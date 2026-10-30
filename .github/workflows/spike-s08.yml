@@ -94,17 +94,27 @@ jobs:
         continue-on-error: true
         run: cargo deny check licenses
 
-      - name: Build the app bundle (macOS .app)
-        if: runner.os == 'macOS'
-        working-directory: spikes/s08-tauri
-        run: pnpm tauri build --bundles app
-
-      # A .dmg failure is a recorded result, not a stop (task S-08a).
+      # A .dmg failure is a recorded result, not a stop (task S-08a). Build
+      # and upload the .dmg FIRST: a dmg-only build deletes the .app it
+      # stages ("Cleaning .../bundle/macos/s08-app.app"), because the .app is
+      # an intermediate when it is not a requested bundle.
       - name: Build the .dmg
         if: runner.os == 'macOS'
         working-directory: spikes/s08-tauri
         continue-on-error: true
         run: pnpm tauri build --bundles dmg
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: s08-macos-arm64-dmg
+          path: spikes/s08-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: ignore
+
+      - name: Build the app bundle (macOS .app)
+        if: runner.os == 'macOS'
+        working-directory: spikes/s08-tauri
+        run: pnpm tauri build --bundles app
 
       # Acceptance criterion: both binaries must be ad-hoc signed.
       - name: Verify ad-hoc signatures (macOS)
@@ -133,13 +143,6 @@ jobs:
         with:
           name: s08-macos-arm64-app
           path: spikes/s08-tauri/target/release/bundle/s08-app-macos.tar.gz
-
-      - uses: actions/upload-artifact@v4
-        if: runner.os == 'macOS'
-        with:
-          name: s08-macos-arm64-dmg
-          path: spikes/s08-tauri/target/release/bundle/dmg/*.dmg
-          if-no-files-found: ignore
 
       - name: Build the NSIS installer (per-user)
         if: runner.os == 'Windows'
