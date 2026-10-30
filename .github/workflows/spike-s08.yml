@@ -45,11 +45,11 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
       # Reads the pnpm version from the packageManager field.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: spikes/s08-tauri/package.json
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: spikes/s08-tauri/.nvmrc
           cache: pnpm
@@ -63,6 +63,12 @@ jobs:
       - name: pnpm install
         working-directory: spikes/s08-tauri
         run: pnpm install --frozen-lockfile
+
+      # tauri-build (build.rs) validates externalBin at compile time, so the
+      # sidecar must exist with its target-triple name before cargo runs.
+      - name: Prepare the sidecar binary
+        working-directory: spikes/s08-tauri
+        run: pnpm run prepare:sidecar
 
       # generate_context! embeds dist/ in release builds: build it first.
       - name: Build the frontend
@@ -167,9 +173,14 @@ jobs:
       # Report steps: print only, never fail the job.
       - name: Report artifact sizes
         if: always()
-        working-directory: spikes/s08-tauri/target/release/bundle
+        working-directory: spikes/s08-tauri
         continue-on-error: true
-        run: find . -mindepth 2 -maxdepth 2 \( -type f -o -type d \) -exec du -sh {} +
+        run: |
+          if [ -d target/release/bundle ]; then
+            find target/release/bundle -mindepth 1 -maxdepth 2 \( -type f -o -type d \) -exec du -sh {} +
+          else
+            echo "no bundle directory"
+          fi
 
       - name: Report the highest required GLIBC version (Linux)
         if: always() && runner.os == 'Linux'
@@ -178,5 +189,9 @@ jobs:
         run: |
           for binary in target/release/s08-app target/release/s08-sidecar; do
             echo "== $binary"
-            objdump -p "$binary" | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -n 1
+            if [ -f "$binary" ]; then
+              objdump -p "$binary" | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -n 1
+            else
+              echo "missing"
+            fi
           done
