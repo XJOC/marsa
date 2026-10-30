@@ -25,21 +25,28 @@ interface FontCounts {
 }
 
 // Renders `backtick` segments as <code>, the way the task file writes them.
-function Mixed({ text }: { text: string }) {
+// `isolate` puts each one in dir="ltr": a leading "/" has no direction of its
+// own, so inside Arabic text it otherwise moves to the end of the path.
+function Mixed({ text, isolate = false }: { text: string; isolate?: boolean }) {
   return (
     <>
-      {text.split("`").map((part, i) =>
-        i % 2 === 1 ? <code key={i}>{part}</code> : <span key={i}>{part}</span>,
-      )}
+      {text.split("`").map((part, i) => {
+        if (i % 2 === 0) return <span key={i}>{part}</span>;
+        const code = <code key={i}>{part}</code>;
+        return isolate ? <span key={i} dir="ltr">{code}</span> : code;
+      })}
     </>
   );
 }
 
+// The inner span isolates the value and leaves the <dd> aligned with the page.
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="row">
       <dt>{label}</dt>
-      <dd>{value}</dd>
+      <dd>
+        <span dir="ltr">{value}</span>
+      </dd>
     </div>
   );
 }
@@ -112,6 +119,9 @@ export default function App() {
       <p>{t.intro}</p>
       <p>
         <Mixed text={t.mixed} />
+      </p>
+      <p>
+        {t.mixedIsolated}: <Mixed text={t.mixed} isolate />
       </p>
       <p className="system-font">{t.systemFontNote}</p>
 

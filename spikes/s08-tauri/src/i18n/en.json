@@ -2,6 +2,7 @@
   "title": "S-08 spike: a Tauri window",
   "intro": "This English paragraph checks the LTR layout after the switch. The default screen is Arabic RTL.",
   "mixed": "The site `shop.test` runs on PHP 8.4 from `/Users/omar/Sites/shop`.",
+  "mixedIsolated": "With dir=ltr",
   "systemFontNote": "This line uses the system font for comparison.",
   "switchLocale": "Switch to Arabic",
   "fontsTitle": "Embedded fonts",
