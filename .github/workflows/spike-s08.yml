@@ -1,0 +1,182 @@
+name: spike-s08
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [task/S-08a-tauri-skeleton]
+    paths:
+      - "spikes/s08-tauri/**"
+      - ".github/workflows/spike-s08.yml"
+
+# The repository is public: nothing more than read access is needed.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: build (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macos-arm64
+            os: macos-latest
+          - label: windows-x64
+            os: windows-latest
+          - label: linux-x64
+            os: ubuntu-22.04
+          - label: linux-arm64
+            os: ubuntu-22.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux webview dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      # Reads the pnpm version from the packageManager field.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: spikes/s08-tauri/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: spikes/s08-tauri/.nvmrc
+          cache: pnpm
+          cache-dependency-path: spikes/s08-tauri/pnpm-lock.yaml
+
+      # Installs the toolchain pinned by rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        working-directory: spikes/s08-tauri
+        run: rustup toolchain install --profile default
+
+      - name: pnpm install
+        working-directory: spikes/s08-tauri
+        run: pnpm install --frozen-lockfile
+
+      # generate_context! embeds dist/ in release builds: build it first.
+      - name: Build the frontend
+        working-directory: spikes/s08-tauri
+        run: pnpm run build
+
+      - name: cargo fmt
+        working-directory: spikes/s08-tauri
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        working-directory: spikes/s08-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Report steps print and never fail the job (task S-08a).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+        continue-on-error: true
+
+      - name: Report license check (cargo deny)
+        working-directory: spikes/s08-tauri
+        continue-on-error: true
+        run: cargo deny check licenses
+
+      - name: Build the app bundle (macOS .app)
+        if: runner.os == 'macOS'
+        working-directory: spikes/s08-tauri
+        run: pnpm tauri build --bundles app
+
+      # A .dmg failure is a recorded result, not a stop (task S-08a).
+      - name: Build the .dmg
+        if: runner.os == 'macOS'
+        working-directory: spikes/s08-tauri
+        continue-on-error: true
+        run: pnpm tauri build --bundles dmg
+
+      # Acceptance criterion: both binaries must be ad-hoc signed.
+      - name: Verify ad-hoc signatures (macOS)
+        if: runner.os == 'macOS'
+        working-directory: spikes/s08-tauri
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/macos/s08-app.app"
+          for binary in "$app/Contents/MacOS/s08-app" "$app/Contents/MacOS/s08-sidecar"; do
+            echo "== $binary"
+            codesign -dv --verbose=4 "$binary" 2>&1 | tee /tmp/codesign.txt
+            grep -q 'Signature=adhoc' /tmp/codesign.txt
+            codesign --verify --deep --strict --verbose=2 "$binary"
+          done
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+      # upload-artifact zips and drops permissions and symlinks, so the .app
+      # travels inside a tar.gz (task S-08a).
+      - name: Pack the .app for upload
+        if: runner.os == 'macOS'
+        working-directory: spikes/s08-tauri/target/release/bundle
+        run: tar -czf s08-app-macos.tar.gz macos/s08-app.app
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: s08-macos-arm64-app
+          path: spikes/s08-tauri/target/release/bundle/s08-app-macos.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: s08-macos-arm64-dmg
+          path: spikes/s08-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: ignore
+
+      - name: Build the NSIS installer (per-user)
+        if: runner.os == 'Windows'
+        working-directory: spikes/s08-tauri
+        run: pnpm tauri build --bundles nsis
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: s08-windows-x64-nsis
+          path: spikes/s08-tauri/target/release/bundle/nsis/*.exe
+
+      - name: Build .deb and .AppImage
+        if: runner.os == 'Linux'
+        working-directory: spikes/s08-tauri
+        run: pnpm tauri build --bundles deb,appimage
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: s08-${{ matrix.label }}-deb
+          path: spikes/s08-tauri/target/release/bundle/deb/*.deb
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: s08-${{ matrix.label }}-appimage
+          path: spikes/s08-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: ignore
+
+      # Report steps: print only, never fail the job.
+      - name: Report artifact sizes
+        if: always()
+        working-directory: spikes/s08-tauri/target/release/bundle
+        continue-on-error: true
+        run: find . -mindepth 2 -maxdepth 2 \( -type f -o -type d \) -exec du -sh {} +
+
+      - name: Report the highest required GLIBC version (Linux)
+        if: always() && runner.os == 'Linux'
+        working-directory: spikes/s08-tauri
+        continue-on-error: true
+        run: |
+          for binary in target/release/s08-app target/release/s08-sidecar; do
+            echo "== $binary"
+            objdump -p "$binary" | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -n 1
+          done

@@ -1,0 +1,100 @@
+/* Functional styling only (no visual design yet; AGENTS.md section 9).
+   Logical properties everywhere so the RTL/LTR switch visibly flips the
+   layout. Never `left`/`right`. */
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  font-family: "IBM Plex Sans Arabic", "IBM Plex Sans", system-ui, sans-serif;
+}
+
+.app {
+  max-inline-size: 46rem;
+  margin-inline: auto;
+  padding: 1.5rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+h1,
+h2 {
+  text-align: start;
+}
+
+h1 {
+  font-size: 1.25rem;
+  margin-block: 0;
+}
+
+.card {
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-inline-start: 4px solid currentColor;
+  border-radius: 6px;
+  padding-block: 0.75rem;
+  /* Asymmetric on purpose: the accent side flips with dir. */
+  padding-inline-start: 1.25rem;
+  padding-inline-end: 1rem;
+}
+
+.card h2 {
+  font-size: 1rem;
+  margin-block: 0 0.5rem;
+}
+
+dl {
+  margin: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.row {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.row dt {
+  flex: none;
+  min-inline-size: 9rem;
+  text-align: start;
+  opacity: 0.8;
+}
+
+.row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  text-align: start;
+}
+
+.system-font {
+  font-family: system-ui, sans-serif;
+}
+
+code {
+  font-family: "IBM Plex Sans", monospace;
+  overflow-wrap: anywhere;
+}
+
+.note {
+  opacity: 0.7;
+  font-size: 0.9rem;
+}
+
+.error {
+  color: crimson;
+}
+
+button {
+  font: inherit;
+  padding-block: 0.35rem;
+  padding-inline: 1rem;
+}
