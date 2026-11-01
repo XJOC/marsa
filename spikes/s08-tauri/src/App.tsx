@@ -23,6 +23,10 @@ interface FontCounts {
   arabic: number;
   latin: number;
 }
+interface CspViolations {
+  count: number;
+  first: string;
+}
 
 // Renders `backtick` segments as <code>, the way the task file writes them.
 // `isolate` puts each one in dir="ltr": a leading "/" has no direction of its
@@ -58,6 +62,7 @@ export default function App() {
   const [sidecar, setSidecar] = useState<SidecarOutput | null>(null);
   const [sidecarError, setSidecarError] = useState<string | null>(null);
   const [fonts, setFonts] = useState<FontCounts | null>(null);
+  const [csp, setCsp] = useState<CspViolations>({ count: 0, first: "" });
 
   const t = dicts[locale];
 
@@ -65,6 +70,21 @@ export default function App() {
     document.documentElement.lang = locale;
     document.documentElement.dir = locale === "ar" ? "rtl" : "ltr";
   }, [locale]);
+
+  // Declared before the `invoke` effect, so the listener is attached before
+  // the first IPC call: a block during startup is the one we must not miss.
+  // Tauri adds nothing to `connect-src` itself; a violation here means the
+  // CSP in `tauri.conf.json` and the actual IPC scheme disagree.
+  useEffect(() => {
+    function onViolation(event: SecurityPolicyViolationEvent) {
+      setCsp((prev) => ({
+        count: prev.count + 1,
+        first: prev.first === "" ? event.blockedURI : prev.first,
+      }));
+    }
+    document.addEventListener("securitypolicyviolation", onViolation);
+    return () => document.removeEventListener("securitypolicyviolation", onViolation);
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -149,6 +169,12 @@ export default function App() {
           {rows.map(([label, value]) => (
             <Row key={label} label={label} value={value} />
           ))}
+          {/* Stays visible when `diagnostics` fails: a blocked IPC call is the
+              likeliest reason it did. */}
+          <Row
+            label={t.cspViolations}
+            value={csp.first === "" ? String(csp.count) : `${csp.count} · ${csp.first}`}
+          />
         </dl>
       </section>
 

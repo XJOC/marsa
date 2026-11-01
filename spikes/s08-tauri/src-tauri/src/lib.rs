@@ -76,9 +76,12 @@ fn run_sidecar() -> Result<SidecarOutput, String> {
     })
 }
 
+// `run` fails for real reasons (no WebView2 on Windows, no display on Linux),
+// so the `expect` below is not an invariant. In M3 it becomes a returned error,
+// because a panic is invisible on Windows with `windows_subsystem = "windows"`.
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![diagnostics, run_sidecar])
         .run(tauri::generate_context!())
-        .expect("the window comes from tauri.conf.json, so building it cannot fail here")
+        .expect("failed to start the Tauri app")
 }

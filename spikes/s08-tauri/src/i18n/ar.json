@@ -18,6 +18,7 @@
   "appDataDir": "مجلد بيانات التطبيق",
   "origin": "location.origin",
   "secureContext": "isSecureContext",
+  "cspViolations": "مخالفات CSP (المتوقع 0)",
   "sidecarTitle": "البرنامج الجانبي",
   "runSidecar": "شغّل s08-sidecar",
   "exitCode": "رمز الخروج",

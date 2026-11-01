@@ -18,6 +18,7 @@
   "appDataDir": "App data directory",
   "origin": "location.origin",
   "secureContext": "isSecureContext",
+  "cspViolations": "CSP violations (expected 0)",
   "sidecarTitle": "Sidecar binary",
   "runSidecar": "Run s08-sidecar",
   "exitCode": "Exit code",

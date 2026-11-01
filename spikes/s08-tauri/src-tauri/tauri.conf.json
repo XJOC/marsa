@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost",
+      "csp": "default-src 'self'; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost",
       "capabilities": ["default"]
     }
   },
