@@ -1,0 +1,13 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Repository chores for the Marsa workspace"
+publish = false
+
+[dependencies]
+clap.workspace = true
+
+[lints]
+workspace = true

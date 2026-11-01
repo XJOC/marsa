@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/app", "crates/shim", "crates/helper", "xtask"]
+# The Tauri spike is a separate workspace on purpose: throwaway code, never a
+# product member (task S-08a).
+exclude = ["spikes"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# Every dependency is declared here once; crates use `name.workspace = true`.
+[workspace.dependencies]
+clap = "4"
+notify = "8"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+tokio = { version = "1", features = ["full"] }
+
+# Architecture rule: a lock is never held across `.await`, and `unwrap()` is
+# banned outside tests (AGENTS.md section 6).
+[workspace.lints.clippy]
+await_holding_lock = "deny"
+unwrap_used = "deny"

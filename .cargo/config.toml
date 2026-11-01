@@ -1,0 +1,3 @@
+[alias]
+# `cargo xtask <command>` runs the `xtask` package with the arguments after it.
+xtask = "run --package xtask --"
