@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal capability: the window gets no plugin permissions (no shell, no fs, no http). App commands such as diagnostics and run_sidecar are not gated by the ACL.",
+  "windows": ["main"],
+  "permissions": []
+}

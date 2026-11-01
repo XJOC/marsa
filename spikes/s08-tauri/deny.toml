@@ -1,0 +1,18 @@
+# cargo-deny policy for the S-08 spike. In CI this runs as a report step:
+# a rejected license (MPL-2.0 is expected somewhere in the Tauri tree) is a
+# recorded result for task S-08a, not a build failure.
+[graph]
+all-features = true
+
+[licenses]
+version = 2
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+]

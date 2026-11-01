@@ -1,0 +1,21 @@
+# S-08 spike workspace. Independent on purpose: this is throwaway code in
+# `spikes/`, never a member of the product workspace (task S-08a).
+[workspace]
+resolver = "3"
+members = ["s08-sidecar", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = "2"
+tauri-build = "2"
+
+# Same lint policy as the product workspace (architecture.md section 2).
+[workspace.lints.clippy]
+await_holding_lock = "deny"
+unwrap_used = "deny"
