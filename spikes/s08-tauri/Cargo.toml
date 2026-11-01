@@ -10,10 +10,16 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+# Same major version Tauri already resolves (0.13.5 in Cargo.lock), so the
+# spike does not build two copies of reqwest (plan review S-08b, item 1).
+# `rustls` is the 0.13 feature name; `rustls-tls` was 0.12 and is gone.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+flate2 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = "2"
 tauri-build = "2"
+tar = "0.4"
 
 # Same lint policy as the product workspace (architecture.md section 2).
 [workspace.lints.clippy]

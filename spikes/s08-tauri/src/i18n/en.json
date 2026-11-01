@@ -22,6 +22,12 @@
   "sidecarTitle": "Sidecar binary",
   "runSidecar": "Run s08-sidecar",
   "exitCode": "Exit code",
+  "downloadTitle": "Self-download",
+  "downloadRun": "Download and run s08-sidecar",
+  "downloadPath": "Downloaded file path",
+  "downloadQuarantine": "com.apple.quarantine",
+  "downloadQuarantineNone": "absent",
+  "stdout": "Output",
   "loading": "loading…",
   "error": "Error"
 }

@@ -9,8 +9,11 @@ publish = false
 tauri-build = { workspace = true }
 
 [dependencies]
+flate2 = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tar = { workspace = true }
 tauri = { workspace = true }
 
 [lints]

@@ -2,13 +2,19 @@ name: spike-s08
 
 on:
   workflow_dispatch:
+    inputs:
+      # Manual only: nothing is published on a push (task S-08b, owner's call).
+      publish:
+        description: "Publish the spike-s08 pre-release"
+        type: boolean
+        default: false
   push:
-    branches: [task/S-08a-tauri-skeleton]
+    branches: [task/S-08b-install-update]
     paths:
       - "spikes/s08-tauri/**"
       - ".github/workflows/spike-s08.yml"
 
-# The repository is public: nothing more than read access is needed.
+# Read for every job. Only `publish` raises itself to `contents: write`.
 permissions:
   contents: read
 
@@ -28,12 +34,16 @@ jobs:
         include:
           - label: macos-arm64
             os: macos-latest
+            triple: aarch64-apple-darwin
           - label: windows-x64
             os: windows-latest
+            triple: x86_64-pc-windows-msvc
           - label: linux-x64
             os: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
           - label: linux-arm64
             os: ubuntu-22.04-arm
+            triple: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -69,6 +79,24 @@ jobs:
       - name: Prepare the sidecar binary
         working-directory: spikes/s08-tauri
         run: pnpm run prepare:sidecar
+
+      # One archive per triple, the name `download_and_run` asks for. Inside,
+      # the binary keeps its plain name (no triple) so the app can find it
+      # after unpacking (task S-08b, plan review item 4).
+      - name: Pack the sidecar archive (Windows and Linux)
+        if: runner.os != 'macOS'
+        working-directory: spikes/s08-tauri
+        run: |
+          set -euo pipefail
+          name=s08-sidecar
+          if [ "${{ runner.os }}" = "Windows" ]; then name=s08-sidecar.exe; fi
+          tar -czf "s08-sidecar-${{ matrix.triple }}.tar.gz" -C target/release "$name"
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os != 'macOS'
+        with:
+          name: s08-sidecar-${{ matrix.triple }}
+          path: spikes/s08-tauri/s08-sidecar-${{ matrix.triple }}.tar.gz
 
       # generate_context! embeds dist/ in release builds: build it first.
       - name: Build the frontend
@@ -130,6 +158,22 @@ jobs:
             codesign --verify --deep --strict --verbose=2 "$binary"
           done
           codesign --verify --deep --strict --verbose=2 "$app"
+
+      # From inside the .app, after the signature check: the bundler re-signs
+      # the sidecar, so the copy next to it in target/release is stale.
+      - name: Pack the sidecar archive (macOS)
+        if: runner.os == 'macOS'
+        working-directory: spikes/s08-tauri
+        run: |
+          set -euo pipefail
+          dir=target/release/bundle/macos/s08-app.app/Contents/MacOS
+          tar -czf "s08-sidecar-${{ matrix.triple }}.tar.gz" -C "$dir" s08-sidecar
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: s08-sidecar-${{ matrix.triple }}
+          path: spikes/s08-tauri/s08-sidecar-${{ matrix.triple }}.tar.gz
 
       # upload-artifact zips and drops permissions and symlinks, so the .app
       # travels inside a tar.gz (task S-08a).
@@ -198,3 +242,45 @@ jobs:
               echo "missing"
             fi
           done
+
+  # Manual only, so the pre-release never appears by accident. Run:
+  #   GH_TOKEN="$(gh auth token --user XJOC)" gh workflow run spike-s08.yml \
+  #     --repo XJOC/marsa --ref task/S-08b-install-update -f publish=true
+  publish:
+    name: publish the spike-s08 pre-release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # One file with the checksum of every output and archive.
+      - name: Write SHA256SUMS
+        working-directory: artifacts
+        run: |
+          set -euo pipefail
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      # A re-run finds the release and keeps it; `--target` pins the tag to the
+      # commit that was tested instead of the default branch head.
+      - name: Create the pre-release when it does not exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view spike-s08 --repo XJOC/marsa >/dev/null 2>&1 ||
+            gh release create spike-s08 --repo XJOC/marsa --prerelease \
+              --title "S-08 spike (pre-release)" --target "${{ github.sha }}"
+
+      - name: Upload the artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload spike-s08 --repo XJOC/marsa --clobber artifacts/*
