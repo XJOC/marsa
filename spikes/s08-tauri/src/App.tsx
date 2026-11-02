@@ -19,6 +19,12 @@ interface SidecarOutput {
   exit_code: number;
   stdout: string;
 }
+interface DownloadRunOutput {
+  path: string;
+  exit_code: number;
+  stdout: string;
+  quarantine: string | null;
+}
 interface FontCounts {
   arabic: number;
   latin: number;
@@ -44,13 +50,12 @@ function Mixed({ text, isolate = false }: { text: string; isolate?: boolean }) {
 }
 
 // The inner span isolates the value and leaves the <dd> aligned with the page.
-function Row({ label, value }: { label: string; value: string }) {
+// `ltr` is false for Arabic values such as "absent".
+function Row({ label, value, ltr = true }: { label: string; value: string; ltr?: boolean }) {
   return (
     <div className="row">
       <dt>{label}</dt>
-      <dd>
-        <span dir="ltr">{value}</span>
-      </dd>
+      <dd>{ltr ? <span dir="ltr">{value}</span> : value}</dd>
     </div>
   );
 }
@@ -61,6 +66,8 @@ export default function App() {
   const [diagError, setDiagError] = useState<string | null>(null);
   const [sidecar, setSidecar] = useState<SidecarOutput | null>(null);
   const [sidecarError, setSidecarError] = useState<string | null>(null);
+  const [download, setDownload] = useState<DownloadRunOutput | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [fonts, setFonts] = useState<FontCounts | null>(null);
   const [csp, setCsp] = useState<CspViolations>({ count: 0, first: "" });
 
@@ -113,6 +120,16 @@ export default function App() {
       setSidecar(await invoke<SidecarOutput>("run_sidecar"));
     } catch (e) {
       setSidecarError(String(e));
+    }
+  }
+
+  async function runDownload() {
+    setDownload(null);
+    setDownloadError(null);
+    try {
+      setDownload(await invoke<DownloadRunOutput>("download_and_run"));
+    } catch (e) {
+      setDownloadError(String(e));
     }
   }
 
@@ -190,6 +207,30 @@ export default function App() {
             <br />
             <code>{sidecar.stdout}</code>
           </p>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>{t.downloadTitle}</h2>
+        <button type="button" onClick={() => void runDownload()}>
+          {t.downloadRun}
+        </button>
+        {downloadError && <p className="error">{`${t.error}: ${downloadError}`}</p>}
+        {download && (
+          <>
+            <dl>
+              <Row label={t.downloadPath} value={download.path} />
+              <Row
+                label={t.downloadQuarantine}
+                value={download.quarantine ?? t.downloadQuarantineNone}
+                ltr={download.quarantine !== null}
+              />
+              <Row label={t.exitCode} value={String(download.exit_code)} />
+            </dl>
+            <p>
+              {t.stdout}: <code>{download.stdout}</code>
+            </p>
+          </>
         )}
       </section>
     </main>

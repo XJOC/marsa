@@ -22,6 +22,12 @@
   "sidecarTitle": "البرنامج الجانبي",
   "runSidecar": "شغّل s08-sidecar",
   "exitCode": "رمز الخروج",
+  "downloadTitle": "التنزيل الذاتي",
+  "downloadRun": "نزّل وشغّل s08-sidecar",
+  "downloadPath": "مسار الملف المنزَّل",
+  "downloadQuarantine": "com.apple.quarantine",
+  "downloadQuarantineNone": "لا توجد",
+  "stdout": "المخرجات",
   "loading": "…يُحمَّل",
   "error": "خطأ"
 }
