@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only on purpose: the checks never write to the repository.
+permissions:
+  contents: read
+
+# A new run on the same branch cancels the older one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    # One shell on all three systems, so the commands stay identical.
+    shell: bash
+
+jobs:
+  checks:
+    name: checks (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macos-arm64
+            os: macos-latest
+          - label: windows-x64
+            os: windows-latest
+          - label: linux-x64
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Reads the pinned version from rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile default
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - uses: taiki-e/install-action@v2
+        if: runner.os == 'Linux'
+        with:
+          tool: cargo-deny
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: cargo nextest
+        run: cargo nextest run --workspace
+
+      # One system is enough for the license and advisory policy.
+      - name: cargo deny
+        if: runner.os == 'Linux'
+        run: cargo deny check
+
+      # Built alone: workspace feature unification would turn on `full` in
+      # marsa-core and drag tokio into the shim (architecture.md section 3).
+      - name: Build the shim
+        run: cargo build -p marsa-shim --release
+
+      # The README command only prints FAIL; here the job must fail too. The
+      # tree is saved first: `grep -q` would close the pipe early and the
+      # SIGPIPE would look like "no match" under `bash -eo pipefail`.
+      - name: Check that tokio is absent from the shim
+        run: |
+          tree="$(cargo tree -p marsa-shim -e normal)"
+          if grep -q tokio <<<"$tree"; then
+            echo "FAIL: tokio in marsa-shim"
+            exit 1
+          fi
+          echo "OK: tokio is not in the marsa-shim dependency tree"
+
+      # Report only: never fails the job.
+      - name: Report the shim binary size
+        run: |
+          binary=target/release/marsa-shim
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            binary="$binary.exe"
+          fi
+          if [ -f "$binary" ]; then
+            du -h "$binary"
+            ls -l "$binary"
+          else
+            echo "missing: $binary"
+          fi
