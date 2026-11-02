@@ -1,0 +1,12 @@
+[package]
+name = "marsa"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Marsa CLI and daemon"
+
+[dependencies]
+clap.workspace = true
+
+[lints]
+workspace = true

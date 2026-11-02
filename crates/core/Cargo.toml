@@ -1,0 +1,25 @@
+[package]
+name = "marsa-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "All of Marsa's logic, split into modules"
+
+[lib]
+name = "marsa_core"
+
+[features]
+default = ["full"]
+# Modules that start processes or open sockets sit behind this feature, so the
+# shim can depend on the core without pulling tokio or reqwest (architecture.md
+# section 3).
+full = ["dep:tokio", "dep:reqwest", "dep:notify"]
+
+[dependencies]
+# Optional, so `full` can switch them on with `dep:` and the shim can leave them out.
+tokio = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+notify = { workspace = true, optional = true }
+
+[lints]
+workspace = true

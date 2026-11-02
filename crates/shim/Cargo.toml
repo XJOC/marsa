@@ -1,0 +1,14 @@
+[package]
+name = "marsa-shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Runs php, node, npm, npx, and composer at the version a project asks for"
+
+[dependencies]
+# No default features: the shim must never pull tokio or reqwest
+# (architecture.md section 3).
+marsa-core = { path = "../core", default-features = false }
+
+[lints]
+workspace = true

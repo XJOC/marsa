@@ -1,0 +1,9 @@
+[package]
+name = "marsa-helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Privileged helper with a closed list of admin operations"
+
+[lints]
+workspace = true
