@@ -9,9 +9,6 @@ description = "Runs php, node, npm, npx, and composer at the version a project a
 # No default features: the shim must never pull tokio or reqwest
 # (architecture.md section 3).
 marsa-core = { path = "../core", default-features = false }
-# TEMPORARY, for the M1-02 acceptance test only: this must make CI's tokio
-# check fail. Reverted in the next commit.
-tokio.workspace = true
 
 [lints]
 workspace = true
