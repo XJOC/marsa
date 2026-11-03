@@ -1,0 +1,2 @@
+ls: ~/Library/Application Support/Caddy: No such file or directory
+ls: ~/.config/caddy: No such file or directory

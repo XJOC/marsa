@@ -1,0 +1,23 @@
+$ port-probe connect [::1]:18443
+CONNECTED [::1]:18443
+exit=0
+
+$ netstat_port 18443
+tcp4 127.0.0.1.18443 caddy:81524
+tcp6 ::1.18443 port-probe:81629
+exit=0
+
+$ /usr/sbin/lsof -nP -iTCP:18443 -sTCP:LISTEN
+COMMAND     PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+caddy     81524 <me>    7u  IPv4 0xc2ae23d4f600f9ce      0t0  TCP 127.0.0.1:18443 (LISTEN)
+port-prob 81629 <me>    3u  IPv6 0xd739d24cc359c8f7      0t0  TCP [::1]:18443 (LISTEN)
+exit=0
+
+$ /bin/ps -p 81524 -o user=,comm=
+<me> ~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/bin/caddy
+exit=0
+
+$ /bin/ps -p 81629 -o user=,comm=
+<me> port-probe
+exit=0
+

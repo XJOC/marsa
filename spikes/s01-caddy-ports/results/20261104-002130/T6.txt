@@ -1,0 +1,29 @@
+$ /usr/sbin/lsof -nP -a -p 81293 -i
+COMMAND   PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+caddy   81293 <me>    6u  IPv4 0xff9bcec77ec10ef8      0t0  TCP 127.0.0.1:2101 (LISTEN)
+caddy   81293 <me>    7u  IPv4  0xe0048c0ee2de59d      0t0  TCP 127.0.0.1:18443 (LISTEN)
+caddy   81293 <me>    8u  IPv4 0x51963dc231e1c5b5      0t0  UDP 127.0.0.1:18443
+caddy   81293 <me>    9u  IPv4 0xab14f654b20875dc      0t0  TCP 127.0.0.1:18080 (LISTEN)
+exit=0
+
+$ curl -sS -i --max-time 5 --resolve app.test:18443:127.0.0.1 --cacert ~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data/pki/authorities/local/root.crt https://app.test:18443/
+HTTP/2 200 
+alt-svc: h3=":18443"; ma=2592000
+content-type: text/plain; charset=utf-8
+server: Caddy
+content-length: 2
+date: Tue, 03 Nov 2026 21:21:35 GMT
+
+ok
+exit=0
+
+$ curl -sS -i --max-time 5 --resolve app.test:18080:127.0.0.1 http://app.test:18080/
+HTTP/1.1 308 Permanent Redirect
+Connection: close
+Location: https://app.test/
+Server: Caddy
+Date: Tue, 03 Nov 2026 21:21:35 GMT
+Content-Length: 0
+
+exit=0
+

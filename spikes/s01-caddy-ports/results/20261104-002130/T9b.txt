@@ -1,0 +1,6 @@
+$ curl -sS --max-time 20 -w \nHTTP %{http_code} -X POST -H Content-Type: application/json --data-binary @~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data/T9b.json http://127.0.0.1:2101/load
+{"error":"loading config: loading new config: http app module: start: listening on 127.0.0.1:18080: listen tcp 127.0.0.1:18080: bind: address already in use"}
+
+HTTP 400
+exit=0
+

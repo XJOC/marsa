@@ -1,0 +1,16 @@
+sha512 OK for caddy_2.11.7_mac_arm64.tar.gz
+archive sha256: cda3030e5d5b13eb9f0b6fb541037f633bddd958c070c5f561d7a5cccb581665
+binary sha256:  0d746e47f39d9706883b3633bf419feb25973e6caaa8eabbf5b44421d59e3973
+v2.11.7 h1:yj0Y4fYZGPkSvibBJ1sTWE33xC0fxztVyXEW5iIdUT4=
+~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/bin/caddy: Mach-O 64-bit executable arm64
+Executable=~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/bin/caddy
+Identifier=a.out
+Format=Mach-O thin (arm64)
+CodeDirectory v=20400 size=389214 flags=0x20002(adhoc,linker-signed) hashes=12160+0 location=embedded
+Signature=adhoc
+Info.plist=not bound
+TeamIdentifier=not set
+Sealed Resources=none
+Internal requirements=none
+xattr -l (empty means no quarantine):
+com.apple.provenance: 

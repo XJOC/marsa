@@ -1,0 +1,20 @@
+$ port-probe bind 127.0.0.1:18080
+OK bind 127.0.0.1:18080
+exit=0
+
+$ curl -sS --max-time 20 -w \nHTTP %{http_code} -X POST -H Content-Type: application/json --data-binary @~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data/T11.json http://127.0.0.1:2101/load
+
+HTTP 200
+exit=0
+
+$ curl -sS -i --max-time 5 --resolve app.test:18080:127.0.0.1 --cacert ~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data/pki/authorities/local/root.crt https://app.test:18080/
+HTTP/2 200 
+alt-svc: h3=":18080"; ma=2592000
+content-type: text/plain; charset=utf-8
+server: Caddy
+content-length: 2
+date: Tue, 03 Nov 2026 21:21:37 GMT
+
+ok
+exit=0
+

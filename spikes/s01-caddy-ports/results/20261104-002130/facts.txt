@@ -1,0 +1,24 @@
+$ sw_vers
+ProductName:		macOS
+ProductVersion:		26.5.1
+BuildVersion:		25F80
+exit=0
+
+$ uname -m
+arm64
+exit=0
+
+$ sysctl net.inet.ip.portrange
+net.inet.ip.portrange.lowfirst: 1023
+net.inet.ip.portrange.lowlast: 600
+net.inet.ip.portrange.first: 49152
+net.inet.ip.portrange.last: 65535
+net.inet.ip.portrange.hifirst: 49152
+net.inet.ip.portrange.hilast: 65535
+net.inet.ip.portrange.ipport_allow_udp_port_exhaustion: 0
+exit=0
+
+$ /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
+Firewall is disabled. (State = 0)
+exit=0
+

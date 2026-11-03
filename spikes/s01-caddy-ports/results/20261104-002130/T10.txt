@@ -1,0 +1,5 @@
+$ curl -sS --max-time 20 -w \nHTTP %{http_code} -X POST -H Content-Type: application/json --data-binary @~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data/T10.json http://127.0.0.1:2101/load
+
+HTTP 200
+exit=0
+

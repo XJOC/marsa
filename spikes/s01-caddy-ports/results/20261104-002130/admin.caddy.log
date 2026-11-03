@@ -1,0 +1,79 @@
+{"level":"info","ts":1793740896.58571,"msg":"maxprocs: Leaving GOMAXPROCS=8: CPU quota undefined"}
+{"level":"info","ts":1793740896.5857558,"msg":"GOMEMLIMIT is updated","GOMEMLIMIT":15461882265,"previous":9223372036854775807}
+{"level":"info","ts":1793740896.5857642,"msg":"using config from file","file":"~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data/empty.json"}
+{"level":"info","ts":1793740896.5859358,"logger":"admin","msg":"admin endpoint started","address":"127.0.0.1:2101","enforce_origin":false,"origins":["//localhost:2101","//[::1]:2101","//127.0.0.1:2101"]}
+{"level":"info","ts":1793740896.586043,"msg":"autosaved config (load with --resume flag)","file":"~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data/xdg-config/caddy/autosave.json"}
+{"level":"info","ts":1793740896.586048,"msg":"serving initial configuration"}
+{"level":"info","ts":1793740896.689504,"logger":"admin.api","msg":"received request","method":"POST","host":"127.0.0.1:2101","uri":"/load","remote_ip":"127.0.0.1","remote_port":"60724","headers":{"User-Agent":["curl/8.10.1"],"Accept":["*/*"],"Content-Type":["application/json"],"Content-Length":["750"]}}
+{"level":"info","ts":1793740896.6902301,"logger":"admin","msg":"admin endpoint started","address":"127.0.0.1:2101","enforce_origin":false,"origins":["//localhost:2101","//[::1]:2101","//127.0.0.1:2101"]}
+{"level":"info","ts":1793740896.69034,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance","cache":"0x1be170c44400"}
+{"level":"info","ts":1793740896.690441,"logger":"http.auto_https","msg":"server is listening only on the HTTPS port but has no TLS connection policies; adding one to enable TLS","server_name":"app","https_port":18443}
+{"level":"info","ts":1793740896.690451,"logger":"http.auto_https","msg":"enabling automatic HTTP->HTTPS redirects","server_name":"app"}
+{"level":"info","ts":1793740896.694826,"logger":"tls","msg":"storage cleaning happened too recently; skipping for now","storage":"FileStorage:~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data","instance":"d0c46ef1-0d06-42e2-8d15-8ff0e597a4ea","try_again":1793827296.694825,"try_again_in":86399.999999625}
+{"level":"info","ts":1793740896.694995,"logger":"tls.cache.maintenance","msg":"stopped background certificate maintenance","cache":"0x1be170c44400"}
+{"level":"info","ts":1793740896.695008,"logger":"http","msg":"servers shutting down with eternal grace period"}
+{"level":"error","ts":1793740896.695047,"logger":"admin.api","msg":"request error","error":"loading config: loading new config: http app module: start: listening on 127.0.0.1:18443: listen tcp 127.0.0.1:18443: bind: address already in use","status_code":400}
+{"level":"info","ts":1793740896.699411,"logger":"admin","msg":"stopped previous server","address":"127.0.0.1:2101"}
+{"level":"info","ts":1793740896.7909381,"logger":"admin.api","msg":"received request","method":"POST","host":"127.0.0.1:2101","uri":"/load","remote_ip":"127.0.0.1","remote_port":"60726","headers":{"User-Agent":["curl/8.10.1"],"Accept":["*/*"],"Content-Type":["application/json"],"Content-Length":["152"]}}
+{"level":"info","ts":1793740896.790978,"msg":"config is unchanged"}
+{"level":"info","ts":1793740896.790984,"logger":"admin.api","msg":"load complete"}
+{"level":"info","ts":1793740896.807114,"logger":"admin.api","msg":"received request","method":"POST","host":"127.0.0.1:2101","uri":"/load","remote_ip":"127.0.0.1","remote_port":"60727","headers":{"User-Agent":["curl/8.10.1"],"Accept":["*/*"],"Content-Type":["application/json"],"Content-Length":["750"]}}
+{"level":"info","ts":1793740896.807582,"logger":"admin","msg":"admin endpoint started","address":"127.0.0.1:2101","enforce_origin":false,"origins":["//localhost:2101","//[::1]:2101","//127.0.0.1:2101"]}
+{"level":"info","ts":1793740896.8076348,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance","cache":"0x1be170a45b00"}
+{"level":"info","ts":1793740896.8076348,"logger":"http.auto_https","msg":"server is listening only on the HTTPS port but has no TLS connection policies; adding one to enable TLS","server_name":"app","https_port":18443}
+{"level":"info","ts":1793740896.807668,"logger":"http.auto_https","msg":"enabling automatic HTTP->HTTPS redirects","server_name":"app"}
+{"level":"info","ts":1793740896.807703,"logger":"pki.ca.local","msg":"root certificate trust store installation disabled; unconfigured clients may show warnings","path":"storage:pki/authorities/local/root.crt"}
+{"level":"info","ts":1793740896.807734,"logger":"http","msg":"enabling HTTP/3 listener","addr":"127.0.0.1:18443"}
+{"level":"info","ts":1793740896.8078132,"logger":"http.log","msg":"server running","name":"app","protocols":["h1","h2","h3"]}
+{"level":"info","ts":1793740896.8078458,"logger":"http","msg":"servers shutting down with eternal grace period"}
+{"level":"info","ts":1793740896.807863,"logger":"tls.cache.maintenance","msg":"stopped background certificate maintenance","cache":"0x1be170a45b00"}
+{"level":"error","ts":1793740896.807883,"logger":"admin.api","msg":"request error","error":"loading config: loading new config: http app module: start: listening on 127.0.0.1:18080: listen tcp 127.0.0.1:18080: bind: address already in use","status_code":400}
+{"level":"info","ts":1793740896.808973,"logger":"admin","msg":"stopped previous server","address":"127.0.0.1:2101"}
+{"level":"info","ts":1793740896.8260128,"logger":"admin.api","msg":"received request","method":"POST","host":"127.0.0.1:2101","uri":"/load","remote_ip":"127.0.0.1","remote_port":"60728","headers":{"User-Agent":["curl/8.10.1"],"Accept":["*/*"],"Content-Type":["application/json"],"Content-Length":["152"]}}
+{"level":"info","ts":1793740896.826061,"msg":"config is unchanged"}
+{"level":"info","ts":1793740896.826066,"logger":"admin.api","msg":"load complete"}
+{"level":"info","ts":1793740896.842108,"logger":"admin.api","msg":"received request","method":"POST","host":"127.0.0.1:2101","uri":"/load","remote_ip":"127.0.0.1","remote_port":"60729","headers":{"User-Agent":["curl/8.10.1"],"Accept":["*/*"],"Content-Type":["application/json"],"Content-Length":["750"]}}
+{"level":"info","ts":1793740896.842636,"logger":"admin","msg":"admin endpoint started","address":"127.0.0.1:2101","enforce_origin":false,"origins":["//localhost:2101","//[::1]:2101","//127.0.0.1:2101"]}
+{"level":"info","ts":1793740896.8426912,"logger":"http.auto_https","msg":"server is listening only on the HTTPS port but has no TLS connection policies; adding one to enable TLS","server_name":"app","https_port":18443}
+{"level":"info","ts":1793740896.8426938,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance","cache":"0x1be170af9280"}
+{"level":"info","ts":1793740896.8427,"logger":"http.auto_https","msg":"enabling automatic HTTP->HTTPS redirects","server_name":"app"}
+{"level":"info","ts":1793740896.8427331,"logger":"pki.ca.local","msg":"root certificate trust store installation disabled; unconfigured clients may show warnings","path":"storage:pki/authorities/local/root.crt"}
+{"level":"info","ts":1793740896.842765,"logger":"http","msg":"enabling HTTP/3 listener","addr":"127.0.0.1:18443"}
+{"level":"info","ts":1793740896.8428218,"logger":"http.log","msg":"server running","name":"app","protocols":["h1","h2","h3"]}
+{"level":"warn","ts":1793740896.8428469,"logger":"http","msg":"HTTP/2 skipped because it requires TLS","network":"tcp","addr":"127.0.0.1:18080"}
+{"level":"warn","ts":1793740896.8428512,"logger":"http","msg":"HTTP/3 skipped because it requires TLS","network":"tcp","addr":"127.0.0.1:18080"}
+{"level":"info","ts":1793740896.842853,"logger":"http.log","msg":"server running","name":"remaining_auto_https_redirects","protocols":["h1","h2","h3"]}
+{"level":"info","ts":1793740896.842856,"logger":"http","msg":"enabling automatic TLS certificate management","domains":["app.test"]}
+{"level":"info","ts":1793740896.842973,"msg":"autosaved config (load with --resume flag)","file":"~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data/xdg-config/caddy/autosave.json"}
+{"level":"info","ts":1793740896.842978,"logger":"admin.api","msg":"load complete"}
+{"level":"info","ts":1793740896.8440378,"logger":"admin","msg":"stopped previous server","address":"127.0.0.1:2101"}
+{"level":"info","ts":1793740896.8451068,"logger":"tls","msg":"storage cleaning happened too recently; skipping for now","storage":"FileStorage:~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data","instance":"d0c46ef1-0d06-42e2-8d15-8ff0e597a4ea","try_again":1793827296.845105,"try_again_in":86399.99999975}
+{"level":"info","ts":1793740896.8452108,"logger":"tls","msg":"finished cleaning storage units"}
+{"level":"info","ts":1793740897.013046,"logger":"admin.api","msg":"received request","method":"POST","host":"127.0.0.1:2101","uri":"/load","remote_ip":"127.0.0.1","remote_port":"60735","headers":{"User-Agent":["curl/8.10.1"],"Accept":["*/*"],"Content-Type":["application/json"],"Content-Length":["152"]}}
+{"level":"info","ts":1793740897.013355,"logger":"admin","msg":"admin endpoint started","address":"127.0.0.1:2101","enforce_origin":false,"origins":["//localhost:2101","//[::1]:2101","//127.0.0.1:2101"]}
+{"level":"info","ts":1793740897.013401,"logger":"http","msg":"servers shutting down with eternal grace period"}
+{"level":"info","ts":1793740897.013449,"logger":"tls.cache.maintenance","msg":"stopped background certificate maintenance","cache":"0x1be170af9280"}
+{"level":"info","ts":1793740897.013589,"msg":"autosaved config (load with --resume flag)","file":"~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data/xdg-config/caddy/autosave.json"}
+{"level":"info","ts":1793740897.0135958,"logger":"admin.api","msg":"load complete"}
+{"level":"info","ts":1793740897.014494,"logger":"admin","msg":"stopped previous server","address":"127.0.0.1:2101"}
+{"level":"info","ts":1793740897.0458791,"logger":"admin.api","msg":"received request","method":"POST","host":"127.0.0.1:2101","uri":"/load","remote_ip":"127.0.0.1","remote_port":"60736","headers":{"User-Agent":["curl/8.10.1"],"Accept":["*/*"],"Content-Type":["application/json"],"Content-Length":["750"]}}
+{"level":"info","ts":1793740897.046488,"logger":"admin","msg":"admin endpoint started","address":"127.0.0.1:2101","enforce_origin":false,"origins":["//127.0.0.1:2101","//localhost:2101","//[::1]:2101"]}
+{"level":"info","ts":1793740897.04656,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance","cache":"0x1be170bb1180"}
+{"level":"info","ts":1793740897.046567,"logger":"http.auto_https","msg":"server is listening only on the HTTPS port but has no TLS connection policies; adding one to enable TLS","server_name":"app","https_port":18080}
+{"level":"info","ts":1793740897.046577,"logger":"http.auto_https","msg":"enabling automatic HTTP->HTTPS redirects","server_name":"app"}
+{"level":"info","ts":1793740897.046633,"logger":"pki.ca.local","msg":"root certificate trust store installation disabled; unconfigured clients may show warnings","path":"storage:pki/authorities/local/root.crt"}
+{"level":"info","ts":1793740897.046674,"logger":"http","msg":"enabling HTTP/3 listener","addr":"127.0.0.1:18080"}
+{"level":"info","ts":1793740897.046848,"logger":"http.log","msg":"server running","name":"app","protocols":["h1","h2","h3"]}
+{"level":"warn","ts":1793740897.04689,"logger":"http","msg":"HTTP/2 skipped because it requires TLS","network":"tcp","addr":"127.0.0.1:18081"}
+{"level":"warn","ts":1793740897.046913,"logger":"http","msg":"HTTP/3 skipped because it requires TLS","network":"tcp","addr":"127.0.0.1:18081"}
+{"level":"info","ts":1793740897.046922,"logger":"http.log","msg":"server running","name":"remaining_auto_https_redirects","protocols":["h1","h2","h3"]}
+{"level":"info","ts":1793740897.046925,"logger":"http","msg":"enabling automatic TLS certificate management","domains":["app.test"]}
+{"level":"info","ts":1793740897.04724,"msg":"autosaved config (load with --resume flag)","file":"~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data/xdg-config/caddy/autosave.json"}
+{"level":"info","ts":1793740897.04729,"logger":"admin.api","msg":"load complete"}
+{"level":"info","ts":1793740897.047657,"logger":"admin","msg":"stopped previous server","address":"127.0.0.1:2101"}
+{"level":"info","ts":1793740897.1556501,"msg":"shutting down apps, then terminating","signal":"SIGTERM"}
+{"level":"warn","ts":1793740897.155665,"msg":"exiting; byeee!! 👋","signal":"SIGTERM"}
+{"level":"info","ts":1793740897.155691,"logger":"http","msg":"servers shutting down with eternal grace period"}
+{"level":"info","ts":1793740897.155738,"logger":"tls.cache.maintenance","msg":"stopped background certificate maintenance","cache":"0x1be170bb1180"}
+{"level":"info","ts":1793740897.155778,"logger":"admin","msg":"stopped previous server","address":"127.0.0.1:2101"}
+{"level":"info","ts":1793740897.1557848,"msg":"shutdown complete","signal":"SIGTERM","exit_code":0}
