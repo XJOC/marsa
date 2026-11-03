@@ -6,7 +6,13 @@ license.workspace = true
 description = "Marsa CLI and daemon"
 
 [dependencies]
+# With `full` (the default): the binaries run the installer and talk to the daemon.
+marsa-core = { path = "../core" }
+anyhow.workspace = true
 clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
