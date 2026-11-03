@@ -257,9 +257,11 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
         let dir = root.join("fixtures").join("helper").join(folder);
         let entries = fs::read_dir(&dir).unwrap_or_else(|err| panic!("{}: {err}", dir.display()));
+        // `.json` only, like marsa-core: Finder may leave a `.DS_Store` here.
         let files: BTreeMap<_, _> = entries
-            .map(|entry| {
-                let path = entry.unwrap().path();
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .map(|path| {
                 let name = path.file_name().unwrap().to_string_lossy().into_owned();
                 (name, fs::read_to_string(&path).unwrap())
             })
