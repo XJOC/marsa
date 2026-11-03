@@ -38,9 +38,12 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// For one call that is not a stream. A service restart fits well inside.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long a new daemon has to answer, and an old one to stop.
+/// How long a new daemon has to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
-const STOP_WAIT: Duration = Duration::from_secs(5);
+/// How long an old daemon has to stop. `marsad` gives its processes up to
+/// 10 s and its open connections up to 5 s before it deletes `daemon.json`
+/// (task M3-06), so this is longer than both together.
+const STOP_WAIT: Duration = Duration::from_secs(17);
 const POLL: Duration = Duration::from_millis(50);
 /// The largest JSON body read. Log lines are the biggest answer.
 const MAX_BODY: usize = 16 * 1024 * 1024;
