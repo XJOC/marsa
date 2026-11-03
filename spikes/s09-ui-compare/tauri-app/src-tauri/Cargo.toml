@@ -1,0 +1,20 @@
+[package]
+name = "tauri-app"
+description = "S-09 Tauri window: Table, SQL, and Logs tabs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+s09-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `tray-icon` is needed only by `--with-tray`; the same binary serves cases D and E.
+tauri = { workspace = true, features = ["tray-icon"] }
+
+[lints]
+workspace = true
