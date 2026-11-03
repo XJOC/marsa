@@ -281,6 +281,8 @@ fn fake_marsad(dir: &Path, script: &str) -> PathBuf {
 
 /// After `delay`, a fake daemon of this version takes the lock in
 /// `data_dir`, and after `delay` again it writes its file and answers.
+// Only the start-up tests use it, and they need a shell-script `marsad`.
+#[cfg(unix)]
 fn daemon_later(data_dir: &Path, delay: Duration) -> tokio::task::JoinHandle<Fake> {
     let data_dir = data_dir.to_path_buf();
     tokio::spawn(async move {
