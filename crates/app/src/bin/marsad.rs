@@ -19,8 +19,12 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
 /// The exit code when another daemon already runs on the same data folder.
-// Keep equal to `marsa_core::platform::spawn::EXIT_ALREADY_RUNNING` (M3-08).
-const EXIT_ALREADY_RUNNING: u8 = 3;
+/// The client reads it from the same constant (task M3-08).
+const EXIT_ALREADY_RUNNING: u8 = {
+    let code = marsa_core::platform::spawn::EXIT_ALREADY_RUNNING;
+    assert!(code > 0 && code < 256, "an exit code fits in a byte");
+    code as u8
+};
 
 #[derive(Parser)]
 #[command(name = "marsad", version, about = "Marsa daemon")]
