@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use marsa_core::platform::process;
 use marsa_core::services::{LogBuffer, ProgramNotAbsolute, ServiceSpec, restart_delay};
@@ -27,6 +27,10 @@ const MAX_LINE_BYTES: u64 = 8 * 1024;
 /// How long to wait for the last output after an exit. A grandchild that keeps
 /// a pipe open must not block a restart: its reader keeps draining anyway.
 const DRAIN_WAIT: Duration = Duration::from_secs(1);
+
+/// A run this long counts as healthy: the restart count starts again from 0,
+/// so failures days apart do not use up the retries.
+const STABLE_RUN: Duration = Duration::from_secs(60);
 
 /// The state and recent output of one service.
 #[derive(Debug)]
@@ -151,10 +155,16 @@ async fn supervise(spec: ServiceSpec, shared: Shared, cancel: CancellationToken)
     let mut restarts = 0;
     loop {
         shared.set_state(ServiceState::Starting, None, restarts);
+        let started = Instant::now();
         let code = match command(&spec).spawn() {
             Ok(child) => match run(child, &spec, &shared, &cancel, restarts).await {
                 Exit::Stopped => break,
-                Exit::Exited => "exited",
+                Exit::Exited => {
+                    if started.elapsed() >= STABLE_RUN {
+                        restarts = 0;
+                    }
+                    "exited"
+                }
             },
             Err(err) => {
                 warn!(service = %spec.id, %err, "cannot start");
