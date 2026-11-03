@@ -783,6 +783,9 @@ name = "marsa-shim"
 version = "0.0.0"
 dependencies = [
  "marsa-core",
+ "semver",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
