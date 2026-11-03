@@ -6,9 +6,11 @@
 //! bearer token from `run/daemon.json`.
 //!
 //! `run/daemon.lock` is the source of truth: the running daemon holds it, and
-//! the OS frees it when the daemon exits, even after a crash. A
-//! `daemon.json` whose daemon no longer holds the lock is never contacted,
-//! so its dead token never reaches a program that has taken the port since.
+//! the OS frees it when the daemon exits, even after a crash. While the lock
+//! is free, a `daemon.json` left by a crash is never contacted. One short
+//! window remains: a new daemon holds the lock but has not replaced the old
+//! file yet. A probe then may reach the old port with the old token, which
+//! is dead (every start makes a new one).
 //!
 //! The token leaves this module only in the `Authorization` header, which is
 //! marked sensitive. [`DaemonClient`] prints its port only, no proxy is ever
@@ -445,7 +447,11 @@ async fn start(
     // daemon is gone, so it must not be contacted.
     let stale = read_daemon_file(&run)
         .ok()
-        .map(|file| (file.pid, file.port));
+        .map(|file| (file.pid, file.port))
+        // Another client's daemon may have taken the lock and written this
+        // file since our probe. Then the file is live: our `marsad` exits
+        // with code 3 and the wait below uses that daemon.
+        .filter(|_| !lock_is_held(&lock));
     let marsad = marsad().map_err(|err| {
         ClientError::start_failed("cannot find marsad next to this program", Some(err))
     })?;
