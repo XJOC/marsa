@@ -31,13 +31,14 @@ pub struct RunOutput {
 /// then use it; that is safe only because the user cannot change such a
 /// folder between the two steps.
 // Outside tests only: the tests call these, and an unmet `expect` warns.
+// `exists`, `run`, and `current_exe` are still unused outside tests.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "called by the handlers of M4-07 to M4-09")
+    expect(dead_code, reason = "called by the handlers of M4-08 and M4-09")
 )]
 pub trait System {
     /// The whole file, or an error if it is larger than `max` bytes or is not
-    /// a regular file.
+    /// a regular file. A missing file is an error of kind `NotFound`.
     fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>>;
 
     /// Whether `path` exists. A symlink counts even if its target does not.
@@ -389,6 +390,21 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         let err = RealSystem.read(tmp.path(), 10).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// The resolver op tells a missing file from a foreign one by this kind.
+    /// A fresh Mac has no `/etc/resolver` folder either.
+    #[test]
+    fn read_of_a_missing_file_is_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let in_folder = tmp.path().join("test");
+        let no_folder = tmp.path().join("resolver").join("test");
+        for path in [in_folder, no_folder] {
+            let err = RealSystem.read(&path, 4096).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::NotFound, "{}", path.display());
+            let err = FakeSystem::default().read(&path, 4096).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        }
     }
 
     #[test]

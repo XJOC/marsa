@@ -1,0 +1,7 @@
+---
+source: crates/helper/src/ops/resolver.rs
+expression: text
+---
+# Managed by Marsa. Do not edit.
+nameserver 127.0.0.1
+port 18053
