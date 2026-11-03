@@ -1,0 +1,210 @@
+---
+source: crates/core/src/caddy.rs
+expression: "build(&[shop()], &socket_pools())"
+---
+{
+  "admin": {
+    "config": {
+      "persist": false
+    },
+    "listen": "127.0.0.1:18019"
+  },
+  "apps": {
+    "http": {
+      "http_port": 18080,
+      "https_port": 18443,
+      "servers": {
+        "marsa": {
+          "@id": "marsa-srv",
+          "automatic_https": {
+            "disable": true
+          },
+          "listen": [
+            "127.0.0.1:18080"
+          ],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "headers": {
+                    "Location": [
+                      "https://{http.request.host}{http.request.uri}"
+                    ]
+                  },
+                  "status_code": 308
+                }
+              ],
+              "match": [
+                {
+                  "host": [
+                    "shop.test"
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "handle": [
+                {
+                  "body": "Marsa is running. No sites yet.",
+                  "handler": "static_response",
+                  "status_code": 200
+                }
+              ]
+            }
+          ]
+        },
+        "marsa-tls": {
+          "automatic_https": {
+            "disable_redirects": true
+          },
+          "listen": [
+            "127.0.0.1:18443"
+          ],
+          "protocols": [
+            "h1",
+            "h2"
+          ],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "subroute",
+                  "routes": [
+                    {
+                      "handle": [
+                        {
+                          "handler": "vars",
+                          "root": "/code/shop/public"
+                        }
+                      ]
+                    },
+                    {
+                      "handle": [
+                        {
+                          "handler": "static_response",
+                          "headers": {
+                            "Location": [
+                              "{http.request.orig_uri.path}/{http.request.orig_uri.prefixed_query}"
+                            ]
+                          },
+                          "status_code": 308
+                        }
+                      ],
+                      "match": [
+                        {
+                          "file": {
+                            "try_files": [
+                              "{http.request.uri.path}/index.php"
+                            ]
+                          },
+                          "not": [
+                            {
+                              "path": [
+                                "*/"
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "handle": [
+                        {
+                          "handler": "rewrite",
+                          "uri": "{http.matchers.file.relative}"
+                        }
+                      ],
+                      "match": [
+                        {
+                          "file": {
+                            "split_path": [
+                              ".php"
+                            ],
+                            "try_files": [
+                              "{http.request.uri.path}",
+                              "{http.request.uri.path}/index.php",
+                              "index.php"
+                            ],
+                            "try_policy": "first_exist_fallback"
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "handle": [
+                        {
+                          "handler": "reverse_proxy",
+                          "transport": {
+                            "protocol": "fastcgi",
+                            "split_path": [
+                              ".php"
+                            ]
+                          },
+                          "upstreams": [
+                            {
+                              "dial": "unix//run/php-8.4.sock"
+                            }
+                          ]
+                        }
+                      ],
+                      "match": [
+                        {
+                          "path": [
+                            "*.php"
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "handle": [
+                        {
+                          "handler": "file_server"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "match": [
+                {
+                  "host": [
+                    "shop.test"
+                  ]
+                }
+              ],
+              "terminal": true
+            }
+          ]
+        }
+      }
+    },
+    "pki": {
+      "certificate_authorities": {
+        "marsa": {
+          "install_trust": false,
+          "name": "Marsa Local CA",
+          "root_common_name": "Marsa Local CA"
+        }
+      }
+    },
+    "tls": {
+      "automation": {
+        "policies": [
+          {
+            "issuers": [
+              {
+                "ca": "marsa",
+                "module": "internal"
+              }
+            ],
+            "subjects": [
+              "shop.test"
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
