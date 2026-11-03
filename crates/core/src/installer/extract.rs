@@ -4,8 +4,6 @@
 //!
 //! Every entry goes through one function (`Sink::entry`), so the rules live in
 //! one place. We never call `tar::Entry::unpack_in` or `ZipArchive::extract`.
-//! On error nothing is cleaned up: the whole folder is temporary, and the
-//! caller (M2-05) deletes it.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
@@ -14,6 +12,13 @@ use std::path::{Path, PathBuf};
 use flate2::read::GzDecoder;
 
 use crate::recipes::{ArchiveFormat, Artifact};
+
+/// Longer entry names are refused before anything else is done with them.
+const MAX_NAME_BYTES: usize = 4096;
+/// Names in errors are cut to this many characters.
+const NAME_IN_ERROR_CHARS: usize = 256;
+/// Room for tar headers, long names, and pax data, per entry allowed.
+const METADATA_BYTES_PER_ENTRY: u64 = 1024;
 
 /// How one artifact is unpacked. Built from an [`Artifact`] with `From`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +47,8 @@ impl<'a> From<&'a Artifact> for Layout<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// Bytes written in total, counted while copying (headers are not trusted).
+    /// A tar.gz may also decompress at most this plus 1 KiB per entry allowed,
+    /// which bounds long names, pax data, and skipped entries.
     pub max_total_bytes: u64,
     /// Entries read, including folders, links, and skipped entries.
     pub max_entries: u64,
@@ -66,7 +73,7 @@ pub struct ExtractReport {
 }
 
 /// Why an archive was refused. The `String` is the entry name as written in
-/// the archive (empty when the archive itself cannot be read).
+/// the archive, cut to 256 characters (empty before the first entry).
 #[derive(Debug, thiserror::Error)]
 pub enum ExtractError {
     #[error("archive entry {0:?} has an unsafe path")]
@@ -106,7 +113,9 @@ impl ExtractError {
 ///
 /// # Errors
 ///
-/// Any [`ExtractError`]. Files written before the error stay in `dest_root`.
+/// Any [`ExtractError`]. Nothing is cleaned up: files written before the
+/// error stay. The caller must delete the whole `dest_root` and never reuse
+/// it.
 pub fn extract(
     archive: &Path,
     layout: &Layout<'_>,
@@ -115,7 +124,7 @@ pub fn extract(
 ) -> Result<ExtractReport, ExtractError> {
     let into = match layout.into {
         "" => Vec::new(),
-        into => relative_parts(into).ok_or_else(|| ExtractError::UnsafePath(into.into()))?,
+        into => relative_parts(into).ok_or_else(|| ExtractError::UnsafePath(short(into)))?,
     };
     let mut sink = Sink {
         root: dest_root,
@@ -123,6 +132,8 @@ pub fn extract(
         strip: usize::try_from(layout.strip_components).unwrap_or(usize::MAX),
         limits,
         entries: 0,
+        last: String::new(),
+        buf: vec![0; 64 * 1024],
         report: ExtractReport::default(),
     };
     let file = File::open(archive).map_err(io_err(archive))?;
@@ -130,26 +141,19 @@ pub fn extract(
 
     match layout.format {
         ArchiveFormat::TarGz => {
-            let mut tar = tar::Archive::new(GzDecoder::new(reader));
-            for entry in tar.entries().map_err(corrupt(""))? {
-                let mut entry = entry.map_err(corrupt(""))?;
-                let name = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
-                let header = entry.header();
-                let kind = match header.entry_type() {
-                    tar::EntryType::Regular | tar::EntryType::Continuous => Kind::File {
-                        mode: header.mode().map_err(corrupt(&name))?,
-                    },
-                    tar::EntryType::Directory => Kind::Dir,
-                    tar::EntryType::Symlink => Kind::Symlink {
-                        target: entry.link_name_bytes().map(|t| t.into_owned()),
-                    },
-                    // A pax global header (from `git archive`) is metadata,
-                    // never a path.
-                    tar::EntryType::XGlobalHeader => Kind::Skip,
-                    _ => Kind::Other,
-                };
-                sink.entry(&name, kind, &mut entry)?;
+            let left = limits.max_entries.saturating_mul(METADATA_BYTES_PER_ENTRY);
+            let mut tar = tar::Archive::new(Capped {
+                inner: GzDecoder::new(reader),
+                left: limits.max_total_bytes.saturating_add(left),
+                hit: false,
+            });
+            let result = tar_entries(&mut tar, &mut sink);
+            // tar-rs reads long names and pax data whole, and skips unread
+            // data: only the cap stops those, and it shows as a read error.
+            if tar.into_inner().hit {
+                return Err(ExtractError::TooLarge(sink.last));
             }
+            result?;
         }
         ArchiveFormat::Zip => {
             let mut zip = zip::ZipArchive::new(reader).map_err(corrupt(""))?;
@@ -157,8 +161,9 @@ pub fn extract(
                 return Err(ExtractError::TooLarge(String::new()));
             }
             for index in 0..zip.len() {
-                let mut file = zip.by_index(index).map_err(corrupt(""))?;
-                let name = file.name().map_err(corrupt(""))?.into_owned();
+                let mut file = zip.by_index(index).map_err(corrupt(&sink.last))?;
+                let name = file.name().map_err(corrupt(&sink.last))?.into_owned();
+                sink.last = short(&name);
                 // The type bits of a Unix mode: none, a regular file, or other.
                 let file_type = file.unix_mode().unwrap_or(0) & 0o170_000;
                 let kind = if file.is_symlink() {
@@ -177,14 +182,69 @@ pub fn extract(
         }
         ArchiveFormat::Raw => {
             let name = layout.file_name.unwrap_or_default();
-            if name.contains(['/', '\\']) {
-                return Err(ExtractError::UnsafePath(name.into()));
+            // Exactly one normal part: not `.`, not `a/b`.
+            if !matches!(relative_parts(name).as_deref(), Some([part]) if *part == name) {
+                return Err(ExtractError::UnsafePath(short(name)));
             }
             sink.strip = 0;
             sink.entry(name, Kind::File { mode: 0o644 }, &mut reader)?;
         }
     }
     Ok(sink.report)
+}
+
+fn tar_entries<R: Read>(
+    tar: &mut tar::Archive<R>,
+    sink: &mut Sink<'_>,
+) -> Result<(), ExtractError> {
+    for entry in tar.entries().map_err(corrupt(""))? {
+        let mut entry = entry.map_err(corrupt(&sink.last))?;
+        let raw_name = entry.path_bytes();
+        let cut = raw_name.len().min(MAX_NAME_BYTES);
+        sink.last = short(&String::from_utf8_lossy(&raw_name[..cut]));
+        if raw_name.len() > MAX_NAME_BYTES {
+            return Err(ExtractError::UnsafePath(sink.last.clone()));
+        }
+        let name = String::from_utf8_lossy(&raw_name).into_owned();
+        let header = entry.header();
+        let kind = match header.entry_type() {
+            tar::EntryType::Regular | tar::EntryType::Continuous => Kind::File {
+                mode: header.mode().map_err(corrupt(&sink.last))?,
+            },
+            tar::EntryType::Directory => Kind::Dir,
+            tar::EntryType::Symlink => Kind::Symlink {
+                target: entry.link_name_bytes().map(|t| t.into_owned()),
+            },
+            // A pax global header (from `git archive`) is metadata, never a
+            // path. Its data is still counted by the cap.
+            tar::EntryType::XGlobalHeader => Kind::Skip,
+            _ => Kind::Other,
+        };
+        sink.entry(&name, kind, &mut entry)?;
+    }
+    Ok(())
+}
+
+/// A reader that fails once `left` bytes were read, and remembers it.
+struct Capped<R> {
+    inner: R,
+    left: u64,
+    hit: bool,
+}
+
+impl<R: Read> Read for Capped<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.left == 0 && !buf.is_empty() {
+            self.hit = true;
+            return Err(io::Error::other("archive is over the size limit"));
+        }
+        let max = buf
+            .len()
+            .min(usize::try_from(self.left).unwrap_or(usize::MAX));
+        let n = self.inner.read(&mut buf[..max])?;
+        self.left -= n as u64;
+        Ok(n)
+    }
 }
 
 enum Kind {
@@ -206,6 +266,10 @@ struct Sink<'a> {
     strip: usize,
     limits: &'a Limits,
     entries: u64,
+    /// The current entry name, cut for errors.
+    last: String,
+    /// One copy buffer for every file.
+    buf: Vec<u8>,
     report: ExtractReport,
 }
 
@@ -214,14 +278,17 @@ impl Sink<'_> {
     fn entry(&mut self, name: &str, kind: Kind, data: &mut dyn Read) -> Result<(), ExtractError> {
         self.entries += 1;
         if self.entries > self.limits.max_entries {
-            return Err(ExtractError::TooLarge(name.into()));
+            return Err(ExtractError::TooLarge(short(name)));
         }
         match kind {
             Kind::Skip => return Ok(()),
-            Kind::Other => return Err(ExtractError::UnsupportedEntry(name.into())),
+            Kind::Other => return Err(ExtractError::UnsupportedEntry(short(name))),
             _ => {}
         }
-        let parts = relative_parts(name).ok_or_else(|| ExtractError::UnsafePath(name.into()))?;
+        let parts = Some(name)
+            .filter(|n| n.len() <= MAX_NAME_BYTES)
+            .and_then(relative_parts)
+            .ok_or_else(|| ExtractError::UnsafePath(short(name)))?;
         let Some(parts) = parts.get(self.strip..).filter(|p| !p.is_empty()) else {
             return Ok(()); // the stripped root folder
         };
@@ -234,7 +301,7 @@ impl Sink<'_> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(io_err(parent))?;
         }
-        let unsafe_link = || ExtractError::UnsafeLink(name.into());
+        let unsafe_link = || ExtractError::UnsafeLink(short(name));
         match kind {
             Kind::File { mode } => self.write_file(name, &path, data, file_mode(mode))?,
             Kind::Symlink {
@@ -267,7 +334,7 @@ impl Sink<'_> {
             }
             match fs::symlink_metadata(&path) {
                 Ok(meta) if meta.file_type().is_symlink() => {
-                    return Err(ExtractError::UnsafePath(entry.into()));
+                    return Err(ExtractError::UnsafePath(short(entry)));
                 }
                 Ok(_) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => exists = false,
@@ -291,9 +358,8 @@ impl Sink<'_> {
             .create_new(true)
             .open(path)
             .map_err(|e| exists_or_io(entry, path, e))?;
-        let mut buf = vec![0u8; 64 * 1024];
         loop {
-            let n = match data.read(&mut buf) {
+            let n = match data.read(&mut self.buf) {
                 Ok(0) => break,
                 Ok(n) => n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -301,9 +367,9 @@ impl Sink<'_> {
             };
             self.report.bytes += n as u64;
             if self.report.bytes > self.limits.max_total_bytes {
-                return Err(ExtractError::TooLarge(entry.into()));
+                return Err(ExtractError::TooLarge(short(entry)));
             }
-            out.write_all(&buf[..n]).map_err(io_err(path))?;
+            out.write_all(&self.buf[..n]).map_err(io_err(path))?;
         }
         set_mode(&out, mode).map_err(io_err(path))
     }
@@ -311,8 +377,12 @@ impl Sink<'_> {
 
 /// Splits an entry name on `/` and `\` and checks every part. `None` if a part
 /// is empty (absolute, UNC, or `a//b`), is `..` (or only dots and spaces,
-/// which Windows may read as `..`), holds `:` (a drive or a stream), or the
-/// name holds `\0`. `.` parts are dropped; a trailing separator is allowed.
+/// which Windows may read as `..`), holds `:` (a drive or a stream), ends in
+/// a dot or a space, or is a Windows device name; or if the name holds `\0`.
+/// `.` parts are dropped; a trailing separator is allowed.
+///
+/// The Windows rules apply on every system: the result is the same
+/// everywhere, and real archives never use such names.
 fn relative_parts(name: &str) -> Option<Vec<&str>> {
     if name.contains('\0') {
         return None;
@@ -322,12 +392,29 @@ fn relative_parts(name: &str) -> Option<Vec<&str>> {
         parts.pop();
     }
     let bad = |p: &&str| {
-        p.is_empty() || p.contains(':') || (*p != "." && p.chars().all(|c| c == '.' || c == ' '))
+        *p != "."
+            && (p.is_empty() || p.contains(':') || p.ends_with(['.', ' ']) || windows_device(p))
     };
     if parts.iter().any(bad) {
         return None;
     }
     Some(parts.into_iter().filter(|p| *p != ".").collect())
+}
+
+/// `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, in any case and
+/// with any extension (`nul.txt`): Windows opens a device for these.
+fn windows_device(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or(part).trim_end_matches(' ');
+    let stem = stem.to_ascii_uppercase();
+    matches!(
+        stem.as_bytes(),
+        b"CON"
+            | b"PRN"
+            | b"AUX"
+            | b"NUL"
+            | [b'C', b'O', b'M', b'1'..=b'9']
+            | [b'L', b'P', b'T', b'1'..=b'9']
+    )
 }
 
 /// Whether a link at `link` (its parts under the root, name last) pointing to
@@ -390,12 +477,17 @@ fn io_err(path: &Path) -> impl FnOnce(io::Error) -> ExtractError + '_ {
 
 /// For errors while reading the archive. `E` is `io::Error` or `ZipError`.
 fn corrupt<E: Into<io::Error>>(entry: &str) -> impl FnOnce(E) -> ExtractError + '_ {
-    move |e| ExtractError::Corrupt(entry.to_string(), e.into())
+    move |e| ExtractError::Corrupt(short(entry), e.into())
+}
+
+/// `name` cut to 256 characters, for errors and logs.
+fn short(name: &str) -> String {
+    name.chars().take(NAME_IN_ERROR_CHARS).collect()
 }
 
 fn exists_or_io(entry: &str, path: &Path, e: io::Error) -> ExtractError {
     if e.kind() == io::ErrorKind::AlreadyExists {
-        ExtractError::Duplicate(entry.into())
+        ExtractError::Duplicate(short(entry))
     } else {
         io_err(path)(e)
     }
@@ -430,11 +522,8 @@ mod tests {
             if matches!(kind, EntryType::Symlink | EntryType::Link) {
                 header.as_old_mut().linkname[..data.len()].copy_from_slice(data);
             }
-            let body: &[u8] = if *kind == EntryType::Regular {
-                data
-            } else {
-                &[]
-            };
+            let is_link = matches!(kind, EntryType::Symlink | EntryType::Link);
+            let body: &[u8] = if is_link { &[] } else { data };
             header.set_entry_type(*kind);
             header.set_mode(*mode);
             header.set_size(body.len() as u64);
@@ -524,8 +613,14 @@ mod tests {
             ".. ",
             "a:b",
         ];
-        for name in bad.into_iter().chain(more) {
+        let windows = [
+            "CON", "con.txt", "a/NUL", "Lpt9.log", "COM1", "aux .js", "a/b.", "a/b ",
+        ];
+        for name in bad.into_iter().chain(more).chain(windows) {
             assert_eq!(relative_parts(name), None, "{name:?}");
+        }
+        for name in ["console.txt", "COM10", "com0", "lpt", ".hidden", "a.b/c"] {
+            assert!(relative_parts(name).is_some(), "{name:?}");
         }
     }
 
@@ -668,11 +763,25 @@ mod tests {
             ..layout
         };
         assert_eq!(code(b"<?php", &bad), "extract_unsafe_path");
+        for name in [".", "", "a/b", "a\\b", "nul"] {
+            let bad = Layout {
+                file_name: Some(name),
+                ..layout
+            };
+            assert_eq!(code(b"<?php", &bad), "extract_unsafe_path", "{name:?}");
+        }
     }
 
     #[test]
     fn tar_paths_that_escape_are_refused() {
-        for name in ["../evil", "/abs", "a/../../evil", "..\\evil", "C:\\evil"] {
+        for name in [
+            "../evil",
+            "/abs",
+            "a/../../evil",
+            "..\\evil",
+            "C:\\evil",
+            "bin/con",
+        ] {
             let bytes = targz(&[(name, EntryType::Regular, 0o644, b"x")]);
             assert_eq!(code(&bytes, &TAR), "extract_unsafe_path", "{name:?}");
         }
@@ -800,5 +909,97 @@ mod tests {
         let bytes = targz(&[("a", EntryType::Regular, 0o644, &[1u8; 4096])]);
         assert_eq!(code(&bytes[..bytes.len() / 2], &TAR), "extract_corrupt");
         assert_eq!(code(b"this is not a zip file", &ZIP), "extract_corrupt");
+    }
+
+    #[test]
+    fn dot_dot_in_a_stripped_part_is_refused() {
+        let layout = Layout {
+            strip_components: 1,
+            ..TAR
+        };
+        for name in ["../x", "../root/x"] {
+            let bytes = targz(&[(name, EntryType::Regular, 0o644, b"x")]);
+            assert_eq!(code(&bytes, &layout), "extract_unsafe_path", "{name}");
+        }
+    }
+
+    #[test]
+    fn tar_metadata_over_the_cap_is_refused() {
+        // 1 KiB of files and 8 entries allow 9 KiB of decompressed tar.
+        let limits = Limits {
+            max_total_bytes: 1024,
+            max_entries: 8,
+        };
+        let big = vec![b'a'; 1024 * 1024];
+        for kind in [
+            EntryType::XHeader,
+            EntryType::GNULongName,
+            EntryType::XGlobalHeader,
+        ] {
+            let bytes = targz(&[
+                ("meta", kind, 0o644, &big),
+                ("a", EntryType::Regular, 0o644, b"x"),
+            ]);
+            assert_eq!(
+                refused(&bytes, &TAR, &limits),
+                "extract_too_large",
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_names_are_refused_and_cut_in_errors() {
+        let long = vec![b'a'; MAX_NAME_BYTES + 1];
+        let bytes = targz(&[
+            ("long", EntryType::GNULongName, 0o644, &long),
+            ("x", EntryType::Regular, 0o644, b"x"),
+        ]);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = unpack(tmp.path(), &bytes, &TAR, &Limits::default()).expect_err("too long");
+        assert!(
+            matches!(&err, ExtractError::UnsafePath(name) if name.len() == NAME_IN_ERROR_CHARS),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn zip_bytes_over_the_limit_are_refused() {
+        let limits = Limits {
+            max_total_bytes: 1024,
+            ..Limits::default()
+        };
+        let bytes = zip(&[Z::File("big", 0o644, &[7u8; 2048])]);
+        assert_eq!(refused(&bytes, &ZIP, &limits), "extract_too_large");
+    }
+
+    #[test]
+    fn zip_entries_with_the_same_path_are_refused() {
+        let bytes = zip(&[Z::File("a/b", 0o644, b"1"), Z::File("a\\b", 0o644, b"2")]);
+        assert_eq!(code(&bytes, &ZIP), "extract_duplicate");
+    }
+
+    // Unix only: Windows refuses every link before these rules are reached.
+    #[cfg(unix)]
+    #[test]
+    fn a_chain_of_links_cannot_be_written_through() {
+        let bytes = targz(&[
+            ("a/", EntryType::Directory, 0o755, b""),
+            ("a/up", EntryType::Symlink, 0o777, b".."),
+            ("b", EntryType::Symlink, 0o777, b"a/up"),
+            ("b/x", EntryType::Regular, 0o644, b"x"),
+        ]);
+        assert_eq!(code(&bytes, &TAR), "extract_unsafe_path");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_entry_over_a_link_is_refused() {
+        let bytes = targz(&[
+            ("sub/", EntryType::Directory, 0o755, b""),
+            ("l", EntryType::Symlink, 0o777, b"sub"),
+            ("l/", EntryType::Directory, 0o755, b""),
+        ]);
+        assert_eq!(code(&bytes, &TAR), "extract_unsafe_path");
     }
 }
