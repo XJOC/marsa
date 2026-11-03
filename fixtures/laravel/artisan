@@ -1,0 +1,5 @@
+#!/usr/bin/env php
+<?php
+
+// Marker file only: `artisan` is what tells the site detector that this folder
+// is a Laravel project. The fixture stays tiny on purpose.
