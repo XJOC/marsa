@@ -246,36 +246,48 @@ fn pick(
     installed: &[Version],
 ) -> Result<Resolution, ResolveError> {
     let value = value.trim();
-    let request = match Request::parse(value) {
-        Ok(request) => request,
-        Err(BadRequest::Alias) => {
-            return Err(ResolveError::UnsupportedAlias {
-                tool,
-                value: value.to_owned(),
-                origin,
-            });
-        }
-        Err(BadRequest::Invalid) => {
-            return Err(ResolveError::InvalidVersion {
-                tool,
-                value: value.to_owned(),
-                origin,
-            });
-        }
-    };
-
-    match installed.iter().filter(|v| request.matches(v)).max() {
-        Some(version) => Ok(Resolution {
+    match best_match(value, installed) {
+        Ok(Some(version)) => Ok(Resolution {
             tool,
-            version: version.clone(),
+            version,
             source: origin,
         }),
-        None => Err(ResolveError::NotInstalled {
+        Ok(None) => Err(ResolveError::NotInstalled {
             tool,
             requested: value.to_owned(),
             origin,
         }),
+        Err(BadRequest::Alias) => Err(ResolveError::UnsupportedAlias {
+            tool,
+            value: value.to_owned(),
+            origin,
+        }),
+        Err(BadRequest::Invalid) => Err(ResolveError::InvalidVersion {
+            tool,
+            value: value.to_owned(),
+            origin,
+        }),
     }
+}
+
+/// The highest of `candidates` that `value` asks for, by the rules `resolve`
+/// uses for a version file: `8.4` is the newest `8.4.x` (never `8.9`), and a
+/// pre-release is picked only when written in full (`8.5.0-rc1`). So `8.4`
+/// means the same in `.php-version` and in `marsa install` (task M2-05).
+///
+/// `Ok(None)` when no candidate matches.
+///
+/// # Errors
+///
+/// `unsupported_alias` for `latest`, `lts/*`, and the like, or
+/// `invalid_version` for text that is not a version.
+pub fn best_match(value: &str, candidates: &[Version]) -> Result<Option<Version>, BadRequest> {
+    let request = Request::parse(value.trim())?;
+    Ok(candidates
+        .iter()
+        .filter(|v| request.matches(v))
+        .max()
+        .cloned())
 }
 
 /// A version as the user wrote it: `8`, `8.4`, `8.4.1`, or `8.5.0-rc1`.
@@ -293,12 +305,25 @@ struct Request {
     pre: Prerelease,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum BadRequest {
+/// Why the text of a version request is refused by [`best_match`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BadRequest {
     /// A word that version managers accept instead of a number.
+    #[error("version aliases such as `latest` are not supported, write a version number")]
     Alias,
     /// Anything else that is not a version.
+    #[error("this is not a valid version")]
     Invalid,
+}
+
+impl BadRequest {
+    /// The same stable names as [`ResolveError::code`].
+    pub fn code(&self) -> &'static str {
+        match self {
+            BadRequest::Alias => "unsupported_alias",
+            BadRequest::Invalid => "invalid_version",
+        }
+    }
 }
 
 /// Aliases from nvm, asdf, and mise. Marsa does not guess what they mean.
@@ -1124,6 +1149,34 @@ mod tests {
         ];
         for (error, code) in cases {
             assert_eq!(error.code(), code, "{error}");
+        }
+    }
+
+    #[test]
+    fn best_match_uses_the_resolver_rules() {
+        let list = versions(&["8.3.14", "8.4.1", "8.4.23", "8.4.24-rc1", "8.5.0"]);
+        let best = |value| best_match(value, &list).expect("a valid request");
+        let v = |text| Some(Version::parse(text).unwrap());
+        assert_eq!(best("8.4"), v("8.4.23"));
+        assert_eq!(best(" v8.4 "), v("8.4.23"));
+        assert_eq!(best("8"), v("8.5.0"));
+        assert_eq!(best("8.4.1"), v("8.4.1"));
+        assert_eq!(best("8.4.24-rc1"), v("8.4.24-rc1"));
+        assert_eq!(best("8.2"), None);
+        assert_eq!(best("8.4.24"), None);
+    }
+
+    #[test]
+    fn best_match_refuses_aliases_and_junk() {
+        let list = versions(&["22.11.0"]);
+        for alias in ["latest", "lts/*", "LTS/iron", "node"] {
+            let err = best_match(alias, &list).expect_err(alias);
+            assert_eq!(err, BadRequest::Alias);
+            assert_eq!(err.code(), "unsupported_alias");
+        }
+        for junk in ["", "x", "8.x", "+8", "^8.4"] {
+            let err = best_match(junk, &list).expect_err(junk);
+            assert_eq!(err.code(), "invalid_version", "{junk:?}");
         }
     }
 }
