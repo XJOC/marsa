@@ -17,6 +17,8 @@ use std::time::Duration;
 use reqwest::{StatusCode, Url, redirect};
 use sha2::{Digest, Sha256};
 
+use super::manifest::ArtifactSource;
+
 /// The most redirects one request follows. GitHub Releases uses one.
 pub const MAX_REDIRECTS: usize = 5;
 
@@ -38,12 +40,39 @@ pub trait Fetch: Sync {
     ) -> impl Future<Output = Result<(), FetchError>> + Send;
 }
 
-/// The size and sha256 one file must have. The caller must take them from the
-/// manifest after its signature was checked: this module trusts them as given.
+/// The size and sha256 one file must have. This module trusts them as given,
+/// so the only way to build one is [`Expected::from_manifest`], from a file of
+/// a manifest whose signature passed. The fields are private:
+///
+/// ```compile_fail,E0451
+/// use marsa_core::installer::fetch::Expected;
+/// let expected = Expected { sha256: [0; 32], size: 1 };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expected {
-    pub sha256: [u8; 32],
-    pub size: u64,
+    sha256: [u8; 32],
+    size: u64,
+}
+
+impl Expected {
+    /// The size and sha256 the signed manifest lists for `source`. An
+    /// [`ArtifactSource`] exists only inside a verified [`Manifest`].
+    ///
+    /// [`Manifest`]: super::manifest::Manifest
+    pub fn from_manifest(source: &ArtifactSource) -> Self {
+        Expected {
+            sha256: *source.sha256(),
+            size: source.size(),
+        }
+    }
+
+    pub fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
 }
 
 /// A file on disk whose size and sha256 matched the [`Expected`] values passed
