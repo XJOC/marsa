@@ -1,6 +1,7 @@
 //! Downloads a file to a temp folder over HTTPS only, with a size limit, and
 //! computes its sha256 while writing. The result is a [`VerifiedFile`], which
-//! exists only when the sha256 matches the signed manifest.
+//! exists only when the size and sha256 matched the [`Expected`] values the
+//! caller passed in.
 //!
 //! All the checks live in [`download_verified`] and [`fetch_bytes`], on top of
 //! the [`Fetch`] trait. [`HttpFetch`] only turns a response into chunks, so the
@@ -21,8 +22,9 @@ pub const MAX_REDIRECTS: usize = 5;
 
 /// Receives a response body chunk by chunk.
 pub trait ChunkSink: Send {
-    /// Takes the next part of the body. On an error the fetcher stops reading
-    /// at once and returns this error from [`Fetch::get`] unchanged.
+    /// Takes the next part of the body. An error tells the fetcher to stop
+    /// reading at once and return it from [`Fetch::get`]. The sink keeps the
+    /// real cause itself, so a fetcher cannot change or hide it.
     fn accept(&mut self, chunk: &[u8]) -> Result<(), FetchError>;
 }
 
@@ -36,19 +38,27 @@ pub trait Fetch: Sync {
     ) -> impl Future<Output = Result<(), FetchError>> + Send;
 }
 
-/// What the signed manifest says about one file.
+/// The size and sha256 one file must have. The caller must take them from the
+/// manifest after its signature was checked: this module trusts them as given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expected {
     pub sha256: [u8; 32],
     pub size: u64,
 }
 
-/// A file on disk whose size and sha256 matched the signed manifest.
+/// A file on disk whose size and sha256 matched the [`Expected`] values passed
+/// to [`download_verified`]. It is only as trustworthy as those values.
 ///
 /// Only [`download_verified`] creates one: the fields are private and there is
 /// no constructor, so the extractor cannot get an unchecked file.
 ///
-/// ```compile_fail
+/// The caller owns the file and deletes it when done, for example with
+/// [`VerifiedFile::remove`]. This holds a path, not an open handle: the check
+/// is true when [`download_verified`] returns, and stays true only while
+/// nobody else can write in its folder. That is why `dest` must be in a folder
+/// private to the user (`runtimes/.tmp/`).
+///
+/// ```compile_fail,E0451
 /// use marsa_core::installer::fetch::VerifiedFile;
 /// let file = VerifiedFile { path: std::path::PathBuf::new(), sha256: [0; 32] };
 /// ```
@@ -66,6 +76,11 @@ impl VerifiedFile {
     pub fn sha256(&self) -> &[u8; 32] {
         &self.sha256
     }
+
+    /// Deletes the file.
+    pub fn remove(self) -> io::Result<()> {
+        fs::remove_file(&self.path)
+    }
 }
 
 /// Why a download failed. [`FetchError::code`] gives a stable name that the UI
@@ -76,31 +91,31 @@ pub enum FetchError {
     InsecureUrl { url: String },
     #[error("{url} answered with HTTP status {status}")]
     HttpStatus { url: String, status: u16 },
-    #[error("cannot download {url}")]
+    #[error("cannot download {url}: {source}")]
     Network {
         url: String,
         #[source]
         source: Box<dyn StdError + Send + Sync>,
     },
-    #[error("download failed after trying {tried} URLs")]
+    #[error("download failed after trying {tried} URLs{}", last_suffix(.last))]
     Failed {
         tried: usize,
         #[source]
         last: Option<Box<FetchError>>,
     },
-    #[error("{url} sent {received} bytes or more, but the manifest says {expected}")]
+    #[error("{url} sent {received} bytes or more, but {expected} were expected")]
     TooLong {
         url: String,
         expected: u64,
         received: u64,
     },
-    #[error("{url} sent {received} bytes, but the manifest says {expected}")]
+    #[error("{url} sent {received} bytes, but {expected} were expected")]
     TooShort {
         url: String,
         expected: u64,
         received: u64,
     },
-    #[error("sha256 of {url} is {actual}, but the manifest says {expected}")]
+    #[error("sha256 of {url} is {actual}, but {expected} was expected")]
     ChecksumMismatch {
         url: String,
         expected: String,
@@ -114,6 +129,13 @@ pub enum FetchError {
         #[source]
         source: io::Error,
     },
+}
+
+fn last_suffix(last: &Option<Box<FetchError>>) -> String {
+    match last {
+        Some(last) => format!("; last error: {last}"),
+        None => String::new(),
+    }
 }
 
 impl FetchError {
@@ -130,9 +152,20 @@ impl FetchError {
         }
     }
 
+    /// For `download_failed`: the code of the last mirror's error (for example
+    /// `download_http_status`), so the UI can say more. `None` otherwise.
+    pub fn last_code(&self) -> Option<&'static str> {
+        match self {
+            FetchError::Failed {
+                last: Some(last), ..
+            } => Some(last.code()),
+            _ => None,
+        }
+    }
+
     /// Only an unavailable mirror is a reason to try the next one. A file that
-    /// arrived but differs from the signed manifest stops the download: it
-    /// means tampering or a bad manifest, and the user must see it.
+    /// arrived but differs from the expected one stops the download: it means
+    /// tampering or a bad manifest, and the user must see it.
     fn try_next_mirror(&self) -> bool {
         matches!(
             self,
@@ -141,9 +174,30 @@ impl FetchError {
     }
 }
 
+/// The message of `err` and of every cause under it, for logs. Skips a cause
+/// whose text the message already shows.
+fn full_chain(err: &(dyn StdError + 'static)) -> String {
+    let mut text = err.to_string();
+    let mut cause = err.source();
+    while let Some(current) = cause {
+        let message = current.to_string();
+        if !text.contains(&message) {
+            text.push_str(": ");
+            text.push_str(&message);
+        }
+        cause = current.source();
+    }
+    text
+}
+
 /// Downloads the first URL that works into `dest`, a file that must not exist
 /// yet, and checks its size and sha256 against `expected`. `progress` gets
-/// `(received, total)`. On any error `dest` is deleted.
+/// `(received, total)`, from 0 again for each mirror.
+///
+/// `dest` must be in a folder private to the user (`runtimes/.tmp/`); see
+/// [`VerifiedFile`]. On success the caller owns the file. On an error, a panic
+/// in `progress`, or when this future is dropped, the partial file is closed
+/// and deleted; if that delete fails, only a warning is logged.
 pub async fn download_verified(
     fetch: &impl Fetch,
     urls: &[String],
@@ -173,22 +227,33 @@ async fn download_with(
         let url = check_https(url)?;
         let shown = redact(&url);
         // `create_new`: never write over a file that is already there. This
-        // error returns before anything is deleted.
+        // error returns before the guard exists, so nothing is deleted.
         let file = open(dest).map_err(|source| io_error(dest, source))?;
+        let mut partial = PartialFile {
+            file: Some(file),
+            path: dest,
+            armed: true,
+        };
         tracing::info!(url = %shown, "downloading");
-        match download_one(fetch, &url, &shown, file, expected, dest, progress).await {
+        match download_one(fetch, &url, &shown, &mut partial, expected, progress).await {
             Ok(sha256) => {
+                partial.keep();
                 return Ok(VerifiedFile {
                     path: dest.to_path_buf(),
                     sha256,
                 });
             }
             Err(err) => {
-                remove_partial(dest);
+                drop(partial);
                 if !err.try_next_mirror() {
                     return Err(err);
                 }
-                tracing::warn!(url = %shown, attempt = tried + 1, error = %err, "mirror failed");
+                tracing::warn!(
+                    url = %shown,
+                    attempt = tried + 1,
+                    error = %full_chain(&err),
+                    "mirror failed"
+                );
                 last = Some(Box::new(err));
             }
         }
@@ -199,17 +264,44 @@ async fn download_with(
     })
 }
 
-/// One attempt. Owns `file`, so the file is closed when this returns and the
-/// caller can delete it (Windows cannot delete an open file).
+/// Deletes a download that did not finish: on an error, on a panic, and when
+/// the future is dropped (a timeout or a cancel). [`PartialFile::keep`] turns
+/// it off once the file passed every check.
+struct PartialFile<'a> {
+    file: Option<File>,
+    path: &'a Path,
+    armed: bool,
+}
+
+impl PartialFile<'_> {
+    fn keep(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PartialFile<'_> {
+    fn drop(&mut self) {
+        // Close first: Windows cannot delete an open file.
+        drop(self.file.take());
+        if self.armed {
+            remove_partial(self.path);
+        }
+    }
+}
+
+/// One attempt into the file that `partial` holds.
 async fn download_one(
     fetch: &impl Fetch,
     url: &Url,
     shown: &str,
-    file: File,
+    partial: &mut PartialFile<'_>,
     expected: &Expected,
-    dest: &Path,
     progress: &mut (dyn FnMut(u64, u64) + Send),
 ) -> Result<[u8; 32], FetchError> {
+    let dest = partial.path;
+    let Some(file) = partial.file.as_mut() else {
+        return Err(io_error(dest, io::Error::other("the file is closed")));
+    };
     progress(0, expected.size);
     let mut sink = FileSink {
         file,
@@ -218,14 +310,16 @@ async fn download_one(
         hasher: Sha256::new(),
         received: 0,
         expected: expected.size,
-        failed: false,
+        first_error: None,
         progress,
     };
-    fetch.get(url.as_str(), &mut sink).await?;
-    if sink.failed {
-        // The fetcher ignored a refused chunk: never trust what is on disk.
-        return Err(sink.refused());
+    let result = fetch.get(url.as_str(), &mut sink).await;
+    // The sink's own error wins over whatever the fetcher returned: a refused
+    // chunk can never turn into a network error that tries the next mirror.
+    if let Some(err) = sink.first_error.take() {
+        return Err(err);
     }
+    result?;
     if sink.received != expected.size {
         return Err(FetchError::TooShort {
             url: shown.to_owned(),
@@ -241,35 +335,32 @@ async fn download_one(
             actual: hex(&actual),
         });
     }
-    // `sync_all` can take a while: tokio runs it on its blocking threads.
-    let file = tokio::fs::File::from_std(sink.file);
-    file.sync_all()
-        .await
-        .map_err(|source| io_error(dest, source))?;
+    // `sync_all` can take a while: tokio runs it on its blocking threads. The
+    // file leaves the guard here, but the guard still deletes the path if this
+    // fails or the future is dropped.
+    if let Some(file) = partial.file.take() {
+        tokio::fs::File::from_std(file)
+            .sync_all()
+            .await
+            .map_err(|source| io_error(dest, source))?;
+    }
     Ok(actual)
 }
 
 /// Writes each chunk to the file and to the hasher. Refuses a chunk that would
 /// go past the expected size before writing it.
 struct FileSink<'a> {
-    file: File,
+    file: &'a mut File,
     path: &'a Path,
     url: &'a str,
     hasher: Sha256,
     received: u64,
     expected: u64,
-    failed: bool,
+    first_error: Option<FetchError>,
     progress: &'a mut (dyn FnMut(u64, u64) + Send),
 }
 
 impl FileSink<'_> {
-    fn refused(&self) -> FetchError {
-        io_error(
-            self.path,
-            io::Error::other("download stopped after an earlier error"),
-        )
-    }
-
     fn try_accept(&mut self, chunk: &[u8]) -> Result<(), FetchError> {
         let received = self.received.saturating_add(chunk.len() as u64);
         if received > self.expected {
@@ -293,29 +384,35 @@ impl FileSink<'_> {
 
 impl ChunkSink for FileSink<'_> {
     fn accept(&mut self, chunk: &[u8]) -> Result<(), FetchError> {
-        if self.failed {
-            return Err(self.refused());
+        if self.first_error.is_none() {
+            match self.try_accept(chunk) {
+                Ok(()) => return Ok(()),
+                Err(err) => self.first_error = Some(err),
+            }
         }
-        let result = self.try_accept(chunk);
-        self.failed = result.is_err();
-        result
+        // Only a stop signal: `download_one` returns `first_error` instead.
+        Err(io_error(self.path, io::Error::other("download stopped")))
     }
 }
 
 /// Downloads a small file (the manifest or its signature) into memory. Fails
 /// as soon as the body goes past `max` bytes.
+///
+/// There is no deadline for the whole body, only between two reads: wrap the
+/// call in `tokio::time::timeout` when a total limit is needed.
 pub async fn fetch_bytes(fetch: &impl Fetch, url: &str, max: u64) -> Result<Vec<u8>, FetchError> {
     let url = check_https(url)?;
     let mut sink = BytesSink {
         bytes: Vec::new(),
         url: redact(&url),
         max,
-        failed: false,
+        first_error: None,
     };
-    fetch.get(url.as_str(), &mut sink).await?;
-    if sink.failed {
-        return Err(sink.too_large());
+    let result = fetch.get(url.as_str(), &mut sink).await;
+    if let Some(err) = sink.first_error.take() {
+        return Err(err);
     }
+    result?;
     Ok(sink.bytes)
 }
 
@@ -323,7 +420,7 @@ struct BytesSink {
     bytes: Vec<u8>,
     url: String,
     max: u64,
-    failed: bool,
+    first_error: Option<FetchError>,
 }
 
 impl BytesSink {
@@ -338,12 +435,15 @@ impl BytesSink {
 impl ChunkSink for BytesSink {
     fn accept(&mut self, chunk: &[u8]) -> Result<(), FetchError> {
         let total = (self.bytes.len() as u64).saturating_add(chunk.len() as u64);
-        if self.failed || total > self.max {
-            self.failed = true;
-            return Err(self.too_large());
+        if self.first_error.is_none() && total <= self.max {
+            self.bytes.extend_from_slice(chunk);
+            return Ok(());
         }
-        self.bytes.extend_from_slice(chunk);
-        Ok(())
+        if self.first_error.is_none() {
+            self.first_error = Some(self.too_large());
+        }
+        // Only a stop signal: `fetch_bytes` returns `first_error` instead.
+        Err(self.too_large())
     }
 }
 
@@ -541,6 +641,8 @@ pub mod testing {
     pub enum Reply {
         /// HTTP 200 with this body, sent in these chunks.
         Chunks(Vec<Vec<u8>>),
+        /// HTTP 200, these chunks, then the connection breaks.
+        ChunksThenError(Vec<Vec<u8>>),
         /// Any status but 200.
         Status(u16),
         /// A connection error.
@@ -586,22 +688,34 @@ pub mod testing {
                 requests.push(url.to_owned());
             }
             match self.replies.get(url) {
-                Some(Reply::Chunks(chunks)) => {
-                    for chunk in chunks {
-                        self.chunks_sent.fetch_add(1, Ordering::SeqCst);
-                        sink.accept(chunk)?;
-                    }
-                    Ok(())
+                Some(Reply::Chunks(chunks)) => self.send(chunks, sink),
+                Some(Reply::ChunksThenError(chunks)) => {
+                    self.send(chunks, sink)?;
+                    Err(network_error(url))
                 }
                 Some(Reply::Status(status)) => Err(FetchError::HttpStatus {
                     url: url.to_owned(),
                     status: *status,
                 }),
-                Some(Reply::NetworkError) | None => Err(FetchError::Network {
-                    url: url.to_owned(),
-                    source: Box::new(io::Error::from(io::ErrorKind::ConnectionRefused)),
-                }),
+                Some(Reply::NetworkError) | None => Err(network_error(url)),
             }
+        }
+    }
+
+    impl MemoryFetch {
+        fn send(&self, chunks: &[Vec<u8>], sink: &mut dyn ChunkSink) -> Result<(), FetchError> {
+            for chunk in chunks {
+                self.chunks_sent.fetch_add(1, Ordering::SeqCst);
+                sink.accept(chunk)?;
+            }
+            Ok(())
+        }
+    }
+
+    fn network_error(url: &str) -> FetchError {
+        FetchError::Network {
+            url: url.to_owned(),
+            source: Box::new(io::Error::from(io::ErrorKind::ConnectionReset)),
         }
     }
 }
@@ -725,9 +839,43 @@ mod tests {
             .with(A, Reply::Status(404))
             .with(B, Reply::Chunks(body()));
         let (_dir, dest) = dest();
-        download(&fetch, &[A, B], &dest)
+        let file = download(&fetch, &[A, B], &dest)
             .await
             .expect("second mirror works");
+        assert_eq!(fs::read(file.path()).expect("read file"), body().concat());
+        assert_eq!(fetch.requests(), urls(&[A, B]));
+    }
+
+    #[tokio::test]
+    async fn a_broken_mirror_is_removed_and_the_next_starts_clean() {
+        // A sends two good chunks, then the connection breaks.
+        let fetch = MemoryFetch::new()
+            .with(A, Reply::ChunksThenError(body()[..2].to_vec()))
+            .with(B, Reply::Chunks(body()));
+        let (_dir, dest) = dest();
+        let file = download(&fetch, &[A, B], &dest)
+            .await
+            .expect("second mirror works");
+        // `create_new` worked again, so A's partial file was deleted; the sha256
+        // matched, so the hash started again from zero for B.
+        assert_eq!(fs::read(file.path()).expect("read file"), body().concat());
+        assert_eq!(fetch.requests(), urls(&[A, B]));
+    }
+
+    #[tokio::test]
+    async fn a_size_mismatch_does_not_try_the_next_mirror() {
+        let mut long = body();
+        long.push(b"extra".to_vec());
+        let fetch = MemoryFetch::new()
+            .with(A, Reply::Chunks(long))
+            .with(B, Reply::Chunks(body()));
+        let (_dir, dest) = dest();
+        let err = download(&fetch, &[A, B], &dest)
+            .await
+            .expect_err("stops at the first mirror");
+        assert_eq!(err.code(), "download_size_mismatch");
+        assert_eq!(fetch.requests(), urls(&[A]));
+        assert!(!dest.exists());
     }
 
     #[tokio::test]
@@ -762,10 +910,13 @@ mod tests {
             }
         ));
         assert_eq!(err.code(), "download_failed");
+        assert_eq!(err.last_code(), Some("download_http_status"));
+        assert!(err.to_string().contains("503"), "{err}");
         assert!(!dest.exists());
 
         let err = download(&fetch, &[], &dest).await.expect_err("no mirrors");
         assert_eq!(err.code(), "download_failed");
+        assert_eq!(err.last_code(), None);
     }
 
     #[tokio::test]
@@ -825,7 +976,10 @@ mod tests {
         ]);
         let (_dir, dest) = dest();
         let err = download(&fetch, &[A], &dest).await.expect_err("refused");
-        assert_eq!(err.code(), "download_io");
+        assert!(
+            matches!(err, FetchError::TooLong { received: 21, .. }),
+            "{err}"
+        );
         assert!(!dest.exists());
 
         let err = fetch_bytes(&fetch, A, 11).await.expect_err("refused");
@@ -858,7 +1012,7 @@ mod tests {
                 bytes: Vec::new(),
                 url: String::new(),
                 max: 10,
-                failed: false,
+                first_error: None,
             };
             let err = http.get(url, &mut sink).await.expect_err("refused");
             assert_eq!(err.code(), "download_insecure_url", "{url}");
@@ -906,8 +1060,149 @@ mod tests {
         let size = body().concat().len() as u64;
         let bytes = fetch_bytes(&fetch, A, size).await.expect("fits exactly");
         assert_eq!(bytes, body().concat());
-        let err = fetch_bytes(&fetch, A, size - 1).await.expect_err("too big");
+
+        // The first chunk (6 bytes) fits in 7; the second goes past it, and the
+        // third is never read.
+        let fetch = MemoryFetch::new().with(A, Reply::Chunks(body()));
+        let err = fetch_bytes(&fetch, A, 7).await.expect_err("too big");
         assert_eq!(err.code(), "download_too_large");
+        assert_eq!(fetch.chunks_sent(), 2);
+    }
+
+    /// Sends one chunk, then never finishes.
+    struct Hangs;
+
+    impl Fetch for Hangs {
+        async fn get(&self, _url: &str, sink: &mut dyn ChunkSink) -> Result<(), FetchError> {
+            sink.accept(b"hello ")?;
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dropped_download_deletes_the_partial_file() {
+        let (_dir, dest) = dest();
+        let expected = expected_for(&body());
+        let list = urls(&[A]);
+        let mut written = 0;
+        let mut progress = |got, _| written = got;
+        let download = download_verified(&Hangs, &list, &expected, &dest, &mut progress);
+        let timed_out = tokio::time::timeout(Duration::from_millis(50), download).await;
+        assert!(timed_out.is_err(), "the fetch never finishes");
+        assert_eq!(written, 6, "a chunk reached the file before the drop");
+        assert!(!dest.exists());
+    }
+
+    #[tokio::test]
+    async fn a_panic_in_progress_deletes_the_partial_file() {
+        let dir = TempDir::new().expect("create temp dir");
+        let dest = dir.path().join("php.tar.gz");
+        let task_dest = dest.clone();
+        let task = tokio::spawn(async move {
+            let fetch = MemoryFetch::new().with(A, Reply::Chunks(body()));
+            let mut progress = |got: u64, _| assert!(got == 0, "progress panics");
+            let expected = expected_for(&body());
+            let _ =
+                download_verified(&fetch, &urls(&[A]), &expected, &task_dest, &mut progress).await;
+        });
+        let joined = task.await;
+        assert!(joined.is_err_and(|err| err.is_panic()));
+        assert!(!dest.exists());
+    }
+
+    #[tokio::test]
+    async fn a_verified_file_can_be_removed() {
+        let fetch = MemoryFetch::new().with(A, Reply::Chunks(body()));
+        let (_dir, dest) = dest();
+        let file = download(&fetch, &[A], &dest).await.expect("download");
+        file.remove().expect("remove");
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn every_error_has_its_code() {
+        let url = || "https://a.example/x".to_owned();
+        let net = || FetchError::Network {
+            url: url(),
+            source: Box::new(io::Error::other("reset")),
+        };
+        let cases = [
+            (
+                FetchError::InsecureUrl { url: url() },
+                "download_insecure_url",
+            ),
+            (
+                FetchError::HttpStatus {
+                    url: url(),
+                    status: 404,
+                },
+                "download_http_status",
+            ),
+            (net(), "download_failed"),
+            (
+                FetchError::Failed {
+                    tried: 1,
+                    last: Some(Box::new(net())),
+                },
+                "download_failed",
+            ),
+            (
+                FetchError::TooLong {
+                    url: url(),
+                    expected: 1,
+                    received: 2,
+                },
+                "download_size_mismatch",
+            ),
+            (
+                FetchError::TooShort {
+                    url: url(),
+                    expected: 2,
+                    received: 1,
+                },
+                "download_size_mismatch",
+            ),
+            (
+                FetchError::ChecksumMismatch {
+                    url: url(),
+                    expected: "a".into(),
+                    actual: "b".into(),
+                },
+                "checksum_mismatch",
+            ),
+            (
+                FetchError::TooLarge { url: url(), max: 1 },
+                "download_too_large",
+            ),
+            (
+                FetchError::Io {
+                    path: PathBuf::from("x"),
+                    source: io::Error::other("full"),
+                },
+                "download_io",
+            ),
+        ];
+        for (err, code) in cases {
+            assert_eq!(err.code(), code, "{err}");
+        }
+    }
+
+    #[test]
+    fn messages_show_the_cause() {
+        let net = FetchError::Network {
+            url: "https://a.example/x".to_owned(),
+            source: Box::new(io::Error::other("connection reset")),
+        };
+        assert!(net.to_string().contains("connection reset"));
+        let failed = FetchError::Failed {
+            tried: 1,
+            last: Some(Box::new(net)),
+        };
+        let text = full_chain(&failed);
+        assert!(text.contains("connection reset"), "{text}");
+        assert_eq!(text.matches("connection reset").count(), 1, "{text}");
+        assert_eq!(failed.last_code(), Some("download_failed"));
     }
 
     #[test]
