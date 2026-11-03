@@ -5,5 +5,22 @@ edition.workspace = true
 license.workspace = true
 description = "Privileged helper with a closed list of admin operations"
 
+# No dependency on marsa-core (architecture.md section 7): the helper runs as
+# root, so it stays small and reads only its own typed requests.
+[dependencies]
+# The typed JSON request and response (task M4-05).
+serde.workspace = true
+serde_json.workspace = true
+# The SHA-256 of the CA certificate, to remove it by hash (task M4-09).
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Snapshots of the files the helper writes: pf rules, the launchd plist, the
+# resolver file (tasks M4-07 and M4-08).
+insta.workspace = true
+# Tests of the real atomic write, inside a temp folder only.
+tempfile.workspace = true
+
 [lints]
 workspace = true
