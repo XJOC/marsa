@@ -4,11 +4,16 @@
 //!
 //! 1. the project setting stored by Marsa,
 //! 2. version files, from the folder up to the root of the disk,
-//! 3. `composer.json` and `package.json` constraints (task M1-04, not here yet),
+//! 3. constraints in `composer.json` or `package.json`, from the folder up to
+//!    the root of the disk,
 //! 4. the global default.
 //!
+//! All version files up to the root come before any constraint. A version
+//! file is a pin the user wrote; a constraint is a range, often written by a
+//! library author (`vendor/*/composer.json`, `node_modules/*/package.json`).
+//!
 //! The caller passes the settings and the installed versions. The only thing
-//! this module does on its own is read version files.
+//! this module does on its own is read version files and manifests.
 
 use std::fmt;
 use std::fs;
@@ -16,15 +21,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use semver::{Prerelease, Version};
+use serde_json::Value;
 use toml::de::DeTable;
 
-// `resolve` starts to use the matcher in M1-04b, when it reads
-// `composer.json` and `package.json`. Until then only the tests call it.
-// `expect` fails the build once that is done, so this line is not forgotten.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into `resolve` in task M1-04b")
-)]
+use constraint::Constraint;
+
 mod constraint;
 
 /// A runtime that Marsa picks a version for.
@@ -67,6 +68,15 @@ impl Tool {
             Tool::Node => "node",
         }
     }
+
+    /// The manifest that may hold a constraint, and where in it:
+    /// `require.php` in `composer.json`, `engines.node` in `package.json`.
+    fn manifest(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Tool::Php => ("composer.json", "require", "php"),
+            Tool::Node => ("package.json", "engines", "node"),
+        }
+    }
 }
 
 impl fmt::Display for Tool {
@@ -85,6 +95,8 @@ pub enum Source {
     ProjectSetting,
     /// A version file, such as `.php-version`, with its full path.
     VersionFile(PathBuf),
+    /// A constraint in `composer.json` or `package.json`, with its full path.
+    Constraint(PathBuf),
     /// The global default (`global.toml`).
     GlobalDefault,
 }
@@ -93,7 +105,9 @@ impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Source::ProjectSetting => f.write_str("the project setting"),
-            Source::VersionFile(path) => write!(f, "{}", path.display()),
+            Source::VersionFile(path) | Source::Constraint(path) => {
+                write!(f, "{}", path.display())
+            }
             Source::GlobalDefault => f.write_str("the global default"),
         }
     }
@@ -121,6 +135,13 @@ pub enum ResolveError {
     NotInstalled {
         tool: Tool,
         requested: String,
+        origin: Source,
+    },
+
+    #[error("no installed {tool} version satisfies {constraint} (in {origin})")]
+    NoMatchingVersion {
+        tool: Tool,
+        constraint: String,
         origin: Source,
     },
 
@@ -157,6 +178,7 @@ impl ResolveError {
         match self {
             ResolveError::NoVersion { .. } => "no_version",
             ResolveError::NotInstalled { .. } => "not_installed",
+            ResolveError::NoMatchingVersion { .. } => "no_matching_version",
             ResolveError::InvalidVersion { .. } => "invalid_version",
             ResolveError::UnsupportedAlias { .. } => "unsupported_alias",
             ResolveError::Unsupported { .. } => "unsupported",
@@ -166,7 +188,12 @@ impl ResolveError {
 }
 
 /// Picks the `tool` version for `dir`. First match wins: `project_setting`,
-/// then version files from `dir` up to the root, then `global_default`.
+/// then version files from `dir` up to the root, then the constraint in
+/// `composer.json` or `package.json` from `dir` up to the root, then
+/// `global_default`.
+///
+/// A constraint gives the highest installed version that satisfies it. A
+/// constraint that allows any version (`*`) is skipped.
 ///
 /// `dir` should be absolute. A relative path stops the upward search at the
 /// current directory.
@@ -174,9 +201,10 @@ impl ResolveError {
 /// # Errors
 ///
 /// If the first source found asks for a version that is not in `installed`,
-/// this returns `not_installed` and does not try the next source. Running
-/// another version without saying so would confuse the user.
-/// A missing version file is skipped; any other read error is `io`.
+/// this returns `not_installed` (`no_matching_version` for a constraint) and
+/// does not try the next source. Running another version without saying so
+/// would confuse the user.
+/// A missing file is skipped; any other read error is `io`.
 pub fn resolve(
     tool: Tool,
     dir: &Path,
@@ -189,6 +217,20 @@ pub fn resolve(
     }
     if let Some((value, path)) = find_in_files(tool, dir)? {
         return pick(tool, &value, Source::VersionFile(path), installed);
+    }
+    if let Some((constraint, value, path)) = find_constraint(tool, dir)? {
+        return match constraint.best(installed) {
+            Some(version) => Ok(Resolution {
+                tool,
+                version: version.clone(),
+                source: Source::Constraint(path),
+            }),
+            None => Err(ResolveError::NoMatchingVersion {
+                tool,
+                constraint: value,
+                origin: Source::Constraint(path),
+            }),
+        };
     }
     if let Some(value) = global_default {
         return pick(tool, value, Source::GlobalDefault, installed);
@@ -365,14 +407,77 @@ fn find_in_files(tool: Tool, dir: &Path) -> Result<Option<(String, PathBuf)>, Re
             let Some(contents) = read_if_exists(&path)? else {
                 continue;
             };
-            // Some Windows editors start the file with a byte order mark.
-            let text = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
-            if let Some(value) = kind.read_value(tool, text, &path)? {
+            if let Some(value) = kind.read_value(tool, without_bom(&contents), &path)? {
                 return Ok(Some((value, path)));
             }
         }
     }
     Ok(None)
+}
+
+/// Walks from `dir` up to the root and returns the first constraint that asks
+/// for something, with its text and the manifest it came from. A manifest
+/// without the key, or with `*`, is skipped.
+fn find_constraint(
+    tool: Tool,
+    dir: &Path,
+) -> Result<Option<(Constraint, String, PathBuf)>, ResolveError> {
+    let (file_name, _, _) = tool.manifest();
+    for folder in dir.ancestors() {
+        let path = folder.join(file_name);
+        let Some(contents) = read_if_exists(&path)? else {
+            continue;
+        };
+        let Some(value) = manifest_value(tool, without_bom(&contents), &path)? else {
+            continue;
+        };
+        match Constraint::parse(&value, tool) {
+            Ok(Some(constraint)) => return Ok(Some((constraint, value, path))),
+            // Any version: the global default is the user's real choice.
+            Ok(None) => continue,
+            Err(_) => {
+                return Err(ResolveError::InvalidVersion {
+                    tool,
+                    value,
+                    origin: Source::Constraint(path),
+                });
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `require.php` or `engines.node`, or `None` if the manifest does not have
+/// it. JSON allows any whitespace between tokens, so `\r\n` needs no work.
+fn manifest_value(tool: Tool, text: &str, path: &Path) -> Result<Option<String>, ResolveError> {
+    let (_, section, key) = tool.manifest();
+    let unsupported = |reason: String| ResolveError::Unsupported {
+        path: path.to_path_buf(),
+        reason,
+    };
+
+    let document: Value = serde_json::from_str(text)
+        .map_err(|error| unsupported(format!("not valid JSON: {error}")))?;
+    // PHP's `json_encode` writes an empty `require` as `[]`, so a section that
+    // is not an object is the same as no section.
+    let Some(value) = document
+        .get(section)
+        .and_then(Value::as_object)
+        .and_then(|section| section.get(key))
+    else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        Some(constraint) => Ok(Some(constraint.trim().to_owned())),
+        None => Err(unsupported(format!(
+            "`{section}.{key}` must be a version constraint string"
+        ))),
+    }
+}
+
+/// Some Windows editors start a file with a byte order mark.
+fn without_bom(contents: &str) -> &str {
+    contents.strip_prefix('\u{feff}').unwrap_or(contents)
 }
 
 /// Reads a file. A missing file is `None`; any other read error is `io`.
@@ -477,6 +582,10 @@ mod tests {
 
     fn from_file(root: &TempDir, name: &str) -> Source {
         Source::VersionFile(root.path().join(name))
+    }
+
+    fn from_manifest(root: &TempDir, name: &str) -> Source {
+        Source::Constraint(root.path().join(name))
     }
 
     // Matching table in the task file.
@@ -741,6 +850,153 @@ mod tests {
         assert_eq!(got.version, Version::new(8, 3, 14));
     }
 
+    // Constraints in manifests.
+
+    #[test]
+    fn reads_composer_json() {
+        let root = project(&[(
+            "composer.json",
+            r#"{"require": {"php": "^8.2", "laravel/framework": "^11.0"}}"#,
+        )]);
+        let got = php(root.path(), &["8.1.31", "8.3.14", "8.4.3"]).unwrap();
+        assert_eq!(got.version, Version::new(8, 4, 3));
+        assert_eq!(got.source, from_manifest(&root, "composer.json"));
+    }
+
+    #[test]
+    fn reads_package_json() {
+        let root = project(&[("package.json", r#"{"engines": {"node": ">=18 <23"}}"#)]);
+        let got = node(root.path(), &["18.20.4", "22.11.0", "23.3.0"]).unwrap();
+        assert_eq!(got.version, Version::new(22, 11, 0));
+        assert_eq!(got.source, from_manifest(&root, "package.json"));
+    }
+
+    #[test]
+    fn each_tool_reads_only_its_manifest() {
+        let root = project(&[
+            ("composer.json", r#"{"require": {"php": "^8.2"}}"#),
+            (
+                "package.json",
+                r#"{"engines": {"node": "^22"}, "require": {"php": "^8.2"}}"#,
+            ),
+        ]);
+        let got = node(root.path(), &["22.11.0"]).unwrap();
+        assert_eq!(got.source, from_manifest(&root, "package.json"));
+        let only_node = project(&[("package.json", r#"{"engines": {"node": "^22"}}"#)]);
+        let err = php(only_node.path(), &["8.4.3"]).unwrap_err();
+        assert_eq!(err.code(), "no_version");
+    }
+
+    #[test]
+    fn constraint_in_parent_folder_is_used() {
+        // `app` has no `require.php`, and `app/src` has `require` as `[]`.
+        let root = project(&[
+            ("composer.json", r#"{"require": {"php": "^8.2"}}"#),
+            (
+                "app/composer.json",
+                r#"{"require": {"laravel/framework": "^11.0"}}"#,
+            ),
+            ("app/src/composer.json", r#"{"name": "a/b", "require": []}"#),
+        ]);
+        let got = php(&root.path().join("app/src"), &["8.3.14"]).unwrap();
+        assert_eq!(got.source, from_manifest(&root, "composer.json"));
+    }
+
+    #[test]
+    fn version_file_in_parent_wins_over_constraint() {
+        let root = project(&[
+            (".php-version", "8.3"),
+            ("app/composer.json", r#"{"require": {"php": "^8.4"}}"#),
+        ]);
+        let got = php(&root.path().join("app"), &["8.3.14", "8.4.3"]).unwrap();
+        assert_eq!(got.source, from_file(&root, ".php-version"));
+    }
+
+    #[test]
+    fn no_matching_version_stops_the_search() {
+        let root = project(&[
+            ("composer.json", r#"{"require": {"php": "^7.4"}}"#),
+            ("app/composer.json", r#"{"require": {"php": "^8.2"}}"#),
+        ]);
+        match php(&root.path().join("app"), &["7.4.33", "8.1.31"]).unwrap_err() {
+            ResolveError::NoMatchingVersion {
+                constraint, origin, ..
+            } => {
+                assert_eq!(constraint, "^8.2");
+                assert_eq!(origin, from_manifest(&root, "app/composer.json"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn any_version_is_skipped() {
+        let installed = versions(&["20.18.0", "22.11.0"]);
+        let root = project(&[
+            ("package.json", r#"{"engines": {"node": "^20"}}"#),
+            ("app/package.json", r#"{"engines": {"node": "*"}}"#),
+        ]);
+        let got = node(&root.path().join("app"), &["20.18.0", "22.11.0"]).unwrap();
+        assert_eq!(got.source, from_manifest(&root, "package.json"));
+
+        for any in ["*", "x", ""] {
+            let json = format!(r#"{{"engines": {{"node": "{any}"}}}}"#);
+            let root = project(&[("package.json", &json)]);
+            let got = resolve(Tool::Node, root.path(), None, &installed, Some("20")).unwrap();
+            assert_eq!(got.source, Source::GlobalDefault, "{any:?}");
+            assert_eq!(got.version, Version::new(20, 18, 0));
+        }
+    }
+
+    #[test]
+    fn bad_manifest_is_unsupported_with_its_path() {
+        for contents in [
+            r#"{"require": {"php": "^8.2"}"#,
+            r#"{"require": {"php": 8.2}}"#,
+            r#"{"require": {"php": ["^8.2"]}}"#,
+            "",
+        ] {
+            let root = project(&[("composer.json", contents)]);
+            match php(root.path(), &["8.4.3"]).unwrap_err() {
+                ResolveError::Unsupported { path, .. } => {
+                    assert_eq!(path, root.path().join("composer.json"));
+                }
+                other => panic!("{contents:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_constraint_is_invalid_version_with_its_path() {
+        let root = project(&[("composer.json", r#"{"require": {"php": " dev-master "}}"#)]);
+        match php(root.path(), &["8.4.3"]).unwrap_err() {
+            ResolveError::InvalidVersion { value, origin, .. } => {
+                assert_eq!(value, "dev-master");
+                assert_eq!(origin, from_manifest(&root, "composer.json"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_with_windows_line_endings_and_bom() {
+        let root = project(&[
+            (
+                "composer.json",
+                "\u{feff}{\r\n  \"require\": {\r\n    \"php\": \"^8.2\"\r\n  }\r\n}\r\n",
+            ),
+            (
+                "package.json",
+                "\u{feff}{\r\n  \"engines\": {\r\n    \"node\": \">=20\"\r\n  }\r\n}\r\n",
+            ),
+        ]);
+        let installed = ["8.4.3", "22.11.0"];
+        let got = php(root.path(), &installed).unwrap();
+        assert_eq!(got.version, Version::new(8, 4, 3));
+        let got = node(root.path(), &installed).unwrap();
+        assert_eq!(got.version, Version::new(22, 11, 0));
+    }
+
     // Priority between sources.
 
     #[test]
@@ -756,6 +1012,11 @@ mod tests {
         .unwrap();
         assert_eq!(got.version, Version::new(8, 4, 3));
         assert_eq!(got.source, Source::ProjectSetting);
+
+        let root = project(&[("composer.json", r#"{"require": {"php": "^8.4"}}"#)]);
+        let installed = versions(&["8.3.14", "8.4.3"]);
+        let got = resolve(Tool::Php, root.path(), Some("8.3"), &installed, None).unwrap();
+        assert_eq!(got.source, Source::ProjectSetting);
     }
 
     #[test]
@@ -765,6 +1026,17 @@ mod tests {
         let with_file = project(&[(".php-version", "8.4")]);
         let got = resolve(Tool::Php, with_file.path(), None, &installed, Some("8.3")).unwrap();
         assert_eq!(got.source, from_file(&with_file, ".php-version"));
+
+        let with_constraint = project(&[("composer.json", r#"{"require": {"php": "^8.4"}}"#)]);
+        let got = resolve(
+            Tool::Php,
+            with_constraint.path(),
+            None,
+            &installed,
+            Some("8.3"),
+        )
+        .unwrap();
+        assert_eq!(got.source, from_manifest(&with_constraint, "composer.json"));
 
         let without = TempDir::new().unwrap();
         let got = resolve(Tool::Php, without.path(), None, &installed, Some("8.3")).unwrap();
@@ -810,6 +1082,14 @@ mod tests {
                     origin: origin.clone(),
                 },
                 "not_installed",
+            ),
+            (
+                ResolveError::NoMatchingVersion {
+                    tool: Tool::Php,
+                    constraint: "^8.2".to_owned(),
+                    origin: Source::Constraint(PathBuf::from("composer.json")),
+                },
+                "no_matching_version",
             ),
             (
                 ResolveError::InvalidVersion {

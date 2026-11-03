@@ -18,6 +18,9 @@ notify = "8"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
+# Only `Value` is used, to read two keys from `composer.json` and
+# `package.json`; no derive, so no `serde_derive` build time (task M1-04).
+serde_json = { version = "1", default-features = false, features = ["std"] }
 tempfile = "3"
 thiserror = "2"
 # No `preserve_order` or other extras: the shim depends on the core, so its size

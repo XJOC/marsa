@@ -31,17 +31,11 @@ impl Flavor {
     }
 }
 
-/// The text does not follow the constraint rules of its tool.
+/// The text does not follow the constraint rules of its tool. `resolve`
+/// reports it as `invalid_version`, with the text and its file.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 #[error("not a valid version constraint")]
 pub(super) struct InvalidConstraint;
-
-impl InvalidConstraint {
-    /// The same code as any other version text that does not parse.
-    pub(super) fn code(&self) -> &'static str {
-        "invalid_version"
-    }
-}
 
 /// A parsed constraint: alternatives (OR) of conditions (AND).
 #[derive(Debug, PartialEq, Eq)]
@@ -510,8 +504,11 @@ mod tests {
             .chain(composer.iter().map(|text| (Tool::Php, text)))
             .chain(npm.iter().map(|text| (Tool::Node, text)));
         for (tool, text) in cases {
-            let err = Constraint::parse(text, tool).unwrap_err();
-            assert_eq!(err.code(), "invalid_version", "{tool} {text:?}");
+            assert_eq!(
+                Constraint::parse(text, tool),
+                Err(InvalidConstraint),
+                "{tool} {text:?}"
+            );
         }
     }
 
