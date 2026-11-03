@@ -19,6 +19,8 @@ thiserror.workspace = true
 # Snapshots of the files the helper writes: pf rules, the launchd plist, the
 # resolver file (tasks M4-07 and M4-08).
 insta.workspace = true
+# Tests of the real atomic write, inside a temp folder only.
+tempfile.workspace = true
 
 [lints]
 workspace = true
