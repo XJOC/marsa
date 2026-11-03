@@ -1,0 +1,40 @@
+---
+source: crates/core/src/caddy.rs
+expression: "caddy_config(&CaddyInput::default())"
+---
+{
+  "admin": {
+    "config": {
+      "persist": false
+    },
+    "listen": "127.0.0.1:18019"
+  },
+  "apps": {
+    "http": {
+      "http_port": 18080,
+      "https_port": 18443,
+      "servers": {
+        "marsa": {
+          "@id": "marsa-srv",
+          "automatic_https": {
+            "disable": true
+          },
+          "listen": [
+            "127.0.0.1:18080"
+          ],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "body": "Marsa is running. No sites yet.",
+                  "handler": "static_response",
+                  "status_code": 200
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
