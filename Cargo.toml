@@ -15,6 +15,12 @@ license = "Apache-2.0"
 clap = "4"
 notify = "8"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+semver = "1"
+tempfile = "3"
+thiserror = "2"
+# Only the parser: the shim depends on the core, so its size matters. `parse`
+# gives `toml::de::DeTable` without pulling serde (task M1-03).
+toml = { version = "1", default-features = false, features = ["std", "parse"] }
 tokio = { version = "1", features = ["full"] }
 
 # Architecture rule: a lock is never held across `.await`, and `unwrap()` is
