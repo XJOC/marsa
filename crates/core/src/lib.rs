@@ -10,6 +10,7 @@ pub mod dns;
 pub mod php;
 pub mod recipes;
 pub mod resolver;
+pub mod runtimes;
 pub mod services;
 pub mod sites;
 pub mod types;
