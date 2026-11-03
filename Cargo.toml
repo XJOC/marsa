@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/app", "crates/shim", "crates/helper", "xtask"]
+members = ["crates/core", "crates/app", "crates/shim", "crates/helper", "crates/gui", "xtask"]
 # The Tauri spike is a separate workspace on purpose: throwaway code, never a
 # product member (task S-08a).
 exclude = ["spikes"]
@@ -14,14 +14,29 @@ license = "Apache-2.0"
 [workspace.dependencies]
 # Binaries only (AGENTS.md section 8): the libraries use `thiserror`.
 anyhow = "1"
+# The daemon API server (task M3-01).
+axum = "0.8"
 # `derive`: subcommands as structs in `marsa` and `xtask` (task M2-01).
 clap = { version = "4", features = ["derive"] }
 directories = "6"
+# The window (ADR 0007): `wgpu` only, no `glow`. `wayland` and `x11` so one
+# binary runs on both Linux display servers. Left out: `system_fonts` (an extra
+# font crate), `links` and `web_screen_reader` (not needed), and `accesskit`:
+# on Linux it pulls zbus 5, whose `zbus_names` and `zvariant` crates are
+# unmaintained (RUSTSEC-2026-0371 and others). Bring it back with zbus 6 (M5).
+eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "wayland", "wgpu", "x11"] }
+egui_extras = "0.37"
 # Default backend `rust_backend` (miniz_oxide): pure Rust, no C zlib.
 flate2 = "1"
+# The daemon token: 32 bytes from the OS random source (task M3-03). Already
+# in the tree through `tempfile`; approved by the owner on 2026-11-04.
+getrandom = "0.4"
+# Generated Caddy config is tested with snapshots (task M3-05).
+insta = { version = "1", features = ["json"] }
 minisign-verify = "0.3"
 notify = "8"
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# `json`: typed calls to the daemon API and to the Caddy admin API (task M3-01).
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 # No extra features: `Value` reads two keys from `composer.json` and
@@ -37,6 +52,12 @@ thiserror = "2"
 # the owner accepted the size cost (task M1-05).
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde", "display"] }
 tokio = { version = "1", features = ["full"] }
+# `sync`: `BroadcastStream` turns the event bus into an SSE stream (task M3-01).
+tokio-stream = { version = "0.1", features = ["sync"] }
+# `CancellationToken`: one per managed process (architecture.md section 5).
+tokio-util = "0.7"
+# `util`: `ServiceExt::oneshot` tests the daemon router without a socket.
+tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 # `env-filter`: `MARSA_LOG=debug` raises the log level (task M2-06).
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

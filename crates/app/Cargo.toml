@@ -9,10 +9,20 @@ description = "Marsa CLI and daemon"
 # With `full` (the default): the binaries run the installer and talk to the daemon.
 marsa-core = { path = "../core" }
 anyhow.workspace = true
+axum.workspace = true
 clap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower.workspace = true
 
 [lints]
 workspace = true

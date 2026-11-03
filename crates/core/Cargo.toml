@@ -24,6 +24,7 @@ full = [
   "dep:tar",
   "dep:zip",
   "dep:tracing",
+  "dep:getrandom",
 ]
 
 [dependencies]
@@ -37,6 +38,7 @@ flate2 = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
 directories.workspace = true
 semver.workspace = true
 serde.workspace = true
@@ -45,6 +47,9 @@ thiserror.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+# A fake daemon for the client tests (task M3-08).
+axum.workspace = true
+insta.workspace = true
 tempfile.workspace = true
 
 [lints]

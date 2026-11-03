@@ -19,4 +19,12 @@ allow = [
   "CC0-1.0",
   # webpki-root-certs, through reqwest's rustls-platform-verifier.
   "CDLA-Permissive-2.0",
+  # clipboard-win and error-code, through eframe's clipboard on Windows. A short
+  # permissive license like MIT (task M3-01).
+  "BSL-1.0",
 ]
+
+# egui's bundled fonts. Only this crate may use the two font licenses.
+[[licenses.exceptions]]
+crate = "epaint_default_fonts"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]
