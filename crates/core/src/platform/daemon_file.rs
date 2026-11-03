@@ -184,6 +184,14 @@ pub fn daemon_file_path(run_dir: &Path) -> PathBuf {
     run_dir.join(FILE_NAME)
 }
 
+/// The path of `daemon.lock` inside `run_dir`. The running daemon holds an
+/// exclusive lock on it, and the OS frees the lock when the daemon exits,
+/// even after a crash. So the lock, not `daemon.json`, tells whether a
+/// daemon runs.
+pub fn daemon_lock_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("daemon.lock")
+}
+
 /// `127.0.0.1:<port>`: where the daemon listens, and the only `Host` it
 /// accepts. The client and the auth middleware both use this.
 pub fn daemon_authority(port: u16) -> String {
