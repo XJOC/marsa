@@ -59,9 +59,14 @@ pub fn select<'m>(
     };
     picked
         .and_then(|version| manifest.release(runtime, &version))
-        .ok_or_else(|| InstallError::NoSuchVersion {
-            runtime: runtime.dir_name(),
-            requested: requested.unwrap_or("a stable version").to_owned(),
+        .ok_or_else(|| {
+            let mut available: Vec<&Version> = releases.iter().map(Release::version).collect();
+            available.sort();
+            InstallError::NoSuchVersion {
+                runtime: runtime.dir_name(),
+                requested: requested.map(str::to_owned),
+                available: available.iter().map(ToString::to_string).collect(),
+            }
         })
 }
 
@@ -243,6 +248,19 @@ mod tests {
         }
         let err = select(&m, Runtime::Node, None).expect_err("no node in the manifest");
         assert_eq!(err.code(), "install_no_such_version");
+
+        let m = manifest(&["8.4.23", "8.3.27"], &["cli"]);
+        let err = pick(&m, Some("8.2")).expect_err("not listed");
+        let InstallError::NoSuchVersion {
+            requested,
+            available,
+            ..
+        } = err
+        else {
+            panic!("expected install_no_such_version");
+        };
+        assert_eq!(requested.as_deref(), Some("8.2"));
+        assert_eq!(available, ["8.3.27", "8.4.23"]);
     }
 
     #[test]

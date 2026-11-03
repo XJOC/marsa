@@ -3,11 +3,18 @@
 //! version folder into place atomically.
 //!
 //! Called by [`super::install`]; the order of the steps is documented there.
+//!
+//! Cancel safety: `install()` may be dropped at any `.await` (a timeout, or
+//! the daemon shutting down). Every disk step that must not stop halfway (the
+//! extraction, the two renames, the deletes) runs in `spawn_blocking`, and the
+//! blocking task owns the lock and the work folder. So the lock is freed only
+//! after the last write, even when the future is gone.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use semver::Version;
@@ -20,7 +27,7 @@ use super::manifest::{MAX_MANIFEST_SIZE, Manifest, ManifestError};
 use super::plan::{self, ArtifactStep};
 use super::{InstallEnv, InstallError, InstallRequest, InstalledVersion};
 use crate::recipes::{Check, PlatformRecipe};
-use crate::runtimes::RuntimesDir;
+use crate::runtimes::{Runtime, RuntimesDir};
 use crate::types::InstallEvent;
 
 /// A `.minisig` file is about 300 bytes.
@@ -35,8 +42,20 @@ const CHECK_OUTPUT_SHOWN: usize = 500;
 /// `STATUS_DLL_NOT_FOUND`, the exit code of a Windows program that misses a
 /// DLL. For PHP and Node that is the Visual C++ runtime. Never a Unix code.
 const STATUS_DLL_NOT_FOUND: i32 = 0xC000_0135_u32.cast_signed();
-/// The variables that would change how the check program starts.
-const CHECK_ENV_REMOVED: [&str; 3] = ["PHPRC", "PHP_INI_SCAN_DIR", "NODE_OPTIONS"];
+/// Variables that would change how the check program starts or which
+/// libraries it loads. The rest of the environment stays: Windows programs
+/// need `SystemRoot`.
+const CHECK_ENV_REMOVED: [&str; 7] = [
+    "PHPRC",
+    "PHP_INI_SCAN_DIR",
+    "NODE_OPTIONS",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+];
+/// The three runtimes, to read the names of moved-aside folders.
+const RUNTIMES: [Runtime; 3] = [Runtime::Php, Runtime::Node, Runtime::Composer];
 
 pub(super) async fn run<F: Fetch>(
     req: &InstallRequest<'_>,
@@ -57,11 +76,20 @@ pub(super) async fn run<F: Fetch>(
         .ok_or_else(|| unsupported(platform.to_string()))?;
     let runtimes = RuntimesDir::in_dir(&env.app_data_dir);
 
-    // Held until this function returns; the OS frees it if the process dies.
-    let _lock = lock(&runtimes)?;
-    clean_tmp(&runtimes);
+    // Shared with every blocking task, so it is freed only after the last
+    // one ends. The OS frees it if the process dies.
+    let lock = Arc::new(lock(&runtimes)?);
+    blocking(&runtimes.tmp_dir(), {
+        let (runtimes, lock) = (runtimes.clone(), Arc::clone(&lock));
+        move || {
+            clean_tmp(&runtimes);
+            drop(lock);
+            Ok(())
+        }
+    })
+    .await?;
 
-    let manifest = verified_manifest(env, &runtimes).await?;
+    let manifest = verified_manifest(env, &runtimes, &lock).await?;
     events(InstallEvent::ManifestVerified {
         serial: manifest.serial(),
     });
@@ -73,6 +101,9 @@ pub(super) async fn run<F: Fetch>(
     });
     let target = runtimes.version_dir(runtime, &version);
     if !req.force && runtimes.installed(runtime)?.contains(&version) {
+        events(InstallEvent::Installed {
+            dir: target.clone(),
+        });
         return Ok(InstalledVersion {
             runtime,
             version,
@@ -82,17 +113,39 @@ pub(super) async fn run<F: Fetch>(
     }
 
     let plan = plan::build(runtime, release, programs, platform)?;
-    // Deleted with everything in it when this function returns, on success
-    // and on every error.
-    let work = WorkDir::create(&runtimes.tmp_dir())?;
-    for step in &plan.steps {
-        download_and_extract(&env.fetch, step, &work, events).await?;
-    }
-    if let Some(check) = recipe.check() {
-        events(InstallEvent::Checking);
-        run_check(check, programs, &work.root(), &version).await?;
-    }
-    move_into_place(&work.root(), &target, &runtimes.tmp_dir()).await?;
+    // Deleted with everything in it when the last owner drops it.
+    let work = Arc::new(WorkDir::create(&runtimes.tmp_dir(), Arc::clone(&lock))?);
+    drop(lock);
+    let built = fill(
+        env,
+        &plan.steps,
+        recipe.check(),
+        programs,
+        &work,
+        &version,
+        events,
+    )
+    .await;
+
+    // One blocking task for the end, success or not: sync, both renames, and
+    // the delete of the work folder. Dropping this future cannot stop it
+    // between the two renames.
+    let old = runtimes.tmp_dir().join(format!(
+        "old-{}-{version}-{}",
+        runtime.dir_name(),
+        random_hex()?
+    ));
+    let finish_target = target.clone();
+    blocking(&target, move || {
+        let result = built.and_then(|()| {
+            sync_tree(&work.root())?;
+            move_into_place(&work.root(), &finish_target, &old)
+        });
+        drop(work);
+        result
+    })
+    .await?;
+
     events(InstallEvent::Installed {
         dir: target.clone(),
     });
@@ -102,6 +155,40 @@ pub(super) async fn run<F: Fetch>(
         dir: target,
         already: false,
     })
+}
+
+/// Downloads and unpacks every file into the work folder, then runs the check.
+async fn fill<F: Fetch>(
+    env: &InstallEnv<F>,
+    steps: &[ArtifactStep<'_>],
+    check: Option<&Check>,
+    programs: &PlatformRecipe,
+    work: &Arc<WorkDir>,
+    version: &Version,
+    events: &mut (dyn FnMut(InstallEvent) + Send),
+) -> Result<(), InstallError> {
+    for step in steps {
+        download_and_extract(&env.fetch, step, work, events).await?;
+    }
+    if let Some(check) = check {
+        events(InstallEvent::Checking);
+        run_check(check, programs, &work.root(), version, CHECK_TIMEOUT).await?;
+    }
+    Ok(())
+}
+
+/// Runs `job` on tokio's blocking threads. If the caller's future is dropped,
+/// the job still runs to the end. `path` names the error if the task panics.
+async fn blocking<T: Send + 'static>(
+    path: &Path,
+    job: impl FnOnce() -> Result<T, InstallError> + Send + 'static,
+) -> Result<T, InstallError> {
+    tokio::task::spawn_blocking(job)
+        .await
+        .map_err(|err| InstallError::Io {
+            path: path.to_path_buf(),
+            source: io::Error::other(format!("a disk task stopped: {err}")),
+        })?
 }
 
 /// Creates `runtimes/.tmp/` (user-only) and takes the install lock in it.
@@ -168,10 +255,13 @@ fn make_private(_path: &Path, _meta: &fs::Metadata) -> io::Result<()> {
     Ok(())
 }
 
-/// Deletes everything in `runtimes/.tmp/` but the lock: what an install that
-/// was cut off left behind. Runs under the lock, so no install is using it.
-/// A failure is only logged: on Windows a running program cannot be deleted,
-/// and the next install tries again.
+/// Empties `runtimes/.tmp/` but for the lock: what an install that was cut
+/// off left behind. Runs under the lock, so no install is using it.
+///
+/// A moved-aside version (`old-<runtime>-<version>-<hex>`) whose folder is
+/// missing was cut off between the two renames of a `force` install: it is
+/// put back, not deleted. A failure is only logged: on Windows a running
+/// program cannot be deleted, and the next install tries again.
 fn clean_tmp(runtimes: &RuntimesDir) {
     let tmp = runtimes.tmp_dir();
     let lock = runtimes.lock_path();
@@ -187,6 +277,24 @@ fn clean_tmp(runtimes: &RuntimesDir) {
         if path == lock {
             continue;
         }
+        if let Some(target) = moved_aside_target(runtimes, &entry.file_name())
+            && matches!(fs::symlink_metadata(&target), Err(e) if e.kind() == io::ErrorKind::NotFound)
+        {
+            let restored = target
+                .parent()
+                .map_or(Ok(()), fs::create_dir_all)
+                .map_err(io_error(&target))
+                .and_then(|()| rename(&path, &target));
+            match restored {
+                Ok(()) => {
+                    tracing::warn!(path = %target.display(), "put back a version moved aside")
+                }
+                Err(err) => {
+                    tracing::warn!(path = %path.display(), error = %err, "cannot put back a version");
+                }
+            }
+            continue;
+        }
         // `file_type` does not follow links: a link is removed, not its target.
         let result = match entry.file_type() {
             Ok(kind) if kind.is_dir() => fs::remove_dir_all(&path),
@@ -198,12 +306,25 @@ fn clean_tmp(runtimes: &RuntimesDir) {
     }
 }
 
+/// The version folder that `old-<runtime>-<version>-<8 hex>` came from, or
+/// `None` for any other name.
+fn moved_aside_target(runtimes: &RuntimesDir, name: &std::ffi::OsStr) -> Option<PathBuf> {
+    let rest = name.to_str()?.strip_prefix("old-")?;
+    let (runtime, rest) = rest.split_once('-')?;
+    let (version, hex) = rest.rsplit_once('-')?;
+    let runtime = RUNTIMES.into_iter().find(|r| r.dir_name() == runtime)?;
+    let version = Version::parse(version).ok()?;
+    let is_hex = hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit());
+    is_hex.then(|| runtimes.version_dir(runtime, &version))
+}
+
 /// Downloads the manifest and its signature, checks them against the last
 /// serial accepted, and saves the new serial. The serial is saved before any
 /// download, so a failed install still raises the floor.
 async fn verified_manifest<F: Fetch>(
     env: &InstallEnv<F>,
     runtimes: &RuntimesDir,
+    lock: &Arc<File>,
 ) -> Result<Manifest, InstallError> {
     let json = fetch::fetch_bytes(&env.fetch, &env.manifest_url, MAX_MANIFEST_SIZE as u64).await?;
     let sig_url = format!("{}.minisig", env.manifest_url);
@@ -213,22 +334,32 @@ async fn verified_manifest<F: Fetch>(
     let serial_path = runtimes.manifest_serial_path();
     let last_seen = read_serial(&serial_path)?;
     let manifest = env.trust.verify(&json, &sig, last_seen)?;
-    if last_seen != Some(manifest.serial()) {
-        write_serial(&serial_path, &runtimes.tmp_dir(), manifest.serial())?;
+    let serial = manifest.serial();
+    if last_seen != Some(serial) {
+        let tmp = runtimes.tmp_dir();
+        let lock = Arc::clone(lock);
+        blocking(&serial_path.clone(), move || {
+            let result = write_serial(&serial_path, &tmp, serial);
+            drop(lock);
+            result
+        })
+        .await?;
     }
     Ok(manifest)
 }
 
 /// The saved serial, or `None` if there is none yet. A file that is not a
-/// number is an error, not `None`: that would turn the rollback check off.
+/// number is `install_serial_corrupt`, never `None`: that would turn the
+/// rollback check off.
 fn read_serial(path: &Path) -> Result<Option<u64>, InstallError> {
     match fs::read_to_string(path) {
-        Ok(text) => text.trim().parse().map(Some).map_err(|_| {
-            io_error(path)(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "not a serial number; delete the file to accept any manifest again",
-            ))
-        }),
+        Ok(text) => text
+            .trim()
+            .parse()
+            .map(Some)
+            .map_err(|_| InstallError::SerialCorrupt {
+                path: path.to_path_buf(),
+            }),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(io_error(path)(err)),
     }
@@ -245,29 +376,36 @@ fn write_serial(path: &Path, tmp: &Path, serial: u64) -> Result<(), InstallError
             file.write_all(format!("{serial}\n").as_bytes())?;
             file.sync_all()
         })
-        .and_then(|()| fs::rename(&temp, path));
-    if let Err(err) = written {
+        .map_err(io_error(path))
+        .and_then(|()| rename(&temp, path));
+    if written.is_err() {
         remove_quietly(&temp);
-        return Err(io_error(path)(err));
     }
-    Ok(())
+    written
 }
 
 /// `runtimes/.tmp/i-<8 hex>/`, new for each install, with `dl/` for the
-/// downloads and `root/` for the version folder. Deleted on drop.
+/// downloads and `root/` for the version folder. Deleted on drop, and only
+/// then is its share of the install lock freed.
 struct WorkDir {
     path: PathBuf,
+    _lock: Arc<File>,
 }
 
 impl WorkDir {
-    fn create(tmp: &Path) -> Result<WorkDir, InstallError> {
+    fn create(tmp: &Path, lock: Arc<File>) -> Result<WorkDir, InstallError> {
         let mut tries = 0;
         let work = loop {
             // Short on purpose: Windows tools still trip on paths over 260
             // characters (architecture.md section 10).
             let path = tmp.join(format!("i-{}", random_hex()?));
             match fs::create_dir(&path) {
-                Ok(()) => break WorkDir { path },
+                Ok(()) => {
+                    break WorkDir {
+                        path,
+                        _lock: Arc::clone(&lock),
+                    };
+                }
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists && tries < 5 => tries += 1,
                 Err(err) => return Err(io_error(&path)(err)),
             }
@@ -288,6 +426,8 @@ impl WorkDir {
 }
 
 impl Drop for WorkDir {
+    // Normally the last owner is a blocking task. Only when `install()` is
+    // dropped during a download does this run on an async thread.
     fn drop(&mut self) {
         remove_tree(&self.path);
     }
@@ -297,7 +437,7 @@ impl Drop for WorkDir {
 async fn download_and_extract<F: Fetch>(
     fetch: &F,
     step: &ArtifactStep<'_>,
-    work: &WorkDir,
+    work: &Arc<WorkDir>,
     events: &mut (dyn FnMut(InstallEvent) + Send),
 ) -> Result<(), InstallError> {
     let name = step.source.name();
@@ -326,68 +466,54 @@ async fn download_and_extract<F: Fetch>(
     events(InstallEvent::Extracting {
         artifact: name.to_owned(),
     });
-    let archive = file.path().to_path_buf();
     let artifact = step.artifact.clone();
-    let root = work.root();
-    let task = tokio::task::spawn_blocking(move || {
-        extract::extract(
-            &archive,
+    let work = Arc::clone(work);
+    let report = blocking(&dest, move || {
+        let report = extract::extract(
+            file.path(),
             &Layout::from(&artifact),
-            &root,
+            &work.root(),
             &Limits::default(),
-        )
-    });
-    let report = task.await.map_err(|err| InstallError::Io {
-        path: work.root(),
-        source: io::Error::other(format!("the extract task stopped: {err}")),
-    })??;
+        )?;
+        let path = file.path().to_path_buf();
+        if let Err(err) = file.remove() {
+            tracing::warn!(path = %path.display(), error = %err, "cannot delete a download");
+        }
+        drop(work);
+        Ok(report)
+    })
+    .await?;
     tracing::debug!(
         artifact = name,
         files = report.files,
         bytes = report.bytes,
         "extracted"
     );
-    if let Err(err) = file.remove() {
-        tracing::warn!(path = %dest.display(), error = %err, "cannot delete a download");
-    }
     Ok(())
 }
 
 /// Runs the recipe's check program from `root` by its full path: no `PATH`
-/// search, no shell. Its output must start with the expected text.
+/// search, no shell. It must exit with success, and its output must start
+/// with the expected text.
 async fn run_check(
     check: &Check,
     programs: &PlatformRecipe,
     root: &Path,
     version: &Version,
+    timeout: Duration,
 ) -> Result<(), InstallError> {
     let failed = |output: String, exit_code| InstallError::CheckFailed { output, exit_code };
     // The recipe parser checks that the program is in `programs`.
     let program = programs
         .program_path(root, &check.program)
         .ok_or_else(|| failed(format!("no program {:?}", check.program), None))?;
+    // The app data dir is absolute, so `Command` never searches `PATH`.
+    debug_assert!(program.is_absolute(), "{}", program.display());
     let mut command = Command::new(&program);
-    command
-        .args(&check.args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    for name in CHECK_ENV_REMOVED {
-        command.env_remove(name);
-    }
+    command.args(&check.args);
+    clean_check_env(&mut command);
 
-    let output = async {
-        let mut child = command.spawn()?;
-        let (stdout, stderr) = tokio::join!(
-            read_capped(child.stdout.take()),
-            read_capped(child.stderr.take())
-        );
-        let status = child.wait().await?;
-        io::Result::Ok((status, stdout?, stderr?))
-    };
-    // On a timeout the future is dropped, and `kill_on_drop` stops the child.
-    let (status, stdout, stderr) = match tokio::time::timeout(CHECK_TIMEOUT, output).await {
+    let (status, stdout, stderr) = match run_capped(command, timeout).await {
         Ok(Ok(output)) => output,
         Ok(Err(err)) => {
             return Err(failed(
@@ -397,7 +523,7 @@ async fn run_check(
         }
         Err(_) => {
             return Err(failed(
-                format!("no answer after {} seconds", CHECK_TIMEOUT.as_secs()),
+                format!("no answer after {} ms", timeout.as_millis()),
                 None,
             ));
         }
@@ -417,7 +543,40 @@ async fn run_check(
     ))
 }
 
-/// Reads at most [`CHECK_OUTPUT_MAX`] bytes, then closes the pipe.
+fn clean_check_env(command: &mut Command) {
+    for name in CHECK_ENV_REMOVED {
+        command.env_remove(name);
+    }
+}
+
+type CheckOutput = (std::process::ExitStatus, Vec<u8>, Vec<u8>);
+
+/// Runs `command` with no input, reads at most [`CHECK_OUTPUT_MAX`] bytes of
+/// each output, and waits at most `timeout`. On a timeout the future is
+/// dropped, and `kill_on_drop` stops the child.
+async fn run_capped(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<io::Result<CheckOutput>, tokio::time::error::Elapsed> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = async {
+        let mut child = command.spawn()?;
+        let (stdout, stderr) = tokio::join!(
+            read_capped(child.stdout.take()),
+            read_capped(child.stderr.take())
+        );
+        let status = child.wait().await?;
+        Ok((status, stdout?, stderr?))
+    };
+    tokio::time::timeout(timeout, output).await
+}
+
+/// Reads at most [`CHECK_OUTPUT_MAX`] bytes, then closes the pipe: a program
+/// that keeps writing then gets a broken pipe and stops.
 async fn read_capped(pipe: Option<impl AsyncRead + Unpin>) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     if let Some(pipe) = pipe {
@@ -426,26 +585,67 @@ async fn read_capped(pipe: Option<impl AsyncRead + Unpin>) -> io::Result<Vec<u8>
     Ok(bytes)
 }
 
+/// Flushes every file under `root` to disk before the rename makes it
+/// visible: a power cut must not leave empty programs in a version folder
+/// that looks installed.
+fn sync_tree(root: &Path) -> Result<(), InstallError> {
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).map_err(io_error(&dir))? {
+            let entry = entry.map_err(io_error(&dir))?;
+            let path = entry.path();
+            let kind = entry.file_type().map_err(io_error(&path))?;
+            if kind.is_dir() {
+                dirs.push(path);
+            } else if kind.is_file() {
+                sync_path(&path).map_err(io_error(&path))?;
+            }
+        }
+        sync_dir(&dir).map_err(io_error(&dir))?;
+    }
+    Ok(())
+}
+
+fn sync_path(path: &Path) -> io::Result<()> {
+    // Windows flushes only through a handle with write access.
+    OpenOptions::new()
+        .read(true)
+        .write(cfg!(windows))
+        .open(path)?
+        .sync_all()
+}
+
+// `#[cfg(unix)]` outside `platform`: a folder's entries are flushed by
+// opening the folder, which only Unix allows. NTFS logs them itself.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 /// Renames `root` to `target`. If `target` exists (`force`), it is first
-/// moved into `tmp` and deleted after; if the second rename fails, it is
-/// put back.
-async fn move_into_place(root: &Path, target: &Path, tmp: &Path) -> Result<(), InstallError> {
+/// moved to `old` and deleted after; if the second rename fails, it is put
+/// back. Blocking: called from a blocking task, so it never stops between
+/// the two renames.
+fn move_into_place(root: &Path, target: &Path, old: &Path) -> Result<(), InstallError> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(io_error(parent))?;
     }
-    let old = match fs::symlink_metadata(target) {
+    let moved = match fs::symlink_metadata(target) {
         Ok(_) => {
-            let old = tmp.join(format!("old-{}", random_hex()?));
-            rename(target, &old).await?;
-            Some(old)
+            rename(target, old)?;
+            true
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => false,
         Err(err) => return Err(io_error(target)(err)),
     };
-    if let Err(err) = rename(root, target).await {
-        if let Some(old) = &old
-            && let Err(back) = rename(old, target).await
-        {
+    if let Err(err) = rename(root, target) {
+        if moved && let Err(back) = rename(old, target) {
+            // `clean_tmp` tries again at the next install.
             tracing::error!(
                 from = %old.display(),
                 to = %target.display(),
@@ -455,34 +655,43 @@ async fn move_into_place(root: &Path, target: &Path, tmp: &Path) -> Result<(), I
         }
         return Err(err);
     }
-    if let Some(old) = old {
+    if let Some(parent) = target.parent() {
+        sync_dir(parent).map_err(io_error(parent))?;
+    }
+    if moved {
         // On Windows a running program cannot be deleted: then the old folder
         // stays in `.tmp/` until the next install cleans it.
-        remove_tree(&old);
+        remove_tree(old);
     }
     Ok(())
 }
 
-/// `fs::rename`, tried again on Windows while the error is "access denied":
+/// `fs::rename`, tried again on Windows while another program holds a file:
 /// antivirus programs hold files that were just unpacked for a short time.
-/// rustup does the same.
-async fn rename(from: &Path, to: &Path) -> Result<(), InstallError> {
+/// rustup does the same. Blocking (it sleeps between tries).
+fn rename(from: &Path, to: &Path) -> Result<(), InstallError> {
     let mut delay = Duration::from_millis(100);
     let mut tries = 0;
     loop {
         match fs::rename(from, to) {
             Ok(()) => return Ok(()),
-            // `cfg!` outside `platform`: one known Windows behavior, std only.
-            Err(err)
-                if cfg!(windows) && err.kind() == io::ErrorKind::PermissionDenied && tries < 5 =>
-            {
-                tokio::time::sleep(delay).await;
+            Err(err) if is_held_on_windows(&err) && tries < 5 => {
+                std::thread::sleep(delay);
                 delay *= 2;
                 tries += 1;
             }
             Err(err) => return Err(io_error(from)(err)),
         }
     }
+}
+
+/// `ERROR_ACCESS_DENIED` (5), `ERROR_SHARING_VIOLATION` (32), or
+/// `ERROR_LOCK_VIOLATION` (33).
+fn is_held_on_windows(err: &io::Error) -> bool {
+    // `cfg!` outside `platform`: one known Windows behavior, std only.
+    cfg!(windows)
+        && (err.kind() == io::ErrorKind::PermissionDenied
+            || matches!(err.raw_os_error(), Some(5 | 32 | 33)))
 }
 
 /// 8 hex characters from the OS random source, for temp names.
@@ -810,8 +1019,42 @@ into = "bin"
         let installed = result.expect("install succeeds");
         assert_eq!(installed.version, version("8.5.0"), "the newest stable");
         assert!(installed.dir.join("bin").join("php").is_file());
-        assert!(!events.contains(&InstallEvent::Checking));
         assert_tmp_is_clean(&data);
+
+        // Each file comes in one chunk: progress at 0 and at the end.
+        let file_events = |name: &str, size: usize| {
+            let size = size as u64;
+            let artifact = || name.to_owned();
+            [
+                InstallEvent::Downloading {
+                    artifact: artifact(),
+                    done: 0,
+                    total: size,
+                },
+                InstallEvent::Downloading {
+                    artifact: artifact(),
+                    done: size,
+                    total: size,
+                },
+                InstallEvent::Verified {
+                    artifact: artifact(),
+                },
+                InstallEvent::Extracting {
+                    artifact: artifact(),
+                },
+            ]
+        };
+        let mut expected = vec![
+            InstallEvent::ManifestVerified { serial: 1 },
+            InstallEvent::Selected {
+                runtime: Runtime::Php,
+                version: "8.5.0".into(),
+            },
+        ];
+        expected.extend(file_events("cli", php_cli("PHP 8.5.0 ").len()));
+        expected.extend(file_events("fpm", php_fpm().len()));
+        expected.push(InstallEvent::Installed { dir: installed.dir });
+        assert_eq!(events, expected);
     }
 
     #[tokio::test]
@@ -852,11 +1095,16 @@ into = "bin"
             .expect("first install");
 
         let again = env(&data, served.fetch(1), Some(FAKE_PHP), Trust::Unsigned);
-        let (result, _) = run_install(&again, Runtime::Php, Some("8.4"), false).await;
+        let (result, events) = run_install(&again, Runtime::Php, Some("8.4"), false).await;
         let installed = result.expect("already there");
         assert!(installed.already);
         assert_eq!(installed.version, version("8.4.23"));
         assert!(archive_requests(&again.fetch).is_empty());
+        // Every run ends with a terminal event.
+        assert_eq!(
+            events.last(),
+            Some(&InstallEvent::Installed { dir: installed.dir })
+        );
     }
 
     #[tokio::test]
@@ -971,7 +1219,7 @@ into = "bin"
 
         fs::write(&serial_path, "four").expect("a broken serial file");
         let (result, _) = run_install(&signed(), Runtime::Php, Some("8.4.23"), false).await;
-        assert_eq!(result.expect_err("broken").code(), "install_io");
+        assert_eq!(result.expect_err("broken").code(), "install_serial_corrupt");
     }
 
     #[tokio::test]
@@ -1023,5 +1271,173 @@ into = "bin"
         let mut events = |_| {};
         let future = install(&req, &env, &mut events);
         assert_send(&future);
+    }
+
+    /// A small recipe whose check runs `bin/php -v`.
+    #[cfg(unix)]
+    fn check_recipe() -> crate::recipes::Recipe {
+        recipes::parse("test.toml", &fake_php_with_check()).expect("test recipe")
+    }
+
+    /// Writes `script` as `root/bin/php` and runs the check on it.
+    #[cfg(unix)]
+    async fn check_script(script: &str, timeout: Duration) -> Result<(), InstallError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TempDir::new().expect("temp dir");
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).expect("bin");
+        let php = bin.join("php");
+        fs::write(&php, format!("#!/bin/sh\n{script}\n")).expect("script");
+        fs::set_permissions(&php, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let recipe = check_recipe();
+        let check = recipe.check().expect("check");
+        let programs = recipe.platform(Platform::LinuxX64).expect("linux");
+        run_check(check, programs, root.path(), &version("8.4.23"), timeout).await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_check_needs_the_prefix_and_a_success_exit() {
+        let ok = check_script("echo 'PHP 8.4.23 (cli)'", CHECK_TIMEOUT).await;
+        ok.expect("right version, exit 0");
+
+        let err = check_script("echo 'PHP 8.4.23 (cli)'; exit 3", CHECK_TIMEOUT)
+            .await
+            .expect_err("right version, but exit 3");
+        assert!(
+            matches!(
+                err,
+                InstallError::CheckFailed {
+                    exit_code: Some(3),
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_check_times_out_and_caps_its_output() {
+        let started = std::time::Instant::now();
+        let err = check_script("exec sleep 5", Duration::from_millis(200))
+            .await
+            .expect_err("too slow");
+        assert!(err.to_string().contains("no answer after 200 ms"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(4));
+
+        // `yes` never stops on its own. Without the 64 KiB cap this would
+        // read until the timeout; with it, `yes` gets a broken pipe and ends.
+        let err = check_script("exec yes 'PHP 8.4.23 x'", Duration::from_secs(10))
+            .await
+            .expect_err("killed by a broken pipe");
+        let InstallError::CheckFailed { output, .. } = &err else {
+            panic!("expected install_check_failed, got {err}");
+        };
+        assert!(!output.contains("no answer"), "{output}");
+        assert_eq!(output.chars().count(), CHECK_OUTPUT_SHOWN);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_check_does_not_see_the_removed_variables() {
+        // The test cannot change its own environment (`set_var` is unsafe),
+        // so the variables are set on the command, before the clean.
+        let mut command = Command::new("/bin/sh");
+        let mut script = String::from("printf \"[");
+        for name in CHECK_ENV_REMOVED {
+            command.env(name, "leak");
+            script.push_str(&format!("${{{name}-}}"));
+        }
+        script.push_str("]\"");
+        command.arg("-c").arg(script);
+        clean_check_env(&mut command);
+        let (status, stdout, _) = run_capped(command, CHECK_TIMEOUT)
+            .await
+            .expect("in time")
+            .expect("runs");
+        assert!(status.success());
+        assert_eq!(stdout, b"[]");
+    }
+
+    #[test]
+    fn the_missing_dll_code_is_the_windows_status() {
+        assert_eq!(STATUS_DLL_NOT_FOUND, -1_073_741_515);
+    }
+
+    #[test]
+    fn a_failed_second_rename_puts_the_old_version_back() {
+        let data = TempDir::new().expect("temp dir");
+        let tmp = data.path().join("tmp");
+        fs::create_dir(&tmp).expect("tmp");
+        let target = data.path().join("php").join("8.4.23");
+        fs::create_dir_all(&target).expect("target");
+        fs::write(target.join("x"), "old").expect("old file");
+        let old = tmp.join("old-php-8.4.23-00000000");
+
+        let missing_root = data.path().join("no-root");
+        let err = move_into_place(&missing_root, &target, &old).expect_err("no root");
+        assert_eq!(err.code(), "install_io");
+        assert_eq!(fs::read_to_string(target.join("x")).expect("back"), "old");
+        assert_eq!(fs::read_dir(&tmp).expect("read tmp").count(), 0);
+    }
+
+    #[test]
+    fn a_version_moved_aside_by_a_crash_is_put_back() {
+        let data = TempDir::new().expect("temp dir");
+        let runtimes = runtimes(&data);
+        let tmp = runtimes.tmp_dir();
+        // Cut off between the two renames: the version is only in `.tmp/`.
+        let aside = tmp.join("old-php-8.4.24-rc1-0a1b2c3d");
+        fs::create_dir_all(&aside).expect("aside");
+        fs::write(aside.join("x"), "kept").expect("file");
+        // Its version folder is back already: the copy aside is deleted.
+        let stale = tmp.join("old-node-22.11.0-0a1b2c3d");
+        fs::create_dir_all(&stale).expect("stale");
+        let node = runtimes.version_dir(Runtime::Node, &version("22.11.0"));
+        fs::create_dir_all(&node).expect("node");
+        // Not a moved-aside name: deleted.
+        fs::create_dir_all(tmp.join("old-ruby-1.0.0-0a1b2c3d")).expect("other");
+        fs::write(runtimes.lock_path(), "").expect("lock");
+
+        clean_tmp(&runtimes);
+
+        let php = runtimes.version_dir(Runtime::Php, &version("8.4.24-rc1"));
+        assert_eq!(fs::read_to_string(php.join("x")).expect("put back"), "kept");
+        assert!(node.is_dir());
+        assert_tmp_is_clean(&data);
+    }
+
+    #[test]
+    fn moved_aside_names_are_read_strictly() {
+        let runtimes = RuntimesDir::in_dir(Path::new("data"));
+        let target = |name: &str| moved_aside_target(&runtimes, std::ffi::OsStr::new(name));
+        assert_eq!(
+            target("old-php-8.4.23-deadbeef"),
+            Some(runtimes.version_dir(Runtime::Php, &version("8.4.23")))
+        );
+        for bad in [
+            "old-php-8.4.23",
+            "old-php-8.4-deadbeef",
+            "old-php-8.4.23-xyz12345",
+            "old-ruby-1.0.0-deadbeef",
+            "i-deadbeef",
+            "old-php-../../x-deadbeef",
+        ] {
+            assert_eq!(target(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_windows_retries_a_held_file() {
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        let sharing = io::Error::from_raw_os_error(32);
+        let missing = io::Error::from(io::ErrorKind::NotFound);
+        assert_eq!(is_held_on_windows(&denied), cfg!(windows));
+        assert!(!is_held_on_windows(&missing));
+        if cfg!(windows) {
+            assert!(is_held_on_windows(&sharing));
+        }
     }
 }

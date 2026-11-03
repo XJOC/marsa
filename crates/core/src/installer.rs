@@ -152,10 +152,14 @@ pub enum InstallError {
     #[error("another install is running")]
     Busy,
 
-    #[error("the runtimes manifest has no {runtime} version for {requested:?}")]
+    /// `requested` is `None` when no version was asked for (the newest stable
+    /// one). `available` lists every version of the runtime in the manifest,
+    /// oldest first.
+    #[error("{}", no_such_version_text(.runtime, .requested.as_deref(), .available))]
     NoSuchVersion {
         runtime: &'static str,
-        requested: String,
+        requested: Option<String>,
+        available: Vec<String>,
     },
 
     #[error(
@@ -186,6 +190,14 @@ pub enum InstallError {
          install it from https://aka.ms/vs/17/release/vc_redist.x64.exe"
     )]
     MissingVcRuntime,
+
+    /// `runtimes/.manifest-serial` is not a number. It is never read as
+    /// "no serial", which would turn the rollback check off.
+    #[error(
+        "{} is damaged; delete it to accept the current manifest again",
+        .path.display()
+    )]
+    SerialCorrupt { path: PathBuf },
 
     #[error("disk error at {}", .path.display())]
     Io {
@@ -224,6 +236,7 @@ impl InstallError {
             InstallError::UnsafeName { .. } => "install_unsafe_name",
             InstallError::CheckFailed { .. } => "install_check_failed",
             InstallError::MissingVcRuntime => "install_missing_vc_runtime",
+            InstallError::SerialCorrupt { .. } => "install_serial_corrupt",
             InstallError::Io { .. } => "install_io",
             InstallError::Manifest(err) => err.code(),
             InstallError::Fetch(err) => err.code(),
@@ -232,6 +245,20 @@ impl InstallError {
             InstallError::Recipe(err) => err.code(),
             InstallError::Runtimes(err) => err.code(),
         }
+    }
+}
+
+fn no_such_version_text(runtime: &str, requested: Option<&str>, available: &[String]) -> String {
+    let wanted = match requested {
+        Some(text) => {
+            format!("the runtimes manifest has no {runtime} version that matches {text:?}")
+        }
+        None => format!("the runtimes manifest has no stable {runtime} version"),
+    };
+    if available.is_empty() {
+        format!("{wanted}, and lists no {runtime} version at all")
+    } else {
+        format!("{wanted}; available: {}", available.join(", "))
     }
 }
 
@@ -260,9 +287,16 @@ mod tests {
             (
                 InstallError::NoSuchVersion {
                     runtime: "php",
-                    requested: "8.2".into(),
+                    requested: Some("8.2".into()),
+                    available: vec!["8.3.27".into(), "8.4.23".into()],
                 },
                 "install_no_such_version",
+            ),
+            (
+                InstallError::SerialCorrupt {
+                    path: PathBuf::from("x"),
+                },
+                "install_serial_corrupt",
             ),
             (
                 InstallError::ManifestMismatch {
@@ -301,5 +335,27 @@ mod tests {
         for (err, code) in cases {
             assert_eq!(err.code(), code, "{err}");
         }
+    }
+
+    #[test]
+    fn no_such_version_reads_naturally() {
+        let err = |requested: Option<&str>, available: &[&str]| InstallError::NoSuchVersion {
+            runtime: "php",
+            requested: requested.map(str::to_owned),
+            available: available.iter().map(|v| (*v).to_owned()).collect(),
+        };
+        assert_eq!(
+            err(Some("8.2"), &["8.3.27", "8.4.23"]).to_string(),
+            "the runtimes manifest has no php version that matches \"8.2\"; \
+             available: 8.3.27, 8.4.23"
+        );
+        assert_eq!(
+            err(None, &["8.5.0-rc1"]).to_string(),
+            "the runtimes manifest has no stable php version; available: 8.5.0-rc1"
+        );
+        assert_eq!(
+            err(None, &[]).to_string(),
+            "the runtimes manifest has no stable php version, and lists no php version at all"
+        );
     }
 }
