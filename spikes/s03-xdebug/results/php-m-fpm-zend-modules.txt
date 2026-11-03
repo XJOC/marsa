@@ -1,0 +1,4 @@
+[Zend Modules]
+Xdebug
+Zend OPcache
+

@@ -1,0 +1,14 @@
+php sha256 before: d0efe2c3ef4a3cd003cd862977f50040e07757b9924207b692c1da3dff450580
+== ini file ABSENT
+[Zend Modules] Zend OPcache  
+== ini file PRESENT (zend_extension + xdebug.mode=debug)
+[Zend Modules] Xdebug Zend OPcache  
+xdebug.mode=debug
+== ini file with xdebug.mode=off (still loaded)
+extension_loaded=true mode= xdebug_info(mode)=[]
+== fpm, same ini
+[Zend Modules] Xdebug Zend OPcache  
+== ini file ABSENT again
+[Zend Modules] Zend OPcache  
+php sha256 after:  d0efe2c3ef4a3cd003cd862977f50040e07757b9924207b692c1da3dff450580
+binary unchanged: yes

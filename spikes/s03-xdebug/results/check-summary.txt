@@ -1,0 +1,4 @@
+criterion 1 (php -m shows Xdebug, cli+fpm, OPcache coexists): PASS
+criterion 2 (DBGp session: init, breakpoint, stopping):        PASS
+extra: same session with opcache.enable_cli=1:                 PASS
+criterion 3 (ini switch, binary sha256 unchanged):             PASS

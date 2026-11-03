@@ -1,0 +1,21 @@
+== StaticPHP 3.0.0-alpha1
+
+== spc dev:info ext-xdebug (package config, first 14 lines)
+
+Package: ext-xdebug  Type: php-extension  Registry: core
+Config file: config/pkg/ext/ext-xdebug.yml
+
+── Package Config ──
+php-extension:
+  os:
+    - Linux
+    - Darwin
+  zend-extension: true
+  build-static: false
+  build-shared: true
+  build-with-php: false
+
+
+== spc build:php xdebug --build-cli -n --no-download
+[WARNING] Please run `spc doctor` first to verify your build environment.
+Extension [xdebug] cannot be built as static extension.

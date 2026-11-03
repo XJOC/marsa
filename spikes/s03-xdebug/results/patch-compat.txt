@@ -1,0 +1,26 @@
+== PHP 8.4.1 (PHP API => 20240924; built Dec 13 2024 08:45:11; exported symbols:       98)
+    with Zend OPcache v8.4.1, Copyright (c), by Zend Technologies
+RESULT missing
+dbgp session exit code: 3
+php stderr:
+Failed loading <spike>/work/out/xdebug-8.4-macos-arm64.so:  dlopen(<spike>/work/out/xdebug-8.4-macos-arm64.so, 0x0009): symbol not found in flat namespace '_OnUpdateBool'
+== PHP 8.4.5 (PHP API => 20240924; built Apr 25 2025 03:26:31; exported symbols:      102)
+    with Zend OPcache v8.4.5, Copyright (c), by Zend Technologies
+RESULT missing
+dbgp session exit code: 3
+php stderr:
+Failed loading <spike>/work/out/xdebug-8.4-macos-arm64.so:  dlopen(<spike>/work/out/xdebug-8.4-macos-arm64.so, 0x0009): symbol not found in flat namespace '_OnUpdateBool'
+== PHP 8.4.6 (PHP API => 20240924; built Jun 19 2025 02:48:38; exported symbols:      102)
+    with Zend OPcache v8.4.6, Copyright (c), by Zend Technologies
+RESULT missing
+dbgp session exit code: 3
+php stderr:
+Failed loading <spike>/work/out/xdebug-8.4-macos-arm64.so:  dlopen(<spike>/work/out/xdebug-8.4-macos-arm64.so, 0x0009): symbol not found in flat namespace '_OnUpdateBool'
+== PHP 8.4.8 (PHP API => 20240924; built Jul 22 2025 16:54:49; exported symbols:    35390)
+    with Zend OPcache v8.4.8, Copyright (c), by Zend Technologies
+RESULT init_names_xdebug=true break_hit=true stack_has_greet=true run_ended_stopping=true
+dbgp session exit code: 0
+== PHP 8.4.10 (PHP API => 20240924; built Aug  1 2025 03:58:50; exported symbols:    35402)
+    with Zend OPcache v8.4.10, Copyright (c), by Zend Technologies
+RESULT init_names_xdebug=true break_hit=true stack_has_greet=true run_ended_stopping=true
+dbgp session exit code: 0

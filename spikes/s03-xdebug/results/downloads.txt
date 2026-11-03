@@ -1,0 +1,12 @@
+3be4a26d825ffdfda52a56fc43246456989a3630093cced3fbddf4771ee58a70  2953876 bytes  2026-11-03T21:08Z  https://ftpmirror.gnu.org/gnu/m4/m4-1.4.19.tar.gz
+431075ad0bf529ef13cb41e9042c542381103e80015686222b8a9d4abef42a1c  2003781 bytes  2026-11-03T21:10Z  https://ftpmirror.gnu.org/gnu/autoconf/autoconf-2.71.tar.gz
+990588010de0bc3daaa92f90751e155426647a586b1735e35ac4a01475c734de  9380765 bytes  2026-11-03T21:11Z  https://dl.static-php.dev/v3/spc-bin/nightly/spc-macos-aarch64
+4a5dca6df0211f7fb21425cf1c867968b2dfb7c079f98cf37770c5728e0bf709  36179860 bytes  2026-11-03T21:11Z  https://dl.static-php.dev/static-php-cli/bulk/php-8.4.23-cli-macos-aarch64.tar.gz
+1a417db44f0eb0b40a9f8cd862f24ecfabdea87f85863f30d218c4876bb688ef  36200205 bytes  2026-11-03T21:11Z  https://dl.static-php.dev/static-php-cli/bulk/php-8.4.23-fpm-macos-aarch64.tar.gz
+f073de91bea046106abf4d6071c963ea71e58571df6ce58948ceca89d121cb2d  283968 bytes  2026-11-03T21:11Z  https://xdebug.org/files/xdebug-3.5.3.tgz
+f43b69572cabfb91c023356f3ce197c782d8a255bc084c1a6af58c0e86cf7573  22501080 bytes  2026-11-03T21:11Z  https://www.php.net/distributions/php-8.4.23.tar.gz
+eccd065d461dd92ed313448366762f992aa5468a224ef05a2cadf64fee1a85f5  29230163 bytes  2026-11-03T21:20Z  https://dl.static-php.dev/static-php-cli/bulk/php-8.4.1-cli-macos-aarch64.tar.gz
+417864974dee23c52dbc888128b6bc9c9baae116fabb9b03b2953caed39b3328  33961474 bytes  2026-11-03T21:21Z  https://dl.static-php.dev/static-php-cli/bulk/php-8.4.10-cli-macos-aarch64.tar.gz
+9282744c5678d03468582fbe858d04ac35d38c2f04327cc93ffc57074cb73ebc  31684828 bytes  2026-11-03T21:22Z  https://dl.static-php.dev/static-php-cli/bulk/php-8.4.5-cli-macos-aarch64.tar.gz
+3c8d4ee7e3d34c57a0ab53bbf37af6a1227d54882af5e871e096ae4bb9e34b24  33935730 bytes  2026-11-03T21:22Z  https://dl.static-php.dev/static-php-cli/bulk/php-8.4.8-cli-macos-aarch64.tar.gz
+1033a20e32d0c8841f9114c2c534c0b3090908e0e85eb7087da3833a0851c766  33792600 bytes  2026-11-03T21:22Z  https://dl.static-php.dev/static-php-cli/bulk/php-8.4.6-cli-macos-aarch64.tar.gz
