@@ -1,0 +1,11 @@
+$ curl -sS -i --max-time 5 --resolve app.test:18443:127.0.0.1 --cacert ~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data/pki/authorities/local/root.crt https://app.test:18443/
+HTTP/2 200 
+alt-svc: h3=":18443"; ma=2592000
+content-type: text/plain; charset=utf-8
+server: Caddy
+content-length: 2
+date: Tue, 03 Nov 2026 21:21:36 GMT
+
+ok
+exit=0
+

@@ -1,0 +1,24 @@
+$ port-probe bind 127.0.0.1:80
+FAIL bind 127.0.0.1:80 kind=PermissionDenied raw_os_error=13 message=Permission denied (os error 13)
+exit=1
+
+$ port-probe bind 127.0.0.1:443
+FAIL bind 127.0.0.1:443 kind=PermissionDenied raw_os_error=13 message=Permission denied (os error 13)
+exit=1
+
+$ port-probe bind 127.0.0.1:81
+FAIL bind 127.0.0.1:81 kind=PermissionDenied raw_os_error=13 message=Permission denied (os error 13)
+exit=1
+
+$ port-probe bind 127.0.0.1:444
+FAIL bind 127.0.0.1:444 kind=PermissionDenied raw_os_error=13 message=Permission denied (os error 13)
+exit=1
+
+$ port-probe bind 127.0.0.1:1023
+FAIL bind 127.0.0.1:1023 kind=PermissionDenied raw_os_error=13 message=Permission denied (os error 13)
+exit=1
+
+$ port-probe bind 127.0.0.1:1024
+OK bind 127.0.0.1:1024
+exit=0
+

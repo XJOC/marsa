@@ -1,0 +1,16 @@
+$ port-probe connect 127.0.0.1:53
+CONNECTED 127.0.0.1:53
+exit=0
+
+$ netstat_port 53
+tcp4 127.0.0.1.53 dnsmasq-arm64:14847
+exit=0
+
+$ /usr/sbin/lsof -nP -iTCP:53 -sTCP:LISTEN
+
+exit=1
+
+$ /bin/ps -p 14847 -o user=,comm=
+nobody /Applications/Herd.app/Contents/Resources/dnsmasq-arm64
+exit=0
+

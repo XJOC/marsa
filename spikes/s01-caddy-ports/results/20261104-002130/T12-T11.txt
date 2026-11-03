@@ -1,0 +1,27 @@
+$ port-probe connect 127.0.0.1:18080
+CONNECTED 127.0.0.1:18080
+exit=0
+
+$ port-probe bind 127.0.0.1:18080
+FAIL bind 127.0.0.1:18080 kind=AddrInUse raw_os_error=48 message=Address already in use (os error 48)
+exit=1
+
+$ netstat_port 18080
+tcp4 127.0.0.1.18080 caddy:81524
+tcp4 *.18080 port-probe:81770
+exit=0
+
+$ /usr/sbin/lsof -nP -iTCP:18080 -sTCP:LISTEN
+COMMAND     PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+caddy     81524 <me>    8u  IPv4 0x552dadbfaa12d176      0t0  TCP 127.0.0.1:18080 (LISTEN)
+port-prob 81770 <me>    3u  IPv4 0x7301edf6a0dfdd3d      0t0  TCP *:18080 (LISTEN)
+exit=0
+
+$ /bin/ps -p 81524 -o user=,comm=
+<me> ~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/bin/caddy
+exit=0
+
+$ /bin/ps -p 81770 -o user=,comm=
+<me> port-probe
+exit=0
+

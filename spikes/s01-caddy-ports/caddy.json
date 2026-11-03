@@ -1,0 +1,24 @@
+{
+  "admin": { "listen": "__ADMIN__" },
+  "storage": { "module": "file_system", "root": "__DATA__" },
+  "apps": {
+    "http": {
+      "http_port": __HTTP_PORT__,
+      "https_port": __HTTPS_PORT__,
+      "servers": {
+        "app": {
+          "listen": [__LISTEN__],
+          "routes": [{
+            "match": [{ "host": ["app.test"] }],
+            "handle": [{ "handler": "static_response", "body": "ok" }],
+            "terminal": true
+          }]
+        }
+      }
+    },
+    "tls": {
+      "automation": { "policies": [{ "subjects": ["app.test"], "issuers": [{ "module": "internal" }] }] }
+    },
+    "pki": { "certificate_authorities": { "local": { "install_trust": false } } }
+  }
+}

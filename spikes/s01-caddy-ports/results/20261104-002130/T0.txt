@@ -1,0 +1,16 @@
+$ port-probe connect 127.0.0.1:80
+CONNECTED 127.0.0.1:80
+exit=0
+
+$ port-probe connect 127.0.0.1:443
+CONNECTED 127.0.0.1:443
+exit=0
+
+$ port-probe connect [::1]:80
+REFUSED [::1]:80 kind=ConnectionRefused raw_os_error=61 message=Connection refused (os error 61)
+exit=1
+
+$ port-probe connect [::1]:443
+REFUSED [::1]:443 kind=ConnectionRefused raw_os_error=61 message=Connection refused (os error 61)
+exit=1
+

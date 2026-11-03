@@ -1,0 +1,19 @@
+$ /usr/sbin/lsof -nP -a -p 81385 -i
+COMMAND   PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+caddy   81385 <me>    6u  IPv4 0x91bb29ce1b0466e3      0t0  TCP 127.0.0.1:2101 (LISTEN)
+caddy   81385 <me>    7u  IPv6 0x75a4264bfb2faf14      0t0  TCP [::1]:18443 (LISTEN)
+caddy   81385 <me>    8u  IPv6 0xcdda09d9036eeb55      0t0  UDP [::1]:18443
+caddy   81385 <me>    9u  IPv6 0x3fcd5ece4f86bcdf      0t0  TCP [::1]:18080 (LISTEN)
+exit=0
+
+$ curl -sS -i --max-time 5 --resolve app.test:18443:[::1] --cacert ~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data/pki/authorities/local/root.crt https://app.test:18443/
+HTTP/2 200 
+alt-svc: h3=":18443"; ma=2592000
+content-type: text/plain; charset=utf-8
+server: Caddy
+content-length: 2
+date: Tue, 03 Nov 2026 21:21:35 GMT
+
+ok
+exit=0
+

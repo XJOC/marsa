@@ -1,0 +1,20 @@
+$ /usr/sbin/lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN
+COMMAND     PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+nginx-arm 15457 <me>    5u  IPv4 0xac47d8889c2f701b      0t0  TCP 127.0.0.1:80 (LISTEN)
+nginx-arm 15457 <me>    6u  IPv4 0x25035e2b2a448326      0t0  TCP 127.0.0.1:443 (LISTEN)
+nginx-arm 15458 <me>    5u  IPv4 0xac47d8889c2f701b      0t0  TCP 127.0.0.1:80 (LISTEN)
+nginx-arm 15458 <me>    6u  IPv4 0x25035e2b2a448326      0t0  TCP 127.0.0.1:443 (LISTEN)
+nginx-arm 15459 <me>    5u  IPv4 0xac47d8889c2f701b      0t0  TCP 127.0.0.1:80 (LISTEN)
+nginx-arm 15459 <me>    6u  IPv4 0x25035e2b2a448326      0t0  TCP 127.0.0.1:443 (LISTEN)
+nginx-arm 15460 <me>    5u  IPv4 0xac47d8889c2f701b      0t0  TCP 127.0.0.1:80 (LISTEN)
+nginx-arm 15460 <me>    6u  IPv4 0x25035e2b2a448326      0t0  TCP 127.0.0.1:443 (LISTEN)
+nginx-arm 15461 <me>    5u  IPv4 0xac47d8889c2f701b      0t0  TCP 127.0.0.1:80 (LISTEN)
+nginx-arm 15461 <me>    6u  IPv4 0x25035e2b2a448326      0t0  TCP 127.0.0.1:443 (LISTEN)
+nginx-arm 15462 <me>    5u  IPv4 0xac47d8889c2f701b      0t0  TCP 127.0.0.1:80 (LISTEN)
+nginx-arm 15462 <me>    6u  IPv4 0x25035e2b2a448326      0t0  TCP 127.0.0.1:443 (LISTEN)
+nginx-arm 15463 <me>    5u  IPv4 0xac47d8889c2f701b      0t0  TCP 127.0.0.1:80 (LISTEN)
+nginx-arm 15463 <me>    6u  IPv4 0x25035e2b2a448326      0t0  TCP 127.0.0.1:443 (LISTEN)
+nginx-arm 15464 <me>    5u  IPv4 0xac47d8889c2f701b      0t0  TCP 127.0.0.1:80 (LISTEN)
+nginx-arm 15464 <me>    6u  IPv4 0x25035e2b2a448326      0t0  TCP 127.0.0.1:443 (LISTEN)
+exit=0
+

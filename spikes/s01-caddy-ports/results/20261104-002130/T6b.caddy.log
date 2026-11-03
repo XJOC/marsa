@@ -1,0 +1,13 @@
+{"level":"info","ts":1793740895.591003,"msg":"maxprocs: Leaving GOMAXPROCS=8: CPU quota undefined"}
+{"level":"info","ts":1793740895.591038,"msg":"GOMEMLIMIT is updated","GOMEMLIMIT":15461882265,"previous":9223372036854775807}
+{"level":"info","ts":1793740895.5910451,"msg":"using config from file","file":"~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/data/t6b.json"}
+{"level":"info","ts":1793740895.591359,"logger":"admin","msg":"admin endpoint started","address":"127.0.0.1:2101","enforce_origin":false,"origins":["//127.0.0.1:2101","//localhost:2101","//[::1]:2101"]}
+{"level":"info","ts":1793740895.591532,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance","cache":"0x375c71607a00"}
+{"level":"info","ts":1793740895.5915341,"logger":"http.auto_https","msg":"server is listening only on the HTTPS port but has no TLS connection policies; adding one to enable TLS","server_name":"app","https_port":18443}
+{"level":"info","ts":1793740895.591555,"logger":"http.auto_https","msg":"enabling automatic HTTP->HTTPS redirects","server_name":"app"}
+{"level":"info","ts":1793740895.591599,"logger":"pki.ca.local","msg":"root certificate trust store installation disabled; unconfigured clients may show warnings","path":"storage:pki/authorities/local/root.crt"}
+{"level":"info","ts":1793740895.5916429,"logger":"http","msg":"enabling HTTP/3 listener","addr":"127.0.0.1:18443"}
+{"level":"info","ts":1793740895.591724,"logger":"http.log","msg":"server running","name":"app","protocols":["h1","h2","h3"]}
+{"level":"info","ts":1793740895.591756,"logger":"tls.cache.maintenance","msg":"stopped background certificate maintenance","cache":"0x375c71607a00"}
+{"level":"info","ts":1793740895.5917618,"logger":"http","msg":"servers shutting down with eternal grace period"}
+{"level":"error","ts":1793740895.591784,"msg":"loading initial config: loading new config: http app module: start: listening on 127.0.0.1:80: listen tcp 127.0.0.1:80: bind: permission denied"}

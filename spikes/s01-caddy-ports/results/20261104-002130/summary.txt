@@ -1,0 +1,80 @@
+CASE  WHAT                           RESULT
+T0    connect 127.0.0.1:80           CONNECTED
+T0    connect 127.0.0.1:443          CONNECTED
+T0    connect [::1]:80               REFUSED (nothing listens)
+T0    connect [::1]:443              REFUSED (nothing listens)
+T1    bind 127.0.0.1:80              FAIL EACCES(13)
+T1    bind 127.0.0.1:443             FAIL EACCES(13)
+T1    bind 127.0.0.1:81              FAIL EACCES(13)
+T1    bind 127.0.0.1:444             FAIL EACCES(13)
+T1    bind 127.0.0.1:1023            FAIL EACCES(13)
+T1    bind 127.0.0.1:1024            OK
+T2    bind [::1]:80                  FAIL EACCES(13)
+T2    bind [::1]:443                 FAIL EACCES(13)
+T2    bind [::1]:81                  FAIL EACCES(13)
+T2    bind [::1]:444                 FAIL EACCES(13)
+T3    bind 127.0.0.1:8080            OK
+T3    bind [::1]:8080                OK
+T4    bind 127.0.0.1:81+444          0 of 2 OK
+T5    wildcard bind 0.0.0.0:81       OK
+T5    wildcard bind [::]:81          OK
+T5    wildcard bind 0.0.0.0:444      OK
+T5    wildcard bind [::]:444         OK
+T5    wildcard bind 0.0.0.0:80       FAIL EADDRINUSE(48)
+T5    wildcard bind [::]:80          FAIL EADDRINUSE(48)
+T5    wildcard bind 0.0.0.0:443      FAIL EADDRINUSE(48)
+T12   herd-nginx connect 127.0.0.1:80 CONNECTED
+T12   herd-nginx netstat -anv        127.0.0.1.80=nginx-arm64:15464
+T12   herd-nginx lsof                nginx-arm pid=15457 user=<me> 127.0.0.1:80; nginx-arm pid=15458 user=<me> 127.0.0.1:80; nginx-arm pid=15459 user=<me> 127.0.0.1:80; nginx-arm pid=15460 user=<me> 127.0.0.1:80; nginx-arm pid=15461 user=<me> 127.0.0.1:80; nginx-arm pid=15462 user=<me> 127.0.0.1:80; nginx-arm pid=15463 user=<me> 127.0.0.1:80; nginx-arm pid=15464 user=<me> 127.0.0.1:80
+T12   herd-nginx ps -p 15464         <me> nginx: worker process
+T12   herd-dnsmasq connect 127.0.0.1:53 CONNECTED
+T12   herd-dnsmasq netstat -anv      127.0.0.1.53=dnsmasq-arm64:14847
+T12   herd-dnsmasq lsof              nothing
+T12   herd-dnsmasq ps -p 14847       nobody /Applications/Herd.app/Contents/Resources/dnsmasq-arm64
+T12   airplay connect 127.0.0.1:5000 CONNECTED
+T12   airplay netstat -anv           *.5000=ControlCenter:589; *.5000=ControlCenter:589
+T12   airplay lsof                   ControlCe pid=589 user=<me> *:5000; ControlCe pid=589 user=<me> *:5000
+T12   airplay ps -p 589              <me> /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter
+INFO  caddy                          v2.11.7 h1:yj0Y4fYZGPkSvibBJ1sTWE33xC0fxztVyXEW5iIdUT4=
+T6    caddy run 127.0.0.1:18443      starts
+T6    caddy sockets                  TCP 127.0.0.1:18080, TCP 127.0.0.1:18443, TCP 127.0.0.1:2101, UDP 127.0.0.1:18443
+T6    caddy non-loopback sockets     none
+T6    https 127.0.0.1:18443          HTTP/2 200  ok
+T6    http redirect :18080           HTTP/1.1 308 Permanent Redirect Location: https://app.test/
+T6b   caddy run, http_port 80        loading initial config: loading new config: http app module: start: listening on 127.0.0.1:80: listen tcp 127.0.0.1:80: bind: permission denied
+T7    caddy run [::1]:18443          starts
+T7    caddy sockets                  TCP 127.0.0.1:2101, TCP [::1]:18080, TCP [::1]:18443, UDP [::1]:18443
+T7    caddy non-loopback sockets     none
+T7    https [::1]:18443              HTTP/2 200  ok
+T8    5 start/stop cycles, no pause  5 of 5 served a request
+T9    hold 127.0.0.1:18443, load     HTTP 400 loading config: loading new config: http app module: start: listening on 127.0.0.1:18443: listen tcp 127.0.0.1:18443: bind: address already in use
+T12   T9-hold connect 127.0.0.1:18443 CONNECTED
+T12   T9-hold bind 127.0.0.1:18443   FAIL EADDRINUSE(48)
+T12   T9-hold netstat -anv           127.0.0.1.18443=port-probe:81534
+T12   T9-hold lsof                   port-prob pid=81534 user=<me> 127.0.0.1:18443
+T12   T9-hold ps -p 81534            <me> port-probe
+T9b   hold 127.0.0.1:18080 (redirect), load HTTP 400 loading config: loading new config: http app module: start: listening on 127.0.0.1:18080: listen tcp 127.0.0.1:18080: bind: address already in use
+T10   hold [::1]:18443, load 127.0.0.1 load OK (HTTP 200)
+T12   T10-v4 connect 127.0.0.1:18443 CONNECTED
+T12   T10-v4 netstat -anv            127.0.0.1.18443=caddy:81524; ::1.18443=port-probe:81629
+T12   T10-v4 lsof                    caddy pid=81524 user=<me> 127.0.0.1:18443; port-prob pid=81629 user=<me> [::1]:18443
+T12   T10-v4 ps -p 81524             <me> ~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/bin/caddy
+T12   T10-v4 ps -p 81629             <me> port-probe
+T12   T10-v6 connect [::1]:18443     CONNECTED
+T12   T10-v6 netstat -anv            127.0.0.1.18443=caddy:81524; ::1.18443=port-probe:81629
+T12   T10-v6 lsof                    caddy pid=81524 user=<me> 127.0.0.1:18443; port-prob pid=81629 user=<me> [::1]:18443
+T12   T10-v6 ps -p 81524             <me> ~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/bin/caddy
+T12   T10-v6 ps -p 81629             <me> port-probe
+T11   wildcard hold, then std bind 127.0.0.1 OK
+T11   wildcard hold, then caddy load load OK (HTTP 200)
+T11   https 127.0.0.1:18080          HTTP/2 200  ok
+T12   T11 connect 127.0.0.1:18080    CONNECTED
+T12   T11 bind 127.0.0.1:18080       FAIL EADDRINUSE(48)
+T12   T11 netstat -anv               127.0.0.1.18080=caddy:81524; *.18080=port-probe:81770
+T12   T11 lsof                       caddy pid=81524 user=<me> 127.0.0.1:18080; port-prob pid=81770 user=<me> *:18080
+T12   T11 ps -p 81524                <me> ~/Desktop/OmarProjects/marsa-s01/spikes/s01-caddy-ports/bin/caddy
+T12   T11 ps -p 81770                <me> port-probe
+STATE Caddy user dirs                unchanged
+END   ports 18080 18443 18081 2101   free
+END   caddy processes of this folder 0 alive
+END   ports 80 443 as before         held by Herd, as before

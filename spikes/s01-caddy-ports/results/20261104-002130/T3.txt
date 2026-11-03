@@ -1,0 +1,8 @@
+$ port-probe bind 127.0.0.1:8080
+OK bind 127.0.0.1:8080
+exit=0
+
+$ port-probe bind [::1]:8080
+OK bind [::1]:8080
+exit=0
+
