@@ -12,14 +12,31 @@ name = "marsa_core"
 default = ["full"]
 # Modules that start processes or open sockets sit behind this feature, so the
 # shim can depend on the core without pulling tokio or reqwest (architecture.md
-# section 3).
-full = ["dep:tokio", "dep:reqwest", "dep:notify"]
+# section 3). The installer's crates (signature, checksum, archives, logs) are
+# here too: only the `installer` module uses them (task M2-01).
+full = [
+  "dep:tokio",
+  "dep:reqwest",
+  "dep:notify",
+  "dep:minisign-verify",
+  "dep:sha2",
+  "dep:flate2",
+  "dep:tar",
+  "dep:zip",
+  "dep:tracing",
+]
 
 [dependencies]
 # Optional, so `full` can switch them on with `dep:` and the shim can leave them out.
 tokio = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
+minisign-verify = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 directories.workspace = true
 semver.workspace = true
 serde.workspace = true

@@ -1,0 +1,15 @@
+# How Composer is laid out on disk (task M2-01). See php.toml for how a recipe
+# and the signed manifest work together.
+#
+# No `[check]`: running `composer.phar` needs PHP, which may not be installed.
+name = "composer"
+
+# One file for every system, saved as is (not unpacked).
+[platform.any]
+programs = { composer = "composer.phar" }
+
+[[platform.any.artifact]]
+name = "phar"
+url = "https://getcomposer.org/download/{version}/composer.phar"
+format = "raw"
+file_name = "composer.phar"

@@ -14,15 +14,22 @@ license = "Apache-2.0"
 [workspace.dependencies]
 # Binaries only (AGENTS.md section 8): the libraries use `thiserror`.
 anyhow = "1"
-clap = "4"
+# `derive`: subcommands as structs in `marsa` and `xtask` (task M2-01).
+clap = { version = "4", features = ["derive"] }
 directories = "6"
+# Default backend `rust_backend` (miniz_oxide): pure Rust, no C zlib.
+flate2 = "1"
+minisign-verify = "0.3"
 notify = "8"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
-# Only `Value` is used, to read two keys from `composer.json` and
-# `package.json`; no derive, so no `serde_derive` build time (task M1-04).
+# No extra features: `Value` reads two keys from `composer.json` and
+# `package.json` (task M1-04), and typed structs read the manifest (M2-02).
 serde_json = { version = "1", default-features = false, features = ["std"] }
+sha2 = "0.11"
+# No `xattr`: the installer does not keep extended attributes (task M2-03).
+tar = { version = "0.4", default-features = false }
 tempfile = "3"
 thiserror = "2"
 # No `preserve_order` or other extras: the shim depends on the core, so its size
@@ -30,6 +37,12 @@ thiserror = "2"
 # the owner accepted the size cost (task M1-05).
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde", "display"] }
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+# `env-filter`: `MARSA_LOG=debug` raises the log level (task M2-06).
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Deflate through flate2 only (the same crate as above, so one backend). No
+# bzip2, zstd, lzma, aes, or zopfli: the archives we read do not use them.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 # Architecture rule: a lock is never held across `.await`, and `unwrap()` is
 # banned outside tests (AGENTS.md section 6).
