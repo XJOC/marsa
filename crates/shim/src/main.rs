@@ -1,7 +1,7 @@
 //! `marsa-shim`: runs the real program at the version the project asks for.
 //!
-//! It is installed under many names (`php`, `node`, and later `npm`, `npx`,
-//! `composer`) and learns its job from its own file name. It never talks to the
+//! It is installed under many names (`php`, `node`, `npm`, `npx`, `composer`)
+//! and learns its job from its own file name. It never talks to the
 //! daemon, never uses tokio, and never searches `PATH`: it always runs an
 //! absolute path inside `runtimes/`.
 
@@ -19,7 +19,7 @@ use std::process::ExitCode;
 
 use marsa_core::config::{self, ConfigPaths};
 use marsa_core::resolver::{self, Tool};
-use marsa_core::runtimes::RuntimesDir;
+use marsa_core::runtimes::{Runtime, RuntimesDir};
 use semver::Version;
 
 use crate::error::ShimError;
@@ -54,7 +54,14 @@ fn run() -> Result<Infallible, ShimError> {
     let runtimes = RuntimesDir::in_dir(&data_dir);
     let version = pick_version(name.tool(), &cwd, &data_dir, &runtimes)?;
 
-    let plan = Plan::new(name, &runtimes, &version, args);
+    // One copy of Composer serves every PHP version; the highest one runs.
+    // The list is sorted, so the highest is the last.
+    let composer = match name {
+        ShimName::Composer => runtimes.installed(Runtime::Composer)?.pop(),
+        _ => None,
+    };
+
+    let plan = Plan::new(name, &runtimes, &version, composer.as_ref(), args)?;
     plan.check()?;
     Err(sys::exec(plan.command(depth)))
 }
