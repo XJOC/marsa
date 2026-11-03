@@ -1,11 +1,137 @@
-//! `marsa`: the command-line client. It never changes state by itself; every
-//! command maps to a route on the daemon.
+//! `marsa`: the command-line client.
+//!
+//! In M2 `marsa install` runs the installer in this process, because the
+//! daemon has no API yet; see `cli::install`. From M3 every command that
+//! changes state is a call to `marsad`.
 
-use clap::Command;
+use std::path::PathBuf;
+use std::process::ExitCode;
 
-fn main() {
-    Command::new("marsa")
-        .version(env!("CARGO_PKG_VERSION"))
-        .about("Command-line client for the Marsa daemon")
-        .get_matches();
+use clap::{Parser, Subcommand};
+use marsa::cli::install::{self, InstallArgs};
+use marsa::cli::runtimes::{self, RuntimesArgs};
+
+/// Local development runtimes and sites.
+#[derive(Debug, Parser)]
+#[command(name = "marsa", version, about)]
+struct Cli {
+    /// Use this folder as the app data folder, for tests. The shims always
+    /// read the default folder, so they do not see what is installed here.
+    /// There is no environment variable for it, on purpose.
+    #[arg(long, global = true, value_name = "PATH")]
+    data_dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Install a version of PHP, Node.js, or Composer.
+    Install(InstallArgs),
+    /// List the installed versions.
+    Runtimes(RuntimesArgs),
+}
+
+// One thread is enough: the command waits on one install at a time.
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> ExitCode {
+    // Wrong arguments exit here with code 2 and clap's own message.
+    let cli = Cli::parse();
+    marsa::cli::init_logging();
+    let data_dir = match marsa::cli::data_dir(cli.data_dir) {
+        Ok(dir) => dir,
+        Err(failure) => return failure.report(),
+    };
+    match &cli.command {
+        Command::Install(args) => install::run(args, &data_dir).await,
+        Command::Runtimes(args) => runtimes::run(args, &data_dir),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory as _;
+    use clap::error::ErrorKind;
+    use marsa::cli::Tool;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("marsa").chain(args.iter().copied()))
+    }
+
+    fn install(args: &[&str]) -> InstallArgs {
+        match parse(args).expect("valid arguments").command {
+            Command::Install(args) => args,
+            other => panic!("not install: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn install_takes_a_tool_a_version_and_force() {
+        assert_eq!(
+            install(&["install", "php", "8.4"]),
+            InstallArgs {
+                tool: Tool::Php,
+                version: Some("8.4".into()),
+                force: false,
+            }
+        );
+        assert_eq!(
+            install(&["install", "node"]),
+            InstallArgs {
+                tool: Tool::Node,
+                version: None,
+                force: false,
+            }
+        );
+        assert_eq!(
+            install(&["install", "composer", "2", "--force"]),
+            InstallArgs {
+                tool: Tool::Composer,
+                version: Some("2".into()),
+                force: true,
+            }
+        );
+    }
+
+    #[test]
+    fn bad_arguments_exit_with_code_2() {
+        for args in [
+            &["install", "ruby"][..],
+            &["install"],
+            &["install", "php", "8.4", "8.3"],
+            &["runtimes", "python"],
+            &[],
+        ] {
+            let err = parse(args).expect_err("invalid arguments");
+            assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
+        }
+        assert_eq!(
+            parse(&["install", "ruby"]).expect_err("ruby").kind(),
+            ErrorKind::InvalidValue
+        );
+    }
+
+    #[test]
+    fn data_dir_is_global_and_runtimes_takes_an_optional_tool() {
+        let cli = parse(&["runtimes", "--data-dir", "/tmp/m"]).expect("valid");
+        assert_eq!(cli.data_dir, Some(PathBuf::from("/tmp/m")));
+        match cli.command {
+            Command::Runtimes(args) => assert_eq!(args.tool, None),
+            other => panic!("not runtimes: {other:?}"),
+        }
+        match parse(&["--data-dir", "/x", "runtimes", "php"])
+            .expect("valid")
+            .command
+        {
+            Command::Runtimes(args) => assert_eq!(args.tool, Some(Tool::Php)),
+            other => panic!("not runtimes: {other:?}"),
+        }
+    }
 }
