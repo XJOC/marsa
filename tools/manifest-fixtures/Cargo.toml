@@ -1,0 +1,31 @@
+# Makes the signed test fixtures for `marsa_core::installer::manifest` (task
+# M2-02). Independent workspace on purpose: the product workspace excludes
+# `tools/`, so the `minisign` signing crate never enters the product's
+# dependency graph. Run it with:
+#   cargo run --manifest-path tools/manifest-fixtures/Cargo.toml
+[workspace]
+resolver = "3"
+members = ["."]
+
+[package]
+name = "manifest-fixtures"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+# Signs prehashed signatures, the minisign default, and makes the key pairs.
+minisign = "0.10"
+# Signs the legacy fixture by hand: minisign 0.10 cannot make legacy signatures.
+ed25519-dalek = "2"
+# Rewrites the key id in the forged-id fixture.
+base64 = "0.23"
+
+[lints]
+workspace = true
+
+# Same lint policy as the product workspace.
+[workspace.lints.clippy]
+await_holding_lock = "deny"
+unwrap_used = "deny"

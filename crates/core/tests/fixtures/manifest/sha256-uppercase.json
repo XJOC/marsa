@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "serial": 3,
+  "runtimes": {
+    "composer": [
+      {
+        "version": "2.8.12",
+        "platforms": {
+          "any": [
+            { "name": "phar", "urls": ["https://getcomposer.org/download/2.8.12/composer.phar"], "sha256": "2E17F6527A6C92F5713BA16E5DFD1B55869AB5E98DE46677E994FED5536316BA", "size": 3000000 }
+          ]
+        }
+      }
+    ]
+  }
+}

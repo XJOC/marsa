@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "serial": 3,
+  "generated_at": "2026-11-04T12:00:00Z",
+  "runtimes": {
+    "php": [
+      {
+        "version": "8.4.23",
+        "platforms": {
+          "darwin-arm64": [
+            {
+              "name": "cli",
+              "urls": ["https://dl.static-php.dev/static-php-cli/common/php-8.4.23-cli-macos-aarch64.tar.gz"],
+              "sha256": "7f6bed8f71430fc0ee86dc83e10b6f6b3379e90318d967ed910b5be160583e9b",
+              "size": 36179860
+            },
+            {
+              "name": "fpm",
+              "urls": ["https://dl.static-php.dev/static-php-cli/common/php-8.4.23-fpm-macos-aarch64.tar.gz"],
+              "sha256": "403ab49d22e6f99407ca5f2efbf699bf06aaaf72bb0588ec2dd995ccb1fabfee",
+              "size": 36200205
+            }
+          ],
+          "windows-x64": [
+            {
+              "name": "zip",
+              "urls": [
+                "https://windows.php.net/downloads/releases/php-8.4.23-nts-Win32-vs17-x64.zip",
+                "https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win32-vs17-x64.zip"
+              ],
+              "sha256": "d24782bd4e069b0cd309dc00c0fe6562100fdb1592f9cb5170ef862221b467ee",
+              "size": 32000000
+            }
+          ]
+        }
+      }
+    ],
+    "node": [
+      {
+        "version": "22.11.0",
+        "platforms": {
+          "darwin-arm64": [
+            {
+              "name": "archive",
+              "urls": ["https://nodejs.org/dist/v22.11.0/node-v22.11.0-darwin-arm64.tar.gz"],
+              "sha256": "128448ee1b537b3d6e77e07d4c47d313d74b19d9c117681c867c3c54afdbd488",
+              "size": 49000000
+            }
+          ]
+        }
+      }
+    ],
+    "composer": [
+      {
+        "version": "2.8.12",
+        "platforms": {
+          "any": [
+            {
+              "name": "phar",
+              "urls": ["https://getcomposer.org/download/2.8.12/composer.phar"],
+              "sha256": "2e17f6527a6c92f5713ba16e5dfd1b55869ab5e98de46677e994fed5536316ba",
+              "size": 3000000
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
