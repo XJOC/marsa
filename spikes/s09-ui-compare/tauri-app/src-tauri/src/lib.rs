@@ -1,6 +1,9 @@
 //! S-09 Tauri window: the Table, SQL, and Logs tabs in React.
 //!
-//! `tauri-app [--bench] [--with-tray]`.
+//! `tauri-app [--grid canvas|dom] [--bench] [--with-tray]`.
+//! - `--grid canvas` (default, S-09b): the table and the logs are drawn on a
+//!   canvas grid (`@glideapps/glide-data-grid`). `--grid dom`: the S-09 DOM
+//!   lists (`@tanstack/react-virtual`), kept for comparison.
 //! - The data stays in Rust. The UI asks for the rows it shows, in batches of
 //!   500 (`table_rows`, `log_lines`), like a real database browser.
 //! - `--bench`: the UI walks the phases (`src/bench.ts`); Rust prints the
@@ -33,21 +36,63 @@ const WINDOW_SIZE: (f64, f64) = (1100.0, 760.0);
 const MENU_OPEN_ID: &str = "open";
 const MENU_QUIT_ID: &str = "quit";
 
+/// How the Table and Logs tabs are drawn.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Grid {
+    /// `@glideapps/glide-data-grid`: one canvas, redrawn while scrolling.
+    Canvas,
+    /// `@tanstack/react-virtual`: one DOM element per visible row (S-09).
+    Dom,
+}
+
+impl Grid {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "canvas" => Ok(Self::Canvas),
+            "dom" => Ok(Self::Dom),
+            other => Err(format!(
+                "unknown --grid value: {other} (expected canvas or dom)"
+            )),
+        }
+    }
+}
+
 /// Command-line options. Unknown arguments are ignored: macOS may add its
 /// own when the app starts from Finder.
 #[derive(Clone, Copy)]
 struct Options {
     bench: bool,
     with_tray: bool,
+    grid: Grid,
 }
 
 impl Options {
-    fn from_args() -> Self {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        Self {
-            bench: args.iter().any(|arg| arg == "--bench"),
-            with_tray: args.iter().any(|arg| arg == "--with-tray"),
+    fn from_args() -> Result<Self, String> {
+        let mut options = Self {
+            bench: false,
+            with_tray: false,
+            grid: Grid::Canvas,
+        };
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--bench" => options.bench = true,
+                "--with-tray" => options.with_tray = true,
+                "--grid" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| "--grid needs a value: canvas or dom".to_string())?;
+                    options.grid = Grid::parse(&value)?;
+                }
+                other => {
+                    if let Some(value) = other.strip_prefix("--grid=") {
+                        options.grid = Grid::parse(value)?;
+                    }
+                }
+            }
         }
+        Ok(options)
     }
 }
 
@@ -57,12 +102,17 @@ impl Options {
 struct AppConfig {
     bench: bool,
     with_tray: bool,
+    grid: Grid,
     pause_ms: u128,
     scroll_ms: u128,
     table_rows: usize,
     table_columns: [&'static str; 8],
     log_lines: usize,
     batch_size: usize,
+    /// `sql-typing`: the text typed one character per frame, and the 1-based
+    /// line it is typed at the start of. The same values as egui.
+    typing_text: &'static str,
+    typing_line: usize,
 }
 
 #[tauri::command]
@@ -70,12 +120,15 @@ fn app_config(options: State<'_, Options>) -> AppConfig {
     AppConfig {
         bench: options.bench,
         with_tray: options.with_tray,
+        grid: options.grid,
         pause_ms: bench::PHASE_PAUSE.as_millis(),
         scroll_ms: bench::SCROLL_DURATION.as_millis(),
         table_rows: data::TABLE_ROWS,
         table_columns: data::TABLE_COLUMNS,
         log_lines: data::LOG_LINES,
         batch_size: data::BATCH_SIZE,
+        typing_text: bench::TYPING_TEXT,
+        typing_line: bench::TYPING_LINE,
     }
 }
 
@@ -113,6 +166,8 @@ fn ui_error(message: String) {
 ///   deltas in ms; `placeholder_frames` counts frames that showed rows still
 ///   waiting for their batch.
 /// - `sql-loaded`: `ms` from opening the tab to the editor being painted.
+/// - `sql-typing`: `intervals` are `requestAnimationFrame` deltas in ms while
+///   the UI types one character per frame.
 #[tauri::command]
 fn bench_phase(
     name: String,
@@ -135,6 +190,10 @@ fn bench_phase(
             ));
             bench::phase(&name, &fields);
         }
+        "sql-typing" => match FrameStats::from_intervals(&intervals.unwrap_or_default()) {
+            Some(stats) => bench::phase(&name, &stats.fields()),
+            None => bench::phase(&name, &[("frames", "0".to_string())]),
+        },
         "sql-loaded" => bench::phase(
             &name,
             &[
@@ -234,8 +293,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-pub fn run() -> tauri::Result<()> {
-    let options = Options::from_args();
+/// Starts the app. Errors are returned as text: a bad argument, or Tauri
+/// failing to start (for example no window server).
+pub fn run() -> Result<(), String> {
+    let options = Options::from_args()?;
     let app = tauri::Builder::default()
         .manage(options)
         .invoke_handler(tauri::generate_handler![
@@ -255,7 +316,8 @@ pub fn run() -> tauri::Result<()> {
             open_window(app.handle())?;
             Ok(())
         })
-        .build(tauri::generate_context!())?;
+        .build(tauri::generate_context!())
+        .map_err(|error| format!("cannot start Tauri: {error}"))?;
     app.run(move |_app, event| {
         // `code: None` means "the last window closed". With the tray the
         // process stays; `app.exit(0)` (Quit, bench end) has a code and exits.

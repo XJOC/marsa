@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { basicSetup, EditorView } from "codemirror";
 import { sql } from "@codemirror/lang-sql";
 import { api, reportError } from "./api";
-import { afterNextPaint, signal } from "./bench";
+import { afterNextPaint, registerEditor, signal } from "./bench";
 
 /**
  * CodeMirror 6 with SQL highlighting. The 5,000 lines come from Rust when the
@@ -24,12 +24,14 @@ export function SqlTab() {
         if (getComputedStyle(view.dom).display !== "flex") {
           reportError("CodeMirror", "editor styles were not applied");
         }
+        registerEditor(view);
         afterNextPaint(() => signal("sql-ready"));
       },
       (error: unknown) => reportError("sql_text", error),
     );
     return () => {
       cancelled = true;
+      if (view !== undefined) registerEditor(null);
       view?.destroy();
     };
   }, []);

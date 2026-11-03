@@ -9,12 +9,18 @@ export class BatchCache<T> {
   private readonly batches = new Map<number, T[]>();
   private readonly inFlight = new Set<number>();
 
+  /**
+   * `onLoad` gets the number of the batch that arrived (rows
+   * `batch * batchSize` onward). `prefetch` is how many batches to load on
+   * each side of the visible rows.
+   */
   constructor(
     private readonly fetchBatch: (start: number, count: number) => Promise<T[]>,
     private readonly total: number,
     private readonly batchSize: number,
     private readonly capacity: number,
-    private readonly onLoad: () => void,
+    private readonly onLoad: (batch: number) => void,
+    private readonly prefetch = 1,
   ) {}
 
   /** The row at `index`, or `undefined` while its batch is not loaded. */
@@ -24,14 +30,14 @@ export class BatchCache<T> {
   }
 
   /**
-   * Loads the batches that cover rows `first..=last`, plus one batch on each
-   * side, so a scroll usually finds the next rows already loaded.
+   * Loads the batches that cover rows `first..=last`, plus `prefetch` batches
+   * on each side, so a scroll usually finds the next rows already loaded.
    */
   ensure(first: number, last: number): void {
     if (this.total === 0) return;
     const lastBatch = Math.floor((this.total - 1) / this.batchSize);
-    const from = Math.max(0, Math.floor(first / this.batchSize) - 1);
-    const to = Math.min(lastBatch, Math.floor(last / this.batchSize) + 1);
+    const from = Math.max(0, Math.floor(first / this.batchSize) - this.prefetch);
+    const to = Math.min(lastBatch, Math.floor(last / this.batchSize) + this.prefetch);
     for (let batch = from; batch <= to; batch++) {
       const rows = this.batches.get(batch);
       if (rows !== undefined) {
@@ -51,7 +57,7 @@ export class BatchCache<T> {
             if (oldest.done === true) break;
             this.batches.delete(oldest.value);
           }
-          this.onLoad();
+          this.onLoad(batch);
         },
         (error: unknown) => {
           this.inFlight.delete(batch);

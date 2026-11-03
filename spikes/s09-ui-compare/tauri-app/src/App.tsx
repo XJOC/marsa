@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { reportError, type AppConfig } from "./api";
 import { runBench, type Tab } from "./bench";
+import { CanvasLogsTab, CanvasTableTab } from "./CanvasTabs";
 import { LogsTab } from "./LogsTab";
 import { SqlTab } from "./SqlTab";
 import { strings } from "./strings";
@@ -11,6 +12,7 @@ const TABS: Tab[] = ["table", "sql", "logs"];
 /**
  * A tab mounts the first time it opens and then stays mounted (hidden), so
  * the SQL editor keeps its text, like the egui app keeps its `String`.
+ * `--grid` picks the canvas grid (default) or the S-09 DOM lists.
  */
 export function App({ config }: { config: AppConfig }) {
   const [tab, setTab] = useState<Tab>("table");
@@ -28,6 +30,8 @@ export function App({ config }: { config: AppConfig }) {
   }, [config, open]);
 
   const panel = (name: Tab) => (tab === name ? "panel" : "panel hidden");
+  const Table = config.grid === "dom" ? TableTab : CanvasTableTab;
+  const Logs = config.grid === "dom" ? LogsTab : CanvasLogsTab;
 
   return (
     <div className="app">
@@ -42,12 +46,13 @@ export function App({ config }: { config: AppConfig }) {
             {strings.tabs[name]}
           </button>
         ))}
+        <span className="badge">{strings.gridBadge[config.grid]}</span>
         {config.bench && <span className="badge">{strings.benchBadge}</span>}
         {config.with_tray && <span className="badge">{strings.trayBadge}</span>}
       </nav>
       <main>
         <section className={panel("table")}>
-          <TableTab config={config} />
+          <Table config={config} />
         </section>
         {opened.has("sql") && (
           <section className={panel("sql")}>
@@ -56,7 +61,7 @@ export function App({ config }: { config: AppConfig }) {
         )}
         {opened.has("logs") && (
           <section className={panel("logs")}>
-            <LogsTab config={config} />
+            <Logs config={config} />
           </section>
         )}
       </main>

@@ -20,7 +20,7 @@ RESPONSIBLE_JS="$ROOT/responsible-pids.js"
 
 RUNS=3
 WARMUP=1
-CASES=ABCDE
+CASES=ABCDEF
 BUILD=1
 # Longest silence between two PHASE lines: idle (10 s) plus a pause (5 s), or
 # a cold first start. Anything longer means the program is stuck.
@@ -35,7 +35,7 @@ usage: ./measure.sh [options]
   --warmup N     unmeasured warm-up runs per case, before the measured ones
                  (default 1: the first start after a build is a cold start)
   --quick        one run, no warm-up (same as --runs 1 --warmup 0)
-  --cases LIST   cases to run, for example B or ABD (default ABCDE)
+  --cases LIST   cases to run, for example B or BCDF (default ABCDEF)
   --no-build     use the programs already built in target/release
   -h, --help     show this help
 
@@ -43,8 +43,9 @@ cases:
   A  tray alone, no window          tray --bench
   B  egui, glow renderer            egui-app --renderer glow --bench
   C  egui, wgpu renderer            egui-app --renderer wgpu --bench
-  D  Tauri                          tauri-app --bench
+  D  Tauri, canvas grid (default)   tauri-app --bench
   E  Tauri with tray, window closed tauri-app --with-tray --bench
+  F  Tauri, DOM grid (S-09 lists)   tauri-app --grid dom --bench   (shown as D-dom)
 USAGE
 }
 
@@ -68,7 +69,7 @@ done
 case "$RUNS" in '' | *[!0-9]*) die "--runs must be a number" ;; esac
 case "$WARMUP" in '' | *[!0-9]*) die "--warmup must be a number" ;; esac
 [ "$RUNS" -ge 1 ] || die "--runs must be 1 or more"
-case "$CASES" in '' | *[!A-E]*) die "--cases takes letters A to E, for example ABD" ;; esac
+case "$CASES" in '' | *[!A-F]*) die "--cases takes letters A to F, for example BCDF" ;; esac
 [ "$(uname -s)" = Darwin ] || die "macOS only"
 command -v footprint >/dev/null || die "footprint not found (it ships with macOS)"
 
@@ -207,7 +208,7 @@ wait_exit() {
 # run_case <case> <run label>. Returns non-zero when the run did not finish.
 run_case() {
   local id=$1 run=$2 kind line rest name fields kv pids
-  local total app webkit count idle_wall="" end_wall cpu done_seen=0
+  local total app webkit count idle_wall="" end_wall cpu done_seen=0 scroll_peak=""
   local -a cmd
   case "$id" in
     A) cmd=("$TRAY_BIN" --bench); kind=native ;;
@@ -215,6 +216,7 @@ run_case() {
     C) cmd=("$EGUI_BIN" --renderer wgpu --bench); kind=native ;;
     D) cmd=("$TAURI_BIN" --bench); kind=webkit ;;
     E) cmd=("$TAURI_BIN" --with-tray --bench); kind=webkit ;;
+    F) cmd=("$TAURI_BIN" --grid dom --bench); kind=webkit ;;
   esac
 
   BASELINE=" $(webkit_all | tr '\n' ' ') "
@@ -261,6 +263,12 @@ run_case() {
     # shellcheck disable=SC2086 # one argument per PID
     read -r total app webkit count <<<"$(sample_memory $pids)"
     record "$id" "$run" "$name" mem_total_mib "$(mib "$total")"
+    # Peak scroll: the larger of the two samples taken when a scroll ends.
+    case "$name" in
+      table-scrolled | logs-scrolled)
+        if [ -z "$scroll_peak" ] || [ "$total" -gt "$scroll_peak" ]; then scroll_peak=$total; fi
+        ;;
+    esac
     record "$id" "$run" "$name" mem_app_mib "$(mib "$app")"
     record "$id" "$run" "$name" mem_webkit_mib "$(mib "$webkit")"
     record "$id" "$run" "$name" webkit_procs "$count"
@@ -277,6 +285,7 @@ run_case() {
   APP_PID=""
   rm -f "$FIFO"
   [ "$done_seen" -eq 1 ] || return 1
+  if [ -n "$scroll_peak" ]; then record "$id" "$run" scroll-peak mem_total_mib "$(mib "$scroll_peak")"; fi
   record "$id" "$run" done ok 1
 }
 
@@ -351,28 +360,31 @@ awk -F '\t' \
     }
     if (count > columns) columns = count
   }
-  function row(c, program, size, start_phase,   closed) {
+  # c: case letter in the samples; label: what the table shows (F is "D-dom").
+  function row(c, label, program, size, start_phase,   closed) {
     closed = f(m(c, "window-closed", "mem_total_mib"), 1)
     if (closed != "-") {
       closed = closed " (WebKit " f(m(c, "window-closed", "webkit_procs"), 0) " procs: " \
         f(m(c, "window-closed", "mem_webkit_mib"), 1) ")"
     }
-    add(c "\t" program "\t" ((c in finished) ? finished[c] : 0) "/" runs "\t" size "\t" \
+    add(label "\t" program "\t" ((c in finished) ? finished[c] : 0) "/" runs "\t" size "\t" \
       f(m(c, start_phase, "ms"), 0) "\t" \
       f(m(c, start_phase, "mem_total_mib"), 1) "\t" f(m(c, "table-scrolled", "mem_total_mib"), 1) "\t" \
       f(m(c, "sql-loaded", "mem_total_mib"), 1) "\t" f(m(c, "logs-scrolled", "mem_total_mib"), 1) "\t" \
-      f(m(c, "idle", "mem_total_mib"), 1) "\t" closed "\t" \
+      f(m(c, "idle", "mem_total_mib"), 1) "\t" f(m(c, "scroll-peak", "mem_total_mib"), 1) "\t" closed "\t" \
       frames(c, "table-scrolled") "\t" f(m(c, "table-scrolled", "cpu_p95"), 1) "\t" \
       f(m(c, "logs-scrolled", "p95"), 1) "\t" f(m(c, "sql-loaded", "ms"), 0) "\t" \
-      f(m(c, "idle", "idle_cpu_pct"), 2))
+      frames(c, "sql-typing") "\t" f(m(c, "idle", "idle_cpu_pct"), 2))
   }
   END {
-    add("Case\tProgram\tRuns\tSize MiB\t1st frame ms\tMem start\tMem table\tMem SQL\tMem logs\tMem idle\tMem after close\tTable frame p50 / p95 / max ms\tTable CPU/frame p95 ms\tLogs frame p95 ms\tSQL load ms\tIdle CPU %")
-    if (index(cases, "A")) row("A", "tray (icon, no window)", size_tray, "ready")
-    if (index(cases, "B")) row("B", "egui-app --renderer glow", size_egui, "first-frame")
-    if (index(cases, "C")) row("C", "egui-app --renderer wgpu", size_egui, "first-frame")
-    if (index(cases, "D")) row("D", "tauri-app", size_tauri " (.app " size_tauri_app ")", "first-frame")
-    if (index(cases, "E")) row("E", "tauri-app --with-tray", size_tauri " (.app " size_tauri_app ")", "first-frame")
+    add("Case\tProgram\tRuns\tSize MiB\t1st frame ms\tMem start\tMem table\tMem SQL\tMem logs\tMem idle\tPeak scroll MiB\tMem after close\tTable frame p50 / p95 / max ms\tTable CPU/frame p95 ms\tLogs frame p95 ms\tSQL load ms\tSQL typing p50 / p95 / max ms\tIdle CPU %")
+    tauri_size = size_tauri " (.app " size_tauri_app ")"
+    if (index(cases, "A")) row("A", "A", "tray (icon, no window)", size_tray, "ready")
+    if (index(cases, "B")) row("B", "B", "egui-app --renderer glow", size_egui, "first-frame")
+    if (index(cases, "C")) row("C", "C", "egui-app --renderer wgpu", size_egui, "first-frame")
+    if (index(cases, "D")) row("D", "D", "tauri-app (canvas grid)", tauri_size, "first-frame")
+    if (index(cases, "F")) row("F", "D-dom", "tauri-app --grid dom", tauri_size, "first-frame")
+    if (index(cases, "E")) row("E", "E", "tauri-app --with-tray", tauri_size, "first-frame")
     for (r = 1; r <= rows; r++) {
       line = "|"
       for (i = 1; i <= columns; i++) line = line " " sprintf("%-" width[i] "s", cell[r, i]) " |"
@@ -394,9 +406,16 @@ awk -F '\t' \
     print "Frame interval: wall time between consecutive frames while scrolling top to bottom in 5 s"
     print "(egui: start of each frame; Tauri: requestAnimationFrame timestamps, 1 ms resolution)."
     print "Table CPU/frame: eframe CPU time per frame (egui only). Idle CPU: CPU time during the"
-    print "10 s idle phase / wall time, percent of one core. Tauri \"Mem table\" and \"Mem logs\" are"
+    print "10 s idle phase / wall time, percent of one core. D-dom \"Mem table\" and \"Mem logs\" are"
     print "sampled right after the scroll: they include WebKit tile surfaces made while scrolling"
     print "(much of it volatile), which WebKit releases about 3 s later, before the next phase."
+    print "D (canvas) has no tile surfaces, but the WebKit heap grows while it draws many distinct"
+    print "strings and is not given back by idle (see README, Known caveats)."
+    print "Peak scroll = the larger of \"Mem table\" and \"Mem logs\" in each run: sampled when each"
+    print "scroll ends, not polled during the scroll, so the true peak can be higher."
+    print "SQL typing: frame intervals while typing 50 characters, one per frame, at the start of"
+    print "line 2,500 of the SQL editor (for information; not part of the decision rule)."
+    print "D = Tauri with the canvas grid (default since S-09b); D-dom = case F, the S-09 DOM lists."
   }' "$MEDIANS" >"$TABLE"
 
 echo

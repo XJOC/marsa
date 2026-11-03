@@ -27,6 +27,14 @@ pub const IDLE_DURATION: Duration = Duration::from_secs(10);
 /// `PHASE window-closed` is printed.
 pub const SETTLE_AFTER_CLOSE: Duration = Duration::from_secs(5);
 
+/// The `sql-typing` phase (S-09b) types these 50 ASCII characters, one per
+/// frame, into the SQL editor. Both programs type the same text.
+pub const TYPING_TEXT: &str = "-- typed by the S-09b bench, one char per frame --";
+
+/// Typing starts at the beginning of this line (1-based): the middle of the
+/// SQL text, so the editor has 2,500 lines above and below the cursor.
+pub const TYPING_LINE: usize = crate::data::SQL_LINES / 2;
+
 static START: OnceLock<Instant> = OnceLock::new();
 
 /// Records the start of `main()`. Call it on the first line of `main()`.
@@ -149,6 +157,13 @@ mod tests {
         assert_eq!(FrameStats::from_intervals(&[]), None);
         assert_eq!(FrameStats::from_intervals(&[16.0, f64::NAN]), None);
         assert_eq!(FrameStats::from_intervals(&[f64::INFINITY]), None);
+    }
+
+    #[test]
+    fn typing_constants_match_the_plan() {
+        assert_eq!(TYPING_TEXT.len(), 50);
+        assert!(TYPING_TEXT.is_ascii());
+        assert_eq!(TYPING_LINE, 2_500);
     }
 
     #[test]

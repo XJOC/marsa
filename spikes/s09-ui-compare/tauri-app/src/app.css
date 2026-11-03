@@ -68,6 +68,13 @@ main {
   position: relative;
 }
 
+/* S-09b canvas grid: fills the panel; the grid sizes itself to this box. */
+.canvas-host {
+  flex: 1;
+  min-block-size: 0;
+  position: relative;
+}
+
 /* Same column widths as the egui table. */
 .table-row {
   display: grid;

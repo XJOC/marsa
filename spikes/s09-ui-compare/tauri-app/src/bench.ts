@@ -5,6 +5,11 @@
 // `requestAnimationFrame` callbacks: WebKit calls them once per rendering
 // update, so a slow update (React, layout, paint) makes the gap longer.
 // Rust computes p50/p95/max with the same code as egui (`s09-common`).
+//
+// The scroll walk works on any element that scrolls natively: the DOM lists
+// (`--grid dom`) and the canvas grid's transparent scroll layer
+// (`--grid canvas`, `.dvn-scroller` in glide-data-grid).
+import type { EditorView } from "codemirror";
 import { api, type AppConfig } from "./api";
 
 export type Tab = "table" | "sql" | "logs";
@@ -111,6 +116,50 @@ function scrollThrough(scroller: Scroller, durationMs: number): Promise<ScrollRe
   });
 }
 
+let editor: EditorView | null = null;
+
+/** The SQL tab hands its CodeMirror view to the bench (`null` when it goes). */
+export function registerEditor(view: EditorView | null): void {
+  editor = view;
+}
+
+/**
+ * Types `text` one character per frame at the cursor, through CodeMirror's
+ * own transactions: the change, the new cursor, and `scrollIntoView`, like a
+ * key press. The first frame is a warm-up; each later frame records its
+ * interval, so the result has one interval per typed character.
+ */
+function typeText(view: EditorView, text: string): Promise<number[]> {
+  return new Promise((resolve) => {
+    const intervals: number[] = [];
+    let warmedUp = false;
+    let last: number | null = null;
+    let index = 0;
+    const tick = (now: number) => {
+      if (!warmedUp) {
+        warmedUp = true;
+        requestAnimationFrame(tick);
+        return;
+      }
+      if (last !== null) intervals.push(now - last);
+      last = now;
+      if (index >= text.length) {
+        resolve(intervals);
+        return;
+      }
+      const at = view.state.selection.main.head;
+      view.dispatch({
+        changes: { from: at, insert: text[index] },
+        selection: { anchor: at + 1 },
+        scrollIntoView: true,
+      });
+      index++;
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
 function scroller(name: "table" | "logs"): Scroller {
   const found = scrollers.get(name);
   if (found === undefined) throw new Error(`no ${name} scroller`);
@@ -138,7 +187,21 @@ export async function runBench(
   await api.benchPhase("sql-loaded", { ms: performance.now() - sqlOpened });
   await sleep(config.pause_ms);
 
-  // 4. Logs, top to bottom.
+  // 3b. Type in the middle of the file: cursor at the start of line
+  // `typing_line`, scrolled into view, then one character per frame.
+  if (editor === null) throw new Error("no SQL editor");
+  const view = editor;
+  const line = view.state.doc.line(config.typing_line);
+  view.focus();
+  view.dispatch({ selection: { anchor: line.from }, scrollIntoView: true });
+  await new Promise<void>((resolve) => afterNextPaint(resolve));
+  const typing = await typeText(view, config.typing_text);
+  // Leave the editor so its blinking cursor cannot wake the idle phase.
+  view.contentDOM.blur();
+  await api.benchPhase("sql-typing", { intervals: typing });
+  await sleep(config.pause_ms);
+
+  // 4. Logs, top to bottom (the SQL tab is hidden from here on).
   open("logs");
   await waitFor("logs-ready");
   const logs = await scrollThrough(scroller("logs"), config.scroll_ms);

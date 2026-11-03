@@ -21,6 +21,7 @@ use crate::view::{Tab, View};
 enum Next {
     TableScroll,
     SqlOpen,
+    SqlType,
     LogsScroll,
     Idle,
     Done,
@@ -56,8 +57,20 @@ impl ScrollRun {
     }
 }
 
+/// The `sql-typing` phase: one character of `bench::TYPING_TEXT` per frame.
+struct TypingRun {
+    /// Frame on which the next character is typed.
+    next: usize,
+    last_frame: Option<Instant>,
+    /// Every character was typed; the next frame closes the measurement.
+    finishing: bool,
+    intervals_ms: Vec<f64>,
+    cpu_ms: Vec<f64>,
+}
+
 enum Step {
     FirstFrame,
+    Typing(Box<TypingRun>),
     Pause {
         until: Instant,
         next: Next,
@@ -125,8 +138,9 @@ impl BenchRun {
                         ("lines", data::SQL_LINES.to_string()),
                     ],
                 );
-                Some(pause(ctx, now, Next::LogsScroll))
+                Some(pause(ctx, now, Next::SqlType))
             }
+            Step::Typing(run) => typing_frame(ctx, now, cpu_usage, run, view),
             Step::Idle {
                 until,
                 repaints,
@@ -194,6 +208,19 @@ fn begin(ctx: &egui::Context, now: Instant, next: Next, view: &mut View) -> Step
         Next::TableScroll => {
             ctx.request_repaint();
             Step::Scroll(Box::new(ScrollRun::new(Tab::Table, "table-scrolled")))
+        }
+        Next::SqlType => {
+            // This frame places the cursor; typing starts on the next one.
+            view.tab = Tab::Sql;
+            view.typing.place_cursor_at_line = Some(bench::TYPING_LINE);
+            ctx.request_repaint();
+            Step::Typing(Box::new(TypingRun {
+                next: 0,
+                last_frame: None,
+                finishing: false,
+                intervals_ms: Vec::with_capacity(64),
+                cpu_ms: Vec::with_capacity(64),
+            }))
         }
         Next::LogsScroll => {
             ctx.request_repaint();
@@ -271,5 +298,48 @@ fn scroll_frame(
     let progress = ((now - started).as_secs_f64() / bench::SCROLL_DURATION.as_secs_f64()).min(1.0);
     scroll.force = Some(progress as f32 * scroll.max);
     run.finishing = progress >= 1.0;
+    None
+}
+
+/// Types one character per frame, then prints `PHASE sql-typing` with the
+/// frame intervals (same definition as the scroll phases).
+fn typing_frame(
+    ctx: &egui::Context,
+    now: Instant,
+    cpu_usage: Option<f32>,
+    run: &mut TypingRun,
+    view: &mut View,
+) -> Option<Step> {
+    ctx.request_repaint();
+    if let Some(last) = run.last_frame {
+        run.intervals_ms.push(millis(now - last));
+        if let Some(cpu) = cpu_usage {
+            run.cpu_ms.push(f64::from(cpu) * 1000.0);
+        }
+    }
+    run.last_frame = Some(now);
+
+    if run.finishing {
+        let mut fields: Vec<(&str, String)> = Vec::with_capacity(8);
+        match FrameStats::from_intervals(&run.intervals_ms) {
+            Some(stats) => fields.extend(stats.fields()),
+            None => fields.push(("frames", "0".to_string())),
+        }
+        if let Some(cpu) = FrameStats::from_intervals(&run.cpu_ms) {
+            fields.extend(cpu.cpu_fields());
+        }
+        // Proof that the key presses reached the editor, not just the bench.
+        let inserted = view
+            .sql
+            .as_deref()
+            .is_some_and(|text| text.contains(bench::TYPING_TEXT));
+        fields.push(("inserted", u8::from(inserted).to_string()));
+        bench::phase("sql-typing", &fields);
+        return Some(pause(ctx, now, Next::LogsScroll));
+    }
+
+    view.typing.char_this_frame = bench::TYPING_TEXT.chars().nth(run.next);
+    run.next += 1;
+    run.finishing = run.next >= bench::TYPING_TEXT.len();
     None
 }

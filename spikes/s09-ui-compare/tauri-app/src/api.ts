@@ -9,18 +9,24 @@ export type Row = string[];
 export interface AppConfig {
   bench: boolean;
   with_tray: boolean;
+  /** `--grid`: canvas grid (default) or the S-09 DOM lists. */
+  grid: "canvas" | "dom";
   pause_ms: number;
   scroll_ms: number;
   table_rows: number;
   table_columns: string[];
   log_lines: number;
   batch_size: number;
+  /** `sql-typing`: text typed one character per frame at the start of line `typing_line` (1-based). */
+  typing_text: string;
+  typing_line: number;
 }
 
 export type PhaseName =
   | "first-frame"
   | "table-scrolled"
   | "sql-loaded"
+  | "sql-typing"
   | "logs-scrolled";
 
 export interface PhaseData {
