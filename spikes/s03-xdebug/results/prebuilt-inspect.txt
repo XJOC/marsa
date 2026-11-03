@@ -1,0 +1,69 @@
+== php -v
+PHP 8.4.23 (cli) (built: Jul  7 2026 06:19:10) (NTS clang 17.0.0)
+Copyright (c) The PHP Group
+Built by static-php-cli 2.8.6
+Zend Engine v4.4.23, Copyright (c) Zend Technologies
+    with Zend OPcache v8.4.23, Copyright (c), by Zend Technologies
+
+== php -n -m (one line)
+[PHP Modules] apcu bcmath bz2 calendar Core ctype curl date dba dom event exif fileinfo filter ftp gd gmp hash iconv imagick imap intl json libxml mbstring mysqli mysqlnd openssl opentelemetry pcntl pcre PDO pdo_mysql pgsql Phar posix protobuf random readline redis Reflection session shmop SimpleXML soap sockets sodium SPL sqlite3 standard swoole sysvmsg sysvsem sysvshm tokenizer xml xmlreader xmlwriter xsl Zend OPcache zip zlib [Zend Modules] Zend OPcache 
+
+== php -n -i (ABI fields)
+Server API => Command Line Interface
+Loaded Configuration File => (none)
+Scan this dir for additional .ini files => (none)
+PHP API => 20240924
+PHP Extension => 20240924
+Zend Extension => 420240924
+Zend Extension Build => API420240924,NTS
+PHP Extension Build => API20240924,NTS
+Debug Build => no
+Thread Safety => disabled
+Zend Signal Handling => enabled
+extension_dir => /lib/php/extensions/no-debug-non-zts-20240924 => /lib/php/extensions/no-debug-non-zts-20240924
+
+== configure command (first 400 chars)
+Configure Command =>  './configure'  '--prefix=' '--with-valgrind=no' '--enable-shared=no' '--enable-static=yes' '--disable-all' '--disable-phpdbg' '--enable-cli' '--enable-fpm' '--disable-embed' '--enable-micro' '--disable-cgi' '--with-config-file-path=/usr/local/etc/php' '--with-config-file-scan-dir=/usr/local/etc/php/conf.d' '--enable-apcu' '--enable-bcmath' '--with-bz2=/Users/runner/work/hoste
+
+== size and sha256
+96778864 bytes  <spike>/work/php-cli/php
+96837016 bytes  <spike>/work/php-fpm/php-fpm
+d0efe2c3ef4a3cd003cd862977f50040e07757b9924207b692c1da3dff450580  <spike>/work/php-cli/php
+887e2582cb66e31b775f8c0b7f4dc08721c7b24f7e7d7b0bd3bfa38746082786  <spike>/work/php-fpm/php-fpm
+
+== otool -L php
+<spike>/work/php-cli/php:
+	/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 1900.180.0)
+	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)
+	/usr/lib/libresolv.9.dylib (compatibility version 1.0.0, current version 1.0.0)
+	/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices (compatibility version 1.0.0, current version 1226.0.0)
+	/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 3502.1.255)
+	/System/Library/Frameworks/Kerberos.framework/Versions/A/Kerberos (compatibility version 5.0.0, current version 6.0.0)
+	/System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration (compatibility version 1.0.0, current version 1351.120.3)
+
+== file / codesign
+<spike>/work/php-cli/php: Mach-O 64-bit executable arm64
+Format=Mach-O thin (arm64)
+CodeDirectory v=20400 size=750332 flags=0x20002(adhoc,linker-signed) hashes=23445+0 location=embedded
+Signature=adhoc
+
+== exported symbols (nm -gU)
+total:    39465   zend_*: 1011   php_*: 755
+0000000105438dd8 S _zend_error_cb
+0000000105435878 S _zend_execute_ex
+0000000100744624 T _zend_extension_dispatch_message
+00000001006f84a8 T _zend_get_executed_filename
+000000010076cab8 T _zend_observer_fcall_register
+000000010075ef00 T _zend_register_ini_entries
+
+== php-fpm -v
+PHP 8.4.23 (fpm-fcgi) (built: Jul  7 2026 06:19:10) (NTS clang 17.0.0)
+Copyright (c) The PHP Group
+Built by static-php-cli 2.8.6
+Zend Engine v4.4.23, Copyright (c) Zend Technologies
+    with Zend OPcache v8.4.23, Copyright (c), by Zend Technologies
+
+== php-fpm -n -m (Zend Modules part)
+[Zend Modules]
+Zend OPcache
+

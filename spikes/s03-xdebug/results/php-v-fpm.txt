@@ -1,0 +1,6 @@
+PHP 8.4.23 (fpm-fcgi) (built: Jul  7 2026 06:19:10) (NTS clang 17.0.0)
+Copyright (c) The PHP Group
+Built by static-php-cli 2.8.6
+Zend Engine v4.4.23, Copyright (c) Zend Technologies
+    with Xdebug v3.5.3, Copyright (c) 2002-2026, by Derick Rethans
+    with Zend OPcache v8.4.23, Copyright (c), by Zend Technologies

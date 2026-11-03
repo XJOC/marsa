@@ -1,0 +1,21 @@
+xdebug 3.5.3 built against php 8.4.23 headers
+build seconds (this run): 49
+== file / size / sha256
+<spike>/work/out/xdebug-8.4-macos-arm64.so: Mach-O 64-bit bundle arm64
+400328 bytes
+30a7ca8243ec576ea484455043559ff7f7f027e5c45d56ff78fa1541da3520d9  <spike>/work/out/xdebug-8.4-macos-arm64.so
+== codesign
+Format=Mach-O thin (arm64)
+CodeDirectory v=20400 size=3202 flags=0x20002(adhoc,linker-signed) hashes=97+0 location=embedded
+Signature=adhoc
+== otool -L
+<spike>/work/out/xdebug-8.4-macos-arm64.so:
+	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)
+== undefined symbols resolved at load time (count; they must come from the php binary)
+undefined total:      244, of which Zend/PHP API: 121
+_zend_error_cb
+_zend_execute_ex
+== php-config
+--version: 8.4.23
+--vernum: 80423
+--extension-dir: <spike>/work/phpdev/lib/php/extensions/no-debug-non-zts-20240924

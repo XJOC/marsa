@@ -1,0 +1,7 @@
+== sizes (bytes)
+36179860  <spike>/work/downloads/php-8.4.23-cli-macos-aarch64.tar.gz
+36200205  <spike>/work/downloads/php-8.4.23-fpm-macos-aarch64.tar.gz
+96778864  <spike>/work/php-cli/php
+96837016  <spike>/work/php-fpm/php-fpm
+400328  <spike>/work/out/xdebug-8.4-macos-arm64.so
+150602  <spike>/work/out/xdebug.so.tar.gz (gzip of the .so, as it would be shipped)

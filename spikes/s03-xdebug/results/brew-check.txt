@@ -1,0 +1,3 @@
+brew list --versions: 89 lines, sha256 27e41ccec2e2e81de08c27c78a0fe9ccde4abc56780e6bc29251544b2eb84a09.
+Taken before the first download and again after the last step: identical (empty diff).
+The list itself is not committed (it is the owner's package list).

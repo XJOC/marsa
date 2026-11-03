@@ -1,0 +1,2 @@
+# spc version (from https://dl.static-php.dev/v3/spc-bin/nightly/spc-macos-aarch64)
+StaticPHP 3.0.0-alpha1
