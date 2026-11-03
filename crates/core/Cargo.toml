@@ -20,6 +20,12 @@ full = ["dep:tokio", "dep:reqwest", "dep:notify"]
 tokio = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
+semver.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
