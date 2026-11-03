@@ -3,7 +3,7 @@
   "ops": [
     {
       "op": "trust_install",
-      "cert": "/home/example/.local/share/marsa/caddy/root.crt"
+      "pem": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
     },
     {
       "op": "resolved_install",

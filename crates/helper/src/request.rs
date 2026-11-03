@@ -4,13 +4,17 @@
 //! The helper runs as root, so nothing here is lenient. An unknown op, an
 //! unknown or duplicate field, a wrong type, or a bad value rejects the whole
 //! request, like a strict Laravel Form Request that also fails on extra keys.
+//! The only way to get a [`ValidRequest`] is [`Request::from_arg`], so an op
+//! can never run from a request that skipped a check.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::path::{Component, Path, PathBuf, Prefix};
 
 use serde::Deserialize;
+use serde_json::Value;
 use serde_json::error::Category;
+
+use crate::response::code;
 
 /// The protocol version of requests and responses.
 pub const VERSION: u32 = 1;
@@ -18,21 +22,33 @@ pub const VERSION: u32 = 1;
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_OPS: usize = 16;
 const MAX_NAMES: usize = 1000;
-const MAX_CERT_BYTES: usize = 1024;
+const MAX_PEM_BYTES: usize = 16 * 1024;
 const MAX_LABEL: usize = 63;
 /// Ports below 1024 need root. Caddy and the DNS server never run as root.
 const MIN_PORT: u16 = 1024;
 
-/// `{"version": 1, "ops": [...]}`.
+/// `{"version": 1, "ops": [...]}`, before validation.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    pub version: u32,
-    pub ops: Vec<Op>,
+    version: u32,
+    ops: Vec<Op>,
 }
 
-/// One op from the closed list (task M4-05). The helper never writes to a path
-/// from the request: every path it writes is a constant in its code.
+/// A request that passed every check. The field is private, so only this
+/// module can build one.
+#[derive(Debug)]
+pub struct ValidRequest(Request);
+
+impl ValidRequest {
+    /// The ops, in the order of the request.
+    pub fn ops(&self) -> &[Op] {
+        &self.0.ops
+    }
+}
+
+/// One op from the closed list (task M4-05). The helper never opens or writes
+/// a path from the request: every path it touches is a constant in its code.
 ///
 /// Ops without fields are empty struct variants (`TrustRemove {}`), not unit
 /// variants: serde ignores extra keys next to the tag of a unit variant, even
@@ -40,9 +56,11 @@ pub struct Request {
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Op {
-    /// Trusts the CA certificate at `cert`. The helper only reads this path.
+    /// Trusts a CA root certificate, sent as PEM text. The text, not a path:
+    /// root must never open a path the caller chose (a symlink, a FIFO, a
+    /// network share). Task M4-09 parses the PEM.
     TrustInstall {
-        cert: PathBuf,
+        pem: String,
     },
     TrustRemove {},
     /// macOS: `/etc/resolver/test`, so `.test` names go to `127.0.0.1:<port>`.
@@ -114,50 +132,34 @@ pub enum RequestError {
 impl RequestError {
     /// Stable error name for `marsad`. Never changes once released.
     pub fn code(&self) -> &'static str {
-        "request_invalid"
+        code::REQUEST_INVALID
     }
 }
 
 impl Request {
-    /// Reads the `apply` argument and validates every value.
+    /// Reads the `apply` argument and checks every value, in this order: the
+    /// size (so a huge argument is never parsed), UTF-8, JSON syntax, the
+    /// shape and the version, the typed parse, and the values.
     ///
     /// # Errors
     ///
     /// `request_invalid` for anything outside the closed list or the limits.
-    pub fn from_arg(raw: &OsStr) -> Result<Self, RequestError> {
-        let request = Self::parse(raw)?;
-        request.validate()?;
-        Ok(request)
-    }
-
-    /// Checks the size, the encoding, and the JSON shape, in that order. The
-    /// size comes first, so a huge argument is never parsed.
-    ///
-    /// # Errors
-    ///
-    /// `request_invalid` if the argument is too large, not UTF-8, not JSON, or
-    /// not a request of known ops and fields.
-    pub fn parse(raw: &OsStr) -> Result<Self, RequestError> {
+    pub fn from_arg(raw: &OsStr) -> Result<ValidRequest, RequestError> {
         if raw.len() > MAX_REQUEST_BYTES {
             return Err(RequestError::TooLarge);
         }
         let text = raw.to_str().ok_or(RequestError::NotUtf8)?;
-        serde_json::from_str(text).map_err(|err| RequestError::Json {
-            problem: match err.classify() {
-                Category::Data => "does not match the request format",
-                Category::Io | Category::Syntax | Category::Eof => "is not valid JSON",
-            },
-            line: err.line(),
-            column: err.column(),
-        })
+        let value: Value = serde_json::from_str(text).map_err(json_error)?;
+        check_shape(&value)?;
+        // From the text, not `from_value`: a `Value` keeps only the last of
+        // two equal keys, and the typed parse must see both to reject them.
+        let request: Request = serde_json::from_str(text).map_err(json_error)?;
+        request.validate()?;
+        Ok(ValidRequest(request))
     }
 
-    /// Checks every value against the limits of task M4-05.
-    ///
-    /// # Errors
-    ///
-    /// `request_invalid` with the first field that is out of bounds.
-    pub fn validate(&self) -> Result<(), RequestError> {
+    fn validate(&self) -> Result<(), RequestError> {
+        // Checked on the JSON value already; again here on the typed value.
         if self.version != VERSION {
             let reason = format!("{} is not supported, only {VERSION} is", self.version);
             return Err(invalid("version".to_owned(), reason));
@@ -170,7 +172,7 @@ impl Request {
             // Every variant is listed, so a new op with fields cannot skip
             // validation by accident.
             match op {
-                Op::TrustInstall { cert } => check_cert(format!("ops[{i}].cert"), cert)?,
+                Op::TrustInstall { pem } => check_pem(format!("ops[{i}].pem"), pem)?,
                 Op::ResolverInstall { port } | Op::ResolvedInstall { port } => {
                     check_port(format!("ops[{i}].port"), *port)?;
                 }
@@ -198,6 +200,46 @@ impl Request {
     }
 }
 
+fn json_error(err: serde_json::Error) -> RequestError {
+    RequestError::Json {
+        problem: match err.classify() {
+            Category::Data => "does not match the request format",
+            Category::Io | Category::Syntax | Category::Eof => "is not valid JSON",
+        },
+        line: err.line(),
+        column: err.column(),
+    }
+}
+
+/// An object whose `version` is 1 and whose `ops` is an array of objects.
+/// serde would also accept arrays in place of objects (`[1, [["pf_remove"]]]`),
+/// and the version comes first, so a newer request with new ops gets a clear
+/// error.
+fn check_shape(value: &Value) -> Result<(), RequestError> {
+    let Some(request) = value.as_object() else {
+        return Err(invalid("request".to_owned(), "is not an object".to_owned()));
+    };
+    match request.get("version").and_then(Value::as_u64) {
+        Some(version) if version == u64::from(VERSION) => {}
+        Some(version) => {
+            let reason = format!("{version} is not supported, only {VERSION} is");
+            return Err(invalid("version".to_owned(), reason));
+        }
+        None => {
+            let reason = "is missing or not a whole number".to_owned();
+            return Err(invalid("version".to_owned(), reason));
+        }
+    }
+    let Some(ops) = request.get("ops").and_then(Value::as_array) else {
+        let reason = "is missing or not an array".to_owned();
+        return Err(invalid("ops".to_owned(), reason));
+    };
+    match ops.iter().position(|op| !op.is_object()) {
+        Some(i) => Err(invalid(format!("ops[{i}]"), "is not an object".to_owned())),
+        None => Ok(()),
+    }
+}
+
 fn invalid(field: String, reason: String) -> RequestError {
     RequestError::Invalid { field, reason }
 }
@@ -209,23 +251,16 @@ fn check_port(field: String, port: u16) -> Result<(), RequestError> {
     Ok(())
 }
 
-/// An absolute path for this OS, without `..`. On Windows it must start with a
-/// drive letter: a `\\server\share` path would make the helper, running as
-/// SYSTEM, connect to another machine.
-fn check_cert(field: String, cert: &Path) -> Result<(), RequestError> {
-    let bytes = cert.as_os_str().as_encoded_bytes();
-    let reason = if bytes.len() > MAX_CERT_BYTES {
-        "is longer than 1024 bytes"
-    } else if bytes.contains(&0) {
+/// Only the size and the bytes. Task M4-09 parses the PEM itself.
+fn check_pem(field: String, pem: &str) -> Result<(), RequestError> {
+    let reason = if pem.is_empty() {
+        "is empty"
+    } else if pem.len() > MAX_PEM_BYTES {
+        "is longer than 16384 bytes"
+    } else if !pem.is_ascii() {
+        "is not ASCII"
+    } else if pem.contains('\0') {
         "contains a NUL byte"
-    } else if !cert.is_absolute() {
-        "is not an absolute path"
-    } else if cert.components().any(|part| part == Component::ParentDir) {
-        "contains a `..` component"
-    } else if let Some(Component::Prefix(prefix)) = cert.components().next()
-        && !matches!(prefix.kind(), Prefix::Disk(_))
-    {
-        "is not on a local drive"
     } else {
         return Ok(());
     };
@@ -272,7 +307,7 @@ mod tests {
     #[test]
     fn op_names_match_the_request_tags() {
         let ops = [
-            r#"{"op":"trust_install","cert":"/c"}"#,
+            r#"{"op":"trust_install","pem":"x"}"#,
             r#"{"op":"trust_remove"}"#,
             r#"{"op":"resolver_install","port":1024}"#,
             r#"{"op":"resolver_remove"}"#,
@@ -291,6 +326,27 @@ mod tests {
                 "{json}"
             );
         }
+    }
+
+    /// Why the typed parse reads the text and not the `Value`.
+    #[test]
+    fn a_value_hides_duplicate_keys() {
+        let json = r#"{"version":1,"ops":[{"op":"resolver_install","port":18053,"port":18054}]}"#;
+        let value: Value = serde_json::from_str(json).unwrap();
+        assert!(serde_json::from_value::<Request>(value).is_ok());
+        assert!(Request::from_arg(OsStr::new(json)).is_err());
+    }
+
+    #[test]
+    fn a_pem_of_exactly_the_limit_is_valid() {
+        let op = Op::TrustInstall {
+            pem: "A".repeat(MAX_PEM_BYTES),
+        };
+        let request = Request {
+            version: 1,
+            ops: vec![op],
+        };
+        assert!(request.validate().is_ok());
     }
 
     #[test]

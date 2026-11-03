@@ -6,12 +6,14 @@
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// The only `PATH` a child process sees. The helper runs absolute paths, so
 /// this only stops a child from finding programs through the caller's `PATH`.
 const SAFE_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+/// The mode of a folder that `write_atomic` creates.
+const DIR_MODE: u32 = 0o755;
 
 /// The output of a program that finished.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -23,9 +25,16 @@ pub struct RunOutput {
 }
 
 /// The file and process calls the ops may make.
-// The op handlers (tasks M4-07 to M4-09) call these methods; until then only
-// the tests do.
-#[allow(dead_code)]
+///
+/// Precondition for every path: it is a constant in the helper's code, in a
+/// folder that only root can write. The checks below look at the path and
+/// then use it; that is safe only because the user cannot change such a
+/// folder between the two steps.
+// Outside tests only: the tests call these, and an unmet `expect` warns.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the handlers of M4-07 to M4-09")
+)]
 pub trait System {
     /// The whole file, or an error if it is larger than `max` bytes or is not
     /// a regular file.
@@ -34,9 +43,9 @@ pub trait System {
     /// Whether `path` exists. A symlink counts even if its target does not.
     fn exists(&self, path: &Path) -> bool;
 
-    /// Writes a temp file in the same folder, syncs it, then renames it over
-    /// `path`. Creates the parent folder with mode `0755` if it is missing.
-    /// `mode` is the Unix file mode; Windows ignores it.
+    /// Writes a temp file in the same folder, syncs it, renames it over
+    /// `path`, then syncs the folder. Creates the folder with mode `0755` if
+    /// it is missing. `mode` is the Unix file mode; Windows ignores it.
     fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()>;
 
     /// Deletes a file. A missing file counts as success.
@@ -46,6 +55,9 @@ pub trait System {
     /// means a constant in the code, like `/sbin/pfctl`: it cannot come from
     /// the request.
     fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput>;
+
+    /// The path of the running helper, for the boot job (task M4-08).
+    fn current_exe(&self) -> io::Result<PathBuf>;
 }
 
 /// The real disk and processes.
@@ -77,11 +89,14 @@ impl System for RealSystem {
                 "the path has no folder or no file name",
             ));
         };
-        create_dir(dir)?;
+        create_dir(dir, DIR_MODE)?;
         let mut tmp_name = OsString::from(".");
         tmp_name.push(name);
         tmp_name.push(format!(".marsa-tmp-{}", std::process::id()));
         let tmp = dir.join(tmp_name);
+        // A temp file left by a crash of an earlier run with the same PID.
+        // `create_new` below still refuses anything that appears after this.
+        let _ = fs::remove_file(&tmp);
 
         let mut options = OpenOptions::new();
         // `create_new`: never write through a file or symlink already there.
@@ -97,7 +112,8 @@ impl System for RealSystem {
             // Best effort: the first error is the one to report.
             let _ = fs::remove_file(&tmp);
         }
-        result
+        result?;
+        sync_dir(dir)
     }
 
     fn remove(&self, path: &Path) -> io::Result<()> {
@@ -107,6 +123,8 @@ impl System for RealSystem {
         }
     }
 
+    /// The environment is empty except `PATH`. The Windows environment
+    /// (`SystemRoot`, Windows folders in `PATH`) is set in task M4-19.
     fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
         if !Path::new(program).is_absolute() {
             return Err(io::Error::new(
@@ -114,17 +132,26 @@ impl System for RealSystem {
                 "the program is not an absolute path",
             ));
         }
-        let output = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .env_clear()
             .env("PATH", SAFE_PATH)
-            .stdin(Stdio::null())
-            .output()?;
+            .stdin(Stdio::null());
+        // The child must not start in the caller's folder, which the user
+        // controls. `/` is a Unix path; Windows is set in task M4-19.
+        #[cfg(unix)]
+        command.current_dir("/");
+        let output = command.output()?;
         Ok(RunOutput {
             code: output.status.code(),
             stdout: output.stdout,
             stderr: output.stderr,
         })
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        std::env::current_exe()
     }
 }
 
@@ -154,9 +181,9 @@ fn too_large(max: u64) -> io::Error {
     )
 }
 
-/// Creates `dir` and the folders above it. Only `dir` itself is set to `0755`
-/// against the umask; folders that exist keep their mode.
-fn create_dir(dir: &Path) -> io::Result<()> {
+/// Creates `dir` and the folders above it. Only `dir` itself is set to
+/// `mode` against the umask; folders that exist keep their mode.
+fn create_dir(dir: &Path, mode: u32) -> io::Result<()> {
     if dir.is_dir() {
         return Ok(());
     }
@@ -164,14 +191,16 @@ fn create_dir(dir: &Path) -> io::Result<()> {
     builder.recursive(true);
     // Folder modes exist on Unix only.
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o755);
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, mode);
     builder.create(dir)?;
     // Again after `create`, because the umask may have removed bits.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(mode))?;
     }
+    #[cfg(not(unix))]
+    let _ = mode;
     Ok(())
 }
 
@@ -190,17 +219,32 @@ fn set_mode(_file: &File, _mode: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// Syncs the folder, so the rename itself survives a power cut.
+// Unix only: Windows cannot open a folder as a `File`, and NTFS logs renames.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 pub use fake::FakeSystem;
 
 #[cfg(test)]
 mod fake {
     use std::cell::RefCell;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::io;
     use std::path::{Path, PathBuf};
 
     use super::{RunOutput, System, too_large};
+
+    /// What `current_exe` returns.
+    pub const EXE: &str = "/fake/marsa-helper";
 
     /// Files and commands in memory, for tests.
     #[derive(Default)]
@@ -209,8 +253,30 @@ mod fake {
         pub files: RefCell<BTreeMap<PathBuf, (Vec<u8>, u32)>>,
         /// Every `run` call: the program and its arguments.
         pub log: RefCell<Vec<(String, Vec<String>)>>,
-        /// The output of each program. A program without one fails as not found.
-        pub outputs: BTreeMap<&'static str, RunOutput>,
+        /// The output of one exact command line. See [`FakeSystem::script`].
+        pub outputs: BTreeMap<(&'static str, Vec<String>), RunOutput>,
+        /// The output of any other command line of a program. A program with
+        /// neither fails as not found.
+        pub defaults: BTreeMap<&'static str, RunOutput>,
+        /// Paths where `write_atomic` fails and the file stays as it was.
+        pub fail_writes: BTreeSet<PathBuf>,
+        /// Paths where `remove` fails and the file stays.
+        pub fail_removes: BTreeSet<PathBuf>,
+    }
+
+    impl FakeSystem {
+        /// Scripts the output of `program` run with exactly `args`.
+        pub fn script(&mut self, program: &'static str, args: &[&str], output: RunOutput) {
+            self.outputs.insert((program, strings(args)), output);
+        }
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    fn injected() -> io::Error {
+        io::Error::new(io::ErrorKind::PermissionDenied, "injected failure")
     }
 
     impl System for FakeSystem {
@@ -227,21 +293,38 @@ mod fake {
         }
 
         fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+            if self.fail_writes.contains(path) {
+                return Err(injected());
+            }
             let entry = (bytes.to_vec(), mode);
             self.files.borrow_mut().insert(path.to_path_buf(), entry);
             Ok(())
         }
 
         fn remove(&self, path: &Path) -> io::Result<()> {
+            if self.fail_removes.contains(path) {
+                return Err(injected());
+            }
             self.files.borrow_mut().remove(path);
             Ok(())
         }
 
         fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
-            let args = args.iter().map(|arg| (*arg).to_owned()).collect();
-            self.log.borrow_mut().push((program.to_owned(), args));
-            let output = self.outputs.get(program).cloned();
-            output.ok_or_else(|| io::ErrorKind::NotFound.into())
+            let key = (program, strings(args));
+            self.log
+                .borrow_mut()
+                .push((program.to_owned(), key.1.clone()));
+            let output = self
+                .outputs
+                .get(&key)
+                .or_else(|| self.defaults.get(program));
+            output
+                .cloned()
+                .ok_or_else(|| io::ErrorKind::NotFound.into())
+        }
+
+        fn current_exe(&self) -> io::Result<PathBuf> {
+            Ok(PathBuf::from(EXE))
         }
     }
 }
@@ -251,6 +334,11 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn names_in(dir: &Path) -> Vec<OsString> {
+        let entries = fs::read_dir(dir).unwrap();
+        entries.map(|entry| entry.unwrap().file_name()).collect()
+    }
+
     #[test]
     fn write_atomic_creates_the_folder_and_leaves_no_temp_file() {
         let tmp = TempDir::new().unwrap();
@@ -259,26 +347,36 @@ mod tests {
         RealSystem.write_atomic(&path, b"one", 0o644).unwrap();
         RealSystem.write_atomic(&path, b"two", 0o600).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"two");
-        let names: Vec<_> = fs::read_dir(&dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(names, ["rules.conf"]);
+        assert_eq!(names_in(&dir), ["rules.conf"]);
     }
 
+    #[test]
+    fn write_atomic_removes_the_temp_file_when_the_rename_fails() {
+        let tmp = TempDir::new().unwrap();
+        // A folder in place of the file: the rename cannot replace it.
+        let path = tmp.path().join("rules.conf");
+        fs::create_dir(&path).unwrap();
+        assert!(RealSystem.write_atomic(&path, b"x", 0o644).is_err());
+        assert_eq!(names_in(tmp.path()), ["rules.conf"]);
+    }
+
+    /// Modes with group write: a usual umask (`022`) removes that bit, so these
+    /// pass only if the mode is set again after `open` and `create`.
     #[cfg(unix)]
     #[test]
-    fn write_atomic_sets_the_mode() {
+    fn modes_survive_the_umask() {
         use std::os::unix::fs::PermissionsExt;
         let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
         let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().join("new");
-        let path = dir.join("token");
-        RealSystem.write_atomic(&path, b"x", 0o644).unwrap();
-        assert_eq!(mode(&path), 0o644);
-        assert_eq!(mode(&dir), 0o755);
+        let path = tmp.path().join("new").join("rules.conf");
+        RealSystem.write_atomic(&path, b"x", 0o664).unwrap();
+        assert_eq!(mode(&path), 0o664);
+        assert_eq!(mode(&tmp.path().join("new")), DIR_MODE);
         RealSystem.write_atomic(&path, b"x", 0o600).unwrap();
         assert_eq!(mode(&path), 0o600);
+        let dir = tmp.path().join("group");
+        create_dir(&dir, 0o775).unwrap();
+        assert_eq!(mode(&dir), 0o775);
     }
 
     #[test]
@@ -319,21 +417,46 @@ mod tests {
         assert_eq!(output.stdout, format!("PATH={SAFE_PATH}\n").as_bytes());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn run_starts_in_the_root_folder() {
+        let output = RealSystem.run("/bin/pwd", &[]).unwrap();
+        assert_eq!(output.stdout, b"/\n");
+    }
+
+    #[test]
+    fn current_exe_is_absolute() {
+        assert!(RealSystem.current_exe().unwrap().is_absolute());
+    }
+
     #[test]
     fn fake_system_keeps_files_and_logs_commands() {
-        let mut fake = FakeSystem::default();
-        fake.outputs.insert("/sbin/pfctl", RunOutput::default());
         let path = Path::new("/etc/resolver/test");
+        let mut fake = FakeSystem::default();
+        let output = |code| RunOutput {
+            code: Some(code),
+            ..RunOutput::default()
+        };
+        fake.script("/sbin/pfctl", &["-E"], output(0));
+        fake.defaults.insert("/sbin/pfctl", output(1));
+        fake.fail_removes.insert(path.to_path_buf());
+
         fake.write_atomic(path, b"port 18053", 0o644).unwrap();
         assert!(fake.exists(path));
         assert!(fake.read(path, 4).is_err());
         assert_eq!(fake.read(path, 10).unwrap(), b"port 18053");
-        fake.remove(path).unwrap();
-        assert!(!fake.exists(path));
-        assert!(fake.run("/sbin/pfctl", &["-E"]).is_ok());
+        assert!(fake.remove(path).is_err());
+        assert!(fake.exists(path));
+        fake.fail_writes.insert(path.to_path_buf());
+        assert!(fake.write_atomic(path, b"new", 0o644).is_err());
+        assert_eq!(fake.read(path, 10).unwrap(), b"port 18053");
+
+        assert_eq!(fake.run("/sbin/pfctl", &["-E"]).unwrap().code, Some(0));
+        assert_eq!(fake.run("/sbin/pfctl", &["-d"]).unwrap().code, Some(1));
         assert!(fake.run("/usr/bin/true", &[]).is_err());
         let log = fake.log.borrow();
-        assert_eq!(log[0], ("/sbin/pfctl".to_owned(), vec!["-E".to_owned()]));
-        assert_eq!(log.len(), 2);
+        assert_eq!(log[1], ("/sbin/pfctl".to_owned(), vec!["-d".to_owned()]));
+        assert_eq!(log.len(), 3);
+        assert_eq!(fake.current_exe().unwrap(), Path::new(fake::EXE));
     }
 }

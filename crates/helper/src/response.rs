@@ -7,6 +7,15 @@ use serde::Serialize;
 
 use crate::request::VERSION;
 
+/// The stable error codes. `marsad` and the UI match on them, so they never
+/// change once released.
+pub mod code {
+    pub const OP_NOT_IMPLEMENTED: &str = "op_not_implemented";
+    pub const OP_NOT_SUPPORTED: &str = "op_not_supported";
+    pub const REQUEST_INVALID: &str = "request_invalid";
+    pub const USAGE: &str = "usage";
+}
+
 /// `{"version":1,"results":[...]}` or `{"version":1,"error":{...}}`.
 #[derive(Debug, Serialize)]
 pub struct Response {
@@ -34,11 +43,16 @@ pub struct OpResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
-    // The op handlers (tasks M4-07 to M4-09) build these two; until then only
-    // the tests do.
-    #[allow(dead_code)]
+    // Outside tests only: the tests build these, and an unmet `expect` warns.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "built by the handlers of M4-07 to M4-09")
+    )]
     Done,
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "built by the handlers of M4-07 to M4-09")
+    )]
     Unchanged,
     /// `code` is stable, so the UI can map it to a message.
     Failed { code: &'static str, message: String },

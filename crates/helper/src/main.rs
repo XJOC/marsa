@@ -23,11 +23,12 @@ mod system;
 
 use std::env;
 use std::ffi::OsString;
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use crate::os::Os;
 use crate::request::Request;
-use crate::response::Response;
+use crate::response::{Response, code};
 use crate::system::{RealSystem, System};
 
 const USAGE: &str = "usage: marsa-helper apply <json> | pf-load | version";
@@ -35,10 +36,11 @@ const USAGE: &str = "usage: marsa-helper apply <json> | pf-load | version";
 fn main() -> ExitCode {
     // `args_os`: `args` panics on an argument that is not UTF-8.
     let args: Vec<OsString> = env::args_os().skip(1).collect();
-    let (line, code) = cli(&args, Os::current(), &RealSystem);
+    let (line, exit) = cli(&args, Os::current(), &RealSystem);
     // stdout is the helper's protocol: this one line is all it prints there.
-    println!("{line}");
-    ExitCode::from(code)
+    // A closed stdout is ignored, so the exit code still tells what happened.
+    let _ = writeln!(io::stdout().lock(), "{line}");
+    ExitCode::from(exit)
 }
 
 /// Runs one command line. Returns the line for stdout and the exit code.
@@ -50,13 +52,14 @@ fn cli(args: &[OsString], os: Os, system: &impl System) -> (String, u8) {
             Ok(request) => Response::results(ops::apply(&request, os, system)),
             Err(err) => Response::error(err.code(), err.to_string()),
         },
-        _ => Response::error("usage", USAGE.to_owned()),
+        _ => Response::error(code::USAGE, USAGE.to_owned()),
     };
     (response.to_json(), response.exit_code())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::ffi::OsStr;
     use std::fs;
     use std::path::Path;
@@ -68,11 +71,6 @@ mod tests {
     use crate::request::MAX_REQUEST_BYTES;
     use crate::response::{OpResult, Outcome};
     use crate::system::FakeSystem;
-
-    #[cfg(not(windows))]
-    const HOME: &str = "/Users/example";
-    #[cfg(windows)]
-    const HOME: &str = r"C:\Users\example";
 
     /// Runs the helper against a fresh `FakeSystem`, checks that the output
     /// is one JSON line, and returns it with the exit code.
@@ -89,7 +87,7 @@ mod tests {
     fn assert_rejected(raw: impl AsRef<OsStr>, reason: &str) {
         let (out, code, fake) = helper(&[OsStr::new("apply"), raw.as_ref()], Os::Macos);
         assert_eq!(code, 2);
-        assert_eq!(out["error"]["code"], "request_invalid");
+        assert_eq!(out["error"]["code"], code::REQUEST_INVALID);
         let message = out["error"]["message"].as_str().unwrap();
         assert!(message.contains(reason), "{message}");
         assert!(fake.log.borrow().is_empty() && fake.files.borrow().is_empty());
@@ -103,8 +101,8 @@ mod tests {
         with_ops(json!([op]))
     }
 
-    fn trust(cert: impl AsRef<Path>) -> String {
-        one_op(json!({ "op": "trust_install", "cert": cert.as_ref() }))
+    fn trust(pem: &str) -> String {
+        one_op(json!({ "op": "trust_install", "pem": pem }))
     }
 
     fn hosts(names: impl Serialize) -> String {
@@ -131,7 +129,15 @@ mod tests {
         empty_request: "" => "is not valid JSON",
         too_large: padded(MAX_REQUEST_BYTES + 1) => "larger than 65536 bytes",
         version_2: r#"{"version":2,"ops":[{"op":"pf_remove"}]}"# => "version: 2 is not supported",
-        missing_version: r#"{"ops":[{"op":"pf_remove"}]}"# => "does not match",
+        version_2_with_a_new_op: r#"{"version":2,"ops":[{"op":"future_op"}]}"#
+            => "version: 2 is not supported",
+        missing_version: r#"{"ops":[{"op":"pf_remove"}]}"# => "version: is missing",
+        version_as_string: r#"{"version":"1","ops":[{"op":"pf_remove"}]}"# => "version: is missing",
+        request_as_array: r#"[1,[{"op":"pf_remove"}]]"# => "request: is not an object",
+        ops_not_an_array: r#"{"version":1,"ops":{"op":"pf_remove"}}"# => "ops: is missing or not",
+        op_as_array: r#"{"version":1,"ops":[["pf_remove"]]}"# => "ops[0]: is not an object",
+        op_as_array_after_an_object: r#"{"version":1,"ops":[{"op":"pf_remove"},["pf_remove"]]}"#
+            => "ops[1]: is not an object",
         extra_request_field: r#"{"version":1,"ops":[{"op":"pf_remove"}],"x":1}"#
             => "does not match",
         unknown_op: one_op(json!({ "op": "run", "cmd": "rm -rf /" })) => "does not match",
@@ -156,10 +162,12 @@ mod tests {
             => "ops[0].http_port: 0 is below 1024",
         same_ports: one_op(json!({ "op": "pf_install", "http_port": 18443, "https_port": 18443 }))
             => "ops[0]: http_port and https_port are the same",
-        relative_cert: trust("caddy/root.crt") => "ops[0].cert: is not an absolute path",
-        cert_with_parent_dir: trust(Path::new(HOME).join("..").join("root.crt")) => "`..`",
-        cert_with_nul: trust(format!("{HOME}/root\u{0}.crt")) => "NUL",
-        cert_too_long: trust(Path::new(HOME).join("a".repeat(1024))) => "longer than 1024 bytes",
+        cert_path_instead_of_pem: one_op(json!({ "op": "trust_install", "cert": "/etc/ca.crt" }))
+            => "does not match",
+        empty_pem: trust("") => "ops[0].pem: is empty",
+        pem_too_long: trust(&"A".repeat(16 * 1024 + 1)) => "ops[0].pem: is longer than 16384 bytes",
+        pem_not_ascii: trust("-----BEGIN CERTIFICATE-----\né") => "ops[0].pem: is not ASCII",
+        pem_with_nul: trust("-----BEGIN\u{0}") => "ops[0].pem: contains a NUL byte",
         name_with_capital: hosts(["Shop.test"]) => "ops[0].names[0]: is not <label>.test",
         name_not_test: hosts(["shop.com"]) => "is not <label>.test",
         name_with_leading_hyphen: hosts(["-shop.test"]) => "is not <label>.test",
@@ -171,14 +179,6 @@ mod tests {
             => "ops[0].names[2]: is a duplicate",
         too_many_names: hosts((0..1001).map(|i| format!("s{i}.test")).collect::<Vec<_>>())
             => "1001 names, at most 1000",
-    }
-
-    /// As SYSTEM, reading `\\server\share` would connect to another machine.
-    #[cfg(windows)]
-    #[test]
-    fn cert_not_on_a_local_drive() {
-        assert_rejected(trust(r"\\server\share\root.crt"), "is not on a local drive");
-        assert_rejected(trust(r"\\?\C:\root.crt"), "is not on a local drive");
     }
 
     #[cfg(unix)]
@@ -200,12 +200,11 @@ mod tests {
         let raw = padded(MAX_REQUEST_BYTES);
         let (out, code, _) = helper(&[OsStr::new("apply"), OsStr::new(&raw)], Os::Macos);
         assert_eq!(code, 1);
-        assert_eq!(out["results"][0]["code"], "op_not_implemented");
+        assert_eq!(out["results"][0]["code"], code::OP_NOT_IMPLEMENTED);
     }
 
     #[test]
     fn a_valid_request_gives_one_result_per_op() {
-        // No paths in this fixture, so it is valid on every OS.
         let raw = fixture("requests/macos-remove.json");
         let (out, code, fake) = helper(&[OsStr::new("apply"), OsStr::new(&raw)], Os::Macos);
         assert_eq!(code, 1);
@@ -227,7 +226,7 @@ mod tests {
         let (out, code, fake) = helper(&[OsStr::new("pf-load")], Os::Macos);
         assert_eq!(code, 1);
         assert_eq!(out["results"][0]["op"], "pf_load");
-        assert_eq!(out["results"][0]["code"], "op_not_implemented");
+        assert_eq!(out["results"][0]["code"], code::OP_NOT_IMPLEMENTED);
         assert!(fake.log.borrow().is_empty());
     }
 
@@ -246,39 +245,60 @@ mod tests {
             let (out, code, fake) = helper(&args, Os::Macos);
             assert_eq!(
                 (code, &out["error"]["code"]),
-                (2, &json!("usage")),
+                (2, &json!(code::USAGE)),
                 "{args:?}"
             );
             assert!(fake.log.borrow().is_empty());
         }
     }
 
-    fn fixture(name: &str) -> String {
+    /// Every file in `fixtures/helper/<folder>`, by name.
+    fn fixtures(folder: &str) -> BTreeMap<String, String> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let path = root.join("fixtures").join("helper").join(name);
-        fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+        let dir = root.join("fixtures").join("helper").join(folder);
+        let entries = fs::read_dir(&dir).unwrap_or_else(|err| panic!("{}: {err}", dir.display()));
+        let files: BTreeMap<_, _> = entries
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                (name, fs::read_to_string(&path).unwrap())
+            })
+            .collect();
+        assert!(!files.is_empty(), "{}", dir.display());
+        files
     }
 
-    /// The contract with `marsa-core` (task M4-06): every request fixture
-    /// parses, and those with paths for this OS family pass validation.
+    fn fixture(name: &str) -> String {
+        let (folder, file) = name.split_once('/').unwrap();
+        fixtures(folder).remove(file).unwrap()
+    }
+
+    /// The contract with `marsa-core` (task M4-06): every request fixture is
+    /// valid on every OS.
     #[test]
-    fn request_fixtures_parse_and_validate() {
-        let files = [
-            ("macos-setup.json", cfg!(unix)),
-            ("macos-remove.json", true),
-            ("linux-setup.json", cfg!(unix)),
-            ("windows-hosts.json", true),
-            ("uninstall.json", true),
-        ];
-        for (file, valid_here) in files {
-            let text = fixture(&format!("requests/{file}"));
-            let request = Request::parse(OsStr::new(&text)).unwrap();
-            assert_eq!(request.validate().is_ok(), valid_here, "{file}");
+    fn request_fixtures_are_valid() {
+        for (file, text) in fixtures("requests") {
+            let request = Request::from_arg(OsStr::new(&text));
+            assert!(request.is_ok(), "{file}: {:?}", request.err());
         }
     }
 
+    /// Every response fixture is exactly what the helper prints, with its exit
+    /// code. A fixture without a case here fails the test.
     #[test]
     fn response_fixtures_match_the_output() {
+        let apply = |ops: Value, os| {
+            let raw = with_ops(ops);
+            let (out, code, _) = helper(&[OsStr::new("apply"), OsStr::new(&raw)], os);
+            (out, code)
+        };
+        let built = |results| {
+            let response = Response::results(results);
+            (
+                serde_json::from_str(&response.to_json()).unwrap(),
+                response.exit_code(),
+            )
+        };
         let done = |op| OpResult {
             op,
             outcome: Outcome::Done,
@@ -287,31 +307,34 @@ mod tests {
             op: "pf_install",
             outcome: Outcome::Unchanged,
         };
-        let message = "pf_install is not implemented yet".to_owned();
-        let failed = OpResult::failed("pf_install", "op_not_implemented", message);
-        let reason = "ops[0].http_port: 80 is below 1024".to_owned();
+        let failed = ops::not_implemented("pf_install");
+        let not_supported = json!([
+            { "op": "pf_install", "http_port": 18080, "https_port": 18443 },
+            { "op": "trust_remove" },
+        ]);
+        let port_80 = json!([{ "op": "pf_install", "http_port": 80, "https_port": 18443 }]);
+        let (usage, usage_code, _) = helper(&[], Os::Macos);
         let cases = [
             (
                 "done.json",
-                Response::results(vec![done("resolver_install"), unchanged]),
+                built(vec![done("resolver_install"), unchanged]),
                 0,
             ),
             (
                 "failed.json",
-                Response::results(vec![done("resolver_install"), failed]),
+                built(vec![done("resolver_install"), failed]),
                 1,
             ),
-            (
-                "rejected.json",
-                Response::error("request_invalid", reason),
-                2,
-            ),
+            ("not-supported.json", apply(not_supported, Os::Linux), 1),
+            ("rejected.json", apply(port_80, Os::Macos), 2),
+            ("usage.json", (usage, usage_code), 2),
         ];
-        for (file, response, code) in cases {
-            let expected: Value =
-                serde_json::from_str(&fixture(&format!("responses/{file}"))).unwrap();
-            let actual: Value = serde_json::from_str(&response.to_json()).unwrap();
-            assert_eq!((actual, response.exit_code()), (expected, code), "{file}");
+        let files = fixtures("responses");
+        let names: Vec<_> = files.keys().map(String::as_str).collect();
+        assert_eq!(names, cases.iter().map(|case| case.0).collect::<Vec<_>>());
+        for (file, (out, code), expected_code) in cases {
+            let fixture: Value = serde_json::from_str(&files[file]).unwrap();
+            assert_eq!((out, code), (fixture, expected_code), "{file}");
         }
     }
 }
