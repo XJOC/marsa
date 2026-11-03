@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "ops": [
+    {
+      "op": "trust_install",
+      "pem": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+    },
+    {
+      "op": "resolved_install",
+      "port": 18053
+    }
+  ]
+}

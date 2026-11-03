@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "ops": [
+    {
+      "op": "hosts_sync",
+      "names": [
+        "shop.test",
+        "blog.test"
+      ]
+    },
+    {
+      "op": "hosts_remove"
+    }
+  ]
+}
