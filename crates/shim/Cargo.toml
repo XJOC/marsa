@@ -9,6 +9,11 @@ description = "Runs php, node, npm, npx, and composer at the version a project a
 # No default features: the shim must never pull tokio or reqwest
 # (architecture.md section 3).
 marsa-core = { path = "../core", default-features = false }
+semver.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
