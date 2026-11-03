@@ -6,11 +6,17 @@ use std::path::Path;
 use marsa_core::resolver::Tool;
 use marsa_core::runtimes::Runtime;
 
-/// A name the shim answers to. `npm`, `npx`, and `composer` come in task M1-06c.
+/// A name the shim answers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShimName {
     Php,
     Node,
+    /// Runs through `node`, with npm's own `npm-cli.js`.
+    Npm,
+    /// Runs through `node`, with npm's own `npx-cli.js`.
+    Npx,
+    /// Runs through `php`, with `composer.phar`.
+    Composer,
 }
 
 impl ShimName {
@@ -22,6 +28,9 @@ impl ShimName {
         match Path::new(argv0).file_name()?.to_str()? {
             "php" => Some(ShimName::Php),
             "node" => Some(ShimName::Node),
+            "npm" => Some(ShimName::Npm),
+            "npx" => Some(ShimName::Npx),
+            "composer" => Some(ShimName::Composer),
             _ => None,
         }
     }
@@ -29,12 +38,13 @@ impl ShimName {
     /// The tool whose version is picked.
     pub fn tool(self) -> Tool {
         match self {
-            ShimName::Php => Tool::Php,
-            ShimName::Node => Tool::Node,
+            ShimName::Php | ShimName::Composer => Tool::Php,
+            ShimName::Node | ShimName::Npm | ShimName::Npx => Tool::Node,
         }
     }
 
-    /// The folder under `runtimes/` that holds the real program.
+    /// The folder under `runtimes/` that holds the real program: `php` for
+    /// `composer`, `node` for `npm` and `npx`.
     pub fn runtime(self) -> Runtime {
         self.tool().into()
     }
@@ -54,11 +64,23 @@ mod tests {
         assert_eq!(name("/any/path/php"), Some(ShimName::Php));
         assert_eq!(name("node"), Some(ShimName::Node));
         assert_eq!(name("shims/node"), Some(ShimName::Node));
+        assert_eq!(name("npm"), Some(ShimName::Npm));
+        assert_eq!(name("npx"), Some(ShimName::Npx));
+        assert_eq!(name("/any/path/composer"), Some(ShimName::Composer));
     }
 
     #[test]
     fn unknown_names() {
-        for text in ["marsa-shim", "PHP", "", "/", "php8", "php.exe"] {
+        for text in [
+            "marsa-shim",
+            "PHP",
+            "",
+            "/",
+            "php8",
+            "php.exe",
+            "Composer",
+            "npm.cmd",
+        ] {
             assert_eq!(name(text), None, "{text:?}");
         }
     }
@@ -73,9 +95,15 @@ mod tests {
 
     #[test]
     fn tool_and_runtime() {
-        assert_eq!(ShimName::Php.tool(), Tool::Php);
-        assert_eq!(ShimName::Node.tool(), Tool::Node);
-        assert_eq!(ShimName::Php.runtime(), Runtime::Php);
-        assert_eq!(ShimName::Node.runtime(), Runtime::Node);
+        for (name, tool, runtime) in [
+            (ShimName::Php, Tool::Php, Runtime::Php),
+            (ShimName::Composer, Tool::Php, Runtime::Php),
+            (ShimName::Node, Tool::Node, Runtime::Node),
+            (ShimName::Npm, Tool::Node, Runtime::Node),
+            (ShimName::Npx, Tool::Node, Runtime::Node),
+        ] {
+            assert_eq!(name.tool(), tool, "{name:?}");
+            assert_eq!(name.runtime(), runtime, "{name:?}");
+        }
     }
 }

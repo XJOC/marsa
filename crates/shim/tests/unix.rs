@@ -74,6 +74,16 @@ impl World {
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("chmod");
     }
 
+    /// An empty script under `runtimes/`, such as `npm-cli.js`. The fake
+    /// programs only print its path. Returns the full path.
+    fn put_script(&self, relative: &str) -> PathBuf {
+        let path = self.data().join("runtimes").join(relative);
+        let dir = path.parent().expect("the script has a folder");
+        fs::create_dir_all(dir).expect("create script folder");
+        fs::write(&path, "").expect("write script");
+        path
+    }
+
     fn write_config(&self, file: &str, text: &str) {
         let dir = self.data().join("config");
         fs::create_dir_all(&dir).expect("create config dir");
@@ -205,5 +215,57 @@ fn a_link_back_to_the_shim_stops_with_126() {
         stderr(&output).contains("[shim_loop]"),
         "{}",
         stderr(&output)
+    );
+}
+
+#[test]
+fn npm_and_npx_run_their_script_through_node() {
+    let world = World::new();
+    fs::write(world.project.join(".nvmrc"), "22").expect("write .nvmrc");
+    for (name, file) in [("npm", "npm-cli.js"), ("npx", "npx-cli.js")] {
+        let script = world.put_script(&format!("node/22.11.0/lib/node_modules/npm/bin/{file}"));
+        let output = world.run(name, &["run", "dev"]);
+        let expected = format!(
+            "version=22.11.0\narg={}\narg=run\narg=dev\n",
+            script.display()
+        );
+        assert_eq!(stdout(&output), expected, "{}", stderr(&output));
+    }
+}
+
+#[test]
+fn composer_runs_the_highest_phar_through_the_project_php() {
+    let world = World::new();
+    fs::write(world.project.join(".php-version"), "8.3").expect("write version file");
+    world.put_script("composer/2.7.0/composer.phar");
+    let phar = world.put_script("composer/2.8.4/composer.phar");
+    let output = world.run("composer", &["install"]);
+    let expected = format!("version=8.3.14\narg={}\narg=install\n", phar.display());
+    assert_eq!(stdout(&output), expected, "{}", stderr(&output));
+}
+
+#[test]
+fn composer_without_a_phar_exits_127() {
+    let world = World::new();
+    fs::write(world.project.join(".php-version"), "8.3").expect("write version file");
+    let output = world.run("composer", &[]);
+    assert_eq!(output.status.code(), Some(127));
+    let err = stderr(&output);
+    assert!(
+        err.contains("[shim_composer_not_installed]\nmarsa: hint: "),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_missing_npm_script_exits_127() {
+    let world = World::new();
+    fs::write(world.project.join(".nvmrc"), "22").expect("write .nvmrc");
+    let output = world.run("npm", &[]);
+    assert_eq!(output.status.code(), Some(127));
+    let err = stderr(&output);
+    assert!(
+        err.contains("npm-cli.js is missing [shim_program_missing]"),
+        "{err}"
     );
 }

@@ -22,6 +22,10 @@ pub enum ShimError {
     #[error("{} is missing", .path.display())]
     ProgramMissing { path: PathBuf },
 
+    /// `dir` is `runtimes/composer`.
+    #[error("Composer is not installed: no version folder in {}", .dir.display())]
+    ComposerNotInstalled { dir: PathBuf },
+
     #[error(transparent)]
     Resolve(#[from] ResolveError),
 
@@ -63,6 +67,7 @@ impl ShimError {
             ShimError::UnknownName { .. } => "shim_unknown_name",
             ShimError::NoCwd(_) => "shim_no_cwd",
             ShimError::ProgramMissing { .. } => "shim_program_missing",
+            ShimError::ComposerNotInstalled { .. } => "shim_composer_not_installed",
             ShimError::Resolve(err) => err.code(),
             ShimError::Config(err) => err.code(),
             ShimError::Runtimes(err) => err.code(),
@@ -103,9 +108,13 @@ impl ShimError {
             format!("put {tool} builds in {dir}/<version>/bin/{program}")
         };
         match self {
-            ShimError::UnknownName { .. } => {
-                Some("marsa-shim runs through links named php or node".to_owned())
-            }
+            ShimError::UnknownName { .. } => Some(
+                "marsa-shim runs through links named php, node, npm, npx, or composer".to_owned(),
+            ),
+            ShimError::ComposerNotInstalled { dir } => Some(format!(
+                "put composer.phar in {}/<version>/composer.phar",
+                dir.display()
+            )),
             ShimError::Resolve(ResolveError::NotInstalled { tool, .. })
             | ShimError::Resolve(ResolveError::NoMatchingVersion { tool, .. }) => {
                 Some(runtimes(*tool))
@@ -145,6 +154,11 @@ mod tests {
                 127,
             ),
             (ShimError::NoCwd(io_error()), "shim_no_cwd", 127),
+            (
+                ShimError::ComposerNotInstalled { dir: "c".into() },
+                "shim_composer_not_installed",
+                127,
+            ),
             (
                 ShimError::ProgramMissing { path: "p".into() },
                 "shim_program_missing",
@@ -223,7 +237,17 @@ mod tests {
         );
 
         let unknown = ShimError::UnknownName { name: "x".into() };
-        assert!(unknown.hint(None).is_some());
+        let hint = unknown.hint(None).expect("shim_unknown_name has a hint");
+        assert!(hint.ends_with("php, node, npm, npx, or composer"), "{hint}");
+
+        let composer = ShimError::ComposerNotInstalled {
+            dir: data.join("runtimes").join("composer"),
+        };
+        let expected = format!(
+            "put composer.phar in {}/<version>/composer.phar",
+            data.join("runtimes").join("composer").display()
+        );
+        assert_eq!(composer.hint(Some(data)), Some(expected));
         assert_eq!(ShimError::Loop { depth: 16 }.hint(None), None);
     }
 }

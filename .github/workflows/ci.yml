@@ -87,16 +87,20 @@ jobs:
           fi
           echo "OK: tokio is not in the marsa-shim dependency tree"
 
-      # Report only: never fails the job.
-      - name: Report the shim binary size
+      # The shim runs before every php, node, npm, npx, and composer command,
+      # so its size is watched (task M1-06). Sizes at M1-06b: Linux 1,054,944,
+      # macOS 903,168, Windows 599,040 bytes (still the stub). The limit is the
+      # largest plus about 25%, rounded, and is the same on every system.
+      - name: Check the shim binary size
         run: |
+          limit=1400000
           binary=target/release/marsa-shim
           if [ "${{ runner.os }}" = "Windows" ]; then
             binary="$binary.exe"
           fi
-          if [ -f "$binary" ]; then
-            du -h "$binary"
-            ls -l "$binary"
-          else
-            echo "missing: $binary"
+          size="$(wc -c < "$binary" | tr -d ' ')"
+          echo "marsa-shim: $size bytes (limit $limit)"
+          if [ "$size" -gt "$limit" ]; then
+            echo "FAIL: the shim is larger than $limit bytes"
+            exit 1
           fi
