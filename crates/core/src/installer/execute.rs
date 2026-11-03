@@ -765,6 +765,9 @@ into = "bin"
 "#;
 
     /// [`FAKE_PHP`] with a check, like the real recipe.
+    // `#[cfg(unix)]`: only the Unix tests run the `#!/bin/sh` fake check, so on
+    // Windows this helper would be dead code and fail clippy's `-D warnings`.
+    #[cfg(unix)]
     fn fake_php_with_check() -> String {
         FAKE_PHP.replacen(
             "name = \"php\"\n",
