@@ -1,0 +1,35 @@
+# The versions the next signed runtimes manifest publishes (task M2-07).
+# `cargo xtask manifest build` reads this file; a change here goes through a
+# pull request, so the history of this file is the audit trail of what was
+# published.
+
+# Raise by one for every publish. `build` refuses a serial that is not greater
+# than the published one. The owner signs with the trusted comment
+# "marsa runtimes manifest serial=<serial>".
+serial = 1
+
+# static-php-cli line (ADR 0010): `php -v` must say "Built by static-php-cli 2.8.x".
+spc_line = "2.8"
+
+[php]
+# The newest 8.4 in the static-php-cli `bulk` set on 2026-11-04.
+versions = ["8.4.23"]
+
+[node]
+# The newest 22.x LTS on 2026-11-04.
+versions = ["22.23.4"]
+
+[composer]
+# The newest 2.x on 2026-11-04.
+versions = ["2.11.1"]
+
+# A URL for one version, platform, and artifact that replaces the recipe
+# template. `urls`: the first is the main one, the rest are mirrors.
+
+# 8.4.23 is no longer the current 8.4 on windows.php.net: only archives/ has it.
+[[override]]
+runtime = "php"
+version = "8.4.23"
+platform = "windows-x64"
+artifact = "zip"
+urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win32-vs17-x64.zip"]
