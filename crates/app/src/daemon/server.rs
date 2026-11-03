@@ -6,7 +6,7 @@ use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use axum::Router;
@@ -24,6 +24,11 @@ use super::state::Daemon;
 const PROCS_LIMIT: Duration = Duration::from_secs(10);
 /// How long shutdown then waits for open connections to finish.
 const DRAIN_LIMIT: Duration = Duration::from_secs(5);
+/// How long a busy `run/daemon.lock` is tried again before giving up. A
+/// client probes it with a short shared lock every 50 ms; a probe must not
+/// make a starting daemon exit.
+const LOCK_RETRY_LIMIT: Duration = Duration::from_millis(300);
+const LOCK_RETRY_EVERY: Duration = Duration::from_millis(20);
 
 /// Another `marsad` holds `run/daemon.lock` for this data folder.
 #[derive(Debug)]
@@ -56,7 +61,12 @@ impl std::error::Error for AlreadyRunning {}
 /// lock, the port, or `run/daemon.json` cannot be set up.
 pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     let run_dir = data_dir.join("run");
-    let lock = lock_instance(&run_dir)?;
+    let lock = lock_instance(&run_dir).await?;
+    // A file left by a crash goes as soon as this daemon owns the lock, so no
+    // client reads its stale port and token.
+    if let Err(err) = daemon_file::remove_daemon_file(&run_dir) {
+        tracing::warn!(code = err.code(), error = %err, "cannot delete an old daemon.json");
+    }
     // Before `daemon.json` exists, so a client that found the daemon can
     // already stop it with a signal.
     let signal = shutdown_signal();
@@ -86,15 +96,20 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     if let Err(err) = daemon_file::remove_daemon_file(&run_dir) {
         tracing::warn!(code = err.code(), error = %err, "cannot delete daemon.json");
     }
-    // Closing the file releases the lock.
+    // Released before the close: Windows may release a lock some time after
+    // the handle closes.
+    if let Err(err) = lock.unlock() {
+        tracing::warn!(error = %err, "cannot unlock daemon.lock");
+    }
     drop(lock);
     tracing::info!("marsad stopped");
     result
 }
 
 /// Takes `run_dir/daemon.lock` for this process, or fails with
-/// [`AlreadyRunning`]. The OS drops the lock if the process dies.
-fn lock_instance(run_dir: &Path) -> anyhow::Result<File> {
+/// [`AlreadyRunning`] if the lock stays busy for [`LOCK_RETRY_LIMIT`]. The OS
+/// drops the lock if the process dies.
+async fn lock_instance(run_dir: &Path) -> anyhow::Result<File> {
     // `write_daemon_file` closes the folder to other users right after.
     fs::create_dir_all(run_dir).with_context(|| format!("cannot create {}", run_dir.display()))?;
     let path = run_dir.join("daemon.lock");
@@ -104,11 +119,18 @@ fn lock_instance(run_dir: &Path) -> anyhow::Result<File> {
         .truncate(false)
         .open(&path)
         .with_context(|| format!("cannot open {}", path.display()))?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(TryLockError::WouldBlock) => Err(AlreadyRunning { lock: path }.into()),
-        Err(TryLockError::Error(err)) => {
-            Err(anyhow::Error::new(err).context(format!("cannot lock {}", path.display())))
+    let started = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if started.elapsed() < LOCK_RETRY_LIMIT => {
+                tokio::time::sleep(LOCK_RETRY_EVERY).await;
+            }
+            Err(TryLockError::WouldBlock) => return Err(AlreadyRunning { lock: path }.into()),
+            Err(TryLockError::Error(err)) => {
+                let context = format!("cannot lock {}", path.display());
+                return Err(anyhow::Error::new(err).context(context));
+            }
         }
     }
 }
@@ -147,5 +169,47 @@ async fn serve(
             tracing::warn!(limit = ?DRAIN_LIMIT, "connections still open; closing them");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn probe(run_dir: &Path) -> File {
+        let probe = File::open(run_dir.join("daemon.lock")).unwrap();
+        probe.try_lock_shared().unwrap();
+        probe
+    }
+
+    #[tokio::test]
+    async fn a_short_shared_probe_does_not_stop_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = lock_instance(dir.path()).await.unwrap();
+        first.unlock().unwrap();
+        drop(first);
+
+        // A client's probe, released 100 ms later.
+        let probe = probe(dir.path());
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            probe.unlock().unwrap();
+        });
+        let started = Instant::now();
+        let lock = lock_instance(dir.path()).await;
+        release.await.unwrap();
+        assert!(lock.is_ok(), "{lock:?}");
+        // It waited for the probe, and did not give up.
+        assert!(started.elapsed() >= Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn a_lock_held_longer_is_already_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let _held = lock_instance(dir.path()).await.unwrap();
+        let started = Instant::now();
+        let err = lock_instance(dir.path()).await.unwrap_err();
+        assert!(started.elapsed() >= LOCK_RETRY_LIMIT);
+        assert!(err.downcast_ref::<AlreadyRunning>().is_some(), "{err:#}");
     }
 }
