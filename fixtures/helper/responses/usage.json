@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "error": {
+    "code": "usage",
+    "message": "usage: marsa-helper apply <json> | pf-load | version"
+  }
+}
