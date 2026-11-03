@@ -1,0 +1,20 @@
+[package]
+name = "marsa-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Marsa window: egui with the wgpu renderer, a client of the daemon"
+
+[dependencies]
+# With `full` (the default): the window talks to the daemon through
+# `marsa_core::client`, like the CLI.
+marsa-core = { path = "../core" }
+anyhow.workspace = true
+eframe.workspace = true
+egui_extras.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
