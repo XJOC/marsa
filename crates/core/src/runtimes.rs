@@ -89,6 +89,24 @@ impl RuntimesDir {
         self.runtime_dir(runtime).join(version.to_string())
     }
 
+    /// `runtimes/.tmp/`: the installer's private work folder (task M2-05). It
+    /// is on the same volume as the version folders, so the final `rename`
+    /// is atomic.
+    pub fn tmp_dir(&self) -> PathBuf {
+        self.root.join(".tmp")
+    }
+
+    /// `runtimes/.tmp/install.lock`: one install at a time.
+    pub fn lock_path(&self) -> PathBuf {
+        self.tmp_dir().join("install.lock")
+    }
+
+    /// `runtimes/.manifest-serial`: the serial of the last manifest accepted,
+    /// so an older one is refused as a rollback.
+    pub fn manifest_serial_path(&self) -> PathBuf {
+        self.root.join(".manifest-serial")
+    }
+
     /// The installed versions of `runtime`, oldest first.
     ///
     /// Skipped: names that are not a full `semver` version (`8.4`, `.tmp`,
@@ -195,6 +213,18 @@ mod tests {
         assert_eq!(
             runtimes.version_dir(Runtime::Node, &v("22.11.0")),
             data.join("runtimes").join("node").join("22.11.0")
+        );
+    }
+
+    #[test]
+    fn installer_paths_sit_in_the_runtimes_folder() {
+        let runtimes = RuntimesDir::in_dir(Path::new("data"));
+        let root = Path::new("data").join("runtimes");
+        assert_eq!(runtimes.tmp_dir(), root.join(".tmp"));
+        assert_eq!(runtimes.lock_path(), root.join(".tmp").join("install.lock"));
+        assert_eq!(
+            runtimes.manifest_serial_path(),
+            root.join(".manifest-serial")
         );
     }
 

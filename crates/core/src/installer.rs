@@ -1,8 +1,8 @@
 //! Install plans: verify the manifest signature, download to a temp folder,
 //! verify the checksum, extract, then move atomically into place.
 //!
-//! One submodule per step, so the M2 tasks can work on them in parallel. The
-//! recipes they read live in [`crate::recipes`].
+//! One submodule per step. [`install`] runs them in order. The recipes they
+//! read live in [`crate::recipes`].
 
 pub mod execute;
 pub mod extract;
@@ -11,14 +11,136 @@ pub mod manifest;
 pub mod plan;
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::recipes::RecipeError;
+use semver::Version;
+
+use crate::recipes::{self, Platform, Recipe, RecipeError};
 use crate::resolver::BadRequest;
-use crate::runtimes::RuntimesError;
+use crate::runtimes::{Runtime, RuntimesError};
+use crate::types::InstallEvent;
 use extract::ExtractError;
-use fetch::FetchError;
-use manifest::ManifestError;
+use fetch::{Fetch, FetchError, HttpFetch};
+use manifest::{Manifest, ManifestError};
+
+/// Where the signed manifest is published (task M2-08). Its signature is the
+/// same URL with `.minisig` added.
+pub const MANIFEST_URL: &str =
+    "https://github.com/XJOC/marsa/releases/download/runtimes-manifest/manifest.json";
+
+/// What to install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallRequest<'a> {
+    pub runtime: Runtime,
+    /// `8.4`, `8.4.23`, or `None` for the newest stable version in the
+    /// manifest. The same rules as a `.php-version` file.
+    pub version: Option<&'a str>,
+    /// Install again even if this version is already there.
+    pub force: bool,
+}
+
+/// The result of [`install`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledVersion {
+    pub runtime: Runtime,
+    pub version: Version,
+    /// `runtimes/<runtime>/<version>`.
+    pub dir: PathBuf,
+    /// The version was there already and nothing was downloaded.
+    pub already: bool,
+}
+
+/// Everything that differs between a real install and a test. Outside this
+/// crate the only constructor is [`InstallEnv::production`], so the manifest
+/// key and URL cannot be swapped.
+pub struct InstallEnv<F> {
+    app_data_dir: PathBuf,
+    fetch: F,
+    manifest_url: String,
+    platform: Option<Platform>,
+    /// `None`: the built-in recipe of the runtime.
+    recipe: Option<Recipe>,
+    trust: Trust,
+}
+
+impl InstallEnv<HttpFetch> {
+    /// The real downloader, the published manifest, the key built into the
+    /// binary, this system's platform, and the built-in recipes.
+    ///
+    /// # Errors
+    ///
+    /// `download_failed` if the HTTP client cannot be set up.
+    pub fn production(app_data_dir: &Path) -> Result<Self, InstallError> {
+        Ok(InstallEnv {
+            app_data_dir: app_data_dir.to_path_buf(),
+            fetch: HttpFetch::new()?,
+            manifest_url: MANIFEST_URL.to_owned(),
+            platform: Platform::current(),
+            recipe: None,
+            trust: Trust::Embedded,
+        })
+    }
+}
+
+impl<F> InstallEnv<F> {
+    fn recipe(&self, runtime: Runtime) -> Result<&Recipe, RecipeError> {
+        match &self.recipe {
+            Some(recipe) => Ok(recipe),
+            None => recipes::builtin(runtime),
+        }
+    }
+}
+
+/// How the manifest's signature is checked. Outside this crate's own tests
+/// only [`Trust::Embedded`] exists.
+enum Trust {
+    /// [`Manifest::verify_embedded`]: the key built into the binary.
+    Embedded,
+    /// The test key of the signed fixtures.
+    #[cfg(test)]
+    Key(minisign_verify::PublicKey),
+    /// No signature check, for manifests that list archives a test builds.
+    #[cfg(test)]
+    Unsigned,
+}
+
+impl Trust {
+    fn verify(
+        &self,
+        json: &[u8],
+        minisig: &str,
+        last_seen: Option<u64>,
+    ) -> Result<Manifest, ManifestError> {
+        match self {
+            Trust::Embedded => Manifest::verify_embedded(json, minisig, last_seen),
+            #[cfg(test)]
+            Trust::Key(key) => Manifest::verify_and_parse(json, minisig, key, last_seen),
+            #[cfg(test)]
+            Trust::Unsigned => Manifest::unsigned_for_tests(json, last_seen),
+        }
+    }
+}
+
+/// Installs one version of a runtime into `runtimes/<runtime>/<version>/`.
+///
+/// The steps, in order: take the install lock, clean `runtimes/.tmp/`,
+/// download and verify the manifest, save its serial, pick the version, then
+/// download, verify, and unpack each file into a new temp folder, run the
+/// recipe's check, and move the folder into place with one `rename`. The
+/// version folder appears whole or not at all.
+///
+/// Writes only inside `runtimes/`. `events` gets the progress.
+///
+/// # Errors
+///
+/// Any [`InstallError`]; [`InstallError::code`] gives its stable name.
+pub async fn install<F: Fetch>(
+    req: &InstallRequest<'_>,
+    env: &InstallEnv<F>,
+    events: &mut (dyn FnMut(InstallEvent) + Send),
+) -> Result<InstalledVersion, InstallError> {
+    execute::run(req, env, events).await
+}
 
 /// Why an install failed. [`InstallError::code`] gives a stable name that the
 /// UI maps to a message. Errors of the steps keep their own codes.
