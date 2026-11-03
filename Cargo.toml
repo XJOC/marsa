@@ -2,8 +2,9 @@
 resolver = "3"
 members = ["crates/core", "crates/app", "crates/shim", "crates/helper", "xtask"]
 # The Tauri spike is a separate workspace on purpose: throwaway code, never a
-# product member (task S-08a).
-exclude = ["spikes"]
+# product member (task S-08a). `tools/` holds dev tools with their own
+# dependencies, such as the `minisign` signer for test fixtures (task M2-02).
+exclude = ["spikes", "tools"]
 
 [workspace.package]
 version = "0.0.0"

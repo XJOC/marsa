@@ -1,44 +1,63 @@
 # Manifest test fixtures
 
 Signed files for the tests in `crates/core/src/installer/manifest.rs` (task M2-02).
-The repository has no `minisign` signing crate, so these were signed once and committed.
+The product workspace has no `minisign` signing crate. The signatures are made by
+`tools/manifest-fixtures/`, a separate Cargo project that the workspace excludes.
 
 **`test-key.pub` is a test key.** It must never become the production key in
 `MANIFEST_PUBLIC_KEY`. A test checks this.
+
+## Regenerate
+
+From the repository root:
+
+```sh
+cargo run --manifest-path tools/manifest-fixtures/Cargo.toml
+```
+
+Each run makes a new key pair, in memory only. The secret keys are never written
+to disk, and they are gone when the program exits. So one run rewrites
+`test-key.pub` and every `.minisig` together. The JSON files are written by hand
+and stay the same.
+
+Before it writes a file, the generator checks each signature with the `minisign`
+crate's own verifier, a different implementation from the `minisign-verify` crate
+that Marsa uses.
+
+## Cross-check with the minisign CLI (optional)
+
+```sh
+cd crates/core/tests/fixtures/manifest
+minisign -V -p test-key.pub -m valid.json -x valid.json.minisig
+# Signature and comment signature verified
+# Trusted comment: marsa runtimes manifest serial=3
+```
+
+These must fail:
+
+- `-x valid.json.other-key.minisig`
+- `-x valid.json.other-key-same-id.minisig`
 
 ## Files
 
 | File | What it is |
 | --- | --- |
-| `test-key.pub` | Public key A (key id `74F999C2E825FB87`). Every test verifies with it. |
-| `valid.json` + `.minisig` | A good manifest, signed by key A (prehashed, the minisign default). |
-| `valid.json.legacy.minisig` | A legacy (not prehashed, algorithm `Ed`) signature of `valid.json` by key A. |
+| `test-key.pub` | Public key A. Every test verifies with it. |
+| `valid.json` + `.minisig` | A good manifest (serial 3), signed by key A (prehashed, the minisign default). |
+| `valid.json.legacy.minisig` | A legacy signature of `valid.json` by key A (not prehashed, algorithm `Ed`). `minisign` 0.10 cannot make legacy signatures, so the generator builds it from key A's Ed25519 seed. |
 | `valid.json.other-key.minisig` | A signature of `valid.json` by key B. |
 | `valid.json.other-key-same-id.minisig` | Key B's signature with key A's key id written in, so it reaches the Ed25519 check. |
+| `valid.json.wrong-comment.minisig` | A good signature by key A, but with minisign's default trusted comment instead of `marsa runtimes manifest ...`. |
 | `invalid-json.json` + `.minisig` | Broken JSON, signed by key A. |
-| `http-url.json`, `sha256-uppercase.json`, `sha256-short.json`, `unknown-platform.json`, `bad-version.json`, `duplicate-version.json`, `schema-2.json` + `.minisig` | Each breaks one rule, each signed by key A. |
+| `http-url.json`, `sha256-uppercase.json`, `sha256-short.json`, `unknown-platform.json`, `bad-version.json`, `duplicate-version.json`, `schema-2.json`, `serial-0.json` + `.minisig` | Each breaks one rule. Each is signed by key A. |
+
+Every signature by key A, except the wrong-comment one, has the trusted comment
+`marsa runtimes manifest serial=N`. N is the serial in the file. This is the form
+the owner uses for real manifests.
 
 The sha256 values in the JSON files are fake (`sha256("marsa-fixture-<name>")`).
 
-## How they were made (2026-11-04)
+Never commit a secret key.
 
-1. A throwaway Cargo project outside the repository, with the `minisign` 0.10,
-   `ed25519-dalek` 2, and `base64` crates.
-2. It made two key pairs in memory with `KeyPair::generate_unencrypted_keypair()`.
-   The secret keys were never written to disk and were gone when the program exited.
-3. It wrote `test-key.pub` (key A) and signed each `*.json` here with
-   `minisign::sign` (prehashed) and key A.
-4. Legacy: `minisign` 0.10 cannot make legacy signatures, so it was built by hand
-   from key A's Ed25519 seed: `"Ed" || key id || ed25519(sk, bytes)`, then the
-   global signature `ed25519(sk, signature || trusted comment)`.
-5. Other key: `minisign::sign` with key B. The same-id variant replaces bytes
-   2..10 of the decoded second line with key A's id.
-6. Each output was checked with `minisign::verify` (an independent
-   implementation) before writing: good signatures pass; the legacy one passes only
-   with `allow_legacy = true`; key B's signatures fail with key A.
-7. The throwaway project was deleted.
-
-To change a fixture, make all of them again the same way: a new key pair means
-every `.minisig` and `test-key.pub` change together. Never commit a secret key.
-
-`.gitattributes` here turns off line-ending conversion: one changed byte breaks a signature.
+`.gitattributes` here turns off line-ending conversion. One changed byte breaks a
+signature.

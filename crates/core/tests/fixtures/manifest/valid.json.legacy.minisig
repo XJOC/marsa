@@ -1,4 +1,4 @@
-untrusted comment: marsa test key A, legacy
-RWSH+yXowpn5dIx6nj2wy9MbNNeDY0vjw5yTkITf3S9/MhoehcwnIm3L+FdNmMlVTSe7MrCCTCoT9TCyXVPglD+BofN8avqVNAI=
-trusted comment: marsa test manifest valid serial=3, legacy
-i2P7ULeu12YuJxjzpe1s1xSLvSqalYtccZoEZMKVjRPB+gliDul5GoNLmE0Us63S+x0J0YdNaUAd/2YjMMfFCg==
+untrusted comment: marsa test signature, legacy
+RWTWJSyVkSS0RFFYgIyCMMxl9mnOlIyn0axnKXlJAMt0LuOXpa2UWkDYg+bJF32yAB5g7Zad0hhAhAA0oGQ3EDeBSrG4JWbOlgE=
+trusted comment: marsa runtimes manifest serial=3
+Q1NwFzQZDF25sCToGtkiDVcrKandCwdgttrfgFeLrTBgvufx9/yUxYp1yuS+zrqENQY3+jOX2Lf67r/3UfVXBg==
