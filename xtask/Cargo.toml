@@ -7,7 +7,14 @@ description = "Repository chores for the Marsa workspace"
 publish = false
 
 [dependencies]
+anyhow.workspace = true
 clap.workspace = true
+# No default features, like the shim: `app_data_dir()` is all we need, and the
+# tokio side of the core would only slow the build.
+marsa-core = { path = "../crates/core", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

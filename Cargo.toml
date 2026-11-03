@@ -12,6 +12,8 @@ license = "Apache-2.0"
 
 # Every dependency is declared here once; crates use `name.workspace = true`.
 [workspace.dependencies]
+# Binaries only (AGENTS.md section 8): the libraries use `thiserror`.
+anyhow = "1"
 clap = "4"
 directories = "6"
 notify = "8"
