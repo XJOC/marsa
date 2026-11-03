@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "results": [
+    {
+      "op": "resolver_install",
+      "status": "done"
+    },
+    {
+      "op": "pf_install",
+      "status": "failed",
+      "code": "op_not_implemented",
+      "message": "pf_install is not implemented yet"
+    }
+  ]
+}

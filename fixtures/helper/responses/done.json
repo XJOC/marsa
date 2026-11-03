@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "results": [
+    {
+      "op": "resolver_install",
+      "status": "done"
+    },
+    {
+      "op": "pf_install",
+      "status": "unchanged"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "error": {
+    "code": "request_invalid",
+    "message": "ops[0].http_port: 80 is below 1024"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "ops": [
+    {
+      "op": "trust_install",
+      "cert": "/Users/example/Library/Application Support/dev.marsa.Marsa/caddy/root.crt"
+    },
+    {
+      "op": "resolver_install",
+      "port": 18053
+    },
+    {
+      "op": "pf_install",
+      "http_port": 18080,
+      "https_port": 18443
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "ops": [
+    {
+      "op": "trust_install",
+      "cert": "/home/example/.local/share/marsa/caddy/root.crt"
+    },
+    {
+      "op": "resolved_install",
+      "port": 18053
+    }
+  ]
+}
