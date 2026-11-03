@@ -20,23 +20,35 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderName, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use marsa_core::platform::daemon_file::Token;
+use marsa_core::platform::daemon_file::{Token, daemon_authority};
 use marsa_core::types::ErrorBody;
 
 /// What [`require_auth`] checks against. `Debug` is safe: the token prints
 /// redacted.
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
-    pub token: Arc<Token>,
-    /// The daemon's port. `Host` must be `127.0.0.1:<port>`.
-    pub port: u16,
+    token: Arc<Token>,
+    /// `127.0.0.1:<port>`, built once.
+    host: String,
+}
+
+impl AuthConfig {
+    /// `port` is the port the daemon listens on.
+    pub fn new(token: Arc<Token>, port: u16) -> Self {
+        Self {
+            token,
+            host: daemon_authority(port),
+        }
+    }
 }
 
 /// The middleware, for `axum::middleware::from_fn_with_state(config,
-/// require_auth)`. Add it with `Router::layer` after the last route, so that
-/// every route sits behind it.
+/// require_auth)`. Add it with `Router::layer` after the last route and the
+/// fallback, so that every request passes through it.
 ///
-/// The log line names the error code and the path only, never a header value.
+/// Rejections are logged at `debug`, not `warn`: any web page can send them
+/// without limit, and they must not flood the log. The line names the error
+/// code and the path only, never a header value.
 pub async fn require_auth(
     State(config): State<AuthConfig>,
     request: Request,
@@ -45,7 +57,7 @@ pub async fn require_auth(
     match check(&config, &request) {
         Ok(()) => next.run(request).await,
         Err(rejection) => {
-            tracing::warn!(
+            tracing::debug!(
                 code = rejection.code,
                 path = %request.uri().path(),
                 "request rejected"
@@ -97,9 +109,10 @@ fn check(config: &AuthConfig, request: &Request) -> Result<(), Rejection> {
         return Err(ORIGIN_REJECTED);
     }
 
-    let host = format!("127.0.0.1:{}", config.port);
     // An absolute request target (`GET http://other/ HTTP/1.1`) carries a
-    // host too, and it must agree.
+    // host too, and it must agree. HTTP/2 may send no `Host` at all; that
+    // fails closed here (axum serves HTTP/1 only with its default features).
+    let host = config.host.as_str();
     let host_ok = single(headers, header::HOST) == Some(host.as_bytes())
         && request
             .uri()
@@ -135,6 +148,7 @@ mod tests {
 
     use axum::Router;
     use axum::body::{Body, to_bytes};
+    use axum::http::HeaderValue;
     use axum::middleware::from_fn_with_state;
     use axum::routing::get;
     use tower::ServiceExt;
@@ -143,22 +157,28 @@ mod tests {
     const PATH: &str = "/v1/health";
 
     fn app(token: Token) -> Router {
-        let config = AuthConfig {
-            token: Arc::new(token),
-            port: PORT,
-        };
+        let config = AuthConfig::new(Arc::new(token), PORT);
         Router::new()
             .route(PATH, get(|| async { "ok" }))
+            .fallback(|| async {
+                let body = ErrorBody::new("not_found", "no such route");
+                (StatusCode::NOT_FOUND, Json(body))
+            })
             .layer(from_fn_with_state(config, require_auth))
     }
 
-    /// Sends `GET <uri>` with `headers`, one `name: value` per line. Gives the
-    /// status and the error code, if any.
+    /// Sends `GET <uri>` with `headers`, one `name: value` per line. Values go
+    /// out as Latin-1, so `ÿ` becomes the byte 0xFF, which is not UTF-8. Gives
+    /// the status and the error code, if any.
     async fn send(app: &Router, uri: &str, headers: &str) -> (StatusCode, Option<String>) {
         let mut request = Request::builder().uri(uri);
         for line in headers.lines() {
             let (name, value) = line.split_once(": ").unwrap();
-            request = request.header(name, value);
+            let latin1: Vec<u8> = value
+                .chars()
+                .map(|c| u8::try_from(u32::from(c)).unwrap())
+                .collect();
+            request = request.header(name, HeaderValue::from_bytes(&latin1).unwrap());
         }
         let request = request.body(Body::empty()).unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
@@ -216,6 +236,11 @@ mod tests {
                 bad_host,
             ),
             ("no port", format!("host: 127.0.0.1\n{auth}"), bad_host),
+            (
+                "Host not UTF-8",
+                format!("host: 127.0.0.1:{PORT}ÿ\n{auth}"),
+                bad_host,
+            ),
             ("two Hosts", format!("{host}\n{good}"), bad_host),
             (
                 "Host before the token",
@@ -239,8 +264,18 @@ mod tests {
                 unauthorized,
             ),
             (
+                "two spaces",
+                format!("{host}\nauthorization: Bearer  {hex}"),
+                unauthorized,
+            ),
+            (
                 "one character short",
                 good[..good.len() - 1].to_owned(),
+                unauthorized,
+            ),
+            (
+                "token not UTF-8",
+                format!("{host}\nauthorization: Bearer {}ÿ", &hex[..63]),
                 unauthorized,
             ),
             (
@@ -254,7 +289,12 @@ mod tests {
                 unauthorized,
             ),
             (
-                "two tokens",
+                "two tokens, good first",
+                format!("{good}\nauthorization: {other}"),
+                unauthorized,
+            ),
+            (
+                "two tokens, good last",
                 format!("{host}\nauthorization: {other}\n{auth}"),
                 unauthorized,
             ),
@@ -265,8 +305,32 @@ mod tests {
         }
 
         // An absolute request target names a host too, and it must agree.
-        let got = send(&app, "http://evil.example/v1/health", &good).await;
-        assert_eq!(got, (StatusCode::FORBIDDEN, Some("host_rejected".into())));
+        let absolute = [
+            (format!("http://127.0.0.1:{PORT}{PATH}"), ok),
+            ("http://evil.example/v1/health".to_owned(), bad_host),
+            (format!("http://u@127.0.0.1:{PORT}{PATH}"), bad_host),
+        ];
+        for (uri, (status, code)) in absolute {
+            let got = send(&app, &uri, &good).await;
+            assert_eq!(got, (status, code.map(str::to_owned)), "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_paths_are_checked_too() {
+        let token = Token::generate().unwrap();
+        let host = format!("host: 127.0.0.1:{PORT}");
+        let good = format!("{host}\nauthorization: {}", token.bearer_header());
+        let app = app(token);
+        let path = "/v1/nope";
+        let code = |code: &str| Some(code.to_owned());
+
+        let got = send(&app, path, &host).await;
+        assert_eq!(got, (StatusCode::UNAUTHORIZED, code("unauthorized")));
+        let got = send(&app, path, &format!("origin: null\n{good}")).await;
+        assert_eq!(got, (StatusCode::FORBIDDEN, code("origin_rejected")));
+        let got = send(&app, path, &good).await;
+        assert_eq!(got, (StatusCode::NOT_FOUND, code("not_found")));
     }
 
     /// Collects log output in memory.
@@ -290,6 +354,7 @@ mod tests {
         let writer = capture.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(move || writer.clone())
+            .with_max_level(tracing::Level::DEBUG)
             .with_ansi(false)
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
@@ -309,9 +374,17 @@ mod tests {
         .await;
 
         let log = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
-        for wanted in ["origin_rejected", "host_rejected", "unauthorized", PATH] {
+        // `DEBUG`, not `WARN`: rejections must not flood the log.
+        for wanted in [
+            "DEBUG",
+            "origin_rejected",
+            "host_rejected",
+            "unauthorized",
+            PATH,
+        ] {
             assert!(log.contains(wanted), "{wanted} missing from: {log}");
         }
+        assert!(!log.contains("WARN"), "{log}");
         for value in [&bearer[7..], &other[7..], "evil.example", "rebind.example"] {
             assert!(!log.contains(value), "the log shows a header value: {log}");
         }

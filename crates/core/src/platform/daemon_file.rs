@@ -19,10 +19,15 @@ use serde::{Deserialize, Serialize};
 
 const FILE_NAME: &str = "daemon.json";
 const TEMP_NAME: &str = "daemon.json.tmp";
+/// The real file is under 200 bytes. A longer one is not ours.
+const MAX_LEN: usize = 64 * 1024;
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 /// The daemon's bearer token: 32 random bytes, sent as 64 lowercase hex
 /// characters. A new one is made at every start.
+///
+/// The bytes are not zeroed on drop: doing that reliably needs `unsafe`
+/// volatile writes or an extra crate.
 pub struct Token([u8; 32]);
 
 impl Token {
@@ -49,14 +54,17 @@ impl Token {
         };
         let mut diff = 0_u8;
         for (a, b) in self.0.iter().zip(presented.0) {
-            // `black_box` keeps the optimizer from adding an early exit.
+            // `black_box` keeps the optimizer from adding an early exit. It is
+            // best effort, not a guarantee like the `subtle` crate gives.
             diff = std::hint::black_box(diff | (a ^ b));
         }
         diff == 0
     }
 
     /// The `Authorization` header value, `Bearer <hex>`. The only way to read
-    /// the token: for the client, which sends it to the daemon.
+    /// the token: for the client, which sends it to the daemon. Mark the
+    /// `HeaderValue` built from it with `set_sensitive(true)`, so HTTP
+    /// libraries leave it out of their logs.
     pub fn bearer_header(&self) -> String {
         format!("Bearer {}", self.hex_string())
     }
@@ -130,6 +138,9 @@ pub enum DaemonFileError {
     #[error("{} is not a valid daemon file: {reason}", .path.display())]
     Invalid { path: PathBuf, reason: &'static str },
 
+    /// The file exists but cannot be read. On Windows this may be transient
+    /// (an antivirus scan, or a sharing violation while the daemon renames
+    /// the file), so a start-up poller may retry it.
     #[error("cannot read {}", .path.display())]
     Unreadable {
         path: PathBuf,
@@ -137,7 +148,7 @@ pub enum DaemonFileError {
         source: io::Error,
     },
 
-    #[error("{} can be read by other users (mode {mode:03o}); it must be 600", .path.display())]
+    #[error("{}: other users have access to it (mode {mode:03o}); it must be 600", .path.display())]
     Insecure { path: PathBuf, mode: u32 },
 
     #[error("cannot write {}", .path.display())]
@@ -153,7 +164,8 @@ pub enum DaemonFileError {
 
 impl DaemonFileError {
     /// Stable error name for the UI. Never changes once released. A file that
-    /// exists but cannot be read counts as `daemon_file_invalid`.
+    /// exists but cannot be read counts as `daemon_file_invalid`; on Windows
+    /// that may be transient, see [`DaemonFileError::Unreadable`].
     pub fn code(&self) -> &'static str {
         match self {
             DaemonFileError::Missing { .. } => "daemon_file_missing",
@@ -170,6 +182,12 @@ impl DaemonFileError {
 /// The path of `daemon.json` inside `run_dir`.
 pub fn daemon_file_path(run_dir: &Path) -> PathBuf {
     run_dir.join(FILE_NAME)
+}
+
+/// `127.0.0.1:<port>`: where the daemon listens, and the only `Host` it
+/// accepts. The client and the auth middleware both use this.
+pub fn daemon_authority(port: u16) -> String {
+    format!("127.0.0.1:{port}")
 }
 
 /// Writes `run_dir/daemon.json` atomically: a temp file in `run_dir`, created
@@ -198,6 +216,7 @@ pub fn write_daemon_file(run_dir: &Path, file: &DaemonFile) -> Result<(), Daemon
         serde_json::to_vec_pretty(&on_disk).map_err(|err| fail(io::Error::other(err)))?;
     body.push(b'\n');
     let temp = run_dir.join(TEMP_NAME);
+    // `write_new` closes its handle before the `rename`: Windows cannot rename an open file.
     let result = write_new(&temp, &body).and_then(|()| fs::rename(&temp, &path));
     if result.is_err() {
         // Best effort: the write already failed, and that is the error to report.
@@ -215,7 +234,7 @@ pub fn write_daemon_file(run_dir: &Path, file: &DaemonFile) -> Result<(), Daemon
 /// is not a daemon file.
 pub fn read_daemon_file(run_dir: &Path) -> Result<DaemonFile, DaemonFileError> {
     let path = daemon_file_path(run_dir);
-    let mut file = match File::open(&path) {
+    let file = match File::open(&path) {
         Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             return Err(DaemonFileError::Missing { path });
@@ -235,11 +254,15 @@ pub fn read_daemon_file(run_dir: &Path) -> Result<DaemonFile, DaemonFileError> {
     check_private(&path, &file.metadata().map_err(unreadable)?)?;
 
     let mut text = String::new();
-    file.read_to_string(&mut text)
+    file.take(MAX_LEN as u64 + 1)
+        .read_to_string(&mut text)
         .map_err(|err| match err.kind() {
             io::ErrorKind::InvalidData => invalid("not UTF-8 text"),
             _ => unreadable(err),
         })?;
+    if text.len() > MAX_LEN {
+        return Err(invalid("the file is too long"));
+    }
     // The `serde_json` message can quote a value from the file, so it is dropped.
     let on_disk: OnDisk =
         serde_json::from_str(&text).map_err(|_| invalid("not the expected JSON"))?;
@@ -467,6 +490,11 @@ mod tests {
                 KNOWN.to_uppercase()
             ),
             format!(r#"{{"pid": 1, "port": 2, "token": "{good}"}}"#),
+            // Valid, but padded past the 64 KiB cap.
+            format!(
+                r#"{{"pid": 1, "port": 2, "token": "{good}", "app_version": "0"}}{}"#,
+                " ".repeat(MAX_LEN)
+            ),
         ] {
             put(dir.path(), &text);
             let err = read_daemon_file(dir.path()).unwrap_err();
