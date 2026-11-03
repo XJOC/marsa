@@ -1,0 +1,36 @@
+# S-09 spike workspace: Tauri vs egui on memory, startup, and scrolling.
+# Independent on purpose: throwaway code in `spikes/`, never a member of the
+# product workspace (the product workspace excludes `spikes/`).
+[workspace]
+resolver = "3"
+members = ["common", "tray", "egui-app", "tauri-app/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+s09-common = { path = "common" }
+eframe = "0.37"
+egui_extras = "0.37"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tao = "0.37"
+tauri = "2"
+tauri-build = "2"
+tray-icon = "0.26"
+
+# One release profile for every program, so the comparison is fair: the
+# Tauri CLI (`tauri build`) and plain `cargo build --release` both read it.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+# Same lint policy as the product workspace (AGENTS.md section 6).
+[workspace.lints.clippy]
+await_holding_lock = "deny"
+unwrap_used = "deny"

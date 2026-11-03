@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "No plugin permissions. The app's own commands (table_rows, log_lines, sql_text, app_config, bench_*) are not gated by the ACL.",
+  "windows": ["main"],
+  "permissions": []
+}

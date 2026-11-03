@@ -1,0 +1,12 @@
+[package]
+name = "s09-common"
+description = "Deterministic data and bench helpers shared by the S-09 programs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
