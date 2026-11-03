@@ -162,6 +162,23 @@ impl Manifest {
     }
 }
 
+// Compiled only into this crate's own unit tests, never into a build that
+// ships.
+#[cfg(test)]
+impl Manifest {
+    /// Reads `json` as if its signature had passed, with the same serial and
+    /// content checks. The installer's tests use it for manifests that list
+    /// archives the test builds itself: their sha256 is not known when the
+    /// signed fixtures are made. The signature path is tested with the signed
+    /// fixtures.
+    pub(crate) fn unsigned_for_tests(
+        json: &[u8],
+        last_seen: Option<u64>,
+    ) -> Result<Manifest, ManifestError> {
+        parse_verified(json, last_seen)
+    }
+}
+
 impl Release {
     pub fn version(&self) -> &Version {
         &self.version

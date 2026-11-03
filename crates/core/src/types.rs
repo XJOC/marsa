@@ -8,9 +8,12 @@
 //! needed.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+
+use crate::runtimes::Runtime;
 
 /// The API version this build speaks. A client refuses a daemon whose API
 /// version is newer than its own (architecture.md section 6, version handshake).
@@ -163,6 +166,41 @@ impl ErrorBody {
             },
         }
     }
+}
+
+/// The progress of one runtime install (task M2-05). `marsa install` prints
+/// these; in M3 the daemon sends the same values on `/v1/events`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum InstallEvent {
+    /// The manifest's signature and serial passed.
+    ManifestVerified {
+        serial: u64,
+    },
+    /// The version picked from the manifest, as full semver text (`8.4.23`).
+    Selected {
+        runtime: Runtime,
+        version: String,
+    },
+    /// Sent at most once per 256 KiB, and at the start and end of each file.
+    Downloading {
+        artifact: String,
+        done: u64,
+        total: u64,
+    },
+    /// The file's size and sha256 matched the manifest.
+    Verified {
+        artifact: String,
+    },
+    Extracting {
+        artifact: String,
+    },
+    /// Running the recipe's check (`php -v`).
+    Checking,
+    /// The version folder is in place.
+    Installed {
+        dir: PathBuf,
+    },
 }
 
 #[cfg(test)]
@@ -335,5 +373,25 @@ mod tests {
             &ErrorBody::new("service_not_found", "no service named php"),
             json!({ "error": { "code": "service_not_found", "message": "no service named php" } }),
         );
+    }
+
+    #[test]
+    fn install_events() {
+        round_trip(
+            &InstallEvent::Selected {
+                runtime: Runtime::Php,
+                version: "8.4.23".into(),
+            },
+            json!({ "step": "selected", "runtime": "php", "version": "8.4.23" }),
+        );
+        round_trip(
+            &InstallEvent::Downloading {
+                artifact: "cli".into(),
+                done: 1,
+                total: 2,
+            },
+            json!({ "step": "downloading", "artifact": "cli", "done": 1, "total": 2 }),
+        );
+        round_trip(&InstallEvent::Checking, json!({ "step": "checking" }));
     }
 }

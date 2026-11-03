@@ -21,11 +21,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use semver::Version;
+use serde::{Deserialize, Serialize};
 
 use crate::resolver::Tool;
 
-/// A program that has its own folder under `runtimes/`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A program that has its own folder under `runtimes/`. Serialized as its
+/// folder name (`php`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Runtime {
     Php,
     Node,
