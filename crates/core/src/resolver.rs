@@ -18,6 +18,15 @@ use std::path::{Path, PathBuf};
 use semver::{Prerelease, Version};
 use toml::de::DeTable;
 
+// `resolve` starts to use the matcher in M1-04b, when it reads
+// `composer.json` and `package.json`. Until then only the tests call it.
+// `expect` fails the build once that is done, so this line is not forgotten.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired into `resolve` in task M1-04b")
+)]
+mod constraint;
+
 /// A runtime that Marsa picks a version for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
