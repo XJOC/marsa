@@ -1,22 +1,28 @@
 //! Why a call to the daemon failed. Task M3-08.
 
+use std::error::Error as StdError;
 use std::io;
 
 use crate::platform::daemon_file::DaemonFileError;
-use crate::types::API_VERSION;
+use crate::types::{API_VERSION, ErrorBody};
+
+/// The longest text from the daemon kept in an error or a log line.
+const MAX_DAEMON_TEXT: usize = 200;
 
 /// Why a call to the daemon failed. [`ClientError::code`] gives a stable name
 /// that the UI maps to a message. No message holds the token: the token lives
 /// only in the `Authorization` header, and response bodies are never quoted
-/// except the `ErrorBody` the daemon wrote for us.
+/// except the `ErrorBody` the daemon wrote for us, cleaned by
+/// [`daemon_text`].
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
-    /// No `run/daemon.json`, or nothing accepts a connection on its port.
+    /// No daemon holds `run/daemon.lock`, there is no `run/daemon.json`, or
+    /// nothing accepts a connection on its port.
     #[error("the daemon is not running")]
     NotRunning,
 
-    /// `marsad` could not be started, did not answer in time, or an old
-    /// daemon did not stop.
+    /// `marsad` could not be started, stopped early, or did not answer in
+    /// time.
     #[error("cannot start the daemon: {reason}")]
     StartFailed {
         reason: String,
@@ -24,12 +30,16 @@ pub enum ClientError {
         source: Option<io::Error>,
     },
 
+    /// A running daemon did not stop in time.
+    #[error("the daemon did not stop: {reason}")]
+    StopFailed { reason: String },
+
     /// The connection worked but the call did not, for example it timed out.
     #[error("cannot reach the daemon on port {port}")]
     Unreachable {
         port: u16,
         #[source]
-        source: reqwest::Error,
+        source: Box<dyn StdError + Send + Sync>,
     },
 
     /// The daemon is newer than this build. Guessing is unsafe, and stopping
@@ -46,7 +56,8 @@ pub enum ClientError {
     #[error("{id:?} is not a valid name")]
     InvalidId { id: String },
 
-    /// The daemon answered with an `ErrorBody`. `code` is passed on as sent.
+    /// The daemon answered with an `ErrorBody`. `code` is passed on as sent,
+    /// after [`daemon_text`].
     #[error("the daemon answered {status} {code}: {message}")]
     Api {
         status: u16,
@@ -66,6 +77,7 @@ impl ClientError {
         match self {
             ClientError::NotRunning => "daemon_not_running",
             ClientError::StartFailed { .. } => "daemon_start_failed",
+            ClientError::StopFailed { .. } => "daemon_stop_failed",
             ClientError::Unreachable { .. } => "daemon_unreachable",
             ClientError::ApiTooNew { .. } => "daemon_api_too_new",
             ClientError::BadResponse { .. } => "daemon_bad_response",
@@ -97,6 +109,40 @@ impl ClientError {
             err.column()
         ))
     }
+
+    pub(super) fn api(status: u16, body: &ErrorBody) -> Self {
+        ClientError::Api {
+            status,
+            code: daemon_text(&body.error.code),
+            message: daemon_text(&body.error.message),
+        }
+    }
+
+    /// No answer within `waited`.
+    pub(super) fn timed_out(port: u16, what: &str, waited: std::time::Duration) -> Self {
+        ClientError::Unreachable {
+            port,
+            source: Box::new(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("{what} within {} seconds", waited.as_secs()),
+            )),
+        }
+    }
+
+    /// Whether waiting may fix it: the daemon may be starting, stopping, or
+    /// renaming its file into place (a sharing violation on Windows).
+    pub(super) fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            ClientError::NotRunning
+                | ClientError::Unreachable { .. }
+                | ClientError::BadResponse { .. }
+                | ClientError::Api { status: 401, .. }
+                | ClientError::DaemonFile(
+                    DaemonFileError::Invalid { .. } | DaemonFileError::Unreadable { .. }
+                )
+        )
+    }
 }
 
 /// A missing file means no daemon. Every other file error keeps its code.
@@ -106,5 +152,28 @@ impl From<DaemonFileError> for ClientError {
             DaemonFileError::Missing { .. } => ClientError::NotRunning,
             other => ClientError::DaemonFile(other),
         }
+    }
+}
+
+/// Text from the daemon (an error code or message, a version) made safe for
+/// an error message or a log line: no control characters, which could move
+/// the cursor or forge a log line, and at most 200 characters.
+pub(super) fn daemon_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_DAEMON_TEXT)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_text_drops_control_characters_and_is_short() {
+        assert_eq!(daemon_text("service_not_found"), "service_not_found");
+        assert_eq!(daemon_text("a\nb\r\u{1b}[31mc\u{7f}\u{85}"), "ab[31mc");
+        let long = "م".repeat(300);
+        assert_eq!(daemon_text(&long).chars().count(), MAX_DAEMON_TEXT);
     }
 }

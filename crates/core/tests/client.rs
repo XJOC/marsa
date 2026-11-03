@@ -1,13 +1,15 @@
 //! The daemon client against a fake daemon: an axum server on `127.0.0.1:0`
-//! with a `run/daemon.json` in a temp folder (task M3-08). No network beyond
-//! loopback. Starting the real `marsad` is tested in M3-09.
+//! that holds `run/daemon.lock` and has a `run/daemon.json` in a temp folder,
+//! like `marsad` (task M3-08). No network beyond loopback. Starting the real
+//! `marsad` is tested in M3-09.
 
 #![cfg(feature = "full")]
 
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{RawQuery, Request, State};
 use axum::http::{StatusCode, header};
@@ -16,10 +18,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use marsa_core::client::{
-    ClientError, DaemonClient, EventStream, ensure_running, ensure_running_with,
+    ClientError, DaemonClient, EventStream, StreamItem, ensure_running, ensure_running_with,
+    stop_daemon,
 };
 use marsa_core::platform::daemon_file::{
-    DaemonFile, Token, daemon_file_path, remove_daemon_file, write_daemon_file,
+    DaemonFile, Token, daemon_file_path, daemon_lock_path, remove_daemon_file, write_daemon_file,
 };
 use marsa_core::types::{
     API_VERSION, ErrorBody, Event, Health, LogLine, LogStream, ServiceAction, ServiceState,
@@ -43,17 +46,55 @@ struct Seen {
 
 type Log = Arc<Mutex<Vec<Seen>>>;
 
+/// `run/daemon.lock`, held the way `marsad` holds it while it runs.
+#[derive(Clone)]
+struct DaemonLock(Arc<Mutex<Option<File>>>);
+
+impl DaemonLock {
+    fn take(data_dir: &Path) -> Self {
+        let run = data_dir.join("run");
+        fs::create_dir_all(&run).expect("the run folder");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(daemon_lock_path(&run))
+            .expect("the lock file");
+        file.try_lock().expect("the daemon lock");
+        DaemonLock(Arc::new(Mutex::new(Some(file))))
+    }
+
+    /// Lets go, as `marsad` does when it exits.
+    fn release(&self) {
+        if let Some(file) = self.0.lock().expect("lock").take() {
+            file.unlock().expect("unlock");
+        }
+    }
+}
+
 struct Fake {
-    dir: TempDir,
+    _temp: Option<TempDir>,
+    data_dir: PathBuf,
     port: u16,
     /// The token in hex, to look for it where it must not be.
     token: String,
     seen: Log,
+    lock: DaemonLock,
 }
 
 impl Fake {
-    /// Serves `router` on a free loopback port and writes the daemon file.
+    /// A fake daemon in a new temp folder.
     async fn start(router: Router) -> Self {
+        let temp = TempDir::new().expect("a temp folder");
+        let lock = DaemonLock::take(temp.path());
+        let mut fake = Fake::serve(temp.path(), lock, router).await;
+        fake._temp = Some(temp);
+        fake
+    }
+
+    /// Serves `router` on a free loopback port for `data_dir`, holding
+    /// `lock`, then writes the daemon file: the order `marsad` uses.
+    async fn serve(data_dir: &Path, lock: DaemonLock, router: Router) -> Self {
         let seen = Log::default();
         let router = router.layer(middleware::from_fn_with_state(seen.clone(), record));
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -61,18 +102,19 @@ impl Fake {
             .expect("bind a loopback port");
         let port = listener.local_addr().expect("a bound address").port();
         tokio::spawn(async move { axum::serve(listener, router).await.expect("serve") });
-        let dir = TempDir::new().expect("a temp folder");
-        let token = write_file(dir.path(), port);
+        let token = write_file(data_dir, port);
         Fake {
-            dir,
+            _temp: None,
+            data_dir: data_dir.to_path_buf(),
             port,
             token,
             seen,
+            lock,
         }
     }
 
     fn data_dir(&self) -> &Path {
-        self.dir.path()
+        &self.data_dir
     }
 
     fn client(&self) -> DaemonClient {
@@ -85,14 +127,18 @@ impl Fake {
 
     /// Neither the message, its sources, nor `Debug` holds the token.
     fn assert_no_token(&self, err: &ClientError) {
-        let mut shown = format!("{err} {err:?} {err:#?}");
-        let mut source = std::error::Error::source(err);
-        while let Some(cause) = source {
-            shown.push_str(&format!(" {cause} {cause:?}"));
-            source = cause.source();
-        }
-        assert!(!shown.contains(&self.token), "{shown}");
+        assert_no_token(&self.token, err);
     }
+}
+
+fn assert_no_token(token: &str, err: &ClientError) {
+    let mut shown = format!("{err} {err:?} {err:#?}");
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        shown.push_str(&format!(" {cause} {cause:?}"));
+        source = cause.source();
+    }
+    assert!(!shown.contains(token), "{shown}");
 }
 
 /// Writes `<data_dir>/run/daemon.json` for `port` and returns the token in hex.
@@ -149,20 +195,22 @@ fn serve_health(answer: Health) -> Router {
     )
 }
 
-/// `POST /v1/shutdown` that counts calls and, like the real daemon, deletes
-/// the daemon file.
+/// `POST /v1/shutdown` that counts calls. With `stop`, it also does what
+/// `marsad` does: deletes the daemon file and lets go of the lock.
 fn serve_shutdown(
     router: Router,
-    run_dir: Arc<Mutex<Option<std::path::PathBuf>>>,
+    stop: Option<(&Path, &DaemonLock)>,
 ) -> (Router, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
+    let stop = stop.map(|(data_dir, lock)| (data_dir.join("run"), lock.clone()));
     let router = router.route(
         "/v1/shutdown",
         post(move || {
             counter.fetch_add(1, Ordering::SeqCst);
-            if let Some(run) = run_dir.lock().expect("lock").as_deref() {
+            if let Some((run, lock)) = &stop {
                 remove_daemon_file(run).expect("delete the daemon file");
+                lock.release();
             }
             async { StatusCode::ACCEPTED }
         }),
@@ -190,14 +238,16 @@ fn log_line(seq: u64, text: &str) -> LogLine {
     }
 }
 
+fn sse_data<T: serde::Serialize>(event: &T) -> String {
+    format!("data: {}\n\n", serde_json::to_string(event).expect("JSON"))
+}
+
 /// An SSE body the way axum's `Sse` writes it, with keep-alive comments.
 fn sse_body<T: serde::Serialize>(events: &[T]) -> String {
     let mut body = String::from(":\n\n");
     for event in events {
-        body.push_str(&format!(
-            "data: {}\n\n: keep-alive\n\n",
-            serde_json::to_string(event).expect("JSON")
-        ));
+        body.push_str(&sse_data(event));
+        body.push_str(": keep-alive\n\n");
     }
     body
 }
@@ -206,13 +256,43 @@ fn sse_response(body: String) -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/event-stream")], body)
 }
 
-async fn collect<T: serde::de::DeserializeOwned>(mut stream: EventStream<T>) -> Vec<T> {
+async fn collect<T: serde::de::DeserializeOwned>(mut stream: EventStream<T>) -> Vec<StreamItem<T>> {
     let mut out = Vec::new();
-    while let Some(event) = stream.next().await {
-        out.push(event.expect("an event"));
+    while let Some(item) = stream.next().await {
+        out.push(item.expect("an item"));
     }
     out
 }
+
+fn items<T: Clone>(events: &[T]) -> Vec<StreamItem<T>> {
+    events.iter().cloned().map(StreamItem::Item).collect()
+}
+
+/// An executable shell script standing in for `marsad`. It gets
+/// `--data-dir <path>` as `$1 $2`.
+#[cfg(unix)]
+fn fake_marsad(dir: &Path, script: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("marsad");
+    fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("write the script");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    path
+}
+
+/// After `delay`, a fake daemon of this version takes the lock in
+/// `data_dir`, and after `delay` again it writes its file and answers.
+fn daemon_later(data_dir: &Path, delay: Duration) -> tokio::task::JoinHandle<Fake> {
+    let data_dir = data_dir.to_path_buf();
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let lock = DaemonLock::take(&data_dir);
+        tokio::time::sleep(delay).await;
+        Fake::serve(&data_dir, lock, serve_health(health(VERSION, API_VERSION))).await
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Calls
 
 #[tokio::test]
 async fn requests_carry_the_token_and_no_origin() {
@@ -236,6 +316,7 @@ async fn requests_carry_the_token_and_no_origin() {
 #[test]
 fn debug_shows_the_port_and_never_the_token() {
     let dir = TempDir::new().unwrap();
+    let _lock = DaemonLock::take(dir.path());
     let token = write_file(dir.path(), 51234);
     let client = DaemonClient::connect(dir.path()).unwrap();
     assert_eq!(client.port(), 51234);
@@ -278,6 +359,30 @@ async fn an_error_body_becomes_an_api_error_with_the_daemons_code() {
 }
 
 #[tokio::test]
+async fn daemon_text_in_an_error_is_cleaned_and_short() {
+    let router = Router::new().route(
+        "/v1/services",
+        get(|| async {
+            let message = format!("line\r\nforged log line\u{1b}[2J{}", "x".repeat(500));
+            let body = ErrorBody::new("caddy_not\ninstalled", message);
+            (StatusCode::CONFLICT, Json(body))
+        }),
+    );
+    let fake = Fake::start(router).await;
+    let err = fake.client().services().await.unwrap_err();
+    assert_eq!(err.code(), "caddy_notinstalled");
+    let ClientError::Api { message, .. } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(
+        message.starts_with("lineforged log line[2Jxxx"),
+        "{message}"
+    );
+    assert_eq!(message.chars().count(), 200);
+    assert!(!err.to_string().chars().any(char::is_control), "{err}");
+}
+
+#[tokio::test]
 async fn an_error_without_an_error_body_is_a_bad_response() {
     // axum's own 404 has an empty body.
     let fake = Fake::start(Router::new()).await;
@@ -295,6 +400,40 @@ async fn a_body_that_is_not_the_expected_json_is_a_bad_response() {
     let fake = Fake::start(router).await;
     let err = fake.client().services().await.unwrap_err();
     assert_eq!(err.code(), "daemon_bad_response", "{err:?}");
+    fake.assert_no_token(&err);
+}
+
+#[tokio::test]
+async fn a_body_over_16_mib_is_refused() {
+    let router = Router::new().route(
+        "/v1/services",
+        get(|| async { "x".repeat(16 * 1024 * 1024 + 1) }),
+    );
+    let fake = Fake::start(router).await;
+    let err = fake.client().services().await.unwrap_err();
+    assert_eq!(err.code(), "daemon_bad_response", "{err:?}");
+    assert!(err.to_string().contains("16 MiB"), "{err}");
+}
+
+#[tokio::test]
+async fn a_redirect_is_not_followed() {
+    let other = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = format!(
+        "http://127.0.0.1:{}/v1/health",
+        other.local_addr().unwrap().port()
+    );
+    let router = Router::new().route(
+        "/v1/health",
+        get(move || {
+            let target = target.clone();
+            async move { (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, target)]) }
+        }),
+    );
+    let fake = Fake::start(router).await;
+    let err = fake.client().health().await.unwrap_err();
+    assert_eq!(err.code(), "daemon_bad_response", "{err:?}");
+    let accepted = tokio::time::timeout(Duration::from_millis(200), other.accept()).await;
+    assert!(accepted.is_err(), "the redirect was followed");
     fake.assert_no_token(&err);
 }
 
@@ -332,10 +471,8 @@ async fn services_and_logs_are_read() {
     assert_eq!(started, caddy(ServiceState::Running));
     let lines = vec![log_line(0, "serving"), log_line(1, "مرسى")];
     assert_eq!(client.logs("caddy").await.unwrap(), lines);
-    assert_eq!(
-        collect(client.follow_logs("caddy").await.unwrap()).await,
-        lines
-    );
+    let followed = collect(client.follow_logs("caddy").await.unwrap()).await;
+    assert_eq!(followed, items(&lines));
 
     let targets: Vec<String> = fake
         .seen()
@@ -354,6 +491,52 @@ async fn services_and_logs_are_read() {
 }
 
 #[tokio::test]
+async fn an_id_cannot_reach_another_route() {
+    let (router, shutdowns) = serve_shutdown(Router::new(), None);
+    let router = router.route(
+        "/v1/shutdown/{action}",
+        post(|| async { StatusCode::ACCEPTED }),
+    );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    for id in [
+        "../../shutdown",
+        "x/../../shutdown#",
+        "%2e%2e/%2e%2e/shutdown",
+        "../../shutdown?a=b",
+    ] {
+        let _ = client.service_action(id, ServiceAction::Start).await;
+        let _ = client.logs(id).await;
+    }
+    assert_eq!(shutdowns.load(Ordering::SeqCst), 0);
+    let seen = fake.seen();
+    assert_eq!(seen.len(), 8, "{seen:?}");
+    for request in &seen {
+        assert!(!request.target.starts_with("/v1/shutdown"), "{request:?}");
+    }
+    assert_eq!(
+        seen[2].target,
+        "/v1/services/x%2F..%2F..%2Fshutdown%23/start"
+    );
+
+    // The URL rules would drop these segments and shorten the path, so they
+    // are refused before any request.
+    for id in ["", ".", ".."] {
+        let err = client
+            .service_action(id, ServiceAction::Start)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_id", "{err:?}");
+        let err = client.follow_logs(id).await.unwrap_err();
+        assert_eq!(err.code(), "invalid_id", "{err:?}");
+    }
+    assert_eq!(fake.seen().len(), 8);
+}
+
+// ---------------------------------------------------------------------------
+// Event streams
+
+#[tokio::test]
 async fn events_reads_three_events() {
     let events = vec![
         Event::ServiceChanged(caddy(ServiceState::Running)),
@@ -363,7 +546,29 @@ async fn events_reads_three_events() {
     let body = sse_body(&events);
     let router = Router::new().route("/v1/events", get(move || async move { sse_response(body) }));
     let fake = Fake::start(router).await;
-    assert_eq!(collect(fake.client().events().await.unwrap()).await, events);
+    let got = collect(fake.client().events().await.unwrap()).await;
+    assert_eq!(got, items(&events));
+}
+
+#[tokio::test]
+async fn a_lag_note_is_its_own_item() {
+    let first = Event::ServiceChanged(caddy(ServiceState::Running));
+    let body = format!(
+        "{}: lagged 5\n\n{}",
+        sse_data(&first),
+        sse_data(&Event::ShuttingDown)
+    );
+    let router = Router::new().route("/v1/events", get(move || async move { sse_response(body) }));
+    let fake = Fake::start(router).await;
+    let got = collect(fake.client().events().await.unwrap()).await;
+    assert_eq!(
+        got,
+        [
+            StreamItem::Item(first),
+            StreamItem::Lagged(5),
+            StreamItem::Item(Event::ShuttingDown),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -407,86 +612,93 @@ async fn events_survive_a_body_sent_one_byte_at_a_time() {
         }
     });
     let dir = TempDir::new().unwrap();
+    let _lock = DaemonLock::take(dir.path());
     write_file(dir.path(), port);
     let client = DaemonClient::connect(dir.path()).unwrap();
-    assert_eq!(collect(client.events().await.unwrap()).await, events);
-}
-
-#[tokio::test]
-async fn an_id_cannot_reach_another_route() {
-    let (router, shutdowns) = serve_shutdown(Router::new(), Arc::default());
-    let router = router.route(
-        "/v1/shutdown/{action}",
-        post(|| async { StatusCode::ACCEPTED }),
-    );
-    let fake = Fake::start(router).await;
-    let client = fake.client();
-    for id in [
-        "../../shutdown",
-        "x/../../shutdown#",
-        "%2e%2e/%2e%2e/shutdown",
-        "../../shutdown?a=b",
-    ] {
-        let _ = client.service_action(id, ServiceAction::Start).await;
-        let _ = client.logs(id).await;
-    }
-    assert_eq!(shutdowns.load(Ordering::SeqCst), 0);
-    let seen = fake.seen();
-    assert_eq!(seen.len(), 8, "{seen:?}");
-    for request in &seen {
-        assert!(!request.target.starts_with("/v1/shutdown"), "{request:?}");
-    }
     assert_eq!(
-        seen[2].target,
-        "/v1/services/x%2F..%2F..%2Fshutdown%23/start"
+        collect(client.events().await.unwrap()).await,
+        items(&events)
     );
-
-    // The URL rules would drop these segments and shorten the path, so they
-    // are refused before any request.
-    for id in ["", ".", ".."] {
-        let err = client
-            .service_action(id, ServiceAction::Start)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), "invalid_id", "{err:?}");
-        let err = client.follow_logs(id).await.unwrap_err();
-        assert_eq!(err.code(), "invalid_id", "{err:?}");
-    }
-    assert_eq!(fake.seen().len(), 8);
 }
 
+// ---------------------------------------------------------------------------
+// Finding the daemon
+
 #[tokio::test]
-async fn no_file_or_a_dead_port_means_not_running() {
+async fn no_daemon_or_a_dead_port_means_not_running() {
     let dir = TempDir::new().unwrap();
     let err = DaemonClient::connect(dir.path()).unwrap_err();
     assert_eq!(err.code(), "daemon_not_running", "{err:?}");
 
-    // A file left by a crash: nothing listens on port 1.
-    let token = write_file(dir.path(), 1);
+    // The lock is held but there is no file yet: still not running.
+    let _lock = DaemonLock::take(dir.path());
+    let err = DaemonClient::connect(dir.path()).unwrap_err();
+    assert_eq!(err.code(), "daemon_not_running", "{err:?}");
+
+    // A daemon that has stopped serving: nothing listens on its port.
+    let port = {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let token = write_file(dir.path(), port);
     let err = DaemonClient::connect(dir.path())
         .unwrap()
         .health()
         .await
         .unwrap_err();
     assert_eq!(err.code(), "daemon_not_running", "{err:?}");
-    let shown = format!("{err} {err:?}");
-    assert!(!shown.contains(&token), "{shown}");
+    assert_no_token(&token, &err);
 }
 
 #[test]
 fn a_broken_file_keeps_its_code() {
     let dir = TempDir::new().unwrap();
+    let _lock = DaemonLock::take(dir.path());
     write_file(dir.path(), 1);
     let path = daemon_file_path(&dir.path().join("run"));
-    std::fs::write(&path, "not json").unwrap();
+    fs::write(&path, "not json").unwrap();
     let err = DaemonClient::connect(dir.path()).unwrap_err();
     assert_eq!(err.code(), "daemon_file_invalid", "{err:?}");
 }
 
+/// A file left by a crash: the lock is free, and a program now listens on
+/// the old port. It must never get the old token.
+#[tokio::test]
+async fn a_stale_file_with_a_free_lock_is_never_contacted() {
+    let squatter = Fake::start(serve_health(health(VERSION, API_VERSION))).await;
+    squatter.lock.release();
+
+    let err = DaemonClient::connect(squatter.data_dir()).unwrap_err();
+    assert_eq!(err.code(), "daemon_not_running", "{err:?}");
+    assert!(!stop_daemon(squatter.data_dir()).await.unwrap());
+    let missing = squatter.data_dir().join("no-marsad");
+    let err = ensure_running_with(squatter.data_dir(), &missing)
+        .await
+        .unwrap_err();
+    // It went straight to starting marsad.
+    assert_eq!(err.code(), "daemon_start_failed", "{err:?}");
+    assert!(err.to_string().contains("cannot run"), "{err}");
+    assert!(squatter.seen().is_empty(), "{:?}", squatter.seen());
+}
+
+// ---------------------------------------------------------------------------
+// The version handshake
+
 #[tokio::test]
 async fn ensure_running_returns_a_daemon_of_this_version() {
-    let (router, shutdowns) =
-        serve_shutdown(serve_health(health(VERSION, API_VERSION)), Arc::default());
+    let (router, shutdowns) = serve_shutdown(serve_health(health(VERSION, API_VERSION)), None);
+    let fake = Fake::start(router).await;
+    let missing = fake.data_dir().join("no-marsad");
+    let client = ensure_running_with(fake.data_dir(), &missing)
+        .await
+        .unwrap();
+    assert_eq!(client.port(), fake.port);
+    assert_eq!(shutdowns.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_newer_daemon_is_used_as_is() {
+    let (router, shutdowns) = serve_shutdown(serve_health(health("99.0.0", API_VERSION)), None);
     let fake = Fake::start(router).await;
     let missing = fake.data_dir().join("no-marsad");
     let client = ensure_running_with(fake.data_dir(), &missing)
@@ -498,10 +710,10 @@ async fn ensure_running_returns_a_daemon_of_this_version() {
 
 #[tokio::test]
 async fn a_daemon_with_a_newer_api_is_refused_and_left_running() {
-    // Even with another app version: the API check comes first.
-    for app_version in [VERSION, "99.0.0"] {
+    // Whatever its app version: the API check comes first.
+    for app_version in [VERSION, "99.0.0", "0.0.0-old"] {
         let answer = health(app_version, API_VERSION + 1);
-        let (router, shutdowns) = serve_shutdown(serve_health(answer), Arc::default());
+        let (router, shutdowns) = serve_shutdown(serve_health(answer), None);
         let fake = Fake::start(router).await;
         let missing = fake.data_dir().join("no-marsad");
         let err = ensure_running_with(fake.data_dir(), &missing)
@@ -515,24 +727,91 @@ async fn a_daemon_with_a_newer_api_is_refused_and_left_running() {
 }
 
 #[tokio::test]
-async fn a_daemon_of_another_version_is_stopped_then_replaced() {
-    let run_dir = Arc::new(Mutex::new(None));
-    let (router, shutdowns) = serve_shutdown(
-        serve_health(health("0.0.0-old", API_VERSION)),
-        run_dir.clone(),
-    );
-    let fake = Fake::start(router).await;
-    *run_dir.lock().unwrap() = Some(fake.data_dir().join("run"));
+async fn an_older_daemon_is_stopped_then_replaced() {
+    let temp = TempDir::new().unwrap();
+    let lock = DaemonLock::take(temp.path());
+    let router = serve_health(health("0.0.0-old", API_VERSION));
+    let (router, shutdowns) = serve_shutdown(router, Some((temp.path(), &lock)));
+    let fake = Fake::serve(temp.path(), lock, router).await;
 
-    // No `marsad` here, so the start after the stop fails, which shows it was tried.
-    let missing = fake.data_dir().join("no-marsad");
-    let err = ensure_running_with(fake.data_dir(), &missing)
+    // No `marsad` here, so the start after the stop fails, which shows it was
+    // tried.
+    let missing = temp.path().join("no-marsad");
+    let err = ensure_running_with(temp.path(), &missing)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "daemon_start_failed", "{err:?}");
+    assert!(err.to_string().contains("cannot run"), "{err}");
     assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
-    assert!(!daemon_file_path(&fake.data_dir().join("run")).exists());
+    assert!(!daemon_file_path(&temp.path().join("run")).exists());
     fake.assert_no_token(&err);
+}
+
+/// Two clients find an older daemon at once. Whichever stops it, the other
+/// one's new daemon answers while both wait, and both use it: neither starts
+/// a second `marsad`.
+#[tokio::test]
+async fn two_clients_replacing_a_daemon_both_use_the_new_one() {
+    let answer = Arc::new(Mutex::new(health("0.0.0-old", API_VERSION)));
+    let shutdowns = Arc::new(AtomicUsize::new(0));
+    let router = Router::new()
+        .route(
+            "/v1/health",
+            get({
+                let answer = answer.clone();
+                move || {
+                    let now = answer.lock().expect("lock").clone();
+                    async move { Json(now) }
+                }
+            }),
+        )
+        .route(
+            "/v1/shutdown",
+            post({
+                let shutdowns = shutdowns.clone();
+                move || {
+                    shutdowns.fetch_add(1, Ordering::SeqCst);
+                    // The new daemon a client started is up a little later.
+                    let answer = answer.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        *answer.lock().expect("lock") = health(VERSION, API_VERSION);
+                    });
+                    async { StatusCode::ACCEPTED }
+                }
+            }),
+        );
+    let fake = Fake::start(router).await;
+    let missing = fake.data_dir().join("no-marsad");
+    let (a, b) = tokio::join!(
+        ensure_running_with(fake.data_dir(), &missing),
+        ensure_running_with(fake.data_dir(), &missing),
+    );
+    assert_eq!(a.unwrap().port(), fake.port);
+    assert_eq!(b.unwrap().port(), fake.port);
+    assert!((1..=2).contains(&shutdowns.load(Ordering::SeqCst)));
+}
+
+/// A daemon that holds the lock but has no file (it is stopping) is waited
+/// for; once it lets go, `marsad` is started.
+#[tokio::test]
+async fn a_held_lock_is_waited_for_then_marsad_is_started() {
+    let temp = TempDir::new().unwrap();
+    let lock = DaemonLock::take(temp.path());
+    let delay = Duration::from_millis(300);
+    let releaser = tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        lock.release();
+    });
+    let started = Instant::now();
+    let missing = temp.path().join("no-marsad");
+    let err = ensure_running_with(temp.path(), &missing)
+        .await
+        .unwrap_err();
+    assert!(started.elapsed() >= delay, "{:?}", started.elapsed());
+    assert_eq!(err.code(), "daemon_start_failed", "{err:?}");
+    assert!(err.to_string().contains("cannot run"), "{err}");
+    releaser.await.unwrap();
 }
 
 #[tokio::test]
@@ -544,6 +823,99 @@ async fn no_daemon_and_no_marsad_is_a_start_failure() {
     assert_eq!(err.code(), "daemon_start_failed", "{err:?}");
 }
 
+// ---------------------------------------------------------------------------
+// Starting marsad. The stand-in `marsad` is a shell script, so these run on
+// macOS and Linux only; M3-09 tests the real binary on all three systems.
+
+/// The new daemon takes the lock, then writes its file later. Meanwhile the
+/// file of a crashed daemon still points at a program on its old port, which
+/// must get nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn ensure_running_waits_for_the_new_daemon_and_skips_the_stale_file() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let squatter = Fake::serve(
+        &data,
+        DaemonLock::take(&data),
+        serve_health(health(VERSION, API_VERSION)),
+    )
+    .await;
+    squatter.lock.release();
+
+    let marsad = fake_marsad(temp.path(), "exec /bin/sleep 3");
+    let later = daemon_later(&data, Duration::from_millis(250));
+    let client = ensure_running_with(&data, &marsad).await.unwrap();
+    let fake = later.await.unwrap();
+    assert_eq!(client.port(), fake.port);
+    assert!(squatter.seen().is_empty(), "{:?}", squatter.seen());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn marsad_that_stops_early_fails_at_once_and_names_its_log() {
+    let temp = TempDir::new().unwrap();
+    let marsad = fake_marsad(temp.path(), "exit 1");
+    let started = Instant::now();
+    let err = ensure_running_with(&temp.path().join("data"), &marsad)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "daemon_start_failed", "{err:?}");
+    let shown = err.to_string();
+    assert!(
+        shown.contains("logs") && shown.contains("marsad.log"),
+        "{shown}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+/// The first `marsad` exits with code 3 (the lock was taken a moment ago),
+/// the lock is free now, so it is started once more. The fake daemon comes
+/// up only after that second start, so the test does not depend on how fast
+/// the system runs a new script.
+#[cfg(unix)]
+#[tokio::test]
+async fn marsad_that_found_the_lock_taken_is_started_again() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let marsad = fake_marsad(
+        temp.path(),
+        r#"if [ -e "$2/first-run" ]; then : > "$2/second-run"; exec /bin/sleep 3; fi
+: > "$2/first-run"
+exit 3"#,
+    );
+    let later = tokio::spawn({
+        let data = data.clone();
+        async move {
+            while !data.join("second-run").exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let lock = DaemonLock::take(&data);
+            Fake::serve(&data, lock, serve_health(health(VERSION, API_VERSION))).await
+        }
+    });
+    let client = ensure_running_with(&data, &marsad).await.unwrap();
+    assert_eq!(client.port(), later.await.unwrap().port);
+    assert!(data.join("first-run").exists());
+}
+
+// ---------------------------------------------------------------------------
+// Stopping
+
+#[tokio::test]
+async fn stop_daemon_stops_it_and_says_whether_one_ran() {
+    let temp = TempDir::new().unwrap();
+    assert!(!stop_daemon(temp.path()).await.unwrap());
+
+    let lock = DaemonLock::take(temp.path());
+    let (router, shutdowns) = serve_shutdown(Router::new(), Some((temp.path(), &lock)));
+    let _fake = Fake::serve(temp.path(), lock, router).await;
+    assert!(stop_daemon(temp.path()).await.unwrap());
+    assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+    assert!(!stop_daemon(temp.path()).await.unwrap());
+}
+
 /// The window runs these on a tokio runtime, which needs `Send`.
 #[test]
 fn futures_and_streams_are_send() {
@@ -552,6 +924,7 @@ fn futures_and_streams_are_send() {
     let dir = Path::new("unused");
     is_send(&ensure_running(dir));
     is_send(&ensure_running_with(dir, dir));
+    is_send(&stop_daemon(dir));
     is_send_type::<DaemonClient>();
     is_send_type::<EventStream<Event>>();
 }
