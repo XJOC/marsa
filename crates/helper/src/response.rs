@@ -17,6 +17,8 @@ pub mod code {
     pub const RESOLVER_DELETE: &str = "resolver_delete";
     /// `/etc/resolver/test` belongs to another tool, so it was left as it is.
     pub const RESOLVER_FOREIGN: &str = "resolver_foreign";
+    /// `/etc/resolver/test` could not be read, so it was left as it is.
+    pub const RESOLVER_READ: &str = "resolver_read";
     /// Writing `/etc/resolver/test` failed.
     pub const RESOLVER_WRITE: &str = "resolver_write";
     pub const USAGE: &str = "usage";

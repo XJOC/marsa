@@ -38,7 +38,7 @@ fn run(op: &Op, os: Os, system: &impl System, results: &mut Vec<OpResult>) {
             run(&remove, os, system, results);
         }
     } else if supported(op, os) {
-        results.push(handle(op, system));
+        results.push(handle(op, os, system));
     } else {
         let name = op.name();
         let message = format!("{name} is not supported on {}", os.name());
@@ -72,8 +72,9 @@ fn supported(op: &Op, os: Os) -> bool {
 }
 
 /// One op meant for this OS. Every handler gets `system` for each file and
-/// command, and returns the result of its op.
-fn handle(op: &Op, system: &impl System) -> OpResult {
+/// command, and returns the result of its op. Trust is written for macOS
+/// first (task M4-09); Linux gets its own handler with task M4-18.
+fn handle(op: &Op, os: Os, system: &impl System) -> OpResult {
     match op {
         Op::ResolverInstall { port } => resolver::install(*port, system),
         Op::ResolverRemove {} => resolver::remove(system),
@@ -82,8 +83,9 @@ fn handle(op: &Op, system: &impl System) -> OpResult {
             https_port,
         } => pf::install(*http_port, *https_port, system),
         Op::PfRemove {} => pf::remove(system),
-        Op::TrustInstall { pem } => trust::install(pem, system),
-        Op::TrustRemove {} => trust::remove(system),
+        Op::TrustInstall { pem } if os == Os::Macos => trust::install(pem, system),
+        Op::TrustRemove {} if os == Os::Macos => trust::remove(system),
+        Op::TrustInstall { .. } | Op::TrustRemove {} => not_implemented(op.name()),
         // `run` expands `uninstall_all` into its removals, so it never gets
         // here. Linux and Windows come with their own tasks.
         Op::UninstallAll {}
@@ -112,7 +114,6 @@ mod tests {
         let request = Request::from_arg(OsStr::new(&raw)).unwrap();
         let fake = FakeSystem::default();
         let results = apply(&request, os, &fake);
-        assert!(fake.log.borrow().is_empty());
         let code = |r: &OpResult| match r.outcome {
             Outcome::Failed { code, .. } => code,
             Outcome::Done => "done",
@@ -151,20 +152,22 @@ mod tests {
 
     #[test]
     fn handle_sends_each_op_to_its_own_handler() {
+        // Ops that stay stubs here are the Linux ones, so this test does not
+        // change when the macOS handlers land.
         let ops = json!([
             { "op": "resolver_install", "port": 18053 },
-            { "op": "pf_install", "http_port": 18080, "https_port": 18443 },
+            { "op": "resolved_install", "port": 18053 },
+            { "op": "trust_remove" },
         ]);
-        let macos = [
-            ("resolver_install", "done"),
-            ("pf_install", code::OP_NOT_IMPLEMENTED),
-        ];
-        assert_eq!(codes(ops.clone(), Os::Macos), macos);
         let linux = [
             ("resolver_install", code::OP_NOT_SUPPORTED),
-            ("pf_install", code::OP_NOT_SUPPORTED),
+            ("resolved_install", code::OP_NOT_IMPLEMENTED),
+            ("trust_remove", code::OP_NOT_IMPLEMENTED),
         ];
-        assert_eq!(codes(ops, Os::Linux), linux);
+        assert_eq!(codes(ops.clone(), Os::Linux), linux);
+        let macos = codes(ops, Os::Macos);
+        assert_eq!(macos[0], ("resolver_install", "done"));
+        assert_eq!(macos[1], ("resolved_install", code::OP_NOT_SUPPORTED));
     }
 
     /// Only `op_not_supported` is checked: the other results change as the

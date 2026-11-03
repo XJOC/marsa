@@ -6,7 +6,7 @@
 //!
 //! The helper changes the file only if Marsa wrote it: its first line is
 //! exactly [`MARKER`]. Herd and Valet write the same path, and their file is
-//! never overwritten or deleted. On the owner's Mac today the file is Herd's
+//! never overwritten or deleted. On a Mac with Herd the file is Herd's
 //! (`nameserver 127.0.0.1`), so `resolver_install` fails there with
 //! `resolver_foreign`. `marsad` decides what to do then (a later task).
 //!
@@ -37,9 +37,12 @@ enum Current {
     Missing,
     /// Marsa's file, with its content.
     Ours(Vec<u8>),
-    /// Anything else: another tool's file, a file over [`MAX_BYTES`], a
-    /// folder, or a file that cannot be read.
+    /// Another tool's file, a file over [`MAX_BYTES`], a folder, or a
+    /// dangling symlink.
     Foreign,
+    /// Reading failed for another reason. Left as it is too, but reported
+    /// with its own code, so the message does not blame another tool.
+    Unreadable(io::ErrorKind),
 }
 
 /// `resolver_install`: names under `.test` go to `127.0.0.1:<port>`.
@@ -51,6 +54,7 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
             let message = format!("{PATH} was not written by Marsa, so it was left as it is");
             return OpResult::failed(INSTALL, code::RESOLVER_FOREIGN, message);
         }
+        Current::Unreadable(kind) => return unreadable(INSTALL, kind),
         Current::Ours(bytes) if bytes == content.as_bytes() => Outcome::Unchanged,
         Current::Missing | Current::Ours(_) => {
             if let Err(err) = system.write_atomic(Path::new(PATH), content.as_bytes(), MODE) {
@@ -71,6 +75,7 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
 pub fn remove(system: &impl System) -> OpResult {
     let outcome = match current(system) {
         Current::Missing | Current::Foreign => Outcome::Unchanged,
+        Current::Unreadable(kind) => return unreadable(REMOVE, kind),
         Current::Ours(_) => {
             if let Err(err) = system.remove(Path::new(PATH)) {
                 let message = format!("cannot delete {PATH}: {}", err.kind());
@@ -93,11 +98,28 @@ fn content(port: u16) -> String {
 fn current(system: &impl System) -> Current {
     match system.read(Path::new(PATH), MAX_BYTES) {
         Ok(bytes) if is_ours(&bytes) => Current::Ours(bytes),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Current::Missing,
-        // Fail safe: a file the helper cannot read in full may be another
-        // tool's, so it is never changed.
-        _ => Current::Foreign,
+        // `read` follows symlinks, so a dangling link also says `NotFound`.
+        // `exists` does not follow them: a link there is someone else's.
+        Err(err) if err.kind() == io::ErrorKind::NotFound && !system.exists(Path::new(PATH)) => {
+            Current::Missing
+        }
+        // Fail safe: anything the helper cannot read in full is never
+        // changed. `InvalidData` is a file over the limit and `InvalidInput`
+        // is not a regular file (`System::read`); a dangling link is
+        // `NotFound` with something at the path.
+        Ok(_) => Current::Foreign,
+        Err(err) => match err.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => {
+                Current::Foreign
+            }
+            kind => Current::Unreadable(kind),
+        },
     }
+}
+
+fn unreadable(op: &'static str, kind: io::ErrorKind) -> OpResult {
+    let message = format!("cannot read {PATH}: {kind}, so it was left as it is");
+    OpResult::failed(op, code::RESOLVER_READ, message)
 }
 
 /// The first line is exactly the marker. Nothing is trimmed: a near match
@@ -254,7 +276,7 @@ mod tests {
     /// The marker is there, but the size alone makes it foreign.
     #[test]
     fn install_fails_on_a_file_over_4_kib_and_keeps_it() {
-        let large = ours_padded(MAX_BYTES + 1);
+        let large = ours_padded(4097);
         let fake = fake_with(&large);
         assert_eq!(install(18053, &fake), foreign());
         assert_eq!(file(&fake), Some((large, OLD_MODE)));
@@ -262,14 +284,42 @@ mod tests {
 
     #[test]
     fn remove_keeps_a_file_over_4_kib() {
-        let large = ours_padded(MAX_BYTES + 1);
+        let large = ours_padded(4097);
         let fake = fake_with(&large);
         assert_eq!(remove(&fake), result(REMOVE, Outcome::Unchanged));
         assert_eq!(file(&fake), Some((large, OLD_MODE)));
         // Exactly 4 KiB is still read, so this one is ours.
-        let fake = fake_with(&ours_padded(MAX_BYTES));
+        let fake = fake_with(&ours_padded(4096));
         assert_eq!(remove(&fake), result(REMOVE, Outcome::Done));
         assert_eq!(file(&fake), None);
+    }
+
+    #[test]
+    fn a_dangling_symlink_is_foreign() {
+        // `read` follows the link and says `NotFound`; the link is still
+        // someone else's, so it is neither replaced nor removed.
+        let mut fake = FakeSystem::default();
+        fake.dangling.insert(PathBuf::from(PATH));
+        assert_eq!(install(18053, &fake), foreign());
+        assert_eq!(remove(&fake), result(REMOVE, Outcome::Unchanged));
+        assert_eq!(file(&fake), None);
+        assert!(fake.exists(Path::new(PATH)));
+    }
+
+    #[test]
+    fn an_unreadable_file_is_resolver_read_and_kept() {
+        let mut fake = fake_with(HERD);
+        fake.fail_reads.insert(PathBuf::from(PATH));
+        let message = format!("cannot read {PATH}: permission denied, so it was left as it is");
+        assert_eq!(
+            install(18053, &fake),
+            OpResult::failed(INSTALL, code::RESOLVER_READ, message.clone())
+        );
+        assert_eq!(
+            remove(&fake),
+            OpResult::failed(REMOVE, code::RESOLVER_READ, message)
+        );
+        assert_eq!(file(&fake), Some((HERD.to_vec(), OLD_MODE)));
     }
 
     #[test]
