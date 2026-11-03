@@ -1,0 +1,16 @@
+[package]
+name = "egui-app"
+description = "S-09 egui window: Table, SQL, and Logs tabs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Both renderers in one binary: `--renderer glow|wgpu` picks one at run time.
+eframe = { workspace = true, features = ["glow", "wgpu"] }
+egui_extras = { workspace = true, features = ["syntect"] }
+s09-common = { workspace = true }
+
+[lints]
+workspace = true
