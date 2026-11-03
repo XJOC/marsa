@@ -1,0 +1,66 @@
+---
+source: crates/core/src/caddy.rs
+expression: "build(&[legacy], &windows_pools())"
+---
+{
+  "admin": {
+    "config": {
+      "persist": false
+    },
+    "listen": "127.0.0.1:18019"
+  },
+  "apps": {
+    "http": {
+      "http_port": 18080,
+      "https_port": 18443,
+      "servers": {
+        "marsa": {
+          "@id": "marsa-srv",
+          "automatic_https": {
+            "disable": true
+          },
+          "listen": [
+            "127.0.0.1:18080"
+          ],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "subroute",
+                  "routes": [
+                    {
+                      "handle": [
+                        {
+                          "body": "Marsa: PHP 8.3 is not running for legacy.test.",
+                          "handler": "static_response",
+                          "status_code": 503
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "match": [
+                {
+                  "host": [
+                    "legacy.test"
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "handle": [
+                {
+                  "body": "Marsa is running. No sites yet.",
+                  "handler": "static_response",
+                  "status_code": 200
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
