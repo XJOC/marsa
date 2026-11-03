@@ -30,14 +30,9 @@ pub struct RunOutput {
 /// folder that only root can write. The checks below look at the path and
 /// then use it; that is safe only because the user cannot change such a
 /// folder between the two steps.
-// Outside tests only: the tests call these, and an unmet `expect` warns.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called by the handlers of M4-07 to M4-09")
-)]
 pub trait System {
     /// The whole file, or an error if it is larger than `max` bytes or is not
-    /// a regular file.
+    /// a regular file. A missing file is an error of kind `NotFound`.
     fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>>;
 
     /// Whether `path` exists. A symlink counts even if its target does not.
@@ -54,9 +49,14 @@ pub trait System {
     /// Runs `program` with `args`, never through a shell. `&'static str`
     /// means a constant in the code, like `/sbin/pfctl`: it cannot come from
     /// the request.
+    // `allow`, not `expect`: M4-08 and M4-09 start using this in parallel,
+    // and an `expect` would warn as soon as one of them lands.
+    #[allow(dead_code)]
     fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput>;
 
     /// The path of the running helper, for the boot job (task M4-08).
+    // `allow`, not `expect`: used by M4-08, which runs in parallel with M4-09.
+    #[allow(dead_code)]
     fn current_exe(&self) -> io::Result<PathBuf>;
 }
 
@@ -262,6 +262,11 @@ mod fake {
         pub fail_writes: BTreeSet<PathBuf>,
         /// Paths where `remove` fails and the file stays.
         pub fail_removes: BTreeSet<PathBuf>,
+        /// Paths where `read` fails with `PermissionDenied`.
+        pub fail_reads: BTreeSet<PathBuf>,
+        /// Dangling symlinks: `exists` is true, but `read` is `NotFound`,
+        /// like a link whose target is gone.
+        pub dangling: BTreeSet<PathBuf>,
     }
 
     impl FakeSystem {
@@ -281,6 +286,9 @@ mod fake {
 
     impl System for FakeSystem {
         fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>> {
+            if self.fail_reads.contains(path) {
+                return Err(injected());
+            }
             match self.files.borrow().get(path) {
                 Some((bytes, _)) if bytes.len() as u64 > max => Err(too_large(max)),
                 Some((bytes, _)) => Ok(bytes.clone()),
@@ -289,7 +297,7 @@ mod fake {
         }
 
         fn exists(&self, path: &Path) -> bool {
-            self.files.borrow().contains_key(path)
+            self.dangling.contains(path) || self.files.borrow().contains_key(path)
         }
 
         fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
@@ -389,6 +397,21 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         let err = RealSystem.read(tmp.path(), 10).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// The resolver op tells a missing file from a foreign one by this kind.
+    /// A fresh Mac has no `/etc/resolver` folder either.
+    #[test]
+    fn read_of_a_missing_file_is_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let in_folder = tmp.path().join("test");
+        let no_folder = tmp.path().join("resolver").join("test");
+        for path in [in_folder, no_folder] {
+            let err = RealSystem.read(&path, 4096).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::NotFound, "{}", path.display());
+            let err = FakeSystem::default().read(&path, 4096).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        }
     }
 
     #[test]

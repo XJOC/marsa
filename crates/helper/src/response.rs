@@ -13,6 +13,14 @@ pub mod code {
     pub const OP_NOT_IMPLEMENTED: &str = "op_not_implemented";
     pub const OP_NOT_SUPPORTED: &str = "op_not_supported";
     pub const REQUEST_INVALID: &str = "request_invalid";
+    /// `/etc/resolver/test` is Marsa's, but deleting it failed.
+    pub const RESOLVER_DELETE: &str = "resolver_delete";
+    /// `/etc/resolver/test` belongs to another tool, so it was left as it is.
+    pub const RESOLVER_FOREIGN: &str = "resolver_foreign";
+    /// `/etc/resolver/test` could not be read, so it was left as it is.
+    pub const RESOLVER_READ: &str = "resolver_read";
+    /// Writing `/etc/resolver/test` failed.
+    pub const RESOLVER_WRITE: &str = "resolver_write";
     pub const USAGE: &str = "usage";
 }
 
@@ -43,19 +51,13 @@ pub struct OpResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
-    // Outside tests only: the tests build these, and an unmet `expect` warns.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "built by the handlers of M4-07 to M4-09")
-    )]
     Done,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "built by the handlers of M4-07 to M4-09")
-    )]
     Unchanged,
     /// `code` is stable, so the UI can map it to a message.
-    Failed { code: &'static str, message: String },
+    Failed {
+        code: &'static str,
+        message: String,
+    },
 }
 
 impl OpResult {
