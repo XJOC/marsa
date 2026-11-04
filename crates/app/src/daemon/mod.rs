@@ -5,6 +5,7 @@
 pub mod api;
 pub mod auth;
 pub mod caddy;
+pub mod dns;
 pub mod runtimes_api;
 pub mod server;
 pub mod services_api;
