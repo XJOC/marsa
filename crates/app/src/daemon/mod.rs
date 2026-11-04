@@ -12,3 +12,4 @@ pub mod services_api;
 pub mod sites_api;
 pub mod state;
 pub mod supervisor;
+pub mod watch;

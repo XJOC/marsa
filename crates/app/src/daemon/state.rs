@@ -11,7 +11,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use marsa_core::config::{self, ConfigError, ConfigPaths, SitesConfig};
 use marsa_core::types::{Event, SiteList};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::api::HttpError;
@@ -67,6 +67,8 @@ pub struct Daemon {
     /// Held for the whole of each sites job, from reading `sites.toml` to
     /// publishing the list, so no change is lost and the events keep order.
     sites_lock: Mutex<()>,
+    /// The parked folders of the last build. Use [`Daemon::watch_parked`].
+    parked: watch::Sender<Vec<PathBuf>>,
 }
 
 impl Daemon {
@@ -80,6 +82,7 @@ impl Daemon {
             shutdown: CancellationToken::new(),
             installs: Installs::new(),
             sites_lock: Mutex::default(),
+            parked: watch::Sender::new(Vec::new()),
         }
     }
 
@@ -113,8 +116,8 @@ impl Daemon {
     /// the installed PHP versions. Publishes `sites_changed` only if the list
     /// changed; the first build publishes nothing.
     ///
-    /// `server::run` does not call this at start-up yet (task M4-12 owns that
-    /// file now), so `GET /v1/sites` does the first build when it finds none.
+    /// `server::run` calls this once at start-up; `GET /v1/sites` also builds
+    /// the list if it finds none (for tests that skip the server).
     ///
     /// # Errors
     ///
@@ -144,6 +147,12 @@ impl Daemon {
                 config::save_sites(&path, &sites).map_err(config_error)?;
             }
             let list = sites_api::build(&daemon.data_dir, &sites);
+            // Wakes the folder watcher only when the parked list changes.
+            daemon.parked.send_if_modified(|parked| {
+                let changed = *parked != list.parked;
+                parked.clone_from(&list.parked);
+                changed
+            });
             let before = daemon.write_state().sites.replace(list.clone());
             let changed = before.is_some_and(|before| before != list);
             if publish == Publish::Always || changed {
@@ -160,6 +169,12 @@ impl Daemon {
                 message,
             ))
         })
+    }
+
+    /// The parked folders of the last build, for the folder watcher (task
+    /// M4-10d). It reports a change only when the list changes.
+    pub fn watch_parked(&self) -> watch::Receiver<Vec<PathBuf>> {
+        self.parked.subscribe()
     }
 
     fn write_state(&self) -> RwLockWriteGuard<'_, AppState> {

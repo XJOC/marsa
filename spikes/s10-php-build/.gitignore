@@ -1,0 +1,3 @@
+# Everything downloaded or built stays out of git. No binaries in the repo.
+/work/
+/out/

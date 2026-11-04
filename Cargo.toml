@@ -25,7 +25,9 @@ directories = "6"
 # font crate), `links` and `web_screen_reader` (not needed), and `accesskit`:
 # on Linux it pulls zbus 5, whose `zbus_names` and `zvariant` crates are
 # unmaintained (RUSTSEC-2026-0371 and others). Bring it back with zbus 6 (M5).
-eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "wayland", "wgpu", "x11"] }
+# `links`: clicking a site URL opens the browser (task M4-15); it adds only
+# the small `webbrowser` crate.
+eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "links", "wayland", "wgpu", "x11"] }
 egui_extras = "0.37"
 # Default backend `rust_backend` (miniz_oxide): pure Rust, no C zlib.
 flate2 = "1"

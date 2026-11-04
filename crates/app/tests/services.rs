@@ -123,6 +123,10 @@ impl App {
         if let Some(mode) = fake {
             let caddy = &mut daemon.caddy;
             caddy.input.admin_port = admin_port;
+            // Free ports, so the orphan check before a start never meets a
+            // Caddy that runs on this machine on Marsa's own ports.
+            caddy.input.http_port = free_port();
+            caddy.input.https_port = free_port();
             caddy.ready_limit = ready_limit;
             let config = caddy.paths.config_file.to_string_lossy().into_owned();
             caddy.spec = ServiceSpec {
@@ -332,6 +336,8 @@ async fn start_shows_running_and_logs_then_stop() {
         .await;
     assert_eq!((stopped.state, stopped.pid), (ServiceState::Stopped, None));
     assert!(!app.daemon.proc_alive("caddy"));
+    // Caddy has exited, so its pid file is gone (ADR 0009).
+    assert!(!app.dir.path().join("run").join("caddy.pid").exists());
     // A second stop changes nothing.
     let again: ServiceStatus = app
         .json("POST", "/v1/services/caddy/stop", StatusCode::OK)

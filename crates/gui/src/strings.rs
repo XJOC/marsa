@@ -150,6 +150,10 @@ fn error_message(code: &str) -> Option<&'static str> {
         "caddy_config_write" => "Cannot write the Caddy config file.",
         "caddy_start_timeout" => "Caddy did not become ready in time.",
         "port_in_use" => "A port it needs is used by another program.",
+        "caddy_orphan_stuck" => {
+            "An old Caddy from a crashed daemon holds the ports and could not be stopped safely."
+        }
+        "caddy_other_marsa" => "Another Marsa's Caddy uses the ports it needs.",
         "exited" => "The process exited.",
         "spawn_failed" => "The process could not be started.",
         "program_not_absolute" => "The service program has no full path.",
@@ -234,8 +238,8 @@ mod tests {
 
     #[test]
     fn known_daemon_codes_have_a_message() {
-        // Auth (M3-03), routes (M3-06), services and Caddy (M3-07), and
-        // sites (M4-10b).
+        // Auth (M3-03), routes (M3-06), services and Caddy (M3-07), the
+        // orphan check (M3-11), and sites (M4-10b).
         for code in [
             "unauthorized",
             "origin_rejected",
@@ -251,6 +255,8 @@ mod tests {
             "caddy_config_write",
             "caddy_start_timeout",
             "port_in_use",
+            "caddy_orphan_stuck",
+            "caddy_other_marsa",
             "exited",
             "spawn_failed",
             "program_not_absolute",

@@ -276,6 +276,11 @@ async fn run(started: Started, runtime: Runtime, body: InstallRequest) {
     let update = match result {
         Ok(done) => {
             tracing::info!(id, version = %done.version, already = done.already, "install done");
+            // Before `done`, so a client that reads it lists the sites with
+            // their new PHP (task M4-10d). `rebuild_sites` logs its errors.
+            if runtime == Runtime::Php {
+                let _ = daemon.rebuild_sites().await;
+            }
             InstallUpdate::Done(InstallDone {
                 runtime: done.runtime,
                 version: done.version.to_string(),

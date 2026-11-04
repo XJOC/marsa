@@ -4,6 +4,16 @@
 //! `caddy/caddy.json`, runs `bin/caddy run --config caddy/caddy.json` under
 //! the supervisor, and waits until the admin API answers. Like a Laravel job
 //! that starts a queue worker, then checks that it is healthy.
+//!
+//! Before each start, [`orphan`] stops a Caddy that a crashed daemon left
+//! behind, or refuses to start when another program holds our ports. A
+//! `stop` with no Caddy running stops such an orphan too. After each spawn
+//! the watcher writes `run/caddy.pid`, and removes it once Caddy has exited
+//! (ADR 0009). The `admin` object in `caddy.json` carries this data folder's
+//! tag, `marsa-instance-<id>`, so the daemon of another folder never takes
+//! our Caddy for its own.
+
+pub mod orphan;
 
 use std::fmt;
 use std::io;
@@ -13,15 +23,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use marsa_core::caddy::{CaddyInput, CaddyPaths, caddy_config, caddy_env};
+use marsa_core::orphan::instance_tag;
+use marsa_core::platform::process;
 use marsa_core::services::{ProgramNotAbsolute, RestartPolicy, ServiceSpec};
 use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceState, ServiceStatus};
 use reqwest::redirect;
+use serde_json::Value;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use self::orphan::{Blocked, Ladder, Orphans, PidFile, Processes, SystemProcesses};
 use super::state::Daemon;
 use super::supervisor::{ServiceHandle, ServiceRuntime, Supervisor, lock, now_ms};
 
@@ -112,6 +126,11 @@ pub struct CaddyManager {
     pub spec: ServiceSpec,
     /// How long `start` waits for the admin API.
     pub ready_limit: Duration,
+    /// Who runs under a pid, and signals, for the orphan check. Tests put a
+    /// recorder here.
+    pub processes: Arc<dyn Processes>,
+    /// How long each step of an orphan's stop waits.
+    pub ladder: Ladder,
     /// The status and recent lines. Kept across runs, so `seq` never goes
     /// back and the lines of a failed run stay readable.
     runtime: Arc<Mutex<ServiceRuntime>>,
@@ -128,6 +147,8 @@ impl CaddyManager {
             paths,
             input: CaddyInput::default(),
             ready_limit: READY_LIMIT,
+            processes: Arc::new(SystemProcesses),
+            ladder: Ladder::default(),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(CADDY_ID))),
             busy: AtomicBool::new(false),
         }
@@ -164,10 +185,15 @@ impl CaddyManager {
         let admin = Admin::new(self.input.admin_port);
         match action {
             ServiceAction::Start => self.start(daemon, &admin).await?,
-            ServiceAction::Stop => self.stop(daemon, &admin).await,
-            ServiceAction::Restart => {
+            ServiceAction::Stop => {
                 self.stop(daemon, &admin).await;
-                self.start(daemon, &admin).await?;
+            }
+            ServiceAction::Restart => {
+                // An orphan that would not stop now would not stop for the
+                // start either: the status already says why.
+                if self.stop(daemon, &admin).await {
+                    self.start(daemon, &admin).await?;
+                }
             }
         }
         Ok(self.status())
@@ -182,7 +208,29 @@ impl CaddyManager {
             self.fail("caddy_not_installed", &daemon.events);
             return Err(ActionError::NotInstalled(self.spec.program.clone()));
         }
-        if let Err(err) = write_config(&self.paths.config_file, &self.input).await {
+        // The tag goes into `caddy.json`, and the check below looks for it.
+        let tag = match self.instance_tag() {
+            Ok(tag) => tag,
+            Err(err) => {
+                self.fail("caddy_config_write", &daemon.events);
+                return Err(ActionError::ConfigWrite(err));
+            }
+        };
+        // ADR 0009: stop our own orphan; touch nothing that is not ours.
+        let pid_file = PidFile::new(&daemon.data_dir, &self.spec.program);
+        {
+            let orphans = self.orphans(&pid_file, admin, &tag);
+            if let Some(found) = orphans.inspect().await {
+                if found.is_reap() {
+                    note(&self.runtime, &daemon.events, STOPPING_ORPHAN);
+                }
+                if let Err(blocked) = orphans.clear_for_start(found).await {
+                    self.blocked("Caddy was not started", &blocked, &daemon.events);
+                    return Ok(());
+                }
+            }
+        }
+        if let Err(err) = write_config(&self.paths.config_file, &self.input, &tag).await {
             self.fail("caddy_config_write", &daemon.events);
             return Err(ActionError::ConfigWrite(err));
         }
@@ -212,6 +260,8 @@ impl CaddyManager {
             cancel: cancel.clone(),
             runtime: Arc::clone(&runtime),
             events: daemon.events.clone(),
+            pid_file,
+            processes: Arc::clone(&self.processes),
         };
         let task = tokio::spawn(watcher.run(task));
         // A handle this replaces belongs to a run that has ended.
@@ -260,11 +310,11 @@ impl CaddyManager {
     }
 
     /// Asks Caddy to exit through its admin API (the clean way on Windows,
-    /// which has no SIGTERM), then stops its task. Does nothing when no task
-    /// runs.
-    async fn stop(&self, daemon: &Daemon, admin: &Admin) {
+    /// which has no SIGTERM), then stops its task. With no task, stops our
+    /// orphan, if there is one. `false` when that orphan would not stop.
+    async fn stop(&self, daemon: &Daemon, admin: &Admin) -> bool {
         if !daemon.proc_alive(CADDY_ID) {
-            return;
+            return self.stop_orphan(daemon, admin).await;
         }
         admin.stop().await;
         // `None`: a shutdown took the handle and stops it.
@@ -273,6 +323,68 @@ impl CaddyManager {
         {
             warn!(%err, "the caddy task failed");
         }
+        true
+    }
+
+    /// Stops our orphan from a crashed daemon, and nothing else: a conflict
+    /// or another Marsa's Caddy is left alone, and so is a stale pid file.
+    /// `false` when the orphan would not stop.
+    async fn stop_orphan(&self, daemon: &Daemon, admin: &Admin) -> bool {
+        // No check on this OS, so no instance id file either. Without the
+        // program there is no Caddy of ours to recognize.
+        if !process::ORPHAN_RECOVERY || !self.spec.program.is_file() {
+            return true;
+        }
+        let tag = match self.instance_tag() {
+            Ok(tag) => tag,
+            Err(err) => {
+                warn!(%err, "cannot read the instance id; not looking for an orphan");
+                return true;
+            }
+        };
+        let pid_file = PidFile::new(&daemon.data_dir, &self.spec.program);
+        let orphans = self.orphans(&pid_file, admin, &tag);
+        let Some(found) = orphans.inspect().await else {
+            return true;
+        };
+        if !found.is_reap() {
+            return true;
+        }
+        note(&self.runtime, &daemon.events, STOPPING_ORPHAN);
+        match orphans.reap(found).await {
+            Ok(()) => true,
+            Err(blocked) => {
+                self.blocked("The old Caddy was not stopped", &blocked, &daemon.events);
+                false
+            }
+        }
+    }
+
+    /// This data folder's admin tag, `marsa-instance-<id>`. The id is made
+    /// once, in `caddy/instance-id`.
+    fn instance_tag(&self) -> io::Result<String> {
+        let id = process::instance_id(&self.paths.home.join("instance-id"))?;
+        Ok(instance_tag(&id))
+    }
+
+    /// The orphan check for one start or stop.
+    fn orphans<'a>(&'a self, pid_file: &'a PidFile, admin: &'a Admin, tag: &'a str) -> Orphans<'a> {
+        Orphans {
+            pid_file,
+            processes: &*self.processes,
+            admin,
+            input: &self.input,
+            ladder: self.ladder,
+            tag,
+        }
+    }
+
+    /// Says why in Caddy's recent lines, and sets `Failed { code }`.
+    fn blocked(&self, what: &str, blocked: &Blocked, events: &broadcast::Sender<Event>) {
+        warn!(code = blocked.code, reason = %blocked.reason, "{what}");
+        let text = format!("marsad: {what}: {}.", blocked.reason);
+        note(&self.runtime, events, &text);
+        self.fail(blocked.code, events);
     }
 
     /// Sets `Failed { code }`. Only while no task runs: the supervisor owns
@@ -281,6 +393,9 @@ impl CaddyManager {
         set_failed(&self.runtime, events, code);
     }
 }
+
+/// The line before a reap, in Caddy's recent lines.
+const STOPPING_ORPHAN: &str = "marsad: Stopping an old Caddy left by a crashed marsad.";
 
 /// Clears the busy flag when the action ends, also when the request is
 /// dropped half way.
@@ -309,6 +424,9 @@ struct Watcher {
     cancel: CancellationToken,
     runtime: Arc<Mutex<ServiceRuntime>>,
     events: broadcast::Sender<Event>,
+    /// `run/caddy.pid`: written after each spawn, removed after the exit.
+    pid_file: PidFile,
+    processes: Arc<dyn Processes>,
 }
 
 impl Watcher {
@@ -325,42 +443,67 @@ impl Watcher {
             cancel,
             runtime,
             events,
+            pid_file,
+            processes,
         } = self;
-        tokio::select! {
+        let conflict = tokio::select! {
             result = &mut supervisor => {
                 report(result);
-                return;
+                false
             }
-            () = port_conflict(lines, first_seq, &runtime) => {}
+            () = watch(lines, first_seq, &runtime, &pid_file, &*processes) => true,
+        };
+        if conflict {
+            warn!("a port caddy needs is in use; stopping it without a restart");
+            cancel.cancel();
+            report(supervisor.await);
         }
-        warn!("a port caddy needs is in use; stopping it without a restart");
-        cancel.cancel();
-        report(supervisor.await);
-        // After the supervisor's last change, so this one stays.
-        set_failed(&runtime, &events, "port_in_use");
+        // Caddy has exited, so its pid may be anyone's from now on.
+        pid_file.remove();
+        if conflict {
+            // After the supervisor's last change, so this one stays.
+            set_failed(&runtime, &events, "port_in_use");
+        }
     }
 }
 
-/// Ends when a stderr line of this run says that a port is taken. Never ends
-/// otherwise.
-async fn port_conflict(
+/// Writes `run/caddy.pid` after each spawn of this run. Ends when a stderr
+/// line of this run says that a port is taken; never ends otherwise.
+async fn watch(
     mut lines: broadcast::Receiver<Event>,
     first_seq: u64,
     runtime: &Mutex<ServiceRuntime>,
+    pid_file: &PidFile,
+    processes: &dyn Processes,
 ) {
+    let mut recorded = None;
     loop {
-        match lines.recv().await {
+        let status = match lines.recv().await {
             Ok(Event::Log(line)) if line.service == CADDY_ID && is_port_conflict(&line) => return,
-            Ok(_) => {}
-            // Too far behind: the skipped lines are still in the buffer.
+            Ok(Event::ServiceChanged(status)) if status.id == CADDY_ID => status,
+            Ok(_) => continue,
+            // Too far behind: the skipped lines are still in the buffer, and
+            // the status is current.
             Err(RecvError::Lagged(_)) => {
-                let recent = lock(runtime).logs.recent();
+                let (recent, status) = {
+                    let runtime = lock(runtime);
+                    (runtime.logs.recent(), runtime.status.clone())
+                };
                 let mut this_run = recent.iter().filter(|line| line.seq >= first_seq);
                 if this_run.any(is_port_conflict) {
                     return;
                 }
+                status
             }
             Err(RecvError::Closed) => std::future::pending().await,
+        };
+        // The supervisor says `Running` right after each spawn.
+        if status.state == ServiceState::Running
+            && let Some(pid) = status.pid
+            && recorded != Some(pid)
+        {
+            pid_file.record(processes, pid).await;
+            recorded = Some(pid);
         }
     }
 }
@@ -387,6 +530,15 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// Adds a line from the daemon to Caddy's recent lines, so `marsa logs caddy`
+/// shows why Caddy did not start.
+fn note(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, text: &str) {
+    let mut runtime = lock(runtime);
+    let line = runtime.logs.push(LogStream::Stderr, text, now_ms());
+    // Under the lock, like the supervisor, so events come in `seq` order.
+    let _ = events.send(Event::Log(line));
+}
+
 /// Sets `Failed { code }` and tells every reader, under the lock like the
 /// supervisor, so events come in the order of the changes.
 fn set_failed(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, code: &str) {
@@ -401,10 +553,23 @@ fn set_failed(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>
     let _ = events.send(Event::ServiceChanged(status.clone()));
 }
 
+/// The config for `input`, with this data folder's `tag` as the `@id` of the
+/// `admin` object. `GET /id/<tag>` then answers only on our own Caddy.
+/// Without an `admin` object there is no tag, and the Caddy counts as not
+/// ours, which is the safe side.
+fn tagged_config(input: &CaddyInput, tag: &str) -> Value {
+    let mut config = caddy_config(input);
+    if let Some(admin) = config.get_mut("admin").and_then(Value::as_object_mut) {
+        admin.insert("@id".to_owned(), Value::String(tag.to_owned()));
+    }
+    config
+}
+
 /// Writes `caddy.json` through a temp file in the same folder and a rename,
 /// so Caddy never reads half a file.
-async fn write_config(path: &Path, input: &CaddyInput) -> io::Result<()> {
-    let mut body = serde_json::to_vec_pretty(&caddy_config(input)).map_err(io::Error::other)?;
+async fn write_config(path: &Path, input: &CaddyInput, tag: &str) -> io::Result<()> {
+    let config = tagged_config(input, tag);
+    let mut body = serde_json::to_vec_pretty(&config).map_err(io::Error::other)?;
     body.push(b'\n');
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir).await?;
@@ -534,9 +699,14 @@ mod tests {
             admin_port: 1,
             ..CaddyInput::default()
         };
-        write_config(&path, &input).await.unwrap();
-        let written: serde_json::Value =
+        let tag = "marsa-instance-0123456789abcdef0123456789abcdef";
+        write_config(&path, &input, tag).await.unwrap();
+        let mut written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // The core config, plus our tag on the admin object, and nothing else.
+        assert_eq!(written["admin"]["@id"], tag);
+        let admin = written["admin"].as_object_mut().unwrap();
+        admin.remove("@id");
         assert_eq!(written, caddy_config(&input));
         let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
             .unwrap()

@@ -1,5 +1,6 @@
 //! Start-up and shutdown: lock file, bind, `run/daemon.json`, serve. Task M3-06.
-//! The DNS server for `.test` starts and stops with it (task M4-12).
+//! The DNS server for `.test` starts and stops with it (task M4-12), and so
+//! does the parked folder watcher (task M4-10d).
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -21,6 +22,7 @@ use super::api;
 use super::auth::AuthConfig;
 use super::dns;
 use super::state::Daemon;
+use super::watch;
 
 /// How long shutdown waits for the managed processes to stop.
 const PROCS_LIMIT: Duration = Duration::from_secs(10);
@@ -28,6 +30,8 @@ const PROCS_LIMIT: Duration = Duration::from_secs(10);
 const DRAIN_LIMIT: Duration = Duration::from_secs(5);
 /// How long shutdown waits for the DNS server to close its sockets.
 const DNS_STOP_LIMIT: Duration = Duration::from_secs(2);
+/// How long shutdown waits for the parked folder watcher.
+const WATCH_STOP_LIMIT: Duration = Duration::from_secs(2);
 /// How long a busy `run/daemon.lock` is tried again before giving up. A
 /// client probes it with a short shared lock every 50 ms; a probe must not
 /// make a starting daemon exit.
@@ -98,11 +102,17 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     if let Err(err) = daemon.rebuild_sites().await {
         tracing::warn!(code = err.code, error = %err.message, "cannot build the site list");
     }
+    // After the first build, so it starts from its parked folders. It stops
+    // when `daemon.shutdown` is cancelled.
+    let watcher = watch::start(&daemon);
     // After the API listener. It stops when `daemon.shutdown` is cancelled. A
     // port in use is only a warning: the daemon runs on without it.
     let dns = dns::start_for_daemon(&daemon.shutdown).await;
     let app = api::router(daemon.clone(), auth);
     let result = serve(listener, app, daemon, signal).await;
+    if let Some(watcher) = watcher {
+        watcher.stop(WATCH_STOP_LIMIT).await;
+    }
     // Before the lock goes, so the next daemon finds the DNS port free.
     if let Some(dns) = dns {
         dns.stop(DNS_STOP_LIMIT).await;
