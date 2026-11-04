@@ -15,7 +15,7 @@ use axum::extract::{RawQuery, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use marsa_core::client::{
     ClientError, DaemonClient, EventStream, StreamItem, ensure_running, ensure_running_with,
@@ -26,8 +26,9 @@ use marsa_core::platform::daemon_file::{
 };
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    API_VERSION, ErrorBody, Event, Health, InstallAccepted, InstallRequest, LogLine, LogStream,
-    RuntimeList, RuntimeVersions, ServiceAction, ServiceState, ServiceStatus,
+    API_VERSION, ErrorBody, Event, Health, InstallAccepted, InstallRequest, LinkRequest, LogLine,
+    LogStream, ParkRequest, RuntimeList, RuntimeVersions, ServiceAction, ServiceState,
+    ServiceStatus, Site, SiteKind, SiteList, SitePatch, SkippedFolder,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -613,6 +614,193 @@ async fn an_id_cannot_reach_another_route() {
 }
 
 // ---------------------------------------------------------------------------
+// Sites (task M4-10c)
+
+/// A list with one site, so each answer can be told apart by `parked`.
+fn site_list(parked: &str) -> SiteList {
+    // Absolute on every system; nothing is created there.
+    let code = std::env::temp_dir().join("code");
+    let root = code.join("shop");
+    SiteList {
+        parked: vec![PathBuf::from(parked)],
+        sites: vec![Site {
+            name: "shop".into(),
+            docroot: root.join("public"),
+            root,
+            kind: SiteKind::Laravel,
+            php: Some(semver::Version::new(8, 4, 23)),
+            secure: false,
+        }],
+        skipped: vec![SkippedFolder {
+            path: code.join("متجر"),
+            code: "site_name_invalid".into(),
+        }],
+    }
+}
+
+/// `GET`, `POST park`, `POST link`, and `PATCH {name}`, each answering its own
+/// list. The bodies the daemon got, as JSON.
+fn serve_sites(bodies: &Arc<Mutex<Vec<serde_json::Value>>>) -> Router {
+    let keep = |bodies: &Arc<Mutex<Vec<serde_json::Value>>>, answer: SiteList| {
+        let bodies = bodies.clone();
+        move |Json(body): Json<serde_json::Value>| async move {
+            bodies.lock().expect("lock").push(body);
+            Json(answer)
+        }
+    };
+    Router::new()
+        .route("/v1/sites", get(|| async { Json(site_list("get")) }))
+        .route(
+            "/v1/sites/park",
+            post(keep(bodies, site_list("park"))).patch(keep(bodies, site_list("patch park"))),
+        )
+        .route("/v1/sites/link", post(keep(bodies, site_list("link"))))
+        .route("/v1/sites/{name}", patch(keep(bodies, site_list("patch"))))
+}
+
+#[tokio::test]
+async fn sites_park_link_and_update_site_are_called() {
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let fake = Fake::start(serve_sites(&bodies)).await;
+    let client = fake.client();
+    let folder = fake.data_dir().join("code");
+    let api = fake.data_dir().join("work").join("api");
+
+    assert_eq!(client.sites().await.unwrap(), site_list("get"));
+    assert_eq!(client.park(&folder).await.unwrap(), site_list("park"));
+    assert_eq!(client.link("api", &api).await.unwrap(), site_list("link"));
+    let secure = SitePatch {
+        secure: Some(true),
+        ..SitePatch::default()
+    };
+    assert_eq!(
+        client.update_site("shop", &secure).await.unwrap(),
+        site_list("patch")
+    );
+    let clear = SitePatch {
+        php: Some(None),
+        secure: Some(false),
+        proxy: Some(None),
+    };
+    // `park` is a valid site name: its fixed path takes `PATCH` too.
+    assert_eq!(
+        client.update_site("park", &clear).await.unwrap(),
+        site_list("patch park")
+    );
+
+    let want = [
+        serde_json::to_value(ParkRequest {
+            path: folder.clone(),
+        })
+        .unwrap(),
+        serde_json::to_value(LinkRequest {
+            name: "api".into(),
+            path: api.clone(),
+        })
+        .unwrap(),
+        serde_json::json!({ "secure": true }),
+        serde_json::json!({ "php": null, "secure": false, "proxy": null }),
+    ];
+    assert_eq!(*bodies.lock().unwrap(), want);
+    let targets: Vec<String> = fake
+        .seen()
+        .into_iter()
+        .map(|seen| format!("{} {}", seen.method, seen.target))
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            "GET /v1/sites",
+            "POST /v1/sites/park",
+            "POST /v1/sites/link",
+            "PATCH /v1/sites/shop",
+            "PATCH /v1/sites/park",
+        ]
+    );
+    let bearer = format!("Bearer {}", fake.token);
+    for seen in fake.seen() {
+        assert_eq!(seen.authorization.as_deref(), Some(bearer.as_str()));
+        assert!(!seen.origin);
+    }
+}
+
+#[tokio::test]
+async fn a_site_error_keeps_the_daemons_code() {
+    let router = Router::new()
+        .route(
+            "/v1/sites/{name}",
+            patch(|| async {
+                let body = ErrorBody::new("site_not_found", "no site named \"nope\"");
+                (StatusCode::NOT_FOUND, Json(body))
+            }),
+        )
+        .route(
+            "/v1/sites/park",
+            post(|| async {
+                let body = ErrorBody::new("site_not_a_folder", "/x is not a folder");
+                (StatusCode::BAD_REQUEST, Json(body))
+            }),
+        );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    let err = client
+        .update_site("nope", &SitePatch::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "site_not_found");
+    assert!(
+        matches!(err, ClientError::Api { status: 404, .. }),
+        "{err:?}"
+    );
+    fake.assert_no_token(&err);
+    let err = client.park(&fake.data_dir().join("x")).await.unwrap_err();
+    assert_eq!(err.code(), "site_not_a_folder");
+    fake.assert_no_token(&err);
+}
+
+#[tokio::test]
+async fn a_site_name_cannot_reach_another_route() {
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let fake = Fake::start(serve_sites(&bodies)).await;
+    let client = fake.client();
+    let patch = SitePatch::default();
+    client.update_site("../link", &patch).await.unwrap();
+    assert_eq!(fake.seen()[0].target, "/v1/sites/..%2Flink");
+    for name in ["", ".", ".."] {
+        let err = client.update_site(name, &patch).await.unwrap_err();
+        assert_eq!(err.code(), "invalid_id", "{err:?}");
+    }
+    assert_eq!(fake.seen().len(), 1);
+}
+
+/// A path that is not UTF-8 cannot go into JSON. It is refused with the
+/// daemon's code, and nothing is sent.
+#[tokio::test]
+async fn a_path_that_is_not_utf8_is_refused_before_any_request() {
+    // How a path that is not UTF-8 is built differs by system.
+    #[cfg(unix)]
+    let name = {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::OsStr::from_bytes(b"caf\xe9").to_os_string()
+    };
+    #[cfg(windows)]
+    let name = {
+        use std::os::windows::ffi::OsStringExt;
+        // A lone surrogate: valid in a Windows path, not in UTF-8.
+        std::ffi::OsString::from_wide(&[0x63, 0xD800])
+    };
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let fake = Fake::start(serve_sites(&bodies)).await;
+    let client = fake.client();
+    let path = fake.data_dir().join(name);
+    let err = client.park(&path).await.unwrap_err();
+    assert_eq!(err.code(), "site_path_not_utf8", "{err:?}");
+    let err = client.link("cafe", &path).await.unwrap_err();
+    assert_eq!(err.code(), "site_path_not_utf8", "{err:?}");
+    assert!(fake.seen().is_empty(), "{:?}", fake.seen());
+}
+
+// ---------------------------------------------------------------------------
 // Event streams
 
 #[tokio::test]
@@ -1004,6 +1192,15 @@ fn futures_and_streams_are_send() {
     is_send(&ensure_running(dir));
     is_send(&ensure_running_with(dir, dir));
     is_send(&stop_daemon(dir));
+    let dir = TempDir::new().unwrap();
+    let _lock = DaemonLock::take(dir.path());
+    write_file(dir.path(), 51234);
+    let client = DaemonClient::connect(dir.path()).unwrap();
+    let patch = SitePatch::default();
+    is_send(&client.sites());
+    is_send(&client.park(dir.path()));
+    is_send(&client.link("shop", dir.path()));
+    is_send(&client.update_site("shop", &patch));
     is_send_type::<DaemonClient>();
     is_send_type::<EventStream<Event>>();
 }

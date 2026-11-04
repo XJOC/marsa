@@ -11,6 +11,7 @@ pub mod logs;
 pub mod progress;
 pub mod runtimes;
 pub mod services;
+pub mod sites;
 pub mod strings;
 
 use std::path::PathBuf;

@@ -33,6 +33,7 @@ use std::time::Duration;
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use reqwest::{Method, RequestBuilder, Response, Url, redirect};
 use semver::Version;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 
@@ -42,8 +43,8 @@ use crate::platform::daemon_file::{
 use crate::platform::spawn::{EXIT_ALREADY_RUNNING, marsad_path, spawn_marsad};
 use crate::runtimes::Runtime;
 use crate::types::{
-    API_VERSION, ErrorBody, Event, Health, InstallAccepted, InstallRequest, LogLine, RuntimeList,
-    ServiceAction, ServiceStatus,
+    API_VERSION, ErrorBody, Event, Health, InstallAccepted, InstallRequest, LinkRequest, LogLine,
+    ParkRequest, RuntimeList, ServiceAction, ServiceStatus, SiteList, SitePatch,
 };
 use error::daemon_text;
 
@@ -212,6 +213,60 @@ impl DaemonClient {
         self.answer(request.timeout(REQUEST_TIMEOUT)).await
     }
 
+    /// `GET /v1/sites`: every site, sorted by name, and the folders that did
+    /// not become one.
+    pub async fn sites(&self) -> Result<SiteList, ClientError> {
+        self.call(Method::GET, &["v1", "sites"], REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// `POST /v1/sites/park`: every sub-folder of `path` becomes a site. The
+    /// list after the change.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `site_path_not_utf8` before any request, and the
+    /// daemon's `site_path_relative` or `site_not_a_folder`.
+    pub async fn park(&self, path: &Path) -> Result<SiteList, ClientError> {
+        let body = ParkRequest {
+            path: utf8_path(path)?,
+        };
+        self.call_with(Method::POST, &["v1", "sites", "park"], &body)
+            .await
+    }
+
+    /// `POST /v1/sites/link`: `path` becomes the site `name`. The list after
+    /// the change.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `site_path_not_utf8` before any request, and the
+    /// daemon's `site_name_invalid`, `site_path_relative`, or
+    /// `site_not_a_folder`.
+    pub async fn link(&self, name: &str, path: &Path) -> Result<SiteList, ClientError> {
+        let body = LinkRequest {
+            name: name.to_owned(),
+            path: utf8_path(path)?,
+        };
+        self.call_with(Method::POST, &["v1", "sites", "link"], &body)
+            .await
+    }
+
+    /// `PATCH /v1/sites/{name}`: changes the settings in `patch`, keeps the
+    /// others. The list after the change.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `site_not_found` (404) for a name with no site.
+    pub async fn update_site(
+        &self,
+        name: &str,
+        patch: &SitePatch,
+    ) -> Result<SiteList, ClientError> {
+        self.call_with(Method::PATCH, &["v1", "sites", name], patch)
+            .await
+    }
+
     /// The URL of the path made of `segments`, so an id can never reach
     /// another route: each segment is percent-encoded (`/`, `?`, `#`, and `%`
     /// too), and an empty, `.`, or `..` segment is refused here, because the
@@ -239,6 +294,17 @@ impl DaemonClient {
     ) -> Result<T, ClientError> {
         let request = self.http.request(method, self.url(segments)?);
         self.answer(request.timeout(limit)).await
+    }
+
+    /// A call with a JSON body and a JSON answer, within `REQUEST_TIMEOUT`.
+    async fn call_with<B: Serialize, T: DeserializeOwned>(
+        &self,
+        method: Method,
+        segments: &[&str],
+        body: &B,
+    ) -> Result<T, ClientError> {
+        let request = self.http.request(method, self.url(segments)?).json(body);
+        self.answer(request.timeout(REQUEST_TIMEOUT)).await
     }
 
     /// Sends `request` and reads its JSON answer.
@@ -627,6 +693,17 @@ fn lock_is_held(lock: &Path) -> bool {
             false
         }
     }
+}
+
+/// `path` as it goes into a JSON body. JSON text is UTF-8, so a path that is
+/// not fails here, with its own code, before any request.
+fn utf8_path(path: &Path) -> Result<PathBuf, ClientError> {
+    if path.to_str().is_none() {
+        return Err(ClientError::PathNotUtf8 {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(path.to_path_buf())
 }
 
 fn run_dir(data_dir: &Path) -> PathBuf {

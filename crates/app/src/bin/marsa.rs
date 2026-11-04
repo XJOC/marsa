@@ -11,6 +11,7 @@ use marsa::cli::install::{self, InstallArgs};
 use marsa::cli::logs::{self, LogsArgs};
 use marsa::cli::runtimes::{self, RuntimesArgs};
 use marsa::cli::services::{self, ServicesArgs};
+use marsa::cli::sites::{self, SitesCommand};
 
 /// Local development runtimes and sites.
 #[derive(Debug, Parser)]
@@ -39,6 +40,10 @@ enum Command {
     Services(ServicesArgs),
     /// Show the output of a service.
     Logs(LogsArgs),
+    /// `sites`, `park`, `link`, `secure`, and `unsecure`, each a command of
+    /// its own.
+    #[command(flatten)]
+    Sites(SitesCommand),
 }
 
 // One thread is enough: the command waits on one thing at a time.
@@ -57,6 +62,7 @@ async fn main() -> ExitCode {
         Command::Daemon(command) => daemon::run(*command, &data_dir).await,
         Command::Services(args) => services::run(args, &data_dir).await,
         Command::Logs(args) => logs::run(args, &data_dir).await,
+        Command::Sites(command) => sites::run(command, &data_dir).await,
     }
 }
 
@@ -196,6 +202,46 @@ mod tests {
             let err = parse(args).expect_err("invalid arguments");
             assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
         }
+    }
+
+    /// The full parsing tests are in `cli/sites.rs`.
+    #[test]
+    fn the_sites_commands_are_top_level_commands() {
+        for (args, want) in [
+            (&["sites"][..], SitesCommand::Sites),
+            (
+                &["park", "code"],
+                SitesCommand::Park {
+                    dir: Some(PathBuf::from("code")),
+                },
+            ),
+            (
+                &["link", "--data-dir", "/x", "api"],
+                SitesCommand::Link {
+                    name: Some("api".into()),
+                    path: None,
+                },
+            ),
+            (
+                &["secure", "shop"],
+                SitesCommand::Secure {
+                    name: "shop".into(),
+                },
+            ),
+            (
+                &["unsecure", "shop"],
+                SitesCommand::Unsecure {
+                    name: "shop".into(),
+                },
+            ),
+        ] {
+            match parse(args).expect("valid").command {
+                Command::Sites(got) => assert_eq!(got, want, "{args:?}"),
+                other => panic!("not a sites command: {other:?}"),
+            }
+        }
+        let err = parse(&["sites", "park"]).expect_err("not a sub-command");
+        assert_eq!(err.exit_code(), 2);
     }
 
     #[test]

@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use marsa_core::runtimes::Runtime;
-use marsa_core::types::ServiceState;
+use marsa_core::types::{ServiceState, SiteKind};
 
 /// The facts a message may show. Fill in what the error has; a message whose
 /// fact is missing reads without it.
@@ -30,6 +30,9 @@ pub struct Details<'a> {
     pub output: Option<&'a str>,
     /// The id of the service the command is about, such as `caddy`.
     pub service: Option<&'a str>,
+    /// The site name the command is about, such as `shop`, or the folder
+    /// name a site name could not be made from.
+    pub site: Option<&'a str>,
 }
 
 /// The sentence for `code`. An unknown code gets a general sentence; the
@@ -51,6 +54,12 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
     let id = d.service.unwrap_or("<service>");
     let service = d.service.map_or("the service", service_name);
     let service_first = d.service.map_or("The service", service_name);
+    // A path at the start of a sentence, or what to say without one.
+    let shown = |default: &str| {
+        d.path
+            .map_or(default.to_owned(), |p| p.display().to_string())
+    };
+    let site = d.site.unwrap_or("<name>");
     const REPORT: &str = "Nothing was installed. Report it.";
     const AGAIN: &str = "Nothing was installed. Try again later; if it repeats, report it.";
     const DISK: &str = "Check the free disk space and the folder's permissions.";
@@ -245,6 +254,51 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "origin_rejected" | "host_rejected" => {
             "The daemon refused the request of this command. Report it.".into()
         }
+        "internal_error" => "The Marsa daemon hit a bug. Try again; if it repeats, report it \
+             with the file logs/marsad.log."
+            .into(),
+
+        // Sites: `SiteError`, `SkipReason`, and the sites routes.
+        "site_not_found" => {
+            format!("There is no site named \"{site}\". Run \"marsa sites\" to see them.")
+        }
+        "site_name_invalid" => format!(
+            "{} is not a valid site name. Use 1 to 63 of a-z, 0-9, and -, with no - at the \
+             start or the end.",
+            d.site
+                .map_or("This".to_owned(), |name| format!("\"{name}\""))
+        ),
+        "site_name_taken" => format!("Another folder already has the site name \"{site}\"."),
+        "site_not_a_folder" => format!(
+            "{} is not a folder. Check the path, then try again.",
+            shown("The path")
+        ),
+        "site_path_relative" => format!(
+            "{} is not a full path. Pass a full path, then try again.",
+            shown("The path")
+        ),
+        "site_path_not_utf8" => format!(
+            "{} is not valid UTF-8, so Marsa cannot serve it. Rename the folder, then try again.",
+            shown("The path")
+        ),
+        "site_read_dir" => format!(
+            "Cannot read {}. Check the folder's permissions.",
+            shown("the folder")
+        ),
+        "no_current_dir" => "Cannot read the current folder; it may have been deleted. Go to \
+             another folder, or pass a full path."
+            .into(),
+
+        // The settings files: `ConfigError`.
+        "config_read" => format!(
+            "Cannot read {}. Check the file's permissions.",
+            shown("the settings file")
+        ),
+        "config_invalid" => format!(
+            "{} has an error, so Marsa cannot read it. Fix the file, then try again.",
+            shown("The settings file")
+        ),
+        "config_write" => format!("Cannot write {}. {DISK}", shown("the settings file")),
 
         _ => return None,
     };
@@ -392,6 +446,63 @@ pub fn lagged(count: u64) -> String {
 /// On stderr when the daemon closes a followed log, for example when it stops.
 pub const LOG_ENDED: &str = "The daemon closed the log.";
 
+// `marsa sites`, `park`, `link`, `secure`, and `unsecure`.
+
+/// The column titles of the sites table.
+pub const SITES_HEADER: [&str; 5] = ["NAME", "URL", "KIND", "PHP", "FOLDER"];
+/// The PHP column of a site with no PHP version: no PHP is installed.
+pub const NO_PHP: &str = "-";
+pub const NO_SITES: &str = "No sites yet. Run \"marsa park\" in a folder of projects, or \
+     \"marsa link\" in one project.";
+/// The title over the folders that did not become a site.
+pub const SKIPPED_HEADER: &str = "Skipped folders:";
+/// After the `site_name_invalid` text when `marsa link` cannot make a name
+/// from the folder name.
+pub const PASS_A_NAME: &str = "Pass a name: marsa link <name>";
+
+/// The kind column of the sites table.
+pub fn kind_name(kind: SiteKind) -> String {
+    match kind {
+        SiteKind::Laravel => "laravel".to_owned(),
+        SiteKind::Php => "php".to_owned(),
+        SiteKind::Static => "static".to_owned(),
+        SiteKind::NodeProxy { port } => format!("proxy :{port}"),
+    }
+}
+
+/// Why a folder did not become a site, in the list under the table. Shorter
+/// than [`message`], which is for a command that failed.
+pub fn skip_reason(code: &str) -> String {
+    match code {
+        "site_name_invalid" => "its name gives no valid site name".to_owned(),
+        "site_path_not_utf8" => "its path is not valid UTF-8".to_owned(),
+        "site_name_taken" => "another folder has the same site name".to_owned(),
+        "site_read_dir" => "it cannot be read".to_owned(),
+        "site_not_a_folder" => "it is gone or is not a folder".to_owned(),
+        other => message(other, &Details::default()),
+    }
+}
+
+/// One line of the list under the table.
+pub fn skipped_folder(path: &str, reason: &str, code: &str) -> String {
+    format!("  {path}: {reason} [{code}]")
+}
+
+/// `marsa link`.
+pub fn linked(url: &str, folder: &str) -> String {
+    format!("Linked {folder} as {url}.")
+}
+
+/// `marsa secure`.
+pub fn secured(url: &str) -> String {
+    format!("{url} is served over HTTPS.")
+}
+
+/// `marsa unsecure`.
+pub fn unsecured(url: &str) -> String {
+    format!("{url} is served over plain HTTP.")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,6 +590,21 @@ mod tests {
         "unauthorized",
         "origin_rejected",
         "host_rejected",
+        "internal_error",
+        // The sites routes (task M4-10b), `SiteError`, `SkipReason`, and
+        // `ConfigError`; `site_path_not_utf8` is a `ClientError` too.
+        "site_not_found",
+        "site_name_invalid",
+        "site_name_taken",
+        "site_not_a_folder",
+        "site_path_relative",
+        "site_path_not_utf8",
+        "site_read_dir",
+        "config_read",
+        "config_invalid",
+        "config_write",
+        // `marsa park` and `marsa link` themselves.
+        "no_current_dir",
     ];
 
     #[test]
@@ -516,6 +642,7 @@ mod tests {
             ClientError::ApiTooNew { daemon: 2 },
             ClientError::BadResponse { reason: "x".into() },
             ClientError::InvalidId { id: "..".into() },
+            ClientError::PathNotUtf8 { path: path() },
             ClientError::Api {
                 status: 409,
                 code: "caddy_not_installed".into(),
@@ -548,6 +675,7 @@ mod tests {
                 | ClientError::ApiTooNew { .. }
                 | ClientError::BadResponse { .. }
                 | ClientError::InvalidId { .. }
+                | ClientError::PathNotUtf8 { .. }
                 | ClientError::Api { .. }
                 | ClientError::DaemonFile(_) => {}
             }
@@ -579,6 +707,55 @@ mod tests {
             message("exited", &Details::default()),
             "The service stopped by itself. Run \"marsa logs <service>\" to see why."
         );
+    }
+
+    #[test]
+    fn site_messages_name_the_site_and_the_path() {
+        let path = std::env::temp_dir().join("notes.txt");
+        let details = Details {
+            site: Some("Shop"),
+            path: Some(&path),
+            ..Details::default()
+        };
+        assert_eq!(
+            message("site_name_invalid", &details),
+            "\"Shop\" is not a valid site name. Use 1 to 63 of a-z, 0-9, and -, with no - at \
+             the start or the end."
+        );
+        assert_eq!(
+            message("site_not_found", &details),
+            "There is no site named \"Shop\". Run \"marsa sites\" to see them."
+        );
+        assert_eq!(
+            message("site_not_a_folder", &details),
+            format!(
+                "{} is not a folder. Check the path, then try again.",
+                path.display()
+            )
+        );
+        let none = Details::default();
+        assert!(message("site_name_invalid", &none).starts_with("This is not a valid site name."));
+        assert!(message("site_not_a_folder", &none).starts_with("The path is not a folder."));
+        assert!(message("config_invalid", &none).starts_with("The settings file has an error"));
+    }
+
+    #[test]
+    fn every_skip_code_has_a_short_reason() {
+        for code in [
+            "site_name_invalid",
+            "site_path_not_utf8",
+            "site_name_taken",
+            "site_read_dir",
+            "site_not_a_folder",
+        ] {
+            let reason = skip_reason(code);
+            assert!(
+                reason.chars().next().is_some_and(char::is_lowercase),
+                "{code}"
+            );
+            assert!(!reason.ends_with('.'), "{code}: {reason}");
+        }
+        assert!(skip_reason("newer_code").starts_with("Something went wrong."));
     }
 
     #[test]
