@@ -24,7 +24,7 @@ use semver::Version;
 
 use crate::error::ShimError;
 use crate::name::ShimName;
-use crate::plan::Plan;
+use crate::plan::{Inherited, Plan, TrustEnv, TrustVar};
 
 fn main() -> ExitCode {
     match run() {
@@ -61,9 +61,19 @@ fn run() -> Result<Infallible, ShimError> {
         _ => None,
     };
 
-    let plan = Plan::new(name, &runtimes, &version, composer.as_ref(), args)?;
+    let mut plan = Plan::new(name, &runtimes, &version, composer.as_ref(), args)?;
     plan.check()?;
+    plan.trust = trust_env(TrustVar::for_shim(name, &data_dir, &version));
     Err(sys::exec(plan.command(depth)))
+}
+
+/// Reads the environment and the disk for [`TrustVar::decide`]. The file is
+/// not checked when the user set the variable, so this costs one `is_file` at
+/// most.
+fn trust_env(var: TrustVar) -> Option<TrustEnv> {
+    let inherited = var.inherited(env::var_os(var.name).as_deref());
+    let file_exists = inherited != Inherited::User && var.file.is_file();
+    var.decide(inherited, file_exists)
 }
 
 /// The version of `tool` to run in `cwd`. A broken `global.toml` or
@@ -106,5 +116,75 @@ fn report(err: &ShimError) {
     let _ = writeln!(stderr, "marsa: {}", err.line());
     if let Some(hint) = err.hint(data_dir.as_deref()) {
         let _ = writeln!(stderr, "marsa: hint: {hint}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// A variable that no test run sets. These tests only read the
+    /// environment; they never change it.
+    const UNSET: &str = "MARSA_TEST_TRUST_VAR_NEVER_SET";
+
+    fn var(name: &'static str, file: PathBuf, marsa_dir: Option<PathBuf>) -> TrustVar {
+        TrustVar {
+            name,
+            file,
+            marsa_dir,
+        }
+    }
+
+    fn set(name: &'static str, file: PathBuf) -> Option<TrustEnv> {
+        Some(TrustEnv::Set { name, file })
+    }
+
+    /// The value of `PATH`, as a path. Every test run has `PATH`.
+    fn path_value() -> PathBuf {
+        PathBuf::from(env::var_os("PATH").expect("the tests run with PATH"))
+    }
+
+    #[test]
+    fn an_unset_variable_is_set_once_its_file_exists() {
+        assert_eq!(env::var_os(UNSET), None, "{UNSET} must not be set");
+        let dir = tempfile::tempdir().expect("create a temp dir");
+        let file = dir.path().join("root.crt");
+        assert_eq!(trust_env(var(UNSET, file.clone(), None)), None);
+        // A folder is not a file.
+        let folder = dir.path().to_path_buf();
+        assert_eq!(trust_env(var(UNSET, folder, None)), None);
+
+        std::fs::write(&file, "pem").expect("write the file");
+        assert_eq!(trust_env(var(UNSET, file.clone(), None)), set(UNSET, file));
+    }
+
+    #[test]
+    fn a_variable_the_user_set_is_left_alone() {
+        // `PATH` stands for a value the user set: it is not inside the
+        // `marsa_dir` given here.
+        let dir = tempfile::tempdir().expect("create a temp dir");
+        let file = dir.path().join("php.ini");
+        std::fs::write(&file, "").expect("write the file");
+        let marsa_dir = Some(dir.path().join("php"));
+        assert_eq!(trust_env(var("PATH", file, marsa_dir)), None);
+    }
+
+    #[test]
+    fn a_value_inside_marsa_dir_is_replaced_or_removed() {
+        // `PATH` stands for a value an outer shim set: its own value is
+        // inside `marsa_dir` when `marsa_dir` is that value.
+        let marsa_dir = Some(path_value());
+        let dir = tempfile::tempdir().expect("create a temp dir");
+        let file = dir.path().join("php.ini");
+        let removed = Some(TrustEnv::Remove { name: "PATH" });
+        assert_eq!(
+            trust_env(var("PATH", file.clone(), marsa_dir.clone())),
+            removed
+        );
+
+        std::fs::write(&file, "").expect("write the file");
+        let replaced = set("PATH", file.clone());
+        assert_eq!(trust_env(var("PATH", file, marsa_dir)), replaced);
     }
 }
