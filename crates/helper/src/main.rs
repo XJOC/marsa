@@ -25,10 +25,13 @@ use std::env;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::thread;
+use std::time::Duration;
 
+use crate::ops::pf;
 use crate::os::Os;
 use crate::request::Request;
-use crate::response::{Response, code};
+use crate::response::{OpResult, Response, code};
 use crate::system::{RealSystem, System};
 
 const USAGE: &str = "usage: marsa-helper apply <json> | pf-load | version";
@@ -36,7 +39,8 @@ const USAGE: &str = "usage: marsa-helper apply <json> | pf-load | version";
 fn main() -> ExitCode {
     // `args_os`: `args` panics on an argument that is not UTF-8.
     let args: Vec<OsString> = env::args_os().skip(1).collect();
-    let (line, exit) = cli(&args, Os::current(), &RealSystem);
+    // The boot job really waits only here. Tests pass their own `sleep`.
+    let (line, exit) = cli(&args, Os::current(), &RealSystem, thread::sleep);
     // stdout is the helper's protocol: this one line is all it prints there.
     // A closed stdout is ignored, so the exit code still tells what happened.
     let _ = writeln!(io::stdout().lock(), "{line}");
@@ -44,10 +48,11 @@ fn main() -> ExitCode {
 }
 
 /// Runs one command line. Returns the line for stdout and the exit code.
-fn cli(args: &[OsString], os: Os, system: &impl System) -> (String, u8) {
+/// `sleep` is how the boot job (`pf-load`) waits between its checks.
+fn cli(args: &[OsString], os: Os, system: &impl System, sleep: impl Fn(Duration)) -> (String, u8) {
     let response = match args {
         [cmd] if cmd == "version" => return (env!("CARGO_PKG_VERSION").to_owned(), 0),
-        [cmd] if cmd == "pf-load" => Response::results(vec![ops::not_implemented("pf_load")]),
+        [cmd] if cmd == pf::COMMAND => Response::results(vec![pf_load(os, system, sleep)]),
         [cmd, raw] if cmd == "apply" => match Request::from_arg(raw) {
             Ok(request) => Response::results(ops::apply(&request, os, system)),
             Err(err) => Response::error(err.code(), err.to_string()),
@@ -57,12 +62,22 @@ fn cli(args: &[OsString], os: Os, system: &impl System) -> (String, u8) {
     (response.to_json(), response.exit_code())
 }
 
+/// The boot job. Like the pf ops, it runs on macOS only.
+fn pf_load(os: Os, system: &impl System, sleep: impl Fn(Duration)) -> OpResult {
+    if os == Os::Macos {
+        return pf::boot(system, sleep);
+    }
+    let message = format!("{} is not supported on {}", pf::LOAD, os.name());
+    OpResult::failed(pf::LOAD, code::OP_NOT_SUPPORTED, message)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use serde::Serialize;
     use serde_json::{Value, json};
@@ -73,11 +88,11 @@ mod tests {
     use crate::system::FakeSystem;
 
     /// Runs the helper against a fresh `FakeSystem`, checks that the output
-    /// is one JSON line, and returns it with the exit code.
+    /// is one JSON line, and returns it with the exit code. Nothing waits.
     fn helper(args: &[&OsStr], os: Os) -> (Value, u8, FakeSystem) {
         let fake = FakeSystem::default();
         let args: Vec<OsString> = args.iter().map(|arg| arg.to_os_string()).collect();
-        let (line, code) = cli(&args, os, &fake);
+        let (line, code) = cli(&args, os, &fake, |_| panic!("the helper waited"));
         assert!(!line.contains('\n'));
         (serde_json::from_str(&line).unwrap(), code, fake)
     }
@@ -199,46 +214,78 @@ mod tests {
     fn a_request_of_exactly_the_limit_runs() {
         let raw = padded(MAX_REQUEST_BYTES);
         let (out, code, _) = helper(&[OsStr::new("apply"), OsStr::new(&raw)], Os::Macos);
+        // The fake has no pfctl, so `pf_remove` runs and fails.
         assert_eq!(code, 1);
-        assert_eq!(out["results"][0]["code"], code::OP_NOT_IMPLEMENTED);
+        assert_eq!(out["results"][0]["op"], "pf_remove");
     }
 
     #[test]
     fn a_valid_request_gives_one_result_per_op() {
         let raw = fixture("requests/macos-remove.json");
-        let (out, code, fake) = helper(&[OsStr::new("apply"), OsStr::new(&raw)], Os::Macos);
+        let (out, code, _) = helper(&[OsStr::new("apply"), OsStr::new(&raw)], Os::Macos);
         assert_eq!(code, 1);
         let results = out["results"].as_array().unwrap();
         let ops: Vec<_> = results.iter().map(|r| &r["op"]).collect();
         assert_eq!(ops, ["pf_remove", "resolver_remove", "trust_remove"]);
-        assert!(fake.log.borrow().is_empty());
     }
 
     #[test]
     fn version_prints_the_crate_version() {
         let fake = FakeSystem::default();
-        let (line, code) = cli(&["version".into()], Os::Macos, &fake);
+        let (line, code) = cli(&["version".into()], Os::Macos, &fake, |_| {});
         assert_eq!((line.as_str(), code), (env!("CARGO_PKG_VERSION"), 0));
     }
 
     #[test]
-    fn pf_load_is_not_implemented_yet() {
+    fn pf_load_without_the_rules_file_does_nothing() {
         let (out, code, fake) = helper(&[OsStr::new("pf-load")], Os::Macos);
         assert_eq!(code, 1);
         assert_eq!(out["results"][0]["op"], "pf_load");
-        assert_eq!(out["results"][0]["code"], code::OP_NOT_IMPLEMENTED);
+        assert_eq!(out["results"][0]["code"], pf::PF_NOT_INSTALLED);
         assert!(fake.log.borrow().is_empty());
+    }
+
+    #[test]
+    fn pf_load_is_macos_only() {
+        for os in [Os::Linux, Os::Windows] {
+            let (out, code, fake) = helper(&[OsStr::new("pf-load")], os);
+            assert_eq!(code, 1);
+            assert_eq!(out["results"][0]["code"], code::OP_NOT_SUPPORTED);
+            assert!(fake.log.borrow().is_empty());
+        }
+    }
+
+    /// `main` passes its `sleep` to the boot job. The fake has no pfctl, so
+    /// every load fails and is tried again after each wait.
+    #[test]
+    fn pf_load_waits_through_the_given_sleep() {
+        let fake = FakeSystem::default();
+        let rules = PathBuf::from("/Library/Application Support/Marsa/pf-redirect.rules");
+        fake.files
+            .borrow_mut()
+            .insert(rules, (b"rdr".to_vec(), 0o644));
+        let waits = RefCell::new(Vec::new());
+        let sleep = |wait: Duration| waits.borrow_mut().push(wait.as_secs());
+        let (line, code) = cli(&["pf-load".into()], Os::Macos, &fake, sleep);
+        let out: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            (code, &out["results"][0]["code"]),
+            (1, &json!(pf::PF_LOAD_FAILED))
+        );
+        assert_eq!(waits.into_inner(), [10, 30]);
+        assert_eq!(fake.log.borrow().len(), 3);
     }
 
     #[test]
     fn a_bad_command_line_is_a_usage_error() {
         let ok = one_op(json!({ "op": "pf_remove" }));
-        let cases: [&[&str]; 5] = [
+        let cases: [&[&str]; 6] = [
             &[],
             &["run"],
             &["apply"],
             &["apply", &ok, &ok],
             &["version", "x"],
+            &["pf-load", "x"],
         ];
         for args in cases {
             let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
