@@ -11,6 +11,7 @@ use marsa::cli::install::{self, InstallArgs};
 use marsa::cli::logs::{self, LogsArgs};
 use marsa::cli::runtimes::{self, RuntimesArgs};
 use marsa::cli::services::{self, ServicesArgs};
+use marsa::cli::setup;
 use marsa::cli::sites::{self, SitesCommand};
 
 /// Local development runtimes and sites.
@@ -44,6 +45,9 @@ enum Command {
     /// its own.
     #[command(flatten)]
     Sites(SitesCommand),
+    /// Trust Marsa's HTTPS certificates, send .test names to Marsa, and route
+    /// ports 80 and 443 to it, with one password prompt (macOS).
+    Setup,
 }
 
 // One thread is enough: the command waits on one thing at a time.
@@ -63,6 +67,7 @@ async fn main() -> ExitCode {
         Command::Services(args) => services::run(args, &data_dir).await,
         Command::Logs(args) => logs::run(args, &data_dir).await,
         Command::Sites(command) => sites::run(command, &data_dir).await,
+        Command::Setup => setup::run(&data_dir).await,
     }
 }
 
@@ -242,6 +247,20 @@ mod tests {
         }
         let err = parse(&["sites", "park"]).expect_err("not a sub-command");
         assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn setup_takes_no_argument() {
+        for args in [&["setup"][..], &["setup", "--data-dir", "/x"]] {
+            match parse(args).expect("valid").command {
+                Command::Setup => {}
+                other => panic!("not setup: {other:?}"),
+            }
+        }
+        for args in [&["setup", "now"][..], &["setup", "--force"]] {
+            let err = parse(args).expect_err("invalid arguments");
+            assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
+        }
     }
 
     #[test]

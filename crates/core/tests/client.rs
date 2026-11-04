@@ -27,8 +27,9 @@ use marsa_core::platform::daemon_file::{
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
     API_VERSION, ErrorBody, Event, Health, InstallAccepted, InstallRequest, LinkRequest, LogLine,
-    LogStream, ParkRequest, RuntimeList, RuntimeVersions, ServiceAction, ServiceState,
-    ServiceStatus, Site, SiteKind, SiteList, SitePatch, SkippedFolder,
+    LogStream, OpResult, OpStatus, ParkRequest, RuntimeList, RuntimeVersions, ServiceAction,
+    ServiceState, ServiceStatus, SetupReport, SetupSkip, Site, SiteKind, SiteList, SitePatch,
+    SkippedFolder,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -798,6 +799,66 @@ async fn a_path_that_is_not_utf8_is_refused_before_any_request() {
     let err = client.link("cafe", &path).await.unwrap_err();
     assert_eq!(err.code(), "site_path_not_utf8", "{err:?}");
     assert!(fake.seen().is_empty(), "{:?}", fake.seen());
+}
+
+// ---------------------------------------------------------------------------
+// Setup (task M4-13)
+
+#[tokio::test]
+async fn setup_posts_and_reads_the_report() {
+    let report = SetupReport {
+        results: vec![OpResult {
+            op: "resolver_install".into(),
+            status: OpStatus::Done,
+            code: None,
+            message: None,
+        }],
+        skipped: vec![SetupSkip {
+            op: "trust_install".into(),
+            code: "ca_not_ready".into(),
+        }],
+        ..SetupReport::default()
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let router = Router::new().route(
+        "/v1/setup",
+        post({
+            let report = report.clone();
+            move || {
+                let (report, calls) = (report.clone(), calls.clone());
+                async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Json(report).into_response()
+                    } else {
+                        let busy = ErrorBody::new("setup_running", "another setup is running");
+                        (StatusCode::CONFLICT, Json(busy)).into_response()
+                    }
+                }
+            }
+        }),
+    );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    assert_eq!(client.setup().await.unwrap(), report);
+    let err = client.setup().await.unwrap_err();
+    assert_eq!(err.code(), "setup_running");
+    assert!(
+        matches!(err, ClientError::Api { status: 409, .. }),
+        "{err:?}"
+    );
+    fake.assert_no_token(&err);
+
+    let targets: Vec<String> = fake
+        .seen()
+        .into_iter()
+        .map(|seen| format!("{} {}", seen.method, seen.target))
+        .collect();
+    assert_eq!(targets, ["POST /v1/setup", "POST /v1/setup"]);
+    let bearer = format!("Bearer {}", fake.token);
+    for seen in fake.seen() {
+        assert_eq!(seen.authorization.as_deref(), Some(bearer.as_str()));
+        assert!(!seen.origin);
+    }
 }
 
 // ---------------------------------------------------------------------------

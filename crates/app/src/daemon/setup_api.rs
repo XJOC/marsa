@@ -1,0 +1,1272 @@
+//! `POST /v1/setup`: the first setup on macOS, behind one admin prompt. Task
+//! M4-13, with the port check of task M4-14b.
+//!
+//! | Route | Answer |
+//! | --- | --- |
+//! | `POST /v1/setup` | `SetupReport`, also sent as `setup_finished` on `/v1/events` |
+//!
+//! The steps, on a blocking thread:
+//!
+//! 1. **CA:** Caddy's root certificate goes into `trust_install` as text
+//!    (ADR 0011). Caddy makes it with the first secure site; before that the
+//!    report says `ca_not_ready`.
+//! 2. **DNS:** the setup operation of [`dns::strategy_for`].
+//! 3. **Ports** (M4-14b): `/usr/sbin/netstat -anv -p tcp` lists the sockets
+//!    that listen, [`ports::holders`] picks those on 80 and 443, and `/bin/ps`
+//!    names each process. A holder, or a check that fails, means no
+//!    `pf_install`: the redirect would take that program's traffic without a
+//!    word (ADR 0008, "Herd conflict"). Otherwise `pf_install` gets Caddy's
+//!    ports from the daemon's `CaddyInput`.
+//! 4. **Helper:** if any operation is left, `/usr/bin/osascript` runs
+//!    `marsa-helper apply <request>` with administrator privileges, through
+//!    the constant script of ADR 0012, and the helper's JSON answer gives one
+//!    result per operation. No operation left: no prompt.
+//!
+//! One setup at a time: a second request gets 409 `setup_running`. Linux and
+//! Windows get 501 `setup_not_supported` until tasks M4-18 and M4-19.
+//!
+//! Every program runs through [`Runner`], so the tests run none: they pass a
+//! fake that records each call and answers from fixtures.
+
+use std::collections::BTreeMap;
+use std::env::consts::EXE_SUFFIX;
+use std::ffi::OsString;
+use std::fmt;
+use std::fs::File;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::post;
+use axum::{Json, Router};
+use marsa_core::caddy::{CaddyInput, CaddyPaths};
+use marsa_core::dns;
+use marsa_core::helper::{
+    HELPER_PROTOCOL_VERSION, HelperOp, HelperRequest, HelperResponse, OpResult,
+};
+use marsa_core::ports::{self, Listener, ProcessInfo};
+use marsa_core::recipes::Platform;
+use marsa_core::types::{ApiError, Event, PortHolder, SetupReport, SetupSkip};
+use tokio_util::sync::CancellationToken;
+
+use super::api::HttpError;
+use super::state::Daemon;
+
+const NETSTAT: &str = "/usr/sbin/netstat";
+const PS: &str = "/bin/ps";
+const OSASCRIPT: &str = "/usr/bin/osascript";
+
+/// The AppleScript of ADR 0012, one `-e` argument per line. A constant:
+/// nothing is ever put into it. The helper path and the request travel as
+/// `argv` items 1 and 2, and `quoted form of` hands each to `/bin/sh` as one
+/// literal argument. This is the only shell line Marsa runs (AGENTS.md
+/// section 6).
+const APPLESCRIPT: [&str; 3] = [
+    "on run argv",
+    "do shell script (quoted form of item 1 of argv) & \" apply \" & (quoted form of item 2 of argv) with administrator privileges",
+    "end run",
+];
+
+/// The ports the `pf` redirect takes (ADR 0008).
+const REDIRECTED: [u16; 2] = [80, 443];
+/// How long `netstat` and each `ps` may take.
+const CHECK_LIMIT: Duration = Duration::from_secs(10);
+/// How long `osascript` may take: the user types the password meanwhile.
+const PROMPT_LIMIT: Duration = Duration::from_secs(5 * 60);
+/// At most this many `ps` calls; further holders keep netstat's name only.
+const MAX_PS: usize = 8;
+/// The helper refuses a larger certificate (ADR 0011).
+const MAX_CA_BYTES: u64 = 16 * 1024;
+/// The most read from each pipe of a program. The rest is read and dropped,
+/// so the program never waits on a full pipe.
+const MAX_OUTPUT: u64 = 4 * 1024 * 1024;
+/// The largest helper answer read. A real one is well under 4 KiB.
+const MAX_ANSWER: usize = 64 * 1024;
+/// The only `PATH` a program sees. Every program here is an absolute path, so
+/// this only keeps the daemon's own `PATH` away from them.
+const SAFE_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+/// How often [`RealRunner`] checks whether the program has finished.
+const POLL: Duration = Duration::from_millis(10);
+
+const TRUST_INSTALL: &str = "trust_install";
+const PF_INSTALL: &str = "pf_install";
+
+/// The routes, for `api::router` to merge before its fallbacks.
+pub fn routes() -> Router<Arc<Daemon>> {
+    routes_with(Setup::new())
+}
+
+/// The routes with the given [`Setup`]: tests pass a fake [`Runner`].
+pub fn routes_with(setup: Setup) -> Router<Arc<Daemon>> {
+    let setup = Arc::new(setup);
+    let handler = move |State(daemon): State<Arc<Daemon>>| {
+        let setup = Arc::clone(&setup);
+        async move { start(daemon, setup).await }
+    };
+    Router::new().route("/v1/setup", post(handler))
+}
+
+/// What a program printed, and how it ended.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunOutput {
+    /// The exit code, or `None` if a signal stopped the program.
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+impl RunOutput {
+    fn success(&self) -> bool {
+        self.code == Some(0)
+    }
+}
+
+/// Runs the programs of setup. The daemon uses [`RealRunner`]; tests use a
+/// fake, like `Process::fake()` in Laravel.
+pub trait Runner: Send + Sync {
+    /// Runs `program` with `args`, never through a shell, and waits at most
+    /// `limit`. `&'static str`: a constant path in this file, never one from
+    /// a request.
+    ///
+    /// # Errors
+    ///
+    /// The error of the start; kind `TimedOut` after `limit`, and kind
+    /// `Interrupted` once `stop` is cancelled. In both cases the program is
+    /// killed first.
+    fn run(
+        &self,
+        program: &'static str,
+        args: &[OsString],
+        limit: Duration,
+        stop: &CancellationToken,
+    ) -> io::Result<RunOutput>;
+}
+
+/// `std::process::Command`, with an empty environment except [`SAFE_PATH`],
+/// no stdin, and the working folder `/`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RealRunner;
+
+impl Runner for RealRunner {
+    fn run(
+        &self,
+        program: &'static str,
+        args: &[OsString],
+        limit: Duration,
+        stop: &CancellationToken,
+    ) -> io::Result<RunOutput> {
+        if !Path::new(program).is_absolute() {
+            let reason = "the program is not an absolute path";
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
+        }
+        // Checked before the start too, so a stopping daemon never opens the
+        // admin prompt, not even for a moment.
+        if stop.is_cancelled() {
+            let reason = "the daemon is stopping";
+            return Err(io::Error::new(io::ErrorKind::Interrupted, reason));
+        }
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .env_clear()
+            .env("PATH", SAFE_PATH)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // Not the daemon's working folder. `/` is a Unix path, and setup runs
+        // on macOS only for now (Linux in task M4-18, Windows in M4-19).
+        #[cfg(unix)]
+        command.current_dir("/");
+        let mut child = command.spawn()?;
+        let result = collect(&mut child, Instant::now() + limit, stop);
+        if result.is_err() {
+            // Best effort: the first error is the one to report.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        result
+    }
+}
+
+/// Waits for `child` until `deadline` or `stop`, and collects its output.
+fn collect(
+    child: &mut Child,
+    deadline: Instant,
+    stop: &CancellationToken,
+) -> io::Result<RunOutput> {
+    let stdout = read_in_background(child.stdout.take())?;
+    let stderr = read_in_background(child.stderr.take())?;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if stop.is_cancelled() {
+            let reason = "the daemon is stopping";
+            return Err(io::Error::new(io::ErrorKind::Interrupted, reason));
+        }
+        if Instant::now() >= deadline {
+            return Err(timed_out());
+        }
+        thread::sleep(POLL);
+    };
+    // A program it started may still hold a pipe open, so this waits only
+    // until the same deadline.
+    Ok(RunOutput {
+        code: status.code(),
+        stdout: receive(&stdout, deadline)?,
+        stderr: receive(&stderr, deadline)?,
+    })
+}
+
+/// Reads a pipe on its own thread, so a program that fills one pipe never
+/// blocks while the other is read. Keeps the first [`MAX_OUTPUT`] bytes.
+fn read_in_background<R>(pipe: Option<R>) -> io::Result<Receiver<io::Result<Vec<u8>>>>
+where
+    R: Read + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    thread::Builder::new()
+        .name("setup-pipe".to_owned())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let result = match pipe {
+                Some(mut pipe) => {
+                    let kept = (&mut pipe).take(MAX_OUTPUT).read_to_end(&mut bytes);
+                    kept.and_then(|_| io::copy(&mut pipe, &mut io::sink()))
+                        .map(|_| bytes)
+                }
+                None => Ok(bytes),
+            };
+            // After a timeout nobody waits for this, so a failed send is fine.
+            let _ = sender.send(result);
+        })?;
+    Ok(receiver)
+}
+
+fn receive(output: &Receiver<io::Result<Vec<u8>>>, deadline: Instant) -> io::Result<Vec<u8>> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    match output.recv_timeout(left) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => Err(timed_out()),
+        Err(RecvTimeoutError::Disconnected) => Err(io::Error::other("the output reader stopped")),
+    }
+}
+
+fn timed_out() -> io::Error {
+    let reason = "the program did not finish in time";
+    io::Error::new(io::ErrorKind::TimedOut, reason)
+}
+
+/// The setup side of the daemon: how programs run, which system this is,
+/// where the helper is, and whether a setup runs now.
+pub struct Setup {
+    runner: Arc<dyn Runner>,
+    /// `None`: a system Marsa has no build for.
+    platform: Option<Platform>,
+    /// `marsa-helper`. `None` if the daemon's own path is not known.
+    helper: Option<PathBuf>,
+    running: AtomicBool,
+}
+
+impl Setup {
+    /// The daemon's: [`RealRunner`], this system, and `marsa-helper` next to
+    /// the running program. That is `<app data>/bin/` in a real install and
+    /// `target/<profile>/` in development (ADR 0012).
+    pub fn new() -> Self {
+        Self::with(Arc::new(RealRunner), Platform::current(), helper_path())
+    }
+
+    /// For tests: any runner, system, and helper path.
+    pub fn with(
+        runner: Arc<dyn Runner>,
+        platform: Option<Platform>,
+        helper: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            runner,
+            platform,
+            helper,
+            running: AtomicBool::new(false),
+        }
+    }
+
+    /// The setup itself. Blocking: it runs programs and reads a file.
+    fn run(
+        &self,
+        data_dir: &Path,
+        caddy: CaddyInput,
+        platform: Platform,
+        stop: &CancellationToken,
+    ) -> SetupReport {
+        let mut report = SetupReport::default();
+        let mut ops = Vec::new();
+        match read_ca(&CaddyPaths::in_dir(data_dir).ca_root()) {
+            Ok(pem) => ops.push(HelperOp::TrustInstall { pem }),
+            Err(code) => report.skipped.push(skip(TRUST_INSTALL, code)),
+        }
+        if let Some(dns) = dns::strategy_for(platform) {
+            ops.push(dns.setup_op());
+        }
+        match self.port_holders(stop) {
+            Some(holders) if holders.is_empty() => ops.push(HelperOp::PfInstall {
+                http_port: caddy.http_port,
+                https_port: caddy.https_port,
+            }),
+            Some(holders) => {
+                for holder in &holders {
+                    tracing::warn!(
+                        port = holder.port,
+                        process = ?holder.process,
+                        pid = ?holder.pid,
+                        app = ?holder.app,
+                        "a program listens on a port the pf redirect would take; no pf_install"
+                    );
+                }
+                report.port_holders = holders;
+                report.skipped.push(skip(PF_INSTALL, "redirect_port_held"));
+            }
+            None => report.skipped.push(skip(PF_INSTALL, "ports_not_checked")),
+        }
+        match self.apply(ops, stop) {
+            Ok(results) => report.results = results,
+            Err(error) => report.error = Some(error),
+        }
+        report
+    }
+
+    /// Who listens on 80 and 443, or `None` if that cannot be known:
+    /// `netstat` failed, or it listed no listening socket at all. The
+    /// daemon's own API socket always listens, so an empty list means the
+    /// output was not understood, and the redirect must not go in blind.
+    fn port_holders(&self, stop: &CancellationToken) -> Option<Vec<PortHolder>> {
+        let args = ["-anv", "-p", "tcp"].map(OsString::from);
+        let output = match self.runner.run(NETSTAT, &args, CHECK_LIMIT, stop) {
+            Ok(output) if output.success() => output,
+            Ok(output) => {
+                tracing::warn!(exit = ?output.code, "netstat failed; ports 80 and 443 not checked");
+                return None;
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "cannot run netstat; ports 80 and 443 not checked");
+                return None;
+            }
+        };
+        let listeners = ports::parse_netstat(&String::from_utf8_lossy(&output.stdout));
+        if listeners.is_empty() {
+            tracing::warn!("netstat listed no listening socket; its output was not understood");
+            return None;
+        }
+        let mut processes = BTreeMap::new();
+        let holders = REDIRECTED
+            .iter()
+            .flat_map(|&port| ports::holders(&listeners, port))
+            .map(|listener| self.holder(listener, &mut processes, stop))
+            .collect();
+        Some(holders)
+    }
+
+    /// One holder, named by `ps` (once per PID, at most [`MAX_PS`] PIDs) and
+    /// by netstat. [`ports::known_app`] tries the `ps` command first, then
+    /// the netstat name: an nginx worker shows only its title in `ps`.
+    fn holder(
+        &self,
+        listener: &Listener,
+        processes: &mut BTreeMap<u32, Option<ProcessInfo>>,
+        stop: &CancellationToken,
+    ) -> PortHolder {
+        let info = listener.pid.and_then(|pid| {
+            if !processes.contains_key(&pid) && processes.len() >= MAX_PS {
+                return None;
+            }
+            let info = processes
+                .entry(pid)
+                .or_insert_with(|| self.process(pid, stop));
+            info.clone()
+        });
+        let app = info
+            .as_ref()
+            .and_then(|info| ports::known_app(&info.command))
+            .or_else(|| listener.process.as_deref().and_then(ports::known_app));
+        PortHolder {
+            port: listener.port,
+            address: listener.address.clone(),
+            process: listener.process.clone(),
+            pid: listener.pid,
+            user: info.as_ref().map(|info| info.user.clone()),
+            command: info.map(|info| info.command),
+            app: app.map(str::to_owned),
+        }
+    }
+
+    /// The user and program of `pid`, or `None` if `ps` cannot tell: the
+    /// process may have ended since netstat listed it.
+    fn process(&self, pid: u32, stop: &CancellationToken) -> Option<ProcessInfo> {
+        let pid_text = pid.to_string();
+        let args = ["-p", pid_text.as_str(), "-o", "user=,comm="].map(OsString::from);
+        match self.runner.run(PS, &args, CHECK_LIMIT, stop) {
+            Ok(output) if output.success() => {
+                ports::parse_ps(&String::from_utf8_lossy(&output.stdout))
+            }
+            Ok(_) => None,
+            Err(err) => {
+                tracing::debug!(pid, error = %err, "cannot run ps");
+                None
+            }
+        }
+    }
+
+    /// Sends `ops` to the helper behind the admin prompt and reads its
+    /// answer. With no operation nothing runs and no prompt shows.
+    fn apply(
+        &self,
+        ops: Vec<HelperOp>,
+        stop: &CancellationToken,
+    ) -> Result<Vec<OpResult>, ApiError> {
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let helper = self
+            .helper
+            .as_deref()
+            .filter(|helper| helper.is_absolute() && helper.is_file())
+            .ok_or_else(|| {
+                tracing::warn!(path = ?self.helper, "marsa-helper is not next to marsad");
+                failure("setup_helper_missing", "marsa-helper is not next to marsad")
+            })?;
+        let request = serde_json::to_string(&HelperRequest::new(ops)).map_err(|err| {
+            tracing::error!(error = %err, "cannot write the helper request");
+            failure("setup_helper_failed", "cannot write the helper request")
+        })?;
+        tracing::info!(helper = %helper.display(), "asking for admin rights to run marsa-helper");
+        let args = osascript_args(helper, &request);
+        read_answer(self.runner.run(OSASCRIPT, &args, PROMPT_LIMIT, stop))
+    }
+}
+
+impl Default for Setup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for Setup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Setup")
+            .field("platform", &self.platform)
+            .field("helper", &self.helper)
+            .field("running", &self.running.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+/// The right to run the one setup. Dropping it lets the next one start, also
+/// if the setup panics.
+struct Running(Arc<Setup>);
+
+impl Running {
+    /// `None` while another setup runs. One atomic swap, no lock.
+    fn take(setup: &Arc<Setup>) -> Option<Self> {
+        setup
+            .running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(Arc::clone(setup)))
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.running.store(false, Ordering::Release);
+    }
+}
+
+async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport>, HttpError> {
+    let platform = setup
+        .platform
+        .filter(|platform| matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64))
+        .ok_or_else(|| {
+            let message = "setup runs on macOS only for now";
+            HttpError::new(StatusCode::NOT_IMPLEMENTED, "setup_not_supported", message)
+        })?;
+    let running = Running::take(&setup).ok_or_else(|| {
+        let message = "another setup is running";
+        HttpError::new(StatusCode::CONFLICT, "setup_running", message)
+    })?;
+    tracing::info!("setup started");
+    let job = tokio::task::spawn_blocking(move || {
+        // Moved in, so the next setup waits for this one to end even if the
+        // client goes away.
+        let _running = running;
+        let caddy = daemon.caddy.input;
+        let report = setup.run(&daemon.data_dir, caddy, platform, &daemon.shutdown);
+        tracing::info!(
+            results = report.results.len(),
+            skipped = report.skipped.len(),
+            error = report.error.as_ref().map(|error| error.code.as_str()),
+            "setup finished"
+        );
+        // Here, not in the handler: the event goes out even if the client
+        // went away.
+        daemon.publish(Event::SetupFinished(report.clone()));
+        report
+    });
+    job.await.map(Json).map_err(|err| {
+        tracing::error!(error = %err, "the setup job failed");
+        let message = "the setup job failed";
+        HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+    })
+}
+
+/// `marsa-helper` next to the running program.
+fn helper_path() -> Option<PathBuf> {
+    match std::env::current_exe() {
+        Ok(exe) => exe
+            .parent()
+            .map(|dir| dir.join(format!("marsa-helper{EXE_SUFFIX}"))),
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot find the running program, so not marsa-helper");
+            None
+        }
+    }
+}
+
+/// The text of Caddy's root certificate at `path`, for `trust_install`.
+///
+/// # Errors
+///
+/// `ca_not_ready` if there is no file yet, and `ca_unreadable` if it is not
+/// a regular file, is larger than 16 KiB, is not UTF-8, or cannot be read.
+fn read_ca(path: &Path) -> Result<String, &'static str> {
+    let unreadable = |err: io::Error| {
+        tracing::warn!(path = %path.display(), error = %err, "cannot read the CA root certificate");
+        "ca_unreadable"
+    };
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Err("ca_not_ready"),
+        Err(err) => return Err(unreadable(err)),
+    };
+    // Checked before `open`: opening a FIFO waits for a writer.
+    if !meta.is_file() || meta.len() > MAX_CA_BYTES {
+        let reason = "not a regular file of at most 16 KiB";
+        return Err(unreadable(io::Error::new(
+            io::ErrorKind::InvalidData,
+            reason,
+        )));
+    }
+    let mut pem = String::new();
+    File::open(path)
+        .and_then(|file| file.take(MAX_CA_BYTES + 1).read_to_string(&mut pem))
+        .map_err(unreadable)?;
+    if pem.len() as u64 > MAX_CA_BYTES {
+        let reason = "larger than 16 KiB";
+        return Err(unreadable(io::Error::new(
+            io::ErrorKind::InvalidData,
+            reason,
+        )));
+    }
+    Ok(pem)
+}
+
+/// The `osascript` arguments of ADR 0012: the constant script, then the
+/// helper path and the request as `argv` items 1 and 2.
+fn osascript_args(helper: &Path, request: &str) -> Vec<OsString> {
+    let mut args = Vec::with_capacity(APPLESCRIPT.len() * 2 + 2);
+    for line in APPLESCRIPT {
+        args.push(OsString::from("-e"));
+        args.push(OsString::from(line));
+    }
+    args.push(helper.as_os_str().to_owned());
+    args.push(OsString::from(request));
+    args
+}
+
+/// The helper's results from what `osascript` gave back.
+///
+/// - Exit 0: stdout is the helper's JSON line; `do shell script` returns it.
+/// - Another exit: the helper exited with 1 (an operation failed) or 2 (it
+///   refused the request), and `do shell script` turned that into an
+///   AppleScript error whose text is the helper's stdout. `osascript` prints
+///   it on stderr as `<at>: execution error: <JSON> (<exit>)`, so the JSON
+///   is read from there.
+/// - A cancelled prompt is AppleScript error -128:
+///   `execution error: User canceled. (-128)`.
+///
+/// A message never quotes what the programs printed: only its size and the
+/// exit code go to the log.
+fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError> {
+    let output = match output {
+        Ok(output) => output,
+        Err(err) if err.kind() == io::ErrorKind::TimedOut => {
+            let message = "nobody answered the admin prompt within 5 minutes";
+            return Err(failure("setup_timed_out", message));
+        }
+        Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+            return Err(failure(
+                "setup_interrupted",
+                "the daemon stopped during setup",
+            ));
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot run osascript");
+            return Err(failure("setup_helper_failed", "cannot run osascript"));
+        }
+    };
+    let text = if output.success() {
+        &output.stdout
+    } else {
+        &output.stderr
+    };
+    let answer = if text.len() > MAX_ANSWER {
+        None
+    } else if output.success() {
+        parse_answer(text.trim_ascii())
+    } else {
+        braces(text).and_then(parse_answer)
+    };
+    let Some(answer) = answer else {
+        if !output.success() && cancelled(&output.stderr) {
+            tracing::info!("the admin prompt was cancelled");
+            return Err(failure("setup_cancelled", "the admin prompt was cancelled"));
+        }
+        tracing::warn!(
+            exit = ?output.code,
+            stdout_bytes = output.stdout.len(),
+            stderr_bytes = output.stderr.len(),
+            "marsa-helper gave no answer Marsa can read"
+        );
+        return Err(failure(
+            "setup_helper_failed",
+            "the helper's answer cannot be read",
+        ));
+    };
+    if let Some(refused) = answer.error {
+        let code = short_code(&refused.code);
+        tracing::warn!(code = %code, "marsa-helper refused the setup request");
+        let message = format!("the helper refused the request: {code}");
+        return Err(failure("setup_helper_rejected", message));
+    }
+    if answer.results.is_empty() {
+        tracing::warn!(exit = ?output.code, "marsa-helper answered with no result");
+        return Err(failure("setup_helper_failed", "the helper gave no result"));
+    }
+    Ok(answer.results)
+}
+
+/// The helper's answer in `json`, if it is one of this protocol version.
+fn parse_answer(json: &[u8]) -> Option<HelperResponse> {
+    let answer: HelperResponse = serde_json::from_slice(json).ok()?;
+    (answer.version == HELPER_PROTOCOL_VERSION).then_some(answer)
+}
+
+/// From the first `{` to the last `}`: the helper's JSON inside the error
+/// line of `osascript`, whose other parts hold no brace.
+fn braces(text: &[u8]) -> Option<&[u8]> {
+    let start = text.iter().position(|&byte| byte == b'{')?;
+    let end = text.iter().rposition(|&byte| byte == b'}')?;
+    text.get(start..=end)
+}
+
+/// AppleScript error -128. The number is the same in every language; the
+/// English text is checked too, in case the number is cut.
+fn cancelled(stderr: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stderr);
+    text.contains("(-128)") || text.contains("User canceled")
+}
+
+/// A code from the helper, safe for a log line and a message.
+fn short_code(code: &str) -> String {
+    code.chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
+        .take(64)
+        .collect()
+}
+
+fn skip(op: &str, code: &str) -> SetupSkip {
+    SetupSkip {
+        op: op.to_owned(),
+        code: code.to_owned(),
+    }
+}
+
+fn failure(code: &str, message: impl Into<String>) -> ApiError {
+    ApiError {
+        code: code.to_owned(),
+        message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::Mutex;
+
+    use axum::body::{Body, to_bytes};
+    use axum::extract::Request;
+    use axum::middleware::from_fn_with_state;
+    use marsa_core::platform::daemon_file::{Token, daemon_authority};
+    use marsa_core::types::{ErrorBody, OpStatus};
+    use serde_json::{Value, json};
+    use tempfile::TempDir;
+    use tower::ServiceExt as _;
+
+    use crate::daemon::auth::{AuthConfig, require_auth};
+
+    /// The daemon port in the `Host` header. No socket is bound for it.
+    const PORT: u16 = 51237;
+    /// Real `netstat -anv -p tcp` output with Herd's nginx on 80 and 443.
+    const NETSTAT_HERD: &str = include_str!("../../../../fixtures/ports/netstat-macos.txt");
+    /// Real `ps` output for an nginx worker: its title only.
+    const PS_WORKER: &str = include_str!("../../../../fixtures/ports/ps-nginx-worker.txt");
+    const DONE: &str = include_str!("../../../../fixtures/helper/responses/done.json");
+    const FAILED: &str = include_str!("../../../../fixtures/helper/responses/failed.json");
+    const REJECTED: &str = include_str!("../../../../fixtures/helper/responses/rejected.json");
+    const TEST_CA: &str = include_str!("../../../../fixtures/helper/test-ca.pem");
+    /// ADR 0012, written out here and not taken from `APPLESCRIPT`, so a
+    /// change to the constant fails this test.
+    const SCRIPT: &str = "do shell script (quoted form of item 1 of argv) & \" apply \" & \
+                          (quoted form of item 2 of argv) with administrator privileges";
+
+    /// One call the fake runner got.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Call {
+        program: &'static str,
+        args: Vec<String>,
+        limit: Duration,
+    }
+
+    type Answer = Box<dyn Fn(&'static str) -> io::Result<RunOutput> + Send + Sync>;
+
+    /// Records every call and answers by program. Runs nothing.
+    struct Fake {
+        calls: Mutex<Vec<Call>>,
+        answer: Answer,
+    }
+
+    impl Fake {
+        fn new(
+            answer: impl Fn(&'static str) -> io::Result<RunOutput> + Send + Sync + 'static,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                calls: Mutex::default(),
+                answer: Box::new(answer),
+            })
+        }
+
+        /// `netstat` prints `netstat`, `ps` prints the nginx worker, and
+        /// `osascript` gives `osascript()`.
+        fn scripted(
+            netstat: &'static str,
+            osascript: impl Fn() -> io::Result<RunOutput> + Send + Sync + 'static,
+        ) -> Arc<Self> {
+            Self::new(move |program| match program {
+                NETSTAT => ok(netstat),
+                PS => ok(PS_WORKER),
+                OSASCRIPT => osascript(),
+                other => panic!("unexpected program {other}"),
+            })
+        }
+
+        fn calls(&self) -> Vec<Call> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn programs(&self) -> Vec<&'static str> {
+            self.calls().iter().map(|call| call.program).collect()
+        }
+
+        /// The request the helper would have got, from the last `osascript`.
+        fn request(&self) -> HelperRequest {
+            let calls = self.calls();
+            let call = calls.iter().rfind(|call| call.program == OSASCRIPT);
+            let request = &call.expect("an osascript call").args[7];
+            serde_json::from_str(request).unwrap()
+        }
+    }
+
+    impl Runner for Fake {
+        fn run(
+            &self,
+            program: &'static str,
+            args: &[OsString],
+            limit: Duration,
+            _stop: &CancellationToken,
+        ) -> io::Result<RunOutput> {
+            let args = args.iter().map(|arg| arg.to_str().unwrap().to_owned());
+            self.calls.lock().unwrap().push(Call {
+                program,
+                args: args.collect(),
+                limit,
+            });
+            (self.answer)(program)
+        }
+    }
+
+    fn ok(stdout: &str) -> io::Result<RunOutput> {
+        Ok(RunOutput {
+            code: Some(0),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+
+    /// What `osascript` gives when the script failed: exit 1 and `stderr`.
+    fn script_error(stderr: &str) -> io::Result<RunOutput> {
+        Ok(RunOutput {
+            code: Some(1),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        })
+    }
+
+    /// The helper's answer as one line, as it prints it.
+    fn line(json: &str) -> String {
+        serde_json::from_str::<Value>(json).unwrap().to_string()
+    }
+
+    /// The real netstat output without Herd's nginx: nobody on 80 or 443.
+    fn netstat_free() -> &'static str {
+        let text: Vec<&str> = NETSTAT_HERD
+            .lines()
+            .filter(|line| !line.contains("nginx-arm64"))
+            .collect();
+        text.join("\n").leak()
+    }
+
+    /// One done result per op, as the helper prints it.
+    fn all_done(ops: &[&str]) -> String {
+        let results: Vec<Value> = ops
+            .iter()
+            .map(|op| json!({ "op": op, "status": "done" }))
+            .collect();
+        json!({ "version": 1, "results": results }).to_string()
+    }
+
+    fn results(json: &str) -> Vec<OpResult> {
+        serde_json::from_str::<HelperResponse>(json)
+            .unwrap()
+            .results
+    }
+
+    /// A data folder, with Caddy's CA root if `ca`, and a `marsa-helper`
+    /// file in `bin/`.
+    struct Dir {
+        dir: TempDir,
+    }
+
+    impl Dir {
+        fn new(ca: bool) -> Self {
+            let dir = TempDir::new().unwrap();
+            if ca {
+                let root = CaddyPaths::in_dir(dir.path()).ca_root();
+                fs::create_dir_all(root.parent().unwrap()).unwrap();
+                fs::write(&root, TEST_CA).unwrap();
+            }
+            let helper = dir.path().join("bin").join("marsa-helper");
+            fs::create_dir_all(helper.parent().unwrap()).unwrap();
+            fs::write(&helper, "").unwrap();
+            Self { dir }
+        }
+
+        fn helper(&self) -> PathBuf {
+            self.dir.path().join("bin").join("marsa-helper")
+        }
+
+        fn setup(&self, fake: &Arc<Fake>) -> Setup {
+            Setup::with(
+                fake.clone(),
+                Some(Platform::DarwinArm64),
+                Some(self.helper()),
+            )
+        }
+
+        /// [`Setup::run`] with the default Caddy ports.
+        fn run(&self, fake: &Arc<Fake>) -> SetupReport {
+            let caddy = CaddyInput::default();
+            let stop = CancellationToken::new();
+            self.setup(fake)
+                .run(self.dir.path(), caddy, Platform::DarwinArm64, &stop)
+        }
+    }
+
+    fn trust() -> HelperOp {
+        HelperOp::TrustInstall {
+            pem: TEST_CA.to_owned(),
+        }
+    }
+
+    fn resolver() -> HelperOp {
+        HelperOp::ResolverInstall { port: 18053 }
+    }
+
+    fn pf(http_port: u16, https_port: u16) -> HelperOp {
+        HelperOp::PfInstall {
+            http_port,
+            https_port,
+        }
+    }
+
+    fn error_code(report: &SetupReport) -> Option<&str> {
+        report.error.as_ref().map(|error| error.code.as_str())
+    }
+
+    /// The route with `setup` behind the real auth layer, on `daemon`.
+    struct App {
+        router: Router,
+        bearer: String,
+    }
+
+    impl App {
+        fn new(daemon: Arc<Daemon>, setup: Setup) -> Self {
+            let token = Token::generate().unwrap();
+            let bearer = token.bearer_header();
+            let auth = AuthConfig::new(Arc::new(token), PORT);
+            let router = routes_with(setup)
+                .with_state(daemon)
+                .layer(from_fn_with_state(auth, require_auth));
+            Self { router, bearer }
+        }
+
+        async fn post(&self) -> (StatusCode, Value) {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/v1/setup")
+                .header("host", daemon_authority(PORT))
+                .header("authorization", &self.bearer)
+                .body(Body::empty())
+                .unwrap();
+            let response = self.router.clone().oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+
+        async fn refused(&self) -> (StatusCode, String) {
+            let (status, json) = self.post().await;
+            let error: ErrorBody = serde_json::from_value(json).unwrap();
+            (status, error.error.code)
+        }
+    }
+
+    #[test]
+    fn the_osascript_arguments_are_pinned() {
+        let dir = Dir::new(false);
+        let fake = Fake::scripted(netstat_free(), || ok(DONE));
+        dir.run(&fake);
+
+        let calls = fake.calls();
+        let osascript = calls.last().unwrap();
+        assert_eq!(osascript.program, "/usr/bin/osascript");
+        let helper = dir.helper().to_str().unwrap().to_owned();
+        let request = osascript.args[7].clone();
+        assert_eq!(
+            osascript.args,
+            [
+                "-e",
+                "on run argv",
+                "-e",
+                SCRIPT,
+                "-e",
+                "end run",
+                helper.as_str(),
+                request.as_str(),
+            ]
+        );
+        assert!(Path::new(&helper).is_absolute());
+        assert_eq!(osascript.limit, Duration::from_secs(300));
+        assert_eq!(
+            serde_json::from_str::<Value>(&request).unwrap(),
+            json!({ "version": 1, "ops": [
+                { "op": "resolver_install", "port": 18053 },
+                { "op": "pf_install", "http_port": 18080, "https_port": 18443 },
+            ] })
+        );
+    }
+
+    #[test]
+    fn herd_on_80_and_443_means_no_pf_install() {
+        let dir = Dir::new(true);
+        let answer = all_done(&["trust_install", "resolver_install"]);
+        let fake = Fake::scripted(NETSTAT_HERD, move || ok(&answer));
+        let report = dir.run(&fake);
+
+        let nginx = |port| PortHolder {
+            port,
+            address: "127.0.0.1".into(),
+            process: Some("nginx-arm64".into()),
+            pid: Some(15464),
+            user: Some("dev".into()),
+            // The worker's title gives no hint; netstat's name says Herd.
+            command: Some("nginx: worker process".into()),
+            app: Some("Herd".into()),
+        };
+        assert_eq!(report.port_holders, [nginx(80), nginx(443)]);
+        assert_eq!(report.skipped, [skip("pf_install", "redirect_port_held")]);
+        assert_eq!(fake.request().ops, [trust(), resolver()]);
+        assert_eq!(report.results.len(), 2);
+        assert_eq!(report.error, None);
+
+        // `ps` once for the one PID that holds both ports.
+        let calls = fake.calls();
+        assert_eq!(fake.programs(), [NETSTAT, PS, OSASCRIPT]);
+        assert_eq!(calls[0].args, ["-anv", "-p", "tcp"]);
+        assert_eq!(calls[1].args, ["-p", "15464", "-o", "user=,comm="]);
+        assert_eq!(calls[0].limit, Duration::from_secs(10));
+        assert_eq!(calls[1].limit, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn no_ca_means_no_trust_install() {
+        let dir = Dir::new(false);
+        let fake = Fake::scripted(netstat_free(), || ok(DONE));
+        let report = dir.run(&fake);
+
+        assert_eq!(report.skipped, [skip("trust_install", "ca_not_ready")]);
+        assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)]);
+        assert_eq!(report.results, results(DONE));
+        assert!(report.port_holders.is_empty());
+        assert_eq!(report.error, None);
+    }
+
+    #[test]
+    fn a_ca_that_cannot_be_used_is_ca_unreadable() {
+        let dir = Dir::new(false);
+        let root = CaddyPaths::in_dir(dir.dir.path()).ca_root();
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(read_ca(&root), Err("ca_unreadable"));
+        fs::remove_dir(&root).unwrap();
+        fs::write(&root, "x".repeat(16 * 1024 + 1)).unwrap();
+        assert_eq!(read_ca(&root), Err("ca_unreadable"));
+        fs::write(&root, [0xff, 0xfe]).unwrap();
+        assert_eq!(read_ca(&root), Err("ca_unreadable"));
+        fs::write(&root, TEST_CA).unwrap();
+        assert_eq!(read_ca(&root).as_deref(), Ok(TEST_CA));
+    }
+
+    #[test]
+    fn a_cancelled_prompt_is_setup_cancelled() {
+        for stderr in [
+            "0:180: execution error: User canceled. (-128)\n",
+            // Another language: the number is the same.
+            "0:180: execution error: Vom Benutzer abgebrochen. (-128)\r",
+        ] {
+            let dir = Dir::new(true);
+            let fake = Fake::scripted(netstat_free(), move || script_error(stderr));
+            let report = dir.run(&fake);
+            assert_eq!(error_code(&report), Some("setup_cancelled"), "{stderr}");
+            assert!(report.results.is_empty());
+            assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
+        }
+    }
+
+    #[test]
+    fn an_answer_that_cannot_be_read_is_setup_helper_failed() {
+        let cases: Vec<(&str, io::Result<RunOutput>)> = vec![
+            ("garbage", ok("garbage from the helper")),
+            ("empty", ok("")),
+            ("newer protocol", ok(r#"{"version":2,"results":[]}"#)),
+            ("no result", ok(r#"{"version":1}"#)),
+            (
+                "too large",
+                ok(&format!("{}{}", " ".repeat(MAX_ANSWER), DONE)),
+            ),
+            (
+                "shell error",
+                script_error("0:94: execution error: sh: garbage: Permission denied (126)"),
+            ),
+            (
+                "osascript missing",
+                Err(io::Error::from(io::ErrorKind::NotFound)),
+            ),
+        ];
+        for (name, output) in cases {
+            let answer = read_answer(output);
+            let error = answer.expect_err(name);
+            assert_eq!(error.code, "setup_helper_failed", "{name}");
+            // Nothing the programs printed is copied into the message.
+            assert!(
+                !error.message.contains("garbage"),
+                "{name}: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_op_comes_back_through_the_script_error() {
+        // The helper exits 1 when an op fails, so `do shell script` raises
+        // an error whose text is the helper's JSON line.
+        let stderr = format!("7:83: execution error: {} (1)\n", line(FAILED));
+        assert_eq!(read_answer(script_error(&stderr)), Ok(results(FAILED)));
+        let failed = &results(FAILED)[1];
+        assert_eq!(failed.status, OpStatus::Failed);
+        assert_eq!(failed.code.as_deref(), Some("op_not_implemented"));
+    }
+
+    #[test]
+    fn a_refused_request_is_setup_helper_rejected() {
+        let stderr = format!("7:83: execution error: {} (2)\n", line(REJECTED));
+        let error = read_answer(script_error(&stderr)).unwrap_err();
+        assert_eq!(error.code, "setup_helper_rejected");
+        assert_eq!(
+            error.message,
+            "the helper refused the request: request_invalid"
+        );
+    }
+
+    #[test]
+    fn a_prompt_left_open_or_a_stopping_daemon_ends_setup() {
+        let timed_out = read_answer(Err(io::Error::from(io::ErrorKind::TimedOut)));
+        assert_eq!(timed_out.unwrap_err().code, "setup_timed_out");
+        let stopped = read_answer(Err(io::Error::from(io::ErrorKind::Interrupted)));
+        assert_eq!(stopped.unwrap_err().code, "setup_interrupted");
+    }
+
+    #[test]
+    fn no_op_means_no_prompt() {
+        let dir = Dir::new(false);
+        let fake = Fake::new(|program| panic!("{program} ran"));
+        let setup = dir.setup(&fake);
+        assert_eq!(
+            setup.apply(Vec::new(), &CancellationToken::new()),
+            Ok(Vec::new())
+        );
+        assert!(fake.calls().is_empty());
+    }
+
+    #[test]
+    fn a_missing_helper_is_setup_helper_missing_and_no_prompt() {
+        let dir = Dir::new(true);
+        let fake = Fake::scripted(netstat_free(), || panic!("osascript ran"));
+        let stop = CancellationToken::new();
+        let missing = dir.dir.path().join("nowhere").join("marsa-helper");
+        for helper in [None, Some(missing), Some(PathBuf::from("marsa-helper"))] {
+            let setup = Setup::with(fake.clone(), Some(Platform::DarwinArm64), helper);
+            let report = setup.run(
+                dir.dir.path(),
+                CaddyInput::default(),
+                Platform::DarwinArm64,
+                &stop,
+            );
+            assert_eq!(error_code(&report), Some("setup_helper_missing"));
+            assert!(report.results.is_empty());
+        }
+        assert!(!fake.programs().contains(&OSASCRIPT));
+    }
+
+    #[test]
+    fn netstat_that_fails_or_is_not_understood_means_no_pf_install() {
+        let outputs: [fn() -> io::Result<RunOutput>; 3] = [
+            || Err(io::Error::from(io::ErrorKind::NotFound)),
+            || script_error("netstat: sysctl: Operation not permitted"),
+            || ok("Active Internet connections\nsomething new\n"),
+        ];
+        for netstat in outputs {
+            let dir = Dir::new(true);
+            let answer = all_done(&["trust_install", "resolver_install"]);
+            let fake = Fake::new(move |program| match program {
+                NETSTAT => netstat(),
+                OSASCRIPT => ok(&answer),
+                other => panic!("unexpected program {other}"),
+            });
+            let report = dir.run(&fake);
+            assert_eq!(report.skipped, [skip("pf_install", "ports_not_checked")]);
+            assert_eq!(fake.request().ops, [trust(), resolver()]);
+            assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
+            assert_eq!(report.error, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_whole_setup_over_http() {
+        let dir = Dir::new(true);
+        let answer = all_done(&["trust_install", "resolver_install", "pf_install"]);
+        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+        let mut daemon = Daemon::new(dir.dir.path().to_path_buf());
+        // The ports come from the daemon's Caddy settings.
+        daemon.caddy.input.http_port = 28080;
+        daemon.caddy.input.https_port = 28443;
+        let daemon = Arc::new(daemon);
+        let mut events = daemon.events.subscribe();
+        let app = App::new(daemon.clone(), dir.setup(&fake));
+
+        let (status, json) = app.post().await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let report: SetupReport = serde_json::from_value(json).unwrap();
+        let done = |op: &str| OpResult {
+            op: op.into(),
+            status: OpStatus::Done,
+            code: None,
+            message: None,
+        };
+        let want = SetupReport {
+            results: vec![
+                done("trust_install"),
+                done("resolver_install"),
+                done("pf_install"),
+            ],
+            ..SetupReport::default()
+        };
+        assert_eq!(report, want);
+        assert_eq!(
+            fake.request(),
+            HelperRequest::new(vec![trust(), resolver(), pf(28080, 28443)])
+        );
+        assert_eq!(events.try_recv().unwrap(), Event::SetupFinished(want));
+    }
+
+    #[tokio::test]
+    async fn a_second_setup_while_one_runs_gets_409() {
+        let dir = Dir::new(false);
+        let (started, mut prompt_shown) = tokio::sync::mpsc::unbounded_channel();
+        let (answer, answers) = mpsc::channel::<()>();
+        let answers = Mutex::new(answers);
+        let fake = Fake::scripted(netstat_free(), move || {
+            started.send(()).unwrap();
+            answers.lock().unwrap().recv().unwrap();
+            ok(DONE)
+        });
+        let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+        let app = Arc::new(App::new(daemon, dir.setup(&fake)));
+
+        let first = tokio::spawn({
+            let app = app.clone();
+            async move { app.post().await }
+        });
+        prompt_shown.recv().await.unwrap();
+        let busy = (StatusCode::CONFLICT, "setup_running".to_owned());
+        assert_eq!(app.refused().await, busy);
+        answer.send(()).unwrap();
+        assert_eq!(first.await.unwrap().0, StatusCode::OK);
+
+        // Free again once the first one ended.
+        answer.send(()).unwrap();
+        assert_eq!(app.post().await.0, StatusCode::OK);
+        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, NETSTAT, OSASCRIPT]);
+    }
+
+    #[tokio::test]
+    async fn linux_and_windows_get_setup_not_supported() {
+        let dir = Dir::new(true);
+        let fake = Fake::new(|program| panic!("{program} ran"));
+        for platform in [Some(Platform::LinuxX64), Some(Platform::WindowsX64), None] {
+            let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+            let setup = Setup::with(fake.clone(), platform, Some(dir.helper()));
+            let app = App::new(daemon, setup);
+            let refused = (
+                StatusCode::NOT_IMPLEMENTED,
+                "setup_not_supported".to_owned(),
+            );
+            assert_eq!(app.refused().await, refused, "{platform:?}");
+        }
+        assert!(fake.calls().is_empty());
+    }
+}

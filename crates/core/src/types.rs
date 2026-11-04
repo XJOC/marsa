@@ -14,6 +14,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// Defined once, in `helper`, next to the request they answer.
+pub use crate::helper::{OpResult, OpStatus};
 use crate::runtimes::Runtime;
 /// Defined once, in `sites`, where the daemon builds them.
 pub use crate::sites::{Site, SiteKind};
@@ -145,6 +147,8 @@ pub enum Event {
     /// The whole new site list: after each park, link, or patch, and after a
     /// rebuild that found a different list.
     SitesChanged(SiteList),
+    /// The end of a `POST /v1/setup`, with the same report as its answer.
+    SetupFinished(SetupReport),
     /// The daemon is stopping; the stream ends after this event.
     ShuttingDown,
 }
@@ -390,6 +394,68 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer).map(Some)
+}
+
+/// The answer to `POST /v1/setup`, and the data of `setup_finished` (task
+/// M4-13).
+///
+/// Setup sends one request to `marsa-helper`, behind one admin prompt. An
+/// operation it cannot do safely is left out of that request and listed in
+/// `skipped`; the others still run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupReport {
+    /// The helper's result for each operation it ran, in order. Empty if the
+    /// helper did not run: no operation was left, or `error` says why.
+    #[serde(default)]
+    pub results: Vec<OpResult>,
+    /// The operations left out of the request, and why.
+    #[serde(default)]
+    pub skipped: Vec<SetupSkip>,
+    /// The programs that listen on port 80 or 443 and take loopback
+    /// connections. Any of them means no `pf_install`: the redirect would
+    /// take their traffic without a word (ADR 0008, "Herd conflict").
+    #[serde(default)]
+    pub port_holders: Vec<PortHolder>,
+    /// Why the helper did not run, or why its answer cannot be used:
+    /// `setup_cancelled`, `setup_timed_out`, `setup_interrupted`,
+    /// `setup_helper_missing`, `setup_helper_failed`, or
+    /// `setup_helper_rejected`. `None` if the helper answered, or was not
+    /// needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ApiError>,
+}
+
+/// An operation setup left out of the helper request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupSkip {
+    /// The helper operation, for example `pf_install`.
+    pub op: String,
+    /// Why: `redirect_port_held` and `ports_not_checked` for `pf_install`,
+    /// `ca_not_ready` and `ca_unreadable` for `trust_install`.
+    pub code: String,
+}
+
+/// A program that listens on port 80 or 443, from `netstat` and `ps`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortHolder {
+    pub port: u16,
+    /// As netstat prints it: `127.0.0.1`, `::1`, or `*` for every address.
+    pub address: String,
+    /// The process name netstat gives, at most 16 characters
+    /// (`nginx-arm64`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// The user of the process, from `ps`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// The program from `ps`: a path, or the title the process set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// The app it seems to belong to (`Herd`, `Docker`), a hint only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 #[cfg(test)]
@@ -776,5 +842,59 @@ mod tests {
         for bad in [json!({ "proxy": 0 }), json!({ "proxy": 70000 })] {
             assert!(serde_json::from_value::<SitePatch>(bad).is_err());
         }
+    }
+
+    #[test]
+    fn a_setup_report_in_a_setup_finished_event() {
+        let report = SetupReport {
+            results: vec![OpResult {
+                op: "resolver_install".into(),
+                status: OpStatus::Done,
+                code: None,
+                message: None,
+            }],
+            skipped: vec![SetupSkip {
+                op: "pf_install".into(),
+                code: "redirect_port_held".into(),
+            }],
+            port_holders: vec![PortHolder {
+                port: 80,
+                address: "127.0.0.1".into(),
+                process: Some("nginx-arm64".into()),
+                pid: Some(15464),
+                user: None,
+                command: None,
+                app: Some("Herd".into()),
+            }],
+            error: None,
+        };
+        round_trip(
+            &Event::SetupFinished(report),
+            json!({
+                "type": "setup_finished",
+                "data": {
+                    "results": [{ "op": "resolver_install", "status": "done" }],
+                    "skipped": [{ "op": "pf_install", "code": "redirect_port_held" }],
+                    "port_holders": [{
+                        "port": 80, "address": "127.0.0.1", "process": "nginx-arm64",
+                        "pid": 15464, "app": "Herd",
+                    }],
+                },
+            }),
+        );
+        let failed = SetupReport {
+            error: Some(ApiError {
+                code: "setup_cancelled".into(),
+                message: "the admin prompt was cancelled".into(),
+            }),
+            ..SetupReport::default()
+        };
+        round_trip(
+            &failed,
+            json!({
+                "results": [], "skipped": [], "port_holders": [],
+                "error": { "code": "setup_cancelled", "message": "the admin prompt was cancelled" },
+            }),
+        );
     }
 }

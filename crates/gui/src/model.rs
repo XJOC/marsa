@@ -130,6 +130,8 @@ pub fn apply(model: &mut Model, event: Event) {
         Event::Install(_) => {}
         // No sites view yet (task M4-15).
         Event::SitesChanged(_) => {}
+        // No setup button yet (task M4-13 adds the route and the CLI only).
+        Event::SetupFinished(_) => {}
         Event::ShuttingDown => model.disconnect(Connection::ShuttingDown),
     }
 }

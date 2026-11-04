@@ -330,7 +330,7 @@ fn shown(path: &Path) -> String {
 
 /// Text from the daemon or a folder name, safe to print: no control
 /// characters, which could move the cursor.
-fn printable(text: &str) -> String {
+pub(super) fn printable(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
