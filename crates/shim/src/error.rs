@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use marsa_core::config::{ConfigError, ConfigPaths};
 use marsa_core::resolver::{ResolveError, Tool};
-use marsa_core::runtimes::{Runtime, RuntimesDir, RuntimesError};
+use marsa_core::runtimes::{Runtime, RuntimesError};
 
 /// Errors from `resolver`, `config`, and `runtimes` are wrapped as they are,
 /// and [`ShimError::code`] gives their own code.
@@ -101,24 +101,26 @@ impl ShimError {
     /// A next step, only for errors that have a clear one. All hint texts live
     /// here (AGENTS.md section 9). `data_dir` is `None` if it is unknown.
     pub fn hint(&self, data_dir: Option<&Path>) -> Option<String> {
-        let runtimes = |tool: Tool| {
-            let program = Runtime::from(tool).dir_name();
-            let dir = data_dir.map(|d| RuntimesDir::in_dir(d).runtime_dir(tool.into()));
-            let dir = dir.map_or("runtimes".into(), |d| d.display().to_string());
-            format!("put {tool} builds in {dir}/<version>/bin/{program}")
-        };
+        let program = |tool: &Tool| Runtime::from(*tool).dir_name();
         match self {
             ShimError::UnknownName { .. } => Some(
                 "marsa-shim runs through links named php, node, npm, npx, or composer".to_owned(),
             ),
-            ShimError::ComposerNotInstalled { dir } => Some(format!(
-                "put composer.phar in {}/<version>/composer.phar",
-                dir.display()
-            )),
-            ShimError::Resolve(ResolveError::NotInstalled { tool, .. })
-            | ShimError::Resolve(ResolveError::NoMatchingVersion { tool, .. }) => {
-                Some(runtimes(*tool))
+            ShimError::ComposerNotInstalled { .. } => {
+                Some("run \"marsa install composer\"".to_owned())
             }
+            ShimError::Resolve(ResolveError::NotInstalled {
+                tool, requested, ..
+            }) => Some(format!(
+                "run \"marsa install {} {requested}\"",
+                program(tool)
+            )),
+            ShimError::Resolve(ResolveError::NoMatchingVersion {
+                tool, constraint, ..
+            }) => Some(format!(
+                "install a {tool} version that satisfies {constraint}: \"marsa install {} <version>\"",
+                program(tool)
+            )),
             ShimError::Resolve(ResolveError::NoVersion { tool }) => {
                 let (file, table) = match tool {
                     Tool::Php => (".php-version", "php"),
@@ -219,14 +221,19 @@ mod tests {
             requested: "8.2".into(),
             origin: Source::GlobalDefault,
         });
-        let expected = format!(
-            "put PHP builds in {}/<version>/bin/php",
-            data.join("runtimes").join("php").display()
-        );
-        assert_eq!(not_installed.hint(Some(data)), Some(expected));
         assert_eq!(
-            not_installed.hint(None).as_deref(),
-            Some("put PHP builds in runtimes/<version>/bin/php")
+            not_installed.hint(Some(data)).as_deref(),
+            Some("run \"marsa install php 8.2\"")
+        );
+
+        let no_match = ShimError::from(ResolveError::NoMatchingVersion {
+            tool: Tool::Node,
+            constraint: ">=22".into(),
+            origin: Source::GlobalDefault,
+        });
+        assert_eq!(
+            no_match.hint(None).as_deref(),
+            Some("install a Node version that satisfies >=22: \"marsa install node <version>\"")
         );
 
         let no_version = ShimError::from(ResolveError::NoVersion { tool: Tool::Node });
@@ -243,11 +250,10 @@ mod tests {
         let composer = ShimError::ComposerNotInstalled {
             dir: data.join("runtimes").join("composer"),
         };
-        let expected = format!(
-            "put composer.phar in {}/<version>/composer.phar",
-            data.join("runtimes").join("composer").display()
+        assert_eq!(
+            composer.hint(Some(data)).as_deref(),
+            Some("run \"marsa install composer\"")
         );
-        assert_eq!(composer.hint(Some(data)), Some(expected));
         assert_eq!(ShimError::Loop { depth: 16 }.hint(None), None);
     }
 }

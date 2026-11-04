@@ -187,7 +187,7 @@ fn a_missing_version_exits_127() {
     let err = stderr(&output);
     assert!(err.starts_with("marsa: PHP 8.2 is not installed"), "{err}");
     assert!(
-        err.contains("[not_installed]\nmarsa: hint: put PHP builds in "),
+        err.contains("[not_installed]\nmarsa: hint: run \"marsa install php 8.2\"\n"),
         "{err}"
     );
     assert!(output.stdout.is_empty());
