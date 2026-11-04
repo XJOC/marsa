@@ -28,8 +28,10 @@ pub const TRUST_CERT_INVALID: &str = "trust_cert_invalid";
 pub const TRUST_READ: &str = "trust_read";
 /// Writing [`CA_PATH`] failed.
 pub const TRUST_WRITE: &str = "trust_write";
-/// `security add-trusted-cert` failed or timed out. The certificate and the
-/// file were removed again, so a retry starts clean.
+/// `security add-trusted-cert` failed or timed out. The helper then ran the
+/// steps of `trust_remove`. If they failed too, the file stays so a later
+/// `trust_remove` can finish, and until then `trust_install` with the same
+/// certificate answers `unchanged`: run `trust_remove` before a retry.
 pub const TRUST_ADD_FAILED: &str = "trust_add_failed";
 /// `security` could not remove the trust or the certificate. The file stays,
 /// so a retry still knows the hash.
@@ -48,7 +50,12 @@ const SECURITY: &str = "/usr/bin/security";
 const KEYCHAIN: &str = "/Library/Keychains/System.keychain";
 /// What `security delete-certificate` prints, with exit code 1, when no
 /// certificate has the hash.
-const NOT_FOUND: &[u8] = b"Unable to delete certificate matching";
+const NO_CERTIFICATE: &[u8] = b"Unable to delete certificate matching";
+/// Part of the text of `errSecItemNotFound` ("The specified item could not
+/// be found in the keychain."), which `security remove-trusted-cert` prints
+/// when the certificate has no admin trust settings. Unverified here: running
+/// it would change the trust settings. The owner's manual check confirms it.
+const NO_TRUST: &[u8] = b"could not be found";
 
 const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
 const END: &str = "-----END CERTIFICATE-----";
@@ -101,12 +108,11 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
     if exited_with(&added, 0) {
         return result(INSTALL, Outcome::Done);
     }
-    // `add-trusted-cert` adds the certificate before it asks for the trust, so
-    // a failure can leave it in the keychain. Without the file a retry runs
-    // `add-trusted-cert` again instead of answering `unchanged`. Best effort:
-    // the failed add is the error to report.
-    let _ = system.run(SECURITY, &["delete-certificate", "-Z", &hash, KEYCHAIN]);
-    let _ = system.remove(Path::new(CA_PATH));
+    // `add-trusted-cert` can stop half way: after it added the certificate,
+    // or even the trust, and then failed or timed out. The steps of
+    // `trust_remove` undo that, and they delete the file only if every step
+    // worked, so the hash is never lost. The failed add is the error either way.
+    let _ = remove_steps(INSTALL, &hash, system);
     command_failed(INSTALL, TRUST_ADD_FAILED, "add-trusted-cert", &added)
 }
 
@@ -150,17 +156,14 @@ fn stored_hash(op: &'static str, system: &impl System) -> Result<Option<String>,
 /// Removes the trust and the certificate whose SHA-256 is `hash`, then
 /// [`CA_PATH`]. After a failure the file stays, so a retry still has the hash.
 fn remove_steps(op: &'static str, hash: &str, system: &impl System) -> Result<(), OpResult> {
-    // A non-zero exit is fine: it also means that the certificate has no
-    // trust to remove, for example after the user removed it by hand. Not
-    // running at all, or a timeout, is not: the trust may still be there.
-    let untrusted = system.run(SECURITY, &UNTRUST);
-    if untrusted.is_err() {
-        let failed = command_failed(op, TRUST_REMOVE_FAILED, "remove-trusted-cert", &untrusted);
+    let untrust = system.run(SECURITY, &UNTRUST);
+    if !is_untrusted(&untrust) {
+        let failed = command_failed(op, TRUST_REMOVE_FAILED, "remove-trusted-cert", &untrust);
         return Err(failed);
     }
-    let deleted = system.run(SECURITY, &["delete-certificate", "-Z", hash, KEYCHAIN]);
-    if !exited_with(&deleted, 0) && !is_gone(&deleted) {
-        let failed = command_failed(op, TRUST_REMOVE_FAILED, "delete-certificate", &deleted);
+    let delete = system.run(SECURITY, &["delete-certificate", "-Z", hash, KEYCHAIN]);
+    if !is_deleted(&delete) {
+        let failed = command_failed(op, TRUST_REMOVE_FAILED, "delete-certificate", &delete);
         return Err(failed);
     }
     if let Err(err) = system.remove(Path::new(CA_PATH)) {
@@ -174,11 +177,32 @@ fn exited_with(result: &io::Result<RunOutput>, code: i32) -> bool {
     matches!(result, Ok(output) if output.code == Some(code))
 }
 
-/// No certificate in the keychain has the hash, so it is already gone. Both
-/// the exit code and the message must match; anything else is a failure,
-/// which keeps the file and is the safe side.
-fn is_gone(result: &io::Result<RunOutput>) -> bool {
-    matches!(result, Ok(output) if output.code == Some(1) && output.stderr.starts_with(NOT_FOUND))
+/// `remove-trusted-cert` removed the trust, or there was none to remove
+/// (any non-zero exit with [`NO_TRUST`]), for example after the user removed
+/// it by hand. Anything else, such as a dialog that was refused or cancelled
+/// (since Big Sur) or a timeout, means the trust may still be there.
+fn is_untrusted(result: &io::Result<RunOutput>) -> bool {
+    match result {
+        Ok(output) if output.code == Some(0) => true,
+        Ok(output) => output.code.is_some() && mentions(&output.stderr, NO_TRUST),
+        Err(_) => false,
+    }
+}
+
+/// `delete-certificate` deleted the certificate, or no certificate has the
+/// hash (exit code 1 with [`NO_CERTIFICATE`]): it is already gone. Anything
+/// else is a failure, which keeps the file and is the safe side.
+fn is_deleted(result: &io::Result<RunOutput>) -> bool {
+    let gone =
+        |output: &RunOutput| output.code == Some(1) && mentions(&output.stderr, NO_CERTIFICATE);
+    matches!(result, Ok(output) if output.code == Some(0) || gone(output))
+}
+
+/// `text` appears in `stderr`, ignoring ASCII case.
+fn mentions(stderr: &[u8], text: &[u8]) -> bool {
+    stderr
+        .windows(text.len())
+        .any(|window| window.eq_ignore_ascii_case(text))
 }
 
 /// The output of `security` is not in the message: the exit code is enough
@@ -217,7 +241,7 @@ fn parse_pem(text: &str) -> Result<Vec<u8>, &'static str> {
         .and_then(|rest| rest.strip_suffix(END))
         .ok_or("is not one CERTIFICATE block with only whitespace around it")?;
     let der = decode(body).ok_or("has a body that is not strict base64")?;
-    if !is_one_sequence(&der) {
+    if !is_certificate(&der) {
         return Err("is not one DER certificate");
     }
     Ok(der)
@@ -266,19 +290,39 @@ fn sextet(c: u8) -> Option<u8> {
     }
 }
 
-/// One ASN.1 SEQUENCE (tag `0x30`, which starts every X.509 certificate) with
-/// a minimal DER length that covers every other byte, so nothing follows it.
-/// A 16 KiB PEM never needs more than two length bytes.
-fn is_one_sequence(der: &[u8]) -> bool {
-    let (header, len) = match der {
-        [0x30, len, ..] if *len < 0x80 => (2, usize::from(*len)),
-        [0x30, 0x81, len, ..] if *len >= 0x80 => (3, usize::from(*len)),
-        [0x30, 0x82, high, low, ..] if *high > 0 => {
-            (4, usize::from(u16::from_be_bytes([*high, *low])))
-        }
-        _ => return false,
+/// The shape of an X.509 certificate (RFC 5280): one SEQUENCE, with nothing
+/// after it, that holds exactly a SEQUENCE (the TBSCertificate), a SEQUENCE
+/// (the signature algorithm), and a BIT STRING (the signature). Keys have
+/// other shapes, so a key under a CERTIFICATE label fails here: PKCS#1,
+/// PKCS#8, and SEC1 keys start with an INTEGER, and an encrypted PKCS#8 key
+/// holds a SEQUENCE and an OCTET STRING.
+fn is_certificate(der: &[u8]) -> bool {
+    let Some((0x30, header, total)) = element(der) else {
+        return false;
     };
-    der.len() == header + len
+    let mut rest = &der[header..total];
+    let mut tags = Vec::new();
+    while let Some((tag, _, size)) = element(rest) {
+        tags.push(tag);
+        rest = &rest[size..];
+    }
+    total == der.len() && rest.is_empty() && tags == [0x30, 0x30, 0x03]
+}
+
+/// The tag, the header length, and the total length of the DER element at
+/// the start of `der`, if its length is in minimal form and fits in `der`.
+/// A 16 KiB PEM never needs more than two length bytes.
+fn element(der: &[u8]) -> Option<(u8, usize, usize)> {
+    let (tag, header, len) = match *der {
+        [tag, len, ..] if len < 0x80 => (tag, 2, usize::from(len)),
+        [tag, 0x81, len, ..] if len >= 0x80 => (tag, 3, usize::from(len)),
+        [tag, 0x82, high, low, ..] if high > 0 => {
+            (tag, 4, usize::from(u16::from_be_bytes([high, low])))
+        }
+        _ => return None,
+    };
+    let total = header + len;
+    (total <= der.len()).then_some((tag, header, total))
 }
 
 /// Upper case, as `security` prints it.
@@ -347,6 +391,12 @@ mod tests {
     /// The mode of a file a test starts with. Marsa never writes it, so the
     /// mode shows whether an op rewrote the file.
     const OLD_MODE: u32 = 0o600;
+    /// What `remove-trusted-cert` prints when there is no trust to remove.
+    const NOT_FOUND: &[u8] = b"SecTrustSettingsRemoveTrustSettings: \
+        The specified item could not be found in the keychain.";
+    /// What it prints when the trust change is refused.
+    const REFUSED: &[u8] = b"SecTrustSettingsRemoveTrustSettings: \
+        The authorization was denied since no user interaction was possible.";
 
     fn exit(code: i32, stderr: &[u8]) -> RunOutput {
         RunOutput {
@@ -513,9 +563,12 @@ mod tests {
         format!("{BEGIN}\n{base64}\n{END}\n")
     }
 
-    fn two_ders_in_one_body() -> String {
-        let der = parse_pem(TEST_CA).unwrap();
-        String::from_utf8(to_pem(&[der.clone(), der].concat())).unwrap()
+    fn der_pem(der: &[u8]) -> String {
+        String::from_utf8(to_pem(der)).unwrap()
+    }
+
+    fn test_der_and(more: &[u8]) -> String {
+        der_pem(&[parse_pem(TEST_CA).unwrap(), more.to_vec()].concat())
     }
 
     refused! {
@@ -523,7 +576,7 @@ mod tests {
         refuses_two_certificate_blocks: format!("{TEST_CA}{TEST_CA}"),
         refuses_a_certificate_then_a_key: format!("{TEST_CA}{}", as_key()),
         refuses_a_key_then_a_certificate: format!("{}{TEST_CA}", as_key()),
-        refuses_two_certificates_in_one_body: two_ders_in_one_body(),
+        refuses_two_certificates_in_one_body: test_der_and(&parse_pem(TEST_CA).unwrap()),
         refuses_text_before_the_block: format!("Certificate:\n{TEST_CA}"),
         refuses_text_after_the_block: format!("{TEST_CA}subject=CN=Marsa Test CA\n"),
         refuses_an_empty_body: format!("{BEGIN}\n{END}\n"),
@@ -534,8 +587,34 @@ mod tests {
         refuses_three_padding_characters: one_line("M==="),
         refuses_nonzero_padding_bits: TEST_CA.replacen("TI=", "TJ=", 1),
         refuses_der_that_is_not_a_sequence: one_line("MQA="),
-        refuses_bytes_after_the_sequence: one_line("MAAA"),
-        refuses_a_length_that_is_not_minimal: one_line("MIEA"),
+        refuses_an_empty_sequence: der_pem(&[0x30, 0x00]),
+        refuses_bytes_after_the_certificate: test_der_and(&[0x00]),
+        // `30 06 30 00 30 00 03 00` passes (see `the_certificate_shape`).
+        refuses_a_length_that_is_not_minimal: der_pem(&[0x30, 0x81, 0x06, 0x30, 0x00, 0x30, 0x00, 0x03, 0x00]),
+        // A synthetic key: a SEQUENCE that starts with an INTEGER (version 0).
+        refuses_a_key_labelled_certificate: der_pem(&[0x30, 0x03, 0x02, 0x01, 0x00]),
+        // The shape of an encrypted PKCS#8 key: a SEQUENCE and an OCTET STRING.
+        refuses_an_encrypted_key_labelled_certificate: der_pem(&[0x30, 0x04, 0x30, 0x00, 0x04, 0x00]),
+    }
+
+    #[test]
+    fn the_certificate_shape() {
+        assert!(is_certificate(&parse_pem(TEST_CA).unwrap()));
+        assert!(is_certificate(&[
+            0x30, 0x06, 0x30, 0x00, 0x30, 0x00, 0x03, 0x00
+        ]));
+        // A fourth element, and an element that runs past the end.
+        let four = [0x30, 0x08, 0x30, 0x00, 0x30, 0x00, 0x03, 0x00, 0x05, 0x00];
+        assert!(!is_certificate(&four));
+        assert!(!is_certificate(&[
+            0x30, 0x06, 0x30, 0x00, 0x30, 0x00, 0x03, 0x01
+        ]));
+    }
+
+    #[test]
+    fn stderr_matches_ignore_case_and_position() {
+        assert!(mentions(b"x: The item COULD NOT BE FOUND.", NO_TRUST));
+        assert!(!mentions(b"could not be", NO_TRUST));
     }
 
     /// Every failure path that sees the PEM: the request, the stored file,
@@ -602,14 +681,41 @@ mod tests {
     }
 
     /// The user removed the trust and the certificate by hand.
+    fn script_gone(fake: &mut FakeSystem) {
+        script(fake, &untrust(), exit(1, NOT_FOUND));
+        let gone = format!("security: Unable to delete certificate matching \"{HASH}\"\n");
+        script(fake, &delete(HASH), exit(1, gone.as_bytes()));
+    }
+
     #[test]
     fn remove_goes_on_when_the_trust_and_the_certificate_are_gone() {
         let mut fake = fake_with(TEST_CA.as_bytes());
-        script(&mut fake, &untrust(), exit(1, b"no trust settings"));
-        let gone = format!("Unable to delete certificate matching \"{HASH}\"\n");
-        script(&mut fake, &delete(HASH), exit(1, gone.as_bytes()));
+        script_gone(&mut fake);
         assert_eq!(remove(&fake), result(REMOVE, Outcome::Done));
+        assert_eq!(commands(&fake), [untrust(), delete(HASH)]);
         assert_eq!(file(&fake), None);
+    }
+
+    /// A refused dialog, another error, and a signal even with the not-found
+    /// text: the trust may still be there, so nothing else runs and the file
+    /// keeps the hash.
+    #[test]
+    fn a_refused_untrust_keeps_the_file_and_deletes_nothing() {
+        let killed = RunOutput {
+            code: None,
+            stdout: Vec::new(),
+            stderr: NOT_FOUND.to_vec(),
+        };
+        for output in [exit(1, REFUSED), exit(44, b""), killed] {
+            let text = failure_text(&Ok(output.clone()));
+            let mut fake = fake_with(TEST_CA.as_bytes());
+            script(&mut fake, &untrust(), output);
+            let message = format!("security remove-trusted-cert {text}");
+            let expected = OpResult::failed(REMOVE, TRUST_REMOVE_FAILED, message);
+            assert_eq!(remove(&fake), expected);
+            assert_eq!(commands(&fake), [untrust()]);
+            assert_eq!(file(&fake), test_ca(OLD_MODE));
+        }
     }
 
     /// Exit code 1 with another message, and the message with another code.
@@ -643,18 +749,38 @@ mod tests {
         assert_eq!(file(&fake), test_ca(OLD_MODE));
     }
 
+    fn add_failed() -> OpResult {
+        let message = "security add-trusted-cert exited with code 1".to_owned();
+        OpResult::failed(INSTALL, TRUST_ADD_FAILED, message)
+    }
+
+    /// The add failed before it changed anything: the cleanup finds nothing.
     #[test]
     fn a_failed_add_is_trust_add_failed_and_leaves_nothing() {
         let mut fake = fake();
         script(&mut fake, &add(), exit(1, b""));
-        let message = "security add-trusted-cert exited with code 1".to_owned();
-        let expected = OpResult::failed(INSTALL, TRUST_ADD_FAILED, message);
-        assert_eq!(install(TEST_CA, &fake), expected);
-        assert_eq!(commands(&fake), [add(), delete(HASH)]);
+        script_gone(&mut fake);
+        assert_eq!(install(TEST_CA, &fake), add_failed());
+        assert_eq!(commands(&fake), [add(), untrust(), delete(HASH)]);
         assert_eq!(file(&fake), None);
         // So a retry runs `add-trusted-cert` again.
         fake.outputs.clear();
         assert_eq!(install(TEST_CA, &fake), result(INSTALL, Outcome::Done));
+    }
+
+    /// The cleanup cannot remove the trust, so the file keeps the hash for a
+    /// later `trust_remove`, and the error is still the failed add.
+    #[test]
+    fn a_failed_add_with_a_refused_untrust_keeps_the_file() {
+        let mut fake = fake();
+        script(&mut fake, &add(), exit(1, b""));
+        script(&mut fake, &untrust(), exit(1, REFUSED));
+        assert_eq!(install(TEST_CA, &fake), add_failed());
+        assert_eq!(commands(&fake), [add(), untrust()]);
+        assert_eq!(file(&fake), test_ca(MODE));
+        fake.outputs.clear();
+        assert_eq!(remove(&fake), result(REMOVE, Outcome::Done));
+        assert_eq!(file(&fake), None);
     }
 
     /// `RealSystem::run` gives `TimedOut` at its limit (tests in `system`).
@@ -673,7 +799,9 @@ mod tests {
         let result = install(TEST_CA, &fake);
         let message = "security add-trusted-cert could not run: entity not found".to_owned();
         assert_eq!(result, OpResult::failed(INSTALL, TRUST_ADD_FAILED, message));
-        assert_eq!(file(&fake), None);
+        // The cleanup cannot run either, so the file stays.
+        assert_eq!(commands(&fake), [add(), untrust()]);
+        assert_eq!(file(&fake), test_ca(MODE));
     }
 
     #[test]
