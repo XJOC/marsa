@@ -212,7 +212,24 @@ async fn install(
         force = request.force,
         "install started"
     );
-    tokio::spawn(run(started, runtime, request));
+    let task = tokio::spawn(run(started, runtime, request));
+    // A panic in the install task sends no final event, and `marsa install`
+    // waits for one. This watcher sends `failed` instead.
+    tokio::spawn(async move {
+        if let Err(err) = task.await
+            && err.is_panic()
+        {
+            tracing::error!(id, "the install task panicked");
+            daemon.publish(Event::Install(InstallProgress {
+                id,
+                update: InstallUpdate::Failed(InstallFailure {
+                    code: "install_crashed".to_owned(),
+                    message: "the install task panicked".to_owned(),
+                    ..InstallFailure::default()
+                }),
+            }));
+        }
+    });
     Ok((StatusCode::ACCEPTED, Json(InstallAccepted { id })))
 }
 

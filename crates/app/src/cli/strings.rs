@@ -90,6 +90,10 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              version list."
         ),
         "install_io" => format!("Cannot write to {path}. {DISK}"),
+        "install_crashed" => "The install stopped because of a bug in Marsa. Run \
+             \"marsa runtimes\" to see what is installed, then try again. If it repeats, \
+             report it with the file logs/marsad.log."
+            .into(),
         "install_interrupted" => "The Marsa daemon stopped before the install ended. Run \
              \"marsa runtimes\" to see what is installed, then try again."
             .into(),
@@ -409,6 +413,8 @@ mod tests {
         "install_io",
         // `marsa install` itself: the daemon stopped during the install.
         "install_interrupted",
+        // The daemon: the install task panicked.
+        "install_crashed",
         "manifest_too_large",
         "manifest_bad_signature",
         "manifest_invalid",
