@@ -43,7 +43,17 @@ pub struct ToolDefaults {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SitesConfig {
+    /// The parked folders: every sub-folder in one is a site. Each path is
+    /// absolute and listed once, in the order the user added it. First in the
+    /// struct, so `toml` writes it above the `[sites.<name>]` tables.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "parked_paths"
+    )]
+    pub parked: Vec<PathBuf>,
     /// A `BTreeMap`, not a `HashMap`: the file is written in a stable order.
+    /// Every key is a valid site name (see [`crate::sites::validate_name`]).
+    #[serde(deserialize_with = "site_tables")]
     pub sites: BTreeMap<String, SiteSettings>,
 }
 
@@ -58,6 +68,18 @@ pub struct SiteSettings {
     pub php: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+    /// Served over HTTPS. The default is `true`, so the file only says
+    /// `secure = false`.
+    #[serde(default = "default_secure", skip_serializing_if = "is_true")]
+    pub secure: bool,
+    /// The port of the program that serves this site, for example `npm run
+    /// dev` on `5173`. When set, the site is a Node proxy. Never `0`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "proxy_port"
+    )]
+    pub proxy: Option<u16>,
 }
 
 impl SitesConfig {
@@ -160,8 +182,9 @@ pub fn parse_global(text: &str, path: &Path) -> Result<GlobalConfig, ConfigError
 ///
 /// # Errors
 ///
-/// `config_invalid` for bad TOML, a wrong type, an unknown key, or a relative
-/// `root`.
+/// `config_invalid` for bad TOML, a wrong type, an unknown key, a relative
+/// `root`, a relative or repeated `parked` folder, a `proxy` outside 1 to
+/// 65535, or a site name that [`crate::sites::validate_name`] rejects.
 pub fn parse_sites(text: &str, path: &Path) -> Result<SitesConfig, ConfigError> {
     parse(text, path)
 }
@@ -276,16 +299,87 @@ fn write_synced(path: &Path, text: &str) -> io::Result<()> {
 }
 
 /// Accepts only absolute paths for `root`. Rejecting it here, not after
-/// parsing, lets `toml` add the line number to the error.
+/// parsing, lets `toml` add the line number to the error. The other checks
+/// below are done while parsing for the same reason.
 fn absolute_path<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
     let path = PathBuf::deserialize(deserializer)?;
+    check_absolute("root", &path).map_err(serde::de::Error::custom)?;
+    Ok(path)
+}
+
+/// Accepts only absolute folders for `parked`, each listed once.
+///
+/// Paths are compared as [`PathBuf`] values: `/code/` and `/code` are the same
+/// folder. Nothing is canonicalized, like in [`SitesConfig::site_for`].
+fn parked_paths<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<PathBuf>, D::Error> {
+    let paths = Vec::<PathBuf>::deserialize(deserializer)?;
+    for (index, path) in paths.iter().enumerate() {
+        check_absolute("parked", path).map_err(serde::de::Error::custom)?;
+        if paths[..index].contains(path) {
+            return Err(serde::de::Error::custom(format!(
+                "parked lists {:?} more than once",
+                path.display().to_string()
+            )));
+        }
+    }
+    Ok(paths)
+}
+
+/// Fails with a message that names `key` if `path` is not absolute.
+fn check_absolute(key: &str, path: &Path) -> Result<(), String> {
     if path.is_absolute() {
-        Ok(path)
+        Ok(())
     } else {
-        Err(serde::de::Error::custom(format!(
-            "root must be an absolute path, not {:?}",
+        Err(format!(
+            "{key} must be an absolute path, not {:?}",
             path.display().to_string()
-        )))
+        ))
+    }
+}
+
+/// `proxy` is a TCP port from 1 to 65535: port `0` is not a real port. Read as
+/// `i64` (a TOML integer), so `0`, `-1`, and `70000` all get the same message.
+fn proxy_port<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u16>, D::Error> {
+    let number = i64::deserialize(deserializer)?;
+    match u16::try_from(number) {
+        Ok(port) if port != 0 => Ok(Some(port)),
+        _ => Err(serde::de::Error::custom(format!(
+            "proxy must be a port from 1 to 65535, not {number}"
+        ))),
+    }
+}
+
+fn default_secure() -> bool {
+    true
+}
+
+/// For `skip_serializing_if`, which passes a reference.
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+/// The `[sites.<name>]` tables. Each name is checked as its key is read, so
+/// `toml` adds the line of the bad table to the error.
+fn site_tables<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, SiteSettings>, D::Error> {
+    let tables = BTreeMap::<SiteName, SiteSettings>::deserialize(deserializer)?;
+    Ok(tables
+        .into_iter()
+        .map(|(name, site)| (name.0, site))
+        .collect())
+}
+
+/// A key of `[sites]` that passed [`crate::sites::validate_name`]. Only used
+/// while parsing: [`SitesConfig::sites`] keeps plain `String` keys.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct SiteName(String);
+
+impl<'de> Deserialize<'de> for SiteName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        crate::sites::validate_name(&name).map_err(serde::de::Error::custom)?;
+        Ok(SiteName(name))
     }
 }
 
@@ -306,11 +400,25 @@ mod tests {
     #[cfg(not(windows))]
     const SHOP_TOML: &str = "\"/code/shop\"";
 
+    /// The folder above `SHOP`, used as a parked folder.
+    #[cfg(windows)]
+    const CODE: &str = r"C:\code";
+    #[cfg(not(windows))]
+    const CODE: &str = "/code";
+
+    /// `CODE` as `toml` writes it.
+    #[cfg(windows)]
+    const CODE_TOML: &str = r"'C:\code'";
+    #[cfg(not(windows))]
+    const CODE_TOML: &str = "\"/code\"";
+
     fn site(root: &Path, php: Option<&str>) -> SiteSettings {
         SiteSettings {
             root: root.to_path_buf(),
             php: php.map(str::to_owned),
             node: None,
+            secure: true,
+            proxy: None,
         }
     }
 
@@ -384,6 +492,8 @@ mod tests {
             root: dir.path().to_path_buf(),
             php: None,
             node: Some("20".to_owned()),
+            secure: true,
+            proxy: None,
         };
         assert_eq!(config.sites.len(), 2);
         assert_eq!(config.sites["shop"], site(dir.path(), Some("8.3")));
@@ -582,7 +692,10 @@ mod tests {
             .iter()
             .map(|(name, rel)| ((*name).to_owned(), site(&base.join(rel), None)))
             .collect();
-        SitesConfig { sites }
+        SitesConfig {
+            parked: Vec::new(),
+            sites,
+        }
     }
 
     #[test]
@@ -629,6 +742,219 @@ mod tests {
         let paths = ConfigPaths::in_dir(base);
         assert_eq!(paths.global, base.join("config").join("global.toml"));
         assert_eq!(paths.sites, base.join("config").join("sites.toml"));
+    }
+
+    /// A `sites.toml` as M1-05 wrote it: no `parked`, `secure`, or `proxy`.
+    fn old_sites_text() -> String {
+        format!(
+            "{HEADER}\n\
+             [sites.shop]\n\
+             root = {SHOP_TOML}\n\
+             php = \"8.3\"\n\
+             node = \"22\"\n"
+        )
+    }
+
+    /// A `sites.toml` that uses every new key.
+    fn new_sites_text() -> String {
+        format!(
+            "{HEADER}\n\
+             parked = [{SHOP_TOML}, {CODE_TOML}]\n\
+             \n\
+             [sites.shop]\n\
+             root = {SHOP_TOML}\n\
+             php = \"8.4\"\n\
+             secure = false\n\
+             proxy = 5173\n"
+        )
+    }
+
+    /// The config in [`new_sites_text`].
+    fn new_sites() -> SitesConfig {
+        let shop = SiteSettings {
+            secure: false,
+            proxy: Some(5173),
+            ..site(Path::new(SHOP), Some("8.4"))
+        };
+        SitesConfig {
+            parked: vec![PathBuf::from(SHOP), PathBuf::from(CODE)],
+            sites: BTreeMap::from([("shop".to_owned(), shop)]),
+        }
+    }
+
+    /// Parses in-memory `sites.toml` text.
+    fn parse_text(text: &str) -> Result<SitesConfig, ConfigError> {
+        parse_sites(text, Path::new("sites.toml"))
+    }
+
+    #[test]
+    fn old_sites_file_reads_with_defaults() {
+        let config = parse_text(&old_sites_text()).unwrap();
+        assert!(config.parked.is_empty());
+        let shop = &config.sites["shop"];
+        assert_eq!(shop.root, Path::new(SHOP));
+        assert_eq!(shop.php.as_deref(), Some("8.3"));
+        assert_eq!(shop.node.as_deref(), Some("22"));
+        assert!(shop.secure);
+        assert_eq!(shop.proxy, None);
+    }
+
+    #[test]
+    fn old_sites_file_is_written_back_without_new_keys() {
+        let dir = TempDir::new().unwrap();
+        let path = file(&dir, "sites.toml", &old_sites_text());
+        let config = load_sites(&path).unwrap();
+        save_sites(&path, &config).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), old_sites_text());
+    }
+
+    #[test]
+    fn reads_new_fields() {
+        assert_eq!(parse_text(&new_sites_text()).unwrap(), new_sites());
+    }
+
+    #[test]
+    fn new_fields_are_written_exactly() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sites.toml");
+        save_sites(&path, &new_sites()).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), new_sites_text());
+    }
+
+    #[test]
+    fn new_fields_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sites.toml");
+        save_sites(&path, &new_sites()).unwrap();
+        assert_eq!(load_sites(&path).unwrap(), new_sites());
+    }
+
+    #[test]
+    fn parked_only_file_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sites.toml");
+        let config = SitesConfig {
+            parked: vec![PathBuf::from(CODE)],
+            sites: BTreeMap::new(),
+        };
+        save_sites(&path, &config).unwrap();
+        assert_eq!(load_sites(&path).unwrap(), config);
+    }
+
+    #[test]
+    fn parked_keeps_insertion_order() {
+        // `SHOP` sorts after `CODE`: a sorted list would swap them.
+        let config = parse_text(&format!("parked = [{SHOP_TOML}, {CODE_TOML}]\n")).unwrap();
+        assert_eq!(config.parked, [PathBuf::from(SHOP), PathBuf::from(CODE)]);
+    }
+
+    #[test]
+    fn explicit_secure_true_is_read_and_not_written() {
+        let text = format!("[sites.shop]\nroot = {SHOP_TOML}\nsecure = true\n");
+        let config = parse_text(&text).unwrap();
+        assert!(config.sites["shop"].secure);
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sites.toml");
+        save_sites(&path, &config).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("secure"), "{written}");
+    }
+
+    #[test]
+    fn relative_parked_folder_is_invalid_with_line() {
+        let dir = TempDir::new().unwrap();
+        let text = sites_text(&dir, "parked = [\n  {root},\n  \"code\",\n]\n");
+        let path = file(&dir, "sites.toml", &text);
+        let err = load_sites(&path).unwrap_err();
+        assert_invalid(&err, &path, "parked must be an absolute path");
+        assert_invalid(&err, &path, "\"code\"");
+        assert_invalid(&err, &path, "line 1");
+    }
+
+    #[test]
+    fn repeated_parked_folder_is_invalid() {
+        let dir = TempDir::new().unwrap();
+        let text = sites_text(&dir, "parked = [{root}, {root}]\n");
+        let path = file(&dir, "sites.toml", &text);
+        let err = load_sites(&path).unwrap_err();
+        assert_invalid(&err, &path, "more than once");
+        assert_invalid(&err, &path, "line 1");
+    }
+
+    #[test]
+    fn parked_folder_with_trailing_separator_is_a_repeat() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let text = format!("parked = ['{CODE}', '{CODE}{sep}']\n");
+        let err = parse_text(&text).unwrap_err();
+        assert_invalid(&err, Path::new("sites.toml"), "more than once");
+    }
+
+    #[test]
+    fn proxy_zero_is_invalid_with_line() {
+        let dir = TempDir::new().unwrap();
+        let text = sites_text(&dir, "[sites.shop]\nroot = {root}\nproxy = 0\n");
+        let path = file(&dir, "sites.toml", &text);
+        let err = load_sites(&path).unwrap_err();
+        assert_invalid(&err, &path, "proxy must be a port from 1 to 65535");
+        assert_invalid(&err, &path, "line 3");
+    }
+
+    #[test]
+    fn proxy_accepts_every_real_port() {
+        for port in [1, 5173, 65535] {
+            let text = format!("[sites.shop]\nroot = {SHOP_TOML}\nproxy = {port}\n");
+            let config = parse_text(&text).unwrap();
+            assert_eq!(config.sites["shop"].proxy, Some(port));
+        }
+    }
+
+    #[test]
+    fn proxy_out_of_range_is_invalid() {
+        for port in ["65536", "-1"] {
+            let text = format!("[sites.shop]\nroot = {SHOP_TOML}\nproxy = {port}\n");
+            let err = parse_text(&text).unwrap_err();
+            let path = Path::new("sites.toml");
+            assert_invalid(&err, path, &format!("from 1 to 65535, not {port}"));
+            assert_invalid(&err, path, "line 3");
+        }
+    }
+
+    #[test]
+    fn proxy_as_text_is_invalid() {
+        let text = format!("[sites.shop]\nroot = {SHOP_TOML}\nproxy = \"5173\"\n");
+        let err = parse_text(&text).unwrap_err();
+        assert_invalid(&err, Path::new("sites.toml"), "line 3");
+    }
+
+    #[test]
+    fn uppercase_site_name_is_invalid_with_line() {
+        let dir = TempDir::new().unwrap();
+        let text = sites_text(&dir, "[sites.Shop]\nroot = {root}\n");
+        let path = file(&dir, "sites.toml", &text);
+        let err = load_sites(&path).unwrap_err();
+        assert_invalid(&err, &path, "\"Shop\" is not a valid site name");
+        assert_invalid(&err, &path, "line 1");
+    }
+
+    #[test]
+    fn other_bad_site_names_are_invalid() {
+        let too_long = "a".repeat(crate::sites::MAX_NAME_LEN + 1);
+        for name in ["-shop", "shop-", "my_shop", "\"a.b\"", "\"\"", &too_long] {
+            let text = format!("[sites.{name}]\nroot = {SHOP_TOML}\n");
+            let err = parse_text(&text).unwrap_err();
+            assert_invalid(&err, Path::new("sites.toml"), "is not a valid site name");
+        }
+    }
+
+    #[test]
+    fn good_site_names_are_accepted() {
+        let longest = "a".repeat(crate::sites::MAX_NAME_LEN);
+        for name in ["a", "shop-2", "0day", &longest] {
+            let text = format!("[sites.{name}]\nroot = {SHOP_TOML}\n");
+            let config = parse_text(&text).unwrap();
+            assert!(config.sites.contains_key(name), "{name}");
+        }
     }
 
     #[test]
