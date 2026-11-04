@@ -1,6 +1,6 @@
 <?php
-// S-10 runtime checks. Run with the PHP you just built, with no ini file:
-//   buildroot/bin/php -n spikes/s10-php-build/runtime-checks.php
+// Runtime checks for our PHP build (ADR 0012). Run with the PHP, with no ini file:
+//   bin/php -n tools/php-build/runtime-checks.php
 // Each line is STATUS<TAB>name<TAB>detail, where STATUS is PASS, FAIL, or INFO.
 // The exit code is 1 if any line is FAIL.
 // INFO lines never fail the run (network, environment details).

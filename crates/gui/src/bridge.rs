@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use eframe::egui;
 use marsa_core::client::{self, ClientError, DaemonClient, StreamItem};
-use marsa_core::types::ServiceAction;
+use marsa_core::types::{Event, ServiceAction, SiteList, SitePatch};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::model::{LOG_SERVICE, Update};
@@ -21,11 +21,19 @@ use crate::strings;
 /// The wait before the next attempt to connect.
 const RETRY: Duration = Duration::from_secs(1);
 
-/// A button the user pressed.
+/// What the user asked for.
 #[derive(Debug)]
-pub struct Command {
-    pub service: String,
-    pub action: ServiceAction,
+pub enum Command {
+    /// A service button.
+    Service {
+        service: String,
+        action: ServiceAction,
+    },
+    /// The park button: every sub-folder of this absolute folder becomes a
+    /// site.
+    Park(PathBuf),
+    /// A site's HTTPS switch.
+    Secure { site: String, secure: bool },
 }
 
 /// The window's end of the bridge.
@@ -160,6 +168,9 @@ async fn session(
         tokio::select! {
             event = events.next() => match event {
                 Some(Ok(StreamItem::Item(event))) => {
+                    if let Event::SitesChanged(list) = &event {
+                        log_sites("sites changed", list);
+                    }
                     if !window.send(Update::Event(event)) {
                         return End::Closed;
                     }
@@ -186,29 +197,65 @@ async fn session(
     }
 }
 
-/// Sends the whole services table and the recent log lines. A failed read is
-/// a notice: the events still keep the window up to date. `false` once the
-/// window is gone.
+/// Sends the whole services table, the site list, and the recent log lines.
+/// A failed read is a notice: the events still keep the window up to date.
+/// `false` once the window is gone.
 async fn refresh(client: &DaemonClient, window: &Window) -> bool {
     let services = match client.services().await {
         Ok(services) => Update::Services(services),
         Err(err) => notice("cannot read the services", &err),
     };
+    let sites = match client.sites().await {
+        Ok(list) => {
+            log_sites("site list read", &list);
+            Update::Sites(list)
+        }
+        Err(err) => sites_failed("cannot read the sites", &err),
+    };
     let log = match client.logs(LOG_SERVICE).await {
         Ok(lines) => Update::Log(lines),
         Err(err) => notice("cannot read the log", &err),
     };
-    window.send(services) && window.send(log)
+    window.send(services) && window.send(sites) && window.send(log)
 }
 
-/// Runs the action on its own task, so a slow restart does not hold up the
-/// events. The new state arrives as an event; only a failure is sent here.
+/// Runs the command on its own task, so a slow restart does not hold up the
+/// events. The new state arrives as an event, so the daemon's answer is not
+/// passed on: an older answer could arrive after a newer event. Only a
+/// failure, and an accepted park for the notice line, are sent here.
 fn run_command(client: &DaemonClient, command: Command, window: Window) {
     let client = client.clone();
     tokio::spawn(async move {
-        let Command { service, action } = command;
-        if let Err(err) = client.service_action(&service, action).await {
-            window.send(notice(&format!("cannot {action} {service}"), &err));
+        let update = match command {
+            Command::Service { service, action } => {
+                let result = client.service_action(&service, action).await;
+                result
+                    .err()
+                    .map(|err| notice(&format!("cannot {action} {service}"), &err))
+            }
+            Command::Park(folder) => Some(match client.park(&folder).await {
+                Ok(_) => {
+                    tracing::info!(folder = %folder.display(), "folder parked");
+                    Update::Parked(folder)
+                }
+                Err(err) => sites_failed(&format!("cannot park {}", folder.display()), &err),
+            }),
+            Command::Secure { site, secure } => {
+                let patch = SitePatch {
+                    secure: Some(secure),
+                    ..SitePatch::default()
+                };
+                let result = client.update_site(&site, &patch).await;
+                if result.is_ok() {
+                    tracing::info!(site = %site, secure, "HTTPS setting changed");
+                }
+                result
+                    .err()
+                    .map(|err| sites_failed(&format!("cannot change HTTPS for {site}"), &err))
+            }
+        };
+        if let Some(update) = update {
+            window.send(update);
         }
     });
 }
@@ -216,4 +263,20 @@ fn run_command(client: &DaemonClient, command: Command, window: Window) {
 fn notice(what: &str, err: &ClientError) -> Update {
     tracing::warn!(code = err.code(), error = %err, "{what}");
     Update::Notice(err.code().to_owned())
+}
+
+/// As [`notice`], for the line in the sites section.
+fn sites_failed(what: &str, err: &ClientError) -> Update {
+    tracing::warn!(code = err.code(), error = %err, "{what}");
+    Update::SitesFailed(err.code().to_owned())
+}
+
+/// The size of a site list, to follow the window's updates in the log.
+fn log_sites(what: &str, list: &SiteList) {
+    tracing::debug!(
+        sites = list.sites.len(),
+        skipped = list.skipped.len(),
+        parked = list.parked.len(),
+        "{what}"
+    );
 }

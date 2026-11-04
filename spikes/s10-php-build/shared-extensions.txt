@@ -1,3 +1,0 @@
-# Built as shared `.so` in the same spc run (`--build-shared`). One name per line.
-# Xdebug is a zend_extension and spc can only build it shared (ADR 0010).
-xdebug

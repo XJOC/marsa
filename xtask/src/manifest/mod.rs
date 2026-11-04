@@ -10,7 +10,6 @@ mod pins;
 mod upstream;
 mod verify;
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +18,7 @@ use marsa_core::installer::fetch::{FetchError, HttpFetch, fetch_bytes};
 use marsa_core::installer::manifest::MAX_MANIFEST_SIZE;
 use marsa_core::recipes::{self, Platform};
 use marsa_core::runtimes::Runtime;
+use semver::Version;
 use serde::Deserialize;
 
 pub use verify::run as verify;
@@ -44,22 +44,6 @@ pub struct BuildOptions {
     pub pins: PathBuf,
     pub out: PathBuf,
     pub previous: Previous,
-    /// `8.4` → an absolute path to an `xdebug.so` for that PHP minor.
-    pub xdebug: BTreeMap<(u64, u64), PathBuf>,
-}
-
-/// Parses `--xdebug-so 8.4=/path/xdebug.so`.
-pub fn parse_xdebug(arg: &str) -> Result<((u64, u64), PathBuf)> {
-    let (minor, path) = arg
-        .split_once('=')
-        .context("--xdebug-so must be <major.minor>=<path>")?;
-    let (major, minor) = minor
-        .split_once('.')
-        .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
-        .context("--xdebug-so must start with a PHP minor such as 8.4")?;
-    let path = std::path::absolute(path).with_context(|| format!("bad path {path}"))?;
-    ensure!(path.is_file(), "{} is not a file", path.display());
-    Ok(((major, minor), path))
 }
 
 /// The workspace root: the parent of `xtask/`.
@@ -70,25 +54,60 @@ pub fn workspace_root() -> Result<PathBuf> {
         .context("xtask is not inside the workspace")
 }
 
-/// Runs the real PHP checks (`php_smoke`) for macOS archives.
+/// Runs the real PHP checks (`php_smoke`) for our macOS and Linux archives.
 struct Smoke<'a> {
     spc_line: &'a str,
-    xdebug: &'a BTreeMap<(u64, u64), PathBuf>,
     work: PathBuf,
 }
 
 impl Inspect for Smoke<'_> {
-    fn php_darwin(&self, target: &Target<'_>, file: &Path) -> Result<Vec<String>> {
+    fn php_build(&self, target: &Target<'_>, file: &Path) -> Result<Vec<String>> {
         let work = self.work.join(format!(
             "php-{}-{}-{}",
             target.version, target.platform, target.artifact.name
         ));
-        let xdebug = self
-            .xdebug
-            .get(&(target.version.major, target.version.minor))
-            .map(PathBuf::as_path);
-        php_smoke::check_archive(file, target, self.spc_line, xdebug, &work)
+        php_smoke::check_archive(file, target, self.spc_line, &work)
     }
+}
+
+/// `cargo xtask manifest check-php`: the checks of `build` on one local PHP
+/// archive, without the manifest. The build workflow runs it on each archive
+/// it makes, on the runner that made it.
+pub fn run_check_php(
+    archive: &Path,
+    platform: Platform,
+    version: &Version,
+    pins: &Path,
+) -> Result<()> {
+    let text =
+        fs::read_to_string(pins).with_context(|| format!("cannot read {}", pins.display()))?;
+    let pins = Pins::parse(&text).with_context(|| pins.display().to_string())?;
+    ensure!(
+        build::is_spc_platform(platform),
+        "{platform} has no static-php-cli PHP build"
+    );
+    let recipe = recipes::builtin(Runtime::Php)?
+        .platform(platform)
+        .with_context(|| format!("the php recipe has no {platform}"))?;
+    let [artifact] = recipe.artifacts() else {
+        bail!("the php recipe for {platform} must have one archive");
+    };
+    let target = Target {
+        version,
+        platform,
+        recipe,
+        artifact,
+    };
+    let work = workspace_root()?
+        .join("target")
+        .join("check-php")
+        .join(format!("{version}-{platform}"));
+    let warnings = php_smoke::check_archive(archive, &target, &pins.spc_line, &work)?;
+    for warning in &warnings {
+        println!("warning: {warning}");
+    }
+    println!("{}: PHP checks passed", archive.display());
+    Ok(())
 }
 
 pub fn run_build(options: BuildOptions) -> Result<()> {
@@ -96,8 +115,10 @@ pub fn run_build(options: BuildOptions) -> Result<()> {
         .with_context(|| format!("cannot read {}", options.pins.display()))?;
     let pins = Pins::parse(&text).with_context(|| options.pins.display().to_string())?;
 
-    // The static-php-cli checks need macOS (`nm`, and running `php`). No way
-    // to skip them: a PHP build for macOS is never published unchecked.
+    // The static-php-cli checks need macOS: `nm` for the Mach-O files (Apple's
+    // nm is llvm-nm, which reads the Linux ELF files too), and running the
+    // macOS `php`. No way to skip them: a PHP build is never published
+    // unchecked.
     let darwin_php = !pins.versions(Runtime::Php).is_empty()
         && recipes::builtin(Runtime::Php)?
             .platforms()
@@ -136,7 +157,6 @@ pub fn run_build(options: BuildOptions) -> Result<()> {
     let cache = options.out.join("cache");
     let smoke = Smoke {
         spc_line: &pins.spc_line,
-        xdebug: &options.xdebug,
         work: options.out.join("work"),
     };
     let built = runtime.block_on(build::build(&fetch, &pins, &cache, &smoke))?;
