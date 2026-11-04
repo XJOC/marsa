@@ -1,0 +1,246 @@
+name: php-build
+
+# Builds Marsa's own PHP (ADR 0012) with static-php-cli: one archive per
+# platform with bin/php, bin/php-fpm and ext/xdebug.so, in the layout of
+# recipes/php.toml. The extension set is recipes/php-extensions.txt.
+#
+# - push to task/M2-09-*: build and test; the archives are workflow artifacts
+#   (14 days). No release.
+# - workflow_dispatch: the same; with `release` on (main only), also a DRAFT,
+#   pre-release GitHub Release php-<version>-r<revision> with the four archives
+#   and sha256sums.txt. The owner reads the draft and publishes it; then
+#   `cargo xtask manifest build` on the owner's Mac reads it (recipes/pins.toml).
+#   The minisign key never enters CI.
+#
+# Linux is glibc 2.17 (zig), not static musl: a musl PHP cannot load Xdebug, so
+# it is not built (ADR 0012). Windows uses the official windows.php.net build.
+
+on:
+  push:
+    branches: ["task/M2-09-*"]
+    paths:
+      - ".github/workflows/php-build.yml"
+      - "tools/php-build/**"
+      - "recipes/php-extensions.txt"
+      - "recipes/php.toml"
+      - "xtask/src/manifest/**"
+  workflow_dispatch:
+    inputs:
+      php_version:
+        description: "PHP version, in full (8.4.27, not 8.4)"
+        type: string
+        default: "8.4.27"
+      revision:
+        description: "Build number for this PHP version: 1, then 2 for a rebuild"
+        type: string
+        default: "1"
+      release:
+        description: "Create a DRAFT release php-<version>-r<revision> with the archives (main only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# A new push cancels the older run. A manual run is never cancelled.
+concurrency:
+  group: php-build-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+env:
+  PHP_VERSION: ${{ inputs.php_version || '8.4.27' }}
+  REVISION: ${{ inputs.revision || '1' }}
+  # Pinned build tools. Their sha256 is in tools/php-build/downloads.sha256; a
+  # new version here needs a new line there, or the build stops.
+  SPC_VERSION: "2.8.5"
+  # spc doctor would install the newest zig; tools/php-build/setup.sh installs
+  # this one instead. 0.17.1 is the version the green S-10 runs used.
+  ZIG_VERSION: "0.17.1"
+  XDEBUG_VERSION: "3.5.3"
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS links only system libraries, so it can load xdebug.so.
+          - platform: darwin-arm64
+            os: macos-15
+            spc_target: ""
+          - platform: darwin-x64
+            os: macos-15-intel
+            spc_target: ""
+          # glibc 2.17 with zig: loads xdebug.so, runs on any glibc distribution
+          # from CentOS 7 on, not on Alpine.
+          - platform: linux-x64
+            os: ubuntu-22.04
+            spc_target: native-native-gnu.2.17
+          - platform: linux-arm64
+            os: ubuntu-22.04-arm
+            spc_target: native-native-gnu.2.17
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      SPC_TARGET: ${{ matrix.spc_target }}
+      WORK: ${{ runner.temp }}/php-build/work
+      OUT: ${{ runner.temp }}/php-build/out
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Check the inputs
+        run: |
+          [[ "$PHP_VERSION" =~ ^8\.[0-9]+\.[0-9]+$ ]] || { echo "php_version must look like 8.4.27"; exit 1; }
+          [[ "$REVISION" =~ ^[1-9][0-9]*$ ]] || { echo "revision must be a number from 1"; exit 1; }
+          echo "PHP $PHP_VERSION r$REVISION for $PLATFORM on $ImageOS $ImageVersion"
+
+      - name: Download spc ${{ env.SPC_VERSION }} (and zig ${{ env.ZIG_VERSION }} on Linux)
+        run: bash tools/php-build/setup.sh
+
+      - name: Build PHP (spc doctor, download, build)
+        env:
+          # spc reads it to avoid GitHub API rate limits when it downloads sources.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash tools/php-build/build.sh
+
+      - name: Package
+        run: bash tools/php-build/package.sh
+
+      # The smoke tests run on the archive as it ships, unpacked in a new folder.
+      - name: Smoke tests
+        run: |
+          mkdir -p "$OUT/unpacked"
+          tar -xzf "$OUT/dist/php-$PHP_VERSION-$PLATFORM.tar.gz" -C "$OUT/unpacked"
+          if [ -f /etc/ssl/cert.pem ]; then export CAFILE=/etc/ssl/cert.pem
+          elif [ -f /etc/ssl/certs/ca-certificates.crt ]; then export CAFILE=/etc/ssl/certs/ca-certificates.crt; fi
+          bash tools/php-build/smoke.sh "$OUT/unpacked"
+
+      # The checks `cargo xtask manifest build` runs, on the runner that can run
+      # this build: the recipe layout, the installer's extractor, nm, php -m.
+      - name: Install the pinned Rust toolchain
+        run: |
+          if ! command -v rustup > /dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          # Reads the version from rust-toolchain.toml.
+          rustup toolchain install --profile minimal
+
+      - name: cargo xtask manifest check-php
+        run: cargo xtask manifest check-php --platform "$PLATFORM" --version "$PHP_VERSION" "$OUT/dist/php-$PHP_VERSION-$PLATFORM.tar.gz"
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## $PLATFORM: PHP $PHP_VERSION r$REVISION"
+            echo
+            if [ -f "$OUT/smoke-status.txt" ]; then echo "Smoke tests: $(cat "$OUT/smoke-status.txt")"; echo; fi
+            for f in "$OUT/dist/"*.sha256; do [ -f "$f" ] && { echo '```'; cat "$f"; echo '```'; }; done
+            if [ -f "$OUT/pkg/BUILD-INFO.txt" ]; then echo '```'; cat "$OUT/pkg/BUILD-INFO.txt"; echo '```'; fi
+            if [ -f "$WORK/timings.txt" ]; then echo '```'; cat "$WORK/timings.txt"; echo '```'; fi
+            if [ -f "$OUT/smoke.md" ]; then
+              echo "<details><summary>Smoke test lines</summary>"
+              echo
+              cat "$OUT/smoke.md"
+              echo
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-${{ matrix.platform }}
+          path: ${{ runner.temp }}/php-build/out/dist/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.platform }}
+          path: |
+            ${{ runner.temp }}/php-build/work/log/
+            ${{ runner.temp }}/php-build/work/timings.txt
+            ${{ runner.temp }}/php-build/out/*.txt
+            ${{ runner.temp }}/php-build/out/*.md
+            ${{ runner.temp }}/php-build/out/fpm/
+            ${{ runner.temp }}/php-build/out/pkg/BUILD-INFO.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+  release:
+    name: draft release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: php-${{ inputs.php_version }}-r${{ inputs.revision }}
+    steps:
+      - name: Only from main
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "a release is made from main only, not $GITHUB_REF"; exit 1; }
+
+      - name: The tag must be new
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release $TAG exists (maybe as a draft): raise the revision"; exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > /dev/null 2>&1; then
+            echo "tag $TAG exists: raise the revision"; exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: php-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check the archives and write sha256sums.txt
+        working-directory: dist
+        run: |
+          for platform in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            name="php-$PHP_VERSION-$platform.tar.gz"
+            [ -f "$name" ] || { echo "missing $name"; exit 1; }
+            sha256sum -c "$name.sha256"
+          done
+          cat ./*.sha256 | sort -k2 > sha256sums.txt
+          rm ./*.sha256
+          cat sha256sums.txt
+
+      - name: Create the draft release
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          {
+            echo "PHP $PHP_VERSION for Marsa, build $REVISION (ADR 0012). Not a Marsa app release."
+            echo
+            echo "One archive per platform: bin/php, bin/php-fpm, ext/xdebug.so (Xdebug $XDEBUG_VERSION),"
+            echo "licenses/, and BUILD-INFO.txt. Built with static-php-cli $SPC_VERSION from commit $GITHUB_SHA"
+            echo "in $run_url. Linux builds need glibc 2.17 or newer."
+            echo
+            echo "This product includes Xdebug software, freely available from <https://xdebug.org/>."
+            echo
+            echo '```'
+            cat dist/sha256sums.txt
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --draft --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "PHP $PHP_VERSION (build $REVISION)" --notes-file notes.md \
+            dist/php-"$PHP_VERSION"-*.tar.gz dist/sha256sums.txt
+          echo "Draft release $TAG created. Read it, then publish it on GitHub." >> "$GITHUB_STEP_SUMMARY"

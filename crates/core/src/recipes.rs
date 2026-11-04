@@ -638,10 +638,10 @@ into = "bin"
     fn artifact_url_fills_the_version() {
         let php = builtin(Runtime::Php).expect("built-in recipe is valid");
         assert_eq!(
-            php.artifact_url(Platform::DarwinArm64, "fpm", &v("8.4.23"))
+            php.artifact_url(Platform::DarwinArm64, "php", &v("8.4.27"))
                 .as_deref(),
             Some(
-                "https://dl.static-php.dev/static-php-cli/bulk/php-8.4.23-fpm-macos-aarch64.tar.gz"
+                "https://github.com/XJOC/marsa/releases/download/php-8.4.27-r1/php-8.4.27-darwin-arm64.tar.gz"
             )
         );
         let node = builtin(Runtime::Node).expect("built-in recipe is valid");
@@ -654,7 +654,7 @@ into = "bin"
             php.artifact_url(Platform::LinuxX64, "nope", &v("8.4.23")),
             None
         );
-        assert_eq!(php.artifact_url(Platform::Any, "cli", &v("8.4.23")), None);
+        assert_eq!(php.artifact_url(Platform::Any, "php", &v("8.4.23")), None);
     }
 
     #[test]
@@ -674,11 +674,19 @@ into = "bin"
                 .expect("artifact exists")
         };
         let dir = Path::new("v");
-        assert_eq!(
-            artifact(Platform::LinuxArm64, "cli").into_dir(dir),
-            dir.join("bin")
-        );
+        // One archive with bin/ and ext/ inside, unpacked into the version folder.
+        assert_eq!(artifact(Platform::LinuxArm64, "php").into_dir(dir), dir);
         assert_eq!(artifact(Platform::WindowsX64, "zip").into_dir(dir), dir);
+        let nested = parse(
+            "test.toml",
+            &good_with("into = \"bin\"", "into = \"lib/php\""),
+        )
+        .expect("valid recipe");
+        let cli = nested
+            .platform(Platform::LinuxX64)
+            .and_then(|p| p.artifact("cli"))
+            .expect("cli");
+        assert_eq!(cli.into_dir(dir), dir.join("lib").join("php"));
     }
 
     // --- Platform ---

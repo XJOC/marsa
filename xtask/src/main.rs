@@ -7,8 +7,9 @@ mod manifest;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
+use marsa_core::recipes::Platform;
 
 fn cli() -> Command {
     Command::new("xtask")
@@ -69,12 +70,37 @@ fn cli() -> Command {
                                 .value_parser(value_parser!(PathBuf))
                                 .help("Read the published serial from this manifest.json"),
                         )
+                )
+                .subcommand(
+                    Command::new("check-php")
+                        .about("Run the PHP checks of `build` on one local archive of our own PHP build")
                         .arg(
-                            Arg::new("xdebug-so")
-                                .long("xdebug-so")
-                                .value_name("MINOR=PATH")
-                                .action(ArgAction::Append)
-                                .help("Test that PHP <minor> loads this xdebug.so, e.g. 8.4=/tmp/xdebug.so"),
+                            Arg::new("archive")
+                                .required(true)
+                                .value_parser(value_parser!(PathBuf)),
+                        )
+                        .arg(
+                            Arg::new("platform")
+                                .long("platform")
+                                .required(true)
+                                .value_name("PLATFORM")
+                                .value_parser(value_parser!(Platform))
+                                .help("darwin-arm64, darwin-x64, linux-x64, or linux-arm64"),
+                        )
+                        .arg(
+                            Arg::new("version")
+                                .long("version")
+                                .required(true)
+                                .value_name("VERSION")
+                                .value_parser(value_parser!(semver::Version))
+                                .help("The PHP version, such as 8.4.27"),
+                        )
+                        .arg(
+                            Arg::new("pins")
+                                .long("pins")
+                                .value_name("FILE")
+                                .value_parser(value_parser!(PathBuf))
+                                .help("Pins file, for spc_line [default: recipes/pins.toml]"),
                         ),
                 )
                 .subcommand(
@@ -106,12 +132,6 @@ fn manifest_command(args: &ArgMatches) -> Result<()> {
                 (None, Some(path)) => manifest::Previous::File(path.clone()),
                 (None, None) => manifest::Previous::Download,
             };
-            let xdebug = args
-                .get_many::<String>("xdebug-so")
-                .into_iter()
-                .flatten()
-                .map(|arg| manifest::parse_xdebug(arg))
-                .collect::<Result<_>>()?;
             manifest::run_build(manifest::BuildOptions {
                 pins: args
                     .get_one::<PathBuf>("pins")
@@ -122,8 +142,24 @@ fn manifest_command(args: &ArgMatches) -> Result<()> {
                     .cloned()
                     .unwrap_or_else(|| root.join("target").join("manifest")),
                 previous,
-                xdebug,
             })
+        }
+        Some(("check-php", args)) => {
+            let root = manifest::workspace_root()?;
+            let archive = args
+                .get_one::<PathBuf>("archive")
+                .context("clap requires the archive")?;
+            let platform = args
+                .get_one::<Platform>("platform")
+                .context("clap requires --platform")?;
+            let version = args
+                .get_one::<semver::Version>("version")
+                .context("clap requires --version")?;
+            let pins = args
+                .get_one::<PathBuf>("pins")
+                .cloned()
+                .unwrap_or_else(|| root.join("recipes").join("pins.toml"));
+            manifest::run_check_php(archive, *platform, version, &pins)
         }
         Some(("verify", args)) => match args.get_one::<PathBuf>("manifest") {
             Some(path) => manifest::verify(path, args.get_one::<PathBuf>("signature").cloned()),

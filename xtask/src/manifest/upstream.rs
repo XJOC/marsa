@@ -3,13 +3,20 @@
 
 use anyhow::{Context, Result, bail};
 
+/// Where our own PHP builds are published: one GitHub Release per build,
+/// `php-<version>-r<revision>`, made by `.github/workflows/php-build.yml`
+/// with a `sha256sums.txt` beside the archives (ADR 0012).
+pub const PHP_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/php-";
+
 /// Where the upstream sha256 of the file at `url` is published, and the name
-/// the file has in it. `None` when the source publishes none: static-php-cli
-/// (checked by `php_smoke` instead) and `windows.php.net/.../archives/`
-/// (it only has `sha1sum.txt`).
+/// the file has in it. `None` when the source publishes none:
+/// `windows.php.net/.../archives/` (it only has `sha1sum.txt`) and any other
+/// host.
 pub fn sum_file_for(url: &str) -> Option<(String, String)> {
     let (dir, name) = url.rsplit_once('/')?;
-    let sums = if url.starts_with("https://nodejs.org/dist/") {
+    let sums = if url.starts_with(PHP_RELEASES) {
+        format!("{dir}/sha256sums.txt")
+    } else if url.starts_with("https://nodejs.org/dist/") {
         format!("{dir}/SHASUMS256.txt")
     } else if dir == "https://windows.php.net/downloads/releases" {
         format!("{dir}/sha256sum.txt")
@@ -129,7 +136,18 @@ mod tests {
                 None,
             ),
             (
+                "https://github.com/XJOC/marsa/releases/download/php-8.4.27-r1/php-8.4.27-linux-x64.tar.gz",
+                Some((
+                    "https://github.com/XJOC/marsa/releases/download/php-8.4.27-r1/sha256sums.txt",
+                    "php-8.4.27-linux-x64.tar.gz",
+                )),
+            ),
+            (
                 "https://dl.static-php.dev/static-php-cli/bulk/php-8.4.23-cli-macos-aarch64.tar.gz",
+                None,
+            ),
+            (
+                "https://github.com/XJOC/marsa/releases/download/runtimes-manifest/manifest.json",
                 None,
             ),
         ];

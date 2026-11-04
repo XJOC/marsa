@@ -1,5 +1,5 @@
 <?php
-// S-10: a tiny FastCGI client. Sends one GET request to php-fpm and prints the body.
+// A tiny FastCGI client. Sends one GET request to php-fpm and prints the body.
 //   php fcgi-get.php <host> <port> <absolute path of the script to run>
 // Exit code 0 if a response arrived, 1 on any error. Used by smoke.sh to prove that
 // the php-fpm we built answers a request. This is not the M4 test through nginx/Caddy.
