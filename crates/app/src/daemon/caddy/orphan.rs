@@ -255,22 +255,30 @@ impl Orphans<'_> {
                 Ok(())
             }
             Action::Reap { .. } | Action::Adopt { .. } => self.reap(found).await,
-            Action::Conflict { reason } => {
-                // A frozen process on our admin port that no pid file names
-                // may be our orphan, but it cannot be signalled.
-                let code = if found.inspection.admin == AdminState::Timeout {
-                    ORPHAN_STUCK
-                } else {
-                    PORT_IN_USE
-                };
-                Err(Blocked::new(code, with_owners(reason, &found.inspection)))
-            }
+            // Includes a frozen process on our admin port that no pid file
+            // names: nothing says it is ours, so it is someone else's port.
+            Action::Conflict { reason } => Err(Blocked::new(
+                PORT_IN_USE,
+                with_owners(reason, &found.inspection),
+            )),
             Action::OtherMarsa => {
-                let reason = "the Caddy of another Marsa (another data folder or user) \
-                              answers on our admin port";
+                let mut reason = "the Caddy of another Marsa (another data folder or user) \
+                                  answers on our admin port"
+                    .to_owned();
+                // Then it may be our own old Caddy, tagged with an id this
+                // folder no longer has: say which process the file names.
+                if let (PidfileState::Ours { pid }, Some(record)) =
+                    (&found.inspection.pidfile, &found.record)
+                {
+                    let exe = record.exe.display();
+                    reason.push_str(&format!(
+                        "; our pid file names pid {pid}, started as {exe}, which may be our \
+                         own old Caddy"
+                    ));
+                }
                 Err(Blocked::new(
                     OTHER_MARSA,
-                    with_owners(reason, &found.inspection),
+                    with_owners(&reason, &found.inspection),
                 ))
             }
         }
@@ -283,20 +291,29 @@ impl Orphans<'_> {
         };
         // The pid comes from the pid file that matched, and nowhere else.
         let target = found.record.filter(|record| Some(record.pid) == pid);
-        self.ladder(target.as_ref()).await?;
+        let tagged = found.inspection.admin == AdminState::Ours;
+        self.ladder(target.as_ref(), tagged).await?;
         self.pid_file.remove();
         Ok(())
     }
 
-    /// `POST /stop`; if the ports stay busy, SIGTERM, then SIGKILL, each only
-    /// to `target` and only while it still is our Caddy.
-    async fn ladder(&self, target: Option<&PidRecord>) -> Result<(), Blocked> {
-        let started = Instant::now();
-        self.admin.stop().await;
-        let left = self.ladder.stop.saturating_sub(started.elapsed());
-        if self.wait_stopped(target, left).await {
-            info!("the orphan caddy stopped through its admin API");
-            return Ok(());
+    /// `POST /stop` when `tagged` (our instance tag answered on the admin
+    /// port); then, while the ports stay busy, SIGTERM, then SIGKILL, each
+    /// only to `target` and only while it still is our Caddy. Without the
+    /// tag (a frozen admin API, or none) the ladder starts at the signals:
+    /// `/stop` goes only to a Caddy that said it is ours.
+    async fn ladder(&self, target: Option<&PidRecord>, tagged: bool) -> Result<(), Blocked> {
+        if tagged {
+            // A small race stays: another Caddy could take the admin port
+            // between the tag probe and this request. It cannot be closed,
+            // because Caddy's `/stop` cannot be limited to an `@id`.
+            let started = Instant::now();
+            self.admin.stop().await;
+            let left = self.ladder.stop.saturating_sub(started.elapsed());
+            if self.wait_stopped(target, left).await {
+                info!("the orphan caddy stopped through its admin API");
+                return Ok(());
+            }
         }
         let Some(record) = target else {
             return Err(Blocked::new(
@@ -318,12 +335,28 @@ impl Orphans<'_> {
                         ?signal,
                         "no signal: the pid is not verified as our caddy"
                     );
+                    let unsure = matches!(verdict, Verdict::Unsure);
                     if self.ports_free() {
+                        if unsure {
+                            // The caller deletes the pid file next. Keep the
+                            // pid in the log: it may still be our Caddy.
+                            let exe = record.exe.display();
+                            warn!(pid, %exe, "the old pid may still be our caddy; forgetting it");
+                        }
                         return Ok(());
                     }
-                    let (code, why) = match verdict {
-                        Verdict::NotOurs => (PORT_IN_USE, "is not our Caddy any more"),
-                        _ => (ORPHAN_STUCK, "cannot be verified as our Caddy"),
+                    // Our tag answered, so our Caddy holds the ports even
+                    // though this pid is not it. Without the tag, someone
+                    // else holds them.
+                    let code = if unsure || tagged {
+                        ORPHAN_STUCK
+                    } else {
+                        PORT_IN_USE
+                    };
+                    let why = if unsure {
+                        "cannot be verified as our Caddy"
+                    } else {
+                        "is not our Caddy"
                     };
                     let reason = format!("pid {pid} {why}, and the ports are still busy");
                     return Err(Blocked::new(code, reason));
@@ -350,6 +383,9 @@ impl Orphans<'_> {
             PidfileState::Unknown { .. } => return Verdict::Unsure,
             _ => return Verdict::NotOurs,
         }
+        // Compared exactly, byte for byte. A path that differs only in case
+        // (APFS ignores case) or that `lsof` escapes (a newline becomes
+        // `\n`) does not match, so the check fails closed: no signal.
         match self.processes.executable(record.pid).await {
             Some(exe) if self.pid_file.accepted.contains(&exe) => Verdict::Ours,
             Some(exe) => {
@@ -505,7 +541,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::io::{Read as _, Write as _};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     const PROGRAM: &str = "/data/bin/caddy";
     const STARTED: &str = "Wed Nov 4 03:31:27 2026";
@@ -513,12 +549,14 @@ mod tests {
 
     /// Gives the identities in order, then `Unknown`, and the executable
     /// `exe`. Records signals and sends none; a SIGKILL closes `held`, as the
-    /// death of the holder would.
+    /// death of the holder would. `events` keeps the order of the `lsof`
+    /// checks and the signals.
     #[derive(Debug)]
     struct Fake {
         identities: Mutex<VecDeque<Liveness>>,
         exe: Option<PathBuf>,
         signals: Mutex<Vec<(u32, Signal)>>,
+        events: Mutex<Vec<&'static str>>,
         held: Mutex<Option<TcpListener>>,
     }
 
@@ -528,6 +566,7 @@ mod tests {
                 identities: Mutex::new(identities.into_iter().collect()),
                 exe: Some(PathBuf::from(PROGRAM)),
                 signals: Mutex::default(),
+                events: Mutex::default(),
                 held: Mutex::default(),
             }
         }
@@ -544,11 +583,17 @@ mod tests {
         }
 
         fn executable(&self, _pid: u32) -> BoxFuture<'_, Option<PathBuf>> {
+            self.events.lock().unwrap().push("check");
             Box::pin(async move { self.exe.clone() })
         }
 
         fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
             self.signals.lock().unwrap().push((pid, signal));
+            let event = match signal {
+                Signal::Term => "TERM",
+                Signal::Kill => "KILL",
+            };
+            self.events.lock().unwrap().push(event);
             if signal == Signal::Kill {
                 self.held.lock().unwrap().take();
             }
@@ -721,6 +766,62 @@ mod tests {
             }
         });
         port
+    }
+
+    /// Accepts every connection on a new port, keeps what each request says,
+    /// and never answers: a frozen admin API.
+    fn frozen_admin() -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else {
+                    return;
+                };
+                let log = Arc::clone(&log);
+                std::thread::spawn(move || {
+                    let mut buf = [0; 4096];
+                    if let Ok(n) = stream.read(&mut buf) {
+                        let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                        log.lock().unwrap().push(request);
+                    }
+                    std::thread::sleep(Duration::from_secs(5));
+                });
+            }
+        });
+        (port, seen)
+    }
+
+    #[tokio::test]
+    async fn a_frozen_admin_api_gets_no_stop_and_each_signal_follows_its_check() {
+        // R7 with a pid file: the admin API never answers, so nothing says
+        // the Caddy there is ours, and `/stop` is not sent to it.
+        let (setup, _held) = setup();
+        let (port, seen) = frozen_admin();
+        let setup = Setup {
+            admin: Admin::new(port),
+            input: CaddyInput {
+                admin_port: port,
+                ..setup.input
+            },
+            ..setup
+        };
+        // Inspection, before SIGTERM, before SIGKILL.
+        let fake = Fake::new([ours(), ours(), ours()]);
+
+        let result = run(&setup, &fake).await;
+        // The frozen listener keeps the admin port busy to the end.
+        assert_eq!(result.unwrap_err().code, ORPHAN_STUCK);
+        let want = [(4242, Signal::Term), (4242, Signal::Kill)];
+        assert_eq!(fake.signals(), want);
+        let events = fake.events.lock().unwrap().clone();
+        assert_eq!(events, ["check", "TERM", "check", "KILL"]);
+        let seen = seen.lock().unwrap().clone();
+        assert!(seen.iter().all(|r| !r.contains("/stop")), "{seen:?}");
+        let probe = "GET /id/marsa-instance-";
+        assert!(seen.iter().any(|r| r.starts_with(probe)), "{seen:?}");
     }
 
     #[tokio::test]

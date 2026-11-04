@@ -87,7 +87,9 @@ fn error_message(code: &str) -> Option<&'static str> {
         "caddy_config_write" => "Cannot write the Caddy config file.",
         "caddy_start_timeout" => "Caddy did not become ready in time.",
         "port_in_use" => "A port it needs is used by another program.",
-        "caddy_orphan_stuck" => "An old Caddy from a crashed daemon could not be stopped.",
+        "caddy_orphan_stuck" => {
+            "An old Caddy from a crashed daemon holds the ports and could not be stopped safely."
+        }
         "caddy_other_marsa" => "Another Marsa's Caddy uses the ports it needs.",
         "exited" => "The process exited.",
         "spawn_failed" => "The process could not be started.",

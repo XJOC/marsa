@@ -310,7 +310,9 @@ pub fn parse_proc_stat(text: &str) -> Option<(char, u64)> {
 }
 
 /// Reads `lsof -p <pid> -a -d txt -Fn` output (macOS): the first `n<path>`
-/// line is the executable the process runs, links resolved.
+/// line is the executable the process runs, links resolved; the next ones are
+/// `dyld` and the libraries. `lsof` escapes odd characters (a newline becomes
+/// `\n`), so such a path never equals ours and the check fails closed.
 pub fn parse_lsof_executable(text: &str) -> Option<PathBuf> {
     let path = text
         .lines()

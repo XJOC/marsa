@@ -224,9 +224,9 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              see which one."
         ),
         "caddy_orphan_stuck" => format!(
-            "An old Caddy, left running when the Marsa daemon crashed, still holds the ports \
-             and could not be stopped. Run \"marsa logs {id}\" to see its process, stop it, \
-             then try again."
+            "An old Caddy, left running when the Marsa daemon crashed, still holds the ports, \
+             and Marsa could not stop it safely. Run \"marsa logs {id}\" to see its process, \
+             stop it, then try again."
         ),
         "caddy_other_marsa" => format!(
             "The Caddy of another Marsa (another data folder, or another user) uses the ports \

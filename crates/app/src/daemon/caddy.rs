@@ -330,8 +330,9 @@ impl CaddyManager {
     /// or another Marsa's Caddy is left alone, and so is a stale pid file.
     /// `false` when the orphan would not stop.
     async fn stop_orphan(&self, daemon: &Daemon, admin: &Admin) -> bool {
-        // Without the program there is no Caddy of ours to recognize.
-        if !self.spec.program.is_file() {
+        // No check on this OS, so no instance id file either. Without the
+        // program there is no Caddy of ours to recognize.
+        if !process::ORPHAN_RECOVERY || !self.spec.program.is_file() {
             return true;
         }
         let tag = match self.instance_tag() {

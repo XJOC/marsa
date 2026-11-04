@@ -182,8 +182,10 @@ pub async fn identity(_pid: u32) -> Liveness {
 }
 
 /// The file `pid` really runs, links resolved: not `argv[0]`. macOS asks
-/// `/usr/sbin/lsof` for the first text file of the process, Linux reads the
-/// `exe` link. `None` when it cannot be told.
+/// `/usr/sbin/lsof` for the text files of the process: the first one is the
+/// executable, then `dyld`. Linux reads the `exe` link. `None` when it
+/// cannot be told. The caller compares the path exactly, so a difference in
+/// case alone (APFS ignores case) fails closed.
 #[cfg(target_os = "macos")]
 pub async fn executable(pid: u32) -> Option<PathBuf> {
     if pid == 0 {
@@ -266,9 +268,10 @@ pub fn write_pid_file(path: &Path, record: &PidRecord) -> io::Result<()> {
 
 /// The instance id of a data folder, kept in `path` (`caddy/instance-id`):
 /// read when the file holds one, else 16 random bytes in hex, written once,
-/// `0600`, through a temp file and a rename. A file that holds no id is
-/// replaced: a Caddy tagged with the lost id then counts as another Marsa's,
-/// which is never touched.
+/// `0600`, through a temp file and a rename. Only a file whose content is no
+/// id is replaced: a Caddy tagged with the lost id then counts as another
+/// Marsa's, which is never touched. A failed read is an error, so a valid id
+/// is never replaced because of it.
 ///
 /// # Errors
 ///
@@ -276,10 +279,10 @@ pub fn write_pid_file(path: &Path, record: &PidRecord) -> io::Result<()> {
 pub fn instance_id(path: &Path) -> io::Result<String> {
     match File::open(path) {
         Ok(file) => {
-            let mut text = String::new();
-            // Longer than an id is not an id: no need to read it all, and a
-            // read error leaves `text` without an id too.
-            let _ = file.take(64).read_to_string(&mut text);
+            let mut bytes = Vec::new();
+            // Longer than an id is not an id: no need to read it all.
+            file.take(64).read_to_end(&mut bytes)?;
+            let text = std::str::from_utf8(&bytes).unwrap_or_default();
             let text = text.trim_end_matches(['\r', '\n']);
             if is_instance_id(text) {
                 return Ok(text.to_owned());
@@ -453,10 +456,23 @@ mod tests {
     fn a_file_without_an_id_gets_a_new_one() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("instance-id");
-        fs::write(&path, "not an id\n").unwrap();
-        let id = instance_id(&path).unwrap();
-        assert!(is_instance_id(&id), "{id}");
-        assert_eq!(instance_id(&path).unwrap(), id);
+        for bad in [&b"not an id\n"[..], &[0xff; 32][..]] {
+            fs::write(&path, bad).unwrap();
+            let id = instance_id(&path).unwrap();
+            assert!(is_instance_id(&id), "{id}");
+            assert_eq!(instance_id(&path).unwrap(), id);
+        }
+    }
+
+    #[test]
+    fn a_failed_read_is_an_error_and_replaces_nothing() {
+        // A folder where the file should be: it opens on Unix and fails to
+        // read, and fails to open on Windows. Either way nothing is written.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("instance-id");
+        fs::create_dir(&path).unwrap();
+        assert!(instance_id(&path).is_err());
+        assert!(path.is_dir());
     }
 
     #[test]

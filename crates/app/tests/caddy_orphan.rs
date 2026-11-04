@@ -20,6 +20,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, BufRead as _, BufReader, Write as _};
 use std::net::{Ipv4Addr, TcpListener};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -523,6 +524,42 @@ async fn a_pid_file_with_another_start_time_is_never_signalled() {
 }
 
 #[tokio::test]
+async fn a_process_that_only_claims_our_path_is_never_signalled() {
+    // `argv[0]` is chosen by whoever starts a process: this `sleep` shows our
+    // Caddy's path in `ps`, with its real start time, so the pid file
+    // matches. Only `lsof`, which reads the real executable, tells it apart.
+    // Nothing answers on the admin port, and a program holds the site port,
+    // so the ladder goes straight to the check before SIGTERM.
+    let dir = TempDir::new().unwrap();
+    let ports = Ports::free();
+    let mut sleeper = Bystander::spawn(Command::new("/bin/sleep").arg0(program()).arg("120"));
+    let Liveness::Alive { exe, started } = process::identity(sleeper.pid()).await else {
+        panic!("no identity for the sleeper");
+    };
+    assert_eq!(exe, program(), "ps shows the claimed path");
+    let record = PidRecord {
+        pid: sleeper.pid(),
+        exe,
+        started,
+    };
+    write_pid_file(&pid_path(dir.path()), &record).unwrap();
+    let _held = TcpListener::bind((Ipv4Addr::LOCALHOST, ports.http)).unwrap();
+
+    let recorder = Arc::new(Recorder::recording());
+    let daemon = daemon_on(dir.path(), "serve", ports, recorder.clone());
+    let status = start(&daemon).await;
+    assert!(
+        matches!(status.state, ServiceState::Failed { .. }),
+        "{:?}",
+        status.state
+    );
+    assert_eq!(status.state, port_in_use());
+    assert!(recorder.signals().is_empty());
+    assert!(sleeper.alive());
+    assert!(!daemon.proc_alive("caddy"));
+}
+
+#[tokio::test]
 async fn a_dead_pid_is_never_signalled() {
     // R3: the file names a process that has exited.
     let dir = TempDir::new().unwrap();
@@ -648,6 +685,13 @@ async fn another_marsas_caddy_gets_no_stop_and_no_signal() {
         notes.iter().any(|n| n.contains("another Marsa")),
         "{notes:?}"
     );
+    // The pid file matches, so the note names that process: it may be the
+    // user's own old Caddy.
+    let named = format!(
+        "our pid file names pid {me}, started as {}",
+        program().display()
+    );
+    assert!(notes.iter().any(|n| n.contains(&named)), "{notes:?}");
 
     // A stop leaves it alone too.
     let status = daemon.caddy.run(&daemon, ServiceAction::Stop).await;
