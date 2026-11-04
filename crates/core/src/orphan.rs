@@ -6,16 +6,20 @@
 //! Laravel policy: it answers "may I?", and the controller does the work.
 //!
 //! The rule that matters most: a pid may be signalled only when the pid file
-//! names it, the process at that pid runs our Caddy program, and it started at
-//! the time the file says ([`classify_pidfile`]). A port, or an answer on the
-//! admin API, never authorizes a signal.
+//! names it, the process at that pid was started as our Caddy program, at the
+//! time the file says ([`classify_pidfile`]), and, right before the signal,
+//! its real executable is our Caddy. A port, or an answer on the admin API,
+//! never authorizes a signal.
+//!
+//! Identity on the admin API is per data folder: the daemon puts
+//! `"@id": "marsa-instance-<id>"` on the `admin` object ([`instance_tag`]). A
+//! Caddy that answers only to the shared `marsa-srv` tag belongs to another
+//! Marsa (another data folder, or another user), and is never touched.
 
 use std::fmt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-
-use crate::caddy::SERVER_ID;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PidfileState {
@@ -25,15 +29,20 @@ pub enum PidfileState {
     Stale { pid: u32 },
     /// The pid is alive but it is not the process we started.
     Mismatch { pid: u32, found: String },
-    /// Alive, same executable path, same start time.
+    /// The OS could not describe the pid this time. Never ours, and the file
+    /// is kept: it may be ours on the next try.
+    Unknown { pid: u32 },
+    /// Alive, same start path, same start time.
     Ours { pid: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminState {
-    /// `GET /id/marsa-srv` answered 200 with our id.
+    /// `GET /id/marsa-instance-<id>` answered 200 with our data folder's id.
     Ours,
-    /// Something answered, but without our id.
+    /// Only `GET /id/marsa-srv` answered: the Caddy of another Marsa.
+    OtherMarsa,
+    /// Something answered, but without our id, or not as HTTP.
     Foreign,
     /// Connection refused: nothing listens.
     NoReply,
@@ -79,6 +88,8 @@ pub enum Action {
     Adopt { pid: Option<u32> },
     /// Someone else holds our ports. Report it and touch nothing.
     Conflict { reason: String },
+    /// Another Marsa's Caddy answers on our admin port. Touch nothing.
+    OtherMarsa,
 }
 
 impl fmt::Display for PidfileState {
@@ -87,6 +98,7 @@ impl fmt::Display for PidfileState {
             Self::Missing => write!(f, "missing"),
             Self::Stale { pid } => write!(f, "stale(pid={pid})"),
             Self::Mismatch { pid, found } => write!(f, "mismatch(pid={pid},found={found})"),
+            Self::Unknown { pid } => write!(f, "unknown(pid={pid})"),
             Self::Ours { pid } => write!(f, "ours(pid={pid})"),
         }
     }
@@ -96,6 +108,7 @@ impl fmt::Display for AdminState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
             Self::Ours => "ours",
+            Self::OtherMarsa => "other-marsa",
             Self::Foreign => "foreign",
             Self::NoReply => "no-reply",
             Self::Timeout => "timeout",
@@ -122,6 +135,7 @@ impl fmt::Display for Action {
             Self::Reap { pid } => write!(f, "reap(pid={pid:?})"),
             Self::Adopt { pid } => write!(f, "adopt(pid={pid:?})"),
             Self::Conflict { reason } => write!(f, "conflict({reason})"),
+            Self::OtherMarsa => write!(f, "other-marsa"),
         }
     }
 }
@@ -138,6 +152,7 @@ pub fn decide(i: &Inspection, strategy: Strategy) -> Action {
     // our admin port.
     let ours_pid = from_file.or(i.admin_owner);
     match i.admin {
+        AdminState::OtherMarsa => Action::OtherMarsa,
         AdminState::Foreign => Action::Conflict {
             reason: "a Caddy that is not ours answers on our admin port".to_string(),
         },
@@ -180,7 +195,9 @@ pub fn decide(i: &Inspection, strategy: Strategy) -> Action {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PidRecord {
     pub pid: u32,
-    /// The executable path as the OS reported it right after the spawn.
+    /// The path the process was started with, as the OS reported it right
+    /// after the spawn. On macOS `ps` shows `argv[0]`, which a process sets
+    /// itself, so the daemon checks the real executable before each signal.
     pub exe: PathBuf,
     /// The start time as the OS reported it, compared as text. Without it a
     /// reused pid that runs the same program would pass (ADR 0009, R5e).
@@ -192,27 +209,22 @@ pub struct PidRecord {
 pub enum Liveness {
     /// No such process, or a zombie.
     Gone,
-    Alive {
-        exe: PathBuf,
-        started: String,
-    },
+    /// `exe` is the path it was started with (`argv[0]` on macOS).
+    Alive { exe: PathBuf, started: String },
     /// The OS cannot tell: no permission, a failed tool, or an OS where this
     /// is not supported. Never ours.
     Unknown,
 }
 
 /// Compares the pid file with what the OS says now. `Ours` only when the
-/// process runs the program the file names, that program is one of `accepted`
-/// (the ways our Caddy path can be spelled), and the start time is the same.
-/// The daemon calls this again before each signal.
+/// process was started as the program the file names, that program is one of
+/// `accepted` (the ways our Caddy path can be spelled), and the start time is
+/// the same. The daemon calls this again before each signal.
 pub fn classify_pidfile(record: &PidRecord, accepted: &[PathBuf], now: &Liveness) -> PidfileState {
     let pid = record.pid;
     let (exe, started) = match now {
         Liveness::Gone => return PidfileState::Stale { pid },
-        Liveness::Unknown => {
-            let found = "a process the OS cannot describe".to_owned();
-            return PidfileState::Mismatch { pid, found };
-        }
+        Liveness::Unknown => return PidfileState::Unknown { pid },
         Liveness::Alive { exe, started } => (exe, started),
     };
     let found = exe.display().to_string();
@@ -226,21 +238,41 @@ pub fn classify_pidfile(record: &PidRecord, accepted: &[PathBuf], now: &Liveness
     PidfileState::Ours { pid }
 }
 
-/// The answer to `GET /id/marsa-srv`: ours only for a 200 whose JSON carries
-/// our `@id`. Any other answer is a program that is not ours.
-pub fn classify_admin_reply(status: u16, body: &[u8]) -> AdminState {
-    let tagged = status == 200
+/// The start of the `@id` the daemon puts on Caddy's `admin` object.
+pub const INSTANCE_TAG_PREFIX: &str = "marsa-instance-";
+
+/// The `@id` of this data folder's Caddy: `marsa-instance-<id>`, where `<id>`
+/// is the folder's [instance id](is_instance_id).
+pub fn instance_tag(instance_id: &str) -> String {
+    format!("{INSTANCE_TAG_PREFIX}{instance_id}")
+}
+
+/// Whether `text` is an instance id: 32 lowercase hex characters.
+pub fn is_instance_id(text: &str) -> bool {
+    text.len() == 32 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Whether an answer to `GET /id/<tag>` is the object tagged `tag`: a 200
+/// whose JSON carries that `@id`. Any other answer is not.
+pub fn reply_has_tag(status: u16, body: &[u8], tag: &str) -> bool {
+    status == 200
         && serde_json::from_slice::<serde_json::Value>(body)
-            .is_ok_and(|value| value.get("@id").and_then(|id| id.as_str()) == Some(SERVER_ID));
-    if tagged {
-        AdminState::Ours
-    } else {
-        AdminState::Foreign
+            .is_ok_and(|value| value.get("@id").and_then(|id| id.as_str()) == Some(tag))
+}
+
+/// The admin API state from two answers: to our instance tag, and, only when
+/// that one was not ours, to the shared `marsa-srv` tag.
+pub fn classify_admin_replies(ours: bool, shared: bool) -> AdminState {
+    match (ours, shared) {
+        (true, _) => AdminState::Ours,
+        (false, true) => AdminState::OtherMarsa,
+        (false, false) => AdminState::Foreign,
     }
 }
 
-/// Reads one line of `ps -o stat=,lstart=,comm=` run with `LC_ALL=C` (macOS):
-/// the state, five words of start time, then the path, which may hold spaces.
+/// Reads one line of `ps -o stat=,lstart=,comm=` run with `LC_ALL=C` and
+/// `TZ=UTC0` (macOS): the state, five words of start time, then the start
+/// path (`argv[0]`), which may hold spaces.
 /// Text in any other shape is `Unknown`.
 pub fn parse_ps_line(text: &str) -> Liveness {
     let mut rest = text.trim();
@@ -277,6 +309,15 @@ pub fn parse_proc_stat(text: &str) -> Option<(char, u64)> {
     Some((state, started))
 }
 
+/// Reads `lsof -p <pid> -a -d txt -Fn` output (macOS): the first `n<path>`
+/// line is the executable the process runs, links resolved.
+pub fn parse_lsof_executable(text: &str) -> Option<PathBuf> {
+    let path = text
+        .lines()
+        .find_map(|line| line.trim_end_matches('\r').strip_prefix('n'))?;
+    path.starts_with('/').then(|| PathBuf::from(path))
+}
+
 /// Reads `lsof -Fpc` output: `p<pid>` and `c<name>` lines. Gives `name(pid)`
 /// for the first process, for messages only.
 pub fn parse_lsof(text: &str) -> Option<String> {
@@ -299,6 +340,7 @@ pub fn parse_lsof(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::caddy::SERVER_ID;
 
     fn busy(owner: &str) -> PortState {
         PortState::Busy {
@@ -530,13 +572,21 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_pid_is_stale_and_an_unknown_one_a_mismatch() {
+    fn a_dead_pid_is_stale_and_an_unknown_one_is_kept() {
         assert_eq!(classify(&Liveness::Gone), PidfileState::Stale { pid: 7 });
-        let state = classify(&Liveness::Unknown);
-        assert!(
-            matches!(state, PidfileState::Mismatch { pid: 7, .. }),
-            "{state}"
+        let unknown = classify(&Liveness::Unknown);
+        assert_eq!(unknown, PidfileState::Unknown { pid: 7 });
+        // A failed `ps` neither names a pid to signal nor removes the file.
+        let i = inspection(
+            unknown,
+            AdminState::NoReply,
+            PortState::Free,
+            PortState::Free,
         );
+        let keep = Action::StartFresh {
+            remove_pidfile: false,
+        };
+        assert_eq!(decide(&i, Strategy::Reap), keep);
     }
 
     #[test]
@@ -555,14 +605,16 @@ mod tests {
     }
 
     #[test]
-    fn only_our_tag_on_a_200_is_ours() {
-        // What Caddy answers for the config `caddy_config` builds.
+    fn only_a_200_with_the_tag_has_the_tag() {
+        // What Caddy answers for the server `caddy_config` builds.
         let config = crate::caddy::caddy_config(&crate::caddy::CaddyInput::default());
         let server = config["apps"]["http"]["servers"]["marsa"].to_string();
-        assert_eq!(
-            classify_admin_reply(200, server.as_bytes()),
-            AdminState::Ours
-        );
+        assert!(reply_has_tag(200, server.as_bytes(), SERVER_ID));
+
+        let tag = instance_tag("0123456789abcdef0123456789abcdef");
+        let admin = format!(r#"{{"@id":"{tag}","listen":"127.0.0.1:1"}}"#);
+        assert!(reply_has_tag(200, admin.as_bytes(), &tag));
+        assert!(!reply_has_tag(200, admin.as_bytes(), SERVER_ID));
 
         let unknown = br#"{"error":"unknown object ID 'marsa-srv'"}"#;
         let cases: [(u16, &[u8]); 5] = [
@@ -574,12 +626,47 @@ mod tests {
         ];
         for (status, body) in cases {
             let text = String::from_utf8_lossy(body);
-            assert_eq!(
-                classify_admin_reply(status, body),
-                AdminState::Foreign,
-                "{status} {text}"
-            );
+            assert!(!reply_has_tag(status, body, SERVER_ID), "{status} {text}");
         }
+    }
+
+    #[test]
+    fn our_instance_tag_wins_and_the_shared_tag_alone_is_another_marsa() {
+        assert_eq!(classify_admin_replies(true, true), AdminState::Ours);
+        assert_eq!(classify_admin_replies(true, false), AdminState::Ours);
+        assert_eq!(classify_admin_replies(false, true), AdminState::OtherMarsa);
+        assert_eq!(classify_admin_replies(false, false), AdminState::Foreign);
+        // Another Marsa wins over a pid file that matches, as R5b.
+        let i = inspection(
+            PidfileState::Ours { pid: 9 },
+            AdminState::OtherMarsa,
+            busy("caddy(9)"),
+            busy("caddy(9)"),
+        );
+        assert_eq!(decide(&i, Strategy::Reap), Action::OtherMarsa);
+    }
+
+    #[test]
+    fn instance_ids_are_32_lowercase_hex() {
+        assert!(is_instance_id("0123456789abcdef0123456789abcdef"));
+        for bad in [
+            "",
+            "0123456789abcdef0123456789abcde",
+            "0123456789ABCDEF0123456789abcdef",
+            "0123456789abcdef0123456789abcdeg",
+            "0123456789abcdef0123456789abcdef\n",
+        ] {
+            assert!(!is_instance_id(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn lsof_txt_output_gives_the_executable() {
+        let out = "p812\nftxt\nn/data/a b/bin/caddy\nftxt\nn/usr/lib/dyld\n";
+        let exe = parse_lsof_executable(out);
+        assert_eq!(exe, Some(PathBuf::from("/data/a b/bin/caddy")));
+        assert_eq!(parse_lsof_executable(""), None);
+        assert_eq!(parse_lsof_executable("p812\nftxt\nncaddy\n"), None);
     }
 
     #[test]

@@ -336,6 +336,8 @@ async fn start_shows_running_and_logs_then_stop() {
         .await;
     assert_eq!((stopped.state, stopped.pid), (ServiceState::Stopped, None));
     assert!(!app.daemon.proc_alive("caddy"));
+    // Caddy has exited, so its pid file is gone (ADR 0009).
+    assert!(!app.dir.path().join("run").join("caddy.pid").exists());
     // A second stop changes nothing.
     let again: ServiceStatus = app
         .json("POST", "/v1/services/caddy/stop", StatusCode::OK)

@@ -2,8 +2,9 @@
 //! part, run again with `MARSA_ORPHAN_FAKE` set:
 //!
 //! - `serve`: a fake Caddy. It reads the `caddy.json` the daemon wrote,
-//!   listens on its admin and site addresses, answers `GET /id/marsa-srv`
-//!   with the tagged server, and exits on `POST /stop`.
+//!   listens on its admin and site addresses, answers `GET /id/<tag>` for
+//!   the `@id` of the admin object (this data folder's tag) and for
+//!   `marsa-srv`, as Caddy does, and exits on `POST /stop`.
 //! - `stubborn`: the same, but `POST /stop` does nothing: only a signal stops it.
 //! - `idle`: runs our program and holds no port.
 //! - `daemon`: a small `marsad`: a `Daemon` that starts the fake Caddy, then
@@ -12,9 +13,9 @@
 //! The rejection tests record the signals and send none. Every fake ends by
 //! itself after two minutes, so a failed test leaves nothing running for long.
 
-// Signals and pid checks exist on macOS and Linux only; Windows skips the
-// orphan check until Job Objects (architecture.md section 9).
-#![cfg(any(target_os = "macos", target_os = "linux"))]
+// The orphan check runs on macOS only (ADR 0009): Linux waits for spike
+// S-06b, and Windows for Job Objects (architecture.md section 9).
+#![cfg(target_os = "macos")]
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead as _, BufReader, Write as _};
@@ -75,10 +76,12 @@ fn fake_caddy(stops: bool) {
     let path = std::env::var(CONFIG).expect("the config path");
     let config = std::fs::read_to_string(path).expect("caddy.json");
     let config: Value = serde_json::from_str(&config).expect("JSON");
-    let admin = config["admin"]["listen"].as_str().expect("admin.listen");
+    let admin_object = config["admin"].clone();
+    let admin = admin_object["listen"].as_str().expect("admin.listen");
+    let tag = admin_object["@id"].as_str().expect("admin.@id");
     let server = config["apps"]["http"]["servers"]["marsa"].clone();
     let site = server["listen"][0].as_str().expect("a site address");
-    let (admin, site) = (admin.to_owned(), site.to_owned());
+    let (admin, tag, site) = (admin.to_owned(), tag.to_owned(), site.to_owned());
     let runtime = tokio::runtime::Runtime::new().expect("a runtime");
     runtime.block_on(async move {
         tokio::spawn(async {
@@ -89,6 +92,13 @@ fn fake_caddy(stops: bool) {
         let site = tokio::net::TcpListener::bind(&site).await.expect("site");
         let api = Router::new()
             .route("/config/", get(|| async { "{}" }))
+            .route(
+                &format!("/id/{tag}"),
+                get(move || {
+                    let admin = admin_object.clone();
+                    async move { Json(admin) }
+                }),
+            )
             .route(
                 &format!("/id/{SERVER_ID}"),
                 get(move || {
@@ -197,6 +207,10 @@ impl Processes for Recorder {
         Box::pin(process::identity(pid))
     }
 
+    fn executable(&self, pid: u32) -> BoxFuture<'_, Option<PathBuf>> {
+        Box::pin(process::executable(pid))
+    }
+
     fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
         self.signals
             .lock()
@@ -280,9 +294,45 @@ fn notes(daemon: &Daemon) -> Vec<String> {
 }
 
 fn port_in_use() -> ServiceState {
-    ServiceState::Failed {
-        code: "port_in_use".into(),
+    failed("port_in_use")
+}
+
+fn failed(code: &str) -> ServiceState {
+    ServiceState::Failed { code: code.into() }
+}
+
+/// Kills an orphan this test made, once it is checked to still be that one.
+async fn kill_orphan(record: &PidRecord) {
+    if alive(record).await {
+        let _ = process::send_signal(record.pid, Signal::Kill).await;
     }
+}
+
+/// Serves another Marsa's Caddy on `port`: it answers to the shared
+/// `marsa-srv` tag only. Gives the count of `POST /stop` requests.
+async fn other_marsa(port: u16) -> Arc<AtomicUsize> {
+    let stops = Arc::new(AtomicUsize::new(0));
+    let counted = stops.clone();
+    let app = Router::new()
+        .route(
+            &format!("/id/{SERVER_ID}"),
+            get(|| async { Json(json!({ "@id": SERVER_ID, "listen": [":1"] })) }),
+        )
+        .route(
+            "/stop",
+            post(move || async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }),
+        )
+        .fallback(|| async {
+            let error = json!({ "error": "unknown object ID" });
+            (StatusCode::NOT_FOUND, Json(error))
+        });
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+        .await
+        .expect("the admin port");
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    stops
 }
 
 /// A process this test started. Dropping it kills it: its pid cannot be
@@ -371,6 +421,9 @@ async fn an_orphan_of_a_killed_daemon_stops_on_post_stop_and_is_replaced() {
     assert!(!alive(&orphan).await, "the orphan is gone");
     assert!(recorder.signals().is_empty(), "POST /stop was enough");
     wait_for_pid_file(dir.path(), pid).await;
+    let notes = notes(&daemon);
+    let stopping = "marsad: Stopping an old Caddy left by a crashed marsad.";
+    assert!(notes.iter().any(|n| n == stopping), "{notes:?}");
 
     // A clean stop removes the file.
     daemon.stop_procs(WAIT).await;
@@ -558,12 +611,134 @@ async fn a_port_held_by_another_program_is_a_conflict() {
     let notes = notes(&daemon);
     let note = notes.iter().find(|n| n.contains("site port is held by"));
     let note = note.unwrap_or_else(|| panic!("no note in {notes:?}"));
-    // `lsof` names the owner on macOS; Linux reports an unknown program.
-    #[cfg(target_os = "macos")]
+    // `lsof` names the owner, once.
+    let me = format!("({})", std::process::id());
+    assert_eq!(note.matches(&me).count(), 1, "{note}");
+}
+
+#[tokio::test]
+async fn another_marsas_caddy_gets_no_stop_and_no_signal() {
+    // Another data folder's Caddy on the shared admin port: it answers to
+    // `marsa-srv`, not to our instance tag. Even a pid file that matches this
+    // very process does not make it ours.
+    let dir = TempDir::new().unwrap();
+    let ports = Ports::free();
+    let stops = other_marsa(ports.admin).await;
+    let me = std::process::id();
+    let Liveness::Alive { exe, started } = process::identity(me).await else {
+        panic!("no identity for this test");
+    };
+    let record = PidRecord {
+        pid: me,
+        exe,
+        started,
+    };
+    write_pid_file(&pid_path(dir.path()), &record).unwrap();
+
+    let recorder = Arc::new(Recorder::recording());
+    let daemon = daemon_on(dir.path(), "serve", ports, recorder.clone());
+    let status = start(&daemon).await;
+    assert_eq!(status.state, failed("caddy_other_marsa"));
+    assert_eq!(stops.load(Ordering::SeqCst), 0, "no POST /stop to it");
+    assert!(recorder.signals().is_empty());
+    assert!(!daemon.proc_alive("caddy"));
+    assert_eq!(read_pid_file(&pid_path(dir.path())), Some(record));
+    let notes = notes(&daemon);
     assert!(
-        note.contains(&format!("({})", std::process::id())),
-        "{note}"
+        notes.iter().any(|n| n.contains("another Marsa")),
+        "{notes:?}"
     );
-    #[cfg(target_os = "linux")]
-    assert!(note.contains("an unknown program"), "{note}");
+
+    // A stop leaves it alone too.
+    let status = daemon.caddy.run(&daemon, ServiceAction::Stop).await;
+    assert_eq!(status.unwrap().state, failed("caddy_other_marsa"));
+    assert_eq!(stops.load(Ordering::SeqCst), 0);
+    assert!(recorder.signals().is_empty());
+}
+
+#[tokio::test]
+async fn our_stubborn_orphan_with_a_pid_file_naming_sleep_gets_no_signal() {
+    // Our tag answers, but the pid file names an innocent `sleep` (its start
+    // time included): `/stop` is all the orphan gets.
+    let dir = TempDir::new().unwrap();
+    let ports = Ports::free();
+    let orphan = orphan_of_a_killed_daemon(dir.path(), "stubborn", ports).await;
+    let mut sleeper = Bystander::spawn(Command::new("/bin/sleep").arg("120"));
+    let Liveness::Alive { started, .. } = process::identity(sleeper.pid()).await else {
+        panic!("no identity for the sleeper");
+    };
+    let record = PidRecord {
+        pid: sleeper.pid(),
+        exe: program(),
+        started,
+    };
+    write_pid_file(&pid_path(dir.path()), &record).unwrap();
+
+    let recorder = Arc::new(Recorder::recording());
+    let daemon = daemon_on(dir.path(), "serve", ports, recorder.clone());
+    let status = start(&daemon).await;
+    assert_eq!(status.state, failed("caddy_orphan_stuck"));
+    assert!(recorder.signals().is_empty());
+    assert!(sleeper.alive());
+    assert!(alive(&orphan).await, "only /stop, which it ignores");
+    kill_orphan(&orphan).await;
+}
+
+#[tokio::test]
+async fn r2_our_stubborn_orphan_without_a_pid_file_gets_no_signal() {
+    let dir = TempDir::new().unwrap();
+    let ports = Ports::free();
+    let orphan = orphan_of_a_killed_daemon(dir.path(), "stubborn", ports).await;
+    process::remove_pid_file(&pid_path(dir.path())).unwrap();
+
+    let recorder = Arc::new(Recorder::recording());
+    let daemon = daemon_on(dir.path(), "serve", ports, recorder.clone());
+    let status = start(&daemon).await;
+    assert_eq!(status.state, failed("caddy_orphan_stuck"));
+    assert!(recorder.signals().is_empty());
+    assert!(alive(&orphan).await);
+    let notes = notes(&daemon);
+    assert!(notes.iter().any(|n| n.contains("no pid file")), "{notes:?}");
+    kill_orphan(&orphan).await;
+}
+
+#[tokio::test]
+async fn stop_with_no_caddy_running_stops_our_own_orphan() {
+    let dir = TempDir::new().unwrap();
+    let ports = Ports::free();
+    let orphan = orphan_of_a_killed_daemon(dir.path(), "serve", ports).await;
+
+    let recorder = Arc::new(Recorder::sending());
+    let daemon = daemon_on(dir.path(), "serve", ports, recorder.clone());
+    let status = daemon.caddy.run(&daemon, ServiceAction::Stop).await;
+    assert_eq!(status.unwrap().state, ServiceState::Stopped);
+    assert!(!alive(&orphan).await, "the orphan is gone");
+    assert!(recorder.signals().is_empty(), "POST /stop was enough");
+    assert_eq!(read_pid_file(&pid_path(dir.path())), None);
+    assert!(!daemon.proc_alive("caddy"), "a stop starts nothing");
+}
+
+#[tokio::test]
+async fn stop_with_no_caddy_running_touches_nothing_else() {
+    // A stale pid file and a port held by another program: a start would
+    // remove the file or report the port; a stop does neither.
+    let dir = TempDir::new().unwrap();
+    let ports = Ports::free();
+    let mut gone = Command::new("/bin/sleep").arg("0").spawn().unwrap();
+    gone.wait().unwrap();
+    let record = PidRecord {
+        pid: gone.id(),
+        exe: program(),
+        started: "Wed Nov 4 03:31:27 2026".into(),
+    };
+    write_pid_file(&pid_path(dir.path()), &record).unwrap();
+    let _held = TcpListener::bind((Ipv4Addr::LOCALHOST, ports.http)).unwrap();
+
+    let recorder = Arc::new(Recorder::recording());
+    let daemon = daemon_on(dir.path(), "serve", ports, recorder.clone());
+    let status = daemon.caddy.run(&daemon, ServiceAction::Stop).await;
+    assert_eq!(status.unwrap().state, ServiceState::Stopped);
+    assert!(recorder.signals().is_empty());
+    assert_eq!(read_pid_file(&pid_path(dir.path())), Some(record));
+    assert!(notes(&daemon).is_empty());
 }
