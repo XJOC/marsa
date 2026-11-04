@@ -16,6 +16,10 @@
 #   PREFER_PRE_BUILT  "true" = use static-php.dev pre-built libraries when they
 #                     match; "false" = build every library from source (default: true)
 #   EXTRA_LIBS        optional gd/redis libraries (default: freetype,libjpeg,libwebp,zstd,liblz4)
+#   XDEBUG_URL        a source archive for Xdebug that replaces spc's default. The
+#                     default is the newest commit of the xdebug/xdebug repo (3.6.0alpha1
+#                     in run 1), not a release. Needs XDEBUG_SHA256 too.
+#   XDEBUG_SHA256     sha256 of that archive; the build stops if it differs
 #   OUT               where timings.txt is written     (default: out/)
 set -euo pipefail
 
@@ -59,10 +63,30 @@ t1="$(now)"
 dl_args=(download "--with-php=$PHP_VERSION" "--for-extensions=${EXTS}${SHARED:+,$SHARED}" --ignore-cache-sources=php-src --retry=2)
 if [ -n "$EXTRA_LIBS" ]; then dl_args+=("--for-libs=$EXTRA_LIBS"); fi
 if [ "$PREFER_PRE_BUILT" = "true" ]; then dl_args+=(--prefer-pre-built); fi
+XDEBUG_URL="${XDEBUG_URL:-}"
+case ",$SHARED," in *,xdebug,*) ;; *) XDEBUG_URL="" ;; esac   # only when Xdebug is built
+if [ -n "$XDEBUG_URL" ]; then dl_args+=("--custom-url=xdebug:$XDEBUG_URL"); fi
 echo "::group::spc ${dl_args[*]}"
 "$SPC" "${dl_args[@]}"
 echo "::endgroup::"
 t2="$(now)"
+
+# spc does not check a custom URL, so check the pinned hash here.
+if [ -n "$XDEBUG_URL" ]; then
+  want="${XDEBUG_SHA256:?XDEBUG_SHA256 is required with XDEBUG_URL}"
+  file="downloads/$(basename "$XDEBUG_URL")"
+  if [ ! -f "$file" ]; then
+    echo "Xdebug archive $file not found; downloads/ has:"
+    ls -l downloads
+    exit 1
+  fi
+  got="$( (sha256sum "$file" 2> /dev/null || shasum -a 256 "$file") | cut -d' ' -f1)"
+  if [ "$got" != "$want" ]; then
+    echo "Xdebug sha256 mismatch: wanted $want, got $got"
+    exit 1
+  fi
+  echo "Xdebug archive ok: $file sha256 $got"
+fi
 
 build_args=(build "$EXTS" --build-cli --build-fpm)
 if [ -n "$SHARED" ]; then build_args+=("--build-shared=$SHARED"); fi

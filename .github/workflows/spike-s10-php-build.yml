@@ -36,9 +36,12 @@ env:
   # asset is in spikes/s10-php-build/spc.sha256.
   SPC_VERSION: "2.8.5"
   PHP_VERSION: ${{ inputs.php_version || '8.4' }}
-  PREFER_PRE_BUILT: ${{ inputs.prefer_pre_built || 'true' }}
   # spc reads this to avoid GitHub API rate limits when it downloads sources.
   GITHUB_TOKEN: ${{ github.token }}
+  # spc's default Xdebug source is the newest commit (3.6.0alpha1 in run 1). Pin the
+  # release ADR 0010 used. sha256 as recorded in spikes/s03-xdebug/results/downloads.txt.
+  XDEBUG_URL: "https://xdebug.org/files/xdebug-3.5.3.tgz"
+  XDEBUG_SHA256: "f073de91bea046106abf4d6071c963ea71e58571df6ce58948ceca89d121cb2d"
 
 defaults:
   run:
@@ -58,25 +61,32 @@ jobs:
             spc_target: ""
             shared: xdebug
             dlopen: "true"
+            prebuilt: "true"
           - label: macos-x64
             os: macos-15-intel
             spc_asset: spc-macos-x86_64
             spc_target: ""
             shared: xdebug
             dlopen: "true"
+            prebuilt: "true"
           # Linux glibc 2.17 (zig toolchain): can load xdebug.so, runs on any glibc distro.
+          # prebuilt "false": the static-php.dev pre-built ICU is built with libstdc++, and zig
+          # links libc++, so linking fails (run 1: undefined std::condition_variable). Build
+          # every library from source with zig.
           - label: linux-x64-glibc
             os: ubuntu-22.04
             spc_asset: spc-linux-x86_64
             spc_target: native-native-gnu.2.17
             shared: xdebug
             dlopen: "true"
+            prebuilt: "false"
           - label: linux-arm64-glibc
             os: ubuntu-22.04-arm
             spc_asset: spc-linux-aarch64
             spc_target: native-native-gnu.2.17
             shared: xdebug
             dlopen: "true"
+            prebuilt: "false"
           # Linux static musl (what static-php.dev publishes): runs on any Linux
           # including Alpine, but cannot load a .so, so no Xdebug (ADR 0010).
           - label: linux-x64-musl
@@ -85,6 +95,7 @@ jobs:
             spc_target: ""
             shared: ""
             dlopen: "false"
+            prebuilt: "true"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     env:
@@ -95,6 +106,8 @@ jobs:
       SPC_TARGET: ${{ matrix.spc_target }}
       SHARED: ${{ matrix.shared }}
       DLOPEN: ${{ matrix.dlopen }}
+      # A manual run with prefer_pre_built=false forces a from-source build everywhere.
+      PREFER_PRE_BUILT: ${{ inputs.prefer_pre_built == 'false' && 'false' || matrix.prebuilt }}
     steps:
       - uses: actions/checkout@v5
 
