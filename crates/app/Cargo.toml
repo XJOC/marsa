@@ -14,6 +14,8 @@ clap.workspace = true
 # The DNS server for .test in marsad (task M4-12).
 hickory-server.workspace = true
 reqwest.workspace = true
+# Site PHP versions, for the php-fpm pools (task M4-11).
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -12,6 +12,11 @@
 //! (ADR 0009). The `admin` object in `caddy.json` carries this data folder's
 //! tag, `marsa-instance-<id>`, so the daemon of another folder never takes
 //! our Caddy for its own.
+//!
+//! The config is always `sites_config` of the sites and PHP pools that the
+//! sync task (`sites_sync`) last gave [`CaddyManager::apply`]. While Caddy
+//! runs, each change goes to its admin API (`POST /load`), so Caddy changes
+//! without a restart (task M4-11). The ports stay the same: no new listener.
 
 pub mod orphan;
 
@@ -22,10 +27,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use marsa_core::caddy::{CaddyInput, CaddyPaths, caddy_config, caddy_env};
+use marsa_core::caddy::{CaddyError, CaddyInput, CaddyPaths, PhpPools, caddy_env, sites_config};
 use marsa_core::orphan::instance_tag;
 use marsa_core::platform::process;
 use marsa_core::services::{ProgramNotAbsolute, RestartPolicy, ServiceSpec};
+use marsa_core::sites::Site;
 use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceState, ServiceStatus};
 use reqwest::redirect;
 use serde_json::Value;
@@ -48,6 +54,19 @@ const READY_LIMIT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(100);
 /// For each admin API call, `/stop` included.
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(1);
+/// For `POST /load`: Caddy answers once the new config runs, and the first
+/// config with a secure site also makes the CA.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How Caddy and each php-fpm pool restart after a failure: up to 3 times,
+/// after 0.5 s, then twice as long each time, at most 5 s.
+pub const RESTART: RestartPolicy = RestartPolicy::OnFailure {
+    max_retries: 3,
+    initial: Duration::from_millis(500),
+    max: Duration::from_secs(5),
+};
+/// How long a stop of Caddy or of a php-fpm pool waits after SIGTERM.
+pub const STOP_GRACE: Duration = Duration::from_secs(2);
 
 /// What Caddy prints when an address is taken: Go's text on macOS and Linux,
 /// and the English Windows text. Compared in lower case.
@@ -71,12 +90,8 @@ pub fn caddy_spec(paths: &CaddyPaths) -> ServiceSpec {
         ],
         env: caddy_env(paths),
         cwd: None,
-        restart: RestartPolicy::OnFailure {
-            max_retries: 3,
-            initial: Duration::from_millis(500),
-            max: Duration::from_secs(5),
-        },
-        stop_grace: Duration::from_secs(2),
+        restart: RESTART,
+        stop_grace: STOP_GRACE,
     }
 }
 
@@ -136,6 +151,86 @@ pub struct CaddyManager {
     runtime: Arc<Mutex<ServiceRuntime>>,
     /// Set while an action runs.
     busy: AtomicBool,
+    /// The sites and PHP pools of the config. [`CaddyManager::apply`] sets
+    /// them; `start` writes the config of the latest ones.
+    wanted: Mutex<Wanted>,
+    /// Held while a config goes to Caddy: by each `apply`, and by `start`
+    /// from writing `caddy.json` until Caddy is ready. So configs reach
+    /// Caddy in order, and never a Caddy that is still starting. A tokio
+    /// lock: it is held across `.await`.
+    pushing: tokio::sync::Mutex<()>,
+}
+
+/// What the config is built from, besides the ports.
+#[derive(Debug, Default)]
+struct Wanted {
+    sites: Vec<Site>,
+    pools: PhpPools,
+}
+
+/// Where [`CaddyManager::apply`] put the new config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// Caddy runs it now.
+    Loaded,
+    /// Caddy does not run: it reads `caddy.json` when it starts.
+    Written,
+}
+
+/// Why a new config did not reach Caddy. Caddy keeps its old config then.
+#[derive(Debug)]
+pub enum LoadError {
+    /// The config cannot be built.
+    Config(CaddyError),
+    /// `caddy.json` or the instance id cannot be written.
+    Write(io::Error),
+    /// Caddy cannot listen on an address of the new config: another program
+    /// holds it, or it is not allowed (ADR 0008, finding 11). `address` comes
+    /// from `listening on <addr>:` in Caddy's answer.
+    PortInUse {
+        address: Option<String>,
+        message: String,
+    },
+    /// Caddy refused the config for another reason.
+    Rejected { status: u16, message: String },
+    /// The admin API did not answer.
+    Unreachable(String),
+}
+
+impl LoadError {
+    /// Stable error name for the logs and the UI.
+    pub fn code(&self) -> &'static str {
+        match self {
+            LoadError::Config(err) => err.code(),
+            LoadError::Write(_) => "caddy_config_write",
+            LoadError::PortInUse { .. } => orphan::PORT_IN_USE,
+            LoadError::Rejected { .. } => "caddy_config_rejected",
+            LoadError::Unreachable(_) => "caddy_admin_unreachable",
+        }
+    }
+}
+
+impl fmt::Display for LoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LoadError::Config(err) => err.fmt(f),
+            LoadError::Write(err) => write!(f, "cannot write caddy.json: {err}"),
+            LoadError::PortInUse {
+                address: Some(address),
+                ..
+            } => write!(
+                f,
+                "Caddy cannot listen on {address}: it is in use or not allowed"
+            ),
+            LoadError::PortInUse { address: None, .. } => {
+                f.write_str("Caddy cannot listen on an address: it is in use or not allowed")
+            }
+            LoadError::Rejected { status, message } => {
+                write!(f, "Caddy refused the config ({status}): {message}")
+            }
+            LoadError::Unreachable(err) => write!(f, "Caddy's admin API did not answer: {err}"),
+        }
+    }
 }
 
 impl CaddyManager {
@@ -151,7 +246,56 @@ impl CaddyManager {
             ladder: Ladder::default(),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(CADDY_ID))),
             busy: AtomicBool::new(false),
+            wanted: Mutex::default(),
+            pushing: tokio::sync::Mutex::default(),
         }
+    }
+
+    /// Makes `sites` and `pools` the config: writes `caddy.json`, and while
+    /// Caddy runs, sends it to the admin API (`POST /load`), so Caddy changes
+    /// without a restart. A Caddy that does not run reads the file when it
+    /// starts. Calls run one at a time, in order, so the last one wins.
+    ///
+    /// # Errors
+    ///
+    /// See [`LoadError`]. A refused config is also noted in Caddy's recent
+    /// lines, so `marsa logs caddy` shows why.
+    pub async fn apply(
+        &self,
+        daemon: &Daemon,
+        sites: Vec<Site>,
+        pools: PhpPools,
+    ) -> Result<Applied, LoadError> {
+        let _pushing = self.pushing.lock().await;
+        *lock(&self.wanted) = Wanted { sites, pools };
+        let tag = self.instance_tag().map_err(LoadError::Write)?;
+        let config = self.config(&tag).map_err(LoadError::Config)?;
+        write_config(&self.paths.config_file, &config)
+            .await
+            .map_err(LoadError::Write)?;
+        if !daemon.proc_alive(CADDY_ID) {
+            return Ok(Applied::Written);
+        }
+        match Admin::new(self.input.admin_port).load(&config).await {
+            Ok(()) => Ok(Applied::Loaded),
+            // Caddy stopped in the meantime: it reads the file when it starts.
+            Err(LoadError::Unreachable(_)) if !daemon.proc_alive(CADDY_ID) => Ok(Applied::Written),
+            Err(err) => {
+                let text = format!("marsad: The new config was not loaded: {err}.");
+                note(&self.runtime, &daemon.events, &text);
+                Err(err)
+            }
+        }
+    }
+
+    /// The config of the latest sites and pools, with `tag` on `admin`.
+    fn config(&self, tag: &str) -> Result<Value, CaddyError> {
+        let mut config = {
+            let wanted = lock(&self.wanted);
+            sites_config(&self.input, &wanted.sites, &wanted.pools)?
+        };
+        tag_config(&mut config, tag);
+        Ok(config)
     }
 
     pub fn status(&self) -> ServiceStatus {
@@ -230,7 +374,18 @@ impl CaddyManager {
                 }
             }
         }
-        if let Err(err) = write_config(&self.paths.config_file, &self.input, &tag).await {
+        // Held until the end of the start, so `apply` waits for a Caddy that
+        // answers.
+        let _pushing = self.pushing.lock().await;
+        let config = match self.config(&tag) {
+            Ok(config) => config,
+            Err(err) => {
+                self.fail("caddy_config_write", &daemon.events);
+                let err = io::Error::new(io::ErrorKind::InvalidData, err);
+                return Err(ActionError::ConfigWrite(err));
+            }
+        };
+        if let Err(err) = write_config(&self.paths.config_file, &config).await {
             self.fail("caddy_config_write", &daemon.events);
             return Err(ActionError::ConfigWrite(err));
         }
@@ -553,23 +708,20 @@ fn set_failed(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>
     let _ = events.send(Event::ServiceChanged(status.clone()));
 }
 
-/// The config for `input`, with this data folder's `tag` as the `@id` of the
-/// `admin` object. `GET /id/<tag>` then answers only on our own Caddy.
-/// Without an `admin` object there is no tag, and the Caddy counts as not
-/// ours, which is the safe side.
-fn tagged_config(input: &CaddyInput, tag: &str) -> Value {
-    let mut config = caddy_config(input);
+/// Puts this data folder's `tag` as the `@id` of the `admin` object.
+/// `GET /id/<tag>` then answers only on our own Caddy. Without an `admin`
+/// object there is no tag, and the Caddy counts as not ours, which is the
+/// safe side.
+fn tag_config(config: &mut Value, tag: &str) {
     if let Some(admin) = config.get_mut("admin").and_then(Value::as_object_mut) {
         admin.insert("@id".to_owned(), Value::String(tag.to_owned()));
     }
-    config
 }
 
 /// Writes `caddy.json` through a temp file in the same folder and a rename,
 /// so Caddy never reads half a file.
-async fn write_config(path: &Path, input: &CaddyInput, tag: &str) -> io::Result<()> {
-    let config = tagged_config(input, tag);
-    let mut body = serde_json::to_vec_pretty(&config).map_err(io::Error::other)?;
+async fn write_config(path: &Path, config: &Value) -> io::Result<()> {
+    let mut body = serde_json::to_vec_pretty(config).map_err(io::Error::other)?;
     body.push(b'\n');
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir).await?;
@@ -634,12 +786,73 @@ impl Admin {
             Err(err) => debug!(%err, "caddy admin /stop failed"),
         }
     }
+
+    /// `POST /load` with `config`: Caddy runs it from now on, or keeps its
+    /// old config and says why.
+    async fn load(&self, config: &Value) -> Result<(), LoadError> {
+        let Some(http) = &self.http else {
+            return Err(LoadError::Unreachable("no HTTP client".to_owned()));
+        };
+        let response = http
+            .post(format!("{}/load", self.base))
+            .json(config)
+            .timeout(LOAD_TIMEOUT)
+            .send()
+            .await
+            .map_err(|err| LoadError::Unreachable(err.to_string()))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        // A body that cannot be read leaves the status to say what happened.
+        let body = response.text().await.unwrap_or_default();
+        Err(load_error(status.as_u16(), &body))
+    }
+}
+
+/// What Caddy says, in lower case, when it cannot listen on an address of a
+/// new config: Go's texts on macOS and Linux (ADR 0008, finding 11), and the
+/// English Windows text.
+const LOAD_PORT_ERRORS: [&str; 3] = [
+    "bind: address already in use",
+    "bind: permission denied",
+    "only one usage of each socket address",
+];
+
+/// The error of a refused `POST /load`. Caddy answers `{"error": "..."}`; a
+/// 400 that says an address is taken or not allowed is `port_in_use`.
+fn load_error(status: u16, body: &str) -> LoadError {
+    let message = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|body| body.get("error")?.as_str().map(str::to_owned))
+        .unwrap_or_else(|| body.trim().to_owned());
+    let lower = message.to_ascii_lowercase();
+    if status == 400 && LOAD_PORT_ERRORS.iter().any(|text| lower.contains(text)) {
+        let address = listen_address(&message);
+        return LoadError::PortInUse { address, message };
+    }
+    LoadError::Rejected { status, message }
+}
+
+/// The `<addr>` of `listening on <addr>: ...` in Caddy's error text, for
+/// example `127.0.0.1:18443`.
+fn listen_address(message: &str) -> Option<String> {
+    let (_, rest) = message.split_once("listening on ")?;
+    let (address, _) = rest.split_once(": ")?;
+    (!address.is_empty()).then(|| address.to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::env::consts::EXE_SUFFIX;
+    use std::path::PathBuf;
+
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use marsa_core::caddy::caddy_config;
+    use marsa_core::sites::SiteKind;
+    use tokio::sync::mpsc;
 
     fn line(stream: LogStream, text: &str) -> LogLine {
         LogLine {
@@ -672,6 +885,7 @@ mod tests {
             max: Duration::from_secs(5),
         };
         assert_eq!(spec.restart, restart);
+        assert_eq!(RESTART, restart);
         assert_eq!(spec.stop_grace, Duration::from_secs(2));
     }
 
@@ -700,7 +914,9 @@ mod tests {
             ..CaddyInput::default()
         };
         let tag = "marsa-instance-0123456789abcdef0123456789abcdef";
-        write_config(&path, &input, tag).await.unwrap();
+        let mut config = caddy_config(&input);
+        tag_config(&mut config, tag);
+        write_config(&path, &config).await.unwrap();
         let mut written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         // The core config, plus our tag on the admin object, and nothing else.
@@ -713,5 +929,176 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, ["caddy.json"], "no temp file left");
+    }
+
+    /// What Caddy v2.11.7 answered when another program held its HTTPS
+    /// address (ADR 0008, finding 11, T9), verbatim.
+    const T9: &str = "{\"error\":\"loading config: loading new config: http app module: start: \
+                      listening on 127.0.0.1:18443: listen tcp 127.0.0.1:18443: bind: address already in use\"}";
+
+    #[test]
+    fn a_taken_address_in_a_load_answer_is_port_in_use() {
+        let err = load_error(400, T9);
+        assert_eq!(err.code(), "port_in_use");
+        let LoadError::PortInUse { address, message } = err else {
+            panic!("not port_in_use");
+        };
+        assert_eq!(address.as_deref(), Some("127.0.0.1:18443"));
+        assert!(message.starts_with("loading config:"), "{message}");
+
+        // The redirect port (T9b), and a low port Caddy may not use.
+        let t9b = T9.replace("18443", "18080");
+        let LoadError::PortInUse { address, .. } = load_error(400, &t9b) else {
+            panic!("not port_in_use");
+        };
+        assert_eq!(address.as_deref(), Some("127.0.0.1:18080"));
+        let denied = "{\"error\":\"loading config: loading new config: http app module: start: \
+                      listening on [::1]:443: listen tcp [::1]:443: bind: permission denied\"}";
+        let LoadError::PortInUse { address, .. } = load_error(400, denied) else {
+            panic!("not port_in_use");
+        };
+        assert_eq!(address.as_deref(), Some("[::1]:443"));
+    }
+
+    #[test]
+    fn other_load_answers_are_rejected_with_their_text() {
+        let bad = "{\"error\":\"loading config: decoding request body: unexpected EOF\"}";
+        let err = load_error(400, bad);
+        assert_eq!(err.code(), "caddy_config_rejected");
+        assert!(err.to_string().contains("unexpected EOF"), "{err}");
+        // Only a 400 says that Caddy refused the config itself.
+        assert_eq!(load_error(500, T9).code(), "caddy_config_rejected");
+        // A body that is not JSON is kept as text.
+        let LoadError::Rejected { status, message } = load_error(502, " bad gateway\n") else {
+            panic!("not rejected");
+        };
+        assert_eq!((status, message.as_str()), (502, "bad gateway"));
+        // No `listening on`: still the code, without an address.
+        let short = "{\"error\":\"bind: address already in use\"}";
+        let LoadError::PortInUse { address, .. } = load_error(400, short) else {
+            panic!("not port_in_use");
+        };
+        assert_eq!(address, None);
+    }
+
+    /// A fake admin API: `POST /load` sends each body on the channel and
+    /// answers `status` with `body`.
+    async fn fake_admin(
+        status: StatusCode,
+        body: &'static str,
+    ) -> (u16, mpsc::UnboundedReceiver<Value>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let app = axum::Router::new().route(
+            "/load",
+            post(move |axum::Json(config): axum::Json<Value>| async move {
+                tx.send(config).unwrap();
+                (status, body)
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (port, rx)
+    }
+
+    /// Registers a task as the running Caddy, so `apply` sends to the admin API.
+    fn pretend_caddy_runs(daemon: &Daemon) {
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { cancel.cancelled().await }
+        });
+        let runtime = Arc::new(Mutex::new(ServiceRuntime::new(CADDY_ID)));
+        daemon.add_proc(
+            CADDY_ID,
+            ServiceHandle {
+                cancel,
+                task,
+                runtime,
+            },
+        );
+    }
+
+    fn shop(root: PathBuf) -> Site {
+        Site {
+            name: "shop".into(),
+            docroot: root.clone(),
+            root,
+            kind: SiteKind::Static,
+            php: None,
+            secure: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_writes_the_file_only_while_caddy_does_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::new(dir.path().to_path_buf());
+        // Nothing listens there: a call would fail.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        daemon.caddy.input.admin_port = free.local_addr().unwrap().port();
+        drop(free);
+        let sites = vec![shop(dir.path().join("shop"))];
+        let applied = daemon
+            .caddy
+            .apply(&daemon, sites, PhpPools::default())
+            .await;
+        assert_eq!(applied.unwrap(), Applied::Written);
+
+        let text = std::fs::read_to_string(&daemon.caddy.paths.config_file).unwrap();
+        let written: Value = serde_json::from_str(&text).unwrap();
+        let hosts = &written["apps"]["http"]["servers"]["marsa-tls"]["routes"][0]["match"][0];
+        assert_eq!(hosts["host"][0], "shop.test");
+        let tag = written["admin"]["@id"].as_str().unwrap();
+        assert!(tag.starts_with("marsa-instance-"), "{tag}");
+    }
+
+    #[tokio::test]
+    async fn apply_loads_the_config_into_a_running_caddy() {
+        let (port, mut loads) = fake_admin(StatusCode::OK, "").await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::new(dir.path().to_path_buf());
+        daemon.caddy.input.admin_port = port;
+        pretend_caddy_runs(&daemon);
+
+        let sites = vec![shop(dir.path().join("shop"))];
+        let applied = daemon
+            .caddy
+            .apply(&daemon, sites, PhpPools::default())
+            .await;
+        assert_eq!(applied.unwrap(), Applied::Loaded);
+        let loaded = loads.recv().await.unwrap();
+        let text = std::fs::read_to_string(&daemon.caddy.paths.config_file).unwrap();
+        let written: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(loaded, written, "the file and Caddy have the same config");
+        daemon.stop_procs(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_load_is_port_in_use_and_noted_in_the_log() {
+        let (port, mut loads) = fake_admin(StatusCode::BAD_REQUEST, T9).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::new(dir.path().to_path_buf());
+        daemon.caddy.input.admin_port = port;
+        pretend_caddy_runs(&daemon);
+
+        let sites = vec![shop(dir.path().join("shop"))];
+        let err = daemon
+            .caddy
+            .apply(&daemon, sites, PhpPools::default())
+            .await
+            .unwrap_err();
+        assert!(loads.recv().await.is_some());
+        assert_eq!(err.code(), "port_in_use");
+        assert!(err.to_string().contains("127.0.0.1:18443"), "{err}");
+        let last = daemon.caddy.recent_logs().pop().unwrap();
+        assert!(
+            last.text
+                .starts_with("marsad: The new config was not loaded"),
+            "{}",
+            last.text
+        );
+        assert!(last.text.contains("127.0.0.1:18443"), "{}", last.text);
+        daemon.stop_procs(Duration::from_secs(5)).await;
     }
 }

@@ -2059,6 +2059,7 @@ dependencies = [
  "hickory-server",
  "marsa-core",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
