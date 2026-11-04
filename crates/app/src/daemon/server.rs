@@ -93,6 +93,11 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     let auth = AuthConfig::new(Arc::new(file.token), port);
 
     let daemon = Arc::new(Daemon::new(data_dir));
+    // The first site list, so the first client gets it at once. A broken
+    // sites.toml is logged; the routes report it again with its code.
+    if let Err(err) = daemon.rebuild_sites().await {
+        tracing::warn!(code = err.code, error = %err.message, "cannot build the site list");
+    }
     // After the API listener. It stops when `daemon.shutdown` is cancelled. A
     // port in use is only a warning: the daemon runs on without it.
     let dns = dns::start_for_daemon(&daemon.shutdown).await;

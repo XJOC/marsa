@@ -8,12 +8,15 @@
 //! needed.
 
 use std::fmt;
+use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::runtimes::Runtime;
+/// Defined once, in `sites`, where the daemon builds them.
+pub use crate::sites::{Site, SiteKind};
 
 /// The API version this build speaks. A client refuses a daemon whose API
 /// version is newer than its own (architecture.md section 6, version handshake).
@@ -139,6 +142,9 @@ pub enum Event {
     Log(LogLine),
     /// A step of an install that `POST /v1/runtimes/{tool}/install` started.
     Install(InstallProgress),
+    /// The whole new site list: after each park, link, or patch, and after a
+    /// rebuild that found a different list.
+    SitesChanged(SiteList),
     /// The daemon is stopping; the stream ends after this event.
     ShuttingDown,
 }
@@ -310,6 +316,80 @@ pub struct InstallFailure {
     /// What the installed program printed in its check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+}
+
+/// `GET /v1/sites`, and the answer to every change of the sites.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteList {
+    /// The parked folders, in the order they were added.
+    pub parked: Vec<PathBuf>,
+    /// Every site, sorted by name.
+    pub sites: Vec<Site>,
+    /// The folders that did not become a site, so the UI can say why.
+    pub skipped: Vec<SkippedFolder>,
+}
+
+/// A folder that did not become a site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedFolder {
+    /// Shown as text only: a path that is not UTF-8 has `U+FFFD` in its place.
+    pub path: PathBuf,
+    /// `site_name_invalid`, `site_path_not_utf8`, or `site_name_taken` for a
+    /// folder in a parked folder; `site_read_dir` for a parked folder that
+    /// cannot be read; `site_not_a_folder` for a linked folder that is gone.
+    pub code: String,
+}
+
+/// The body of `POST /v1/sites/park`: every sub-folder of `path` becomes a
+/// site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkRequest {
+    /// An absolute folder.
+    pub path: PathBuf,
+}
+
+/// The body of `POST /v1/sites/link`: `path` becomes the site `name`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkRequest {
+    /// 1 to 63 of `a-z`, `0-9`, and `-`.
+    pub name: String,
+    /// An absolute folder.
+    pub path: PathBuf,
+}
+
+/// The body of `PATCH /v1/sites/{name}`. A missing field keeps its value. For
+/// `php` and `proxy`, `null` clears the value. `{}` is valid.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SitePatch {
+    /// `8.4` or `8.4.23`, with the rules of a `.php-version` file. Cleared:
+    /// the version comes from the project's files or the global default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub php: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secure: Option<bool>,
+    /// The port of the program that serves the site (`npm run dev`). Set: the
+    /// site is a Node proxy. Cleared: the detected kind again.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub proxy: Option<Option<NonZeroU16>>,
+}
+
+/// For a field where `null` and a missing key differ. A missing key stays
+/// `None` through `#[serde(default)]`; this gives `Some(None)` for `null` and
+/// `Some(Some(value))` for a value.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[cfg(test)]
@@ -619,5 +699,82 @@ mod tests {
                 },
             }),
         );
+    }
+
+    #[test]
+    fn site_list_in_a_sites_changed_event() {
+        let list = SiteList {
+            parked: vec![PathBuf::from("/code")],
+            sites: vec![Site {
+                name: "shop".into(),
+                root: PathBuf::from("/code/shop"),
+                docroot: PathBuf::from("/code/shop/public"),
+                kind: SiteKind::Laravel,
+                php: Some(semver::Version::new(8, 4, 23)),
+                secure: true,
+            }],
+            skipped: vec![SkippedFolder {
+                path: PathBuf::from("/code/متجر"),
+                code: "site_name_invalid".into(),
+            }],
+        };
+        round_trip(
+            &Event::SitesChanged(list),
+            json!({
+                "type": "sites_changed",
+                "data": {
+                    "parked": ["/code"],
+                    "sites": [{
+                        "name": "shop", "root": "/code/shop", "docroot": "/code/shop/public",
+                        "kind": { "type": "laravel" }, "php": "8.4.23", "secure": true,
+                    }],
+                    "skipped": [{ "path": "/code/متجر", "code": "site_name_invalid" }],
+                },
+            }),
+        );
+    }
+
+    #[test]
+    fn park_and_link_requests() {
+        round_trip(
+            &ParkRequest {
+                path: PathBuf::from("/code"),
+            },
+            json!({ "path": "/code" }),
+        );
+        round_trip(
+            &LinkRequest {
+                name: "api".into(),
+                path: PathBuf::from("/work/api"),
+            },
+            json!({ "name": "api", "path": "/work/api" }),
+        );
+    }
+
+    #[test]
+    fn a_site_patch_tells_null_from_a_missing_field() {
+        round_trip(&SitePatch::default(), json!({}));
+        round_trip(
+            &SitePatch {
+                php: Some(Some("8.3".into())),
+                secure: Some(false),
+                proxy: Some(NonZeroU16::new(5173)),
+            },
+            json!({ "php": "8.3", "secure": false, "proxy": 5173 }),
+        );
+        round_trip(
+            &SitePatch {
+                php: Some(None),
+                secure: None,
+                proxy: Some(None),
+            },
+            json!({ "php": null, "proxy": null }),
+        );
+        // `null` for `secure` keeps it, like a missing field.
+        let patch: SitePatch = serde_json::from_value(json!({ "secure": null })).unwrap();
+        assert_eq!(patch, SitePatch::default());
+        for bad in [json!({ "proxy": 0 }), json!({ "proxy": 70000 })] {
+            assert!(serde_json::from_value::<SitePatch>(bad).is_err());
+        }
     }
 }

@@ -5,26 +5,45 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard};
 use std::time::Duration;
 
-use marsa_core::types::Event;
+use axum::http::StatusCode;
+use marsa_core::config::{self, ConfigError, ConfigPaths, SitesConfig};
+use marsa_core::types::{Event, SiteList};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+use super::api::HttpError;
 use super::caddy::CaddyManager;
 use super::runtimes_api::Installs;
+use super::sites_api;
 use super::supervisor::ServiceHandle;
 
 /// How many events the bus keeps for a slow reader. A reader that falls
 /// further behind loses the oldest ones (`Lagged`).
 pub const EVENT_CAPACITY: usize = 1024;
 
-/// What the daemon knows. The sites come in M4. A service's status is not
-/// copied here: it lives in one place, the runtime its manager shares with
-/// the supervisor (`Daemon::caddy`).
+/// What the daemon knows. A service's status is not copied here: it lives in
+/// one place, the runtime its manager shares with the supervisor
+/// (`Daemon::caddy`).
 #[derive(Debug, Default)]
-pub struct AppState {}
+pub struct AppState {
+    /// The site list of the last build; `None` before the first one. Use
+    /// [`Daemon::sites`], [`Daemon::change_sites`], and
+    /// [`Daemon::rebuild_sites`].
+    pub sites: Option<SiteList>,
+}
+
+/// When a sites job sends `sites_changed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Publish {
+    /// After every change request, so its client sees the result.
+    Always,
+    /// Only if the new list differs from the stored one. Never for the first
+    /// build: that is the start, not a change.
+    IfChanged,
+}
 
 /// Everything the routes share. The router holds it in an `Arc`, like a
 /// singleton in Laravel's service container.
@@ -45,6 +64,9 @@ pub struct Daemon {
     pub caddy: CaddyManager,
     /// The runtime installer, and whether an install runs (task M3-12).
     pub installs: Installs,
+    /// Held for the whole of each sites job, from reading `sites.toml` to
+    /// publishing the list, so no change is lost and the events keep order.
+    sites_lock: Mutex<()>,
 }
 
 impl Daemon {
@@ -57,7 +79,92 @@ impl Daemon {
             procs: Mutex::default(),
             shutdown: CancellationToken::new(),
             installs: Installs::new(),
+            sites_lock: Mutex::default(),
         }
+    }
+
+    /// The site list of the last build, or `None` before the first one.
+    pub fn sites(&self) -> Option<SiteList> {
+        // A write is one assignment, so a panic elsewhere while the lock was
+        // held cannot leave the state half changed.
+        let state = self.state.read().unwrap_or_else(PoisonError::into_inner);
+        state.sites.clone()
+    }
+
+    /// Changes `sites.toml` and builds the site list again (task M4-10b).
+    ///
+    /// On a blocking thread, one job at a time: reads the file, lets `edit`
+    /// change it, writes it back atomically if `edit` returns `true`, builds
+    /// the list, stores it, and publishes `sites_changed`. `edit` sees the
+    /// file as it is on disk now, so it may read the disk too.
+    ///
+    /// # Errors
+    ///
+    /// The error of `edit`, or a `config_*` code (500) if `sites.toml` cannot
+    /// be read or written.
+    pub async fn change_sites<F>(self: &Arc<Self>, edit: F) -> Result<SiteList, HttpError>
+    where
+        F: FnOnce(&mut SitesConfig) -> Result<bool, HttpError> + Send + 'static,
+    {
+        self.sites_job(edit, Publish::Always).await
+    }
+
+    /// Builds the site list again from `sites.toml`, the parked folders, and
+    /// the installed PHP versions. Publishes `sites_changed` only if the list
+    /// changed; the first build publishes nothing.
+    ///
+    /// `server::run` does not call this at start-up yet (task M4-12 owns that
+    /// file now), so `GET /v1/sites` does the first build when it finds none.
+    ///
+    /// # Errors
+    ///
+    /// A `config_*` code (500) if `sites.toml` cannot be read.
+    pub async fn rebuild_sites(self: &Arc<Self>) -> Result<SiteList, HttpError> {
+        self.sites_job(|_| Ok(false), Publish::IfChanged).await
+    }
+
+    async fn sites_job<F>(
+        self: &Arc<Self>,
+        edit: F,
+        publish: Publish,
+    ) -> Result<SiteList, HttpError>
+    where
+        F: FnOnce(&mut SitesConfig) -> Result<bool, HttpError> + Send + 'static,
+    {
+        let daemon = Arc::clone(self);
+        let job = tokio::task::spawn_blocking(move || {
+            // The lock guards no data, so a poisoned one is still good.
+            let _one = daemon
+                .sites_lock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let path = ConfigPaths::in_dir(&daemon.data_dir).sites;
+            let mut sites = config::load_sites(&path).map_err(config_error)?;
+            if edit(&mut sites)? {
+                config::save_sites(&path, &sites).map_err(config_error)?;
+            }
+            let list = sites_api::build(&daemon.data_dir, &sites);
+            let before = daemon.write_state().sites.replace(list.clone());
+            let changed = before.is_some_and(|before| before != list);
+            if publish == Publish::Always || changed {
+                daemon.publish(Event::SitesChanged(list.clone()));
+            }
+            Ok(list)
+        });
+        job.await.unwrap_or_else(|err| {
+            tracing::error!(error = %err, "the sites job failed");
+            let message = "the sites job failed";
+            Err(HttpError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                message,
+            ))
+        })
+    }
+
+    fn write_state(&self) -> RwLockWriteGuard<'_, AppState> {
+        // As in `sites`: each write is one assignment.
+        self.state.write().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Sends `event` to every `/v1/events` reader.
@@ -120,6 +227,17 @@ impl Daemon {
         // the lock was held cannot leave the map half changed.
         self.procs.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// `sites.toml` cannot be read or written: the request was fine, the file or
+/// the disk is not.
+fn config_error(err: ConfigError) -> HttpError {
+    tracing::warn!(code = err.code(), error = %err, "sites.toml");
+    HttpError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        err.code(),
+        err.to_string(),
+    )
 }
 
 #[cfg(test)]

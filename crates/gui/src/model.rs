@@ -128,6 +128,8 @@ pub fn apply(model: &mut Model, event: Event) {
         Event::Log(line) => model.push_log(line),
         // The window has no install view yet (task M3-12 leaves it out).
         Event::Install(_) => {}
+        // No sites view yet (task M4-15).
+        Event::SitesChanged(_) => {}
         Event::ShuttingDown => model.disconnect(Connection::ShuttingDown),
     }
 }
