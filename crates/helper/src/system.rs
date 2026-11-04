@@ -7,13 +7,21 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// The only `PATH` a child process sees. The helper runs absolute paths, so
 /// this only stops a child from finding programs through the caller's `PATH`.
 const SAFE_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 /// The mode of a folder that `write_atomic` creates.
 const DIR_MODE: u32 = 0o755;
+/// How long `run` lets a program take. `security add-trusted-cert -d` may
+/// wait for the user to confirm in a dialog that nobody answers.
+const RUN_TIMEOUT: Duration = Duration::from_secs(120);
+/// How often `run` checks whether the program has finished.
+const POLL: Duration = Duration::from_millis(10);
 
 /// The output of a program that finished.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -49,14 +57,13 @@ pub trait System {
     /// Runs `program` with `args`, never through a shell. `&'static str`
     /// means a constant in the code, like `/sbin/pfctl`: it cannot come from
     /// the request.
-    // `allow`, not `expect`: M4-08 and M4-09 start using this in parallel,
-    // and an `expect` would warn as soon as one of them lands.
-    #[allow(dead_code)]
+    ///
+    /// [`RealSystem`] gives the program 120 seconds. After that it kills and
+    /// reaps it and returns an error of kind `TimedOut`. The same happens if
+    /// the program exited but something it started still holds a pipe open.
     fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput>;
 
     /// The path of the running helper, for the boot job (task M4-08).
-    // `allow`, not `expect`: used by M4-08, which runs in parallel with M4-09.
-    #[allow(dead_code)]
     fn current_exe(&self) -> io::Result<PathBuf>;
 }
 
@@ -123,9 +130,28 @@ impl System for RealSystem {
         }
     }
 
+    /// Stops the program after [`RUN_TIMEOUT`]; see [`RealSystem::run_within`].
+    fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
+        self.run_within(program, args, RUN_TIMEOUT)
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        std::env::current_exe()
+    }
+}
+
+impl RealSystem {
+    /// `run` with a time limit. A program still running at the limit is
+    /// killed and reaped, and the error is of kind `TimedOut`.
+    ///
     /// The environment is empty except `PATH`. The Windows environment
     /// (`SystemRoot`, Windows folders in `PATH`) is set in task M4-19.
-    fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
+    fn run_within(
+        &self,
+        program: &'static str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> io::Result<RunOutput> {
         if !Path::new(program).is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -137,22 +163,84 @@ impl System for RealSystem {
             .args(args)
             .env_clear()
             .env("PATH", SAFE_PATH)
-            .stdin(Stdio::null());
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         // The child must not start in the caller's folder, which the user
         // controls. `/` is a Unix path; Windows is set in task M4-19.
         #[cfg(unix)]
         command.current_dir("/");
-        let output = command.output()?;
-        Ok(RunOutput {
-            code: output.status.code(),
-            stdout: output.stdout,
-            stderr: output.stderr,
-        })
+        finish(command.spawn()?, timeout)
     }
+}
 
-    fn current_exe(&self) -> io::Result<PathBuf> {
-        std::env::current_exe()
+/// Waits for `child` and collects its output. On a timeout or any other
+/// error the child is killed and reaped, so no process is left behind.
+fn finish(mut child: Child, timeout: Duration) -> io::Result<RunOutput> {
+    let deadline = Instant::now() + timeout;
+    let result = collect(&mut child, deadline);
+    if result.is_err() {
+        // Best effort: the first error is the one to report.
+        let _ = child.kill();
+        let _ = child.wait();
     }
+    result
+}
+
+fn collect(child: &mut Child, deadline: Instant) -> io::Result<RunOutput> {
+    let stdout = read_in_background(child.stdout.take())?;
+    let stderr = read_in_background(child.stderr.take())?;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            return Err(timed_out());
+        }
+        thread::sleep(POLL);
+    };
+    // A program it started may still hold a pipe open, so this waits only
+    // until the same deadline.
+    Ok(RunOutput {
+        code: status.code(),
+        stdout: receive(&stdout, deadline)?,
+        stderr: receive(&stderr, deadline)?,
+    })
+}
+
+/// Reads a pipe to its end on its own thread. With one thread per pipe, a
+/// child that fills one pipe never blocks while the other is read.
+fn read_in_background<R>(pipe: Option<R>) -> io::Result<Receiver<io::Result<Vec<u8>>>>
+where
+    R: Read + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    thread::Builder::new().spawn(move || {
+        let mut bytes = Vec::new();
+        let result = match pipe {
+            Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
+            None => Ok(bytes),
+        };
+        // After a timeout nobody waits for this, so a failed send is fine.
+        let _ = sender.send(result);
+    })?;
+    Ok(receiver)
+}
+
+fn receive(output: &Receiver<io::Result<Vec<u8>>>, deadline: Instant) -> io::Result<Vec<u8>> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    match output.recv_timeout(left) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => Err(timed_out()),
+        Err(RecvTimeoutError::Disconnected) => Err(io::Error::other("the output reader stopped")),
+    }
+}
+
+fn timed_out() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        "the program did not finish in time",
+    )
 }
 
 /// Sets the mode, writes, and syncs, so a power cut cannot leave an empty file
@@ -445,6 +533,56 @@ mod tests {
     fn run_starts_in_the_root_folder() {
         let output = RealSystem.run("/bin/pwd", &[]).unwrap();
         assert_eq!(output.stdout, b"/\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_within_stops_a_program_at_the_timeout() {
+        let start = Instant::now();
+        let timeout = Duration::from_secs(1);
+        let err = RealSystem
+            .run_within("/bin/sleep", &["5"], timeout)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        let elapsed = start.elapsed();
+        assert!(
+            timeout <= elapsed && elapsed < Duration::from_secs(3),
+            "{elapsed:?}"
+        );
+    }
+
+    /// `ps -p` fails when no process has the PID. A zombie (killed but not
+    /// reaped) would still be listed.
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_program_is_killed_and_reaped() {
+        let child = Command::new("/bin/sleep")
+            .arg("5")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id().to_string();
+        let err = finish(child, Duration::from_millis(200)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        let ps = Command::new("/bin/ps").args(["-p", &pid]).output().unwrap();
+        let listed = String::from_utf8_lossy(&ps.stdout);
+        assert!(!ps.status.success(), "{listed}");
+    }
+
+    /// 256 KiB is more than a pipe holds (64 KiB on macOS and Linux), so this
+    /// would hang if `run` waited for the exit before reading.
+    #[cfg(unix)]
+    #[test]
+    fn run_within_reads_large_output_and_the_exit_code() {
+        let args = ["if=/dev/zero", "bs=1024", "count=256"];
+        let output = RealSystem
+            .run_within("/bin/dd", &args, Duration::from_secs(10))
+            .unwrap();
+        assert_eq!((output.code, output.stdout.len()), (Some(0), 256 * 1024));
+        assert!(!output.stderr.is_empty());
+        let output = RealSystem.run("/usr/bin/false", &[]).unwrap();
+        assert_eq!(output.code, Some(1));
     }
 
     #[test]
