@@ -61,9 +61,8 @@ const TOKEN: &str = "/Library/Application Support/Marsa/pf-token";
 const COPY: &str = "/Library/PrivilegedHelperTools/dev.marsa.helper";
 const PLIST: &str = "/Library/LaunchDaemons/dev.marsa.pf-redirect.plist";
 const LABEL: &str = "dev.marsa.pf-redirect";
-/// Everything `pf_remove` deletes. The plist goes first, so a boot job is
-/// never left that runs a deleted helper.
-const FILES: [&str; 4] = [PLIST, COPY, RULES, TOKEN];
+/// Every file of the redirect.
+const FILES: [&str; 4] = [RULES, TOKEN, COPY, PLIST];
 
 /// The largest helper binary that is copied.
 const MAX_HELPER_BYTES: u64 = 64 * 1024 * 1024;
@@ -86,7 +85,7 @@ pub fn install(http_port: u16, https_port: u16, system: &impl System) -> OpResul
     finish(INSTALL, install_files(http_port, https_port, system))
 }
 
-/// `pf_remove`: flush the anchor, give back the reference, stop the boot job,
+/// `pf_remove`: stop the boot job, flush the anchor, give back the reference,
 /// and delete the files.
 pub fn remove(system: &impl System) -> OpResult {
     finish(REMOVE, remove_all(system))
@@ -101,12 +100,18 @@ pub fn boot(system: &impl System, sleep: impl Fn(Duration)) -> OpResult {
         let message = format!("{RULES} is missing: pf_install has not run");
         return OpResult::failed(LOAD, PF_NOT_INSTALLED, message);
     }
-    let mut loaded = load(system);
+    // References do not survive a reboot, and pf may already have given the
+    // old number to another tool, so the old token is dropped, never given
+    // back: this job never reads the file, and `held` starts empty. Best
+    // effort: if the delete fails, the next saved token replaces the file.
+    let _ = system.remove(Path::new(TOKEN));
+    let mut held = None;
+    let mut loaded = load(system, &mut held);
     for wait in RECHECKS {
         sleep(wait);
         // A failed load is tried again too: pf may not have been ready.
         if loaded.is_err() || !rules_loaded(system) {
-            loaded = load(system);
+            loaded = load(system, &mut held);
         }
     }
     finish(LOAD, loaded.map(|()| Outcome::Done))
@@ -153,14 +158,19 @@ fn install_files(
             .write_atomic(Path::new(path), bytes, *mode)
             .map_err(|err| write_failed(path, &err))?;
     }
-    load(system)?;
+    load(system, &mut saved_token(system))?;
     Ok(Outcome::Done)
 }
 
 /// Loads [`RULES`] into [`ANCHOR`], takes a new reference, and checks that pf
 /// shows the rules. Shared by `pf_install` and the boot job.
-fn load(system: &impl System) -> Result<(), Failure> {
-    release(system);
+///
+/// `held` is the reference Marsa holds now. It is given back only after the
+/// new one is saved, so if `-f`, `-E`, or the save fails, the old reference
+/// and its file stay and the redirect that worked keeps pf on. Once given back, a token is in
+/// neither `held` nor the file, so it is never given back twice: pf may hand
+/// the same number to another tool later.
+fn load(system: &impl System, held: &mut Option<u64>) -> Result<(), Failure> {
     let loaded = system.run(PFCTL, &["-a", ANCHOR, "-f", RULES]);
     if !exited_0(&loaded) {
         let message = format!(
@@ -175,13 +185,19 @@ fn load(system: &impl System) -> Result<(), Failure> {
         let message = format!("pfctl -E printed no reference token ({})", status(&enabled));
         return Err(failure(PF_TOKEN_MISSING, message));
     };
-    let token = token.to_string();
     let line = format!("{token}\n");
     if let Err(err) = system.write_atomic(Path::new(TOKEN), line.as_bytes(), 0o600) {
         // A token that is not on disk can never be given back, so it goes now.
         // Nothing more can be done if this fails too.
-        let _ = system.run(PFCTL, &["-X", &token]);
+        let _ = system.run(PFCTL, &["-X", &token.to_string()]);
         return Err(write_failed(TOKEN, &err));
+    }
+    // pf never gives a live reference's number to a new one, so the same
+    // number means the old reference was already gone: giving it back would
+    // drop the new one.
+    if let Some(old) = held.replace(token).filter(|old| *old != token) {
+        // Failure is fine: the old reference may already be gone.
+        let _ = system.run(PFCTL, &["-X", &old.to_string()]);
     }
     if !rules_loaded(system) {
         let message = format!("the anchor {ANCHOR} does not show the {RULE_COUNT} redirect rules");
@@ -196,6 +212,10 @@ fn remove_all(system: &impl System) -> Result<Outcome, Failure> {
     if !installed && rdr_rules(system) == Some(0) {
         return Ok(Outcome::Unchanged);
     }
+    // First, so a boot job in its recheck waits cannot load the rules again
+    // after the flush. Failure is fine: launchd loads the job only at the
+    // boot after `pf_install`, so it may not be loaded.
+    let _ = system.run(LAUNCHCTL, &["bootout", &format!("system/{LABEL}")]);
     let flushed = system.run(PFCTL, &["-a", ANCHOR, "-F", "all"]);
     if !exited_0(&flushed) {
         // The files stay, so a retry still has the token to give back.
@@ -205,39 +225,34 @@ fn remove_all(system: &impl System) -> Result<Outcome, Failure> {
         );
         return Err(failure(PF_FLUSH_FAILED, message));
     }
-    release(system);
-    // Failure is fine: launchd loads the job only at the boot after
-    // `pf_install`, so it may not be loaded.
-    let _ = system.run(LAUNCHCTL, &["bootout", &format!("system/{LABEL}")]);
-    // Every file is tried. The first failure is reported.
-    let mut first = None;
-    for path in FILES {
-        if let Err(err) = system.remove(Path::new(path)) {
-            let message = format!("cannot delete {path}: {}", err.kind());
-            first.get_or_insert(failure(PF_DELETE, message));
-        }
-    }
-    first.map_or(Ok(Outcome::Done), Err)
-}
-
-/// Gives back the reference in [`TOKEN`], if there is one, and deletes the
-/// file, so a token is never given back twice: pf may hand the same number to
-/// another tool later.
-fn release(system: &impl System) {
-    if !system.exists(Path::new(TOKEN)) {
-        return;
-    }
-    let token = system
-        .read(Path::new(TOKEN), MAX_TOKEN_BYTES)
-        .ok()
-        .and_then(|bytes| digits(String::from_utf8_lossy(&bytes).trim()));
+    // The file goes before the reference, so a retry never gives back the
+    // same token twice.
+    let token = saved_token(system);
+    delete(system, TOKEN)?;
     if let Some(token) = token {
-        // Failure is fine: a token from before a reboot is no longer valid.
+        // Failure is fine: the reference may already be gone.
         let _ = system.run(PFCTL, &["-X", &token.to_string()]);
     }
-    // Best effort: a stale file is replaced by the next token, and
-    // `pf_remove` deletes it again and reports a failure.
-    let _ = system.remove(Path::new(TOKEN));
+    // The rules go before the plist, so a boot job that a failed delete
+    // leaves behind loads nothing. If the plist stays, the helper copy stays
+    // too: a boot job never runs a deleted program.
+    let rules = delete(system, RULES);
+    let rest = delete(system, PLIST).and_then(|()| delete(system, COPY));
+    rules.and(rest)?;
+    Ok(Outcome::Done)
+}
+
+/// The token in [`TOKEN`], if the file holds a valid one.
+fn saved_token(system: &impl System) -> Option<u64> {
+    let bytes = system.read(Path::new(TOKEN), MAX_TOKEN_BYTES).ok()?;
+    digits(String::from_utf8_lossy(&bytes).trim())
+}
+
+fn delete(system: &impl System, path: &str) -> Result<(), Failure> {
+    system.remove(Path::new(path)).map_err(|err| {
+        let message = format!("cannot delete {path}: {}", err.kind());
+        failure(PF_DELETE, message)
+    })
 }
 
 /// How many `rdr` rules on `lo0` pf shows in [`ANCHOR`], or `None` if pfctl
@@ -356,7 +371,6 @@ fn finish(op: &'static str, outcome: Result<Outcome, Failure>) -> OpResult {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::collections::VecDeque;
     use std::path::PathBuf;
 
     use super::*;
@@ -372,8 +386,10 @@ mod tests {
 
     /// The bytes of the running helper.
     const HELPER: &[u8] = b"\xcf\xfa\xed\xfe the helper binary";
-    /// The token in the file of an earlier load, and the one `pfctl -E` prints.
+    /// The token in the file of an earlier load, one that a test makes
+    /// `pfctl -E` print once, and the one it prints by default.
     const OLD: &str = "7393882174112";
+    const ONCE: &str = "7393882174336";
     const NEW: &str = "7393882174560";
     /// `pfctl -a <anchor> -s nat` with the four rules. The exact form pfctl
     /// prints is a guess: it needs root to see (ADR 0008).
@@ -384,12 +400,21 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 80 -> ::1 port 18080
 rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
 ";
 
-    /// A [`FakeSystem`] plus the answers of `pfctl -a <anchor> -s nat`, one per
-    /// call, so the rules can vanish between two checks. After the last
-    /// answer, the fake's own output is used. Every call is in `fake.log`.
+    /// A [`FakeSystem`] plus one-time answers of `pfctl`, used in order, so
+    /// the rules can vanish between two checks and `-E` can print a new token
+    /// each time. Without one, the fake's own output is used. Every call is in
+    /// `fake.log`.
     struct Mac {
         fake: FakeSystem,
-        listings: RefCell<VecDeque<&'static str>>,
+        answers: RefCell<Vec<(Vec<String>, RunOutput)>>,
+    }
+
+    impl Mac {
+        /// The next `pfctl <args>` prints `stdout` and exits 0.
+        fn answer(&self, args: &[&str], stdout: &str) {
+            let args = args.iter().map(|arg| (*arg).to_owned()).collect();
+            self.answers.borrow_mut().push((args, ran(0, stdout, "")));
+        }
     }
 
     impl System for Mac {
@@ -407,10 +432,11 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         }
         fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
             let result = self.fake.run(program, args);
-            let next = (args == SHOW_ARGS)
-                .then(|| self.listings.borrow_mut().pop_front())
-                .flatten();
-            next.map_or(result, |listing| Ok(ran(0, listing, "")))
+            let mut answers = self.answers.borrow_mut();
+            match answers.iter().position(|(expected, _)| expected == args) {
+                Some(i) => Ok(answers.remove(i).1),
+                None => result,
+            }
         }
         fn current_exe(&self) -> io::Result<PathBuf> {
             self.fake.current_exe()
@@ -438,8 +464,14 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         fake.files
             .borrow_mut()
             .insert(exe, (HELPER.to_vec(), 0o755));
-        let listings = RefCell::new(listings.iter().copied().collect());
-        Mac { fake, listings }
+        let mac = Mac {
+            fake,
+            answers: RefCell::default(),
+        };
+        for listing in listings {
+            mac.answer(&SHOW_ARGS, listing);
+        }
+        mac
     }
 
     /// [`fresh`], after `pf_install(18080, 18443)`, with [`OLD`] in the token
@@ -603,15 +635,31 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
     fn install_loads_again_when_the_anchor_is_empty() {
         let mac = installed(&["", LISTED]);
         assert_eq!(install(18080, 18443, &mac), result(INSTALL, Outcome::Done));
+        // The old reference goes only after the new one is saved.
         let expected = [
             pf(&SHOW_ARGS),
-            pf(&["-X", OLD]),
             pf(&LOAD_ARGS),
             pf(&["-E"]),
+            pf(&["-X", OLD]),
             pf(&SHOW_ARGS),
         ];
         assert_eq!(commands(&mac), expected);
         assert_eq!(file(&mac, TOKEN), token_file(NEW));
+    }
+
+    /// pf never reuses a live reference's number, so a saved token equal to
+    /// the new one was already gone: giving it back would drop the new one.
+    #[test]
+    fn a_saved_token_equal_to_the_new_one_is_not_given_back() {
+        let mac = installed(&["", LISTED]);
+        let token = (format!("{NEW}\n").into_bytes(), 0o600);
+        mac.fake
+            .files
+            .borrow_mut()
+            .insert(PathBuf::from(TOKEN), token);
+        assert_eq!(install(18080, 18443, &mac), result(INSTALL, Outcome::Done));
+        let expected = [pf(&SHOW_ARGS), pf(&LOAD_ARGS), pf(&["-E"]), pf(&SHOW_ARGS)];
+        assert_eq!(commands(&mac), expected);
     }
 
     /// Without a token, Marsa holds no reference, so pf could go off.
@@ -631,9 +679,9 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         let mac = installed(&[LISTED]);
         assert_eq!(install(18081, 18443, &mac), result(INSTALL, Outcome::Done));
         let expected = [
-            pf(&["-X", OLD]),
             pf(&LOAD_ARGS),
             pf(&["-E"]),
+            pf(&["-X", OLD]),
             pf(&SHOW_ARGS),
         ];
         assert_eq!(commands(&mac), expected);
@@ -641,15 +689,18 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         assert_eq!(file(&mac, RULES), Some(rules_file));
     }
 
+    /// No token file is written, and an old one stays with its reference, so
+    /// the redirect that worked keeps pf on.
     #[test]
     fn no_token_from_pfctl_e_is_pf_token_missing_and_writes_no_token_file() {
-        let mut mac = fresh(&[LISTED]);
-        mac.fake.script(PF, &["-E"], ran(0, "", "pf enabled\n"));
-        let message = "pfctl -E printed no reference token (exit code 0)".to_owned();
-        let expected = OpResult::failed(INSTALL, PF_TOKEN_MISSING, message);
-        assert_eq!(install(18080, 18443, &mac), expected);
-        assert_eq!(commands(&mac), [pf(&LOAD_ARGS), pf(&["-E"])]);
-        assert_eq!(file(&mac, TOKEN), None);
+        for (mut mac, kept) in [(fresh(&[]), None), (installed(&[]), token_file(OLD))] {
+            mac.fake.script(PF, &["-E"], ran(0, "", "pf enabled\n"));
+            let message = "pfctl -E printed no reference token (exit code 0)".to_owned();
+            let expected = OpResult::failed(INSTALL, PF_TOKEN_MISSING, message);
+            assert_eq!(install(18081, 18443, &mac), expected);
+            assert_eq!(commands(&mac), [pf(&LOAD_ARGS), pf(&["-E"])]);
+            assert_eq!(file(&mac, TOKEN), kept);
+        }
     }
 
     #[test]
@@ -674,30 +725,31 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         }
     }
 
-    /// The message has the exit code, not pfctl's output.
+    /// No new reference is taken, and the old one stays. The message has the
+    /// exit code, not pfctl's output.
     #[test]
-    fn a_failed_load_takes_no_reference() {
-        let mut mac = fresh(&[]);
+    fn a_failed_load_takes_no_reference_and_keeps_the_old_one() {
+        let mut mac = installed(&[]);
         mac.fake.script(PF, &LOAD_ARGS, ran(1, "", "syntax error"));
         let message =
             format!("pfctl could not load {RULES_FILE} into the anchor {A} (exit code 1)");
         let expected = OpResult::failed(INSTALL, PF_LOAD_FAILED, message);
-        assert_eq!(install(18080, 18443, &mac), expected);
+        assert_eq!(install(18081, 18443, &mac), expected);
         assert_eq!(commands(&mac), [pf(&LOAD_ARGS)]);
-        assert_eq!(file(&mac, TOKEN), None);
+        assert_eq!(file(&mac, TOKEN), token_file(OLD));
     }
 
+    /// The new token goes back at once; the old file and reference stay.
     #[test]
     fn a_token_that_cannot_be_saved_is_given_back() {
-        let mut mac = fresh(&[LISTED]);
+        let mut mac = installed(&[]);
         mac.fake.fail_writes.insert(PathBuf::from(TOKEN));
         let message = format!("cannot write {TOKEN}: permission denied");
         let expected = OpResult::failed(INSTALL, PF_WRITE, message);
-        assert_eq!(install(18080, 18443, &mac), expected);
-        assert_eq!(
-            commands(&mac),
-            [pf(&LOAD_ARGS), pf(&["-E"]), pf(&["-X", NEW])]
-        );
+        assert_eq!(install(18081, 18443, &mac), expected);
+        let expected = [pf(&LOAD_ARGS), pf(&["-E"]), pf(&["-X", NEW])];
+        assert_eq!(commands(&mac), expected);
+        assert_eq!(file(&mac, TOKEN), token_file(OLD));
     }
 
     /// pf holds the reference, so the token is kept to give it back later.
@@ -729,11 +781,13 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         assert!(commands(&mac).is_empty() && mac.fake.files.borrow().is_empty());
     }
 
+    /// The job stops first, so a boot job in its recheck waits cannot load
+    /// the rules again after the flush.
     #[test]
-    fn remove_flushes_gives_back_the_token_stops_the_job_and_deletes_the_files() {
+    fn remove_stops_the_job_flushes_gives_back_the_token_and_deletes_the_files() {
         let mac = installed(&[]);
         assert_eq!(remove(&mac), result(REMOVE, Outcome::Done));
-        let expected = [pf(&FLUSH_ARGS), pf(&["-X", OLD]), bootout()];
+        let expected = [bootout(), pf(&FLUSH_ARGS), pf(&["-X", OLD])];
         assert_eq!(commands(&mac), expected);
         // Only the running helper is left.
         let exe = mac.current_exe().unwrap();
@@ -745,7 +799,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         let mac = installed(&[]);
         mac.fake.files.borrow_mut().remove(Path::new(TOKEN));
         assert_eq!(remove(&mac), result(REMOVE, Outcome::Done));
-        assert_eq!(commands(&mac), [pf(&FLUSH_ARGS), bootout()]);
+        assert_eq!(commands(&mac), [bootout(), pf(&FLUSH_ARGS)]);
     }
 
     #[test]
@@ -762,7 +816,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         unknown.fake.script(PF, &SHOW_ARGS, ran(1, "", ""));
         for mac in [fresh(&[LISTED]), unknown] {
             assert_eq!(remove(&mac), result(REMOVE, Outcome::Done));
-            let expected = [pf(&SHOW_ARGS), pf(&FLUSH_ARGS), bootout()];
+            let expected = [pf(&SHOW_ARGS), bootout(), pf(&FLUSH_ARGS)];
             assert_eq!(commands(&mac), expected);
         }
     }
@@ -774,40 +828,57 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         let message = format!("pfctl could not flush the anchor {A} (exit code 1)");
         let expected = OpResult::failed(REMOVE, PF_FLUSH_FAILED, message);
         assert_eq!(remove(&mac), expected);
-        assert_eq!(commands(&mac), [pf(&FLUSH_ARGS)]);
+        assert_eq!(commands(&mac), [bootout(), pf(&FLUSH_ARGS)]);
         assert_eq!(mac.fake.files.borrow().len(), 5);
     }
 
+    /// If the plist stays, the helper copy stays too, so a boot job never runs
+    /// a deleted program. The rules are gone, so that job loads nothing.
     #[test]
-    fn a_failed_delete_is_pf_delete_and_the_other_files_still_go() {
+    fn a_plist_that_cannot_be_deleted_keeps_the_helper_copy() {
         let mut mac = installed(&[]);
         mac.fake.fail_removes.insert(PathBuf::from(PLIST));
         let message = format!("cannot delete {PLIST}: permission denied");
         let expected = OpResult::failed(REMOVE, PF_DELETE, message);
         assert_eq!(remove(&mac), expected);
         assert_eq!(commands(&mac).len(), 3);
-        let files = mac.fake.files.borrow();
-        assert!(files.contains_key(Path::new(PLIST)) && files.len() == 2);
+        let left: Vec<_> = mac.fake.files.borrow().keys().cloned().collect();
+        let exe = mac.current_exe().unwrap();
+        // The map is sorted by path.
+        assert_eq!(left, [PathBuf::from(PLIST), PathBuf::from(COPY), exe]);
     }
 
-    /// The rules are there after the load, gone at the 10 s check (as if
-    /// `com.apple.pfctl` loaded `/etc/pf.conf`), there after the reload, and
-    /// still there at the check after 30 s more.
+    /// The token file goes before the reference: if it stays, the reference
+    /// stays too, so a retry never gives back the same token twice.
+    #[test]
+    fn a_token_file_that_cannot_be_deleted_keeps_the_reference() {
+        let mut mac = installed(&[]);
+        mac.fake.fail_removes.insert(PathBuf::from(TOKEN));
+        assert_eq!(code_of(&remove(&mac)), PF_DELETE);
+        assert_eq!(commands(&mac), [bootout(), pf(&FLUSH_ARGS)]);
+        assert_eq!(mac.fake.files.borrow().len(), 5);
+    }
+
+    /// The token of the last boot is dropped, never given back. The rules are
+    /// there after the load, gone at the 10 s check (as if `com.apple.pfctl`
+    /// loaded `/etc/pf.conf`), there after the reload, and still there at the
+    /// check after 30 s more. The reload gives back the token of this boot
+    /// only after the new one is saved.
     #[test]
     fn the_boot_job_loads_again_when_the_rules_vanish() {
         let mac = installed(&[LISTED, "", LISTED, LISTED]);
+        mac.answer(&["-E"], &format!("Token : {ONCE}\n"));
         assert_eq!(boot_logged(&mac), result(LOAD, Outcome::Done));
         let sleep = |seconds: &str| vec!["sleep".to_owned(), seconds.to_owned()];
         let expected = [
-            pf(&["-X", OLD]),
             pf(&LOAD_ARGS),
             pf(&["-E"]),
             pf(&SHOW_ARGS),
             sleep("10"),
             pf(&SHOW_ARGS),
-            pf(&["-X", NEW]),
             pf(&LOAD_ARGS),
             pf(&["-E"]),
+            pf(&["-X", ONCE]),
             pf(&SHOW_ARGS),
             sleep("30"),
             pf(&SHOW_ARGS),
@@ -816,8 +887,8 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         assert_eq!(file(&mac, TOKEN), token_file(NEW));
     }
 
-    /// A failed load is tried again after each wait, and the old token is
-    /// given back only once.
+    /// A failed load is tried again after each wait. The token of the last
+    /// boot is dropped and never given back.
     #[test]
     fn the_boot_job_tries_a_failed_load_again() {
         let mut mac = installed(&[]);
@@ -825,7 +896,6 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         assert_eq!(code_of(&boot_logged(&mac)), PF_LOAD_FAILED);
         let sleep = |seconds: &str| vec!["sleep".to_owned(), seconds.to_owned()];
         let expected = [
-            pf(&["-X", OLD]),
             pf(&LOAD_ARGS),
             sleep("10"),
             pf(&LOAD_ARGS),
