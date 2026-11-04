@@ -1,22 +1,22 @@
-//! `marsa install <tool> [version] [--force]`: installs one runtime version
-//! into `runtimes/`. Every step is in `marsa_core::installer`; this file only
-//! starts it and prints what it reports.
+//! `marsa install <tool> [version] [--force]`: asks `marsad` to install one
+//! runtime version into `runtimes/` (`POST /v1/runtimes/{tool}/install`),
+//! then prints the install's events from `/v1/events` until it ends.
+//!
+//! The daemon runs the installer; this file only prints what it reports.
 
-use std::error::Error;
 use std::io::IsTerminal as _;
 use std::path::Path;
 use std::process::ExitCode;
 
-use marsa_core::installer::extract::ExtractError;
-use marsa_core::installer::fetch::FetchError;
-use marsa_core::installer::{self, InstallEnv, InstallError, InstallRequest, InstalledVersion};
+use marsa_core::client::{ClientError, DaemonClient, StreamItem};
 use marsa_core::recipes::Platform;
-use marsa_core::runtimes::{Runtime, RuntimesDir, RuntimesError};
-use marsa_core::types::InstallEvent;
+use marsa_core::runtimes::Runtime;
+use marsa_core::types::{Event, InstallDone, InstallFailure, InstallUpdate};
 
+use super::Tool;
+use super::daemon::{ClientFailure, connect, failure};
 use super::progress::Progress;
 use super::strings::{self, Details};
-use super::{Failure, Tool};
 
 /// The arguments of `marsa install`.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -34,160 +34,315 @@ pub struct InstallArgs {
     pub force: bool,
 }
 
-/// Installs, with progress on stderr and the result on stdout. Exit code 0
-/// also when the version was already installed.
+/// Starts the daemon if needed and installs through it, with progress on
+/// stderr and the result on stdout. Exit code 0 also when the version was
+/// already installed, 1 for any failure.
 pub async fn run(args: &InstallArgs, data_dir: &Path) -> ExitCode {
     let runtime = Runtime::from(args.tool);
-    let request = InstallRequest {
-        runtime,
-        version: args.version.as_deref(),
-        force: args.force,
+    let client = match connect(data_dir).await {
+        Ok(client) => client,
+        Err(failure) => return failure.report(),
     };
+    // Subscribed before the request, so no event of this install is missed.
+    let mut stream = match client.events().await {
+        Ok(stream) => stream,
+        Err(err) => return failure(&err, data_dir, None).report(),
+    };
+    let accepted = match client
+        .install(runtime, args.version.as_deref(), args.force)
+        .await
+    {
+        Ok(accepted) => accepted,
+        Err(err) => return failure(&err, data_dir, None).report(),
+    };
+
     let platform = Platform::current().map_or_else(|| "this system".to_owned(), |p| p.to_string());
-    let mut progress = Progress::new(std::io::stderr().is_terminal(), platform);
-
-    let result = {
-        let mut events = |event: InstallEvent| eprint!("{}", progress.render(&event));
-        install_directly(&request, data_dir, &mut events).await
+    let progress = Progress::new(std::io::stderr().is_terminal(), platform);
+    let mut follow = Follow::new(accepted.id, progress);
+    let end = loop {
+        // `EventStream::next` gives `None` after the daemon closed the stream.
+        let (text, end) = follow.next(stream.next().await);
+        eprint!("{text}");
+        if let Some(end) = end {
+            break end;
+        }
     };
-    eprint!("{}", progress.finish());
 
-    match result {
-        Ok(done) => {
-            print_result(&done, data_dir);
+    match end {
+        End::Done(done) => {
+            print_result(&done, &client).await;
             ExitCode::SUCCESS
         }
-        Err(err) => {
-            tracing::debug!(code = err.code(), error = %chain(&err), "install failed");
-            failure(&err, &request).report()
+        End::Failed(failed) => install_failure(&failed, runtime).report(),
+        End::Broken(err) => failure(&err, data_dir, None).report(),
+        End::Interrupted => ClientFailure::new("install_interrupted", data_dir, None).report(),
+    }
+}
+
+/// How an install ended, as this command saw it.
+#[derive(Debug)]
+pub enum End {
+    Done(InstallDone),
+    Failed(InstallFailure),
+    /// The event stream broke before the install ended.
+    Broken(ClientError),
+    /// The daemon stopped before the install ended.
+    Interrupted,
+}
+
+/// Reads the event stream for install `id`: no I/O here, so tests feed it
+/// items and compare the text.
+#[derive(Debug)]
+pub struct Follow {
+    id: u64,
+    progress: Progress,
+    /// The last stream error, until an event shows that the stream goes on.
+    broken: Option<ClientError>,
+}
+
+impl Follow {
+    pub fn new(id: u64, progress: Progress) -> Self {
+        Self {
+            id,
+            progress,
+            broken: None,
+        }
+    }
+
+    /// The text to print for the next stream `item`, and how the install
+    /// ended if this item ends it. Events of other installs are skipped.
+    pub fn next(
+        &mut self,
+        item: Option<Result<StreamItem<Event>, ClientError>>,
+    ) -> (String, Option<End>) {
+        let event = match item {
+            Some(Ok(StreamItem::Item(event))) => event,
+            // Lost events may be progress lines; the last event of the
+            // install comes after them.
+            Some(Ok(StreamItem::Lagged(_))) => return (String::new(), None),
+            // An event that cannot be read is skipped; a broken connection
+            // gives an error, then `None`.
+            Some(Err(err)) => {
+                self.broken = Some(err);
+                return (String::new(), None);
+            }
+            None => {
+                let end = self.broken.take().map_or(End::Interrupted, End::Broken);
+                return (self.progress.finish(), Some(end));
+            }
+        };
+        self.broken = None;
+        match event {
+            Event::Install(step) if step.id == self.id => match step.update {
+                InstallUpdate::Running(event) => (self.progress.render(&event), None),
+                InstallUpdate::Done(done) => (self.progress.finish(), Some(End::Done(done))),
+                InstallUpdate::Failed(failed) => {
+                    (self.progress.finish(), Some(End::Failed(failed)))
+                }
+            },
+            Event::ShuttingDown => (self.progress.finish(), Some(End::Interrupted)),
+            _ => (String::new(), None),
         }
     }
 }
 
-/// Runs the installer in this process.
-///
-/// M2 only: no daemon yet. M3 moves this call into marsad (task M3-12,
-/// `POST /v1/runtimes/{tool}/install`, with the events sent over SSE), and
-/// `marsa install` becomes a client of it through `marsa_core::client`. Keep
-/// every direct call to the installer inside this one function.
-async fn install_directly(
-    request: &InstallRequest<'_>,
-    data_dir: &Path,
-    events: &mut (dyn FnMut(InstallEvent) + Send),
-) -> Result<InstalledVersion, InstallError> {
-    let env = InstallEnv::production(data_dir)?;
-    installer::install(request, &env, events).await
-}
-
-fn print_result(done: &InstalledVersion, data_dir: &Path) {
-    let version = done.version.to_string();
+async fn print_result(done: &InstallDone, client: &DaemonClient) {
+    let version = printable(&done.version);
     if done.already {
         println!("{}", strings::already_installed(done.runtime, &version));
     } else {
         println!("{}", strings::installed(done.runtime, &version, &done.dir));
     }
     if done.runtime == Runtime::Php {
-        let composer = RuntimesDir::in_dir(data_dir).installed(Runtime::Composer);
-        if composer.is_ok_and(|versions| versions.is_empty()) {
+        // Only a tip: if the list cannot be read, it is left out.
+        let no_composer = client.runtimes().await.is_ok_and(|list| {
+            list.runtimes
+                .iter()
+                .any(|r| r.runtime == Runtime::Composer && r.installed.is_empty())
+        });
+        if no_composer {
             eprintln!("{}", strings::COMPOSER_TIP);
         }
     }
 }
 
-/// The text and code the user sees for `err`.
-pub fn failure(err: &InstallError, request: &InstallRequest<'_>) -> Failure {
-    let mut details = Details {
-        runtime: Some(request.runtime),
-        ..Details::default()
+/// The text and code the user sees for a `failed` install event. The
+/// daemon's English `message` goes to the log only.
+pub fn install_failure(failed: &InstallFailure, runtime: Runtime) -> ClientFailure {
+    tracing::debug!(code = %failed.code, error = %failed.message, "install failed");
+    let code = printable(&failed.code);
+    let text = |value: &Option<String>| value.as_deref().map(printable);
+    let (requested, platform, url, cause, output) = (
+        text(&failed.requested),
+        text(&failed.platform),
+        text(&failed.url),
+        text(&failed.cause),
+        text(&failed.output),
+    );
+    let available: Vec<String> = failed.available.iter().map(|v| printable(v)).collect();
+    let details = Details {
+        runtime: Some(runtime),
+        requested: requested.as_deref(),
+        available: &available,
+        platform: platform.as_deref(),
+        path: failed.path.as_deref(),
+        url: url.as_deref(),
+        cause: cause.as_deref(),
+        output: output.as_deref(),
+        service: None,
     };
-    match err {
-        InstallError::UnsupportedPlatform { platform, .. } => details.platform = Some(platform),
-        InstallError::NoSuchVersion {
-            requested,
-            available,
-            ..
-        } => {
-            details.requested = requested.as_deref();
-            details.available = available;
-        }
-        InstallError::CheckFailed { output, .. } => details.output = Some(output),
-        InstallError::SerialCorrupt { path } | InstallError::Io { path, .. } => {
-            details.path = Some(path);
-        }
-        InstallError::Fetch(fetch) => {
-            details.url = url_of(fetch);
-            details.cause = fetch.last_code();
-            if let FetchError::Io { path, .. } = fetch {
-                details.path = Some(path);
-            }
-        }
-        InstallError::Extract(ExtractError::Io(path, _))
-        | InstallError::Runtimes(RuntimesError::Read { path, .. }) => details.path = Some(path),
-        InstallError::Version(_) => details.requested = request.version,
-        _ => {}
-    }
-    Failure {
-        code: err.code(),
-        message: strings::message(err.code(), &details),
+    ClientFailure {
+        message: strings::message(&code, &details),
+        code,
     }
 }
 
-/// The URL a download error is about. For `download_failed`, the one of the
-/// last mirror tried.
-fn url_of(err: &FetchError) -> Option<&str> {
-    match err {
-        FetchError::InsecureUrl { url }
-        | FetchError::HttpStatus { url, .. }
-        | FetchError::Network { url, .. }
-        | FetchError::TooLong { url, .. }
-        | FetchError::TooShort { url, .. }
-        | FetchError::ChecksumMismatch { url, .. }
-        | FetchError::TooLarge { url, .. } => Some(url),
-        FetchError::Failed {
-            last: Some(last), ..
-        } => url_of(last),
-        FetchError::Failed { last: None, .. } | FetchError::Io { .. } => None,
-    }
-}
-
-/// The message of `err` and of each cause under it, for the log.
-fn chain(err: &dyn Error) -> String {
-    let mut text = err.to_string();
-    let mut cause = err.source();
-    while let Some(current) = cause {
-        text.push_str(": ");
-        text.push_str(&current.to_string());
-        cause = current.source();
-    }
-    text
+/// Text from the daemon, safe to print: no control characters but line
+/// breaks and tabs, so it cannot move the cursor or recolor the terminal.
+fn printable(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marsa_core::installer::manifest::ManifestError;
-    use marsa_core::resolver::BadRequest;
+    use marsa_core::types::{InstallEvent, InstallProgress};
     use std::path::PathBuf;
 
-    fn request(version: Option<&str>) -> InstallRequest<'_> {
-        InstallRequest {
+    type Item = Option<Result<StreamItem<Event>, ClientError>>;
+
+    fn event(id: u64, update: InstallUpdate) -> Item {
+        Some(Ok(StreamItem::Item(Event::Install(InstallProgress {
+            id,
+            update,
+        }))))
+    }
+
+    fn step(id: u64, event: InstallEvent) -> Item {
+        self::event(id, InstallUpdate::Running(event))
+    }
+
+    fn done() -> InstallDone {
+        InstallDone {
             runtime: Runtime::Php,
-            version,
-            force: false,
+            version: "8.4.23".into(),
+            dir: PathBuf::from("/d/runtimes/php/8.4.23"),
+            already: false,
         }
+    }
+
+    /// Feeds `items` to install 2 and returns the text printed and how it
+    /// ended.
+    fn follow(items: Vec<Item>) -> (String, Option<End>) {
+        let mut follow = Follow::new(2, Progress::new(false, "darwin-arm64"));
+        let mut printed = String::new();
+        for item in items {
+            let (text, end) = follow.next(item);
+            printed.push_str(&text);
+            if end.is_some() {
+                return (printed, end);
+            }
+        }
+        (printed, None)
+    }
+
+    #[test]
+    fn the_steps_of_this_install_are_printed_until_done() {
+        let artifact = || "cli".to_owned();
+        let (printed, end) = follow(vec![
+            // The end of an earlier install, from another client.
+            event(1, InstallUpdate::Done(done())),
+            step(2, InstallEvent::ManifestVerified { serial: 3 }),
+            Some(Ok(StreamItem::Lagged(4))),
+            step(
+                2,
+                InstallEvent::Selected {
+                    runtime: Runtime::Php,
+                    version: "8.4.23".into(),
+                },
+            ),
+            step(
+                2,
+                InstallEvent::Downloading {
+                    artifact: artifact(),
+                    done: 2_000_000,
+                    total: 2_000_000,
+                },
+            ),
+            step(
+                2,
+                InstallEvent::Verified {
+                    artifact: artifact(),
+                },
+            ),
+            step(
+                2,
+                InstallEvent::Installed {
+                    dir: PathBuf::from("/d"),
+                },
+            ),
+            event(2, InstallUpdate::Done(done())),
+            step(2, InstallEvent::Checking),
+        ]);
+        assert_eq!(
+            printed,
+            "Verified the version list (serial 3)\n\
+             Installing PHP 8.4.23 for darwin-arm64\n\
+             \x20 cli      [##########] 2.0 MB of 2.0 MB (100%)\n\
+             \x20 cli      [##########] 2.0 MB, sha256 ok\n"
+        );
+        assert!(
+            matches!(&end, Some(End::Done(got)) if *got == done()),
+            "{end:?}"
+        );
+    }
+
+    #[test]
+    fn a_failure_ends_with_its_code() {
+        let failed = InstallFailure {
+            code: "install_busy".into(),
+            message: "another install is running".into(),
+            ..InstallFailure::default()
+        };
+        let (printed, end) = follow(vec![event(2, InstallUpdate::Failed(failed.clone()))]);
+        assert_eq!(printed, "");
+        assert!(
+            matches!(&end, Some(End::Failed(got)) if *got == failed),
+            "{end:?}"
+        );
+    }
+
+    #[test]
+    fn the_daemon_stopping_or_a_broken_stream_ends_it() {
+        let (_, end) = follow(vec![Some(Ok(StreamItem::Item(Event::ShuttingDown)))]);
+        assert!(matches!(end, Some(End::Interrupted)), "{end:?}");
+        let (_, end) = follow(vec![None]);
+        assert!(matches!(end, Some(End::Interrupted)), "{end:?}");
+
+        let broken = || Some(Err(ClientError::BadResponse { reason: "x".into() }));
+        let (_, end) = follow(vec![broken(), None]);
+        assert!(
+            matches!(&end, Some(End::Broken(err)) if err.code() == "daemon_bad_response"),
+            "{end:?}"
+        );
+        // An event after the error shows that the stream went on.
+        let (_, end) = follow(vec![broken(), step(2, InstallEvent::Checking), None]);
+        assert!(matches!(end, Some(End::Interrupted)), "{end:?}");
     }
 
     #[test]
     fn no_such_version_shows_what_was_asked_and_what_exists() {
-        let err = InstallError::NoSuchVersion {
-            runtime: "php",
+        let failed = InstallFailure {
+            code: "install_no_such_version".into(),
+            message: "x".into(),
             requested: Some("8.9".into()),
             available: vec!["8.3.27".into(), "8.4.23".into(), "8.5.4".into()],
+            ..InstallFailure::default()
         };
-        let failure = failure(&err, &request(Some("8.9")));
-        assert_eq!(failure.code, "install_no_such_version");
         assert_eq!(
-            failure.line(),
+            install_failure(&failed, Runtime::Php).line(),
             "marsa: No PHP version matches \"8.9\". Available: 8.3.27, 8.4.23, 8.5.4 \
              [install_no_such_version]"
         );
@@ -195,54 +350,30 @@ mod tests {
 
     #[test]
     fn download_failed_names_the_last_url_and_its_cause() {
-        let err = InstallError::Fetch(FetchError::Failed {
-            tried: 2,
-            last: Some(Box::new(FetchError::HttpStatus {
-                url: "https://mirror.example/php.tar.gz".into(),
-                status: 503,
-            })),
-        });
-        let failure = failure(&err, &request(None));
-        assert_eq!(failure.code, "download_failed");
+        let failed = InstallFailure {
+            code: "download_failed".into(),
+            url: Some("https://mirror.example/php.tar.gz".into()),
+            cause: Some("download_http_status".into()),
+            ..InstallFailure::default()
+        };
+        let message = install_failure(&failed, Runtime::Php).message;
         assert!(
-            failure
-                .message
-                .contains("server answered with an error for https://mirror.example/php.tar.gz"),
-            "{}",
-            failure.message
+            message.contains("server answered with an error for https://mirror.example/php.tar.gz"),
+            "{message}"
         );
     }
 
     #[test]
-    fn details_come_from_the_error() {
-        let serial = InstallError::SerialCorrupt {
-            path: PathBuf::from("/d/runtimes/.manifest-serial"),
+    fn text_from_the_daemon_cannot_move_the_cursor() {
+        let failed = InstallFailure {
+            code: "install_check_failed".into(),
+            output: Some("PHP 8.4.22\u{1b}[2J\n(cli)\r".into()),
+            ..InstallFailure::default()
         };
+        let message = install_failure(&failed, Runtime::Php).message;
         assert!(
-            failure(&serial, &request(None))
-                .message
-                .contains(".manifest-serial is damaged"),
+            message.ends_with("It printed: PHP 8.4.22[2J\n(cli)"),
+            "{message:?}"
         );
-
-        let alias = InstallError::Version(BadRequest::Alias);
-        assert!(
-            failure(&alias, &request(Some("latest")))
-                .message
-                .starts_with("\"latest\" is a name, not a version.")
-        );
-
-        let key = InstallError::Manifest(ManifestError::NoTrustedKey);
-        let failure = failure(&key, &request(Some("8.4")));
-        assert_eq!(failure.code, "manifest_no_trusted_key");
-        assert!(failure.message.contains("no trusted manifest key yet"));
-    }
-
-    #[test]
-    fn the_log_text_holds_every_cause() {
-        let err = InstallError::Io {
-            path: PathBuf::from("/d"),
-            source: std::io::Error::other("disk full"),
-        };
-        assert_eq!(chain(&err), "disk error at /d: disk full");
     }
 }

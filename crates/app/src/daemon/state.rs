@@ -13,6 +13,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use super::caddy::CaddyManager;
+use super::runtimes_api::Installs;
 use super::supervisor::ServiceHandle;
 
 /// How many events the bus keeps for a slow reader. A reader that falls
@@ -42,6 +43,8 @@ pub struct Daemon {
     pub shutdown: CancellationToken,
     /// Caddy: how it runs, its status, and its recent lines.
     pub caddy: CaddyManager,
+    /// The runtime installer, and whether an install runs (task M3-12).
+    pub installs: Installs,
 }
 
 impl Daemon {
@@ -53,6 +56,7 @@ impl Daemon {
             events: broadcast::channel(EVENT_CAPACITY).0,
             procs: Mutex::default(),
             shutdown: CancellationToken::new(),
+            installs: Installs::new(),
         }
     }
 

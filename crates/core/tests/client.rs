@@ -24,9 +24,10 @@ use marsa_core::client::{
 use marsa_core::platform::daemon_file::{
     DaemonFile, Token, daemon_file_path, daemon_lock_path, remove_daemon_file, write_daemon_file,
 };
+use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    API_VERSION, ErrorBody, Event, Health, LogLine, LogStream, ServiceAction, ServiceState,
-    ServiceStatus,
+    API_VERSION, ErrorBody, Event, Health, InstallAccepted, InstallRequest, LogLine, LogStream,
+    RuntimeList, RuntimeVersions, ServiceAction, ServiceState, ServiceStatus,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -488,6 +489,82 @@ async fn services_and_logs_are_read() {
             "POST /v1/services/caddy/restart",
             "GET /v1/logs/caddy",
             "GET /v1/logs/caddy?follow=true",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn runtimes_and_install_are_called() {
+    let list = RuntimeList {
+        runtimes: vec![RuntimeVersions {
+            runtime: Runtime::Php,
+            installed: vec!["8.4.23".into()],
+        }],
+    };
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let router = Router::new()
+        .route(
+            "/v1/runtimes",
+            get({
+                let list = list.clone();
+                move || async move { Json(list) }
+            }),
+        )
+        .route(
+            "/v1/runtimes/{tool}/install",
+            post({
+                let bodies = bodies.clone();
+                move |Json(body): Json<InstallRequest>| async move {
+                    let mut bodies = bodies.lock().expect("lock");
+                    bodies.push(body);
+                    if bodies.len() == 1 {
+                        (StatusCode::ACCEPTED, Json(InstallAccepted { id: 4 })).into_response()
+                    } else {
+                        let busy = ErrorBody::new("install_busy", "another install is running");
+                        (StatusCode::CONFLICT, Json(busy)).into_response()
+                    }
+                }
+            }),
+        );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    assert_eq!(client.runtimes().await.unwrap(), list);
+    let accepted = client.install(Runtime::Php, Some("8.4"), false).await;
+    assert_eq!(accepted.unwrap(), InstallAccepted { id: 4 });
+    let err = client
+        .install(Runtime::Composer, None, true)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "install_busy");
+    assert!(
+        matches!(err, ClientError::Api { status: 409, .. }),
+        "{err:?}"
+    );
+
+    assert_eq!(
+        *bodies.lock().unwrap(),
+        [
+            InstallRequest {
+                version: Some("8.4".into()),
+                force: false,
+            },
+            InstallRequest {
+                version: None,
+                force: true,
+            },
+        ]
+    );
+    let targets: Vec<String> = fake
+        .seen()
+        .into_iter()
+        .map(|seen| format!("{} {}", seen.method, seen.target))
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            "GET /v1/runtimes",
+            "POST /v1/runtimes/php/install",
+            "POST /v1/runtimes/composer/install",
         ]
     );
 }

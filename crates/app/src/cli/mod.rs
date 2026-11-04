@@ -1,9 +1,9 @@
 //! The commands of the `marsa` binary. `bin/marsa.rs` parses the arguments
 //! and calls one `run` function per command.
 //!
-//! The commands hold no install logic: they call `marsa_core` and print what
-//! it reports. Every text the user sees comes from [`strings`] (AGENTS.md
-//! section 9).
+//! The commands hold no logic of their own: they call the daemon through
+//! `marsa_core::client` and print what it reports. Every text the user sees
+//! comes from [`strings`] (AGENTS.md section 9).
 
 pub mod daemon;
 pub mod install;

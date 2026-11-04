@@ -1,8 +1,6 @@
-//! `marsa`: the command-line client.
-//!
-//! In M2 `marsa install` runs the installer in this process, because the
-//! daemon has no API yet; see `cli::install`. From M3 every command that
-//! changes state is a call to `marsad`.
+//! `marsa`: the command-line client. Every command that changes state, and
+//! every command that reads it, is a call to `marsad` (task M3-12 moved
+//! `marsa install` there).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -55,7 +53,7 @@ async fn main() -> ExitCode {
     };
     match &cli.command {
         Command::Install(args) => install::run(args, &data_dir).await,
-        Command::Runtimes(args) => runtimes::run(args, &data_dir),
+        Command::Runtimes(args) => runtimes::run(args, &data_dir).await,
         Command::Daemon(command) => daemon::run(*command, &data_dir).await,
         Command::Services(args) => services::run(args, &data_dir).await,
         Command::Logs(args) => logs::run(args, &data_dir).await,

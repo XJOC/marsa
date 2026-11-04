@@ -1,12 +1,14 @@
-//! `marsa runtimes [tool]`: lists the installed versions. Reads the
-//! `runtimes/` folder only, no network.
+//! `marsa runtimes [tool]`: lists the installed versions, from the daemon's
+//! `GET /v1/runtimes`. No network beyond the daemon on `127.0.0.1`.
 
 use std::path::Path;
 use std::process::ExitCode;
 
-use marsa_core::runtimes::{Runtime, RuntimesDir, RuntimesError};
+use marsa_core::runtimes::Runtime;
+use marsa_core::types::RuntimeList;
 
-use super::{Failure, Tool, strings};
+use super::daemon::{connect, failure};
+use super::{Tool, strings};
 
 /// The arguments of `marsa runtimes`.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -18,58 +20,46 @@ pub struct RuntimesArgs {
 
 const ALL: [Runtime; 3] = [Runtime::Php, Runtime::Node, Runtime::Composer];
 
-/// Prints the installed versions to stdout.
-pub fn run(args: &RuntimesArgs, data_dir: &Path) -> ExitCode {
-    match list(args, data_dir) {
-        Ok(text) => {
-            print!("{text}");
+/// Starts the daemon if needed, then prints the installed versions to stdout.
+pub async fn run(args: &RuntimesArgs, data_dir: &Path) -> ExitCode {
+    let client = match connect(data_dir).await {
+        Ok(client) => client,
+        Err(failure) => return failure.report(),
+    };
+    match client.runtimes().await {
+        Ok(list) => {
+            print!("{}", render(&list, args.tool));
             ExitCode::SUCCESS
         }
-        Err(failure) => failure.report(),
+        Err(err) => failure(&err, data_dir, None).report(),
     }
 }
 
-/// The text `marsa runtimes` prints.
-///
-/// # Errors
-///
-/// `runtimes_read` if a runtime folder exists but cannot be read.
-pub fn list(args: &RuntimesArgs, data_dir: &Path) -> Result<String, Failure> {
-    let dir = RuntimesDir::in_dir(data_dir);
-    let wanted: Vec<Runtime> = match args.tool {
+/// One line per runtime (only `tool`'s if given): its name, then its
+/// versions, oldest first. A runtime the daemon did not list has none.
+pub fn render(list: &RuntimeList, tool: Option<Tool>) -> String {
+    let wanted: Vec<Runtime> = match tool {
         Some(tool) => vec![tool.into()],
         None => ALL.to_vec(),
     };
-    let mut found = Vec::with_capacity(wanted.len());
-    for runtime in wanted {
-        let versions = dir.installed(runtime).map_err(|err| {
-            tracing::warn!(error = %err, "cannot list runtimes");
-            let RuntimesError::Read { path, .. } = &err;
-            let details = strings::Details {
-                runtime: Some(runtime),
-                path: Some(path),
-                ..strings::Details::default()
-            };
-            Failure {
-                code: err.code(),
-                message: strings::message(err.code(), &details),
-            }
-        })?;
-        found.push((runtime, versions.iter().map(ToString::to_string).collect()));
-    }
-    Ok(render(&found))
-}
-
-/// One line per runtime: its name, then its versions, oldest first.
-pub fn render(found: &[(Runtime, Vec<String>)]) -> String {
     let mut text = String::new();
-    for (runtime, versions) in found {
-        let list = if versions.is_empty() {
+    for runtime in wanted {
+        let versions = list
+            .runtimes
+            .iter()
+            .find(|r| r.runtime == runtime)
+            .map_or(&[][..], |r| r.installed.as_slice());
+        let shown = if versions.is_empty() {
             strings::NONE_INSTALLED.to_owned()
         } else {
-            versions.join(", ")
+            // From the daemon: no control characters on the terminal.
+            versions
+                .iter()
+                .map(|v| v.chars().filter(|c| !c.is_control()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join(", ")
         };
-        text.push_str(&format!("{:<10}{list}\n", strings::runtime_name(*runtime)));
+        text.push_str(&format!("{:<10}{shown}\n", strings::runtime_name(runtime)));
     }
     text
 }
@@ -77,17 +67,29 @@ pub fn render(found: &[(Runtime, Vec<String>)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use marsa_core::types::RuntimeVersions;
 
-    fn args(tool: Option<Tool>) -> RuntimesArgs {
-        RuntimesArgs { tool }
+    fn list(found: &[(Runtime, &[&str])]) -> RuntimeList {
+        RuntimeList {
+            runtimes: found
+                .iter()
+                .map(|(runtime, versions)| RuntimeVersions {
+                    runtime: *runtime,
+                    installed: versions.iter().map(|v| (*v).to_owned()).collect(),
+                })
+                .collect(),
+        }
     }
 
     #[test]
-    fn an_empty_data_dir_lists_nothing_installed() {
-        let tmp = tempfile::tempdir().expect("temp dir");
+    fn nothing_installed_reads_none_installed() {
+        let empty = list(&[
+            (Runtime::Php, &[]),
+            (Runtime::Node, &[]),
+            (Runtime::Composer, &[]),
+        ]);
         assert_eq!(
-            list(&args(None), tmp.path()).expect("list"),
+            render(&empty, None),
             "PHP       none installed\n\
              Node.js   none installed\n\
              Composer  none installed\n"
@@ -95,54 +97,24 @@ mod tests {
     }
 
     #[test]
-    fn versions_are_listed_oldest_first() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let runtimes = tmp.path().join("runtimes");
-        for dir in [
-            "php/8.4.23",
-            "php/8.3.27",
-            "php/8.4",
-            "node/22.11.0",
-            ".tmp",
-        ] {
-            fs::create_dir_all(runtimes.join(dir)).expect("mkdir");
-        }
-        // A file named like a version is not a version folder.
-        fs::create_dir_all(runtimes.join("composer")).expect("mkdir");
-        fs::write(runtimes.join("composer").join("2.8.4"), "").expect("write");
-
+    fn versions_are_listed_as_the_daemon_sent_them() {
+        let found = list(&[
+            (Runtime::Php, &["8.3.27", "8.4.23"]),
+            (Runtime::Node, &["22.11.0"]),
+        ]);
         assert_eq!(
-            list(&args(None), tmp.path()).expect("list"),
+            render(&found, None),
             "PHP       8.3.27, 8.4.23\n\
              Node.js   22.11.0\n\
              Composer  none installed\n"
         );
+        assert_eq!(render(&found, Some(Tool::Node)), "Node.js   22.11.0\n");
         assert_eq!(
-            list(&args(Some(Tool::Node)), tmp.path()).expect("list"),
-            "Node.js   22.11.0\n"
+            render(
+                &list(&[(Runtime::Php, &["8.4.23\u{1b}[2J"])]),
+                Some(Tool::Php)
+            ),
+            "PHP       8.4.23[2J\n"
         );
-    }
-
-    // `cfg(unix)` outside `platform`: Unix file modes are the simplest way to
-    // make a folder unreadable in a test.
-    #[cfg(unix)]
-    #[test]
-    fn an_unreadable_folder_is_runtimes_read() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let php = tmp.path().join("runtimes").join("php");
-        fs::create_dir_all(&php).expect("mkdir");
-        fs::set_permissions(&php, fs::Permissions::from_mode(0o000)).expect("chmod");
-        let result = list(&args(Some(Tool::Php)), tmp.path());
-        fs::set_permissions(&php, fs::Permissions::from_mode(0o755)).expect("chmod back");
-        // Root can read anything; then there is no error to check.
-        if let Err(failure) = result {
-            assert_eq!(failure.code, "runtimes_read");
-            assert!(
-                failure.message.contains("Cannot read"),
-                "{}",
-                failure.message
-            );
-        }
     }
 }
