@@ -4,6 +4,13 @@
 //! `caddy/caddy.json`, runs `bin/caddy run --config caddy/caddy.json` under
 //! the supervisor, and waits until the admin API answers. Like a Laravel job
 //! that starts a queue worker, then checks that it is healthy.
+//!
+//! Before each start, [`orphan`] stops a Caddy that a crashed daemon left
+//! behind, or refuses to start when another program holds our ports. After
+//! each spawn the watcher writes `run/caddy.pid`, and removes it once Caddy
+//! has exited (ADR 0009).
+
+pub mod orphan;
 
 use std::fmt;
 use std::io;
@@ -22,6 +29,7 @@ use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use self::orphan::{Ladder, PidFile, Processes, SystemProcesses};
 use super::state::Daemon;
 use super::supervisor::{ServiceHandle, ServiceRuntime, Supervisor, lock, now_ms};
 
@@ -112,6 +120,11 @@ pub struct CaddyManager {
     pub spec: ServiceSpec,
     /// How long `start` waits for the admin API.
     pub ready_limit: Duration,
+    /// Who runs under a pid, and signals, for the orphan check. Tests put a
+    /// recorder here.
+    pub processes: Arc<dyn Processes>,
+    /// How long each step of an orphan's stop waits.
+    pub ladder: Ladder,
     /// The status and recent lines. Kept across runs, so `seq` never goes
     /// back and the lines of a failed run stay readable.
     runtime: Arc<Mutex<ServiceRuntime>>,
@@ -128,6 +141,8 @@ impl CaddyManager {
             paths,
             input: CaddyInput::default(),
             ready_limit: READY_LIMIT,
+            processes: Arc::new(SystemProcesses),
+            ladder: Ladder::default(),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(CADDY_ID))),
             busy: AtomicBool::new(false),
         }
@@ -182,6 +197,17 @@ impl CaddyManager {
             self.fail("caddy_not_installed", &daemon.events);
             return Err(ActionError::NotInstalled(self.spec.program.clone()));
         }
+        // ADR 0009: stop our own orphan; touch nothing that is not ours.
+        let pid_file = PidFile::new(&daemon.data_dir, &self.spec.program);
+        let processes = Arc::clone(&self.processes);
+        let checked = orphan::recover(&pid_file, &*processes, admin, &self.input, self.ladder);
+        if let Err(reason) = checked.await {
+            warn!(%reason, "not starting caddy");
+            let text = format!("marsad: Caddy was not started: {reason}.");
+            note(&self.runtime, &daemon.events, &text);
+            self.fail("port_in_use", &daemon.events);
+            return Ok(());
+        }
         if let Err(err) = write_config(&self.paths.config_file, &self.input).await {
             self.fail("caddy_config_write", &daemon.events);
             return Err(ActionError::ConfigWrite(err));
@@ -212,6 +238,8 @@ impl CaddyManager {
             cancel: cancel.clone(),
             runtime: Arc::clone(&runtime),
             events: daemon.events.clone(),
+            pid_file,
+            processes,
         };
         let task = tokio::spawn(watcher.run(task));
         // A handle this replaces belongs to a run that has ended.
@@ -309,6 +337,9 @@ struct Watcher {
     cancel: CancellationToken,
     runtime: Arc<Mutex<ServiceRuntime>>,
     events: broadcast::Sender<Event>,
+    /// `run/caddy.pid`: written after each spawn, removed after the exit.
+    pid_file: PidFile,
+    processes: Arc<dyn Processes>,
 }
 
 impl Watcher {
@@ -325,42 +356,67 @@ impl Watcher {
             cancel,
             runtime,
             events,
+            pid_file,
+            processes,
         } = self;
-        tokio::select! {
+        let conflict = tokio::select! {
             result = &mut supervisor => {
                 report(result);
-                return;
+                false
             }
-            () = port_conflict(lines, first_seq, &runtime) => {}
+            () = watch(lines, first_seq, &runtime, &pid_file, &*processes) => true,
+        };
+        if conflict {
+            warn!("a port caddy needs is in use; stopping it without a restart");
+            cancel.cancel();
+            report(supervisor.await);
         }
-        warn!("a port caddy needs is in use; stopping it without a restart");
-        cancel.cancel();
-        report(supervisor.await);
-        // After the supervisor's last change, so this one stays.
-        set_failed(&runtime, &events, "port_in_use");
+        // Caddy has exited, so its pid may be anyone's from now on.
+        pid_file.remove();
+        if conflict {
+            // After the supervisor's last change, so this one stays.
+            set_failed(&runtime, &events, "port_in_use");
+        }
     }
 }
 
-/// Ends when a stderr line of this run says that a port is taken. Never ends
-/// otherwise.
-async fn port_conflict(
+/// Writes `run/caddy.pid` after each spawn of this run. Ends when a stderr
+/// line of this run says that a port is taken; never ends otherwise.
+async fn watch(
     mut lines: broadcast::Receiver<Event>,
     first_seq: u64,
     runtime: &Mutex<ServiceRuntime>,
+    pid_file: &PidFile,
+    processes: &dyn Processes,
 ) {
+    let mut recorded = None;
     loop {
-        match lines.recv().await {
+        let status = match lines.recv().await {
             Ok(Event::Log(line)) if line.service == CADDY_ID && is_port_conflict(&line) => return,
-            Ok(_) => {}
-            // Too far behind: the skipped lines are still in the buffer.
+            Ok(Event::ServiceChanged(status)) if status.id == CADDY_ID => status,
+            Ok(_) => continue,
+            // Too far behind: the skipped lines are still in the buffer, and
+            // the status is current.
             Err(RecvError::Lagged(_)) => {
-                let recent = lock(runtime).logs.recent();
+                let (recent, status) = {
+                    let runtime = lock(runtime);
+                    (runtime.logs.recent(), runtime.status.clone())
+                };
                 let mut this_run = recent.iter().filter(|line| line.seq >= first_seq);
                 if this_run.any(is_port_conflict) {
                     return;
                 }
+                status
             }
             Err(RecvError::Closed) => std::future::pending().await,
+        };
+        // The supervisor says `Running` right after each spawn.
+        if status.state == ServiceState::Running
+            && let Some(pid) = status.pid
+            && recorded != Some(pid)
+        {
+            pid_file.record(processes, pid).await;
+            recorded = Some(pid);
         }
     }
 }
@@ -385,6 +441,15 @@ impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// Adds a line from the daemon to Caddy's recent lines, so `marsa logs caddy`
+/// shows why Caddy did not start.
+fn note(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, text: &str) {
+    let mut runtime = lock(runtime);
+    let line = runtime.logs.push(LogStream::Stderr, text, now_ms());
+    // Under the lock, like the supervisor, so events come in `seq` order.
+    let _ = events.send(Event::Log(line));
 }
 
 /// Sets `Failed { code }` and tells every reader, under the lock like the

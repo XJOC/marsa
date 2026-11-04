@@ -123,6 +123,10 @@ impl App {
         if let Some(mode) = fake {
             let caddy = &mut daemon.caddy;
             caddy.input.admin_port = admin_port;
+            // Free ports, so the orphan check before a start never meets a
+            // Caddy that runs on this machine on Marsa's own ports.
+            caddy.input.http_port = free_port();
+            caddy.input.https_port = free_port();
             caddy.ready_limit = ready_limit;
             let config = caddy.paths.config_file.to_string_lossy().into_owned();
             caddy.spec = ServiceSpec {
