@@ -190,7 +190,7 @@ mod tests {
         let manifest = check_json(good.as_bytes()).expect("good");
         assert_eq!(
             summary(&manifest),
-            "serial 1\nphp: 0 version(s)\nnode: 0 version(s)\ncomposer: 1 version(s)\n  2.11.1: any\n"
+            "serial 1\nphp: 0 version(s)\nnode: 0 version(s)\ncomposer: 1 version(s)\n  2.11.1: any\ncaddy: 0 version(s)\n"
         );
         let refused = [
             doc(2, 1, &file("phar", URL, SHA, 10)),

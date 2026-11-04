@@ -1,5 +1,7 @@
-//! The sha256 that the upstream project publishes for a file, to compare with
-//! the one we compute. Pure functions: the build step downloads the text.
+//! The hash that the upstream project publishes for a file, to compare with
+//! the one we compute. Most publish sha256; Caddy publishes sha512. The
+//! manifest itself always stores sha256. Pure functions: the build step
+//! downloads the text.
 
 use anyhow::{Context, Result, bail};
 
@@ -8,30 +10,84 @@ use anyhow::{Context, Result, bail};
 /// with a `sha256sums.txt` beside the archives (ADR 0012).
 pub const PHP_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/php-";
 
-/// Where the upstream sha256 of the file at `url` is published, and the name
-/// the file has in it. `None` when the source publishes none:
-/// `windows.php.net/.../archives/` (it only has `sha1sum.txt`) and any other
-/// host.
-pub fn sum_file_for(url: &str) -> Option<(String, String)> {
+/// Caddy's official releases (ADR 0008): tag `v<version>`, with
+/// `caddy_<version>_checksums.txt` (sha512) beside the archives.
+pub const CADDY_RELEASES: &str = "https://github.com/caddyserver/caddy/releases/download/v";
+
+/// The hash in a sum file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Algorithm {
+    Sha256,
+    Sha512,
+}
+
+impl Algorithm {
+    /// `sha256` or `sha512`, for messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            Algorithm::Sha256 => "sha256",
+            Algorithm::Sha512 => "sha512",
+        }
+    }
+
+    /// The length of the hash in bytes.
+    fn size(self) -> usize {
+        match self {
+            Algorithm::Sha256 => 32,
+            Algorithm::Sha512 => 64,
+        }
+    }
+}
+
+/// Where the upstream hash of one file is published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SumFile {
+    /// The URL of the sum file.
+    pub url: String,
+    /// The name the file has in it.
+    pub name: String,
+    pub algorithm: Algorithm,
+}
+
+/// Where the upstream hash of the file at `url` is published. `None` when
+/// the source publishes none: `windows.php.net/.../archives/` (it only has
+/// `sha1sum.txt`) and any other host.
+pub fn sum_file_for(url: &str) -> Option<SumFile> {
     let (dir, name) = url.rsplit_once('/')?;
-    let sums = if url.starts_with(PHP_RELEASES) {
-        format!("{dir}/sha256sums.txt")
-    } else if url.starts_with("https://nodejs.org/dist/") {
-        format!("{dir}/SHASUMS256.txt")
-    } else if dir == "https://windows.php.net/downloads/releases" {
-        format!("{dir}/sha256sum.txt")
-    } else if url.starts_with("https://getcomposer.org/download/") {
-        format!("{url}.sha256sum")
-    } else {
-        return None;
+    let sum = |url: String, algorithm| {
+        Some(SumFile {
+            url,
+            name: name.to_owned(),
+            algorithm,
+        })
     };
-    Some((sums, name.to_owned()))
+    if url.starts_with(PHP_RELEASES) {
+        sum(format!("{dir}/sha256sums.txt"), Algorithm::Sha256)
+    } else if url.starts_with("https://nodejs.org/dist/") {
+        sum(format!("{dir}/SHASUMS256.txt"), Algorithm::Sha256)
+    } else if dir == "https://windows.php.net/downloads/releases" {
+        sum(format!("{dir}/sha256sum.txt"), Algorithm::Sha256)
+    } else if url.starts_with("https://getcomposer.org/download/") {
+        sum(format!("{url}.sha256sum"), Algorithm::Sha256)
+    } else if let Some(version) = dir.strip_prefix(CADDY_RELEASES) {
+        // `.../v<version>/<file>`: the tag is the only part between.
+        if version.is_empty() || version.contains('/') {
+            return None;
+        }
+        sum(
+            format!("{dir}/caddy_{version}_checksums.txt"),
+            Algorithm::Sha512,
+        )
+    } else {
+        None
+    }
 }
 
 /// Finds `name` in a sum file: one `<hex> <name>` per line, with one or two
 /// spaces, and `*` before the name for binary mode (`sha256sum.txt` on
-/// windows.php.net). `\r\n` endings are fine.
-pub fn find_sha256(text: &str, name: &str) -> Result<[u8; 32]> {
+/// windows.php.net). `\r\n` endings are fine. The hex must have the length
+/// of `algorithm`.
+pub fn find_sum(text: &str, name: &str, algorithm: Algorithm) -> Result<Vec<u8>> {
     for line in text.lines().map(|l| l.trim_end_matches('\r')) {
         let Some((hex, file)) = line.split_once(' ') else {
             continue;
@@ -39,8 +95,8 @@ pub fn find_sha256(text: &str, name: &str) -> Result<[u8; 32]> {
         let file = file.trim_start_matches(' ');
         let file = file.strip_prefix('*').unwrap_or(file);
         if file == name {
-            return parse_hex(&hex.to_ascii_lowercase())
-                .with_context(|| format!("bad sha256 for {name}: {hex:?}"));
+            return parse_hex_bytes(&hex.to_ascii_lowercase(), algorithm.size())
+                .with_context(|| format!("bad {} for {name}: {hex:?}", algorithm.name()));
         }
     }
     bail!("{name} is not in the upstream sum file")
@@ -48,18 +104,21 @@ pub fn find_sha256(text: &str, name: &str) -> Result<[u8; 32]> {
 
 /// 64 lowercase hex characters to bytes.
 pub fn parse_hex(text: &str) -> Option<[u8; 32]> {
-    if text.len() != 64 || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
+    parse_hex_bytes(text, 32)?.try_into().ok()
 }
 
-/// Bytes to 64 lowercase hex characters.
-pub fn hex(bytes: &[u8; 32]) -> String {
+/// `2 * len` lowercase hex characters to `len` bytes.
+fn parse_hex_bytes(text: &str, len: usize) -> Option<Vec<u8>> {
+    if text.len() != len * 2 || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    (0..len)
+        .map(|i| u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok())
+        .collect()
+}
+
+/// Bytes to lowercase hex, two characters per byte.
+pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -74,24 +133,64 @@ mod tests {
         dbae154a0a89791f36c3d48e68bae797878333e7d6cb5721e74617de59b63ab7 *php-8.4.27-1-nts-Win32-vs17-x64.zip\r\n";
     const COMPOSER: &str =
         "6f1b891e1d4927d6274027dc540fb490e47689e19e102c49e8da849794882f8c  composer.phar\r\n";
+    // Cut from caddy_2.11.8_checksums.txt (2026-11-04): sha512, two spaces.
+    const CADDY: &str = "34d29142d6aeef494fdbf0c31805be896acfa223c6aaf7ed20b204b8ba836bedb73ff0362b12d1498c922512bc115d2608041754aba9c03e2319bda01505cf6b  caddy_2.11.8_mac_arm64.sbom\n\
+        0c6992b1bb40629b6090d72cdc4a3f3722a7f6b667606db9fe67bfea0e42e9c40736d10925d406bf103628a5e906e59300d616a0709bc8855d9e85efbcfece81  caddy_2.11.8_mac_arm64.tar.gz\n\
+        fff45b117b9d9ea5cc3f824f3c18de89630bcb43a0b759ca5e7163b7a3c1fb39ec7dae7f3147012d602213c950a46c8b0ef8095c77109e807ebf90132deeb759  caddy_2.11.8_windows_amd64.zip\n";
+
+    fn sha256_of(text: &str, name: &str) -> Result<Vec<u8>> {
+        find_sum(text, name, Algorithm::Sha256)
+    }
 
     #[test]
     fn reads_the_three_formats() {
-        let node = find_sha256(NODE, "node-v22.23.4-darwin-arm64.tar.gz").expect("node");
+        let node = sha256_of(NODE, "node-v22.23.4-darwin-arm64.tar.gz").expect("node");
         assert_eq!(
             hex(&node),
             "c9e1dbc748b33ed2d14f42445191ecaf14c56259c7a9a26d0042c49ec2b66428"
         );
-        let php = find_sha256(PHP_WINDOWS, "php-8.4.27-1-nts-Win32-vs17-x64.zip").expect("php");
+        let php = sha256_of(PHP_WINDOWS, "php-8.4.27-1-nts-Win32-vs17-x64.zip").expect("php");
         assert_eq!(
             hex(&php),
             "dbae154a0a89791f36c3d48e68bae797878333e7d6cb5721e74617de59b63ab7"
         );
-        let composer = find_sha256(COMPOSER, "composer.phar").expect("composer");
+        let composer = sha256_of(COMPOSER, "composer.phar").expect("composer");
         assert_eq!(
             hex(&composer),
             "6f1b891e1d4927d6274027dc540fb490e47689e19e102c49e8da849794882f8c"
         );
+    }
+
+    #[test]
+    fn reads_caddy_sha512() {
+        let mac = find_sum(CADDY, "caddy_2.11.8_mac_arm64.tar.gz", Algorithm::Sha512)
+            .expect("mac archive");
+        assert_eq!(mac.len(), 64);
+        assert_eq!(
+            hex(&mac),
+            "0c6992b1bb40629b6090d72cdc4a3f3722a7f6b667606db9fe67bfea0e42e9c4\
+             0736d10925d406bf103628a5e906e59300d616a0709bc8855d9e85efbcfece81"
+        );
+        let windows = find_sum(CADDY, "caddy_2.11.8_windows_amd64.zip", Algorithm::Sha512)
+            .expect("windows archive");
+        assert!(hex(&windows).starts_with("fff45b117b9d"));
+        // Only the exact name: the sbom of the same build is another line.
+        assert_ne!(
+            find_sum(CADDY, "caddy_2.11.8_mac_arm64.sbom", Algorithm::Sha512).expect("sbom"),
+            mac
+        );
+    }
+
+    #[test]
+    fn a_hash_of_the_other_length_is_refused() {
+        // A sha512 line read as sha256, and a sha256 line read as sha512.
+        let err = sha256_of(CADDY, "caddy_2.11.8_mac_arm64.tar.gz").expect_err("too long");
+        assert!(err.to_string().starts_with("bad sha256 for"), "{err}");
+        let err = find_sum(COMPOSER, "composer.phar", Algorithm::Sha512).expect_err("too short");
+        assert!(err.to_string().starts_with("bad sha512 for"), "{err}");
+        // Not hex.
+        let bad = format!("{}  caddy.tar.gz\n", "g".repeat(128));
+        assert!(find_sum(&bad, "caddy.tar.gz", Algorithm::Sha512).is_err());
     }
 
     #[test]
@@ -101,20 +200,23 @@ mod tests {
             (PHP_WINDOWS, "php-8.4.27-nts-Win32-vs17-x64.zip"),
             (COMPOSER, "composer.phar.sig"),
             ("", "composer.phar"),
+            (CADDY, "caddy_2.11.8_linux_amd64.tar.gz"),
         ] {
-            let err = find_sha256(text, name).expect_err(name);
+            let err = sha256_of(text, name).expect_err(name);
             assert!(err.to_string().contains("is not in"), "{err}");
         }
     }
 
     #[test]
     fn sum_file_urls() {
+        use Algorithm::{Sha256, Sha512};
         let cases = [
             (
                 "https://nodejs.org/dist/v22.23.4/node-v22.23.4-win-x64.zip",
                 Some((
                     "https://nodejs.org/dist/v22.23.4/SHASUMS256.txt",
                     "node-v22.23.4-win-x64.zip",
+                    Sha256,
                 )),
             ),
             (
@@ -122,6 +224,7 @@ mod tests {
                 Some((
                     "https://windows.php.net/downloads/releases/sha256sum.txt",
                     "php-8.4.27-1-nts-Win32-vs17-x64.zip",
+                    Sha256,
                 )),
             ),
             (
@@ -129,6 +232,7 @@ mod tests {
                 Some((
                     "https://getcomposer.org/download/2.11.1/composer.phar.sha256sum",
                     "composer.phar",
+                    Sha256,
                 )),
             ),
             (
@@ -140,7 +244,33 @@ mod tests {
                 Some((
                     "https://github.com/XJOC/marsa/releases/download/php-8.4.27-r1/sha256sums.txt",
                     "php-8.4.27-linux-x64.tar.gz",
+                    Sha256,
                 )),
+            ),
+            (
+                "https://github.com/caddyserver/caddy/releases/download/v2.11.8/caddy_2.11.8_mac_arm64.tar.gz",
+                Some((
+                    "https://github.com/caddyserver/caddy/releases/download/v2.11.8/caddy_2.11.8_checksums.txt",
+                    "caddy_2.11.8_mac_arm64.tar.gz",
+                    Sha512,
+                )),
+            ),
+            (
+                "https://github.com/caddyserver/caddy/releases/download/v2.11.8/caddy_2.11.8_windows_amd64.zip",
+                Some((
+                    "https://github.com/caddyserver/caddy/releases/download/v2.11.8/caddy_2.11.8_checksums.txt",
+                    "caddy_2.11.8_windows_amd64.zip",
+                    Sha512,
+                )),
+            ),
+            // Not a release asset: no tag, or a folder below the tag.
+            (
+                "https://github.com/caddyserver/caddy/releases/download/v/caddy.tar.gz",
+                None,
+            ),
+            (
+                "https://github.com/caddyserver/caddy/releases/download/v2.11.8/x/caddy.tar.gz",
+                None,
             ),
             (
                 "https://dl.static-php.dev/static-php-cli/bulk/php-8.4.23-cli-macos-aarch64.tar.gz",
@@ -153,7 +283,11 @@ mod tests {
         ];
         for (url, expected) in cases {
             let got = sum_file_for(url);
-            let expected = expected.map(|(a, b)| (a.to_owned(), b.to_owned()));
+            let expected = expected.map(|(sums, name, algorithm)| SumFile {
+                url: sums.to_owned(),
+                name: name.to_owned(),
+                algorithm,
+            });
             assert_eq!(got, expected, "{url}");
         }
     }

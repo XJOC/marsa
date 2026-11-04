@@ -6,7 +6,8 @@
 //! <app data dir>/runtimes/
 //! ├── php/8.4.3/bin/php
 //! ├── node/22.11.0/bin/node
-//! └── composer/2.8.4/composer.phar
+//! ├── composer/2.8.4/composer.phar
+//! └── caddy/2.11.8/caddy
 //! ```
 //!
 //! The list of installed versions is the folder names that are valid
@@ -35,15 +36,27 @@ pub enum Runtime {
     /// `composer.phar`. Its versions do not follow PHP's, and one copy serves
     /// every PHP version.
     Composer,
+    /// The web server `marsad` runs (task M2-10). Not a shim tool: nothing
+    /// in a project picks its version.
+    Caddy,
 }
 
 impl Runtime {
+    /// Every runtime, in the order lists show them.
+    pub const ALL: [Runtime; 4] = [
+        Runtime::Php,
+        Runtime::Node,
+        Runtime::Composer,
+        Runtime::Caddy,
+    ];
+
     /// The folder name under `runtimes/`.
     pub fn dir_name(self) -> &'static str {
         match self {
             Runtime::Php => "php",
             Runtime::Node => "node",
             Runtime::Composer => "composer",
+            Runtime::Caddy => "caddy",
         }
     }
 }
@@ -235,6 +248,43 @@ mod tests {
             let dir = runtimes.version_dir(Runtime::Php, &v(name));
             assert_eq!(dir.file_name(), Some(OsStr::new(name)));
         }
+    }
+
+    #[test]
+    fn serde_name_is_the_folder_name() {
+        for runtime in Runtime::ALL {
+            let json = serde_json::to_string(&runtime).expect("serialize");
+            assert_eq!(json, format!("\"{}\"", runtime.dir_name()));
+            let back: Runtime = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, runtime);
+        }
+        assert_eq!(
+            serde_json::from_str::<Runtime>("\"caddy\"").expect("caddy"),
+            Runtime::Caddy
+        );
+        assert!(serde_json::from_str::<Runtime>("\"Caddy\"").is_err());
+    }
+
+    #[test]
+    fn all_lists_each_runtime_once_in_order() {
+        let names: Vec<&str> = Runtime::ALL.iter().map(|r| r.dir_name()).collect();
+        assert_eq!(names, ["php", "node", "composer", "caddy"]);
+    }
+
+    #[test]
+    fn caddy_versions_have_their_own_folder() {
+        let data = TempDir::new().expect("create temp dir");
+        let runtimes = RuntimesDir::in_dir(data.path());
+        let caddy = runtimes.runtime_dir(Runtime::Caddy);
+        assert_eq!(caddy, data.path().join("runtimes").join("caddy"));
+        for name in ["2.11.7", "2.11.8", "latest"] {
+            fs::create_dir_all(caddy.join(name)).expect("create version dir");
+        }
+        assert_eq!(
+            runtimes.installed(Runtime::Caddy).expect("read runtimes"),
+            [v("2.11.7"), v("2.11.8")]
+        );
+        assert!(runtimes.installed(Runtime::Php).expect("read").is_empty());
     }
 
     #[test]

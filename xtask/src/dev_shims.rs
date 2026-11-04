@@ -220,6 +220,14 @@ mod tests {
         }
     }
 
+    /// Caddy is installed by `marsa install caddy` and run by `marsad`: no
+    /// shim, and no folder made by hand here.
+    #[test]
+    fn caddy_is_not_a_shim() {
+        assert!(!SHIM_NAMES.contains(&"caddy"));
+        assert!(!RUNTIME_DIRS.contains(&"caddy"));
+    }
+
     // Inode numbers exist on Unix only; the command itself is Unix-only for now.
     #[cfg(unix)]
     #[test]

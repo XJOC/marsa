@@ -18,8 +18,6 @@ pub struct RuntimesArgs {
     pub tool: Option<Tool>,
 }
 
-const ALL: [Runtime; 3] = [Runtime::Php, Runtime::Node, Runtime::Composer];
-
 /// Starts the daemon if needed, then prints the installed versions to stdout.
 pub async fn run(args: &RuntimesArgs, data_dir: &Path) -> ExitCode {
     let client = match connect(data_dir).await {
@@ -40,7 +38,7 @@ pub async fn run(args: &RuntimesArgs, data_dir: &Path) -> ExitCode {
 pub fn render(list: &RuntimeList, tool: Option<Tool>) -> String {
     let wanted: Vec<Runtime> = match tool {
         Some(tool) => vec![tool.into()],
-        None => ALL.to_vec(),
+        None => Runtime::ALL.to_vec(),
     };
     let mut text = String::new();
     for runtime in wanted {
@@ -87,12 +85,14 @@ mod tests {
             (Runtime::Php, &[]),
             (Runtime::Node, &[]),
             (Runtime::Composer, &[]),
+            (Runtime::Caddy, &[]),
         ]);
         assert_eq!(
             render(&empty, None),
             "PHP       none installed\n\
              Node.js   none installed\n\
-             Composer  none installed\n"
+             Composer  none installed\n\
+             Caddy     none installed\n"
         );
     }
 
@@ -101,14 +101,17 @@ mod tests {
         let found = list(&[
             (Runtime::Php, &["8.3.27", "8.4.23"]),
             (Runtime::Node, &["22.11.0"]),
+            (Runtime::Caddy, &["2.11.8"]),
         ]);
         assert_eq!(
             render(&found, None),
             "PHP       8.3.27, 8.4.23\n\
              Node.js   22.11.0\n\
-             Composer  none installed\n"
+             Composer  none installed\n\
+             Caddy     2.11.8\n"
         );
         assert_eq!(render(&found, Some(Tool::Node)), "Node.js   22.11.0\n");
+        assert_eq!(render(&found, Some(Tool::Caddy)), "Caddy     2.11.8\n");
         assert_eq!(
             render(
                 &list(&[(Runtime::Php, &["8.4.23\u{1b}[2J"])]),

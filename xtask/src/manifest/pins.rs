@@ -12,7 +12,7 @@ use semver::Version;
 use serde::Deserialize;
 
 /// The runtimes in manifest order.
-pub const RUNTIMES: [Runtime; 3] = [Runtime::Php, Runtime::Node, Runtime::Composer];
+pub const RUNTIMES: [Runtime; 4] = Runtime::ALL;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +22,7 @@ struct RawPins {
     php: RawList,
     node: RawList,
     composer: RawList,
+    caddy: RawList,
     #[serde(default, rename = "override")]
     overrides: Vec<RawOverride>,
 }
@@ -69,7 +70,8 @@ impl Pins {
             raw.spc_line
         );
         let mut versions = BTreeMap::new();
-        for (runtime, list) in RUNTIMES.into_iter().zip([raw.php, raw.node, raw.composer]) {
+        let lists = [raw.php, raw.node, raw.composer, raw.caddy];
+        for (runtime, list) in RUNTIMES.into_iter().zip(lists) {
             versions.insert(runtime.dir_name(), versions_of(runtime, list.versions)?);
         }
         let mut overrides = BTreeMap::new();
@@ -204,6 +206,9 @@ versions = ["22.23.4"]
 [composer]
 versions = ["2.11.1"]
 
+[caddy]
+versions = ["2.11.8"]
+
 [[override]]
 runtime = "php"
 version = "8.3.27"
@@ -224,6 +229,7 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
         assert_eq!(pins.versions(Runtime::Php), &[v("8.4.23"), v("8.3.27")]);
         assert_eq!(pins.versions(Runtime::Node), &[v("22.23.4")]);
         assert_eq!(pins.versions(Runtime::Composer), &[v("2.11.1")]);
+        assert_eq!(pins.versions(Runtime::Caddy), &[v("2.11.8")]);
     }
 
     #[test]
@@ -254,6 +260,20 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
         assert_eq!(
             urls,
             ["https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.gz"]
+        );
+        let urls = pins
+            .urls(
+                Runtime::Caddy,
+                &v("2.11.8"),
+                Platform::WindowsX64,
+                "archive",
+            )
+            .expect("urls");
+        assert_eq!(
+            urls,
+            [
+                "https://github.com/caddyserver/caddy/releases/download/v2.11.8/caddy_2.11.8_windows_amd64.zip"
+            ]
         );
     }
 
@@ -288,6 +308,7 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
                 "listed twice",
             ),
             (FULL.replace("[node]", "[nodejs]"), "not valid"),
+            (FULL.replace("[caddy]", "[web]"), "not valid"),
         ];
         for (text, expected) in cases {
             let message = error(&text);
@@ -337,6 +358,32 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
                 );
                 assert_eq!(name, format!("php-{version}-{platform}.tar.gz"));
                 assert!(super::super::upstream::sum_file_for(url).is_some());
+            }
+        }
+    }
+
+    /// Caddy is the official release, and every file has an upstream sha512.
+    #[test]
+    fn repository_caddy_urls_are_official_releases() {
+        use super::super::upstream::{Algorithm, CADDY_RELEASES, sum_file_for};
+
+        let pins = Pins::parse(include_str!("../../../recipes/pins.toml")).expect("valid pins");
+        assert!(!pins.versions(Runtime::Caddy).is_empty());
+        let recipe = recipes::builtin(Runtime::Caddy).expect("caddy recipe");
+        for version in pins.versions(Runtime::Caddy) {
+            for (platform, _) in recipe.platforms() {
+                let urls = pins
+                    .urls(Runtime::Caddy, version, platform, "archive")
+                    .expect("urls");
+                let [url] = urls.as_slice() else {
+                    panic!("one URL expected for {platform}: {urls:?}");
+                };
+                assert!(
+                    url.starts_with(&format!("{CADDY_RELEASES}{version}/caddy_{version}_")),
+                    "{url}"
+                );
+                let sums = sum_file_for(url).expect("caddy publishes sums");
+                assert_eq!(sums.algorithm, Algorithm::Sha512);
             }
         }
     }

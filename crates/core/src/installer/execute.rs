@@ -54,9 +54,6 @@ const CHECK_ENV_REMOVED: [&str; 7] = [
     "DYLD_LIBRARY_PATH",
     "DYLD_INSERT_LIBRARIES",
 ];
-/// The three runtimes, to read the names of moved-aside folders.
-const RUNTIMES: [Runtime; 3] = [Runtime::Php, Runtime::Node, Runtime::Composer];
-
 pub(super) async fn run<F: Fetch>(
     req: &InstallRequest<'_>,
     env: &InstallEnv<F>,
@@ -312,7 +309,7 @@ fn moved_aside_target(runtimes: &RuntimesDir, name: &std::ffi::OsStr) -> Option<
     let rest = name.to_str()?.strip_prefix("old-")?;
     let (runtime, rest) = rest.split_once('-')?;
     let (version, hex) = rest.rsplit_once('-')?;
-    let runtime = RUNTIMES.into_iter().find(|r| r.dir_name() == runtime)?;
+    let runtime = Runtime::ALL.into_iter().find(|r| r.dir_name() == runtime)?;
     let version = Version::parse(version).ok()?;
     let is_hex = hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit());
     is_hex.then(|| runtimes.version_dir(runtime, &version))
@@ -1419,6 +1416,10 @@ into = "bin"
         assert_eq!(
             target("old-php-8.4.23-deadbeef"),
             Some(runtimes.version_dir(Runtime::Php, &version("8.4.23")))
+        );
+        assert_eq!(
+            target("old-caddy-2.11.8-0a1b2c3d"),
+            Some(runtimes.version_dir(Runtime::Caddy, &version("2.11.8")))
         );
         for bad in [
             "old-php-8.4.23",

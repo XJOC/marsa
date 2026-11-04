@@ -80,6 +80,9 @@ mod tests {
             "php.exe",
             "Composer",
             "npm.cmd",
+            // Caddy is a runtime (M2-10) that `marsad` runs, not a shim tool.
+            "caddy",
+            "caddy.exe",
         ] {
             assert_eq!(name(text), None, "{text:?}");
         }

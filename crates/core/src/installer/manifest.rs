@@ -74,6 +74,7 @@ pub struct Manifest {
     php: Vec<Release>,
     node: Vec<Release>,
     composer: Vec<Release>,
+    caddy: Vec<Release>,
 }
 
 /// One version of a runtime and its files for each platform.
@@ -151,6 +152,7 @@ impl Manifest {
             Runtime::Php => &self.php,
             Runtime::Node => &self.node,
             Runtime::Composer => &self.composer,
+            Runtime::Caddy => &self.caddy,
         }
     }
 
@@ -331,6 +333,7 @@ fn parse_verified(json: &[u8], last_seen: Option<u64>) -> Result<Manifest, Manif
         php: releases("php", raw.runtimes.php)?,
         node: releases("node", raw.runtimes.node)?,
         composer: releases("composer", raw.runtimes.composer)?,
+        caddy: releases("caddy", raw.runtimes.caddy)?,
     })
 }
 
@@ -362,6 +365,10 @@ struct RawRuntimes {
     node: Vec<RawRelease>,
     #[serde(default)]
     composer: Vec<RawRelease>,
+    /// Added in M2-10 within schema 1: older builds ignore it, and a manifest
+    /// without it has no Caddy.
+    #[serde(default)]
+    caddy: Vec<RawRelease>,
 }
 
 #[derive(Deserialize)]
@@ -847,6 +854,37 @@ mod tests {
         assert!(reason.contains("platform is listed twice"), "{reason}");
     }
 
+    /// Caddy is read with the same rules as the other runtimes, under its own
+    /// key, within schema 1.
+    #[test]
+    fn caddy_releases_are_read_under_their_own_key() {
+        let file = |name: &str| {
+            format!(
+                r#"{{"name": "{name}", "urls": ["https://github.com/caddyserver/caddy/releases/download/v2.11.8/caddy_2.11.8_mac_arm64.tar.gz"],
+                "sha256": "2e17f6527a6c92f5713ba16e5dfd1b55869ab5e98de46677e994fed5536316ba",
+                "size": 10}}"#
+            )
+        };
+        let doc = |files: &str| {
+            format!(
+                r#"{{"schema": 1, "serial": 1, "runtimes": {{"caddy": [{{"version": "2.11.8",
+                "platforms": {{"darwin-arm64": [{files}]}}}}]}}}}"#
+            )
+        };
+        let manifest =
+            parse_verified(doc(&file("archive")).as_bytes(), None).expect("caddy release");
+        let [caddy] = manifest.releases(Runtime::Caddy) else {
+            panic!("one caddy release expected");
+        };
+        assert_eq!(caddy.version(), &Version::new(2, 11, 8));
+        let mac = caddy.platform(Platform::DarwinArm64).expect("darwin-arm64");
+        assert_eq!(mac[0].name(), "archive");
+        assert!(manifest.releases(Runtime::Composer).is_empty());
+
+        let reason = reason(parse_verified(doc(&file("A")).as_bytes(), None));
+        assert!(reason.starts_with("caddy 2.11.8 darwin-arm64"), "{reason}");
+    }
+
     /// Content rules on JSON whose signature is taken as checked, one composer
     /// file at a time. The signed fixtures above cover the same path end to end.
     #[test]
@@ -870,6 +908,7 @@ mod tests {
         // Unknown fields are ignored, and runtimes that are not listed are empty.
         let manifest = parse_verified(doc("1", &good).as_bytes(), None).expect("good content");
         assert!(manifest.releases(Runtime::Php).is_empty());
+        assert!(manifest.releases(Runtime::Caddy).is_empty());
         assert_eq!(manifest.releases(Runtime::Composer).len(), 1);
         let max = file("my-file_1.0", &one_url, MAX_ARTIFACT_SIZE);
         parse_verified(doc("1", &max).as_bytes(), None).expect("size at the limit, name rules");

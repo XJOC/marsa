@@ -28,6 +28,9 @@ pub enum Tool {
     Php,
     Node,
     Composer,
+    /// The web server `marsad` runs. Installed like the others, but no shim
+    /// runs it.
+    Caddy,
 }
 
 impl From<Tool> for Runtime {
@@ -36,6 +39,7 @@ impl From<Tool> for Runtime {
             Tool::Php => Runtime::Php,
             Tool::Node => Runtime::Node,
             Tool::Composer => Runtime::Composer,
+            Tool::Caddy => Runtime::Caddy,
         }
     }
 }
