@@ -61,14 +61,9 @@ pub trait System {
     /// [`RealSystem`] gives the program 120 seconds. After that it kills and
     /// reaps it and returns an error of kind `TimedOut`. The same happens if
     /// the program exited but something it started still holds a pipe open.
-    // `allow`, not `expect`: M4-08 and M4-09 start using this in parallel,
-    // and an `expect` would warn as soon as one of them lands.
-    #[allow(dead_code)]
     fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput>;
 
     /// The path of the running helper, for the boot job (task M4-08).
-    // `allow`, not `expect`: used by M4-08, which runs in parallel with M4-09.
-    #[allow(dead_code)]
     fn current_exe(&self) -> io::Result<PathBuf>;
 }
 
