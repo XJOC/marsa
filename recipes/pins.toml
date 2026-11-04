@@ -26,6 +26,12 @@ versions = ["22.23.4"]
 # The newest 2.x on 2026-11-04.
 versions = ["2.11.1"]
 
+[caddy]
+# The official build (ADR 0008). 2.11.8 came out on 2026-11-04 with security
+# fixes for `php_fastcgi` and file paths; S-01 tested 2.11.7. The release's
+# caddy_<version>_checksums.txt (sha512) is checked by `manifest build`.
+versions = ["2.11.8"]
+
 # A URL for one version, platform, and artifact that replaces the recipe
 # template. `urls`: the first is the main one, the rest are mirrors.
 

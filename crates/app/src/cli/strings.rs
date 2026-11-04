@@ -399,6 +399,7 @@ fn example_version(runtime: Option<Runtime>) -> &'static str {
     match runtime {
         Some(Runtime::Node) => "22",
         Some(Runtime::Composer) => "2.8",
+        Some(Runtime::Caddy) => "2.11",
         Some(Runtime::Php) | None => "8.4",
     }
 }
@@ -409,6 +410,7 @@ pub fn runtime_name(runtime: Runtime) -> &'static str {
         Runtime::Php => "PHP",
         Runtime::Node => "Node.js",
         Runtime::Composer => "Composer",
+        Runtime::Caddy => "Caddy",
     }
 }
 
@@ -996,6 +998,41 @@ mod tests {
         assert!(
             message("manifest_no_trusted_key", &bad)
                 .starts_with("This build of Marsa has no trusted manifest key yet")
+        );
+    }
+
+    #[test]
+    fn every_runtime_has_its_own_name_and_example() {
+        let names: Vec<&str> = Runtime::ALL.into_iter().map(runtime_name).collect();
+        assert_eq!(names, ["PHP", "Node.js", "Composer", "Caddy"]);
+        for runtime in Runtime::ALL {
+            let example = example_version(Some(runtime));
+            assert!(
+                semver::VersionReq::parse(example).is_ok(),
+                "{runtime:?}: {example}"
+            );
+        }
+
+        let caddy = Details {
+            runtime: Some(Runtime::Caddy),
+            requested: Some("latest"),
+            ..Details::default()
+        };
+        assert_eq!(
+            message("invalid_version", &caddy),
+            "\"latest\" is not a version. Write a version number, such as 2.11."
+        );
+        assert_eq!(
+            installing(Runtime::Caddy, "2.11.8", "darwin-arm64"),
+            "Installing Caddy 2.11.8 for darwin-arm64"
+        );
+        assert_eq!(
+            already_installed(Runtime::Caddy, "2.11.8"),
+            "Caddy 2.11.8 is already installed. Use --force to reinstall."
+        );
+        assert_eq!(
+            checking(Some(Runtime::Caddy), Some("2.11.8")),
+            "Checking Caddy 2.11.8..."
         );
     }
 }

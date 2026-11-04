@@ -105,6 +105,7 @@ impl RunInstall for FakeInstall {
                 Runtime::Php => "8.4.23",
                 Runtime::Node => "22.11.0",
                 Runtime::Composer => "2.8.4",
+                Runtime::Caddy => "2.11.8",
             };
             events(InstallEvent::Selected {
                 runtime,
@@ -369,7 +370,8 @@ async fn install_through_the_daemon_prints_progress_and_installs() {
             0,
             "PHP       none installed\n\
              Node.js   none installed\n\
-             Composer  none installed\n",
+             Composer  none installed\n\
+             Caddy     none installed\n",
             "",
         )
         .await;

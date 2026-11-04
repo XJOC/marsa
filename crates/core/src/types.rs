@@ -225,7 +225,7 @@ pub struct RuntimeVersions {
 }
 
 /// `GET /v1/runtimes`: every runtime, installed or not, in a fixed order
-/// (PHP, Node.js, Composer). Read from `runtimes/` on each call.
+/// ([`Runtime::ALL`]). Read from `runtimes/` on each call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeList {
     pub runtimes: Vec<RuntimeVersions>,

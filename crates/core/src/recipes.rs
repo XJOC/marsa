@@ -298,6 +298,7 @@ pub fn builtin(runtime: Runtime) -> Result<&'static Recipe, RecipeError> {
     static PHP: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
     static NODE: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
     static COMPOSER: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
+    static CADDY: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
 
     let (cell, file, text) = match runtime {
         Runtime::Php => (&PHP, "php.toml", include_str!("../../../recipes/php.toml")),
@@ -310,6 +311,11 @@ pub fn builtin(runtime: Runtime) -> Result<&'static Recipe, RecipeError> {
             &COMPOSER,
             "composer.toml",
             include_str!("../../../recipes/composer.toml"),
+        ),
+        Runtime::Caddy => (
+            &CADDY,
+            "caddy.toml",
+            include_str!("../../../recipes/caddy.toml"),
         ),
     };
     cell.get_or_init(|| {
@@ -522,8 +528,6 @@ fn bad_path(source: &str, path: &str) -> RecipeError {
 mod tests {
     use super::*;
 
-    const RUNTIMES: [Runtime; 3] = [Runtime::Php, Runtime::Node, Runtime::Composer];
-
     /// The five platforms Marsa builds for (all but `any`).
     const CONCRETE: [Platform; 5] = [
         Platform::DarwinArm64,
@@ -572,7 +576,7 @@ into = "bin"
 
     #[test]
     fn builtin_recipes_parse_and_every_platform_has_an_artifact() {
-        for runtime in RUNTIMES {
+        for runtime in Runtime::ALL {
             let recipe = builtin(runtime).expect("built-in recipe is valid");
             assert_eq!(recipe.name(), runtime.dir_name());
             for (platform, entry) in recipe.platforms() {
@@ -582,8 +586,8 @@ into = "bin"
     }
 
     #[test]
-    fn php_and_node_cover_the_five_platforms() {
-        for runtime in [Runtime::Php, Runtime::Node] {
+    fn php_node_and_caddy_cover_the_five_platforms() {
+        for runtime in [Runtime::Php, Runtime::Node, Runtime::Caddy] {
             let recipe = builtin(runtime).expect("built-in recipe is valid");
             let listed: Vec<Platform> = recipe.platforms().map(|(p, _)| p).collect();
             assert_eq!(listed, CONCRETE, "{runtime:?}");
@@ -605,6 +609,61 @@ into = "bin"
             assert_eq!(artifact.format, ArchiveFormat::Raw);
             assert_eq!(artifact.file_name.as_deref(), Some("composer.phar"));
         }
+    }
+
+    #[test]
+    fn caddy_is_the_official_archive_with_the_program_at_its_root() {
+        let caddy = builtin(Runtime::Caddy).expect("built-in recipe is valid");
+        let version = v("2.11.8");
+        let dir = Path::new("data")
+            .join("runtimes")
+            .join("caddy")
+            .join("2.11.8");
+        let assets = [
+            (Platform::DarwinArm64, "mac_arm64.tar.gz", "caddy"),
+            (Platform::DarwinX64, "mac_amd64.tar.gz", "caddy"),
+            (Platform::LinuxX64, "linux_amd64.tar.gz", "caddy"),
+            (Platform::LinuxArm64, "linux_arm64.tar.gz", "caddy"),
+            (Platform::WindowsX64, "windows_amd64.zip", "caddy.exe"),
+        ];
+        for (platform, asset, program) in assets {
+            let entry = caddy.platform(platform).expect("platform listed");
+            let [artifact] = entry.artifacts() else {
+                panic!("one artifact expected on {platform}");
+            };
+            assert_eq!(artifact.name, "archive");
+            assert_eq!(artifact.strip_components, 0, "{platform}");
+            assert_eq!(artifact.into_dir(&dir), dir, "{platform}");
+            let format = if platform == Platform::WindowsX64 {
+                ArchiveFormat::Zip
+            } else {
+                ArchiveFormat::TarGz
+            };
+            assert_eq!(artifact.format, format, "{platform}");
+            assert_eq!(
+                caddy
+                    .artifact_url(platform, "archive", &version)
+                    .as_deref(),
+                Some(
+                    format!(
+                        "https://github.com/caddyserver/caddy/releases/download/v2.11.8/caddy_2.11.8_{asset}"
+                    )
+                    .as_str()
+                )
+            );
+            assert_eq!(entry.program_names().collect::<Vec<_>>(), ["caddy"]);
+            assert_eq!(entry.program_path(&dir, "caddy"), Some(dir.join(program)));
+        }
+        assert!(caddy.platform(Platform::Any).is_none());
+
+        let check = caddy.check().expect("caddy has a check");
+        assert_eq!(check.program, "caddy");
+        assert_eq!(check.args, ["version"]);
+        // `caddy version` prints `v2.11.8 h1:<hash>=`.
+        let prefix = check.expected_prefix(&version);
+        assert_eq!(prefix, "v2.11.8 ");
+        assert!("v2.11.8 h1:E2pv1BoZ5bJaWqFkU6QvLa21iGAX8bDzlEQG4dDQ/Vc=".starts_with(&prefix));
+        assert!(!"v2.11.80 h1:x=".starts_with(&prefix));
     }
 
     #[test]

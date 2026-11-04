@@ -1,6 +1,7 @@
 //! `cargo xtask manifest build`: for every pinned version, platform, and
 //! artifact, download the file (or reuse the cache), hash it, compare with
-//! the upstream sum, run the PHP checks, then write `manifest.json`.
+//! the upstream sum (sha256, or sha512 for Caddy), run the PHP checks, then
+//! write `manifest.json`.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -14,10 +15,10 @@ use marsa_core::recipes::{self, Artifact, Platform, PlatformRecipe};
 use marsa_core::runtimes::Runtime;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 
 use super::pins::{Pins, RUNTIMES};
-use super::upstream::{find_sha256, hex, parse_hex, sum_file_for};
+use super::upstream::{Algorithm, find_sum, hex, parse_hex, sum_file_for};
 
 /// The JSON that `marsa_core::installer::manifest` reads (M2-02). Field
 /// order is the output order, and maps are `BTreeMap`, so the same inputs
@@ -37,6 +38,8 @@ pub struct RuntimesJson {
     pub node: Vec<ReleaseJson>,
     #[serde(default)]
     pub composer: Vec<ReleaseJson>,
+    #[serde(default)]
+    pub caddy: Vec<ReleaseJson>,
 }
 
 impl RuntimesJson {
@@ -45,6 +48,7 @@ impl RuntimesJson {
             Runtime::Php => &self.php,
             Runtime::Node => &self.node,
             Runtime::Composer => &self.composer,
+            Runtime::Caddy => &self.caddy,
         }
     }
 
@@ -53,6 +57,7 @@ impl RuntimesJson {
             Runtime::Php => &mut self.php,
             Runtime::Node => &mut self.node,
             Runtime::Composer => &mut self.composer,
+            Runtime::Caddy => &mut self.caddy,
         }
     }
 }
@@ -164,25 +169,38 @@ pub async fn build(
 
                     let mut notes = Vec::new();
                     match sum_file_for(&file.url) {
-                        Some((sum_url, name)) => {
-                            if !sum_files.contains_key(&sum_url) {
-                                let bytes = fetch_bytes(fetch, &sum_url, 1024 * 1024)
+                        Some(sums) => {
+                            let sum_url = &sums.url;
+                            if !sum_files.contains_key(sum_url) {
+                                let bytes = fetch_bytes(fetch, sum_url, 1024 * 1024)
                                     .await
                                     .with_context(|| format!("{what}: upstream sums"))?;
                                 let text = String::from_utf8(bytes)
                                     .with_context(|| format!("{sum_url} is not text"))?;
                                 sum_files.insert(sum_url.clone(), text);
                             }
-                            let text = sum_files.get(&sum_url).map_or("", String::as_str);
-                            let expected = find_sha256(text, &name)
+                            let text = sum_files.get(sum_url).map_or("", String::as_str);
+                            let expected = find_sum(text, &sums.name, sums.algorithm)
                                 .with_context(|| format!("{what}: {sum_url}"))?;
+                            // The manifest keeps our sha256; the upstream hash
+                            // is only compared.
+                            let actual = match sums.algorithm {
+                                Algorithm::Sha256 => file.sha256.to_vec(),
+                                Algorithm::Sha512 => {
+                                    sha512_file(&file.path, &file.sha256)?.to_vec()
+                                }
+                            };
+                            let algorithm = sums.algorithm.name();
                             ensure!(
-                                expected == file.sha256,
-                                "{what}: sha256 is {}, but {sum_url} says {}",
-                                hex(&file.sha256),
+                                expected == actual,
+                                "{what}: {algorithm} is {}, but {sum_url} says {}",
+                                hex(&actual),
                                 hex(&expected)
                             );
-                            notes.push("upstream sha256 matches");
+                            notes.push(match sums.algorithm {
+                                Algorithm::Sha256 => "upstream sha256 matches",
+                                Algorithm::Sha512 => "upstream sha512 matches",
+                            });
                         }
                         None => {
                             warnings.push(format!(
@@ -340,9 +358,35 @@ impl ChunkSink for FileSink {
     }
 }
 
+/// The sha256 and size of a file.
 fn hash_file(path: &Path) -> Result<([u8; 32], u64)> {
-    let mut file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let mut hasher = Sha256::new();
+    let size = read_chunks(path, |chunk| hasher.update(chunk))?;
+    Ok((hasher.finalize().into(), size))
+}
+
+/// The sha512 of a file, for sources that publish only sha512 (Caddy). The
+/// same pass checks that the file still has the `sha256` the manifest will
+/// record, so both hashes are of the same bytes.
+fn sha512_file(path: &Path, sha256: &[u8; 32]) -> Result<[u8; 64]> {
+    let mut sha512 = Sha512::new();
+    let mut check = Sha256::new();
+    read_chunks(path, |chunk| {
+        sha512.update(chunk);
+        check.update(chunk);
+    })?;
+    let now: [u8; 32] = check.finalize().into();
+    ensure!(
+        &now == sha256,
+        "{} changed on disk while the manifest was built",
+        path.display()
+    );
+    Ok(sha512.finalize().into())
+}
+
+/// Gives each chunk of the file to `each`, and returns the size.
+fn read_chunks(path: &Path, mut each: impl FnMut(&[u8])) -> Result<u64> {
+    let mut file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let mut buffer = vec![0u8; 1 << 16];
     let mut size = 0u64;
     loop {
@@ -352,10 +396,10 @@ fn hash_file(path: &Path) -> Result<([u8; 32], u64)> {
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err) => return Err(err.into()),
         };
-        hasher.update(&buffer[..read]);
+        each(&buffer[..read]);
         size += read as u64;
     }
-    Ok((hasher.finalize().into(), size))
+    Ok(size)
 }
 
 #[cfg(test)]
@@ -374,6 +418,8 @@ versions = ["8.4.23"]
 versions = ["22.23.4"]
 [composer]
 versions = ["2.11.1"]
+[caddy]
+versions = ["2.11.8"]
 [[override]]
 runtime = "php"
 version = "8.4.23"
@@ -397,12 +443,20 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
     }
 
     fn sha(body: &[u8]) -> String {
-        hex(&Sha256::digest(body).into())
+        hex(Sha256::digest(body).as_slice())
+    }
+
+    /// The hash a sum file of `algorithm` lists for `body`.
+    fn upstream(algorithm: Algorithm, body: &[u8]) -> String {
+        match algorithm {
+            Algorithm::Sha256 => sha(body),
+            Algorithm::Sha512 => hex(Sha512::digest(body).as_slice()),
+        }
     }
 
     /// Every URL of the pins, with a fake body (the URL itself) and sum files
-    /// that agree, except for the node file named in `bad_node`.
-    fn fetcher(pins: &Pins, bad_node: Option<&str>) -> MemoryFetch {
+    /// that agree, except for the file named in `bad`.
+    fn fetcher(pins: &Pins, bad: Option<&str>) -> MemoryFetch {
         let mut fetch = MemoryFetch::new();
         let mut sums: BTreeMap<String, String> = BTreeMap::new();
         for runtime in RUNTIMES {
@@ -415,15 +469,15 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
                             .expect("urls");
                         let url = &urls[0];
                         let body = url.as_bytes().to_vec();
-                        if let Some((sum_url, name)) = sum_file_for(url) {
-                            let hash = if bad_node == Some(name.as_str()) {
-                                sha(b"something else")
+                        if let Some(sum) = sum_file_for(url) {
+                            let hash = if bad == Some(sum.name.as_str()) {
+                                upstream(sum.algorithm, b"something else")
                             } else {
-                                sha(&body)
+                                upstream(sum.algorithm, &body)
                             };
-                            sums.entry(sum_url)
+                            sums.entry(sum.url)
                                 .or_default()
-                                .push_str(&format!("{hash}  {name}\r\n"));
+                                .push_str(&format!("{hash}  {}\r\n", sum.name));
                         }
                         fetch = fetch.with(url, Reply::Chunks(vec![body]));
                     }
@@ -462,8 +516,8 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
         assert_eq!(json, to_json(&third.manifest).expect("json"));
         let new_requests = fetch.requests().len() - requests;
         assert_eq!(
-            new_requests, 3,
-            "only the php, node and composer sum files are fetched again"
+            new_requests, 4,
+            "only the php, node, composer and caddy sum files are fetched again"
         );
 
         // The local checks (the same rules as M2-02) accept it.
@@ -503,6 +557,24 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
         assert_eq!(node.as_object().map(|o| o.len()), Some(5));
         let composer = &value["runtimes"]["composer"][0]["platforms"]["any"][0];
         assert_eq!(composer["name"], "phar");
+        let caddy = &value["runtimes"]["caddy"][0];
+        assert_eq!(caddy["version"], "2.11.8");
+        assert_eq!(caddy["platforms"].as_object().map(|o| o.len()), Some(5));
+        let caddy_mac = &caddy["platforms"]["darwin-arm64"][0];
+        let url = "https://github.com/caddyserver/caddy/releases/download/v2.11.8/caddy_2.11.8_mac_arm64.tar.gz";
+        assert_eq!(caddy_mac["name"], "archive");
+        assert_eq!(caddy_mac["urls"][0], url);
+        // The manifest stores our sha256, not the upstream sha512.
+        assert_eq!(caddy_mac["sha256"], sha(url.as_bytes()));
+        let caddy_row = first
+            .rows
+            .iter()
+            .find(|row| row.starts_with("caddy 2.11.8 darwin-arm64 archive:"))
+            .expect("a caddy row");
+        assert!(
+            caddy_row.ends_with("(upstream sha512 matches)"),
+            "{caddy_row}"
+        );
 
         // The PHP checks ran for each macOS and Linux archive, every run.
         let seen = stub.0.lock().expect("lock").clone();
@@ -538,6 +610,26 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
         let message = format!("{err:#}");
         assert!(
             message.contains("node 22.23.4 linux-x64 archive: sha256 is"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn caddy_sha512_mismatch_stops_the_build() {
+        let pins = Pins::parse(PINS).expect("pins");
+        let fetch = fetcher(&pins, Some("caddy_2.11.8_windows_amd64.zip"));
+        let cache = tempfile::tempdir().expect("tempdir");
+        let err = build(&fetch, &pins, cache.path(), &Stub::default())
+            .await
+            .err()
+            .expect("refused");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("caddy 2.11.8 windows-x64 archive: sha512 is"),
+            "{message}"
+        );
+        assert!(
+            message.contains("but https://github.com/caddyserver/caddy/releases/download/v2.11.8/caddy_2.11.8_checksums.txt says"),
             "{message}"
         );
     }
@@ -586,6 +678,20 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             .err()
             .expect("bad name");
         assert!(err.to_string().contains("is not [a-z0-9._-]+"));
+    }
+
+    #[test]
+    fn sha512_is_of_the_bytes_the_manifest_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("archive");
+        fs::write(&path, b"caddy").expect("write");
+        let sha256: [u8; 32] = Sha256::digest(b"caddy").into();
+        let sha512 = sha512_file(&path, &sha256).expect("same bytes");
+        assert_eq!(sha512.as_slice(), Sha512::digest(b"caddy").as_slice());
+
+        fs::write(&path, b"other").expect("write");
+        let err = sha512_file(&path, &sha256).expect_err("the file changed");
+        assert!(err.to_string().contains("changed on disk"), "{err}");
     }
 
     #[test]

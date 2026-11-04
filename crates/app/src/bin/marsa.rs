@@ -30,7 +30,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Install a version of PHP, Node.js, or Composer.
+    /// Install a version of PHP, Node.js, Composer, or Caddy.
     Install(InstallArgs),
     /// List the installed versions.
     Runtimes(RuntimesArgs),
@@ -121,6 +121,18 @@ mod tests {
                 force: true,
             }
         );
+        assert_eq!(
+            install(&["install", "caddy", "2.11.8"]),
+            InstallArgs {
+                tool: Tool::Caddy,
+                version: Some("2.11.8".into()),
+                force: false,
+            }
+        );
+        match parse(&["runtimes", "caddy"]).expect("valid").command {
+            Command::Runtimes(args) => assert_eq!(args.tool, Some(Tool::Caddy)),
+            other => panic!("not runtimes: {other:?}"),
+        }
     }
 
     #[test]

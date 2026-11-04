@@ -1,0 +1,55 @@
+# How Caddy is laid out on disk (task M2-10). See php.toml for how a recipe
+# and the signed manifest work together.
+name = "caddy"
+
+# After install (M2-05): `caddy version` prints `v2.11.8 h1:<hash>=`. The
+# space after the version keeps 2.11.8 from matching 2.11.80.
+[check]
+program = "caddy"
+args = ["version"]
+expect_prefix = "v{version} "
+
+# The official builds from the Caddy GitHub Releases (ADR 0008). Every archive
+# holds `caddy` (or `caddy.exe`), LICENSE, and README.md at its root, with no
+# top folder. The release's `caddy_<version>_checksums.txt` has their sha512;
+# `cargo xtask manifest build` compares with it.
+
+[platform.darwin-arm64]
+programs = { caddy = "caddy" }
+
+[[platform.darwin-arm64.artifact]]
+name = "archive"
+url = "https://github.com/caddyserver/caddy/releases/download/v{version}/caddy_{version}_mac_arm64.tar.gz"
+format = "tar.gz"
+
+[platform.darwin-x64]
+programs = { caddy = "caddy" }
+
+[[platform.darwin-x64.artifact]]
+name = "archive"
+url = "https://github.com/caddyserver/caddy/releases/download/v{version}/caddy_{version}_mac_amd64.tar.gz"
+format = "tar.gz"
+
+[platform.linux-x64]
+programs = { caddy = "caddy" }
+
+[[platform.linux-x64.artifact]]
+name = "archive"
+url = "https://github.com/caddyserver/caddy/releases/download/v{version}/caddy_{version}_linux_amd64.tar.gz"
+format = "tar.gz"
+
+[platform.linux-arm64]
+programs = { caddy = "caddy" }
+
+[[platform.linux-arm64.artifact]]
+name = "archive"
+url = "https://github.com/caddyserver/caddy/releases/download/v{version}/caddy_{version}_linux_arm64.tar.gz"
+format = "tar.gz"
+
+[platform.windows-x64]
+programs = { caddy = "caddy.exe" }
+
+[[platform.windows-x64.artifact]]
+name = "archive"
+url = "https://github.com/caddyserver/caddy/releases/download/v{version}/caddy_{version}_windows_amd64.zip"
+format = "zip"
