@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::php::PhpMinor;
+use crate::recipes::Platform;
 use crate::sites::{Site, SiteKind};
 
 /// The port of Caddy's admin API. It is private to Marsa, not Caddy's default
@@ -67,7 +68,34 @@ impl CaddyPaths {
             home,
         }
     }
+
+    /// The root certificate of Marsa's CA:
+    /// `caddy/data/caddy/pki/authorities/marsa/root.crt`.
+    ///
+    /// Caddy writes it there once the config has a secure site: [`caddy_env`]
+    /// sets `XDG_DATA_HOME` to `caddy/data`, Caddy adds `caddy`, and the CA id
+    /// in [`sites_config`] is `marsa`. Nothing is read or created here.
+    pub fn ca_root(&self) -> PathBuf {
+        self.home
+            .join(DATA_HOME)
+            .join("caddy")
+            .join("pki")
+            .join("authorities")
+            .join(CA_ID)
+            .join("root.crt")
+    }
+
+    /// The CA bundle for PHP: `caddy/ca-bundle.pem`, with the text of
+    /// [`ca_bundle_text`]. `curl.cainfo` and `openssl.cafile` in `php.ini`
+    /// point to it. The daemon writes it (task M4-11).
+    pub fn ca_bundle(&self) -> PathBuf {
+        self.home.join("ca-bundle.pem")
+    }
 }
+
+/// The folder in `caddy/` that [`caddy_env`] gives Caddy as `XDG_DATA_HOME`.
+/// [`CaddyPaths::ca_root`] is inside it.
+const DATA_HOME: &str = "data";
 
 /// The environment variables Caddy needs.
 ///
@@ -80,9 +108,52 @@ pub fn caddy_env(paths: &CaddyPaths) -> BTreeMap<String, String> {
     // app data dir comes from the OS and is valid in practice.
     let dir = |name: &str| paths.home.join(name).to_string_lossy().into_owned();
     BTreeMap::from([
-        ("XDG_DATA_HOME".to_string(), dir("data")),
+        ("XDG_DATA_HOME".to_string(), dir(DATA_HOME)),
         ("XDG_CONFIG_HOME".to_string(), dir("config")),
     ])
+}
+
+/// Where the system's CA bundle may be, in the order to try: the first file
+/// that exists is the one to read. These are the system's own files, so the
+/// paths are fixed.
+///
+/// - macOS: `/etc/ssl/cert.pem`.
+/// - Linux: `/etc/ssl/certs/ca-certificates.crt` (Debian, Ubuntu, Arch), then
+///   `/etc/pki/tls/certs/ca-bundle.crt` (Fedora, RHEL).
+/// - Windows: none for now. Its trust store is not a PEM file.
+/// - [`Platform::Any`]: none. It is not a system.
+pub fn system_ca_bundles(platform: Platform) -> Vec<&'static Path> {
+    let paths: &[&'static str] = match platform {
+        Platform::DarwinArm64 | Platform::DarwinX64 => &["/etc/ssl/cert.pem"],
+        Platform::LinuxX64 | Platform::LinuxArm64 => &[
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+        ],
+        Platform::WindowsX64 | Platform::Any => &[],
+    };
+    paths.iter().copied().map(Path::new).collect()
+}
+
+/// The text of [`CaddyPaths::ca_bundle`]: the system bundle as it is, one
+/// blank line, then Marsa's root certificate.
+///
+/// The text has LF line endings only: `\r\n`, and a lone `\r`, become `\n`.
+/// Blank lines and spaces at the start and end of each part are dropped, so
+/// there is exactly one blank line between the parts and one newline at the
+/// end. An empty part is left out: with no system bundle (Windows) the text
+/// is Marsa's root alone. The same input always gives the same output.
+pub fn ca_bundle_text(system_pem: &str, marsa_root_pem: &str) -> String {
+    let parts: Vec<String> = [system_pem, marsa_root_pem]
+        .into_iter()
+        .map(|pem| pem.replace("\r\n", "\n").replace('\r', "\n"))
+        .map(|pem| pem.trim().to_owned())
+        .filter(|pem| !pem.is_empty())
+        .collect();
+    let mut text = parts.join("\n\n");
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text
 }
 
 /// What the config is built from. For now only the ports; M4 adds the sites.
@@ -516,6 +587,112 @@ mod tests {
             env["XDG_CONFIG_HOME"],
             dir.path().join("caddy").join("config").to_string_lossy()
         );
+    }
+
+    #[test]
+    fn ca_paths_sit_inside_caddys_home() {
+        let dir = tempfile::tempdir().expect("create a temp dir");
+        let paths = CaddyPaths::in_dir(dir.path());
+        let home = dir.path().join("caddy");
+
+        let root = home
+            .join("data")
+            .join("caddy")
+            .join("pki")
+            .join("authorities")
+            .join("marsa")
+            .join("root.crt");
+        assert_eq!(paths.ca_root(), root);
+        assert_eq!(paths.ca_bundle(), home.join("ca-bundle.pem"));
+    }
+
+    /// The root is where Caddy writes it: under `XDG_DATA_HOME` from
+    /// `caddy_env`, then `caddy/pki/authorities/<ca id>`, with the CA id from
+    /// the config of a secure site.
+    #[test]
+    fn ca_root_follows_caddy_env_and_the_ca_id() {
+        let dir = tempfile::tempdir().expect("create a temp dir");
+        let paths = CaddyPaths::in_dir(dir.path());
+        let data_home = PathBuf::from(&caddy_env(&paths)["XDG_DATA_HOME"]);
+        let config = build(&[shop()], &socket_pools());
+        let policy = &config["apps"]["tls"]["automation"]["policies"][0];
+        let ca_id = policy["issuers"][0]["ca"]
+            .as_str()
+            .expect("the issuer names a CA");
+        assert!(config["apps"]["pki"]["certificate_authorities"][ca_id].is_object());
+
+        let root = data_home
+            .join("caddy")
+            .join("pki")
+            .join("authorities")
+            .join(ca_id)
+            .join("root.crt");
+        assert_eq!(paths.ca_root(), root);
+    }
+
+    #[test]
+    fn system_bundles_per_platform() {
+        let macos = [Path::new("/etc/ssl/cert.pem")];
+        let linux = [
+            Path::new("/etc/ssl/certs/ca-certificates.crt"),
+            Path::new("/etc/pki/tls/certs/ca-bundle.crt"),
+        ];
+        for platform in Platform::ALL {
+            let expected: &[&Path] = match platform {
+                Platform::DarwinArm64 | Platform::DarwinX64 => &macos,
+                Platform::LinuxX64 | Platform::LinuxArm64 => &linux,
+                Platform::WindowsX64 | Platform::Any => &[],
+            };
+            assert_eq!(system_ca_bundles(platform), expected, "{platform}");
+        }
+    }
+
+    const SYSTEM_PEM: &str = "## System bundle\n\
+        -----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n\
+        -----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n";
+
+    const MARSA_PEM: &str = "-----BEGIN CERTIFICATE-----\nMMMM\n-----END CERTIFICATE-----\n";
+
+    #[test]
+    fn bundle_is_the_system_bundle_a_blank_line_and_the_root() {
+        let text = ca_bundle_text(SYSTEM_PEM, MARSA_PEM);
+        assert_eq!(text, format!("{SYSTEM_PEM}\n{MARSA_PEM}"));
+        assert!(text.contains("-----END CERTIFICATE-----\n\n-----BEGIN CERTIFICATE-----\nMMMM"));
+        assert!(text.ends_with("-----END CERTIFICATE-----\n"));
+        assert!(!text.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn bundle_turns_crlf_into_lf() {
+        let system = SYSTEM_PEM.replace('\n', "\r\n");
+        let root = MARSA_PEM.replace('\n', "\r\n");
+        let text = ca_bundle_text(&system, &root);
+        assert!(!text.contains('\r'), "{text:?}");
+        assert_eq!(text, ca_bundle_text(SYSTEM_PEM, MARSA_PEM));
+
+        // A lone `\r` is a line ending too.
+        assert_eq!(ca_bundle_text("a\rb", "c"), "a\nb\n\nc\n");
+    }
+
+    #[test]
+    fn bundle_has_one_blank_line_between_parts_and_one_final_newline() {
+        let system = format!("\n\n{SYSTEM_PEM}\n\n  \n");
+        let root = format!("\r\n\r\n{MARSA_PEM}\r\n\r\n");
+        assert_eq!(
+            ca_bundle_text(&system, &root),
+            ca_bundle_text(SYSTEM_PEM, MARSA_PEM)
+        );
+        // No final newline in the input still gives one.
+        let text = ca_bundle_text("sys", "root");
+        assert_eq!(text, "sys\n\nroot\n");
+    }
+
+    #[test]
+    fn bundle_leaves_out_an_empty_part() {
+        assert_eq!(ca_bundle_text("", MARSA_PEM), MARSA_PEM);
+        assert_eq!(ca_bundle_text("\r\n \n", MARSA_PEM), MARSA_PEM);
+        assert_eq!(ca_bundle_text(SYSTEM_PEM, ""), SYSTEM_PEM);
+        assert_eq!(ca_bundle_text("", ""), "");
     }
 
     /// Collects every `dial` value in the JSON, at any depth.
