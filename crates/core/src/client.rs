@@ -60,8 +60,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// prompt, and its port checks (`netstat`, then `ps` for at most 8
 /// processes) up to 10 seconds each.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(7 * 60);
-/// How long a new daemon has to answer.
-const START_WAIT: Duration = Duration::from_secs(5);
+/// How long a new daemon has to answer. The wait ends as soon as it does, so
+/// this only bounds a real failure. macOS checks a program the first time it
+/// runs after an install or an update: about 2 s when the machine is idle,
+/// more under load, so 5 s was too tight (task M4-20).
+pub const START_WAIT: Duration = Duration::from_secs(15);
 /// How long an old daemon has to stop. `marsad` gives its processes up to
 /// 10 s and its open connections up to 5 s before it deletes `daemon.json`
 /// (task M3-06), so this is longer than both together.

@@ -1194,7 +1194,9 @@ async fn marsad_that_stops_early_fails_at_once_and_names_its_log() {
         shown.contains("logs") && shown.contains("marsad.log"),
         "{shown}"
     );
-    assert!(started.elapsed() < Duration::from_secs(3));
+    // At once means before the start wait runs out, not a fixed time: a new
+    // script can take seconds to start on a busy machine (task M4-20).
+    assert!(started.elapsed() < marsa_core::client::START_WAIT);
 }
 
 /// The first `marsad` exits with code 3 (the lock was taken a moment ago),
