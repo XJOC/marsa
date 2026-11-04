@@ -2061,6 +2061,7 @@ dependencies = [
  "marsa-core",
  "notify",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",

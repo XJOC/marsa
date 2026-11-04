@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use super::api;
 use super::auth::AuthConfig;
 use super::dns;
+use super::sites_sync;
 use super::state::Daemon;
 use super::watch;
 
@@ -102,6 +103,8 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     if let Err(err) = daemon.rebuild_sites().await {
         tracing::warn!(code = err.code, error = %err.message, "cannot build the site list");
     }
+    // From here on, PHP pools and Caddy's config follow the sites (task M4-11).
+    let sync = sites_sync::start(&daemon);
     // After the first build, so it starts from its parked folders. It stops
     // when `daemon.shutdown` is cancelled.
     let watcher = watch::start(&daemon);
@@ -110,9 +113,11 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     let dns = dns::start_for_daemon(&daemon.shutdown).await;
     let app = api::router(daemon.clone(), auth);
     let result = serve(listener, app, daemon, signal).await;
+    // The watcher first: it is what asks the sync task for passes.
     if let Some(watcher) = watcher {
         watcher.stop(WATCH_STOP_LIMIT).await;
     }
+    sync.stop().await;
     // Before the lock goes, so the next daemon finds the DNS port free.
     if let Some(dns) = dns {
         dns.stop(DNS_STOP_LIMIT).await;
