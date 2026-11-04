@@ -223,6 +223,15 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             "A port {service} needs is used by another program. Run \"marsa logs {id}\" to \
              see which one."
         ),
+        "caddy_orphan_stuck" => format!(
+            "An old Caddy, left running when the Marsa daemon crashed, still holds the ports \
+             and could not be stopped. Run \"marsa logs {id}\" to see its process, stop it, \
+             then try again."
+        ),
+        "caddy_other_marsa" => format!(
+            "The Caddy of another Marsa (another data folder, or another user) uses the ports \
+             {service} needs. Stop that Marsa first. Run \"marsa logs {id}\" for details."
+        ),
         "exited" => {
             format!("{service_first} stopped by itself. Run \"marsa logs {id}\" to see why.")
         }
@@ -455,6 +464,8 @@ mod tests {
         "caddy_config_write",
         "caddy_start_timeout",
         "port_in_use",
+        "caddy_orphan_stuck",
+        "caddy_other_marsa",
         "exited",
         "spawn_failed",
         "program_not_absolute",
