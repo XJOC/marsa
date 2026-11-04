@@ -11,6 +11,8 @@ marsa-core = { path = "../core" }
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+# The DNS server for .test in marsad (task M4-12).
+hickory-server.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

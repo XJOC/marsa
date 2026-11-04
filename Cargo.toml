@@ -29,6 +29,9 @@ eframe = { version = "0.37", default-features = false, features = ["clipboard", 
 egui_extras = "0.37"
 # Default backend `rust_backend` (miniz_oxide): pure Rust, no C zlib.
 flate2 = "1"
+# The DNS server in marsad that answers *.test with 127.0.0.1 (task M4-12).
+# No features: plain UDP and TCP, no DNSSEC, TLS, resolver, or sqlite.
+hickory-server = { version = "0.26", default-features = false }
 # The daemon token: 32 bytes from the OS random source (task M3-03). Already
 # in the tree through `tempfile`; approved by the owner on 2026-11-04.
 getrandom = "0.4"
