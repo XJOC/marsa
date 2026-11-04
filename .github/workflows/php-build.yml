@@ -90,8 +90,6 @@ jobs:
     env:
       PLATFORM: ${{ matrix.platform }}
       SPC_TARGET: ${{ matrix.spc_target }}
-      WORK: ${{ runner.temp }}/php-build/work
-      OUT: ${{ runner.temp }}/php-build/out
     steps:
       - uses: actions/checkout@v5
         with:
@@ -102,6 +100,9 @@ jobs:
           [[ "$PHP_VERSION" =~ ^8\.[0-9]+\.[0-9]+$ ]] || { echo "php_version must look like 8.4.27"; exit 1; }
           [[ "$REVISION" =~ ^[1-9][0-9]*$ ]] || { echo "revision must be a number from 1"; exit 1; }
           echo "PHP $PHP_VERSION r$REVISION for $PLATFORM on $ImageOS $ImageVersion"
+          # Outside the checkout. (The runner context is not allowed in job env.)
+          echo "WORK=$RUNNER_TEMP/php-build/work" >> "$GITHUB_ENV"
+          echo "OUT=$RUNNER_TEMP/php-build/out" >> "$GITHUB_ENV"
 
       - name: Download spc ${{ env.SPC_VERSION }} (and zig ${{ env.ZIG_VERSION }} on Linux)
         run: bash tools/php-build/setup.sh
