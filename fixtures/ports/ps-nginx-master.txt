@@ -1,0 +1,1 @@
+root nginx: master process /Applications/Herd.app/Contents/Resources/nginx-arm64 -g daemon off; -c /Users/dev/Library/Application Support/Herd/config/nginx/nginx.conf
