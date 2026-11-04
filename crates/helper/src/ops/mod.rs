@@ -7,7 +7,7 @@
 //! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). The
 //! Linux and Windows ops fail with `op_not_implemented` until their tasks.
 
-mod pf;
+pub mod pf;
 mod resolver;
 mod trust;
 
