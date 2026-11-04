@@ -11,7 +11,7 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
-use marsa_core::client::{self, ClientError, DaemonClient};
+use marsa_core::client::{self, ClientError, DaemonClient, StreamItem};
 use marsa_core::types::ServiceAction;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -159,13 +159,20 @@ async fn session(
     loop {
         tokio::select! {
             event = events.next() => match event {
-                Some(Ok(event)) => {
+                Some(Ok(StreamItem::Item(event))) => {
                     if !window.send(Update::Event(event)) {
                         return End::Closed;
                     }
                 }
+                // Events were dropped, so the table may be stale.
+                Some(Ok(StreamItem::Lagged(count))) => {
+                    tracing::warn!(count, "the daemon dropped events; reading the state again");
+                    if !refresh(&client, window).await {
+                        return End::Closed;
+                    }
+                }
                 // The stream goes on after a bad event, and ends after a
-                // connection error.
+                // connection error or 45 s of silence.
                 Some(Err(err)) => {
                     tracing::warn!(code = err.code(), error = %err, "bad event from the daemon");
                 }

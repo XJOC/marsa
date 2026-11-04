@@ -66,6 +66,7 @@ fn error_message(code: &str) -> Option<&'static str> {
         // `marsa_core::client::ClientError`.
         "daemon_not_running" | "daemon_file_missing" => "The daemon is not running.",
         "daemon_start_failed" => "Cannot start the daemon (marsad).",
+        "daemon_stop_failed" => "The running daemon did not stop in time.",
         "daemon_unreachable" => "Cannot reach the daemon.",
         "daemon_api_too_new" => "The daemon is newer than this window. Update Marsa.",
         "daemon_bad_response" => "The daemon sent an answer this window cannot read.",
@@ -77,14 +78,18 @@ fn error_message(code: &str) -> Option<&'static str> {
         // Codes the daemon answers with (`ErrorBody`).
         "unauthorized" | "origin_rejected" | "host_rejected" => "The daemon refused the request.",
         "not_found" | "method_not_allowed" => "This daemon does not support that request.",
+        "invalid_path" | "invalid_query" => "The daemon could not read that request.",
         "service_not_found" => "No such service.",
         "unknown_action" => "Unknown service action.",
-        // Why a service failed (`ServiceState::Failed`).
+        "service_busy" => "The service is busy with another action. Try again.",
+        // Codes that come as an answer or in `ServiceState::Failed`.
         "caddy_not_installed" => "Caddy is not installed.",
+        "caddy_config_write" => "Cannot write the Caddy config file.",
         "caddy_start_timeout" => "Caddy did not become ready in time.",
         "port_in_use" => "A port it needs is used by another program.",
         "exited" => "The process exited.",
         "spawn_failed" => "The process could not be started.",
+        "program_not_absolute" => "The service program has no full path.",
         BRIDGE_FAILED => "The window could not start its background worker.",
         _ => return None,
     })
@@ -110,6 +115,13 @@ mod tests {
                 reason: String::new(),
                 source: None,
             },
+            ClientError::StopFailed {
+                reason: String::new(),
+            },
+            ClientError::Unreachable {
+                port: 1,
+                source: Box::new(io_error()),
+            },
             ClientError::ApiTooNew { daemon: 2 },
             ClientError::BadResponse {
                 reason: String::new(),
@@ -134,29 +146,34 @@ mod tests {
             }),
         ];
         let built = errors.iter().map(|err| err.code().to_owned());
-        // These variants hold a `reqwest::Error` or a `getrandom::Error`,
-        // which a test cannot build.
-        let listed = ["daemon_unreachable", "random_unavailable"].map(str::to_owned);
-        for code in built.chain(listed) {
+        // `RandomUnavailable` holds a `getrandom::Error`, which a test cannot
+        // build.
+        for code in built.chain(["random_unavailable".to_owned()]) {
             assert!(error_message(&code).is_some(), "no message for {code}");
         }
     }
 
     #[test]
     fn known_daemon_codes_have_a_message() {
+        // Auth (M3-03), routes (M3-06), and services and Caddy (M3-07).
         for code in [
             "unauthorized",
             "origin_rejected",
             "host_rejected",
             "not_found",
             "method_not_allowed",
+            "invalid_path",
+            "invalid_query",
             "service_not_found",
             "unknown_action",
+            "service_busy",
             "caddy_not_installed",
+            "caddy_config_write",
             "caddy_start_timeout",
             "port_in_use",
             "exited",
             "spawn_failed",
+            "program_not_absolute",
             BRIDGE_FAILED,
         ] {
             assert!(error_message(code).is_some(), "no message for {code}");

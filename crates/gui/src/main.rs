@@ -5,8 +5,9 @@
 //! `marsa-gui`: the window. A client of the daemon, like the CLI; it never
 //! changes state by itself (task M3-10).
 //!
-//! `marsa-gui [--data-dir <PATH>]`. Without the flag: `MARSA_DATA_DIR`, then
-//! the OS app data folder, the same as `marsad`.
+//! `marsa-gui [--data-dir <PATH>]`. The flag is for tests; the default is
+//! the OS app data folder. No environment variable overrides it: the shim
+//! never reads one, so the window and the shim always share one folder.
 
 mod app;
 mod bridge;
@@ -54,8 +55,8 @@ fn run(started: Instant) -> anyhow::Result<()> {
     .map_err(|err| anyhow::anyhow!("cannot open the window: {err}"))
 }
 
-/// The data folder: `--data-dir`, then `MARSA_DATA_DIR`, then the OS app data
-/// folder, made absolute.
+/// The data folder: `--data-dir` (for tests), else the OS app data folder,
+/// made absolute.
 fn data_dir(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<PathBuf> {
     let mut flag = None;
     while let Some(arg) = args.next() {
@@ -67,8 +68,7 @@ fn data_dir(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<PathBuf>
             bail!("unknown argument {}", arg.display());
         }
     }
-    let from_env = || std::env::var_os("MARSA_DATA_DIR").filter(|value| !value.is_empty());
-    let dir = match flag.or_else(from_env) {
+    let dir = match flag {
         Some(dir) => PathBuf::from(dir),
         None => marsa_core::config::app_data_dir()?,
     };
