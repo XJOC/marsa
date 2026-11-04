@@ -44,7 +44,7 @@ use crate::platform::spawn::{EXIT_ALREADY_RUNNING, marsad_path, spawn_marsad};
 use crate::runtimes::Runtime;
 use crate::types::{
     API_VERSION, ErrorBody, Event, Health, InstallAccepted, InstallRequest, LinkRequest, LogLine,
-    ParkRequest, RuntimeList, ServiceAction, ServiceStatus, SiteList, SitePatch,
+    ParkRequest, RuntimeList, ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch,
 };
 use error::daemon_text;
 
@@ -56,6 +56,10 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// For one call that is not a stream, and for the start of a stream. A
 /// service restart fits well inside.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// For `POST /v1/setup`: the daemon gives the user 5 minutes at the admin
+/// prompt, and its port checks (`netstat`, then `ps` for at most 8
+/// processes) up to 10 seconds each.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(7 * 60);
 /// How long a new daemon has to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
 /// How long an old daemon has to stop. `marsad` gives its processes up to
@@ -264,6 +268,21 @@ impl DaemonClient {
         patch: &SitePatch,
     ) -> Result<SiteList, ClientError> {
         self.call_with(Method::PATCH, &["v1", "sites", name], patch)
+            .await
+    }
+
+    /// `POST /v1/setup`: the first setup, with one admin prompt (macOS). Waits
+    /// until it ends, up to 7 minutes: the user may take a while at the
+    /// prompt. The same report also comes on [`DaemonClient::events`] as
+    /// `Event::SetupFinished`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `setup_running` (409) while another setup runs,
+    /// and `setup_not_supported` (501) on Linux and Windows for now. A
+    /// cancelled prompt is not an error: it is in [`SetupReport::error`].
+    pub async fn setup(&self) -> Result<SetupReport, ClientError> {
+        self.call(Method::POST, &["v1", "setup"], SETUP_TIMEOUT)
             .await
     }
 

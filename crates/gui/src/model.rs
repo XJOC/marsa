@@ -188,6 +188,8 @@ pub fn apply(model: &mut Model, event: Event) {
         Event::Install(_) => {}
         // The whole new list: no need to ask the daemon again.
         Event::SitesChanged(list) => model.set_sites(list),
+        // No setup button yet (task M4-13 adds the route and the CLI only).
+        Event::SetupFinished(_) => {}
         Event::ShuttingDown => model.disconnect(Connection::ShuttingDown),
     }
 }

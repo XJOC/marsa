@@ -309,6 +309,75 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         ),
         "config_write" => format!("Cannot write {}. {DISK}", shown("the settings file")),
 
+        // `marsa setup`: the setup route (task M4-13), its skipped steps, and
+        // the failure codes of `marsa-helper`.
+        "setup_running" => "Another setup is running. Wait for it to end, then try again.".into(),
+        "setup_not_supported" => "\"marsa setup\" works on macOS only for now.".into(),
+        "setup_cancelled" => "The password prompt was cancelled, so nothing was changed. Run \
+             \"marsa setup\" again when you are ready."
+            .into(),
+        "setup_timed_out" => {
+            format!("Marsa stopped waiting for setup after 5 minutes. {SETUP_MAY_HAVE_RUN}")
+        }
+        "setup_interrupted" => format!(
+            "The Marsa daemon stopped during setup, so Marsa stopped waiting. \
+             {SETUP_MAY_HAVE_RUN}"
+        ),
+        "setup_not_authorized" => "macOS did not give Marsa admin rights, so nothing was \
+             changed. The password was not accepted, or the prompt could not open (over SSH, \
+             for example). Run \"marsa setup\" again on your desktop and enter the password of \
+             an administrator account."
+            .into(),
+        "setup_helper_missing" => "The marsa-helper program is not next to marsad, so nothing \
+             was changed. Reinstall Marsa, then try again."
+            .into(),
+        "setup_helper_unsafe" => "Another user could change the marsa-helper program or its \
+             folder, so Marsa did not ask for the password and nothing was changed. Make both \
+             yours and writable only by you (chmod go-w), then run \"marsa setup\" again. The \
+             path is in the file logs/marsad.log."
+            .into(),
+        "setup_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the result \
+             of setup is not known. Run \"marsa setup\" again; if it repeats, report it with \
+             the file logs/marsad.log."
+            .into(),
+        "setup_helper_rejected" => "marsa-helper refused the setup request, so nothing was \
+             changed. This is a bug in Marsa: report it with the file logs/marsad.log."
+            .into(),
+        "redirect_port_held" => "Another program uses port 80 or 443, and the redirect would \
+             take its traffic. Stop that program, or turn off its web server, then run \
+             \"marsa setup\" again."
+            .into(),
+        "ports_not_checked" => "Marsa could not check which programs use ports 80 and 443, so \
+             it left them alone. Run \"marsa setup\" again; if it repeats, report it."
+            .into(),
+        "ca_not_ready" => "Marsa's certificate authority does not exist yet: Caddy makes it \
+             when it first serves a secure site. Run \"marsa setup\" again after that."
+            .into(),
+        "ca_unreadable" => format!(
+            "Cannot read the root certificate of Marsa's certificate authority{}, or it is \
+             not a certificate. Check the file, then run \"marsa setup\" again.",
+            d.path
+                .map_or(String::new(), |p| format!(" at {}", p.display()))
+        ),
+        "op_not_implemented" => format!("This build of marsa-helper cannot do this yet. {UPDATE}"),
+        "op_not_supported" => "marsa-helper cannot do this on this system.".into(),
+        "resolver_foreign" => "/etc/resolver/test belongs to another tool, so Marsa left it as \
+             it is. Remove that tool's .test setting, then run \"marsa setup\" again."
+            .into(),
+        "resolver_read" | "resolver_write" => "macOS did not let Marsa write \
+             /etc/resolver/test. Run \"marsa setup\" again; if it repeats, report it."
+            .into(),
+        "trust_cert_invalid" => "The root certificate of Marsa's certificate authority is not \
+             valid, so it was not trusted. Report it."
+            .into(),
+        "trust_read" | "trust_write" | "trust_add_failed" => "macOS did not add Marsa's \
+             certificate authority to the System keychain. Run \"marsa setup\" again; if it \
+             repeats, report it."
+            .into(),
+        "pf_write" | "pf_load_failed" => "macOS did not load the redirect of ports 80 and 443. \
+             Run \"marsa setup\" again; if it repeats, report it."
+            .into(),
+
         _ => return None,
     };
     Some(text)
@@ -512,6 +581,57 @@ pub fn unsecured(url: &str) -> String {
     format!("{url} is served over plain HTTP.")
 }
 
+// `marsa setup`.
+
+/// On stderr before the call, which may wait for the password prompt. On
+/// macOS only: other systems get `setup_not_supported` and no prompt.
+pub const SETUP_STARTED: &str = "Setting up Marsa. macOS may ask for your password once.";
+/// After Marsa stopped waiting for the helper, which may still have run.
+const SETUP_MAY_HAVE_RUN: &str = "Some steps may already have run with admin rights. Running \
+     \"marsa setup\" again is safe: each step checks what is already done.";
+/// When setup had no step to report.
+pub const SETUP_NOTHING: &str = "Nothing to set up.";
+
+/// A helper operation, as a step of `marsa setup`. An operation this build
+/// does not know shows its own name.
+pub fn setup_step(op: &str) -> String {
+    match op {
+        "trust_install" => "Trust Marsa's HTTPS certificates".to_owned(),
+        "resolver_install" => "Send .test names to Marsa".to_owned(),
+        "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+pub fn setup_done(step: &str) -> String {
+    format!("{step}: done.")
+}
+
+pub fn setup_unchanged(step: &str) -> String {
+    format!("{step}: already done.")
+}
+
+pub fn setup_failed(step: &str, reason: &str, code: &str) -> String {
+    format!("{step}: failed. {reason} [{code}]")
+}
+
+pub fn setup_skipped(step: &str, reason: &str, code: &str) -> String {
+    format!("{step}: skipped. {reason} [{code}]")
+}
+
+/// A program on a port the redirect needs, under the skipped step: its
+/// netstat name, its PID, and the app it seems to belong to.
+pub fn port_held(port: u16, name: Option<&str>, pid: Option<u32>, app: Option<&str>) -> String {
+    let name = name.unwrap_or("an unknown program");
+    let about = match (pid, app) {
+        (Some(pid), Some(app)) => format!(" (PID {pid}, {app})"),
+        (Some(pid), None) => format!(" (PID {pid})"),
+        (None, Some(app)) => format!(" ({app})"),
+        (None, None) => String::new(),
+    };
+    format!("  Port {port} is used by {name}{about}.")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,6 +736,33 @@ mod tests {
         "config_write",
         // `marsa park` and `marsa link` themselves.
         "no_current_dir",
+        // The setup route (task M4-13): its errors, the codes of its skipped
+        // steps, and the failure codes of `marsa-helper` for the setup ops.
+        "setup_running",
+        "setup_not_supported",
+        "setup_cancelled",
+        "setup_timed_out",
+        "setup_interrupted",
+        "setup_not_authorized",
+        "setup_helper_missing",
+        "setup_helper_unsafe",
+        "setup_helper_failed",
+        "setup_helper_rejected",
+        "redirect_port_held",
+        "ports_not_checked",
+        "ca_not_ready",
+        "ca_unreadable",
+        "op_not_implemented",
+        "op_not_supported",
+        "resolver_foreign",
+        "resolver_read",
+        "resolver_write",
+        "trust_cert_invalid",
+        "trust_read",
+        "trust_write",
+        "trust_add_failed",
+        "pf_write",
+        "pf_load_failed",
     ];
 
     #[test]
