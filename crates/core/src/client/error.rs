@@ -2,6 +2,7 @@
 
 use std::error::Error as StdError;
 use std::io;
+use std::path::PathBuf;
 
 use crate::platform::daemon_file::DaemonFileError;
 use crate::types::{API_VERSION, ErrorBody};
@@ -56,6 +57,12 @@ pub enum ClientError {
     #[error("{id:?} is not a valid name")]
     InvalidId { id: String },
 
+    /// A folder for a site whose path is not UTF-8. JSON text cannot hold
+    /// it, and the daemon would refuse it with the same code. Refused before
+    /// any request.
+    #[error("{} is not valid UTF-8", .path.display())]
+    PathNotUtf8 { path: PathBuf },
+
     /// The daemon answered with an `ErrorBody`. `code` is passed on as sent,
     /// after [`daemon_text`].
     #[error("the daemon answered {status} {code}: {message}")]
@@ -82,6 +89,7 @@ impl ClientError {
             ClientError::ApiTooNew { .. } => "daemon_api_too_new",
             ClientError::BadResponse { .. } => "daemon_bad_response",
             ClientError::InvalidId { .. } => "invalid_id",
+            ClientError::PathNotUtf8 { .. } => "site_path_not_utf8",
             ClientError::Api { code, .. } => code,
             ClientError::DaemonFile(err) => err.code(),
         }
