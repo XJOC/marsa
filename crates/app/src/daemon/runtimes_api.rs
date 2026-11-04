@@ -41,9 +41,6 @@ use marsa_core::types::{
 use super::api::HttpError;
 use super::state::Daemon;
 
-/// Every runtime, in the order `GET /v1/runtimes` lists them.
-const ALL: [Runtime; 3] = [Runtime::Php, Runtime::Node, Runtime::Composer];
-
 /// The routes, for `api::router` to merge before its fallbacks.
 pub fn routes() -> Router<Arc<Daemon>> {
     Router::new()
@@ -175,7 +172,7 @@ async fn runtimes(State(daemon): State<Arc<Daemon>>) -> Result<Json<RuntimeList>
 /// `runtimes_read` if a runtime folder exists but cannot be read.
 pub fn list(data_dir: &Path) -> Result<RuntimeList, RuntimesError> {
     let dir = RuntimesDir::in_dir(data_dir);
-    let runtimes = ALL
+    let runtimes = Runtime::ALL
         .into_iter()
         .map(|runtime| {
             let installed = dir.installed(runtime)?;
@@ -236,10 +233,11 @@ async fn install(
 
 /// The `{tool}` path segment.
 fn runtime(tool: &str) -> Result<Runtime, HttpError> {
-    ALL.into_iter()
+    Runtime::ALL
+        .into_iter()
         .find(|runtime| runtime.dir_name() == tool)
         .ok_or_else(|| {
-            let message = format!("no tool named {tool:?}; use php, node, or composer");
+            let message = format!("no tool named {tool:?}; use php, node, composer, or caddy");
             HttpError::new(StatusCode::NOT_FOUND, "unknown_tool", message)
         })
 }
@@ -410,7 +408,8 @@ fn first_default(
             format!("{}.{}", version.major, version.minor),
         ),
         Runtime::Node => (&mut global.node, version.major.to_string()),
-        Runtime::Composer => return Ok(None),
+        // No default version: the newest installed one is used.
+        Runtime::Composer | Runtime::Caddy => return Ok(None),
     };
     if tool.default.is_some() {
         return Ok(None);
@@ -537,11 +536,12 @@ mod tests {
     }
 
     #[test]
-    fn only_the_three_tools_are_known() {
+    fn only_the_four_tools_are_known() {
         for (tool, runtime) in [
             ("php", Runtime::Php),
             ("node", Runtime::Node),
             ("composer", Runtime::Composer),
+            ("caddy", Runtime::Caddy),
         ] {
             assert_eq!(super::runtime(tool).unwrap(), runtime);
         }
@@ -562,6 +562,7 @@ mod tests {
             "php/8.3.27",
             "php/8.4",
             "node/22.11.0",
+            "caddy/2.11.7",
             ".tmp",
         ] {
             std::fs::create_dir_all(tmp.path().join("runtimes").join(dir)).unwrap();
@@ -578,6 +579,7 @@ mod tests {
                 (Runtime::Php, "8.3.27,8.4.23".to_owned()),
                 (Runtime::Node, "22.11.0".to_owned()),
                 (Runtime::Composer, String::new()),
+                (Runtime::Caddy, "2.11.7".to_owned()),
             ]
         );
     }
