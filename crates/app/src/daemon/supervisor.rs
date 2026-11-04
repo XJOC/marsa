@@ -5,6 +5,8 @@
 //! `CancellationToken` is cancelled. Like Supervisor running `queue:work` for
 //! Laravel, but inside the daemon.
 
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -13,8 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use marsa_core::platform::process;
 use marsa_core::services::{LogBuffer, ProgramNotAbsolute, ServiceSpec, restart_delay};
 use marsa_core::types::{Event, LogLine, LogStream, ServiceState, ServiceStatus};
-use tokio::fs::OpenOptions;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::broadcast;
 use tokio::task::{JoinError, JoinHandle};
@@ -32,11 +33,30 @@ const DRAIN_WAIT: Duration = Duration::from_secs(1);
 /// so failures days apart do not use up the retries.
 const STABLE_RUN: Duration = Duration::from_secs(60);
 
+/// The size at which a log file moves to `<name>.1`: 10 MiB.
+pub const LOG_FILE_LIMIT: u64 = 10 * 1024 * 1024;
+
 /// The state and recent output of one service.
 #[derive(Debug)]
 pub struct ServiceRuntime {
     pub status: ServiceStatus,
     pub logs: LogBuffer,
+}
+
+impl ServiceRuntime {
+    /// A service that has not run yet: `Stopped`, with no lines.
+    pub fn new(id: &str) -> Self {
+        Self {
+            status: ServiceStatus {
+                id: id.to_owned(),
+                state: ServiceState::Stopped,
+                pid: None,
+                restarts: 0,
+                since_ms: None,
+            },
+            logs: LogBuffer::new(id),
+        }
+    }
 }
 
 /// What the daemon keeps per service. Dropping it does not stop the process:
@@ -88,18 +108,32 @@ impl Supervisor {
         events: broadcast::Sender<Event>,
         logs_dir: &Path,
     ) -> Result<ServiceHandle, ProgramNotAbsolute> {
+        let runtime = Arc::new(Mutex::new(ServiceRuntime::new(&spec.id)));
+        Self::spawn_on(spec, events, logs_dir, runtime)
+    }
+
+    /// Like [`Supervisor::spawn`], on the runtime of an earlier run of the
+    /// same service: its lines stay, and `seq` goes on from them, so a client
+    /// never sees `seq` go back. The earlier task must have ended.
+    ///
+    /// # Errors
+    ///
+    /// `program_not_absolute`: `marsad` never searches `PATH`.
+    pub fn spawn_on(
+        spec: ServiceSpec,
+        events: broadcast::Sender<Event>,
+        logs_dir: &Path,
+        runtime: Arc<Mutex<ServiceRuntime>>,
+    ) -> Result<ServiceHandle, ProgramNotAbsolute> {
         if !spec.program.is_absolute() {
             return Err(ProgramNotAbsolute(spec.program));
         }
-        let runtime = Arc::new(Mutex::new(ServiceRuntime {
-            status: status(&spec.id, ServiceState::Starting, None, 0),
-            logs: LogBuffer::new(spec.id.clone()),
-        }));
+        lock(&runtime).status = status(&spec.id, ServiceState::Starting, None, 0);
         let shared = Shared {
             id: spec.id.clone(),
             runtime: Arc::clone(&runtime),
             events,
-            log_path: logs_dir.join(format!("{}.log", spec.id)),
+            log: Arc::new(Mutex::new(open_log(&spec.id, logs_dir))),
         };
         let cancel = CancellationToken::new();
         let task = tokio::spawn(supervise(spec, shared, cancel.clone()));
@@ -117,7 +151,16 @@ struct Shared {
     id: String,
     runtime: Arc<Mutex<ServiceRuntime>>,
     events: broadcast::Sender<Event>,
-    log_path: PathBuf,
+    /// `logs/<id>.log`, shared by both readers so one writer moves it to
+    /// `.1`. `None` if it cannot be opened: lines still reach the buffer and
+    /// the events.
+    log: Arc<Mutex<Option<ServiceLog>>>,
+}
+
+struct ServiceLog {
+    file: LogFile,
+    /// The last write failed: warn once, not for every line.
+    failing: bool,
 }
 
 impl Shared {
@@ -138,6 +181,26 @@ impl Shared {
         let _ = self.events.send(Event::Log(line.clone()));
         line
     }
+
+    /// Appends one line to the log file. A short synchronous write, like the
+    /// `tracing` writer of `marsad.log`. After an error the next line tries
+    /// again: a failed move to `.1` can be brief, for example while a virus
+    /// scanner holds the file on Windows.
+    fn write_log(&self, text: &str) {
+        let mut log = lock(&self.log);
+        let Some(log) = log.as_mut() else {
+            return;
+        };
+        match log.file.write_all(format!("{text}\n").as_bytes()) {
+            Ok(()) => log.failing = false,
+            Err(err) => {
+                if !log.failing {
+                    warn!(service = %self.id, %err, "cannot write the log file");
+                }
+                log.failing = true;
+            }
+        }
+    }
 }
 
 /// How one run of the process ended.
@@ -147,11 +210,6 @@ enum Exit {
 }
 
 async fn supervise(spec: ServiceSpec, shared: Shared, cancel: CancellationToken) {
-    if let Some(dir) = shared.log_path.parent()
-        && let Err(err) = tokio::fs::create_dir_all(dir).await
-    {
-        warn!(service = %spec.id, %err, "cannot create the logs folder");
-    }
     let mut restarts = 0;
     loop {
         shared.set_state(ServiceState::Starting, None, restarts);
@@ -275,14 +333,6 @@ fn read_lines(
 ) -> JoinHandle<()> {
     let shared = shared.clone();
     tokio::spawn(async move {
-        // Without the file, lines still reach the buffer and the events.
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&shared.log_path)
-            .await
-            .inspect_err(|err| warn!(service = %shared.id, %err, "cannot open the log file"))
-            .ok();
         let mut reader = BufReader::new(pipe);
         let mut buf = Vec::new();
         loop {
@@ -292,12 +342,7 @@ fn read_lines(
                 Ok(0) => break,
                 Ok(_) => {
                     let line = shared.record(stream, &String::from_utf8_lossy(&buf));
-                    if let Some(out) = &mut file
-                        && let Err(err) = out.write_all(format!("{}\n", line.text).as_bytes()).await
-                    {
-                        warn!(service = %shared.id, %err, "cannot write the log file");
-                        file = None;
-                    }
+                    shared.write_log(&line.text);
                 }
                 Err(err) => {
                     warn!(service = %shared.id, %err, "cannot read the output");
@@ -305,10 +350,102 @@ fn read_lines(
                 }
             }
         }
-        if let Some(mut out) = file {
-            let _ = out.flush().await;
-        }
     })
+}
+
+/// Opens `logs_dir/<id>.log`, or warns and gives `None`.
+fn open_log(id: &str, logs_dir: &Path) -> Option<ServiceLog> {
+    let path = logs_dir.join(format!("{id}.log"));
+    let file = fs::create_dir_all(logs_dir)
+        .and_then(|()| LogFile::open(&path, LOG_FILE_LIMIT))
+        .inspect_err(|err| warn!(service = %id, %err, "cannot open the log file"))
+        .ok()?;
+    Some(ServiceLog {
+        file,
+        failing: false,
+    })
+}
+
+/// An append-only log file that keeps one older part. When a write would take
+/// it past `limit`, the file moves to `<name>.1` (over the older part) and a
+/// new file starts. So a noisy service, or a web page that sends rejected
+/// requests to `marsad` without end, fills at most about twice the limit.
+///
+/// A write that fails leaves the size as it was, so the next write tries
+/// again and the file still never grows past the limit.
+#[derive(Debug)]
+pub struct LogFile {
+    path: PathBuf,
+    /// `<name>.1`.
+    older: PathBuf,
+    limit: u64,
+    /// `None` after a move, until the next write opens the new file.
+    file: Option<File>,
+    size: u64,
+}
+
+impl LogFile {
+    /// Opens `path` to append, and creates it if needed. The parent folder
+    /// must exist.
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be opened.
+    pub fn open(path: &Path, limit: u64) -> io::Result<Self> {
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(".1");
+        let mut log = Self {
+            path: path.to_path_buf(),
+            older: path.with_file_name(name),
+            limit,
+            file: None,
+            size: 0,
+        };
+        log.file()?;
+        Ok(log)
+    }
+
+    /// The open file. Opens it first if a move closed it.
+    fn file(&mut self) -> io::Result<&mut File> {
+        match &mut self.file {
+            Some(file) => Ok(file),
+            slot @ None => {
+                let file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)?;
+                self.size = file.metadata()?.len();
+                Ok(slot.insert(file))
+            }
+        }
+    }
+
+    /// Moves the file to `<name>.1`, over the older part.
+    fn rotate(&mut self) -> io::Result<()> {
+        // Closed first: Windows cannot always rename an open file.
+        self.file = None;
+        fs::rename(&self.path, &self.older)?;
+        self.size = 0;
+        Ok(())
+    }
+}
+
+impl Write for LogFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let len = u64::try_from(buf.len()).unwrap_or(u64::MAX);
+        // `size > 0`: a write larger than the limit still goes into an empty
+        // file, instead of moving files without end.
+        if self.size > 0 && self.size.saturating_add(len) > self.limit {
+            self.rotate()?;
+        }
+        let written = self.file()?.write(buf)?;
+        self.size += u64::try_from(written).unwrap_or(u64::MAX);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.as_mut().map_or(Ok(()), Write::flush)
+    }
 }
 
 fn status(id: &str, state: ServiceState, pid: Option<u32>, restarts: u32) -> ServiceStatus {
@@ -321,14 +458,82 @@ fn status(id: &str, state: ServiceState, pid: Option<u32>, restarts: u32) -> Ser
     }
 }
 
-/// A poisoned lock still holds whole values: every write replaces a field.
-fn lock(runtime: &Mutex<ServiceRuntime>) -> MutexGuard<'_, ServiceRuntime> {
-    runtime.lock().unwrap_or_else(PoisonError::into_inner)
+/// A poisoned lock still holds whole values: every write replaces a field or
+/// appends a line.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     let since = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(path: &Path) -> String {
+        fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn a_log_file_moves_to_dot_1_past_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("caddy.log");
+        let older = dir.path().join("caddy.log.1");
+        // Each line is 7 bytes; two fit in 20.
+        let mut log = LogFile::open(&path, 20).unwrap();
+        for n in 1..=5 {
+            log.write_all(format!("line {n}\n").as_bytes()).unwrap();
+        }
+        // 1 and 2 filled the first file, 3 and 4 the second, 5 the third. The
+        // second replaced the first as `.1`.
+        assert_eq!(read(&older), "line 3\nline 4\n");
+        assert_eq!(read(&path), "line 5\n");
+    }
+
+    #[test]
+    fn a_log_file_counts_what_it_already_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("marsad.log");
+        fs::write(&path, "0123456789abcdef").unwrap();
+        let mut log = LogFile::open(&path, 20).unwrap();
+        log.write_all(b"new line\n").unwrap();
+        assert_eq!(read(&dir.path().join("marsad.log.1")), "0123456789abcdef");
+        assert_eq!(read(&path), "new line\n");
+    }
+
+    #[test]
+    fn a_write_larger_than_the_limit_goes_into_an_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.log");
+        let mut log = LogFile::open(&path, 4).unwrap();
+        log.write_all(b"longer than four\n").unwrap();
+        assert_eq!(read(&path), "longer than four\n");
+        assert!(!dir.path().join("big.log.1").exists());
+        log.write_all(b"next\n").unwrap();
+        assert_eq!(read(&dir.path().join("big.log.1")), "longer than four\n");
+        assert_eq!(read(&path), "next\n");
+    }
+
+    #[test]
+    fn a_failed_move_writes_nothing_and_is_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("svc.log");
+        let older = dir.path().join("svc.log.1");
+        let mut log = LogFile::open(&path, 10).unwrap();
+        log.write_all(b"12345678\n").unwrap();
+        // A folder named `svc.log.1` makes the rename fail on every OS.
+        fs::create_dir(&older).unwrap();
+        fs::write(older.join("keep"), "x").unwrap();
+        assert!(log.write_all(b"second\n").is_err());
+        assert_eq!(read(&path), "12345678\n");
+        fs::remove_dir_all(&older).unwrap();
+        log.write_all(b"second\n").unwrap();
+        assert_eq!(read(&older), "12345678\n");
+        assert_eq!(read(&path), "second\n");
+    }
 }

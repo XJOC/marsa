@@ -5,25 +5,33 @@
 //! `marsad`: the daemon. It is the only process that changes state; the CLI and
 //! the window are its clients.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::Mutex;
 
 use anyhow::Context as _;
 use clap::Parser;
 use marsa::daemon::server::{self, AlreadyRunning};
+use marsa::daemon::supervisor::{LOG_FILE_LIMIT, LogFile};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
 /// The exit code when another daemon already runs on the same data folder.
-const EXIT_ALREADY_RUNNING: u8 = 3;
+/// The client reads it from the same constant (task M3-08).
+const EXIT_ALREADY_RUNNING: u8 = {
+    let code = marsa_core::platform::spawn::EXIT_ALREADY_RUNNING;
+    assert!(code > 0 && code < 256, "an exit code fits in a byte");
+    code as u8
+};
 
 #[derive(Parser)]
 #[command(name = "marsad", version, about = "Marsa daemon")]
 struct Args {
-    /// The data folder. Default: `MARSA_DATA_DIR`, then the OS app data folder.
+    /// The data folder, for tests. Default: the OS app data folder. There is
+    /// no environment variable for it: the shim never reads one, so `marsad`
+    /// and the shim could use different folders.
     #[arg(long, value_name = "PATH")]
     data_dir: Option<PathBuf>,
 }
@@ -57,12 +65,7 @@ async fn main() -> ExitCode {
 
 /// The data folder, made absolute.
 fn data_dir(flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    let from_env = || {
-        std::env::var_os("MARSA_DATA_DIR")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-    };
-    let dir = match flag.or_else(from_env) {
+    let dir = match flag {
         Some(dir) => dir,
         None => marsa_core::config::app_data_dir()?,
     };
@@ -72,19 +75,17 @@ fn data_dir(flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 }
 
 /// Logs to `logs/marsad.log`, and to stderr in debug builds. `MARSA_LOG` sets
-/// the level (default `info`).
+/// the level (default `info`). Past 10 MiB the file moves to `marsad.log.1`:
+/// any web page can make the daemon log rejected requests without end.
 fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
     let logs = data_dir.join("logs");
     fs::create_dir_all(&logs).with_context(|| format!("cannot create {}", logs.display()))?;
     let path = logs.join("marsad.log");
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
+    let file = LogFile::open(&path, LOG_FILE_LIMIT)
         .with_context(|| format!("cannot open {}", path.display()))?;
     let filter = EnvFilter::try_from_env("MARSA_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     let to_file = tracing_subscriber::fmt::layer()
-        .with_writer(Arc::new(file))
+        .with_writer(Mutex::new(file))
         .with_ansi(false);
     let to_stderr = cfg!(debug_assertions)
         .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stderr));

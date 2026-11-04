@@ -1,1 +1,257 @@
 //! The services and logs routes. Task M3-07.
+//!
+//! | Route | Answer |
+//! | --- | --- |
+//! | `GET /v1/services` | `Vec<ServiceStatus>` |
+//! | `POST /v1/services/{id}/{action}` | `ServiceStatus` after the action |
+//! | `GET /v1/logs/{id}` | `Vec<LogLine>`, the recent lines |
+//! | `GET /v1/logs/{id}?follow=true` | SSE: the recent lines, then new ones |
+//!
+//! Every error, the extractors' own included, is an `ErrorBody`.
+
+use std::convert::Infallible;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::extract::rejection::{PathRejection, QueryRejection};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use marsa_core::types::{Event, LogLine, ServiceAction, ServiceStatus, UnknownAction};
+use serde::Deserialize;
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tokio_stream::{Stream, StreamExt as _};
+
+use super::api::HttpError;
+use super::caddy::{ActionError, CADDY_ID, CaddyManager};
+use super::state::Daemon;
+
+/// A `:` comment this often on a quiet stream, as on `/v1/events`: the
+/// client gives up after 45 s without a byte.
+const KEEP_ALIVE: Duration = Duration::from_secs(15);
+
+/// The routes, for `api::router` to merge before its fallbacks.
+pub fn routes() -> Router<Arc<Daemon>> {
+    Router::new()
+        .route("/v1/services", get(services))
+        .route("/v1/services/{id}/{action}", post(service_action))
+        .route("/v1/logs/{id}", get(logs))
+}
+
+async fn services(State(daemon): State<Arc<Daemon>>) -> Json<Vec<ServiceStatus>> {
+    Json(vec![daemon.caddy.status()])
+}
+
+async fn service_action(
+    State(daemon): State<Arc<Daemon>>,
+    path: Result<Path<(String, String)>, PathRejection>,
+) -> Result<Json<ServiceStatus>, HttpError> {
+    let Path((id, action)) = path.map_err(bad_path)?;
+    let service = service(&daemon, &id)?;
+    let action: ServiceAction = action.parse().map_err(|err: UnknownAction| {
+        HttpError::new(StatusCode::BAD_REQUEST, err.code(), err.to_string())
+    })?;
+    tracing::info!(service = %id, %action, "service action");
+    match service.run(&daemon, action).await {
+        Ok(status) => Ok(Json(status)),
+        Err(err) => {
+            tracing::warn!(service = %id, %action, code = err.code(), error = %err, "service action failed");
+            Err(action_error(&err))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    #[serde(default)]
+    follow: bool,
+}
+
+async fn logs(
+    State(daemon): State<Arc<Daemon>>,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<LogsQuery>, QueryRejection>,
+) -> Result<Response, HttpError> {
+    let Path(id) = path.map_err(bad_path)?;
+    let service = service(&daemon, &id)?;
+    let Query(query) = query.map_err(bad_query)?;
+    if !query.follow {
+        return Ok(Json(service.recent_logs()).into_response());
+    }
+    // Subscribe first, then copy the recent lines: a line printed in between
+    // is then in both (and skipped by `seq`), never in neither.
+    let receiver = daemon.events.subscribe();
+    // Checked after subscribing, as in `/v1/events`: `shutting_down` comes
+    // after the token is cancelled.
+    let closing = daemon.shutdown.is_cancelled();
+    let recent = service.recent_logs();
+    let stream = follow(id, recent, receiver, closing);
+    Ok(sse(stream, KEEP_ALIVE))
+}
+
+/// An SSE response that sends a keep-alive comment after `every` without data.
+fn sse(
+    stream: impl Stream<Item = Result<SseEvent, Infallible>> + Send + 'static,
+    every: Duration,
+) -> Response {
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(every))
+        .into_response()
+}
+
+/// The `?follow=true` body: each line as `data: <LogLine>`, `recent` first,
+/// then the new lines of service `id`. A line with a `seq` already sent is
+/// skipped (`seq` grows across runs, so this is exact). `: lagged <n>` marks
+/// `n` lost events. The stream ends at `shutting_down`, so the server can
+/// stop.
+fn follow(
+    id: String,
+    recent: Vec<LogLine>,
+    receiver: broadcast::Receiver<Event>,
+    closing: bool,
+) -> impl Stream<Item = Result<SseEvent, Infallible>> + Send + 'static {
+    let last_sent = recent.last().map(|line| line.seq);
+    let live = BroadcastStream::new(receiver)
+        // `take(0)` ends at once: the daemon was already stopping, and its
+        // `shutting_down` went out before we subscribed.
+        .take(if closing { 0 } else { usize::MAX })
+        .take_while(|item| !matches!(item, Ok(Event::ShuttingDown)))
+        .filter_map(move |item| match item {
+            Ok(Event::Log(line))
+                if line.service == id && last_sent.is_none_or(|seq| line.seq > seq) =>
+            {
+                Some(line_event(&line))
+            }
+            Ok(_) => None,
+            Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                Some(SseEvent::default().comment(format!("lagged {missed}")))
+            }
+        });
+    tokio_stream::iter(recent)
+        .map(|line| line_event(&line))
+        .chain(live)
+        .map(Ok)
+}
+
+fn line_event(line: &LogLine) -> SseEvent {
+    SseEvent::default().json_data(line).unwrap_or_else(|err| {
+        // `LogLine` holds only strings and numbers; this does not happen.
+        tracing::error!(error = %err, "cannot serialize a log line");
+        SseEvent::default().comment("line_not_serialized")
+    })
+}
+
+/// The manager of service `id`. Caddy is the only managed service in M3; the
+/// PHP pools come in M4.
+fn service<'a>(daemon: &'a Daemon, id: &str) -> Result<&'a CaddyManager, HttpError> {
+    if id == CADDY_ID {
+        Ok(&daemon.caddy)
+    } else {
+        let message = format!("no service named {id:?}");
+        Err(HttpError::new(
+            StatusCode::NOT_FOUND,
+            "service_not_found",
+            message,
+        ))
+    }
+}
+
+fn action_error(err: &ActionError) -> HttpError {
+    let status = match err {
+        ActionError::NotInstalled(_) | ActionError::Busy => StatusCode::CONFLICT,
+        ActionError::ConfigWrite(_) | ActionError::ProgramNotAbsolute(_) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    HttpError::new(status, err.code(), err.to_string())
+}
+
+fn bad_path(rejection: PathRejection) -> HttpError {
+    HttpError::new(rejection.status(), "invalid_path", rejection.body_text())
+}
+
+fn bad_query(rejection: QueryRejection) -> HttpError {
+    HttpError::new(rejection.status(), "invalid_query", rejection.body_text())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use marsa_core::types::LogStream;
+
+    fn line(service: &str, seq: u64) -> LogLine {
+        LogLine {
+            service: service.into(),
+            seq,
+            at_ms: 0,
+            stream: LogStream::Stdout,
+            text: format!("line {seq}"),
+        }
+    }
+
+    fn data(line: &LogLine) -> String {
+        format!("data: {}\n\n", serde_json::to_string(line).unwrap())
+    }
+
+    async fn text(response: Response) -> String {
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn follow_skips_lines_already_sent_and_ends_at_shutting_down() {
+        let (sender, receiver) = broadcast::channel(16);
+        // Lines 1 and 2 were published after the subscription and before the
+        // copy, so they are in both.
+        let recent = vec![line("caddy", 0), line("caddy", 1), line("caddy", 2)];
+        for event in [
+            Event::Log(line("caddy", 1)),
+            Event::Log(line("caddy", 2)),
+            Event::Log(line("php", 3)),
+            Event::Log(line("caddy", 3)),
+            Event::ShuttingDown,
+            Event::Log(line("caddy", 4)),
+        ] {
+            sender.send(event).unwrap();
+        }
+        let stream = follow("caddy".into(), recent, receiver, false);
+        let got = text(sse(stream, KEEP_ALIVE)).await;
+        let want: String = (0..=3).map(|seq| data(&line("caddy", seq))).collect();
+        assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn follow_during_shutdown_sends_the_recent_lines_and_ends() {
+        let (sender, receiver) = broadcast::channel(4);
+        let stream = follow("caddy".into(), vec![line("caddy", 7)], receiver, true);
+        assert_eq!(text(sse(stream, KEEP_ALIVE)).await, data(&line("caddy", 7)));
+        drop(sender);
+    }
+
+    #[tokio::test]
+    async fn a_quiet_follow_stream_sends_keep_alive_comments() {
+        let (sender, receiver) = broadcast::channel(4);
+        let stream = follow("caddy".into(), vec![line("caddy", 0)], receiver, false);
+        let body = sse(stream, Duration::from_millis(20)).into_body();
+        let mut chunks = Body::into_data_stream(body);
+        let mut got = String::new();
+        while !got.contains(":\n\n") {
+            let chunk = tokio::time::timeout(Duration::from_secs(10), chunks.next())
+                .await
+                .expect("a keep-alive in time")
+                .expect("the stream stays open")
+                .unwrap();
+            got.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+        assert!(got.starts_with(&data(&line("caddy", 0))), "{got:?}");
+        // The route uses the same helper with this interval.
+        assert_eq!(KEEP_ALIVE, Duration::from_secs(15));
+        drop(sender);
+    }
+}
