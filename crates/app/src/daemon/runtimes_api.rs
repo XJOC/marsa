@@ -28,6 +28,7 @@ use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use marsa_core::config::{self, ConfigError, ConfigPaths};
 use marsa_core::installer::extract::ExtractError;
 use marsa_core::installer::fetch::FetchError;
 use marsa_core::installer::{self, InstallEnv, InstallError, InstalledVersion};
@@ -276,6 +277,22 @@ async fn run(started: Started, runtime: Runtime, body: InstallRequest) {
     let update = match result {
         Ok(done) => {
             tracing::info!(id, version = %done.version, already = done.already, "install done");
+            // The first PHP or Node becomes the default, so a site or a
+            // folder with no version file works at once (task M4-22).
+            let data_dir = daemon.data_dir.clone();
+            let version = done.version.clone();
+            match tokio::task::spawn_blocking(move || first_default(&data_dir, runtime, &version))
+                .await
+            {
+                Ok(Ok(Some(line))) => {
+                    tracing::info!(id, runtime = ?runtime, default = %line, "set the default version")
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!(id, code = err.code(), error = %err, "cannot set the default version")
+                }
+                Err(err) => tracing::warn!(id, error = %err, "cannot set the default version"),
+            }
             // Before `done`, so a client that reads it lists the sites with
             // their new PHP (task M4-10d). `rebuild_sites` logs its errors.
             if runtime == Runtime::Php {
@@ -369,9 +386,76 @@ fn chain(err: &dyn Error) -> String {
     text
 }
 
+/// Makes `version` the default of `runtime` in `global.toml` when it has
+/// none: `major.minor` for PHP (`8.4`), the major for Node (`22`), so later
+/// updates of that line follow. Returns the new
+/// default, or `None` when one was already set or the runtime has no default
+/// (Composer).
+///
+/// # Errors
+///
+/// The `config_*` codes when `global.toml` cannot be read or written.
+fn first_default(
+    data_dir: &Path,
+    runtime: Runtime,
+    version: &semver::Version,
+) -> Result<Option<String>, ConfigError> {
+    let path = ConfigPaths::in_dir(data_dir).global;
+    let mut global = config::load_global(&path)?;
+    // PHP lines differ by minor (8.3, 8.4); Node lines by major (22), as
+    // in `.nvmrc`.
+    let (tool, line) = match runtime {
+        Runtime::Php => (
+            &mut global.php,
+            format!("{}.{}", version.major, version.minor),
+        ),
+        Runtime::Node => (&mut global.node, version.major.to_string()),
+        Runtime::Composer => return Ok(None),
+    };
+    if tool.default.is_some() {
+        return Ok(None);
+    }
+    tool.default = Some(line.clone());
+    config::save_global(&path, &global)?;
+    Ok(Some(line))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_php_and_node_become_the_default() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let v = |text: &str| semver::Version::parse(text).unwrap();
+        let path = ConfigPaths::in_dir(dir.path()).global;
+
+        assert_eq!(
+            first_default(dir.path(), Runtime::Php, &v("8.4.27"))
+                .unwrap()
+                .as_deref(),
+            Some("8.4")
+        );
+        // A default that is set stays: a second install does not move it.
+        assert_eq!(
+            first_default(dir.path(), Runtime::Php, &v("8.3.20")).unwrap(),
+            None
+        );
+        assert_eq!(
+            first_default(dir.path(), Runtime::Node, &v("22.11.0"))
+                .unwrap()
+                .as_deref(),
+            Some("22")
+        );
+        assert_eq!(
+            first_default(dir.path(), Runtime::Composer, &v("2.8.3")).unwrap(),
+            None
+        );
+
+        let global = config::load_global(&path).unwrap();
+        assert_eq!(global.php.default.as_deref(), Some("8.4"));
+        assert_eq!(global.node.default.as_deref(), Some("22"));
+    }
     use marsa_core::installer::manifest::ManifestError;
     use marsa_core::resolver::BadRequest;
     use std::path::PathBuf;
