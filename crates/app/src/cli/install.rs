@@ -190,6 +190,7 @@ pub fn install_failure(failed: &InstallFailure, runtime: Runtime) -> ClientFailu
         cause: cause.as_deref(),
         output: output.as_deref(),
         service: None,
+        site: None,
     };
     ClientFailure {
         message: strings::message(&code, &details),

@@ -2058,6 +2058,7 @@ dependencies = [
  "clap",
  "hickory-server",
  "marsa-core",
+ "notify",
  "reqwest",
  "semver",
  "serde",

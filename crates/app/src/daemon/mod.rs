@@ -14,3 +14,4 @@ pub mod sites_api;
 pub mod sites_sync;
 pub mod state;
 pub mod supervisor;
+pub mod watch;

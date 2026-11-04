@@ -13,6 +13,9 @@ axum.workspace = true
 clap.workspace = true
 # The DNS server for .test in marsad (task M4-12).
 hickory-server.workspace = true
+# Watches the parked folders in marsad (task M4-10d). Already in the tree
+# through `marsa-core`.
+notify.workspace = true
 reqwest.workspace = true
 # Site PHP versions, for the php-fpm pools (task M4-11).
 semver.workspace = true
