@@ -90,6 +90,13 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              version list."
         ),
         "install_io" => format!("Cannot write to {path}. {DISK}"),
+        "install_crashed" => "The install stopped because of a bug in Marsa. Run \
+             \"marsa runtimes\" to see what is installed, then try again. If it repeats, \
+             report it with the file logs/marsad.log."
+            .into(),
+        "install_interrupted" => "The Marsa daemon stopped before the install ended. Run \
+             \"marsa runtimes\" to see what is installed, then try again."
+            .into(),
 
         // The signed version list: `ManifestError`.
         "manifest_no_trusted_key" => "This build of Marsa has no trusted manifest key yet, so it \
@@ -230,7 +237,8 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "program_not_absolute" => {
             format!("Marsa refused to run {service}: its program has no full path. Report it.")
         }
-        "invalid_path" | "invalid_query" | "not_found" | "method_not_allowed" => {
+        "unknown_tool" => format!("The daemon does not know this program. {UPDATE}"),
+        "invalid_path" | "invalid_query" | "invalid_body" | "not_found" | "method_not_allowed" => {
             format!("The daemon did not understand the request of this command. {UPDATE}")
         }
         "unauthorized" => format!("The daemon refused the key of this command. {RESTART_DAEMON}"),
@@ -388,11 +396,11 @@ pub const LOG_ENDED: &str = "The daemon closed the log.";
 mod tests {
     use super::*;
 
-    /// Every code `marsa install` and `marsa runtimes` can meet. Core has no
-    /// public list of its codes, so this one is kept by hand from the
-    /// `code()` functions of `InstallError`, `ManifestError`, `FetchError`,
-    /// `ExtractError`, `BadRequest`, `RecipeError`, `RuntimesError`, and
-    /// `config::app_data_dir`.
+    /// Every code a `marsa` command can meet. Core has no public list of its
+    /// codes, so this one is kept by hand from the `code()` functions of
+    /// `InstallError` (which reach `marsa install` in `failed` events),
+    /// `ManifestError`, `FetchError`, `ExtractError`, `BadRequest`,
+    /// `RecipeError`, `RuntimesError`, and `config::app_data_dir`.
     const CODES: &[&str] = &[
         "install_unsupported_platform",
         "install_busy",
@@ -403,6 +411,10 @@ mod tests {
         "install_missing_vc_runtime",
         "install_serial_corrupt",
         "install_io",
+        // `marsa install` itself: the daemon stopped during the install.
+        "install_interrupted",
+        // The daemon: the install task panicked.
+        "install_crashed",
         "manifest_too_large",
         "manifest_bad_signature",
         "manifest_invalid",
@@ -446,7 +458,7 @@ mod tests {
         "random_unavailable",
         // The daemon's codes, passed on by `ClientError::Api` or found in
         // `ServiceState::Failed`: `services_api`, `caddy`, `supervisor`,
-        // `api`, and `auth` in `crates/app/src/daemon/`, and
+        // `runtimes_api`, `api`, and `auth` in `crates/app/src/daemon/`, and
         // `ProgramNotAbsolute` in core.
         "service_not_found",
         "unknown_action",
@@ -460,6 +472,8 @@ mod tests {
         "program_not_absolute",
         "invalid_path",
         "invalid_query",
+        "unknown_tool",
+        "invalid_body",
         "not_found",
         "method_not_allowed",
         "unauthorized",

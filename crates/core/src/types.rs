@@ -137,6 +137,8 @@ pub struct LogLine {
 pub enum Event {
     ServiceChanged(ServiceStatus),
     Log(LogLine),
+    /// A step of an install that `POST /v1/runtimes/{tool}/install` started.
+    Install(InstallProgress),
     /// The daemon is stopping; the stream ends after this event.
     ShuttingDown,
 }
@@ -168,8 +170,9 @@ impl ErrorBody {
     }
 }
 
-/// The progress of one runtime install (task M2-05). `marsa install` prints
-/// these; in M3 the daemon sends the same values on `/v1/events`.
+/// The progress of one runtime install (task M2-05). The daemon sends each
+/// one on `/v1/events` inside [`InstallUpdate::Running`], and `marsa install`
+/// prints it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
 pub enum InstallEvent {
@@ -201,6 +204,112 @@ pub enum InstallEvent {
     Installed {
         dir: PathBuf,
     },
+}
+
+/// One runtime and its installed versions, in [`RuntimeList`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeVersions {
+    pub runtime: Runtime,
+    /// Full semver text (`8.4.23`), oldest first. Empty if none is installed.
+    pub installed: Vec<String>,
+}
+
+/// `GET /v1/runtimes`: every runtime, installed or not, in a fixed order
+/// (PHP, Node.js, Composer). Read from `runtimes/` on each call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeList {
+    pub runtimes: Vec<RuntimeVersions>,
+}
+
+/// The body of `POST /v1/runtimes/{tool}/install`. `{}` is valid: the newest
+/// stable version, without `force`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallRequest {
+    /// `8`, `8.4`, or `8.4.23`: the same rules as a `.php-version` file.
+    /// `None`: the newest stable version in the manifest.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Install again even if this version is already there.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// The 202 answer to `POST /v1/runtimes/{tool}/install`. The install's events
+/// on `/v1/events` carry the same `id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallAccepted {
+    pub id: u64,
+}
+
+/// `Event::Install`: what the install `id` did. The last event of each install
+/// is `done` or `failed`, unless the daemon stops first (then
+/// `shutting_down` ends the stream instead).
+///
+/// ```json
+/// { "id": 1, "status": "running", "step": "downloading", "artifact": "cli", "done": 1, "total": 2 }
+/// { "id": 1, "status": "failed", "code": "checksum_mismatch", "message": "..." }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallProgress {
+    /// From [`InstallAccepted::id`].
+    pub id: u64,
+    #[serde(flatten)]
+    pub update: InstallUpdate,
+}
+
+/// The `status` of an [`InstallProgress`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum InstallUpdate {
+    /// A step of the installer.
+    Running(InstallEvent),
+    /// The install ended well.
+    Done(InstallDone),
+    /// The install ended with an error.
+    Failed(InstallFailure),
+}
+
+/// The end of a successful install.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallDone {
+    pub runtime: Runtime,
+    /// Full semver text (`8.4.23`).
+    pub version: String,
+    /// `runtimes/<runtime>/<version>`.
+    pub dir: PathBuf,
+    /// The version was there already and nothing was downloaded.
+    pub already: bool,
+}
+
+/// Why an install failed: the error's stable `code`, an English `message` for
+/// logs, and the facts a translated message may show. A fact the error does
+/// not have is left out of the JSON.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallFailure {
+    /// For example `checksum_mismatch`. The UI picks its text by this.
+    pub code: String,
+    /// English, for logs. Never shown to the user as is.
+    pub message: String,
+    /// The version text that was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested: Option<String>,
+    /// Versions in the manifest that could be asked for instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available: Vec<String>,
+    /// A platform key, such as `darwin-arm64`, or "this system".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The code of the error under this one, such as the last mirror's error
+    /// under `download_failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    /// What the installed program printed in its check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 #[cfg(test)]
@@ -393,5 +502,122 @@ mod tests {
             json!({ "step": "downloading", "artifact": "cli", "done": 1, "total": 2 }),
         );
         round_trip(&InstallEvent::Checking, json!({ "step": "checking" }));
+    }
+
+    #[test]
+    fn runtime_list() {
+        let list = RuntimeList {
+            runtimes: vec![
+                RuntimeVersions {
+                    runtime: Runtime::Php,
+                    installed: vec!["8.3.27".into(), "8.4.23".into()],
+                },
+                RuntimeVersions {
+                    runtime: Runtime::Composer,
+                    installed: vec![],
+                },
+            ],
+        };
+        round_trip(
+            &list,
+            json!({ "runtimes": [
+                { "runtime": "php", "installed": ["8.3.27", "8.4.23"] },
+                { "runtime": "composer", "installed": [] },
+            ] }),
+        );
+    }
+
+    #[test]
+    fn install_request_and_accepted() {
+        round_trip(
+            &InstallRequest {
+                version: Some("8.4".into()),
+                force: false,
+            },
+            json!({ "version": "8.4", "force": false }),
+        );
+        // Both fields may be left out.
+        let empty: InstallRequest = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(empty, InstallRequest::default());
+        round_trip(&InstallAccepted { id: 7 }, json!({ "id": 7 }));
+    }
+
+    #[test]
+    fn install_progress_is_one_flat_object_in_an_install_event() {
+        let step = |update| Event::Install(InstallProgress { id: 3, update });
+        round_trip(
+            &step(InstallUpdate::Running(InstallEvent::Downloading {
+                artifact: "cli".into(),
+                done: 1,
+                total: 2,
+            })),
+            json!({
+                "type": "install",
+                "data": {
+                    "id": 3, "status": "running",
+                    "step": "downloading", "artifact": "cli", "done": 1, "total": 2,
+                },
+            }),
+        );
+        round_trip(
+            &step(InstallUpdate::Running(InstallEvent::Checking)),
+            json!({ "type": "install", "data": { "id": 3, "status": "running", "step": "checking" } }),
+        );
+        round_trip(
+            &step(InstallUpdate::Done(InstallDone {
+                runtime: Runtime::Node,
+                version: "22.11.0".into(),
+                dir: PathBuf::from("/d/runtimes/node/22.11.0"),
+                already: false,
+            })),
+            json!({
+                "type": "install",
+                "data": {
+                    "id": 3, "status": "done", "runtime": "node", "version": "22.11.0",
+                    "dir": "/d/runtimes/node/22.11.0", "already": false,
+                },
+            }),
+        );
+    }
+
+    #[test]
+    fn a_failed_install_carries_its_code_and_only_the_facts_it_has() {
+        let failed = |failure| {
+            Event::Install(InstallProgress {
+                id: 9,
+                update: InstallUpdate::Failed(failure),
+            })
+        };
+        round_trip(
+            &failed(InstallFailure {
+                code: "install_busy".into(),
+                message: "another install is running".into(),
+                ..InstallFailure::default()
+            }),
+            json!({
+                "type": "install",
+                "data": {
+                    "id": 9, "status": "failed",
+                    "code": "install_busy", "message": "another install is running",
+                },
+            }),
+        );
+        round_trip(
+            &failed(InstallFailure {
+                code: "install_no_such_version".into(),
+                message: "no match".into(),
+                requested: Some("8.9".into()),
+                available: vec!["8.3.27".into(), "8.4.23".into()],
+                ..InstallFailure::default()
+            }),
+            json!({
+                "type": "install",
+                "data": {
+                    "id": 9, "status": "failed",
+                    "code": "install_no_such_version", "message": "no match",
+                    "requested": "8.9", "available": ["8.3.27", "8.4.23"],
+                },
+            }),
+        );
     }
 }

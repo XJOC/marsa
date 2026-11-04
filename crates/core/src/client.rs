@@ -40,7 +40,11 @@ use crate::platform::daemon_file::{
     DaemonFile, DaemonFileError, daemon_authority, daemon_lock_path, read_daemon_file,
 };
 use crate::platform::spawn::{EXIT_ALREADY_RUNNING, marsad_path, spawn_marsad};
-use crate::types::{API_VERSION, ErrorBody, Event, Health, LogLine, ServiceAction, ServiceStatus};
+use crate::runtimes::Runtime;
+use crate::types::{
+    API_VERSION, ErrorBody, Event, Health, InstallAccepted, InstallRequest, LogLine, RuntimeList,
+    ServiceAction, ServiceStatus,
+};
 use error::daemon_text;
 
 /// This build's version. An older daemon is replaced.
@@ -179,6 +183,35 @@ impl DaemonClient {
         self.stream(self.url(&["v1", "events"])?).await
     }
 
+    /// `GET /v1/runtimes`: the installed versions of each runtime.
+    pub async fn runtimes(&self) -> Result<RuntimeList, ClientError> {
+        self.call(Method::GET, &["v1", "runtimes"], REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// `POST /v1/runtimes/{tool}/install`. Returns once the daemon has
+    /// accepted; the progress then comes on [`DaemonClient::events`] as
+    /// `Event::Install` with the id returned here. Open that stream first,
+    /// so no event of this install is missed.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `install_busy` (409) while another install runs.
+    pub async fn install(
+        &self,
+        runtime: Runtime,
+        version: Option<&str>,
+        force: bool,
+    ) -> Result<InstallAccepted, ClientError> {
+        let url = self.url(&["v1", "runtimes", runtime.dir_name(), "install"])?;
+        let body = InstallRequest {
+            version: version.map(str::to_owned),
+            force,
+        };
+        let request = self.http.post(url).json(&body);
+        self.answer(request.timeout(REQUEST_TIMEOUT)).await
+    }
+
     /// The URL of the path made of `segments`, so an id can never reach
     /// another route: each segment is percent-encoded (`/`, `?`, `#`, and `%`
     /// too), and an empty, `.`, or `..` segment is refused here, because the
@@ -197,7 +230,7 @@ impl DaemonClient {
         Ok(url)
     }
 
-    /// A call with a JSON answer, within `limit`.
+    /// A call without a body and with a JSON answer, within `limit`.
     async fn call<T: DeserializeOwned>(
         &self,
         method: Method,
@@ -205,7 +238,12 @@ impl DaemonClient {
         limit: Duration,
     ) -> Result<T, ClientError> {
         let request = self.http.request(method, self.url(segments)?);
-        let response = self.send(request.timeout(limit)).await?;
+        self.answer(request.timeout(limit)).await
+    }
+
+    /// Sends `request` and reads its JSON answer.
+    async fn answer<T: DeserializeOwned>(&self, request: RequestBuilder) -> Result<T, ClientError> {
+        let response = self.send(request).await?;
         let body = self.read_body(response).await?;
         serde_json::from_slice(&body).map_err(|err| ClientError::bad_json("the answer", &err))
     }

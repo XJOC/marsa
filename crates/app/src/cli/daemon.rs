@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use marsa_core::caddy::CaddyPaths;
 use marsa_core::client::{self, ClientError, DaemonClient};
 use marsa_core::platform::daemon_file::daemon_file_path;
+use marsa_core::runtimes::RuntimesDir;
 
 use super::strings::{self, Details};
 
@@ -167,6 +168,7 @@ fn path_for(code: &str, data_dir: &Path) -> Option<PathBuf> {
         }
         "caddy_not_installed" => Some(CaddyPaths::in_dir(data_dir).program),
         "caddy_config_write" => Some(CaddyPaths::in_dir(data_dir).config_file),
+        "runtimes_read" => Some(RuntimesDir::in_dir(data_dir).root().to_path_buf()),
         _ => None,
     }
 }

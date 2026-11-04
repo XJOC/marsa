@@ -1,10 +1,12 @@
 //! Runs the `marsa` binary with `--data-dir` in a temp folder. No test here
 //! uses the network: the installer downloads the manifest before it checks
 //! the key, so `manifest_no_trusted_key` cannot be reached offline. The
-//! install test stops earlier, at the install lock.
+//! install test stops earlier, at the install lock. `tests/install.rs` runs
+//! whole installs through the daemon, with a fake installer.
 //!
 //! The daemon tests (task M3-09) run the real `marsa` and `marsad`: `marsa`
 //! starts the `marsad` next to it in `target/debug/`, as it does for a user.
+//! `marsa runtimes` and `marsa install` are daemon calls too (task M3-12).
 //! No fixed sleeps: each wait polls with a generous limit.
 
 use std::fs::{self, File, OpenOptions};
@@ -34,42 +36,41 @@ fn text(bytes: &[u8]) -> String {
 
 #[test]
 fn runtimes_on_an_empty_data_dir() {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let out = marsa(tmp.path(), &["runtimes"]);
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    assert_eq!(
-        text(&out.stdout),
+    let data = DaemonDir::new();
+    data.expect(
+        &["runtimes"],
+        0,
         "PHP       none installed\n\
          Node.js   none installed\n\
-         Composer  none installed\n"
+         Composer  none installed\n",
+        "",
     );
-    assert_eq!(text(&out.stderr), "");
 }
 
 #[test]
 fn runtimes_lists_installed_versions() {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let runtimes = tmp.path().join("runtimes");
+    let data = DaemonDir::new();
+    let runtimes = data.path().join("runtimes");
     for dir in ["php/8.4.23", "php/8.3.27", "node/22.11.0", "composer/2.8.4"] {
         fs::create_dir_all(runtimes.join(dir)).expect("mkdir");
     }
-    let out = marsa(tmp.path(), &["runtimes"]);
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    assert_eq!(
-        text(&out.stdout),
+    data.expect(
+        &["runtimes"],
+        0,
         "PHP       8.3.27, 8.4.23\n\
          Node.js   22.11.0\n\
-         Composer  2.8.4\n"
+         Composer  2.8.4\n",
+        "",
     );
-
-    let out = marsa(tmp.path(), &["runtimes", "php"]);
-    assert_eq!(text(&out.stdout), "PHP       8.3.27, 8.4.23\n");
+    data.expect(&["runtimes", "php"], 0, "PHP       8.3.27, 8.4.23\n", "");
 }
 
+/// The real installer in the real `marsad`, up to its file lock: another
+/// process (this test) holds it, so the daemon's install ends as `failed`.
 #[test]
 fn install_fails_with_its_code_when_another_install_runs() {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let lock_dir = tmp.path().join("runtimes").join(".tmp");
+    let data = DaemonDir::new();
+    let lock_dir = data.path().join("runtimes").join(".tmp");
     fs::create_dir_all(&lock_dir).expect("mkdir");
     let lock = OpenOptions::new()
         .read(true)
@@ -80,16 +81,15 @@ fn install_fails_with_its_code_when_another_install_runs() {
         .expect("open the lock");
     lock.try_lock().expect("take the lock");
 
-    let out = marsa(tmp.path(), &["install", "php", "8.4"]);
-    drop(lock);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    assert_eq!(text(&out.stdout), "");
-    assert_eq!(
-        text(&out.stderr),
+    data.expect(
+        &["install", "php", "8.4"],
+        1,
+        "",
         "marsa: Another install is running. Wait for it to end, then try again. \
-         [install_busy]\n"
+         [install_busy]\n",
     );
-    assert!(!tmp.path().join("runtimes").join("php").exists());
+    drop(lock);
+    assert!(!data.path().join("runtimes").join("php").exists());
 }
 
 #[test]
