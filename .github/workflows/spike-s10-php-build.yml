@@ -20,8 +20,8 @@ on:
       prefer_pre_built:
         description: "Use static-php.dev pre-built libraries (false = build every library from source)"
         type: choice
-        options: ["true", "false"]
-        default: "true"
+        options: ["false", "true"]
+        default: "false"
 
 permissions:
   contents: read
@@ -61,32 +61,28 @@ jobs:
             spc_target: ""
             shared: xdebug
             dlopen: "true"
-            prebuilt: "true"
           - label: macos-x64
             os: macos-15-intel
             spc_asset: spc-macos-x86_64
             spc_target: ""
             shared: xdebug
             dlopen: "true"
-            prebuilt: "true"
           # Linux glibc 2.17 (zig toolchain): can load xdebug.so, runs on any glibc distro.
-          # prebuilt "false": the static-php.dev pre-built ICU is built with libstdc++, and zig
-          # links libc++, so linking fails (run 1: undefined std::condition_variable). Build
-          # every library from source with zig.
+          # The static-php.dev pre-built ICU is built with libstdc++ and zig links libc++, so
+          # the link fails with pre-built libraries (run 1: undefined std::condition_variable).
+          # Every library is built from source (see PREFER_PRE_BUILT below).
           - label: linux-x64-glibc
             os: ubuntu-22.04
             spc_asset: spc-linux-x86_64
             spc_target: native-native-gnu.2.17
             shared: xdebug
             dlopen: "true"
-            prebuilt: "false"
           - label: linux-arm64-glibc
             os: ubuntu-22.04-arm
             spc_asset: spc-linux-aarch64
             spc_target: native-native-gnu.2.17
             shared: xdebug
             dlopen: "true"
-            prebuilt: "false"
           # Linux static musl (what static-php.dev publishes): runs on any Linux
           # including Alpine, but cannot load a .so, so no Xdebug (ADR 0010).
           - label: linux-x64-musl
@@ -95,7 +91,6 @@ jobs:
             spc_target: ""
             shared: ""
             dlopen: "false"
-            prebuilt: "true"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     env:
@@ -106,8 +101,9 @@ jobs:
       SPC_TARGET: ${{ matrix.spc_target }}
       SHARED: ${{ matrix.shared }}
       DLOPEN: ${{ matrix.dlopen }}
-      # A manual run with prefer_pre_built=false forces a from-source build everywhere.
-      PREFER_PRE_BUILT: ${{ inputs.prefer_pre_built == 'false' && 'false' || matrix.prebuilt }}
+      # Every library is built from source: run 1 (macOS, musl) used pre-built ones, run 2
+      # built glibc from source, run 3 builds all from source. A manual run can switch it back.
+      PREFER_PRE_BUILT: ${{ inputs.prefer_pre_built || 'false' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -149,6 +145,12 @@ jobs:
         if: steps.build.outcome == 'success'
         continue-on-error: true
         run: bash "$SPIKE/laravel-check.sh" "$WORK/buildroot/bin/php" "$WORK/laravel"
+
+      # Does this PHP run on other Linux distributions? Recorded in the summary; never fails the job.
+      - name: Run on other distros (docker)
+        if: runner.os == 'Linux' && steps.build.outcome == 'success'
+        continue-on-error: true
+        run: bash "$SPIKE/distro-check.sh" "$WORK/buildroot"
 
       - name: Package
         if: steps.build.outcome == 'success'

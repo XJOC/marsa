@@ -72,6 +72,12 @@ echo "| $LABEL | ${phpver:--} | $(ok "${BUILD_OUTCOME:-}") | $(ok "${SMOKE_OUTCO
     echo "</details>"
     echo
   fi
+  if [ -f "$OUT/distros.md" ]; then
+    echo "Other Linux distributions (docker):"
+    echo
+    cat "$OUT/distros.md"
+    echo
+  fi
   if [ -f "$OUT/laravel.md" ]; then
     echo "Laravel check:"
     echo
