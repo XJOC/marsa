@@ -1,0 +1,1 @@
+nobody /Applications/Herd.app/Contents/Resources/dnsmasq-arm64
