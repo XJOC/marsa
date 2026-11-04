@@ -5,9 +5,12 @@
 //! it reports. Every text the user sees comes from [`strings`] (AGENTS.md
 //! section 9).
 
+pub mod daemon;
 pub mod install;
+pub mod logs;
 pub mod progress;
 pub mod runtimes;
+pub mod services;
 pub mod strings;
 
 use std::path::PathBuf;

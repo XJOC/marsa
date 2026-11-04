@@ -8,8 +8,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use marsa::cli::daemon::{self, DaemonCommand};
 use marsa::cli::install::{self, InstallArgs};
+use marsa::cli::logs::{self, LogsArgs};
 use marsa::cli::runtimes::{self, RuntimesArgs};
+use marsa::cli::services::{self, ServicesArgs};
 
 /// Local development runtimes and sites.
 #[derive(Debug, Parser)]
@@ -31,9 +34,16 @@ enum Command {
     Install(InstallArgs),
     /// List the installed versions.
     Runtimes(RuntimesArgs),
+    /// Start, stop, or check the Marsa daemon (marsad).
+    #[command(subcommand)]
+    Daemon(DaemonCommand),
+    /// List the services, or start, stop, or restart one.
+    Services(ServicesArgs),
+    /// Show the output of a service.
+    Logs(LogsArgs),
 }
 
-// One thread is enough: the command waits on one install at a time.
+// One thread is enough: the command waits on one thing at a time.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     // Wrong arguments exit here with code 2 and clap's own message.
@@ -46,6 +56,9 @@ async fn main() -> ExitCode {
     match &cli.command {
         Command::Install(args) => install::run(args, &data_dir).await,
         Command::Runtimes(args) => runtimes::run(args, &data_dir),
+        Command::Daemon(command) => daemon::run(*command, &data_dir).await,
+        Command::Services(args) => services::run(args, &data_dir).await,
+        Command::Logs(args) => logs::run(args, &data_dir).await,
     }
 }
 
@@ -55,6 +68,7 @@ mod tests {
     use clap::CommandFactory as _;
     use clap::error::ErrorKind;
     use marsa::cli::Tool;
+    use marsa::cli::services::ServicesCommand;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("marsa").chain(args.iter().copied()))
@@ -116,6 +130,74 @@ mod tests {
             parse(&["install", "ruby"]).expect_err("ruby").kind(),
             ErrorKind::InvalidValue
         );
+    }
+
+    #[test]
+    fn daemon_takes_start_stop_or_status() {
+        for (word, want) in [
+            ("start", DaemonCommand::Start),
+            ("stop", DaemonCommand::Stop),
+            ("status", DaemonCommand::Status),
+        ] {
+            match parse(&["daemon", word]).expect("valid").command {
+                Command::Daemon(got) => assert_eq!(got, want),
+                other => panic!("not daemon: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn services_lists_or_runs_an_action_on_one_service() {
+        match parse(&["services"]).expect("valid").command {
+            Command::Services(args) => assert_eq!(args.command, None),
+            other => panic!("not services: {other:?}"),
+        }
+        match parse(&["services", "restart", "caddy"])
+            .expect("valid")
+            .command
+        {
+            Command::Services(args) => assert_eq!(
+                args.command,
+                Some(ServicesCommand::Restart { id: "caddy".into() })
+            ),
+            other => panic!("not services: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logs_takes_an_id_and_follow() {
+        for (args, follow) in [
+            (&["logs", "caddy"][..], false),
+            (&["logs", "caddy", "-f"], true),
+            (&["logs", "--follow", "caddy"], true),
+        ] {
+            match parse(args).expect("valid").command {
+                Command::Logs(got) => assert_eq!(
+                    got,
+                    LogsArgs {
+                        id: "caddy".into(),
+                        follow,
+                    }
+                ),
+                other => panic!("not logs: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn bad_daemon_services_and_logs_arguments_exit_with_code_2() {
+        for args in [
+            &["daemon"][..],
+            &["daemon", "restart"],
+            &["services", "start"],
+            &["services", "kill", "caddy"],
+            &["services", "start", "caddy", "php"],
+            &["logs"],
+            &["logs", "caddy", "--tail"],
+        ] {
+            let err = parse(args).expect_err("invalid arguments");
+            assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
+        }
     }
 
     #[test]
