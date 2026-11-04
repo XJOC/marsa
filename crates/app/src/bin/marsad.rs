@@ -83,7 +83,10 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
     let path = logs.join("marsad.log");
     let file = LogFile::open(&path, LOG_FILE_LIMIT)
         .with_context(|| format!("cannot open {}", path.display()))?;
-    let filter = EnvFilter::try_from_env("MARSA_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    // hickory logs two `info` lines for every DNS query, so every `.test`
+    // lookup of a browser would fill the log (task M4-12).
+    let filter = EnvFilter::try_from_env("MARSA_LOG")
+        .unwrap_or_else(|_| EnvFilter::new("info,hickory_server=warn"));
     let to_file = tracing_subscriber::fmt::layer()
         .with_writer(Mutex::new(file))
         .with_ansi(false);
