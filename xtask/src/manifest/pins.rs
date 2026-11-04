@@ -303,4 +303,41 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
         let text = include_str!("../../../recipes/pins.toml");
         Pins::parse(text).expect("recipes/pins.toml is valid");
     }
+
+    /// Our PHP builds are the release assets `php-build.yml` makes:
+    /// `php-<v>-r<n>/php-<v>-<platform>.tar.gz`, with a sha256sums.txt
+    /// beside them that `build` checks.
+    #[test]
+    fn repository_php_urls_are_our_release_assets() {
+        let pins = Pins::parse(include_str!("../../../recipes/pins.toml")).expect("valid pins");
+        assert!(!pins.versions(Runtime::Php).is_empty());
+        for version in pins.versions(Runtime::Php) {
+            for platform in [
+                Platform::DarwinArm64,
+                Platform::DarwinX64,
+                Platform::LinuxX64,
+                Platform::LinuxArm64,
+            ] {
+                let urls = pins
+                    .urls(Runtime::Php, version, platform, "php")
+                    .expect("urls");
+                let [url] = urls.as_slice() else {
+                    panic!("one URL expected for {platform}: {urls:?}");
+                };
+                let rest = url
+                    .strip_prefix(super::super::upstream::PHP_RELEASES)
+                    .unwrap_or_else(|| panic!("{url} is not one of our releases"));
+                let (tag, name) = rest.split_once('/').expect("tag/name");
+                let revision = tag
+                    .strip_prefix(&format!("{version}-r"))
+                    .unwrap_or_else(|| panic!("tag php-{tag} is not php-{version}-r<n>"));
+                assert!(
+                    revision.parse::<u32>().is_ok_and(|n| n > 0),
+                    "revision {revision:?}"
+                );
+                assert_eq!(name, format!("php-{version}-{platform}.tar.gz"));
+                assert!(super::super::upstream::sum_file_for(url).is_some());
+            }
+        }
+    }
 }

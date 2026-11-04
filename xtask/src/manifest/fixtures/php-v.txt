@@ -1,0 +1,5 @@
+PHP 8.4.27 (cli) (built: Nov  4 2026 01:38:50) (NTS clang 17.0.0)
+Copyright (c) The PHP Group
+Built by static-php-cli 2.8.5
+Zend Engine v4.4.27, Copyright (c) Zend Technologies
+    with Zend OPcache v8.4.27, Copyright (c), by Zend Technologies

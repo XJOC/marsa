@@ -1,0 +1,71 @@
+# The PHP extensions in Marsa's own PHP build (ADR 0012). One file for both
+# readers, so they cannot drift:
+#   - .github/workflows/php-build.yml (tools/php-build/build.sh and smoke.sh);
+#   - `cargo xtask manifest` (xtask/src/manifest/php_smoke.rs).
+#
+# One extension per line: <kind> <spc name> <module name>
+#   kind    builtin  always built in; spc has no name for it, so "-"
+#           static   built into php and php-fpm by `spc build`
+#           shared   built as a .so in the same spc run, shipped as
+#                    ext/<spc name>.so, loaded with zend_extension=
+#   module  what `php -m` lists (case does not matter; may contain spaces)
+#
+# `php -m` must list every builtin and static module, and nothing else.
+
+# Always on.
+builtin  -          Core
+builtin  -          date
+builtin  -          hash
+builtin  -          json
+builtin  -          libxml
+builtin  -          pcre
+builtin  -          random
+builtin  -          Reflection
+builtin  -          SPL
+builtin  -          standard
+
+# Laravel requires these (laravel/framework composer.json).
+static   ctype      ctype
+static   curl       curl
+static   dom        dom
+static   fileinfo   fileinfo
+static   filter     filter
+static   mbstring   mbstring
+static   openssl    openssl
+static   pdo        PDO
+static   session    session
+static   tokenizer  tokenizer
+static   xml        xml
+
+# A new Laravel project and its usual packages.
+static   opcache    Zend OPcache
+static   intl       intl
+static   pdo_sqlite pdo_sqlite
+static   sqlite3    sqlite3
+static   pdo_mysql  pdo_mysql
+static   mysqlnd    mysqlnd
+static   pdo_pgsql  pdo_pgsql
+static   pgsql      pgsql
+static   bcmath     bcmath
+static   gd         gd
+static   zip        zip
+static   zlib       zlib
+static   iconv      iconv
+static   sodium     sodium
+static   redis      redis
+static   exif       exif
+static   pcntl      pcntl
+static   posix      posix
+static   readline   readline
+static   simplexml  SimpleXML
+static   xmlreader  xmlreader
+static   xmlwriter  xmlwriter
+static   phar       Phar
+static   sockets    sockets
+
+# Laravel "suggest" list: the Flysystem FTP driver and the APC cache driver.
+static   ftp        ftp
+static   apcu       apcu
+
+# Xdebug is a zend_extension, and spc can only build it shared (ADR 0010).
+shared   xdebug     Xdebug

@@ -87,8 +87,17 @@ pub struct Target<'a> {
 
 /// Checks that need real programs. Tests pass a stub.
 pub trait Inspect {
-    /// Checks a static-php-cli PHP archive for macOS. Returns warnings.
-    fn php_darwin(&self, target: &Target<'_>, file: &Path) -> Result<Vec<String>>;
+    /// Checks one of our static-php-cli PHP archives (macOS or Linux).
+    /// Returns warnings.
+    fn php_build(&self, target: &Target<'_>, file: &Path) -> Result<Vec<String>>;
+}
+
+/// Platforms where PHP is our own static-php-cli build (ADR 0012).
+pub fn is_spc_platform(platform: Platform) -> bool {
+    matches!(
+        platform,
+        Platform::DarwinArm64 | Platform::DarwinX64 | Platform::LinuxX64 | Platform::LinuxArm64
+    )
 }
 
 /// The result: the manifest, one line per file for the report, and warnings.
@@ -153,7 +162,8 @@ pub async fn build(
                         .await
                         .with_context(|| what.clone())?;
 
-                    let upstream = match sum_file_for(&file.url) {
+                    let mut notes = Vec::new();
+                    match sum_file_for(&file.url) {
                         Some((sum_url, name)) => {
                             if !sum_files.contains_key(&sum_url) {
                                 let bytes = fetch_bytes(fetch, &sum_url, 1024 * 1024)
@@ -172,29 +182,28 @@ pub async fn build(
                                 hex(&file.sha256),
                                 hex(&expected)
                             );
-                            "upstream sha256 matches"
-                        }
-                        None if runtime == Runtime::Php
-                            && matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64) =>
-                        {
-                            let found = inspect
-                                .php_darwin(&target, &file.path)
-                                .with_context(|| format!("{what}: PHP check failed"))?;
-                            warnings.extend(found);
-                            "no upstream sum; PHP checks passed"
+                            notes.push("upstream sha256 matches");
                         }
                         None => {
                             warnings.push(format!(
                                 "{what}: {} publishes no sha256, so only our own sha256 is recorded",
                                 file.url
                             ));
-                            "no upstream sum"
+                            notes.push("no upstream sum");
                         }
-                    };
+                    }
+                    if runtime == Runtime::Php && is_spc_platform(platform) {
+                        let found = inspect
+                            .php_build(&target, &file.path)
+                            .with_context(|| format!("{what}: PHP check failed"))?;
+                        warnings.extend(found);
+                        notes.push("PHP checks passed");
+                    }
                     rows.push(format!(
-                        "{what}: {} bytes, sha256 {} ({upstream})",
+                        "{what}: {} bytes, sha256 {} ({})",
                         file.size,
-                        hex(&file.sha256)
+                        hex(&file.sha256),
+                        notes.join("; ")
                     ));
                     sources.push(SourceJson {
                         name: artifact.name.clone(),
@@ -378,7 +387,7 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
     struct Stub(std::sync::Mutex<Vec<String>>);
 
     impl Inspect for Stub {
-        fn php_darwin(&self, target: &Target<'_>, _file: &Path) -> Result<Vec<String>> {
+        fn php_build(&self, target: &Target<'_>, _file: &Path) -> Result<Vec<String>> {
             let name = format!("{} {}", target.platform, target.artifact.name);
             if let Ok(mut seen) = self.0.lock() {
                 seen.push(name);
@@ -453,8 +462,8 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
         assert_eq!(json, to_json(&third.manifest).expect("json"));
         let new_requests = fetch.requests().len() - requests;
         assert_eq!(
-            new_requests, 2,
-            "only the node and composer sum files are fetched again"
+            new_requests, 3,
+            "only the php, node and composer sum files are fetched again"
         );
 
         // The local checks (the same rules as M2-02) accept it.
@@ -481,13 +490,13 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
                 "windows-x64"
             ]
         );
-        let cli = &php["platforms"]["darwin-arm64"][0];
-        let url =
-            "https://dl.static-php.dev/static-php-cli/bulk/php-8.4.23-cli-macos-aarch64.tar.gz";
-        assert_eq!(cli["name"], "cli");
-        assert_eq!(cli["urls"][0], url);
-        assert_eq!(cli["sha256"], sha(url.as_bytes()));
-        assert_eq!(cli["size"], url.len());
+        let mac = &php["platforms"]["darwin-arm64"];
+        assert_eq!(mac.as_array().map(Vec::len), Some(1), "one archive");
+        let url = "https://github.com/XJOC/marsa/releases/download/php-8.4.23-r1/php-8.4.23-darwin-arm64.tar.gz";
+        assert_eq!(mac[0]["name"], "php");
+        assert_eq!(mac[0]["urls"][0], url);
+        assert_eq!(mac[0]["sha256"], sha(url.as_bytes()));
+        assert_eq!(mac[0]["size"], url.len());
         let windows = &php["platforms"]["windows-x64"][0];
         assert_eq!(windows["urls"].as_array().map(Vec::len), Some(1));
         let node = &value["runtimes"]["node"][0]["platforms"];
@@ -495,20 +504,26 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
         let composer = &value["runtimes"]["composer"][0]["platforms"]["any"][0];
         assert_eq!(composer["name"], "phar");
 
-        // The PHP checks ran for each macOS archive, every run.
+        // The PHP checks ran for each macOS and Linux archive, every run.
         let seen = stub.0.lock().expect("lock").clone();
         assert_eq!(seen.len(), 12);
         assert_eq!(
             &seen[..4],
             [
-                "darwin-arm64 cli",
-                "darwin-arm64 fpm",
-                "darwin-x64 cli",
-                "darwin-x64 fpm"
+                "darwin-arm64 php",
+                "darwin-x64 php",
+                "linux-x64 php",
+                "linux-arm64 php"
             ]
         );
-        // Linux PHP and archived Windows PHP have no upstream sums.
-        assert_eq!(first.warnings.len(), 5, "{:?}", first.warnings);
+        // Our PHP archives: their release's sha256sums.txt, and the checks.
+        assert!(
+            first.rows[0].ends_with("(upstream sha256 matches; PHP checks passed)"),
+            "{}",
+            first.rows[0]
+        );
+        // Only archived Windows PHP has no upstream sum.
+        assert_eq!(first.warnings.len(), 1, "{:?}", first.warnings);
     }
 
     #[tokio::test]

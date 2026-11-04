@@ -9,11 +9,14 @@
 serial = 1
 
 # static-php-cli line (ADR 0010): `php -v` must say "Built by static-php-cli 2.8.x".
+# The exact spc release (2.8.5), zig (0.17.1) and Xdebug (3.5.3) of our PHP
+# builds are pinned in .github/workflows/php-build.yml, with their sha256 in
+# tools/php-build/downloads.sha256 (ADR 0012).
 spc_line = "2.8"
 
 [php]
-# The newest 8.4 in the static-php-cli `bulk` set on 2026-11-04.
-versions = ["8.4.23"]
+# The newest 8.4 on 2026-11-04. macOS and Linux: our own build (ADR 0012).
+versions = ["8.4.27"]
 
 [node]
 # The newest 22.x LTS on 2026-11-04.
@@ -26,10 +29,46 @@ versions = ["2.11.1"]
 # A URL for one version, platform, and artifact that replaces the recipe
 # template. `urls`: the first is the main one, the rest are mirrors.
 
-# 8.4.23 is no longer the current 8.4 on windows.php.net: only archives/ has it.
+# PHP 8.4.27 for macOS and Linux: the archives of the GitHub Release
+# php-8.4.27-r1, made by .github/workflows/php-build.yml (run it with
+# release = true). The workflow makes it a DRAFT: these URLs answer only after
+# the owner publishes it. A rebuild is a new release (r2) and new URLs here.
 [[override]]
 runtime = "php"
-version = "8.4.23"
+version = "8.4.27"
+platform = "darwin-arm64"
+artifact = "php"
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.4.27-r1/php-8.4.27-darwin-arm64.tar.gz"]
+
+[[override]]
+runtime = "php"
+version = "8.4.27"
+platform = "darwin-x64"
+artifact = "php"
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.4.27-r1/php-8.4.27-darwin-x64.tar.gz"]
+
+[[override]]
+runtime = "php"
+version = "8.4.27"
+platform = "linux-x64"
+artifact = "php"
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.4.27-r1/php-8.4.27-linux-x64.tar.gz"]
+
+[[override]]
+runtime = "php"
+version = "8.4.27"
+platform = "linux-arm64"
+artifact = "php"
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.4.27-r1/php-8.4.27-linux-arm64.tar.gz"]
+
+# Windows: windows.php.net rebuilt 8.4.27 as "8.4.27-1", so the recipe
+# template (without "-1") is 404. The archive folder is the mirror.
+[[override]]
+runtime = "php"
+version = "8.4.27"
 platform = "windows-x64"
 artifact = "zip"
-urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win32-vs17-x64.zip"]
+urls = [
+  "https://windows.php.net/downloads/releases/php-8.4.27-1-nts-Win32-vs17-x64.zip",
+  "https://windows.php.net/downloads/releases/archives/php-8.4.27-1-nts-Win32-vs17-x64.zip",
+]
