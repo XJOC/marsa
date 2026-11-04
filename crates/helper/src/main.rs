@@ -43,6 +43,12 @@ fn main() -> ExitCode {
     let (line, exit) = cli(&args, Os::current(), &RealSystem, thread::sleep);
     // stdout is the helper's protocol: this one line is all it prints there.
     // A closed stdout is ignored, so the exit code still tells what happened.
+    //
+    // `apply` must never write to stderr, not one byte. On exit 1 or 2,
+    // osascript's `do shell script` raises an error whose text is the shell's
+    // stderr if it has any, and its stdout only if not. marsad reads this
+    // JSON line from that error text (`daemon/setup_api.rs`, `read_answer`),
+    // so anything on stderr would hide every result.
     let _ = writeln!(io::stdout().lock(), "{line}");
     ExitCode::from(exit)
 }

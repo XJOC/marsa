@@ -9,7 +9,8 @@
 //!
 //! 1. **CA:** Caddy's root certificate goes into `trust_install` as text
 //!    (ADR 0011). Caddy makes it with the first secure site; before that the
-//!    report says `ca_not_ready`.
+//!    report says `ca_not_ready`. A file the helper would refuse is skipped
+//!    as `ca_unreadable`, so the other steps still go.
 //! 2. **DNS:** the setup operation of [`dns::strategy_for`].
 //! 3. **Ports** (M4-14b): `/usr/sbin/netstat -anv -p tcp` lists the sockets
 //!    that listen, [`ports::holders`] picks those on 80 and 443, and `/bin/ps`
@@ -17,10 +18,12 @@
 //!    `pf_install`: the redirect would take that program's traffic without a
 //!    word (ADR 0008, "Herd conflict"). Otherwise `pf_install` gets Caddy's
 //!    ports from the daemon's `CaddyInput`.
-//! 4. **Helper:** if any operation is left, `/usr/bin/osascript` runs
-//!    `marsa-helper apply <request>` with administrator privileges, through
-//!    the constant script of ADR 0012, and the helper's JSON answer gives one
-//!    result per operation. No operation left: no prompt.
+//! 4. **Helper:** if any operation is left and the `marsa-helper` file can
+//!    be changed only by its owner (this user or root), `/usr/bin/osascript`
+//!    runs `marsa-helper apply <request>` with administrator privileges,
+//!    through the constant script of ADR 0012. The helper's JSON answer gives
+//!    one result per operation, in the order sent. No operation left: no
+//!    prompt.
 //!
 //! One setup at a time: a second request gets 409 `setup_running`. Linux and
 //! Windows get 501 `setup_not_supported` until tasks M4-18 and M4-19.
@@ -32,7 +35,7 @@ use std::collections::BTreeMap;
 use std::env::consts::EXE_SUFFIX;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs::File;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -94,9 +97,40 @@ const MAX_ANSWER: usize = 64 * 1024;
 const SAFE_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 /// How often [`RealRunner`] checks whether the program has finished.
 const POLL: Duration = Duration::from_millis(10);
+/// How long the pipes may stay open after the program ended. Its output is
+/// read all along, so only the last bytes are left by then.
+const PIPE_GRACE: Duration = Duration::from_secs(2);
+
+/// The first line the helper's `trust_install` accepts (`ops/trust.rs`).
+const PEM_BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+
+// `#[cfg]` outside `platform`: std has no `O_NONBLOCK`, its value differs by
+// system, and `libc` is not an approved dependency (AGENTS.md section 8).
+// These are the values of `<sys/fcntl.h>` on macOS and of
+// `<asm-generic/fcntl.h>` on Linux x86-64 and arm64. Another Unix opens
+// without it; Marsa has no build there.
+#[cfg(target_os = "macos")]
+const O_NONBLOCK: i32 = 0x0004;
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const O_NONBLOCK: i32 = 0o4000;
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))
+))]
+const O_NONBLOCK: i32 = 0;
 
 const TRUST_INSTALL: &str = "trust_install";
 const PF_INSTALL: &str = "pf_install";
+const UNINSTALL_ALL: &str = "uninstall_all";
 
 /// The routes, for `api::router` to merge before its fallbacks.
 pub fn routes() -> Router<Arc<Daemon>> {
@@ -185,14 +219,20 @@ impl Runner for RealRunner {
         #[cfg(unix)]
         command.current_dir("/");
         let mut child = command.spawn()?;
-        let result = collect(&mut child, Instant::now() + limit, stop);
-        if result.is_err() {
-            // Best effort: the first error is the one to report.
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        result
+        finish(&mut child, limit, stop)
     }
+}
+
+/// Waits for `child` at most `limit`, or until `stop`, and collects its
+/// output. On any error the child is killed and reaped before this returns.
+fn finish(child: &mut Child, limit: Duration, stop: &CancellationToken) -> io::Result<RunOutput> {
+    let result = collect(child, Instant::now() + limit, stop);
+    if result.is_err() {
+        // Best effort: the first error is the one to report.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
 }
 
 /// Waits for `child` until `deadline` or `stop`, and collects its output.
@@ -216,12 +256,14 @@ fn collect(
         }
         thread::sleep(POLL);
     };
-    // A program it started may still hold a pipe open, so this waits only
-    // until the same deadline.
+    // From the end of the program, not from `deadline`: a program that ends
+    // just before its limit still gives its output. A program it started may
+    // hold a pipe open, so the wait is short.
+    let pipes = Instant::now() + PIPE_GRACE;
     Ok(RunOutput {
         code: status.code(),
-        stdout: receive(&stdout, deadline)?,
-        stderr: receive(&stderr, deadline)?,
+        stdout: receive(&stdout, pipes)?,
+        stderr: receive(&stderr, pipes)?,
     })
 }
 
@@ -250,11 +292,15 @@ where
     Ok(receiver)
 }
 
+/// The output of one pipe, read after the program ended. Not `TimedOut` if
+/// the pipe stays open past `deadline`: the program itself finished in time.
 fn receive(output: &Receiver<io::Result<Vec<u8>>>, deadline: Instant) -> io::Result<Vec<u8>> {
     let left = deadline.saturating_duration_since(Instant::now());
     match output.recv_timeout(left) {
         Ok(result) => result,
-        Err(RecvTimeoutError::Timeout) => Err(timed_out()),
+        Err(RecvTimeoutError::Timeout) => Err(io::Error::other(
+            "the program ended, but its output stayed open",
+        )),
         Err(RecvTimeoutError::Disconnected) => Err(io::Error::other("the output reader stopped")),
     }
 }
@@ -342,9 +388,10 @@ impl Setup {
     }
 
     /// Who listens on 80 and 443, or `None` if that cannot be known:
-    /// `netstat` failed, or it listed no listening socket at all. The
-    /// daemon's own API socket always listens, so an empty list means the
-    /// output was not understood, and the redirect must not go in blind.
+    /// `netstat` failed, printed more than [`MAX_OUTPUT`] (the rest, with a
+    /// holder in it maybe, was not read), or listed no listening socket at
+    /// all. The daemon's own API socket always listens, so an empty list
+    /// means the output was not understood. The redirect never goes in blind.
     fn port_holders(&self, stop: &CancellationToken) -> Option<Vec<PortHolder>> {
         let args = ["-anv", "-p", "tcp"].map(OsString::from);
         let output = match self.runner.run(NETSTAT, &args, CHECK_LIMIT, stop) {
@@ -358,6 +405,14 @@ impl Setup {
                 return None;
             }
         };
+        // `>=`: an output of exactly the limit may have been cut too.
+        if output.stdout.len() as u64 >= MAX_OUTPUT {
+            tracing::warn!(
+                bytes = output.stdout.len(),
+                "netstat printed more than Marsa reads; ports 80 and 443 not checked"
+            );
+            return None;
+        }
         let listeners = ports::parse_netstat(&String::from_utf8_lossy(&output.stdout));
         if listeners.is_empty() {
             tracing::warn!("netstat listed no listening socket; its output was not understood");
@@ -423,7 +478,9 @@ impl Setup {
     }
 
     /// Sends `ops` to the helper behind the admin prompt and reads its
-    /// answer. With no operation nothing runs and no prompt shows.
+    /// answer. With no operation nothing runs and no prompt shows. The
+    /// helper file is checked first: a file that is missing or that another
+    /// user could change means no prompt.
     fn apply(
         &self,
         ops: Vec<HelperOp>,
@@ -432,21 +489,47 @@ impl Setup {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
-        let helper = self
-            .helper
-            .as_deref()
-            .filter(|helper| helper.is_absolute() && helper.is_file())
-            .ok_or_else(|| {
-                tracing::warn!(path = ?self.helper, "marsa-helper is not next to marsad");
-                failure("setup_helper_missing", "marsa-helper is not next to marsad")
-            })?;
-        let request = serde_json::to_string(&HelperRequest::new(ops)).map_err(|err| {
+        let missing = || {
+            tracing::warn!(path = ?self.helper, "marsa-helper is not next to marsad");
+            failure("setup_helper_missing", "marsa-helper is not next to marsad")
+        };
+        let helper = self.helper.as_deref().ok_or_else(missing)?;
+        match check_helper(helper) {
+            Ok(()) => {}
+            Err(HelperFault::Missing) => return Err(missing()),
+            Err(HelperFault::Unsafe(reason)) => {
+                tracing::warn!(
+                    path = %helper.display(),
+                    reason,
+                    "marsa-helper could be changed by another user; no admin prompt"
+                );
+                let message = format!("marsa-helper is not safe to run as root: {reason}");
+                return Err(failure("setup_helper_unsafe", message));
+            }
+        }
+        let cannot_write = |err: serde_json::Error| {
             tracing::error!(error = %err, "cannot write the helper request");
             failure("setup_helper_failed", "cannot write the helper request")
-        })?;
+        };
+        let names = ops
+            .iter()
+            .map(op_name)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(cannot_write)?;
+        let request = serde_json::to_string(&HelperRequest::new(ops)).map_err(cannot_write)?;
         tracing::info!(helper = %helper.display(), "asking for admin rights to run marsa-helper");
         let args = osascript_args(helper, &request);
-        read_answer(self.runner.run(OSASCRIPT, &args, PROMPT_LIMIT, stop))
+        let results = read_answer(self.runner.run(OSASCRIPT, &args, PROMPT_LIMIT, stop))?;
+        if !results_match(&names, &results) {
+            tracing::warn!(
+                sent = ?names,
+                got = ?results.iter().map(|result| short_code(&result.op)).collect::<Vec<_>>(),
+                "marsa-helper answered for other operations than it was sent"
+            );
+            let message = "the helper's results do not match the request";
+            return Err(failure("setup_helper_failed", message));
+        }
+        Ok(results)
     }
 }
 
@@ -542,37 +625,175 @@ fn helper_path() -> Option<PathBuf> {
 /// # Errors
 ///
 /// `ca_not_ready` if there is no file yet, and `ca_unreadable` if it is not
-/// a regular file, is larger than 16 KiB, is not UTF-8, or cannot be read.
+/// a regular file, is larger than 16 KiB, cannot be read, or would fail the
+/// helper's own checks ([`pem_problem`]).
 fn read_ca(path: &Path) -> Result<String, &'static str> {
-    let unreadable = |err: io::Error| {
-        tracing::warn!(path = %path.display(), error = %err, "cannot read the CA root certificate");
+    let unusable = |reason: &dyn fmt::Display| {
+        tracing::warn!(path = %path.display(), reason = %reason, "cannot use the CA root certificate");
         "ca_unreadable"
     };
-    let meta = match std::fs::metadata(path) {
-        Ok(meta) => meta,
+    let file = match open_nonblocking(path) {
+        Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Err("ca_not_ready"),
-        Err(err) => return Err(unreadable(err)),
+        Err(err) => return Err(unusable(&err)),
     };
-    // Checked before `open`: opening a FIFO waits for a writer.
+    // The metadata of the open file, not of the path: a file swapped after
+    // a check by path would slip through.
+    let meta = file.metadata().map_err(|err| unusable(&err))?;
     if !meta.is_file() || meta.len() > MAX_CA_BYTES {
-        let reason = "not a regular file of at most 16 KiB";
-        return Err(unreadable(io::Error::new(
-            io::ErrorKind::InvalidData,
-            reason,
-        )));
+        return Err(unusable(&"not a regular file of at most 16 KiB"));
     }
     let mut pem = String::new();
-    File::open(path)
-        .and_then(|file| file.take(MAX_CA_BYTES + 1).read_to_string(&mut pem))
-        .map_err(unreadable)?;
+    file.take(MAX_CA_BYTES + 1)
+        .read_to_string(&mut pem)
+        .map_err(|err| unusable(&err))?;
     if pem.len() as u64 > MAX_CA_BYTES {
-        let reason = "larger than 16 KiB";
-        return Err(unreadable(io::Error::new(
-            io::ErrorKind::InvalidData,
-            reason,
-        )));
+        return Err(unusable(&"larger than 16 KiB"));
     }
-    Ok(pem)
+    match pem_problem(&pem) {
+        Some(problem) => Err(unusable(&problem)),
+        None => Ok(pem),
+    }
+}
+
+/// Opens `path` to read. On Unix with `O_NONBLOCK`: a FIFO put in place of
+/// the file then opens at once, and fails the regular file check, instead of
+/// waiting for a writer and holding up setup. A regular file reads as usual.
+fn open_nonblocking(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, O_NONBLOCK);
+    options.open(path)
+}
+
+/// Why the helper would refuse `pem` in `trust_install` (`request.rs` and
+/// `ops/trust.rs` of `marsa-helper`), or `None`. Checked here too, so the
+/// password is never asked for a request the helper rejects as a whole.
+fn pem_problem(pem: &str) -> Option<&'static str> {
+    let start = pem.trim_start_matches([' ', '\t', '\r', '\n']);
+    if pem.is_empty() {
+        Some("is empty")
+    } else if !pem.is_ascii() {
+        Some("is not ASCII")
+    } else if pem.contains('\0') {
+        Some("contains a NUL byte")
+    } else if !start.starts_with(PEM_BEGIN) {
+        Some("does not start with -----BEGIN CERTIFICATE-----")
+    } else {
+        None
+    }
+}
+
+/// Why `marsa-helper` must not run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelperFault {
+    /// No file at the path, or the path is not absolute.
+    Missing,
+    /// Another user could change the file or put another in its place.
+    Unsafe(&'static str),
+}
+
+/// Checks the helper file before it runs as root. It must be a regular file
+/// (not a symlink), and on Unix the file and its folder must belong to this
+/// user or root and be writable by nobody else. Another user could otherwise
+/// replace it before the user approves the prompt.
+///
+/// What this cannot stop: a program of this same user replacing the file
+/// between this check and the prompt. Only a copy owned by root would.
+fn check_helper(helper: &Path) -> Result<(), HelperFault> {
+    if !helper.is_absolute() {
+        return Err(HelperFault::Missing);
+    }
+    // `symlink_metadata`: a symlink is refused, not followed.
+    let meta = match fs::symlink_metadata(helper) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Err(HelperFault::Missing),
+        Err(_) => return Err(HelperFault::Unsafe("the file cannot be checked")),
+    };
+    if !meta.file_type().is_file() {
+        return Err(HelperFault::Unsafe("the file is not a regular file"));
+    }
+    check_owners(helper, &meta)
+}
+
+/// The file and its folder: owned by this user or root, and writable by
+/// nobody else. The mode check is the one of `platform::daemon_file`.
+// `#[cfg]` outside `platform`: Unix owners and modes, read with
+// `MetadataExt`. The Windows twin is below.
+#[cfg(unix)]
+fn check_owners(helper: &Path, file: &fs::Metadata) -> Result<(), HelperFault> {
+    use std::os::unix::fs::MetadataExt;
+
+    let folder = helper
+        .parent()
+        .and_then(|folder| fs::metadata(folder).ok())
+        .ok_or(HelperFault::Unsafe("the folder cannot be checked"))?;
+    let me = current_uid().map_err(|_| HelperFault::Unsafe("the current user is not known"))?;
+    let checks = [
+        (
+            file,
+            "the file is writable by group or others",
+            "the file belongs to another user",
+        ),
+        (
+            &folder,
+            "the folder is writable by group or others",
+            "the folder belongs to another user",
+        ),
+    ];
+    for (meta, writable, foreign) in checks {
+        // `0o022`: write for the group or for others.
+        if meta.mode() & 0o022 != 0 {
+            return Err(HelperFault::Unsafe(writable));
+        }
+        if meta.uid() != me && meta.uid() != 0 {
+            return Err(HelperFault::Unsafe(foreign));
+        }
+    }
+    Ok(())
+}
+
+/// `#[cfg]` outside `platform`: this check reads Unix owners and modes.
+/// Windows answers 501 before setup runs; its helper service is protected in
+/// task M4-19.
+#[cfg(not(unix))]
+fn check_owners(_helper: &Path, _file: &fs::Metadata) -> Result<(), HelperFault> {
+    Ok(())
+}
+
+/// The effective user of this process. Std has no `geteuid` and `libc` is
+/// not an approved dependency (AGENTS.md section 8), so this reads the owner
+/// of a new pipe: macOS and Linux give a pipe the effective user of the
+/// process that asks. A test compares it with a new file's owner.
+// `#[cfg]` outside `platform`: only `check_owners` on Unix needs it.
+#[cfg(unix)]
+fn current_uid() -> io::Result<u32> {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::fs::MetadataExt;
+
+    let (reader, _writer) = io::pipe()?;
+    Ok(File::from(OwnedFd::from(reader)).metadata()?.uid())
+}
+
+/// The name of `op` in the helper's results: its `op` tag in JSON.
+fn op_name(op: &HelperOp) -> Result<String, serde_json::Error> {
+    let value = serde_json::to_value(op)?;
+    match value.get("op").and_then(serde_json::Value::as_str) {
+        Some(name) => Ok(name.to_owned()),
+        None => Err(serde::de::Error::custom("an operation without its name")),
+    }
+}
+
+/// Whether the helper answered for exactly the operations sent, in order.
+/// `uninstall_all` gives one result per removal it runs, so a request with
+/// it is not checked; setup never sends it.
+fn results_match(names: &[String], results: &[OpResult]) -> bool {
+    names.iter().any(|name| name == UNINSTALL_ALL)
+        || names
+            .iter()
+            .map(String::as_str)
+            .eq(results.iter().map(|result| result.op.as_str()))
 }
 
 /// The `osascript` arguments of ADR 0012: the constant script, then the
@@ -598,6 +819,12 @@ fn osascript_args(helper: &Path, request: &str) -> Vec<OsString> {
 ///   is read from there.
 /// - A cancelled prompt is AppleScript error -128:
 ///   `execution error: User canceled. (-128)`.
+/// - A wrong password, or a prompt that cannot show (over SSH), is error
+///   -60005 or -60007 of the Authorization Services.
+///
+/// When Marsa stops waiting (the limit, or the daemon stopping), `osascript`
+/// is killed, but the helper may already run as root. Every helper operation
+/// can run again safely, so the message says so.
 ///
 /// A message never quotes what the programs printed: only its size and the
 /// exit code go to the log.
@@ -605,14 +832,16 @@ fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError>
     let output = match output {
         Ok(output) => output,
         Err(err) if err.kind() == io::ErrorKind::TimedOut => {
-            let message = "nobody answered the admin prompt within 5 minutes";
+            tracing::warn!("setup took more than 5 minutes; Marsa stopped waiting");
+            let message = "Marsa stopped waiting for setup after 5 minutes; some steps may \
+                           already have run as root, and running setup again is safe";
             return Err(failure("setup_timed_out", message));
         }
         Err(err) if err.kind() == io::ErrorKind::Interrupted => {
-            return Err(failure(
-                "setup_interrupted",
-                "the daemon stopped during setup",
-            ));
+            tracing::warn!("the daemon is stopping; Marsa stopped waiting for setup");
+            let message = "the daemon stopped, so Marsa stopped waiting for setup; some steps \
+                           may already have run as root, and running setup again is safe";
+            return Err(failure("setup_interrupted", message));
         }
         Err(err) => {
             tracing::warn!(error = %err, "cannot run osascript");
@@ -635,6 +864,11 @@ fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError>
         if !output.success() && cancelled(&output.stderr) {
             tracing::info!("the admin prompt was cancelled");
             return Err(failure("setup_cancelled", "the admin prompt was cancelled"));
+        }
+        if !output.success() && not_authorized(&output.stderr) {
+            tracing::info!("macOS did not give admin rights");
+            let message = "macOS did not give admin rights: a wrong password, or no prompt";
+            return Err(failure("setup_not_authorized", message));
         }
         tracing::warn!(
             exit = ?output.code,
@@ -679,6 +913,14 @@ fn braces(text: &[u8]) -> Option<&[u8]> {
 fn cancelled(stderr: &[u8]) -> bool {
     let text = String::from_utf8_lossy(stderr);
     text.contains("(-128)") || text.contains("User canceled")
+}
+
+/// `errAuthorizationDenied` (-60005: a wrong password, or not an admin) and
+/// `errAuthorizationInteractionNotAllowed` (-60007: the prompt cannot show,
+/// as over SSH). Only the numbers: the text depends on the language.
+fn not_authorized(stderr: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stderr);
+    text.contains("(-60005)") || text.contains("(-60007)")
 }
 
 /// A code from the helper, safe for a log line and a message.
@@ -873,6 +1115,11 @@ mod tests {
             let helper = dir.path().join("bin").join("marsa-helper");
             fs::create_dir_all(helper.parent().unwrap()).unwrap();
             fs::write(&helper, "").unwrap();
+            // As cargo and an install leave them, whatever the umask.
+            #[cfg(unix)]
+            for path in [&helper, &dir.path().join("bin")] {
+                set_mode(path, 0o755);
+            }
             Self { dir }
         }
 
@@ -895,6 +1142,12 @@ mod tests {
             self.setup(fake)
                 .run(self.dir.path(), caddy, Platform::DarwinArm64, &stop)
         }
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
 
     fn trust() -> HelperOp {
@@ -952,6 +1205,20 @@ mod tests {
         async fn refused(&self) -> (StatusCode, String) {
             let (status, json) = self.post().await;
             let error: ErrorBody = serde_json::from_value(json).unwrap();
+            (status, error.error.code)
+        }
+
+        /// `POST /v1/setup` with only `headers`, expecting an error body.
+        async fn send(&self, headers: &[(&str, &str)]) -> (StatusCode, String) {
+            let mut request = Request::builder().method("POST").uri("/v1/setup");
+            for &(name, value) in headers {
+                request = request.header(name, value);
+            }
+            let request = request.body(Body::empty()).unwrap();
+            let response = self.router.clone().oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            let error: ErrorBody = serde_json::from_slice(&bytes).unwrap();
             (status, error.error.code)
         }
     }
@@ -1052,6 +1319,61 @@ mod tests {
     }
 
     #[test]
+    fn a_pem_the_helper_would_refuse_is_ca_unreadable_and_the_rest_goes() {
+        let refused = [
+            ("empty", String::new()),
+            ("not ASCII", format!("{TEST_CA}é")),
+            ("a NUL byte", format!("{TEST_CA}\0")),
+            (
+                "another block",
+                "-----BEGIN PRIVATE KEY-----\nAAAA\n".to_owned(),
+            ),
+            ("text first", format!("garbage\n{TEST_CA}")),
+        ];
+        for (name, pem) in refused {
+            let dir = Dir::new(false);
+            let root = CaddyPaths::in_dir(dir.dir.path()).ca_root();
+            fs::create_dir_all(root.parent().unwrap()).unwrap();
+            fs::write(&root, &pem).unwrap();
+            assert_eq!(read_ca(&root), Err("ca_unreadable"), "{name}");
+
+            // Only the trust step is skipped: DNS and pf still go.
+            let answer = all_done(&["resolver_install", "pf_install"]);
+            let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+            let report = dir.run(&fake);
+            assert_eq!(
+                report.skipped,
+                [skip("trust_install", "ca_unreadable")],
+                "{name}"
+            );
+            assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)], "{name}");
+            assert_eq!(report.error, None, "{name}");
+        }
+        // The helper allows whitespace before the BEGIN line.
+        assert_eq!(pem_problem(&format!(" \t\r\n{TEST_CA}")), None);
+        assert_eq!(pem_problem(TEST_CA), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_place_of_the_ca_does_not_hold_up_setup() {
+        let dir = Dir::new(false);
+        let root = CaddyPaths::in_dir(dir.dir.path()).ca_root();
+        fs::create_dir_all(root.parent().unwrap()).unwrap();
+        // std cannot make a FIFO, so `mkfifo` does, in the test's own folder.
+        let made = Command::new("/usr/bin/mkfifo").arg(&root).status().unwrap();
+        assert!(made.success());
+        // On a thread: a blocking `open` would wait for a writer forever.
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || sender.send(read_ca(&root)));
+        let got = receiver.recv_timeout(Duration::from_secs(5));
+        assert_eq!(
+            got.expect("read_ca waited on the FIFO"),
+            Err("ca_unreadable")
+        );
+    }
+
+    #[test]
     fn a_cancelled_prompt_is_setup_cancelled() {
         for stderr in [
             "0:180: execution error: User canceled. (-128)\n",
@@ -1124,10 +1446,89 @@ mod tests {
 
     #[test]
     fn a_prompt_left_open_or_a_stopping_daemon_ends_setup() {
-        let timed_out = read_answer(Err(io::Error::from(io::ErrorKind::TimedOut)));
-        assert_eq!(timed_out.unwrap_err().code, "setup_timed_out");
-        let stopped = read_answer(Err(io::Error::from(io::ErrorKind::Interrupted)));
-        assert_eq!(stopped.unwrap_err().code, "setup_interrupted");
+        let cases = [
+            (io::ErrorKind::TimedOut, "setup_timed_out"),
+            (io::ErrorKind::Interrupted, "setup_interrupted"),
+        ];
+        for (kind, code) in cases {
+            let error = read_answer(Err(io::Error::from(kind))).unwrap_err();
+            assert_eq!(error.code, code);
+            // The helper may have run as root already, and a rerun is safe.
+            for part in [
+                "stopped waiting",
+                "may already have run as root",
+                "again is safe",
+            ] {
+                assert!(error.message.contains(part), "{code}: {}", error.message);
+            }
+        }
+    }
+
+    #[test]
+    fn a_wrong_password_or_no_prompt_is_setup_not_authorized() {
+        for stderr in [
+            "0:180: execution error: The administrator user name or password was incorrect. \
+             (-60005)\n",
+            "0:180: execution error: The authorization was denied since no user interaction \
+             was possible. (-60007)\n",
+        ] {
+            let error = read_answer(script_error(stderr)).unwrap_err();
+            assert_eq!(error.code, "setup_not_authorized", "{stderr}");
+            assert!(!error.message.contains("incorrect"), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn a_message_with_brackets_quotes_and_accents_survives_the_script_error() {
+        // What osascript printed on macOS for a shell that printed this JSON
+        // line and exited 1 (run by hand without admin rights).
+        let stderr = r#"7:88: execution error: {"version":1,"results":[{"op":"resolver_install","status":"failed","code":"resolver_write","message":"cannot write (x) } \"q\" é"}]} (1)"#;
+        let results = read_answer(script_error(stderr)).unwrap();
+        assert_eq!(
+            results,
+            [OpResult {
+                op: "resolver_install".into(),
+                status: OpStatus::Failed,
+                code: Some("resolver_write".into()),
+                message: Some("cannot write (x) } \"q\" é".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn results_for_other_operations_are_setup_helper_failed() {
+        // No CA: the request is resolver_install, then pf_install.
+        let answers = [
+            all_done(&["resolver_install"]),
+            all_done(&["pf_install", "resolver_install"]),
+            all_done(&["resolver_install", "pf_install", "trust_install"]),
+            all_done(&["resolver_install", "trust_install"]),
+        ];
+        for answer in answers {
+            let dir = Dir::new(false);
+            let sent = answer.clone();
+            let fake = Fake::scripted(netstat_free(), move || ok(&sent));
+            let report = dir.run(&fake);
+            assert_eq!(error_code(&report), Some("setup_helper_failed"), "{answer}");
+            assert!(report.results.is_empty(), "{answer}");
+        }
+        // `uninstall_all` gives one result per removal, so it is not checked.
+        let names = [UNINSTALL_ALL.to_owned()];
+        assert!(results_match(
+            &names,
+            &results(&all_done(&["pf_remove", "resolver_remove"]))
+        ));
+        let ops = [trust(), resolver(), pf(1, 2), HelperOp::UninstallAll];
+        let names: Vec<String> = ops.iter().map(|op| op_name(op).unwrap()).collect();
+        assert_eq!(
+            names,
+            [
+                "trust_install",
+                "resolver_install",
+                "pf_install",
+                "uninstall_all"
+            ]
+        );
     }
 
     #[test]
@@ -1160,6 +1561,123 @@ mod tests {
             assert!(report.results.is_empty());
         }
         assert!(!fake.programs().contains(&OSASCRIPT));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_others_could_change_is_setup_helper_unsafe_and_no_prompt() {
+        let file_writable = "the file is writable by group or others";
+        let folder_writable = "the folder is writable by group or others";
+        let not_regular = "the file is not a regular file";
+        /// What a case does to the helper file at the path.
+        type Change = fn(&Path);
+        let cases: [(&str, Change, &str); 6] = [
+            (
+                "group may write the file",
+                |h| set_mode(h, 0o775),
+                file_writable,
+            ),
+            (
+                "others may write the file",
+                |h| set_mode(h, 0o757),
+                file_writable,
+            ),
+            (
+                "group may write the folder",
+                |h| set_mode(h.parent().unwrap(), 0o775),
+                folder_writable,
+            ),
+            (
+                "others may write the folder",
+                |h| set_mode(h.parent().unwrap(), 0o777),
+                folder_writable,
+            ),
+            (
+                "a symlink",
+                |h| {
+                    let real = h.parent().unwrap().join("real-helper");
+                    fs::rename(h, &real).unwrap();
+                    std::os::unix::fs::symlink(&real, h).unwrap();
+                },
+                not_regular,
+            ),
+            (
+                "a folder",
+                |h| {
+                    fs::remove_file(h).unwrap();
+                    fs::create_dir(h).unwrap();
+                },
+                not_regular,
+            ),
+        ];
+        for (name, change, reason) in cases {
+            let dir = Dir::new(true);
+            assert_eq!(check_helper(&dir.helper()), Ok(()), "{name}");
+            change(&dir.helper());
+            assert_eq!(
+                check_helper(&dir.helper()),
+                Err(HelperFault::Unsafe(reason)),
+                "{name}"
+            );
+
+            let fake = Fake::scripted(netstat_free(), || panic!("osascript ran"));
+            let report = dir.run(&fake);
+            let error = report.error.as_ref().expect(name);
+            assert_eq!(error.code, "setup_helper_unsafe", "{name}");
+            assert!(error.message.contains(reason), "{name}: {}", error.message);
+            assert!(report.results.is_empty(), "{name}");
+            assert_eq!(fake.programs(), [NETSTAT], "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_current_user_is_the_owner_of_a_new_file() {
+        use std::os::unix::fs::MetadataExt;
+
+        // A file owned by another user needs root to make, so the owner
+        // check is tested through the user it compares with.
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("mine");
+        fs::write(&file, "").unwrap();
+        assert_eq!(current_uid().unwrap(), fs::metadata(&file).unwrap().uid());
+    }
+
+    #[test]
+    fn netstat_output_cut_at_the_limit_means_no_pf_install() {
+        // Real lines with nobody on 80 or 443, repeated to just under the
+        // limit: read as usual.
+        let free = netstat_free();
+        let mut text = String::new();
+        while text.len() + free.len() + 1 < MAX_OUTPUT as usize {
+            text.push_str(free);
+            text.push('\n');
+        }
+        let run = |text: String, done: &[&str]| {
+            let dir = Dir::new(true);
+            let answer = all_done(done);
+            let fake = Fake::new(move |program| match program {
+                NETSTAT => ok(&text),
+                OSASCRIPT => ok(&answer),
+                other => panic!("unexpected program {other}"),
+            });
+            let report = dir.run(&fake);
+            (report, fake.request().ops, fake.programs())
+        };
+        let all = ["trust_install", "resolver_install", "pf_install"];
+        let (report, ops, _) = run(text.clone(), &all);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(ops, [trust(), resolver(), pf(18080, 18443)]);
+        assert_eq!(report.error, None);
+
+        // Filled up to the limit, as `RealRunner` keeps a longer output: a
+        // holder could sit in the part that was not read.
+        text.push_str(&" ".repeat(MAX_OUTPUT as usize - text.len()));
+        let (report, ops, programs) = run(text, &all[..2]);
+        assert_eq!(report.skipped, [skip("pf_install", "ports_not_checked")]);
+        assert_eq!(ops, [trust(), resolver()]);
+        assert_eq!(programs, [NETSTAT, OSASCRIPT]);
+        assert_eq!(report.error, None);
     }
 
     #[test]
@@ -1268,5 +1786,163 @@ mod tests {
             assert_eq!(app.refused().await, refused, "{platform:?}");
         }
         assert!(fake.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_request_without_the_token_with_an_origin_or_another_host_runs_nothing() {
+        let dir = Dir::new(true);
+        let answer = all_done(&["trust_install", "resolver_install", "pf_install"]);
+        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+        let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+        let app = App::new(daemon, dir.setup(&fake));
+        let host = daemon_authority(PORT);
+        let other_host = daemon_authority(PORT + 1);
+        let localhost = format!("localhost:{PORT}");
+        let wrong = Token::generate().unwrap().bearer_header();
+        let bearer = app.bearer.clone();
+        let unauthorized = (StatusCode::UNAUTHORIZED, "unauthorized".to_owned());
+        let cases = [
+            (
+                "no token",
+                vec![("host", host.as_str())],
+                unauthorized.clone(),
+            ),
+            (
+                "a wrong token",
+                vec![("host", host.as_str()), ("authorization", wrong.as_str())],
+                unauthorized,
+            ),
+            (
+                "an Origin header",
+                vec![
+                    ("host", host.as_str()),
+                    ("authorization", bearer.as_str()),
+                    ("origin", "http://evil.test"),
+                ],
+                (StatusCode::FORBIDDEN, "origin_rejected".to_owned()),
+            ),
+            (
+                "another port in Host",
+                vec![
+                    ("host", other_host.as_str()),
+                    ("authorization", bearer.as_str()),
+                ],
+                (StatusCode::FORBIDDEN, "host_rejected".to_owned()),
+            ),
+            (
+                "localhost in Host",
+                vec![
+                    ("host", localhost.as_str()),
+                    ("authorization", bearer.as_str()),
+                ],
+                (StatusCode::FORBIDDEN, "host_rejected".to_owned()),
+            ),
+        ];
+        for (name, headers, refused) in cases {
+            assert_eq!(app.send(&headers).await, refused, "{name}");
+            assert!(fake.calls().is_empty(), "{name}: {:?}", fake.calls());
+        }
+        // The same route with the right headers runs: the refusals above
+        // came from the auth layer.
+        assert_eq!(app.post().await.0, StatusCode::OK);
+        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
+    }
+
+    #[test]
+    fn a_relative_program_is_refused() {
+        let stop = CancellationToken::new();
+        let err = RealRunner.run("echo", &[], Duration::from_secs(10), &stop);
+        assert_eq!(err.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// [`RealRunner`] with real programs: only `/bin/sleep`, `/bin/echo`, and
+    /// `/usr/bin/false`, which change nothing.
+    #[cfg(unix)]
+    mod real_runner {
+        use super::*;
+        use std::os::unix::process::ExitStatusExt;
+
+        fn args(args: &[&str]) -> Vec<OsString> {
+            args.iter().map(OsString::from).collect()
+        }
+
+        #[test]
+        fn a_program_past_its_limit_is_killed_and_reaped() {
+            let stop = CancellationToken::new();
+            let limit = Duration::from_millis(100);
+            let started = Instant::now();
+            let err = RealRunner.run("/bin/sleep", &args(&["5"]), limit, &stop);
+            assert_eq!(err.unwrap_err().kind(), io::ErrorKind::TimedOut);
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{:?}",
+                started.elapsed()
+            );
+
+            // The same wait on a child the test holds, to see it is gone.
+            let mut child = Command::new("/bin/sleep")
+                .arg("5")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let err = finish(&mut child, limit, &stop).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+            // Reaped (its status is known) and ended by SIGKILL.
+            let status = child.try_wait().unwrap().expect("the child was reaped");
+            assert_eq!(status.signal(), Some(9));
+        }
+
+        #[test]
+        fn a_stop_before_the_call_starts_nothing() {
+            let stop = CancellationToken::new();
+            stop.cancel();
+            let started = Instant::now();
+            let limit = Duration::from_secs(10);
+            let err = RealRunner.run("/bin/sleep", &args(&["5"]), limit, &stop);
+            assert_eq!(err.unwrap_err().kind(), io::ErrorKind::Interrupted);
+            assert!(started.elapsed() < Duration::from_secs(1));
+            // Not `NotFound`: the stop is seen before any start.
+            let err = RealRunner.run("/marsa-test/no-such-program", &[], limit, &stop);
+            assert_eq!(err.unwrap_err().kind(), io::ErrorKind::Interrupted);
+        }
+
+        #[test]
+        fn a_stop_during_the_call_ends_it() {
+            let stop = CancellationToken::new();
+            let canceller = thread::spawn({
+                let stop = stop.clone();
+                move || {
+                    thread::sleep(Duration::from_millis(100));
+                    stop.cancel();
+                }
+            });
+            let started = Instant::now();
+            let limit = Duration::from_secs(10);
+            let err = RealRunner.run("/bin/sleep", &args(&["5"]), limit, &stop);
+            assert_eq!(err.unwrap_err().kind(), io::ErrorKind::Interrupted);
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{:?}",
+                started.elapsed()
+            );
+            canceller.join().unwrap();
+        }
+
+        #[test]
+        fn output_and_exit_code_come_back() {
+            let stop = CancellationToken::new();
+            let limit = Duration::from_secs(10);
+            let echo = RealRunner.run("/bin/echo", &args(&["hello", "marsa"]), limit, &stop);
+            let want = RunOutput {
+                code: Some(0),
+                stdout: b"hello marsa\n".to_vec(),
+                stderr: Vec::new(),
+            };
+            assert_eq!(echo.unwrap(), want);
+            let failed = RealRunner.run("/usr/bin/false", &[], limit, &stop).unwrap();
+            assert_eq!(failed.code, Some(1));
+            assert!(!failed.success());
+        }
     }
 }

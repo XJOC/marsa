@@ -316,14 +316,25 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "setup_cancelled" => "The password prompt was cancelled, so nothing was changed. Run \
              \"marsa setup\" again when you are ready."
             .into(),
-        "setup_timed_out" => "Nobody answered the password prompt within 5 minutes, so setup \
-             stopped. Run \"marsa setup\" again."
-            .into(),
-        "setup_interrupted" => {
-            "The Marsa daemon stopped during setup. Run \"marsa setup\" again.".into()
+        "setup_timed_out" => {
+            format!("Marsa stopped waiting for setup after 5 minutes. {SETUP_MAY_HAVE_RUN}")
         }
+        "setup_interrupted" => format!(
+            "The Marsa daemon stopped during setup, so Marsa stopped waiting. \
+             {SETUP_MAY_HAVE_RUN}"
+        ),
+        "setup_not_authorized" => "macOS did not give Marsa admin rights, so nothing was \
+             changed. The password was not accepted, or the prompt could not open (over SSH, \
+             for example). Run \"marsa setup\" again on your desktop and enter the password of \
+             an administrator account."
+            .into(),
         "setup_helper_missing" => "The marsa-helper program is not next to marsad, so nothing \
              was changed. Reinstall Marsa, then try again."
+            .into(),
+        "setup_helper_unsafe" => "Another user could change the marsa-helper program or its \
+             folder, so Marsa did not ask for the password and nothing was changed. Make both \
+             yours and writable only by you (chmod go-w), then run \"marsa setup\" again. The \
+             path is in the file logs/marsad.log."
             .into(),
         "setup_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the result \
              of setup is not known. Run \"marsa setup\" again; if it repeats, report it with \
@@ -343,8 +354,8 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              when it first serves a secure site. Run \"marsa setup\" again after that."
             .into(),
         "ca_unreadable" => format!(
-            "Cannot read the root certificate of Marsa's certificate authority{}. Check the \
-             file, then run \"marsa setup\" again.",
+            "Cannot read the root certificate of Marsa's certificate authority{}, or it is \
+             not a certificate. Check the file, then run \"marsa setup\" again.",
             d.path
                 .map_or(String::new(), |p| format!(" at {}", p.display()))
         ),
@@ -572,8 +583,12 @@ pub fn unsecured(url: &str) -> String {
 
 // `marsa setup`.
 
-/// On stderr before the call, which may wait for the password prompt.
-pub const SETUP_STARTED: &str = "Setting up Marsa. Your system may ask for your password once.";
+/// On stderr before the call, which may wait for the password prompt. On
+/// macOS only: other systems get `setup_not_supported` and no prompt.
+pub const SETUP_STARTED: &str = "Setting up Marsa. macOS may ask for your password once.";
+/// After Marsa stopped waiting for the helper, which may still have run.
+const SETUP_MAY_HAVE_RUN: &str = "Some steps may already have run with admin rights. Running \
+     \"marsa setup\" again is safe: each step checks what is already done.";
 /// When setup had no step to report.
 pub const SETUP_NOTHING: &str = "Nothing to set up.";
 
@@ -728,7 +743,9 @@ mod tests {
         "setup_cancelled",
         "setup_timed_out",
         "setup_interrupted",
+        "setup_not_authorized",
         "setup_helper_missing",
+        "setup_helper_unsafe",
         "setup_helper_failed",
         "setup_helper_rejected",
         "redirect_port_held",

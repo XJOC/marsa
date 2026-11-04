@@ -14,6 +14,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use marsa_core::caddy::CaddyPaths;
+use marsa_core::recipes::Platform;
 use marsa_core::types::{OpStatus, PortHolder, SetupReport};
 
 use super::daemon::{ClientFailure, connect, failure};
@@ -26,7 +27,9 @@ pub async fn run(data_dir: &Path) -> ExitCode {
         Ok(client) => client,
         Err(failure) => return failure.report(),
     };
-    eprintln!("{}", strings::SETUP_STARTED);
+    if let Some(line) = started(Platform::current()) {
+        eprintln!("{line}");
+    }
     let report = match client.setup().await {
         Ok(report) => report,
         Err(err) => return failure(&err, data_dir, None).report(),
@@ -43,6 +46,16 @@ pub async fn run(data_dir: &Path) -> ExitCode {
         }
         None => ExitCode::SUCCESS,
     }
+}
+
+/// The line before the call, which may wait for the password prompt. Only
+/// on macOS, the one system where the daemon runs setup for now (the
+/// platform check of `daemon/setup_api.rs`); the CLI and the daemon run on
+/// the same machine. Elsewhere the daemon answers `setup_not_supported` at
+/// once, and a password line first would be wrong.
+fn started(platform: Option<Platform>) -> Option<&'static str> {
+    matches!(platform, Some(Platform::DarwinArm64 | Platform::DarwinX64))
+        .then_some(strings::SETUP_STARTED)
 }
 
 /// One line per helper result, then one per skipped step, with the programs
@@ -225,6 +238,41 @@ mod tests {
             render(&SetupReport::default(), &data()),
             "Nothing to set up.\n"
         );
+    }
+
+    #[test]
+    fn only_macos_is_told_about_the_password() {
+        for platform in [Platform::DarwinArm64, Platform::DarwinX64] {
+            assert_eq!(started(Some(platform)), Some(strings::SETUP_STARTED));
+        }
+        for platform in [
+            Some(Platform::LinuxX64),
+            Some(Platform::LinuxArm64),
+            Some(Platform::WindowsX64),
+            None,
+        ] {
+            assert_eq!(started(platform), None, "{platform:?}");
+        }
+    }
+
+    #[test]
+    fn stopping_to_wait_says_steps_may_have_run_and_a_rerun_is_safe() {
+        for code in ["setup_timed_out", "setup_interrupted"] {
+            let report = SetupReport {
+                error: Some(ApiError {
+                    code: code.into(),
+                    message: "x".into(),
+                }),
+                ..SetupReport::default()
+            };
+            let line = error(&report).unwrap().line();
+            assert!(line.contains("stopped waiting"), "{line}");
+            assert!(
+                line.contains("Some steps may already have run with admin rights"),
+                "{line}"
+            );
+            assert!(line.contains("again is safe"), "{line}");
+        }
     }
 
     #[test]
