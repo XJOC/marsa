@@ -1,4 +1,5 @@
 //! Start-up and shutdown: lock file, bind, `run/daemon.json`, serve. Task M3-06.
+//! The DNS server for `.test` starts and stops with it (task M4-12).
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -18,12 +19,15 @@ use tokio_util::sync::CancellationToken;
 
 use super::api;
 use super::auth::AuthConfig;
+use super::dns;
 use super::state::Daemon;
 
 /// How long shutdown waits for the managed processes to stop.
 const PROCS_LIMIT: Duration = Duration::from_secs(10);
 /// How long shutdown then waits for open connections to finish.
 const DRAIN_LIMIT: Duration = Duration::from_secs(5);
+/// How long shutdown waits for the DNS server to close its sockets.
+const DNS_STOP_LIMIT: Duration = Duration::from_secs(2);
 /// How long a busy `run/daemon.lock` is tried again before giving up. A
 /// client probes it with a short shared lock every 50 ms; a probe must not
 /// make a starting daemon exit.
@@ -53,7 +57,8 @@ impl std::error::Error for AlreadyRunning {}
 
 /// Runs the daemon on `data_dir` until a stop request, then stops cleanly:
 /// `shutting_down` to every reader, the processes stopped, the server
-/// stopped, `run/daemon.json` deleted, the lock released.
+/// stopped, the DNS server stopped, `run/daemon.json` deleted, the lock
+/// released.
 ///
 /// # Errors
 ///
@@ -88,8 +93,15 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     let auth = AuthConfig::new(Arc::new(file.token), port);
 
     let daemon = Arc::new(Daemon::new(data_dir));
+    // After the API listener. It stops when `daemon.shutdown` is cancelled. A
+    // port in use is only a warning: the daemon runs on without it.
+    let dns = dns::start_for_daemon(&daemon.shutdown).await;
     let app = api::router(daemon.clone(), auth);
     let result = serve(listener, app, daemon, signal).await;
+    // Before the lock goes, so the next daemon finds the DNS port free.
+    if let Some(dns) = dns {
+        dns.stop(DNS_STOP_LIMIT).await;
+    }
 
     // The file goes before the lock, so a daemon that takes the lock next
     // never finds our file.
