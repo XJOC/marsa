@@ -121,25 +121,39 @@ pub async fn start(addr: SocketAddr, shutdown: &CancellationToken) -> anyhow::Re
     Ok(DnsServer { addr, cancel, task })
 }
 
-/// How often port 0 may pick a UDP port whose number TCP refuses.
-const PICK_TRIES: usize = 10;
+/// How often port 0 may pick a port that one of the two protocols refuses.
+const PICK_TRIES: usize = 50;
 
-/// Binds UDP, then TCP on the same port. With port 0 the system picks the UDP
-/// port, and on Windows that number can sit in a range reserved for TCP
-/// (`WSAEACCES`, os error 10013), so a new pick is tried. A fixed port fails
-/// at once, so the caller can name it.
+/// Binds UDP and TCP on the same port.
+///
+/// With port 0 the system picks: TCP first, because on Windows a range of
+/// TCP ports can be reserved (`WSAEACCES`, os error 10013) and the system
+/// never hands out a reserved TCP port, then UDP on the same number. A number
+/// UDP refuses is dropped and a new one picked. Picking UDP first failed on
+/// Windows CI even after 10 tries: UDP ports come in sequence, often inside
+/// the same reserved TCP range. A fixed port fails at once, so the caller can
+/// name it.
 async fn bind_both(addr: SocketAddr) -> anyhow::Result<(UdpSocket, TcpListener)> {
-    let mut tries = 0;
-    loop {
+    if addr.port() != 0 {
         let udp = UdpSocket::bind(addr)
             .await
             .with_context(|| format!("cannot bind UDP {addr}"))?;
-        let picked = udp.local_addr().context("no local UDP address")?;
-        match TcpListener::bind(picked).await {
-            Ok(tcp) => return Ok((udp, tcp)),
-            Err(_) if addr.port() == 0 && tries + 1 < PICK_TRIES => tries += 1,
+        let tcp = TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("cannot bind TCP {addr}"))?;
+        return Ok((udp, tcp));
+    }
+    let mut tries = 0;
+    loop {
+        let tcp = TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("cannot bind TCP {addr}"))?;
+        let picked = tcp.local_addr().context("no local TCP address")?;
+        match UdpSocket::bind(picked).await {
+            Ok(udp) => return Ok((udp, tcp)),
+            Err(_) if tries + 1 < PICK_TRIES => tries += 1,
             Err(err) => {
-                return Err(anyhow::Error::new(err).context(format!("cannot bind TCP {picked}")));
+                return Err(anyhow::Error::new(err).context(format!("cannot bind UDP {picked}")));
             }
         }
     }
