@@ -6,9 +6,13 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
+use marsa_core::resolver;
+use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    Event, Health, LogLine, LogStream, ServiceAction, ServiceState, ServiceStatus, Site, SiteList,
+    Event, Health, LogLine, LogStream, RuntimeList, ServiceAction, ServiceState, ServiceStatus,
+    Site, SiteList, Source,
 };
+use semver::Version;
 
 /// The service whose log the window shows.
 pub const LOG_SERVICE: &str = "caddy";
@@ -40,7 +44,76 @@ pub enum Update {
     Parked(PathBuf),
     /// A sites call failed but the connection is fine. A client error code.
     SitesFailed(String),
+    /// Every runtime with its installed versions and default, read when a
+    /// session starts and after an install.
+    Runtimes(RuntimeList),
+    /// The runtimes could not be read. A client error code.
+    RuntimesFailed(String),
+    /// The daemon saved this change. The new state comes as an event.
+    Saved(Change),
+    /// The daemon refused this change, or could not be reached. A client
+    /// error code.
+    NotSaved {
+        change: Change,
+        code: String,
+    },
     Event(Event),
+}
+
+/// One runtime in the Runtimes section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRow {
+    pub runtime: Runtime,
+    /// Oldest first.
+    pub installed: Vec<Version>,
+    /// As saved in `global.toml` (`8.4`). Always `None` for Composer and
+    /// Caddy.
+    pub default: Option<String>,
+}
+
+/// One entry of a PHP or Node list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Choice {
+    /// A site with no setting of its own: its version file, its
+    /// `composer.json`, or the default picks the version. Sites only.
+    Auto,
+    /// This installed version.
+    Version(Version),
+}
+
+/// A setting the window changes through the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    /// `PUT /v1/runtimes/{tool}/default` with this text (`8.4`).
+    Default { runtime: Runtime, version: String },
+    /// `PATCH /v1/sites/{name}` with this PHP text. `None` clears the site's
+    /// own setting.
+    SitePhp { site: String, php: Option<String> },
+}
+
+impl Change {
+    fn setting(&self) -> Setting<'_> {
+        match self {
+            Change::Default { runtime, .. } => Setting::Default(*runtime),
+            Change::SitePhp { site, .. } => Setting::SitePhp(site),
+        }
+    }
+}
+
+/// Which setting a [`Change`] is about. Borrows the site name, so finding
+/// the pending change of a row copies nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Setting<'a> {
+    Default(Runtime),
+    SitePhp(&'a str),
+}
+
+/// A change sent to the daemon and not answered yet, with the entry its
+/// list shows meanwhile. A refusal shows the daemon's value again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Pending {
+    change: Change,
+    shown: Choice,
 }
 
 /// The status line.
@@ -86,6 +159,12 @@ pub struct Model {
     /// typing, not daemon state.
     pub park_input: String,
     pub sites_notice: Option<SitesNotice>,
+    /// In [`Runtime::ALL`] order.
+    pub runtimes: Vec<RuntimeRow>,
+    /// The last runtimes read or default change failed. A client error code.
+    pub runtimes_notice: Option<String>,
+    /// Oldest first.
+    pending: Vec<Pending>,
 }
 
 impl Model {
@@ -115,8 +194,137 @@ impl Model {
                 self.sites_notice = Some(SitesNotice::Parked(path));
             }
             Update::SitesFailed(code) => self.sites_notice = Some(SitesNotice::Failed(code)),
+            Update::Runtimes(list) => self.set_runtimes(list),
+            Update::RuntimesFailed(code) => self.runtimes_notice = Some(code),
+            Update::Saved(change) => self.settle(&change),
+            Update::NotSaved { change, code } => {
+                self.settle(&change);
+                match change {
+                    Change::Default { .. } => self.runtimes_notice = Some(code),
+                    Change::SitePhp { .. } => self.sites_notice = Some(SitesNotice::Failed(code)),
+                }
+            }
             Update::Event(event) => apply(self, event),
         }
+    }
+
+    /// The installed PHP versions, oldest first.
+    pub fn php_versions(&self) -> &[Version] {
+        self.row(Runtime::Php)
+            .map_or(&[], |row| row.installed.as_slice())
+    }
+
+    /// The entry a site's PHP list shows: the one the user just picked, the
+    /// version of the site's own setting, or [`Choice::Auto`].
+    pub fn site_choice(&self, site: &Site) -> Choice {
+        if let Some(shown) = self.pending_choice(Setting::SitePhp(&site.name)) {
+            return shown.clone();
+        }
+        match (&site.php_source, &site.php) {
+            (Some(Source::ProjectSetting), Some(version)) => Choice::Version(version.clone()),
+            _ => Choice::Auto,
+        }
+    }
+
+    /// The user picked `choice` in the PHP list of the site `name`. Returns
+    /// the change to send, or `None` if it is the entry shown already. The
+    /// list shows `choice` until the daemon answers.
+    pub fn choose_site_php(&mut self, name: &str, choice: Choice) -> Option<Change> {
+        let site = self.sites.sites.iter().find(|site| site.name == name)?;
+        if self.site_choice(site) == choice {
+            return None;
+        }
+        let php = match &choice {
+            Choice::Auto => None,
+            Choice::Version(version) => {
+                Some(version_text(Runtime::Php, version, self.php_versions()))
+            }
+        };
+        let change = Change::SitePhp {
+            site: name.to_owned(),
+            php,
+        };
+        // The notice was about the last action.
+        self.sites_notice = None;
+        self.pending.push(Pending {
+            change: change.clone(),
+            shown: choice,
+        });
+        Some(change)
+    }
+
+    /// The installed version the default of `runtime` picks now, or the one
+    /// the user just picked. `None` when there is no default, or it matches
+    /// no installed version.
+    pub fn default_choice(&self, runtime: Runtime) -> Option<Version> {
+        if let Some(Choice::Version(version)) = self.pending_choice(Setting::Default(runtime)) {
+            return Some(version.clone());
+        }
+        let row = self.row(runtime)?;
+        let text = row.default.as_deref()?;
+        resolver::best_match(text, &row.installed).ok().flatten()
+    }
+
+    /// The user picked `version` as the default of `runtime`. Returns the
+    /// change to send, or `None` if it is the default already.
+    pub fn choose_default(&mut self, runtime: Runtime, version: Version) -> Option<Change> {
+        if !has_default(runtime) || self.default_choice(runtime).as_ref() == Some(&version) {
+            return None;
+        }
+        let installed = self.row(runtime).map_or(&[][..], |row| &row.installed);
+        let change = Change::Default {
+            runtime,
+            version: version_text(runtime, &version, installed),
+        };
+        self.runtimes_notice = None;
+        self.pending.push(Pending {
+            change: change.clone(),
+            shown: Choice::Version(version),
+        });
+        Some(change)
+    }
+
+    fn row(&self, runtime: Runtime) -> Option<&RuntimeRow> {
+        self.runtimes.iter().find(|row| row.runtime == runtime)
+    }
+
+    /// What the newest unanswered change of `setting` shows, if any.
+    fn pending_choice(&self, setting: Setting<'_>) -> Option<&Choice> {
+        // Newest first: the user may pick again before the first answer.
+        self.pending
+            .iter()
+            .rev()
+            .find(|pending| pending.change.setting() == setting)
+            .map(|pending| &pending.shown)
+    }
+
+    /// The daemon answered `change`: its list shows the daemon's value again.
+    fn settle(&mut self, change: &Change) {
+        if let Some(index) = self.pending.iter().position(|p| p.change == *change) {
+            self.pending.remove(index);
+        }
+    }
+
+    /// Versions that are not semver are left out: the daemon lists only
+    /// folders named by a version.
+    fn set_runtimes(&mut self, list: RuntimeList) {
+        self.runtimes = list
+            .runtimes
+            .into_iter()
+            .map(|runtime| {
+                let mut installed: Vec<Version> = runtime
+                    .installed
+                    .iter()
+                    .filter_map(|text| text.parse().ok())
+                    .collect();
+                installed.sort();
+                RuntimeRow {
+                    runtime: runtime.runtime,
+                    installed,
+                    default: runtime.default,
+                }
+            })
+            .collect();
     }
 
     /// The folder to park from the park field, or `None` if the text is not
@@ -145,6 +353,9 @@ impl Model {
         self.connection = connection;
         self.services.clear();
         self.sites = SiteList::default();
+        self.runtimes.clear();
+        // No answer comes from a lost session.
+        self.pending.clear();
     }
 
     /// The daemon sends the sites sorted by name already; sorting here keeps
@@ -188,6 +399,15 @@ pub fn apply(model: &mut Model, event: Event) {
         Event::Install(_) => {}
         // The whole new list: no need to ask the daemon again.
         Event::SitesChanged(list) => model.set_sites(list),
+        Event::DefaultChanged(default) => {
+            let row = model
+                .runtimes
+                .iter_mut()
+                .find(|r| r.runtime == default.runtime);
+            if let Some(row) = row {
+                row.default = Some(default.default);
+            }
+        }
         // No setup button yet (task M4-13 adds the route and the CLI only).
         Event::SetupFinished(_) => {}
         Event::ShuttingDown => model.disconnect(Connection::ShuttingDown),
@@ -223,6 +443,27 @@ pub fn park_path(input: &str) -> Result<PathBuf, &'static str> {
     // Not `canonicalize`: it reads the disk, follows links, and gives `\\?\`
     // paths on Windows.
     Ok(path.components().collect())
+}
+
+/// Whether `runtime` has a default version. Composer and Caddy have none: the
+/// newest installed version is used.
+pub fn has_default(runtime: Runtime) -> bool {
+    matches!(runtime, Runtime::Php | Runtime::Node)
+}
+
+/// The text to save for `chosen`: its line (`8.4` for PHP, `22` for Node)
+/// when the line picks `chosen` now, so later patch releases follow, as with
+/// `marsa use 8.4` and the default set by the first install. Otherwise the
+/// full version, so an older patch release stays the one used.
+pub fn version_text(runtime: Runtime, chosen: &Version, installed: &[Version]) -> String {
+    let line = match runtime {
+        Runtime::Node => chosen.major.to_string(),
+        _ => format!("{}.{}", chosen.major, chosen.minor),
+    };
+    match resolver::best_match(&line, installed) {
+        Ok(Some(best)) if best == *chosen => line,
+        _ => chosen.to_string(),
+    }
 }
 
 /// Whether the button for `action` makes sense in `state`.
@@ -295,6 +536,7 @@ mod tests {
             root,
             kind: marsa_core::types::SiteKind::Laravel,
             php: None,
+            php_source: None,
             secure,
         }
     }
@@ -518,5 +760,286 @@ mod tests {
         assert_eq!(names(&model), ["shop"]);
         let failed = SitesNotice::Failed("site_not_found".into());
         assert_eq!(model.sites_notice, Some(failed));
+    }
+
+    // -- The PHP and Node lists (task M5-02) --
+
+    fn v(text: &str) -> Version {
+        text.parse().unwrap()
+    }
+
+    /// The daemon's runtimes list: PHP and Node with these versions and
+    /// defaults, Composer and Caddy with none.
+    fn runtime_list(php: (&[&str], Option<&str>), node: (&[&str], Option<&str>)) -> RuntimeList {
+        let row = |runtime, (installed, default): (&[&str], Option<&str>)| {
+            marsa_core::types::RuntimeVersions {
+                runtime,
+                installed: installed.iter().map(|t| (*t).to_owned()).collect(),
+                default: default.map(str::to_owned),
+            }
+        };
+        RuntimeList {
+            runtimes: vec![
+                row(Runtime::Php, php),
+                row(Runtime::Node, node),
+                row(Runtime::Composer, (&["2.8.3"], None)),
+                row(Runtime::Caddy, (&[], None)),
+            ],
+        }
+    }
+
+    fn php_site(name: &str, php: Option<&str>, source: Option<Source>) -> Site {
+        Site {
+            php: php.map(v),
+            php_source: source,
+            ..site(name, true)
+        }
+    }
+
+    /// Connected, with PHP 8.3.27 and 8.4.23 (default `8.4`), Node 22, and
+    /// these sites.
+    fn with_php(sites: Vec<Site>) -> Model {
+        let mut model = connected();
+        let php: &[&str] = &["8.4.23", "8.3.27"];
+        model.update(Update::Runtimes(runtime_list(
+            (php, Some("8.4")),
+            (&["22.11.0"], None),
+        )));
+        model.update(Update::Sites(SiteList {
+            sites,
+            ..SiteList::default()
+        }));
+        model
+    }
+
+    fn site_named<'a>(model: &'a Model, name: &str) -> &'a Site {
+        model.sites.sites.iter().find(|s| s.name == name).unwrap()
+    }
+
+    fn choice(model: &Model, name: &str) -> Choice {
+        model.site_choice(site_named(model, name))
+    }
+
+    fn site_php(site: &str, php: Option<&str>) -> Change {
+        Change::SitePhp {
+            site: site.into(),
+            php: php.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn the_runtimes_list_has_each_default() {
+        let model = with_php(Vec::new());
+        assert_eq!(model.php_versions(), [v("8.3.27"), v("8.4.23")]);
+        assert_eq!(model.default_choice(Runtime::Php), Some(v("8.4.23")));
+        // Node has no default yet; Composer never has one.
+        assert_eq!(model.default_choice(Runtime::Node), None);
+        assert_eq!(model.default_choice(Runtime::Composer), None);
+        assert!(has_default(Runtime::Node) && !has_default(Runtime::Caddy));
+
+        // A default that matches nothing installed picks nothing; its text
+        // stays for the window to show.
+        let mut model = connected();
+        model.update(Update::Runtimes(runtime_list(
+            (&["8.4.23"], Some("8.2")),
+            (&[], None),
+        )));
+        assert_eq!(model.default_choice(Runtime::Php), None);
+        assert_eq!(model.runtimes[0].default.as_deref(), Some("8.2"));
+    }
+
+    #[test]
+    fn picking_a_default_sends_its_line_and_shows_it_until_the_answer() {
+        let mut model = with_php(Vec::new());
+        let change = model.choose_default(Runtime::Php, v("8.3.27"));
+        let want = Change::Default {
+            runtime: Runtime::Php,
+            version: "8.3".into(),
+        };
+        assert_eq!(change, Some(want.clone()));
+        assert_eq!(model.default_choice(Runtime::Php), Some(v("8.3.27")));
+
+        // Saved: the daemon's value again, which its event has changed.
+        apply(&mut model, default_changed(Runtime::Php, "8.3", "8.3.27"));
+        model.update(Update::Saved(want));
+        assert_eq!(model.default_choice(Runtime::Php), Some(v("8.3.27")));
+        assert_eq!(model.runtimes[0].default.as_deref(), Some("8.3"));
+
+        // The default already, and a runtime with no default: nothing to send.
+        assert_eq!(model.choose_default(Runtime::Php, v("8.3.27")), None);
+        assert_eq!(model.choose_default(Runtime::Composer, v("2.8.3")), None);
+        // Node lines are majors.
+        let node = model.choose_default(Runtime::Node, v("22.11.0"));
+        let want = Change::Default {
+            runtime: Runtime::Node,
+            version: "22".into(),
+        };
+        assert_eq!(node, Some(want));
+    }
+
+    fn default_changed(runtime: Runtime, default: &str, version: &str) -> Event {
+        Event::DefaultChanged(marsa_core::types::DefaultVersion {
+            runtime,
+            default: default.into(),
+            version: version.into(),
+        })
+    }
+
+    #[test]
+    fn a_refused_default_goes_back_and_says_why() {
+        let mut model = with_php(Vec::new());
+        let change = model.choose_default(Runtime::Php, v("8.3.27")).unwrap();
+        let code = "version_not_installed".to_owned();
+        model.update(Update::NotSaved { change, code });
+        assert_eq!(model.default_choice(Runtime::Php), Some(v("8.4.23")));
+        assert_eq!(
+            model.runtimes_notice.as_deref(),
+            Some("version_not_installed")
+        );
+        // The next pick clears the notice.
+        model.choose_default(Runtime::Php, v("8.3.27"));
+        assert!(model.runtimes_notice.is_none());
+    }
+
+    #[test]
+    fn a_default_set_elsewhere_reaches_the_list() {
+        // `marsa use php 8.3` in a terminal.
+        let mut model = with_php(Vec::new());
+        apply(&mut model, default_changed(Runtime::Php, "8.3", "8.3.27"));
+        assert_eq!(model.default_choice(Runtime::Php), Some(v("8.3.27")));
+    }
+
+    #[test]
+    fn the_line_is_saved_only_when_it_picks_the_same_version() {
+        let installed = [v("8.3.27"), v("8.4.22"), v("8.4.23"), v("8.5.0-rc1")];
+        for (runtime, chosen, want) in [
+            (Runtime::Php, "8.4.23", "8.4"),
+            // An older patch release stays the one used.
+            (Runtime::Php, "8.4.22", "8.4.22"),
+            (Runtime::Php, "8.3.27", "8.3"),
+            // `8.5` never picks a pre-release.
+            (Runtime::Php, "8.5.0-rc1", "8.5.0-rc1"),
+        ] {
+            assert_eq!(
+                version_text(runtime, &v(chosen), &installed),
+                want,
+                "{chosen}"
+            );
+        }
+        let node = [v("20.18.0"), v("22.11.0")];
+        assert_eq!(version_text(Runtime::Node, &v("22.11.0"), &node), "22");
+    }
+
+    #[test]
+    fn a_site_that_follows_the_default_can_be_pinned() {
+        let shop = php_site("shop", Some("8.4.23"), Some(Source::GlobalDefault));
+        let mut model = with_php(vec![shop]);
+        assert_eq!(choice(&model, "shop"), Choice::Auto);
+        assert_eq!(model.choose_site_php("shop", Choice::Auto), None);
+
+        // The same version as the default is a pin too: the default may move.
+        let change = model.choose_site_php("shop", Choice::Version(v("8.4.23")));
+        assert_eq!(change, Some(site_php("shop", Some("8.4"))));
+        assert_eq!(choice(&model, "shop"), Choice::Version(v("8.4.23")));
+    }
+
+    #[test]
+    fn a_site_with_a_version_file_keeps_it_until_a_version_is_picked() {
+        let file = Source::VersionFile(PathBuf::from("/code/shop/.php-version"));
+        let shop = php_site("shop", Some("8.3.27"), Some(file));
+        let mut model = with_php(vec![shop]);
+        assert_eq!(choice(&model, "shop"), Choice::Auto);
+
+        let change = model.choose_site_php("shop", Choice::Version(v("8.4.23")));
+        assert_eq!(change.clone(), Some(site_php("shop", Some("8.4"))));
+        // Saved, and the new list says the site's own setting won.
+        let pinned = php_site("shop", Some("8.4.23"), Some(Source::ProjectSetting));
+        apply(
+            &mut model,
+            Event::SitesChanged(SiteList {
+                sites: vec![pinned],
+                ..SiteList::default()
+            }),
+        );
+        model.update(Update::Saved(change.unwrap()));
+        assert_eq!(choice(&model, "shop"), Choice::Version(v("8.4.23")));
+    }
+
+    #[test]
+    fn the_first_entry_clears_the_sites_own_setting() {
+        let shop = php_site("shop", Some("8.3.27"), Some(Source::ProjectSetting));
+        let mut model = with_php(vec![shop]);
+        assert_eq!(choice(&model, "shop"), Choice::Version(v("8.3.27")));
+        assert_eq!(
+            model.choose_site_php("shop", Choice::Version(v("8.3.27"))),
+            None
+        );
+
+        let change = model.choose_site_php("shop", Choice::Auto);
+        assert_eq!(change, Some(site_php("shop", None)));
+        assert_eq!(choice(&model, "shop"), Choice::Auto);
+        // No such site: nothing to send.
+        assert_eq!(model.choose_site_php("gone", Choice::Auto), None);
+    }
+
+    #[test]
+    fn a_refused_site_php_goes_back_and_says_why() {
+        let shop = php_site("shop", Some("8.4.23"), Some(Source::GlobalDefault));
+        let mut model = with_php(vec![shop]);
+        let change = model.choose_site_php("shop", Choice::Version(v("8.3.27")));
+        let code = "config_write".to_owned();
+        model.update(Update::NotSaved {
+            change: change.unwrap(),
+            code,
+        });
+        assert_eq!(choice(&model, "shop"), Choice::Auto);
+        let failed = SitesNotice::Failed("config_write".into());
+        assert_eq!(model.sites_notice, Some(failed));
+    }
+
+    #[test]
+    fn the_newest_pick_shows_until_its_own_answer() {
+        let shop = php_site("shop", Some("8.4.23"), Some(Source::GlobalDefault));
+        let mut model = with_php(vec![shop]);
+        let first = model.choose_site_php("shop", Choice::Version(v("8.3.27")));
+        let second = model.choose_site_php("shop", Choice::Auto);
+        assert_eq!(second, Some(site_php("shop", None)));
+        // The first answer does not hide the second pick.
+        model.update(Update::Saved(first.unwrap()));
+        assert_eq!(choice(&model, "shop"), Choice::Auto);
+    }
+
+    #[test]
+    fn a_sites_event_moves_the_lists_without_a_reload() {
+        let shop = php_site("shop", Some("8.4.23"), Some(Source::GlobalDefault));
+        let mut model = with_php(vec![shop]);
+        // `marsa` pinned it in a terminal.
+        let pinned = php_site("shop", Some("8.3.27"), Some(Source::ProjectSetting));
+        apply(
+            &mut model,
+            Event::SitesChanged(SiteList {
+                sites: vec![pinned],
+                ..SiteList::default()
+            }),
+        );
+        assert_eq!(choice(&model, "shop"), Choice::Version(v("8.3.27")));
+    }
+
+    #[test]
+    fn a_lost_session_drops_the_runtimes_and_the_picks() {
+        let shop = php_site("shop", Some("8.4.23"), Some(Source::GlobalDefault));
+        let mut model = with_php(vec![shop.clone()]);
+        model.choose_site_php("shop", Choice::Version(v("8.3.27")));
+        model.update(Update::Reconnecting);
+        assert!(model.runtimes.is_empty() && model.php_versions().is_empty());
+        // The pick was not saved: the old value shows with the new session.
+        model.update(Update::Connected(health()));
+        model.update(Update::Sites(SiteList {
+            sites: vec![shop],
+            ..SiteList::default()
+        }));
+        assert_eq!(choice(&model, "shop"), Choice::Auto);
+        model.update(Update::RuntimesFailed("runtimes_read".into()));
+        assert_eq!(model.runtimes_notice.as_deref(), Some("runtimes_read"));
     }
 }

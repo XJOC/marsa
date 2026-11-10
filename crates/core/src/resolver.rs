@@ -21,6 +21,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use semver::{Prerelease, Version};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use toml::de::DeTable;
 
@@ -89,7 +90,11 @@ impl fmt::Display for Tool {
 }
 
 /// Where the chosen version came from, so the UI can explain the choice.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// In JSON (`Site::php_source`): `{ "type": "version_file", "path": "..." }`,
+/// or `{ "type": "global_default" }` for a variant with no path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "path", rename_all = "snake_case")]
 pub enum Source {
     /// The project setting stored by Marsa (`sites.toml`).
     ProjectSetting,

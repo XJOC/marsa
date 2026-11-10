@@ -1107,6 +1107,7 @@ mod tests {
             root,
             kind: SiteKind::Static,
             php: None,
+            php_source: None,
             secure: true,
         }
     }

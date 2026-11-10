@@ -29,7 +29,7 @@ use marsa_core::types::{
     API_VERSION, DefaultVersion, ErrorBody, Event, Health, InstallAccepted, InstallRequest,
     LinkRequest, LogLine, LogStream, OpResult, OpStatus, ParkRequest, RuntimeList, RuntimeVersions,
     ServiceAction, ServiceState, ServiceStatus, SetupReport, SetupSkip, Site, SiteKind, SiteList,
-    SitePatch, SkippedFolder,
+    SitePatch, SkippedFolder, Source,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -501,6 +501,7 @@ async fn runtimes_and_install_are_called() {
         runtimes: vec![RuntimeVersions {
             runtime: Runtime::Php,
             installed: vec!["8.4.23".into()],
+            default: Some("8.4".into()),
         }],
     };
     let bodies = Arc::new(Mutex::new(Vec::new()));
@@ -692,6 +693,7 @@ fn site_list(parked: &str) -> SiteList {
             root,
             kind: SiteKind::Laravel,
             php: Some(semver::Version::new(8, 4, 23)),
+            php_source: Some(Source::GlobalDefault),
             secure: false,
         }],
         skipped: vec![SkippedFolder {
