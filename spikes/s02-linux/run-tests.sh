@@ -125,6 +125,8 @@ start_dns() {
 }
 stop_dns() { kill "$DNS_PID" 2>/dev/null; wait "$DNS_PID" 2>/dev/null; }
 restart_resolved() {
+  # Many restarts in a row hit the unit's start limit (seen on Fedora).
+  sudo systemctl reset-failed systemd-resolved 2>/dev/null
   run sudo systemctl restart systemd-resolved
   local i
   for i in 1 2 3 4 5 6 7 8 9 10; do
@@ -188,7 +190,9 @@ for i in 1 2 3 4 5 6; do
 done
 run resolvectl query "$SITE"
 run resolvectl status
+run resolvectl dns
 result T2b "with DNS=1.1.1.1 also global: $SITE resolved" "$ok of 6 tries"
+result T2b "resolvectl dns, global line" "$(resolvectl dns | head -1)"
 run sudo rm /etc/systemd/resolved.conf.d/00-user.conf
 restart_resolved
 
@@ -206,6 +210,17 @@ if [ "$SYSTEMD" -ge 258 ]; then
   leaked=$(($(grep -c ' other ' "$QUERY_LOG") - before))
   result T2c "delegate: $SITE" "$(resolvectl query "$SITE" 2>&1 | head -1 | tr -s ' ')"
   result T2c "delegate: queries outside .test at our server" "$leaked"
+  printf '[Resolve]\nDNS=1.1.1.1\n' | sudo tee /etc/systemd/resolved.conf.d/00-user.conf
+  restart_resolved
+  ok=0
+  for i in 1 2 3 4 5 6; do
+    sudo resolvectl flush-caches
+    resolvectl query "$SITE" >/dev/null 2>&1 && ok=$((ok + 1))
+    resolvectl query "example.com" >/dev/null 2>&1
+  done
+  run resolvectl status
+  result T2d "delegate, with DNS=1.1.1.1 also global: $SITE resolved" "$ok of 6 tries"
+  run sudo rm /etc/systemd/resolved.conf.d/00-user.conf
   run sudo rm /etc/systemd/dns-delegate.d/marsa.dns-delegate
   printf '# Managed by Marsa. Do not edit.\n[Resolve]\nDNS=127.0.0.1:%s\nDomains=~test\n' "$DNS_PORT" | sudo tee "$DROPIN"
   restart_resolved
@@ -365,6 +380,7 @@ if [ -n "$CADDY_PID" ]; then
   echo
   body=$(curl -sS --max-time 10 "https://$SITE/" 2>&1)
   result T8 "curl https://$SITE with the system store" "exit $curl_rc, body: $body"
+  result T8 "address and connect time of that curl" "$(curl -sS -o /dev/null --max-time 10 -w '%{remote_ip} in %{time_connect} s' "https://$SITE/" 2>&1)"
   run curl -s -o /dev/null --max-time 10 -w '%{http_code} %{redirect_url}\n' "http://$SITE/"
   result T8 "curl http://$SITE" "$(curl -s -o /dev/null --max-time 10 -w '%{http_code} -> %{redirect_url}' "http://$SITE/")"
   run python3 -c "import urllib.request; print(urllib.request.urlopen('https://$SITE/', timeout=10).read())"
@@ -508,6 +524,11 @@ result T7 "bind 127.0.0.1:80 after the reset to 1024" "$(bind_probe 127.0.0.1 80
 echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/60-marsa.conf
 run sudo sysctl -p /etc/sysctl.d/60-marsa.conf
 result T7 "sysctl -p <our file>" "exit $?, value $(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
+# What a boot does: systemd-sysctl reads /etc/sysctl.d again.
+run sudo sysctl -w net.ipv4.ip_unprivileged_port_start=1024
+run sudo systemctl restart systemd-sysctl
+result T7 "our file after systemd-sysctl runs again (as at boot)" "value $(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
+run grep -rs ip_unprivileged_port_start /etc/sysctl.conf /etc/sysctl.d /usr/lib/sysctl.d /run/sysctl.d
 run sudo rm /etc/sysctl.d/60-marsa.conf
 run sudo sysctl -w net.ipv4.ip_unprivileged_port_start=1024
 
@@ -530,7 +551,9 @@ echo "--- no rule"
 run timeout 30 "$PKEXEC" /usr/bin/id -u </dev/null
 result T10 "pkexec without a rule, no agent, no terminal" "exit $? (124 = it waited 30 s)"
 ME=$(id -un)
-if [ -d /etc/polkit-1/localauthority/50-local.d ] && [ "${POLKIT%%.*}" = 0 ]; then
+if [ "${POLKIT%%.*}" = 0 ]; then
+  # polkit 0.105 (Ubuntu 22.04) has no JavaScript rules: it reads .pkla files.
+  sudo mkdir -p /etc/polkit-1/localauthority/50-local.d
   RULE=/etc/polkit-1/localauthority/50-local.d/marsa-ci.pkla
   printf '[Marsa CI: %s may use pkexec]\nIdentity=unix-user:%s\nAction=org.freedesktop.policykit.exec\nResultAny=yes\nResultInactive=yes\nResultActive=yes\n' "$ME" "$ME" | sudo tee "$RULE"
 else

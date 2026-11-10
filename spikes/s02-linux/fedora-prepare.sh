@@ -18,5 +18,8 @@ resolvectl default-route "$link" yes
 # change: resolved skips its own stub address when it reads the file.
 printf 'nameserver 127.0.0.53\noptions edns0 trust-ad\n' >/etc/resolv.conf
 
+# Docker sets this to 0 in a container. A real Fedora has 1024.
+sysctl -w net.ipv4.ip_unprivileged_port_start=1024
+
 resolvectl status
 getent hosts example.com
