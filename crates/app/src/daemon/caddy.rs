@@ -398,7 +398,7 @@ impl CaddyManager {
             }
         };
         // ADR 0009: stop our own orphan; touch nothing that is not ours.
-        let pid_file = PidFile::new(&daemon.data_dir, &spec.program);
+        let pid_file = PidFile::new(&daemon.data_dir, &self.our_programs(&spec.program));
         {
             let orphans = self.orphans(&pid_file, admin, &tag);
             if let Some(found) = orphans.inspect().await {
@@ -518,6 +518,22 @@ impl CaddyManager {
         true
     }
 
+    /// The Caddy programs an orphan of this data folder may run: `program`
+    /// (the one this start uses) and every installed version, because an
+    /// orphan left by a crash may be older than the newest version (ADR 0009).
+    /// A failure to list the versions leaves only `program`: fewer paths
+    /// means fewer processes that can ever be signalled.
+    fn our_programs(&self, program: &Path) -> Vec<PathBuf> {
+        let mut programs = self.paths.installed_programs().unwrap_or_else(|err| {
+            warn!(%err, "cannot list the installed Caddy versions");
+            Vec::new()
+        });
+        if !programs.iter().any(|known| known == program) {
+            programs.push(program.to_path_buf());
+        }
+        programs
+    }
+
     /// Stops our orphan from a crashed daemon, and nothing else: a conflict
     /// or another Marsa's Caddy is left alone, and so is a stale pid file.
     /// `false` when the orphan would not stop.
@@ -538,7 +554,7 @@ impl CaddyManager {
                 return true;
             }
         };
-        let pid_file = PidFile::new(&daemon.data_dir, &program);
+        let pid_file = PidFile::new(&daemon.data_dir, &self.our_programs(&program));
         let orphans = self.orphans(&pid_file, admin, &tag);
         let Some(found) = orphans.inspect().await else {
             return true;

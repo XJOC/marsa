@@ -118,14 +118,23 @@ pub(super) struct PidFile {
 }
 
 impl PidFile {
-    pub(super) fn new(data_dir: &Path, program: &Path) -> Self {
-        let mut accepted = vec![program.to_path_buf()];
-        // `lsof` reports the path with links resolved. Only compared, never
-        // passed to a program (architecture.md section 10).
-        if let Ok(real) = std::fs::canonicalize(program)
-            && real != program
-        {
-            accepted.push(real);
+    /// `programs`: every Caddy of this data folder that may still run, so
+    /// the one about to start and each installed version (an orphan may be
+    /// an older version than the newest). Nothing outside this list is ever
+    /// signalled.
+    pub(super) fn new(data_dir: &Path, programs: &[PathBuf]) -> Self {
+        let mut accepted = Vec::new();
+        for program in programs {
+            if !accepted.contains(program) {
+                accepted.push(program.clone());
+            }
+            // `lsof` reports the path with links resolved. Only compared,
+            // never passed to a program (architecture.md section 10).
+            if let Ok(real) = std::fs::canonicalize(program)
+                && !accepted.contains(&real)
+            {
+                accepted.push(real);
+            }
         }
         Self {
             path: data_dir.join("run").join("caddy.pid"),
@@ -623,9 +632,36 @@ mod tests {
         admin: Admin,
     }
 
+    /// An orphan of an older installed Caddy is ours; the same file at a
+    /// path outside the list (another data folder's Caddy) never is.
+    #[tokio::test]
+    async fn every_listed_version_is_ours_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = PathBuf::from("/data/runtimes/caddy/2.11.7/caddy");
+        let new = PathBuf::from("/data/runtimes/caddy/2.11.8/caddy");
+        let other = PathBuf::from("/other/runtimes/caddy/2.11.7/caddy");
+        let pid_file = PidFile::new(dir.path(), &[old.clone(), new.clone(), old.clone()]);
+        assert_eq!(pid_file.accepted, [old.clone(), new]);
+
+        for (exe, ours) in [(old, true), (other, false)] {
+            let record = PidRecord {
+                pid: 4242,
+                exe: exe.clone(),
+                started: STARTED.into(),
+            };
+            let fake = Fake::new([Liveness::Alive {
+                exe,
+                started: STARTED.into(),
+            }]);
+            let state = pid_file.check(&record, &fake).await;
+            assert_eq!(state == PidfileState::Ours { pid: 4242 }, ours, "{state:?}");
+            assert!(fake.signals().is_empty());
+        }
+    }
+
     fn setup() -> (Setup, TcpListener) {
         let dir = tempfile::tempdir().unwrap();
-        let pid_file = PidFile::new(dir.path(), Path::new(PROGRAM));
+        let pid_file = PidFile::new(dir.path(), &[PathBuf::from(PROGRAM)]);
         let record = PidRecord {
             pid: 4242,
             exe: PathBuf::from(PROGRAM),
