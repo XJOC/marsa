@@ -1,0 +1,238 @@
+name: release
+
+# Builds Marsa itself (the runtimes have php-build.yml): one archive per
+# platform with marsa, marsad, marsa-shim, marsa-helper, marsa-gui (and
+# marsa-tray once it exists), LICENSE, and BUILD-INFO.txt. The macOS programs
+# are ad-hoc signed (ADR 0004).
+#
+# - push to a task branch that changes this workflow or tools/release/: build,
+#   pack, and test the five platforms; the archives are workflow artifacts
+#   (14 days). No release.
+# - workflow_dispatch: the same; with `release` on (main only), also a DRAFT,
+#   pre-release GitHub Release v<version> with the five archives and
+#   SHA256SUMS. The owner signs SHA256SUMS with minisign on their own machine,
+#   uploads SHA256SUMS.minisig, reads the draft, and publishes it. The minisign
+#   key never enters CI, and this workflow never publishes.
+
+on:
+  push:
+    branches: ["task/**"]
+    paths:
+      - ".github/workflows/release.yml"
+      - "tools/release/**"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Marsa version, as in Cargo.toml (0.1.0-alpha.1). A release needs it"
+        type: string
+        default: ""
+      release:
+        description: "Create a DRAFT release v<version> with the archives (main only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# A new push cancels the older run. A manual run is never cancelled.
+concurrency:
+  group: release-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: check the inputs
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      # Inputs reach the scripts as variables, never as text inside a script.
+      INPUT_VERSION: ${{ inputs.version }}
+      RELEASE: ${{ inputs.release }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: shellcheck
+        run: shellcheck -x tools/release/*.sh
+
+      # The version is the one Cargo builds into `marsa --version`. The input
+      # only confirms it: nobody releases a version by accident.
+      - name: Read the version from Cargo.toml and check the input
+        id: version
+        run: |
+          rustup toolchain install --profile minimal
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "marsa") | .version')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::the marsa version in Cargo.toml is '$version': this workflow cannot release it"; exit 1; }
+          if [ -n "$INPUT_VERSION" ] && [ "$INPUT_VERSION" != "$version" ]; then
+            echo "::error::the version input is '$INPUT_VERSION', but Cargo.toml says $version: change Cargo.toml in a pull request first"; exit 1
+          fi
+          if [ "$RELEASE" = true ] && [ -z "$INPUT_VERSION" ]; then
+            echo "::error::a release needs the version input, typed in full ($version)"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Marsa $version from $GITHUB_REF ($GITHUB_SHA), release: ${RELEASE:-false}"
+
+      # Before five builds, not after them. The release job asks again.
+      - name: A release is made from main only, with a new tag
+        if: github.event_name == 'workflow_dispatch' && inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: bash tools/release/guard.sh
+
+  build:
+    name: build (${{ matrix.platform }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            os: macos-15
+            triple: aarch64-apple-darwin
+          - platform: darwin-x64
+            os: macos-15-intel
+            triple: x86_64-apple-darwin
+          # Ubuntu 22.04 is the system CI tests on, so its glibc (2.35) is the
+          # oldest these programs are known to run on. BUILD-INFO.txt records
+          # the glibc they really ask for.
+          - platform: linux-x64
+            os: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+          - platform: linux-arm64
+            os: ubuntu-22.04-arm
+            triple: aarch64-unknown-linux-gnu
+          - platform: windows-x64
+            os: windows-latest
+            triple: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      PLATFORM: ${{ matrix.platform }}
+      TRIPLE: ${{ matrix.triple }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # No build cache, on purpose: a release is built from the sources alone.
+      - name: Install the pinned Rust toolchain
+        run: |
+          if ! command -v rustup > /dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          # Reads the version from rust-toolchain.toml.
+          rustup toolchain install --profile minimal
+          rustup target add "$TRIPLE"
+          # Outside the checkout, with / on Windows too. (The runner context is
+          # not allowed in job env.)
+          echo "OUT=${RUNNER_TEMP//\\//}/release" >> "$GITHUB_ENV"
+
+      # tray-icon and tao (marsa-tray, task M5-04) link GTK 3, libxdo, and
+      # AppIndicator on Linux. Nothing else in the workspace needs them.
+      - name: Install the Linux build packages of the tray icon
+        if: runner.os == 'Linux'
+        run: |
+          if grep -qx 'name = "tray-icon"' Cargo.lock; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libgtk-3-dev libxdo-dev libayatana-appindicator3-dev
+          else
+            echo "tray-icon is not in Cargo.lock: nothing to install"
+          fi
+
+      - name: Build marsa, marsad, marsa-helper, and marsa-gui
+        run: cargo build --release --locked --target "$TRIPLE" -p marsa -p marsa-helper -p marsa-gui
+
+      # Alone: built with the others, feature unification would turn on `full`
+      # in marsa-core and drag tokio into the shim (architecture.md section 3).
+      - name: Build marsa-shim
+        run: cargo build --release --locked --target "$TRIPLE" -p marsa-shim
+
+      - name: Package (and ad-hoc sign on macOS)
+        run: bash tools/release/package.sh
+
+      # On the archive as it ships, unpacked in a new folder.
+      - name: Smoke tests
+        run: bash tools/release/smoke.sh
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## $PLATFORM: Marsa $VERSION"
+            echo
+            if [ -f "$OUT/smoke-status.txt" ]; then echo "Smoke tests: $(cat "$OUT/smoke-status.txt")"; echo; fi
+            if [ -f "$OUT/smoke.md" ]; then cat "$OUT/smoke.md"; echo; fi
+            for f in "$OUT/dist/"*.sha256 "$OUT/pkg/BUILD-INFO.txt"; do
+              if [ -f "$f" ]; then echo '```'; cat "$f"; echo '```'; fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: marsa-${{ matrix.platform }}
+          path: ${{ runner.temp }}/release/dist/
+          retention-days: 14
+          if-no-files-found: error
+
+  release:
+    name: draft release
+    needs: [check, build]
+    if: github.event_name == 'workflow_dispatch' && inputs.release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.check.outputs.version }}
+      TAG: v${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Again, now with write access: only that sees an older draft.
+      - name: A release is made from main only, with a new tag
+        run: bash tools/release/guard.sh
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: marsa-*
+          path: ${{ runner.temp }}/dist
+          merge-multiple: true
+
+      - name: Check the archives, write SHA256SUMS and the notes
+        run: bash tools/release/collect.sh "$RUNNER_TEMP/dist" "$RUNNER_TEMP/notes.md"
+
+      - name: Create the draft release
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --draft --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "Marsa $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
+            "$RUNNER_TEMP"/dist/*
+          {
+            echo "## Draft release $TAG created"
+            echo
+            echo "It is not public yet. On the owner's machine:"
+            echo
+            echo '```sh'
+            echo "gh release download $TAG --repo $GITHUB_REPOSITORY --pattern SHA256SUMS"
+            echo "minisign -S -s ~/.minisign/marsa-runtimes.key -m SHA256SUMS -t \"marsa release $TAG\""
+            echo "gh release upload $TAG --repo $GITHUB_REPOSITORY SHA256SUMS.minisig"
+            echo '```'
+            echo
+            echo "Then read the draft and publish it on GitHub."
+          } >> "$GITHUB_STEP_SUMMARY"
