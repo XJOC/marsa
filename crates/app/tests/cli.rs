@@ -345,11 +345,10 @@ fn daemon_start_status_services_and_stop() {
         "",
     );
 
-    let program = CaddyPaths::in_dir(data.path()).program;
+    let caddy = CaddyPaths::in_dir(data.path()).runtime_dir();
     let not_installed = format!(
-        "Caddy is not installed: there is no program at {}. Put the caddy program there, \
-         then try again.",
-        program.display()
+        "Caddy is not installed in {}. Run \"marsa install caddy\", then try again.",
+        caddy.display()
     );
     data.expect(
         &["services", "start", "caddy"],

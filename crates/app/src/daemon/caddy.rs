@@ -1,8 +1,9 @@
 //! Starts Caddy through the supervisor and talks to its admin API. Task M3-07.
 //!
 //! `marsa_core::caddy` builds the config as data. This module writes it to
-//! `caddy/caddy.json`, runs `bin/caddy run --config caddy/caddy.json` under
-//! the supervisor, and waits until the admin API answers. Like a Laravel job
+//! `caddy/caddy.json`, runs the newest installed Caddy
+//! (`runtimes/caddy/<version>/caddy run --config caddy/caddy.json`) under the
+//! supervisor, and waits until the admin API answers. Like a Laravel job
 //! that starts a queue worker, then checks that it is healthy.
 //!
 //! Before each start, [`orphan`] stops a Caddy that a crashed daemon left
@@ -75,12 +76,23 @@ const PORT_IN_USE: [&str; 2] = [
     "only one usage of each socket address",
 ];
 
-/// How the supervisor runs Caddy: `bin/caddy run --config caddy/caddy.json`,
-/// with Caddy's own data inside `caddy/`.
-pub fn caddy_spec(paths: &CaddyPaths) -> ServiceSpec {
+/// How the supervisor runs Caddy: the newest installed Caddy
+/// ([`CaddyPaths::program`]) with `run --config caddy/caddy.json`, and
+/// Caddy's own data inside `caddy/`.
+///
+/// # Errors
+///
+/// The error of [`CaddyPaths::program`]: `caddy_not_installed` when
+/// `runtimes/caddy` has no version.
+pub fn caddy_spec(paths: &CaddyPaths) -> Result<ServiceSpec, CaddyError> {
+    Ok(caddy_spec_for(paths, paths.program()?))
+}
+
+/// [`caddy_spec`] with `program` as Caddy. Tests run a fake this way.
+pub fn caddy_spec_for(paths: &CaddyPaths, program: PathBuf) -> ServiceSpec {
     ServiceSpec {
         id: CADDY_ID.to_owned(),
-        program: paths.program.clone(),
+        program,
         // `to_string_lossy` as in `caddy_env`: the app data dir comes from the
         // OS and is valid Unicode in practice.
         args: vec![
@@ -98,7 +110,12 @@ pub fn caddy_spec(paths: &CaddyPaths) -> ServiceSpec {
 /// Why a service action failed. The route turns it into an `ErrorBody`.
 #[derive(Debug)]
 pub enum ActionError {
-    /// No program at `bin/caddy`. In M3 the owner puts it there by hand.
+    /// [`CaddyPaths::program`] found no Caddy to run: no version in
+    /// `runtimes/caddy`, or, rarely, no Caddy for this system or a broken
+    /// recipe.
+    NoCaddy(CaddyError),
+    /// The program to run is not a file: a version folder without its
+    /// `caddy`.
     NotInstalled(PathBuf),
     /// Another action on the service has not finished.
     Busy,
@@ -108,10 +125,12 @@ pub enum ActionError {
 }
 
 impl ActionError {
-    /// Stable error name for the UI.
+    /// Stable error name for the UI. Every [`ActionError::NoCaddy`] is
+    /// `caddy_not_installed`, the code the CLI and GUI know, with
+    /// `marsa install caddy` as the fix; its text keeps the exact reason.
     pub fn code(&self) -> &'static str {
         match self {
-            ActionError::NotInstalled(_) => "caddy_not_installed",
+            ActionError::NoCaddy(_) | ActionError::NotInstalled(_) => "caddy_not_installed",
             ActionError::Busy => "service_busy",
             ActionError::ConfigWrite(_) => "caddy_config_write",
             ActionError::ProgramNotAbsolute(err) => err.code(),
@@ -122,6 +141,7 @@ impl ActionError {
 impl fmt::Display for ActionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ActionError::NoCaddy(err) => err.fmt(f),
             ActionError::NotInstalled(path) => write!(f, "no Caddy at {}", path.display()),
             ActionError::Busy => f.write_str("another action on this service is running"),
             ActionError::ConfigWrite(err) => write!(f, "cannot write caddy.json: {err}"),
@@ -137,8 +157,10 @@ pub struct CaddyManager {
     pub paths: CaddyPaths,
     /// The ports in `caddy.json`. `start` and `stop` call the admin port.
     pub input: CaddyInput,
-    /// How Caddy runs: [`caddy_spec`]. Tests put a fake program here.
-    pub spec: ServiceSpec,
+    /// How Caddy runs. `None`, the default: [`caddy_spec`], built again at
+    /// each start, so the newest Caddy installed runs, also one installed
+    /// while `marsad` runs. Tests put a fake program here.
+    pub spec: Option<ServiceSpec>,
     /// How long `start` waits for the admin API.
     pub ready_limit: Duration,
     /// Who runs under a pid, and signals, for the orphan check. Tests put a
@@ -236,10 +258,9 @@ impl fmt::Display for LoadError {
 impl CaddyManager {
     /// Caddy in `data_dir`, on Marsa's ports. Nothing is read or started.
     pub fn new(data_dir: &Path) -> Self {
-        let paths = CaddyPaths::in_dir(data_dir);
         Self {
-            spec: caddy_spec(&paths),
-            paths,
+            paths: CaddyPaths::in_dir(data_dir),
+            spec: None,
             input: CaddyInput::default(),
             ready_limit: READY_LIMIT,
             processes: Arc::new(SystemProcesses),
@@ -298,6 +319,14 @@ impl CaddyManager {
         Ok(config)
     }
 
+    /// The spec to run now: the fake of a test, else [`caddy_spec`].
+    fn spec_to_run(&self) -> Result<ServiceSpec, CaddyError> {
+        match &self.spec {
+            Some(spec) => Ok(spec.clone()),
+            None => caddy_spec(&self.paths),
+        }
+    }
+
     pub fn status(&self) -> ServiceStatus {
         lock(&self.runtime).status.clone()
     }
@@ -348,10 +377,18 @@ impl CaddyManager {
             return Ok(());
         }
         // No task runs from here on, so these writes cannot race the supervisor.
-        if !self.spec.program.is_file() {
-            self.fail("caddy_not_installed", &daemon.events);
-            return Err(ActionError::NotInstalled(self.spec.program.clone()));
-        }
+        let spec = match self.spec_to_run() {
+            Ok(spec) if spec.program.is_file() => spec,
+            Ok(spec) => {
+                self.fail("caddy_not_installed", &daemon.events);
+                return Err(ActionError::NotInstalled(spec.program));
+            }
+            Err(err) => {
+                warn!(code = err.code(), %err, "no caddy to run");
+                self.fail("caddy_not_installed", &daemon.events);
+                return Err(ActionError::NoCaddy(err));
+            }
+        };
         // The tag goes into `caddy.json`, and the check below looks for it.
         let tag = match self.instance_tag() {
             Ok(tag) => tag,
@@ -361,7 +398,7 @@ impl CaddyManager {
             }
         };
         // ADR 0009: stop our own orphan; touch nothing that is not ours.
-        let pid_file = PidFile::new(&daemon.data_dir, &self.spec.program);
+        let pid_file = PidFile::new(&daemon.data_dir, &spec.program);
         {
             let orphans = self.orphans(&pid_file, admin, &tag);
             if let Some(found) = orphans.inspect().await {
@@ -394,7 +431,7 @@ impl CaddyManager {
         let first_seq = self.recent_logs().last().map_or(0, |line| line.seq + 1);
         let spec = ServiceSpec {
             id: CADDY_ID.to_owned(),
-            ..self.spec.clone()
+            ..spec
         };
         let logs_dir = daemon.data_dir.join("logs");
         let runtime = Arc::clone(&self.runtime);
@@ -487,9 +524,13 @@ impl CaddyManager {
     async fn stop_orphan(&self, daemon: &Daemon, admin: &Admin) -> bool {
         // No check on this OS, so no instance id file either. Without the
         // program there is no Caddy of ours to recognize.
-        if !process::ORPHAN_RECOVERY || !self.spec.program.is_file() {
+        if !process::ORPHAN_RECOVERY {
             return true;
         }
+        let program = match self.spec_to_run() {
+            Ok(spec) if spec.program.is_file() => spec.program,
+            _ => return true,
+        };
         let tag = match self.instance_tag() {
             Ok(tag) => tag,
             Err(err) => {
@@ -497,7 +538,7 @@ impl CaddyManager {
                 return true;
             }
         };
-        let pid_file = PidFile::new(&daemon.data_dir, &self.spec.program);
+        let pid_file = PidFile::new(&daemon.data_dir, &program);
         let orphans = self.orphans(&pid_file, admin, &tag);
         let Some(found) = orphans.inspect().await else {
             return true;
@@ -865,12 +906,16 @@ mod tests {
     }
 
     #[test]
-    fn caddy_spec_runs_bin_caddy_with_the_config() {
+    fn caddy_spec_runs_the_newest_caddy_with_the_config() {
         let dir = tempfile::tempdir().unwrap();
+        let caddy = dir.path().join("runtimes").join("caddy");
+        for version in ["2.11.8", "2.11.10", "2.11.9"] {
+            std::fs::create_dir_all(caddy.join(version)).unwrap();
+        }
         let paths = CaddyPaths::in_dir(dir.path());
-        let spec = caddy_spec(&paths);
+        let spec = caddy_spec(&paths).unwrap();
 
-        let program = dir.path().join("bin").join(format!("caddy{EXE_SUFFIX}"));
+        let program = caddy.join("2.11.10").join(format!("caddy{EXE_SUFFIX}"));
         assert_eq!(spec.program, program);
         assert!(spec.program.is_absolute());
         let config = dir.path().join("caddy").join("caddy.json");
@@ -887,6 +932,26 @@ mod tests {
         assert_eq!(spec.restart, restart);
         assert_eq!(RESTART, restart);
         assert_eq!(spec.stop_grace, Duration::from_secs(2));
+        assert_eq!(caddy_spec_for(&paths, program), spec);
+    }
+
+    #[test]
+    fn caddy_spec_without_caddy_is_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = CaddyPaths::in_dir(dir.path());
+
+        let err = caddy_spec(&paths).unwrap_err();
+        assert_eq!(err.code(), "caddy_not_installed");
+        // Every reason for no Caddy is the code the CLI and GUI know.
+        for err in [
+            err,
+            CaddyError::UnsupportedPlatform,
+            CaddyError::RecipeInvalid { reason: "x".into() },
+        ] {
+            assert_eq!(ActionError::NoCaddy(err).code(), "caddy_not_installed");
+        }
+        let missing = ActionError::NotInstalled(paths.runtime_dir().join("2.11.8"));
+        assert_eq!(missing.code(), "caddy_not_installed");
     }
 
     #[test]
