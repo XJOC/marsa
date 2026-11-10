@@ -768,10 +768,7 @@ mod tests {
                 caddy_in(dir.path(), "2.11.10"),
             ]
         );
-        assert_eq!(
-            paths.program().as_ref(),
-            all.last().ok_or(&CaddyError::UnsupportedPlatform)
-        );
+        assert_eq!(paths.program().ok().as_ref(), all.last());
     }
 
     #[test]

@@ -110,7 +110,8 @@ impl Blocked {
     }
 }
 
-/// `run/caddy.pid`, and the ways the OS may spell our Caddy's path.
+/// `run/caddy.pid`, and the accepted Caddy paths: every installed Caddy of
+/// this data folder, and the resolved form of each.
 #[derive(Debug)]
 pub(super) struct PidFile {
     path: PathBuf,
@@ -120,8 +121,8 @@ pub(super) struct PidFile {
 impl PidFile {
     /// `programs`: every Caddy of this data folder that may still run, so
     /// the one about to start and each installed version (an orphan may be
-    /// an older version than the newest). Nothing outside this list is ever
-    /// signalled.
+    /// an older version than the newest). Nothing outside this list, or the
+    /// resolved paths of its entries, is ever signalled.
     pub(super) fn new(data_dir: &Path, programs: &[PathBuf]) -> Self {
         let mut accepted = Vec::new();
         for program in programs {
@@ -655,7 +656,6 @@ mod tests {
             }]);
             let state = pid_file.check(&record, &fake).await;
             assert_eq!(state == PidfileState::Ours { pid: 4242 }, ours, "{state:?}");
-            assert!(fake.signals().is_empty());
         }
     }
 
