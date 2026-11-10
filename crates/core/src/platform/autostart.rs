@@ -715,8 +715,15 @@ mod tests {
         fs::write(&file, "").unwrap();
         let err = write(XdgAutostart, &file, tray).unwrap_err();
         assert_eq!(err.code(), "autostart_write", "{err}");
-        let err = remove(XdgAutostart, &file).unwrap_err();
-        assert_eq!(err.code(), "autostart_write", "{err}");
+        // Unix answers "not a directory". Windows answers "not found", which
+        // `remove` rightly treats as already removed.
+        let removed = remove(XdgAutostart, &file);
+        if cfg!(unix) {
+            let err = removed.unwrap_err();
+            assert_eq!(err.code(), "autostart_write", "{err}");
+        } else {
+            removed.unwrap();
+        }
 
         // The login file is a folder: the rename fails, and the temp file goes.
         let target = dir.path().join("autostart");
