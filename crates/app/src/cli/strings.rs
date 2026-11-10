@@ -403,6 +403,29 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              Run \"marsa setup\" again; if it repeats, report it."
             .into(),
 
+        // `marsa autostart`: the autostart route (task M5-03).
+        "autostart_unsupported" => {
+            "Starting Marsa at login works on macOS and Linux only for now.".into()
+        }
+        "tray_not_found" => "The marsa-tray program is not next to marsad, so Marsa cannot \
+             start at login. Reinstall Marsa, then try again."
+            .into(),
+        "autostart_path_invalid" => "The folder of marsa-tray has a character a login file \
+             cannot hold: a line break or another control character, or % on Linux. Move \
+             Marsa to another folder, then try again."
+            .into(),
+        "autostart_no_home" => "Cannot find your home folder, so Marsa does not know where \
+             the login file goes."
+            .into(),
+        "autostart_read" => format!(
+            "Cannot read {}. Check the file's permissions.",
+            shown("the login file")
+        ),
+        "autostart_write" => format!(
+            "Cannot write {}. Check the folder's permissions.",
+            shown("the login file")
+        ),
+
         _ => return None,
     };
     Some(text)
@@ -659,6 +682,21 @@ pub fn setup_skipped(step: &str, reason: &str, code: &str) -> String {
     format!("{step}: skipped. {reason} [{code}]")
 }
 
+// `marsa autostart`.
+
+/// `marsa autostart`, when the login file starts this Marsa.
+pub const AUTOSTART_ON: &str = "Start at login: on. Marsa's tray icon starts when you log in.";
+/// `marsa autostart`, when there is no login file.
+pub const AUTOSTART_OFF: &str = "Start at login: off. Run \"marsa autostart on\" to turn it on.";
+/// `marsa autostart`, when the login file is not the one this Marsa writes.
+pub const AUTOSTART_STALE: &str = "Start at login: off. The login file starts Marsa from \
+     another folder, or it was changed. Run \"marsa autostart on\" to fix it.";
+/// `marsa autostart on`.
+pub const AUTOSTART_TURNED_ON: &str =
+    "Start at login: on. From your next login, Marsa's tray icon starts by itself.";
+/// `marsa autostart off`.
+pub const AUTOSTART_TURNED_OFF: &str = "Start at login: off.";
+
 /// A program on a port the redirect needs, under the skipped step: its
 /// netstat name, its PID, and the app it seems to belong to.
 pub fn port_held(port: u16, name: Option<&str>, pid: Option<u32>, app: Option<&str>) -> String {
@@ -808,6 +846,13 @@ mod tests {
         "trust_add_failed",
         "pf_write",
         "pf_load_failed",
+        // The autostart route (task M5-03) and `AutostartError` in core.
+        "autostart_unsupported",
+        "tray_not_found",
+        "autostart_path_invalid",
+        "autostart_no_home",
+        "autostart_read",
+        "autostart_write",
     ];
 
     #[test]

@@ -1,0 +1,11 @@
+---
+source: crates/core/src/platform/autostart.rs
+expression: text
+---
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Marsa
+Comment=Starts the Marsa tray icon at login
+Exec="/home/me/.local/share/marsa/bin/marsa-tray"
+Terminal=false

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use marsa::cli::autostart::{self, AutostartArgs};
 use marsa::cli::daemon::{self, DaemonCommand};
 use marsa::cli::default_version::{self, UseArgs};
 use marsa::cli::install::{self, InstallArgs};
@@ -52,6 +53,9 @@ enum Command {
     /// Trust Marsa's HTTPS certificates, send .test names to Marsa, and route
     /// ports 80 and 443 to it, with one password prompt (macOS).
     Setup,
+    /// Start Marsa at login, or not: on or off. Without on or off, show
+    /// whether it does (macOS and Linux).
+    Autostart(AutostartArgs),
 }
 
 // One thread is enough: the command waits on one thing at a time.
@@ -73,6 +77,7 @@ async fn main() -> ExitCode {
         Command::Logs(args) => logs::run(args, &data_dir).await,
         Command::Sites(command) => sites::run(command, &data_dir).await,
         Command::Setup => setup::run(&data_dir).await,
+        Command::Autostart(args) => autostart::run(args, &data_dir).await,
     }
 }
 
@@ -311,6 +316,33 @@ mod tests {
             }
         }
         for args in [&["setup", "now"][..], &["setup", "--force"]] {
+            let err = parse(args).expect_err("invalid arguments");
+            assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
+        }
+    }
+
+    #[test]
+    fn autostart_takes_on_off_or_nothing() {
+        use marsa::cli::autostart::Switch;
+
+        for (args, switch) in [
+            (&["autostart"][..], None),
+            (&["autostart", "on"], Some(Switch::On)),
+            (&["autostart", "off"], Some(Switch::Off)),
+            (&["--data-dir", "/x", "autostart", "on"], Some(Switch::On)),
+            (&["autostart", "off", "--data-dir", "/x"], Some(Switch::Off)),
+        ] {
+            match parse(args).expect("valid").command {
+                Command::Autostart(got) => assert_eq!(got, AutostartArgs { switch }, "{args:?}"),
+                other => panic!("not autostart: {other:?}"),
+            }
+        }
+        for args in [
+            &["autostart", "yes"][..],
+            &["autostart", "ON"],
+            &["autostart", "on", "off"],
+            &["autostart", "--on"],
+        ] {
             let err = parse(args).expect_err("invalid arguments");
             assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
         }

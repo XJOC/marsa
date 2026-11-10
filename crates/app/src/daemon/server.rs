@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::api;
 use super::auth::AuthConfig;
+use super::autostart_api::Autostart;
 use super::dns;
 use super::sites_sync;
 use super::state::Daemon;
@@ -97,7 +98,11 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     tracing::info!(port, pid = file.pid, version = %file.app_version, "marsad started");
     let auth = AuthConfig::new(Arc::new(file.token), port);
 
-    let daemon = Arc::new(Daemon::new(data_dir));
+    let mut daemon = Daemon::new(data_dir);
+    // The user's own folder for the login file, only in the real daemon
+    // (task M5-03).
+    daemon.autostart = Autostart::this_user();
+    let daemon = Arc::new(daemon);
     // The first site list, so the first client gets it at once. A broken
     // sites.toml is logged; the routes report it again with its code.
     if let Err(err) = daemon.rebuild_sites().await {
