@@ -15,6 +15,7 @@ use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::api::HttpError;
+use super::autostart_api::Autostart;
 use super::caddy::CaddyManager;
 use super::php::Pools;
 use super::runtimes_api::Installs;
@@ -68,6 +69,10 @@ pub struct Daemon {
     pub pools: Pools,
     /// The runtime installer, and whether an install runs (task M3-12).
     pub installs: Installs,
+    /// Where the login file that starts the tray icon goes (task M5-03).
+    /// [`Autostart::unset`] here, so tests never reach the user's real
+    /// folders; `server::run` sets [`Autostart::this_user`].
+    pub autostart: Autostart,
     /// Held for the whole of each sites job, from reading `sites.toml` to
     /// publishing the list, so no change is lost and the events keep order.
     sites_lock: Mutex<()>,
@@ -89,6 +94,7 @@ impl Daemon {
             procs: Mutex::default(),
             shutdown: CancellationToken::new(),
             installs: Installs::new(),
+            autostart: Autostart::unset(),
             sites_lock: Mutex::default(),
             global_lock: Mutex::default(),
             parked: watch::Sender::new(Vec::new()),

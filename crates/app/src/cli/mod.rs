@@ -5,6 +5,7 @@
 //! `marsa_core::client` and print what it reports. Every text the user sees
 //! comes from [`strings`] (AGENTS.md section 9).
 
+pub mod autostart;
 pub mod daemon;
 pub mod default_version;
 pub mod install;

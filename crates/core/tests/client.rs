@@ -26,10 +26,10 @@ use marsa_core::platform::daemon_file::{
 };
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    API_VERSION, DefaultVersion, ErrorBody, Event, Health, InstallAccepted, InstallRequest,
-    LinkRequest, LogLine, LogStream, OpResult, OpStatus, ParkRequest, RuntimeList, RuntimeVersions,
-    ServiceAction, ServiceState, ServiceStatus, SetupReport, SetupSkip, Site, SiteKind, SiteList,
-    SitePatch, SkippedFolder, Source,
+    API_VERSION, AutostartState, DefaultVersion, ErrorBody, Event, Health, InstallAccepted,
+    InstallRequest, LinkRequest, LogLine, LogStream, OpResult, OpStatus, ParkRequest, RuntimeList,
+    RuntimeVersions, ServiceAction, ServiceState, ServiceStatus, SetupReport, SetupSkip, Site,
+    SiteKind, SiteList, SitePatch, SkippedFolder, Source,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -923,6 +923,75 @@ async fn setup_posts_and_reads_the_report() {
         assert_eq!(seen.authorization.as_deref(), Some(bearer.as_str()));
         assert!(!seen.origin);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Start at login (task M5-03)
+
+#[tokio::test]
+async fn autostart_reads_and_puts_and_keeps_the_daemons_code() {
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let router = Router::new().route(
+        "/v1/autostart",
+        get(|| async {
+            Json(AutostartState {
+                enabled: false,
+                stale: true,
+            })
+        })
+        .put({
+            let bodies = bodies.clone();
+            move |Json(body): Json<serde_json::Value>| async move {
+                let enabled = body["enabled"] == serde_json::json!(true);
+                bodies.lock().expect("lock").push(body);
+                if enabled {
+                    let body = ErrorBody::new("tray_not_found", "no marsa-tray next to marsad");
+                    (StatusCode::CONFLICT, Json(body)).into_response()
+                } else {
+                    Json(AutostartState::default()).into_response()
+                }
+            }
+        }),
+    );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    let stale = AutostartState {
+        enabled: false,
+        stale: true,
+    };
+    assert_eq!(client.autostart().await.unwrap(), stale);
+    assert_eq!(
+        client.set_autostart(false).await.unwrap(),
+        AutostartState::default()
+    );
+    let err = client.set_autostart(true).await.unwrap_err();
+    assert_eq!(err.code(), "tray_not_found");
+    assert!(
+        matches!(err, ClientError::Api { status: 409, .. }),
+        "{err:?}"
+    );
+    fake.assert_no_token(&err);
+
+    assert_eq!(
+        *bodies.lock().unwrap(),
+        [
+            serde_json::json!({ "enabled": false }),
+            serde_json::json!({ "enabled": true }),
+        ]
+    );
+    let targets: Vec<String> = fake
+        .seen()
+        .into_iter()
+        .map(|seen| format!("{} {}", seen.method, seen.target))
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            "GET /v1/autostart",
+            "PUT /v1/autostart",
+            "PUT /v1/autostart"
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------

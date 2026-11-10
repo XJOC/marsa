@@ -43,9 +43,9 @@ use crate::platform::daemon_file::{
 use crate::platform::spawn::{EXIT_ALREADY_RUNNING, marsad_path, spawn_marsad};
 use crate::runtimes::Runtime;
 use crate::types::{
-    API_VERSION, DefaultRequest, DefaultVersion, ErrorBody, Event, Health, InstallAccepted,
-    InstallRequest, LinkRequest, LogLine, ParkRequest, RuntimeList, ServiceAction, ServiceStatus,
-    SetupReport, SiteList, SitePatch,
+    API_VERSION, AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, ErrorBody,
+    Event, Health, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest, RuntimeList,
+    ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch,
 };
 use error::daemon_text;
 
@@ -311,6 +311,31 @@ impl DaemonClient {
     /// cancelled prompt is not an error: it is in [`SetupReport::error`].
     pub async fn setup(&self) -> Result<SetupReport, ClientError> {
         self.call(Method::POST, &["v1", "setup"], SETUP_TIMEOUT)
+            .await
+    }
+
+    /// `GET /v1/autostart`: whether the tray icon starts at login (task
+    /// M5-03).
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `autostart_unsupported` (501) on Windows for now.
+    pub async fn autostart(&self) -> Result<AutostartState, ClientError> {
+        self.call(Method::GET, &["v1", "autostart"], REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// `PUT /v1/autostart`: the daemon writes (`true`) or deletes (`false`)
+    /// the login file that starts the tray icon. It takes effect at the next
+    /// login. The state after the change.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `tray_not_found` (409) when `marsa-tray` is not
+    /// next to `marsad`, and `autostart_unsupported` (501) on Windows for now.
+    pub async fn set_autostart(&self, enabled: bool) -> Result<AutostartState, ClientError> {
+        let body = AutostartRequest { enabled };
+        self.call_with(Method::PUT, &["v1", "autostart"], &body)
             .await
     }
 

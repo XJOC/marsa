@@ -21,11 +21,22 @@ pub const EXIT_ALREADY_RUNNING: i32 = 3;
 /// The `io::Error` from `current_exe`, or `NotFound` if the program has no
 /// folder.
 pub fn marsad_path() -> io::Result<PathBuf> {
+    sibling_program("marsad")
+}
+
+/// The program `stem` (`marsad`, `marsa-tray`) in the folder of the running
+/// program, with `.exe` on Windows. Marsa's programs sit in one folder.
+///
+/// # Errors
+///
+/// The `io::Error` from `current_exe`, or `NotFound` if the program has no
+/// folder.
+pub fn sibling_program(stem: &str) -> io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let dir = exe.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "the running program has no folder")
     })?;
-    Ok(dir.join(format!("marsad{}", std::env::consts::EXE_SUFFIX)))
+    Ok(dir.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX)))
 }
 
 /// A `marsad` this process started. While the caller waits for it to answer,

@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod autostart_api;
 pub mod caddy;
 pub mod dns;
 pub mod php;
