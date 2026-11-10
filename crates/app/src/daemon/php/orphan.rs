@@ -13,18 +13,29 @@
 //!   of this data folder (an older version counts: an update may have come in
 //!   between), and started at the recorded time. It gets SIGTERM, then
 //!   SIGKILL after a limit, each only after the same check passes again.
-//!   Only the master is signalled: its workers end with it. The pool starts
-//!   once the process is gone and its socket or port is free.
+//!   The pool starts once the process is gone and its socket or port is
+//!   free.
+//! - php-fpm's workers end with a master that stops on SIGTERM. A master
+//!   that only dies from SIGKILL cannot end them, and macOS has no
+//!   parent-death signal, so they live on under pid 1 and keep the socket
+//!   (task M4-25). So, right before the master's SIGKILL, its direct
+//!   children are listed (`ps`), and the ones that run the master's very
+//!   executable and started no earlier than it are remembered
+//!   ([`orphan::worker_of`]). Once the master is gone, each gets SIGTERM,
+//!   then SIGKILL after a limit, each only right after the same check passes
+//!   again (same executable, same start time). When the file's master is
+//!   already gone and the socket or port is still in use, the children of
+//!   pid 1 are searched the same way, with the file's executable and start
+//!   time as the rule.
 //! - Anything else is never signalled. A stale file is deleted, and the log
 //!   says why. A pid that cannot be told (a tool failed) is never signalled
 //!   either: the pool waits, and the file stays, while the socket or port is
 //!   in use.
 //!
-//! Known limit: php-fpm's workers end with a master that stops on SIGTERM.
-//! A master that only dies from SIGKILL cannot end them, and macOS has no
-//! parent-death signal, so workers that were serving a request can live on
-//! and keep the socket. The pool then ends `php_fpm_orphan_stuck`; the
-//! workers are not signalled, because no pid file names them.
+//! Known limit: a worker whose identity cannot be read (a tool failed), or
+//! whose pid is not listed (`ps` failed), gets no signal, and the pool ends
+//! `php_fpm_orphan_stuck` while it keeps the socket. A worker forked after
+//! the master's children were listed is found by the search under pid 1.
 //!
 //! php-fpm writes its own `argv[0]` (`php-fpm: master process (...)`), so
 //! `ps` shows no path for it. Identity is the file it really runs instead
@@ -34,6 +45,7 @@
 //! Elsewhere no pid file is written, nothing is signalled, and a file left
 //! from before is deleted.
 
+use std::cmp::Ordering;
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
@@ -42,7 +54,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use marsa_core::caddy::Dial;
-use marsa_core::orphan::{self, Liveness, PidRecord, PidfileState};
+use marsa_core::orphan::{self, ChildProcess, Liveness, PidRecord, PidfileState};
 use marsa_core::php::PhpMinor;
 use marsa_core::platform::process::{self, Signal};
 use marsa_core::recipes::Platform;
@@ -76,6 +88,9 @@ const CONNECT_LIMIT: Duration = Duration::from_millis(500);
 pub trait FpmProcesses: fmt::Debug + Send + Sync {
     /// The file the process really runs, and its start time.
     fn identity(&self, pid: u32) -> BoxFuture<'_, Liveness>;
+    /// The children of `ppid` now, each with its start time: a list, never
+    /// a proof. `None` when they cannot be listed: then none is signalled.
+    fn children(&self, ppid: u32) -> BoxFuture<'_, Option<Vec<ChildProcess>>>;
     /// Sends `signal` to `pid`. The caller checked the pid right before.
     fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>>;
 }
@@ -87,6 +102,10 @@ pub struct SystemFpm;
 impl FpmProcesses for SystemFpm {
     fn identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
         Box::pin(process::real_identity(pid))
+    }
+
+    fn children(&self, ppid: u32) -> BoxFuture<'_, Option<Vec<ChildProcess>>> {
+        Box::pin(process::children(ppid))
     }
 
     fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
@@ -207,8 +226,13 @@ impl PidFile {
 pub enum Found {
     /// No pid file, or one that names nothing of ours to stop.
     Nothing,
-    /// Our php-fpm, alive, started at the recorded time.
+    /// Our php-fpm master, alive, started at the recorded time.
     Orphan(PidRecord),
+    /// The master the file names is gone, and the pool's socket or port is
+    /// still in use: its workers may live on, since a master that died from
+    /// SIGKILL cannot end them. The record says which executable they run
+    /// and the time they cannot have started before.
+    Workers(PidRecord),
 }
 
 /// The check before one pool starts.
@@ -227,10 +251,12 @@ pub struct Orphans<'a> {
 
 impl Orphans<'_> {
     /// Reads the pid file and checks the process it names. A file that
-    /// names a process that is gone, or not our php-fpm, is deleted. A
-    /// process that cannot be described gets no signal: while the socket or
-    /// port is in use, the start is blocked and the file stays for the next
-    /// try; once it is free, the file is deleted.
+    /// names a process that is gone, or not our php-fpm, is deleted, unless
+    /// the socket or port is still in use: then the master's workers may
+    /// live on, and the answer is [`Found::Workers`]. A process that cannot
+    /// be described gets no signal: while the socket or port is in use, the
+    /// start is blocked and the file stays for the next try; once it is
+    /// free, the file is deleted.
     ///
     /// # Errors
     ///
@@ -248,123 +274,299 @@ impl Orphans<'_> {
                 return Ok(Found::Orphan(record));
             }
             PidfileState::Stale { .. } => {
-                debug!(pid, "the old php-fpm has exited; deleting its pid file");
-                self.pid_file.remove();
+                debug!(pid, "the old php-fpm master has exited");
             }
             PidfileState::Mismatch { found, .. } => {
                 warn!(
                     pid,
                     %found,
-                    "the php-fpm pid file names a process that is not our php-fpm; no signal, \
-                     deleting the file"
+                    "the php-fpm pid file names a process that is not our php-fpm; no signal"
                 );
-                self.pid_file.remove();
             }
             PidfileState::Unknown { .. } | PidfileState::Missing => {
                 warn!(
                     pid,
                     "cannot tell who runs under the pid in the php-fpm pid file; no signal"
                 );
-                self.without_signal(&record, &state, false).await?;
+                self.without_signal(&record).await?;
+                return Ok(Found::Nothing);
             }
         }
+        // The master is gone. Its workers may live on and hold the socket.
+        if !listen_free(self.listen).await {
+            info!(
+                pid,
+                listen = %describe(self.listen),
+                "the old php-fpm master is gone, but its socket or port is in use: its workers \
+                 may live on"
+            );
+            return Ok(Found::Workers(record));
+        }
+        debug!(pid, "deleting the php-fpm pid file");
+        self.pid_file.remove();
         Ok(Found::Nothing)
     }
 
-    /// Stops `record`, which [`Orphans::inspect`] found: SIGTERM, then
-    /// SIGKILL, each only right after the pid is checked again, then waits
-    /// for the socket or port. `Ok` once the pool may start.
-    pub async fn reap(&self, record: PidRecord) -> Result<(), Blocked> {
+    /// Stops what [`Orphans::inspect`] found, then waits for the socket or
+    /// port. `Ok` once the pool may start.
+    pub async fn reap(&self, found: Found) -> Result<(), Blocked> {
+        match found {
+            Found::Nothing => Ok(()),
+            Found::Orphan(record) => self.reap_master(record).await,
+            Found::Workers(record) => self.after_master(&record, &[], false).await,
+        }
+    }
+
+    /// Stops the master `record` names: SIGTERM, then SIGKILL, each only
+    /// right after the pid is checked again. Its workers end with it on
+    /// SIGTERM; SIGKILL cannot end them, so right before it they are listed,
+    /// and stopped once the master is gone ([`Orphans::after_master`]).
+    async fn reap_master(&self, record: PidRecord) -> Result<(), Blocked> {
         let pid = record.pid;
         let mut signalled = false;
         for (signal, wait) in [
             (Signal::Term, self.ladder.term),
             (Signal::Kill, self.ladder.kill),
         ] {
+            // A master that dies from SIGKILL cannot end its workers, and
+            // once it is gone nothing names them: find them first. The
+            // master itself is checked after that, right before its signal.
+            let workers = match signal {
+                Signal::Kill => self.workers_under(&record, pid).await,
+                Signal::Term => Vec::new(),
+            };
             let state = self.check(&record).await;
-            if !matches!(state, PidfileState::Ours { .. }) {
-                warn!(pid, ?signal, %state, "no signal: the pid is not verified as our php-fpm");
-                return self.without_signal(&record, &state, signalled).await;
+            match state {
+                PidfileState::Ours { .. } => {}
+                PidfileState::Unknown { .. } | PidfileState::Missing => {
+                    warn!(pid, ?signal, %state, "no signal: the pid is not verified as our php-fpm");
+                    return self.without_signal(&record).await;
+                }
+                PidfileState::Stale { .. } | PidfileState::Mismatch { .. } => {
+                    info!(pid, ?signal, %state, "the old php-fpm master is gone before the signal");
+                    return self.after_master(&record, &[], signalled).await;
+                }
             }
             warn!(pid, ?signal, "the old php-fpm still runs; signalling it");
             if let Err(err) = self.processes.signal(pid, signal).await {
                 warn!(pid, ?signal, %err, "the signal failed");
             }
             signalled = true;
-            if self.wait_stopped(&record, wait).await {
-                info!(pid, ?signal, "the old php-fpm stopped");
-                self.pid_file.remove();
-                return Ok(());
+            if self.wait_gone(&record, wait).await {
+                info!(pid, ?signal, "the old php-fpm master stopped");
+                return self.after_master(&record, &workers, true).await;
             }
         }
         Err(Blocked {
             code: ORPHAN_STUCK,
             reason: format!(
-                "our old php-fpm (pid {pid}) did not stop after SIGKILL, or {} stays in use",
+                "our old php-fpm (pid {pid}) still runs, or cannot be told, after SIGKILL"
+            ),
+        })
+    }
+
+    /// The master is gone: it exited, or its pid changed hands. Stops the
+    /// workers it could not end: `remembered`, its children verified right
+    /// before its SIGKILL, and then, while the socket or port stays in use,
+    /// the ones pid 1 adopted. `signalled`: whether the master got a signal.
+    /// Once nothing holds the socket or port, the file is deleted and the
+    /// pool may start. If something still does after a signal, the start is
+    /// blocked and the file stays for the next try; with no signal at all,
+    /// the pool starts, and php-fpm itself says what holds its socket.
+    async fn after_master(
+        &self,
+        record: &PidRecord,
+        remembered: &[PidRecord],
+        mut signalled: bool,
+    ) -> Result<(), Blocked> {
+        let pid = record.pid;
+        if !remembered.is_empty() {
+            signalled |= self.stop_workers(remembered).await;
+        }
+        if !listen_free(self.listen).await {
+            let adopted = self.workers_under(record, 1).await;
+            if !adopted.is_empty() {
+                signalled |= self.stop_workers(&adopted).await;
+            }
+        }
+        if !signalled || listen_free(self.listen).await {
+            self.pid_file.remove();
+            return Ok(());
+        }
+        Err(Blocked {
+            code: ORPHAN_STUCK,
+            reason: format!(
+                "our old php-fpm (pid {pid}) has exited, and {} is still in use",
                 describe(self.listen)
             ),
         })
     }
 
-    /// The pid is not ours now (it exited, or changed hands), or it cannot
-    /// be told: no signal. Once nothing holds the socket or port, the file
-    /// is deleted and the pool may start. While something does, a pid that
-    /// cannot be told blocks the start and its file stays.
-    async fn without_signal(
-        &self,
-        record: &PidRecord,
-        state: &PidfileState,
-        signalled: bool,
-    ) -> Result<(), Blocked> {
-        let pid = record.pid;
-        let unsure = matches!(state, PidfileState::Unknown { .. } | PidfileState::Missing);
-        // Never verified before any signal: nothing of ours to wait for.
-        // php-fpm says so itself if its socket is still in use.
-        if (!signalled && !unsure) || listen_free(self.listen).await {
-            if unsure {
-                let exe = record.exe.display();
-                warn!(pid, %exe, "the old pid may still be our php-fpm; forgetting it");
+    /// The children of `ppid` that are workers of the master `record` names
+    /// ([`orphan::worker_of`]: alive, the master's very executable, started
+    /// no earlier than it), by pid, each named by a record of its own for
+    /// the checks before its signals. A table that cannot be read gives
+    /// none: nothing is signalled.
+    async fn workers_under(&self, record: &PidRecord, ppid: u32) -> Vec<PidRecord> {
+        let Some(children) = self.processes.children(ppid).await else {
+            warn!(
+                ppid,
+                "cannot list the children of the process; the old php-fpm's workers, if any, \
+                 get no signal"
+            );
+            return Vec::new();
+        };
+        let mut workers = Vec::new();
+        for child in children {
+            // By the listed start time first, which is cheap: pid 1's
+            // children are every service of the user, and most are older
+            // than our master.
+            let order = orphan::started_order(&child.started, &record.started);
+            if !matches!(order, Some(Ordering::Equal | Ordering::Greater)) {
+                continue;
             }
+            let now = self.processes.identity(child.pid).await;
+            match orphan::worker_of(record, self.accepted, child.pid, &now) {
+                Some(worker) => {
+                    info!(
+                        pid = worker.pid,
+                        ppid, "a worker of the old php-fpm still runs"
+                    );
+                    workers.push(worker);
+                }
+                None => {
+                    debug!(
+                        pid = child.pid,
+                        ppid,
+                        ?now,
+                        "not a worker of the old php-fpm; no signal"
+                    );
+                }
+            }
+        }
+        workers.sort_by_key(|worker| worker.pid);
+        workers
+    }
+
+    /// Stops `workers`: SIGTERM to each, then SIGKILL after a limit to the
+    /// ones still there, each only right after the pid is checked again
+    /// (same executable, same start time). A pid that is not verified at
+    /// that moment gets no signal, then or later. `true` when any signal
+    /// was sent.
+    async fn stop_workers(&self, workers: &[PidRecord]) -> bool {
+        let mut signalled = false;
+        let mut pending: Vec<&PidRecord> = workers.iter().collect();
+        for (signal, wait) in [
+            (Signal::Term, self.ladder.term),
+            (Signal::Kill, self.ladder.kill),
+        ] {
+            let mut sent = Vec::new();
+            for worker in pending {
+                let pid = worker.pid;
+                let state = self.check(worker).await;
+                if !matches!(state, PidfileState::Ours { .. }) {
+                    warn!(
+                        pid,
+                        ?signal,
+                        %state,
+                        "no signal: the pid is not verified as the old php-fpm's worker"
+                    );
+                    continue;
+                }
+                warn!(
+                    pid,
+                    ?signal,
+                    "a worker of the old php-fpm still runs; signalling it"
+                );
+                if let Err(err) = self.processes.signal(pid, signal).await {
+                    warn!(pid, ?signal, %err, "the signal failed");
+                }
+                signalled = true;
+                sent.push(worker);
+            }
+            pending = self.wait_workers_gone(sent, wait).await;
+            if pending.is_empty() {
+                break;
+            }
+        }
+        for worker in pending {
+            warn!(
+                pid = worker.pid,
+                "a worker of the old php-fpm did not stop, or cannot be told"
+            );
+        }
+        signalled
+    }
+
+    /// The pid cannot be told (a tool failed): no signal. Once nothing holds
+    /// the socket or port, the file is deleted and the pool may start. While
+    /// something does, the start is blocked and the file stays for the next
+    /// try.
+    async fn without_signal(&self, record: &PidRecord) -> Result<(), Blocked> {
+        let pid = record.pid;
+        if listen_free(self.listen).await {
+            let exe = record.exe.display();
+            warn!(pid, %exe, "the old pid may still be our php-fpm; forgetting it");
             self.pid_file.remove();
             return Ok(());
         }
-        let listen = describe(self.listen);
-        let reason = if unsure {
-            format!(
-                "pid {pid} of the php-fpm pid file cannot be verified as our php-fpm, so it gets \
-                 no signal, and {listen} is still in use"
-            )
-        } else {
-            format!("our old php-fpm (pid {pid}) has exited, and {listen} is still in use")
-        };
         Err(Blocked {
             code: ORPHAN_STUCK,
-            reason,
+            reason: format!(
+                "pid {pid} of the php-fpm pid file cannot be verified as our php-fpm, so it gets \
+                 no signal, and {} is still in use",
+                describe(self.listen)
+            ),
         })
     }
 
-    /// What the OS says about `record` now.
+    /// What the OS says about `record` now: the master's, or a worker's.
     async fn check(&self, record: &PidRecord) -> PidfileState {
         let now = self.processes.identity(record.pid).await;
         orphan::classify_pidfile(record, self.accepted, &now)
     }
 
-    /// Polls until the socket or port is free and `record` is not our
-    /// php-fpm any more. A free socket alone is not enough: a master that
-    /// closed it may still be shutting down, and must not get a signal it
-    /// does not need, nor a second php-fpm beside it.
-    async fn wait_stopped(&self, record: &PidRecord, limit: Duration) -> bool {
+    /// Polls until `record` is not our php-fpm any more (it exited, or its
+    /// pid changed hands), or `limit` passed. The socket or port says
+    /// nothing here: a master that closed it may still be shutting down, and
+    /// must not get a signal it does not need; and its workers may hold it
+    /// after its death, which [`Orphans::after_master`] handles. `Unknown`
+    /// may be a tool that failed once: wait on.
+    async fn wait_gone(&self, record: &PidRecord, limit: Duration) -> bool {
         let started = Instant::now();
         loop {
-            if listen_free(self.listen).await {
-                match self.check(record).await {
-                    // `Unknown` may be a tool that failed once: wait on.
-                    PidfileState::Ours { .. } | PidfileState::Unknown { .. } => {}
-                    _ => return true,
-                }
+            match self.check(record).await {
+                PidfileState::Ours { .. } | PidfileState::Unknown { .. } => {}
+                _ => return true,
             }
             if started.elapsed() >= limit {
                 return false;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// Polls until each of `workers` is not the verified worker any more (it
+    /// exited, or its pid changed hands), or `limit` passed: the ones that
+    /// still are, or cannot be told.
+    async fn wait_workers_gone<'w>(
+        &self,
+        mut workers: Vec<&'w PidRecord>,
+        limit: Duration,
+    ) -> Vec<&'w PidRecord> {
+        let started = Instant::now();
+        loop {
+            let mut left = Vec::with_capacity(workers.len());
+            for worker in workers {
+                match self.check(worker).await {
+                    // `Unknown` may be a tool that failed once: wait on.
+                    PidfileState::Ours { .. } | PidfileState::Unknown { .. } => left.push(worker),
+                    _ => {}
+                }
+            }
+            workers = left;
+            if workers.is_empty() || started.elapsed() >= limit {
+                return workers;
             }
             tokio::time::sleep(POLL).await;
         }
@@ -523,7 +725,7 @@ impl Drop for AbortOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
+    use std::collections::{BTreeMap, VecDeque};
 
     use semver::Version;
 
@@ -534,6 +736,11 @@ mod tests {
 
     const PROGRAM: &str = "/data/runtimes/php/8.4.3/bin/php-fpm";
     const STARTED: &str = "Wed Nov 4 03:31:27 2026";
+    /// A second before and after `STARTED`.
+    const EARLIER: &str = "Wed Nov 4 03:31:26 2026";
+    const LATER: &str = "Wed Nov 4 03:31:28 2026";
+    /// The pid the pid file names.
+    const MASTER: u32 = 4242;
     const PHP84: PhpMinor = PhpMinor { major: 8, minor: 4 };
 
     /// Short waits for the fakes, which change state at once.
@@ -547,23 +754,92 @@ mod tests {
         Version::parse(text).unwrap()
     }
 
-    /// What the OS says: the front of the queue, and the last one again once
-    /// one is left. A signal is recorded, never sent, and may change what the
+    /// One process the fake OS knows.
+    #[derive(Debug, Clone, Default)]
+    struct Proc {
+        ppid: u32,
+        /// What the OS says: the front of the queue, and the last one again
+        /// once one is left.
+        now: VecDeque<Liveness>,
+        /// The start time the process table lists for it: the first `Alive`
+        /// of `now`, unless set.
+        listed: String,
+        /// What the OS says after a signal, as the death of the process
+        /// would. `None`: the signal changes nothing.
+        after_term: Option<Liveness>,
+        after_kill: Option<Liveness>,
+    }
+
+    /// A process that says `now`, with no parent of note.
+    fn proc(now: impl IntoIterator<Item = Liveness>) -> Proc {
+        let now: VecDeque<Liveness> = now.into_iter().collect();
+        let listed = now.iter().find_map(|state| match state {
+            Liveness::Alive { started, .. } => Some(started.clone()),
+            _ => None,
+        });
+        Proc {
+            now,
+            listed: listed.unwrap_or_default(),
+            ..Proc::default()
+        }
+    }
+
+    /// A child of the master that runs `exe`, started at `started`.
+    fn child(exe: &str, started: &str) -> Proc {
+        Proc {
+            ppid: MASTER,
+            ..proc([alive(exe, started)])
+        }
+    }
+
+    /// The master M4-25 is about: it ignores SIGTERM and dies from SIGKILL.
+    fn stubborn_master() -> Proc {
+        Proc {
+            after_kill: Some(Liveness::Gone),
+            ..proc([ours()])
+        }
+    }
+
+    /// A worker of the master: its program, started at `started`, ends on
+    /// SIGTERM.
+    fn worker(started: &str) -> Proc {
+        Proc {
+            after_term: Some(Liveness::Gone),
+            ..child(PROGRAM, started)
+        }
+    }
+
+    /// The fake OS. A signal is recorded, never sent, and may change what the
     /// OS says next, as the death of the process would.
     #[derive(Debug, Default)]
     struct Fake {
-        now: Mutex<VecDeque<Liveness>>,
-        after_term: Option<Liveness>,
-        after_kill: Option<Liveness>,
+        procs: Mutex<BTreeMap<u32, Proc>>,
+        /// `ps` fails: no children can be listed.
+        no_children: bool,
+        /// The port a pid holds, let go when a signal ends the process.
+        held: Mutex<Vec<(u32, TcpListener)>>,
         signals: Mutex<Vec<(u32, Signal)>>,
     }
 
     impl Fake {
+        /// The master, pid 4242, says `now`.
         fn new(now: impl IntoIterator<Item = Liveness>) -> Self {
-            Self {
-                now: Mutex::new(now.into_iter().collect()),
-                ..Self::default()
-            }
+            Self::of(proc(now))
+        }
+
+        fn of(master: Proc) -> Self {
+            Self::default().with(MASTER, master)
+        }
+
+        fn with(self, pid: u32, proc: Proc) -> Self {
+            self.procs.lock().unwrap().insert(pid, proc);
+            self
+        }
+
+        /// `pid` holds `listener`'s port until a signal ends it.
+        fn holding(self, pid: u32, listener: TcpListener) -> Self {
+            self.held.lock().unwrap().push((pid, listener));
+            self
         }
 
         fn signals(&self) -> Vec<(u32, Signal)> {
@@ -572,25 +848,54 @@ mod tests {
     }
 
     impl FpmProcesses for Fake {
-        fn identity(&self, _pid: u32) -> BoxFuture<'_, Liveness> {
-            let mut now = self.now.lock().unwrap();
-            let next = if now.len() > 1 {
-                now.pop_front()
-            } else {
-                now.front().cloned()
+        fn identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
+            let mut procs = self.procs.lock().unwrap();
+            let next = match procs.get_mut(&pid) {
+                Some(proc) => {
+                    let next = if proc.now.len() > 1 {
+                        proc.now.pop_front()
+                    } else {
+                        proc.now.front().cloned()
+                    };
+                    next.unwrap_or(Liveness::Unknown)
+                }
+                None => Liveness::Gone,
             };
-            let next = next.unwrap_or(Liveness::Unknown);
             Box::pin(async move { next })
+        }
+
+        fn children(&self, ppid: u32) -> BoxFuture<'_, Option<Vec<ChildProcess>>> {
+            let children = (!self.no_children).then(|| {
+                let procs = self.procs.lock().unwrap();
+                procs
+                    .iter()
+                    .filter(|(_, proc)| proc.ppid == ppid)
+                    .map(|(pid, proc)| ChildProcess {
+                        pid: *pid,
+                        started: proc.listed.clone(),
+                    })
+                    .collect()
+            });
+            Box::pin(async move { children })
         }
 
         fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
             self.signals.lock().unwrap().push((pid, signal));
-            let after = match signal {
-                Signal::Term => &self.after_term,
-                Signal::Kill => &self.after_kill,
-            };
-            if let Some(state) = after {
-                *self.now.lock().unwrap() = VecDeque::from([state.clone()]);
+            let mut procs = self.procs.lock().unwrap();
+            if let Some(proc) = procs.get_mut(&pid) {
+                let after = match signal {
+                    Signal::Term => &proc.after_term,
+                    Signal::Kill => &proc.after_kill,
+                };
+                if let Some(state) = after.clone() {
+                    if state == Liveness::Gone {
+                        self.held
+                            .lock()
+                            .unwrap()
+                            .retain(|(holder, _)| *holder != pid);
+                    }
+                    proc.now = VecDeque::from([state]);
+                }
             }
             Box::pin(async { Ok(()) })
         }
@@ -635,10 +940,16 @@ mod tests {
             listen,
             ladder: SHORT,
         };
-        match orphans.inspect().await? {
-            Found::Nothing => Ok(()),
-            Found::Orphan(record) => orphans.reap(record).await,
-        }
+        let found = orphans.inspect().await?;
+        orphans.reap(found).await
+    }
+
+    /// A port something holds: `Dial::Tcp` of it, and the listener to hand
+    /// to the process that holds it.
+    fn held_port() -> (TcpListener, Dial) {
+        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen = Dial::Tcp(held.local_addr().unwrap().port());
+        (held, listen)
     }
 
     /// The 8.4 pool of `data` on `listen`, run as `program args`. Without
@@ -668,10 +979,7 @@ mod tests {
     #[tokio::test]
     async fn a_stubborn_orphan_gets_sigterm_then_sigkill_and_its_file_goes() {
         let (_dir, pid_file) = pid_file_of_ours();
-        let fake = Fake {
-            after_kill: Some(Liveness::Gone),
-            ..Fake::new([ours()])
-        };
+        let fake = Fake::of(stubborn_master());
         let listen = Dial::Tcp(free_port());
         assert_eq!(run(&pid_file, &fake, &listen).await, Ok(()));
         let want = [(4242, Signal::Term), (4242, Signal::Kill)];
@@ -682,10 +990,10 @@ mod tests {
     #[tokio::test]
     async fn an_orphan_that_stops_on_sigterm_gets_no_sigkill() {
         let (_dir, pid_file) = pid_file_of_ours();
-        let fake = Fake {
+        let fake = Fake::of(Proc {
             after_term: Some(Liveness::Gone),
-            ..Fake::new([ours()])
-        };
+            ..proc([ours()])
+        });
         let listen = Dial::Tcp(free_port());
         assert_eq!(run(&pid_file, &fake, &listen).await, Ok(()));
         assert_eq!(fake.signals(), [(4242, Signal::Term)]);
@@ -697,16 +1005,182 @@ mod tests {
         // After SIGTERM the pid runs another program, and the port stays
         // busy: that program gets no SIGKILL.
         let (_dir, pid_file) = pid_file_of_ours();
-        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let listen = Dial::Tcp(held.local_addr().unwrap().port());
-        let fake = Fake {
+        let (_held, listen) = held_port();
+        let fake = Fake::of(Proc {
             after_term: Some(alive("/bin/sleep", STARTED)),
-            ..Fake::new([ours()])
-        };
+            ..proc([ours()])
+        });
         let blocked = run(&pid_file, &fake, &listen).await.unwrap_err();
         assert_eq!(blocked.code, ORPHAN_STUCK);
         assert!(blocked.reason.contains("is still in use"), "{blocked:?}");
         assert_eq!(fake.signals(), [(4242, Signal::Term)], "no SIGKILL");
+    }
+
+    #[tokio::test]
+    async fn the_workers_of_a_master_killed_by_sigkill_are_stopped_in_order() {
+        // Two workers, one of them on the port. The second ignores SIGTERM
+        // too. A child that runs another program is not a worker.
+        let (_dir, pid_file) = pid_file_of_ours();
+        let (held, listen) = held_port();
+        let fake = Fake::of(stubborn_master())
+            .with(4301, worker(STARTED))
+            .with(
+                4302,
+                Proc {
+                    after_kill: Some(Liveness::Gone),
+                    ..child(PROGRAM, LATER)
+                },
+            )
+            .with(4303, child("/bin/sleep", LATER))
+            .holding(4302, held);
+        assert_eq!(run(&pid_file, &fake, &listen).await, Ok(()));
+        let want = [
+            (MASTER, Signal::Term),
+            (MASTER, Signal::Kill),
+            (4301, Signal::Term),
+            (4302, Signal::Term),
+            (4302, Signal::Kill),
+        ];
+        assert_eq!(fake.signals(), want);
+        assert!(!pid_file.path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_child_that_is_not_the_masters_worker_gets_no_signal() {
+        let cases = [
+            ("another program", child("/bin/sleep", STARTED)),
+            (
+                "a php-fpm of another data folder",
+                child("/other/runtimes/php/8.4.3/bin/php-fpm", STARTED),
+            ),
+            ("older than the master", child(PROGRAM, EARLIER)),
+            (
+                "an identity that cannot be read",
+                Proc {
+                    listed: STARTED.into(),
+                    ppid: MASTER,
+                    ..proc([Liveness::Unknown])
+                },
+            ),
+        ];
+        for (what, decoy) in cases {
+            let (_dir, pid_file) = pid_file_of_ours();
+            // The decoy holds the port, so a signal would have been the only
+            // way on; the master's SIGKILL alone leaves it in use.
+            let (held, listen) = held_port();
+            let fake = Fake::of(stubborn_master())
+                .with(4300, decoy)
+                .holding(4300, held);
+            let blocked = run(&pid_file, &fake, &listen).await.unwrap_err();
+            assert_eq!(blocked.code, ORPHAN_STUCK, "{what}");
+            assert!(blocked.reason.contains("has exited"), "{what}: {blocked:?}");
+            let want = [(MASTER, Signal::Term), (MASTER, Signal::Kill)];
+            assert_eq!(fake.signals(), want, "{what}");
+            assert!(pid_file.path.exists(), "{what}: kept for the next try");
+        }
+    }
+
+    #[tokio::test]
+    async fn workers_that_cannot_be_listed_get_no_signal() {
+        let (_dir, pid_file) = pid_file_of_ours();
+        let (held, listen) = held_port();
+        let fake = Fake {
+            no_children: true,
+            ..Fake::of(stubborn_master())
+        }
+        .with(4301, worker(STARTED))
+        .holding(4301, held);
+        let blocked = run(&pid_file, &fake, &listen).await.unwrap_err();
+        assert_eq!(blocked.code, ORPHAN_STUCK);
+        let want = [(MASTER, Signal::Term), (MASTER, Signal::Kill)];
+        assert_eq!(fake.signals(), want);
+    }
+
+    #[tokio::test]
+    async fn a_worker_whose_identity_changes_before_sigkill_gets_none() {
+        // The worker ignores SIGTERM; right before SIGKILL its pid runs
+        // another program. With no wait, the OS is asked exactly four times:
+        // listed, before SIGTERM, once after it, and before SIGKILL.
+        let (_dir, pid_file) = pid_file_of_ours();
+        let listen = Dial::Tcp(free_port());
+        let same = alive(PROGRAM, STARTED);
+        let changed = Proc {
+            ppid: MASTER,
+            ..proc([same.clone(), same.clone(), same, alive("/bin/sleep", LATER)])
+        };
+        let fake = Fake::of(stubborn_master()).with(4300, changed);
+        let accepted = [PathBuf::from(PROGRAM)];
+        let orphans = Orphans {
+            pid_file: &pid_file,
+            processes: &fake,
+            accepted: &accepted,
+            listen: &listen,
+            ladder: Ladder {
+                term: Duration::ZERO,
+                ..SHORT
+            },
+        };
+        let found = orphans.inspect().await.unwrap();
+        assert_eq!(orphans.reap(found).await, Ok(()));
+        let want = [
+            (MASTER, Signal::Term),
+            (MASTER, Signal::Kill),
+            (4300, Signal::Term),
+        ];
+        assert_eq!(fake.signals(), want, "no SIGKILL to the worker");
+        assert!(!pid_file.path.exists());
+    }
+
+    #[tokio::test]
+    async fn workers_under_pid_1_are_stopped_when_the_master_is_already_gone() {
+        // The file names a master that is gone; two of its workers live on
+        // under pid 1, one of them on the port. A sibling of another
+        // program, and our php-fpm from before the master, are left alone.
+        let (_dir, pid_file) = pid_file_of_ours();
+        let (held, listen) = held_port();
+        let adopted = |proc: Proc| Proc { ppid: 1, ..proc };
+        let fake = Fake::new([Liveness::Gone])
+            .with(4301, adopted(worker(STARTED)))
+            .with(4302, adopted(worker(LATER)))
+            .with(4303, adopted(child("/bin/sleep", LATER)))
+            .with(4304, adopted(child(PROGRAM, EARLIER)))
+            .holding(4302, held);
+        assert_eq!(run(&pid_file, &fake, &listen).await, Ok(()));
+        assert_eq!(fake.signals(), [(4301, Signal::Term), (4302, Signal::Term)]);
+        assert!(!pid_file.path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_child_of_pid_1_that_is_not_the_masters_worker_gets_no_signal() {
+        let cases = [
+            (
+                "a php-fpm of another data folder",
+                alive("/other/runtimes/php/8.4.3/bin/php-fpm", LATER),
+            ),
+            ("another program", alive("/bin/sleep", LATER)),
+            (
+                "our php-fpm from before the master",
+                alive(PROGRAM, EARLIER),
+            ),
+            ("an identity that cannot be read", Liveness::Unknown),
+        ];
+        for (what, now) in cases {
+            let (_dir, pid_file) = pid_file_of_ours();
+            let (held, listen) = held_port();
+            let decoy = Proc {
+                ppid: 1,
+                listed: LATER.into(),
+                ..proc([now])
+            };
+            let fake = Fake::new([Liveness::Gone])
+                .with(4300, decoy)
+                .holding(4300, held);
+            // No signal at all: the pool starts, and php-fpm itself says
+            // what holds its port.
+            assert_eq!(run(&pid_file, &fake, &listen).await, Ok(()), "{what}");
+            assert!(fake.signals().is_empty(), "{what}");
+            assert!(!pid_file.path.exists(), "{what}");
+        }
     }
 
     #[tokio::test]
@@ -921,20 +1395,23 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     mod real {
         use super::*;
-        use std::collections::BTreeMap;
         use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
         use std::process::{Child, Command, ExitStatus, Stdio};
 
         use super::super::super::{pool_for, stop_pool, write_pool};
 
         /// The fake's mode: `hold` listens on `$MARSA_FPM_SOCKET`, `idle`
-        /// does nothing, and `once` exits after a second the first time
-        /// (until `$MARSA_FPM_MARKER` exists), then does nothing. Each ends by
-        /// itself after two minutes.
+        /// does nothing, `once` exits after a second the first time (until
+        /// `$MARSA_FPM_MARKER` exists), then does nothing, and `master` runs
+        /// a `hold` and an `idle` child, writes their pids to
+        /// `$MARSA_FPM_CHILDREN`, and ignores SIGTERM. Each ends by itself
+        /// after two minutes.
         const FAKE: &str = "MARSA_FPM_FAKE";
         const SOCKET: &str = "MARSA_FPM_SOCKET";
         /// For `once`: the file that says the first run is over.
         const MARKER: &str = "MARSA_FPM_MARKER";
+        /// For `master`: the file with the pids of its children, one per line.
+        const CHILDREN: &str = "MARSA_FPM_CHILDREN";
         const FAKE_TEST: &str = "daemon::php::orphan::tests::real::fake_php_fpm";
         const FAKE_LIFE: Duration = Duration::from_secs(120);
         /// Generous: a test binary can start slowly on a busy CI machine.
@@ -947,6 +1424,9 @@ mod tests {
             let Ok(mode) = std::env::var(FAKE) else {
                 return;
             };
+            if mode == "master" {
+                return fake_master();
+            }
             let _listener = (mode == "hold").then(|| {
                 let path = std::env::var(SOCKET).expect("the socket path");
                 std::os::unix::net::UnixListener::bind(path).expect("the socket")
@@ -960,6 +1440,38 @@ mod tests {
                 }
             }
             std::thread::sleep(FAKE_LIFE);
+        }
+
+        /// A php-fpm whose master only dies from SIGKILL: it catches SIGTERM,
+        /// starts two children of this very program, one on the socket as a
+        /// worker that serves, and sleeps. The children hold the socket after
+        /// its death, as php-fpm's workers do on macOS.
+        fn fake_master() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            runtime.block_on(async {
+                use tokio::signal::unix::{SignalKind, signal};
+                // A handler, not SIG_IGN: the children start with the default
+                // again, as php-fpm's workers do. Nothing reads it; the
+                // process just lives on.
+                let _term = signal(SignalKind::terminate()).expect("the SIGTERM handler");
+                let me = std::env::current_exe().expect("this program");
+                let socket = std::env::var(SOCKET).expect("the socket path");
+                let pids_file = std::env::var(CHILDREN).expect("the children file");
+                let mut children = Vec::new();
+                for mode in ["hold", "idle"] {
+                    let mut command = fake_command(&me, mode);
+                    command.env(SOCKET, &socket).stdin(Stdio::null());
+                    children.push(command.spawn().expect("a child"));
+                }
+                let pids: Vec<String> = children.iter().map(|c| c.id().to_string()).collect();
+                std::fs::write(&pids_file, pids.join("\n") + "\n").expect("the children file");
+                // Kept, not waited for: they outlive this process.
+                tokio::time::sleep(FAKE_LIFE).await;
+                drop(children);
+            });
         }
 
         /// Records each signal. Only `send` passes it on to the OS.
@@ -978,6 +1490,10 @@ mod tests {
         impl FpmProcesses for Recorder {
             fn identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
                 Box::pin(process::real_identity(pid))
+            }
+
+            fn children(&self, ppid: u32) -> BoxFuture<'_, Option<Vec<ChildProcess>>> {
+                Box::pin(process::children(ppid))
             }
 
             fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
@@ -1275,6 +1791,88 @@ mod tests {
                 started: STARTED.into(),
             };
             assert!(check_recording(dir.path(), &record).await.is_empty());
+        }
+
+        #[tokio::test]
+        async fn the_workers_of_a_master_that_only_dies_from_sigkill_are_stopped_too() {
+            let dir = tempfile::tempdir().unwrap();
+            let data = dir.path();
+            let program = install_fake(data, "8.4.3");
+            let recorder = Arc::new(Recorder {
+                send: true,
+                ..Recorder::default()
+            });
+            let mut php = manager(data, recorder.clone());
+            // The master ignores SIGTERM, so that step waits its whole limit:
+            // short. Every other wait ends early.
+            php.ladder = Ladder {
+                stop: Duration::ZERO,
+                term: Duration::from_secs(1),
+                kill: Duration::from_secs(10),
+            };
+            let daemon = Daemon::new(data.to_path_buf());
+            let pool = fake_pool(data, "8.4.3", "idle");
+            let Dial::Unix(socket) = &pool.dial else {
+                panic!("a short socket path: {:?}", pool.dial);
+            };
+
+            // As a crashed daemon leaves it: a master with two workers, one of
+            // them on the pool's socket, and a pid file.
+            let pids_file = data.join("children");
+            let mut command = fake_command(&program, "master");
+            command.env(SOCKET, socket).env(CHILDREN, &pids_file);
+            let mut master = Bystander::spawn(&mut command);
+            let mut workers: Vec<u32> = Vec::new();
+            wait_until("the master's children", async || {
+                let text = std::fs::read_to_string(&pids_file).unwrap_or_default();
+                workers = text.lines().filter_map(|line| line.parse().ok()).collect();
+                workers.len() == 2
+            })
+            .await;
+            workers.sort_unstable();
+            wait_until("a worker listens", async || !listen_free(&pool.dial).await).await;
+            // Both are listed under the master and run its program.
+            let listed = process::children(master.pid()).await.expect("the table");
+            for pid in &workers {
+                assert!(listed.iter().any(|c| c.pid == *pid), "{pid} in {listed:?}");
+                let Liveness::Alive { exe, .. } = process::real_identity(*pid).await else {
+                    panic!("no identity for worker {pid}");
+                };
+                assert!(accepted([program.clone()]).contains(&exe), "{exe:?}");
+            }
+            let pid_file = PidFile::new(data, PHP84);
+            assert!(pid_file.record(&SystemFpm, master.pid(), &program).await);
+
+            assert!(php.start_pool(&daemon, &pool).await);
+            // SIGTERM did nothing and SIGKILL ended the master; then each
+            // worker got SIGTERM, which ended it. Nothing else was signalled.
+            assert_eq!(master.wait().signal(), Some(9));
+            let mut want = vec![(master.pid(), Signal::Term), (master.pid(), Signal::Kill)];
+            want.extend(workers.iter().map(|pid| (*pid, Signal::Term)));
+            assert_eq!(recorder.signals(), want);
+            for pid in &workers {
+                assert_eq!(process::real_identity(*pid).await, Liveness::Gone, "{pid}");
+            }
+            let runtime = daemon.pools.find("php-fpm-8.4").expect("listed");
+            let lines = lock(&runtime).logs.recent();
+            assert!(lines.iter().any(|line| line.text == STOPPING_ORPHAN));
+
+            // The new pool runs, and its pid file names it.
+            let mut pid = None;
+            wait_until("the pool runs", async || {
+                let status = lock(&runtime).status.clone();
+                pid = status.pid.filter(|_| status.state == ServiceState::Running);
+                pid.is_some()
+            })
+            .await;
+            let pid = pid.expect("a pid");
+            wait_until("the new pid file", async || {
+                process::read_pid_file(&pid_file.path).is_some_and(|r| r.pid == pid)
+            })
+            .await;
+            stop_pool(&daemon, PHP84).await;
+            assert!(!pid_file.path.exists());
+            assert_eq!(lock(&runtime).status.state, ServiceState::Stopped);
         }
     }
 }

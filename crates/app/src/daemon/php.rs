@@ -492,10 +492,11 @@ impl PhpManager {
         };
         match orphans.inspect().await? {
             Found::Nothing => Ok(()),
-            Found::Orphan(record) => {
+            // The master, or the workers it left behind.
+            found => {
                 let runtime = daemon.pools.runtime(pool.files.minor);
                 note(&runtime, &daemon.events, orphan::STOPPING_ORPHAN);
-                orphans.reap(record).await
+                orphans.reap(found).await
             }
         }
     }
