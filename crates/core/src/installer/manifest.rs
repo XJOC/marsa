@@ -25,15 +25,16 @@ use crate::runtimes::Runtime;
 /// The public key that signs the real manifest: the base64 line (the second
 /// line) of the owner's `marsa-runtimes.pub`.
 ///
-/// `None` until the owner creates the key pair (task M2-02, "owner steps").
-/// While it is `None`, [`Manifest::verify_embedded`] fails with
-/// `manifest_no_trusted_key`, so nothing can be installed.
+/// The owner created the key pair on 2026-11-10 (task M2-08). Key id
+/// `0136668A6B96BDEE`. If this were `None`, [`Manifest::verify_embedded`]
+/// would fail with `manifest_no_trusted_key`, so nothing could be installed.
 ///
 /// Rules: this constant is the only trusted key; no environment variable or
 /// config file can replace it, in any build. Never put a test key here (a test
 /// checks this). Changing it is a `sensitive` task. When it is set, write the
 /// date it was created and its key id in this comment.
-pub const MANIFEST_PUBLIC_KEY: Option<&str> = None;
+pub const MANIFEST_PUBLIC_KEY: Option<&str> =
+    Some("RWTuvZZrimY2ASzeaoWovb0LKYQTrVnNIbXoxoTKGJEZmSeLlyomDKxU");
 
 /// Every real manifest is signed with a trusted comment that starts with
 /// this, for example `minisign -S ... -t "marsa runtimes manifest serial=7"`.
