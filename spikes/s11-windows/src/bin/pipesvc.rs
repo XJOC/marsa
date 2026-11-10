@@ -5,6 +5,7 @@
 //! pipesvc serve <pipe> <sddl|-> [--not-first]   a server in the foreground
 //! pipesvc squat <pipe>                    a server with the default ACL, 60 seconds
 //! pipesvc client <pipe> <message> [--as <user> <password>]
+//! pipesvc probe <pipe>                    open the pipe, print who serves it
 //! pipesvc install <pipe> <sid>            register this exe as a service and start it
 //! pipesvc uninstall
 //! pipesvc service <pipe> <sid>            the entry point the SCM starts
@@ -65,6 +66,7 @@ mod imp {
             ["whoami"] => whoami(),
             ["serve", pipe, sddl, rest @ ..] => serve_foreground(pipe, sddl, rest),
             ["squat", pipe] => squat(pipe),
+            ["probe", pipe] => return client(pipe, "", None),
             ["client", pipe, message] => return client(pipe, message, None),
             ["client", pipe, message, "--as", user, password] => {
                 return client(pipe, message, Some((user, password)));
@@ -266,6 +268,10 @@ mod imp {
         };
         let (session, pid) = pipe_server_of(&file);
         println!("open=ok server_session={session:?} server_pid={pid:?}");
+        if message.is_empty() {
+            // `probe`: only who is behind the pipe.
+            return ExitCode::SUCCESS;
+        }
         let reply = write_message(&mut file, message.replace("\\n", "\n").as_bytes())
             .and_then(|()| read_message(&mut file));
         match reply {

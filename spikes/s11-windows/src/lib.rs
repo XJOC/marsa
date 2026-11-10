@@ -15,8 +15,8 @@ use std::os::windows::io::FromRawHandle;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
-    INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation,
+    CloseHandle, ERROR_PIPE_CONNECTED, GetHandleInformation, GetLastError, HANDLE,
+    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -46,7 +46,9 @@ use windows_sys::Win32::System::Pipes::{
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::Threading::{
+    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DETACHED_PROCESS,
     GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+    PROCESS_INFORMATION, STARTUPINFOW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
 
@@ -150,6 +152,68 @@ pub fn stop_std_handles_inheritance() -> Vec<io::Result<()>> {
             }
         })
         .collect()
+}
+
+/// Clears the inherit flag on every handle of the process that has it, by
+/// trying each possible handle value. Returns how many it cleared. A shell
+/// can pass more inheritable handles than the three standard ones.
+pub fn stop_all_handles_inheritance() -> usize {
+    let mut cleared = 0;
+    // Handle values are multiples of 4. A short-lived CLI has few of them.
+    for value in (4..=0x1_0000usize).step_by(4) {
+        let handle = value as HANDLE;
+        let mut flags = 0;
+        // SAFETY: both calls only read or change the flags of a handle value;
+        // a value that is not a handle makes them fail, which is ignored.
+        unsafe {
+            if GetHandleInformation(handle, &mut flags) != 0
+                && flags & HANDLE_FLAG_INHERIT != 0
+                && SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) != 0
+            {
+                cleared += 1;
+            }
+        }
+    }
+    cleared
+}
+
+/// Starts `program` with `args` through `CreateProcessW` with
+/// `bInheritHandles = FALSE`: detached, no console, and no handle of the
+/// caller at all. Returns the child's pid. The spike's paths have no quotes,
+/// so wrapping each argument in quotes is enough here.
+pub fn spawn_without_handles(program: &str, args: &[&str]) -> io::Result<u32> {
+    let application = wide(program);
+    let mut line = format!("\"{program}\"");
+    for arg in args {
+        line.push_str(&format!(" \"{arg}\""));
+    }
+    let mut command_line = wide(&line);
+    // SAFETY: the strings are NUL-terminated and outlive the call; the
+    // command line is a mutable buffer, as `CreateProcessW` requires; both
+    // returned handles are closed.
+    unsafe {
+        let mut startup: STARTUPINFOW = zeroed();
+        startup.cb = size_of::<STARTUPINFOW>() as u32;
+        let mut info: PROCESS_INFORMATION = zeroed();
+        let ok = CreateProcessW(
+            application.as_ptr(),
+            command_line.as_mut_ptr(),
+            null(),
+            null(),
+            0,
+            DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            null(),
+            null(),
+            &startup,
+            &mut info,
+        );
+        if ok == 0 {
+            return Err(last());
+        }
+        CloseHandle(info.hThread);
+        CloseHandle(info.hProcess);
+        Ok(info.dwProcessId)
+    }
 }
 
 /// `C:\Windows\System32`, asked from Windows, not from the environment.

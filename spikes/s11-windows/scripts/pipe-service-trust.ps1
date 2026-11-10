@@ -21,7 +21,8 @@ Remove-Item $script:Results -ErrorAction SilentlyContinue
 $pipesvc = Join-Path $Bin 'pipesvc.exe'
 $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
 $other = 'marsa-other'
-$otherPassword = "Sp1ke!$([guid]::NewGuid().ToString('N').Substring(0, 12))"
+# 14 characters: `net user` asks a question on the console for a longer one.
+$otherPassword = "Sp1ke!$([guid]::NewGuid().ToString('N').Substring(0, 8))"
 
 # Runs pipesvc, records its output and exit code.
 function Invoke-Pipesvc([string]$Label, [string[]]$Arguments) {
@@ -105,8 +106,8 @@ try {
 
     Say ""
     Say "# A second local user (a standard user, not an admin)"
-    & net.exe user $other $otherPassword /add | Out-Null
-    Say "net user /add -> exit=$LASTEXITCODE"
+    $output = & net.exe user $other $otherPassword /add 2>&1 | Out-String
+    Say "net user /add -> exit=$LASTEXITCODE $($output.Trim())"
 
     Say ""
     Say "# Pipe ACL, server in the foreground as the script's user"
@@ -150,8 +151,8 @@ try {
     Say "install while squatted -> exit=$LASTEXITCODE $($output.Trim())"
     Start-Sleep -Seconds 2
     (& sc.exe query MarsaSpikeHelper | Out-String).Trim() -split "`r?`n" | ForEach-Object { Say "    $_" }
-    Invoke-Pipesvc 'client reaches the squatter (server_session tells it apart from a service?)' @('client', 's11-svc', 'whoami')
-    Stop-Process -Id $squatter.Id -Force
+    Invoke-Pipesvc 'client reaches the squatter (a service would be in session 0)' @('probe', 's11-svc')
+    Stop-Process -Id $squatter.Id -Force -ErrorAction SilentlyContinue
     $output = & $installed uninstall 2>&1 | Out-String
     Say "uninstall -> exit=$LASTEXITCODE $($output.Trim())"
     Start-Sleep -Seconds 1

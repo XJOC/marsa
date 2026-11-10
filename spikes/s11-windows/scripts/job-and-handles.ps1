@@ -51,22 +51,29 @@ Say ""
 Say "# Handle inheritance (does a detached child keep the caller's stdout pipe?)"
 Say "The child sleeps 20 s. A pipeline that takes about 20 s means the child holds the pipe."
 
+$marker = Join-Path $Out 'inherit-marker.txt'
+
 function Test-Pipe([string]$Label, [scriptblock]$Run) {
+    Remove-Item $marker -ErrorAction SilentlyContinue
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    $output = & $Run
+    $output = (& $Run | Out-String).Trim()
     $watch.Stop()
-    Say "$Label -> output='$output' seconds=$([math]::Round($watch.Elapsed.TotalSeconds, 1))"
+    Start-Sleep -Milliseconds 500
+    $child = if (Test-Path $marker) { Get-Content $marker -Raw } else { 'no marker' }
+    Say "$Label -> output='$output' seconds=$([math]::Round($watch.Elapsed.TotalSeconds, 1)) child='$child'"
     Get-Process inherit -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Milliseconds 300
 }
 
 $inherit = Join-Path $Bin 'inherit.exe'
-Test-Pipe 'cmd pipe, no fix'  { cmd /c "`"$inherit`" parent | findstr started" }
-Test-Pipe 'cmd pipe, fix'     { cmd /c "`"$inherit`" parent --fix | findstr started" }
-Test-Pipe 'pwsh pipe, no fix' { & $inherit parent | Out-String }
-Test-Pipe 'pwsh pipe, fix'    { & $inherit parent --fix | Out-String }
-Test-Pipe 'bash pipe, no fix' { bash -c "'$($inherit -replace '\\', '/')' parent | cat" }
-Test-Pipe 'bash pipe, fix'    { bash -c "'$($inherit -replace '\\', '/')' parent --fix | cat" }
+$unix = $inherit -replace '\\', '/'
+$unixMarker = $marker -replace '\\', '/'
+foreach ($fix in '', '--fix', '--fix-all', '--no-inherit') {
+    $name = if ($fix) { $fix } else { 'as spawn_marsad does today' }
+    Test-Pipe "cmd pipe, $name"  { cmd /c "`"$inherit`" parent `"$marker`" $fix | findstr started" }
+    Test-Pipe "pwsh pipe, $name" { & $inherit parent $marker $fix | Out-String }
+    Test-Pipe "bash pipe, $name" { bash -c "'$unix' parent '$unixMarker' $fix | cat" }
+}
 
 if ($env:GITHUB_STEP_SUMMARY) {
     '```' | Add-Content $env:GITHUB_STEP_SUMMARY
