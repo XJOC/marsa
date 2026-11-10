@@ -23,7 +23,7 @@ use crate::recipes::Platform;
 use crate::runtimes::Runtime;
 
 /// The public key that signs the real manifest: the base64 line (the second
-/// line) of the owner's `marsa-runtimes.pub`.
+/// line) of the owner's minisign public key file.
 ///
 /// The owner created the key pair on 2026-11-10 (task M2-08). Key id
 /// `0136668A6B96BDEE`. If this were `None`, [`Manifest::verify_embedded`]
@@ -103,7 +103,8 @@ impl Manifest {
     ///
     /// # Errors
     ///
-    /// `manifest_no_trusted_key` while [`MANIFEST_PUBLIC_KEY`] is `None`, or
+    /// `manifest_no_trusted_key` if [`MANIFEST_PUBLIC_KEY`] is `None` or does
+    /// not decode, or
     /// any error of `verify_and_parse`: `manifest_too_large`,
     /// `manifest_bad_signature`, `manifest_schema_unsupported`,
     /// `manifest_rollback`, or `manifest_invalid`.
