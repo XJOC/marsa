@@ -18,24 +18,37 @@
 //!
 //! [`write_ca_bundle`] writes the CA bundle that `php.ini` points to, so PHP
 //! trusts the certificates of the other `.test` sites.
+//!
+//! Each pool is a service like Caddy (task M4-23): [`Pools`] keeps its
+//! status and recent lines for `GET /v1/services` and `GET /v1/logs`, and
+//! [`orphan`] stops a php-fpm that a crashed daemon left on the pool's
+//! socket before the pool starts (ADR 0009).
+
+pub mod orphan;
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use marsa_core::caddy::{CaddyPaths, Dial, PhpPools, ca_bundle_text};
 use marsa_core::php::{Listen, PhpFiles, PhpMinor, fpm_conf, fpm_listen, php_ini};
+use marsa_core::platform::process;
 use marsa_core::recipes::{self, Platform};
 use marsa_core::runtimes::{Runtime, RuntimesDir};
 use marsa_core::services::ServiceSpec;
 use marsa_core::sites::{Site, SiteKind};
+use marsa_core::types::{Event, LogStream, ServiceState, ServiceStatus};
 use semver::Version;
+use tokio::sync::broadcast;
 use tracing::{info, warn};
 
+use self::orphan::{Blocked, Found, FpmProcesses, Orphans, PidFile, SystemFpm};
+use super::caddy::orphan::Ladder;
 use super::caddy::{RESTART, STOP_GRACE};
 use super::state::Daemon;
-use super::supervisor::Supervisor;
+use super::supervisor::{ServiceRuntime, Supervisor, lock, now_ms};
 
 /// The TCP fallback of PHP `major.minor` is `19000 + major * 10 + minor`:
 /// 19084 for PHP 8.4.
@@ -274,6 +287,42 @@ pub fn plan_pools<P: PartialEq>(
     changes
 }
 
+/// The status and recent lines of each pool started in this run of the
+/// daemon, for `GET /v1/services` and `GET /v1/logs/php-fpm-<minor>`. A
+/// pool's entry stays after it stops, as Caddy's does: its lines stay
+/// readable, and `seq` keeps growing across its runs.
+#[derive(Debug, Default)]
+pub struct Pools(Mutex<BTreeMap<PhpMinor, Arc<Mutex<ServiceRuntime>>>>);
+
+impl Pools {
+    /// The runtime of the pool of `minor`, made on first use.
+    pub fn runtime(&self, minor: PhpMinor) -> Arc<Mutex<ServiceRuntime>> {
+        let mut pools = lock(&self.0);
+        let runtime = pools
+            .entry(minor)
+            .or_insert_with(|| Arc::new(Mutex::new(ServiceRuntime::new(&fpm_id(minor)))));
+        Arc::clone(runtime)
+    }
+
+    /// The status of each pool, in PHP line order.
+    pub fn statuses(&self) -> Vec<ServiceStatus> {
+        // Copied out first: one lock at a time.
+        let runtimes: Vec<_> = lock(&self.0).values().cloned().collect();
+        runtimes
+            .iter()
+            .map(|runtime| lock(runtime).status.clone())
+            .collect()
+    }
+
+    /// The runtime of the pool whose service id is `id` (`php-fpm-8.4`), if
+    /// it was started in this run.
+    pub fn find(&self, id: &str) -> Option<Arc<Mutex<ServiceRuntime>>> {
+        let pools = lock(&self.0);
+        let mut found = pools.iter().filter(|(minor, _)| fpm_id(**minor) == id);
+        found.next().map(|(_, runtime)| Arc::clone(runtime))
+    }
+}
+
 /// The pools of this daemon. The sync task owns it, so only that task starts
 /// or stops a pool. The process tasks live in `Daemon::procs`, so a shutdown
 /// stops them.
@@ -286,6 +335,13 @@ pub struct PhpManager {
     running: BTreeMap<PhpMinor, Pool>,
     /// The warning about Windows was logged: once per run is enough.
     warned: bool,
+    /// Whether pid files are written and orphans stopped:
+    /// `process::ORPHAN_RECOVERY`. Only tests change it.
+    recovery: bool,
+    /// Who runs under a pid, and signals, for the orphan check.
+    processes: Arc<dyn FpmProcesses>,
+    /// How long SIGTERM and SIGKILL to an orphan wait (ADR 0009).
+    ladder: Ladder,
 }
 
 impl PhpManager {
@@ -295,6 +351,9 @@ impl PhpManager {
             platform,
             running: BTreeMap::new(),
             warned: false,
+            recovery: process::ORPHAN_RECOVERY,
+            processes: Arc::new(SystemFpm),
+            ladder: Ladder::default(),
         }
     }
 
@@ -345,7 +404,7 @@ impl PhpManager {
             };
             // The run before, if any: changed, or ended.
             stop_pool(daemon, *minor).await;
-            if start_pool(daemon, pool) {
+            if self.start_pool(daemon, pool).await {
                 self.running.insert(*minor, pool.clone());
             } else {
                 self.running.remove(minor);
@@ -363,6 +422,79 @@ impl PhpManager {
                 .collect(),
         )
     }
+
+    /// Starts the pool under the supervisor, after the orphan check. `false`
+    /// if it cannot start: its status then says why.
+    async fn start_pool(&self, daemon: &Daemon, pool: &Pool) -> bool {
+        let id = &pool.spec.id;
+        let runtime = daemon.pools.runtime(pool.files.minor);
+        let pid_file = PidFile::new(&daemon.data_dir, pool.files.minor);
+        if let Err(blocked) = self.clear_orphan(daemon, pool, &pid_file).await {
+            warn!(service = %id, code = blocked.code, reason = %blocked.reason, "php-fpm was not started");
+            let text = format!("marsad: php-fpm was not started: {}.", blocked.reason);
+            note(&runtime, &daemon.events, &text);
+            set_failed(&runtime, &daemon.events, blocked.code);
+            return false;
+        }
+        // Before the spawn, so the watcher cannot miss the first `running`.
+        let lines = daemon.events.subscribe();
+        let logs_dir = daemon.data_dir.join("logs");
+        let spec = pool.spec.clone();
+        let events = daemon.events.clone();
+        match Supervisor::spawn_on(spec, events, &logs_dir, Arc::clone(&runtime)) {
+            Ok(handle) => {
+                info!(service = %id, program = %pool.spec.program.display(), "php-fpm started");
+                let handle = if self.recovery {
+                    let program = pool.spec.program.clone();
+                    let processes = Arc::clone(&self.processes);
+                    orphan::watch(handle, lines, pid_file, program, processes)
+                } else {
+                    handle
+                };
+                // `stop_pool` took the handle before, so none is replaced.
+                if let Some(old) = daemon.add_proc(id.clone(), handle) {
+                    old.cancel.cancel();
+                }
+                true
+            }
+            Err(err) => {
+                warn!(service = %id, code = err.code(), %err, "cannot start php-fpm");
+                set_failed(&runtime, &daemon.events, err.code());
+                false
+            }
+        }
+    }
+
+    /// ADR 0009: stops our own php-fpm that a crashed daemon left running for
+    /// this pool, and touches nothing that is not ours. Where recovery is off,
+    /// only deletes a pid file left from before.
+    async fn clear_orphan(
+        &self,
+        daemon: &Daemon,
+        pool: &Pool,
+        pid_file: &PidFile,
+    ) -> Result<(), Blocked> {
+        let (true, Some(platform)) = (self.recovery, self.platform) else {
+            pid_file.discard();
+            return Ok(());
+        };
+        let accepted = orphan::installed_programs(&self.data_dir, platform);
+        let orphans = Orphans {
+            pid_file,
+            processes: &*self.processes,
+            accepted: &accepted,
+            listen: &pool.dial,
+            ladder: self.ladder,
+        };
+        match orphans.inspect().await {
+            Found::Nothing => Ok(()),
+            Found::Orphan(record) => {
+                let runtime = daemon.pools.runtime(pool.files.minor);
+                note(&runtime, &daemon.events, orphan::STOPPING_ORPHAN);
+                orphans.reap(record).await
+            }
+        }
+    }
 }
 
 /// php-fpm runs on macOS and Linux. Windows needs php-cgi (architecture.md
@@ -379,23 +511,27 @@ async fn stop_pool(daemon: &Daemon, minor: PhpMinor) {
     }
 }
 
-/// Starts the pool under the supervisor. `false` if it cannot start.
-fn start_pool(daemon: &Daemon, pool: &Pool) -> bool {
-    let logs_dir = daemon.data_dir.join("logs");
-    match Supervisor::spawn(pool.spec.clone(), daemon.events.clone(), &logs_dir) {
-        Ok(handle) => {
-            info!(service = %pool.spec.id, program = %pool.spec.program.display(), "php-fpm started");
-            // `stop_pool` took the handle before, so none is replaced.
-            if let Some(old) = daemon.add_proc(pool.spec.id.clone(), handle) {
-                old.cancel.cancel();
-            }
-            true
-        }
-        Err(err) => {
-            warn!(service = %pool.spec.id, code = err.code(), %err, "cannot start php-fpm");
-            false
-        }
-    }
+/// Adds a line from the daemon to a pool's recent lines, so `marsa logs
+/// php-fpm-<minor>` shows why the pool did not start.
+fn note(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, text: &str) {
+    let mut runtime = lock(runtime);
+    let line = runtime.logs.push(LogStream::Stderr, text, now_ms());
+    // Under the lock, like the supervisor, so events come in `seq` order.
+    let _ = events.send(Event::Log(line));
+}
+
+/// Sets `Failed { code }` and tells every reader. Only while no task runs
+/// the pool: the supervisor owns the status then.
+fn set_failed(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, code: &str) {
+    let mut runtime = lock(runtime);
+    let status = &mut runtime.status;
+    status.state = ServiceState::Failed {
+        code: code.to_owned(),
+    };
+    status.pid = None;
+    status.since_ms = Some(now_ms());
+    // An error only means that nobody listens right now.
+    let _ = events.send(Event::ServiceChanged(status.clone()));
 }
 
 /// Writes `caddy/ca-bundle.pem` once Caddy has made Marsa's CA: the first

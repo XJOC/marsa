@@ -243,6 +243,15 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              and Marsa could not stop it safely. Run \"marsa logs {id}\" to see its process, \
              stop it, then try again."
         ),
+        "service_managed_by_sites" => format!(
+            "{service_first} starts and stops with the sites that need its PHP version, so it \
+             cannot be started or stopped by hand. Run \"marsa logs {id}\" to see its lines."
+        ),
+        "php_fpm_orphan_stuck" => format!(
+            "An old php-fpm, left running when the Marsa daemon crashed, still holds the socket \
+             {service} needs, and Marsa could not stop it safely. Run \"marsa logs {id}\" to \
+             see its process, stop it, then run \"marsa services restart caddy\" to try again."
+        ),
         "caddy_other_marsa" => format!(
             "The Caddy of another Marsa (another data folder, or another user) uses the ports \
              {service} needs. Stop that Marsa first. Run \"marsa logs {id}\" for details."
@@ -698,7 +707,7 @@ mod tests {
         "daemon_file_write",
         "random_unavailable",
         // The daemon's codes, passed on by `ClientError::Api` or found in
-        // `ServiceState::Failed`: `services_api`, `caddy`, `supervisor`,
+        // `ServiceState::Failed`: `services_api`, `caddy`, `php`, `supervisor`,
         // `runtimes_api`, `api`, and `auth` in `crates/app/src/daemon/`, and
         // `ProgramNotAbsolute` in core.
         "service_not_found",
@@ -710,6 +719,8 @@ mod tests {
         "port_in_use",
         "caddy_orphan_stuck",
         "caddy_other_marsa",
+        "service_managed_by_sites",
+        "php_fpm_orphan_stuck",
         "exited",
         "spawn_failed",
         "program_not_absolute",

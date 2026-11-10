@@ -1,7 +1,7 @@
 //! Stopping a managed process, the options every child of `marsad` gets, and
-//! what the daemon needs to find an orphan Caddy (ADR 0009): who runs under a
-//! pid, its real executable, who listens on a port, signals, `run/caddy.pid`,
-//! and the data folder's instance id.
+//! what the daemon needs to find an orphan Caddy or php-fpm (ADR 0009): who
+//! runs under a pid, its real executable, who listens on a port, signals, the
+//! pid files in `run/`, and the data folder's instance id.
 //!
 //! The `#[cfg]` for these lives here, so the supervisor has none. Every tool
 //! runs with an absolute path and an argument array, never through a shell.
@@ -179,6 +179,64 @@ pub async fn identity(pid: u32) -> Liveness {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub async fn identity(_pid: u32) -> Liveness {
     Liveness::Unknown
+}
+
+/// Who runs under `pid`, by the file it really runs (links resolved) and its
+/// start time. For a program that rewrites its own `argv[0]`, such as
+/// php-fpm (`php-fpm: master process (...)`): there [`identity`] finds no
+/// path on macOS. macOS reads the start time with `/bin/ps`, the file with
+/// [`executable`], then the start time again: a pid that changed hands in
+/// between is `Unknown`.
+#[cfg(target_os = "macos")]
+pub async fn real_identity(pid: u32) -> Liveness {
+    let started = match start_time(pid).await {
+        Ok(started) => started,
+        Err(state) => return state,
+    };
+    let exe = executable(pid).await;
+    match (start_time(pid).await, exe) {
+        (Ok(again), Some(exe)) if again == started => Liveness::Alive { exe, started },
+        (Err(Liveness::Gone), _) => Liveness::Gone,
+        _ => Liveness::Unknown,
+    }
+}
+
+/// Who runs under `pid`, by the file it really runs and its start time:
+/// [`identity`], which reads the `exe` link already.
+#[cfg(target_os = "linux")]
+pub async fn real_identity(pid: u32) -> Liveness {
+    identity(pid).await
+}
+
+/// Not supported on this system: never ours.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub async fn real_identity(_pid: u32) -> Liveness {
+    Liveness::Unknown
+}
+
+/// The start time of `pid` from `/bin/ps`, in the form [`identity`] gives.
+/// `Err(Gone)` for no process or a zombie, `Err(Unknown)` when `ps` fails.
+#[cfg(target_os = "macos")]
+async fn start_time(pid: u32) -> Result<String, Liveness> {
+    if pid == 0 {
+        return Err(Liveness::Unknown);
+    }
+    let mut ps = Command::new("/bin/ps");
+    ps.args(["-ww", "-p", &pid.to_string(), "-o", "stat=,lstart="])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC0");
+    match run_tool(ps).await {
+        Some(out) if out.status.success() => {
+            match crate::orphan::parse_ps_start(&String::from_utf8_lossy(&out.stdout)) {
+                Some(('Z', _)) => Err(Liveness::Gone),
+                Some((_, started)) => Ok(started),
+                None => Err(Liveness::Unknown),
+            }
+        }
+        // `ps` prints nothing and fails for a pid with no process.
+        Some(out) if out.stdout.is_empty() => Err(Liveness::Gone),
+        _ => Err(Liveness::Unknown),
+    }
 }
 
 /// The file `pid` really runs, links resolved: not `argv[0]`. macOS asks
@@ -413,6 +471,33 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(identity(pid).await, Liveness::Gone);
+    }
+
+    // The systems where `real_identity` reads a process.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn real_identity_is_the_real_file_whatever_argv0_says() {
+        use std::os::unix::process::CommandExt as _;
+
+        // Like php-fpm, which writes `php-fpm: master process (...)` there.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg0("php-fpm: master process (/x)")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let Liveness::Alive { exe, started } = real_identity(pid).await else {
+            panic!("no identity for {pid}");
+        };
+        assert_eq!(exe, fs::canonicalize("/bin/sleep").unwrap());
+        assert!(!started.is_empty());
+        // `identity` and `real_identity` give the same start time.
+        if let Liveness::Alive { started: same, .. } = identity(pid).await {
+            assert_eq!(same, started);
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(real_identity(pid).await, Liveness::Gone);
     }
 
     // The systems where `executable` reads a process.

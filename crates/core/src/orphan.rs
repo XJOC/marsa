@@ -298,6 +298,21 @@ pub fn parse_ps_line(text: &str) -> Liveness {
     }
 }
 
+/// Reads one line of `ps -o stat=,lstart=` run with `LC_ALL=C` and `TZ=UTC0`
+/// (macOS): the state letter and the start time, with single spaces as in
+/// [`parse_ps_line`]. For a process whose `argv[0]` is no path, such as
+/// php-fpm. Text in any other shape is `None`.
+pub fn parse_ps_start(text: &str) -> Option<(char, String)> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let [state, started @ ..] = words.as_slice() else {
+        return None;
+    };
+    if started.len() != 5 {
+        return None;
+    }
+    Some((state.chars().next()?, started.join(" ")))
+}
+
 /// Reads `/proc/<pid>/stat` (Linux): the state letter and the start time in
 /// clock ticks since boot. The name in parentheses may hold any character, so
 /// the fields are counted after the last `)`.
@@ -694,6 +709,28 @@ mod tests {
             "S a b c d e /x\n/y",
         ] {
             assert_eq!(parse_ps_line(bad), Liveness::Unknown, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn ps_start_lines_give_the_state_and_the_start_time() {
+        let started = "Wed Nov 4 03:31:27 2026".to_owned();
+        let line = "Ss   Wed Nov  4 03:31:27 2026\n";
+        assert_eq!(parse_ps_start(line), Some(('S', started.clone())));
+        // The same form as `parse_ps_line`, so both compare alike.
+        let full = parse_ps_line("Ss   Wed Nov  4 03:31:27 2026 /x\n");
+        assert_eq!(full, alive("/x", &started));
+        assert_eq!(
+            parse_ps_start("Z Wed Nov 4 03:31:27 2026"),
+            Some(('Z', started))
+        );
+        for bad in [
+            "",
+            "S Wed Nov 4",
+            "S Wed Nov 4 03:31:27 2026 /x",
+            "S a b c d e\nS",
+        ] {
+            assert_eq!(parse_ps_start(bad), None, "{bad:?}");
         }
     }
 
