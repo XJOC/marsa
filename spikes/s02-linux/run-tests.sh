@@ -529,7 +529,20 @@ run sudo sysctl -w net.ipv4.ip_unprivileged_port_start=1024
 run sudo systemctl restart systemd-sysctl
 result T7 "our file after systemd-sysctl runs again (as at boot)" "value $(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
 run grep -rs ip_unprivileged_port_start /etc/sysctl.conf /etc/sysctl.d /usr/lib/sysctl.d /run/sysctl.d
+# Removal: delete our file, put the kernel's default back, then let every
+# other sysctl file apply again, in case one of them sets the same key.
 run sudo rm /etc/sysctl.d/60-marsa.conf
+run sudo sysctl -w net.ipv4.ip_unprivileged_port_start=1024
+start=$(now_ms)
+sudo sysctl --system >"$OUT/sysctl-system.out" 2>&1
+system_rc=$?
+run tail -n 5 "$OUT/sysctl-system.out"
+result T7 "removal: rm, =1024, sysctl --system" "exit $system_rc in $(($(now_ms) - start)) ms, value $(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
+echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/10-someone-else.conf
+sudo sysctl -w net.ipv4.ip_unprivileged_port_start=1024 >/dev/null
+sudo sysctl --system >/dev/null 2>&1
+result T7 "the same when another file also sets the key to 80" "exit $?, value $(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
+run sudo rm /etc/sysctl.d/10-someone-else.conf
 run sudo sysctl -w net.ipv4.ip_unprivileged_port_start=1024
 
 # ------------------------------------------------------------- T10: pkexec
