@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use marsa::daemon::caddy::caddy_spec_for;
 use marsa::daemon::caddy::orphan::{BoxFuture, Processes};
 use marsa::daemon::state::Daemon;
 use marsa_core::caddy::{CaddyInput, SERVER_ID};
@@ -237,8 +238,7 @@ fn daemon_on(data: &Path, mode: &str, ports: Ports, processes: Arc<dyn Processes
     caddy.ready_limit = WAIT;
     caddy.processes = processes;
     let config = caddy.paths.config_file.to_string_lossy().into_owned();
-    caddy.spec = ServiceSpec {
-        program: program(),
+    caddy.spec = Some(ServiceSpec {
         // Runs only the entry point, under libtest and nextest alike.
         args: ["fake_process", "--exact", "--nocapture"]
             .map(String::from)
@@ -248,8 +248,8 @@ fn daemon_on(data: &Path, mode: &str, ports: Ports, processes: Arc<dyn Processes
             (CONFIG.to_owned(), config),
         ]),
         stop_grace: Duration::from_millis(500),
-        ..caddy.spec.clone()
-    };
+        ..caddy_spec_for(&caddy.paths, program())
+    });
     daemon
 }
 

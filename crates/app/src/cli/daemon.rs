@@ -166,7 +166,7 @@ fn path_for(code: &str, data_dir: &Path) -> Option<PathBuf> {
         "daemon_file_invalid" | "daemon_file_insecure" | "daemon_file_write" => {
             Some(daemon_file_path(&data_dir.join("run")))
         }
-        "caddy_not_installed" => Some(CaddyPaths::in_dir(data_dir).program),
+        "caddy_not_installed" => Some(CaddyPaths::in_dir(data_dir).runtime_dir()),
         "caddy_config_write" => Some(CaddyPaths::in_dir(data_dir).config_file),
         "runtimes_read" => Some(RuntimesDir::in_dir(data_dir).root().to_path_buf()),
         _ => None,
@@ -186,6 +186,21 @@ mod tests {
             failure.message.ends_with(&log.display().to_string()),
             "{}",
             failure.message
+        );
+    }
+
+    #[test]
+    fn no_caddy_names_its_folder_and_the_install_command() {
+        let data = Path::new("/data");
+        let failure = ClientFailure::new("caddy_not_installed", data, Some("caddy"));
+        let caddy = data.join("runtimes").join("caddy");
+        assert_eq!(
+            failure.line(),
+            format!(
+                "marsa: Caddy is not installed in {}. Run \"marsa install caddy\", then try \
+                 again. [caddy_not_installed]",
+                caddy.display()
+            )
         );
     }
 

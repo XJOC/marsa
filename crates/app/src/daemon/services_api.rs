@@ -163,7 +163,9 @@ fn service<'a>(daemon: &'a Daemon, id: &str) -> Result<&'a CaddyManager, HttpErr
 
 fn action_error(err: &ActionError) -> HttpError {
     let status = match err {
-        ActionError::NotInstalled(_) | ActionError::Busy => StatusCode::CONFLICT,
+        ActionError::NoCaddy(_) | ActionError::NotInstalled(_) | ActionError::Busy => {
+            StatusCode::CONFLICT
+        }
         ActionError::ConfigWrite(_) | ActionError::ProgramNotAbsolute(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
