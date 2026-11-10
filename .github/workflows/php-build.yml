@@ -7,8 +7,8 @@ name: php-build
 # - push to task/M2-09-*: build and test; the archives are workflow artifacts
 #   (14 days). No release.
 # - workflow_dispatch: the same; with `release` on (main only), also a DRAFT,
-#   pre-release GitHub Release php-<version>-r<revision> with the four archives
-#   and sha256sums.txt. The owner reads the draft and publishes it; then
+#   pre-release GitHub Release php-<version>-r<revision> with the four archives,
+#   sha256sums.txt, and the libiconv source that macOS links (LGPL 2.1). The owner reads the draft and publishes it; then
 #   `cargo xtask manifest build` on the owner's Mac reads it (recipes/pins.toml).
 #   The minisign key never enters CI.
 #
@@ -125,6 +125,23 @@ jobs:
           elif [ -f /etc/ssl/certs/ca-certificates.crt ]; then export CAFILE=/etc/ssl/certs/ca-certificates.crt; fi
           bash tools/php-build/smoke.sh "$OUT/unpacked"
 
+      # LGPL 2.1 asks whoever ships a statically linked libiconv to ship its
+      # source too. Keep the exact tarball spc compiled, only where PHP really
+      # uses GNU libiconv (macOS; Linux uses glibc's iconv at run time).
+      - name: Keep the libiconv source (LGPL)
+        id: lgpl
+        run: |
+          impl=$("$OUT/unpacked/bin/php" -n -r 'echo ICONV_IMPL;')
+          echo "ICONV_IMPL: $impl"
+          [ "$impl" = libiconv ] || exit 0
+          shopt -s nullglob
+          sources=("$WORK"/downloads/libiconv-*.tar.*)
+          [ "${#sources[@]}" -eq 1 ] || { echo "expected one libiconv source in downloads/, found ${#sources[@]}"; exit 1; }
+          mkdir -p "$OUT/lgpl"
+          cp "${sources[0]}" "$OUT/lgpl/"
+          ls -l "$OUT/lgpl"
+          echo "kept=true" >> "$GITHUB_OUTPUT"
+
       # The checks `cargo xtask manifest build` runs, on the runner that can run
       # this build: the recipe layout, the installer's extractor, nm, php -m.
       - name: Install the pinned Rust toolchain
@@ -164,6 +181,15 @@ jobs:
         with:
           name: php-${{ matrix.platform }}
           path: ${{ runner.temp }}/php-build/out/dist/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload the libiconv source
+        if: steps.lgpl.outputs.kept == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lgpl-${{ matrix.platform }}
+          path: ${{ runner.temp }}/php-build/out/lgpl/
           retention-days: 14
           if-no-files-found: error
 
@@ -212,6 +238,13 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The same tarball from both macOS jobs lands once. Linux has none.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lgpl-*
+          path: lgpl
+          merge-multiple: true
+
       - name: Check the archives and write sha256sums.txt
         working-directory: dist
         run: |
@@ -239,9 +272,27 @@ jobs:
             echo '```'
             cat dist/sha256sums.txt
             echo '```'
+            for src in lgpl/*; do
+              [ -f "$src" ] || continue
+              name=$(basename "$src")
+              echo
+              echo "## GNU libiconv (LGPL 2.1)"
+              echo
+              echo "The macOS archives link GNU libiconv statically into bin/php and bin/php-fpm. It is covered by"
+              echo "the GNU Lesser General Public License, version 2.1 (licenses/lib_libiconv_0.txt in each archive)."
+              echo "The Linux archives use the iconv of the system's glibc, loaded at run time."
+              echo
+              echo "- Its complete source, the exact file this build compiled, is attached: \`$name\`"
+              echo "  (sha256 \`$(sha256sum "$src" | cut -d' ' -f1)\`)."
+              echo "- To rebuild PHP with a changed libiconv: the PHP source is public, and the exact build is"
+              echo "  .github/workflows/php-build.yml and tools/php-build/ at commit $GITHUB_SHA of this repository"
+              echo "  (static-php-cli $SPC_VERSION). Put your changed libiconv in spc's downloads/ and run the same build."
+            done
           } > notes.md
+          shopt -s nullglob
+          lgpl=(lgpl/*)
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
             --draft --prerelease --latest=false --target "$GITHUB_SHA" \
             --title "PHP $PHP_VERSION (build $REVISION)" --notes-file notes.md \
-            dist/php-"$PHP_VERSION"-*.tar.gz dist/sha256sums.txt
+            dist/php-"$PHP_VERSION"-*.tar.gz dist/sha256sums.txt "${lgpl[@]}"
           echo "Draft release $TAG created. Read it, then publish it on GitHub." >> "$GITHUB_STEP_SUMMARY"
