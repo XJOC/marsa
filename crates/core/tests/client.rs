@@ -15,7 +15,7 @@ use axum::extract::{RawQuery, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use marsa_core::client::{
     ClientError, DaemonClient, EventStream, StreamItem, ensure_running, ensure_running_with,
@@ -26,10 +26,10 @@ use marsa_core::platform::daemon_file::{
 };
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    API_VERSION, ErrorBody, Event, Health, InstallAccepted, InstallRequest, LinkRequest, LogLine,
-    LogStream, OpResult, OpStatus, ParkRequest, RuntimeList, RuntimeVersions, ServiceAction,
-    ServiceState, ServiceStatus, SetupReport, SetupSkip, Site, SiteKind, SiteList, SitePatch,
-    SkippedFolder,
+    API_VERSION, DefaultVersion, ErrorBody, Event, Health, InstallAccepted, InstallRequest,
+    LinkRequest, LogLine, LogStream, OpResult, OpStatus, ParkRequest, RuntimeList, RuntimeVersions,
+    ServiceAction, ServiceState, ServiceStatus, SetupReport, SetupSkip, Site, SiteKind, SiteList,
+    SitePatch, SkippedFolder,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -567,6 +567,68 @@ async fn runtimes_and_install_are_called() {
             "GET /v1/runtimes",
             "POST /v1/runtimes/php/install",
             "POST /v1/runtimes/composer/install",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn set_default_puts_the_version_and_keeps_the_daemons_code() {
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let answer = DefaultVersion {
+        runtime: Runtime::Php,
+        default: "8.3".into(),
+        version: "8.3.12".into(),
+    };
+    let router = Router::new()
+        .route(
+            "/v1/runtimes/php/default",
+            put({
+                let bodies = bodies.clone();
+                let answer = answer.clone();
+                move |Json(body): Json<serde_json::Value>| async move {
+                    bodies.lock().expect("lock").push(body);
+                    Json(answer)
+                }
+            }),
+        )
+        .route(
+            "/v1/runtimes/composer/default",
+            put(|| async {
+                let body = ErrorBody::new("no_default_version", "composer has no default version");
+                (StatusCode::BAD_REQUEST, Json(body))
+            }),
+        );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    assert_eq!(
+        client.set_default(Runtime::Php, "8.3").await.unwrap(),
+        answer
+    );
+    let err = client
+        .set_default(Runtime::Composer, "2")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "no_default_version");
+    assert!(
+        matches!(err, ClientError::Api { status: 400, .. }),
+        "{err:?}"
+    );
+    fake.assert_no_token(&err);
+
+    assert_eq!(
+        *bodies.lock().unwrap(),
+        [serde_json::json!({ "version": "8.3" })]
+    );
+    let targets: Vec<String> = fake
+        .seen()
+        .into_iter()
+        .map(|seen| format!("{} {}", seen.method, seen.target))
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            "PUT /v1/runtimes/php/default",
+            "PUT /v1/runtimes/composer/default",
         ]
     );
 }

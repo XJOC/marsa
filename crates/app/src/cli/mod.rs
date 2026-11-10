@@ -6,6 +6,7 @@
 //! comes from [`strings`] (AGENTS.md section 9).
 
 pub mod daemon;
+pub mod default_version;
 pub mod install;
 pub mod logs;
 pub mod progress;
@@ -21,8 +22,8 @@ use std::process::ExitCode;
 use marsa_core::config;
 use marsa_core::runtimes::Runtime;
 
-/// A program `marsa install` and `marsa runtimes` know. The command-line
-/// form of [`Runtime`].
+/// A program `marsa install`, `marsa runtimes`, and `marsa use` know. The
+/// command-line form of [`Runtime`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Tool {
     Php,

@@ -43,8 +43,9 @@ use crate::platform::daemon_file::{
 use crate::platform::spawn::{EXIT_ALREADY_RUNNING, marsad_path, spawn_marsad};
 use crate::runtimes::Runtime;
 use crate::types::{
-    API_VERSION, ErrorBody, Event, Health, InstallAccepted, InstallRequest, LinkRequest, LogLine,
-    ParkRequest, RuntimeList, ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch,
+    API_VERSION, DefaultRequest, DefaultVersion, ErrorBody, Event, Health, InstallAccepted,
+    InstallRequest, LinkRequest, LogLine, ParkRequest, RuntimeList, ServiceAction, ServiceStatus,
+    SetupReport, SiteList, SitePatch,
 };
 use error::daemon_text;
 
@@ -218,6 +219,29 @@ impl DaemonClient {
         };
         let request = self.http.post(url).json(&body);
         self.answer(request.timeout(REQUEST_TIMEOUT)).await
+    }
+
+    /// `PUT /v1/runtimes/{tool}/default`: makes `version` (`8.3`, `22`) the
+    /// default of PHP or Node. Returns once `global.toml` is saved and the
+    /// site list is built again; a changed list also comes on
+    /// [`DaemonClient::events`] as `Event::SitesChanged`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; the daemon's `no_default_version` (400) for
+    /// Composer and Caddy, `invalid_version` or `unsupported_alias` (400) for
+    /// text that is not a version, and `version_not_installed` (409) when no
+    /// installed version matches.
+    pub async fn set_default(
+        &self,
+        runtime: Runtime,
+        version: &str,
+    ) -> Result<DefaultVersion, ClientError> {
+        let path = ["v1", "runtimes", runtime.dir_name(), "default"];
+        let body = DefaultRequest {
+            version: version.to_owned(),
+        };
+        self.call_with(Method::PUT, &path, &body).await
     }
 
     /// `GET /v1/sites`: every site, sorted by name, and the folders that did

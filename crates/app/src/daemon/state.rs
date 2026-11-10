@@ -71,6 +71,9 @@ pub struct Daemon {
     /// Held for the whole of each sites job, from reading `sites.toml` to
     /// publishing the list, so no change is lost and the events keep order.
     sites_lock: Mutex<()>,
+    /// Held while `global.toml` is read, changed, and written. Use
+    /// [`Daemon::lock_global`].
+    global_lock: Mutex<()>,
     /// The parked folders of the last build. Use [`Daemon::watch_parked`].
     parked: watch::Sender<Vec<PathBuf>>,
 }
@@ -87,6 +90,7 @@ impl Daemon {
             shutdown: CancellationToken::new(),
             installs: Installs::new(),
             sites_lock: Mutex::default(),
+            global_lock: Mutex::default(),
             parked: watch::Sender::new(Vec::new()),
         }
     }
@@ -180,6 +184,17 @@ impl Daemon {
     /// M4-10d). It reports a change only when the list changes.
     pub fn watch_parked(&self) -> watch::Receiver<Vec<PathBuf>> {
         self.parked.subscribe()
+    }
+
+    /// One change of `global.toml` at a time: the first install's default
+    /// and `PUT /v1/runtimes/{tool}/default` both read the whole file and
+    /// write it back, so without this one could undo the other. Take it on a
+    /// blocking thread only, and drop it before any `.await`.
+    pub fn lock_global(&self) -> MutexGuard<'_, ()> {
+        // The lock guards no data, so a poisoned one is still good.
+        self.global_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn write_state(&self) -> RwLockWriteGuard<'_, AppState> {

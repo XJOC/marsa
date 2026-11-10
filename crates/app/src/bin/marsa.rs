@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use marsa::cli::daemon::{self, DaemonCommand};
+use marsa::cli::default_version::{self, UseArgs};
 use marsa::cli::install::{self, InstallArgs};
 use marsa::cli::logs::{self, LogsArgs};
 use marsa::cli::runtimes::{self, RuntimesArgs};
@@ -34,6 +35,9 @@ enum Command {
     Install(InstallArgs),
     /// List the installed versions.
     Runtimes(RuntimesArgs),
+    /// Make an installed PHP or Node.js version the default: every folder
+    /// that sets no version of its own runs it.
+    Use(UseArgs),
     /// Start, stop, or check the Marsa daemon (marsad).
     #[command(subcommand)]
     Daemon(DaemonCommand),
@@ -63,6 +67,7 @@ async fn main() -> ExitCode {
     match &cli.command {
         Command::Install(args) => install::run(args, &data_dir).await,
         Command::Runtimes(args) => runtimes::run(args, &data_dir).await,
+        Command::Use(args) => default_version::run(args, &data_dir).await,
         Command::Daemon(command) => daemon::run(*command, &data_dir).await,
         Command::Services(args) => services::run(args, &data_dir).await,
         Command::Logs(args) => logs::run(args, &data_dir).await,
@@ -151,6 +156,42 @@ mod tests {
             parse(&["install", "ruby"]).expect_err("ruby").kind(),
             ErrorKind::InvalidValue
         );
+    }
+
+    #[test]
+    fn use_takes_a_tool_and_a_version() {
+        for (args, tool, version) in [
+            (&["use", "php", "8.3"][..], Tool::Php, "8.3"),
+            (&["use", "node", "22"], Tool::Node, "22"),
+            (
+                &["--data-dir", "/x", "use", "php", "8.3.12"],
+                Tool::Php,
+                "8.3.12",
+            ),
+            // The daemon answers `no_default_version`, with its own text.
+            (&["use", "composer", "2"], Tool::Composer, "2"),
+        ] {
+            match parse(args).expect("valid").command {
+                Command::Use(got) => assert_eq!(
+                    got,
+                    UseArgs {
+                        tool,
+                        version: version.into(),
+                    },
+                    "{args:?}"
+                ),
+                other => panic!("not use: {other:?}"),
+            }
+        }
+        for args in [
+            &["use"][..],
+            &["use", "php"],
+            &["use", "ruby", "3"],
+            &["use", "php", "8.3", "8.4"],
+        ] {
+            let err = parse(args).expect_err("invalid arguments");
+            assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
+        }
     }
 
     #[test]
