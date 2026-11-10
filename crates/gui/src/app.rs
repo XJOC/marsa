@@ -20,6 +20,10 @@ const ACTIONS: [ServiceAction; 3] = [
     ServiceAction::Restart,
 ];
 
+/// The start of the id of each php-fpm pool (`php-fpm-8.4`). The daemon starts
+/// and stops the pools with the sites, and refuses actions on them.
+const POOL_PREFIX: &str = "php-fpm-";
+
 /// The first height of the log panel at the bottom. The user can drag it.
 const LOG_HEIGHT: f32 = 170.0;
 /// The width of the park field.
@@ -143,10 +147,16 @@ fn services(ui: &mut egui::Ui, model: &Model) -> Option<Command> {
                     }
                 });
                 row.col(|ui| {
+                    let pool = service.id.starts_with(POOL_PREFIX);
                     for action in ACTIONS {
-                        let enabled = connected && model::can(&service.state, action);
+                        let enabled = connected && !pool && model::can(&service.state, action);
                         let button = egui::Button::new(strings::action_text(action));
-                        if ui.add_enabled(enabled, button).clicked() {
+                        let mut response = ui.add_enabled(enabled, button);
+                        if pool {
+                            response =
+                                response.on_disabled_hover_text(strings::MANAGED_BY_SITES_HINT);
+                        }
+                        if response.clicked() {
                             pressed = Some(Command::Service {
                                 service: service.id.clone(),
                                 action,

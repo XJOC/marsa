@@ -105,8 +105,11 @@ pub fn fpm_program(data_dir: &Path, platform: Platform, version: &Version) -> Op
         .program_path(&version_dir, "php-fpm")
 }
 
-/// How the supervisor runs the pool of `files`: `program --nodaemonize -y
-/// <php-fpm.conf> -c <php.ini>`, restarted after a failure like Caddy.
+/// How the supervisor runs the pool of `files`: `program --nodaemonize
+/// --force-stderr -y <php-fpm.conf> -c <php.ini>`, restarted after a failure
+/// like Caddy. `--force-stderr` sends php-fpm's own log (and the workers'
+/// output it catches) to stderr, which the supervisor reads, instead of the
+/// `error_log` file, so `GET /v1/logs/php-fpm-<minor>` shows it.
 pub fn fpm_spec(program: PathBuf, files: &PhpFiles) -> ServiceSpec {
     // `to_string_lossy` as in `caddy_spec`: the app data dir comes from the
     // OS and is valid Unicode in practice.
@@ -116,6 +119,7 @@ pub fn fpm_spec(program: PathBuf, files: &PhpFiles) -> ServiceSpec {
         program,
         args: vec![
             "--nodaemonize".to_owned(),
+            "--force-stderr".to_owned(),
             "-y".to_owned(),
             path(&files.fpm_conf_file),
             "-c".to_owned(),
@@ -486,7 +490,7 @@ impl PhpManager {
             listen: &pool.dial,
             ladder: self.ladder,
         };
-        match orphans.inspect().await {
+        match orphans.inspect().await? {
             Found::Nothing => Ok(()),
             Found::Orphan(record) => {
                 let runtime = daemon.pools.runtime(pool.files.minor);
@@ -672,7 +676,8 @@ mod tests {
         assert_eq!(spec.program, program);
         let conf = files.fpm_conf_file.to_str().unwrap();
         let ini = files.ini_file.to_str().unwrap();
-        assert_eq!(spec.args, ["--nodaemonize", "-y", conf, "-c", ini]);
+        let want = ["--nodaemonize", "--force-stderr", "-y", conf, "-c", ini];
+        assert_eq!(spec.args, want);
         assert!(spec.env.is_empty());
         assert_eq!(spec.cwd, None);
         assert_eq!(spec.restart, RESTART);

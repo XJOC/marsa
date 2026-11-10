@@ -249,8 +249,9 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         ),
         "php_fpm_orphan_stuck" => format!(
             "An old php-fpm, left running when the Marsa daemon crashed, still holds the socket \
-             {service} needs, and Marsa could not stop it safely. Run \"marsa logs {id}\" to \
-             see its process, stop it, then run \"marsa services restart caddy\" to try again."
+             or port {service} needs, and Marsa could not stop it safely. Run \"marsa logs \
+             {id}\" to see its process and stop it. Then run \"marsa services restart caddy\" \
+             to try again; it briefly interrupts every site."
         ),
         "caddy_other_marsa" => format!(
             "The Caddy of another Marsa (another data folder, or another user) uses the ports \

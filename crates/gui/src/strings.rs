@@ -18,6 +18,9 @@ pub const COLUMN_SERVICE: &str = "Service";
 pub const COLUMN_STATE: &str = "State";
 pub const COLUMN_PID: &str = "PID";
 pub const COLUMN_ACTIONS: &str = "Actions";
+/// Over the disabled buttons of a php-fpm pool.
+pub const MANAGED_BY_SITES_HINT: &str =
+    "Starts and stops with the sites that need its PHP version.";
 pub const LOG_TITLE: &str = "Caddy log";
 pub const LOG_EMPTY: &str = "No log lines yet.";
 
@@ -154,6 +157,13 @@ fn error_message(code: &str) -> Option<&'static str> {
             "An old Caddy from a crashed daemon holds the ports and could not be stopped safely."
         }
         "caddy_other_marsa" => "Another Marsa's Caddy uses the ports it needs.",
+        "service_managed_by_sites" => {
+            "This service starts and stops with the sites that need its PHP version."
+        }
+        "php_fpm_orphan_stuck" => {
+            "An old php-fpm from a crashed daemon holds the socket or port and could not be \
+             stopped safely."
+        }
         "exited" => "The process exited.",
         "spawn_failed" => "The process could not be started.",
         "program_not_absolute" => "The service program has no full path.",
@@ -239,7 +249,7 @@ mod tests {
     #[test]
     fn known_daemon_codes_have_a_message() {
         // Auth (M3-03), routes (M3-06), services and Caddy (M3-07), the
-        // orphan check (M3-11), and sites (M4-10b).
+        // orphan check (M3-11), sites (M4-10b), and php-fpm pools (M4-23).
         for code in [
             "unauthorized",
             "origin_rejected",
@@ -257,6 +267,8 @@ mod tests {
             "port_in_use",
             "caddy_orphan_stuck",
             "caddy_other_marsa",
+            "service_managed_by_sites",
+            "php_fpm_orphan_stuck",
             "exited",
             "spawn_failed",
             "program_not_absolute",

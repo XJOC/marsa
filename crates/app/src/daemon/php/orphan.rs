@@ -16,7 +16,15 @@
 //!   Only the master is signalled: its workers end with it. The pool starts
 //!   once the process is gone and its socket or port is free.
 //! - Anything else is never signalled. A stale file is deleted, and the log
-//!   says why.
+//!   says why. A pid that cannot be told (a tool failed) is never signalled
+//!   either: the pool waits, and the file stays, while the socket or port is
+//!   in use.
+//!
+//! Known limit: php-fpm's workers end with a master that stops on SIGTERM.
+//! A master that only dies from SIGKILL cannot end them, and macOS has no
+//! parent-death signal, so workers that were serving a request can live on
+//! and keep the socket. The pool then ends `php_fpm_orphan_stuck`; the
+//! workers are not signalled, because no pid file names them.
 //!
 //! php-fpm writes its own `argv[0]` (`php-fpm: master process (...)`), so
 //! `ps` shows no path for it. Identity is the file it really runs instead
@@ -59,6 +67,7 @@ pub const STOPPING_ORPHAN: &str = "marsad: Stopping an old php-fpm left by a cra
 const POLL: Duration = Duration::from_millis(50);
 
 /// How long a probe of the socket may wait for a connection.
+// Only the Unix socket probe uses it, and Unix sockets exist on Unix only.
 #[cfg(unix)]
 const CONNECT_LIMIT: Duration = Duration::from_millis(500);
 
@@ -139,26 +148,36 @@ impl PidFile {
     }
 
     /// Writes the file for a php-fpm just spawned, only if `pid` really runs
-    /// `program`.
-    pub async fn record(&self, processes: &dyn FpmProcesses, pid: u32, program: &Path) {
+    /// `program`. `true` when the file was written.
+    pub async fn record(&self, processes: &dyn FpmProcesses, pid: u32, program: &Path) -> bool {
         let spellings = accepted([program.to_path_buf()]);
         match processes.identity(pid).await {
             Liveness::Alive { exe, started } if spellings.contains(&exe) => {
                 let record = PidRecord { pid, exe, started };
                 match process::write_pid_file(&self.path, &record) {
-                    Ok(()) => debug!(pid, path = %self.path.display(), "php-fpm pid file written"),
+                    Ok(()) => {
+                        debug!(pid, path = %self.path.display(), "php-fpm pid file written");
+                        true
+                    }
                     Err(err) => {
-                        warn!(%err, path = %self.path.display(), "cannot write the php-fpm pid file")
+                        warn!(%err, path = %self.path.display(), "cannot write the php-fpm pid file");
+                        false
                     }
                 }
             }
             // It exited at once; the supervisor reports why.
-            Liveness::Gone => debug!(pid, "php-fpm exited before its pid file was written"),
-            other => warn!(
-                pid,
-                ?other,
-                "php-fpm pid file not written: the pid is not our php-fpm"
-            ),
+            Liveness::Gone => {
+                debug!(pid, "php-fpm exited before its pid file was written");
+                false
+            }
+            other => {
+                warn!(
+                    pid,
+                    ?other,
+                    "php-fpm pid file not written: the pid is not our php-fpm"
+                );
+                false
+            }
         }
     }
 
@@ -208,22 +227,29 @@ pub struct Orphans<'a> {
 
 impl Orphans<'_> {
     /// Reads the pid file and checks the process it names. A file that
-    /// names a process that is gone, or not our php-fpm, is deleted; one
-    /// whose process cannot be described stays, and nothing is signalled.
-    pub async fn inspect(&self) -> Found {
+    /// names a process that is gone, or not our php-fpm, is deleted. A
+    /// process that cannot be described gets no signal: while the socket or
+    /// port is in use, the start is blocked and the file stays for the next
+    /// try; once it is free, the file is deleted.
+    ///
+    /// # Errors
+    ///
+    /// [`ORPHAN_STUCK`] for a pid that cannot be told while the socket or
+    /// port is in use.
+    pub async fn inspect(&self) -> Result<Found, Blocked> {
         let Some(record) = process::read_pid_file(&self.pid_file.path) else {
-            return Found::Nothing;
+            return Ok(Found::Nothing);
         };
         let pid = record.pid;
-        match self.check(&record).await {
+        let state = self.check(&record).await;
+        match &state {
             PidfileState::Ours { .. } => {
                 info!(pid, exe = %record.exe.display(), "an old php-fpm of ours still runs");
-                Found::Orphan(record)
+                return Ok(Found::Orphan(record));
             }
             PidfileState::Stale { .. } => {
                 debug!(pid, "the old php-fpm has exited; deleting its pid file");
                 self.pid_file.remove();
-                Found::Nothing
             }
             PidfileState::Mismatch { found, .. } => {
                 warn!(
@@ -233,17 +259,16 @@ impl Orphans<'_> {
                      deleting the file"
                 );
                 self.pid_file.remove();
-                Found::Nothing
             }
             PidfileState::Unknown { .. } | PidfileState::Missing => {
                 warn!(
                     pid,
-                    "cannot tell who runs under the pid in the php-fpm pid file; no signal, \
-                     the file stays"
+                    "cannot tell who runs under the pid in the php-fpm pid file; no signal"
                 );
-                Found::Nothing
+                self.without_signal(&record, &state, false).await?;
             }
         }
+        Ok(Found::Nothing)
     }
 
     /// Stops `record`, which [`Orphans::inspect`] found: SIGTERM, then
@@ -283,7 +308,8 @@ impl Orphans<'_> {
 
     /// The pid is not ours now (it exited, or changed hands), or it cannot
     /// be told: no signal. Once nothing holds the socket or port, the file
-    /// is deleted and the pool may start.
+    /// is deleted and the pool may start. While something does, a pid that
+    /// cannot be told blocks the start and its file stays.
     async fn without_signal(
         &self,
         record: &PidRecord,
@@ -291,7 +317,7 @@ impl Orphans<'_> {
         signalled: bool,
     ) -> Result<(), Blocked> {
         let pid = record.pid;
-        let unsure = matches!(state, PidfileState::Unknown { .. });
+        let unsure = matches!(state, PidfileState::Unknown { .. } | PidfileState::Missing);
         // Never verified before any signal: nothing of ours to wait for.
         // php-fpm says so itself if its socket is still in use.
         if (!signalled && !unsure) || listen_free(self.listen).await {
@@ -302,17 +328,18 @@ impl Orphans<'_> {
             self.pid_file.remove();
             return Ok(());
         }
-        let why = if unsure {
-            "cannot be verified, so it gets no signal"
+        let listen = describe(self.listen);
+        let reason = if unsure {
+            format!(
+                "pid {pid} of the php-fpm pid file cannot be verified as our php-fpm, so it gets \
+                 no signal, and {listen} is still in use"
+            )
         } else {
-            "has exited"
+            format!("our old php-fpm (pid {pid}) has exited, and {listen} is still in use")
         };
         Err(Blocked {
             code: ORPHAN_STUCK,
-            reason: format!(
-                "our old php-fpm (pid {pid}) {why}, and {} is still in use",
-                describe(self.listen)
-            ),
+            reason,
         })
     }
 
@@ -362,8 +389,11 @@ pub async fn listen_free(listen: &Dial) -> bool {
 }
 
 /// Free when a connection is refused or there is no socket file. A
-/// connection, or one that does not complete in time (a frozen or full
-/// listener), is busy.
+/// connection, or one that does not complete in time, is busy. On Linux a
+/// frozen listener with a full backlog makes the connection wait, so it is
+/// busy; on macOS a full backlog refuses the connection, so it reads as
+/// free. So this probe never decides alone whether our php-fpm still runs:
+/// [`Orphans::wait_stopped`] also checks the pid.
 // Unix sockets exist on Unix only, and only Unix runs php-fpm pools.
 #[cfg(unix)]
 async fn socket_free(path: &Path) -> bool {
@@ -458,9 +488,10 @@ impl Watcher {
             match (&status.state, status.pid) {
                 // The supervisor says `running` right after each spawn.
                 (ServiceState::Running, Some(pid)) if recorded != Some(pid) => {
-                    pid_file.record(&*processes, pid, &program).await;
-                    recorded = Some(pid);
+                    let written = pid_file.record(&*processes, pid, &program).await;
+                    recorded = written.then_some(pid);
                 }
+                // php-fpm has exited, so its pid may be anyone's from now on.
                 (ServiceState::Failed { .. } | ServiceState::Stopped, _) if recorded.is_some() => {
                     pid_file.remove();
                     recorded = None;
@@ -468,8 +499,10 @@ impl Watcher {
                 _ => {}
             }
         }
-        // php-fpm has exited, so its pid may be anyone's from now on.
-        pid_file.remove();
+        // Only a file this watcher wrote, for a php-fpm that has exited.
+        if recorded.is_some() {
+            pid_file.remove();
+        }
     }
 }
 
@@ -494,7 +527,9 @@ mod tests {
 
     use semver::Version;
 
-    use super::super::{PhpManager, pool_for};
+    use marsa_core::php::PhpFiles;
+
+    use super::super::{PhpManager, Pool, fpm_spec};
     use crate::daemon::state::Daemon;
 
     const PROGRAM: &str = "/data/runtimes/php/8.4.3/bin/php-fpm";
@@ -600,10 +635,34 @@ mod tests {
             listen,
             ladder: SHORT,
         };
-        match orphans.inspect().await {
+        match orphans.inspect().await? {
             Found::Nothing => Ok(()),
             Found::Orphan(record) => orphans.reap(record).await,
         }
+    }
+
+    /// The 8.4 pool of `data` on `listen`, run as `program args`. Without
+    /// php-fpm's config text, so it builds from a Windows path too.
+    fn bare_pool(data: &Path, listen: Dial, program: &str, args: &[&str]) -> Pool {
+        let files = PhpFiles::new(data, &v("8.4.3"));
+        let mut spec = fpm_spec(PathBuf::from(program), &files);
+        spec.args = args.iter().map(|arg| (*arg).to_owned()).collect();
+        Pool {
+            files,
+            fpm_conf: String::new(),
+            php_ini: String::new(),
+            spec,
+            dial: listen,
+        }
+    }
+
+    /// A manager that checks for orphans with `processes`, on any system.
+    fn manager_with(data: &Path, processes: Arc<dyn FpmProcesses>) -> PhpManager {
+        let mut php = PhpManager::new(data, Some(Platform::LinuxX64));
+        php.recovery = true;
+        php.processes = processes;
+        php.ladder = SHORT;
+        php
     }
 
     #[tokio::test]
@@ -655,20 +714,14 @@ mod tests {
         let later = "Wed Nov 4 03:31:28 2026";
         let cases = [
             // Another program, our start time.
-            (alive("/bin/sleep", STARTED), false),
+            alive("/bin/sleep", STARTED),
             // Our program, another start time: a reused pid (ADR 0009, R5e).
-            (alive(PROGRAM, later), false),
+            alive(PROGRAM, later),
             // A php-fpm of another data folder.
-            (
-                alive("/other/runtimes/php/8.4.3/bin/php-fpm", STARTED),
-                false,
-            ),
-            // Gone.
-            (Liveness::Gone, false),
-            // Cannot be told: the file stays for the next try.
-            (Liveness::Unknown, true),
+            alive("/other/runtimes/php/8.4.3/bin/php-fpm", STARTED),
+            Liveness::Gone,
         ];
-        for (now, kept) in cases {
+        for now in cases {
             let (_dir, pid_file) = pid_file_of_ours();
             // Busy, so a signal would have been the only way on.
             let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -676,8 +729,75 @@ mod tests {
             let fake = Fake::new([now.clone()]);
             assert_eq!(run(&pid_file, &fake, &listen).await, Ok(()), "{now:?}");
             assert!(fake.signals().is_empty(), "{now:?}");
-            assert_eq!(pid_file.path.exists(), kept, "{now:?}");
+            assert!(!pid_file.path.exists(), "{now:?}: a stale file goes");
         }
+    }
+
+    #[tokio::test]
+    async fn a_pid_that_cannot_be_told_blocks_while_busy_and_is_forgotten_once_free() {
+        // Busy: blocked, no signal, and the file stays for the next try.
+        let (_dir, pid_file) = pid_file_of_ours();
+        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen = Dial::Tcp(held.local_addr().unwrap().port());
+        let fake = Fake::new([Liveness::Unknown]);
+        let blocked = run(&pid_file, &fake, &listen).await.unwrap_err();
+        assert_eq!(blocked.code, ORPHAN_STUCK);
+        assert!(blocked.reason.contains("cannot be verified"), "{blocked:?}");
+        assert!(fake.signals().is_empty());
+        assert!(pid_file.path.exists());
+
+        // Free: the pool may start, and the pid is forgotten.
+        drop(held);
+        assert_eq!(run(&pid_file, &fake, &listen).await, Ok(()));
+        assert!(fake.signals().is_empty());
+        assert!(!pid_file.path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_blocked_start_pool_fails_with_a_note_and_keeps_the_file() {
+        let (dir, pid_file) = pid_file_of_ours();
+        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen = Dial::Tcp(held.local_addr().unwrap().port());
+        let fake = Arc::new(Fake::new([Liveness::Unknown]));
+        let php = manager_with(dir.path(), fake.clone());
+        let daemon = Daemon::new(dir.path().to_path_buf());
+        // Never run: the start is blocked first.
+        let pool = bare_pool(dir.path(), listen, "/never/run/php-fpm", &[]);
+
+        assert!(!php.start_pool(&daemon, &pool).await);
+        let runtime = daemon.pools.find("php-fpm-8.4").expect("listed");
+        let (status, lines) = {
+            let runtime = lock(&runtime);
+            (runtime.status.clone(), runtime.logs.recent())
+        };
+        let failed = ServiceState::Failed {
+            code: ORPHAN_STUCK.into(),
+        };
+        assert_eq!((status.state, status.pid), (failed, None));
+        let note = "marsad: php-fpm was not started: pid 4242 of the php-fpm pid file";
+        assert!(lines.iter().any(|l| l.text.starts_with(note)), "{lines:?}");
+        assert!(fake.signals().is_empty());
+        assert!(pid_file.path.exists(), "kept for the next try");
+        assert!(!daemon.proc_alive("php-fpm-8.4"));
+    }
+
+    // Runs `/bin/sleep` as the pool, which Windows does not have.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn start_pool_forgets_a_pid_that_cannot_be_told_once_the_port_is_free() {
+        let (dir, pid_file) = pid_file_of_ours();
+        let fake = Arc::new(Fake::new([Liveness::Unknown]));
+        let php = manager_with(dir.path(), fake.clone());
+        let daemon = Daemon::new(dir.path().to_path_buf());
+        let listen = Dial::Tcp(free_port());
+        let pool = bare_pool(dir.path(), listen, "/bin/sleep", &["30"]);
+
+        assert!(php.start_pool(&daemon, &pool).await);
+        assert!(daemon.proc_alive("php-fpm-8.4"));
+        assert!(!pid_file.path.exists(), "forgotten");
+        assert!(fake.signals().is_empty());
+        super::super::stop_pool(&daemon, PHP84).await;
+        assert!(!daemon.proc_alive("php-fpm-8.4"));
     }
 
     #[tokio::test]
@@ -715,10 +835,10 @@ mod tests {
             Liveness::Gone,
             Liveness::Unknown,
         ] {
-            pid_file.record(&Fake::new([now]), 4242, program).await;
+            assert!(!pid_file.record(&Fake::new([now]), 4242, program).await);
             assert!(!pid_file.path.exists());
         }
-        pid_file.record(&Fake::new([ours()]), 4242, program).await;
+        assert!(pid_file.record(&Fake::new([ours()]), 4242, program).await);
         let record = process::read_pid_file(&pid_file.path).unwrap();
         let want = PidRecord {
             pid: 4242,
@@ -736,7 +856,7 @@ mod tests {
         php.recovery = false;
         php.processes = fake.clone();
         let daemon = Daemon::new(dir.path().to_path_buf());
-        let pool = pool_for(dir.path(), Platform::LinuxX64, &v("8.4.3"), None).unwrap();
+        let pool = bare_pool(dir.path(), Dial::Tcp(free_port()), PROGRAM, &[]);
         let result = php.clear_orphan(&daemon, &pool, &pid_file).await;
         assert_eq!(result, Ok(()));
         assert!(fake.signals().is_empty());
@@ -805,12 +925,16 @@ mod tests {
         use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
         use std::process::{Child, Command, ExitStatus, Stdio};
 
-        use super::super::super::{Pool, stop_pool, write_pool};
+        use super::super::super::{pool_for, stop_pool, write_pool};
 
         /// The fake's mode: `hold` listens on `$MARSA_FPM_SOCKET`, `idle`
-        /// does nothing. Either ends by itself after two minutes.
+        /// does nothing, and `once` exits after a second the first time
+        /// (until `$MARSA_FPM_MARKER` exists), then does nothing. Each ends by
+        /// itself after two minutes.
         const FAKE: &str = "MARSA_FPM_FAKE";
         const SOCKET: &str = "MARSA_FPM_SOCKET";
+        /// For `once`: the file that says the first run is over.
+        const MARKER: &str = "MARSA_FPM_MARKER";
         const FAKE_TEST: &str = "daemon::php::orphan::tests::real::fake_php_fpm";
         const FAKE_LIFE: Duration = Duration::from_secs(120);
         /// Generous: a test binary can start slowly on a busy CI machine.
@@ -827,6 +951,14 @@ mod tests {
                 let path = std::env::var(SOCKET).expect("the socket path");
                 std::os::unix::net::UnixListener::bind(path).expect("the socket")
             });
+            if mode == "once" {
+                let marker = PathBuf::from(std::env::var(MARKER).expect("the marker path"));
+                if !marker.exists() {
+                    std::fs::write(&marker, "").expect("the marker");
+                    std::thread::sleep(Duration::from_secs(1));
+                    std::process::exit(1);
+                }
+            }
             std::thread::sleep(FAKE_LIFE);
         }
 
@@ -961,6 +1093,46 @@ mod tests {
             // Not ours, so the file was stale.
             assert!(!pid_file.path.exists());
             recorder.signals()
+        }
+
+        #[tokio::test]
+        async fn the_watcher_deletes_the_file_at_an_exit_and_writes_it_after_the_restart() {
+            let dir = tempfile::tempdir().unwrap();
+            let data = dir.path();
+            install_fake(data, "8.4.3");
+            let recorder = Arc::new(Recorder::default());
+            let php = manager(data, recorder.clone());
+            let daemon = Daemon::new(data.to_path_buf());
+            let mut pool = fake_pool(data, "8.4.3", "once");
+            let marker = data.join("first-run-over");
+            let marker = marker.to_string_lossy().into_owned();
+            pool.spec.env.insert(MARKER.to_owned(), marker);
+            let pid_file = PidFile::new(data, PHP84);
+            let read = || process::read_pid_file(&pid_file.path);
+
+            assert!(php.start_pool(&daemon, &pool).await);
+            let mut first = None;
+            wait_until("the first pid file", async || {
+                first = read();
+                first.is_some()
+            })
+            .await;
+            let first = first.expect("a record");
+            // The first run exits by itself: its file goes.
+            wait_until("no file after the exit", async || read().is_none()).await;
+            // The supervisor's restart gets a file of its own.
+            wait_until("the file of the restart", async || {
+                read().is_some_and(|record| record.pid != first.pid)
+            })
+            .await;
+            let second = read().expect("a record");
+            let runtime = daemon.pools.find("php-fpm-8.4").expect("listed");
+            let status = lock(&runtime).status.clone();
+            assert_eq!((status.pid, status.restarts), (Some(second.pid), 1));
+
+            stop_pool(&daemon, PHP84).await;
+            assert_eq!(read(), None);
+            assert!(recorder.signals().is_empty());
         }
 
         #[tokio::test]
