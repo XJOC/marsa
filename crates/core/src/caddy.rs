@@ -102,28 +102,53 @@ impl CaddyPaths {
     /// - `caddy_recipe_invalid`: the built-in recipe is broken or names no
     ///   `caddy` program. A test reads it, so this fails in CI first.
     pub fn program(&self) -> Result<PathBuf, CaddyError> {
+        // `installed_programs` is oldest first, so the last one is the newest.
+        self.installed_programs()?
+            .pop()
+            .ok_or_else(|| CaddyError::NotInstalled {
+                dir: self.runtime_dir(),
+            })
+    }
+
+    /// The Caddy program of every installed version, oldest first, by the
+    /// same rule as [`CaddyPaths::program`]. Empty when none is installed.
+    ///
+    /// Orphan recovery (ADR 0009) uses it: a Caddy left running by a crashed
+    /// `marsad` may be an older version than the newest one.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`CaddyPaths::program`], except that no installed version
+    /// gives an empty list, not `caddy_not_installed`.
+    pub fn installed_programs(&self) -> Result<Vec<PathBuf>, CaddyError> {
         let not_installed = || CaddyError::NotInstalled {
             dir: self.runtime_dir(),
         };
-        // `installed` sorts oldest first, so the last one is the newest.
-        let newest = self
+        let versions = self
             .runtimes
             .installed(Runtime::Caddy)
-            .map_err(|_| not_installed())?
-            .pop()
-            .ok_or_else(not_installed)?;
+            .map_err(|_| not_installed())?;
+        if versions.is_empty() {
+            return Ok(Vec::new());
+        }
         let platform = Platform::current().ok_or(CaddyError::UnsupportedPlatform)?;
         let recipe = recipes::builtin(Runtime::Caddy).map_err(|err| CaddyError::RecipeInvalid {
             reason: err.to_string(),
         })?;
-        let version_dir = self.runtimes.version_dir(Runtime::Caddy, &newest);
-        recipe
+        let layout = recipe
             .platform(platform)
-            .ok_or(CaddyError::UnsupportedPlatform)?
-            .program_path(&version_dir, PROGRAM)
-            .ok_or_else(|| CaddyError::RecipeInvalid {
-                reason: format!("no {PROGRAM:?} program for {platform}"),
+            .ok_or(CaddyError::UnsupportedPlatform)?;
+        versions
+            .iter()
+            .map(|version| {
+                let version_dir = self.runtimes.version_dir(Runtime::Caddy, version);
+                layout.program_path(&version_dir, PROGRAM).ok_or_else(|| {
+                    CaddyError::RecipeInvalid {
+                        reason: format!("no {PROGRAM:?} program for {platform}"),
+                    }
+                })
             })
+            .collect()
     }
 
     /// The root certificate of Marsa's CA:
@@ -723,6 +748,27 @@ mod tests {
 
         let program = CaddyPaths::in_dir(dir.path()).program();
         assert_eq!(program, Ok(caddy_in(dir.path(), "2.11.10")));
+    }
+
+    /// Every version, oldest first, so an orphan of an older Caddy is still
+    /// recognized after an update (ADR 0009). The newest is `program`.
+    #[test]
+    fn installed_programs_lists_every_version_oldest_first() {
+        let dir = tempfile::tempdir().expect("create a temp dir");
+        let paths = CaddyPaths::in_dir(dir.path());
+        assert_eq!(paths.installed_programs(), Ok(Vec::new()));
+
+        install_caddy(dir.path(), &["2.11.9", "2.11.10", ".tmp", "2.9.0"]);
+        let all = paths.installed_programs().expect("list the versions");
+        assert_eq!(
+            all,
+            [
+                caddy_in(dir.path(), "2.9.0"),
+                caddy_in(dir.path(), "2.11.9"),
+                caddy_in(dir.path(), "2.11.10"),
+            ]
+        );
+        assert_eq!(paths.program().ok().as_ref(), all.last());
     }
 
     #[test]

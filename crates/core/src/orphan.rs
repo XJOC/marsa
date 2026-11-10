@@ -218,7 +218,8 @@ pub enum Liveness {
 
 /// Compares the pid file with what the OS says now. `Ours` only when the
 /// process was started as the program the file names, that program is one of
-/// `accepted` (the ways our Caddy path can be spelled), and the start time is
+/// `accepted` (every installed Caddy of this data folder, and the resolved
+/// form of each), and the start time is
 /// the same. The daemon calls this again before each signal.
 pub fn classify_pidfile(record: &PidRecord, accepted: &[PathBuf], now: &Liveness) -> PidfileState {
     let pid = record.pid;
