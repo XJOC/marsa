@@ -65,6 +65,11 @@ jobs:
       - name: cargo nextest
         run: cargo nextest run --workspace
 
+      # nextest does not run doc tests. Two `compile_fail` doc tests prove that
+      # code outside the installer cannot build `VerifiedFile` or `Expected`.
+      - name: cargo test --doc
+        run: cargo test --doc --workspace
+
       # One system is enough for the license and advisory policy.
       - name: cargo deny
         if: runner.os == 'Linux'
