@@ -18,6 +18,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use marsa::daemon::api::router;
 use marsa::daemon::auth::AuthConfig;
+use marsa::daemon::caddy::caddy_spec_for;
 use marsa::daemon::state::Daemon;
 use marsa_core::platform::daemon_file::{Token, daemon_authority};
 use marsa_core::services::ServiceSpec;
@@ -110,8 +111,9 @@ struct App {
 }
 
 impl App {
-    /// `fake`: run the fake in this mode instead of `bin/caddy`. `None`
-    /// leaves the real path, where nothing is installed.
+    /// `fake`: run the fake in this mode instead of the newest Caddy in
+    /// `runtimes/caddy`. `None` leaves the real lookup, and nothing is
+    /// installed there.
     fn new(fake: Option<&str>) -> Self {
         Self::with_ready_limit(fake, WAIT)
     }
@@ -129,8 +131,8 @@ impl App {
             caddy.input.https_port = free_port();
             caddy.ready_limit = ready_limit;
             let config = caddy.paths.config_file.to_string_lossy().into_owned();
-            caddy.spec = ServiceSpec {
-                program: std::env::current_exe().expect("the test binary has a path"),
+            let program = std::env::current_exe().expect("the test binary has a path");
+            caddy.spec = Some(ServiceSpec {
                 // Runs only the entry point, under libtest and nextest alike.
                 args: ["fake_caddy", "--exact", "--nocapture"]
                     .map(String::from)
@@ -140,8 +142,8 @@ impl App {
                     (FAKE_CONFIG.to_owned(), config),
                 ]),
                 stop_grace: Duration::from_millis(500),
-                ..caddy.spec.clone()
-            };
+                ..caddy_spec_for(&caddy.paths, program)
+            });
         }
         let token = Token::generate().expect("a token");
         let bearer = token.bearer_header();
@@ -413,6 +415,21 @@ async fn unknown_ids_actions_and_queries_are_errors() {
 #[tokio::test]
 async fn start_without_caddy_is_409_and_failed() {
     let app = App::new(None);
+    let code = app
+        .error("POST", "/v1/services/caddy/start", StatusCode::CONFLICT)
+        .await;
+    assert_eq!(code, "caddy_not_installed");
+    assert_eq!(app.caddy().await.state, failed("caddy_not_installed"));
+    assert!(!app.daemon.proc_alive("caddy"));
+}
+
+/// The newest version folder counts only with its program in it.
+#[tokio::test]
+async fn start_with_a_version_folder_but_no_program_is_409_and_failed() {
+    let app = App::new(None);
+    let version = app.dir.path().join("runtimes").join("caddy").join("2.11.8");
+    std::fs::create_dir_all(&version).expect("a version folder");
+
     let code = app
         .error("POST", "/v1/services/caddy/start", StatusCode::CONFLICT)
         .await;

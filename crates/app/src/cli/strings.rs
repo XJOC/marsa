@@ -228,8 +228,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              then try again."
         ),
         "caddy_not_installed" => format!(
-            "Caddy is not installed: there is no program at {path}. Put the caddy program \
-             there, then try again."
+            "Caddy is not installed in {path}. Run \"marsa install caddy\", then try again."
         ),
         "caddy_config_write" => format!("Cannot write the Caddy config file {path}. {DISK}"),
         "caddy_start_timeout" => "Caddy started but did not answer in time, so it was stopped. \

@@ -19,13 +19,13 @@
 //! tokio.
 
 use std::collections::BTreeMap;
-use std::env::consts::EXE_SUFFIX;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
 use crate::php::PhpMinor;
-use crate::recipes::Platform;
+use crate::recipes::{self, Platform};
+use crate::runtimes::{Runtime, RuntimesDir};
 use crate::sites::{Site, SiteKind};
 
 /// The port of Caddy's admin API. It is private to Marsa, not Caddy's default
@@ -47,15 +47,19 @@ pub const SERVER_ID: &str = "marsa-srv";
 /// What the only server answers in M3.
 const GREETING: &str = "Marsa is running. No sites yet.";
 
+/// The name of Caddy's program in its recipe (`recipes/caddy.toml`).
+const PROGRAM: &str = "caddy";
+
 /// Where Caddy's files live inside the app data dir.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaddyPaths {
-    /// The Caddy executable: `bin/caddy` (`bin/caddy.exe` on Windows).
-    pub program: PathBuf,
     /// Caddy's own folder: `caddy/`. Its state stays inside it.
     pub home: PathBuf,
     /// The config file: `caddy/caddy.json`.
     pub config_file: PathBuf,
+    /// `runtimes/`, where [`CaddyPaths::program`] looks for the installed
+    /// versions.
+    runtimes: RuntimesDir,
 }
 
 impl CaddyPaths {
@@ -63,10 +67,63 @@ impl CaddyPaths {
     pub fn in_dir(app_data_dir: &Path) -> Self {
         let home = app_data_dir.join("caddy");
         Self {
-            program: app_data_dir.join("bin").join(format!("caddy{EXE_SUFFIX}")),
             config_file: home.join("caddy.json"),
             home,
+            runtimes: RuntimesDir::in_dir(app_data_dir),
         }
+    }
+
+    /// `runtimes/caddy/`: `marsa install caddy` puts each version in a folder
+    /// of its own here.
+    pub fn runtime_dir(&self) -> PathBuf {
+        self.runtimes.runtime_dir(Runtime::Caddy)
+    }
+
+    /// The Caddy program to run: the newest version in `runtimes/caddy`, at
+    /// the path its recipe gives for this system, so
+    /// `runtimes/caddy/<version>/caddy` (`caddy.exe` on Windows).
+    ///
+    /// The folder is read at each call, so a Caddy installed while `marsad`
+    /// runs is found at the next start. Only the folder names are checked,
+    /// as in [`RuntimesDir::installed`]: whether the program file is there is
+    /// for the caller to check.
+    ///
+    /// On Windows, reinstalling a version (`marsa install caddy <version>
+    /// --force`) while `marsad` runs its `caddy.exe` fails when the installer
+    /// renames the old folder aside: Windows does not move a folder with a
+    /// running program in it. Stop Caddy first (`marsa services stop caddy`),
+    /// then reinstall.
+    ///
+    /// # Errors
+    ///
+    /// - `caddy_not_installed`: no version in `runtimes/caddy`, or the folder
+    ///   cannot be listed.
+    /// - `caddy_unsupported_platform`: Marsa has no Caddy for this system.
+    /// - `caddy_recipe_invalid`: the built-in recipe is broken or names no
+    ///   `caddy` program. A test reads it, so this fails in CI first.
+    pub fn program(&self) -> Result<PathBuf, CaddyError> {
+        let not_installed = || CaddyError::NotInstalled {
+            dir: self.runtime_dir(),
+        };
+        // `installed` sorts oldest first, so the last one is the newest.
+        let newest = self
+            .runtimes
+            .installed(Runtime::Caddy)
+            .map_err(|_| not_installed())?
+            .pop()
+            .ok_or_else(not_installed)?;
+        let platform = Platform::current().ok_or(CaddyError::UnsupportedPlatform)?;
+        let recipe = recipes::builtin(Runtime::Caddy).map_err(|err| CaddyError::RecipeInvalid {
+            reason: err.to_string(),
+        })?;
+        let version_dir = self.runtimes.version_dir(Runtime::Caddy, &newest);
+        recipe
+            .platform(platform)
+            .ok_or(CaddyError::UnsupportedPlatform)?
+            .program_path(&version_dir, PROGRAM)
+            .ok_or_else(|| CaddyError::RecipeInvalid {
+                reason: format!("no {PROGRAM:?} program for {platform}"),
+            })
     }
 
     /// The root certificate of Marsa's CA:
@@ -249,14 +306,29 @@ pub enum Dial {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PhpPools(pub BTreeMap<PhpMinor, Vec<Dial>>);
 
-/// Why [`sites_config`] could not build the config. [`CaddyError::code`]
-/// gives a stable name that the UI maps to a message.
+/// Why [`sites_config`] could not build the config, or why
+/// [`CaddyPaths::program`] found no Caddy to run. [`CaddyError::code`] gives a
+/// stable name that the UI maps to a message.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CaddyError {
     /// JSON text is UTF-8, so such a path cannot be written in the config.
     /// The site scan already skips these folders; this is a second guard.
     #[error("{} is not valid UTF-8, so it cannot go in the Caddy config", .path.display())]
     PathNotUtf8 { path: PathBuf },
+
+    /// `dir` (`runtimes/caddy`) has no version, or cannot be listed.
+    /// `marsa install caddy` puts one there.
+    #[error("Caddy is not installed: no version in {}", .dir.display())]
+    NotInstalled { dir: PathBuf },
+
+    /// Marsa has no Caddy for the system this binary was built for.
+    #[error("Marsa has no Caddy for this system")]
+    UnsupportedPlatform,
+
+    /// The built-in Caddy recipe cannot give the program's path. A test reads
+    /// the recipe, so this is a programmer error.
+    #[error("the built-in Caddy recipe is not valid: {reason}")]
+    RecipeInvalid { reason: String },
 }
 
 impl CaddyError {
@@ -264,6 +336,9 @@ impl CaddyError {
     pub fn code(&self) -> &'static str {
         match self {
             CaddyError::PathNotUtf8 { .. } => "caddy_path_not_utf8",
+            CaddyError::NotInstalled { .. } => "caddy_not_installed",
+            CaddyError::UnsupportedPlatform => "caddy_unsupported_platform",
+            CaddyError::RecipeInvalid { .. } => "caddy_recipe_invalid",
         }
     }
 }
@@ -385,12 +460,14 @@ fn site_route(site: &Site, pools: &PhpPools) -> Result<Value, CaddyError> {
     }))
 }
 
-/// What Caddyfile `php_fastcgi` expands to, as `caddy adapt` (Caddy v2.11.7)
-/// prints it. Only `"hide": ["./Caddyfile"]` is left out of `file_server`:
-/// there is no Caddyfile. The routes, in order:
+/// What Caddyfile `php_fastcgi` expands to, as `caddy adapt` (Caddy v2.11.8,
+/// the version Marsa installs) prints it. Only `"hide": ["./Caddyfile"]` is
+/// left out of `file_server`: there is no Caddyfile. The routes, in order:
 ///
 /// 1. Set the root for the file matchers and the file server.
 /// 2. Send a folder with an `index.php` to the same path with a `/` (308).
+///    The `Location` is Caddy 2.11.8's: the `./` and `file_escaped` keep a
+///    path like `//evil.com` from becoming a redirect to another host.
 /// 3. Rewrite to the first that exists: the file, the folder's `index.php`,
 ///    else `index.php` (the front controller of Laravel).
 /// 4. Send `*.php` to the pool over FastCGI.
@@ -442,7 +519,7 @@ fn php_routes(site: &Site, pools: &PhpPools) -> Result<Vec<Value>, CaddyError> {
                 "status_code": 308,
                 "headers": {
                     "Location": [
-                        "{http.request.orig_uri.path}/{http.request.orig_uri.prefixed_query}",
+                        "./{http.request.orig_uri.path.file_escaped}/{http.request.orig_uri.prefixed_query}",
                     ],
                 },
             }],
@@ -562,14 +639,107 @@ mod tests {
         let paths = CaddyPaths::in_dir(dir.path());
 
         assert_eq!(
-            paths.program,
-            dir.path().join("bin").join(format!("caddy{EXE_SUFFIX}"))
+            paths.runtime_dir(),
+            dir.path().join("runtimes").join("caddy")
         );
         assert_eq!(paths.home, dir.path().join("caddy"));
         assert_eq!(
             paths.config_file,
             dir.path().join("caddy").join("caddy.json")
         );
+    }
+
+    /// `runtimes/caddy/<version>/caddy` (`caddy.exe` on Windows), built with
+    /// `join` so the separators match on every system.
+    fn caddy_in(data: &Path, version: &str) -> PathBuf {
+        let program = format!("caddy{}", std::env::consts::EXE_SUFFIX);
+        data.join("runtimes")
+            .join("caddy")
+            .join(version)
+            .join(program)
+    }
+
+    /// Makes the version folders under `runtimes/caddy`, without programs:
+    /// `program` reads only the folder names.
+    fn install_caddy(data: &Path, versions: &[&str]) {
+        for version in versions {
+            let dir = data.join("runtimes").join("caddy").join(version);
+            std::fs::create_dir_all(dir).expect("create a version folder");
+        }
+    }
+
+    #[test]
+    fn program_without_caddy_is_not_installed() {
+        let dir = tempfile::tempdir().expect("create a temp dir");
+        let paths = CaddyPaths::in_dir(dir.path());
+        let missing = CaddyError::NotInstalled {
+            dir: dir.path().join("runtimes").join("caddy"),
+        };
+
+        // No `runtimes/` at all.
+        let err = paths.program().expect_err("nothing is installed");
+        assert_eq!(err, missing);
+        assert_eq!(err.code(), "caddy_not_installed");
+
+        // Folders that are not full versions, and a file, do not count.
+        install_caddy(dir.path(), &[".tmp", "2.11", "latest"]);
+        std::fs::write(paths.runtime_dir().join("2.11.8"), "").expect("write a file");
+        assert_eq!(paths.program(), Err(missing));
+    }
+
+    #[test]
+    fn program_when_the_folder_cannot_be_listed_is_not_installed() {
+        let dir = tempfile::tempdir().expect("create a temp dir");
+        let paths = CaddyPaths::in_dir(dir.path());
+        // A file where the folder should be: listing it fails.
+        std::fs::create_dir_all(dir.path().join("runtimes")).expect("create runtimes");
+        std::fs::write(paths.runtime_dir(), "").expect("write a file");
+
+        let err = paths.program().expect_err("nothing can be listed");
+        assert_eq!(
+            err,
+            CaddyError::NotInstalled {
+                dir: paths.runtime_dir()
+            }
+        );
+        assert_eq!(err.code(), "caddy_not_installed");
+    }
+
+    #[test]
+    fn program_is_in_the_only_version() {
+        let dir = tempfile::tempdir().expect("create a temp dir");
+        install_caddy(dir.path(), &["2.11.8"]);
+
+        let program = CaddyPaths::in_dir(dir.path()).program();
+        assert_eq!(program, Ok(caddy_in(dir.path(), "2.11.8")));
+    }
+
+    /// Versions compare as numbers, not as text: `2.11.10` is newer than
+    /// `2.11.9`, though it sorts before it as text.
+    #[test]
+    fn program_is_in_the_newest_version() {
+        let dir = tempfile::tempdir().expect("create a temp dir");
+        install_caddy(dir.path(), &["2.11.9", "2.11.10", "2.9.0", "2.11.8"]);
+
+        let program = CaddyPaths::in_dir(dir.path()).program();
+        assert_eq!(program, Ok(caddy_in(dir.path(), "2.11.10")));
+    }
+
+    #[test]
+    fn program_errors_have_stable_codes() {
+        let cases = [
+            (
+                CaddyError::UnsupportedPlatform,
+                "caddy_unsupported_platform",
+            ),
+            (
+                CaddyError::RecipeInvalid { reason: "x".into() },
+                "caddy_recipe_invalid",
+            ),
+        ];
+        for (err, code) in cases {
+            assert_eq!(err.code(), code, "{err}");
+        }
     }
 
     #[test]
