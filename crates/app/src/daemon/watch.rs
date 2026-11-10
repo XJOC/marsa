@@ -37,6 +37,13 @@ pub const SETTLE: Duration = Duration::from_millis(300);
 /// The longest a rebuild waits while events keep coming.
 pub const MAX_WAIT: Duration = Duration::from_secs(2);
 
+/// After a rebuild that followed folder events, the list is built again this
+/// long later, then again after the next delay. A `git clone` or a copy makes
+/// the folder first and fills it later, so its first build may see an empty
+/// folder and call it a static site (task M4-24). A rebuild that finds no
+/// change publishes nothing.
+pub const RECHECKS: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(25)];
+
 /// Starts the watcher for `daemon`'s parked folders. It stops when
 /// `daemon.shutdown` is cancelled, or at [`ParkedWatcher::stop`].
 ///
@@ -217,6 +224,8 @@ async fn run(mut task: Task) {
     // The list as it is now; `changed` then reports each new one.
     let mut wanted = Some(parked.borrow_and_update().iter().cloned().collect());
     let mut burst: Option<Burst> = None;
+    // The next recheck after a burst: when, and which entry of `RECHECKS`.
+    let mut recheck: Option<(Instant, usize)> = None;
     loop {
         if let Some(dirs) = wanted.take() {
             let Some(added) = task.sync(dirs).await else {
@@ -244,6 +253,16 @@ async fn run(mut task: Task) {
                 if !task.rebuild().await {
                     break;
                 }
+                recheck = next_recheck(Instant::now(), 0);
+            }
+            () = tokio::time::sleep_until(recheck.map_or_else(Instant::now, |(at, _)| at)),
+                if recheck.is_some() =>
+            {
+                let step = recheck.map_or(0, |(_, step)| step);
+                if !task.rebuild().await {
+                    break;
+                }
+                recheck = next_recheck(Instant::now(), step + 1);
             }
         }
     }
@@ -254,6 +273,11 @@ async fn run(mut task: Task) {
         tracing::warn!(error = %err, "the parked folder watcher did not stop cleanly");
     }
     tracing::debug!("parked folder watcher stopped");
+}
+
+/// When to recheck after step `step` of [`RECHECKS`], or `None` after the last.
+fn next_recheck(now: Instant, step: usize) -> Option<(Instant, usize)> {
+    RECHECKS.get(step).map(|delay| (now + *delay, step))
 }
 
 /// `burst` with one more event, now.
@@ -474,6 +498,55 @@ mod tests {
         let lost = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
         assert!(matters(&Ok(lost)));
         assert!(matters(&Err(notify::Error::generic("test"))));
+    }
+
+    #[test]
+    fn rechecks_follow_a_rebuild_then_stop() {
+        let now = Instant::now();
+        assert_eq!(next_recheck(now, 0), Some((now + RECHECKS[0], 0)));
+        assert_eq!(next_recheck(now, 1), Some((now + RECHECKS[1], 1)));
+        assert_eq!(next_recheck(now, 2), None);
+    }
+
+    #[tokio::test]
+    async fn a_folder_filled_after_it_appeared_is_seen_again() {
+        // `git clone` makes the folder, then writes the files: the first build
+        // sees an empty folder (static), a recheck sees Laravel.
+        let (_temp, daemon, parked) = daemon();
+        park_on_disk(&daemon, vec![parked.clone()]).await;
+        let watcher = start(&daemon).expect("a watcher on this system");
+        first_rebuild(&watcher).await;
+        let mut events = daemon.events.subscribe();
+
+        let app = parked.join("app");
+        fs::create_dir(&app).unwrap();
+        let list = site_appears(&mut events, "app").await;
+        let kind = |list: &SiteList| {
+            list.sites
+                .iter()
+                .find(|site| site.name == "app")
+                .map(|site| site.kind)
+        };
+        assert_eq!(kind(&list), Some(marsa_core::sites::SiteKind::Static));
+
+        // Inside the folder: no event reaches a non-recursive watch.
+        fs::write(app.join("artisan"), "").unwrap();
+        fs::create_dir(app.join("public")).unwrap();
+        fs::write(app.join("public").join("index.php"), "").unwrap();
+        let deadline = tokio::time::Instant::now() + RECHECKS[0] + WAIT;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(left, events.recv()).await {
+                Ok(Ok(Event::SitesChanged(list)))
+                    if kind(&list) == Some(marsa_core::sites::SiteKind::Laravel) =>
+                {
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => panic!("the recheck never saw the Laravel files"),
+            }
+        }
+        watcher.stop(WAIT).await;
     }
 
     #[test]
