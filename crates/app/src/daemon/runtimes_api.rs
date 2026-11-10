@@ -2,7 +2,7 @@
 //!
 //! | Route | Answer |
 //! | --- | --- |
-//! | `GET /v1/runtimes` | `RuntimeList`: the installed versions of each runtime |
+//! | `GET /v1/runtimes` | `RuntimeList`: the installed versions and the default of each runtime |
 //! | `POST /v1/runtimes/{tool}/install` | 202 `InstallAccepted`, then `install` events on `/v1/events` |
 //! | `PUT /v1/runtimes/{tool}/default` | `DefaultVersion`: the new default of PHP or Node (task M5-01) |
 //!
@@ -18,9 +18,10 @@
 //!
 //! `PUT .../default` takes `{"version": "8.3"}`. The text must match an
 //! installed version, by the rules of a `.php-version` file; then it goes
-//! into `global.toml` as written, and the site list is built again. A site
-//! that follows the default gets the new PHP, and `sites_changed` makes Caddy
-//! and php-fpm follow. A refused request leaves `global.toml` as it was.
+//! into `global.toml` as written, `default_changed` goes to `/v1/events`, and
+//! the site list is built again. A site that follows the default gets the
+//! new PHP, and `sites_changed` makes Caddy and php-fpm follow. A refused
+//! request leaves `global.toml` as it was.
 
 use std::error::Error;
 use std::fmt;
@@ -163,7 +164,7 @@ impl Drop for Started {
 }
 
 async fn runtimes(State(daemon): State<Arc<Daemon>>) -> Result<Json<RuntimeList>, HttpError> {
-    // Three small folder reads; not worth a blocking thread.
+    // Four small folder reads and one small file; not worth a blocking thread.
     list(&daemon.data_dir).map(Json).map_err(|err| {
         tracing::warn!(code = err.code(), error = %err, "cannot list runtimes");
         HttpError::new(
@@ -174,20 +175,32 @@ async fn runtimes(State(daemon): State<Arc<Daemon>>) -> Result<Json<RuntimeList>
     })
 }
 
-/// The installed versions of every runtime, from `runtimes/`.
+/// The installed versions of every runtime, from `runtimes/`, and the
+/// defaults of PHP and Node, from `global.toml`. A `global.toml` that cannot
+/// be read gives no default, as in the site list.
 ///
 /// # Errors
 ///
 /// `runtimes_read` if a runtime folder exists but cannot be read.
 pub fn list(data_dir: &Path) -> Result<RuntimeList, RuntimesError> {
     let dir = RuntimesDir::in_dir(data_dir);
+    let global = config::load_global(&ConfigPaths::in_dir(data_dir).global).unwrap_or_else(|err| {
+        tracing::warn!(code = err.code(), error = %err, "global.toml");
+        GlobalConfig::default()
+    });
     let runtimes = Runtime::ALL
         .into_iter()
         .map(|runtime| {
             let installed = dir.installed(runtime)?;
+            let default = match runtime {
+                Runtime::Php => global.php.default.clone(),
+                Runtime::Node => global.node.default.clone(),
+                Runtime::Composer | Runtime::Caddy => None,
+            };
             Ok(RuntimeVersions {
                 runtime,
                 installed: installed.iter().map(ToString::to_string).collect(),
+                default,
             })
         })
         .collect::<Result<_, RuntimesError>>()?;
@@ -294,7 +307,12 @@ async fn run(started: Started, runtime: Runtime, body: InstallRequest) {
             });
             match job.await {
                 Ok(Ok(Some(line))) => {
-                    tracing::info!(id, runtime = ?runtime, default = %line, "set the default version")
+                    tracing::info!(id, runtime = ?runtime, default = %line, "set the default version");
+                    daemon.publish(Event::DefaultChanged(DefaultVersion {
+                        runtime,
+                        default: line,
+                        version: done.version.to_string(),
+                    }));
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(err)) => {
@@ -462,6 +480,8 @@ async fn set_default(
         version = %answer.version,
         "set the default version"
     );
+    // For the window's runtimes list, also when the CLI made the change.
+    daemon.publish(Event::DefaultChanged(answer.clone()));
     // The sites that follow the default now get the new PHP, and
     // `sites_changed` makes Caddy and php-fpm follow (task M4-11). Before
     // the answer, so a client that reads it then lists the new versions.
@@ -716,21 +736,36 @@ mod tests {
         ] {
             std::fs::create_dir_all(tmp.path().join("runtimes").join(dir)).unwrap();
         }
+        let shown = |got: RuntimeList| -> Vec<_> {
+            let row = |r: RuntimeVersions| (r.runtime, r.installed.join(","), r.default);
+            got.runtimes.into_iter().map(row).collect()
+        };
+        let want = [
+            (Runtime::Php, "8.3.27,8.4.23".to_owned(), None),
+            (Runtime::Node, "22.11.0".to_owned(), None),
+            (Runtime::Composer, String::new(), None),
+            (Runtime::Caddy, "2.11.7".to_owned(), None),
+        ];
+        assert_eq!(shown(list(tmp.path()).unwrap()), want);
+
+        // The defaults as written in `global.toml`, for PHP and Node only.
+        let mut global = GlobalConfig::default();
+        global.php.default = Some("8.4".into());
+        global.node.default = Some("22".into());
+        config::save_global(&ConfigPaths::in_dir(tmp.path()).global, &global).unwrap();
+        let [php, node, composer, caddy] = want;
+        let want = [
+            (php.0, php.1, Some("8.4".to_owned())),
+            (node.0, node.1, Some("22".to_owned())),
+            composer,
+            caddy,
+        ];
+        assert_eq!(shown(list(tmp.path()).unwrap()), want);
+
+        // A broken `global.toml` gives no default; the versions still show.
+        std::fs::write(ConfigPaths::in_dir(tmp.path()).global, "php = 1\n").unwrap();
         let got = list(tmp.path()).unwrap();
-        let shown: Vec<_> = got
-            .runtimes
-            .iter()
-            .map(|r| (r.runtime, r.installed.join(",")))
-            .collect();
-        assert_eq!(
-            shown,
-            [
-                (Runtime::Php, "8.3.27,8.4.23".to_owned()),
-                (Runtime::Node, "22.11.0".to_owned()),
-                (Runtime::Composer, String::new()),
-                (Runtime::Caddy, "2.11.7".to_owned()),
-            ]
-        );
+        assert!(got.runtimes.iter().all(|r| r.default.is_none()), "{got:?}");
     }
 
     // `cfg(unix)` outside `platform`: Unix file modes are the simplest way to

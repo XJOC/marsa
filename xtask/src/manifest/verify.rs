@@ -2,8 +2,8 @@
 //! Marsa, and check the JSON with the same rules as the installer (M2-02).
 //!
 //! The signature check goes through `Manifest::verify_embedded` only: no
-//! other key can be trusted. While the key slot is empty, that call refuses
-//! everything with `manifest_no_trusted_key`; the local JSON check still runs.
+//! other key can be trusted. The local JSON check runs first, so a JSON
+//! problem is reported even when the signature is bad.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -211,14 +211,14 @@ mod tests {
     }
 
     #[test]
-    fn empty_key_slot_is_reported_after_the_local_check() {
+    fn signature_is_checked_after_the_local_check() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("manifest.json");
         fs::write(&path, doc(1, 1, &file("phar", URL, SHA, 10))).expect("write");
         // No signature file.
         let err = run(&path, None).expect_err("no signature");
         assert!(format!("{err:#}").contains("no signature"), "{err:#}");
-        // Any signature: the empty key slot refuses before reading it.
+        // A junk signature: refused by the built-in key (or by its absence).
         fs::write(dir.path().join("manifest.json.minisig"), "junk").expect("write");
         let err = run(&path, None).expect_err("not verified");
         if marsa_core::installer::manifest::MANIFEST_PUBLIC_KEY.is_none() {

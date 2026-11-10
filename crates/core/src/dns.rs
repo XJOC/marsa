@@ -128,6 +128,7 @@ mod tests {
             docroot: PathBuf::from("/code").join(name),
             kind: SiteKind::Static,
             php: None,
+            php_source: None,
             secure: true,
         }
     }

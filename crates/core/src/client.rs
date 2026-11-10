@@ -223,8 +223,9 @@ impl DaemonClient {
 
     /// `PUT /v1/runtimes/{tool}/default`: makes `version` (`8.3`, `22`) the
     /// default of PHP or Node. Returns once `global.toml` is saved and the
-    /// site list is built again; a changed list also comes on
-    /// [`DaemonClient::events`] as `Event::SitesChanged`.
+    /// site list is built again. The new default also comes on
+    /// [`DaemonClient::events`] as `Event::DefaultChanged`, and a changed list
+    /// as `Event::SitesChanged`.
     ///
     /// # Errors
     ///

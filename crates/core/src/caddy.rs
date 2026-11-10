@@ -593,6 +593,7 @@ fn utf8(path: &Path) -> Result<&str, CaddyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolver::Source;
     use semver::Version;
 
     /// Collects every `listen` value in the JSON, at any depth. A value is
@@ -931,12 +932,14 @@ mod tests {
     /// A site for the tests. The paths are literal text, not `join`, so the
     /// snapshots are the same on Windows.
     fn site(name: &str, kind: SiteKind, docroot: &str, php: Option<&str>, secure: bool) -> Site {
+        let php = php.map(|text| Version::parse(text).expect("test versions are valid"));
         Site {
             name: name.to_string(),
             root: PathBuf::from(format!("/code/{name}")),
             docroot: PathBuf::from(docroot),
             kind,
-            php: php.map(|text| Version::parse(text).expect("test versions are valid")),
+            php_source: php.as_ref().map(|_| Source::GlobalDefault),
+            php,
             secure,
         }
     }

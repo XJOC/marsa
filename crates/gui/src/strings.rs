@@ -4,9 +4,11 @@
 
 use std::path::Path;
 
-use marsa_core::types::{ServiceAction, ServiceState, Site, SiteKind};
+use marsa_core::runtimes::Runtime;
+use marsa_core::types::{ServiceAction, ServiceState, Site, SiteKind, Source};
+use semver::Version;
 
-use crate::model::Connection;
+use crate::model::{Choice, Connection};
 
 pub const APP_NAME: &str = "Marsa";
 pub const WINDOW_SIZE: [f32; 2] = [900.0, 600.0];
@@ -33,14 +35,35 @@ pub const COLUMN_HTTPS: &str = "HTTPS";
 pub const COLUMN_KIND: &str = "Kind";
 pub const COLUMN_PHP: &str = "PHP";
 pub const COLUMN_FOLDER: &str = "Folder";
-/// The PHP column of a site with no PHP version: no PHP is installed.
+/// The PHP column of a site with no PHP version: no PHP is installed, or
+/// none matches what the site asks for.
 pub const NO_PHP: &str = "–";
+/// The first entry of a site's PHP list when the window cannot tell which
+/// version clearing the site's setting gives.
+pub const AUTO_PHP: &str = "Default";
+pub const AUTO_PHP_HINT: &str = "No setting for this site: its .php-version file, its \
+     composer.json, or the default PHP picks the version.";
 pub const HTTPS_HINT: &str = "Serve this site over HTTPS";
 pub const PARK_BUTTON: &str = "Park folder…";
 pub const PARK_FIELD_HINT: &str = "Full path of a folder of projects";
 pub const PARK_BUTTON_HINT: &str =
     "Every sub-folder of this folder becomes a site, named after it.";
 pub const SKIPPED_TITLE: &str = "Skipped folders";
+
+pub const RUNTIMES: &str = "Runtimes";
+pub const NO_RUNTIMES: &str = "No runtimes listed yet.";
+pub const COLUMN_RUNTIME: &str = "Runtime";
+pub const COLUMN_INSTALLED: &str = "Installed";
+pub const COLUMN_DEFAULT: &str = "Default";
+pub const NONE_INSTALLED: &str = "None installed";
+/// The default column of a runtime with a default but none set.
+pub const NO_DEFAULT: &str = "Not set";
+pub const DEFAULT_HINT: &str = "Used where nothing else picks a version: no site setting, \
+     no version file, and no composer.json or package.json.";
+/// The default column of Composer and Caddy.
+pub const NEWEST: &str = "Newest installed";
+pub const NEWEST_HINT: &str =
+    "This program has no default version: the newest installed one is used.";
 
 /// The window's own code: its background thread could not start.
 pub const BRIDGE_FAILED: &str = "bridge_failed";
@@ -88,11 +111,77 @@ pub fn kind_text(kind: SiteKind) -> String {
     }
 }
 
-/// The PHP column of the sites table: the version, or [`NO_PHP`].
-pub fn php_text(site: &Site) -> String {
-    site.php
-        .as_ref()
-        .map_or_else(|| NO_PHP.to_owned(), ToString::to_string)
+/// The first entry of a site's PHP list: what the site runs with no setting
+/// of its own. `Default (8.4.23)`, `From .php-version (8.3.27)`, or `From
+/// composer.json (8.3.27)` by where its version came from; [`AUTO_PHP`]
+/// when the site has its own setting, so the window cannot tell.
+pub fn auto_php(site: &Site) -> String {
+    match (&site.php_source, &site.php) {
+        (Some(Source::GlobalDefault), Some(version)) => format!("Default ({version})"),
+        (Some(Source::VersionFile(path) | Source::Constraint(path)), Some(version)) => {
+            format!("From {} ({version})", file_name(path))
+        }
+        _ => AUTO_PHP.to_owned(),
+    }
+}
+
+/// The closed PHP list of a site: the entry shown, or [`NO_PHP`] when the
+/// site has no PHP version.
+pub fn php_choice_text(choice: &Choice, site: &Site) -> String {
+    match choice {
+        Choice::Version(version) => version.to_string(),
+        Choice::Auto if site.php.is_none() => NO_PHP.to_owned(),
+        Choice::Auto => auto_php(site),
+    }
+}
+
+/// Over the closed PHP list of a site: what the list does, and the file its
+/// version came from, if any.
+pub fn site_php_hint(site: &Site) -> String {
+    let what = "PHP for this site. A version picked here wins over the project's \
+                .php-version and composer.json.";
+    match &site.php_source {
+        Some(Source::VersionFile(path) | Source::Constraint(path)) => {
+            format!("{what}\nNow from {}.", path.display())
+        }
+        _ => what.to_owned(),
+    }
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// The name column of the Runtimes section, as the CLI writes it.
+pub fn runtime_name(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Php => "PHP",
+        Runtime::Node => "Node.js",
+        Runtime::Composer => "Composer",
+        Runtime::Caddy => "Caddy",
+    }
+}
+
+/// The installed column of the Runtimes section: `8.3.27, 8.4.23`.
+pub fn installed_text(versions: &[Version]) -> String {
+    if versions.is_empty() {
+        return NONE_INSTALLED.to_owned();
+    }
+    let texts: Vec<String> = versions.iter().map(ToString::to_string).collect();
+    texts.join(", ")
+}
+
+/// The closed default list of PHP or Node: the version the default picks,
+/// the saved text when it picks none, or [`NO_DEFAULT`].
+pub fn default_text(chosen: Option<&Version>, saved: Option<&str>) -> String {
+    match (chosen, saved) {
+        (Some(version), _) => version.to_string(),
+        (None, Some(text)) => format!("{text} (not installed)"),
+        (None, None) => NO_DEFAULT.to_owned(),
+    }
 }
 
 /// Under the park field once the daemon accepted the folder.
@@ -182,9 +271,14 @@ fn error_message(code: &str) -> Option<&'static str> {
         "config_read" => "Cannot read the Marsa settings file.",
         "config_invalid" => "The Marsa settings file has an error. Fix the file, then try again.",
         "config_write" => "Cannot write the Marsa settings file.",
-        // `PUT /v1/runtimes/{tool}/default` (M5-01).
+        // `PUT /v1/runtimes/{tool}/default` (M5-01), `GET /v1/runtimes`, and
+        // the PHP version of a site (M5-02).
         "version_not_installed" => "That version is not installed. Install it first.",
         "no_default_version" => "This program has no default version: the newest one is used.",
+        "invalid_version" => "That is not a valid version number.",
+        "unsupported_alias" => "Version names such as \"latest\" are not supported. Pick a number.",
+        "unknown_tool" => "This daemon does not know that program.",
+        "runtimes_read" => "Cannot read the folder of installed versions.",
         BRIDGE_FAILED => "The window could not start its background worker.",
         _ => return None,
     })
@@ -252,8 +346,8 @@ mod tests {
     #[test]
     fn known_daemon_codes_have_a_message() {
         // Auth (M3-03), routes (M3-06), services and Caddy (M3-07), the
-        // orphan check (M3-11), sites (M4-10b), php-fpm pools (M4-23), and
-        // the default version (M5-01).
+        // orphan check (M3-11), sites (M4-10b), php-fpm pools (M4-23), the
+        // default version (M5-01), and the runtimes list (M5-02).
         for code in [
             "unauthorized",
             "origin_rejected",
@@ -289,9 +383,13 @@ mod tests {
             "config_read",
             "config_invalid",
             "config_write",
-            // The default version (M5-01).
+            // The default version (M5-01) and the PHP lists (M5-02).
             "version_not_installed",
             "no_default_version",
+            "invalid_version",
+            "unsupported_alias",
+            "unknown_tool",
+            "runtimes_read",
             BRIDGE_FAILED,
         ] {
             assert!(error_message(code).is_some(), "no message for {code}");
@@ -334,23 +432,84 @@ mod tests {
         assert_eq!(skip_reason("site_new"), "Unexpected error (site_new).");
     }
 
+    fn v(text: &str) -> Version {
+        text.parse().unwrap()
+    }
+
+    fn shop(php: Option<&str>, source: Option<Source>) -> Site {
+        Site {
+            name: "shop".into(),
+            root: "/code/shop".into(),
+            docroot: "/code/shop/public".into(),
+            kind: SiteKind::Laravel,
+            php: php.map(v),
+            php_source: source,
+            secure: true,
+        }
+    }
+
     #[test]
-    fn the_kind_and_php_columns() {
+    fn the_kind_column() {
         assert_eq!(kind_text(SiteKind::Laravel), "Laravel");
         assert_eq!(
             kind_text(SiteKind::NodeProxy { port: 5173 }),
             "Proxy to port 5173"
         );
-        let mut site = Site {
-            name: "shop".into(),
-            root: "/code/shop".into(),
-            docroot: "/code/shop/public".into(),
-            kind: SiteKind::Laravel,
-            php: None,
-            secure: true,
-        };
-        assert_eq!(php_text(&site), NO_PHP);
-        site.php = Some("8.4.23".parse().unwrap());
-        assert_eq!(php_text(&site), "8.4.23");
+    }
+
+    #[test]
+    fn the_first_php_entry_says_where_the_version_comes_from() {
+        let file = PathBuf::from("/code/shop/.php-version");
+        let composer = PathBuf::from("/code/shop/composer.json");
+        let cases = [
+            (Some(Source::GlobalDefault), "Default (8.4.23)"),
+            (
+                Some(Source::VersionFile(file)),
+                "From .php-version (8.4.23)",
+            ),
+            (
+                Some(Source::Constraint(composer)),
+                "From composer.json (8.4.23)",
+            ),
+            // The site's own setting: clearing it may give any of the above.
+            (Some(Source::ProjectSetting), "Default"),
+        ];
+        for (source, want) in cases {
+            let site = shop(Some("8.4.23"), source);
+            assert_eq!(auto_php(&site), want);
+            assert_eq!(php_choice_text(&Choice::Auto, &site), want);
+        }
+        let pinned = shop(Some("8.3.27"), Some(Source::ProjectSetting));
+        assert_eq!(
+            php_choice_text(&Choice::Version(v("8.3.27")), &pinned),
+            "8.3.27"
+        );
+        // No PHP version at all.
+        assert_eq!(php_choice_text(&Choice::Auto, &shop(None, None)), NO_PHP);
+    }
+
+    #[test]
+    fn the_php_hint_names_the_file() {
+        let file = Source::VersionFile(PathBuf::from("/code/shop/.php-version"));
+        let hint = site_php_hint(&shop(Some("8.4.23"), Some(file)));
+        assert!(
+            hint.ends_with("\nNow from /code/shop/.php-version."),
+            "{hint}"
+        );
+        let hint = site_php_hint(&shop(Some("8.4.23"), Some(Source::GlobalDefault)));
+        assert!(!hint.contains("Now from"), "{hint}");
+    }
+
+    #[test]
+    fn the_runtimes_columns() {
+        assert_eq!(runtime_name(Runtime::Node), "Node.js");
+        assert_eq!(installed_text(&[]), NONE_INSTALLED);
+        assert_eq!(
+            installed_text(&[v("8.3.27"), v("8.4.23")]),
+            "8.3.27, 8.4.23"
+        );
+        assert_eq!(default_text(Some(&v("8.4.23")), Some("8.4")), "8.4.23");
+        assert_eq!(default_text(None, Some("8.2")), "8.2 (not installed)");
+        assert_eq!(default_text(None, None), NO_DEFAULT);
     }
 }

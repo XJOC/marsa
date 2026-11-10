@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
+use crate::resolver::{Resolution, Source};
+
 /// The top-level domain of every site: `shop` is served at `https://shop.test`.
 pub const TLD: &str = "test";
 
@@ -38,9 +40,16 @@ pub struct Site {
     /// Found at detection time, so the Caddy config never reads the disk.
     pub docroot: PathBuf,
     pub kind: SiteKind,
-    /// The PHP version picked for this site. `None`: no PHP is installed.
+    /// The PHP version picked for this site. `None`: no PHP is installed, or
+    /// none matches what the site asks for.
     #[serde(with = "optional_version")]
     pub php: Option<Version>,
+    /// Where `php` came from (task M5-02), so the UI can say why it was
+    /// picked: the site's own setting, a version file, `composer.json`, or
+    /// the global default. `None` exactly when `php` is `None`. Missing in
+    /// JSON from an older daemon reads as `None`.
+    #[serde(default)]
+    pub php_source: Option<Source>,
     /// Served over HTTPS. The default is `true`.
     pub secure: bool,
 }
@@ -85,14 +94,20 @@ pub struct Found {
 }
 
 impl Found {
-    /// Builds the [`Site`] with the settings that come from the daemon.
-    pub fn into_site(self, php: Option<Version>, secure: bool) -> Site {
+    /// Builds the [`Site`] with the settings that come from the daemon: the
+    /// PHP version the resolver picked, if any, and the HTTPS setting.
+    pub fn into_site(self, php: Option<Resolution>, secure: bool) -> Site {
+        let (php, php_source) = match php {
+            Some(resolution) => (Some(resolution.version), Some(resolution.source)),
+            None => (None, None),
+        };
         Site {
             name: self.name,
             root: self.root,
             docroot: self.detected.docroot,
             kind: self.detected.kind,
             php,
+            php_source,
             secure,
         }
     }
@@ -676,7 +691,12 @@ mod tests {
                 docroot: PathBuf::from("/code/shop"),
             },
         };
-        let site = found.into_site(Some(Version::new(8, 4, 1)), true);
+        let resolution = Resolution {
+            tool: crate::resolver::Tool::Php,
+            version: Version::new(8, 4, 1),
+            source: Source::VersionFile(PathBuf::from("/code/shop/.php-version")),
+        };
+        let site = found.into_site(Some(resolution), true);
         assert_eq!(site.host(), "shop.test");
 
         let json = serde_json::to_value(&site).expect("serialize");
@@ -688,15 +708,48 @@ mod tests {
                 "docroot": "/code/shop",
                 "kind": { "type": "node_proxy", "port": 3000 },
                 "php": "8.4.1",
+                "php_source": { "type": "version_file", "path": "/code/shop/.php-version" },
                 "secure": true,
             })
         );
         let back: Site = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, site);
 
-        let none = Site { php: None, ..site };
+        // The sources with no path, and with the manifest's path.
+        for (source, want) in [
+            (
+                Source::ProjectSetting,
+                serde_json::json!({ "type": "project_setting" }),
+            ),
+            (
+                Source::GlobalDefault,
+                serde_json::json!({ "type": "global_default" }),
+            ),
+            (
+                Source::Constraint(PathBuf::from("/code/shop/composer.json")),
+                serde_json::json!({ "type": "constraint", "path": "/code/shop/composer.json" }),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&source).expect("serialize"), want);
+            assert_eq!(
+                serde_json::from_value::<Source>(want).expect("back"),
+                source
+            );
+        }
+
+        let none = Site {
+            php: None,
+            php_source: None,
+            ..site
+        };
         let json = serde_json::to_value(&none).expect("serialize");
         assert_eq!(json["php"], serde_json::Value::Null);
+        assert_eq!(json["php_source"], serde_json::Value::Null);
         assert_eq!(serde_json::from_value::<Site>(json).expect("back"), none);
+
+        // An older daemon sends no `php_source`.
+        let mut old = serde_json::to_value(&none).expect("serialize");
+        old.as_object_mut().expect("an object").remove("php_source");
+        assert_eq!(serde_json::from_value::<Site>(old).expect("back"), none);
     }
 }
