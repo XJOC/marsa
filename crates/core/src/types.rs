@@ -16,6 +16,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 /// Defined once, in `helper`, next to the request they answer.
 pub use crate::helper::{OpResult, OpStatus};
+/// Defined once, in `resolver`, which picks the version: `Site::php_source`.
+pub use crate::resolver::Source;
 use crate::runtimes::Runtime;
 /// Defined once, in `sites`, where the daemon builds them.
 pub use crate::sites::{Site, SiteKind};
@@ -147,6 +149,10 @@ pub enum Event {
     /// The whole new site list: after each park, link, or patch, and after a
     /// rebuild that found a different list.
     SitesChanged(SiteList),
+    /// The default version of PHP or Node, after `PUT
+    /// /v1/runtimes/{tool}/default` saved it or the first install set it
+    /// (task M5-02). A changed site list follows as `sites_changed`.
+    DefaultChanged(DefaultVersion),
     /// The end of a `POST /v1/setup`, with the same report as its answer.
     SetupFinished(SetupReport),
     /// The daemon is stopping; the stream ends after this event.
@@ -222,6 +228,11 @@ pub struct RuntimeVersions {
     pub runtime: Runtime,
     /// Full semver text (`8.4.23`), oldest first. Empty if none is installed.
     pub installed: Vec<String>,
+    /// The default of PHP or Node as saved in `global.toml` (`8.4`), and
+    /// left out of the JSON when there is none. Always `None` for Composer
+    /// and Caddy: the newest installed version is used (task M5-02).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
 }
 
 /// `GET /v1/runtimes`: every runtime, installed or not, in a fixed order
@@ -641,6 +652,17 @@ mod tests {
                 "data": { "service": "caddy", "seq": 0, "at_ms": 1, "stream": "stdout", "text": "hi" },
             }),
         );
+        round_trip(
+            &Event::DefaultChanged(DefaultVersion {
+                runtime: Runtime::Php,
+                default: "8.3".into(),
+                version: "8.3.27".into(),
+            }),
+            json!({
+                "type": "default_changed",
+                "data": { "runtime": "php", "default": "8.3", "version": "8.3.27" },
+            }),
+        );
         round_trip(&Event::ShuttingDown, json!({ "type": "shutting_down" }));
     }
 
@@ -679,17 +701,19 @@ mod tests {
                 RuntimeVersions {
                     runtime: Runtime::Php,
                     installed: vec!["8.3.27".into(), "8.4.23".into()],
+                    default: Some("8.4".into()),
                 },
                 RuntimeVersions {
                     runtime: Runtime::Composer,
                     installed: vec![],
+                    default: None,
                 },
             ],
         };
         round_trip(
             &list,
             json!({ "runtimes": [
-                { "runtime": "php", "installed": ["8.3.27", "8.4.23"] },
+                { "runtime": "php", "installed": ["8.3.27", "8.4.23"], "default": "8.4" },
                 { "runtime": "composer", "installed": [] },
             ] }),
         );
@@ -819,6 +843,7 @@ mod tests {
                 docroot: PathBuf::from("/code/shop/public"),
                 kind: SiteKind::Laravel,
                 php: Some(semver::Version::new(8, 4, 23)),
+                php_source: Some(Source::GlobalDefault),
                 secure: true,
             }],
             skipped: vec![SkippedFolder {
@@ -834,7 +859,8 @@ mod tests {
                     "parked": ["/code"],
                     "sites": [{
                         "name": "shop", "root": "/code/shop", "docroot": "/code/shop/public",
-                        "kind": { "type": "laravel" }, "php": "8.4.23", "secure": true,
+                        "kind": { "type": "laravel" }, "php": "8.4.23",
+                        "php_source": { "type": "global_default" }, "secure": true,
                     }],
                     "skipped": [{ "path": "/code/متجر", "code": "site_name_invalid" }],
                 },

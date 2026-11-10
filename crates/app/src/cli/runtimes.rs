@@ -74,6 +74,7 @@ mod tests {
                 .map(|(runtime, versions)| RuntimeVersions {
                     runtime: *runtime,
                     installed: versions.iter().map(|v| (*v).to_owned()).collect(),
+                    default: None,
                 })
                 .collect(),
         }

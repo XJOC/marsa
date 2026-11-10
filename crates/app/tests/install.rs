@@ -725,13 +725,16 @@ async fn use_makes_a_version_the_default_and_the_sites_follow() {
         version: "8.4.23".into(),
     };
     assert_eq!(answer, want);
+    // The window learns the new default first, then the new site list.
+    let changed = events.try_recv().expect("a default_changed event");
+    assert_eq!(changed, Event::DefaultChanged(want));
     let global = config::load_global(&global_toml).expect("global.toml");
     assert_eq!(global.php.default.as_deref(), Some("8.4.23"));
     let list = next_sites(&mut events).await;
     assert_eq!(php_of(&list, "blog").as_deref(), Some("8.4.23"));
 
     // Node has its own table. No site runs Node, so the list stays the same
-    // and no `sites_changed` is sent.
+    // and only `default_changed` is sent.
     served
         .expect(
             &["use", "node", "22"],
@@ -748,6 +751,12 @@ async fn use_makes_a_version_the_default_and_the_sites_follow() {
         ),
         (Some("8.4.23"), Some("22"))
     );
+    let node = DefaultVersion {
+        runtime: Runtime::Node,
+        default: "22".into(),
+        version: "22.11.0".into(),
+    };
+    assert_eq!(events.try_recv().ok(), Some(Event::DefaultChanged(node)));
     assert!(events.try_recv().is_err(), "the site list did not change");
 }
 

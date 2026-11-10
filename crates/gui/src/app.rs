@@ -11,7 +11,7 @@ use egui_extras::{Column, Size, StripBuilder, TableBuilder};
 use marsa_core::types::{LogStream, ServiceAction, Site, SkippedFolder};
 
 use crate::bridge::{self, Command};
-use crate::model::{self, Connection, Model, SitesNotice, Update};
+use crate::model::{self, Change, Choice, Connection, Model, SitesNotice, Update};
 use crate::strings;
 
 const ACTIONS: [ServiceAction; 3] = [
@@ -30,6 +30,8 @@ const LOG_HEIGHT: f32 = 170.0;
 const PARK_FIELD_WIDTH: f32 = 360.0;
 /// The most skipped folders shown at once; more scroll.
 const SKIPPED_ROWS: usize = 4;
+/// The narrowest PHP column: a closed list with a version in it.
+const PHP_COLUMN_WIDTH: f32 = 110.0;
 
 pub struct App {
     model: Model,
@@ -78,6 +80,11 @@ impl eframe::App for App {
                 // The notice was about the last action.
                 self.model.notice = None;
                 self.bridge.send(command);
+            }
+        });
+        egui::Panel::top("runtimes").show(ui, |ui| {
+            if let Some(change) = runtimes(ui, &mut self.model) {
+                self.bridge.send(Command::Save(change));
             }
         });
         egui::Panel::bottom("log")
@@ -169,6 +176,74 @@ fn services(ui: &mut egui::Ui, model: &Model) -> Option<Command> {
     pressed
 }
 
+/// The Runtimes section: each runtime, its installed versions, and its
+/// default; a list for the default of PHP and Node. Four rows, so a plain
+/// grid. Returns the default the user picked, if it is a change.
+fn runtimes(ui: &mut egui::Ui, model: &mut Model) -> Option<Change> {
+    ui.strong(strings::RUNTIMES);
+    let mut picked = None;
+    if model.runtimes.is_empty() {
+        ui.weak(strings::NO_RUNTIMES);
+    } else {
+        let connected = model.is_connected();
+        egui::Grid::new("runtimes")
+            .striped(true)
+            .num_columns(3)
+            .show(ui, |ui| {
+                for title in [
+                    strings::COLUMN_RUNTIME,
+                    strings::COLUMN_INSTALLED,
+                    strings::COLUMN_DEFAULT,
+                ] {
+                    ui.strong(title);
+                }
+                ui.end_row();
+                for row in &model.runtimes {
+                    ui.label(strings::runtime_name(row.runtime));
+                    ui.label(strings::installed_text(&row.installed));
+                    if !model::has_default(row.runtime) {
+                        ui.weak(strings::NEWEST).on_hover_text(strings::NEWEST_HINT);
+                        ui.end_row();
+                        continue;
+                    }
+                    let chosen = model.default_choice(row.runtime);
+                    let text = strings::default_text(chosen.as_ref(), row.default.as_deref());
+                    let enabled = connected && !row.installed.is_empty();
+                    ui.add_enabled_ui(enabled, |ui| {
+                        let list =
+                            egui::ComboBox::from_id_salt(("default", row.runtime.dir_name()))
+                                .selected_text(text)
+                                .show_ui(ui, |ui| {
+                                    for version in &row.installed {
+                                        let selected = chosen.as_ref() == Some(version);
+                                        let entry =
+                                            ui.selectable_label(selected, version.to_string());
+                                        if entry.clicked() {
+                                            picked = Some((row.runtime, version.clone()));
+                                        }
+                                    }
+                                });
+                        list.response.on_hover_text(strings::DEFAULT_HINT);
+                    });
+                    ui.end_row();
+                }
+            });
+    }
+    if let Some(code) = &model.runtimes_notice {
+        ui.colored_label(ui.visuals().error_fg_color, strings::error_text(code));
+    }
+    let (runtime, version) = picked?;
+    model.choose_default(runtime, version)
+}
+
+/// What the user did in the sites table.
+enum SiteAction {
+    /// Flipped the HTTPS switch.
+    Secure(Command),
+    /// Picked an entry in the PHP list of the site `site`.
+    Php { site: String, choice: Choice },
+}
+
 /// The sites section: the park field, the sites table, and the folders that
 /// did not become a site. Returns what the user asked for, if anything.
 fn sites(ui: &mut egui::Ui, model: &mut Model) -> Option<Command> {
@@ -201,7 +276,8 @@ fn sites(ui: &mut egui::Ui, model: &mut Model) -> Option<Command> {
         None => {}
     }
 
-    let list = &model.sites;
+    let view: &Model = model;
+    let list = &view.sites;
     let line = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
     let skipped_height = if list.skipped.is_empty() {
         0.0
@@ -209,7 +285,7 @@ fn sites(ui: &mut egui::Ui, model: &mut Model) -> Option<Command> {
         // The title and up to `SKIPPED_ROWS` lines.
         line * (list.skipped.len().min(SKIPPED_ROWS) + 1) as f32
     };
-    let mut switched = None;
+    let mut action = None;
     StripBuilder::new(ui)
         .size(Size::remainder().at_least(line * 2.0))
         .size(Size::exact(skipped_height))
@@ -218,24 +294,31 @@ fn sites(ui: &mut egui::Ui, model: &mut Model) -> Option<Command> {
                 if list.sites.is_empty() {
                     ui.weak(strings::NO_SITES);
                 } else {
-                    switched = site_table(ui, &list.sites, connected);
+                    action = site_table(ui, view, connected);
                 }
             });
             strip.cell(|ui| skipped(ui, &list.skipped));
         });
-    if switched.is_some() {
-        // The notice was about the last action.
-        model.sites_notice = None;
-        command = switched;
+    match action {
+        Some(SiteAction::Secure(switched)) => {
+            // The notice was about the last action.
+            model.sites_notice = None;
+            command = Some(switched);
+        }
+        Some(SiteAction::Php { site, choice }) => {
+            command = model.choose_site_php(&site, choice).map(Command::Save);
+        }
+        None => {}
     }
     command
 }
 
-/// The sites table. `rows` draws the visible rows only. Returns the HTTPS
-/// switch the user flipped, if any.
-fn site_table(ui: &mut egui::Ui, sites: &[Site], connected: bool) -> Option<Command> {
+/// The sites table. `rows` draws the visible rows only. Returns what the
+/// user did in it, if anything.
+fn site_table(ui: &mut egui::Ui, model: &Model, connected: bool) -> Option<SiteAction> {
+    let sites = &model.sites.sites;
     let row_height = ui.spacing().interact_size.y;
-    let mut switched = None;
+    let mut action = None;
     TableBuilder::new(ui)
         .id_salt("sites")
         .striped(true)
@@ -247,7 +330,7 @@ fn site_table(ui: &mut egui::Ui, sites: &[Site], connected: bool) -> Option<Comm
         .column(Column::auto().at_least(120.0).at_most(320.0).clip(true))
         .column(Column::auto())
         .column(Column::auto().at_least(60.0))
-        .column(Column::auto().at_least(40.0))
+        .column(Column::auto().at_least(PHP_COLUMN_WIDTH))
         .column(Column::remainder().at_least(80.0).clip(true))
         .header(row_height, |mut header| {
             for title in [
@@ -284,17 +367,20 @@ fn site_table(ui: &mut egui::Ui, sites: &[Site], connected: bool) -> Option<Comm
                         .add_enabled(connected, switch)
                         .on_hover_text(strings::HTTPS_HINT);
                     if response.changed() {
-                        switched = Some(Command::Secure {
+                        action = Some(SiteAction::Secure(Command::Secure {
                             site: site.name.clone(),
                             secure,
-                        });
+                        }));
                     }
                 });
                 row.col(|ui| {
                     ui.label(strings::kind_text(site.kind));
                 });
                 row.col(|ui| {
-                    ui.label(strings::php_text(site));
+                    if let Some(choice) = site_php(ui, model, site, connected) {
+                        let site = site.name.clone();
+                        action = Some(SiteAction::Php { site, choice });
+                    }
                 });
                 row.col(|ui| {
                     let folder = site.root.display().to_string();
@@ -302,7 +388,40 @@ fn site_table(ui: &mut egui::Ui, sites: &[Site], connected: bool) -> Option<Comm
                 });
             });
         });
-    switched
+    action
+}
+
+/// The PHP list of one site: first what the site runs with no setting of its
+/// own, then each installed PHP. Like the HTTPS switch, it shows the model's
+/// value on every frame. Returns the entry the user clicked, if any.
+fn site_php(ui: &mut egui::Ui, model: &Model, site: &Site, connected: bool) -> Option<Choice> {
+    let installed = model.php_versions();
+    if installed.is_empty() && site.php.is_none() {
+        ui.label(strings::NO_PHP);
+        return None;
+    }
+    let chosen = model.site_choice(site);
+    let mut clicked = None;
+    ui.add_enabled_ui(connected, |ui| {
+        let list = egui::ComboBox::from_id_salt(("php", &site.name))
+            .selected_text(strings::php_choice_text(&chosen, site))
+            .show_ui(ui, |ui| {
+                let auto = ui
+                    .selectable_label(chosen == Choice::Auto, strings::auto_php(site))
+                    .on_hover_text(strings::AUTO_PHP_HINT);
+                if auto.clicked() {
+                    clicked = Some(Choice::Auto);
+                }
+                for version in installed {
+                    let selected = matches!(&chosen, Choice::Version(v) if v == version);
+                    if ui.selectable_label(selected, version.to_string()).clicked() {
+                        clicked = Some(Choice::Version(version.clone()));
+                    }
+                }
+            });
+        list.response.on_hover_text(strings::site_php_hint(site));
+    });
+    clicked
 }
 
 /// The folders that did not become a site, each with the reason.

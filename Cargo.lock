@@ -2106,6 +2106,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "marsa-core",
+ "semver",
  "tokio",
  "tracing",
  "tracing-subscriber",

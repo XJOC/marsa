@@ -12,10 +12,12 @@ use std::time::Duration;
 
 use eframe::egui;
 use marsa_core::client::{self, ClientError, DaemonClient, StreamItem};
-use marsa_core::types::{Event, ServiceAction, SiteList, SitePatch};
+use marsa_core::types::{
+    Event, InstallProgress, InstallUpdate, ServiceAction, SiteList, SitePatch,
+};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::model::{LOG_SERVICE, Update};
+use crate::model::{Change, LOG_SERVICE, Update};
 use crate::strings;
 
 /// The wait before the next attempt to connect.
@@ -34,6 +36,8 @@ pub enum Command {
     Park(PathBuf),
     /// A site's HTTPS switch.
     Secure { site: String, secure: bool },
+    /// A default version or a site's PHP version, picked in a list.
+    Save(Change),
 }
 
 /// The window's end of the bridge.
@@ -171,7 +175,16 @@ async fn session(
                     if let Event::SitesChanged(list) = &event {
                         log_sites("sites changed", list);
                     }
+                    let installed = matches!(
+                        &event,
+                        Event::Install(InstallProgress { update: InstallUpdate::Done(_), .. })
+                    );
                     if !window.send(Update::Event(event)) {
+                        return End::Closed;
+                    }
+                    // A new version, and maybe a first default: no event
+                    // carries the whole list, so read it again.
+                    if installed && !window.send(runtimes(&client).await) {
                         return End::Closed;
                     }
                 }
@@ -197,9 +210,9 @@ async fn session(
     }
 }
 
-/// Sends the whole services table, the site list, and the recent log lines.
-/// A failed read is a notice: the events still keep the window up to date.
-/// `false` once the window is gone.
+/// Sends the whole services table, the site list, the runtimes, and the
+/// recent log lines. A failed read is a notice: the events still keep the
+/// window up to date. `false` once the window is gone.
 async fn refresh(client: &DaemonClient, window: &Window) -> bool {
     let services = match client.services().await {
         Ok(services) => Update::Services(services),
@@ -212,17 +225,30 @@ async fn refresh(client: &DaemonClient, window: &Window) -> bool {
         }
         Err(err) => sites_failed("cannot read the sites", &err),
     };
+    let runtimes = runtimes(client).await;
     let log = match client.logs(LOG_SERVICE).await {
         Ok(lines) => Update::Log(lines),
         Err(err) => notice("cannot read the log", &err),
     };
-    window.send(services) && window.send(sites) && window.send(log)
+    window.send(services) && window.send(sites) && window.send(runtimes) && window.send(log)
+}
+
+/// The runtimes list, or why it cannot be read.
+async fn runtimes(client: &DaemonClient) -> Update {
+    match client.runtimes().await {
+        Ok(list) => Update::Runtimes(list),
+        Err(err) => {
+            tracing::warn!(code = err.code(), error = %err, "cannot read the runtimes");
+            Update::RuntimesFailed(err.code().to_owned())
+        }
+    }
 }
 
 /// Runs the command on its own task, so a slow restart does not hold up the
 /// events. The new state arrives as an event, so the daemon's answer is not
 /// passed on: an older answer could arrive after a newer event. Only a
-/// failure, and an accepted park for the notice line, are sent here.
+/// failure, an accepted park for the notice line, and whether a [`Change`]
+/// was saved (its list shows the pick until then) are sent here.
 fn run_command(client: &DaemonClient, command: Command, window: Window) {
     let client = client.clone();
     tokio::spawn(async move {
@@ -253,11 +279,39 @@ fn run_command(client: &DaemonClient, command: Command, window: Window) {
                     .err()
                     .map(|err| sites_failed(&format!("cannot change HTTPS for {site}"), &err))
             }
+            Command::Save(change) => Some(save(&client, change).await),
         };
         if let Some(update) = update {
             window.send(update);
         }
     });
+}
+
+/// Sends `change` to the daemon. `Saved` or `NotSaved` with the error code.
+async fn save(client: &DaemonClient, change: Change) -> Update {
+    let result = match &change {
+        Change::Default { runtime, version } => {
+            client.set_default(*runtime, version).await.map(drop)
+        }
+        Change::SitePhp { site, php } => {
+            let patch = SitePatch {
+                php: Some(php.clone()),
+                ..SitePatch::default()
+            };
+            client.update_site(site, &patch).await.map(drop)
+        }
+    };
+    match result {
+        Ok(()) => {
+            tracing::info!(?change, "setting saved");
+            Update::Saved(change)
+        }
+        Err(err) => {
+            tracing::warn!(code = err.code(), error = %err, ?change, "cannot save the setting");
+            let code = err.code().to_owned();
+            Update::NotSaved { change, code }
+        }
+    }
 }
 
 fn notice(what: &str, err: &ClientError) -> Update {

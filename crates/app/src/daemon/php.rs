@@ -604,6 +604,7 @@ pub fn write_if_changed(path: &Path, text: &str) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marsa_core::resolver::Source;
 
     const PHP84: PhpMinor = PhpMinor { major: 8, minor: 4 };
     const PHP83: PhpMinor = PhpMinor { major: 8, minor: 3 };
@@ -620,6 +621,7 @@ mod tests {
             root,
             kind,
             php: php.map(v),
+            php_source: php.map(|_| Source::GlobalDefault),
             secure: true,
         }
     }

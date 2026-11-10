@@ -190,12 +190,13 @@ pub fn build(data_dir: &Path, sites_toml: &SitesConfig) -> SiteList {
         let setting = own.or_else(|| sites_toml.site_for(&found.root).map(|(_, table)| table));
         let setting = setting.and_then(|table| table.php.as_deref());
         let default = global.php.default.as_deref();
-        // No PHP at all: skip the version files, the answer is `None`.
+        // No PHP at all: skip the version files, the answer is `None`. The
+        // resolution keeps where the version came from, for the window.
         let php = if installed.is_empty() {
             None
         } else {
             match resolver::resolve(Tool::Php, &found.root, setting, &installed, default) {
-                Ok(resolution) => Some(resolution.version),
+                Ok(resolution) => Some(resolution),
                 Err(err) => {
                     let code = err.code();
                     tracing::debug!(site = %found.name, code, error = %err, "no PHP version");
@@ -311,7 +312,7 @@ mod tests {
     use axum::extract::Request;
     use axum::response::Response;
     use marsa_core::platform::daemon_file::{Token, daemon_authority};
-    use marsa_core::types::{ErrorBody, Event};
+    use marsa_core::types::{ErrorBody, Event, Source};
     use serde_json::{Value, json};
     use tempfile::TempDir;
     use tokio_stream::StreamExt as _;
@@ -668,5 +669,50 @@ mod tests {
         assert_eq!(app.refused("GET", "/v1/sites", None).await, broken);
         let body = json!({ "path": code });
         assert_eq!(app.refused("POST", park, Some(body)).await, broken);
+    }
+
+    #[tokio::test]
+    async fn each_site_says_where_its_php_version_came_from() {
+        let app = App::new();
+        let code = app.code();
+        app.install_php(&["8.3.27", "8.4.23"]);
+        // `api` has only a constraint, `^8.3`: the newest match wins.
+        fs::create_dir(code.join("api")).unwrap();
+        let composer = code.join("api").join("composer.json");
+        fs::write(&composer, r#"{ "require": { "php": "^8.3" } }"#).unwrap();
+        let mut global = GlobalConfig::default();
+        global.php.default = Some("8.3".into());
+        config::save_global(&ConfigPaths::in_dir(app.dir.path()).global, &global).unwrap();
+        let source = |list: &SiteList, name: &str| {
+            let site = site(list, name);
+            (php(site), site.php_source.clone())
+        };
+        let version_file = Source::VersionFile(code.join("shop").join(".php-version"));
+        let shop = (Some("8.4.23".to_owned()), Some(version_file.clone()));
+
+        let list = app.park(&code).await;
+        assert_eq!(source(&list, "shop"), shop);
+        let api = (
+            Some("8.4.23".to_owned()),
+            Some(Source::Constraint(composer)),
+        );
+        assert_eq!(source(&list, "api"), api);
+        let blog = (Some("8.3.27".to_owned()), Some(Source::GlobalDefault));
+        assert_eq!(source(&list, "blog"), blog);
+
+        // The site's own setting wins over its `.php-version`; clearing it
+        // gives the file back.
+        let body = json!({ "php": "8.3" });
+        let list = app.list("PATCH", "/v1/sites/shop", Some(body)).await;
+        let own = (Some("8.3.27".to_owned()), Some(Source::ProjectSetting));
+        assert_eq!(source(&list, "shop"), own);
+        let body = json!({ "php": null });
+        let list = app.list("PATCH", "/v1/sites/shop", Some(body)).await;
+        assert_eq!(source(&list, "shop"), shop);
+
+        // No match: no version, and so no source.
+        let body = json!({ "php": "7.4" });
+        let list = app.list("PATCH", "/v1/sites/shop", Some(body)).await;
+        assert_eq!(source(&list, "shop"), (None, None));
     }
 }
