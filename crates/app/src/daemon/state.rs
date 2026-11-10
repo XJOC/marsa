@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::api::HttpError;
 use super::caddy::CaddyManager;
+use super::php::Pools;
 use super::runtimes_api::Installs;
 use super::sites_api;
 use super::supervisor::ServiceHandle;
@@ -62,6 +63,9 @@ pub struct Daemon {
     pub shutdown: CancellationToken,
     /// Caddy: how it runs, its status, and its recent lines.
     pub caddy: CaddyManager,
+    /// The status and recent lines of each php-fpm pool (task M4-23). The
+    /// sites sync starts and stops the pools.
+    pub pools: Pools,
     /// The runtime installer, and whether an install runs (task M3-12).
     pub installs: Installs,
     /// Held for the whole of each sites job, from reading `sites.toml` to
@@ -75,6 +79,7 @@ impl Daemon {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
             caddy: CaddyManager::new(&data_dir),
+            pools: Pools::default(),
             data_dir,
             state: Arc::default(),
             events: broadcast::channel(EVENT_CAPACITY).0,

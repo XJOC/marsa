@@ -1,7 +1,7 @@
 //! Stopping a managed process, the options every child of `marsad` gets, and
-//! what the daemon needs to find an orphan Caddy (ADR 0009): who runs under a
-//! pid, its real executable, who listens on a port, signals, `run/caddy.pid`,
-//! and the data folder's instance id.
+//! what the daemon needs to find an orphan Caddy or php-fpm (ADR 0009): who
+//! runs under a pid, its real executable, who listens on a port, signals, the
+//! pid files in `run/`, and the data folder's instance id.
 //!
 //! The `#[cfg]` for these lives here, so the supervisor has none. Every tool
 //! runs with an absolute path and an argument array, never through a shell.
@@ -181,6 +181,64 @@ pub async fn identity(_pid: u32) -> Liveness {
     Liveness::Unknown
 }
 
+/// Who runs under `pid`, by the file it really runs (links resolved) and its
+/// start time. For a program that rewrites its own `argv[0]`, such as
+/// php-fpm (`php-fpm: master process (...)`): there [`identity`] finds no
+/// path on macOS. macOS reads the start time with `/bin/ps`, the file with
+/// [`executable`], then the start time again: a pid that changed hands in
+/// between is `Unknown`.
+#[cfg(target_os = "macos")]
+pub async fn real_identity(pid: u32) -> Liveness {
+    let started = match start_time(pid).await {
+        Ok(started) => started,
+        Err(state) => return state,
+    };
+    let exe = executable(pid).await;
+    match (start_time(pid).await, exe) {
+        (Ok(again), Some(exe)) if again == started => Liveness::Alive { exe, started },
+        (Err(Liveness::Gone), _) => Liveness::Gone,
+        _ => Liveness::Unknown,
+    }
+}
+
+/// Who runs under `pid`, by the file it really runs and its start time:
+/// [`identity`], which reads the `exe` link already.
+#[cfg(target_os = "linux")]
+pub async fn real_identity(pid: u32) -> Liveness {
+    identity(pid).await
+}
+
+/// Not supported on this system: never ours.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub async fn real_identity(_pid: u32) -> Liveness {
+    Liveness::Unknown
+}
+
+/// The start time of `pid` from `/bin/ps`, in the form [`identity`] gives.
+/// `Err(Gone)` for no process or a zombie, `Err(Unknown)` when `ps` fails.
+#[cfg(target_os = "macos")]
+async fn start_time(pid: u32) -> Result<String, Liveness> {
+    if pid == 0 {
+        return Err(Liveness::Unknown);
+    }
+    let mut ps = Command::new("/bin/ps");
+    ps.args(["-ww", "-p", &pid.to_string(), "-o", "stat=,lstart="])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC0");
+    match run_tool(ps).await {
+        Some(out) if out.status.success() => {
+            match crate::orphan::parse_ps_start(&String::from_utf8_lossy(&out.stdout)) {
+                Some(('Z', _)) => Err(Liveness::Gone),
+                Some((_, started)) => Ok(started),
+                None => Err(Liveness::Unknown),
+            }
+        }
+        // `ps` prints nothing and fails for a pid with no process.
+        Some(out) if out.stdout.is_empty() => Err(Liveness::Gone),
+        _ => Err(Liveness::Unknown),
+    }
+}
+
 /// The file `pid` really runs, links resolved: not `argv[0]`. macOS asks
 /// `/usr/sbin/lsof` for the text files of the process: the first one is the
 /// executable, then `dyld`. Linux reads the `exe` link. `None` when it
@@ -336,15 +394,21 @@ fn create_new(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
-/// Reads `run/caddy.pid`. `None` if it is missing, too long, or not a pid
-/// record: then it names no pid.
+/// Reads a pid file (`run/caddy.pid`, `run/php-fpm-<minor>.pid`). `None` if
+/// it is missing, not a regular file, too long, or not a pid record: then it
+/// names no pid. A link, even to a regular file, is refused, and so is a FIFO,
+/// whose `open` would wait for a writer without end.
 pub fn read_pid_file(path: &Path) -> Option<PidRecord> {
+    if !fs::symlink_metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = File::open(path).ok()?;
+    // Checked again on the open file: the path may have changed in between.
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut text = String::new();
-    File::open(path)
-        .ok()?
-        .take(PID_FILE_MAX + 1)
-        .read_to_string(&mut text)
-        .ok()?;
+    file.take(PID_FILE_MAX + 1).read_to_string(&mut text).ok()?;
     if text.len() as u64 > PID_FILE_MAX {
         return None;
     }
@@ -413,6 +477,33 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(identity(pid).await, Liveness::Gone);
+    }
+
+    // The systems where `real_identity` reads a process.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn real_identity_is_the_real_file_whatever_argv0_says() {
+        use std::os::unix::process::CommandExt as _;
+
+        // Like php-fpm, which writes `php-fpm: master process (...)` there.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg0("php-fpm: master process (/x)")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let Liveness::Alive { exe, started } = real_identity(pid).await else {
+            panic!("no identity for {pid}");
+        };
+        assert_eq!(exe, fs::canonicalize("/bin/sleep").unwrap());
+        assert!(!started.is_empty());
+        // `identity` and `real_identity` give the same start time.
+        if let Liveness::Alive { started: same, .. } = identity(pid).await {
+            assert_eq!(same, started);
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(real_identity(pid).await, Liveness::Gone);
     }
 
     // The systems where `executable` reads a process.
@@ -504,6 +595,45 @@ mod tests {
         remove_pid_file(&path).unwrap();
         remove_pid_file(&path).unwrap();
         assert_eq!(read_pid_file(&path), None);
+    }
+
+    // FIFOs and symlinks to them are a Unix matter.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_or_a_link_at_the_pid_file_path_names_no_pid_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("caddy.pid");
+        let made = std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let real = dir.path().join("real.pid");
+        let record = PidRecord {
+            pid: 42,
+            exe: PathBuf::from("/data/bin/caddy"),
+            started: "Wed Nov  4 03:31:27 2026".into(),
+        };
+        write_pid_file(&real, &record).unwrap();
+        let to_real = dir.path().join("to-real.pid");
+        let to_fifo = dir.path().join("to-fifo.pid");
+        std::os::unix::fs::symlink(&real, &to_real).unwrap();
+        std::os::unix::fs::symlink(&fifo, &to_fifo).unwrap();
+
+        // On a thread: a `read_pid_file` that opens the FIFO never returns,
+        // and must not hang the test run.
+        let (sender, answers) = std::sync::mpsc::channel();
+        let paths = [fifo, to_fifo, to_real];
+        std::thread::spawn(move || {
+            for path in paths {
+                let _ = sender.send(read_pid_file(&path));
+            }
+        });
+        for _ in 0..3 {
+            let answer = answers.recv_timeout(std::time::Duration::from_secs(10));
+            assert_eq!(answer, Ok(None));
+        }
+        assert_eq!(read_pid_file(&real), Some(record));
     }
 
     #[test]
