@@ -59,7 +59,7 @@ pub struct Pins {
 
 impl Pins {
     pub fn parse(text: &str) -> Result<Pins> {
-        let raw: RawPins = toml::from_str(text).context("pins.toml is not valid")?;
+        let mut raw: RawPins = toml::from_str(text).context("pins.toml is not valid")?;
         ensure!(
             raw.serial >= MIN_SERIAL,
             "serial must be {MIN_SERIAL} or more"
@@ -70,9 +70,18 @@ impl Pins {
             raw.spc_line
         );
         let mut versions = BTreeMap::new();
-        let lists = [raw.php, raw.node, raw.composer, raw.caddy];
-        for (runtime, list) in RUNTIMES.into_iter().zip(lists) {
-            versions.insert(runtime.dir_name(), versions_of(runtime, list.versions)?);
+        for runtime in RUNTIMES {
+            // An exhaustive `match`, not a `zip` by position: a new `Runtime`
+            // fails to compile here until it has a list, instead of being
+            // dropped silently or paired with another runtime's list.
+            let list = match runtime {
+                Runtime::Php => &mut raw.php,
+                Runtime::Node => &mut raw.node,
+                Runtime::Composer => &mut raw.composer,
+                Runtime::Caddy => &mut raw.caddy,
+            };
+            let list = std::mem::take(&mut list.versions);
+            versions.insert(runtime.dir_name(), versions_of(runtime, list)?);
         }
         let mut overrides = BTreeMap::new();
         for o in raw.overrides {
