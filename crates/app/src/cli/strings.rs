@@ -170,6 +170,22 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             example_version(d.runtime)
         ),
 
+        // `marsa use`: `PUT /v1/runtimes/{tool}/default` (task M5-01).
+        "version_not_installed" => match (d.runtime, d.requested) {
+            (Some(runtime), Some(version)) => format!(
+                "{name} {version} is not installed. Run \"marsa install {} {version}\", then \
+                 try again.",
+                runtime.dir_name()
+            ),
+            _ => "This version is not installed. Run \"marsa runtimes\" to see the installed \
+                  versions."
+                .into(),
+        },
+        "no_default_version" => format!(
+            "{} has no default version: Marsa always runs the newest installed one.",
+            d.runtime.map_or("This program", runtime_name)
+        ),
+
         // Built-in recipes: `RecipeError`. Tests check them, so a user should
         // never see these.
         "recipe_invalid"
@@ -477,6 +493,19 @@ pub const COMPOSER_TIP: &str = "Tip: run \"marsa install composer\" for Composer
 
 pub const NONE_INSTALLED: &str = "none installed";
 
+// `marsa use`.
+
+/// The new default, and the installed version it picks now when that says
+/// more (`8.3` picks `8.3.12`).
+pub fn default_set(runtime: Runtime, default: &str, version: &str) -> String {
+    let name = runtime_name(runtime);
+    if default == version {
+        format!("{name} {default} is now the default.")
+    } else {
+        format!("{name} {default} is now the default ({version}).")
+    }
+}
+
 // `marsa daemon`.
 
 /// `marsa daemon start` and `marsa daemon status`. Never the token.
@@ -688,6 +717,9 @@ mod tests {
         "extract_io",
         "unsupported_alias",
         "invalid_version",
+        // `PUT /v1/runtimes/{tool}/default` (task M5-01).
+        "version_not_installed",
+        "no_default_version",
         "recipe_invalid",
         "recipe_unknown_platform",
         "recipe_bad_path",

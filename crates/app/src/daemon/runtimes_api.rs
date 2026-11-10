@@ -4,6 +4,7 @@
 //! | --- | --- |
 //! | `GET /v1/runtimes` | `RuntimeList`: the installed versions of each runtime |
 //! | `POST /v1/runtimes/{tool}/install` | 202 `InstallAccepted`, then `install` events on `/v1/events` |
+//! | `PUT /v1/runtimes/{tool}/default` | `DefaultVersion`: the new default of PHP or Node (task M5-01) |
 //!
 //! The daemon runs the installer (`marsa_core::installer::install`) in a task
 //! of its own and sends each `InstallEvent` on the event bus. The last event
@@ -14,6 +15,12 @@
 //! `install_busy`. The installer's own file lock (`runtimes/.tmp/install.lock`)
 //! still guards against another process; that case ends as `failed` with the
 //! same code.
+//!
+//! `PUT .../default` takes `{"version": "8.3"}`. The text must match an
+//! installed version, by the rules of a `.php-version` file; then it goes
+//! into `global.toml` as written, and the site list is built again. A site
+//! that follows the default gets the new PHP, and `sites_changed` makes Caddy
+//! and php-fpm follow. A refused request leaves `global.toml` as it was.
 
 use std::error::Error;
 use std::fmt;
@@ -26,16 +33,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use marsa_core::config::{self, ConfigError, ConfigPaths};
+use marsa_core::config::{self, ConfigError, ConfigPaths, GlobalConfig, ToolDefaults};
 use marsa_core::installer::extract::ExtractError;
 use marsa_core::installer::fetch::FetchError;
 use marsa_core::installer::{self, InstallEnv, InstallError, InstalledVersion};
+use marsa_core::resolver::{self, BadRequest, Tool};
 use marsa_core::runtimes::{Runtime, RuntimesDir, RuntimesError};
 use marsa_core::types::{
-    Event, InstallAccepted, InstallDone, InstallEvent, InstallFailure, InstallProgress,
-    InstallRequest, InstallUpdate, RuntimeList, RuntimeVersions,
+    DefaultRequest, DefaultVersion, Event, InstallAccepted, InstallDone, InstallEvent,
+    InstallFailure, InstallProgress, InstallRequest, InstallUpdate, RuntimeList, RuntimeVersions,
 };
 
 use super::api::HttpError;
@@ -46,6 +54,7 @@ pub fn routes() -> Router<Arc<Daemon>> {
     Router::new()
         .route("/v1/runtimes", get(runtimes))
         .route("/v1/runtimes/{tool}/install", post(install))
+        .route("/v1/runtimes/{tool}/default", put(set_default))
 }
 
 /// What [`RunInstall::run`] returns.
@@ -277,11 +286,13 @@ async fn run(started: Started, runtime: Runtime, body: InstallRequest) {
             tracing::info!(id, version = %done.version, already = done.already, "install done");
             // The first PHP or Node becomes the default, so a site or a
             // folder with no version file works at once (task M4-22).
-            let data_dir = daemon.data_dir.clone();
+            let worker = Arc::clone(&daemon);
             let version = done.version.clone();
-            match tokio::task::spawn_blocking(move || first_default(&data_dir, runtime, &version))
-                .await
-            {
+            let job = tokio::task::spawn_blocking(move || {
+                let _one = worker.lock_global();
+                first_default(&worker.data_dir, runtime, &version)
+            });
+            match job.await {
                 Ok(Ok(Some(line))) => {
                     tracing::info!(id, runtime = ?runtime, default = %line, "set the default version")
                 }
@@ -388,7 +399,7 @@ fn chain(err: &dyn Error) -> String {
 /// none: `major.minor` for PHP (`8.4`), the major for Node (`22`), so later
 /// updates of that line follow. Returns the new
 /// default, or `None` when one was already set or the runtime has no default
-/// (Composer).
+/// (Composer). The caller holds [`Daemon::lock_global`].
 ///
 /// # Errors
 ///
@@ -398,25 +409,164 @@ fn first_default(
     runtime: Runtime,
     version: &semver::Version,
 ) -> Result<Option<String>, ConfigError> {
-    let path = ConfigPaths::in_dir(data_dir).global;
-    let mut global = config::load_global(&path)?;
+    let Some(tool) = default_tool(runtime) else {
+        return Ok(None);
+    };
     // PHP lines differ by minor (8.3, 8.4); Node lines by major (22), as
     // in `.nvmrc`.
-    let (tool, line) = match runtime {
-        Runtime::Php => (
-            &mut global.php,
-            format!("{}.{}", version.major, version.minor),
-        ),
-        Runtime::Node => (&mut global.node, version.major.to_string()),
-        // No default version: the newest installed one is used.
-        Runtime::Composer | Runtime::Caddy => return Ok(None),
+    let line = match tool {
+        Tool::Php => format!("{}.{}", version.major, version.minor),
+        Tool::Node => version.major.to_string(),
     };
-    if tool.default.is_some() {
+    let path = ConfigPaths::in_dir(data_dir).global;
+    let mut global = config::load_global(&path)?;
+    let defaults = defaults_mut(&mut global, tool);
+    if defaults.default.is_some() {
         return Ok(None);
     }
-    tool.default = Some(line.clone());
+    defaults.default = Some(line.clone());
     config::save_global(&path, &global)?;
     Ok(Some(line))
+}
+
+async fn set_default(
+    State(daemon): State<Arc<Daemon>>,
+    path: Result<UrlPath<String>, PathRejection>,
+    body: Result<Json<DefaultRequest>, JsonRejection>,
+) -> Result<Json<DefaultVersion>, HttpError> {
+    let UrlPath(tool) =
+        path.map_err(|err| HttpError::new(err.status(), "invalid_path", err.body_text()))?;
+    let runtime = runtime(&tool)?;
+    let tool = default_tool(runtime).ok_or_else(|| no_default_version(runtime))?;
+    let Json(DefaultRequest { version }) =
+        body.map_err(|err| HttpError::new(err.status(), "invalid_body", err.body_text()))?;
+    // The disk on a blocking thread; the lock is dropped there, before any
+    // `.await`.
+    let worker = Arc::clone(&daemon);
+    let job = tokio::task::spawn_blocking(move || {
+        let _one = worker.lock_global();
+        save_default(&worker.data_dir, tool, version.trim())
+    });
+    let answer = job.await.unwrap_or_else(|err| {
+        tracing::error!(error = %err, "the default version job failed");
+        let message = "the default version job failed";
+        Err(HttpError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            message,
+        ))
+    })?;
+    tracing::info!(
+        runtime = runtime.dir_name(),
+        default = %answer.default,
+        version = %answer.version,
+        "set the default version"
+    );
+    // The sites that follow the default now get the new PHP, and
+    // `sites_changed` makes Caddy and php-fpm follow (task M4-11). Before
+    // the answer, so a client that reads it then lists the new versions.
+    // Node is in no site yet; then the list stays the same and nothing is
+    // sent. `rebuild_sites` logs its errors; the default is saved either way.
+    let _ = daemon.rebuild_sites().await;
+    Ok(Json(answer))
+}
+
+/// Makes `text` the default of `tool` in `global.toml` if it matches an
+/// installed version, and returns it with the version it picks now. Writes
+/// nothing when it is the default already, and nothing on any error. The
+/// caller holds [`Daemon::lock_global`].
+///
+/// # Errors
+///
+/// `invalid_version` or `unsupported_alias` (400) for text that is not a
+/// version, `version_not_installed` (409) when no installed version matches,
+/// `runtimes_read` (500) when the runtime's folder cannot be read, and a
+/// `config_*` code (500) when `global.toml` cannot be read or written.
+fn save_default(data_dir: &Path, tool: Tool, text: &str) -> Result<DefaultVersion, HttpError> {
+    let runtime = Runtime::from(tool);
+    // First alone, so text that is not a version is refused whatever is
+    // installed, as `PATCH /v1/sites/{name}` refuses it.
+    resolver::best_match(text, &[]).map_err(|err| bad_version(text, err))?;
+    let installed = RuntimesDir::in_dir(data_dir)
+        .installed(runtime)
+        .map_err(|err| {
+            tracing::warn!(code = err.code(), error = %err, "cannot list the installed versions");
+            HttpError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                err.code(),
+                err.to_string(),
+            )
+        })?;
+    let version = match resolver::best_match(text, &installed) {
+        Ok(Some(version)) => version,
+        Ok(None) => {
+            let message = format!(
+                "no installed {} version matches {text:?}",
+                runtime.dir_name()
+            );
+            return Err(HttpError::new(
+                StatusCode::CONFLICT,
+                "version_not_installed",
+                message,
+            ));
+        }
+        Err(err) => return Err(bad_version(text, err)),
+    };
+    let path = ConfigPaths::in_dir(data_dir).global;
+    let mut global = config::load_global(&path).map_err(|err| global_error(&err))?;
+    let defaults = defaults_mut(&mut global, tool);
+    if defaults.default.as_deref() != Some(text) {
+        defaults.default = Some(text.to_owned());
+        config::save_global(&path, &global).map_err(|err| global_error(&err))?;
+    }
+    Ok(DefaultVersion {
+        runtime,
+        default: text.to_owned(),
+        version: version.to_string(),
+    })
+}
+
+/// The resolver's tool for `runtime`, or `None` for a runtime with no default
+/// version (Composer, Caddy): the newest installed one is used.
+fn default_tool(runtime: Runtime) -> Option<Tool> {
+    match runtime {
+        Runtime::Php => Some(Tool::Php),
+        Runtime::Node => Some(Tool::Node),
+        Runtime::Composer | Runtime::Caddy => None,
+    }
+}
+
+/// The `[php]` or `[node]` table of `global.toml`.
+fn defaults_mut(global: &mut GlobalConfig, tool: Tool) -> &mut ToolDefaults {
+    match tool {
+        Tool::Php => &mut global.php,
+        Tool::Node => &mut global.node,
+    }
+}
+
+fn no_default_version(runtime: Runtime) -> HttpError {
+    let message = format!(
+        "{} has no default version; the newest installed one is used",
+        runtime.dir_name()
+    );
+    HttpError::new(StatusCode::BAD_REQUEST, "no_default_version", message)
+}
+
+/// The same code and status as `PATCH /v1/sites/{name}` gives for this text.
+fn bad_version(text: &str, err: BadRequest) -> HttpError {
+    let message = format!("{text:?}: {err}");
+    HttpError::new(StatusCode::BAD_REQUEST, err.code(), message)
+}
+
+/// `global.toml` cannot be read or written: the request was fine, the file or
+/// the disk is not.
+fn global_error(err: &ConfigError) -> HttpError {
+    tracing::warn!(code = err.code(), error = %err, "global.toml");
+    HttpError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        err.code(),
+        err.to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -456,7 +606,6 @@ mod tests {
         assert_eq!(global.node.default.as_deref(), Some("22"));
     }
     use marsa_core::installer::manifest::ManifestError;
-    use marsa_core::resolver::BadRequest;
     use std::path::PathBuf;
 
     #[test]

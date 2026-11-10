@@ -182,6 +182,9 @@ fn error_message(code: &str) -> Option<&'static str> {
         "config_read" => "Cannot read the Marsa settings file.",
         "config_invalid" => "The Marsa settings file has an error. Fix the file, then try again.",
         "config_write" => "Cannot write the Marsa settings file.",
+        // `PUT /v1/runtimes/{tool}/default` (M5-01).
+        "version_not_installed" => "That version is not installed. Install it first.",
+        "no_default_version" => "This program has no default version: the newest one is used.",
         BRIDGE_FAILED => "The window could not start its background worker.",
         _ => return None,
     })
@@ -249,7 +252,8 @@ mod tests {
     #[test]
     fn known_daemon_codes_have_a_message() {
         // Auth (M3-03), routes (M3-06), services and Caddy (M3-07), the
-        // orphan check (M3-11), sites (M4-10b), and php-fpm pools (M4-23).
+        // orphan check (M3-11), sites (M4-10b), php-fpm pools (M4-23), and
+        // the default version (M5-01).
         for code in [
             "unauthorized",
             "origin_rejected",
@@ -285,6 +289,9 @@ mod tests {
             "config_read",
             "config_invalid",
             "config_write",
+            // The default version (M5-01).
+            "version_not_installed",
+            "no_default_version",
             BRIDGE_FAILED,
         ] {
             assert!(error_message(code).is_some(), "no message for {code}");

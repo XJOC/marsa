@@ -244,6 +244,28 @@ pub struct InstallRequest {
     pub force: bool,
 }
 
+/// The body of `PUT /v1/runtimes/{tool}/default` (task M5-01), for PHP and
+/// Node only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultRequest {
+    /// `8.4` or `8.4.23` for PHP, `22` for Node: the rules of a
+    /// `.php-version` file. Saved as written, without the spaces around it.
+    /// An installed version must match it.
+    pub version: String,
+}
+
+/// The answer to `PUT /v1/runtimes/{tool}/default`: the new default, and the
+/// installed version it picks now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultVersion {
+    pub runtime: Runtime,
+    /// As saved in `global.toml` (`8.4`).
+    pub default: String,
+    /// Full semver text (`8.4.23`). A newer `8.4.x` installed later is
+    /// picked then.
+    pub version: String,
+}
+
 /// The 202 answer to `POST /v1/runtimes/{tool}/install`. The install's events
 /// on `/v1/events` carry the same `id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -686,6 +708,26 @@ mod tests {
         let empty: InstallRequest = serde_json::from_value(json!({})).unwrap();
         assert_eq!(empty, InstallRequest::default());
         round_trip(&InstallAccepted { id: 7 }, json!({ "id": 7 }));
+    }
+
+    #[test]
+    fn default_request_and_answer() {
+        round_trip(
+            &DefaultRequest {
+                version: "8.3".into(),
+            },
+            json!({ "version": "8.3" }),
+        );
+        // The version is required: there is no default for the default.
+        assert!(serde_json::from_value::<DefaultRequest>(json!({})).is_err());
+        round_trip(
+            &DefaultVersion {
+                runtime: Runtime::Node,
+                default: "22".into(),
+                version: "22.11.0".into(),
+            },
+            json!({ "runtime": "node", "default": "22", "version": "22.11.0" }),
+        );
     }
 
     #[test]

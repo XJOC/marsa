@@ -1,4 +1,5 @@
-//! `marsa install` and `marsa runtimes` through the daemon (task M3-12).
+//! `marsa install` and `marsa runtimes` through the daemon (task M3-12), and
+//! `marsa use` with its route, `PUT /v1/runtimes/{tool}/default` (task M5-01).
 //!
 //! The real `marsa` binary talks to the real router, auth layer, and runtimes
 //! routes, served in this process on `127.0.0.1` for a temp data folder, with
@@ -25,6 +26,7 @@ use marsa::daemon::api::router;
 use marsa::daemon::auth::AuthConfig;
 use marsa::daemon::runtimes_api::{InstallFuture, RunInstall};
 use marsa::daemon::state::Daemon;
+use marsa_core::config::{self, ConfigPaths};
 use marsa_core::installer::{InstallError, InstallRequest, InstalledVersion};
 use marsa_core::platform::daemon_file::{
     DaemonFile, Token, daemon_authority, daemon_lock_path, write_daemon_file,
@@ -32,7 +34,8 @@ use marsa_core::platform::daemon_file::{
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::{Runtime, RuntimesDir};
 use marsa_core::types::{
-    ErrorBody, Event, InstallAccepted, InstallEvent, InstallProgress, InstallUpdate, RuntimeList,
+    DefaultVersion, ErrorBody, Event, InstallAccepted, InstallEvent, InstallProgress,
+    InstallUpdate, RuntimeList, SiteList,
 };
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
@@ -639,4 +642,259 @@ async fn bad_install_requests_get_their_codes() {
         InstallUpdate::Done(_)
     ));
     assert_eq!(served.fake.asked(), [(Runtime::Node, None, false)]);
+}
+
+// ---------------------------------------------------------------------------
+// The default version (task M5-01)
+
+/// The next `sites_changed` on the bus; other events are skipped.
+async fn next_sites(events: &mut broadcast::Receiver<Event>) -> SiteList {
+    let started = Instant::now();
+    loop {
+        let left = WAIT.saturating_sub(started.elapsed());
+        let event = tokio::time::timeout(left, events.recv())
+            .await
+            .expect("a sites_changed event")
+            .expect("the bus is open");
+        if let Event::SitesChanged(list) = event {
+            return list;
+        }
+    }
+}
+
+/// The PHP version of the site `name`.
+fn php_of(list: &SiteList, name: &str) -> Option<String> {
+    let site = list.sites.iter().find(|site| site.name == name);
+    let site = site.unwrap_or_else(|| panic!("no site {name} in {list:?}"));
+    site.php.as_ref().map(ToString::to_string)
+}
+
+fn install_dirs(served: &Served, versions: &[(Runtime, &str)]) {
+    let runtimes = RuntimesDir::in_dir(served.path());
+    for (runtime, version) in versions {
+        let dir = runtimes.runtime_dir(*runtime).join(version);
+        fs::create_dir_all(dir).expect("a version folder");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn use_makes_a_version_the_default_and_the_sites_follow() {
+    let served = Served::start(FakeInstall::default()).await;
+    install_dirs(
+        &served,
+        &[
+            (Runtime::Php, "8.3.12"),
+            (Runtime::Php, "8.4.23"),
+            (Runtime::Node, "22.11.0"),
+        ],
+    );
+    // A site with no version file: it runs the default.
+    let code = served.path().join("code");
+    fs::create_dir_all(code.join("blog")).expect("a site folder");
+    let park = serde_json::json!({ "path": code }).to_string();
+    let list: SiteList = served
+        .json("POST", "/v1/sites/park", Some(&park), StatusCode::OK)
+        .await;
+    assert_eq!(php_of(&list, "blog"), None, "no default yet");
+    let global_toml = ConfigPaths::in_dir(served.path()).global;
+    let mut events = served.daemon.events.subscribe();
+
+    served
+        .expect(
+            &["use", "php", "8.3"],
+            0,
+            "PHP 8.3 is now the default (8.3.12).\n",
+            "",
+        )
+        .await;
+    let text = fs::read_to_string(&global_toml).expect("global.toml");
+    assert!(text.contains("[php]\ndefault = \"8.3\"\n"), "{text}");
+    let global = config::load_global(&global_toml).expect("global.toml");
+    assert_eq!(global.node.default, None);
+    let list = next_sites(&mut events).await;
+    assert_eq!(php_of(&list, "blog").as_deref(), Some("8.3.12"));
+
+    // Through the API: a full version is kept as written, without spaces.
+    let body = Some(r#"{ "version": " 8.4.23 " }"#);
+    let answer: DefaultVersion = served
+        .json("PUT", "/v1/runtimes/php/default", body, StatusCode::OK)
+        .await;
+    let want = DefaultVersion {
+        runtime: Runtime::Php,
+        default: "8.4.23".into(),
+        version: "8.4.23".into(),
+    };
+    assert_eq!(answer, want);
+    let global = config::load_global(&global_toml).expect("global.toml");
+    assert_eq!(global.php.default.as_deref(), Some("8.4.23"));
+    let list = next_sites(&mut events).await;
+    assert_eq!(php_of(&list, "blog").as_deref(), Some("8.4.23"));
+
+    // Node has its own table. No site runs Node, so the list stays the same
+    // and no `sites_changed` is sent.
+    served
+        .expect(
+            &["use", "node", "22"],
+            0,
+            "Node.js 22 is now the default (22.11.0).\n",
+            "",
+        )
+        .await;
+    let global = config::load_global(&global_toml).expect("global.toml");
+    assert_eq!(
+        (
+            global.php.default.as_deref(),
+            global.node.default.as_deref()
+        ),
+        (Some("8.4.23"), Some("22"))
+    );
+    assert!(events.try_recv().is_err(), "the site list did not change");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_default_leaves_global_toml_as_it_was() {
+    let served = Served::start(FakeInstall::default()).await;
+    install_dirs(&served, &[(Runtime::Php, "8.3.12")]);
+    let global_toml = ConfigPaths::in_dir(served.path()).global;
+    let php = "/v1/runtimes/php/default";
+
+    // No file yet: a refusal makes none.
+    let body = Some(r#"{ "version": "8.9" }"#);
+    let code = served.error("PUT", php, body, StatusCode::CONFLICT).await;
+    assert_eq!(code, "version_not_installed");
+    assert!(!global_toml.exists());
+
+    let body = Some(r#"{ "version": "8.3" }"#);
+    let _: DefaultVersion = served.json("PUT", php, body, StatusCode::OK).await;
+    let before = fs::read(&global_toml).expect("global.toml");
+    let mut events = served.daemon.events.subscribe();
+    let (bad, conflict) = (StatusCode::BAD_REQUEST, StatusCode::CONFLICT);
+    for (method, path, body, status, want) in [
+        (
+            "PUT",
+            php,
+            Some(r#"{ "version": "8.9" }"#),
+            conflict,
+            "version_not_installed",
+        ),
+        (
+            "PUT",
+            php,
+            Some(r#"{ "version": "8.3.0" }"#),
+            conflict,
+            "version_not_installed",
+        ),
+        (
+            "PUT",
+            php,
+            Some(r#"{ "version": "abc" }"#),
+            bad,
+            "invalid_version",
+        ),
+        (
+            "PUT",
+            php,
+            Some(r#"{ "version": " " }"#),
+            bad,
+            "invalid_version",
+        ),
+        (
+            "PUT",
+            php,
+            Some(r#"{ "version": "latest" }"#),
+            bad,
+            "unsupported_alias",
+        ),
+        (
+            "PUT",
+            "/v1/runtimes/node/default",
+            Some(r#"{ "version": "22" }"#),
+            conflict,
+            "version_not_installed",
+        ),
+        (
+            "PUT",
+            "/v1/runtimes/composer/default",
+            Some(r#"{ "version": "2" }"#),
+            bad,
+            "no_default_version",
+        ),
+        (
+            "PUT",
+            "/v1/runtimes/caddy/default",
+            Some(r#"{ "version": "2.11" }"#),
+            bad,
+            "no_default_version",
+        ),
+        (
+            "PUT",
+            "/v1/runtimes/ruby/default",
+            Some(r#"{ "version": "3" }"#),
+            StatusCode::NOT_FOUND,
+            "unknown_tool",
+        ),
+        (
+            "PUT",
+            php,
+            Some("{}"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_body",
+        ),
+        (
+            "GET",
+            php,
+            None,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+        ),
+    ] {
+        let got = served.error(method, path, body, status).await;
+        assert_eq!(got, want, "{method} {path} {body:?}");
+        let now = fs::read(&global_toml).expect("global.toml");
+        assert_eq!(now, before, "{method} {path} {body:?}");
+    }
+
+    // The CLI: the text of each code, and exit code 1.
+    served
+        .expect(
+            &["use", "php", "8.9"],
+            1,
+            "",
+            "marsa: PHP 8.9 is not installed. Run \"marsa install php 8.9\", then try again. \
+             [version_not_installed]\n",
+        )
+        .await;
+    served
+        .expect(
+            &["use", "caddy", "2"],
+            1,
+            "",
+            "marsa: Caddy has no default version: Marsa always runs the newest installed one. \
+             [no_default_version]\n",
+        )
+        .await;
+    assert_eq!(fs::read(&global_toml).expect("global.toml"), before);
+    assert!(events.try_recv().is_err(), "a refusal sends no event");
+
+    // A broken file is the daemon's problem, and it stays as it is.
+    fs::write(&global_toml, "php = 1\n").expect("write global.toml");
+    let body = Some(r#"{ "version": "8.3" }"#);
+    let code = served
+        .error("PUT", php, body, StatusCode::INTERNAL_SERVER_ERROR)
+        .await;
+    assert_eq!(code, "config_invalid");
+    served
+        .expect(
+            &["use", "php", "8.3"],
+            1,
+            "",
+            &format!(
+                "marsa: {} has an error, so Marsa cannot read it. Fix the file, then try again. \
+                 [config_invalid]\n",
+                global_toml.display()
+            ),
+        )
+        .await;
+    let text = fs::read_to_string(&global_toml).expect("global.toml");
+    assert_eq!(text, "php = 1\n");
 }
