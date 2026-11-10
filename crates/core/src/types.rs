@@ -437,8 +437,10 @@ where
 /// `skipped`; the others still run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupReport {
-    /// The helper's result for each operation it ran, in order. Empty if the
-    /// helper did not run: no operation was left, or `error` says why.
+    /// The helper's result for each operation it ran, in order, then, on
+    /// macOS, the daemon's own `trust_install` result: the trust for the
+    /// current user (ADR 0015). Empty if nothing ran: no operation was left,
+    /// or `error` says why.
     #[serde(default)]
     pub results: Vec<OpResult>,
     /// The operations left out of the request, and why.
@@ -451,7 +453,8 @@ pub struct SetupReport {
     pub port_holders: Vec<PortHolder>,
     /// Why the helper did not run, or why its answer cannot be used:
     /// `setup_cancelled`, `setup_timed_out`, `setup_interrupted`,
-    /// `setup_helper_missing`, `setup_helper_failed`, or
+    /// `setup_helper_missing`, `setup_helper_unsafe`,
+    /// `setup_helper_protected_folder`, `setup_helper_failed`, or
     /// `setup_helper_rejected`. `None` if the helper answered, or was not
     /// needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]

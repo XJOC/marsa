@@ -361,6 +361,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              yours and writable only by you (chmod go-w), then run \"marsa setup\" again. The \
              path is in the file logs/marsad.log."
             .into(),
+        "setup_helper_protected_folder" => "marsa-helper is inside Desktop, Documents, or \
+             Downloads, and macOS keeps the admin part of Marsa out of those folders, so \
+             nothing was changed. Move Marsa's programs to \
+             ~/Library/Application Support/dev.marsa.Marsa/bin, then run \"marsa setup\" again."
+            .into(),
         "setup_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the result \
              of setup is not known. Run \"marsa setup\" again; if it repeats, report it with \
              the file logs/marsad.log."
@@ -395,12 +400,26 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "trust_cert_invalid" => "The root certificate of Marsa's certificate authority is not \
              valid, so it was not trusted. Report it."
             .into(),
-        "trust_read" | "trust_write" | "trust_add_failed" => "macOS did not add Marsa's \
-             certificate authority to the System keychain. Run \"marsa setup\" again; if it \
-             repeats, report it."
+        "trust_read" | "trust_write" => "Marsa could not add its certificate authority to \
+             the system's trusted certificates. Run \"marsa setup\" again; if it repeats, \
+             report it."
+            .into(),
+        "trust_add_failed" => "Your browser will not trust Marsa's sites yet: the trust for \
+             your user was not added. Run \"marsa setup\" again from your desktop (not over \
+             SSH) and approve the dialog macOS shows. If it repeats, report it with the file \
+             logs/marsad.log."
+            .into(),
+        "trust_remove_failed" => "Marsa could not take away the trust in its certificate \
+             authority. Run the command again; if it repeats, remove \"Marsa Local CA\" in \
+             Keychain Access and report it."
             .into(),
         "pf_write" | "pf_load_failed" => "macOS did not load the redirect of ports 80 and 443. \
              Run \"marsa setup\" again; if it repeats, report it."
+            .into(),
+        "pf_helper_unreadable" => "macOS did not let the admin part of Marsa read \
+             marsa-helper, so ports 80 and 443 were not redirected. Move Marsa's programs out \
+             of Desktop, Documents, and Downloads to \
+             ~/Library/Application Support/dev.marsa.Marsa/bin, then run \"marsa setup\" again."
             .into(),
 
         // `marsa autostart`: the autostart route (task M5-03).
@@ -829,6 +848,7 @@ mod tests {
         "setup_not_authorized",
         "setup_helper_missing",
         "setup_helper_unsafe",
+        "setup_helper_protected_folder",
         "setup_helper_failed",
         "setup_helper_rejected",
         "redirect_port_held",
@@ -844,8 +864,10 @@ mod tests {
         "trust_read",
         "trust_write",
         "trust_add_failed",
+        "trust_remove_failed",
         "pf_write",
         "pf_load_failed",
+        "pf_helper_unreadable",
         // The autostart route (task M5-03) and `AutostartError` in core.
         "autostart_unsupported",
         "tray_not_found",

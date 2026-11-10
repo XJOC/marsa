@@ -32,7 +32,7 @@
 //! 5. **User trust (macOS):** after the helper, and only if it ran as asked
 //!    or was not needed, `marsad` itself trusts the CA for the current user
 //!    with `security add-trusted-cert` against the login keychain, behind the
-//!    dialog macOS shows (ADR 0013, [`user_trust`]). Its result goes into the
+//!    dialog macOS shows (ADR 0015, [`user_trust`]). Its result goes into the
 //!    report as `trust_install`, after the helper's results.
 //!
 //! One setup at a time: a second request gets 409 `setup_running`. Linux and
@@ -387,7 +387,7 @@ impl Setup {
         let mut report = SetupReport::default();
         let mut ops = Vec::new();
         let ca_root = CaddyPaths::in_dir(data_dir).ca_root();
-        // macOS: the user's own trust, after the helper (ADR 0013). Elsewhere
+        // macOS: the user's own trust, after the helper (ADR 0015). Elsewhere
         // the helper trusts the CA as root (ADR 0011).
         let mut trust_for_user = false;
         match read_ca(&ca_root) {
@@ -431,7 +431,7 @@ impl Setup {
         report
     }
 
-    /// The user's trust of the CA root at `ca_root` (ADR 0013), or
+    /// The user's trust of the CA root at `ca_root` (ADR 0015), or
     /// `trust_add_failed` when the home folder, and so the login keychain,
     /// is not known.
     fn trust_for_user(&self, ca_root: &Path, stop: &CancellationToken) -> OpResult {
@@ -1443,7 +1443,7 @@ mod tests {
         let report = dir.run(&fake);
 
         // The request has no trust_install: on macOS the helper does not
-        // trust the CA (ADR 0013), and the user's trust comes after it.
+        // trust the CA (ADR 0015), and the user's trust comes after it.
         assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)]);
         assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, SECURITY, SECURITY]);
         let ca_root = dir.ca_root();

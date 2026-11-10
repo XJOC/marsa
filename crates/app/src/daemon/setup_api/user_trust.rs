@@ -1,5 +1,5 @@
 //! macOS: trust of Marsa's CA root for the current user, by `marsad` itself
-//! and without root (ADR 0013, task M4-26).
+//! and without root (ADR 0015, task M4-26).
 //!
 //! `security add-trusted-cert` changes trust settings, and macOS wants the
 //! user to approve that in its own dialog. Behind `osascript ... with
@@ -195,7 +195,7 @@ fn verify_args(ca_root: &Path) -> Vec<OsString> {
     ]
 }
 
-/// No `-d`: the user domain, not the admin one (ADR 0013).
+/// No `-d`: the user domain, not the admin one (ADR 0015).
 fn add_args(keychain: &Path, ca_root: &Path) -> Vec<OsString> {
     vec![
         OsString::from("add-trusted-cert"),
