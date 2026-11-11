@@ -70,10 +70,13 @@ pub const RESTART: RestartPolicy = RestartPolicy::OnFailure {
 pub const STOP_GRACE: Duration = Duration::from_secs(2);
 
 /// What Caddy prints when an address is taken: Go's text on macOS and Linux,
-/// and the English Windows text. Compared in lower case.
-const PORT_IN_USE: [&str; 2] = [
+/// and the two English Windows texts. Windows says "forbidden by its access
+/// permissions" when the holder took the port for itself alone, as IIS does
+/// with port 80 (spike S-11). Compared in lower case.
+const PORT_IN_USE: [&str; 3] = [
     "address already in use",
     "only one usage of each socket address",
+    "forbidden by its access permissions",
 ];
 
 /// How the supervisor runs Caddy: the newest installed Caddy
@@ -890,11 +893,12 @@ impl Admin {
 
 /// What Caddy says, in lower case, when it cannot listen on an address of a
 /// new config: Go's texts on macOS and Linux (ADR 0008, finding 11), and the
-/// English Windows text.
-const LOAD_PORT_ERRORS: [&str; 3] = [
+/// two English Windows texts (see [`PORT_IN_USE`]).
+const LOAD_PORT_ERRORS: [&str; 4] = [
     "bind: address already in use",
     "bind: permission denied",
     "only one usage of each socket address",
+    "forbidden by its access permissions",
 ];
 
 /// The error of a refused `POST /load`. Caddy answers `{"error": "..."}`; a
@@ -997,8 +1001,12 @@ mod tests {
                   listening on 127.0.0.1:18080: listen tcp 127.0.0.1:18080: bind: address already in use";
         let windows = "listen tcp 127.0.0.1:18080: bind: Only one usage of each socket \
                        address (protocol/network address/port) is normally permitted.";
+        // Port 80 on a Windows machine where IIS runs (spike S-11).
+        let held_alone = "listening on 127.0.0.1:80: listen tcp 127.0.0.1:80: bind: An attempt \
+                          was made to access a socket in a way forbidden by its access permissions.";
         assert!(is_port_conflict(&line(LogStream::Stderr, go)));
         assert!(is_port_conflict(&line(LogStream::Stderr, windows)));
+        assert!(is_port_conflict(&line(LogStream::Stderr, held_alone)));
         assert!(!is_port_conflict(&line(LogStream::Stdout, go)));
         let other = "bind: permission denied";
         assert!(!is_port_conflict(&line(LogStream::Stderr, other)));
@@ -1096,6 +1104,14 @@ mod tests {
             panic!("not port_in_use");
         };
         assert_eq!(address.as_deref(), Some("[::1]:443"));
+        // Windows, with IIS on port 80 (spike S-11).
+        let held_alone = "{\"error\":\"loading config: loading new config: http app module: start: \
+                          listening on 127.0.0.1:80: listen tcp 127.0.0.1:80: bind: An attempt was \
+                          made to access a socket in a way forbidden by its access permissions.\"}";
+        let LoadError::PortInUse { address, .. } = load_error(400, held_alone) else {
+            panic!("not port_in_use");
+        };
+        assert_eq!(address.as_deref(), Some("127.0.0.1:80"));
     }
 
     #[test]
