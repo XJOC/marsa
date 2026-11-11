@@ -28,29 +28,29 @@ use crate::system::System;
 
 /// A file at [`FILE`] that Marsa did not write, so it was left as it is.
 pub const PORTS_FOREIGN: &str = "ports_foreign";
-/// [`FILE`] or the current value cannot be read, so nothing was changed.
+/// [`FILE`] cannot be read, or `ports_install` cannot read the current
+/// value. Nothing was changed.
 pub const PORTS_READ: &str = "ports_read";
 /// Writing [`FILE`] failed.
 pub const PORTS_WRITE: &str = "ports_write";
-/// `sysctl -p` failed, or the value did not change. A file that this call
-/// wrote is removed again.
+/// `sysctl -p` failed, or port 80 is still not allowed after it. Marsa's
+/// file is removed again, so it cannot take effect at a later boot.
 pub const PORTS_APPLY_FAILED: &str = "ports_apply_failed";
-/// The value could not be set back to the default. [`FILE`] stays, so a
-/// retry can finish.
-pub const PORTS_RESTORE_FAILED: &str = "ports_restore_failed";
-/// Deleting [`FILE`] failed.
+/// Deleting [`FILE`] failed. Nothing was changed.
 pub const PORTS_DELETE: &str = "ports_delete";
+/// [`FILE`] is deleted, but the value could not be set back to the default.
+/// It stays as it is until the next boot.
+pub const PORTS_RESTORE_FAILED: &str = "ports_restore_failed";
 
 /// Marsa's own sysctl file. The system loads this folder at every boot.
 const FILE: &str = "/etc/sysctl.d/60-marsa.conf";
 /// Everyone can read it, and only root can change it.
 const MODE: u32 = 0o644;
 const KEY: &str = "net.ipv4.ip_unprivileged_port_start";
-/// Where the kernel shows the value of [`KEY`]: the lowest port a normal
-/// process may bind.
-const VALUE: &str = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
+/// Where the kernel shows the value of [`KEY`].
+const VALUE_FILE: &str = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
 /// The value Marsa sets: port 80 for HTTP, so port 443 too.
-const LOWEST: u32 = 80;
+const WANTED: u32 = 80;
 /// The kernel's own value.
 const DEFAULT: u32 = 1024;
 const SYSCTL: &str = "/usr/sbin/sysctl";
@@ -73,14 +73,14 @@ pub fn install(system: &impl System) -> OpResult {
         }
         Current::Unreadable(kind) => return unreadable(INSTALL, kind),
     };
-    let lowest = match lowest_port(system) {
+    let first_allowed = match first_allowed_port(system) {
         Ok(port) => port,
         Err(message) => return OpResult::failed(INSTALL, PORTS_READ, message),
     };
     let in_place = ours.as_deref() == Some(content.as_bytes());
     // Port 80 is allowed already: by Marsa's file, or by the owner of the
     // machine. Then Marsa writes no file, so it has nothing to undo later.
-    if lowest <= LOWEST && (in_place || ours.is_none()) {
+    if first_allowed <= WANTED && (in_place || ours.is_none()) {
         return result(INSTALL, Outcome::Unchanged);
     }
     if !in_place && let Err(err) = system.write_atomic(Path::new(FILE), content.as_bytes(), MODE) {
@@ -88,74 +88,75 @@ pub fn install(system: &impl System) -> OpResult {
         return OpResult::failed(INSTALL, PORTS_WRITE, message);
     }
     let loaded = system.run(SYSCTL, &["-p", FILE]);
-    let reason = match (program::succeeded(&loaded), lowest_port(system)) {
-        (true, Ok(port)) if port <= LOWEST => return result(INSTALL, Outcome::Done),
-        (true, Ok(port)) => format!("sysctl -p {FILE} ran, but {KEY} is {port}"),
-        (true, Err(message)) => message,
-        (false, _) => format!("sysctl -p {FILE} {}", program::failure(&loaded)),
+    let reason = if program::succeeded(&loaded) {
+        // Exit code 0 alone is not trusted: the daemon picks Caddy's ports
+        // by this value.
+        match first_allowed_port(system) {
+            Ok(port) if port <= WANTED => return result(INSTALL, Outcome::Done),
+            Ok(port) => format!("sysctl -p {FILE} ran, but {KEY} is {port}"),
+            Err(message) => message,
+        }
+    } else {
+        format!("sysctl -p {FILE} {}", program::failure(&loaded))
     };
-    // A file that was not loaded would take effect at the next boot, without
-    // a word. So the file this call wrote goes again. Best effort: the
-    // failed load is the error to report.
-    if !in_place {
-        let _ = system.remove(Path::new(FILE));
-    }
-    OpResult::failed(INSTALL, PORTS_APPLY_FAILED, reason)
+    // A file that is not loaded now would still take effect at the next
+    // boot, without a word. So Marsa's file goes, also one that was there
+    // before this call.
+    let cleanup = match system.remove(Path::new(FILE)) {
+        Ok(()) => "was removed again",
+        Err(_) => "could not be removed",
+    };
+    let message = format!("{reason}; {FILE} {cleanup}");
+    OpResult::failed(INSTALL, PORTS_APPLY_FAILED, message)
 }
 
-/// `ports_remove`: deletes Marsa's file and undoes its value. Without the
-/// file, nothing here is Marsa's: the value is not touched.
+/// `ports_remove`: deletes Marsa's file and puts the kernel's value back.
+/// Without the file, nothing here is Marsa's: the value is not touched.
 pub fn remove(system: &impl System) -> OpResult {
     match marked::current(system, Path::new(FILE)) {
         Current::Missing | Current::Foreign => return result(REMOVE, Outcome::Unchanged),
         Current::Unreadable(kind) => return unreadable(REMOVE, kind),
         Current::Ours(_) => {}
     }
-    let lowest = match lowest_port(system) {
-        Ok(port) => port,
-        Err(message) => return OpResult::failed(REMOVE, PORTS_READ, message),
-    };
-    // Only the value of Marsa's file is undone. Any other value was set by
-    // someone else after the install, and stays.
-    let undo = lowest == LOWEST;
-    if undo {
-        // Before the file goes, so a retry after a failure still finds it.
-        let reset = format!("{KEY}={DEFAULT}");
-        let back = system.run(SYSCTL, &["-w", &reset]);
-        if !program::succeeded(&back) {
-            let message = format!("sysctl -w {reset} {}", program::failure(&back));
-            return OpResult::failed(REMOVE, PORTS_RESTORE_FAILED, message);
-        }
-    }
+    // The file first: if this fails, nothing has changed and a retry starts
+    // from the same state.
     if let Err(err) = system.remove(Path::new(FILE)) {
         let message = format!("cannot delete {FILE}: {}", err.kind());
         return OpResult::failed(REMOVE, PORTS_DELETE, message);
     }
-    if undo {
-        // Every other sysctl file again: one of them may set the same key,
-        // and that setting is not Marsa's to drop. The result is not
-        // checked: `sysctl --system` also fails for a bad line in another
-        // program's file, and the key is back at the kernel's value either
-        // way.
-        let _ = system.run(SYSCTL, &["--system"]);
+    // Then the kernel's own value. `sysctl --system` alone would not do it:
+    // it sets only the keys that a file names.
+    let reset = format!("{KEY}={DEFAULT}");
+    let back = system.run(SYSCTL, &["-w", &reset]);
+    if !program::succeeded(&back) {
+        let message = format!(
+            "{FILE} was deleted, but sysctl -w {reset} {}; the value stays until the next boot",
+            program::failure(&back)
+        );
+        return OpResult::failed(REMOVE, PORTS_RESTORE_FAILED, message);
     }
+    // Then every other sysctl file again: one of them may set the same key,
+    // and that setting is not Marsa's to drop. The result is not checked:
+    // `sysctl --system` also fails for a bad line in another program's
+    // file, which is not Marsa's to report.
+    let _ = system.run(SYSCTL, &["--system"]);
     result(REMOVE, Outcome::Done)
 }
 
 /// LF only, with a final newline.
 fn content() -> String {
-    format!("{MARKER}\n{KEY}={LOWEST}\n")
+    format!("{MARKER}\n{KEY}={WANTED}\n")
 }
 
 /// The lowest port a normal process may bind now, or why that is not known.
-fn lowest_port(system: &impl System) -> Result<u32, String> {
+fn first_allowed_port(system: &impl System) -> Result<u32, String> {
     let bytes = system
-        .read(Path::new(VALUE), MAX_VALUE_BYTES)
-        .map_err(|err| format!("cannot read {VALUE}: {}", err.kind()))?;
+        .read(Path::new(VALUE_FILE), MAX_VALUE_BYTES)
+        .map_err(|err| format!("cannot read {VALUE_FILE}: {}", err.kind()))?;
     std::str::from_utf8(&bytes)
         .ok()
         .and_then(|text| text.trim_ascii().parse().ok())
-        .ok_or_else(|| format!("{VALUE} does not hold a port number"))
+        .ok_or_else(|| format!("{VALUE_FILE} does not hold a port number"))
 }
 
 fn unreadable(op: &'static str, kind: io::ErrorKind) -> OpResult {
@@ -169,7 +170,6 @@ fn result(op: &'static str, outcome: Outcome) -> OpResult {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
     use std::ffi::OsStr;
     use std::path::PathBuf;
 
@@ -181,6 +181,15 @@ mod tests {
     use crate::request::Request;
     use crate::system::{FakeSystem, RunOutput};
 
+    // Written out again, not taken from the constants above: a test must
+    // fail if one of those changes.
+    const PROGRAM: &str = "/usr/sbin/sysctl";
+    const CONF: &str = "/etc/sysctl.d/60-marsa.conf";
+    const PROC: &str = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
+    const RESET: &str = "net.ipv4.ip_unprivileged_port_start=1024";
+    const OURS: &[u8] =
+        b"# Managed by Marsa. Do not edit.\nnet.ipv4.ip_unprivileged_port_start=80\n";
+
     /// The mode of a file a test starts with. Marsa never writes it, so the
     /// mode shows whether an op rewrote the file.
     const OLD_MODE: u32 = 0o600;
@@ -191,31 +200,30 @@ mod tests {
     /// Everything else goes straight to the [`FakeSystem`] inside.
     struct Linux {
         fake: FakeSystem,
-        /// What `sysctl --system` sets the key to: `Some` when another file
-        /// in `/etc/sysctl.d` sets it too.
+        /// What the value file holds after `sysctl -p <our file>`.
+        after_load: &'static str,
+        /// The value in another file of `/etc/sysctl.d`, if one sets the key.
         other_file: Option<u32>,
-        /// A `sysctl` that exits with 0 and changes nothing.
-        inert: Cell<bool>,
     }
 
     impl Linux {
-        /// A machine where the lowest free port is `lowest`, with a working
-        /// `sysctl` and no file of Marsa's.
-        fn new(lowest: u32) -> Self {
+        /// A machine where normal processes may bind from port `first` up,
+        /// with a working `sysctl` and nothing at Marsa's path.
+        fn new(first: u32) -> Self {
             let mut fake = FakeSystem::default();
-            fake.defaults.insert(SYSCTL, exit(0));
+            fake.defaults.insert(PROGRAM, exit(0));
             let linux = Self {
                 fake,
+                after_load: "80\n",
                 other_file: None,
-                inert: Cell::new(false),
             };
-            linux.set(VALUE, format!("{lowest}\n").as_bytes());
+            linux.set(PROC, format!("{first}\n").as_bytes());
             linux
         }
 
-        fn with_file(lowest: u32, bytes: &[u8]) -> Self {
-            let linux = Self::new(lowest);
-            linux.set(FILE, bytes);
+        fn with_file(first: u32, bytes: &[u8]) -> Self {
+            let linux = Self::new(first);
+            linux.set(CONF, bytes);
             linux
         }
 
@@ -227,20 +235,21 @@ mod tests {
                 .insert(PathBuf::from(path), file);
         }
 
-        /// Marsa's file, or `None`.
+        /// The file at Marsa's path, or `None`.
         fn file(&self) -> Option<(Vec<u8>, u32)> {
-            self.fake.files.borrow().get(Path::new(FILE)).cloned()
+            self.fake.files.borrow().get(Path::new(CONF)).cloned()
         }
 
-        fn lowest(&self) -> String {
+        /// The value file, as text.
+        fn value(&self) -> String {
             let files = self.fake.files.borrow();
-            String::from_utf8(files[Path::new(VALUE)].0.clone()).unwrap()
+            String::from_utf8(files[Path::new(PROC)].0.clone()).unwrap()
         }
 
         /// The arguments of every command, which must all be `sysctl`.
         fn commands(&self) -> Vec<Vec<String>> {
             let log = self.fake.log.borrow();
-            assert!(log.iter().all(|(program, _)| program == SYSCTL));
+            assert!(log.iter().all(|(program, _)| program == PROGRAM));
             log.iter().map(|(_, args)| args.clone()).collect()
         }
     }
@@ -264,15 +273,19 @@ mod tests {
 
         fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
             let output = self.fake.run(program, args)?;
+            if output.code != Some(0) {
+                return Ok(output);
+            }
             let value = match args {
-                // Loads the file only if it is there, like the real one.
-                ["-p", FILE] if self.file().is_some() => Some(LOWEST),
-                ["-w", "net.ipv4.ip_unprivileged_port_start=1024"] => Some(DEFAULT),
-                ["--system"] => self.other_file,
+                // Both load the file at Marsa's path only while it is there.
+                ["-p", CONF] if self.file().is_some() => Some(self.after_load.to_owned()),
+                ["--system"] if self.file().is_some() => Some("80\n".to_owned()),
+                ["--system"] => self.other_file.map(|value| format!("{value}\n")),
+                ["-w", RESET] => Some("1024\n".to_owned()),
                 _ => None,
             };
-            if let (Some(0), false, Some(value)) = (output.code, self.inert.get(), value) {
-                self.set(VALUE, format!("{value}\n").as_bytes());
+            if let Some(value) = value {
+                self.set(PROC, value.as_bytes());
             }
             Ok(output)
         }
@@ -289,16 +302,12 @@ mod tests {
         }
     }
 
-    fn ours() -> Vec<u8> {
-        content().into_bytes()
-    }
-
     fn args(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| (*arg).to_owned()).collect()
     }
 
     fn load() -> Vec<String> {
-        args(&["-p", FILE])
+        args(&["-p", CONF])
     }
 
     fn failed(op: &'static str, code: &'static str, message: &str) -> OpResult {
@@ -307,11 +316,13 @@ mod tests {
 
     #[test]
     fn install_writes_the_file_and_loads_it() {
-        let linux = Linux::new(1024);
-        assert_eq!(install(&linux), result(INSTALL, Outcome::Done));
-        assert_eq!(linux.file(), Some((ours(), 0o644)));
-        assert_eq!(linux.commands(), [load()]);
-        assert_eq!(linux.lowest(), "80\n");
+        for first in [81, 443, 1024] {
+            let linux = Linux::new(first);
+            assert_eq!(install(&linux), result(INSTALL, Outcome::Done), "{first}");
+            assert_eq!(linux.file(), Some((OURS.to_vec(), 0o644)));
+            assert_eq!(linux.commands(), [load()]);
+            assert_eq!(linux.value(), "80\n");
+        }
     }
 
     /// The snapshot does not show line endings, so they are checked here.
@@ -329,22 +340,26 @@ mod tests {
     /// The owner of the machine set the value: Marsa adds nothing of its own.
     #[test]
     fn install_where_port_80_is_allowed_already_writes_no_file() {
-        for lowest in [80, 0] {
-            let linux = Linux::new(lowest);
-            assert_eq!(install(&linux), result(INSTALL, Outcome::Unchanged));
+        for first in [0, 79, 80] {
+            let linux = Linux::new(first);
+            assert_eq!(
+                install(&linux),
+                result(INSTALL, Outcome::Unchanged),
+                "{first}"
+            );
             assert_eq!(linux.file(), None);
             assert!(linux.commands().is_empty());
-            assert_eq!(linux.lowest(), format!("{lowest}\n"));
+            assert_eq!(linux.value(), format!("{first}\n"));
         }
     }
 
     #[test]
     fn install_over_our_loaded_file_is_unchanged() {
-        let mut linux = Linux::with_file(80, &ours());
+        let mut linux = Linux::with_file(80, OURS);
         // Any write fails here, so `unchanged` also shows that none was tried.
-        linux.fake.fail_writes.insert(PathBuf::from(FILE));
+        linux.fake.fail_writes.insert(PathBuf::from(CONF));
         assert_eq!(install(&linux), result(INSTALL, Outcome::Unchanged));
-        assert_eq!(linux.file(), Some((ours(), OLD_MODE)));
+        assert_eq!(linux.file(), Some((OURS.to_vec(), OLD_MODE)));
         assert!(linux.commands().is_empty());
     }
 
@@ -352,65 +367,69 @@ mod tests {
     /// rewritten.
     #[test]
     fn install_loads_our_file_again_when_the_value_went_back() {
-        let linux = Linux::with_file(1024, &ours());
-        assert_eq!(install(&linux), result(INSTALL, Outcome::Done));
-        assert_eq!(linux.file(), Some((ours(), OLD_MODE)));
-        assert_eq!(linux.commands(), [load()]);
-        assert_eq!(linux.lowest(), "80\n");
+        for first in [81, 1024] {
+            let linux = Linux::with_file(first, OURS);
+            assert_eq!(install(&linux), result(INSTALL, Outcome::Done), "{first}");
+            assert_eq!(linux.file(), Some((OURS.to_vec(), OLD_MODE)));
+            assert_eq!(linux.commands(), [load()]);
+            assert_eq!(linux.value(), "80\n");
+        }
     }
 
+    /// Also when port 80 is allowed already: the file is Marsa's to keep
+    /// right.
     #[test]
-    fn install_rewrites_our_file_with_other_content() {
-        let old = format!("{MARKER}\n{KEY}=443\n");
-        let linux = Linux::with_file(443, old.as_bytes());
-        assert_eq!(install(&linux), result(INSTALL, Outcome::Done));
-        assert_eq!(linux.file(), Some((ours(), MODE)));
-        assert_eq!(linux.lowest(), "80\n");
+    fn install_rewrites_and_loads_our_file_with_other_content() {
+        let old = b"# Managed by Marsa. Do not edit.\nnet.ipv4.ip_unprivileged_port_start=443\n";
+        for first in [80, 443] {
+            let linux = Linux::with_file(first, old);
+            assert_eq!(install(&linux), result(INSTALL, Outcome::Done), "{first}");
+            assert_eq!(linux.file(), Some((OURS.to_vec(), 0o644)));
+            assert_eq!(linux.commands(), [load()]);
+            assert_eq!(linux.value(), "80\n");
+        }
     }
 
     /// The exact message also shows that it holds the path and no content.
     #[test]
     fn install_fails_on_a_foreign_file_and_keeps_it() {
         let linux = Linux::with_file(1024, FOREIGN);
-        let message = format!("{FILE} was not written by Marsa, so it was left as it is");
+        let message = format!("{CONF} was not written by Marsa, so it was left as it is");
         assert_eq!(install(&linux), failed(INSTALL, PORTS_FOREIGN, &message));
         assert_eq!(linux.file(), Some((FOREIGN.to_vec(), OLD_MODE)));
         assert!(linux.commands().is_empty());
-        assert_eq!(linux.lowest(), "1024\n");
+        assert_eq!(linux.value(), "1024\n");
     }
 
     #[test]
-    fn a_file_or_a_value_that_cannot_be_read_is_ports_read() {
-        let mut linux = Linux::with_file(1024, &ours());
-        linux.fake.fail_reads.insert(PathBuf::from(FILE));
-        let message = format!("cannot read {FILE}: permission denied, so it was left as it is");
+    fn a_file_that_cannot_be_read_is_ports_read_and_kept() {
+        let mut linux = Linux::with_file(80, OURS);
+        linux.fake.fail_reads.insert(PathBuf::from(CONF));
+        let message = format!("cannot read {CONF}: permission denied, so it was left as it is");
         assert_eq!(install(&linux), failed(INSTALL, PORTS_READ, &message));
         assert_eq!(remove(&linux), failed(REMOVE, PORTS_READ, &message));
+        assert_eq!(linux.file(), Some((OURS.to_vec(), OLD_MODE)));
+        assert!(linux.commands().is_empty());
+        assert_eq!(linux.value(), "80\n");
+    }
 
+    #[test]
+    fn install_without_a_value_it_can_read_changes_nothing() {
+        let no_number = format!("{PROC} does not hold a port number");
         let values: [(Option<&[u8]>, String); 4] = [
-            (None, format!("cannot read {VALUE}: entity not found")),
-            (
-                Some(b"abc\n"),
-                format!("{VALUE} does not hold a port number"),
-            ),
-            (
-                Some(b"-1\n"),
-                format!("{VALUE} does not hold a port number"),
-            ),
-            (
-                Some(b"\xff\n"),
-                format!("{VALUE} does not hold a port number"),
-            ),
+            (None, format!("cannot read {PROC}: entity not found")),
+            (Some(b"abc\n"), no_number.clone()),
+            (Some(b"-1\n"), no_number.clone()),
+            (Some(b"\xff\n"), no_number),
         ];
         for (value, message) in values {
-            let linux = Linux::with_file(1024, &ours());
+            let linux = Linux::new(1024);
             match value {
-                Some(bytes) => linux.set(VALUE, bytes),
-                None => drop(linux.fake.files.borrow_mut().remove(Path::new(VALUE))),
+                Some(bytes) => linux.set(PROC, bytes),
+                None => drop(linux.fake.files.borrow_mut().remove(Path::new(PROC))),
             }
             assert_eq!(install(&linux), failed(INSTALL, PORTS_READ, &message));
-            assert_eq!(remove(&linux), failed(REMOVE, PORTS_READ, &message));
-            assert_eq!(linux.file(), Some((ours(), OLD_MODE)));
+            assert_eq!(linux.file(), None);
             assert!(linux.commands().is_empty());
         }
     }
@@ -418,29 +437,34 @@ mod tests {
     #[test]
     fn a_failed_write_is_ports_write_and_nothing_is_loaded() {
         let mut linux = Linux::new(1024);
-        linux.fake.fail_writes.insert(PathBuf::from(FILE));
-        let message = format!("cannot write {FILE}: permission denied");
+        linux.fake.fail_writes.insert(PathBuf::from(CONF));
+        let message = format!("cannot write {CONF}: permission denied");
         assert_eq!(install(&linux), failed(INSTALL, PORTS_WRITE, &message));
         assert!(linux.commands().is_empty());
-        assert_eq!(linux.lowest(), "1024\n");
+        assert_eq!(linux.value(), "1024\n");
     }
 
+    /// Also a file that was there before the call: it must not take effect
+    /// at a later boot, after an install that said it failed.
     #[test]
-    fn a_failed_load_removes_the_file_this_call_wrote() {
-        let mut linux = Linux::new(1024);
-        linux.fake.script(SYSCTL, &["-p", FILE], exit(255));
-        let message = format!("sysctl -p {FILE} exited with code 255");
-        assert_eq!(
-            install(&linux),
-            failed(INSTALL, PORTS_APPLY_FAILED, &message)
-        );
-        assert_eq!(linux.file(), None);
-        assert_eq!(linux.lowest(), "1024\n");
+    fn a_failed_load_removes_our_file() {
+        let message = format!("sysctl -p {CONF} exited with code 255; {CONF} was removed again");
+        for mut linux in [Linux::new(1024), Linux::with_file(1024, OURS)] {
+            linux.fake.script(PROGRAM, &["-p", CONF], exit(255));
+            assert_eq!(
+                install(&linux),
+                failed(INSTALL, PORTS_APPLY_FAILED, &message)
+            );
+            assert_eq!(linux.file(), None);
+            assert_eq!(linux.commands(), [load()]);
+            assert_eq!(linux.value(), "1024\n");
+        }
 
         // No `sysctl` program at all.
         let mut linux = Linux::new(1024);
         linux.fake.defaults.clear();
-        let message = format!("sysctl -p {FILE} could not run: entity not found");
+        let message =
+            format!("sysctl -p {CONF} could not run: entity not found; {CONF} was removed again");
         assert_eq!(
             install(&linux),
             failed(INSTALL, PORTS_APPLY_FAILED, &message)
@@ -451,24 +475,37 @@ mod tests {
     /// The value is read again after the load: exit code 0 alone is not
     /// trusted.
     #[test]
-    fn a_load_that_changes_nothing_is_a_failure() {
-        let message = format!("sysctl -p {FILE} ran, but {KEY} is 1024");
-        let linux = Linux::new(1024);
-        linux.inert.set(true);
-        assert_eq!(
-            install(&linux),
-            failed(INSTALL, PORTS_APPLY_FAILED, &message)
-        );
-        assert_eq!(linux.file(), None);
+    fn a_load_that_does_not_allow_port_80_is_a_failure() {
+        let key = "net.ipv4.ip_unprivileged_port_start";
+        let cases = [
+            ("1024\n", format!("sysctl -p {CONF} ran, but {key} is 1024")),
+            ("81\n", format!("sysctl -p {CONF} ran, but {key} is 81")),
+            ("junk\n", format!("{PROC} does not hold a port number")),
+        ];
+        for (after_load, reason) in cases {
+            for mut linux in [Linux::new(1024), Linux::with_file(1024, OURS)] {
+                linux.after_load = after_load;
+                let message = format!("{reason}; {CONF} was removed again");
+                assert_eq!(
+                    install(&linux),
+                    failed(INSTALL, PORTS_APPLY_FAILED, &message)
+                );
+                assert_eq!(linux.file(), None);
+            }
+        }
+    }
 
-        // A file that was there before this call stays.
-        let linux = Linux::with_file(1024, &ours());
-        linux.inert.set(true);
+    #[test]
+    fn a_file_that_cannot_be_removed_after_a_failed_load_is_named() {
+        let mut linux = Linux::new(1024);
+        linux.fake.script(PROGRAM, &["-p", CONF], exit(1));
+        linux.fake.fail_removes.insert(PathBuf::from(CONF));
+        let message = format!("sysctl -p {CONF} exited with code 1; {CONF} could not be removed");
         assert_eq!(
             install(&linux),
             failed(INSTALL, PORTS_APPLY_FAILED, &message)
         );
-        assert_eq!(linux.file(), Some((ours(), OLD_MODE)));
+        assert_eq!(linux.file(), Some((OURS.to_vec(), 0o644)));
     }
 
     #[test]
@@ -478,80 +515,90 @@ mod tests {
             assert_eq!(remove(&linux), result(REMOVE, Outcome::Unchanged));
             assert_eq!(linux.file(), before);
             assert!(linux.commands().is_empty());
-            assert_eq!(linux.lowest(), "80\n");
+            assert_eq!(linux.value(), "80\n");
         }
     }
 
+    /// The fake's `sysctl --system` loads Marsa's file while it is there, so
+    /// the value at the end also shows that the delete came first.
     #[test]
-    fn remove_sets_the_default_back_deletes_the_file_and_reloads_the_rest() {
-        let linux = Linux::with_file(80, &ours());
-        assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
-        assert_eq!(linux.file(), None);
-        let reset = args(&["-w", "net.ipv4.ip_unprivileged_port_start=1024"]);
-        assert_eq!(linux.commands(), [reset, args(&["--system"])]);
-        assert_eq!(linux.lowest(), "1024\n");
+    fn remove_deletes_the_file_sets_the_default_and_reloads_the_rest() {
+        for first in [0, 80, 443, 1024] {
+            let linux = Linux::with_file(first, OURS);
+            assert_eq!(remove(&linux), result(REMOVE, Outcome::Done), "{first}");
+            assert_eq!(linux.file(), None);
+            assert_eq!(
+                linux.commands(),
+                [args(&["-w", RESET]), args(&["--system"])]
+            );
+            assert_eq!(linux.value(), "1024\n");
+        }
     }
 
     #[test]
     fn another_file_that_sets_the_key_applies_again() {
-        let mut linux = Linux::with_file(80, &ours());
+        let mut linux = Linux::with_file(80, OURS);
         linux.other_file = Some(80);
         assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
         assert_eq!(linux.file(), None);
-        assert_eq!(linux.lowest(), "80\n");
+        assert_eq!(linux.value(), "80\n");
     }
 
-    /// Someone changed the value after the install: it is theirs now.
+    /// `ports_remove` never reads the value: a value file that is missing
+    /// must not keep Marsa's file on the machine.
     #[test]
-    fn remove_leaves_a_value_that_is_not_ours() {
-        for lowest in [0, 79, 81, 1024] {
-            let linux = Linux::with_file(lowest, &ours());
-            assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
-            assert_eq!(linux.file(), None);
-            assert!(linux.commands().is_empty());
-            assert_eq!(linux.lowest(), format!("{lowest}\n"));
-        }
+    fn remove_does_not_need_the_value() {
+        let linux = Linux::with_file(80, OURS);
+        linux.fake.files.borrow_mut().remove(Path::new(PROC));
+        assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
+        assert_eq!(linux.file(), None);
+        assert_eq!(linux.commands().len(), 2);
     }
 
+    /// Nothing has changed by then, so a retry does the whole removal.
     #[test]
-    fn a_failed_reset_is_ports_restore_failed_and_keeps_the_file() {
-        let mut linux = Linux::with_file(80, &ours());
-        let reset = "net.ipv4.ip_unprivileged_port_start=1024";
-        linux.fake.script(SYSCTL, &["-w", reset], exit(1));
-        let message = format!("sysctl -w {reset} exited with code 1");
-        assert_eq!(
-            remove(&linux),
-            failed(REMOVE, PORTS_RESTORE_FAILED, &message)
-        );
-        assert_eq!(linux.file(), Some((ours(), OLD_MODE)));
-        assert_eq!(linux.commands().len(), 1);
-        assert_eq!(linux.lowest(), "80\n");
-    }
-
-    /// The value is back at the default by then, so a retry only deletes.
-    #[test]
-    fn a_failed_delete_is_ports_delete_and_a_retry_finishes() {
-        let mut linux = Linux::with_file(80, &ours());
-        linux.fake.fail_removes.insert(PathBuf::from(FILE));
-        let message = format!("cannot delete {FILE}: permission denied");
+    fn a_failed_delete_is_ports_delete_and_changes_nothing() {
+        let mut linux = Linux::with_file(80, OURS);
+        linux.other_file = Some(80);
+        linux.fake.fail_removes.insert(PathBuf::from(CONF));
+        let message = format!("cannot delete {CONF}: permission denied");
         assert_eq!(remove(&linux), failed(REMOVE, PORTS_DELETE, &message));
-        assert_eq!(linux.file(), Some((ours(), OLD_MODE)));
-        assert_eq!(linux.commands().len(), 1);
+        assert_eq!(linux.file(), Some((OURS.to_vec(), OLD_MODE)));
+        assert!(linux.commands().is_empty());
+        assert_eq!(linux.value(), "80\n");
 
         linux.fake.fail_removes.clear();
         assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
         assert_eq!(linux.file(), None);
-        assert_eq!(linux.commands().len(), 1);
-        assert_eq!(linux.lowest(), "1024\n");
+        assert_eq!(linux.commands().len(), 2);
+        // The other file's value is back, as without the failure.
+        assert_eq!(linux.value(), "80\n");
+    }
+
+    #[test]
+    fn a_failed_reset_is_ports_restore_failed_and_says_what_stays() {
+        let mut linux = Linux::with_file(80, OURS);
+        linux.fake.script(PROGRAM, &["-w", RESET], exit(1));
+        let message = format!(
+            "{CONF} was deleted, but sysctl -w {RESET} exited with code 1; \
+             the value stays until the next boot"
+        );
+        assert_eq!(
+            remove(&linux),
+            failed(REMOVE, PORTS_RESTORE_FAILED, &message)
+        );
+        assert_eq!(linux.file(), None);
+        assert_eq!(linux.commands(), [args(&["-w", RESET])]);
+        assert_eq!(linux.value(), "80\n");
     }
 
     #[test]
     fn a_failed_reload_of_the_other_files_does_not_fail_the_removal() {
-        let mut linux = Linux::with_file(80, &ours());
-        linux.fake.script(SYSCTL, &["--system"], exit(255));
+        let mut linux = Linux::with_file(80, OURS);
+        linux.fake.script(PROGRAM, &["--system"], exit(255));
         assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
         assert_eq!(linux.file(), None);
-        assert_eq!(linux.lowest(), "1024\n");
+        assert_eq!(linux.value(), "1024\n");
     }
 
     /// Through `apply`, as a real request: Linux only.
@@ -562,16 +609,17 @@ mod tests {
         let request = Request::from_arg(OsStr::new(&raw)).unwrap();
         let linux = Linux::new(1024);
         let expected = [
-            result(INSTALL, Outcome::Done),
-            result(REMOVE, Outcome::Done),
+            result("ports_install", Outcome::Done),
+            result("ports_remove", Outcome::Done),
         ];
         assert_eq!(apply(&request, Os::Linux, &linux), expected);
         assert_eq!(linux.file(), None);
-        assert_eq!(linux.lowest(), "1024\n");
+        assert_eq!(linux.value(), "1024\n");
 
         for os in [Os::Macos, Os::Windows] {
             let linux = Linux::new(1024);
             let results = apply(&request, os, &linux);
+            assert_eq!(results.len(), 2);
             assert!(results.iter().all(|result| matches!(
                 &result.outcome,
                 Outcome::Failed { code, .. } if *code == crate::response::code::OP_NOT_SUPPORTED

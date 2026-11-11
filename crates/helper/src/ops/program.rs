@@ -14,6 +14,7 @@ pub fn succeeded(result: &io::Result<RunOutput>) -> bool {
 
 /// How the program failed, for a message. Never its output: the exit code
 /// is enough for `marsad`, and the owner can run the same command by hand.
+/// The same texts as the private `failure_text` of `trust` (macOS).
 pub fn failure(result: &io::Result<RunOutput>) -> String {
     match result {
         Ok(RunOutput {
