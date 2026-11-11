@@ -32,9 +32,16 @@ check_pinned() {
 # The spc names of one kind (static or shared), joined with commas.
 spc_names() { awk -v k="$1" '$1 == k { print $2 }' "$EXTENSIONS" | paste -sd, -; }
 
-# What `php -m` must list: every builtin and static module, lowercase, sorted.
+# What `php -m` must list for $PHP_VERSION: every builtin and static module,
+# lowercase, sorted. `builtin@8.5` counts only from PHP 8.5 on.
 expected_modules() {
-  awk '$1 == "builtin" || $1 == "static" { $1 = ""; $2 = ""; sub(/^ +/, ""); print }' "$EXTENSIONS" |
+  awk -v version="${PHP_VERSION:?PHP_VERSION is required}" '
+    BEGIN { split(version, v, "."); have = v[1] * 100 + v[2] }
+    {
+      kind = $1; since = 0
+      if (kind ~ /^builtin@[0-9]+\.[0-9]+$/) { split(substr(kind, 9), s, "."); since = s[1] * 100 + s[2]; kind = "builtin" }
+    }
+    (kind == "builtin" || kind == "static") && have >= since { $1 = ""; $2 = ""; sub(/^ +/, ""); print }' "$EXTENSIONS" |
     tr 'A-Z' 'a-z' | sort -u
 }
 
