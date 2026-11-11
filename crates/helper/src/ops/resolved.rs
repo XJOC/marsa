@@ -203,12 +203,20 @@ mod tests {
     use crate::request::Request;
     use crate::system::FakeSystem;
 
+    // Written out again, not taken from the constants above: a test must
+    // fail if one of those changes.
+    const CONF: &str = "/etc/systemd/resolved.conf.d/marsa.conf";
+    const CTL: &str = "/usr/bin/systemctl";
+    const RESOLVE: &str = "/usr/bin/resolvectl";
+    const SERVICE: &str = "systemd-resolved.service";
+    const IS_ACTIVE: [&str; 3] = ["is-active", "--quiet", SERVICE];
+    const RESTART_UNIT: [&str; 2] = ["restart", SERVICE];
+
     /// The mode of a file a test starts with. Marsa never writes it, so the
     /// mode shows whether an op rewrote the file.
     const OLD_MODE: u32 = 0o600;
     /// Another tool's drop-in at the same path.
     const FOREIGN: &[u8] = b"[Resolve]\nDNS=9.9.9.9\n";
-    const IS_ACTIVE: [&str; 3] = ["is-active", "--quiet", UNIT];
 
     fn exit(code: i32, stdout: &str) -> RunOutput {
         RunOutput {
@@ -222,28 +230,30 @@ mod tests {
     /// its global DNS servers.
     fn linux(global: &str) -> FakeSystem {
         let mut fake = FakeSystem::default();
-        fake.script(SYSTEMCTL, &IS_ACTIVE, exit(0, ""));
-        fake.script(SYSTEMCTL, &RESTART, exit(0, ""));
+        fake.script(CTL, &IS_ACTIVE, exit(0, ""));
+        fake.script(CTL, &RESTART_UNIT, exit(0, ""));
         let listed = format!("Global: {global}\nLink 2 (eth0): 168.63.129.16\n");
-        fake.script(RESOLVECTL, &["dns"], exit(0, &listed));
+        fake.script(RESOLVE, &["dns"], exit(0, &listed));
         fake
     }
 
     fn with_file(fake: FakeSystem, bytes: &[u8]) -> FakeSystem {
         let file = (bytes.to_vec(), OLD_MODE);
-        fake.files.borrow_mut().insert(PathBuf::from(FILE), file);
+        fake.files.borrow_mut().insert(PathBuf::from(CONF), file);
         fake
     }
 
     fn ours(port: u16) -> Vec<u8> {
-        content(port).into_bytes()
+        let text =
+            "# Managed by Marsa. Do not edit.\n[Resolve]\nDNS=127.0.0.1:PORT\nDomains=~test\n";
+        text.replace("PORT", &port.to_string()).into_bytes()
     }
 
-    /// The file at [`FILE`]. No other file may appear.
+    /// The file at [`CONF`]. No other file may appear.
     fn file(fake: &FakeSystem) -> Option<(Vec<u8>, u32)> {
         let files = fake.files.borrow();
-        assert!(files.keys().all(|path| path == Path::new(FILE)));
-        files.get(Path::new(FILE)).cloned()
+        assert!(files.keys().all(|path| path == Path::new(CONF)));
+        files.get(Path::new(CONF)).cloned()
     }
 
     /// Every command that ran, as `program arguments`.
@@ -297,7 +307,7 @@ mod tests {
     fn install_over_our_same_file_is_unchanged_and_runs_nothing() {
         let mut fake = with_file(linux("127.0.0.1:18053"), &ours(18053));
         // Any write fails here, so `unchanged` also shows that none was tried.
-        fake.fail_writes.insert(PathBuf::from(FILE));
+        fake.fail_writes.insert(PathBuf::from(CONF));
         assert_eq!(install(18053, &fake), result(INSTALL, Outcome::Unchanged));
         assert_eq!(file(&fake), Some((ours(18053), OLD_MODE)));
         assert!(commands(&fake).is_empty());
@@ -315,7 +325,7 @@ mod tests {
     #[test]
     fn install_fails_on_a_foreign_file_and_keeps_it() {
         let fake = with_file(linux("127.0.0.1:18053"), FOREIGN);
-        let message = format!("{FILE} was not written by Marsa, so it was left as it is");
+        let message = format!("{CONF} was not written by Marsa, so it was left as it is");
         let expected = OpResult::failed(INSTALL, RESOLVED_FOREIGN, message);
         assert_eq!(install(18053, &fake), expected);
         assert_eq!(file(&fake), Some((FOREIGN.to_vec(), OLD_MODE)));
@@ -325,8 +335,8 @@ mod tests {
     #[test]
     fn a_file_that_cannot_be_read_is_resolved_read_and_kept() {
         let mut fake = with_file(linux("127.0.0.1:18053"), &ours(18053));
-        fake.fail_reads.insert(PathBuf::from(FILE));
-        let message = format!("cannot read {FILE}: permission denied, so it was left as it is");
+        fake.fail_reads.insert(PathBuf::from(CONF));
+        let message = format!("cannot read {CONF}: permission denied, so it was left as it is");
         let failed = |op| OpResult::failed(op, RESOLVED_READ, message.clone());
         assert_eq!(install(18053, &fake), failed(INSTALL));
         assert_eq!(remove(&fake), failed(REMOVE));
@@ -339,9 +349,9 @@ mod tests {
     #[test]
     fn without_a_running_resolved_nothing_is_written() {
         let mut stopped = linux("");
-        stopped.script(SYSTEMCTL, &IS_ACTIVE, exit(3, ""));
+        stopped.script(CTL, &IS_ACTIVE, exit(3, ""));
         for fake in [stopped, FakeSystem::default()] {
-            let message = format!("{UNIT} is not running, so nothing was changed");
+            let message = format!("{SERVICE} is not running, so nothing was changed");
             let expected = OpResult::failed(INSTALL, RESOLVED_NOT_RUNNING, message);
             assert_eq!(install(18053, &fake), expected);
             assert_eq!(file(&fake), None);
@@ -352,8 +362,8 @@ mod tests {
     #[test]
     fn a_failed_write_is_resolved_write_and_nothing_restarts() {
         let mut fake = linux("127.0.0.1:18053");
-        fake.fail_writes.insert(PathBuf::from(FILE));
-        let message = format!("cannot write {FILE}: permission denied");
+        fake.fail_writes.insert(PathBuf::from(CONF));
+        let message = format!("cannot write {CONF}: permission denied");
         let expected = OpResult::failed(INSTALL, RESOLVED_WRITE, message);
         assert_eq!(install(18053, &fake), expected);
         assert_eq!(commands(&fake), [ACTIVE]);
@@ -362,12 +372,12 @@ mod tests {
     #[test]
     fn a_failed_restart_takes_the_file_out_again() {
         let mut fake = linux("127.0.0.1:18053");
-        fake.script(SYSTEMCTL, &RESTART, exit(1, ""));
+        fake.script(CTL, &RESTART_UNIT, exit(1, ""));
         let failed = install(18053, &fake);
         assert_eq!(code_of(&failed), RESOLVED_RESTART_FAILED);
         assert_eq!(
             message_of(&failed),
-            format!("systemctl restart {UNIT} exited with code 1; {FILE} was removed again")
+            format!("systemctl restart {SERVICE} exited with code 1; {CONF} was removed again")
         );
         assert_eq!(file(&fake), None);
         // The second restart is for the state without the file.
@@ -398,18 +408,17 @@ mod tests {
     fn servers_that_cannot_be_checked_are_resolved_check_failed_and_the_file_goes() {
         let no_program = {
             let mut fake = linux("");
-            fake.outputs
-                .retain(|(program, _), _| *program != RESOLVECTL);
+            fake.outputs.retain(|(program, _), _| *program != RESOLVE);
             fake
         };
         let failing = {
             let mut fake = linux("");
-            fake.script(RESOLVECTL, &["dns"], exit(1, "Global: 127.0.0.1:18053\n"));
+            fake.script(RESOLVE, &["dns"], exit(1, "Global: 127.0.0.1:18053\n"));
             fake
         };
         let no_line = {
             let mut fake = linux("");
-            fake.script(RESOLVECTL, &["dns"], exit(0, "Link 2 (eth0): 1.1.1.1\n"));
+            fake.script(RESOLVE, &["dns"], exit(0, "Link 2 (eth0): 1.1.1.1\n"));
             fake
         };
         let cases = [
@@ -457,7 +466,7 @@ mod tests {
     #[test]
     fn remove_does_not_restart_a_resolved_that_does_not_run() {
         let mut fake = with_file(linux(""), &ours(18053));
-        fake.script(SYSTEMCTL, &IS_ACTIVE, exit(3, ""));
+        fake.script(CTL, &IS_ACTIVE, exit(3, ""));
         assert_eq!(remove(&fake), result(REMOVE, Outcome::Done));
         assert_eq!(file(&fake), None);
         assert_eq!(commands(&fake), [ACTIVE]);
@@ -466,8 +475,8 @@ mod tests {
     #[test]
     fn a_failed_delete_is_resolved_delete_and_keeps_the_file() {
         let mut fake = with_file(linux(""), &ours(18053));
-        fake.fail_removes.insert(PathBuf::from(FILE));
-        let message = format!("cannot delete {FILE}: permission denied");
+        fake.fail_removes.insert(PathBuf::from(CONF));
+        let message = format!("cannot delete {CONF}: permission denied");
         let expected = OpResult::failed(REMOVE, RESOLVED_DELETE, message);
         assert_eq!(remove(&fake), expected);
         assert_eq!(file(&fake), Some((ours(18053), OLD_MODE)));
@@ -477,12 +486,12 @@ mod tests {
     #[test]
     fn a_failed_restart_after_the_delete_is_reported() {
         let mut fake = with_file(linux(""), &ours(18053));
-        fake.script(SYSTEMCTL, &RESTART, exit(1, ""));
+        fake.script(CTL, &RESTART_UNIT, exit(1, ""));
         let failed = remove(&fake);
         assert_eq!(code_of(&failed), RESOLVED_RESTART_FAILED);
         assert_eq!(
             message_of(&failed),
-            format!("{FILE} was deleted, but systemctl restart {UNIT} exited with code 1")
+            format!("{CONF} was deleted, but systemctl restart {SERVICE} exited with code 1")
         );
         assert_eq!(file(&fake), None);
     }
