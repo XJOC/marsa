@@ -1,0 +1,79 @@
+name: linux-e2e
+
+# The Linux side of the Phase 1 gate (task M4-18f): from the built programs
+# to an open Laravel page, on real Ubuntu machines. The job downloads
+# runtimes and changes the system with sudo, which is fine here and only
+# here: a runner is thrown away after the job. It is not part of the tests
+# that `cargo nextest` runs.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["task/M4-18*", main]
+    paths:
+      - "crates/helper/**"
+      - "crates/core/src/platform/**"
+      - "crates/core/src/caddy.rs"
+      - "crates/core/src/dns.rs"
+      - "crates/core/src/helper.rs"
+      - "crates/app/src/daemon/**"
+      - "tools/e2e/**"
+      - ".github/workflows/linux-e2e.yml"
+
+# Read-only on purpose: the job never writes to the repository.
+permissions:
+  contents: read
+
+# A new run on the same branch cancels the older one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  e2e:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      # Reads the pinned version from rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build marsa, marsad, and marsa-helper
+        run: cargo build --release -p marsa -p marsa-helper
+
+      # Built alone: workspace feature unification would drag tokio into the
+      # shim (architecture.md section 3).
+      - name: Build the shim
+        run: cargo build --release -p marsa-shim
+
+      - name: End to end
+        env:
+          # Composer downloads packages from GitHub. With the job's own
+          # read-only token it is not held back by the anonymous rate limit.
+          COMPOSER_AUTH: '{"github-oauth": {"github.com": "${{ github.token }}"}}'
+        run: bash tools/e2e/linux.sh
+
+      # Logs only. `run/daemon.json` holds the daemon token and is never
+      # uploaded.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: marsa-logs-${{ matrix.os }}
+          path: ~/.local/share/marsa/logs
+          if-no-files-found: ignore
