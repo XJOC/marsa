@@ -453,6 +453,10 @@ mod tests {
             _ => ok(""),
         });
         assert_eq!(remove_with(&fake), result(TRUST_REMOVE, OpStatus::Done));
+        // Built like the code builds it: on Windows, where these tests also
+        // run, `join` puts `\` between the parts.
+        let keychain = login_keychain(Path::new(HOME));
+        let keychain = keychain.to_str().expect("the test path is UTF-8");
         assert_eq!(
             security_calls(&fake),
             [
@@ -464,9 +468,9 @@ mod tests {
                     "-p",
                     "-c",
                     "Marsa Local CA",
-                    KEYCHAIN
+                    keychain
                 ],
-                vec!["delete-certificate", "-Z", HASH, KEYCHAIN],
+                vec!["delete-certificate", "-Z", HASH, keychain],
             ]
         );
         let limits: Vec<_> = fake.calls().iter().map(|call| call.limit).collect();
