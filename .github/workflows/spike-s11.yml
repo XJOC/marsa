@@ -3,13 +3,9 @@ name: spike-s11
 # S-11: the Windows questions of architecture.md section 13, answered on a
 # GitHub Windows runner (the owner has no Windows machine). Throwaway code in
 # spikes/s11-windows; the results go into ADRs.
+# By hand only: the spike is over, and its runs are cited in the ADRs.
 on:
   workflow_dispatch:
-  push:
-    branches: [task/S-11-windows-spikes]
-    paths:
-      - "spikes/s11-windows/**"
-      - ".github/workflows/spike-s11.yml"
 
 permissions:
   contents: read

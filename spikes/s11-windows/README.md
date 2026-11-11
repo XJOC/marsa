@@ -5,6 +5,12 @@ section 13 on a GitHub runner (`windows-2025`), because the owner has no
 Windows machine. The workflow is `.github/workflows/spike-s11.yml`; every
 script writes a results file that the run uploads and shows in its summary.
 
+The spike is over. Its results are in three decisions: ADR 0016 (php-cgi
+pool), ADR 0017 (Job Object and a start without inherited handles), and ADR
+0018 (the helper service, the named pipe, the hosts file, and trust). The
+runs they cite are 42920002335, 42923418104, and 42962161258. The workflow
+now runs only by hand (`workflow_dispatch`).
+
 | Script | Question | Changes the machine? |
 | --- | --- | --- |
 | `scripts/php-cgi-load.ps1` | Are 4 php-cgi processes enough under concurrent requests? Is one php-cgi with `PHP_FCGI_CHILDREN` better than several behind Caddy? What happens when php-cgi exits after its request limit? Which DLLs does the official PHP need? | No |
