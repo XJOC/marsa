@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use axum::Router;
 use marsa_core::platform::daemon_file::{self, DaemonFile, Token};
+use marsa_core::platform::low_ports;
 use marsa_core::platform::signals::shutdown_signal;
 use marsa_core::types::Event;
 use tokio::net::TcpListener;
@@ -102,6 +103,8 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     // The user's own folder for the login file, only in the real daemon
     // (task M5-03).
     daemon.autostart = Autostart::this_user();
+    // The real system's answer, only in the real daemon (task M4-18d).
+    daemon.caddy.low_ports = low_ports::low_ports_allowed;
     let daemon = Arc::new(daemon);
     // The first site list, so the first client gets it at once. A broken
     // sites.toml is logged; the routes report it again with its code.
