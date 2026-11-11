@@ -27,10 +27,12 @@ use crate::system::{RunOutput, System};
 /// Writing a file of the redirect failed.
 pub const PF_WRITE: &str = "pf_write";
 /// The running helper could not be found or read, so it was not copied for
-/// the boot job, and nothing was written (task M4-27). On macOS, root cannot
+/// the boot job, and nothing was written (task M4-27): its path is not
+/// known, the file is gone or larger than 64 MiB, or the read was refused.
+/// A refused read is what the folder protection of macOS gives: root cannot
 /// read the user's Desktop, Documents, and Downloads folders until the user
-/// allows it (the folder protection of Privacy & Security), so a helper run
-/// from there fails here: run Marsa from its own folder,
+/// allows it (Privacy & Security). Only then does the message say to run
+/// Marsa from its own folder,
 /// `~/Library/Application Support/dev.marsa.Marsa/bin`.
 pub const PF_HELPER_UNREADABLE: &str = "pf_helper_unreadable";
 /// Deleting a file of the redirect failed.
@@ -139,9 +141,18 @@ fn install_files(
         failure(PF_HELPER_UNREADABLE, message)
     })?;
     let helper = system.read(&exe, MAX_HELPER_BYTES).map_err(|err| {
+        // Only a refused read points at the folder protection. A helper that
+        // is gone or too large has another cause, so no such advice.
+        let advice = if err.kind() == io::ErrorKind::PermissionDenied {
+            format!(
+                ". macOS keeps root out of the Desktop, Documents, and Downloads folders: \
+                 run Marsa from {INSTALL_BIN}"
+            )
+        } else {
+            String::new()
+        };
         let message = format!(
-            "cannot read {} to copy it to {COPY}: {}. macOS keeps root out of the Desktop, \
-             Documents, and Downloads folders: run Marsa from {INSTALL_BIN}",
+            "cannot read {} to copy it to {COPY}: {}{advice}",
             exe.display(),
             err.kind()
         );
@@ -807,9 +818,16 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         assert!(mac.fake.files.borrow().keys().eq([&exe]));
 
         // A helper that is gone is not copied either, and nothing is written.
+        // The same code, but no word about the folder protection: that is
+        // not why the read failed.
         let mac = fresh(&[]);
         mac.fake.files.borrow_mut().clear();
-        assert_eq!(code_of(&install(18080, 18443, &mac)), PF_HELPER_UNREADABLE);
+        let message = format!(
+            "cannot read {} to copy it to {COPY}: entity not found",
+            exe.display()
+        );
+        let expected = OpResult::failed(INSTALL, PF_HELPER_UNREADABLE, message);
+        assert_eq!(install(18080, 18443, &mac), expected);
         assert!(commands(&mac).is_empty() && mac.fake.files.borrow().is_empty());
     }
 

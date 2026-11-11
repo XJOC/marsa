@@ -432,9 +432,11 @@ where
 /// The answer to `POST /v1/setup`, and the data of `setup_finished` (task
 /// M4-13).
 ///
-/// Setup sends one request to `marsa-helper`, behind one admin prompt. An
-/// operation it cannot do safely is left out of that request and listed in
-/// `skipped`; the others still run.
+/// Setup sends one request to `marsa-helper`, behind the admin prompt. On
+/// macOS the daemon then asks the user to approve the trust in Marsa's
+/// certificate authority for this user, in the dialog macOS shows (ADR
+/// 0015). An operation it cannot do safely is left out of that request and
+/// listed in `skipped`; the others still run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupReport {
     /// The helper's result for each operation it ran, in order, then, on
@@ -452,8 +454,8 @@ pub struct SetupReport {
     #[serde(default)]
     pub port_holders: Vec<PortHolder>,
     /// Why the helper did not run, or why its answer cannot be used:
-    /// `setup_cancelled`, `setup_timed_out`, `setup_interrupted`,
-    /// `setup_helper_missing`, `setup_helper_unsafe`,
+    /// `setup_cancelled`, `setup_not_authorized`, `setup_timed_out`,
+    /// `setup_interrupted`, `setup_helper_missing`, `setup_helper_unsafe`,
     /// `setup_helper_protected_folder`, `setup_helper_failed`, or
     /// `setup_helper_rejected`. `None` if the helper answered, or was not
     /// needed.

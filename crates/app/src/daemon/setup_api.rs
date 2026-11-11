@@ -1,5 +1,7 @@
-//! `POST /v1/setup`: the first setup on macOS, behind one admin prompt. Task
-//! M4-13, with the port check of task M4-14b.
+//! `POST /v1/setup`: the first setup on macOS. The user is asked twice: for
+//! an administrator password (the helper), then to approve the trust in
+//! Marsa's certificate authority for this user. Task M4-13, with the port
+//! check of task M4-14b and the user trust of task M4-26.
 //!
 //! | Route | Answer |
 //! | --- | --- |
@@ -94,6 +96,7 @@ const REDIRECTED: [u16; 2] = [80, 443];
 /// How long `netstat` and each `ps` may take.
 const CHECK_LIMIT: Duration = Duration::from_secs(10);
 /// How long `osascript` may take: the user types the password meanwhile.
+/// The trust dialog of `security add-trusted-cert` gets the same.
 const PROMPT_LIMIT: Duration = Duration::from_secs(5 * 60);
 /// At most this many `ps` calls; further holders keep netstat's name only.
 const MAX_PS: usize = 8;
@@ -112,6 +115,17 @@ const POLL: Duration = Duration::from_millis(10);
 /// How long the pipes may stay open after the program ended. Its output is
 /// read all along, so only the last bytes are left by then.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
+/// The longest a setup takes, when every program runs to its limit:
+/// `netstat`, [`MAX_PS`] `ps` calls, and `security verify-cert` at
+/// [`CHECK_LIMIT`] each, `osascript` and `security add-trusted-cert` at
+/// [`PROMPT_LIMIT`] each, and [`PIPE_GRACE`] after each of these programs.
+/// A client has to wait longer: `marsa_core::client::SETUP_TIMEOUT` does,
+/// and a test holds the two together.
+pub const SLOWEST_SETUP: Duration = Duration::from_secs(
+    (2 + MAX_PS as u64) * CHECK_LIMIT.as_secs()
+        + 2 * PROMPT_LIMIT.as_secs()
+        + (4 + MAX_PS as u64) * PIPE_GRACE.as_secs(),
+);
 
 /// The first line the helper's `trust_install` accepts (`ops/trust.rs`).
 const PEM_BEGIN: &str = "-----BEGIN CERTIFICATE-----";
@@ -540,9 +554,9 @@ impl Setup {
 
     /// Sends `ops` to the helper behind the admin prompt and reads its
     /// answer. With no operation nothing runs and no prompt shows. The
-    /// helper file is checked first: a file that is missing, that another
-    /// user could change, or (on macOS) that sits in a folder macOS keeps
-    /// root out of means no prompt.
+    /// helper is checked first: a path in a folder macOS keeps root out of
+    /// (on macOS; by the path alone, before any look at the file), or a file
+    /// that is missing or that another user could change, means no prompt.
     fn apply(
         &self,
         ops: Vec<HelperOp>,
@@ -557,19 +571,8 @@ impl Setup {
             failure("setup_helper_missing", "marsa-helper is not next to marsad")
         };
         let helper = self.helper.as_deref().ok_or_else(missing)?;
-        match check_helper(helper) {
-            Ok(()) => {}
-            Err(HelperFault::Missing) => return Err(missing()),
-            Err(HelperFault::Unsafe(reason)) => {
-                tracing::warn!(
-                    path = %helper.display(),
-                    reason,
-                    "marsa-helper could be changed by another user; no admin prompt"
-                );
-                let message = format!("marsa-helper is not safe to run as root: {reason}");
-                return Err(failure("setup_helper_unsafe", message));
-            }
-        }
+        // First: it reads nothing, and the advice to move Marsa comes before
+        // any word about the file itself.
         let protected = is_macos(platform)
             .then(|| protected_folder(helper, self.home.as_deref()))
             .flatten();
@@ -586,6 +589,19 @@ impl Setup {
                 folder.display()
             );
             return Err(failure("setup_helper_protected_folder", message));
+        }
+        match check_helper(helper) {
+            Ok(()) => {}
+            Err(HelperFault::Missing) => return Err(missing()),
+            Err(HelperFault::Unsafe(reason)) => {
+                tracing::warn!(
+                    path = %helper.display(),
+                    reason,
+                    "marsa-helper could be changed by another user; no admin prompt"
+                );
+                let message = format!("marsa-helper is not safe to run as root: {reason}");
+                return Err(failure("setup_helper_unsafe", message));
+            }
         }
         let cannot_write = |err: serde_json::Error| {
             tracing::error!(error = %err, "cannot write the helper request");
@@ -716,15 +732,18 @@ fn is_macos(platform: Platform) -> bool {
 }
 
 /// The folder of [`PROTECTED_FOLDERS`] under `home` that holds `helper`, if
-/// any. Component-wise ([`Path::starts_with`]), so `~/Desktop2` is not
-/// `~/Desktop`, and with no `canonicalize`: the path is compared as root
-/// would open it.
+/// any, as the helper's path writes it. By component, so `~/Desktop2` is not
+/// `~/Desktop`. The folder's name is compared without ASCII case: the usual
+/// macOS disk takes `~/desktop` for `~/Desktop`. No `canonicalize` and no
+/// I/O: the path is compared as root would open it.
 fn protected_folder(helper: &Path, home: Option<&Path>) -> Option<PathBuf> {
     let home = home?;
+    let first = helper.strip_prefix(home).ok()?.components().next()?;
+    let name = first.as_os_str().to_str()?;
     PROTECTED_FOLDERS
         .iter()
-        .map(|name| home.join(name))
-        .find(|folder| helper.starts_with(folder))
+        .any(|protected| name.eq_ignore_ascii_case(protected))
+        .then(|| home.join(name))
 }
 
 /// The text of Caddy's root certificate at `path`, for `trust_install`.
@@ -1552,7 +1571,15 @@ mod tests {
             assert_eq!(trust.status, OpStatus::Failed, "{name}");
             assert_eq!(trust.code.as_deref(), Some("trust_add_failed"), "{name}");
             let message = trust.message.as_deref().unwrap().to_ascii_lowercase();
-            for part in [how, "approve the dialog", "desktop session"] {
+            // What to do: the dialog shows in the daemon's session, so a
+            // daemon started over SSH has to stop first.
+            for part in [
+                how,
+                "in terminal on the mac's desktop",
+                "approve the dialog",
+                "started over ssh",
+                "\"marsa daemon stop\" first",
+            ] {
                 assert!(message.contains(part), "{name}: {message}");
             }
             // Nothing `security` printed is in the message.
@@ -1589,8 +1616,42 @@ mod tests {
     }
 
     #[test]
+    fn the_client_waits_longer_than_the_slowest_setup() {
+        use marsa_core::client::SETUP_TIMEOUT;
+
+        // 11 min 40 s of limits, and 2 s of grace after each of 12 programs.
+        assert_eq!(SLOWEST_SETUP, Duration::from_secs(724));
+        // With room for the HTTP round trip and for killing a stalled
+        // program.
+        let margin = Duration::from_secs(30);
+        assert!(
+            SETUP_TIMEOUT >= SLOWEST_SETUP + margin,
+            "the client waits {SETUP_TIMEOUT:?}, and a setup may take {SLOWEST_SETUP:?}"
+        );
+
+        // The sum holds every program a setup runs. A full run with nobody
+        // on 80 or 443 runs all of them but `ps`, each with its limit, so a
+        // new program in the flow fails here until it is in `SLOWEST_SETUP`,
+        // which then has to fit the client's wait above.
+        let dir = Dir::new(true);
+        let answer = all_done(&["resolver_install", "pf_install"]);
+        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+        dir.run(&fake);
+        let calls = fake.calls();
+        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, SECURITY, SECURITY]);
+        let ps = u32::try_from(MAX_PS).unwrap();
+        let programs = u32::try_from(calls.len()).unwrap() + ps;
+        let limits: Duration = calls.iter().map(|call| call.limit).sum();
+        assert_eq!(
+            limits + CHECK_LIMIT * ps + PIPE_GRACE * programs,
+            SLOWEST_SETUP
+        );
+    }
+
+    #[test]
     fn a_helper_in_a_protected_folder_is_refused_before_any_prompt() {
-        for folder in PROTECTED_FOLDERS {
+        // `desktop`: the usual macOS disk takes it for `Desktop`.
+        for folder in ["Desktop", "Documents", "Downloads", "desktop"] {
             let dir = Dir::new(true);
             let helper = dir
                 .home()
@@ -1623,6 +1684,27 @@ mod tests {
             // No admin prompt, and no trust dialog after it either.
             assert_eq!(fake.programs(), [NETSTAT], "{folder}");
         }
+
+        // By the path alone, before any look at the file: a helper that is
+        // not there gets the same answer, not `setup_helper_missing`.
+        let dir = Dir::new(true);
+        let helper = dir.home().join("Downloads").join("marsa-helper");
+        let fake = Fake::scripted(netstat_free(), || panic!("osascript ran"));
+        let setup = Setup::with(
+            fake.clone(),
+            Some(Platform::DarwinArm64),
+            Some(helper),
+            Some(dir.home()),
+        );
+        let stop = CancellationToken::new();
+        let report = setup.run(
+            dir.dir.path(),
+            CaddyInput::default(),
+            Platform::DarwinArm64,
+            &stop,
+        );
+        assert_eq!(error_code(&report), Some("setup_helper_protected_folder"));
+        assert_eq!(fake.programs(), [NETSTAT]);
     }
 
     #[test]
@@ -1637,6 +1719,10 @@ mod tests {
             ),
             ("/Users/dev/Documents/x/marsa-helper", under("Documents")),
             ("/Users/dev/Downloads/marsa-helper", under("Downloads")),
+            // Without ASCII case, and as the path writes the folder.
+            ("/Users/dev/desktop/marsa-helper", under("desktop")),
+            ("/Users/dev/DOWNLOADS/x/marsa-helper", under("DOWNLOADS")),
+            ("/Users/dev/documents2/marsa-helper", None),
             ("/Users/dev/Desktop2/marsa-helper", None),
             ("/Users/dev/DesktopX/Desktop/marsa-helper", None),
             (
@@ -1786,6 +1872,10 @@ mod tests {
             );
             assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)], "{name}");
             assert_eq!(report.error, None, "{name}");
+            // A certificate that cannot be used never reaches `security`:
+            // only the helper's two results come back.
+            assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT], "{name}");
+            assert_eq!(report.results.len(), 2, "{name}");
         }
         // The helper allows whitespace before the BEGIN line.
         assert_eq!(pem_problem(&format!(" \t\r\n{TEST_CA}")), None);

@@ -405,9 +405,9 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              report it."
             .into(),
         "trust_add_failed" => "Your browser will not trust Marsa's sites yet: the trust for \
-             your user was not added. Run \"marsa setup\" again from your desktop (not over \
-             SSH) and approve the dialog macOS shows. If it repeats, report it with the file \
-             logs/marsad.log."
+             your user was not added. Run \"marsa setup\" in Terminal on the Mac's desktop and \
+             approve the dialog macOS shows. If Marsa was started over SSH, run \"marsa daemon \
+             stop\" first. If it repeats, report it with the file logs/marsad.log."
             .into(),
         "trust_remove_failed" => "Marsa could not take away the trust in its certificate \
              authority. Run the command again; if it repeats, remove \"Marsa Local CA\" in \
@@ -416,10 +416,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "pf_write" | "pf_load_failed" => "macOS did not load the redirect of ports 80 and 443. \
              Run \"marsa setup\" again; if it repeats, report it."
             .into(),
-        "pf_helper_unreadable" => "macOS did not let the admin part of Marsa read \
-             marsa-helper, so ports 80 and 443 were not redirected. Move Marsa's programs out \
-             of Desktop, Documents, and Downloads to \
-             ~/Library/Application Support/dev.marsa.Marsa/bin, then run \"marsa setup\" again."
+        "pf_helper_unreadable" => "The admin part of Marsa could not read marsa-helper, so \
+             ports 80 and 443 were not redirected. If Marsa's programs are in Desktop, \
+             Documents, or Downloads, move them to \
+             ~/Library/Application Support/dev.marsa.Marsa/bin; otherwise reinstall Marsa. \
+             Then run \"marsa setup\" again."
             .into(),
 
         // `marsa autostart`: the autostart route (task M5-03).
@@ -665,9 +666,11 @@ pub fn unsecured(url: &str) -> String {
 
 // `marsa setup`.
 
-/// On stderr before the call, which may wait for the password prompt. On
-/// macOS only: other systems get `setup_not_supported` and no prompt.
-pub const SETUP_STARTED: &str = "Setting up Marsa. macOS may ask for your password once.";
+/// On stderr before the call, which may wait for the admin prompt and then
+/// for the trust dialog. On macOS only: other systems get
+/// `setup_not_supported` and no prompt.
+pub const SETUP_STARTED: &str = "Setting up Marsa. macOS asks for an administrator password, \
+     then asks you to approve trusting Marsa's certificate authority for your user.";
 /// After Marsa stopped waiting for the helper, which may still have run.
 const SETUP_MAY_HAVE_RUN: &str = "Some steps may already have run with admin rights. Running \
      \"marsa setup\" again is safe: each step checks what is already done.";

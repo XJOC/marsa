@@ -1,10 +1,12 @@
-//! `marsa setup`: the first setup, with one password prompt (macOS). Task
-//! M4-13.
+//! `marsa setup`: the first setup (macOS). macOS asks for an administrator
+//! password, then asks the user to approve trusting Marsa's certificate
+//! authority for this user. Task M4-13, and task M4-26 for the trust.
 //!
 //! One call to `marsad` (`POST /v1/setup`, in `daemon/setup_api.rs`),
-//! started if needed. The daemon checks ports 80 and 443, then asks macOS
-//! for the password once and runs `marsa-helper`. This prints one line per
-//! step: done, already done, failed, or skipped and why.
+//! started if needed. The daemon checks ports 80 and 443, asks macOS for the
+//! administrator password and runs `marsa-helper`, then trusts the
+//! certificate authority for the user behind the dialog macOS shows. This
+//! prints one line per step: done, already done, failed, or skipped and why.
 //!
 //! Exit code 1 if a step failed or the helper did not run (the prompt was
 //! cancelled, for example). A skipped step alone, such as `ca_not_ready`

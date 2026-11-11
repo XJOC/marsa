@@ -38,6 +38,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use marsa_core::helper::OpResult;
 use marsa_core::types::OpStatus;
@@ -61,11 +62,15 @@ const TRUST_REMOVE: &str = "trust_remove";
 const CA_NAME: &str = "Marsa Local CA";
 /// The user's login keychain, under the home folder.
 const LOGIN_KEYCHAIN: [&str; 3] = ["Library", "Keychains", "login.keychain-db"];
-/// Part of the text of `errSecItemNotFound`, which `remove-trusted-cert`
-/// prints when the certificate has no trust settings in the user domain.
-/// Unverified: running it would change the owner's trust settings. The
-/// helper's `ops/trust.rs` relies on the same text for the admin domain.
-const NO_TRUST: &[u8] = b"could not be found";
+/// What `remove-trusted-cert` prints when there is no trust to take away:
+/// part of the text of `errSecItemNotFound` (-25300, "The specified item
+/// could not be found in the keychain.": the user's trust settings have no
+/// entry for the certificate), and of `errSecNoTrustSettings` (-25263, "No
+/// Trust Settings were found.": the user has no trust settings at all, the
+/// usual case before the first setup). Unverified: running it would change
+/// the owner's trust settings. The helper's `ops/trust.rs` relies on the
+/// first text for the admin domain.
+const NO_TRUST: [&[u8]; 2] = [b"could not be found", b"No Trust Settings were found"];
 /// The line before each certificate in the output of `find-certificate -Z`.
 const HASH_LINE: &str = "SHA-256 hash: ";
 const PEM_END: &str = "-----END CERTIFICATE-----";
@@ -86,6 +91,11 @@ pub fn install(
     ca_root: &Path,
     stop: &CancellationToken,
 ) -> OpResult {
+    if let Some(problem) = not_absolute(home, ca_root) {
+        tracing::warn!(problem, "security does not run");
+        let message = format!("{problem}, so security did not run");
+        return failed(TRUST_INSTALL, TRUST_ADD_FAILED, message);
+    }
     if is_trusted(runner, ca_root, stop) {
         tracing::info!("Marsa's CA root is already trusted for the current user");
         return result(TRUST_INSTALL, OpStatus::Unchanged);
@@ -96,11 +106,14 @@ pub fn install(
     if succeeded(&added) {
         return result(TRUST_INSTALL, OpStatus::Done);
     }
-    let how = failure_text(&added);
+    let how = failure_text(&added, PROMPT_LIMIT);
     tracing::warn!(outcome = %how, "macOS did not add the user's trust for Marsa's CA root");
+    // The dialog shows in the session `marsad` runs in, not in the one
+    // `marsa setup` was typed in: a daemon started over SSH has none.
     let message = format!(
         "macOS did not add the trust for the current user: security add-trusted-cert {how}. \
-         Approve the dialog macOS shows, or run \"marsa setup\" from the desktop session"
+         Run \"marsa setup\" in Terminal on the Mac's desktop and approve the dialog; if \
+         Marsa was started over SSH, run \"marsa daemon stop\" first"
     );
     failed(TRUST_INSTALL, TRUST_ADD_FAILED, message)
 }
@@ -116,20 +129,28 @@ pub fn remove(
     pem: &str,
     stop: &CancellationToken,
 ) -> OpResult {
+    if let Some(problem) = not_absolute(home, ca_root) {
+        tracing::warn!(problem, "security does not run");
+        let message = format!("{problem}, so security did not run");
+        return failed(TRUST_REMOVE, TRUST_REMOVE_FAILED, message);
+    }
     let keychain = login_keychain(home);
     let untrust = runner.run(SECURITY, &untrust_args(ca_root), PROMPT_LIMIT, stop);
     let had_trust = match &untrust {
         Ok(output) if output.success() => true,
-        // No trust to take away, for example after the user removed it by
-        // hand. A dialog refused or cancelled, or a timeout, is a failure:
-        // the trust may still be there.
-        Ok(output) if output.code.is_some() && mentions(&output.stderr, NO_TRUST) => false,
-        _ => return command_failed(TRUST_REMOVE, "remove-trusted-cert", &untrust),
+        // No trust to take away: the first setup never ran, or the user
+        // removed it by hand. A dialog refused or cancelled, or a timeout,
+        // is a failure: the trust may still be there.
+        Ok(output) if output.code.is_some() && no_trust(&output.stderr) => false,
+        _ => {
+            let command = "remove-trusted-cert";
+            return command_failed(TRUST_REMOVE, command, &untrust, PROMPT_LIMIT);
+        }
     };
     let listed = runner.run(SECURITY, &find_args(&keychain), CHECK_LIMIT, stop);
     let hash = match &listed {
         Ok(output) if output.success() => hash_of(&output.stdout, pem),
-        _ => return command_failed(TRUST_REMOVE, "find-certificate", &listed),
+        _ => return command_failed(TRUST_REMOVE, "find-certificate", &listed, CHECK_LIMIT),
     };
     let Some(hash) = hash else {
         let outcome = if had_trust {
@@ -143,7 +164,21 @@ pub fn remove(
     if succeeded(&deleted) {
         result(TRUST_REMOVE, OpStatus::Done)
     } else {
-        command_failed(TRUST_REMOVE, "delete-certificate", &deleted)
+        command_failed(TRUST_REMOVE, "delete-certificate", &deleted, PROMPT_LIMIT)
+    }
+}
+
+/// Why `security` must not get these paths, or `None`. Each goes on its
+/// command line as one argument: a relative one would name another file
+/// (the runner's working folder is `/`), and one that starts with `-` would
+/// be read as an option. An absolute path does neither.
+fn not_absolute(home: &Path, ca_root: &Path) -> Option<&'static str> {
+    if !ca_root.is_absolute() {
+        Some("the path of the CA root certificate is not absolute")
+    } else if !home.is_absolute() {
+        Some("the home folder is not an absolute path")
+    } else {
+        None
     }
 }
 
@@ -241,33 +276,53 @@ fn succeeded(result: &io::Result<RunOutput>) -> bool {
     matches!(result, Ok(output) if output.success())
 }
 
-/// `text` appears in `stderr`, ignoring ASCII case.
-fn mentions(stderr: &[u8], text: &[u8]) -> bool {
-    stderr
-        .windows(text.len())
-        .any(|window| window.eq_ignore_ascii_case(text))
+/// One of the [`NO_TRUST`] texts appears in `stderr`, ignoring ASCII case.
+fn no_trust(stderr: &[u8]) -> bool {
+    NO_TRUST.iter().any(|text| {
+        stderr
+            .windows(text.len())
+            .any(|window| window.eq_ignore_ascii_case(text))
+    })
 }
 
-fn command_failed(op: &str, command: &str, result: &io::Result<RunOutput>) -> OpResult {
-    let how = failure_text(result);
+/// `limit`: how long `command` was given, for the message of a timeout.
+fn command_failed(
+    op: &str,
+    command: &str,
+    result: &io::Result<RunOutput>,
+    limit: Duration,
+) -> OpResult {
+    let how = failure_text(result, limit);
     tracing::warn!(command, outcome = %how, "security could not remove the user's trust");
     let message = format!("security {command} {how}");
     failed(op, TRUST_REMOVE_FAILED, message)
 }
 
-fn failure_text(result: &io::Result<RunOutput>) -> String {
+/// How a command ended, when it did not end well. `limit` is the time it
+/// was given: a timeout names it.
+fn failure_text(result: &io::Result<RunOutput>, limit: Duration) -> String {
     match result {
         Ok(RunOutput {
             code: Some(code), ..
         }) => format!("exited with code {code}"),
         Ok(_) => "was stopped by a signal".to_owned(),
         Err(err) if err.kind() == io::ErrorKind::TimedOut => {
-            "did not finish in 5 minutes".to_owned()
+            format!("did not finish in {}", limit_text(limit))
         }
         Err(err) if err.kind() == io::ErrorKind::Interrupted => {
             "was stopped with the daemon".to_owned()
         }
         Err(err) => format!("could not run: {}", err.kind()),
+    }
+}
+
+/// `limit` in words: whole minutes, else seconds.
+fn limit_text(limit: Duration) -> String {
+    let seconds = limit.as_secs();
+    match (seconds / 60, seconds % 60) {
+        (1, 0) => "1 minute".to_owned(),
+        (minutes, 0) if minutes > 1 => format!("{minutes} minutes"),
+        _ => format!("{seconds} seconds"),
     }
 }
 
@@ -338,9 +393,20 @@ mod tests {
     /// Another certificate with Marsa's name: the test CA's base64 with one
     /// character changed, so only the hash and the body differ.
     const OTHER_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-    const HOME: &str = "/Users/dev";
-    const KEYCHAIN: &str = "/Users/dev/Library/Keychains/login.keychain-db";
-    const CA_ROOT: &str = "/Users/dev/Library/Application Support/dev.marsa.Marsa/caddy/data/caddy/pki/authorities/marsa/root.crt";
+    /// A drive on Windows, where these tests also run: a path without one is
+    /// not absolute there, and `security` gets absolute paths only.
+    const DRIVE: &str = if cfg!(windows) { "C:" } else { "" };
+
+    fn home() -> PathBuf {
+        PathBuf::from(format!("{DRIVE}/Users/dev"))
+    }
+
+    fn ca_root() -> PathBuf {
+        PathBuf::from(format!(
+            "{DRIVE}/Users/dev/Library/Application Support/dev.marsa.Marsa/caddy/data/caddy/\
+             pki/authorities/marsa/root.crt"
+        ))
+    }
 
     /// What `find-certificate -a -Z -p` prints for `certs`, in its format.
     fn listing(certs: &[(&str, &str)]) -> String {
@@ -367,12 +433,57 @@ mod tests {
 
     fn remove_with(fake: &Fake) -> OpResult {
         let stop = CancellationToken::new();
-        remove(fake, Path::new(HOME), Path::new(CA_ROOT), TEST_CA, &stop)
+        remove(fake, &home(), &ca_root(), TEST_CA, &stop)
     }
 
     #[test]
     fn the_login_keychain_is_under_the_home_folder() {
-        assert_eq!(login_keychain(Path::new(HOME)), Path::new(KEYCHAIN));
+        assert_eq!(
+            login_keychain(Path::new("/Users/dev")),
+            Path::new("/Users/dev/Library/Keychains/login.keychain-db")
+        );
+    }
+
+    #[test]
+    fn a_path_that_is_not_absolute_never_reaches_security() {
+        let fake = Fake::answering(|program, args| panic!("{program} {args:?} ran"));
+        let stop = CancellationToken::new();
+        let (home, ca_root) = (home(), ca_root());
+        // A relative path would name another file, and `-d` would be read
+        // as an option.
+        let cases = [
+            ("a relative file", home.as_path(), Path::new("root.crt")),
+            ("a file in .", home.as_path(), Path::new("./root.crt")),
+            ("an option", home.as_path(), Path::new("-d")),
+            ("a relative home", Path::new("Users/dev"), ca_root.as_path()),
+        ];
+        for (name, home, ca_root) in cases {
+            let added = install(&*fake, home, ca_root, &stop);
+            assert_eq!(added.op, TRUST_INSTALL, "{name}");
+            assert_eq!(added.status, OpStatus::Failed, "{name}");
+            assert_eq!(added.code.as_deref(), Some(TRUST_ADD_FAILED), "{name}");
+            let removed = remove(&*fake, home, ca_root, TEST_CA, &stop);
+            assert_eq!(removed.op, TRUST_REMOVE, "{name}");
+            assert_eq!(removed.status, OpStatus::Failed, "{name}");
+            assert_eq!(removed.code.as_deref(), Some(TRUST_REMOVE_FAILED), "{name}");
+            for result in [added, removed] {
+                let message = result.message.unwrap();
+                assert!(
+                    message.contains("security did not run"),
+                    "{name}: {message}"
+                );
+            }
+        }
+        assert!(fake.calls().is_empty());
+    }
+
+    #[test]
+    fn a_timeout_names_the_limit_of_its_command() {
+        assert_eq!(limit_text(PROMPT_LIMIT), "5 minutes");
+        assert_eq!(limit_text(CHECK_LIMIT), "10 seconds");
+        assert_eq!(limit_text(Duration::from_secs(60)), "1 minute");
+        assert_eq!(limit_text(Duration::from_secs(90)), "90 seconds");
+        assert_eq!(limit_text(Duration::ZERO), "0 seconds");
     }
 
     #[test]
@@ -455,12 +566,14 @@ mod tests {
         assert_eq!(remove_with(&fake), result(TRUST_REMOVE, OpStatus::Done));
         // Built like the code builds it: on Windows, where these tests also
         // run, `join` puts `\` between the parts.
-        let keychain = login_keychain(Path::new(HOME));
+        let keychain = login_keychain(&home());
         let keychain = keychain.to_str().expect("the test path is UTF-8");
+        let ca_root = ca_root();
+        let ca_root = ca_root.to_str().expect("the test path is UTF-8");
         assert_eq!(
             security_calls(&fake),
             [
-                vec!["remove-trusted-cert", CA_ROOT],
+                vec!["remove-trusted-cert", ca_root],
                 vec![
                     "find-certificate",
                     "-a",
@@ -479,18 +592,27 @@ mod tests {
 
     #[test]
     fn remove_with_nothing_there_is_unchanged_and_deletes_nothing() {
-        let not_found = "SecTrustSettingsRemoveTrustSettings: The specified item could not be \
-                         found in the keychain.\n";
-        let fake = Fake::answering(move |_, args| match args[0].as_str() {
-            "remove-trusted-cert" => exit(1, not_found),
-            "find-certificate" => ok(""),
-            other => panic!("{other} ran"),
-        });
-        assert_eq!(
-            remove_with(&fake),
-            result(TRUST_REMOVE, OpStatus::Unchanged)
-        );
-        assert_eq!(security_calls(&fake).len(), 2);
+        let no_trust = [
+            // The trust settings have no entry for the certificate.
+            "SecTrustSettingsRemoveTrustSettings: The specified item could not be found in the \
+             keychain.\n",
+            // The user has no trust settings at all: the usual case before
+            // the first setup.
+            "SecTrustSettingsRemoveTrustSettings: No Trust Settings were found.\n",
+        ];
+        for stderr in no_trust {
+            let fake = Fake::answering(move |_, args| match args[0].as_str() {
+                "remove-trusted-cert" => exit(1, stderr),
+                "find-certificate" => ok(""),
+                other => panic!("{other} ran"),
+            });
+            assert_eq!(
+                remove_with(&fake),
+                result(TRUST_REMOVE, OpStatus::Unchanged),
+                "{stderr}"
+            );
+            assert_eq!(security_calls(&fake).len(), 2, "{stderr}");
+        }
 
         // The trust was there, the certificate was not: done.
         let fake = Fake::answering(move |_, args| match args[0].as_str() {
@@ -527,6 +649,16 @@ mod tests {
                     other => panic!("{other} ran"),
                 }),
                 1,
+            ),
+            (
+                "the listing left open",
+                "security find-certificate did not finish in 10 seconds",
+                Box::new(|args| match args[0].as_str() {
+                    "find-certificate" => Err(io::Error::from(io::ErrorKind::TimedOut)),
+                    "remove-trusted-cert" => ok(""),
+                    other => panic!("{other} ran"),
+                }),
+                2,
             ),
             (
                 "the listing failed",
