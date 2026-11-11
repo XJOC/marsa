@@ -3,7 +3,11 @@ name = "marsa-gui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The Marsa window: egui with the wgpu renderer, a client of the daemon"
+description = "The Marsa window (egui with the wgpu renderer) and the menu-bar icon, two clients of the daemon"
+
+# Two binaries: `marsa-gui` (src/main.rs, the window) and `marsa-tray`
+# (src/bin/marsa-tray.rs, the menu-bar icon). The library holds the code of
+# both and exists for them only (task M5-04).
 
 [dependencies]
 # With `full` (the default): the window talks to the daemon through
@@ -14,9 +18,17 @@ eframe.workspace = true
 egui_extras.workspace = true
 # The type of `Site::php`; the PHP and Node lists compare versions.
 semver.workspace = true
+# The menu-bar icon: the event loop, and the icon with its menu.
+tao.workspace = true
+# The errors of the startup code and the tray, which sit in the library.
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tray-icon.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
