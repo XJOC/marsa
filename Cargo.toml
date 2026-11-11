@@ -67,6 +67,10 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 # `env-filter`: `MARSA_LOG=debug` raises the log level (task M2-06).
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Win32 calls with no safe wrapper in std: the daemon's Job Object and a
+# process start that inherits no handles (task M4-19a, ADR 0017). Only on
+# Windows, and only the API families named here.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 # Deflate through flate2 only (the same crate as above, so one backend). No
 # bzip2, zstd, lzma, aes, or zopfli: the archives we read do not use them.
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
