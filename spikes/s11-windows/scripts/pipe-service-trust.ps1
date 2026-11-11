@@ -174,6 +174,47 @@ try {
     $work = Join-Path $Out 'work'
     New-Item -ItemType Directory -Force $work | Out-Null
     Get-Zip $CaddyUrls $CaddySha256 (Join-Path $work 'caddy')
+    Say ""
+    Say "## Port 80: can Caddy bind 127.0.0.1:80 next to what holds it?"
+    $plain = Join-Path $work 'Caddyfile-80'
+    @"
+{
+    admin off
+    auto_https off
+}
+http://laravel-app.test:80 {
+    bind 127.0.0.1
+    respond "hello on 80"
+}
+"@ | Set-Content -Path $plain -Encoding ascii
+    function Test-Port80([string]$Label) {
+        $try = Start-Process -FilePath (Join-Path $work 'caddy\caddy.exe') `
+            -ArgumentList @('run', '--config', "`"$plain`"", '--adapter', 'caddyfile') `
+            -PassThru -NoNewWindow -RedirectStandardError (Join-Path $Out 'caddy-80.log')
+        Start-Sleep -Seconds 3
+        if ($try.HasExited) {
+            $last = Get-Content (Join-Path $Out 'caddy-80.log') | Select-Object -Last 1
+            Say "${Label}: Caddy stopped (exit $($try.ExitCode)): $last"
+        } else {
+            Say "${Label}: Caddy listens on 127.0.0.1:80"
+            Stop-Process -Id $try.Id -Force
+        }
+    }
+    Test-Port80 'as the runner comes'
+    Say "http.sys URLs on port 80:"
+    (& netsh.exe http show servicestate view=requestq | Select-String -Pattern ':80/' | Out-String).Trim() -split "`r?`n" | ForEach-Object { Say "    $_" }
+    foreach ($name in 'W3SVC', 'MsDepSvc', 'WAS', 'ReportServer', 'SQLServerReportingServices') {
+        $service = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if ($service) {
+            Say "service ${name}: $($service.Status)"
+            if ($service.Status -eq 'Running') {
+                Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
+                Say "  stopped ${name}; listeners on :80 now: $((& netstat.exe -ano | Select-String -Pattern ':80\s+\S+\s+LISTENING' | Measure-Object).Count)"
+            }
+        }
+    }
+    Test-Port80 'after stopping those services'
+
     $script:Url = 'https://laravel-app.test/'
     $caddy = Start-Caddy $work 443
     if (-not $caddy) {
@@ -208,6 +249,10 @@ try {
     $pem = ((Get-Content $root -Raw).Trim() -replace "`r?`n", '\n')
     Invoke-Pipesvc 'trust' @('client', 's11-svc', "trust\n$pem")
     Test-Url 'after trust (expect hello from caddy)'
+    $output = & $curl -sS --max-time 10 --ssl-revoke-best-effort $script:Url 2>&1 | Out-String
+    Say "after trust, curl.exe --ssl-revoke-best-effort -> exit=$LASTEXITCODE output='$($output.Trim())'"
+    Invoke-Pipesvc 'trust a second time (already in the store)' @('client', 's11-svc', "trust\n$pem")
+    Invoke-Pipesvc 'certutil -store Root <sha1> while it is there' @('client', 's11-svc', "store $sha1")
     Say "in LocalMachine\Root: $([bool](Get-ChildItem Cert:\LocalMachine\Root | Where-Object Thumbprint -eq $cert.Thumbprint))"
 
     Invoke-Pipesvc 'untrust by SHA-256 (does certutil accept it?)' @('client', 's11-svc', "untrust $sha256")
@@ -215,6 +260,8 @@ try {
     Invoke-Pipesvc 'untrust by SHA-1' @('client', 's11-svc', "untrust $sha1")
     Say "still in LocalMachine\Root: $([bool](Get-ChildItem Cert:\LocalMachine\Root | Where-Object Thumbprint -eq $cert.Thumbprint))"
     Test-Url 'after untrust (expect a certificate error again)'
+    Invoke-Pipesvc 'certutil -store Root <sha1> after it is gone' @('client', 's11-svc', "store $sha1")
+    Invoke-Pipesvc 'untrust by SHA-1 when it is not there' @('client', 's11-svc', "untrust $sha1")
 
     Invoke-Pipesvc 'trust again' @('client', 's11-svc', "trust\n$pem")
     Invoke-Pipesvc 'untrust by serial number' @('client', 's11-svc', "untrust $($cert.SerialNumber)")

@@ -13,7 +13,7 @@
 //!
 //! Messages are text. The first word is the op: `whoami`, `hosts-rename
 //! <name>`, `hosts-inplace <name>`, `hosts-clear`, `trust` (then the PEM on
-//! the next lines), `untrust <id>`, `stop`. The reply starts with `ok` or
+//! the next lines), `untrust <id>`, `store <id>` (is it in the store?), `stop`. The reply starts with `ok` or
 //! `err`. The service allows SYSTEM and the SID given at install.
 
 #[cfg(not(windows))]
@@ -151,6 +151,7 @@ mod imp {
             "hosts-clear" => write_hosts(None, true),
             "trust" => trust(rest),
             "untrust" => untrust(rest),
+            "store" => certutil(&[OsStr::new("-store"), OsStr::new("Root"), OsStr::new(rest)]),
             "stop" => Ok("stopping".to_owned()),
             _ => Err(io::Error::other("unknown op")),
         };
@@ -352,8 +353,9 @@ mod imp {
                 process_id: None,
             });
         };
-        // SYSTEM and the installing user, nobody else. `P`: no inherited ACEs.
-        let sddl = format!("D:P(A;;GA;;;SY)(A;;GA;;;{sid})");
+        // SYSTEM, and read and write for the installing user; nobody else.
+        // `P`: no inherited ACEs.
+        let sddl = format!("D:P(A;;GA;;;SY)(A;;GRGW;;;{sid})");
         let server = match PipeServer::create(pipe, Some(&sddl), true) {
             Ok(server) => server,
             Err(err) => {

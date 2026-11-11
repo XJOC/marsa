@@ -211,6 +211,23 @@ foreach ($mode in 'procs', 'children') {
 }
 
 Say ""
+Say "## children-4: the master php-cgi is killed"
+$stack = Start-Stack 'children' 4 10000 'children-4-master-kill'
+try {
+    $master = [int]((Get-Content $stack.Log | Where-Object { $_ -match '^start port=\d+ pid=(\d+)' } | Select-Object -Last 1) -replace '.*pid=', '')
+    $before = (Get-Pool).Count
+    Stop-Process -Id $master -Force
+    Start-Sleep -Milliseconds 300
+    Say "  php-cgi processes: $before before killing master $master, $((Get-Pool).Count) 0.3 s after"
+    Start-Sleep -Seconds 2
+    Say "  php-cgi processes 2.3 s after: $((Get-Pool).Count)"
+    Get-Content $stack.Log | ForEach-Object { Say "    $_" }
+    Invoke-Load '/fast.php' @(4) 200 30
+} finally {
+    Stop-Stack $stack
+}
+
+Say ""
 Say "# PHP error log and php-cgi output (first lines)"
 foreach ($file in @(Join-Path $Out 'php-errors.log') + @(Get-ChildItem $Out -Filter 'pool-*.log.out' | ForEach-Object FullName)) {
     if ((Test-Path $file) -and (Get-Item $file).Length -gt 0) {
