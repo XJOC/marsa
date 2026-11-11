@@ -157,6 +157,11 @@ pub struct CaddyManager {
     pub paths: CaddyPaths,
     /// The ports in `caddy.json`. `start` and `stop` call the admin port.
     pub input: CaddyInput,
+    /// Whether Caddy may take ports 80 and 443 itself, asked again for every
+    /// config (Linux, ADR 0014). Never here, so tests never depend on the
+    /// machine they run on; `server::run` sets
+    /// [`marsa_core::platform::low_ports::low_ports_allowed`].
+    pub low_ports: fn() -> bool,
     /// How Caddy runs. `None`, the default: [`caddy_spec`], built again at
     /// each start, so the newest Caddy installed runs, also one installed
     /// while `marsad` runs. Tests put a fake program here.
@@ -262,6 +267,7 @@ impl CaddyManager {
             paths: CaddyPaths::in_dir(data_dir),
             spec: None,
             input: CaddyInput::default(),
+            low_ports: || false,
             ready_limit: READY_LIMIT,
             processes: Arc::new(SystemProcesses),
             ladder: Ladder::default(),
@@ -309,11 +315,26 @@ impl CaddyManager {
         }
     }
 
+    /// The ports of the next config: those of `input`, or 80 and 443 where
+    /// the system now lets Caddy bind them. Linux only: the helper's
+    /// `ports_install` allows it at setup, so the next config after setup
+    /// moves a running Caddy to 80 and 443, with no restart.
+    ///
+    /// The orphan check still looks at the ports of `input`. It runs on
+    /// macOS only; a Linux orphan check (spike S-06b) must ask here.
+    pub fn ports(&self) -> CaddyInput {
+        if (self.low_ports)() {
+            self.input.on_low_ports()
+        } else {
+            self.input
+        }
+    }
+
     /// The config of the latest sites and pools, with `tag` on `admin`.
     fn config(&self, tag: &str) -> Result<Value, CaddyError> {
         let mut config = {
             let wanted = lock(&self.wanted);
-            sites_config(&self.input, &wanted.sites, &wanted.pools)?
+            sites_config(&self.ports(), &wanted.sites, &wanted.pools)?
         };
         tag_config(&mut config, tag);
         Ok(config)
@@ -981,6 +1002,42 @@ mod tests {
         assert!(!is_port_conflict(&line(LogStream::Stdout, go)));
         let other = "bind: permission denied";
         assert!(!is_port_conflict(&line(LogStream::Stderr, other)));
+    }
+
+    /// Linux after setup (ADR 0014): the next config has ports 80 and 443.
+    /// The manager asks at every config, so a running Caddy moves with no
+    /// restart of the daemon.
+    #[test]
+    fn the_config_takes_ports_80_and_443_once_the_system_allows_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut caddy = CaddyManager::new(dir.path());
+        let tag = "marsa-instance-0123456789abcdef0123456789abcdef";
+        let ports = |config: &Value| {
+            let http = &config["apps"]["http"];
+            (
+                http["http_port"].as_u64(),
+                http["https_port"].as_u64(),
+                config["admin"]["listen"].as_str().map(str::to_owned),
+            )
+        };
+        let admin = Some("127.0.0.1:18019".to_owned());
+
+        // A new manager never asks the system: tests stay on the high ports.
+        assert_eq!(caddy.ports(), CaddyInput::default());
+        let high = caddy.config(tag).unwrap();
+        assert_eq!(ports(&high), (Some(18080), Some(18443), admin.clone()));
+
+        caddy.low_ports = || true;
+        assert_eq!(caddy.ports(), CaddyInput::default().on_low_ports());
+        let low = caddy.config(tag).unwrap();
+        assert_eq!(ports(&low), (Some(80), Some(443), admin.clone()));
+
+        // And back, if the system stops allowing them.
+        caddy.low_ports = || false;
+        assert_eq!(
+            ports(&caddy.config(tag).unwrap()),
+            (Some(18080), Some(18443), admin)
+        );
     }
 
     #[tokio::test]
