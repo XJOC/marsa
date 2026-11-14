@@ -238,6 +238,9 @@ mod tests {
         }
     }
 
+    // Unix paths: on Windows `/home/me/bin` has no drive letter, so it is
+    // not absolute and is rightly left out. `xdg-open` is a Linux program.
+    #[cfg(unix)]
     #[test]
     fn xdg_open_is_looked_for_in_the_standard_folders_first() {
         let path = std::env::join_paths(["/home/me/bin", "relative/bin", "/usr/bin"]).unwrap();

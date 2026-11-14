@@ -17,3 +17,4 @@ pub mod sites_sync;
 pub mod state;
 pub mod supervisor;
 pub mod watch;
+pub mod xdebug_api;

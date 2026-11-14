@@ -45,7 +45,7 @@ use crate::runtimes::Runtime;
 use crate::types::{
     API_VERSION, AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, ErrorBody,
     Event, Health, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest, RuntimeList,
-    ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch,
+    ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, XdebugRequest, XdebugState,
 };
 use error::daemon_text;
 
@@ -371,6 +371,32 @@ impl DaemonClient {
     pub async fn set_autostart(&self, enabled: bool) -> Result<AutostartState, ClientError> {
         let body = AutostartRequest { enabled };
         self.call_with(Method::PUT, &["v1", "autostart"], &body)
+            .await
+    }
+
+    /// `GET /v1/php/xdebug`: whether PHP loads Xdebug, and which versions
+    /// (task M5-11).
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`].
+    pub async fn xdebug(&self) -> Result<XdebugState, ClientError> {
+        self.call(Method::GET, &["v1", "php", "xdebug"], REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// `PUT /v1/php/xdebug`: turns Xdebug on or off for every installed PHP.
+    /// Returns once every `php.ini` is written and the php-fpm pools it
+    /// changed have started again, so the next `php` in the terminal already
+    /// runs with the new setting. The state after the change.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; a `config_*` code (500) when `global.toml` cannot
+    /// be read or written.
+    pub async fn set_xdebug(&self, enabled: bool) -> Result<XdebugState, ClientError> {
+        let body = XdebugRequest { enabled };
+        self.call_with(Method::PUT, &["v1", "php", "xdebug"], &body)
             .await
     }
 
