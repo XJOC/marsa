@@ -125,8 +125,9 @@ pub fn error(report: &SetupReport) -> Option<ClientFailure> {
     })
 }
 
-/// `  Port 80 is used by nginx-arm64 (PID 15464, Herd).`
-fn port_held(holder: &PortHolder) -> String {
+/// `  Port 80 is used by nginx-arm64 (PID 15464, Herd).` `marsa doctor`
+/// shows the same lines.
+pub(super) fn port_held(holder: &PortHolder) -> String {
     let name = holder
         .process
         .as_deref()

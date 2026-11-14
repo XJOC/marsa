@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use marsa_core::doctor::{Check, Skip};
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{ServiceState, SiteKind, VersionInUse};
 
@@ -1186,6 +1187,197 @@ pub fn port_held(port: u16, name: Option<&str>, pid: Option<u32>, app: Option<&s
         (None, None) => String::new(),
     };
     format!("  Port {port} is used by {name}{about}.")
+}
+
+// `marsa doctor`.
+
+/// A check that passed.
+pub fn doctor_pass(text: &str) -> String {
+    format!("✓ {text}")
+}
+
+/// A check that failed, with its fix on the next line.
+pub fn doctor_fail(text: &str, fix: &str) -> String {
+    format!("✗ {text}\n  Fix: {fix}")
+}
+
+/// A check that did not run, and why.
+pub fn doctor_skip(check: Check, skip: Skip) -> String {
+    let check = match check {
+        Check::Daemon => "marsad",
+        Check::Runtimes => "PHP and Caddy",
+        Check::Caddy => "Caddy",
+        Check::Dns => ".test names",
+        Check::Ports => "Ports 80 and 443",
+        Check::Trust => "Marsa's certificate authority",
+        Check::Path => "PATH",
+        Check::Log => "The daemon log",
+    };
+    let reason = match skip {
+        Skip::NotOnThisSystem => "Marsa checks this on macOS only for now.",
+        Skip::NeedsDaemon => "It needs marsad, which is not running.",
+        Skip::NeedsCaddy => "It needs Caddy, which is not running.",
+        Skip::CaddyNotInstalled => "Caddy is not installed.",
+        Skip::NoCa => "It does not exist yet: Caddy makes it when it first serves a secure site.",
+        Skip::NoLog => "marsad has not written it yet.",
+        Skip::NotChecked => "The check could not run. Run again with MARSA_LOG=debug for details.",
+    };
+    format!("- {check}: not checked. {reason}")
+}
+
+pub fn doctor_runtimes_ok(default: &str, version: &str) -> String {
+    if default == version {
+        format!("PHP and Caddy are installed, and PHP {default} is the default.")
+    } else {
+        format!("PHP and Caddy are installed, and PHP {default} is the default ({version}).")
+    }
+}
+
+pub const DOCTOR_CADDY_OK: &str = "Caddy is running.";
+pub const DOCTOR_DNS_OK: &str = ".test names resolve to 127.0.0.1.";
+pub const DOCTOR_PORTS_OK: &str = "Ports 80 and 443 reach Caddy.";
+pub const DOCTOR_TRUST_OK: &str = "Marsa's certificate authority is trusted.";
+pub const DOCTOR_PATH_OK: &str = "Marsa's shims come first in PATH.";
+
+pub fn doctor_log_ok(log: &Path) -> String {
+    format!("No errors in {} since marsad last started.", log.display())
+}
+
+pub const DOCTOR_START_DAEMON: &str = "Run \"marsa daemon start\".";
+
+pub fn doctor_daemon_error(code: &str) -> String {
+    format!("Cannot reach marsad. [{code}]")
+}
+
+/// The line and the fix when PHP, Caddy, or both are missing.
+pub fn doctor_not_installed(php: bool, caddy: bool) -> (String, String) {
+    let (missing, fix) = match (php, caddy) {
+        (true, true) => (
+            "PHP and Caddy are",
+            "Run \"marsa install php\", then \"marsa install caddy\".",
+        ),
+        (true, false) => ("PHP is", "Run \"marsa install php\"."),
+        _ => ("Caddy is", "Run \"marsa install caddy\"."),
+    };
+    (format!("{missing} not installed."), fix.to_owned())
+}
+
+pub fn doctor_runtimes_unreadable(code: &str) -> String {
+    format!("Cannot list the installed versions. [{code}]")
+}
+
+pub fn doctor_config_unreadable(code: &str) -> String {
+    format!("Cannot read the default PHP version. [{code}]")
+}
+
+pub const DOCTOR_NO_DEFAULT: &str =
+    "No PHP version is the default, so a folder without a version of its own runs no PHP.";
+
+pub fn doctor_default_not_installed(default: &str) -> String {
+    format!("The default PHP is {default}, but no installed PHP matches it.")
+}
+
+pub fn doctor_use_php(version: &str) -> String {
+    format!("Run \"marsa use php {version}\".")
+}
+
+pub fn doctor_caddy_state(state: &ServiceState) -> String {
+    format!("Caddy is {}.", state_name(state))
+}
+
+pub const DOCTOR_START_CADDY: &str = "Run \"marsa services start caddy\".";
+
+pub fn doctor_caddy_failed(code: &str) -> String {
+    format!("Caddy stopped with an error. [{code}]")
+}
+
+pub const DOCTOR_DNS_NO_ANSWER: &str =
+    ".test names do not resolve, so browsers cannot find Marsa's sites.";
+pub const DOCTOR_DNS_SETUP: &str = "Run \"marsa setup\": it sends .test names to Marsa. If it \
+     says /etc/resolver/test belongs to another tool, remove that tool's .test setting first.";
+
+pub fn doctor_dns_wrong(addresses: &str) -> String {
+    format!(".test names resolve to {addresses}, not to 127.0.0.1.")
+}
+
+pub const DOCTOR_DNS_FOREIGN: &str = "Another tool answers .test names, such as the dnsmasq of \
+     Valet or Herd, or a VPN. Turn off its .test domain, then run \"marsa setup\".";
+/// Above the [`port_held`] lines.
+pub const DOCTOR_PORTS_HELD: &str = "Another program uses port 80 or 443:";
+pub const DOCTOR_FREE_PORTS: &str = "Stop that program, or turn off its web server, then run \
+     \"marsa setup\".";
+
+pub fn doctor_ports_not_routed(ports: &[u16]) -> String {
+    match ports {
+        [port] => format!("Port {port} does not reach Caddy."),
+        _ => "Ports 80 and 443 do not reach Caddy.".to_owned(),
+    }
+}
+
+pub const DOCTOR_PORTS_SETUP: &str = "Run \"marsa setup\" to route ports 80 and 443 to Caddy. If \
+     you already did, run it again: a macOS update or another tool may have removed the route.";
+pub const DOCTOR_UNTRUSTED: &str =
+    "Marsa's certificate authority is not trusted, so browsers warn on https://*.test sites.";
+pub const DOCTOR_TRUST_SETUP: &str = "Run \"marsa setup\" in Terminal on the Mac's desktop and \
+     approve the dialog macOS shows.";
+
+pub fn doctor_shims_missing(shims: &Path) -> String {
+    format!(
+        "Marsa's shims ({}) are not in PATH, so php does not run Marsa's PHP.",
+        shims.display()
+    )
+}
+
+/// `windows`: the user's PATH is a setting there, not a line in a file.
+pub fn doctor_add_shims(shims: &Path, windows: bool) -> String {
+    if windows {
+        format!(
+            "Add {} to the start of your user PATH, then open a new terminal.",
+            shims.display()
+        )
+    } else {
+        format!(
+            "Add this line at the end of ~/.zprofile and ~/.zshrc (or your shell's startup \
+             file), then open a new terminal: export PATH=\"{}:$PATH\"",
+            shims.display()
+        )
+    }
+}
+
+pub fn doctor_php_first(php: &Path) -> String {
+    format!(
+        "{} comes before Marsa's shims in PATH, so php runs that PHP.",
+        php.display()
+    )
+}
+
+pub fn doctor_move_shims(shims: &Path, windows: bool) -> String {
+    if windows {
+        format!(
+            "Move {} to the start of your user PATH, then open a new terminal.",
+            shims.display()
+        )
+    } else {
+        format!(
+            "Move the line that adds {} to PATH to the end of ~/.zprofile and ~/.zshrc (or your \
+             shell's startup file), after Homebrew's, then open a new terminal.",
+            shims.display()
+        )
+    }
+}
+
+pub fn doctor_log_error(log: &Path, line: &str) -> String {
+    format!(
+        "The last error in {} since marsad started:\n    {line}",
+        log.display()
+    )
+}
+
+pub fn doctor_read_log(log: &Path) -> String {
+    format!(
+        "Read {} around that line. If the error repeats, report it with that file.",
+        log.display()
+    )
 }
 
 #[cfg(test)]

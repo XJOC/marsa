@@ -51,8 +51,9 @@ pub const LOW_HTTPS_PORT: u16 = 443;
 /// daemon that a running Caddy is ours (ADR 0009).
 pub const SERVER_ID: &str = "marsa-srv";
 
-/// What the only server answers in M3.
-const GREETING: &str = "Marsa is running. No sites yet.";
+/// What the `marsa` server answers a host that is not a site. `marsa doctor`
+/// looks for it behind port 80 (task M5-12).
+pub const GREETING: &str = "Marsa is running. No sites yet.";
 
 /// The name of Caddy's program in its recipe (`recipes/caddy.toml`).
 const PROGRAM: &str = "caddy";

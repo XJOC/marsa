@@ -691,7 +691,8 @@ impl Setup {
     /// holder in it maybe, was not read), or listed no listening socket at
     /// all. The daemon's own API socket always listens, so an empty list
     /// means the output was not understood. The redirect never goes in blind.
-    fn port_holders(&self, stop: &CancellationToken) -> Option<Vec<PortHolder>> {
+    /// `marsa doctor` asks the same (task M5-12).
+    pub fn port_holders(&self, stop: &CancellationToken) -> Option<Vec<PortHolder>> {
         let args = ["-anv", "-p", "tcp"].map(OsString::from);
         let output = match self.runner.run(NETSTAT, &args, CHECK_LIMIT, stop) {
             Ok(output) if output.success() => output,
