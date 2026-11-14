@@ -71,6 +71,12 @@ pub trait System {
     /// Deletes a file. A missing file counts as success.
     fn remove(&self, path: &Path) -> io::Result<()>;
 
+    /// Deletes the folder `path` only if it is empty, like `rmdir`. Never
+    /// deletes anything inside it. A folder that is not empty fails with
+    /// kind `DirectoryNotEmpty`, and a missing one with `NotFound`. A
+    /// symlink is never followed: its target stays as it is.
+    fn remove_empty_dir(&self, path: &Path) -> io::Result<()>;
+
     /// Runs `program` with `args`, never through a shell. `&'static str`
     /// means a constant in the code, like `/sbin/pfctl`: it cannot come from
     /// the request.
@@ -195,6 +201,12 @@ impl System for RealSystem {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             other => other,
         }
+    }
+
+    /// `fs::remove_dir` is `rmdir(2)` on Unix: it refuses a folder that is
+    /// not empty, and a symlink (`ENOTDIR`), and follows neither.
+    fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
+        fs::remove_dir(path)
     }
 
     /// Stops the program after [`RUN_TIMEOUT`]; see [`RealSystem::run_within`].
@@ -487,6 +499,10 @@ mod fake {
         /// Dangling symlinks: `exists` is true, but `read` is `NotFound`,
         /// like a link whose target is gone.
         pub dangling: BTreeSet<PathBuf>,
+        /// Folders that exist. `write_atomic` adds the folder of its file,
+        /// as the real one makes it. A folder that holds a file in `files`
+        /// counts as not empty even if it is not listed here.
+        pub dirs: RefCell<BTreeSet<PathBuf>>,
         /// Links whose target is there: `read` works, and `is_link` is true.
         pub links: BTreeSet<PathBuf>,
         /// Files marked read-only.
@@ -543,6 +559,9 @@ mod fake {
             }
             let entry = (bytes.to_vec(), mode);
             self.files.borrow_mut().insert(path.to_path_buf(), entry);
+            if let Some(dir) = path.parent() {
+                self.dirs.borrow_mut().insert(dir.to_path_buf());
+            }
             Ok(())
         }
 
@@ -552,6 +571,20 @@ mod fake {
             }
             self.files.borrow_mut().remove(path);
             Ok(())
+        }
+
+        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
+            let inside = |other: &Path| other != path && other.starts_with(path);
+            let holds_a_file = self.files.borrow().keys().any(|file| inside(file));
+            let holds_a_dir = self.dirs.borrow().iter().any(|dir| inside(dir));
+            if holds_a_file || holds_a_dir || self.dangling.iter().any(|link| inside(link)) {
+                return Err(io::ErrorKind::DirectoryNotEmpty.into());
+            }
+            if self.dirs.borrow_mut().remove(path) {
+                Ok(())
+            } else {
+                Err(io::ErrorKind::NotFound.into())
+            }
         }
 
         fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
@@ -698,6 +731,39 @@ mod tests {
         assert!(RealSystem.exists(&path));
         RealSystem.remove(&path).unwrap();
         assert!(!RealSystem.exists(&path));
+    }
+
+    #[test]
+    fn remove_empty_dir_deletes_only_an_empty_folder() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("Marsa");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("pf-token"), b"1").unwrap();
+        let err = RealSystem.remove_empty_dir(&dir).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::DirectoryNotEmpty);
+        // Nothing inside was touched.
+        assert_eq!(fs::read(dir.join("pf-token")).unwrap(), b"1");
+
+        fs::remove_file(dir.join("pf-token")).unwrap();
+        RealSystem.remove_empty_dir(&dir).unwrap();
+        assert!(!dir.exists());
+        let err = RealSystem.remove_empty_dir(&dir).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// `rmdir` on a link to a folder fails, and the folder it points to
+    /// stays, with what is inside.
+    #[cfg(unix)]
+    #[test]
+    fn remove_empty_dir_does_not_follow_a_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let link = tmp.path().join("Marsa");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(RealSystem.remove_empty_dir(&link).is_err());
+        assert!(target.is_dir());
+        assert!(fs::symlink_metadata(&link).is_ok());
     }
 
     #[test]
@@ -861,5 +927,43 @@ mod tests {
             let err = RealSystem.run_system_tool(program, &[]).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{program}");
         }
+    }
+
+    #[test]
+    fn fake_system_removes_only_an_empty_folder() {
+        let dir = Path::new("/Library/Application Support/Marsa");
+        let file = dir.join("pf-token");
+        let mut fake = FakeSystem::default();
+        // Not there yet.
+        let err = fake.remove_empty_dir(dir).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+        // `write_atomic` makes the folder, and its file keeps it.
+        fake.write_atomic(&file, b"1", 0o600).unwrap();
+        let err = fake.remove_empty_dir(dir).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::DirectoryNotEmpty);
+        assert!(fake.exists(&file));
+        // A folder inside, or a dangling link inside, keeps it too.
+        fake.remove(&file).unwrap();
+        fake.dirs.borrow_mut().insert(dir.join("sub"));
+        let err = fake.remove_empty_dir(dir).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::DirectoryNotEmpty);
+        fake.dirs.borrow_mut().remove(&dir.join("sub"));
+        fake.dangling.insert(dir.join("link"));
+        let err = fake.remove_empty_dir(dir).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::DirectoryNotEmpty);
+
+        fake.dangling.clear();
+        fake.remove_empty_dir(dir).unwrap();
+        assert!(!fake.dirs.borrow().contains(dir));
+        // A file in a folder that is only a prefix of the name does not count.
+        fake.write_atomic(
+            Path::new("/Library/Application Support/Marsa2/x"),
+            b"",
+            0o600,
+        )
+        .unwrap();
+        fake.dirs.borrow_mut().insert(dir.to_path_buf());
+        fake.remove_empty_dir(dir).unwrap();
     }
 }

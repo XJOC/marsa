@@ -7,7 +7,7 @@ members = ["crates/core", "crates/app", "crates/shim", "crates/helper", "crates/
 exclude = ["spikes", "tools"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0-rc.1"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -43,6 +43,12 @@ minisign-verify = "0.3"
 notify = "8"
 # `json`: typed calls to the daemon API and to the Caddy admin API (task M3-01).
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+# The folder picker of the window's "Park a folder…" and "Link a folder…"
+# (task M5-10). On Linux `xdg-portal` and not GTK: the desktop's own dialog,
+# through libdbus loaded at run time (zenity if there is none), so nothing new
+# to build against. Without `wayland`: it only ties the dialog to the window
+# on Wayland, with more unsafe code; the dialog works without it.
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 # No extra features: `Value` reads two keys from `composer.json` and

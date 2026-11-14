@@ -5,7 +5,7 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::platform::daemon_file::DaemonFileError;
-use crate::types::{API_VERSION, ErrorBody};
+use crate::types::{API_VERSION, ErrorBody, VersionInUse};
 
 /// The longest text from the daemon kept in an error or a log line.
 const MAX_DAEMON_TEXT: usize = 200;
@@ -72,6 +72,15 @@ pub enum ClientError {
         message: String,
     },
 
+    /// The daemon's 409 `version_in_use` from `DELETE
+    /// /v1/runtimes/{tool}/{version}`, with what uses the version (task
+    /// M5-07). Its text went through [`daemon_text`].
+    #[error("the daemon answered 409 version_in_use: {message}")]
+    InUse {
+        message: String,
+        in_use: VersionInUse,
+    },
+
     /// `run/daemon.json` is there but cannot be used.
     #[error(transparent)]
     DaemonFile(DaemonFileError),
@@ -91,6 +100,7 @@ impl ClientError {
             ClientError::InvalidId { .. } => "invalid_id",
             ClientError::PathNotUtf8 { .. } => "site_path_not_utf8",
             ClientError::Api { code, .. } => code,
+            ClientError::InUse { .. } => "version_in_use",
             ClientError::DaemonFile(err) => err.code(),
         }
     }
@@ -119,6 +129,19 @@ impl ClientError {
     }
 
     pub(super) fn api(status: u16, body: &ErrorBody) -> Self {
+        if let Some(in_use) = &body.in_use
+            && body.error.code == "version_in_use"
+        {
+            return ClientError::InUse {
+                message: daemon_text(&body.error.message),
+                in_use: VersionInUse {
+                    version: daemon_text(&in_use.version),
+                    default: in_use.default.as_deref().map(daemon_text),
+                    sites: in_use.sites.iter().map(|site| daemon_text(site)).collect(),
+                    caddy: in_use.caddy,
+                },
+            };
+        }
         ClientError::Api {
             status,
             code: daemon_text(&body.error.code),

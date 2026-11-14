@@ -20,6 +20,7 @@ use super::caddy::CaddyManager;
 use super::php::Pools;
 use super::runtimes_api::Installs;
 use super::sites_api;
+use super::sites_sync::PassRequests;
 use super::supervisor::ServiceHandle;
 
 /// How many events the bus keeps for a slow reader. A reader that falls
@@ -67,6 +68,9 @@ pub struct Daemon {
     /// The status and recent lines of each php-fpm pool (task M4-23). The
     /// sites sync starts and stops the pools.
     pub pools: Pools,
+    /// Asks the sites sync task for a pass, and waits for it (task M5-11).
+    /// The task alone runs passes and owns the pools.
+    pub pass_requests: PassRequests,
     /// The runtime installer, and whether an install runs (task M3-12).
     pub installs: Installs,
     /// Where the login file that starts the tray icon goes (task M5-03).
@@ -88,6 +92,7 @@ impl Daemon {
         Self {
             caddy: CaddyManager::new(&data_dir),
             pools: Pools::default(),
+            pass_requests: PassRequests::default(),
             data_dir,
             state: Arc::default(),
             events: broadcast::channel(EVENT_CAPACITY).0,
@@ -344,6 +349,40 @@ mod tests {
         let cancel = handle.cancel.clone();
         assert!(daemon.add_proc("late", handle).is_none());
         assert!(cancel.is_cancelled());
+    }
+
+    /// `server::run` sweeps `procs` again after its tasks end (task M5-16): a
+    /// process added after the first sweep is told to stop by `add_proc`,
+    /// and the second sweep waits until it has.
+    #[tokio::test]
+    async fn the_next_sweep_waits_for_a_proc_added_after_the_first() {
+        let daemon = Daemon::new(PathBuf::new());
+        daemon.shutdown.cancel();
+        daemon.stop_procs(Duration::from_secs(5)).await;
+
+        // Its stop takes a while, so a sweep that did not wait would end
+        // before the flag is set.
+        let stopped = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn({
+            let (cancel, stopped) = (cancel.clone(), stopped.clone());
+            async move {
+                cancel.cancelled().await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                stopped.store(true, Ordering::SeqCst);
+            }
+        });
+        assert!(
+            daemon
+                .add_proc("late", handle(cancel.clone(), task))
+                .is_none()
+        );
+        assert!(cancel.is_cancelled());
+        assert!(!stopped.load(Ordering::SeqCst));
+
+        daemon.stop_procs(Duration::from_secs(5)).await;
+        assert!(stopped.load(Ordering::SeqCst));
+        assert!(daemon.procs.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

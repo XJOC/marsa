@@ -37,36 +37,38 @@ versions = ["2.11.8"]
 # template. `urls`: the first is the main one, the rest are mirrors.
 
 # PHP 8.4.27 for macOS and Linux: the archives of the GitHub Release
-# php-8.4.27-r1, made by .github/workflows/php-build.yml (run it with
+# php-8.4.27-r2, made by .github/workflows/php-build.yml (run it with
 # release = true). The workflow makes it a DRAFT: these URLs answer only after
-# the owner publishes it. A rebuild is a new release (r2) and new URLs here.
+# it is published. A rebuild is a new release (r3) and new URLs here.
+# r2 of every PHP version (2026-11-14, M2-13): the r1 Linux builds needed the
+# build runner's CPU (AVX-512) and died with SIGILL on other CPUs.
 [[override]]
 runtime = "php"
 version = "8.4.27"
 platform = "darwin-arm64"
 artifact = "php"
-urls = ["https://github.com/XJOC/marsa/releases/download/php-8.4.27-r1/php-8.4.27-darwin-arm64.tar.gz"]
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.4.27-r2/php-8.4.27-darwin-arm64.tar.gz"]
 
 [[override]]
 runtime = "php"
 version = "8.4.27"
 platform = "darwin-x64"
 artifact = "php"
-urls = ["https://github.com/XJOC/marsa/releases/download/php-8.4.27-r1/php-8.4.27-darwin-x64.tar.gz"]
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.4.27-r2/php-8.4.27-darwin-x64.tar.gz"]
 
 [[override]]
 runtime = "php"
 version = "8.4.27"
 platform = "linux-x64"
 artifact = "php"
-urls = ["https://github.com/XJOC/marsa/releases/download/php-8.4.27-r1/php-8.4.27-linux-x64.tar.gz"]
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.4.27-r2/php-8.4.27-linux-x64.tar.gz"]
 
 [[override]]
 runtime = "php"
 version = "8.4.27"
 platform = "linux-arm64"
 artifact = "php"
-urls = ["https://github.com/XJOC/marsa/releases/download/php-8.4.27-r1/php-8.4.27-linux-arm64.tar.gz"]
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.4.27-r2/php-8.4.27-linux-arm64.tar.gz"]
 
 # Windows: windows.php.net rebuilt 8.4.27 as "8.4.27-1", so the recipe
 # template (without "-1") is 404. The archive folder is the mirror.
@@ -80,64 +82,64 @@ urls = [
   "https://windows.php.net/downloads/releases/archives/php-8.4.27-1-nts-Win32-vs17-x64.zip",
 ]
 
-# PHP 8.3.36 for macOS and Linux: the GitHub Release php-8.3.36-r1 (php-build.yml).
+# PHP 8.3.36 for macOS and Linux: the GitHub Release php-8.3.36-r2 (php-build.yml).
 [[override]]
 runtime = "php"
 version = "8.3.36"
 platform = "darwin-arm64"
 artifact = "php"
-urls = ["https://github.com/XJOC/marsa/releases/download/php-8.3.36-r1/php-8.3.36-darwin-arm64.tar.gz"]
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.3.36-r2/php-8.3.36-darwin-arm64.tar.gz"]
 
 [[override]]
 runtime = "php"
 version = "8.3.36"
 platform = "darwin-x64"
 artifact = "php"
-urls = ["https://github.com/XJOC/marsa/releases/download/php-8.3.36-r1/php-8.3.36-darwin-x64.tar.gz"]
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.3.36-r2/php-8.3.36-darwin-x64.tar.gz"]
 
 [[override]]
 runtime = "php"
 version = "8.3.36"
 platform = "linux-x64"
 artifact = "php"
-urls = ["https://github.com/XJOC/marsa/releases/download/php-8.3.36-r1/php-8.3.36-linux-x64.tar.gz"]
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.3.36-r2/php-8.3.36-linux-x64.tar.gz"]
 
 [[override]]
 runtime = "php"
 version = "8.3.36"
 platform = "linux-arm64"
 artifact = "php"
-urls = ["https://github.com/XJOC/marsa/releases/download/php-8.3.36-r1/php-8.3.36-linux-arm64.tar.gz"]
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.3.36-r2/php-8.3.36-linux-arm64.tar.gz"]
 
 
-# PHP 8.5.12 for macOS and Linux: the GitHub Release php-8.5.12-r1 (php-build.yml).
+# PHP 8.5.12 for macOS and Linux: the GitHub Release php-8.5.12-r2 (php-build.yml).
 [[override]]
 runtime = "php"
 version = "8.5.12"
 platform = "darwin-arm64"
 artifact = "php"
-urls = ["https://github.com/XJOC/marsa/releases/download/php-8.5.12-r1/php-8.5.12-darwin-arm64.tar.gz"]
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.5.12-r2/php-8.5.12-darwin-arm64.tar.gz"]
 
 [[override]]
 runtime = "php"
 version = "8.5.12"
 platform = "darwin-x64"
 artifact = "php"
-urls = ["https://github.com/XJOC/marsa/releases/download/php-8.5.12-r1/php-8.5.12-darwin-x64.tar.gz"]
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.5.12-r2/php-8.5.12-darwin-x64.tar.gz"]
 
 [[override]]
 runtime = "php"
 version = "8.5.12"
 platform = "linux-x64"
 artifact = "php"
-urls = ["https://github.com/XJOC/marsa/releases/download/php-8.5.12-r1/php-8.5.12-linux-x64.tar.gz"]
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.5.12-r2/php-8.5.12-linux-x64.tar.gz"]
 
 [[override]]
 runtime = "php"
 version = "8.5.12"
 platform = "linux-arm64"
 artifact = "php"
-urls = ["https://github.com/XJOC/marsa/releases/download/php-8.5.12-r1/php-8.5.12-linux-arm64.tar.gz"]
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.5.12-r2/php-8.5.12-linux-arm64.tar.gz"]
 
 # Windows: windows.php.net names this build "8.3.36-1" (vs16), so the recipe template is 404.
 [[override]]

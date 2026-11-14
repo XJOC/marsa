@@ -11,6 +11,12 @@
 //! (`php-fpm-8.4`). The sites sync starts and stops the pools, so an action
 //! on a pool is `409 service_managed_by_sites`.
 //!
+//! An action on Caddy that finds another one running waits for it, up to
+//! [`ACTION_WAIT`], then runs; a wait that runs out is still
+//! `409 service_busy`. The usual one is the start of Caddy with the daemon
+//! (task M5-16): `marsa services stop caddy` starts the daemon itself, and
+//! its stop then runs after that start instead of failing.
+//!
 //! Every error, the extractors' own included, is an `ErrorBody`.
 
 use std::convert::Infallible;
@@ -38,6 +44,16 @@ use super::supervisor::{ServiceRuntime, lock};
 
 /// The answer to an action on a service that the sites sync starts and stops.
 pub const MANAGED_BY_SITES: &str = "service_managed_by_sites";
+
+/// How long an action on Caddy waits for another one to end before
+/// `409 service_busy`. Longer than the slowest start, about 19 s: about 10 s
+/// to stop an old Caddy (ADR 0009: `POST /stop` 1 s, then 2 s, SIGTERM and
+/// 5 s, SIGKILL and 2 s), 5 s for the admin API, then up to 4 s to stop a
+/// Caddy that never answered. The action that waited runs after: a restart
+/// is a stop (up to 4 s) and such a start, about 23 s. So one request takes
+/// up to about 43 s, and the client gives an action 60 s
+/// (`marsa_core::client`).
+pub const ACTION_WAIT: Duration = Duration::from_secs(20);
 
 /// A `:` comment this often on a quiet stream, as on `/v1/events`: the
 /// client gives up after 45 s without a byte.
@@ -78,7 +94,7 @@ async fn service_action(
         ));
     };
     tracing::info!(service = %id, %action, "service action");
-    match caddy.run(&daemon, action).await {
+    match caddy.run_waiting(&daemon, action, ACTION_WAIT).await {
         Ok(status) => Ok(Json(status)),
         Err(err) => {
             tracing::warn!(service = %id, %action, code = err.code(), error = %err, "service action failed");
@@ -311,6 +327,9 @@ mod tests {
         let bearer = token.bearer_header();
         let daemon = Arc::new(Daemon::new(std::path::PathBuf::new()));
         let runtime = daemon.pools.runtime(PhpMinor { major: 8, minor: 4 });
+        // `php-fpm-8.4`, or `php-cgi-8.4` on Windows.
+        let pool = crate::daemon::php::fpm_id(PhpMinor { major: 8, minor: 4 });
+        let other = crate::daemon::php::fpm_id(PhpMinor { major: 8, minor: 3 });
         let ready = {
             let mut runtime = lock(&runtime);
             runtime.status.state = ServiceState::Running;
@@ -334,39 +353,56 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let list: Vec<ServiceStatus> = serde_json::from_str(&body).unwrap();
         let ids: Vec<_> = list.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["caddy", "php-fpm-8.4"]);
+        assert_eq!(ids, ["caddy", pool.as_str()]);
         assert_eq!(list[1].state, ServiceState::Running);
         assert_eq!(list[1].pid, Some(4242));
 
-        let (status, body) = send("GET", "/v1/logs/php-fpm-8.4").await;
+        let (status, body) = send("GET", &format!("/v1/logs/{pool}")).await;
         assert_eq!(status, StatusCode::OK);
         let lines: Vec<LogLine> = serde_json::from_str(&body).unwrap();
         assert_eq!(lines, std::slice::from_ref(&ready));
         // Follow during a shutdown: the recent lines, then the end.
         daemon.shutdown.cancel();
-        let (status, body) = send("GET", "/v1/logs/php-fpm-8.4?follow=true").await;
+        let (status, body) = send("GET", &format!("/v1/logs/{pool}?follow=true")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, data(&ready));
 
         let cases = [
-            ("POST /v1/services/php-fpm-8.4/start", 409, MANAGED_BY_SITES),
-            ("POST /v1/services/php-fpm-8.4/stop", 409, MANAGED_BY_SITES),
             (
-                "POST /v1/services/php-fpm-8.4/restart",
+                "POST",
+                format!("/v1/services/{pool}/start"),
                 409,
                 MANAGED_BY_SITES,
             ),
-            ("POST /v1/services/php-fpm-8.4/kill", 400, "unknown_action"),
             (
-                "POST /v1/services/php-fpm-8.3/start",
+                "POST",
+                format!("/v1/services/{pool}/stop"),
+                409,
+                MANAGED_BY_SITES,
+            ),
+            (
+                "POST",
+                format!("/v1/services/{pool}/restart"),
+                409,
+                MANAGED_BY_SITES,
+            ),
+            (
+                "POST",
+                format!("/v1/services/{pool}/kill"),
+                400,
+                "unknown_action",
+            ),
+            (
+                "POST",
+                format!("/v1/services/{other}/start"),
                 404,
                 "service_not_found",
             ),
-            ("GET /v1/logs/php-fpm-8.3", 404, "service_not_found"),
+            ("GET", format!("/v1/logs/{other}"), 404, "service_not_found"),
         ];
-        for (request, want, code) in cases {
-            let (method, path) = request.split_once(' ').unwrap();
-            let (status, body) = send(method, path).await;
+        for (method, path, want, code) in cases {
+            let request = format!("{method} {path}");
+            let (status, body) = send(method, &path).await;
             assert_eq!(status.as_u16(), want, "{request}: {body}");
             let error: ErrorBody = serde_json::from_str(&body).unwrap();
             assert_eq!(error.error.code, code, "{request}");
