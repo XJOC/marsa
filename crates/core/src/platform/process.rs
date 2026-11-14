@@ -555,6 +555,26 @@ mod tests {
         }
     }
 
+    /// Asks `look` until `done` holds for its answer, for up to 10 s, and
+    /// gives that answer. With glibc's `posix_spawn` (Linux), `spawn` returns
+    /// before the child's exec is done, and until then its `exe` link names
+    /// this test binary.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    async fn after_exec<T: std::fmt::Debug>(
+        mut look: impl AsyncFnMut() -> T,
+        done: impl Fn(&T) -> bool,
+    ) -> T {
+        let started = std::time::Instant::now();
+        loop {
+            let now = look().await;
+            if done(&now) {
+                return now;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "{now:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     // The systems where `identity` reads a process.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
@@ -564,10 +584,12 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id();
-        let Liveness::Alive { exe, started } = identity(pid).await else {
+        let is_sleep = |now: &Liveness| matches!(now, Liveness::Alive { exe, .. } if exe.file_name().is_some_and(|n| n == "sleep"));
+        let Liveness::Alive { exe, started } =
+            after_exec(async || identity(pid).await, is_sleep).await
+        else {
             panic!("no identity for {pid}");
         };
-        assert_eq!(exe.file_name().unwrap(), "sleep");
         assert!(!started.is_empty());
         // The same answer again: the start time is stable.
         let again = identity(pid).await;
@@ -590,10 +612,13 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id();
-        let Liveness::Alive { exe, started } = real_identity(pid).await else {
+        let sleep = fs::canonicalize("/bin/sleep").unwrap();
+        let is_sleep = |now: &Liveness| matches!(now, Liveness::Alive { exe, .. } if *exe == sleep);
+        let Liveness::Alive { started, .. } =
+            after_exec(async || real_identity(pid).await, is_sleep).await
+        else {
             panic!("no identity for {pid}");
         };
-        assert_eq!(exe, fs::canonicalize("/bin/sleep").unwrap());
         assert!(!started.is_empty());
         // `identity` and `real_identity` give the same start time.
         if let Liveness::Alive { started: same, .. } = identity(pid).await {
@@ -613,8 +638,9 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id();
-        let exe = executable(pid).await.expect("an executable");
-        assert_eq!(exe, fs::canonicalize("/bin/sleep").unwrap());
+        let sleep = fs::canonicalize("/bin/sleep").unwrap();
+        let is_sleep = |exe: &Option<PathBuf>| exe.as_ref() == Some(&sleep);
+        after_exec(async || executable(pid).await, is_sleep).await;
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(executable(pid).await, None);
