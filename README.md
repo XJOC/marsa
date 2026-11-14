@@ -95,7 +95,7 @@ used only once it is installed: `marsa install php 8.3`.
 | `marsa autostart [on\|off]` | Start Marsa at login, or not. |
 | `marsa setup` | HTTPS and `.test` names: once, with your password. |
 | `marsa doctor` | Check everything and say how to fix what is wrong. |
-| `marsa uninstall --all` | Remove Marsa from this Mac (see below). |
+| `marsa uninstall --all [--delete-data]` | Remove Marsa from this Mac (see below). |
 
 `marsa <command> --help` explains each one.
 
@@ -120,9 +120,12 @@ the way.
 marsa uninstall --all
 ```
 
-It stops Marsa, removes what `marsa setup` added to the system (macOS asks
-for your password once), and deletes Marsa's data folder. Then remove the
-`PATH` line from `~/.zprofile` and `~/.zshrc`.
+It asks before it removes anything. Then it stops Marsa and removes what
+`marsa setup` added to the system (macOS asks for your password once). It
+also asks whether to delete Marsa's data folder: the installed runtimes, the
+settings, and the certificate authority. `--delete-data` deletes the folder
+without that question, and `--yes` answers the first one. At the end, remove
+the `PATH` line from `~/.zprofile` and `~/.zshrc`.
 
 ## Verify a download
 

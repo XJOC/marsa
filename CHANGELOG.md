@@ -34,7 +34,9 @@ The first release, for macOS (Apple Silicon and Intel).
 - **Window and menu-bar icon:** `marsa-gui` shows the sites and the PHP
   versions, installs runtimes, and parks and links folders. `marsa-tray`
   shows Marsa's state and switches the default PHP.
-- **Install and uninstall:** `install.sh`, and `marsa uninstall --all`.
+- **Install and uninstall:** `install.sh`, and `marsa uninstall --all`, which
+  asks before it removes anything and keeps the data folder unless you say
+  otherwise.
 - **Releases:** archives for macOS with `SHA256SUMS` and a minisign
   signature.
 
