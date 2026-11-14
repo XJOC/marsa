@@ -46,7 +46,9 @@ use crate::ops::trust::{self, TRUST_CERT_INVALID, TRUST_DELETE, TRUST_READ, TRUS
 use crate::response::{OpResult, Outcome};
 use crate::system::{RunOutput, System};
 
-/// This system has neither of the two tools, so nothing was changed.
+/// This system has neither family's tool with its folder. An install
+/// changed nothing; a removal may have deleted a file of Marsa's, but
+/// nothing could rebuild the store.
 pub const TRUST_TOOL_MISSING: &str = "trust_tool_missing";
 /// The store's tool failed, in an install or a removal. Not the codes of
 /// the macOS op (`trust_add_failed`, `trust_remove_failed`): the UI explains
@@ -75,7 +77,7 @@ const FEDORA: Store = Store {
     tool: "/usr/bin/update-ca-trust",
     args: &[],
 };
-/// Debian's first: its tool has a name of its own.
+/// Debian's first: Ubuntu may have `update-ca-trust` from a package too.
 const STORES: [&Store; 2] = [&DEBIAN, &FEDORA];
 
 /// Everyone can read a certificate, and only root can change it.
@@ -187,19 +189,26 @@ pub fn remove(system: &impl System) -> OpResult {
 /// either path. Nothing can rebuild the store, so a deleted file is
 /// `trust_tool_missing`.
 fn remove_without_tool(system: &impl System) -> OpResult {
-    let mut deleted = Vec::new();
+    // Both paths are checked before either file goes, so a refusal never
+    // follows a deletion it does not name.
+    let mut found = Vec::new();
     for store in STORES {
         match stored_hash(REMOVE, store, system) {
             Ok(None) => {}
-            Ok(Some(_)) => {
-                if let Err(err) = system.remove(Path::new(store.file)) {
-                    let message = format!("cannot delete {}: {}", store.file, err.kind());
-                    return OpResult::failed(REMOVE, TRUST_DELETE, message);
-                }
-                deleted.push(store.file);
-            }
+            Ok(Some(_)) => found.push(store.file),
             Err(failed) => return failed,
         }
+    }
+    let mut deleted = Vec::new();
+    for file in found {
+        if let Err(err) = system.remove(Path::new(file)) {
+            let mut message = format!("cannot delete {file}: {}", err.kind());
+            if !deleted.is_empty() {
+                message.push_str(&format!(" ({} was deleted)", deleted.join(" and ")));
+            }
+            return OpResult::failed(REMOVE, TRUST_DELETE, message);
+        }
+        deleted.push(file);
     }
     if deleted.is_empty() {
         return result(REMOVE, Outcome::Unchanged);
@@ -592,7 +601,6 @@ mod tests {
         }
     }
 
-    /// Ubuntu can have `update-ca-trust` from a package too.
     /// The tool is gone, but a file of Marsa's is still there: it goes, so
     /// it does not come back with the tool, and nothing can rebuild the store.
     #[test]
@@ -618,6 +626,27 @@ mod tests {
         assert!(fake.files.borrow().contains_key(Path::new(FEDORA_FILE)));
     }
 
+    /// Without a tool: a file that cannot be deleted, and a foreign file at
+    /// the other path, which stops the removal before any delete.
+    #[test]
+    fn remove_without_a_tool_names_what_stays() {
+        let mut fake = FakeSystem::default();
+        put(&fake, DEBIAN_FILE, TEST_CA.as_bytes());
+        fake.fail_removes.insert(PathBuf::from(DEBIAN_FILE));
+        let failed = remove(&fake);
+        assert_eq!(code_of(&failed), TRUST_DELETE);
+        assert_eq!(
+            message_of(&failed),
+            format!("cannot delete {DEBIAN_FILE}: permission denied")
+        );
+        let fake = FakeSystem::default();
+        put(&fake, DEBIAN_FILE, TEST_CA.as_bytes());
+        put(&fake, FEDORA_FILE, b"someone else's file\n");
+        assert_eq!(code_of(&remove(&fake)), TRUST_READ);
+        assert!(fake.files.borrow().contains_key(Path::new(DEBIAN_FILE)));
+    }
+
+    /// Ubuntu can have `update-ca-trust` from a package too.
     #[test]
     fn the_debian_tool_wins_when_both_exist() {
         let family = debian();
