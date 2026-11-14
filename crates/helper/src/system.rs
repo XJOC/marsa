@@ -719,6 +719,14 @@ mod tests {
             let link = tmp.path().join("link");
             std::os::unix::fs::symlink(&file, &link).unwrap();
             assert!(RealSystem.is_link(&link) && !RealSystem.is_link(&file));
+            // Not followed: a link to nothing and a link to a folder are
+            // links too, and the folder itself is not.
+            let dangling = tmp.path().join("dangling");
+            std::os::unix::fs::symlink(&missing, &dangling).unwrap();
+            let to_dir = tmp.path().join("to-dir");
+            std::os::unix::fs::symlink(tmp.path(), &to_dir).unwrap();
+            assert!(RealSystem.is_link(&dangling) && RealSystem.is_link(&to_dir));
+            assert!(!RealSystem.is_link(tmp.path()));
         }
     }
 
