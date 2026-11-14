@@ -115,7 +115,7 @@ mod tests {
             render(None, &state(true, &["8.4.3"], &[])),
             "Xdebug: on, in your sites and in the terminal. Loaded by PHP 8.4.3."
         );
-        // Windows, or no PHP yet: on, and nothing loads it.
+        // Only PHP without Xdebug (the official Windows build), or no PHP yet.
         for none in [state(true, &[], &["8.4.3"]), state(true, &[], &[])] {
             assert_eq!(
                 render(Some(Switch::On), &none),

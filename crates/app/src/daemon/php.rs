@@ -180,9 +180,6 @@ pub fn pool_for(
     version: &Version,
     ca_bundle: Option<&Path>,
 ) -> Result<Pool, Skip> {
-    if platform == Platform::WindowsX64 {
-        return cgi::pool_for(data_dir, version, ca_bundle);
-    }
     let mut files = PhpFiles::new(data_dir, version);
     files.ca_bundle = ca_bundle.map(Path::to_path_buf);
     pool_with(data_dir, platform, version, files)
@@ -195,6 +192,9 @@ fn pool_with(
     version: &Version,
     files: PhpFiles,
 ) -> Result<Pool, Skip> {
+    if platform == Platform::WindowsX64 {
+        return cgi::pool_with(files);
+    }
     let listen = fpm_listen(&files.socket, fallback_port(files.minor));
     let conf = fpm_conf(&listen, &files).map_err(php_skip)?;
     let ini = php_ini(platform, &files).map_err(php_skip)?;
@@ -317,8 +317,8 @@ fn write_pool(pool: &Pool) -> Result<(), Skip> {
 /// The pool of each wanted line, with its files written, and `php.ini` of
 /// every other installed line. Each `php.ini` loads Xdebug while `[php]
 /// xdebug` is on. A pool that cannot run is logged and left out, and its
-/// line still gets `php.ini`. Reads and writes the disk, so it runs on a
-/// blocking thread.
+/// line still gets `php.ini` if that PHP is installed. Reads and writes the
+/// disk, so it runs on a blocking thread.
 fn prepare(
     data_dir: &Path,
     platform: Platform,
@@ -333,6 +333,7 @@ fn prepare(
         warn!(code = err.code(), error = %err, "cannot list the installed PHP versions");
         wanted.clone()
     });
+    let runtimes = RuntimesDir::in_dir(data_dir);
     let mut pools = BTreeMap::new();
     for (minor, version) in &lines {
         let files = line_files(data_dir, version, ca_bundle, xdebug);
@@ -351,9 +352,14 @@ fn prepare(
                     "no PHP pool; its sites answer 503"
                 ),
             }
+            // A site may name a PHP that is not installed: then no `php`
+            // in the terminal reads this file either.
+            if !runtimes.version_dir(Runtime::Php, version).is_dir() {
+                continue;
+            }
         }
-        // No pool, or one that cannot run (no php-fpm): `php` in the
-        // terminal still reads this file, so it follows the switch.
+        // No pool, or one that cannot run (no php-fpm or php-cgi): `php` in
+        // the terminal still reads this file, so it follows the switch.
         if let Err(skip) = write_ini(platform, &files) {
             warn!(
                 php = %version,
@@ -1070,9 +1076,9 @@ mod tests {
         assert!(xdebug_enabled(data).unwrap());
     }
 
-    /// A pool that cannot run (no php-fpm) still leaves its line a
-    /// `php.ini`, so `php` in the terminal follows the switch.
-    #[cfg(unix)]
+    /// A pool that cannot run (no php-fpm, or no php-cgi on Windows) still
+    /// leaves its line a `php.ini`, so `php` in the terminal follows the
+    /// switch.
     #[test]
     fn a_line_whose_pool_cannot_run_still_gets_its_php_ini() {
         let dir = tempfile::tempdir().unwrap();
@@ -1083,9 +1089,11 @@ mod tests {
         fs::write(&so, "").unwrap();
         set_xdebug(data, true);
 
-        let wanted = BTreeMap::from([(PHP84, v("8.4.3"))]);
+        // 8.3.1 is named by a site, and not installed.
+        let wanted = BTreeMap::from([(PHP83, v("8.3.1")), (PHP84, v("8.4.3"))]);
         let pools = prepare(data, platform, &wanted, None);
         assert!(pools.is_empty(), "no php-fpm, so no pool");
+        assert!(!data.join("php").join("8.3").exists(), "not installed");
         let line = data.join("php").join("8.4");
         let ini = fs::read_to_string(line.join("php.ini")).unwrap();
         let loads = format!("\nzend_extension = \"{}\"\n", so.display());

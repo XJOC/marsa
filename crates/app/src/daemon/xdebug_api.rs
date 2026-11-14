@@ -22,9 +22,9 @@
 //! client that goes away does not stop it halfway.
 //!
 //! A PHP with no `ext/xdebug.so` (the official Windows build, an older
-//! install) is skipped: the answer names it in `missing`. Where the daemon
-//! writes no `php.ini` yet (Windows, until its php-cgi pools come), the
-//! setting is saved and no PHP loads Xdebug.
+//! install) is skipped: the answer names it in `missing`. On Windows,
+//! php-cgi reads the same `php.ini` (ADR 0016), so the switch works the
+//! same there for a PHP that has the file.
 
 use std::sync::Arc;
 
@@ -119,7 +119,7 @@ fn state(daemon: &Daemon) -> Result<XdebugState, HttpError> {
             err.to_string(),
         )
     })?;
-    // The pass writes `php.ini` only where php-fpm runs.
+    // The pass writes `php.ini` on every system Marsa has PHP for.
     let written = Platform::current().is_some_and(php::runs_pools);
     let mut state = XdebugState {
         enabled,
@@ -171,7 +171,7 @@ fn global_error(err: &ConfigError) -> HttpError {
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use axum::body::{Body, to_bytes};
     use axum::extract::Request;
@@ -263,16 +263,18 @@ mod tests {
         }
     }
 
-    /// The answer while Xdebug is on: 8.4.3 loads it where php-fpm runs.
+    /// The answer while Xdebug is on: the newest 8.4 loads it, and 8.3.1
+    /// has none. The same on every system: php-fpm and php-cgi (Windows)
+    /// both read the `php.ini` the pass writes.
     fn on_state() -> Value {
-        // `php.ini` is written where php-fpm runs: macOS and Linux. On
-        // Windows the setting is saved, and no PHP loads Xdebug yet.
-        let loaded = if cfg!(unix) {
-            json!(["8.4.3"])
-        } else {
-            json!([])
-        };
-        json!({ "enabled": true, "loaded": loaded, "missing": ["8.3.1"] })
+        json!({ "enabled": true, "loaded": ["8.4.3"], "missing": ["8.3.1"] })
+    }
+
+    /// The `zend_extension` line of `php.ini` that loads the Xdebug of
+    /// `version`.
+    fn loads(dir: &Path, version: &str) -> String {
+        let so = PhpFiles::new(dir, &Version::parse(version).unwrap()).xdebug_so();
+        format!("\nzend_extension = \"{}\"\n", so.display())
     }
 
     #[tokio::test]
@@ -290,20 +292,18 @@ mod tests {
         // The path is the one of the newest 8.4, under the data folder as it
         // was given: on macOS the temp folder is behind a symlink, so a
         // canonicalized path would not match.
-        if cfg!(unix) {
-            let so = PhpFiles::new(app.dir.path(), &Version::parse("8.4.3").unwrap()).xdebug_so();
-            let line = format!("\nzend_extension = \"{}\"\n", so.display());
-            assert!(app.ini("8.4").unwrap().contains(&line));
-            assert!(!app.ini("8.3").unwrap().contains("xdebug"));
-        }
+        assert!(
+            app.ini("8.4")
+                .unwrap()
+                .contains(&loads(app.dir.path(), "8.4.3"))
+        );
+        assert!(!app.ini("8.3").unwrap().contains("xdebug"));
 
         let put_off = app.send("PUT", Some(json!({ "enabled": false }))).await;
         assert_eq!(put_off, (StatusCode::OK, off));
         let text = fs::read_to_string(app.global_toml()).unwrap();
         assert!(!text.contains("xdebug"), "{text}");
-        if cfg!(unix) {
-            assert!(!app.ini("8.4").unwrap().contains("xdebug"));
-        }
+        assert!(!app.ini("8.4").unwrap().contains("xdebug"));
         app.stop().await;
     }
 
@@ -316,9 +316,11 @@ mod tests {
         let (first, second) = tokio::join!(app.send("PUT", on()), app.send("PUT", on()));
         assert_eq!(first, (StatusCode::OK, on_state()));
         assert_eq!(second, (StatusCode::OK, on_state()));
-        if cfg!(unix) {
-            assert!(app.ini("8.4").unwrap().contains("zend_extension"));
-        }
+        assert!(
+            app.ini("8.4")
+                .unwrap()
+                .contains(&loads(app.dir.path(), "8.4.3"))
+        );
         app.stop().await;
     }
 

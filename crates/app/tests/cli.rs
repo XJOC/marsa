@@ -400,9 +400,8 @@ fn a_followed_log_ends_when_the_daemon_stops() {
     );
 }
 
-/// Task M5-11, through the real `marsa` and `marsad`. Unix only: the daemon
-/// writes `php.ini` where php-fpm runs, so on Windows no PHP loads Xdebug.
-#[cfg(unix)]
+/// Task M5-11, through the real `marsa` and `marsad`. On every system: the
+/// daemon writes `php.ini` for php-fpm and for php-cgi (Windows) alike.
 #[test]
 fn xdebug_on_and_off_change_the_php_ini_before_marsa_returns() {
     use marsa_core::php::PhpFiles;
