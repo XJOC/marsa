@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use marsa_core::config::{self, ConfigError, ConfigPaths, SitesConfig};
-use marsa_core::recipes::Platform;
 use marsa_core::types::{Event, SiteList};
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
@@ -18,9 +17,10 @@ use tokio_util::sync::CancellationToken;
 use super::api::HttpError;
 use super::autostart_api::Autostart;
 use super::caddy::CaddyManager;
-use super::php::{PhpManager, Pools};
+use super::php::Pools;
 use super::runtimes_api::Installs;
 use super::sites_api;
+use super::sites_sync::PassRequests;
 use super::supervisor::ServiceHandle;
 
 /// How many events the bus keeps for a slow reader. A reader that falls
@@ -68,11 +68,9 @@ pub struct Daemon {
     /// The status and recent lines of each php-fpm pool (task M4-23). The
     /// sites sync starts and stops the pools.
     pub pools: Pools,
-    /// The php-fpm pools themselves. A sync pass holds this lock to its end
-    /// (`sites_sync::pass`), so the passes of the sync task and of `PUT
-    /// /v1/php/xdebug` run one at a time. A tokio lock: it is held across
-    /// `.await`.
-    pub php: tokio::sync::Mutex<PhpManager>,
+    /// Asks the sites sync task for a pass, and waits for it (task M5-11).
+    /// The task alone runs passes and owns the pools.
+    pub pass_requests: PassRequests,
     /// The runtime installer, and whether an install runs (task M3-12).
     pub installs: Installs,
     /// Where the login file that starts the tray icon goes (task M5-03).
@@ -94,7 +92,7 @@ impl Daemon {
         Self {
             caddy: CaddyManager::new(&data_dir),
             pools: Pools::default(),
-            php: tokio::sync::Mutex::new(PhpManager::new(&data_dir, Platform::current())),
+            pass_requests: PassRequests::default(),
             data_dir,
             state: Arc::default(),
             events: broadcast::channel(EVENT_CAPACITY).0,

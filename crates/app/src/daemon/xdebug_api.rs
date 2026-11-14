@@ -9,14 +9,17 @@
 //! | --- | --- |
 //! | 500 `config_read`, `config_invalid`, `config_write` | `global.toml` cannot be read or written |
 //! | 500 `runtimes_read` | the folder of the PHP versions cannot be read |
+//! | 500 `internal_error` | `PUT` only: the daemon stopped before the pass ended; the setting is saved |
 //! | 4xx `invalid_body` | the body is not `{"enabled": bool}` |
 //!
 //! One switch for every PHP, off by default: Xdebug makes PHP two to four
-//! times slower (ADR 0010). The route only saves the setting. The sync pass
-//! (`sites_sync::pass`) does the work: it writes `php.ini` of every installed
-//! PHP line with or without the Xdebug lines, and restarts the php-fpm pools
-//! whose `php.ini` changed. `PUT` answers after the pass, so `php` in the
-//! terminal already runs with the new setting.
+//! times slower (ADR 0010). The route only saves the setting, then asks the
+//! sites sync task for a pass (`Daemon::pass_requests`) and waits for it. The
+//! pass does the work: it writes `php.ini` of every installed PHP line with
+//! or without the Xdebug lines, and restarts the php-fpm pools whose
+//! `php.ini` changed. `PUT` answers after the pass, so `php` in the terminal
+//! already runs with the new setting. The pass runs in the sync task, so a
+//! client that goes away does not stop it halfway.
 //!
 //! A PHP with no `ext/xdebug.so` (the official Windows build, an older
 //! install) is skipped: the answer names it in `missing`. Where the daemon
@@ -35,8 +38,9 @@ use marsa_core::recipes::Platform;
 use marsa_core::types::{XdebugRequest, XdebugState};
 
 use super::api::HttpError;
+use super::php;
+use super::sites_sync::PassNotRun;
 use super::state::Daemon;
-use super::{php, sites_sync};
 
 /// The routes, for `api::router` to merge before its fallbacks.
 pub fn routes() -> Router<Arc<Daemon>> {
@@ -55,14 +59,21 @@ async fn set(
         body.map_err(|err| HttpError::new(err.status(), "invalid_body", err.body_text()))?;
     blocking(&daemon, move |daemon| save(daemon, enabled)).await?;
     // Also when nothing changed: the pass then repairs a `php.ini` that is
-    // missing or old. In a task of its own, so a client that goes away does
-    // not stop the pass halfway.
-    let pass = tokio::spawn({
-        let daemon = Arc::clone(&daemon);
-        async move { sites_sync::pass(&daemon).await }
-    });
-    pass.await.map_err(|err| job_failed(&err))?;
+    // missing or old.
+    daemon
+        .pass_requests
+        .run_pass()
+        .await
+        .map_err(|PassNotRun| pass_not_run())?;
     blocking(&daemon, state).await.map(Json)
+}
+
+/// The daemon stops (or its sync task does not run), so no pass applied the
+/// saved setting. The start-up pass of the next daemon applies it.
+fn pass_not_run() -> HttpError {
+    tracing::warn!("the Xdebug setting is saved, but no pass applied it: the daemon stops");
+    let message = "the daemon stopped before every php.ini was written; the setting is saved";
+    HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
 }
 
 /// Saves `[php] xdebug` if it differs. Blocking: it takes the lock of
@@ -159,16 +170,20 @@ mod tests {
 
     use crate::daemon::api::router;
     use crate::daemon::auth::AuthConfig;
+    use crate::daemon::sites_sync::{self, SitesSync};
 
     /// The daemon port in the `Host` header. No socket is bound for it.
     const PORT: u16 = 51238;
 
-    /// The real router and auth layer on a temp data folder with three PHP
-    /// versions and no site: 8.3.1 without Xdebug, and 8.4.1 and 8.4.3 with
-    /// `ext/xdebug.so`. Caddy does not run, so a pass only writes files.
+    /// The real router and auth layer, and the real sites sync task, on a
+    /// temp data folder with three PHP versions and no site: 8.3.1 without
+    /// Xdebug, and 8.4.1 and 8.4.3 with `ext/xdebug.so`. Caddy does not run,
+    /// so a pass only writes files.
     struct App {
         router: Router,
         bearer: String,
+        daemon: Arc<Daemon>,
+        sync: Option<SitesSync>,
         dir: TempDir,
     }
 
@@ -185,12 +200,26 @@ mod tests {
             let token = Token::generate().unwrap();
             let bearer = token.bearer_header();
             let daemon = Arc::new(Daemon::new(dir.path().to_path_buf()));
-            let router = router(daemon, AuthConfig::new(Arc::new(token), PORT));
+            let sync = Some(sites_sync::start(&daemon));
+            let router = router(Arc::clone(&daemon), AuthConfig::new(Arc::new(token), PORT));
             Self {
                 router,
                 bearer,
+                daemon,
+                sync,
                 dir,
             }
+        }
+
+        /// The daemon's shutdown: the sync task ends.
+        async fn stop(&mut self) {
+            self.daemon.shutdown.cancel();
+            if let Some(sync) = self.sync.take() {
+                sync.stop().await;
+            }
+            self.daemon
+                .stop_procs(std::time::Duration::from_secs(5))
+                .await;
         }
 
         /// The status and the JSON body of one request with the token.
@@ -220,9 +249,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn put_saves_the_setting_and_every_php_ini_follows() {
-        let app = App::new();
+    /// The answer while Xdebug is on: 8.4.3 loads it where php-fpm runs.
+    fn on_state() -> Value {
         // `php.ini` is written where php-fpm runs: macOS and Linux. On
         // Windows the setting is saved, and no PHP loads Xdebug yet.
         let loaded = if cfg!(unix) {
@@ -230,8 +258,14 @@ mod tests {
         } else {
             json!([])
         };
+        json!({ "enabled": true, "loaded": loaded, "missing": ["8.3.1"] })
+    }
+
+    #[tokio::test]
+    async fn put_saves_the_setting_and_every_php_ini_follows() {
+        let mut app = App::new();
         let off = json!({ "enabled": false, "loaded": [], "missing": ["8.3.1"] });
-        let on = json!({ "enabled": true, "loaded": loaded, "missing": ["8.3.1"] });
+        let on = on_state();
         assert_eq!(app.send("GET", None).await, (StatusCode::OK, off.clone()));
 
         let put_on = app.send("PUT", Some(json!({ "enabled": true }))).await;
@@ -256,18 +290,47 @@ mod tests {
         if cfg!(unix) {
             assert!(!app.ini("8.4").unwrap().contains("xdebug"));
         }
+        app.stop().await;
+    }
+
+    /// Both wait for the sync task; the pass that answers each one started
+    /// after its setting was saved.
+    #[tokio::test]
+    async fn two_puts_at_once_are_both_answered_after_a_pass() {
+        let mut app = App::new();
+        let on = || Some(json!({ "enabled": true }));
+        let (first, second) = tokio::join!(app.send("PUT", on()), app.send("PUT", on()));
+        assert_eq!(first, (StatusCode::OK, on_state()));
+        assert_eq!(second, (StatusCode::OK, on_state()));
+        if cfg!(unix) {
+            assert!(app.ini("8.4").unwrap().contains("zend_extension"));
+        }
+        app.stop().await;
+    }
+
+    /// No pass can apply the setting once the daemon stops: the route says
+    /// so instead of waiting, and the setting stays saved for the next
+    /// daemon.
+    #[tokio::test]
+    async fn a_put_while_the_daemon_stops_fails_and_keeps_the_setting() {
+        let mut app = App::new();
+        app.stop().await;
+        let (status, body) = app.send("PUT", Some(json!({ "enabled": true }))).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], "internal_error");
+        let text = fs::read_to_string(app.global_toml()).unwrap();
+        assert!(text.contains("[php]\nxdebug = true\n"), "{text}");
     }
 
     #[tokio::test]
     async fn a_bad_body_and_a_broken_global_toml_are_refused() {
-        let app = App::new();
+        let mut app = App::new();
         for bad in [json!({}), json!({ "enabled": "on" })] {
             let (status, body) = app.send("PUT", Some(bad)).await;
             assert!(status.is_client_error(), "{status}");
             assert_eq!(body["error"]["code"], "invalid_body");
         }
         assert!(!app.global_toml().exists());
-        assert_eq!(app.ini("8.4"), None, "no pass ran");
 
         fs::create_dir_all(app.global_toml().parent().unwrap()).unwrap();
         fs::write(app.global_toml(), "[php]\nxdebug = 1\n").unwrap();
@@ -276,11 +339,12 @@ mod tests {
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
             assert_eq!(body["error"]["code"], "config_invalid");
         }
+        app.stop().await;
     }
 
     #[tokio::test]
     async fn a_request_without_the_token_is_refused() {
-        let app = App::new();
+        let mut app = App::new();
         let request = Request::builder()
             .method("PUT")
             .uri("/v1/php/xdebug")
@@ -291,5 +355,6 @@ mod tests {
         let response = app.router.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(!app.global_toml().exists());
+        app.stop().await;
     }
 }

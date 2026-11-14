@@ -420,9 +420,9 @@ impl Pools {
     }
 }
 
-/// The pools of this daemon. It lives in `Daemon::php`, behind a lock that a
-/// sync pass holds to its end, so one pass at a time starts or stops a pool.
-/// The process tasks live in `Daemon::procs`, so a shutdown stops them.
+/// The pools of this daemon. The sync task owns it, so only that task starts
+/// or stops a pool. The process tasks live in `Daemon::procs`, so a shutdown
+/// stops them.
 #[derive(Debug)]
 pub struct PhpManager {
     data_dir: PathBuf,
