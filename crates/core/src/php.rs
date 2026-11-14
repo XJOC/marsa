@@ -1,5 +1,6 @@
 //! PHP configuration per version: a php-fpm pool on macOS and Linux, a php-cgi
-//! pool plan on Windows, and `php.ini` on every system.
+//! plan on Windows (one php-cgi that keeps its own workers), and `php.ini` on
+//! every system.
 //!
 //! This is Marsa's version of the `valet-fpm.conf` that Laravel Valet writes
 //! for each PHP version, but the functions only return text or a plan. The
@@ -46,10 +47,15 @@ const HEADER: &str = "; Managed by Marsa. Changes to this file are overwritten."
 /// byte; 100 leaves a margin.
 pub const MAX_SOCKET_PATH: usize = 100;
 
-/// The fewest php-cgi processes per version (architecture.md section 9). One
-/// php-cgi process serves one request at a time, so a page that calls its own
-/// site would hang with one process.
-pub const MIN_CGI_POOL: usize = 4;
+/// How many requests PHP serves at the same moment on Windows: the worker
+/// processes one php-cgi keeps (ADR 0016). One worker serves one request at a
+/// time, so a page that calls its own site needs a second one. With 4, up to
+/// 3 such pages can run at once; other requests wait in line.
+pub const CGI_WORKERS: u16 = 4;
+
+/// A php-cgi worker exits after this many requests, and php-cgi starts a new
+/// one. The same number as `pm.max_requests` of the php-fpm pool.
+pub const CGI_MAX_REQUESTS: u32 = 500;
 
 /// The folders after the shims in the `PATH` of php-fpm workers.
 const SYSTEM_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -320,70 +326,55 @@ pub fn php_ini(platform: Platform, files: &PhpFiles) -> Result<String, PhpError>
     }))
 }
 
-/// The php-cgi processes of one PHP version on Windows. Caddy balances the
-/// requests between them, and the daemon restarts any that exits.
+/// How php-cgi runs for one PHP version on Windows: one process on one
+/// loopback port. It keeps [`CGI_WORKERS`] worker processes itself and
+/// replaces a worker that exits, so Caddy has one address per PHP version,
+/// as with php-fpm (ADR 0016).
 ///
-/// This is Marsa's own type. The daemon turns each process into a service
-/// spec.
+/// This is Marsa's own type. The daemon turns it into a service spec.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CgiPool {
-    pub processes: Vec<CgiProcess>,
-}
-
-/// One php-cgi process: an absolute program, a list of arguments, and no
-/// shell.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CgiProcess {
-    /// `php-cgi-<minor>-<n>`, with `n` from 1.
-    pub id: String,
     /// `php-cgi.exe` of the installed version.
     pub program: PathBuf,
     /// `-b 127.0.0.1:<port> -c <php.ini>`, one entry per argument.
     pub args: Vec<String>,
-    /// `PHP_FCGI_MAX_REQUESTS` and `PHP_FCGI_CHILDREN`.
+    /// `PHP_FCGI_CHILDREN` and `PHP_FCGI_MAX_REQUESTS`.
     pub env: BTreeMap<String, String>,
 }
 
-/// The php-cgi pool for one version on Windows: one process per port, in the
-/// order of `ports`. The daemon picks free ports.
+/// The php-cgi of one PHP version on Windows, listening on
+/// `127.0.0.1:<port>`.
 ///
-/// Each process serves 10000 requests and then exits, and the daemon starts it
-/// again. `PHP_FCGI_CHILDREN = 0` keeps each one a single process.
+/// `PHP_FCGI_CHILDREN` makes php-cgi start that many workers and restart
+/// each one after `PHP_FCGI_MAX_REQUESTS` requests. No request fails at that
+/// moment, unlike with separate php-cgi processes behind Caddy (spike S-11).
 ///
 /// # Errors
 ///
-/// - `php_pool_too_small` with fewer than [`MIN_CGI_POOL`] ports.
-/// - `php_path_not_allowed` if `files.ini_file` is not UTF-8.
-pub fn cgi_pool(files: &PhpFiles, ports: &[u16]) -> Result<CgiPool, PhpError> {
-    if ports.len() < MIN_CGI_POOL {
-        return Err(PhpError::PoolTooSmall { ports: ports.len() });
-    }
+/// `php_path_not_allowed` if `files.ini_file` is not UTF-8.
+pub fn cgi_pool(files: &PhpFiles, port: u16) -> Result<CgiPool, PhpError> {
     let ini = files
         .ini_file
         .to_str()
         .ok_or_else(|| PhpError::PathNotAllowed {
             path: files.ini_file.clone(),
         })?;
-
-    let processes = ports
-        .iter()
-        .zip(1usize..)
-        .map(|(port, n)| CgiProcess {
-            id: format!("php-cgi-{}-{n}", files.minor),
-            program: files.php_cgi.clone(),
-            args: vec![
-                "-b".to_string(),
-                format!("127.0.0.1:{port}"),
-                "-c".to_string(),
-                ini.to_string(),
-            ],
-            env: BTreeMap::from([
-                ("PHP_FCGI_CHILDREN".to_string(), "0".to_string()),
-                ("PHP_FCGI_MAX_REQUESTS".to_string(), "10000".to_string()),
-            ]),
-        })
-        .collect();
-    Ok(CgiPool { processes })
+    Ok(CgiPool {
+        program: files.php_cgi.clone(),
+        args: vec![
+            "-b".to_string(),
+            format!("127.0.0.1:{port}"),
+            "-c".to_string(),
+            ini.to_string(),
+        ],
+        env: BTreeMap::from([
+            ("PHP_FCGI_CHILDREN".to_string(), CGI_WORKERS.to_string()),
+            (
+                "PHP_FCGI_MAX_REQUESTS".to_string(),
+                CGI_MAX_REQUESTS.to_string(),
+            ),
+        ]),
+    })
 }
 
 /// Why a PHP config could not be built. [`PhpError::code`] gives a stable
@@ -394,9 +385,6 @@ pub enum PhpError {
     /// cannot carry: `"`, `$`, `\\`, a line break, or a NUL byte.
     #[error("{path:?} cannot be written in a PHP config file")]
     PathNotAllowed { path: PathBuf },
-
-    #[error("a php-cgi pool needs at least {min} ports, got {ports}", min = MIN_CGI_POOL)]
-    PoolTooSmall { ports: usize },
 }
 
 impl PhpError {
@@ -404,7 +392,6 @@ impl PhpError {
     pub fn code(&self) -> &'static str {
         match self {
             PhpError::PathNotAllowed { .. } => "php_path_not_allowed",
-            PhpError::PoolTooSmall { .. } => "php_pool_too_small",
         }
     }
 }
@@ -780,64 +767,38 @@ mod tests {
 
         let mut files = windows_files();
         files.ini_file = path;
-        assert_eq!(cgi_pool(&files, &[1, 2, 3, 4]), Err(not_allowed));
+        assert_eq!(cgi_pool(&files, 19084), Err(not_allowed));
     }
 
     #[test]
-    fn cgi_pool_needs_four_ports() {
-        let too_few: [&[u16]; 3] = [&[], &[9001], &[9001, 9002, 9003]];
-        for ports in too_few {
-            let err = cgi_pool(&windows_files(), ports).expect_err("too few ports");
-            assert_eq!(err.code(), "php_pool_too_small");
-            assert_eq!(err, PhpError::PoolTooSmall { ports: ports.len() });
-        }
-    }
-
-    #[test]
-    fn cgi_pool_runs_one_process_per_port() {
+    fn cgi_pool_is_one_php_cgi_that_keeps_its_own_workers() {
         let files = windows_files();
-        let ports = [9001, 9002, 9003, 9004];
-        let pool = cgi_pool(&files, &ports).expect("four ports");
-
-        let ids: Vec<&str> = pool.processes.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            [
-                "php-cgi-8.4-1",
-                "php-cgi-8.4-2",
-                "php-cgi-8.4-3",
-                "php-cgi-8.4-4"
-            ]
-        );
-
-        let env = BTreeMap::from([
-            ("PHP_FCGI_CHILDREN".to_string(), "0".to_string()),
-            ("PHP_FCGI_MAX_REQUESTS".to_string(), "10000".to_string()),
-        ]);
-        let expected = CgiProcess {
-            id: "php-cgi-8.4-1".to_string(),
+        let pool = cgi_pool(&files, 19084).expect("a UTF-8 path");
+        let expected = CgiPool {
             program: r"C:\marsa\runtimes\php\8.4.3\php-cgi.exe".into(),
             args: Vec::from(
-                ["-b", "127.0.0.1:9001", "-c", r"C:\marsa\php\8.4\php.ini"].map(String::from),
+                ["-b", "127.0.0.1:19084", "-c", r"C:\marsa\php\8.4\php.ini"].map(String::from),
             ),
-            env: env.clone(),
+            env: BTreeMap::from([
+                ("PHP_FCGI_CHILDREN".to_string(), "4".to_string()),
+                ("PHP_FCGI_MAX_REQUESTS".to_string(), "500".to_string()),
+            ]),
         };
-        assert_eq!(pool.processes[0], expected);
-
-        for (process, port) in pool.processes.iter().zip(ports) {
-            assert_eq!(process.program, files.php_cgi);
-            assert_eq!(process.args[1], format!("127.0.0.1:{port}"));
-            assert_eq!(process.args[3], r"C:\marsa\php\8.4\php.ini");
-            assert_eq!(process.env, env);
-        }
+        assert_eq!(pool, expected);
+        assert_eq!(pool.program, files.php_cgi);
     }
 
+    /// php-cgi listens on loopback only (AGENTS.md section 6), whatever the
+    /// port.
     #[test]
-    fn cgi_pool_takes_more_than_four_ports() {
-        let ports: Vec<u16> = (9001..9009).collect();
-        let pool = cgi_pool(&windows_files(), &ports).expect("eight ports");
-        assert_eq!(pool.processes.len(), 8);
-        assert_eq!(pool.processes[7].id, "php-cgi-8.4-8");
+    fn cgi_pool_listens_on_loopback_only() {
+        for port in [1, 19084, u16::MAX] {
+            let pool = cgi_pool(&windows_files(), port).expect("a UTF-8 path");
+            assert_eq!(
+                pool.args[..2],
+                ["-b".to_string(), format!("127.0.0.1:{port}")]
+            );
+        }
     }
 
     #[test]
@@ -848,11 +809,6 @@ mod tests {
         assert_eq!(
             err.to_string(),
             r#""/a\nb" cannot be written in a PHP config file"#
-        );
-        let err = PhpError::PoolTooSmall { ports: 3 };
-        assert_eq!(
-            err.to_string(),
-            "a php-cgi pool needs at least 4 ports, got 3"
         );
     }
 }

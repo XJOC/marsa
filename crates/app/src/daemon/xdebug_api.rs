@@ -120,7 +120,7 @@ fn state(daemon: &Daemon) -> Result<XdebugState, HttpError> {
         )
     })?;
     // The pass writes `php.ini` only where php-fpm runs.
-    let written = Platform::current().is_some_and(php::runs_fpm);
+    let written = Platform::current().is_some_and(php::runs_pools);
     let mut state = XdebugState {
         enabled,
         ..XdebugState::default()
