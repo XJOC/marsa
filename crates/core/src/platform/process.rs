@@ -328,15 +328,15 @@ pub async fn children(_ppid: u32) -> Option<Vec<ChildProcess>> {
     None
 }
 
-/// The processes that hold the listener at `listen` open now: a Unix socket
+/// The processes that hold a listener at `listen` open now: a Unix socket
 /// bound to that path, or a TCP listener on `127.0.0.1:<port>`. A child that
-/// inherited the listener from its parent holds it too, which is what tells
-/// a php-fpm worker from any other process that runs the same file (task
-/// M4-25). A list, never a proof alone: the caller checks each pid with
-/// [`real_identity`] too. macOS asks `/usr/sbin/lsof` once, and in the same
-/// run for the files of this process: if `lsof` does not describe this
-/// process, its answer proves nothing. `None` when it cannot be told: then
-/// nothing is signalled.
+/// inherited the listener from its parent holds it too. It says who holds a
+/// listener there, not who inherited it from whom: a filter for the workers
+/// of a php-fpm (task M4-25), never a proof alone. The caller checks each
+/// pid with [`real_identity`] too. macOS asks `/usr/sbin/lsof` once, and in
+/// the same run for the files of this process: if `lsof` does not describe
+/// this process, or a signal ended it, its answer proves nothing. `None`
+/// when it cannot be told: then nothing is signalled.
 #[cfg(target_os = "macos")]
 pub async fn listener_holders(listen: &Dial) -> Option<Vec<u32>> {
     let own = std::process::id();
@@ -352,6 +352,11 @@ pub async fn listener_holders(listen: &Dial) -> Option<Vec<u32>> {
     };
     lsof.arg("-FptPnT").env("LC_ALL", "C");
     let out = run_tool(lsof).await?;
+    // 1: a selection matched nothing. No code at all: a signal ended `lsof`,
+    // so its list may be cut short.
+    if !matches!(out.status.code(), Some(0 | 1)) {
+        return None;
+    }
     let text = String::from_utf8_lossy(&out.stdout);
     crate::orphan::parse_lsof_holders(&text, listen, own)
 }

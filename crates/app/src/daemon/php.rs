@@ -344,8 +344,10 @@ pub struct PhpManager {
     recovery: bool,
     /// Who runs under a pid, and signals, for the orphan check.
     processes: Arc<dyn FpmProcesses>,
-    /// How long SIGTERM and SIGKILL to an orphan wait (ADR 0009).
+    /// How long SIGTERM and SIGKILL to an orphan master wait (ADR 0009).
     ladder: Ladder,
+    /// The same for the workers it left.
+    worker_ladder: Ladder,
 }
 
 impl PhpManager {
@@ -358,6 +360,7 @@ impl PhpManager {
             recovery: process::ORPHAN_RECOVERY,
             processes: Arc::new(SystemFpm),
             ladder: Ladder::default(),
+            worker_ladder: Ladder::default(),
         }
     }
 
@@ -489,6 +492,7 @@ impl PhpManager {
             accepted: &accepted,
             listen: &pool.dial,
             ladder: self.ladder,
+            worker_ladder: self.worker_ladder,
         };
         // The master, or the workers it left behind.
         let found = orphans.inspect().await?;
