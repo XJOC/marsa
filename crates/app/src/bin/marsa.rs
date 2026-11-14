@@ -52,7 +52,9 @@ enum Command {
     #[command(flatten)]
     Sites(SitesCommand),
     /// Trust Marsa's HTTPS certificates, send .test names to Marsa, and route
-    /// ports 80 and 443 to it, with one password prompt (macOS).
+    /// ports 80 and 443 to it (macOS). macOS may ask for an administrator
+    /// password, and may then ask you to approve trusting Marsa's
+    /// certificate authority for your user.
     Setup,
     /// Start Marsa at login, or not: on or off. Without on or off, show
     /// whether it does (macOS and Linux).

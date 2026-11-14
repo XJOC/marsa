@@ -4,10 +4,14 @@
 //! An op meant for another OS fails with `op_not_supported`.
 //!
 //! Each pair of macOS ops has its own file, so their tasks do not touch the
-//! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). The
-//! Linux and Windows ops fail with `op_not_implemented` until their tasks.
+//! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). On
+//! Linux, `ports` (M4-18b) is written; the other Linux ops and the Windows
+//! ops fail with `op_not_implemented` until their tasks.
 
+mod marked;
 pub mod pf;
+mod ports;
+mod program;
 mod resolver;
 mod trust;
 
@@ -46,12 +50,17 @@ fn run(op: &Op, os: Os, system: &impl System, results: &mut Vec<OpResult>) {
     }
 }
 
-/// What `uninstall_all` runs: the reverse of the setup order, so the `pf`
-/// redirect goes before the DNS setup, and the trust goes last.
+/// What `uninstall_all` runs: the reverse of the setup order, so the ports
+/// (the `pf` redirect, the sysctl) go before the DNS setup, and the trust
+/// goes last.
 fn removals(os: Os) -> Vec<Op> {
     match os {
         Os::Macos => vec![Op::PfRemove {}, Op::ResolverRemove {}, Op::TrustRemove {}],
-        Os::Linux => vec![Op::ResolvedRemove {}, Op::TrustRemove {}],
+        Os::Linux => vec![
+            Op::PortsRemove {},
+            Op::ResolvedRemove {},
+            Op::TrustRemove {},
+        ],
         Os::Windows => vec![Op::HostsRemove {}],
     }
 }
@@ -66,7 +75,10 @@ fn supported(op: &Op, os: Os) -> bool {
         | Op::ResolverRemove {}
         | Op::PfInstall { .. }
         | Op::PfRemove {} => os == Os::Macos,
-        Op::ResolvedInstall { .. } | Op::ResolvedRemove {} => os == Os::Linux,
+        Op::ResolvedInstall { .. }
+        | Op::ResolvedRemove {}
+        | Op::PortsInstall {}
+        | Op::PortsRemove {} => os == Os::Linux,
         Op::HostsSync { .. } | Op::HostsRemove {} => os == Os::Windows,
     }
 }
@@ -83,6 +95,8 @@ fn handle(op: &Op, os: Os, system: &impl System) -> OpResult {
             https_port,
         } => pf::install(*http_port, *https_port, system),
         Op::PfRemove {} => pf::remove(system),
+        Op::PortsInstall {} => ports::install(system),
+        Op::PortsRemove {} => ports::remove(system),
         Op::TrustInstall { pem } if os == Os::Macos => trust::install(pem, system),
         Op::TrustRemove {} if os == Os::Macos => trust::remove(system),
         Op::TrustInstall { .. } | Op::TrustRemove {} => not_implemented(op.name()),
@@ -132,6 +146,8 @@ mod tests {
             { "op": "pf_remove" },
             { "op": "resolved_install", "port": 18053 },
             { "op": "resolved_remove" },
+            { "op": "ports_install" },
+            { "op": "ports_remove" },
             { "op": "hosts_sync", "names": [] },
             { "op": "hosts_remove" },
         ])
@@ -176,7 +192,7 @@ mod tests {
     fn each_os_supports_only_its_own_ops() {
         let table = [
             (Os::Macos, &["trust", "resolver", "pf"][..]),
-            (Os::Linux, &["trust", "resolved"]),
+            (Os::Linux, &["trust", "resolved", "ports"]),
             (Os::Windows, &["hosts"]),
         ];
         for (os, own) in table {
@@ -195,7 +211,10 @@ mod tests {
                 Os::Macos,
                 &["pf_remove", "resolver_remove", "trust_remove"][..],
             ),
-            (Os::Linux, &["resolved_remove", "trust_remove"]),
+            (
+                Os::Linux,
+                &["ports_remove", "resolved_remove", "trust_remove"],
+            ),
             (Os::Windows, &["hosts_remove"]),
         ];
         for (os, expected) in table {

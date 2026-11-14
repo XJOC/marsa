@@ -57,10 +57,13 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// For one call that is not a stream, and for the start of a stream. A
 /// service restart fits well inside.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// For `POST /v1/setup`: the daemon gives the user 5 minutes at the admin
-/// prompt, and its port checks (`netstat`, then `ps` for at most 8
-/// processes) up to 10 seconds each.
-const SETUP_TIMEOUT: Duration = Duration::from_secs(7 * 60);
+/// For `POST /v1/setup`: longer than the daemon's slowest setup, which is
+/// about 12 minutes when every program runs to its limit. The daemon gives
+/// the user 5 minutes at the admin prompt and 5 more at the trust dialog
+/// (macOS), and each check (`netstat`, `ps` for at most 8 processes,
+/// `security verify-cert`) up to 10 seconds. A test in the daemon's
+/// `setup_api.rs` holds this above the sum of the daemon's own limits.
+pub const SETUP_TIMEOUT: Duration = Duration::from_secs(13 * 60);
 /// How long a new daemon has to answer. The wait ends as soon as it does, so
 /// this only bounds a real failure. macOS checks a program the first time it
 /// runs after an install or an update: about 2 s when the machine is idle,
@@ -299,9 +302,11 @@ impl DaemonClient {
             .await
     }
 
-    /// `POST /v1/setup`: the first setup, with one admin prompt (macOS). Waits
-    /// until it ends, up to 7 minutes: the user may take a while at the
-    /// prompt. The same report also comes on [`DaemonClient::events`] as
+    /// `POST /v1/setup`: the first setup. On macOS the user is asked twice:
+    /// for an administrator password, then to approve the trust in Marsa's
+    /// certificate authority for this user. Waits until it ends, up to 13
+    /// minutes ([`SETUP_TIMEOUT`]): the user may take a while at each. The
+    /// same report also comes on [`DaemonClient::events`] as
     /// `Event::SetupFinished`.
     ///
     /// # Errors
