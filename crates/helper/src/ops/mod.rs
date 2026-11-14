@@ -85,6 +85,7 @@ fn removals(os: Os) -> Vec<Op> {
         Os::Linux => vec![
             Op::PortsRemove {},
             Op::ResolvedRemove {},
+            Op::HostsRemove {},
             Op::TrustRemove {},
         ],
         Os::Windows => vec![Op::HostsRemove {}, Op::TrustRemove {}],
@@ -114,7 +115,8 @@ fn supported(op: &Op, os: Os) -> bool {
         | Op::ResolvedRemove {}
         | Op::PortsInstall {}
         | Op::PortsRemove {} => os == Os::Linux,
-        Op::HostsSync { .. } | Op::HostsRemove {} => os == Os::Windows,
+        // Linux: before systemd 250 with systemd-networkd (task M4-18k).
+        Op::HostsSync { .. } | Op::HostsRemove {} => matches!(os, Os::Windows | Os::Linux),
     }
 }
 
@@ -142,8 +144,8 @@ fn handle(op: &Op, os: Os, system: &impl System) -> OpResult {
         // Linux: the arms above take macOS and Windows.
         Op::TrustInstall { pem } => trust_linux::install(pem, system),
         Op::TrustRemove {} => trust_linux::remove(system),
-        Op::HostsSync { names } => hosts::sync(names, system),
-        Op::HostsRemove {} => hosts::remove(system),
+        Op::HostsSync { names } => hosts::sync(names, os, system),
+        Op::HostsRemove {} => hosts::remove(os, system),
         // `run` expands `uninstall_all` into its removals, so it never gets
         // here.
         Op::UninstallAll {} => not_implemented(op.name()),
@@ -234,7 +236,7 @@ mod tests {
     fn each_os_supports_only_its_own_ops() {
         let table = [
             (Os::Macos, &["trust", "resolver", "pf"][..]),
-            (Os::Linux, &["trust", "resolved", "ports"]),
+            (Os::Linux, &["trust", "resolved", "ports", "hosts"]),
             (Os::Windows, &["hosts", "trust"]),
         ];
         for (os, own) in table {
@@ -358,7 +360,12 @@ mod tests {
             ),
             (
                 Os::Linux,
-                &["ports_remove", "resolved_remove", "trust_remove"],
+                &[
+                    "ports_remove",
+                    "resolved_remove",
+                    "hosts_remove",
+                    "trust_remove",
+                ],
             ),
             (Os::Windows, &["hosts_remove", "trust_remove"]),
         ];

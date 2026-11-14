@@ -79,12 +79,16 @@ pub const RESOLVED_RESTART_FAILED: &str = "resolved_restart_failed";
 pub const RESOLVED_STOPPED: &str = "resolved_stopped";
 /// Deleting [`UNIT_FILE`] or [`DROP_IN`] failed.
 pub const RESOLVED_DELETE: &str = "resolved_delete";
-/// systemd is older than 250, or its version cannot be read. Its resolved
-/// counts a link that systemd-networkd calls "initialized" as managed, and
-/// clears what was set on it (spike S-02c), so Marsa makes no link there.
-/// Nothing was changed but the removal of an old drop-in. Task M4-18k gives
-/// these systems another way.
+/// The version of systemd cannot be read, so Marsa makes no link. Nothing
+/// was changed but the removal of an old drop-in (and of an earlier unit).
 pub const RESOLVED_SYSTEMD_TOO_OLD: &str = "resolved_systemd_too_old";
+/// systemd is older than 250 and systemd-networkd runs (or `systemctl`
+/// cannot tell): that resolved counts a link networkd calls "initialized"
+/// as managed and clears what was set on it (ADR 0014, finding 30), so
+/// Marsa makes no link. The daemon writes `/etc/hosts` lines instead
+/// (`hosts_sync`, task M4-18k). Nothing was changed but the removal of an
+/// old drop-in (and of an earlier unit).
+pub const RESOLVED_USE_HOSTS: &str = "resolved_use_hosts";
 
 /// Marsa's unit. `enable` links it into `multi-user.target`, so it runs at
 /// every boot.
@@ -124,6 +128,7 @@ const RESTART_UNIT: [&str; 2] = ["restart", UNIT_NAME];
 const DISABLE: [&str; 3] = ["disable", "--now", UNIT_NAME];
 const STATUS: [&str; 2] = ["status", LINK];
 const VERSION: [&str; 1] = ["--version"];
+const NETWORKD_ACTIVE: [&str; 3] = ["is-active", "--quiet", "systemd-networkd.service"];
 /// The first systemd whose resolved leaves a new link's settings alone
 /// while systemd-networkd looks at it.
 const FIRST_SYSTEMD: u32 = 250;
@@ -179,13 +184,20 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
     }
     let version = match systemd_version(system) {
         Ok(version) if version >= FIRST_SYSTEMD => version,
+        // Before 250 the race needs systemd-networkd (finding 30): without
+        // it running, the link is safe there too.
+        Ok(version) if networkd_runs(system) == Ok(false) => version,
         other => {
-            let reason = match other {
-                Ok(version) => format!(
-                    "systemd {version} is older than {FIRST_SYSTEMD}: its resolved can drop the \
-                     settings of Marsa's link"
+            let (code, reason) = match other {
+                Ok(version) => (
+                    RESOLVED_USE_HOSTS,
+                    format!(
+                        "systemd {version} is older than {FIRST_SYSTEMD} and systemd-networkd \
+                         may run: its resolved can drop the settings of Marsa's link, and .test \
+                         names go into /etc/hosts here instead"
+                    ),
                 ),
-                Err(reason) => reason,
+                Err(reason) => (RESOLVED_SYSTEMD_TOO_OLD, reason),
             };
             // A unit of an earlier install would meet that race at every
             // boot, so it goes.
@@ -198,7 +210,7 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
             } else {
                 format!("{reason}, {nothing_else}")
             };
-            return OpResult::failed(INSTALL, RESOLVED_SYSTEMD_TOO_OLD, message);
+            return OpResult::failed(INSTALL, code, message);
         }
     };
     let Some(ip) = IP.into_iter().find(|path| system.exists(Path::new(path))) else {
@@ -308,6 +320,20 @@ WantedBy=multi-user.target
 /// Marsa's DNS server as systemd-resolved writes it.
 fn server(port: u16) -> String {
     format!("127.0.0.1:{port}")
+}
+
+/// Whether systemd-networkd runs: `Ok(false)` only for "not active" (exit
+/// 3); anything else that is not 0 means `systemctl` cannot tell.
+fn networkd_runs(system: &impl System) -> Result<bool, String> {
+    let active = system.run(SYSTEMCTL, &NETWORKD_ACTIVE);
+    match &active {
+        Ok(RunOutput { code: Some(0), .. }) => Ok(true),
+        Ok(RunOutput {
+            code: Some(INACTIVE),
+            ..
+        }) => Ok(false),
+        _ => Err(program::failure(&active)),
+    }
 }
 
 /// The version of systemd, from the first line of `systemctl --version`
@@ -632,6 +658,7 @@ mod tests {
     const RESET_UNIT: &str = "/usr/bin/systemctl reset-failed marsa-dns-link.service";
     const LOOKED: &str = "/usr/bin/resolvectl status marsa0";
     const VERSIONED: &str = "/usr/bin/systemctl --version";
+    const NETWORKD: &str = "/usr/bin/systemctl is-active --quiet systemd-networkd.service";
     /// The mode of files that were there before a test, so a rewrite shows.
     const OLD_MODE: u32 = 0o600;
     const FOREIGN: &[u8] = b"[Unit]\nDescription=someone else's\n";
@@ -712,6 +739,8 @@ mod tests {
         fedora: bool,
         /// What `systemctl --version` says on its first line.
         version_line: &'static str,
+        /// The exit code of `systemctl is-active systemd-networkd`.
+        networkd_code: i32,
         /// A global `DNSOverTLS=yes`, which a link inherits.
         strict_dot: bool,
     }
@@ -739,6 +768,7 @@ mod tests {
                 resolvectl_fails: false,
                 fedora: false,
                 version_line: "systemd 255 (255.4-1ubuntu8)",
+                networkd_code: 0,
                 strict_dot: false,
             };
             linux.put("/usr/sbin/ip", b"");
@@ -900,6 +930,7 @@ mod tests {
             }
             match line {
                 "--version" => exit(0, &format!("{}\n+PAM +AUDIT +SELINUX\n", self.version_line)),
+                "is-active --quiet systemd-networkd.service" => exit(self.networkd_code, ""),
                 "is-active --quiet systemd-resolved.service" => {
                     let code = if self.active.get() { 0 } else { 3 };
                     exit(self.active_code.unwrap_or(code), "")
@@ -1101,17 +1132,24 @@ mod tests {
         let mut old = Linux::new().with_drop_in();
         old.version_line = "systemd 249 (249.11-0ubuntu3.12)";
         let failed = install(18053, &old);
-        assert_eq!(code_of(&failed), RESOLVED_SYSTEMD_TOO_OLD);
+        assert_eq!(code_of(&failed), RESOLVED_USE_HOSTS);
         assert_eq!(
             message_of(&failed),
-            "systemd 249 is older than 250: its resolved can drop the settings of Marsa's link, \
-             so only Marsa's old global setting was removed"
+            "systemd 249 is older than 250 and systemd-networkd may run: its resolved can drop \
+             the settings of Marsa's link, and .test names go into /etc/hosts here instead, so \
+             only Marsa's old global setting was removed"
         );
         assert_eq!((old.unit_file(), old.file(DROP_IN)), (None, None));
         assert_eq!(
             old.commands(),
-            [ACTIVE, RESET, RESTARTED, ACTIVE, VERSIONED]
+            [ACTIVE, RESET, RESTARTED, ACTIVE, VERSIONED, NETWORKD]
         );
+        // `systemctl` cannot tell whether networkd runs: the same.
+        let mut unsure = Linux::new();
+        unsure.version_line = "systemd 249 (249.11-0ubuntu3.12)";
+        unsure.networkd_code = 1;
+        assert_eq!(code_of(&install(18053, &unsure)), RESOLVED_USE_HOSTS);
+        assert_eq!(unsure.unit_file(), None);
         let mut unknown = Linux::new();
         unknown.version_line = "something else";
         let failed = install(18053, &unknown);
@@ -1131,19 +1169,38 @@ mod tests {
         let mut linux = Linux::with_unit(&ours(18053));
         linux.version_line = "systemd 249 (249.11-0ubuntu3.12)";
         let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_SYSTEMD_TOO_OLD);
+        assert_eq!(code_of(&failed), RESOLVED_USE_HOSTS);
         assert_eq!(
             message_of(&failed),
             format!(
-                "systemd 249 is older than 250: its resolved can drop the settings of Marsa's \
-                 link; {UNIT_FILE} of an earlier install was taken out"
+                "systemd 249 is older than 250 and systemd-networkd may run: its resolved can \
+                 drop the settings of Marsa's link, and .test names go into /etc/hosts here \
+                 instead; {UNIT_FILE} of an earlier install was taken out"
             )
         );
         assert_eq!(linux.unit_file(), None);
         assert!(linux.link.borrow().is_none() && !linux.enabled.get());
         assert_eq!(
             linux.commands(),
-            [ACTIVE, VERSIONED, DISABLED, RELOAD, RESET_UNIT]
+            [ACTIVE, VERSIONED, NETWORKD, DISABLED, RELOAD, RESET_UNIT]
+        );
+    }
+
+    /// Before 250 without systemd-networkd (an Ubuntu 22.04 desktop with
+    /// NetworkManager) the race cannot happen: the unit, with the route.
+    #[test]
+    fn a_systemd_before_250_without_networkd_gets_the_link() {
+        let mut linux = Linux::new();
+        linux.version_line = "systemd 249 (249.11-0ubuntu3.12)";
+        linux.networkd_code = 3;
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        let (bytes, _) = linux.unit_file().unwrap();
+        assert_eq!(bytes, unit("/usr/sbin/ip", 18053, true).into_bytes());
+        assert_eq!(
+            linux.commands(),
+            [
+                ACTIVE, VERSIONED, NETWORKD, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED
+            ]
         );
     }
 

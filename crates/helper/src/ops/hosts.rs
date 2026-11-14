@@ -1,6 +1,8 @@
-//! Windows: Marsa's block in the hosts file, one `127.0.0.1 <name>` line per
-//! site (ADR 0018). The hosts file has no wildcards, so the block changes
-//! with every new site.
+//! Marsa's block in the hosts file, one `127.0.0.1 <name>` line per site:
+//! on Windows (ADR 0018), and on Linux where systemd is older than 250 and
+//! systemd-networkd runs, so `marsa0` cannot be used (ADR 0014, task
+//! M4-18k). The hosts file has no wildcards, so the block changes with every
+//! new site.
 //!
 //! The file belongs to the user and to other tools too. The helper changes
 //! only the lines between its two marker lines and keeps every other byte as
@@ -9,9 +11,11 @@
 //! start), the file is left alone and the op fails with
 //! `hosts_block_broken`: the helper never guesses where its block ends.
 //!
-//! The path is `<System32>\drivers\etc\hosts`, with `System32` asked from
-//! Windows ([`System::system_dir`]), never from the request and never from
-//! the environment. No external command runs here.
+//! The path is `<System32>\drivers\etc\hosts` on Windows, with `System32`
+//! asked from Windows ([`System::system_dir`]), and `/etc/hosts` on Linux;
+//! never from the request and never from the environment. The block's line
+//! endings are those of the system: CRLF on Windows, LF on Linux. No
+//! external command runs here.
 //!
 //! The helper leaves the file alone, and says why, when it is a link or a
 //! reparse point (the real hosts file never is one: a link could make the
@@ -23,6 +27,7 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::PathBuf;
 
+use crate::os::Os;
 use crate::response::{OpResult, Outcome, code};
 use crate::system::System;
 
@@ -35,14 +40,16 @@ const NOTE: &str = "# Managed by Marsa. Lines in this block are overwritten.";
 /// hosts files of a few MiB; a larger file is left as it is.
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// Windows ignores the mode: the file gets the permissions of its folder.
+/// On Linux everyone reads it, and only root changes it.
 const MODE: u32 = 0o644;
+const LINUX_HOSTS: &str = "/etc/hosts";
 
 const SYNC: &str = "hosts_sync";
 const REMOVE: &str = "hosts_remove";
 
 /// `hosts_sync`: the block holds exactly `names`, sorted. An empty list
 /// leaves an empty block (written only if it was not there yet).
-pub fn sync(names: &[String], system: &impl System) -> OpResult {
+pub fn sync(names: &[String], os: Os, system: &impl System) -> OpResult {
     // The request parser already allows `<label>.test` only. Checked again
     // here, because this text goes into a system file as it is: a line break
     // in a name would add a line of the caller's choice.
@@ -50,19 +57,19 @@ pub fn sync(names: &[String], system: &impl System) -> OpResult {
         let message = "a name is not <label>.test, so nothing was written".to_owned();
         return OpResult::failed(SYNC, code::REQUEST_INVALID, message);
     }
-    apply(SYNC, Some(&block(names)), system)
+    apply(SYNC, Some(&block(names, os)), os, system)
 }
 
 /// `hosts_remove`: takes Marsa's block out. No block, or no hosts file, is
 /// `unchanged`.
-pub fn remove(system: &impl System) -> OpResult {
-    apply(REMOVE, None, system)
+pub fn remove(os: Os, system: &impl System) -> OpResult {
+    apply(REMOVE, None, os, system)
 }
 
 /// Reads the file, swaps Marsa's block for `block` (or for nothing), and
 /// writes the file back only if a byte changed.
-fn apply(op: &'static str, block: Option<&[u8]>, system: &impl System) -> OpResult {
-    let path = match hosts_path(system) {
+fn apply(op: &'static str, block: Option<&[u8]>, os: Os, system: &impl System) -> OpResult {
+    let path = match hosts_path(os, system) {
         Ok(path) => path,
         Err(err) => {
             let message = format!("cannot find the Windows system folder: {}", err.kind());
@@ -78,8 +85,9 @@ fn apply(op: &'static str, block: Option<&[u8]>, system: &impl System) -> OpResu
     }
     let current = match system.read(&path, MAX_BYTES) {
         Ok(bytes) => bytes,
-        // Windows works without a hosts file. `exists` does not follow
-        // links, so a dangling link is not "no file": it is left alone.
+        // Windows works without a hosts file, and Linux resolves localhost
+        // without one. `exists` does not follow links, so a dangling link is
+        // not "no file": it is left alone.
         Err(err) if err.kind() == io::ErrorKind::NotFound && !system.exists(&path) => Vec::new(),
         Err(err) => {
             let message = format!(
@@ -122,7 +130,10 @@ fn apply(op: &'static str, block: Option<&[u8]>, system: &impl System) -> OpResu
     OpResult { op, outcome }
 }
 
-fn hosts_path(system: &impl System) -> io::Result<PathBuf> {
+fn hosts_path(os: Os, system: &impl System) -> io::Result<PathBuf> {
+    if os == Os::Linux {
+        return Ok(PathBuf::from(LINUX_HOSTS));
+    }
     Ok(system
         .system_dir()?
         .join("drivers")
@@ -141,18 +152,19 @@ fn is_test_name(name: &str) -> bool {
     })
 }
 
-/// Marsa's block for `names`: sorted, each once, CRLF line endings like the
-/// hosts file Windows ships.
-fn block(names: &[String]) -> Vec<u8> {
+/// Marsa's block for `names`: sorted, each once, with the line endings of
+/// the hosts file the system ships: CRLF on Windows, LF on Linux.
+fn block(names: &[String], os: Os) -> Vec<u8> {
+    let eol = if os == Os::Windows { "\r\n" } else { "\n" };
     let names: BTreeSet<&str> = names.iter().map(String::as_str).collect();
-    let mut text = format!("{BEGIN}\r\n{NOTE}\r\n");
+    let mut text = format!("{BEGIN}{eol}{NOTE}{eol}");
     for name in names {
         text.push_str("127.0.0.1 ");
         text.push_str(name);
-        text.push_str("\r\n");
+        text.push_str(eol);
     }
     text.push_str(END);
-    text.push_str("\r\n");
+    text.push_str(eol);
     text.into_bytes()
 }
 
@@ -279,13 +291,13 @@ mod tests {
     }
 
     fn block_of(list: &[&str]) -> String {
-        String::from_utf8(block(&names(list))).unwrap()
+        String::from_utf8(block(&names(list), Os::Windows)).unwrap()
     }
 
     #[test]
     fn the_written_file() {
         let fake = windows(Some(SHIPPED.as_bytes()));
-        let result = sync(&names(&["shop.test", "blog.test"]), &fake);
+        let result = sync(&names(&["shop.test", "blog.test"]), Os::Windows, &fake);
         assert_eq!((result.op, status(&result)), (SYNC, "done"));
         insta::assert_snapshot!(text(&fake));
     }
@@ -293,7 +305,7 @@ mod tests {
     #[test]
     fn names_are_sorted_and_written_once() {
         let fake = windows(Some(b""));
-        sync(&names(&["b.test", "a.test", "b.test"]), &fake);
+        sync(&names(&["b.test", "a.test", "b.test"]), Os::Windows, &fake);
         assert_eq!(text(&fake), block_of(&["a.test", "b.test"]));
         assert_eq!(
             block_of(&["a.test", "b.test"]),
@@ -306,7 +318,7 @@ mod tests {
         let content = format!("{SHIPPED}{}", block_of(&["blog.test", "shop.test"]));
         let fake = windows(Some(content.as_bytes()));
         // Another order in the request is still the same block.
-        let result = sync(&names(&["shop.test", "blog.test"]), &fake);
+        let result = sync(&names(&["shop.test", "blog.test"]), Os::Windows, &fake);
         assert_eq!(status(&result), "unchanged");
         assert_eq!(file(&fake), Some((content.into_bytes(), OLD_MODE)));
     }
@@ -319,16 +331,16 @@ mod tests {
         let old = block_of(&["gone.test"]);
         let content = [before.clone(), old.into_bytes(), after.clone()].concat();
         let fake = windows(Some(&content));
-        let result = sync(&names(&["shop.test"]), &fake);
+        let result = sync(&names(&["shop.test"]), Os::Windows, &fake);
         assert_eq!(status(&result), "done");
-        let wanted = [before, block(&names(&["shop.test"])), after].concat();
+        let wanted = [before, block(&names(&["shop.test"]), Os::Windows), after].concat();
         assert_eq!(file(&fake), Some((wanted, MODE)));
     }
 
     #[test]
     fn a_file_without_a_final_line_break_gets_one_before_the_block() {
         let fake = windows(Some(b"10.0.0.1 nas"));
-        sync(&names(&["shop.test"]), &fake);
+        sync(&names(&["shop.test"]), Os::Windows, &fake);
         let wanted = format!("10.0.0.1 nas\r\n{}", block_of(&["shop.test"]));
         assert_eq!(text(&fake), wanted);
     }
@@ -336,7 +348,7 @@ mod tests {
     #[test]
     fn no_names_leave_an_empty_block() {
         let fake = windows(Some(SHIPPED.as_bytes()));
-        let result = sync(&[], &fake);
+        let result = sync(&[], Os::Windows, &fake);
         assert_eq!(status(&result), "done");
         let wanted = format!("{SHIPPED}{BEGIN}\r\n{NOTE}\r\n{END}\r\n");
         assert_eq!(text(&fake), wanted);
@@ -345,9 +357,12 @@ mod tests {
     #[test]
     fn a_missing_hosts_file_is_created_by_sync_and_left_by_remove() {
         let fake = windows(None);
-        assert_eq!(status(&remove(&fake)), "unchanged");
+        assert_eq!(status(&remove(Os::Windows, &fake)), "unchanged");
         assert_eq!(file(&fake), None);
-        assert_eq!(status(&sync(&names(&["shop.test"]), &fake)), "done");
+        assert_eq!(
+            status(&sync(&names(&["shop.test"]), Os::Windows, &fake)),
+            "done"
+        );
         assert_eq!(text(&fake), block_of(&["shop.test"]));
     }
 
@@ -358,12 +373,12 @@ mod tests {
             block_of(&["blog.test", "shop.test"])
         );
         let fake = windows(Some(content.as_bytes()));
-        let result = remove(&fake);
+        let result = remove(Os::Windows, &fake);
         assert_eq!((result.op, status(&result)), (REMOVE, "done"));
         assert_eq!(text(&fake), format!("{SHIPPED}10.0.0.1 nas\r\n"));
         // Nothing of Marsa's is left: the second call writes nothing.
         let before = file(&fake);
-        assert_eq!(status(&remove(&fake)), "unchanged");
+        assert_eq!(status(&remove(Os::Windows, &fake)), "unchanged");
         assert_eq!(file(&fake), before);
     }
 
@@ -375,7 +390,7 @@ mod tests {
             block_of(&["two.test"])
         );
         let fake = windows(Some(content.as_bytes()));
-        sync(&names(&["shop.test"]), &fake);
+        sync(&names(&["shop.test"]), Os::Windows, &fake);
         let wanted = format!("a\r\n{}b\r\nc\r\n", block_of(&["shop.test"]));
         assert_eq!(text(&fake), wanted);
     }
@@ -393,9 +408,9 @@ mod tests {
             for sync_op in [true, false] {
                 let fake = windows(Some(content.as_bytes()));
                 let result = if sync_op {
-                    sync(&names(&["shop.test"]), &fake)
+                    sync(&names(&["shop.test"]), Os::Windows, &fake)
                 } else {
-                    remove(&fake)
+                    remove(Os::Windows, &fake)
                 };
                 assert_eq!(status(&result), code::HOSTS_BLOCK_BROKEN, "{content:?}");
                 let Outcome::Failed { message, .. } = &result.outcome else {
@@ -434,7 +449,10 @@ mod tests {
         // Such lines stay in the file like any other line.
         let content = " # Marsa start\r\n# Marsa end here\r\n";
         let fake = windows(Some(content.as_bytes()));
-        assert_eq!(status(&sync(&names(&["shop.test"]), &fake)), "done");
+        assert_eq!(
+            status(&sync(&names(&["shop.test"]), Os::Windows, &fake)),
+            "done"
+        );
         assert_eq!(
             text(&fake),
             format!("{content}{}", block_of(&["shop.test"]))
@@ -457,7 +475,7 @@ mod tests {
         ];
         for name in bad {
             let fake = windows(Some(SHIPPED.as_bytes()));
-            let result = sync(&names(&["ok.test", name]), &fake);
+            let result = sync(&names(&["ok.test", name]), Os::Windows, &fake);
             assert_eq!(status(&result), code::REQUEST_INVALID, "{name:?}");
             assert_eq!(
                 file(&fake),
@@ -477,7 +495,10 @@ mod tests {
         link.dangling.insert(path());
         for fake in [denied, huge, link] {
             let before = file(&fake);
-            for result in [sync(&names(&["shop.test"]), &fake), remove(&fake)] {
+            for result in [
+                sync(&names(&["shop.test"]), Os::Windows, &fake),
+                remove(Os::Windows, &fake),
+            ] {
                 assert_eq!(status(&result), code::HOSTS_READ);
             }
             assert_eq!(file(&fake), before);
@@ -489,7 +510,10 @@ mod tests {
         let content = format!("{SHIPPED}{}", block_of(&["old.test"]));
         let mut fake = windows(Some(content.as_bytes()));
         fake.fail_writes.insert(path());
-        for result in [sync(&names(&["shop.test"]), &fake), remove(&fake)] {
+        for result in [
+            sync(&names(&["shop.test"]), Os::Windows, &fake),
+            remove(Os::Windows, &fake),
+        ] {
             assert_eq!(status(&result), code::HOSTS_WRITE);
         }
         assert_eq!(file(&fake), Some((content.into_bytes(), OLD_MODE)));
@@ -498,10 +522,10 @@ mod tests {
     #[test]
     fn remove_of_a_file_that_is_only_the_block_leaves_it_empty() {
         let fake = windows(Some(block_of(&["shop.test"]).as_bytes()));
-        assert_eq!(status(&remove(&fake)), "done");
+        assert_eq!(status(&remove(Os::Windows, &fake)), "done");
         assert_eq!(file(&fake), Some((Vec::new(), MODE)));
         // An empty file has nothing of Marsa's.
-        assert_eq!(status(&remove(&fake)), "unchanged");
+        assert_eq!(status(&remove(Os::Windows, &fake)), "unchanged");
     }
 
     /// An editor that saves "UTF-8 with BOM" puts three bytes in front of
@@ -510,14 +534,17 @@ mod tests {
     fn a_byte_order_mark_stays_and_does_not_hide_the_first_marker() {
         let content = format!("\u{feff}{}10.0.0.1 nas\r\n", block_of(&["old.test"]));
         let fake = windows(Some(content.as_bytes()));
-        assert_eq!(status(&sync(&names(&["shop.test"]), &fake)), "done");
+        assert_eq!(
+            status(&sync(&names(&["shop.test"]), Os::Windows, &fake)),
+            "done"
+        );
         let wanted = format!("\u{feff}{}10.0.0.1 nas\r\n", block_of(&["shop.test"]));
         assert_eq!(text(&fake), wanted);
-        assert_eq!(status(&remove(&fake)), "done");
+        assert_eq!(status(&remove(Os::Windows, &fake)), "done");
         assert_eq!(text(&fake), "\u{feff}10.0.0.1 nas\r\n");
         // A file of only a mark gets the block after it, with no line break.
         let fake = windows(Some(BOM));
-        sync(&names(&["shop.test"]), &fake);
+        sync(&names(&["shop.test"]), Os::Windows, &fake);
         assert_eq!(text(&fake), format!("\u{feff}{}", block_of(&["shop.test"])));
     }
 
@@ -527,7 +554,10 @@ mod tests {
     fn a_hosts_file_that_is_a_link_is_left_alone() {
         let mut fake = windows(Some(SHIPPED.as_bytes()));
         fake.links.insert(path());
-        for result in [sync(&names(&["shop.test"]), &fake), remove(&fake)] {
+        for result in [
+            sync(&names(&["shop.test"]), Os::Windows, &fake),
+            remove(Os::Windows, &fake),
+        ] {
             assert_eq!(status(&result), code::HOSTS_READ);
         }
         assert_eq!(file(&fake), Some((SHIPPED.as_bytes().to_vec(), OLD_MODE)));
@@ -538,8 +568,14 @@ mod tests {
         let content = format!("{SHIPPED}{}", block_of(&["shop.test"]));
         let mut fake = windows(Some(content.as_bytes()));
         fake.read_only.insert(path());
-        assert_eq!(status(&sync(&names(&["shop.test"]), &fake)), "unchanged");
-        for result in [sync(&names(&["blog.test"]), &fake), remove(&fake)] {
+        assert_eq!(
+            status(&sync(&names(&["shop.test"]), Os::Windows, &fake)),
+            "unchanged"
+        );
+        for result in [
+            sync(&names(&["blog.test"]), Os::Windows, &fake),
+            remove(Os::Windows, &fake),
+        ] {
             assert_eq!(status(&result), code::HOSTS_WRITE);
         }
         assert_eq!(file(&fake), Some((content.into_bytes(), OLD_MODE)));
@@ -550,7 +586,7 @@ mod tests {
     fn a_result_larger_than_the_read_limit_is_not_written() {
         let filler = vec![b'#'; MAX_BYTES as usize - 10];
         let fake = windows(Some(&filler));
-        let result = sync(&names(&["shop.test"]), &fake);
+        let result = sync(&names(&["shop.test"]), Os::Windows, &fake);
         assert_eq!(status(&result), code::HOSTS_WRITE);
         assert_eq!(file(&fake), Some((filler, OLD_MODE)));
     }
@@ -559,7 +595,10 @@ mod tests {
     #[test]
     fn without_the_system_folder_nothing_is_read_or_written() {
         let fake = FakeSystem::default();
-        for result in [sync(&names(&["shop.test"]), &fake), remove(&fake)] {
+        for result in [
+            sync(&names(&["shop.test"]), Os::Windows, &fake),
+            remove(Os::Windows, &fake),
+        ] {
             assert_eq!(status(&result), code::HOSTS_READ);
         }
         assert!(fake.files.borrow().is_empty());
@@ -580,5 +619,55 @@ mod tests {
         assert_eq!(seen, [(SYNC, "done"), (REMOVE, "done")]);
         assert_eq!(text(&fake), SHIPPED);
         assert!(fake.log.borrow().is_empty());
+    }
+
+    /// The hosts file a Debian or Ubuntu system ships: LF.
+    const DEBIAN_HOSTS: &str = "127.0.0.1\tlocalhost\n127.0.1.1\trunner\n\n# The following \
+                                lines are desirable for IPv6 capable hosts\n::1     \
+                                ip6-localhost ip6-loopback\n";
+
+    /// Linux: `/etc/hosts`, LF line endings, every other byte kept, and a
+    /// request runs both ops (task M4-18k).
+    #[test]
+    fn on_linux_the_block_goes_into_etc_hosts_with_lf() {
+        let fake = FakeSystem::default();
+        let path = PathBuf::from("/etc/hosts");
+        let file = (DEBIAN_HOSTS.as_bytes().to_vec(), OLD_MODE);
+        fake.files.borrow_mut().insert(path.clone(), file);
+        let result = sync(&names(&["shop.test", "blog.test"]), Os::Linux, &fake);
+        assert_eq!(status(&result), "done");
+        let (bytes, mode) = fake.files.borrow()[&path].clone();
+        assert_eq!(mode, 0o644);
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(
+            text,
+            format!(
+                "{DEBIAN_HOSTS}{BEGIN}\n{NOTE}\n127.0.0.1 blog.test\n127.0.0.1 shop.test\n{END}\n"
+            )
+        );
+        assert!(!text.contains('\r'));
+        let same = sync(&names(&["blog.test", "shop.test"]), Os::Linux, &fake);
+        assert_eq!(status(&same), "unchanged");
+
+        let raw = json!({ "version": 1, "ops": [{ "op": "hosts_remove" }] }).to_string();
+        let request = Request::from_arg(OsStr::new(&raw)).unwrap();
+        let results = ops::apply(&request, Os::Linux, &fake);
+        assert_eq!(status(&results[0]), "done");
+        assert_eq!(fake.files.borrow()[&path].0, DEBIAN_HOSTS.as_bytes());
+        assert!(fake.log.borrow().is_empty());
+    }
+
+    /// A link at `/etc/hosts` is left alone on Linux too.
+    #[test]
+    fn on_linux_a_hosts_file_that_is_a_link_is_left_alone() {
+        let mut fake = FakeSystem::default();
+        let path = PathBuf::from("/etc/hosts");
+        fake.files
+            .borrow_mut()
+            .insert(path.clone(), (DEBIAN_HOSTS.as_bytes().to_vec(), OLD_MODE));
+        fake.links.insert(path.clone());
+        let result = sync(&names(&["shop.test"]), Os::Linux, &fake);
+        assert_eq!(status(&result), code::HOSTS_READ);
+        assert_eq!(fake.files.borrow()[&path].0, DEBIAN_HOSTS.as_bytes());
     }
 }
