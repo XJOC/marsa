@@ -26,17 +26,29 @@
 //!   puts the certificate in the login keychain (one that is there already is
 //!   fine) and sets the user's trust, behind the dialog. Five minutes, like
 //!   the admin prompt.
-//! - For the uninstall, [`remove`]: `security remove-trusted-cert <root.crt>`
+//! - For the uninstall, [`remove`]: `security remove-trusted-cert <file>`
 //!   takes the user's trust away, then `security delete-certificate -Z
 //!   <sha256> <login keychain>` deletes the certificate by its SHA-256. The
 //!   hash comes from `security find-certificate -a -Z -p -c "Marsa Local CA"
 //!   <login keychain>`, matched by the certificate's own base64 and never by
 //!   name alone: another CA may carry the same name (ADR 0011).
 //!
+//! **The record** (task M5-13): once the user trusts the CA (`done`, or
+//! `unchanged` when it was trusted already), [`install`] keeps the text it
+//! checked in `<data>/trust/user-trusted.pem` ([`record_path`]), mode 0600.
+//! [`remove`] takes both the file for `remove-trusted-cert` and the text it
+//! matches in the keychain from that one record, so the certificate that is
+//! untrusted is the one that is deleted, even if Caddy's folder was deleted
+//! or its CA changed since. Without a record (a setup before this task) it
+//! falls back to Caddy's current `root.crt`. The record goes once the
+//! removal succeeded. One record: a CA that changes between two setups
+//! replaces it, and the older CA is no longer known here.
+//!
 //! No message quotes what `security` printed: only the exit code.
 
 use std::ffi::OsString;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -44,7 +56,7 @@ use marsa_core::helper::OpResult;
 use marsa_core::types::OpStatus;
 use tokio_util::sync::CancellationToken;
 
-use super::{CHECK_LIMIT, PEM_BEGIN, PROMPT_LIMIT, RunOutput, Runner, TRUST_INSTALL};
+use super::{CHECK_LIMIT, PEM_BEGIN, PROMPT_LIMIT, RunOutput, Runner, TRUST_INSTALL, read_ca};
 
 /// The tool, by its absolute path (AGENTS.md section 6).
 pub const SECURITY: &str = "/usr/bin/security";
@@ -74,6 +86,10 @@ const NO_TRUST: [&[u8]; 2] = [b"could not be found", b"No Trust Settings were fo
 /// The line before each certificate in the output of `find-certificate -Z`.
 const HASH_LINE: &str = "SHA-256 hash: ";
 const PEM_END: &str = "-----END CERTIFICATE-----";
+/// The record of the certificate this user trusts, under the data folder.
+const RECORD: [&str; 2] = ["trust", "user-trusted.pem"];
+/// `read_ca`'s answer for a file that is not there.
+const NO_FILE: &str = "ca_not_ready";
 
 /// The login keychain of the user whose home folder is `home`.
 pub fn login_keychain(home: &Path) -> PathBuf {
@@ -82,28 +98,42 @@ pub fn login_keychain(home: &Path) -> PathBuf {
         .fold(home.to_path_buf(), |path, part| path.join(part))
 }
 
+/// `<data_dir>/trust/user-trusted.pem`: the certificate this user trusted,
+/// as [`install`] checked it.
+pub fn record_path(data_dir: &Path) -> PathBuf {
+    RECORD
+        .iter()
+        .fold(data_dir.to_path_buf(), |path, part| path.join(part))
+}
+
 /// `trust_install` for the current user: `unchanged` if the certificate at
 /// `ca_root` is trusted already, `done` once macOS added the trust behind its
-/// dialog, or `trust_add_failed`.
+/// dialog, or `trust_add_failed`. `pem` is the text `read_ca` checked at
+/// `ca_root`; after `done` or `unchanged` it is kept at `record` (see the
+/// module notes).
 pub fn install(
     runner: &dyn Runner,
     home: &Path,
     ca_root: &Path,
+    pem: &str,
+    record: &Path,
     stop: &CancellationToken,
 ) -> OpResult {
-    if let Some(problem) = not_absolute(home, ca_root) {
+    if let Some(problem) = not_absolute(home, ca_root, record) {
         tracing::warn!(problem, "security does not run");
         let message = format!("{problem}, so security did not run");
         return failed(TRUST_INSTALL, TRUST_ADD_FAILED, message);
     }
     if is_trusted(runner, ca_root, stop) {
         tracing::info!("Marsa's CA root is already trusted for the current user");
+        keep_record(record, pem);
         return result(TRUST_INSTALL, OpStatus::Unchanged);
     }
     tracing::info!("asking macOS to trust Marsa's CA root for the current user");
     let args = add_args(&login_keychain(home), ca_root);
     let added = runner.run(SECURITY, &args, PROMPT_LIMIT, stop);
     if succeeded(&added) {
+        keep_record(record, pem);
         return result(TRUST_INSTALL, OpStatus::Done);
     }
     let how = failure_text(&added, PROMPT_LIMIT);
@@ -118,24 +148,76 @@ pub fn install(
     failed(TRUST_INSTALL, TRUST_ADD_FAILED, message)
 }
 
-/// `trust_remove` for the current user, for the later uninstall: takes the
-/// user's trust away from the certificate at `ca_root`, then deletes the
-/// certificate whose text is `pem` from the login keychain. `unchanged` if
-/// neither was there. No route calls it yet.
+/// `trust_remove` for the current user, for the uninstall: takes the user's
+/// trust away from the certificate in `record`, then deletes the certificate
+/// with that text from the login keychain, and then the record. Without a
+/// record, the same with Caddy's `ca_root`. `unchanged` if neither the trust
+/// nor the certificate was there, or there is no file to name either.
+///
+/// A record that is there but cannot be used fails with
+/// `trust_remove_failed` before any `security` call, and stays: the trust it
+/// names may still be there, and `root.crt` may be another certificate.
 pub fn remove(
     runner: &dyn Runner,
     home: &Path,
     ca_root: &Path,
-    pem: &str,
+    record: &Path,
     stop: &CancellationToken,
 ) -> OpResult {
-    if let Some(problem) = not_absolute(home, ca_root) {
+    if let Some(problem) = not_absolute(home, ca_root, record) {
         tracing::warn!(problem, "security does not run");
         let message = format!("{problem}, so security did not run");
         return failed(TRUST_REMOVE, TRUST_REMOVE_FAILED, message);
     }
+    let (file, pem, recorded) = match trusted_file(ca_root, record) {
+        Ok(Some(found)) => found,
+        Ok(None) => {
+            tracing::info!("no record and no CA root certificate: no user trust to remove");
+            return result(TRUST_REMOVE, OpStatus::Unchanged);
+        }
+        Err(problem) => {
+            tracing::warn!(problem, "security does not run");
+            let message = format!("{problem}, so security did not run");
+            return failed(TRUST_REMOVE, TRUST_REMOVE_FAILED, message);
+        }
+    };
+    let removed = remove_trust(runner, home, file, &pem, stop);
+    if recorded && removed.status != OpStatus::Failed {
+        forget_record(record);
+    }
+    removed
+}
+
+/// The file to untrust and its text: the record if there is one, else
+/// Caddy's `root.crt`, and whether it is the record. `None` if neither is
+/// there.
+fn trusted_file<'a>(
+    ca_root: &'a Path,
+    record: &'a Path,
+) -> Result<Option<(&'a Path, String, bool)>, &'static str> {
+    match read_ca(record) {
+        Ok(pem) => return Ok(Some((record, pem, true))),
+        Err(NO_FILE) => {}
+        Err(_) => return Err("the record of the trusted certificate cannot be used"),
+    }
+    match read_ca(ca_root) {
+        Ok(pem) => Ok(Some((ca_root, pem, false))),
+        Err(NO_FILE) => Ok(None),
+        Err(_) => Err("the CA root certificate cannot be used"),
+    }
+}
+
+/// The three `security` steps of [`remove`] for the certificate at `file`,
+/// whose text is `pem`.
+fn remove_trust(
+    runner: &dyn Runner,
+    home: &Path,
+    file: &Path,
+    pem: &str,
+    stop: &CancellationToken,
+) -> OpResult {
     let keychain = login_keychain(home);
-    let untrust = runner.run(SECURITY, &untrust_args(ca_root), PROMPT_LIMIT, stop);
+    let untrust = runner.run(SECURITY, &untrust_args(file), PROMPT_LIMIT, stop);
     let had_trust = match &untrust {
         Ok(output) if output.success() => true,
         // No trust to take away: the first setup never ran, or the user
@@ -172,13 +254,99 @@ pub fn remove(
 /// command line as one argument: a relative one would name another file
 /// (the runner's working folder is `/`), and one that starts with `-` would
 /// be read as an option. An absolute path does neither.
-fn not_absolute(home: &Path, ca_root: &Path) -> Option<&'static str> {
+fn not_absolute(home: &Path, ca_root: &Path, record: &Path) -> Option<&'static str> {
     if !ca_root.is_absolute() {
         Some("the path of the CA root certificate is not absolute")
+    } else if !record.is_absolute() {
+        Some("the path of the record of the trusted certificate is not absolute")
     } else if !home.is_absolute() {
         Some("the home folder is not an absolute path")
     } else {
         None
+    }
+}
+
+/// Keeps `pem` at `record`. A failure is logged and does not fail the trust,
+/// which macOS has added: the uninstall then falls back to `root.crt`.
+fn keep_record(record: &Path, pem: &str) {
+    match write_record(record, pem) {
+        Ok(()) => tracing::debug!(path = %record.display(), "kept the record of the trusted CA"),
+        Err(err) => tracing::warn!(
+            path = %record.display(),
+            error = %err,
+            "cannot keep the record of the trusted CA; the uninstall will use root.crt"
+        ),
+    }
+}
+
+/// Writes `pem` to a temp file in the folder of `record`, mode 0600, then
+/// renames it over `record`: a reader finds the old record or the new one,
+/// never half of one. The folder is made, mode 0700, if it is missing.
+fn write_record(record: &Path, pem: &str) -> io::Result<()> {
+    let (Some(dir), Some(name)) = (record.parent(), record.file_name()) else {
+        let reason = "the record path has no folder or no file name";
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
+    };
+    create_private_dir(dir)?;
+    let mut temp = OsString::from(".");
+    temp.push(name);
+    temp.push(".tmp");
+    let temp = dir.join(temp);
+    // `write_new` closes the file before the rename.
+    let written = write_new(&temp, pem.as_bytes()).and_then(|()| fs::rename(&temp, record));
+    if written.is_err() {
+        // Best effort: the first error is the one to report.
+        let _ = fs::remove_file(&temp);
+    }
+    written
+}
+
+/// Writes a new file, never through one that is there: a temp file left by
+/// a crash, or a link put in its place, is deleted first. One setup runs at
+/// a time, so no other writer shares the name.
+fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = match create_new(path) {
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            fs::remove_file(path)?;
+            create_new(path)?
+        }
+        other => other?,
+    };
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+fn create_new(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    // `#[cfg]` outside `platform`: the Unix mode of the new file. Windows
+    // gives it the ACL of the user's own data folder.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
+}
+
+/// `dir` and its parents. A new `dir` is for its owner only.
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    // `#[cfg]` outside `platform`: the Unix mode of the new folder, as above.
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
+}
+
+/// Deletes the record after the removal succeeded. A failure is logged: the
+/// next removal finds the trust gone and deletes the record then.
+fn forget_record(record: &Path) {
+    match fs::remove_file(record) {
+        Ok(()) => tracing::debug!(path = %record.display(), "deleted the record of the trusted CA"),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => tracing::warn!(
+            path = %record.display(),
+            error = %err,
+            "cannot delete the record of the trusted CA"
+        ),
     }
 }
 
@@ -242,10 +410,10 @@ fn add_args(keychain: &Path, ca_root: &Path) -> Vec<OsString> {
     ]
 }
 
-fn untrust_args(ca_root: &Path) -> Vec<OsString> {
+fn untrust_args(file: &Path) -> Vec<OsString> {
     vec![
         OsString::from("remove-trusted-cert"),
-        ca_root.as_os_str().to_owned(),
+        file.as_os_str().to_owned(),
     ]
 }
 
@@ -386,6 +554,8 @@ fn body(pem: &str) -> Option<String> {
 mod tests {
     use super::super::tests::{Fake, TEST_CA, exit, ok};
     use super::*;
+    use marsa_core::caddy::CaddyPaths;
+    use tempfile::TempDir;
 
     /// `openssl x509 -in test-ca.pem -outform der | shasum -a 256`, run
     /// once; the same value as in the helper's `ops/trust.rs` tests.
@@ -399,13 +569,6 @@ mod tests {
 
     fn home() -> PathBuf {
         PathBuf::from(format!("{DRIVE}/Users/dev"))
-    }
-
-    fn ca_root() -> PathBuf {
-        PathBuf::from(format!(
-            "{DRIVE}/Users/dev/Library/Application Support/dev.marsa.Marsa/caddy/data/caddy/\
-             pki/authorities/marsa/root.crt"
-        ))
     }
 
     /// What `find-certificate -a -Z -p` prints for `certs`, in its format.
@@ -431,9 +594,70 @@ mod tests {
             .collect()
     }
 
+    /// A data folder with Caddy's `root.crt` (if `ca` is given) and the
+    /// record (if `record` is given). Both paths are real files in a temp
+    /// folder; the home folder stays a path only.
+    struct Data {
+        dir: TempDir,
+    }
+
+    impl Data {
+        fn new(ca: Option<&str>, record: Option<&str>) -> Self {
+            let data = Self {
+                dir: TempDir::new().unwrap(),
+            };
+            for (path, text) in [(data.ca_root(), ca), (data.record(), record)] {
+                if let Some(text) = text {
+                    fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    fs::write(&path, text).unwrap();
+                }
+            }
+            data
+        }
+
+        fn ca_root(&self) -> PathBuf {
+            CaddyPaths::in_dir(self.dir.path()).ca_root()
+        }
+
+        fn record(&self) -> PathBuf {
+            record_path(self.dir.path())
+        }
+
+        fn install(&self, fake: &Fake) -> OpResult {
+            let stop = CancellationToken::new();
+            install(
+                fake,
+                &home(),
+                &self.ca_root(),
+                TEST_CA,
+                &self.record(),
+                &stop,
+            )
+        }
+
+        fn remove(&self, fake: &Fake) -> OpResult {
+            let stop = CancellationToken::new();
+            remove(fake, &home(), &self.ca_root(), &self.record(), &stop)
+        }
+
+        /// What the record holds, or `None` if there is none.
+        fn recorded(&self) -> Option<String> {
+            fs::read_to_string(self.record()).ok()
+        }
+    }
+
+    /// `remove` with the test CA in `root.crt` and no record: the path the
+    /// uninstall takes after a setup made before the record existed.
     fn remove_with(fake: &Fake) -> OpResult {
-        let stop = CancellationToken::new();
-        remove(fake, &home(), &ca_root(), TEST_CA, &stop)
+        Data::new(Some(TEST_CA), None).remove(fake)
+    }
+
+    /// `remove` with the test CA in `root.crt` and no record, and the path
+    /// of that `root.crt` as `security` gets it.
+    fn remove_with_root(fake: &Fake) -> (OpResult, String) {
+        let data = Data::new(Some(TEST_CA), None);
+        let removed = data.remove(fake);
+        (removed, data.ca_root().to_str().unwrap().to_owned())
     }
 
     #[test]
@@ -448,21 +672,56 @@ mod tests {
     fn a_path_that_is_not_absolute_never_reaches_security() {
         let fake = Fake::answering(|program, args| panic!("{program} {args:?} ran"));
         let stop = CancellationToken::new();
-        let (home, ca_root) = (home(), ca_root());
+        // Real files at the absolute paths, so only the relative one stops
+        // the call.
+        let data = Data::new(Some(TEST_CA), Some(TEST_CA));
+        let (home, ca_root, record) = (home(), data.ca_root(), data.record());
         // A relative path would name another file, and `-d` would be read
         // as an option.
         let cases = [
-            ("a relative file", home.as_path(), Path::new("root.crt")),
-            ("a file in .", home.as_path(), Path::new("./root.crt")),
-            ("an option", home.as_path(), Path::new("-d")),
-            ("a relative home", Path::new("Users/dev"), ca_root.as_path()),
+            (
+                "a relative file",
+                home.as_path(),
+                Path::new("root.crt"),
+                record.as_path(),
+            ),
+            (
+                "a file in .",
+                home.as_path(),
+                Path::new("./root.crt"),
+                record.as_path(),
+            ),
+            (
+                "an option",
+                home.as_path(),
+                Path::new("-d"),
+                record.as_path(),
+            ),
+            (
+                "a relative record",
+                home.as_path(),
+                ca_root.as_path(),
+                Path::new("user-trusted.pem"),
+            ),
+            (
+                "a record as an option",
+                home.as_path(),
+                ca_root.as_path(),
+                Path::new("-d"),
+            ),
+            (
+                "a relative home",
+                Path::new("Users/dev"),
+                ca_root.as_path(),
+                record.as_path(),
+            ),
         ];
-        for (name, home, ca_root) in cases {
-            let added = install(&*fake, home, ca_root, &stop);
+        for (name, home, ca_root, record) in cases {
+            let added = install(&*fake, home, ca_root, TEST_CA, record, &stop);
             assert_eq!(added.op, TRUST_INSTALL, "{name}");
             assert_eq!(added.status, OpStatus::Failed, "{name}");
             assert_eq!(added.code.as_deref(), Some(TRUST_ADD_FAILED), "{name}");
-            let removed = remove(&*fake, home, ca_root, TEST_CA, &stop);
+            let removed = remove(&*fake, home, ca_root, record, &stop);
             assert_eq!(removed.op, TRUST_REMOVE, "{name}");
             assert_eq!(removed.status, OpStatus::Failed, "{name}");
             assert_eq!(removed.code.as_deref(), Some(TRUST_REMOVE_FAILED), "{name}");
@@ -475,6 +734,8 @@ mod tests {
             }
         }
         assert!(fake.calls().is_empty());
+        // Nothing was written or deleted either.
+        assert_eq!(data.recorded().as_deref(), Some(TEST_CA));
     }
 
     #[test]
@@ -563,13 +824,13 @@ mod tests {
             "find-certificate" => ok(&text),
             _ => ok(""),
         });
-        assert_eq!(remove_with(&fake), result(TRUST_REMOVE, OpStatus::Done));
+        let (removed, ca_root) = remove_with_root(&fake);
+        assert_eq!(removed, result(TRUST_REMOVE, OpStatus::Done));
         // Built like the code builds it: on Windows, where these tests also
         // run, `join` puts `\` between the parts.
         let keychain = login_keychain(&home());
         let keychain = keychain.to_str().expect("the test path is UTF-8");
-        let ca_root = ca_root();
-        let ca_root = ca_root.to_str().expect("the test path is UTF-8");
+        let ca_root = ca_root.as_str();
         assert_eq!(
             security_calls(&fake),
             [
@@ -690,5 +951,204 @@ mod tests {
             assert_eq!(remove_with(&fake), want, "{name}");
             assert_eq!(security_calls(&fake).len(), calls, "{name}");
         }
+    }
+
+    #[test]
+    fn the_record_is_under_the_data_folder() {
+        assert_eq!(
+            record_path(Path::new("/data")),
+            Path::new("/data").join("trust").join("user-trusted.pem")
+        );
+    }
+
+    #[test]
+    fn a_trust_added_or_already_there_is_recorded() {
+        let added = Fake::answering(|_, args| match args[0].as_str() {
+            "verify-cert" => exit(1, "CSSMERR_TP_NOT_TRUSTED"),
+            _ => ok(""),
+        });
+        let there = Fake::answering(|_, args| match args[0].as_str() {
+            "verify-cert" => ok(""),
+            other => panic!("{other} ran"),
+        });
+        for (fake, status) in [(added, OpStatus::Done), (there, OpStatus::Unchanged)] {
+            let data = Data::new(Some(TEST_CA), None);
+            assert_eq!(data.install(&fake), result(TRUST_INSTALL, status));
+            assert_eq!(data.recorded().as_deref(), Some(TEST_CA), "{status:?}");
+            // `security` still got Caddy's file: the record is written after.
+            let ca_root = data.ca_root();
+            assert_eq!(security_calls(&fake)[0][2], ca_root.to_str().unwrap());
+            // Only the record is in its folder: no temp file is left.
+            let folder = data.record().parent().unwrap().to_path_buf();
+            let names: Vec<_> = fs::read_dir(&folder)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(names, ["user-trusted.pem"], "{status:?}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode(&data.record()), 0o600);
+                assert_eq!(mode(&folder), 0o700);
+            }
+        }
+    }
+
+    #[test]
+    fn a_trust_not_added_records_nothing_and_keeps_an_old_record() {
+        let fake = Fake::answering(|_, args| match args[0].as_str() {
+            "verify-cert" => exit(1, "CSSMERR_TP_NOT_TRUSTED"),
+            _ => exit(1, "refused"),
+        });
+        let data = Data::new(Some(TEST_CA), None);
+        assert_eq!(data.install(&fake).status, OpStatus::Failed);
+        assert_eq!(data.recorded(), None);
+
+        let old = other_pem();
+        let data = Data::new(Some(TEST_CA), Some(&old));
+        assert_eq!(data.install(&fake).status, OpStatus::Failed);
+        assert_eq!(data.recorded(), Some(old));
+    }
+
+    #[test]
+    fn a_record_replaces_a_temp_file_or_a_link_left_in_its_way() {
+        let fake = Fake::answering(|_, _| ok(""));
+        let data = Data::new(Some(TEST_CA), Some(&other_pem()));
+        let folder = data.record().parent().unwrap().to_path_buf();
+        let temp = folder.join(".user-trusted.pem.tmp");
+        fs::write(&temp, "left by a crash").unwrap();
+        assert_eq!(data.install(&fake).status, OpStatus::Unchanged);
+        assert_eq!(data.recorded().as_deref(), Some(TEST_CA));
+        assert!(!temp.exists());
+
+        // A link at the temp name is replaced, not written through.
+        #[cfg(unix)]
+        {
+            let target = data.dir.path().join("elsewhere");
+            fs::write(&target, "not Marsa's").unwrap();
+            std::os::unix::fs::symlink(&target, &temp).unwrap();
+            assert_eq!(data.install(&fake).status, OpStatus::Unchanged);
+            assert_eq!(fs::read_to_string(&target).unwrap(), "not Marsa's");
+            assert_eq!(data.recorded().as_deref(), Some(TEST_CA));
+        }
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_written_does_not_fail_the_trust() {
+        let fake = Fake::answering(|_, _| ok(""));
+        let data = Data::new(Some(TEST_CA), None);
+        // A file where the record's folder goes.
+        fs::write(data.dir.path().join("trust"), "a file").unwrap();
+        assert_eq!(
+            data.install(&fake),
+            result(TRUST_INSTALL, OpStatus::Unchanged)
+        );
+        assert_eq!(data.recorded(), None);
+    }
+
+    #[test]
+    fn remove_takes_the_file_and_the_text_from_the_record() {
+        // Caddy's root changed since the trust was added: the record still
+        // names the old certificate, and that one is untrusted and deleted.
+        let old = other_pem();
+        let data = Data::new(Some(TEST_CA), Some(&old));
+        let text = listing(&[(OTHER_HASH, &old), (HASH, TEST_CA)]);
+        let fake = Fake::answering(move |_, args| match args[0].as_str() {
+            "find-certificate" => ok(&text),
+            _ => ok(""),
+        });
+        assert_eq!(data.remove(&fake), result(TRUST_REMOVE, OpStatus::Done));
+        let record = data.record();
+        let keychain = login_keychain(&home());
+        let calls = security_calls(&fake);
+        assert_eq!(calls[0], ["remove-trusted-cert", record.to_str().unwrap()]);
+        assert_eq!(
+            calls[2],
+            [
+                "delete-certificate",
+                "-Z",
+                OTHER_HASH,
+                keychain.to_str().unwrap()
+            ]
+        );
+        assert_eq!(calls.len(), 3);
+        // The removal succeeded, so the record is gone; root.crt stays.
+        assert_eq!(data.recorded(), None);
+        assert!(data.ca_root().is_file());
+
+        // The same with Caddy's folder deleted.
+        let data = Data::new(None, Some(TEST_CA));
+        let fake = Fake::answering(|_, args| match args[0].as_str() {
+            "remove-trusted-cert" => exit(1, "No Trust Settings were found."),
+            _ => ok(""),
+        });
+        assert_eq!(
+            data.remove(&fake),
+            result(TRUST_REMOVE, OpStatus::Unchanged)
+        );
+        let record = data.record();
+        assert_eq!(
+            security_calls(&fake)[0],
+            ["remove-trusted-cert", record.to_str().unwrap()]
+        );
+        assert_eq!(data.recorded(), None);
+    }
+
+    #[test]
+    fn a_failed_removal_keeps_the_record() {
+        let data = Data::new(Some(TEST_CA), Some(TEST_CA));
+        let fake = Fake::answering(|_, args| match args[0].as_str() {
+            "remove-trusted-cert" => exit(1, "The authorization was denied."),
+            other => panic!("{other} ran"),
+        });
+        assert_eq!(data.remove(&fake).status, OpStatus::Failed);
+        assert_eq!(data.recorded().as_deref(), Some(TEST_CA));
+    }
+
+    #[test]
+    fn without_a_record_or_a_root_there_is_nothing_to_remove() {
+        let data = Data::new(None, None);
+        let fake = Fake::answering(|program, args| panic!("{program} {args:?} ran"));
+        assert_eq!(
+            data.remove(&fake),
+            result(TRUST_REMOVE, OpStatus::Unchanged)
+        );
+    }
+
+    #[test]
+    fn a_record_or_root_that_cannot_be_used_fails_before_security() {
+        let fake = Fake::answering(|program, args| panic!("{program} {args:?} ran"));
+        let cases = [
+            (
+                "a record that is not a certificate",
+                Some(TEST_CA),
+                Some("garbage"),
+            ),
+            (
+                "a record that is not a certificate, no root",
+                None,
+                Some("garbage"),
+            ),
+            ("a root that is not a certificate", Some("garbage"), None),
+        ];
+        for (name, ca, record) in cases {
+            let data = Data::new(ca, record);
+            let removed = data.remove(&fake);
+            assert_eq!(removed.status, OpStatus::Failed, "{name}");
+            assert_eq!(removed.code.as_deref(), Some(TRUST_REMOVE_FAILED), "{name}");
+            let message = removed.message.unwrap();
+            assert!(
+                message.contains("security did not run"),
+                "{name}: {message}"
+            );
+            // The record stays: the trust it names may still be there.
+            assert_eq!(data.recorded().as_deref(), record, "{name}");
+        }
+        // A folder in place of the record.
+        let data = Data::new(Some(TEST_CA), None);
+        fs::create_dir_all(data.record()).unwrap();
+        assert_eq!(data.remove(&fake).status, OpStatus::Failed);
+        assert!(data.record().is_dir());
     }
 }

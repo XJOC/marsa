@@ -403,9 +403,9 @@ impl Setup {
         let ca_root = CaddyPaths::in_dir(data_dir).ca_root();
         // macOS: the user's own trust, after the helper (ADR 0015). Elsewhere
         // the helper trusts the CA as root (ADR 0011).
-        let mut trust_for_user = false;
+        let mut trust_for_user = None;
         match read_ca(&ca_root) {
-            Ok(_) if is_macos(platform) => trust_for_user = true,
+            Ok(pem) if is_macos(platform) => trust_for_user = Some(pem),
             Ok(pem) => ops.push(HelperOp::TrustInstall { pem }),
             Err(code) => report.skipped.push(skip(TRUST_INSTALL, code)),
         }
@@ -439,18 +439,29 @@ impl Setup {
         // Only if the helper ran as asked, or was not needed: a cancelled or
         // refused admin prompt ends setup with nothing changed, and no second
         // dialog.
-        if trust_for_user && report.error.is_none() {
-            report.results.push(self.trust_for_user(&ca_root, stop));
+        if let Some(pem) = trust_for_user.filter(|_| report.error.is_none()) {
+            let record = user_trust::record_path(data_dir);
+            let trust = self.trust_for_user(&ca_root, &pem, &record, stop);
+            report.results.push(trust);
         }
         report
     }
 
-    /// The user's trust of the CA root at `ca_root` (ADR 0015), or
+    /// The user's trust of the CA root at `ca_root`, whose checked text is
+    /// `pem` (ADR 0015), kept at `record` once it is trusted; or
     /// `trust_add_failed` when the home folder, and so the login keychain,
     /// is not known.
-    fn trust_for_user(&self, ca_root: &Path, stop: &CancellationToken) -> OpResult {
+    fn trust_for_user(
+        &self,
+        ca_root: &Path,
+        pem: &str,
+        record: &Path,
+        stop: &CancellationToken,
+    ) -> OpResult {
         match &self.home {
-            Some(home) => user_trust::install(self.runner.as_ref(), home, ca_root, stop),
+            Some(home) => {
+                user_trust::install(self.runner.as_ref(), home, ca_root, pem, record, stop)
+            }
             None => {
                 tracing::warn!(
                     "the home folder is not known, so the login keychain cannot be found"
