@@ -17,6 +17,7 @@ pub mod setup;
 pub mod sites;
 pub mod strings;
 pub mod uninstall;
+pub mod uninstall_all;
 pub mod xdebug;
 
 use std::path::PathBuf;
