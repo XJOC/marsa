@@ -112,6 +112,40 @@ for variant in none addr route; do
   result "$variant" "after the stop: ping 127.0.0.1" "$(ping -c1 -W1 127.0.0.1 >/dev/null 2>&1 && echo ok || echo FAILS)"
   result "$variant" "after the stop: marsa0" "$("$IP" link show marsa0 >/dev/null 2>&1 && echo present || echo gone)"
 done
+# The settings race of resolved 249: a new link that systemd-networkd sees
+# as "initialized" counts as managed there (v250 fixed it), so resolved
+# clears what the bus set before networkd calls it "unmanaged". With the
+# route variant, 20 starts of the unit, with networkd running and stopped:
+# how often marsa0 lacks one of its settings right after the start.
+settings_ok() {
+  local status
+  status=$(resolvectl status marsa0 2>/dev/null) || return 1
+  grep -q "DNS Servers: 127.0.0.1:$PORT" <<<"$status" &&
+    grep -qE "DNS Domain: ~test$" <<<"$status" &&
+    grep -q -- "-DefaultRoute" <<<"$status"
+}
+race() {
+  local lost=0 round
+  for round in $(seq 1 20); do
+    sudo systemctl reset-failed marsa-s02c.service
+    sudo systemctl restart marsa-s02c.service
+    sleep 0.3
+    settings_ok || { lost=$((lost + 1)); resolvectl status marsa0 >>"$OUT/race-$1.txt" 2>&1; }
+    sleep 1.5
+  done
+  echo "$lost of 20"
+}
+write_unit "ExecStart=-$IP route add local 127.0.0.1/32 dev marsa0 table local metric 1024"
+sudo systemctl reset-failed marsa-s02c.service 2>/dev/null
+sudo systemctl enable --now marsa-s02c.service >/dev/null 2>&1
+result race "networkd $(systemctl is-active systemd-networkd): settings lost after a start" "$(race networkd-on)"
+if systemctl is-active --quiet systemd-networkd; then
+  sudo systemctl stop systemd-networkd.socket systemd-networkd.service
+  result race "networkd stopped: settings lost after a start" "$(race networkd-off)"
+  sudo systemctl start systemd-networkd.service
+fi
+sudo systemctl disable --now marsa-s02c.service >/dev/null 2>&1
+
 sudo rm -f "$UNIT"
 sudo systemctl daemon-reload
 echo
