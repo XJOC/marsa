@@ -4,10 +4,10 @@
 //! systemd-resolved does the same on Linux (`marsa_core::dns`). The server
 //! answers `127.0.0.1` for `test.` and every name under it, and refuses
 //! every other name: it is not a resolver and never asks another server.
-//! `AAAA` gets no address (task M5-17): Caddy and the pf redirect listen on
-//! IPv4 only (architecture.md section 10), so `::1` sent clients that try
-//! IPv6 first to a port where nothing listens. Windows finds sites in the hosts file, so the daemon does not
-//! start it there.
+//! `AAAA` gets no address (task M5-17): Caddy listens on `127.0.0.1` only
+//! (architecture.md section 10), so `::1` sent clients that try IPv6 first
+//! to a port where nothing listens. Windows finds sites in the hosts file,
+//! so the daemon does not start it there.
 //!
 //! `hickory-server` reads the queries and writes the answers on the sockets;
 //! this file only decides what to answer.
