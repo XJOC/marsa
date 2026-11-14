@@ -1218,7 +1218,10 @@ pub fn doctor_skip(check: Check, skip: Skip) -> String {
         Skip::NeedsDaemon => "It needs marsad, which is not running.",
         Skip::NeedsCaddy => "It needs Caddy, which is not running.",
         Skip::CaddyNotInstalled => "Caddy is not installed.",
-        Skip::NoCa => "It does not exist yet: Caddy makes it when it first serves a secure site.",
+        Skip::NoCa => {
+            "It does not exist yet: Caddy makes it when it first starts. Run \"marsa setup\" to \
+             make it and trust it."
+        }
         Skip::NoLog => "marsad has not written it yet.",
         Skip::NotChecked => "The check could not run. Run again with MARSA_LOG=debug for details.",
     };

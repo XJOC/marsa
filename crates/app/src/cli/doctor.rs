@@ -546,7 +546,7 @@ mod tests {
         assert_eq!(
             skip(Check::Trust, Skip::NoCa),
             "- Marsa's certificate authority: not checked. It does not exist yet: Caddy makes \
-             it when it first serves a secure site."
+             it when it first starts. Run \"marsa setup\" to make it and trust it."
         );
     }
 }

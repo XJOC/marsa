@@ -921,7 +921,7 @@ mod tests {
         use marsa_core::caddy::{CaddyInput, PhpPools, sites_config};
         use marsa_core::sites::{Site, SiteKind};
 
-        // A secure site, so the config names the CA.
+        // Every config names the CA (task M5-15); this one with a site.
         let site = Site {
             name: "shop".into(),
             root: PathBuf::from("/code/shop"),
