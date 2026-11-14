@@ -56,9 +56,14 @@ const WANTED: u32 = 80;
 const DEFAULT: u32 = 1024;
 const SYSCTL: &str = "/usr/sbin/sysctl";
 /// For `sysctl --pattern`: only [`KEY`] is loaded again from the other
-/// files, not every setting that someone changed by hand since the boot. A
-/// file may write the key with `/` in place of `.`, so both match.
-const ONLY_KEY: &str = r"^net[./]ipv4[./]ip_unprivileged_port_start$";
+/// files, not every setting that someone changed by hand since the boot.
+///
+/// procps 3.3 (Ubuntu 22.04) matches the pattern against the key alone;
+/// procps 4 (Ubuntu 24.04, Fedora) against the whole line, `key = value`.
+/// So the key may be followed by its end or by spaces and `=`, and may start
+/// with `-` (a line whose errors are ignored). A file may write the key with
+/// `/` in place of `.`.
+const ONLY_KEY: &str = r"^-?net[./]ipv4[./]ip_unprivileged_port_start[[:space:]]*(=|$)";
 /// The largest value file read: a port number and a line break.
 const MAX_VALUE_BYTES: u64 = 16;
 
@@ -113,13 +118,17 @@ pub fn install(system: &impl System) -> OpResult {
     // A file that is not loaded now would still take effect at the next
     // boot, without a word. So Marsa's file goes, also one that was there
     // before this call.
-    let cleanup = match system.remove(Path::new(FILE)) {
-        Ok(()) => "was removed again",
-        Err(_) => "could not be removed",
+    let removed = system.remove(Path::new(FILE)).is_ok();
+    let cleanup = if removed {
+        "was removed again"
+    } else {
+        "could not be removed"
     };
-    // A `sysctl` that failed may still have set the key.
+    // A `sysctl` that failed may still have set the key. With the file
+    // still there, it is set again at every boot too.
     let value = match first_allowed_port(system) {
-        Ok(port) if port <= WANTED => "; port 80 stays allowed until the next boot",
+        Ok(port) if port <= WANTED && removed => "; port 80 stays allowed until the next boot",
+        Ok(port) if port <= WANTED => "; port 80 stays allowed",
         _ => "",
     };
     let message = format!("{reason}; {FILE} {cleanup}{value}");
@@ -205,7 +214,7 @@ mod tests {
     const RESET: &str = "net.ipv4.ip_unprivileged_port_start=1024";
     const RELOAD: [&str; 3] = [
         "--pattern",
-        "^net[./]ipv4[./]ip_unprivileged_port_start$",
+        "^-?net[./]ipv4[./]ip_unprivileged_port_start[[:space:]]*(=|$)",
         "--system",
     ];
     const OURS: &[u8] =
@@ -550,6 +559,23 @@ mod tests {
         );
         assert_eq!(linux.file(), None);
         assert_eq!(linux.value(), "80\n");
+    }
+
+    /// The file stays, so the value comes back at every boot as well.
+    #[test]
+    fn a_failed_load_whose_file_stays_says_port_80_stays_allowed() {
+        let mut linux = Linux::new(1024);
+        linux.fake.script(PROGRAM, &["-p", CONF], exit(255));
+        linux.fake.fail_removes.insert(PathBuf::from(CONF));
+        linux.load_sets_then_fails = true;
+        let message = format!(
+            "sysctl -p {CONF} exited with code 255; {CONF} could not be removed; \
+             port 80 stays allowed"
+        );
+        assert_eq!(
+            install(&linux),
+            failed(INSTALL, PORTS_APPLY_FAILED, &message)
+        );
     }
 
     #[test]
