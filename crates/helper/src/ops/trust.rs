@@ -234,7 +234,7 @@ fn failure_text(result: &io::Result<RunOutput>) -> String {
 /// and line breaks around it. A key block, a second block, or any other text
 /// fails here, because the prefix or the suffix does not match or because
 /// `-` and spaces are not base64.
-fn parse_pem(text: &str) -> Result<Vec<u8>, &'static str> {
+pub(super) fn parse_pem(text: &str) -> Result<Vec<u8>, &'static str> {
     let block = text.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'));
     let body = block
         .strip_prefix(BEGIN)
@@ -326,7 +326,7 @@ fn element(der: &[u8]) -> Option<(u8, usize, usize)> {
 }
 
 /// Upper case, as `security` prints it.
-fn sha256_hex(der: &[u8]) -> String {
+pub(super) fn sha256_hex(der: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut hex = String::with_capacity(64);
     for byte in Sha256::digest(der).iter() {
@@ -338,7 +338,7 @@ fn sha256_hex(der: &[u8]) -> String {
 
 /// The clean file: the BEGIN line, the base64 in lines of 64, the END line,
 /// LF only, with a final newline.
-fn to_pem(der: &[u8]) -> Vec<u8> {
+pub(super) fn to_pem(der: &[u8]) -> Vec<u8> {
     let mut body = Vec::with_capacity(der.len().div_ceil(3) * 4);
     for chunk in der.chunks(3) {
         let [a, b, c] = [0, 1, 2].map(|i| chunk.get(i).copied().unwrap_or(0));
