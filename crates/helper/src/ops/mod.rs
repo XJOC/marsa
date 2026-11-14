@@ -5,16 +5,19 @@
 //!
 //! Each pair of macOS ops has its own file, so their tasks do not touch the
 //! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). On
-//! Linux, `ports` (M4-18b) is written; on Windows, `hosts` (M4-19d). The
-//! other Linux ops fail with `op_not_implemented` until their tasks.
+//! Linux, `resolved` (M4-18a) and `ports` (M4-18b) are written; on Windows,
+//! `hosts` (M4-19d) and `trust_windows` (M4-19e). Trust on Linux fails with
+//! `op_not_implemented` until its task.
 
 mod hosts;
 mod marked;
 pub mod pf;
 mod ports;
 mod program;
+mod resolved;
 mod resolver;
 mod trust;
+mod trust_windows;
 
 use std::path::Path;
 
@@ -72,7 +75,7 @@ fn removals(os: Os) -> Vec<Op> {
             Op::ResolvedRemove {},
             Op::TrustRemove {},
         ],
-        Os::Windows => vec![Op::HostsRemove {}],
+        Os::Windows => vec![Op::HostsRemove {}, Op::TrustRemove {}],
     }
 }
 
@@ -87,12 +90,10 @@ fn remove_folder_if_empty(system: &impl System) {
     let _ = system.remove_empty_dir(Path::new(MACOS_DIR));
 }
 
-/// Windows has no `trust_*` for now: its helper service (task M4-19) accepts
-/// only the hosts ops, and trust on Windows is decided there.
+/// Which ops each OS has. Trust is on every OS, each with its own tool.
 fn supported(op: &Op, os: Os) -> bool {
     match op {
-        Op::UninstallAll {} => true,
-        Op::TrustInstall { .. } | Op::TrustRemove {} => os != Os::Windows,
+        Op::UninstallAll {} | Op::TrustInstall { .. } | Op::TrustRemove {} => true,
         Op::ResolverInstall { .. }
         | Op::ResolverRemove {}
         | Op::PfInstall { .. }
@@ -106,8 +107,9 @@ fn supported(op: &Op, os: Os) -> bool {
 }
 
 /// One op meant for this OS. Every handler gets `system` for each file and
-/// command, and returns the result of its op. Trust is written for macOS
-/// first (task M4-09); Linux gets its own handler with task M4-18.
+/// command, and returns the result of its op. Trust has a handler per OS:
+/// `trust` on macOS (task M4-09), `trust_windows` on Windows (task M4-19e);
+/// Linux gets its own with task M4-18.
 fn handle(op: &Op, os: Os, system: &impl System) -> OpResult {
     match op {
         Op::ResolverInstall { port } => resolver::install(*port, system),
@@ -119,16 +121,18 @@ fn handle(op: &Op, os: Os, system: &impl System) -> OpResult {
         Op::PfRemove {} => pf::remove(system),
         Op::PortsInstall {} => ports::install(system),
         Op::PortsRemove {} => ports::remove(system),
+        Op::ResolvedInstall { port } => resolved::install(*port, system),
+        Op::ResolvedRemove {} => resolved::remove(system),
         Op::TrustInstall { pem } if os == Os::Macos => trust::install(pem, system),
         Op::TrustRemove {} if os == Os::Macos => trust::remove(system),
+        Op::TrustInstall { pem } if os == Os::Windows => trust_windows::install(pem, system),
+        Op::TrustRemove {} if os == Os::Windows => trust_windows::remove(system),
         Op::TrustInstall { .. } | Op::TrustRemove {} => not_implemented(op.name()),
         Op::HostsSync { names } => hosts::sync(names, system),
         Op::HostsRemove {} => hosts::remove(system),
         // `run` expands `uninstall_all` into its removals, so it never gets
-        // here. Linux comes with its own tasks.
-        Op::UninstallAll {} | Op::ResolvedInstall { .. } | Op::ResolvedRemove {} => {
-            not_implemented(op.name())
-        }
+        // here.
+        Op::UninstallAll {} => not_implemented(op.name()),
     }
 }
 
@@ -191,8 +195,8 @@ mod tests {
 
     #[test]
     fn handle_sends_each_op_to_its_own_handler() {
-        // Ops that stay stubs here are the Linux ones, so this test does not
-        // change when the macOS handlers land.
+        // The fake has no `systemctl`, so on Linux `resolved_install` gets
+        // as far as its own first check. Trust on Linux is still a stub.
         let ops = json!([
             { "op": "resolver_install", "port": 18053 },
             { "op": "resolved_install", "port": 18053 },
@@ -200,7 +204,7 @@ mod tests {
         ]);
         let linux = [
             ("resolver_install", code::OP_NOT_SUPPORTED),
-            ("resolved_install", code::OP_NOT_IMPLEMENTED),
+            ("resolved_install", resolved::RESOLVED_NOT_RUNNING),
             ("trust_remove", code::OP_NOT_IMPLEMENTED),
         ];
         assert_eq!(codes(ops.clone(), Os::Linux), linux);
@@ -216,7 +220,7 @@ mod tests {
         let table = [
             (Os::Macos, &["trust", "resolver", "pf"][..]),
             (Os::Linux, &["trust", "resolved", "ports"]),
-            (Os::Windows, &["hosts"]),
+            (Os::Windows, &["hosts", "trust"]),
         ];
         for (os, own) in table {
             for (name, code) in codes(every_op(), os) {
@@ -341,7 +345,7 @@ mod tests {
                 Os::Linux,
                 &["ports_remove", "resolved_remove", "trust_remove"],
             ),
-            (Os::Windows, &["hosts_remove"]),
+            (Os::Windows, &["hosts_remove", "trust_remove"]),
         ];
         for (os, expected) in table {
             let results = codes(json!([{ "op": "uninstall_all" }]), os);

@@ -95,15 +95,29 @@ pub trait System {
     /// macOS and Linux, which is also what a `System` without its own
     /// answer gives.
     fn system_dir(&self) -> io::Result<PathBuf> {
-        Err(no_system_dir())
+        Err(only_windows())
+    }
+
+    /// Marsa's own folder for the helper on Windows, `<Program Files>\Marsa`,
+    /// which only administrators can write (ADR 0018). [`RealSystem`] asks
+    /// Windows for `Program Files`: a user can change the `ProgramFiles`
+    /// variable, but not that answer. `Unsupported` elsewhere.
+    fn install_dir(&self) -> io::Result<PathBuf> {
+        Err(only_windows())
+    }
+
+    /// Runs `program` from the Windows system folder (`certutil.exe`), never
+    /// through a shell. `program` is a constant file name in the code, so the
+    /// request cannot choose what runs. The time limit is that of
+    /// [`System::run`]. `Unsupported` elsewhere.
+    fn run_system_tool(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
+        let _ = (program, args);
+        Err(only_windows())
     }
 }
 
-fn no_system_dir() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        "only Windows has a system folder",
-    )
+fn only_windows() -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "only on Windows")
 }
 
 /// The real disk and processes.
@@ -204,13 +218,30 @@ impl System for RealSystem {
         std::env::current_exe()
     }
 
+    // The three below are Windows only: the other systems have no such
+    // folders, and no op of theirs asks for them.
     fn system_dir(&self) -> io::Result<PathBuf> {
-        // Windows only: the other systems have no such folder, and no op of
-        // theirs asks for it.
         #[cfg(windows)]
         return crate::windows::system_dir();
         #[cfg(not(windows))]
-        Err(no_system_dir())
+        Err(only_windows())
+    }
+
+    fn install_dir(&self) -> io::Result<PathBuf> {
+        #[cfg(windows)]
+        return Ok(crate::windows::program_files()?.join("Marsa"));
+        #[cfg(not(windows))]
+        Err(only_windows())
+    }
+
+    fn run_system_tool(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
+        #[cfg(windows)]
+        return self.run_in_system_dir(program, args, RUN_TIMEOUT);
+        #[cfg(not(windows))]
+        {
+            let _ = (program, args);
+            Err(only_windows())
+        }
     }
 }
 
@@ -218,8 +249,8 @@ impl RealSystem {
     /// `run` with a time limit. A program still running at the limit is
     /// killed and reaped, and the error is of kind `TimedOut`.
     ///
-    /// The environment is empty except `PATH`. The Windows environment
-    /// (`SystemRoot`, Windows folders in `PATH`) is set in task M4-19.
+    /// The environment is empty except `PATH`. On Windows the helper runs
+    /// its tools through [`System::run_system_tool`] instead.
     fn run_within(
         &self,
         program: &'static str,
@@ -241,9 +272,48 @@ impl RealSystem {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // The child must not start in the caller's folder, which the user
-        // controls. `/` is a Unix path; Windows is set in task M4-19.
+        // controls. `/` is a Unix path; on Windows `run_in_system_dir` sets
+        // the system folder.
         #[cfg(unix)]
         command.current_dir("/");
+        finish(command.spawn()?, timeout)
+    }
+
+    /// `<System32>\<program>`, with an environment of the two variables
+    /// Windows tools need to start (`SystemRoot`, `windir`) and a `PATH` of
+    /// the Windows folders, in the system folder. Nothing of the caller's
+    /// environment reaches it.
+    #[cfg(windows)]
+    fn run_in_system_dir(
+        &self,
+        program: &'static str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> io::Result<RunOutput> {
+        let name = Path::new(program);
+        if name.file_name() != Some(name.as_os_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the program is not a plain file name",
+            ));
+        }
+        let dir = crate::windows::system_dir()?;
+        let root = dir.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "the system folder has no parent")
+        })?;
+        let path = std::env::join_paths([dir.as_path(), root])
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        let mut command = Command::new(dir.join(name));
+        command
+            .args(args)
+            .env_clear()
+            .env("SystemRoot", root)
+            .env("windir", root)
+            .env("PATH", path)
+            .current_dir(&dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         finish(command.spawn()?, timeout)
     }
 }
@@ -440,6 +510,8 @@ mod fake {
         /// What `system_dir` returns. `None`, the default, is a system
         /// without one: macOS or Linux.
         pub system_dir: Option<PathBuf>,
+        /// What `install_dir` returns, like `system_dir`.
+        pub install_dir: Option<PathBuf>,
     }
 
     impl FakeSystem {
@@ -534,7 +606,16 @@ mod fake {
         }
 
         fn system_dir(&self) -> io::Result<PathBuf> {
-            self.system_dir.clone().ok_or_else(super::no_system_dir)
+            self.system_dir.clone().ok_or_else(super::only_windows)
+        }
+
+        fn install_dir(&self) -> io::Result<PathBuf> {
+            self.install_dir.clone().ok_or_else(super::only_windows)
+        }
+
+        /// The same log and scripted outputs as `run`, under the bare name.
+        fn run_system_tool(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
+            self.run(program, args)
         }
     }
 }
@@ -638,6 +719,14 @@ mod tests {
             let link = tmp.path().join("link");
             std::os::unix::fs::symlink(&file, &link).unwrap();
             assert!(RealSystem.is_link(&link) && !RealSystem.is_link(&file));
+            // Not followed: a link to nothing and a link to a folder are
+            // links too, and the folder itself is not.
+            let dangling = tmp.path().join("dangling");
+            std::os::unix::fs::symlink(&missing, &dangling).unwrap();
+            let to_dir = tmp.path().join("to-dir");
+            std::os::unix::fs::symlink(tmp.path(), &to_dir).unwrap();
+            assert!(RealSystem.is_link(&dangling) && RealSystem.is_link(&to_dir));
+            assert!(!RealSystem.is_link(tmp.path()));
         }
     }
 
@@ -791,6 +880,78 @@ mod tests {
         assert_eq!(log[1], ("/sbin/pfctl".to_owned(), vec!["-d".to_owned()]));
         assert_eq!(log.len(), 3);
         assert_eq!(fake.current_exe().unwrap(), Path::new(fake::EXE));
+    }
+
+    #[test]
+    fn the_windows_folders_and_tools_are_windows_only() {
+        if cfg!(windows) {
+            return;
+        }
+        let real = RealSystem;
+        for err in [
+            real.system_dir().unwrap_err(),
+            real.install_dir().unwrap_err(),
+            real.run_system_tool("certutil.exe", &[]).unwrap_err(),
+        ] {
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        }
+    }
+
+    /// Read only: Marsa's folder is `Marsa` in `Program Files`. It need not
+    /// exist.
+    #[cfg(windows)]
+    #[test]
+    fn the_install_folder_is_marsa_in_program_files() {
+        let dir = RealSystem.install_dir().unwrap();
+        assert_eq!(dir.file_name(), Some(std::ffi::OsStr::new("Marsa")));
+        assert_eq!(
+            dir.parent(),
+            Some(crate::windows::program_files().unwrap().as_path())
+        );
+    }
+
+    /// Read only: `certutil` runs from the system folder with the helper's
+    /// small environment, and looks in the Root store for thumbprints that
+    /// match nothing.
+    ///
+    /// certutil reads its id as an index, a serial number, or a hash: `000…0`
+    /// lists the store's first certificate, and `000…0a` a root whose serial
+    /// number is `0a` (both seen in CI). A real SHA-1 is a 160-bit number,
+    /// too large for any serial but a crafted one. These ids are too: they
+    /// start with digits, as most thumbprints do, and none may be read as an
+    /// index from its first digits (`1a…` as 1).
+    #[cfg(windows)]
+    #[test]
+    fn a_system_tool_runs_with_the_helpers_environment() {
+        let ids = [
+            "deadbeef".repeat(5),
+            format!("0{}", "c".repeat(39)),
+            format!("1{}", "a".repeat(39)),
+            format!("12{}", "b".repeat(38)),
+            format!("2{}", "0a".repeat(19) + "f"),
+        ];
+        for id in &ids {
+            assert_eq!(id.len(), 40);
+            let output = RealSystem
+                .run_system_tool("certutil.exe", &["-store", "Root", id])
+                .unwrap();
+            // NTE_NOT_FOUND, as in spike S-11: it ran and searched the store.
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(output.code, Some(0x8009_0011_u32 as i32), "{id}: {text}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_system_tool_is_a_plain_file_name() {
+        for program in [
+            r"..\cmd.exe",
+            r"C:\Windows\System32\certutil.exe",
+            "a/b.exe",
+        ] {
+            let err = RealSystem.run_system_tool(program, &[]).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{program}");
+        }
     }
 
     #[test]
