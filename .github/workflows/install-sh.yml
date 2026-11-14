@@ -15,12 +15,16 @@ on:
       - "install.sh"
       - "tests/install-sh/**"
       - ".github/workflows/install-sh.yml"
+      # The tests check that the script trusts the key built into Marsa.
+      - "crates/core/src/installer/manifest.rs"
   push:
     branches: [main]
     paths:
       - "install.sh"
       - "tests/install-sh/**"
       - ".github/workflows/install-sh.yml"
+      # The tests check that the script trusts the key built into Marsa.
+      - "crates/core/src/installer/manifest.rs"
   workflow_call:
 
 permissions:

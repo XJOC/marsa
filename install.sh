@@ -11,8 +11,9 @@
 #      If a `minisign` program is installed: also the signature of SHA256SUMS,
 #      with the public key written below. A failed check stops the install
 #      before anything is unpacked, and no installed file has changed.
-#   4. It unpacks the archive, stops a running Marsa, moves the programs into
-#      <data folder>/bin, and links the shims in <data folder>/shims.
+#   4. It unpacks the archive and checks that the new `marsa` starts on this
+#      system. Only then does it stop a running Marsa, move the programs into
+#      <data folder>/bin, and link the shims in <data folder>/shims.
 #
 # It never uses sudo, never edits your shell files, and runs no downloaded
 # program before the checks pass. `marsa setup` asks for admin rights later.
@@ -38,6 +39,8 @@ PUBLIC_KEY="RWTuvZZrimY2ASzeaoWovb0LKYQTrVnNIbXoxoTKGJEZmSeLlyomDKxU"
 # version of the newest release, and only after `valid_version` accepts it.
 PROGRAMS="marsa marsad marsa-shim marsa-helper marsa-gui"
 OPTIONAL_PROGRAMS="marsa-tray"
+# Text files of the archive, kept next to the programs.
+TEXT_FILES="LICENSE BUILD-INFO.txt"
 SHIMS="php node npm npx composer"
 
 say() { printf '%s\n' "$*"; }
@@ -101,18 +104,24 @@ valid_version() {
   printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
 }
 
-# fetch <url> <file>. HTTPS only, redirects too. Plain HTTP is allowed for
-# 127.0.0.1 alone: the script's own tests serve their files from there.
+# fetch <url> <file>. HTTPS only, redirects too. A connection that stalls is
+# dropped. Plain HTTP is allowed for 127.0.0.1 alone: the script's own tests
+# serve their files from there.
 fetch() {
   case "$1" in
-    https://*) curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --retry 3 -o "$2" "$1" ;;
-    http://127.0.0.1:*) curl --proto '=http' -fsS -o "$2" "$1" ;;
+    https://*)
+      curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --retry 3 \
+        --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o "$2" "$1"
+      ;;
+    http://127.0.0.1:*) curl --proto '=http' -fsS --connect-timeout 5 -o "$2" "$1" ;;
     *) return 1 ;;
   esac
 }
 
 # Sets VERSION, from MARSA_VERSION or from the newest release on GitHub whose
-# tag is v<version>. Pre-releases count: GitHub lists the newest first.
+# tag is v<version>. Pre-releases count: GitHub lists the newest first. Tags
+# of other releases (php-..., runtimes-manifest) and other tags that start
+# with v are skipped.
 find_version() {
   if [ -n "${MARSA_VERSION:-}" ]; then
     VERSION="${MARSA_VERSION#v}"
@@ -121,7 +130,9 @@ find_version() {
   fi
   fetch "$RELEASES_API" "$TMP/releases.json" ||
     fail "cannot read the list of releases from GitHub. Try again later, or choose a version: MARSA_VERSION=<version>."
-  VERSION="$(tr ',' '\n' < "$TMP/releases.json" | sed -n 's/.*"tag_name" *: *"v\([^"]*\)".*/\1/p' | head -n 1)"
+  VERSION="$(tr ',' '\n' < "$TMP/releases.json" |
+    sed -n 's/.*"tag_name" *: *"v\([0-9][0-9A-Za-z.-]*\)".*/\1/p' |
+    grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' | head -n 1)"
   valid_version "$VERSION" ||
     fail "found no Marsa release on GitHub. Choose a version: MARSA_VERSION=<version>."
 }
@@ -139,7 +150,7 @@ sha256_of() {
 # Checks the minisign signature of SHA256SUMS, if `minisign` is installed.
 check_signature() {
   if ! command -v minisign > /dev/null 2>&1; then
-    say "Warning: the signature was NOT checked, because the minisign program is not installed. Only the SHA-256 was checked. To check the signature yourself, install minisign, download SHA256SUMS and SHA256SUMS.minisig from $BASE, and run: minisign -V -P $PUBLIC_KEY -m SHA256SUMS"
+    say "Warning: the signature will NOT be checked, because the minisign program is not installed. Only the SHA-256 of the archive will be checked. To check the signature yourself: download SHA256SUMS and SHA256SUMS.minisig from $BASE, run 'minisign -V -P $PUBLIC_KEY -m SHA256SUMS', and make sure it prints the trusted comment 'marsa release v$VERSION'."
     return 0
   fi
   fetch "$BASE/SHA256SUMS.minisig" "$TMP/SHA256SUMS.minisig" ||
@@ -171,53 +182,83 @@ check_archive() {
   say "The SHA-256 of $ARCHIVE is good."
 }
 
-# Unpacks the checked archive inside the temporary folder.
+# Unpacks the checked archive inside the temporary folder, then checks that
+# the new marsa starts on this system. Nothing installed has changed yet.
 unpack() {
-  mkdir "$TMP/unpacked"
-  tar -xzf "$TMP/$ARCHIVE" -C "$TMP/unpacked" || fail "cannot unpack $ARCHIVE. Nothing was installed."
+  NEW="$TMP/unpacked"
+  mkdir "$NEW"
+  tar -xzf "$TMP/$ARCHIVE" -C "$NEW" || fail "cannot unpack $ARCHIVE. Nothing was installed."
   for name in $PROGRAMS; do
-    if [ ! -f "$TMP/unpacked/$name" ] || [ -L "$TMP/unpacked/$name" ]; then
+    if [ ! -f "$NEW/$name" ] || [ -L "$NEW/$name" ]; then
       fail "$ARCHIVE does not hold the program $name. Nothing was installed."
     fi
   done
+  for name in $PROGRAMS $OPTIONAL_PROGRAMS; do
+    if [ -f "$NEW/$name" ] && [ ! -L "$NEW/$name" ]; then chmod 755 "$NEW/$name"; fi
+  done
+  for name in $TEXT_FILES; do
+    if [ -f "$NEW/$name" ] && [ ! -L "$NEW/$name" ]; then chmod 644 "$NEW/$name"; fi
+  done
+  # The first downloaded program to run, after every check. A build for a
+  # newer glibc or for another processor stops here, while the installed
+  # Marsa still works.
+  NEW_VERSION="$("$NEW/marsa" --version 2> /dev/null)" ||
+    fail "the new marsa does not start on this system, so nothing was installed. On Linux, Marsa needs a recent glibc: the release notes say which version."
+  [ "$NEW_VERSION" = "marsa $VERSION" ] ||
+    fail "the archive of v$VERSION holds another version of marsa. Nothing was installed."
 }
 
 # Stops the old Marsa, then puts the new programs and the shims in place.
 install_programs() {
   BIN="$DATA/bin"
   SHIM_DIR="$DATA/shims"
+  mkdir -p "$BIN" "$SHIM_DIR" || fail "cannot make the folders $BIN and $SHIM_DIR. Nothing was installed."
+  # marsad runs marsa-helper as root only from a folder that nobody else can
+  # write to.
+  chmod 755 "$BIN" "$SHIM_DIR" || fail "cannot set the mode of $BIN and $SHIM_DIR. Nothing was installed."
+
+  # From here on the installed Marsa changes. If a step fails, `on_exit`
+  # says that the install stopped half way.
+  REPLACING=yes
   STOPPED=""
   if [ -f "$BIN/marsa" ] && [ -x "$BIN/marsa" ]; then
     # The program of the release that is installed now, not a downloaded one.
-    if stopped="$("$BIN/marsa" daemon stop 2> /dev/null)"; then
-      case "$stopped" in
-        *"not running"*) ;;
-        *) STOPPED=yes ;;
-      esac
+    if "$BIN/marsa" daemon stop > /dev/null 2>&1; then
+      STOPPED=yes
     else
       say "Warning: 'marsa daemon stop' failed. If the old Marsa still runs, stop it, then start it again."
     fi
   fi
-  mkdir -p "$BIN" "$SHIM_DIR"
-  # marsad runs marsa-helper as root only from a folder that nobody else can
-  # write to.
-  chmod 755 "$BIN" "$SHIM_DIR"
-  for name in $PROGRAMS $OPTIONAL_PROGRAMS; do
-    if [ -f "$TMP/unpacked/$name" ] && [ ! -L "$TMP/unpacked/$name" ]; then
-      chmod 755 "$TMP/unpacked/$name"
-      # Same volume, so this is one rename: a program is never half written.
-      mv -f "$TMP/unpacked/$name" "$BIN/$name"
+  for name in $PROGRAMS $OPTIONAL_PROGRAMS $TEXT_FILES; do
+    if [ -f "$NEW/$name" ] && [ ! -L "$NEW/$name" ]; then
+      # Same volume, so this is one rename: a program is never half written,
+      # and a program that still runs keeps its old file.
+      mv -f "$NEW/$name" "$BIN/$name"
     fi
   done
-  # One program under five names. A hard link; a copy where links fail.
+  # One program under five names. A hard link; a copy where links fail. The
+  # old name goes first: a signed program on macOS must not be overwritten
+  # in place.
   for name in $SHIMS; do
-    ln -f "$BIN/marsa-shim" "$SHIM_DIR/$name" 2> /dev/null || cp -f "$BIN/marsa-shim" "$SHIM_DIR/$name"
+    rm -f "$SHIM_DIR/$name"
+    ln "$BIN/marsa-shim" "$SHIM_DIR/$name" 2> /dev/null || cp "$BIN/marsa-shim" "$SHIM_DIR/$name"
   done
+  REPLACING=""
 }
 
 # Prints the line that adds Marsa to PATH. The script does not edit shell files.
 say_path() {
   say
+  case ":${PATH:-}:" in
+    *":$DATA/shims:"*)
+      case ":$PATH:" in
+        *":$DATA/bin:"*)
+          say "Marsa's folders are already in your PATH."
+          return 0
+          ;;
+      esac
+      ;;
+  esac
   case "$DATA" in
     "$HOME"/*) rest="${DATA#"$HOME"}" shown="\$HOME$rest" ;;
     *) rest="$DATA" shown="$DATA" ;;
@@ -240,7 +281,17 @@ say_path() {
   case "${SHELL:-}-${PLATFORM%%-*}" in
     */zsh-darwin) files=".zprofile .zshrc" ;;
     */zsh-linux) files=".zshrc" ;;
-    */bash-darwin) files=".bash_profile" ;;
+    */bash-darwin)
+      # A login shell reads only the first of these that exists, so a new
+      # .bash_profile would hide an existing .profile.
+      files=".bash_profile"
+      for file in .bash_profile .bash_login .profile; do
+        if [ -f "$HOME/$file" ]; then
+          files="$file"
+          break
+        fi
+      done
+      ;;
     */bash-linux) files=".bashrc" ;;
     *) return 0 ;;
   esac
@@ -254,7 +305,19 @@ say_path() {
   say "Then open a new terminal."
 }
 
+# Runs when the script ends, also after a failure or a signal.
+on_exit() {
+  status=$?
+  rm -rf "$TMP"
+  # Only if it is still empty: a first install that failed leaves nothing.
+  rmdir "$DATA" 2> /dev/null || true
+  if [ "$status" -ne 0 ] && [ -n "$REPLACING" ]; then
+    printf '%s\n' "install.sh: the install stopped half way. Some programs in $DATA/bin may be new and others old, and Marsa may be stopped. Run this script again to finish it." >&2
+  fi
+}
+
 main() {
+  REPLACING=""
   # Marsa belongs to one user. As root it would land in root's folders, or
   # leave root's files in yours.
   need id
@@ -271,8 +334,9 @@ main() {
   if ! command -v sha256sum > /dev/null 2>&1 && ! command -v shasum > /dev/null 2>&1; then
     fail "a SHA-256 program is needed (sha256sum or shasum), but none was found."
   fi
-  # New files and folders: the user may write, others may only read.
-  umask 022
+  # New files and folders are never writable by others, and never looser
+  # than the user's own umask.
+  umask "$(printf '%03o' $((0$(umask) | 022)))"
 
   find_platform
   find_data_dir
@@ -280,8 +344,7 @@ main() {
   # Inside the data folder, so the last move is a rename on one volume.
   mkdir -p "$DATA"
   TMP="$(mktemp -d "$DATA/.install.XXXXXX")" || fail "cannot make a temporary folder in $DATA."
-  # Also on a failure. `rmdir` removes the data folder only if it is still empty.
-  trap 'rm -rf "$TMP"; rmdir "$DATA" 2> /dev/null || true' EXIT
+  trap on_exit EXIT
   trap 'exit 1' HUP INT TERM
 
   find_version
@@ -298,21 +361,18 @@ main() {
   unpack
   install_programs
 
-  # Our own program, checked above. It also proves that it starts here.
-  installed="$("$BIN/marsa" --version 2> /dev/null)" ||
-    fail "Marsa is in $BIN, but 'marsa --version' does not start on this system. On Linux, Marsa needs glibc; the release notes say which version."
   say
-  say "Installed: $installed"
+  say "Installed: $NEW_VERSION"
   if [ -n "$STOPPED" ]; then
-    say "Marsa was running and was stopped for the update. Start it again: marsa daemon start"
+    say "If Marsa was running, it was stopped for the update. Start it again: marsa daemon start"
   fi
   say_path
   if [ "${PLATFORM%%-*}" = linux ]; then
     say
-    say "On Linux, the window (marsa-gui) needs a desktop session with Vulkan or OpenGL. The tray icon (marsa-tray), when this release has it, also needs GTK 3, libxdo, and AppIndicator. On Debian and Ubuntu: sudo apt install libgtk-3-0 libxdo3 libayatana-appindicator3-1"
+    say "On Linux, the window (marsa-gui) needs a desktop session with Vulkan or OpenGL, and the menu-bar icon (marsa-tray) needs GTK 3 and AppIndicator. On Debian and Ubuntu: sudo apt install libgtk-3-0 libayatana-appindicator3-1"
   fi
   say
-  say "Next, in a new terminal:"
+  say "Next:"
   say "  marsa install php 8.4"
   if [ "${PLATFORM%%-*}" = darwin ]; then
     say "  marsa setup    (HTTPS and .test names; asks for your password once)"

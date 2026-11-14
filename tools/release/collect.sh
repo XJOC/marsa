@@ -49,7 +49,7 @@ tray=""
 while read -r name; do
   programs="$programs\`$name\`, "
   if [ "$name" = marsa-tray ]; then
-    tray=" \`marsa-tray\` also needs GTK 3, libxdo, and AppIndicator: \`sudo apt install libgtk-3-0 libxdo3 libayatana-appindicator3-1\` on Debian and Ubuntu."
+    tray=" \`marsa-tray\` also needs GTK 3 and AppIndicator: \`sudo apt install libgtk-3-0 libayatana-appindicator3-1\` on Debian and Ubuntu."
   fi
 done < <(archive_names "$ARCHIVE" | grep '^marsa')
 

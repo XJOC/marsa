@@ -140,17 +140,11 @@ jobs:
           # not allowed in job env.)
           echo "OUT=${RUNNER_TEMP//\\//}/release" >> "$GITHUB_ENV"
 
-      # tray-icon and tao (marsa-tray, task M5-04) link GTK 3, libxdo, and
-      # AppIndicator on Linux. Nothing else in the workspace needs them.
-      - name: Install the Linux build packages of the tray icon
+      # marsa-tray (task M5-04): tao and tray-icon build against GTK 3, as in
+      # ci.yml. AppIndicator is loaded only when the icon runs.
+      - name: Install GTK 3 for the menu-bar icon
         if: runner.os == 'Linux'
-        run: |
-          if grep -qx 'name = "tray-icon"' Cargo.lock; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends libgtk-3-dev libxdo-dev libayatana-appindicator3-dev
-          else
-            echo "tray-icon is not in Cargo.lock: nothing to install"
-          fi
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-3-dev
 
       - name: Build marsa, marsad, marsa-helper, and marsa-gui
         run: cargo build --release --locked --target "$TRIPLE" -p marsa -p marsa-helper -p marsa-gui
