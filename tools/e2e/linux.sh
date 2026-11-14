@@ -99,25 +99,11 @@ run marsa-helper version
 . /etc/os-release
 echo "system: $PRETTY_NAME, systemd $(systemctl --version | awk 'NR==1 {print $2}'), kernel $(uname -r)"
 
-step "marsa install: PHP 8.4, Caddy, Composer (the signed manifest)"
-run marsa install php 8.4
-run marsa install caddy
-run marsa install composer
-run marsa runtimes
-run php -v
-run composer --version
+# Part A: the helper alone. It needs no runtime, only marsad's DNS server.
 
-step "a real Laravel project in a parked folder"
-mkdir -p "$CODE"
-(cd "$CODE" && run composer create-project --no-interaction --prefer-dist laravel/laravel laravel-app)
-run marsa park "$CODE"
-run marsa sites
-run marsa services start caddy
-run marsa services
-
-step "before setup: Caddy on its high ports"
+step "part A: before the helper"
+run marsa daemon start
 [ "$(cat "$PORT_START")" -gt 80 ] || fail "this machine already allows port 80; the test would prove nothing"
-wait_for_laravel -k --resolve "$SITE:18443:127.0.0.1" "https://$SITE:18443/"
 if resolvectl query "$SITE" >/dev/null 2>&1; then
   fail "$SITE resolves before setup"
 fi
@@ -138,36 +124,18 @@ step "the same request again changes nothing"
 helper '[{"op":"resolved_install","port":18053},{"op":"ports_install"}]' || fail "the helper exited with $?"
 [ "$(statuses)" = "unchanged unchanged" ] || fail "expected unchanged unchanged, got: $(statuses)"
 
-step "after setup: Caddy on ports 80 and 443"
-# The daemon picks the ports at every config. Phase 2: `marsa setup` asks for
-# the new config itself. Here, a restart of Caddy writes it.
-run marsa services restart caddy
-wait_for_laravel -k "https://$SITE/"
-# The certificate, checked against Marsa's own CA (the system store is task
-# M4-18c).
-run curl -fsS -o /dev/null --max-time 10 --cacert "$CA" -w 'https://%{remote_ip}:%{remote_port} -> %{http_code}\n' "https://$SITE/"
-redirect=$(curl -sS -o /dev/null --max-time 10 -w '%{http_code} %{redirect_url}' "http://$SITE/")
-echo "http://$SITE/ -> $redirect"
-[ "$redirect" = "308 https://$SITE/" ] || fail "expected a 308 to https://$SITE/"
-listeners=$(sudo ss -H -ltnp | grep '"caddy"' | awk '{print $4}' | sort | tr '\n' ' ')
-echo "caddy listens on: $listeners"
-case "$listeners" in
-  *"127.0.0.1:443 "*"127.0.0.1:80 "*) ;;
-  *) fail "caddy does not listen on 127.0.0.1:80 and :443" ;;
-esac
-if grep -vq '^127\.0\.0\.1:' <<<"$(tr ' ' '\n' <<<"$listeners" | grep .)"; then
-  fail "caddy listens on an address that is not 127.0.0.1"
-fi
-
 step "removal"
-helper '[{"op":"ports_remove"},{"op":"resolved_remove"}]' || fail "the helper exited with $?"
-[ "$(statuses)" = "done done" ] || fail "expected done done, got: $(statuses)"
-[ ! -e "$DROPIN" ] || fail "$DROPIN is still there"
-[ ! -e "$SYSCTL_FILE" ] || fail "$SYSCTL_FILE is still there"
-[ "$(cat "$PORT_START")" = 1024 ] || fail "ip_unprivileged_port_start is $(cat "$PORT_START"), not 1024"
-if resolvectl query "$SITE" >/dev/null 2>&1; then
-  fail "$SITE still resolves after the removal"
-fi
+remove_all() {
+  helper '[{"op":"ports_remove"},{"op":"resolved_remove"}]' || fail "the helper exited with $?"
+  [ "$(statuses)" = "done done" ] || fail "expected done done, got: $(statuses)"
+  [ ! -e "$DROPIN" ] || fail "$DROPIN is still there"
+  [ ! -e "$SYSCTL_FILE" ] || fail "$SYSCTL_FILE is still there"
+  [ "$(cat "$PORT_START")" = 1024 ] || fail "ip_unprivileged_port_start is $(cat "$PORT_START"), not 1024"
+  if resolvectl query "$SITE" >/dev/null 2>&1; then
+    fail "$SITE still resolves after the removal"
+  fi
+}
+remove_all
 helper '[{"op":"ports_remove"},{"op":"resolved_remove"}]' || fail "the helper exited with $?"
 [ "$(statuses)" = "unchanged unchanged" ] || fail "expected unchanged unchanged, got: $(statuses)"
 
@@ -200,6 +168,57 @@ sudo rm /etc/systemd/resolved.conf.d/00-someone-else.conf
 sudo systemctl reset-failed systemd-resolved
 sudo systemctl restart systemd-resolved
 run resolvectl query example.com
+echo
+echo "PASS: part A, the helper"
+
+# Part B: a real Laravel site, from the signed runtimes to the open page.
+
+step "marsa install: PHP 8.4, Caddy, Composer (the signed manifest)"
+run marsa install php 8.4
+run marsa install caddy
+run marsa install composer
+run marsa runtimes
+run php -v
+run composer --version
+
+step "a real Laravel project in a parked folder"
+mkdir -p "$CODE"
+(cd "$CODE" && run composer create-project --no-interaction --prefer-dist laravel/laravel laravel-app)
+run marsa park "$CODE"
+run marsa sites
+run marsa services start caddy
+run marsa services
+
+step "before the helper: Caddy on its high ports"
+wait_for_laravel -k --resolve "$SITE:18443:127.0.0.1" "https://$SITE:18443/"
+
+step "the helper again, for the site"
+helper '[{"op":"resolved_install","port":18053},{"op":"ports_install"}]' || fail "the helper exited with $?"
+[ "$(statuses)" = "done done" ] || fail "expected done done, got: $(statuses)"
+
+step "after the helper: Caddy on ports 80 and 443"
+# The daemon picks the ports at every config. Phase 2: `marsa setup` asks for
+# the new config itself. Here, a restart of Caddy writes it.
+run marsa services restart caddy
+wait_for_laravel -k "https://$SITE/"
+# The certificate, checked against Marsa's own CA (the system store is task
+# M4-18c).
+run curl -fsS -o /dev/null --max-time 10 --cacert "$CA" -w 'https://%{remote_ip}:%{remote_port} -> %{http_code}\n' "https://$SITE/"
+redirect=$(curl -sS -o /dev/null --max-time 10 -w '%{http_code} %{redirect_url}' "http://$SITE/")
+echo "http://$SITE/ -> $redirect"
+[ "$redirect" = "308 https://$SITE/" ] || fail "expected a 308 to https://$SITE/"
+listeners=$(sudo ss -H -ltnp | grep '"caddy"' | awk '{print $4}' | sort | tr '\n' ' ')
+echo "caddy listens on: $listeners"
+case "$listeners" in
+  *"127.0.0.1:443 "*"127.0.0.1:80 "*) ;;
+  *) fail "caddy does not listen on 127.0.0.1:80 and :443" ;;
+esac
+if grep -vq '^127\.0\.0\.1:' <<<"$(tr ' ' '\n' <<<"$listeners" | grep .)"; then
+  fail "caddy listens on an address that is not 127.0.0.1"
+fi
+
+step "removal, with the site running"
+remove_all
 
 step "stop"
 run marsa daemon stop
