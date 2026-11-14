@@ -35,6 +35,8 @@ OTHER_NAMES="example.com example.org github.com kernel.org wikipedia.org"
 SYSTEMD=$(systemctl --version | awk 'NR==1 {print $2}')
 IP=$(PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v ip)
 RESOLVECTL=$(PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v resolvectl)
+# L1 showed it: systemd-resolved ignores a link with no address.
+LINK_ADDRESS=169.254.53.53/32
 
 section() { printf '\n\n===== %s =====\n' "$*"; }
 run() {
@@ -118,6 +120,7 @@ result T0 "systemd-networkd, NetworkManager" "$(systemctl is-active systemd-netw
 
 # ----------------------------------------------------- G: the global drop-in
 section "G the global drop-in of M4-18a, for comparison"
+run sudo mkdir -p /etc/systemd/resolved.conf.d
 printf '# Managed by Marsa. Do not edit.\n[Resolve]\nDNS=127.0.0.1:%s\nDomains=~test\n' "$PORT" | sudo tee /etc/systemd/resolved.conf.d/marsa.conf
 restart_resolved
 judge G "global drop-in"
@@ -141,7 +144,7 @@ result L1 "resolvectl dns/domain/default-route on marsa0" "exit codes above; sco
 judge L1 "marsa0, no address"
 
 section "L1b the same link with a link-local address"
-run sudo "$IP" addr add 169.254.53.53/32 dev marsa0
+run sudo "$IP" addr add "$LINK_ADDRESS" dev marsa0
 run resolvectl status marsa0
 judge L1b "marsa0, 169.254.53.53/32"
 
@@ -173,6 +176,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=-$IP link add marsa0 type dummy
 ExecStart=$IP link set marsa0 up
+ExecStart=-$IP addr add $LINK_ADDRESS dev marsa0
 ExecStart=$RESOLVECTL dns marsa0 127.0.0.1:$PORT
 ExecStart=$RESOLVECTL domain marsa0 ~test
 ExecStart=$RESOLVECTL default-route marsa0 false
@@ -185,6 +189,8 @@ run sudo systemctl daemon-reload
 run sudo systemctl enable --now marsa-dns-link.service
 run systemctl status marsa-dns-link.service --no-pager
 judge L4 "marsa0 from the unit"
+run "$IP" route show table all dev marsa0
+result L4 "routes that the address adds" "$("$IP" route show table all dev marsa0 | tr '\n' ';')"
 restart_resolved
 result L4 "after a restart of resolved: marsa0 dns / domain" "$(resolvectl dns marsa0 | cut -d: -f2- | xargs) / $(resolvectl domain marsa0 | cut -d: -f2- | xargs)"
 run sudo systemctl restart marsa-dns-link.service
@@ -198,7 +204,7 @@ run sudo systemctl daemon-reload
 section "L6 the same with systemd-networkd files"
 sudo mkdir -p /etc/systemd/network
 printf '[NetDev]\nName=marsa0\nKind=dummy\n' | sudo tee /etc/systemd/network/50-marsa0.netdev
-printf '[Match]\nName=marsa0\n\n[Link]\nRequiredForOnline=no\n\n[Network]\nDNS=127.0.0.1:%s\nDomains=~test\nDNSDefaultRoute=no\nLinkLocalAddressing=no\nConfigureWithoutCarrier=yes\n' "$PORT" | sudo tee /etc/systemd/network/50-marsa0.network
+printf '[Match]\nName=marsa0\n\n[Link]\nRequiredForOnline=no\n\n[Network]\nAddress=%s\nDNS=127.0.0.1:%s\nDomains=~test\nDNSDefaultRoute=no\nLinkLocalAddressing=no\nConfigureWithoutCarrier=yes\n' "$LINK_ADDRESS" "$PORT" | sudo tee /etc/systemd/network/50-marsa0.network
 was_networkd=$(systemctl is-active systemd-networkd)
 if [ "$was_networkd" = active ]; then
   run sudo networkctl reload
@@ -240,6 +246,7 @@ if ! systemctl list-unit-files NetworkManager.service >/dev/null 2>&1 || [ "$(sy
 fi
 run sudo "$IP" link add marsa0 type dummy
 run sudo "$IP" link set marsa0 up
+run sudo "$IP" addr add "$LINK_ADDRESS" dev marsa0
 set_link
 run sudo systemctl start NetworkManager
 sleep 8
