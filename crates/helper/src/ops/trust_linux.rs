@@ -158,13 +158,19 @@ fn stored_hash(
     system: &impl System,
 ) -> Result<Option<String>, OpResult> {
     let path = Path::new(store.file);
+    // Marsa never writes a link, so one here is someone else's, whatever it
+    // points to: `read` would follow it.
+    if system.is_link(path) {
+        let message = format!("{} is a link, so it was left as it is", store.file);
+        return Err(OpResult::failed(op, TRUST_READ, message));
+    }
     let reason = match system.read(path, MAX_FILE_BYTES) {
         Ok(bytes) => match std::str::from_utf8(&bytes).map(trust::parse_pem) {
             Ok(Ok(der)) => return Ok(Some(trust::sha256_hex(&der))),
             _ => "is not one certificate".to_owned(),
         },
-        // `read` follows symlinks and `exists` does not, so a dangling link
-        // is something there, not nothing.
+        // A link that appeared after the check above: `read` follows it and
+        // `exists` does not, so a dangling one is something there.
         Err(err) if err.kind() == io::ErrorKind::NotFound && !system.exists(path) => {
             return Ok(None);
         }
@@ -470,8 +476,10 @@ mod tests {
         }
     }
 
+    /// A link is left alone too when it points to the very certificate:
+    /// Marsa never writes one.
     #[test]
-    fn a_stored_file_that_cannot_be_read_or_a_dangling_link_is_left_alone() {
+    fn a_stored_file_that_cannot_be_read_or_a_link_is_left_alone() {
         let mut unreadable = debian().with_file(TEST_CA.as_bytes());
         unreadable
             .fake
@@ -479,9 +487,12 @@ mod tests {
             .insert(PathBuf::from(DEBIAN_FILE));
         let mut dangling = debian();
         dangling.fake.dangling.insert(PathBuf::from(DEBIAN_FILE));
+        let mut link = debian().with_file(TEST_CA.as_bytes());
+        link.fake.links.insert(PathBuf::from(DEBIAN_FILE));
         let cases = [
             (unreadable, "cannot be read: permission denied"),
-            (dangling, "cannot be read: entity not found"),
+            (dangling, "is a link"),
+            (link, "is a link"),
         ];
         for (family, reason) in cases {
             let message = format!("{DEBIAN_FILE} {reason}, so it was left as it is");
