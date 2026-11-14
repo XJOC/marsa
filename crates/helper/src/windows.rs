@@ -1,29 +1,35 @@
-//! The helper's Win32 calls (ADR 0018): the system folders, and the server
-//! end of the named pipe. The `unsafe` code of the helper on Windows is in
+//! The helper's Win32 calls (ADR 0018): the system folders, Marsa's own
+//! folder and its DACL, the server end of the named pipe, and the waits of
+//! `install`. The `unsafe` code of the helper on Windows is in
 //! this file only; the blocks are short, and every result is checked.
 
-use std::ffi::OsString;
-use std::fs::File;
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::mem::{ManuallyDrop, size_of};
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
+use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
     ERROR_NO_DATA, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-    ConvertStringSidToSidW, SDDL_REVISION_1,
+    ConvertStringSidToSidW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, LookupAccountSidW, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
-    SECURITY_ATTRIBUTES, SID_NAME_USE, SidTypeUser, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
+    LookupAccountSidW, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    RevertToSelf, SECURITY_ATTRIBUTES, SID_NAME_USE, SidTypeUser, TOKEN_QUERY, TOKEN_USER,
+    TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, PIPE_ACCESS_DUPLEX,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers,
+    PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Pipes::{
@@ -31,7 +37,9 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
-use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentThread, OpenProcess, OpenThreadToken, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+};
 use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
 /// `MAX_PATH`: the system folder is `C:\Windows\System32` or close to it,
@@ -39,6 +47,10 @@ use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGe
 const MAX_PATH: usize = 260;
 /// The pipe's buffer in each direction: one request or answer of 64 KiB.
 const BUFFER: u32 = 64 * 1024;
+/// The DACL of Marsa's folder in Program Files: full control for
+/// LocalSystem and Administrators, read and run (`0x1200a9`) for Users, the
+/// same for every file inside, and nothing inherited from above (`P`).
+const FOLDER_DACL: &str = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
 /// The user's rights on the pipe: `FILE_GENERIC_READ`, and
 /// `FILE_GENERIC_WRITE` without `FILE_APPEND_DATA`, which on a pipe is
 /// `FILE_CREATE_PIPE_INSTANCE`. The user reads and writes, and cannot add
@@ -421,6 +433,104 @@ fn security_descriptor(user_sid: &str) -> String {
     format!("D:P(A;;GA;;;SY)(A;;{USER_RIGHTS};;;{user_sid}){LABEL}")
 }
 
+/// Makes `dir` if needed, and gives it [`FOLDER_DACL`]. A folder that
+/// someone made first could hold a weaker DACL, which would let any user
+/// replace the program that runs as LocalSystem, or the record of the CA. A
+/// file, a link, or a reparse point in its place is refused.
+///
+/// # Errors
+///
+/// `InvalidInput` for anything but a plain folder; otherwise the I/O or
+/// Win32 error.
+pub fn private_dir(dir: &Path) -> io::Result<()> {
+    match fs::create_dir(dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(err),
+    }
+    let meta = fs::symlink_metadata(dir)?;
+    if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Marsa's folder is not a plain folder",
+        ));
+    }
+    let sddl = wide(FOLDER_DACL);
+    let path = wide_os(dir.as_os_str())?;
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: `sddl` is NUL-terminated and `descriptor` a valid out pointer;
+    // Windows allocates the descriptor, freed with `LocalFree` below.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let mut present = 0;
+    let mut dacl: *mut ACL = null_mut();
+    let mut defaulted = 0;
+    // SAFETY: `descriptor` is the one made above, and lives until the
+    // `LocalFree`; `dacl` points into it and is used before that. `path` is
+    // NUL-terminated. The owner, the group, and the SACL stay as they are.
+    unsafe {
+        let found = GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted);
+        let result = if found == 0 || present == 0 {
+            Err(io::Error::other("the folder's SDDL holds no DACL"))
+        } else {
+            let set = SetNamedSecurityInfoW(
+                path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                dacl,
+                null_mut(),
+            );
+            if set == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::from_raw_os_error(set as i32))
+            }
+        };
+        LocalFree(descriptor);
+        result
+    }
+}
+
+/// Waits up to `limit` for the process `pid` to end. A process that has
+/// ended, or that cannot be opened, is not waited for.
+pub fn wait_for_exit(pid: u32, limit: Duration) {
+    // SAFETY: no pointer; the handle is checked, then owned.
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: just opened, and closed by `OwnedHandle`.
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    // `u32::MAX` is `INFINITE`.
+    let millis = u32::try_from(limit.as_millis()).map_or(u32::MAX - 1, |ms| ms.min(u32::MAX - 1));
+    // SAFETY: the handle is open with `SYNCHRONIZE`.
+    unsafe { WaitForSingleObject(handle.as_raw_handle(), millis) };
+}
+
+/// `text` as NUL-terminated UTF-16, refused with a NUL inside.
+fn wide_os(text: &OsStr) -> io::Result<Vec<u16>> {
+    let mut wide: Vec<u16> = text.encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a NUL in a path",
+        ));
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
 /// `text` as NUL-terminated UTF-16.
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
@@ -661,6 +771,90 @@ mod tests {
             "{}",
             dir.display()
         );
+    }
+
+    /// In a temporary folder: Marsa's folder gets its own DACL, and a file
+    /// in its place is refused.
+    #[test]
+    fn marsas_folder_gets_its_own_dacl() {
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("Marsa");
+        private_dir(&dir).unwrap();
+        // A second time, on the folder that is there: the same.
+        private_dir(&dir).unwrap();
+        let path = wide_os(dir.as_os_str()).unwrap();
+        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+        let mut text: *mut u16 = null_mut();
+        // SAFETY: `path` is NUL-terminated and the out pointers are valid.
+        // Windows allocates the descriptor and the text, which are read and
+        // then freed with `LocalFree`.
+        let sddl = unsafe {
+            let read = GetNamedSecurityInfoW(
+                path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                &mut descriptor,
+            );
+            assert_eq!(read, 0);
+            let converted = ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                null_mut(),
+            );
+            assert_ne!(converted, 0);
+            let mut len = 0;
+            while *text.add(len) != 0 {
+                len += 1;
+            }
+            let sddl = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+            LocalFree(text.cast());
+            LocalFree(descriptor);
+            sddl
+        };
+        // Protected, and three entries: no other account, nothing inherited.
+        assert!(sddl.starts_with("D:P"), "{sddl}");
+        assert_eq!(sddl.matches("(A;").count(), 3, "{sddl}");
+        for who in [";SY)", ";BA)", ";BU)"] {
+            assert!(sddl.contains(who), "{sddl}");
+        }
+        assert!(!sddl.contains("ID;"), "{sddl}");
+
+        let file = temp.path().join("file");
+        fs::write(&file, b"").unwrap();
+        let err = private_dir(&file).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// A process that has ended is not waited for; one that runs is, up to
+    /// the limit.
+    #[test]
+    fn the_wait_for_an_exit_ends() {
+        use std::process::Command;
+        use std::time::Instant;
+        // This test program lists its tests and ends.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        let start = Instant::now();
+        wait_for_exit(pid, Duration::from_secs(30));
+        assert!(start.elapsed() < Duration::from_secs(10));
+        // This process runs on: the limit ends the wait.
+        let start = Instant::now();
+        wait_for_exit(std::process::id(), Duration::from_millis(200));
+        assert!(start.elapsed() >= Duration::from_millis(150));
     }
 
     /// Read only: the test's own user is a user; a built-in group, an
