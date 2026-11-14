@@ -62,6 +62,8 @@ diagnose() {
   networkctl list --no-pager
   echo "--- marsa0, every 0.25 s while the helper ran (newest last)"
   tail -n 120 "$HOME/marsa0-watch.log"
+  echo "--- packets to and from port 18053 (newest last)"
+  tail -n 80 "$HOME/tcpdump.log"
   echo "--- the journal of resolved, networkd, and the unit"
   sudo journalctl -u systemd-resolved -u systemd-networkd -u marsa-dns-link --since "-3min" --no-pager | grep -iE 'marsa0|link [0-9]+|dns|flush|revert|manag|started|stopp' | tail -n 150
   sudo ss -H -ltnp | grep -E ':(80|443|18019|18053|18080|18443)\b'
@@ -72,6 +74,8 @@ trap 'code=$?; [ "$code" -eq 0 ] || diagnose; exit "$code"' EXIT
 # What `resolvectl status marsa0` shows, every 0.25 s, into a log for the
 # diagnosis: a failed check deletes the unit before the script can look.
 watch_marsa0() {
+  # A background loop: a failed look must not end it (set -e).
+  set +e
   while true; do
     printf '%s ' "$(date +%T.%N | cut -c1-12)"
     { ip -brief link show marsa0 2>&1; resolvectl status marsa0 2>&1; networkctl status marsa0 --no-pager 2>&1 | grep -E 'State|Network File'; } | tr '\n' '|'
@@ -159,6 +163,8 @@ sudo systemctl restart systemd-resolved
 if systemctl is-active --quiet systemd-networkd; then sudo systemctl restart systemd-networkd; fi
 watch_marsa0 &
 WATCHER=$!
+# Which link the packets to Marsa's DNS port take: lo, or marsa0 (lost).
+sudo tcpdump -i any -n -l -tttt 'port 18053' >"$HOME/tcpdump.log" 2>&1 &
 
 step "part A: before the helper"
 run marsa daemon start
