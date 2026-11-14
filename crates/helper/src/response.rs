@@ -10,6 +10,11 @@ use crate::request::VERSION;
 /// The stable error codes. `marsad` and the UI match on them, so they never
 /// change once released.
 pub mod code {
+    /// The pipe's client is not the user who installed the helper service
+    /// (Windows).
+    // Used by the Windows service only.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub const CLIENT_NOT_ALLOWED: &str = "client_not_allowed";
     /// The marker lines of Marsa's block in the hosts file do not pair up,
     /// so the file was left as it is (Windows).
     pub const HOSTS_BLOCK_BROKEN: &str = "hosts_block_broken";
@@ -28,6 +33,16 @@ pub mod code {
     pub const RESOLVER_READ: &str = "resolver_read";
     /// Writing `/etc/resolver/test` failed.
     pub const RESOLVER_WRITE: &str = "resolver_write";
+    /// `marsa-helper service` was not started by the service manager
+    /// (Windows).
+    // Used by the Windows service only.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub const SERVICE_FAILED: &str = "service_failed";
+    /// A `trust_install` through the service carries a certificate other
+    /// than the one approved at install (Windows).
+    // Used by the Windows service only.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub const TRUST_NOT_ALLOWED: &str = "trust_not_allowed";
     pub const USAGE: &str = "usage";
 }
 
