@@ -337,6 +337,36 @@ impl DaemonClient {
             .await
     }
 
+    /// `DELETE /v1/sites/{name}`: the linked site `name` is no longer served,
+    /// and its own settings (PHP version, HTTPS, proxy) go with it. The list
+    /// after the change. Sent without a body, so `park` is unlinked too.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; the daemon's `site_not_found` (404) for a name
+    /// with no site, and `site_is_parked` (409) for a site from a parked
+    /// folder: [`DaemonClient::forget`] removes those.
+    pub async fn unlink(&self, name: &str) -> Result<SiteList, ClientError> {
+        self.call(Method::DELETE, &["v1", "sites", name], REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// `DELETE /v1/sites/park` with `{"path": ...}`: `path` is no longer
+    /// parked, so its sites are no longer served, and their own settings go
+    /// with them. The list after the change.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `site_path_not_utf8` before any request, and the
+    /// daemon's `site_path_relative` (400) and `folder_not_parked` (404).
+    pub async fn forget(&self, path: &Path) -> Result<SiteList, ClientError> {
+        let body = ParkRequest {
+            path: utf8_path(path)?,
+        };
+        self.call_with(Method::DELETE, &["v1", "sites", "park"], &body)
+            .await
+    }
+
     /// `POST /v1/setup`: the first setup. On macOS the user is asked twice:
     /// for an administrator password, then to approve the trust in Marsa's
     /// certificate authority for this user. Waits until it ends, up to 13

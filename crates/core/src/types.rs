@@ -409,7 +409,8 @@ pub struct SkippedFolder {
 }
 
 /// The body of `POST /v1/sites/park`: every sub-folder of `path` becomes a
-/// site.
+/// site. Also the body of `DELETE /v1/sites/park` (task M5-09): `path` is no
+/// longer parked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParkRequest {
     /// An absolute folder.

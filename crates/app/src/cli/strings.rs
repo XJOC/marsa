@@ -17,7 +17,8 @@ pub struct Details<'a> {
     pub runtime: Option<Runtime>,
     /// The version text the user asked for.
     pub requested: Option<&'a str>,
-    /// Versions the user could ask for instead.
+    /// Versions the user could ask for instead, or the parked folders for
+    /// `folder_not_parked`.
     pub available: &'a [String],
     /// A platform key, such as `darwin-arm64`, or "this system".
     pub platform: Option<&'a str>,
@@ -341,6 +342,36 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "no_current_dir" => "Cannot read the current folder; it may have been deleted. Go to \
              another folder, or pass a full path."
             .into(),
+        // M5-09: `marsa unlink`, `marsa forget`, and `marsa open`.
+        "site_is_parked" => match d.path {
+            Some(dir) => format!(
+                "\"{site}\" comes from the parked folder {0}, so it cannot be unlinked alone. \
+                 To stop serving that folder and all its sites, run \"marsa forget {0}\".",
+                dir.display()
+            ),
+            None => format!(
+                "\"{site}\" comes from a parked folder, so it cannot be unlinked alone. To stop \
+                 serving that folder and all its sites, run \"marsa forget <folder>\"."
+            ),
+        },
+        "folder_not_parked" => format!(
+            "{} is not a parked folder. {}",
+            shown("The folder"),
+            if d.available.is_empty() {
+                "No folder is parked.".to_owned()
+            } else {
+                format!("Parked folders: {}.", d.available.join(", "))
+            }
+        ),
+        "open_no_program" => format!(
+            "Cannot find a program that opens the browser (xdg-open on Linux). Open {} \
+             yourself.",
+            d.url.unwrap_or("the site's address")
+        ),
+        "open_failed" => format!(
+            "Cannot open the browser. Open {} yourself.",
+            d.url.unwrap_or("the site's address")
+        ),
 
         // The settings files: `ConfigError`.
         "config_read" => format!(
@@ -742,6 +773,54 @@ pub fn unsecured(url: &str) -> String {
     format!("{url} is served over plain HTTP.")
 }
 
+// M5-09: `marsa unlink`, `forget`, `isolate`, `unisolate`, and `open`.
+
+/// `marsa unlink`.
+pub fn unlinked(name: &str) -> String {
+    format!("Unlinked {name}: it is no longer served, and its settings are gone.")
+}
+
+/// `marsa unlink`, when a parked folder has a site of the same name, which
+/// is served again.
+pub fn unlinked_parked_back(name: &str, url: &str, folder: &str) -> String {
+    format!("Unlinked {name}. {url} now serves {folder}, from a parked folder.")
+}
+
+/// `marsa forget`.
+pub fn forgot(folder: &str) -> String {
+    format!("Forgot {folder}: its sites are no longer served.")
+}
+
+/// `marsa isolate`: the version asked for, and the installed one it picks
+/// now, if any.
+pub fn isolated(url: &str, asked: &str, version: Option<&str>) -> String {
+    match version {
+        Some(version) if version == asked => format!("{url} now runs PHP {version}."),
+        Some(version) => format!("{url} now runs PHP {asked} ({version})."),
+        None => format!(
+            "{url} now asks for PHP {asked}, but no installed version matches. Run \"marsa \
+             install php {asked}\"."
+        ),
+    }
+}
+
+/// `marsa unisolate`: the installed version the site runs now, if any.
+pub fn unisolated(url: &str, version: Option<&str>) -> String {
+    match version {
+        Some(version) => {
+            format!("{url} has no PHP version of its own now, and runs PHP {version}.")
+        }
+        None => {
+            format!("{url} has no PHP version of its own now. No installed PHP version fits it.")
+        }
+    }
+}
+
+/// `marsa open`.
+pub fn opened(url: &str) -> String {
+    format!("Opened {url} in your browser.")
+}
+
 // `marsa setup`.
 
 /// On stderr before the call, which may wait for the admin prompt and then
@@ -957,6 +1036,11 @@ mod tests {
         "config_write",
         // `marsa park` and `marsa link` themselves.
         "no_current_dir",
+        // M5-09: the unlink and forget routes, and `OpenError` in core.
+        "site_is_parked",
+        "folder_not_parked",
+        "open_no_program",
+        "open_failed",
         // The setup route (task M4-13): its errors, the codes of its skipped
         // steps, and the failure codes of `marsa-helper` for the setup ops.
         "setup_running",
