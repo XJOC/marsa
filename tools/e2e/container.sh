@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# The helper's Linux ops on Fedora, in a container with systemd as PID 1
-# (task M4-18f; reviews of #114 and #111). Ubuntu runs the whole end to end
-# in linux.sh; this adds the other family, a real boot, and NetworkManager.
+# The helper's Linux ops in a container with systemd as PID 1: Fedora
+# (systemd 257 or later) and Debian 12 (systemd 252, where the unit adds the
+# local route for 127.0.0.1). Task M4-18f; reviews of #114 and #111. Ubuntu
+# runs the whole end to end in linux.sh; this adds the other families, a
+# real boot, and NetworkManager.
 #
 # It runs as root inside the container that linux-e2e.yml starts, in two
 # phases around a restart of the container, which boots systemd again in a
 # new network namespace: marsa0 is gone, and only Marsa's unit makes it
 # again.
 #
-#   fedora.sh before-boot   install, the forger, trust, NetworkManager
-#   fedora.sh after-boot    the unit ran at boot, then the removal
+#   container.sh before-boot   install, the forger, trust, NetworkManager
+#   container.sh after-boot    the unit ran at boot, then the removal
 #
 # A stand-in answers on port 18053 as marsad would (spikes/s02-linux).
 set -euo pipefail
@@ -25,10 +27,15 @@ STANDIN=$REPO/spikes/s02-linux/dns-standin.py
 SITE=laravel-app.test
 UNIT=/etc/systemd/system/marsa-dns-link.service
 TEST_CA=$REPO/fixtures/helper/test-ca.pem
-TRUST_FILE=/etc/pki/ca-trust/source/anchors/marsa-local-ca.pem
-# What update-ca-trust extracts; /etc/pki/tls/certs/ca-bundle.crt is not on
-# every Fedora (run 43605058794).
-BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+if [ -d /usr/local/share/ca-certificates ] && [ -x /usr/sbin/update-ca-certificates ]; then
+  TRUST_FILE=/usr/local/share/ca-certificates/marsa-local-ca.crt
+  BUNDLE=/etc/ssl/certs/ca-certificates.crt
+else
+  TRUST_FILE=/etc/pki/ca-trust/source/anchors/marsa-local-ca.pem
+  # What update-ca-trust extracts; /etc/pki/tls/certs/ca-bundle.crt is not
+  # on every Fedora (run 43605058794).
+  BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+fi
 QUERIES=/root/queries.log
 
 step() { printf '\n\n===== %s =====\n' "$*"; }
@@ -80,7 +87,8 @@ trust_ops() {
 }
 
 . /etc/os-release
-echo "system: $PRETTY_NAME, systemd $(systemctl --version | awk 'NR==1 {print $2}')"
+SYSTEMD=$(systemctl --version | awk 'NR==1 {print $2}')
+echo "system: $PRETTY_NAME, systemd $SYSTEMD"
 
 case "${1:-}" in
 before-boot)
@@ -90,12 +98,23 @@ before-boot)
   [ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"
   [ "$(systemctl is-enabled marsa-dns-link.service)" = enabled ] || fail "the unit is not enabled"
   run resolvectl status marsa0
+  run cat "$UNIT"
+  if [ "$SYSTEMD" -lt 253 ]; then
+    grep -q 'route add local 127.0.0.1/32 dev marsa0' "$UNIT" || fail "no local route in the unit on systemd $SYSTEMD"
+    run ip route show table local dev marsa0
+  fi
+  # The first lookup must be quick: before 253 without the route it took
+  # 21 s (spike S-02c).
+  start=$(date +%s)
   wait_for_name "$SITE" || fail "$SITE does not resolve"
+  took=$(($(date +%s) - start))
+  echo "the first lookup took about $took s"
+  [ "$took" -le 3 ] || fail "the first lookup took $took s"
 
   step "a forger on 18053 gets .test names only"
   : >"$QUERIES"
   standin spoof
-  for name in example.com fedoraproject.org; do
+  for name in example.com github.com; do
     answer=$(address_of "$name")
     echo "$name -> $answer"
     [ "$answer" != 10.9.9.9 ] || fail "the forger answered for $name"
@@ -106,7 +125,7 @@ before-boot)
   [ "${other:-0}" = 0 ] || fail "$other queries outside .test reached port 18053"
   standin
 
-  step "trust on Fedora: update-ca-trust"
+  step "trust in the system store"
   helper "$(trust_ops "$TEST_CA")" || fail "the helper exited with $?"
   [ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"
   [ "$(stat -c '%U:%G %a' "$TRUST_FILE")" = "root:root 644" ] || fail "wrong owner or mode on $TRUST_FILE"
@@ -126,7 +145,7 @@ before-boot)
   run resolvectl status marsa0
   wait_for_name "$SITE" || fail "$SITE does not resolve with NetworkManager"
   echo
-  echo "PASS: Fedora, before the boot"
+  echo "PASS: $ID, before the boot"
   ;;
 after-boot)
   step "after the boot: the unit made marsa0 again"
@@ -151,10 +170,10 @@ after-boot)
     fail "$SITE still resolves after the removal"
   fi
   echo
-  echo "PASS: Fedora, after the boot"
+  echo "PASS: $ID, after the boot"
   ;;
 *)
-  echo "usage: fedora.sh before-boot|after-boot" >&2
+  echo "usage: container.sh before-boot|after-boot" >&2
   exit 2
   ;;
 esac

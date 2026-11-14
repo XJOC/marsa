@@ -83,13 +83,20 @@ jobs:
           path: ~/.local/share/marsa/logs
           if-no-files-found: ignore
 
-  # The helper's Linux ops on Fedora (systemd 262 or later): in a container
-  # with systemd as PID 1, with a restart of the container between the two
-  # phases. The restart boots systemd again in a new network namespace, so
-  # only Marsa's unit can make marsa0 again (reviews of #114 and #111).
-  fedora:
-    name: fedora (container, the helper)
-    runs-on: ubuntu-24.04
+  # The helper's Linux ops in a container with systemd as PID 1: Fedora
+  # (systemd 257 or later) and Debian 12 (systemd 252, where the unit adds
+  # the local route for 127.0.0.1), with a restart of the container between
+  # the two phases. The restart boots systemd again in a new network
+  # namespace, so only Marsa's unit can make marsa0 again (reviews of #114
+  # and #111). The helper is built on 22.04: its glibc (2.35) is older than
+  # the containers' own.
+  container:
+    name: ${{ matrix.system }} (container, the helper)
+    strategy:
+      fail-fast: false
+      matrix:
+        system: [fedora, debian12]
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -99,35 +106,33 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: fedora
+          key: container-ubuntu-22.04
 
       - name: Build marsa-helper
         run: cargo build --release -p marsa-helper
 
       - name: Build the image
-        run: docker build -t marsa-e2e-fedora -f spikes/s02-linux/fedora.Dockerfile spikes/s02-linux
+        run: docker build -t marsa-e2e-${{ matrix.system }} -f tools/e2e/${{ matrix.system }}.Dockerfile tools/e2e
 
       - name: Start systemd in the container
         run: |
-          docker run -d --name fedora --privileged --cgroupns=host \
-            -v /sys/fs/cgroup:/sys/fs/cgroup:rw -v "$PWD:/repo:ro" marsa-e2e-fedora
-          bash tools/e2e/fedora-boot.sh
-          docker exec fedora dnf -y -q install NetworkManager openssl
-          docker exec fedora bash /repo/spikes/s02-linux/fedora-prepare.sh
+          docker run -d --name box --privileged --cgroupns=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw -v "$PWD:/repo:ro" marsa-e2e-${{ matrix.system }}
+          bash tools/e2e/container-boot.sh
+          docker exec box bash /repo/spikes/s02-linux/fedora-prepare.sh
 
       - name: Before the boot
-        run: docker exec -e CI=true fedora bash /repo/tools/e2e/fedora.sh before-boot
+        run: docker exec -e CI=true box bash /repo/tools/e2e/container.sh before-boot
 
       - name: Boot again
         run: |
-          docker restart fedora
-          bash tools/e2e/fedora-boot.sh
-          docker exec fedora bash /repo/spikes/s02-linux/fedora-prepare.sh
+          docker restart box
+          bash tools/e2e/container-boot.sh
+          docker exec box bash /repo/spikes/s02-linux/fedora-prepare.sh
 
       - name: After the boot
-        run: docker exec -e CI=true fedora bash /repo/tools/e2e/fedora.sh after-boot
+        run: docker exec -e CI=true box bash /repo/tools/e2e/container.sh after-boot
 
       - name: The journal of the unit
         if: always()
-        run: docker exec fedora journalctl -u marsa-dns-link -u systemd-resolved -b --no-pager | tail -n 60 || true
-
+        run: docker exec box journalctl -u marsa-dns-link -u systemd-resolved -b --no-pager | tail -n 60 || true
