@@ -10,8 +10,9 @@
 # Before it: `cargo build --release -p marsa -p marsa-helper`, then
 # `cargo build --release -p marsa-shim` (the shim is always built alone).
 #
-# Phase 1 (now): the helper is run with sudo. Phase 2 replaces that step
-# with `marsa setup` through pkexec, once setup runs on Linux (task M4-18e).
+# Part A runs marsa-helper alone with sudo, op by op. Part B runs the real
+# `marsa setup`, which asks for root through pkexec (task M4-18e); a polkit
+# rule for the runner's user stands in for the password.
 set -euo pipefail
 
 if [ "${CI:-}" != "true" ]; then
@@ -82,6 +83,30 @@ watch_marsa0() {
     echo
     sleep 0.25
   done >>"$HOME/marsa0-watch.log"
+}
+
+# A polkit rule that lets this user run pkexec with no password: it stands in
+# for the password a person types on a desktop (M4-18e). pkexec is not on the
+# 24.04 image (ADR 0014, finding 19); polkit 0.105 (22.04) reads .pkla
+# files, later versions JavaScript rules (finding 18).
+polkit_rule() {
+  local me version
+  me=$(id -un)
+  if ! command -v pkexec >/dev/null; then
+    sudo apt-get install -y -q pkexec >/dev/null 2>&1 || sudo apt-get install -y -q policykit-1 >/dev/null 2>&1
+  fi
+  version=$(pkexec --version | awk '{print $NF}')
+  echo "pkexec $version"
+  if [ "${version%%.*}" = 0 ]; then
+    sudo mkdir -p /etc/polkit-1/localauthority/50-local.d
+    printf '[Marsa e2e]\nIdentity=unix-user:%s\nAction=org.freedesktop.policykit.exec\nResultAny=yes\nResultInactive=yes\nResultActive=yes\n' "$me" |
+      sudo tee /etc/polkit-1/localauthority/50-local.d/marsa-e2e.pkla
+  else
+    sudo mkdir -p /etc/polkit-1/rules.d
+    printf 'polkit.addRule(function(action, subject) {\n  if (action.id == "org.freedesktop.policykit.exec" && subject.user == "%s") {\n    return polkit.Result.YES;\n  }\n});\n' "$me" |
+      sudo tee /etc/polkit-1/rules.d/49-marsa-e2e.rules
+  fi
+  sleep 2
 }
 
 # Runs the helper as root with the ops in "$1" (a JSON list) and prints its
@@ -360,19 +385,26 @@ run marsa services
 step "before the helper: Caddy on its high ports"
 wait_for_laravel -k --resolve "$SITE:18443:127.0.0.1" "https://$SITE:18443/"
 
-step "the helper again, for the site"
-helper '[{"op":"resolved_install","port":18053},{"op":"ports_install"}]' || true
-[ "$(statuses)" = "$RESOLVED_DONE done" ] || fail "expected $RESOLVED_DONE done, got: $(statuses)"
+step "marsa setup, through pkexec: a polkit rule stands in for the password"
+polkit_rule
+code=0
+out=$(marsa setup 2>&1) || code=$?
+echo "$out"
+if [ "$LINK" = yes ]; then
+  [ "$code" = 0 ] || fail "marsa setup exited with $code"
+  grep -q "Send .test names to Marsa: done" <<<"$out" || fail "the .test step is not done"
+else
+  # resolved_systemd_too_old: a failed step, so exit 1 (M4-18h).
+  [ "$code" = 1 ] || fail "marsa setup exited with $code, not 1"
+  grep -q "Send .test names to Marsa: failed" <<<"$out" || fail "no failed .test step on systemd $SYSTEMD"
+fi
+grep -q "Let Caddy use ports 80 and 443: done" <<<"$out" || fail "the ports step is not done"
+grep -q "Trust Marsa's HTTPS certificates: done" <<<"$out" || fail "the trust step is not done"
+[ "$(cat "$PORT_START")" = 80 ] || fail "ip_unprivileged_port_start is $(cat "$PORT_START"), not 80"
 [ "$LINK" = no ] || wait_for_name "$SITE" || fail "$SITE does not resolve"
 
-step "trust: Caddy's CA in the system store"
-helper "$(trust_ops "$CA")" || fail "the helper exited with $?"
-[ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"
-
-step "after the helper: Caddy on ports 80 and 443"
-# The daemon picks the ports at every config. Phase 2: `marsa setup` asks for
-# the new config itself. Here, a restart of Caddy writes it.
-run marsa services restart caddy
+step "after setup: Caddy on ports 80 and 443, with no restart"
+# Setup sent Caddy its config with ports 80 and 443 itself (M4-18e).
 wait_for_laravel -k "${NAME[@]}" "https://$SITE/"
 # The certificate, checked against the system store: no -k, no --cacert.
 run curl -fsS -o /dev/null --max-time 10 "${NAME[@]}" -w 'https://%{remote_ip}:%{remote_port} -> %{http_code}\n' "https://$SITE/"
@@ -401,4 +433,4 @@ fi
 step "stop"
 run marsa daemon stop
 echo
-echo "PASS: Linux end to end, phase 1"
+echo "PASS: Linux end to end"
