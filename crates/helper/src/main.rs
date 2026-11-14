@@ -175,6 +175,12 @@ mod tests {
             => "does not match",
         port_above_65535: one_op(json!({ "op": "resolved_install", "port": 65536 }))
             => "does not match",
+        ports_install_with_a_port: one_op(json!({ "op": "ports_install", "port": 80 }))
+            => "does not match",
+        ports_install_with_a_path: one_op(json!({ "op": "ports_install", "path": "/etc/passwd" }))
+            => "does not match",
+        ports_remove_with_a_field: one_op(json!({ "op": "ports_remove", "all": true }))
+            => "does not match",
         no_ops: with_ops(json!([])) => "ops: 0 ops, expected 1 to 16",
         seventeen_ops: with_ops(json!(vec![json!({ "op": "trust_remove" }); 17])) => "ops: 17 ops",
         port_80: one_op(json!({ "op": "resolver_install", "port": 80 }))
