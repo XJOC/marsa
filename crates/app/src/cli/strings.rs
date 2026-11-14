@@ -546,6 +546,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             shown("the login file")
         ),
 
+        // The Xdebug route (task M5-11).
+        "xdebug_interrupted" => "The Marsa daemon stopped before the change reached PHP. The \
+             setting is saved: Marsa applies it when it starts again."
+            .into(),
+
         _ => return None,
     };
     Some(text)
@@ -958,6 +963,39 @@ pub fn programs_left(dir: &Path) -> String {
     format!("  Delete Marsa's programs in {}.", dir.display())
 }
 
+// `marsa xdebug`.
+
+/// `marsa xdebug`, while it is off.
+pub const XDEBUG_OFF: &str = "Xdebug: off. Run \"marsa xdebug on\" to turn it on.";
+/// `marsa xdebug off`.
+pub const XDEBUG_TURNED_OFF: &str = "Xdebug: off. PHP runs at full speed again.";
+
+/// `marsa xdebug` and `marsa xdebug on`, while it is on: the PHP versions
+/// that load Xdebug (`loaded`), and those installed without it (`missing`).
+/// `turned_on` adds what it costs (ADR 0010).
+pub fn xdebug_on(loaded: &[String], missing: &[String], turned_on: bool) -> String {
+    if loaded.is_empty() {
+        return "Xdebug: on, but no installed PHP has Xdebug.".to_owned();
+    }
+    let mut text = format!(
+        "Xdebug: on, in your sites and in the terminal. Loaded by PHP {}.",
+        loaded.join(", ")
+    );
+    if !missing.is_empty() {
+        let missing = missing.join(", ");
+        text.push_str(&format!(
+            " Not loaded by PHP {missing}: installed without Xdebug."
+        ));
+    }
+    if turned_on {
+        text.push_str(
+            " PHP can run up to 4 times slower while it is on. Run \"marsa xdebug off\" when \
+             you finish.",
+        );
+    }
+    text
+}
+
 /// A program on a port the redirect needs, under the skipped step: its
 /// netstat name, its PID, and the app it seems to belong to.
 pub fn port_held(port: u16, name: Option<&str>, pid: Option<u32>, app: Option<&str>) -> String {
@@ -1141,6 +1179,9 @@ mod tests {
         "autostart_no_home",
         "autostart_read",
         "autostart_write",
+        // The Xdebug route (task M5-11). Its other codes (`config_*`,
+        // `runtimes_read`, `invalid_body`, `internal_error`) are above.
+        "xdebug_interrupted",
     ];
 
     #[test]

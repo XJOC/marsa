@@ -18,3 +18,4 @@ pub mod state;
 pub mod supervisor;
 pub mod uninstall_api;
 pub mod watch;
+pub mod xdebug_api;

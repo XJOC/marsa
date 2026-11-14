@@ -1,0 +1,90 @@
+name: install-sh
+
+# Checks install.sh, the script that decides what a user's machine trusts:
+# shellcheck, then tests/install-sh/run.sh, which runs the script against fake
+# releases served from 127.0.0.1 (no network).
+#
+# - pull requests and pushes to main that change the script or its tests;
+# - release.yml calls this workflow, so no release is drafted with a script
+#   that fails its tests.
+
+on:
+  pull_request:
+    branches: [main]
+    # labeled and unlabeled: the label check below runs again.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - "install.sh"
+      - "tests/install-sh/**"
+      - ".github/workflows/install-sh.yml"
+      # The tests check that the script trusts the key built into Marsa.
+      - "crates/core/src/installer/manifest.rs"
+  push:
+    branches: [main]
+    paths:
+      - "install.sh"
+      - "tests/install-sh/**"
+      - ".github/workflows/install-sh.yml"
+      # The tests check that the script trusts the key built into Marsa.
+      - "crates/core/src/installer/manifest.rs"
+  workflow_call:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # A merge to main reaches every user of the raw install.sh URL at once, so a
+  # change to the script is a `sensitive` task: two reviewers (AGENTS.md
+  # section 5). The label is how the pull request says so.
+  label:
+    name: install.sh needs the sensitive label
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check the label
+        env:
+          SENSITIVE: ${{ contains(github.event.pull_request.labels.*.name, 'sensitive') }}
+        run: |
+          if [ "$SENSITIVE" != true ]; then
+            echo "::error::this pull request changes install.sh or its tests: label it sensitive, and get two reviewers (AGENTS.md section 5)"
+            exit 1
+          fi
+          echo "the sensitive label is set"
+
+  test:
+    name: install.sh (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macos
+            os: macos-15
+          # `sh` is dash here, which accepts POSIX and little more.
+          - label: linux
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # On the runner only. The tests need minisign to sign their fake releases.
+      - name: Install minisign and shellcheck
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            brew install minisign shellcheck
+          else
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends minisign shellcheck
+          fi
+
+      - name: shellcheck
+        run: shellcheck install.sh tests/install-sh/run.sh
+
+      - name: Tests
+        run: bash tests/install-sh/run.sh

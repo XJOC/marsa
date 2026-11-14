@@ -16,6 +16,7 @@ use marsa::cli::services::{self, ServicesArgs};
 use marsa::cli::setup;
 use marsa::cli::sites::{self, SitesCommand};
 use marsa::cli::uninstall_all::{self, UninstallAllArgs};
+use marsa::cli::xdebug::{self, XdebugArgs};
 
 /// Local development runtimes and sites.
 #[derive(Debug, Parser)]
@@ -65,6 +66,9 @@ enum Command {
     /// to type yes first, and macOS asks for an administrator password. The
     /// data folder stays unless you agree to delete it.
     Uninstall(UninstallAllArgs),
+    /// Load Xdebug in every installed PHP, or in none: on or off. Without on
+    /// or off, show whether PHP loads it, and which versions.
+    Xdebug(XdebugArgs),
 }
 
 // One thread is enough: the command waits on one thing at a time.
@@ -90,6 +94,7 @@ async fn main() -> ExitCode {
         Command::Setup => setup::run(&data_dir).await,
         Command::Autostart(args) => autostart::run(args, &data_dir).await,
         Command::Uninstall(args) => uninstall_all::run(args, &data_dir, data_dir_given).await,
+        Command::Xdebug(args) => xdebug::run(args, &data_dir).await,
     }
 }
 
@@ -396,6 +401,26 @@ mod tests {
             &["uninstall", "--all", "php"],
             &["uninstall", "--all", "--force"],
         ] {
+            let err = parse(args).expect_err("invalid arguments");
+            assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
+        }
+    }
+
+    #[test]
+    fn xdebug_takes_on_off_or_nothing() {
+        use marsa::cli::autostart::Switch;
+
+        for (args, switch) in [
+            (&["xdebug"][..], None),
+            (&["xdebug", "on"], Some(Switch::On)),
+            (&["xdebug", "off", "--data-dir", "/x"], Some(Switch::Off)),
+        ] {
+            match parse(args).expect("valid").command {
+                Command::Xdebug(got) => assert_eq!(got, XdebugArgs { switch }, "{args:?}"),
+                other => panic!("not xdebug: {other:?}"),
+            }
+        }
+        for args in [&["xdebug", "yes"][..], &["xdebug", "on", "off"]] {
             let err = parse(args).expect_err("invalid arguments");
             assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
         }
