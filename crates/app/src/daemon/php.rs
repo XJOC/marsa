@@ -665,8 +665,8 @@ fn set_failed(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>
 
 /// Writes `caddy/ca-bundle.pem` once Caddy has made Marsa's CA: the first
 /// file of `system` that exists, then Marsa's root ([`ca_bundle_text`]).
-/// `false` while there is no root yet: Caddy makes it at the first load of a
-/// config with a secure site. The same text already there is left alone.
+/// `false` while there is no root yet: Caddy makes it when it first loads a
+/// config, with or without sites. The same text already there is left alone.
 ///
 /// A system bundle that cannot be read is logged and left out, so PHP still
 /// trusts Marsa's own sites.

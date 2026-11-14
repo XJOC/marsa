@@ -231,8 +231,27 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(text.contains("logs/caddy.log"), "{text}");
+        assert!(
+            text.contains("Run \"marsa logs caddy\" to see why"),
+            "{text}"
+        );
         assert!(text.ends_with("[ca_not_ready]\n"), "{text}");
+    }
+
+    /// Task M5-15b: Caddy did not start. The reason is in its recent lines,
+    /// which `marsa logs caddy` shows.
+    #[test]
+    fn a_caddy_that_did_not_start_says_to_look_at_its_logs() {
+        let report = SetupReport {
+            skipped: vec![skip("trust_install", "caddy_not_started")],
+            ..SetupReport::default()
+        };
+        assert_eq!(
+            render(&report, &data()),
+            "Trust Marsa's HTTPS certificates: skipped. Caddy did not start, so Marsa's \
+             certificate authority is not there yet. Run \"marsa logs caddy\" to see why, then \
+             run \"marsa setup\" again. [caddy_not_started]\n"
+        );
     }
 
     /// Task M5-15: no Caddy, so no CA. The line says to install Caddy, then
