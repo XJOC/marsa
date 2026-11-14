@@ -5,7 +5,7 @@
 //!
 //! Each pair of macOS ops has its own file, so their tasks do not touch the
 //! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). On
-//! Linux, `resolved` (M4-18a) and `ports` (M4-18b) are written; on Windows,
+//! Linux, `resolved` (M4-18a, M4-18h) and `ports` (M4-18b) are written; on Windows,
 //! `hosts` (M4-19d). Trust on Linux fails with `op_not_implemented` until
 //! its task.
 

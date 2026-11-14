@@ -97,6 +97,13 @@ pub trait System {
     fn system_dir(&self) -> io::Result<PathBuf> {
         Err(no_system_dir())
     }
+
+    /// Waits `duration` before an op looks again, as when systemd-resolved
+    /// takes a moment to use a new link. [`RealSystem`] sleeps. The default
+    /// returns at once, so tests do not wait.
+    fn pause(&self, duration: Duration) {
+        let _ = duration;
+    }
 }
 
 fn no_system_dir() -> io::Error {
@@ -211,6 +218,10 @@ impl System for RealSystem {
         return crate::windows::system_dir();
         #[cfg(not(windows))]
         Err(no_system_dir())
+    }
+
+    fn pause(&self, duration: Duration) {
+        thread::sleep(duration);
     }
 }
 
