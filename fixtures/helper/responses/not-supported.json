@@ -9,9 +9,7 @@
     },
     {
       "op": "trust_remove",
-      "status": "failed",
-      "code": "op_not_implemented",
-      "message": "trust_remove is not implemented yet"
+      "status": "unchanged"
     }
   ]
 }
