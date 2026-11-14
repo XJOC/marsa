@@ -26,9 +26,10 @@ pub use sse::{EventStream, StreamItem};
 use std::cmp::Ordering;
 use std::fmt;
 use std::fs::{File, TryLockError};
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use reqwest::{Method, RequestBuilder, Response, Url, redirect};
@@ -37,9 +38,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 
+use crate::orphan::lstart_seconds;
 use crate::platform::daemon_file::{
     DaemonFile, DaemonFileError, daemon_authority, daemon_lock_path, read_daemon_file,
 };
+use crate::platform::process::{LoginTimes, read_login_times};
 use crate::platform::spawn::{EXIT_ALREADY_RUNNING, marsad_path, spawn_marsad};
 use crate::runtimes::Runtime;
 use crate::types::{
@@ -88,6 +91,14 @@ pub const START_WAIT: Duration = Duration::from_secs(15);
 /// 10 s and its open connections up to 5 s before it deletes `daemon.json`
 /// (task M3-06), so this is longer than both together.
 const STOP_WAIT: Duration = Duration::from_secs(17);
+/// How much earlier than the login session a daemon may have started and
+/// still count as of that session, in seconds (task M5-21). `ps` gives times
+/// to the second. On the Mac measured for this task the login items, which
+/// start a daemon at login, started about 10 s after `loginwindow` and about
+/// 2 s before the Dock (read only when there is no `loginwindow`). A daemon
+/// of the session before started before its logout, and a logout and a login
+/// take longer.
+const LOGIN_MARGIN_SECS: i64 = 10;
 const POLL: Duration = Duration::from_millis(50);
 /// The largest JSON body read. Log lines are the biggest answer.
 const MAX_BODY: usize = 16 * 1024 * 1024;
@@ -595,6 +606,10 @@ impl DaemonClient {
 /// 4. An older daemon: ask it to stop, wait up to 17 s for it to let go of
 ///    the lock, then step 2. If another client has replaced it meanwhile, the
 ///    new daemon is used.
+/// 5. On macOS, a daemon that started before the user's current GUI login
+///    session (task M5-21): replaced as in step 4. It outlived a logout, and
+///    macOS shows no admin prompt for a process of a session that ended.
+///    When either start time is unknown, the daemon is kept.
 ///
 /// A daemon that holds the lock but does not answer yet (starting or
 /// stopping) is waited for, up to 17 s.
@@ -605,7 +620,7 @@ impl DaemonClient {
 /// stops early, or does not answer, and `daemon_stop_failed` if an old
 /// daemon does not stop.
 pub async fn ensure_running(data_dir: &Path) -> Result<DaemonClient, ClientError> {
-    ensure(data_dir, marsad_path).await
+    ensure(data_dir, marsad_path, read_login_times).await
 }
 
 /// [`ensure_running`] with the `marsad` program given. Public so the M3-09
@@ -618,7 +633,7 @@ pub async fn ensure_running_with(
     data_dir: &Path,
     marsad: &Path,
 ) -> Result<DaemonClient, ClientError> {
-    ensure(data_dir, || Ok(marsad.to_path_buf())).await
+    ensure(data_dir, || Ok(marsad.to_path_buf()), read_login_times).await
 }
 
 /// Stops the running daemon (`marsa daemon stop`): asks it to shut down,
@@ -666,12 +681,18 @@ pub fn is_daemon_running(data_dir: &Path) -> bool {
 }
 
 /// `marsad` is looked up only when it must be started, so a running daemon
-/// is found even if `current_exe` fails.
-async fn ensure(
+/// is found even if `current_exe` fails. `login` gives the [`LoginTimes`] of
+/// the daemon at a pid: [`read_login_times`], or a fake in the tests.
+async fn ensure<L, F>(
     data_dir: &Path,
     marsad: impl FnOnce() -> io::Result<PathBuf>,
-) -> Result<DaemonClient, ClientError> {
-    match current_daemon(data_dir).await? {
+    login: L,
+) -> Result<DaemonClient, ClientError>
+where
+    L: Fn(u32) -> F,
+    F: Future<Output = Option<LoginTimes>>,
+{
+    match current_daemon(data_dir, login).await? {
         Some(client) => Ok(client),
         None => start(data_dir, marsad).await,
     }
@@ -683,25 +704,62 @@ enum Probe {
     /// A daemon holds the lock but does not answer yet: it is starting or
     /// stopping.
     Busy,
-    /// A daemon of this version or newer, with an API this build knows.
+    /// A daemon of this version or newer, with an API this build knows, from
+    /// this login session or of one that cannot be told.
     Ready(DaemonClient),
-    /// A daemon older than this build, and its version.
-    Older(DaemonClient, String),
+    /// A daemon to stop and start again, and why.
+    Replace(DaemonClient, Replace),
 }
 
-/// Steps 1, 3, and 4 of [`ensure_running`]: a client for the running daemon
-/// if it fits, or `None` once no daemon holds the lock. An older daemon is
-/// asked to stop.
-async fn current_daemon(data_dir: &Path) -> Result<Option<DaemonClient>, ClientError> {
+/// Why a daemon that answers is replaced.
+enum Replace {
+    /// It is older than this build: its version.
+    Older(String),
+    /// It started before the user's current GUI login session (task M5-21).
+    OutlivedLogin(LoginTimes),
+}
+
+impl Replace {
+    fn log(&self) {
+        match self {
+            Replace::Older(version) => {
+                tracing::info!(daemon = %version, client = APP_VERSION, "stopping an older daemon");
+            }
+            Replace::OutlivedLogin(times) => tracing::info!(
+                daemon_started = %times.started,
+                login_started = %times.login,
+                "stopping a daemon from an earlier login session"
+            ),
+        }
+    }
+}
+
+/// The login check of the last daemon probed: its pid, and its times when it
+/// outlived the login. A daemon is checked once, so `ps` does not run at
+/// every poll while it stops.
+type LoginCheck = Option<(u32, Option<LoginTimes>)>;
+
+/// Steps 1, 3, 4, and 5 of [`ensure_running`]: a client for the running
+/// daemon if it fits, or `None` once no daemon holds the lock. A daemon that
+/// is older, or from an earlier login session, is asked to stop.
+async fn current_daemon<L, F>(
+    data_dir: &Path,
+    login: L,
+) -> Result<Option<DaemonClient>, ClientError>
+where
+    L: Fn(u32) -> F,
+    F: Future<Output = Option<LoginTimes>>,
+{
     let deadline = Instant::now() + STOP_WAIT;
     let mut asked_to_stop = false;
+    let mut checked: LoginCheck = None;
     let mut last_error = None;
     loop {
-        match timeout_at(deadline, probe(data_dir)).await {
+        match timeout_at(deadline, probe(data_dir, &login, &mut checked)).await {
             Ok(Ok(Probe::Ready(client))) => return Ok(Some(client)),
             Ok(Ok(Probe::NotRunning)) => return Ok(None),
-            Ok(Ok(Probe::Older(client, version))) if !asked_to_stop => {
-                tracing::info!(daemon = %version, client = APP_VERSION, "stopping an older daemon");
+            Ok(Ok(Probe::Replace(client, why))) if !asked_to_stop => {
+                why.log();
                 match timeout_at(deadline, client.shutdown()).await {
                     Ok(Ok(())) => asked_to_stop = true,
                     Ok(Err(err)) if err.is_transient() => last_error = Some(err),
@@ -709,7 +767,7 @@ async fn current_daemon(data_dir: &Path) -> Result<Option<DaemonClient>, ClientE
                     Err(_) => {}
                 }
             }
-            Ok(Ok(Probe::Older(..) | Probe::Busy)) | Err(_) => {}
+            Ok(Ok(Probe::Replace(..) | Probe::Busy)) | Err(_) => {}
             Ok(Err(err)) if err.is_transient() => last_error = Some(err),
             Ok(Err(err)) => return Err(err),
         }
@@ -720,8 +778,17 @@ async fn current_daemon(data_dir: &Path) -> Result<Option<DaemonClient>, ClientE
     }
 }
 
-/// Who holds the lock, and which version it is.
-async fn probe(data_dir: &Path) -> Result<Probe, ClientError> {
+/// Who holds the lock, which version it is, and whether it outlived the
+/// login. `checked` keeps the login check from one probe to the next.
+async fn probe<L, F>(
+    data_dir: &Path,
+    login: &L,
+    checked: &mut LoginCheck,
+) -> Result<Probe, ClientError>
+where
+    L: Fn(u32) -> F,
+    F: Future<Output = Option<LoginTimes>>,
+{
     let run = run_dir(data_dir);
     // The lock first: a file left by a crash is never contacted.
     if !lock_is_held(&daemon_lock_path(&run)) {
@@ -738,9 +805,49 @@ async fn probe(data_dir: &Path) -> Result<Probe, ClientError> {
         other => other?,
     };
     if is_older(&health)? {
-        return Ok(Probe::Older(client, daemon_text(&health.app_version)));
+        let version = daemon_text(&health.app_version);
+        return Ok(Probe::Replace(client, Replace::Older(version)));
     }
-    Ok(Probe::Ready(client))
+    let outlived = match checked {
+        Some((pid, outlived)) if *pid == health.pid => outlived.clone(),
+        _ => {
+            let now = SystemTime::now();
+            let outlived = login(health.pid)
+                .await
+                .filter(|times| outlived_login(times, now));
+            *checked = Some((health.pid, outlived.clone()));
+            outlived
+        }
+    };
+    match outlived {
+        Some(times) => Ok(Probe::Replace(client, Replace::OutlivedLogin(times))),
+        None => Ok(Probe::Ready(client)),
+    }
+}
+
+/// Whether a daemon started before the current login session, more than
+/// [`LOGIN_MARGIN_SECS`] before it: then it outlived a logout (task M5-21).
+/// `false` when a time cannot be read, or when the login seems to come after
+/// `now`: the clock was set back since, so the times say nothing. Without
+/// that check, each new daemon would seem older than the login too, and be
+/// replaced again at every call until the clock caught up.
+fn outlived_login(times: &LoginTimes, now: SystemTime) -> bool {
+    let (Some(started), Some(login)) =
+        (lstart_seconds(&times.started), lstart_seconds(&times.login))
+    else {
+        return false;
+    };
+    let Some(now) = now
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_secs()).ok())
+    else {
+        return false;
+    };
+    if login > now + LOGIN_MARGIN_SECS {
+        return false;
+    }
+    started + LOGIN_MARGIN_SECS < login
 }
 
 /// Starts `marsad` and waits up to 5 s for it to answer.
@@ -921,7 +1028,12 @@ fn run_dir(data_dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+    use crate::platform::daemon_file::{Token, remove_daemon_file, write_daemon_file};
 
     #[test]
     fn only_an_older_daemon_is_replaced() {
@@ -950,5 +1062,188 @@ mod tests {
         assert!(!is_older(&health(API_VERSION)).unwrap());
         let err = is_older(&health(API_VERSION + 1)).unwrap_err();
         assert_eq!(err.code(), "daemon_api_too_new");
+    }
+
+    // ---------------------------------------------------------------------
+    // A daemon left from an earlier login session (task M5-21)
+
+    /// A login on 2026-11-14 (UTC).
+    const LOGIN: &str = "Sat Nov 14 13:28:04 2026";
+
+    fn times(started: &str, login: &str) -> LoginTimes {
+        LoginTimes {
+            started: started.to_owned(),
+            login: login.to_owned(),
+        }
+    }
+
+    /// `seconds` after the login.
+    fn after_login(seconds: u64) -> SystemTime {
+        let login = lstart_seconds(LOGIN).unwrap();
+        UNIX_EPOCH + Duration::from_secs(u64::try_from(login).unwrap() + seconds)
+    }
+
+    #[test]
+    fn a_daemon_older_than_the_login_outlived_it() {
+        let now = after_login(3_600);
+        // The incident: started three days before.
+        assert!(outlived_login(
+            &times("Wed Nov 11 10:12:30 2026", LOGIN),
+            now
+        ));
+        // Just past the margin.
+        assert!(outlived_login(
+            &times("Sat Nov 14 13:27:53 2026", LOGIN),
+            now
+        ));
+    }
+
+    #[test]
+    fn a_daemon_of_this_login_or_within_the_margin_is_kept() {
+        let now = after_login(3_600);
+        for started in [
+            // Started by the menu-bar icon at login, and later.
+            "Sat Nov 14 13:28:26 2026",
+            "Sat Nov 14 14:00:00 2026",
+            // At the same second, and up to 10 s before (the Dock is read
+            // when there is no loginwindow, and starts after login items).
+            LOGIN,
+            "Sat Nov 14 13:28:00 2026",
+            "Sat Nov 14 13:27:54 2026",
+        ] {
+            assert!(!outlived_login(&times(started, LOGIN), now), "{started}");
+        }
+    }
+
+    #[test]
+    fn unknown_times_keep_the_daemon() {
+        let now = after_login(3_600);
+        let old = "Wed Nov 11 10:12:30 2026";
+        for (started, login) in [
+            ("", LOGIN),
+            (old, ""),
+            // Linux clock ticks, which are no time of day.
+            ("987654", LOGIN),
+            (old, "Sat Nov 14 13:28 2026"),
+        ] {
+            assert!(
+                !outlived_login(&times(started, login), now),
+                "{started:?} {login:?}"
+            );
+        }
+        // The clock was set back since the login: it seems to come later.
+        let before_login = UNIX_EPOCH
+            + Duration::from_secs(u64::try_from(lstart_seconds(LOGIN).unwrap() - 60).unwrap());
+        assert!(!outlived_login(&times(old, LOGIN), before_login));
+        assert!(!outlived_login(&times(old, LOGIN), UNIX_EPOCH));
+        // Within the margin it still counts.
+        assert!(outlived_login(&times(old, LOGIN), after_login(0)));
+    }
+
+    /// The requests a [`fake_daemon`] got.
+    #[derive(Default)]
+    struct Calls {
+        health: AtomicUsize,
+        shutdown: AtomicUsize,
+    }
+
+    /// A daemon of this build that answers as `pid` and holds the lock in
+    /// `data_dir` until it is asked to stop. Like `marsad`, which stops its
+    /// processes first, it answers for 300 ms more, then lets go.
+    async fn fake_daemon(data_dir: &Path, pid: u32) -> Arc<Calls> {
+        use axum::routing::{get, post};
+
+        let run = run_dir(data_dir);
+        std::fs::create_dir_all(&run).unwrap();
+        let lock = File::create(daemon_lock_path(&run)).unwrap();
+        lock.try_lock().unwrap();
+        let lock = Arc::new(Mutex::new(Some(lock)));
+        let calls = Arc::new(Calls::default());
+        let health = Health {
+            app_version: APP_VERSION.to_owned(),
+            api_version: API_VERSION,
+            pid,
+        };
+        let shutdown = {
+            let (run, calls) = (run.clone(), calls.clone());
+            move || {
+                calls.shutdown.fetch_add(1, SeqCst);
+                let (run, lock) = (run.clone(), lock.clone());
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    remove_daemon_file(&run).unwrap();
+                    if let Some(lock) = lock.lock().unwrap().take() {
+                        lock.unlock().unwrap();
+                    }
+                });
+                async { axum::http::StatusCode::ACCEPTED }
+            }
+        };
+        let answer = {
+            let calls = calls.clone();
+            move || {
+                calls.health.fetch_add(1, SeqCst);
+                let health = health.clone();
+                async move { axum::Json(health) }
+            }
+        };
+        let router = axum::Router::new()
+            .route("/v1/health", get(answer))
+            .route("/v1/shutdown", post(shutdown));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let file = DaemonFile {
+            pid,
+            port,
+            token: Token::generate().unwrap(),
+            app_version: APP_VERSION.to_owned(),
+        };
+        write_daemon_file(&run, &file).unwrap();
+        calls
+    }
+
+    /// A login check that answers `answer` for every pid, and counts its calls.
+    fn fake_login(
+        answer: Option<LoginTimes>,
+        calls: &AtomicUsize,
+    ) -> impl Fn(u32) -> std::future::Ready<Option<LoginTimes>> {
+        move |_pid| {
+            calls.fetch_add(1, SeqCst);
+            std::future::ready(answer.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_daemon_from_an_earlier_login_is_asked_to_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = fake_daemon(dir.path(), 5793).await;
+        let checks = AtomicUsize::new(0);
+        // Far in the past, so the real clock is past the login.
+        let old = times("Thu Jan  1 00:00:00 1970", "Thu Jan  1 01:00:00 1970");
+        let found = current_daemon(dir.path(), fake_login(Some(old), &checks)).await;
+        // Stopped, so `ensure_running` starts a new one.
+        assert!(found.unwrap().is_none());
+        assert_eq!(daemon.shutdown.load(SeqCst), 1);
+        assert!(!is_daemon_running(dir.path()));
+        // It answered at more than one poll while it stopped, and was
+        // checked at the first only.
+        assert!(daemon.health.load(SeqCst) > 1);
+        assert_eq!(checks.load(SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_daemon_of_this_login_or_of_an_unknown_one_is_used() {
+        let new = times("Thu Jan  1 01:00:00 1970", "Thu Jan  1 00:00:00 1970");
+        for answer in [Some(new), None] {
+            let dir = tempfile::tempdir().unwrap();
+            let daemon = fake_daemon(dir.path(), 5793).await;
+            let checks = AtomicUsize::new(0);
+            let found = current_daemon(dir.path(), fake_login(answer.clone(), &checks)).await;
+            assert!(found.unwrap().is_some(), "{answer:?}");
+            assert_eq!(daemon.shutdown.load(SeqCst), 0, "{answer:?}");
+            assert!(is_daemon_running(dir.path()));
+            assert_eq!(checks.load(SeqCst), 1);
+        }
     }
 }
