@@ -19,13 +19,14 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-    ConvertStringSidToSidW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    ConvertStringSidToSidW, ProgressInvokeNever, SDDL_REVISION_1, SE_FILE_OBJECT,
+    TreeResetNamedSecurityInfoW,
 };
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
-    LookupAccountSidW, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    RevertToSelf, SECURITY_ATTRIBUTES, SID_NAME_USE, SidTypeUser, TOKEN_QUERY, TOKEN_USER,
-    TokenUser,
+    ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
+    GetTokenInformation, LookupAccountSidW, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
+    SECURITY_ATTRIBUTES, SID_NAME_USE, SidTypeUser, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers,
@@ -47,10 +48,11 @@ use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGe
 const MAX_PATH: usize = 260;
 /// The pipe's buffer in each direction: one request or answer of 64 KiB.
 const BUFFER: u32 = 64 * 1024;
-/// The DACL of Marsa's folder in Program Files: full control for
-/// LocalSystem and Administrators, read and run (`0x1200a9`) for Users, the
-/// same for every file inside, and nothing inherited from above (`P`).
-const FOLDER_DACL: &str = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
+/// The owner and the DACL of Marsa's folder in Program Files: owned by
+/// Administrators; full control for LocalSystem and Administrators, read
+/// and run (`0x1200a9`) for Users, the same for every file inside, and
+/// nothing inherited from above (`P`).
+const FOLDER_DACL: &str = "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
 /// The user's rights on the pipe: `FILE_GENERIC_READ`, and
 /// `FILE_GENERIC_WRITE` without `FILE_APPEND_DATA`, which on a pipe is
 /// `FILE_CREATE_PIPE_INSTANCE`. The user reads and writes, and cannot add
@@ -433,10 +435,13 @@ fn security_descriptor(user_sid: &str) -> String {
     format!("D:P(A;;GA;;;SY)(A;;{USER_RIGHTS};;;{user_sid}){LABEL}")
 }
 
-/// Makes `dir` if needed, and gives it [`FOLDER_DACL`]. A folder that
-/// someone made first could hold a weaker DACL, which would let any user
-/// replace the program that runs as LocalSystem, or the record of the CA. A
-/// file, a link, or a reparse point in its place is refused.
+/// Makes `dir` if needed, and gives it and everything in it
+/// [`FOLDER_DACL`]. A folder that someone made first could hold a weaker
+/// DACL, which would let any user replace the program that runs as
+/// LocalSystem, or the record of the CA. So the owner is reset too (an
+/// owner can always change the DACL back), and every file inside loses its
+/// own entries and gets the folder's. A file, a link, or a reparse point in
+/// its place is refused.
 ///
 /// # Errors
 ///
@@ -474,22 +479,36 @@ pub fn private_dir(dir: &Path) -> io::Result<()> {
     let mut present = 0;
     let mut dacl: *mut ACL = null_mut();
     let mut defaulted = 0;
+    let mut owner: PSID = null_mut();
+    let mut owner_defaulted = 0;
     // SAFETY: `descriptor` is the one made above, and lives until the
-    // `LocalFree`; `dacl` points into it and is used before that. `path` is
-    // NUL-terminated. The owner, the group, and the SACL stay as they are.
+    // `LocalFree`; `dacl` and `owner` point into it and are used before
+    // that. `path` is NUL-terminated. The group and the SACL stay as they
+    // are; no progress callback. `KeepExplicit = FALSE` removes the entries
+    // of the files inside, which then inherit the folder's.
     unsafe {
-        let found = GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted);
-        let result = if found == 0 || present == 0 {
-            Err(io::Error::other("the folder's SDDL holds no DACL"))
+        let found = GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted)
+            != 0
+            && GetSecurityDescriptorOwner(descriptor, &mut owner, &mut owner_defaulted) != 0;
+        let result = if !found || present == 0 || owner.is_null() {
+            Err(io::Error::other(
+                "the folder's SDDL holds no owner or no DACL",
+            ))
         } else {
-            let set = SetNamedSecurityInfoW(
+            let set = TreeResetNamedSecurityInfoW(
                 path.as_ptr(),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                null_mut(),
+                OWNER_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                owner,
                 null_mut(),
                 dacl,
                 null_mut(),
+                0,
+                None,
+                ProgressInvokeNever,
+                null(),
             );
             if set == 0 {
                 Ok(())
@@ -773,29 +792,23 @@ mod tests {
         );
     }
 
-    /// In a temporary folder: Marsa's folder gets its own DACL, and a file
-    /// in its place is refused.
-    #[test]
-    fn marsas_folder_gets_its_own_dacl() {
+    /// The owner and the DACL of `path`, in SDDL.
+    fn sddl_of(path: &Path) -> String {
         use windows_sys::Win32::Security::Authorization::{
             ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
         };
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("Marsa");
-        private_dir(&dir).unwrap();
-        // A second time, on the folder that is there: the same.
-        private_dir(&dir).unwrap();
-        let path = wide_os(dir.as_os_str()).unwrap();
+        let path = wide_os(path.as_os_str()).unwrap();
+        let what = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
         let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
         let mut text: *mut u16 = null_mut();
         // SAFETY: `path` is NUL-terminated and the out pointers are valid.
         // Windows allocates the descriptor and the text, which are read and
         // then freed with `LocalFree`.
-        let sddl = unsafe {
+        unsafe {
             let read = GetNamedSecurityInfoW(
                 path.as_ptr(),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
+                what,
                 null_mut(),
                 null_mut(),
                 null_mut(),
@@ -806,7 +819,7 @@ mod tests {
             let converted = ConvertSecurityDescriptorToStringSecurityDescriptorW(
                 descriptor,
                 SDDL_REVISION_1,
-                DACL_SECURITY_INFORMATION,
+                what,
                 &mut text,
                 null_mut(),
             );
@@ -819,18 +832,40 @@ mod tests {
             LocalFree(text.cast());
             LocalFree(descriptor);
             sddl
-        };
-        // Protected, and three entries: no other account, nothing inherited.
-        assert!(sddl.starts_with("D:P"), "{sddl}");
-        assert_eq!(sddl.matches("(A;").count(), 3, "{sddl}");
-        for who in [";SY)", ";BA)", ";BU)"] {
-            assert!(sddl.contains(who), "{sddl}");
         }
-        assert!(!sddl.contains("ID;"), "{sddl}");
+    }
 
-        let file = temp.path().join("file");
+    /// In a temporary folder: Marsa's folder gets its owner and its DACL,
+    /// a file in it gets the folder's entries only, and a file in the
+    /// folder's place is refused.
+    #[test]
+    fn marsas_folder_gets_its_own_dacl() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("Marsa");
+        private_dir(&dir).unwrap();
+        // A second time, on the folder that is there, with a file in it.
+        let file = dir.join("ca-root.pem");
         fs::write(&file, b"").unwrap();
-        let err = private_dir(&file).unwrap_err();
+        private_dir(&dir).unwrap();
+
+        // Owned by Administrators; protected, and three entries: no other
+        // account, nothing inherited from above.
+        let folder = sddl_of(&dir);
+        assert!(folder.starts_with("O:BAD:P"), "{folder}");
+        assert_eq!(folder.matches("(A;").count(), 3, "{folder}");
+        for who in [";SY)", ";BA)", ";BU)"] {
+            assert!(folder.contains(who), "{folder}");
+        }
+        assert!(!folder.contains("ID;"), "{folder}");
+        // The file: Administrators, and only what it inherits.
+        let inside = sddl_of(&file);
+        assert!(inside.starts_with("O:BA"), "{inside}");
+        assert_eq!(inside.matches("(A;").count(), 3, "{inside}");
+        assert_eq!(inside.matches("ID;").count(), 3, "{inside}");
+
+        let not_a_folder = temp.path().join("file");
+        fs::write(&not_a_folder, b"").unwrap();
+        let err = private_dir(&not_a_folder).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 

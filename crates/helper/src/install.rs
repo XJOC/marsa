@@ -302,8 +302,28 @@ mod scm {
         let dir = RealSystem
             .install_dir()
             .map_err(|err| text("cannot find Program Files", err))?;
-        for name in FILES {
-            match fs::remove_file(dir.join(name)) {
+        // The program may be loaded for a moment after the stop, and the
+        // service manager names no process to wait for once the service is
+        // stopping: it is moved aside, then deleted, tried for a while.
+        match fs::rename(dir.join(PROGRAM), dir.join(OLD)) {
+            Ok(()) => outcome = Outcome::Done,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(text("cannot move the helper aside", err)),
+        }
+        let old = dir.join(OLD);
+        let deadline = Instant::now() + EXIT_WAIT;
+        while let Err(err) = fs::remove_file(&old) {
+            if err.kind() == io::ErrorKind::NotFound {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(text("cannot delete the old helper", err));
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        let names = FILES.iter().map(|name| (*name).to_owned());
+        for name in names.chain(leftovers(&dir)) {
+            match fs::remove_file(dir.join(&name)) {
                 Ok(()) => outcome = Outcome::Done,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                 Err(err) => return Err(text(&format!("cannot delete {name}"), err)),
@@ -325,8 +345,21 @@ mod scm {
         }
     }
 
+    /// The temp files that a crash of `write_atomic` may have left next to
+    /// the record of the CA (`.ca-root.pem.marsa-tmp-<pid>`).
+    fn leftovers(dir: &Path) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.starts_with(".ca-root.pem.marsa-tmp-"))
+            .collect()
+    }
+
     /// Starts the service again after a failed step. Best effort: the
-    /// failed step is the error.
+    /// failed step is the error. After a failed start of a new program, the
+    /// old one is gone already: nothing better can serve.
     pub fn start_again(service: &Service) {
         let _ = service.start::<&OsStr>(&[]);
     }
