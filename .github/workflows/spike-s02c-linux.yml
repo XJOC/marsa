@@ -1,0 +1,57 @@
+name: spike-s02c-linux
+
+# Spike S-02c: can systemd-resolved 249 reach a link DNS server at
+# 127.0.0.1 on marsa0 at once? The jobs change the system with sudo, which
+# is fine here and only here: a runner is thrown away after the job.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["task/S-02c-*"]
+    paths:
+      - "spikes/s02-linux/**"
+      - ".github/workflows/spike-s02c-linux.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ubuntu:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Pick the results folder
+        run: echo "OUT=$RUNNER_TEMP/results" >>"$GITHUB_ENV"
+
+      - name: Run the spike
+        run: CI=true bash spikes/s02-linux/loopback-link.sh 2>&1 | tee "$RUNNER_TEMP/full.log"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '```text'
+            cat "$OUT/summary.txt"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s02c-${{ matrix.os }}
+          path: ${{ runner.temp }}/results

@@ -21,12 +21,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// The first line of every file Marsa writes.
 const HEADER: &str = "# Managed by Marsa. Comments in this file are not kept.\n";
 
-/// `global.toml`.
+/// `global.toml`. A table with nothing set is not written, so clearing the
+/// last key of `[php]` or `[node]` removes the table (task M5-19).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GlobalConfig {
+    #[serde(skip_serializing_if = "is_default")]
     pub php: ToolDefaults,
-    #[serde(deserialize_with = "node_defaults")]
+    #[serde(deserialize_with = "node_defaults", skip_serializing_if = "is_default")]
     pub node: ToolDefaults,
 }
 
@@ -368,6 +370,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
 /// The `[node]` table. It has no `xdebug`: the key is refused there like any
 /// unknown key, with its line.
 fn node_defaults<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ToolDefaults, D::Error> {
@@ -519,14 +525,15 @@ mod tests {
         assert_eq!(config.php.default, None);
         save_global(&path, &config).unwrap();
         let text = fs::read_to_string(&path).unwrap();
-        assert_eq!(text, format!("{HEADER}\n[php]\nxdebug = true\n\n[node]\n"));
+        assert_eq!(text, format!("{HEADER}\n[php]\nxdebug = true\n"));
         assert_eq!(load_global(&path).unwrap(), config);
 
-        // Off is not written.
+        // Off is not written, and neither is a table with nothing set.
         config.php.xdebug = false;
         save_global(&path, &config).unwrap();
         let text = fs::read_to_string(&path).unwrap();
-        assert_eq!(text, format!("{HEADER}\n[php]\n\n[node]\n"));
+        assert_eq!(text, format!("{HEADER}\n"));
+        assert_eq!(load_global(&path).unwrap(), GlobalConfig::default());
 
         let path = file(&dir, "node.toml", "[node]\nxdebug = true\n");
         assert_invalid(&load_global(&path).unwrap_err(), &path, "xdebug");
@@ -702,6 +709,28 @@ mod tests {
                  php = \"8.3\"\n"
             )
         );
+    }
+
+    #[test]
+    fn a_cleared_default_leaves_no_key_and_no_empty_table() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("global.toml");
+        let mut config = global("8.4", "22");
+        config.php.xdebug = true;
+        config.node.default = None;
+        save_global(&path, &config).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("{HEADER}\n[php]\ndefault = \"8.4\"\nxdebug = true\n")
+        );
+        // The rest of the table stays.
+        config.php.default = None;
+        save_global(&path, &config).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("{HEADER}\n[php]\nxdebug = true\n")
+        );
+        assert_eq!(load_global(&path).unwrap(), config);
     }
 
     #[test]

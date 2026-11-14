@@ -21,22 +21,24 @@ use sha2::{Digest, Sha256};
 use crate::response::{OpResult, Outcome};
 use crate::system::{RunOutput, System};
 
-/// The request's `pem` is not exactly one certificate.
+/// The request's `pem` is not exactly one certificate. On Windows also: its
+/// SHA-1 has no letter, which `certutil` would read as an index.
 pub const TRUST_CERT_INVALID: &str = "trust_cert_invalid";
-/// The file at [`CA_PATH`] cannot be read as one certificate, so it was left
-/// as it is and no command ran.
+/// Marsa's file ([`CA_PATH`] on macOS) cannot be read as one certificate, so
+/// it was left as it is and no command ran.
 pub const TRUST_READ: &str = "trust_read";
-/// Writing [`CA_PATH`] failed.
+/// Writing Marsa's file failed.
 pub const TRUST_WRITE: &str = "trust_write";
-/// `security add-trusted-cert` failed or timed out. The helper then ran the
-/// steps of `trust_remove`. If they failed too, the file stays so a later
-/// `trust_remove` can finish, and until then `trust_install` with the same
-/// certificate answers `unchanged`: run `trust_remove` before a retry.
+/// `security add-trusted-cert` (macOS) or `certutil -addstore` (Windows)
+/// failed or timed out. The helper then ran the steps of `trust_remove`. If
+/// they failed too, the file stays so a later `trust_remove` can finish, and
+/// until then `trust_install` with the same certificate answers `unchanged`:
+/// run `trust_remove` before a retry.
 pub const TRUST_ADD_FAILED: &str = "trust_add_failed";
-/// `security` could not remove the trust or the certificate. The file stays,
-/// so a retry still knows the hash.
+/// `security` or `certutil` could not remove the trust or the certificate.
+/// The file stays, so a retry still knows the hash.
 pub const TRUST_REMOVE_FAILED: &str = "trust_remove_failed";
-/// Deleting [`CA_PATH`] failed.
+/// Deleting Marsa's file failed.
 pub const TRUST_DELETE: &str = "trust_delete";
 
 /// Marsa's copy of the CA root it trusts, in a folder only root can write.

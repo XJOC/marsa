@@ -173,7 +173,8 @@ pub struct ApiError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorBody {
     pub error: ApiError,
-    /// What uses a version, with the code `version_in_use` only (task M5-07).
+    /// What uses a version, with the codes `version_in_use` (task M5-07) and
+    /// `sites_lose_php` (task M5-19) only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_use: Option<VersionInUse>,
 }
@@ -291,21 +292,55 @@ pub struct Uninstalled {
 }
 
 /// Why `DELETE /v1/runtimes/{tool}/{version}` refused a version: the facts
-/// of its 409 `version_in_use`. At least one of the last three is set.
+/// of its 409, with the code [`VersionInUse::code`]. At least one of the
+/// last four is set.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionInUse {
     /// Full semver text (`8.3.12`).
     pub version: String,
-    /// The default in `global.toml` (`8.3`), when it picks this version now.
+    /// The default in `global.toml` (`8.3`), when it picks this version now
+    /// and another version of the tool is installed. The default of the only
+    /// installed version does not keep it: the uninstall clears that default
+    /// (task M5-19).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     /// The sites whose own setting in `sites.toml` picks this version now, by
     /// name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sites: Vec<String>,
+    /// The Laravel and PHP sites that run this version now and would have no
+    /// PHP after the uninstall, by name, whatever picked it for them (the
+    /// default, a version file, `composer.json`). Set only when the default
+    /// picks this version and it is the only installed PHP. A site already in
+    /// `sites` is not named again (task M5-19).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sites_left_without_php: Vec<String>,
     /// Caddy runs from this version now.
     #[serde(default)]
     pub caddy: bool,
+}
+
+impl VersionInUse {
+    /// Stable error name of the refusal. Never changes once released.
+    /// `sites_lose_php` when the sites left without PHP are the only use, so
+    /// the user knows that another version must be installed first;
+    /// `version_in_use` otherwise.
+    pub fn code(&self) -> &'static str {
+        let nothing_else = self.default.is_none() && self.sites.is_empty() && !self.caddy;
+        if nothing_else && !self.sites_left_without_php.is_empty() {
+            "sites_lose_php"
+        } else {
+            "version_in_use"
+        }
+    }
+
+    /// Whether anything uses the version, so the uninstall is refused.
+    pub fn any(&self) -> bool {
+        self.default.is_some()
+            || !self.sites.is_empty()
+            || !self.sites_left_without_php.is_empty()
+            || self.caddy
+    }
 }
 
 /// The 202 answer to `POST /v1/runtimes/{tool}/install`. The install's events
@@ -488,9 +523,11 @@ pub struct SetupReport {
     /// Why the helper did not run, or why its answer cannot be used:
     /// `setup_cancelled`, `setup_not_authorized`, `setup_timed_out`,
     /// `setup_interrupted`, `setup_helper_missing`, `setup_helper_unsafe`,
-    /// `setup_helper_protected_folder`, `setup_helper_failed`, or
-    /// `setup_helper_rejected`. `None` if the helper answered, or was not
-    /// needed.
+    /// `setup_helper_protected_folder`, `setup_prompt_failed`,
+    /// `setup_helper_failed`, or `setup_helper_rejected`; on Linux also
+    /// `setup_pkexec_missing`, and `setup_caddy_ports_failed` when the
+    /// helper allowed ports 80 and 443 but Caddy did not take them. `None`
+    /// if the helper answered, or was not needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,
 }
@@ -614,8 +651,9 @@ pub struct UninstallReport {
     /// `uninstall_cancelled`, `uninstall_not_authorized`,
     /// `uninstall_timed_out`, `uninstall_interrupted`,
     /// `uninstall_helper_missing`, `uninstall_helper_unsafe`,
-    /// `uninstall_helper_failed`, or `uninstall_helper_rejected`. Nothing after the helper ran then, and
-    /// the daemon keeps running. `None` if the helper answered.
+    /// `uninstall_prompt_failed`, `uninstall_helper_failed`, or
+    /// `uninstall_helper_rejected`. Nothing after the helper ran then, and the
+    /// daemon keeps running. `None` if the helper answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,
     /// The daemon stops right after this answer: `true` exactly when `error`
@@ -993,6 +1031,37 @@ mod tests {
             },
             json!({ "runtime": "node", "default": "22", "version": "22.11.0" }),
         );
+    }
+
+    #[test]
+    fn the_sites_left_without_php_have_a_code_of_their_own() {
+        let left = VersionInUse {
+            version: "8.3.12".into(),
+            sites_left_without_php: vec!["blog".into()],
+            ..VersionInUse::default()
+        };
+        assert!(left.any());
+        assert_eq!(left.code(), "sites_lose_php");
+        round_trip(
+            &left,
+            json!({ "version": "8.3.12", "sites_left_without_php": ["blog"], "caddy": false }),
+        );
+        // With any other use, the general code.
+        let pinned = VersionInUse {
+            sites: vec!["shop".into()],
+            ..left.clone()
+        };
+        assert_eq!(pinned.code(), "version_in_use");
+        let running = VersionInUse {
+            caddy: true,
+            ..VersionInUse::default()
+        };
+        assert_eq!(running.code(), "version_in_use");
+        // An answer from before M5-19 reads with no such sites.
+        let old: VersionInUse =
+            serde_json::from_value(json!({ "version": "8.3.12", "default": "8.3" })).unwrap();
+        assert!(old.sites_left_without_php.is_empty() && old.any());
+        assert!(!VersionInUse::default().any());
     }
 
     #[test]

@@ -668,8 +668,8 @@ pub fn removing(removal: &Removal) -> String {
 }
 
 /// The lines under the Runtimes table about the last uninstall. A refusal
-/// for `version_in_use` names each thing that uses the version, and what to
-/// do about it.
+/// for `version_in_use` or `sites_lose_php` names each thing that uses the
+/// version, and what to do about it.
 pub fn uninstall_lines(notice: &UninstallNotice) -> Vec<ReportLine> {
     let problem = |text: String| ReportLine {
         text,
@@ -722,6 +722,23 @@ fn in_use_reasons(runtime: Runtime, in_use: &VersionInUse) -> Vec<String> {
                 names.join(", ")
             ));
         }
+    }
+    let names: Vec<String> = in_use
+        .sites_left_without_php
+        .iter()
+        .map(|site| format!("{site}.{TLD}"))
+        .collect();
+    let left = match names.as_slice() {
+        [] => None,
+        [site] => Some(format!("The site {site}")),
+        sites => Some(format!("The sites {}", sites.join(", "))),
+    };
+    if let Some(left) = left {
+        let version = &in_use.version;
+        reasons.push(format!(
+            "{left} would have no {name}: {name} {version} is the only {name} installed. \
+             Install another {name} version and pick it as the default above first."
+        ));
     }
     if in_use.caddy {
         reasons.push("Caddy is running from it. Stop Caddy under Services first.".to_owned());
@@ -862,6 +879,11 @@ fn error_message(code: &str) -> Option<&'static str> {
             "This version is in use: it is a default, a site is set to it, or Caddy runs from \
              it. Nothing was uninstalled."
         }
+        // M5-19: the only PHP and the default, and sites run it.
+        "sites_lose_php" => {
+            "This is the only PHP version installed, and sites run it: they would have no PHP. \
+             Install another PHP version and pick it as the default first."
+        }
         "version_ambiguous" => "More than one installed version matches. Pick one in full.",
         "uninstall_io" => {
             "Cannot delete this version: a program from it may still run, or its folder is not \
@@ -1000,6 +1022,12 @@ fn error_message(code: &str) -> Option<&'static str> {
             "Another user could change the marsa-helper program or its folder, so Marsa did not \
              ask for the password. Make both writable only by you, then run setup again."
         }
+        "setup_prompt_failed" => {
+            "macOS could not show the administrator password prompt, so nothing was changed. \
+             Make sure this Mac's desktop is unlocked. \
+             Quit the Marsa window and the menu-bar icon, run \"marsa daemon stop\" in \
+             Terminal, then run \"marsa setup\" there, on your desktop."
+        }
         "setup_helper_failed" => {
             "marsa-helper gave an answer Marsa cannot read, so the result of setup is not known. \
              Run setup again; if it repeats, report it with the file logs/marsad.log."
@@ -1097,7 +1125,14 @@ mod tests {
             ClientError::PathNotUtf8 { path: path.clone() },
             ClientError::InUse {
                 message: String::new(),
-                in_use: VersionInUse::default(),
+                in_use: Box::default(),
+            },
+            ClientError::InUse {
+                message: String::new(),
+                in_use: Box::new(VersionInUse {
+                    sites_left_without_php: vec!["blog".into()],
+                    ..VersionInUse::default()
+                }),
             },
             ClientError::DaemonFile(DaemonFileError::Missing { path: path.clone() }),
             ClientError::DaemonFile(DaemonFileError::Invalid {
@@ -1165,8 +1200,9 @@ mod tests {
             // M5-09: unlink and forget.
             "site_is_parked",
             "folder_not_parked",
-            // M5-07: uninstall a version.
+            // M5-07 and M5-19: uninstall a version.
             "version_in_use",
+            "sites_lose_php",
             "version_ambiguous",
             "uninstall_io",
             "install_busy",
@@ -1465,6 +1501,7 @@ mod tests {
             "setup_not_authorized",
             "setup_helper_missing",
             "setup_helper_unsafe",
+            "setup_prompt_failed",
             "setup_helper_failed",
             "setup_helper_rejected",
             "redirect_port_held",
@@ -1780,6 +1817,7 @@ mod tests {
                 default: default.map(str::to_owned),
                 sites: sites.iter().map(|site| (*site).to_owned()).collect(),
                 caddy,
+                ..VersionInUse::default()
             },
         }
     }
@@ -1833,6 +1871,21 @@ mod tests {
         let lines = uninstall_lines(&in_use(None, &[], false));
         let general = error_text("version_in_use");
         assert_eq!(texts(&lines), [title, (general.as_str(), true)]);
+
+        // M5-19: the only PHP, with sites that would have no PHP after it.
+        let mut last = in_use(None, &[], false);
+        let one = "The site blog.test would have no PHP: PHP 8.3.27 is the only PHP installed. \
+                   Install another PHP version and pick it as the default above first.";
+        let many = "The sites blog.test, shop.test would have no PHP: PHP 8.3.27 is the only PHP \
+                    installed. Install another PHP version and pick it as the default above \
+                    first.";
+        for (sites, want) in [(&["blog"][..], one), (&["blog", "shop"][..], many)] {
+            if let UninstallNotice::InUse { in_use, .. } = &mut last {
+                in_use.sites_left_without_php =
+                    sites.iter().map(|site| (*site).to_owned()).collect();
+            }
+            assert_eq!(texts(&uninstall_lines(&last)), [title, (want, true)]);
+        }
     }
 
     #[test]

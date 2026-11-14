@@ -24,7 +24,7 @@ use hickory_server::net::runtime::Time;
 use hickory_server::proto::op::{
     Edns, Header, HeaderCounts, LowerQuery, Metadata, OpCode, ResponseCode,
 };
-use hickory_server::proto::rr::rdata::A;
+use hickory_server::proto::rr::rdata::{A, SOA};
 use hickory_server::proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::MessageResponseBuilder;
@@ -221,12 +221,20 @@ impl RequestHandler for TestZone {
 async fn reply<R: ResponseHandler>(request: &Request, mut handle: R) -> ResponseInfo {
     let mut metadata = Metadata::response_from_request(&request.metadata);
     let mut record = None;
+    let mut soa = None;
     match (request.metadata.op_code, request.queries.queries()) {
         (OpCode::Query, [query]) => {
             let (code, found) = answer(query);
             metadata.response_code = code;
             // This server owns `test.`: its answers there are final.
             metadata.authoritative = code == ResponseCode::NoError;
+            // No record of that type (NODATA): the zone's SOA goes in the
+            // authority section, so resolvers may cache the empty answer for
+            // its MINIMUM, one second (RFC 2308 section 3). systemd-resolved
+            // caches none without it.
+            if code == ResponseCode::NoError && found.is_none() {
+                soa = Some(zone_soa());
+            }
             record = found;
         }
         // DNS servers in practice take exactly one question per message.
@@ -244,7 +252,7 @@ async fn reply<R: ResponseHandler>(request: &Request, mut handle: R) -> Response
         metadata,
         record.iter(),
         iter::empty(),
-        iter::empty(),
+        soa.iter(),
         iter::empty(),
     );
     match handle.send_response(response).await {
@@ -269,12 +277,33 @@ fn answer(query: &LowerQuery) -> (ResponseCode, Option<Record>) {
     }
     let data = match (query.query_type(), query.query_class()) {
         (RecordType::A, DNSClass::IN) => Some(RData::A(A(Ipv4Addr::LOCALHOST))),
+        // The zone's own SOA, asked at its top: `test.`.
+        (RecordType::SOA, DNSClass::IN) if query.name().iter().count() == 1 => {
+            Some(RData::SOA(soa_data()))
+        }
         _ => None,
     };
     // The name as asked, letter case kept: some resolvers check it.
     let name = query.original().name().clone();
     let record = data.map(|data| Record::from_rdata(name, TTL, data));
     (ResponseCode::NoError, record)
+}
+
+/// The SOA record of the `test.` zone, for the authority section of an
+/// empty answer.
+fn zone_soa() -> Record {
+    let zone = Name::from_ascii("test.").expect("`test.` is a valid name");
+    Record::from_rdata(zone, TTL, RData::SOA(soa_data()))
+}
+
+/// The SOA of `test.`. Only MINIMUM matters to clients: one second, like
+/// [`TTL`], so a negative answer is cached no longer than an address.
+/// Refresh, retry, and expire are for secondary servers, which this zone
+/// has none of.
+fn soa_data() -> SOA {
+    let mname = Name::from_ascii("localhost.").expect("`localhost.` is a valid name");
+    let rname = Name::from_ascii("hostmaster.test.").expect("`hostmaster.test.` is a valid name");
+    SOA::new(mname, rname, 1, 3600, 600, 86_400, TTL)
 }
 
 /// Whether `name` is `test.` or a name under it, in any letter case.
@@ -356,6 +385,17 @@ mod tests {
         (message.metadata.response_code, answers.collect())
     }
 
+    /// The SOA in the authority section: its owner, TTL, and MINIMUM.
+    fn authority_soa(message: &Message) -> Option<(String, u32, u32)> {
+        match message.authorities.as_slice() {
+            [record] => match &record.data {
+                RData::SOA(soa) => Some((record.name.to_string(), record.ttl, soa.minimum)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     async fn answers_every_case(transport: Transport) {
         let shutdown = CancellationToken::new();
         let server = start(any_port(), &shutdown).await.unwrap();
@@ -383,6 +423,22 @@ mod tests {
             ),
             ("test.", RecordType::A, ok, vec!["test. 1 127.0.0.1"]),
             ("shop.test.", RecordType::MX, ok, vec![]),
+            // The zone's own SOA at its top; under it, an empty answer.
+            (
+                "test.",
+                RecordType::SOA,
+                ok,
+                vec!["test. 1 localhost. hostmaster.test. 1 3600 600 86400 1"],
+            ),
+            ("shop.test.", RecordType::SOA, ok, vec![]),
+            // `*` is a label like any other: not the zone's top.
+            ("*.test.", RecordType::SOA, ok, vec![]),
+            (
+                "TEST.",
+                RecordType::SOA,
+                ok,
+                vec!["TEST. 1 localhost. hostmaster.test. 1 3600 600 86400 1"],
+            ),
             ("example.com.", RecordType::A, ResponseCode::Refused, vec![]),
         ];
         for (name, kind, code, answers) in cases {
@@ -394,6 +450,13 @@ mod tests {
                 "{name} {kind} over {transport:?}"
             );
             assert_eq!(reply.metadata.authoritative, code == ok, "{name} {kind}");
+            // An empty answer in the zone carries its SOA, with MINIMUM 1
+            // (RFC 2308); an answer with a record, or REFUSED, carries none.
+            let soa = (code == ok && answers.is_empty()).then(|| ("test.".to_owned(), TTL, TTL));
+            match soa {
+                Some(_) => assert_eq!(authority_soa(&reply), soa, "{name} {kind}"),
+                None => assert!(reply.authorities.is_empty(), "{name} {kind}"),
+            }
             assert!(!reply.metadata.recursion_available, "{name} {kind}");
         }
         server.stop(LIMIT).await;

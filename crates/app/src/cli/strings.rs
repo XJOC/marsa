@@ -193,6 +193,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "version_in_use" => "This version is in use: it is a default, a site is set to it, \
              or Caddy runs from it. Nothing was uninstalled."
             .into(),
+        // M5-19: the only PHP and the default, and sites run it.
+        "sites_lose_php" => "This is the only PHP version installed, and sites run it: they \
+             would have no PHP. Install another PHP version and make it the default first. \
+             Nothing was uninstalled."
+            .into(),
         "version_ambiguous" => format!(
             "{} matches more than one installed {}version. Name one in full; \"marsa \
              runtimes{}\" lists them.",
@@ -388,7 +393,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         // `marsa setup`: the setup route (task M4-13), its skipped steps, and
         // the failure codes of `marsa-helper`.
         "setup_running" => "Another setup is running. Wait for it to end, then try again.".into(),
-        "setup_not_supported" => "\"marsa setup\" works on macOS only for now.".into(),
+        "setup_not_supported" => "\"marsa setup\" works on macOS and Linux only for now.".into(),
         "setup_cancelled" => "The password prompt was cancelled, so nothing was changed. Run \
              \"marsa setup\" again when you are ready."
             .into(),
@@ -399,10 +404,10 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             "The Marsa daemon stopped during setup, so Marsa stopped waiting. \
              {SETUP_MAY_HAVE_RUN}"
         ),
-        "setup_not_authorized" => "macOS did not give Marsa admin rights, so nothing was \
-             changed. The password was not accepted, or the prompt could not open (over SSH, \
-             for example). Run \"marsa daemon stop\", then run \"marsa setup\" again in \
-             Terminal on your desktop and enter the password of an administrator account."
+        "setup_not_authorized" => "The system did not give Marsa admin rights, so nothing \
+             was changed. The password was not accepted, or the prompt could not open (over \
+             SSH, for example). Run \"marsa daemon stop\", then run \"marsa setup\" again in \
+             a terminal on your desktop and enter the password of an administrator account."
             .into(),
         "setup_helper_missing" => "The marsa-helper program is not next to marsad, so nothing \
              was changed. Reinstall Marsa, then try again."
@@ -417,6 +422,12 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              nothing was changed. Run \"marsa daemon stop\", move Marsa's programs to \
              ~/Library/Application Support/dev.marsa.Marsa/bin, then run \"marsa setup\" from \
              there."
+            .into(),
+        "setup_prompt_failed" => "macOS could not show the administrator password prompt, so \
+             marsa-helper did not run. Make sure you are logged in at this Mac's desktop and it \
+             is unlocked. Quit the Marsa window and the menu-bar icon, run \"marsa daemon \
+             stop\", then run \"marsa setup\" again in Terminal. The error number is in the \
+             file logs/marsad.log."
             .into(),
         "setup_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the result \
              of setup is not known. Run \"marsa setup\" again; if it repeats, report it with \
@@ -468,9 +479,14 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              trusted certificates. Run \"marsa setup\" again; if it repeats, report it."
             .into(),
         // Setup and the uninstall both meet it: no advice for one of them.
-        "trust_read" => "macOS did not let Marsa read its copy of its certificate authority \
-             in /Library/Application Support/Marsa, so Marsa left the trust for all users as it \
-             is. Run the command again; if it repeats, report it."
+        // macOS and Linux: the helper's copy of the CA in a system folder.
+        "trust_read" => "Marsa could not use its copy of its certificate authority: it cannot \
+             be read, or a file or link Marsa did not write is in its place (on macOS in \
+             /Library/Application Support/Marsa; on Linux \
+             /usr/local/share/ca-certificates/marsa-local-ca.crt or \
+             /etc/pki/ca-trust/source/anchors/marsa-local-ca.pem). So Marsa left the trust for \
+             all users as it is. If you put a file there, move it away; then run the command \
+             again. If it repeats, report it."
             .into(),
         "trust_record_unusable" => format!(
             "Marsa cannot use {}: it is not a plain file in a folder of yours, or not the \
@@ -479,9 +495,8 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              yourself, remove \"Marsa Local CA\" in Keychain Access.",
             shown("its record of the trusted certificate")
         ),
-        "trust_delete" => "Marsa took away the trust for all users, but could not delete its \
-             copy of the certificate in /Library/Application Support/Marsa. Run the command \
-             again; if it repeats, report it."
+        "trust_delete" => "Marsa could not delete its copy of its certificate authority in a \
+             system folder. Run the command again; if it repeats, report it."
             .into(),
         "trust_add_failed" => "Your browser will not trust Marsa's sites yet: the trust for \
              your user was not added. Run \"marsa setup\" in Terminal on the Mac's desktop and \
@@ -491,6 +506,83 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "trust_remove_failed" => "Marsa could not take away the trust in its certificate \
              authority. Run the command again; if it repeats, remove \"Marsa Local CA\" in \
              Keychain Access and report it."
+            .into(),
+        // The Linux ops of `marsa-helper` (tasks M4-18b, M4-18c, M4-18h).
+        "resolved_foreign" => "/etc/systemd/system/marsa-dns-link.service belongs to another \
+             tool, so Marsa left it as it is. Move that file away, then run \"marsa setup\" \
+             again."
+            .into(),
+        "resolved_read" | "resolved_write" | "resolved_delete" => "Linux did not let Marsa \
+             change its files for .test names (/etc/systemd/system/marsa-dns-link.service, or \
+             the old /etc/systemd/resolved.conf.d/marsa.conf). Run the command again; if it \
+             repeats, report it."
+            .into(),
+        "resolved_not_running" => "Marsa sends .test names to its DNS server through \
+             systemd-resolved, which does not run on this system, so nothing was changed. \
+             Start systemd-resolved, then run \"marsa setup\" again."
+            .into(),
+        "resolved_tool_missing" => "The ip program (package iproute2) is not on this system, \
+             so Marsa could not make its link for .test names. Install iproute2, then run \
+             \"marsa setup\" again."
+            .into(),
+        "resolved_unit_failed" => "systemd did not start or stop Marsa's link for .test names \
+             (marsa-dns-link.service). Run the command again; if it repeats, report it with \
+             the output of \"journalctl -u marsa-dns-link\"."
+            .into(),
+        "setup_pkexec_missing" => "pkexec is not installed, so Marsa cannot ask for the \
+             administrator password. Install the package pkexec (Debian, Ubuntu), polkit \
+             (Fedora), or policykit-1 (older systems), then run \"marsa setup\" again."
+            .into(),
+        "setup_caddy_ports_failed" => "Linux now lets Caddy use ports 80 and 443, but Caddy \
+             did not take them. Most often another program listens there (Apache, nginx). Stop \
+             it, then run \"marsa services restart caddy\"; \"marsa logs caddy\" says why."
+            .into(),
+        "resolved_systemd_too_old" => "This system's systemd is older than version 250, \
+             where systemd-resolved can drop the setting that sends .test names to Marsa, so \
+             Marsa did not make it. .test names do not open by name here yet; a later version \
+             of Marsa adds another way."
+            .into(),
+        "resolved_check_failed" => "Marsa could not confirm that systemd-resolved sends .test \
+             names, and only them, to its DNS server, so it took its link out again. Run \
+             \"marsa setup\" again; if it repeats, report it."
+            .into(),
+        // Only while Marsa removes the setting of an earlier build, which
+        // sent every name to its DNS server.
+        "resolved_restart_failed" => "systemd-resolved did not restart after Marsa removed an \
+             old setting, so it may still send every name to Marsa's DNS server. Run \"sudo \
+             systemctl restart systemd-resolved\"; if it fails, report it with the output of \
+             \"journalctl -u systemd-resolved\"."
+            .into(),
+        "resolved_stopped" => "systemd-resolved stopped and did not start again, so no name \
+             resolves on this computer now. Run \"sudo systemctl start systemd-resolved\", then \
+             run \"marsa setup\" again; if it repeats, report it with the output of \
+             \"journalctl -u systemd-resolved\"."
+            .into(),
+        "ports_foreign" => "/etc/sysctl.d/60-marsa.conf belongs to another tool, so Marsa \
+             left it as it is and Caddy cannot use ports 80 and 443. Move that file away, then \
+             run \"marsa setup\" again."
+            .into(),
+        "ports_read" | "ports_write" | "ports_delete" => "Linux did not let Marsa change \
+             /etc/sysctl.d/60-marsa.conf. Run \"marsa setup\" again; if it repeats, report it."
+            .into(),
+        "ports_apply_failed" => "Linux did not let Caddy use ports 80 and 443, so Marsa took \
+             its setting out again. Run \"marsa setup\" again; if it repeats, report it with \
+             the file logs/marsad.log."
+            .into(),
+        "ports_restore_failed" => "Marsa removed its setting for ports 80 and 443, but could \
+             not apply that now: every program may use ports 80 to 1023 until the computer \
+             restarts."
+            .into(),
+        "trust_tool_missing" => "This system has no tool Marsa knows for its trusted \
+             certificates (update-ca-certificates with /usr/local/share/ca-certificates, or \
+             update-ca-trust with /etc/pki/ca-trust/source/anchors), so Marsa could not change \
+             the trust in its certificate authority. On Debian, Ubuntu, or Fedora, install the \
+             ca-certificates package, then run the command again. Systems whose tool reads \
+             another folder (Arch, openSUSE) are not supported yet."
+            .into(),
+        "trust_store_update_failed" => "The system's store of trusted certificates could not \
+             be updated, so Marsa's certificate authority is not trusted, or not removed, yet. \
+             Run the command again; if it repeats, report it with the file logs/marsad.log."
             .into(),
         "pf_write" | "pf_load_failed" => "macOS did not load the redirect of ports 80 and 443. \
              Run \"marsa setup\" again; if it repeats, report it."
@@ -536,6 +628,12 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              its folder, so Marsa did not ask for the password and nothing was removed. Make \
              both yours and writable only by you (chmod go-w), then run \"marsa uninstall \
              --all\" again. The path is in the file logs/marsad.log."
+            .into(),
+        "uninstall_prompt_failed" => "macOS could not show the administrator password prompt, \
+             so marsa-helper did not run and nothing was removed. Make sure you are logged in at \
+             this Mac's desktop and it is unlocked. Quit the Marsa window and the menu-bar icon, \
+             run \"marsa daemon stop\", then run \"marsa uninstall --all\" again in Terminal. \
+             The error number is in the file logs/marsad.log."
             .into(),
         "uninstall_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the \
              result is not known, and Marsa removed nothing else. Run \"marsa uninstall --all\" \
@@ -727,8 +825,8 @@ pub fn nothing_to_uninstall(runtime: Runtime, requested: &str) -> String {
     )
 }
 
-/// `version_in_use` with its facts: one sentence for each use, each with
-/// what to do first.
+/// `version_in_use` or `sites_lose_php` with its facts: one sentence for
+/// each use, each with what to do first.
 pub fn version_in_use(runtime: Runtime, in_use: &VersionInUse) -> String {
     let name = runtime_name(runtime);
     let version = &in_use.version;
@@ -755,6 +853,19 @@ pub fn version_in_use(runtime: Runtime, in_use: &VersionInUse) -> String {
             " The sites {} are set to it: give them another version first.",
             sites.join(", ")
         )),
+    }
+    let left = match &in_use.sites_left_without_php[..] {
+        [] => None,
+        [site] => Some(format!("The site {site}")),
+        sites => Some(format!("The sites {}", sites.join(", "))),
+    };
+    if let Some(left) = left {
+        let tool = runtime.dir_name();
+        text.push_str(&format!(
+            " {left} would have no {name}: {name} {version} is the only {name} installed. \
+             Install another version first with \"marsa install {tool} <version>\", then make \
+             it the default with \"marsa use {tool} <version>\"."
+        ));
     }
     if in_use.caddy {
         text.push_str(" Caddy runs from it: stop Caddy first with \"marsa services stop caddy\".");
@@ -928,11 +1039,15 @@ pub fn opened(url: &str) -> String {
 // `marsa setup`.
 
 /// On stderr before the call, which may wait for the admin prompt and then
-/// for the trust dialog. On macOS only: other systems get
-/// `setup_not_supported` and no prompt.
+/// for the trust dialog (macOS).
 pub const SETUP_STARTED: &str = "Setting up Marsa. macOS may ask for an administrator \
      password, and may then ask you to approve trusting Marsa's certificate authority for your \
      user.";
+/// The same on Linux, with the one thing setup changes for every program
+/// (ADR 0014): it says so before the password is asked.
+pub const SETUP_STARTED_LINUX: &str = "Setting up Marsa. Linux may ask for your password. \
+     Setup lets every program on this computer use ports 80 to 1023, so that Caddy can serve \
+     your sites on ports 80 and 443.";
 /// After Marsa stopped waiting for the helper, which may still have run.
 const SETUP_MAY_HAVE_RUN: &str = "Some steps may already have run with admin rights. Running \
      \"marsa setup\" again is safe: each step checks what is already done.";
@@ -951,6 +1066,8 @@ pub fn setup_step(op: &str) -> String {
         "trust_install" => "Trust Marsa's HTTPS certificates".to_owned(),
         "resolver_install" => "Send .test names to Marsa".to_owned(),
         "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
+        "resolved_install" => "Send .test names to Marsa".to_owned(),
+        "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -1343,8 +1460,8 @@ pub fn doctor_add_shims(shims: &Path, windows: bool) -> String {
         )
     } else {
         format!(
-            "Add this line at the end of ~/.zprofile and ~/.zshrc (or your shell's startup \
-             file), then open a new terminal: export PATH=\"{}:$PATH\"",
+            "Add this line at the end of ~/.zshrc (or your shell's startup file), then open a \
+             new terminal: export PATH=\"{}:$PATH\"",
             shims.display()
         )
     }
@@ -1365,8 +1482,8 @@ pub fn doctor_move_shims(shims: &Path, windows: bool) -> String {
         )
     } else {
         format!(
-            "Move the line that adds {} to PATH to the end of ~/.zprofile and ~/.zshrc (or your \
-             shell's startup file), after Homebrew's, then open a new terminal.",
+            "Move the line that adds {} to PATH to the end of ~/.zshrc (or your shell's startup \
+             file), after any other line that changes PATH, then open a new terminal.",
             shims.display()
         )
     }
@@ -1434,8 +1551,9 @@ mod tests {
         // `PUT /v1/runtimes/{tool}/default` (task M5-01).
         "version_not_installed",
         "no_default_version",
-        // `DELETE /v1/runtimes/{tool}/{version}` (task M5-07).
+        // `DELETE /v1/runtimes/{tool}/{version}` (tasks M5-07 and M5-19).
         "version_in_use",
+        "sites_lose_php",
         "version_ambiguous",
         "uninstall_io",
         "recipe_invalid",
@@ -1516,6 +1634,7 @@ mod tests {
         "setup_helper_missing",
         "setup_helper_unsafe",
         "setup_helper_protected_folder",
+        "setup_prompt_failed",
         "setup_helper_failed",
         "setup_helper_rejected",
         "redirect_port_held",
@@ -1536,6 +1655,28 @@ mod tests {
         "pf_write",
         "pf_load_failed",
         "pf_helper_unreadable",
+        // Linux setup (task M4-18): the codes of `marsa-helper`.
+        "resolved_foreign",
+        "resolved_read",
+        "resolved_write",
+        "resolved_delete",
+        "resolved_not_running",
+        "resolved_restart_failed",
+        "resolved_check_failed",
+        "resolved_tool_missing",
+        "resolved_unit_failed",
+        "resolved_systemd_too_old",
+        "setup_pkexec_missing",
+        "setup_caddy_ports_failed",
+        "resolved_stopped",
+        "ports_foreign",
+        "ports_read",
+        "ports_write",
+        "ports_delete",
+        "ports_apply_failed",
+        "ports_restore_failed",
+        "trust_tool_missing",
+        "trust_store_update_failed",
         // The uninstall route (task M5-13), the removal codes of
         // `marsa-helper`, and `marsa uninstall --all` itself.
         "uninstall_running",
@@ -1546,6 +1687,7 @@ mod tests {
         "uninstall_not_authorized",
         "uninstall_helper_missing",
         "uninstall_helper_unsafe",
+        "uninstall_prompt_failed",
         "uninstall_helper_failed",
         "uninstall_helper_rejected",
         "uninstall_all_needs_yes",
@@ -1615,7 +1757,14 @@ mod tests {
             },
             ClientError::InUse {
                 message: "x".into(),
-                in_use: VersionInUse::default(),
+                in_use: Box::default(),
+            },
+            ClientError::InUse {
+                message: "x".into(),
+                in_use: Box::new(VersionInUse {
+                    sites_left_without_php: vec!["blog".into()],
+                    ..VersionInUse::default()
+                }),
             },
             ClientError::DaemonFile(DaemonFileError::Missing { path: path() }),
             ClientError::DaemonFile(DaemonFileError::Invalid {

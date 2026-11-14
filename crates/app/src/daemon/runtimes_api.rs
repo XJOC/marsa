@@ -31,6 +31,13 @@
 //! now, or that the running Caddy runs from. Then the folder is moved aside
 //! (`installer::uninstall`), each php-fpm pool that runs the version is
 //! stopped, the folder is deleted, and the site list is built again.
+//!
+//! The default of the only installed PHP or Node version has no other
+//! version to pick, so it does not keep the version: it is cleared from
+//! `global.toml` with the uninstall (task M5-19). The Laravel and PHP sites
+//! that run that last PHP would have no PHP after it, whatever picked it for
+//! them (the default, a version file, `composer.json`), so they still keep
+//! it: 409 `sites_lose_php`, with their names.
 
 use std::error::Error;
 use std::fmt;
@@ -57,12 +64,13 @@ use marsa_core::runtimes::{Runtime, RuntimesDir, RuntimesError};
 use marsa_core::types::{
     DefaultRequest, DefaultVersion, Event, InstallAccepted, InstallDone, InstallEvent,
     InstallFailure, InstallProgress, InstallRequest, InstallUpdate, RuntimeList, RuntimeVersions,
-    Uninstalled, VersionInUse,
+    SiteKind, Uninstalled, VersionInUse,
 };
 use semver::Version;
 
 use super::api::HttpError;
 use super::php::{fpm_id, wanted_pools};
+use super::sites_api;
 use super::state::Daemon;
 
 /// The routes, for `api::router` to merge before its fallbacks.
@@ -607,7 +615,7 @@ async fn remove_version(
         let _one = worker.lock_global();
         retire_unused(&worker.data_dir, runtime, text.trim(), caddy.as_deref())
     });
-    let (version, retired) = job.await.map_err(|err| {
+    let (version, retired, cleared) = job.await.map_err(|err| {
         tracing::error!(error = %err, "the uninstall job failed");
         HttpError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -615,6 +623,10 @@ async fn remove_version(
             "the uninstall job failed",
         )
     })??;
+    if let Some(default) = cleared {
+        let tool = runtime.dir_name();
+        tracing::info!(runtime = tool, %default, "cleared the default of the last version");
+    }
     // The version is hidden now, so no pool can start with it again.
     if runtime == Runtime::Php {
         stop_pools(&daemon, &version).await;
@@ -640,15 +652,16 @@ async fn remove_version(
 }
 
 /// Picks the installed version `text` names, checks that nothing uses it,
-/// and moves its folder aside. A refusal changes nothing on disk. `caddy` is
-/// the program the running Caddy runs from. The caller holds
-/// [`Daemon::lock_global`].
+/// and moves its folder aside. Also returns the default it cleared, if any:
+/// the default of the only installed version goes with it (task M5-19). A
+/// refusal changes nothing on disk. `caddy` is the program the running Caddy
+/// runs from. The caller holds [`Daemon::lock_global`].
 fn retire_unused(
     data_dir: &Path,
     runtime: Runtime,
     text: &str,
     caddy: Option<&Path>,
-) -> Result<(Version, Retired), HttpError> {
+) -> Result<(Version, Retired, Option<String>), HttpError> {
     resolver::best_match(text, &[]).map_err(|err| bad_version(text, err))?;
     let runtimes = RuntimesDir::in_dir(data_dir);
     let installed = runtimes.installed(runtime).map_err(|err| {
@@ -689,22 +702,78 @@ fn retire_unused(
     let mut used = in_use(runtime, &version, &installed, &global, &sites);
     let dir = runtimes.version_dir(runtime, &version);
     used.caddy = caddy.is_some_and(|program| program.starts_with(&dir));
-    if used.default.is_some() || !used.sites.is_empty() || used.caddy {
+    // The default of the only installed version has no other version to
+    // pick, so it goes with this one. The PHP sites that run this last PHP
+    // would have none after it, so they keep the version instead.
+    let clear = match (default_tool(runtime), installed.len()) {
+        (Some(tool), 1) => used.default.take().map(|default| (tool, default)),
+        _ => None,
+    };
+    if clear.is_some() && runtime == Runtime::Php {
+        let mut left = sites_running(data_dir, &sites, &version);
+        // A site set to it in `sites.toml` is named once, as set to it.
+        left.retain(|name| !used.sites.contains(name));
+        used.sites_left_without_php = left;
+    }
+    if used.any() {
         let message = format!("{} {version} is in use: {used:?}", runtime.dir_name());
-        let mut err = HttpError::new(StatusCode::CONFLICT, "version_in_use", message);
+        let mut err = HttpError::new(StatusCode::CONFLICT, used.code(), message);
         err.in_use = Some(Box::new(used));
         return Err(err);
     }
-    let retired = uninstall::retire(&runtimes, runtime, &version).map_err(|err| {
-        let status = match err {
-            UninstallError::Busy => StatusCode::CONFLICT,
-            UninstallError::NotInstalled { .. } => StatusCode::NOT_FOUND,
-            UninstallError::Io { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        tracing::warn!(code = err.code(), error = %err, "cannot uninstall");
-        HttpError::new(status, err.code(), err.to_string())
-    })?;
-    Ok((version, retired))
+    // The default first, then the move. The move fails more often (on
+    // Windows: a program from the folder runs), and then the default is
+    // written back, so a failed uninstall keeps it. In no order of failures
+    // does a default name a version that is gone: at worst the version
+    // stays without its default, and the log says so.
+    if let Some((tool, _)) = &clear {
+        let mut cleared = global.clone();
+        defaults_mut(&mut cleared, *tool).default = None;
+        config::save_global(&paths.global, &cleared).map_err(|err| global_error(&err))?;
+    }
+    let retired = match uninstall::retire(&runtimes, runtime, &version) {
+        Ok(retired) => retired,
+        Err(err) => {
+            tracing::warn!(code = err.code(), error = %err, "cannot uninstall");
+            let mut answer = uninstall_error(&err);
+            if clear.is_some()
+                && let Err(put_back) = config::save_global(&paths.global, &global)
+            {
+                let code = put_back.code();
+                tracing::error!(code, error = %put_back, "cannot put the default back");
+                answer
+                    .message
+                    .push_str("; the default it had could not be put back");
+            }
+            return Err(answer);
+        }
+    };
+    Ok((version, retired, clear.map(|(_, default)| default)))
+}
+
+/// The answer for an uninstall that could not move the folder aside.
+fn uninstall_error(err: &UninstallError) -> HttpError {
+    let status = match err {
+        UninstallError::Busy => StatusCode::CONFLICT,
+        UninstallError::NotInstalled { .. } => StatusCode::NOT_FOUND,
+        UninstallError::Io { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    HttpError::new(status, err.code(), err.to_string())
+}
+
+/// The PHP sites that run `version` now, by name, whatever picked it: the
+/// default, a version file, a `composer.json` constraint, or `sites.toml`.
+/// Only Laravel and PHP sites count, as in `wanted_pools`: a static site or
+/// a Node proxy runs no PHP. Builds the site list as the daemon does, so it
+/// reads the disk.
+fn sites_running(data_dir: &Path, sites: &SitesConfig, version: &Version) -> Vec<String> {
+    let list = sites_api::build(data_dir, sites);
+    list.sites
+        .into_iter()
+        .filter(|site| matches!(site.kind, SiteKind::Laravel | SiteKind::Php))
+        .filter(|site| site.php.as_ref() == Some(version))
+        .map(|site| site.name)
+        .collect()
 }
 
 /// Whether the version text `text` picks `version` among `installed`, as the
@@ -741,6 +810,7 @@ fn in_use(
             .filter(|(_, site)| setting(site).is_some_and(|text| uses(&text)))
             .map(|(name, _)| name.clone())
             .collect(),
+        sites_left_without_php: Vec::new(),
         caddy: false,
     }
 }
