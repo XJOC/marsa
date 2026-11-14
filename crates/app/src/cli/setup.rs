@@ -120,7 +120,8 @@ pub fn render(report: &SetupReport, data_dir: &Path) -> String {
     text
 }
 
-/// Why the helper did not run, ready for stderr.
+/// Why the helper did not run, or (Linux) why Caddy did not take ports 80
+/// and 443 after it, ready for stderr.
 pub fn error(report: &SetupReport) -> Option<ClientFailure> {
     let error = report.error.as_ref()?;
     let code = printable(&error.code);

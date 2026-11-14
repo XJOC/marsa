@@ -1037,7 +1037,9 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
         // the event and the answer: the sites open on the usual ports as
         // soon as setup ends. Here, not in the handler, so it happens even
         // if the client went away.
-        if is_linux(platform) && low_ports_set(&report) {
+        // Not while the daemon stops: the runtime may be going away, and
+        // Caddy reads its file when it starts again.
+        if is_linux(platform) && low_ports_set(&report) && !daemon.shutdown.is_cancelled() {
             match runtime.block_on(daemon.caddy.reapply(&daemon)) {
                 Ok(applied) => {
                     tracing::info!(?applied, "caddy config sent again with ports 80 and 443")
