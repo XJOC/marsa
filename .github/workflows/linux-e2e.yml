@@ -52,7 +52,11 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install --profile minimal
 
+      # One cache per system: objects built on 24.04 use symbols of its newer
+      # glibc (`__isoc23_sscanf`) and fail to link on 22.04.
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
 
       - name: Build marsa, marsad, and marsa-helper
         run: cargo build --release -p marsa -p marsa-helper
@@ -72,6 +76,12 @@ jobs:
           find "$dir" -maxdepth 3 -type f | head -n 20
           php="$(find "$dir" -type f -name php | head -n 1)"
           ldd --version | head -n 1
+          grep -m1 'model name' /proc/cpuinfo
+          for flag in sse4_2 avx avx2 bmi2 avx512f avx512bw avx512vl; do
+            grep -qw "$flag" /proc/cpuinfo && echo "cpu has $flag" || echo "cpu LACKS $flag"
+          done
+          echo "zmm (AVX-512) instructions in php: $(objdump -d --no-show-raw-insn "$php" | grep -c zmm || true)"
+          echo "ymm (AVX) instructions in php: $(objdump -d --no-show-raw-insn "$php" | grep -c ymm || true)"
           file "$php"
           ldd "$php" || true
           readelf -l "$php" | grep -E 'INTERP|interpreter|GNU_PROPERTY|LOAD' | head -n 12 || true

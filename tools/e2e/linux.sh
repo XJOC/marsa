@@ -171,6 +171,21 @@ fi
 helper '[{"op":"ports_remove"},{"op":"resolved_remove"}]' || fail "the helper exited with $?"
 [ "$(statuses)" = "unchanged unchanged" ] || fail "expected unchanged unchanged, got: $(statuses)"
 
+step "removal reloads only Marsa's key from the other sysctl files"
+helper '[{"op":"ports_install"}]' || fail "the helper exited with $?"
+[ "$(cat "$PORT_START")" = 80 ] || fail "ports_install did not set 80"
+# Another program's file sets the same key, and someone changed another
+# setting by hand since the boot.
+printf 'net.ipv4.ip_unprivileged_port_start = 100\nvm.swappiness = 60\n' | sudo tee /etc/sysctl.d/10-someone-else.conf
+run sudo sysctl -w vm.swappiness=13
+helper '[{"op":"ports_remove"}]' || fail "the helper exited with $?"
+[ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"
+[ "$(cat "$PORT_START")" = 100 ] || fail "the other file's value did not come back: $(cat "$PORT_START")"
+[ "$(cat /proc/sys/vm/swappiness)" = 13 ] || fail "a setting changed by hand was reloaded: $(cat /proc/sys/vm/swappiness)"
+echo "the other file's port value is back, and vm.swappiness kept its hand-set value"
+sudo rm /etc/sysctl.d/10-someone-else.conf
+run sudo sysctl -w net.ipv4.ip_unprivileged_port_start=1024
+
 step "a machine with another global DNS server: a clear refusal"
 # Many restarts in a few seconds hit the unit's start limit.
 sudo systemctl reset-failed systemd-resolved
