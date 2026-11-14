@@ -77,6 +77,8 @@ for variant in none addr route; do
   esac
   echo; echo "===== variant $variant"
   write_unit "$extra"
+  # systemd refuses a sixth start in ten seconds (run 43605798363).
+  sudo systemctl reset-failed marsa-s02c.service 2>/dev/null
   run sudo systemctl enable --now marsa-s02c.service
   run resolvectl status marsa0
   run "$IP" route show table local dev marsa0
@@ -85,15 +87,19 @@ for variant in none addr route; do
   for round in 1 2 3 4 5; do
     sudo systemctl reset-failed systemd-resolved
     sudo systemctl restart systemd-resolved
+    sudo systemctl reset-failed marsa-s02c.service
     sudo systemctl restart marsa-s02c.service
     times="$times $(first_lookup)"
+    sleep 2
   done
   result "$variant" "first lookup after restarts, 5 rounds (s)" "$times"
   # The same right after the unit only, without a restart of resolved.
   times=""
   for round in 1 2 3; do
+    sudo systemctl reset-failed marsa-s02c.service
     sudo systemctl restart marsa-s02c.service
     times="$times $(first_lookup)"
+    sleep 2
   done
   result "$variant" "first lookup after a restart of the unit only (s)" "$times"
   sleep 1
