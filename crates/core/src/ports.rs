@@ -1,7 +1,8 @@
 //! Who holds a TCP port: reads the output of `netstat` and `ps` on macOS.
 //!
 //! The `pf` redirect of ADR 0008 sends every connection to `127.0.0.1:80`,
-//! `127.0.0.1:443`, `[::1]:80`, and `[::1]:443` to Caddy. Another program that
+//! `127.0.0.1:443`, `[::1]:80`, and `[::1]:443` to Caddy's high ports (the
+//! `[::1]` ones reach no listener: Caddy binds `127.0.0.1` only). Another program that
 //! listens on those ports (Laravel Herd's nginx, for example) stops getting
 //! its traffic, and neither program logs an error. So the daemon asks who
 //! holds the ports before it asks for the redirect, and on every start:
@@ -92,7 +93,8 @@ pub fn parse_netstat(text: &str) -> Vec<Listener> {
 
 /// The listeners that take connections to `127.0.0.1:<port>` or
 /// `[::1]:<port>`, in netstat's order. These are the addresses that the `pf`
-/// redirect of ADR 0008 captures, and the addresses that `*.test` resolves to.
+/// redirect of ADR 0008 captures. `*.test` resolves to `127.0.0.1` only
+/// (task M5-17); `::1` stays here because pf redirects it too.
 ///
 /// - **Loopback:** `127.0.0.1` or `::1` (also written `::ffff:127.0.0.1`).
 /// - **Wildcard:** `*` (netstat's form), `0.0.0.0`, or `::`. A wildcard socket

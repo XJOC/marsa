@@ -719,6 +719,14 @@ mod tests {
             let link = tmp.path().join("link");
             std::os::unix::fs::symlink(&file, &link).unwrap();
             assert!(RealSystem.is_link(&link) && !RealSystem.is_link(&file));
+            // Not followed: a link to nothing and a link to a folder are
+            // links too, and the folder itself is not.
+            let dangling = tmp.path().join("dangling");
+            std::os::unix::fs::symlink(&missing, &dangling).unwrap();
+            let to_dir = tmp.path().join("to-dir");
+            std::os::unix::fs::symlink(tmp.path(), &to_dir).unwrap();
+            assert!(RealSystem.is_link(&dangling) && RealSystem.is_link(&to_dir));
+            assert!(!RealSystem.is_link(tmp.path()));
         }
     }
 
@@ -903,19 +911,34 @@ mod tests {
     }
 
     /// Read only: `certutil` runs from the system folder with the helper's
-    /// small environment, and looks in the Root store for a thumbprint that
-    /// matches nothing.
+    /// small environment, and looks in the Root store for thumbprints that
+    /// match nothing.
+    ///
+    /// certutil reads its id as an index, a serial number, or a hash: `000…0`
+    /// lists the store's first certificate, and `000…0a` a root whose serial
+    /// number is `0a` (both seen in CI). A real SHA-1 is a 160-bit number,
+    /// too large for any serial but a crafted one. These ids are too: they
+    /// start with digits, as most thumbprints do, and none may be read as an
+    /// index from its first digits (`1a…` as 1).
     #[cfg(windows)]
     #[test]
     fn a_system_tool_runs_with_the_helpers_environment() {
-        // With letters: an id of digits only is an index for certutil, and
-        // `000…0` lists the store's first certificate.
-        let nothing = "deadbeef".repeat(5);
-        let output = RealSystem
-            .run_system_tool("certutil.exe", &["-store", "Root", &nothing])
-            .unwrap();
-        // NTE_NOT_FOUND, as in spike S-11: it ran and searched the store.
-        assert_eq!(output.code, Some(0x8009_0011_u32 as i32), "{output:?}");
+        let ids = [
+            "deadbeef".repeat(5),
+            format!("0{}", "c".repeat(39)),
+            format!("1{}", "a".repeat(39)),
+            format!("12{}", "b".repeat(38)),
+            format!("2{}", "0a".repeat(19) + "f"),
+        ];
+        for id in &ids {
+            assert_eq!(id.len(), 40);
+            let output = RealSystem
+                .run_system_tool("certutil.exe", &["-store", "Root", id])
+                .unwrap();
+            // NTE_NOT_FOUND, as in spike S-11: it ran and searched the store.
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(output.code, Some(0x8009_0011_u32 as i32), "{id}: {text}");
+        }
     }
 
     #[cfg(windows)]
