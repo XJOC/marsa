@@ -179,15 +179,25 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
     }
     let version = match systemd_version(system) {
         Ok(version) if version >= FIRST_SYSTEMD => version,
-        Ok(version) => {
-            let message = format!(
-                "systemd {version} is older than {FIRST_SYSTEMD}: its resolved can drop the \
-                 settings of Marsa's link, {nothing_else}"
-            );
-            return OpResult::failed(INSTALL, RESOLVED_SYSTEMD_TOO_OLD, message);
-        }
-        Err(reason) => {
-            let message = format!("{reason}, {nothing_else}");
+        other => {
+            let reason = match other {
+                Ok(version) => format!(
+                    "systemd {version} is older than {FIRST_SYSTEMD}: its resolved can drop the \
+                     settings of Marsa's link"
+                ),
+                Err(reason) => reason,
+            };
+            // A unit of an earlier install would meet that race at every
+            // boot, so it goes.
+            let message = if current.is_some() {
+                let cleanup = match take_out(system) {
+                    Ok(()) => format!("{UNIT_FILE} of an earlier install was taken out"),
+                    Err((_, why)) => why,
+                };
+                format!("{reason}; {cleanup}")
+            } else {
+                format!("{reason}, {nothing_else}")
+            };
             return OpResult::failed(INSTALL, RESOLVED_SYSTEMD_TOO_OLD, message);
         }
     };
@@ -1112,6 +1122,40 @@ mod tests {
              nothing was changed"
         );
         assert_eq!(unknown.unit_file(), None);
+    }
+
+    /// A unit of an earlier install on a system before 250 goes: it would
+    /// meet the race of resolved 249 at every boot.
+    #[test]
+    fn a_systemd_before_250_takes_out_an_earlier_unit() {
+        let mut linux = Linux::with_unit(&ours(18053));
+        linux.version_line = "systemd 249 (249.11-0ubuntu3.12)";
+        let failed = install(18053, &linux);
+        assert_eq!(code_of(&failed), RESOLVED_SYSTEMD_TOO_OLD);
+        assert_eq!(
+            message_of(&failed),
+            format!(
+                "systemd 249 is older than 250: its resolved can drop the settings of Marsa's \
+                 link; {UNIT_FILE} of an earlier install was taken out"
+            )
+        );
+        assert_eq!(linux.unit_file(), None);
+        assert!(linux.link.borrow().is_none() && !linux.enabled.get());
+        assert_eq!(
+            linux.commands(),
+            [ACTIVE, VERSIONED, DISABLED, RELOAD, RESET_UNIT]
+        );
+    }
+
+    /// The unit for systemd 250 to 252, with the local route.
+    #[test]
+    fn the_written_unit_before_253() {
+        let mut linux = Linux::new();
+        linux.version_line = "systemd 252 (252.36-1~deb12u1)";
+        install(18053, &linux);
+        let (bytes, _) = linux.unit_file().unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        insta::assert_snapshot!(text);
     }
 
     /// Before 253 the unit adds the local route for `127.0.0.1`; from 253
