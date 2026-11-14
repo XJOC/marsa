@@ -1291,13 +1291,20 @@ fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError>
 ///   `execution error: User canceled. (-128)`.
 /// - A wrong password, or a prompt that cannot show (over SSH), is error
 ///   -60005 or -60007 of the Authorization Services.
+/// - Any other negative error number (`-10810`, `-1743`, ...) is
+///   `osascript` failing before the helper ran (task M5-20), for example
+///   when the daemon runs where macOS's prompt cannot reach it: a sandbox it
+///   inherited from the program that started it, or a locked or other
+///   user's session. `<flow>_prompt_failed`, with the number.
 ///
 /// When Marsa stops waiting (the limit, or the daemon stopping), `osascript`
 /// is killed, but the helper may already run as root. Every helper operation
 /// can run again safely, so the message says so.
 ///
-/// A message never quotes what the programs printed: only its size and the
-/// exit code go to the log.
+/// A message never quotes what the programs printed. The log gets a short
+/// excerpt of `osascript`'s error text ([`excerpt`]), without control
+/// characters: the request holds op names, ports, and paths, nothing secret,
+/// and the password goes to macOS's prompt, never to this text.
 fn read_answer_for(flow: Flow, output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError> {
     let noun = flow.noun();
     let output = match output {
@@ -1346,10 +1353,25 @@ fn read_answer_for(flow: Flow, output: io::Result<RunOutput>) -> Result<Vec<OpRe
             let message = "macOS did not give admin rights: a wrong password, or no prompt";
             return Err(failure(&flow.code("not_authorized"), message));
         }
+        if !output.success()
+            && let Some(number) = os_error(&output.stderr)
+        {
+            tracing::warn!(
+                error = number,
+                stderr = %excerpt(&output.stderr),
+                "osascript failed before marsa-helper ran"
+            );
+            let message = format!(
+                "macOS could not run the admin prompt (error {number}), so marsa-helper did not \
+                 run; running it again is safe"
+            );
+            return Err(failure(&flow.code("prompt_failed"), &message));
+        }
         tracing::warn!(
             exit = ?output.code,
             stdout_bytes = output.stdout.len(),
             stderr_bytes = output.stderr.len(),
+            stderr = %excerpt(&output.stderr),
             "marsa-helper gave no answer Marsa can read"
         );
         return Err(failure(
@@ -1401,6 +1423,40 @@ fn not_authorized(stderr: &[u8]) -> bool {
     let text = String::from_utf8_lossy(stderr);
     text.contains("(-60005)") || text.contains("(-60007)")
 }
+
+/// The error number at the end of `osascript`'s error line, `(-10810)`, when
+/// it is negative: an AppleScript or system error, so `do shell script`
+/// never ran the helper. The helper's own exit codes (1, 2, 126, 127) and a
+/// helper killed by a signal (1000 plus its number) are positive and stay
+/// `helper_failed`.
+fn os_error(stderr: &[u8]) -> Option<i64> {
+    let text = String::from_utf8_lossy(stderr);
+    let inside = text.trim_end().strip_suffix(')')?;
+    let number: i64 = inside.rsplit_once('(')?.1.parse().ok()?;
+    (number < 0).then_some(number)
+}
+
+/// Up to [`EXCERPT_CHARS`] characters of `text` for the log, with control
+/// characters (line breaks, escapes) turned into spaces.
+fn excerpt(text: &[u8]) -> String {
+    String::from_utf8_lossy(text)
+        .trim()
+        .chars()
+        // Also the Unicode line and paragraph separators: one log line stays
+        // one line.
+        .map(|c| {
+            if c.is_control() || (c.is_whitespace() && c != ' ') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .take(EXCERPT_CHARS)
+        .collect()
+}
+
+/// How much of `osascript`'s error text goes to the log.
+const EXCERPT_CHARS: usize = 300;
 
 /// A code from the helper, safe for a log line and a message.
 fn short_code(code: &str) -> String {
@@ -2517,6 +2573,67 @@ mod tests {
             assert!(report.results.is_empty());
             assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
         }
+    }
+
+    #[test]
+    fn an_os_error_before_the_helper_is_prompt_failed_with_its_number() {
+        // What osascript prints when macOS cannot run the prompt for the
+        // daemon (task M5-20), and other negative errors of the same kind.
+        let cases = [
+            (
+                "0:194: execution error: An error of type -10810 has occurred. (-10810)\n",
+                -10810,
+            ),
+            (
+                "0:94: execution error: Not authorized to send Apple events. (-1743)",
+                -1743,
+            ),
+            ("12:40: execution error: garbage (-2700)\r\n", -2700),
+        ];
+        for (stderr, number) in cases {
+            let error = read_answer(script_error(stderr)).expect_err(stderr);
+            assert_eq!(error.code, "setup_prompt_failed", "{stderr}");
+            assert!(
+                error.message.contains(&number.to_string()),
+                "{}",
+                error.message
+            );
+            assert!(!error.message.contains("garbage"), "{}", error.message);
+            let error = read_answer_for(Flow::Uninstall, script_error(stderr)).expect_err(stderr);
+            assert_eq!(error.code, "uninstall_prompt_failed", "{stderr}");
+        }
+        // The known ones keep their own codes, and a positive exit of the
+        // shell (the helper or sh itself) stays helper_failed.
+        let cancelled = script_error("0:180: execution error: User canceled. (-128)\n");
+        assert_eq!(read_answer(cancelled).unwrap_err().code, "setup_cancelled");
+        let denied = script_error("0:9: execution error: The password was wrong. (-60005)");
+        assert_eq!(
+            read_answer(denied).unwrap_err().code,
+            "setup_not_authorized"
+        );
+        let shell = script_error("0:94: execution error: sh: x: Permission denied (126)");
+        assert_eq!(read_answer(shell).unwrap_err().code, "setup_helper_failed");
+    }
+
+    #[test]
+    fn the_log_excerpt_is_short_and_has_no_control_characters() {
+        let text = format!(
+            "  0:1: execution error:\x1b[31m bad\r\nline {}  ",
+            "x".repeat(400)
+        );
+        let got = excerpt(text.as_bytes());
+        assert!(got.starts_with("0:1: execution error:"), "{got}");
+        assert!(!got.chars().any(char::is_control), "{got}");
+        assert_eq!(got.chars().count(), EXCERPT_CHARS);
+        assert_eq!(os_error(b"no number here"), None);
+        assert_eq!(os_error(b"execution error: x (1)"), None);
+        assert_eq!(os_error(b"execution error: x (-10810)\n"), Some(-10810));
+        // A helper killed by a signal (1000 plus its number), text after the
+        // number, and a broken number are not an OS error.
+        assert_eq!(os_error(b"execution error: due to a signal. (1006)"), None);
+        assert_eq!(os_error(b"execution error: x (-10810) and more"), None);
+        assert_eq!(os_error(b"execution error: x (--5)"), None);
+        assert!(!excerpt("a\u{2028}b\u{2029}c".as_bytes()).contains('\u{2028}'));
     }
 
     #[test]
