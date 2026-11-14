@@ -52,11 +52,13 @@ const RESTART_WATCH: Duration = Duration::from_secs(3);
 /// How often the daemon lock is looked at meanwhile.
 const RESTART_POLL: Duration = Duration::from_millis(100);
 
-/// The arguments of `marsa uninstall --all`.
+/// The arguments of `marsa uninstall --all`. `bin/marsa.rs` flattens them
+/// into `marsa uninstall`, next to the `<TOOL> <VERSION>` of task M5-07, and
+/// requires either `--all` or a tool, never both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::Args)]
 pub struct UninstallAllArgs {
-    /// Remove everything Marsa set up in this system. Required.
-    #[arg(long, required = true)]
+    /// Remove Marsa from this system, instead of one version.
+    #[arg(long)]
     pub all: bool,
     /// Do not ask before removing Marsa. The data folder is still kept
     /// unless --delete-data is given too.

@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use marsa_core::runtimes::Runtime;
-use marsa_core::types::{ServiceState, SiteKind};
+use marsa_core::types::{ServiceState, SiteKind, VersionInUse};
 
 /// The facts a message may show. Fill in what the error has; a message whose
 /// fact is missing reads without it.
@@ -185,6 +185,25 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             "{} has no default version: Marsa always runs the newest installed one.",
             d.runtime.map_or("This program", runtime_name)
         ),
+
+        // `marsa uninstall`: `DELETE /v1/runtimes/{tool}/{version}` (task
+        // M5-07). `version_in_use` has its facts in `version_in_use()`.
+        "version_in_use" => "This version is in use: it is a default, a site is set to it, \
+             or Caddy runs from it. Nothing was uninstalled."
+            .into(),
+        "version_ambiguous" => format!(
+            "{} matches more than one installed {}version. Name one in full; \"marsa \
+             runtimes{}\" lists them.",
+            d.requested
+                .map_or("This version".to_owned(), |r| format!("\"{r}\"")),
+            d.runtime
+                .map_or(String::new(), |r| format!("{} ", runtime_name(r))),
+            d.runtime
+                .map_or(String::new(), |r| format!(" {}", r.dir_name()))
+        ),
+        "uninstall_io" => "Cannot delete this version: a program from it may still run, or \
+             its folder is not writable. Quit that program, then try again."
+            .into(),
 
         // Built-in recipes: `RecipeError`. Tests check them, so a user should
         // never see these.
@@ -654,6 +673,59 @@ pub fn default_set(runtime: Runtime, default: &str, version: &str) -> String {
     }
 }
 
+// `marsa uninstall` (task M5-07).
+
+/// `Uninstalled PHP 8.3.12.`
+pub fn uninstalled(runtime: Runtime, version: &str) -> String {
+    format!("Uninstalled {} {version}.", runtime_name(runtime))
+}
+
+/// `version_not_installed` from `marsa uninstall`: it points to the list,
+/// where `marsa use` points to an install.
+pub fn nothing_to_uninstall(runtime: Runtime, requested: &str) -> String {
+    format!(
+        "{} {requested} is not installed. Run \"marsa runtimes {}\" to see the installed \
+         versions.",
+        runtime_name(runtime),
+        runtime.dir_name()
+    )
+}
+
+/// `version_in_use` with its facts: one sentence for each use, each with
+/// what to do first.
+pub fn version_in_use(runtime: Runtime, in_use: &VersionInUse) -> String {
+    let name = runtime_name(runtime);
+    let version = &in_use.version;
+    let mut text = format!("{name} {version} is in use, so it was not uninstalled.");
+    if let Some(default) = &in_use.default {
+        // `8.3` picks `8.3.12`; `8.3.12` is said once.
+        let written = if default == version {
+            String::new()
+        } else {
+            format!(" ({default})")
+        };
+        text.push_str(&format!(
+            " It is the default{written}: make another version the default first with \
+             \"marsa use {} <version>\".",
+            runtime.dir_name()
+        ));
+    }
+    match &in_use.sites[..] {
+        [] => {}
+        [site] => text.push_str(&format!(
+            " The site {site} is set to it: give it another version first."
+        )),
+        sites => text.push_str(&format!(
+            " The sites {} are set to it: give them another version first.",
+            sites.join(", ")
+        )),
+    }
+    if in_use.caddy {
+        text.push_str(" Caddy runs from it: stop Caddy first with \"marsa services stop caddy\".");
+    }
+    text
+}
+
 // `marsa daemon`.
 
 /// `marsa daemon start` and `marsa daemon status`. Never the token.
@@ -1079,6 +1151,10 @@ mod tests {
         // `PUT /v1/runtimes/{tool}/default` (task M5-01).
         "version_not_installed",
         "no_default_version",
+        // `DELETE /v1/runtimes/{tool}/{version}` (task M5-07).
+        "version_in_use",
+        "version_ambiguous",
+        "uninstall_io",
         "recipe_invalid",
         "recipe_unknown_platform",
         "recipe_bad_path",
@@ -1247,6 +1323,10 @@ mod tests {
                 code: "caddy_not_installed".into(),
                 message: "x".into(),
             },
+            ClientError::InUse {
+                message: "x".into(),
+                in_use: VersionInUse::default(),
+            },
             ClientError::DaemonFile(DaemonFileError::Missing { path: path() }),
             ClientError::DaemonFile(DaemonFileError::Invalid {
                 path: path(),
@@ -1276,6 +1356,7 @@ mod tests {
                 | ClientError::InvalidId { .. }
                 | ClientError::PathNotUtf8 { .. }
                 | ClientError::Api { .. }
+                | ClientError::InUse { .. }
                 | ClientError::DaemonFile(_) => {}
             }
             let code = err.code();
