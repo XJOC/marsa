@@ -2497,7 +2497,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "marsa"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2520,7 +2520,7 @@ dependencies = [
 
 [[package]]
 name = "marsa-core"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "axum",
  "directories",
@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "marsa-gui"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "eframe",
@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "marsa-helper"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "insta",
  "serde",
@@ -2578,7 +2578,7 @@ dependencies = [
 
 [[package]]
 name = "marsa-shim"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "marsa-core",
  "semver",
@@ -6109,7 +6109,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "clap",
