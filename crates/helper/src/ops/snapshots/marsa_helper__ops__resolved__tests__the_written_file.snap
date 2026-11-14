@@ -1,8 +1,0 @@
----
-source: crates/helper/src/ops/resolved.rs
-expression: text
----
-# Managed by Marsa. Do not edit.
-[Resolve]
-DNS=127.0.0.1:18053
-Domains=~test
