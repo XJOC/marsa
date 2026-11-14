@@ -9,8 +9,8 @@ name: release
 #   pack, and test the five platforms; the archives are workflow artifacts
 #   (14 days). No release.
 # - workflow_dispatch: the same; with `release` on (main only), also a DRAFT,
-#   pre-release GitHub Release v<version> with the five archives, install.sh,
-#   and SHA256SUMS. The owner signs SHA256SUMS with minisign on their own machine,
+#   pre-release GitHub Release v<version> with the archives of the platforms
+#   input (macOS only for 0.1.0), install.sh, and SHA256SUMS. The owner signs SHA256SUMS with minisign on their own machine,
 #   uploads SHA256SUMS.minisig, reads the draft, and publishes it. The minisign
 #   key never enters CI, and this workflow never publishes.
 
@@ -30,6 +30,12 @@ on:
         description: "Create a DRAFT release v<version> with the archives (main only)"
         type: boolean
         default: false
+      # 0.1.0 is for macOS only (2026-11-14): Linux and Windows still build
+      # here, but their archives stay out of the release until they are ready.
+      platforms:
+        description: "The platforms the release holds; all five build either way"
+        type: string
+        default: "darwin-arm64 darwin-x64"
 
 permissions:
   contents: read
@@ -56,6 +62,7 @@ jobs:
       # Inputs reach the scripts as variables, never as text inside a script.
       INPUT_VERSION: ${{ inputs.version }}
       RELEASE: ${{ inputs.release }}
+      RELEASE_PLATFORMS: ${{ inputs.platforms }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -78,6 +85,12 @@ jobs:
           if [ "$RELEASE" = true ] && [ -z "$INPUT_VERSION" ]; then
             echo "::error::a release needs the version input, typed in full ($version)"; exit 1
           fi
+          for platform in $RELEASE_PLATFORMS; do
+            case " darwin-arm64 darwin-x64 linux-x64 linux-arm64 windows-x64 " in
+              *" $platform "*) ;;
+              *) echo "::error::unknown platform '$platform' in the platforms input"; exit 1 ;;
+            esac
+          done
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Marsa $version from $GITHUB_REF ($GITHUB_SHA), release: ${RELEASE:-false}"
 
@@ -198,6 +211,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.check.outputs.version }}
       TAG: v${{ needs.check.outputs.version }}
+      RELEASE_PLATFORMS: ${{ inputs.platforms }}
     steps:
       - uses: actions/checkout@v5
         with:
