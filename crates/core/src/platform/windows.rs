@@ -777,7 +777,10 @@ mod tests {
     #[test]
     fn the_current_user_sid_is_a_user_sid() {
         let sid = current_user_sid().unwrap();
-        assert!(sid.starts_with("S-1-5-"), "{sid}");
+        // A local or domain account, or a Microsoft Entra ID one: the
+        // shapes the helper's `install` accepts.
+        let user = sid.starts_with("S-1-5-21-") || sid.starts_with("S-1-12-1-");
+        assert!(user, "{sid}");
         assert!(
             sid.bytes()
                 .all(|b| b.is_ascii_digit() || b == b'S' || b == b'-')
