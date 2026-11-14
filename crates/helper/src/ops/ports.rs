@@ -304,6 +304,10 @@ mod tests {
             self.fake.remove(path)
         }
 
+        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
+            self.fake.remove_empty_dir(path)
+        }
+
         fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
             let output = self.fake.run(program, args)?;
             let loads = matches!(args, ["-p", CONF]);
@@ -480,6 +484,19 @@ mod tests {
             assert_eq!(linux.file(), None);
             assert!(linux.commands().is_empty());
         }
+    }
+
+    /// Also where port 80 is allowed already and only the file is put
+    /// right: a failed write is not `done`.
+    #[test]
+    fn a_failed_rewrite_where_port_80_is_allowed_is_ports_write() {
+        let mut linux = Linux::with_file(80, OLD_OURS);
+        linux.fake.fail_writes.insert(PathBuf::from(CONF));
+        let message = format!("cannot write {CONF}: permission denied");
+        assert_eq!(install(&linux), failed(INSTALL, PORTS_WRITE, &message));
+        assert_eq!(linux.file(), Some((OLD_OURS.to_vec(), OLD_MODE)));
+        assert!(linux.commands().is_empty());
+        assert_eq!(linux.value(), "80\n");
     }
 
     #[test]

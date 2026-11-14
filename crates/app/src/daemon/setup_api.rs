@@ -1,5 +1,7 @@
-//! `POST /v1/setup`: the first setup on macOS, behind one admin prompt. Task
-//! M4-13, with the port check of task M4-14b.
+//! `POST /v1/setup`: the first setup on macOS. The user may be asked twice:
+//! for an administrator password (the helper), then to approve the trust in
+//! Marsa's certificate authority for this user. Task M4-13, with the port
+//! check of task M4-14b and the user trust of task M4-26.
 //!
 //! | Route | Answer |
 //! | --- | --- |
@@ -7,10 +9,17 @@
 //!
 //! The steps, on a blocking thread:
 //!
-//! 1. **CA:** Caddy's root certificate goes into `trust_install` as text
-//!    (ADR 0011). Caddy makes it with the first secure site; before that the
-//!    report says `ca_not_ready`. A file the helper would refuse is skipped
-//!    as `ca_unreadable`, so the other steps still go.
+//! 1. **CA:** Caddy's root certificate is checked ([`read_ca`]). Caddy makes
+//!    it when it loads its config, sites or not. With no root yet, setup
+//!    starts Caddy the way `marsa services start caddy` does ([`StartCaddy`])
+//!    and waits for the root up to [`CA_WAIT`] (task M5-15). No Caddy
+//!    installed skips the trust as `caddy_not_installed`, a Caddy that did
+//!    not start as `caddy_not_started`, and a root that did not come in time
+//!    as `ca_not_ready`; `marsa logs caddy` shows why. A file the helper or
+//!    `security` would refuse is skipped as `ca_unreadable`, so the other
+//!    steps still go. On macOS the trust is step 5, by the user;
+//!    elsewhere the certificate goes into `trust_install` as text, for the
+//!    helper (ADR 0011).
 //! 2. **DNS:** the setup operation of [`dns::strategy_for`].
 //! 3. **Ports** (M4-14b): `/usr/sbin/netstat -anv -p tcp` lists the sockets
 //!    that listen, [`ports::holders`] picks those on 80 and 443, and `/bin/ps`
@@ -23,13 +32,29 @@
 //!    runs `marsa-helper apply <request>` with administrator privileges,
 //!    through the constant script of ADR 0012. The helper's JSON answer gives
 //!    one result per operation, in the order sent. No operation left: no
-//!    prompt.
+//!    prompt. A helper inside `~/Desktop`, `~/Documents`, or `~/Downloads`
+//!    ends setup before the prompt with `setup_helper_protected_folder`:
+//!    macOS keeps root out of those folders, so the boot job's copy of the
+//!    helper fails there (task M4-17).
+//! 5. **User trust (macOS):** after the helper, and only if it ran as asked
+//!    or was not needed, `marsad` itself trusts the CA for the current user
+//!    with `security add-trusted-cert` against the login keychain, behind the
+//!    dialog macOS shows (ADR 0015, [`user_trust`]). Its result goes into the
+//!    report as `trust_install`, after the helper's results.
 //!
-//! One setup at a time: a second request gets 409 `setup_running`. Linux and
-//! Windows get 501 `setup_not_supported` until tasks M4-18 and M4-19.
+//! One setup at a time: a second request gets 409 `setup_running`, and one
+//! during an uninstall gets 409 `uninstall_running`. Linux and Windows get
+//! 501 `setup_not_supported` until tasks M4-18 and M4-19.
+//!
+//! `POST /v1/uninstall` (task M5-13, `uninstall_api.rs`) shares [`Setup`]:
+//! the same runner, the same helper file check and admin prompt ([`Flow`]
+//! gives each its own error codes), and the same one-at-a-time flag. The
+//! protected-folder check of step 4 is setup's only ([`Setup::launch`]).
 //!
 //! Every program runs through [`Runner`], so the tests run none: they pass a
 //! fake that records each call and answers from fixtures.
+
+pub mod user_trust;
 
 use std::collections::BTreeMap;
 use std::env::consts::EXE_SUFFIX;
@@ -40,7 +65,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -56,10 +81,14 @@ use marsa_core::helper::{
 };
 use marsa_core::ports::{self, Listener, ProcessInfo};
 use marsa_core::recipes::Platform;
-use marsa_core::types::{ApiError, Event, PortHolder, SetupReport, SetupSkip};
+use marsa_core::types::{
+    ApiError, Event, PortHolder, ServiceAction, ServiceState, SetupReport, SetupSkip,
+};
+use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use super::api::HttpError;
+use super::caddy::ActionError;
 use super::state::Daemon;
 
 const NETSTAT: &str = "/usr/sbin/netstat";
@@ -80,9 +109,10 @@ const APPLESCRIPT: [&str; 3] = [
 /// The ports the `pf` redirect takes (ADR 0008).
 const REDIRECTED: [u16; 2] = [80, 443];
 /// How long `netstat` and each `ps` may take.
-const CHECK_LIMIT: Duration = Duration::from_secs(10);
+pub(super) const CHECK_LIMIT: Duration = Duration::from_secs(10);
 /// How long `osascript` may take: the user types the password meanwhile.
-const PROMPT_LIMIT: Duration = Duration::from_secs(5 * 60);
+/// The trust dialog of `security add-trusted-cert` gets the same.
+pub(super) const PROMPT_LIMIT: Duration = Duration::from_secs(5 * 60);
 /// At most this many `ps` calls; further holders keep netstat's name only.
 const MAX_PS: usize = 8;
 /// The helper refuses a larger certificate (ADR 0011).
@@ -99,7 +129,27 @@ const SAFE_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const POLL: Duration = Duration::from_millis(10);
 /// How long the pipes may stay open after the program ended. Its output is
 /// read all along, so only the last bytes are left by then.
-const PIPE_GRACE: Duration = Duration::from_secs(2);
+pub(super) const PIPE_GRACE: Duration = Duration::from_secs(2);
+/// How long setup waits for Caddy to start and make its CA root, when there
+/// is no root yet (task M5-15). Caddy's own start waits up to 5 s for its
+/// admin API, and up to about 10 s more to stop an old Caddy of a crashed
+/// daemon first (ADR 0009); making the root then takes well under a second.
+pub const CA_WAIT: Duration = Duration::from_secs(30);
+/// How often setup looks for the CA root meanwhile.
+const CA_POLL: Duration = Duration::from_millis(100);
+/// The longest a setup takes, when every step runs to its limit: Caddy's
+/// start and its CA root at [`CA_WAIT`], `netstat`, [`MAX_PS`] `ps` calls,
+/// and `security verify-cert` at [`CHECK_LIMIT`] each, `osascript` and
+/// `security add-trusted-cert` at [`PROMPT_LIMIT`] each, and [`PIPE_GRACE`]
+/// after each of these programs. A client has to wait longer:
+/// `marsa_core::client::SETUP_TIMEOUT` does, and a test holds the two
+/// together.
+pub const SLOWEST_SETUP: Duration = Duration::from_secs(
+    CA_WAIT.as_secs()
+        + (2 + MAX_PS as u64) * CHECK_LIMIT.as_secs()
+        + 2 * PROMPT_LIMIT.as_secs()
+        + (4 + MAX_PS as u64) * PIPE_GRACE.as_secs(),
+);
 
 /// The first line the helper's `trust_install` accepts (`ops/trust.rs`).
 const PEM_BEGIN: &str = "-----BEGIN CERTIFICATE-----";
@@ -132,20 +182,94 @@ const TRUST_INSTALL: &str = "trust_install";
 const PF_INSTALL: &str = "pf_install";
 const UNINSTALL_ALL: &str = "uninstall_all";
 
-/// The routes, for `api::router` to merge before its fallbacks.
-pub fn routes() -> Router<Arc<Daemon>> {
-    routes_with(Setup::new())
-}
+/// [`read_ca`]'s code when the CA root is not there.
+const CA_NOT_READY: &str = "ca_not_ready";
+/// Why the trust was skipped when there is no CA root and no Caddy to make
+/// one. The code of `marsa services start caddy` for the same cause, which
+/// the CLI and the window already know.
+const CADDY_NOT_INSTALLED: &str = "caddy_not_installed";
+/// Why the trust was skipped when Caddy did not start, so there is no CA
+/// root (task M5-15b). Caddy's status and its recent lines say why.
+const CADDY_NOT_STARTED: &str = "caddy_not_started";
 
-/// The routes with the given [`Setup`]: tests pass a fake [`Runner`].
-pub fn routes_with(setup: Setup) -> Router<Arc<Daemon>> {
-    let setup = Arc::new(setup);
+/// The folders under the home folder that macOS keeps other users, root
+/// included, out of until the user allows it (the folder protection of
+/// Privacy & Security). Root could not read a helper there to copy it for
+/// the boot job: `pf_write` in task M4-17, `pf_helper_unreadable` since
+/// task M4-27.
+const PROTECTED_FOLDERS: [&str; 3] = ["Desktop", "Documents", "Downloads"];
+/// Where an install puts the programs, for the message that says to move
+/// Marsa there.
+const INSTALL_BIN: &str = "~/Library/Application Support/dev.marsa.Marsa/bin";
+
+/// The routes on `setup`, for `api::router` to merge before its fallbacks.
+/// The uninstall route gets the same [`Setup`], so the two never run at once.
+pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
     let handler = move |State(daemon): State<Arc<Daemon>>| {
         let setup = Arc::clone(&setup);
         async move { start(daemon, setup).await }
     };
     Router::new().route("/v1/setup", post(handler))
 }
+
+/// The routes with the given [`Setup`]: tests pass a fake [`Runner`].
+pub fn routes_with(setup: Setup) -> Router<Arc<Daemon>> {
+    routes(Arc::new(setup))
+}
+
+/// Which request runs the helper: the setup, or the uninstall of task M5-13.
+/// Each has its own error codes, `setup_*` and `uninstall_*`, and its
+/// messages name its own command. It also names the request that runs now,
+/// for the 409 of the other one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    Setup,
+    Uninstall,
+}
+
+impl Flow {
+    /// `setup_<what>` or `uninstall_<what>`.
+    pub fn code(self, what: &str) -> String {
+        let prefix = match self {
+            Self::Setup => "setup",
+            Self::Uninstall => "uninstall",
+        };
+        format!("{prefix}_{what}")
+    }
+
+    /// The request in an English message: "setup", "the uninstall".
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Setup => "setup",
+            Self::Uninstall => "the uninstall",
+        }
+    }
+
+    /// Its value in [`Setup`]'s flag; `IDLE` is none.
+    fn flag(self) -> u8 {
+        match self {
+            Self::Setup => 1,
+            Self::Uninstall => 2,
+        }
+    }
+
+    /// The 409 for a request while this one runs.
+    pub fn busy(self) -> HttpError {
+        let message = match self {
+            Self::Setup => "another setup is running",
+            Self::Uninstall => "an uninstall is running",
+        };
+        // `HttpError` wants a `&'static str` code.
+        let code = match self {
+            Self::Setup => "setup_running",
+            Self::Uninstall => "uninstall_running",
+        };
+        HttpError::new(StatusCode::CONFLICT, code, message)
+    }
+}
+
+/// [`Setup`]'s flag when neither request runs.
+const IDLE: u8 = 0;
 
 /// What a program printed, and how it ended.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -310,6 +434,79 @@ fn timed_out() -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, reason)
 }
 
+/// Starts Caddy for setup when its CA root does not exist yet: Caddy makes
+/// the CA when it loads its config (task M5-15). The daemon uses its own
+/// Caddy ([`DaemonCaddy`]); tests use a fake, as for [`Runner`].
+pub trait StartCaddy: Send + Sync {
+    /// Makes Caddy run if it is installed, and waits at most `limit` for
+    /// that, or until `stop`. Blocking: setup runs on a blocking thread.
+    fn start(&self, limit: Duration, stop: &CancellationToken) -> CaddyStart;
+}
+
+/// What [`StartCaddy::start`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaddyStart {
+    /// Caddy runs, or is still starting: its CA root may come at any moment.
+    Started,
+    /// No Caddy is installed, so nothing can make the CA.
+    NotInstalled,
+    /// Caddy did not start. Why, for the log: the code of its status or of
+    /// the start.
+    Failed(String),
+}
+
+/// [`StartCaddy`] through the daemon's own `CaddyManager`, the path of
+/// `marsa services start caddy`: the orphan check, the newest installed
+/// Caddy under the supervisor, and the wait for its admin API. No shell.
+struct DaemonCaddy {
+    daemon: Arc<Daemon>,
+    /// The daemon's runtime: the start is async, and setup runs on a
+    /// blocking thread of this runtime.
+    runtime: Handle,
+}
+
+impl StartCaddy for DaemonCaddy {
+    fn start(&self, limit: Duration, stop: &CancellationToken) -> CaddyStart {
+        let caddy = &self.daemon.caddy;
+        // First, so a missing Caddy does not mark Caddy's status failed.
+        if !caddy.installed() {
+            return CaddyStart::NotInstalled;
+        }
+        let start = async {
+            loop {
+                match caddy.run(&self.daemon, ServiceAction::Start).await {
+                    // Another start or stop runs now. Ask again until it has
+                    // ended, so a stop in the meantime does not leave Caddy
+                    // stopped. A refused call returns at once, and the
+                    // timeout below bounds the loop.
+                    Err(ActionError::Busy) => tokio::time::sleep(CA_POLL).await,
+                    other => return other,
+                }
+            }
+        };
+        let started = self.runtime.block_on(async {
+            tokio::select! {
+                () = stop.cancelled() => None,
+                result = tokio::time::timeout(limit, start) => Some(result),
+            }
+        });
+        match started {
+            None => CaddyStart::Failed("the daemon is stopping".to_owned()),
+            // Still starting. The wait for the root has the same limit.
+            Some(Err(_)) => CaddyStart::Started,
+            Some(Ok(Ok(status))) => match status.state {
+                ServiceState::Running | ServiceState::Starting => CaddyStart::Started,
+                ServiceState::Failed { code } => CaddyStart::Failed(code),
+                ServiceState::Stopped | ServiceState::Stopping => {
+                    CaddyStart::Failed("Caddy stopped".to_owned())
+                }
+            },
+            Some(Ok(Err(err))) if err.code() == CADDY_NOT_INSTALLED => CaddyStart::NotInstalled,
+            Some(Ok(Err(err))) => CaddyStart::Failed(err.code().to_owned()),
+        }
+    }
+}
+
 /// The setup side of the daemon: how programs run, which system this is,
 /// where the helper is, and whether a setup runs now.
 pub struct Setup {
@@ -318,42 +515,91 @@ pub struct Setup {
     platform: Option<Platform>,
     /// `marsa-helper`. `None` if the daemon's own path is not known.
     helper: Option<PathBuf>,
-    running: AtomicBool,
+    /// The home folder of the user `marsad` runs as: the login keychain and
+    /// the protected folders are under it. `None` if the system gives none.
+    home: Option<PathBuf>,
+    /// How setup starts Caddy for its CA. `None`, the default: the daemon's
+    /// own Caddy ([`DaemonCaddy`]). Tests put a fake here.
+    caddy: Option<Arc<dyn StartCaddy>>,
+    /// How long setup waits for Caddy and its CA root: [`CA_WAIT`], shorter
+    /// in tests.
+    ca_wait: Duration,
+    /// [`IDLE`], or the [`Flow::flag`] of the request that runs now.
+    running: AtomicU8,
 }
 
 impl Setup {
-    /// The daemon's: [`RealRunner`], this system, and `marsa-helper` next to
-    /// the running program. That is `<app data>/bin/` in a real install and
-    /// `target/<profile>/` in development (ADR 0012).
+    /// The daemon's: [`RealRunner`], this system, `marsa-helper` next to the
+    /// running program, and this user's home folder. The helper is in
+    /// `<app data>/bin/` in a real install and `target/<profile>/` in
+    /// development (ADR 0012).
     pub fn new() -> Self {
-        Self::with(Arc::new(RealRunner), Platform::current(), helper_path())
+        Self::with(
+            Arc::new(RealRunner),
+            Platform::current(),
+            helper_path(),
+            home_dir(),
+        )
     }
 
-    /// For tests: any runner, system, and helper path.
+    /// For tests: any runner, system, helper path, and home folder.
     pub fn with(
         runner: Arc<dyn Runner>,
         platform: Option<Platform>,
         helper: Option<PathBuf>,
+        home: Option<PathBuf>,
     ) -> Self {
         Self {
             runner,
             platform,
             helper,
-            running: AtomicBool::new(false),
+            home,
+            caddy: None,
+            ca_wait: CA_WAIT,
+            running: AtomicU8::new(IDLE),
         }
     }
 
+    /// For tests: `caddy` starts Caddy for the CA step, not the daemon's own.
+    #[must_use]
+    pub fn with_caddy(mut self, caddy: Arc<dyn StartCaddy>) -> Self {
+        self.caddy = Some(caddy);
+        self
+    }
+
+    /// The program runner, for the uninstall's own steps.
+    pub(super) fn runner(&self) -> &dyn Runner {
+        self.runner.as_ref()
+    }
+
+    /// This system, if Marsa has a build for it.
+    pub(super) fn platform(&self) -> Option<Platform> {
+        self.platform
+    }
+
+    /// The home folder of the user `marsad` runs as, if known.
+    pub(super) fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+
     /// The setup itself. Blocking: it runs programs and reads a file.
+    /// `starter` starts Caddy when its CA root is not there yet.
     fn run(
         &self,
         data_dir: &Path,
         caddy: CaddyInput,
         platform: Platform,
+        starter: &dyn StartCaddy,
         stop: &CancellationToken,
     ) -> SetupReport {
         let mut report = SetupReport::default();
         let mut ops = Vec::new();
-        match read_ca(&CaddyPaths::in_dir(data_dir).ca_root()) {
+        let ca_root = CaddyPaths::in_dir(data_dir).ca_root();
+        // macOS: the user's own trust, after the helper (ADR 0015). Elsewhere
+        // the helper trusts the CA as root (ADR 0011).
+        let mut trust_for_user = None;
+        match self.ca(&ca_root, starter, stop) {
+            Ok(pem) if is_macos(platform) => trust_for_user = Some(pem),
             Ok(pem) => ops.push(HelperOp::TrustInstall { pem }),
             Err(code) => report.skipped.push(skip(TRUST_INSTALL, code)),
         }
@@ -380,11 +626,83 @@ impl Setup {
             }
             None => report.skipped.push(skip(PF_INSTALL, "ports_not_checked")),
         }
-        match self.apply(ops, stop) {
+        match self.apply(ops, platform, stop) {
             Ok(results) => report.results = results,
             Err(error) => report.error = Some(error),
         }
+        // Only if the helper ran as asked, or was not needed: a cancelled or
+        // refused admin prompt ends setup with nothing changed in the system,
+        // and no second dialog. Setup may have started Caddy and made its CA
+        // by then: Marsa's own process and data.
+        if let Some(pem) = trust_for_user.filter(|_| report.error.is_none()) {
+            let files = user_trust::TrustFiles::in_dir(data_dir);
+            report.results.push(self.trust_for_user(&pem, &files, stop));
+        }
         report
+    }
+
+    /// The text of Caddy's root certificate at `path`, as [`read_ca`] gives
+    /// it. A root that is there is read at once. With no root yet, `starter`
+    /// starts Caddy if it does not run, and setup waits for the root up to
+    /// `ca_wait`: Caddy makes it when it loads its config (task M5-15).
+    ///
+    /// # Errors
+    ///
+    /// The codes of [`read_ca`]: `ca_not_ready` when the root did not come
+    /// in time. `caddy_not_installed` when there is no root and no Caddy to
+    /// make it, and `caddy_not_started` when Caddy did not start and made
+    /// none.
+    fn ca(
+        &self,
+        path: &Path,
+        starter: &dyn StartCaddy,
+        stop: &CancellationToken,
+    ) -> Result<String, &'static str> {
+        let found = read_ca(path);
+        if !matches!(found, Err(CA_NOT_READY)) {
+            return found;
+        }
+        tracing::info!("no CA root yet; starting Caddy so that it makes one");
+        let deadline = Instant::now() + self.ca_wait;
+        match starter.start(self.ca_wait, stop) {
+            CaddyStart::Started => wait_for_ca(path, deadline, stop),
+            CaddyStart::NotInstalled => {
+                tracing::warn!("no CA root, and no Caddy to make one: install Caddy first");
+                Err(CADDY_NOT_INSTALLED)
+            }
+            CaddyStart::Failed(reason) => {
+                tracing::warn!(%reason, "Caddy did not start; marsa logs caddy says why");
+                // Caddy makes the CA before it opens its ports, so a start
+                // that failed on a port may still have made it.
+                match load_ca(path) {
+                    Ok(pem) => Ok(pem),
+                    Err(CaProblem::Missing) => Err(CADDY_NOT_STARTED),
+                    Err(problem) => Err(ca_code(path, problem)),
+                }
+            }
+        }
+    }
+
+    /// The user's trust of the CA root whose checked text is `pem` (ADR
+    /// 0015), through the trust folder `files`; or `trust_add_failed` when
+    /// the home folder, and so the login keychain, is not known.
+    fn trust_for_user(
+        &self,
+        pem: &str,
+        files: &user_trust::TrustFiles,
+        stop: &CancellationToken,
+    ) -> OpResult {
+        match &self.home {
+            Some(home) => user_trust::install(self.runner.as_ref(), home, pem, files, stop),
+            None => {
+                tracing::warn!(
+                    "the home folder is not known, so the login keychain cannot be found"
+                );
+                let message = "the home folder of the current user is not known, so the \
+                               login keychain cannot be found";
+                user_trust::failed(TRUST_INSTALL, user_trust::TRUST_ADD_FAILED, message)
+            }
+        }
     }
 
     /// Who listens on 80 and 443, or `None` if that cannot be known:
@@ -392,7 +710,8 @@ impl Setup {
     /// holder in it maybe, was not read), or listed no listening socket at
     /// all. The daemon's own API socket always listens, so an empty list
     /// means the output was not understood. The redirect never goes in blind.
-    fn port_holders(&self, stop: &CancellationToken) -> Option<Vec<PortHolder>> {
+    /// `marsa doctor` asks the same (task M5-12).
+    pub fn port_holders(&self, stop: &CancellationToken) -> Option<Vec<PortHolder>> {
         let args = ["-anv", "-p", "tcp"].map(OsString::from);
         let output = match self.runner.run(NETSTAT, &args, CHECK_LIMIT, stop) {
             Ok(output) if output.success() => output,
@@ -477,13 +796,33 @@ impl Setup {
         }
     }
 
-    /// Sends `ops` to the helper behind the admin prompt and reads its
-    /// answer. With no operation nothing runs and no prompt shows. The
-    /// helper file is checked first: a file that is missing or that another
-    /// user could change means no prompt.
+    /// [`Setup::launch`] for the setup.
     fn apply(
         &self,
         ops: Vec<HelperOp>,
+        platform: Platform,
+        stop: &CancellationToken,
+    ) -> Result<Vec<OpResult>, ApiError> {
+        self.launch(Flow::Setup, ops, platform, stop)
+    }
+
+    /// Sends `ops` to the helper behind the admin prompt and reads its
+    /// answer, with the error codes of `flow`. With no operation nothing
+    /// runs and no prompt shows. The helper is checked first: a file that is
+    /// missing or that another user could change means no prompt, and so
+    /// does, for setup only, a path in a folder macOS keeps root out of (on
+    /// macOS; by the path alone, before any look at the file).
+    ///
+    /// The uninstall skips the folder check: root runs a helper from those
+    /// folders through `osascript` (task M4-17: `resolver_install` worked
+    /// from `~/Desktop`), and only the boot job's copy of the binary, which
+    /// `pf_install` reads, fails there. `uninstall_all` reads no binary, so
+    /// moving Marsa first would only be in the user's way.
+    pub(super) fn launch(
+        &self,
+        flow: Flow,
+        ops: Vec<HelperOp>,
+        platform: Platform,
         stop: &CancellationToken,
     ) -> Result<Vec<OpResult>, ApiError> {
         if ops.is_empty() {
@@ -491,9 +830,31 @@ impl Setup {
         }
         let missing = || {
             tracing::warn!(path = ?self.helper, "marsa-helper is not next to marsad");
-            failure("setup_helper_missing", "marsa-helper is not next to marsad")
+            failure(
+                &flow.code("helper_missing"),
+                "marsa-helper is not next to marsad",
+            )
         };
         let helper = self.helper.as_deref().ok_or_else(missing)?;
+        // First: it reads nothing, and the advice to move Marsa comes before
+        // any word about the file itself.
+        let protected = (flow == Flow::Setup && is_macos(platform))
+            .then(|| protected_folder(helper, self.home.as_deref()))
+            .flatten();
+        if let Some(folder) = protected {
+            tracing::warn!(
+                path = %helper.display(),
+                folder = %folder.display(),
+                "marsa-helper is in a folder macOS keeps root out of; no admin prompt"
+            );
+            let message = format!(
+                "marsa-helper is inside {}, a folder macOS protects, so root could not read \
+                 it to set up the boot job; run \"marsa daemon stop\", move Marsa to \
+                 {INSTALL_BIN}, and run \"marsa setup\" from there",
+                folder.display()
+            );
+            return Err(failure("setup_helper_protected_folder", message));
+        }
         match check_helper(helper) {
             Ok(()) => {}
             Err(HelperFault::Missing) => return Err(missing()),
@@ -504,12 +865,15 @@ impl Setup {
                     "marsa-helper could be changed by another user; no admin prompt"
                 );
                 let message = format!("marsa-helper is not safe to run as root: {reason}");
-                return Err(failure("setup_helper_unsafe", message));
+                return Err(failure(&flow.code("helper_unsafe"), message));
             }
         }
         let cannot_write = |err: serde_json::Error| {
             tracing::error!(error = %err, "cannot write the helper request");
-            failure("setup_helper_failed", "cannot write the helper request")
+            failure(
+                &flow.code("helper_failed"),
+                "cannot write the helper request",
+            )
         };
         let names = ops
             .iter()
@@ -519,7 +883,8 @@ impl Setup {
         let request = serde_json::to_string(&HelperRequest::new(ops)).map_err(cannot_write)?;
         tracing::info!(helper = %helper.display(), "asking for admin rights to run marsa-helper");
         let args = osascript_args(helper, &request);
-        let results = read_answer(self.runner.run(OSASCRIPT, &args, PROMPT_LIMIT, stop))?;
+        let answer = self.runner.run(OSASCRIPT, &args, PROMPT_LIMIT, stop);
+        let results = read_answer_for(flow, answer)?;
         if !results_match(&names, &results) {
             tracing::warn!(
                 sent = ?names,
@@ -527,7 +892,7 @@ impl Setup {
                 "marsa-helper answered for other operations than it was sent"
             );
             let message = "the helper's results do not match the request";
-            return Err(failure("setup_helper_failed", message));
+            return Err(failure(&flow.code("helper_failed"), message));
         }
         Ok(results)
     }
@@ -549,46 +914,64 @@ impl fmt::Debug for Setup {
     }
 }
 
-/// The right to run the one setup. Dropping it lets the next one start, also
-/// if the setup panics.
-struct Running(Arc<Setup>);
+/// The right to run the one setup or uninstall. Dropping it lets the next
+/// one start, also if the request panics.
+pub(super) struct Running(Arc<Setup>);
 
 impl Running {
-    /// `None` while another setup runs. One atomic swap, no lock.
-    fn take(setup: &Arc<Setup>) -> Option<Self> {
+    /// The right to run `flow`, or the [`Flow`] that runs now. One atomic
+    /// swap, no lock.
+    pub(super) fn take(setup: &Arc<Setup>, flow: Flow) -> Result<Self, Flow> {
         setup
             .running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
+            .compare_exchange(IDLE, flow.flag(), Ordering::AcqRel, Ordering::Acquire)
             .map(|_| Self(Arc::clone(setup)))
+            .map_err(|now| {
+                if now == Flow::Uninstall.flag() {
+                    Flow::Uninstall
+                } else {
+                    Flow::Setup
+                }
+            })
     }
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        self.0.running.store(false, Ordering::Release);
+        self.0.running.store(IDLE, Ordering::Release);
     }
 }
 
 async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport>, HttpError> {
     let platform = setup
         .platform
-        .filter(|platform| matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64))
+        .filter(|platform| is_macos(*platform))
         .ok_or_else(|| {
             let message = "setup runs on macOS only for now";
             HttpError::new(StatusCode::NOT_IMPLEMENTED, "setup_not_supported", message)
         })?;
-    let running = Running::take(&setup).ok_or_else(|| {
-        let message = "another setup is running";
-        HttpError::new(StatusCode::CONFLICT, "setup_running", message)
-    })?;
+    let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
     tracing::info!("setup started");
+    let runtime = Handle::current();
     let job = tokio::task::spawn_blocking(move || {
         // Moved in, so the next setup waits for this one to end even if the
         // client goes away.
         let _running = running;
         let caddy = daemon.caddy.input;
-        let report = setup.run(&daemon.data_dir, caddy, platform, &daemon.shutdown);
+        let starter: Arc<dyn StartCaddy> = match &setup.caddy {
+            Some(fake) => Arc::clone(fake),
+            None => Arc::new(DaemonCaddy {
+                daemon: Arc::clone(&daemon),
+                runtime,
+            }),
+        };
+        let report = setup.run(
+            &daemon.data_dir,
+            caddy,
+            platform,
+            starter.as_ref(),
+            &daemon.shutdown,
+        );
         tracing::info!(
             results = report.results.len(),
             skipped = report.skipped.len(),
@@ -620,6 +1003,83 @@ fn helper_path() -> Option<PathBuf> {
     }
 }
 
+/// The home folder of the user `marsad` runs as: `$HOME`, else the user
+/// database, which is what `directories` reads for the data folder too.
+/// Never from a request.
+fn home_dir() -> Option<PathBuf> {
+    let home = std::env::home_dir().filter(|home| home.is_absolute());
+    if home.is_none() {
+        tracing::warn!("the home folder of the current user is not known");
+    }
+    home
+}
+
+pub(super) fn is_macos(platform: Platform) -> bool {
+    matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64)
+}
+
+/// The folder of [`PROTECTED_FOLDERS`] under `home` that holds `helper`, if
+/// any, as the helper's path writes it. By component, so `~/Desktop2` is not
+/// `~/Desktop`. The folder's name is compared without ASCII case: the usual
+/// macOS disk takes `~/desktop` for `~/Desktop`. No `canonicalize` and no
+/// I/O: the path is compared as root would open it.
+fn protected_folder(helper: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let home = home?;
+    let first = helper.strip_prefix(home).ok()?.components().next()?;
+    let name = first.as_os_str().to_str()?;
+    PROTECTED_FOLDERS
+        .iter()
+        .any(|protected| name.eq_ignore_ascii_case(protected))
+        .then(|| home.join(name))
+}
+
+/// Looks for the CA root at `path` every [`CA_POLL`] until it can be used,
+/// `deadline`, or `stop`, and gives what [`read_ca`] gives then. A root that
+/// is there but cannot be used yet, or has no END line yet, is waited for
+/// too: the root was missing at the first look, so it may be half written.
+fn wait_for_ca(
+    path: &Path,
+    deadline: Instant,
+    stop: &CancellationToken,
+) -> Result<String, &'static str> {
+    loop {
+        let problem = match load_ca(path) {
+            Ok(pem) if pem.contains(user_trust::PEM_END) => return Ok(pem),
+            Ok(_) => CaProblem::Unusable(format!("no {} line", user_trust::PEM_END)),
+            Err(problem) => problem,
+        };
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || stop.is_cancelled() {
+            if problem == CaProblem::Missing {
+                tracing::warn!("Caddy did not make its CA root in time; marsa logs caddy says why");
+            }
+            return Err(ca_code(path, problem));
+        }
+        thread::sleep(CA_POLL.min(left));
+    }
+}
+
+/// Why the CA root cannot be used, before it becomes a code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CaProblem {
+    /// No file yet.
+    Missing,
+    /// A file that cannot be used, and why, for the log.
+    Unusable(String),
+}
+
+/// The code of `problem`, for the report: `ca_not_ready` or
+/// `ca_unreadable`. An unusable file goes to the log with its reason.
+fn ca_code(path: &Path, problem: CaProblem) -> &'static str {
+    match problem {
+        CaProblem::Missing => CA_NOT_READY,
+        CaProblem::Unusable(reason) => {
+            tracing::warn!(path = %path.display(), %reason, "cannot use the CA root certificate");
+            "ca_unreadable"
+        }
+    }
+}
+
 /// The text of Caddy's root certificate at `path`, for `trust_install`.
 ///
 /// # Errors
@@ -628,13 +1088,15 @@ fn helper_path() -> Option<PathBuf> {
 /// a regular file, is larger than 16 KiB, cannot be read, or would fail the
 /// helper's own checks ([`pem_problem`]).
 fn read_ca(path: &Path) -> Result<String, &'static str> {
-    let unusable = |reason: &dyn fmt::Display| {
-        tracing::warn!(path = %path.display(), reason = %reason, "cannot use the CA root certificate");
-        "ca_unreadable"
-    };
+    load_ca(path).map_err(|problem| ca_code(path, problem))
+}
+
+/// [`read_ca`] without the log, so a wait can look many times.
+fn load_ca(path: &Path) -> Result<String, CaProblem> {
+    let unusable = |reason: &dyn fmt::Display| CaProblem::Unusable(reason.to_string());
     let file = match open_nonblocking(path) {
         Ok(file) => file,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Err("ca_not_ready"),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Err(CaProblem::Missing),
         Err(err) => return Err(unusable(&err)),
     };
     // The metadata of the open file, not of the path: a file swapped after
@@ -766,7 +1228,8 @@ fn check_owners(_helper: &Path, _file: &fs::Metadata) -> Result<(), HelperFault>
 /// not an approved dependency (AGENTS.md section 8), so this reads the owner
 /// of a new pipe: macOS and Linux give a pipe the effective user of the
 /// process that asks. A test compares it with a new file's owner.
-// `#[cfg]` outside `platform`: only `check_owners` on Unix needs it.
+// `#[cfg]` outside `platform`: only `check_owners`, and the trust folder
+// check of `user_trust`, need it, on Unix.
 #[cfg(unix)]
 fn current_uid() -> io::Result<u32> {
     use std::os::fd::OwnedFd;
@@ -787,7 +1250,7 @@ fn op_name(op: &HelperOp) -> Result<String, serde_json::Error> {
 
 /// Whether the helper answered for exactly the operations sent, in order.
 /// `uninstall_all` gives one result per removal it runs, so a request with
-/// it is not checked; setup never sends it.
+/// it is not checked; setup never sends it, and the uninstall sends it alone.
 fn results_match(names: &[String], results: &[OpResult]) -> bool {
     names.iter().any(|name| name == UNINSTALL_ALL)
         || names
@@ -809,7 +1272,14 @@ fn osascript_args(helper: &Path, request: &str) -> Vec<OsString> {
     args
 }
 
-/// The helper's results from what `osascript` gave back.
+/// [`read_answer_for`] for setup, as the tests call it.
+#[cfg(test)]
+fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError> {
+    read_answer_for(Flow::Setup, output)
+}
+
+/// The helper's results from what `osascript` gave back, with the error
+/// codes of `flow`.
 ///
 /// - Exit 0: stdout is the helper's JSON line; `do shell script` returns it.
 /// - Another exit: the helper exited with 1 (an operation failed) or 2 (it
@@ -828,24 +1298,29 @@ fn osascript_args(helper: &Path, request: &str) -> Vec<OsString> {
 ///
 /// A message never quotes what the programs printed: only its size and the
 /// exit code go to the log.
-fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError> {
+fn read_answer_for(flow: Flow, output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError> {
+    let noun = flow.noun();
     let output = match output {
         Ok(output) => output,
         Err(err) if err.kind() == io::ErrorKind::TimedOut => {
-            tracing::warn!("setup took more than 5 minutes; Marsa stopped waiting");
-            let message = "Marsa stopped waiting for setup after 5 minutes; some steps may \
-                           already have run as root, and running setup again is safe";
-            return Err(failure("setup_timed_out", message));
+            tracing::warn!("{noun} took more than 5 minutes; Marsa stopped waiting");
+            let message = format!(
+                "Marsa stopped waiting for {noun} after 5 minutes; some steps may already have \
+                 run as root, and running {noun} again is safe"
+            );
+            return Err(failure(&flow.code("timed_out"), message));
         }
         Err(err) if err.kind() == io::ErrorKind::Interrupted => {
-            tracing::warn!("the daemon is stopping; Marsa stopped waiting for setup");
-            let message = "the daemon stopped, so Marsa stopped waiting for setup; some steps \
-                           may already have run as root, and running setup again is safe";
-            return Err(failure("setup_interrupted", message));
+            tracing::warn!("the daemon is stopping; Marsa stopped waiting for {noun}");
+            let message = format!(
+                "the daemon stopped, so Marsa stopped waiting for {noun}; some steps may \
+                 already have run as root, and running {noun} again is safe"
+            );
+            return Err(failure(&flow.code("interrupted"), message));
         }
         Err(err) => {
             tracing::warn!(error = %err, "cannot run osascript");
-            return Err(failure("setup_helper_failed", "cannot run osascript"));
+            return Err(failure(&flow.code("helper_failed"), "cannot run osascript"));
         }
     };
     let text = if output.success() {
@@ -863,12 +1338,13 @@ fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError>
     let Some(answer) = answer else {
         if !output.success() && cancelled(&output.stderr) {
             tracing::info!("the admin prompt was cancelled");
-            return Err(failure("setup_cancelled", "the admin prompt was cancelled"));
+            let message = "the admin prompt was cancelled";
+            return Err(failure(&flow.code("cancelled"), message));
         }
         if !output.success() && not_authorized(&output.stderr) {
             tracing::info!("macOS did not give admin rights");
             let message = "macOS did not give admin rights: a wrong password, or no prompt";
-            return Err(failure("setup_not_authorized", message));
+            return Err(failure(&flow.code("not_authorized"), message));
         }
         tracing::warn!(
             exit = ?output.code,
@@ -877,19 +1353,22 @@ fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError>
             "marsa-helper gave no answer Marsa can read"
         );
         return Err(failure(
-            "setup_helper_failed",
+            &flow.code("helper_failed"),
             "the helper's answer cannot be read",
         ));
     };
     if let Some(refused) = answer.error {
         let code = short_code(&refused.code);
-        tracing::warn!(code = %code, "marsa-helper refused the setup request");
+        tracing::warn!(code = %code, "marsa-helper refused the request of {noun}");
         let message = format!("the helper refused the request: {code}");
-        return Err(failure("setup_helper_rejected", message));
+        return Err(failure(&flow.code("helper_rejected"), message));
     }
     if answer.results.is_empty() {
         tracing::warn!(exit = ?output.code, "marsa-helper answered with no result");
-        return Err(failure("setup_helper_failed", "the helper gave no result"));
+        return Err(failure(
+            &flow.code("helper_failed"),
+            "the helper gave no result",
+        ));
     }
     Ok(answer.results)
 }
@@ -960,6 +1439,7 @@ mod tests {
     use tempfile::TempDir;
     use tower::ServiceExt as _;
 
+    use super::user_trust::SECURITY;
     use crate::daemon::auth::{AuthConfig, require_auth};
 
     /// The daemon port in the `Host` header. No socket is bound for it.
@@ -971,7 +1451,9 @@ mod tests {
     const DONE: &str = include_str!("../../../../fixtures/helper/responses/done.json");
     const FAILED: &str = include_str!("../../../../fixtures/helper/responses/failed.json");
     const REJECTED: &str = include_str!("../../../../fixtures/helper/responses/rejected.json");
-    const TEST_CA: &str = include_str!("../../../../fixtures/helper/test-ca.pem");
+    pub(super) const TEST_CA: &str = include_str!("../../../../fixtures/helper/test-ca.pem");
+    /// What `security verify-cert` prints for a root nobody trusts.
+    const NOT_TRUSTED: &str = "Cert Verify Result: CSSMERR_TP_NOT_TRUSTED\n";
     /// ADR 0012, written out here and not taken from `APPLESCRIPT`, so a
     /// change to the constant fails this test.
     const SCRIPT: &str = "do shell script (quoted form of item 1 of argv) & \" apply \" & \
@@ -979,23 +1461,32 @@ mod tests {
 
     /// One call the fake runner got.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    struct Call {
-        program: &'static str,
-        args: Vec<String>,
-        limit: Duration,
+    pub(super) struct Call {
+        pub(super) program: &'static str,
+        pub(super) args: Vec<String>,
+        pub(super) limit: Duration,
     }
 
-    type Answer = Box<dyn Fn(&'static str) -> io::Result<RunOutput> + Send + Sync>;
+    type Answer = Box<dyn Fn(&'static str, &[String]) -> io::Result<RunOutput> + Send + Sync>;
 
-    /// Records every call and answers by program. Runs nothing.
-    struct Fake {
+    /// Records every call and answers by program and arguments. Runs
+    /// nothing.
+    pub(super) struct Fake {
         calls: Mutex<Vec<Call>>,
         answer: Answer,
     }
 
     impl Fake {
+        /// Answers by program alone.
         fn new(
             answer: impl Fn(&'static str) -> io::Result<RunOutput> + Send + Sync + 'static,
+        ) -> Arc<Self> {
+            Self::answering(move |program, _| answer(program))
+        }
+
+        /// Answers by program and arguments.
+        pub(super) fn answering(
+            answer: impl Fn(&'static str, &[String]) -> io::Result<RunOutput> + Send + Sync + 'static,
         ) -> Arc<Self> {
             Arc::new(Self {
                 calls: Mutex::default(),
@@ -1003,22 +1494,32 @@ mod tests {
             })
         }
 
-        /// `netstat` prints `netstat`, `ps` prints the nginx worker, and
-        /// `osascript` gives `osascript()`.
+        /// `netstat` prints `netstat`, `ps` prints the nginx worker,
+        /// `osascript` gives `osascript()`, and `security` is a Mac that does
+        /// not trust the CA yet: `verify-cert` exits 1, the add exits 0.
         fn scripted(
             netstat: &'static str,
             osascript: impl Fn() -> io::Result<RunOutput> + Send + Sync + 'static,
         ) -> Arc<Self> {
-            Self::new(move |program| match program {
+            Self::answering(move |program, args| match program {
                 NETSTAT => ok(netstat),
                 PS => ok(PS_WORKER),
                 OSASCRIPT => osascript(),
+                SECURITY => security_untrusted(args),
                 other => panic!("unexpected program {other}"),
             })
         }
 
-        fn calls(&self) -> Vec<Call> {
+        pub(super) fn calls(&self) -> Vec<Call> {
             self.calls.lock().unwrap().clone()
+        }
+
+        /// The `security` calls only.
+        fn security_calls(&self) -> Vec<Call> {
+            self.calls()
+                .into_iter()
+                .filter(|call| call.program == SECURITY)
+                .collect()
         }
 
         fn programs(&self) -> Vec<&'static str> {
@@ -1042,17 +1543,30 @@ mod tests {
             limit: Duration,
             _stop: &CancellationToken,
         ) -> io::Result<RunOutput> {
-            let args = args.iter().map(|arg| arg.to_str().unwrap().to_owned());
+            let args: Vec<String> = args
+                .iter()
+                .map(|arg| arg.to_str().unwrap().to_owned())
+                .collect();
             self.calls.lock().unwrap().push(Call {
                 program,
-                args: args.collect(),
+                args: args.clone(),
                 limit,
             });
-            (self.answer)(program)
+            (self.answer)(program, &args)
         }
     }
 
-    fn ok(stdout: &str) -> io::Result<RunOutput> {
+    /// `security` on a Mac that does not trust the CA yet: `verify-cert`
+    /// exits 1, and every other command exits 0.
+    fn security_untrusted(args: &[String]) -> io::Result<RunOutput> {
+        if args.first().map(String::as_str) == Some("verify-cert") {
+            exit(1, NOT_TRUSTED)
+        } else {
+            ok("")
+        }
+    }
+
+    pub(super) fn ok(stdout: &str) -> io::Result<RunOutput> {
         Ok(RunOutput {
             code: Some(0),
             stdout: stdout.as_bytes().to_vec(),
@@ -1060,13 +1574,18 @@ mod tests {
         })
     }
 
-    /// What `osascript` gives when the script failed: exit 1 and `stderr`.
-    fn script_error(stderr: &str) -> io::Result<RunOutput> {
+    /// A program that exited with `code` and printed `stderr`.
+    pub(super) fn exit(code: i32, stderr: &str) -> io::Result<RunOutput> {
         Ok(RunOutput {
-            code: Some(1),
+            code: Some(code),
             stdout: Vec::new(),
             stderr: stderr.as_bytes().to_vec(),
         })
+    }
+
+    /// What `osascript` gives when the script failed: exit 1 and `stderr`.
+    fn script_error(stderr: &str) -> io::Result<RunOutput> {
+        exit(1, stderr)
     }
 
     /// The helper's answer as one line, as it prints it.
@@ -1099,9 +1618,14 @@ mod tests {
     }
 
     /// A data folder, with Caddy's CA root if `ca`, and a `marsa-helper`
-    /// file in `bin/`.
+    /// file in `bin/`. The user's home folder is `home/` in it: a path only,
+    /// never made. Caddy is not installed, unless [`Dir::with_caddy`] says
+    /// otherwise.
     struct Dir {
         dir: TempDir,
+        caddy: Arc<FakeCaddy>,
+        /// How long setup waits for Caddy and its CA root.
+        ca_wait: Duration,
     }
 
     impl Dir {
@@ -1120,27 +1644,115 @@ mod tests {
             for path in [&helper, &dir.path().join("bin")] {
                 set_mode(path, 0o755);
             }
-            Self { dir }
+            Self {
+                dir,
+                caddy: Arc::new(FakeCaddy::new(CaddyStart::NotInstalled, None)),
+                ca_wait: CA_WAIT,
+            }
+        }
+
+        /// A Caddy that answers `answer`, and that makes the CA root
+        /// `ca_after` the start, if given.
+        fn with_caddy(self, answer: CaddyStart, ca_after: Option<Duration>) -> Self {
+            let ca = ca_after.map(|delay| (self.ca_root(), delay));
+            self.with_fake(FakeCaddy::new(answer, ca))
+        }
+
+        fn with_fake(mut self, caddy: FakeCaddy) -> Self {
+            self.caddy = Arc::new(caddy);
+            self
         }
 
         fn helper(&self) -> PathBuf {
             self.dir.path().join("bin").join("marsa-helper")
         }
 
+        fn home(&self) -> PathBuf {
+            self.dir.path().join("home")
+        }
+
+        fn ca_root(&self) -> PathBuf {
+            CaddyPaths::in_dir(self.dir.path()).ca_root()
+        }
+
         fn setup(&self, fake: &Arc<Fake>) -> Setup {
-            Setup::with(
+            let mut setup = Setup::with(
                 fake.clone(),
                 Some(Platform::DarwinArm64),
                 Some(self.helper()),
+                Some(self.home()),
             )
+            .with_caddy(self.caddy.clone());
+            setup.ca_wait = self.ca_wait;
+            setup
         }
 
         /// [`Setup::run`] with the default Caddy ports.
         fn run(&self, fake: &Arc<Fake>) -> SetupReport {
             let caddy = CaddyInput::default();
             let stop = CancellationToken::new();
+            let platform = Platform::DarwinArm64;
             self.setup(fake)
-                .run(self.dir.path(), caddy, Platform::DarwinArm64, &stop)
+                .run(self.dir.path(), caddy, platform, self.caddy.as_ref(), &stop)
+        }
+    }
+
+    /// A Caddy for the CA step. It records the limit of each start, takes
+    /// `takes`, and answers `answer`; with `ca`, the start also makes the CA
+    /// root after that delay, as Caddy does once it has loaded its config:
+    /// on its own thread, or at once for no delay. Through a rename, as
+    /// Caddy's file storage writes, so setup never reads half a file, unless
+    /// `half` first writes half of a root there in place.
+    struct FakeCaddy {
+        limits: Mutex<Vec<Duration>>,
+        answer: CaddyStart,
+        takes: Duration,
+        half: Option<PathBuf>,
+        ca: Option<(PathBuf, Duration)>,
+    }
+
+    impl FakeCaddy {
+        fn new(answer: CaddyStart, ca: Option<(PathBuf, Duration)>) -> Self {
+            Self {
+                limits: Mutex::default(),
+                answer,
+                takes: Duration::ZERO,
+                half: None,
+                ca,
+            }
+        }
+
+        /// The limit of each start, in order.
+        fn limits(&self) -> Vec<Duration> {
+            self.limits.lock().unwrap().clone()
+        }
+    }
+
+    impl StartCaddy for FakeCaddy {
+        fn start(&self, limit: Duration, _stop: &CancellationToken) -> CaddyStart {
+            self.limits.lock().unwrap().push(limit);
+            thread::sleep(self.takes);
+            if let Some(root) = &self.half {
+                fs::create_dir_all(root.parent().unwrap()).unwrap();
+                fs::write(root, &TEST_CA[..TEST_CA.len() / 2]).unwrap();
+            }
+            if let Some((root, delay)) = self.ca.clone() {
+                let make = move || {
+                    thread::sleep(delay);
+                    let temp = root.with_extension("tmp");
+                    fs::create_dir_all(root.parent().unwrap()).unwrap();
+                    fs::write(&temp, TEST_CA).unwrap();
+                    fs::rename(&temp, &root).unwrap();
+                };
+                if delay.is_zero() {
+                    make();
+                } else {
+                    // Setup waits for the file, so the thread is done before
+                    // the test ends.
+                    thread::spawn(make);
+                }
+            }
+            self.answer.clone()
         }
     }
 
@@ -1169,6 +1781,26 @@ mod tests {
 
     fn error_code(report: &SetupReport) -> Option<&str> {
         report.error.as_ref().map(|error| error.code.as_str())
+    }
+
+    fn done(op: &str) -> OpResult {
+        OpResult {
+            op: op.into(),
+            status: OpStatus::Done,
+            code: None,
+            message: None,
+        }
+    }
+
+    /// A helper file at `path`, with the modes of an install, and its
+    /// folder.
+    fn make_helper(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "").unwrap();
+        #[cfg(unix)]
+        for path in [path, path.parent().unwrap()] {
+            set_mode(path, 0o755);
+        }
     }
 
     /// The route with `setup` behind the real auth layer, on `daemon`.
@@ -1259,9 +1891,349 @@ mod tests {
     }
 
     #[test]
+    fn the_user_trust_commands_are_pinned_and_come_after_the_helper() {
+        let dir = Dir::new(true);
+        let answer = all_done(&["resolver_install", "pf_install"]);
+        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+        let report = dir.run(&fake);
+
+        // The request has no trust_install: on macOS the helper does not
+        // trust the CA (ADR 0015), and the user's trust comes after it.
+        assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)]);
+        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, SECURITY, SECURITY]);
+        // `security` gets the checked copy of Caddy's root in the trust
+        // folder, not `root.crt` again (task M5-13); it is the record now.
+        let checked = dir.dir.path().join("trust").join("pending.pem");
+        assert_ne!(checked, dir.ca_root());
+        let ca_root = checked.to_str().unwrap();
+        let record = dir.dir.path().join("trust").join("user-trusted.pem");
+        assert_eq!(fs::read_to_string(record).unwrap(), TEST_CA);
+        let keychain = dir
+            .home()
+            .join("Library")
+            .join("Keychains")
+            .join("login.keychain-db");
+        let keychain = keychain.to_str().unwrap();
+        let security = fake.security_calls();
+        // The absolute program, written out: `RealRunner` refuses a bare
+        // name, so a constant that lost its path would fail only on a Mac.
+        assert_eq!(security[0].program, "/usr/bin/security");
+        assert_eq!(security[1].program, "/usr/bin/security");
+        assert_eq!(security[0].args, ["verify-cert", "-c", ca_root, "-L", "-l"]);
+        assert_eq!(security[0].limit, Duration::from_secs(10));
+        assert_eq!(
+            security[1].args,
+            [
+                "add-trusted-cert",
+                "-r",
+                "trustRoot",
+                "-k",
+                keychain,
+                ca_root
+            ]
+        );
+        assert_eq!(security[1].limit, Duration::from_secs(300));
+        assert!(Path::new(ca_root).is_absolute() && Path::new(keychain).is_absolute());
+
+        // The trust result comes after the helper's, under the helper's op
+        // name, so the CLI prints it like the others.
+        assert_eq!(
+            report.results,
+            [
+                done("resolver_install"),
+                done("pf_install"),
+                done("trust_install")
+            ]
+        );
+        assert!(report.skipped.is_empty());
+        assert_eq!(report.error, None);
+    }
+
+    #[test]
+    fn a_ca_the_user_trusts_already_is_unchanged_and_nothing_is_added() {
+        let dir = Dir::new(true);
+        let answer = all_done(&["resolver_install", "pf_install"]);
+        let fake = Fake::answering(move |program, args| match program {
+            NETSTAT => ok(netstat_free()),
+            OSASCRIPT => ok(&answer),
+            SECURITY if args[0] == "verify-cert" => ok("...certificate verification successful.\n"),
+            other => panic!("{other} {args:?} ran"),
+        });
+        let report = dir.run(&fake);
+
+        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, SECURITY]);
+        let trust = report.results.last().unwrap();
+        assert_eq!(trust.op, "trust_install");
+        assert_eq!(trust.status, OpStatus::Unchanged);
+        assert_eq!(report.results.len(), 3);
+        assert_eq!(report.error, None);
+    }
+
+    #[test]
+    fn a_dialog_refused_or_left_open_is_trust_add_failed_and_the_helper_ops_stay() {
+        /// What `add-trusted-cert` prints when the dialog is refused.
+        const REFUSED: &str = "SecTrustSettingsSetTrustSettings: The authorization was denied \
+                               since no user interaction was possible.\n";
+        /// What `add-trusted-cert` gives back.
+        type Add = fn() -> io::Result<RunOutput>;
+        // The case, the add, and the words the message must hold.
+        let cases: [(&str, Add, &str); 4] = [
+            ("refused", || exit(1, REFUSED), "exited with code 1"),
+            (
+                "left open",
+                || Err(io::Error::from(io::ErrorKind::TimedOut)),
+                "did not finish in 5 minutes",
+            ),
+            (
+                "daemon stopping",
+                || Err(io::Error::from(io::ErrorKind::Interrupted)),
+                "was stopped with the daemon",
+            ),
+            (
+                "security missing",
+                || Err(io::Error::from(io::ErrorKind::NotFound)),
+                "could not run",
+            ),
+        ];
+        for (name, add, how) in cases {
+            let dir = Dir::new(true);
+            let fake = Fake::answering(move |program, args| match program {
+                NETSTAT => ok(netstat_free()),
+                OSASCRIPT => ok(DONE),
+                SECURITY if args[0] == "verify-cert" => exit(1, NOT_TRUSTED),
+                SECURITY => add(),
+                other => panic!("{other} ran"),
+            });
+            let report = dir.run(&fake);
+
+            // The helper's results stay, and the setup has no error: the
+            // failed step is in the results, like a failed helper op.
+            assert_eq!(report.error, None, "{name}");
+            assert_eq!(report.results.len(), 3, "{name}");
+            assert_eq!(report.results[..2], results(DONE)[..], "{name}");
+            let trust = &report.results[2];
+            assert_eq!(trust.op, "trust_install", "{name}");
+            assert_eq!(trust.status, OpStatus::Failed, "{name}");
+            assert_eq!(trust.code.as_deref(), Some("trust_add_failed"), "{name}");
+            let message = trust.message.as_deref().unwrap().to_ascii_lowercase();
+            // What to do: the dialog shows in the daemon's session, so a
+            // daemon started over SSH has to stop first.
+            for part in [
+                how,
+                "in terminal on the mac's desktop",
+                "approve the dialog",
+                "started over ssh",
+                "\"marsa daemon stop\" first",
+            ] {
+                assert!(message.contains(part), "{name}: {message}");
+            }
+            // Nothing `security` printed is in the message.
+            assert!(!message.contains("authorization"), "{name}: {message}");
+            assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, SECURITY, SECURITY]);
+        }
+    }
+
+    #[test]
+    fn no_home_folder_is_trust_add_failed_after_the_helper() {
+        let dir = Dir::new(true);
+        let answer = all_done(&["resolver_install", "pf_install"]);
+        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+        let setup = Setup::with(
+            fake.clone(),
+            Some(Platform::DarwinArm64),
+            Some(dir.helper()),
+            None,
+        );
+        let stop = CancellationToken::new();
+        let report = setup.run(
+            dir.dir.path(),
+            CaddyInput::default(),
+            Platform::DarwinArm64,
+            dir.caddy.as_ref(),
+            &stop,
+        );
+
+        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
+        assert_eq!(report.results.len(), 3);
+        let trust = &report.results[2];
+        assert_eq!(trust.op, "trust_install");
+        assert_eq!(trust.code.as_deref(), Some("trust_add_failed"));
+        assert_eq!(report.error, None);
+    }
+
+    #[test]
+    fn the_client_waits_longer_than_the_slowest_setup() {
+        use marsa_core::client::SETUP_TIMEOUT;
+
+        // 12 min 10 s of limits, 30 s of them for Caddy and its CA root, and
+        // 2 s of grace after each of 12 programs.
+        assert_eq!(SLOWEST_SETUP, Duration::from_secs(754));
+        // With room for the HTTP round trip and for killing a stalled
+        // program.
+        let margin = Duration::from_secs(30);
+        assert!(
+            SETUP_TIMEOUT >= SLOWEST_SETUP + margin,
+            "the client waits {SETUP_TIMEOUT:?}, and a setup may take {SLOWEST_SETUP:?}"
+        );
+
+        // The sum holds every step a setup waits for. A full run with no CA
+        // root yet and nobody on 80 or 443 starts Caddy and runs every
+        // program but `ps`, each with its limit, so a new program or wait in
+        // the flow fails here until it is in `SLOWEST_SETUP`, which then has
+        // to fit the client's wait above.
+        let dir = Dir::new(false).with_caddy(CaddyStart::Started, Some(Duration::ZERO));
+        let answer = all_done(&["resolver_install", "pf_install"]);
+        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+        let report = dir.run(&fake);
+        assert_eq!(report.results.len(), 3);
+        let calls = fake.calls();
+        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, SECURITY, SECURITY]);
+        let ps = u32::try_from(MAX_PS).unwrap();
+        let programs = u32::try_from(calls.len()).unwrap() + ps;
+        let limits: Duration = calls.iter().map(|call| call.limit).sum();
+        let caddy: Duration = dir.caddy.limits().iter().sum();
+        assert_eq!(caddy, CA_WAIT);
+        assert_eq!(
+            caddy + limits + CHECK_LIMIT * ps + PIPE_GRACE * programs,
+            SLOWEST_SETUP
+        );
+    }
+
+    #[test]
+    fn a_helper_in_a_protected_folder_is_refused_before_any_prompt() {
+        // `desktop`: the usual macOS disk takes it for `Desktop`.
+        for folder in ["Desktop", "Documents", "Downloads", "desktop"] {
+            let dir = Dir::new(true);
+            let helper = dir
+                .home()
+                .join(folder)
+                .join("marsa")
+                .join("bin")
+                .join("marsa-helper");
+            make_helper(&helper);
+            let fake = Fake::scripted(netstat_free(), || panic!("osascript ran"));
+            let setup = Setup::with(
+                fake.clone(),
+                Some(Platform::DarwinArm64),
+                Some(helper),
+                Some(dir.home()),
+            );
+            let stop = CancellationToken::new();
+            let report = setup.run(
+                dir.dir.path(),
+                CaddyInput::default(),
+                Platform::DarwinArm64,
+                dir.caddy.as_ref(),
+                &stop,
+            );
+
+            let error = report.error.as_ref().expect(folder);
+            assert_eq!(error.code, "setup_helper_protected_folder", "{folder}");
+            for part in [folder, INSTALL_BIN, "marsa daemon stop", "marsa setup"] {
+                assert!(error.message.contains(part), "{folder}: {}", error.message);
+            }
+            assert!(report.results.is_empty(), "{folder}");
+            // No admin prompt, and no trust dialog after it either.
+            assert_eq!(fake.programs(), [NETSTAT], "{folder}");
+        }
+
+        // By the path alone, before any look at the file: a helper that is
+        // not there gets the same answer, not `setup_helper_missing`.
+        let dir = Dir::new(true);
+        let helper = dir.home().join("Downloads").join("marsa-helper");
+        let fake = Fake::scripted(netstat_free(), || panic!("osascript ran"));
+        let setup = Setup::with(
+            fake.clone(),
+            Some(Platform::DarwinArm64),
+            Some(helper),
+            Some(dir.home()),
+        );
+        let stop = CancellationToken::new();
+        let report = setup.run(
+            dir.dir.path(),
+            CaddyInput::default(),
+            Platform::DarwinArm64,
+            dir.caddy.as_ref(),
+            &stop,
+        );
+        assert_eq!(error_code(&report), Some("setup_helper_protected_folder"));
+        assert_eq!(fake.programs(), [NETSTAT]);
+    }
+
+    #[test]
+    fn protected_folders_match_by_component_under_the_home_folder() {
+        let home = Path::new("/Users/dev");
+        let under = |name: &str| Some(PathBuf::from("/Users/dev").join(name));
+        let cases = [
+            ("/Users/dev/Desktop/marsa-helper", under("Desktop")),
+            (
+                "/Users/dev/Desktop/marsa/target/release/marsa-helper",
+                under("Desktop"),
+            ),
+            ("/Users/dev/Documents/x/marsa-helper", under("Documents")),
+            ("/Users/dev/Downloads/marsa-helper", under("Downloads")),
+            // Without ASCII case, and as the path writes the folder.
+            ("/Users/dev/desktop/marsa-helper", under("desktop")),
+            ("/Users/dev/DOWNLOADS/x/marsa-helper", under("DOWNLOADS")),
+            ("/Users/dev/documents2/marsa-helper", None),
+            ("/Users/dev/Desktop2/marsa-helper", None),
+            ("/Users/dev/DesktopX/Desktop/marsa-helper", None),
+            (
+                "/Users/dev/Library/Application Support/dev.marsa.Marsa/bin/marsa-helper",
+                None,
+            ),
+            ("/Users/other/Desktop/marsa-helper", None),
+            ("/Desktop/marsa-helper", None),
+        ];
+        for (helper, want) in cases {
+            let helper = Path::new(helper);
+            assert_eq!(
+                protected_folder(helper, Some(home)),
+                want,
+                "{}",
+                helper.display()
+            );
+            // Without a home folder nothing can be known, so nothing matches.
+            assert_eq!(protected_folder(helper, None), None, "{}", helper.display());
+        }
+    }
+
+    #[test]
+    fn linux_keeps_trust_install_for_the_helper_and_runs_no_security() {
+        // ADR 0011 stays off macOS: the request carries the certificate, and
+        // neither the user trust nor the protected folder check runs. Setup
+        // itself answers 501 there until task M4-18; this pins the request it
+        // will send.
+        let dir = Dir::new(true);
+        let helper = dir.home().join("Desktop").join("marsa-helper");
+        make_helper(&helper);
+        let answer = all_done(&["trust_install", "resolved_install", "pf_install"]);
+        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+        let setup = Setup::with(
+            fake.clone(),
+            Some(Platform::LinuxX64),
+            Some(helper),
+            Some(dir.home()),
+        );
+        let stop = CancellationToken::new();
+        let report = setup.run(
+            dir.dir.path(),
+            CaddyInput::default(),
+            Platform::LinuxX64,
+            dir.caddy.as_ref(),
+            &stop,
+        );
+
+        assert_eq!(fake.request().ops[0], trust());
+        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
+        assert_eq!(report.results.len(), 3);
+        assert_eq!(report.error, None);
+    }
+
+    #[test]
     fn herd_on_80_and_443_means_no_pf_install() {
         let dir = Dir::new(true);
-        let answer = all_done(&["trust_install", "resolver_install"]);
+        let answer = all_done(&["resolver_install"]);
         let fake = Fake::scripted(NETSTAT_HERD, move || ok(&answer));
         let report = dir.run(&fake);
 
@@ -1277,30 +2249,184 @@ mod tests {
         };
         assert_eq!(report.port_holders, [nginx(80), nginx(443)]);
         assert_eq!(report.skipped, [skip("pf_install", "redirect_port_held")]);
-        assert_eq!(fake.request().ops, [trust(), resolver()]);
-        assert_eq!(report.results.len(), 2);
+        assert_eq!(fake.request().ops, [resolver()]);
+        assert_eq!(
+            report.results,
+            [done("resolver_install"), done("trust_install")]
+        );
         assert_eq!(report.error, None);
 
         // `ps` once for the one PID that holds both ports.
         let calls = fake.calls();
-        assert_eq!(fake.programs(), [NETSTAT, PS, OSASCRIPT]);
+        assert_eq!(
+            fake.programs(),
+            [NETSTAT, PS, OSASCRIPT, SECURITY, SECURITY]
+        );
         assert_eq!(calls[0].args, ["-anv", "-p", "tcp"]);
         assert_eq!(calls[1].args, ["-p", "15464", "-o", "user=,comm="]);
         assert_eq!(calls[0].limit, Duration::from_secs(10));
         assert_eq!(calls[1].limit, Duration::from_secs(10));
     }
 
+    /// Task M5-15: a new user runs setup before any site. Setup starts
+    /// Caddy, which makes its CA root a moment later, waits for it, and
+    /// trusts it.
     #[test]
-    fn no_ca_means_no_trust_install() {
-        let dir = Dir::new(false);
-        let fake = Fake::scripted(netstat_free(), || ok(DONE));
+    fn no_ca_yet_starts_caddy_waits_for_the_root_and_trusts_it() {
+        let after = Duration::from_millis(300);
+        let dir = Dir::new(false).with_caddy(CaddyStart::Started, Some(after));
+        let answer = all_done(&["resolver_install", "pf_install"]);
+        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+        let began = Instant::now();
         let report = dir.run(&fake);
 
+        assert!(began.elapsed() >= after, "{:?}", began.elapsed());
+        assert_eq!(dir.caddy.limits(), [CA_WAIT]);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        let want = [
+            done("resolver_install"),
+            done("pf_install"),
+            done("trust_install"),
+        ];
+        assert_eq!(report.results, want);
+        assert_eq!(report.error, None);
+        // Caddy first, then the checks and the prompt.
+        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, SECURITY, SECURITY]);
+        assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)]);
+    }
+
+    /// A root that is already there is read at once: no start, no wait.
+    #[test]
+    fn a_ca_already_there_starts_no_caddy() {
+        let dir = Dir::new(true).with_caddy(CaddyStart::Started, None);
+        let answer = all_done(&["resolver_install", "pf_install"]);
+        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+        let report = dir.run(&fake);
+
+        assert!(dir.caddy.limits().is_empty());
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(report.results.len(), 3);
+        assert_eq!(report.results[2], done("trust_install"));
+    }
+
+    /// Caddy started, but no root came in time: `ca_not_ready`, after the
+    /// limit and not much later. The other steps still go.
+    #[test]
+    fn a_root_that_does_not_come_in_time_is_ca_not_ready() {
+        let mut dir = Dir::new(false).with_caddy(CaddyStart::Started, None);
+        dir.ca_wait = Duration::from_millis(300);
+        let fake = Fake::scripted(netstat_free(), || ok(DONE));
+        let began = Instant::now();
+        let report = dir.run(&fake);
+
+        let took = began.elapsed();
+        assert!(
+            took >= dir.ca_wait && took < Duration::from_secs(5),
+            "{took:?}"
+        );
+        assert_eq!(dir.caddy.limits(), [dir.ca_wait]);
         assert_eq!(report.skipped, [skip("trust_install", "ca_not_ready")]);
+        assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)]);
+        assert_eq!(report.results, results(DONE));
+        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
+        assert_eq!(report.error, None);
+    }
+
+    /// No Caddy installed: nothing can make the CA, so no wait, and a skip
+    /// that says to install Caddy. The other steps still go.
+    #[test]
+    fn no_caddy_installed_skips_the_trust_as_caddy_not_installed() {
+        let dir = Dir::new(false);
+        let fake = Fake::scripted(netstat_free(), || ok(DONE));
+        let began = Instant::now();
+        let report = dir.run(&fake);
+
+        assert!(began.elapsed() < Duration::from_secs(5));
+        assert_eq!(dir.caddy.limits(), [CA_WAIT]);
+        let skipped = [skip("trust_install", "caddy_not_installed")];
+        assert_eq!(report.skipped, skipped);
         assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)]);
         assert_eq!(report.results, results(DONE));
         assert!(report.port_holders.is_empty());
         assert_eq!(report.error, None);
+    }
+
+    /// Caddy did not start: one more look and no wait. Caddy makes its CA
+    /// before it opens its ports, so a root made by a start that failed on
+    /// a port is still trusted.
+    #[test]
+    fn a_caddy_that_did_not_start_is_not_waited_for() {
+        let failed = CaddyStart::Failed("port_in_use".into());
+        let dir = Dir::new(false).with_caddy(failed.clone(), None);
+        let fake = Fake::scripted(netstat_free(), || ok(DONE));
+        let began = Instant::now();
+        let report = dir.run(&fake);
+        assert!(began.elapsed() < Duration::from_secs(5));
+        assert_eq!(report.skipped, [skip("trust_install", "caddy_not_started")]);
+
+        let dir = Dir::new(false).with_caddy(failed, Some(Duration::ZERO));
+        let answer = all_done(&["resolver_install", "pf_install"]);
+        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+        let report = dir.run(&fake);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(report.results[2], done("trust_install"));
+    }
+
+    /// Task M5-15b: a root that is there but half written is waited for,
+    /// and the whole certificate is the one trusted.
+    #[test]
+    fn a_half_written_root_is_waited_for() {
+        let dir = Dir::new(false);
+        let ca = Some((dir.ca_root(), Duration::from_millis(300)));
+        let fake_caddy = FakeCaddy {
+            half: Some(dir.ca_root()),
+            ..FakeCaddy::new(CaddyStart::Started, ca)
+        };
+        let dir = dir.with_fake(fake_caddy);
+        let answer = all_done(&["resolver_install", "pf_install"]);
+        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+        let report = dir.run(&fake);
+
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(report.results[2], done("trust_install"));
+        let record = user_trust::TrustFiles::in_dir(dir.dir.path()).record();
+        assert_eq!(fs::read_to_string(record).unwrap(), TEST_CA);
+
+        // Still half at the limit: `ca_unreadable`, after the limit.
+        let mut dir = Dir::new(false);
+        dir.ca_wait = Duration::from_millis(300);
+        let fake_caddy = FakeCaddy {
+            half: Some(dir.ca_root()),
+            ..FakeCaddy::new(CaddyStart::Started, None)
+        };
+        let dir = dir.with_fake(fake_caddy);
+        let fake = Fake::scripted(netstat_free(), || ok(DONE));
+        let began = Instant::now();
+        let report = dir.run(&fake);
+        assert!(began.elapsed() >= dir.ca_wait, "{:?}", began.elapsed());
+        assert_eq!(report.skipped, [skip("trust_install", "ca_unreadable")]);
+    }
+
+    /// Task M5-15b: Caddy's start and the wait for its root share one
+    /// limit. A start that takes most of it leaves only the rest to wait.
+    #[test]
+    fn the_start_and_the_wait_share_one_limit() {
+        let mut dir = Dir::new(false);
+        dir.ca_wait = Duration::from_secs(1);
+        let fake_caddy = FakeCaddy {
+            takes: Duration::from_millis(900),
+            ..FakeCaddy::new(CaddyStart::Started, None)
+        };
+        let dir = dir.with_fake(fake_caddy);
+        let fake = Fake::scripted(netstat_free(), || ok(DONE));
+        let began = Instant::now();
+        let report = dir.run(&fake);
+
+        let took = began.elapsed();
+        assert!(took >= dir.ca_wait, "{took:?}");
+        // Two limits one after the other would be 1.9 s.
+        assert!(took < Duration::from_millis(1500), "{took:?}");
+        assert_eq!(report.skipped, [skip("trust_install", "ca_not_ready")]);
     }
 
     #[test]
@@ -1348,6 +2474,10 @@ mod tests {
             );
             assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)], "{name}");
             assert_eq!(report.error, None, "{name}");
+            // A certificate that cannot be used never reaches `security`:
+            // only the helper's two results come back.
+            assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT], "{name}");
+            assert_eq!(report.results.len(), 2, "{name}");
         }
         // The helper allows whitespace before the BEGIN line.
         assert_eq!(pem_problem(&format!(" \t\r\n{TEST_CA}")), None);
@@ -1536,8 +2666,9 @@ mod tests {
         let dir = Dir::new(false);
         let fake = Fake::new(|program| panic!("{program} ran"));
         let setup = dir.setup(&fake);
+        let stop = CancellationToken::new();
         assert_eq!(
-            setup.apply(Vec::new(), &CancellationToken::new()),
+            setup.apply(Vec::new(), Platform::DarwinArm64, &stop),
             Ok(Vec::new())
         );
         assert!(fake.calls().is_empty());
@@ -1550,17 +2681,24 @@ mod tests {
         let stop = CancellationToken::new();
         let missing = dir.dir.path().join("nowhere").join("marsa-helper");
         for helper in [None, Some(missing), Some(PathBuf::from("marsa-helper"))] {
-            let setup = Setup::with(fake.clone(), Some(Platform::DarwinArm64), helper);
+            let setup = Setup::with(
+                fake.clone(),
+                Some(Platform::DarwinArm64),
+                helper,
+                Some(dir.home()),
+            );
             let report = setup.run(
                 dir.dir.path(),
                 CaddyInput::default(),
                 Platform::DarwinArm64,
+                dir.caddy.as_ref(),
                 &stop,
             );
             assert_eq!(error_code(&report), Some("setup_helper_missing"));
             assert!(report.results.is_empty());
         }
-        assert!(!fake.programs().contains(&OSASCRIPT));
+        // No prompt, and no trust dialog after a setup that stopped.
+        assert_eq!(fake.programs(), [NETSTAT, NETSTAT, NETSTAT]);
     }
 
     #[cfg(unix)]
@@ -1656,27 +2794,28 @@ mod tests {
         let run = |text: String, done: &[&str]| {
             let dir = Dir::new(true);
             let answer = all_done(done);
-            let fake = Fake::new(move |program| match program {
+            let fake = Fake::answering(move |program, args| match program {
                 NETSTAT => ok(&text),
                 OSASCRIPT => ok(&answer),
+                SECURITY => security_untrusted(args),
                 other => panic!("unexpected program {other}"),
             });
             let report = dir.run(&fake);
             (report, fake.request().ops, fake.programs())
         };
-        let all = ["trust_install", "resolver_install", "pf_install"];
+        let all = ["resolver_install", "pf_install"];
         let (report, ops, _) = run(text.clone(), &all);
         assert!(report.skipped.is_empty(), "{:?}", report.skipped);
-        assert_eq!(ops, [trust(), resolver(), pf(18080, 18443)]);
+        assert_eq!(ops, [resolver(), pf(18080, 18443)]);
         assert_eq!(report.error, None);
 
         // Filled up to the limit, as `RealRunner` keeps a longer output: a
         // holder could sit in the part that was not read.
         text.push_str(&" ".repeat(MAX_OUTPUT as usize - text.len()));
-        let (report, ops, programs) = run(text, &all[..2]);
+        let (report, ops, programs) = run(text, &all[..1]);
         assert_eq!(report.skipped, [skip("pf_install", "ports_not_checked")]);
-        assert_eq!(ops, [trust(), resolver()]);
-        assert_eq!(programs, [NETSTAT, OSASCRIPT]);
+        assert_eq!(ops, [resolver()]);
+        assert_eq!(programs, [NETSTAT, OSASCRIPT, SECURITY, SECURITY]);
         assert_eq!(report.error, None);
     }
 
@@ -1689,16 +2828,17 @@ mod tests {
         ];
         for netstat in outputs {
             let dir = Dir::new(true);
-            let answer = all_done(&["trust_install", "resolver_install"]);
-            let fake = Fake::new(move |program| match program {
+            let answer = all_done(&["resolver_install"]);
+            let fake = Fake::answering(move |program, args| match program {
                 NETSTAT => netstat(),
                 OSASCRIPT => ok(&answer),
+                SECURITY => security_untrusted(args),
                 other => panic!("unexpected program {other}"),
             });
             let report = dir.run(&fake);
             assert_eq!(report.skipped, [skip("pf_install", "ports_not_checked")]);
-            assert_eq!(fake.request().ops, [trust(), resolver()]);
-            assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
+            assert_eq!(fake.request().ops, [resolver()]);
+            assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, SECURITY, SECURITY]);
             assert_eq!(report.error, None);
         }
     }
@@ -1706,7 +2846,7 @@ mod tests {
     #[tokio::test]
     async fn the_whole_setup_over_http() {
         let dir = Dir::new(true);
-        let answer = all_done(&["trust_install", "resolver_install", "pf_install"]);
+        let answer = all_done(&["resolver_install", "pf_install"]);
         let fake = Fake::scripted(netstat_free(), move || ok(&answer));
         let mut daemon = Daemon::new(dir.dir.path().to_path_buf());
         // The ports come from the daemon's Caddy settings.
@@ -1719,26 +2859,138 @@ mod tests {
         let (status, json) = app.post().await;
         assert_eq!(status, StatusCode::OK, "{json}");
         let report: SetupReport = serde_json::from_value(json).unwrap();
-        let done = |op: &str| OpResult {
-            op: op.into(),
-            status: OpStatus::Done,
-            code: None,
-            message: None,
-        };
         let want = SetupReport {
             results: vec![
-                done("trust_install"),
                 done("resolver_install"),
                 done("pf_install"),
+                done("trust_install"),
             ],
             ..SetupReport::default()
         };
         assert_eq!(report, want);
         assert_eq!(
             fake.request(),
-            HelperRequest::new(vec![trust(), resolver(), pf(28080, 28443)])
+            HelperRequest::new(vec![resolver(), pf(28080, 28443)])
         );
         assert_eq!(events.try_recv().unwrap(), Event::SetupFinished(want));
+    }
+
+    /// The daemon's own Caddy, not a fake: with no Caddy installed, setup
+    /// says so, and Caddy's status is not marked failed.
+    #[tokio::test]
+    async fn the_daemons_caddy_not_installed_is_a_skip_and_no_failed_status() {
+        let dir = Dir::new(false);
+        let fake = Fake::scripted(netstat_free(), || ok(DONE));
+        let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+        let app = App::new(daemon.clone(), with_the_daemons_caddy(&dir, &fake));
+
+        let (status, json) = app.post().await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let report: SetupReport = serde_json::from_value(json).unwrap();
+        let skipped = [skip("trust_install", "caddy_not_installed")];
+        assert_eq!(report.skipped, skipped);
+        assert_eq!(daemon.caddy.status().state, ServiceState::Stopped);
+    }
+
+    /// A daemon on `dir` whose Caddy is `/bin/sleep` on free ports: it
+    /// starts, but its admin API never answers, so each start ends with
+    /// `caddy_start_timeout` after `ready`.
+    #[cfg(unix)]
+    fn sleeping_caddy(dir: &Dir, ready: Duration) -> Arc<Daemon> {
+        use crate::daemon::caddy::caddy_spec_for;
+        use marsa_core::services::ServiceSpec;
+
+        let mut daemon = Daemon::new(dir.dir.path().to_path_buf());
+        // Free ports, so nothing of this machine answers there.
+        let free: Vec<std::net::TcpListener> = (0..3)
+            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+            .collect();
+        let port = |index: usize| free[index].local_addr().unwrap().port();
+        let caddy = &mut daemon.caddy;
+        caddy.input = CaddyInput {
+            admin_port: port(0),
+            http_port: port(1),
+            https_port: port(2),
+        };
+        drop(free);
+        caddy.ready_limit = ready;
+        caddy.spec = Some(ServiceSpec {
+            args: vec!["30".to_owned()],
+            stop_grace: Duration::from_millis(200),
+            ..caddy_spec_for(&caddy.paths, PathBuf::from("/bin/sleep"))
+        });
+        Arc::new(daemon)
+    }
+
+    /// Setup with the daemon's own Caddy, not a fake one.
+    fn with_the_daemons_caddy(dir: &Dir, fake: &Arc<Fake>) -> Setup {
+        Setup::with(
+            fake.clone(),
+            Some(Platform::DarwinArm64),
+            Some(dir.helper()),
+            Some(dir.home()),
+        )
+    }
+
+    /// The daemon's own Caddy, started from setup's blocking thread through
+    /// the path of `marsa services start caddy`. Its start fails, so setup
+    /// does not wait for a root, and says that Caddy did not start.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn setup_starts_the_daemons_caddy_and_does_not_wait_when_it_fails() {
+        let dir = Dir::new(false);
+        let fake = Fake::scripted(netstat_free(), || ok(DONE));
+        let daemon = sleeping_caddy(&dir, Duration::from_millis(300));
+        let app = App::new(daemon.clone(), with_the_daemons_caddy(&dir, &fake));
+
+        let began = Instant::now();
+        let (status, json) = app.post().await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(began.elapsed() < CA_WAIT, "{:?}", began.elapsed());
+        let report: SetupReport = serde_json::from_value(json).unwrap();
+        let skipped = [skip("trust_install", "caddy_not_started")];
+        assert_eq!(report.skipped, skipped);
+        let failed = ServiceState::Failed {
+            code: "caddy_start_timeout".into(),
+        };
+        assert_eq!(daemon.caddy.status().state, failed);
+        daemon.stop_procs(Duration::from_secs(5)).await;
+    }
+
+    /// Task M5-15b: another start of Caddy runs when setup asks for one.
+    /// Setup asks again once it has ended, so its own start runs too, and
+    /// the busy answer is never taken for a running Caddy.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_busy_caddy_is_asked_again_once_the_other_action_ends() {
+        let dir = Dir::new(false);
+        let fake = Fake::scripted(netstat_free(), || ok(DONE));
+        let daemon = sleeping_caddy(&dir, Duration::from_millis(500));
+        let first = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.caddy.run(&daemon, ServiceAction::Start).await }
+        });
+        // Spawned: the first start holds the busy flag until it ends.
+        while daemon.caddy.status().state == ServiceState::Stopped {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let mut setup = with_the_daemons_caddy(&dir, &fake);
+        setup.ca_wait = Duration::from_secs(20);
+        let app = App::new(daemon.clone(), setup);
+
+        let (status, json) = app.post().await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let report: SetupReport = serde_json::from_value(json).unwrap();
+        // Busy taken for a running Caddy would wait for a root, then say
+        // `ca_not_ready`.
+        let skipped = [skip("trust_install", "caddy_not_started")];
+        assert_eq!(report.skipped, skipped);
+        let first = first.await.unwrap().unwrap();
+        let last = daemon.caddy.status();
+        assert_eq!(last.state, first.state);
+        // A second start, after the first one ended.
+        assert!(last.since_ms > first.since_ms, "{first:?} {last:?}");
+        daemon.stop_procs(Duration::from_secs(5)).await;
     }
 
     #[tokio::test]
@@ -1777,7 +3029,7 @@ mod tests {
         let fake = Fake::new(|program| panic!("{program} ran"));
         for platform in [Some(Platform::LinuxX64), Some(Platform::WindowsX64), None] {
             let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
-            let setup = Setup::with(fake.clone(), platform, Some(dir.helper()));
+            let setup = Setup::with(fake.clone(), platform, Some(dir.helper()), Some(dir.home()));
             let app = App::new(daemon, setup);
             let refused = (
                 StatusCode::NOT_IMPLEMENTED,
@@ -1791,7 +3043,7 @@ mod tests {
     #[tokio::test]
     async fn a_request_without_the_token_with_an_origin_or_another_host_runs_nothing() {
         let dir = Dir::new(true);
-        let answer = all_done(&["trust_install", "resolver_install", "pf_install"]);
+        let answer = all_done(&["resolver_install", "pf_install"]);
         let fake = Fake::scripted(netstat_free(), move || ok(&answer));
         let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
         let app = App::new(daemon, dir.setup(&fake));
@@ -1845,7 +3097,7 @@ mod tests {
         // The same route with the right headers runs: the refusals above
         // came from the auth layer.
         assert_eq!(app.post().await.0, StatusCode::OK);
-        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
+        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, SECURITY, SECURITY]);
     }
 
     #[test]

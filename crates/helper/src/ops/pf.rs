@@ -24,9 +24,17 @@ use std::time::Duration;
 use crate::response::{OpResult, Outcome};
 use crate::system::{RunOutput, System};
 
-/// Writing a file of the redirect failed, or the running helper could not be
-/// read to copy it.
+/// Writing a file of the redirect failed.
 pub const PF_WRITE: &str = "pf_write";
+/// The running helper could not be found or read, so it was not copied for
+/// the boot job, and nothing was written (task M4-27): its path is not
+/// known, the file is gone or larger than 64 MiB, or the read was refused.
+/// A refused read is what the folder protection of macOS gives: root cannot
+/// read the user's Desktop, Documents, and Downloads folders until the user
+/// allows it (Privacy & Security). Only then does the message say to run
+/// Marsa from its own folder,
+/// `~/Library/Application Support/dev.marsa.Marsa/bin`.
+pub const PF_HELPER_UNREADABLE: &str = "pf_helper_unreadable";
 /// Deleting a file of the redirect failed.
 pub const PF_DELETE: &str = "pf_delete";
 /// `pfctl -f` did not load the rules file into the anchor.
@@ -66,6 +74,9 @@ const FILES: [&str; 4] = [RULES, TOKEN, COPY, PLIST];
 
 /// The largest helper binary that is copied.
 const MAX_HELPER_BYTES: u64 = 64 * 1024 * 1024;
+/// Where an install puts the programs, for the message of
+/// [`PF_HELPER_UNREADABLE`].
+const INSTALL_BIN: &str = "~/Library/Application Support/dev.marsa.Marsa/bin";
 /// A token is a `u64`: at most 20 digits and a newline.
 const MAX_TOKEN_BYTES: u64 = 32;
 const RULE_COUNT: usize = 4;
@@ -127,15 +138,25 @@ fn install_files(
             "cannot find the running helper to copy it to {COPY}: {}",
             err.kind()
         );
-        failure(PF_WRITE, message)
+        failure(PF_HELPER_UNREADABLE, message)
     })?;
     let helper = system.read(&exe, MAX_HELPER_BYTES).map_err(|err| {
+        // Only a refused read points at the folder protection. A helper that
+        // is gone or too large has another cause, so no such advice.
+        let advice = if err.kind() == io::ErrorKind::PermissionDenied {
+            format!(
+                ". macOS keeps root out of the Desktop, Documents, and Downloads folders: \
+                 run \"marsa daemon stop\", then run Marsa from {INSTALL_BIN}"
+            )
+        } else {
+            String::new()
+        };
         let message = format!(
-            "cannot read {} to copy it to {COPY}: {}",
+            "cannot read {} to copy it to {COPY}: {}{advice}",
             exe.display(),
             err.kind()
         );
-        failure(PF_WRITE, message)
+        failure(PF_HELPER_UNREADABLE, message)
     })?;
     // The plist comes last, so launchd never finds a job whose program is not
     // there yet.
@@ -429,6 +450,9 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         }
         fn remove(&self, path: &Path) -> io::Result<()> {
             self.fake.remove(path)
+        }
+        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
+            self.fake.remove_empty_dir(path)
         }
         fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
             let result = self.fake.run(program, args);
@@ -774,10 +798,39 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
             assert_eq!(install(18080, 18443, &mac), expected);
             assert!(commands(&mac).is_empty());
         }
-        // A helper that cannot be read is not copied, and nothing is written.
+    }
+
+    /// Root could not read the running helper (task M4-27): on macOS, a
+    /// helper run from `~/Desktop` is behind the folder protection.
+    #[test]
+    fn a_helper_root_cannot_read_is_pf_helper_unreadable_and_runs_nothing() {
+        let mut mac = fresh(&[]);
+        let exe = mac.current_exe().unwrap();
+        mac.fake.fail_reads.insert(exe.clone());
+        let message = format!(
+            "cannot read {} to copy it to {COPY}: permission denied. macOS keeps root out of \
+             the Desktop, Documents, and Downloads folders: run \"marsa daemon stop\", then \
+             run Marsa from ~/Library/Application Support/dev.marsa.Marsa/bin",
+            exe.display()
+        );
+        let expected = OpResult::failed(INSTALL, PF_HELPER_UNREADABLE, message);
+        assert_eq!(install(18080, 18443, &mac), expected);
+        // Nothing ran and nothing was written: only the running helper is
+        // there.
+        assert!(commands(&mac).is_empty());
+        assert!(mac.fake.files.borrow().keys().eq([&exe]));
+
+        // A helper that is gone is not copied either, and nothing is written.
+        // The same code, but no word about the folder protection: that is
+        // not why the read failed.
         let mac = fresh(&[]);
         mac.fake.files.borrow_mut().clear();
-        assert_eq!(code_of(&install(18080, 18443, &mac)), PF_WRITE);
+        let message = format!(
+            "cannot read {} to copy it to {COPY}: entity not found",
+            exe.display()
+        );
+        let expected = OpResult::failed(INSTALL, PF_HELPER_UNREADABLE, message);
+        assert_eq!(install(18080, 18443, &mac), expected);
         assert!(commands(&mac).is_empty() && mac.fake.files.borrow().is_empty());
     }
 

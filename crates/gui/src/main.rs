@@ -37,7 +37,7 @@ fn run(started: Instant) -> anyhow::Result<()> {
         return Ok(());
     };
     // Connecting starts now, while the window opens.
-    let bridge = bridge::start(data_dir).context("cannot start the bridge thread")?;
+    let bridge = bridge::start(data_dir.clone()).context("cannot start the bridge thread")?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(strings::APP_NAME)
@@ -49,7 +49,10 @@ fn run(started: Instant) -> anyhow::Result<()> {
     eframe::run_native(
         strings::APP_NAME,
         options,
-        Box::new(move |creation| Ok(Box::new(app::App::new(&creation.egui_ctx, bridge, started)))),
+        Box::new(move |creation| {
+            let app = app::App::new(&creation.egui_ctx, bridge, data_dir, started);
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|err| anyhow::anyhow!("cannot open the window: {err}"))
 }
