@@ -65,6 +65,22 @@ pub trait System {
 
     /// The path of the running helper, for the boot job (task M4-08).
     fn current_exe(&self) -> io::Result<PathBuf>;
+
+    /// The Windows system folder, `C:\Windows\System32` on most machines.
+    /// [`RealSystem`] asks Windows for it, so it comes neither from the
+    /// request nor from the environment. An error of kind `Unsupported` on
+    /// macOS and Linux, which is also what a `System` without its own
+    /// answer gives.
+    fn system_dir(&self) -> io::Result<PathBuf> {
+        Err(no_system_dir())
+    }
+}
+
+fn no_system_dir() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "only Windows has a system folder",
+    )
 }
 
 /// The real disk and processes.
@@ -137,6 +153,15 @@ impl System for RealSystem {
 
     fn current_exe(&self) -> io::Result<PathBuf> {
         std::env::current_exe()
+    }
+
+    fn system_dir(&self) -> io::Result<PathBuf> {
+        // Windows only: the other systems have no such folder, and no op of
+        // theirs asks for it.
+        #[cfg(windows)]
+        return crate::windows::system_dir();
+        #[cfg(not(windows))]
+        Err(no_system_dir())
     }
 }
 
@@ -355,6 +380,9 @@ mod fake {
         /// Dangling symlinks: `exists` is true, but `read` is `NotFound`,
         /// like a link whose target is gone.
         pub dangling: BTreeSet<PathBuf>,
+        /// What `system_dir` returns. `None`, the default, is a system
+        /// without one: macOS or Linux.
+        pub system_dir: Option<PathBuf>,
     }
 
     impl FakeSystem {
@@ -421,6 +449,10 @@ mod fake {
 
         fn current_exe(&self) -> io::Result<PathBuf> {
             Ok(PathBuf::from(EXE))
+        }
+
+        fn system_dir(&self) -> io::Result<PathBuf> {
+            self.system_dir.clone().ok_or_else(super::no_system_dir)
         }
     }
 }

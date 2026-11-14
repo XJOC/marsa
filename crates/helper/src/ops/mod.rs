@@ -4,9 +4,11 @@
 //! An op meant for another OS fails with `op_not_supported`.
 //!
 //! Each pair of macOS ops has its own file, so their tasks do not touch the
-//! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). The
-//! Linux and Windows ops fail with `op_not_implemented` until their tasks.
+//! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). On
+//! Windows, `hosts` (M4-19d) is written. The Linux ops fail with
+//! `op_not_implemented` until their tasks.
 
+mod hosts;
 pub mod pf;
 mod resolver;
 mod trust;
@@ -86,13 +88,13 @@ fn handle(op: &Op, os: Os, system: &impl System) -> OpResult {
         Op::TrustInstall { pem } if os == Os::Macos => trust::install(pem, system),
         Op::TrustRemove {} if os == Os::Macos => trust::remove(system),
         Op::TrustInstall { .. } | Op::TrustRemove {} => not_implemented(op.name()),
+        Op::HostsSync { names } => hosts::sync(names, system),
+        Op::HostsRemove {} => hosts::remove(system),
         // `run` expands `uninstall_all` into its removals, so it never gets
-        // here. Linux and Windows come with their own tasks.
-        Op::UninstallAll {}
-        | Op::ResolvedInstall { .. }
-        | Op::ResolvedRemove {}
-        | Op::HostsSync { .. }
-        | Op::HostsRemove {} => not_implemented(op.name()),
+        // here. Linux comes with its own tasks.
+        Op::UninstallAll {} | Op::ResolvedInstall { .. } | Op::ResolvedRemove {} => {
+            not_implemented(op.name())
+        }
     }
 }
 
