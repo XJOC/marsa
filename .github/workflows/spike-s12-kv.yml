@@ -1,0 +1,185 @@
+name: spike-s12-kv
+
+# Spike S-12b: a key-value server for Marsa. Valkey 8 on macOS and Linux
+# (official tarball or our own build), and the options on Windows (Garnet,
+# Memurai, tporadowski/redis, redis-windows, Valkey built in MSYS2 and Cygwin),
+# each with a Laravel cache and queue test. Throwaway code in
+# spikes/s12-database-servers/kv; the results go into an ADR.
+# Runners are thrown away after the job, so sudo and installers are fine here.
+# Never run these scripts on a real machine.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["task/S-12b-*"]
+    paths:
+      - "spikes/s12-database-servers/kv/**"
+      - ".github/workflows/spike-s12-kv.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VALKEY_VERSION: "8.1.11"
+
+jobs:
+  unix:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-14 is deprecated (images retire 2026-11-02); macos-15 is arm64 too.
+          - { os: macos-15, mode: build, label: darwin-arm64-build }
+          - { os: macos-15-intel, mode: build, label: darwin-x64-build }
+          - { os: ubuntu-24.04, mode: official, label: linux-x64-official-noble }
+          - { os: ubuntu-22.04, mode: official, label: linux-x64-official-jammy }
+          - { os: ubuntu-24.04, mode: build, label: linux-x64-build }
+          - { os: ubuntu-24.04, mode: build-static, label: linux-x64-static-musl }
+          - { os: ubuntu-24.04-arm, mode: official, label: linux-arm64-official-noble }
+          - { os: ubuntu-24.04-arm, mode: build, label: linux-arm64-build }
+          - { os: ubuntu-24.04-arm, mode: build-static, label: linux-arm64-static-musl }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      LABEL: ${{ matrix.label }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: mbstring, intl, sqlite3, pdo_sqlite, curl, openssl, zip, fileinfo, ctype, tokenizer, xml, dom
+          tools: composer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Obtain the server (${{ matrix.mode }})
+        run: bash spikes/s12-database-servers/kv/unix/kv.sh obtain ${{ matrix.mode }}
+
+      - name: Probe (start, memory, stop, orphan)
+        run: bash spikes/s12-database-servers/kv/unix/kv.sh probe
+
+      - name: Laravel cache and queue
+        run: bash spikes/s12-database-servers/kv/unix/kv.sh laravel
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '```text'
+            bash spikes/s12-database-servers/kv/unix/kv.sh summary
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kv-${{ matrix.label }}
+          path: ${{ runner.temp }}/kv-results
+          if-no-files-found: warn
+
+  windows:
+    name: win-${{ matrix.candidate }}
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate:
+          - garnet
+          - memurai
+          - tporadowski
+          - rw-7.2.16-msys2
+          - rw-7.2.16-cygwin
+          - rw-8.10.3-msys2
+          - valkey-msys2
+          - valkey-cygwin
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: mbstring, intl, sqlite3, pdo_sqlite, curl, openssl, zip, fileinfo, ctype, tokenizer, xml, dom
+          tools: composer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      # Valkey has no Windows port: try the POSIX build under MSYS2 and Cygwin.
+      - name: Install MSYS2
+        if: matrix.candidate == 'valkey-msys2'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: false
+          path-type: minimal
+          install: gcc make curl tar
+
+      - name: Build Valkey in MSYS2
+        if: matrix.candidate == 'valkey-msys2'
+        shell: msys2 {0}
+        run: bash spikes/s12-database-servers/kv/windows/build-valkey.sh msys2
+
+      - name: Install Cygwin
+        if: matrix.candidate == 'valkey-cygwin'
+        uses: cygwin/cygwin-install-action@v6
+        with:
+          packages: gcc-core make curl tar binutils
+
+      - name: Build Valkey in Cygwin
+        if: matrix.candidate == 'valkey-cygwin'
+        run: |
+          $env:CHERE_INVOKING = '1'
+          C:\cygwin\bin\bash.exe -lc 'bash "$(cygpath -u "$GITHUB_WORKSPACE")/spikes/s12-database-servers/kv/windows/build-valkey.sh" cygwin'
+
+      - name: Obtain the server
+        run: ./spikes/s12-database-servers/kv/windows/kv.ps1 -Candidate ${{ matrix.candidate }} -Step obtain
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Probe (start, memory, stop, orphan)
+        run: ./spikes/s12-database-servers/kv/windows/kv.ps1 -Candidate ${{ matrix.candidate }} -Step probe
+
+      - name: Laravel cache and queue
+        run: ./spikes/s12-database-servers/kv/windows/kv.ps1 -Candidate ${{ matrix.candidate }} -Step laravel
+
+      - name: Summary
+        if: always()
+        run: |
+          $s = ./spikes/s12-database-servers/kv/windows/kv.ps1 -Candidate ${{ matrix.candidate }} -Step summary | Out-String
+          $s
+          "``````text`n$s`n``````" | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kv-win-${{ matrix.candidate }}
+          path: |
+            ${{ runner.temp }}/kv-results
+            ${{ runner.temp }}/kv-dist
+          if-no-files-found: warn
+
+  report:
+    name: all cells
+    needs: [unix, windows]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kv-*
+          path: all
+      - name: One report
+        run: python3 -I spikes/s12-database-servers/kv/tools/aggregate.py all | tee -a "$GITHUB_STEP_SUMMARY"
