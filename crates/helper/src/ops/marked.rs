@@ -4,6 +4,8 @@
 //! too (`/etc/sysctl.d`, `/etc/systemd/resolved.conf.d`). Before the helper
 //! changes or deletes such a file, it reads it here: a file without the
 //! marker belongs to someone else and is never written over or deleted.
+//! Marsa never writes a link, so a link at the path is someone else's too,
+//! whatever its target holds.
 //!
 //! `resolver` (macOS, task M4-07) has its own copy of this check.
 
@@ -25,7 +27,7 @@ pub enum Current {
     /// Marsa's file, with its content.
     Ours(Vec<u8>),
     /// Another tool's file, a file over [`MAX_BYTES`], a folder, or a
-    /// dangling symlink.
+    /// symlink (to anything, or to nothing).
     Foreign,
     /// Reading failed for another reason. Left as it is too, but an op
     /// reports it with its own code, so the message does not blame another
@@ -35,6 +37,11 @@ pub enum Current {
 
 /// Reads `path` and says whose file it is.
 pub fn current(system: &impl System, path: &Path) -> Current {
+    // First: `read` follows a link, so a link to a file with the marker
+    // would read as Marsa's, and the op would replace or delete the link.
+    if system.is_link(path) {
+        return Current::Foreign;
+    }
     match system.read(path, MAX_BYTES) {
         Ok(bytes) if is_ours(&bytes) => Current::Ours(bytes),
         // `read` follows symlinks, so a dangling link also says `NotFound`.
@@ -128,6 +135,15 @@ mod tests {
     fn a_dangling_symlink_is_foreign() {
         let mut fake = FakeSystem::default();
         fake.dangling.insert(PathBuf::from(PATH));
+        assert_eq!(at(&fake), Current::Foreign);
+    }
+
+    /// A link to a file that starts with the marker reads as Marsa's, but
+    /// Marsa never writes a link.
+    #[test]
+    fn a_symlink_to_a_marked_file_is_foreign() {
+        let mut fake = fake_with(format!("{MARKER}\nkey=1\n").as_bytes());
+        fake.links.insert(PathBuf::from(PATH));
         assert_eq!(at(&fake), Current::Foreign);
     }
 
