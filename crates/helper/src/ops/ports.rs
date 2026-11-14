@@ -304,6 +304,10 @@ mod tests {
             self.fake.remove(path)
         }
 
+        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
+            self.fake.remove_empty_dir(path)
+        }
+
         fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
             let output = self.fake.run(program, args)?;
             let loads = matches!(args, ["-p", CONF]);

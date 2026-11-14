@@ -1,5 +1,7 @@
 //! `marsa sites`, `marsa park`, `marsa link`, `marsa secure`, and
-//! `marsa unsecure`: the sites the daemon serves. Task M4-10c.
+//! `marsa unsecure`: the sites the daemon serves. Task M4-10c. Then `marsa
+//! unlink`, `marsa forget`, `marsa isolate`, `marsa unisolate`, and `marsa
+//! open` (task M5-09).
 //!
 //! Each command is one call to `marsad` (the routes in
 //! `daemon/sites_api.rs`), started if needed. A folder the user names is made
@@ -13,6 +15,8 @@ use std::process::ExitCode;
 
 use marsa_core::client::{ClientError, DaemonClient};
 use marsa_core::config::ConfigPaths;
+use marsa_core::platform::{OpenError, open_url};
+use marsa_core::runtimes::Runtime;
 use marsa_core::sites;
 use marsa_core::types::{Site, SiteList, SitePatch};
 
@@ -50,15 +54,49 @@ pub enum SitesCommand {
         /// The site name.
         name: String,
     },
+    /// Stop serving a linked site. Its settings (PHP version, HTTPS) go too.
+    Unlink {
+        /// The site name.
+        name: String,
+    },
+    /// Stop serving a parked folder: its sites, and their settings, go.
+    Forget {
+        /// The folder. Default: the current folder.
+        #[arg(value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// Run a site with its own PHP version.
+    Isolate {
+        /// The site name.
+        name: String,
+        /// The PHP version, as in a .php-version file: 8.3 or 8.3.27.
+        php: String,
+    },
+    /// Run a site with the PHP version its files or the default give.
+    Unisolate {
+        /// The site name.
+        name: String,
+    },
+    /// Open a site in the browser.
+    Open {
+        /// The site name.
+        name: String,
+    },
 }
 
 /// What a command asks the daemon: every folder absolute, every name checked.
+/// `Isolate` with `php: None` clears the site's own version (`marsa
+/// unisolate`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     List,
     Park { folder: PathBuf },
     Link { name: String, folder: PathBuf },
     Secure { name: String, secure: bool },
+    Unlink { name: String },
+    Forget { folder: PathBuf },
+    Isolate { name: String, php: Option<String> },
+    Open { name: String },
 }
 
 impl Action {
@@ -91,12 +129,29 @@ impl Action {
                 name: checked(name)?,
                 secure: false,
             },
+            SitesCommand::Unlink { name } => Action::Unlink {
+                name: checked(name)?,
+            },
+            SitesCommand::Forget { dir } => Action::Forget {
+                folder: folder(dir.as_deref(), cwd)?,
+            },
+            SitesCommand::Isolate { name, php } => Action::Isolate {
+                name: checked(name)?,
+                php: Some(php.clone()),
+            },
+            SitesCommand::Unisolate { name } => Action::Isolate {
+                name: checked(name)?,
+                php: None,
+            },
+            SitesCommand::Open { name } => Action::Open {
+                name: checked(name)?,
+            },
         })
     }
 
     async fn send(&self, client: &DaemonClient) -> Result<SiteList, ClientError> {
         match self {
-            Action::List => client.sites().await,
+            Action::List | Action::Open { .. } => client.sites().await,
             Action::Park { folder } => client.park(folder).await,
             Action::Link { name, folder } => client.link(name, folder).await,
             Action::Secure { name, secure } => {
@@ -106,16 +161,60 @@ impl Action {
                 };
                 client.update_site(name, &patch).await
             }
+            Action::Unlink { name } => client.unlink(name).await,
+            Action::Forget { folder } => client.forget(folder).await,
+            Action::Isolate { name, php } => {
+                let patch = SitePatch {
+                    php: Some(php.clone()),
+                    ..SitePatch::default()
+                };
+                client.update_site(name, &patch).await
+            }
         }
     }
 
+    /// What to print for the daemon's answer: [`Action::render`], except for
+    /// `marsa open`, which opens the site's address here with `open`.
+    ///
+    /// # Errors
+    ///
+    /// `site_not_found` when the list has no site of that name, and the code
+    /// of `open`'s error.
+    pub fn finish(
+        &self,
+        list: &SiteList,
+        open: impl FnOnce(&str) -> Result<(), OpenError>,
+    ) -> Result<String, ClientFailure> {
+        let Action::Open { name } = self else {
+            return Ok(self.render(list));
+        };
+        let Some(site) = list.sites.iter().find(|site| site.name == *name) else {
+            let details = Details {
+                site: Some(name.as_str()),
+                ..Details::default()
+            };
+            return Err(local("site_not_found", &details));
+        };
+        let url = url(site);
+        open(&url).map_err(|err| {
+            tracing::debug!(code = err.code(), error = %err, "cannot open the browser");
+            let details = Details {
+                url: Some(&url),
+                ..Details::default()
+            };
+            local(err.code(), &details)
+        })?;
+        Ok(format!("{}\n", strings::opened(&url)))
+    }
+
     /// What to print for the daemon's answer: the table for `sites` and
-    /// `park`, one line for `link`, `secure`, and `unsecure`. If that site
-    /// is not in the answer as asked, the table instead.
+    /// `park`, one line for the others. If that site is not in the answer as
+    /// asked, the table instead.
     pub fn render(&self, list: &SiteList) -> String {
         let site = |name: &str| list.sites.iter().find(|site| site.name == name);
+        let php = |site: &Site| site.php.as_ref().map(ToString::to_string);
         let line = match self {
-            Action::List | Action::Park { .. } => None,
+            Action::List | Action::Park { .. } | Action::Open { .. } => None,
             Action::Link { name, folder } => site(name)
                 .filter(|site| site.root == *folder)
                 .map(|site| strings::linked(&url(site), &shown(&site.root))),
@@ -128,6 +227,22 @@ impl Action {
                         strings::unsecured(&url(site))
                     }
                 }),
+            // A parked folder's site of the same name may be served again.
+            Action::Unlink { name } => Some(match site(name) {
+                Some(site) => strings::unlinked_parked_back(name, &url(site), &shown(&site.root)),
+                None => strings::unlinked(name),
+            }),
+            Action::Forget { folder } => Some(strings::forgot(&shown(folder))),
+            Action::Isolate {
+                name,
+                php: Some(asked),
+            } => site(name).map(|site| {
+                let asked = printable(asked.trim());
+                strings::isolated(&url(site), &asked, php(site).as_deref())
+            }),
+            Action::Isolate { name, php: None } => {
+                site(name).map(|site| strings::unisolated(&url(site), php(site).as_deref()))
+            }
         };
         match line {
             Some(line) => format!("{line}\n"),
@@ -139,20 +254,51 @@ impl Action {
     /// and the folder of this action, and a `config_*` code names
     /// `sites.toml`, the file the daemon could not use.
     pub fn failure(&self, err: &ClientError, data_dir: &Path) -> ClientFailure {
+        self.failure_with(err, data_dir, None)
+    }
+
+    /// [`Action::failure`], with the site list read after the error, if any:
+    /// `site_is_parked` then names the parked folder of the site, and
+    /// `folder_not_parked` the parked folders. A version code of `marsa
+    /// isolate` names the version.
+    pub fn failure_with(
+        &self,
+        err: &ClientError,
+        data_dir: &Path,
+        list: Option<&SiteList>,
+    ) -> ClientFailure {
         let mut failure = failure(err, data_dir, None);
         let (site, folder) = match self {
             Action::List => (None, None),
-            Action::Park { folder } => (None, Some(folder.as_path())),
+            Action::Park { folder } | Action::Forget { folder } => (None, Some(folder.as_path())),
             Action::Link { name, folder } => (Some(name.as_str()), Some(folder.as_path())),
-            Action::Secure { name, .. } => (Some(name.as_str()), None),
+            Action::Secure { name, .. }
+            | Action::Unlink { name }
+            | Action::Isolate { name, .. }
+            | Action::Open { name } => (Some(name.as_str()), None),
         };
+        let requested = match self {
+            Action::Isolate { php: Some(php), .. } => Some(printable(php.trim())),
+            _ => None,
+        };
+        let parked: Vec<String> = list.map_or_else(Vec::new, |list| {
+            list.parked.iter().map(|dir| shown(dir)).collect()
+        });
+        let holder = list
+            .zip(site)
+            .and_then(|(list, name)| parked_folder(list, name));
         let sites_toml = ConfigPaths::in_dir(data_dir).sites;
         let path = match failure.code.as_str() {
             "config_read" | "config_invalid" | "config_write" => Some(sites_toml.as_path()),
-            code if code.starts_with("site_") => folder,
+            "site_is_parked" => holder.as_deref(),
+            code if code.starts_with("site_") || code == "folder_not_parked" => folder,
+            "invalid_version" | "unsupported_alias" if requested.is_some() => None,
             _ => return failure,
         };
         let details = Details {
+            runtime: requested.as_ref().map(|_| Runtime::Php),
+            requested: requested.as_deref(),
+            available: &parked,
             site,
             path,
             ..Details::default()
@@ -160,6 +306,13 @@ impl Action {
         failure.message = strings::message(&failure.code, &details);
         failure
     }
+}
+
+/// The parked folder in `list` that holds the site `name`.
+fn parked_folder(list: &SiteList, name: &str) -> Option<PathBuf> {
+    let site = list.sites.iter().find(|site| site.name == name)?;
+    let parent = site.root.parent()?;
+    list.parked.iter().find(|dir| *dir == parent).cloned()
 }
 
 /// Starts the daemon if needed, sends the command, and prints the answer.
@@ -174,11 +327,21 @@ pub async fn run(command: &SitesCommand, data_dir: &Path) -> ExitCode {
         Err(failure) => return failure.report(),
     };
     match action.send(&client).await {
-        Ok(list) => {
-            print!("{}", action.render(&list));
-            ExitCode::SUCCESS
+        Ok(list) => match action.finish(&list, open_url) {
+            Ok(text) => {
+                print!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(failure) => failure.report(),
+        },
+        Err(err) => {
+            // These answers name no folder; the site list does.
+            let list = match err.code() {
+                "site_is_parked" | "folder_not_parked" => client.sites().await.ok(),
+                _ => None,
+            };
+            action.failure_with(&err, data_dir, list.as_ref()).report()
         }
-        Err(err) => action.failure(&err, data_dir).report(),
     }
 }
 
@@ -684,6 +847,264 @@ mod tests {
             failure
                 .message
                 .starts_with("The Marsa daemon is not running.")
+        );
+    }
+
+    // M5-09: `unlink`, `forget`, `isolate`, `unisolate`, and `open`.
+
+    #[test]
+    fn the_new_commands_parse_their_arguments() {
+        let name = || "shop".to_owned();
+        for (args, want) in [
+            (
+                &["unlink", "shop"][..],
+                SitesCommand::Unlink { name: name() },
+            ),
+            (&["forget"], SitesCommand::Forget { dir: None }),
+            (
+                &["forget", "code"],
+                SitesCommand::Forget {
+                    dir: Some("code".into()),
+                },
+            ),
+            (
+                &["isolate", "shop", "8.3"],
+                SitesCommand::Isolate {
+                    name: name(),
+                    php: "8.3".into(),
+                },
+            ),
+            (
+                &["unisolate", "shop"],
+                SitesCommand::Unisolate { name: name() },
+            ),
+            (&["open", "shop"], SitesCommand::Open { name: name() }),
+        ] {
+            assert_eq!(parse(args).expect("valid arguments"), want, "{args:?}");
+        }
+        for args in [
+            &["unlink"][..],
+            &["forget", "a", "b"],
+            &["isolate", "shop"],
+            &["isolate", "shop", "8.3", "8.4"],
+            &["unisolate"],
+            &["open"],
+            &["open", "a", "b"],
+        ] {
+            let err = parse(args).expect_err("invalid arguments");
+            assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
+        }
+    }
+
+    #[test]
+    fn the_new_commands_become_their_actions() {
+        let cwd = base();
+        let action = |command: SitesCommand| Action::new(&command, || Ok(cwd.clone()));
+        let forget = |dir: Option<&str>| SitesCommand::Forget {
+            dir: dir.map(PathBuf::from),
+        };
+        // The folder is made absolute as `marsa park` makes it.
+        let here = Action::Forget {
+            folder: cwd.clone(),
+        };
+        assert_eq!(action(forget(None)).unwrap(), here);
+        let code = Action::Forget {
+            folder: cwd.join("code"),
+        };
+        assert_eq!(action(forget(Some("./code/"))).unwrap(), code);
+        let isolate = SitesCommand::Isolate {
+            name: "shop".into(),
+            php: "8.3".into(),
+        };
+        let want = Action::Isolate {
+            name: "shop".into(),
+            php: Some("8.3".into()),
+        };
+        assert_eq!(Action::new(&isolate, no_cwd).unwrap(), want);
+        let unisolate = SitesCommand::Unisolate {
+            name: "shop".into(),
+        };
+        let want = Action::Isolate {
+            name: "shop".into(),
+            php: None,
+        };
+        assert_eq!(Action::new(&unisolate, no_cwd).unwrap(), want);
+
+        // A name that is not valid is refused before any call.
+        for command in [
+            SitesCommand::Unlink {
+                name: "Shop".into(),
+            },
+            SitesCommand::Isolate {
+                name: "a/b".into(),
+                php: "8.3".into(),
+            },
+            SitesCommand::Unisolate { name: "-a".into() },
+            SitesCommand::Open { name: "..".into() },
+        ] {
+            let err = Action::new(&command, no_cwd).unwrap_err();
+            assert_eq!(err.code, "site_name_invalid", "{command:?}");
+        }
+    }
+
+    #[test]
+    fn unlink_forget_isolate_and_unisolate_print_one_line() {
+        let unlink = |name: &str| Action::Unlink { name: name.into() };
+        assert_eq!(
+            unlink("api").render(&list()),
+            "Unlinked api: it is no longer served, and its settings are gone.\n"
+        );
+        // A parked `shop` is served again.
+        assert_eq!(
+            unlink("shop").render(&list()),
+            "Unlinked shop. https://shop.test now serves /code/shop, from a parked folder.\n"
+        );
+        let forget = Action::Forget {
+            folder: PathBuf::from("/code"),
+        };
+        assert_eq!(
+            forget.render(&SiteList::default()),
+            "Forgot /code: its sites are no longer served.\n"
+        );
+
+        let isolate = |name: &str, php: Option<&str>| Action::Isolate {
+            name: name.into(),
+            php: php.map(str::to_owned),
+        };
+        for (action, want) in [
+            (
+                isolate("shop", Some(" 8.4 ")),
+                "https://shop.test now runs PHP 8.4 (8.4.23).\n",
+            ),
+            (
+                isolate("shop", Some("8.4.23")),
+                "https://shop.test now runs PHP 8.4.23.\n",
+            ),
+            (
+                isolate("blog", Some("7.4")),
+                "http://blog.test now asks for PHP 7.4, but no installed version matches. Run \
+                 \"marsa install php 7.4\".\n",
+            ),
+            (
+                isolate("shop", None),
+                "https://shop.test has no PHP version of its own now, and runs PHP 8.4.23.\n",
+            ),
+            (
+                isolate("blog", None),
+                "http://blog.test has no PHP version of its own now. No installed PHP version \
+                 fits it.\n",
+            ),
+        ] {
+            assert_eq!(action.render(&list()), want, "{action:?}");
+        }
+        // Not in the answer: the whole table.
+        assert_eq!(isolate("nope", None).render(&list()), render(&list()));
+    }
+
+    #[test]
+    fn open_opens_the_address_of_the_site_and_nothing_else() {
+        let open = |name: &str| Action::Open { name: name.into() };
+        let mut opened = Vec::new();
+        for name in ["shop", "blog"] {
+            let text = open(name)
+                .finish(&list(), |url| {
+                    opened.push(url.to_owned());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                text,
+                format!("Opened {} in your browser.\n", opened[opened.len() - 1])
+            );
+        }
+        assert_eq!(opened, ["https://shop.test", "http://blog.test"]);
+
+        let never = |url: &str| -> Result<(), OpenError> { panic!("opened {url}") };
+        let err = open("nope").finish(&list(), never).unwrap_err();
+        assert_eq!(
+            err.line(),
+            "marsa: There is no site named \"nope\". Run \"marsa sites\" to see them. \
+             [site_not_found]"
+        );
+        let none = |_: &str| {
+            Err(OpenError::NoOpener {
+                tried: "xdg-open".into(),
+            })
+        };
+        assert_eq!(
+            open("shop").finish(&list(), none).unwrap_err().line(),
+            "marsa: Cannot find a program that opens the browser (xdg-open on Linux). Open \
+             https://shop.test yourself. [open_no_program]"
+        );
+        let failed = |_: &str| {
+            Err(OpenError::Spawn {
+                program: PathBuf::from("/usr/bin/open"),
+                source: io::Error::other("x"),
+            })
+        };
+        assert_eq!(
+            open("shop").finish(&list(), failed).unwrap_err().line(),
+            "marsa: Cannot open the browser. Open https://shop.test yourself. [open_failed]"
+        );
+        // The other actions print what `render` gives, and open nothing.
+        assert_eq!(
+            Action::List.finish(&list(), never).unwrap(),
+            render(&list())
+        );
+    }
+
+    #[test]
+    fn a_refused_unlink_or_forget_names_the_folders() {
+        let data = base().join("data");
+        let api = |status, code: &str| ClientError::Api {
+            status,
+            code: code.into(),
+            message: "x".into(),
+        };
+        let unlink = Action::Unlink {
+            name: "shop".into(),
+        };
+        let parked = api(409, "site_is_parked");
+        assert_eq!(
+            unlink.failure_with(&parked, &data, Some(&list())).line(),
+            "marsa: \"shop\" comes from the parked folder /code, so it cannot be unlinked \
+             alone. To stop serving that folder and all its sites, run \"marsa forget /code\". \
+             [site_is_parked]"
+        );
+        // Without the list, no folder.
+        let message = unlink.failure(&parked, &data).message;
+        assert!(
+            message.ends_with("run \"marsa forget <folder>\"."),
+            "{message}"
+        );
+
+        let forget = Action::Forget {
+            folder: PathBuf::from("/work"),
+        };
+        let missing = api(404, "folder_not_parked");
+        assert_eq!(
+            forget.failure_with(&missing, &data, Some(&list())).message,
+            "/work is not a parked folder. Parked folders: /code."
+        );
+        let none = SiteList::default();
+        assert_eq!(
+            forget.failure_with(&missing, &data, Some(&none)).message,
+            "/work is not a parked folder. No folder is parked."
+        );
+
+        let isolate = Action::Isolate {
+            name: "shop".into(),
+            php: Some(" latest".into()),
+        };
+        assert_eq!(
+            isolate
+                .failure(&api(400, "unsupported_alias"), &data)
+                .message,
+            "\"latest\" is a name, not a version. Write a version number, such as 8.4."
+        );
+        assert_eq!(
+            isolate.failure(&api(404, "site_not_found"), &data).message,
+            "There is no site named \"shop\". Run \"marsa sites\" to see them."
         );
     }
 }
