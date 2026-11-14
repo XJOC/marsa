@@ -399,3 +399,35 @@ fn a_followed_log_ends_when_the_daemon_stops() {
          The daemon closed the log.\n"
     );
 }
+
+/// Task M5-11, through the real `marsa` and `marsad`. On every system: the
+/// daemon writes `php.ini` for php-fpm and for php-cgi (Windows) alike.
+#[test]
+fn xdebug_on_and_off_change_the_php_ini_before_marsa_returns() {
+    use marsa_core::php::PhpFiles;
+
+    let data = DaemonDir::new();
+    // A PHP with Xdebug, as the installer leaves it. Nothing runs it.
+    let version = semver::Version::parse("8.4.3").expect("a valid version");
+    let files = PhpFiles::new(data.path(), &version);
+    fs::create_dir_all(&files.ext_dir).expect("create ext");
+    fs::write(files.xdebug_so(), "").expect("write xdebug.so");
+    let loads = format!("\nzend_extension = \"{}\"\n", files.xdebug_so().display());
+    let ini = || fs::read_to_string(&files.ini_file).expect("read php.ini");
+
+    const OFF: &str = "Xdebug: off. Run \"marsa xdebug on\" to turn it on.\n";
+    const ON: &str = "Xdebug: on, in your sites and in the terminal. Loaded by PHP 8.4.3.";
+    // `xdebug` starts the daemon itself.
+    data.expect(&["xdebug"], 0, OFF, "");
+    let slower = "PHP can run up to 4 times slower while it is on. Run \"marsa xdebug off\" \
+                  when you finish.";
+    data.expect(&["xdebug", "on"], 0, &format!("{ON} {slower}\n"), "");
+    assert!(ini().contains(&loads), "{}", ini());
+    data.expect(&["xdebug"], 0, &format!("{ON}\n"), "");
+
+    let turned_off = "Xdebug: off. PHP runs at full speed again.\n";
+    data.expect(&["xdebug", "off"], 0, turned_off, "");
+    assert!(!ini().contains("xdebug"), "{}", ini());
+    data.expect(&["xdebug"], 0, OFF, "");
+    data.expect(&["daemon", "stop"], 0, "Stopped marsad.\n", "");
+}

@@ -20,6 +20,7 @@ use super::caddy::CaddyManager;
 use super::php::Pools;
 use super::runtimes_api::Installs;
 use super::sites_api;
+use super::sites_sync::PassRequests;
 use super::supervisor::ServiceHandle;
 
 /// How many events the bus keeps for a slow reader. A reader that falls
@@ -67,6 +68,9 @@ pub struct Daemon {
     /// The status and recent lines of each php-fpm pool (task M4-23). The
     /// sites sync starts and stops the pools.
     pub pools: Pools,
+    /// Asks the sites sync task for a pass, and waits for it (task M5-11).
+    /// The task alone runs passes and owns the pools.
+    pub pass_requests: PassRequests,
     /// The runtime installer, and whether an install runs (task M3-12).
     pub installs: Installs,
     /// Where the login file that starts the tray icon goes (task M5-03).
@@ -88,6 +92,7 @@ impl Daemon {
         Self {
             caddy: CaddyManager::new(&data_dir),
             pools: Pools::default(),
+            pass_requests: PassRequests::default(),
             data_dir,
             state: Arc::default(),
             events: broadcast::channel(EVENT_CAPACITY).0,

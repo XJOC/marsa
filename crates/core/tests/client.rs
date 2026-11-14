@@ -15,7 +15,7 @@ use axum::extract::{RawQuery, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use marsa_core::client::{
     ClientError, DaemonClient, EventStream, StreamItem, ensure_running, ensure_running_with,
@@ -29,7 +29,7 @@ use marsa_core::types::{
     API_VERSION, AutostartState, DefaultVersion, ErrorBody, Event, Health, InstallAccepted,
     InstallRequest, LinkRequest, LogLine, LogStream, OpResult, OpStatus, ParkRequest, RuntimeList,
     RuntimeVersions, ServiceAction, ServiceState, ServiceStatus, SetupReport, SetupSkip, Site,
-    SiteKind, SiteList, SitePatch, SkippedFolder, Source,
+    SiteKind, SiteList, SitePatch, SkippedFolder, Source, Uninstalled, VersionInUse, XdebugState,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -643,6 +643,66 @@ async fn set_default_puts_the_version_and_keeps_the_daemons_code() {
 }
 
 #[tokio::test]
+async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
+    let in_use = VersionInUse {
+        version: "8.3.12".into(),
+        default: Some("8.3\u{1b}[2J".into()),
+        sites: vec!["blog".into()],
+        caddy: false,
+    };
+    let router = Router::new().route(
+        "/v1/runtimes/php/{version}",
+        delete({
+            let in_use = in_use.clone();
+            move |axum::extract::Path(version): axum::extract::Path<String>| async move {
+                if version == "8.4.1" {
+                    let done = Uninstalled {
+                        runtime: Runtime::Php,
+                        version,
+                    };
+                    return Json(done).into_response();
+                }
+                let mut body = ErrorBody::new("version_in_use", "php 8.3.12 is in use");
+                body.in_use = Some(in_use);
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+        }),
+    );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    let done = client.uninstall(Runtime::Php, "8.4.1").await.unwrap();
+    assert_eq!(
+        (done.runtime, done.version.as_str()),
+        (Runtime::Php, "8.4.1")
+    );
+
+    let err = client.uninstall(Runtime::Php, "8.3").await.unwrap_err();
+    assert_eq!(err.code(), "version_in_use");
+    let ClientError::InUse { in_use: got, .. } = &err else {
+        panic!("{err:?}");
+    };
+    // The daemon's text is cleaned, as every text in an error.
+    let want = VersionInUse {
+        default: Some("8.3[2J".into()),
+        ..in_use
+    };
+    assert_eq!(*got, want);
+    fake.assert_no_token(&err);
+    let targets: Vec<String> = fake
+        .seen()
+        .into_iter()
+        .map(|seen| format!("{} {}", seen.method, seen.target))
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            "DELETE /v1/runtimes/php/8.4.1",
+            "DELETE /v1/runtimes/php/8.3"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn an_id_cannot_reach_another_route() {
     let (router, shutdowns) = serve_shutdown(Router::new(), None);
     let router = router.route(
@@ -1000,6 +1060,42 @@ async fn autostart_reads_and_puts_and_keeps_the_daemons_code() {
             "PUT /v1/autostart"
         ]
     );
+}
+
+// ---------------------------------------------------------------------------
+// Xdebug (task M5-11)
+
+#[tokio::test]
+async fn xdebug_reads_and_puts() {
+    let on = XdebugState {
+        enabled: true,
+        loaded: vec!["8.4.23".into()],
+        missing: vec!["8.3.1".into()],
+    };
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let router = Router::new().route(
+        "/v1/php/xdebug",
+        get(|| async { Json(XdebugState::default()) }).put({
+            let (bodies, on) = (bodies.clone(), on.clone());
+            move |Json(body): Json<serde_json::Value>| async move {
+                bodies.lock().expect("lock").push(body);
+                Json(on)
+            }
+        }),
+    );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    assert_eq!(client.xdebug().await.unwrap(), XdebugState::default());
+    assert_eq!(client.set_xdebug(true).await.unwrap(), on);
+
+    let sent = serde_json::json!({ "enabled": true });
+    assert_eq!(*bodies.lock().unwrap(), [sent]);
+    let targets: Vec<String> = fake
+        .seen()
+        .into_iter()
+        .map(|seen| format!("{} {}", seen.method, seen.target))
+        .collect();
+    assert_eq!(targets, ["GET /v1/php/xdebug", "PUT /v1/php/xdebug"]);
 }
 
 // ---------------------------------------------------------------------------

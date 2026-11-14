@@ -190,7 +190,7 @@ async fn blocking<T: Send + 'static>(
 
 /// Creates `runtimes/.tmp/` (user-only) and takes the install lock in it.
 /// The lock is freed when the returned file is dropped.
-fn lock(runtimes: &RuntimesDir) -> Result<File, InstallError> {
+pub(super) fn lock(runtimes: &RuntimesDir) -> Result<File, InstallError> {
     make_private_dir(runtimes.root(), &runtimes.tmp_dir())?;
     let path = runtimes.lock_path();
     let file = OpenOptions::new()
@@ -666,7 +666,7 @@ fn move_into_place(root: &Path, target: &Path, old: &Path) -> Result<(), Install
 /// `fs::rename`, tried again on Windows while another program holds a file:
 /// antivirus programs hold files that were just unpacked for a short time.
 /// rustup does the same. Blocking (it sleeps between tries).
-fn rename(from: &Path, to: &Path) -> Result<(), InstallError> {
+pub(super) fn rename(from: &Path, to: &Path) -> Result<(), InstallError> {
     let mut delay = Duration::from_millis(100);
     let mut tries = 0;
     loop {
@@ -692,7 +692,7 @@ fn is_held_on_windows(err: &io::Error) -> bool {
 }
 
 /// 8 hex characters from the OS random source, for temp names.
-fn random_hex() -> Result<String, InstallError> {
+pub(super) fn random_hex() -> Result<String, InstallError> {
     let mut bytes = [0u8; 4];
     getrandom::fill(&mut bytes).map_err(|err| InstallError::Io {
         path: PathBuf::new(),

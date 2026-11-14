@@ -9,8 +9,8 @@ name: release
 #   pack, and test the five platforms; the archives are workflow artifacts
 #   (14 days). No release.
 # - workflow_dispatch: the same; with `release` on (main only), also a DRAFT,
-#   pre-release GitHub Release v<version> with the five archives and
-#   SHA256SUMS. The owner signs SHA256SUMS with minisign on their own machine,
+#   pre-release GitHub Release v<version> with the five archives, install.sh,
+#   and SHA256SUMS. The owner signs SHA256SUMS with minisign on their own machine,
 #   uploads SHA256SUMS.minisig, reads the draft, and publishes it. The minisign
 #   key never enters CI, and this workflow never publishes.
 
@@ -140,17 +140,11 @@ jobs:
           # not allowed in job env.)
           echo "OUT=${RUNNER_TEMP//\\//}/release" >> "$GITHUB_ENV"
 
-      # tray-icon and tao (marsa-tray, task M5-04) link GTK 3, libxdo, and
-      # AppIndicator on Linux. Nothing else in the workspace needs them.
-      - name: Install the Linux build packages of the tray icon
+      # marsa-tray (task M5-04): tao and tray-icon build against GTK 3, as in
+      # ci.yml. AppIndicator is loaded only when the icon runs.
+      - name: Install GTK 3 for the menu-bar icon
         if: runner.os == 'Linux'
-        run: |
-          if grep -qx 'name = "tray-icon"' Cargo.lock; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends libgtk-3-dev libxdo-dev libayatana-appindicator3-dev
-          else
-            echo "tray-icon is not in Cargo.lock: nothing to install"
-          fi
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-3-dev
 
       - name: Build marsa, marsad, marsa-helper, and marsa-gui
         run: cargo build --release --locked --target "$TRIPLE" -p marsa -p marsa-helper -p marsa-gui
@@ -188,9 +182,14 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # install.sh ships with every release, so its tests run here too.
+  install-sh:
+    name: install.sh
+    uses: ./.github/workflows/install-sh.yml
+
   release:
     name: draft release
-    needs: [check, build]
+    needs: [check, build, install-sh]
     if: github.event_name == 'workflow_dispatch' && inputs.release
     runs-on: ubuntu-24.04
     permissions:
@@ -234,5 +233,6 @@ jobs:
             echo "gh release upload $TAG --repo $GITHUB_REPOSITORY SHA256SUMS.minisig"
             echo '```'
             echo
-            echo "Then read the draft and publish it on GitHub."
+            echo "Then read the draft and publish it on GitHub. Upload the signature first:"
+            echo "install.sh refuses a release without it on every machine that has minisign."
           } >> "$GITHUB_STEP_SUMMARY"

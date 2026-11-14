@@ -16,6 +16,8 @@ use marsa::cli::runtimes::{self, RuntimesArgs};
 use marsa::cli::services::{self, ServicesArgs};
 use marsa::cli::setup;
 use marsa::cli::sites::{self, SitesCommand};
+use marsa::cli::uninstall::{self, UninstallArgs};
+use marsa::cli::xdebug::{self, XdebugArgs};
 
 /// Local development runtimes and sites.
 #[derive(Debug, Parser)]
@@ -40,6 +42,9 @@ enum Command {
     /// Make an installed PHP or Node.js version the default: every folder
     /// that sets no version of its own runs it.
     Use(UseArgs),
+    /// Delete an installed version. Marsa refuses a version that is the
+    /// default, that a site is set to, or that the running Caddy uses.
+    Uninstall(UninstallArgs),
     /// Start, stop, or check the Marsa daemon (marsad).
     #[command(subcommand)]
     Daemon(DaemonCommand),
@@ -62,6 +67,9 @@ enum Command {
     /// Check that Marsa can serve your sites, and say how to fix what is
     /// wrong. Changes nothing. Exits with code 1 if a check failed.
     Doctor,
+    /// Load Xdebug in every installed PHP, or in none: on or off. Without on
+    /// or off, show whether PHP loads it, and which versions.
+    Xdebug(XdebugArgs),
 }
 
 // One thread is enough: the command waits on one thing at a time.
@@ -78,6 +86,7 @@ async fn main() -> ExitCode {
         Command::Install(args) => install::run(args, &data_dir).await,
         Command::Runtimes(args) => runtimes::run(args, &data_dir).await,
         Command::Use(args) => default_version::run(args, &data_dir).await,
+        Command::Uninstall(args) => uninstall::run(args, &data_dir).await,
         Command::Daemon(command) => daemon::run(*command, &data_dir).await,
         Command::Services(args) => services::run(args, &data_dir).await,
         Command::Logs(args) => logs::run(args, &data_dir).await,
@@ -85,6 +94,7 @@ async fn main() -> ExitCode {
         Command::Setup => setup::run(&data_dir).await,
         Command::Autostart(args) => autostart::run(args, &data_dir).await,
         Command::Doctor => doctor::run(&data_dir).await,
+        Command::Xdebug(args) => xdebug::run(args, &data_dir).await,
     }
 }
 
@@ -364,6 +374,26 @@ mod tests {
             }
         }
         for args in [&["doctor", "dns"][..], &["doctor", "--fix"]] {
+            let err = parse(args).expect_err("invalid arguments");
+            assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
+        }
+    }
+
+    #[test]
+    fn xdebug_takes_on_off_or_nothing() {
+        use marsa::cli::autostart::Switch;
+
+        for (args, switch) in [
+            (&["xdebug"][..], None),
+            (&["xdebug", "on"], Some(Switch::On)),
+            (&["xdebug", "off", "--data-dir", "/x"], Some(Switch::Off)),
+        ] {
+            match parse(args).expect("valid").command {
+                Command::Xdebug(got) => assert_eq!(got, XdebugArgs { switch }, "{args:?}"),
+                other => panic!("not xdebug: {other:?}"),
+            }
+        }
+        for args in [&["xdebug", "yes"][..], &["xdebug", "on", "off"]] {
             let err = parse(args).expect_err("invalid arguments");
             assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
         }

@@ -17,6 +17,8 @@ pub mod services;
 pub mod setup;
 pub mod sites;
 pub mod strings;
+pub mod uninstall;
+pub mod xdebug;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -24,8 +26,8 @@ use std::process::ExitCode;
 use marsa_core::config;
 use marsa_core::runtimes::Runtime;
 
-/// A program `marsa install`, `marsa runtimes`, and `marsa use` know. The
-/// command-line form of [`Runtime`].
+/// A program `marsa install`, `marsa runtimes`, `marsa use`, and `marsa
+/// uninstall` know. The command-line form of [`Runtime`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Tool {
     Php,
