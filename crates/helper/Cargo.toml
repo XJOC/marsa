@@ -15,6 +15,10 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 
+# Win32 calls (ADR 0018): the system folder for the hosts file (task M4-19d).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_SystemInformation"] }
+
 [dev-dependencies]
 # Snapshots of the files the helper writes: pf rules, the launchd plist, the
 # resolver file (tasks M4-07 and M4-08).

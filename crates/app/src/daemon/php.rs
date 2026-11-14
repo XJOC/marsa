@@ -50,7 +50,7 @@ use semver::Version;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
-use self::orphan::{Blocked, Found, FpmProcesses, Orphans, PidFile, SystemFpm};
+use self::orphan::{Blocked, FpmProcesses, Orphans, PidFile, SystemFpm};
 use super::caddy::orphan::Ladder;
 use super::caddy::{RESTART, STOP_GRACE};
 use super::state::Daemon;
@@ -448,8 +448,10 @@ pub struct PhpManager {
     recovery: bool,
     /// Who runs under a pid, and signals, for the orphan check.
     processes: Arc<dyn FpmProcesses>,
-    /// How long SIGTERM and SIGKILL to an orphan wait (ADR 0009).
+    /// How long SIGTERM and SIGKILL to an orphan master wait (ADR 0009).
     ladder: Ladder,
+    /// The same for the workers it left.
+    worker_ladder: Ladder,
 }
 
 impl PhpManager {
@@ -462,6 +464,7 @@ impl PhpManager {
             recovery: process::ORPHAN_RECOVERY,
             processes: Arc::new(SystemFpm),
             ladder: Ladder::default(),
+            worker_ladder: Ladder::default(),
         }
     }
 
@@ -594,15 +597,14 @@ impl PhpManager {
             accepted: &accepted,
             listen: &pool.dial,
             ladder: self.ladder,
+            worker_ladder: self.worker_ladder,
         };
-        match orphans.inspect().await? {
-            Found::Nothing => Ok(()),
-            Found::Orphan(record) => {
-                let runtime = daemon.pools.runtime(pool.files.minor);
-                note(&runtime, &daemon.events, orphan::STOPPING_ORPHAN);
-                orphans.reap(record).await
-            }
-        }
+        // The master, or the workers it left behind.
+        let found = orphans.inspect().await?;
+        let runtime = daemon.pools.runtime(pool.files.minor);
+        // Only right before a signal: a stale file alone stops nothing.
+        let note_stop = || note(&runtime, &daemon.events, orphan::STOPPING_ORPHAN);
+        orphans.reap(found, &note_stop).await
     }
 }
 

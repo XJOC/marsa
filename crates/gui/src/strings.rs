@@ -4,11 +4,18 @@
 
 use std::path::Path;
 
+use marsa_core::recipes::Platform;
 use marsa_core::runtimes::Runtime;
-use marsa_core::types::{ServiceAction, ServiceState, Site, SiteKind, Source};
+use marsa_core::sites::TLD;
+use marsa_core::types::{
+    InstallFailure, OpStatus, PortHolder, ServiceAction, ServiceState, SetupReport, Site, SiteKind,
+    Source,
+};
 use semver::Version;
 
-use crate::model::{Choice, Connection};
+use crate::model::{
+    Autostart, Choice, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Pick,
+};
 use crate::tray::menu::Daemon;
 
 pub const APP_NAME: &str = "Marsa";
@@ -28,8 +35,8 @@ pub const LOG_TITLE: &str = "Caddy log";
 pub const LOG_EMPTY: &str = "No log lines yet.";
 
 pub const SITES: &str = "Sites";
-pub const NO_SITES: &str =
-    "No sites yet. Park a folder of projects: each sub-folder becomes a site.";
+pub const NO_SITES: &str = "No sites yet. Park a folder of projects, where each sub-folder becomes a site, or link one \
+     project folder.";
 pub const COLUMN_NAME: &str = "Name";
 pub const COLUMN_URL: &str = "URL";
 pub const COLUMN_HTTPS: &str = "HTTPS";
@@ -45,10 +52,19 @@ pub const AUTO_PHP: &str = "Default";
 pub const AUTO_PHP_HINT: &str = "No setting for this site: its .php-version file, its \
      composer.json, or the default PHP picks the version.";
 pub const HTTPS_HINT: &str = "Serve this site over HTTPS";
-pub const PARK_BUTTON: &str = "Park folder…";
-pub const PARK_FIELD_HINT: &str = "Full path of a folder of projects";
+pub const PARK_BUTTON: &str = "Park a folder…";
 pub const PARK_BUTTON_HINT: &str =
-    "Every sub-folder of this folder becomes a site, named after it.";
+    "Choose a folder of projects: every sub-folder becomes a site, named after it.";
+pub const LINK_BUTTON: &str = "Link a folder…";
+pub const LINK_BUTTON_HINT: &str = "Choose one project folder and give it a site name.";
+/// The label before the site name field of the link form.
+pub const LINK_NAME: &str = "Site name:";
+pub const LINK_NAME_HINT: &str = "a-z, 0-9, and -";
+/// The button that sends the link form.
+pub const LINK_CONFIRM: &str = "Link";
+pub const CANCEL: &str = "Cancel";
+/// While a folder dialog is open: the buttons wait for it.
+pub const PICKING_HINT: &str = "A folder dialog is open.";
 pub const SKIPPED_TITLE: &str = "Skipped folders";
 
 pub const RUNTIMES: &str = "Runtimes";
@@ -65,6 +81,48 @@ pub const DEFAULT_HINT: &str = "Used where nothing else picks a version: no site
 pub const NEWEST: &str = "Newest installed";
 pub const NEWEST_HINT: &str =
     "This program has no default version: the newest installed one is used.";
+pub const COLUMN_INSTALL: &str = "Install";
+/// In an empty version field.
+pub const VERSION_FIELD_EMPTY: &str = "newest";
+pub const INSTALL_BUTTON: &str = "Install";
+pub const INSTALL_HINT: &str = "Download and install this version from Marsa's signed version \
+     list. With an empty field: the newest stable version.";
+/// Over a disabled Install button.
+pub const INSTALL_BUSY_HINT: &str = "Wait for the install that runs to end.";
+
+// The first-run panel (task M5-10).
+
+pub const FIRST_RUN_TITLE: &str = "Get started";
+pub const FIRST_RUN_TEXT: &str =
+    "Marsa needs PHP and the Caddy web server to serve your sites. Neither is installed yet.";
+/// Names the version of `model::FIRST_PHP`; a test keeps the two the same.
+pub const FIRST_RUN_INSTALL: &str = "Install PHP 8.4 and Caddy";
+pub const FIRST_RUN_INSTALL_HINT: &str =
+    "Downloads PHP 8.4 and Caddy from Marsa's signed version list, one after the other.";
+pub const FIRST_RUN_READY: &str = "PHP and Caddy are installed. One last step, needed once:";
+pub const NOT_NOW: &str = "Not now";
+pub const CLOSE: &str = "Close";
+
+// Setup (`POST /v1/setup`), in the first-run panel and in Settings.
+
+pub const RUN_SETUP: &str = "Run setup";
+pub const RUN_SETUP_HINT: &str =
+    "Each step checks what is already done, so running setup again is safe.";
+/// When setup had no step to report.
+pub const SETUP_NOTHING: &str = "Nothing to set up.";
+
+// Settings (task M5-10).
+
+pub const SETTINGS: &str = "Settings";
+pub const AUTOSTART: &str = "Start at login";
+pub const AUTOSTART_HINT: &str =
+    "Start Marsa's menu-bar icon when you log in. The icon starts the daemon.";
+pub const DATA_FOLDER: &str = "Data folder";
+pub const DATA_FOLDER_HINT: &str =
+    "Where Marsa keeps its programs, settings, and logs. Chosen when Marsa starts.";
+pub const APP_VERSION: &str = "Marsa version";
+pub const DAEMON_VERSION: &str = "Daemon version";
+pub const NOT_CONNECTED: &str = "Not connected";
 
 /// The window's own code: its background thread could not start.
 pub const BRIDGE_FAILED: &str = "bridge_failed";
@@ -88,6 +146,258 @@ pub const TRAY_QUIT: &str = "Quit";
 pub const TRAY_WORKER_FAILED: &str = "tray_worker_failed";
 /// The icon's own code: `marsa-gui` could not be started.
 pub const WINDOW_START_FAILED: &str = "window_start_failed";
+
+/// The daemon column of Settings: its version and PID while connected.
+pub fn daemon_version(connection: &Connection) -> String {
+    match connection {
+        Connection::Running(health) => format!("{} (PID {})", health.app_version, health.pid),
+        _ => NOT_CONNECTED.to_owned(),
+    }
+}
+
+/// The line next to "Start at login", for the states the box alone cannot
+/// show.
+pub fn autostart_note(state: Autostart) -> Option<&'static str> {
+    match state {
+        Autostart::Stale => Some(
+            "The login file starts Marsa from another folder, or it was changed. Turn this on \
+             to fix it.",
+        ),
+        Autostart::Unsupported => Some("Not supported on this system yet."),
+        Autostart::Unknown | Autostart::Off | Autostart::On => None,
+    }
+}
+
+/// The title of a folder dialog.
+pub fn pick_title(pick: Pick) -> &'static str {
+    match pick {
+        Pick::Park => "Choose a folder of projects to park",
+        Pick::Link => "Choose a project folder to link",
+    }
+}
+
+/// The first line of the link form.
+pub fn link_folder(folder: &Path) -> String {
+    format!("Link {} as:", folder.display())
+}
+
+/// After the site name field: `.test`.
+pub fn site_suffix() -> String {
+    format!(".{TLD}")
+}
+
+/// Under the link form when the name belongs to another folder's site.
+pub fn link_replaces(site: &Site) -> String {
+    format!(
+        "A site named {} already exists for {}. Linking gives the name to this folder.",
+        site.name,
+        site.root.display()
+    )
+}
+
+/// Under the sites buttons once the daemon linked the folder.
+pub fn linked(name: &str, folder: &Path) -> String {
+    format!("Linked {} as {name}.{TLD}.", folder.display())
+}
+
+/// Over an Install field: what to type for this runtime.
+pub fn version_field_hint(runtime: Runtime) -> String {
+    let example = example_version(runtime);
+    format!(
+        "A version such as {example}: the newest {} that matches it. Empty: the newest stable \
+         version.",
+        runtime_name(runtime)
+    )
+}
+
+fn example_version(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Php => "8.4",
+        Runtime::Node => "22",
+        Runtime::Composer => "2.8",
+        Runtime::Caddy => "2.11",
+    }
+}
+
+/// The text on the progress bar, or the line after an install.
+pub fn install_status(view: &InstallView) -> String {
+    let what = install_subject(view);
+    match &view.step {
+        InstallStep::Waiting => format!("Asking the daemon to install {what}…"),
+        InstallStep::ListChecked => format!("Installing {what}…"),
+        InstallStep::Downloading {
+            artifact,
+            done,
+            total,
+        } => format!(
+            "Downloading {what} ({artifact}): {} of {} MB",
+            megabytes(*done),
+            megabytes(*total)
+        ),
+        InstallStep::Unpacking { artifact } => format!("Unpacking {what} ({artifact})…"),
+        InstallStep::Checking => format!("Testing {what}…"),
+        InstallStep::Finishing => format!("Finishing the install of {what}…"),
+        InstallStep::Done { already: false } => format!("Installed {what}."),
+        InstallStep::Done { already: true } => format!("{what} was already installed."),
+        InstallStep::Failed(failure) => {
+            format!(
+                "Cannot install {what}. {}",
+                install_failure(view.runtime, failure)
+            )
+        }
+    }
+}
+
+/// `PHP 8.4.23`, `PHP 8.4`, `Caddy`, or `a program` for an install from a
+/// terminal before its version is known.
+fn install_subject(view: &InstallView) -> String {
+    match (view.runtime, &view.version) {
+        (Some(runtime), Some(version)) => format!("{} {version}", runtime_name(runtime)),
+        (Some(runtime), None) => runtime_name(runtime).to_owned(),
+        (None, _) => "a program".to_owned(),
+    }
+}
+
+/// Bytes as megabytes with one decimal: `12.3`.
+fn megabytes(bytes: u64) -> String {
+    // Display only: `f64` holds any file size closely enough.
+    format!("{:.1}", bytes as f64 / 1_000_000.0)
+}
+
+/// Why an install failed, with the facts the daemon sent. The daemon's
+/// English `message` goes to the log only.
+pub fn install_failure(runtime: Option<Runtime>, failure: &InstallFailure) -> String {
+    let name = runtime.map_or("the program", runtime_name);
+    let requested = failure.requested.as_deref();
+    match failure.code.as_str() {
+        "install_unsupported_platform" => format!(
+            "Marsa has no {name} build for {}.",
+            failure.platform.as_deref().unwrap_or("this system")
+        ),
+        "install_no_such_version" => {
+            let wanted = match requested {
+                Some(text) => format!("No {name} version matches \"{text}\"."),
+                None => format!("The version list has no stable {name} version."),
+            };
+            if failure.available.is_empty() {
+                format!("{wanted} The version list has no {name} versions.")
+            } else {
+                format!("{wanted} Available: {}.", failure.available.join(", "))
+            }
+        }
+        "install_check_failed" => {
+            let output = failure.output.as_deref().map(str::trim);
+            match output.filter(|output| !output.is_empty()) {
+                Some(output) => format!(
+                    "The new {name} failed its test run, so it was not installed. It printed: \
+                     {output}"
+                ),
+                None => format!("The new {name} failed its test run, so it was not installed."),
+            }
+        }
+        "unsupported_alias" | "invalid_version" if requested.is_some() => format!(
+            "\"{}\" is not a version number. Write one such as {}.",
+            requested.unwrap_or_default(),
+            runtime.map_or("8.4", example_version)
+        ),
+        code => error_text(code),
+    }
+}
+
+/// What setup does, and the prompt it may bring, on this system.
+pub fn setup_explanation(platform: Option<Platform>) -> &'static str {
+    match platform {
+        Some(Platform::DarwinArm64 | Platform::DarwinX64) => {
+            "Setup lets your browser open .test sites over HTTPS: it sends .test names to \
+             Marsa, trusts Marsa's certificates, and routes ports 80 and 443 to Marsa. macOS \
+             asks for your password once."
+        }
+        _ => {
+            "Setup lets your browser open .test sites over HTTPS. Your system may ask for an \
+             administrator's approval once."
+        }
+    }
+}
+
+/// Next to "Run setup" while it runs.
+pub fn setup_running(platform: Option<Platform>) -> &'static str {
+    match platform {
+        Some(Platform::DarwinArm64 | Platform::DarwinX64) => {
+            "Setting up… Enter your password when macOS asks."
+        }
+        _ => "Setting up… Answer your system's prompt if one opens.",
+    }
+}
+
+/// One line of a setup report. `problem`: a step that failed, or why the
+/// helper did not run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportLine {
+    pub text: String,
+    pub problem: bool,
+}
+
+/// A setup report, as `marsa setup` prints it: one line per step (done,
+/// already done, failed, or skipped and why), the programs on port 80 or
+/// 443 under the skipped redirect, and why the helper did not run.
+pub fn setup_lines(report: &SetupReport) -> Vec<ReportLine> {
+    let mut lines = Vec::new();
+    let mut push = |text: String, problem: bool| lines.push(ReportLine { text, problem });
+    for result in &report.results {
+        let step = setup_step(&result.op);
+        match result.status {
+            OpStatus::Done => push(format!("{step}: done."), false),
+            OpStatus::Unchanged => push(format!("{step}: already done."), false),
+            OpStatus::Failed => {
+                let reason = error_text(result.code.as_deref().unwrap_or_default());
+                push(format!("{step}: failed. {reason}"), true);
+            }
+        }
+    }
+    for skipped in &report.skipped {
+        let step = setup_step(&skipped.op);
+        let reason = error_text(&skipped.code);
+        push(format!("{step}: skipped. {reason}"), false);
+        if skipped.code == "redirect_port_held" {
+            for holder in &report.port_holders {
+                push(port_held(holder), false);
+            }
+        }
+    }
+    if let Some(error) = &report.error {
+        push(error_text(&error.code), true);
+    } else if report.results.is_empty() && report.skipped.is_empty() {
+        push(SETUP_NOTHING.to_owned(), false);
+    }
+    lines
+}
+
+/// A helper operation, as a step of setup. An operation this build does not
+/// know shows its own name.
+fn setup_step(op: &str) -> String {
+    match op {
+        "trust_install" => "Trust Marsa's HTTPS certificates".to_owned(),
+        "resolver_install" => "Send .test names to Marsa".to_owned(),
+        "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+/// `Port 80 is used by nginx-arm64 (PID 15464, Herd).`
+fn port_held(holder: &PortHolder) -> String {
+    let name = holder
+        .process
+        .as_deref()
+        .or(holder.command.as_deref())
+        .unwrap_or("an unknown program");
+    let about = match (holder.pid, holder.app.as_deref()) {
+        (Some(pid), Some(app)) => format!(" (PID {pid}, {app})"),
+        (Some(pid), None) => format!(" (PID {pid})"),
+        (None, Some(app)) => format!(" ({app})"),
+        (None, None) => String::new(),
+    };
+    format!("Port {} is used by {name}{about}.", holder.port)
+}
 
 /// The first line of the menu: the daemon's state.
 pub fn tray_status(daemon: &Daemon) -> String {
@@ -216,7 +526,7 @@ pub fn default_text(chosen: Option<&Version>, saved: Option<&str>) -> String {
     }
 }
 
-/// Under the park field once the daemon accepted the folder.
+/// Under the sites buttons once the daemon accepted the folder to park.
 pub fn parked(folder: &Path) -> String {
     format!("Parked {}.", folder.display())
 }
@@ -294,7 +604,7 @@ fn error_message(code: &str) -> Option<&'static str> {
         "site_name_invalid" => "That is not a valid site name.",
         "site_name_taken" => "Another folder already has that site name.",
         "site_not_a_folder" => "That path is not a folder.",
-        "site_path_relative" => "That is not a full path. Type the whole path of the folder.",
+        "site_path_relative" => "That is not a full path of a folder.",
         "site_path_not_utf8" => {
             "That folder's path is not valid UTF-8, so Marsa cannot serve it. Rename the folder."
         }
@@ -321,6 +631,163 @@ fn error_message(code: &str) -> Option<&'static str> {
         "autostart_no_home" => "The system gives no home folder for the login file.",
         "autostart_read" => "Cannot read the login file.",
         "autostart_write" => "Cannot write the login file.",
+        // Installs (task M5-10): `InstallError` and the codes under it, in
+        // the `failed` event or the answer to the request.
+        "install_busy" => "Another install is running. Wait for it to end, then try again.",
+        "install_unsupported_platform" => "Marsa has no build of this program for this system.",
+        "install_no_such_version" => "The version list has no version that matches.",
+        "install_manifest_mismatch" => {
+            "The version list and this build of Marsa disagree on the files to install. \
+             Nothing was installed. Update Marsa, or report it."
+        }
+        "install_unsafe_name" => {
+            "The version list has a file name Marsa refuses. Nothing was installed. Report it."
+        }
+        "install_check_failed" => "The new program failed its test run, so it was not installed.",
+        "install_missing_vc_runtime" => {
+            "This program needs the Microsoft Visual C++ Redistributable: \
+             https://aka.ms/vs/17/release/vc_redist.x64.exe"
+        }
+        "install_serial_corrupt" => {
+            "The file runtimes/.manifest-serial in the data folder is damaged. Delete it, then \
+             try again: Marsa then accepts the current version list."
+        }
+        "install_io" => {
+            "Cannot write to the data folder. Check the free disk space and the folder's \
+             permissions."
+        }
+        "install_crashed" => {
+            "The install stopped because of a bug in Marsa. Try again; if it repeats, report it \
+             with the file logs/marsad.log."
+        }
+        INSTALL_INTERRUPTED => "The daemon stopped before the install ended. Try again.",
+        "manifest_no_trusted_key" => {
+            "This build of Marsa has no trusted key for the version list, so it cannot check \
+             it. Nothing was installed."
+        }
+        "manifest_bad_signature" => {
+            "The version list failed its signature check. Nothing was installed. Try again \
+             later; if it repeats, report it."
+        }
+        "manifest_too_large" | "manifest_invalid" => {
+            "The version list cannot be read. Nothing was installed. Try again later; if it \
+             repeats, report it."
+        }
+        "manifest_schema_unsupported" => {
+            "The version list uses a newer format. Update Marsa, then try again."
+        }
+        "manifest_rollback" => {
+            "The version list is older than one this computer already accepted, so it was \
+             refused. Try again later; if it repeats, report it."
+        }
+        "download_failed" => "A download failed. Check your connection, then try again.",
+        "download_http_status" => "The download server answered with an error. Try again later.",
+        "download_insecure_url" => {
+            "Marsa refused a download that is not https. Nothing was installed. Report it."
+        }
+        "download_size_mismatch" => {
+            "A downloaded file has the wrong size. Nothing was installed. Try again."
+        }
+        "download_too_large" => {
+            "A download is larger than allowed. Nothing was installed. Report it."
+        }
+        "download_io" => {
+            "Cannot save a download in the data folder. Check the free disk space and the \
+             folder's permissions."
+        }
+        "checksum_mismatch" => {
+            "A downloaded file does not match its signed checksum. Nothing was installed."
+        }
+        "extract_unsafe_path"
+        | "extract_unsafe_link"
+        | "extract_unsupported_entry"
+        | "extract_duplicate"
+        | "extract_too_large" => {
+            "A downloaded archive has content Marsa refuses. Nothing was installed. Report it."
+        }
+        "extract_corrupt" => "A downloaded archive is damaged. Nothing was installed. Try again.",
+        "extract_io" => {
+            "Cannot unpack a download in the data folder. Check the free disk space and the \
+             folder's permissions."
+        }
+        "recipe_invalid"
+        | "recipe_unknown_platform"
+        | "recipe_bad_path"
+        | "recipe_bad_template" => "This build of Marsa has a broken install recipe. Report it.",
+        // Setup (`POST /v1/setup`, task M4-13): why it did not run, the
+        // steps it skipped, and the codes of `marsa-helper`.
+        "setup_running" => "Another setup is running. Wait for it to end, then try again.",
+        "setup_not_supported" => "Setup from Marsa works on macOS only for now.",
+        "setup_cancelled" => {
+            "The password prompt was cancelled, so nothing was changed. Run setup again when \
+             you are ready."
+        }
+        "setup_timed_out" => {
+            "Marsa stopped waiting for setup after 5 minutes. Some steps may already have run; \
+             running setup again is safe."
+        }
+        "setup_interrupted" => {
+            "The daemon stopped during setup. Some steps may already have run; running setup \
+             again is safe."
+        }
+        "setup_not_authorized" => {
+            "macOS did not give Marsa admin rights, so nothing was changed. Run setup again and \
+             enter the password of an administrator account."
+        }
+        "setup_helper_missing" => {
+            "The marsa-helper program is not next to marsad, so nothing was changed. Reinstall \
+             Marsa, then try again."
+        }
+        "setup_helper_unsafe" => {
+            "Another user could change the marsa-helper program or its folder, so Marsa did not \
+             ask for the password. Make both writable only by you, then run setup again."
+        }
+        "setup_helper_failed" => {
+            "marsa-helper gave an answer Marsa cannot read, so the result of setup is not known. \
+             Run setup again; if it repeats, report it with the file logs/marsad.log."
+        }
+        "setup_helper_rejected" => {
+            "marsa-helper refused the setup request, so nothing was changed. Report it with the \
+             file logs/marsad.log."
+        }
+        "redirect_port_held" => {
+            "Another program uses port 80 or 443, and the redirect would take its traffic. Stop \
+             that program, or turn off its web server, then run setup again."
+        }
+        "ports_not_checked" => {
+            "Marsa could not check which programs use ports 80 and 443, so it left them alone. \
+             Run setup again; if it repeats, report it."
+        }
+        "ca_not_ready" => {
+            "Marsa's certificate authority does not exist yet: Caddy makes it when it first \
+             serves a secure site. Run setup again after that."
+        }
+        "ca_unreadable" => {
+            "Cannot read the root certificate of Marsa's certificate authority, or it is not a \
+             certificate. Run setup again; if it repeats, report it."
+        }
+        "op_not_implemented" => "This build of marsa-helper cannot do this yet. Update Marsa.",
+        "op_not_supported" => "marsa-helper cannot do this on this system.",
+        "resolver_foreign" => {
+            "/etc/resolver/test belongs to another tool, so Marsa left it as it is. Remove that \
+             tool's .test setting, then run setup again."
+        }
+        "resolver_read" | "resolver_write" => {
+            "macOS did not let Marsa write /etc/resolver/test. Run setup again; if it repeats, \
+             report it."
+        }
+        "trust_cert_invalid" => {
+            "The root certificate of Marsa's certificate authority is not valid, so it was not \
+             trusted. Report it."
+        }
+        "trust_read" | "trust_write" | "trust_add_failed" => {
+            "Marsa's certificate authority was not trusted. Run setup again; if it repeats, \
+             report it."
+        }
+        "pf_write" | "pf_load_failed" => {
+            "macOS did not load the redirect of ports 80 and 443. Run setup again; if it \
+             repeats, report it."
+        }
         BRIDGE_FAILED => "The window could not start its background worker.",
         TRAY_WORKER_FAILED => "The menu-bar icon could not start its background worker.",
         WINDOW_START_FAILED => "Cannot start the window (marsa-gui).",
@@ -506,7 +973,7 @@ mod tests {
         );
         assert_eq!(
             error_text("site_path_relative"),
-            "That is not a full path. Type the whole path of the folder."
+            "That is not a full path of a folder."
         );
     }
 
@@ -608,5 +1075,381 @@ mod tests {
         assert_eq!(default_text(Some(&v("8.4.23")), Some("8.4")), "8.4.23");
         assert_eq!(default_text(None, Some("8.2")), "8.2 (not installed)");
         assert_eq!(default_text(None, None), NO_DEFAULT);
+    }
+
+    // -- Installs, setup, and settings (task M5-10) --
+
+    use marsa_core::installer::InstallError;
+    use marsa_core::installer::manifest::ManifestError;
+    use marsa_core::resolver::BadRequest;
+    use marsa_core::types::{ApiError, OpResult, SetupSkip};
+
+    #[test]
+    fn every_install_and_setup_code_has_a_message() {
+        let built = [
+            InstallError::UnsupportedPlatform {
+                what: "php".into(),
+                platform: "x".into(),
+            },
+            InstallError::Busy,
+            InstallError::NoSuchVersion {
+                runtime: "php",
+                requested: None,
+                available: Vec::new(),
+            },
+            InstallError::ManifestMismatch {
+                what: "php".into(),
+                missing: Vec::new(),
+                extra: Vec::new(),
+            },
+            InstallError::UnsafeName { name: "..".into() },
+            InstallError::CheckFailed {
+                output: String::new(),
+                exit_code: None,
+            },
+            InstallError::MissingVcRuntime,
+            InstallError::SerialCorrupt {
+                path: PathBuf::from("s"),
+            },
+            InstallError::Io {
+                path: PathBuf::from("s"),
+                source: io::Error::other("test"),
+            },
+            InstallError::Manifest(ManifestError::NoTrustedKey),
+            InstallError::Manifest(ManifestError::BadSignature),
+            InstallError::Version(BadRequest::Alias),
+            InstallError::Version(BadRequest::Invalid),
+        ];
+        let built = built.iter().map(|err| err.code().to_owned());
+        // The codes of the errors under `InstallError` that a test cannot
+        // build here, the daemon's own install codes, and setup's codes
+        // (its route, its skipped steps, and `marsa-helper`).
+        let listed = [
+            "install_crashed",
+            INSTALL_INTERRUPTED,
+            "manifest_too_large",
+            "manifest_invalid",
+            "manifest_schema_unsupported",
+            "manifest_rollback",
+            "download_insecure_url",
+            "download_http_status",
+            "download_failed",
+            "download_size_mismatch",
+            "checksum_mismatch",
+            "download_too_large",
+            "download_io",
+            "extract_unsafe_path",
+            "extract_unsafe_link",
+            "extract_unsupported_entry",
+            "extract_duplicate",
+            "extract_too_large",
+            "extract_corrupt",
+            "extract_io",
+            "recipe_invalid",
+            "recipe_unknown_platform",
+            "recipe_bad_path",
+            "recipe_bad_template",
+            "runtimes_read",
+            "unknown_tool",
+            "setup_running",
+            "setup_not_supported",
+            "setup_cancelled",
+            "setup_timed_out",
+            "setup_interrupted",
+            "setup_not_authorized",
+            "setup_helper_missing",
+            "setup_helper_unsafe",
+            "setup_helper_failed",
+            "setup_helper_rejected",
+            "redirect_port_held",
+            "ports_not_checked",
+            "ca_not_ready",
+            "ca_unreadable",
+            "op_not_implemented",
+            "op_not_supported",
+            "resolver_foreign",
+            "resolver_read",
+            "resolver_write",
+            "trust_cert_invalid",
+            "trust_read",
+            "trust_write",
+            "trust_add_failed",
+            "pf_write",
+            "pf_load_failed",
+        ];
+        for code in built.chain(listed.map(str::to_owned)) {
+            assert!(error_message(&code).is_some(), "no message for {code}");
+        }
+    }
+
+    fn view(runtime: Option<Runtime>, version: Option<&str>, step: InstallStep) -> InstallView {
+        InstallView {
+            runtime,
+            version: version.map(str::to_owned),
+            step,
+        }
+    }
+
+    #[test]
+    fn each_install_step_has_its_line() {
+        let php = |step| view(Some(Runtime::Php), Some("8.4.23"), step);
+        let artifact = || "cli".to_owned();
+        let cases = [
+            (
+                view(Some(Runtime::Php), Some("8.4"), InstallStep::Waiting),
+                "Asking the daemon to install PHP 8.4…",
+            ),
+            (
+                view(Some(Runtime::Caddy), None, InstallStep::ListChecked),
+                "Installing Caddy…",
+            ),
+            (
+                php(InstallStep::Downloading {
+                    artifact: artifact(),
+                    done: 12_340_000,
+                    total: 30_100_000,
+                }),
+                "Downloading PHP 8.4.23 (cli): 12.3 of 30.1 MB",
+            ),
+            (
+                php(InstallStep::Unpacking {
+                    artifact: artifact(),
+                }),
+                "Unpacking PHP 8.4.23 (cli)…",
+            ),
+            (php(InstallStep::Checking), "Testing PHP 8.4.23…"),
+            (
+                php(InstallStep::Finishing),
+                "Finishing the install of PHP 8.4.23…",
+            ),
+            (
+                php(InstallStep::Done { already: false }),
+                "Installed PHP 8.4.23.",
+            ),
+            (
+                php(InstallStep::Done { already: true }),
+                "PHP 8.4.23 was already installed.",
+            ),
+            (
+                view(None, None, InstallStep::Checking),
+                "Testing a program…",
+            ),
+        ];
+        for (view, want) in cases {
+            assert_eq!(install_status(&view), want);
+        }
+    }
+
+    #[test]
+    fn a_failed_install_says_why_with_its_facts() {
+        let failed = |failure| {
+            view(
+                Some(Runtime::Php),
+                Some("8.9"),
+                InstallStep::Failed(failure),
+            )
+        };
+        let no_match = InstallFailure {
+            code: "install_no_such_version".into(),
+            requested: Some("8.9".into()),
+            available: vec!["8.3.27".into(), "8.4.23".into()],
+            ..InstallFailure::default()
+        };
+        assert_eq!(
+            install_status(&failed(no_match)),
+            "Cannot install PHP 8.9. No PHP version matches \"8.9\". Available: 8.3.27, 8.4.23."
+        );
+        let check = InstallFailure {
+            code: "install_check_failed".into(),
+            output: Some(" dyld: missing library \n".into()),
+            ..InstallFailure::default()
+        };
+        assert!(
+            install_failure(Some(Runtime::Php), &check)
+                .ends_with("It printed: dyld: missing library")
+        );
+        let alias = InstallFailure {
+            code: "unsupported_alias".into(),
+            requested: Some("latest".into()),
+            ..InstallFailure::default()
+        };
+        assert_eq!(
+            install_failure(Some(Runtime::Node), &alias),
+            "\"latest\" is not a version number. Write one such as 22."
+        );
+        let platform = InstallFailure {
+            code: "install_unsupported_platform".into(),
+            platform: Some("linux-arm64".into()),
+            ..InstallFailure::default()
+        };
+        assert_eq!(
+            install_failure(Some(Runtime::Caddy), &platform),
+            "Marsa has no Caddy build for linux-arm64."
+        );
+        // Any other code: its general text; a new one shows its name.
+        let busy = InstallFailure {
+            code: "install_busy".into(),
+            ..InstallFailure::default()
+        };
+        assert_eq!(install_failure(None, &busy), error_text("install_busy"));
+        let new = InstallFailure {
+            code: "install_new".into(),
+            ..InstallFailure::default()
+        };
+        assert_eq!(
+            install_failure(None, &new),
+            "Unexpected error (install_new)."
+        );
+    }
+
+    #[test]
+    fn the_first_run_button_names_the_php_it_installs() {
+        let line = format!("PHP {}", crate::model::FIRST_PHP);
+        assert!(FIRST_RUN_INSTALL.contains(&line), "{FIRST_RUN_INSTALL}");
+        assert!(
+            FIRST_RUN_INSTALL_HINT.contains(&line),
+            "{FIRST_RUN_INSTALL_HINT}"
+        );
+    }
+
+    #[test]
+    fn setup_says_macos_asks_for_the_password_once() {
+        for platform in [Platform::DarwinArm64, Platform::DarwinX64] {
+            let text = setup_explanation(Some(platform));
+            assert!(text.contains("macOS asks for your password once"), "{text}");
+            assert!(setup_running(Some(platform)).contains("macOS"));
+        }
+        for platform in [Some(Platform::LinuxX64), Some(Platform::WindowsX64), None] {
+            assert!(!setup_explanation(platform).contains("macOS"));
+            assert!(!setup_running(platform).contains("macOS"));
+        }
+    }
+
+    fn result(op: &str, status: OpStatus, code: Option<&str>) -> OpResult {
+        OpResult {
+            op: op.into(),
+            status,
+            code: code.map(str::to_owned),
+            message: None,
+        }
+    }
+
+    fn texts(lines: &[ReportLine]) -> Vec<(&str, bool)> {
+        lines
+            .iter()
+            .map(|line| (line.text.as_str(), line.problem))
+            .collect()
+    }
+
+    #[test]
+    fn a_setup_report_has_one_line_per_step() {
+        let report = SetupReport {
+            results: vec![
+                result("resolver_install", OpStatus::Done, None),
+                result("trust_install", OpStatus::Unchanged, None),
+                result("pf_install", OpStatus::Failed, Some("pf_load_failed")),
+                result("new_op", OpStatus::Done, None),
+            ],
+            skipped: vec![SetupSkip {
+                op: "pf_install".into(),
+                code: "redirect_port_held".into(),
+            }],
+            port_holders: vec![
+                PortHolder {
+                    port: 80,
+                    address: "127.0.0.1".into(),
+                    process: Some("nginx-arm64".into()),
+                    pid: Some(15464),
+                    user: None,
+                    command: None,
+                    app: Some("Herd".into()),
+                },
+                PortHolder {
+                    port: 443,
+                    address: "*".into(),
+                    process: None,
+                    pid: None,
+                    user: None,
+                    command: None,
+                    app: None,
+                },
+            ],
+            error: None,
+        };
+        let lines = setup_lines(&report);
+        let failed = format!(
+            "Route ports 80 and 443 to Marsa: failed. {}",
+            error_text("pf_load_failed")
+        );
+        let skipped = format!(
+            "Route ports 80 and 443 to Marsa: skipped. {}",
+            error_text("redirect_port_held")
+        );
+        assert_eq!(
+            texts(&lines),
+            [
+                ("Send .test names to Marsa: done.", false),
+                ("Trust Marsa's HTTPS certificates: already done.", false),
+                (failed.as_str(), true),
+                ("new_op: done.", false),
+                (skipped.as_str(), false),
+                ("Port 80 is used by nginx-arm64 (PID 15464, Herd).", false),
+                ("Port 443 is used by an unknown program.", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_setup_that_did_not_run_says_why() {
+        let cancelled = SetupReport {
+            error: Some(ApiError {
+                code: "setup_cancelled".into(),
+                message: "the admin prompt was cancelled".into(),
+            }),
+            ..SetupReport::default()
+        };
+        let lines = setup_lines(&cancelled);
+        assert_eq!(
+            texts(&lines),
+            [(error_text("setup_cancelled").as_str(), true)]
+        );
+        assert_eq!(
+            texts(&setup_lines(&SetupReport::default())),
+            [(SETUP_NOTHING, false)]
+        );
+    }
+
+    #[test]
+    fn the_settings_lines() {
+        let health = marsa_core::types::Health {
+            app_version: "0.3.0".into(),
+            api_version: 1,
+            pid: 77,
+        };
+        assert_eq!(
+            daemon_version(&Connection::Running(health)),
+            "0.3.0 (PID 77)"
+        );
+        assert_eq!(daemon_version(&Connection::Reconnecting), NOT_CONNECTED);
+        for state in [Autostart::Stale, Autostart::Unsupported] {
+            assert!(autostart_note(state).is_some(), "{state:?}");
+        }
+        for state in [Autostart::Unknown, Autostart::Off, Autostart::On] {
+            assert!(autostart_note(state).is_none(), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn the_link_lines() {
+        let folder = Path::new("/work/api");
+        assert_eq!(linked("api", folder), "Linked /work/api as api.test.");
+        assert_eq!(link_folder(folder), "Link /work/api as:");
+        assert_eq!(site_suffix(), ".test");
+        let hint = version_field_hint(Runtime::Node);
+        assert!(
+            hint.starts_with("A version such as 22: the newest Node.js"),
+            "{hint}"
+        );
+        assert_ne!(pick_title(Pick::Park), pick_title(Pick::Link));
     }
 }
