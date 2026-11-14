@@ -237,6 +237,21 @@ remove_all
 helper '[{"op":"ports_remove"},{"op":"resolved_remove"}]' || fail "the helper exited with $?"
 [ "$(statuses)" = "unchanged unchanged" ] || fail "expected unchanged unchanged, got: $(statuses)"
 
+step "the install five more times, each from an old drop-in and a restart"
+# Run 43603392848 failed once here on 22.04 (the check saw another server
+# list on marsa0). Each round: the old drop-in, a restart, the install, the
+# name, and the removal.
+for round in 1 2 3 4 5; do
+  printf '# Managed by Marsa. Do not edit.\n[Resolve]\nDNS=127.0.0.1:18053\nDomains=~test\n' | sudo tee "$DROPIN" >/dev/null
+  sudo systemctl reset-failed systemd-resolved
+  sudo systemctl restart systemd-resolved
+  helper '[{"op":"resolved_install","port":18053}]' || fail "round $round: the helper exited with $?"
+  [ "$(statuses)" = "done" ] || fail "round $round: expected done, got: $(statuses)"
+  wait_for_name "$SITE" || fail "round $round: $SITE does not resolve"
+  helper '[{"op":"resolved_remove"}]' || fail "round $round: the helper exited with $?"
+  [ "$(statuses)" = "done" ] || fail "round $round: expected done, got: $(statuses)"
+done
+
 step "removal reloads only Marsa's key from the other sysctl files"
 helper '[{"op":"ports_install"}]' || fail "the helper exited with $?"
 [ "$(cat "$PORT_START")" = 80 ] || fail "ports_install did not set 80"
