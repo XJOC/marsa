@@ -61,6 +61,15 @@ expression: "build(&[legacy], &windows_pools())"
           ]
         }
       }
+    },
+    "pki": {
+      "certificate_authorities": {
+        "marsa": {
+          "install_trust": false,
+          "name": "Marsa Local CA",
+          "root_common_name": "Marsa Local CA"
+        }
+      }
     }
   }
 }

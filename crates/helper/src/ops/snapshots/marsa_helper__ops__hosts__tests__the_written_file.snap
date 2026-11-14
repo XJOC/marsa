@@ -1,0 +1,14 @@
+---
+source: crates/helper/src/ops/hosts.rs
+expression: text(&fake)
+---
+# Copyright (c) 1993-2009 Microsoft Corp.
+#
+# localhost name resolution is handled within DNS itself.
+#	127.0.0.1       localhost
+#	::1             localhost
+# Marsa start
+# Managed by Marsa. Lines in this block are overwritten.
+127.0.0.1 blog.test
+127.0.0.1 shop.test
+# Marsa end

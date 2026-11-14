@@ -5,6 +5,7 @@
 //! | `GET /v1/runtimes` | `RuntimeList`: the installed versions and the default of each runtime |
 //! | `POST /v1/runtimes/{tool}/install` | 202 `InstallAccepted`, then `install` events on `/v1/events` |
 //! | `PUT /v1/runtimes/{tool}/default` | `DefaultVersion`: the new default of PHP or Node (task M5-01) |
+//! | `DELETE /v1/runtimes/{tool}/{version}` | `Uninstalled`: the version whose folder is gone (task M5-07) |
 //!
 //! The daemon runs the installer (`marsa_core::installer::install`) in a task
 //! of its own and sends each `InstallEvent` on the event bus. The last event
@@ -22,6 +23,14 @@
 //! the site list is built again. A site that follows the default gets the
 //! new PHP, and `sites_changed` makes Caddy and php-fpm follow. A refused
 //! request leaves `global.toml` as it was.
+//!
+//! `DELETE .../{version}` takes `8.3.12`, or `8.3` when one installed version
+//! matches. It takes the install's guard, so it never runs with an install,
+//! and refuses (409 `version_in_use`, nothing changed) a version that the
+//! default in `global.toml` or a site's own setting in `sites.toml` picks
+//! now, or that the running Caddy runs from. Then the folder is moved aside
+//! (`installer::uninstall`), each php-fpm pool that runs the version is
+//! stopped, the folder is deleted, and the site list is built again.
 
 use std::error::Error;
 use std::fmt;
@@ -34,20 +43,26 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use marsa_core::config::{self, ConfigError, ConfigPaths, GlobalConfig, ToolDefaults};
+use marsa_core::config::{
+    self, ConfigError, ConfigPaths, GlobalConfig, SiteSettings, SitesConfig, ToolDefaults,
+};
 use marsa_core::installer::extract::ExtractError;
 use marsa_core::installer::fetch::FetchError;
+use marsa_core::installer::uninstall::{self, Retired, UninstallError};
 use marsa_core::installer::{self, InstallEnv, InstallError, InstalledVersion};
 use marsa_core::resolver::{self, BadRequest, Tool};
 use marsa_core::runtimes::{Runtime, RuntimesDir, RuntimesError};
 use marsa_core::types::{
     DefaultRequest, DefaultVersion, Event, InstallAccepted, InstallDone, InstallEvent,
     InstallFailure, InstallProgress, InstallRequest, InstallUpdate, RuntimeList, RuntimeVersions,
+    Uninstalled, VersionInUse,
 };
+use semver::Version;
 
 use super::api::HttpError;
+use super::php::{fpm_id, wanted_pools};
 use super::state::Daemon;
 
 /// The routes, for `api::router` to merge before its fallbacks.
@@ -56,6 +71,7 @@ pub fn routes() -> Router<Arc<Daemon>> {
         .route("/v1/runtimes", get(runtimes))
         .route("/v1/runtimes/{tool}/install", post(install))
         .route("/v1/runtimes/{tool}/default", put(set_default))
+        .route("/v1/runtimes/{tool}/{version}", delete(uninstall))
 }
 
 /// What [`RunInstall::run`] returns.
@@ -113,7 +129,7 @@ impl Installs {
         }
     }
 
-    /// Whether an install runs now.
+    /// Whether an install, or an uninstall (task M5-07), runs now.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
@@ -142,17 +158,23 @@ struct Started {
 }
 
 impl Started {
-    /// `None` while another install runs. No lock: one atomic swap.
+    /// `None` while another install or an uninstall runs.
     fn take(daemon: &Arc<Daemon>) -> Option<Self> {
-        let installs = &daemon.installs;
-        installs
-            .running
+        let mut started = Self::claim(daemon)?;
+        started.id = daemon.installs.last_id.fetch_add(1, Ordering::Relaxed) + 1;
+        Some(started)
+    }
+
+    /// The same right for an uninstall, which has no id. No lock: one atomic
+    /// swap.
+    fn claim(daemon: &Arc<Daemon>) -> Option<Self> {
+        let running = &daemon.installs.running;
+        running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()?;
-        let id = installs.last_id.fetch_add(1, Ordering::Relaxed) + 1;
         Some(Self {
             daemon: Arc::clone(daemon),
-            id,
+            id: 0,
         })
     }
 }
@@ -218,11 +240,7 @@ async fn install(
     let Json(request) =
         body.map_err(|err| HttpError::new(err.status(), "invalid_body", err.body_text()))?;
     let Some(started) = Started::take(&daemon) else {
-        return Err(HttpError::new(
-            StatusCode::CONFLICT,
-            InstallError::Busy.code(),
-            InstallError::Busy.to_string(),
-        ));
+        return Err(busy());
     };
     let id = started.id;
     tracing::info!(
@@ -251,6 +269,11 @@ async fn install(
         }
     });
     Ok((StatusCode::ACCEPTED, Json(InstallAccepted { id })))
+}
+
+fn busy() -> HttpError {
+    let err = InstallError::Busy;
+    HttpError::new(StatusCode::CONFLICT, err.code(), err.to_string())
 }
 
 /// The `{tool}` path segment.
@@ -544,6 +567,199 @@ fn save_default(data_dir: &Path, tool: Tool, text: &str) -> Result<DefaultVersio
         default: text.to_owned(),
         version: version.to_string(),
     })
+}
+
+async fn uninstall(
+    State(daemon): State<Arc<Daemon>>,
+    path: Result<UrlPath<(String, String)>, PathRejection>,
+) -> Result<Json<Uninstalled>, HttpError> {
+    let UrlPath((tool, text)) =
+        path.map_err(|err| HttpError::new(err.status(), "invalid_path", err.body_text()))?;
+    let runtime = runtime(&tool)?;
+    let started = Started::claim(&daemon).ok_or_else(busy)?;
+    // A task of its own, so a client that hangs up cannot stop it between
+    // the rename and the delete.
+    let task = tokio::spawn(remove_version(started, runtime, text));
+    task.await.unwrap_or_else(|err| {
+        tracing::error!(error = %err, "the uninstall task failed");
+        let message = "the uninstall task failed";
+        Err(HttpError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            message,
+        ))
+    })
+}
+
+/// The uninstall, from the checks to the new site list. `started` keeps
+/// installs out until the end.
+async fn remove_version(
+    started: Started,
+    runtime: Runtime,
+    text: String,
+) -> Result<Json<Uninstalled>, HttpError> {
+    let daemon = Arc::clone(&started.daemon);
+    let caddy = daemon.caddy.running_program(&daemon);
+    let worker = Arc::clone(&daemon);
+    let job = tokio::task::spawn_blocking(move || {
+        // `marsa use` waits, so the version cannot become the default
+        // between the check and the rename.
+        let _one = worker.lock_global();
+        retire_unused(&worker.data_dir, runtime, text.trim(), caddy.as_deref())
+    });
+    let (version, retired) = job.await.map_err(|err| {
+        tracing::error!(error = %err, "the uninstall job failed");
+        HttpError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "the uninstall job failed",
+        )
+    })??;
+    // The version is hidden now, so no pool can start with it again.
+    if runtime == Runtime::Php {
+        stop_pools(&daemon, &version).await;
+    }
+    let path = retired.path().to_path_buf();
+    match tokio::task::spawn_blocking(move || retired.remove()).await {
+        Ok(Ok(())) => {}
+        // The version is gone either way; `marsad` deletes the rest at its
+        // next start.
+        Ok(Err(err)) => tracing::warn!(code = err.code(), error = %err, "the delete stopped"),
+        Err(err) => tracing::warn!(path = %path.display(), error = %err, "the delete stopped"),
+    }
+    tracing::info!(runtime = runtime.dir_name(), %version, "uninstalled");
+    // Sites that ran this version now resolve to another one, or to none,
+    // and `sites_changed` makes Caddy and php-fpm follow. `rebuild_sites`
+    // logs its errors.
+    let _ = daemon.rebuild_sites().await;
+    drop(started);
+    Ok(Json(Uninstalled {
+        runtime,
+        version: version.to_string(),
+    }))
+}
+
+/// Picks the installed version `text` names, checks that nothing uses it,
+/// and moves its folder aside. A refusal changes nothing on disk. `caddy` is
+/// the program the running Caddy runs from. The caller holds
+/// [`Daemon::lock_global`].
+fn retire_unused(
+    data_dir: &Path,
+    runtime: Runtime,
+    text: &str,
+    caddy: Option<&Path>,
+) -> Result<(Version, Retired), HttpError> {
+    resolver::best_match(text, &[]).map_err(|err| bad_version(text, err))?;
+    let runtimes = RuntimesDir::in_dir(data_dir);
+    let installed = runtimes.installed(runtime).map_err(|err| {
+        let status = StatusCode::INTERNAL_SERVER_ERROR;
+        HttpError::new(status, err.code(), err.to_string())
+    })?;
+    let matching: Vec<&Version> = installed
+        .iter()
+        .filter(|version| picks(text, std::slice::from_ref(*version), version))
+        .collect();
+    let version = match matching[..] {
+        [one] => one.clone(),
+        [] => {
+            let message = format!(
+                "no installed {} version matches {text:?}",
+                runtime.dir_name()
+            );
+            let status = StatusCode::NOT_FOUND;
+            return Err(HttpError::new(status, "version_not_installed", message));
+        }
+        ref many => {
+            let many: Vec<String> = many.iter().map(ToString::to_string).collect();
+            let message = format!("{text:?} matches {}; name one", many.join(", "));
+            let status = StatusCode::CONFLICT;
+            return Err(HttpError::new(status, "version_ambiguous", message));
+        }
+    };
+    let paths = ConfigPaths::in_dir(data_dir);
+    let global = config::load_global(&paths.global).map_err(|err| global_error(&err))?;
+    let sites = config::load_sites(&paths.sites).map_err(|err| {
+        tracing::warn!(code = err.code(), error = %err, "sites.toml");
+        HttpError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            err.code(),
+            err.to_string(),
+        )
+    })?;
+    let mut used = in_use(runtime, &version, &installed, &global, &sites);
+    let dir = runtimes.version_dir(runtime, &version);
+    used.caddy = caddy.is_some_and(|program| program.starts_with(&dir));
+    if used.default.is_some() || !used.sites.is_empty() || used.caddy {
+        let message = format!("{} {version} is in use: {used:?}", runtime.dir_name());
+        let mut err = HttpError::new(StatusCode::CONFLICT, "version_in_use", message);
+        err.in_use = Some(Box::new(used));
+        return Err(err);
+    }
+    let retired = uninstall::retire(&runtimes, runtime, &version).map_err(|err| {
+        let status = match err {
+            UninstallError::Busy => StatusCode::CONFLICT,
+            UninstallError::NotInstalled { .. } => StatusCode::NOT_FOUND,
+            UninstallError::Io { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        tracing::warn!(code = err.code(), error = %err, "cannot uninstall");
+        HttpError::new(status, err.code(), err.to_string())
+    })?;
+    Ok((version, retired))
+}
+
+/// Whether the version text `text` picks `version` among `installed`, as the
+/// resolver would.
+fn picks(text: &str, installed: &[Version], version: &Version) -> bool {
+    resolver::best_match(text, installed).is_ok_and(|picked| picked.as_ref() == Some(version))
+}
+
+/// The default and the sites' own settings that pick `version` now. Composer
+/// and Caddy have neither.
+fn in_use(
+    runtime: Runtime,
+    version: &Version,
+    installed: &[Version],
+    global: &GlobalConfig,
+    sites: &SitesConfig,
+) -> VersionInUse {
+    let setting: fn(&SiteSettings) -> Option<&String> = match runtime {
+        Runtime::Php => |site| site.php.as_ref(),
+        Runtime::Node => |site| site.node.as_ref(),
+        Runtime::Composer | Runtime::Caddy => |_| None,
+    };
+    let default = default_tool(runtime).and_then(|tool| match tool {
+        Tool::Php => global.php.default.as_ref(),
+        Tool::Node => global.node.default.as_ref(),
+    });
+    let uses = |text: &&String| picks(text, installed, version);
+    VersionInUse {
+        version: version.to_string(),
+        default: default.filter(uses).cloned(),
+        sites: sites
+            .sites
+            .iter()
+            .filter(|(_, site)| setting(site).is_some_and(|text| uses(&text)))
+            .map(|(name, _)| name.clone())
+            .collect(),
+        caddy: false,
+    }
+}
+
+/// Stops, through the supervisor, each php-fpm pool that the sites run with
+/// `version`. The sync task starts the line again after `sites_changed`, if
+/// a site still needs it.
+async fn stop_pools(daemon: &Daemon, version: &Version) {
+    let sites = daemon.sites().map(|list| list.sites).unwrap_or_default();
+    for (minor, picked) in wanted_pools(&sites) {
+        if picked == *version
+            && let Some(handle) = daemon.take_proc(&fpm_id(minor))
+        {
+            tracing::info!(php = %minor, "stopping php-fpm before its uninstall");
+            if let Err(err) = handle.stop().await {
+                tracing::warn!(php = %minor, %err, "the php-fpm task failed");
+            }
+        }
+    }
 }
 
 /// The resolver's tool for `runtime`, or `None` for a runtime with no default

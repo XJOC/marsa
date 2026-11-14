@@ -14,7 +14,7 @@ use marsa_core::sites;
 use marsa_core::types::{
     Event, Health, InstallEvent, InstallFailure, InstallProgress, InstallUpdate, LogLine,
     LogStream, RuntimeList, ServiceAction, ServiceState, ServiceStatus, SetupReport, Site,
-    SiteList, Source,
+    SiteList, Source, VersionInUse, XdebugState,
 };
 use semver::Version;
 
@@ -38,6 +38,8 @@ const MAX_INSTALLS: usize = 4;
 /// The window's own code: the daemon stopped before an install ended, as
 /// `marsa install` says it.
 pub const INSTALL_INTERRUPTED: &str = "install_interrupted";
+/// The daemon's answer to unlinking a site that comes from a parked folder.
+const SITE_IS_PARKED: &str = "site_is_parked";
 
 /// What the bridge sends to the window.
 #[derive(Debug)]
@@ -104,6 +106,23 @@ pub enum Update {
     Autostart(Autostart),
     /// Reading or changing it failed. A client error code.
     AutostartFailed(String),
+    /// The daemon removed this. After an uninstall the bridge reads the
+    /// runtimes again: no event carries them.
+    Removed(Removal),
+    /// The daemon refused or failed the removal, or could not be reached. A
+    /// client error code; `in_use` holds the facts of `version_in_use`.
+    NotRemoved {
+        removal: Removal,
+        code: String,
+        in_use: Option<VersionInUse>,
+    },
+    /// Whether PHP loads Xdebug, as read (no event carries it).
+    Xdebug(XdebugState),
+    /// Reading it failed. A client error code.
+    XdebugFailed(String),
+    /// The answer to the Xdebug box: the state after the change, or a client
+    /// error code.
+    XdebugAnswered(Result<XdebugState, String>),
     Event(Event),
 }
 
@@ -181,8 +200,48 @@ pub enum SitesNotice {
     Parked(PathBuf),
     /// The daemon linked `folder` as the site `name`.
     Linked { name: String, folder: PathBuf },
+    /// The daemon unlinked this site.
+    Unlinked(String),
+    /// The daemon forgot this parked folder.
+    Forgot(PathBuf),
+    /// The daemon refused to unlink `site`: it comes from a parked folder.
+    /// `folder` is that folder when the list names it, so the window can
+    /// offer to forget it instead.
+    SiteIsParked {
+        site: String,
+        folder: Option<PathBuf>,
+    },
     /// A sites action failed. A client error code.
     Failed(String),
+}
+
+/// Something the window removes once the user confirms it (task M5-10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Removal {
+    /// `DELETE /v1/runtimes/{tool}/{version}`, with the full version.
+    Uninstall { runtime: Runtime, version: Version },
+    /// `DELETE /v1/sites/{name}`: a linked site.
+    Unlink { site: String },
+    /// `DELETE /v1/sites/park`: a parked folder, as the list names it.
+    Forget { folder: PathBuf },
+}
+
+/// The lines under the Runtimes table about the last uninstall.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UninstallNotice {
+    /// The daemon deleted this version.
+    Done { runtime: Runtime, version: Version },
+    /// The daemon refused: the default, a site, or Caddy uses the version.
+    InUse {
+        runtime: Runtime,
+        in_use: VersionInUse,
+    },
+    /// The daemon refused or failed for another reason. A client error code.
+    Failed {
+        runtime: Runtime,
+        version: Version,
+        code: String,
+    },
 }
 
 /// One log line, without the fields the window does not show.
@@ -408,6 +467,17 @@ pub struct Model {
     pub settings_notice: Option<String>,
     /// The data folder this window and its daemon use. Shown, never changed.
     pub data_dir: PathBuf,
+    /// The removal the confirmation dialog asks about.
+    pub confirm: Option<Removal>,
+    /// The removal sent and not answered yet. One at a time.
+    removing: Option<Removal>,
+    pub uninstall_notice: Option<UninstallNotice>,
+    /// Whether PHP loads Xdebug, as the daemon said last. `None` until read.
+    pub xdebug: Option<XdebugState>,
+    /// The state the Xdebug box asked for, until the daemon answers.
+    xdebug_pending: Option<bool>,
+    /// The last Xdebug read or change failed. A client error code.
+    pub xdebug_notice: Option<String>,
 }
 
 impl Model {
@@ -474,6 +544,22 @@ impl Model {
             Update::AutostartFailed(code) => {
                 self.autostart = Autostart::Unknown;
                 self.settings_notice = Some(code);
+            }
+            Update::Removed(removal) => self.removed(removal),
+            Update::NotRemoved {
+                removal,
+                code,
+                in_use,
+            } => self.not_removed(removal, code, in_use),
+            Update::Xdebug(state) => self.xdebug = Some(state),
+            Update::XdebugFailed(code) => self.xdebug_notice = Some(code),
+            Update::XdebugAnswered(answer) => {
+                self.xdebug_pending = None;
+                match answer {
+                    Ok(state) => self.xdebug = Some(state),
+                    // The bridge reads the state again.
+                    Err(code) => self.xdebug_notice = Some(code),
+                }
             }
             Update::Event(event) => apply(self, event),
         }
@@ -708,7 +794,11 @@ impl Model {
     /// waiting until the daemon answers. The window calls this after each
     /// change, so one call sends at most one job.
     pub fn next_install(&mut self) -> Option<InstallJob> {
-        if !self.is_connected() || self.installs.iter().any(Install::runs_for_us) {
+        // The daemon runs one install or uninstall at a time.
+        if !self.is_connected()
+            || self.uninstalling()
+            || self.installs.iter().any(Install::runs_for_us)
+        {
             return None;
         }
         let job = self.queue.pop_front()?;
@@ -904,6 +994,201 @@ impl Model {
         Some(enabled)
     }
 
+    // -- Removals: uninstall, unlink, and forget, after a confirmation (task M5-10) --
+
+    /// Whether a removal can be asked for now: connected, and no other
+    /// removal waits for its answer.
+    pub fn can_remove(&self) -> bool {
+        self.is_connected() && self.removing.is_none()
+    }
+
+    /// [`Model::can_remove`], and no job of this window installs: the daemon
+    /// runs one install or uninstall at a time.
+    pub fn can_uninstall(&self) -> bool {
+        self.can_remove() && !self.installing()
+    }
+
+    /// The removal sent and not answered yet.
+    pub fn removing(&self) -> Option<&Removal> {
+        self.removing.as_ref()
+    }
+
+    /// Whether an uninstall waits for its answer. The install buttons wait
+    /// for it.
+    pub fn uninstalling(&self) -> bool {
+        matches!(self.removing, Some(Removal::Uninstall { .. }))
+    }
+
+    fn may_remove(&self, removal: &Removal) -> bool {
+        match removal {
+            Removal::Uninstall { .. } => self.can_uninstall(),
+            Removal::Unlink { .. } | Removal::Forget { .. } => self.can_remove(),
+        }
+    }
+
+    /// The user pressed Uninstall, Unlink, or Forget: the confirmation
+    /// opens. `false` when it cannot be removed now.
+    pub fn ask_removal(&mut self, removal: Removal) -> bool {
+        if !self.may_remove(&removal) {
+            return false;
+        }
+        self.confirm = Some(removal);
+        true
+    }
+
+    /// "Cancel", Escape, or a click beside the confirmation.
+    pub fn cancel_removal(&mut self) {
+        self.confirm = None;
+    }
+
+    /// The user confirmed: the removal to send, or `None` if it cannot be
+    /// sent now. The last notice of its section goes: it was about the last
+    /// action.
+    pub fn confirm_removal(&mut self) -> Option<Removal> {
+        let removal = self.confirm.take()?;
+        if !self.may_remove(&removal) {
+            return None;
+        }
+        match removal {
+            Removal::Uninstall { .. } => {
+                self.uninstall_notice = None;
+                self.runtimes_notice = None;
+            }
+            Removal::Unlink { .. } | Removal::Forget { .. } => self.sites_notice = None,
+        }
+        self.removing = Some(removal.clone());
+        Some(removal)
+    }
+
+    /// Whether `removal` is the one waiting for its answer, which is then no
+    /// longer waited for. An answer from a lost session finds none.
+    fn settle_removal(&mut self, removal: &Removal) -> bool {
+        let ours = self.removing.as_ref() == Some(removal);
+        if ours {
+            self.removing = None;
+        }
+        ours
+    }
+
+    fn removed(&mut self, removal: Removal) {
+        if !self.settle_removal(&removal) {
+            return;
+        }
+        match removal {
+            Removal::Uninstall { runtime, version } => {
+                // The bridge reads the list again; until it comes, the
+                // version is gone from the table already.
+                if let Some(row) = self.runtimes.iter_mut().find(|r| r.runtime == runtime) {
+                    row.installed.retain(|installed| *installed != version);
+                }
+                self.uninstall_notice = Some(UninstallNotice::Done { runtime, version });
+            }
+            // The new list comes as `sites_changed`.
+            Removal::Unlink { site } => self.sites_notice = Some(SitesNotice::Unlinked(site)),
+            Removal::Forget { folder } => self.sites_notice = Some(SitesNotice::Forgot(folder)),
+        }
+    }
+
+    fn not_removed(&mut self, removal: Removal, code: String, in_use: Option<VersionInUse>) {
+        if !self.settle_removal(&removal) {
+            return;
+        }
+        match removal {
+            Removal::Uninstall { runtime, version } => {
+                self.uninstall_notice = Some(match in_use {
+                    Some(in_use) => UninstallNotice::InUse { runtime, in_use },
+                    None => UninstallNotice::Failed {
+                        runtime,
+                        version,
+                        code,
+                    },
+                });
+            }
+            Removal::Unlink { site } if code == SITE_IS_PARKED => {
+                let folder = self.holder(&site).map(Path::to_path_buf);
+                self.sites_notice = Some(SitesNotice::SiteIsParked { site, folder });
+            }
+            Removal::Unlink { .. } | Removal::Forget { .. } => {
+                self.sites_notice = Some(SitesNotice::Failed(code));
+            }
+        }
+    }
+
+    /// The parked folder whose scan gives `site`: the folder holds the
+    /// site's folder, and the site is named after it, as the daemon names
+    /// the sites of a parked folder. `None` for a linked site, which Unlink
+    /// removes; the daemon has the last word (`site_is_parked`).
+    pub fn parked_folder(&self, site: &Site) -> Option<&Path> {
+        let named = site.root.file_name().and_then(sites::name_from_folder);
+        if named.as_deref() != Some(site.name.as_str()) {
+            return None;
+        }
+        let parent = site.root.parent()?;
+        self.sites
+            .parked
+            .iter()
+            .find(|dir| dir.as_path() == parent)
+            .map(PathBuf::as_path)
+    }
+
+    /// The parked folder that holds the folder of the site `name`, after the
+    /// daemon said it comes from one.
+    fn holder(&self, name: &str) -> Option<&Path> {
+        let site = self.sites.sites.iter().find(|site| site.name == name)?;
+        let parent = site.root.parent()?;
+        self.sites
+            .parked
+            .iter()
+            .find(|dir| dir.as_path() == parent)
+            .map(PathBuf::as_path)
+    }
+
+    /// How many sites the parked folder `folder` gives now.
+    pub fn sites_in(&self, folder: &Path) -> usize {
+        self.sites
+            .sites
+            .iter()
+            .filter(|site| self.parked_folder(site) == Some(folder))
+            .count()
+    }
+
+    /// The folder of the site `name`, if it is in the list.
+    pub fn site_root(&self, name: &str) -> Option<&Path> {
+        self.sites
+            .sites
+            .iter()
+            .find(|site| site.name == name)
+            .map(|site| site.root.as_path())
+    }
+
+    // -- Xdebug (tasks M5-11 and M5-10) --
+
+    /// Whether the Xdebug box shows a tick: the state asked for until the
+    /// daemon answers, else the daemon's. `None` until it is read.
+    pub fn xdebug_on(&self) -> Option<bool> {
+        self.xdebug_pending
+            .or_else(|| self.xdebug.as_ref().map(|state| state.enabled))
+    }
+
+    /// The state the box asked for, while the daemon writes every `php.ini`
+    /// and starts the pools again.
+    pub fn xdebug_pending(&self) -> Option<bool> {
+        self.xdebug_pending
+    }
+
+    /// The Xdebug box was clicked. Returns the state to ask for, or `None`
+    /// while the state is unknown or a change runs. The box shows the new
+    /// state until the daemon answers.
+    pub fn toggle_xdebug(&mut self) -> Option<bool> {
+        if !self.is_connected() || self.xdebug_pending.is_some() {
+            return None;
+        }
+        let enabled = !self.xdebug.as_ref()?.enabled;
+        self.xdebug_pending = Some(enabled);
+        self.xdebug_notice = None;
+        Some(enabled)
+    }
+
     pub fn is_connected(&self) -> bool {
         matches!(self.connection, Connection::Running(_))
     }
@@ -923,6 +1208,11 @@ impl Model {
             self.setup = Setup::Idle;
         }
         self.autostart = Autostart::Unknown;
+        // No answer comes from a lost session, and its buttons are gone.
+        self.confirm = None;
+        self.removing = None;
+        self.xdebug = None;
+        self.xdebug_pending = None;
     }
 
     /// The daemon sends the sites sorted by name already; sorting here keeps
@@ -2128,5 +2418,293 @@ mod tests {
         let folder = absolute("/work/api");
         model.update(Update::Linked { name, folder });
         assert_eq!(model.link.as_ref().unwrap().name, "web");
+    }
+
+    // -- Removals: uninstall, unlink, and forget (task M5-10) --
+
+    fn uninstall(runtime: Runtime, version: &str) -> Removal {
+        Removal::Uninstall {
+            runtime,
+            version: v(version),
+        }
+    }
+
+    fn unlink(site: &str) -> Removal {
+        Removal::Unlink { site: site.into() }
+    }
+
+    fn forget(folder: &str) -> Removal {
+        Removal::Forget {
+            folder: PathBuf::from(folder),
+        }
+    }
+
+    fn not_removed(removal: Removal, code: &str) -> Update {
+        Update::NotRemoved {
+            removal,
+            code: code.into(),
+            in_use: None,
+        }
+    }
+
+    /// Asks for `removal`, confirms it, and returns what goes to the bridge.
+    fn send(model: &mut Model, removal: Removal) -> Removal {
+        assert!(model.ask_removal(removal), "the confirmation opens");
+        model.confirm_removal().expect("sent")
+    }
+
+    /// `/code` and `/empty` parked, `shop` and `blog` from `/code`, and `api`
+    /// linked from `/work/api`.
+    fn with_parked() -> Model {
+        let mut model = connected();
+        let api = Site {
+            root: PathBuf::from("/work/api"),
+            ..site("api", true)
+        };
+        model.update(Update::Sites(SiteList {
+            parked: vec![PathBuf::from("/code"), PathBuf::from("/empty")],
+            sites: vec![site("shop", true), site("blog", true), api],
+            skipped: Vec::new(),
+        }));
+        model
+    }
+
+    #[test]
+    fn a_removal_waits_for_its_confirmation() {
+        let mut model = Model::default();
+        assert!(!model.ask_removal(unlink("api")), "no daemon");
+        let mut model = with_parked();
+        assert!(model.ask_removal(forget("/code")));
+        assert_eq!(model.confirm, Some(forget("/code")));
+        model.cancel_removal();
+        assert!(model.confirm.is_none());
+        assert_eq!(model.confirm_removal(), None, "nothing to confirm");
+
+        // An older notice goes once the user confirms.
+        model.update(Update::SitesFailed("site_not_found".into()));
+        assert!(model.ask_removal(unlink("api")));
+        assert!(model.sites_notice.is_some());
+        assert_eq!(model.confirm_removal(), Some(unlink("api")));
+        assert!(model.confirm.is_none() && model.sites_notice.is_none());
+        assert_eq!(model.removing(), Some(&unlink("api")));
+        // One at a time.
+        assert!(!model.can_remove());
+        assert!(!model.ask_removal(forget("/code")));
+
+        model.update(Update::Removed(unlink("api")));
+        let unlinked = SitesNotice::Unlinked("api".into());
+        assert_eq!(model.sites_notice, Some(unlinked));
+        assert!(model.removing().is_none() && model.can_remove());
+    }
+
+    #[test]
+    fn an_uninstall_and_the_windows_installs_wait_for_each_other() {
+        let mut model = with_runtimes(&["8.4.23"], &[]);
+        assert!(model.request_install(Runtime::Caddy));
+        assert!(!model.can_uninstall());
+        assert!(!model.ask_removal(uninstall(Runtime::Php, "8.4.23")));
+        let caddy = model.next_install().unwrap();
+        model.update(Update::InstallAccepted { job: caddy, id: 1 });
+        apply(&mut model, done(1, Runtime::Caddy, "2.11.7"));
+
+        let sent = send(&mut model, uninstall(Runtime::Php, "8.4.23"));
+        assert!(model.uninstalling());
+        // An install asked for now is sent after the uninstall's answer.
+        model.install_input[runtime_index(Runtime::Node)] = "22".into();
+        assert!(model.request_install(Runtime::Node));
+        assert_eq!(model.next_install(), None);
+        model.update(not_removed(sent, "install_busy"));
+        assert!(!model.uninstalling());
+        assert_eq!(model.next_install(), Some(job(Runtime::Node, Some("22"))));
+    }
+
+    #[test]
+    fn an_uninstall_drops_the_version_and_the_list_is_read_again() {
+        let mut model = with_runtimes(&["8.3.27", "8.4.23"], &[]);
+        let sent = send(&mut model, uninstall(Runtime::Php, "8.3.27"));
+        model.update(Update::Removed(sent));
+        assert_eq!(model.php_versions(), [v("8.4.23")]);
+        let uninstalled = UninstallNotice::Done {
+            runtime: Runtime::Php,
+            version: v("8.3.27"),
+        };
+        assert_eq!(model.uninstall_notice, Some(uninstalled));
+
+        // The last PHP, with no Caddy: the list read again after it opens
+        // the first-run panel.
+        let sent = send(&mut model, uninstall(Runtime::Php, "8.4.23"));
+        model.update(Update::Removed(sent));
+        assert!(model.php_versions().is_empty());
+        assert!(model.first_run.is_none(), "not before the list is read");
+        model.update(Update::Runtimes(list(&[], &[])));
+        assert_eq!(model.first_run, Some(FirstRun::Offer));
+    }
+
+    #[test]
+    fn a_version_in_use_says_what_uses_it() {
+        let mut model = with_php(Vec::new());
+        let sent = send(&mut model, uninstall(Runtime::Php, "8.4.23"));
+        let in_use = VersionInUse {
+            version: "8.4.23".into(),
+            default: Some("8.4".into()),
+            sites: vec!["shop".into()],
+            caddy: false,
+        };
+        model.update(Update::NotRemoved {
+            removal: sent,
+            code: "version_in_use".into(),
+            in_use: Some(in_use.clone()),
+        });
+        let notice = UninstallNotice::InUse {
+            runtime: Runtime::Php,
+            in_use,
+        };
+        assert_eq!(model.uninstall_notice, Some(notice));
+        assert_eq!(model.php_versions().len(), 2, "nothing changed");
+
+        // The next confirmation clears it; another failure keeps its code.
+        let sent = send(&mut model, uninstall(Runtime::Php, "8.3.27"));
+        assert!(model.uninstall_notice.is_none());
+        model.update(not_removed(sent, "uninstall_io"));
+        let failed = UninstallNotice::Failed {
+            runtime: Runtime::Php,
+            version: v("8.3.27"),
+            code: "uninstall_io".into(),
+        };
+        assert_eq!(model.uninstall_notice, Some(failed));
+    }
+
+    #[test]
+    fn only_a_linked_site_has_unlink() {
+        let model = with_parked();
+        let folder = |name| model.parked_folder(site_named(&model, name));
+        assert_eq!(folder("shop"), Some(Path::new("/code")));
+        assert_eq!(folder("blog"), Some(Path::new("/code")));
+        assert_eq!(folder("api"), None);
+        assert_eq!(model.sites_in(Path::new("/code")), 2);
+        assert_eq!(model.sites_in(Path::new("/empty")), 0);
+        assert_eq!(model.site_root("api"), Some(Path::new("/work/api")));
+        assert_eq!(model.site_root("gone"), None);
+
+        // Linked by another name to a folder of a parked folder: linked.
+        let alias = Site {
+            root: PathBuf::from("/code/shop"),
+            ..site("alias", true)
+        };
+        assert_eq!(model.parked_folder(&alias), None);
+    }
+
+    #[test]
+    fn a_parked_site_that_is_refused_offers_its_folder() {
+        let mut model = with_parked();
+        // The window's guess may be old: the daemon has the last word.
+        let sent = send(&mut model, unlink("shop"));
+        model.update(not_removed(sent, "site_is_parked"));
+        let refused = SitesNotice::SiteIsParked {
+            site: "shop".into(),
+            folder: Some(PathBuf::from("/code")),
+        };
+        assert_eq!(model.sites_notice, Some(refused));
+
+        let sent = send(&mut model, forget("/code"));
+        model.update(Update::Removed(sent));
+        let forgot = SitesNotice::Forgot(PathBuf::from("/code"));
+        assert_eq!(model.sites_notice, Some(forgot));
+
+        // A site the list does not have: no folder to offer.
+        let sent = send(&mut model, unlink("gone"));
+        model.update(not_removed(sent, "site_is_parked"));
+        let refused = SitesNotice::SiteIsParked {
+            site: "gone".into(),
+            folder: None,
+        };
+        assert_eq!(model.sites_notice, Some(refused));
+    }
+
+    #[test]
+    fn a_refused_unlink_or_forget_shows_its_code_and_keeps_the_list() {
+        for (removal, code) in [
+            (unlink("api"), "site_not_found"),
+            (unlink(".."), "invalid_id"),
+            (forget("/elsewhere"), "folder_not_parked"),
+            (forget("code"), "site_path_relative"),
+            (forget("/code"), "site_path_not_utf8"),
+        ] {
+            let mut model = with_parked();
+            let sent = send(&mut model, removal);
+            model.update(not_removed(sent, code));
+            let failed = SitesNotice::Failed(code.into());
+            assert_eq!(model.sites_notice, Some(failed), "{code}");
+            assert!(model.can_remove(), "{code}");
+            assert_eq!(names(&model), ["api", "blog", "shop"], "{code}");
+        }
+    }
+
+    #[test]
+    fn a_lost_session_closes_the_confirmation_and_drops_its_answer() {
+        let mut model = with_parked();
+        assert!(model.ask_removal(forget("/code")));
+        model.update(Update::Reconnecting);
+        assert!(model.confirm.is_none());
+        assert_eq!(model.confirm_removal(), None);
+
+        model.update(Update::Connected(health()));
+        let sent = send(&mut model, unlink("api"));
+        model.update(Update::Reconnecting);
+        assert!(model.removing().is_none());
+        model.update(Update::Connected(health()));
+        model.update(Update::Removed(sent));
+        assert!(model.sites_notice.is_none());
+    }
+
+    // -- Xdebug (task M5-10) --
+
+    fn xdebug(enabled: bool) -> XdebugState {
+        XdebugState {
+            enabled,
+            loaded: if enabled {
+                vec!["8.4.23".into()]
+            } else {
+                Vec::new()
+            },
+            missing: vec!["8.3.27".into()],
+        }
+    }
+
+    #[test]
+    fn the_xdebug_box_follows_each_state() {
+        let mut model = connected();
+        assert_eq!(model.xdebug_on(), None);
+        assert_eq!(model.toggle_xdebug(), None, "not read yet");
+        model.update(Update::Xdebug(xdebug(false)));
+        assert_eq!(model.xdebug_on(), Some(false));
+        assert_eq!(model.toggle_xdebug(), Some(true));
+        // The box shows the new state until the answer.
+        assert_eq!(model.xdebug_on(), Some(true));
+        assert_eq!(model.xdebug_pending(), Some(true));
+        assert_eq!(model.toggle_xdebug(), None, "one change at a time");
+        // A read meanwhile does not end the wait.
+        model.update(Update::Xdebug(xdebug(false)));
+        assert_eq!(model.xdebug_on(), Some(true));
+        model.update(Update::XdebugAnswered(Ok(xdebug(true))));
+        assert_eq!(model.xdebug_pending(), None);
+        assert_eq!(model.xdebug, Some(xdebug(true)));
+
+        assert_eq!(model.toggle_xdebug(), Some(false));
+        let code = "xdebug_interrupted".to_owned();
+        model.update(Update::XdebugAnswered(Err(code)));
+        assert_eq!(model.xdebug_notice.as_deref(), Some("xdebug_interrupted"));
+        // The bridge reads it again; until then the last state shows.
+        assert_eq!(model.xdebug_on(), Some(true));
+        assert_eq!(model.toggle_xdebug(), Some(false));
+        assert!(model.xdebug_notice.is_none(), "the next click clears it");
+
+        model.update(Update::Reconnecting);
+        assert_eq!(model.xdebug_on(), None);
+        assert_eq!(model.toggle_xdebug(), None);
+        model.update(Update::Connected(health()));
+        model.update(Update::XdebugFailed("config_invalid".into()));
+        assert_eq!(model.xdebug_notice.as_deref(), Some("config_invalid"));
+        assert_eq!(model.toggle_xdebug(), None);
     }
 }

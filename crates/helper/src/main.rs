@@ -20,6 +20,9 @@ mod os;
 mod request;
 mod response;
 mod system;
+// The helper's Win32 calls (ADR 0018). Windows only: nothing else has them.
+#[cfg(windows)]
+mod windows;
 
 use std::env;
 use std::ffi::OsString;
