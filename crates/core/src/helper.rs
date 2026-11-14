@@ -63,6 +63,12 @@ pub enum HelperOp {
         port: u16,
     },
     ResolvedRemove,
+    /// Linux: let a normal process bind port 80 and up, with the sysctl
+    /// `net.ipv4.ip_unprivileged_port_start` (ADR 0014). Caddy then binds
+    /// ports 80 and 443 itself. No field: the helper holds the file, the
+    /// key, and the value as constants.
+    PortsInstall,
+    PortsRemove,
     /// Windows: one hosts file line per name, inside Marsa's own marked
     /// block. Every name is `<site>.test`, sorted, each once: the helper
     /// rejects a duplicate.
