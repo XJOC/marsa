@@ -5,14 +5,16 @@
 //!
 //! Each pair of macOS ops has its own file, so their tasks do not touch the
 //! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). On
-//! Linux, `ports` (M4-18b) is written; on Windows, `hosts` (M4-19d). The
-//! other Linux ops fail with `op_not_implemented` until their tasks.
+//! Linux, `resolved` (M4-18a) and `ports` (M4-18b) are written; on Windows,
+//! `hosts` (M4-19d). Trust on Linux fails with `op_not_implemented` until
+//! its task.
 
 mod hosts;
 mod marked;
 pub mod pf;
 mod ports;
 mod program;
+mod resolved;
 mod resolver;
 mod trust;
 
@@ -119,16 +121,16 @@ fn handle(op: &Op, os: Os, system: &impl System) -> OpResult {
         Op::PfRemove {} => pf::remove(system),
         Op::PortsInstall {} => ports::install(system),
         Op::PortsRemove {} => ports::remove(system),
+        Op::ResolvedInstall { port } => resolved::install(*port, system),
+        Op::ResolvedRemove {} => resolved::remove(system),
         Op::TrustInstall { pem } if os == Os::Macos => trust::install(pem, system),
         Op::TrustRemove {} if os == Os::Macos => trust::remove(system),
         Op::TrustInstall { .. } | Op::TrustRemove {} => not_implemented(op.name()),
         Op::HostsSync { names } => hosts::sync(names, system),
         Op::HostsRemove {} => hosts::remove(system),
         // `run` expands `uninstall_all` into its removals, so it never gets
-        // here. Linux comes with its own tasks.
-        Op::UninstallAll {} | Op::ResolvedInstall { .. } | Op::ResolvedRemove {} => {
-            not_implemented(op.name())
-        }
+        // here.
+        Op::UninstallAll {} => not_implemented(op.name()),
     }
 }
 
@@ -191,8 +193,8 @@ mod tests {
 
     #[test]
     fn handle_sends_each_op_to_its_own_handler() {
-        // Ops that stay stubs here are the Linux ones, so this test does not
-        // change when the macOS handlers land.
+        // The fake has no `systemctl`, so on Linux `resolved_install` gets
+        // as far as its own first check. Trust on Linux is still a stub.
         let ops = json!([
             { "op": "resolver_install", "port": 18053 },
             { "op": "resolved_install", "port": 18053 },
@@ -200,7 +202,7 @@ mod tests {
         ]);
         let linux = [
             ("resolver_install", code::OP_NOT_SUPPORTED),
-            ("resolved_install", code::OP_NOT_IMPLEMENTED),
+            ("resolved_install", resolved::RESOLVED_NOT_RUNNING),
             ("trust_remove", code::OP_NOT_IMPLEMENTED),
         ];
         assert_eq!(codes(ops.clone(), Os::Linux), linux);
