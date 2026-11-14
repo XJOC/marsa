@@ -1017,8 +1017,12 @@ fn error_message(code: &str) -> Option<&'static str> {
              Run setup again; if it repeats, report it."
         }
         "ca_not_ready" => {
-            "Caddy did not make Marsa's certificate authority in time. See why in the file \
-             logs/caddy.log, then run setup again."
+            "Caddy did not make Marsa's certificate authority in time. See why in the Caddy \
+             log, then run setup again."
+        }
+        "caddy_not_started" => {
+            "Caddy did not start, so Marsa's certificate authority is not there yet. See why in \
+             the Caddy log, then run setup again."
         }
         "ca_unreadable" => {
             "Cannot read the root certificate of Marsa's certificate authority, or it is not a \
@@ -1467,6 +1471,7 @@ mod tests {
             "ports_not_checked",
             "ca_not_ready",
             "ca_unreadable",
+            "caddy_not_started",
             "op_not_implemented",
             "op_not_supported",
             "resolver_foreign",
@@ -1717,12 +1722,12 @@ mod tests {
             texts(&setup_lines(&skipped("caddy_not_installed"))),
             [(no_caddy.as_str(), false)]
         );
-        let lines = setup_lines(&skipped("ca_not_ready"));
-        assert!(
-            lines[0].text.contains("logs/caddy.log"),
-            "{}",
-            lines[0].text
-        );
+        for code in ["ca_not_ready", "caddy_not_started"] {
+            let line = &setup_lines(&skipped(code))[0];
+            assert!(line.text.contains("Caddy log"), "{}", line.text);
+            assert!(line.text.ends_with("run setup again."), "{}", line.text);
+        }
+        assert!(error_text("caddy_not_started").starts_with("Caddy did not start"));
     }
 
     #[test]
