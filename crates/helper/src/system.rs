@@ -252,6 +252,8 @@ impl RealSystem {
         let root = dir.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "the system folder has no parent")
         })?;
+        let path = std::env::join_paths([dir.as_path(), root])
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         let mut command = Command::new(dir.join(name));
         command
             .args(args)
@@ -730,5 +732,60 @@ mod tests {
         assert_eq!(log[1], ("/sbin/pfctl".to_owned(), vec!["-d".to_owned()]));
         assert_eq!(log.len(), 3);
         assert_eq!(fake.current_exe().unwrap(), Path::new(fake::EXE));
+    }
+
+    #[test]
+    fn the_windows_folders_and_tools_are_windows_only() {
+        if cfg!(windows) {
+            return;
+        }
+        let real = RealSystem;
+        for err in [
+            real.system_dir().unwrap_err(),
+            real.install_dir().unwrap_err(),
+            real.run_system_tool("certutil.exe", &[]).unwrap_err(),
+        ] {
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        }
+    }
+
+    /// Read only: Marsa's folder is `Marsa` in `Program Files`. It need not
+    /// exist.
+    #[cfg(windows)]
+    #[test]
+    fn the_install_folder_is_marsa_in_program_files() {
+        let dir = RealSystem.install_dir().unwrap();
+        assert_eq!(dir.file_name(), Some(std::ffi::OsStr::new("Marsa")));
+        assert_eq!(
+            dir.parent(),
+            Some(crate::windows::program_files().unwrap().as_path())
+        );
+    }
+
+    /// Read only: `certutil` runs from the system folder with the helper's
+    /// small environment, and looks in the Root store for a thumbprint that
+    /// matches nothing.
+    #[cfg(windows)]
+    #[test]
+    fn a_system_tool_runs_with_the_helpers_environment() {
+        let nothing = "0".repeat(40);
+        let output = RealSystem
+            .run_system_tool("certutil.exe", &["-store", "Root", &nothing])
+            .unwrap();
+        // NTE_NOT_FOUND, as in spike S-11: it ran and searched the store.
+        assert_eq!(output.code, Some(0x8009_0011_u32 as i32), "{output:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_system_tool_is_a_plain_file_name() {
+        for program in [
+            r"..\cmd.exe",
+            r"C:\Windows\System32\certutil.exe",
+            "a/b.exe",
+        ] {
+            let err = RealSystem.run_system_tool(program, &[]).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{program}");
+        }
     }
 }
