@@ -1,0 +1,59 @@
+name: spike-s11
+
+# S-11: the Windows questions of architecture.md section 13, answered on a
+# GitHub Windows runner (the owner has no Windows machine). Throwaway code in
+# spikes/s11-windows; the results go into ADRs.
+# By hand only: the spike is over, and its runs are cited in the ADRs.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: pwsh
+    working-directory: spikes/s11-windows
+
+jobs:
+  spike:
+    name: ${{ matrix.script }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # pipe-service-trust needs admin rights and changes the runner (a
+        # user, a service, the hosts file, a root certificate). The runner is
+        # a throwaway VM; never run that script on a real machine.
+        script: [php-cgi-load, job-and-handles, pipe-service-trust]
+    # Pinned, not windows-latest: the results are evidence for one system.
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      # Reads the pinned version from rust-toolchain.toml in the repo root.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - name: Build the spike
+        run: cargo build --release --locked
+
+      - name: Run ${{ matrix.script }}
+        run: ./scripts/${{ matrix.script }}.ps1 -Bin target/release -Out out
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s11-${{ matrix.script }}
+          path: |
+            spikes/s11-windows/out/*.txt
+            spikes/s11-windows/out/*.log
+            spikes/s11-windows/out/*.out
+          if-no-files-found: warn

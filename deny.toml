@@ -2,6 +2,18 @@
 [graph]
 all-features = true
 
+[advisories]
+version = 2
+ignore = [
+  # Not a vulnerability: `proc-macro-error` is unmaintained. It is a
+  # compile-time macro helper of glib-macros 0.18, part of the GTK 3 bindings
+  # (gtk 0.18) that tao, muda, and libappindicator need on Linux for the
+  # menu-bar icon (task M5-04). gtk-rs has no newer GTK 3 release, and
+  # tray-icon has no Linux menu without GTK. Remove this when tao and
+  # tray-icon move off gtk 0.18.
+  { id = "RUSTSEC-2024-0370", reason = "unmaintained proc-macro-error, compile-time only, through gtk 0.18 (tao, tray-icon) on Linux" },
+]
+
 [licenses]
 version = 2
 allow = [

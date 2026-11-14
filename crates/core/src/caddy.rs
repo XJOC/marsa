@@ -40,6 +40,12 @@ pub const HTTP_PORT: u16 = 18080;
 /// [`HTTP_PORT`].
 pub const HTTPS_PORT: u16 = 18443;
 
+/// The ports Caddy takes itself on Linux, once the system lets a normal
+/// process bind them (ADR 0014). There is no redirect there, unlike macOS.
+pub const LOW_HTTP_PORT: u16 = 80;
+/// See [`LOW_HTTP_PORT`].
+pub const LOW_HTTPS_PORT: u16 = 443;
+
 /// The `@id` tag on our server. `GET /id/marsa-srv` on the admin API tells the
 /// daemon that a running Caddy is ours (ADR 0009).
 pub const SERVER_ID: &str = "marsa-srv";
@@ -252,6 +258,19 @@ impl Default for CaddyInput {
             admin_port: ADMIN_PORT,
             http_port: HTTP_PORT,
             https_port: HTTPS_PORT,
+        }
+    }
+}
+
+impl CaddyInput {
+    /// The same input with HTTP on port 80 and HTTPS on port 443. The admin
+    /// port stays: only Marsa talks to it.
+    #[must_use]
+    pub fn on_low_ports(self) -> Self {
+        Self {
+            http_port: LOW_HTTP_PORT,
+            https_port: LOW_HTTPS_PORT,
+            ..self
         }
     }
 }
@@ -1004,6 +1023,33 @@ mod tests {
 
     fn build(sites: &[Site], pools: &PhpPools) -> Value {
         sites_config(&CaddyInput::default(), sites, pools).expect("build the config")
+    }
+
+    /// Linux after setup: Caddy itself on 80 and 443, still on loopback only,
+    /// and the admin port as before.
+    #[test]
+    fn low_ports_change_only_the_two_site_ports() {
+        let input = CaddyInput::default().on_low_ports();
+        assert_eq!(
+            (input.admin_port, input.http_port, input.https_port),
+            (ADMIN_PORT, 80, 443)
+        );
+        let config = sites_config(&input, &[shop()], &socket_pools()).expect("build the config");
+        let mut listen = Vec::new();
+        listen_addresses(&config, &mut listen);
+        listen.sort();
+        assert_eq!(listen, ["127.0.0.1:18019", "127.0.0.1:443", "127.0.0.1:80"]);
+        assert_eq!(config["apps"]["http"]["http_port"], 80);
+        assert_eq!(config["apps"]["http"]["https_port"], 443);
+        // Nothing else differs from the config on the high ports.
+        let high = build(&[shop()], &socket_pools()).to_string();
+        let low = config
+            .to_string()
+            .replace("127.0.0.1:80\"", "127.0.0.1:18080\"")
+            .replace("127.0.0.1:443\"", "127.0.0.1:18443\"")
+            .replace("\"http_port\":80,", "\"http_port\":18080,")
+            .replace("\"https_port\":443,", "\"https_port\":18443,");
+        assert_eq!(low, high);
     }
 
     #[test]

@@ -1,0 +1,3 @@
+# Build output and run results stay out of git.
+/target/
+/out/

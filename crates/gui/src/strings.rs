@@ -9,6 +9,7 @@ use marsa_core::types::{ServiceAction, ServiceState, Site, SiteKind, Source};
 use semver::Version;
 
 use crate::model::{Choice, Connection};
+use crate::tray::menu::Daemon;
 
 pub const APP_NAME: &str = "Marsa";
 pub const WINDOW_SIZE: [f32; 2] = [900.0, 600.0];
@@ -67,6 +68,37 @@ pub const NEWEST_HINT: &str =
 
 /// The window's own code: its background thread could not start.
 pub const BRIDGE_FAILED: &str = "bridge_failed";
+
+// The menu-bar icon (`marsa-tray`, task M5-04).
+
+/// The tooltip of the icon.
+pub const TRAY_TOOLTIP: &str = "Marsa";
+pub const TRAY_OPEN: &str = "Open Marsa";
+/// The PHP submenu: the installed versions, the default checked.
+pub const TRAY_PHP: &str = "PHP";
+pub const TRAY_AUTOSTART: &str = "Start at Login";
+/// A login file is there, but it starts another `marsa-tray` (the app
+/// moved): a click writes it again.
+pub const TRAY_AUTOSTART_STALE: &str = "Start at Login (outdated, click to fix)";
+pub const TRAY_STOP: &str = "Stop Marsa";
+pub const TRAY_START: &str = "Start Marsa";
+/// Closes the icon only; the daemon and the sites keep running.
+pub const TRAY_QUIT: &str = "Quit";
+/// The icon's own code: its background thread could not start.
+pub const TRAY_WORKER_FAILED: &str = "tray_worker_failed";
+/// The icon's own code: `marsa-gui` could not be started.
+pub const WINDOW_START_FAILED: &str = "window_start_failed";
+
+/// The first line of the menu: the daemon's state.
+pub fn tray_status(daemon: &Daemon) -> String {
+    match daemon {
+        Daemon::Starting => "Starting Marsa…".to_owned(),
+        Daemon::Running => "Marsa is running".to_owned(),
+        Daemon::Stopping => "Stopping Marsa…".to_owned(),
+        Daemon::Stopped => "Marsa is stopped".to_owned(),
+        Daemon::Failed(code) => error_text(code),
+    }
+}
 
 pub fn status_line(connection: &Connection) -> String {
     match connection {
@@ -279,7 +311,19 @@ fn error_message(code: &str) -> Option<&'static str> {
         "unsupported_alias" => "Version names such as \"latest\" are not supported. Pick a number.",
         "unknown_tool" => "This daemon does not know that program.",
         "runtimes_read" => "Cannot read the folder of installed versions.",
+        // `GET` and `PUT /v1/autostart` (M5-03), behind the tray's "Start at
+        // Login" line (M5-04).
+        "tray_not_found" => {
+            "marsa-tray was not found next to marsad, so Marsa cannot start at login."
+        }
+        "autostart_path_invalid" => "The path of marsa-tray cannot go into a login file.",
+        "autostart_unsupported" => "Starting at login is not supported on this system yet.",
+        "autostart_no_home" => "The system gives no home folder for the login file.",
+        "autostart_read" => "Cannot read the login file.",
+        "autostart_write" => "Cannot write the login file.",
         BRIDGE_FAILED => "The window could not start its background worker.",
+        TRAY_WORKER_FAILED => "The menu-bar icon could not start its background worker.",
+        WINDOW_START_FAILED => "Cannot start the window (marsa-gui).",
         _ => return None,
     })
 }
@@ -390,10 +434,63 @@ mod tests {
             "unsupported_alias",
             "unknown_tool",
             "runtimes_read",
+            // Autostart (M5-03), shown by the tray (M5-04).
+            "tray_not_found",
+            "autostart_path_invalid",
+            "autostart_unsupported",
+            "autostart_no_home",
+            "autostart_read",
+            "autostart_write",
             BRIDGE_FAILED,
+            TRAY_WORKER_FAILED,
+            WINDOW_START_FAILED,
         ] {
             assert!(error_message(code).is_some(), "no message for {code}");
         }
+    }
+
+    #[test]
+    fn every_autostart_error_code_has_a_message() {
+        use marsa_core::platform::autostart::AutostartError;
+
+        let path = PathBuf::from("login.plist");
+        let errors = [
+            AutostartError::InvalidPath {
+                path: path.clone(),
+                reason: "test",
+            },
+            AutostartError::Read {
+                path: path.clone(),
+                source: io::Error::other("test"),
+            },
+            AutostartError::Write {
+                path,
+                source: io::Error::other("test"),
+            },
+        ];
+        for err in &errors {
+            assert!(
+                error_message(err.code()).is_some(),
+                "no message for {}",
+                err.code()
+            );
+        }
+    }
+
+    #[test]
+    fn the_tray_status_line() {
+        assert_eq!(tray_status(&Daemon::Starting), "Starting Marsa…");
+        assert_eq!(tray_status(&Daemon::Running), "Marsa is running");
+        assert_eq!(tray_status(&Daemon::Stopping), "Stopping Marsa…");
+        assert_eq!(tray_status(&Daemon::Stopped), "Marsa is stopped");
+        assert_eq!(
+            tray_status(&Daemon::Failed("daemon_start_failed".into())),
+            "Cannot start the daemon (marsad)."
+        );
+        assert_eq!(
+            tray_status(&Daemon::Failed("new_code".into())),
+            "Unexpected error (new_code)."
+        );
     }
 
     #[test]
