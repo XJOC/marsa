@@ -46,6 +46,23 @@ pub trait System {
     /// Whether `path` exists. A symlink counts even if its target does not.
     fn exists(&self, path: &Path) -> bool;
 
+    /// Whether `path` itself is a link: a symlink, or on Windows any reparse
+    /// point (a junction too). Not followed. `false` if nothing is there.
+    /// The default, `false`, is for test systems that have no links;
+    /// [`RealSystem`] asks the file system.
+    fn is_link(&self, path: &Path) -> bool {
+        let _ = path;
+        false
+    }
+
+    /// Whether the file at `path` is marked read-only (the Windows file
+    /// attribute; on Unix, no write bit at all). `false` if nothing is
+    /// there. The default, `false`, is for test systems, as for `is_link`.
+    fn is_read_only(&self, path: &Path) -> bool {
+        let _ = path;
+        false
+    }
+
     /// Writes a temp file in the same folder, syncs it, renames it over
     /// `path`, then syncs the folder. Creates the folder with mode `0755` if
     /// it is missing. `mode` is the Unix file mode; Windows ignores it.
@@ -71,6 +88,22 @@ pub trait System {
 
     /// The path of the running helper, for the boot job (task M4-08).
     fn current_exe(&self) -> io::Result<PathBuf>;
+
+    /// The Windows system folder, `C:\Windows\System32` on most machines.
+    /// [`RealSystem`] asks Windows for it, so it comes neither from the
+    /// request nor from the environment. An error of kind `Unsupported` on
+    /// macOS and Linux, which is also what a `System` without its own
+    /// answer gives.
+    fn system_dir(&self) -> io::Result<PathBuf> {
+        Err(no_system_dir())
+    }
+}
+
+fn no_system_dir() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "only Windows has a system folder",
+    )
 }
 
 /// The real disk and processes.
@@ -93,6 +126,26 @@ impl System for RealSystem {
 
     fn exists(&self, path: &Path) -> bool {
         fs::symlink_metadata(path).is_ok()
+    }
+
+    fn is_link(&self, path: &Path) -> bool {
+        let Ok(meta) = fs::symlink_metadata(path) else {
+            return false;
+        };
+        // Windows: `FILE_ATTRIBUTE_REPARSE_POINT` covers symlinks, junctions,
+        // and every other reparse point, which `is_symlink` does not all see.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        }
+        #[cfg(not(windows))]
+        meta.file_type().is_symlink()
+    }
+
+    fn is_read_only(&self, path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok_and(|meta| meta.permissions().readonly())
     }
 
     fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
@@ -149,6 +202,15 @@ impl System for RealSystem {
 
     fn current_exe(&self) -> io::Result<PathBuf> {
         std::env::current_exe()
+    }
+
+    fn system_dir(&self) -> io::Result<PathBuf> {
+        // Windows only: the other systems have no such folder, and no op of
+        // theirs asks for it.
+        #[cfg(windows)]
+        return crate::windows::system_dir();
+        #[cfg(not(windows))]
+        Err(no_system_dir())
     }
 }
 
@@ -371,6 +433,13 @@ mod fake {
         /// as the real one makes it. A folder that holds a file in `files`
         /// counts as not empty even if it is not listed here.
         pub dirs: RefCell<BTreeSet<PathBuf>>,
+        /// Links whose target is there: `read` works, and `is_link` is true.
+        pub links: BTreeSet<PathBuf>,
+        /// Files marked read-only.
+        pub read_only: BTreeSet<PathBuf>,
+        /// What `system_dir` returns. `None`, the default, is a system
+        /// without one: macOS or Linux.
+        pub system_dir: Option<PathBuf>,
     }
 
     impl FakeSystem {
@@ -402,6 +471,14 @@ mod fake {
 
         fn exists(&self, path: &Path) -> bool {
             self.dangling.contains(path) || self.files.borrow().contains_key(path)
+        }
+
+        fn is_link(&self, path: &Path) -> bool {
+            self.dangling.contains(path) || self.links.contains(path)
+        }
+
+        fn is_read_only(&self, path: &Path) -> bool {
+            self.read_only.contains(path)
         }
 
         fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
@@ -454,6 +531,10 @@ mod fake {
 
         fn current_exe(&self) -> io::Result<PathBuf> {
             Ok(PathBuf::from(EXE))
+        }
+
+        fn system_dir(&self) -> io::Result<PathBuf> {
+            self.system_dir.clone().ok_or_else(super::no_system_dir)
         }
     }
 }
@@ -532,6 +613,31 @@ mod tests {
             assert_eq!(err.kind(), io::ErrorKind::NotFound, "{}", path.display());
             let err = FakeSystem::default().read(&path, 4096).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        }
+    }
+
+    #[test]
+    fn read_only_and_links_are_seen_without_following() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("hosts");
+        fs::write(&file, b"x").unwrap();
+        let missing = tmp.path().join("missing");
+        assert!(!RealSystem.is_read_only(&file) && !RealSystem.is_link(&file));
+        assert!(!RealSystem.is_read_only(&missing) && !RealSystem.is_link(&missing));
+        let mut permissions = fs::metadata(&file).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&file, permissions.clone()).unwrap();
+        assert!(RealSystem.is_read_only(&file));
+        // So the temp folder can be removed on Windows.
+        #[allow(clippy::permissions_set_readonly_false)] // A test file only.
+        permissions.set_readonly(false);
+        fs::set_permissions(&file, permissions).unwrap();
+        // Making a link needs a privilege on Windows, so this part is Unix.
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(RealSystem.is_link(&link) && !RealSystem.is_link(&file));
         }
     }
 
