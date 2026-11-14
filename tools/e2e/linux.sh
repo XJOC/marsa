@@ -31,6 +31,10 @@ DROPIN=/etc/systemd/resolved.conf.d/marsa.conf
 SYSCTL_FILE=/etc/sysctl.d/60-marsa.conf
 PORT_START=/proc/sys/net/ipv4/ip_unprivileged_port_start
 CA=$DATA/caddy/data/caddy/pki/authorities/marsa/root.crt
+# Where the helper puts a CA on Debian and Ubuntu (task M4-18c).
+TRUST_FILE=/usr/local/share/ca-certificates/marsa-local-ca.crt
+BUNDLE=/etc/ssl/certs/ca-certificates.crt
+TEST_CA=$REPO/fixtures/helper/test-ca.pem
 
 step() { printf '\n\n===== %s =====\n' "$*"; }
 fail() {
@@ -87,6 +91,13 @@ wait_for_name() {
   done
   return 1
 }
+# The ops list that trusts the PEM file "$1".
+trust_ops() { jq -cn --rawfile pem "$1" '[{op: "trust_install", pem: $pem}]'; }
+# Whether the system bundle holds the certificate in the PEM file "$1".
+in_bundle() { grep -qF "$(sed -n 2p "$1")" "$BUNDLE"; }
+# Links in /etc/ssl/certs whose target is gone.
+dangling_links() { find /etc/ssl/certs -xtype l | tr '\n' ' '; }
+
 # The first IPv4 address of "$1", or "none".
 address_of() { getent ahostsv4 "$1" | awk 'NR==1 {print $1}' | grep . || echo none; }
 
@@ -213,6 +224,26 @@ echo "the other file's port value is back, and vm.swappiness kept its hand-set v
 sudo rm /etc/sysctl.d/10-someone-else.conf
 run sudo sysctl -w net.ipv4.ip_unprivileged_port_start=1024
 
+step "trust: a CA in the system store, and out again"
+hash=$(openssl x509 -noout -hash -in "$TEST_CA")
+echo "dangling links before the test: $(dangling_links)"
+helper "$(trust_ops "$TEST_CA")" || fail "the helper exited with $?"
+[ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"
+[ "$(stat -c '%U:%G %a' "$TRUST_FILE")" = "root:root 644" ] || fail "wrong owner or mode on $TRUST_FILE"
+[ -e "/etc/ssl/certs/$hash.0" ] || fail "no hash link /etc/ssl/certs/$hash.0"
+in_bundle "$TEST_CA" || fail "the CA is not in $BUNDLE"
+run openssl verify -CAfile "$BUNDLE" "$TEST_CA"
+helper "$(trust_ops "$TEST_CA")" || fail "the helper exited with $?"
+[ "$(statuses)" = "unchanged" ] || fail "expected unchanged, got: $(statuses)"
+helper '[{"op":"trust_remove"}]' || fail "the helper exited with $?"
+[ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"
+[ ! -e "$TRUST_FILE" ] || fail "$TRUST_FILE is still there"
+! in_bundle "$TEST_CA" || fail "the CA is still in $BUNDLE"
+[ ! -L "/etc/ssl/certs/$hash.0" ] || fail "the hash link /etc/ssl/certs/$hash.0 is still there"
+[ -z "$(dangling_links)" ] || fail "dangling links after the removal: $(dangling_links)"
+helper '[{"op":"trust_remove"}]' || fail "the helper exited with $?"
+[ "$(statuses)" = "unchanged" ] || fail "expected unchanged, got: $(statuses)"
+
 step "next to another global DNS server, .test names still work"
 # With the old global drop-in, .test never resolved here (spike S-02: 0 of 6).
 sudo systemctl reset-failed systemd-resolved
@@ -256,14 +287,17 @@ helper '[{"op":"resolved_install","port":18053},{"op":"ports_install"}]' || fail
 [ "$(statuses)" = "done done" ] || fail "expected done done, got: $(statuses)"
 wait_for_name "$SITE" || fail "$SITE does not resolve"
 
+step "trust: Caddy's CA in the system store"
+helper "$(trust_ops "$CA")" || fail "the helper exited with $?"
+[ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"
+
 step "after the helper: Caddy on ports 80 and 443"
 # The daemon picks the ports at every config. Phase 2: `marsa setup` asks for
 # the new config itself. Here, a restart of Caddy writes it.
 run marsa services restart caddy
 wait_for_laravel -k "https://$SITE/"
-# The certificate, checked against Marsa's own CA (the system store is task
-# M4-18c).
-run curl -fsS -o /dev/null --max-time 10 --cacert "$CA" -w 'https://%{remote_ip}:%{remote_port} -> %{http_code}\n' "https://$SITE/"
+# The certificate, checked against the system store: no -k, no --cacert.
+run curl -fsS -o /dev/null --max-time 10 -w 'https://%{remote_ip}:%{remote_port} -> %{http_code}\n' "https://$SITE/"
 redirect=$(curl -sS -o /dev/null --max-time 10 -w '%{http_code} %{redirect_url}' "http://$SITE/")
 echo "http://$SITE/ -> $redirect"
 [ "$redirect" = "308 https://$SITE/" ] || fail "expected a 308 to https://$SITE/"
@@ -279,6 +313,12 @@ fi
 
 step "removal, with the site running"
 remove_all
+helper '[{"op":"trust_remove"}]' || fail "the helper exited with $?"
+[ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"
+if openssl verify -CAfile "$BUNDLE" "$CA" >/dev/null 2>&1; then
+  fail "the system store still trusts Caddy's CA"
+fi
+[ -z "$(dangling_links)" ] || fail "dangling links after the removal: $(dangling_links)"
 
 step "stop"
 run marsa daemon stop
