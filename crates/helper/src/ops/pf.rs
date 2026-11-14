@@ -1,9 +1,12 @@
 //! macOS: the `pf` redirect of ports 80 and 443 to Caddy (ADR 0008).
 //!
-//! Caddy runs without root on high ports of `127.0.0.1` and `::1`. Four `rdr`
-//! rules on `lo0` send ports 80 and 443 there, so `https://shop.test` needs no
-//! port. The rules sit in Marsa's own anchor under `com.apple/`, which the
-//! default `/etc/pf.conf` already evaluates, so no system file is edited.
+//! Caddy runs without root on high ports of `127.0.0.1`. Four `rdr` rules on
+//! `lo0` send ports 80 and 443 there, so `https://shop.test` needs no port.
+//! The two `inet6` rules for `::1` reach no listener today: Caddy binds IPv4
+//! only, and `.test` names resolve to `127.0.0.1` only (task M5-17). Removing
+//! them is left for after 0.1.0. The rules sit in Marsa's own anchor under
+//! `com.apple/`, which the default `/etc/pf.conf` already evaluates, so no
+//! system file is edited.
 //!
 //! pf is shared with macOS and other tools, so the helper keeps two rules. It
 //! never disables pf (`pfctl -d`). Every `pfctl` call names Marsa's anchor
