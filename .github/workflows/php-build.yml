@@ -79,12 +79,20 @@ jobs:
             spc_target: ""
           # glibc 2.17 with zig: loads xdebug.so, runs on any glibc distribution
           # from CentOS 7 on, not on Alpine.
+          # An explicit arch, never "native": with a native arch zig compiles
+          # for the runner's own CPU, and PHP then dies with SIGILL on older
+          # CPUs (found by the Ubuntu 22.04 end-to-end run, M2-13). An explicit
+          # triple gets zig's baseline CPU.
           - platform: linux-x64
             os: ubuntu-22.04
-            spc_target: native-native-gnu.2.17
+            spc_target: x86_64-linux-gnu.2.17
+            qemu: qemu-x86_64
+            old_cpu: Nehalem
           - platform: linux-arm64
             os: ubuntu-22.04-arm
-            spc_target: native-native-gnu.2.17
+            spc_target: aarch64-linux-gnu.2.17
+            qemu: qemu-aarch64
+            old_cpu: cortex-a53
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     env:
@@ -124,6 +132,23 @@ jobs:
           if [ -f /etc/ssl/cert.pem ]; then export CAFILE=/etc/ssl/cert.pem
           elif [ -f /etc/ssl/certs/ca-certificates.crt ]; then export CAFILE=/etc/ssl/certs/ca-certificates.crt; fi
           bash tools/php-build/smoke.sh "$OUT/unpacked"
+
+      # The build must not depend on the runner's CPU: run php and php-fpm on
+      # an emulated old CPU (x86-64: Nehalem, 2008; arm64: Cortex-A53, ARMv8.0).
+      # An instruction that CPU lacks ends the program with SIGILL.
+      - name: Run on an old CPU (qemu)
+        if: matrix.qemu != ''
+        env:
+          QEMU: ${{ matrix.qemu }}
+          OLD_CPU: ${{ matrix.old_cpu }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user > /dev/null
+          php="$OUT/unpacked/bin/php"
+          "$QEMU" -cpu "$OLD_CPU" "$php" -n -v
+          "$QEMU" -cpu "$OLD_CPU" "$php" -n -r '$p = new PDO("sqlite::memory:"); echo $p->query("select 40+2")->fetchColumn(), " ", mb_strlen("مرسى"), " ", hash("sha256", "marsa"), "\n";'
+          "$QEMU" -cpu "$OLD_CPU" "$php" -n -d zend_extension="$OUT/unpacked/ext/xdebug.so" -r 'echo phpversion("xdebug"), "\n";'
+          "$QEMU" -cpu "$OLD_CPU" "$OUT/unpacked/bin/php-fpm" -n -v
 
       # LGPL 2.1 asks whoever ships a statically linked libiconv to ship its
       # source too. Keep the exact tarball spc compiled, only where PHP really

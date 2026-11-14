@@ -17,11 +17,13 @@ use marsa_core::types::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::model::{Change, LOG_SERVICE, Update};
+use crate::model::{Autostart, Change, InstallJob, LOG_SERVICE, Update};
 use crate::strings;
 
 /// The wait before the next attempt to connect.
 const RETRY: Duration = Duration::from_secs(1);
+/// The daemon's answer to `/v1/autostart` on a system it does not support.
+const AUTOSTART_UNSUPPORTED: &str = "autostart_unsupported";
 
 /// What the user asked for.
 #[derive(Debug)]
@@ -31,13 +33,21 @@ pub enum Command {
         service: String,
         action: ServiceAction,
     },
-    /// The park button: every sub-folder of this absolute folder becomes a
+    /// "Park a folder…": every sub-folder of this absolute folder becomes a
     /// site.
     Park(PathBuf),
+    /// "Link a folder…": this absolute folder becomes the site `name`.
+    Link { name: String, folder: PathBuf },
     /// A site's HTTPS switch.
     Secure { site: String, secure: bool },
     /// A default version or a site's PHP version, picked in a list.
     Save(Change),
+    /// An Install button, or the first-run panel.
+    Install(InstallJob),
+    /// "Run setup". The daemon may wait minutes for the password prompt.
+    Setup,
+    /// The "Start at login" box.
+    SetAutostart(bool),
 }
 
 /// The window's end of the bridge.
@@ -210,9 +220,10 @@ async fn session(
     }
 }
 
-/// Sends the whole services table, the site list, the runtimes, and the
-/// recent log lines. A failed read is a notice: the events still keep the
-/// window up to date. `false` once the window is gone.
+/// Sends the whole services table, the site list, the runtimes, whether the
+/// icon starts at login, and the recent log lines. A failed read is a
+/// notice: the events still keep the window up to date. `false` once the
+/// window is gone.
 async fn refresh(client: &DaemonClient, window: &Window) -> bool {
     let services = match client.services().await {
         Ok(services) => Update::Services(services),
@@ -226,11 +237,32 @@ async fn refresh(client: &DaemonClient, window: &Window) -> bool {
         Err(err) => sites_failed("cannot read the sites", &err),
     };
     let runtimes = runtimes(client).await;
+    // No event tells when it changes (the menu-bar icon may change it), so
+    // it is read with the rest.
+    let autostart = autostart(client).await;
     let log = match client.logs(LOG_SERVICE).await {
         Ok(lines) => Update::Log(lines),
         Err(err) => notice("cannot read the log", &err),
     };
-    window.send(services) && window.send(sites) && window.send(runtimes) && window.send(log)
+    window.send(services)
+        && window.send(sites)
+        && window.send(runtimes)
+        && window.send(autostart)
+        && window.send(log)
+}
+
+/// Whether the icon starts at login, or why it cannot be read.
+async fn autostart(client: &DaemonClient) -> Update {
+    match client.autostart().await {
+        Ok(state) => Update::Autostart(state.into()),
+        Err(err) if err.code() == AUTOSTART_UNSUPPORTED => {
+            Update::Autostart(Autostart::Unsupported)
+        }
+        Err(err) => {
+            tracing::warn!(code = err.code(), error = %err, "cannot read the autostart state");
+            Update::AutostartFailed(err.code().to_owned())
+        }
+    }
 }
 
 /// The runtimes list, or why it cannot be read.
@@ -244,11 +276,13 @@ async fn runtimes(client: &DaemonClient) -> Update {
     }
 }
 
-/// Runs the command on its own task, so a slow restart does not hold up the
-/// events. The new state arrives as an event, so the daemon's answer is not
-/// passed on: an older answer could arrive after a newer event. Only a
-/// failure, an accepted park for the notice line, and whether a [`Change`]
-/// was saved (its list shows the pick until then) are sent here.
+/// Runs the command on its own task, so a slow restart or a setup that waits
+/// for the password does not hold up the events. The new state arrives as
+/// an event, so the daemon's answer is not passed on: an older answer could
+/// arrive after a newer event. Only a failure, an accepted park or link for
+/// the notice line, whether a [`Change`] was saved (its list shows the pick
+/// until then), the id of an accepted install, the setup report, and the
+/// autostart state (no event carries it) are sent here.
 fn run_command(client: &DaemonClient, command: Command, window: Window) {
     let client = client.clone();
     tokio::spawn(async move {
@@ -266,6 +300,16 @@ fn run_command(client: &DaemonClient, command: Command, window: Window) {
                 }
                 Err(err) => sites_failed(&format!("cannot park {}", folder.display()), &err),
             }),
+            Command::Link { name, folder } => Some(match client.link(&name, &folder).await {
+                Ok(_) => {
+                    tracing::info!(site = %name, folder = %folder.display(), "folder linked");
+                    Update::Linked { name, folder }
+                }
+                Err(err) => {
+                    let what = format!("cannot link {} as {name}", folder.display());
+                    sites_failed(&what, &err)
+                }
+            }),
             Command::Secure { site, secure } => {
                 let patch = SitePatch {
                     secure: Some(secure),
@@ -280,11 +324,57 @@ fn run_command(client: &DaemonClient, command: Command, window: Window) {
                     .map(|err| sites_failed(&format!("cannot change HTTPS for {site}"), &err))
             }
             Command::Save(change) => Some(save(&client, change).await),
+            Command::Install(job) => Some(install(&client, job).await),
+            Command::Setup => Some(match client.setup().await {
+                Ok(report) => {
+                    let error = report.error.as_ref().map(|error| error.code.as_str());
+                    tracing::info!(error, "setup finished");
+                    Update::SetupDone(report)
+                }
+                Err(err) => {
+                    tracing::warn!(code = err.code(), error = %err, "setup did not run");
+                    Update::SetupFailed(err.code().to_owned())
+                }
+            }),
+            Command::SetAutostart(enabled) => Some(match client.set_autostart(enabled).await {
+                Ok(state) => {
+                    tracing::info!(enabled, "autostart changed");
+                    Update::Autostart(state.into())
+                }
+                Err(err) => {
+                    tracing::warn!(code = err.code(), error = %err, "cannot change autostart");
+                    window.send(Update::AutostartFailed(err.code().to_owned()));
+                    // The box showed the new state: show the real one.
+                    autostart(&client).await
+                }
+            }),
         };
         if let Some(update) = update {
             window.send(update);
         }
     });
+}
+
+/// Asks the daemon for `job`. Its progress comes as `install` events on the
+/// stream this session opened first, so none is missed.
+async fn install(client: &DaemonClient, job: InstallJob) -> Update {
+    let version = job.version.as_deref();
+    match client.install(job.runtime, version, false).await {
+        Ok(accepted) => {
+            let runtime = job.runtime.dir_name();
+            let version = version.unwrap_or("newest");
+            tracing::info!(id = accepted.id, runtime, version, "install accepted");
+            Update::InstallAccepted {
+                job,
+                id: accepted.id,
+            }
+        }
+        Err(err) => {
+            tracing::warn!(code = err.code(), error = %err, ?job, "install refused");
+            let code = err.code().to_owned();
+            Update::InstallRefused { job, code }
+        }
+    }
 }
 
 /// Sends `change` to the daemon. `Saved` or `NotSaved` with the error code.
