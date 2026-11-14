@@ -64,6 +64,7 @@
 
 pub mod pkexec;
 pub mod user_trust;
+pub mod windows;
 
 use std::collections::BTreeMap;
 use std::env::consts::EXE_SUFFIX;
@@ -553,6 +554,9 @@ pub struct Setup {
     /// How setup starts Caddy for its CA. `None`, the default: the daemon's
     /// own Caddy ([`DaemonCaddy`]). Tests put a fake here.
     caddy: Option<Arc<dyn StartCaddy>>,
+    /// The helper service on Windows (ADR 0018): the daemon's own there,
+    /// `None` elsewhere. Tests put a fake here.
+    windows: Option<Arc<dyn windows::Service>>,
     /// How long setup waits for Caddy and its CA root: [`CA_WAIT`], shorter
     /// in tests.
     ca_wait: Duration,
@@ -587,9 +591,17 @@ impl Setup {
             helper,
             home,
             caddy: None,
+            windows: default_windows_service(),
             ca_wait: CA_WAIT,
             running: AtomicU8::new(IDLE),
         }
+    }
+
+    /// For tests: `service` stands for the Windows helper service.
+    #[must_use]
+    pub fn with_windows(mut self, service: Arc<dyn windows::Service>) -> Self {
+        self.windows = Some(service);
+        self
     }
 
     /// For tests: `caddy` starts Caddy for the CA step, not the daemon's own.
@@ -640,9 +652,11 @@ impl Setup {
         }
         if is_linux(platform) {
             ops.push(HelperOp::PortsInstall);
-        } else {
+        } else if !is_windows(platform) {
             self.pf_op(caddy, &mut ops, &mut report, stop);
         }
+        // Windows: Caddy binds ports 80 and 443 itself (ADR 0018), so
+        // there is nothing to redirect and nothing to allow.
         match self.apply(ops, platform, stop) {
             Ok(results) => report.results = results,
             Err(error) => report.error = Some(error),
@@ -928,9 +942,26 @@ impl Setup {
             .map(op_name)
             .collect::<Result<Vec<_>, _>>()
             .map_err(cannot_write)?;
+        // Windows: the service trusts only the CA named at its install, so it
+        // is installed for the CA this request trusts, if any.
+        let ca_sha256 = ops.iter().find_map(|op| match op {
+            HelperOp::TrustInstall { pem } if is_windows(platform) => {
+                marsa_core::helper::certificate_sha256(pem)
+            }
+            _ => None,
+        });
         let request = serde_json::to_string(&HelperRequest::new(ops)).map_err(cannot_write)?;
         tracing::info!(helper = %helper.display(), "asking for admin rights to run marsa-helper");
-        let results = if is_linux(platform) {
+        let results = if is_windows(platform) {
+            let Some(service) = self.windows.as_deref() else {
+                tracing::error!("no helper service on this system");
+                return Err(failure(
+                    &flow.code("helper_failed"),
+                    "no helper service here",
+                ));
+            };
+            windows::launch(flow, service, helper, &request, ca_sha256.as_deref())?
+        } else if is_linux(platform) {
             let args = pkexec::args(helper, &request);
             let answer = self.runner.run(pkexec::PKEXEC, &args, PROMPT_LIMIT, stop);
             pkexec::read_answer(flow, answer)?
@@ -999,9 +1030,9 @@ impl Drop for Running {
 async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport>, HttpError> {
     let platform = setup
         .platform
-        .filter(|platform| is_macos(*platform) || is_linux(*platform))
+        .filter(|platform| is_macos(*platform) || is_linux(*platform) || is_windows(*platform))
         .ok_or_else(|| {
-            let message = "setup runs on macOS and Linux only for now";
+            let message = "setup runs on macOS, Linux, and Windows only";
             HttpError::new(StatusCode::NOT_IMPLEMENTED, "setup_not_supported", message)
         })?;
     let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
@@ -1106,6 +1137,19 @@ fn home_dir() -> Option<PathBuf> {
 
 pub(super) fn is_macos(platform: Platform) -> bool {
     matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64)
+}
+
+fn is_windows(platform: Platform) -> bool {
+    platform == Platform::WindowsX64
+}
+
+/// The daemon's helper service on Windows; no other system has one.
+fn default_windows_service() -> Option<Arc<dyn windows::Service>> {
+    // `RealService` is Windows only: its calls are Win32.
+    #[cfg(windows)]
+    return Some(Arc::new(windows::RealService));
+    #[cfg(not(windows))]
+    None
 }
 
 fn is_linux(platform: Platform) -> bool {
@@ -3466,10 +3510,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn windows_and_other_systems_get_setup_not_supported() {
+    async fn other_systems_get_setup_not_supported() {
         let dir = Dir::new(true);
         let fake = Fake::new(|program| panic!("{program} ran"));
-        for platform in [Some(Platform::WindowsX64), Some(Platform::Any), None] {
+        for platform in [Some(Platform::Any), None] {
             let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
             let setup = Setup::with(fake.clone(), platform, Some(dir.helper()), Some(dir.home()));
             let app = App::new(daemon, setup);
@@ -3479,6 +3523,75 @@ mod tests {
             );
             assert_eq!(app.refused().await, refused, "{platform:?}");
         }
+        assert!(fake.calls().is_empty());
+    }
+
+    /// A Windows helper service that is not installed until `install`, and
+    /// then answers `done` for every op of a request.
+    #[derive(Default)]
+    struct WindowsService {
+        installed: std::sync::Mutex<Option<(String, String)>>,
+        requests: std::sync::Mutex<Vec<Value>>,
+    }
+
+    impl windows::Service for WindowsService {
+        fn user_sid(&self) -> Result<String, String> {
+            Ok("S-1-5-21-1-2-3-1001".to_owned())
+        }
+
+        fn send(&self, request: &[u8]) -> Result<Vec<u8>, &'static str> {
+            if self.installed.lock().unwrap().is_none() {
+                return Err("helper_not_running");
+            }
+            let request: Value = serde_json::from_slice(request).unwrap();
+            let results: Vec<Value> = request["ops"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|op| json!({ "op": op["op"], "status": "done" }))
+                .collect();
+            self.requests.lock().unwrap().push(request);
+            Ok(json!({ "version": 1, "results": results })
+                .to_string()
+                .into_bytes())
+        }
+
+        fn install(&self, _helper: &Path, sid: &str, hash: &str) -> windows::Install {
+            *self.installed.lock().unwrap() = Some((sid.to_owned(), hash.to_owned()));
+            windows::Install::Exited(0)
+        }
+    }
+
+    /// Windows: one install of the service, for this CA, then the CA and the
+    /// hosts block through its pipe. No other program runs: no pf, no
+    /// `osascript`, no `pkexec`.
+    #[tokio::test]
+    async fn windows_setup_installs_the_service_for_its_ca_and_sends_trust_and_hosts() {
+        let dir = Dir::new(true);
+        let fake = Fake::new(|program| panic!("{program} ran"));
+        let service = Arc::new(WindowsService::default());
+        let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+        let setup = Setup::with(
+            fake.clone(),
+            Some(Platform::WindowsX64),
+            Some(dir.helper()),
+            Some(dir.home()),
+        )
+        .with_windows(service.clone());
+        let app = App::new(daemon, setup);
+        let (status, report) = app.post().await;
+        assert_eq!(status, StatusCode::OK, "{report}");
+        let ops: Vec<&str> = report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| result["op"].as_str().unwrap())
+            .collect();
+        assert_eq!(ops, ["trust_install", "hosts_sync"], "{report}");
+        let hash = marsa_core::helper::certificate_sha256(TEST_CA).unwrap();
+        let installed = service.installed.lock().unwrap().clone();
+        assert_eq!(installed, Some(("S-1-5-21-1-2-3-1001".to_owned(), hash)));
+        assert_eq!(service.requests.lock().unwrap().len(), 1);
         assert!(fake.calls().is_empty());
     }
 
