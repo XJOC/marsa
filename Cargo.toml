@@ -7,7 +7,7 @@ members = ["crates/core", "crates/app", "crates/shim", "crates/helper", "crates/
 exclude = ["spikes", "tools"]
 
 [workspace.package]
-version = "0.1.0-rc.1"
+version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -87,6 +87,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # process start that inherits no handles (task M4-19a, ADR 0017). Only on
 # Windows, and only the API families named here.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# The Windows helper service: the SCM dispatcher, its control handler, and
+# its install (ADR 0018). Windows only, in `marsa-helper`.
+windows-service = "0.8"
 # Deflate through flate2 only (the same crate as above, so one backend). No
 # bzip2, zstd, lzma, aes, or zopfli: the archives we read do not use them.
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
