@@ -174,7 +174,7 @@ pub struct ApiError {
 pub struct ErrorBody {
     pub error: ApiError,
     /// What uses a version, with the codes `version_in_use` (task M5-07) and
-    /// `sites_follow_default` (task M5-19) only.
+    /// `sites_lose_php` (task M5-19) only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_use: Option<VersionInUse>,
 }
@@ -308,12 +308,13 @@ pub struct VersionInUse {
     /// name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sites: Vec<String>,
-    /// The PHP sites with no PHP version of their own, which follow the
-    /// default, by name. Set only when the default picks this version and
-    /// it is the only installed PHP: those sites would have no PHP after the
-    /// uninstall (task M5-19).
+    /// The Laravel and PHP sites that run this version now and would have no
+    /// PHP after the uninstall, by name, whatever picked it for them (the
+    /// default, a version file, `composer.json`). Set only when the default
+    /// picks this version and it is the only installed PHP. A site already in
+    /// `sites` is not named again (task M5-19).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub default_sites: Vec<String>,
+    pub sites_left_without_php: Vec<String>,
     /// Caddy runs from this version now.
     #[serde(default)]
     pub caddy: bool,
@@ -321,13 +322,13 @@ pub struct VersionInUse {
 
 impl VersionInUse {
     /// Stable error name of the refusal. Never changes once released.
-    /// `sites_follow_default` when the sites that follow the default are the
-    /// only use, so the user knows that another version must be installed
-    /// first; `version_in_use` otherwise.
+    /// `sites_lose_php` when the sites left without PHP are the only use, so
+    /// the user knows that another version must be installed first;
+    /// `version_in_use` otherwise.
     pub fn code(&self) -> &'static str {
-        let only_followers = self.default.is_none() && self.sites.is_empty() && !self.caddy;
-        if only_followers && !self.default_sites.is_empty() {
-            "sites_follow_default"
+        let nothing_else = self.default.is_none() && self.sites.is_empty() && !self.caddy;
+        if nothing_else && !self.sites_left_without_php.is_empty() {
+            "sites_lose_php"
         } else {
             "version_in_use"
         }
@@ -337,7 +338,7 @@ impl VersionInUse {
     pub fn any(&self) -> bool {
         self.default.is_some()
             || !self.sites.is_empty()
-            || !self.default_sites.is_empty()
+            || !self.sites_left_without_php.is_empty()
             || self.caddy
     }
 }
@@ -1031,22 +1032,22 @@ mod tests {
     }
 
     #[test]
-    fn the_sites_that_follow_the_default_have_a_code_of_their_own() {
-        let followed = VersionInUse {
+    fn the_sites_left_without_php_have_a_code_of_their_own() {
+        let left = VersionInUse {
             version: "8.3.12".into(),
-            default_sites: vec!["blog".into()],
+            sites_left_without_php: vec!["blog".into()],
             ..VersionInUse::default()
         };
-        assert!(followed.any());
-        assert_eq!(followed.code(), "sites_follow_default");
+        assert!(left.any());
+        assert_eq!(left.code(), "sites_lose_php");
         round_trip(
-            &followed,
-            json!({ "version": "8.3.12", "default_sites": ["blog"], "caddy": false }),
+            &left,
+            json!({ "version": "8.3.12", "sites_left_without_php": ["blog"], "caddy": false }),
         );
         // With any other use, the general code.
         let pinned = VersionInUse {
             sites: vec!["shop".into()],
-            ..followed.clone()
+            ..left.clone()
         };
         assert_eq!(pinned.code(), "version_in_use");
         let running = VersionInUse {
@@ -1057,7 +1058,7 @@ mod tests {
         // An answer from before M5-19 reads with no such sites.
         let old: VersionInUse =
             serde_json::from_value(json!({ "version": "8.3.12", "default": "8.3" })).unwrap();
-        assert!(old.default_sites.is_empty() && old.any());
+        assert!(old.sites_left_without_php.is_empty() && old.any());
         assert!(!VersionInUse::default().any());
     }
 

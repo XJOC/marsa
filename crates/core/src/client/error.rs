@@ -73,7 +73,7 @@ pub enum ClientError {
     },
 
     /// The daemon's 409 `version_in_use` (task M5-07) or
-    /// `sites_follow_default` (task M5-19) from `DELETE
+    /// `sites_lose_php` (task M5-19) from `DELETE
     /// /v1/runtimes/{tool}/{version}`, with what uses the version. Its text
     /// went through [`daemon_text`]. Boxed, so every `Result<_,
     /// ClientError>` stays small.
@@ -134,7 +134,7 @@ impl ClientError {
         if let Some(in_use) = &body.in_use
             && matches!(
                 body.error.code.as_str(),
-                "version_in_use" | "sites_follow_default"
+                "version_in_use" | "sites_lose_php"
             )
         {
             let names = |names: &[String]| -> Vec<String> {
@@ -146,7 +146,7 @@ impl ClientError {
                     version: daemon_text(&in_use.version),
                     default: in_use.default.as_deref().map(daemon_text),
                     sites: names(&in_use.sites),
-                    default_sites: names(&in_use.default_sites),
+                    sites_left_without_php: names(&in_use.sites_left_without_php),
                     caddy: in_use.caddy,
                 }),
             };

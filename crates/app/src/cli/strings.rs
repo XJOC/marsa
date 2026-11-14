@@ -193,10 +193,10 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "version_in_use" => "This version is in use: it is a default, a site is set to it, \
              or Caddy runs from it. Nothing was uninstalled."
             .into(),
-        // M5-19: the only PHP and the default, with sites that follow it.
-        "sites_follow_default" => "This is the only PHP version, and sites with no version of \
-             their own follow it as the default: they would have no PHP. Install another PHP \
-             version and make it the default first. Nothing was uninstalled."
+        // M5-19: the only PHP and the default, and sites run it.
+        "sites_lose_php" => "This is the only PHP version installed, and sites run it: they \
+             would have no PHP. Install another PHP version and make it the default first. \
+             Nothing was uninstalled."
             .into(),
         "version_ambiguous" => format!(
             "{} matches more than one installed {}version. Name one in full; \"marsa \
@@ -744,8 +744,8 @@ pub fn nothing_to_uninstall(runtime: Runtime, requested: &str) -> String {
     )
 }
 
-/// `version_in_use` or `sites_follow_default` with its facts: one sentence
-/// for each use, each with what to do first.
+/// `version_in_use` or `sites_lose_php` with its facts: one sentence for
+/// each use, each with what to do first.
 pub fn version_in_use(runtime: Runtime, in_use: &VersionInUse) -> String {
     let name = runtime_name(runtime);
     let version = &in_use.version;
@@ -773,17 +773,17 @@ pub fn version_in_use(runtime: Runtime, in_use: &VersionInUse) -> String {
             sites.join(", ")
         )),
     }
-    let follow = match &in_use.default_sites[..] {
+    let left = match &in_use.sites_left_without_php[..] {
         [] => None,
-        [site] => Some(format!("The site {site} follows")),
-        sites => Some(format!("The sites {} follow", sites.join(", "))),
+        [site] => Some(format!("The site {site}")),
+        sites => Some(format!("The sites {}", sites.join(", "))),
     };
-    if let Some(follow) = follow {
+    if let Some(left) = left {
         let tool = runtime.dir_name();
         text.push_str(&format!(
-            " {follow} the default, and it is the only {name} installed: install another \
-             version first with \"marsa install {tool} <version>\", then make it the default \
-             with \"marsa use {tool} <version>\"."
+            " {left} would have no {name}: {name} {version} is the only {name} installed. \
+             Install another version first with \"marsa install {tool} <version>\", then make \
+             it the default with \"marsa use {tool} <version>\"."
         ));
     }
     if in_use.caddy {
@@ -1466,7 +1466,7 @@ mod tests {
         "no_default_version",
         // `DELETE /v1/runtimes/{tool}/{version}` (tasks M5-07 and M5-19).
         "version_in_use",
-        "sites_follow_default",
+        "sites_lose_php",
         "version_ambiguous",
         "uninstall_io",
         "recipe_invalid",
@@ -1653,7 +1653,7 @@ mod tests {
             ClientError::InUse {
                 message: "x".into(),
                 in_use: Box::new(VersionInUse {
-                    default_sites: vec!["blog".into()],
+                    sites_left_without_php: vec!["blog".into()],
                     ..VersionInUse::default()
                 }),
             },

@@ -650,17 +650,17 @@ async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
         sites: vec!["blog".into()],
         ..VersionInUse::default()
     };
-    // M5-19: the only PHP, with sites that follow the default.
-    let followed = VersionInUse {
+    // M5-19: the only PHP, with sites that would have no PHP after it.
+    let left = VersionInUse {
         version: "8.2.30".into(),
-        default_sites: vec!["shop\u{1b}[2J".into()],
+        sites_left_without_php: vec!["shop\u{1b}[2J".into()],
         ..VersionInUse::default()
     };
     let router = Router::new().route(
         "/v1/runtimes/php/{version}",
         delete({
             let in_use = in_use.clone();
-            let followed = followed.clone();
+            let left = left.clone();
             move |axum::extract::Path(version): axum::extract::Path<String>| async move {
                 if version == "8.4.1" {
                     let done = Uninstalled {
@@ -670,7 +670,7 @@ async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
                     return Json(done).into_response();
                 }
                 let (code, in_use) = match version.as_str() {
-                    "8.2" => ("sites_follow_default", followed),
+                    "8.2" => ("sites_lose_php", left),
                     _ => ("version_in_use", in_use),
                 };
                 let mut body = ErrorBody::new(code, "php is in use");
@@ -701,11 +701,11 @@ async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
     fake.assert_no_token(&err);
 
     let err = client.uninstall(Runtime::Php, "8.2").await.unwrap_err();
-    assert_eq!(err.code(), "sites_follow_default");
+    assert_eq!(err.code(), "sites_lose_php");
     let ClientError::InUse { in_use: got, .. } = &err else {
         panic!("{err:?}");
     };
-    assert_eq!(got.default_sites, ["shop[2J"]);
+    assert_eq!(got.sites_left_without_php, ["shop[2J"]);
     let targets: Vec<String> = fake
         .seen()
         .into_iter()

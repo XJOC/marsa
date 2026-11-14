@@ -34,9 +34,10 @@
 //!
 //! The default of the only installed PHP or Node version has no other
 //! version to pick, so it does not keep the version: it is cleared from
-//! `global.toml` with the uninstall (task M5-19). The PHP sites that follow
-//! that default would have no PHP, so they still keep it: 409
-//! `sites_follow_default`, with their names.
+//! `global.toml` with the uninstall (task M5-19). The Laravel and PHP sites
+//! that run that last PHP would have no PHP after it, whatever picked it for
+//! them (the default, a version file, `composer.json`), so they still keep
+//! it: 409 `sites_lose_php`, with their names.
 
 use std::error::Error;
 use std::fmt;
@@ -58,7 +59,7 @@ use marsa_core::installer::extract::ExtractError;
 use marsa_core::installer::fetch::FetchError;
 use marsa_core::installer::uninstall::{self, Retired, UninstallError};
 use marsa_core::installer::{self, InstallEnv, InstallError, InstalledVersion};
-use marsa_core::resolver::{self, BadRequest, Source, Tool};
+use marsa_core::resolver::{self, BadRequest, Tool};
 use marsa_core::runtimes::{Runtime, RuntimesDir, RuntimesError};
 use marsa_core::types::{
     DefaultRequest, DefaultVersion, Event, InstallAccepted, InstallDone, InstallEvent,
@@ -702,14 +703,17 @@ fn retire_unused(
     let dir = runtimes.version_dir(runtime, &version);
     used.caddy = caddy.is_some_and(|program| program.starts_with(&dir));
     // The default of the only installed version has no other version to
-    // pick, so it goes with this one. The PHP sites that follow it would
-    // have no PHP, so they keep the version instead.
+    // pick, so it goes with this one. The PHP sites that run this last PHP
+    // would have none after it, so they keep the version instead.
     let clear = match (default_tool(runtime), installed.len()) {
         (Some(tool), 1) => used.default.take().map(|default| (tool, default)),
         _ => None,
     };
     if clear.is_some() && runtime == Runtime::Php {
-        used.default_sites = default_sites(data_dir, &sites, &version);
+        let mut left = sites_running(data_dir, &sites, &version);
+        // A site set to it in `sites.toml` is named once, as set to it.
+        left.retain(|name| !used.sites.contains(name));
+        used.sites_left_without_php = left;
     }
     if used.any() {
         let message = format!("{} {version} is in use: {used:?}", runtime.dir_name());
@@ -757,17 +761,16 @@ fn uninstall_error(err: &UninstallError) -> HttpError {
     HttpError::new(status, err.code(), err.to_string())
 }
 
-/// The PHP sites that follow the default and run `version` through it now,
-/// by name: no setting in `sites.toml`, no version file, no `composer.json`
-/// constraint. Only Laravel and PHP sites count, as in `wanted_pools`: a
-/// static site or a Node proxy runs no PHP. Builds the site list as the
-/// daemon does, so it reads the disk.
-fn default_sites(data_dir: &Path, sites: &SitesConfig, version: &Version) -> Vec<String> {
+/// The PHP sites that run `version` now, by name, whatever picked it: the
+/// default, a version file, a `composer.json` constraint, or `sites.toml`.
+/// Only Laravel and PHP sites count, as in `wanted_pools`: a static site or
+/// a Node proxy runs no PHP. Builds the site list as the daemon does, so it
+/// reads the disk.
+fn sites_running(data_dir: &Path, sites: &SitesConfig, version: &Version) -> Vec<String> {
     let list = sites_api::build(data_dir, sites);
     list.sites
         .into_iter()
         .filter(|site| matches!(site.kind, SiteKind::Laravel | SiteKind::Php))
-        .filter(|site| site.php_source == Some(Source::GlobalDefault))
         .filter(|site| site.php.as_ref() == Some(version))
         .map(|site| site.name)
         .collect()
@@ -807,7 +810,7 @@ fn in_use(
             .filter(|(_, site)| setting(site).is_some_and(|text| uses(&text)))
             .map(|(name, _)| name.clone())
             .collect(),
-        default_sites: Vec::new(),
+        sites_left_without_php: Vec::new(),
         caddy: false,
     }
 }
