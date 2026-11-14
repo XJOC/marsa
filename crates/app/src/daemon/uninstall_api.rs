@@ -844,7 +844,7 @@ mod tests {
     async fn failed_later_steps_are_results_and_the_daemon_still_stops() {
         let dir = Dir::new();
         // A removal of the helper failed, the user refused the dialog, and
-        // the login folder cannot be written.
+        // the login file cannot be deleted.
         let helper_answer = json!({ "version": 1, "results": [
             { "op": "pf_remove", "status": "failed", "code": "pf_flush_failed", "message": "x" },
             { "op": "resolver_remove", "status": "unchanged" },
@@ -858,9 +858,12 @@ mod tests {
             }
             other => panic!("{other} {args:?} ran"),
         });
+        // A folder where the login file goes: deleting it as a file fails on
+        // every system. (A file where the folder goes is "not found" on
+        // Windows, which counts as nothing to delete.)
         fs::remove_file(dir.login_file()).unwrap();
-        fs::remove_dir(dir.login()).unwrap();
-        fs::write(dir.login(), "a file where the folder goes").unwrap();
+        fs::create_dir(dir.login_file()).unwrap();
+        fs::write(dir.login_file().join("keep"), "x").unwrap();
         let app = App::new(&dir, dir.setup(&fake));
 
         let report = app.uninstall().await;
