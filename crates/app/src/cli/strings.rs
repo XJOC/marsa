@@ -480,10 +480,13 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             .into(),
         // Setup and the uninstall both meet it: no advice for one of them.
         // macOS and Linux: the helper's copy of the CA in a system folder.
-        "trust_read" => "Marsa could not use its copy of its certificate authority in a \
-             system folder: it cannot be read, or a file or link Marsa did not write is in its \
-             place. So Marsa left the trust for all users as it is. If you put a file there, \
-             move it away; then run the command again. If it repeats, report it."
+        "trust_read" => "Marsa could not use its copy of its certificate authority: it cannot \
+             be read, or a file or link Marsa did not write is in its place (on macOS in \
+             /Library/Application Support/Marsa; on Linux \
+             /usr/local/share/ca-certificates/marsa-local-ca.crt or \
+             /etc/pki/ca-trust/source/anchors/marsa-local-ca.pem). So Marsa left the trust for \
+             all users as it is. If you put a file there, move it away; then run the command \
+             again. If it repeats, report it."
             .into(),
         "trust_record_unusable" => format!(
             "Marsa cannot use {}: it is not a plain file in a folder of yours, or not the \
@@ -493,8 +496,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             shown("its record of the trusted certificate")
         ),
         "trust_delete" => "Marsa could not delete its copy of its certificate authority in a \
-             system folder, so the trust for all users may stay until it does. Run the command \
-             again; if it repeats, report it."
+             system folder. Run the command again; if it repeats, report it."
             .into(),
         "trust_add_failed" => "Your browser will not trust Marsa's sites yet: the trust for \
              your user was not added. Run \"marsa setup\" in Terminal on the Mac's desktop and \
@@ -511,7 +513,8 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              again."
             .into(),
         "resolved_read" | "resolved_write" | "resolved_delete" => "Linux did not let Marsa \
-             change /etc/systemd/system/marsa-dns-link.service. Run the command again; if it \
+             change its files for .test names (/etc/systemd/system/marsa-dns-link.service, or \
+             the old /etc/systemd/resolved.conf.d/marsa.conf). Run the command again; if it \
              repeats, report it."
             .into(),
         "resolved_not_running" => "Marsa sends .test names to its DNS server through \
@@ -525,6 +528,14 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "resolved_unit_failed" => "systemd did not start or stop Marsa's link for .test names \
              (marsa-dns-link.service). Run the command again; if it repeats, report it with \
              the output of \"journalctl -u marsa-dns-link\"."
+            .into(),
+        "setup_pkexec_missing" => "pkexec is not installed, so Marsa cannot ask for the \
+             administrator password. Install the package pkexec (Debian, Ubuntu), polkit \
+             (Fedora), or policykit-1 (older systems), then run \"marsa setup\" again."
+            .into(),
+        "setup_caddy_ports_failed" => "Linux now lets Caddy use ports 80 and 443, but Caddy \
+             did not take them. Most often another program listens there (Apache, nginx). Stop \
+             it, then run \"marsa services restart caddy\"; \"marsa logs caddy\" says why."
             .into(),
         "resolved_systemd_too_old" => "This system's systemd is older than version 250, \
              where systemd-resolved can drop the setting that sends .test names to Marsa, so \
@@ -565,8 +576,9 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "trust_tool_missing" => "This system has no tool Marsa knows for its trusted \
              certificates (update-ca-certificates with /usr/local/share/ca-certificates, or \
              update-ca-trust with /etc/pki/ca-trust/source/anchors), so Marsa could not change \
-             the trust in its certificate authority. Install the ca-certificates package, then \
-             run the command again."
+             the trust in its certificate authority. On Debian, Ubuntu, or Fedora, install the \
+             ca-certificates package, then run the command again. Systems whose tool reads \
+             another folder (Arch, openSUSE) are not supported yet."
             .into(),
         "trust_store_update_failed" => "The system's store of trusted certificates could not \
              be updated, so Marsa's certificate authority is not trusted, or not removed, yet. \
@@ -1054,6 +1066,8 @@ pub fn setup_step(op: &str) -> String {
         "trust_install" => "Trust Marsa's HTTPS certificates".to_owned(),
         "resolver_install" => "Send .test names to Marsa".to_owned(),
         "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
+        "resolved_install" => "Send .test names to Marsa".to_owned(),
+        "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -1652,6 +1666,8 @@ mod tests {
         "resolved_tool_missing",
         "resolved_unit_failed",
         "resolved_systemd_too_old",
+        "setup_pkexec_missing",
+        "setup_caddy_ports_failed",
         "resolved_stopped",
         "ports_foreign",
         "ports_read",

@@ -524,8 +524,10 @@ pub struct SetupReport {
     /// `setup_cancelled`, `setup_not_authorized`, `setup_timed_out`,
     /// `setup_interrupted`, `setup_helper_missing`, `setup_helper_unsafe`,
     /// `setup_helper_protected_folder`, `setup_prompt_failed`,
-    /// `setup_helper_failed`, or `setup_helper_rejected`. `None` if the
-    /// helper answered, or was not needed.
+    /// `setup_helper_failed`, or `setup_helper_rejected`; on Linux also
+    /// `setup_pkexec_missing`, and `setup_caddy_ports_failed` when the
+    /// helper allowed ports 80 and 443 but Caddy did not take them. `None`
+    /// if the helper answered, or was not needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,
 }

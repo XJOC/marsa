@@ -370,6 +370,13 @@ fn finish(child: &mut Child, limit: Duration, stop: &CancellationToken) -> io::R
 }
 
 /// Waits for `child` until `deadline` or `stop`, and collects its output.
+///
+/// At `deadline` or `stop` the child is killed. A kill that is refused
+/// (`PermissionDenied`) means the child now runs as root: on Linux `pkexec`
+/// becomes the helper after the password, and the daemon cannot stop it.
+/// Then the wait goes on until it ends, within its own limits, and its
+/// answer is used: reporting a timeout would hide what it did (review of
+/// #120).
 fn collect(
     child: &mut Child,
     deadline: Instant,
@@ -377,16 +384,31 @@ fn collect(
 ) -> io::Result<RunOutput> {
     let stdout = read_in_background(child.stdout.take())?;
     let stderr = read_in_background(child.stderr.take())?;
+    let mut unstoppable = false;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if stop.is_cancelled() {
+        let ended = if unstoppable {
+            None
+        } else if stop.is_cancelled() {
             let reason = "the daemon is stopping";
-            return Err(io::Error::new(io::ErrorKind::Interrupted, reason));
-        }
-        if Instant::now() >= deadline {
-            return Err(timed_out());
+            Some(io::Error::new(io::ErrorKind::Interrupted, reason))
+        } else if Instant::now() >= deadline {
+            Some(timed_out())
+        } else {
+            None
+        };
+        if let Some(err) = ended {
+            match child.kill() {
+                Err(kill) if kill.kind() == io::ErrorKind::PermissionDenied => {
+                    tracing::warn!(
+                        "the helper runs as root and cannot be stopped; waiting for it to end"
+                    );
+                    unstoppable = true;
+                }
+                _ => return Err(err),
+            }
         }
         thread::sleep(POLL);
     };
@@ -994,10 +1016,10 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
             Some(fake) => Arc::clone(fake),
             None => Arc::new(DaemonCaddy {
                 daemon: Arc::clone(&daemon),
-                runtime,
+                runtime: runtime.clone(),
             }),
         };
-        let report = setup.run(
+        let mut report = setup.run(
             &daemon.data_dir,
             caddy,
             platform,
@@ -1010,31 +1032,42 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
             error = report.error.as_ref().map(|error| error.code.as_str()),
             "setup finished"
         );
+        // Linux: Caddy may now bind ports 80 and 443 itself. The next config
+        // has them (`CaddyManager::ports`), so it goes to Caddy now, before
+        // the event and the answer: the sites open on the usual ports as
+        // soon as setup ends. Here, not in the handler, so it happens even
+        // if the client went away.
+        if is_linux(platform) && low_ports_set(&report) {
+            match runtime.block_on(daemon.caddy.reapply(&daemon)) {
+                Ok(applied) => {
+                    tracing::info!(?applied, "caddy config sent again with ports 80 and 443")
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        code = err.code(),
+                        error = %err,
+                        "caddy did not take the config with ports 80 and 443"
+                    );
+                    // The system now allows the ports, but Caddy did not
+                    // take them: most often another program listens on 80
+                    // or 443 (ADR 0014). Setup must not look done.
+                    let message = format!("Caddy did not take ports 80 and 443: {}", err.code());
+                    report
+                        .error
+                        .get_or_insert_with(|| failure("setup_caddy_ports_failed", message));
+                }
+            }
+        }
         // Here, not in the handler: the event goes out even if the client
         // went away.
         daemon.publish(Event::SetupFinished(report.clone()));
-        (daemon, report)
+        report
     });
-    let (daemon, report) = job.await.map_err(|err| {
+    let report = job.await.map_err(|err| {
         tracing::error!(error = %err, "the setup job failed");
         let message = "the setup job failed";
         HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
     })?;
-    // Linux: Caddy may now bind ports 80 and 443 itself. The next config
-    // has them (`CaddyManager::ports`), so it goes to Caddy now, before the
-    // answer: the sites open on the usual ports as soon as setup returns.
-    if is_linux(platform) && low_ports_set(&report) {
-        match daemon.caddy.reapply(&daemon).await {
-            Ok(applied) => {
-                tracing::info!(?applied, "caddy config sent again with ports 80 and 443")
-            }
-            Err(err) => tracing::warn!(
-                code = err.code(),
-                error = %err,
-                "caddy did not take the config with ports 80 and 443"
-            ),
-        }
-    }
     Ok(Json(report))
 }
 
@@ -1662,7 +1695,7 @@ mod tests {
         fn pkexec_request(&self) -> HelperRequest {
             let calls = self.calls();
             let call = calls.iter().rfind(|call| call.program == pkexec::PKEXEC);
-            let request = &call.expect("a pkexec call").args[2];
+            let request = &call.expect("a pkexec call").args[3];
             serde_json::from_str(request).unwrap()
         }
 
@@ -2382,9 +2415,10 @@ mod tests {
 
         let calls = fake.calls();
         assert_eq!(fake.programs(), ["/usr/bin/pkexec"]);
-        assert_eq!(calls[0].args.len(), 3);
-        assert_eq!(calls[0].args[0], helper.to_str().unwrap());
-        assert_eq!(calls[0].args[1], "apply");
+        assert_eq!(calls[0].args.len(), 4);
+        assert_eq!(calls[0].args[0], "--disable-internal-agent");
+        assert_eq!(calls[0].args[1], helper.to_str().unwrap());
+        assert_eq!(calls[0].args[2], "apply");
         assert_eq!(calls[0].limit, Duration::from_secs(300));
         let ops = [
             trust(),
@@ -2398,6 +2432,22 @@ mod tests {
             ["trust_install", "resolved_install", "ports_install"]
         );
         assert_eq!((report.error, report.skipped), (None, Vec::new()));
+    }
+
+    /// An answer for other ops than sent, through pkexec: no results, so
+    /// Caddy's config is not sent again for ports 80 and 443 either.
+    #[test]
+    fn linux_results_for_other_operations_are_setup_helper_failed() {
+        let dir = Dir::new(true);
+        let answer = all_done(&["ports_install", "trust_install", "resolved_install"]);
+        let fake = linux_fake(move || ok(&answer));
+        let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code.as_str()),
+            Some("setup_helper_failed")
+        );
+        assert!(report.results.is_empty());
+        assert!(!low_ports_set(&report));
     }
 
     /// No CA root and no Caddy to make one (task M5-15): the names and the
@@ -2438,7 +2488,7 @@ mod tests {
         let dir = Dir::new(true);
         let answer = json!({ "version": 1, "results": [
             { "op": "trust_install", "status": "done" },
-            { "op": "resolved_install", "status": "failed", "code": "resolved_other_dns",
+            { "op": "resolved_install", "status": "failed", "code": "resolved_check_failed",
               "message": "x" },
             { "op": "ports_install", "status": "done" },
         ]})
@@ -2454,7 +2504,7 @@ mod tests {
         assert_eq!(report.error, None);
         assert_eq!(
             report.results[1].code.as_deref(),
-            Some("resolved_other_dns")
+            Some("resolved_check_failed")
         );
     }
 

@@ -7,6 +7,17 @@
 //! S-02: a request with quotes, `$`, and backticks, and one of 64 KiB, arrive
 //! unchanged).
 //!
+//! `--disable-internal-agent` (polkit 0.102 and later): with no polkit agent,
+//! as over SSH or on a desktop without one, `pkexec` would start its own
+//! text agent on the terminal that `marsad` was started from. Its password
+//! prompt would then stop the daemon (`SIGTTOU`) or land in the user's shell.
+//! With the option it exits 127 instead (review of #120).
+//!
+//! Once the password is given, `pkexec` becomes the helper as root, so
+//! `marsad` cannot kill it: after a timeout or a stop, the runner waits for
+//! the helper to end and uses its answer (`collect`). Each command of the
+//! helper has its own limit of 120 s.
+//!
 //! `pkexec` passes the helper's stdout and its exit code through, so the
 //! helper's JSON line is read from stdout, whatever the exit code. Without a
 //! JSON line, the exit code is `pkexec`'s own (the `pkexec` manual; the
@@ -17,6 +28,8 @@
 //! | 126 | the user dismissed the password dialog | `setup_cancelled` |
 //! | 127 | not authorized: a wrong password, no polkit agent (over SSH, no desktop), or the policy said no | `setup_not_authorized` |
 //! | other | – | `setup_helper_failed` |
+//!
+//! No `/usr/bin/pkexec` at all is `setup_pkexec_missing`.
 //!
 //! The codes are setup's; the uninstall (task M5-13) gets `uninstall_*`.
 
@@ -38,10 +51,12 @@ const DISMISSED: i32 = 126;
 /// to ask.
 const NOT_AUTHORIZED: i32 = 127;
 
-/// The arguments of `pkexec`: the helper's absolute path, `apply`, and the
-/// request, each as one argument.
+/// The arguments of `pkexec`: no text agent of its own (see the module
+/// doc), then the helper's absolute path, `apply`, and the request, each as
+/// one argument.
 pub fn args(helper: &Path, request: &str) -> Vec<OsString> {
     vec![
+        OsString::from("--disable-internal-agent"),
         helper.as_os_str().to_owned(),
         OsString::from("apply"),
         OsString::from(request),
@@ -54,7 +69,15 @@ pub fn args(helper: &Path, request: &str) -> Vec<OsString> {
 /// A message never quotes what the programs printed: only its size and the
 /// exit code go to the log.
 pub fn read_answer(flow: Flow, output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError> {
-    let output = output.map_err(|err| not_finished(flow, &err, "pkexec"))?;
+    let output = output.map_err(|err| {
+        if err.kind() == io::ErrorKind::NotFound {
+            tracing::warn!("no /usr/bin/pkexec on this system");
+            let message = "pkexec is not installed: install the package pkexec (Debian, \
+                           Ubuntu), polkit (Fedora), or policykit-1 (older systems)";
+            return failure(&flow.code("pkexec_missing"), message);
+        }
+        not_finished(flow, &err, "pkexec")
+    })?;
     let answer = if output.stdout.len() > MAX_ANSWER {
         None
     } else {
@@ -67,7 +90,9 @@ pub fn read_answer(flow: Flow, output: io::Result<RunOutput>) -> Result<Vec<OpRe
                 failure(&flow.code("cancelled"), "the password dialog was dismissed")
             }
             Some(NOT_AUTHORIZED) => {
-                tracing::info!("pkexec did not give admin rights");
+                // Also when pkexec could not run the helper at all (a file
+                // removed after the check), which the code cannot tell.
+                tracing::info!("pkexec did not give admin rights, or could not run the helper");
                 failure(
                     &flow.code("not_authorized"),
                     "Linux did not give admin rights: a wrong password, no password dialog \
@@ -120,6 +145,7 @@ mod tests {
         assert_eq!(
             args,
             [
+                "--disable-internal-agent",
                 "/home/u/.local/share/marsa/bin/marsa-helper",
                 "apply",
                 request
@@ -230,6 +256,16 @@ mod tests {
         );
         let missing = Err(io::Error::from(io::ErrorKind::NotFound));
         let err = read_answer(Flow::Setup, missing).unwrap_err();
+        assert_eq!(
+            (err.code.as_str(), err.message.as_str()),
+            (
+                "setup_pkexec_missing",
+                "pkexec is not installed: install the package pkexec (Debian, Ubuntu), polkit \
+                 (Fedora), or policykit-1 (older systems)"
+            )
+        );
+        let denied = Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        let err = read_answer(Flow::Setup, denied).unwrap_err();
         assert_eq!(
             (err.code.as_str(), err.message.as_str()),
             ("setup_helper_failed", "cannot run pkexec")

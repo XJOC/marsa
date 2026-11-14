@@ -305,8 +305,16 @@ impl CaddyManager {
         sites: Vec<Site>,
         pools: PhpPools,
     ) -> Result<Applied, LoadError> {
+        // A serialization token across the push (manager decision
+        // 2026-11-14), not a guard of data.
         let _pushing = self.pushing.lock().await;
         *lock(&self.wanted) = Wanted { sites, pools };
+        self.push(daemon).await
+    }
+
+    /// Writes the config of the wanted sites and pools, and loads it into a
+    /// running Caddy. The caller holds `pushing`.
+    async fn push(&self, daemon: &Daemon) -> Result<Applied, LoadError> {
         let tag = self.instance_tag().map_err(LoadError::Write)?;
         let config = self.config(&tag).map_err(LoadError::Config)?;
         write_config(&self.paths.config_file, &config)
@@ -350,11 +358,11 @@ impl CaddyManager {
     ///
     /// See [`LoadError`].
     pub async fn reapply(&self, daemon: &Daemon) -> Result<Applied, LoadError> {
-        let (sites, pools) = {
-            let wanted = lock(&self.wanted);
-            (wanted.sites.clone(), wanted.pools.clone())
-        };
-        self.apply(daemon, sites, pools).await
+        // The wanted state is read only after the turn comes: a change that
+        // waited on `pushing` first is kept, not undone by an older copy.
+        // A serialization token, as in `apply`.
+        let _pushing = self.pushing.lock().await;
+        self.push(daemon).await
     }
 
     /// The config of the latest sites and pools, with `tag` on `admin`.
