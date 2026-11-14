@@ -15,6 +15,7 @@ use marsa::cli::runtimes::{self, RuntimesArgs};
 use marsa::cli::services::{self, ServicesArgs};
 use marsa::cli::setup;
 use marsa::cli::sites::{self, SitesCommand};
+use marsa::cli::xdebug::{self, XdebugArgs};
 
 /// Local development runtimes and sites.
 #[derive(Debug, Parser)]
@@ -56,6 +57,9 @@ enum Command {
     /// Start Marsa at login, or not: on or off. Without on or off, show
     /// whether it does (macOS and Linux).
     Autostart(AutostartArgs),
+    /// Load Xdebug in every installed PHP, or in none: on or off. Without on
+    /// or off, show whether PHP loads it, and which versions.
+    Xdebug(XdebugArgs),
 }
 
 // One thread is enough: the command waits on one thing at a time.
@@ -78,6 +82,7 @@ async fn main() -> ExitCode {
         Command::Sites(command) => sites::run(command, &data_dir).await,
         Command::Setup => setup::run(&data_dir).await,
         Command::Autostart(args) => autostart::run(args, &data_dir).await,
+        Command::Xdebug(args) => xdebug::run(args, &data_dir).await,
     }
 }
 
@@ -343,6 +348,26 @@ mod tests {
             &["autostart", "on", "off"],
             &["autostart", "--on"],
         ] {
+            let err = parse(args).expect_err("invalid arguments");
+            assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
+        }
+    }
+
+    #[test]
+    fn xdebug_takes_on_off_or_nothing() {
+        use marsa::cli::autostart::Switch;
+
+        for (args, switch) in [
+            (&["xdebug"][..], None),
+            (&["xdebug", "on"], Some(Switch::On)),
+            (&["xdebug", "off", "--data-dir", "/x"], Some(Switch::Off)),
+        ] {
+            match parse(args).expect("valid").command {
+                Command::Xdebug(got) => assert_eq!(got, XdebugArgs { switch }, "{args:?}"),
+                other => panic!("not xdebug: {other:?}"),
+            }
+        }
+        for args in [&["xdebug", "yes"][..], &["xdebug", "on", "off"]] {
             let err = parse(args).expect_err("invalid arguments");
             assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
         }

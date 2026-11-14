@@ -615,6 +615,9 @@ mod tests {
         insta::assert_snapshot!(text);
     }
 
+    /// Both states of `php.ini`: off is the snapshot of
+    /// `php_ini_on_macos_without_a_ca_bundle` (the same files), and on is
+    /// that text plus the Xdebug block.
     #[test]
     fn php_ini_on_macos_with_xdebug() {
         let mut files = unix_files();

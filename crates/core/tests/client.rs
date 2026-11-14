@@ -29,7 +29,7 @@ use marsa_core::types::{
     API_VERSION, AutostartState, DefaultVersion, ErrorBody, Event, Health, InstallAccepted,
     InstallRequest, LinkRequest, LogLine, LogStream, OpResult, OpStatus, ParkRequest, RuntimeList,
     RuntimeVersions, ServiceAction, ServiceState, ServiceStatus, SetupReport, SetupSkip, Site,
-    SiteKind, SiteList, SitePatch, SkippedFolder, Source,
+    SiteKind, SiteList, SitePatch, SkippedFolder, Source, XdebugState,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -992,6 +992,42 @@ async fn autostart_reads_and_puts_and_keeps_the_daemons_code() {
             "PUT /v1/autostart"
         ]
     );
+}
+
+// ---------------------------------------------------------------------------
+// Xdebug (task M5-11)
+
+#[tokio::test]
+async fn xdebug_reads_and_puts() {
+    let on = XdebugState {
+        enabled: true,
+        loaded: vec!["8.4.23".into()],
+        missing: vec!["8.3.1".into()],
+    };
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let router = Router::new().route(
+        "/v1/php/xdebug",
+        get(|| async { Json(XdebugState::default()) }).put({
+            let (bodies, on) = (bodies.clone(), on.clone());
+            move |Json(body): Json<serde_json::Value>| async move {
+                bodies.lock().expect("lock").push(body);
+                Json(on)
+            }
+        }),
+    );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    assert_eq!(client.xdebug().await.unwrap(), XdebugState::default());
+    assert_eq!(client.set_xdebug(true).await.unwrap(), on);
+
+    let sent = serde_json::json!({ "enabled": true });
+    assert_eq!(*bodies.lock().unwrap(), [sent]);
+    let targets: Vec<String> = fake
+        .seen()
+        .into_iter()
+        .map(|seen| format!("{} {}", seen.method, seen.target))
+        .collect();
+    assert_eq!(targets, ["GET /v1/php/xdebug", "PUT /v1/php/xdebug"]);
 }
 
 // ---------------------------------------------------------------------------

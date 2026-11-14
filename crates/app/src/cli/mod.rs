@@ -16,6 +16,7 @@ pub mod services;
 pub mod setup;
 pub mod sites;
 pub mod strings;
+pub mod xdebug;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

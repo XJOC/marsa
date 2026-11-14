@@ -11,8 +11,10 @@
 //! 4. PHP again if the bundle just appeared: `php.ini` then points to it, so
 //!    those pools restart.
 //!
-//! One task, so two passes never overlap, like a queue with one worker. It
-//! stops with the daemon's shutdown token.
+//! One task, so its passes never overlap, like a queue with one worker. It
+//! stops with the daemon's shutdown token. `PUT /v1/php/xdebug` runs a pass
+//! of its own, to answer after the change is in place; `Daemon::php` keeps
+//! the two apart.
 //!
 //! [`CaddyManager::apply`]: super::caddy::CaddyManager::apply
 
@@ -22,14 +24,15 @@ use std::time::Duration;
 
 use marsa_core::caddy::{CaddyPaths, PhpPools, system_ca_bundles};
 use marsa_core::recipes::Platform;
+use marsa_core::runtimes::Runtime;
 use marsa_core::sites::Site;
-use marsa_core::types::{Event, ServiceState};
+use marsa_core::types::{Event, InstallUpdate, ServiceState};
 use tokio::sync::broadcast::{self, error::RecvError, error::TryRecvError};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use super::caddy::CADDY_ID;
-use super::php::{PhpManager, write_ca_bundle};
+use super::php::write_ca_bundle;
 use super::state::Daemon;
 
 /// How long a pass waits after the first event, so a burst of changes (a
@@ -71,14 +74,11 @@ impl SitesSync {
 }
 
 async fn run(daemon: Arc<Daemon>, mut events: broadcast::Receiver<Event>) {
-    let platform = Platform::current();
-    let mut php = PhpManager::new(&daemon.data_dir, platform);
-    let system = platform.map(system_ca_bundles).unwrap_or_default();
     let shutdown = daemon.shutdown.clone();
     loop {
         tokio::select! {
             () = shutdown.cancelled() => return,
-            () = pass(&daemon, &mut php, &system) => {}
+            () = pass(&daemon) => {}
         }
         tokio::select! {
             () = shutdown.cancelled() => return,
@@ -93,11 +93,15 @@ async fn run(daemon: Arc<Daemon>, mut events: broadcast::Receiver<Event>) {
     }
 }
 
-/// Whether `event` asks for a pass: the sites changed, or Caddy started
-/// again (it has read `caddy.json`, but it may have just made its CA).
+/// Whether `event` asks for a pass: the sites changed, Caddy started again
+/// (it has read `caddy.json`, but it may have just made its CA), or a PHP
+/// was installed (its line may have no `php.ini` yet).
 pub fn is_trigger(event: &Event) -> bool {
     match event {
         Event::SitesChanged(_) => true,
+        Event::Install(install) => {
+            matches!(&install.update, InstallUpdate::Done(done) if done.runtime == Runtime::Php)
+        }
         Event::ServiceChanged(status) => {
             status.id == CADDY_ID && status.state == ServiceState::Running
         }
@@ -131,7 +135,12 @@ fn skip_waiting(events: &mut broadcast::Receiver<Event>) {
 }
 
 /// One pass: PHP, Caddy, the CA bundle, then PHP again if the bundle is new.
-async fn pass(daemon: &Daemon, php: &mut PhpManager, system: &[&'static Path]) {
+/// It holds `Daemon::php` to its end, so passes run one at a time.
+pub async fn pass(daemon: &Daemon) {
+    let mut php = daemon.php.lock().await;
+    let system = Platform::current()
+        .map(system_ca_bundles)
+        .unwrap_or_default();
     let sites = daemon.sites().map(|list| list.sites).unwrap_or_default();
     let bundle = daemon.caddy.paths.ca_bundle();
     let had_bundle = tokio::fs::try_exists(&bundle).await.unwrap_or(false);
@@ -139,7 +148,7 @@ async fn pass(daemon: &Daemon, php: &mut PhpManager, system: &[&'static Path]) {
     let pools = php.sync(daemon, &sites, ca).await;
     apply_caddy(daemon, &sites, pools.clone()).await;
 
-    if !write_bundle(&daemon.caddy.paths, system).await || had_bundle {
+    if !write_bundle(&daemon.caddy.paths, &system).await || had_bundle {
         return;
     }
     let again = php.sync(daemon, &sites, Some(&bundle)).await;
@@ -184,7 +193,7 @@ mod tests {
 
     use axum::Json;
     use axum::routing::post;
-    use marsa_core::types::{ServiceStatus, SiteList};
+    use marsa_core::types::{InstallDone, InstallProgress, ServiceStatus, SiteList};
     use serde_json::Value;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -208,6 +217,19 @@ mod tests {
         assert!(!is_trigger(&status("caddy", ServiceState::Starting)));
         assert!(!is_trigger(&status("php-fpm-8.4", ServiceState::Running)));
         assert!(!is_trigger(&Event::ShuttingDown));
+
+        // A new PHP needs its `php.ini`; a new Node needs nothing here.
+        let installed = |runtime| {
+            let update = InstallUpdate::Done(InstallDone {
+                runtime,
+                version: "1.2.3".into(),
+                dir: "/data/runtimes/x/1.2.3".into(),
+                already: false,
+            });
+            Event::Install(InstallProgress { id: 1, update })
+        };
+        assert!(is_trigger(&installed(Runtime::Php)));
+        assert!(!is_trigger(&installed(Runtime::Node)));
     }
 
     /// A fake Caddy admin API that sends the body of each `POST /load` on the
