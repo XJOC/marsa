@@ -1,0 +1,88 @@
+name: spike-s12-sql
+
+# Spike S-12a: MySQL 8.4 and PostgreSQL 17/18 as ready-made downloads, run
+# without admin rights, on every platform Marsa ships for. Where each archive
+# comes from, how it is verified, whether it starts on 127.0.0.1, how it stops,
+# and what an orphan looks like after its parent is killed.
+# The jobs start database servers. That is fine here and only here: a runner
+# is thrown away after the job. Never run the scripts on a real machine.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["task/S-12a-*"]
+    paths:
+      - "spikes/s12-database-servers/sql/**"
+      - ".github/workflows/spike-s12-sql.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  sql:
+    name: ${{ matrix.os }} / ${{ matrix.set }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-14 and macos-15 are both arm64: they show whether a macOS 15
+        # build runs on macOS 14. macos-15-intel is the Intel runner
+        # (macos-13 is retired). ubuntu-22.04 has glibc 2.35, 24.04 has 2.39.
+        os: [macos-14, macos-15, macos-15-intel, ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm, windows-2022]
+        set: [mysql, postgres]
+        include:
+          - set: mysql
+            ids: oracle-mysql84 oracle-mysql84-minimal
+          - set: postgres
+            ids: theseus-pg17 theseus-pg18 zonky-pg17 zonky-pg18 edb-pg17 postgresapp-pg17
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      S12_DOCKER: ${{ startsWith(matrix.os, 'ubuntu-24') && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run the candidates (Linux, macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/s12-out"
+          mkdir -p "$out"
+          for id in ${{ matrix.ids }}; do
+            echo "::group::$id"
+            bash spikes/s12-database-servers/sql/run.sh "$id" "$out" || true
+            echo "::endgroup::"
+          done
+
+      - name: Run the candidates (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 's12-out'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          foreach ($id in '${{ matrix.ids }}'.Split(' ')) {
+            Write-Host "::group::$id"
+            try { & ./spikes/s12-database-servers/sql/run.ps1 -Id $id -Out $out } catch { Write-Host "run.ps1 failed: $_" }
+            Write-Host "::endgroup::"
+          }
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/s12-out"
+          py="$(command -v python3 || command -v python)"
+          {
+            echo "## ${{ matrix.os }} / ${{ matrix.set }}"
+            "$py" spikes/s12-database-servers/sql/summarize.py "$out"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s12-sql-${{ matrix.os }}-${{ matrix.set }}
+          path: ${{ runner.temp }}/s12-out
