@@ -102,6 +102,37 @@ fn bad_arguments_exit_with_code_2() {
     assert!(text(&out.stderr).contains("ruby"), "{}", text(&out.stderr));
 }
 
+/// `marsa uninstall --all` with no terminal to ask on and no `--yes`
+/// (`Command::output` gives the child no stdin): it refuses before anything,
+/// so no daemon starts and the data folder stays empty. Off macOS it says the
+/// uninstall is not supported there, also before anything.
+#[test]
+fn uninstall_without_a_terminal_and_without_yes_changes_nothing() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let data = tmp.path().join("data");
+    fs::create_dir(&data).expect("mkdir");
+    for args in [
+        &["uninstall", "--all"][..],
+        &["uninstall", "--all", "--delete-data"],
+    ] {
+        let out = marsa(&data, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stderr = text(&out.stderr);
+        let code = if cfg!(target_os = "macos") {
+            "[uninstall_all_needs_yes]"
+        } else {
+            "[uninstall_not_supported]"
+        };
+        assert!(stderr.contains(code), "{args:?}: {stderr}");
+        assert_eq!(text(&out.stdout), "", "{args:?}");
+        let left: Vec<_> = fs::read_dir(&data).expect("read").collect();
+        assert!(left.is_empty(), "{args:?}: {left:?}");
+    }
+    // Without --all it is not a command yet.
+    let out = marsa(&data, &["uninstall", "--yes"]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
 #[test]
 fn help_and_version_work() {
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -398,4 +429,110 @@ fn a_followed_log_ends_when_the_daemon_stops() {
         "Showing new lines from caddy as they come. Press Ctrl+C to stop.\n\
          The daemon closed the log.\n"
     );
+}
+
+/// `marsa unlink`, `forget`, `isolate`, and `unisolate` through the real
+/// daemon (task M5-09). `marsa open` would start a browser here, so its tests
+/// are in `cli/sites.rs`, with a stand-in for the browser.
+#[test]
+fn sites_are_isolated_unlinked_and_forgotten() {
+    let data = DaemonDir::new();
+    let work = TempDir::new().expect("temp folder");
+    let code = work.path().join("code");
+    let api = work.path().join("api");
+    for dir in [code.join("blog"), api.clone()] {
+        fs::create_dir_all(dir).expect("mkdir");
+    }
+    let (code_arg, api_arg) = (code.to_str().expect("UTF-8"), api.to_str().expect("UTF-8"));
+
+    let out = data.marsa(&["park", code_arg]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let linked = format!("Linked {} as https://api.test.\n", api.display());
+    data.expect(&["link", "api", "--path", api_arg], 0, &linked, "");
+    // No PHP is installed in the temp data folder.
+    data.expect(
+        &["isolate", "api", "8.3"],
+        0,
+        "https://api.test now asks for PHP 8.3, but no installed version matches. Run \
+         \"marsa install php 8.3\".\n",
+        "",
+    );
+    data.expect(
+        &["unisolate", "api"],
+        0,
+        "https://api.test has no PHP version of its own now. No installed PHP version fits it.\n",
+        "",
+    );
+
+    let parked = format!(
+        "marsa: \"blog\" comes from the parked folder {0}, so it cannot be unlinked alone. To \
+         stop serving that folder and all its sites, run \"marsa forget {0}\". \
+         [site_is_parked]\n",
+        code.display()
+    );
+    data.expect(&["unlink", "blog"], 1, "", &parked);
+    data.expect(
+        &["unlink", "api"],
+        0,
+        "Unlinked api: it is no longer served, and its settings are gone.\n",
+        "",
+    );
+    data.expect(
+        &["unlink", "api"],
+        1,
+        "",
+        "marsa: There is no site named \"api\". Run \"marsa sites\" to see them. \
+         [site_not_found]\n",
+    );
+
+    let slash = format!("{code_arg}{}", std::path::MAIN_SEPARATOR);
+    let forgot = format!(
+        "Forgot {}: its sites are no longer served.\n",
+        code.display()
+    );
+    data.expect(&["forget", &slash], 0, &forgot, "");
+    let not_parked = format!(
+        "marsa: {} is not a parked folder. No folder is parked. [folder_not_parked]\n",
+        code.display()
+    );
+    data.expect(&["forget", code_arg], 1, "", &not_parked);
+    data.expect(
+        &["sites"],
+        0,
+        "No sites yet. Run \"marsa park\" in a folder of projects, or \"marsa link\" in one \
+         project.\n",
+        "",
+    );
+}
+
+/// Task M5-11, through the real `marsa` and `marsad`. On every system: the
+/// daemon writes `php.ini` for php-fpm and for php-cgi (Windows) alike.
+#[test]
+fn xdebug_on_and_off_change_the_php_ini_before_marsa_returns() {
+    use marsa_core::php::PhpFiles;
+
+    let data = DaemonDir::new();
+    // A PHP with Xdebug, as the installer leaves it. Nothing runs it.
+    let version = semver::Version::parse("8.4.3").expect("a valid version");
+    let files = PhpFiles::new(data.path(), &version);
+    fs::create_dir_all(&files.ext_dir).expect("create ext");
+    fs::write(files.xdebug_so(), "").expect("write xdebug.so");
+    let loads = format!("\nzend_extension = \"{}\"\n", files.xdebug_so().display());
+    let ini = || fs::read_to_string(&files.ini_file).expect("read php.ini");
+
+    const OFF: &str = "Xdebug: off. Run \"marsa xdebug on\" to turn it on.\n";
+    const ON: &str = "Xdebug: on, in your sites and in the terminal. Loaded by PHP 8.4.3.";
+    // `xdebug` starts the daemon itself.
+    data.expect(&["xdebug"], 0, OFF, "");
+    let slower = "PHP can run up to 4 times slower while it is on. Run \"marsa xdebug off\" \
+                  when you finish.";
+    data.expect(&["xdebug", "on"], 0, &format!("{ON} {slower}\n"), "");
+    assert!(ini().contains(&loads), "{}", ini());
+    data.expect(&["xdebug"], 0, &format!("{ON}\n"), "");
+
+    let turned_off = "Xdebug: off. PHP runs at full speed again.\n";
+    data.expect(&["xdebug", "off"], 0, turned_off, "");
+    assert!(!ini().contains("xdebug"), "{}", ini());
+    data.expect(&["xdebug"], 0, OFF, "");
+    data.expect(&["daemon", "stop"], 0, "Stopped marsad.\n", "");
 }

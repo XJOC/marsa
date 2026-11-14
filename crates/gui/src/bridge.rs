@@ -17,7 +17,7 @@ use marsa_core::types::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::model::{Autostart, Change, InstallJob, LOG_SERVICE, Update};
+use crate::model::{Autostart, Change, InstallJob, LOG_SERVICE, Removal, Update};
 use crate::strings;
 
 /// The wait before the next attempt to connect.
@@ -48,6 +48,10 @@ pub enum Command {
     Setup,
     /// The "Start at login" box.
     SetAutostart(bool),
+    /// A confirmed Uninstall, Unlink, or Forget.
+    Remove(Removal),
+    /// The Xdebug box.
+    SetXdebug(bool),
 }
 
 /// The window's end of the bridge.
@@ -178,6 +182,10 @@ async fn session(
     if !window.send(Update::Connected(health)) || !refresh(&client, window).await {
         return End::Closed;
     }
+    // A command's task asks here to read the runtimes again, so the read
+    // runs in order with the events. This end lives as long as the loop, so
+    // `recv` never ends.
+    let (reread, mut rereads) = unbounded_channel::<()>();
     loop {
         tokio::select! {
             event = events.next() => match event {
@@ -194,7 +202,7 @@ async fn session(
                     }
                     // A new version, and maybe a first default: no event
                     // carries the whole list, so read it again.
-                    if installed && !window.send(runtimes(&client).await) {
+                    if installed && !runtimes_changed(&client, window).await {
                         return End::Closed;
                     }
                 }
@@ -213,17 +221,29 @@ async fn session(
                 None => return End::Lost,
             },
             command = commands.recv() => match command {
-                Some(command) => run_command(&client, command, window.clone()),
+                Some(command) => run_command(&client, command, window.clone(), reread.clone()),
                 None => return End::Closed,
             },
+            Some(()) = rereads.recv() => {
+                if !runtimes_changed(&client, window).await {
+                    return End::Closed;
+                }
+            }
         }
     }
 }
 
-/// Sends the whole services table, the site list, the runtimes, whether the
-/// icon starts at login, and the recent log lines. A failed read is a
-/// notice: the events still keep the window up to date. `false` once the
+/// After an install or an uninstall: the runtimes list, and the Xdebug
+/// state, whose lists name the installed PHP versions. `false` once the
 /// window is gone.
+async fn runtimes_changed(client: &DaemonClient, window: &Window) -> bool {
+    window.send(runtimes(client).await) && window.send(xdebug(client).await)
+}
+
+/// Sends the whole services table, the site list, the runtimes, whether the
+/// icon starts at login, whether PHP loads Xdebug, and the recent log lines.
+/// A failed read is a notice: the events still keep the window up to date.
+/// `false` once the window is gone.
 async fn refresh(client: &DaemonClient, window: &Window) -> bool {
     let services = match client.services().await {
         Ok(services) => Update::Services(services),
@@ -240,6 +260,8 @@ async fn refresh(client: &DaemonClient, window: &Window) -> bool {
     // No event tells when it changes (the menu-bar icon may change it), so
     // it is read with the rest.
     let autostart = autostart(client).await;
+    // No event either: only the Xdebug box and `marsa xdebug` change it.
+    let xdebug = xdebug(client).await;
     let log = match client.logs(LOG_SERVICE).await {
         Ok(lines) => Update::Log(lines),
         Err(err) => notice("cannot read the log", &err),
@@ -248,7 +270,19 @@ async fn refresh(client: &DaemonClient, window: &Window) -> bool {
         && window.send(sites)
         && window.send(runtimes)
         && window.send(autostart)
+        && window.send(xdebug)
         && window.send(log)
+}
+
+/// Whether PHP loads Xdebug, or why it cannot be read.
+async fn xdebug(client: &DaemonClient) -> Update {
+    match client.xdebug().await {
+        Ok(state) => Update::Xdebug(state),
+        Err(err) => {
+            tracing::warn!(code = err.code(), error = %err, "cannot read the Xdebug state");
+            Update::XdebugFailed(err.code().to_owned())
+        }
+    }
 }
 
 /// Whether the icon starts at login, or why it cannot be read.
@@ -281,9 +315,16 @@ async fn runtimes(client: &DaemonClient) -> Update {
 /// an event, so the daemon's answer is not passed on: an older answer could
 /// arrive after a newer event. Only a failure, an accepted park or link for
 /// the notice line, whether a [`Change`] was saved (its list shows the pick
-/// until then), the id of an accepted install, the setup report, and the
-/// autostart state (no event carries it) are sent here.
-fn run_command(client: &DaemonClient, command: Command, window: Window) {
+/// until then), the id of an accepted install, the setup report, whether a
+/// removal was done, and the autostart and Xdebug states (no event carries
+/// them) are sent here. After an uninstall, `reread` asks the session to
+/// read the runtimes again.
+fn run_command(
+    client: &DaemonClient,
+    command: Command,
+    window: Window,
+    reread: UnboundedSender<()>,
+) {
     let client = client.clone();
     tokio::spawn(async move {
         let update = match command {
@@ -348,6 +389,29 @@ fn run_command(client: &DaemonClient, command: Command, window: Window) {
                     autostart(&client).await
                 }
             }),
+            Command::Remove(removal) => {
+                let uninstall = matches!(removal, Removal::Uninstall { .. });
+                window.send(remove(&client, removal).await);
+                // Also after a refusal: `version_not_installed` means the
+                // list is old. A send fails only once the session has
+                // ended, and the next session reads everything.
+                if uninstall {
+                    let _ = reread.send(());
+                }
+                None
+            }
+            Command::SetXdebug(enabled) => Some(match client.set_xdebug(enabled).await {
+                Ok(state) => {
+                    tracing::info!(enabled, "Xdebug changed");
+                    Update::XdebugAnswered(Ok(state))
+                }
+                Err(err) => {
+                    tracing::warn!(code = err.code(), error = %err, "cannot change Xdebug");
+                    window.send(Update::XdebugAnswered(Err(err.code().to_owned())));
+                    // The box showed the new state: show the real one.
+                    xdebug(&client).await
+                }
+            }),
         };
         if let Some(update) = update {
             window.send(update);
@@ -373,6 +437,38 @@ async fn install(client: &DaemonClient, job: InstallJob) -> Update {
             tracing::warn!(code = err.code(), error = %err, ?job, "install refused");
             let code = err.code().to_owned();
             Update::InstallRefused { job, code }
+        }
+    }
+}
+
+/// Asks the daemon for `removal`. `Removed`, or `NotRemoved` with the error
+/// code and, for `version_in_use`, what uses the version.
+async fn remove(client: &DaemonClient, removal: Removal) -> Update {
+    let result = match &removal {
+        Removal::Uninstall { runtime, version } => client
+            .uninstall(*runtime, &version.to_string())
+            .await
+            .map(drop),
+        Removal::Unlink { site } => client.unlink(site).await.map(drop),
+        Removal::Forget { folder } => client.forget(folder).await.map(drop),
+    };
+    match result {
+        Ok(()) => {
+            tracing::info!(?removal, "removed");
+            Update::Removed(removal)
+        }
+        Err(err) => {
+            tracing::warn!(code = err.code(), error = %err, ?removal, "cannot remove");
+            let code = err.code().to_owned();
+            let in_use = match err {
+                ClientError::InUse { in_use, .. } => Some(in_use),
+                _ => None,
+            };
+            Update::NotRemoved {
+                removal,
+                code,
+                in_use,
+            }
         }
     }
 }

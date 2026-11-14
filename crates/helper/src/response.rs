@@ -10,6 +10,13 @@ use crate::request::VERSION;
 /// The stable error codes. `marsad` and the UI match on them, so they never
 /// change once released.
 pub mod code {
+    /// The marker lines of Marsa's block in the hosts file do not pair up,
+    /// so the file was left as it is (Windows).
+    pub const HOSTS_BLOCK_BROKEN: &str = "hosts_block_broken";
+    /// The hosts file could not be read, so it was left as it is (Windows).
+    pub const HOSTS_READ: &str = "hosts_read";
+    /// Writing the hosts file failed (Windows).
+    pub const HOSTS_WRITE: &str = "hosts_write";
     pub const OP_NOT_IMPLEMENTED: &str = "op_not_implemented";
     pub const OP_NOT_SUPPORTED: &str = "op_not_supported";
     pub const REQUEST_INVALID: &str = "request_invalid";

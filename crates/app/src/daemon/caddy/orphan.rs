@@ -40,6 +40,9 @@ const POLL: Duration = Duration::from_millis(50);
 /// The largest answer to `GET /id/...` that is read. The server's config grows
 /// with the sites; a longer answer counts as not ours.
 const TAG_BODY_MAX: usize = 16 * 1024 * 1024;
+/// The same for [`Admin::answers_as`]: our tag is on the `admin` object, a
+/// few hundred bytes.
+const ADMIN_BODY_MAX: usize = 64 * 1024;
 
 /// A boxed future, so [`Processes`] works as `dyn Processes`.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -487,21 +490,29 @@ impl Admin {
     /// Whether the program on our admin port is this data folder's Caddy
     /// (`ours`), another Marsa's (`marsa-srv` only), or something else.
     async fn tag(&self, ours: &str) -> AdminState {
-        match self.probe(ours).await {
+        match self.probe(ours, TAG_BODY_MAX).await {
             Probe::Tagged => orphan::classify_admin_replies(true, false),
             Probe::Refused => AdminState::NoReply,
             Probe::Timeout => AdminState::Timeout,
             Probe::Broken => AdminState::Foreign,
             // HTTP, but not ours: maybe another Marsa.
             Probe::Untagged => {
-                let shared = matches!(self.probe(SERVER_ID).await, Probe::Tagged);
+                let shared = matches!(self.probe(SERVER_ID, TAG_BODY_MAX).await, Probe::Tagged);
                 orphan::classify_admin_replies(false, shared)
             }
         }
     }
 
-    /// `GET /id/<tag>`, read for at most the client's timeout.
-    async fn probe(&self, tag: &str) -> Probe {
+    /// Whether the admin port answers `GET /id/<tag>` with `tag`: the Caddy
+    /// of this data folder, and no other program. A running Caddy's start
+    /// waits for this, and its stop asks it before `POST /stop`.
+    pub(super) async fn answers_as(&self, tag: &str) -> bool {
+        matches!(self.probe(tag, ADMIN_BODY_MAX).await, Probe::Tagged)
+    }
+
+    /// `GET /id/<tag>`, read for at most the client's timeout and `max`
+    /// bytes.
+    async fn probe(&self, tag: &str, max: usize) -> Probe {
         let Some(http) = &self.http else {
             return Probe::Broken;
         };
@@ -514,7 +525,7 @@ impl Admin {
         let mut body = Vec::new();
         loop {
             match response.chunk().await {
-                Ok(Some(chunk)) if body.len() + chunk.len() <= TAG_BODY_MAX => {
+                Ok(Some(chunk)) if body.len() + chunk.len() <= max => {
                     body.extend_from_slice(&chunk);
                 }
                 Ok(Some(_)) => return Probe::Broken,

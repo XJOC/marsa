@@ -92,7 +92,8 @@ pub fn parse_netstat(text: &str) -> Vec<Listener> {
 
 /// The listeners that take connections to `127.0.0.1:<port>` or
 /// `[::1]:<port>`, in netstat's order. These are the addresses that the `pf`
-/// redirect of ADR 0008 captures, and the addresses that `*.test` resolves to.
+/// redirect of ADR 0008 captures. `*.test` resolves to `127.0.0.1` only
+/// (task M5-17); `::1` stays here because pf redirects it too.
 ///
 /// - **Loopback:** `127.0.0.1` or `::1` (also written `::ffff:127.0.0.1`).
 /// - **Wildcard:** `*` (netstat's form), `0.0.0.0`, or `::`. A wildcard socket

@@ -1,0 +1,26 @@
+---
+source: crates/core/src/php.rs
+expression: "on"
+---
+; Managed by Marsa. Changes to this file are overwritten.
+memory_limit = 512M
+upload_max_filesize = 128M
+post_max_size = 128M
+max_execution_time = 60
+
+display_errors = On
+display_startup_errors = On
+error_reporting = E_ALL
+log_errors = On
+error_log = "/marsa/logs/php-8.4-errors.log"
+
+date.timezone = UTC
+realpath_cache_size = 4096K
+
+opcache.enable = 1
+opcache.validate_timestamps = 1
+opcache.revalidate_freq = 0
+
+zend_extension = "/Users/a b/marsa/runtimes/php/8.4.3/ext/xdebug.so"
+xdebug.mode = debug,develop
+xdebug.start_with_request = trigger
