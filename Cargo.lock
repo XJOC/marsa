@@ -2497,7 +2497,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "marsa"
-version = "0.1.0-rc.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2520,7 +2520,7 @@ dependencies = [
 
 [[package]]
 name = "marsa-core"
-version = "0.1.0-rc.1"
+version = "0.1.0"
 dependencies = [
  "axum",
  "directories",
@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "marsa-gui"
-version = "0.1.0-rc.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "marsa-helper"
-version = "0.1.0-rc.1"
+version = "0.1.0"
 dependencies = [
  "insta",
  "serde",
@@ -2574,12 +2574,13 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.21",
+ "windows-service",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "marsa-shim"
-version = "0.1.0-rc.1"
+version = "0.1.0"
 dependencies = [
  "marsa-core",
  "semver",
@@ -5650,6 +5651,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5770,6 +5777,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "windows-service"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "857224b3b211c6f3616921f081ee54721ee3ad2ace2fac6a6337e032f7b4dcf2"
+dependencies = [
+ "bitflags 2.13.2",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6121,7 +6139,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.1.0-rc.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",

@@ -1,222 +1,308 @@
-//! Linux: names under `.test` go to the DNS server of `marsad`, through a
-//! drop-in file of systemd-resolved (ADR 0014). The macOS twin is `resolver`.
+//! Linux: names under `.test` go to the DNS server of `marsad`, and no other
+//! name does (ADR 0014, spike S-02b). The macOS twin is `resolver`.
 //!
-//! The file has a port (`DNS=127.0.0.1:18053`), so the DNS server does not
-//! need port 53. `Domains=~test` routes `.test` names there, but a global
-//! server is also a default route: systemd-resolved sends every other name
-//! there too, and takes the first good answer (ADR 0014, finding 2). A
-//! program that holds the port while `marsad` does not could answer for any
-//! name. So this file must never ship in a release: task M4-18h replaces it
-//! with a link of its own (systemd before 258) or a DNS delegate (258 on).
+//! A root unit of Marsa's, [`UNIT_FILE`], makes a dummy link `marsa0` with
+//! the address `169.254.53.53/32`. Then it tells systemd-resolved, through
+//! `resolvectl`, that this link has one DNS server, `127.0.0.1:<port>`, the
+//! routing domain `~test`, and no default route. So resolved sends `.test`
+//! names there and nothing else: a program that holds the port while
+//! `marsad` does not can answer for `.test` names only, as on macOS. The
+//! unit runs again at every boot, and resolved keeps the link's settings
+//! when it restarts. The address is needed: resolved ignores a link without
+//! one.
 //!
-//! systemd-resolved asks one global server at a time: next to another global
-//! `DNS=` line, `.test` names never resolve (spike S-02: 0 of 6 tries). And
-//! a global server turns off its fallback servers, so a machine whose network
-//! gives no DNS server would resolve nothing but `.test`. The helper checks
-//! both before it writes, and again after the restart. A check that fails
-//! after the write takes Marsa's file out again: a clear error, not a site
-//! that does not open.
+//! The unit gives the link its domain and takes away its default route
+//! before it gives it Marsa's server: a link with a server and no routing
+//! domain is a default route, so the other order would send every name to
+//! the port for a moment, and for good if a later line failed. A start that
+//! fails half way still deletes the link (`ExecStopPost=`). A `marsa0` that
+//! is there already is taken over: only root can make a link.
 //!
-//! Every restart clears a failed state first: many restarts in a few seconds
-//! hit the unit's start limit (S-02, Fedora). After a failed install the
-//! helper makes sure systemd-resolved runs again. If it does not, the code is
-//! `resolved_stopped`: no name resolves until it runs.
+//! Before systemd 253 the unit also adds a local route for `127.0.0.1` on
+//! `marsa0`. Those versions of resolved bind a link's DNS socket to the
+//! link while it connects, unless they know the server's address as a link
+//! address, so the packets to `127.0.0.1` left through the dummy link and
+//! were lost: the first `.test` lookup took 21 s on Ubuntu 22.04 (spike
+//! S-02c). With the route, the kernel delivers them locally: 0.01 s. From
+//! 253 on, resolved makes an exception for localhost, so the unit changes
+//! no routing there. `marsad` still listens on `127.0.0.1` only, and `lo`
+//! keeps its own route. Before systemd 250 Marsa makes no link at all
+//! ([`RESOLVED_SYSTEMD_TOO_OLD`]).
 //!
-//! The helper changes the file only if Marsa wrote it ([`marked`]).
+//! The helper writes the unit only over a file Marsa wrote ([`marked`]),
+//! starts it, and checks the link with `resolvectl status marsa0`. A failed
+//! start or check takes the unit out again, so it does not run at the next
+//! boot.
 //!
-//! No message holds the content of a file, the output of a program, or the
-//! user's own DNS servers.
+//! An earlier build wrote a global drop-in instead ([`DROP_IN`]). A global
+//! server is a default route, so resolved sent every name there too. Both
+//! ops delete it if Marsa wrote it, and restart systemd-resolved without it.
+//! After a failed restart the helper makes sure systemd-resolved runs again;
+//! if it does not, the code is `resolved_stopped`.
+//!
+//! No message holds the content of a file or the output of a program.
 
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::ops::marked::{self, Current, MARKER};
 use crate::ops::program;
 use crate::response::{OpResult, Outcome};
 use crate::system::{RunOutput, System};
 
-/// A file at [`FILE`] that Marsa did not write, so it was left as it is.
+/// A file at [`UNIT_FILE`] that Marsa did not write, so it was left as it
+/// is.
 pub const RESOLVED_FOREIGN: &str = "resolved_foreign";
-/// [`FILE`] cannot be read, so it was left as it is.
+/// [`UNIT_FILE`] or [`DROP_IN`] cannot be read, so it was left as it is.
 pub const RESOLVED_READ: &str = "resolved_read";
 /// systemd-resolved does not run, or `systemctl` cannot tell. Nothing was
 /// changed.
 pub const RESOLVED_NOT_RUNNING: &str = "resolved_not_running";
-/// Writing [`FILE`] failed.
+/// There is no `ip` program (iproute2) at the usual paths. Nothing was
+/// changed.
+pub const RESOLVED_TOOL_MISSING: &str = "resolved_tool_missing";
+/// Writing [`UNIT_FILE`] failed.
 pub const RESOLVED_WRITE: &str = "resolved_write";
-/// `systemctl restart` failed, or `systemctl` could not tell whether
-/// systemd-resolved runs. After an install, Marsa's file is gone again. The
-/// message says when the old process may still use Marsa's server.
-pub const RESOLVED_RESTART_FAILED: &str = "resolved_restart_failed";
-/// The machine has another global DNS server, so `.test` names would not
-/// resolve.
-pub const RESOLVED_OTHER_DNS: &str = "resolved_other_dns";
-/// No network connection has a DNS server: with Marsa's global server,
-/// systemd-resolved would not use its fallback servers.
-pub const RESOLVED_NO_LINK_DNS: &str = "resolved_no_link_dns";
-/// The servers could not be read, or Marsa's is not among them after the
-/// restart.
+/// `systemctl` could not load, enable, start, or stop Marsa's unit. After
+/// an install, the unit is gone again.
+pub const RESOLVED_UNIT_FAILED: &str = "resolved_unit_failed";
+/// `marsa0` does not send `.test` names, and only them, to Marsa's server.
+/// The unit is gone again.
 pub const RESOLVED_CHECK_FAILED: &str = "resolved_check_failed";
-/// systemd-resolved does not run after a failed step, and did not start
-/// again: no name resolves until it runs.
+/// The restart that drops [`DROP_IN`] failed, or `systemctl` cannot tell
+/// whether systemd-resolved runs. The message says that the old process
+/// may still use Marsa's server.
+pub const RESOLVED_RESTART_FAILED: &str = "resolved_restart_failed";
+/// systemd-resolved does not run after the restart that drops [`DROP_IN`],
+/// and did not start again: no name resolves until it runs.
 pub const RESOLVED_STOPPED: &str = "resolved_stopped";
-/// Deleting [`FILE`] failed.
+/// Deleting [`UNIT_FILE`] or [`DROP_IN`] failed.
 pub const RESOLVED_DELETE: &str = "resolved_delete";
+/// systemd is older than 250, or its version cannot be read. Its resolved
+/// counts a link that systemd-networkd calls "initialized" as managed, and
+/// clears what was set on it (spike S-02c), so Marsa makes no link there.
+/// Nothing was changed but the removal of an old drop-in. Task M4-18k gives
+/// these systems another way.
+pub const RESOLVED_SYSTEMD_TOO_OLD: &str = "resolved_systemd_too_old";
 
-/// Marsa's own drop-in. systemd-resolved reads every file in this folder.
-const FILE: &str = "/etc/systemd/resolved.conf.d/marsa.conf";
+/// Marsa's unit. `enable` links it into `multi-user.target`, so it runs at
+/// every boot.
+const UNIT_FILE: &str = "/etc/systemd/system/marsa-dns-link.service";
+const UNIT_NAME: &str = "marsa-dns-link.service";
+/// The global drop-in of earlier builds (task M4-18a).
+const DROP_IN: &str = "/etc/systemd/resolved.conf.d/marsa.conf";
 /// Everyone can read it, and only root can change it.
 const MODE: u32 = 0o644;
+const LINK: &str = "marsa0";
+/// A link-local address (RFC 3927): it adds a route on this link only.
+const ADDRESS: &str = "169.254.53.53/32";
+/// Where iproute2 puts `ip`. The first one there goes into the unit.
+const IP: [&str; 4] = ["/usr/sbin/ip", "/usr/bin/ip", "/sbin/ip", "/bin/ip"];
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 const RESOLVECTL: &str = "/usr/bin/resolvectl";
-const UNIT: &str = "systemd-resolved.service";
-const IS_ACTIVE: [&str; 3] = ["is-active", "--quiet", UNIT];
-const RESET_FAILED: [&str; 2] = ["reset-failed", UNIT];
-/// `restart`, not `reload`: systemd-resolved has no reload before systemd 253.
-const RESTART: [&str; 2] = ["restart", UNIT];
-const START: [&str; 2] = ["start", UNIT];
+const RESOLVED: &str = "systemd-resolved.service";
+const IS_ACTIVE: [&str; 3] = ["is-active", "--quiet", RESOLVED];
+/// `systemctl is-active` for a unit that is not active (LSB "not
+/// running"). Any other failure means `systemctl` cannot tell.
+const INACTIVE: i32 = 3;
+const RESET_FAILED: [&str; 2] = ["reset-failed", RESOLVED];
+/// `restart`, not `reload`: systemd-resolved has no reload before systemd
+/// 253.
+const RESTART: [&str; 2] = ["restart", RESOLVED];
+const START: [&str; 2] = ["start", RESOLVED];
+const DAEMON_RELOAD: [&str; 1] = ["daemon-reload"];
+const ENABLE: [&str; 2] = ["enable", UNIT_NAME];
+const IS_ENABLED: [&str; 3] = ["is-enabled", "--quiet", UNIT_NAME];
+/// After the unit is gone: a failed state would keep it listed, and the
+/// system "degraded", until the next boot.
+const RESET_FAILED_UNIT: [&str; 2] = ["reset-failed", UNIT_NAME];
+/// Starts the unit if it does not run, and runs a changed one again.
+const RESTART_UNIT: [&str; 2] = ["restart", UNIT_NAME];
+/// Stops the unit, whose stop deletes the link, and takes it out of the
+/// boot.
+const DISABLE: [&str; 3] = ["disable", "--now", UNIT_NAME];
+const STATUS: [&str; 2] = ["status", LINK];
+const VERSION: [&str; 1] = ["--version"];
+/// The first systemd whose resolved leaves a new link's settings alone
+/// while systemd-networkd looks at it.
+const FIRST_SYSTEMD: u32 = 250;
+/// The first systemd whose resolved does not bind its socket to the link
+/// for a server on localhost; before it, the unit adds the local route.
+const NO_BIND_BUG: u32 = 253;
+/// How many times the link is checked after the start, with a pause in
+/// between: resolved may take a moment to use a new link (S-02b).
+const CHECKS: u32 = 10;
+const CHECK_PAUSE: Duration = Duration::from_millis(500);
 /// The end of a message when systemd-resolved stays down.
 const STOPPED: &str = "systemd-resolved does not run now, so no name resolves until it starts";
-/// The end of a message when a restart failed and the old process runs on.
+/// The end of a message when the old process may run on.
 const OLD_RUNS: &str = "systemd-resolved may use Marsa's server until it restarts (systemctl restart systemd-resolved)";
 
 const INSTALL: &str = "resolved_install";
 const REMOVE: &str = "resolved_remove";
 
-/// `resolved_install`: names under `.test` go to `127.0.0.1:<port>`.
+/// `resolved_install`: names under `.test`, and only them, go to
+/// `127.0.0.1:<port>`.
 pub fn install(port: u16, system: &impl System) -> OpResult {
-    let content = content(port);
-    let ours = server(port);
-    // `None`: no file of Marsa's. `Some(true)`: this very file.
-    let in_place = match marked::current(system, Path::new(FILE)) {
+    // The global drop-in first, whatever else fails: while it is there,
+    // every name reaches the port.
+    let dropped = match drop_old(system) {
+        Ok(dropped) => dropped,
+        Err((code, message)) => return OpResult::failed(INSTALL, code, message),
+    };
+    let nothing_else = if dropped {
+        "so only Marsa's old global setting was removed"
+    } else {
+        "so nothing was changed"
+    };
+    let current = match marked::current(system, Path::new(UNIT_FILE)) {
         Current::Foreign => {
             // The path only: the content of another tool's file stays out.
-            let message = format!("{FILE} was not written by Marsa, so it was left as it is");
+            let message = format!("{UNIT_FILE} was not written by Marsa, so it was left as it is");
             return OpResult::failed(INSTALL, RESOLVED_FOREIGN, message);
         }
-        Current::Unreadable(kind) => return unreadable(INSTALL, kind),
-        Current::Ours(bytes) => Some(bytes == content.as_bytes()),
+        Current::Unreadable(kind) => {
+            return OpResult::failed(INSTALL, RESOLVED_READ, unreadable(UNIT_FILE, kind));
+        }
+        Current::Ours(bytes) => Some(bytes),
         Current::Missing => None,
     };
     let not_running = match running(system) {
         Ok(true) => None,
-        Ok(false) => Some(format!("{UNIT} is not running")),
+        Ok(false) => Some(format!("{RESOLVED} is not running")),
         Err(reason) => Some(reason),
     };
     if let Some(reason) = not_running {
-        let message = format!("{reason}, so nothing was changed");
+        let message = format!("{reason}, {nothing_else}");
         return OpResult::failed(INSTALL, RESOLVED_NOT_RUNNING, message);
     }
-    match in_place {
-        // The same file, checked again (read only): it may never have been
-        // loaded (a crash before the restart), or another global server came
-        // later. A restart cannot give a connection a DNS server, so without
-        // one the working file stays. A list that cannot be read tells
-        // nothing, so nothing changes.
-        Some(true) => {
-            let dns = match list(system) {
-                Ok(dns) => dns,
-                Err(reason) => {
-                    let message = format!("{reason}; nothing was changed");
-                    return OpResult::failed(INSTALL, RESOLVED_CHECK_FAILED, message);
-                }
+    let version = match systemd_version(system) {
+        Ok(version) if version >= FIRST_SYSTEMD => version,
+        other => {
+            let reason = match other {
+                Ok(version) => format!(
+                    "systemd {version} is older than {FIRST_SYSTEMD}: its resolved can drop the \
+                     settings of Marsa's link"
+                ),
+                Err(reason) => reason,
             };
-            match judge(&dns, &ours, true) {
-                Ok(()) => return result(INSTALL, Outcome::Unchanged),
-                Err((code, reason)) if code == RESOLVED_NO_LINK_DNS => {
-                    let message = format!("{reason}; nothing was changed");
-                    return OpResult::failed(INSTALL, code, message);
-                }
-                Err(_) => {}
-            }
+            // A unit of an earlier install would meet that race at every
+            // boot, so it goes.
+            let message = if current.is_some() {
+                let cleanup = match take_out(system) {
+                    Ok(()) => format!("{UNIT_FILE} of an earlier install was taken out"),
+                    Err((_, why)) => why,
+                };
+                format!("{reason}; {cleanup}")
+            } else {
+                format!("{reason}, {nothing_else}")
+            };
+            return OpResult::failed(INSTALL, RESOLVED_SYSTEMD_TOO_OLD, message);
         }
-        // No file of Marsa's yet: what can be told without it is checked
-        // first, with nothing written and no restart.
-        None => {
-            if let Err((code, reason)) = check(system, &ours, false) {
-                let message = format!("{reason}; nothing was changed");
-                return OpResult::failed(INSTALL, code, message);
-            }
-        }
-        // An older file of Marsa's (another port): its server is listed.
-        Some(false) => {}
-    }
-    if in_place != Some(true)
-        && let Err(err) = system.write_atomic(Path::new(FILE), content.as_bytes(), MODE)
+    };
+    let Some(ip) = IP.into_iter().find(|path| system.exists(Path::new(path))) else {
+        let message = format!(
+            "no ip program (iproute2) at {}, {nothing_else}",
+            IP.join(", ")
+        );
+        return OpResult::failed(INSTALL, RESOLVED_TOOL_MISSING, message);
+    };
+    let content = unit(ip, port, version < NO_BIND_BUG);
+    let in_place = current.as_deref() == Some(content.as_bytes());
+    // In place, working, and enabled for the next boot: nothing to do.
+    if in_place
+        && check(system, port).is_ok()
+        && program::succeeded(&system.run(SYSTEMCTL, &IS_ENABLED))
     {
-        let message = format!("cannot write {FILE}: {}", err.kind());
+        let outcome = if dropped {
+            Outcome::Done
+        } else {
+            Outcome::Unchanged
+        };
+        return result(INSTALL, outcome);
+    }
+    if !in_place
+        && let Err(err) = system.write_atomic(Path::new(UNIT_FILE), content.as_bytes(), MODE)
+    {
+        let message = format!("cannot write {UNIT_FILE}: {}", err.kind());
         return OpResult::failed(INSTALL, RESOLVED_WRITE, message);
     }
-    let restarted = restart(system);
-    // Whether a running systemd-resolved may have read a file of Marsa's:
-    // one that was there before, or this one after the restart.
-    let loaded = in_place.is_some() || restarted.is_ok();
-    let checked = restarted
-        .map_err(|reason| (RESOLVED_RESTART_FAILED, reason))
-        .and_then(|()| check(system, &ours, true));
+    let checked = start(system)
+        .map_err(|reason| (RESOLVED_UNIT_FAILED, reason))
+        .and_then(|()| {
+            wait_for_link(system, port).map_err(|reason| (RESOLVED_CHECK_FAILED, reason))
+        });
     let Err((code, reason)) = checked else {
         return result(INSTALL, Outcome::Done);
     };
-    // Marsa's file goes, also one that was there before this call, and
-    // systemd-resolved starts again without it.
-    let cleanup = match system.remove(Path::new(FILE)) {
-        Ok(()) => "was removed again",
-        Err(_) => "could not be removed",
+    // The unit goes, also one that was there before this call: a unit that
+    // does not work must not run again at the next boot.
+    let cleanup = match take_out(system) {
+        Ok(()) => format!("{UNIT_FILE} was removed again"),
+        Err((_, why)) => why,
     };
-    let message = format!("{reason}; {FILE} {cleanup}");
-    match settle(system, restart(system)) {
-        Restarted::Fine => OpResult::failed(INSTALL, code, message),
-        // Marsa's server may still be in use: that comes first.
-        Restarted::OldStillRuns(why) if loaded => {
-            let message = format!("{message}, but {why}; {OLD_RUNS}");
-            OpResult::failed(INSTALL, RESOLVED_RESTART_FAILED, message)
-        }
-        // It never read a file of Marsa's, so it runs as before.
-        Restarted::OldStillRuns(_) => OpResult::failed(INSTALL, code, message),
-        Restarted::Stopped(_) => {
-            OpResult::failed(INSTALL, RESOLVED_STOPPED, format!("{message}; {STOPPED}"))
-        }
-    }
+    OpResult::failed(INSTALL, code, format!("{reason}; {cleanup}"))
 }
 
-/// `resolved_remove`: deletes the file if Marsa wrote it. A missing or
-/// foreign file is `unchanged`: nothing of Marsa's is there to remove.
+/// `resolved_remove`: takes out Marsa's unit and the old drop-in, each only
+/// if Marsa wrote it. Both are tried; the first failure is the result.
+/// Nothing of Marsa's there is `unchanged`.
 pub fn remove(system: &impl System) -> OpResult {
-    match marked::current(system, Path::new(FILE)) {
-        Current::Missing | Current::Foreign => return result(REMOVE, Outcome::Unchanged),
-        Current::Unreadable(kind) => return unreadable(REMOVE, kind),
-        Current::Ours(_) => {}
-    }
-    if let Err(err) = system.remove(Path::new(FILE)) {
-        let message = format!("cannot delete {FILE}: {}", err.kind());
-        return OpResult::failed(REMOVE, RESOLVED_DELETE, message);
-    }
-    match running(system) {
-        Ok(true) => {}
-        // A systemd-resolved that does not run reads its files when it starts.
-        Ok(false) => return result(REMOVE, Outcome::Done),
-        // It may run, with Marsa's server.
-        Err(reason) => {
-            let message = format!("{FILE} was deleted, but {reason}; {OLD_RUNS}");
-            return OpResult::failed(REMOVE, RESOLVED_RESTART_FAILED, message);
+    let taken = match marked::current(system, Path::new(UNIT_FILE)) {
+        Current::Missing | Current::Foreign => Ok(false),
+        Current::Unreadable(kind) => Err((RESOLVED_READ, unreadable(UNIT_FILE, kind))),
+        Current::Ours(_) => take_out(system).map(|()| true),
+    };
+    let dropped = drop_old(system);
+    match (taken, dropped) {
+        (Err((code, message)), _) | (_, Err((code, message))) => {
+            OpResult::failed(REMOVE, code, message)
         }
-    }
-    match settle(system, restart(system)) {
-        Restarted::Fine => result(REMOVE, Outcome::Done),
-        Restarted::OldStillRuns(why) => {
-            let message = format!("{FILE} was deleted, but {why}; {OLD_RUNS}");
-            OpResult::failed(REMOVE, RESOLVED_RESTART_FAILED, message)
-        }
-        Restarted::Stopped(why) => {
-            let message = format!("{FILE} was deleted, but {why}; {STOPPED}");
-            OpResult::failed(REMOVE, RESOLVED_STOPPED, message)
-        }
+        (Ok(false), Ok(false)) => result(REMOVE, Outcome::Unchanged),
+        (Ok(_), Ok(_)) => result(REMOVE, Outcome::Done),
     }
 }
 
-/// LF only, with a final newline.
-fn content(port: u16) -> String {
-    format!("{MARKER}\n[Resolve]\nDNS={}\nDomains=~test\n", server(port))
+/// The unit, for `ip` at `ip`. LF only, with a final newline. The domain
+/// and the default route come before the server (see the module doc). A
+/// `-` before a command lets the unit go on when it fails: the link or its
+/// address may be there already, and LLMNR, mDNS, or DNS over TLS may be
+/// built out. Without `dnsovertls no`, a global `DNSOverTLS=yes` would make
+/// resolved speak TLS to `marsad`, which does not.
+/// `ExecStopPost=` runs after a stop, and also after a start that failed.
+/// `loopback_route`: before systemd 253 (see the module doc).
+fn unit(ip: &str, port: u16, loopback_route: bool) -> String {
+    let route = if loopback_route {
+        format!("ExecStart={ip} route add local 127.0.0.1/32 dev {LINK} table local metric 1024\n")
+    } else {
+        String::new()
+    };
+    format!(
+        "{MARKER}
+[Unit]
+Description=Marsa: send .test names to marsad
+After={RESOLVED}
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-{ip} link add {LINK} type dummy
+ExecStart={ip} link set {LINK} up
+ExecStart=-{ip} addr add {ADDRESS} dev {LINK}
+{route}ExecStart={RESOLVECTL} default-route {LINK} false
+ExecStart={RESOLVECTL} domain {LINK} ~test
+ExecStart=-{RESOLVECTL} llmnr {LINK} no
+ExecStart=-{RESOLVECTL} mdns {LINK} no
+ExecStart=-{RESOLVECTL} dnsovertls {LINK} no
+ExecStart={RESOLVECTL} dns {LINK} {server}
+ExecStopPost=-{ip} link del {LINK}
+
+[Install]
+WantedBy=multi-user.target
+",
+        server = server(port)
+    )
 }
 
 /// Marsa's DNS server as systemd-resolved writes it.
@@ -224,14 +310,241 @@ fn server(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
-/// Whether systemd-resolved runs, or why `systemctl` cannot tell.
+/// The version of systemd, from the first line of `systemctl --version`
+/// (`systemd 255 (255.4-1ubuntu8)`), or why it cannot be read.
+fn systemd_version(system: &impl System) -> Result<u32, String> {
+    let output = system.run(SYSTEMCTL, &VERSION);
+    let version = output
+        .as_ref()
+        .ok()
+        .filter(|output| output.code == Some(0))
+        .and_then(|output| {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let first = text.lines().next()?.to_owned();
+            first
+                .strip_prefix("systemd ")?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        });
+    version.ok_or_else(|| {
+        let reason = if program::succeeded(&output) {
+            "printed no version".to_owned()
+        } else {
+            program::failure(&output)
+        };
+        format!("cannot read the version of systemd: systemctl --version {reason}")
+    })
+}
+
+/// Loads the unit file, adds the unit to the boot, and (re)starts it. A
+/// failed state is cleared first: systemd refuses a sixth start in ten
+/// seconds (spike S-02c).
+fn start(system: &impl System) -> Result<(), String> {
+    let _ = system.run(SYSTEMCTL, &RESET_FAILED_UNIT);
+    for args in [&DAEMON_RELOAD[..], &ENABLE, &RESTART_UNIT] {
+        let output = system.run(SYSTEMCTL, args);
+        if !program::succeeded(&output) {
+            return Err(format!(
+                "systemctl {} {}",
+                args.join(" "),
+                program::failure(&output)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Stops and disables the unit (its stop deletes the link; after a failed
+/// start, `ExecStopPost=` already did), deletes its
+/// file, and makes systemd forget it. The file is tried even when the stop
+/// failed: without it, the unit does not run at the next boot.
+fn take_out(system: &impl System) -> Result<(), (&'static str, String)> {
+    let disabled = system.run(SYSTEMCTL, &DISABLE);
+    let removed = system.remove(Path::new(UNIT_FILE));
+    let _ = system.run(SYSTEMCTL, &DAEMON_RELOAD);
+    let _ = system.run(SYSTEMCTL, &RESET_FAILED_UNIT);
+    if let Err(err) = removed {
+        let message = format!("cannot delete {UNIT_FILE}: {}", err.kind());
+        return Err((RESOLVED_DELETE, message));
+    }
+    if !program::succeeded(&disabled) {
+        let message = format!(
+            "{UNIT_FILE} was deleted, but systemctl {} {}; {LINK} may stay until the next boot",
+            DISABLE.join(" "),
+            program::failure(&disabled)
+        );
+        return Err((RESOLVED_UNIT_FAILED, message));
+    }
+    Ok(())
+}
+
+/// [`check`] until it passes, up to [`CHECKS`] times. The last reason if it
+/// never does.
+fn wait_for_link(system: &impl System, port: u16) -> Result<(), String> {
+    let mut checked = check(system, port);
+    for _ in 1..CHECKS {
+        if checked.is_ok() {
+            break;
+        }
+        system.pause(CHECK_PAUSE);
+        checked = check(system, port);
+    }
+    checked
+}
+
+/// Whether resolved sends `.test` names, and only them, to Marsa's server
+/// through `marsa0`, from `resolvectl status marsa0`.
+fn check(system: &impl System, port: u16) -> Result<(), String> {
+    let output = system.run(RESOLVECTL, &STATUS);
+    let Some(link) = read_status(&output) else {
+        return Err(format!(
+            "resolvectl status {LINK} {}",
+            program::failure(&output)
+        ));
+    };
+    let has = |list: &[String], word: &str| list.iter().any(|item| item == word);
+    if link.servers != [server(port)] {
+        Err(format!("{LINK} does not have Marsa's DNS server alone"))
+    } else if link.domains != ["~test"] {
+        // Another domain would send its names there too; `~.` every name.
+        Err(format!("{LINK} does not route .test names alone"))
+    } else if !has(&link.protocols, "-DefaultRoute") {
+        // Without it the link would get other names too: the very thing
+        // this setup avoids.
+        Err(format!("{LINK} is not marked as no default route"))
+    } else if !has(&link.protocols, "-DNSOverTLS") {
+        // `marsad` does not speak TLS: every `.test` lookup would fail.
+        Err(format!("{LINK} would use DNS over TLS"))
+    } else if !has(&link.scopes, "DNS") {
+        Err(format!("systemd-resolved does not use {LINK} for DNS"))
+    } else {
+        Ok(())
+    }
+}
+
+/// What `resolvectl status <link>` shows for one link, as lists of words.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LinkStatus {
+    scopes: Vec<String>,
+    protocols: Vec<String>,
+    servers: Vec<String>,
+    domains: Vec<String>,
+}
+
+/// The fields of [`LinkStatus`], and the others.
+#[derive(Clone, Copy)]
+enum Field {
+    Scopes,
+    Protocols,
+    Servers,
+    Domains,
+    Other,
+}
+
+/// The status in the output of `resolvectl status <link>`, or `None` if the
+/// program failed (also for a link that is not there). A line without a
+/// key goes on the value before it, as a wrapped value does:
+///
+/// ```text
+/// Link 3 (marsa0)
+///     Current Scopes: DNS
+///          Protocols: -DefaultRoute LLMNR=resolve -mDNS -DNSOverTLS
+///                     DNSSEC=no/unsupported
+/// Current DNS Server: 127.0.0.1:18053
+///        DNS Servers: 127.0.0.1:18053
+///         DNS Domain: ~test
+///      Default Route: no
+/// ```
+fn read_status(output: &io::Result<RunOutput>) -> Option<LinkStatus> {
+    let output = output
+        .as_ref()
+        .ok()
+        .filter(|output| output.code == Some(0))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut status = LinkStatus::default();
+    let mut field = Field::Other;
+    for line in text.lines() {
+        let words = match line.split_once(':') {
+            Some((key, words)) if is_key(key.trim()) => {
+                field = match key.trim() {
+                    "Current Scopes" => Field::Scopes,
+                    "Protocols" => Field::Protocols,
+                    "DNS Servers" => Field::Servers,
+                    "DNS Domain" => Field::Domains,
+                    _ => Field::Other,
+                };
+                words
+            }
+            _ => line,
+        };
+        let list = match field {
+            Field::Scopes => &mut status.scopes,
+            Field::Protocols => &mut status.protocols,
+            Field::Servers => &mut status.servers,
+            Field::Domains => &mut status.domains,
+            Field::Other => continue,
+        };
+        list.extend(words.split_whitespace().map(str::to_owned));
+    }
+    Some(status)
+}
+
+/// A key of `resolvectl status`: words that start with a capital letter.
+/// So a wrapped value with a `:`, as `127.0.0.1:53` or `fd00::1`, is no key.
+fn is_key(text: &str) -> bool {
+    text.starts_with(|c: char| c.is_ascii_uppercase())
+        && text.chars().all(|c| c.is_ascii_alphabetic() || c == ' ')
+}
+
+/// Deletes [`DROP_IN`] if Marsa wrote it, and restarts systemd-resolved
+/// without it. `Ok(true)`: it was there and is gone.
+fn drop_old(system: &impl System) -> Result<bool, (&'static str, String)> {
+    match marked::current(system, Path::new(DROP_IN)) {
+        Current::Missing | Current::Foreign => return Ok(false),
+        Current::Unreadable(kind) => return Err((RESOLVED_READ, unreadable(DROP_IN, kind))),
+        Current::Ours(_) => {}
+    }
+    if let Err(err) = system.remove(Path::new(DROP_IN)) {
+        let message = format!("cannot delete {DROP_IN}: {}", err.kind());
+        return Err((RESOLVED_DELETE, message));
+    }
+    match running(system) {
+        Ok(true) => {}
+        // A systemd-resolved that does not run reads its files when it
+        // starts.
+        Ok(false) => return Ok(true),
+        Err(reason) => {
+            let message = format!("{DROP_IN} was deleted, but {reason}; {OLD_RUNS}");
+            return Err((RESOLVED_RESTART_FAILED, message));
+        }
+    }
+    match settle(system, restart(system)) {
+        Restarted::Fine => Ok(true),
+        Restarted::OldMayRun(why) => {
+            let message = format!("{DROP_IN} was deleted, but {why}; {OLD_RUNS}");
+            Err((RESOLVED_RESTART_FAILED, message))
+        }
+        Restarted::Stopped(why) => {
+            let message = format!("{DROP_IN} was deleted, but {why}; {STOPPED}");
+            Err((RESOLVED_STOPPED, message))
+        }
+    }
+}
+
+/// Whether systemd-resolved runs. `Err` with the reason when `systemctl`
+/// cannot tell: only exit code 3 means "not active".
 fn running(system: &impl System) -> Result<bool, String> {
     let active = system.run(SYSTEMCTL, &IS_ACTIVE);
     match &active {
-        Ok(output) if output.code == Some(0) => Ok(true),
-        Ok(RunOutput { code: Some(_), .. }) => Ok(false),
+        Ok(RunOutput { code: Some(0), .. }) => Ok(true),
+        Ok(RunOutput {
+            code: Some(INACTIVE),
+            ..
+        }) => Ok(false),
         _ => Err(format!(
-            "cannot check {UNIT}: systemctl {}",
+            "cannot check {RESOLVED}: systemctl {}",
             program::failure(&active)
         )),
     }
@@ -247,7 +560,7 @@ fn restart(system: &impl System) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "systemctl restart {UNIT} {}",
+            "systemctl restart {RESOLVED} {}",
             program::failure(&restarted)
         ))
     }
@@ -257,148 +570,36 @@ fn restart(system: &impl System) -> Result<(), String> {
 enum Restarted {
     /// It runs with the files as they are now.
     Fine,
-    /// The restart failed, and the old process runs on with the files as
-    /// they were. The reason is the restart's.
-    OldStillRuns(String),
+    /// The restart failed, and the old process may run on with the files as
+    /// they were: it runs, or `systemctl` cannot tell. The reason is the
+    /// restart's.
+    OldMayRun(String),
     /// It does not run, also after one more start: on most machines no name
     /// resolves. The reason is the restart's.
     Stopped(String),
 }
 
-/// After a failed restart: whether the old process runs on, or else one
+/// After a failed restart: whether the old process may run on, or else one
 /// more start, which reads the files as they are now.
 fn settle(system: &impl System, restarted: Result<(), String>) -> Restarted {
     let Err(reason) = restarted else {
         return Restarted::Fine;
     };
-    if running(system) == Ok(true) {
-        return Restarted::OldStillRuns(reason);
+    if running(system) != Ok(false) {
+        return Restarted::OldMayRun(reason);
     }
     let _ = system.run(SYSTEMCTL, &RESET_FAILED);
     let _ = system.run(SYSTEMCTL, &START);
-    if running(system) == Ok(true) {
-        Restarted::Fine
-    } else {
-        Restarted::Stopped(reason)
+    match running(system) {
+        Ok(true) => Restarted::Fine,
+        Ok(false) => Restarted::Stopped(reason),
+        Err(_) => Restarted::OldMayRun(reason),
     }
 }
 
-/// Whether `.test` names reach `ours` and other names still resolve, from
-/// `resolvectl dns`. `listed`: whether `ours` must be in the global list;
-/// not before Marsa's file is written. Either way it is not another server.
-fn check(system: &impl System, ours: &str, listed: bool) -> Result<(), (&'static str, String)> {
-    let dns = list(system).map_err(|reason| (RESOLVED_CHECK_FAILED, reason))?;
-    judge(&dns, ours, listed)
-}
-
-/// The servers `resolvectl dns` lists, or why they cannot be read.
-fn list(system: &impl System) -> Result<Dns, String> {
-    let output = system.run(RESOLVECTL, &["dns"]);
-    read_dns(&output).ok_or_else(|| {
-        let reason = if program::succeeded(&output) {
-            "printed no global line".to_owned()
-        } else {
-            program::failure(&output)
-        };
-        format!("resolvectl dns {reason}")
-    })
-}
-
-/// [`check`] on servers already read.
-fn judge(dns: &Dns, ours: &str, listed: bool) -> Result<(), (&'static str, String)> {
-    let others = dns
-        .global
-        .iter()
-        .filter(|server| server.as_str() != ours)
-        .count();
-    if others > 0 {
-        // How many, never which: the addresses are the user's own.
-        let reason = format!(
-            "systemd-resolved has {others} other global DNS server(s), so .test names would not \
-             resolve"
-        );
-        return Err((RESOLVED_OTHER_DNS, reason));
-    }
-    if listed && !dns.global.iter().any(|server| server == ours) {
-        let reason = "systemd-resolved does not list Marsa's DNS server".to_owned();
-        return Err((RESOLVED_CHECK_FAILED, reason));
-    }
-    if !dns.link_server {
-        let reason = "no network connection has a DNS server, and with Marsa's server \
-                      systemd-resolved would not use its fallback servers"
-            .to_owned();
-        return Err((RESOLVED_NO_LINK_DNS, reason));
-    }
-    Ok(())
-}
-
-/// What `resolvectl dns` shows.
-#[derive(Debug, PartialEq, Eq)]
-struct Dns {
-    /// The global servers, as written (`1.1.1.1#name`, `[::1]:53`).
-    global: Vec<String>,
-    /// Whether any network connection (link) has a server.
-    link_server: bool,
-}
-
-/// The servers in the output of `resolvectl dns`, or `None` if the program
-/// failed or printed no `Global:` line. A long list goes on, indented, on
-/// the next lines:
-///
-/// ```text
-/// Global: 1.1.1.1#cloudflare-dns.com 1.0.0.1#cloudflare-dns.com
-///         127.0.0.1:18053
-/// Link 2 (eth0): 168.63.129.16
-/// Link 3 (docker0):
-/// ```
-///
-/// An interface name never holds `:`, so the first `:` ends the head.
-fn read_dns(listed: &io::Result<RunOutput>) -> Option<Dns> {
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Section {
-        Global,
-        Link,
-        Other,
-    }
-    let output = listed
-        .as_ref()
-        .ok()
-        .filter(|output| output.code == Some(0))?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut global: Option<Vec<String>> = None;
-    let mut link_server = false;
-    let mut section = Section::Other;
-    for line in text.lines() {
-        let servers = if line.starts_with(char::is_whitespace) {
-            line
-        } else {
-            let (head, servers) = line.split_once(':').unwrap_or((line, ""));
-            section = if head == "Global" {
-                global.get_or_insert_with(Vec::new);
-                Section::Global
-            } else if head.starts_with("Link ") {
-                Section::Link
-            } else {
-                Section::Other
-            };
-            servers
-        };
-        let mut servers = servers.split_whitespace().map(str::to_owned).peekable();
-        match section {
-            Section::Global => global.get_or_insert_with(Vec::new).extend(servers),
-            Section::Link => link_server |= servers.peek().is_some(),
-            Section::Other => {}
-        }
-    }
-    Some(Dns {
-        global: global?,
-        link_server,
-    })
-}
-
-fn unreadable(op: &'static str, kind: io::ErrorKind) -> OpResult {
-    let message = format!("cannot read {FILE}: {kind}, so it was left as it is");
-    OpResult::failed(op, RESOLVED_READ, message)
+/// The message for a file at `path` that cannot be read.
+fn unreadable(path: &str, kind: io::ErrorKind) -> String {
+    format!("cannot read {path}: {kind}, so it was left as it is")
 }
 
 fn result(op: &'static str, outcome: Outcome) -> OpResult {
@@ -419,85 +620,162 @@ mod tests {
     use crate::request::Request;
     use crate::system::FakeSystem;
 
-    // Written out again, not taken from the constants above: a test must
-    // fail if one of those changes.
-    const CONF: &str = "/etc/systemd/resolved.conf.d/marsa.conf";
     const ACTIVE: &str = "/usr/bin/systemctl is-active --quiet systemd-resolved.service";
     const RESET: &str = "/usr/bin/systemctl reset-failed systemd-resolved.service";
     const RESTARTED: &str = "/usr/bin/systemctl restart systemd-resolved.service";
     const STARTED: &str = "/usr/bin/systemctl start systemd-resolved.service";
-    const LISTED: &str = "/usr/bin/resolvectl dns";
-
-    /// The mode of a file a test starts with. Marsa never writes it, so the
-    /// mode shows whether an op rewrote the file.
+    const RELOAD: &str = "/usr/bin/systemctl daemon-reload";
+    const ENABLED: &str = "/usr/bin/systemctl enable marsa-dns-link.service";
+    const UNIT_UP: &str = "/usr/bin/systemctl restart marsa-dns-link.service";
+    const DISABLED: &str = "/usr/bin/systemctl disable --now marsa-dns-link.service";
+    const IS_ENABLED_CMD: &str = "/usr/bin/systemctl is-enabled --quiet marsa-dns-link.service";
+    const RESET_UNIT: &str = "/usr/bin/systemctl reset-failed marsa-dns-link.service";
+    const LOOKED: &str = "/usr/bin/resolvectl status marsa0";
+    const VERSIONED: &str = "/usr/bin/systemctl --version";
+    /// The mode of files that were there before a test, so a rewrite shows.
     const OLD_MODE: u32 = 0o600;
-    /// Another tool's drop-in at the same path.
-    const FOREIGN: &[u8] = b"[Resolve]\nDNS=9.9.9.9\n";
+    const FOREIGN: &[u8] = b"[Unit]\nDescription=someone else's\n";
+    const FOREIGN_DROP_IN: &[u8] = b"[Resolve]\nDNS=9.9.9.9\n";
 
-    /// A Linux with systemd-resolved, whose `resolvectl dns` shows what it
-    /// read at its last start. Files and the log are in `fake`.
+    /// The global drop-in of task M4-18a, as it wrote it.
+    fn drop_in() -> Vec<u8> {
+        format!("{MARKER}\n[Resolve]\nDNS=127.0.0.1:18053\nDomains=~test\n").into_bytes()
+    }
+
+    /// Marsa's unit for `port`, with `ip` at its first path.
+    fn ours(port: u16) -> Vec<u8> {
+        unit("/usr/sbin/ip", port, false).into_bytes()
+    }
+
+    /// `marsa0` while it is there, as the lines of the unit left it.
+    #[derive(Clone, Debug, Default)]
+    struct Link {
+        address: bool,
+        /// Set by `default-route`; `None` is resolved's automatic mode.
+        default_route: Option<bool>,
+        domains: Vec<String>,
+        server: Option<String>,
+        /// Set by `dnsovertls no`.
+        no_dot: bool,
+        /// The local route for `127.0.0.1` on the link.
+        loopback_route: bool,
+    }
+
+    impl Link {
+        /// The default route in effect: in the automatic mode, a link is one
+        /// unless it has a routing-only domain (`~x`), and `~.` makes it one.
+        fn default_route(&self) -> bool {
+            let only = self.domains.iter().any(|domain| domain.starts_with('~'));
+            let all = self.domains.iter().any(|domain| domain == "~.");
+            self.default_route.unwrap_or(!only || all)
+        }
+
+        /// Whether names outside `.test` could reach the server now.
+        fn exposed(&self) -> bool {
+            self.server.is_some() && (self.default_route() || self.domains != ["~test"])
+        }
+    }
+
+    /// A Linux with systemd-resolved and `ip`, whose systemd runs Marsa's
+    /// unit as written. Files and the log are in `fake`.
     struct Linux {
         fake: FakeSystem,
         active: Cell<bool>,
-        /// Marsa's file as systemd-resolved read it at its last start.
-        loaded: RefCell<Option<Vec<u8>>>,
-        /// The user's own global servers.
-        others: Vec<&'static str>,
-        /// Whether the network connection has a DNS server.
-        link_server: bool,
-        /// That many restarts work before `failing_restarts` count.
-        ok_restarts: Cell<u32>,
-        /// That many restarts fail, and leave it stopped.
-        failing_restarts: Cell<u32>,
-        start_fails: bool,
+        /// `systemctl is-active` exits with this instead, as on a bus error.
+        active_code: Option<i32>,
         no_systemctl: bool,
+        /// That many restarts of systemd-resolved fail.
+        failing_restarts: Cell<u32>,
+        /// A failed restart leaves the old process running.
+        old_survives: bool,
+        start_fails: bool,
+        /// systemd-resolved read the drop-in at its last start.
+        drop_in_loaded: Cell<bool>,
+        /// The unit as systemd read it at the last `daemon-reload`.
+        loaded: RefCell<Option<Vec<u8>>>,
+        enabled: Cell<bool>,
+        /// The unit's start worked, and it has not stopped since.
+        unit_active: Cell<bool>,
+        link: RefCell<Option<Link>>,
+        /// At any moment, `marsa0` had a server for more than `.test`.
+        exposed: Cell<bool>,
+        /// This `systemctl` command line fails.
+        failing: Option<&'static str>,
+        /// The unit's command that has this text fails.
+        failing_line: Option<&'static str>,
+        /// resolved does not use the link, whatever the unit did.
+        unused: bool,
+        /// `status` says "Current Scopes: none" that many more times first.
+        none_for: Cell<u32>,
         resolvectl_fails: bool,
-        /// A systemd-resolved that does not read the drop-in folder.
-        ignores_file: bool,
-        /// Long global lists: one server per line, as when they are wrapped.
-        wrapped: bool,
-        /// For each command: whether Marsa's file was there.
-        file_at: RefCell<Vec<bool>>,
+        /// `status` as systemd 262 prints it (Fedora 45).
+        fedora: bool,
+        /// What `systemctl --version` says on its first line.
+        version_line: &'static str,
+        /// A global `DNSOverTLS=yes`, which a link inherits.
+        strict_dot: bool,
     }
 
     impl Linux {
         fn new() -> Self {
-            Self {
+            let linux = Self {
                 fake: FakeSystem::default(),
                 active: Cell::new(true),
-                loaded: RefCell::new(None),
-                others: Vec::new(),
-                link_server: true,
-                ok_restarts: Cell::new(0),
-                failing_restarts: Cell::new(0),
-                start_fails: false,
+                active_code: None,
                 no_systemctl: false,
+                failing_restarts: Cell::new(0),
+                old_survives: false,
+                start_fails: false,
+                drop_in_loaded: Cell::new(false),
+                loaded: RefCell::new(None),
+                enabled: Cell::new(false),
+                unit_active: Cell::new(false),
+                link: RefCell::new(None),
+                exposed: Cell::new(false),
+                failing: None,
+                failing_line: None,
+                unused: false,
+                none_for: Cell::new(0),
                 resolvectl_fails: false,
-                ignores_file: false,
-                wrapped: false,
-                file_at: RefCell::new(Vec::new()),
-            }
+                fedora: false,
+                version_line: "systemd 255 (255.4-1ubuntu8)",
+                strict_dot: false,
+            };
+            linux.put("/usr/sbin/ip", b"");
+            linux
         }
 
-        /// With `bytes` at Marsa's path, and systemd-resolved running with
-        /// it loaded.
-        fn with_file(bytes: &[u8]) -> Self {
+        /// With `bytes` as the unit, loaded, enabled, and started.
+        fn with_unit(bytes: &[u8]) -> Self {
             let linux = Self::new();
-            let file = (bytes.to_vec(), OLD_MODE);
+            linux.put(UNIT_FILE, bytes);
+            *linux.loaded.borrow_mut() = Some(bytes.to_vec());
+            linux.enabled.set(true);
+            linux.start_unit();
             linux
-                .fake
+        }
+
+        /// With the old drop-in, loaded.
+        fn with_drop_in(self) -> Self {
+            self.put(DROP_IN, &drop_in());
+            self.drop_in_loaded.set(true);
+            self
+        }
+
+        fn put(&self, path: &str, bytes: &[u8]) {
+            let file = (bytes.to_vec(), OLD_MODE);
+            self.fake
                 .files
                 .borrow_mut()
-                .insert(PathBuf::from(CONF), file);
-            *linux.loaded.borrow_mut() = Some(bytes.to_vec());
-            linux
+                .insert(PathBuf::from(path), file);
         }
 
-        /// The file at Marsa's path. No other file may appear.
-        fn file(&self) -> Option<(Vec<u8>, u32)> {
-            let files = self.fake.files.borrow();
-            assert!(files.keys().all(|path| path == Path::new(CONF)));
-            files.get(Path::new(CONF)).cloned()
+        fn file(&self, path: &str) -> Option<(Vec<u8>, u32)> {
+            self.fake.files.borrow().get(Path::new(path)).cloned()
+        }
+
+        fn unit_file(&self) -> Option<(Vec<u8>, u32)> {
+            self.file(UNIT_FILE)
         }
 
         /// Every command that ran, as `program arguments`.
@@ -508,38 +786,218 @@ mod tests {
                 .collect()
         }
 
-        /// A (re)start: reads Marsa's file, if it is there.
-        fn start(&self) {
-            self.active.set(true);
-            let file = self.file().map(|(bytes, _)| bytes);
-            *self.loaded.borrow_mut() = file.filter(|_| !self.ignores_file);
+        /// The server of `marsa0`, while it is there.
+        fn server(&self) -> Option<String> {
+            self.link
+                .borrow()
+                .as_ref()
+                .and_then(|link| link.server.clone())
         }
 
-        /// What `resolvectl dns` prints now.
-        fn listing(&self) -> String {
+        /// The lines of the loaded unit that start with `key=`, without the
+        /// `-` that lets one fail: `(may_fail, command)`.
+        fn lines(&self, key: &str) -> Vec<(bool, String)> {
             let loaded = self.loaded.borrow();
-            let ours = loaded.as_deref().and_then(|bytes| {
-                let text = String::from_utf8_lossy(bytes).into_owned();
-                text.lines()
-                    .find_map(|line| line.strip_prefix("DNS="))
-                    .map(str::to_owned)
-            });
-            let global: Vec<String> = self
-                .others
-                .iter()
-                .map(|server| (*server).to_owned())
-                .chain(ours)
-                .collect();
-            let separator = if self.wrapped { "\n        " } else { " " };
-            let link = if self.link_server {
-                " 168.63.129.16"
+            let text = String::from_utf8_lossy(loaded.as_deref().unwrap_or_default());
+            text.lines()
+                .filter_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+                .map(|command| match command.strip_prefix('-') {
+                    Some(command) => (true, command.to_owned()),
+                    None => (false, command.to_owned()),
+                })
+                .collect()
+        }
+
+        /// systemd starts the loaded unit: its `ExecStart=` lines in order.
+        /// A line that fails without a `-` fails the start, and then the
+        /// `ExecStopPost=` lines run.
+        fn start_unit(&self) -> bool {
+            for (may_fail, command) in self.lines("ExecStart") {
+                let failed = self.failing_line.is_some_and(|part| command.contains(part))
+                    || !self.apply(&command);
+                if failed && !may_fail {
+                    self.stop_unit(false);
+                    return false;
+                }
+            }
+            self.unit_active.set(true);
+            true
+        }
+
+        /// systemd stops the unit: `ExecStop=` only after a start that
+        /// worked, `ExecStopPost=` always.
+        fn stop_unit(&self, active: bool) {
+            let mut commands = if active {
+                self.lines("ExecStop")
             } else {
-                ""
+                Vec::new()
             };
-            format!(
-                "Global: {}\nLink 2 (eth0):{link}\nLink 3 (docker0):\n",
-                global.join(separator)
-            )
+            commands.extend(self.lines("ExecStopPost"));
+            for (_, command) in commands {
+                self.apply(&command);
+            }
+            self.unit_active.set(false);
+        }
+
+        /// One command of the unit, on the link. `false`: it failed, as
+        /// with no link to work on.
+        fn apply(&self, command: &str) -> bool {
+            let words: Vec<&str> = command.split_whitespace().collect();
+            let mut link = self.link.borrow_mut();
+            if let ["link", "add", "marsa0", "type", "dummy"] = &words[1..] {
+                let made = link.is_none();
+                link.get_or_insert_with(Link::default);
+                return made;
+            }
+            let Some(there) = link.as_mut() else {
+                return false;
+            };
+            match &words[1..] {
+                ["link", "del", "marsa0"] => *link = None,
+                ["link", "set", "marsa0", "up"] | ["llmnr" | "mdns", "marsa0", "no"] => {}
+                ["addr", "add", "169.254.53.53/32", "dev", "marsa0"] => there.address = true,
+                [
+                    "route",
+                    "add",
+                    "local",
+                    "127.0.0.1/32",
+                    "dev",
+                    "marsa0",
+                    "table",
+                    "local",
+                    "metric",
+                    "1024",
+                ] => {
+                    there.loopback_route = true;
+                }
+                ["default-route", "marsa0", value] => there.default_route = Some(*value == "true"),
+                ["dnsovertls", "marsa0", "no"] => there.no_dot = true,
+                ["domain", "marsa0", domains @ ..] => {
+                    there.domains = domains.iter().map(|word| (*word).to_owned()).collect();
+                }
+                ["dns", "marsa0", server] => there.server = Some((*server).to_owned()),
+                _ => panic!("the fake does not know: {command}"),
+            }
+            if link.as_ref().is_some_and(Link::exposed) {
+                self.exposed.set(true);
+            }
+            true
+        }
+
+        /// A (re)start of systemd-resolved: it reads the drop-in if it is
+        /// there.
+        fn start_resolved(&self) {
+            self.active.set(true);
+            self.drop_in_loaded.set(self.file(DROP_IN).is_some());
+        }
+
+        fn systemctl(&self, line: &str) -> io::Result<RunOutput> {
+            if self.no_systemctl {
+                return Err(io::ErrorKind::NotFound.into());
+            }
+            if self.failing == Some(line) {
+                return exit(1, "");
+            }
+            match line {
+                "--version" => exit(0, &format!("{}\n+PAM +AUDIT +SELINUX\n", self.version_line)),
+                "is-active --quiet systemd-resolved.service" => {
+                    let code = if self.active.get() { 0 } else { 3 };
+                    exit(self.active_code.unwrap_or(code), "")
+                }
+                "reset-failed systemd-resolved.service" => exit(0, ""),
+                "restart systemd-resolved.service" => {
+                    if self.failing_restarts.get() > 0 {
+                        self.failing_restarts.set(self.failing_restarts.get() - 1);
+                        self.active.set(self.old_survives);
+                        return exit(1, "");
+                    }
+                    self.start_resolved();
+                    exit(0, "")
+                }
+                "start systemd-resolved.service" => {
+                    if self.start_fails {
+                        return exit(1, "");
+                    }
+                    self.start_resolved();
+                    exit(0, "")
+                }
+                "daemon-reload" => {
+                    *self.loaded.borrow_mut() = self.unit_file().map(|(bytes, _)| bytes);
+                    exit(0, "")
+                }
+                "is-enabled --quiet marsa-dns-link.service" => {
+                    exit(if self.enabled.get() { 0 } else { 1 }, "")
+                }
+                "reset-failed marsa-dns-link.service" => exit(0, ""),
+                "enable marsa-dns-link.service" => {
+                    if self.loaded.borrow().is_none() {
+                        return exit(1, "");
+                    }
+                    self.enabled.set(true);
+                    exit(0, "")
+                }
+                "restart marsa-dns-link.service" => {
+                    if self.loaded.borrow().is_none() {
+                        return exit(5, "");
+                    }
+                    if self.unit_active.get() {
+                        self.stop_unit(true);
+                    }
+                    exit(if self.start_unit() { 0 } else { 1 }, "")
+                }
+                // A unit whose start failed is not active: nothing runs.
+                "disable --now marsa-dns-link.service" => {
+                    if self.unit_active.get() {
+                        self.stop_unit(true);
+                    }
+                    self.enabled.set(false);
+                    exit(0, "")
+                }
+                _ => panic!("unexpected systemctl {line}"),
+            }
+        }
+
+        /// What `resolvectl status marsa0` prints now.
+        fn status(&self) -> io::Result<RunOutput> {
+            let link = self.link.borrow().clone();
+            let Some(link) = link.filter(|_| !self.resolvectl_fails && self.active.get()) else {
+                return exit(1, "");
+            };
+            let mut used = link.address && link.server.is_some() && !self.unused;
+            if self.none_for.get() > 0 {
+                self.none_for.set(self.none_for.get() - 1);
+                used = false;
+            }
+            let scopes = if used { "DNS" } else { "none" };
+            let route = if link.default_route() { '+' } else { '-' };
+            let dot = if self.strict_dot && !link.no_dot {
+                '+'
+            } else {
+                '-'
+            };
+            let domains = link.domains.join(" ");
+            let mut text = if self.fedora {
+                format!(
+                    "Link 3 (marsa0)\n    Current Scopes: {scopes}\n         Protocols: \
+                     {route}DefaultRoute LLMNR=resolve -mDNS {dot}DNSOverTLS\n                    \
+                     DNSSEC=no/unsupported\n"
+                )
+            } else {
+                format!(
+                    "Link 5 (marsa0)\nCurrent Scopes: {scopes}\n     Protocols: \
+                     {route}DefaultRoute +LLMNR -mDNS {dot}DNSOverTLS DNSSEC=no/unsupported\n"
+                )
+            };
+            if let Some(server) = &link.server {
+                if self.fedora {
+                    text.push_str(&format!("Current DNS Server: {server}\n"));
+                }
+                text.push_str(&format!("       DNS Servers: {server}\n"));
+            }
+            if !domains.is_empty() {
+                text.push_str(&format!("        DNS Domain: {domains}\n"));
+            }
+            exit(0, &text)
         }
     }
 
@@ -560,6 +1018,10 @@ mod tests {
             self.fake.exists(path)
         }
 
+        fn is_link(&self, path: &Path) -> bool {
+            self.fake.is_link(path)
+        }
+
         fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
             self.fake.write_atomic(path, bytes, mode)
         }
@@ -578,39 +1040,9 @@ mod tests {
                 .log
                 .borrow_mut()
                 .push((program.to_owned(), strings));
-            self.file_at.borrow_mut().push(self.file().is_some());
-            match (program, args) {
-                ("/usr/bin/systemctl", _) if self.no_systemctl => {
-                    Err(io::ErrorKind::NotFound.into())
-                }
-                ("/usr/bin/systemctl", ["is-active", "--quiet", "systemd-resolved.service"]) => {
-                    exit(if self.active.get() { 0 } else { 3 }, "")
-                }
-                ("/usr/bin/systemctl", ["reset-failed", "systemd-resolved.service"]) => exit(0, ""),
-                ("/usr/bin/systemctl", ["restart", "systemd-resolved.service"]) => {
-                    if self.ok_restarts.get() > 0 {
-                        self.ok_restarts.set(self.ok_restarts.get() - 1);
-                    } else if self.failing_restarts.get() > 0 {
-                        self.failing_restarts.set(self.failing_restarts.get() - 1);
-                        self.active.set(false);
-                        return exit(1, "");
-                    }
-                    self.start();
-                    exit(0, "")
-                }
-                ("/usr/bin/systemctl", ["start", "systemd-resolved.service"]) => {
-                    if self.start_fails {
-                        return exit(1, "");
-                    }
-                    self.start();
-                    exit(0, "")
-                }
-                ("/usr/bin/resolvectl", ["dns"]) => {
-                    if self.resolvectl_fails || !self.active.get() {
-                        return exit(1, "");
-                    }
-                    exit(0, &self.listing())
-                }
+            match program {
+                "/usr/bin/systemctl" => self.systemctl(&args.join(" ")),
+                "/usr/bin/resolvectl" if args == ["status", "marsa0"] => self.status(),
                 _ => panic!("unexpected command: {program} {args:?}"),
             }
         }
@@ -620,525 +1052,649 @@ mod tests {
         }
     }
 
-    fn ours(port: u16) -> Vec<u8> {
-        let text =
-            "# Managed by Marsa. Do not edit.\n[Resolve]\nDNS=127.0.0.1:PORT\nDomains=~test\n";
-        text.replace("PORT", &port.to_string()).into_bytes()
-    }
-
     fn code_of(result: &OpResult) -> &'static str {
-        match result.outcome {
+        match &result.outcome {
             Outcome::Failed { code, .. } => code,
-            Outcome::Done => "done",
-            Outcome::Unchanged => "unchanged",
+            other => panic!("not a failure: {other:?}"),
         }
     }
 
     fn message_of(result: &OpResult) -> &str {
         match &result.outcome {
             Outcome::Failed { message, .. } => message,
-            _ => "",
+            other => panic!("not a failure: {other:?}"),
         }
     }
 
+    // --- install ---------------------------------------------------------
+
     #[test]
-    fn install_checks_writes_restarts_and_checks_again() {
+    fn install_writes_starts_and_checks_the_unit() {
         let linux = Linux::new();
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
-        assert_eq!(linux.file(), Some((ours(18053), 0o644)));
-        assert_eq!(linux.commands(), [ACTIVE, LISTED, RESET, RESTARTED, LISTED]);
-        // The first check ran before the file was there, the restart after.
-        assert_eq!(*linux.file_at.borrow(), [false, false, true, true, true]);
+        assert_eq!(linux.unit_file(), Some((ours(18053), 0o644)));
+        assert_eq!(
+            linux.commands(),
+            [
+                ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED
+            ]
+        );
+        assert!(linux.enabled.get());
+        assert_eq!(linux.server().as_deref(), Some("127.0.0.1:18053"));
     }
 
-    /// The snapshot does not show line endings, so they are checked here.
     #[test]
-    fn the_written_file() {
+    fn the_written_unit() {
         let linux = Linux::new();
-        assert_eq!(install(18053, &linux).outcome, Outcome::Done);
-        let (bytes, mode) = linux.file().unwrap();
+        install(18053, &linux);
+        let (bytes, mode) = linux.unit_file().unwrap();
         assert_eq!(mode, 0o644);
-        assert!(bytes.ends_with(b"~test\n") && !bytes.contains(&b'\r'));
+        assert!(bytes.ends_with(b"multi-user.target\n") && !bytes.contains(&b'\r'));
         let text = String::from_utf8(bytes).unwrap();
         insta::assert_snapshot!(text);
     }
 
-    /// The same file, loaded and working: two read-only commands.
+    /// systemd 249 (Ubuntu 22.04) and an unreadable version: no link, and
+    /// the old drop-in still goes.
     #[test]
-    fn install_over_our_working_file_is_unchanged() {
-        let mut linux = Linux::with_file(&ours(18053));
-        // Any write fails here, so `unchanged` also shows that none was tried.
-        linux.fake.fail_writes.insert(PathBuf::from(CONF));
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Unchanged));
-        assert_eq!(linux.file(), Some((ours(18053), OLD_MODE)));
-        assert_eq!(linux.commands(), [ACTIVE, LISTED]);
-    }
-
-    /// The same file, never loaded (a crash before the restart): restarted
-    /// and checked, not rewritten.
-    #[test]
-    fn install_over_our_file_that_was_not_loaded_restarts() {
-        let linux = Linux::with_file(&ours(18053));
-        *linux.loaded.borrow_mut() = None;
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
-        assert_eq!(linux.file(), Some((ours(18053), OLD_MODE)));
-        assert_eq!(linux.commands(), [ACTIVE, LISTED, RESET, RESTARTED, LISTED]);
-    }
-
-    /// An older file of Marsa's: its server is listed, so the check comes
-    /// after the restart only.
-    #[test]
-    fn install_rewrites_our_file_with_another_port() {
-        let linux = Linux::with_file(&ours(18054));
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
-        assert_eq!(linux.file(), Some((ours(18053), 0o644)));
-        assert_eq!(linux.commands(), [ACTIVE, RESET, RESTARTED, LISTED]);
-    }
-
-    /// The exact message also shows that it holds the path and no content.
-    #[test]
-    fn install_fails_on_a_foreign_file_and_keeps_it() {
-        let large = {
-            let mut bytes = ours(18053);
-            bytes.resize(4097, b'#');
-            bytes
-        };
-        for bytes in [FOREIGN.to_vec(), large] {
-            let linux = Linux::with_file(&bytes);
-            let message = format!("{CONF} was not written by Marsa, so it was left as it is");
-            let expected = OpResult::failed(INSTALL, RESOLVED_FOREIGN, message);
-            assert_eq!(install(18053, &linux), expected);
-            assert_eq!(remove(&linux), result(REMOVE, Outcome::Unchanged));
-            assert_eq!(linux.file(), Some((bytes, OLD_MODE)));
-            assert!(linux.commands().is_empty());
-        }
-        // A dangling symlink is someone else's too.
-        let mut linux = Linux::new();
-        linux.fake.dangling.insert(PathBuf::from(CONF));
-        assert_eq!(code_of(&install(18053, &linux)), RESOLVED_FOREIGN);
-        assert_eq!(remove(&linux), result(REMOVE, Outcome::Unchanged));
-        assert!(linux.commands().is_empty());
-    }
-
-    #[test]
-    fn a_file_that_cannot_be_read_is_resolved_read_and_kept() {
-        let mut linux = Linux::with_file(&ours(18053));
-        linux.fake.fail_reads.insert(PathBuf::from(CONF));
-        let message = format!("cannot read {CONF}: permission denied, so it was left as it is");
-        let failed = |op| OpResult::failed(op, RESOLVED_READ, message.clone());
-        assert_eq!(install(18053, &linux), failed(INSTALL));
-        assert_eq!(remove(&linux), failed(REMOVE));
-        assert_eq!(linux.file(), Some((ours(18053), OLD_MODE)));
-        assert!(linux.commands().is_empty());
-    }
-
-    #[test]
-    fn without_a_running_resolved_nothing_changes() {
-        // Not running: `is-active` exits with 3. Also with an older file.
-        for start in [None, Some(ours(18054))] {
-            let linux = start.as_deref().map_or_else(Linux::new, Linux::with_file);
-            linux.active.set(false);
-            let message = "systemd-resolved.service is not running, so nothing was changed";
-            let expected = OpResult::failed(INSTALL, RESOLVED_NOT_RUNNING, message.to_owned());
-            assert_eq!(install(18053, &linux), expected);
-            assert_eq!(linux.file().map(|(bytes, _)| bytes), start);
-            assert_eq!(linux.commands(), [ACTIVE]);
-        }
-        // No `systemctl` at all: the message says so.
-        let mut linux = Linux::new();
-        linux.no_systemctl = true;
-        let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_NOT_RUNNING);
+    fn a_systemd_before_250_gets_no_link() {
+        let mut old = Linux::new().with_drop_in();
+        old.version_line = "systemd 249 (249.11-0ubuntu3.12)";
+        let failed = install(18053, &old);
+        assert_eq!(code_of(&failed), RESOLVED_SYSTEMD_TOO_OLD);
         assert_eq!(
             message_of(&failed),
-            "cannot check systemd-resolved.service: systemctl could not run: entity not found, \
-             so nothing was changed"
+            "systemd 249 is older than 250: its resolved can drop the settings of Marsa's link, \
+             so only Marsa's old global setting was removed"
         );
-        assert_eq!(linux.file(), None);
+        assert_eq!((old.unit_file(), old.file(DROP_IN)), (None, None));
+        assert_eq!(
+            old.commands(),
+            [ACTIVE, RESET, RESTARTED, ACTIVE, VERSIONED]
+        );
+        let mut unknown = Linux::new();
+        unknown.version_line = "something else";
+        let failed = install(18053, &unknown);
+        assert_eq!(code_of(&failed), RESOLVED_SYSTEMD_TOO_OLD);
+        assert_eq!(
+            message_of(&failed),
+            "cannot read the version of systemd: systemctl --version printed no version, so \
+             nothing was changed"
+        );
+        assert_eq!(unknown.unit_file(), None);
     }
 
-    /// Spike S-02, case T2b: next to another global server, `.test` never
-    /// resolves. Found before anything is written.
+    /// A unit of an earlier install on a system before 250 goes: it would
+    /// meet the race of resolved 249 at every boot.
     #[test]
-    fn another_global_server_is_refused_before_the_write() {
-        for (others, count) in [
-            (vec!["1.1.1.1"], 1),
-            (
-                vec!["1.1.1.1#cloudflare-dns.com", "2606:4700:4700::1111"],
-                2,
-            ),
+    fn a_systemd_before_250_takes_out_an_earlier_unit() {
+        let mut linux = Linux::with_unit(&ours(18053));
+        linux.version_line = "systemd 249 (249.11-0ubuntu3.12)";
+        let failed = install(18053, &linux);
+        assert_eq!(code_of(&failed), RESOLVED_SYSTEMD_TOO_OLD);
+        assert_eq!(
+            message_of(&failed),
+            format!(
+                "systemd 249 is older than 250: its resolved can drop the settings of Marsa's \
+                 link; {UNIT_FILE} of an earlier install was taken out"
+            )
+        );
+        assert_eq!(linux.unit_file(), None);
+        assert!(linux.link.borrow().is_none() && !linux.enabled.get());
+        assert_eq!(
+            linux.commands(),
+            [ACTIVE, VERSIONED, DISABLED, RELOAD, RESET_UNIT]
+        );
+    }
+
+    /// The unit for systemd 250 to 252, with the local route.
+    #[test]
+    fn the_written_unit_before_253() {
+        let mut linux = Linux::new();
+        linux.version_line = "systemd 252 (252.36-1~deb12u1)";
+        install(18053, &linux);
+        let (bytes, _) = linux.unit_file().unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        insta::assert_snapshot!(text);
+    }
+
+    /// Before 253 the unit adds the local route for `127.0.0.1`; from 253
+    /// on it changes no routing (see the module doc).
+    #[test]
+    fn the_loopback_route_comes_only_before_253() {
+        for (line, route) in [
+            ("systemd 250 (250.3)", true),
+            ("systemd 252 (252.36-1~deb12u1)", true),
+            ("systemd 253 (253.1)", false),
+            ("systemd 262 (262-1.fc45)", false),
         ] {
             let mut linux = Linux::new();
-            linux.others = others;
-            let failed = install(18053, &linux);
-            assert_eq!(code_of(&failed), RESOLVED_OTHER_DNS);
+            linux.version_line = line;
             assert_eq!(
-                message_of(&failed),
-                format!(
-                    "systemd-resolved has {count} other global DNS server(s), so .test names \
-                     would not resolve; nothing was changed"
-                )
+                install(18053, &linux),
+                result(INSTALL, Outcome::Done),
+                "{line}"
             );
-            assert_eq!(linux.file(), None);
-            assert_eq!(linux.commands(), [ACTIVE, LISTED]);
+            let (bytes, _) = linux.unit_file().unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                text.contains("route add local 127.0.0.1/32 dev marsa0"),
+                route,
+                "{line}"
+            );
+            assert_eq!(
+                linux.link.borrow().as_ref().unwrap().loopback_route,
+                route,
+                "{line}"
+            );
         }
     }
 
-    /// systemd prints a long list on more lines. A server on a later line
-    /// counts too: both the user's, and Marsa's after the restart.
+    /// The first `ip` that is there goes into the unit.
     #[test]
-    fn wrapped_lists_are_read_whole() {
-        let mut linux = Linux::new();
-        linux.wrapped = true;
-        linux.others = vec!["1.1.1.1#cloudflare-dns.com", "1.0.0.1#cloudflare-dns.com"];
-        assert_eq!(code_of(&install(18053, &linux)), RESOLVED_OTHER_DNS);
-
-        // An older file of Marsa's, and another server that sorts after it.
-        let mut linux = Linux::with_file(&ours(18054));
-        linux.wrapped = true;
-        linux.others = vec!["2001:db8:abcd:12:3456:7890:abcd:ef01#dns-over-tls.corp.example.com"];
-        let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_OTHER_DNS);
-        assert_eq!(linux.file(), None);
-    }
-
-    /// A global server turns off the fallback servers, so a machine whose
-    /// network gives none would resolve nothing but `.test`.
-    #[test]
-    fn no_dns_server_on_any_connection_is_refused_before_the_write() {
-        let mut linux = Linux::new();
-        linux.link_server = false;
-        let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_NO_LINK_DNS);
-        assert!(message_of(&failed).ends_with("; nothing was changed"));
-        assert_eq!(linux.file(), None);
-        assert_eq!(linux.commands(), [ACTIVE, LISTED]);
-    }
-
-    #[test]
-    fn a_check_that_cannot_run_changes_nothing() {
-        let mut linux = Linux::new();
-        linux.resolvectl_fails = true;
-        let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_CHECK_FAILED);
-        assert_eq!(
-            message_of(&failed),
-            "resolvectl dns exited with code 1; nothing was changed"
-        );
-        assert_eq!(linux.file(), None);
-    }
-
-    #[test]
-    fn a_failed_write_is_resolved_write_and_nothing_restarts() {
-        let mut linux = Linux::new();
-        linux.fake.fail_writes.insert(PathBuf::from(CONF));
-        let message = format!("cannot write {CONF}: permission denied");
-        let expected = OpResult::failed(INSTALL, RESOLVED_WRITE, message);
-        assert_eq!(install(18053, &linux), expected);
-        assert_eq!(linux.file(), None);
-        assert_eq!(linux.commands(), [ACTIVE, LISTED]);
-    }
-
-    /// The file goes before the second restart, which brings
-    /// systemd-resolved back without it.
-    #[test]
-    fn a_failed_restart_takes_the_file_out_again() {
+    fn the_unit_uses_the_ip_that_is_there() {
         let linux = Linux::new();
-        linux.failing_restarts.set(1);
-        let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_RESTART_FAILED);
-        assert_eq!(
-            message_of(&failed),
-            format!(
-                "systemctl restart systemd-resolved.service exited with code 1; {CONF} was \
-                 removed again"
-            )
-        );
-        assert_eq!(linux.file(), None);
-        assert_eq!(
-            linux.commands(),
-            [ACTIVE, LISTED, RESET, RESTARTED, RESET, RESTARTED]
-        );
-        let file_at = linux.file_at.borrow();
-        // The file was there at the first restart, and gone at the second.
-        assert!(file_at[3] && !file_at[5]);
-        assert!(linux.active.get() && linux.loaded.borrow().is_none());
-    }
-
-    /// systemd refuses the restarts, then one more start: no name resolves,
-    /// and the code says so.
-    #[test]
-    fn a_resolved_that_stays_down_is_resolved_stopped() {
-        let mut linux = Linux::new();
-        linux.failing_restarts.set(2);
-        linux.start_fails = true;
-        let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_STOPPED);
-        assert!(
-            message_of(&failed).ends_with(
-                "systemd-resolved does not run now, so no name resolves until it starts"
-            )
-        );
-        assert_eq!(
-            linux.commands(),
-            [
-                ACTIVE, LISTED, RESET, RESTARTED, RESET, RESTARTED, ACTIVE, RESET, STARTED, ACTIVE
-            ]
-        );
-        assert_eq!(linux.file(), None);
-
-        // The start works: the first error is the one reported.
-        let linux = Linux::new();
-        linux.failing_restarts.set(2);
-        assert_eq!(code_of(&install(18053, &linux)), RESOLVED_RESTART_FAILED);
-        assert!(linux.active.get());
-    }
-
-    /// The other server shows only after the restart (an older file of
-    /// Marsa's hid the first check): the file goes, and the older one is
-    /// not put back.
-    #[test]
-    fn a_failed_check_after_the_restart_takes_the_file_out_again() {
-        let mut linux = Linux::with_file(&ours(18054));
-        linux.others = vec!["1.1.1.1"];
-        let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_OTHER_DNS);
-        assert!(message_of(&failed).ends_with(&format!("; {CONF} was removed again")));
-        assert!(!message_of(&failed).contains("1.1.1.1"));
-        assert_eq!(linux.file(), None);
-        assert_eq!(
-            linux.commands(),
-            [ACTIVE, RESET, RESTARTED, LISTED, RESET, RESTARTED]
-        );
-        assert!(linux.loaded.borrow().is_none());
-    }
-
-    #[test]
-    fn a_resolved_that_does_not_list_our_server_is_resolved_check_failed() {
-        let mut linux = Linux::new();
-        linux.ignores_file = true;
-        let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_CHECK_FAILED);
-        assert_eq!(
-            message_of(&failed),
-            format!("systemd-resolved does not list Marsa's DNS server; {CONF} was removed again")
-        );
-        assert_eq!(linux.file(), None);
-    }
-
-    /// The rollback says when the file stays.
-    #[test]
-    fn a_file_that_cannot_be_taken_out_again_is_named() {
-        let mut linux = Linux::new();
-        linux.ignores_file = true;
-        linux.fake.fail_removes.insert(PathBuf::from(CONF));
-        let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_CHECK_FAILED);
-        assert!(message_of(&failed).ends_with(&format!("; {CONF} could not be removed")));
-        assert!(linux.file().is_some());
-    }
-
-    /// Setup run again with no network: a restart cannot give a connection
-    /// a DNS server, so the working file stays, and nothing restarts.
-    #[test]
-    fn our_working_file_stays_when_no_connection_has_a_dns_server() {
-        let mut linux = Linux::with_file(&ours(18053));
-        linux.link_server = false;
-        let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_NO_LINK_DNS);
-        assert!(message_of(&failed).ends_with("; nothing was changed"));
-        assert_eq!(linux.file(), Some((ours(18053), OLD_MODE)));
-        assert_eq!(linux.commands(), [ACTIVE, LISTED]);
-    }
-
-    /// Marsa's server still loaded with no file (a removal whose restart
-    /// failed): not another server, so the install goes on.
-    #[test]
-    fn our_own_server_still_loaded_is_not_another_server() {
-        let linux = Linux::new();
-        *linux.loaded.borrow_mut() = Some(ours(18053));
+        linux
+            .fake
+            .files
+            .borrow_mut()
+            .remove(Path::new("/usr/sbin/ip"));
+        linux.put("/bin/ip", b"");
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
-        assert_eq!(linux.file(), Some((ours(18053), 0o644)));
+        let (bytes, _) = linux.unit_file().unwrap();
+        assert_eq!(bytes, unit("/bin/ip", 18053, false).into_bytes());
     }
 
-    /// A fresh install whose two restarts fail while the old process runs:
-    /// that process never read Marsa's file, so it runs as before, and the
-    /// message does not say that it may use Marsa's server.
     #[test]
-    fn a_failed_rollback_restart_before_any_load_leaves_it_as_before() {
+    fn without_ip_nothing_changes() {
         let linux = Linux::new();
-        linux.failing_restarts.set(2);
-        let old = OldProcess(linux);
-        let failed = install(18053, &old);
-        assert_eq!(code_of(&failed), RESOLVED_RESTART_FAILED);
+        linux
+            .fake
+            .files
+            .borrow_mut()
+            .remove(Path::new("/usr/sbin/ip"));
+        let failed = install(18053, &linux);
+        assert_eq!(code_of(&failed), RESOLVED_TOOL_MISSING);
         assert_eq!(
             message_of(&failed),
-            format!(
-                "systemctl restart systemd-resolved.service exited with code 1; {CONF} was \
-                 removed again"
-            )
+            "no ip program (iproute2) at /usr/sbin/ip, /usr/bin/ip, /sbin/ip, /bin/ip, so \
+             nothing was changed"
         );
-        assert_eq!(
-            old.0.commands(),
-            [ACTIVE, LISTED, RESET, RESTARTED, RESET, RESTARTED, ACTIVE]
-        );
-        assert_eq!(old.0.file(), None);
+        assert_eq!(linux.unit_file(), None);
+        assert_eq!(linux.commands(), [ACTIVE, VERSIONED]);
     }
 
-    /// An older file of Marsa's was loaded, and both restarts fail while the
-    /// old process runs: it may still use Marsa's server.
+    /// The same unit, running and checked: one look, nothing written.
     #[test]
-    fn a_failed_rollback_restart_after_a_load_says_marsa_may_be_in_use() {
-        let linux = Linux::with_file(&ours(18054));
-        linux.failing_restarts.set(2);
-        let old = OldProcess(linux);
-        let failed = install(18053, &old);
-        assert_eq!(code_of(&failed), RESOLVED_RESTART_FAILED);
-        assert!(message_of(&failed).ends_with(OLD_RUNS), "{failed:?}");
+    fn install_over_our_working_unit_is_unchanged() {
+        let mut linux = Linux::with_unit(&ours(18053));
+        // Any write fails here, so `unchanged` also shows that none was tried.
+        linux.fake.fail_writes.insert(PathBuf::from(UNIT_FILE));
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Unchanged));
+        assert_eq!(linux.unit_file(), Some((ours(18053), OLD_MODE)));
         assert_eq!(
-            old.0.commands(),
-            [ACTIVE, RESET, RESTARTED, RESET, RESTARTED, ACTIVE]
+            linux.commands(),
+            [ACTIVE, VERSIONED, LOOKED, IS_ENABLED_CMD]
         );
-        assert_eq!(old.0.file(), None);
     }
 
-    /// The check fails after a restart that read Marsa's file, and the
-    /// restart that takes it out fails while the old process runs: the code
-    /// is the one of that state, not the check's.
+    /// The same unit, but the link is gone (deleted by hand): started again,
+    /// not rewritten.
     #[test]
-    fn a_failed_rollback_after_a_failed_check_is_resolved_restart_failed() {
-        let mut linux = Linux::new();
-        linux.ignores_file = true;
-        linux.ok_restarts.set(1);
-        linux.failing_restarts.set(1);
-        let old = OldProcess(linux);
-        let failed = install(18053, &old);
-        assert_eq!(code_of(&failed), RESOLVED_RESTART_FAILED);
+    fn install_over_our_unit_without_its_link_starts_it_again() {
+        let linux = Linux::with_unit(&ours(18053));
+        *linux.link.borrow_mut() = None;
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(linux.unit_file(), Some((ours(18053), OLD_MODE)));
         assert_eq!(
-            message_of(&failed),
-            format!(
-                "systemd-resolved does not list Marsa's DNS server; {CONF} was removed again, \
-                 but systemctl restart systemd-resolved.service exited with code 1; {OLD_RUNS}"
-            )
-        );
-        assert_eq!(
-            old.0.commands(),
+            linux.commands(),
             [
-                ACTIVE, LISTED, RESET, RESTARTED, LISTED, RESET, RESTARTED, ACTIVE
+                ACTIVE, VERSIONED, LOOKED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED
             ]
         );
-        assert_eq!(old.0.file(), None);
     }
 
-    /// Our file, loaded, and another global server came later: restarted and
-    /// checked again, then taken out.
+    /// The unit works but was disabled by hand: it would not run at the next
+    /// boot, so it is enabled and started again.
     #[test]
-    fn our_file_next_to_a_later_global_server_is_taken_out() {
-        let mut linux = Linux::with_file(&ours(18053));
-        linux.others = vec!["1.1.1.1"];
-        let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_OTHER_DNS);
-        assert!(message_of(&failed).ends_with(&format!("{CONF} was removed again")));
-        assert_eq!(linux.file(), None);
+    fn install_over_our_disabled_unit_enables_it() {
+        let linux = Linux::with_unit(&ours(18053));
+        linux.enabled.set(false);
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert!(linux.enabled.get());
         assert_eq!(
             linux.commands(),
-            [ACTIVE, LISTED, RESET, RESTARTED, LISTED, RESET, RESTARTED]
+            [
+                ACTIVE,
+                VERSIONED,
+                LOOKED,
+                IS_ENABLED_CMD,
+                RESET_UNIT,
+                RELOAD,
+                ENABLED,
+                UNIT_UP,
+                LOOKED
+            ]
         );
     }
 
-    /// No connection has a DNS server, seen only after the restart: even an
-    /// older file of Marsa's goes.
+    /// A global `DNSOverTLS=yes`: the unit turns it off on its link, as
+    /// `marsad` does not speak TLS; without that line the check fails.
     #[test]
-    fn no_link_server_after_the_restart_takes_an_older_file_out() {
-        let mut linux = Linux::with_file(&ours(18054));
-        linux.link_server = false;
-        let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_NO_LINK_DNS);
-        assert!(message_of(&failed).ends_with(&format!("{CONF} was removed again")));
-        assert_eq!(linux.file(), None);
+    fn a_global_dns_over_tls_is_turned_off_on_the_link() {
+        let mut linux = Linux::new();
+        linux.strict_dot = true;
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        let base = String::from_utf8(ours(18053)).unwrap();
+        let without = base.replace("ExecStart=-/usr/bin/resolvectl dnsovertls marsa0 no\n", "");
+        assert_ne!(without, base);
+        let mut linux = Linux::with_unit(without.as_bytes());
+        linux.strict_dot = true;
+        assert_eq!(
+            check(&linux, 18053),
+            Err("marsa0 would use DNS over TLS".to_owned())
+        );
+    }
+
+    /// An older unit of Marsa's, with another port: rewritten, and checked
+    /// only after the start.
+    #[test]
+    fn install_rewrites_our_unit_with_another_port() {
+        let linux = Linux::with_unit(&ours(18054));
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(linux.unit_file(), Some((ours(18053), 0o644)));
+        assert_eq!(linux.server().as_deref(), Some("127.0.0.1:18053"));
         assert_eq!(
             linux.commands(),
-            [ACTIVE, RESET, RESTARTED, LISTED, RESET, RESTARTED]
+            [
+                ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED
+            ]
         );
     }
 
-    /// Our file, and a list that cannot be read: it tells nothing, so the
-    /// working file stays and nothing restarts.
+    /// A foreign file, and a link to Marsa's very unit: both left alone,
+    /// with nothing run.
     #[test]
-    fn our_file_with_a_list_that_cannot_be_read_stays() {
-        let mut linux = Linux::with_file(&ours(18053));
-        linux.resolvectl_fails = true;
-        let failed = install(18053, &linux);
-        assert_eq!(code_of(&failed), RESOLVED_CHECK_FAILED);
-        assert_eq!(
-            message_of(&failed),
-            "resolvectl dns exited with code 1; nothing was changed"
-        );
-        assert_eq!(linux.file(), Some((ours(18053), OLD_MODE)));
-        assert_eq!(linux.commands(), [ACTIVE, LISTED]);
-    }
-
-    #[test]
-    fn remove_without_our_file_is_unchanged_and_runs_nothing() {
-        for linux in [Linux::new(), Linux::with_file(FOREIGN)] {
-            let before = linux.file();
-            assert_eq!(remove(&linux), result(REMOVE, Outcome::Unchanged));
-            assert_eq!(linux.file(), before);
+    fn install_fails_on_a_foreign_unit_and_keeps_it() {
+        let mut link = Linux::with_unit(&ours(18053));
+        link.fake.links.insert(PathBuf::from(UNIT_FILE));
+        for (linux, bytes) in [
+            (Linux::with_unit(FOREIGN), FOREIGN.to_vec()),
+            (link, ours(18053)),
+        ] {
+            let failed = install(18053, &linux);
+            assert_eq!(code_of(&failed), RESOLVED_FOREIGN);
+            assert_eq!(
+                message_of(&failed),
+                format!("{UNIT_FILE} was not written by Marsa, so it was left as it is")
+            );
+            assert_eq!(linux.unit_file(), Some((bytes, OLD_MODE)));
             assert!(linux.commands().is_empty());
         }
     }
 
+    /// A foreign unit stops the install, but the old drop-in goes first.
     #[test]
-    fn remove_deletes_our_file_then_restarts() {
-        // Also with another port: the marker makes it ours, not the content.
-        for port in [18053, 18054] {
-            let linux = Linux::with_file(&ours(port));
-            assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
-            assert_eq!(linux.file(), None);
-            assert_eq!(linux.commands(), [ACTIVE, RESET, RESTARTED]);
-            assert_eq!(*linux.file_at.borrow(), [false, false, false]);
-            assert!(linux.loaded.borrow().is_none());
+    fn a_foreign_unit_still_lets_the_old_drop_in_go() {
+        let linux = Linux::with_unit(FOREIGN).with_drop_in();
+        assert_eq!(code_of(&install(18053, &linux)), RESOLVED_FOREIGN);
+        assert_eq!(linux.file(DROP_IN), None);
+        assert_eq!(linux.unit_file(), Some((FOREIGN.to_vec(), OLD_MODE)));
+        assert_eq!(linux.commands(), [ACTIVE, RESET, RESTARTED]);
+    }
+
+    #[test]
+    fn a_unit_that_cannot_be_read_is_resolved_read_and_kept() {
+        let mut linux = Linux::with_unit(&ours(18053));
+        linux.fake.fail_reads.insert(PathBuf::from(UNIT_FILE));
+        let message =
+            format!("cannot read {UNIT_FILE}: permission denied, so it was left as it is");
+        for failed in [install(18053, &linux), remove(&linux)] {
+            assert_eq!(code_of(&failed), RESOLVED_READ);
+            assert_eq!(message_of(&failed), message);
+        }
+        assert_eq!(linux.unit_file(), Some((ours(18053), OLD_MODE)));
+        assert!(linux.server().is_some());
+    }
+
+    /// Stopped (exit 3), `systemctl` missing, or `systemctl` that cannot
+    /// tell (exit 1): nothing is written.
+    #[test]
+    fn without_a_running_resolved_nothing_changes() {
+        let stopped = Linux::new();
+        stopped.active.set(false);
+        let mut missing = Linux::new();
+        missing.no_systemctl = true;
+        let mut unknown = Linux::new();
+        unknown.active_code = Some(1);
+        let cases = [
+            (stopped, "systemd-resolved.service is not running"),
+            (
+                missing,
+                "cannot check systemd-resolved.service: systemctl could not run: entity not found",
+            ),
+            (
+                unknown,
+                "cannot check systemd-resolved.service: systemctl exited with code 1",
+            ),
+        ];
+        for (linux, reason) in cases {
+            let failed = install(18053, &linux);
+            assert_eq!(code_of(&failed), RESOLVED_NOT_RUNNING);
+            assert_eq!(
+                message_of(&failed),
+                format!("{reason}, so nothing was changed")
+            );
+            assert_eq!(linux.unit_file(), None);
+            assert_eq!(linux.commands(), [ACTIVE]);
         }
     }
 
     #[test]
-    fn remove_does_not_start_a_resolved_that_does_not_run() {
-        let linux = Linux::with_file(&ours(18053));
-        linux.active.set(false);
-        assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
-        assert_eq!(linux.file(), None);
-        assert_eq!(linux.commands(), [ACTIVE]);
-        assert!(!linux.active.get());
+    fn a_failed_write_is_resolved_write_and_nothing_starts() {
+        let mut linux = Linux::new();
+        linux.fake.fail_writes.insert(PathBuf::from(UNIT_FILE));
+        let failed = install(18053, &linux);
+        assert_eq!(code_of(&failed), RESOLVED_WRITE);
+        assert_eq!(
+            message_of(&failed),
+            format!("cannot write {UNIT_FILE}: permission denied")
+        );
+        assert_eq!(linux.commands(), [ACTIVE, VERSIONED]);
+    }
+
+    /// Each `systemctl` step of the start can fail: the unit goes again.
+    #[test]
+    fn a_unit_that_does_not_start_is_taken_out_again() {
+        let steps = [
+            ("daemon-reload", vec![ACTIVE, VERSIONED, RESET_UNIT, RELOAD]),
+            (
+                "enable marsa-dns-link.service",
+                vec![ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED],
+            ),
+            (
+                "restart marsa-dns-link.service",
+                vec![ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP],
+            ),
+        ];
+        for (step, mut commands) in steps {
+            let mut linux = Linux::new();
+            linux.failing = Some(step);
+            let failed = install(18053, &linux);
+            assert_eq!(code_of(&failed), RESOLVED_UNIT_FAILED, "{step}");
+            assert_eq!(
+                message_of(&failed),
+                format!("systemctl {step} exited with code 1; {UNIT_FILE} was removed again"),
+            );
+            commands.extend([DISABLED, RELOAD, RESET_UNIT]);
+            assert_eq!(linux.commands(), commands, "{step}");
+            assert_eq!(linux.unit_file(), None);
+            assert!(!linux.enabled.get() && linux.server().is_none());
+        }
+    }
+
+    /// resolved needs a moment for a new link: the check is tried again.
+    #[test]
+    fn a_link_that_needs_a_moment_is_checked_again() {
+        let linux = Linux::new();
+        linux.none_for.set(2);
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(
+            linux.commands(),
+            [
+                ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED, LOOKED, LOOKED
+            ]
+        );
+    }
+
+    /// A link resolved never uses: ten looks, then the unit goes.
+    #[test]
+    fn a_link_resolved_does_not_use_is_resolved_check_failed() {
+        let mut linux = Linux::new();
+        linux.unused = true;
+        let failed = install(18053, &linux);
+        assert_eq!(code_of(&failed), RESOLVED_CHECK_FAILED);
+        assert_eq!(
+            message_of(&failed),
+            format!("systemd-resolved does not use marsa0 for DNS; {UNIT_FILE} was removed again")
+        );
+        let mut commands = vec![ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP];
+        commands.extend([LOOKED; 10]);
+        commands.extend([DISABLED, RELOAD, RESET_UNIT]);
+        assert_eq!(linux.commands(), commands);
+        assert_eq!(linux.unit_file(), None);
+        assert!(linux.server().is_none());
+    }
+
+    /// Each part of the check, with a unit that misses it: the fake runs the
+    /// unit as written, so these are units Marsa must never accept.
+    #[test]
+    fn the_check_needs_each_setting_of_the_link() {
+        let base = String::from_utf8(ours(18053)).unwrap();
+        let cases = [
+            (
+                base.replace("127.0.0.1:18053", "127.0.0.1:18054"),
+                "marsa0 does not have Marsa's DNS server alone",
+            ),
+            (
+                base.replace("default-route marsa0 false", "default-route marsa0 true"),
+                "marsa0 is not marked as no default route",
+            ),
+            (
+                base.replace(
+                    "ExecStart=-/usr/sbin/ip addr add 169.254.53.53/32 dev marsa0\n",
+                    "",
+                ),
+                "systemd-resolved does not use marsa0 for DNS",
+            ),
+        ];
+        let more = [
+            (
+                base.replace("ExecStart=/usr/bin/resolvectl domain marsa0 ~test\n", ""),
+                "marsa0 does not route .test names alone",
+            ),
+            (
+                base.replace("domain marsa0 ~test", "domain marsa0 ~test ~."),
+                "marsa0 does not route .test names alone",
+            ),
+            (
+                base.replace("domain marsa0 ~test", "domain marsa0 ~test example.com"),
+                "marsa0 does not route .test names alone",
+            ),
+        ];
+        for (unit, reason) in cases.into_iter().chain(more) {
+            assert_ne!(unit, base);
+            let linux = Linux::with_unit(unit.as_bytes());
+            assert_eq!(check(&linux, 18053), Err(reason.to_owned()));
+        }
+        let linux = Linux::with_unit(base.as_bytes());
+        assert_eq!(check(&linux, 18053), Ok(()));
+    }
+
+    /// At no moment of the start does `marsa0` have Marsa's server for more
+    /// than `.test`. The fake would see it: with `dns` first, it does.
+    #[test]
+    fn the_unit_never_routes_other_names_to_the_port() {
+        let linux = Linux::new();
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert!(!linux.exposed.get());
+        let base = String::from_utf8(ours(18053)).unwrap();
+        let dns = "ExecStart=/usr/bin/resolvectl dns marsa0 127.0.0.1:18053\n";
+        let dns_first = base.replace(dns, "").replace(
+            "ExecStart=/usr/bin/resolvectl default-route",
+            &format!("{dns}ExecStart=/usr/bin/resolvectl default-route"),
+        );
+        assert!(Linux::with_unit(dns_first.as_bytes()).exposed.get());
+    }
+
+    /// A line of the unit fails half way: its start fails, and the link
+    /// goes with `ExecStopPost=`, never left with a server for every name.
+    #[test]
+    fn a_start_that_fails_half_way_leaves_no_link() {
+        for line in [
+            "default-route marsa0",
+            "domain marsa0",
+            "dns marsa0",
+            "link set",
+        ] {
+            let mut linux = Linux::new();
+            linux.failing_line = Some(line);
+            let failed = install(18053, &linux);
+            assert_eq!(code_of(&failed), RESOLVED_UNIT_FAILED, "{line}");
+            assert!(linux.link.borrow().is_none(), "{line}");
+            assert!(!linux.exposed.get(), "{line}");
+            assert_eq!(linux.unit_file(), None, "{line}");
+        }
+        // With `ExecStop=` instead, a failed start would leave the link.
+        let base = String::from_utf8(ours(18053)).unwrap();
+        let mut linux = Linux::new();
+        linux.put(
+            UNIT_FILE,
+            base.replace("ExecStopPost=-", "ExecStop=").as_bytes(),
+        );
+        *linux.loaded.borrow_mut() = linux.unit_file().map(|(bytes, _)| bytes);
+        linux.failing_line = Some("dns marsa0");
+        assert!(!linux.start_unit());
+        assert!(linux.link.borrow().is_some());
     }
 
     #[test]
-    fn a_failed_delete_is_resolved_delete_and_keeps_the_file() {
-        let mut linux = Linux::with_file(&ours(18053));
-        linux.fake.fail_removes.insert(PathBuf::from(CONF));
-        let message = format!("cannot delete {CONF}: permission denied");
-        let expected = OpResult::failed(REMOVE, RESOLVED_DELETE, message);
-        assert_eq!(remove(&linux), expected);
-        assert_eq!(linux.file(), Some((ours(18053), OLD_MODE)));
+    fn a_status_that_cannot_be_read_fails_the_check() {
+        let mut linux = Linux::with_unit(&ours(18053));
+        linux.resolvectl_fails = true;
+        assert_eq!(
+            check(&linux, 18053),
+            Err("resolvectl status marsa0 exited with code 1".to_owned())
+        );
+    }
+
+    /// After a failed check, the message tells what the cleanup did.
+    #[test]
+    fn a_unit_that_cannot_be_taken_out_again_is_named() {
+        let mut linux = Linux::new();
+        linux.unused = true;
+        linux.fake.fail_removes.insert(PathBuf::from(UNIT_FILE));
+        let failed = install(18053, &linux);
+        assert_eq!(code_of(&failed), RESOLVED_CHECK_FAILED);
+        assert_eq!(
+            message_of(&failed),
+            format!(
+                "systemd-resolved does not use marsa0 for DNS; cannot delete {UNIT_FILE}: \
+                 permission denied"
+            )
+        );
+        assert!(!linux.enabled.get());
+    }
+
+    /// systemd 262 wraps the protocols onto a second line.
+    #[test]
+    fn the_status_of_systemd_262_is_read_whole() {
+        let mut linux = Linux::new();
+        linux.fedora = true;
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+    }
+
+    // --- the old global drop-in --------------------------------------------
+
+    #[test]
+    fn install_takes_out_the_old_drop_in_first() {
+        let linux = Linux::new().with_drop_in();
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(linux.file(DROP_IN), None);
+        assert!(!linux.drop_in_loaded.get());
+        assert_eq!(
+            linux.commands(),
+            [
+                ACTIVE, RESET, RESTARTED, ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP,
+                LOOKED
+            ]
+        );
+    }
+
+    /// The unit was fine, but the drop-in was still there: `done`.
+    #[test]
+    fn install_over_a_working_unit_and_the_drop_in_is_done() {
+        let linux = Linux::with_unit(&ours(18053)).with_drop_in();
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(linux.file(DROP_IN), None);
+        assert_eq!(
+            linux.commands(),
+            [
+                ACTIVE,
+                RESET,
+                RESTARTED,
+                ACTIVE,
+                VERSIONED,
+                LOOKED,
+                IS_ENABLED_CMD
+            ]
+        );
+    }
+
+    #[test]
+    fn a_foreign_drop_in_is_left_alone() {
+        let linux = Linux::new();
+        linux.put(DROP_IN, FOREIGN_DROP_IN);
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
+        assert_eq!(
+            linux.file(DROP_IN),
+            Some((FOREIGN_DROP_IN.to_vec(), OLD_MODE))
+        );
+    }
+
+    /// A drop-in that cannot go stops the install before the unit.
+    #[test]
+    fn a_drop_in_that_cannot_be_deleted_stops_the_install() {
+        let mut linux = Linux::new().with_drop_in();
+        linux.fake.fail_removes.insert(PathBuf::from(DROP_IN));
+        let failed = install(18053, &linux);
+        assert_eq!(code_of(&failed), RESOLVED_DELETE);
+        assert_eq!(
+            message_of(&failed),
+            format!("cannot delete {DROP_IN}: permission denied")
+        );
+        assert_eq!(linux.unit_file(), None);
         assert!(linux.commands().is_empty());
+    }
+
+    /// The restart without the drop-in fails while the old process runs:
+    /// it may still use Marsa's server for every name.
+    #[test]
+    fn a_failed_restart_with_the_old_process_running_is_resolved_restart_failed() {
+        let mut linux = Linux::new().with_drop_in();
+        linux.failing_restarts.set(1);
+        linux.old_survives = true;
+        let failed = install(18053, &linux);
+        assert_eq!(code_of(&failed), RESOLVED_RESTART_FAILED);
+        assert_eq!(
+            message_of(&failed),
+            format!(
+                "{DROP_IN} was deleted, but systemctl restart systemd-resolved.service exited \
+                 with code 1; {OLD_RUNS}"
+            )
+        );
+        assert_eq!(linux.commands(), [ACTIVE, RESET, RESTARTED, ACTIVE]);
+        assert_eq!(linux.unit_file(), None);
     }
 
     /// A restart that fails and leaves it stopped: one start reads the
-    /// folder without Marsa's file, so the removal is done.
+    /// folder without the drop-in.
     #[test]
     fn a_failed_restart_after_the_delete_is_mended_by_a_start() {
-        let linux = Linux::with_file(&ours(18053));
+        let linux = Linux::new().with_drop_in();
         linux.failing_restarts.set(1);
         assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
         assert_eq!(
             linux.commands(),
             [ACTIVE, RESET, RESTARTED, ACTIVE, RESET, STARTED, ACTIVE]
         );
-        assert!(linux.active.get() && linux.loaded.borrow().is_none());
+        assert!(linux.active.get() && !linux.drop_in_loaded.get());
     }
 
     #[test]
     fn a_resolved_that_stays_down_after_the_delete_is_resolved_stopped() {
-        let mut linux = Linux::with_file(&ours(18053));
+        let mut linux = Linux::new().with_drop_in();
         linux.failing_restarts.set(1);
         linux.start_fails = true;
         let failed = remove(&linux);
@@ -1146,117 +1702,186 @@ mod tests {
         assert_eq!(
             message_of(&failed),
             format!(
-                "{CONF} was deleted, but systemctl restart systemd-resolved.service exited with \
-                 code 1; systemd-resolved does not run now, so no name resolves until it starts"
+                "{DROP_IN} was deleted, but systemctl restart systemd-resolved.service exited \
+                 with code 1; {STOPPED}"
             )
         );
-        assert_eq!(linux.file(), None);
+        assert_eq!(linux.file(DROP_IN), None);
     }
 
-    /// The restart fails while the old process still runs: it may still use
-    /// Marsa's server, and the message says so.
+    /// resolved does not run: the old drop-in still goes, and the message
+    /// says that this is all that changed.
     #[test]
-    fn a_failed_restart_with_the_old_process_running_is_resolved_restart_failed() {
-        let linux = Linux::with_file(&ours(18053));
-        linux.failing_restarts.set(1);
-        // This restart fails without stopping the old process.
-        let still_running = OldProcess(linux);
-        let failed = remove(&still_running);
-        assert_eq!(code_of(&failed), RESOLVED_RESTART_FAILED);
-        assert!(message_of(&failed).ends_with(OLD_RUNS), "{failed:?}");
+    fn install_with_a_stopped_resolved_still_takes_out_the_drop_in() {
+        let linux = Linux::new().with_drop_in();
+        linux.active.set(false);
+        let failed = install(18053, &linux);
+        assert_eq!(code_of(&failed), RESOLVED_NOT_RUNNING);
         assert_eq!(
-            still_running.0.commands(),
-            [ACTIVE, RESET, RESTARTED, ACTIVE]
+            message_of(&failed),
+            "systemd-resolved.service is not running, so only Marsa's old global setting was \
+             removed"
         );
+        assert_eq!(linux.file(DROP_IN), None);
+        assert_eq!(linux.unit_file(), None);
     }
 
-    /// `systemctl` cannot tell whether it runs: it may run with Marsa's
-    /// server, so the removal is not `done`.
+    /// A stopped resolved reads its files when it starts: no restart.
+    #[test]
+    fn remove_does_not_start_a_resolved_that_does_not_run() {
+        let linux = Linux::new().with_drop_in();
+        linux.active.set(false);
+        assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
+        assert_eq!(linux.file(DROP_IN), None);
+        assert_eq!(linux.commands(), [ACTIVE]);
+        assert!(!linux.active.get());
+    }
+
+    /// `systemctl` cannot tell whether it runs: it may run with the
+    /// drop-in, so the removal is not `done`.
     #[test]
     fn remove_when_systemctl_cannot_tell_is_resolved_restart_failed() {
-        let mut linux = Linux::with_file(&ours(18053));
-        linux.no_systemctl = true;
+        let mut linux = Linux::new().with_drop_in();
+        linux.active_code = Some(1);
         let failed = remove(&linux);
         assert_eq!(code_of(&failed), RESOLVED_RESTART_FAILED);
-        let start = format!("{CONF} was deleted, but cannot check systemd-resolved.service:");
-        assert!(message_of(&failed).starts_with(&start), "{failed:?}");
-        assert!(message_of(&failed).ends_with(OLD_RUNS), "{failed:?}");
-        assert_eq!(linux.file(), None);
+        assert_eq!(
+            message_of(&failed),
+            format!(
+                "{DROP_IN} was deleted, but cannot check systemd-resolved.service: systemctl \
+                 exited with code 1; {OLD_RUNS}"
+            )
+        );
+        assert_eq!(linux.file(DROP_IN), None);
         assert_eq!(linux.commands(), [ACTIVE]);
     }
 
-    /// [`Linux`], whose failed restarts leave the old process running.
-    struct OldProcess(Linux);
+    // --- remove --------------------------------------------------------------
 
-    impl System for OldProcess {
-        fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>> {
-            self.0.read(path, max)
-        }
-
-        fn exists(&self, path: &Path) -> bool {
-            self.0.exists(path)
-        }
-
-        fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-            self.0.write_atomic(path, bytes, mode)
-        }
-
-        fn remove(&self, path: &Path) -> io::Result<()> {
-            self.0.remove(path)
-        }
-
-        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
-            self.0.remove_empty_dir(path)
-        }
-
-        fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
-            let output = self.0.run(program, args);
-            self.0.active.set(true);
-            output
-        }
-
-        fn current_exe(&self) -> io::Result<PathBuf> {
-            self.0.current_exe()
+    #[test]
+    fn remove_without_anything_of_marsa_is_unchanged_and_runs_nothing() {
+        let foreign_drop_in = Linux::new();
+        foreign_drop_in.put(DROP_IN, FOREIGN_DROP_IN);
+        for linux in [Linux::new(), Linux::with_unit(FOREIGN), foreign_drop_in] {
+            let before = (linux.unit_file(), linux.file(DROP_IN));
+            assert_eq!(remove(&linux), result(REMOVE, Outcome::Unchanged));
+            assert_eq!((linux.unit_file(), linux.file(DROP_IN)), before);
+            assert!(linux.commands().is_empty());
         }
     }
 
     #[test]
-    fn the_output_of_resolvectl_dns() {
-        let dns = |stdout: &str| read_dns(&exit(0, stdout));
-        let global = |servers: &[&str]| servers.iter().map(|s| (*s).to_owned()).collect();
-        assert_eq!(
-            dns("Global: 127.0.0.1:18053\nLink 2 (eth0): 1.1.1.1\n"),
-            Some(Dns {
-                global: global(&["127.0.0.1:18053"]),
-                link_server: true,
-            })
-        );
-        // A wrapped list, a link without servers, CRLF, and the global line
-        // after the links.
-        let text = "Link 3 (docker0):\r\nLink 2 (eth0):\r\n        10.0.0.1\r\nGlobal: a\r\n        b c\r\n";
-        assert_eq!(
-            dns(text),
-            Some(Dns {
-                global: global(&["a", "b", "c"]),
-                link_server: true,
-            })
-        );
-        assert_eq!(
-            dns("Global:\nLink 2 (eth0):\nLink 3 (lo):\n"),
-            Some(Dns {
-                global: Vec::new(),
-                link_server: false,
-            })
-        );
-        // Only at the start of a line, and only with exit code 0.
-        assert_eq!(dns(" Global: 127.0.0.1:18053\n"), None);
-        assert_eq!(dns("Link 2 (Global:): 1.1.1.1\n"), None);
-        assert_eq!(dns(""), None);
-        assert_eq!(read_dns(&exit(1, "Global: 127.0.0.1:18053\n")), None);
-        assert_eq!(read_dns(&Err(io::ErrorKind::NotFound.into())), None);
+    fn remove_stops_disables_and_deletes_the_unit() {
+        // Also with another port: the marker makes it ours, not the content.
+        for port in [18053, 18054] {
+            let linux = Linux::with_unit(&ours(port));
+            assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
+            assert_eq!(linux.unit_file(), None);
+            assert_eq!(linux.commands(), [DISABLED, RELOAD, RESET_UNIT]);
+            assert!(!linux.enabled.get() && linux.server().is_none());
+            assert!(linux.loaded.borrow().is_none());
+        }
     }
 
-    /// Through `apply`, as a real request: Linux only.
+    #[test]
+    fn remove_takes_out_the_unit_and_the_drop_in() {
+        let linux = Linux::with_unit(&ours(18053)).with_drop_in();
+        assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
+        assert_eq!((linux.unit_file(), linux.file(DROP_IN)), (None, None));
+        assert_eq!(
+            linux.commands(),
+            [DISABLED, RELOAD, RESET_UNIT, ACTIVE, RESET, RESTARTED]
+        );
+    }
+
+    /// The stop fails: the file still goes, so the link does not come back
+    /// at the next boot, and the message says it may stay until then.
+    #[test]
+    fn a_failed_stop_still_deletes_the_unit() {
+        let mut linux = Linux::with_unit(&ours(18053));
+        linux.failing = Some("disable --now marsa-dns-link.service");
+        let failed = remove(&linux);
+        assert_eq!(code_of(&failed), RESOLVED_UNIT_FAILED);
+        assert_eq!(
+            message_of(&failed),
+            format!(
+                "{UNIT_FILE} was deleted, but systemctl disable --now marsa-dns-link.service \
+                 exited with code 1; marsa0 may stay until the next boot"
+            )
+        );
+        assert_eq!(linux.unit_file(), None);
+        assert_eq!(linux.commands(), [DISABLED, RELOAD, RESET_UNIT]);
+        assert!(linux.server().is_some());
+    }
+
+    /// A unit that cannot be deleted: the drop-in is still tried, and the
+    /// first failure is the result.
+    #[test]
+    fn a_failed_delete_is_resolved_delete_and_the_drop_in_still_goes() {
+        let mut linux = Linux::with_unit(&ours(18053)).with_drop_in();
+        linux.fake.fail_removes.insert(PathBuf::from(UNIT_FILE));
+        let failed = remove(&linux);
+        assert_eq!(code_of(&failed), RESOLVED_DELETE);
+        assert_eq!(
+            message_of(&failed),
+            format!("cannot delete {UNIT_FILE}: permission denied")
+        );
+        assert_eq!(linux.unit_file(), Some((ours(18053), OLD_MODE)));
+        assert_eq!(linux.file(DROP_IN), None);
+    }
+
+    // --- resolvectl status ---------------------------------------------------
+
+    #[test]
+    fn the_output_of_resolvectl_status() {
+        let read = |text: &str| read_status(&exit(0, text)).unwrap();
+        let words = |list: &[&str]| {
+            list.iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>()
+        };
+        // systemd 249 (Ubuntu 22.04), from spike S-02b.
+        let ubuntu = read(
+            "Link 5 (marsa0)\nCurrent Scopes: DNS\n     Protocols: -DefaultRoute +LLMNR -mDNS \
+             -DNSOverTLS DNSSEC=no/unsupported\n   DNS Servers: 127.0.0.1:18053\n    DNS \
+             Domain: ~test\n",
+        );
+        assert_eq!(
+            ubuntu,
+            LinkStatus {
+                scopes: words(&["DNS"]),
+                protocols: words(&[
+                    "-DefaultRoute",
+                    "+LLMNR",
+                    "-mDNS",
+                    "-DNSOverTLS",
+                    "DNSSEC=no/unsupported"
+                ]),
+                servers: words(&["127.0.0.1:18053"]),
+                domains: words(&["~test"]),
+            }
+        );
+        // systemd 262 (Fedora 45): wrapped protocols, and keys of its own.
+        let fedora = read(
+            "Link 3 (marsa0)\n    Current Scopes: none\n         Protocols: -DefaultRoute \
+             LLMNR=resolve -mDNS -DNSOverTLS\n                    DNSSEC=no/unsupported\nCurrent \
+             DNS Server: 127.0.0.1:18053\n       DNS Servers: 127.0.0.1:18053\n        DNS \
+             Domain: ~test\n     Default Route: no\n",
+        );
+        assert_eq!(fedora.scopes, ["none"]);
+        assert_eq!(fedora.protocols.last().unwrap(), "DNSSEC=no/unsupported");
+        assert_eq!(fedora.servers, ["127.0.0.1:18053"]);
+        // A wrapped list of servers, with a `:` in each, stays one list.
+        let wrapped = read("       DNS Servers: 127.0.0.1:18053\n                    fd00::1\n");
+        assert_eq!(wrapped.servers, ["127.0.0.1:18053", "fd00::1"]);
+        // No settings yet.
+        let bare = read("Link 5 (marsa0)\nCurrent Scopes: none\n");
+        assert!(bare.servers.is_empty() && bare.domains.is_empty());
+        assert_eq!(read_status(&exit(1, "")), None);
+        assert_eq!(read_status(&Err(io::ErrorKind::NotFound.into())), None);
+    }
+
+    /// Through a request, as `main` runs it.
     #[test]
     fn the_ops_run_from_a_request_on_linux_only() {
         let ops = json!([
@@ -1271,14 +1896,14 @@ mod tests {
             result(REMOVE, Outcome::Done),
         ];
         assert_eq!(apply(&request, Os::Linux, &linux), expected);
-        assert_eq!(linux.file(), None);
+        assert_eq!(linux.unit_file(), None);
 
         for os in [Os::Macos, Os::Windows] {
             let linux = Linux::new();
             let results = apply(&request, os, &linux);
             let codes: Vec<_> = results.iter().map(code_of).collect();
             assert_eq!(codes, [crate::response::code::OP_NOT_SUPPORTED; 2]);
-            assert!(linux.commands().is_empty() && linux.file().is_none());
+            assert!(linux.commands().is_empty() && linux.unit_file().is_none());
         }
     }
 }

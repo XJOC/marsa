@@ -5,9 +5,9 @@
 //!
 //! Each pair of macOS ops has its own file, so their tasks do not touch the
 //! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). Linux
-//! has `resolved` (M4-18a), `ports` (M4-18b), and `trust_linux` (M4-18c),
-//! which uses the PEM parser of `trust`. Windows has `hosts` (M4-19d) and
-//! `trust_windows` (M4-19e).
+//! has `resolved` (M4-18a, M4-18h), `ports` (M4-18b), and `trust_linux`
+//! (M4-18c), which uses the PEM parser of `trust`. Windows has `hosts`
+//! (M4-19d) and `trust_windows` (M4-19e).
 
 mod hosts;
 mod marked;
@@ -35,6 +35,17 @@ pub fn apply(request: &ValidRequest, os: Os, system: &impl System) -> Vec<OpResu
         run(op, os, system, &mut results);
     }
     results
+}
+
+/// The SHA-256 (upper-case hex) of the one certificate in `pem`, or `None`
+/// if `pem` is not exactly one certificate. The Windows service compares it
+/// with the hash approved at install, before any op runs.
+// Only the Windows service calls it; its tests run on every system.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn certificate_sha256(pem: &str) -> Option<String> {
+    trust::parse_pem(pem)
+        .ok()
+        .map(|der| trust::sha256_hex(&der))
 }
 
 /// The result of an op whose handler is not written yet.
@@ -357,5 +368,14 @@ mod tests {
             assert_eq!(names, expected, "{os:?}");
             assert!(results.iter().all(|(_, c)| *c != code::OP_NOT_SUPPORTED));
         }
+    }
+
+    /// The same value `marsa_core::helper::certificate_sha256` gives: the
+    /// service compares the hash `marsad` computed (ADR 0018).
+    #[test]
+    fn the_ca_hash_is_the_one_marsad_computes() {
+        const TEST_CA: &str = include_str!("../../../../fixtures/helper/test-ca.pem");
+        const HASH: &str = include_str!("../../../../fixtures/helper/test-ca.sha256");
+        assert_eq!(certificate_sha256(TEST_CA).as_deref(), Some(HASH.trim()));
     }
 }

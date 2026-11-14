@@ -2,6 +2,6 @@
   "version": 1,
   "error": {
     "code": "usage",
-    "message": "usage: marsa-helper apply <json> | pf-load | version"
+    "message": "usage: marsa-helper apply <json> | pf-load | version | service <user SID> <CA SHA-256 | -> | install <user SID> <CA SHA-256 | -> | uninstall"
   }
 }
