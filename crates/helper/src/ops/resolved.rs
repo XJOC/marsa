@@ -18,6 +18,14 @@
 //! fails half way still deletes the link (`ExecStopPost=`). A `marsa0` that
 //! is there already is taken over: only root can make a link.
 //!
+//! The unit also adds a local route for `127.0.0.1` on `marsa0`. Before
+//! systemd 253, resolved binds a link's DNS socket to the link while it
+//! connects, unless it knows the server's address as a link address, so the
+//! packets to `127.0.0.1` left through the dummy link and were lost: the
+//! first `.test` lookup took 21 s on Ubuntu 22.04 (spike S-02c). With the
+//! route, the kernel delivers them locally: 0.01 s. `marsad` still listens
+//! on `127.0.0.1` only, and `lo` keeps its own route.
+//!
 //! The helper writes the unit only over a file Marsa wrote ([`marked`]),
 //! starts it, and checks the link with `resolvectl status marsa0`. A failed
 //! start or check takes the unit out again, so it does not run at the next
@@ -236,6 +244,7 @@ RemainAfterExit=yes
 ExecStart=-{ip} link add {LINK} type dummy
 ExecStart={ip} link set {LINK} up
 ExecStart=-{ip} addr add {ADDRESS} dev {LINK}
+ExecStart={ip} route add local 127.0.0.1/32 dev {LINK} table local metric 1024
 ExecStart={RESOLVECTL} default-route {LINK} false
 ExecStart={RESOLVECTL} domain {LINK} ~test
 ExecStart=-{RESOLVECTL} llmnr {LINK} no
@@ -256,8 +265,11 @@ fn server(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
-/// Loads the unit file, adds the unit to the boot, and (re)starts it.
+/// Loads the unit file, adds the unit to the boot, and (re)starts it. A
+/// failed state is cleared first: systemd refuses a sixth start in ten
+/// seconds (spike S-02c).
 fn start(system: &impl System) -> Result<(), String> {
+    let _ = system.run(SYSTEMCTL, &RESET_FAILED_UNIT);
     for args in [&DAEMON_RELOAD[..], &ENABLE, &RESTART_UNIT] {
         let output = system.run(SYSTEMCTL, args);
         if !program::succeeded(&output) {
@@ -571,6 +583,8 @@ mod tests {
         server: Option<String>,
         /// Set by `dnsovertls no`.
         no_dot: bool,
+        /// The local route for `127.0.0.1` on the link.
+        loopback_route: bool,
     }
 
     impl Link {
@@ -765,6 +779,20 @@ mod tests {
                 ["link", "del", "marsa0"] => *link = None,
                 ["link", "set", "marsa0", "up"] | ["llmnr" | "mdns", "marsa0", "no"] => {}
                 ["addr", "add", "169.254.53.53/32", "dev", "marsa0"] => there.address = true,
+                [
+                    "route",
+                    "add",
+                    "local",
+                    "127.0.0.1/32",
+                    "dev",
+                    "marsa0",
+                    "table",
+                    "local",
+                    "metric",
+                    "1024",
+                ] => {
+                    there.loopback_route = true;
+                }
                 ["default-route", "marsa0", value] => there.default_route = Some(*value == "true"),
                 ["dnsovertls", "marsa0", "no"] => there.no_dot = true,
                 ["domain", "marsa0", domains @ ..] => {
@@ -967,7 +995,10 @@ mod tests {
         let linux = Linux::new();
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
         assert_eq!(linux.unit_file(), Some((ours(18053), 0o644)));
-        assert_eq!(linux.commands(), [ACTIVE, RELOAD, ENABLED, UNIT_UP, LOOKED]);
+        assert_eq!(
+            linux.commands(),
+            [ACTIVE, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED]
+        );
         assert!(linux.enabled.get());
         assert_eq!(linux.server().as_deref(), Some("127.0.0.1:18053"));
     }
@@ -1038,7 +1069,7 @@ mod tests {
         assert_eq!(linux.unit_file(), Some((ours(18053), OLD_MODE)));
         assert_eq!(
             linux.commands(),
-            [ACTIVE, LOOKED, RELOAD, ENABLED, UNIT_UP, LOOKED]
+            [ACTIVE, LOOKED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED]
         );
     }
 
@@ -1056,6 +1087,7 @@ mod tests {
                 ACTIVE,
                 LOOKED,
                 IS_ENABLED_CMD,
+                RESET_UNIT,
                 RELOAD,
                 ENABLED,
                 UNIT_UP,
@@ -1090,7 +1122,10 @@ mod tests {
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
         assert_eq!(linux.unit_file(), Some((ours(18053), 0o644)));
         assert_eq!(linux.server().as_deref(), Some("127.0.0.1:18053"));
-        assert_eq!(linux.commands(), [ACTIVE, RELOAD, ENABLED, UNIT_UP, LOOKED]);
+        assert_eq!(
+            linux.commands(),
+            [ACTIVE, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED]
+        );
     }
 
     /// A foreign file, and a link to Marsa's very unit: both left alone,
@@ -1188,14 +1223,14 @@ mod tests {
     #[test]
     fn a_unit_that_does_not_start_is_taken_out_again() {
         let steps = [
-            ("daemon-reload", vec![ACTIVE, RELOAD]),
+            ("daemon-reload", vec![ACTIVE, RESET_UNIT, RELOAD]),
             (
                 "enable marsa-dns-link.service",
-                vec![ACTIVE, RELOAD, ENABLED],
+                vec![ACTIVE, RESET_UNIT, RELOAD, ENABLED],
             ),
             (
                 "restart marsa-dns-link.service",
-                vec![ACTIVE, RELOAD, ENABLED, UNIT_UP],
+                vec![ACTIVE, RESET_UNIT, RELOAD, ENABLED, UNIT_UP],
             ),
         ];
         for (step, mut commands) in steps {
@@ -1222,7 +1257,9 @@ mod tests {
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
         assert_eq!(
             linux.commands(),
-            [ACTIVE, RELOAD, ENABLED, UNIT_UP, LOOKED, LOOKED, LOOKED]
+            [
+                ACTIVE, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED, LOOKED, LOOKED
+            ]
         );
     }
 
@@ -1237,7 +1274,7 @@ mod tests {
             message_of(&failed),
             format!("systemd-resolved does not use marsa0 for DNS; {UNIT_FILE} was removed again")
         );
-        let mut commands = vec![ACTIVE, RELOAD, ENABLED, UNIT_UP];
+        let mut commands = vec![ACTIVE, RESET_UNIT, RELOAD, ENABLED, UNIT_UP];
         commands.extend([LOOKED; 10]);
         commands.extend([DISABLED, RELOAD, RESET_UNIT]);
         assert_eq!(linux.commands(), commands);
@@ -1384,7 +1421,7 @@ mod tests {
         assert_eq!(
             linux.commands(),
             [
-                ACTIVE, RESET, RESTARTED, ACTIVE, RELOAD, ENABLED, UNIT_UP, LOOKED
+                ACTIVE, RESET, RESTARTED, ACTIVE, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED
             ]
         );
     }
