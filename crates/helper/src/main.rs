@@ -8,6 +8,7 @@
 //! marsa-helper apply <json>   run a request, print the response
 //! marsa-helper pf-load        boot job: load the pf redirect (task M4-08)
 //! marsa-helper version        print the version
+//! marsa-helper service <SID> <hash>   Windows: the service (task M4-19f)
 //! ```
 //!
 //! The request is one argument, not stdin: osascript's `do shell script` has
@@ -19,6 +20,7 @@ mod ops;
 mod os;
 mod request;
 mod response;
+mod service;
 mod system;
 // The helper's Win32 calls (ADR 0018). Windows only: nothing else has them.
 #[cfg(windows)]
@@ -37,7 +39,8 @@ use crate::request::Request;
 use crate::response::{OpResult, Response, code};
 use crate::system::{RealSystem, System};
 
-const USAGE: &str = "usage: marsa-helper apply <json> | pf-load | version";
+const USAGE: &str =
+    "usage: marsa-helper apply <json> | pf-load | version | service <user SID> <CA SHA-256 | ->";
 
 fn main() -> ExitCode {
     // `args_os`: `args` panics on an argument that is not UTF-8.
@@ -62,6 +65,8 @@ fn cli(args: &[OsString], os: Os, system: &impl System, sleep: impl Fn(Duration)
     let response = match args {
         [cmd] if cmd == "version" => return (env!("CARGO_PKG_VERSION").to_owned(), 0),
         [cmd] if cmd == pf::COMMAND => Response::results(vec![pf_load(os, system, sleep)]),
+        // Windows: the SCM starts the helper this way (ADR 0018).
+        [cmd, rest @ ..] if cmd == service::COMMAND => service::run(rest),
         [cmd, raw] if cmd == "apply" => match Request::from_arg(raw) {
             Ok(request) => Response::results(ops::apply(&request, os, system)),
             Err(err) => Response::error(err.code(), err.to_string()),

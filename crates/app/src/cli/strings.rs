@@ -193,6 +193,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "version_in_use" => "This version is in use: it is a default, a site is set to it, \
              or Caddy runs from it. Nothing was uninstalled."
             .into(),
+        // M5-19: the only PHP and the default, and sites run it.
+        "sites_lose_php" => "This is the only PHP version installed, and sites run it: they \
+             would have no PHP. Install another PHP version and make it the default first. \
+             Nothing was uninstalled."
+            .into(),
         "version_ambiguous" => format!(
             "{} matches more than one installed {}version. Name one in full; \"marsa \
              runtimes{}\" lists them.",
@@ -418,6 +423,12 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              ~/Library/Application Support/dev.marsa.Marsa/bin, then run \"marsa setup\" from \
              there."
             .into(),
+        "setup_prompt_failed" => "macOS could not show the administrator password prompt, so \
+             marsa-helper did not run. Make sure you are logged in at this Mac's desktop and it \
+             is unlocked. Quit the Marsa window and the menu-bar icon, run \"marsa daemon \
+             stop\", then run \"marsa setup\" again in Terminal. The error number is in the \
+             file logs/marsad.log."
+            .into(),
         "setup_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the result \
              of setup is not known. Run \"marsa setup\" again; if it repeats, report it with \
              the file logs/marsad.log."
@@ -605,6 +616,12 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              its folder, so Marsa did not ask for the password and nothing was removed. Make \
              both yours and writable only by you (chmod go-w), then run \"marsa uninstall \
              --all\" again. The path is in the file logs/marsad.log."
+            .into(),
+        "uninstall_prompt_failed" => "macOS could not show the administrator password prompt, \
+             so marsa-helper did not run and nothing was removed. Make sure you are logged in at \
+             this Mac's desktop and it is unlocked. Quit the Marsa window and the menu-bar icon, \
+             run \"marsa daemon stop\", then run \"marsa uninstall --all\" again in Terminal. \
+             The error number is in the file logs/marsad.log."
             .into(),
         "uninstall_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the \
              result is not known, and Marsa removed nothing else. Run \"marsa uninstall --all\" \
@@ -796,8 +813,8 @@ pub fn nothing_to_uninstall(runtime: Runtime, requested: &str) -> String {
     )
 }
 
-/// `version_in_use` with its facts: one sentence for each use, each with
-/// what to do first.
+/// `version_in_use` or `sites_lose_php` with its facts: one sentence for
+/// each use, each with what to do first.
 pub fn version_in_use(runtime: Runtime, in_use: &VersionInUse) -> String {
     let name = runtime_name(runtime);
     let version = &in_use.version;
@@ -824,6 +841,19 @@ pub fn version_in_use(runtime: Runtime, in_use: &VersionInUse) -> String {
             " The sites {} are set to it: give them another version first.",
             sites.join(", ")
         )),
+    }
+    let left = match &in_use.sites_left_without_php[..] {
+        [] => None,
+        [site] => Some(format!("The site {site}")),
+        sites => Some(format!("The sites {}", sites.join(", "))),
+    };
+    if let Some(left) = left {
+        let tool = runtime.dir_name();
+        text.push_str(&format!(
+            " {left} would have no {name}: {name} {version} is the only {name} installed. \
+             Install another version first with \"marsa install {tool} <version>\", then make \
+             it the default with \"marsa use {tool} <version>\"."
+        ));
     }
     if in_use.caddy {
         text.push_str(" Caddy runs from it: stop Caddy first with \"marsa services stop caddy\".");
@@ -1416,8 +1446,8 @@ pub fn doctor_add_shims(shims: &Path, windows: bool) -> String {
         )
     } else {
         format!(
-            "Add this line at the end of ~/.zprofile and ~/.zshrc (or your shell's startup \
-             file), then open a new terminal: export PATH=\"{}:$PATH\"",
+            "Add this line at the end of ~/.zshrc (or your shell's startup file), then open a \
+             new terminal: export PATH=\"{}:$PATH\"",
             shims.display()
         )
     }
@@ -1438,8 +1468,8 @@ pub fn doctor_move_shims(shims: &Path, windows: bool) -> String {
         )
     } else {
         format!(
-            "Move the line that adds {} to PATH to the end of ~/.zprofile and ~/.zshrc (or your \
-             shell's startup file), after Homebrew's, then open a new terminal.",
+            "Move the line that adds {} to PATH to the end of ~/.zshrc (or your shell's startup \
+             file), after any other line that changes PATH, then open a new terminal.",
             shims.display()
         )
     }
@@ -1507,8 +1537,9 @@ mod tests {
         // `PUT /v1/runtimes/{tool}/default` (task M5-01).
         "version_not_installed",
         "no_default_version",
-        // `DELETE /v1/runtimes/{tool}/{version}` (task M5-07).
+        // `DELETE /v1/runtimes/{tool}/{version}` (tasks M5-07 and M5-19).
         "version_in_use",
+        "sites_lose_php",
         "version_ambiguous",
         "uninstall_io",
         "recipe_invalid",
@@ -1589,6 +1620,7 @@ mod tests {
         "setup_helper_missing",
         "setup_helper_unsafe",
         "setup_helper_protected_folder",
+        "setup_prompt_failed",
         "setup_helper_failed",
         "setup_helper_rejected",
         "redirect_port_held",
@@ -1639,6 +1671,7 @@ mod tests {
         "uninstall_not_authorized",
         "uninstall_helper_missing",
         "uninstall_helper_unsafe",
+        "uninstall_prompt_failed",
         "uninstall_helper_failed",
         "uninstall_helper_rejected",
         "uninstall_all_needs_yes",
@@ -1708,7 +1741,14 @@ mod tests {
             },
             ClientError::InUse {
                 message: "x".into(),
-                in_use: VersionInUse::default(),
+                in_use: Box::default(),
+            },
+            ClientError::InUse {
+                message: "x".into(),
+                in_use: Box::new(VersionInUse {
+                    sites_left_without_php: vec!["blog".into()],
+                    ..VersionInUse::default()
+                }),
             },
             ClientError::DaemonFile(DaemonFileError::Missing { path: path() }),
             ClientError::DaemonFile(DaemonFileError::Invalid {

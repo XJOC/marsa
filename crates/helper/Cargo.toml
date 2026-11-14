@@ -13,11 +13,20 @@ serde.workspace = true
 serde_json.workspace = true
 # The SHA-256 of the CA certificate, to remove it by hash (task M4-09).
 sha2.workspace = true
+# The thumbprint `certutil` matches, on Windows (task M4-19e). The op is built
+# and tested on every system, so it is not a Windows-only dependency.
+sha1.workspace = true
 thiserror.workspace = true
 
-# Win32 calls (ADR 0018): the system folder for the hosts file (task M4-19d).
+# Win32 calls (ADR 0018): the system folder for the hosts file (task M4-19d),
+# `Program Files` (task M4-19e), and the named pipe with its DACL and the
+# client's SID (task M4-19f).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_SystemInformation"] }
+windows-sys = { workspace = true, features = ["Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_UI_Shell"] }
+# The service dispatcher, its control handler, and its install (tasks M4-19f
+# and M4-19j), instead of about 150 lines of hand-written `unsafe` FFI.
+# Approved by the manager on 2026-11-11 (ADR 0018).
+windows-service.workspace = true
 
 [dev-dependencies]
 # Snapshots of the files the helper writes: pf rules, the launchd plist, the

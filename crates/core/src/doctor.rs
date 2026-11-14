@@ -244,9 +244,10 @@ pub fn caddy(daemon_running: bool, state: Option<&ServiceState>, installed: bool
 }
 
 /// `answer`: what the system resolver gave a random `.test` name, `None` if
-/// it gave nothing in time. `marsad`'s DNS server answers `127.0.0.1` and
-/// `::1`. Without the daemon nothing answers, which is no fault of the setup;
-/// but a foreign answer is one.
+/// it gave nothing in time. `marsad`'s DNS server answers `127.0.0.1`, and
+/// no address for `AAAA` (task M5-17); `::1` still counts as ours, as older
+/// builds answered it. Without the daemon nothing answers, which is no fault
+/// of the setup; but a foreign answer is one.
 pub fn dns(daemon_running: bool, answer: Option<&[IpAddr]>) -> Verdict {
     let answer = answer.unwrap_or_default();
     if answer.contains(&IpAddr::V4(Ipv4Addr::LOCALHOST))

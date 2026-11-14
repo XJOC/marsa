@@ -296,6 +296,10 @@ mod tests {
             self.fake.exists(path)
         }
 
+        fn is_link(&self, path: &Path) -> bool {
+            self.fake.is_link(path)
+        }
+
         fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
             self.fake.write_atomic(path, bytes, mode)
         }
@@ -449,6 +453,20 @@ mod tests {
         let message = format!("{CONF} was not written by Marsa, so it was left as it is");
         assert_eq!(install(&linux), failed(INSTALL, PORTS_FOREIGN, &message));
         assert_eq!(linux.file(), Some((FOREIGN.to_vec(), OLD_MODE)));
+        assert!(linux.commands().is_empty());
+        assert_eq!(linux.value(), "1024\n");
+    }
+
+    /// A link at Marsa's path to a file with Marsa's content: neither op
+    /// replaces or deletes it.
+    #[test]
+    fn a_symlink_at_marsa_s_path_is_foreign_and_kept() {
+        let mut linux = Linux::with_file(1024, OURS);
+        linux.fake.links.insert(PathBuf::from(CONF));
+        let message = format!("{CONF} was not written by Marsa, so it was left as it is");
+        assert_eq!(install(&linux), failed(INSTALL, PORTS_FOREIGN, &message));
+        assert_eq!(remove(&linux), result(REMOVE, Outcome::Unchanged));
+        assert_eq!(linux.file(), Some((OURS.to_vec(), OLD_MODE)));
         assert!(linux.commands().is_empty());
         assert_eq!(linux.value(), "1024\n");
     }
