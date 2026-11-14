@@ -12,9 +12,9 @@
 //! - nothing else is touched.
 //!
 //! Caddy reaches each pool on its Unix socket, or on `127.0.0.1:<port>` when
-//! the socket path is too long ([`fallback_port`]). Windows needs php-cgi
-//! pools instead; they come later, so there the daemon logs a warning and
-//! runs no pool, and PHP sites answer 503.
+//! the socket path is too long ([`fallback_port`]). Windows has no php-fpm:
+//! there each line runs one php-cgi on its fallback port instead ([`cgi`],
+//! ADR 0016), as the service `php-cgi-<minor>`.
 //!
 //! [`write_ca_bundle`] writes the CA bundle that `php.ini` points to, so PHP
 //! trusts the certificates of the other `.test` sites.
@@ -24,6 +24,7 @@
 //! [`orphan`] stops a php-fpm that a crashed daemon left on the pool's
 //! socket before the pool starts (ADR 0009).
 
+pub mod cgi;
 pub mod orphan;
 
 use std::collections::BTreeMap;
@@ -75,10 +76,14 @@ pub fn wanted_pools(sites: &[Site]) -> BTreeMap<PhpMinor, Version> {
     wanted
 }
 
-/// The service id of the pool of `minor`: `php-fpm-8.4`. Also its log file,
-/// `logs/php-fpm-8.4.log`.
+/// The service id of the pool of `minor`: `php-fpm-8.4`, or `php-cgi-8.4` on
+/// Windows, where php-cgi serves PHP (ADR 0016). Also its log file,
+/// `logs/<id>.log`.
 pub fn fpm_id(minor: PhpMinor) -> String {
-    format!("php-fpm-{minor}")
+    // `cfg!` outside `platform`: the id names the program that runs on this
+    // system, and the daemon always runs on the system it was built for.
+    let program = if cfg!(windows) { "php-cgi" } else { "php-fpm" };
+    format!("{program}-{minor}")
 }
 
 /// The port php-fpm listens on when the socket path is too long:
@@ -137,6 +142,8 @@ pub fn fpm_spec(program: PathBuf, files: &PhpFiles) -> ServiceSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pool {
     pub files: PhpFiles,
+    /// The text of `php-fpm.conf`. Empty for php-cgi (Windows), which has no
+    /// config file of its own: then no `php-fpm.conf` is written.
     pub fpm_conf: String,
     pub php_ini: String,
     pub spec: ServiceSpec,
@@ -160,12 +167,16 @@ pub struct Skip {
 ///
 /// `php_path_not_allowed` if a path cannot go in the files, and
 /// `php_fpm_unavailable` if the recipe has no `php-fpm` for `platform`.
+/// Windows gets the php-cgi pool of [`cgi::pool_for`].
 pub fn pool_for(
     data_dir: &Path,
     platform: Platform,
     version: &Version,
     ca_bundle: Option<&Path>,
 ) -> Result<Pool, Skip> {
+    if platform == Platform::WindowsX64 {
+        return cgi::pool_for(data_dir, version, ca_bundle);
+    }
     let mut files = PhpFiles::new(data_dir, version);
     files.ca_bundle = ca_bundle.map(Path::to_path_buf);
     let php_error = |err: marsa_core::php::PhpError| Skip {
@@ -192,13 +203,13 @@ pub fn pool_for(
     })
 }
 
-/// Checks that php-fpm is installed, makes the folders it needs, and writes
-/// the two files whose text changed.
+/// Checks that php-fpm (or php-cgi) is installed, makes the folders it
+/// needs, and writes the files whose text changed.
 fn write_pool(pool: &Pool) -> Result<(), Skip> {
     if !pool.spec.program.is_file() {
         return Err(Skip {
             code: "php_fpm_not_installed",
-            reason: format!("no php-fpm at {}", pool.spec.program.display()),
+            reason: format!("no PHP program at {}", pool.spec.program.display()),
         });
     }
     let files = &pool.files;
@@ -215,7 +226,10 @@ fn write_pool(pool: &Pool) -> Result<(), Skip> {
             fs::create_dir_all(dir).map_err(cannot(dir))?;
         }
     }
-    write_if_changed(&files.fpm_conf_file, &pool.fpm_conf).map_err(cannot(&files.fpm_conf_file))?;
+    if !pool.fpm_conf.is_empty() {
+        write_if_changed(&files.fpm_conf_file, &pool.fpm_conf)
+            .map_err(cannot(&files.fpm_conf_file))?;
+    }
     write_if_changed(&files.ini_file, &pool.php_ini).map_err(cannot(&files.ini_file))?;
     Ok(())
 }
@@ -375,7 +389,7 @@ impl PhpManager {
     ) -> PhpPools {
         let wanted = wanted_pools(sites);
         let pools = match self.platform {
-            Some(platform) if runs_fpm(platform) => {
+            Some(platform) if runs_pools(platform) => {
                 let data_dir = self.data_dir.clone();
                 let ca_bundle = ca_bundle.map(Path::to_path_buf);
                 let job = move || prepare(&data_dir, platform, &wanted, ca_bundle.as_deref());
@@ -389,9 +403,7 @@ impl PhpManager {
             _ => {
                 if !wanted.is_empty() && !self.warned {
                     self.warned = true;
-                    warn!(
-                        "PHP pools need php-cgi on this system, which comes later; PHP sites answer 503"
-                    );
+                    warn!("Marsa has no PHP for this system; PHP sites answer 503");
                 }
                 BTreeMap::new()
             }
@@ -503,10 +515,10 @@ impl PhpManager {
     }
 }
 
-/// php-fpm runs on macOS and Linux. Windows needs php-cgi (architecture.md
-/// section 9), which comes later.
-fn runs_fpm(platform: Platform) -> bool {
-    !matches!(platform, Platform::WindowsX64 | Platform::Any)
+/// php-fpm runs on macOS and Linux, php-cgi on Windows ([`cgi`]).
+/// `Platform::Any` is not a system.
+fn runs_pools(platform: Platform) -> bool {
+    platform != Platform::Any
 }
 
 async fn stop_pool(daemon: &Daemon, minor: PhpMinor) {
@@ -648,7 +660,8 @@ mod tests {
 
     #[test]
     fn ids_and_fallback_ports_follow_the_php_line() {
-        assert_eq!(fpm_id(PHP84), "php-fpm-8.4");
+        let program = if cfg!(windows) { "php-cgi" } else { "php-fpm" };
+        assert_eq!(fpm_id(PHP84), format!("{program}-8.4"));
         assert_eq!(fallback_port(PHP84), 19084);
         assert_eq!(fallback_port(PhpMinor { major: 7, minor: 4 }), 19074);
         let huge = PhpMinor {
@@ -676,7 +689,7 @@ mod tests {
         let program = PathBuf::from("/data/runtimes/php/8.4.3/bin/php-fpm");
         let spec = fpm_spec(program.clone(), &files);
 
-        assert_eq!(spec.id, "php-fpm-8.4");
+        assert_eq!(spec.id, fpm_id(PHP84));
         assert_eq!(spec.program, program);
         let conf = files.fpm_conf_file.to_str().unwrap();
         let ini = files.ini_file.to_str().unwrap();
@@ -705,8 +718,10 @@ mod tests {
         let cainfo = format!("curl.cainfo = \"{}\"", bundle.to_str().unwrap());
         assert!(long.php_ini.contains(&cainfo), "{}", long.php_ini);
 
-        let windows = pool_for(Path::new("/data"), Platform::WindowsX64, &version, None);
-        assert_eq!(windows.unwrap_err().code, "php_fpm_unavailable");
+        // Windows: php-cgi on the fallback port, with no php-fpm.conf.
+        let windows = pool_for(Path::new("/data"), Platform::WindowsX64, &version, None).unwrap();
+        assert_eq!(windows.dial, Dial::Tcp(19084));
+        assert!(windows.fpm_conf.is_empty());
     }
 
     #[test]
@@ -791,19 +806,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn windows_runs_no_pool() {
+    async fn windows_without_php_cgi_runs_no_pool() {
         let dir = tempfile::tempdir().unwrap();
         let daemon = Daemon::new(dir.path().to_path_buf());
         let mut php = PhpManager::new(dir.path(), Some(Platform::WindowsX64));
         let sites = [site("shop", SiteKind::Laravel, Some("8.4.3"))];
         let pools = php.sync(&daemon, &sites, None).await;
         assert_eq!(pools, PhpPools::default());
-        assert!(!daemon.proc_alive("php-fpm-8.4"));
+        assert!(!daemon.proc_alive(&fpm_id(PHP84)));
         assert!(!dir.path().join("php").exists(), "no files written");
     }
 
+    /// Windows: one php-cgi per line, on the fallback port, with `php.ini`
+    /// and no `php-fpm.conf`. The stand-in `php-cgi.exe` is an empty file:
+    /// whether the supervisor can run it is not this test's concern.
+    #[tokio::test]
+    async fn windows_runs_one_php_cgi_per_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = Daemon::new(dir.path().to_path_buf());
+        let program = PhpFiles::new(dir.path(), &v("8.4.3")).php_cgi;
+        fs::create_dir_all(program.parent().unwrap()).unwrap();
+        fs::write(&program, "").unwrap();
+
+        let mut php = PhpManager::new(dir.path(), Some(Platform::WindowsX64));
+        // No orphan check: it would look at this machine's processes.
+        php.recovery = false;
+        let sites = [site("shop", SiteKind::Laravel, Some("8.4.3"))];
+        let pools = php.sync(&daemon, &sites, None).await;
+        assert_eq!(pools.0, BTreeMap::from([(PHP84, vec![Dial::Tcp(19084)])]));
+        assert!(daemon.proc_alive(&fpm_id(PHP84)));
+        let config = dir.path().join("php").join("8.4");
+        assert!(config.join("php.ini").is_file());
+        assert!(!config.join("php-fpm.conf").exists());
+        daemon.stop_procs(std::time::Duration::from_secs(5)).await;
+    }
+
     /// A shell script stands in for php-fpm, which runs on macOS and Linux
-    /// only: Windows has no `/bin/sh`, and gets no pools (see above).
+    /// only: Windows has no `/bin/sh` (php-cgi: see above).
     #[cfg(unix)]
     #[tokio::test]
     async fn sync_starts_restarts_and_stops_only_what_changed() {
