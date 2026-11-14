@@ -321,7 +321,7 @@ function Probe {
   # runner, give it read access to the server files, and start the server as that user.
   Say 'probe 6: standard user'
   try {
-    $pwd1 = 'Kv!Spike-2026-x'
+    $pwd1 = 'Kv!Sp1ke#26x'
     # Server editions do not let standard users log on locally; allow it for this throwaway runner.
     $inf = Join-Path $Work 'sec.inf'; $sdb = Join-Path $Work 'sec.sdb'
     & secedit /export /cfg $inf /areas USER_RIGHTS 2>&1 | Out-Null
@@ -333,7 +333,9 @@ function Probe {
     Set-Content $inf $txt
     & secedit /configure /db $sdb /cfg $inf /areas USER_RIGHTS 2>&1 | Out-Null
     Fact std_user_rights_granted "secedit exit $LASTEXITCODE"
-    Fact std_user_create ((& net user kvstd $pwd1 /add 2>&1 | Out-String).Trim() -replace "`r?`n", ' ')
+    New-LocalUser -Name kvstd -Password (ConvertTo-SecureString $pwd1 -AsPlainText -Force) -PasswordNeverExpires | Out-Null
+    Add-LocalGroupMember -Group 'Users' -Member 'kvstd' -ErrorAction SilentlyContinue
+    Fact std_user_groups ((& net user kvstd | Select-String -Pattern 'Local Group' | ForEach-Object { $_.Line.Trim() }) -join ' ')
     Fact std_user_in_administrators ($(if ((& net localgroup Administrators) -match 'kvstd') { 'YES (unexpected)' } else { 'no' }))
     $cred = New-Object System.Management.Automation.PSCredential('kvstd', (ConvertTo-SecureString $pwd1 -AsPlainText -Force))
     $sdir = Join-Path $Work 'probe/std'; New-Item -ItemType Directory -Force -Path $sdir | Out-Null
