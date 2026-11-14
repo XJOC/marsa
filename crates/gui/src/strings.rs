@@ -341,6 +341,13 @@ pub fn setup_explanation(platform: Option<Platform>) -> &'static str {
              Marsa, trusts Marsa's certificates, and routes ports 80 and 443 to Marsa. macOS \
              asks for your password once."
         }
+        // ADR 0014: the setup text says what the low ports cost.
+        Some(Platform::LinuxX64 | Platform::LinuxArm64) => {
+            "Setup lets your browser open .test sites over HTTPS: it sends .test names to \
+             Marsa, trusts Marsa's certificates, and lets Caddy use ports 80 and 443. After \
+             it, any program on this computer may use ports 80 to 1023. Your desktop asks for \
+             your password once."
+        }
         _ => {
             "Setup lets your browser open .test sites over HTTPS. Your system may ask for an \
              administrator's approval once."
@@ -353,6 +360,9 @@ pub fn setup_running(platform: Option<Platform>) -> &'static str {
     match platform {
         Some(Platform::DarwinArm64 | Platform::DarwinX64) => {
             "Setting up… Enter your password when macOS asks."
+        }
+        Some(Platform::LinuxX64 | Platform::LinuxArm64) => {
+            "Setting up… Enter your password when your desktop asks."
         }
         _ => "Setting up… Answer your system's prompt if one opens.",
     }
@@ -412,6 +422,8 @@ fn setup_step(op: &str) -> String {
         "trust_install" => "Trust Marsa's HTTPS certificates".to_owned(),
         "resolver_install" => "Send .test names to Marsa".to_owned(),
         "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
+        "resolved_install" => "Send .test names to Marsa".to_owned(),
+        "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -997,7 +1009,7 @@ fn error_message(code: &str) -> Option<&'static str> {
             "Marsa is being removed from this computer (marsa uninstall --all). Wait for it to \
              end, then try again."
         }
-        "setup_not_supported" => "Setup from Marsa works on macOS only for now.",
+        "setup_not_supported" => "Setup from Marsa works on macOS and Linux only for now.",
         "setup_cancelled" => {
             "The password prompt was cancelled, so nothing was changed. Run setup again when \
              you are ready."
@@ -1011,8 +1023,83 @@ fn error_message(code: &str) -> Option<&'static str> {
              again is safe."
         }
         "setup_not_authorized" => {
-            "macOS did not give Marsa admin rights, so nothing was changed. Run setup again and \
-             enter the password of an administrator account."
+            "Your system did not give Marsa admin rights, so nothing was changed: a wrong \
+             password, or no password prompt (as over SSH). Run setup again from your desktop \
+             and enter the password of an administrator account."
+        }
+        // Linux (tasks M4-18e, M4-18h, M4-18b, M4-18c).
+        "setup_pkexec_missing" => {
+            "pkexec is not installed, so Marsa cannot ask for the administrator password. \
+             Install the package pkexec (Debian, Ubuntu), polkit (Fedora), or policykit-1 \
+             (older systems), then run setup again."
+        }
+        "setup_caddy_ports_failed" => {
+            "Linux now lets Caddy use ports 80 and 443, but Caddy did not take them. Most often \
+             another program listens there (Apache, nginx). Stop it, then restart Caddy; the \
+             Caddy log says why."
+        }
+        "resolved_foreign" => {
+            "/etc/systemd/system/marsa-dns-link.service belongs to another tool, so Marsa left \
+             it as it is. Move that file away, then run setup again."
+        }
+        "resolved_read" | "resolved_write" | "resolved_delete" => {
+            "Linux did not let Marsa change its files for .test names. Run setup again; if it \
+             repeats, report it."
+        }
+        "resolved_not_running" => {
+            "Marsa sends .test names to its DNS server through systemd-resolved, which does not \
+             run here, so nothing was changed. Start systemd-resolved, then run setup again."
+        }
+        "resolved_tool_missing" => {
+            "The ip program (package iproute2) is not on this system, so Marsa could not make \
+             its link for .test names. Install iproute2, then run setup again."
+        }
+        "resolved_unit_failed" => {
+            "systemd did not start or stop Marsa's link for .test names \
+             (marsa-dns-link.service). Run setup again; if it repeats, report it."
+        }
+        "resolved_check_failed" => {
+            "Marsa could not confirm that systemd-resolved sends .test names, and only them, to \
+             its DNS server, so it took its link out again. Run setup again; if it repeats, \
+             report it."
+        }
+        "resolved_systemd_too_old" => {
+            "This system's systemd is older than version 250, where systemd-resolved can drop \
+             the setting that sends .test names to Marsa, so Marsa did not make it. .test names \
+             do not open by name here yet."
+        }
+        "resolved_restart_failed" => {
+            "systemd-resolved did not restart after Marsa removed an old setting, so it may \
+             still send every name to Marsa's DNS server. Restart systemd-resolved."
+        }
+        "resolved_stopped" => {
+            "systemd-resolved stopped and did not start again, so no name resolves on this \
+             computer now. Start systemd-resolved, then run setup again."
+        }
+        "ports_foreign" => {
+            "/etc/sysctl.d/60-marsa.conf belongs to another tool, so Caddy cannot use ports 80 \
+             and 443. Move that file away, then run setup again."
+        }
+        "ports_read" | "ports_write" | "ports_delete" => {
+            "Linux did not let Marsa change /etc/sysctl.d/60-marsa.conf. Run setup again; if it \
+             repeats, report it."
+        }
+        "ports_apply_failed" => {
+            "Linux did not let Caddy use ports 80 and 443, so Marsa took its setting out again. \
+             Run setup again; if it repeats, report it."
+        }
+        "ports_restore_failed" => {
+            "Marsa removed its setting for ports 80 and 443, but every program may use ports 80 \
+             to 1023 until the computer restarts."
+        }
+        "trust_tool_missing" => {
+            "This system has no tool Marsa knows for its trusted certificates, so the trust in \
+             Marsa's certificate authority was not changed. On Debian, Ubuntu, or Fedora, \
+             install the ca-certificates package, then run setup again."
+        }
+        "trust_store_update_failed" => {
+            "The system's store of trusted certificates could not be updated. Run setup again; \
+             if it repeats, report it."
         }
         "setup_helper_missing" => {
             "The marsa-helper program is not next to marsad, so nothing was changed. Reinstall \
@@ -1520,6 +1607,27 @@ mod tests {
             "trust_add_failed",
             "pf_write",
             "pf_load_failed",
+            "setup_pkexec_missing",
+            "setup_caddy_ports_failed",
+            "resolved_foreign",
+            "resolved_read",
+            "resolved_write",
+            "resolved_delete",
+            "resolved_not_running",
+            "resolved_tool_missing",
+            "resolved_unit_failed",
+            "resolved_check_failed",
+            "resolved_systemd_too_old",
+            "resolved_restart_failed",
+            "resolved_stopped",
+            "ports_foreign",
+            "ports_read",
+            "ports_write",
+            "ports_delete",
+            "ports_apply_failed",
+            "ports_restore_failed",
+            "trust_tool_missing",
+            "trust_store_update_failed",
         ];
         for code in built.chain(listed.map(str::to_owned)) {
             assert!(error_message(&code).is_some(), "no message for {code}");
@@ -1667,6 +1775,22 @@ mod tests {
             assert!(!setup_explanation(platform).contains("macOS"));
             assert!(!setup_running(platform).contains("macOS"));
         }
+    }
+
+    /// ADR 0014: on Linux the setup text says that ports 80 to 1023 become
+    /// open to every program, before the password prompt.
+    #[test]
+    fn setup_on_linux_names_the_cost_of_the_low_ports() {
+        for platform in [Platform::LinuxX64, Platform::LinuxArm64] {
+            let text = setup_explanation(Some(platform));
+            assert!(text.contains("any program on this computer may use ports 80 to 1023"));
+            assert!(setup_running(Some(platform)).contains("desktop"));
+        }
+        assert_eq!(
+            setup_step("ports_install"),
+            "Let Caddy use ports 80 and 443"
+        );
+        assert_eq!(setup_step("resolved_install"), "Send .test names to Marsa");
     }
 
     fn result(op: &str, status: OpStatus, code: Option<&str>) -> OpResult {
