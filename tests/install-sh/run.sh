@@ -386,7 +386,8 @@ fi
 if [ -s "$HOME_DIR/.profile" ] || [ -e "$HOME_DIR/.bash_profile" ]; then problems+=" bash-with-profile-wrote-a-file"; fi
 home fish-mac "$MAC"
 run fresh-mac "$MAC" MARSA_VERSION="$VERSION" SHELL=/usr/local/bin/fish
-if [[ "$OUTPUT" != *"Add Marsa to your PATH"* ]] || [[ "$OUTPUT" == *"These commands do it"* ]]; then
+# No ready command for another shell: no `echo '...' >>` line at all.
+if [[ "$OUTPUT" != *"Add Marsa to your PATH"* ]] || [[ "$OUTPUT" == *"echo '"* ]]; then
   problems+=" fish"
 fi
 report "the PATH advice for bash and other shells on macOS" "$problems"
