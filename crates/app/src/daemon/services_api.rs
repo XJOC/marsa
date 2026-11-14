@@ -12,9 +12,10 @@
 //! on a pool is `409 service_managed_by_sites`.
 //!
 //! An action on Caddy that finds another one running waits for it, up to
-//! [`ACTION_WAIT`], then runs. The usual one is the start of Caddy with the
-//! daemon (task M5-16): `marsa services stop caddy` starts the daemon itself,
-//! and its stop must not be lost to that start.
+//! [`ACTION_WAIT`], then runs; a wait that runs out is still
+//! `409 service_busy`. The usual one is the start of Caddy with the daemon
+//! (task M5-16): `marsa services stop caddy` starts the daemon itself, and
+//! its stop then runs after that start instead of failing.
 //!
 //! Every error, the extractors' own included, is an `ErrorBody`.
 
@@ -45,11 +46,14 @@ use super::supervisor::{ServiceRuntime, lock};
 pub const MANAGED_BY_SITES: &str = "service_managed_by_sites";
 
 /// How long an action on Caddy waits for another one to end before
-/// `409 service_busy`. Longer than a start that first stops an old Caddy
-/// (up to about 15 s: 10 s for the old one with ADR 0009's ladder, 5 s for
-/// the admin API). A request that waited, then stopped or restarted Caddy,
-/// still fits in the client's 30 s.
-pub const ACTION_WAIT: Duration = Duration::from_secs(16);
+/// `409 service_busy`. Longer than the slowest start, about 19 s: about 10 s
+/// to stop an old Caddy (ADR 0009: `POST /stop` 1 s, then 2 s, SIGTERM and
+/// 5 s, SIGKILL and 2 s), 5 s for the admin API, then up to 4 s to stop a
+/// Caddy that never answered. The action that waited runs after: a restart
+/// is a stop (up to 4 s) and such a start, about 23 s. So one request takes
+/// up to about 43 s, and the client gives an action 60 s
+/// (`marsa_core::client`).
+pub const ACTION_WAIT: Duration = Duration::from_secs(20);
 
 /// A `:` comment this often on a quiet stream, as on `/v1/events`: the
 /// client gives up after 45 s without a byte.

@@ -55,9 +55,12 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// `GET /v1/health` answers at once; this also bounds each handshake step.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
-/// For one call that is not a stream, and for the start of a stream. A
-/// service restart fits well inside.
+/// For one call that is not a stream, and for the start of a stream.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// For `POST /v1/services/{id}/{action}`. The daemon waits up to 20 s for
+/// another action on the service, then runs this one; a restart that stops
+/// an old Caddy first takes about 23 s. About 43 s in all.
+const SERVICE_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 /// For `DELETE /v1/runtimes/{tool}/{version}`: a Node.js folder holds
 /// thousands of files, and a virus scanner may slow their delete.
 const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -185,7 +188,7 @@ impl DaemonClient {
         action: ServiceAction,
     ) -> Result<ServiceStatus, ClientError> {
         let path = ["v1", "services", id, action.as_str()];
-        self.call(Method::POST, &path, REQUEST_TIMEOUT).await
+        self.call(Method::POST, &path, SERVICE_ACTION_TIMEOUT).await
     }
 
     /// `GET /v1/logs/{id}`: the recent lines.

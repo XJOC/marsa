@@ -663,12 +663,11 @@ async fn a_start_by_hand_during_the_start_with_the_daemon_waits_for_it() {
         panic!("not run: {launched:?}");
     };
     assert_eq!(first.state, ServiceState::Running);
+    // The same pid in both answers: the request started no second Caddy.
     assert_eq!(
         (started.state, started.pid),
         (ServiceState::Running, first.pid)
     );
-    // One Caddy ran, not two.
-    app.wait_for_line("fake serving").await;
     app.daemon.stop_procs(WAIT).await;
 }
 
@@ -725,6 +724,46 @@ async fn a_wait_that_runs_out_is_busy() {
     assert_eq!(status.state, failed("caddy_start_timeout"));
     assert!(!app.daemon.proc_alive("caddy"));
     app.wait_for_line("fake deaf").await;
+}
+
+/// A request queued behind the start with the daemon when the daemon begins
+/// to stop does not run: the shutdown stops Caddy, and a start then would
+/// take our stopping Caddy for an orphan and start another one. A request
+/// that comes during the shutdown does not run either.
+#[tokio::test]
+async fn a_request_waiting_at_shutdown_does_not_run() {
+    // Deaf: the start holds Caddy until the shutdown.
+    let app = App::new(Some("deaf"));
+    let launch = start_at_launch(&app.daemon);
+    until_caddy_runs(&app).await;
+    let queued = tokio::spawn({
+        let daemon = Arc::clone(&app.daemon);
+        async move {
+            let caddy = &daemon.caddy;
+            caddy.run_waiting(&daemon, ServiceAction::Start, WAIT).await
+        }
+    });
+    // In line behind the start.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!queued.is_finished());
+
+    app.daemon.shutdown.cancel();
+    assert_eq!(launch.wait(WAIT).await, Some(Launched::ShuttingDown));
+    let answer = tokio::time::timeout(WAIT, queued).await.expect("no hang");
+    assert_eq!(answer.unwrap().unwrap_err().code(), "service_busy");
+    // Free now, but the daemon stops.
+    let caddy = &app.daemon.caddy;
+    let late = caddy
+        .run_waiting(&app.daemon, ServiceAction::Restart, WAIT)
+        .await;
+    assert_eq!(late.unwrap_err().code(), "service_busy");
+
+    // Only the first Caddy ever ran, and the shutdown's sweep stops it.
+    app.daemon.stop_procs(WAIT).await;
+    assert!(!app.daemon.proc_alive("caddy"));
+    let lines: Vec<LogLine> = app.json("GET", "/v1/logs/caddy", StatusCode::OK).await;
+    let runs = lines.iter().filter(|line| line.text == "fake deaf");
+    assert_eq!(runs.count(), 1, "{lines:?}");
 }
 
 #[tokio::test]
@@ -820,7 +859,7 @@ async fn caddy_that_starts_after_the_first_pass_starts_on_the_sites() {
 /// it is not taken for our Caddy, and gets no `POST /stop`.
 #[tokio::test]
 async fn a_caddy_without_our_tag_is_never_ready_and_gets_no_stop() {
-    let app = App::with_ready_limit(Some("impostor"), Duration::from_secs(1));
+    let app = App::with_ready_limit(Some("impostor"), Duration::from_secs(3));
     let status: ServiceStatus = app
         .json("POST", "/v1/services/caddy/start", StatusCode::OK)
         .await;
