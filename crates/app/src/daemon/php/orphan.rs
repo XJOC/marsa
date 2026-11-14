@@ -765,7 +765,7 @@ mod tests {
         let pool = bare_pool(dir.path(), listen, "/never/run/php-fpm", &[]);
 
         assert!(!php.start_pool(&daemon, &pool).await);
-        let runtime = daemon.pools.find("php-fpm-8.4").expect("listed");
+        let runtime = daemon.pools.find(&fpm_id(PHP84)).expect("listed");
         let (status, lines) = {
             let runtime = lock(&runtime);
             (runtime.status.clone(), runtime.logs.recent())
@@ -778,7 +778,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.text.starts_with(note)), "{lines:?}");
         assert!(fake.signals().is_empty());
         assert!(pid_file.path.exists(), "kept for the next try");
-        assert!(!daemon.proc_alive("php-fpm-8.4"));
+        assert!(!daemon.proc_alive(&fpm_id(PHP84)));
     }
 
     // Runs `/bin/sleep` as the pool, which Windows does not have.
@@ -793,11 +793,11 @@ mod tests {
         let pool = bare_pool(dir.path(), listen, "/bin/sleep", &["30"]);
 
         assert!(php.start_pool(&daemon, &pool).await);
-        assert!(daemon.proc_alive("php-fpm-8.4"));
+        assert!(daemon.proc_alive(&fpm_id(PHP84)));
         assert!(!pid_file.path.exists(), "forgotten");
         assert!(fake.signals().is_empty());
         super::super::stop_pool(&daemon, PHP84).await;
-        assert!(!daemon.proc_alive("php-fpm-8.4"));
+        assert!(!daemon.proc_alive(&fpm_id(PHP84)));
     }
 
     #[tokio::test]
@@ -827,7 +827,7 @@ mod tests {
         assert!(
             pid_file
                 .path
-                .ends_with(Path::new("run").join("php-fpm-8.4.pid"))
+                .ends_with(Path::new("run").join(format!("{}.pid", fpm_id(PHP84))))
         );
         let program = Path::new(PROGRAM);
         for now in [
@@ -1126,7 +1126,7 @@ mod tests {
             })
             .await;
             let second = read().expect("a record");
-            let runtime = daemon.pools.find("php-fpm-8.4").expect("listed");
+            let runtime = daemon.pools.find(&fpm_id(PHP84)).expect("listed");
             let status = lock(&runtime).status.clone();
             assert_eq!((status.pid, status.restarts), (Some(second.pid), 1));
 
@@ -1170,7 +1170,7 @@ mod tests {
             // Only SIGTERM, only to the orphan, which it ended.
             assert_eq!(recorder.signals(), [(orphan.pid(), Signal::Term)]);
             assert_eq!(orphan.wait().signal(), Some(15));
-            let runtime = daemon.pools.find("php-fpm-8.4").expect("listed");
+            let runtime = daemon.pools.find(&fpm_id(PHP84)).expect("listed");
             let lines = lock(&runtime).logs.recent();
             assert!(lines.iter().any(|line| line.text == STOPPING_ORPHAN));
 
