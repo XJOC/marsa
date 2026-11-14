@@ -16,7 +16,8 @@
 //! ([`marked`]), and it writes none on a machine whose owner already allows
 //! port 80.
 //!
-//! No message holds the content of a file or the output of `sysctl`.
+//! No message holds the content of a file or the output of `sysctl`. One
+//! message names the port number that the kernel's value file holds.
 
 use std::io;
 use std::path::Path;
@@ -54,6 +55,10 @@ const WANTED: u32 = 80;
 /// The kernel's own value.
 const DEFAULT: u32 = 1024;
 const SYSCTL: &str = "/usr/sbin/sysctl";
+/// For `sysctl --pattern`: only [`KEY`] is loaded again from the other
+/// files, not every setting that someone changed by hand since the boot. A
+/// file may write the key with `/` in place of `.`, so both match.
+const ONLY_KEY: &str = r"^net[./]ipv4[./]ip_unprivileged_port_start$";
 /// The largest value file read: a port number and a line break.
 const MAX_VALUE_BYTES: u64 = 16;
 
@@ -78,14 +83,20 @@ pub fn install(system: &impl System) -> OpResult {
         Err(message) => return OpResult::failed(INSTALL, PORTS_READ, message),
     };
     let in_place = ours.as_deref() == Some(content.as_bytes());
+    let allowed = first_allowed <= WANTED;
     // Port 80 is allowed already: by Marsa's file, or by the owner of the
     // machine. Then Marsa writes no file, so it has nothing to undo later.
-    if first_allowed <= WANTED && (in_place || ours.is_none()) {
+    if allowed && (in_place || ours.is_none()) {
         return result(INSTALL, Outcome::Unchanged);
     }
     if !in_place && let Err(err) = system.write_atomic(Path::new(FILE), content.as_bytes(), MODE) {
         let message = format!("cannot write {FILE}: {}", err.kind());
         return OpResult::failed(INSTALL, PORTS_WRITE, message);
+    }
+    // Marsa's file had other content, and is right again for the next boot.
+    // No load now: it could only raise a lower value that someone else set.
+    if allowed {
+        return result(INSTALL, Outcome::Done);
     }
     let loaded = system.run(SYSCTL, &["-p", FILE]);
     let reason = if program::succeeded(&loaded) {
@@ -106,7 +117,12 @@ pub fn install(system: &impl System) -> OpResult {
         Ok(()) => "was removed again",
         Err(_) => "could not be removed",
     };
-    let message = format!("{reason}; {FILE} {cleanup}");
+    // A `sysctl` that failed may still have set the key.
+    let value = match first_allowed_port(system) {
+        Ok(port) if port <= WANTED => "; port 80 stays allowed until the next boot",
+        _ => "",
+    };
+    let message = format!("{reason}; {FILE} {cleanup}{value}");
     OpResult::failed(INSTALL, PORTS_APPLY_FAILED, message)
 }
 
@@ -135,11 +151,11 @@ pub fn remove(system: &impl System) -> OpResult {
         );
         return OpResult::failed(REMOVE, PORTS_RESTORE_FAILED, message);
     }
-    // Then every other sysctl file again: one of them may set the same key,
-    // and that setting is not Marsa's to drop. The result is not checked:
-    // `sysctl --system` also fails for a bad line in another program's
-    // file, which is not Marsa's to report.
-    let _ = system.run(SYSCTL, &["--system"]);
+    // Then this key from every other sysctl file again: one of them may set
+    // it too, and that setting is not Marsa's to drop. The result is not
+    // checked: `sysctl --system` also fails for a bad line in another
+    // program's file, which is not Marsa's to report.
+    let _ = system.run(SYSCTL, &["--pattern", ONLY_KEY, "--system"]);
     result(REMOVE, Outcome::Done)
 }
 
@@ -187,6 +203,11 @@ mod tests {
     const CONF: &str = "/etc/sysctl.d/60-marsa.conf";
     const PROC: &str = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
     const RESET: &str = "net.ipv4.ip_unprivileged_port_start=1024";
+    const RELOAD: [&str; 3] = [
+        "--pattern",
+        "^net[./]ipv4[./]ip_unprivileged_port_start$",
+        "--system",
+    ];
     const OURS: &[u8] =
         b"# Managed by Marsa. Do not edit.\nnet.ipv4.ip_unprivileged_port_start=80\n";
 
@@ -204,6 +225,8 @@ mod tests {
         after_load: &'static str,
         /// The value in another file of `/etc/sysctl.d`, if one sets the key.
         other_file: Option<u32>,
+        /// A `sysctl -p` that sets the key and then fails all the same.
+        load_sets_then_fails: bool,
     }
 
     impl Linux {
@@ -216,6 +239,7 @@ mod tests {
                 fake,
                 after_load: "80\n",
                 other_file: None,
+                load_sets_then_fails: false,
             };
             linux.set(PROC, format!("{first}\n").as_bytes());
             linux
@@ -273,14 +297,15 @@ mod tests {
 
         fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
             let output = self.fake.run(program, args)?;
-            if output.code != Some(0) {
+            let loads = matches!(args, ["-p", CONF]);
+            if output.code != Some(0) && !(loads && self.load_sets_then_fails) {
                 return Ok(output);
             }
             let value = match args {
                 // Both load the file at Marsa's path only while it is there.
                 ["-p", CONF] if self.file().is_some() => Some(self.after_load.to_owned()),
-                ["--system"] if self.file().is_some() => Some("80\n".to_owned()),
-                ["--system"] => self.other_file.map(|value| format!("{value}\n")),
+                [..] if args == RELOAD && self.file().is_some() => Some("80\n".to_owned()),
+                [..] if args == RELOAD => self.other_file.map(|value| format!("{value}\n")),
                 ["-w", RESET] => Some("1024\n".to_owned()),
                 _ => None,
             };
@@ -376,17 +401,31 @@ mod tests {
         }
     }
 
-    /// Also when port 80 is allowed already: the file is Marsa's to keep
-    /// right.
+    /// A file of Marsa's from another version, or edited by hand.
+    const OLD_OURS: &[u8] =
+        b"# Managed by Marsa. Do not edit.\nnet.ipv4.ip_unprivileged_port_start=443\n";
+
     #[test]
     fn install_rewrites_and_loads_our_file_with_other_content() {
-        let old = b"# Managed by Marsa. Do not edit.\nnet.ipv4.ip_unprivileged_port_start=443\n";
-        for first in [80, 443] {
-            let linux = Linux::with_file(first, old);
+        for first in [81, 443] {
+            let linux = Linux::with_file(first, OLD_OURS);
             assert_eq!(install(&linux), result(INSTALL, Outcome::Done), "{first}");
             assert_eq!(linux.file(), Some((OURS.to_vec(), 0o644)));
             assert_eq!(linux.commands(), [load()]);
             assert_eq!(linux.value(), "80\n");
+        }
+    }
+
+    /// Where port 80 is allowed already, the file is put right and nothing
+    /// is loaded: a load would raise a lower value that someone else set.
+    #[test]
+    fn install_only_rewrites_our_file_where_port_80_is_allowed_already() {
+        for first in [0, 79, 80] {
+            let linux = Linux::with_file(first, OLD_OURS);
+            assert_eq!(install(&linux), result(INSTALL, Outcome::Done), "{first}");
+            assert_eq!(linux.file(), Some((OURS.to_vec(), 0o644)));
+            assert!(linux.commands().is_empty());
+            assert_eq!(linux.value(), format!("{first}\n"));
         }
     }
 
@@ -495,6 +534,24 @@ mod tests {
         }
     }
 
+    /// The file is gone, but the running value is not Marsa's to guess.
+    #[test]
+    fn a_load_that_set_the_key_and_then_failed_says_that_the_value_stays() {
+        let mut linux = Linux::new(1024);
+        linux.fake.script(PROGRAM, &["-p", CONF], exit(255));
+        linux.load_sets_then_fails = true;
+        let message = format!(
+            "sysctl -p {CONF} exited with code 255; {CONF} was removed again; \
+             port 80 stays allowed until the next boot"
+        );
+        assert_eq!(
+            install(&linux),
+            failed(INSTALL, PORTS_APPLY_FAILED, &message)
+        );
+        assert_eq!(linux.file(), None);
+        assert_eq!(linux.value(), "80\n");
+    }
+
     #[test]
     fn a_file_that_cannot_be_removed_after_a_failed_load_is_named() {
         let mut linux = Linux::new(1024);
@@ -527,10 +584,7 @@ mod tests {
             let linux = Linux::with_file(first, OURS);
             assert_eq!(remove(&linux), result(REMOVE, Outcome::Done), "{first}");
             assert_eq!(linux.file(), None);
-            assert_eq!(
-                linux.commands(),
-                [args(&["-w", RESET]), args(&["--system"])]
-            );
+            assert_eq!(linux.commands(), [args(&["-w", RESET]), args(&RELOAD)]);
             assert_eq!(linux.value(), "1024\n");
         }
     }
@@ -595,10 +649,20 @@ mod tests {
     #[test]
     fn a_failed_reload_of_the_other_files_does_not_fail_the_removal() {
         let mut linux = Linux::with_file(80, OURS);
-        linux.fake.script(PROGRAM, &["--system"], exit(255));
+        linux.fake.script(PROGRAM, &RELOAD, exit(255));
         assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
         assert_eq!(linux.file(), None);
         assert_eq!(linux.value(), "1024\n");
+    }
+
+    /// The kernel's file reports a size of 0 and still holds the number. Read
+    /// through the real `System`, on the one system that has the file.
+    // `#[cfg]`: `/proc/sys` exists on Linux only.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_real_value_file_holds_a_port_number() {
+        let port = first_allowed_port(&crate::system::RealSystem);
+        assert!(port.is_ok_and(|port| port <= 65535), "{port:?}");
     }
 
     /// Through `apply`, as a real request: Linux only.
