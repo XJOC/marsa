@@ -18,7 +18,7 @@ on:
       - "crates/core/src/helper.rs"
       - "crates/app/src/daemon/**"
       - "tools/e2e/**"
-      - "spikes/s02-linux/dns-standin.py"
+      - "spikes/s02-linux/**"
       - ".github/workflows/linux-e2e.yml"
 
 # Read-only on purpose: the job never writes to the repository.
@@ -82,3 +82,52 @@ jobs:
           name: marsa-logs-${{ matrix.os }}
           path: ~/.local/share/marsa/logs
           if-no-files-found: ignore
+
+  # The helper's Linux ops on Fedora (systemd 262 or later): in a container
+  # with systemd as PID 1, with a restart of the container between the two
+  # phases. The restart boots systemd again in a new network namespace, so
+  # only Marsa's unit can make marsa0 again (reviews of #114 and #111).
+  fedora:
+    name: fedora (container, the helper)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fedora
+
+      - name: Build marsa-helper
+        run: cargo build --release -p marsa-helper
+
+      - name: Build the image
+        run: docker build -t marsa-e2e-fedora -f spikes/s02-linux/fedora.Dockerfile spikes/s02-linux
+
+      - name: Start systemd in the container
+        run: |
+          docker run -d --name fedora --privileged --cgroupns=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw -v "$PWD:/repo:ro" marsa-e2e-fedora
+          bash tools/e2e/fedora-boot.sh
+          docker exec fedora dnf -y -q install NetworkManager openssl
+          docker exec fedora bash /repo/spikes/s02-linux/fedora-prepare.sh
+
+      - name: Before the boot
+        run: docker exec -e CI=true fedora bash /repo/tools/e2e/fedora.sh before-boot
+
+      - name: Boot again
+        run: |
+          docker restart fedora
+          bash tools/e2e/fedora-boot.sh
+          docker exec fedora bash /repo/spikes/s02-linux/fedora-prepare.sh
+
+      - name: After the boot
+        run: docker exec -e CI=true fedora bash /repo/tools/e2e/fedora.sh after-boot
+
+      - name: The journal of the unit
+        if: always()
+        run: docker exec fedora journalctl -u marsa-dns-link -u systemd-resolved -b --no-pager | tail -n 60 || true
+
