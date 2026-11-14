@@ -14,8 +14,10 @@
 //! name, or a hash. An id of digits only is an index: `-store Root 000…0`
 //! lists the store's first certificate. So a thumbprint without a letter
 //! (about 7 in a billion) is never passed: `trust_install` refuses that
-//! certificate. Another root whose serial number or name is exactly Marsa's
-//! thumbprint would match too; only an administrator can put one there.
+//! certificate. A serial number matches as a number (`000…0a` finds a root
+//! whose serial number is `0a`), so another root whose serial number equals
+//! the 160-bit thumbprint, or whose name is that text, would match too; only
+//! an administrator can put such a root there.
 //!
 //! The same certificate in the store without Marsa's file (Marsa's file was
 //! deleted, or `caddy trust` ran elevated on Marsa's own CA) is recorded as

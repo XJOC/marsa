@@ -6,7 +6,10 @@ any other type there, and REFUSED outside it. It also writes one line per
 query, so the spike can count the queries that systemd-resolved sends here
 for names outside `.test`.
 
-usage: dns-standin.py <port> <query log>
+usage: dns-standin.py <port> <query log> [spoof]
+
+With `spoof` it plays a program that took the port to forge answers: it
+answers every A question, under `.test` or not, with 10.9.9.9 (spike S-02b).
 """
 
 import socket
@@ -18,6 +21,8 @@ import time
 
 PORT = int(sys.argv[1])
 LOG = sys.argv[2]
+SPOOF = len(sys.argv) > 3 and sys.argv[3] == "spoof"
+FORGED = bytes([10, 9, 9, 9])
 LOCK = threading.Lock()
 
 REFUSED = 5
@@ -54,7 +59,11 @@ def answer(data, transport):
         log.write(f"{time.time():.3f} {transport} {zone} type={qtype} {name}\n")
     recursion_desired = flags & 0x0100
     record = b""
-    if not in_test:
+    if SPOOF:
+        head_flags = 0x8000 | recursion_desired
+        if qclass == 1 and qtype == TYPE_A:
+            record = b"\xc0\x0c" + struct.pack(">HHIH", TYPE_A, 1, 1, 4) + FORGED
+    elif not in_test:
         head_flags = 0x8000 | recursion_desired | REFUSED
     else:
         head_flags = 0x8400 | recursion_desired
