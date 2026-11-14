@@ -367,6 +367,12 @@ mod tests {
                 ok,
                 vec!["shop.test. 1 127.0.0.1"],
             ),
+            (
+                "api.shop.test.",
+                RecordType::A,
+                ok,
+                vec!["api.shop.test. 1 127.0.0.1"],
+            ),
             // No `::1`: nothing of Marsa's listens on IPv6 (task M5-17).
             ("api.shop.test.", RecordType::AAAA, ok, vec![]),
             (
