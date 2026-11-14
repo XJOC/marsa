@@ -29,6 +29,8 @@ const KEEP_ALIVE: Duration = Duration::from_secs(15);
 
 /// The whole API.
 pub fn router(daemon: Arc<Daemon>, auth: AuthConfig) -> Router {
+    // One for setup and the uninstall, so the two never run at once.
+    let setup = Arc::new(super::setup_api::Setup::new());
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/shutdown", post(shutdown))
@@ -38,7 +40,8 @@ pub fn router(daemon: Arc<Daemon>, auth: AuthConfig) -> Router {
         .merge(services_api::routes())
         .merge(runtimes_api::routes())
         .merge(sites_api::routes())
-        .merge(super::setup_api::routes())
+        .merge(super::setup_api::routes(Arc::clone(&setup)))
+        .merge(super::uninstall_api::routes(setup))
         .merge(super::autostart_api::routes())
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)

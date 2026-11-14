@@ -15,6 +15,7 @@ use marsa::cli::runtimes::{self, RuntimesArgs};
 use marsa::cli::services::{self, ServicesArgs};
 use marsa::cli::setup;
 use marsa::cli::sites::{self, SitesCommand};
+use marsa::cli::uninstall::{self, UninstallArgs};
 
 /// Local development runtimes and sites.
 #[derive(Debug, Parser)]
@@ -58,6 +59,12 @@ enum Command {
     /// Start Marsa at login, or not: on or off. Without on or off, show
     /// whether it does (macOS and Linux).
     Autostart(AutostartArgs),
+    /// Remove Marsa from this system with --all (macOS): the redirect of
+    /// ports 80 and 443, the .test setting, the trust in Marsa's
+    /// certificates, and the start at login; then stop the daemon. Asks you
+    /// to type yes first, and macOS asks for an administrator password. The
+    /// data folder stays unless you agree to delete it.
+    Uninstall(UninstallArgs),
 }
 
 // One thread is enough: the command waits on one thing at a time.
@@ -66,6 +73,8 @@ async fn main() -> ExitCode {
     // Wrong arguments exit here with code 2 and clap's own message.
     let cli = Cli::parse();
     marsa::cli::init_logging();
+    // The uninstall deletes only a data folder that did not come from here.
+    let data_dir_given = cli.data_dir.is_some();
     let data_dir = match marsa::cli::data_dir(cli.data_dir) {
         Ok(dir) => dir,
         Err(failure) => return failure.report(),
@@ -80,6 +89,7 @@ async fn main() -> ExitCode {
         Command::Sites(command) => sites::run(command, &data_dir).await,
         Command::Setup => setup::run(&data_dir).await,
         Command::Autostart(args) => autostart::run(args, &data_dir).await,
+        Command::Uninstall(args) => uninstall::run(args, &data_dir, data_dir_given).await,
     }
 }
 
@@ -344,6 +354,47 @@ mod tests {
             &["autostart", "ON"],
             &["autostart", "on", "off"],
             &["autostart", "--on"],
+        ] {
+            let err = parse(args).expect_err("invalid arguments");
+            assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
+        }
+    }
+
+    #[test]
+    fn uninstall_needs_all_and_takes_yes_and_delete_data() {
+        for (args, yes, delete_data) in [
+            (&["uninstall", "--all"][..], false, false),
+            (&["uninstall", "--all", "--yes"], true, false),
+            (
+                &["uninstall", "--yes", "--all", "--delete-data"],
+                true,
+                true,
+            ),
+            (
+                &["--data-dir", "/x", "uninstall", "--all", "--delete-data"],
+                false,
+                true,
+            ),
+        ] {
+            match parse(args).expect("valid").command {
+                Command::Uninstall(got) => assert_eq!(
+                    got,
+                    UninstallArgs {
+                        all: true,
+                        yes,
+                        delete_data
+                    },
+                    "{args:?}"
+                ),
+                other => panic!("not uninstall: {other:?}"),
+            }
+        }
+        for args in [
+            &["uninstall"][..],
+            &["uninstall", "--yes"],
+            &["uninstall", "--delete-data"],
+            &["uninstall", "--all", "php"],
+            &["uninstall", "--all", "--force"],
         ] {
             let err = parse(args).expect_err("invalid arguments");
             assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());

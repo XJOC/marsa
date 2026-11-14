@@ -67,8 +67,10 @@ pub const TRUST_ADD_FAILED: &str = "trust_add_failed";
 /// `security` could not take the trust away or delete the certificate.
 pub const TRUST_REMOVE_FAILED: &str = "trust_remove_failed";
 
-/// The op name of the removal in a report, like the helper's.
-const TRUST_REMOVE: &str = "trust_remove";
+/// The op name of the removal in a report. Not the helper's `trust_remove`:
+/// `uninstall_all` reports that one too, for a trust added as root before
+/// ADR 0015, in the same report (task M5-13).
+pub const TRUST_REMOVE: &str = "user_trust_remove";
 /// The common name of Marsa's root certificate: `CA_NAME` in
 /// `marsa_core::caddy`. A test checks that the two agree.
 const CA_NAME: &str = "Marsa Local CA";
@@ -351,7 +353,7 @@ fn forget_record(record: &Path) {
 }
 
 /// A failed op, with its code and an English message for the logs.
-pub(super) fn failed(op: &str, code: &str, message: impl Into<String>) -> OpResult {
+pub(crate) fn failed(op: &str, code: &str, message: impl Into<String>) -> OpResult {
     OpResult {
         op: op.to_owned(),
         status: OpStatus::Failed,

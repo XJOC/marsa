@@ -37,8 +37,13 @@
 //!    dialog macOS shows (ADR 0015, [`user_trust`]). Its result goes into the
 //!    report as `trust_install`, after the helper's results.
 //!
-//! One setup at a time: a second request gets 409 `setup_running`. Linux and
-//! Windows get 501 `setup_not_supported` until tasks M4-18 and M4-19.
+//! One setup at a time: a second request gets 409 `setup_running`, and one
+//! during an uninstall gets 409 `uninstall_running`. Linux and Windows get
+//! 501 `setup_not_supported` until tasks M4-18 and M4-19.
+//!
+//! `POST /v1/uninstall` (task M5-13, `uninstall_api.rs`) shares [`Setup`]:
+//! the same runner, the same helper checks and admin prompt ([`Flow`] gives
+//! each its own error codes), and the same one-at-a-time flag.
 //!
 //! Every program runs through [`Runner`], so the tests run none: they pass a
 //! fake that records each call and answers from fixtures.
@@ -54,7 +59,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -94,10 +99,10 @@ const APPLESCRIPT: [&str; 3] = [
 /// The ports the `pf` redirect takes (ADR 0008).
 const REDIRECTED: [u16; 2] = [80, 443];
 /// How long `netstat` and each `ps` may take.
-const CHECK_LIMIT: Duration = Duration::from_secs(10);
+pub(super) const CHECK_LIMIT: Duration = Duration::from_secs(10);
 /// How long `osascript` may take: the user types the password meanwhile.
 /// The trust dialog of `security add-trusted-cert` gets the same.
-const PROMPT_LIMIT: Duration = Duration::from_secs(5 * 60);
+pub(super) const PROMPT_LIMIT: Duration = Duration::from_secs(5 * 60);
 /// At most this many `ps` calls; further holders keep netstat's name only.
 const MAX_PS: usize = 8;
 /// The helper refuses a larger certificate (ADR 0011).
@@ -114,7 +119,7 @@ const SAFE_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const POLL: Duration = Duration::from_millis(10);
 /// How long the pipes may stay open after the program ended. Its output is
 /// read all along, so only the last bytes are left by then.
-const PIPE_GRACE: Duration = Duration::from_secs(2);
+pub(super) const PIPE_GRACE: Duration = Duration::from_secs(2);
 /// The longest a setup takes, when every program runs to its limit:
 /// `netstat`, [`MAX_PS`] `ps` calls, and `security verify-cert` at
 /// [`CHECK_LIMIT`] each, `osascript` and `security add-trusted-cert` at
@@ -168,20 +173,82 @@ const PROTECTED_FOLDERS: [&str; 3] = ["Desktop", "Documents", "Downloads"];
 /// Marsa there.
 const INSTALL_BIN: &str = "~/Library/Application Support/dev.marsa.Marsa/bin";
 
-/// The routes, for `api::router` to merge before its fallbacks.
-pub fn routes() -> Router<Arc<Daemon>> {
-    routes_with(Setup::new())
-}
-
-/// The routes with the given [`Setup`]: tests pass a fake [`Runner`].
-pub fn routes_with(setup: Setup) -> Router<Arc<Daemon>> {
-    let setup = Arc::new(setup);
+/// The routes on `setup`, for `api::router` to merge before its fallbacks.
+/// The uninstall route gets the same [`Setup`], so the two never run at once.
+pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
     let handler = move |State(daemon): State<Arc<Daemon>>| {
         let setup = Arc::clone(&setup);
         async move { start(daemon, setup).await }
     };
     Router::new().route("/v1/setup", post(handler))
 }
+
+/// The routes with the given [`Setup`]: tests pass a fake [`Runner`].
+pub fn routes_with(setup: Setup) -> Router<Arc<Daemon>> {
+    routes(Arc::new(setup))
+}
+
+/// Which request runs the helper: the setup, or the uninstall of task M5-13.
+/// Each has its own error codes, `setup_*` and `uninstall_*`, and its
+/// messages name its own command. It also names the request that runs now,
+/// for the 409 of the other one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    Setup,
+    Uninstall,
+}
+
+impl Flow {
+    /// `setup_<what>` or `uninstall_<what>`.
+    pub fn code(self, what: &str) -> String {
+        let prefix = match self {
+            Self::Setup => "setup",
+            Self::Uninstall => "uninstall",
+        };
+        format!("{prefix}_{what}")
+    }
+
+    /// The request in an English message: "setup", "the uninstall".
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Setup => "setup",
+            Self::Uninstall => "the uninstall",
+        }
+    }
+
+    /// The command that runs it again.
+    fn command(self) -> &'static str {
+        match self {
+            Self::Setup => "marsa setup",
+            Self::Uninstall => "marsa uninstall --all",
+        }
+    }
+
+    /// Its value in [`Setup`]'s flag; `IDLE` is none.
+    fn flag(self) -> u8 {
+        match self {
+            Self::Setup => 1,
+            Self::Uninstall => 2,
+        }
+    }
+
+    /// The 409 for a request while this one runs.
+    pub fn busy(self) -> HttpError {
+        let message = match self {
+            Self::Setup => "another setup is running",
+            Self::Uninstall => "an uninstall is running",
+        };
+        // `HttpError` wants a `&'static str` code.
+        let code = match self {
+            Self::Setup => "setup_running",
+            Self::Uninstall => "uninstall_running",
+        };
+        HttpError::new(StatusCode::CONFLICT, code, message)
+    }
+}
+
+/// [`Setup`]'s flag when neither request runs.
+const IDLE: u8 = 0;
 
 /// What a program printed, and how it ended.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -357,7 +424,8 @@ pub struct Setup {
     /// The home folder of the user `marsad` runs as: the login keychain and
     /// the protected folders are under it. `None` if the system gives none.
     home: Option<PathBuf>,
-    running: AtomicBool,
+    /// [`IDLE`], or the [`Flow::flag`] of the request that runs now.
+    running: AtomicU8,
 }
 
 impl Setup {
@@ -386,8 +454,23 @@ impl Setup {
             platform,
             helper,
             home,
-            running: AtomicBool::new(false),
+            running: AtomicU8::new(IDLE),
         }
+    }
+
+    /// The program runner, for the uninstall's own steps.
+    pub(super) fn runner(&self) -> &dyn Runner {
+        self.runner.as_ref()
+    }
+
+    /// This system, if Marsa has a build for it.
+    pub(super) fn platform(&self) -> Option<Platform> {
+        self.platform
+    }
+
+    /// The home folder of the user `marsad` runs as, if known.
+    pub(super) fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
     }
 
     /// The setup itself. Blocking: it runs programs and reads a file.
@@ -563,13 +646,25 @@ impl Setup {
         }
     }
 
-    /// Sends `ops` to the helper behind the admin prompt and reads its
-    /// answer. With no operation nothing runs and no prompt shows. The
-    /// helper is checked first: a path in a folder macOS keeps root out of
-    /// (on macOS; by the path alone, before any look at the file), or a file
-    /// that is missing or that another user could change, means no prompt.
+    /// [`Setup::launch`] for the setup.
     fn apply(
         &self,
+        ops: Vec<HelperOp>,
+        platform: Platform,
+        stop: &CancellationToken,
+    ) -> Result<Vec<OpResult>, ApiError> {
+        self.launch(Flow::Setup, ops, platform, stop)
+    }
+
+    /// Sends `ops` to the helper behind the admin prompt and reads its
+    /// answer, with the error codes of `flow`. With no operation nothing
+    /// runs and no prompt shows. The helper is checked first: a path in a
+    /// folder macOS keeps root out of (on macOS; by the path alone, before
+    /// any look at the file), or a file that is missing or that another user
+    /// could change, means no prompt.
+    pub(super) fn launch(
+        &self,
+        flow: Flow,
         ops: Vec<HelperOp>,
         platform: Platform,
         stop: &CancellationToken,
@@ -579,7 +674,10 @@ impl Setup {
         }
         let missing = || {
             tracing::warn!(path = ?self.helper, "marsa-helper is not next to marsad");
-            failure("setup_helper_missing", "marsa-helper is not next to marsad")
+            failure(
+                &flow.code("helper_missing"),
+                "marsa-helper is not next to marsad",
+            )
         };
         let helper = self.helper.as_deref().ok_or_else(missing)?;
         // First: it reads nothing, and the advice to move Marsa comes before
@@ -593,13 +691,17 @@ impl Setup {
                 folder = %folder.display(),
                 "marsa-helper is in a folder macOS keeps root out of; no admin prompt"
             );
+            let why = match flow {
+                Flow::Setup => "so root could not read it to set up the boot job",
+                Flow::Uninstall => "so Marsa does not run it as root from there",
+            };
             let message = format!(
-                "marsa-helper is inside {}, a folder macOS protects, so root could not read \
-                 it to set up the boot job; run \"marsa daemon stop\", move Marsa to \
-                 {INSTALL_BIN}, and run \"marsa setup\" from there",
-                folder.display()
+                "marsa-helper is inside {}, a folder macOS protects, {why}; run \"marsa daemon \
+                 stop\", move Marsa to {INSTALL_BIN}, and run \"{}\" from there",
+                folder.display(),
+                flow.command(),
             );
-            return Err(failure("setup_helper_protected_folder", message));
+            return Err(failure(&flow.code("helper_protected_folder"), message));
         }
         match check_helper(helper) {
             Ok(()) => {}
@@ -611,12 +713,15 @@ impl Setup {
                     "marsa-helper could be changed by another user; no admin prompt"
                 );
                 let message = format!("marsa-helper is not safe to run as root: {reason}");
-                return Err(failure("setup_helper_unsafe", message));
+                return Err(failure(&flow.code("helper_unsafe"), message));
             }
         }
         let cannot_write = |err: serde_json::Error| {
             tracing::error!(error = %err, "cannot write the helper request");
-            failure("setup_helper_failed", "cannot write the helper request")
+            failure(
+                &flow.code("helper_failed"),
+                "cannot write the helper request",
+            )
         };
         let names = ops
             .iter()
@@ -626,7 +731,8 @@ impl Setup {
         let request = serde_json::to_string(&HelperRequest::new(ops)).map_err(cannot_write)?;
         tracing::info!(helper = %helper.display(), "asking for admin rights to run marsa-helper");
         let args = osascript_args(helper, &request);
-        let results = read_answer(self.runner.run(OSASCRIPT, &args, PROMPT_LIMIT, stop))?;
+        let answer = self.runner.run(OSASCRIPT, &args, PROMPT_LIMIT, stop);
+        let results = read_answer_for(flow, answer)?;
         if !results_match(&names, &results) {
             tracing::warn!(
                 sent = ?names,
@@ -634,7 +740,7 @@ impl Setup {
                 "marsa-helper answered for other operations than it was sent"
             );
             let message = "the helper's results do not match the request";
-            return Err(failure("setup_helper_failed", message));
+            return Err(failure(&flow.code("helper_failed"), message));
         }
         Ok(results)
     }
@@ -656,24 +762,31 @@ impl fmt::Debug for Setup {
     }
 }
 
-/// The right to run the one setup. Dropping it lets the next one start, also
-/// if the setup panics.
-struct Running(Arc<Setup>);
+/// The right to run the one setup or uninstall. Dropping it lets the next
+/// one start, also if the request panics.
+pub(super) struct Running(Arc<Setup>);
 
 impl Running {
-    /// `None` while another setup runs. One atomic swap, no lock.
-    fn take(setup: &Arc<Setup>) -> Option<Self> {
+    /// The right to run `flow`, or the [`Flow`] that runs now. One atomic
+    /// swap, no lock.
+    pub(super) fn take(setup: &Arc<Setup>, flow: Flow) -> Result<Self, Flow> {
         setup
             .running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
+            .compare_exchange(IDLE, flow.flag(), Ordering::AcqRel, Ordering::Acquire)
             .map(|_| Self(Arc::clone(setup)))
+            .map_err(|now| {
+                if now == Flow::Uninstall.flag() {
+                    Flow::Uninstall
+                } else {
+                    Flow::Setup
+                }
+            })
     }
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        self.0.running.store(false, Ordering::Release);
+        self.0.running.store(IDLE, Ordering::Release);
     }
 }
 
@@ -685,10 +798,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
             let message = "setup runs on macOS only for now";
             HttpError::new(StatusCode::NOT_IMPLEMENTED, "setup_not_supported", message)
         })?;
-    let running = Running::take(&setup).ok_or_else(|| {
-        let message = "another setup is running";
-        HttpError::new(StatusCode::CONFLICT, "setup_running", message)
-    })?;
+    let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
     tracing::info!("setup started");
     let job = tokio::task::spawn_blocking(move || {
         // Moved in, so the next setup waits for this one to end even if the
@@ -738,7 +848,7 @@ fn home_dir() -> Option<PathBuf> {
     home
 }
 
-fn is_macos(platform: Platform) -> bool {
+pub(super) fn is_macos(platform: Platform) -> bool {
     matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64)
 }
 
@@ -924,7 +1034,7 @@ fn op_name(op: &HelperOp) -> Result<String, serde_json::Error> {
 
 /// Whether the helper answered for exactly the operations sent, in order.
 /// `uninstall_all` gives one result per removal it runs, so a request with
-/// it is not checked; setup never sends it.
+/// it is not checked; setup never sends it, and the uninstall sends it alone.
 fn results_match(names: &[String], results: &[OpResult]) -> bool {
     names.iter().any(|name| name == UNINSTALL_ALL)
         || names
@@ -946,7 +1056,14 @@ fn osascript_args(helper: &Path, request: &str) -> Vec<OsString> {
     args
 }
 
-/// The helper's results from what `osascript` gave back.
+/// [`read_answer_for`] for setup, as the tests call it.
+#[cfg(test)]
+fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError> {
+    read_answer_for(Flow::Setup, output)
+}
+
+/// The helper's results from what `osascript` gave back, with the error
+/// codes of `flow`.
 ///
 /// - Exit 0: stdout is the helper's JSON line; `do shell script` returns it.
 /// - Another exit: the helper exited with 1 (an operation failed) or 2 (it
@@ -965,24 +1082,29 @@ fn osascript_args(helper: &Path, request: &str) -> Vec<OsString> {
 ///
 /// A message never quotes what the programs printed: only its size and the
 /// exit code go to the log.
-fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError> {
+fn read_answer_for(flow: Flow, output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError> {
+    let noun = flow.noun();
     let output = match output {
         Ok(output) => output,
         Err(err) if err.kind() == io::ErrorKind::TimedOut => {
-            tracing::warn!("setup took more than 5 minutes; Marsa stopped waiting");
-            let message = "Marsa stopped waiting for setup after 5 minutes; some steps may \
-                           already have run as root, and running setup again is safe";
-            return Err(failure("setup_timed_out", message));
+            tracing::warn!("{noun} took more than 5 minutes; Marsa stopped waiting");
+            let message = format!(
+                "Marsa stopped waiting for {noun} after 5 minutes; some steps may already have \
+                 run as root, and running {noun} again is safe"
+            );
+            return Err(failure(&flow.code("timed_out"), message));
         }
         Err(err) if err.kind() == io::ErrorKind::Interrupted => {
-            tracing::warn!("the daemon is stopping; Marsa stopped waiting for setup");
-            let message = "the daemon stopped, so Marsa stopped waiting for setup; some steps \
-                           may already have run as root, and running setup again is safe";
-            return Err(failure("setup_interrupted", message));
+            tracing::warn!("the daemon is stopping; Marsa stopped waiting for {noun}");
+            let message = format!(
+                "the daemon stopped, so Marsa stopped waiting for {noun}; some steps may \
+                 already have run as root, and running {noun} again is safe"
+            );
+            return Err(failure(&flow.code("interrupted"), message));
         }
         Err(err) => {
             tracing::warn!(error = %err, "cannot run osascript");
-            return Err(failure("setup_helper_failed", "cannot run osascript"));
+            return Err(failure(&flow.code("helper_failed"), "cannot run osascript"));
         }
     };
     let text = if output.success() {
@@ -1000,12 +1122,13 @@ fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError>
     let Some(answer) = answer else {
         if !output.success() && cancelled(&output.stderr) {
             tracing::info!("the admin prompt was cancelled");
-            return Err(failure("setup_cancelled", "the admin prompt was cancelled"));
+            let message = "the admin prompt was cancelled";
+            return Err(failure(&flow.code("cancelled"), message));
         }
         if !output.success() && not_authorized(&output.stderr) {
             tracing::info!("macOS did not give admin rights");
             let message = "macOS did not give admin rights: a wrong password, or no prompt";
-            return Err(failure("setup_not_authorized", message));
+            return Err(failure(&flow.code("not_authorized"), message));
         }
         tracing::warn!(
             exit = ?output.code,
@@ -1014,19 +1137,22 @@ fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError>
             "marsa-helper gave no answer Marsa can read"
         );
         return Err(failure(
-            "setup_helper_failed",
+            &flow.code("helper_failed"),
             "the helper's answer cannot be read",
         ));
     };
     if let Some(refused) = answer.error {
         let code = short_code(&refused.code);
-        tracing::warn!(code = %code, "marsa-helper refused the setup request");
+        tracing::warn!(code = %code, "marsa-helper refused the request of {noun}");
         let message = format!("the helper refused the request: {code}");
-        return Err(failure("setup_helper_rejected", message));
+        return Err(failure(&flow.code("helper_rejected"), message));
     }
     if answer.results.is_empty() {
         tracing::warn!(exit = ?output.code, "marsa-helper answered with no result");
-        return Err(failure("setup_helper_failed", "the helper gave no result"));
+        return Err(failure(
+            &flow.code("helper_failed"),
+            "the helper gave no result",
+        ));
     }
     Ok(answer.results)
 }

@@ -45,7 +45,7 @@ use crate::runtimes::Runtime;
 use crate::types::{
     API_VERSION, AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, ErrorBody,
     Event, Health, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest, RuntimeList,
-    ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch,
+    ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, UninstallReport,
 };
 use error::daemon_text;
 
@@ -64,6 +64,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// `security verify-cert`) up to 10 seconds. A test in the daemon's
 /// `setup_api.rs` holds this above the sum of the daemon's own limits.
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(13 * 60);
+/// For `POST /v1/uninstall`: longer than the daemon's slowest uninstall,
+/// about 15 minutes and 20 seconds when every program runs to its limit. The
+/// user has 5 minutes at the admin prompt, then up to 5 at each of the two
+/// dialogs macOS may show to take the user's trust away and to delete the
+/// certificate; the keychain listing gets 10 seconds. A test in the daemon's
+/// `uninstall_api.rs` holds this above the sum of the daemon's own limits.
+pub const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(16 * 60);
 /// How long a new daemon has to answer. The wait ends as soon as it does, so
 /// this only bounds a real failure. macOS checks a program the first time it
 /// runs after an install or an update: about 2 s when the machine is idle,
@@ -316,6 +323,23 @@ impl DaemonClient {
     /// cancelled prompt is not an error: it is in [`SetupReport::error`].
     pub async fn setup(&self) -> Result<SetupReport, ClientError> {
         self.call(Method::POST, &["v1", "setup"], SETUP_TIMEOUT)
+            .await
+    }
+
+    /// `POST /v1/uninstall` (task M5-13): one admin prompt for the helper's
+    /// removals, then the user's trust and the login file. Waits until it
+    /// ends, up to 16 minutes ([`UNINSTALL_TIMEOUT`]). When
+    /// [`UninstallReport::stopping`] is `true` the daemon stops right after
+    /// this answer: [`stop_daemon`] waits until it has.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `uninstall_running` or `setup_running` (409)
+    /// while one of them runs, and `uninstall_not_supported` (501) on Linux
+    /// and Windows for now. A cancelled prompt is not an error: it is in
+    /// [`UninstallReport::error`].
+    pub async fn uninstall(&self) -> Result<UninstallReport, ClientError> {
+        self.call(Method::POST, &["v1", "uninstall"], UNINSTALL_TIMEOUT)
             .await
     }
 
