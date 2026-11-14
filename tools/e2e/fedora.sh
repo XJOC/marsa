@@ -26,7 +26,9 @@ SITE=laravel-app.test
 UNIT=/etc/systemd/system/marsa-dns-link.service
 TEST_CA=$REPO/fixtures/helper/test-ca.pem
 TRUST_FILE=/etc/pki/ca-trust/source/anchors/marsa-local-ca.pem
-BUNDLE=/etc/pki/tls/certs/ca-bundle.crt
+# What update-ca-trust extracts; /etc/pki/tls/certs/ca-bundle.crt is not on
+# every Fedora (run 43605058794).
+BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 QUERIES=/root/queries.log
 
 step() { printf '\n\n===== %s =====\n' "$*"; }
