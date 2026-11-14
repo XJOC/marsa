@@ -289,11 +289,12 @@ say_path() {
   say "Add Marsa to your PATH. Put this line at the end of your shell's startup file:"
   say
   say "  $line"
-  # zsh on macOS reads .zprofile and .zshrc; the line goes last in both, so
-  # Marsa's php comes before any other (architecture.md section 10).
+  # Every interactive zsh reads .zshrc, a login one too, and after .zprofile,
+  # where Homebrew's line usually is: so Marsa's php comes first. Not
+  # .zprofile as well: a terminal that is not a login shell never reads it,
+  # and a login shell would get the line twice (architecture.md section 10).
   case "${SHELL:-}-${PLATFORM%%-*}" in
-    */zsh-darwin) files=".zprofile .zshrc" ;;
-    */zsh-linux) files=".zshrc" ;;
+    */zsh-*) files=".zshrc" ;;
     */bash-darwin)
       # A login shell reads only the first of these that exists, so a new
       # .bash_profile would hide an existing .profile.

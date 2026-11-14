@@ -332,9 +332,10 @@ installed "a new install on macOS, signature checked"
 # shellcheck disable=SC2016  # the script prints $HOME and $PATH as text
 path_line='export PATH="$HOME/Library/Application Support/dev.marsa.Marsa/shims:$HOME/Library/Application Support/dev.marsa.Marsa/bin:$PATH"'
 [[ "$OUTPUT" == *"$path_line"* ]] || fail "fresh-mac: no PATH line"
-for file in .zprofile .zshrc; do
-  [[ "$OUTPUT" == *"echo '$path_line' >> \"\$HOME/$file\""* ]] || fail "fresh-mac: no command for $file"
-done
+# zsh: .zshrc only. Every interactive zsh reads it; a terminal that is not a
+# login shell never reads .zprofile.
+[[ "$OUTPUT" == *"echo '$path_line' >> \"\$HOME/.zshrc\""* ]] || fail "fresh-mac: no command for .zshrc"
+[[ "$OUTPUT" != *".zprofile"* ]] || fail "fresh-mac: .zprofile was named"
 if [ -e "$HOME_DIR/.zshrc" ] || [ -e "$HOME_DIR/.zprofile" ]; then fail "fresh-mac: the script wrote a shell file"; fi
 
 # As `curl ... | sh` runs it: the script comes from a pipe.
