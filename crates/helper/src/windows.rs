@@ -73,11 +73,11 @@ pub fn system_dir() -> io::Result<PathBuf> {
 pub fn program_files() -> io::Result<PathBuf> {
     let mut path = null_mut();
     // SAFETY: `FOLDERID_ProgramFiles` is a static GUID, the token is null
-    // (the current user), and `path` is a valid out pointer. On success the
-    // function returns a NUL-terminated string that the caller frees with
-    // `CoTaskMemFree`; on failure it sets `path` to null, and freeing null is
-    // allowed. The string is read up to its NUL and copied before the free.
-    unsafe {
+    // (the current user), and `path` is a valid out pointer. The caller frees
+    // `path` with `CoTaskMemFree` whether the call works or not, and
+    // `CoTaskMemFree` accepts null. On success `path` is a NUL-terminated
+    // string, read up to its NUL and copied before the free.
+    let (result, folder) = unsafe {
         let result = SHGetKnownFolderPath(
             &FOLDERID_ProgramFiles,
             KF_FLAG_DEFAULT as u32,
@@ -92,7 +92,13 @@ pub fn program_files() -> io::Result<PathBuf> {
             PathBuf::from(OsString::from_wide(std::slice::from_raw_parts(path, len)))
         });
         CoTaskMemFree(path.cast());
-        folder.ok_or_else(|| io::Error::from_raw_os_error(result))
+        (result, folder)
+    };
+    match folder {
+        Some(folder) => Ok(folder),
+        None if result < 0 => Err(io::Error::from_raw_os_error(result)),
+        // Success with no string: not documented, and not a folder.
+        None => Err(io::Error::other("Windows gave no Program Files folder")),
     }
 }
 

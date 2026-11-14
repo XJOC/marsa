@@ -1,7 +1,9 @@
-//! What a Linux op says about a program it ran through [`System::run`]:
-//! whether it succeeded, and how it failed.
+//! What a Linux or Windows op says about a program it ran through
+//! [`System::run`] or [`System::run_system_tool`]: whether it succeeded, and
+//! how it failed.
 //!
 //! [`System::run`]: crate::system::System::run
+//! [`System::run_system_tool`]: crate::system::System::run_system_tool
 
 use std::io;
 
@@ -14,9 +16,13 @@ pub fn succeeded(result: &io::Result<RunOutput>) -> bool {
 
 /// How the program failed, for a message. Never its output: the exit code
 /// is enough for `marsad`, and the owner can run the same command by hand.
-/// The same texts as the private `failure_text` of `trust` (macOS).
+/// The same texts as the private `failure_text` of `trust` (macOS). A
+/// negative code is a Windows `HRESULT`, in hex as Windows prints it.
 pub fn failure(result: &io::Result<RunOutput>) -> String {
     match result {
+        Ok(RunOutput {
+            code: Some(code), ..
+        }) if *code < 0 => format!("exited with code {:#010x}", code.cast_unsigned()),
         Ok(RunOutput {
             code: Some(code), ..
         }) => format!("exited with code {code}"),
@@ -49,6 +55,11 @@ mod tests {
     #[test]
     fn a_failure_names_the_exit_and_never_the_output() {
         assert_eq!(failure(&exit(Some(255))), "exited with code 255");
+        let not_found = 0x8009_0011_u32.cast_signed();
+        assert_eq!(
+            failure(&exit(Some(not_found))),
+            "exited with code 0x80090011"
+        );
         assert_eq!(failure(&exit(None)), "was stopped by a signal");
         let timeout = Err(io::Error::new(io::ErrorKind::TimedOut, "secret"));
         assert_eq!(failure(&timeout), "timed out");
