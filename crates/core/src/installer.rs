@@ -9,6 +9,7 @@ pub mod extract;
 pub mod fetch;
 pub mod manifest;
 pub mod plan;
+pub mod uninstall;
 
 use std::io;
 use std::path::{Path, PathBuf};

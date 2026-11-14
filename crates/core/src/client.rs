@@ -45,7 +45,8 @@ use crate::runtimes::Runtime;
 use crate::types::{
     API_VERSION, AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, ErrorBody,
     Event, Health, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest, RuntimeList,
-    ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, XdebugRequest, XdebugState,
+    ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, Uninstalled, XdebugRequest,
+    XdebugState,
 };
 use error::daemon_text;
 
@@ -57,6 +58,9 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// For one call that is not a stream, and for the start of a stream. A
 /// service restart fits well inside.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// For `DELETE /v1/runtimes/{tool}/{version}`: a Node.js folder holds
+/// thousands of files, and a virus scanner may slow their delete.
+const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// For `POST /v1/setup`: longer than the daemon's slowest setup, which is
 /// about 12 minutes when every program runs to its limit. The daemon gives
 /// the user 5 minutes at the admin prompt and 5 more at the trust dialog
@@ -246,6 +250,37 @@ impl DaemonClient {
             version: version.to_owned(),
         };
         self.call_with(Method::PUT, &path, &body).await
+    }
+
+    /// `DELETE /v1/runtimes/{tool}/{version}` (task M5-07): deletes the
+    /// installed version that `version` names: `8.3.12`, or `8.3` when one
+    /// installed version matches it. A php-fpm pool that runs it is stopped
+    /// first. Returns once the folder is gone and the site list is built
+    /// again; a changed list also comes on [`DaemonClient::events`] as
+    /// `Event::SitesChanged`. A refusal changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`], and these codes from the daemon:
+    ///
+    /// - `version_in_use` (409) as [`ClientError::InUse`], with what uses
+    ///   it: the default in `global.toml`, sites set to it in `sites.toml`,
+    ///   or the running Caddy;
+    /// - `install_busy` (409) while an install or another uninstall runs;
+    /// - `version_not_installed` (404) when no installed version matches;
+    /// - `version_ambiguous` (409) when more than one does;
+    /// - `invalid_version` or `unsupported_alias` (400) for text that is not
+    ///   a version, and `unknown_tool` (404);
+    /// - `uninstall_io` (500) when the folder cannot be moved aside (on
+    ///   Windows: a program from it still runs);
+    /// - `runtimes_read`, `config_read`, or `config_invalid` (500).
+    pub async fn uninstall(
+        &self,
+        runtime: Runtime,
+        version: &str,
+    ) -> Result<Uninstalled, ClientError> {
+        let path = ["v1", "runtimes", runtime.dir_name(), version];
+        self.call(Method::DELETE, &path, UNINSTALL_TIMEOUT).await
     }
 
     /// `GET /v1/sites`: every site, sorted by name, and the folders that did
