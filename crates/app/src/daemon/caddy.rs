@@ -333,6 +333,21 @@ impl CaddyManager {
         }
     }
 
+    /// Sends the config of the latest sites and pools again, for a change
+    /// that is not in them: the ports, after setup on Linux let Caddy bind 80
+    /// and 443 (task M4-18e). See [`CaddyManager::apply`].
+    ///
+    /// # Errors
+    ///
+    /// See [`LoadError`].
+    pub async fn reapply(&self, daemon: &Daemon) -> Result<Applied, LoadError> {
+        let (sites, pools) = {
+            let wanted = lock(&self.wanted);
+            (wanted.sites.clone(), wanted.pools.clone())
+        };
+        self.apply(daemon, sites, pools).await
+    }
+
     /// The config of the latest sites and pools, with `tag` on `admin`.
     fn config(&self, tag: &str) -> Result<Value, CaddyError> {
         let mut config = {

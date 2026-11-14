@@ -337,7 +337,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         // `marsa setup`: the setup route (task M4-13), its skipped steps, and
         // the failure codes of `marsa-helper`.
         "setup_running" => "Another setup is running. Wait for it to end, then try again.".into(),
-        "setup_not_supported" => "\"marsa setup\" works on macOS only for now.".into(),
+        "setup_not_supported" => "\"marsa setup\" works on macOS and Linux only for now.".into(),
         "setup_cancelled" => "The password prompt was cancelled, so nothing was changed. Run \
              \"marsa setup\" again when you are ready."
             .into(),
@@ -348,10 +348,10 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             "The Marsa daemon stopped during setup, so Marsa stopped waiting. \
              {SETUP_MAY_HAVE_RUN}"
         ),
-        "setup_not_authorized" => "macOS did not give Marsa admin rights, so nothing was \
-             changed. The password was not accepted, or the prompt could not open (over SSH, \
-             for example). Run \"marsa daemon stop\", then run \"marsa setup\" again in \
-             Terminal on your desktop and enter the password of an administrator account."
+        "setup_not_authorized" => "The system did not give Marsa admin rights, so nothing \
+             was changed. The password was not accepted, or the prompt could not open (over \
+             SSH, for example). Run \"marsa daemon stop\", then run \"marsa setup\" again in \
+             a terminal on your desktop and enter the password of an administrator account."
             .into(),
         "setup_helper_missing" => "The marsa-helper program is not next to marsad, so nothing \
              was changed. Reinstall Marsa, then try again."
@@ -413,6 +413,57 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "trust_remove_failed" => "Marsa could not take away the trust in its certificate \
              authority. Run the command again; if it repeats, remove \"Marsa Local CA\" in \
              Keychain Access and report it."
+            .into(),
+        // The Linux ops of `marsa-helper` (tasks M4-18a, M4-18b, M4-18c).
+        "resolved_foreign" => "/etc/systemd/resolved.conf.d/marsa.conf belongs to another \
+             tool, so Marsa left it as it is. Move that file away, then run \"marsa setup\" \
+             again."
+            .into(),
+        "resolved_read" | "resolved_write" | "resolved_delete" => "Linux did not let Marsa \
+             change /etc/systemd/resolved.conf.d/marsa.conf. Run \"marsa setup\" again; if it \
+             repeats, report it."
+            .into(),
+        "resolved_not_running" => "Marsa sends .test names to its DNS server through \
+             systemd-resolved, which does not run on this system, so nothing was changed. \
+             Start systemd-resolved, then run \"marsa setup\" again."
+            .into(),
+        "resolved_restart_failed" => "systemd-resolved did not restart, so Marsa took its \
+             .test setting out again. Run \"marsa setup\" again; if it repeats, report it \
+             with the output of \"journalctl -u systemd-resolved\"."
+            .into(),
+        "resolved_other_dns" => "systemd-resolved has a DNS server for all names (a DNS= line \
+             in /etc/systemd/resolved.conf or in /etc/systemd/resolved.conf.d/). With it, \
+             .test names cannot reach Marsa, so Marsa took its setting out again. Remove that \
+             DNS= line and set the DNS server on your network connection instead, then run \
+             \"marsa setup\" again."
+            .into(),
+        "resolved_check_failed" => "Marsa could not confirm that systemd-resolved sends .test \
+             names to it, so it took its setting out again. Run \"marsa setup\" again; if it \
+             repeats, report it."
+            .into(),
+        "ports_foreign" => "/etc/sysctl.d/60-marsa.conf belongs to another tool, so Marsa \
+             left it as it is and Caddy cannot use ports 80 and 443. Move that file away, then \
+             run \"marsa setup\" again."
+            .into(),
+        "ports_read" | "ports_write" | "ports_delete" => "Linux did not let Marsa change \
+             /etc/sysctl.d/60-marsa.conf. Run \"marsa setup\" again; if it repeats, report it."
+            .into(),
+        "ports_apply_failed" => "Linux did not let Caddy use ports 80 and 443, so Marsa took \
+             its setting out again. Run \"marsa setup\" again; if it repeats, report it with \
+             the file logs/marsad.log."
+            .into(),
+        "ports_restore_failed" => "Marsa removed its setting for ports 80 and 443, but could \
+             not apply that now: every program may use ports 80 to 1023 until the computer \
+             restarts."
+            .into(),
+        "trust_tool_missing" => "Neither update-ca-certificates nor update-ca-trust is on this \
+             system, so Marsa could not add its certificate authority to the trusted \
+             certificates. Install the ca-certificates package, then run \"marsa setup\" \
+             again."
+            .into(),
+        "trust_store_update_failed" => "The system's store of trusted certificates could not \
+             be updated, so Marsa's certificate authority is not trusted, or not removed, yet. \
+             Run the command again; if it repeats, report it with the file logs/marsad.log."
             .into(),
         "pf_write" | "pf_load_failed" => "macOS did not load the redirect of ports 80 and 443. \
              Run \"marsa setup\" again; if it repeats, report it."
@@ -668,11 +719,15 @@ pub fn unsecured(url: &str) -> String {
 // `marsa setup`.
 
 /// On stderr before the call, which may wait for the admin prompt and then
-/// for the trust dialog. On macOS only: other systems get
-/// `setup_not_supported` and no prompt.
+/// for the trust dialog (macOS).
 pub const SETUP_STARTED: &str = "Setting up Marsa. macOS may ask for an administrator \
      password, and may then ask you to approve trusting Marsa's certificate authority for your \
      user.";
+/// The same on Linux, with the one thing setup changes for every program
+/// (ADR 0014): it says so before the password is asked.
+pub const SETUP_STARTED_LINUX: &str = "Setting up Marsa. Linux may ask for your password. \
+     Setup lets every program on this computer use ports 80 to 1023, so that Caddy can serve \
+     your sites on ports 80 and 443.";
 /// After Marsa stopped waiting for the helper, which may still have run.
 const SETUP_MAY_HAVE_RUN: &str = "Some steps may already have run with admin rights. Running \
      \"marsa setup\" again is safe: each step checks what is already done.";
@@ -873,6 +928,22 @@ mod tests {
         "pf_write",
         "pf_load_failed",
         "pf_helper_unreadable",
+        "resolved_foreign",
+        "resolved_read",
+        "resolved_write",
+        "resolved_delete",
+        "resolved_not_running",
+        "resolved_restart_failed",
+        "resolved_other_dns",
+        "resolved_check_failed",
+        "ports_foreign",
+        "ports_read",
+        "ports_write",
+        "ports_delete",
+        "ports_apply_failed",
+        "ports_restore_failed",
+        "trust_tool_missing",
+        "trust_store_update_failed",
         // The autostart route (task M5-03) and `AutostartError` in core.
         "autostart_unsupported",
         "tray_not_found",

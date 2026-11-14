@@ -1,7 +1,8 @@
-//! `POST /v1/setup`: the first setup on macOS. The user may be asked twice:
-//! for an administrator password (the helper), then to approve the trust in
-//! Marsa's certificate authority for this user. Task M4-13, with the port
-//! check of task M4-14b and the user trust of task M4-26.
+//! `POST /v1/setup`: the first setup on macOS and Linux. On macOS the user
+//! may be asked twice: for an administrator password (the helper), then to
+//! approve the trust in Marsa's certificate authority for this user. On
+//! Linux once, for the password (`pkexec`). Task M4-13, with the port check
+//! of task M4-14b, the user trust of task M4-26, and Linux (task M4-18e).
 //!
 //! | Route | Answer |
 //! | --- | --- |
@@ -16,7 +17,13 @@
 //!    step 5, by the user; elsewhere the certificate goes into
 //!    `trust_install` as text, for the helper (ADR 0011).
 //! 2. **DNS:** the setup operation of [`dns::strategy_for`].
-//! 3. **Ports** (M4-14b): `/usr/sbin/netstat -anv -p tcp` lists the sockets
+//! 3. **Ports** on Linux (ADR 0014): `ports_install`, which lets Caddy bind
+//!    80 and 443 itself. Nothing is redirected, so no other program's
+//!    traffic can be taken, and no port check runs first: a program on port
+//!    80 makes Caddy's own bind fail (`port_in_use`). After the helper, the
+//!    daemon sends Caddy its config again, which now has ports 80 and 443.
+//!
+//!    **Ports** on macOS (M4-14b): `/usr/sbin/netstat -anv -p tcp` lists the sockets
 //!    that listen, [`ports::holders`] picks those on 80 and 443, and `/bin/ps`
 //!    names each process. A holder, or a check that fails, means no
 //!    `pf_install`: the redirect would take that program's traffic without a
@@ -25,7 +32,8 @@
 //! 4. **Helper:** if any operation is left and the `marsa-helper` file can
 //!    be changed only by its owner (this user or root), `/usr/bin/osascript`
 //!    runs `marsa-helper apply <request>` with administrator privileges,
-//!    through the constant script of ADR 0012. The helper's JSON answer gives
+//!    through the constant script of ADR 0012. On Linux `/usr/bin/pkexec`
+//!    runs it, with no shell ([`pkexec`]). The helper's JSON answer gives
 //!    one result per operation, in the order sent. No operation left: no
 //!    prompt. A helper inside `~/Desktop`, `~/Documents`, or `~/Downloads`
 //!    ends setup before the prompt with `setup_helper_protected_folder`:
@@ -37,12 +45,13 @@
 //!    dialog macOS shows (ADR 0015, [`user_trust`]). Its result goes into the
 //!    report as `trust_install`, after the helper's results.
 //!
-//! One setup at a time: a second request gets 409 `setup_running`. Linux and
-//! Windows get 501 `setup_not_supported` until tasks M4-18 and M4-19.
+//! One setup at a time: a second request gets 409 `setup_running`. Windows
+//! gets 501 `setup_not_supported` until task M4-19.
 //!
 //! Every program runs through [`Runner`], so the tests run none: they pass a
 //! fake that records each call and answers from fixtures.
 
+pub mod pkexec;
 pub mod user_trust;
 
 use std::collections::BTreeMap;
@@ -66,7 +75,7 @@ use axum::{Json, Router};
 use marsa_core::caddy::{CaddyInput, CaddyPaths};
 use marsa_core::dns;
 use marsa_core::helper::{
-    HELPER_PROTOCOL_VERSION, HelperOp, HelperRequest, HelperResponse, OpResult,
+    HELPER_PROTOCOL_VERSION, HelperOp, HelperRequest, HelperResponse, OpResult, OpStatus,
 };
 use marsa_core::ports::{self, Listener, ProcessInfo};
 use marsa_core::recipes::Platform;
@@ -156,6 +165,7 @@ const O_NONBLOCK: i32 = 0;
 
 const TRUST_INSTALL: &str = "trust_install";
 const PF_INSTALL: &str = "pf_install";
+const PORTS_INSTALL: &str = "ports_install";
 const UNINSTALL_ALL: &str = "uninstall_all";
 
 /// The folders under the home folder that macOS keeps other users, root
@@ -251,7 +261,7 @@ impl Runner for RealRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // Not the daemon's working folder. `/` is a Unix path, and setup runs
-        // on macOS only for now (Linux in task M4-18, Windows in M4-19).
+        // on macOS and Linux only for now (Windows in task M4-19).
         #[cfg(unix)]
         command.current_dir("/");
         let mut child = command.spawn()?;
@@ -412,6 +422,33 @@ impl Setup {
         if let Some(dns) = dns::strategy_for(platform) {
             ops.push(dns.setup_op());
         }
+        if is_linux(platform) {
+            ops.push(HelperOp::PortsInstall);
+        } else {
+            self.pf_op(caddy, &mut ops, &mut report, stop);
+        }
+        match self.apply(ops, platform, stop) {
+            Ok(results) => report.results = results,
+            Err(error) => report.error = Some(error),
+        }
+        // Only if the helper ran as asked, or was not needed: a cancelled or
+        // refused admin prompt ends setup with nothing changed, and no second
+        // dialog.
+        if trust_for_user && report.error.is_none() {
+            report.results.push(self.trust_for_user(&ca_root, stop));
+        }
+        report
+    }
+
+    /// macOS: `pf_install` if nobody listens on 80 and 443, else the reason
+    /// why not in `report` (ADR 0008, "Herd conflict").
+    fn pf_op(
+        &self,
+        caddy: CaddyInput,
+        ops: &mut Vec<HelperOp>,
+        report: &mut SetupReport,
+        stop: &CancellationToken,
+    ) {
         match self.port_holders(stop) {
             Some(holders) if holders.is_empty() => ops.push(HelperOp::PfInstall {
                 http_port: caddy.http_port,
@@ -432,17 +469,6 @@ impl Setup {
             }
             None => report.skipped.push(skip(PF_INSTALL, "ports_not_checked")),
         }
-        match self.apply(ops, platform, stop) {
-            Ok(results) => report.results = results,
-            Err(error) => report.error = Some(error),
-        }
-        // Only if the helper ran as asked, or was not needed: a cancelled or
-        // refused admin prompt ends setup with nothing changed, and no second
-        // dialog.
-        if trust_for_user && report.error.is_none() {
-            report.results.push(self.trust_for_user(&ca_root, stop));
-        }
-        report
     }
 
     /// The user's trust of the CA root at `ca_root` (ADR 0015), or
@@ -614,8 +640,13 @@ impl Setup {
             .map_err(cannot_write)?;
         let request = serde_json::to_string(&HelperRequest::new(ops)).map_err(cannot_write)?;
         tracing::info!(helper = %helper.display(), "asking for admin rights to run marsa-helper");
-        let args = osascript_args(helper, &request);
-        let results = read_answer(self.runner.run(OSASCRIPT, &args, PROMPT_LIMIT, stop))?;
+        let results = if is_linux(platform) {
+            let args = pkexec::args(helper, &request);
+            pkexec::read_answer(self.runner.run(pkexec::PKEXEC, &args, PROMPT_LIMIT, stop))?
+        } else {
+            let args = osascript_args(helper, &request);
+            read_answer(self.runner.run(OSASCRIPT, &args, PROMPT_LIMIT, stop))?
+        };
         if !results_match(&names, &results) {
             tracing::warn!(
                 sent = ?names,
@@ -669,9 +700,9 @@ impl Drop for Running {
 async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport>, HttpError> {
     let platform = setup
         .platform
-        .filter(|platform| is_macos(*platform))
+        .filter(|platform| is_macos(*platform) || is_linux(*platform))
         .ok_or_else(|| {
-            let message = "setup runs on macOS only for now";
+            let message = "setup runs on macOS and Linux only for now";
             HttpError::new(StatusCode::NOT_IMPLEMENTED, "setup_not_supported", message)
         })?;
     let running = Running::take(&setup).ok_or_else(|| {
@@ -694,12 +725,35 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
         // Here, not in the handler: the event goes out even if the client
         // went away.
         daemon.publish(Event::SetupFinished(report.clone()));
-        report
+        (daemon, report)
     });
-    job.await.map(Json).map_err(|err| {
+    let (daemon, report) = job.await.map_err(|err| {
         tracing::error!(error = %err, "the setup job failed");
         let message = "the setup job failed";
         HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+    })?;
+    // Linux: Caddy may now bind ports 80 and 443 itself. The next config
+    // has them (`CaddyManager::ports`), so it goes to Caddy now, before the
+    // answer: the sites open on the usual ports as soon as setup returns.
+    if is_linux(platform) && low_ports_set(&report) {
+        match daemon.caddy.reapply(&daemon).await {
+            Ok(applied) => {
+                tracing::info!(?applied, "caddy config sent again with ports 80 and 443")
+            }
+            Err(err) => tracing::warn!(
+                code = err.code(),
+                error = %err,
+                "caddy did not take the config with ports 80 and 443"
+            ),
+        }
+    }
+    Ok(Json(report))
+}
+
+/// Whether the helper's `ports_install` is done, now or before.
+fn low_ports_set(report: &SetupReport) -> bool {
+    report.results.iter().any(|result| {
+        result.op == PORTS_INSTALL && matches!(result.status, OpStatus::Done | OpStatus::Unchanged)
     })
 }
 
@@ -729,6 +783,10 @@ fn home_dir() -> Option<PathBuf> {
 
 fn is_macos(platform: Platform) -> bool {
     matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64)
+}
+
+fn is_linux(platform: Platform) -> bool {
+    matches!(platform, Platform::LinuxX64 | Platform::LinuxArm64)
 }
 
 /// The folder of [`PROTECTED_FOLDERS`] under `home` that holds `helper`, if
@@ -955,25 +1013,7 @@ fn osascript_args(helper: &Path, request: &str) -> Vec<OsString> {
 /// A message never quotes what the programs printed: only its size and the
 /// exit code go to the log.
 fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError> {
-    let output = match output {
-        Ok(output) => output,
-        Err(err) if err.kind() == io::ErrorKind::TimedOut => {
-            tracing::warn!("setup took more than 5 minutes; Marsa stopped waiting");
-            let message = "Marsa stopped waiting for setup after 5 minutes; some steps may \
-                           already have run as root, and running setup again is safe";
-            return Err(failure("setup_timed_out", message));
-        }
-        Err(err) if err.kind() == io::ErrorKind::Interrupted => {
-            tracing::warn!("the daemon is stopping; Marsa stopped waiting for setup");
-            let message = "the daemon stopped, so Marsa stopped waiting for setup; some steps \
-                           may already have run as root, and running setup again is safe";
-            return Err(failure("setup_interrupted", message));
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, "cannot run osascript");
-            return Err(failure("setup_helper_failed", "cannot run osascript"));
-        }
-    };
+    let output = output.map_err(|err| not_finished(&err, "osascript"))?;
     let text = if output.success() {
         &output.stdout
     } else {
@@ -1007,6 +1047,36 @@ fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError>
             "the helper's answer cannot be read",
         ));
     };
+    results_of(answer, output.code)
+}
+
+/// Why setup stopped waiting for `program`, the program that asks for the
+/// password and runs the helper: a timeout, a stopping daemon, or a program
+/// that could not run.
+fn not_finished(err: &io::Error, program: &str) -> ApiError {
+    match err.kind() {
+        io::ErrorKind::TimedOut => {
+            tracing::warn!("setup took more than 5 minutes; Marsa stopped waiting");
+            let message = "Marsa stopped waiting for setup after 5 minutes; some steps may \
+                           already have run as root, and running setup again is safe";
+            failure("setup_timed_out", message)
+        }
+        io::ErrorKind::Interrupted => {
+            tracing::warn!("the daemon is stopping; Marsa stopped waiting for setup");
+            let message = "the daemon stopped, so Marsa stopped waiting for setup; some steps \
+                           may already have run as root, and running setup again is safe";
+            failure("setup_interrupted", message)
+        }
+        _ => {
+            tracing::warn!(error = %err, program, "cannot run the program that asks for the password");
+            failure("setup_helper_failed", format!("cannot run {program}"))
+        }
+    }
+}
+
+/// The results in the helper's `answer`, or why there are none. `exit` is
+/// the exit code it came with, for the log.
+fn results_of(answer: HelperResponse, exit: Option<i32>) -> Result<Vec<OpResult>, ApiError> {
     if let Some(refused) = answer.error {
         let code = short_code(&refused.code);
         tracing::warn!(code = %code, "marsa-helper refused the setup request");
@@ -1014,7 +1084,7 @@ fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError>
         return Err(failure("setup_helper_rejected", message));
     }
     if answer.results.is_empty() {
-        tracing::warn!(exit = ?output.code, "marsa-helper answered with no result");
+        tracing::warn!(?exit, "marsa-helper answered with no result");
         return Err(failure("setup_helper_failed", "the helper gave no result"));
     }
     Ok(answer.results)
@@ -1171,6 +1241,14 @@ mod tests {
 
         fn programs(&self) -> Vec<&'static str> {
             self.calls().iter().map(|call| call.program).collect()
+        }
+
+        /// The request the helper would have got, from the last `pkexec`.
+        fn pkexec_request(&self) -> HelperRequest {
+            let calls = self.calls();
+            let call = calls.iter().rfind(|call| call.program == pkexec::PKEXEC);
+            let request = &call.expect("a pkexec call").args[2];
+            serde_json::from_str(request).unwrap()
         }
 
         /// The request the helper would have got, from the last `osascript`.
@@ -1749,35 +1827,219 @@ mod tests {
         }
     }
 
-    #[test]
-    fn linux_keeps_trust_install_for_the_helper_and_runs_no_security() {
-        // ADR 0011 stays off macOS: the request carries the certificate, and
-        // neither the user trust nor the protected folder check runs. Setup
-        // itself answers 501 there until task M4-18; this pins the request it
-        // will send.
-        let dir = Dir::new(true);
-        let helper = dir.home().join("Desktop").join("marsa-helper");
-        make_helper(&helper);
-        let answer = all_done(&["trust_install", "resolved_install", "pf_install"]);
-        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
-        let setup = Setup::with(
+    /// A Linux machine whose `pkexec` gives `answer()`. Nothing else may run.
+    fn linux_fake(answer: impl Fn() -> io::Result<RunOutput> + Send + Sync + 'static) -> Arc<Fake> {
+        Fake::answering(move |program, _| match program {
+            pkexec::PKEXEC => answer(),
+            other => panic!("{other} ran on Linux"),
+        })
+    }
+
+    fn linux_setup(fake: &Arc<Fake>, helper: PathBuf, home: PathBuf) -> Setup {
+        Setup::with(
             fake.clone(),
             Some(Platform::LinuxX64),
             Some(helper),
-            Some(dir.home()),
-        );
+            Some(home),
+        )
+    }
+
+    fn run_linux(setup: &Setup, dir: &Dir) -> SetupReport {
         let stop = CancellationToken::new();
-        let report = setup.run(
+        setup.run(
             dir.dir.path(),
             CaddyInput::default(),
             Platform::LinuxX64,
             &stop,
-        );
+        )
+    }
 
-        assert_eq!(fake.request().ops[0], trust());
-        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
-        assert_eq!(report.results.len(), 3);
+    /// ADR 0011 stays on Linux: the request carries the certificate. ADR
+    /// 0014: `ports_install` instead of a port check and `pf_install`. The
+    /// helper runs through `pkexec`, with no shell, and nothing else runs:
+    /// no `netstat`, no `security`, and no protected folder check (the
+    /// helper here is in `~/Desktop`).
+    #[test]
+    fn linux_sends_trust_resolved_and_ports_through_pkexec() {
+        let dir = Dir::new(true);
+        let helper = dir.home().join("Desktop").join("marsa-helper");
+        make_helper(&helper);
+        let answer = all_done(&["trust_install", "resolved_install", "ports_install"]);
+        let fake = linux_fake(move || ok(&answer));
+        let report = run_linux(&linux_setup(&fake, helper.clone(), dir.home()), &dir);
+
+        let calls = fake.calls();
+        assert_eq!(fake.programs(), ["/usr/bin/pkexec"]);
+        assert_eq!(calls[0].args.len(), 3);
+        assert_eq!(calls[0].args[0], helper.to_str().unwrap());
+        assert_eq!(calls[0].args[1], "apply");
+        assert_eq!(calls[0].limit, Duration::from_secs(300));
+        let ops = [
+            trust(),
+            HelperOp::ResolvedInstall { port: 18053 },
+            HelperOp::PortsInstall,
+        ];
+        assert_eq!(fake.pkexec_request(), HelperRequest::new(ops.to_vec()));
+        let names: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+        assert_eq!(
+            names,
+            ["trust_install", "resolved_install", "ports_install"]
+        );
+        assert_eq!((report.error, report.skipped), (None, Vec::new()));
+    }
+
+    #[test]
+    fn linux_without_a_ca_still_sets_up_names_and_ports() {
+        let dir = Dir::new(false);
+        let answer = all_done(&["resolved_install", "ports_install"]);
+        let fake = linux_fake(move || ok(&answer));
+        let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+        let ops = vec![
+            HelperOp::ResolvedInstall { port: 18053 },
+            HelperOp::PortsInstall,
+        ];
+        assert_eq!(fake.pkexec_request(), HelperRequest::new(ops));
+        assert_eq!(report.skipped, [skip("trust_install", "ca_not_ready")]);
         assert_eq!(report.error, None);
+    }
+
+    /// `pkexec`'s own exit codes, with no answer of the helper (spike S-02).
+    #[test]
+    fn a_dismissed_or_refused_password_dialog_on_linux() {
+        for (code, expected) in [(126, "setup_cancelled"), (127, "setup_not_authorized")] {
+            let dir = Dir::new(true);
+            let fake = linux_fake(move || exit(code, "Error executing command as another user"));
+            let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+            assert_eq!(error_code(&report), Some(expected), "{code}");
+            assert!(report.results.is_empty());
+        }
+    }
+
+    /// The helper's answer comes on stdout also when an op failed (exit 1).
+    #[test]
+    fn a_failed_op_on_linux_is_in_the_results() {
+        let dir = Dir::new(true);
+        let answer = json!({ "version": 1, "results": [
+            { "op": "trust_install", "status": "done" },
+            { "op": "resolved_install", "status": "failed", "code": "resolved_other_dns",
+              "message": "x" },
+            { "op": "ports_install", "status": "done" },
+        ]})
+        .to_string();
+        let fake = linux_fake(move || {
+            Ok(RunOutput {
+                code: Some(1),
+                stdout: answer.clone().into_bytes(),
+                stderr: Vec::new(),
+            })
+        });
+        let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+        assert_eq!(report.error, None);
+        assert_eq!(
+            report.results[1].code.as_deref(),
+            Some("resolved_other_dns")
+        );
+    }
+
+    /// The same checks of the helper file as on macOS, before any dialog.
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_others_could_change_on_linux_means_no_pkexec() {
+        let dir = Dir::new(true);
+        set_mode(&dir.helper(), 0o777);
+        let fake = linux_fake(|| panic!("pkexec ran"));
+        let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+        assert_eq!(error_code(&report), Some("setup_helper_unsafe"));
+        assert!(fake.calls().is_empty());
+    }
+
+    #[test]
+    fn low_ports_are_set_when_ports_install_is_done_or_unchanged() {
+        let report = |status| SetupReport {
+            results: vec![OpResult {
+                op: "ports_install".into(),
+                status,
+                code: None,
+                message: None,
+            }],
+            ..SetupReport::default()
+        };
+        assert!(low_ports_set(&report(OpStatus::Done)));
+        assert!(low_ports_set(&report(OpStatus::Unchanged)));
+        assert!(!low_ports_set(&report(OpStatus::Failed)));
+        assert!(!low_ports_set(&SetupReport::default()));
+        let other = SetupReport {
+            results: vec![done("resolved_install")],
+            ..SetupReport::default()
+        };
+        assert!(!low_ports_set(&other));
+    }
+
+    /// After setup on Linux, Caddy's config is written again with ports 80
+    /// and 443 (Caddy does not run here, so only the file shows it). Not
+    /// after a `ports_install` that failed.
+    #[tokio::test]
+    async fn linux_setup_sends_caddy_its_config_with_ports_80_and_443() {
+        for (status, port) in [("done", Some(80)), ("failed", None)] {
+            let dir = Dir::new(true);
+            let answer = json!({ "version": 1, "results": [
+                { "op": "trust_install", "status": "done" },
+                { "op": "resolved_install", "status": "done" },
+                { "op": "ports_install", "status": status, "code": "x", "message": "x" },
+            ]})
+            .to_string();
+            let fake = linux_fake(move || ok(&answer));
+            let mut daemon = Daemon::new(dir.dir.path().to_path_buf());
+            daemon.caddy.low_ports = || true;
+            let daemon = Arc::new(daemon);
+            let app = App::new(
+                Arc::clone(&daemon),
+                linux_setup(&fake, dir.helper(), dir.home()),
+            );
+            assert_eq!(app.post().await.0, StatusCode::OK, "{status}");
+            let written = fs::read_to_string(&daemon.caddy.paths.config_file)
+                .ok()
+                .map(|text| serde_json::from_str::<Value>(&text).unwrap());
+            let http_port = written.and_then(|config| config["apps"]["http"]["http_port"].as_u64());
+            assert_eq!(http_port, port, "{status}");
+        }
+    }
+
+    /// The rejection paths of the route (AGENTS.md section 5) on Linux too.
+    #[tokio::test]
+    async fn on_linux_a_request_without_the_token_with_an_origin_or_another_host_runs_nothing() {
+        let dir = Dir::new(true);
+        let answer = all_done(&["trust_install", "resolved_install", "ports_install"]);
+        let fake = linux_fake(move || ok(&answer));
+        let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+        let app = App::new(daemon, linux_setup(&fake, dir.helper(), dir.home()));
+        let host = daemon_authority(PORT);
+        let other_host = daemon_authority(PORT + 1);
+        let bearer = app.bearer.clone();
+        let cases = [
+            (vec![("host", host.as_str())], StatusCode::UNAUTHORIZED),
+            (
+                vec![
+                    ("host", host.as_str()),
+                    ("authorization", bearer.as_str()),
+                    ("origin", "http://evil.test"),
+                ],
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                vec![
+                    ("host", other_host.as_str()),
+                    ("authorization", bearer.as_str()),
+                ],
+                StatusCode::FORBIDDEN,
+            ),
+        ];
+        for (headers, status) in cases {
+            assert_eq!(app.send(&headers).await.0, status, "{headers:?}");
+            assert!(fake.calls().is_empty());
+        }
+        assert_eq!(app.post().await.0, StatusCode::OK);
+        assert_eq!(fake.programs(), ["/usr/bin/pkexec"]);
     }
 
     #[test]
@@ -2307,10 +2569,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn linux_and_windows_get_setup_not_supported() {
+    async fn windows_and_other_systems_get_setup_not_supported() {
         let dir = Dir::new(true);
         let fake = Fake::new(|program| panic!("{program} ran"));
-        for platform in [Some(Platform::LinuxX64), Some(Platform::WindowsX64), None] {
+        for platform in [Some(Platform::WindowsX64), Some(Platform::Any), None] {
             let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
             let setup = Setup::with(fake.clone(), platform, Some(dir.helper()), Some(dir.home()));
             let app = App::new(daemon, setup);
