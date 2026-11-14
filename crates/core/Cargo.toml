@@ -25,6 +25,7 @@ full = [
   "dep:zip",
   "dep:tracing",
   "dep:getrandom",
+  "dep:windows-sys",
 ]
 
 [dependencies]
@@ -45,6 +46,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+
+# `platform::windows` (task M4-19a). Behind `full`, like `platform` itself, so
+# the shim never builds it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, optional = true }
 
 [dev-dependencies]
 # A fake daemon for the client tests (task M3-08).

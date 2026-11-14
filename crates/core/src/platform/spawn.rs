@@ -6,7 +6,16 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::ExitStatus;
+
+/// The started daemon as the system gives it. Both types have `id` and
+/// `try_wait`, so the code below reads the same on every system.
+#[cfg(unix)]
+type Started = std::process::Child;
+/// On Windows, `platform::windows` starts the daemon: std cannot start a
+/// process without handing it the caller's inheritable handles (ADR 0017).
+#[cfg(windows)]
+type Started = super::windows::DetachedProcess;
 
 /// `marsad`'s exit code when another daemon already holds `run/daemon.lock`
 /// (task M3-06).
@@ -44,8 +53,9 @@ pub fn sibling_program(stem: &str) -> io::Result<PathBuf> {
 /// it leaves the daemon running.
 #[derive(Debug)]
 pub struct SpawnedDaemon {
-    /// Always `Some` until `drop` takes it.
-    child: Option<Child>,
+    /// `Some` until `drop` takes it on macOS and Linux; always `Some` on
+    /// Windows, which has no zombies to reap.
+    child: Option<Started>,
     pid: u32,
 }
 
@@ -61,9 +71,12 @@ impl SpawnedDaemon {
 }
 
 /// Collects the exit status on a small background thread when the daemon
-/// exits, so it does not stay a zombie on macOS and Linux while a long-lived
-/// window runs. The caller never blocks, and the thread ends with the daemon
-/// or with this process.
+/// exits, so it does not stay a zombie while a long-lived window runs. The
+/// caller never blocks, and the thread ends with the daemon or with this
+/// process.
+// Unix only: Windows keeps no zombie. There, dropping the process handle is
+// all the clean-up, and `DetachedProcess` does that itself.
+#[cfg(unix)]
 impl Drop for SpawnedDaemon {
     fn drop(&mut self) {
         let Some(mut child) = self.child.take() else {
@@ -92,8 +105,11 @@ impl Drop for SpawnedDaemon {
 ///
 /// - Both paths are made absolute first, so `marsad` is never searched on
 ///   `PATH` and `data_dir` does not depend on the working folder.
-/// - stdin, stdout, and stderr are null: the daemon logs to its own file, and
-///   no pipe ties it to this process.
+/// - No pipe ties the daemon to this process, and it logs to its own file.
+///   On macOS and Linux its stdin, stdout, and stderr are null. On Windows it
+///   gets none of this process's handles, the standard ones included: a
+///   shell can leave more inheritable handles in this process than those
+///   three (ADR 0017).
 /// - The working folder is the one `marsad` sits in, so the daemon does not
 ///   keep the caller's folder busy.
 /// - On macOS and Linux it gets its own process group, so Ctrl+C in the
@@ -103,22 +119,12 @@ impl Drop for SpawnedDaemon {
 ///
 /// # Errors
 ///
-/// The `io::Error` from `spawn`, for example `NotFound` if `marsad` is missing.
+/// The `io::Error` from the start, for example `NotFound` if `marsad` is
+/// missing.
 pub fn spawn_marsad(marsad: &Path, data_dir: &Path) -> io::Result<SpawnedDaemon> {
     let marsad = std::path::absolute(marsad)?;
     let data_dir = std::path::absolute(data_dir)?;
-    let mut command = Command::new(&marsad);
-    command
-        .arg("--data-dir")
-        .arg(&data_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Some(dir) = marsad.parent() {
-        command.current_dir(dir);
-    }
-    detach(&mut command);
-    let child = command.spawn()?;
+    let child = start_detached(&marsad, &data_dir)?;
     Ok(SpawnedDaemon {
         pid: child.id(),
         child: Some(child),
@@ -126,28 +132,36 @@ pub fn spawn_marsad(marsad: &Path, data_dir: &Path) -> io::Result<SpawnedDaemon>
 }
 
 #[cfg(unix)]
-fn detach(command: &mut Command) {
+fn start_detached(marsad: &Path, data_dir: &Path) -> io::Result<Started> {
     use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
 
+    let mut command = Command::new(marsad);
+    command
+        .arg("--data-dir")
+        .arg(data_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(dir) = marsad.parent() {
+        command.current_dir(dir);
+    }
     // A new process group: the terminal sends Ctrl+C and its hang-up signal
     // to its foreground group only.
     command.process_group(0);
+    command.spawn()
 }
 
+/// No console (so no Ctrl+C from the caller's console), no window, and no
+/// handle of this process.
+///
+/// Known limit: the daemon does not leave a Job Object the caller is in. If
+/// that job ends its processes when it closes (some terminals and CI runners
+/// do this), the daemon ends with the caller.
 #[cfg(windows)]
-fn detach(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
+fn start_detached(marsad: &Path, data_dir: &Path) -> io::Result<Started> {
+    use std::ffi::OsStr;
 
-    // Values from the Win32 "Process Creation Flags" page, written here so the
-    // core needs no `windows-sys`. `DETACHED_PROCESS`: no console, so no
-    // Ctrl+C from the caller's console. Windows ignores `CREATE_NO_WINDOW`
-    // when `DETACHED_PROCESS` is set; it stays so that no window appears if
-    // the first flag is ever dropped.
-    //
-    // Known limit: there is no `CREATE_BREAKAWAY_FROM_JOB` yet. If the caller
-    // runs in a job object that kills its processes on close (some terminals
-    // and CI runners do this), the daemon is killed with the caller.
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    let args = [OsStr::new("--data-dir"), data_dir.as_os_str()];
+    super::windows::spawn_detached(marsad, &args, marsad.parent())
 }

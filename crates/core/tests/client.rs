@@ -35,6 +35,14 @@ use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+/// A `marsad` that is not there. With `.exe` on Windows, where only an
+/// `.exe` is started at all, so the start fails for the missing file.
+const NO_MARSAD: &str = if cfg!(windows) {
+    "no-marsad.exe"
+} else {
+    "no-marsad"
+};
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// What the fake daemon saw of one request.
@@ -1132,7 +1140,7 @@ async fn a_stale_file_with_a_free_lock_is_never_contacted() {
     let err = DaemonClient::connect(squatter.data_dir()).unwrap_err();
     assert_eq!(err.code(), "daemon_not_running", "{err:?}");
     assert!(!stop_daemon(squatter.data_dir()).await.unwrap());
-    let missing = squatter.data_dir().join("no-marsad");
+    let missing = squatter.data_dir().join(NO_MARSAD);
     let err = ensure_running_with(squatter.data_dir(), &missing)
         .await
         .unwrap_err();
@@ -1149,7 +1157,7 @@ async fn a_stale_file_with_a_free_lock_is_never_contacted() {
 async fn ensure_running_returns_a_daemon_of_this_version() {
     let (router, shutdowns) = serve_shutdown(serve_health(health(VERSION, API_VERSION)), None);
     let fake = Fake::start(router).await;
-    let missing = fake.data_dir().join("no-marsad");
+    let missing = fake.data_dir().join(NO_MARSAD);
     let client = ensure_running_with(fake.data_dir(), &missing)
         .await
         .unwrap();
@@ -1161,7 +1169,7 @@ async fn ensure_running_returns_a_daemon_of_this_version() {
 async fn a_newer_daemon_is_used_as_is() {
     let (router, shutdowns) = serve_shutdown(serve_health(health("99.0.0", API_VERSION)), None);
     let fake = Fake::start(router).await;
-    let missing = fake.data_dir().join("no-marsad");
+    let missing = fake.data_dir().join(NO_MARSAD);
     let client = ensure_running_with(fake.data_dir(), &missing)
         .await
         .unwrap();
@@ -1176,7 +1184,7 @@ async fn a_daemon_with_a_newer_api_is_refused_and_left_running() {
         let answer = health(app_version, API_VERSION + 1);
         let (router, shutdowns) = serve_shutdown(serve_health(answer), None);
         let fake = Fake::start(router).await;
-        let missing = fake.data_dir().join("no-marsad");
+        let missing = fake.data_dir().join(NO_MARSAD);
         let err = ensure_running_with(fake.data_dir(), &missing)
             .await
             .unwrap_err();
@@ -1197,7 +1205,7 @@ async fn an_older_daemon_is_stopped_then_replaced() {
 
     // No `marsad` here, so the start after the stop fails, which shows it was
     // tried.
-    let missing = temp.path().join("no-marsad");
+    let missing = temp.path().join(NO_MARSAD);
     let err = ensure_running_with(temp.path(), &missing)
         .await
         .unwrap_err();
@@ -1243,7 +1251,7 @@ async fn two_clients_replacing_a_daemon_both_use_the_new_one() {
             }),
         );
     let fake = Fake::start(router).await;
-    let missing = fake.data_dir().join("no-marsad");
+    let missing = fake.data_dir().join(NO_MARSAD);
     let (a, b) = tokio::join!(
         ensure_running_with(fake.data_dir(), &missing),
         ensure_running_with(fake.data_dir(), &missing),
@@ -1265,7 +1273,7 @@ async fn a_held_lock_is_waited_for_then_marsad_is_started() {
         lock.release();
     });
     let started = Instant::now();
-    let missing = temp.path().join("no-marsad");
+    let missing = temp.path().join(NO_MARSAD);
     let err = ensure_running_with(temp.path(), &missing)
         .await
         .unwrap_err();
@@ -1278,7 +1286,7 @@ async fn a_held_lock_is_waited_for_then_marsad_is_started() {
 #[tokio::test]
 async fn no_daemon_and_no_marsad_is_a_start_failure() {
     let dir = TempDir::new().unwrap();
-    let err = ensure_running_with(dir.path(), &dir.path().join("no-marsad"))
+    let err = ensure_running_with(dir.path(), &dir.path().join(NO_MARSAD))
         .await
         .unwrap_err();
     assert_eq!(err.code(), "daemon_start_failed", "{err:?}");
