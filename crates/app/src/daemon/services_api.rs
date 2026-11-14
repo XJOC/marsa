@@ -11,6 +11,11 @@
 //! (`php-fpm-8.4`). The sites sync starts and stops the pools, so an action
 //! on a pool is `409 service_managed_by_sites`.
 //!
+//! An action on Caddy that finds another one running waits for it, up to
+//! [`ACTION_WAIT`], then runs. The usual one is the start of Caddy with the
+//! daemon (task M5-16): `marsa services stop caddy` starts the daemon itself,
+//! and its stop must not be lost to that start.
+//!
 //! Every error, the extractors' own included, is an `ErrorBody`.
 
 use std::convert::Infallible;
@@ -38,6 +43,13 @@ use super::supervisor::{ServiceRuntime, lock};
 
 /// The answer to an action on a service that the sites sync starts and stops.
 pub const MANAGED_BY_SITES: &str = "service_managed_by_sites";
+
+/// How long an action on Caddy waits for another one to end before
+/// `409 service_busy`. Longer than a start that first stops an old Caddy
+/// (up to about 15 s: 10 s for the old one with ADR 0009's ladder, 5 s for
+/// the admin API). A request that waited, then stopped or restarted Caddy,
+/// still fits in the client's 30 s.
+pub const ACTION_WAIT: Duration = Duration::from_secs(16);
 
 /// A `:` comment this often on a quiet stream, as on `/v1/events`: the
 /// client gives up after 45 s without a byte.
@@ -78,7 +90,7 @@ async fn service_action(
         ));
     };
     tracing::info!(service = %id, %action, "service action");
-    match caddy.run(&daemon, action).await {
+    match caddy.run_waiting(&daemon, action, ACTION_WAIT).await {
         Ok(status) => Ok(Json(status)),
         Err(err) => {
             tracing::warn!(service = %id, %action, code = err.code(), error = %err, "service action failed");

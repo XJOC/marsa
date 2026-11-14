@@ -500,6 +500,13 @@ impl Admin {
         }
     }
 
+    /// Whether the admin port answers `GET /id/<tag>` with `tag`: the Caddy
+    /// of this data folder, and no other program. A running Caddy's start
+    /// waits for this, and its stop asks it before `POST /stop`.
+    pub(super) async fn answers_as(&self, tag: &str) -> bool {
+        matches!(self.probe(tag).await, Probe::Tagged)
+    }
+
     /// `GET /id/<tag>`, read for at most the client's timeout.
     async fn probe(&self, tag: &str) -> Probe {
         let Some(http) = &self.http else {

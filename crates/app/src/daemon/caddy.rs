@@ -27,7 +27,6 @@ pub mod orphan;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -184,8 +183,10 @@ pub struct CaddyManager {
     /// The status and recent lines. Kept across runs, so `seq` never goes
     /// back and the lines of a failed run stay readable.
     runtime: Arc<Mutex<ServiceRuntime>>,
-    /// Set while an action runs.
-    busy: AtomicBool,
+    /// Held for the whole of each action. [`CaddyManager::run`] only tries
+    /// it, [`CaddyManager::run_waiting`] waits for it in line. A tokio lock:
+    /// it is held across `.await`, and it serves the waits in order.
+    busy: tokio::sync::Mutex<()>,
     /// The sites and PHP pools of the config. [`CaddyManager::apply`] sets
     /// them; `start` writes the config of the latest ones.
     wanted: Mutex<Wanted>,
@@ -281,7 +282,7 @@ impl CaddyManager {
             ladder: Ladder::default(),
             started: Mutex::default(),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(CADDY_ID))),
-            busy: AtomicBool::new(false),
+            busy: tokio::sync::Mutex::default(),
             wanted: Mutex::default(),
             pushing: tokio::sync::Mutex::default(),
         }
@@ -387,8 +388,8 @@ impl CaddyManager {
     ///
     /// # Errors
     ///
-    /// `service_busy` while another action runs: a flag, not a lock held
-    /// across `.await`, keeps two starts from running two Caddys.
+    /// `service_busy` while another action runs, or another waits for its
+    /// turn: one action at a time keeps two starts from running two Caddys.
     /// `caddy_not_installed`, `caddy_config_write`, and `program_not_absolute`
     /// from `start`: the status is then `Failed` with the same code.
     pub async fn run(
@@ -396,10 +397,45 @@ impl CaddyManager {
         daemon: &Daemon,
         action: ServiceAction,
     ) -> Result<ServiceStatus, ActionError> {
-        if self.busy.swap(true, Ordering::AcqRel) {
-            return Err(ActionError::Busy);
-        }
-        let _busy = ActionGuard(&self.busy);
+        let busy = self.busy.try_lock().map_err(|_| ActionError::Busy)?;
+        self.act(daemon, action, busy).await
+    }
+
+    /// [`CaddyManager::run`], but an action that finds another one running
+    /// waits up to `wait` for it to end, then runs. Waits end in the order
+    /// they began. So a `stop` sent while the daemon starts Caddy (task
+    /// M5-16) stops Caddy once it has started, and is never lost.
+    ///
+    /// # Errors
+    ///
+    /// `service_busy` when the wait runs out; the others as for
+    /// [`CaddyManager::run`].
+    pub async fn run_waiting(
+        &self,
+        daemon: &Daemon,
+        action: ServiceAction,
+        wait: Duration,
+    ) -> Result<ServiceStatus, ActionError> {
+        let busy = match self.busy.try_lock() {
+            Ok(busy) => busy,
+            Err(_) => {
+                info!(%action, "another action on caddy runs; waiting for it");
+                tokio::time::timeout(wait, self.busy.lock())
+                    .await
+                    .map_err(|_| ActionError::Busy)?
+            }
+        };
+        self.act(daemon, action, busy).await
+    }
+
+    /// Runs `action`. `_busy` proves that no other action runs; it is let go
+    /// when this ends, also when the caller is dropped half way.
+    async fn act(
+        &self,
+        daemon: &Daemon,
+        action: ServiceAction,
+        _busy: tokio::sync::MutexGuard<'_, ()>,
+    ) -> Result<ServiceStatus, ActionError> {
         let admin = Admin::new(self.input.admin_port);
         match action {
             ServiceAction::Start => self.start(daemon, &admin).await?,
@@ -513,7 +549,7 @@ impl CaddyManager {
         );
 
         info!("caddy started; waiting for its admin API");
-        match self.wait_ready(daemon, admin).await {
+        match self.wait_ready(daemon, admin, &tag).await {
             Ready::Yes => info!("caddy is ready"),
             // The status already says why.
             Ready::Ended => warn!(state = ?self.status().state, "caddy ended before it was ready"),
@@ -529,14 +565,18 @@ impl CaddyManager {
         Ok(())
     }
 
-    /// Polls `GET /config/` until it answers, the task ends, or the limit.
-    async fn wait_ready(&self, daemon: &Daemon, admin: &Admin) -> Ready {
+    /// Polls `GET /id/<tag>` until our Caddy answers, the task ends, or the
+    /// limit. Only our tag counts: another program on the admin port, a
+    /// second user's Caddy for one, is never taken for ours, so no config
+    /// goes to it. Where no orphan check runs first (Linux and Windows) this
+    /// is the only check.
+    async fn wait_ready(&self, daemon: &Daemon, admin: &Admin, tag: &str) -> Ready {
         let poll = async {
             loop {
                 if !daemon.proc_alive(CADDY_ID) {
                     return Ready::Ended;
                 }
-                if admin.ready().await {
+                if admin.answers_as(tag).await {
                     return Ready::Yes;
                 }
                 tokio::time::sleep(READY_POLL).await;
@@ -550,11 +590,19 @@ impl CaddyManager {
     /// Asks Caddy to exit through its admin API (the clean way on Windows,
     /// which has no SIGTERM), then stops its task. With no task, stops our
     /// orphan, if there is one. `false` when that orphan would not stop.
+    ///
+    /// `POST /stop` goes only to a Caddy that answers with our tag: another
+    /// program on the admin port never gets it. Without it, the task's stop
+    /// ends our Caddy.
     async fn stop(&self, daemon: &Daemon, admin: &Admin) -> bool {
         if !daemon.proc_alive(CADDY_ID) {
             return self.stop_orphan(daemon, admin).await;
         }
-        admin.stop().await;
+        match self.instance_tag() {
+            Ok(tag) if admin.answers_as(&tag).await => admin.stop().await,
+            Ok(_) => debug!("the admin port does not answer with our tag; no /stop"),
+            Err(err) => warn!(%err, "cannot read the instance id; no /stop"),
+        }
         // `None`: a shutdown took the handle and stops it.
         if let Some(handle) = daemon.take_proc(CADDY_ID)
             && let Err(err) = handle.stop().await
@@ -665,8 +713,8 @@ pub enum Launched {
     /// The start failed before Caddy ran, with this code. The status is
     /// `Failed` with the same code.
     Failed(&'static str),
-    /// The daemon began to stop first, and the start was dropped. A Caddy it
-    /// spawned is in `Daemon::procs`, so the shutdown stops it.
+    /// The daemon began to stop first, and the start was dropped. The
+    /// shutdown stops a Caddy it had spawned (see [`start_at_launch`]).
     ShuttingDown,
 }
 
@@ -703,8 +751,9 @@ impl Launch {
 /// Starts Caddy in the background when it is installed (task M5-16), so the
 /// sites answer after a reboot or a `marsa daemon stop` with no step by hand.
 /// The path of `marsa services start caddy`: [`CaddyManager::run`], with the
-/// orphan check (ADR 0009) and the busy flag, so a request meanwhile gets
-/// `service_busy` and never starts a second Caddy. The API serves meanwhile.
+/// orphan check (ADR 0009) and one action at a time, so a request meanwhile
+/// waits for it ([`CaddyManager::run_waiting`]) and never starts a second
+/// Caddy. The API serves meanwhile.
 ///
 /// The config is the latest that the sites sync gave
 /// [`CaddyManager::apply`]: `start` and `apply` take turns on `pushing`, so a
@@ -766,16 +815,6 @@ async fn launch(daemon: &Daemon) -> Launched {
 
 /// The line before a reap, in Caddy's recent lines.
 const STOPPING_ORPHAN: &str = "marsad: Stopping an old Caddy left by a crashed marsad.";
-
-/// Clears the busy flag when the action ends, also when the request is
-/// dropped half way.
-struct ActionGuard<'a>(&'a AtomicBool);
-
-impl Drop for ActionGuard<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
 
 enum Ready {
     Yes,
@@ -979,16 +1018,6 @@ impl Admin {
             http,
             base: format!("http://127.0.0.1:{port}"),
         }
-    }
-
-    /// `GET /config/` answers with a success.
-    async fn ready(&self) -> bool {
-        let Some(http) = &self.http else {
-            return false;
-        };
-        let url = format!("{}/config/", self.base);
-        let response = http.get(url).send().await;
-        response.is_ok_and(|response| response.status().is_success())
     }
 
     /// `POST /stop`: Caddy stops its servers and exits.
