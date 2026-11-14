@@ -923,7 +923,10 @@ mod tests {
         for version in [APP_VERSION, newer.as_str(), build.as_str()] {
             assert!(!older_than_this_build(version), "{version}");
         }
-        let pre = format!("{APP_VERSION}-rc.1");
+        // A pre-release of this build's version is older. `-0` is the lowest
+        // pre-release, so this holds when this build is a pre-release too
+        // (0.1.0-0 < 0.1.0-rc.1); appending `-rc.1` to `0.1.0-rc.1` would not.
+        let pre = format!("{}.{}.{}-0", ours.major, ours.minor, ours.patch);
         for version in [pre.as_str(), "not a version", ""] {
             assert!(older_than_this_build(version), "{version}");
         }
