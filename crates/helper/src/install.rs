@@ -312,14 +312,18 @@ mod scm {
         }
         let old = dir.join(OLD);
         let deadline = Instant::now() + EXIT_WAIT;
-        while let Err(err) = fs::remove_file(&old) {
-            if err.kind() == io::ErrorKind::NotFound {
-                break;
+        loop {
+            match fs::remove_file(&old) {
+                Ok(()) => {
+                    outcome = Outcome::Done;
+                    break;
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotFound => break,
+                Err(err) if Instant::now() >= deadline => {
+                    return Err(text("cannot delete the old helper", err));
+                }
+                Err(_) => thread::sleep(Duration::from_millis(200)),
             }
-            if Instant::now() >= deadline {
-                return Err(text("cannot delete the old helper", err));
-            }
-            thread::sleep(Duration::from_millis(200));
         }
         let names = FILES.iter().map(|name| (*name).to_owned());
         for name in names.chain(leftovers(&dir)) {

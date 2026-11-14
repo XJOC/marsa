@@ -842,7 +842,14 @@ mod tests {
     fn marsas_folder_gets_its_own_dacl() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("Marsa");
-        private_dir(&dir).unwrap();
+        // Only an elevated process may make Administrators the owner, as
+        // `install` is. CI runs elevated; a developer's shell may not
+        // (`ERROR_INVALID_OWNER`, 1307), and then there is nothing to check.
+        if let Err(err) = private_dir(&dir) {
+            assert_eq!(err.raw_os_error(), Some(1307), "{err}");
+            eprintln!("not elevated: the owner cannot be Administrators here");
+            return;
+        }
         // A second time, on the folder that is there, with a file in it.
         let file = dir.join("ca-root.pem");
         fs::write(&file, b"").unwrap();
