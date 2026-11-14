@@ -17,9 +17,9 @@ use semver::Version;
 
 use super::build::Target;
 
-/// Good builds export 1,034 to 1,036 `zend_*` symbols; static musl and
-/// broken builds none (S-03, S-10).
-pub const MIN_ZEND_SYMBOLS: usize = 1000;
+/// Good PHP 8.4 builds export 1,034 to 1,036 `zend_*` symbols, PHP 8.3
+/// builds about 980; static musl and broken builds none (S-03, S-10, M5-08).
+pub const MIN_ZEND_SYMBOLS: usize = 900;
 
 /// Linux builds target glibc 2.17 (ADR 0012).
 pub const MAX_GLIBC: (u32, u32) = (2, 17);
@@ -46,6 +46,16 @@ pub struct Extension {
     pub spc: Option<String>,
     /// What `php -m` lists, lowercase.
     pub module: String,
+    /// `builtin@8.5`: the module exists from this PHP version on.
+    pub since: Option<(u64, u64)>,
+}
+
+impl Extension {
+    /// Whether PHP `version` has this module.
+    pub fn applies_to(&self, version: &Version) -> bool {
+        self.since
+            .is_none_or(|since| (version.major, version.minor) >= since)
+    }
 }
 
 impl Extension {
@@ -73,11 +83,21 @@ pub fn parse_extensions(text: &str) -> Result<Vec<Extension>> {
         };
         let module = words.collect::<Vec<_>>().join(" ").to_lowercase();
         ensure!(!module.is_empty(), "{}: no module name", at());
-        let kind = match kind {
-            "builtin" => Kind::Builtin,
-            "static" => Kind::Static,
-            "shared" => Kind::Shared,
-            other => bail!("{}: unknown kind {other:?}", at()),
+        let (kind, since) = match kind.split_once('@') {
+            Some(("builtin", version)) => {
+                let since = version
+                    .split_once('.')
+                    .and_then(|(major, minor)| Some((major.parse().ok()?, minor.parse().ok()?)))
+                    .with_context(|| format!("{}: builtin@ needs <major>.<minor>", at()))?;
+                (Kind::Builtin, Some(since))
+            }
+            Some(_) => bail!("{}: only builtin takes @<version>", at()),
+            None => match kind {
+                "builtin" => (Kind::Builtin, None),
+                "static" => (Kind::Static, None),
+                "shared" => (Kind::Shared, None),
+                other => bail!("{}: unknown kind {other:?}", at()),
+            },
         };
         let spc = match (kind, spc) {
             (Kind::Builtin, "-") => None,
@@ -104,7 +124,12 @@ pub fn parse_extensions(text: &str) -> Result<Vec<Extension>> {
             "{}: module {module} is listed twice",
             at()
         );
-        list.push(Extension { kind, spc, module });
+        list.push(Extension {
+            kind,
+            spc,
+            module,
+            since,
+        });
     }
     ensure!(
         list.iter().any(|e| e.kind == Kind::Static),
@@ -184,7 +209,9 @@ pub fn newest_glibc(nm_output: &str) -> Option<(u32, u32)> {
 }
 
 /// `php -n -v` must name this exact version and a static-php-cli build from
-/// the pinned line: `Built by static-php-cli 2.8.6` matches `2.8`.
+/// the pinned line: `Built by static-php-cli 2.8.6` matches `2.8`. spc adds
+/// that line to PHP 8.4 and later only, so PHP 8.3 may lack it; the archive's
+/// `BUILD-INFO.txt` is checked for every version ([`check_build_info`]).
 pub fn check_version_output(output: &str, version: &Version, spc_line: &str) -> Result<()> {
     ensure!(
         output.contains(&format!("PHP {version} ")),
@@ -194,8 +221,25 @@ pub fn check_version_output(output: &str, version: &Version, spc_line: &str) -> 
         .split("Built by static-php-cli ")
         .nth(1)
         .and_then(|rest| rest.split_whitespace().next())
-        .map(|word| word.trim_end_matches('.'))
-        .context("php -v has no \"Built by static-php-cli\" line")?;
+        .map(|word| word.trim_end_matches('.'));
+    match built {
+        Some(built) => on_spc_line(built, spc_line),
+        None if (version.major, version.minor) < (8, 4) => Ok(()),
+        None => bail!("php -v has no \"Built by static-php-cli\" line"),
+    }
+}
+
+/// `BUILD-INFO.txt` (written by tools/php-build/package.sh) must have a
+/// `static-php-cli <version>` line on the pinned line.
+pub fn check_build_info(text: &str, spc_line: &str) -> Result<()> {
+    let built = text
+        .lines()
+        .find_map(|line| line.trim_end_matches('\r').strip_prefix("static-php-cli "))
+        .context("BUILD-INFO.txt has no \"static-php-cli\" line")?;
+    on_spc_line(built.trim(), spc_line)
+}
+
+fn on_spc_line(built: &str, spc_line: &str) -> Result<()> {
     ensure!(
         built == spc_line || built.starts_with(&format!("{spc_line}.")),
         "built by static-php-cli {built}, but pins.toml pins the {spc_line} line"
@@ -220,10 +264,14 @@ pub fn modules(output: &str, section: &str) -> Vec<String> {
 /// `php -n -m` against the list: the builtin and static modules that are
 /// missing, and the modules that are not in the list. `cgi-fcgi`, which
 /// `php-fpm -m` adds, is not counted.
-pub fn compare_modules(list: &[Extension], output: &str) -> (Vec<String>, Vec<String>) {
+pub fn compare_modules(
+    list: &[Extension],
+    version: &Version,
+    output: &str,
+) -> (Vec<String>, Vec<String>) {
     let expected: BTreeSet<&str> = list
         .iter()
-        .filter(|e| e.kind != Kind::Shared)
+        .filter(|e| e.kind != Kind::Shared && e.applies_to(version))
         .map(|e| e.module.as_str())
         .collect();
     let mut have = modules(output, "PHP Modules");
@@ -267,6 +315,11 @@ pub fn check_archive(
         &Limits::default(),
     )
     .with_context(|| format!("cannot unpack {}", archive.display()))?;
+
+    let info = work.join("BUILD-INFO.txt");
+    let info = fs::read_to_string(&info)
+        .with_context(|| format!("{} has no BUILD-INFO.txt", archive.display()))?;
+    check_build_info(&info, spc_line).with_context(|| archive.display().to_string())?;
 
     let mut programs = Vec::new();
     for name in recipe.program_names() {
@@ -315,7 +368,7 @@ pub fn check_archive(
         }
         check_version_output(&run(program, &["-n", "-v"])?, version, spc_line)
             .with_context(|| what.clone())?;
-        let (missing, extra) = compare_modules(&list, &run(program, &["-n", "-m"])?);
+        let (missing, extra) = compare_modules(&list, version, &run(program, &["-n", "-m"])?);
         ensure!(
             missing.is_empty(),
             "{what} lacks modules from recipes/php-extensions.txt: {}",
@@ -427,8 +480,15 @@ mod tests {
                 count(Kind::Static),
                 count(Kind::Shared)
             ),
-            (10, 37, 1)
+            (12, 37, 1)
         );
+        // lexbor and uri are on from PHP 8.5 only.
+        let new_in_85: Vec<_> = list
+            .iter()
+            .filter(|e| e.since == Some((8, 5)))
+            .map(|e| e.module.as_str())
+            .collect();
+        assert_eq!(new_in_85, ["lexbor", "uri"]);
         let opcache = list
             .iter()
             .find(|e| e.spc.as_deref() == Some("opcache"))
@@ -449,8 +509,14 @@ mod tests {
 
     #[test]
     fn extension_list_refusals() {
-        let good = "builtin - Core\nstatic pdo PDO\r\nshared xdebug Xdebug\n";
-        assert_eq!(parse_extensions(good).expect("valid").len(), 3);
+        let good = "builtin - Core\nbuiltin@8.5 - uri\nstatic pdo PDO\r\nshared xdebug Xdebug\n";
+        let parsed = parse_extensions(good).expect("valid");
+        assert_eq!(parsed.len(), 4);
+        assert_eq!(parsed[1].since, Some((8, 5)));
+        assert!(parsed[1].applies_to(&Version::new(8, 5, 0)));
+        assert!(parsed[1].applies_to(&Version::new(9, 0, 0)));
+        assert!(!parsed[1].applies_to(&Version::new(8, 4, 27)));
+        assert!(parsed[0].applies_to(&Version::new(8, 3, 36)));
         for (text, expected) in [
             ("static\n", "needs <kind>"),
             ("static pdo\n", "no module name"),
@@ -464,6 +530,9 @@ mod tests {
                 "module pdo is listed twice",
             ),
             ("builtin - Core\n", "no static extension"),
+            ("builtin@8 - uri\nstatic pdo PDO\n", "builtin@ needs"),
+            ("builtin@x.y - uri\nstatic pdo PDO\n", "builtin@ needs"),
+            ("static@8.5 pdo PDO\n", "only builtin takes"),
         ] {
             let err = parse_extensions(text).expect_err(expected);
             assert!(format!("{err:#}").contains(expected), "{expected}: {err:#}");
@@ -473,13 +542,20 @@ mod tests {
     #[test]
     fn real_php_m_matches_the_list() {
         let list = list();
-        let (missing, extra) = compare_modules(&list, PHP_M);
+        let v84 = Version::new(8, 4, 27);
+        let (missing, extra) = compare_modules(&list, &v84, PHP_M);
         assert!(missing.is_empty(), "{missing:?}");
         assert!(extra.is_empty(), "{extra:?}");
         // php-fpm adds cgi-fcgi, which does not count.
-        assert_eq!(compare_modules(&list, PHP_FPM_M), (vec![], vec![]));
+        assert_eq!(compare_modules(&list, &v84, PHP_FPM_M), (vec![], vec![]));
+        // PHP 8.5 must also have lexbor and uri.
+        let v85 = Version::new(8, 5, 12);
+        let (missing, _) = compare_modules(&list, &v85, PHP_M);
+        assert_eq!(missing, ["lexbor", "uri"]);
+        let with_85 = PHP_M.replace("libxml\n", "lexbor\nlibxml\nuri\n");
+        assert_eq!(compare_modules(&list, &v85, &with_85), (vec![], vec![]));
         // With Xdebug loaded, it is the only extra module.
-        let (missing, extra) = compare_modules(&list, PHP_XDEBUG_M);
+        let (missing, extra) = compare_modules(&list, &v84, PHP_XDEBUG_M);
         assert!(missing.is_empty());
         assert_eq!(extra, ["xdebug"]);
         assert!(modules(PHP_XDEBUG_M, "Zend Modules").contains(&"xdebug".to_owned()));
@@ -490,11 +566,12 @@ mod tests {
         let output = PHP_M
             .replace("pdo_sqlite\n", "")
             .replace("zip\n", "zip\nyaml\n");
-        let (missing, extra) = compare_modules(&list(), &output);
+        let v = Version::new(8, 4, 27);
+        let (missing, extra) = compare_modules(&list(), &v, &output);
         assert_eq!(missing, ["pdo_sqlite"]);
         assert_eq!(extra, ["yaml"]);
         let output = "[PHP Modules]\nbcmath\nCore\n\n[Zend Modules]\nZend OPcache\n";
-        let (missing, _) = compare_modules(&list(), output);
+        let (missing, _) = compare_modules(&list(), &v, output);
         assert!(missing.contains(&"intl".to_owned()));
         assert!(!missing.contains(&"zend opcache".to_owned()));
         assert!(!missing.contains(&"core".to_owned()));
@@ -560,5 +637,24 @@ mod tests {
             let err = check_version_output(&output, &version, line).expect_err(expected);
             assert!(err.to_string().contains(expected), "{err}");
         }
+        // PHP 8.3 has no "Built by" line; BUILD-INFO.txt carries it instead.
+        let php83 = "PHP 8.3.36 (cli) (built: Nov 11 2026 00:03:02) (NTS clang 17.0.0)\n";
+        check_version_output(php83, &Version::new(8, 3, 36), "2.8").expect("8.3 has no line");
+        // But if the line is there, it must be on the pinned line.
+        let wrong = format!("{php83}Built by static-php-cli 3.0.0\n");
+        assert!(check_version_output(&wrong, &Version::new(8, 3, 36), "2.8").is_err());
+    }
+
+    #[test]
+    fn build_info_names_the_spc_line() {
+        let info = "php 8.3.36 for darwin-arm64\r\nstatic-php-cli 2.8.5\r\nxdebug 3.5.3\n";
+        check_build_info(info, "2.8").expect("2.8.5 is on the 2.8 line");
+        let err = check_build_info(info, "3.0").expect_err("wrong line");
+        assert!(err.to_string().contains("pins the 3.0 line"), "{err}");
+        let err = check_build_info("php 8.3.36\n", "2.8").expect_err("no line");
+        assert!(
+            err.to_string().contains("no \"static-php-cli\" line"),
+            "{err}"
+        );
     }
 }
