@@ -461,7 +461,7 @@ async fn remove(client: &DaemonClient, removal: Removal) -> Update {
             tracing::warn!(code = err.code(), error = %err, ?removal, "cannot remove");
             let code = err.code().to_owned();
             let in_use = match err {
-                ClientError::InUse { in_use, .. } => Some(in_use),
+                ClientError::InUse { in_use, .. } => Some(*in_use),
                 _ => None,
             };
             Update::NotRemoved {

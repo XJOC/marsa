@@ -289,31 +289,31 @@ say_path() {
   say "Add Marsa to your PATH. Put this line at the end of your shell's startup file:"
   say
   say "  $line"
-  # zsh on macOS reads .zprofile and .zshrc; the line goes last in both, so
-  # Marsa's php comes before any other (architecture.md section 10).
+  # Every interactive zsh reads .zshrc, a login one too, and after .zprofile,
+  # where Homebrew's line usually is: so Marsa's php comes first. Not
+  # .zprofile as well: a terminal that is not a login shell never reads it,
+  # and a login shell would get the line twice (architecture.md section 10).
   case "${SHELL:-}-${PLATFORM%%-*}" in
-    */zsh-darwin) files=".zprofile .zshrc" ;;
-    */zsh-linux) files=".zshrc" ;;
+    # The program's own name, not a folder that starts with zsh-.
+    */zsh-darwin | */zsh-linux) file=".zshrc" ;;
     */bash-darwin)
       # A login shell reads only the first of these that exists, so a new
       # .bash_profile would hide an existing .profile.
-      files=".bash_profile"
-      for file in .bash_profile .bash_login .profile; do
-        if [ -f "$HOME/$file" ]; then
-          files="$file"
+      file=".bash_profile"
+      for name in .bash_profile .bash_login .profile; do
+        if [ -f "$HOME/$name" ]; then
+          file="$name"
           break
         fi
       done
       ;;
-    */bash-linux) files=".bashrc" ;;
+    */bash-linux) file=".bashrc" ;;
     *) return 0 ;;
   esac
   say
-  say "These commands do it:"
+  say "This command does it:"
   say
-  for file in $files; do
-    say "  echo '$line' >> \"\$HOME/$file\""
-  done
+  say "  echo '$line' >> \"\$HOME/$file\""
   say
   say "Then open a new terminal."
 }

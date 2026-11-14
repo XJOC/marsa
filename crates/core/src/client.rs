@@ -268,15 +268,20 @@ impl DaemonClient {
     /// installed version matches it. A php-fpm pool that runs it is stopped
     /// first. Returns once the folder is gone and the site list is built
     /// again; a changed list also comes on [`DaemonClient::events`] as
-    /// `Event::SitesChanged`. A refusal changes nothing.
+    /// `Event::SitesChanged`. A refusal changes nothing. The only installed
+    /// PHP or Node version goes with its default in `global.toml` (task
+    /// M5-19).
     ///
     /// # Errors
     ///
     /// Any [`ClientError`], and these codes from the daemon:
     ///
     /// - `version_in_use` (409) as [`ClientError::InUse`], with what uses
-    ///   it: the default in `global.toml`, sites set to it in `sites.toml`,
-    ///   or the running Caddy;
+    ///   it: the default in `global.toml` while another version is
+    ///   installed, sites set to it in `sites.toml`, or the running Caddy;
+    /// - `sites_lose_php` (409) as [`ClientError::InUse`] too: it is the
+    ///   only PHP and the default, and the sites that run it, which would
+    ///   have no PHP after it, are in `sites_left_without_php`;
     /// - `install_busy` (409) while an install or another uninstall runs;
     /// - `version_not_installed` (404) when no installed version matches;
     /// - `version_ambiguous` (409) when more than one does;
