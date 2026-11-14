@@ -117,8 +117,9 @@ fn supported(op: &Op, os: Os) -> bool {
 }
 
 /// One op meant for this OS. Every handler gets `system` for each file and
-/// command, and returns the result of its op. Trust is written for macOS
-/// first (task M4-09); Linux gets its own handler with task M4-18.
+/// command, and returns the result of its op. Trust has a handler per OS:
+/// `trust` on macOS (task M4-09), `trust_windows` on Windows (task M4-19e);
+/// Linux gets its own with task M4-18.
 fn handle(op: &Op, os: Os, system: &impl System) -> OpResult {
     match op {
         Op::ResolverInstall { port } => resolver::install(*port, system),

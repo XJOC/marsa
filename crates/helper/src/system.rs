@@ -908,7 +908,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_system_tool_runs_with_the_helpers_environment() {
-        let nothing = "0".repeat(40);
+        // With letters: an id of digits only is an index for certutil, and
+        // `000…0` lists the store's first certificate.
+        let nothing = "deadbeef".repeat(5);
         let output = RealSystem
             .run_system_tool("certutil.exe", &["-store", "Root", &nothing])
             .unwrap();
