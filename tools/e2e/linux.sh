@@ -175,10 +175,13 @@ run marsa-helper version
 . /etc/os-release
 SYSTEMD=$(systemctl --version | awk 'NR==1 {print $2}')
 echo "system: $PRETTY_NAME, systemd $SYSTEMD, kernel $(uname -r)"
-# systemd 250 and later: the helper makes marsa0 (task M4-18h). Before 250
-# it refuses with resolved_systemd_too_old until task M4-18k, and curl
-# reaches the site with --resolve; ports and trust are tested all the same.
-if [ "$SYSTEMD" -ge 250 ]; then LINK=yes; else LINK=no; fi
+# systemd 250 and later, or before 250 without systemd-networkd: the helper
+# makes marsa0 (tasks M4-18h, M4-18k). Before 250 with networkd (the
+# runners) it answers resolved_use_hosts, and .test names go into
+# /etc/hosts instead (hosts_sync); until setup does that (task M4-18k2),
+# curl reaches the site with --resolve. Ports and trust are tested all the
+# same.
+if [ "$SYSTEMD" -ge 250 ] || ! systemctl is-active --quiet systemd-networkd; then LINK=yes; else LINK=no; fi
 echo "marsa0 on this system: $LINK"
 NAME=()
 RESOLVED_DONE=done
@@ -238,9 +241,21 @@ if [ "$LINK" = yes ]; then
   run resolvectl query "$SITE"
   run getent hosts "$SITE"
 else
-  [ "$(codes)" = resolved_systemd_too_old ] || fail "expected resolved_systemd_too_old, got: $(codes)"
+  [ "$(codes)" = resolved_use_hosts ] || fail "expected resolved_use_hosts, got: $(codes)"
   [ ! -e "$UNIT" ] || fail "a unit was written on systemd $SYSTEMD"
   ! ip link show marsa0 >/dev/null 2>&1 || fail "marsa0 was made on systemd $SYSTEMD"
+
+  step "the hosts path: Marsa's block in /etc/hosts (M4-18k)"
+  cp /etc/hosts "$HOME/hosts-before"
+  helper "[{\"op\":\"hosts_sync\",\"names\":[\"$SITE\"]}]" || fail "the helper exited with $?"
+  [ "$(statuses)" = done ] || fail "expected done, got: $(statuses)"
+  run cat /etc/hosts
+  [ "$(address_of "$SITE")" = 127.0.0.1 ] || fail "$SITE does not resolve from /etc/hosts"
+  helper "[{\"op\":\"hosts_sync\",\"names\":[\"$SITE\"]}]" || fail "the helper exited with $?"
+  [ "$(statuses)" = unchanged ] || fail "expected unchanged, got: $(statuses)"
+  helper '[{"op":"hosts_remove"}]' || fail "the helper exited with $?"
+  [ "$(statuses)" = done ] || fail "expected done, got: $(statuses)"
+  cmp -s /etc/hosts "$HOME/hosts-before" || fail "/etc/hosts is not as it was"
 fi
 
 if [ "$LINK" = yes ]; then
@@ -394,7 +409,8 @@ if [ "$LINK" = yes ]; then
   [ "$code" = 0 ] || fail "marsa setup exited with $code"
   grep -q "Send .test names to Marsa: done" <<<"$out" || fail "the .test step is not done"
 else
-  # resolved_systemd_too_old: a failed step, so exit 1 (M4-18h).
+  # resolved_use_hosts: a failed step, so exit 1, until setup writes the
+  # hosts lines itself (task M4-18k2).
   [ "$code" = 1 ] || fail "marsa setup exited with $code, not 1"
   grep -q "Send .test names to Marsa: failed" <<<"$out" || fail "no failed .test step on systemd $SYSTEMD"
 fi
