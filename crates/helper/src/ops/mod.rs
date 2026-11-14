@@ -5,15 +5,18 @@
 //!
 //! Each pair of macOS ops has its own file, so their tasks do not touch the
 //! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). On
-//! Linux, `ports` (M4-18b) is written; the other Linux ops and the Windows
-//! ops fail with `op_not_implemented` until their tasks.
+//! Linux, `ports` (M4-18b) is written; on Windows, `hosts` (M4-19d). The
+//! other Linux ops fail with `op_not_implemented` until their tasks.
 
+mod hosts;
 mod marked;
 pub mod pf;
 mod ports;
 mod program;
 mod resolver;
 mod trust;
+
+use std::path::Path;
 
 use crate::os::Os;
 use crate::request::{Op, ValidRequest};
@@ -36,10 +39,18 @@ pub fn not_implemented(op: &'static str) -> OpResult {
     OpResult::failed(op, code::OP_NOT_IMPLEMENTED, message)
 }
 
+/// The folder of Marsa's root-owned files on macOS: the `pf` rules and
+/// token, and the CA copy of the admin trust (ADR 0011). `pf_install` and
+/// `trust_install` make it through `write_atomic`.
+const MACOS_DIR: &str = "/Library/Application Support/Marsa";
+
 fn run(op: &Op, os: Os, system: &impl System, results: &mut Vec<OpResult>) {
     if let Op::UninstallAll {} = op {
         for remove in removals(os) {
             run(&remove, os, system, results);
+        }
+        if os == Os::Macos {
+            remove_folder_if_empty(system);
         }
     } else if supported(op, os) {
         results.push(handle(op, os, system));
@@ -63,6 +74,17 @@ fn removals(os: Os) -> Vec<Op> {
         ],
         Os::Windows => vec![Op::HostsRemove {}],
     }
+}
+
+/// After the removals of `uninstall_all` on macOS: [`MACOS_DIR`] goes if
+/// they left it empty, like `rmdir`, and never with what is inside. A folder
+/// that still holds something (a removal failed and kept its file, or
+/// another file is there), or that is gone already, stays as it is. That is
+/// not a failure, and it adds no result: the results stay one per removal,
+/// and a later `uninstall_all` tries again.
+fn remove_folder_if_empty(system: &impl System) {
+    // Every error is fine here, see above; stderr must stay empty (`main`).
+    let _ = system.remove_empty_dir(Path::new(MACOS_DIR));
 }
 
 /// Windows has no `trust_*` for now: its helper service (task M4-19) accepts
@@ -100,26 +122,27 @@ fn handle(op: &Op, os: Os, system: &impl System) -> OpResult {
         Op::TrustInstall { pem } if os == Os::Macos => trust::install(pem, system),
         Op::TrustRemove {} if os == Os::Macos => trust::remove(system),
         Op::TrustInstall { .. } | Op::TrustRemove {} => not_implemented(op.name()),
+        Op::HostsSync { names } => hosts::sync(names, system),
+        Op::HostsRemove {} => hosts::remove(system),
         // `run` expands `uninstall_all` into its removals, so it never gets
-        // here. Linux and Windows come with their own tasks.
-        Op::UninstallAll {}
-        | Op::ResolvedInstall { .. }
-        | Op::ResolvedRemove {}
-        | Op::HostsSync { .. }
-        | Op::HostsRemove {} => not_implemented(op.name()),
+        // here. Linux comes with its own tasks.
+        Op::UninstallAll {} | Op::ResolvedInstall { .. } | Op::ResolvedRemove {} => {
+            not_implemented(op.name())
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
+    use std::path::PathBuf;
 
     use serde_json::{Value, json};
 
     use super::*;
     use crate::request::Request;
     use crate::response::Outcome;
-    use crate::system::FakeSystem;
+    use crate::system::{FakeSystem, RunOutput};
 
     /// The op name and the failure code of each result, or `done` or
     /// `unchanged`. The request goes through `from_arg`, like a real one.
@@ -202,6 +225,109 @@ mod tests {
                 assert_eq!(is_supported, own.contains(&prefix), "{name} on {os:?}");
             }
         }
+    }
+
+    /// The files `pf_install` and `trust_install` leave in [`MACOS_DIR`],
+    /// and a system on which every command succeeds.
+    fn installed() -> FakeSystem {
+        const TEST_CA: &str = include_str!("../../../../fixtures/helper/test-ca.pem");
+        let mut fake = FakeSystem::default();
+        let dir = Path::new(MACOS_DIR);
+        let files = [
+            ("pf-redirect.rules", "rdr pass on lo0\n"),
+            ("pf-token", "7393882174112\n"),
+            ("ca-root.pem", TEST_CA),
+        ];
+        for (name, text) in files {
+            fake.write_atomic(&dir.join(name), text.as_bytes(), 0o644)
+                .unwrap();
+        }
+        let exit_0 = RunOutput {
+            code: Some(0),
+            ..RunOutput::default()
+        };
+        for program in ["/sbin/pfctl", "/bin/launchctl", "/usr/bin/security"] {
+            fake.defaults.insert(program, exit_0.clone());
+        }
+        fake
+    }
+
+    /// `uninstall_all` on `os`, with its op names and results.
+    fn uninstall_all(fake: &FakeSystem, os: Os) -> Vec<(&'static str, &'static str)> {
+        let raw = json!({ "version": 1, "ops": [{ "op": "uninstall_all" }] }).to_string();
+        let request = Request::from_arg(OsStr::new(&raw)).unwrap();
+        let code = |r: &OpResult| match r.outcome {
+            Outcome::Failed { code, .. } => code,
+            Outcome::Done => "done",
+            Outcome::Unchanged => "unchanged",
+        };
+        let results = apply(&request, os, fake);
+        results.iter().map(|r| (r.op, code(r))).collect()
+    }
+
+    #[test]
+    fn uninstall_all_on_macos_removes_the_folder_it_emptied() {
+        let fake = installed();
+        assert!(fake.dirs.borrow().contains(Path::new(MACOS_DIR)));
+        let results = uninstall_all(&fake, Os::Macos);
+        assert_eq!(
+            results,
+            [
+                ("pf_remove", "done"),
+                ("resolver_remove", "unchanged"),
+                ("trust_remove", "done"),
+            ]
+        );
+        assert!(fake.files.borrow().is_empty(), "{:?}", fake.files.borrow());
+        assert!(!fake.dirs.borrow().contains(Path::new(MACOS_DIR)));
+
+        // Again: the folder is gone, which is fine, and adds no result.
+        let again = uninstall_all(&fake, Os::Macos);
+        let names: Vec<_> = again.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["pf_remove", "resolver_remove", "trust_remove"]);
+        assert!(
+            again.iter().all(|(_, code)| *code == "unchanged"),
+            "{again:?}"
+        );
+    }
+
+    #[test]
+    fn a_folder_that_still_holds_a_file_stays_with_the_file() {
+        // A removal that failed keeps its file, and the folder with it.
+        let mut fake = installed();
+        let rules = Path::new(MACOS_DIR).join("pf-redirect.rules");
+        fake.fail_removes.insert(rules.clone());
+        let results = uninstall_all(&fake, Os::Macos);
+        assert_eq!(results[0], ("pf_remove", "pf_delete"));
+        assert_eq!(results.len(), 3, "{results:?}");
+        assert!(fake.exists(&rules));
+        assert!(fake.dirs.borrow().contains(Path::new(MACOS_DIR)));
+
+        // A file that is not Marsa's stays too: nothing is deleted by folder.
+        let fake = installed();
+        let other = Path::new(MACOS_DIR).join("notes.txt");
+        fake.write_atomic(&other, b"mine", 0o644).unwrap();
+        let results = uninstall_all(&fake, Os::Macos);
+        assert_eq!(results.len(), 3, "{results:?}");
+        assert_eq!(fake.read(&other, 16).unwrap(), b"mine");
+        assert!(fake.dirs.borrow().contains(Path::new(MACOS_DIR)));
+    }
+
+    #[test]
+    fn only_macos_touches_the_macos_folder() {
+        for os in [Os::Linux, Os::Windows] {
+            let fake = FakeSystem::default();
+            fake.dirs.borrow_mut().insert(PathBuf::from(MACOS_DIR));
+            uninstall_all(&fake, os);
+            assert!(fake.dirs.borrow().contains(Path::new(MACOS_DIR)), "{os:?}");
+        }
+        // Nor does a single removal on macOS: only `uninstall_all` tidies.
+        let fake = FakeSystem::default();
+        fake.dirs.borrow_mut().insert(PathBuf::from(MACOS_DIR));
+        let raw = json!({ "version": 1, "ops": [{ "op": "pf_remove" }] }).to_string();
+        let request = Request::from_arg(OsStr::new(&raw)).unwrap();
+        apply(&request, Os::Macos, &fake);
+        assert!(fake.dirs.borrow().contains(Path::new(MACOS_DIR)));
     }
 
     #[test]

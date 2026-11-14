@@ -13,6 +13,9 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use marsa_core::php::{PhpFiles, php_ini};
+use marsa_core::recipes::Platform;
+use semver::Version;
 use tempfile::TempDir;
 
 /// A fake program: prints its version and arguments, one per line, and exits
@@ -107,6 +110,8 @@ impl World {
             .env("HOME", self.home.path())
             .env_remove("XDG_DATA_HOME")
             .env_remove("MARSA_SHIM_DEPTH")
+            // The shim sets it for PHP; a developer's own must not leak in.
+            .env_remove("PHPRC")
             // The shim must not need `PATH`; the fake programs use only shell
             // built-ins.
             .env("PATH", self.home.path().join("no-such-dir"))
@@ -268,4 +273,64 @@ fn a_missing_npm_script_exits_127() {
         err.contains("npm-cli.js is missing [shim_program_missing]"),
         "{err}"
     );
+}
+
+/// A fake `php -m`: it lists Xdebug when the `php.ini` that `PHPRC` names has
+/// a `zend_extension` line whose file exists, as PHP does. Shell built-ins
+/// only.
+const FAKE_PHP_M: &str = r#"#!/bin/sh
+echo "[Zend Modules]"
+[ -f "$PHPRC" ] || exit 0
+while IFS= read -r line; do
+  case "$line" in
+    'zend_extension = "'*'"')
+      file=${line#*\"}
+      file=${file%\"}
+      [ -f "$file" ] && echo "Xdebug"
+      ;;
+  esac
+done < "$PHPRC"
+exit 0
+"#;
+
+/// Task M5-11. The daemon writes `php/<minor>/php.ini` with
+/// `marsa_core::php::php_ini`; the shim points `PHPRC` at that file. So this
+/// test writes the file the same way, and runs `php -m` through the shim.
+#[test]
+fn php_m_lists_xdebug_once_the_php_ini_of_its_line_loads_it() {
+    let world = World::new();
+    // The shim reads `global.toml` too: the new key must not stop it.
+    world.write_config("global.toml", "[php]\ndefault = \"8.4\"\nxdebug = true\n");
+    let php = world.bin("php", "8.4.3").join("php");
+    fs::write(&php, FAKE_PHP_M).expect("write the fake php");
+
+    let version = Version::parse("8.4.3").expect("a valid version");
+    let mut files = PhpFiles::new(&world.data(), &version);
+    fs::create_dir_all(&files.ext_dir).expect("create ext");
+    fs::write(files.xdebug_so(), "").expect("write xdebug.so");
+    let platform = Platform::current().expect("a system Marsa has PHP builds for");
+    let write_ini = |files: &PhpFiles| {
+        let dir = files.ini_file.parent().expect("php.ini has a folder");
+        fs::create_dir_all(dir).expect("create the config folder");
+        let text = php_ini(platform, files).expect("render php.ini");
+        fs::write(&files.ini_file, text).expect("write php.ini");
+    };
+    let php_m = || {
+        let output = world.run("php", &["-m"]);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        stdout(&output)
+    };
+
+    // No `php.ini` yet: PHP runs without Xdebug.
+    assert_eq!(php_m(), "[Zend Modules]\n");
+
+    // `marsa xdebug on`: the file loads `ext/xdebug.so` of this PHP.
+    files.xdebug = Some(files.xdebug_so());
+    write_ini(&files);
+    assert_eq!(php_m(), "[Zend Modules]\nXdebug\n");
+
+    // `marsa xdebug off`: the same file without Xdebug.
+    files.xdebug = None;
+    write_ini(&files);
+    assert_eq!(php_m(), "[Zend Modules]\n");
 }

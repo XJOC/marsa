@@ -55,8 +55,7 @@ const READY_LIMIT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(100);
 /// For each admin API call, `/stop` included.
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(1);
-/// For `POST /load`: Caddy answers once the new config runs, and the first
-/// config with a secure site also makes the CA.
+/// For `POST /load`: Caddy answers once the new config runs.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How Caddy and each php-fpm pool restart after a failure: up to 3 times,
@@ -176,6 +175,9 @@ pub struct CaddyManager {
     pub processes: Arc<dyn Processes>,
     /// How long each step of an orphan's stop waits.
     pub ladder: Ladder,
+    /// The program of the last start, so an uninstall never deletes the
+    /// Caddy that runs (task M5-07). Use [`CaddyManager::running_program`].
+    pub started: Mutex<Option<PathBuf>>,
     /// The status and recent lines. Kept across runs, so `seq` never goes
     /// back and the lines of a failed run stay readable.
     runtime: Arc<Mutex<ServiceRuntime>>,
@@ -274,6 +276,7 @@ impl CaddyManager {
             ready_limit: READY_LIMIT,
             processes: Arc::new(SystemProcesses),
             ladder: Ladder::default(),
+            started: Mutex::default(),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(CADDY_ID))),
             busy: AtomicBool::new(false),
             wanted: Mutex::default(),
@@ -343,6 +346,13 @@ impl CaddyManager {
         Ok(config)
     }
 
+    /// Whether there is a Caddy to run: the check `start` makes first, here
+    /// without marking the status failed. Setup asks it before it starts
+    /// Caddy to make the CA (task M5-15).
+    pub fn installed(&self) -> bool {
+        self.spec_to_run().is_ok_and(|spec| spec.program.is_file())
+    }
+
     /// The spec to run now: the fake of a test, else [`caddy_spec`].
     fn spec_to_run(&self) -> Result<ServiceSpec, CaddyError> {
         match &self.spec {
@@ -353,6 +363,14 @@ impl CaddyManager {
 
     pub fn status(&self) -> ServiceStatus {
         lock(&self.runtime).status.clone()
+    }
+
+    /// The program Caddy runs from now, or `None` while it does not run.
+    pub fn running_program(&self, daemon: &Daemon) -> Option<PathBuf> {
+        if !daemon.proc_alive(CADDY_ID) {
+            return None;
+        }
+        lock(&self.started).clone()
     }
 
     /// The last lines, oldest first.
@@ -459,6 +477,7 @@ impl CaddyManager {
         };
         let logs_dir = daemon.data_dir.join("logs");
         let runtime = Arc::clone(&self.runtime);
+        *lock(&self.started) = Some(spec.program.clone());
         let handle = Supervisor::spawn_on(spec, daemon.events.clone(), &logs_dir, runtime)
             .map_err(|err| {
                 self.fail(err.code(), &daemon.events);

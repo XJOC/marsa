@@ -173,6 +173,9 @@ pub struct ApiError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorBody {
     pub error: ApiError,
+    /// What uses a version, with the code `version_in_use` only (task M5-07).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_use: Option<VersionInUse>,
 }
 
 impl ErrorBody {
@@ -182,6 +185,7 @@ impl ErrorBody {
                 code: code.into(),
                 message: message.into(),
             },
+            in_use: None,
         }
     }
 }
@@ -275,6 +279,33 @@ pub struct DefaultVersion {
     /// Full semver text (`8.4.23`). A newer `8.4.x` installed later is
     /// picked then.
     pub version: String,
+}
+
+/// The answer to `DELETE /v1/runtimes/{tool}/{version}` (task M5-07): the
+/// version whose folder is gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Uninstalled {
+    pub runtime: Runtime,
+    /// Full semver text (`8.3.12`).
+    pub version: String,
+}
+
+/// Why `DELETE /v1/runtimes/{tool}/{version}` refused a version: the facts
+/// of its 409 `version_in_use`. At least one of the last three is set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionInUse {
+    /// Full semver text (`8.3.12`).
+    pub version: String,
+    /// The default in `global.toml` (`8.3`), when it picks this version now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// The sites whose own setting in `sites.toml` picks this version now, by
+    /// name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sites: Vec<String>,
+    /// Caddy runs from this version now.
+    #[serde(default)]
+    pub caddy: bool,
 }
 
 /// The 202 answer to `POST /v1/runtimes/{tool}/install`. The install's events
@@ -378,7 +409,8 @@ pub struct SkippedFolder {
 }
 
 /// The body of `POST /v1/sites/park`: every sub-folder of `path` becomes a
-/// site.
+/// site. Also the body of `DELETE /v1/sites/park` (task M5-09): `path` is no
+/// longer parked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParkRequest {
     /// An absolute folder.
@@ -469,7 +501,8 @@ pub struct SetupSkip {
     /// The helper operation, for example `pf_install`.
     pub op: String,
     /// Why: `redirect_port_held` and `ports_not_checked` for `pf_install`,
-    /// `ca_not_ready` and `ca_unreadable` for `trust_install`.
+    /// `ca_not_ready`, `ca_unreadable`, and `caddy_not_installed` for
+    /// `trust_install`.
     pub code: String,
 }
 
@@ -557,6 +590,144 @@ mod autostart_tests {
             json!({ "enabled": 1 }),
         ] {
             assert!(serde_json::from_value::<AutostartRequest>(bad).is_err());
+        }
+    }
+}
+
+/// The answer to `POST /v1/uninstall` (task M5-13): what `marsa uninstall
+/// --all` removed from the system.
+///
+/// One admin prompt runs the helper's `uninstall_all`. Only if the helper
+/// ran does the daemon go on: it takes away the current user's trust in
+/// Marsa's certificate authority (macOS, ADR 0015), deletes the login file
+/// (task M5-03), answers, and then stops, with Caddy, the PHP pools, and
+/// the DNS server. The data folder stays: the CLI asks about it on its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UninstallReport {
+    /// One result per step, in order: the helper's removals (`pf_remove`,
+    /// `resolver_remove`, `trust_remove` on macOS), then the daemon's own
+    /// `user_trust_remove` and `autostart_remove`. Empty when `error` says
+    /// why nothing ran.
+    #[serde(default)]
+    pub results: Vec<OpResult>,
+    /// Why the helper did not run, or why its answer cannot be used:
+    /// `uninstall_cancelled`, `uninstall_not_authorized`,
+    /// `uninstall_timed_out`, `uninstall_interrupted`,
+    /// `uninstall_helper_missing`, `uninstall_helper_unsafe`,
+    /// `uninstall_helper_failed`, or `uninstall_helper_rejected`. Nothing after the helper ran then, and
+    /// the daemon keeps running. `None` if the helper answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ApiError>,
+    /// The daemon stops right after this answer: `true` exactly when `error`
+    /// is `None`.
+    #[serde(default)]
+    pub stopping: bool,
+}
+
+/// The JSON of [`UninstallReport`], next to it, like the autostart tests.
+#[cfg(test)]
+mod uninstall_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_uninstall_report_and_a_cancelled_one() {
+        let report = UninstallReport {
+            results: vec![OpResult {
+                op: "user_trust_remove".into(),
+                status: OpStatus::Unchanged,
+                code: None,
+                message: None,
+            }],
+            error: None,
+            stopping: true,
+        };
+        let value = json!({
+            "results": [{ "op": "user_trust_remove", "status": "unchanged" }],
+            "stopping": true,
+        });
+        assert_eq!(serde_json::to_value(&report).unwrap(), value);
+        assert_eq!(
+            serde_json::from_value::<UninstallReport>(value).unwrap(),
+            report
+        );
+
+        let cancelled = UninstallReport {
+            error: Some(ApiError {
+                code: "uninstall_cancelled".into(),
+                message: "the admin prompt was cancelled".into(),
+            }),
+            ..UninstallReport::default()
+        };
+        let value = json!({
+            "results": [],
+            "error": { "code": "uninstall_cancelled", "message": "the admin prompt was cancelled" },
+            "stopping": false,
+        });
+        assert_eq!(serde_json::to_value(&cancelled).unwrap(), value);
+        // Every field may be left out.
+        assert_eq!(
+            serde_json::from_value::<UninstallReport>(json!({})).unwrap(),
+            UninstallReport::default()
+        );
+    }
+}
+
+/// `GET /v1/php/xdebug`, and the answer to `PUT /v1/php/xdebug` (task M5-11):
+/// whether the `php.ini` files Marsa writes load Xdebug, and for which PHP.
+///
+/// Each PHP line (`8.4`) has one `php.ini`, so each list has at most one
+/// version per line: the one its php-fpm runs, or the newest installed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XdebugState {
+    /// `[php] xdebug` in `global.toml`.
+    pub enabled: bool,
+    /// The PHP versions that load Xdebug, oldest first, in sites and in the
+    /// terminal. Empty while `enabled` is `false`. Full semver text
+    /// (`8.4.23`).
+    #[serde(default)]
+    pub loaded: Vec<String>,
+    /// The PHP versions that have no `ext/xdebug.so` (the official Windows
+    /// build, or an older install), oldest first. They run without Xdebug
+    /// also while `enabled` is `true`.
+    #[serde(default)]
+    pub missing: Vec<String>,
+}
+
+/// The body of `PUT /v1/php/xdebug`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XdebugRequest {
+    /// `true` loads Xdebug in every PHP that has it, `false` in none.
+    pub enabled: bool,
+}
+
+/// The JSON of the Xdebug types. A module of its own, like `autostart_tests`.
+#[cfg(test)]
+mod xdebug_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn xdebug_state_and_request() {
+        let state = XdebugState {
+            enabled: true,
+            loaded: vec!["8.4.23".into()],
+            missing: vec!["8.3.1".into()],
+        };
+        let text = json!({ "enabled": true, "loaded": ["8.4.23"], "missing": ["8.3.1"] });
+        assert_eq!(serde_json::to_value(&state).unwrap(), text);
+        assert_eq!(serde_json::from_value::<XdebugState>(text).unwrap(), state);
+        // The lists may be left out.
+        let off: XdebugState = serde_json::from_value(json!({ "enabled": false })).unwrap();
+        assert_eq!(off, XdebugState::default());
+
+        let request = XdebugRequest { enabled: true };
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({ "enabled": true })
+        );
+        for bad in [json!({}), json!({ "enabled": "on" })] {
+            assert!(serde_json::from_value::<XdebugRequest>(bad).is_err());
         }
     }
 }

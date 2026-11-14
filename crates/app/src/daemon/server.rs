@@ -12,9 +12,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use axum::Router;
+use marsa_core::installer::uninstall::clean_retired;
 use marsa_core::platform::daemon_file::{self, DaemonFile, Token};
 use marsa_core::platform::low_ports;
 use marsa_core::platform::signals::shutdown_signal;
+use marsa_core::runtimes::RuntimesDir;
 use marsa_core::types::Event;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -78,6 +80,12 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     // client reads its stale port and token.
     if let Err(err) = daemon_file::remove_daemon_file(&run_dir) {
         tracing::warn!(code = err.code(), error = %err, "cannot delete an old daemon.json");
+    }
+    // What an uninstall that stopped half way left (task M5-07). Before the
+    // API serves, so no new uninstall runs meanwhile.
+    let runtimes = RuntimesDir::in_dir(&data_dir);
+    if let Err(err) = tokio::task::spawn_blocking(move || clean_retired(&runtimes)).await {
+        tracing::warn!(error = %err, "the cleanup of unfinished uninstalls failed");
     }
     // Before `daemon.json` exists, so a client that found the daemon can
     // already stop it with a signal.
