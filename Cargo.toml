@@ -51,8 +51,14 @@ serde_json = { version = "1", default-features = false, features = ["std"] }
 sha2 = "0.11"
 # No `xattr`: the installer does not keep extended attributes (task M2-03).
 tar = { version = "0.4", default-features = false }
+# The menu-bar icon `marsa-tray` (task M5-04): `tao` runs the event loop on
+# the main thread, `tray-icon` draws the icon and its menu (muda). Without
+# `dbus`: tao uses it for the desktop portal of a window, and the tray opens
+# none; leaving it out saves libdbus at build and run time on Linux.
+tao = { version = "0.37", default-features = false, features = ["rwh_06", "x11"] }
 tempfile = "3"
 thiserror = "2"
+tray-icon = "0.26"
 # No `preserve_order` or other extras: the shim depends on the core, so its size
 # matters. `serde` and `display` read and write the config files with derive;
 # the owner accepted the size cost (task M1-05).

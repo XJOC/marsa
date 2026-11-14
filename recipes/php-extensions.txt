@@ -4,7 +4,8 @@
 #   - `cargo xtask manifest` (xtask/src/manifest/php_smoke.rs).
 #
 # One extension per line: <kind> <spc name> <module name>
-#   kind    builtin  always built in; spc has no name for it, so "-"
+#   kind    builtin  always built in; spc has no name for it, so "-".
+#                    builtin@8.5: always built in from PHP 8.5 on
 #           static   built into php and php-fpm by `spc build`
 #           shared   built as a .so in the same spc run, shipped as
 #                    ext/<spc name>.so, loaded with zend_extension=
@@ -23,6 +24,9 @@ builtin  -          random
 builtin  -          Reflection
 builtin  -          SPL
 builtin  -          standard
+# Always on from PHP 8.5: the HTML5 parser library and the URI extension.
+builtin@8.5  -      lexbor
+builtin@8.5  -      uri
 
 # Laravel requires these (laravel/framework composer.json).
 static   ctype      ctype

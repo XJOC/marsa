@@ -56,6 +56,13 @@ jobs:
         with:
           tool: cargo-deny
 
+      # The menu-bar icon (marsa-tray, task M5-04): tao and tray-icon build
+      # against GTK 3. The AppIndicator library is loaded only when the icon
+      # runs, so the build and the tests do not need it.
+      - name: Install GTK 3 for the menu-bar icon
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
+
       - name: cargo fmt
         run: cargo fmt --all --check
 

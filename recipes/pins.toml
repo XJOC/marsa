@@ -6,7 +6,7 @@
 # Raise by one for every publish. `build` refuses a serial that is not greater
 # than the published one. The owner signs with the trusted comment
 # "marsa runtimes manifest serial=<serial>".
-serial = 1
+serial = 2
 
 # static-php-cli line (ADR 0010): `php -v` must say "Built by static-php-cli 2.8.x".
 # The exact spc release (2.8.5), zig (0.17.1) and Xdebug (3.5.3) of our PHP
@@ -15,12 +15,13 @@ serial = 1
 spc_line = "2.8"
 
 [php]
-# The newest 8.4 on 2026-11-04. macOS and Linux: our own build (ADR 0012).
-versions = ["8.4.27"]
+# The newest 8.3, 8.4, and 8.5 (8.4.27 on 2026-11-04; 8.3.36 and 8.5.12 on
+# 2026-11-11). macOS and Linux: our own build (ADR 0012).
+versions = ["8.3.36", "8.4.27", "8.5.12"]
 
 [node]
-# The newest 22.x LTS on 2026-11-04.
-versions = ["22.23.4"]
+# The newest 22.x LTS (Jod) on 2026-11-04 and 24.x LTS (Krypton) on 2026-11-11.
+versions = ["22.23.4", "24.22.2"]
 
 [composer]
 # The newest 2.x on 2026-11-04.
@@ -77,4 +78,85 @@ artifact = "zip"
 urls = [
   "https://windows.php.net/downloads/releases/php-8.4.27-1-nts-Win32-vs17-x64.zip",
   "https://windows.php.net/downloads/releases/archives/php-8.4.27-1-nts-Win32-vs17-x64.zip",
+]
+
+# PHP 8.3.36 for macOS and Linux: the GitHub Release php-8.3.36-r1 (php-build.yml).
+[[override]]
+runtime = "php"
+version = "8.3.36"
+platform = "darwin-arm64"
+artifact = "php"
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.3.36-r1/php-8.3.36-darwin-arm64.tar.gz"]
+
+[[override]]
+runtime = "php"
+version = "8.3.36"
+platform = "darwin-x64"
+artifact = "php"
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.3.36-r1/php-8.3.36-darwin-x64.tar.gz"]
+
+[[override]]
+runtime = "php"
+version = "8.3.36"
+platform = "linux-x64"
+artifact = "php"
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.3.36-r1/php-8.3.36-linux-x64.tar.gz"]
+
+[[override]]
+runtime = "php"
+version = "8.3.36"
+platform = "linux-arm64"
+artifact = "php"
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.3.36-r1/php-8.3.36-linux-arm64.tar.gz"]
+
+
+# PHP 8.5.12 for macOS and Linux: the GitHub Release php-8.5.12-r1 (php-build.yml).
+[[override]]
+runtime = "php"
+version = "8.5.12"
+platform = "darwin-arm64"
+artifact = "php"
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.5.12-r1/php-8.5.12-darwin-arm64.tar.gz"]
+
+[[override]]
+runtime = "php"
+version = "8.5.12"
+platform = "darwin-x64"
+artifact = "php"
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.5.12-r1/php-8.5.12-darwin-x64.tar.gz"]
+
+[[override]]
+runtime = "php"
+version = "8.5.12"
+platform = "linux-x64"
+artifact = "php"
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.5.12-r1/php-8.5.12-linux-x64.tar.gz"]
+
+[[override]]
+runtime = "php"
+version = "8.5.12"
+platform = "linux-arm64"
+artifact = "php"
+urls = ["https://github.com/XJOC/marsa/releases/download/php-8.5.12-r1/php-8.5.12-linux-arm64.tar.gz"]
+
+# Windows: windows.php.net names this build "8.3.36-1" (vs16), so the recipe template is 404.
+[[override]]
+runtime = "php"
+version = "8.3.36"
+platform = "windows-x64"
+artifact = "zip"
+urls = [
+  "https://windows.php.net/downloads/releases/php-8.3.36-1-nts-Win32-vs16-x64.zip",
+  "https://windows.php.net/downloads/releases/archives/php-8.3.36-1-nts-Win32-vs16-x64.zip",
+]
+
+# Windows: windows.php.net names this build "8.5.12-1" (vs17), so the recipe template is 404.
+[[override]]
+runtime = "php"
+version = "8.5.12"
+platform = "windows-x64"
+artifact = "zip"
+urls = [
+  "https://windows.php.net/downloads/releases/php-8.5.12-1-nts-Win32-vs17-x64.zip",
+  "https://windows.php.net/downloads/releases/archives/php-8.5.12-1-nts-Win32-vs17-x64.zip",
 ]
