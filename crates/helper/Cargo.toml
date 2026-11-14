@@ -13,11 +13,15 @@ serde.workspace = true
 serde_json.workspace = true
 # The SHA-256 of the CA certificate, to remove it by hash (task M4-09).
 sha2.workspace = true
+# The thumbprint `certutil` matches, on Windows (task M4-19e). The op is built
+# and tested on every system, so it is not a Windows-only dependency.
+sha1.workspace = true
 thiserror.workspace = true
 
-# Win32 calls (ADR 0018): the system folder for the hosts file (task M4-19d).
+# Win32 calls (ADR 0018): the system folder for the hosts file (task M4-19d),
+# and `Program Files` (task M4-19e).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_SystemInformation"] }
+windows-sys = { workspace = true, features = ["Win32_System_Com", "Win32_System_SystemInformation", "Win32_UI_Shell"] }
 
 [dev-dependencies]
 # Snapshots of the files the helper writes: pf rules, the launchd plist, the
