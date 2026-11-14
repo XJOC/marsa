@@ -1077,9 +1077,16 @@ impl Model {
         match removal {
             Removal::Uninstall { runtime, version } => {
                 // The bridge reads the list again; until it comes, the
-                // version is gone from the table already.
+                // version is gone from the table already. The last version
+                // took the default that picked it, as in the daemon (task
+                // M5-19).
                 if let Some(row) = self.runtimes.iter_mut().find(|r| r.runtime == runtime) {
+                    let picks = |text: &str| resolver::best_match(text, &row.installed);
+                    let picked = row.default.as_deref().and_then(|t| picks(t).ok().flatten());
                     row.installed.retain(|installed| *installed != version);
+                    if row.installed.is_empty() && picked.as_ref() == Some(&version) {
+                        row.default = None;
+                    }
                 }
                 self.uninstall_notice = Some(UninstallNotice::Done { runtime, version });
             }
@@ -2541,6 +2548,24 @@ mod tests {
     }
 
     #[test]
+    fn the_last_version_takes_its_default_with_it() {
+        let mut model = connected();
+        let php: &[&str] = &["8.4.23", "8.3.27"];
+        let node = (&["22.11.0"][..], Some("22"));
+        model.update(Update::Runtimes(runtime_list((php, Some("8.4")), node)));
+        let default = |model: &Model, runtime| model.row(runtime).unwrap().default.clone();
+        for (runtime, version, want) in [
+            (Runtime::Node, "22.11.0", None),
+            (Runtime::Php, "8.3.27", Some("8.4")),
+            (Runtime::Php, "8.4.23", None),
+        ] {
+            let sent = send(&mut model, uninstall(runtime, version));
+            model.update(Update::Removed(sent));
+            assert_eq!(default(&model, runtime).as_deref(), want, "{version}");
+        }
+    }
+
+    #[test]
     fn a_version_in_use_says_what_uses_it() {
         let mut model = with_php(Vec::new());
         let sent = send(&mut model, uninstall(Runtime::Php, "8.4.23"));
@@ -2548,7 +2573,7 @@ mod tests {
             version: "8.4.23".into(),
             default: Some("8.4".into()),
             sites: vec!["shop".into()],
-            caddy: false,
+            ..VersionInUse::default()
         };
         model.update(Update::NotRemoved {
             removal: sent,

@@ -622,15 +622,23 @@ mod tests {
             LocalFree(descriptor);
             sddl
         };
-        assert!(
-            sddl.contains(&format!("(A;;{USER_RIGHTS};;;{sid})")),
-            "{sddl}"
-        );
-        assert!(
-            sddl.contains("(A;;FA;;;SY)") || sddl.contains("(A;;GA;;;SY)"),
-            "{sddl}"
-        );
-        assert!(sddl.contains(LABEL), "{sddl}");
+        // Windows writes it back in its own words: on a CI runner
+        // `D:P(A;;FA;;;SY)(A;;0x12019b;;;LA)S:AI(ML;;NWNR;;;ME)`. A SID with
+        // a short name (`LA`, the built-in Administrator) gets that name, and
+        // the label part gets the `AI` flag. The user is checked by name in
+        // `the_pipe_carries_one_message_each_way_and_names_the_client`.
+        let (dacl, label) = sddl.split_once("S:").expect("a label part");
+        let dacl = dacl.strip_prefix("D:P").expect("a protected DACL first");
+        let aces: Vec<&str> = dacl
+            .trim_end_matches(')')
+            .trim_start_matches('(')
+            .split(")(")
+            .collect();
+        assert_eq!(aces.len(), 2, "{sddl}");
+        assert!(aces.contains(&"A;;FA;;;SY"), "{sddl}");
+        let user = aces.iter().find(|ace| **ace != "A;;FA;;;SY").unwrap();
+        assert!(user.starts_with(&format!("A;;{USER_RIGHTS};;;")), "{sddl}");
+        assert!(label.ends_with("(ML;;NWNR;;;ME)"), "{sddl}");
     }
 
     /// The SID goes into the SDDL text, so only digits, `S`, and `-` pass.
