@@ -9,12 +9,13 @@ use marsa_core::runtimes::Runtime;
 use marsa_core::sites::TLD;
 use marsa_core::types::{
     InstallFailure, OpStatus, PortHolder, ServiceAction, ServiceState, SetupReport, Site, SiteKind,
-    Source,
+    Source, VersionInUse, XdebugState,
 };
 use semver::Version;
 
 use crate::model::{
-    Autostart, Choice, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Pick,
+    Autostart, Choice, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Pick, Removal,
+    UninstallNotice,
 };
 use crate::tray::menu::Daemon;
 
@@ -66,6 +67,16 @@ pub const CANCEL: &str = "Cancel";
 /// While a folder dialog is open: the buttons wait for it.
 pub const PICKING_HINT: &str = "A folder dialog is open.";
 pub const SKIPPED_TITLE: &str = "Skipped folders";
+/// The column of the Unlink buttons, and of the Uninstall lists.
+pub const COLUMN_REMOVE: &str = "Remove";
+pub const UNLINK_BUTTON: &str = "Unlink…";
+pub const UNLINK_HINT: &str = "Stop serving this site. Its folder and files stay.";
+pub const PARKED_TITLE: &str = "Parked folders";
+pub const FORGET_BUTTON: &str = "Forget…";
+pub const FORGET_HINT: &str =
+    "Stop serving the sites in this folder. The folder and its files stay.";
+/// Over a disabled Unlink or Forget button while another removal runs.
+pub const REMOVE_BUSY_HINT: &str = "Wait for the removal that runs to end.";
 
 pub const RUNTIMES: &str = "Runtimes";
 pub const NO_RUNTIMES: &str = "No runtimes listed yet.";
@@ -88,7 +99,21 @@ pub const INSTALL_BUTTON: &str = "Install";
 pub const INSTALL_HINT: &str = "Download and install this version from Marsa's signed version \
      list. With an empty field: the newest stable version.";
 /// Over a disabled Install button.
-pub const INSTALL_BUSY_HINT: &str = "Wait for the install that runs to end.";
+pub const INSTALL_BUSY_HINT: &str = "Wait for the install or uninstall that runs to end.";
+/// Opens the list of installed versions to uninstall.
+pub const UNINSTALL_BUTTON: &str = "Uninstall…";
+pub const UNINSTALL_HINT: &str = "Choose an installed version to delete from Marsa's data folder.";
+/// Over a disabled Uninstall list.
+pub const UNINSTALL_BUSY_HINT: &str = "Wait for the install or removal that runs to end.";
+
+// Xdebug (`GET` and `PUT /v1/php/xdebug`, task M5-11).
+
+pub const XDEBUG: &str = "Xdebug";
+pub const XDEBUG_HINT: &str = "Load Xdebug in every installed PHP that has it, in sites and in \
+     the terminal. PHP runs two to four times slower while it is on.";
+/// Under the Xdebug box while it is on.
+pub const XDEBUG_SLOW: &str = "PHP runs two to four times slower while Xdebug is on. Turn it \
+     off when you are done debugging.";
 
 // The first-run panel (task M5-10).
 
@@ -531,6 +556,203 @@ pub fn parked(folder: &Path) -> String {
     format!("Parked {}.", folder.display())
 }
 
+/// Under the sites buttons once the daemon unlinked the site.
+pub fn unlinked(site: &str) -> String {
+    format!("Unlinked {site}.{TLD}. Its folder and files stay.")
+}
+
+/// Under the sites buttons once the daemon forgot the parked folder.
+pub fn forgot(folder: &Path) -> String {
+    format!(
+        "Forgot {}: its sites are no longer served. The folder and its files stay.",
+        folder.display()
+    )
+}
+
+/// Why `site` cannot be unlinked: it comes from a parked folder.
+pub fn site_is_parked(site: &str, folder: Option<&Path>) -> String {
+    match folder {
+        Some(folder) => format!(
+            "{site}.{TLD} comes from the parked folder {}, so it cannot be unlinked alone. \
+             Forget that folder to stop serving it and the folder's other sites.",
+            folder.display()
+        ),
+        None => error_text("site_is_parked"),
+    }
+}
+
+/// The button next to [`site_is_parked`]: it asks to forget the folder.
+pub fn forget_folder(folder: &Path) -> String {
+    format!("Forget {}…", folder.display())
+}
+
+/// Over the disabled Unlink button of a site from a parked folder.
+pub fn unlink_parked_hint(folder: &Path) -> String {
+    format!(
+        "This site comes from the parked folder {}. Forget that folder under {PARKED_TITLE} \
+         to stop serving its sites.",
+        folder.display()
+    )
+}
+
+/// The title of the confirmation.
+pub fn confirm_title(removal: &Removal) -> String {
+    match removal {
+        Removal::Uninstall { runtime, version } => {
+            format!("Uninstall {} {version}?", runtime_name(*runtime))
+        }
+        Removal::Unlink { site } => format!("Unlink {site}.{TLD}?"),
+        Removal::Forget { folder } => format!("Forget {}?", folder.display()),
+    }
+}
+
+/// What the confirmed removal does. `site_root`: the folder of the site to
+/// unlink; `sites`: how many sites the folder to forget gives now.
+pub fn confirm_text(removal: &Removal, site_root: Option<&Path>, sites: usize) -> String {
+    match removal {
+        Removal::Uninstall { runtime, .. } => format!(
+            "Its files are deleted from Marsa's data folder. Marsa refuses if the default, a \
+             site, or Caddy uses it. You can install {} again later.",
+            runtime_name(*runtime)
+        ),
+        Removal::Unlink { .. } => {
+            let kept = site_root.map_or_else(
+                || "Its folder and files stay.".to_owned(),
+                |root| format!("The folder {} and its files stay.", root.display()),
+            );
+            format!(
+                "Marsa stops serving this site, and its own settings (PHP version, HTTPS) are \
+                 removed. {kept}"
+            )
+        }
+        Removal::Forget { .. } => {
+            let served = match sites {
+                0 => "Marsa stops watching this folder.".to_owned(),
+                1 => "Marsa stops serving its site, and the site's own settings are removed."
+                    .to_owned(),
+                n => format!(
+                    "Marsa stops serving its {n} sites, and their own settings are removed."
+                ),
+            };
+            format!("{served} The folder and its files stay.")
+        }
+    }
+}
+
+/// The button that confirms.
+pub fn removal_button(removal: &Removal) -> &'static str {
+    match removal {
+        Removal::Uninstall { .. } => "Uninstall",
+        Removal::Unlink { .. } => "Unlink",
+        Removal::Forget { .. } => "Forget",
+    }
+}
+
+/// While the daemon removes it.
+pub fn removing(removal: &Removal) -> String {
+    match removal {
+        Removal::Uninstall { runtime, version } => {
+            format!("Uninstalling {} {version}…", runtime_name(*runtime))
+        }
+        Removal::Unlink { site } => format!("Unlinking {site}.{TLD}…"),
+        Removal::Forget { folder } => format!("Forgetting {}…", folder.display()),
+    }
+}
+
+/// The lines under the Runtimes table about the last uninstall. A refusal
+/// for `version_in_use` names each thing that uses the version, and what to
+/// do about it.
+pub fn uninstall_lines(notice: &UninstallNotice) -> Vec<ReportLine> {
+    let problem = |text: String| ReportLine {
+        text,
+        problem: true,
+    };
+    match notice {
+        UninstallNotice::Done { runtime, version } => vec![ReportLine {
+            text: format!("Uninstalled {} {version}.", runtime_name(*runtime)),
+            problem: false,
+        }],
+        UninstallNotice::Failed {
+            runtime,
+            version,
+            code,
+        } => vec![problem(format!(
+            "Cannot uninstall {} {version}. {}",
+            runtime_name(*runtime),
+            error_text(code)
+        ))],
+        UninstallNotice::InUse { runtime, in_use } => {
+            let mut lines = vec![problem(format!(
+                "{} {} is in use, so it was not uninstalled:",
+                runtime_name(*runtime),
+                in_use.version
+            ))];
+            lines.extend(in_use_reasons(*runtime, in_use).into_iter().map(problem));
+            lines
+        }
+    }
+}
+
+/// One line for each thing that uses the version, with what to do first.
+fn in_use_reasons(runtime: Runtime, in_use: &VersionInUse) -> Vec<String> {
+    let name = runtime_name(runtime);
+    let mut reasons = Vec::new();
+    if let Some(default) = &in_use.default {
+        reasons.push(format!(
+            "It is the default {name} (set to {default}). Pick another default above first."
+        ));
+    }
+    match in_use.sites.as_slice() {
+        [] => {}
+        [site] => reasons.push(format!(
+            "The site {site}.{TLD} is set to it. Pick another {name} version for it first."
+        )),
+        sites => {
+            let names: Vec<String> = sites.iter().map(|site| format!("{site}.{TLD}")).collect();
+            reasons.push(format!(
+                "The sites {} are set to it. Pick another {name} version for them first.",
+                names.join(", ")
+            ));
+        }
+    }
+    if in_use.caddy {
+        reasons.push("Caddy is running from it. Stop Caddy under Services first.".to_owned());
+    }
+    if reasons.is_empty() {
+        reasons.push(error_text("version_in_use"));
+    }
+    reasons
+}
+
+/// The lines under the Xdebug box: what it does now, and the PHP versions
+/// that run without it. `pending`: the state asked for, until the daemon
+/// answers.
+pub fn xdebug_lines(state: &XdebugState, pending: Option<bool>) -> Vec<String> {
+    let mut lines = Vec::new();
+    match pending {
+        Some(true) => lines.push("Turning Xdebug on…".to_owned()),
+        Some(false) => lines.push("Turning Xdebug off…".to_owned()),
+        None if state.enabled => {
+            lines.push(XDEBUG_SLOW.to_owned());
+            lines.push(if state.loaded.is_empty() {
+                "No installed PHP loads it.".to_owned()
+            } else {
+                format!("Loaded in PHP {}.", state.loaded.join(", "))
+            });
+        }
+        None => {}
+    }
+    match state.missing.as_slice() {
+        [] => {}
+        [version] => lines.push(format!("PHP {version} has no Xdebug and runs without it.")),
+        versions => lines.push(format!(
+            "PHP {} have no Xdebug and run without it.",
+            versions.join(", ")
+        )),
+    }
+    lines
+}
+
 /// Why a folder did not become a site, by its `SkippedFolder::code`. Shorter
 /// than [`error_text`], which is for an action that failed.
 pub fn skip_reason(code: &str) -> String {
@@ -565,7 +787,7 @@ fn error_message(code: &str) -> Option<&'static str> {
         "daemon_unreachable" => "Cannot reach the daemon.",
         "daemon_api_too_new" => "The daemon is newer than this window. Update Marsa.",
         "daemon_bad_response" => "The daemon sent an answer this window cannot read.",
-        "invalid_id" => "That service name is not valid.",
+        "invalid_id" => "That name is not valid.",
         "daemon_file_invalid" => "The daemon's run file cannot be read.",
         "daemon_file_insecure" => "The daemon's run file is readable by other users.",
         "daemon_file_write" => "Cannot write the daemon's run file.",
@@ -611,7 +833,7 @@ fn error_message(code: &str) -> Option<&'static str> {
         "site_read_dir" => "Cannot read that folder. Check its permissions.",
         // M5-09: `DELETE /v1/sites/{name}` and `DELETE /v1/sites/park`.
         "site_is_parked" => {
-            "This site comes from a parked folder, so it cannot be removed alone. Remove the \
+            "This site comes from a parked folder, so it cannot be unlinked alone. Forget the \
              parked folder to stop serving it and the folder's other sites."
         }
         "folder_not_parked" => "That folder is not parked. It may have just been removed.",
@@ -627,6 +849,21 @@ fn error_message(code: &str) -> Option<&'static str> {
         "unsupported_alias" => "Version names such as \"latest\" are not supported. Pick a number.",
         "unknown_tool" => "This daemon does not know that program.",
         "runtimes_read" => "Cannot read the folder of installed versions.",
+        // `DELETE /v1/runtimes/{tool}/{version}` (M5-07).
+        "version_in_use" => {
+            "This version is in use: it is a default, a site is set to it, or Caddy runs from \
+             it. Nothing was uninstalled."
+        }
+        "version_ambiguous" => "More than one installed version matches. Pick one in full.",
+        "uninstall_io" => {
+            "Cannot delete this version: a program from it may still run, or its folder is not \
+             writable. Quit that program, then try again."
+        }
+        // `PUT /v1/php/xdebug` (M5-11).
+        "xdebug_interrupted" => {
+            "The daemon stopped before the change reached PHP. The setting is saved: Marsa \
+             applies it when it starts again."
+        }
         // `GET` and `PUT /v1/autostart` (M5-03), behind the tray's "Start at
         // Login" line (M5-04).
         "tray_not_found" => {
@@ -639,7 +876,9 @@ fn error_message(code: &str) -> Option<&'static str> {
         "autostart_write" => "Cannot write the login file.",
         // Installs (task M5-10): `InstallError` and the codes under it, in
         // the `failed` event or the answer to the request.
-        "install_busy" => "Another install is running. Wait for it to end, then try again.",
+        "install_busy" => {
+            "Another install or uninstall is running. Wait for it to end, then try again."
+        }
         "install_unsupported_platform" => "Marsa has no build of this program for this system.",
         "install_no_such_version" => "The version list has no version that matches.",
         "install_manifest_mismatch" => {
@@ -723,6 +962,11 @@ fn error_message(code: &str) -> Option<&'static str> {
         // Setup (`POST /v1/setup`, task M4-13): why it did not run, the
         // steps it skipped, and the codes of `marsa-helper`.
         "setup_running" => "Another setup is running. Wait for it to end, then try again.",
+        // `marsa uninstall --all` runs (M5-13): setup waits for it.
+        "uninstall_running" => {
+            "Marsa is being removed from this computer (marsa uninstall --all). Wait for it to \
+             end, then try again."
+        }
         "setup_not_supported" => "Setup from Marsa works on macOS only for now.",
         "setup_cancelled" => {
             "The password prompt was cancelled, so nothing was changed. Run setup again when \
@@ -786,6 +1030,11 @@ fn error_message(code: &str) -> Option<&'static str> {
             "The root certificate of Marsa's certificate authority is not valid, so it was not \
              trusted. Report it."
         }
+        // Setup's trust folder in the data folder (M5-13).
+        "trust_record_unusable" => {
+            "Marsa cannot use its folder for the trusted certificate (trust in the data folder): \
+             it must be your own folder, not a link. Fix or delete it, then run setup again."
+        }
         "trust_read" | "trust_write" | "trust_add_failed" => {
             "Marsa's certificate authority was not trusted. Run setup again; if it repeats, \
              report it."
@@ -834,6 +1083,10 @@ mod tests {
             },
             ClientError::InvalidId { id: "..".into() },
             ClientError::PathNotUtf8 { path: path.clone() },
+            ClientError::InUse {
+                message: String::new(),
+                in_use: VersionInUse::default(),
+            },
             ClientError::DaemonFile(DaemonFileError::Missing { path: path.clone() }),
             ClientError::DaemonFile(DaemonFileError::Invalid {
                 path: path.clone(),
@@ -900,6 +1153,16 @@ mod tests {
             // M5-09: unlink and forget.
             "site_is_parked",
             "folder_not_parked",
+            // M5-07: uninstall a version.
+            "version_in_use",
+            "version_ambiguous",
+            "uninstall_io",
+            "install_busy",
+            // M5-11: Xdebug.
+            "xdebug_interrupted",
+            // M5-13: setup during `marsa uninstall --all`, and its trust folder.
+            "uninstall_running",
+            "trust_record_unusable",
             "config_read",
             "config_invalid",
             "config_write",
@@ -922,6 +1185,28 @@ mod tests {
             WINDOW_START_FAILED,
         ] {
             assert!(error_message(code).is_some(), "no message for {code}");
+        }
+    }
+
+    #[test]
+    fn every_uninstall_error_code_has_a_message() {
+        use marsa_core::installer::uninstall::UninstallError;
+
+        let path = PathBuf::from("runtimes/php/8.3.27");
+        let errors = [
+            UninstallError::Busy,
+            UninstallError::NotInstalled { path: path.clone() },
+            UninstallError::Io {
+                path,
+                source: io::Error::other("test"),
+            },
+        ];
+        for err in &errors {
+            assert!(
+                error_message(err.code()).is_some(),
+                "no message for {}",
+                err.code()
+            );
         }
     }
 
@@ -1446,6 +1731,194 @@ mod tests {
         for state in [Autostart::Unknown, Autostart::Off, Autostart::On] {
             assert!(autostart_note(state).is_none(), "{state:?}");
         }
+    }
+
+    // -- Uninstall, unlink, forget, and Xdebug (task M5-10) --
+
+    fn in_use(default: Option<&str>, sites: &[&str], caddy: bool) -> UninstallNotice {
+        UninstallNotice::InUse {
+            runtime: Runtime::Php,
+            in_use: VersionInUse {
+                version: "8.3.27".into(),
+                default: default.map(str::to_owned),
+                sites: sites.iter().map(|site| (*site).to_owned()).collect(),
+                caddy,
+            },
+        }
+    }
+
+    #[test]
+    fn a_version_in_use_names_what_uses_it() {
+        let title = ("PHP 8.3.27 is in use, so it was not uninstalled:", true);
+        let lines = uninstall_lines(&in_use(Some("8.3"), &["shop"], false));
+        assert_eq!(
+            texts(&lines),
+            [
+                title,
+                (
+                    "It is the default PHP (set to 8.3). Pick another default above first.",
+                    true
+                ),
+                (
+                    "The site shop.test is set to it. Pick another PHP version for it first.",
+                    true
+                ),
+            ]
+        );
+        let lines = uninstall_lines(&in_use(None, &["shop", "blog"], false));
+        assert_eq!(
+            texts(&lines)[1],
+            (
+                "The sites shop.test, blog.test are set to it. Pick another PHP version for \
+                 them first.",
+                true
+            )
+        );
+        let caddy = UninstallNotice::InUse {
+            runtime: Runtime::Caddy,
+            in_use: VersionInUse {
+                version: "2.11.7".into(),
+                caddy: true,
+                ..VersionInUse::default()
+            },
+        };
+        assert_eq!(
+            texts(&uninstall_lines(&caddy)),
+            [
+                ("Caddy 2.11.7 is in use, so it was not uninstalled:", true),
+                (
+                    "Caddy is running from it. Stop Caddy under Services first.",
+                    true
+                ),
+            ]
+        );
+        // No fact at all: the general text.
+        let lines = uninstall_lines(&in_use(None, &[], false));
+        let general = error_text("version_in_use");
+        assert_eq!(texts(&lines), [title, (general.as_str(), true)]);
+    }
+
+    #[test]
+    fn an_uninstall_says_how_it_ended() {
+        let version: Version = v("8.3.27");
+        let done = UninstallNotice::Done {
+            runtime: Runtime::Node,
+            version: version.clone(),
+        };
+        assert_eq!(
+            texts(&uninstall_lines(&done)),
+            [("Uninstalled Node.js 8.3.27.", false)]
+        );
+        let failed = UninstallNotice::Failed {
+            runtime: Runtime::Php,
+            version,
+            code: "uninstall_io".into(),
+        };
+        let want = format!(
+            "Cannot uninstall PHP 8.3.27. {}",
+            error_text("uninstall_io")
+        );
+        assert_eq!(texts(&uninstall_lines(&failed)), [(want.as_str(), true)]);
+    }
+
+    #[test]
+    fn each_removal_has_its_confirmation() {
+        let uninstall = Removal::Uninstall {
+            runtime: Runtime::Php,
+            version: v("8.3.27"),
+        };
+        let unlink = Removal::Unlink { site: "api".into() };
+        let forget = Removal::Forget {
+            folder: PathBuf::from("/code"),
+        };
+        assert_eq!(confirm_title(&uninstall), "Uninstall PHP 8.3.27?");
+        assert_eq!(confirm_title(&unlink), "Unlink api.test?");
+        assert_eq!(confirm_title(&forget), "Forget /code?");
+        assert_eq!(
+            [&uninstall, &unlink, &forget].map(removal_button),
+            ["Uninstall", "Unlink", "Forget"]
+        );
+        assert_eq!(removing(&uninstall), "Uninstalling PHP 8.3.27…");
+        assert_eq!(removing(&unlink), "Unlinking api.test…");
+        assert_eq!(removing(&forget), "Forgetting /code…");
+
+        let text = confirm_text(&unlink, Some(Path::new("/work/api")), 0);
+        assert!(
+            text.ends_with("The folder /work/api and its files stay."),
+            "{text}"
+        );
+        assert!(confirm_text(&unlink, None, 0).ends_with("Its folder and files stay."));
+        for (sites, start) in [
+            (0, "Marsa stops watching this folder."),
+            (1, "Marsa stops serving its site,"),
+            (3, "Marsa stops serving its 3 sites,"),
+        ] {
+            let text = confirm_text(&forget, None, sites);
+            assert!(text.starts_with(start), "{text}");
+            assert!(text.ends_with("The folder and its files stay."), "{text}");
+        }
+        assert!(confirm_text(&uninstall, None, 0).contains("install PHP again"));
+    }
+
+    #[test]
+    fn the_unlink_and_forget_lines() {
+        let folder = Path::new("/code");
+        assert_eq!(
+            unlinked("api"),
+            "Unlinked api.test. Its folder and files stay."
+        );
+        assert!(forgot(folder).starts_with("Forgot /code: "));
+        assert_eq!(forget_folder(folder), "Forget /code…");
+        let text = site_is_parked("shop", Some(folder));
+        assert!(
+            text.starts_with("shop.test comes from the parked folder /code,"),
+            "{text}"
+        );
+        assert_eq!(site_is_parked("shop", None), error_text("site_is_parked"));
+        assert!(unlink_parked_hint(folder).contains("/code"));
+        assert!(unlink_parked_hint(folder).contains(PARKED_TITLE));
+    }
+
+    #[test]
+    fn the_xdebug_lines() {
+        let on = XdebugState {
+            enabled: true,
+            loaded: vec!["8.3.27".into(), "8.4.23".into()],
+            missing: vec!["8.2.1".into()],
+        };
+        assert_eq!(
+            xdebug_lines(&on, None),
+            [
+                XDEBUG_SLOW,
+                "Loaded in PHP 8.3.27, 8.4.23.",
+                "PHP 8.2.1 has no Xdebug and runs without it."
+            ]
+        );
+        let off = XdebugState {
+            enabled: false,
+            loaded: Vec::new(),
+            missing: vec!["8.2.1".into(), "8.3.0".into()],
+        };
+        assert_eq!(
+            xdebug_lines(&off, None),
+            ["PHP 8.2.1, 8.3.0 have no Xdebug and run without it."]
+        );
+        assert!(xdebug_lines(&XdebugState::default(), None).is_empty());
+        let none = XdebugState {
+            enabled: true,
+            ..XdebugState::default()
+        };
+        assert_eq!(
+            xdebug_lines(&none, None),
+            [XDEBUG_SLOW, "No installed PHP loads it."]
+        );
+        // While the daemon writes the files: what is asked for.
+        assert_eq!(
+            xdebug_lines(&XdebugState::default(), Some(true)),
+            ["Turning Xdebug on…"]
+        );
+        assert_eq!(xdebug_lines(&none, Some(false)), ["Turning Xdebug off…"]);
+        assert!(XDEBUG_HINT.contains("slower") && XDEBUG_SLOW.contains("slower"));
     }
 
     #[test]
