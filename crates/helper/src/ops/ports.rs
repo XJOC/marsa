@@ -482,6 +482,19 @@ mod tests {
         }
     }
 
+    /// Also where port 80 is allowed already and only the file is put
+    /// right: a failed write is not `done`.
+    #[test]
+    fn a_failed_rewrite_where_port_80_is_allowed_is_ports_write() {
+        let mut linux = Linux::with_file(80, OLD_OURS);
+        linux.fake.fail_writes.insert(PathBuf::from(CONF));
+        let message = format!("cannot write {CONF}: permission denied");
+        assert_eq!(install(&linux), failed(INSTALL, PORTS_WRITE, &message));
+        assert_eq!(linux.file(), Some((OLD_OURS.to_vec(), OLD_MODE)));
+        assert!(linux.commands().is_empty());
+        assert_eq!(linux.value(), "80\n");
+    }
+
     #[test]
     fn a_failed_write_is_ports_write_and_nothing_is_loaded() {
         let mut linux = Linux::new(1024);

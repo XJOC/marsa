@@ -1,4 +1,5 @@
-//! Whether a normal process may bind ports 80 and 443 (Linux, ADR 0014).
+//! Whether a normal process may bind ports 80 and 443 (ADR 0014 for Linux,
+//! ADR 0018 for Windows).
 //!
 //! Linux lets only root bind a port below the sysctl
 //! `net.ipv4.ip_unprivileged_port_start`, 1024 by default. The helper's
@@ -6,8 +7,13 @@
 //! 80 and 443 itself once that is allowed, and stays on its high ports
 //! before.
 //!
+//! Always `true` on Windows: any program may bind a low port there, and
+//! nothing redirects, so Caddy takes 80 and 443 from its first start. If
+//! another program holds one (IIS holds port 80 on some machines), Caddy's
+//! own bind error is the report (`port_in_use`).
+//!
 //! Always `false` on macOS, where the `pf` redirect brings 80 and 443 to the
-//! high ports (ADR 0008), and on Windows, whose ports come with task M4-19.
+//! high ports (ADR 0008).
 
 /// The lowest port Caddy needs: 80 for HTTP. Port 443 is then allowed too.
 // Unused outside Linux and the tests, like `parse`.
@@ -25,8 +31,14 @@ pub fn low_ports_allowed() -> bool {
         .is_some_and(|lowest| lowest <= NEEDED)
 }
 
-/// Not Linux: never.
-#[cfg(not(target_os = "linux"))]
+/// Windows: always. Low ports need no right there.
+#[cfg(windows)]
+pub fn low_ports_allowed() -> bool {
+    true
+}
+
+/// macOS (and any other system): never.
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn low_ports_allowed() -> bool {
     false
 }
@@ -66,7 +78,13 @@ mod tests {
         assert!(parse(&text.unwrap()).is_some());
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    #[test]
+    fn windows_always_allows_it() {
+        assert!(low_ports_allowed());
+    }
+
+    #[cfg(not(any(target_os = "linux", windows)))]
     #[test]
     fn other_systems_never_allow_it() {
         assert!(!low_ports_allowed());
