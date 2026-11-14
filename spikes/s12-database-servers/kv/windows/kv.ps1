@@ -100,7 +100,7 @@ function Obtain {
     }
     '^rw-(?<ver>[\d.]+)-(?<fl>msys2|cygwin)$' {
       $ver = $Matches.ver; $fl = $Matches.fl
-      $lic = if ([version]$ver -ge [version]'7.4.0') { "Redis $ver: RSALv2 or SSPLv1" + $(if ([version]$ver -ge [version]'8.0.0') { ' or AGPLv3' } else { '' }) + ' (not BSD)' } else { "Redis $ver is a 7.2 or older release (BSD-3 line)" }
+      $lic = if ([version]$ver -ge [version]'7.4.0') { "Redis ${ver}: RSALv2 or SSPLv1" + $(if ([version]$ver -ge [version]'8.0.0') { ' or AGPLv3' } else { '' }) + ' (not BSD)' } else { "Redis $ver is a 7.2 or older release (BSD-3 line)" }
       $dir = Obtain-Release 'redis-windows/redis-windows' $ver "Redis-$ver-Windows-x64-$fl.zip" '' $lic
       $exe = (Get-ChildItem $dir -Recurse -Filter redis-server.exe | Select-Object -First 1).FullName
       Fact files_next_to_exe ((Get-ChildItem (Split-Path $exe) -File | ForEach-Object { "$($_.Name):$($_.Length)" }) -join ' ')

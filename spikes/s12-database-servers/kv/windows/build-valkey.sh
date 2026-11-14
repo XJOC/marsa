@@ -6,7 +6,8 @@
 #
 # Needs: gcc make curl tar. Valkey has no Windows port (no Cygwin or MSYS code in
 # 8.1), so this tests the plain POSIX build with the one change redis-windows
-# makes to Redis (a header guard in dlfcn.h of MSYS2).
+# makes to Redis (a header guard in dlfcn.h), and only valkey-server and
+# valkey-cli (valkey-benchmark does not compile: asprintf is hidden on MSYS2).
 set -uo pipefail
 FLAVOR="${1:?msys2|cygwin}"
 V="${VALKEY_VERSION:-8.1.11}"
@@ -28,9 +29,9 @@ if [ "$want" = "$got" ]; then fact sha256_source_match yes; else fact sha256_sou
 tar xzf "valkey-$V.tar.gz"
 cd "valkey-$V" || exit 0
 
-if [ "$FLAVOR" = msys2 ] && grep -q __GNU_VISIBLE /usr/include/dlfcn.h 2>/dev/null; then
+if grep -q __GNU_VISIBLE /usr/include/dlfcn.h 2>/dev/null; then
   sed -i 's/__GNU_VISIBLE/1/' /usr/include/dlfcn.h
-  fact patch_dlfcn_h "applied (as redis-windows does)"
+  fact patch_dlfcn_h "applied to /usr/include/dlfcn.h (as redis-windows does for MSYS2); without it Cygwin fails: Dl_info and dladdr are hidden behind __GNU_VISIBLE"
 fi
 
 built=no
@@ -40,12 +41,12 @@ for opt in -O2 -O0; do
   attempt=$((attempt + 1))
   make distclean >/dev/null 2>&1 || true
   t0=$SECONDS
-  make -j"$(nproc)" BUILD_TLS=no OPTIMIZATION="$opt" CFLAGS="-Wno-char-subscripts" >"$OUT/build-$attempt.log" 2>&1; rc=$?
+  make -j"$(nproc)" BUILD_TLS=no OPTIMIZATION="$opt" CFLAGS="-Wno-char-subscripts" valkey-server valkey-cli >"$OUT/build-$attempt.log" 2>&1; rc=$?
   fact "build_attempt_${attempt}_opt" "$opt"
   fact "build_attempt_${attempt}_rc" "$rc"
   fact "build_attempt_${attempt}_seconds" "$((SECONDS - t0))"
   if [ $rc -eq 0 ] && [ -x src/valkey-server.exe ]; then built="yes ($opt)"; break; fi
-  fact "build_attempt_${attempt}_first_errors" "$(grep -E 'error|Error' "$OUT/build-$attempt.log" | head -5 | cut -c1-240 | tr '\n' '|')"
+  fact "build_attempt_${attempt}_first_errors" "$(grep -E 'error:|undefined reference|\*\*\*' "$OUT/build-$attempt.log" | head -5 | cut -c1-240 | tr '\n' '|')"
 done
 fact built "$built"
 [ "$built" = no ] && { fact source "own build FAILED, see build-N.log"; exit 0; }

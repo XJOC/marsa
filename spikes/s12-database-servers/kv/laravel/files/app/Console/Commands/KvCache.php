@@ -49,11 +49,11 @@ class KvCache extends Command
             $a = Cache::increment('n');
             $b = Cache::increment('n', 5);
             $c = Cache::decrement('n', 2);
-            return [$a, $b, $c, Cache::get('n')] === [1, 6, 4, 4] ?: json_encode([$a, $b, $c, Cache::get('n')]);
+            return [$a, $b, $c, (int) Cache::get('n')] === [1, 6, 4, 4] ?: json_encode([$a, $b, $c, Cache::get('n')]);
         });
         $this->kvCheck($s, 'add_nx', function () {
             Cache::forget('nx');
-            return Cache::add('nx', 1, 60) === true && Cache::add('nx', 2, 60) === false && Cache::get('nx') === 1;
+            return Cache::add('nx', 1, 60) === true && Cache::add('nx', 2, 60) === false && (int) Cache::get('nx') === 1;
         });
         $this->kvCheck($s, 'remember_forever', function () {
             Cache::forget('rem');
@@ -63,7 +63,8 @@ class KvCache extends Command
         });
         $this->kvCheck($s, 'many_putmany', function () {
             Cache::putMany(['m1' => 1, 'm2' => 2], 60);
-            return Cache::many(['m1', 'm2', 'm3']) === ['m1' => 1, 'm2' => 2, 'm3' => null];
+            $m = Cache::many(['m1', 'm2', 'm3']);
+            return ((int) $m['m1'] === 1 && (int) $m['m2'] === 2 && $m['m3'] === null) ?: json_encode($m);
         });
         $this->kvCheck($s, 'tags', function () {
             Cache::tags(['people', 'artists'])->put('John', 'Doe', 60);
@@ -152,7 +153,7 @@ class KvCache extends Command
             for ($i = 0; $i < 20; $i++) { $c->set("scan:$i", $i); }
             $found = 0; $cursor = '0';
             do {
-                [$cursor, $keys] = $c->scan($cursor, ['match' => 'scan:*', 'count' => 100]);
+                [$cursor, $keys] = $c->scan($cursor, ['match' => '*scan:*', 'count' => 100]);
                 $found += count($keys);
             } while ((string) $cursor !== '0');
             return $found === 20 ?: "found=$found";
