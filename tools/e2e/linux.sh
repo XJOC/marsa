@@ -59,10 +59,26 @@ diagnose() {
   resolvectl status | head -n 40
   systemctl status marsa-dns-link.service --no-pager
   ip -brief addr show marsa0
+  networkctl list --no-pager
+  echo "--- marsa0, every 0.25 s while the helper ran (newest last)"
+  tail -n 120 "$HOME/marsa0-watch.log"
+  echo "--- the journal of resolved, networkd, and the unit"
+  sudo journalctl -u systemd-resolved -u systemd-networkd -u marsa-dns-link --since "-3min" --no-pager | grep -iE 'marsa0|link [0-9]+|dns|flush|revert|manag|started|stopp' | tail -n 150
   sudo ss -H -ltnp | grep -E ':(80|443|18019|18053|18080|18443)\b'
   cat "$PORT_START"
 }
 trap 'code=$?; [ "$code" -eq 0 ] || diagnose; exit "$code"' EXIT
+
+# What `resolvectl status marsa0` shows, every 0.25 s, into a log for the
+# diagnosis: a failed check deletes the unit before the script can look.
+watch_marsa0() {
+  while true; do
+    printf '%s ' "$(date +%T.%N | cut -c1-12)"
+    { ip -brief link show marsa0 2>&1; resolvectl status marsa0 2>&1; networkctl status marsa0 --no-pager 2>&1 | grep -E 'State|Network File'; } | tr '\n' '|'
+    echo
+    sleep 0.25
+  done >>"$HOME/marsa0-watch.log"
+}
 
 # Runs the helper as root with the ops in "$1" (a JSON list) and prints its
 # answer. The exit code is the helper's: 0 all done, 1 an op failed.
@@ -131,6 +147,18 @@ run marsa-helper version
 echo "system: $PRETTY_NAME, systemd $(systemctl --version | awk 'NR==1 {print $2}'), kernel $(uname -r)"
 
 # Part A: the helper alone. It needs no runtime, only marsad's DNS server.
+
+step "debug logs of systemd-resolved and systemd-networkd, kept across restarts"
+for unit in systemd-resolved systemd-networkd; do
+  sudo mkdir -p "/etc/systemd/system/$unit.service.d"
+  printf '[Service]\nEnvironment=SYSTEMD_LOG_LEVEL=debug\n' | sudo tee "/etc/systemd/system/$unit.service.d/marsa-e2e-debug.conf" >/dev/null
+done
+sudo systemctl daemon-reload
+sudo systemctl reset-failed systemd-resolved
+sudo systemctl restart systemd-resolved
+if systemctl is-active --quiet systemd-networkd; then sudo systemctl restart systemd-networkd; fi
+watch_marsa0 &
+WATCHER=$!
 
 step "part A: before the helper"
 run marsa daemon start
@@ -259,6 +287,7 @@ sudo systemctl reset-failed systemd-resolved
 sudo systemctl restart systemd-resolved
 run resolvectl query example.com
 echo
+kill "$WATCHER" 2>/dev/null || true
 echo "PASS: part A, the helper"
 
 # Part B: a real Laravel site, from the signed runtimes to the open page.
