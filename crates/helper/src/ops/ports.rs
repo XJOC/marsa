@@ -688,7 +688,7 @@ mod tests {
     #[test]
     fn the_real_value_file_holds_a_port_number() {
         let port = first_allowed_port(&crate::system::RealSystem);
-        assert!(port.is_ok_and(|port| port <= 65535), "{port:?}");
+        assert!(port.as_ref().is_ok_and(|&port| port <= 65535), "{port:?}");
     }
 
     /// Through `apply`, as a real request: Linux only.
