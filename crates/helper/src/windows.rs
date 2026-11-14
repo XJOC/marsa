@@ -9,17 +9,18 @@ use std::mem::{ManuallyDrop, size_of};
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::PathBuf;
-use std::ptr::null_mut;
+use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
     ERROR_NO_DATA, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    ConvertStringSidToSidW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, PSECURITY_DESCRIPTOR, RevertToSelf, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-    TOKEN_USER, TokenUser,
+    GetTokenInformation, LookupAccountSidW, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
+    SECURITY_ATTRIBUTES, SID_NAME_USE, SidTypeUser, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, PIPE_ACCESS_DUPLEX,
@@ -376,6 +377,45 @@ fn token_user_sid(token: &OwnedHandle) -> io::Result<String> {
     }
 }
 
+/// Whether `sid` names a user account, as Windows looks it up: `Some(false)`
+/// for a group, an alias, or a well-known SID. `None` if Windows cannot
+/// tell, for example a domain account with no domain controller to ask.
+///
+/// # Errors
+///
+/// The Win32 error of a SID that Windows cannot read.
+pub fn is_user_account(sid: &str) -> io::Result<Option<bool>> {
+    let text = wide(sid);
+    let mut binary: PSID = null_mut();
+    // SAFETY: `text` is NUL-terminated and `binary` is a valid out pointer.
+    // Windows allocates the SID, which is freed with `LocalFree` below.
+    if unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut binary) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut name = [0u16; 256];
+    let mut domain = [0u16; 256];
+    let mut name_len = name.len() as u32;
+    let mut domain_len = domain.len() as u32;
+    let mut kind: SID_NAME_USE = 0;
+    // SAFETY: each buffer goes with its own length, `kind` is a valid out
+    // pointer, and `binary` is the SID made above, freed right after.
+    let found = unsafe {
+        let found = LookupAccountSidW(
+            null(),
+            binary,
+            name.as_mut_ptr(),
+            &mut name_len,
+            domain.as_mut_ptr(),
+            &mut domain_len,
+            &mut kind,
+        );
+        LocalFree(binary);
+        found
+    };
+    // A name longer than the buffers fails too: then Windows did not tell.
+    Ok((found != 0).then_some(kind == SidTypeUser))
+}
+
 /// The pipe's security descriptor in SDDL: the DACL, then the label.
 fn security_descriptor(user_sid: &str) -> String {
     format!("D:P(A;;GA;;;SY)(A;;{USER_RIGHTS};;;{user_sid}){LABEL}")
@@ -613,6 +653,18 @@ mod tests {
             "{}",
             dir.display()
         );
+    }
+
+    /// Read only: the test's own user is a user; a built-in group, an
+    /// alias, and LocalSystem are not.
+    #[test]
+    fn only_a_user_account_is_a_user() {
+        let me = process_user_sid().unwrap();
+        assert_eq!(is_user_account(&me).unwrap(), Some(true), "{me}");
+        for other in ["S-1-1-0", "S-1-5-32-544", "S-1-5-18"] {
+            assert_eq!(is_user_account(other).unwrap(), Some(false), "{other}");
+        }
+        assert!(is_user_account("not a SID").is_err());
     }
 
     /// Read only: `Program Files` exists and is not the system folder.

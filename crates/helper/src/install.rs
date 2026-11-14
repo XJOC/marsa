@@ -61,6 +61,13 @@ pub fn install(args: &[std::ffi::OsString]) -> Response {
         Ok(allowed) => allowed,
         Err(reason) => return Response::error(code::USAGE, reason),
     };
+    // A group has the shape of a user's SID, so `parse` lets it pass; Windows
+    // tells them apart. If Windows cannot tell, the service's exact compare
+    // still serves only this SID.
+    if let Ok(Some(false)) = crate::windows::is_user_account(&allowed.user_sid) {
+        let reason = "the SID is not a user account";
+        return Response::error(code::USAGE, reason.to_owned());
+    }
     match scm::install(&allowed) {
         Ok(()) => done("service_install", Outcome::Done),
         Err(reason) => {
