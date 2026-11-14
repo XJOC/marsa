@@ -1,12 +1,15 @@
 //! The helper's Win32 calls (ADR 0018). The `unsafe` code of the helper on
-//! Windows is in this file only, and each block calls one function.
+//! Windows is in this file only, and each block calls one or two functions.
 
 use std::ffi::OsString;
 use std::io;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::ptr::null_mut;
 
+use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
 /// `MAX_PATH`: the system folder is `C:\Windows\System32` or close to it,
 /// far below this.
@@ -36,6 +39,45 @@ pub fn system_dir() -> io::Result<PathBuf> {
     }
 }
 
+/// `Program Files` (64-bit), as Windows reports it. A fixed known folder: no
+/// user setting moves it, unlike the `ProgramFiles` variable, which a user
+/// can set for their own programs, elevated ones included.
+///
+/// # Errors
+///
+/// The `HRESULT` of `SHGetKnownFolderPath`.
+pub fn program_files() -> io::Result<PathBuf> {
+    let mut path = null_mut();
+    // SAFETY: `FOLDERID_ProgramFiles` is a static GUID, the token is null
+    // (the current user), and `path` is a valid out pointer. The caller frees
+    // `path` with `CoTaskMemFree` whether the call works or not, and
+    // `CoTaskMemFree` accepts null. On success `path` is a NUL-terminated
+    // string, read up to its NUL and copied before the free.
+    let (result, folder) = unsafe {
+        let result = SHGetKnownFolderPath(
+            &FOLDERID_ProgramFiles,
+            KF_FLAG_DEFAULT as u32,
+            null_mut(),
+            &mut path,
+        );
+        let folder = (result >= 0 && !path.is_null()).then(|| {
+            let mut len = 0;
+            while *path.add(len) != 0 {
+                len += 1;
+            }
+            PathBuf::from(OsString::from_wide(std::slice::from_raw_parts(path, len)))
+        });
+        CoTaskMemFree(path.cast());
+        (result, folder)
+    };
+    match folder {
+        Some(folder) => Ok(folder),
+        None if result < 0 => Err(io::Error::from_raw_os_error(result)),
+        // Success with no string: not documented, and not a folder.
+        None => Err(io::Error::other("Windows gave no Program Files folder")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,5 +93,13 @@ mod tests {
             "{}",
             dir.display()
         );
+    }
+
+    /// Read only: `Program Files` exists and is not the system folder.
+    #[test]
+    fn program_files_is_an_absolute_folder() {
+        let dir = program_files().unwrap();
+        assert!(dir.is_absolute() && dir.is_dir(), "{}", dir.display());
+        assert_ne!(dir, system_dir().unwrap());
     }
 }

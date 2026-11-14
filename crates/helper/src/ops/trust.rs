@@ -21,22 +21,24 @@ use sha2::{Digest, Sha256};
 use crate::response::{OpResult, Outcome};
 use crate::system::{RunOutput, System};
 
-/// The request's `pem` is not exactly one certificate.
+/// The request's `pem` is not exactly one certificate. On Windows also: its
+/// SHA-1 has no letter, which `certutil` would read as an index.
 pub const TRUST_CERT_INVALID: &str = "trust_cert_invalid";
-/// The file at [`CA_PATH`] cannot be read as one certificate, so it was left
-/// as it is and no command ran.
+/// Marsa's file ([`CA_PATH`] on macOS) cannot be read as one certificate, so
+/// it was left as it is and no command ran.
 pub const TRUST_READ: &str = "trust_read";
-/// Writing [`CA_PATH`] failed.
+/// Writing Marsa's file failed.
 pub const TRUST_WRITE: &str = "trust_write";
-/// `security add-trusted-cert` failed or timed out. The helper then ran the
-/// steps of `trust_remove`. If they failed too, the file stays so a later
-/// `trust_remove` can finish, and until then `trust_install` with the same
-/// certificate answers `unchanged`: run `trust_remove` before a retry.
+/// `security add-trusted-cert` (macOS) or `certutil -addstore` (Windows)
+/// failed or timed out. The helper then ran the steps of `trust_remove`. If
+/// they failed too, the file stays so a later `trust_remove` can finish, and
+/// until then `trust_install` with the same certificate answers `unchanged`:
+/// run `trust_remove` before a retry.
 pub const TRUST_ADD_FAILED: &str = "trust_add_failed";
-/// `security` could not remove the trust or the certificate. The file stays,
-/// so a retry still knows the hash.
+/// `security` or `certutil` could not remove the trust or the certificate.
+/// The file stays, so a retry still knows the hash.
 pub const TRUST_REMOVE_FAILED: &str = "trust_remove_failed";
-/// Deleting [`CA_PATH`] failed.
+/// Deleting Marsa's file failed.
 pub const TRUST_DELETE: &str = "trust_delete";
 
 /// Marsa's copy of the CA root it trusts, in a folder only root can write.
@@ -234,7 +236,7 @@ fn failure_text(result: &io::Result<RunOutput>) -> String {
 /// and line breaks around it. A key block, a second block, or any other text
 /// fails here, because the prefix or the suffix does not match or because
 /// `-` and spaces are not base64.
-fn parse_pem(text: &str) -> Result<Vec<u8>, &'static str> {
+pub(super) fn parse_pem(text: &str) -> Result<Vec<u8>, &'static str> {
     let block = text.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'));
     let body = block
         .strip_prefix(BEGIN)
@@ -326,7 +328,7 @@ fn element(der: &[u8]) -> Option<(u8, usize, usize)> {
 }
 
 /// Upper case, as `security` prints it.
-fn sha256_hex(der: &[u8]) -> String {
+pub(super) fn sha256_hex(der: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut hex = String::with_capacity(64);
     for byte in Sha256::digest(der).iter() {
@@ -338,7 +340,7 @@ fn sha256_hex(der: &[u8]) -> String {
 
 /// The clean file: the BEGIN line, the base64 in lines of 64, the END line,
 /// LF only, with a final newline.
-fn to_pem(der: &[u8]) -> Vec<u8> {
+pub(super) fn to_pem(der: &[u8]) -> Vec<u8> {
     let mut body = Vec::with_capacity(der.len().div_ceil(3) * 4);
     for chunk in der.chunks(3) {
         let [a, b, c] = [0, 1, 2].map(|i| chunk.get(i).copied().unwrap_or(0));
