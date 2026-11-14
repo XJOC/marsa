@@ -43,7 +43,7 @@ use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, GetNamedPip
 use windows_sys::Win32::System::Services::{
     CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatusEx, SC_HANDLE,
     SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
-    SERVICE_STATUS_PROCESS,
+    SERVICE_STATUS_PROCESS, SERVICE_STOP_PENDING,
 };
 
 use super::wide;
@@ -303,9 +303,15 @@ pub fn service_process_id(name: &str) -> io::Result<Option<u32>> {
     if read == 0 {
         return Err(io::Error::last_os_error());
     }
-    // Only `Running`: the service reports it once its pipe exists. While it
-    // starts, the process is known but the pipe may be someone else's.
-    let running = status.dwCurrentState == SERVICE_RUNNING && status.dwProcessId != 0;
+    // `Running`, or stopping after it ran: the service reports `Running` once
+    // its pipe exists, and while it stops it finishes the request that runs.
+    // While it starts, the process is known but the pipe may be someone
+    // else's.
+    let serving = matches!(
+        status.dwCurrentState,
+        SERVICE_RUNNING | SERVICE_STOP_PENDING
+    );
+    let running = serving && status.dwProcessId != 0;
     Ok(running.then_some(status.dwProcessId))
 }
 
@@ -445,7 +451,7 @@ mod tests {
             // SAFETY: the handle is the connected server end, after a read
             // as `ImpersonateNamedPipeClient` needs. The thread's token is
             // read, closed by `OwnedHandle`, and the thread reverts before
-            // anything else runs on it; a failed revert ends the test.
+            // anything else runs on it; a failed revert ends the process.
             let level = unsafe {
                 assert_ne!(ImpersonateNamedPipeClient(server.as_raw_handle()), 0);
                 let mut token = null_mut();
@@ -462,7 +468,10 @@ mod tests {
                         &mut used,
                     ) != 0
                 };
-                assert_ne!(RevertToSelf(), 0);
+                // A thread left acting as the client must not go on.
+                if RevertToSelf() == 0 {
+                    std::process::abort();
+                }
                 assert!(read);
                 level
             };
@@ -510,26 +519,38 @@ mod tests {
         }
     }
 
-    /// The only instance has a client for a while: the request is tried
-    /// again, and goes out once the service is free.
+    /// Every instance has a client for a while: the request is tried
+    /// again, and goes out once an instance is free. The free one is a new
+    /// instance: a tokio server end cannot be disconnected and used again
+    /// (mio keeps the error of its last read), unlike the service's own
+    /// blocking server end.
     #[tokio::test]
     async fn a_busy_pipe_is_tried_again() {
         let name = test_pipe("busy");
-        let mut server = server(&name);
+        let busy = ServerOptions::new()
+            .first_pipe_instance(true)
+            .max_instances(2)
+            .create(&name)
+            .unwrap();
         let first = open(&name).unwrap();
+        busy.connect().await.unwrap();
+        let served_name = name.clone();
         let served = tokio::spawn(async move {
-            server.connect().await.unwrap();
             sleep(Duration::from_millis(150)).await;
-            server.disconnect().unwrap();
-            server.connect().await.unwrap();
-            let request = read_request(&mut server).await;
-            answer(&mut server, b"next").await;
+            // Made while the first still exists, so the name never goes.
+            let mut free = ServerOptions::new()
+                .max_instances(2)
+                .create(&served_name)
+                .unwrap();
+            free.connect().await.unwrap();
+            let request = read_request(&mut free).await;
+            answer(&mut free, b"next").await;
             request
         });
         let got = exchange(&name, b"second", LIMIT, any_server).await.unwrap();
         assert_eq!(got, b"next");
         assert_eq!(within(served).await, b"second");
-        drop(first);
+        drop((first, busy));
     }
 
     /// Busy until the limit: nothing went out.
