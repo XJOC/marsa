@@ -416,9 +416,11 @@ pub fn run_elevated(program: &Path, args: &[&OsStr], limit: Duration) -> io::Res
     // SAFETY: with `SEE_MASK_NOCLOSEPROCESS` the process handle is the
     // caller's to close; it is owned from here.
     let process = ElevatedProcess(unsafe { OwnedHandle::from_raw_handle(info.hProcess) });
-    Ok(match process.wait(limit)? {
-        Some(code) => Elevated::Exited(code),
-        None => Elevated::TimedOut(process),
+    Ok(match process.wait(limit) {
+        Ok(Some(code)) => Elevated::Exited(code),
+        // It started, so a failed wait is not "did not start": the caller
+        // keeps the process and may wait again.
+        Ok(None) | Err(_) => Elevated::TimedOut(process),
     })
 }
 
