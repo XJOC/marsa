@@ -28,10 +28,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-14 and macos-15 are both arm64: they show whether a macOS 15
-        # build runs on macOS 14. macos-15-intel is the Intel runner
+        # macos-15 and macos-26 are both arm64: they show whether a macOS 15
+        # build runs on a newer macOS (macos-14 is retired). macos-15-intel is the Intel runner
         # (macos-13 is retired). ubuntu-22.04 has glibc 2.35, 24.04 has 2.39.
-        os: [macos-14, macos-15, macos-15-intel, ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm, windows-2022]
+        os: [macos-26, macos-15, macos-15-intel, ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm, windows-2022]
         set: [mysql, postgres]
         include:
           - set: mysql

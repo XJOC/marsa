@@ -74,6 +74,8 @@ cleanup() {
     [ -n "$p" ] && kill -KILL "$p" 2>/dev/null
   done
   pkill -KILL -f "$BASE/" 2>/dev/null
+  mkdir -p "$OUT/$ID.files"
+  cp "$W"/*.log "$W"/*.out "$W"/*.err "$OUT/$ID.files/" 2>/dev/null
   true
 }
 trap cleanup EXIT
@@ -121,13 +123,16 @@ if [ "$SIG_URL" != "-" ]; then
     if echo "$out" | grep -q 'NO_PUBKEY'; then
       keyid="$(echo "$out" | awk '/NO_PUBKEY/{print $3; exit}')"
       if [ "$SERVER" = mysql ]; then
-        curl -fsSL --max-time 60 https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 | gpg --batch --import >/dev/null 2>&1
+        curl -fsSL --max-time 60 https://repo.mysql.com/RPM-GPG-KEY-mysql-2025 | gpg --batch --import >/dev/null 2>&1
       else
         gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$keyid" >/dev/null 2>&1
       fi
       out="$(gpg --batch --status-fd 1 --verify "$W/dl/sig.asc" "$FILE" 2>&1)"
     fi
-    if echo "$out" | grep -q 'GOODSIG'; then
+    log "gpg output: $(echo "$out" | tr '\n' ' ' | cut -c1-600)"
+    if echo "$out" | grep -q 'EXPKEYSIG'; then
+      rec gpg_status "signature valid but the signing key has EXPIRED"
+    elif echo "$out" | grep -q 'GOODSIG'; then
       rec gpg_status "good signature, key $(echo "$out" | awk '/VALIDSIG/{print $3; exit}')"
     elif echo "$out" | grep -q 'NO_PUBKEY'; then
       rec gpg_status "signature present, public key not found (key id $keyid)"
@@ -198,7 +203,7 @@ else
   maxglibc=""
   for p in $PROGS; do
     [ -x "$ROOT/bin/$p" ] || continue
-    m="$(ldd "$ROOT/bin/$p" 2>&1 | grep -E 'not found' | awk '{print $1}' | tr '\n' ' ')"
+    m="$(ldd "$ROOT/bin/$p" 2>&1 | grep -E '=> not found' | awk '{print $1}' | tr '\n' ' ')"
     [ -n "$m" ] && missing="$missing $p:$m"
     g="$(objdump -T "$ROOT/bin/$p" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -uV | tail -1)"
     maxglibc="$maxglibc
@@ -209,12 +214,29 @@ $g"
 $(objdump -T "$f" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -uV | tail -1)"
   done
   rec ldd_missing "${missing:-none}"
+  rec glibc_of_this_runner "$(ldd --version 2>&1 | head -1)"
+  if echo "$missing" | grep -q libaio; then
+    # No root: fetch the distro package without installing it and use the
+    # library from a private folder (what Marsa could ship next to mysqld).
+    mkdir -p "$W/libs/x"
+    (cd "$W/libs" && { apt-get download libaio1t64 || apt-get download libaio1; }) >/dev/null 2>&1
+    for d in "$W"/libs/*.deb; do [ -f "$d" ] && dpkg-deb -x "$d" "$W/libs/x"; done
+    so="$(find "$W/libs/x" -type f -name 'libaio.so.1*' | head -1)"
+    if [ -n "$so" ]; then
+      ln -sf "$so" "$(dirname "$so")/libaio.so.1"
+      export LD_LIBRARY_PATH="$(dirname "$so")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+      rec libaio_workaround "private copy from the distro package ($(basename "$so"), $(file_size "$so") bytes) through LD_LIBRARY_PATH, no root"
+    else
+      rec libaio_workaround "could not fetch libaio"
+    fi
+  fi
   rec glibc_needed_max "$(echo "$maxglibc" | grep GLIBC | sort -uV | tail -1)"
   rec glibcxx_needed_max "$(objdump -T "$BIN" 2>/dev/null | grep -o 'GLIBCXX_[0-9][0-9.]*' | sort -uV | tail -1)"
   rec ldd_system_libs "$(ldd "$BIN" 2>&1 | awk '{print $1}' | grep -v "^$" | tr '\n' ' ')"
   # Other distributions: only `--version`, in containers, no install.
   if [ "${S12_DOCKER:-0}" = 1 ] && command -v docker >/dev/null; then
     for img in ubuntu:22.04 debian:12 almalinux:9 alpine:3.20; do
+      docker pull -q "$img" >/dev/null 2>&1
       o="$(docker run --rm -v "$ROOT:/opt/db:ro" "$img" /opt/db/bin/$MAIN --version 2>&1 | head -2 | tr '\n' ' ')"
       case "$o" in
         *"$MAIN"*"Ver "* | *"PostgreSQL"*) rec "compat_$img" "ok: $o" ;;
@@ -230,6 +252,7 @@ rec server_version_output "$VER_OUT"
 PORT=$($TOOL freeport)
 [ "$SERVER" = mysql ] && DEFAULT_PORT=3306 || DEFAULT_PORT=5432
 rec port_used "$PORT"
+EXTRA=() # extra server arguments, used by the "small config" memory test
 if [ "$SERVER" = mysql ]; then
   PIDFILE="$W/mysqld.pid"
   SRVLOG="$W/mysqld.err"
@@ -237,6 +260,8 @@ if [ "$SERVER" = mysql ]; then
     SRV_CMD=("$ROOT/bin/mysqld" --no-defaults --basedir="$ROOT" --datadir="$DATA" --port="$1"
       --bind-address=127.0.0.1 --mysqlx=OFF --socket="$SOCK/mysql.sock" --pid-file="$PIDFILE"
       --log-error="$SRVLOG")
+    [ ${#EXTRA[@]} -gt 0 ] && SRV_CMD=("${SRV_CMD[@]}" "${EXTRA[@]}")
+    return 0
   }
   do_init() {
     "$ROOT/bin/mysqld" --no-defaults --initialize-insecure --basedir="$ROOT" --datadir="$DATA" --log-error="$W/init.err"
@@ -261,6 +286,8 @@ else
   SRVLOG="$W/stdout.log" # postgres logs to stderr
   srv_cmd() {
     SRV_CMD=("$ROOT/bin/postgres" -D "$DATA" -p "$1" -c listen_addresses=127.0.0.1 -c unix_socket_directories="$SOCK")
+    [ ${#EXTRA[@]} -gt 0 ] && SRV_CMD=("${SRV_CMD[@]}" "${EXTRA[@]}")
+    return 0
   }
   do_init() { "$ROOT/bin/initdb" -D "$DATA" -U postgres -A trust -E UTF8 --locale=C; }
   RECOVERY_RE='automatic recovery in progress|not properly shut down|was interrupted'
@@ -349,7 +376,7 @@ stop_srv() { # stop_srv METHOD TAG: stop SRV_PID by METHOD, recording how it wen
     wait "$HOLD_PID" 2>/dev/null
   fi
   rec "stop_${tag}_clean_log" "$(grep -cE "$CLEAN_RE" "$SRVLOG" 2>/dev/null)"
-  rec "stop_${tag}_leftovers" "pidfile=$([ -e "$PIDFILE" ] && echo yes || echo no) socket=$(ls "$SOCK" 2>/dev/null | tr '\n' ',')"
+  rec "stop_${tag}_leftovers" "pidfile=$([ -e "$PIDFILE" ] && echo yes || echo no) socket=$(ls -A "$SOCK" 2>/dev/null | tr '\n' ',')"
 }
 
 t0=$(ms)
@@ -388,21 +415,38 @@ done
 
 # 3. port taken by someone else
 stop_srv "$([ "$SERVER" = mysql ] && echo mysqladmin || echo pg_ctl_fast)" final1
-$TOOL hold-port 127.0.0.1 "$PORT" >/dev/null 2>&1 &
+$TOOL hold-port 127.0.0.1 "$PORT" >"$W/holdport.out" 2>&1 &
 HP=$!
 sleep 1
+rec port_conflict_setup "port held by another program: $($TOOL tcp 127.0.0.1 "$PORT" && echo yes || echo NO) ($(cat "$W/holdport.out" | tr '\n' ' '))"
 srv_cmd "$PORT"
+t0=$(ms)
 "${SRV_CMD[@]}" >"$W/conflict.out" 2>&1 &
 CP=$!
 if wait_gone "$CP" 40; then
   wait "$CP" 2>/dev/null
-  rec port_conflict "server exited with code $? ; $(grep -hiE 'already in use|already running|bind|address' "$W/conflict.out" "$SRVLOG" 2>/dev/null | tail -2 | tr '\n' ' ')"
+  rec port_conflict "server exited with code $? after $(($(ms) - t0)) ms; $(grep -hiE 'already in use|already running|bind|address|FATAL' "$W/conflict.out" "$SRVLOG" 2>/dev/null | tail -2 | tr '\n' ' ')"
 else
-  rec port_conflict "server kept running although the port was taken"
+  rec port_conflict "server kept running 40 s although the port was taken; $(tail -3 "$W/conflict.out" | tr '\n' ' ')"
   kill -KILL "$CP" 2>/dev/null
 fi
 kill "$HP" 2>/dev/null
 wait "$HP" 2>/dev/null
+
+# 3b. memory with a small config (what Marsa could pass on a dev machine)
+if [ "$SERVER" = mysql ]; then
+  EXTRA=(--performance-schema=OFF --innodb-buffer-pool-size=64M --innodb-log-buffer-size=8M --max-connections=50)
+else
+  EXTRA=(-c shared_buffers=32MB -c max_connections=20)
+fi
+if start_srv "$PORT" tuned; then
+  sleep 3
+  rec rss_idle_small_config_kb "$(tree_rss_kb "$SRV_PID")"
+  [ "$OS" = Linux ] && rec pss_idle_small_config_kb "$(tree_pss_kb "$SRV_PID")"
+  rec small_config_args "${EXTRA[*]}"
+  stop_srv "$([ "$SERVER" = mysql ] && echo mysqladmin || echo pg_ctl_fast)" tuned
+fi
+EXTRA=()
 
 # 4. default port (no admin rights needed: both are above 1024)
 if $TOOL tcp 127.0.0.1 "$DEFAULT_PORT"; then
@@ -431,7 +475,7 @@ orphan_start() { # orphan_start -> PARENT, CHILD (server pid)
 orphan_report() { # orphan_report PREFIX
   rec "$1_server_alive" "$(alive "$CHILD" && echo yes || echo no) (parent alive: $(alive "$PARENT" && echo yes || echo no); server ppid now: $(ps -o ppid= -p "$CHILD" 2>/dev/null | tr -d ' '))"
   rec "$1_pidfile" "$([ -e "$PIDFILE" ] && echo "present, pid $(head -1 "$PIDFILE")" || echo absent)"
-  rec "$1_socket_files" "$(ls "$SOCK" 2>/dev/null | tr '\n' ' ')"
+  rec "$1_socket_files" "$(ls -A "$SOCK" 2>/dev/null | tr '\n' ' ')"
   rec "$1_port_held" "$($TOOL tcp 127.0.0.1 "$PORT" && echo yes || echo no)"
 }
 
@@ -445,13 +489,14 @@ orphan_report orphan_after_parent_kill
 rec orphan_still_answers "$(smoke "$PORT" 2>&1 | head -2 | tr '\n' ' ')"
 # a second marsad would try to start it again
 srv_cmd "$PORT"
+t0=$(ms)
 "${SRV_CMD[@]}" >"$W/second.out" 2>&1 &
 SP=$!
-if wait_gone "$SP" 40; then
+if wait_gone "$SP" 150; then
   wait "$SP" 2>/dev/null
-  rec orphan_second_start "refused, exit code $? ; $(grep -hiE 'lock|already|in use|FATAL|Unable|ERROR' "$W/second.out" "$SRVLOG" 2>/dev/null | tail -3 | tr '\n' ' ')"
+  rec orphan_second_start "refused after $(($(ms) - t0)) ms, exit code $? ; $(cat "$W/second.out" | grep -iE 'lock|already|in use|FATAL|Unable|ERROR' | tail -3 | tr '\n' ' ') $([ "$SERVER" = mysql ] && tail -n 40 "$SRVLOG" | grep -iE 'lock|already|in use|Unable|ERROR' | tail -2 | tr '\n' ' ')"
 else
-  rec orphan_second_start "second server kept running (two servers on one data dir?)"
+  rec orphan_second_start "second server was still running after 150 s (retrying, or two servers on one data dir)"
   kill -KILL "$SP" 2>/dev/null
 fi
 # recovery A: read the pid file, check, send SIGTERM/SIGINT (what marsad would do)
@@ -460,7 +505,7 @@ rec orphan_pid_matches_pidfile "$([ "$opid" = "$CHILD" ] && echo yes || echo "NO
 # mysqld: SIGTERM. postgres: SIGINT (fast); with no client SIGTERM would do too.
 kill -"$([ "$SERVER" = mysql ] && echo TERM || echo INT)" "$opid" 2>/dev/null
 if wait_gone "$CHILD" 30; then
-  rec orphan_stopped_by_pidfile "yes; pidfile now: $([ -e "$PIDFILE" ] && echo present || echo removed); sockets: $(ls "$SOCK" 2>/dev/null | tr '\n' ' ')"
+  rec orphan_stopped_by_pidfile "yes; pidfile now: $([ -e "$PIDFILE" ] && echo present || echo removed); sockets: $(ls -A "$SOCK" 2>/dev/null | tr '\n' ' ')"
 else
   rec orphan_stopped_by_pidfile "NO, still running after the signal"
   kill -KILL "$CHILD"
