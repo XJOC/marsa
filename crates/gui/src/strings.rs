@@ -110,6 +110,10 @@ pub const RUN_SETUP_HINT: &str =
     "Each step checks what is already done, so running setup again is safe.";
 /// When setup had no step to report.
 pub const SETUP_NOTHING: &str = "Nothing to set up.";
+/// Why setup skipped the trust when no Caddy is installed to make the
+/// certificate authority (task M5-15).
+const SETUP_CADDY_NOT_INSTALLED: &str = "Caddy is not installed, so Marsa's certificate \
+     authority does not exist yet. Install Caddy, then run setup again.";
 
 // Settings (task M5-10).
 
@@ -356,7 +360,11 @@ pub fn setup_lines(report: &SetupReport) -> Vec<ReportLine> {
     }
     for skipped in &report.skipped {
         let step = setup_step(&skipped.op);
-        let reason = error_text(&skipped.code);
+        let reason = if skipped.code == "caddy_not_installed" {
+            SETUP_CADDY_NOT_INSTALLED.to_owned()
+        } else {
+            error_text(&skipped.code)
+        };
         push(format!("{step}: skipped. {reason}"), false);
         if skipped.code == "redirect_port_held" {
             for holder in &report.port_holders {
@@ -765,8 +773,8 @@ fn error_message(code: &str) -> Option<&'static str> {
              Run setup again; if it repeats, report it."
         }
         "ca_not_ready" => {
-            "Marsa's certificate authority does not exist yet: Caddy makes it when it first \
-             serves a secure site. Run setup again after that."
+            "Caddy did not make Marsa's certificate authority in time. See why in the file \
+             logs/caddy.log, then run setup again."
         }
         "ca_unreadable" => {
             "Cannot read the root certificate of Marsa's certificate authority, or it is not a \
@@ -1405,6 +1413,30 @@ mod tests {
                 ("Port 80 is used by nginx-arm64 (PID 15464, Herd).", false),
                 ("Port 443 is used by an unknown program.", false),
             ]
+        );
+    }
+
+    /// Task M5-15: the two reasons for no CA say what to do.
+    #[test]
+    fn a_skipped_trust_says_how_to_get_the_ca() {
+        let skipped = |code: &str| SetupReport {
+            skipped: vec![SetupSkip {
+                op: "trust_install".into(),
+                code: code.into(),
+            }],
+            ..SetupReport::default()
+        };
+        let no_caddy =
+            format!("Trust Marsa's HTTPS certificates: skipped. {SETUP_CADDY_NOT_INSTALLED}");
+        assert_eq!(
+            texts(&setup_lines(&skipped("caddy_not_installed"))),
+            [(no_caddy.as_str(), false)]
+        );
+        let lines = setup_lines(&skipped("ca_not_ready"));
+        assert!(
+            lines[0].text.contains("logs/caddy.log"),
+            "{}",
+            lines[0].text
         );
     }
 

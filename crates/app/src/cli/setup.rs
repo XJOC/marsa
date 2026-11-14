@@ -9,8 +9,9 @@
 //! prints one line per step: done, already done, failed, or skipped and why.
 //!
 //! Exit code 1 if a step failed or the helper did not run (the prompt was
-//! cancelled, for example). A skipped step alone, such as `ca_not_ready`
-//! before the first secure site, is not a failure: its line says what to do.
+//! cancelled, for example). A skipped step alone, such as
+//! `caddy_not_installed` before Caddy is installed, is not a failure: its
+//! line says what to do.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -94,7 +95,12 @@ pub fn render(report: &SetupReport, data_dir: &Path) -> String {
             path: Some(&ca_root),
             ..Details::default()
         };
-        let reason = strings::message(&code, &details);
+        // The general text of this code is for `marsa services start caddy`.
+        let reason = if code == "caddy_not_installed" {
+            strings::SETUP_CADDY_NOT_INSTALLED.to_owned()
+        } else {
+            strings::message(&code, &details)
+        };
         push(strings::setup_skipped(&step, &reason, &code));
         if code == "redirect_port_held" {
             for holder in &report.port_holders {
@@ -219,10 +225,28 @@ mod tests {
         assert!(text.contains("[resolver_foreign]\n"), "{text}");
         assert!(
             text.contains(
-                "Trust Marsa's HTTPS certificates: skipped. Marsa's certificate authority does \
-                 not exist yet"
+                "Trust Marsa's HTTPS certificates: skipped. Caddy did not make Marsa's \
+                 certificate authority in time"
             ),
             "{text}"
+        );
+        assert!(text.contains("logs/caddy.log"), "{text}");
+        assert!(text.ends_with("[ca_not_ready]\n"), "{text}");
+    }
+
+    /// Task M5-15: no Caddy, so no CA. The line says to install Caddy, then
+    /// to run setup again, and names no path.
+    #[test]
+    fn no_caddy_says_to_install_it_then_to_run_setup_again() {
+        let report = SetupReport {
+            skipped: vec![skip("trust_install", "caddy_not_installed")],
+            ..SetupReport::default()
+        };
+        assert_eq!(
+            render(&report, &data()),
+            "Trust Marsa's HTTPS certificates: skipped. Caddy is not installed, so Marsa's \
+             certificate authority does not exist yet. Run \"marsa install caddy\", then run \
+             \"marsa setup\" again. [caddy_not_installed]\n"
         );
     }
 

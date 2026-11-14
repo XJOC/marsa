@@ -6,7 +6,8 @@
 //!
 //! In M3 there are no sites yet (they come in M4), so the config has one
 //! server that answers a fixed text. That proves Caddy runs and listens where
-//! we expect.
+//! we expect. It also has Marsa's CA in Caddy's `pki` app, so Caddy makes the
+//! CA when it starts, before any site exists (task M5-15).
 //!
 //! [`sites_config`] adds the sites (M4): PHP through php-fpm or php-cgi,
 //! static files, and Node proxies, with HTTPS from Caddy's own CA.
@@ -160,9 +161,10 @@ impl CaddyPaths {
     /// The root certificate of Marsa's CA:
     /// `caddy/data/caddy/pki/authorities/marsa/root.crt`.
     ///
-    /// Caddy writes it there once the config has a secure site: [`caddy_env`]
-    /// sets `XDG_DATA_HOME` to `caddy/data`, Caddy adds `caddy`, and the CA id
-    /// in [`sites_config`] is `marsa`. Nothing is read or created here.
+    /// Caddy writes it there when it loads a config, with or without sites:
+    /// [`caddy_env`] sets `XDG_DATA_HOME` to `caddy/data`, Caddy adds
+    /// `caddy`, and the CA id in [`caddy_config`] is `marsa`. Nothing is read
+    /// or created here.
     pub fn ca_root(&self) -> PathBuf {
         self.home
             .join(DATA_HOME)
@@ -277,6 +279,12 @@ impl CaddyInput {
 
 /// Builds the Caddy config as JSON. The same input always gives the same
 /// output.
+///
+/// The `pki` app holds Marsa's CA even with no site, so Caddy makes the CA
+/// (`root.crt` at [`CaddyPaths::ca_root`]) as soon as it loads this config,
+/// and `marsa setup` can trust it before the first secure site (task M5-15).
+/// Caddy does not add the CA to the system trust store (`install_trust`):
+/// setup does that.
 pub fn caddy_config(input: &CaddyInput) -> Value {
     json!({
         "admin": {
@@ -301,6 +309,15 @@ pub fn caddy_config(input: &CaddyInput) -> Value {
                         }],
                         // No sites and no certificates yet (M4).
                         "automatic_https": { "disable": true },
+                    },
+                },
+            },
+            "pki": {
+                "certificate_authorities": {
+                    CA_ID: {
+                        "name": CA_NAME,
+                        "root_common_name": CA_NAME,
+                        "install_trust": false,
                     },
                 },
             },
@@ -394,8 +411,9 @@ impl CaddyError {
 ///   sends every secure site to HTTPS with a `308`, and answers any other
 ///   host with the greeting of [`caddy_config`].
 /// - The `marsa-tls` server (on `https_port`) serves the secure sites, with
-///   certificates from our own CA in Caddy. Caddy does not add the CA to the
-///   system trust store: the helper does that (M4-09).
+///   certificates from our own CA, the one in the `pki` app of
+///   [`caddy_config`]. Caddy does not add the CA to the trust store:
+///   `marsa setup` does that.
 ///
 /// The sites are sorted by name first, so the same sites in any order give
 /// the same JSON.
@@ -451,21 +469,13 @@ pub fn sites_config(
         // The `marsa` server already sends HTTP to HTTPS.
         "automatic_https": { "disable_redirects": true },
     });
+    // The CA itself is already in the `pki` app of `caddy_config`.
     config["apps"]["tls"] = json!({
         "automation": {
             "policies": [{
                 "subjects": secure_hosts,
                 "issuers": [{ "module": "internal", "ca": CA_ID }],
             }],
-        },
-    });
-    config["apps"]["pki"] = json!({
-        "certificate_authorities": {
-            CA_ID: {
-                "name": CA_NAME,
-                "root_common_name": CA_NAME,
-                "install_trust": false,
-            },
         },
     });
     Ok(config)
@@ -844,7 +854,7 @@ mod tests {
 
     /// The root is where Caddy writes it: under `XDG_DATA_HOME` from
     /// `caddy_env`, then `caddy/pki/authorities/<ca id>`, with the CA id from
-    /// the config of a secure site.
+    /// the config of a secure site. The config with no site has the same CA.
     #[test]
     fn ca_root_follows_caddy_env_and_the_ca_id() {
         let dir = tempfile::tempdir().expect("create a temp dir");
@@ -856,6 +866,8 @@ mod tests {
             .as_str()
             .expect("the issuer names a CA");
         assert!(config["apps"]["pki"]["certificate_authorities"][ca_id].is_object());
+        let no_sites = caddy_config(&CaddyInput::default());
+        assert!(no_sites["apps"]["pki"]["certificate_authorities"][ca_id].is_object());
 
         let root = data_home
             .join("caddy")
@@ -1083,6 +1095,48 @@ mod tests {
             "php_site_without_a_pool",
             build(&[legacy], &windows_pools())
         );
+    }
+
+    /// Every config has Marsa's CA, also with no site or with no secure
+    /// site, so Caddy makes the CA when it starts and `marsa setup` can
+    /// trust it at once (task M5-15). Caddy never trusts it itself. Without a
+    /// secure site there is still nothing to issue: no `tls` app and no
+    /// HTTPS server.
+    #[test]
+    fn every_config_has_the_ca_and_caddy_never_trusts_it() {
+        let plain = site(
+            "legacy",
+            SiteKind::Php,
+            "/code/legacy",
+            Some("8.3.14"),
+            false,
+        );
+        let no_secure_site = [
+            caddy_config(&CaddyInput::default()),
+            build(&[], &socket_pools()),
+            build(&[plain], &socket_pools()),
+        ];
+        let with_secure_sites = [
+            build(&[shop()], &socket_pools()),
+            build(&four_sites(), &windows_pools()),
+        ];
+        for config in no_secure_site.iter().chain(&with_secure_sites) {
+            let cas = config["apps"]["pki"]["certificate_authorities"]
+                .as_object()
+                .expect("a pki app with its CAs");
+            assert_eq!(cas.len(), 1, "{config}");
+            let ca = &cas[CA_ID];
+            assert_eq!(ca["name"], CA_NAME, "{config}");
+            assert_eq!(ca["root_common_name"], CA_NAME, "{config}");
+            assert_eq!(ca["install_trust"], false, "{config}");
+        }
+        for config in &no_secure_site {
+            assert!(config["apps"].get("tls").is_none(), "{config}");
+            let servers = config["apps"]["http"]["servers"]
+                .as_object()
+                .expect("the servers");
+            assert!(!servers.contains_key(TLS_SERVER), "{config}");
+        }
     }
 
     #[test]
