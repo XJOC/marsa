@@ -75,6 +75,8 @@ const RESTART: [&str; 2] = ["restart", UNIT];
 const START: [&str; 2] = ["start", UNIT];
 /// The end of a message when systemd-resolved stays down.
 const STOPPED: &str = "systemd-resolved does not run now, so no name resolves until it starts";
+/// The end of a message when a restart failed and the old process runs on.
+const OLD_RUNS: &str = "systemd-resolved may use Marsa's server until it restarts";
 
 const INSTALL: &str = "resolved_install";
 const REMOVE: &str = "resolved_remove";
@@ -101,17 +103,21 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
     match in_place {
         // The same file, checked again (read only): it may never have been
         // loaded (a crash before the restart), or another global server came
-        // later.
-        Some(true) => {
-            if check(system, Some(&ours)).is_ok() {
-                return result(INSTALL, Outcome::Unchanged);
+        // later. A restart cannot give a connection a DNS server, so without
+        // one the working file stays.
+        Some(true) => match check(system, &ours, true) {
+            Ok(()) => return result(INSTALL, Outcome::Unchanged),
+            Err((code, reason)) if code == RESOLVED_NO_LINK_DNS => {
+                let message = format!("{reason}; nothing was changed");
+                return OpResult::failed(INSTALL, code, message);
             }
-        }
+            Err(_) => {}
+        },
         // No file of Marsa's yet: what can be told without it is checked
         // first, with nothing written and no restart.
         None => {
-            if let Err((code, reason)) = check(system, None) {
-                let message = format!("{reason}, so nothing was changed");
+            if let Err((code, reason)) = check(system, &ours, false) {
+                let message = format!("{reason}; nothing was changed");
                 return OpResult::failed(INSTALL, code, message);
             }
         }
@@ -126,7 +132,7 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
     }
     let checked = restart(system)
         .map_err(|reason| (RESOLVED_RESTART_FAILED, reason))
-        .and_then(|()| check(system, Some(&ours)));
+        .and_then(|()| check(system, &ours, true));
     let Err((code, reason)) = checked else {
         return result(INSTALL, Outcome::Done);
     };
@@ -136,12 +142,16 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
         Ok(()) => "was removed again",
         Err(_) => "could not be removed",
     };
-    let _ = restart(system);
-    if keep_running(system) {
-        OpResult::failed(INSTALL, code, format!("{reason}; {FILE} {cleanup}"))
-    } else {
-        let message = format!("{reason}; {FILE} {cleanup}; {STOPPED}");
-        OpResult::failed(INSTALL, RESOLVED_STOPPED, message)
+    let message = format!("{reason}; {FILE} {cleanup}");
+    match settle(system, restart(system)) {
+        Restarted::Fine => OpResult::failed(INSTALL, code, message),
+        Restarted::OldStillRuns(why) => {
+            let message = format!("{message}, but {why}; {OLD_RUNS}");
+            OpResult::failed(INSTALL, code, message)
+        }
+        Restarted::Stopped(_) => {
+            OpResult::failed(INSTALL, RESOLVED_STOPPED, format!("{message}; {STOPPED}"))
+        }
     }
 }
 
@@ -161,23 +171,17 @@ pub fn remove(system: &impl System) -> OpResult {
     if running(system).is_err() {
         return result(REMOVE, Outcome::Done);
     }
-    let Err(reason) = restart(system) else {
-        return result(REMOVE, Outcome::Done);
-    };
-    // The old process still runs, with Marsa's server.
-    if running(system).is_ok() {
-        let message = format!(
-            "{FILE} was deleted, but {reason}; systemd-resolved may use Marsa's server until it \
-             restarts"
-        );
-        return OpResult::failed(REMOVE, RESOLVED_RESTART_FAILED, message);
+    match settle(system, restart(system)) {
+        Restarted::Fine => result(REMOVE, Outcome::Done),
+        Restarted::OldStillRuns(why) => {
+            let message = format!("{FILE} was deleted, but {why}; {OLD_RUNS}");
+            OpResult::failed(REMOVE, RESOLVED_RESTART_FAILED, message)
+        }
+        Restarted::Stopped(why) => {
+            let message = format!("{FILE} was deleted, but {why}; {STOPPED}");
+            OpResult::failed(REMOVE, RESOLVED_STOPPED, message)
+        }
     }
-    // It stopped: a start reads the files without Marsa's.
-    if keep_running(system) {
-        return result(REMOVE, Outcome::Done);
-    }
-    let message = format!("{FILE} was deleted, but {reason}; {STOPPED}");
-    OpResult::failed(REMOVE, RESOLVED_STOPPED, message)
 }
 
 /// LF only, with a final newline.
@@ -219,34 +223,53 @@ fn restart(system: &impl System) -> Result<(), String> {
     }
 }
 
-/// Whether systemd-resolved runs, after one more start if it did not.
-/// Without it, no name resolves on most machines.
-fn keep_running(system: &impl System) -> bool {
+/// Where a restart left systemd-resolved.
+enum Restarted {
+    /// It runs with the files as they are now.
+    Fine,
+    /// The restart failed, and the old process runs on with the files as
+    /// they were. The reason is the restart's.
+    OldStillRuns(String),
+    /// It does not run, also after one more start: on most machines no name
+    /// resolves. The reason is the restart's.
+    Stopped(String),
+}
+
+/// After a failed restart: whether the old process runs on, or else one
+/// more start, which reads the files as they are now.
+fn settle(system: &impl System, restarted: Result<(), String>) -> Restarted {
+    let Err(reason) = restarted else {
+        return Restarted::Fine;
+    };
     if running(system).is_ok() {
-        return true;
+        return Restarted::OldStillRuns(reason);
     }
     let _ = system.run(SYSTEMCTL, &RESET_FAILED);
     let _ = system.run(SYSTEMCTL, &START);
-    running(system).is_ok()
+    if running(system).is_ok() {
+        Restarted::Fine
+    } else {
+        Restarted::Stopped(reason)
+    }
 }
 
 /// Whether `.test` names reach `ours` and other names still resolve, from
-/// `resolvectl dns`. `ours` is `None` before Marsa's file is in place: then
-/// no global server may be listed at all.
-fn check(system: &impl System, ours: Option<&str>) -> Result<(), (&'static str, String)> {
-    let listed = system.run(RESOLVECTL, &["dns"]);
-    let Some(dns) = read_dns(&listed) else {
-        let reason = if program::succeeded(&listed) {
+/// `resolvectl dns`. `listed`: whether `ours` must be in the global list;
+/// not before Marsa's file is written. Either way it is not another server.
+fn check(system: &impl System, ours: &str, listed: bool) -> Result<(), (&'static str, String)> {
+    let output = system.run(RESOLVECTL, &["dns"]);
+    let Some(dns) = read_dns(&output) else {
+        let reason = if program::succeeded(&output) {
             "printed no global line".to_owned()
         } else {
-            program::failure(&listed)
+            program::failure(&output)
         };
         return Err((RESOLVED_CHECK_FAILED, format!("resolvectl dns {reason}")));
     };
     let others = dns
         .global
         .iter()
-        .filter(|server| Some(server.as_str()) != ours)
+        .filter(|server| server.as_str() != ours)
         .count();
     if others > 0 {
         // How many, never which: the addresses are the user's own.
@@ -256,9 +279,7 @@ fn check(system: &impl System, ours: Option<&str>) -> Result<(), (&'static str, 
         );
         return Err((RESOLVED_OTHER_DNS, reason));
     }
-    if let Some(ours) = ours
-        && !dns.global.iter().any(|server| server == ours)
-    {
+    if listed && !dns.global.iter().any(|server| server == ours) {
         let reason = "systemd-resolved does not list Marsa's DNS server".to_owned();
         return Err((RESOLVED_CHECK_FAILED, reason));
     }
@@ -706,7 +727,7 @@ mod tests {
                 message_of(&failed),
                 format!(
                     "systemd-resolved has {count} other global DNS server(s), so .test names \
-                     would not resolve, so nothing was changed"
+                     would not resolve; nothing was changed"
                 )
             );
             assert_eq!(linux.file(), None);
@@ -740,7 +761,7 @@ mod tests {
         linux.link_server = false;
         let failed = install(18053, &linux);
         assert_eq!(code_of(&failed), RESOLVED_NO_LINK_DNS);
-        assert!(message_of(&failed).ends_with("so nothing was changed"));
+        assert!(message_of(&failed).ends_with("; nothing was changed"));
         assert_eq!(linux.file(), None);
         assert_eq!(linux.commands(), [ACTIVE, LISTED]);
     }
@@ -753,7 +774,7 @@ mod tests {
         assert_eq!(code_of(&failed), RESOLVED_CHECK_FAILED);
         assert_eq!(
             message_of(&failed),
-            "resolvectl dns exited with code 1, so nothing was changed"
+            "resolvectl dns exited with code 1; nothing was changed"
         );
         assert_eq!(linux.file(), None);
     }
@@ -787,7 +808,7 @@ mod tests {
         assert_eq!(linux.file(), None);
         assert_eq!(
             linux.commands(),
-            [ACTIVE, LISTED, RESET, RESTARTED, RESET, RESTARTED, ACTIVE]
+            [ACTIVE, LISTED, RESET, RESTARTED, RESET, RESTARTED]
         );
         let file_at = linux.file_at.borrow();
         // The file was there at the first restart, and gone at the second.
@@ -838,7 +859,7 @@ mod tests {
         assert_eq!(linux.file(), None);
         assert_eq!(
             linux.commands(),
-            [ACTIVE, RESET, RESTARTED, LISTED, RESET, RESTARTED, ACTIVE]
+            [ACTIVE, RESET, RESTARTED, LISTED, RESET, RESTARTED]
         );
         assert!(linux.loaded.borrow().is_none());
     }
@@ -866,6 +887,53 @@ mod tests {
         assert_eq!(code_of(&failed), RESOLVED_CHECK_FAILED);
         assert!(message_of(&failed).ends_with(&format!("; {CONF} could not be removed")));
         assert!(linux.file().is_some());
+    }
+
+    /// Setup run again with no network: a restart cannot give a connection
+    /// a DNS server, so the working file stays, and nothing restarts.
+    #[test]
+    fn our_working_file_stays_when_no_connection_has_a_dns_server() {
+        let mut linux = Linux::with_file(&ours(18053));
+        linux.link_server = false;
+        let failed = install(18053, &linux);
+        assert_eq!(code_of(&failed), RESOLVED_NO_LINK_DNS);
+        assert!(message_of(&failed).ends_with("; nothing was changed"));
+        assert_eq!(linux.file(), Some((ours(18053), OLD_MODE)));
+        assert_eq!(linux.commands(), [ACTIVE, LISTED]);
+    }
+
+    /// Marsa's server still loaded with no file (a removal whose restart
+    /// failed): not another server, so the install goes on.
+    #[test]
+    fn our_own_server_still_loaded_is_not_another_server() {
+        let linux = Linux::new();
+        *linux.loaded.borrow_mut() = Some(ours(18053));
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(linux.file(), Some((ours(18053), 0o644)));
+    }
+
+    /// Both restarts fail and the old process runs on: the message says it
+    /// may still use Marsa's server.
+    #[test]
+    fn a_failed_rollback_restart_with_the_old_process_running_says_so() {
+        let linux = Linux::new();
+        linux.failing_restarts.set(2);
+        let old = OldProcess(linux);
+        let failed = install(18053, &old);
+        assert_eq!(code_of(&failed), RESOLVED_RESTART_FAILED);
+        assert_eq!(
+            message_of(&failed),
+            format!(
+                "systemctl restart systemd-resolved.service exited with code 1; {CONF} was \
+                 removed again, but systemctl restart systemd-resolved.service exited with code \
+                 1; systemd-resolved may use Marsa's server until it restarts"
+            )
+        );
+        assert_eq!(
+            old.0.commands(),
+            [ACTIVE, LISTED, RESET, RESTARTED, RESET, RESTARTED, ACTIVE]
+        );
+        assert_eq!(old.0.file(), None);
     }
 
     #[test]
@@ -921,9 +989,7 @@ mod tests {
         assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
         assert_eq!(
             linux.commands(),
-            [
-                ACTIVE, RESET, RESTARTED, ACTIVE, ACTIVE, RESET, STARTED, ACTIVE
-            ]
+            [ACTIVE, RESET, RESTARTED, ACTIVE, RESET, STARTED, ACTIVE]
         );
         assert!(linux.active.get() && linux.loaded.borrow().is_none());
     }
