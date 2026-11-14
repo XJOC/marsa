@@ -49,6 +49,10 @@ serde = { version = "1", features = ["derive"] }
 # `package.json` (task M1-04), and typed structs read the manifest (M2-02).
 serde_json = { version = "1", default-features = false, features = ["std"] }
 sha2 = "0.11"
+# The SHA-1 thumbprint of Marsa's CA on Windows (task M4-19e, ADR 0018):
+# `certutil` finds a certificate by it and not by a SHA-256. It only finds
+# the certificate and never decides about trust.
+sha1 = "0.11"
 # No `xattr`: the installer does not keep extended attributes (task M2-03).
 tar = { version = "0.4", default-features = false }
 # The menu-bar icon `marsa-tray` (task M5-04): `tao` runs the event loop on

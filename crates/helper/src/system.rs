@@ -72,15 +72,29 @@ pub trait System {
     /// macOS and Linux, which is also what a `System` without its own
     /// answer gives.
     fn system_dir(&self) -> io::Result<PathBuf> {
-        Err(no_system_dir())
+        Err(only_windows())
+    }
+
+    /// Marsa's own folder for the helper on Windows, `<Program Files>\Marsa`,
+    /// which only administrators can write (ADR 0018). [`RealSystem`] asks
+    /// Windows for `Program Files`: a user can change the `ProgramFiles`
+    /// variable, but not that answer. `Unsupported` elsewhere.
+    fn install_dir(&self) -> io::Result<PathBuf> {
+        Err(only_windows())
+    }
+
+    /// Runs `program` from the Windows system folder (`certutil.exe`), never
+    /// through a shell. `program` is a constant file name in the code, so the
+    /// request cannot choose what runs. The time limit is that of
+    /// [`System::run`]. `Unsupported` elsewhere.
+    fn run_system_tool(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
+        let _ = (program, args);
+        Err(only_windows())
     }
 }
 
-fn no_system_dir() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        "only Windows has a system folder",
-    )
+fn only_windows() -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "only on Windows")
 }
 
 /// The real disk and processes.
@@ -155,13 +169,30 @@ impl System for RealSystem {
         std::env::current_exe()
     }
 
+    // The three below are Windows only: the other systems have no such
+    // folders, and no op of theirs asks for them.
     fn system_dir(&self) -> io::Result<PathBuf> {
-        // Windows only: the other systems have no such folder, and no op of
-        // theirs asks for it.
         #[cfg(windows)]
         return crate::windows::system_dir();
         #[cfg(not(windows))]
-        Err(no_system_dir())
+        Err(only_windows())
+    }
+
+    fn install_dir(&self) -> io::Result<PathBuf> {
+        #[cfg(windows)]
+        return Ok(crate::windows::program_files()?.join("Marsa"));
+        #[cfg(not(windows))]
+        Err(only_windows())
+    }
+
+    fn run_system_tool(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
+        #[cfg(windows)]
+        return self.run_in_system_dir(program, args, RUN_TIMEOUT);
+        #[cfg(not(windows))]
+        {
+            let _ = (program, args);
+            Err(only_windows())
+        }
     }
 }
 
@@ -169,8 +200,8 @@ impl RealSystem {
     /// `run` with a time limit. A program still running at the limit is
     /// killed and reaped, and the error is of kind `TimedOut`.
     ///
-    /// The environment is empty except `PATH`. The Windows environment
-    /// (`SystemRoot`, Windows folders in `PATH`) is set in task M4-19.
+    /// The environment is empty except `PATH`. On Windows the helper runs
+    /// its tools through [`System::run_system_tool`] instead.
     fn run_within(
         &self,
         program: &'static str,
@@ -192,9 +223,46 @@ impl RealSystem {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // The child must not start in the caller's folder, which the user
-        // controls. `/` is a Unix path; Windows is set in task M4-19.
+        // controls. `/` is a Unix path; on Windows `run_in_system_dir` sets
+        // the system folder.
         #[cfg(unix)]
         command.current_dir("/");
+        finish(command.spawn()?, timeout)
+    }
+
+    /// `<System32>\<program>`, with an environment of the two variables
+    /// Windows tools need to start (`SystemRoot`, `windir`) and a `PATH` of
+    /// the Windows folders, in the system folder. Nothing of the caller's
+    /// environment reaches it.
+    #[cfg(windows)]
+    fn run_in_system_dir(
+        &self,
+        program: &'static str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> io::Result<RunOutput> {
+        let name = Path::new(program);
+        if name.file_name() != Some(name.as_os_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the program is not a plain file name",
+            ));
+        }
+        let dir = crate::windows::system_dir()?;
+        let root = dir.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "the system folder has no parent")
+        })?;
+        let mut command = Command::new(dir.join(name));
+        command
+            .args(args)
+            .env_clear()
+            .env("SystemRoot", root)
+            .env("windir", root)
+            .env("PATH", path)
+            .current_dir(&dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         finish(command.spawn()?, timeout)
     }
 }
@@ -383,6 +451,8 @@ mod fake {
         /// What `system_dir` returns. `None`, the default, is a system
         /// without one: macOS or Linux.
         pub system_dir: Option<PathBuf>,
+        /// What `install_dir` returns, like `system_dir`.
+        pub install_dir: Option<PathBuf>,
     }
 
     impl FakeSystem {
@@ -452,7 +522,16 @@ mod fake {
         }
 
         fn system_dir(&self) -> io::Result<PathBuf> {
-            self.system_dir.clone().ok_or_else(super::no_system_dir)
+            self.system_dir.clone().ok_or_else(super::only_windows)
+        }
+
+        fn install_dir(&self) -> io::Result<PathBuf> {
+            self.install_dir.clone().ok_or_else(super::only_windows)
+        }
+
+        /// The same log and scripted outputs as `run`, under the bare name.
+        fn run_system_tool(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
+            self.run(program, args)
         }
     }
 }

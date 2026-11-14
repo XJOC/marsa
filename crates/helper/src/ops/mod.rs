@@ -5,13 +5,14 @@
 //!
 //! Each pair of macOS ops has its own file, so their tasks do not touch the
 //! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). On
-//! Windows, `hosts` (M4-19d) is written. The Linux ops fail with
-//! `op_not_implemented` until their tasks.
+//! Windows, `hosts` (M4-19d) and `trust_windows` (M4-19e) are written. The
+//! Linux ops fail with `op_not_implemented` until their tasks.
 
 mod hosts;
 pub mod pf;
 mod resolver;
 mod trust;
+mod trust_windows;
 
 use crate::os::Os;
 use crate::request::{Op, ValidRequest};
@@ -54,16 +55,14 @@ fn removals(os: Os) -> Vec<Op> {
     match os {
         Os::Macos => vec![Op::PfRemove {}, Op::ResolverRemove {}, Op::TrustRemove {}],
         Os::Linux => vec![Op::ResolvedRemove {}, Op::TrustRemove {}],
-        Os::Windows => vec![Op::HostsRemove {}],
+        Os::Windows => vec![Op::HostsRemove {}, Op::TrustRemove {}],
     }
 }
 
-/// Windows has no `trust_*` for now: its helper service (task M4-19) accepts
-/// only the hosts ops, and trust on Windows is decided there.
+/// Which ops each OS has. Trust is on every OS, each with its own tool.
 fn supported(op: &Op, os: Os) -> bool {
     match op {
-        Op::UninstallAll {} => true,
-        Op::TrustInstall { .. } | Op::TrustRemove {} => os != Os::Windows,
+        Op::UninstallAll {} | Op::TrustInstall { .. } | Op::TrustRemove {} => true,
         Op::ResolverInstall { .. }
         | Op::ResolverRemove {}
         | Op::PfInstall { .. }
@@ -87,6 +86,8 @@ fn handle(op: &Op, os: Os, system: &impl System) -> OpResult {
         Op::PfRemove {} => pf::remove(system),
         Op::TrustInstall { pem } if os == Os::Macos => trust::install(pem, system),
         Op::TrustRemove {} if os == Os::Macos => trust::remove(system),
+        Op::TrustInstall { pem } if os == Os::Windows => trust_windows::install(pem, system),
+        Op::TrustRemove {} if os == Os::Windows => trust_windows::remove(system),
         Op::TrustInstall { .. } | Op::TrustRemove {} => not_implemented(op.name()),
         Op::HostsSync { names } => hosts::sync(names, system),
         Op::HostsRemove {} => hosts::remove(system),
@@ -179,7 +180,7 @@ mod tests {
         let table = [
             (Os::Macos, &["trust", "resolver", "pf"][..]),
             (Os::Linux, &["trust", "resolved"]),
-            (Os::Windows, &["hosts"]),
+            (Os::Windows, &["hosts", "trust"]),
         ];
         for (os, own) in table {
             for (name, code) in codes(every_op(), os) {
@@ -198,7 +199,7 @@ mod tests {
                 &["pf_remove", "resolver_remove", "trust_remove"][..],
             ),
             (Os::Linux, &["resolved_remove", "trust_remove"]),
-            (Os::Windows, &["hosts_remove"]),
+            (Os::Windows, &["hosts_remove", "trust_remove"]),
         ];
         for (os, expected) in table {
             let results = codes(json!([{ "op": "uninstall_all" }]), os);
