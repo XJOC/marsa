@@ -906,17 +906,20 @@ mod tests {
     /// small environment, and looks in the Root store for thumbprints that
     /// match nothing.
     ///
-    /// An id of digits only is an index for certutil: `000…0` lists the
-    /// store's first certificate. These ids hold a letter, and most start
-    /// with digits, as most thumbprints do: none may be read as an index
-    /// from its first digits (`1a…` as 1).
+    /// certutil reads its id as an index, a serial number, or a hash: `000…0`
+    /// lists the store's first certificate, and `000…0a` a root whose serial
+    /// number is `0a` (both seen in CI). A real SHA-1 is a 160-bit number,
+    /// too large for any serial but a crafted one. These ids are too: they
+    /// start with digits, as most thumbprints do, and none may be read as an
+    /// index from its first digits (`1a…` as 1).
     #[cfg(windows)]
     #[test]
     fn a_system_tool_runs_with_the_helpers_environment() {
         let ids = [
             "deadbeef".repeat(5),
-            format!("{}a", "0".repeat(39)),
+            format!("0{}", "c".repeat(39)),
             format!("1{}", "a".repeat(39)),
+            format!("12{}", "b".repeat(38)),
             format!("2{}", "0a".repeat(19) + "f"),
         ];
         for id in &ids {
