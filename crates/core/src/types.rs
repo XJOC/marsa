@@ -409,7 +409,8 @@ pub struct SkippedFolder {
 }
 
 /// The body of `POST /v1/sites/park`: every sub-folder of `path` becomes a
-/// site.
+/// site. Also the body of `DELETE /v1/sites/park` (task M5-09): `path` is no
+/// longer parked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParkRequest {
     /// An absolute folder.
@@ -589,6 +590,85 @@ mod autostart_tests {
         ] {
             assert!(serde_json::from_value::<AutostartRequest>(bad).is_err());
         }
+    }
+}
+
+/// The answer to `POST /v1/uninstall` (task M5-13): what `marsa uninstall
+/// --all` removed from the system.
+///
+/// One admin prompt runs the helper's `uninstall_all`. Only if the helper
+/// ran does the daemon go on: it takes away the current user's trust in
+/// Marsa's certificate authority (macOS, ADR 0015), deletes the login file
+/// (task M5-03), answers, and then stops, with Caddy, the PHP pools, and
+/// the DNS server. The data folder stays: the CLI asks about it on its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UninstallReport {
+    /// One result per step, in order: the helper's removals (`pf_remove`,
+    /// `resolver_remove`, `trust_remove` on macOS), then the daemon's own
+    /// `user_trust_remove` and `autostart_remove`. Empty when `error` says
+    /// why nothing ran.
+    #[serde(default)]
+    pub results: Vec<OpResult>,
+    /// Why the helper did not run, or why its answer cannot be used:
+    /// `uninstall_cancelled`, `uninstall_not_authorized`,
+    /// `uninstall_timed_out`, `uninstall_interrupted`,
+    /// `uninstall_helper_missing`, `uninstall_helper_unsafe`,
+    /// `uninstall_helper_failed`, or `uninstall_helper_rejected`. Nothing after the helper ran then, and
+    /// the daemon keeps running. `None` if the helper answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ApiError>,
+    /// The daemon stops right after this answer: `true` exactly when `error`
+    /// is `None`.
+    #[serde(default)]
+    pub stopping: bool,
+}
+
+/// The JSON of [`UninstallReport`], next to it, like the autostart tests.
+#[cfg(test)]
+mod uninstall_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_uninstall_report_and_a_cancelled_one() {
+        let report = UninstallReport {
+            results: vec![OpResult {
+                op: "user_trust_remove".into(),
+                status: OpStatus::Unchanged,
+                code: None,
+                message: None,
+            }],
+            error: None,
+            stopping: true,
+        };
+        let value = json!({
+            "results": [{ "op": "user_trust_remove", "status": "unchanged" }],
+            "stopping": true,
+        });
+        assert_eq!(serde_json::to_value(&report).unwrap(), value);
+        assert_eq!(
+            serde_json::from_value::<UninstallReport>(value).unwrap(),
+            report
+        );
+
+        let cancelled = UninstallReport {
+            error: Some(ApiError {
+                code: "uninstall_cancelled".into(),
+                message: "the admin prompt was cancelled".into(),
+            }),
+            ..UninstallReport::default()
+        };
+        let value = json!({
+            "results": [],
+            "error": { "code": "uninstall_cancelled", "message": "the admin prompt was cancelled" },
+            "stopping": false,
+        });
+        assert_eq!(serde_json::to_value(&cancelled).unwrap(), value);
+        // Every field may be left out.
+        assert_eq!(
+            serde_json::from_value::<UninstallReport>(json!({})).unwrap(),
+            UninstallReport::default()
+        );
     }
 }
 

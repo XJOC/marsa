@@ -22,6 +22,7 @@ use marsa_core::types::{OpStatus, PortHolder, SetupReport};
 use super::daemon::{ClientFailure, connect, failure};
 use super::sites::printable;
 use super::strings::{self, Details};
+use crate::daemon::setup_api::user_trust::{self, TrustFiles};
 
 /// Starts the daemon if needed, runs the setup, and prints its report.
 pub async fn run(data_dir: &Path) -> ExitCode {
@@ -75,7 +76,12 @@ pub fn render(report: &SetupReport, data_dir: &Path) -> String {
             OpStatus::Unchanged => strings::setup_unchanged(&step),
             OpStatus::Failed => {
                 let code = printable(result.code.as_deref().unwrap_or_default());
-                let reason = strings::message(&code, &Details::default());
+                // The uninstall's text for this code is about its record.
+                let reason = if code == user_trust::TRUST_RECORD_UNUSABLE {
+                    strings::setup_trust_dir_unusable(TrustFiles::in_dir(data_dir).dir())
+                } else {
+                    strings::message(&code, &Details::default())
+                };
                 strings::setup_failed(&step, &reason, &code)
             }
         });
@@ -219,6 +225,25 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    #[test]
+    fn an_unusable_trust_folder_names_it_and_says_to_run_setup_again() {
+        let report = SetupReport {
+            results: vec![result(
+                "trust_install",
+                OpStatus::Failed,
+                Some("trust_record_unusable"),
+            )],
+            ..SetupReport::default()
+        };
+        let text = render(&report, &data());
+        let trust = data().join("trust");
+        assert!(text.contains(&trust.display().to_string()), "{text}");
+        assert!(text.contains("not a link"), "{text}");
+        assert!(text.contains("run \"marsa setup\" again"), "{text}");
+        assert!(!text.contains("Keychain Access"), "{text}");
+        assert!(text.ends_with("[trust_record_unusable]\n"), "{text}");
     }
 
     #[test]

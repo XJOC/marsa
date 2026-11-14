@@ -609,6 +609,12 @@ fn error_message(code: &str) -> Option<&'static str> {
             "That folder's path is not valid UTF-8, so Marsa cannot serve it. Rename the folder."
         }
         "site_read_dir" => "Cannot read that folder. Check its permissions.",
+        // M5-09: `DELETE /v1/sites/{name}` and `DELETE /v1/sites/park`.
+        "site_is_parked" => {
+            "This site comes from a parked folder, so it cannot be removed alone. Remove the \
+             parked folder to stop serving it and the folder's other sites."
+        }
+        "folder_not_parked" => "That folder is not parked. It may have just been removed.",
         // `ConfigError`, for the sites settings file.
         "config_read" => "Cannot read the Marsa settings file.",
         "config_invalid" => "The Marsa settings file has an error. Fix the file, then try again.",
@@ -891,6 +897,9 @@ mod tests {
             "site_path_relative",
             "site_path_not_utf8",
             "site_read_dir",
+            // M5-09: unlink and forget.
+            "site_is_parked",
+            "folder_not_parked",
             "config_read",
             "config_invalid",
             "config_write",

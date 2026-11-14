@@ -5,7 +5,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
+use marsa::cli::Tool;
 use marsa::cli::autostart::{self, AutostartArgs};
 use marsa::cli::daemon::{self, DaemonCommand};
 use marsa::cli::default_version::{self, UseArgs};
@@ -17,6 +18,7 @@ use marsa::cli::services::{self, ServicesArgs};
 use marsa::cli::setup;
 use marsa::cli::sites::{self, SitesCommand};
 use marsa::cli::uninstall::{self, UninstallArgs};
+use marsa::cli::uninstall_all::{self, UninstallAllArgs};
 use marsa::cli::xdebug::{self, XdebugArgs};
 
 /// Local development runtimes and sites.
@@ -42,9 +44,19 @@ enum Command {
     /// Make an installed PHP or Node.js version the default: every folder
     /// that sets no version of its own runs it.
     Use(UseArgs),
-    /// Delete an installed version. Marsa refuses a version that is the
-    /// default, that a site is set to, or that the running Caddy uses.
-    Uninstall(UninstallArgs),
+    /// Delete an installed version, or remove Marsa from this system with
+    /// --all.
+    ///
+    /// "marsa uninstall <TOOL> <VERSION>" deletes one installed version.
+    /// Marsa refuses a version that is the default, that a site is set to,
+    /// or that the running Caddy uses.
+    ///
+    /// "marsa uninstall --all" removes Marsa from this system (macOS): the
+    /// redirect of ports 80 and 443, the .test setting, the trust in Marsa's
+    /// certificates, and the start at login; then it stops the daemon. It
+    /// asks you to type yes first, and macOS asks for an administrator
+    /// password. The data folder stays unless you agree to delete it.
+    Uninstall(UninstallCommand),
     /// Start, stop, or check the Marsa daemon (marsad).
     #[command(subcommand)]
     Daemon(DaemonCommand),
@@ -52,8 +64,8 @@ enum Command {
     Services(ServicesArgs),
     /// Show the output of a service.
     Logs(LogsArgs),
-    /// `sites`, `park`, `link`, `secure`, and `unsecure`, each a command of
-    /// its own.
+    /// `sites`, `park`, `link`, `secure`, `unsecure`, `unlink`, `forget`,
+    /// `isolate`, `unisolate`, and `open`, each a command of its own.
     #[command(flatten)]
     Sites(SitesCommand),
     /// Trust Marsa's HTTPS certificates, send .test names to Marsa, and route
@@ -72,12 +84,45 @@ enum Command {
     Xdebug(XdebugArgs),
 }
 
+/// `marsa uninstall`: one installed version (`<TOOL> <VERSION>`, task M5-07),
+/// or Marsa itself (`--all`, task M5-13). Exactly one of the two: `--all`
+/// is required unless a tool is given, and refused with one. `--yes` and
+/// `--delete-data` belong to `--all`.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+#[command(group(ArgGroup::new("target").required(true).args(["tool", "all"])))]
+struct UninstallCommand {
+    /// The program of the version to delete.
+    // `conflicts_with_all`: `requires = "all"` on the two flags alone lets
+    // them through, because clap counts the default `false` of `--all` as
+    // present.
+    #[arg(value_enum, requires = "version", conflicts_with_all = ["yes", "delete_data"])]
+    tool: Option<Tool>,
+    /// The installed version: 8.3.12, or 8.3 when only one installed version
+    /// matches it. "marsa runtimes" lists them.
+    version: Option<String>,
+    #[command(flatten)]
+    all: UninstallAllArgs,
+}
+
+impl UninstallCommand {
+    /// The arguments of the version uninstall, when a tool and a version are
+    /// given; `None` for `--all`.
+    fn version(&self) -> Option<UninstallArgs> {
+        Some(UninstallArgs {
+            tool: self.tool?,
+            version: self.version.clone()?,
+        })
+    }
+}
+
 // One thread is enough: the command waits on one thing at a time.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     // Wrong arguments exit here with code 2 and clap's own message.
     let cli = Cli::parse();
     marsa::cli::init_logging();
+    // The uninstall deletes only a data folder that did not come from here.
+    let data_dir_given = cli.data_dir.is_some();
     let data_dir = match marsa::cli::data_dir(cli.data_dir) {
         Ok(dir) => dir,
         Err(failure) => return failure.report(),
@@ -86,7 +131,19 @@ async fn main() -> ExitCode {
         Command::Install(args) => install::run(args, &data_dir).await,
         Command::Runtimes(args) => runtimes::run(args, &data_dir).await,
         Command::Use(args) => default_version::run(args, &data_dir).await,
-        Command::Uninstall(args) => uninstall::run(args, &data_dir).await,
+        Command::Uninstall(args) if args.all.all => {
+            uninstall_all::run(&args.all, &data_dir, data_dir_given).await
+        }
+        Command::Uninstall(args) => match args.version() {
+            Some(version) => uninstall::run(&version, &data_dir).await,
+            // The `target` group makes clap refuse this before `main` runs.
+            None => Cli::command()
+                .error(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    "give --all, or a tool and a version",
+                )
+                .exit(),
+        },
         Command::Daemon(command) => daemon::run(*command, &data_dir).await,
         Command::Services(args) => services::run(args, &data_dir).await,
         Command::Logs(args) => logs::run(args, &data_dir).await,
@@ -101,7 +158,6 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory as _;
     use clap::error::ErrorKind;
     use marsa::cli::Tool;
     use marsa::cli::services::ServicesCommand;
@@ -314,6 +370,20 @@ mod tests {
                     name: "shop".into(),
                 },
             ),
+            (
+                &["isolate", "shop", "8.3"],
+                SitesCommand::Isolate {
+                    name: "shop".into(),
+                    php: "8.3".into(),
+                },
+            ),
+            (&["forget"], SitesCommand::Forget { dir: None }),
+            (
+                &["open", "shop"],
+                SitesCommand::Open {
+                    name: "shop".into(),
+                },
+            ),
         ] {
             match parse(args).expect("valid").command {
                 Command::Sites(got) => assert_eq!(got, want, "{args:?}"),
@@ -374,6 +444,80 @@ mod tests {
             }
         }
         for args in [&["doctor", "dns"][..], &["doctor", "--fix"]] {
+            let err = parse(args).expect_err("invalid arguments");
+            assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
+        }
+    }
+
+    #[test]
+    fn uninstall_takes_a_version_or_all_but_not_both() {
+        // `--all`, with its own flags: task M5-13.
+        for (args, yes, delete_data) in [
+            (&["uninstall", "--all"][..], false, false),
+            (&["uninstall", "--all", "--yes"], true, false),
+            (
+                &["uninstall", "--yes", "--all", "--delete-data"],
+                true,
+                true,
+            ),
+            (
+                &["--data-dir", "/x", "uninstall", "--all", "--delete-data"],
+                false,
+                true,
+            ),
+        ] {
+            match parse(args).expect("valid").command {
+                Command::Uninstall(got) => {
+                    let all = UninstallAllArgs {
+                        all: true,
+                        yes,
+                        delete_data,
+                    };
+                    assert_eq!(got.all, all, "{args:?}");
+                    assert_eq!(got.version(), None, "{args:?}");
+                }
+                other => panic!("not uninstall: {other:?}"),
+            }
+        }
+        // A tool and a version: task M5-07, with its own arguments.
+        for (args, tool, version) in [
+            (&["uninstall", "php", "8.4"][..], Tool::Php, "8.4"),
+            (&["uninstall", "node", "22.11.0"], Tool::Node, "22.11.0"),
+            (
+                &["--data-dir", "/x", "uninstall", "caddy", "2.11.8"],
+                Tool::Caddy,
+                "2.11.8",
+            ),
+        ] {
+            match parse(args).expect("valid").command {
+                Command::Uninstall(got) => {
+                    let want = UninstallArgs {
+                        tool,
+                        version: version.into(),
+                    };
+                    assert_eq!(got.version(), Some(want), "{args:?}");
+                    assert!(!got.all.all, "{args:?}");
+                }
+                other => panic!("not uninstall: {other:?}"),
+            }
+        }
+        for args in [
+            // Neither, or both.
+            &["uninstall"][..],
+            &["uninstall", "--all", "php"],
+            &["uninstall", "--all", "php", "8.4"],
+            &["uninstall", "php", "8.4", "--all"],
+            // `--yes` and `--delete-data` belong to `--all`.
+            &["uninstall", "--yes"],
+            &["uninstall", "--delete-data"],
+            &["uninstall", "php", "8.4", "--yes"],
+            &["uninstall", "php", "8.4", "--delete-data"],
+            // A tool needs a version, and nothing else is taken.
+            &["uninstall", "php"],
+            &["uninstall", "ruby", "3"],
+            &["uninstall", "php", "8.4", "8.3"],
+            &["uninstall", "--all", "--force"],
+        ] {
             let err = parse(args).expect_err("invalid arguments");
             assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
         }

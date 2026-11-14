@@ -4,6 +4,7 @@
 //! One file per M3 task, so the tasks can run in parallel (task M3-01).
 
 pub mod autostart;
+pub mod browser;
 pub mod daemon_file;
 pub mod low_ports;
 pub mod probe;
@@ -12,6 +13,8 @@ pub mod signals;
 pub mod spawn;
 #[cfg(windows)]
 pub mod windows;
+
+pub use browser::{OpenError, open_url};
 
 /// Ties the processes the daemon starts to the daemon's own life. Call it
 /// once, early in `marsad`, before any process is started. `marsad` only: a
