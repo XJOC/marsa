@@ -1,7 +1,8 @@
 //! Who holds a TCP port: reads the output of `netstat` and `ps` on macOS.
 //!
 //! The `pf` redirect of ADR 0008 sends every connection to `127.0.0.1:80`,
-//! `127.0.0.1:443`, `[::1]:80`, and `[::1]:443` to Caddy. Another program that
+//! `127.0.0.1:443`, `[::1]:80`, and `[::1]:443` to Caddy's high ports (the
+//! `[::1]` ones reach no listener: Caddy binds `127.0.0.1` only). Another program that
 //! listens on those ports (Laravel Herd's nginx, for example) stops getting
 //! its traffic, and neither program logs an error. So the daemon asks who
 //! holds the ports before it asks for the redirect, and on every start:
