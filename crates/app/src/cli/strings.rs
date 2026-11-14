@@ -468,9 +468,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              trusted certificates. Run \"marsa setup\" again; if it repeats, report it."
             .into(),
         // Setup and the uninstall both meet it: no advice for one of them.
-        "trust_read" => "macOS did not let Marsa read its copy of its certificate authority \
-             in /Library/Application Support/Marsa, so Marsa left the trust for all users as it \
-             is. Run the command again; if it repeats, report it."
+        // macOS and Linux: the helper's copy of the CA in a system folder.
+        "trust_read" => "Marsa could not use its copy of its certificate authority in a \
+             system folder: it cannot be read, or a file or link Marsa did not write is in its \
+             place. So Marsa left the trust for all users as it is. If you put a file there, \
+             move it away; then run the command again. If it repeats, report it."
             .into(),
         "trust_record_unusable" => format!(
             "Marsa cannot use {}: it is not a plain file in a folder of yours, or not the \
@@ -479,8 +481,8 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              yourself, remove \"Marsa Local CA\" in Keychain Access.",
             shown("its record of the trusted certificate")
         ),
-        "trust_delete" => "Marsa took away the trust for all users, but could not delete its \
-             copy of the certificate in /Library/Application Support/Marsa. Run the command \
+        "trust_delete" => "Marsa could not delete its copy of its certificate authority in a \
+             system folder, so the trust for all users may stay until it does. Run the command \
              again; if it repeats, report it."
             .into(),
         "trust_add_failed" => "Your browser will not trust Marsa's sites yet: the trust for \
@@ -492,42 +494,47 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              authority. Run the command again; if it repeats, remove \"Marsa Local CA\" in \
              Keychain Access and report it."
             .into(),
-        // The Linux ops of `marsa-helper` (tasks M4-18a, M4-18b, M4-18c).
-        "resolved_foreign" => "/etc/systemd/resolved.conf.d/marsa.conf belongs to another \
+        // The Linux ops of `marsa-helper` (tasks M4-18b, M4-18c, M4-18h).
+        "resolved_foreign" => "/etc/systemd/system/marsa-dns-link.service belongs to another \
              tool, so Marsa left it as it is. Move that file away, then run \"marsa setup\" \
              again."
             .into(),
         "resolved_read" | "resolved_write" | "resolved_delete" => "Linux did not let Marsa \
-             change /etc/systemd/resolved.conf.d/marsa.conf. Run \"marsa setup\" again; if it \
+             change /etc/systemd/system/marsa-dns-link.service. Run the command again; if it \
              repeats, report it."
             .into(),
         "resolved_not_running" => "Marsa sends .test names to its DNS server through \
              systemd-resolved, which does not run on this system, so nothing was changed. \
              Start systemd-resolved, then run \"marsa setup\" again."
             .into(),
-        "resolved_restart_failed" => "systemd-resolved did not restart, so Marsa took its \
-             .test setting out again. Run \"marsa setup\" again; if it repeats, report it \
-             with the output of \"journalctl -u systemd-resolved\"."
-            .into(),
-        "resolved_other_dns" => "systemd-resolved has a DNS server for all names (a DNS= line \
-             in /etc/systemd/resolved.conf or in /etc/systemd/resolved.conf.d/). With it, \
-             .test names cannot reach Marsa, so Marsa took its setting out again. Remove that \
-             DNS= line and set the DNS server on your network connection instead, then run \
+        "resolved_tool_missing" => "The ip program (package iproute2) is not on this system, \
+             so Marsa could not make its link for .test names. Install iproute2, then run \
              \"marsa setup\" again."
             .into(),
-        "resolved_no_link_dns" => "No network connection has a DNS server now, and with \
-             Marsa's .test setting systemd-resolved would stop using its fallback servers, so \
-             other names would stop working. Nothing was changed. Connect to a network, then \
-             run \"marsa setup\" again."
+        "resolved_unit_failed" => "systemd did not start or stop Marsa's link for .test names \
+             (marsa-dns-link.service). Run the command again; if it repeats, report it with \
+             the output of \"journalctl -u marsa-dns-link\"."
+            .into(),
+        "resolved_systemd_too_old" => "This system's systemd is older than version 250, \
+             where systemd-resolved can drop the setting that sends .test names to Marsa, so \
+             Marsa did not make it. .test names do not open by name here yet; a later version \
+             of Marsa adds another way."
+            .into(),
+        "resolved_check_failed" => "Marsa could not confirm that systemd-resolved sends .test \
+             names, and only them, to its DNS server, so it took its link out again. Run \
+             \"marsa setup\" again; if it repeats, report it."
+            .into(),
+        // Only while Marsa removes the setting of an earlier build, which
+        // sent every name to its DNS server.
+        "resolved_restart_failed" => "systemd-resolved did not restart after Marsa removed an \
+             old setting, so it may still send every name to Marsa's DNS server. Run \"sudo \
+             systemctl restart systemd-resolved\"; if it fails, report it with the output of \
+             \"journalctl -u systemd-resolved\"."
             .into(),
         "resolved_stopped" => "systemd-resolved stopped and did not start again, so no name \
              resolves on this computer now. Run \"sudo systemctl start systemd-resolved\", then \
              run \"marsa setup\" again; if it repeats, report it with the output of \
              \"journalctl -u systemd-resolved\"."
-            .into(),
-        "resolved_check_failed" => "Marsa could not confirm that systemd-resolved sends .test \
-             names to it, so it took its setting out again. Run \"marsa setup\" again; if it \
-             repeats, report it."
             .into(),
         "ports_foreign" => "/etc/sysctl.d/60-marsa.conf belongs to another tool, so Marsa \
              left it as it is and Caddy cannot use ports 80 and 443. Move that file away, then \
@@ -544,10 +551,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              not apply that now: every program may use ports 80 to 1023 until the computer \
              restarts."
             .into(),
-        "trust_tool_missing" => "Neither update-ca-certificates nor update-ca-trust is on this \
-             system, so Marsa could not add its certificate authority to the trusted \
-             certificates. Install the ca-certificates package, then run \"marsa setup\" \
-             again."
+        "trust_tool_missing" => "This system has no tool Marsa knows for its trusted \
+             certificates (update-ca-certificates with /usr/local/share/ca-certificates, or \
+             update-ca-trust with /etc/pki/ca-trust/source/anchors), so Marsa could not change \
+             the trust in its certificate authority. Install the ca-certificates package, then \
+             run the command again."
             .into(),
         "trust_store_update_failed" => "The system's store of trusted certificates could not \
              be updated, so Marsa's certificate authority is not trusted, or not removed, yet. \
@@ -1608,9 +1616,10 @@ mod tests {
         "resolved_delete",
         "resolved_not_running",
         "resolved_restart_failed",
-        "resolved_other_dns",
         "resolved_check_failed",
-        "resolved_no_link_dns",
+        "resolved_tool_missing",
+        "resolved_unit_failed",
+        "resolved_systemd_too_old",
         "resolved_stopped",
         "ports_foreign",
         "ports_read",
