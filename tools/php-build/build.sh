@@ -10,9 +10,11 @@
 #   PHP_VERSION     a full version such as 8.4.27 (never just 8.4)
 #   XDEBUG_VERSION  the Xdebug release. spc's default source is the newest commit
 #                   of xdebug/xdebug (3.6.0alpha1 in S-10 run 1), not a release.
-#   SPC_TARGET      Linux: native-native-gnu.2.17 (glibc 2.17 with zig, can load a
-#                   .so). A static musl build cannot load Xdebug (ADR 0012), so
-#                   this script refuses to run on Linux without it.
+#   SPC_TARGET      Linux: x86_64-linux-gnu.2.17 or aarch64-linux-gnu.2.17
+#                   (glibc 2.17 with zig, can load a .so). A static musl build
+#                   cannot load Xdebug (ADR 0012), so this script refuses to run
+#                   on Linux without it. Never a "native" arch: zig would build
+#                   for the runner's CPU, and PHP would die on older CPUs (M2-13).
 #   EXTRA_LIBS      optional libraries for gd and redis
 #                   (default: freetype,libjpeg,libwebp,zstd,liblz4)
 #
@@ -30,9 +32,15 @@ if ! [[ "$PHP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 if [ "$(uname -s)" = Linux ] && [ -z "${SPC_TARGET:-}" ]; then
-  echo "Linux needs SPC_TARGET=native-native-gnu.2.17: a musl build cannot load Xdebug" >&2
+  echo "Linux needs SPC_TARGET=<arch>-linux-gnu.2.17: a musl build cannot load Xdebug" >&2
   exit 1
 fi
+case "${SPC_TARGET:-}" in
+  native-*)
+    echo "SPC_TARGET=$SPC_TARGET builds for this runner's CPU; use x86_64-linux-gnu.2.17 or aarch64-linux-gnu.2.17" >&2
+    exit 1
+    ;;
+esac
 if [ -n "${SPC_TARGET:-}" ]; then export SPC_TARGET; else unset SPC_TARGET || true; fi
 
 EXTS="$(spc_names static)"
