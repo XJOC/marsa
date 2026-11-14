@@ -75,7 +75,7 @@ function Obtain {
   Fact os ((Get-CimInstance Win32_OperatingSystem).Caption + ' ' + (Get-CimInstance Win32_OperatingSystem).Version)
   Fact elevated ($(if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { 'yes (runner is admin; not tested as a standard user)' } else { 'no' }))
   Fact excluded_tcp_port_ranges ((netsh interface ipv4 show excludedportrange protocol=tcp | Where-Object { $_ -match '^\s+\d+\s+\d+' } | ForEach-Object { $_.Trim() -replace '\s+', '-' }) -join ' ')
-  $exe = $null; $kind = 'redis'
+  $exe = $null; $kind = 'redis'; $dotnetRoot = $null
   switch -Regex ($Candidate) {
     '^garnet$' {
       $dir = Obtain-Release 'microsoft/garnet' 'v2.2.12' 'win-x64-based-readytorun.zip' '3edef0529508bd479c46d943569627189673bdfb3359b1697b19cbf7f93085c1' 'MIT (repo LICENSE)'
@@ -89,9 +89,36 @@ function Obtain {
       }
       Remove-Item Env:DOTNET_ROOT -ErrorAction SilentlyContinue
       Fact dotnet_after ((& cmd /c 'dotnet --list-runtimes 2>&1' | Out-String).Trim() -replace "`r?`n", ' | ')
+      Fact runs_with_no_dotnet ((& $exe --version 2>&1 | Out-String).Trim() -replace "`r?`n", ' | ')
+      # What Marsa could do: unpack a private .NET runtime next to it and point DOTNET_ROOT at it.
+      $ins = Join-Path $Work 'dotnet-install.ps1'
+      Invoke-WebRequest 'https://dot.net/v1/dotnet-install.ps1' -OutFile $ins -UseBasicParsing
+      $rt = Join-Path $Work 'dotnet-rt'
+      $dry = (& $ins -Runtime dotnet -Channel 10.0 -InstallDir $rt -NoPath -DryRun *>&1 | Out-String)
+      $zipUrl = [regex]::Match($dry, 'https://\S+?win-x64\.zip').Value
+      Fact dotnet_runtime_zip_url $zipUrl
+      if ($zipUrl) {
+        $rz = Join-Path $Work 'dotnet-runtime.zip'
+        Download $zipUrl $rz
+        Fact dotnet_runtime_zip_bytes (Get-Item $rz).Length
+        $sha512 = (Get-FileHash -Algorithm SHA512 -Path $rz).Hash.ToLower()
+        try {
+          $ch = [regex]::Match($zipUrl, '/Runtime/(\d+\.\d+)\.').Groups[1].Value
+          $meta = Invoke-RestMethod "https://builds.dotnet.microsoft.com/dotnet/release-metadata/$ch/releases.json"
+          $f = ($meta.releases | ForEach-Object { $_.runtime.files } | Where-Object { $_.url -eq $zipUrl } | Select-Object -First 1)
+          Fact dotnet_runtime_sha512_published_in_releases_json ($(if ($f) { $f.hash } else { 'not found for this url' }))
+          Fact dotnet_runtime_sha512_match ($(if ($f -and $f.hash -eq $sha512) { 'yes' } else { 'NO' }))
+        } catch { Fact dotnet_runtime_sha512_published_in_releases_json "lookup failed: $($_.Exception.Message)" }
+        Expand-Archive -Path $rz -DestinationPath $rt
+        Fact dotnet_runtime_unpacked_bytes ((Get-ChildItem $rt -Recurse -File | Measure-Object Length -Sum).Sum)
+        Fact dotnet_runtime_dirs ((Get-ChildItem (Join-Path $rt 'shared') -Directory -Recurse -Depth 1 | ForEach-Object { $_.Name }) -join ' ')
+        $env:DOTNET_ROOT = $rt
+        Fact runs_with_private_runtime ((& $exe --version 2>&1 | Out-String).Trim() -replace "`r?`n", ' | ')
+      }
       & $exe --help *>&1 | Out-File (Join-Path $Out 'garnet-help.txt')
       Fact help_mentions_lua ($(if (Select-String -Path (Join-Path $Out 'garnet-help.txt') -Pattern '--lua' -Quiet) { 'yes' } else { 'no' }))
-      Fact version ((& $exe --version 2>&1 | Out-String).Trim() -replace "`r?`n", ' | ')
+      Fact help_lines ((Get-Content (Join-Path $Out 'garnet-help.txt')).Count)
+      $dotnetRoot = $rt
     }
     '^tporadowski$' {
       $dir = Obtain-Release 'tporadowski/redis' 'v5.0.14.1' 'Redis-x64-5.0.14.1.zip' '' 'BSD-3-Clause (Redis 5.0 + Microsoft Open Tech port)'
@@ -153,7 +180,7 @@ function Obtain {
   Fact exe $exe
   # DLL imports: who needs what (dumpbin is not on PATH; use the PE import table via .NET? keep it simple: list sibling DLLs)
   Fact sibling_dlls ((Get-ChildItem (Split-Path $exe) -Filter *.dll | ForEach-Object { $_.Name }) -join ' ')
-  Save-State @{ exe = $exe; kind = $kind; candidate = $Candidate }
+  Save-State @{ exe = $exe; kind = $kind; candidate = $Candidate; dotnetRoot = $dotnetRoot }
 }
 
 # ------------------------------------------------------------------ run helpers
@@ -167,7 +194,8 @@ function Get-ServerArgs($st, [int]$Port, [string]$Dir, [string]$Save = '', [swit
     return $a
   }
   $a = "--port $Port --bind 127.0.0.1 --dir `"$d`" --pidfile `"$d/server.pid`" --appendonly no"
-  if ($Save) { $a += " --save `"$Save`"" } else { $a += ' --save ""' }
+  # Redis 5 wants the two numbers as two arguments; later versions accept that too.
+  if ($Save) { $a += " --save $Save" } else { $a += ' --save ""' }
   return $a
 }
 function Start-Kv($st, [int]$Port, [string]$Dir, [string]$Save = '', [switch]$Recover, [switch]$Wrapped) {
@@ -194,6 +222,7 @@ function Show-Tail($dir) { ((Get-Content (Join-Path $dir 'stdout.log'), (Join-Pa
 function Prepare-State {
   $st = Load-State
   $script:GarnetLua = $false
+  if ($st.dotnetRoot) { $env:DOTNET_ROOT = $st.dotnetRoot }
   if ($st.kind -eq 'garnet') {
     $h = Join-Path $Out 'garnet-help.txt'
     if ((Test-Path $h) -and (Select-String -Path $h -Pattern '--lua' -Quiet)) { $script:GarnetLua = $true }
@@ -288,6 +317,28 @@ function Probe {
   Fact orphan_restart_after_recover ((Resp 6391 @('PING') 25).Text)
   $sp = Listen-Pid 6391
   Resp 6391 @('SHUTDOWN', 'NOSAVE') | Out-Null; if ($sp -and (Wait-Gone $sp 10) -lt 0) { Stop-Process -Id $sp -Force -ErrorAction SilentlyContinue }
+  # 6. a standard user (no admin rights): create a throwaway local user on this
+  # runner, give it read access to the server files, and start the server as that user.
+  Say 'probe 6: standard user'
+  try {
+    $pwd1 = 'Kv!Spike-2026-x'
+    & net user kvstd $pwd1 /add 2>&1 | Out-Null
+    Fact std_user_in_administrators ($(if ((& net localgroup Administrators) -match 'kvstd') { 'YES (unexpected)' } else { 'no' }))
+    $cred = New-Object System.Management.Automation.PSCredential('kvstd', (ConvertTo-SecureString $pwd1 -AsPlainText -Force))
+    $sdir = Join-Path $Work 'probe/std'; New-Item -ItemType Directory -Force -Path $sdir | Out-Null
+    icacls (Split-Path $st.exe) /grant 'kvstd:(OI)(CI)RX' /T /C 2>&1 | Out-Null
+    if ($st.dotnetRoot) { icacls $st.dotnetRoot /grant 'kvstd:(OI)(CI)RX' /T /C 2>&1 | Out-Null; [Environment]::SetEnvironmentVariable('DOTNET_ROOT', $st.dotnetRoot, 'Machine') }
+    icacls $sdir /grant 'kvstd:(OI)(CI)F' /C 2>&1 | Out-Null
+    $a = Get-ServerArgs $st 6392 $sdir
+    $pp = Start-Process $st.exe -ArgumentList $a -Credential $cred -WorkingDirectory $sdir -PassThru -WindowStyle Hidden -LoadUserProfile -ErrorAction Stop
+    $r = Resp 6392 @('PING') 25
+    $sp = Listen-Pid 6392
+    $who = if ($sp) { (Get-CimInstance Win32_Process -Filter "ProcessId=$sp" | Invoke-CimMethod -MethodName GetOwner | ForEach-Object { "$($_.Domain)\$($_.User)" }) } else { '?' }
+    Fact std_user_start "PING code $($r.Code) $($r.Text); server pid $sp owned by $who"
+    Fact std_user_listening ($(if ($sp) { (Get-NetTCPConnection -OwningProcess $sp -State Listen | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)" }) -join ' ' } else { 'none' }))
+    if ($r.Code -eq 0) { Resp 6392 @('SHUTDOWN', 'NOSAVE') | Out-Null }
+    if ($sp -and (Wait-Gone $sp 10) -lt 0) { Stop-Process -Id $sp -Force -ErrorAction SilentlyContinue }
+  } catch { Fact std_user_start "FAILED: $($_.Exception.Message)" }
   Say 'probe done'
 }
 
