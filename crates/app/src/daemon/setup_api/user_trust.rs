@@ -218,6 +218,23 @@ fn is_trusted(runner: &dyn Runner, ca_root: &Path, stop: &CancellationToken) -> 
     }
 }
 
+/// For `marsa doctor` (task M5-12): whether the certificate at `ca_root` is
+/// trusted as a root now, by the same `verify-cert` as [`install`]. `None`
+/// when that is not known: the path is not absolute, or `security` could not
+/// run or was stopped by a signal. Changes nothing and shows no dialog.
+pub fn trusted(runner: &dyn Runner, ca_root: &Path, stop: &CancellationToken) -> Option<bool> {
+    if !ca_root.is_absolute() {
+        return None;
+    }
+    match runner.run(SECURITY, &verify_args(ca_root), CHECK_LIMIT, stop) {
+        Ok(output) => output.code.map(|_| output.success()),
+        Err(err) => {
+            tracing::debug!(error = %err, "cannot run security verify-cert");
+            None
+        }
+    }
+}
+
 /// `-L`: no fetch of missing certificates from the net. `-l`: the one
 /// certificate given is a CA, which `verify-cert` refuses otherwise.
 fn verify_args(ca_root: &Path) -> Vec<OsString> {
@@ -690,5 +707,41 @@ mod tests {
             assert_eq!(remove_with(&fake), want, "{name}");
             assert_eq!(security_calls(&fake).len(), calls, "{name}");
         }
+    }
+
+    #[test]
+    fn the_doctor_only_asks_verify_cert() {
+        let stop = CancellationToken::new();
+        let ca_root = ca_root();
+        let ca_text = ca_root.to_str().expect("the test path is UTF-8");
+        type Script = fn() -> io::Result<RunOutput>;
+        let cases: [(Script, Option<bool>); 4] = [
+            (|| ok(""), Some(true)),
+            (
+                || exit(1, "Cert Verify Result: CSSMERR_TP_NOT_TRUSTED\n"),
+                Some(false),
+            ),
+            (|| Err(io::Error::from(io::ErrorKind::TimedOut)), None),
+            (
+                || {
+                    Ok(RunOutput {
+                        code: None,
+                        ..RunOutput::default()
+                    })
+                },
+                None,
+            ),
+        ];
+        for (answer, want) in cases {
+            let fake = Fake::answering(move |_, _| answer());
+            assert_eq!(trusted(&*fake, &ca_root, &stop), want);
+            assert_eq!(
+                security_calls(&fake),
+                [vec!["verify-cert", "-c", ca_text, "-L", "-l"]]
+            );
+            assert_eq!(fake.calls()[0].limit, CHECK_LIMIT);
+        }
+        let fake = Fake::answering(|program, args| panic!("{program} {args:?} ran"));
+        assert_eq!(trusted(&*fake, Path::new("root.crt"), &stop), None);
     }
 }

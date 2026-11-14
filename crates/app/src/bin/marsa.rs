@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 use marsa::cli::autostart::{self, AutostartArgs};
 use marsa::cli::daemon::{self, DaemonCommand};
 use marsa::cli::default_version::{self, UseArgs};
+use marsa::cli::doctor;
 use marsa::cli::install::{self, InstallArgs};
 use marsa::cli::logs::{self, LogsArgs};
 use marsa::cli::runtimes::{self, RuntimesArgs};
@@ -58,6 +59,9 @@ enum Command {
     /// Start Marsa at login, or not: on or off. Without on or off, show
     /// whether it does (macOS and Linux).
     Autostart(AutostartArgs),
+    /// Check that Marsa can serve your sites, and say how to fix what is
+    /// wrong. Changes nothing. Exits with code 1 if a check failed.
+    Doctor,
 }
 
 // One thread is enough: the command waits on one thing at a time.
@@ -80,6 +84,7 @@ async fn main() -> ExitCode {
         Command::Sites(command) => sites::run(command, &data_dir).await,
         Command::Setup => setup::run(&data_dir).await,
         Command::Autostart(args) => autostart::run(args, &data_dir).await,
+        Command::Doctor => doctor::run(&data_dir).await,
     }
 }
 
@@ -345,6 +350,20 @@ mod tests {
             &["autostart", "on", "off"],
             &["autostart", "--on"],
         ] {
+            let err = parse(args).expect_err("invalid arguments");
+            assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
+        }
+    }
+
+    #[test]
+    fn doctor_takes_no_argument() {
+        for args in [&["doctor"][..], &["--data-dir", "/x", "doctor"]] {
+            match parse(args).expect("valid").command {
+                Command::Doctor => {}
+                other => panic!("not doctor: {other:?}"),
+            }
+        }
+        for args in [&["doctor", "dns"][..], &["doctor", "--fix"]] {
             let err = parse(args).expect_err("invalid arguments");
             assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
         }
