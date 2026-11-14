@@ -26,10 +26,12 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use marsa::daemon::api::router;
 use marsa::daemon::auth::AuthConfig;
+use marsa::daemon::php::fpm_id;
 use marsa::daemon::runtimes_api::{InstallFuture, RunInstall};
 use marsa::daemon::state::Daemon;
 use marsa_core::config::{self, ConfigPaths};
 use marsa_core::installer::{InstallError, InstallRequest, InstalledVersion};
+use marsa_core::php::PhpMinor;
 use marsa_core::platform::daemon_file::{
     DaemonFile, Token, daemon_authority, daemon_lock_path, write_daemon_file,
 };
@@ -1054,9 +1056,14 @@ async fn the_pool_of_the_version_stops_before_the_delete_and_the_sites_follow() 
         .json("POST", "/v1/sites/park", Some(&park), StatusCode::OK)
         .await;
     assert_eq!(php_of(&list, "blog").as_deref(), Some("8.3.12"));
+    // The service ids of the two pools: php-fpm, or php-cgi on Windows.
+    let (pool83, pool84) = (
+        fpm_id(PhpMinor { major: 8, minor: 3 }),
+        fpm_id(PhpMinor { major: 8, minor: 4 }),
+    );
     // When the pool stops, the folder moved aside is still whole.
     let whole = Arc::new(AtomicBool::new(false));
-    pretend_runs(&served, "php-fpm-8.3", {
+    pretend_runs(&served, &pool83, {
         let whole = whole.clone();
         move || {
             let mut names = fs::read_dir(&php).expect("php").flatten();
@@ -1065,18 +1072,15 @@ async fn the_pool_of_the_version_stops_before_the_delete_and_the_sites_follow() 
             whole.store(bin.is_some_and(|bin| bin.is_dir()), Ordering::SeqCst);
         }
     });
-    pretend_runs(&served, "php-fpm-8.4", || {});
+    pretend_runs(&served, &pool84, || {});
     let mut events = served.daemon.events.subscribe();
 
     let _: Uninstalled = served
         .json("DELETE", "/v1/runtimes/php/8.3.12", None, StatusCode::OK)
         .await;
     assert!(whole.load(Ordering::SeqCst), "stopped before the delete");
-    assert!(!served.daemon.proc_alive("php-fpm-8.3"));
-    assert!(
-        served.daemon.proc_alive("php-fpm-8.4"),
-        "another line runs on"
-    );
+    assert!(!served.daemon.proc_alive(&pool83));
+    assert!(served.daemon.proc_alive(&pool84), "another line runs on");
     assert_eq!(php_of(&next_sites(&mut events).await, "blog"), None);
     assert_eq!(entries(&served, Runtime::Php), ["8.4.23"]);
 }
