@@ -19,6 +19,8 @@ ExecStart=-/usr/bin/resolvectl llmnr marsa0 no
 ExecStart=-/usr/bin/resolvectl mdns marsa0 no
 ExecStart=-/usr/bin/resolvectl dnsovertls marsa0 no
 ExecStart=/usr/bin/resolvectl dns marsa0 127.0.0.1:18053
+ExecStart=/usr/bin/resolvectl default-route marsa0 false
+ExecStart=/usr/bin/resolvectl domain marsa0 ~test
 ExecStopPost=-/usr/sbin/ip link del marsa0
 
 [Install]

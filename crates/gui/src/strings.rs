@@ -1063,10 +1063,14 @@ fn error_message(code: &str) -> Option<&'static str> {
              its DNS server, so it took its link out again. Run setup again; if it repeats, \
              report it."
         }
-        "resolved_systemd_too_old" => {
-            "This system's systemd is older than version 250, where systemd-resolved can drop \
-             the setting that sends .test names to Marsa, so Marsa did not make it. .test names \
-             do not open by name here yet."
+        "resolved_use_hosts" => {
+            "This system's systemd is older than version 250 and systemd-networkd may run, so \
+             systemd-resolved can drop the setting that sends .test names to Marsa. Marsa did \
+             not make it: .test names here go into /etc/hosts instead."
+        }
+        "resolved_systemd_unknown" => {
+            "Marsa could not read the version of systemd here, so it did not make its link for \
+             .test names. Report it."
         }
         "resolved_restart_failed" => {
             "systemd-resolved did not restart after Marsa removed an old setting, so it may \
@@ -1617,7 +1621,8 @@ mod tests {
             "resolved_tool_missing",
             "resolved_unit_failed",
             "resolved_check_failed",
-            "resolved_systemd_too_old",
+            "resolved_use_hosts",
+            "resolved_systemd_unknown",
             "resolved_restart_failed",
             "resolved_stopped",
             "ports_foreign",

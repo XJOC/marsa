@@ -537,10 +537,14 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              did not take them. Most often another program listens there (Apache, nginx). Stop \
              it, then run \"marsa services restart caddy\"; \"marsa logs caddy\" says why."
             .into(),
-        "resolved_systemd_too_old" => "This system's systemd is older than version 250, \
-             where systemd-resolved can drop the setting that sends .test names to Marsa, so \
-             Marsa did not make it. .test names do not open by name here yet; a later version \
-             of Marsa adds another way."
+        "resolved_use_hosts" => "This system's systemd is older than version 250 and \
+             systemd-networkd may run, so systemd-resolved can drop the setting that sends \
+             .test names to Marsa. Marsa did not make it: .test names here go into /etc/hosts \
+             instead."
+            .into(),
+        "resolved_systemd_unknown" => "Marsa could not read the version of systemd here, so \
+             it did not make its link for .test names. Report it with the output of \
+             \"systemctl --version\"."
             .into(),
         "resolved_check_failed" => "Marsa could not confirm that systemd-resolved sends .test \
              names, and only them, to its DNS server, so it took its link out again. Run \
@@ -1665,7 +1669,8 @@ mod tests {
         "resolved_check_failed",
         "resolved_tool_missing",
         "resolved_unit_failed",
-        "resolved_systemd_too_old",
+        "resolved_use_hosts",
+        "resolved_systemd_unknown",
         "setup_pkexec_missing",
         "setup_caddy_ports_failed",
         "resolved_stopped",

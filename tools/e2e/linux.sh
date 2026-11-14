@@ -181,7 +181,18 @@ echo "system: $PRETTY_NAME, systemd $SYSTEMD, kernel $(uname -r)"
 # /etc/hosts instead (hosts_sync); until setup does that (task M4-18k2),
 # curl reaches the site with --resolve. Ports and trust are tested all the
 # same.
-if [ "$SYSTEMD" -ge 250 ] || ! systemctl is-active --quiet systemd-networkd; then LINK=yes; else LINK=no; fi
+# Mirrors the helper (review of #125): before 250, the link only on 249,
+# and only when networkd's service and socket are inactive and disabled or
+# masked.
+networkd_off() {
+  local active enabled
+  active=$(systemctl is-active systemd-networkd.service systemd-networkd.socket || true)
+  enabled=$(systemctl is-enabled systemd-networkd.service systemd-networkd.socket || true)
+  [ "$(sort -u <<<"$active")" = inactive ] &&
+    [ "$(wc -l <<<"$enabled")" = 2 ] &&
+    ! grep -qvE '^(disabled|masked|masked-runtime)$' <<<"$enabled"
+}
+if [ "$SYSTEMD" -ge 250 ] || { [ "$SYSTEMD" -eq 249 ] && networkd_off; }; then LINK=yes; else LINK=no; fi
 echo "marsa0 on this system: $LINK"
 NAME=()
 RESOLVED_DONE=done
@@ -250,6 +261,7 @@ else
   helper "[{\"op\":\"hosts_sync\",\"names\":[\"$SITE\"]}]" || fail "the helper exited with $?"
   [ "$(statuses)" = done ] || fail "expected done, got: $(statuses)"
   run cat /etc/hosts
+  [ "$(stat -c '%U:%G %a' /etc/hosts)" = "root:root 644" ] || fail "wrong owner or mode on /etc/hosts"
   [ "$(address_of "$SITE")" = 127.0.0.1 ] || fail "$SITE does not resolve from /etc/hosts"
   helper "[{\"op\":\"hosts_sync\",\"names\":[\"$SITE\"]}]" || fail "the helper exited with $?"
   [ "$(statuses)" = unchanged ] || fail "expected unchanged, got: $(statuses)"
@@ -376,6 +388,15 @@ sudo systemctl restart systemd-resolved
 run resolvectl query example.com
 fi
 echo
+if [ "$LINK" = no ]; then
+  step "uninstall_all takes Marsa's block out of /etc/hosts"
+  helper "[{\"op\":\"hosts_sync\",\"names\":[\"$SITE\"]}]" || fail "the helper exited with $?"
+  helper '[{"op":"uninstall_all"}]' || fail "the helper exited with $?"
+  [ "$(statuses)" = "unchanged unchanged done unchanged" ] || fail "expected unchanged unchanged done unchanged, got: $(statuses)"
+  cmp -s /etc/hosts "$HOME/hosts-before" || fail "/etc/hosts is not as it was"
+  helper '[{"op":"uninstall_all"}]' || fail "the helper exited with $?"
+  [ "$(statuses)" = "unchanged unchanged unchanged unchanged" ] || fail "expected all unchanged, got: $(statuses)"
+fi
 kill "$WATCHER" 2>/dev/null || true
 echo "PASS: part A, the helper"
 

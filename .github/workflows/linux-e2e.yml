@@ -84,8 +84,9 @@ jobs:
           if-no-files-found: ignore
 
   # The helper's Linux ops in a container with systemd as PID 1: Fedora
-  # (systemd 257 or later) and Debian 12 (systemd 252, where the unit adds
-  # the local route for 127.0.0.1), with a restart of the container between
+  # (systemd 257 or later), Debian 12 (systemd 252, where the unit adds the
+  # local route for 127.0.0.1), and Ubuntu 22.04 with systemd-networkd
+  # masked (systemd 249, the link before 250), with a restart of the container between
   # the two phases. The restart boots systemd again in a new network
   # namespace, so only Marsa's unit can make marsa0 again (reviews of #114
   # and #111). The helper is built on 22.04: its glibc (2.35) is older than
@@ -95,7 +96,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        system: [fedora, debian12]
+        system: [fedora, debian12, ubuntu2204]
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:

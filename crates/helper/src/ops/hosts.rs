@@ -17,6 +17,10 @@
 //! endings are those of the system: CRLF on Windows, LF on Linux. No
 //! external command runs here.
 //!
+//! The file is replaced as a whole (`write_atomic`): on Linux it is root's,
+//! mode 0644, as distributions ship it. An SELinux label is not copied; the
+//! systems that use this path (Ubuntu 22.04, Debian 11) use AppArmor.
+//!
 //! The helper leaves the file alone, and says why, when it is a link or a
 //! reparse point (the real hosts file never is one: a link could make the
 //! helper copy another file into it), when it is marked read-only (the
@@ -77,6 +81,22 @@ fn apply(op: &'static str, block: Option<&[u8]>, os: Os, system: &impl System) -
         }
     };
     if system.is_link(&path) {
+        // Some Linux systems link /etc/hosts (NixOS). A removal reads
+        // through the link: with no block of Marsa's there, there is nothing
+        // to take out, and an uninstall must not fail on it.
+        let without_block = op == REMOVE
+            && os == Os::Linux
+            && system.read(&path, MAX_BYTES).is_ok_and(|bytes| {
+                !bytes
+                    .split(|byte| *byte == b'\n')
+                    .any(|line| marker(line).is_some())
+            });
+        if without_block {
+            return OpResult {
+                op,
+                outcome: Outcome::Unchanged,
+            };
+        }
         let message = format!(
             "{} is a link or a reparse point, so it was left as it is",
             path.display()
@@ -98,7 +118,7 @@ fn apply(op: &'static str, block: Option<&[u8]>, os: Os, system: &impl System) -
             return OpResult::failed(op, code::HOSTS_READ, message);
         }
     };
-    let Some(wanted) = rebuild(&current, block) else {
+    let Some(wanted) = rebuild(&current, block, eol(os)) else {
         let message = format!(
             "the lines \"{BEGIN}\" and \"{END}\" in {} do not pair up, so it was left as it is",
             path.display()
@@ -152,10 +172,16 @@ fn is_test_name(name: &str) -> bool {
     })
 }
 
+/// The line ending of the hosts file the system ships: CRLF on Windows, LF
+/// on Linux.
+fn eol(os: Os) -> &'static str {
+    if os == Os::Windows { "\r\n" } else { "\n" }
+}
+
 /// Marsa's block for `names`: sorted, each once, with the line endings of
-/// the hosts file the system ships: CRLF on Windows, LF on Linux.
+/// the system ([`eol`]).
 fn block(names: &[String], os: Os) -> Vec<u8> {
-    let eol = if os == Os::Windows { "\r\n" } else { "\n" };
+    let eol = eol(os);
     let names: BTreeSet<&str> = names.iter().map(String::as_str).collect();
     let mut text = format!("{BEGIN}{eol}{NOTE}{eol}");
     for name in names {
@@ -188,7 +214,7 @@ fn marker(line: &[u8]) -> Option<&'static str> {
 /// `current` with every Marsa block taken out and `block` put where the
 /// first one was, or at the end if there was none. Every byte outside the
 /// blocks is kept. `None` if the markers do not pair up.
-fn rebuild(current: &[u8], block: Option<&[u8]>) -> Option<Vec<u8>> {
+fn rebuild(current: &[u8], block: Option<&[u8]>, eol: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(current.len() + block.map_or(0, <[u8]>::len));
     let mut inside = false;
     let mut placed = false;
@@ -220,8 +246,9 @@ fn rebuild(current: &[u8], block: Option<&[u8]>) -> Option<Vec<u8>> {
         return None;
     }
     if let (false, Some(block)) = (placed, block) {
+        // A last line with no line break gets one, of the system's kind.
         if out.len() > bom.len() && !out.ends_with(b"\n") {
-            out.extend_from_slice(b"\r\n");
+            out.extend_from_slice(eol.as_bytes());
         }
         out.extend_from_slice(block);
     }
@@ -657,6 +684,21 @@ mod tests {
         assert!(fake.log.borrow().is_empty());
     }
 
+    /// A link at `/etc/hosts` with no block of Marsa's (NixOS): a removal is
+    /// `unchanged`, so an uninstall does not fail on it; with a block, it is
+    /// still left alone.
+    #[test]
+    fn a_linked_hosts_file_without_a_block_is_unchanged_by_remove() {
+        let mut fake = linux(Some(DEBIAN_HOSTS.as_bytes()));
+        fake.links.insert(PathBuf::from("/etc/hosts"));
+        assert_eq!(status(&remove(Os::Linux, &fake)), "unchanged");
+        let with_block = format!("{DEBIAN_HOSTS}{BEGIN}\n{NOTE}\n{END}\n");
+        let mut fake = linux(Some(with_block.as_bytes()));
+        fake.links.insert(PathBuf::from("/etc/hosts"));
+        assert_eq!(status(&remove(Os::Linux, &fake)), code::HOSTS_READ);
+        assert_eq!(etc_hosts(&fake).unwrap(), with_block.as_bytes());
+    }
+
     /// A link at `/etc/hosts` is left alone on Linux too.
     #[test]
     fn on_linux_a_hosts_file_that_is_a_link_is_left_alone() {
@@ -669,5 +711,87 @@ mod tests {
         let result = sync(&names(&["shop.test"]), Os::Linux, &fake);
         assert_eq!(status(&result), code::HOSTS_READ);
         assert_eq!(fake.files.borrow()[&path].0, DEBIAN_HOSTS.as_bytes());
+    }
+
+    /// Linux: `/etc/hosts` in a fake, with `content` if given.
+    fn linux(content: Option<&[u8]>) -> FakeSystem {
+        let fake = FakeSystem::default();
+        if let Some(content) = content {
+            let file = (content.to_vec(), OLD_MODE);
+            fake.files
+                .borrow_mut()
+                .insert(PathBuf::from("/etc/hosts"), file);
+        }
+        fake
+    }
+
+    fn etc_hosts(fake: &FakeSystem) -> Option<Vec<u8>> {
+        let files = fake.files.borrow();
+        files
+            .get(Path::new("/etc/hosts"))
+            .map(|(bytes, _)| bytes.clone())
+    }
+
+    /// A last line with no line break gets an LF on Linux, never a CR, and
+    /// the removal keeps that LF.
+    #[test]
+    fn on_linux_a_file_without_a_final_newline_gets_lf() {
+        let fake = linux(Some(b"127.0.0.1 localhost"));
+        assert_eq!(
+            status(&sync(&names(&["shop.test"]), Os::Linux, &fake)),
+            "done"
+        );
+        let text = String::from_utf8(etc_hosts(&fake).unwrap()).unwrap();
+        assert!(
+            text.starts_with("127.0.0.1 localhost\n# Marsa start\n"),
+            "{text:?}"
+        );
+        assert!(!text.contains('\r'));
+        assert_eq!(status(&remove(Os::Linux, &fake)), "done");
+        assert_eq!(etc_hosts(&fake).unwrap(), b"127.0.0.1 localhost\n");
+    }
+
+    /// A missing `/etc/hosts`: sync makes one with the block, and remove
+    /// leaves nothing.
+    #[test]
+    fn on_linux_a_missing_hosts_file_is_made_by_sync_only() {
+        let fake = linux(None);
+        assert_eq!(status(&remove(Os::Linux, &fake)), "unchanged");
+        assert_eq!(etc_hosts(&fake), None);
+        assert_eq!(
+            status(&sync(&names(&["shop.test"]), Os::Linux, &fake)),
+            "done"
+        );
+        let text = String::from_utf8(etc_hosts(&fake).unwrap()).unwrap();
+        assert_eq!(
+            text,
+            format!("{BEGIN}\n{NOTE}\n127.0.0.1 shop.test\n{END}\n")
+        );
+    }
+
+    /// The refusals on Linux: a bad name, a read-only file, and markers that
+    /// do not pair up. The file is never touched.
+    #[test]
+    fn on_linux_the_refusals_leave_etc_hosts_alone() {
+        let fake = linux(Some(DEBIAN_HOSTS.as_bytes()));
+        let bad = sync(&names(&["shop.test\n1.2.3.4 bank.com"]), Os::Linux, &fake);
+        assert_eq!(status(&bad), code::REQUEST_INVALID);
+        let mut locked = linux(Some(DEBIAN_HOSTS.as_bytes()));
+        locked.read_only.insert(PathBuf::from("/etc/hosts"));
+        assert_eq!(
+            status(&sync(&names(&["shop.test"]), Os::Linux, &locked)),
+            code::HOSTS_WRITE
+        );
+        let broken_text = format!("{DEBIAN_HOSTS}{BEGIN}\n127.0.0.1 shop.test\n");
+        let broken = linux(Some(broken_text.as_bytes()));
+        for result in [
+            sync(&names(&["shop.test"]), Os::Linux, &broken),
+            remove(Os::Linux, &broken),
+        ] {
+            assert_eq!(status(&result), code::HOSTS_BLOCK_BROKEN);
+        }
+        assert_eq!(etc_hosts(&fake).unwrap(), DEBIAN_HOSTS.as_bytes());
+        assert_eq!(etc_hosts(&locked).unwrap(), DEBIAN_HOSTS.as_bytes());
+        assert_eq!(etc_hosts(&broken).unwrap(), broken_text.as_bytes());
     }
 }

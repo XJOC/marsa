@@ -26,8 +26,19 @@
 //! S-02c). With the route, the kernel delivers them locally: 0.01 s. From
 //! 253 on, resolved makes an exception for localhost, so the unit changes
 //! no routing there. `marsad` still listens on `127.0.0.1` only, and `lo`
-//! keeps its own route. Before systemd 250 Marsa makes no link at all
-//! ([`RESOLVED_SYSTEMD_TOO_OLD`]).
+//! keeps its own route.
+//!
+//! Before systemd 250, resolved can clear a new link's settings while
+//! systemd-networkd looks at it (ADR 0014, finding 30). There the link is
+//! made only when networkd cannot run: its service and its socket are both
+//! inactive, and both disabled or masked. Anything else, or an answer that
+//! cannot be read, gives [`RESOLVED_USE_HOSTS`]: the daemon writes
+//! `/etc/hosts` lines instead (task M4-18k).
+//!
+//! On every version the unit sets `default-route false` and `domain ~test`
+//! again after `dns`: whatever clears the link's settings at any moment,
+//! the link never ends with Marsa's server and no domain, which would make
+//! it a default route.
 //!
 //! The helper writes the unit only over a file Marsa wrote ([`marked`]),
 //! starts it, and checks the link with `resolvectl status marsa0`. A failed
@@ -81,7 +92,7 @@ pub const RESOLVED_STOPPED: &str = "resolved_stopped";
 pub const RESOLVED_DELETE: &str = "resolved_delete";
 /// The version of systemd cannot be read, so Marsa makes no link. Nothing
 /// was changed but the removal of an old drop-in (and of an earlier unit).
-pub const RESOLVED_SYSTEMD_TOO_OLD: &str = "resolved_systemd_too_old";
+pub const RESOLVED_SYSTEMD_UNKNOWN: &str = "resolved_systemd_unknown";
 /// systemd is older than 250 and systemd-networkd runs (or `systemctl`
 /// cannot tell): that resolved counts a link networkd calls "initialized"
 /// as managed and clears what was set on it (ADR 0014, finding 30), so
@@ -128,13 +139,26 @@ const RESTART_UNIT: [&str; 2] = ["restart", UNIT_NAME];
 const DISABLE: [&str; 3] = ["disable", "--now", UNIT_NAME];
 const STATUS: [&str; 2] = ["status", LINK];
 const VERSION: [&str; 1] = ["--version"];
-const NETWORKD_ACTIVE: [&str; 3] = ["is-active", "--quiet", "systemd-networkd.service"];
+/// Each prints one line per unit, whatever its exit code.
+const NETWORKD_ACTIVE: [&str; 3] = [
+    "is-active",
+    "systemd-networkd.service",
+    "systemd-networkd.socket",
+];
+const NETWORKD_ENABLED: [&str; 3] = [
+    "is-enabled",
+    "systemd-networkd.service",
+    "systemd-networkd.socket",
+];
 /// The first systemd whose resolved leaves a new link's settings alone
 /// while systemd-networkd looks at it.
 const FIRST_SYSTEMD: u32 = 250;
 /// The first systemd whose resolved does not bind its socket to the link
 /// for a server on localhost; before it, the unit adds the local route.
 const NO_BIND_BUG: u32 = 253;
+/// Before 250 the link is made on 249 only, the version tested (S-02c);
+/// older ones lack the `ip:port` server syntax or the `Protocols:` line.
+const LINK_BEFORE_250: u32 = 249;
 /// How many times the link is checked after the start, with a pause in
 /// between: resolved may take a moment to use a new link (S-02b).
 const CHECKS: u32 = 10;
@@ -186,7 +210,7 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
         Ok(version) if version >= FIRST_SYSTEMD => version,
         // Before 250 the race needs systemd-networkd (finding 30): without
         // it running, the link is safe there too.
-        Ok(version) if networkd_runs(system) == Ok(false) => version,
+        Ok(version) if version >= LINK_BEFORE_250 && !networkd_may_run(system) => version,
         other => {
             let (code, reason) = match other {
                 Ok(version) => (
@@ -197,7 +221,7 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
                          names go into /etc/hosts here instead"
                     ),
                 ),
-                Err(reason) => (RESOLVED_SYSTEMD_TOO_OLD, reason),
+                Err(reason) => (RESOLVED_SYSTEMD_UNKNOWN, reason),
             };
             // A unit of an earlier install would meet that race at every
             // boot, so it goes.
@@ -308,6 +332,8 @@ ExecStart=-{RESOLVECTL} llmnr {LINK} no
 ExecStart=-{RESOLVECTL} mdns {LINK} no
 ExecStart=-{RESOLVECTL} dnsovertls {LINK} no
 ExecStart={RESOLVECTL} dns {LINK} {server}
+ExecStart={RESOLVECTL} default-route {LINK} false
+ExecStart={RESOLVECTL} domain {LINK} ~test
 ExecStopPost=-{ip} link del {LINK}
 
 [Install]
@@ -322,18 +348,31 @@ fn server(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
-/// Whether systemd-networkd runs: `Ok(false)` only for "not active" (exit
-/// 3); anything else that is not 0 means `systemctl` cannot tell.
-fn networkd_runs(system: &impl System) -> Result<bool, String> {
-    let active = system.run(SYSTEMCTL, &NETWORKD_ACTIVE);
-    match &active {
-        Ok(RunOutput { code: Some(0), .. }) => Ok(true),
-        Ok(RunOutput {
-            code: Some(INACTIVE),
-            ..
-        }) => Ok(false),
-        _ => Err(program::failure(&active)),
+/// Whether systemd-networkd may run, now or later: `false` only when its
+/// service and its socket both print `inactive`, and both print `disabled`
+/// or `masked` (review of #125). Exit code 3 alone is not enough: it also
+/// covers `activating` and `failed`, and an inactive networkd that is
+/// enabled starts again at boot, or through its socket. Output that cannot
+/// be read counts as "may run".
+fn networkd_may_run(system: &impl System) -> bool {
+    let words = |args: &[&str]| -> Option<Vec<String>> {
+        let output = system.run(SYSTEMCTL, args).ok()?;
+        output.code?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let words: Vec<String> = text.lines().map(|line| line.trim().to_owned()).collect();
+        (words.len() == 2).then_some(words)
+    };
+    let inactive = words(&NETWORKD_ACTIVE)
+        .is_some_and(|states| states.iter().all(|state| state == "inactive"));
+    if !inactive {
+        return true;
     }
+    let off = words(&NETWORKD_ENABLED).is_some_and(|states| {
+        states
+            .iter()
+            .all(|state| matches!(state.as_str(), "disabled" | "masked" | "masked-runtime"))
+    });
+    !off
 }
 
 /// The version of systemd, from the first line of `systemctl --version`
@@ -658,7 +697,10 @@ mod tests {
     const RESET_UNIT: &str = "/usr/bin/systemctl reset-failed marsa-dns-link.service";
     const LOOKED: &str = "/usr/bin/resolvectl status marsa0";
     const VERSIONED: &str = "/usr/bin/systemctl --version";
-    const NETWORKD: &str = "/usr/bin/systemctl is-active --quiet systemd-networkd.service";
+    const NETWORKD: &str =
+        "/usr/bin/systemctl is-active systemd-networkd.service systemd-networkd.socket";
+    const NETWORKD_ENABLED_CMD: &str =
+        "/usr/bin/systemctl is-enabled systemd-networkd.service systemd-networkd.socket";
     /// The mode of files that were there before a test, so a rewrite shows.
     const OLD_MODE: u32 = 0o600;
     const FOREIGN: &[u8] = b"[Unit]\nDescription=someone else's\n";
@@ -739,8 +781,13 @@ mod tests {
         fedora: bool,
         /// What `systemctl --version` says on its first line.
         version_line: &'static str,
-        /// The exit code of `systemctl is-active systemd-networkd`.
-        networkd_code: i32,
+        /// What `systemctl is-active` and `is-enabled` print for networkd's
+        /// service and socket.
+        networkd_active: &'static str,
+        networkd_enabled: &'static str,
+        /// After the unit's line with this text, resolved clears the link's
+        /// domain and default route, as in the race of finding 30.
+        wipe_after: Cell<Option<&'static str>>,
         /// A global `DNSOverTLS=yes`, which a link inherits.
         strict_dot: bool,
     }
@@ -768,7 +815,9 @@ mod tests {
                 resolvectl_fails: false,
                 fedora: false,
                 version_line: "systemd 255 (255.4-1ubuntu8)",
-                networkd_code: 0,
+                networkd_active: "active\nactive\n",
+                networkd_enabled: "enabled\nenabled\n",
+                wipe_after: Cell::new(None),
                 strict_dot: false,
             };
             linux.put("/usr/sbin/ip", b"");
@@ -908,6 +957,17 @@ mod tests {
                 ["dns", "marsa0", server] => there.server = Some((*server).to_owned()),
                 _ => panic!("the fake does not know: {command}"),
             }
+            if self
+                .wipe_after
+                .get()
+                .is_some_and(|part| command.contains(part))
+            {
+                self.wipe_after.set(None);
+                if let Some(there) = link.as_mut() {
+                    there.domains.clear();
+                    there.default_route = None;
+                }
+            }
             if link.as_ref().is_some_and(Link::exposed) {
                 self.exposed.set(true);
             }
@@ -930,7 +990,22 @@ mod tests {
             }
             match line {
                 "--version" => exit(0, &format!("{}\n+PAM +AUDIT +SELINUX\n", self.version_line)),
-                "is-active --quiet systemd-networkd.service" => exit(self.networkd_code, ""),
+                "is-active systemd-networkd.service systemd-networkd.socket" => {
+                    let code = if self.networkd_active.starts_with("active") {
+                        0
+                    } else {
+                        3
+                    };
+                    exit(code, self.networkd_active)
+                }
+                "is-enabled systemd-networkd.service systemd-networkd.socket" => {
+                    let code = if self.networkd_enabled.contains("enabled") {
+                        0
+                    } else {
+                        1
+                    };
+                    exit(code, self.networkd_enabled)
+                }
                 "is-active --quiet systemd-resolved.service" => {
                     let code = if self.active.get() { 0 } else { 3 };
                     exit(self.active_code.unwrap_or(code), "")
@@ -1147,13 +1222,13 @@ mod tests {
         // `systemctl` cannot tell whether networkd runs: the same.
         let mut unsure = Linux::new();
         unsure.version_line = "systemd 249 (249.11-0ubuntu3.12)";
-        unsure.networkd_code = 1;
+        unsure.networkd_active = "";
         assert_eq!(code_of(&install(18053, &unsure)), RESOLVED_USE_HOSTS);
         assert_eq!(unsure.unit_file(), None);
         let mut unknown = Linux::new();
         unknown.version_line = "something else";
         let failed = install(18053, &unknown);
-        assert_eq!(code_of(&failed), RESOLVED_SYSTEMD_TOO_OLD);
+        assert_eq!(code_of(&failed), RESOLVED_SYSTEMD_UNKNOWN);
         assert_eq!(
             message_of(&failed),
             "cannot read the version of systemd: systemctl --version printed no version, so \
@@ -1192,16 +1267,96 @@ mod tests {
     fn a_systemd_before_250_without_networkd_gets_the_link() {
         let mut linux = Linux::new();
         linux.version_line = "systemd 249 (249.11-0ubuntu3.12)";
-        linux.networkd_code = 3;
+        linux.networkd_active = "inactive\ninactive\n";
+        linux.networkd_enabled = "disabled\nmasked\n";
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
         let (bytes, _) = linux.unit_file().unwrap();
         assert_eq!(bytes, unit("/usr/sbin/ip", 18053, true).into_bytes());
         assert_eq!(
             linux.commands(),
             [
-                ACTIVE, VERSIONED, NETWORKD, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED
+                ACTIVE,
+                VERSIONED,
+                NETWORKD,
+                NETWORKD_ENABLED_CMD,
+                RESET_UNIT,
+                RELOAD,
+                ENABLED,
+                UNIT_UP,
+                LOOKED
             ]
         );
+        // Before 249 (untested there) the hosts path, whatever networkd does.
+        let mut older = Linux::new();
+        older.version_line = "systemd 247 (247.3-7+deb11u5)";
+        older.networkd_active = "inactive\ninactive\n";
+        older.networkd_enabled = "disabled\ndisabled\n";
+        assert_eq!(code_of(&install(18053, &older)), RESOLVED_USE_HOSTS);
+        assert_eq!(older.unit_file(), None);
+    }
+
+    /// Before 250, networkd that is not running now but may run later
+    /// (enabled, its socket enabled, failed, or activating) gets the hosts
+    /// path: the race would come back at the next boot (review of #125).
+    #[test]
+    fn a_systemd_before_250_with_networkd_that_may_run_gets_hosts() {
+        for (active, enabled) in [
+            ("inactive\ninactive\n", "enabled\ndisabled\n"),
+            ("inactive\ninactive\n", "disabled\nenabled\n"),
+            ("inactive\ninactive\n", "static\ndisabled\n"),
+            ("failed\ninactive\n", "disabled\ndisabled\n"),
+            ("activating\ninactive\n", "disabled\ndisabled\n"),
+            ("inactive\n", "disabled\ndisabled\n"),
+            ("inactive\ninactive\n", ""),
+        ] {
+            let mut linux = Linux::new();
+            linux.version_line = "systemd 249 (249.11-0ubuntu3.12)";
+            linux.networkd_active = active;
+            linux.networkd_enabled = enabled;
+            let failed = install(18053, &linux);
+            assert_eq!(
+                code_of(&failed),
+                RESOLVED_USE_HOSTS,
+                "{active:?} {enabled:?}"
+            );
+            assert_eq!(linux.unit_file(), None);
+        }
+    }
+
+    /// Whatever clears the link's domain and default route after a line of
+    /// the unit (finding 30), the lines after `dns` set them again: the link
+    /// never ends with Marsa's server and no domain.
+    #[test]
+    fn the_unit_sets_the_domain_again_after_the_server() {
+        for line in [
+            "default-route marsa0 false",
+            "domain marsa0 ~test",
+            "dnsovertls marsa0",
+        ] {
+            let linux = Linux::new();
+            linux.wipe_after.set(Some(line));
+            assert_eq!(
+                install(18053, &linux),
+                result(INSTALL, Outcome::Done),
+                "{line}"
+            );
+            let link = linux.link.borrow().clone().unwrap();
+            assert!(!link.exposed(), "{line}");
+            assert_eq!(link.domains, ["~test"], "{line}");
+        }
+        // Without the lines after `dns`, the same wipe leaves a default route.
+        let base = String::from_utf8(ours(18053)).unwrap();
+        let tail = "ExecStart=/usr/bin/resolvectl default-route marsa0 false\n\
+                    ExecStart=/usr/bin/resolvectl domain marsa0 ~test\n\
+                    ExecStopPost";
+        let short = base.replace(tail, "ExecStopPost");
+        assert_ne!(short, base);
+        let linux = Linux::new();
+        linux.put(UNIT_FILE, short.as_bytes());
+        *linux.loaded.borrow_mut() = Some(short.into_bytes());
+        linux.wipe_after.set(Some("domain marsa0 ~test"));
+        assert!(linux.start_unit());
+        assert!(linux.link.borrow().as_ref().unwrap().exposed());
     }
 
     /// The unit for systemd 250 to 252, with the local route.
