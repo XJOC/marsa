@@ -351,6 +351,40 @@ mod tests {
         assert!(cancel.is_cancelled());
     }
 
+    /// `server::run` sweeps `procs` again after its tasks end (task M5-16): a
+    /// process added after the first sweep is told to stop by `add_proc`,
+    /// and the second sweep waits until it has.
+    #[tokio::test]
+    async fn the_next_sweep_waits_for_a_proc_added_after_the_first() {
+        let daemon = Daemon::new(PathBuf::new());
+        daemon.shutdown.cancel();
+        daemon.stop_procs(Duration::from_secs(5)).await;
+
+        // Its stop takes a while, so a sweep that did not wait would end
+        // before the flag is set.
+        let stopped = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn({
+            let (cancel, stopped) = (cancel.clone(), stopped.clone());
+            async move {
+                cancel.cancelled().await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                stopped.store(true, Ordering::SeqCst);
+            }
+        });
+        assert!(
+            daemon
+                .add_proc("late", handle(cancel.clone(), task))
+                .is_none()
+        );
+        assert!(cancel.is_cancelled());
+        assert!(!stopped.load(Ordering::SeqCst));
+
+        daemon.stop_procs(Duration::from_secs(5)).await;
+        assert!(stopped.load(Ordering::SeqCst));
+        assert!(daemon.procs.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn take_proc_and_proc_alive() {
         let daemon = Daemon::new(PathBuf::new());

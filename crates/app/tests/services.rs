@@ -1,9 +1,10 @@
 //! The services and logs routes against a fake Caddy (task M3-07). The fake is
 //! this test binary, run again with `MARSA_FAKE_SERVICE` set, as in
 //! `tests/supervisor.rs`. In `serve` mode it reads the `caddy.json` the daemon
-//! wrote, and answers `GET /config/`, `POST /load`, and `POST /stop` on the
-//! admin address in it. Nothing listens outside `127.0.0.1`, and no real
-//! Caddy is needed.
+//! wrote, and answers `GET /config/`, `GET /id/<tag>` for the `@id` of the
+//! admin object (this data folder's tag), `POST /load`, and `POST /stop` on
+//! the admin address in it, as Caddy does. Nothing listens outside
+//! `127.0.0.1`, and no real Caddy is needed.
 //!
 //! The router runs in this process (`oneshot`), with the real auth layer.
 //! The start of Caddy with the daemon (task M5-16) runs on the same daemon,
@@ -15,7 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::{Body, BodyDataStream, to_bytes};
-use axum::http::{Request, StatusCode, Uri};
+use axum::extract::Path;
+use axum::http::{Method, Request, StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -24,11 +26,12 @@ use marsa::daemon::auth::AuthConfig;
 use marsa::daemon::caddy::{Applied, Launched, caddy_spec_for, start_at_launch};
 use marsa::daemon::sites_sync;
 use marsa::daemon::state::Daemon;
-use marsa_core::caddy::PhpPools;
+use marsa_core::caddy::{PhpPools, SERVER_ID};
 use marsa_core::config::SitesConfig;
 use marsa_core::platform::daemon_file::{Token, daemon_authority};
+use marsa_core::platform::process;
 use marsa_core::services::ServiceSpec;
-use marsa_core::types::{ErrorBody, Event, LogLine, ServiceState, ServiceStatus};
+use marsa_core::types::{ErrorBody, Event, LogLine, ServiceAction, ServiceState, ServiceStatus};
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
 use tokio_stream::StreamExt as _;
@@ -51,7 +54,14 @@ fn fake_caddy() {
         return;
     };
     match mode.as_str() {
-        "serve" => serve(),
+        "serve" => serve(true),
+        // Its admin API comes 1 s late, so a test can act during the start.
+        "slow" => {
+            std::thread::sleep(Duration::from_secs(1));
+            serve(true);
+        }
+        // Another program on our admin port: everything but our tag.
+        "impostor" => serve(false),
         // What Caddy prints when another program holds its HTTP port.
         "port_in_use" => {
             eprintln!(
@@ -70,8 +80,9 @@ fn fake_caddy() {
 }
 
 /// `GET /config/` answers the config of the start, or of the last
-/// `POST /load`, as Caddy does.
-fn serve() {
+/// `POST /load`, as Caddy does. `tagged`: `GET /id/<tag>` answers the admin
+/// object; otherwise every id is unknown (404).
+fn serve(tagged: bool) {
     let path = std::env::var(FAKE_CONFIG).expect("the config path");
     let config = std::fs::read_to_string(path).expect("caddy.json");
     let config: serde_json::Value = serde_json::from_str(&config).expect("JSON");
@@ -93,6 +104,22 @@ fn serve() {
                     move || {
                         let config = current.lock().expect("the config").clone();
                         async move { Json(config) }
+                    }
+                }),
+            )
+            .route(
+                "/id/{id}",
+                get({
+                    let current = Arc::clone(&current);
+                    move |Path(id): Path<String>| {
+                        let admin = current.lock().expect("the config")["admin"].clone();
+                        async move {
+                            if tagged && admin["@id"] == id.as_str() {
+                                Ok(Json(admin))
+                            } else {
+                                Err(StatusCode::NOT_FOUND)
+                            }
+                        }
                     }
                 }),
             )
@@ -509,6 +536,7 @@ async fn until_caddy_runs(app: &App) {
 async fn admin_config(port: u16) -> serde_json::Value {
     let client = reqwest::Client::builder()
         .no_proxy()
+        .timeout(WAIT)
         .build()
         .expect("an HTTP client");
     let response = client
@@ -618,25 +646,124 @@ async fn a_failed_start_with_the_daemon_names_why_and_the_api_serves_on() {
     assert_eq!(again.state, failed("port_in_use"));
 }
 
+/// Task M5-16b: a start by hand while the daemon starts Caddy waits for that
+/// start, then finds Caddy running. No second Caddy.
 #[tokio::test]
-async fn a_start_by_hand_during_the_start_with_the_daemon_is_busy() {
-    // Deaf: the start waits for its admin API until the limit.
+async fn a_start_by_hand_during_the_start_with_the_daemon_waits_for_it() {
+    let app = App::new(Some("slow"));
+    let launch = start_at_launch(&app.daemon);
+    // Spawned; its admin API comes 1 s later.
+    until_caddy_runs(&app).await;
+
+    let started: ServiceStatus = app
+        .json("POST", "/v1/services/caddy/start", StatusCode::OK)
+        .await;
+    let launched = launch.wait(WAIT).await;
+    let Some(Launched::Ran(first)) = launched else {
+        panic!("not run: {launched:?}");
+    };
+    assert_eq!(first.state, ServiceState::Running);
+    // The same pid in both answers: the request started no second Caddy.
+    assert_eq!(
+        (started.state, started.pid),
+        (ServiceState::Running, first.pid)
+    );
+    app.daemon.stop_procs(WAIT).await;
+}
+
+/// Task M5-16b: `marsa services stop caddy` starts the daemon, which starts
+/// Caddy. The stop waits for that start, then stops Caddy: it is not lost.
+#[tokio::test]
+async fn a_stop_during_the_start_with_the_daemon_waits_and_stops_caddy() {
+    let app = App::new(Some("slow"));
+    let launch = start_at_launch(&app.daemon);
+    until_caddy_runs(&app).await;
+
+    let stopped: ServiceStatus = app
+        .json("POST", "/v1/services/caddy/stop", StatusCode::OK)
+        .await;
+    assert_eq!((stopped.state, stopped.pid), (ServiceState::Stopped, None));
+    let launched = launch.wait(WAIT).await;
+    let Some(Launched::Ran(first)) = launched else {
+        panic!("not run: {launched:?}");
+    };
+    assert_eq!(first.state, ServiceState::Running);
+    assert!(!app.daemon.proc_alive("caddy"));
+    assert_eq!(app.caddy().await.state, ServiceState::Stopped);
+    // Our Caddy answered with our tag, so it got `POST /stop`.
+    app.wait_for_line("fake stopping").await;
+}
+
+/// A wait that runs out is still `service_busy`, and `run` does not wait.
+#[tokio::test]
+async fn a_wait_that_runs_out_is_busy() {
+    // Deaf: the start holds Caddy for its whole 3 s limit.
     let app = App::with_ready_limit(Some("deaf"), Duration::from_secs(3));
     let launch = start_at_launch(&app.daemon);
     until_caddy_runs(&app).await;
 
-    let code = app
-        .error("POST", "/v1/services/caddy/start", StatusCode::CONFLICT)
-        .await;
-    assert_eq!(code, "service_busy");
+    let wait = Duration::from_millis(300);
+    let began = Instant::now();
+    let caddy = &app.daemon.caddy;
+    let err = caddy
+        .run_waiting(&app.daemon, ServiceAction::Stop, wait)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "service_busy");
+    assert!(began.elapsed() >= wait);
+    let err = caddy
+        .run(&app.daemon, ServiceAction::Start)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "service_busy");
+
     let launched = launch.wait(WAIT).await;
     let Some(Launched::Ran(status)) = launched else {
         panic!("not run: {launched:?}");
     };
     assert_eq!(status.state, failed("caddy_start_timeout"));
     assert!(!app.daemon.proc_alive("caddy"));
-    // One Caddy ran, not two.
     app.wait_for_line("fake deaf").await;
+}
+
+/// A request queued behind the start with the daemon when the daemon begins
+/// to stop does not run: the shutdown stops Caddy, and a start then would
+/// take our stopping Caddy for an orphan and start another one. A request
+/// that comes during the shutdown does not run either.
+#[tokio::test]
+async fn a_request_waiting_at_shutdown_does_not_run() {
+    // Deaf: the start holds Caddy until the shutdown.
+    let app = App::new(Some("deaf"));
+    let launch = start_at_launch(&app.daemon);
+    until_caddy_runs(&app).await;
+    let queued = tokio::spawn({
+        let daemon = Arc::clone(&app.daemon);
+        async move {
+            let caddy = &daemon.caddy;
+            caddy.run_waiting(&daemon, ServiceAction::Start, WAIT).await
+        }
+    });
+    // In line behind the start.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!queued.is_finished());
+
+    app.daemon.shutdown.cancel();
+    assert_eq!(launch.wait(WAIT).await, Some(Launched::ShuttingDown));
+    let answer = tokio::time::timeout(WAIT, queued).await.expect("no hang");
+    assert_eq!(answer.unwrap().unwrap_err().code(), "service_busy");
+    // Free now, but the daemon stops.
+    let caddy = &app.daemon.caddy;
+    let late = caddy
+        .run_waiting(&app.daemon, ServiceAction::Restart, WAIT)
+        .await;
+    assert_eq!(late.unwrap_err().code(), "service_busy");
+
+    // Only the first Caddy ever ran, and the shutdown's sweep stops it.
+    app.daemon.stop_procs(WAIT).await;
+    assert!(!app.daemon.proc_alive("caddy"));
+    let lines: Vec<LogLine> = app.json("GET", "/v1/logs/caddy", StatusCode::OK).await;
+    let runs = lines.iter().filter(|line| line.text == "fake deaf");
+    assert_eq!(runs.count(), 1, "{lines:?}");
 }
 
 #[tokio::test]
@@ -723,4 +850,88 @@ async fn caddy_that_starts_after_the_first_pass_starts_on_the_sites() {
     assert_eq!(config, written_config(&app));
 
     app.daemon.stop_procs(WAIT).await;
+}
+
+// Task M5-16b: only our tag makes a Caddy ours. `GET /config/` answers on
+// any Caddy.
+
+/// Our process answers `GET /config/` and `POST /stop`, but not our tag:
+/// it is not taken for our Caddy, and gets no `POST /stop`.
+#[tokio::test]
+async fn a_caddy_without_our_tag_is_never_ready_and_gets_no_stop() {
+    let app = App::with_ready_limit(Some("impostor"), Duration::from_secs(3));
+    let status: ServiceStatus = app
+        .json("POST", "/v1/services/caddy/start", StatusCode::OK)
+        .await;
+    assert_eq!(
+        (status.state, status.pid),
+        (failed("caddy_start_timeout"), None)
+    );
+    assert!(!app.daemon.proc_alive("caddy"));
+    let lines = app.wait_for_line("fake serving").await;
+    let stops = lines.iter().filter(|line| line.text == "fake stopping");
+    assert_eq!(stops.count(), 0, "{lines:?}");
+}
+
+/// Another Marsa's Caddy (a second user's) on our admin port, a fake here:
+/// records each request, answers `GET /config/` and its `marsa-srv` tag.
+async fn other_marsa(port: u16) -> (Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new().fallback({
+        let calls = Arc::clone(&calls);
+        move |method: Method, uri: Uri| {
+            let call = format!("{method} {}", uri.path());
+            calls.lock().expect("the calls").push(call);
+            async move {
+                let shared = format!("/id/{SERVER_ID}");
+                match (method, uri.path()) {
+                    (Method::GET, "/config/") => Ok(Json(serde_json::json!({}))),
+                    (Method::GET, path) if path == shared => {
+                        Ok(Json(serde_json::json!({ "@id": SERVER_ID })))
+                    }
+                    _ => Err(StatusCode::NOT_FOUND),
+                }
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+        .await
+        .expect("the admin port");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    (calls, server)
+}
+
+/// Where no orphan check runs first (Linux and Windows), only the tag keeps
+/// the start from taking another Marsa's Caddy for ours. On macOS the orphan
+/// check finds it first. Either way it gets no config and no stop.
+#[tokio::test]
+async fn another_marsas_caddy_on_our_admin_port_gets_no_config_and_no_stop() {
+    let app = App::with_ready_limit(Some("deaf"), Duration::from_secs(1));
+    let (calls, server) = other_marsa(app.admin_port).await;
+
+    let status: ServiceStatus = app
+        .json("POST", "/v1/services/caddy/start", StatusCode::OK)
+        .await;
+    let code = if process::ORPHAN_RECOVERY {
+        "caddy_other_marsa"
+    } else {
+        "caddy_start_timeout"
+    };
+    assert_eq!(status.state, failed(code));
+    assert!(!app.daemon.proc_alive("caddy"));
+    // The first sites pass after it only writes the file.
+    let applied = app
+        .daemon
+        .caddy
+        .apply(&app.daemon, Vec::new(), PhpPools::default())
+        .await;
+    assert_eq!(applied.unwrap(), Applied::Written);
+
+    let calls = calls.lock().unwrap().clone();
+    assert!(!calls.is_empty(), "it was asked who it is");
+    assert!(
+        calls.iter().all(|call| call.starts_with("GET ")),
+        "{calls:?}"
+    );
+    server.abort();
 }
