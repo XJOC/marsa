@@ -192,8 +192,9 @@ mod scm {
 
     /// `ERROR_INVALID_PARAMETER`: the service's own arguments are wrong.
     const BAD_ARGUMENTS: u32 = 87;
-    /// How long a stop may wait for the request that runs: four `certutil`
-    /// calls at their limit of 120 s each, and some room.
+    /// The hint to the SCM while a stop waits for the request that runs. The
+    /// wait itself has no limit: each command of an op has its own (120 s for
+    /// `certutil`), and at shutdown Windows ends the process anyway.
     const STOP_WAIT: Duration = Duration::from_secs(600);
 
     /// Connects this process to the SCM. Fails at once if the SCM did not
