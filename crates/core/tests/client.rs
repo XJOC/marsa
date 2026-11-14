@@ -15,7 +15,7 @@ use axum::extract::{RawQuery, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use marsa_core::client::{
     ClientError, DaemonClient, EventStream, StreamItem, ensure_running, ensure_running_with,
@@ -29,11 +29,19 @@ use marsa_core::types::{
     API_VERSION, AutostartState, DefaultVersion, ErrorBody, Event, Health, InstallAccepted,
     InstallRequest, LinkRequest, LogLine, LogStream, OpResult, OpStatus, ParkRequest, RuntimeList,
     RuntimeVersions, ServiceAction, ServiceState, ServiceStatus, SetupReport, SetupSkip, Site,
-    SiteKind, SiteList, SitePatch, SkippedFolder, Source,
+    SiteKind, SiteList, SitePatch, SkippedFolder, Source, Uninstalled, VersionInUse, XdebugState,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+/// A `marsad` that is not there. With `.exe` on Windows, where only an
+/// `.exe` is started at all, so the start fails for the missing file.
+const NO_MARSAD: &str = if cfg!(windows) {
+    "no-marsad.exe"
+} else {
+    "no-marsad"
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -635,6 +643,66 @@ async fn set_default_puts_the_version_and_keeps_the_daemons_code() {
 }
 
 #[tokio::test]
+async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
+    let in_use = VersionInUse {
+        version: "8.3.12".into(),
+        default: Some("8.3\u{1b}[2J".into()),
+        sites: vec!["blog".into()],
+        caddy: false,
+    };
+    let router = Router::new().route(
+        "/v1/runtimes/php/{version}",
+        delete({
+            let in_use = in_use.clone();
+            move |axum::extract::Path(version): axum::extract::Path<String>| async move {
+                if version == "8.4.1" {
+                    let done = Uninstalled {
+                        runtime: Runtime::Php,
+                        version,
+                    };
+                    return Json(done).into_response();
+                }
+                let mut body = ErrorBody::new("version_in_use", "php 8.3.12 is in use");
+                body.in_use = Some(in_use);
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+        }),
+    );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    let done = client.uninstall(Runtime::Php, "8.4.1").await.unwrap();
+    assert_eq!(
+        (done.runtime, done.version.as_str()),
+        (Runtime::Php, "8.4.1")
+    );
+
+    let err = client.uninstall(Runtime::Php, "8.3").await.unwrap_err();
+    assert_eq!(err.code(), "version_in_use");
+    let ClientError::InUse { in_use: got, .. } = &err else {
+        panic!("{err:?}");
+    };
+    // The daemon's text is cleaned, as every text in an error.
+    let want = VersionInUse {
+        default: Some("8.3[2J".into()),
+        ..in_use
+    };
+    assert_eq!(*got, want);
+    fake.assert_no_token(&err);
+    let targets: Vec<String> = fake
+        .seen()
+        .into_iter()
+        .map(|seen| format!("{} {}", seen.method, seen.target))
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            "DELETE /v1/runtimes/php/8.4.1",
+            "DELETE /v1/runtimes/php/8.3"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn an_id_cannot_reach_another_route() {
     let (router, shutdowns) = serve_shutdown(Router::new(), None);
     let router = router.route(
@@ -838,6 +906,95 @@ async fn a_site_name_cannot_reach_another_route() {
     assert_eq!(fake.seen().len(), 1);
 }
 
+// M5-09: `unlink` and `forget`.
+
+#[tokio::test]
+async fn unlink_and_forget_send_delete() {
+    // Whether each `DELETE` had a `Content-Type`, and its body.
+    let bodies: Arc<Mutex<Vec<(bool, String)>>> = Arc::default();
+    let keep = |answer: SiteList| {
+        let bodies = bodies.clone();
+        move |headers: axum::http::HeaderMap, body: String| async move {
+            let typed = headers.contains_key(header::CONTENT_TYPE);
+            bodies.lock().expect("lock").push((typed, body));
+            Json(answer)
+        }
+    };
+    let router = Router::new()
+        .route(
+            "/v1/sites/park",
+            axum::routing::delete(keep(site_list("delete park"))),
+        )
+        .route(
+            "/v1/sites/{name}",
+            axum::routing::delete(keep(site_list("delete"))),
+        );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    let folder = fake.data_dir().join("code");
+
+    assert_eq!(client.unlink("shop").await.unwrap(), site_list("delete"));
+    // No body: the daemon unlinks the site `park`.
+    assert_eq!(
+        client.unlink("park").await.unwrap(),
+        site_list("delete park")
+    );
+    let forgot = client.forget(&folder).await.unwrap();
+    assert_eq!(forgot, site_list("delete park"));
+    for name in ["", ".", ".."] {
+        let err = client.unlink(name).await.unwrap_err();
+        assert_eq!(err.code(), "invalid_id", "{err:?}");
+    }
+
+    let json = serde_json::to_string(&ParkRequest { path: folder }).unwrap();
+    let none = (false, String::new());
+    assert_eq!(*bodies.lock().unwrap(), [none.clone(), none, (true, json)]);
+    let targets: Vec<String> = fake
+        .seen()
+        .into_iter()
+        .map(|seen| format!("{} {}", seen.method, seen.target))
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            "DELETE /v1/sites/shop",
+            "DELETE /v1/sites/park",
+            "DELETE /v1/sites/park",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn unlink_and_forget_keep_the_daemons_codes() {
+    let refuse = |status: StatusCode, code: &'static str| {
+        axum::routing::delete(move || async move { (status, Json(ErrorBody::new(code, "x"))) })
+    };
+    let router = Router::new()
+        .route(
+            "/v1/sites/park",
+            refuse(StatusCode::NOT_FOUND, "folder_not_parked"),
+        )
+        .route(
+            "/v1/sites/{name}",
+            refuse(StatusCode::CONFLICT, "site_is_parked"),
+        );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+
+    let err = client.unlink("blog").await.unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Api { status: 409, code, .. } if code == "site_is_parked"),
+        "{err:?}"
+    );
+    fake.assert_no_token(&err);
+    let err = client.forget(&fake.data_dir().join("x")).await.unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Api { status: 404, code, .. } if code == "folder_not_parked"),
+        "{err:?}"
+    );
+    fake.assert_no_token(&err);
+}
+
 /// A path that is not UTF-8 cannot go into JSON. It is refused with the
 /// daemon's code, and nothing is sent.
 #[tokio::test]
@@ -995,6 +1152,42 @@ async fn autostart_reads_and_puts_and_keeps_the_daemons_code() {
 }
 
 // ---------------------------------------------------------------------------
+// Xdebug (task M5-11)
+
+#[tokio::test]
+async fn xdebug_reads_and_puts() {
+    let on = XdebugState {
+        enabled: true,
+        loaded: vec!["8.4.23".into()],
+        missing: vec!["8.3.1".into()],
+    };
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let router = Router::new().route(
+        "/v1/php/xdebug",
+        get(|| async { Json(XdebugState::default()) }).put({
+            let (bodies, on) = (bodies.clone(), on.clone());
+            move |Json(body): Json<serde_json::Value>| async move {
+                bodies.lock().expect("lock").push(body);
+                Json(on)
+            }
+        }),
+    );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    assert_eq!(client.xdebug().await.unwrap(), XdebugState::default());
+    assert_eq!(client.set_xdebug(true).await.unwrap(), on);
+
+    let sent = serde_json::json!({ "enabled": true });
+    assert_eq!(*bodies.lock().unwrap(), [sent]);
+    let targets: Vec<String> = fake
+        .seen()
+        .into_iter()
+        .map(|seen| format!("{} {}", seen.method, seen.target))
+        .collect();
+    assert_eq!(targets, ["GET /v1/php/xdebug", "PUT /v1/php/xdebug"]);
+}
+
+// ---------------------------------------------------------------------------
 // Event streams
 
 #[tokio::test]
@@ -1132,7 +1325,7 @@ async fn a_stale_file_with_a_free_lock_is_never_contacted() {
     let err = DaemonClient::connect(squatter.data_dir()).unwrap_err();
     assert_eq!(err.code(), "daemon_not_running", "{err:?}");
     assert!(!stop_daemon(squatter.data_dir()).await.unwrap());
-    let missing = squatter.data_dir().join("no-marsad");
+    let missing = squatter.data_dir().join(NO_MARSAD);
     let err = ensure_running_with(squatter.data_dir(), &missing)
         .await
         .unwrap_err();
@@ -1149,7 +1342,7 @@ async fn a_stale_file_with_a_free_lock_is_never_contacted() {
 async fn ensure_running_returns_a_daemon_of_this_version() {
     let (router, shutdowns) = serve_shutdown(serve_health(health(VERSION, API_VERSION)), None);
     let fake = Fake::start(router).await;
-    let missing = fake.data_dir().join("no-marsad");
+    let missing = fake.data_dir().join(NO_MARSAD);
     let client = ensure_running_with(fake.data_dir(), &missing)
         .await
         .unwrap();
@@ -1161,7 +1354,7 @@ async fn ensure_running_returns_a_daemon_of_this_version() {
 async fn a_newer_daemon_is_used_as_is() {
     let (router, shutdowns) = serve_shutdown(serve_health(health("99.0.0", API_VERSION)), None);
     let fake = Fake::start(router).await;
-    let missing = fake.data_dir().join("no-marsad");
+    let missing = fake.data_dir().join(NO_MARSAD);
     let client = ensure_running_with(fake.data_dir(), &missing)
         .await
         .unwrap();
@@ -1176,7 +1369,7 @@ async fn a_daemon_with_a_newer_api_is_refused_and_left_running() {
         let answer = health(app_version, API_VERSION + 1);
         let (router, shutdowns) = serve_shutdown(serve_health(answer), None);
         let fake = Fake::start(router).await;
-        let missing = fake.data_dir().join("no-marsad");
+        let missing = fake.data_dir().join(NO_MARSAD);
         let err = ensure_running_with(fake.data_dir(), &missing)
             .await
             .unwrap_err();
@@ -1197,7 +1390,7 @@ async fn an_older_daemon_is_stopped_then_replaced() {
 
     // No `marsad` here, so the start after the stop fails, which shows it was
     // tried.
-    let missing = temp.path().join("no-marsad");
+    let missing = temp.path().join(NO_MARSAD);
     let err = ensure_running_with(temp.path(), &missing)
         .await
         .unwrap_err();
@@ -1243,7 +1436,7 @@ async fn two_clients_replacing_a_daemon_both_use_the_new_one() {
             }),
         );
     let fake = Fake::start(router).await;
-    let missing = fake.data_dir().join("no-marsad");
+    let missing = fake.data_dir().join(NO_MARSAD);
     let (a, b) = tokio::join!(
         ensure_running_with(fake.data_dir(), &missing),
         ensure_running_with(fake.data_dir(), &missing),
@@ -1265,7 +1458,7 @@ async fn a_held_lock_is_waited_for_then_marsad_is_started() {
         lock.release();
     });
     let started = Instant::now();
-    let missing = temp.path().join("no-marsad");
+    let missing = temp.path().join(NO_MARSAD);
     let err = ensure_running_with(temp.path(), &missing)
         .await
         .unwrap_err();
@@ -1278,7 +1471,7 @@ async fn a_held_lock_is_waited_for_then_marsad_is_started() {
 #[tokio::test]
 async fn no_daemon_and_no_marsad_is_a_start_failure() {
     let dir = TempDir::new().unwrap();
-    let err = ensure_running_with(dir.path(), &dir.path().join("no-marsad"))
+    let err = ensure_running_with(dir.path(), &dir.path().join(NO_MARSAD))
         .await
         .unwrap_err();
     assert_eq!(err.code(), "daemon_start_failed", "{err:?}");

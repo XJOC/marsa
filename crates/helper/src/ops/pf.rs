@@ -451,6 +451,9 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         fn remove(&self, path: &Path) -> io::Result<()> {
             self.fake.remove(path)
         }
+        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
+            self.fake.remove_empty_dir(path)
+        }
         fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
             let result = self.fake.run(program, args);
             let mut answers = self.answers.borrow_mut();

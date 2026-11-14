@@ -35,6 +35,15 @@ expression: "caddy_config(&CaddyInput::default())"
           ]
         }
       }
+    },
+    "pki": {
+      "certificate_authorities": {
+        "marsa": {
+          "install_trust": false,
+          "name": "Marsa Local CA",
+          "root_common_name": "Marsa Local CA"
+        }
+      }
     }
   }
 }

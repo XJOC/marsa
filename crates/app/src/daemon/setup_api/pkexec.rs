@@ -17,6 +17,8 @@
 //! | 126 | the user dismissed the password dialog | `setup_cancelled` |
 //! | 127 | not authorized: a wrong password, no polkit agent (over SSH, no desktop), or the policy said no | `setup_not_authorized` |
 //! | other | – | `setup_helper_failed` |
+//!
+//! The codes are setup's; the uninstall (task M5-13) gets `uninstall_*`.
 
 use std::ffi::OsString;
 use std::io;
@@ -25,7 +27,7 @@ use std::path::Path;
 use marsa_core::helper::OpResult;
 use marsa_core::types::ApiError;
 
-use super::{MAX_ANSWER, RunOutput, failure, not_finished, parse_answer, results_of};
+use super::{Flow, MAX_ANSWER, RunOutput, failure, not_finished, parse_answer, results_of};
 
 /// `pkexec` itself, from polkit. An absolute path: `marsad` never searches
 /// `PATH`.
@@ -46,12 +48,13 @@ pub fn args(helper: &Path, request: &str) -> Vec<OsString> {
     ]
 }
 
-/// The helper's results from what `pkexec` gave back.
+/// The helper's results from what `pkexec` gave back, with the error codes
+/// of `flow`.
 ///
 /// A message never quotes what the programs printed: only its size and the
 /// exit code go to the log.
-pub fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError> {
-    let output = output.map_err(|err| not_finished(&err, "pkexec"))?;
+pub fn read_answer(flow: Flow, output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError> {
+    let output = output.map_err(|err| not_finished(flow, &err, "pkexec"))?;
     let answer = if output.stdout.len() > MAX_ANSWER {
         None
     } else {
@@ -61,12 +64,12 @@ pub fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiEr
         return Err(match output.code {
             Some(DISMISSED) => {
                 tracing::info!("the password dialog was dismissed");
-                failure("setup_cancelled", "the password dialog was dismissed")
+                failure(&flow.code("cancelled"), "the password dialog was dismissed")
             }
             Some(NOT_AUTHORIZED) => {
                 tracing::info!("pkexec did not give admin rights");
                 failure(
-                    "setup_not_authorized",
+                    &flow.code("not_authorized"),
                     "Linux did not give admin rights: a wrong password, no password dialog \
                      (as over SSH), or a policy that refused",
                 )
@@ -78,11 +81,14 @@ pub fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiEr
                     stderr_bytes = output.stderr.len(),
                     "marsa-helper gave no answer Marsa can read"
                 );
-                failure("setup_helper_failed", "the helper's answer cannot be read")
+                failure(
+                    &flow.code("helper_failed"),
+                    "the helper's answer cannot be read",
+                )
             }
         });
     };
-    results_of(answer, output.code)
+    results_of(flow, answer, output.code)
 }
 
 #[cfg(test)]
@@ -131,7 +137,7 @@ mod tests {
             .unwrap()
             .to_string();
         for code in [0, 1] {
-            let results = read_answer(exited(Some(code), &line, "")).unwrap();
+            let results = read_answer(Flow::Setup, exited(Some(code), &line, "")).unwrap();
             assert_eq!(results.len(), 2, "{code}");
         }
     }
@@ -141,7 +147,7 @@ mod tests {
         let line = serde_json::from_str::<serde_json::Value>(REJECTED)
             .unwrap()
             .to_string();
-        let err = read_answer(exited(Some(2), &line, "")).unwrap_err();
+        let err = read_answer(Flow::Setup, exited(Some(2), &line, "")).unwrap_err();
         assert_eq!(err.code, "setup_helper_rejected");
         assert_eq!(
             err.message,
@@ -160,7 +166,7 @@ mod tests {
             (None, "setup_helper_failed"),
         ];
         for (code, expected) in cases {
-            let err = read_answer(exited(code, "", stderr)).unwrap_err();
+            let err = read_answer(Flow::Setup, exited(code, "", stderr)).unwrap_err();
             assert_eq!(err.code, expected, "{code:?}");
             assert!(!err.message.contains("secret"), "{}", err.message);
         }
@@ -171,34 +177,59 @@ mod tests {
     fn only_a_whole_answer_counts() {
         let half = r#"{"version":1,"results":[{"op":"ports_install""#;
         assert_eq!(
-            code_of(read_answer(exited(Some(126), half, ""))),
+            code_of(read_answer(Flow::Setup, exited(Some(126), half, ""))),
             "setup_cancelled"
         );
         let other = r#"{"version":2,"results":[{"op":"ports_install","status":"done"}]}"#;
         assert_eq!(
-            code_of(read_answer(exited(Some(0), other, ""))),
+            code_of(read_answer(Flow::Setup, exited(Some(0), other, ""))),
             "setup_helper_failed"
         );
         let large = format!("{}{}", " ".repeat(MAX_ANSWER), DONE);
         assert_eq!(
-            code_of(read_answer(exited(Some(0), &large, ""))),
+            code_of(read_answer(Flow::Setup, exited(Some(0), &large, ""))),
             "setup_helper_failed"
         );
         let empty = r#"{"version":1,"results":[]}"#;
         assert_eq!(
-            code_of(read_answer(exited(Some(0), empty, ""))),
+            code_of(read_answer(Flow::Setup, exited(Some(0), empty, ""))),
             "setup_helper_failed"
+        );
+    }
+
+    /// The uninstall (task M5-13) gets its own codes.
+    #[test]
+    fn the_uninstall_gets_its_own_codes() {
+        let cases = [
+            (Some(126), "uninstall_cancelled"),
+            (Some(127), "uninstall_not_authorized"),
+            (Some(1), "uninstall_helper_failed"),
+        ];
+        for (code, expected) in cases {
+            let err = read_answer(Flow::Uninstall, exited(code, "", "")).unwrap_err();
+            assert_eq!(err.code, expected, "{code:?}");
+        }
+        let timed_out = Err(io::Error::new(io::ErrorKind::TimedOut, "x"));
+        assert_eq!(
+            code_of(read_answer(Flow::Uninstall, timed_out)),
+            "uninstall_timed_out"
         );
     }
 
     #[test]
     fn a_timeout_a_stopping_daemon_and_a_missing_pkexec() {
         let timed_out = Err(io::Error::new(io::ErrorKind::TimedOut, "x"));
-        assert_eq!(code_of(read_answer(timed_out)), "setup_timed_out");
+        assert_eq!(
+            code_of(read_answer(Flow::Setup, timed_out)),
+            "setup_timed_out"
+        );
         let stopping = Err(io::Error::new(io::ErrorKind::Interrupted, "x"));
-        assert_eq!(code_of(read_answer(stopping)), "setup_interrupted");
+        assert_eq!(
+            code_of(read_answer(Flow::Setup, stopping)),
+            "setup_interrupted"
+        );
         let missing = Err(io::Error::from(io::ErrorKind::NotFound));
-        let err = read_answer(missing).unwrap_err();
+        let err = read_answer(Flow::Setup, missing).unwrap_err();
         assert_eq!(
             (err.code.as_str(), err.message.as_str()),
             ("setup_helper_failed", "cannot run pkexec")

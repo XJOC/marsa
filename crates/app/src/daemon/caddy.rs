@@ -18,13 +18,15 @@
 //! sync task (`sites_sync`) last gave [`CaddyManager::apply`]. While Caddy
 //! runs, each change goes to its admin API (`POST /load`), so Caddy changes
 //! without a restart (task M4-11). The ports stay the same: no new listener.
+//!
+//! When `marsad` starts, [`start_at_launch`] starts an installed Caddy in the
+//! background, through the same start (task M5-16).
 
 pub mod orphan;
 
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -55,8 +57,7 @@ const READY_LIMIT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(100);
 /// For each admin API call, `/stop` included.
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(1);
-/// For `POST /load`: Caddy answers once the new config runs, and the first
-/// config with a secure site also makes the CA.
+/// For `POST /load`: Caddy answers once the new config runs.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How Caddy and each php-fpm pool restart after a failure: up to 3 times,
@@ -176,11 +177,18 @@ pub struct CaddyManager {
     pub processes: Arc<dyn Processes>,
     /// How long each step of an orphan's stop waits.
     pub ladder: Ladder,
+    /// The program of the last start, so an uninstall never deletes the
+    /// Caddy that runs (task M5-07). Use [`CaddyManager::running_program`].
+    pub started: Mutex<Option<PathBuf>>,
     /// The status and recent lines. Kept across runs, so `seq` never goes
     /// back and the lines of a failed run stay readable.
     runtime: Arc<Mutex<ServiceRuntime>>,
-    /// Set while an action runs.
-    busy: AtomicBool,
+    /// Held for the whole of each action. [`CaddyManager::run`] only tries
+    /// it, [`CaddyManager::run_waiting`] waits for it in line, and
+    /// [`start_at_launch`] takes it before its task runs. A tokio lock: it is
+    /// held across `.await`, and it serves the waits in order. In an `Arc`,
+    /// so a task can own its guard.
+    busy: Arc<tokio::sync::Mutex<()>>,
     /// The sites and PHP pools of the config. [`CaddyManager::apply`] sets
     /// them; `start` writes the config of the latest ones.
     wanted: Mutex<Wanted>,
@@ -274,8 +282,9 @@ impl CaddyManager {
             ready_limit: READY_LIMIT,
             processes: Arc::new(SystemProcesses),
             ladder: Ladder::default(),
+            started: Mutex::default(),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(CADDY_ID))),
-            busy: AtomicBool::new(false),
+            busy: Arc::default(),
             wanted: Mutex::default(),
             pushing: tokio::sync::Mutex::default(),
         }
@@ -358,6 +367,13 @@ impl CaddyManager {
         Ok(config)
     }
 
+    /// Whether there is a Caddy to run: the check `start` makes first, here
+    /// without marking the status failed. Setup asks it before it starts
+    /// Caddy to make the CA (task M5-15).
+    pub fn installed(&self) -> bool {
+        self.spec_to_run().is_ok_and(|spec| spec.program.is_file())
+    }
+
     /// The spec to run now: the fake of a test, else [`caddy_spec`].
     fn spec_to_run(&self) -> Result<ServiceSpec, CaddyError> {
         match &self.spec {
@@ -368,6 +384,14 @@ impl CaddyManager {
 
     pub fn status(&self) -> ServiceStatus {
         lock(&self.runtime).status.clone()
+    }
+
+    /// The program Caddy runs from now, or `None` while it does not run.
+    pub fn running_program(&self, daemon: &Daemon) -> Option<PathBuf> {
+        if !daemon.proc_alive(CADDY_ID) {
+            return None;
+        }
+        lock(&self.started).clone()
     }
 
     /// The last lines, oldest first.
@@ -381,8 +405,8 @@ impl CaddyManager {
     ///
     /// # Errors
     ///
-    /// `service_busy` while another action runs: a flag, not a lock held
-    /// across `.await`, keeps two starts from running two Caddys.
+    /// `service_busy` while another action runs, or another waits for its
+    /// turn: one action at a time keeps two starts from running two Caddys.
     /// `caddy_not_installed`, `caddy_config_write`, and `program_not_absolute`
     /// from `start`: the status is then `Failed` with the same code.
     pub async fn run(
@@ -390,10 +414,59 @@ impl CaddyManager {
         daemon: &Daemon,
         action: ServiceAction,
     ) -> Result<ServiceStatus, ActionError> {
-        if self.busy.swap(true, Ordering::AcqRel) {
+        let busy = Arc::clone(&self.busy)
+            .try_lock_owned()
+            .map_err(|_| ActionError::Busy)?;
+        self.act(daemon, action, busy).await
+    }
+
+    /// [`CaddyManager::run`], but an action that finds another one running
+    /// waits up to `wait` for it to end, then runs. Waits end in the order
+    /// they began. So a `stop` sent while the daemon starts Caddy (task
+    /// M5-16) stops Caddy once that start has ended, if it ends within
+    /// `wait`; otherwise the answer is still `service_busy`.
+    ///
+    /// Once the daemon begins to stop, nothing runs: the shutdown stops
+    /// Caddy itself, and a start then would take our stopping Caddy for an
+    /// orphan and start another one.
+    ///
+    /// # Errors
+    ///
+    /// `service_busy` when the wait runs out or the daemon stops; the others
+    /// as for [`CaddyManager::run`].
+    pub async fn run_waiting(
+        &self,
+        daemon: &Daemon,
+        action: ServiceAction,
+        wait: Duration,
+    ) -> Result<ServiceStatus, ActionError> {
+        let busy = match Arc::clone(&self.busy).try_lock_owned() {
+            Ok(busy) => busy,
+            Err(_) => {
+                info!(%action, "another action on caddy runs; waiting for it");
+                let turn = tokio::time::timeout(wait, Arc::clone(&self.busy).lock_owned());
+                tokio::select! {
+                    () = daemon.shutdown.cancelled() => return Err(ActionError::Busy),
+                    turn = turn => turn.map_err(|_| ActionError::Busy)?,
+                }
+            }
+        };
+        // Also when the turn came at the same moment as the shutdown.
+        if daemon.shutdown.is_cancelled() {
+            info!(%action, "the daemon is stopping; the caddy action does not run");
             return Err(ActionError::Busy);
         }
-        let _busy = ActionGuard(&self.busy);
+        self.act(daemon, action, busy).await
+    }
+
+    /// Runs `action`. `_busy` proves that no other action runs; it is let go
+    /// when this ends, also when the caller is dropped half way.
+    async fn act(
+        &self,
+        daemon: &Daemon,
+        action: ServiceAction,
+        _busy: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<ServiceStatus, ActionError> {
         let admin = Admin::new(self.input.admin_port);
         match action {
             ServiceAction::Start => self.start(daemon, &admin).await?,
@@ -474,6 +547,7 @@ impl CaddyManager {
         };
         let logs_dir = daemon.data_dir.join("logs");
         let runtime = Arc::clone(&self.runtime);
+        *lock(&self.started) = Some(spec.program.clone());
         let handle = Supervisor::spawn_on(spec, daemon.events.clone(), &logs_dir, runtime)
             .map_err(|err| {
                 self.fail(err.code(), &daemon.events);
@@ -506,7 +580,7 @@ impl CaddyManager {
         );
 
         info!("caddy started; waiting for its admin API");
-        match self.wait_ready(daemon, admin).await {
+        match self.wait_ready(daemon, admin, &tag).await {
             Ready::Yes => info!("caddy is ready"),
             // The status already says why.
             Ready::Ended => warn!(state = ?self.status().state, "caddy ended before it was ready"),
@@ -522,14 +596,18 @@ impl CaddyManager {
         Ok(())
     }
 
-    /// Polls `GET /config/` until it answers, the task ends, or the limit.
-    async fn wait_ready(&self, daemon: &Daemon, admin: &Admin) -> Ready {
+    /// Polls `GET /id/<tag>` until our Caddy answers, the task ends, or the
+    /// limit. Only our tag counts: another program on the admin port, a
+    /// second user's Caddy for one, is never taken for ours, so no config
+    /// goes to it. Where no orphan check runs first (Linux and Windows) this
+    /// is the only check.
+    async fn wait_ready(&self, daemon: &Daemon, admin: &Admin, tag: &str) -> Ready {
         let poll = async {
             loop {
                 if !daemon.proc_alive(CADDY_ID) {
                     return Ready::Ended;
                 }
-                if admin.ready().await {
+                if admin.answers_as(tag).await {
                     return Ready::Yes;
                 }
                 tokio::time::sleep(READY_POLL).await;
@@ -543,11 +621,19 @@ impl CaddyManager {
     /// Asks Caddy to exit through its admin API (the clean way on Windows,
     /// which has no SIGTERM), then stops its task. With no task, stops our
     /// orphan, if there is one. `false` when that orphan would not stop.
+    ///
+    /// `POST /stop` goes only to a Caddy that answers with our tag: another
+    /// program on the admin port never gets it. Without it, the task's stop
+    /// ends our Caddy.
     async fn stop(&self, daemon: &Daemon, admin: &Admin) -> bool {
         if !daemon.proc_alive(CADDY_ID) {
             return self.stop_orphan(daemon, admin).await;
         }
-        admin.stop().await;
+        match self.instance_tag() {
+            Ok(tag) if admin.answers_as(&tag).await => admin.stop().await,
+            Ok(_) => debug!("the admin port does not answer with our tag; no /stop"),
+            Err(err) => warn!(%err, "cannot read the instance id; no /stop"),
+        }
         // `None`: a shutdown took the handle and stops it.
         if let Some(handle) = daemon.take_proc(CADDY_ID)
             && let Err(err) = handle.stop().await
@@ -645,18 +731,133 @@ impl CaddyManager {
     }
 }
 
-/// The line before a reap, in Caddy's recent lines.
-const STOPPING_ORPHAN: &str = "marsad: Stopping an old Caddy left by a crashed marsad.";
+/// How the start of Caddy with the daemon ended (task M5-16).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Launched {
+    /// No Caddy is installed: nothing was tried, and the status is unchanged.
+    NotInstalled,
+    /// The start ran. Caddy's status after it: `Running`, or `Failed` with
+    /// the reason.
+    Ran(ServiceStatus),
+    /// Another action on Caddy ran first, a request for example. It decides.
+    Busy,
+    /// The start failed before Caddy ran, with this code. The status is
+    /// `Failed` with the same code.
+    Failed(&'static str),
+    /// The daemon began to stop first, and the start was dropped. The
+    /// shutdown stops a Caddy it had spawned (see [`start_at_launch`]).
+    ShuttingDown,
+}
 
-/// Clears the busy flag when the action ends, also when the request is
-/// dropped half way.
-struct ActionGuard<'a>(&'a AtomicBool);
+/// The start of Caddy with the daemon. Its task ends after the start, or at
+/// once when the daemon's shutdown token is cancelled.
+#[derive(Debug)]
+pub struct Launch(LaunchState);
 
-impl Drop for ActionGuard<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+#[derive(Debug)]
+enum LaunchState {
+    /// Decided before any task: no Caddy, or another action runs.
+    Ended(Launched),
+    Running(JoinHandle<Launched>),
+}
+
+impl Launch {
+    /// Waits for the start to end, at most `limit`, then aborts it. `None`
+    /// when it did not end in time or its task failed.
+    pub async fn wait(self, limit: Duration) -> Option<Launched> {
+        let task = match self.0 {
+            LaunchState::Ended(launched) => return Some(launched),
+            LaunchState::Running(task) => task,
+        };
+        let abort = task.abort_handle();
+        match tokio::time::timeout(limit, task).await {
+            Ok(Ok(launched)) => Some(launched),
+            Ok(Err(err)) => {
+                warn!(error = %err, "the start of caddy with the daemon failed");
+                None
+            }
+            Err(_) => {
+                warn!(
+                    ?limit,
+                    "the start of caddy with the daemon still runs; aborting it"
+                );
+                abort.abort();
+                None
+            }
+        }
     }
 }
+
+/// Starts Caddy in the background when it is installed (task M5-16), so the
+/// sites answer after a reboot or a `marsa daemon stop` with no step by hand.
+/// The path of `marsa services start caddy`, with the orphan check (ADR 0009)
+/// and one action at a time. Its turn is taken here, before the task and
+/// before the API serves, so a request always comes after it: it waits for
+/// the start ([`CaddyManager::run_waiting`]) and never starts a second Caddy.
+/// The API serves meanwhile.
+///
+/// The config is the latest that the sites sync gave
+/// [`CaddyManager::apply`]: `start` and `apply` take turns on `pushing`, so a
+/// pass that comes after the start sends its config with `POST /load`. Caddy's
+/// `Running` also asks for a pass.
+///
+/// A shutdown drops the start at its next `.await`. The spawn of Caddy and
+/// `add_proc` have no `.await` between them, so a Caddy it spawned is in
+/// `Daemon::procs`, which the shutdown stops; `server::run` sweeps `procs`
+/// again at its end for one added after the first sweep. A Caddy that the
+/// start was stopping after a time-out was told to stop before that `.await`.
+/// `kill_on_drop` is the last guard, as for every Caddy.
+pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
+    let caddy = &daemon.caddy;
+    // First, so a missing Caddy does not mark Caddy's status failed.
+    if !caddy.installed() {
+        info!("no caddy is installed; it does not start with the daemon");
+        return Launch(LaunchState::Ended(Launched::NotInstalled));
+    }
+    let Ok(busy) = Arc::clone(&caddy.busy).try_lock_owned() else {
+        info!("another action on caddy runs; it decides instead of the start with the daemon");
+        return Launch(LaunchState::Ended(Launched::Busy));
+    };
+    info!("starting caddy with the daemon");
+    let daemon = Arc::clone(daemon);
+    let task = tokio::spawn(async move {
+        tokio::select! {
+            // A daemon that already stops starts nothing. Dropping the start
+            // lets go of its turn.
+            biased;
+            () = daemon.shutdown.cancelled() => Launched::ShuttingDown,
+            launched = launch(&daemon, busy) => launched,
+        }
+    });
+    Launch(LaunchState::Running(task))
+}
+
+async fn launch(daemon: &Daemon, busy: tokio::sync::OwnedMutexGuard<()>) -> Launched {
+    let caddy = &daemon.caddy;
+    match caddy.act(daemon, ServiceAction::Start, busy).await {
+        Ok(status) => {
+            match &status.state {
+                ServiceState::Running => info!("caddy started with the daemon"),
+                // `marsa services` and `marsa doctor` show the code too.
+                ServiceState::Failed { code } => {
+                    warn!(%code, "caddy did not start with the daemon");
+                }
+                state => warn!(
+                    ?state,
+                    "caddy is not running after its start with the daemon"
+                ),
+            }
+            Launched::Ran(status)
+        }
+        Err(err) => {
+            warn!(code = err.code(), %err, "caddy did not start with the daemon");
+            Launched::Failed(err.code())
+        }
+    }
+}
+
+/// The line before a reap, in Caddy's recent lines.
+const STOPPING_ORPHAN: &str = "marsad: Stopping an old Caddy left by a crashed marsad.";
 
 enum Ready {
     Yes,
@@ -860,16 +1061,6 @@ impl Admin {
             http,
             base: format!("http://127.0.0.1:{port}"),
         }
-    }
-
-    /// `GET /config/` answers with a success.
-    async fn ready(&self) -> bool {
-        let Some(http) = &self.http else {
-            return false;
-        };
-        let url = format!("{}/config/", self.base);
-        let response = http.get(url).send().await;
-        response.is_ok_and(|response| response.status().is_success())
     }
 
     /// `POST /stop`: Caddy stops its servers and exits.
