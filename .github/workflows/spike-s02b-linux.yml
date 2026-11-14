@@ -1,0 +1,116 @@
+name: spike-s02b-linux
+
+# Spike S-02b: `.test` names, and only them, to Marsa's DNS server, with a
+# link of its own (`marsa0`) or the DNS delegate file. The jobs change the
+# system with sudo, which is fine here and only here: a runner is thrown away
+# after the job.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["task/S-02b-*"]
+    paths:
+      - "spikes/s02-linux/**"
+      - ".github/workflows/spike-s02b-linux.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ubuntu:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # The `runner` context does not exist at job level, so not in `env:`.
+      - name: Pick the results folder
+        run: echo "OUT=$RUNNER_TEMP/results" >>"$GITHUB_ENV"
+
+      - name: Run the spike
+        run: |
+          mkdir -p "$OUT"
+          bash spikes/s02-linux/dns-link.sh 2>&1 | tee "$OUT/full.log"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '```text'
+            cat "$OUT/summary.txt"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s02b-${{ matrix.os }}
+          path: ${{ runner.temp }}/results
+
+  # Fedora 45 (systemd 262) in a container whose PID 1 is systemd: the
+  # delegate file, and the same link tests.
+  fedora:
+    name: fedora (container with systemd)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Pick the results folder
+        run: echo "OUT=$RUNNER_TEMP/results" >>"$GITHUB_ENV"
+
+      - name: Build the image
+        run: docker build -t marsa-s02-fedora -f spikes/s02-linux/fedora.Dockerfile spikes/s02-linux
+
+      - name: Start systemd in the container
+        run: |
+          mkdir -p "$OUT"
+          chmod 0777 "$OUT"
+          docker run -d --name fedora --privileged --cgroupns=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            -v "$PWD/spikes/s02-linux:/spike:ro" \
+            -v "$OUT:/results" \
+            marsa-s02-fedora
+          for _ in $(seq 1 60); do
+            state="$(docker exec fedora systemctl is-system-running 2>/dev/null || true)"
+            case "$state" in running | degraded) break ;; esac
+            sleep 1
+          done
+          echo "systemd: $state"
+
+      - name: Send the container's DNS through systemd-resolved
+        run: docker exec fedora bash /spike/fedora-prepare.sh
+
+      - name: Run the spike
+        run: |
+          docker exec -u runner -w /home/runner \
+            -e CI=true -e OUT=/results -e HOME=/home/runner -e USER=runner \
+            fedora bash /spike/dns-link.sh 2>&1 | tee "$OUT/full.log"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '```text'
+            cat "$OUT/summary.txt"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s02b-fedora
+          path: ${{ runner.temp }}/results
