@@ -1000,6 +1000,12 @@ fn error_message(code: &str) -> Option<&'static str> {
             "Another user could change the marsa-helper program or its folder, so Marsa did not \
              ask for the password. Make both writable only by you, then run setup again."
         }
+        "setup_prompt_failed" => {
+            "macOS could not show the administrator password prompt, so nothing was changed. \
+             Make sure this Mac's desktop is unlocked. \
+             Quit the Marsa window and the menu-bar icon, run \"marsa daemon stop\" in \
+             Terminal, then run \"marsa setup\" there, on your desktop."
+        }
         "setup_helper_failed" => {
             "marsa-helper gave an answer Marsa cannot read, so the result of setup is not known. \
              Run setup again; if it repeats, report it with the file logs/marsad.log."
@@ -1465,6 +1471,7 @@ mod tests {
             "setup_not_authorized",
             "setup_helper_missing",
             "setup_helper_unsafe",
+            "setup_prompt_failed",
             "setup_helper_failed",
             "setup_helper_rejected",
             "redirect_port_held",

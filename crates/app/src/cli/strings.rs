@@ -418,6 +418,12 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              ~/Library/Application Support/dev.marsa.Marsa/bin, then run \"marsa setup\" from \
              there."
             .into(),
+        "setup_prompt_failed" => "macOS could not show the administrator password prompt, so \
+             marsa-helper did not run. Make sure you are logged in at this Mac's desktop and it \
+             is unlocked. Quit the Marsa window and the menu-bar icon, run \"marsa daemon \
+             stop\", then run \"marsa setup\" again in Terminal. The error number is in the \
+             file logs/marsad.log."
+            .into(),
         "setup_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the result \
              of setup is not known. Run \"marsa setup\" again; if it repeats, report it with \
              the file logs/marsad.log."
@@ -536,6 +542,12 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              its folder, so Marsa did not ask for the password and nothing was removed. Make \
              both yours and writable only by you (chmod go-w), then run \"marsa uninstall \
              --all\" again. The path is in the file logs/marsad.log."
+            .into(),
+        "uninstall_prompt_failed" => "macOS could not show the administrator password prompt, \
+             so marsa-helper did not run and nothing was removed. Make sure you are logged in at \
+             this Mac's desktop and it is unlocked. Quit the Marsa window and the menu-bar icon, \
+             run \"marsa daemon stop\", then run \"marsa uninstall --all\" again in Terminal. \
+             The error number is in the file logs/marsad.log."
             .into(),
         "uninstall_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the \
              result is not known, and Marsa removed nothing else. Run \"marsa uninstall --all\" \
@@ -1516,6 +1528,7 @@ mod tests {
         "setup_helper_missing",
         "setup_helper_unsafe",
         "setup_helper_protected_folder",
+        "setup_prompt_failed",
         "setup_helper_failed",
         "setup_helper_rejected",
         "redirect_port_held",
@@ -1546,6 +1559,7 @@ mod tests {
         "uninstall_not_authorized",
         "uninstall_helper_missing",
         "uninstall_helper_unsafe",
+        "uninstall_prompt_failed",
         "uninstall_helper_failed",
         "uninstall_helper_rejected",
         "uninstall_all_needs_yes",

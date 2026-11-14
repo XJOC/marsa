@@ -488,9 +488,9 @@ pub struct SetupReport {
     /// Why the helper did not run, or why its answer cannot be used:
     /// `setup_cancelled`, `setup_not_authorized`, `setup_timed_out`,
     /// `setup_interrupted`, `setup_helper_missing`, `setup_helper_unsafe`,
-    /// `setup_helper_protected_folder`, `setup_helper_failed`, or
-    /// `setup_helper_rejected`. `None` if the helper answered, or was not
-    /// needed.
+    /// `setup_helper_protected_folder`, `setup_prompt_failed`,
+    /// `setup_helper_failed`, or `setup_helper_rejected`. `None` if the
+    /// helper answered, or was not needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,
 }
@@ -614,8 +614,9 @@ pub struct UninstallReport {
     /// `uninstall_cancelled`, `uninstall_not_authorized`,
     /// `uninstall_timed_out`, `uninstall_interrupted`,
     /// `uninstall_helper_missing`, `uninstall_helper_unsafe`,
-    /// `uninstall_helper_failed`, or `uninstall_helper_rejected`. Nothing after the helper ran then, and
-    /// the daemon keeps running. `None` if the helper answered.
+    /// `uninstall_prompt_failed`, `uninstall_helper_failed`, or
+    /// `uninstall_helper_rejected`. Nothing after the helper ran then, and the
+    /// daemon keeps running. `None` if the helper answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,
     /// The daemon stops right after this answer: `true` exactly when `error`
