@@ -294,27 +294,26 @@ say_path() {
   # .zprofile as well: a terminal that is not a login shell never reads it,
   # and a login shell would get the line twice (architecture.md section 10).
   case "${SHELL:-}-${PLATFORM%%-*}" in
-    */zsh-*) files=".zshrc" ;;
+    # The program's own name, not a folder that starts with zsh-.
+    */zsh-darwin | */zsh-linux) file=".zshrc" ;;
     */bash-darwin)
       # A login shell reads only the first of these that exists, so a new
       # .bash_profile would hide an existing .profile.
-      files=".bash_profile"
-      for file in .bash_profile .bash_login .profile; do
-        if [ -f "$HOME/$file" ]; then
-          files="$file"
+      file=".bash_profile"
+      for name in .bash_profile .bash_login .profile; do
+        if [ -f "$HOME/$name" ]; then
+          file="$name"
           break
         fi
       done
       ;;
-    */bash-linux) files=".bashrc" ;;
+    */bash-linux) file=".bashrc" ;;
     *) return 0 ;;
   esac
   say
-  say "These commands do it:"
+  say "This command does it:"
   say
-  for file in $files; do
-    say "  echo '$line' >> \"\$HOME/$file\""
-  done
+  say "  echo '$line' >> \"\$HOME/$file\""
   say
   say "Then open a new terminal."
 }

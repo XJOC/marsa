@@ -396,6 +396,7 @@ home fresh-linux "$LINUX"
 run fresh-linux "$LINUX" MARSA_VERSION="v$VERSION"
 installed "a new install on Linux, in ~/.local/share/marsa (MARSA_VERSION with a v)"
 [[ "$OUTPUT" == *">> \"\$HOME/.zshrc\""* ]] || fail "fresh-linux: no command for .zshrc"
+[[ "$OUTPUT" != *".zprofile"* ]] || fail "fresh-linux: .zprofile was named"
 home bash-linux "$LINUX"
 run fresh-linux "$LINUX" MARSA_VERSION="$VERSION" SHELL=/bin/bash
 [[ "$OUTPUT" == *">> \"\$HOME/.bashrc\""* ]] || fail "bash on Linux: not .bashrc"

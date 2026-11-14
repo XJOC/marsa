@@ -1366,7 +1366,7 @@ pub fn doctor_move_shims(shims: &Path, windows: bool) -> String {
     } else {
         format!(
             "Move the line that adds {} to PATH to the end of ~/.zshrc (or your shell's startup \
-             file), after Homebrew's, then open a new terminal.",
+             file), after any other line that changes PATH, then open a new terminal.",
             shims.display()
         )
     }
