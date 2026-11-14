@@ -437,6 +437,16 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              DNS= line and set the DNS server on your network connection instead, then run \
              \"marsa setup\" again."
             .into(),
+        "resolved_no_link_dns" => "No network connection has a DNS server now, and with \
+             Marsa's .test setting systemd-resolved would stop using its fallback servers, so \
+             other names would stop working. Nothing was changed. Connect to a network, then \
+             run \"marsa setup\" again."
+            .into(),
+        "resolved_stopped" => "systemd-resolved stopped and did not start again, so no name \
+             resolves on this computer now. Run \"sudo systemctl start systemd-resolved\", then \
+             run \"marsa setup\" again; if it repeats, report it with the output of \
+             \"journalctl -u systemd-resolved\"."
+            .into(),
         "resolved_check_failed" => "Marsa could not confirm that systemd-resolved sends .test \
              names to it, so it took its setting out again. Run \"marsa setup\" again; if it \
              repeats, report it."
@@ -936,6 +946,8 @@ mod tests {
         "resolved_restart_failed",
         "resolved_other_dns",
         "resolved_check_failed",
+        "resolved_no_link_dns",
+        "resolved_stopped",
         "ports_foreign",
         "ports_read",
         "ports_write",
