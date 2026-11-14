@@ -447,6 +447,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             shown("the login file")
         ),
 
+        // The Xdebug route (task M5-11).
+        "xdebug_interrupted" => "The Marsa daemon stopped before the change reached PHP. The \
+             setting is saved: Marsa applies it when it starts again."
+            .into(),
+
         _ => return None,
     };
     Some(text)
@@ -913,9 +918,9 @@ mod tests {
         "autostart_no_home",
         "autostart_read",
         "autostart_write",
-        // The Xdebug route (task M5-11) has no code of its own. It answers
-        // `config_read`, `config_invalid`, `config_write`, `runtimes_read`,
-        // `invalid_body`, and `internal_error`, all listed above.
+        // The Xdebug route (task M5-11). Its other codes (`config_*`,
+        // `runtimes_read`, `invalid_body`, `internal_error`) are above.
+        "xdebug_interrupted",
     ];
 
     #[test]

@@ -139,5 +139,15 @@ mod tests {
         // Any other code keeps the general text.
         let other = xdebug_failure(&ClientError::NotRunning, data);
         assert_eq!(other.code, "daemon_not_running");
+        let stopped = ClientError::Api {
+            status: 500,
+            code: "xdebug_interrupted".into(),
+            message: "x".into(),
+        };
+        assert_eq!(
+            xdebug_failure(&stopped, data).message,
+            "The Marsa daemon stopped before the change reached PHP. The setting is saved: \
+             Marsa applies it when it starts again."
+        );
     }
 }

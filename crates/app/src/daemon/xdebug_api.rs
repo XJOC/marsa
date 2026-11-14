@@ -9,7 +9,7 @@
 //! | --- | --- |
 //! | 500 `config_read`, `config_invalid`, `config_write` | `global.toml` cannot be read or written |
 //! | 500 `runtimes_read` | the folder of the PHP versions cannot be read |
-//! | 500 `internal_error` | `PUT` only: the daemon stopped before the pass ended; the setting is saved |
+//! | 500 `xdebug_interrupted` | `PUT` only: the daemon stopped before the pass ended; the setting is saved |
 //! | 4xx `invalid_body` | the body is not `{"enabled": bool}` |
 //!
 //! One switch for every PHP, off by default: Xdebug makes PHP two to four
@@ -69,11 +69,16 @@ async fn set(
 }
 
 /// The daemon stops (or its sync task does not run), so no pass applied the
-/// saved setting. The start-up pass of the next daemon applies it.
+/// saved setting. The start-up pass of the next daemon applies it. A code of
+/// its own, like `setup_interrupted`; 500 like the daemon's other failures.
 fn pass_not_run() -> HttpError {
     tracing::warn!("the Xdebug setting is saved, but no pass applied it: the daemon stops");
     let message = "the daemon stopped before every php.ini was written; the setting is saved";
-    HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+    HttpError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "xdebug_interrupted",
+        message,
+    )
 }
 
 /// Saves `[php] xdebug` if it differs. Blocking: it takes the lock of
@@ -317,7 +322,7 @@ mod tests {
         app.stop().await;
         let (status, body) = app.send("PUT", Some(json!({ "enabled": true }))).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(body["error"]["code"], "internal_error");
+        assert_eq!(body["error"]["code"], "xdebug_interrupted");
         let text = fs::read_to_string(app.global_toml()).unwrap();
         assert!(text.contains("[php]\nxdebug = true\n"), "{text}");
     }
