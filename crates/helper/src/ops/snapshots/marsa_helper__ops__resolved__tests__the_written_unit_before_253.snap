@@ -1,0 +1,26 @@
+---
+source: crates/helper/src/ops/resolved.rs
+expression: text
+---
+# Managed by Marsa. Do not edit.
+[Unit]
+Description=Marsa: send .test names to marsad
+After=systemd-resolved.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/sbin/ip link add marsa0 type dummy
+ExecStart=/usr/sbin/ip link set marsa0 up
+ExecStart=-/usr/sbin/ip addr add 169.254.53.53/32 dev marsa0
+ExecStart=/usr/sbin/ip route add local 127.0.0.1/32 dev marsa0 table local metric 1024
+ExecStart=/usr/bin/resolvectl default-route marsa0 false
+ExecStart=/usr/bin/resolvectl domain marsa0 ~test
+ExecStart=-/usr/bin/resolvectl llmnr marsa0 no
+ExecStart=-/usr/bin/resolvectl mdns marsa0 no
+ExecStart=-/usr/bin/resolvectl dnsovertls marsa0 no
+ExecStart=/usr/bin/resolvectl dns marsa0 127.0.0.1:18053
+ExecStopPost=-/usr/sbin/ip link del marsa0
+
+[Install]
+WantedBy=multi-user.target
