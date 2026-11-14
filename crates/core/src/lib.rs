@@ -7,6 +7,7 @@
 pub mod caddy;
 pub mod config;
 pub mod dns;
+pub mod doctor;
 pub mod helper;
 pub mod orphan;
 pub mod php;
