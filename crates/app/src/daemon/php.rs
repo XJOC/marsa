@@ -19,6 +19,11 @@
 //! [`write_ca_bundle`] writes the CA bundle that `php.ini` points to, so PHP
 //! trusts the certificates of the other `.test` sites.
 //!
+//! Every other installed line gets its `php.ini` too (task M5-11): `php` in
+//! the terminal reads it through the shim's `PHPRC`. While `[php] xdebug` is
+//! on in `global.toml`, each `php.ini` loads `ext/xdebug.so` of its PHP, and
+//! a pool restarts when its `php.ini` changes, like for any other change.
+//!
 //! Each pool is a service like Caddy (task M4-23): [`Pools`] keeps its
 //! status and recent lines for `GET /v1/services` and `GET /v1/logs`, and
 //! [`orphan`] stops a php-fpm that a crashed daemon left on the pool's
@@ -34,10 +39,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use marsa_core::caddy::{CaddyPaths, Dial, PhpPools, ca_bundle_text};
-use marsa_core::php::{Listen, PhpFiles, PhpMinor, fpm_conf, fpm_listen, php_ini};
+use marsa_core::config::{self, ConfigError, ConfigPaths};
+use marsa_core::php::{Listen, PhpError, PhpFiles, PhpMinor, fpm_conf, fpm_listen, php_ini};
 use marsa_core::platform::process;
 use marsa_core::recipes::{self, Platform};
-use marsa_core::runtimes::{Runtime, RuntimesDir};
+use marsa_core::runtimes::{Runtime, RuntimesDir, RuntimesError};
 use marsa_core::services::ServiceSpec;
 use marsa_core::sites::{Site, SiteKind};
 use marsa_core::types::{Event, LogStream, ServiceState, ServiceStatus};
@@ -174,18 +180,24 @@ pub fn pool_for(
     version: &Version,
     ca_bundle: Option<&Path>,
 ) -> Result<Pool, Skip> {
-    if platform == Platform::WindowsX64 {
-        return cgi::pool_for(data_dir, version, ca_bundle);
-    }
     let mut files = PhpFiles::new(data_dir, version);
     files.ca_bundle = ca_bundle.map(Path::to_path_buf);
-    let php_error = |err: marsa_core::php::PhpError| Skip {
-        code: err.code(),
-        reason: err.to_string(),
-    };
+    pool_with(data_dir, platform, version, files)
+}
+
+/// [`pool_for`] with `files` as they are, so with the Xdebug they name.
+fn pool_with(
+    data_dir: &Path,
+    platform: Platform,
+    version: &Version,
+    files: PhpFiles,
+) -> Result<Pool, Skip> {
+    if platform == Platform::WindowsX64 {
+        return cgi::pool_with(files);
+    }
     let listen = fpm_listen(&files.socket, fallback_port(files.minor));
-    let conf = fpm_conf(&listen, &files).map_err(php_error)?;
-    let ini = php_ini(platform, &files).map_err(php_error)?;
+    let conf = fpm_conf(&listen, &files).map_err(php_skip)?;
+    let ini = php_ini(platform, &files).map_err(php_skip)?;
     let program = fpm_program(data_dir, platform, version).ok_or_else(|| Skip {
         code: "php_fpm_unavailable",
         reason: format!("Marsa has no php-fpm for {platform}"),
@@ -201,6 +213,74 @@ pub fn pool_for(
         php_ini: ini,
         dial,
     })
+}
+
+fn php_skip(err: PhpError) -> Skip {
+    Skip {
+        code: err.code(),
+        reason: err.to_string(),
+    }
+}
+
+/// `[php] xdebug` in `global.toml`: whether each `php.ini` loads Xdebug.
+///
+/// # Errors
+///
+/// A `config_*` code if the file is there but cannot be read.
+pub fn xdebug_enabled(data_dir: &Path) -> Result<bool, ConfigError> {
+    config::load_global(&ConfigPaths::in_dir(data_dir).global).map(|global| global.php.xdebug)
+}
+
+/// The version that stands for each installed PHP line. `php.ini` is one
+/// file per line, so one version gives it its paths: the one the line's pool
+/// runs (`wanted`), else the newest installed.
+///
+/// # Errors
+///
+/// `runtimes_read` if the folder of the PHP versions cannot be read.
+pub fn line_versions(
+    data_dir: &Path,
+    wanted: &BTreeMap<PhpMinor, Version>,
+) -> Result<BTreeMap<PhpMinor, Version>, RuntimesError> {
+    let installed = RuntimesDir::in_dir(data_dir).installed(Runtime::Php)?;
+    // Oldest first, so the newest version of a line is the one that stays.
+    let newest = installed.into_iter().map(|v| (PhpMinor::from(&v), v));
+    let mut lines: BTreeMap<PhpMinor, Version> = newest.collect();
+    lines.extend(
+        wanted
+            .iter()
+            .map(|(minor, version)| (*minor, version.clone())),
+    );
+    Ok(lines)
+}
+
+/// The files of the line that `version` stands for. `php.ini` points to
+/// `ca_bundle` when it is given. With `xdebug`, it loads `ext/xdebug.so` of
+/// `version` if that file is there: the official Windows build and an older
+/// install have none, and run without Xdebug. The path is absolute like
+/// `data_dir`, and not canonicalized.
+pub fn line_files(
+    data_dir: &Path,
+    version: &Version,
+    ca_bundle: Option<&Path>,
+    xdebug: bool,
+) -> PhpFiles {
+    let mut files = PhpFiles::new(data_dir, version);
+    files.ca_bundle = ca_bundle.map(Path::to_path_buf);
+    files.xdebug = Some(files.xdebug_so()).filter(|file| xdebug && file.is_file());
+    files
+}
+
+/// Writes `php.ini` of a line with no running pool, if its text changed.
+fn write_ini(platform: Platform, files: &PhpFiles) -> Result<(), Skip> {
+    let text = php_ini(platform, files).map_err(php_skip)?;
+    match write_if_changed(&files.ini_file, &text) {
+        Ok(_) => Ok(()),
+        Err(err) => Err(Skip {
+            code: "php_config_write",
+            reason: format!("cannot write {}: {err}", files.ini_file.display()),
+        }),
+    }
 }
 
 /// Checks that php-fpm (or php-cgi) is installed, makes the folders it
@@ -234,29 +314,59 @@ fn write_pool(pool: &Pool) -> Result<(), Skip> {
     Ok(())
 }
 
-/// The pool of each wanted line, with its files written. A line that cannot
-/// have a pool is logged and left out. Reads and writes the disk, so it runs
-/// on a blocking thread.
+/// The pool of each wanted line, with its files written, and `php.ini` of
+/// every other installed line. Each `php.ini` loads Xdebug while `[php]
+/// xdebug` is on. A pool that cannot run is logged and left out, and its
+/// line still gets `php.ini` if that PHP is installed. Reads and writes the
+/// disk, so it runs on a blocking thread.
 fn prepare(
     data_dir: &Path,
     platform: Platform,
     wanted: &BTreeMap<PhpMinor, Version>,
     ca_bundle: Option<&Path>,
 ) -> BTreeMap<PhpMinor, Pool> {
+    let xdebug = xdebug_enabled(data_dir).unwrap_or_else(|err| {
+        warn!(code = err.code(), error = %err, "global.toml; PHP runs without Xdebug");
+        false
+    });
+    let lines = line_versions(data_dir, wanted).unwrap_or_else(|err| {
+        warn!(code = err.code(), error = %err, "cannot list the installed PHP versions");
+        wanted.clone()
+    });
+    let runtimes = RuntimesDir::in_dir(data_dir);
     let mut pools = BTreeMap::new();
-    for (minor, version) in wanted {
-        let pool = pool_for(data_dir, platform, version, ca_bundle)
-            .and_then(|pool| write_pool(&pool).map(|()| pool));
-        match pool {
-            Ok(pool) => {
-                pools.insert(*minor, pool);
+    for (minor, version) in &lines {
+        let files = line_files(data_dir, version, ca_bundle, xdebug);
+        if wanted.contains_key(minor) {
+            let pool = pool_with(data_dir, platform, version, files.clone())
+                .and_then(|pool| write_pool(&pool).map(|()| pool));
+            match pool {
+                Ok(pool) => {
+                    pools.insert(*minor, pool);
+                    continue;
+                }
+                Err(skip) => warn!(
+                    php = %version,
+                    code = skip.code,
+                    reason = %skip.reason,
+                    "no PHP pool; its sites answer 503"
+                ),
             }
-            Err(skip) => warn!(
+            // A site may name a PHP that is not installed: then no `php`
+            // in the terminal reads this file either.
+            if !runtimes.version_dir(Runtime::Php, version).is_dir() {
+                continue;
+            }
+        }
+        // No pool, or one that cannot run (no php-fpm or php-cgi): `php` in
+        // the terminal still reads this file, so it follows the switch.
+        if let Err(skip) = write_ini(platform, &files) {
+            warn!(
                 php = %version,
                 code = skip.code,
                 reason = %skip.reason,
-                "no PHP pool; its sites answer 503"
-            ),
+                "php.ini was not written; php in the terminal runs without it"
+            );
         }
     }
     pools
@@ -380,7 +490,8 @@ impl PhpManager {
 
     /// Brings the pools in line with `sites`: writes the files, then stops,
     /// restarts, and starts only the pools that need it. `php.ini` points to
-    /// `ca_bundle` when it is given. Returns where Caddy reaches each pool.
+    /// `ca_bundle` when it is given, and loads Xdebug while `[php] xdebug` is
+    /// on in `global.toml`. Returns where Caddy reaches each pool.
     pub async fn sync(
         &mut self,
         daemon: &Daemon,
@@ -517,7 +628,7 @@ impl PhpManager {
 
 /// php-fpm runs on macOS and Linux, php-cgi on Windows ([`cgi`]).
 /// `Platform::Any` is not a system.
-fn runs_pools(platform: Platform) -> bool {
+pub fn runs_pools(platform: Platform) -> bool {
     platform != Platform::Any
 }
 
@@ -909,6 +1020,167 @@ mod tests {
         let pools = php.sync(&daemon, &[], Some(&bundle)).await;
         assert_eq!(pools, PhpPools::default());
         assert!(!daemon.proc_alive("php-fpm-8.4"));
+        daemon.stop_procs(std::time::Duration::from_secs(5)).await;
+    }
+
+    /// `[php] xdebug` in the `global.toml` of `data`.
+    fn set_xdebug(data: &Path, on: bool) {
+        let mut global = config::GlobalConfig::default();
+        global.php.xdebug = on;
+        config::save_global(&ConfigPaths::in_dir(data).global, &global).unwrap();
+    }
+
+    #[test]
+    fn each_line_takes_its_pools_version_or_the_newest_and_its_own_xdebug() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        assert!(line_versions(data, &BTreeMap::new()).unwrap().is_empty());
+        for version in ["8.3.1", "8.4.3", "8.4.10"] {
+            fs::create_dir_all(PhpFiles::new(data, &v(version)).ext_dir).unwrap();
+        }
+        let newest = BTreeMap::from([(PHP83, v("8.3.1")), (PHP84, v("8.4.10"))]);
+        assert_eq!(line_versions(data, &BTreeMap::new()).unwrap(), newest);
+        // A site pinned 8.4.3, so its pool runs that one.
+        let wanted = BTreeMap::from([(PHP84, v("8.4.3"))]);
+        let lines = line_versions(data, &wanted).unwrap();
+        assert_eq!(lines[&PHP84], v("8.4.3"));
+        assert_eq!(lines[&PHP83], v("8.3.1"));
+
+        // Only 8.4.3 has the file, and only while Xdebug is on.
+        let so = PhpFiles::new(data, &v("8.4.3")).xdebug_so();
+        fs::write(&so, "").unwrap();
+        assert!(
+            so.is_absolute() && so.starts_with(data),
+            "not canonicalized"
+        );
+        let bundle = data.join("ca.pem");
+        let files = line_files(data, &v("8.4.3"), Some(&bundle), true);
+        assert_eq!(files.xdebug, Some(so));
+        assert_eq!(files.ca_bundle, Some(bundle));
+        assert_eq!(line_files(data, &v("8.4.3"), None, false).xdebug, None);
+        assert_eq!(line_files(data, &v("8.4.10"), None, true).xdebug, None);
+        // On Windows the temp folder starts with `C:`, and `fpm_conf` refuses
+        // the `:` in the `PATH` entry of `shims/` (`path_entry`,
+        // `php_path_not_allowed`), so a Linux pool cannot live there.
+        #[cfg(unix)]
+        assert_eq!(
+            pool_for(data, Platform::LinuxX64, &v("8.4.3"), None)
+                .unwrap()
+                .files
+                .xdebug,
+            None
+        );
+
+        assert!(!xdebug_enabled(data).unwrap(), "no global.toml: off");
+        set_xdebug(data, true);
+        assert!(xdebug_enabled(data).unwrap());
+    }
+
+    /// A pool that cannot run (no php-fpm, or no php-cgi on Windows) still
+    /// leaves its line a `php.ini`, so `php` in the terminal follows the
+    /// switch.
+    #[test]
+    fn a_line_whose_pool_cannot_run_still_gets_its_php_ini() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let platform = Platform::current().unwrap();
+        let so = PhpFiles::new(data, &v("8.4.3")).xdebug_so();
+        fs::create_dir_all(so.parent().unwrap()).unwrap();
+        fs::write(&so, "").unwrap();
+        set_xdebug(data, true);
+
+        // 8.3.1 is named by a site, and not installed.
+        let wanted = BTreeMap::from([(PHP83, v("8.3.1")), (PHP84, v("8.4.3"))]);
+        let pools = prepare(data, platform, &wanted, None);
+        assert!(pools.is_empty(), "no php-fpm, so no pool");
+        assert!(!data.join("php").join("8.3").exists(), "not installed");
+        let line = data.join("php").join("8.4");
+        let ini = fs::read_to_string(line.join("php.ini")).unwrap();
+        let loads = format!("\nzend_extension = \"{}\"\n", so.display());
+        assert!(ini.contains(&loads), "{ini}");
+        assert!(!line.join("php-fpm.conf").exists());
+
+        set_xdebug(data, false);
+        prepare(data, platform, &wanted, None);
+        let ini = fs::read_to_string(line.join("php.ini")).unwrap();
+        assert!(!ini.contains("xdebug"), "{ini}");
+    }
+
+    /// As above: a shell script stands in for php-fpm.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn xdebug_goes_into_every_php_ini_and_restarts_only_the_pools_it_changes() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let platform = Platform::current().unwrap();
+        let daemon = Daemon::new(data.to_path_buf());
+        // 8.4.3 and 8.3.1 have a site; 8.2.0 has none. 8.3.1 has no Xdebug.
+        for version in ["8.4.3", "8.3.1"] {
+            let program = fpm_program(data, platform, &v(version)).unwrap();
+            fs::create_dir_all(program.parent().unwrap()).unwrap();
+            fs::write(&program, "#!/bin/sh\nexec sleep 30\n").unwrap();
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let so = |version: &str| PhpFiles::new(data, &v(version)).xdebug_so();
+        for version in ["8.4.3", "8.2.0"] {
+            fs::create_dir_all(so(version).parent().unwrap()).unwrap();
+            fs::write(so(version), "").unwrap();
+        }
+        let pid = async |id: &str, not: Option<u32>| {
+            for _ in 0..100 {
+                let pid = daemon.procs.lock().unwrap()[id]
+                    .runtime
+                    .lock()
+                    .unwrap()
+                    .status
+                    .pid;
+                if pid.is_some() && pid != not {
+                    return pid;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("{id} did not start");
+        };
+        let ini = |line: &str| fs::read_to_string(data.join("php").join(line).join("php.ini"));
+        let loads = |version: &str| format!("\nzend_extension = \"{}\"\n", so(version).display());
+
+        let mut php = PhpManager::new(data, Some(platform));
+        let sites = [
+            site("shop", SiteKind::Laravel, Some("8.4.3")),
+            site("blog", SiteKind::Php, Some("8.3.1")),
+        ];
+        php.sync(&daemon, &sites, None).await;
+        let (off84, off83) = (
+            pid("php-fpm-8.4", None).await,
+            pid("php-fpm-8.3", None).await,
+        );
+        for line in ["8.2", "8.3", "8.4"] {
+            assert!(!ini(line).unwrap().contains("xdebug"), "{line}");
+        }
+        assert!(!data.join("php").join("8.2").join("php-fpm.conf").exists());
+
+        // On: each PHP that has the file loads it, the one with no pool too.
+        set_xdebug(data, true);
+        php.sync(&daemon, &sites, None).await;
+        assert!(ini("8.4").unwrap().contains(&loads("8.4.3")));
+        assert!(ini("8.2").unwrap().contains(&loads("8.2.0")));
+        assert!(!ini("8.3").unwrap().contains("xdebug"), "8.3.1 has none");
+        let on84 = pid("php-fpm-8.4", off84).await;
+        assert_eq!(
+            pid("php-fpm-8.3", None).await,
+            off83,
+            "its php.ini is the same"
+        );
+
+        // Off: the lines are gone, and 8.4 restarts again.
+        set_xdebug(data, false);
+        php.sync(&daemon, &sites, None).await;
+        assert!(!ini("8.4").unwrap().contains("xdebug"));
+        assert!(!ini("8.2").unwrap().contains("xdebug"));
+        pid("php-fpm-8.4", on84).await;
+        assert_eq!(pid("php-fpm-8.3", None).await, off83);
         daemon.stop_procs(std::time::Duration::from_secs(5)).await;
     }
 }
