@@ -1,6 +1,6 @@
-//! `marsa setup`: the first setup (macOS). macOS asks for an administrator
-//! password, then asks the user to approve trusting Marsa's certificate
-//! authority for this user. Task M4-13, and task M4-26 for the trust.
+//! `marsa setup`: the first setup (macOS). macOS may ask for an
+//! administrator password, and may then ask the user to approve trusting
+//! Marsa's certificate authority for this user. Task M4-13, and task M4-26 for the trust.
 //!
 //! One call to `marsad` (`POST /v1/setup`, in `daemon/setup_api.rs`),
 //! started if needed. The daemon checks ports 80 and 443, asks macOS for the

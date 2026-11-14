@@ -1,5 +1,5 @@
-//! `POST /v1/setup`: the first setup on macOS. The user is asked twice: for
-//! an administrator password (the helper), then to approve the trust in
+//! `POST /v1/setup`: the first setup on macOS. The user may be asked twice:
+//! for an administrator password (the helper), then to approve the trust in
 //! Marsa's certificate authority for this user. Task M4-13, with the port
 //! check of task M4-14b and the user trust of task M4-26.
 //!

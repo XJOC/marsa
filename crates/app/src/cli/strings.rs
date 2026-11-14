@@ -421,7 +421,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              ports 80 and 443 were not redirected. Run \"marsa daemon stop\" first. If \
              Marsa's programs are in Desktop, Documents, or Downloads, move them to \
              ~/Library/Application Support/dev.marsa.Marsa/bin; otherwise reinstall Marsa. \
-             Then run \"marsa setup\" from there."
+             Then run \"marsa setup\" again."
             .into(),
 
         // `marsa autostart`: the autostart route (task M5-03).
