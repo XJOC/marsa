@@ -353,6 +353,7 @@ for cut in "$((size / 3))" "$((size / 2))" "$((size - 20))"; do
   if [ -e "$DATA" ] || [ -n "$CALLED" ]; then fail "a download cut at byte $cut of $size ran something"; fi
 done
 home cut "$MAC"
+# shellcheck disable=SC2016  # $d is sed's "delete the last line", not a variable
 pipe sed '$d' "$script"
 if [ -e "$DATA" ] || [ -n "$CALLED" ]; then fail "a download without its last line ran something"; fi
 pass "a cut-off download of the script runs nothing"
