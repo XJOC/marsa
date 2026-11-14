@@ -6,6 +6,8 @@
 //! | `POST /v1/sites/park` | `ParkRequest` | `SiteList` after the change |
 //! | `POST /v1/sites/link` | `LinkRequest` | `SiteList` after the change |
 //! | `PATCH /v1/sites/{name}` | `SitePatch` | `SiteList` after the change |
+//! | `DELETE /v1/sites/{name}` | – | `SiteList` after the change |
+//! | `DELETE /v1/sites/park` | `ParkRequest` | `SiteList` after the change |
 //!
 //! Each change goes through [`Daemon::change_sites`]: `sites.toml` is written
 //! atomically, the list is built again, and `sites_changed` goes to
@@ -14,6 +16,10 @@
 //! A parked site that gets a patch gets its own `[sites.<name>]` table, with
 //! its folder as `root`, so its settings are kept. From then on it counts as
 //! linked.
+//!
+//! `DELETE` (task M5-09) removes a linked site's table (`unlink`), or a parked
+//! folder with the tables of its sites (`forget`). A site from a parked folder
+//! cannot be unlinked alone: `site_is_parked` (409).
 
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
@@ -41,14 +47,22 @@ type Answer = Result<Json<SiteList>, HttpError>;
 /// The routes, for `api::router` to merge before its fallbacks.
 pub fn routes() -> Router<Arc<Daemon>> {
     // `park` and `link` are valid site names, and a fixed path wins over
-    // `{name}`, so the two fixed paths take `PATCH` too.
+    // `{name}`, so the two fixed paths take `PATCH` and `DELETE` too. A
+    // `DELETE /v1/sites/park` with a JSON body forgets a folder instead.
     let park_patch = |daemon, body| update(daemon, "park".to_owned(), body);
     let link_patch = |daemon, body| update(daemon, "link".to_owned(), body);
+    let link_delete = |daemon| unlink(daemon, "link".to_owned());
     Router::new()
         .route("/v1/sites", get(list))
-        .route("/v1/sites/park", post(park).patch(park_patch))
-        .route("/v1/sites/link", post(link).patch(link_patch))
-        .route("/v1/sites/{name}", patch(patch_site))
+        .route(
+            "/v1/sites/park",
+            post(park).patch(park_patch).delete(park_delete),
+        )
+        .route(
+            "/v1/sites/link",
+            post(link).patch(link_patch).delete(link_delete),
+        )
+        .route("/v1/sites/{name}", patch(patch_site).delete(unlink_site))
 }
 
 async fn list(State(daemon): State<Arc<Daemon>>) -> Answer {
@@ -137,6 +151,96 @@ async fn update(
     daemon.change_sites(change).await.map(Json)
 }
 
+/// `DELETE /v1/sites/{name}`.
+async fn unlink_site(
+    daemon: State<Arc<Daemon>>,
+    path: Result<UrlPath<String>, PathRejection>,
+) -> Answer {
+    let UrlPath(name) =
+        path.map_err(|err| HttpError::new(err.status(), "invalid_path", err.body_text()))?;
+    unlink(daemon, name).await
+}
+
+/// Removes the table of the linked site `name`. A site from a parked folder
+/// is refused, also when it has a table of its own: the table only holds its
+/// settings, and the site would stay.
+async fn unlink(State(daemon): State<Arc<Daemon>>, name: String) -> Answer {
+    let change = move |sites_toml: &mut SitesConfig| {
+        let parked = parked_site(sites_toml, &name);
+        let own_root = sites_toml.sites.get(&name).map(|table| table.root.clone());
+        match (own_root, parked) {
+            (Some(root), Some((dir, parked_root))) if root == parked_root => {
+                Err(site_is_parked(&name, &dir))
+            }
+            (Some(_), _) => {
+                tracing::info!(site = %name, "site unlinked");
+                sites_toml.sites.remove(&name);
+                Ok(true)
+            }
+            (None, Some((dir, _))) => Err(site_is_parked(&name, &dir)),
+            (None, None) => Err(not_found(&name)),
+        }
+    };
+    daemon.change_sites(change).await.map(Json)
+}
+
+/// `DELETE /v1/sites/park`: with a JSON body, forgets the folder in it;
+/// without one (no `Content-Type`), unlinks the site named `park`.
+async fn park_delete(
+    daemon: State<Arc<Daemon>>,
+    body: Result<Option<Json<ParkRequest>>, JsonRejection>,
+) -> Answer {
+    match body.map_err(bad_body)? {
+        Some(Json(ParkRequest { path })) => forget(daemon, path).await,
+        None => unlink(daemon, "park".to_owned()).await,
+    }
+}
+
+/// Removes the parked folder `path`, and the tables of its sites: a table
+/// named as the folder's scan names the sub-folder it points at. A table
+/// under another name was linked by hand, and stays.
+async fn forget(State(daemon): State<Arc<Daemon>>, path: PathBuf) -> Answer {
+    check_absolute(&path)?;
+    let change = move |sites_toml: &mut SitesConfig| {
+        let index = parked_index(&sites_toml.parked, &path).ok_or_else(|| not_parked(&path))?;
+        let dir = sites_toml.parked.remove(index);
+        sites_toml.sites.retain(|name, table| {
+            let folder = table.root.file_name().and_then(sites::name_from_folder);
+            let parked = table.root.parent() == Some(dir.as_path())
+                && folder.as_deref() == Some(name.as_str());
+            !parked
+        });
+        tracing::info!(path = %dir.display(), "parked folder forgotten");
+        Ok(true)
+    };
+    daemon.change_sites(change).await.map(Json)
+}
+
+/// Where `path` is in `parked`, matched as `park` stored it. `park` keeps the
+/// path it was given (the CLI and the window make it absolute and drop `.`
+/// parts first), so:
+///
+/// 1. By component, as [`PathBuf`] compares: `/code/`, `/code//`, and
+///    `/code/.` are `/code`.
+/// 2. The same, with `\r` and `\n` cut from the end: a script that read the
+///    path from a file with Windows line ends.
+/// 3. For a folder that still exists, by the folder the system finds for
+///    both: another letter case (macOS and Windows), a link, or `..`. Only
+///    compared, never passed on.
+fn parked_index(parked: &[PathBuf], path: &Path) -> Option<usize> {
+    let trimmed = match path.to_str() {
+        Some(text) => PathBuf::from(text.trim_end_matches(['\r', '\n'])),
+        None => path.to_path_buf(),
+    };
+    let same = |dir: &PathBuf| *dir == path || *dir == trimmed;
+    parked.iter().position(same).or_else(|| {
+        let real = std::fs::canonicalize(&trimmed).ok()?;
+        parked
+            .iter()
+            .position(|dir| std::fs::canonicalize(dir).is_ok_and(|dir| dir == real))
+    })
+}
+
 /// The site list for `sites_toml`: each linked table, then each parked
 /// folder, joined by [`sites::merge`], with the PHP version and the settings
 /// of each site.
@@ -221,10 +325,15 @@ pub fn build(data_dir: &Path, sites_toml: &SitesConfig) -> SiteList {
 /// The folder of the parked site `name`, found as [`build`] finds it: the
 /// first parked folder that has it wins.
 fn parked_root(sites_toml: &SitesConfig, name: &str) -> Option<PathBuf> {
+    parked_site(sites_toml, name).map(|(_, root)| root)
+}
+
+/// The parked folder that has the site `name`, and the site's folder.
+fn parked_site(sites_toml: &SitesConfig, name: &str) -> Option<(PathBuf, PathBuf)> {
     sites_toml.parked.iter().find_map(|dir| {
         let scan = sites::scan_parked(dir).ok()?;
         let found = scan.found.into_iter().find(|found| found.name == name)?;
-        Some(found.root)
+        Some((dir.clone(), found.root))
     })
 }
 
@@ -296,6 +405,19 @@ fn site_error(err: &SiteError) -> HttpError {
 fn not_found(name: &str) -> HttpError {
     let message = format!("no site named {name:?}");
     HttpError::new(StatusCode::NOT_FOUND, "site_not_found", message)
+}
+
+fn site_is_parked(name: &str, dir: &Path) -> HttpError {
+    let message = format!(
+        "{name:?} comes from the parked folder {}; forget that folder to remove its sites",
+        dir.display()
+    );
+    HttpError::new(StatusCode::CONFLICT, "site_is_parked", message)
+}
+
+fn not_parked(path: &Path) -> HttpError {
+    let message = format!("{} is not a parked folder", path.display());
+    HttpError::new(StatusCode::NOT_FOUND, "folder_not_parked", message)
 }
 
 fn bad_body(rejection: JsonRejection) -> HttpError {
@@ -714,5 +836,216 @@ mod tests {
         let body = json!({ "php": "7.4" });
         let list = app.list("PATCH", "/v1/sites/shop", Some(body)).await;
         assert_eq!(source(&list, "shop"), (None, None));
+    }
+
+    // M5-09: `DELETE /v1/sites/{name}` and `DELETE /v1/sites/park`.
+
+    fn link_body(name: &str, path: &Path) -> Value {
+        json!({ "name": name, "path": path })
+    }
+
+    #[tokio::test]
+    async fn unlink_removes_a_linked_site_and_its_own_settings() {
+        let app = App::new();
+        let code = app.code();
+        app.park(&code).await;
+        let api = app.dir.path().join("work").join("api");
+        fs::create_dir_all(&api).unwrap();
+        app.list("POST", "/v1/sites/link", Some(link_body("api", &api)))
+            .await;
+        let body = json!({ "php": "8.3", "secure": false });
+        app.list("PATCH", "/v1/sites/api", Some(body)).await;
+        // A linked `shop` hides the parked one.
+        app.list("POST", "/v1/sites/link", Some(link_body("shop", &api)))
+            .await;
+        let mut events = app.daemon.events.subscribe();
+
+        let list = app.list("DELETE", "/v1/sites/api", None).await;
+        assert!(list.sites.iter().all(|site| site.name != "api"), "{list:?}");
+        assert_eq!(events.try_recv().unwrap(), Event::SitesChanged(list));
+        // The parked `shop` is served again.
+        let list = app.list("DELETE", "/v1/sites/shop", None).await;
+        assert_eq!(site(&list, "shop").root, code.join("shop"));
+        let file = config::load_sites(&app.sites_toml()).unwrap();
+        assert!(file.sites.is_empty(), "{file:?}");
+        assert_eq!(file.parked, [code]);
+
+        // A linked folder that is gone can still be unlinked.
+        let gone = app.dir.path().join("gone");
+        fs::create_dir(&gone).unwrap();
+        app.list("POST", "/v1/sites/link", Some(link_body("gone", &gone)))
+            .await;
+        fs::remove_dir(&gone).unwrap();
+        let list = app.daemon.rebuild_sites().await.unwrap();
+        assert!(list.skipped.iter().any(|folder| folder.path == gone));
+        let list = app.list("DELETE", "/v1/sites/gone", None).await;
+        assert!(list.skipped.iter().all(|folder| folder.path != gone));
+    }
+
+    #[tokio::test]
+    async fn unlink_refuses_a_parked_site_and_an_unknown_name() {
+        let app = App::new();
+        let code = app.code();
+        app.park(&code).await;
+        // `shop` gets a table of its own: its settings, not a link.
+        let body = json!({ "secure": false });
+        app.list("PATCH", "/v1/sites/shop", Some(body)).await;
+        let before = fs::read_to_string(app.sites_toml()).unwrap();
+        let mut events = app.daemon.events.subscribe();
+
+        let conflict = (StatusCode::CONFLICT, "site_is_parked".to_owned());
+        for name in ["blog", "shop"] {
+            let got = app
+                .refused("DELETE", &format!("/v1/sites/{name}"), None)
+                .await;
+            assert_eq!(got, conflict, "{name}");
+        }
+        let (_, json) = app.answer("DELETE", "/v1/sites/blog", None).await;
+        let message = json["error"]["message"].as_str().unwrap();
+        let named = message.contains("forget") && message.contains(&code.display().to_string());
+        assert!(named, "{message}");
+        let got = app.refused("DELETE", "/v1/sites/nope", None).await;
+        assert_eq!(got, (StatusCode::NOT_FOUND, "site_not_found".to_owned()));
+
+        assert_eq!(fs::read_to_string(app.sites_toml()).unwrap(), before);
+        assert!(events.try_recv().is_err(), "a refusal changes nothing");
+    }
+
+    #[tokio::test]
+    async fn park_and_link_are_site_names_for_delete_too() {
+        let app = App::new();
+        let code = app.code();
+        fs::create_dir(code.join("park")).unwrap();
+        app.park(&code).await;
+        // No body: the site `park`, which is parked.
+        let got = app.refused("DELETE", "/v1/sites/park", None).await;
+        assert_eq!(got, (StatusCode::CONFLICT, "site_is_parked".to_owned()));
+
+        let work = app.dir.path().join("work");
+        fs::create_dir(&work).unwrap();
+        for name in ["park", "link"] {
+            app.list("POST", "/v1/sites/link", Some(link_body(name, &work)))
+                .await;
+            let list = app.list("DELETE", &format!("/v1/sites/{name}"), None).await;
+            assert!(
+                list.sites.iter().all(|s| s.root != work),
+                "{name}: {list:?}"
+            );
+        }
+        assert_eq!(app.list("GET", "/v1/sites", None).await.parked, [code]);
+        assert!(
+            config::load_sites(&app.sites_toml())
+                .unwrap()
+                .sites
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn forget_removes_the_folder_its_sites_and_their_settings() {
+        let app = App::new();
+        let code = app.code();
+        let other = app.dir.path().join("other");
+        fs::create_dir_all(other.join("tools")).unwrap();
+        app.park(&code).await;
+        app.park(&other).await;
+        let body = json!({ "secure": false });
+        app.list("PATCH", "/v1/sites/shop", Some(body)).await;
+        // Linked by hand under another name: it stays.
+        let admin = link_body("admin", &code.join("blog"));
+        app.list("POST", "/v1/sites/link", Some(admin)).await;
+        let mut events = app.daemon.events.subscribe();
+
+        let body = json!({ "path": code });
+        let list = app.list("DELETE", "/v1/sites/park", Some(body)).await;
+        assert_eq!(
+            events.try_recv().unwrap(),
+            Event::SitesChanged(list.clone())
+        );
+        assert_eq!(list.parked, [other]);
+        let names: Vec<_> = list.sites.iter().map(|site| site.name.as_str()).collect();
+        assert_eq!(names, ["admin", "tools"]);
+        assert!(list.skipped.is_empty(), "{list:?}");
+        let file = config::load_sites(&app.sites_toml()).unwrap();
+        assert_eq!(file.sites.keys().collect::<Vec<_>>(), ["admin"]);
+    }
+
+    #[tokio::test]
+    async fn forget_matches_the_folder_as_park_stored_it() {
+        let app = App::new();
+        let code = app.code();
+        let text = code.to_str().unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        let mut given = vec![
+            format!("{text}{sep}"),
+            format!("{text}{sep}{sep}"),
+            format!("{text}{sep}."),
+            format!("{text}\r\n"),
+            // `..` is resolved by the system, for a folder that exists.
+            format!("{text}{sep}shop{sep}.."),
+        ];
+        // Another letter case, where the file system ignores case (macOS
+        // and Windows by default).
+        let upper = code.with_file_name("CODE");
+        if upper.is_dir() {
+            given.push(upper.to_str().unwrap().to_owned());
+        }
+        for path in given {
+            app.park(&code).await;
+            let body = json!({ "path": path });
+            let list = app.list("DELETE", "/v1/sites/park", Some(body)).await;
+            assert!(list.parked.is_empty(), "{path:?}");
+        }
+
+        // A folder that is gone is matched as it was stored.
+        app.park(&code).await;
+        fs::remove_dir_all(&code).unwrap();
+        let body = json!({ "path": code });
+        let list = app.list("DELETE", "/v1/sites/park", Some(body)).await;
+        assert!(list.parked.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forget_refuses_a_folder_that_is_not_parked() {
+        let app = App::new();
+        let code = app.code();
+        app.park(&code).await;
+        let before = fs::read_to_string(app.sites_toml()).unwrap();
+        let mut events = app.daemon.events.subscribe();
+
+        let (bad, missing) = (StatusCode::BAD_REQUEST, StatusCode::NOT_FOUND);
+        for (body, status, want) in [
+            (
+                json!({ "path": code.join("shop") }),
+                missing,
+                "folder_not_parked",
+            ),
+            (
+                json!({ "path": app.dir.path() }),
+                missing,
+                "folder_not_parked",
+            ),
+            (json!({ "path": "code" }), bad, "site_path_relative"),
+            (json!({}), StatusCode::UNPROCESSABLE_ENTITY, "invalid_body"),
+        ] {
+            let got = app
+                .refused("DELETE", "/v1/sites/park", Some(body.clone()))
+                .await;
+            assert_eq!(got, (status, want.to_owned()), "{body}");
+        }
+        // A body that is not JSON.
+        let request = Request::builder()
+            .method("DELETE")
+            .uri("/v1/sites/park")
+            .header("host", daemon_authority(PORT))
+            .header("authorization", &app.bearer)
+            .header("content-type", "text/plain")
+            .body(Body::from("x"))
+            .unwrap();
+        let response = app.router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        assert_eq!(fs::read_to_string(app.sites_toml()).unwrap(), before);
+        assert!(events.try_recv().is_err(), "a refusal changes nothing");
     }
 }

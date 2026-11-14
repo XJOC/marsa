@@ -46,8 +46,8 @@ enum Command {
     Services(ServicesArgs),
     /// Show the output of a service.
     Logs(LogsArgs),
-    /// `sites`, `park`, `link`, `secure`, and `unsecure`, each a command of
-    /// its own.
+    /// `sites`, `park`, `link`, `secure`, `unsecure`, `unlink`, `forget`,
+    /// `isolate`, `unisolate`, and `open`, each a command of its own.
     #[command(flatten)]
     Sites(SitesCommand),
     /// Trust Marsa's HTTPS certificates, send .test names to Marsa, and route
@@ -296,6 +296,20 @@ mod tests {
             (
                 &["unsecure", "shop"],
                 SitesCommand::Unsecure {
+                    name: "shop".into(),
+                },
+            ),
+            (
+                &["isolate", "shop", "8.3"],
+                SitesCommand::Isolate {
+                    name: "shop".into(),
+                    php: "8.3".into(),
+                },
+            ),
+            (&["forget"], SitesCommand::Forget { dir: None }),
+            (
+                &["open", "shop"],
+                SitesCommand::Open {
                     name: "shop".into(),
                 },
             ),

@@ -399,3 +399,77 @@ fn a_followed_log_ends_when_the_daemon_stops() {
          The daemon closed the log.\n"
     );
 }
+
+/// `marsa unlink`, `forget`, `isolate`, and `unisolate` through the real
+/// daemon (task M5-09). `marsa open` would start a browser here, so its tests
+/// are in `cli/sites.rs`, with a stand-in for the browser.
+#[test]
+fn sites_are_isolated_unlinked_and_forgotten() {
+    let data = DaemonDir::new();
+    let work = TempDir::new().expect("temp folder");
+    let code = work.path().join("code");
+    let api = work.path().join("api");
+    for dir in [code.join("blog"), api.clone()] {
+        fs::create_dir_all(dir).expect("mkdir");
+    }
+    let (code_arg, api_arg) = (code.to_str().expect("UTF-8"), api.to_str().expect("UTF-8"));
+
+    let out = data.marsa(&["park", code_arg]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let linked = format!("Linked {} as https://api.test.\n", api.display());
+    data.expect(&["link", "api", "--path", api_arg], 0, &linked, "");
+    // No PHP is installed in the temp data folder.
+    data.expect(
+        &["isolate", "api", "8.3"],
+        0,
+        "https://api.test now asks for PHP 8.3, but no installed version matches. Run \
+         \"marsa install php 8.3\".\n",
+        "",
+    );
+    data.expect(
+        &["unisolate", "api"],
+        0,
+        "https://api.test has no PHP version of its own now. No installed PHP version fits it.\n",
+        "",
+    );
+
+    let parked = format!(
+        "marsa: \"blog\" comes from the parked folder {0}, so it cannot be unlinked alone. To \
+         stop serving that folder and all its sites, run \"marsa forget {0}\". \
+         [site_is_parked]\n",
+        code.display()
+    );
+    data.expect(&["unlink", "blog"], 1, "", &parked);
+    data.expect(
+        &["unlink", "api"],
+        0,
+        "Unlinked api: it is no longer served, and its settings are gone.\n",
+        "",
+    );
+    data.expect(
+        &["unlink", "api"],
+        1,
+        "",
+        "marsa: There is no site named \"api\". Run \"marsa sites\" to see them. \
+         [site_not_found]\n",
+    );
+
+    let slash = format!("{code_arg}{}", std::path::MAIN_SEPARATOR);
+    let forgot = format!(
+        "Forgot {}: its sites are no longer served.\n",
+        code.display()
+    );
+    data.expect(&["forget", &slash], 0, &forgot, "");
+    let not_parked = format!(
+        "marsa: {} is not a parked folder. No folder is parked. [folder_not_parked]\n",
+        code.display()
+    );
+    data.expect(&["forget", code_arg], 1, "", &not_parked);
+    data.expect(
+        &["sites"],
+        0,
+        "No sites yet. Run \"marsa park\" in a folder of projects, or \"marsa link\" in one \
+         project.\n",
+        "",
+    );
+}
