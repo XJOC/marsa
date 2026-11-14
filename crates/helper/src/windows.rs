@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::{
-    ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    ERROR_NO_DATA, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -38,6 +38,16 @@ use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGe
 const MAX_PATH: usize = 260;
 /// The pipe's buffer in each direction: one request or answer of 64 KiB.
 const BUFFER: u32 = 64 * 1024;
+/// The user's rights on the pipe: `FILE_GENERIC_READ`, and
+/// `FILE_GENERIC_WRITE` without `FILE_APPEND_DATA`, which on a pipe is
+/// `FILE_CREATE_PIPE_INSTANCE`. The user reads and writes, and cannot add
+/// an instance of their own. A client opens it with `FILE_GENERIC_READ |
+/// FILE_WRITE_DATA` (`GENERIC_WRITE` asks for the right left out).
+const USER_RIGHTS: &str = "0x12019b";
+/// The pipe's integrity label: Medium, with no read up and no write up. A
+/// process of the user at Low integrity (a sandbox) cannot open the pipe
+/// at all, so it cannot hold the only instance either.
+const LABEL: &str = "S:(ML;;NWNR;;;ME)";
 
 /// The Windows system folder, as Windows itself reports it. Not from the
 /// `SystemRoot` variable: whoever starts the helper sets its environment.
@@ -114,14 +124,25 @@ impl PipeServer {
     /// name first never receives a client meant for the service; and with one
     /// instance at most, nobody can add another later.
     ///
-    /// The DACL: full access for LocalSystem, read and write for `user_sid`,
-    /// nothing for anyone else. `P` keeps inherited entries out.
+    /// The DACL: full access for LocalSystem, [`USER_RIGHTS`] for
+    /// `user_sid`, nothing for anyone else. `P` keeps inherited entries out.
+    /// The label is [`LABEL`].
     ///
     /// # Errors
     ///
     /// `InvalidInput` for a SID with anything but digits, `S`, and `-` in it
     /// (it goes into the SDDL text). Otherwise the Win32 error.
     pub fn create(name: &str, user_sid: &str) -> io::Result<Self> {
+        Self::create_with(
+            name,
+            user_sid,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        )
+    }
+
+    /// [`PipeServer::create`] with the open mode `mode`. The tests make a
+    /// second instance without `FILE_FLAG_FIRST_PIPE_INSTANCE` with it.
+    fn create_with(name: &str, user_sid: &str, mode: u32) -> io::Result<Self> {
         let plain = user_sid.starts_with("S-")
             && user_sid
                 .bytes()
@@ -132,7 +153,7 @@ impl PipeServer {
                 "the SID is not plain",
             ));
         }
-        let sddl = wide(&format!("D:P(A;;GA;;;SY)(A;;GRGW;;;{user_sid})"));
+        let sddl = wide(&security_descriptor(user_sid));
         let name = wide(name);
         let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
         // SAFETY: `sddl` and `name` are NUL-terminated and live through both
@@ -157,7 +178,7 @@ impl PipeServer {
             };
             let handle = CreateNamedPipeW(
                 name.as_ptr(),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                mode,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
                 BUFFER,
@@ -176,20 +197,31 @@ impl PipeServer {
         }
     }
 
-    /// Waits for the next client.
+    /// Waits for the next client. A client that connected before the call
+    /// is fine.
     ///
     /// # Errors
     ///
-    /// The Win32 error. A client that connected before the call is fine.
+    /// The Win32 error. `ERROR_NO_DATA` (232): a client opened the pipe and
+    /// closed it before the call. Until a disconnect, every later call would
+    /// fail the same way and no client could open the pipe; this disconnects
+    /// it, so the next call waits for the next client.
     pub fn accept(&self) -> io::Result<()> {
         // SAFETY: the handle is the open pipe this struct owns; no
         // OVERLAPPED, so the call blocks until a client connects.
-        let connected = unsafe { ConnectNamedPipe(self.raw(), null_mut()) };
-        // SAFETY: no arguments; it reads this thread's last error.
-        if connected == 0 && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
-            return Err(io::Error::last_os_error());
+        if unsafe { ConnectNamedPipe(self.raw(), null_mut()) } != 0 {
+            return Ok(());
         }
-        Ok(())
+        // SAFETY: no arguments; it reads this thread's last error.
+        let code = unsafe { GetLastError() };
+        match code {
+            ERROR_PIPE_CONNECTED => Ok(()),
+            ERROR_NO_DATA => {
+                self.disconnect();
+                Err(io::Error::from_raw_os_error(code as i32))
+            }
+            _ => Err(io::Error::from_raw_os_error(code as i32)),
+        }
     }
 
     /// One message: a 4-byte little-endian length, then at most `max` bytes.
@@ -214,7 +246,8 @@ impl PipeServer {
     }
 
     /// One message, framed like [`PipeServer::read_message`], then waits
-    /// until the client has read it.
+    /// until the client has read it. A client that never reads holds the
+    /// service as long as it stays connected (task M4-19f, open question).
     ///
     /// # Errors
     ///
@@ -275,12 +308,9 @@ impl PipeServer {
     }
 }
 
-/// The user SID of the token the current thread acts with, as text.
-///
-/// # Safety
-///
-/// The thread must be impersonating a client.
-unsafe fn thread_user_sid() -> io::Result<String> {
+/// The user SID of the token the current thread acts with, as text. A
+/// thread that does not impersonate anyone has no token: `ERROR_NO_TOKEN`.
+fn thread_user_sid() -> io::Result<String> {
     let mut token: HANDLE = null_mut();
     // SAFETY: `token` is a valid out pointer. `OpenAsSelf = TRUE`: the
     // access check uses the service's own identity, not the client's.
@@ -346,6 +376,11 @@ fn token_user_sid(token: &OwnedHandle) -> io::Result<String> {
     }
 }
 
+/// The pipe's security descriptor in SDDL: the DACL, then the label.
+fn security_descriptor(user_sid: &str) -> String {
+    format!("D:P(A;;GA;;;SY)(A;;{USER_RIGHTS};;;{user_sid}){LABEL}")
+}
+
 /// `text` as NUL-terminated UTF-16.
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
@@ -355,7 +390,16 @@ fn wide(text: &str) -> Vec<u16> {
 mod tests {
     use std::fs::OpenOptions;
     use std::os::windows::fs::OpenOptionsExt;
+    use std::sync::mpsc::{self, RecvTimeoutError};
     use std::thread;
+    use std::time::Duration;
+
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
+    };
+    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION};
+    use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_WRITE_DATA};
 
     use super::*;
 
@@ -368,19 +412,44 @@ mod tests {
         format!(r"\\.\pipe\marsa-helper-test-{}-{test}", std::process::id())
     }
 
-    fn client(name: &str) -> File {
+    /// A client as `marsad` opens the pipe: read, and write without
+    /// `FILE_APPEND_DATA` (see [`USER_RIGHTS`]).
+    fn client(name: &str) -> io::Result<File> {
         OpenOptions::new()
-            .read(true)
-            .write(true)
+            .access_mode(FILE_GENERIC_READ | FILE_WRITE_DATA)
             .security_qos_flags(SECURITY_IDENTIFICATION)
             .open(name)
-            .unwrap()
     }
 
-    /// A real pipe between two threads of this test: no other process, and
-    /// nothing outside it changes.
+    fn send(pipe: &mut File, bytes: &[u8]) {
+        let len = u32::try_from(bytes.len()).unwrap();
+        pipe.write_all(&len.to_le_bytes()).unwrap();
+        pipe.write_all(bytes).unwrap();
+    }
+
+    /// Ends the test process if a pipe call blocks for good, so a bug fails
+    /// the test instead of hanging CI. Dropping it ends the watch.
+    struct Watchdog {
+        _stop: mpsc::Sender<()>,
+    }
+
+    fn watchdog() -> Watchdog {
+        let (sender, receiver) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            if receiver.recv_timeout(Duration::from_secs(60)) == Err(RecvTimeoutError::Timeout) {
+                eprintln!("a pipe call blocked for 60 s");
+                std::process::abort();
+            }
+        });
+        Watchdog { _stop: sender }
+    }
+
+    /// A real pipe in this test: no other process, and nothing outside it
+    /// changes. The client connects before `accept`, which is allowed, so
+    /// no step can wait for a thread that failed.
     #[test]
     fn the_pipe_carries_one_message_each_way_and_names_the_client() {
+        let _watch = watchdog();
         let sid = process_user_sid().unwrap();
         assert!(sid.starts_with("S-1-5-"), "{sid}");
         let name = test_pipe("one");
@@ -388,40 +457,140 @@ mod tests {
         // The name is taken: a second server is refused.
         assert!(PipeServer::create(&name, &sid).is_err());
 
-        let path = name.clone();
-        let other = thread::spawn(move || {
-            let mut pipe = client(&path);
-            pipe.write_all(&5u32.to_le_bytes()).unwrap();
-            pipe.write_all(b"hello").unwrap();
+        let mut pipe = client(&name).unwrap();
+        // One instance: while it has a client, the next one is busy.
+        let busy = client(&name).unwrap_err();
+        assert_eq!(busy.raw_os_error(), Some(ERROR_PIPE_BUSY as i32));
+        send(&mut pipe, b"hello");
+        server.accept().unwrap();
+        assert_eq!(server.read_message(64).unwrap(), b"hello");
+        assert_eq!(server.client_sid().unwrap(), sid);
+        // `write_message` waits until the client has read the answer.
+        let reader = thread::spawn(move || {
             let mut len = [0u8; 4];
             pipe.read_exact(&mut len).unwrap();
             let mut reply = vec![0; u32::from_le_bytes(len) as usize];
             pipe.read_exact(&mut reply).unwrap();
             reply
         });
-        server.accept().unwrap();
-        assert_eq!(server.read_message(64).unwrap(), b"hello");
-        assert_eq!(server.client_sid().unwrap(), sid);
         server.write_message(b"world").unwrap();
-        assert_eq!(other.join().unwrap(), b"world");
+        assert_eq!(reader.join().unwrap(), b"world");
         server.disconnect();
     }
 
     #[test]
     fn a_message_over_the_limit_is_refused_unread() {
+        let _watch = watchdog();
         let sid = process_user_sid().unwrap();
         let name = test_pipe("large");
         let server = PipeServer::create(&name, &sid).unwrap();
-        let path = name.clone();
-        let other = thread::spawn(move || {
-            let mut pipe = client(&path);
-            pipe.write_all(&65u32.to_le_bytes()).unwrap();
-        });
+        // Open until the server has read: the length alone, no body.
+        let mut pipe = client(&name).unwrap();
+        pipe.write_all(&65u32.to_le_bytes()).unwrap();
         server.accept().unwrap();
         let err = server.read_message(64).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        other.join().unwrap();
+        drop(pipe);
         server.disconnect();
+    }
+
+    /// A client that opened the pipe and closed it before `accept`: the
+    /// pipe is readied, and the next client is served.
+    #[test]
+    fn a_client_that_came_and_went_does_not_block_the_next() {
+        let _watch = watchdog();
+        let sid = process_user_sid().unwrap();
+        let name = test_pipe("gone");
+        let server = PipeServer::create(&name, &sid).unwrap();
+        drop(client(&name).unwrap());
+        let err = server.accept().unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(ERROR_NO_DATA as i32));
+
+        let path = name.clone();
+        let next = thread::spawn(move || {
+            // Busy until the server waits again, below.
+            let mut pipe = loop {
+                match client(&path) {
+                    Ok(pipe) => break pipe,
+                    Err(err) if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("{err}"),
+                }
+            };
+            send(&mut pipe, b"next");
+            pipe
+        });
+        server.accept().unwrap();
+        assert_eq!(server.read_message(64).unwrap(), b"next");
+        drop(next.join().unwrap());
+        server.disconnect();
+    }
+
+    /// The user cannot add an instance of their own: the pipe allows one,
+    /// and the user's rights leave out `FILE_CREATE_PIPE_INSTANCE`.
+    #[test]
+    fn no_second_instance_can_be_made() {
+        let sid = process_user_sid().unwrap();
+        let name = test_pipe("second");
+        let _server = PipeServer::create(&name, &sid).unwrap();
+        let err = PipeServer::create_with(&name, &sid, PIPE_ACCESS_DUPLEX)
+            .err()
+            .unwrap();
+        let refused = [ERROR_PIPE_BUSY as i32, ERROR_ACCESS_DENIED as i32];
+        assert!(refused.contains(&err.raw_os_error().unwrap_or(0)), "{err}");
+    }
+
+    /// Windows keeps the DACL and the label as written.
+    #[test]
+    fn the_pipe_has_its_dacl_and_its_label() {
+        let sid = process_user_sid().unwrap();
+        let name = test_pipe("dacl");
+        let server = PipeServer::create(&name, &sid).unwrap();
+        let what = DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+        let mut text: *mut u16 = null_mut();
+        // SAFETY: the handle is the open pipe; the out pointers are valid.
+        // Windows allocates the descriptor and the text, which are read
+        // and then freed with `LocalFree`.
+        let sddl = unsafe {
+            let read = GetSecurityInfo(
+                server.raw(),
+                SE_KERNEL_OBJECT,
+                what,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                &mut descriptor,
+            );
+            assert_eq!(read, 0);
+            let converted = ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                what,
+                &mut text,
+                null_mut(),
+            );
+            assert_ne!(converted, 0);
+            let mut len = 0;
+            while *text.add(len) != 0 {
+                len += 1;
+            }
+            let sddl = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+            LocalFree(text.cast());
+            LocalFree(descriptor);
+            sddl
+        };
+        assert!(
+            sddl.contains(&format!("(A;;{USER_RIGHTS};;;{sid})")),
+            "{sddl}"
+        );
+        assert!(
+            sddl.contains("(A;;FA;;;SY)") || sddl.contains("(A;;GA;;;SY)"),
+            "{sddl}"
+        );
+        assert!(sddl.contains(LABEL), "{sddl}");
     }
 
     /// The SID goes into the SDDL text, so only digits, `S`, and `-` pass.

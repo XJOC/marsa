@@ -45,7 +45,8 @@ pub const COMMAND: &str = "service";
 /// values the administrator approved at install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Allowed {
-    /// The installing user's SID, `S-1-5-21-...`, in the form Windows prints.
+    /// The installing user's SID (`S-1-5-21-...`, or `S-1-12-1-...` for a
+    /// Microsoft Entra ID account), in the form Windows prints.
     pub user_sid: String,
     /// The SHA-256 of the CA certificate, upper-case hex. `None` (`-` on the
     /// command line): no certificate may be trusted.
@@ -63,7 +64,7 @@ impl Allowed {
         let user_sid = user_sid
             .to_str()
             .filter(|sid| is_user_sid(sid))
-            .ok_or("the user SID is not S-1-5-21-<numbers>")?;
+            .ok_or("the user SID is not S-1-5-21-<numbers> or S-1-12-1-<numbers>")?;
         let ca_sha256 = match ca_sha256.to_str() {
             Some("-") => None,
             Some(hash) if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => {
@@ -78,18 +79,34 @@ impl Allowed {
     }
 }
 
-/// `S-1-5-21-` and then four to six groups of digits: the SID of a local or
-/// domain user. Groups, LocalSystem (`S-1-5-18`), and well-known SIDs are
-/// refused, so the pipe is never opened to more than one account.
+/// The shape of a user account's SID, in the form Windows prints it: a
+/// local or domain account (`S-1-5-21-` and four to six numbers), or a
+/// Microsoft Entra ID account (`S-1-12-1-` and four numbers). Each number
+/// fits a `u32` and has no leading zero, so the text can equal what Windows
+/// reads from a client. LocalSystem (`S-1-5-18`), built-in groups
+/// (`S-1-5-32-...`), and other well-known SIDs are refused.
+///
+/// A local or domain group has the same shape as a user and passes here.
+/// The exact compare in [`answer`] still serves only that SID, which no
+/// client's user SID equals; `install` (task M4-19j) also checks with
+/// Windows that the SID names a user.
 fn is_user_sid(sid: &str) -> bool {
-    let Some(rest) = sid.strip_prefix("S-1-5-21-") else {
+    let (rest, parts) = if let Some(rest) = sid.strip_prefix("S-1-5-21-") {
+        (rest, 4..=6)
+    } else if let Some(rest) = sid.strip_prefix("S-1-12-1-") {
+        (rest, 4..=4)
+    } else {
         return false;
     };
-    let parts: Vec<&str> = rest.split('-').collect();
-    (4..=6).contains(&parts.len())
-        && parts
-            .iter()
-            .all(|part| (1..=10).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit()))
+    let numbers: Vec<&str> = rest.split('-').collect();
+    parts.contains(&numbers.len()) && numbers.iter().all(|number| is_u32_text(number))
+}
+
+/// A `u32` as Windows prints it: digits only, no leading zero.
+fn is_u32_text(text: &str) -> bool {
+    text.bytes().all(|b| b.is_ascii_digit())
+        && (text == "0" || !text.starts_with('0'))
+        && text.parse::<u32>().is_ok()
 }
 
 /// The answer to one message from the pipe. `client_sid` is who sent it, as
@@ -153,7 +170,7 @@ pub fn run(args: &[std::ffi::OsString]) -> Response {
 mod scm {
     use std::env;
     use std::ffi::OsString;
-    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex, PoisonError, mpsc};
     use std::thread;
     use std::time::Duration;
 
@@ -161,7 +178,9 @@ mod scm {
         ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
         ServiceType,
     };
-    use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+    use windows_service::service_control_handler::{
+        self, ServiceControlHandlerResult, ServiceStatusHandle,
+    };
     use windows_service::{define_windows_service, service_dispatcher};
 
     use super::{Allowed, PIPE_NAME, SERVICE_NAME, answer};
@@ -171,6 +190,12 @@ mod scm {
 
     define_windows_service!(ffi_service_main, service_main);
 
+    /// `ERROR_INVALID_PARAMETER`: the service's own arguments are wrong.
+    const BAD_ARGUMENTS: u32 = 87;
+    /// How long a stop may wait for the request that runs: four `certutil`
+    /// calls at their limit of 120 s each, and some room.
+    const STOP_WAIT: Duration = Duration::from_secs(600);
+
     /// Connects this process to the SCM. Fails at once if the SCM did not
     /// start it, for example when a user runs `marsa-helper service`.
     pub fn start() -> Result<(), String> {
@@ -178,26 +203,30 @@ mod scm {
             .map_err(|err| format!("not started by the service manager: {err}"))
     }
 
-    fn status(state: ServiceState, accept: ServiceControlAccept, exit: u32) -> ServiceStatus {
-        ServiceStatus {
+    /// Tells the SCM the service's state. A failure changes nothing the
+    /// service could act on.
+    fn report(handle: ServiceStatusHandle, state: ServiceState, exit: u32, wait_hint: Duration) {
+        let accept = if state == ServiceState::Running {
+            ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN
+        } else {
+            ServiceControlAccept::empty()
+        };
+        let _ = handle.set_service_status(ServiceStatus {
             service_type: ServiceType::OWN_PROCESS,
             current_state: state,
             controls_accepted: accept,
             exit_code: ServiceExitCode::Win32(exit),
             checkpoint: 0,
-            wait_hint: Duration::default(),
+            wait_hint,
             process_id: None,
-        }
+        });
+    }
+
+    fn stopped(handle: ServiceStatusHandle, exit: u32) {
+        report(handle, ServiceState::Stopped, exit, Duration::default());
     }
 
     fn service_main(_start_arguments: Vec<OsString>) {
-        // The arguments of the service's own command line: `service <SID>
-        // <hash>`, set at install. `start` checked them before.
-        let args: Vec<OsString> = env::args_os().skip(2).collect();
-        let Some(Ok(allowed)) = (args.len() == 2).then(|| Allowed::parse(&args[0], &args[1]))
-        else {
-            return;
-        };
         let (stop_sender, stop_receiver) = mpsc::channel();
         let handler = move |control| match control {
             ServiceControl::Stop | ServiceControl::Shutdown => {
@@ -207,50 +236,68 @@ mod scm {
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             _ => ServiceControlHandlerResult::NotImplemented,
         };
+        // First, so that every way out below can report `Stopped`. Without
+        // it nothing can be reported, and the SCM ends the start at its limit.
         let Ok(handle) = service_control_handler::register(SERVICE_NAME, handler) else {
+            return;
+        };
+        // The arguments of the service's own command line: `service <SID>
+        // <hash>`, set at install. `start` checked them before.
+        let args: Vec<OsString> = env::args_os().skip(2).collect();
+        let Some(Ok(allowed)) = (args.len() == 2).then(|| Allowed::parse(&args[0], &args[1]))
+        else {
+            stopped(handle, BAD_ARGUMENTS);
             return;
         };
         let server = match PipeServer::create(PIPE_NAME, &allowed.user_sid) {
             Ok(server) => server,
             Err(err) => {
-                // The pipe name is taken (another program made it first) or
-                // the SID was refused: the SCM shows this exit code.
-                let code = err.raw_os_error().map_or(1, |code| code as u32);
-                let _ = handle.set_service_status(status(
-                    ServiceState::Stopped,
-                    ServiceControlAccept::empty(),
-                    code,
-                ));
+                // Another program has the pipe's name: 231 (`ERROR_PIPE_BUSY`)
+                // if it allows one instance, 5 (`ERROR_ACCESS_DENIED`) if its
+                // DACL refuses LocalSystem. The SCM shows the code.
+                stopped(handle, err.raw_os_error().map_or(1, |code| code as u32));
                 return;
             }
         };
-        let accept = ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN;
-        let _ = handle.set_service_status(status(ServiceState::Running, accept, 0));
-        // The pipe loop waits in `ConnectNamedPipe`, so a stop ends the
-        // process from this thread. Every op writes its files through a
-        // rename, so a stop between two ops leaves no half-written file.
+        report(handle, ServiceState::Running, 0, Duration::default());
+        // A stop waits for the request that runs, if any: ending in the middle
+        // of its ops could leave a temp file next to the hosts file, or a
+        // `certutil` rollback half done. Between requests the loop holds
+        // nothing (it waits in `ConnectNamedPipe`, or for a client's bytes),
+        // so a stop then ends the process at once.
+        let busy = Arc::new(Mutex::new(()));
+        let waiting = Arc::clone(&busy);
         thread::spawn(move || {
             let _ = stop_receiver.recv();
-            let stopped = status(ServiceState::Stopped, ServiceControlAccept::empty(), 0);
-            let _ = handle.set_service_status(stopped);
+            report(handle, ServiceState::StopPending, 0, STOP_WAIT);
+            let _idle = waiting.lock().unwrap_or_else(PoisonError::into_inner);
+            stopped(handle, 0);
             std::process::exit(0);
         });
         loop {
-            serve_one(&server, &allowed);
+            serve_one(&server, &allowed, &busy);
         }
     }
 
     /// One client: read, check, run, answer, disconnect. Any failure of the
     /// pipe only drops this client.
-    fn serve_one(server: &PipeServer, allowed: &Allowed) {
+    fn serve_one(server: &PipeServer, allowed: &Allowed, busy: &Mutex<()>) {
         if server.accept().is_err() {
+            // `accept` readies the pipe after a client that came and went.
+            // For any other error a disconnect is harmless, and the pause
+            // keeps a broken pipe from spinning.
+            server.disconnect();
             thread::sleep(Duration::from_millis(100));
             return;
         }
         if let Ok(message) = server.read_message(MAX_REQUEST_BYTES) {
             // After the first read, as `ImpersonateNamedPipeClient` needs.
             let client = server.client_sid().ok();
-            let response = answer(&message, client.as_deref(), allowed, &RealSystem);
+            let response = {
+                // Held while the ops run, so that a stop waits for them.
+                let _running = busy.lock().unwrap_or_else(PoisonError::into_inner);
+                answer(&message, client.as_deref(), allowed, &RealSystem)
+            };
             let _ = server.write_message(response.to_json().as_bytes());
         }
         server.disconnect();
@@ -363,9 +410,23 @@ mod tests {
             assert!(fake.files.borrow().is_empty() && fake.log.borrow().is_empty());
         }
         // The approved one runs (and fails here: the fake has no folder).
-        let response = send(trust(&pem()), Some(USER), &allowed(Some(hash)));
+        let response = send(trust(&pem()), Some(USER), &allowed(Some(hash.clone())));
         assert_eq!(response["results"][0]["op"], "trust_install");
         assert_eq!(error_code(&response), "");
+    }
+
+    /// A PEM that is not one certificate has no hash, so it is never the
+    /// approved one: `trust_not_allowed`, where `apply` would answer
+    /// `trust_cert_invalid`. Nothing runs.
+    #[test]
+    fn a_bad_pem_is_not_the_approved_certificate() {
+        let hash = ops::certificate_sha256(&pem()).unwrap();
+        let fake = windows();
+        let raw = trust("-----BEGIN CERTIFICATE-----\nnot base64\n").to_string();
+        let response = answer(raw.as_bytes(), Some(USER), &allowed(Some(hash)), &fake);
+        let response: Value = serde_json::from_str(&response.to_json()).unwrap();
+        assert_eq!(error_code(&response), code::TRUST_NOT_ALLOWED);
+        assert!(fake.files.borrow().is_empty() && fake.log.borrow().is_empty());
     }
 
     #[test]
@@ -376,6 +437,9 @@ mod tests {
         assert_eq!(ok.user_sid, USER);
         assert_eq!(ok.ca_sha256, Some(hash.to_ascii_uppercase()));
         assert_eq!(parse(USER, "-").unwrap().ca_sha256, None);
+        let entra = "S-1-12-1-1234567890-1234567890-1234567890-4294967295";
+        assert_eq!(parse(entra, "-").unwrap().user_sid, entra);
+        assert!(parse("S-1-5-21-0-1-2-1001", "-").is_ok());
 
         let bad_sids = [
             "S-1-5-18",
@@ -385,6 +449,13 @@ mod tests {
             "S-1-5-21-1-2-3-4-5-6-7",
             "S-1-5-21-1-2-3-x",
             "S-1-5-21-1-2-3-12345678901",
+            "S-1-5-21-1-2-3-4294967296",
+            "S-1-5-21-01-2-3-4",
+            "S-1-5-21-1-2-3-+4",
+            "S-1-5-21-1-2--4",
+            "S-1-12-1-1-2-3",
+            "S-1-12-1-1-2-3-4-5",
+            "S-1-12-2-1-2-3-4",
             "s-1-5-21-1-2-3-4",
             "S-1-5-21-1-2-3-4)(A;;GA;;;WD",
             "S-1-5-21-1-2-3-4 ",
@@ -396,6 +467,7 @@ mod tests {
         for bad in ["", "--", &"a".repeat(63), &"a".repeat(65), &"g".repeat(64)] {
             assert!(parse(USER, bad).is_err(), "{bad}");
         }
+        // Only Unix builds an `OsStr` that is not UTF-8 from plain bytes.
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
@@ -404,6 +476,7 @@ mod tests {
         }
     }
 
+    // On Windows `run` hands the process to the SCM.
     #[cfg(not(windows))]
     #[test]
     fn there_is_no_service_off_windows() {
