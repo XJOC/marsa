@@ -8,8 +8,8 @@
 //! 1. PHP: the pools the sites need, and `php.ini` of every installed PHP
 //!    line ([`PhpManager::sync`]).
 //! 2. Caddy: the config of the sites and pools ([`CaddyManager::apply`]).
-//! 3. The CA bundle for PHP, once Caddy has made its CA. Caddy makes it at
-//!    the first load of a config with a secure site.
+//! 3. The CA bundle for PHP, once Caddy has made its CA. Caddy makes it
+//!    when it first loads a config, with or without sites (task M5-15).
 //! 4. PHP again if the bundle just appeared: `php.ini` then points to it, so
 //!    those pools restart.
 //!

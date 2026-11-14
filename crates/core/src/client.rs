@@ -62,12 +62,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// thousands of files, and a virus scanner may slow their delete.
 const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// For `POST /v1/setup`: longer than the daemon's slowest setup, which is
-/// about 12 minutes when every program runs to its limit. The daemon gives
+/// about 12.5 minutes when every step runs to its limit. The daemon gives
 /// the user 5 minutes at the admin prompt and 5 more at the trust dialog
-/// (macOS), and each check (`netstat`, `ps` for at most 8 processes,
-/// `security verify-cert`) up to 10 seconds. A test in the daemon's
-/// `setup_api.rs` holds this above the sum of the daemon's own limits.
-pub const SETUP_TIMEOUT: Duration = Duration::from_secs(13 * 60);
+/// (macOS), each check (`netstat`, `ps` for at most 8 processes, `security
+/// verify-cert`) up to 10 seconds, and Caddy 30 seconds to start and make
+/// its CA when there is none yet. A test in the daemon's `setup_api.rs`
+/// holds this above the sum of the daemon's own limits.
+pub const SETUP_TIMEOUT: Duration = Duration::from_secs(14 * 60);
 /// For `POST /v1/uninstall`: longer than the daemon's slowest uninstall,
 /// about 15 minutes and 20 seconds when every program runs to its limit. The
 /// user has 5 minutes at the admin prompt, then up to 5 at each of the two
@@ -376,7 +377,7 @@ impl DaemonClient {
 
     /// `POST /v1/setup`: the first setup. On macOS the user is asked twice:
     /// for an administrator password, then to approve the trust in Marsa's
-    /// certificate authority for this user. Waits until it ends, up to 13
+    /// certificate authority for this user. Waits until it ends, up to 14
     /// minutes ([`SETUP_TIMEOUT`]): the user may take a while at each. The
     /// same report also comes on [`DaemonClient::events`] as
     /// `Event::SetupFinished`.

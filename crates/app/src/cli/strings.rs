@@ -432,8 +432,9 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "ports_not_checked" => "Marsa could not check which programs use ports 80 and 443, so \
              it left them alone. Run \"marsa setup\" again; if it repeats, report it."
             .into(),
-        "ca_not_ready" => "Marsa's certificate authority does not exist yet: Caddy makes it \
-             when it first serves a secure site. Run \"marsa setup\" again after that."
+        "ca_not_ready" => "Caddy did not make Marsa's certificate authority in time, so Marsa \
+             cannot trust it yet. See why in the file logs/caddy.log, then run \"marsa setup\" \
+             again."
             .into(),
         "ca_unreadable" => format!(
             "Cannot read the root certificate of Marsa's certificate authority{}, or it is \
@@ -934,6 +935,11 @@ const SETUP_MAY_HAVE_RUN: &str = "Some steps may already have run with admin rig
      \"marsa setup\" again is safe: each step checks what is already done.";
 /// When setup had no step to report.
 pub const SETUP_NOTHING: &str = "Nothing to set up.";
+/// Why setup skipped the trust when no Caddy is installed to make the
+/// certificate authority (task M5-15). The general text of the code is for
+/// `marsa services start caddy`.
+pub const SETUP_CADDY_NOT_INSTALLED: &str = "Caddy is not installed, so Marsa's certificate \
+     authority does not exist yet. Run \"marsa install caddy\", then run \"marsa setup\" again.";
 
 /// A helper operation, as a step of `marsa setup`. An operation this build
 /// does not know shows its own name.
@@ -1212,7 +1218,10 @@ pub fn doctor_skip(check: Check, skip: Skip) -> String {
         Skip::NeedsDaemon => "It needs marsad, which is not running.",
         Skip::NeedsCaddy => "It needs Caddy, which is not running.",
         Skip::CaddyNotInstalled => "Caddy is not installed.",
-        Skip::NoCa => "It does not exist yet: Caddy makes it when it first serves a secure site.",
+        Skip::NoCa => {
+            "It does not exist yet: Caddy makes it when it first starts. Run \"marsa setup\" to \
+             make it and trust it."
+        }
         Skip::NoLog => "marsad has not written it yet.",
         Skip::NotChecked => "The check could not run. Run again with MARSA_LOG=debug for details.",
     };
@@ -1494,6 +1503,7 @@ mod tests {
         "open_failed",
         // The setup route (task M4-13): its errors, the codes of its skipped
         // steps, and the failure codes of `marsa-helper` for the setup ops.
+        // `caddy_not_installed`, above, is a skip code too (task M5-15).
         "setup_running",
         "setup_not_supported",
         "setup_cancelled",

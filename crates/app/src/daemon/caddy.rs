@@ -55,8 +55,7 @@ const READY_LIMIT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(100);
 /// For each admin API call, `/stop` included.
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(1);
-/// For `POST /load`: Caddy answers once the new config runs, and the first
-/// config with a secure site also makes the CA.
+/// For `POST /load`: Caddy answers once the new config runs.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How Caddy and each php-fpm pool restart after a failure: up to 3 times,
@@ -345,6 +344,13 @@ impl CaddyManager {
         };
         tag_config(&mut config, tag);
         Ok(config)
+    }
+
+    /// Whether there is a Caddy to run: the check `start` makes first, here
+    /// without marking the status failed. Setup asks it before it starts
+    /// Caddy to make the CA (task M5-15).
+    pub fn installed(&self) -> bool {
+        self.spec_to_run().is_ok_and(|spec| spec.program.is_file())
     }
 
     /// The spec to run now: the fake of a test, else [`caddy_spec`].

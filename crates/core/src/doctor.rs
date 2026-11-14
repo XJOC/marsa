@@ -132,7 +132,7 @@ pub enum Skip {
     NeedsDaemon,
     NeedsCaddy,
     CaddyNotInstalled,
-    /// Caddy makes the CA when it first serves a secure site.
+    /// No CA yet: Caddy makes it when it first starts (task M5-15).
     NoCa,
     NoLog,
     /// The check could not get its facts (`netstat` or `security` failed,
