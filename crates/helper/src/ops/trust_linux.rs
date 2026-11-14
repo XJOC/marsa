@@ -25,15 +25,16 @@ use std::io;
 use std::path::Path;
 
 use crate::ops::program;
-use crate::ops::trust::{
-    self, TRUST_ADD_FAILED, TRUST_CERT_INVALID, TRUST_DELETE, TRUST_READ, TRUST_REMOVE_FAILED,
-    TRUST_WRITE,
-};
+use crate::ops::trust::{self, TRUST_CERT_INVALID, TRUST_DELETE, TRUST_READ, TRUST_WRITE};
 use crate::response::{OpResult, Outcome};
 use crate::system::System;
 
 /// This system has neither of the two tools, so nothing was changed.
 pub const TRUST_TOOL_MISSING: &str = "trust_tool_missing";
+/// The store's tool failed, in an install or a removal. Not the codes of
+/// the macOS op (`trust_add_failed`, `trust_remove_failed`): the UI explains
+/// those with macOS steps (a dialog, Keychain Access).
+pub const TRUST_STORE_UPDATE_FAILED: &str = "trust_store_update_failed";
 
 /// Where a family keeps local roots, and the tool that rebuilds its store.
 struct Store {
@@ -116,7 +117,7 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
         program::failure(&updated),
         store.file
     );
-    OpResult::failed(INSTALL, TRUST_ADD_FAILED, message)
+    OpResult::failed(INSTALL, TRUST_STORE_UPDATE_FAILED, message)
 }
 
 /// `trust_remove`: deletes Marsa's file and rebuilds the store without it.
@@ -188,7 +189,7 @@ fn remove_steps(op: &'static str, store: &Store, system: &impl System) -> Result
             store.tool,
             program::failure(&updated)
         );
-        return Err(OpResult::failed(op, TRUST_REMOVE_FAILED, message));
+        return Err(OpResult::failed(op, TRUST_STORE_UPDATE_FAILED, message));
     }
     Ok(())
 }
@@ -512,7 +513,7 @@ mod tests {
         for mut family in families() {
             family.fake.defaults.insert(family.tool, exit(1));
             let failed = install(TEST_CA, &family.fake);
-            assert_eq!(code_of(&failed), TRUST_ADD_FAILED);
+            assert_eq!(code_of(&failed), TRUST_STORE_UPDATE_FAILED);
             assert_eq!(
                 message_of(&failed),
                 format!(
@@ -532,7 +533,7 @@ mod tests {
         family.fake.defaults.insert(DEBIAN_TOOL, exit(1));
         family.fake.fail_removes.insert(PathBuf::from(DEBIAN_FILE));
         let failed = install(TEST_CA, &family.fake);
-        assert_eq!(code_of(&failed), TRUST_ADD_FAILED);
+        assert_eq!(code_of(&failed), TRUST_STORE_UPDATE_FAILED);
         assert!(message_of(&failed).ends_with(&format!("{DEBIAN_FILE} could not be removed")));
         assert!(family.stored().is_some());
     }
@@ -573,11 +574,11 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_that_fails_after_the_delete_is_trust_remove_failed() {
+    fn a_tool_that_fails_after_the_delete_is_trust_store_update_failed() {
         for mut family in families().map(|family| family.with_file(TEST_CA.as_bytes())) {
             family.fake.defaults.insert(family.tool, exit(1));
             let failed = remove(&family.fake);
-            assert_eq!(code_of(&failed), TRUST_REMOVE_FAILED);
+            assert_eq!(code_of(&failed), TRUST_STORE_UPDATE_FAILED);
             assert_eq!(
                 message_of(&failed),
                 format!(
