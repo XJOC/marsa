@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # The helper's Linux ops in a container with systemd as PID 1: Fedora
-# (systemd 257 or later) and Debian 12 (systemd 252, where the unit adds the
-# local route for 127.0.0.1). Task M4-18f; reviews of #114 and #111. Ubuntu
-# runs the whole end to end in linux.sh; this adds the other families, a
-# real boot, and NetworkManager.
+# (systemd 257 or later), Debian 12 (systemd 252, where the unit adds the
+# local route for 127.0.0.1), and Ubuntu 22.04 with systemd-networkd masked
+# (systemd 249, the link before 250). Tasks M4-18f, M4-18k; reviews of #114,
+# #111, and #125. Ubuntu runs the whole end to end in linux.sh; this adds
+# the other families, a real boot, and NetworkManager.
 #
 # It runs as root inside the container that linux-e2e.yml starts, in two
 # phases around a restart of the container, which boots systemd again in a

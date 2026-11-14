@@ -186,11 +186,14 @@ echo "system: $PRETTY_NAME, systemd $SYSTEMD, kernel $(uname -r)"
 # masked.
 networkd_off() {
   local active enabled
-  active=$(systemctl is-active systemd-networkd.service systemd-networkd.socket || true)
-  enabled=$(systemctl is-enabled systemd-networkd.service systemd-networkd.socket || true)
+  local units="systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service"
+  # shellcheck disable=SC2086 # three unit names
+  active=$(systemctl is-active $units || true)
+  # shellcheck disable=SC2086
+  enabled=$(systemctl is-enabled $units || true)
   [ "$(sort -u <<<"$active")" = inactive ] &&
-    [ "$(wc -l <<<"$enabled")" = 2 ] &&
-    ! grep -qvE '^(disabled|masked|masked-runtime)$' <<<"$enabled"
+    [ "$(wc -l <<<"$enabled")" = 3 ] &&
+    ! grep -qvE '^(disabled|masked)$' <<<"$enabled"
 }
 if [ "$SYSTEMD" -ge 250 ] || { [ "$SYSTEMD" -eq 249 ] && networkd_off; }; then LINK=yes; else LINK=no; fi
 echo "marsa0 on this system: $LINK"

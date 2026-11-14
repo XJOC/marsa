@@ -18,8 +18,10 @@
 //! external command runs here.
 //!
 //! The file is replaced as a whole (`write_atomic`): on Linux it is root's,
-//! mode 0644, as distributions ship it. An SELinux label is not copied; the
-//! systems that use this path (Ubuntu 22.04, Debian 11) use AppArmor.
+//! mode 0644, as distributions ship it. An SELinux label is not copied: on
+//! a system before systemd 249 with SELinux (RHEL 8, Rocky 8) the file gets
+//! the label of its folder (`etc_t`), not `net_conf_t`. Ubuntu 22.04 and
+//! Debian 11 use AppArmor.
 //!
 //! The helper leaves the file alone, and says why, when it is a link or a
 //! reparse point (the real hosts file never is one: a link could make the
@@ -87,9 +89,8 @@ fn apply(op: &'static str, block: Option<&[u8]>, os: Os, system: &impl System) -
         let without_block = op == REMOVE
             && os == Os::Linux
             && system.read(&path, MAX_BYTES).is_ok_and(|bytes| {
-                !bytes
-                    .split(|byte| *byte == b'\n')
-                    .any(|line| marker(line).is_some())
+                // No block: taking it out changes nothing (a BOM included).
+                rebuild(&bytes, None, eol(os)).as_deref() == Some(&bytes[..])
             });
         if without_block {
             return OpResult {

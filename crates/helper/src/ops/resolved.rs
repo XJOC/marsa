@@ -30,8 +30,9 @@
 //!
 //! Before systemd 250, resolved can clear a new link's settings while
 //! systemd-networkd looks at it (ADR 0014, finding 30). There the link is
-//! made only when networkd cannot run: its service and its socket are both
-//! inactive, and both disabled or masked. Anything else, or an answer that
+//! made only on 249, and only when networkd cannot run: its service, its
+//! socket, and `systemd-networkd-wait-online` are all inactive, and all
+//! disabled or masked. Anything else, or an answer that
 //! cannot be read, gives [`RESOLVED_USE_HOSTS`]: the daemon writes
 //! `/etc/hosts` lines instead (task M4-18k).
 //!
@@ -140,15 +141,19 @@ const DISABLE: [&str; 3] = ["disable", "--now", UNIT_NAME];
 const STATUS: [&str; 2] = ["status", LINK];
 const VERSION: [&str; 1] = ["--version"];
 /// Each prints one line per unit, whatever its exit code.
-const NETWORKD_ACTIVE: [&str; 3] = [
+/// `systemd-networkd-wait-online.service` requires networkd: enabled, it
+/// starts networkd at boot (review of #125).
+const NETWORKD_ACTIVE: [&str; 4] = [
     "is-active",
     "systemd-networkd.service",
     "systemd-networkd.socket",
+    "systemd-networkd-wait-online.service",
 ];
-const NETWORKD_ENABLED: [&str; 3] = [
+const NETWORKD_ENABLED: [&str; 4] = [
     "is-enabled",
     "systemd-networkd.service",
     "systemd-networkd.socket",
+    "systemd-networkd-wait-online.service",
 ];
 /// The first systemd whose resolved leaves a new link's settings alone
 /// while systemd-networkd looks at it.
@@ -213,6 +218,13 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
         Ok(version) if version >= LINK_BEFORE_250 && !networkd_may_run(system) => version,
         other => {
             let (code, reason) = match other {
+                Ok(version) if version < LINK_BEFORE_250 => (
+                    RESOLVED_USE_HOSTS,
+                    format!(
+                        "systemd {version} is older than {LINK_BEFORE_250}, where Marsa's link \
+                         is not tested, and .test names go into /etc/hosts here instead"
+                    ),
+                ),
                 Ok(version) => (
                     RESOLVED_USE_HOSTS,
                     format!(
@@ -349,8 +361,8 @@ fn server(port: u16) -> String {
 }
 
 /// Whether systemd-networkd may run, now or later: `false` only when its
-/// service and its socket both print `inactive`, and both print `disabled`
-/// or `masked` (review of #125). Exit code 3 alone is not enough: it also
+/// service, its socket, and `systemd-networkd-wait-online` all print
+/// `inactive`, and all print `disabled` or `masked` (review of #125). Exit code 3 alone is not enough: it also
 /// covers `activating` and `failed`, and an inactive networkd that is
 /// enabled starts again at boot, or through its socket. Output that cannot
 /// be read counts as "may run".
@@ -360,7 +372,7 @@ fn networkd_may_run(system: &impl System) -> bool {
         output.code?;
         let text = String::from_utf8_lossy(&output.stdout);
         let words: Vec<String> = text.lines().map(|line| line.trim().to_owned()).collect();
-        (words.len() == 2).then_some(words)
+        (words.len() == 3).then_some(words)
     };
     let inactive = words(&NETWORKD_ACTIVE)
         .is_some_and(|states| states.iter().all(|state| state == "inactive"));
@@ -370,7 +382,8 @@ fn networkd_may_run(system: &impl System) -> bool {
     let off = words(&NETWORKD_ENABLED).is_some_and(|states| {
         states
             .iter()
-            .all(|state| matches!(state.as_str(), "disabled" | "masked" | "masked-runtime"))
+            // Not `masked-runtime`: it is gone after a reboot.
+            .all(|state| matches!(state.as_str(), "disabled" | "masked"))
     });
     !off
 }
@@ -697,10 +710,10 @@ mod tests {
     const RESET_UNIT: &str = "/usr/bin/systemctl reset-failed marsa-dns-link.service";
     const LOOKED: &str = "/usr/bin/resolvectl status marsa0";
     const VERSIONED: &str = "/usr/bin/systemctl --version";
-    const NETWORKD: &str =
-        "/usr/bin/systemctl is-active systemd-networkd.service systemd-networkd.socket";
-    const NETWORKD_ENABLED_CMD: &str =
-        "/usr/bin/systemctl is-enabled systemd-networkd.service systemd-networkd.socket";
+    const NETWORKD: &str = "/usr/bin/systemctl is-active systemd-networkd.service \
+        systemd-networkd.socket systemd-networkd-wait-online.service";
+    const NETWORKD_ENABLED_CMD: &str = "/usr/bin/systemctl is-enabled systemd-networkd.service \
+        systemd-networkd.socket systemd-networkd-wait-online.service";
     /// The mode of files that were there before a test, so a rewrite shows.
     const OLD_MODE: u32 = 0o600;
     const FOREIGN: &[u8] = b"[Unit]\nDescription=someone else's\n";
@@ -815,8 +828,8 @@ mod tests {
                 resolvectl_fails: false,
                 fedora: false,
                 version_line: "systemd 255 (255.4-1ubuntu8)",
-                networkd_active: "active\nactive\n",
-                networkd_enabled: "enabled\nenabled\n",
+                networkd_active: "active\nactive\nactive\n",
+                networkd_enabled: "enabled\nenabled\nenabled\n",
                 wipe_after: Cell::new(None),
                 strict_dot: false,
             };
@@ -990,7 +1003,8 @@ mod tests {
             }
             match line {
                 "--version" => exit(0, &format!("{}\n+PAM +AUDIT +SELINUX\n", self.version_line)),
-                "is-active systemd-networkd.service systemd-networkd.socket" => {
+                "is-active systemd-networkd.service systemd-networkd.socket \
+                 systemd-networkd-wait-online.service" => {
                     let code = if self.networkd_active.starts_with("active") {
                         0
                     } else {
@@ -998,7 +1012,8 @@ mod tests {
                     };
                     exit(code, self.networkd_active)
                 }
-                "is-enabled systemd-networkd.service systemd-networkd.socket" => {
+                "is-enabled systemd-networkd.service systemd-networkd.socket \
+                 systemd-networkd-wait-online.service" => {
                     let code = if self.networkd_enabled.contains("enabled") {
                         0
                     } else {
@@ -1267,8 +1282,8 @@ mod tests {
     fn a_systemd_before_250_without_networkd_gets_the_link() {
         let mut linux = Linux::new();
         linux.version_line = "systemd 249 (249.11-0ubuntu3.12)";
-        linux.networkd_active = "inactive\ninactive\n";
-        linux.networkd_enabled = "disabled\nmasked\n";
+        linux.networkd_active = "inactive\ninactive\ninactive\n";
+        linux.networkd_enabled = "disabled\nmasked\ndisabled\n";
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
         let (bytes, _) = linux.unit_file().unwrap();
         assert_eq!(bytes, unit("/usr/sbin/ip", 18053, true).into_bytes());
@@ -1289,8 +1304,8 @@ mod tests {
         // Before 249 (untested there) the hosts path, whatever networkd does.
         let mut older = Linux::new();
         older.version_line = "systemd 247 (247.3-7+deb11u5)";
-        older.networkd_active = "inactive\ninactive\n";
-        older.networkd_enabled = "disabled\ndisabled\n";
+        older.networkd_active = "inactive\ninactive\ninactive\n";
+        older.networkd_enabled = "disabled\ndisabled\ndisabled\n";
         assert_eq!(code_of(&install(18053, &older)), RESOLVED_USE_HOSTS);
         assert_eq!(older.unit_file(), None);
     }
@@ -1301,13 +1316,28 @@ mod tests {
     #[test]
     fn a_systemd_before_250_with_networkd_that_may_run_gets_hosts() {
         for (active, enabled) in [
-            ("inactive\ninactive\n", "enabled\ndisabled\n"),
-            ("inactive\ninactive\n", "disabled\nenabled\n"),
-            ("inactive\ninactive\n", "static\ndisabled\n"),
-            ("failed\ninactive\n", "disabled\ndisabled\n"),
-            ("activating\ninactive\n", "disabled\ndisabled\n"),
-            ("inactive\n", "disabled\ndisabled\n"),
-            ("inactive\ninactive\n", ""),
+            (
+                "inactive\ninactive\ninactive\n",
+                "enabled\ndisabled\ndisabled\n",
+            ),
+            (
+                "inactive\ninactive\ninactive\n",
+                "disabled\nenabled\ndisabled\n",
+            ),
+            (
+                "inactive\ninactive\ninactive\n",
+                "static\ndisabled\ndisabled\n",
+            ),
+            (
+                "failed\ninactive\ninactive\n",
+                "disabled\ndisabled\ndisabled\n",
+            ),
+            (
+                "activating\ninactive\ninactive\n",
+                "disabled\ndisabled\ndisabled\n",
+            ),
+            ("inactive\n", "disabled\ndisabled\ndisabled\n"),
+            ("inactive\ninactive\ninactive\n", ""),
         ] {
             let mut linux = Linux::new();
             linux.version_line = "systemd 249 (249.11-0ubuntu3.12)";
