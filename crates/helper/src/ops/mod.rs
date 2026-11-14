@@ -4,10 +4,10 @@
 //! An op meant for another OS fails with `op_not_supported`.
 //!
 //! Each pair of macOS ops has its own file, so their tasks do not touch the
-//! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). On
-//! Linux, `resolved` (M4-18a) and `ports` (M4-18b) are written; trust on
-//! Linux and the Windows ops fail with `op_not_implemented` until their
-//! tasks.
+//! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). Linux
+//! has `resolved` (M4-18a), `ports` (M4-18b), and `trust_linux` (M4-18c),
+//! which uses the PEM parser of `trust`. The Windows ops fail with
+//! `op_not_implemented` until their task.
 
 mod marked;
 pub mod pf;
@@ -16,6 +16,7 @@ mod program;
 mod resolved;
 mod resolver;
 mod trust;
+mod trust_linux;
 
 use crate::os::Os;
 use crate::request::{Op, ValidRequest};
@@ -103,7 +104,9 @@ fn handle(op: &Op, os: Os, system: &impl System) -> OpResult {
         Op::ResolvedRemove {} => resolved::remove(system),
         Op::TrustInstall { pem } if os == Os::Macos => trust::install(pem, system),
         Op::TrustRemove {} if os == Os::Macos => trust::remove(system),
-        Op::TrustInstall { .. } | Op::TrustRemove {} => not_implemented(op.name()),
+        // Linux: `supported` keeps the trust ops away from Windows.
+        Op::TrustInstall { pem } => trust_linux::install(pem, system),
+        Op::TrustRemove {} => trust_linux::remove(system),
         // `run` expands `uninstall_all` into its removals, so it never gets
         // here. Windows comes with its own task.
         Op::UninstallAll {} | Op::HostsSync { .. } | Op::HostsRemove {} => {
@@ -161,17 +164,18 @@ mod tests {
             { "op": "pf_install", "http_port": 18080, "https_port": 18443 },
             { "op": "trust_remove" },
         ]);
+        // The fake has no trust tool, so nothing of Marsa's is trusted.
         let expected = [
             ("pf_install", code::OP_NOT_SUPPORTED),
-            ("trust_remove", code::OP_NOT_IMPLEMENTED),
+            ("trust_remove", "unchanged"),
         ];
         assert_eq!(codes(ops, Os::Linux), expected);
     }
 
     #[test]
     fn handle_sends_each_op_to_its_own_handler() {
-        // The fake has no `systemctl`, so on Linux `resolved_install` gets
-        // as far as its own first check. Trust on Linux is still a stub.
+        // The fake has no `systemctl` and no trust tool, so on Linux each op
+        // gets as far as its own first check.
         let ops = json!([
             { "op": "resolver_install", "port": 18053 },
             { "op": "resolved_install", "port": 18053 },
@@ -180,7 +184,7 @@ mod tests {
         let linux = [
             ("resolver_install", code::OP_NOT_SUPPORTED),
             ("resolved_install", resolved::RESOLVED_NOT_RUNNING),
-            ("trust_remove", code::OP_NOT_IMPLEMENTED),
+            ("trust_remove", "unchanged"),
         ];
         assert_eq!(codes(ops.clone(), Os::Linux), linux);
         let macos = codes(ops, Os::Macos);
