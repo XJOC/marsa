@@ -176,6 +176,9 @@ pub struct CaddyManager {
     pub processes: Arc<dyn Processes>,
     /// How long each step of an orphan's stop waits.
     pub ladder: Ladder,
+    /// The program of the last start, so an uninstall never deletes the
+    /// Caddy that runs (task M5-07). Use [`CaddyManager::running_program`].
+    pub started: Mutex<Option<PathBuf>>,
     /// The status and recent lines. Kept across runs, so `seq` never goes
     /// back and the lines of a failed run stay readable.
     runtime: Arc<Mutex<ServiceRuntime>>,
@@ -274,6 +277,7 @@ impl CaddyManager {
             ready_limit: READY_LIMIT,
             processes: Arc::new(SystemProcesses),
             ladder: Ladder::default(),
+            started: Mutex::default(),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(CADDY_ID))),
             busy: AtomicBool::new(false),
             wanted: Mutex::default(),
@@ -353,6 +357,14 @@ impl CaddyManager {
 
     pub fn status(&self) -> ServiceStatus {
         lock(&self.runtime).status.clone()
+    }
+
+    /// The program Caddy runs from now, or `None` while it does not run.
+    pub fn running_program(&self, daemon: &Daemon) -> Option<PathBuf> {
+        if !daemon.proc_alive(CADDY_ID) {
+            return None;
+        }
+        lock(&self.started).clone()
     }
 
     /// The last lines, oldest first.
@@ -459,6 +471,7 @@ impl CaddyManager {
         };
         let logs_dir = daemon.data_dir.join("logs");
         let runtime = Arc::clone(&self.runtime);
+        *lock(&self.started) = Some(spec.program.clone());
         let handle = Supervisor::spawn_on(spec, daemon.events.clone(), &logs_dir, runtime)
             .map_err(|err| {
                 self.fail(err.code(), &daemon.events);

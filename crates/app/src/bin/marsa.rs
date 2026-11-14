@@ -15,6 +15,7 @@ use marsa::cli::runtimes::{self, RuntimesArgs};
 use marsa::cli::services::{self, ServicesArgs};
 use marsa::cli::setup;
 use marsa::cli::sites::{self, SitesCommand};
+use marsa::cli::uninstall::{self, UninstallArgs};
 
 /// Local development runtimes and sites.
 #[derive(Debug, Parser)]
@@ -39,6 +40,9 @@ enum Command {
     /// Make an installed PHP or Node.js version the default: every folder
     /// that sets no version of its own runs it.
     Use(UseArgs),
+    /// Delete an installed version. Marsa refuses a version that is the
+    /// default, that a site is set to, or that the running Caddy uses.
+    Uninstall(UninstallArgs),
     /// Start, stop, or check the Marsa daemon (marsad).
     #[command(subcommand)]
     Daemon(DaemonCommand),
@@ -74,6 +78,7 @@ async fn main() -> ExitCode {
         Command::Install(args) => install::run(args, &data_dir).await,
         Command::Runtimes(args) => runtimes::run(args, &data_dir).await,
         Command::Use(args) => default_version::run(args, &data_dir).await,
+        Command::Uninstall(args) => uninstall::run(args, &data_dir).await,
         Command::Daemon(command) => daemon::run(*command, &data_dir).await,
         Command::Services(args) => services::run(args, &data_dir).await,
         Command::Logs(args) => logs::run(args, &data_dir).await,

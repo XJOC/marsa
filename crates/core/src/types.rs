@@ -173,6 +173,9 @@ pub struct ApiError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorBody {
     pub error: ApiError,
+    /// What uses a version, with the code `version_in_use` only (task M5-07).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_use: Option<VersionInUse>,
 }
 
 impl ErrorBody {
@@ -182,6 +185,7 @@ impl ErrorBody {
                 code: code.into(),
                 message: message.into(),
             },
+            in_use: None,
         }
     }
 }
@@ -275,6 +279,33 @@ pub struct DefaultVersion {
     /// Full semver text (`8.4.23`). A newer `8.4.x` installed later is
     /// picked then.
     pub version: String,
+}
+
+/// The answer to `DELETE /v1/runtimes/{tool}/{version}` (task M5-07): the
+/// version whose folder is gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Uninstalled {
+    pub runtime: Runtime,
+    /// Full semver text (`8.3.12`).
+    pub version: String,
+}
+
+/// Why `DELETE /v1/runtimes/{tool}/{version}` refused a version: the facts
+/// of its 409 `version_in_use`. At least one of the last three is set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionInUse {
+    /// Full semver text (`8.3.12`).
+    pub version: String,
+    /// The default in `global.toml` (`8.3`), when it picks this version now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// The sites whose own setting in `sites.toml` picks this version now, by
+    /// name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sites: Vec<String>,
+    /// Caddy runs from this version now.
+    #[serde(default)]
+    pub caddy: bool,
 }
 
 /// The 202 answer to `POST /v1/runtimes/{tool}/install`. The install's events

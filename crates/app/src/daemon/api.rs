@@ -16,7 +16,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use marsa_core::types::{API_VERSION, ErrorBody, Event, Health};
+use marsa_core::types::{API_VERSION, ErrorBody, Event, Health, VersionInUse};
 use tokio_stream::Stream;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -56,6 +56,9 @@ pub struct HttpError {
     pub code: &'static str,
     /// English, for logs.
     pub message: String,
+    /// The facts of `version_in_use` (task M5-07). Boxed, so every
+    /// `Result<_, HttpError>` stays small.
+    pub in_use: Option<Box<VersionInUse>>,
 }
 
 impl HttpError {
@@ -64,13 +67,16 @@ impl HttpError {
             status,
             code,
             message: message.into(),
+            in_use: None,
         }
     }
 }
 
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
-        (self.status, Json(ErrorBody::new(self.code, self.message))).into_response()
+        let mut body = ErrorBody::new(self.code, self.message);
+        body.in_use = self.in_use.map(|in_use| *in_use);
+        (self.status, Json(body)).into_response()
     }
 }
 
