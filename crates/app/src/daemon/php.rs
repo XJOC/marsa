@@ -44,7 +44,7 @@ use semver::Version;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
-use self::orphan::{Blocked, Found, FpmProcesses, Orphans, PidFile, SystemFpm};
+use self::orphan::{Blocked, FpmProcesses, Orphans, PidFile, SystemFpm};
 use super::caddy::orphan::Ladder;
 use super::caddy::{RESTART, STOP_GRACE};
 use super::state::Daemon;
@@ -490,15 +490,12 @@ impl PhpManager {
             listen: &pool.dial,
             ladder: self.ladder,
         };
-        match orphans.inspect().await? {
-            Found::Nothing => Ok(()),
-            // The master, or the workers it left behind.
-            found => {
-                let runtime = daemon.pools.runtime(pool.files.minor);
-                note(&runtime, &daemon.events, orphan::STOPPING_ORPHAN);
-                orphans.reap(found).await
-            }
-        }
+        // The master, or the workers it left behind.
+        let found = orphans.inspect().await?;
+        let runtime = daemon.pools.runtime(pool.files.minor);
+        // Only right before a signal: a stale file alone stops nothing.
+        let note_stop = || note(&runtime, &daemon.events, orphan::STOPPING_ORPHAN);
+        orphans.reap(found, &note_stop).await
     }
 }
 

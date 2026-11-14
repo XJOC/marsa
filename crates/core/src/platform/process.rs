@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
+use crate::caddy::Dial;
 use crate::orphan::{ChildProcess, Liveness, PidRecord, is_instance_id};
 
 /// Whether the daemon looks for an orphan Caddy before it starts one: macOS
@@ -327,6 +328,42 @@ pub async fn children(_ppid: u32) -> Option<Vec<ChildProcess>> {
     None
 }
 
+/// The processes that hold the listener at `listen` open now: a Unix socket
+/// bound to that path, or a TCP listener on `127.0.0.1:<port>`. A child that
+/// inherited the listener from its parent holds it too, which is what tells
+/// a php-fpm worker from any other process that runs the same file (task
+/// M4-25). A list, never a proof alone: the caller checks each pid with
+/// [`real_identity`] too. macOS asks `/usr/sbin/lsof` once, and in the same
+/// run for the files of this process: if `lsof` does not describe this
+/// process, its answer proves nothing. `None` when it cannot be told: then
+/// nothing is signalled.
+#[cfg(target_os = "macos")]
+pub async fn listener_holders(listen: &Dial) -> Option<Vec<u32>> {
+    let own = std::process::id();
+    let mut lsof = Command::new("/usr/sbin/lsof");
+    // No `-a`: the files of this process, or the sockets asked for.
+    lsof.args(["-nP", "-p", &own.to_string()]);
+    match listen {
+        Dial::Unix(_) => lsof.arg("-U"),
+        Dial::Tcp(port) => {
+            let address = format!("-iTCP@127.0.0.1:{port}");
+            lsof.args([address.as_str(), "-sTCP:LISTEN"])
+        }
+    };
+    lsof.arg("-FptPnT").env("LC_ALL", "C");
+    let out = run_tool(lsof).await?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    crate::orphan::parse_lsof_holders(&text, listen, own)
+}
+
+/// Not known on this system: nothing is signalled. Linux, where `lsof` is
+/// often absent, would read `/proc/net/unix`, `/proc/net/tcp`, and
+/// `/proc/<pid>/fd` (spike S-06b).
+#[cfg(not(target_os = "macos"))]
+pub async fn listener_holders(_listen: &Dial) -> Option<Vec<u32>> {
+    None
+}
+
 /// Who listens on TCP `port`, as `name(pid)`, for messages only: never use it
 /// to pick a pid to signal. macOS asks `/usr/sbin/lsof`.
 #[cfg(target_os = "macos")]
@@ -604,6 +641,37 @@ mod tests {
         child.wait().unwrap();
         let listed = children(std::process::id()).await.expect("the table");
         assert!(listed.iter().all(|c| c.pid != pid), "{listed:?}");
+    }
+
+    // Only macOS lists the holders of a listener (`lsof`).
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn listener_holders_are_the_processes_with_the_socket_or_port_open() {
+        let own = std::process::id();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("php-8.4.sock");
+        let socket = Dial::Unix(path.clone());
+        // Nobody holds it yet: an empty list, which is not `None`.
+        assert_eq!(listener_holders(&socket).await, Some(Vec::new()));
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        // A process that does not hold it is not named.
+        let mut sleeper = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        assert_eq!(listener_holders(&socket).await, Some(vec![own]));
+        sleeper.kill().unwrap();
+        sleeper.wait().unwrap();
+        drop(listener);
+        // The file is still there, and nobody holds the socket.
+        assert!(path.exists());
+        assert_eq!(listener_holders(&socket).await, Some(Vec::new()));
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = Dial::Tcp(listener.local_addr().unwrap().port());
+        assert_eq!(listener_holders(&port).await, Some(vec![own]));
+        drop(listener);
+        assert_eq!(listener_holders(&port).await, Some(Vec::new()));
     }
 
     #[test]

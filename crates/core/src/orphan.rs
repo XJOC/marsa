@@ -18,9 +18,11 @@
 
 use std::cmp::Ordering;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::caddy::Dial;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PidfileState {
@@ -466,6 +468,72 @@ pub fn parse_lsof(text: &str) -> Option<String> {
         }
     }
     Some(format!("{}({})", name.unwrap_or_default(), pid?))
+}
+
+/// Reads `lsof -FptPnT` output (macOS) for the processes that hold the
+/// listener at `listen` open: a Unix socket bound to that very path, or a
+/// TCP socket in the LISTEN state on `127.0.0.1:<port>`. A child that
+/// inherited the listener holds it too. Sorted, each pid once.
+///
+/// `control` is a pid whose files the same `lsof` run was asked for (the
+/// daemon itself). If the output does not describe it, `lsof` did not do its
+/// work, so its answer proves nothing: `None`, which is not "nobody". `lsof`
+/// escapes odd characters in a name, so such a path never matches, and the
+/// check fails closed.
+pub fn parse_lsof_holders(text: &str, listen: &Dial, control: u32) -> Option<Vec<u32>> {
+    /// The fields of one open file.
+    #[derive(Default)]
+    struct OpenFile<'t> {
+        kind: &'t str,
+        protocol: &'t str,
+        name: &'t str,
+        state: &'t str,
+    }
+    let address = match listen {
+        Dial::Tcp(port) => format!("127.0.0.1:{port}"),
+        Dial::Unix(_) => String::new(),
+    };
+    let holds = |file: &OpenFile<'_>| match listen {
+        Dial::Unix(path) => file.kind == "unix" && Path::new(file.name) == path.as_path(),
+        Dial::Tcp(_) => {
+            file.kind == "IPv4"
+                && file.protocol == "TCP"
+                && file.state == "LISTEN"
+                && file.name == address
+        }
+    };
+    let mut holders = Vec::new();
+    let mut described = false;
+    let mut pid = None;
+    let mut file = OpenFile::default();
+    // A `p` line starts a process and an `f` line a file: the file before
+    // either is complete. The `p` added at the end closes the last file.
+    let lines = text.lines().map(|line| line.trim_end_matches('\r'));
+    for line in lines.chain(["p"]) {
+        if line.starts_with(['p', 'f']) {
+            if let Some(pid) = pid
+                && holds(&file)
+                && !holders.contains(&pid)
+            {
+                holders.push(pid);
+            }
+            file = OpenFile::default();
+        }
+        if let Some(value) = line.strip_prefix('p') {
+            pid = value.parse::<u32>().ok();
+            described |= pid == Some(control);
+        } else if let Some(value) = line.strip_prefix('t') {
+            file.kind = value;
+        } else if let Some(value) = line.strip_prefix('P') {
+            file.protocol = value;
+        } else if let Some(value) = line.strip_prefix('n') {
+            file.name = value;
+        } else if let Some(value) = line.strip_prefix("TST=") {
+            file.state = value;
+        }
+    }
+    holders.sort_unstable();
+    described.then_some(holders)
 }
 
 #[cfg(test)]
@@ -983,5 +1051,60 @@ mod tests {
         );
         assert_eq!(parse_lsof(""), None);
         assert_eq!(parse_lsof("cnginx\n"), None);
+    }
+
+    #[test]
+    fn lsof_holders_of_a_socket_are_the_pids_with_that_very_socket_open() {
+        let socket = Dial::Unix(PathBuf::from("/data/a b/run/php-8.4.sock"));
+        // Two workers inherited the socket. Pid 500 holds another pool's
+        // socket, pid 600 a plain file of that name, pid 601 a connection,
+        // and pid 7 is the daemon that asked.
+        let out = "p4302\nf7\ntunix\nn/data/a b/run/php-8.4.sock\n\
+                   f8\ntunix\nn/data/a b/run/php-8.4.sock\n\
+                   p4301\nf0\ntunix\nn->0x66963a7f3f40cd83\n\
+                   f3\ntunix\nn/data/a b/run/php-8.4.sock\n\
+                   p500\nf3\ntunix\nn/data/a b/run/php-8.3.sock\n\
+                   p600\nf4\ntREG\nn/data/a b/run/php-8.4.sock\n\
+                   p601\nf5\ntunix\nn->0x66963a7f3f40cd84\n\
+                   p7\nfcwd\ntDIR\nn/\n";
+        let holders = parse_lsof_holders(out, &socket, 7);
+        assert_eq!(holders, Some(vec![4301, 4302]));
+        // Nobody holds it: an empty list, since `lsof` described the daemon.
+        let other = Dial::Unix(PathBuf::from("/data/a b/run/php-8.2.sock"));
+        assert_eq!(parse_lsof_holders(out, &other, 7), Some(Vec::new()));
+        // The last file of the output counts too.
+        let last = "p7\nfcwd\ntDIR\nn/\np4301\nf3\ntunix\nn/data/a b/run/php-8.4.sock";
+        assert_eq!(parse_lsof_holders(last, &socket, 7), Some(vec![4301]));
+        // Without the daemon in it, the output proves nothing.
+        assert_eq!(parse_lsof_holders(out, &socket, 8), None);
+        assert_eq!(parse_lsof_holders("", &socket, 7), None);
+    }
+
+    #[test]
+    fn lsof_holders_of_a_port_are_the_tcp_listeners_on_localhost() {
+        let port = Dial::Tcp(9084);
+        let listener = |pid: u32| {
+            format!("p{pid}\nf4\ntIPv4\nPTCP\nn127.0.0.1:9084\nTST=LISTEN\nTQR=0\nTQS=0\n")
+        };
+        // After the two listeners: UDP on the same address, a connection to
+        // the port, another port, IPv6, every address, and a closed socket.
+        let others = "p500\nf4\ntIPv4\nPUDP\nn127.0.0.1:9084\n\
+                      p501\nf5\ntIPv4\nPTCP\nn127.0.0.1:50000->127.0.0.1:9084\nTST=ESTABLISHED\n\
+                      p502\nf6\ntIPv4\nPTCP\nn127.0.0.1:9085\nTST=LISTEN\n\
+                      p503\nf7\ntIPv6\nPTCP\nn[::1]:9084\nTST=LISTEN\n\
+                      p504\nf8\ntIPv4\nPTCP\nn*:9084\nTST=LISTEN\n\
+                      p505\nf9\ntIPv4\nPTCP\nn127.0.0.1:9084\nTST=CLOSED\n\
+                      p7\nfcwd\ntDIR\nn/\n";
+        let out = format!("{}{}{others}", listener(4302), listener(4301));
+        assert_eq!(parse_lsof_holders(&out, &port, 7), Some(vec![4301, 4302]));
+        let free = Dial::Tcp(9086);
+        assert_eq!(parse_lsof_holders(&out, &free, 7), Some(Vec::new()));
+        assert_eq!(parse_lsof_holders(&out, &port, 8), None);
+        // The fields of one file never carry over to the next.
+        let split = "p7\nf4\ntIPv4\nPTCP\nTST=LISTEN\nf5\ntIPv4\nPTCP\nn127.0.0.1:9084\n";
+        assert_eq!(parse_lsof_holders(split, &port, 7), Some(Vec::new()));
+        // A socket path is no port, and a port no socket path.
+        let socket = Dial::Unix(PathBuf::from("127.0.0.1:9084"));
+        assert_eq!(parse_lsof_holders(&out, &socket, 7), Some(Vec::new()));
     }
 }
