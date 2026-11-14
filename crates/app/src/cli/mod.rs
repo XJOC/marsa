@@ -8,6 +8,7 @@
 pub mod autostart;
 pub mod daemon;
 pub mod default_version;
+pub mod doctor;
 pub mod install;
 pub mod logs;
 pub mod progress;
