@@ -350,8 +350,8 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         ),
         "setup_not_authorized" => "macOS did not give Marsa admin rights, so nothing was \
              changed. The password was not accepted, or the prompt could not open (over SSH, \
-             for example). Run \"marsa setup\" again on your desktop and enter the password of \
-             an administrator account."
+             for example). Run \"marsa daemon stop\", then run \"marsa setup\" again in \
+             Terminal on your desktop and enter the password of an administrator account."
             .into(),
         "setup_helper_missing" => "The marsa-helper program is not next to marsad, so nothing \
              was changed. Reinstall Marsa, then try again."
@@ -363,8 +363,9 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             .into(),
         "setup_helper_protected_folder" => "marsa-helper is inside Desktop, Documents, or \
              Downloads, and macOS keeps the admin part of Marsa out of those folders, so \
-             nothing was changed. Move Marsa's programs to \
-             ~/Library/Application Support/dev.marsa.Marsa/bin, then run \"marsa setup\" again."
+             nothing was changed. Run \"marsa daemon stop\", move Marsa's programs to \
+             ~/Library/Application Support/dev.marsa.Marsa/bin, then run \"marsa setup\" from \
+             there."
             .into(),
         "setup_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the result \
              of setup is not known. Run \"marsa setup\" again; if it repeats, report it with \
@@ -417,10 +418,10 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              Run \"marsa setup\" again; if it repeats, report it."
             .into(),
         "pf_helper_unreadable" => "The admin part of Marsa could not read marsa-helper, so \
-             ports 80 and 443 were not redirected. If Marsa's programs are in Desktop, \
-             Documents, or Downloads, move them to \
+             ports 80 and 443 were not redirected. Run \"marsa daemon stop\" first. If \
+             Marsa's programs are in Desktop, Documents, or Downloads, move them to \
              ~/Library/Application Support/dev.marsa.Marsa/bin; otherwise reinstall Marsa. \
-             Then run \"marsa setup\" again."
+             Then run \"marsa setup\" from there."
             .into(),
 
         // `marsa autostart`: the autostart route (task M5-03).
@@ -669,8 +670,9 @@ pub fn unsecured(url: &str) -> String {
 /// On stderr before the call, which may wait for the admin prompt and then
 /// for the trust dialog. On macOS only: other systems get
 /// `setup_not_supported` and no prompt.
-pub const SETUP_STARTED: &str = "Setting up Marsa. macOS asks for an administrator password, \
-     then asks you to approve trusting Marsa's certificate authority for your user.";
+pub const SETUP_STARTED: &str = "Setting up Marsa. macOS may ask for an administrator \
+     password, and may then ask you to approve trusting Marsa's certificate authority for your \
+     user.";
 /// After Marsa stopped waiting for the helper, which may still have run.
 const SETUP_MAY_HAVE_RUN: &str = "Some steps may already have run with admin rights. Running \
      \"marsa setup\" again is safe: each step checks what is already done.";

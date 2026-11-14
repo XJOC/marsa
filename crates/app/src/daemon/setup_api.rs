@@ -584,8 +584,8 @@ impl Setup {
             );
             let message = format!(
                 "marsa-helper is inside {}, a folder macOS protects, so root could not read \
-                 it to set up the boot job; move Marsa to {INSTALL_BIN} and run \"marsa \
-                 setup\" again",
+                 it to set up the boot job; run \"marsa daemon stop\", move Marsa to \
+                 {INSTALL_BIN}, and run \"marsa setup\" from there",
                 folder.display()
             );
             return Err(failure("setup_helper_protected_folder", message));
@@ -1474,6 +1474,10 @@ mod tests {
             .join("login.keychain-db");
         let keychain = keychain.to_str().unwrap();
         let security = fake.security_calls();
+        // The absolute program, written out: `RealRunner` refuses a bare
+        // name, so a constant that lost its path would fail only on a Mac.
+        assert_eq!(security[0].program, "/usr/bin/security");
+        assert_eq!(security[1].program, "/usr/bin/security");
         assert_eq!(security[0].args, ["verify-cert", "-c", ca_root, "-L", "-l"]);
         assert_eq!(security[0].limit, Duration::from_secs(10));
         assert_eq!(
@@ -1677,7 +1681,7 @@ mod tests {
 
             let error = report.error.as_ref().expect(folder);
             assert_eq!(error.code, "setup_helper_protected_folder", "{folder}");
-            for part in [folder, INSTALL_BIN, "marsa setup"] {
+            for part in [folder, INSTALL_BIN, "marsa daemon stop", "marsa setup"] {
                 assert!(error.message.contains(part), "{folder}: {}", error.message);
             }
             assert!(report.results.is_empty(), "{folder}");

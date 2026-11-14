@@ -146,7 +146,7 @@ fn install_files(
         let advice = if err.kind() == io::ErrorKind::PermissionDenied {
             format!(
                 ". macOS keeps root out of the Desktop, Documents, and Downloads folders: \
-                 run Marsa from {INSTALL_BIN}"
+                 run \"marsa daemon stop\", then run Marsa from {INSTALL_BIN}"
             )
         } else {
             String::new()
@@ -806,8 +806,8 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         mac.fake.fail_reads.insert(exe.clone());
         let message = format!(
             "cannot read {} to copy it to {COPY}: permission denied. macOS keeps root out of \
-             the Desktop, Documents, and Downloads folders: run Marsa from \
-             ~/Library/Application Support/dev.marsa.Marsa/bin",
+             the Desktop, Documents, and Downloads folders: run \"marsa daemon stop\", then \
+             run Marsa from ~/Library/Application Support/dev.marsa.Marsa/bin",
             exe.display()
         );
         let expected = OpResult::failed(INSTALL, PF_HELPER_UNREADABLE, message);
