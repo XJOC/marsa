@@ -18,6 +18,9 @@
 //! sync task (`sites_sync`) last gave [`CaddyManager::apply`]. While Caddy
 //! runs, each change goes to its admin API (`POST /load`), so Caddy changes
 //! without a restart (task M4-11). The ports stay the same: no new listener.
+//!
+//! When `marsad` starts, [`start_at_launch`] starts an installed Caddy in the
+//! background, through the same start (task M5-16).
 
 pub mod orphan;
 
@@ -646,6 +649,118 @@ impl CaddyManager {
     /// the status then.
     fn fail(&self, code: &str, events: &broadcast::Sender<Event>) {
         set_failed(&self.runtime, events, code);
+    }
+}
+
+/// How the start of Caddy with the daemon ended (task M5-16).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Launched {
+    /// No Caddy is installed: nothing was tried, and the status is unchanged.
+    NotInstalled,
+    /// The start ran. Caddy's status after it: `Running`, or `Failed` with
+    /// the reason.
+    Ran(ServiceStatus),
+    /// Another action on Caddy ran first, a request for example. It decides.
+    Busy,
+    /// The start failed before Caddy ran, with this code. The status is
+    /// `Failed` with the same code.
+    Failed(&'static str),
+    /// The daemon began to stop first, and the start was dropped. A Caddy it
+    /// spawned is in `Daemon::procs`, so the shutdown stops it.
+    ShuttingDown,
+}
+
+/// The start of Caddy with the daemon. Its task ends after the start, or at
+/// once when the daemon's shutdown token is cancelled.
+#[derive(Debug)]
+pub struct Launch {
+    task: JoinHandle<Launched>,
+}
+
+impl Launch {
+    /// Waits for the start to end, at most `limit`, then aborts it. `None`
+    /// when it did not end in time or its task failed.
+    pub async fn wait(self, limit: Duration) -> Option<Launched> {
+        let abort = self.task.abort_handle();
+        match tokio::time::timeout(limit, self.task).await {
+            Ok(Ok(launched)) => Some(launched),
+            Ok(Err(err)) => {
+                warn!(error = %err, "the start of caddy with the daemon failed");
+                None
+            }
+            Err(_) => {
+                warn!(
+                    ?limit,
+                    "the start of caddy with the daemon still runs; aborting it"
+                );
+                abort.abort();
+                None
+            }
+        }
+    }
+}
+
+/// Starts Caddy in the background when it is installed (task M5-16), so the
+/// sites answer after a reboot or a `marsa daemon stop` with no step by hand.
+/// The path of `marsa services start caddy`: [`CaddyManager::run`], with the
+/// orphan check (ADR 0009) and the busy flag, so a request meanwhile gets
+/// `service_busy` and never starts a second Caddy. The API serves meanwhile.
+///
+/// The config is the latest that the sites sync gave
+/// [`CaddyManager::apply`]: `start` and `apply` take turns on `pushing`, so a
+/// pass that comes after the start sends its config with `POST /load`. Caddy's
+/// `Running` also asks for a pass.
+///
+/// A shutdown drops the start at its next `.await`. The spawn of Caddy and
+/// `add_proc` have no `.await` between them, so a Caddy it spawned is in
+/// `Daemon::procs`, which the shutdown stops; `server::run` sweeps `procs`
+/// again at its end for one added after the first sweep. A Caddy that the
+/// start was stopping after a time-out was told to stop before that `.await`.
+/// `kill_on_drop` is the last guard, as for every Caddy.
+pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
+    let daemon = Arc::clone(daemon);
+    let task = tokio::spawn(async move {
+        tokio::select! {
+            // A daemon that already stops starts nothing.
+            biased;
+            () = daemon.shutdown.cancelled() => Launched::ShuttingDown,
+            launched = launch(&daemon) => launched,
+        }
+    });
+    Launch { task }
+}
+
+async fn launch(daemon: &Daemon) -> Launched {
+    let caddy = &daemon.caddy;
+    // First, so a missing Caddy does not mark Caddy's status failed.
+    if !caddy.installed() {
+        info!("no caddy is installed; it does not start with the daemon");
+        return Launched::NotInstalled;
+    }
+    info!("starting caddy with the daemon");
+    match caddy.run(daemon, ServiceAction::Start).await {
+        Ok(status) => {
+            match &status.state {
+                ServiceState::Running => info!("caddy started with the daemon"),
+                // `marsa services` and `marsa doctor` show the code too.
+                ServiceState::Failed { code } => {
+                    warn!(%code, "caddy did not start with the daemon");
+                }
+                state => warn!(
+                    ?state,
+                    "caddy is not running after its start with the daemon"
+                ),
+            }
+            Launched::Ran(status)
+        }
+        Err(ActionError::Busy) => {
+            info!("another action on caddy runs; it decides instead of the start with the daemon");
+            Launched::Busy
+        }
+        Err(err) => {
+            warn!(code = err.code(), %err, "caddy did not start with the daemon");
+            Launched::Failed(err.code())
+        }
     }
 }
 

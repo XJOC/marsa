@@ -1,6 +1,7 @@
 //! Start-up and shutdown: lock file, bind, `run/daemon.json`, serve. Task M3-06.
 //! The DNS server for `.test` starts and stops with it (task M4-12), and so
-//! does the parked folder watcher (task M4-10d).
+//! does the parked folder watcher (task M4-10d). An installed Caddy starts
+//! with it too (task M5-16).
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -24,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use super::api;
 use super::auth::AuthConfig;
 use super::autostart_api::Autostart;
+use super::caddy;
 use super::dns;
 use super::sites_sync;
 use super::state::Daemon;
@@ -37,6 +39,9 @@ const DRAIN_LIMIT: Duration = Duration::from_secs(5);
 const DNS_STOP_LIMIT: Duration = Duration::from_secs(2);
 /// How long shutdown waits for the parked folder watcher.
 const WATCH_STOP_LIMIT: Duration = Duration::from_secs(2);
+/// How long shutdown waits for the start of Caddy with the daemon. It ends at
+/// once at the shutdown token.
+const LAUNCH_STOP_LIMIT: Duration = Duration::from_secs(2);
 /// How long a busy `run/daemon.lock` is tried again before giving up. A
 /// client probes it with a short shared lock every 50 ms; a probe must not
 /// make a starting daemon exit.
@@ -121,6 +126,10 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     }
     // From here on, PHP pools and Caddy's config follow the sites (task M4-11).
     let sync = sites_sync::start(&daemon);
+    // An installed Caddy starts in the background (task M5-16). After the
+    // sync task subscribed, so Caddy's `Running` asks it for a pass. A
+    // failure is only a warning and Caddy's status: the daemon runs on.
+    let launch = caddy::start_at_launch(&daemon);
     // After the first build, so it starts from its parked folders. It stops
     // when `daemon.shutdown` is cancelled.
     let watcher = watch::start(&daemon);
@@ -128,12 +137,17 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     // port in use is only a warning: the daemon runs on without it.
     let dns = dns::start_for_daemon(&daemon.shutdown).await;
     let app = api::router(daemon.clone(), auth);
-    let result = serve(listener, app, daemon, signal).await;
+    let result = serve(listener, app, Arc::clone(&daemon), signal).await;
     // The watcher first: it is what asks the sync task for passes.
     if let Some(watcher) = watcher {
         watcher.stop(WATCH_STOP_LIMIT).await;
     }
     sync.stop().await;
+    launch.wait(LAUNCH_STOP_LIMIT).await;
+    // A pool or a Caddy that one of these tasks put in `procs` after the
+    // shutdown's own sweep: `add_proc` told it to stop, and this waits for it.
+    // The map is empty otherwise, and this returns at once.
+    daemon.stop_procs(PROCS_LIMIT).await;
     // Before the lock goes, so the next daemon finds the DNS port free.
     if let Some(dns) = dns {
         dns.stop(DNS_STOP_LIMIT).await;

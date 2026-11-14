@@ -10,7 +10,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use marsa_core::platform::daemon_file::{daemon_authority, daemon_file_path, read_daemon_file};
-use marsa_core::types::{API_VERSION, ErrorBody, Event, Health};
+use marsa_core::types::{API_VERSION, ErrorBody, Event, Health, ServiceState, ServiceStatus};
 use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use tempfile::TempDir;
@@ -181,6 +181,38 @@ async fn the_start_deletes_unfinished_uninstalls() {
         .map(|entry| entry.expect("an entry").file_name())
         .collect();
     assert_eq!(names, ["8.3.12"]);
+}
+
+/// The start looks for a Caddy to start (task M5-16). None is installed
+/// here: the log says so, and Caddy stays `stopped`, not `failed`. With a
+/// Caddy installed it would take Marsa's own ports, so `tests/services.rs`
+/// tests that start on free ports, in process.
+#[tokio::test]
+async fn the_start_without_caddy_starts_none_and_fails_nothing() {
+    let marsad = Marsad::start().await;
+    let started = Instant::now();
+    while !marsad
+        .log()
+        .contains("no caddy is installed; it does not start with the daemon")
+    {
+        assert!(
+            started.elapsed() < LIMIT,
+            "no word about caddy; log:\n{}",
+            marsad.log()
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    let response = client()
+        .get(marsad.url("/v1/services"))
+        .header(AUTHORIZATION, &marsad.bearer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let services: Vec<ServiceStatus> = response.json().await.unwrap();
+    let caddy = services.iter().find(|service| service.id == "caddy");
+    let caddy = caddy.expect("caddy is listed");
+    assert_eq!((&caddy.state, caddy.pid), (&ServiceState::Stopped, None));
 }
 
 #[tokio::test]
