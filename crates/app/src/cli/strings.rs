@@ -193,6 +193,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "version_in_use" => "This version is in use: it is a default, a site is set to it, \
              or Caddy runs from it. Nothing was uninstalled."
             .into(),
+        // M5-19: the only PHP and the default, and sites run it.
+        "sites_lose_php" => "This is the only PHP version installed, and sites run it: they \
+             would have no PHP. Install another PHP version and make it the default first. \
+             Nothing was uninstalled."
+            .into(),
         "version_ambiguous" => format!(
             "{} matches more than one installed {}version. Name one in full; \"marsa \
              runtimes{}\" lists them.",
@@ -739,8 +744,8 @@ pub fn nothing_to_uninstall(runtime: Runtime, requested: &str) -> String {
     )
 }
 
-/// `version_in_use` with its facts: one sentence for each use, each with
-/// what to do first.
+/// `version_in_use` or `sites_lose_php` with its facts: one sentence for
+/// each use, each with what to do first.
 pub fn version_in_use(runtime: Runtime, in_use: &VersionInUse) -> String {
     let name = runtime_name(runtime);
     let version = &in_use.version;
@@ -767,6 +772,19 @@ pub fn version_in_use(runtime: Runtime, in_use: &VersionInUse) -> String {
             " The sites {} are set to it: give them another version first.",
             sites.join(", ")
         )),
+    }
+    let left = match &in_use.sites_left_without_php[..] {
+        [] => None,
+        [site] => Some(format!("The site {site}")),
+        sites => Some(format!("The sites {}", sites.join(", "))),
+    };
+    if let Some(left) = left {
+        let tool = runtime.dir_name();
+        text.push_str(&format!(
+            " {left} would have no {name}: {name} {version} is the only {name} installed. \
+             Install another version first with \"marsa install {tool} <version>\", then make \
+             it the default with \"marsa use {tool} <version>\"."
+        ));
     }
     if in_use.caddy {
         text.push_str(" Caddy runs from it: stop Caddy first with \"marsa services stop caddy\".");
@@ -1446,8 +1464,9 @@ mod tests {
         // `PUT /v1/runtimes/{tool}/default` (task M5-01).
         "version_not_installed",
         "no_default_version",
-        // `DELETE /v1/runtimes/{tool}/{version}` (task M5-07).
+        // `DELETE /v1/runtimes/{tool}/{version}` (tasks M5-07 and M5-19).
         "version_in_use",
+        "sites_lose_php",
         "version_ambiguous",
         "uninstall_io",
         "recipe_invalid",
@@ -1629,7 +1648,14 @@ mod tests {
             },
             ClientError::InUse {
                 message: "x".into(),
-                in_use: VersionInUse::default(),
+                in_use: Box::default(),
+            },
+            ClientError::InUse {
+                message: "x".into(),
+                in_use: Box::new(VersionInUse {
+                    sites_left_without_php: vec!["blog".into()],
+                    ..VersionInUse::default()
+                }),
             },
             ClientError::DaemonFile(DaemonFileError::Missing { path: path() }),
             ClientError::DaemonFile(DaemonFileError::Invalid {
