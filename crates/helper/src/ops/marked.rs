@@ -44,15 +44,16 @@ pub fn current(system: &impl System, path: &Path) -> Current {
     }
     match system.read(path, MAX_BYTES) {
         Ok(bytes) if is_ours(&bytes) => Current::Ours(bytes),
-        // `read` follows symlinks, so a dangling link also says `NotFound`.
-        // `exists` does not follow them: a link there is someone else's.
+        // The second guard, for a link that appeared after the check above:
+        // `read` follows it, so a dangling one also says `NotFound`, while
+        // `exists` does not follow it.
         Err(err) if err.kind() == io::ErrorKind::NotFound && !system.exists(path) => {
             Current::Missing
         }
         // Fail safe: anything the helper cannot read in full is never
         // changed. `InvalidData` is a file over the limit and `InvalidInput`
-        // is not a regular file (`System::read`); a dangling link is
-        // `NotFound` with something at the path.
+        // is not a regular file (`System::read`); a link that appeared
+        // after the check is `NotFound` with something at the path.
         Ok(_) => Current::Foreign,
         Err(err) => match err.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => {
