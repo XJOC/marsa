@@ -121,6 +121,17 @@ const REMOVE: &str = "resolved_remove";
 /// `resolved_install`: names under `.test`, and only them, go to
 /// `127.0.0.1:<port>`.
 pub fn install(port: u16, system: &impl System) -> OpResult {
+    // The global drop-in first, whatever else fails: while it is there,
+    // every name reaches the port.
+    let dropped = match drop_old(system) {
+        Ok(dropped) => dropped,
+        Err((code, message)) => return OpResult::failed(INSTALL, code, message),
+    };
+    let nothing_else = if dropped {
+        "so only Marsa's old global setting was removed"
+    } else {
+        "so nothing was changed"
+    };
     let current = match marked::current(system, Path::new(UNIT_FILE)) {
         Current::Foreign => {
             // The path only: the content of another tool's file stays out.
@@ -132,17 +143,6 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
         }
         Current::Ours(bytes) => Some(bytes),
         Current::Missing => None,
-    };
-    // The global drop-in first, whatever else fails: while it is there,
-    // every name reaches the port.
-    let dropped = match drop_old(system) {
-        Ok(dropped) => dropped,
-        Err((code, message)) => return OpResult::failed(INSTALL, code, message),
-    };
-    let nothing_else = if dropped {
-        "so only Marsa's old global setting was removed"
-    } else {
-        "so nothing was changed"
     };
     let not_running = match running(system) {
         Ok(true) => None,
@@ -1112,6 +1112,16 @@ mod tests {
             assert_eq!(linux.unit_file(), Some((bytes, OLD_MODE)));
             assert!(linux.commands().is_empty());
         }
+    }
+
+    /// A foreign unit stops the install, but the old drop-in goes first.
+    #[test]
+    fn a_foreign_unit_still_lets_the_old_drop_in_go() {
+        let linux = Linux::with_unit(FOREIGN).with_drop_in();
+        assert_eq!(code_of(&install(18053, &linux)), RESOLVED_FOREIGN);
+        assert_eq!(linux.file(DROP_IN), None);
+        assert_eq!(linux.unit_file(), Some((FOREIGN.to_vec(), OLD_MODE)));
+        assert_eq!(linux.commands(), [ACTIVE, RESET, RESTARTED]);
     }
 
     #[test]
