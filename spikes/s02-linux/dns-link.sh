@@ -193,8 +193,21 @@ run "$IP" route show table all dev marsa0
 result L4 "routes that the address adds" "$("$IP" route show table all dev marsa0 | tr '\n' ';')"
 restart_resolved
 result L4 "after a restart of resolved: marsa0 dns / domain" "$(resolvectl dns marsa0 | cut -d: -f2- | xargs) / $(resolvectl domain marsa0 | cut -d: -f2- | xargs)"
+since=$(date '+%Y-%m-%d %H:%M:%S')
 run sudo systemctl restart marsa-dns-link.service
-result L4 "after a restart of the unit: $SITE" "$(sudo resolvectl flush-caches; address_of "$SITE")"
+result L4 "after a restart of the unit, at once: $SITE" "$(sudo resolvectl flush-caches; address_of "$SITE")"
+run resolvectl status marsa0 --no-pager
+run "$IP" -brief addr show marsa0
+# How long until resolved routes .test through the new marsa0, if ever.
+waited=none
+for i in $(seq 1 30); do
+  sudo resolvectl flush-caches
+  if [ "$(address_of "$SITE")" = 127.0.0.1 ]; then waited="$((i / 2)).$((i % 2 * 5)) s"; break; fi
+  sleep 0.5
+done
+result L4 "after a restart of the unit: $SITE works after" "$waited (of 15 s)"
+run resolvectl status marsa0 --no-pager
+run sudo journalctl -u systemd-resolved -u marsa-dns-link --since "$since" --no-pager
 run sudo systemctl stop marsa-dns-link.service
 result L4 "after the unit stops: marsa0, $SITE" "$("$IP" link show marsa0 >/dev/null 2>&1 && echo present || echo gone), $(sudo resolvectl flush-caches; address_of "$SITE")"
 run sudo systemctl disable marsa-dns-link.service
