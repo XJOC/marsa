@@ -306,14 +306,47 @@ pub fn current_user_sid() -> io::Result<String> {
 }
 
 /// What a program run through the UAC prompt gave.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Elevated {
     /// It ran and ended with this exit code.
     Exited(u32),
     /// The user said no at the prompt.
     Cancelled,
-    /// It still ran at the limit, and runs on.
-    TimedOut,
+    /// It still runs at the limit. The caller may wait more, and must not
+    /// start it again meanwhile.
+    TimedOut(ElevatedProcess),
+}
+
+/// A program started through the UAC prompt that still runs.
+#[derive(Debug)]
+pub struct ElevatedProcess(OwnedHandle);
+
+impl ElevatedProcess {
+    /// Waits up to `limit` more: `Some(code)` once it has ended, `None` if
+    /// it still runs.
+    ///
+    /// # Errors
+    ///
+    /// The Win32 error of the wait or of the exit code.
+    pub fn wait(&self, limit: Duration) -> io::Result<Option<u32>> {
+        // `u32::MAX` is `INFINITE`.
+        let millis =
+            u32::try_from(limit.as_millis()).map_or(u32::MAX - 1, |ms| ms.min(u32::MAX - 1));
+        // SAFETY: the handle is the open process this struct owns.
+        match unsafe { WaitForSingleObject(self.0.as_raw_handle(), millis) } {
+            WAIT_OBJECT_0 => {
+                let mut code = 0;
+                // SAFETY: the handle is the open process, and `code` a valid
+                // out pointer.
+                if unsafe { GetExitCodeProcess(self.0.as_raw_handle(), &mut code) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(Some(code))
+            }
+            WAIT_TIMEOUT => Ok(None),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
 }
 
 /// Runs `program` with `args` as an administrator, through the UAC prompt
@@ -321,14 +354,16 @@ pub enum Elevated {
 /// to end. For the helper's `install` and `uninstall` (ADR 0018).
 ///
 /// Blocking: `ShellExecuteExW` returns once the user has answered the
-/// prompt, which has no limit of its own, so call it from a blocking
-/// thread. The elevated program's output is not available; its exit code
-/// is the answer. Its window, if any, is hidden.
+/// prompt, which has no limit of its own and which `limit` does not cover,
+/// so call it from a blocking thread. The elevated program's output is not
+/// available; its exit code is the answer. Its window, if any, is hidden;
+/// the prompt itself is drawn by Windows and is not.
 ///
 /// # Errors
 ///
-/// `InvalidInput` for a program that is not an absolute `.exe` path, or for
-/// an argument with a NUL; otherwise the Win32 error.
+/// `InvalidInput` for a program that is not an absolute `.exe` path or
+/// whose path holds a quote, or for an argument with a NUL; otherwise the
+/// Win32 error. An error means the program did not start.
 pub fn run_elevated(program: &Path, args: &[&OsStr], limit: Duration) -> io::Result<Elevated> {
     /// `SW_HIDE`.
     const HIDE: i32 = 0;
@@ -343,19 +378,24 @@ pub fn run_elevated(program: &Path, args: &[&OsStr], limit: Duration) -> io::Res
         append_arg(&mut parameters, arg)?;
     }
     parameters.push(0);
-    // SAFETY: an all-zero `SHELLEXECUTEINFOW` is valid (null pointers, no
-    // flags); the fields that matter are set below.
-    let mut info: SHELLEXECUTEINFOW = unsafe { zeroed() };
-    info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
-    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
-    info.lpVerb = verb.as_ptr();
-    info.lpFile = file.as_ptr();
-    info.lpParameters = parameters.as_ptr();
-    info.nShow = HIDE;
-    // SAFETY: COM for this thread, as `ShellExecuteExW` asks; undone below
-    // only if this call set it up (`RPC_E_CHANGED_MODE`: it was there).
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        lpVerb: verb.as_ptr(),
+        lpFile: file.as_ptr(),
+        lpParameters: parameters.as_ptr(),
+        nShow: HIDE,
+        ..SHELLEXECUTEINFOW::default()
+    };
+    // COM for this thread, as `ShellExecuteExW` asks. A failure stops here,
+    // before any prompt; `RPC_E_CHANGED_MODE` means the thread has COM
+    // already, in another mode, which serves as well.
     let mode = (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).cast_unsigned();
+    // SAFETY: the reserved pointer is null, as the function requires.
     let com = unsafe { CoInitializeEx(null(), mode) };
+    if com < 0 && com != RPC_E_CHANGED_MODE {
+        return Err(io::Error::from_raw_os_error(com));
+    }
     // SAFETY: `info` and the three strings it points to live through the
     // call; the strings are NUL-terminated.
     let launched = unsafe { ShellExecuteExW(&mut info) };
@@ -363,8 +403,6 @@ pub fn run_elevated(program: &Path, args: &[&OsStr], limit: Duration) -> io::Res
     if com >= 0 {
         // SAFETY: pairs the successful `CoInitializeEx` above.
         unsafe { CoUninitialize() };
-    } else if com != RPC_E_CHANGED_MODE {
-        return Err(io::Error::from_raw_os_error(com));
     }
     if launched == 0 {
         if launch_error.raw_os_error() == Some(ERROR_CANCELLED as i32) {
@@ -377,23 +415,11 @@ pub fn run_elevated(program: &Path, args: &[&OsStr], limit: Duration) -> io::Res
     }
     // SAFETY: with `SEE_MASK_NOCLOSEPROCESS` the process handle is the
     // caller's to close; it is owned from here.
-    let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
-    // `u32::MAX` is `INFINITE`.
-    let millis = u32::try_from(limit.as_millis()).map_or(u32::MAX - 1, |ms| ms.min(u32::MAX - 1));
-    // SAFETY: the handle is the open process.
-    match unsafe { WaitForSingleObject(process.as_raw_handle(), millis) } {
-        WAIT_OBJECT_0 => {
-            let mut code = 0;
-            // SAFETY: the handle is the open process, and `code` a valid out
-            // pointer.
-            if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(Elevated::Exited(code))
-        }
-        WAIT_TIMEOUT => Ok(Elevated::TimedOut),
-        _ => Err(io::Error::last_os_error()),
-    }
+    let process = ElevatedProcess(unsafe { OwnedHandle::from_raw_handle(info.hProcess) });
+    Ok(match process.wait(limit)? {
+        Some(code) => Elevated::Exited(code),
+        None => Elevated::TimedOut(process),
+    })
 }
 
 /// `text` as NUL-terminated UTF-16.

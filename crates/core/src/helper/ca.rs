@@ -12,11 +12,18 @@ use sha2::{Digest, Sha256};
 
 const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
 const END: &str = "-----END CERTIFICATE-----";
+/// The largest `pem` the helper takes in a request (`request.rs`).
+const MAX_PEM_BYTES: usize = 16 * 1024;
 
 /// The SHA-256 of the DER of the one certificate in `pem`, upper-case hex;
 /// `None` if `pem` is not exactly one certificate, which the helper refuses
 /// too.
 pub fn certificate_sha256(pem: &str) -> Option<String> {
+    // The helper refuses a larger `pem` in any request, so no hash of one
+    // could ever be used.
+    if pem.len() > MAX_PEM_BYTES {
+        return None;
+    }
     let der = parse_pem(pem)?;
     Some(
         Sha256::digest(&der)
@@ -168,6 +175,28 @@ mod tests {
         for case in cases {
             assert_eq!(certificate_sha256(&case), None, "{case:?}");
         }
+    }
+
+    /// The invalid PEMs the helper refuses too (`ops/mod.rs` of the
+    /// helper), so the two parsers cannot drift apart.
+    #[test]
+    fn the_shared_invalid_pems_have_no_hash() {
+        let mut seen = 0;
+        for entry in fs::read_dir(fixture("pem-invalid")).unwrap() {
+            let path = entry.unwrap().path();
+            let text = fs::read_to_string(&path).unwrap();
+            assert_eq!(certificate_sha256(&text), None, "{}", path.display());
+            seen += 1;
+        }
+        assert!(seen >= 6, "{seen}");
+    }
+
+    /// The helper refuses a larger PEM in any request, so it has no hash
+    /// here either.
+    #[test]
+    fn a_pem_over_16_kib_has_no_hash() {
+        let padded = format!("{}{}", pem(), "\n".repeat(MAX_PEM_BYTES));
+        assert_eq!(certificate_sha256(&padded), None);
     }
 
     #[test]
