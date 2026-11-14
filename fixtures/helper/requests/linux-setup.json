@@ -8,6 +8,9 @@
     {
       "op": "resolved_install",
       "port": 18053
+    },
+    {
+      "op": "ports_install"
     }
   ]
 }

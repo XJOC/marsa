@@ -79,6 +79,11 @@ pub enum Op {
         port: u16,
     },
     ResolvedRemove {},
+    /// Linux: lets a normal process bind port 80 and up, through a sysctl
+    /// (ADR 0014). No field: the file, the key, and the value are constants
+    /// in the helper.
+    PortsInstall {},
+    PortsRemove {},
     /// Windows: the site names in Marsa's block of the hosts file.
     HostsSync {
         names: Vec<String>,
@@ -100,6 +105,8 @@ impl Op {
             Op::PfRemove {} => "pf_remove",
             Op::ResolvedInstall { .. } => "resolved_install",
             Op::ResolvedRemove {} => "resolved_remove",
+            Op::PortsInstall {} => "ports_install",
+            Op::PortsRemove {} => "ports_remove",
             Op::HostsSync { .. } => "hosts_sync",
             Op::HostsRemove {} => "hosts_remove",
             Op::UninstallAll {} => "uninstall_all",
@@ -192,6 +199,8 @@ impl Request {
                 | Op::ResolverRemove {}
                 | Op::PfRemove {}
                 | Op::ResolvedRemove {}
+                | Op::PortsInstall {}
+                | Op::PortsRemove {}
                 | Op::HostsRemove {}
                 | Op::UninstallAll {} => {}
             }
@@ -315,6 +324,8 @@ mod tests {
             r#"{"op":"pf_remove"}"#,
             r#"{"op":"resolved_install","port":1024}"#,
             r#"{"op":"resolved_remove"}"#,
+            r#"{"op":"ports_install"}"#,
+            r#"{"op":"ports_remove"}"#,
             r#"{"op":"hosts_sync","names":[]}"#,
             r#"{"op":"hosts_remove"}"#,
             r#"{"op":"uninstall_all"}"#,
