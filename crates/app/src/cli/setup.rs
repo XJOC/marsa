@@ -1,12 +1,14 @@
-//! `marsa setup`: the first setup (macOS). macOS may ask for an
+//! `marsa setup`: the first setup (macOS and Linux). macOS may ask for an
 //! administrator password, and may then ask the user to approve trusting
-//! Marsa's certificate authority for this user. Task M4-13, and task M4-26 for the trust.
+//! Marsa's certificate authority for this user. Linux asks for the password
+//! once. Task M4-13, task M4-26 for the trust, and task M4-18e for Linux.
 //!
 //! One call to `marsad` (`POST /v1/setup`, in `daemon/setup_api.rs`),
-//! started if needed. The daemon checks ports 80 and 443, asks macOS for the
-//! administrator password and runs `marsa-helper`, then trusts the
-//! certificate authority for the user behind the dialog macOS shows. This
-//! prints one line per step: done, already done, failed, or skipped and why.
+//! started if needed. On macOS the daemon checks ports 80 and 443, asks for
+//! the administrator password and runs `marsa-helper`, then trusts the
+//! certificate authority for the user behind the dialog macOS shows. On
+//! Linux it runs `marsa-helper` through `pkexec`. This prints one line per
+//! step: done, already done, failed, or skipped and why.
 //!
 //! Exit code 1 if a step failed or the helper did not run (the prompt was
 //! cancelled, for example). A skipped step alone, such as
@@ -53,13 +55,16 @@ pub async fn run(data_dir: &Path) -> ExitCode {
 }
 
 /// The line before the call, which may wait for the password prompt. Only
-/// on macOS, the one system where the daemon runs setup for now (the
-/// platform check of `daemon/setup_api.rs`); the CLI and the daemon run on
-/// the same machine. Elsewhere the daemon answers `setup_not_supported` at
-/// once, and a password line first would be wrong.
+/// on macOS and Linux, where the daemon runs setup (the platform check of
+/// `daemon/setup_api.rs`); the CLI and the daemon run on the same machine.
+/// Elsewhere the daemon answers `setup_not_supported` at once, and a
+/// password line first would be wrong.
 fn started(platform: Option<Platform>) -> Option<&'static str> {
-    matches!(platform, Some(Platform::DarwinArm64 | Platform::DarwinX64))
-        .then_some(strings::SETUP_STARTED)
+    match platform? {
+        Platform::DarwinArm64 | Platform::DarwinX64 => Some(strings::SETUP_STARTED),
+        Platform::LinuxX64 | Platform::LinuxArm64 => Some(strings::SETUP_STARTED_LINUX),
+        Platform::WindowsX64 | Platform::Any => None,
+    }
 }
 
 /// One line per helper result, then one per skipped step, with the programs
@@ -115,7 +120,8 @@ pub fn render(report: &SetupReport, data_dir: &Path) -> String {
     text
 }
 
-/// Why the helper did not run, ready for stderr.
+/// Why the helper did not run, or (Linux) why Caddy did not take ports 80
+/// and 443 after it, ready for stderr.
 pub fn error(report: &SetupReport) -> Option<ClientFailure> {
     let error = report.error.as_ref()?;
     let code = printable(&error.code);
@@ -312,16 +318,16 @@ mod tests {
     }
 
     #[test]
-    fn only_macos_is_told_about_the_password() {
+    fn macos_and_linux_are_told_about_the_password() {
         for platform in [Platform::DarwinArm64, Platform::DarwinX64] {
             assert_eq!(started(Some(platform)), Some(strings::SETUP_STARTED));
         }
-        for platform in [
-            Some(Platform::LinuxX64),
-            Some(Platform::LinuxArm64),
-            Some(Platform::WindowsX64),
-            None,
-        ] {
+        for platform in [Platform::LinuxX64, Platform::LinuxArm64] {
+            assert_eq!(started(Some(platform)), Some(strings::SETUP_STARTED_LINUX));
+        }
+        // ADR 0014: the one change for every program, before the password.
+        assert!(strings::SETUP_STARTED_LINUX.contains("ports 80 to 1023"));
+        for platform in [Some(Platform::WindowsX64), Some(Platform::Any), None] {
             assert_eq!(started(platform), None, "{platform:?}");
         }
     }

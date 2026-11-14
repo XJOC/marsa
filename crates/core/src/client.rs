@@ -393,7 +393,7 @@ impl DaemonClient {
     /// # Errors
     ///
     /// Any [`ClientError`]; `setup_running` (409) while another setup runs,
-    /// and `setup_not_supported` (501) on Linux and Windows for now. A
+    /// and `setup_not_supported` (501) on Windows for now. A
     /// cancelled prompt is not an error: it is in [`SetupReport::error`].
     pub async fn setup(&self) -> Result<SetupReport, ClientError> {
         self.call(Method::POST, &["v1", "setup"], SETUP_TIMEOUT)
