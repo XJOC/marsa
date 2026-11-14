@@ -12,6 +12,12 @@
 //! The path is `<System32>\drivers\etc\hosts`, with `System32` asked from
 //! Windows ([`System::system_dir`]), never from the request and never from
 //! the environment. No external command runs here.
+//!
+//! The helper leaves the file alone, and says why, when it is a link or a
+//! reparse point (the real hosts file never is one: a link could make the
+//! helper copy another file into it), when it is marked read-only (the
+//! owner locked it on purpose), and when the new file would be larger than
+//! the helper reads back.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -35,7 +41,7 @@ const SYNC: &str = "hosts_sync";
 const REMOVE: &str = "hosts_remove";
 
 /// `hosts_sync`: the block holds exactly `names`, sorted. An empty list
-/// leaves an empty block, which shows that the file can be written.
+/// leaves an empty block (written only if it was not there yet).
 pub fn sync(names: &[String], system: &impl System) -> OpResult {
     // The request parser already allows `<label>.test` only. Checked again
     // here, because this text goes into a system file as it is: a line break
@@ -63,6 +69,13 @@ fn apply(op: &'static str, block: Option<&[u8]>, system: &impl System) -> OpResu
             return OpResult::failed(op, code::HOSTS_READ, message);
         }
     };
+    if system.is_link(&path) {
+        let message = format!(
+            "{} is a link or a reparse point, so it was left as it is",
+            path.display()
+        );
+        return OpResult::failed(op, code::HOSTS_READ, message);
+    }
     let current = match system.read(&path, MAX_BYTES) {
         Ok(bytes) => bytes,
         // Windows works without a hosts file. `exists` does not follow
@@ -86,6 +99,20 @@ fn apply(op: &'static str, block: Option<&[u8]>, system: &impl System) -> OpResu
     };
     let outcome = if wanted == current {
         Outcome::Unchanged
+    } else if system.is_read_only(&path) {
+        let message = format!(
+            "{} is marked read-only, so it was left as it is",
+            path.display()
+        );
+        return OpResult::failed(op, code::HOSTS_WRITE, message);
+    } else if wanted.len() as u64 > MAX_BYTES {
+        // The next run could not read it back, and could not take the block
+        // out again.
+        let message = format!(
+            "{} would be larger than {MAX_BYTES} bytes, so it was left as it is",
+            path.display()
+        );
+        return OpResult::failed(op, code::HOSTS_WRITE, message);
     } else if let Err(err) = system.write_atomic(&path, &wanted, MODE) {
         let message = format!("cannot write {}: {}", path.display(), err.kind());
         return OpResult::failed(op, code::HOSTS_WRITE, message);
@@ -129,8 +156,12 @@ fn block(names: &[String]) -> Vec<u8> {
     text.into_bytes()
 }
 
+/// The UTF-8 byte order mark that some editors put at the start of a file.
+const BOM: &[u8] = b"\xef\xbb\xbf";
+
 /// A line that is exactly a marker, apart from its line ending and spaces
-/// or tabs after it. A marker with anything before it is an ordinary line.
+/// or tabs after it. A marker with anything before it is an ordinary line;
+/// [`rebuild`] takes a byte order mark off the first line before asking.
 fn marker(line: &[u8]) -> Option<&'static str> {
     let line = line.strip_suffix(b"\n").unwrap_or(line);
     let end = line
@@ -149,6 +180,12 @@ fn rebuild(current: &[u8], block: Option<&[u8]>) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(current.len() + block.map_or(0, <[u8]>::len));
     let mut inside = false;
     let mut placed = false;
+    // A byte order mark stays where it is, in front of whatever comes first.
+    let (bom, current) = match current.strip_prefix(BOM) {
+        Some(rest) => (BOM, rest),
+        None => (&b""[..], current),
+    };
+    out.extend_from_slice(bom);
     for line in current.split_inclusive(|byte| *byte == b'\n') {
         match marker(line) {
             Some(BEGIN) if !inside => {
@@ -171,7 +208,7 @@ fn rebuild(current: &[u8], block: Option<&[u8]>) -> Option<Vec<u8>> {
         return None;
     }
     if let (false, Some(block)) = (placed, block) {
-        if !out.is_empty() && !out.ends_with(b"\n") {
+        if out.len() > bom.len() && !out.ends_with(b"\n") {
             out.extend_from_slice(b"\r\n");
         }
         out.extend_from_slice(block);
@@ -409,6 +446,9 @@ mod tests {
         let bad = [
             "shop.test\r\n1.2.3.4 bank.example",
             "shop.test 1.2.3.4",
+            "sh\0op.test",
+            "sh\top.test",
+            "sh\u{f6}p.test",
             "Shop.test",
             "shop.com",
             ".test",
@@ -453,6 +493,66 @@ mod tests {
             assert_eq!(status(&result), code::HOSTS_WRITE);
         }
         assert_eq!(file(&fake), Some((content.into_bytes(), OLD_MODE)));
+    }
+
+    #[test]
+    fn remove_of_a_file_that_is_only_the_block_leaves_it_empty() {
+        let fake = windows(Some(block_of(&["shop.test"]).as_bytes()));
+        assert_eq!(status(&remove(&fake)), "done");
+        assert_eq!(file(&fake), Some((Vec::new(), MODE)));
+        // An empty file has nothing of Marsa's.
+        assert_eq!(status(&remove(&fake)), "unchanged");
+    }
+
+    /// An editor that saves "UTF-8 with BOM" puts three bytes in front of
+    /// the first line. They stay, and the marker after them still counts.
+    #[test]
+    fn a_byte_order_mark_stays_and_does_not_hide_the_first_marker() {
+        let content = format!("\u{feff}{}10.0.0.1 nas\r\n", block_of(&["old.test"]));
+        let fake = windows(Some(content.as_bytes()));
+        assert_eq!(status(&sync(&names(&["shop.test"]), &fake)), "done");
+        let wanted = format!("\u{feff}{}10.0.0.1 nas\r\n", block_of(&["shop.test"]));
+        assert_eq!(text(&fake), wanted);
+        assert_eq!(status(&remove(&fake)), "done");
+        assert_eq!(text(&fake), "\u{feff}10.0.0.1 nas\r\n");
+        // A file of only a mark gets the block after it, with no line break.
+        let fake = windows(Some(BOM));
+        sync(&names(&["shop.test"]), &fake);
+        assert_eq!(text(&fake), format!("\u{feff}{}", block_of(&["shop.test"])));
+    }
+
+    /// The real hosts file is never a link: one could make the helper copy
+    /// another file into it.
+    #[test]
+    fn a_hosts_file_that_is_a_link_is_left_alone() {
+        let mut fake = windows(Some(SHIPPED.as_bytes()));
+        fake.links.insert(path());
+        for result in [sync(&names(&["shop.test"]), &fake), remove(&fake)] {
+            assert_eq!(status(&result), code::HOSTS_READ);
+        }
+        assert_eq!(file(&fake), Some((SHIPPED.as_bytes().to_vec(), OLD_MODE)));
+    }
+
+    #[test]
+    fn a_read_only_hosts_file_is_left_alone_unless_nothing_changes() {
+        let content = format!("{SHIPPED}{}", block_of(&["shop.test"]));
+        let mut fake = windows(Some(content.as_bytes()));
+        fake.read_only.insert(path());
+        assert_eq!(status(&sync(&names(&["shop.test"]), &fake)), "unchanged");
+        for result in [sync(&names(&["blog.test"]), &fake), remove(&fake)] {
+            assert_eq!(status(&result), code::HOSTS_WRITE);
+        }
+        assert_eq!(file(&fake), Some((content.into_bytes(), OLD_MODE)));
+    }
+
+    /// The helper never writes a file it could not read back.
+    #[test]
+    fn a_result_larger_than_the_read_limit_is_not_written() {
+        let filler = vec![b'#'; MAX_BYTES as usize - 10];
+        let fake = windows(Some(&filler));
+        let result = sync(&names(&["shop.test"]), &fake);
+        assert_eq!(status(&result), code::HOSTS_WRITE);
+        assert_eq!(file(&fake), Some((filler, OLD_MODE)));
     }
 
     /// Off Windows there is no system folder to ask for.
