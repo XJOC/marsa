@@ -3,6 +3,8 @@
 //!
 //! The daemon refuses a version in use: the default, a site's own setting,
 //! or the running Caddy. Its answer says which, and this command prints it.
+//! The only installed PHP or Node version goes with its default, unless PHP
+//! sites follow that default (task M5-19).
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -85,6 +87,7 @@ mod tests {
 
     fn in_use(in_use: VersionInUse) -> ClientError {
         let message = "x".into();
+        let in_use = Box::new(in_use);
         ClientError::InUse { message, in_use }
     }
 
@@ -94,7 +97,7 @@ mod tests {
             version: "8.3.12".into(),
             default: Some("8.3".into()),
             sites: vec!["shop".into()],
-            caddy: false,
+            ..VersionInUse::default()
         });
         assert_eq!(
             line(&php, Runtime::Php),
@@ -111,6 +114,33 @@ mod tests {
             line(&caddy, Runtime::Caddy),
             "marsa: Caddy 2.11.7 is in use, so it was not uninstalled. Caddy runs from it: \
              stop Caddy first with \"marsa services stop caddy\". [version_in_use]"
+        );
+        // M5-19: the only PHP, with sites that follow the default.
+        let last = in_use(VersionInUse {
+            version: "8.3.12".into(),
+            default_sites: vec!["blog".into(), "shop".into()],
+            ..VersionInUse::default()
+        });
+        assert_eq!(
+            line(&last, Runtime::Php),
+            "marsa: PHP 8.3.12 is in use, so it was not uninstalled. The sites blog, shop \
+             follow the default, and it is the only PHP installed: install another version \
+             first with \"marsa install php <version>\", then make it the default with \
+             \"marsa use php <version>\". [sites_follow_default]"
+        );
+        let one = in_use(VersionInUse {
+            version: "8.3.12".into(),
+            sites: vec!["api".into()],
+            default_sites: vec!["blog".into()],
+            ..VersionInUse::default()
+        });
+        assert_eq!(
+            line(&one, Runtime::Php),
+            "marsa: PHP 8.3.12 is in use, so it was not uninstalled. The site api is set to \
+             it: give it another version first. The site blog follows the default, and it is \
+             the only PHP installed: install another version first with \"marsa install php \
+             <version>\", then make it the default with \"marsa use php <version>\". \
+             [version_in_use]"
         );
         let ambiguous = ClientError::Api {
             status: 409,

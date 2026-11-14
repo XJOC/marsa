@@ -648,12 +648,19 @@ async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
         version: "8.3.12".into(),
         default: Some("8.3\u{1b}[2J".into()),
         sites: vec!["blog".into()],
-        caddy: false,
+        ..VersionInUse::default()
+    };
+    // M5-19: the only PHP, with sites that follow the default.
+    let followed = VersionInUse {
+        version: "8.2.30".into(),
+        default_sites: vec!["shop\u{1b}[2J".into()],
+        ..VersionInUse::default()
     };
     let router = Router::new().route(
         "/v1/runtimes/php/{version}",
         delete({
             let in_use = in_use.clone();
+            let followed = followed.clone();
             move |axum::extract::Path(version): axum::extract::Path<String>| async move {
                 if version == "8.4.1" {
                     let done = Uninstalled {
@@ -662,7 +669,11 @@ async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
                     };
                     return Json(done).into_response();
                 }
-                let mut body = ErrorBody::new("version_in_use", "php 8.3.12 is in use");
+                let (code, in_use) = match version.as_str() {
+                    "8.2" => ("sites_follow_default", followed),
+                    _ => ("version_in_use", in_use),
+                };
+                let mut body = ErrorBody::new(code, "php is in use");
                 body.in_use = Some(in_use);
                 (StatusCode::CONFLICT, Json(body)).into_response()
             }
@@ -686,8 +697,15 @@ async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
         default: Some("8.3[2J".into()),
         ..in_use
     };
-    assert_eq!(*got, want);
+    assert_eq!(**got, want);
     fake.assert_no_token(&err);
+
+    let err = client.uninstall(Runtime::Php, "8.2").await.unwrap_err();
+    assert_eq!(err.code(), "sites_follow_default");
+    let ClientError::InUse { in_use: got, .. } = &err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(got.default_sites, ["shop[2J"]);
     let targets: Vec<String> = fake
         .seen()
         .into_iter()
@@ -697,7 +715,8 @@ async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
         targets,
         [
             "DELETE /v1/runtimes/php/8.4.1",
-            "DELETE /v1/runtimes/php/8.3"
+            "DELETE /v1/runtimes/php/8.3",
+            "DELETE /v1/runtimes/php/8.2"
         ]
     );
 }

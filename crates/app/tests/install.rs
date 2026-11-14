@@ -1015,7 +1015,7 @@ async fn a_version_in_use_is_refused_and_nothing_changes() {
         version: "8.3.12".into(),
         default: Some("8.3".into()),
         sites: vec!["old".into()],
-        caddy: false,
+        ..VersionInUse::default()
     };
     assert_eq!(refused("/v1/runtimes/php/8.3.12").await, want);
     let running = refused("/v1/runtimes/caddy/2.11.7").await;
@@ -1034,6 +1034,272 @@ async fn a_version_in_use_is_refused_and_nothing_changes() {
         .await;
     assert_eq!((done.runtime, done.version.as_str()), (caddy, "2.11.8"));
     assert_eq!(entries(&served, caddy), ["2.11.7"]);
+}
+
+// ---------------------------------------------------------------------------
+// The default of the last version (task M5-19)
+
+/// The first line of every file Marsa writes.
+const HEADER: &str = "# Managed by Marsa. Comments in this file are not kept.\n";
+
+/// Writes `global.toml` with these defaults, and Xdebug on to show that the
+/// rest of the file stays.
+fn save_defaults(served: &Served, php: Option<&str>, node: Option<&str>) {
+    let mut global = config::GlobalConfig::default();
+    global.php.default = php.map(str::to_owned);
+    global.php.xdebug = true;
+    global.node.default = node.map(str::to_owned);
+    let path = ConfigPaths::in_dir(served.path()).global;
+    config::save_global(&path, &global).expect("global.toml");
+}
+
+fn global_text(served: &Served) -> String {
+    let path = ConfigPaths::in_dir(served.path()).global;
+    fs::read_to_string(path).expect("global.toml")
+}
+
+/// The answer of a refused `DELETE`, with its code.
+async fn refusal(served: &Served, path: &str) -> (String, VersionInUse) {
+    let body: ErrorBody = served
+        .json("DELETE", path, None, StatusCode::CONFLICT)
+        .await;
+    (body.error.code, body.in_use.expect("what uses it"))
+}
+
+/// Parks `<data>/code` with these sites: `(name, files)`, each file empty
+/// but `.php-version`, which asks for 8.3.
+async fn park_sites(served: &Served, sites: &[(&str, &[&str])]) -> SiteList {
+    let code = served.path().join("code");
+    for (name, files) in sites {
+        let root = code.join(name);
+        fs::create_dir_all(&root).expect("a site folder");
+        for file in *files {
+            let text = if *file == ".php-version" { "8.3\n" } else { "" };
+            fs::write(root.join(file), text).expect("a site file");
+        }
+    }
+    let park = serde_json::json!({ "path": code }).to_string();
+    served
+        .json("POST", "/v1/sites/park", Some(&park), StatusCode::OK)
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_node_goes_with_its_default() {
+    let served = Served::start(FakeInstall::default()).await;
+    install_dirs(
+        &served,
+        &[(Runtime::Php, "8.4.23"), (Runtime::Node, "24.22.2")],
+    );
+    save_defaults(&served, Some("8.4"), Some("24"));
+
+    let out = "Uninstalled Node.js 24.22.2.\n";
+    served
+        .expect(&["uninstall", "node", "24"], 0, out, "")
+        .await;
+    assert!(entries(&served, Runtime::Node).is_empty(), "no del- folder");
+    // The `[node]` table is gone; the rest of the file stays.
+    let want = format!("{HEADER}\n[php]\ndefault = \"8.4\"\nxdebug = true\n");
+    assert_eq!(global_text(&served), want);
+    let list: RuntimeList = served
+        .json("GET", "/v1/runtimes", None, StatusCode::OK)
+        .await;
+    let node = &list.runtimes[1];
+    assert_eq!(
+        (node.runtime, node.default.as_deref()),
+        (Runtime::Node, None)
+    );
+    assert!(node.installed.is_empty());
+    assert_eq!(list.runtimes[0].default.as_deref(), Some("8.4"));
+    served
+        .expect(&["runtimes", "node"], 0, "Node.js   none installed\n", "")
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_move_keeps_the_default() {
+    let served = Served::start(FakeInstall::default()).await;
+    install_dirs(&served, &[(Runtime::Node, "24.22.2")]);
+    save_defaults(&served, None, Some("24"));
+    let before = global_text(&served);
+    // Another process holds the install lock, so the move cannot start. The
+    // default was cleared before it, and is written back.
+    let runtimes = RuntimesDir::in_dir(served.path());
+    fs::create_dir_all(runtimes.tmp_dir()).expect("runtimes/.tmp");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(runtimes.lock_path())
+        .expect("the install lock");
+    lock.try_lock().expect("the install lock is free");
+
+    let code = served
+        .error(
+            "DELETE",
+            "/v1/runtimes/node/24.22.2",
+            None,
+            StatusCode::CONFLICT,
+        )
+        .await;
+    assert_eq!(code, "install_busy");
+    assert_eq!(global_text(&served), before);
+    assert_eq!(entries(&served, Runtime::Node), ["24.22.2"]);
+
+    drop(lock);
+    let _: Uninstalled = served
+        .json("DELETE", "/v1/runtimes/node/24.22.2", None, StatusCode::OK)
+        .await;
+    assert_eq!(
+        global_text(&served),
+        format!("{HEADER}\n[php]\nxdebug = true\n")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_default_with_other_versions_or_a_pin_keeps_its_version() {
+    let served = Served::start(FakeInstall::default()).await;
+    let node = Runtime::Node;
+    install_dirs(&served, &[(node, "22.11.0"), (node, "24.22.2")]);
+    save_defaults(&served, None, Some("24"));
+    let before = global_text(&served);
+
+    // Another Node is installed: the user picks it as the default first.
+    let (code, used) = refusal(&served, "/v1/runtimes/node/24.22.2").await;
+    let want = VersionInUse {
+        version: "24.22.2".into(),
+        default: Some("24".into()),
+        ..VersionInUse::default()
+    };
+    assert_eq!((code.as_str(), used), ("version_in_use", want));
+    let err = "marsa: Node.js 24.22.2 is in use, so it was not uninstalled. It is the default \
+               (24): make another version the default first with \"marsa use node <version>\". \
+               [version_in_use]\n";
+    served
+        .expect(&["uninstall", "node", "24"], 1, "", err)
+        .await;
+
+    // The last one, set in a site's own settings: refused as before, and
+    // the default stays. The default is not the reason: it would go too.
+    served
+        .expect(
+            &["uninstall", "node", "22"],
+            0,
+            "Uninstalled Node.js 22.11.0.\n",
+            "",
+        )
+        .await;
+    let sites = config::SitesConfig {
+        parked: Vec::new(),
+        sites: [(
+            "app".to_owned(),
+            config::SiteSettings {
+                root: served.path().join("app"),
+                php: None,
+                node: Some("24".into()),
+                secure: true,
+                proxy: None,
+            },
+        )]
+        .into(),
+    };
+    let sites_toml = ConfigPaths::in_dir(served.path()).sites;
+    config::save_sites(&sites_toml, &sites).expect("sites.toml");
+    let (code, used) = refusal(&served, "/v1/runtimes/node/24.22.2").await;
+    let want = VersionInUse {
+        version: "24.22.2".into(),
+        sites: vec!["app".into()],
+        ..VersionInUse::default()
+    };
+    assert_eq!((code.as_str(), used), ("version_in_use", want));
+    assert_eq!(global_text(&served), before);
+    assert_eq!(entries(&served, node), ["24.22.2"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_php_goes_with_its_default_when_no_site_follows_it() {
+    let served = Served::start(FakeInstall::default()).await;
+    install_dirs(
+        &served,
+        &[(Runtime::Php, "8.3.12"), (Runtime::Node, "22.11.0")],
+    );
+    save_defaults(&served, Some("8.3"), Some("22"));
+    // A site with its own version file, and a static site: neither follows
+    // the default with PHP.
+    let list = park_sites(
+        &served,
+        &[("api", &["index.php", ".php-version"]), ("docs", &[])],
+    )
+    .await;
+    assert_eq!(php_of(&list, "api").as_deref(), Some("8.3.12"));
+    let mut events = served.daemon.events.subscribe();
+
+    let done: Uninstalled = served
+        .json("DELETE", "/v1/runtimes/php/8.3.12", None, StatusCode::OK)
+        .await;
+    assert_eq!(done.version, "8.3.12");
+    assert!(entries(&served, Runtime::Php).is_empty());
+    let want = format!("{HEADER}\n[php]\nxdebug = true\n\n[node]\ndefault = \"22\"\n");
+    assert_eq!(global_text(&served), want);
+    let list = next_sites(&mut events).await;
+    assert_eq!(php_of(&list, "api"), None);
+    let list: RuntimeList = served
+        .json("GET", "/v1/runtimes", None, StatusCode::OK)
+        .await;
+    assert_eq!(list.runtimes[0].default, None);
+    assert_eq!(list.runtimes[1].default.as_deref(), Some("22"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_php_stays_while_sites_follow_its_default() {
+    let served = Served::start(FakeInstall::default()).await;
+    install_dirs(&served, &[(Runtime::Php, "8.3.12")]);
+    save_defaults(&served, Some("8.3"), None);
+    let list = park_sites(
+        &served,
+        &[
+            ("shop", &["index.php"]),
+            ("blog", &["index.php"]),
+            ("api", &["index.php", ".php-version"]),
+            ("docs", &[]),
+        ],
+    )
+    .await;
+    assert_eq!(php_of(&list, "blog").as_deref(), Some("8.3.12"));
+    let paths = ConfigPaths::in_dir(served.path());
+    let files = || [&paths.global, &paths.sites].map(|path| fs::read(path).expect("a file"));
+    let before = files();
+
+    let (code, used) = refusal(&served, "/v1/runtimes/php/8.3.12").await;
+    let want = VersionInUse {
+        version: "8.3.12".into(),
+        default_sites: vec!["blog".into(), "shop".into()],
+        ..VersionInUse::default()
+    };
+    assert_eq!((code.as_str(), used), ("sites_follow_default", want));
+    let err = "marsa: PHP 8.3.12 is in use, so it was not uninstalled. The sites blog, shop \
+               follow the default, and it is the only PHP installed: install another version \
+               first with \"marsa install php <version>\", then make it the default with \
+               \"marsa use php <version>\". [sites_follow_default]\n";
+    served
+        .expect(&["uninstall", "php", "8.3"], 1, "", err)
+        .await;
+
+    // A site set to it as well: every use, under the general code.
+    let body = serde_json::json!({ "php": "8.3" }).to_string();
+    let _: SiteList = served
+        .json("PATCH", "/v1/sites/shop", Some(&body), StatusCode::OK)
+        .await;
+    let (code, used) = refusal(&served, "/v1/runtimes/php/8.3.12").await;
+    let want = VersionInUse {
+        version: "8.3.12".into(),
+        sites: vec!["shop".into()],
+        default_sites: vec!["blog".into()],
+        ..VersionInUse::default()
+    };
+    assert_eq!((code.as_str(), used), ("version_in_use", want));
+    assert_eq!(files()[0], before[0], "global.toml as it was");
+    assert_eq!(entries(&served, Runtime::Php), ["8.3.12"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

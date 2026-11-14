@@ -668,8 +668,8 @@ pub fn removing(removal: &Removal) -> String {
 }
 
 /// The lines under the Runtimes table about the last uninstall. A refusal
-/// for `version_in_use` names each thing that uses the version, and what to
-/// do about it.
+/// for `version_in_use` or `sites_follow_default` names each thing that uses
+/// the version, and what to do about it.
 pub fn uninstall_lines(notice: &UninstallNotice) -> Vec<ReportLine> {
     let problem = |text: String| ReportLine {
         text,
@@ -722,6 +722,22 @@ fn in_use_reasons(runtime: Runtime, in_use: &VersionInUse) -> Vec<String> {
                 names.join(", ")
             ));
         }
+    }
+    let names: Vec<String> = in_use
+        .default_sites
+        .iter()
+        .map(|site| format!("{site}.{TLD}"))
+        .collect();
+    let follow = match names.as_slice() {
+        [] => None,
+        [site] => Some(format!("The site {site} follows")),
+        sites => Some(format!("The sites {} follow", sites.join(", "))),
+    };
+    if let Some(follow) = follow {
+        reasons.push(format!(
+            "{follow} the default, and it is the only {name} installed. Install another \
+             {name} version and pick it as the default above first."
+        ));
     }
     if in_use.caddy {
         reasons.push("Caddy is running from it. Stop Caddy under Services first.".to_owned());
@@ -861,6 +877,11 @@ fn error_message(code: &str) -> Option<&'static str> {
         "version_in_use" => {
             "This version is in use: it is a default, a site is set to it, or Caddy runs from \
              it. Nothing was uninstalled."
+        }
+        // M5-19: the only PHP and the default, with sites that follow it.
+        "sites_follow_default" => {
+            "This is the only PHP version, and sites follow it as the default: they would have \
+             no PHP. Install another PHP version and pick it as the default first."
         }
         "version_ambiguous" => "More than one installed version matches. Pick one in full.",
         "uninstall_io" => {
@@ -1097,7 +1118,14 @@ mod tests {
             ClientError::PathNotUtf8 { path: path.clone() },
             ClientError::InUse {
                 message: String::new(),
-                in_use: VersionInUse::default(),
+                in_use: Box::default(),
+            },
+            ClientError::InUse {
+                message: String::new(),
+                in_use: Box::new(VersionInUse {
+                    default_sites: vec!["blog".into()],
+                    ..VersionInUse::default()
+                }),
             },
             ClientError::DaemonFile(DaemonFileError::Missing { path: path.clone() }),
             ClientError::DaemonFile(DaemonFileError::Invalid {
@@ -1165,8 +1193,9 @@ mod tests {
             // M5-09: unlink and forget.
             "site_is_parked",
             "folder_not_parked",
-            // M5-07: uninstall a version.
+            // M5-07 and M5-19: uninstall a version.
             "version_in_use",
+            "sites_follow_default",
             "version_ambiguous",
             "uninstall_io",
             "install_busy",
@@ -1780,6 +1809,7 @@ mod tests {
                 default: default.map(str::to_owned),
                 sites: sites.iter().map(|site| (*site).to_owned()).collect(),
                 caddy,
+                ..VersionInUse::default()
             },
         }
     }
@@ -1833,6 +1863,20 @@ mod tests {
         let lines = uninstall_lines(&in_use(None, &[], false));
         let general = error_text("version_in_use");
         assert_eq!(texts(&lines), [title, (general.as_str(), true)]);
+
+        // M5-19: the only PHP, with sites that follow the default.
+        let mut last = in_use(None, &[], false);
+        let one = "The site blog.test follows the default, and it is the only PHP installed. \
+                   Install another PHP version and pick it as the default above first.";
+        let many = "The sites blog.test, shop.test follow the default, and it is the only PHP \
+                    installed. Install another PHP version and pick it as the default above \
+                    first.";
+        for (sites, want) in [(&["blog"][..], one), (&["blog", "shop"][..], many)] {
+            if let UninstallNotice::InUse { in_use, .. } = &mut last {
+                in_use.default_sites = sites.iter().map(|site| (*site).to_owned()).collect();
+            }
+            assert_eq!(texts(&uninstall_lines(&last)), [title, (want, true)]);
+        }
     }
 
     #[test]

@@ -72,13 +72,15 @@ pub enum ClientError {
         message: String,
     },
 
-    /// The daemon's 409 `version_in_use` from `DELETE
-    /// /v1/runtimes/{tool}/{version}`, with what uses the version (task
-    /// M5-07). Its text went through [`daemon_text`].
-    #[error("the daemon answered 409 version_in_use: {message}")]
+    /// The daemon's 409 `version_in_use` (task M5-07) or
+    /// `sites_follow_default` (task M5-19) from `DELETE
+    /// /v1/runtimes/{tool}/{version}`, with what uses the version. Its text
+    /// went through [`daemon_text`]. Boxed, so every `Result<_,
+    /// ClientError>` stays small.
+    #[error("the daemon answered 409 {}: {message}", .in_use.code())]
     InUse {
         message: String,
-        in_use: VersionInUse,
+        in_use: Box<VersionInUse>,
     },
 
     /// `run/daemon.json` is there but cannot be used.
@@ -100,7 +102,7 @@ impl ClientError {
             ClientError::InvalidId { .. } => "invalid_id",
             ClientError::PathNotUtf8 { .. } => "site_path_not_utf8",
             ClientError::Api { code, .. } => code,
-            ClientError::InUse { .. } => "version_in_use",
+            ClientError::InUse { in_use, .. } => in_use.code(),
             ClientError::DaemonFile(err) => err.code(),
         }
     }
@@ -130,16 +132,23 @@ impl ClientError {
 
     pub(super) fn api(status: u16, body: &ErrorBody) -> Self {
         if let Some(in_use) = &body.in_use
-            && body.error.code == "version_in_use"
+            && matches!(
+                body.error.code.as_str(),
+                "version_in_use" | "sites_follow_default"
+            )
         {
+            let names = |names: &[String]| -> Vec<String> {
+                names.iter().map(|name| daemon_text(name)).collect()
+            };
             return ClientError::InUse {
                 message: daemon_text(&body.error.message),
-                in_use: VersionInUse {
+                in_use: Box::new(VersionInUse {
                     version: daemon_text(&in_use.version),
                     default: in_use.default.as_deref().map(daemon_text),
-                    sites: in_use.sites.iter().map(|site| daemon_text(site)).collect(),
+                    sites: names(&in_use.sites),
+                    default_sites: names(&in_use.default_sites),
                     caddy: in_use.caddy,
-                },
+                }),
             };
         }
         ClientError::Api {
