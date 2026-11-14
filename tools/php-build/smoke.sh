@@ -63,7 +63,12 @@ norm_modules() { grep -v '^\[' | grep -v '^[[:space:]]*$' | sed 's/\r$//' | tr '
 first="$(head -1 "$OUT/php-v.txt")"
 check "php -v says PHP $PHP_VERSION" "$first" grep -q "^PHP $PHP_VERSION " "$OUT/php-v.txt"
 if [ -n "${SPC_VERSION:-}" ]; then
-  check "php -v says Built by static-php-cli $SPC_VERSION" "" grep -qx "Built by static-php-cli $SPC_VERSION" "$OUT/php-v.txt"
+  # spc adds this line to the banner of PHP 8.4 and later only (8.3.36 has none).
+  minor="${PHP_VERSION#*.}"; minor="${minor%%.*}"
+  if [ "${PHP_VERSION%%.*}" -gt 8 ] || [ "$minor" -ge 4 ]; then
+    check "php -v says Built by static-php-cli $SPC_VERSION" "" grep -qx "Built by static-php-cli $SPC_VERSION" "$OUT/php-v.txt"
+  fi
+  check "BUILD-INFO.txt says static-php-cli $SPC_VERSION" "" grep -qx "static-php-cli $SPC_VERSION" "$PKG/BUILD-INFO.txt"
 fi
 "$FPM" -n -v > "$OUT/fpm-v.txt" 2>&1
 check "php-fpm -v says PHP $PHP_VERSION" "$(head -1 "$OUT/fpm-v.txt")" grep -q "^PHP $PHP_VERSION " "$OUT/fpm-v.txt"
@@ -87,7 +92,8 @@ for bin in "$PHP" "$FPM"; do
     Darwin) n="$(nm -gU "$bin" 2> /dev/null | awk '{ print $NF }' | grep -c '^_zend_' || true)" ;;
     *) n="$(nm -D --defined-only "$bin" 2> /dev/null | awk '{ print $NF }' | grep -c '^zend_' || true)" ;;
   esac
-  check "$(basename "$bin"): exported zend_* symbols >= 1000" "${n:-0}" test "${n:-0}" -ge 1000
+  # PHP 8.4 exports about 1,035, PHP 8.3 about 980; a broken build exports none.
+  check "$(basename "$bin"): exported zend_* symbols >= 900" "${n:-0}" test "${n:-0}" -ge 900
 done
 
 # 4. Shared extensions, from the package's ext/ folder --------------------------
