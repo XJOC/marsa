@@ -215,7 +215,7 @@ old_install() {
 snapshot() { (cd "$DATA" && find bin shims -type f -exec cksum {} + | sort -k3); }
 
 # line_of <text>: the number of the first line of CALLED that is exactly that.
-line_of() { grep -nxF -- "$1" <<< "$CALLED" | head -n 1 | cut -d: -f1; }
+line_of() { grep -nxF -- "$1" <<< "$CALLED" | head -n 1 | cut -d: -f1 || true; }
 
 # ------------------------------------------------------------- expectations
 
@@ -241,8 +241,11 @@ installed() {
   done
   # Only the user may write to bin/ and to marsa-helper: marsad checks both
   # before it runs the helper as root.
-  [ -z "$(find "$DATA/bin" "$DATA/bin/marsa-helper" -maxdepth 0 \( -perm -020 -o -perm -002 \))" ] ||
+  [ -z "$(find "$DATA/bin" "$DATA/bin/marsa-helper" "$DATA/shims" -maxdepth 0 \( -perm -020 -o -perm -002 \))" ] ||
     problems+=" writable-by-others"
+  # The download and the unpacking happen in a temporary folder inside the
+  # data folder, so the last move is a rename on one volume.
+  [[ "$CALLED" == *"tar -xzf $DATA/.install."* ]] || problems+=" temp-not-in-data-folder"
   [ -z "$(find "$DATA" -maxdepth 1 -name '.install.*')" ] || problems+=" leftover-temp"
   [[ "$OUTPUT" == *"Installed: marsa $VERSION"* ]] || problems+=" no-installed-line"
   [ -n "$(line_of "marsa-$VERSION --version")" ] || problems+=" new-marsa-not-tried"
@@ -330,13 +333,29 @@ for file in .zprofile .zshrc; do
 done
 if [ -e "$HOME_DIR/.zshrc" ] || [ -e "$HOME_DIR/.zprofile" ]; then fail "fresh-mac: the script wrote a shell file"; fi
 
-# As `curl ... | sh` runs it: the script comes from stdin.
+# As `curl ... | sh` runs it: the script comes from a pipe.
+# pipe <script text command...>: runs the script it prints through a pipe.
+pipe() {
+  : > "$CALLS"
+  STATUS=0
+  OUTPUT="$("$@" | env -i HOME="$HOME_DIR" PATH="$MAC" MARSA_VERSION="$VERSION" sh 2>&1)" || STATUS=$?
+  CALLED="$(cat "$CALLS")"
+}
+script="$(script_for fresh-mac)"
 home fresh-mac "$MAC"
-: > "$CALLS"
-STATUS=0
-OUTPUT="$(env -i HOME="$HOME_DIR" PATH="$MAC" MARSA_VERSION="$VERSION" sh < "$(script_for fresh-mac)" 2>&1)" || STATUS=$?
-CALLED="$(cat "$CALLS")"
+pipe cat "$script"
 installed "the script piped into sh"
+# A download cut off anywhere runs nothing: the last line starts the script.
+size="$(wc -c < "$script" | tr -d ' ')"
+for cut in "$((size / 3))" "$((size / 2))" "$((size - 20))"; do
+  home cut "$MAC"
+  pipe head -c "$cut" "$script"
+  if [ -e "$DATA" ] || [ -n "$CALLED" ]; then fail "a download cut at byte $cut of $size ran something"; fi
+done
+home cut "$MAC"
+pipe sed '$d' "$script"
+if [ -e "$DATA" ] || [ -n "$CALLED" ]; then fail "a download without its last line ran something"; fi
+pass "a cut-off download of the script runs nothing"
 
 # The user's PATH already has both folders: no advice to add them again.
 home path-set "$MAC"
@@ -347,22 +366,24 @@ if [[ "$OUTPUT" != *"already in your PATH"* ]] || [[ "$OUTPUT" == *"export PATH"
 fi
 
 # The other shells get the right startup file, or no command at all.
+problems=""
 home bash-mac "$MAC"
 run fresh-mac "$MAC" MARSA_VERSION="$VERSION" SHELL=/bin/bash
-[[ "$OUTPUT" == *">> \"\$HOME/.bash_profile\""* ]] || fail "bash on macOS without startup files: not .bash_profile"
+[[ "$OUTPUT" == *">> \"\$HOME/.bash_profile\""* ]] || problems+=" bash-without-files"
+[ ! -e "$HOME_DIR/.bash_profile" ] || problems+=" bash-without-files-wrote-a-file"
 home bash-mac-profile "$MAC"
 touch "$HOME_DIR/.profile"
 run fresh-mac "$MAC" MARSA_VERSION="$VERSION" SHELL=/bin/bash
 if [[ "$OUTPUT" != *">> \"\$HOME/.profile\""* ]] || [[ "$OUTPUT" == *".bash_profile"* ]]; then
-  fail "bash on macOS with only .profile: not .profile"
+  problems+=" bash-with-profile"
 fi
+if [ -s "$HOME_DIR/.profile" ] || [ -e "$HOME_DIR/.bash_profile" ]; then problems+=" bash-with-profile-wrote-a-file"; fi
 home fish-mac "$MAC"
 run fresh-mac "$MAC" MARSA_VERSION="$VERSION" SHELL=/usr/local/bin/fish
 if [[ "$OUTPUT" != *"Add Marsa to your PATH"* ]] || [[ "$OUTPUT" == *"These commands do it"* ]]; then
-  fail "fish: a command for another shell was printed"
+  problems+=" fish"
 fi
-[ -s "$HOME_DIR/.profile" ] && fail "a shell file was written"
-pass "the PATH advice for bash and other shells on macOS"
+report "the PATH advice for bash and other shells on macOS" "$problems"
 
 release fresh-linux linux-x64
 home fresh-linux "$LINUX"
@@ -447,6 +468,13 @@ if [ -z "$stop" ] || [ -z "$try" ] || [ "$try" -gt "$stop" ]; then
 fi
 [[ "$OUTPUT" == *"stopped for the update"* ]] || fail "upgrade: no line about the stopped Marsa"
 
+# An older bin/ and shims/ that the group may write to (umask 002): fixed.
+home loose-folders "$MAC"
+old_install
+chmod 775 "$DATA/bin" "$DATA/shims"
+run upgrade "$MAC" MARSA_VERSION="$VERSION"
+installed "an upgrade over a bin/ and shims/ that the group may write to"
+
 home stop-fails "$MAC"
 old_install 1
 run upgrade "$MAC" MARSA_VERSION="$VERSION"
@@ -491,18 +519,18 @@ fi
 release changed-sums darwin-arm64
 echo more >> "$DIR/$ARCHIVE"
 printf '%s  %s\n' "$(sha256_of "$DIR/$ARCHIVE")" "$ARCHIVE" > "$DIR/SHA256SUMS"
-refuse "a changed archive with a matching SHA256SUMS (wrong signature)" changed-sums "the signature of SHA256SUMS is wrong"
+refuse "a changed archive with a matching SHA256SUMS (wrong signature)" changed-sums "the signature of SHA256SUMS does not verify with Marsa's key"
 
 release other-key darwin-arm64
 sign other "marsa release v$VERSION"
-refuse "SHA256SUMS signed by another key" other-key "the signature of SHA256SUMS is wrong"
+refuse "SHA256SUMS signed by another key" other-key "the signature of SHA256SUMS does not verify with Marsa's key"
 
 # A good signature of another release, with its trusted comment edited.
 release edited-comment darwin-arm64
 sign good "marsa release v0.0.1"
 sed "s/^trusted comment: .*/trusted comment: marsa release v$VERSION/" "$DIR/SHA256SUMS.minisig" > "$T/edited"
 mv "$T/edited" "$DIR/SHA256SUMS.minisig"
-refuse "a trusted comment edited after signing" edited-comment "the signature of SHA256SUMS is wrong"
+refuse "a trusted comment edited after signing" edited-comment "the signature of SHA256SUMS does not verify with Marsa's key"
 
 for comment in "marsa runtimes manifest serial=1" "marsa release v0.0.1" "marsa release v${VERSION}0" "marsa release v$VERSION-rc" "release v$VERSION"; do
   release wrong-comment darwin-arm64
@@ -551,6 +579,16 @@ release other-version darwin-arm64
 stub "$T/pkg/marsa" marsa 1.2.3
 pack
 REACHED=start refuse "an archive that holds another version of marsa" other-version "holds another version of marsa"
+
+# A folder where a program goes: refused before the old Marsa is stopped.
+release folder-in-bin darwin-arm64
+home folder-in-bin "$MAC"
+old_install
+rm "$DATA/bin/marsa-gui"
+mkdir "$DATA/bin/marsa-gui"
+before="$(snapshot)"
+run folder-in-bin "$MAC" MARSA_VERSION="$VERSION"
+REACHED=start refused "a folder named like a program in bin/" "is a folder, so the program cannot go there" "$before"
 
 # A step after the old Marsa was stopped fails: the script must say so.
 release half-way darwin-arm64

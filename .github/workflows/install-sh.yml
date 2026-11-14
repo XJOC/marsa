@@ -11,6 +11,8 @@ name: install-sh
 on:
   pull_request:
     branches: [main]
+    # labeled and unlabeled: the label check below runs again.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - "install.sh"
       - "tests/install-sh/**"
@@ -35,6 +37,24 @@ defaults:
     shell: bash
 
 jobs:
+  # A merge to main reaches every user of the raw install.sh URL at once, so a
+  # change to the script is a `sensitive` task: two reviewers (AGENTS.md
+  # section 5). The label is how the pull request says so.
+  label:
+    name: install.sh needs the sensitive label
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check the label
+        env:
+          SENSITIVE: ${{ contains(github.event.pull_request.labels.*.name, 'sensitive') }}
+        run: |
+          if [ "$SENSITIVE" != true ]; then
+            echo "::error::this pull request changes install.sh or its tests: label it sensitive, and get two reviewers (AGENTS.md section 5)"
+            exit 1
+          fi
+          echo "the sensitive label is set"
+
   test:
     name: install.sh (${{ matrix.label }})
     strategy:
