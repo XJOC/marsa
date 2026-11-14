@@ -836,7 +836,10 @@ const UNINSTALL_MAY_HAVE_RUN: &str = "Some steps may already have run with admin
 /// `delete`: `--delete-data` was given for it.
 pub fn uninstall_all_plan(data_dir: &Path, deletable: bool, delete: bool) -> String {
     let data = match (deletable, delete) {
-        (true, true) => format!("The data folder {} will be deleted.", data_dir.display()),
+        (true, true) => format!(
+            "The data folder {} will be deleted once every step has succeeded.",
+            data_dir.display()
+        ),
         (true, false) => format!(
             "The data folder stays unless you choose to delete it: {}",
             data_dir.display()
@@ -889,6 +892,25 @@ pub const UNINSTALL_ALL_LEFT_TO_DO: &str = "Left to do by hand:";
 /// again.
 pub const QUIT_WINDOW_LEFT: &str = "  Quit the Marsa window and the menu-bar icon if they are \
      open.";
+
+/// After Ctrl+C while the daemon stops after its answer.
+pub const UNINSTALL_ALL_STOP_CTRL_C: &str = "Stopped waiting. The Marsa daemon may still be \
+     stopping: run \"marsa daemon status\" to see. The data folder was kept.";
+
+/// After Ctrl+C at the data folder question: the same as no.
+pub fn data_kept_ctrl_c(path: &Path) -> String {
+    format!("Kept the data folder {}.", path.display())
+}
+
+/// Setup's text for `trust_record_unusable`: the trust folder `dir` (task
+/// M5-13) could not be used. The uninstall's text is in `known`.
+pub fn setup_trust_dir_unusable(dir: &Path) -> String {
+    format!(
+        "Marsa cannot use its folder {} for the trusted certificate: it must be your own \
+         folder, not a link. Fix or delete it, then run \"marsa setup\" again.",
+        dir.display()
+    )
+}
 
 /// After Ctrl+C while the daemon works: it goes on without this command.
 pub fn uninstall_all_ctrl_c(log: &Path) -> String {

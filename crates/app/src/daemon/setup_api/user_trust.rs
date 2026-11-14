@@ -124,6 +124,11 @@ impl TrustFiles {
         }
     }
 
+    /// The folder itself: `<data>/trust`.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// `user-trusted.pem`: the certificate this user trusted.
     pub fn record(&self) -> PathBuf {
         self.dir.join(RECORD)

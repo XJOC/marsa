@@ -80,6 +80,8 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
     let deletable = !data_dir_given;
     let plan = strings::uninstall_all_plan(data_dir, deletable, deletable && args.delete_data);
     eprint!("{plan}");
+    // Read before `until_ctrl_c` takes Ctrl+C over: here it still ends the
+    // process at once, before anything changed.
     if let Err(failure) = confirm(args, &mut terminal) {
         return failure.report();
     }
@@ -111,7 +113,12 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
     if !complete {
         println!("{}", strings::UNINSTALL_ALL_INCOMPLETE);
     }
-    let end = wait_for_exit(data_dir).await;
+    // From here on Ctrl+C is this process's to handle (`until_ctrl_c`
+    // installed the handler), so every wait races it.
+    let Some(end) = until_ctrl_c(wait_for_exit(data_dir)).await else {
+        eprintln!("\n{}", strings::UNINSTALL_ALL_STOP_CTRL_C);
+        return ExitCode::FAILURE;
+    };
     match &end {
         DaemonEnd::Stopped => println!("{}", strings::DAEMON_STOPPED),
         DaemonEnd::Back => eprintln!("{}", strings::UNINSTALL_ALL_DAEMON_BACK),
@@ -119,7 +126,25 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
     }
     let stopped = end == DaemonEnd::Stopped;
     ok &= stopped;
-    let folder = data_folder(args, data_dir_given, complete, stopped, &mut terminal);
+    let decided = data_folder(
+        args,
+        data_dir_given,
+        complete,
+        stopped,
+        terminal.is_terminal(),
+    );
+    let folder = match decided {
+        Some(folder) => folder,
+        None => match ask_until_ctrl_c(strings::UNINSTALL_ALL_DATA_QUESTION).await {
+            Asked::Line(answer) => folder_for(&answer),
+            Asked::Closed => DataFolder::Keep,
+            Asked::CtrlC => {
+                eprintln!();
+                println!("{}", strings::data_kept_ctrl_c(data_dir));
+                DataFolder::Keep
+            }
+        },
+    };
     let deleted = match folder {
         DataFolder::Delete => match delete_when_stopped(data_dir) {
             Ok(()) => {
@@ -295,33 +320,82 @@ enum DataFolder {
     NotOurs,
 }
 
-/// Whether to delete the data folder. `complete`: every step went well;
-/// `stopped`: no daemon runs on it. Asks only when nothing else decides.
+/// Whether to delete the data folder, or `None` when only the user can say:
+/// then the question is asked ([`ask_until_ctrl_c`], [`folder_for`]).
+/// `complete`: every step went well; `stopped`: no daemon runs on it;
+/// `is_terminal`: someone can answer.
 fn data_folder(
     args: &UninstallAllArgs,
     data_dir_given: bool,
     complete: bool,
     stopped: bool,
-    terminal: &mut impl Ask,
-) -> DataFolder {
-    if data_dir_given {
-        return DataFolder::NotOurs;
+    is_terminal: bool,
+) -> Option<DataFolder> {
+    let folder = if data_dir_given {
+        DataFolder::NotOurs
+    } else if !complete {
+        DataFolder::KeepForRetry
+    } else if !stopped {
+        DataFolder::KeepDaemonRuns
+    } else if args.delete_data {
+        DataFolder::Delete
+    } else if args.yes || !is_terminal {
+        DataFolder::Keep
+    } else {
+        return None;
+    };
+    Some(folder)
+}
+
+/// The data folder for the user's answer: `y` or `yes` deletes it, anything
+/// else keeps it.
+fn folder_for(answer: &str) -> DataFolder {
+    if is_yes(answer) {
+        DataFolder::Delete
+    } else {
+        DataFolder::Keep
     }
-    if !complete {
-        return DataFolder::KeepForRetry;
+}
+
+/// An answer read while Ctrl+C is this process's to handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Asked {
+    Line(String),
+    /// The end of the input, or a read error.
+    Closed,
+    CtrlC,
+}
+
+/// Shows `question` on stderr and reads one line from stdin, or stops at
+/// Ctrl+C. std's `read_line` retries after the signal, so the read runs on a
+/// thread of its own and races Ctrl+C. A plain thread, not `spawn_blocking`:
+/// after Ctrl+C the read stays blocked, and the runtime would wait for a
+/// task of its blocking pool when `main` returns; the end of the process
+/// ends a plain thread.
+async fn ask_until_ctrl_c(question: &str) -> Asked {
+    {
+        let mut stderr = io::stderr().lock();
+        // Best effort: the answer is read even if stderr is closed.
+        let _ = write!(stderr, "{question}");
+        let _ = stderr.flush();
     }
-    if !stopped {
-        return DataFolder::KeepDaemonRuns;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let reader = std::thread::Builder::new()
+        .name("answer".to_owned())
+        .spawn(move || {
+            let mut line = String::new();
+            let read = io::stdin().lock().read_line(&mut line);
+            // Nobody waits any more after Ctrl+C, which is fine.
+            let _ = sender.send(matches!(read, Ok(1..)).then_some(line));
+        });
+    if let Err(err) = reader {
+        tracing::debug!(error = %err, "cannot start the thread that reads the answer");
+        return Asked::Closed;
     }
-    if args.delete_data {
-        return DataFolder::Delete;
-    }
-    if args.yes || !terminal.is_terminal() {
-        return DataFolder::Keep;
-    }
-    match terminal.ask(strings::UNINSTALL_ALL_DATA_QUESTION) {
-        Some(answer) if is_yes(&answer) => DataFolder::Delete,
-        _ => DataFolder::Keep,
+    match until_ctrl_c(receiver).await {
+        Some(Ok(Some(line))) => Asked::Line(line),
+        Some(_) => Asked::Closed,
+        None => Asked::CtrlC,
     }
 }
 
@@ -612,63 +686,56 @@ mod tests {
     fn the_data_folder_is_deleted_only_when_asked_and_safe() {
         use DataFolder::{Delete, Keep, KeepDaemonRuns, KeepForRetry, NotOurs};
         // The case, the args, `--data-dir`, every step went well, no daemon
-        // runs, the terminal, and the answer.
+        // runs, a terminal, and the decision (`None`: ask).
         type Case = (
             &'static str,
             UninstallAllArgs,
             bool,
             bool,
             bool,
-            Script,
-            DataFolder,
+            bool,
+            Option<DataFolder>,
         );
-        let cases: Vec<Case> = vec![
-            // The question, with no as the default.
+        let cases: [Case; 8] = [
+            // The question.
+            ("ask", args(false, false), false, true, true, true, None),
+            // No terminal to ask on, and `--yes` alone: no.
             (
-                "yes",
+                "no terminal",
                 args(false, false),
                 false,
                 true,
                 true,
-                Script::new(true, &["y\n"]),
-                Delete,
-            ),
-            (
-                "Enter",
-                args(false, false),
                 false,
-                true,
-                true,
-                Script::new(true, &["\n"]),
-                Keep,
+                Some(Keep),
             ),
-            (
-                "no",
-                args(false, false),
-                false,
-                true,
-                true,
-                Script::new(true, &["n"]),
-                Keep,
-            ),
-            // `--yes` alone answers no, and `--delete-data` yes.
             (
                 "--yes",
                 args(true, false),
                 false,
                 true,
                 true,
-                Script::new(true, &[]),
-                Keep,
+                true,
+                Some(Keep),
             ),
+            // `--delete-data`: yes.
             (
                 "--delete-data",
                 args(true, true),
                 false,
                 true,
                 true,
-                Script::new(false, &[]),
-                Delete,
+                false,
+                Some(Delete),
+            ),
+            (
+                "--delete-data, terminal",
+                args(false, true),
+                false,
+                true,
+                true,
+                true,
+                Some(Delete),
             ),
             // Never after a failed step, with a daemon on it, or for a
             // `--data-dir` folder.
@@ -678,8 +745,8 @@ mod tests {
                 false,
                 false,
                 true,
-                Script::new(true, &["y"]),
-                KeepForRetry,
+                true,
+                Some(KeepForRetry),
             ),
             (
                 "a daemon back",
@@ -687,8 +754,8 @@ mod tests {
                 false,
                 true,
                 false,
-                Script::new(true, &["y"]),
-                KeepDaemonRuns,
+                true,
+                Some(KeepDaemonRuns),
             ),
             (
                 "--data-dir",
@@ -696,24 +763,31 @@ mod tests {
                 true,
                 true,
                 true,
-                Script::new(true, &["y"]),
-                NotOurs,
+                true,
+                Some(NotOurs),
             ),
         ];
-        for (name, args, given, complete, stopped, mut script, want) in cases {
-            let got = data_folder(&args, given, complete, stopped, &mut script);
+        for (name, args, given, complete, stopped, terminal, want) in cases {
+            let got = data_folder(&args, given, complete, stopped, terminal);
             assert_eq!(got, want, "{name}");
-            let asked = if matches!(name, "yes" | "Enter" | "no") {
-                vec![strings::UNINSTALL_ALL_DATA_QUESTION.to_owned()]
-            } else {
-                Vec::new()
-            };
-            assert_eq!(script.asked, asked, "{name}");
+        }
+        // The answer, with no as the default.
+        for (answer, want) in [
+            ("y\n", Delete),
+            ("YES\r\n", Delete),
+            ("\n", Keep),
+            ("n", Keep),
+            ("delete", Keep),
+        ] {
+            assert_eq!(folder_for(answer), want, "{answer:?}");
         }
         assert_eq!(
             strings::UNINSTALL_ALL_DATA_QUESTION,
             "Delete the data folder (runtimes, settings, the CA)? [y/N] "
         );
+        let kept = strings::data_kept_ctrl_c(Path::new("/data"));
+        assert!(kept.contains("Kept the data folder /data"), "{kept}");
+        assert!(strings::UNINSTALL_ALL_STOP_CTRL_C.contains("may still be stopping"));
     }
 
     #[test]
@@ -974,7 +1048,8 @@ mod tests {
         );
         let deleted = strings::uninstall_all_plan(data, true, true);
         assert!(
-            deleted.contains("The data folder /data will be deleted."),
+            deleted
+                .contains("The data folder /data will be deleted once every step has succeeded."),
             "{deleted}"
         );
         for part in [
