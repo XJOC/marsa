@@ -18,6 +18,17 @@
 //! fails half way still deletes the link (`ExecStopPost=`). A `marsa0` that
 //! is there already is taken over: only root can make a link.
 //!
+//! Before systemd 253 the unit also adds a local route for `127.0.0.1` on
+//! `marsa0`. Those versions of resolved bind a link's DNS socket to the
+//! link while it connects, unless they know the server's address as a link
+//! address, so the packets to `127.0.0.1` left through the dummy link and
+//! were lost: the first `.test` lookup took 21 s on Ubuntu 22.04 (spike
+//! S-02c). With the route, the kernel delivers them locally: 0.01 s. From
+//! 253 on, resolved makes an exception for localhost, so the unit changes
+//! no routing there. `marsad` still listens on `127.0.0.1` only, and `lo`
+//! keeps its own route. Before systemd 250 Marsa makes no link at all
+//! ([`RESOLVED_SYSTEMD_TOO_OLD`]).
+//!
 //! The helper writes the unit only over a file Marsa wrote ([`marked`]),
 //! starts it, and checks the link with `resolvectl status marsa0`. A failed
 //! start or check takes the unit out again, so it does not run at the next
@@ -68,6 +79,12 @@ pub const RESOLVED_RESTART_FAILED: &str = "resolved_restart_failed";
 pub const RESOLVED_STOPPED: &str = "resolved_stopped";
 /// Deleting [`UNIT_FILE`] or [`DROP_IN`] failed.
 pub const RESOLVED_DELETE: &str = "resolved_delete";
+/// systemd is older than 250, or its version cannot be read. Its resolved
+/// counts a link that systemd-networkd calls "initialized" as managed, and
+/// clears what was set on it (spike S-02c), so Marsa makes no link there.
+/// Nothing was changed but the removal of an old drop-in. Task M4-18k gives
+/// these systems another way.
+pub const RESOLVED_SYSTEMD_TOO_OLD: &str = "resolved_systemd_too_old";
 
 /// Marsa's unit. `enable` links it into `multi-user.target`, so it runs at
 /// every boot.
@@ -106,6 +123,13 @@ const RESTART_UNIT: [&str; 2] = ["restart", UNIT_NAME];
 /// boot.
 const DISABLE: [&str; 3] = ["disable", "--now", UNIT_NAME];
 const STATUS: [&str; 2] = ["status", LINK];
+const VERSION: [&str; 1] = ["--version"];
+/// The first systemd whose resolved leaves a new link's settings alone
+/// while systemd-networkd looks at it.
+const FIRST_SYSTEMD: u32 = 250;
+/// The first systemd whose resolved does not bind its socket to the link
+/// for a server on localhost; before it, the unit adds the local route.
+const NO_BIND_BUG: u32 = 253;
 /// How many times the link is checked after the start, with a pause in
 /// between: resolved may take a moment to use a new link (S-02b).
 const CHECKS: u32 = 10;
@@ -153,6 +177,20 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
         let message = format!("{reason}, {nothing_else}");
         return OpResult::failed(INSTALL, RESOLVED_NOT_RUNNING, message);
     }
+    let version = match systemd_version(system) {
+        Ok(version) if version >= FIRST_SYSTEMD => version,
+        Ok(version) => {
+            let message = format!(
+                "systemd {version} is older than {FIRST_SYSTEMD}: its resolved can drop the \
+                 settings of Marsa's link, {nothing_else}"
+            );
+            return OpResult::failed(INSTALL, RESOLVED_SYSTEMD_TOO_OLD, message);
+        }
+        Err(reason) => {
+            let message = format!("{reason}, {nothing_else}");
+            return OpResult::failed(INSTALL, RESOLVED_SYSTEMD_TOO_OLD, message);
+        }
+    };
     let Some(ip) = IP.into_iter().find(|path| system.exists(Path::new(path))) else {
         let message = format!(
             "no ip program (iproute2) at {}, {nothing_else}",
@@ -160,7 +198,7 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
         );
         return OpResult::failed(INSTALL, RESOLVED_TOOL_MISSING, message);
     };
-    let content = unit(ip, port);
+    let content = unit(ip, port, version < NO_BIND_BUG);
     let in_place = current.as_deref() == Some(content.as_bytes());
     // In place, working, and enabled for the next boot: nothing to do.
     if in_place
@@ -223,7 +261,13 @@ pub fn remove(system: &impl System) -> OpResult {
 /// built out. Without `dnsovertls no`, a global `DNSOverTLS=yes` would make
 /// resolved speak TLS to `marsad`, which does not.
 /// `ExecStopPost=` runs after a stop, and also after a start that failed.
-fn unit(ip: &str, port: u16) -> String {
+/// `loopback_route`: before systemd 253 (see the module doc).
+fn unit(ip: &str, port: u16, loopback_route: bool) -> String {
+    let route = if loopback_route {
+        format!("ExecStart={ip} route add local 127.0.0.1/32 dev {LINK} table local metric 1024\n")
+    } else {
+        String::new()
+    };
     format!(
         "{MARKER}
 [Unit]
@@ -236,7 +280,7 @@ RemainAfterExit=yes
 ExecStart=-{ip} link add {LINK} type dummy
 ExecStart={ip} link set {LINK} up
 ExecStart=-{ip} addr add {ADDRESS} dev {LINK}
-ExecStart={RESOLVECTL} default-route {LINK} false
+{route}ExecStart={RESOLVECTL} default-route {LINK} false
 ExecStart={RESOLVECTL} domain {LINK} ~test
 ExecStart=-{RESOLVECTL} llmnr {LINK} no
 ExecStart=-{RESOLVECTL} mdns {LINK} no
@@ -256,8 +300,39 @@ fn server(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
-/// Loads the unit file, adds the unit to the boot, and (re)starts it.
+/// The version of systemd, from the first line of `systemctl --version`
+/// (`systemd 255 (255.4-1ubuntu8)`), or why it cannot be read.
+fn systemd_version(system: &impl System) -> Result<u32, String> {
+    let output = system.run(SYSTEMCTL, &VERSION);
+    let version = output
+        .as_ref()
+        .ok()
+        .filter(|output| output.code == Some(0))
+        .and_then(|output| {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let first = text.lines().next()?.to_owned();
+            first
+                .strip_prefix("systemd ")?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        });
+    version.ok_or_else(|| {
+        let reason = if program::succeeded(&output) {
+            "printed no version".to_owned()
+        } else {
+            program::failure(&output)
+        };
+        format!("cannot read the version of systemd: systemctl --version {reason}")
+    })
+}
+
+/// Loads the unit file, adds the unit to the boot, and (re)starts it. A
+/// failed state is cleared first: systemd refuses a sixth start in ten
+/// seconds (spike S-02c).
 fn start(system: &impl System) -> Result<(), String> {
+    let _ = system.run(SYSTEMCTL, &RESET_FAILED_UNIT);
     for args in [&DAEMON_RELOAD[..], &ENABLE, &RESTART_UNIT] {
         let output = system.run(SYSTEMCTL, args);
         if !program::succeeded(&output) {
@@ -546,6 +621,7 @@ mod tests {
     const IS_ENABLED_CMD: &str = "/usr/bin/systemctl is-enabled --quiet marsa-dns-link.service";
     const RESET_UNIT: &str = "/usr/bin/systemctl reset-failed marsa-dns-link.service";
     const LOOKED: &str = "/usr/bin/resolvectl status marsa0";
+    const VERSIONED: &str = "/usr/bin/systemctl --version";
     /// The mode of files that were there before a test, so a rewrite shows.
     const OLD_MODE: u32 = 0o600;
     const FOREIGN: &[u8] = b"[Unit]\nDescription=someone else's\n";
@@ -558,7 +634,7 @@ mod tests {
 
     /// Marsa's unit for `port`, with `ip` at its first path.
     fn ours(port: u16) -> Vec<u8> {
-        unit("/usr/sbin/ip", port).into_bytes()
+        unit("/usr/sbin/ip", port, false).into_bytes()
     }
 
     /// `marsa0` while it is there, as the lines of the unit left it.
@@ -571,6 +647,8 @@ mod tests {
         server: Option<String>,
         /// Set by `dnsovertls no`.
         no_dot: bool,
+        /// The local route for `127.0.0.1` on the link.
+        loopback_route: bool,
     }
 
     impl Link {
@@ -622,6 +700,8 @@ mod tests {
         resolvectl_fails: bool,
         /// `status` as systemd 262 prints it (Fedora 45).
         fedora: bool,
+        /// What `systemctl --version` says on its first line.
+        version_line: &'static str,
         /// A global `DNSOverTLS=yes`, which a link inherits.
         strict_dot: bool,
     }
@@ -648,6 +728,7 @@ mod tests {
                 none_for: Cell::new(0),
                 resolvectl_fails: false,
                 fedora: false,
+                version_line: "systemd 255 (255.4-1ubuntu8)",
                 strict_dot: false,
             };
             linux.put("/usr/sbin/ip", b"");
@@ -765,6 +846,20 @@ mod tests {
                 ["link", "del", "marsa0"] => *link = None,
                 ["link", "set", "marsa0", "up"] | ["llmnr" | "mdns", "marsa0", "no"] => {}
                 ["addr", "add", "169.254.53.53/32", "dev", "marsa0"] => there.address = true,
+                [
+                    "route",
+                    "add",
+                    "local",
+                    "127.0.0.1/32",
+                    "dev",
+                    "marsa0",
+                    "table",
+                    "local",
+                    "metric",
+                    "1024",
+                ] => {
+                    there.loopback_route = true;
+                }
                 ["default-route", "marsa0", value] => there.default_route = Some(*value == "true"),
                 ["dnsovertls", "marsa0", "no"] => there.no_dot = true,
                 ["domain", "marsa0", domains @ ..] => {
@@ -794,6 +889,7 @@ mod tests {
                 return exit(1, "");
             }
             match line {
+                "--version" => exit(0, &format!("{}\n+PAM +AUDIT +SELINUX\n", self.version_line)),
                 "is-active --quiet systemd-resolved.service" => {
                     let code = if self.active.get() { 0 } else { 3 };
                     exit(self.active_code.unwrap_or(code), "")
@@ -967,7 +1063,12 @@ mod tests {
         let linux = Linux::new();
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
         assert_eq!(linux.unit_file(), Some((ours(18053), 0o644)));
-        assert_eq!(linux.commands(), [ACTIVE, RELOAD, ENABLED, UNIT_UP, LOOKED]);
+        assert_eq!(
+            linux.commands(),
+            [
+                ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED
+            ]
+        );
         assert!(linux.enabled.get());
         assert_eq!(linux.server().as_deref(), Some("127.0.0.1:18053"));
     }
@@ -983,6 +1084,68 @@ mod tests {
         insta::assert_snapshot!(text);
     }
 
+    /// systemd 249 (Ubuntu 22.04) and an unreadable version: no link, and
+    /// the old drop-in still goes.
+    #[test]
+    fn a_systemd_before_250_gets_no_link() {
+        let mut old = Linux::new().with_drop_in();
+        old.version_line = "systemd 249 (249.11-0ubuntu3.12)";
+        let failed = install(18053, &old);
+        assert_eq!(code_of(&failed), RESOLVED_SYSTEMD_TOO_OLD);
+        assert_eq!(
+            message_of(&failed),
+            "systemd 249 is older than 250: its resolved can drop the settings of Marsa's link, \
+             so only Marsa's old global setting was removed"
+        );
+        assert_eq!((old.unit_file(), old.file(DROP_IN)), (None, None));
+        assert_eq!(
+            old.commands(),
+            [ACTIVE, RESET, RESTARTED, ACTIVE, VERSIONED]
+        );
+        let mut unknown = Linux::new();
+        unknown.version_line = "something else";
+        let failed = install(18053, &unknown);
+        assert_eq!(code_of(&failed), RESOLVED_SYSTEMD_TOO_OLD);
+        assert_eq!(
+            message_of(&failed),
+            "cannot read the version of systemd: systemctl --version printed no version, so \
+             nothing was changed"
+        );
+        assert_eq!(unknown.unit_file(), None);
+    }
+
+    /// Before 253 the unit adds the local route for `127.0.0.1`; from 253
+    /// on it changes no routing (see the module doc).
+    #[test]
+    fn the_loopback_route_comes_only_before_253() {
+        for (line, route) in [
+            ("systemd 250 (250.3)", true),
+            ("systemd 252 (252.36-1~deb12u1)", true),
+            ("systemd 253 (253.1)", false),
+            ("systemd 262 (262-1.fc45)", false),
+        ] {
+            let mut linux = Linux::new();
+            linux.version_line = line;
+            assert_eq!(
+                install(18053, &linux),
+                result(INSTALL, Outcome::Done),
+                "{line}"
+            );
+            let (bytes, _) = linux.unit_file().unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                text.contains("route add local 127.0.0.1/32 dev marsa0"),
+                route,
+                "{line}"
+            );
+            assert_eq!(
+                linux.link.borrow().as_ref().unwrap().loopback_route,
+                route,
+                "{line}"
+            );
+        }
+    }
+
     /// The first `ip` that is there goes into the unit.
     #[test]
     fn the_unit_uses_the_ip_that_is_there() {
@@ -995,7 +1158,7 @@ mod tests {
         linux.put("/bin/ip", b"");
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
         let (bytes, _) = linux.unit_file().unwrap();
-        assert_eq!(bytes, unit("/bin/ip", 18053).into_bytes());
+        assert_eq!(bytes, unit("/bin/ip", 18053, false).into_bytes());
     }
 
     #[test]
@@ -1014,7 +1177,7 @@ mod tests {
              nothing was changed"
         );
         assert_eq!(linux.unit_file(), None);
-        assert_eq!(linux.commands(), [ACTIVE]);
+        assert_eq!(linux.commands(), [ACTIVE, VERSIONED]);
     }
 
     /// The same unit, running and checked: one look, nothing written.
@@ -1025,7 +1188,10 @@ mod tests {
         linux.fake.fail_writes.insert(PathBuf::from(UNIT_FILE));
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Unchanged));
         assert_eq!(linux.unit_file(), Some((ours(18053), OLD_MODE)));
-        assert_eq!(linux.commands(), [ACTIVE, LOOKED, IS_ENABLED_CMD]);
+        assert_eq!(
+            linux.commands(),
+            [ACTIVE, VERSIONED, LOOKED, IS_ENABLED_CMD]
+        );
     }
 
     /// The same unit, but the link is gone (deleted by hand): started again,
@@ -1038,7 +1204,9 @@ mod tests {
         assert_eq!(linux.unit_file(), Some((ours(18053), OLD_MODE)));
         assert_eq!(
             linux.commands(),
-            [ACTIVE, LOOKED, RELOAD, ENABLED, UNIT_UP, LOOKED]
+            [
+                ACTIVE, VERSIONED, LOOKED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED
+            ]
         );
     }
 
@@ -1054,8 +1222,10 @@ mod tests {
             linux.commands(),
             [
                 ACTIVE,
+                VERSIONED,
                 LOOKED,
                 IS_ENABLED_CMD,
+                RESET_UNIT,
                 RELOAD,
                 ENABLED,
                 UNIT_UP,
@@ -1090,7 +1260,12 @@ mod tests {
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
         assert_eq!(linux.unit_file(), Some((ours(18053), 0o644)));
         assert_eq!(linux.server().as_deref(), Some("127.0.0.1:18053"));
-        assert_eq!(linux.commands(), [ACTIVE, RELOAD, ENABLED, UNIT_UP, LOOKED]);
+        assert_eq!(
+            linux.commands(),
+            [
+                ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED
+            ]
+        );
     }
 
     /// A foreign file, and a link to Marsa's very unit: both left alone,
@@ -1181,21 +1356,21 @@ mod tests {
             message_of(&failed),
             format!("cannot write {UNIT_FILE}: permission denied")
         );
-        assert_eq!(linux.commands(), [ACTIVE]);
+        assert_eq!(linux.commands(), [ACTIVE, VERSIONED]);
     }
 
     /// Each `systemctl` step of the start can fail: the unit goes again.
     #[test]
     fn a_unit_that_does_not_start_is_taken_out_again() {
         let steps = [
-            ("daemon-reload", vec![ACTIVE, RELOAD]),
+            ("daemon-reload", vec![ACTIVE, VERSIONED, RESET_UNIT, RELOAD]),
             (
                 "enable marsa-dns-link.service",
-                vec![ACTIVE, RELOAD, ENABLED],
+                vec![ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED],
             ),
             (
                 "restart marsa-dns-link.service",
-                vec![ACTIVE, RELOAD, ENABLED, UNIT_UP],
+                vec![ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP],
             ),
         ];
         for (step, mut commands) in steps {
@@ -1222,7 +1397,9 @@ mod tests {
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
         assert_eq!(
             linux.commands(),
-            [ACTIVE, RELOAD, ENABLED, UNIT_UP, LOOKED, LOOKED, LOOKED]
+            [
+                ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP, LOOKED, LOOKED, LOOKED
+            ]
         );
     }
 
@@ -1237,7 +1414,7 @@ mod tests {
             message_of(&failed),
             format!("systemd-resolved does not use marsa0 for DNS; {UNIT_FILE} was removed again")
         );
-        let mut commands = vec![ACTIVE, RELOAD, ENABLED, UNIT_UP];
+        let mut commands = vec![ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP];
         commands.extend([LOOKED; 10]);
         commands.extend([DISABLED, RELOAD, RESET_UNIT]);
         assert_eq!(linux.commands(), commands);
@@ -1384,7 +1561,8 @@ mod tests {
         assert_eq!(
             linux.commands(),
             [
-                ACTIVE, RESET, RESTARTED, ACTIVE, RELOAD, ENABLED, UNIT_UP, LOOKED
+                ACTIVE, RESET, RESTARTED, ACTIVE, VERSIONED, RESET_UNIT, RELOAD, ENABLED, UNIT_UP,
+                LOOKED
             ]
         );
     }
@@ -1397,7 +1575,15 @@ mod tests {
         assert_eq!(linux.file(DROP_IN), None);
         assert_eq!(
             linux.commands(),
-            [ACTIVE, RESET, RESTARTED, ACTIVE, LOOKED, IS_ENABLED_CMD]
+            [
+                ACTIVE,
+                RESET,
+                RESTARTED,
+                ACTIVE,
+                VERSIONED,
+                LOOKED,
+                IS_ENABLED_CMD
+            ]
         );
     }
 
