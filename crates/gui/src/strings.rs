@@ -1002,8 +1002,9 @@ fn error_message(code: &str) -> Option<&'static str> {
         }
         "setup_prompt_failed" => {
             "macOS could not show the administrator password prompt, so nothing was changed. \
+             Make sure this Mac's desktop is unlocked. \
              Quit the Marsa window and the menu-bar icon, run \"marsa daemon stop\" in \
-             Terminal, then run setup again."
+             Terminal, then run \"marsa setup\" there, on your desktop."
         }
         "setup_helper_failed" => {
             "marsa-helper gave an answer Marsa cannot read, so the result of setup is not known. \

@@ -419,9 +419,10 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              there."
             .into(),
         "setup_prompt_failed" => "macOS could not show the administrator password prompt, so \
-             nothing was changed. Quit the Marsa window and the menu-bar icon, run \"marsa daemon \
-             stop\", then run \"marsa setup\" again in Terminal on your desktop. The error \
-             number is in the file logs/marsad.log."
+             marsa-helper did not run. Make sure you are logged in at this Mac's desktop and it \
+             is unlocked. Quit the Marsa window and the menu-bar icon, run \"marsa daemon \
+             stop\", then run \"marsa setup\" again in Terminal. The error number is in the \
+             file logs/marsad.log."
             .into(),
         "setup_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the result \
              of setup is not known. Run \"marsa setup\" again; if it repeats, report it with \
@@ -543,9 +544,10 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              --all\" again. The path is in the file logs/marsad.log."
             .into(),
         "uninstall_prompt_failed" => "macOS could not show the administrator password prompt, \
-             so nothing was removed. Quit the Marsa window and the menu-bar icon, run \"marsa \
-             daemon stop\", then run \"marsa uninstall --all\" again in Terminal on your \
-             desktop. The error number is in the file logs/marsad.log."
+             so marsa-helper did not run and nothing was removed. Make sure you are logged in at \
+             this Mac's desktop and it is unlocked. Quit the Marsa window and the menu-bar icon, \
+             run \"marsa daemon stop\", then run \"marsa uninstall --all\" again in Terminal. \
+             The error number is in the file logs/marsad.log."
             .into(),
         "uninstall_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the \
              result is not known, and Marsa removed nothing else. Run \"marsa uninstall --all\" \
