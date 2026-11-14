@@ -7,6 +7,7 @@ pub mod autostart;
 pub mod browser;
 pub mod daemon_file;
 pub mod low_ports;
+pub mod probe;
 pub mod process;
 pub mod signals;
 pub mod spawn;
