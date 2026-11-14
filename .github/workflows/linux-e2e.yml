@@ -1,0 +1,138 @@
+name: linux-e2e
+
+# The Linux side of the Phase 1 gate (task M4-18f): from the built programs
+# to an open Laravel page, on real Ubuntu machines. The job downloads
+# runtimes and changes the system with sudo, which is fine here and only
+# here: a runner is thrown away after the job. It is not part of the tests
+# that `cargo nextest` runs.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["task/M4-18*", main]
+    paths:
+      - "crates/helper/**"
+      - "crates/core/src/platform/**"
+      - "crates/core/src/caddy.rs"
+      - "crates/core/src/dns.rs"
+      - "crates/core/src/helper.rs"
+      - "crates/app/src/daemon/**"
+      - "tools/e2e/**"
+      - "spikes/s02-linux/**"
+      - ".github/workflows/linux-e2e.yml"
+
+# Read-only on purpose: the job never writes to the repository.
+permissions:
+  contents: read
+
+# A new run on the same branch cancels the older one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  e2e:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      # Reads the pinned version from rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      # One cache per system: objects built on 24.04 use symbols of its newer
+      # glibc (`__isoc23_sscanf`) and fail to link on 22.04.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Build marsa, marsad, and marsa-helper
+        run: cargo build --release -p marsa -p marsa-helper
+
+      # Built alone: workspace feature unification would drag tokio into the
+      # shim (architecture.md section 3).
+      - name: Build the shim
+        run: cargo build --release -p marsa-shim
+
+      - name: End to end
+        env:
+          # Composer downloads packages from GitHub. With the job's own
+          # read-only token it is not held back by the anonymous rate limit.
+          COMPOSER_AUTH: '{"github-oauth": {"github.com": "${{ github.token }}"}}'
+        run: bash tools/e2e/linux.sh
+
+      # Logs only. `run/daemon.json` holds the daemon token and is never
+      # uploaded.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: marsa-logs-${{ matrix.os }}
+          path: ~/.local/share/marsa/logs
+          if-no-files-found: ignore
+
+  # The helper's Linux ops in a container with systemd as PID 1: Fedora
+  # (systemd 257 or later) and Debian 12 (systemd 252, where the unit adds
+  # the local route for 127.0.0.1), with a restart of the container between
+  # the two phases. The restart boots systemd again in a new network
+  # namespace, so only Marsa's unit can make marsa0 again (reviews of #114
+  # and #111). The helper is built on 22.04: its glibc (2.35) is older than
+  # the containers' own.
+  container:
+    name: ${{ matrix.system }} (container, the helper)
+    strategy:
+      fail-fast: false
+      matrix:
+        system: [fedora, debian12]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: container-ubuntu-22.04
+
+      - name: Build marsa-helper
+        run: cargo build --release -p marsa-helper
+
+      - name: Build the image
+        run: docker build -t marsa-e2e-${{ matrix.system }} -f tools/e2e/${{ matrix.system }}.Dockerfile tools/e2e
+
+      - name: Start systemd in the container
+        run: |
+          docker run -d --name box --privileged --cgroupns=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw -v "$PWD:/repo:ro" marsa-e2e-${{ matrix.system }}
+          bash tools/e2e/container-boot.sh
+          docker exec box bash /repo/spikes/s02-linux/fedora-prepare.sh
+
+      - name: Before the boot
+        run: docker exec -e CI=true box bash /repo/tools/e2e/container.sh before-boot
+
+      - name: Boot again
+        run: |
+          docker restart box
+          bash tools/e2e/container-boot.sh
+          docker exec box bash /repo/spikes/s02-linux/fedora-prepare.sh
+
+      - name: After the boot
+        run: docker exec -e CI=true box bash /repo/tools/e2e/container.sh after-boot
+
+      - name: The journal of the unit
+        if: always()
+        run: docker exec box journalctl -u marsa-dns-link -u systemd-resolved -b --no-pager | tail -n 60 || true
