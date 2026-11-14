@@ -16,6 +16,8 @@ marsa-core = { path = "../core" }
 anyhow.workspace = true
 eframe.workspace = true
 egui_extras.workspace = true
+# The native folder picker of "Park a folder…" and "Link a folder…".
+rfd.workspace = true
 # The type of `Site::php`; the PHP and Node lists compare versions.
 semver.workspace = true
 # The menu-bar icon: the event loop, and the icon with its menu.
