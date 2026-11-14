@@ -278,7 +278,7 @@ fn answer(query: &LowerQuery) -> (ResponseCode, Option<Record>) {
     let data = match (query.query_type(), query.query_class()) {
         (RecordType::A, DNSClass::IN) => Some(RData::A(A(Ipv4Addr::LOCALHOST))),
         // The zone's own SOA, asked at its top: `test.`.
-        (RecordType::SOA, DNSClass::IN) if query.name().num_labels() == 1 => {
+        (RecordType::SOA, DNSClass::IN) if query.name().iter().count() == 1 => {
             Some(RData::SOA(soa_data()))
         }
         _ => None,
@@ -302,7 +302,7 @@ fn zone_soa() -> Record {
 /// has none of.
 fn soa_data() -> SOA {
     let mname = Name::from_ascii("localhost.").expect("`localhost.` is a valid name");
-    let rname = Name::from_ascii("hostmaster.test.").expect("a valid name");
+    let rname = Name::from_ascii("hostmaster.test.").expect("`hostmaster.test.` is a valid name");
     SOA::new(mname, rname, 1, 3600, 600, 86_400, TTL)
 }
 
@@ -431,6 +431,14 @@ mod tests {
                 vec!["test. 1 localhost. hostmaster.test. 1 3600 600 86400 1"],
             ),
             ("shop.test.", RecordType::SOA, ok, vec![]),
+            // `*` is a label like any other: not the zone's top.
+            ("*.test.", RecordType::SOA, ok, vec![]),
+            (
+                "TEST.",
+                RecordType::SOA,
+                ok,
+                vec!["TEST. 1 localhost. hostmaster.test. 1 3600 600 86400 1"],
+            ),
             ("example.com.", RecordType::A, ResponseCode::Refused, vec![]),
         ];
         for (name, kind, code, answers) in cases {
@@ -445,7 +453,10 @@ mod tests {
             // An empty answer in the zone carries its SOA, with MINIMUM 1
             // (RFC 2308); an answer with a record, or REFUSED, carries none.
             let soa = (code == ok && answers.is_empty()).then(|| ("test.".to_owned(), TTL, TTL));
-            assert_eq!(authority_soa(&reply), soa, "{name} {kind}");
+            match soa {
+                Some(_) => assert_eq!(authority_soa(&reply), soa, "{name} {kind}"),
+                None => assert!(reply.authorities.is_empty(), "{name} {kind}"),
+            }
             assert!(!reply.metadata.recursion_available, "{name} {kind}");
         }
         server.stop(LIMIT).await;
