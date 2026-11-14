@@ -5,9 +5,9 @@
 //!
 //! Each pair of macOS ops has its own file, so their tasks do not touch the
 //! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). Linux
-//! has `resolved` (M4-18a), `ports` (M4-18b), and `trust_linux` (M4-18c),
-//! which uses the PEM parser of `trust`. Windows has `hosts` (M4-19d) and
-//! `trust_windows` (M4-19e).
+//! has `resolved` (M4-18a, M4-18h), `ports` (M4-18b), and `trust_linux`
+//! (M4-18c), which uses the PEM parser of `trust`. Windows has `hosts`
+//! (M4-19d) and `trust_windows` (M4-19e).
 
 mod hosts;
 mod marked;

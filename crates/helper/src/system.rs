@@ -114,6 +114,13 @@ pub trait System {
         let _ = (program, args);
         Err(only_windows())
     }
+
+    /// Waits `duration` before an op looks again, as when systemd-resolved
+    /// takes a moment to use a new link. [`RealSystem`] sleeps. The default
+    /// returns at once, so tests do not wait.
+    fn pause(&self, duration: Duration) {
+        let _ = duration;
+    }
 }
 
 fn only_windows() -> io::Error {
@@ -242,6 +249,10 @@ impl System for RealSystem {
             let _ = (program, args);
             Err(only_windows())
         }
+    }
+
+    fn pause(&self, duration: Duration) {
+        thread::sleep(duration);
     }
 }
 
