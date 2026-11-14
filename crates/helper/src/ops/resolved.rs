@@ -525,6 +525,10 @@ mod tests {
             self.fake.remove(path)
         }
 
+        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
+            self.fake.remove_empty_dir(path)
+        }
+
         fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
             let strings = args.iter().map(|arg| (*arg).to_owned()).collect();
             self.fake
@@ -1046,6 +1050,10 @@ mod tests {
 
         fn remove(&self, path: &Path) -> io::Result<()> {
             self.0.remove(path)
+        }
+
+        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
+            self.0.remove_empty_dir(path)
         }
 
         fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {

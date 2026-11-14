@@ -1,6 +1,7 @@
 //! Start-up and shutdown: lock file, bind, `run/daemon.json`, serve. Task M3-06.
 //! The DNS server for `.test` starts and stops with it (task M4-12), and so
-//! does the parked folder watcher (task M4-10d).
+//! does the parked folder watcher (task M4-10d). An installed Caddy starts
+//! with it too (task M5-16).
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -12,9 +13,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use axum::Router;
+use marsa_core::installer::uninstall::clean_retired;
 use marsa_core::platform::daemon_file::{self, DaemonFile, Token};
 use marsa_core::platform::low_ports;
 use marsa_core::platform::signals::shutdown_signal;
+use marsa_core::runtimes::RuntimesDir;
 use marsa_core::types::Event;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -22,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use super::api;
 use super::auth::AuthConfig;
 use super::autostart_api::Autostart;
+use super::caddy;
 use super::dns;
 use super::sites_sync;
 use super::state::Daemon;
@@ -35,6 +39,9 @@ const DRAIN_LIMIT: Duration = Duration::from_secs(5);
 const DNS_STOP_LIMIT: Duration = Duration::from_secs(2);
 /// How long shutdown waits for the parked folder watcher.
 const WATCH_STOP_LIMIT: Duration = Duration::from_secs(2);
+/// How long shutdown waits for the start of Caddy with the daemon. It ends at
+/// once at the shutdown token.
+const LAUNCH_STOP_LIMIT: Duration = Duration::from_secs(2);
 /// How long a busy `run/daemon.lock` is tried again before giving up. A
 /// client probes it with a short shared lock every 50 ms; a probe must not
 /// make a starting daemon exit.
@@ -79,6 +86,12 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     if let Err(err) = daemon_file::remove_daemon_file(&run_dir) {
         tracing::warn!(code = err.code(), error = %err, "cannot delete an old daemon.json");
     }
+    // What an uninstall that stopped half way left (task M5-07). Before the
+    // API serves, so no new uninstall runs meanwhile.
+    let runtimes = RuntimesDir::in_dir(&data_dir);
+    if let Err(err) = tokio::task::spawn_blocking(move || clean_retired(&runtimes)).await {
+        tracing::warn!(error = %err, "the cleanup of unfinished uninstalls failed");
+    }
     // Before `daemon.json` exists, so a client that found the daemon can
     // already stop it with a signal.
     let signal = shutdown_signal();
@@ -113,6 +126,10 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     }
     // From here on, PHP pools and Caddy's config follow the sites (task M4-11).
     let sync = sites_sync::start(&daemon);
+    // An installed Caddy starts in the background (task M5-16). After the
+    // sync task subscribed, so Caddy's `Running` asks it for a pass. A
+    // failure is only a warning and Caddy's status: the daemon runs on.
+    let launch = caddy::start_at_launch(&daemon);
     // After the first build, so it starts from its parked folders. It stops
     // when `daemon.shutdown` is cancelled.
     let watcher = watch::start(&daemon);
@@ -120,12 +137,17 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     // port in use is only a warning: the daemon runs on without it.
     let dns = dns::start_for_daemon(&daemon.shutdown).await;
     let app = api::router(daemon.clone(), auth);
-    let result = serve(listener, app, daemon, signal).await;
+    let result = serve(listener, app, Arc::clone(&daemon), signal).await;
     // The watcher first: it is what asks the sync task for passes.
     if let Some(watcher) = watcher {
         watcher.stop(WATCH_STOP_LIMIT).await;
     }
     sync.stop().await;
+    launch.wait(LAUNCH_STOP_LIMIT).await;
+    // A pool or a Caddy that one of these tasks put in `procs` after the
+    // shutdown's own sweep: `add_proc` told it to stop, and this waits for it.
+    // The map is empty otherwise, and this returns at once.
+    daemon.stop_procs(PROCS_LIMIT).await;
     // Before the lock goes, so the next daemon finds the DNS port free.
     if let Some(dns) = dns {
         dns.stop(DNS_STOP_LIMIT).await;

@@ -2,7 +2,7 @@
 //!
 //! Two files live in `<app data dir>/config/` (architecture.md section 7):
 //!
-//! - `global.toml`: the default PHP and Node versions,
+//! - `global.toml`: the default PHP and Node versions, and Xdebug on or off,
 //! - `sites.toml`: the settings of each site.
 //!
 //! The functions take the file path as input, so tests use temp folders. Only
@@ -26,6 +26,7 @@ const HEADER: &str = "# Managed by Marsa. Comments in this file are not kept.\n"
 #[serde(default, deny_unknown_fields)]
 pub struct GlobalConfig {
     pub php: ToolDefaults,
+    #[serde(deserialize_with = "node_defaults")]
     pub node: ToolDefaults,
 }
 
@@ -37,6 +38,11 @@ pub struct ToolDefaults {
     /// The version as the user wrote it. The resolver checks it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
+    /// `[php]` only: every `php.ini` Marsa writes loads Xdebug (task M5-11).
+    /// The default is `false`, so the file only says `xdebug = true`, and a
+    /// file from before this key reads as off.
+    #[serde(skip_serializing_if = "is_false")]
+    pub xdebug: bool,
 }
 
 /// `sites.toml`.
@@ -358,6 +364,25 @@ fn is_true(value: &bool) -> bool {
     *value
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// The `[node]` table. It has no `xdebug`: the key is refused there like any
+/// unknown key, with its line.
+fn node_defaults<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ToolDefaults, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Node {
+        default: Option<String>,
+    }
+    let Node { default } = Node::deserialize(deserializer)?;
+    Ok(ToolDefaults {
+        default,
+        xdebug: false,
+    })
+}
+
 /// The `[sites.<name>]` tables. Each name is checked as its key is read, so
 /// `toml` adds the line of the bad table to the error.
 fn site_tables<'de, D: Deserializer<'de>>(
@@ -426,9 +451,11 @@ mod tests {
         GlobalConfig {
             php: ToolDefaults {
                 default: Some(php.to_owned()),
+                xdebug: false,
             },
             node: ToolDefaults {
                 default: Some(node.to_owned()),
+                xdebug: false,
             },
         }
     }
@@ -477,6 +504,34 @@ mod tests {
             "[php]\ndefault = \"8.4\"\n\n[node]\ndefault = \"22\"\n",
         );
         assert_eq!(load_global(&path).unwrap(), global("8.4", "22"));
+    }
+
+    #[test]
+    fn xdebug_is_a_php_key_and_off_unless_the_file_says_true() {
+        let dir = TempDir::new().unwrap();
+        // A file from before the key.
+        let old = file(&dir, "old.toml", "[php]\ndefault = \"8.4\"\n");
+        assert!(!load_global(&old).unwrap().php.xdebug);
+
+        let path = file(&dir, "global.toml", "[php]\nxdebug = true\n");
+        let mut config = load_global(&path).unwrap();
+        assert!(config.php.xdebug);
+        assert_eq!(config.php.default, None);
+        save_global(&path, &config).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text, format!("{HEADER}\n[php]\nxdebug = true\n\n[node]\n"));
+        assert_eq!(load_global(&path).unwrap(), config);
+
+        // Off is not written.
+        config.php.xdebug = false;
+        save_global(&path, &config).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text, format!("{HEADER}\n[php]\n\n[node]\n"));
+
+        let path = file(&dir, "node.toml", "[node]\nxdebug = true\n");
+        assert_invalid(&load_global(&path).unwrap_err(), &path, "xdebug");
+        let path = file(&dir, "text.toml", "[php]\nxdebug = \"on\"\n");
+        assert_invalid(&load_global(&path).unwrap_err(), &path, "line 2");
     }
 
     #[test]
