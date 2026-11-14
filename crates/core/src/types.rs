@@ -581,8 +581,7 @@ pub struct UninstallReport {
     /// `uninstall_cancelled`, `uninstall_not_authorized`,
     /// `uninstall_timed_out`, `uninstall_interrupted`,
     /// `uninstall_helper_missing`, `uninstall_helper_unsafe`,
-    /// `uninstall_helper_protected_folder`, `uninstall_helper_failed`, or
-    /// `uninstall_helper_rejected`. Nothing after the helper ran then, and
+    /// `uninstall_helper_failed`, or `uninstall_helper_rejected`. Nothing after the helper ran then, and
     /// the daemon keeps running. `None` if the helper answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,

@@ -6,11 +6,12 @@
 //!
 //! The steps, on a blocking thread, in this order:
 //!
-//! 1. **Preflight**, as for setup: a `marsa-helper` inside `~/Desktop`,
-//!    `~/Documents`, or `~/Downloads`, then one that is missing or that
-//!    another user could change, ends the request before any prompt
-//!    (`uninstall_helper_protected_folder`, `uninstall_helper_missing`,
-//!    `uninstall_helper_unsafe`).
+//! 1. **Preflight**, as for setup but without its folder check: a
+//!    `marsa-helper` that is missing or that another user could change ends
+//!    the request before any prompt (`uninstall_helper_missing`,
+//!    `uninstall_helper_unsafe`). A helper inside `~/Desktop`, `~/Documents`,
+//!    or `~/Downloads` runs: root can run it from there, and `uninstall_all`
+//!    does not read the binary, which is what fails there (task M4-17).
 //! 2. **Helper:** `uninstall_all` behind the one admin prompt of ADR 0012:
 //!    the `pf` redirect and its boot job, `/etc/resolver/test`, a trust
 //!    added as root before ADR 0015, then `/Library/Application
@@ -658,26 +659,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_helper_in_a_protected_folder_is_refused_before_any_prompt() {
-        for folder in ["Desktop", "Documents", "Downloads"] {
+    async fn a_helper_in_a_protected_folder_runs_the_uninstall_as_usual() {
+        // Root runs a helper from these folders through `osascript`; only
+        // reading the binary fails there, and `uninstall_all` reads none.
+        for folder in ["Desktop", "Documents", "Downloads", "desktop"] {
             let dir = Dir::new();
             let helper = dir.home().join(folder).join("marsa").join("marsa-helper");
             make_helper(&helper);
-            let fake = Fake::no_prompt();
-            let setup = dir.setup_with(&fake, Some(Platform::DarwinArm64), Some(helper));
+            let fake = Fake::all_done();
+            let setup = dir.setup_with(&fake, Some(Platform::DarwinArm64), Some(helper.clone()));
             let app = App::new(&dir, setup);
 
             let report = app.uninstall().await;
-            let error = report.error.as_ref().expect(folder);
-            assert_eq!(error.code, "uninstall_helper_protected_folder");
+            assert_eq!(report.error, None, "{folder}");
+            assert!(report.stopping && app.stopping(), "{folder}");
+            assert_eq!(report.results.len(), 5, "{folder}");
             assert!(
-                error.message.contains("marsa uninstall --all") && error.message.contains(folder),
-                "{}",
-                error.message
+                report
+                    .results
+                    .iter()
+                    .all(|result| result.status == OpStatus::Done),
+                "{folder}: {:?}",
+                report.results
             );
-            assert!(report.results.is_empty() && !report.stopping);
-            assert!(fake.programs().is_empty());
-            assert!(dir.untouched() && !app.stopping());
+            // The one prompt ran that helper.
+            let calls = fake.calls();
+            assert_eq!(calls[0].0, OSASCRIPT, "{folder}");
+            assert_eq!(calls[0].1[6], helper.to_str().unwrap(), "{folder}");
+            assert!(!dir.login_file().exists() && !dir.record().exists());
         }
     }
 

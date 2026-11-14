@@ -42,8 +42,9 @@
 //! 501 `setup_not_supported` until tasks M4-18 and M4-19.
 //!
 //! `POST /v1/uninstall` (task M5-13, `uninstall_api.rs`) shares [`Setup`]:
-//! the same runner, the same helper checks and admin prompt ([`Flow`] gives
-//! each its own error codes), and the same one-at-a-time flag.
+//! the same runner, the same helper file check and admin prompt ([`Flow`]
+//! gives each its own error codes), and the same one-at-a-time flag. The
+//! protected-folder check of step 4 is setup's only ([`Setup::launch`]).
 //!
 //! Every program runs through [`Runner`], so the tests run none: they pass a
 //! fake that records each call and answers from fixtures.
@@ -213,14 +214,6 @@ impl Flow {
         match self {
             Self::Setup => "setup",
             Self::Uninstall => "the uninstall",
-        }
-    }
-
-    /// The command that runs it again.
-    fn command(self) -> &'static str {
-        match self {
-            Self::Setup => "marsa setup",
-            Self::Uninstall => "marsa uninstall --all",
         }
     }
 
@@ -658,10 +651,16 @@ impl Setup {
 
     /// Sends `ops` to the helper behind the admin prompt and reads its
     /// answer, with the error codes of `flow`. With no operation nothing
-    /// runs and no prompt shows. The helper is checked first: a path in a
-    /// folder macOS keeps root out of (on macOS; by the path alone, before
-    /// any look at the file), or a file that is missing or that another user
-    /// could change, means no prompt.
+    /// runs and no prompt shows. The helper is checked first: a file that is
+    /// missing or that another user could change means no prompt, and so
+    /// does, for setup only, a path in a folder macOS keeps root out of (on
+    /// macOS; by the path alone, before any look at the file).
+    ///
+    /// The uninstall skips the folder check: root runs a helper from those
+    /// folders through `osascript` (task M4-17: `resolver_install` worked
+    /// from `~/Desktop`), and only the boot job's copy of the binary, which
+    /// `pf_install` reads, fails there. `uninstall_all` reads no binary, so
+    /// moving Marsa first would only be in the user's way.
     pub(super) fn launch(
         &self,
         flow: Flow,
@@ -682,7 +681,7 @@ impl Setup {
         let helper = self.helper.as_deref().ok_or_else(missing)?;
         // First: it reads nothing, and the advice to move Marsa comes before
         // any word about the file itself.
-        let protected = is_macos(platform)
+        let protected = (flow == Flow::Setup && is_macos(platform))
             .then(|| protected_folder(helper, self.home.as_deref()))
             .flatten();
         if let Some(folder) = protected {
@@ -691,17 +690,13 @@ impl Setup {
                 folder = %folder.display(),
                 "marsa-helper is in a folder macOS keeps root out of; no admin prompt"
             );
-            let why = match flow {
-                Flow::Setup => "so root could not read it to set up the boot job",
-                Flow::Uninstall => "so Marsa does not run it as root from there",
-            };
             let message = format!(
-                "marsa-helper is inside {}, a folder macOS protects, {why}; run \"marsa daemon \
-                 stop\", move Marsa to {INSTALL_BIN}, and run \"{}\" from there",
-                folder.display(),
-                flow.command(),
+                "marsa-helper is inside {}, a folder macOS protects, so root could not read \
+                 it to set up the boot job; run \"marsa daemon stop\", move Marsa to \
+                 {INSTALL_BIN}, and run \"marsa setup\" from there",
+                folder.display()
             );
-            return Err(failure(&flow.code("helper_protected_folder"), message));
+            return Err(failure("setup_helper_protected_folder", message));
         }
         match check_helper(helper) {
             Ok(()) => {}

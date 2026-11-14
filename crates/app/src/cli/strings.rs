@@ -467,12 +467,6 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              both yours and writable only by you (chmod go-w), then run \"marsa uninstall \
              --all\" again. The path is in the file logs/marsad.log."
             .into(),
-        "uninstall_helper_protected_folder" => "marsa-helper is inside Desktop, Documents, or \
-             Downloads, and macOS keeps the admin part of Marsa out of those folders, so \
-             nothing was removed. Run \"marsa daemon stop\", move Marsa's programs to \
-             ~/Library/Application Support/dev.marsa.Marsa/bin, then run \"marsa uninstall \
-             --all\" from there."
-            .into(),
         "uninstall_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the \
              result is not known, and Marsa removed nothing else. Run \"marsa uninstall --all\" \
              again; if it repeats, report it with the file logs/marsad.log."
@@ -1063,7 +1057,6 @@ mod tests {
         "uninstall_not_authorized",
         "uninstall_helper_missing",
         "uninstall_helper_unsafe",
-        "uninstall_helper_protected_folder",
         "uninstall_helper_failed",
         "uninstall_helper_rejected",
         "uninstall_needs_yes",
