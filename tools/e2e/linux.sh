@@ -3,7 +3,7 @@
 # Task M4-18f, the Linux side of the Phase 1 gate.
 #
 # It downloads runtimes, creates a Laravel project, and changes the system
-# with sudo (systemd-resolved config and a sysctl). Run it only on a machine
+# with sudo (a systemd unit, systemd-resolved, and a sysctl). Run it only on a machine
 # that is thrown away afterwards: a GitHub runner. It refuses to start
 # anywhere else. It is not part of `cargo nextest`.
 #
@@ -25,6 +25,8 @@ BIN=$DATA/bin
 SHIMS=$DATA/shims
 SITE=laravel-app.test
 CODE=$HOME/Code
+UNIT=/etc/systemd/system/marsa-dns-link.service
+# The global drop-in of earlier builds (task M4-18a): the helper removes it.
 DROPIN=/etc/systemd/resolved.conf.d/marsa.conf
 SYSCTL_FILE=/etc/sysctl.d/60-marsa.conf
 PORT_START=/proc/sys/net/ipv4/ip_unprivileged_port_start
@@ -50,7 +52,9 @@ diagnose() {
   "$BIN/marsa" logs caddy | tail -n 40
   ls -la "$DATA" "$DATA/logs"
   tail -n 40 "$DATA"/logs/*.log
-  resolvectl status | head -n 30
+  resolvectl status | head -n 40
+  systemctl status marsa-dns-link.service --no-pager
+  ip -brief addr show marsa0
   sudo ss -H -ltnp | grep -E ':(80|443|18019|18053|18080|18443)\b'
   cat "$PORT_START"
 }
@@ -69,6 +73,22 @@ helper() {
 # The statuses of the last answer, in order, such as "done unchanged".
 statuses() { echo "$ANSWER" | grep -o '"status":"[a-z]*"' | cut -d'"' -f4 | tr '\n' ' ' | sed 's/ $//'; }
 codes() { echo "$ANSWER" | grep -o '"code":"[a-z_]*"' | cut -d'"' -f4 | tr '\n' ' ' | sed 's/ $//'; }
+
+# Waits until "$1" resolves to 127.0.0.1, 10 s at most: systemd-resolved
+# may take a moment to use a new link (spike S-02b, systemd 249).
+wait_for_name() {
+  local i
+  for i in $(seq 1 20); do
+    if [ "$(getent ahostsv4 "$1" | awk 'NR==1 {print $1}')" = 127.0.0.1 ]; then
+      echo "$1 resolves (try $i)"
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+# The first IPv4 address of "$1", or "none".
+address_of() { getent ahostsv4 "$1" | awk 'NR==1 {print $1}' | grep . || echo none; }
 
 # Waits until `curl "$@"` prints a page with "Laravel" in it, 60 s at most.
 wait_for_laravel() {
@@ -109,16 +129,52 @@ if resolvectl query "$SITE" >/dev/null 2>&1; then
 fi
 
 step "the helper: .test names and ports 80 and 443"
+# An old global drop-in of Marsa's, as earlier builds wrote it: it goes.
+sudo mkdir -p "$(dirname "$DROPIN")"
+printf '# Managed by Marsa. Do not edit.\n[Resolve]\nDNS=127.0.0.1:18053\nDomains=~test\n' | sudo tee "$DROPIN"
+sudo systemctl reset-failed systemd-resolved
+sudo systemctl restart systemd-resolved
 helper '[{"op":"resolved_install","port":18053},{"op":"ports_install"}]' || fail "the helper exited with $?"
 [ "$(statuses)" = "done done" ] || fail "expected done done, got: $(statuses)"
-run cat "$DROPIN"
+[ ! -e "$DROPIN" ] || fail "the old drop-in $DROPIN is still there"
+run cat "$UNIT"
 run cat "$SYSCTL_FILE"
-[ "$(stat -c '%U:%G %a' "$DROPIN")" = "root:root 644" ] || fail "wrong owner or mode on $DROPIN"
+[ "$(stat -c '%U:%G %a' "$UNIT")" = "root:root 644" ] || fail "wrong owner or mode on $UNIT"
 [ "$(stat -c '%U:%G %a' "$SYSCTL_FILE")" = "root:root 644" ] || fail "wrong owner or mode on $SYSCTL_FILE"
+[ "$(systemctl is-enabled marsa-dns-link.service)" = enabled ] || fail "the unit is not enabled"
+[ "$(systemctl is-active marsa-dns-link.service)" = active ] || fail "the unit is not active"
 [ "$(cat "$PORT_START")" = 80 ] || fail "ip_unprivileged_port_start is $(cat "$PORT_START"), not 80"
+run resolvectl status marsa0
+run ip -brief addr show marsa0
 # The real DNS server of marsad answers, through systemd-resolved.
+wait_for_name "$SITE" || fail "$SITE does not resolve"
 run resolvectl query "$SITE"
 run getent hosts "$SITE"
+
+step "only .test names reach port 18053: a forger there cannot answer other names"
+# marsad stops, so its port is free, and a stand-in that answers every name
+# with 10.9.9.9 takes it, as a program that grabs the port would.
+run marsa daemon stop
+python3 "$REPO/spikes/s02-linux/dns-standin.py" 18053 "$HOME/forger-queries.log" spoof &
+FORGER=$!
+sleep 1
+run sudo resolvectl flush-caches
+for name in example.com github.com; do
+  answer=$(address_of "$name")
+  echo "$name -> $answer"
+  [ "$answer" != 10.9.9.9 ] || fail "the forger on 18053 answered for $name"
+done
+answer=$(address_of "$SITE")
+echo "$SITE -> $answer (the forger may answer .test names only)"
+other=$(grep -c ' other ' "$HOME/forger-queries.log" 2>/dev/null || true)
+other=${other:-0}
+echo "queries outside .test at port 18053: $other"
+[ "$other" = 0 ] || fail "$other queries outside .test reached port 18053"
+kill "$FORGER"
+wait "$FORGER" 2>/dev/null || true
+run sudo resolvectl flush-caches
+run marsa daemon start
+wait_for_name "$SITE" || fail "$SITE does not resolve again"
 
 step "the same request again changes nothing"
 helper '[{"op":"resolved_install","port":18053},{"op":"ports_install"}]' || fail "the helper exited with $?"
@@ -128,9 +184,12 @@ step "removal"
 remove_all() {
   helper '[{"op":"ports_remove"},{"op":"resolved_remove"}]' || fail "the helper exited with $?"
   [ "$(statuses)" = "done done" ] || fail "expected done done, got: $(statuses)"
-  [ ! -e "$DROPIN" ] || fail "$DROPIN is still there"
+  [ ! -e "$UNIT" ] || fail "$UNIT is still there"
+  ! ip link show marsa0 >/dev/null 2>&1 || fail "marsa0 is still there"
+  [ "$(systemctl is-enabled marsa-dns-link.service 2>/dev/null || true)" != enabled ] || fail "the unit is still enabled"
   [ ! -e "$SYSCTL_FILE" ] || fail "$SYSCTL_FILE is still there"
   [ "$(cat "$PORT_START")" = 1024 ] || fail "ip_unprivileged_port_start is $(cat "$PORT_START"), not 1024"
+  sudo resolvectl flush-caches
   if resolvectl query "$SITE" >/dev/null 2>&1; then
     fail "$SITE still resolves after the removal"
   fi
@@ -154,16 +213,16 @@ echo "the other file's port value is back, and vm.swappiness kept its hand-set v
 sudo rm /etc/sysctl.d/10-someone-else.conf
 run sudo sysctl -w net.ipv4.ip_unprivileged_port_start=1024
 
-step "a machine with another global DNS server: a clear refusal"
-# Many restarts in a few seconds hit the unit's start limit.
+step "next to another global DNS server, .test names still work"
+# With the old global drop-in, .test never resolved here (spike S-02: 0 of 6).
 sudo systemctl reset-failed systemd-resolved
 printf '[Resolve]\nDNS=1.1.1.1\n' | sudo tee /etc/systemd/resolved.conf.d/00-someone-else.conf
 sudo systemctl restart systemd-resolved
-code=0
-helper '[{"op":"resolved_install","port":18053}]' || code=$?
-[ "$code" = 1 ] || fail "expected exit 1, got $code"
-[ "$(codes)" = "resolved_other_dns" ] || fail "expected resolved_other_dns, got: $(codes)"
-[ ! -e "$DROPIN" ] || fail "$DROPIN was left behind"
+helper '[{"op":"resolved_install","port":18053}]' || fail "the helper exited with $?"
+[ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"
+wait_for_name "$SITE" || fail "$SITE does not resolve next to DNS=1.1.1.1"
+run resolvectl query example.com
+helper '[{"op":"resolved_remove"}]' || fail "the helper exited with $?"
 sudo rm /etc/systemd/resolved.conf.d/00-someone-else.conf
 sudo systemctl reset-failed systemd-resolved
 sudo systemctl restart systemd-resolved
@@ -195,6 +254,7 @@ wait_for_laravel -k --resolve "$SITE:18443:127.0.0.1" "https://$SITE:18443/"
 step "the helper again, for the site"
 helper '[{"op":"resolved_install","port":18053},{"op":"ports_install"}]' || fail "the helper exited with $?"
 [ "$(statuses)" = "done done" ] || fail "expected done done, got: $(statuses)"
+wait_for_name "$SITE" || fail "$SITE does not resolve"
 
 step "after the helper: Caddy on ports 80 and 443"
 # The daemon picks the ports at every config. Phase 2: `marsa setup` asks for
