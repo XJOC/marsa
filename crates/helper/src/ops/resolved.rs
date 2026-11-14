@@ -11,6 +11,13 @@
 //! when it restarts. The address is needed: resolved ignores a link without
 //! one.
 //!
+//! The unit gives the link its domain and takes away its default route
+//! before it gives it Marsa's server: a link with a server and no routing
+//! domain is a default route, so the other order would send every name to
+//! the port for a moment, and for good if a later line failed. A start that
+//! fails half way still deletes the link (`ExecStopPost=`). A `marsa0` that
+//! is there already is taken over: only root can make a link.
+//!
 //! The helper writes the unit only over a file Marsa wrote ([`marked`]),
 //! starts it, and checks the link with `resolvectl status marsa0`. A failed
 //! start or check takes the unit out again, so it does not run at the next
@@ -89,6 +96,10 @@ const RESTART: [&str; 2] = ["restart", RESOLVED];
 const START: [&str; 2] = ["start", RESOLVED];
 const DAEMON_RELOAD: [&str; 1] = ["daemon-reload"];
 const ENABLE: [&str; 2] = ["enable", UNIT_NAME];
+const IS_ENABLED: [&str; 3] = ["is-enabled", "--quiet", UNIT_NAME];
+/// After the unit is gone: a failed state would keep it listed, and the
+/// system "degraded", until the next boot.
+const RESET_FAILED_UNIT: [&str; 2] = ["reset-failed", UNIT_NAME];
 /// Starts the unit if it does not run, and runs a changed one again.
 const RESTART_UNIT: [&str; 2] = ["restart", UNIT_NAME];
 /// Stops the unit, whose stop deletes the link, and takes it out of the
@@ -122,31 +133,40 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
         Current::Ours(bytes) => Some(bytes),
         Current::Missing => None,
     };
+    // The global drop-in first, whatever else fails: while it is there,
+    // every name reaches the port.
+    let dropped = match drop_old(system) {
+        Ok(dropped) => dropped,
+        Err((code, message)) => return OpResult::failed(INSTALL, code, message),
+    };
+    let nothing_else = if dropped {
+        "so only Marsa's old global setting was removed"
+    } else {
+        "so nothing was changed"
+    };
     let not_running = match running(system) {
         Ok(true) => None,
         Ok(false) => Some(format!("{RESOLVED} is not running")),
         Err(reason) => Some(reason),
     };
     if let Some(reason) = not_running {
-        let message = format!("{reason}, so nothing was changed");
+        let message = format!("{reason}, {nothing_else}");
         return OpResult::failed(INSTALL, RESOLVED_NOT_RUNNING, message);
     }
     let Some(ip) = IP.into_iter().find(|path| system.exists(Path::new(path))) else {
         let message = format!(
-            "no ip program (iproute2) at {}, so nothing was changed",
+            "no ip program (iproute2) at {}, {nothing_else}",
             IP.join(", ")
         );
         return OpResult::failed(INSTALL, RESOLVED_TOOL_MISSING, message);
     };
-    // The global drop-in first: while it is there, every name reaches the
-    // port.
-    let dropped = match drop_old(system) {
-        Ok(dropped) => dropped,
-        Err((code, message)) => return OpResult::failed(INSTALL, code, message),
-    };
     let content = unit(ip, port);
     let in_place = current.as_deref() == Some(content.as_bytes());
-    if in_place && check(system, port).is_ok() {
+    // In place, working, and enabled for the next boot: nothing to do.
+    if in_place
+        && check(system, port).is_ok()
+        && program::succeeded(&system.run(SYSTEMCTL, &IS_ENABLED))
+    {
         let outcome = if dropped {
             Outcome::Done
         } else {
@@ -196,9 +216,13 @@ pub fn remove(system: &impl System) -> OpResult {
     }
 }
 
-/// The unit, for `ip` at `ip`. LF only, with a final newline. A `-` before
-/// a command lets the unit go on when it fails: the link or its address may
-/// be there already.
+/// The unit, for `ip` at `ip`. LF only, with a final newline. The domain
+/// and the default route come before the server (see the module doc). A
+/// `-` before a command lets the unit go on when it fails: the link or its
+/// address may be there already, and LLMNR, mDNS, or DNS over TLS may be
+/// built out. Without `dnsovertls no`, a global `DNSOverTLS=yes` would make
+/// resolved speak TLS to `marsad`, which does not.
+/// `ExecStopPost=` runs after a stop, and also after a start that failed.
 fn unit(ip: &str, port: u16) -> String {
     format!(
         "{MARKER}
@@ -212,10 +236,13 @@ RemainAfterExit=yes
 ExecStart=-{ip} link add {LINK} type dummy
 ExecStart={ip} link set {LINK} up
 ExecStart=-{ip} addr add {ADDRESS} dev {LINK}
-ExecStart={RESOLVECTL} dns {LINK} {server}
-ExecStart={RESOLVECTL} domain {LINK} ~test
 ExecStart={RESOLVECTL} default-route {LINK} false
-ExecStop={ip} link del {LINK}
+ExecStart={RESOLVECTL} domain {LINK} ~test
+ExecStart=-{RESOLVECTL} llmnr {LINK} no
+ExecStart=-{RESOLVECTL} mdns {LINK} no
+ExecStart=-{RESOLVECTL} dnsovertls {LINK} no
+ExecStart={RESOLVECTL} dns {LINK} {server}
+ExecStopPost=-{ip} link del {LINK}
 
 [Install]
 WantedBy=multi-user.target
@@ -244,13 +271,15 @@ fn start(system: &impl System) -> Result<(), String> {
     Ok(())
 }
 
-/// Stops and disables the unit (its stop deletes the link), deletes its
+/// Stops and disables the unit (its stop deletes the link; after a failed
+/// start, `ExecStopPost=` already did), deletes its
 /// file, and makes systemd forget it. The file is tried even when the stop
 /// failed: without it, the unit does not run at the next boot.
 fn take_out(system: &impl System) -> Result<(), (&'static str, String)> {
     let disabled = system.run(SYSTEMCTL, &DISABLE);
     let removed = system.remove(Path::new(UNIT_FILE));
     let _ = system.run(SYSTEMCTL, &DAEMON_RELOAD);
+    let _ = system.run(SYSTEMCTL, &RESET_FAILED_UNIT);
     if let Err(err) = removed {
         let message = format!("cannot delete {UNIT_FILE}: {}", err.kind());
         return Err((RESOLVED_DELETE, message));
@@ -293,12 +322,16 @@ fn check(system: &impl System, port: u16) -> Result<(), String> {
     let has = |list: &[String], word: &str| list.iter().any(|item| item == word);
     if link.servers != [server(port)] {
         Err(format!("{LINK} does not have Marsa's DNS server alone"))
-    } else if !has(&link.domains, "~test") {
-        Err(format!("{LINK} does not route .test names"))
+    } else if link.domains != ["~test"] {
+        // Another domain would send its names there too; `~.` every name.
+        Err(format!("{LINK} does not route .test names alone"))
     } else if !has(&link.protocols, "-DefaultRoute") {
         // Without it the link would get other names too: the very thing
         // this setup avoids.
         Err(format!("{LINK} is not marked as no default route"))
+    } else if !has(&link.protocols, "-DNSOverTLS") {
+        // `marsad` does not speak TLS: every `.test` lookup would fail.
+        Err(format!("{LINK} would use DNS over TLS"))
     } else if !has(&link.scopes, "DNS") {
         Err(format!("systemd-resolved does not use {LINK} for DNS"))
     } else {
@@ -510,6 +543,8 @@ mod tests {
     const ENABLED: &str = "/usr/bin/systemctl enable marsa-dns-link.service";
     const UNIT_UP: &str = "/usr/bin/systemctl restart marsa-dns-link.service";
     const DISABLED: &str = "/usr/bin/systemctl disable --now marsa-dns-link.service";
+    const IS_ENABLED_CMD: &str = "/usr/bin/systemctl is-enabled --quiet marsa-dns-link.service";
+    const RESET_UNIT: &str = "/usr/bin/systemctl reset-failed marsa-dns-link.service";
     const LOOKED: &str = "/usr/bin/resolvectl status marsa0";
     /// The mode of files that were there before a test, so a rewrite shows.
     const OLD_MODE: u32 = 0o600;
@@ -526,26 +561,31 @@ mod tests {
         unit("/usr/sbin/ip", port).into_bytes()
     }
 
-    /// `marsa0` while it is there: what the unit that made it set.
-    #[derive(Clone, Debug)]
+    /// `marsa0` while it is there, as the lines of the unit left it.
+    #[derive(Clone, Debug, Default)]
     struct Link {
-        server: String,
         address: bool,
-        default_route: bool,
+        /// Set by `default-route`; `None` is resolved's automatic mode.
+        default_route: Option<bool>,
+        domains: Vec<String>,
+        server: Option<String>,
+        /// Set by `dnsovertls no`.
+        no_dot: bool,
     }
 
-    /// The link a unit makes when it starts, read from what the unit runs.
-    fn link_of(unit: &[u8]) -> Option<Link> {
-        let text = String::from_utf8_lossy(unit);
-        let server = text
-            .lines()
-            .find_map(|line| line.split_once("resolvectl dns marsa0 "))
-            .map(|(_, server)| server.to_owned())?;
-        Some(Link {
-            server,
-            address: text.contains("addr add 169.254.53.53/32 dev marsa0"),
-            default_route: !text.contains("default-route marsa0 false"),
-        })
+    impl Link {
+        /// The default route in effect: in the automatic mode, a link is one
+        /// unless it has a routing-only domain (`~x`), and `~.` makes it one.
+        fn default_route(&self) -> bool {
+            let only = self.domains.iter().any(|domain| domain.starts_with('~'));
+            let all = self.domains.iter().any(|domain| domain == "~.");
+            self.default_route.unwrap_or(!only || all)
+        }
+
+        /// Whether names outside `.test` could reach the server now.
+        fn exposed(&self) -> bool {
+            self.server.is_some() && (self.default_route() || self.domains != ["~test"])
+        }
     }
 
     /// A Linux with systemd-resolved and `ip`, whose systemd runs Marsa's
@@ -566,9 +606,15 @@ mod tests {
         /// The unit as systemd read it at the last `daemon-reload`.
         loaded: RefCell<Option<Vec<u8>>>,
         enabled: Cell<bool>,
+        /// The unit's start worked, and it has not stopped since.
+        unit_active: Cell<bool>,
         link: RefCell<Option<Link>>,
+        /// At any moment, `marsa0` had a server for more than `.test`.
+        exposed: Cell<bool>,
         /// This `systemctl` command line fails.
         failing: Option<&'static str>,
+        /// The unit's command that has this text fails.
+        failing_line: Option<&'static str>,
         /// resolved does not use the link, whatever the unit did.
         unused: bool,
         /// `status` says "Current Scopes: none" that many more times first.
@@ -576,6 +622,8 @@ mod tests {
         resolvectl_fails: bool,
         /// `status` as systemd 262 prints it (Fedora 45).
         fedora: bool,
+        /// A global `DNSOverTLS=yes`, which a link inherits.
+        strict_dot: bool,
     }
 
     impl Linux {
@@ -591,12 +639,16 @@ mod tests {
                 drop_in_loaded: Cell::new(false),
                 loaded: RefCell::new(None),
                 enabled: Cell::new(false),
+                unit_active: Cell::new(false),
                 link: RefCell::new(None),
+                exposed: Cell::new(false),
                 failing: None,
+                failing_line: None,
                 unused: false,
                 none_for: Cell::new(0),
                 resolvectl_fails: false,
                 fedora: false,
+                strict_dot: false,
             };
             linux.put("/usr/sbin/ip", b"");
             linux
@@ -608,7 +660,7 @@ mod tests {
             linux.put(UNIT_FILE, bytes);
             *linux.loaded.borrow_mut() = Some(bytes.to_vec());
             linux.enabled.set(true);
-            *linux.link.borrow_mut() = link_of(bytes);
+            linux.start_unit();
             linux
         }
 
@@ -645,7 +697,86 @@ mod tests {
 
         /// The server of `marsa0`, while it is there.
         fn server(&self) -> Option<String> {
-            self.link.borrow().as_ref().map(|link| link.server.clone())
+            self.link
+                .borrow()
+                .as_ref()
+                .and_then(|link| link.server.clone())
+        }
+
+        /// The lines of the loaded unit that start with `key=`, without the
+        /// `-` that lets one fail: `(may_fail, command)`.
+        fn lines(&self, key: &str) -> Vec<(bool, String)> {
+            let loaded = self.loaded.borrow();
+            let text = String::from_utf8_lossy(loaded.as_deref().unwrap_or_default());
+            text.lines()
+                .filter_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+                .map(|command| match command.strip_prefix('-') {
+                    Some(command) => (true, command.to_owned()),
+                    None => (false, command.to_owned()),
+                })
+                .collect()
+        }
+
+        /// systemd starts the loaded unit: its `ExecStart=` lines in order.
+        /// A line that fails without a `-` fails the start, and then the
+        /// `ExecStopPost=` lines run.
+        fn start_unit(&self) -> bool {
+            for (may_fail, command) in self.lines("ExecStart") {
+                let failed = self.failing_line.is_some_and(|part| command.contains(part))
+                    || !self.apply(&command);
+                if failed && !may_fail {
+                    self.stop_unit(false);
+                    return false;
+                }
+            }
+            self.unit_active.set(true);
+            true
+        }
+
+        /// systemd stops the unit: `ExecStop=` only after a start that
+        /// worked, `ExecStopPost=` always.
+        fn stop_unit(&self, active: bool) {
+            let mut commands = if active {
+                self.lines("ExecStop")
+            } else {
+                Vec::new()
+            };
+            commands.extend(self.lines("ExecStopPost"));
+            for (_, command) in commands {
+                self.apply(&command);
+            }
+            self.unit_active.set(false);
+        }
+
+        /// One command of the unit, on the link. `false`: it failed, as
+        /// with no link to work on.
+        fn apply(&self, command: &str) -> bool {
+            let words: Vec<&str> = command.split_whitespace().collect();
+            let mut link = self.link.borrow_mut();
+            if let ["link", "add", "marsa0", "type", "dummy"] = &words[1..] {
+                let made = link.is_none();
+                link.get_or_insert_with(Link::default);
+                return made;
+            }
+            let Some(there) = link.as_mut() else {
+                return false;
+            };
+            match &words[1..] {
+                ["link", "del", "marsa0"] => *link = None,
+                ["link", "set", "marsa0", "up"] | ["llmnr" | "mdns", "marsa0", "no"] => {}
+                ["addr", "add", "169.254.53.53/32", "dev", "marsa0"] => there.address = true,
+                ["default-route", "marsa0", value] => there.default_route = Some(*value == "true"),
+                ["dnsovertls", "marsa0", "no"] => there.no_dot = true,
+                ["domain", "marsa0", domains @ ..] => {
+                    there.domains = domains.iter().map(|word| (*word).to_owned()).collect();
+                }
+                ["dns", "marsa0", server] => there.server = Some((*server).to_owned()),
+                _ => panic!("the fake does not know: {command}"),
+            }
+            if link.as_ref().is_some_and(Link::exposed) {
+                self.exposed.set(true);
+            }
+            true
         }
 
         /// A (re)start of systemd-resolved: it reads the drop-in if it is
@@ -688,6 +819,10 @@ mod tests {
                     *self.loaded.borrow_mut() = self.unit_file().map(|(bytes, _)| bytes);
                     exit(0, "")
                 }
+                "is-enabled --quiet marsa-dns-link.service" => {
+                    exit(if self.enabled.get() { 0 } else { 1 }, "")
+                }
+                "reset-failed marsa-dns-link.service" => exit(0, ""),
                 "enable marsa-dns-link.service" => {
                     if self.loaded.borrow().is_none() {
                         return exit(1, "");
@@ -696,13 +831,19 @@ mod tests {
                     exit(0, "")
                 }
                 "restart marsa-dns-link.service" => {
-                    let link = self.loaded.borrow().as_deref().and_then(link_of);
-                    let started = link.is_some();
-                    *self.link.borrow_mut() = link;
-                    exit(if started { 0 } else { 5 }, "")
+                    if self.loaded.borrow().is_none() {
+                        return exit(5, "");
+                    }
+                    if self.unit_active.get() {
+                        self.stop_unit(true);
+                    }
+                    exit(if self.start_unit() { 0 } else { 1 }, "")
                 }
+                // A unit whose start failed is not active: nothing runs.
                 "disable --now marsa-dns-link.service" => {
-                    *self.link.borrow_mut() = None;
+                    if self.unit_active.get() {
+                        self.stop_unit(true);
+                    }
                     self.enabled.set(false);
                     exit(0, "")
                 }
@@ -716,28 +857,40 @@ mod tests {
             let Some(link) = link.filter(|_| !self.resolvectl_fails && self.active.get()) else {
                 return exit(1, "");
             };
-            let mut used = link.address && !self.unused;
+            let mut used = link.address && link.server.is_some() && !self.unused;
             if self.none_for.get() > 0 {
                 self.none_for.set(self.none_for.get() - 1);
                 used = false;
             }
             let scopes = if used { "DNS" } else { "none" };
-            let route = if link.default_route { '+' } else { '-' };
-            let server = link.server;
-            let text = if self.fedora {
+            let route = if link.default_route() { '+' } else { '-' };
+            let dot = if self.strict_dot && !link.no_dot {
+                '+'
+            } else {
+                '-'
+            };
+            let domains = link.domains.join(" ");
+            let mut text = if self.fedora {
                 format!(
                     "Link 3 (marsa0)\n    Current Scopes: {scopes}\n         Protocols: \
-                     {route}DefaultRoute LLMNR=resolve -mDNS -DNSOverTLS\n                    \
-                     DNSSEC=no/unsupported\nCurrent DNS Server: {server}\n       DNS Servers: \
-                     {server}\n        DNS Domain: ~test\n     Default Route: no\n"
+                     {route}DefaultRoute LLMNR=resolve -mDNS {dot}DNSOverTLS\n                    \
+                     DNSSEC=no/unsupported\n"
                 )
             } else {
                 format!(
                     "Link 5 (marsa0)\nCurrent Scopes: {scopes}\n     Protocols: \
-                     {route}DefaultRoute +LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported\n   DNS \
-                     Servers: {server}\n    DNS Domain: ~test\n"
+                     {route}DefaultRoute +LLMNR -mDNS {dot}DNSOverTLS DNSSEC=no/unsupported\n"
                 )
             };
+            if let Some(server) = &link.server {
+                if self.fedora {
+                    text.push_str(&format!("Current DNS Server: {server}\n"));
+                }
+                text.push_str(&format!("       DNS Servers: {server}\n"));
+            }
+            if !domains.is_empty() {
+                text.push_str(&format!("        DNS Domain: {domains}\n"));
+            }
             exit(0, &text)
         }
     }
@@ -872,7 +1025,7 @@ mod tests {
         linux.fake.fail_writes.insert(PathBuf::from(UNIT_FILE));
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Unchanged));
         assert_eq!(linux.unit_file(), Some((ours(18053), OLD_MODE)));
-        assert_eq!(linux.commands(), [ACTIVE, LOOKED]);
+        assert_eq!(linux.commands(), [ACTIVE, LOOKED, IS_ENABLED_CMD]);
     }
 
     /// The same unit, but the link is gone (deleted by hand): started again,
@@ -886,6 +1039,46 @@ mod tests {
         assert_eq!(
             linux.commands(),
             [ACTIVE, LOOKED, RELOAD, ENABLED, UNIT_UP, LOOKED]
+        );
+    }
+
+    /// The unit works but was disabled by hand: it would not run at the next
+    /// boot, so it is enabled and started again.
+    #[test]
+    fn install_over_our_disabled_unit_enables_it() {
+        let linux = Linux::with_unit(&ours(18053));
+        linux.enabled.set(false);
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert!(linux.enabled.get());
+        assert_eq!(
+            linux.commands(),
+            [
+                ACTIVE,
+                LOOKED,
+                IS_ENABLED_CMD,
+                RELOAD,
+                ENABLED,
+                UNIT_UP,
+                LOOKED
+            ]
+        );
+    }
+
+    /// A global `DNSOverTLS=yes`: the unit turns it off on its link, as
+    /// `marsad` does not speak TLS; without that line the check fails.
+    #[test]
+    fn a_global_dns_over_tls_is_turned_off_on_the_link() {
+        let mut linux = Linux::new();
+        linux.strict_dot = true;
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        let base = String::from_utf8(ours(18053)).unwrap();
+        let without = base.replace("ExecStart=-/usr/bin/resolvectl dnsovertls marsa0 no\n", "");
+        assert_ne!(without, base);
+        let mut linux = Linux::with_unit(without.as_bytes());
+        linux.strict_dot = true;
+        assert_eq!(
+            check(&linux, 18053),
+            Err("marsa0 would use DNS over TLS".to_owned())
         );
     }
 
@@ -1004,7 +1197,7 @@ mod tests {
                 message_of(&failed),
                 format!("systemctl {step} exited with code 1; {UNIT_FILE} was removed again"),
             );
-            commands.extend([DISABLED, RELOAD]);
+            commands.extend([DISABLED, RELOAD, RESET_UNIT]);
             assert_eq!(linux.commands(), commands, "{step}");
             assert_eq!(linux.unit_file(), None);
             assert!(!linux.enabled.get() && linux.server().is_none());
@@ -1036,7 +1229,7 @@ mod tests {
         );
         let mut commands = vec![ACTIVE, RELOAD, ENABLED, UNIT_UP];
         commands.extend([LOOKED; 10]);
-        commands.extend([DISABLED, RELOAD]);
+        commands.extend([DISABLED, RELOAD, RESET_UNIT]);
         assert_eq!(linux.commands(), commands);
         assert_eq!(linux.unit_file(), None);
         assert!(linux.server().is_none());
@@ -1053,10 +1246,7 @@ mod tests {
                 "marsa0 does not have Marsa's DNS server alone",
             ),
             (
-                base.replace(
-                    "ExecStart=/usr/bin/resolvectl default-route marsa0 false\n",
-                    "",
-                ),
+                base.replace("default-route marsa0 false", "default-route marsa0 true"),
                 "marsa0 is not marked as no default route",
             ),
             (
@@ -1067,13 +1257,74 @@ mod tests {
                 "systemd-resolved does not use marsa0 for DNS",
             ),
         ];
-        for (unit, reason) in cases {
+        let more = [
+            (
+                base.replace("ExecStart=/usr/bin/resolvectl domain marsa0 ~test\n", ""),
+                "marsa0 does not route .test names alone",
+            ),
+            (
+                base.replace("domain marsa0 ~test", "domain marsa0 ~test ~."),
+                "marsa0 does not route .test names alone",
+            ),
+            (
+                base.replace("domain marsa0 ~test", "domain marsa0 ~test example.com"),
+                "marsa0 does not route .test names alone",
+            ),
+        ];
+        for (unit, reason) in cases.into_iter().chain(more) {
             assert_ne!(unit, base);
             let linux = Linux::with_unit(unit.as_bytes());
             assert_eq!(check(&linux, 18053), Err(reason.to_owned()));
         }
         let linux = Linux::with_unit(base.as_bytes());
         assert_eq!(check(&linux, 18053), Ok(()));
+    }
+
+    /// At no moment of the start does `marsa0` have Marsa's server for more
+    /// than `.test`. The fake would see it: with `dns` first, it does.
+    #[test]
+    fn the_unit_never_routes_other_names_to_the_port() {
+        let linux = Linux::new();
+        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert!(!linux.exposed.get());
+        let base = String::from_utf8(ours(18053)).unwrap();
+        let dns = "ExecStart=/usr/bin/resolvectl dns marsa0 127.0.0.1:18053\n";
+        let dns_first = base.replace(dns, "").replace(
+            "ExecStart=/usr/bin/resolvectl default-route",
+            &format!("{dns}ExecStart=/usr/bin/resolvectl default-route"),
+        );
+        assert!(Linux::with_unit(dns_first.as_bytes()).exposed.get());
+    }
+
+    /// A line of the unit fails half way: its start fails, and the link
+    /// goes with `ExecStopPost=`, never left with a server for every name.
+    #[test]
+    fn a_start_that_fails_half_way_leaves_no_link() {
+        for line in [
+            "default-route marsa0",
+            "domain marsa0",
+            "dns marsa0",
+            "link set",
+        ] {
+            let mut linux = Linux::new();
+            linux.failing_line = Some(line);
+            let failed = install(18053, &linux);
+            assert_eq!(code_of(&failed), RESOLVED_UNIT_FAILED, "{line}");
+            assert!(linux.link.borrow().is_none(), "{line}");
+            assert!(!linux.exposed.get(), "{line}");
+            assert_eq!(linux.unit_file(), None, "{line}");
+        }
+        // With `ExecStop=` instead, a failed start would leave the link.
+        let base = String::from_utf8(ours(18053)).unwrap();
+        let mut linux = Linux::new();
+        linux.put(
+            UNIT_FILE,
+            base.replace("ExecStopPost=-", "ExecStop=").as_bytes(),
+        );
+        *linux.loaded.borrow_mut() = linux.unit_file().map(|(bytes, _)| bytes);
+        linux.failing_line = Some("dns marsa0");
+        assert!(!linux.start_unit());
+        assert!(linux.link.borrow().is_some());
     }
 
     #[test]
@@ -1123,7 +1374,7 @@ mod tests {
         assert_eq!(
             linux.commands(),
             [
-                ACTIVE, ACTIVE, RESET, RESTARTED, RELOAD, ENABLED, UNIT_UP, LOOKED
+                ACTIVE, RESET, RESTARTED, ACTIVE, RELOAD, ENABLED, UNIT_UP, LOOKED
             ]
         );
     }
@@ -1134,7 +1385,10 @@ mod tests {
         let linux = Linux::with_unit(&ours(18053)).with_drop_in();
         assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
         assert_eq!(linux.file(DROP_IN), None);
-        assert_eq!(linux.commands(), [ACTIVE, ACTIVE, RESET, RESTARTED, LOOKED]);
+        assert_eq!(
+            linux.commands(),
+            [ACTIVE, RESET, RESTARTED, ACTIVE, LOOKED, IS_ENABLED_CMD]
+        );
     }
 
     #[test]
@@ -1161,7 +1415,7 @@ mod tests {
             format!("cannot delete {DROP_IN}: permission denied")
         );
         assert_eq!(linux.unit_file(), None);
-        assert_eq!(linux.commands(), [ACTIVE]);
+        assert!(linux.commands().is_empty());
     }
 
     /// The restart without the drop-in fails while the old process runs:
@@ -1180,7 +1434,7 @@ mod tests {
                  with code 1; {OLD_RUNS}"
             )
         );
-        assert_eq!(linux.commands(), [ACTIVE, ACTIVE, RESET, RESTARTED, ACTIVE]);
+        assert_eq!(linux.commands(), [ACTIVE, RESET, RESTARTED, ACTIVE]);
         assert_eq!(linux.unit_file(), None);
     }
 
@@ -1213,6 +1467,23 @@ mod tests {
             )
         );
         assert_eq!(linux.file(DROP_IN), None);
+    }
+
+    /// resolved does not run: the old drop-in still goes, and the message
+    /// says that this is all that changed.
+    #[test]
+    fn install_with_a_stopped_resolved_still_takes_out_the_drop_in() {
+        let linux = Linux::new().with_drop_in();
+        linux.active.set(false);
+        let failed = install(18053, &linux);
+        assert_eq!(code_of(&failed), RESOLVED_NOT_RUNNING);
+        assert_eq!(
+            message_of(&failed),
+            "systemd-resolved.service is not running, so only Marsa's old global setting was \
+             removed"
+        );
+        assert_eq!(linux.file(DROP_IN), None);
+        assert_eq!(linux.unit_file(), None);
     }
 
     /// A stopped resolved reads its files when it starts: no restart.
@@ -1266,7 +1537,7 @@ mod tests {
             let linux = Linux::with_unit(&ours(port));
             assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
             assert_eq!(linux.unit_file(), None);
-            assert_eq!(linux.commands(), [DISABLED, RELOAD]);
+            assert_eq!(linux.commands(), [DISABLED, RELOAD, RESET_UNIT]);
             assert!(!linux.enabled.get() && linux.server().is_none());
             assert!(linux.loaded.borrow().is_none());
         }
@@ -1279,7 +1550,7 @@ mod tests {
         assert_eq!((linux.unit_file(), linux.file(DROP_IN)), (None, None));
         assert_eq!(
             linux.commands(),
-            [DISABLED, RELOAD, ACTIVE, RESET, RESTARTED]
+            [DISABLED, RELOAD, RESET_UNIT, ACTIVE, RESET, RESTARTED]
         );
     }
 
@@ -1299,7 +1570,8 @@ mod tests {
             )
         );
         assert_eq!(linux.unit_file(), None);
-        assert_eq!(linux.commands(), [DISABLED, RELOAD]);
+        assert_eq!(linux.commands(), [DISABLED, RELOAD, RESET_UNIT]);
+        assert!(linux.server().is_some());
     }
 
     /// A unit that cannot be deleted: the drop-in is still tried, and the
