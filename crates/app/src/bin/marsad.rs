@@ -47,6 +47,12 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Before any process is started: on Windows this is what ends Caddy and
+    // PHP with a daemon that crashed or was ended from Task Manager (ADR
+    // 0017). It does nothing on macOS and Linux.
+    if let Err(err) = marsa_core::platform::bind_children_to_daemon() {
+        tracing::warn!(error = %err, "cannot tie child processes to the daemon; they would outlive a crash");
+    }
     match server::run(data_dir).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => match err.downcast_ref::<AlreadyRunning>() {
