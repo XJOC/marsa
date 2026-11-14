@@ -95,7 +95,7 @@ const LOGIN_KEYCHAIN: [&str; 3] = ["Library", "Keychains", "login.keychain-db"];
 const NO_TRUST: [&[u8]; 2] = [b"could not be found", b"No Trust Settings were found"];
 /// The line before each certificate in the output of `find-certificate -Z`.
 const HASH_LINE: &str = "SHA-256 hash: ";
-const PEM_END: &str = "-----END CERTIFICATE-----";
+pub(super) const PEM_END: &str = "-----END CERTIFICATE-----";
 /// The trust folder under the data folder, and the two files in it.
 const TRUST_DIR: &str = "trust";
 const RECORD: &str = "user-trusted.pem";

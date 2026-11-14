@@ -433,8 +433,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              it left them alone. Run \"marsa setup\" again; if it repeats, report it."
             .into(),
         "ca_not_ready" => "Caddy did not make Marsa's certificate authority in time, so Marsa \
-             cannot trust it yet. See why in the file logs/caddy.log, then run \"marsa setup\" \
+             cannot trust it yet. Run \"marsa logs caddy\" to see why, then run \"marsa setup\" \
              again."
+            .into(),
+        "caddy_not_started" => "Caddy did not start, so Marsa's certificate authority is not \
+             there yet. Run \"marsa logs caddy\" to see why, then run \"marsa setup\" again."
             .into(),
         "ca_unreadable" => format!(
             "Cannot read the root certificate of Marsa's certificate authority{}, or it is \
@@ -1519,6 +1522,7 @@ mod tests {
         "ports_not_checked",
         "ca_not_ready",
         "ca_unreadable",
+        "caddy_not_started",
         "op_not_implemented",
         "op_not_supported",
         "resolver_foreign",

@@ -501,8 +501,8 @@ pub struct SetupSkip {
     /// The helper operation, for example `pf_install`.
     pub op: String,
     /// Why: `redirect_port_held` and `ports_not_checked` for `pf_install`,
-    /// `ca_not_ready`, `ca_unreadable`, and `caddy_not_installed` for
-    /// `trust_install`.
+    /// `ca_not_ready`, `ca_unreadable`, `caddy_not_installed`, and
+    /// `caddy_not_started` for `trust_install`.
     pub code: String,
 }
 
