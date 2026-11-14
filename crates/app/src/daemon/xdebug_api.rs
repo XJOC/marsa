@@ -57,14 +57,23 @@ async fn set(
 ) -> Result<Json<XdebugState>, HttpError> {
     let Json(XdebugRequest { enabled }) =
         body.map_err(|err| HttpError::new(err.status(), "invalid_body", err.body_text()))?;
-    blocking(&daemon, move |daemon| save(daemon, enabled)).await?;
-    // Also when nothing changed: the pass then repairs a `php.ini` that is
-    // missing or old.
-    daemon
-        .pass_requests
-        .run_pass()
-        .await
-        .map_err(|PassNotRun| pass_not_run())?;
+    // The save and the request in a task of their own: a client that hangs
+    // up drops this handler, and must not leave the setting saved but not
+    // applied. The pass itself runs in the sync task.
+    let job = tokio::spawn({
+        let daemon = Arc::clone(&daemon);
+        async move {
+            blocking(&daemon, move |daemon| save(daemon, enabled)).await?;
+            // Also when nothing changed: the pass then repairs a `php.ini`
+            // that is missing or old.
+            daemon
+                .pass_requests
+                .run_pass()
+                .await
+                .map_err(|PassNotRun| pass_not_run())
+        }
+    });
+    job.await.unwrap_or_else(|err| Err(job_failed(&err)))?;
     blocking(&daemon, state).await.map(Json)
 }
 
@@ -301,7 +310,7 @@ mod tests {
     /// Both wait for the sync task; the pass that answers each one started
     /// after its setting was saved.
     #[tokio::test]
-    async fn two_puts_at_once_are_both_answered_after_a_pass() {
+    async fn two_puts_at_once_both_get_the_on_state() {
         let mut app = App::new();
         let on = || Some(json!({ "enabled": true }));
         let (first, second) = tokio::join!(app.send("PUT", on()), app.send("PUT", on()));

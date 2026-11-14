@@ -110,6 +110,8 @@ impl World {
             .env("HOME", self.home.path())
             .env_remove("XDG_DATA_HOME")
             .env_remove("MARSA_SHIM_DEPTH")
+            // The shim sets it for PHP; a developer's own must not leak in.
+            .env_remove("PHPRC")
             // The shim must not need `PATH`; the fake programs use only shell
             // built-ins.
             .env("PATH", self.home.path().join("no-such-dir"))

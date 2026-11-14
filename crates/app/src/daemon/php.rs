@@ -260,7 +260,7 @@ pub fn line_files(
     files
 }
 
-/// Writes `php.ini` of a line with no pool, if its text changed.
+/// Writes `php.ini` of a line with no running pool, if its text changed.
 fn write_ini(platform: Platform, files: &PhpFiles) -> Result<(), Skip> {
     let text = php_ini(platform, files).map_err(php_skip)?;
     match write_if_changed(&files.ini_file, &text) {
@@ -302,8 +302,9 @@ fn write_pool(pool: &Pool) -> Result<(), Skip> {
 
 /// The pool of each wanted line, with its files written, and `php.ini` of
 /// every other installed line. Each `php.ini` loads Xdebug while `[php]
-/// xdebug` is on. A line that cannot have its files is logged and left out.
-/// Reads and writes the disk, so it runs on a blocking thread.
+/// xdebug` is on. A pool that cannot run is logged and left out, and its
+/// line still gets `php.ini`. Reads and writes the disk, so it runs on a
+/// blocking thread.
 fn prepare(
     data_dir: &Path,
     platform: Platform,
@@ -321,21 +322,31 @@ fn prepare(
     let mut pools = BTreeMap::new();
     for (minor, version) in &lines {
         let files = line_files(data_dir, version, ca_bundle, xdebug);
-        let has_pool = wanted.contains_key(minor);
-        let written = if has_pool {
-            pool_with(data_dir, platform, version, files)
-                .and_then(|pool| write_pool(&pool).map(|()| pool))
-                .map(|pool| drop(pools.insert(*minor, pool)))
-        } else {
-            write_ini(platform, &files)
-        };
-        if let Err(skip) = written {
-            let effect = if has_pool {
-                "no PHP pool; its sites answer 503"
-            } else {
+        if wanted.contains_key(minor) {
+            let pool = pool_with(data_dir, platform, version, files.clone())
+                .and_then(|pool| write_pool(&pool).map(|()| pool));
+            match pool {
+                Ok(pool) => {
+                    pools.insert(*minor, pool);
+                    continue;
+                }
+                Err(skip) => warn!(
+                    php = %version,
+                    code = skip.code,
+                    reason = %skip.reason,
+                    "no PHP pool; its sites answer 503"
+                ),
+            }
+        }
+        // No pool, or one that cannot run (no php-fpm): `php` in the
+        // terminal still reads this file, so it follows the switch.
+        if let Err(skip) = write_ini(platform, &files) {
+            warn!(
+                php = %version,
+                code = skip.code,
+                reason = %skip.reason,
                 "php.ini was not written; php in the terminal runs without it"
-            };
-            warn!(php = %version, code = skip.code, reason = %skip.reason, "{effect}");
+            );
         }
     }
     pools
@@ -1001,8 +1012,9 @@ mod tests {
         assert_eq!(files.ca_bundle, Some(bundle));
         assert_eq!(line_files(data, &v("8.4.3"), None, false).xdebug, None);
         assert_eq!(line_files(data, &v("8.4.10"), None, true).xdebug, None);
-        // A pool's `php.ini` refuses `\` in its paths (`php_path_not_allowed`),
-        // so a Windows temp folder cannot hold a Linux pool in this test.
+        // On Windows the temp folder starts with `C:`, and `fpm_conf` refuses
+        // the `:` in the `PATH` entry of `shims/` (`path_entry`,
+        // `php_path_not_allowed`), so a Linux pool cannot live there.
         #[cfg(unix)]
         assert_eq!(
             pool_for(data, Platform::LinuxX64, &v("8.4.3"), None)
@@ -1015,6 +1027,34 @@ mod tests {
         assert!(!xdebug_enabled(data).unwrap(), "no global.toml: off");
         set_xdebug(data, true);
         assert!(xdebug_enabled(data).unwrap());
+    }
+
+    /// A pool that cannot run (no php-fpm) still leaves its line a
+    /// `php.ini`, so `php` in the terminal follows the switch.
+    #[cfg(unix)]
+    #[test]
+    fn a_line_whose_pool_cannot_run_still_gets_its_php_ini() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let platform = Platform::current().unwrap();
+        let so = PhpFiles::new(data, &v("8.4.3")).xdebug_so();
+        fs::create_dir_all(so.parent().unwrap()).unwrap();
+        fs::write(&so, "").unwrap();
+        set_xdebug(data, true);
+
+        let wanted = BTreeMap::from([(PHP84, v("8.4.3"))]);
+        let pools = prepare(data, platform, &wanted, None);
+        assert!(pools.is_empty(), "no php-fpm, so no pool");
+        let line = data.join("php").join("8.4");
+        let ini = fs::read_to_string(line.join("php.ini")).unwrap();
+        let loads = format!("\nzend_extension = \"{}\"\n", so.display());
+        assert!(ini.contains(&loads), "{ini}");
+        assert!(!line.join("php-fpm.conf").exists());
+
+        set_xdebug(data, false);
+        prepare(data, platform, &wanted, None);
+        let ini = fs::read_to_string(line.join("php.ini")).unwrap();
+        assert!(!ini.contains("xdebug"), "{ini}");
     }
 
     /// As above: a shell script stands in for php-fpm.

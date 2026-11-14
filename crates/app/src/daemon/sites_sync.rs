@@ -466,14 +466,14 @@ mod tests {
         let first = next_held(&mut loads).await;
         let (one, two) = (ask(&daemon), ask(&daemon));
         queued(&daemon, 2).await;
-        first.send(()).unwrap();
+        first.send(()).ok();
 
         // The pass that was running did not answer them: it may have read
         // the settings before they were saved. The next pass serves both.
         let second = next_held(&mut loads).await;
         tokio::task::yield_now().await;
         assert!(!one.is_finished() && !two.is_finished());
-        second.send(()).unwrap();
+        second.send(()).ok();
         assert_eq!(one.await.unwrap(), Ok(()));
         assert_eq!(two.await.unwrap(), Ok(()));
         // One pass for both: no third load comes.
