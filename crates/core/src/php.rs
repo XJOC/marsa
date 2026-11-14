@@ -14,7 +14,7 @@
 //!    ```text
 //!    <app data dir>/
 //!    ├── php/8.4/               php-fpm.conf, php.ini
-//!    ├── runtimes/php/8.4.3/    ext/, php-cgi.exe (Windows)
+//!    ├── runtimes/php/8.4.3/    ext/ (xdebug.so, or the Windows DLLs), php-cgi.exe
 //!    ├── shims/
 //!    ├── logs/                  php-8.4-fpm.log, php-8.4-errors.log
 //!    └── run/                   php-8.4.sock
@@ -141,8 +141,14 @@ pub struct PhpFiles {
     /// `openssl.cafile` (architecture.md section 10). [`PhpFiles::new`]
     /// leaves it `None`: the daemon sets it once the bundle exists.
     pub ca_bundle: Option<PathBuf>,
-    /// `runtimes/php/<version>/ext`, the extension DLLs (Windows).
+    /// `runtimes/php/<version>/ext`: the extension DLLs (Windows), or
+    /// `xdebug.so` (macOS, Linux).
     pub ext_dir: PathBuf,
+    /// The Xdebug that `php.ini` loads, or `None` for a PHP without Xdebug
+    /// (ADR 0010). [`PhpFiles::new`] leaves it `None`: the daemon sets it to
+    /// [`PhpFiles::xdebug_so`] when `[php] xdebug` is on in `global.toml` and
+    /// the file is there.
+    pub xdebug: Option<PathBuf>,
     /// `runtimes/php/<version>/php-cgi.exe` (Windows).
     pub php_cgi: PathBuf,
 }
@@ -168,8 +174,17 @@ impl PhpFiles {
             shims_dir: app_data_dir.join("shims"),
             ca_bundle: None,
             ext_dir: php_dir.join("ext"),
+            xdebug: None,
             php_cgi: php_dir.join("php-cgi.exe"),
         }
+    }
+
+    /// `runtimes/php/<version>/ext/xdebug.so`, where Marsa's PHP builds for
+    /// macOS and Linux ship Xdebug. The official Windows build has none.
+    ///
+    /// Joined, never canonicalized: `php.ini` gets the path as it is.
+    pub fn xdebug_so(&self) -> PathBuf {
+        self.ext_dir.join("xdebug.so")
     }
 }
 
@@ -244,14 +259,20 @@ pub fn fpm_conf(listen: &Listen, files: &PhpFiles) -> Result<String, PhpError> {
 ///   before PHP 8.5, and one `extension` line for each extension Laravel
 ///   needs. Every other platform gets the same text,
 ///   because static-php-cli builds have their extensions built in.
+/// - With `files.xdebug`: `zend_extension` with that path, and Xdebug's debug
+///   and develop modes. A debug session starts only when the request asks
+///   for one (`XDEBUG_TRIGGER`, or the browser extension), so other requests
+///   do not wait for an IDE. PHP still runs slower while Xdebug is loaded
+///   (ADR 0010), so it is off unless the user turns it on.
 ///
-/// Xdebug is not loaded here. It gets its own file later (ADR 0010).
+/// The Xdebug lines are in this file, not in a file of their own: php-fpm
+/// (`-c`) and the shim (`PHPRC`) both read this one file.
 ///
 /// # Errors
 ///
-/// `php_path_not_allowed` if `files.error_log`, `files.ca_bundle`, or (on
-/// Windows) `files.ext_dir` cannot be written in the file (see
-/// [`PhpError::PathNotAllowed`]).
+/// `php_path_not_allowed` if `files.error_log`, `files.ca_bundle`,
+/// `files.xdebug`, or (on Windows) `files.ext_dir` cannot be written in the
+/// file (see [`PhpError::PathNotAllowed`]).
 pub fn php_ini(platform: Platform, files: &PhpFiles) -> Result<String, PhpError> {
     let error_log = ini_path(&files.error_log)?;
     let ca_bundle = files.ca_bundle.as_deref().map(ini_path).transpose()?;
@@ -259,6 +280,7 @@ pub fn php_ini(platform: Platform, files: &PhpFiles) -> Result<String, PhpError>
         Platform::WindowsX64 => Some(ini_path(&files.ext_dir)?),
         _ => None,
     };
+    let xdebug = files.xdebug.as_deref().map(ini_path).transpose()?;
 
     Ok(render(|out| {
         writeln!(out, "{HEADER}")?;
@@ -293,6 +315,12 @@ pub fn php_ini(platform: Platform, files: &PhpFiles) -> Result<String, PhpError>
             for extension in WINDOWS_EXTENSIONS {
                 writeln!(out, "extension = {extension}")?;
             }
+        }
+        if let Some(xdebug) = xdebug {
+            writeln!(out)?;
+            writeln!(out, "zend_extension = \"{xdebug}\"")?;
+            writeln!(out, "xdebug.mode = debug,develop")?;
+            writeln!(out, "xdebug.start_with_request = trigger")?;
         }
         Ok(())
     }))
@@ -433,6 +461,7 @@ mod tests {
             shims_dir: "/marsa/shims".into(),
             ca_bundle: None,
             ext_dir: "/marsa/runtimes/php/8.4.3/ext".into(),
+            xdebug: None,
             php_cgi: "/marsa/runtimes/php/8.4.3/php-cgi.exe".into(),
         }
     }
@@ -449,6 +478,7 @@ mod tests {
             shims_dir: r"C:\marsa\shims".into(),
             ca_bundle: Some(r"C:\marsa\caddy\ca-bundle.pem".into()),
             ext_dir: r"C:\marsa\runtimes\php\8.4.3\ext".into(),
+            xdebug: None,
             php_cgi: r"C:\marsa\runtimes\php\8.4.3\php-cgi.exe".into(),
         }
     }
@@ -501,9 +531,11 @@ mod tests {
             shims_dir: data.join("shims"),
             ca_bundle: None,
             ext_dir: php_dir.join("ext"),
+            xdebug: None,
             php_cgi: php_dir.join("php-cgi.exe"),
         };
         assert_eq!(files, expected);
+        assert_eq!(files.xdebug_so(), php_dir.join("ext").join("xdebug.so"));
     }
 
     #[test]
@@ -568,6 +600,26 @@ mod tests {
     fn php_ini_on_windows_with_a_ca_bundle() {
         let text = php_ini(Platform::WindowsX64, &windows_files()).expect("render");
         insta::assert_snapshot!(text);
+    }
+
+    /// Both states of `php.ini`: off is the snapshot of
+    /// `php_ini_on_macos_without_a_ca_bundle` (the same files), and on is
+    /// that text plus the Xdebug block.
+    #[test]
+    fn php_ini_on_macos_with_xdebug() {
+        let mut files = unix_files();
+        let off = php_ini(Platform::DarwinArm64, &files).expect("render off");
+        assert!(!off.contains("xdebug"));
+
+        // A space in the path, as in `Application Support`.
+        files.xdebug = Some("/Users/a b/marsa/runtimes/php/8.4.3/ext/xdebug.so".into());
+        let on = php_ini(Platform::DarwinArm64, &files).expect("render on");
+        // Off is the same file without the last block.
+        assert_eq!(
+            on.split_once("\n\nzend_extension").map(|(a, _)| a),
+            off.strip_suffix('\n')
+        );
+        insta::assert_snapshot!(on);
     }
 
     #[test]
@@ -668,6 +720,10 @@ mod tests {
             let mut files = windows_files();
             files.ext_dir = path.into();
             assert_not_allowed(php_ini(Platform::WindowsX64, &files), path);
+
+            let mut files = unix_files();
+            files.xdebug = Some(path.into());
+            assert_not_allowed(php_ini(Platform::DarwinArm64, &files), path);
         }
     }
 

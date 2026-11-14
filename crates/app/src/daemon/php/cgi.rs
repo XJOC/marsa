@@ -36,6 +36,16 @@ pub fn pool_for(
 ) -> Result<Pool, Skip> {
     let mut files = PhpFiles::new(data_dir, version);
     files.ca_bundle = ca_bundle.map(Path::to_path_buf);
+    pool_with(files)
+}
+
+/// [`pool_for`] with `files` as they are, so `php.ini` loads the Xdebug they
+/// name (task M5-11).
+///
+/// # Errors
+///
+/// `php_path_not_allowed` if a path cannot go in `php.ini`.
+pub fn pool_with(files: PhpFiles) -> Result<Pool, Skip> {
     let php_error = |err: PhpError| Skip {
         code: err.code(),
         reason: err.to_string(),
