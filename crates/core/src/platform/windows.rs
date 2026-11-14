@@ -11,8 +11,14 @@
 //!   `bInheritHandles = TRUE`, so a daemon started by `marsa park . | more`
 //!   kept the pipe open, and the reader waited until the daemon stopped.
 //!
-//! The only `unsafe` code of `marsa-core` is in this file (AGENTS.md
-//! section 6). The blocks are short, and every Win32 result is checked.
+//! - [`current_user_sid`] and [`helper_pipe`]: what `marsad` needs to use
+//!   the helper service (ADR 0018), public for the `marsa` crate.
+//!
+//! The only `unsafe` code of `marsa-core` is in this module and its
+//! `helper_pipe` (AGENTS.md section 6). The blocks are short, and every
+//! Win32 result is checked.
+
+pub mod helper_pipe;
 
 use std::ffi::OsStr;
 use std::io;
@@ -22,10 +28,12 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::ExitStatusExt;
 use std::path::Path;
 use std::process::ExitStatus;
-use std::ptr::null;
+use std::ptr::{null, null_mut};
 use std::sync::OnceLock;
 
-use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -33,7 +41,8 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateProcessW, DETACHED_PROCESS, GetCurrentProcess, GetExitCodeProcess,
-    PROCESS_INFORMATION, STARTF_FORCEOFFFEEDBACK, STARTUPINFOW, WaitForSingleObject,
+    OpenProcessToken, PROCESS_INFORMATION, STARTF_FORCEOFFFEEDBACK, STARTUPINFOW,
+    WaitForSingleObject,
 };
 
 /// The longest command line `CreateProcessW` takes, in UTF-16 units, with
@@ -230,6 +239,59 @@ fn check_program(program: &Path) -> io::Result<()> {
         return Err(invalid("the program path holds a quote"));
     }
     Ok(())
+}
+
+/// The SID of the user this process runs as, in the form Windows prints
+/// (`S-1-5-21-...`). The helper service serves this user only (ADR 0018).
+///
+/// # Errors
+///
+/// The Win32 error.
+pub fn current_user_sid() -> io::Result<String> {
+    let mut token = null_mut();
+    // SAFETY: the pseudo handle of this process needs no close; `token` is a
+    // valid out pointer, and the token is checked, then owned.
+    let token = unsafe {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        OwnedHandle::from_raw_handle(token)
+    };
+    // A TOKEN_USER and its SID fit in 256 bytes; `u64` keeps the buffer
+    // aligned for the struct.
+    let mut buffer = [0u64; 32];
+    let mut used = 0;
+    // SAFETY: the buffer and the size passed match; on success it holds a
+    // TOKEN_USER whose SID pointer points into the same buffer.
+    let read = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            size_of::<[u64; 32]>() as u32,
+            &mut used,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut text: *mut u16 = null_mut();
+    // SAFETY: `buffer` holds a TOKEN_USER (above) and outlives these lines.
+    // The string `ConvertSidToStringSidW` allocates is read up to its NUL,
+    // copied, and freed with `LocalFree`.
+    unsafe {
+        let user = &*buffer.as_ptr().cast::<TOKEN_USER>();
+        if ConvertSidToStringSidW(user.User.Sid, &mut text) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut len = 0;
+        while *text.add(len) != 0 {
+            len += 1;
+        }
+        let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+        LocalFree(text.cast());
+        Ok(sid)
+    }
 }
 
 /// `text` as NUL-terminated UTF-16.
@@ -708,5 +770,17 @@ mod tests {
         let json = fs::read_to_string(dir.join("args.json")).unwrap();
         let read: Vec<String> = serde_json::from_str(&json).unwrap();
         assert_eq!(read, AWKWARD);
+    }
+
+    /// Read only: this process's user, in the form the helper service
+    /// compares (ADR 0018).
+    #[test]
+    fn the_current_user_sid_is_a_user_sid() {
+        let sid = current_user_sid().unwrap();
+        assert!(sid.starts_with("S-1-5-"), "{sid}");
+        assert!(
+            sid.bytes()
+                .all(|b| b.is_ascii_digit() || b == b'S' || b == b'-')
+        );
     }
 }
