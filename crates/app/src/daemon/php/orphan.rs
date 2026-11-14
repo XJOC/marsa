@@ -6,8 +6,11 @@
 //! to already listen") and the line's sites answer 502. So:
 //!
 //! - after each spawn of a pool, its [`watch`]er writes
-//!   `run/php-fpm-<minor>.pid` (pid, real executable, start time), and
-//!   deletes it after each exit;
+//!   `run/php-fpm-<minor>.pid` (pid, real executable, start time) once the
+//!   new process runs php-fpm, and deletes it after each exit. It looks
+//!   again for a moment ([`RECORD_LIMIT`]) while the process does not run
+//!   php-fpm yet, as on Linux right after `spawn` ([`Recorded::NotYet`]),
+//!   and stops at a change of its start time: the pid changed hands;
 //! - before a pool starts, [`Orphans`] reads that file. A pid counts as ours
 //!   only if it is alive, really runs the php-fpm of an installed PHP version
 //!   of this data folder (an older version counts: an update may have come in
@@ -191,6 +194,27 @@ pub fn accepted(programs: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     accepted
 }
 
+/// What one look at a php-fpm just spawned did ([`PidFile::record`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub enum Recorded {
+    /// The file names it now.
+    Written,
+    /// Not yet: what the OS says now, a process that runs another program,
+    /// or `Unknown`. On Linux `spawn` returns before the exec has switched
+    /// the child to its new program: the kernel wakes the parent first
+    /// (`exec_mmap` in `fs/exec.c`), and until the switch the child's `exe`
+    /// link names the daemon. So the watcher looks again ([`RECORD_LIMIT`]).
+    NotYet(Liveness),
+    /// Never: it is gone, its pid changed hands, or the file cannot be
+    /// written.
+    Never,
+}
+
+/// How long the watcher looks again at a php-fpm just spawned whose pid
+/// file is not written yet ([`Recorded::NotYet`]), every [`POLL`].
+pub const RECORD_LIMIT: Duration = Duration::from_secs(5);
+
 /// `run/php-fpm-<minor>.pid`.
 #[derive(Debug, Clone)]
 pub struct PidFile {
@@ -205,36 +229,44 @@ impl PidFile {
         }
     }
 
-    /// Writes the file for a php-fpm just spawned, only if `pid` really runs
-    /// `program`. `true` when the file was written.
-    pub async fn record(&self, processes: &dyn FpmProcesses, pid: u32, program: &Path) -> bool {
+    /// One look at a php-fpm just spawned: writes the file only if `pid`
+    /// really runs `program` now. `started` is its start time from an
+    /// earlier look, if one was read: a pid that shows another one now has
+    /// changed hands, and is never written.
+    pub async fn record(
+        &self,
+        processes: &dyn FpmProcesses,
+        pid: u32,
+        program: &Path,
+        started: Option<&str>,
+    ) -> Recorded {
         let spellings = accepted([program.to_path_buf()]);
         match processes.identity(pid).await {
+            Liveness::Alive { started: now, .. } if started.is_some_and(|then| then != now) => {
+                warn!(pid, "php-fpm pid file not written: the pid changed hands");
+                Recorded::Never
+            }
             Liveness::Alive { exe, started } if spellings.contains(&exe) => {
                 let record = PidRecord { pid, exe, started };
                 match process::write_pid_file(&self.path, &record) {
                     Ok(()) => {
                         debug!(pid, path = %self.path.display(), "php-fpm pid file written");
-                        true
+                        Recorded::Written
                     }
                     Err(err) => {
                         warn!(%err, path = %self.path.display(), "cannot write the php-fpm pid file");
-                        false
+                        Recorded::Never
                     }
                 }
             }
             // It exited at once; the supervisor reports why.
             Liveness::Gone => {
                 debug!(pid, "php-fpm exited before its pid file was written");
-                false
+                Recorded::Never
             }
             other => {
-                warn!(
-                    pid,
-                    ?other,
-                    "php-fpm pid file not written: the pid is not our php-fpm"
-                );
-                false
+                debug!(pid, ?other, "the pid does not run our php-fpm yet");
+                Recorded::NotYet(other)
             }
         }
     }
@@ -878,9 +910,13 @@ pub fn watch(
     let watcher = Watcher {
         lines,
         runtime: Arc::clone(&runtime),
-        pid_file,
-        program,
-        processes,
+        file: Recording {
+            pid_file,
+            program,
+            processes,
+            recorded: None,
+            pending: None,
+        },
     };
     let task = tokio::spawn(watcher.run(task));
     ServiceHandle {
@@ -893,9 +929,7 @@ pub fn watch(
 struct Watcher {
     lines: broadcast::Receiver<Event>,
     runtime: Arc<Mutex<ServiceRuntime>>,
-    pid_file: PidFile,
-    program: PathBuf,
-    processes: Arc<dyn FpmProcesses>,
+    file: Recording,
 }
 
 impl Watcher {
@@ -906,12 +940,9 @@ impl Watcher {
         let Watcher {
             mut lines,
             runtime,
-            pid_file,
-            program,
-            processes,
+            mut file,
         } = self;
         let id = lock(&runtime).status.id.clone();
-        let mut recorded = None;
         loop {
             let status = tokio::select! {
                 result = &mut supervisor => {
@@ -929,24 +960,115 @@ impl Watcher {
                         break;
                     }
                 },
+                () = file.due() => {
+                    file.look_again().await;
+                    continue;
+                }
             };
             match (&status.state, status.pid) {
                 // The supervisor says `running` right after each spawn.
-                (ServiceState::Running, Some(pid)) if recorded != Some(pid) => {
-                    let written = pid_file.record(&*processes, pid, &program).await;
-                    recorded = written.then_some(pid);
-                }
+                (ServiceState::Running, Some(pid)) => file.spawned(pid).await,
                 // php-fpm has exited, so its pid may be anyone's from now on.
-                (ServiceState::Failed { .. } | ServiceState::Stopped, _) if recorded.is_some() => {
-                    pid_file.remove();
-                    recorded = None;
-                }
+                (ServiceState::Failed { .. } | ServiceState::Stopped, _) => file.exited(),
                 _ => {}
             }
         }
-        // Only a file this watcher wrote, for a php-fpm that has exited.
-        if recorded.is_some() {
-            pid_file.remove();
+        file.exited();
+    }
+}
+
+/// The pid file of one pool run, as its watcher keeps it.
+struct Recording {
+    pid_file: PidFile,
+    program: PathBuf,
+    processes: Arc<dyn FpmProcesses>,
+    /// The pid the file names: written by this watcher, for a php-fpm that
+    /// has not exited yet.
+    recorded: Option<u32>,
+    /// A php-fpm just spawned whose file is not written yet.
+    pending: Option<Pending>,
+}
+
+/// A spawn to look at again ([`Recorded::NotYet`]).
+struct Pending {
+    pid: u32,
+    /// Its start time at an earlier look, once one was read: a later look
+    /// that shows another one means that the pid changed hands.
+    started: Option<String>,
+    /// When to look again.
+    next: tokio::time::Instant,
+    /// The last look starts before this.
+    until: tokio::time::Instant,
+}
+
+impl Recording {
+    /// After a spawn of `pid`: writes the file, or looks again soon.
+    async fn spawned(&mut self, pid: u32) {
+        let pending = self.pending.as_ref().is_some_and(|look| look.pid == pid);
+        if self.recorded == Some(pid) || pending {
+            return;
+        }
+        // The run before it has exited, even if its end was missed.
+        self.exited();
+        let until = tokio::time::Instant::now() + RECORD_LIMIT;
+        self.look(pid, None, until).await;
+    }
+
+    /// Ready when the next look at a pending spawn is due; never while there
+    /// is none.
+    async fn due(&self) {
+        match &self.pending {
+            Some(pending) => tokio::time::sleep_until(pending.next).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    async fn look_again(&mut self) {
+        if let Some(Pending {
+            pid,
+            started,
+            until,
+            ..
+        }) = self.pending.take()
+        {
+            self.look(pid, started, until).await;
+        }
+    }
+
+    /// One look at `pid` ([`PidFile::record`]). Another one is due after
+    /// [`POLL`] while it does not run our php-fpm yet, until `until`.
+    async fn look(&mut self, pid: u32, started: Option<String>, until: tokio::time::Instant) {
+        let (processes, then) = (&*self.processes, started.as_deref());
+        let found = self.pid_file.record(processes, pid, &self.program, then);
+        match found.await {
+            Recorded::Written => self.recorded = Some(pid),
+            Recorded::Never => {}
+            Recorded::NotYet(now) if tokio::time::Instant::now() < until => {
+                let read = match now {
+                    Liveness::Alive { started, .. } => Some(started),
+                    _ => None,
+                };
+                self.pending = Some(Pending {
+                    pid,
+                    started: started.or(read),
+                    next: tokio::time::Instant::now() + POLL,
+                    until,
+                });
+            }
+            Recorded::NotYet(now) => warn!(
+                pid,
+                ?now,
+                "php-fpm pid file not written: the pid is not our php-fpm"
+            ),
+        }
+    }
+
+    /// The php-fpm has exited, or a new one replaced it: its pid may be
+    /// anyone's from now on. Deletes only a file this watcher wrote.
+    fn exited(&mut self) {
+        self.pending = None;
+        if self.recorded.take().is_some() {
+            self.pid_file.remove();
         }
     }
 }
@@ -971,8 +1093,10 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
     use semver::Version;
+    use tokio_util::sync::CancellationToken;
 
     use marsa_core::php::PhpFiles;
+    use marsa_core::types::ServiceStatus;
 
     use super::super::{PhpManager, Pool, fpm_spec};
     use crate::daemon::state::Daemon;
@@ -1076,6 +1200,8 @@ mod tests {
         signals: Mutex<Vec<(u32, Signal)>>,
         /// How often the hook before the first signal was called.
         announced: Mutex<usize>,
+        /// How often a pid's identity was asked for.
+        looks: Mutex<usize>,
     }
 
     impl Fake {
@@ -1126,10 +1252,15 @@ mod tests {
         fn searches(&self) -> usize {
             *self.searches.lock().unwrap()
         }
+
+        fn looks(&self) -> usize {
+            *self.looks.lock().unwrap()
+        }
     }
 
     impl FpmProcesses for Fake {
         fn identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
+            *self.looks.lock().unwrap() += 1;
             let mut procs = self.procs.lock().unwrap();
             let next = match procs.get_mut(&pid) {
                 Some(proc) => {
@@ -2000,23 +2131,153 @@ mod tests {
                 .path
                 .ends_with(Path::new("run").join(format!("{}.pid", fpm_id(PHP84))))
         );
-        let program = Path::new(PROGRAM);
-        for now in [
-            alive("/bin/sleep", STARTED),
-            Liveness::Gone,
-            Liveness::Unknown,
-        ] {
-            assert!(!pid_file.record(&Fake::new([now]), 4242, program).await);
-            assert!(!pid_file.path.exists());
+        async fn look(pid_file: &PidFile, now: Liveness, started: Option<&str>) -> Recorded {
+            let fake = Fake::new([now]);
+            pid_file
+                .record(&fake, 4242, Path::new(PROGRAM), started)
+                .await
         }
-        assert!(pid_file.record(&Fake::new([ours()]), 4242, program).await);
+        // Another program, or no answer: maybe ours a moment later.
+        for now in [alive("/bin/sleep", STARTED), Liveness::Unknown] {
+            assert_eq!(
+                look(&pid_file, now.clone(), None).await,
+                Recorded::NotYet(now)
+            );
+        }
+        // Gone, or our program under a pid that changed hands since an
+        // earlier look: never.
+        assert_eq!(look(&pid_file, Liveness::Gone, None).await, Recorded::Never);
+        let reused = look(&pid_file, ours(), Some(EARLIER)).await;
+        assert_eq!(reused, Recorded::Never);
+        assert!(!pid_file.path.exists());
+
+        let recorded = look(&pid_file, ours(), Some(STARTED)).await;
+        assert_eq!(recorded, Recorded::Written);
         let record = process::read_pid_file(&pid_file.path).unwrap();
         let want = PidRecord {
             pid: 4242,
-            exe: program.to_path_buf(),
+            exe: PathBuf::from(PROGRAM),
             started: STARTED.into(),
         };
         assert_eq!(record, want);
+    }
+
+    /// The daemon's own program: what `/proc/<pid>/exe` names on Linux for a
+    /// moment after `spawn` returns, before the exec is done.
+    const DAEMON: &str = "/usr/local/bin/marsad";
+
+    /// A watcher of the 8.4 pool whose supervisor task runs until a stop,
+    /// and the bus on which a test says what the supervisor would.
+    fn watched(pid_file: &PidFile, fake: Arc<Fake>) -> (ServiceHandle, broadcast::Sender<Event>) {
+        let (events, lines) = broadcast::channel(16);
+        let cancel = CancellationToken::new();
+        let stopped = cancel.clone();
+        let handle = ServiceHandle {
+            cancel,
+            task: tokio::spawn(async move { stopped.cancelled().await }),
+            runtime: Arc::new(Mutex::new(ServiceRuntime::new(&fpm_id(PHP84)))),
+        };
+        let program = PathBuf::from(PROGRAM);
+        (
+            watch(handle, lines, pid_file.clone(), program, fake),
+            events,
+        )
+    }
+
+    /// What the supervisor says about the 8.4 pool.
+    fn changed(state: ServiceState, pid: Option<u32>) -> Event {
+        Event::ServiceChanged(ServiceStatus {
+            id: fpm_id(PHP84),
+            state,
+            pid,
+            restarts: 0,
+            since_ms: None,
+        })
+    }
+
+    fn exited() -> Event {
+        let failed = ServiceState::Failed {
+            code: "exited".into(),
+        };
+        changed(failed, None)
+    }
+
+    /// Polls `done` until it holds, for up to 10 s.
+    async fn soon(what: &str, done: impl Fn() -> bool) {
+        let started = Instant::now();
+        while !done() {
+            assert!(started.elapsed() < Duration::from_secs(10), "{what}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn the_pid_file_is_written_once_the_spawned_pid_runs_our_program() {
+        // On Linux `spawn` returns before the exec has switched the child to
+        // its program, so for a moment its `exe` link names the daemon. The
+        // watcher looks again until it names php-fpm.
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = PidFile::new(dir.path(), PHP84);
+        let execing = alive(DAEMON, STARTED);
+        let fake = Arc::new(Fake::new([execing.clone(), execing, ours()]));
+        let (handle, events) = watched(&pid_file, fake.clone());
+
+        events
+            .send(changed(ServiceState::Running, Some(MASTER)))
+            .unwrap();
+        soon("the pid file", || pid_file.path.exists()).await;
+        let want = PidRecord {
+            pid: MASTER,
+            exe: PathBuf::from(PROGRAM),
+            started: STARTED.into(),
+        };
+        assert_eq!(process::read_pid_file(&pid_file.path), Some(want));
+        assert_eq!(fake.looks(), 3);
+
+        events.send(exited()).unwrap();
+        soon("no pid file after the exit", || !pid_file.path.exists()).await;
+        handle.stop().await.unwrap();
+        assert!(fake.signals().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_spawned_pid_that_changes_hands_before_it_runs_our_program_gets_no_file() {
+        // Our program at the second look, but with another start time: not
+        // the process the supervisor spawned. No file, and no more looks.
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = PidFile::new(dir.path(), PHP84);
+        let fake = Arc::new(Fake::new([alive(DAEMON, STARTED), alive(PROGRAM, LATER)]));
+        let (handle, events) = watched(&pid_file, fake.clone());
+
+        events
+            .send(changed(ServiceState::Running, Some(MASTER)))
+            .unwrap();
+        soon("a second look", || fake.looks() >= 2).await;
+        tokio::time::sleep(POLL * 5).await;
+        assert_eq!(fake.looks(), 2);
+        assert!(!pid_file.path.exists());
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_watcher_stops_looking_once_the_spawned_pid_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = PidFile::new(dir.path(), PHP84);
+        let fake = Arc::new(Fake::new([alive(DAEMON, STARTED)]));
+        let (handle, events) = watched(&pid_file, fake.clone());
+
+        events
+            .send(changed(ServiceState::Running, Some(MASTER)))
+            .unwrap();
+        soon("a second look", || fake.looks() >= 2).await;
+        events.send(exited()).unwrap();
+        // The watcher runs on this thread: it takes the exit in meanwhile.
+        tokio::time::sleep(POLL * 2).await;
+        let looks = fake.looks();
+        tokio::time::sleep(POLL * 5).await;
+        assert_eq!(fake.looks(), looks);
+        assert!(!pid_file.path.exists());
+        handle.stop().await.unwrap();
     }
 
     #[tokio::test]
@@ -2438,7 +2699,8 @@ mod tests {
             })
             .await;
             let pid_file = PidFile::new(data, PHP84);
-            pid_file.record(&SystemFpm, orphan.pid(), &old).await;
+            let recorded = pid_file.record(&SystemFpm, orphan.pid(), &old, None).await;
+            assert_eq!(recorded, Recorded::Written);
             let record = process::read_pid_file(&pid_file.path).expect("the orphan's file");
             assert_eq!(record.pid, orphan.pid());
 
@@ -2604,7 +2866,10 @@ mod tests {
                 assert!(accepted([program.clone()]).contains(&exe), "{exe:?}");
             }
             let pid_file = PidFile::new(data, PHP84);
-            assert!(pid_file.record(&SystemFpm, master.pid(), &program).await);
+            let recorded = pid_file
+                .record(&SystemFpm, master.pid(), &program, None)
+                .await;
+            assert_eq!(recorded, Recorded::Written);
 
             let watched = [&[master.pid()][..], &workers].concat();
             start(&php, &daemon, &pool, &recorder, &watched).await;
@@ -2677,7 +2942,10 @@ mod tests {
             let (on_socket, by_hand) = (children[0], children[1]);
             wait_until("a worker listens", async || !listen_free(&pool.dial).await).await;
             let pid_file = PidFile::new(data, PHP84);
-            assert!(pid_file.record(&SystemFpm, master.pid(), &program).await);
+            let recorded = pid_file
+                .record(&SystemFpm, master.pid(), &program, None)
+                .await;
+            assert_eq!(recorded, Recorded::Written);
 
             // The master dies as from a SIGKILL, and pid 1 adopts both.
             drop(master);
