@@ -119,7 +119,7 @@ fn uninstall_without_a_terminal_and_without_yes_changes_nothing() {
         assert_eq!(out.status.code(), Some(1), "{args:?}");
         let stderr = text(&out.stderr);
         let code = if cfg!(target_os = "macos") {
-            "[uninstall_needs_yes]"
+            "[uninstall_all_needs_yes]"
         } else {
             "[uninstall_not_supported]"
         };

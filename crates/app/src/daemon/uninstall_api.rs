@@ -19,7 +19,9 @@
 //!    left open, or an answer that cannot be used, ends the request here:
 //!    nothing else changes, and the daemon keeps running.
 //! 3. **User trust:** `user_trust::remove`, as the user, from the record of
-//!    the trusted certificate (ADR 0015). macOS may show its dialog.
+//!    the trusted certificate (ADR 0015), used only if it is Marsa's
+//!    certificate in the login keychain or Caddy's root; otherwise
+//!    `trust_record_unusable`. macOS may show its dialog.
 //! 4. **Login file:** the file of task M5-03 that starts the tray icon.
 //! 5. **Answer, then stop:** once the helper ran, the daemon cancels its own
 //!    shutdown token. The server's graceful stop lets this answer finish, as
@@ -28,8 +30,9 @@
 //!
 //! A failed step 3 or 4 is a failed result, not an error: the other steps
 //! still ran, and running the uninstall again is safe, since each step is
-//! `unchanged` once done. The data folder is the CLI's question, never the
-//! daemon's.
+//! `unchanged` once done. Each step's result goes to the log at `info`, so
+//! `logs/marsad.log` holds the whole report even if the CLI stopped waiting
+//! (Ctrl+C). The data folder is the CLI's question, never the daemon's.
 //!
 //! One request at a time, shared with setup ([`Setup`]): 409
 //! `uninstall_running` or `setup_running`. Linux and Windows get 501
@@ -63,9 +66,9 @@ const AUTOSTART_REMOVE: &str = "autostart_remove";
 /// `osascript`, then `security remove-trusted-cert` and `delete-certificate`
 /// at [`PROMPT_LIMIT`] each (both may show a dialog), `find-certificate` at
 /// [`CHECK_LIMIT`], and [`PIPE_GRACE`] after each of these four. A client
-/// has to wait longer: `marsa_core::client::UNINSTALL_TIMEOUT` does, and a
+/// has to wait longer: `marsa_core::client::UNINSTALL_ALL_TIMEOUT` does, and a
 /// test holds the two together.
-pub const SLOWEST_UNINSTALL: Duration = Duration::from_secs(
+pub const SLOWEST_UNINSTALL_ALL: Duration = Duration::from_secs(
     3 * PROMPT_LIMIT.as_secs() + CHECK_LIMIT.as_secs() + 4 * PIPE_GRACE.as_secs(),
 );
 
@@ -104,6 +107,16 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallR
             platform,
             &daemon.shutdown,
         );
+        // The whole report goes to `logs/marsad.log`: a CLI stopped with
+        // Ctrl+C sends the user there.
+        for step in &report.results {
+            tracing::info!(
+                op = %step.op,
+                status = ?step.status,
+                code = step.code.as_deref(),
+                "uninstall step"
+            );
+        }
         tracing::info!(
             results = report.results.len(),
             error = report.error.as_ref().map(|error| error.code.as_str()),
@@ -161,9 +174,9 @@ pub fn run(
 /// login keychain, is not known.
 fn untrust_for_user(setup: &Setup, data_dir: &Path, stop: &CancellationToken) -> OpResult {
     let ca_root = CaddyPaths::in_dir(data_dir).ca_root();
-    let record = user_trust::record_path(data_dir);
+    let files = user_trust::TrustFiles::in_dir(data_dir);
     match setup.home() {
-        Some(home) => user_trust::remove(setup.runner(), home, &ca_root, &record, stop),
+        Some(home) => user_trust::remove(setup.runner(), home, &ca_root, &files, stop),
         None => {
             tracing::warn!("the home folder is not known, so the login keychain cannot be found");
             let message = "the home folder of the current user is not known, so the login \
@@ -574,9 +587,11 @@ mod tests {
             json!({ "version": 1, "ops": [{ "op": "uninstall_all" }] })
         );
         assert_eq!(*limit, Duration::from_secs(300));
+        // The listing first, then the record's trust, then the certificate.
+        assert_eq!(calls[1].1[0], "find-certificate");
         let record = dir.record();
         assert_eq!(
-            calls[1].1,
+            calls[2].1,
             ["remove-trusted-cert", record.to_str().unwrap()]
         );
         assert_eq!(calls[3].1[0..3], ["delete-certificate", "-Z", HASH]);
@@ -853,6 +868,7 @@ mod tests {
         .to_string();
         let fake = Fake::new(move |program, args| match program {
             OSASCRIPT => script_error(&format!("7:83: execution error: {helper_answer} (1)\n")),
+            SECURITY if args[0] == "find-certificate" => security(args),
             SECURITY if args[0] == "remove-trusted-cert" => {
                 script_error("SecTrustSettingsRemoveTrustSettings: The authorization was denied.")
             }
@@ -917,28 +933,28 @@ mod tests {
 
     #[test]
     fn the_client_waits_longer_than_the_slowest_uninstall() {
-        use marsa_core::client::UNINSTALL_TIMEOUT;
+        use marsa_core::client::UNINSTALL_ALL_TIMEOUT;
 
         // 15 min 10 s of limits, and 2 s of grace after each of 4 programs.
-        assert_eq!(SLOWEST_UNINSTALL, Duration::from_secs(918));
+        assert_eq!(SLOWEST_UNINSTALL_ALL, Duration::from_secs(918));
         // With room for the HTTP round trip and for killing a stalled
         // program.
         let margin = Duration::from_secs(30);
         assert!(
-            UNINSTALL_TIMEOUT >= SLOWEST_UNINSTALL + margin,
-            "the client waits {UNINSTALL_TIMEOUT:?}, and an uninstall may take \
-             {SLOWEST_UNINSTALL:?}"
+            UNINSTALL_ALL_TIMEOUT >= SLOWEST_UNINSTALL_ALL + margin,
+            "the client waits {UNINSTALL_ALL_TIMEOUT:?}, and an uninstall may take \
+             {SLOWEST_UNINSTALL_ALL:?}"
         );
 
         // The sum holds every program an uninstall runs: a full run runs all
         // of them, each with its limit, so a new program in the flow fails
-        // here until it is in `SLOWEST_UNINSTALL`.
+        // here until it is in `SLOWEST_UNINSTALL_ALL`.
         let dir = Dir::new();
         let fake = Fake::all_done();
         dir.run(&dir.setup(&fake));
         let calls = fake.calls();
         let programs = u32::try_from(calls.len()).unwrap();
         let limits: Duration = calls.iter().map(|(_, _, limit)| *limit).sum();
-        assert_eq!(limits + PIPE_GRACE * programs, SLOWEST_UNINSTALL);
+        assert_eq!(limits + PIPE_GRACE * programs, SLOWEST_UNINSTALL_ALL);
     }
 }

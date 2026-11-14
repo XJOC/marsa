@@ -9,23 +9,34 @@
 //!    for the administrator password once and runs `marsa-helper`, then takes
 //!    the user's trust away and deletes the login file. This prints one line
 //!    per step. A cancelled prompt ends the command: nothing was removed.
-//! 3. The daemon stops after its answer; this waits until it has.
+//!    Ctrl+C while it waits stops only this command: the uninstall goes on in
+//!    `marsad`, which writes each step to `logs/marsad.log`.
+//! 3. The daemon stops after its answer; this waits until it has, and then
+//!    watches a few seconds more: the Marsa window starts a daemon again
+//!    every second, and the menu-bar icon on a click.
 //! 4. Asks on its own whether to delete the data folder, `no` by default.
 //!    `--delete-data` answers yes; `--yes` alone leaves it as no. Only the
-//!    folder `directories` gives, never one from `--data-dir`, and only when
-//!    every step went well: the next uninstall needs the record of the
-//!    trusted certificate that is in it.
-//! 5. Prints what is left to do by hand: the `PATH` line in the shell's
-//!    startup file, and the programs if they are outside the data folder.
+//!    folder `directories` gives, never one from `--data-dir`, only when
+//!    every step went well (the next uninstall needs the record of the
+//!    trusted certificate that is in it), and only with no daemon on it. The
+//!    folder is renamed first, in one step, then deleted under the new name,
+//!    so a daemon that starts meanwhile cannot write into it.
+//! 5. Prints what is left to do by hand: quitting the window and the
+//!    menu-bar icon, the `PATH` line in the shell's startup file, and the
+//!    programs if they are outside the data folder.
 //!
 //! Exit code 1 if anything did not happen as asked.
 
+use std::collections::hash_map::RandomState;
 use std::fs;
+use std::hash::{BuildHasher, Hasher};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use marsa_core::client::{self, ClientError};
+use marsa_core::config;
 use marsa_core::recipes::Platform;
 use marsa_core::types::{OpStatus, UninstallReport};
 
@@ -33,10 +44,17 @@ use super::Failure;
 use super::daemon::{ClientFailure, connect, failure};
 use super::sites::printable;
 use super::strings::{self, Details};
+use crate::daemon::setup_api::user_trust;
 
-/// The arguments of `marsa uninstall`.
+/// How long a stopped daemon is watched for a restart. The Marsa window
+/// tries to start one every second.
+const RESTART_WATCH: Duration = Duration::from_secs(3);
+/// How often the daemon lock is looked at meanwhile.
+const RESTART_POLL: Duration = Duration::from_millis(100);
+
+/// The arguments of `marsa uninstall --all`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::Args)]
-pub struct UninstallArgs {
+pub struct UninstallAllArgs {
     /// Remove everything Marsa set up in this system. Required.
     #[arg(long, required = true)]
     pub all: bool,
@@ -52,14 +70,16 @@ pub struct UninstallArgs {
 
 /// Runs the uninstall. `data_dir_given`: the folder came from `--data-dir`,
 /// so it is never deleted.
-pub async fn run(args: &UninstallArgs, data_dir: &Path, data_dir_given: bool) -> ExitCode {
+pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool) -> ExitCode {
     let mut terminal = Terminal;
     // Before the question: the daemon would answer `uninstall_not_supported`
     // only after the user typed yes.
     if !is_macos(Platform::current()) {
         return own_failure("uninstall_not_supported", None).report();
     }
-    eprint!("{}", strings::uninstall_plan(data_dir, !data_dir_given));
+    let deletable = !data_dir_given;
+    let plan = strings::uninstall_all_plan(data_dir, deletable, deletable && args.delete_data);
+    eprint!("{plan}");
     if let Err(failure) = confirm(args, &mut terminal) {
         return failure.report();
     }
@@ -67,42 +87,41 @@ pub async fn run(args: &UninstallArgs, data_dir: &Path, data_dir_given: bool) ->
         Ok(client) => client,
         Err(failure) => return failure.report(),
     };
-    eprintln!("{}", strings::UNINSTALL_STARTED);
-    let report = match client.uninstall().await {
-        Ok(report) => report,
-        Err(err) => {
-            // The daemon refused at once (409, 501): nothing was removed. Any
-            // other error came while it may have been working.
-            if !matches!(err, ClientError::Api { .. }) {
-                eprintln!("{}", strings::UNINSTALL_RESULT_UNKNOWN);
+    eprintln!("{}", strings::UNINSTALL_ALL_STARTED);
+    let report = match until_ctrl_c(client.uninstall_all()).await {
+        Some(Ok(report)) => report,
+        Some(Err(err)) => {
+            if !refused_at_once(&err) {
+                eprintln!("{}", strings::UNINSTALL_ALL_RESULT_UNKNOWN);
             }
             return failure(&err, data_dir, None).report();
         }
+        None => {
+            let log = data_dir.join("logs").join("marsad.log");
+            eprintln!("{}", strings::uninstall_all_ctrl_c(&log));
+            return ExitCode::FAILURE;
+        }
     };
-    print!("{}", render(&report));
+    print!("{}", render(&report, data_dir));
     if let Some(failure) = error(&report) {
         return failure.report();
     }
     let complete = is_complete(&report);
     let mut ok = complete;
     if !complete {
-        println!("{}", strings::UNINSTALL_INCOMPLETE);
+        println!("{}", strings::UNINSTALL_ALL_INCOMPLETE);
     }
-    // The daemon stops by itself after its answer; this waits for it.
-    let stopped = match client::stop_daemon(data_dir).await {
-        Ok(_) => {
-            println!("{}", strings::DAEMON_STOPPED);
-            true
-        }
-        Err(err) => {
-            eprintln!("{}", failure(&err, data_dir, None).line());
-            ok = false;
-            false
-        }
-    };
-    let plan = data_folder(args, data_dir_given, complete && stopped, &mut terminal);
-    let deleted = match plan {
-        DataFolder::Delete => match delete_when_stopped(data_dir).await {
+    let end = wait_for_exit(data_dir).await;
+    match &end {
+        DaemonEnd::Stopped => println!("{}", strings::DAEMON_STOPPED),
+        DaemonEnd::Back => eprintln!("{}", strings::UNINSTALL_ALL_DAEMON_BACK),
+        DaemonEnd::NotStopped(failure) => eprintln!("{}", failure.line()),
+    }
+    let stopped = end == DaemonEnd::Stopped;
+    ok &= stopped;
+    let folder = data_folder(args, data_dir_given, complete, stopped, &mut terminal);
+    let deleted = match folder {
+        DataFolder::Delete => match delete_when_stopped(data_dir) {
             Ok(()) => {
                 println!("{}", strings::data_deleted(data_dir));
                 true
@@ -118,23 +137,97 @@ pub async fn run(args: &UninstallArgs, data_dir: &Path, data_dir_given: bool) ->
             println!("{}", strings::data_kept_for_retry(data_dir));
             false
         }
+        DataFolder::KeepDaemonRuns => {
+            println!("{}", strings::data_kept_daemon_runs(data_dir));
+            false
+        }
         DataFolder::NotOurs => {
             if args.delete_data {
-                let failure = own_failure("uninstall_data_dir_not_default", Some(data_dir));
-                eprintln!("{}", failure.line());
+                let code = "uninstall_all_data_dir_not_default";
+                eprintln!("{}", own_failure(code, Some(data_dir)).line());
                 ok = false;
             }
             false
         }
     };
-    print!(
-        "{}",
-        leftovers(data_dir, deleted, programs_dir().as_deref())
-    );
+    let programs = programs_dir();
+    let default_dir = config::app_data_dir().ok();
+    let left = Leftovers {
+        data_dir,
+        data_left: !deleted
+            && matches!(
+                folder,
+                DataFolder::Keep | DataFolder::KeepDaemonRuns | DataFolder::NotOurs
+            ),
+        programs: programs.as_deref(),
+        default_dir: default_dir.as_deref(),
+    };
+    print!("{}", left.render());
     if ok {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// `answer`, or `None` once the user pressed Ctrl+C. If Ctrl+C cannot be
+/// listened for, it keeps its default and ends the process at once, which
+/// stops only this command too.
+async fn until_ctrl_c<T>(answer: impl Future<Output = T>) -> Option<T> {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            tracing::warn!(error = %err, "cannot listen for Ctrl+C");
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        () = ctrl_c => None,
+        answer = answer => Some(answer),
+    }
+}
+
+/// The daemon refused before it did anything: another setup or uninstall
+/// runs (409), or this system has no uninstall (501). Any other answer, a
+/// 500 from a job that panicked for one, may come after some steps ran.
+fn refused_at_once(err: &ClientError) -> bool {
+    matches!(
+        err,
+        ClientError::Api {
+            status: 409 | 501,
+            ..
+        }
+    )
+}
+
+/// How the daemon ended after its answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DaemonEnd {
+    /// It stopped, and none started again meanwhile.
+    Stopped,
+    /// It stopped, and another started on the same data folder: the Marsa
+    /// window or the menu-bar icon.
+    Back,
+    /// It did not stop in time.
+    NotStopped(ClientFailure),
+}
+
+/// Waits until the daemon has stopped, then watches [`RESTART_WATCH`] for
+/// one that starts again.
+async fn wait_for_exit(data_dir: &Path) -> DaemonEnd {
+    if let Err(err) = client::stop_daemon(data_dir).await {
+        return DaemonEnd::NotStopped(failure(&err, data_dir, None));
+    }
+    let deadline = tokio::time::Instant::now() + RESTART_WATCH;
+    while tokio::time::Instant::now() < deadline {
+        if client::is_daemon_running(data_dir) {
+            return DaemonEnd::Back;
+        }
+        tokio::time::sleep(RESTART_POLL).await;
+    }
+    if client::is_daemon_running(data_dir) {
+        DaemonEnd::Back
+    } else {
+        DaemonEnd::Stopped
     }
 }
 
@@ -174,16 +267,16 @@ fn is_macos(platform: Option<Platform>) -> bool {
 
 /// Goes on with `--yes`, or once the user typed `yes`. Refuses without a
 /// terminal to ask on: a script must say `--yes` itself.
-fn confirm(args: &UninstallArgs, terminal: &mut impl Ask) -> Result<(), Failure> {
+fn confirm(args: &UninstallAllArgs, terminal: &mut impl Ask) -> Result<(), Failure> {
     if args.yes {
         return Ok(());
     }
     if !terminal.is_terminal() {
-        return Err(own_failure("uninstall_needs_yes", None));
+        return Err(own_failure("uninstall_all_needs_yes", None));
     }
-    match terminal.ask(strings::UNINSTALL_CONFIRM) {
+    match terminal.ask(strings::UNINSTALL_ALL_CONFIRM) {
         Some(answer) if answer.trim().eq_ignore_ascii_case("yes") => Ok(()),
-        _ => Err(own_failure("uninstall_not_confirmed", None)),
+        _ => Err(own_failure("uninstall_all_not_confirmed", None)),
     }
 }
 
@@ -194,26 +287,31 @@ enum DataFolder {
     Delete,
     /// The user said no, or was not asked (`--yes` alone).
     Keep,
-    /// A step failed, or the daemon did not stop: running the uninstall
-    /// again needs the folder.
+    /// A step failed: running the uninstall again needs the folder.
     KeepForRetry,
+    /// Every step went well, but a daemon still runs on the folder.
+    KeepDaemonRuns,
     /// It came from `--data-dir`: Marsa deletes only its own.
     NotOurs,
 }
 
-/// Whether to delete the data folder. `ready`: every step went well and the
-/// daemon has stopped. Asks only when nothing else decides.
+/// Whether to delete the data folder. `complete`: every step went well;
+/// `stopped`: no daemon runs on it. Asks only when nothing else decides.
 fn data_folder(
-    args: &UninstallArgs,
+    args: &UninstallAllArgs,
     data_dir_given: bool,
-    ready: bool,
+    complete: bool,
+    stopped: bool,
     terminal: &mut impl Ask,
 ) -> DataFolder {
     if data_dir_given {
         return DataFolder::NotOurs;
     }
-    if !ready {
+    if !complete {
         return DataFolder::KeepForRetry;
+    }
+    if !stopped {
+        return DataFolder::KeepDaemonRuns;
     }
     if args.delete_data {
         return DataFolder::Delete;
@@ -221,7 +319,7 @@ fn data_folder(
     if args.yes || !terminal.is_terminal() {
         return DataFolder::Keep;
     }
-    match terminal.ask(strings::DATA_QUESTION) {
+    match terminal.ask(strings::UNINSTALL_ALL_DATA_QUESTION) {
         Some(answer) if is_yes(&answer) => DataFolder::Delete,
         _ => DataFolder::Keep,
     }
@@ -235,12 +333,12 @@ fn is_yes(answer: &str) -> bool {
 
 /// Deletes the data folder once no daemon runs on it: the Marsa window may
 /// have started one again while the user answered.
-async fn delete_when_stopped(data_dir: &Path) -> Result<(), Failure> {
-    match client::stop_daemon(data_dir).await {
-        Ok(false) => {}
-        Ok(true) | Err(_) => {
-            return Err(own_failure("uninstall_daemon_restarted", Some(data_dir)));
-        }
+fn delete_when_stopped(data_dir: &Path) -> Result<(), Failure> {
+    if client::is_daemon_running(data_dir) {
+        return Err(own_failure(
+            "uninstall_all_daemon_restarted",
+            Some(data_dir),
+        ));
     }
     let home = std::env::home_dir();
     delete_data_dir(data_dir, home.as_deref()).map(|_| ())
@@ -249,36 +347,64 @@ async fn delete_when_stopped(data_dir: &Path) -> Result<(), Failure> {
 /// Deletes the data folder `dir` and everything in it: `true` if it was
 /// there. `dir` comes from `config::app_data_dir`, never from input, and is
 /// still checked: a full path, not the root, not the home folder or a folder
-/// that holds it, and a real folder, not a link. `fs::remove_dir_all` does
-/// not follow the links inside it either: it deletes each link, not what it
-/// points to.
+/// that holds it, and a real folder, not a link.
+///
+/// It is first renamed, in one step, to a sibling with a random name on the
+/// same volume (`<name>.deleting-<hex>`), then deleted under that name: a
+/// daemon that starts meanwhile makes a new folder at `dir` and never writes
+/// into the one being deleted. `fs::remove_dir_all` does not follow the
+/// links inside: it deletes each link, not what it points to.
 ///
 /// # Errors
 ///
-/// `uninstall_data_dir_unsafe` before anything is deleted, and
-/// `uninstall_data_delete_failed` if the deletion stopped midway.
+/// `uninstall_all_data_dir_unsafe` before anything is deleted,
+/// `uninstall_all_data_delete_failed` if the rename or the deletion failed,
+/// and `uninstall_all_data_dir_back` if `dir` was made again meanwhile.
 fn delete_data_dir(dir: &Path, home: Option<&Path>) -> Result<bool, Failure> {
-    let unsafe_dir = || own_failure("uninstall_data_dir_unsafe", Some(dir));
+    let unsafe_dir = || own_failure("uninstall_all_data_dir_unsafe", Some(dir));
     let holds_home = home.is_some_and(|home| home.starts_with(dir));
-    if !dir.is_absolute() || dir.parent().is_none() || holds_home {
+    let name = dir.file_name().filter(|_| dir.parent().is_some());
+    let Some(name) = name.filter(|_| dir.is_absolute() && !holds_home) else {
         return Err(unsafe_dir());
-    }
+    };
     let meta = match fs::symlink_metadata(dir) {
         Ok(meta) => meta,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(err) => {
             tracing::debug!(error = %err, path = %dir.display(), "cannot check the data folder");
-            return Err(own_failure("uninstall_data_delete_failed", Some(dir)));
+            return Err(own_failure("uninstall_all_data_delete_failed", Some(dir)));
         }
     };
     if !meta.file_type().is_dir() {
         return Err(unsafe_dir());
     }
-    fs::remove_dir_all(dir).map_err(|err| {
-        tracing::debug!(error = %err, path = %dir.display(), "cannot delete the data folder");
-        own_failure("uninstall_data_delete_failed", Some(dir))
+    let mut doomed = name.to_os_string();
+    doomed.push(format!(".deleting-{}", random_hex()));
+    let doomed = dir.with_file_name(doomed);
+    if let Err(err) = fs::rename(dir, &doomed) {
+        tracing::debug!(error = %err, path = %dir.display(), "cannot rename the data folder");
+        return Err(own_failure("uninstall_all_data_delete_failed", Some(dir)));
+    }
+    fs::remove_dir_all(&doomed).map_err(|err| {
+        tracing::debug!(error = %err, path = %doomed.display(), "cannot delete the data folder");
+        own_failure("uninstall_all_data_delete_failed", Some(&doomed))
     })?;
+    if fs::symlink_metadata(dir).is_ok() {
+        return Err(own_failure("uninstall_all_data_dir_back", Some(dir)));
+    }
     Ok(true)
+}
+
+/// 16 hex digits nobody can guess: std's `RandomState` is seeded from the
+/// system's random source. The process and the time make two calls differ
+/// for sure.
+fn random_hex() -> String {
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
+        hasher.write_u128(now.as_nanos());
+    }
+    format!("{:016x}", hasher.finish())
 }
 
 /// A failure of this command, with its text from [`strings`].
@@ -293,17 +419,23 @@ fn own_failure(code: &'static str, path: Option<&Path>) -> Failure {
     }
 }
 
-/// One line per step: done, already done, or failed and why.
-fn render(report: &UninstallReport) -> String {
+/// One line per step: done, already done, or failed and why. A record the
+/// daemon could not use is named by its path in the data folder.
+fn render(report: &UninstallReport, data_dir: &Path) -> String {
+    let record = user_trust::record_path(data_dir);
     let mut text = String::new();
     for result in &report.results {
-        let step = strings::uninstall_step(&printable(&result.op));
+        let step = strings::uninstall_all_step(&printable(&result.op));
         let line = match result.status {
             OpStatus::Done => strings::setup_done(&step),
             OpStatus::Unchanged => strings::setup_unchanged(&step),
             OpStatus::Failed => {
                 let code = printable(result.code.as_deref().unwrap_or_default());
-                let reason = strings::message(&code, &Details::default());
+                let details = Details {
+                    path: (code == user_trust::TRUST_RECORD_UNUSABLE).then_some(record.as_path()),
+                    ..Details::default()
+                };
+                let reason = strings::message(&code, &details);
                 strings::setup_failed(&step, &reason, &code)
             }
         };
@@ -340,23 +472,37 @@ fn programs_dir() -> Option<PathBuf> {
     exe.parent().map(Path::to_path_buf)
 }
 
-/// What Marsa does not do itself: the `PATH` line (the install only printed
-/// it, ADR 0013), the data folder if it stays, and the programs if they are
-/// outside it.
-fn leftovers(data_dir: &Path, deleted: bool, programs: Option<&Path>) -> String {
-    let mut lines = vec![
-        strings::LEFT_TO_DO.to_owned(),
-        strings::path_left(&data_dir.join("bin"), &data_dir.join("shims")),
-    ];
-    if !deleted {
-        lines.push(strings::data_left(data_dir));
+/// What Marsa does not do itself.
+struct Leftovers<'a> {
+    /// The data folder this command worked on.
+    data_dir: &'a Path,
+    /// Whether to say the data folder may be deleted by hand: not when it
+    /// is gone, and not when it is kept for a retry.
+    data_left: bool,
+    /// The folder of this program.
+    programs: Option<&'a Path>,
+    /// The folder `directories` gives: the install script printed a `PATH`
+    /// line for it (ADR 0013), whatever `--data-dir` says.
+    default_dir: Option<&'a Path>,
+}
+
+impl Leftovers<'_> {
+    fn render(&self) -> String {
+        let mut lines = vec![
+            strings::UNINSTALL_ALL_LEFT_TO_DO.to_owned(),
+            strings::QUIT_WINDOW_LEFT.to_owned(),
+            strings::path_left(self.default_dir),
+        ];
+        if self.data_left {
+            lines.push(strings::data_left(self.data_dir));
+        }
+        if let Some(dir) = self.programs.filter(|dir| !dir.starts_with(self.data_dir)) {
+            lines.push(strings::programs_left(dir));
+        }
+        let mut text = lines.join("\n");
+        text.push('\n');
+        text
     }
-    if let Some(dir) = programs.filter(|dir| !dir.starts_with(data_dir)) {
-        lines.push(strings::programs_left(dir));
-    }
-    let mut text = lines.join("\n");
-    text.push('\n');
-    text
 }
 
 #[cfg(test)]
@@ -393,8 +539,8 @@ mod tests {
         }
     }
 
-    fn args(yes: bool, delete_data: bool) -> UninstallArgs {
-        UninstallArgs {
+    fn args(yes: bool, delete_data: bool) -> UninstallAllArgs {
+        UninstallAllArgs {
             all: true,
             yes,
             delete_data,
@@ -410,22 +556,32 @@ mod tests {
         }
     }
 
+    /// The names in `dir`.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
     #[test]
     fn anything_but_yes_removes_nothing() {
         for answer in ["no", "y", "", "yess", "ye s"] {
             let mut script = Script::new(true, &[answer]);
             let refused = confirm(&args(false, false), &mut script).unwrap_err();
-            assert_eq!(refused.code, "uninstall_not_confirmed", "{answer:?}");
+            assert_eq!(refused.code, "uninstall_all_not_confirmed", "{answer:?}");
             assert!(
                 refused.message.contains("nothing was removed"),
                 "{answer:?}"
             );
-            assert_eq!(script.asked, [strings::UNINSTALL_CONFIRM]);
+            assert_eq!(script.asked, [strings::UNINSTALL_ALL_CONFIRM]);
         }
         // The end of the input (Ctrl+D) is no answer either.
         let mut script = Script::new(true, &[]);
         let refused = confirm(&args(false, false), &mut script).unwrap_err();
-        assert_eq!(refused.code, "uninstall_not_confirmed");
+        assert_eq!(refused.code, "uninstall_all_not_confirmed");
 
         for answer in ["yes\n", "YES\r\n", " yes "] {
             let mut script = Script::new(true, &[answer]);
@@ -441,7 +597,7 @@ mod tests {
     fn without_a_terminal_and_without_yes_nothing_is_asked_or_removed() {
         let mut script = Script::new(false, &["yes"]);
         let refused = confirm(&args(false, false), &mut script).unwrap_err();
-        assert_eq!(refused.code, "uninstall_needs_yes");
+        assert_eq!(refused.code, "uninstall_all_needs_yes");
         assert!(refused.message.contains("--yes"), "{}", refused.message);
         assert!(script.asked.is_empty());
         // `--yes` goes on without a question, with or without a terminal.
@@ -454,7 +610,18 @@ mod tests {
 
     #[test]
     fn the_data_folder_is_deleted_only_when_asked_and_safe() {
-        type Case = (&'static str, UninstallArgs, bool, bool, Script, DataFolder);
+        use DataFolder::{Delete, Keep, KeepDaemonRuns, KeepForRetry, NotOurs};
+        // The case, the args, `--data-dir`, every step went well, no daemon
+        // runs, the terminal, and the answer.
+        type Case = (
+            &'static str,
+            UninstallAllArgs,
+            bool,
+            bool,
+            bool,
+            Script,
+            DataFolder,
+        );
         let cases: Vec<Case> = vec![
             // The question, with no as the default.
             (
@@ -462,24 +629,27 @@ mod tests {
                 args(false, false),
                 false,
                 true,
+                true,
                 Script::new(true, &["y\n"]),
-                DataFolder::Delete,
+                Delete,
             ),
             (
                 "Enter",
                 args(false, false),
                 false,
                 true,
+                true,
                 Script::new(true, &["\n"]),
-                DataFolder::Keep,
+                Keep,
             ),
             (
                 "no",
                 args(false, false),
                 false,
                 true,
+                true,
                 Script::new(true, &["n"]),
-                DataFolder::Keep,
+                Keep,
             ),
             // `--yes` alone answers no, and `--delete-data` yes.
             (
@@ -487,56 +657,67 @@ mod tests {
                 args(true, false),
                 false,
                 true,
+                true,
                 Script::new(true, &[]),
-                DataFolder::Keep,
+                Keep,
             ),
             (
                 "--delete-data",
                 args(true, true),
                 false,
                 true,
+                true,
                 Script::new(false, &[]),
-                DataFolder::Delete,
+                Delete,
             ),
-            // Never after a failed step, and never a `--data-dir` folder.
+            // Never after a failed step, with a daemon on it, or for a
+            // `--data-dir` folder.
             (
                 "a failed step",
                 args(true, true),
                 false,
                 false,
+                true,
                 Script::new(true, &["y"]),
-                DataFolder::KeepForRetry,
+                KeepForRetry,
+            ),
+            (
+                "a daemon back",
+                args(true, true),
+                false,
+                true,
+                false,
+                Script::new(true, &["y"]),
+                KeepDaemonRuns,
             ),
             (
                 "--data-dir",
                 args(true, true),
                 true,
                 true,
+                true,
                 Script::new(true, &["y"]),
-                DataFolder::NotOurs,
+                NotOurs,
             ),
         ];
-        for (name, args, given, ready, mut script, want) in cases {
-            assert_eq!(
-                data_folder(&args, given, ready, &mut script),
-                want,
-                "{name}"
-            );
+        for (name, args, given, complete, stopped, mut script, want) in cases {
+            let got = data_folder(&args, given, complete, stopped, &mut script);
+            assert_eq!(got, want, "{name}");
             let asked = if matches!(name, "yes" | "Enter" | "no") {
-                vec![strings::DATA_QUESTION.to_owned()]
+                vec![strings::UNINSTALL_ALL_DATA_QUESTION.to_owned()]
             } else {
                 Vec::new()
             };
             assert_eq!(script.asked, asked, "{name}");
         }
         assert_eq!(
-            strings::DATA_QUESTION,
+            strings::UNINSTALL_ALL_DATA_QUESTION,
             "Delete the data folder (runtimes, settings, the CA)? [y/N] "
         );
     }
 
     #[test]
-    fn delete_data_dir_deletes_the_folder_but_not_what_its_links_point_to() {
+    fn the_data_folder_is_renamed_then_deleted_and_its_links_are_not_followed() {
         let tmp = TempDir::new().unwrap();
         let data = tmp.path().join("dev.marsa.Marsa");
         fs::create_dir_all(data.join("runtimes").join("php")).unwrap();
@@ -548,10 +729,24 @@ mod tests {
         std::os::unix::fs::symlink(&outside, data.join("link")).unwrap();
 
         assert_eq!(delete_data_dir(&data, None), Ok(true));
-        assert!(!data.exists());
+        // Gone, the renamed copy too, and what the link pointed to stays.
+        assert_eq!(names(tmp.path()), ["code"]);
         assert!(outside.join("index.php").is_file());
         // Nothing there: fine.
         assert_eq!(delete_data_dir(&data, None), Ok(false));
+    }
+
+    #[test]
+    fn the_name_of_the_renamed_folder_is_a_random_sibling() {
+        let dir = Path::new("/Users/dev/Library/Application Support/dev.marsa.Marsa");
+        let (one, two) = (random_hex(), random_hex());
+        assert_eq!(one.len(), 16);
+        assert!(one.bytes().all(|byte| byte.is_ascii_hexdigit()), "{one}");
+        assert_ne!(one, two);
+        let mut doomed = dir.file_name().unwrap().to_os_string();
+        doomed.push(format!(".deleting-{one}"));
+        let doomed = dir.with_file_name(doomed);
+        assert_eq!(doomed.parent(), dir.parent());
     }
 
     #[test]
@@ -559,12 +754,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let unsafe_dir = |dir: &Path, home: Option<&Path>| {
             let refused = delete_data_dir(dir, home).unwrap_err();
-            assert_eq!(
-                refused.code,
-                "uninstall_data_dir_unsafe",
-                "{}",
-                dir.display()
-            );
+            let code = "uninstall_all_data_dir_unsafe";
+            assert_eq!(refused.code, code, "{}", dir.display());
         };
         // Not a full path, the root, and the home folder or one above it.
         unsafe_dir(Path::new("relative/data"), None);
@@ -597,6 +788,37 @@ mod tests {
     }
 
     #[test]
+    fn only_409_and_501_mean_nothing_was_removed() {
+        let api = |status| ClientError::Api {
+            status,
+            code: "x".into(),
+            message: "x".into(),
+        };
+        assert!(refused_at_once(&api(409)));
+        assert!(refused_at_once(&api(501)));
+        for status in [500, 400, 401, 404] {
+            assert!(!refused_at_once(&api(status)), "{status}");
+        }
+        assert!(!refused_at_once(&ClientError::NotRunning));
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_is_not_waited_for_while_the_answer_comes() {
+        // The answer that comes first is returned; Ctrl+C itself cannot be
+        // sent in a test without stopping the test runner.
+        assert_eq!(until_ctrl_c(async { 7 }).await, Some(7));
+        let log = Path::new("/data/logs/marsad.log");
+        let text = strings::uninstall_all_ctrl_c(log);
+        for part in [
+            "goes on in marsad",
+            "can still be cancelled",
+            "/data/logs/marsad.log",
+        ] {
+            assert!(text.contains(part), "{part}: {text}");
+        }
+    }
+
+    #[test]
     fn each_step_has_a_line_and_a_failure_says_why() {
         let report = UninstallReport {
             results: vec![
@@ -606,14 +828,15 @@ mod tests {
                 result(
                     "user_trust_remove",
                     OpStatus::Failed,
-                    Some("trust_remove_failed"),
+                    Some("trust_record_unusable"),
                 ),
                 result("autostart_remove", OpStatus::Done, None),
             ],
             error: None,
             stopping: true,
         };
-        let text = render(&report);
+        let data = Path::new("/data");
+        let text = render(&report, data);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 5, "{text}");
         assert_eq!(lines[0], "Remove the redirect of ports 80 and 443: done.");
@@ -622,9 +845,13 @@ mod tests {
             lines[2],
             "Remove the trust in Marsa's certificates for all users: already done."
         );
+        // The record is named, and the user may delete it.
+        let record = user_trust::record_path(data);
         assert!(
             lines[3].starts_with("Remove the trust in Marsa's certificates for you: failed.")
-                && lines[3].ends_with("[trust_remove_failed]"),
+                && lines[3].contains(&record.display().to_string())
+                && lines[3].contains("delete it by hand")
+                && lines[3].ends_with("[trust_record_unusable]"),
             "{}",
             lines[3]
         );
@@ -641,6 +868,21 @@ mod tests {
     }
 
     #[test]
+    fn removal_failures_give_no_setup_advice() {
+        for code in [
+            "resolver_read",
+            "trust_read",
+            "autostart_write",
+            "trust_record_unusable",
+        ] {
+            let text = strings::message(code, &Details::default());
+            assert!(!text.contains("marsa setup"), "{code}: {text}");
+            assert!(!text.contains("could not add"), "{code}: {text}");
+            assert!(!text.contains("Cannot write"), "{code}: {text}");
+        }
+    }
+
+    #[test]
     fn a_cancelled_prompt_is_an_error_and_nothing_else() {
         let report = UninstallReport {
             error: Some(ApiError {
@@ -649,7 +891,7 @@ mod tests {
             }),
             ..UninstallReport::default()
         };
-        assert_eq!(render(&report), "");
+        assert_eq!(render(&report, Path::new("/data")), "");
         assert!(!is_complete(&report));
         assert_eq!(
             error(&report).unwrap().line(),
@@ -659,19 +901,32 @@ mod tests {
     }
 
     #[test]
-    fn what_is_left_names_the_path_line_the_data_and_the_programs() {
-        let data = Path::new("/Users/dev/Library/Application Support/dev.marsa.Marsa");
-        let inside = data.join("bin");
+    fn what_is_left_says_to_quit_names_the_default_path_and_the_programs() {
+        let default = Path::new("/Users/dev/Library/Application Support/dev.marsa.Marsa");
+        let inside = default.join("bin");
         let outside = Path::new("/Users/dev/code/marsa/target/release");
+        let left = |data_dir, data_left, programs| Leftovers {
+            data_dir,
+            data_left,
+            programs,
+            default_dir: Some(default),
+        };
 
-        let text = leftovers(data, true, Some(&inside));
+        // All gone.
+        let text = left(default, false, Some(inside.as_path())).render();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "Left to do by hand:");
-        assert!(lines[1].contains(&inside.display().to_string()), "{text}");
-        assert!(lines[1].contains("shims") && lines[1].contains("~/.zprofile"));
-        assert_eq!(lines.len(), 2, "{text}");
+        assert!(lines[1].contains("menu-bar icon"), "{text}");
+        assert!(
+            lines[2].starts_with("  If you added Marsa to PATH"),
+            "{text}"
+        );
+        assert!(lines[2].contains(&inside.display().to_string()), "{text}");
+        assert!(lines[2].contains("shims") && lines[2].contains("~/.zprofile"));
+        assert_eq!(lines.len(), 3, "{text}");
 
-        let text = leftovers(data, false, Some(outside));
+        // The data folder kept by choice, and programs elsewhere.
+        let text = left(default, true, Some(outside)).render();
         assert!(text.contains("Delete the data folder"), "{text}");
         assert!(
             text.contains(&format!(
@@ -680,27 +935,57 @@ mod tests {
             )),
             "{text}"
         );
+
+        // `--data-dir`: the PATH line still names the default folder, which
+        // is the one the install told the user to add.
+        let custom = Path::new("/tmp/marsa-data");
+        let text = left(custom, true, None).render();
+        let path_line = text.lines().nth(2).unwrap();
+        assert!(path_line.contains(&default.join("shims").display().to_string()));
+        assert!(!path_line.contains("/tmp/marsa-data"), "{path_line}");
+        assert!(
+            text.contains("Delete the data folder /tmp/marsa-data"),
+            "{text}"
+        );
+
+        // No default folder known: the line names none.
+        let none = Leftovers {
+            default_dir: None,
+            ..left(custom, false, None)
+        };
+        let text = none.render();
+        let path_line = text.lines().nth(2).unwrap();
+        assert!(path_line.ends_with("~/.zshrc."), "{path_line}");
+        assert!(!path_line.contains("it names"), "{path_line}");
     }
 
     #[test]
-    fn the_plan_names_every_step_and_the_data_folder() {
+    fn the_plan_names_every_step_and_what_happens_to_the_data_folder() {
         let data = Path::new("/data");
-        let given = strings::uninstall_plan(data, false);
+        let given = strings::uninstall_all_plan(data, false, true);
         assert!(
             given.contains("given with --data-dir stays: /data"),
             "{given}"
         );
-        let plan = strings::uninstall_plan(data, true);
-        assert!(plan.contains("unless you choose to delete it"), "{plan}");
+        let kept = strings::uninstall_all_plan(data, true, false);
+        assert!(
+            kept.contains("unless you choose to delete it: /data"),
+            "{kept}"
+        );
+        let deleted = strings::uninstall_all_plan(data, true, true);
+        assert!(
+            deleted.contains("The data folder /data will be deleted."),
+            "{deleted}"
+        );
         for part in [
             "ports 80 and 443",
             "/etc/resolver/test",
             "for all users and for you",
             "start at login",
             "administrator password",
-            "/data",
+            "menu-bar icon",
         ] {
-            assert!(plan.contains(part), "{part}: {plan}");
+            assert!(kept.contains(part), "{part}: {kept}");
         }
     }
 

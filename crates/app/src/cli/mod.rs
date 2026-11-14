@@ -16,7 +16,7 @@ pub mod services;
 pub mod setup;
 pub mod sites;
 pub mod strings;
-pub mod uninstall;
+pub mod uninstall_all;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

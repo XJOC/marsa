@@ -15,7 +15,7 @@ use marsa::cli::runtimes::{self, RuntimesArgs};
 use marsa::cli::services::{self, ServicesArgs};
 use marsa::cli::setup;
 use marsa::cli::sites::{self, SitesCommand};
-use marsa::cli::uninstall::{self, UninstallArgs};
+use marsa::cli::uninstall_all::{self, UninstallAllArgs};
 
 /// Local development runtimes and sites.
 #[derive(Debug, Parser)]
@@ -64,7 +64,7 @@ enum Command {
     /// certificates, and the start at login; then stop the daemon. Asks you
     /// to type yes first, and macOS asks for an administrator password. The
     /// data folder stays unless you agree to delete it.
-    Uninstall(UninstallArgs),
+    Uninstall(UninstallAllArgs),
 }
 
 // One thread is enough: the command waits on one thing at a time.
@@ -89,7 +89,7 @@ async fn main() -> ExitCode {
         Command::Sites(command) => sites::run(command, &data_dir).await,
         Command::Setup => setup::run(&data_dir).await,
         Command::Autostart(args) => autostart::run(args, &data_dir).await,
-        Command::Uninstall(args) => uninstall::run(args, &data_dir, data_dir_given).await,
+        Command::Uninstall(args) => uninstall_all::run(args, &data_dir, data_dir_given).await,
     }
 }
 
@@ -379,7 +379,7 @@ mod tests {
             match parse(args).expect("valid").command {
                 Command::Uninstall(got) => assert_eq!(
                     got,
-                    UninstallArgs {
+                    UninstallAllArgs {
                         all: true,
                         yes,
                         delete_data

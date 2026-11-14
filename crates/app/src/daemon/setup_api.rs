@@ -516,28 +516,23 @@ impl Setup {
         // refused admin prompt ends setup with nothing changed, and no second
         // dialog.
         if let Some(pem) = trust_for_user.filter(|_| report.error.is_none()) {
-            let record = user_trust::record_path(data_dir);
-            let trust = self.trust_for_user(&ca_root, &pem, &record, stop);
-            report.results.push(trust);
+            let files = user_trust::TrustFiles::in_dir(data_dir);
+            report.results.push(self.trust_for_user(&pem, &files, stop));
         }
         report
     }
 
-    /// The user's trust of the CA root at `ca_root`, whose checked text is
-    /// `pem` (ADR 0015), kept at `record` once it is trusted; or
-    /// `trust_add_failed` when the home folder, and so the login keychain,
-    /// is not known.
+    /// The user's trust of the CA root whose checked text is `pem` (ADR
+    /// 0015), through the trust folder `files`; or `trust_add_failed` when
+    /// the home folder, and so the login keychain, is not known.
     fn trust_for_user(
         &self,
-        ca_root: &Path,
         pem: &str,
-        record: &Path,
+        files: &user_trust::TrustFiles,
         stop: &CancellationToken,
     ) -> OpResult {
         match &self.home {
-            Some(home) => {
-                user_trust::install(self.runner.as_ref(), home, ca_root, pem, record, stop)
-            }
+            Some(home) => user_trust::install(self.runner.as_ref(), home, pem, files, stop),
             None => {
                 tracing::warn!(
                     "the home folder is not known, so the login keychain cannot be found"
@@ -1008,7 +1003,8 @@ fn check_owners(_helper: &Path, _file: &fs::Metadata) -> Result<(), HelperFault>
 /// not an approved dependency (AGENTS.md section 8), so this reads the owner
 /// of a new pipe: macOS and Linux give a pipe the effective user of the
 /// process that asks. A test compares it with a new file's owner.
-// `#[cfg]` outside `platform`: only `check_owners` on Unix needs it.
+// `#[cfg]` outside `platform`: only `check_owners`, and the trust folder
+// check of `user_trust`, need it, on Unix.
 #[cfg(unix)]
 fn current_uid() -> io::Result<u32> {
     use std::os::fd::OwnedFd;
@@ -1597,8 +1593,13 @@ mod tests {
         // trust the CA (ADR 0015), and the user's trust comes after it.
         assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)]);
         assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, SECURITY, SECURITY]);
-        let ca_root = dir.ca_root();
-        let ca_root = ca_root.to_str().unwrap();
+        // `security` gets the checked copy of Caddy's root in the trust
+        // folder, not `root.crt` again (task M5-13); it is the record now.
+        let checked = dir.dir.path().join("trust").join("pending.pem");
+        assert_ne!(checked, dir.ca_root());
+        let ca_root = checked.to_str().unwrap();
+        let record = dir.dir.path().join("trust").join("user-trusted.pem");
+        assert_eq!(fs::read_to_string(record).unwrap(), TEST_CA);
         let keychain = dir
             .home()
             .join("Library")

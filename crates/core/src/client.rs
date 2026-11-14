@@ -70,7 +70,7 @@ pub const SETUP_TIMEOUT: Duration = Duration::from_secs(13 * 60);
 /// dialogs macOS may show to take the user's trust away and to delete the
 /// certificate; the keychain listing gets 10 seconds. A test in the daemon's
 /// `uninstall_api.rs` holds this above the sum of the daemon's own limits.
-pub const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(16 * 60);
+pub const UNINSTALL_ALL_TIMEOUT: Duration = Duration::from_secs(16 * 60);
 /// How long a new daemon has to answer. The wait ends as soon as it does, so
 /// this only bounds a real failure. macOS checks a program the first time it
 /// runs after an install or an update: about 2 s when the machine is idle,
@@ -328,7 +328,7 @@ impl DaemonClient {
 
     /// `POST /v1/uninstall` (task M5-13): one admin prompt for the helper's
     /// removals, then the user's trust and the login file. Waits until it
-    /// ends, up to 16 minutes ([`UNINSTALL_TIMEOUT`]). When
+    /// ends, up to 16 minutes ([`UNINSTALL_ALL_TIMEOUT`]). When
     /// [`UninstallReport::stopping`] is `true` the daemon stops right after
     /// this answer: [`stop_daemon`] waits until it has.
     ///
@@ -338,8 +338,8 @@ impl DaemonClient {
     /// while one of them runs, and `uninstall_not_supported` (501) on Linux
     /// and Windows for now. A cancelled prompt is not an error: it is in
     /// [`UninstallReport::error`].
-    pub async fn uninstall(&self) -> Result<UninstallReport, ClientError> {
-        self.call(Method::POST, &["v1", "uninstall"], UNINSTALL_TIMEOUT)
+    pub async fn uninstall_all(&self) -> Result<UninstallReport, ClientError> {
+        self.call(Method::POST, &["v1", "uninstall"], UNINSTALL_ALL_TIMEOUT)
             .await
     }
 
@@ -555,6 +555,14 @@ pub async fn stop_daemon(data_dir: &Path) -> Result<bool, ClientError> {
         sleep(POLL).await;
     }
     Ok(true)
+}
+
+/// Whether a daemon holds `<data_dir>/run/daemon.lock` now: one runs, or is
+/// starting or stopping. Sends nothing and starts nothing. `marsa uninstall
+/// --all` uses it to see whether the Marsa window or the menu-bar icon
+/// started a daemon again (task M5-13).
+pub fn is_daemon_running(data_dir: &Path) -> bool {
+    lock_is_held(&daemon_lock_path(&run_dir(data_dir)))
 }
 
 /// `marsad` is looked up only when it must be started, so a running daemon
