@@ -1001,6 +1001,9 @@ mod tests {
         assert_eq!(files.ca_bundle, Some(bundle));
         assert_eq!(line_files(data, &v("8.4.3"), None, false).xdebug, None);
         assert_eq!(line_files(data, &v("8.4.10"), None, true).xdebug, None);
+        // A pool's `php.ini` refuses `\` in its paths (`php_path_not_allowed`),
+        // so a Windows temp folder cannot hold a Linux pool in this test.
+        #[cfg(unix)]
         assert_eq!(
             pool_for(data, Platform::LinuxX64, &v("8.4.3"), None)
                 .unwrap()
