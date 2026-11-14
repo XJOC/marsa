@@ -51,8 +51,8 @@ toml.workspace = true
 # the shim never builds it.
 [target.'cfg(windows)'.dependencies]
 # The helper service's client (task M4-19g1): the pipe, the service
-# manager, the user's SID.
-windows-sys = { workspace = true, optional = true, features = ["Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Services"] }
+# manager, the user's SID, and the UAC prompt (`ShellExecuteExW`).
+windows-sys = { workspace = true, optional = true, features = ["Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_Services", "Win32_UI_Shell"] }
 
 [dev-dependencies]
 # A fake daemon for the client tests (task M3-08).

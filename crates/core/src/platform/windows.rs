@@ -11,8 +11,9 @@
 //!   `bInheritHandles = TRUE`, so a daemon started by `marsa park . | more`
 //!   kept the pipe open, and the reader waited until the daemon stopped.
 //!
-//! - [`current_user_sid`] and [`helper_pipe`]: what `marsad` needs to use
-//!   the helper service (ADR 0018), public for the `marsa` crate.
+//! - [`current_user_sid`], [`run_elevated`], and [`helper_pipe`]: what
+//!   `marsad` needs to install and use the helper service (ADR 0018),
+//!   public for the `marsa` crate.
 //!
 //! The only `unsafe` code of `marsa-core` is in this module and its
 //! `helper_pipe` (AGENTS.md section 6). The blocks are short, and every
@@ -30,10 +31,16 @@ use std::path::Path;
 use std::process::ExitStatus;
 use std::ptr::{null, null_mut};
 use std::sync::OnceLock;
+use std::time::Duration;
 
-use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_CANCELLED, LocalFree, RPC_E_CHANGED_MODE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+use windows_sys::Win32::System::Com::{
+    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -43,6 +50,10 @@ use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateProcessW, DETACHED_PROCESS, GetCurrentProcess, GetExitCodeProcess,
     OpenProcessToken, PROCESS_INFORMATION, STARTF_FORCEOFFFEEDBACK, STARTUPINFOW,
     WaitForSingleObject,
+};
+use windows_sys::Win32::UI::Shell::{
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    ShellExecuteExW,
 };
 
 /// The longest command line `CreateProcessW` takes, in UTF-16 units, with
@@ -292,6 +303,125 @@ pub fn current_user_sid() -> io::Result<String> {
         LocalFree(text.cast());
         Ok(sid)
     }
+}
+
+/// What a program run through the UAC prompt gave.
+#[derive(Debug)]
+pub enum Elevated {
+    /// It ran and ended with this exit code.
+    Exited(u32),
+    /// The user said no at the prompt.
+    Cancelled,
+    /// It still runs at the limit. The caller may wait more, and must not
+    /// start it again meanwhile.
+    TimedOut(ElevatedProcess),
+}
+
+/// A program started through the UAC prompt that still runs.
+#[derive(Debug)]
+pub struct ElevatedProcess(OwnedHandle);
+
+impl ElevatedProcess {
+    /// Waits up to `limit` more: `Some(code)` once it has ended, `None` if
+    /// it still runs.
+    ///
+    /// # Errors
+    ///
+    /// The Win32 error of the wait or of the exit code.
+    pub fn wait(&self, limit: Duration) -> io::Result<Option<u32>> {
+        // `u32::MAX` is `INFINITE`.
+        let millis =
+            u32::try_from(limit.as_millis()).map_or(u32::MAX - 1, |ms| ms.min(u32::MAX - 1));
+        // SAFETY: the handle is the open process this struct owns.
+        match unsafe { WaitForSingleObject(self.0.as_raw_handle(), millis) } {
+            WAIT_OBJECT_0 => {
+                let mut code = 0;
+                // SAFETY: the handle is the open process, and `code` a valid
+                // out pointer.
+                if unsafe { GetExitCodeProcess(self.0.as_raw_handle(), &mut code) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(Some(code))
+            }
+            WAIT_TIMEOUT => Ok(None),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+}
+
+/// Runs `program` with `args` as an administrator, through the UAC prompt
+/// (`ShellExecuteExW` with the verb `runas`), and waits up to `limit` for it
+/// to end. For the helper's `install` and `uninstall` (ADR 0018).
+///
+/// Blocking: `ShellExecuteExW` returns once the user has answered the
+/// prompt, which has no limit of its own and which `limit` does not cover,
+/// so call it from a blocking thread. The elevated program's output is not
+/// available; its exit code is the answer. Its window, if any, is hidden;
+/// the prompt itself is drawn by Windows and is not.
+///
+/// # Errors
+///
+/// `InvalidInput` for a program that is not an absolute `.exe` path or
+/// whose path holds a quote, or for an argument with a NUL; otherwise the
+/// Win32 error. An error means the program did not start.
+pub fn run_elevated(program: &Path, args: &[&OsStr], limit: Duration) -> io::Result<Elevated> {
+    /// `SW_HIDE`.
+    const HIDE: i32 = 0;
+    check_program(program)?;
+    let file = wide(program.as_os_str())?;
+    let verb = wide(OsStr::new("runas"))?;
+    let mut parameters = Vec::new();
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            parameters.push(u16::from(b' '));
+        }
+        append_arg(&mut parameters, arg)?;
+    }
+    parameters.push(0);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        lpVerb: verb.as_ptr(),
+        lpFile: file.as_ptr(),
+        lpParameters: parameters.as_ptr(),
+        nShow: HIDE,
+        ..SHELLEXECUTEINFOW::default()
+    };
+    // COM for this thread, as `ShellExecuteExW` asks. A failure stops here,
+    // before any prompt; `RPC_E_CHANGED_MODE` means the thread has COM
+    // already, in another mode, which serves as well.
+    let mode = (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).cast_unsigned();
+    // SAFETY: the reserved pointer is null, as the function requires.
+    let com = unsafe { CoInitializeEx(null(), mode) };
+    if com < 0 && com != RPC_E_CHANGED_MODE {
+        return Err(io::Error::from_raw_os_error(com));
+    }
+    // SAFETY: `info` and the three strings it points to live through the
+    // call; the strings are NUL-terminated.
+    let launched = unsafe { ShellExecuteExW(&mut info) };
+    let launch_error = io::Error::last_os_error();
+    if com >= 0 {
+        // SAFETY: pairs the successful `CoInitializeEx` above.
+        unsafe { CoUninitialize() };
+    }
+    if launched == 0 {
+        if launch_error.raw_os_error() == Some(ERROR_CANCELLED as i32) {
+            return Ok(Elevated::Cancelled);
+        }
+        return Err(launch_error);
+    }
+    if info.hProcess.is_null() {
+        return Err(io::Error::other("Windows gave no process for the program"));
+    }
+    // SAFETY: with `SEE_MASK_NOCLOSEPROCESS` the process handle is the
+    // caller's to close; it is owned from here.
+    let process = ElevatedProcess(unsafe { OwnedHandle::from_raw_handle(info.hProcess) });
+    Ok(match process.wait(limit) {
+        Ok(Some(code)) => Elevated::Exited(code),
+        // It started, so a failed wait is not "did not start": the caller
+        // keeps the process and may wait again.
+        Ok(None) | Err(_) => Elevated::TimedOut(process),
+    })
 }
 
 /// `text` as NUL-terminated UTF-16.
@@ -770,6 +900,26 @@ mod tests {
         let json = fs::read_to_string(dir.join("args.json")).unwrap();
         let read: Vec<String> = serde_json::from_str(&json).unwrap();
         assert_eq!(read, AWKWARD);
+    }
+
+    /// Refused before any prompt: only an absolute `.exe` runs elevated.
+    #[test]
+    fn only_an_absolute_exe_is_run_elevated() {
+        let limit = Duration::from_secs(1);
+        let windows = env::var_os("SystemRoot").map(PathBuf::from).unwrap();
+        for program in [
+            PathBuf::from("marsa-helper.exe"),
+            windows.join("System32").join("cmd.bat"),
+            windows.join("notepad"),
+        ] {
+            let err = run_elevated(&program, &[], limit).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                io::ErrorKind::InvalidInput,
+                "{}",
+                program.display()
+            );
+        }
     }
 
     /// Read only: this process's user, in the form the helper service

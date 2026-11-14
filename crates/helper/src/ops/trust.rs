@@ -389,7 +389,8 @@ mod tests {
     /// was deleted at once and never entered the repository.
     const TEST_CA: &str = include_str!("../../../../fixtures/helper/test-ca.pem");
     /// `openssl x509 -in test-ca.pem -outform der | shasum -a 256`, run once.
-    const HASH: &str = "29E433200254DFCE602212438E9D64E306B672DB9BC4642A7620CEBCC0FD8057";
+    /// The hash both crates test against (`marsa_core::helper::certificate_sha256`).
+    const HASH: &str = include_str!("../../../../fixtures/helper/test-ca.sha256").trim_ascii_end();
     /// The mode of a file a test starts with. Marsa never writes it, so the
     /// mode shows whether an op rewrote the file.
     const OLD_MODE: u32 = 0o600;

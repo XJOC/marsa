@@ -369,4 +369,29 @@ mod tests {
             assert!(results.iter().all(|(_, c)| *c != code::OP_NOT_SUPPORTED));
         }
     }
+
+    /// The same value `marsa_core::helper::certificate_sha256` gives: the
+    /// service compares the hash `marsad` computed (ADR 0018).
+    #[test]
+    fn the_ca_hash_is_the_one_marsad_computes() {
+        const TEST_CA: &str = include_str!("../../../../fixtures/helper/test-ca.pem");
+        const HASH: &str = include_str!("../../../../fixtures/helper/test-ca.sha256");
+        assert_eq!(certificate_sha256(TEST_CA).as_deref(), Some(HASH.trim()));
+    }
+
+    /// The invalid PEMs `marsa_core::helper::certificate_sha256` refuses too,
+    /// so the two parsers cannot drift apart.
+    #[test]
+    fn the_shared_invalid_pems_have_no_hash() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/helper/pem-invalid");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(certificate_sha256(&text), None, "{}", path.display());
+            seen += 1;
+        }
+        assert!(seen >= 6, "{seen}");
+    }
 }
