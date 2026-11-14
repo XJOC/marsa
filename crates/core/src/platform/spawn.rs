@@ -53,7 +53,8 @@ pub fn sibling_program(stem: &str) -> io::Result<PathBuf> {
 /// it leaves the daemon running.
 #[derive(Debug)]
 pub struct SpawnedDaemon {
-    /// Always `Some` until `drop` takes it.
+    /// `Some` until `drop` takes it on macOS and Linux; always `Some` on
+    /// Windows, which has no zombies to reap.
     child: Option<Started>,
     pid: u32,
 }
@@ -106,9 +107,9 @@ impl Drop for SpawnedDaemon {
 ///   `PATH` and `data_dir` does not depend on the working folder.
 /// - No pipe ties the daemon to this process, and it logs to its own file.
 ///   On macOS and Linux its stdin, stdout, and stderr are null. On Windows it
-///   has no standard handles and gets none of this process's other handles
-///   either: a shell can leave more inheritable handles in this process than
-///   the three standard ones (ADR 0017).
+///   gets none of this process's handles, the standard ones included: a
+///   shell can leave more inheritable handles in this process than those
+///   three (ADR 0017).
 /// - The working folder is the one `marsad` sits in, so the daemon does not
 ///   keep the caller's folder busy.
 /// - On macOS and Linux it gets its own process group, so Ctrl+C in the

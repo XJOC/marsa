@@ -13,12 +13,14 @@ pub mod spawn;
 pub mod windows;
 
 /// Ties the processes the daemon starts to the daemon's own life. Call it
-/// once, early in `marsad`, before any process is started.
+/// once, early in `marsad`, before any process is started. `marsad` only: a
+/// client (the CLI, the window, the tray) that called it would take the
+/// `marsad` it starts down with it.
 ///
 /// - Windows: the daemon joins a Job Object that ends its children when it
 ///   ends, even after a crash or "End task" (ADR 0017).
-/// - macOS and Linux: nothing to do here. A child of a crashed daemon stays,
-///   and the next daemon finds it (ADR 0009).
+/// - macOS and Linux: nothing to do here. A child of a crashed daemon stays;
+///   on macOS the next daemon finds it (ADR 0009, `process::ORPHAN_RECOVERY`).
 ///
 /// # Errors
 ///

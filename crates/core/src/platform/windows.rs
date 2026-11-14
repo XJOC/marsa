@@ -1,4 +1,6 @@
-//! Windows-only process code (architecture.md section 9, ADR 0017).
+//! Windows-only process code (architecture.md section 9, ADR 0017). For
+//! `marsad` and for `spawn_marsad` only, so it is not public outside the
+//! crate.
 //!
 //! - [`join_kill_on_close_job`]: the daemon puts itself in a Job Object that
 //!   Windows closes when the daemon ends, however it ends. Every process the
@@ -10,8 +12,7 @@
 //!   kept the pipe open, and the reader waited until the daemon stopped.
 //!
 //! The only `unsafe` code of `marsa-core` is in this file (AGENTS.md
-//! section 6). Each block calls one or two Win32 functions and checks every
-//! result.
+//! section 6). The blocks are short, and every Win32 result is checked.
 
 use std::ffi::OsStr;
 use std::io;
@@ -32,7 +33,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateProcessW, DETACHED_PROCESS, GetCurrentProcess, GetExitCodeProcess,
-    PROCESS_INFORMATION, STARTUPINFOW, WaitForSingleObject,
+    PROCESS_INFORMATION, STARTF_FORCEOFFFEEDBACK, STARTUPINFOW, WaitForSingleObject,
 };
 
 /// The longest command line `CreateProcessW` takes, in UTF-16 units, with
@@ -45,27 +46,27 @@ const MAX_COMMAND_LINE: usize = 32_767;
 /// (a clean exit, a crash, or "End task"), Windows closes the job's only
 /// handle and ends every process in the job.
 ///
-/// The first call decides: a later call returns the same result and makes no
-/// second job. A process that is already in a job (a terminal, a CI runner)
-/// gets a nested job; Windows 8 and later allow that.
+/// For `marsad` only: a client (the CLI, the window, the tray) that called it
+/// would take the `marsad` it starts down with it.
+///
+/// Only the first call makes a job; a later call returns the same result. A
+/// process that is already in a job (a terminal, a CI runner) gets a nested
+/// job; Windows 8 and later allow that.
 ///
 /// # Errors
 ///
 /// The Win32 error if the job cannot be made or joined. The caller goes on
 /// without it: only the clean-up after a crash is lost.
-pub fn join_kill_on_close_job() -> io::Result<()> {
-    // The raw OS error of the first call, so the answer can be copied.
-    static JOINED: OnceLock<Option<i32>> = OnceLock::new();
-    let failed = JOINED.get_or_init(|| create_and_join_job().err().map(|err| os_code(&err)));
-    match failed {
-        None => Ok(()),
-        Some(code) => Err(io::Error::from_raw_os_error(*code)),
+pub(crate) fn join_kill_on_close_job() -> io::Result<()> {
+    // The OS error of the first call, so the answer can be given again.
+    static JOINED: OnceLock<Result<(), Option<i32>>> = OnceLock::new();
+    let joined = JOINED.get_or_init(|| create_and_join_job().map_err(|err| err.raw_os_error()));
+    match joined {
+        Ok(()) => Ok(()),
+        Err(Some(code)) => Err(io::Error::from_raw_os_error(*code)),
+        // Every error above comes from `last_os_error`, which has a code.
+        Err(None) => Err(io::Error::other("cannot join a Job Object")),
     }
-}
-
-fn os_code(err: &io::Error) -> i32 {
-    // Every error here comes from `last_os_error`, so it has a code.
-    err.raw_os_error().unwrap_or(0)
 }
 
 fn create_and_join_job() -> io::Result<()> {
@@ -93,9 +94,12 @@ fn create_and_join_job() -> io::Result<()> {
             CloseHandle(job);
             return Err(err);
         }
-        // `job` is never closed, on purpose. It is the job's only handle, and
-        // closing it is what ends every process in the job, this one too.
-        // Windows closes it when this process ends.
+        // `job` is never closed, on purpose. It is the job's only handle:
+        // with null security attributes it cannot be inherited, so no child
+        // holds a copy. Closing it is what ends every process in the job,
+        // this one too, so Windows closes it when this process ends. If the
+        // handle were ever made inheritable, every child would keep the job
+        // open and kill-on-close would stop working without a word.
     }
     Ok(())
 }
@@ -103,14 +107,14 @@ fn create_and_join_job() -> io::Result<()> {
 /// A process started by [`spawn_detached`]. Dropping it closes the handle and
 /// leaves the process running.
 #[derive(Debug)]
-pub struct DetachedProcess {
+pub(crate) struct DetachedProcess {
     process: OwnedHandle,
     pid: u32,
 }
 
 impl DetachedProcess {
     /// The process id, like `Child::id`.
-    pub fn id(&self) -> u32 {
+    pub(crate) fn id(&self) -> u32 {
         self.pid
     }
 
@@ -121,7 +125,7 @@ impl DetachedProcess {
     /// # Errors
     ///
     /// The Win32 error if Windows cannot say.
-    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+    pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         let process = self.process.as_raw_handle();
         // SAFETY: `process` is the open process handle this struct owns, and
         // `code` is a valid place for the exit code. A wait of 0 ms returns
@@ -144,36 +148,43 @@ impl DetachedProcess {
 
 /// Starts `program` with `args` in the background: no console, no window,
 /// and **no handle of the caller**, not even stdin, stdout, or stderr
-/// (`bInheritHandles = FALSE`). The new process has no standard handles, so
-/// what it prints goes nowhere. It inherits the caller's environment.
+/// (`bInheritHandles = FALSE`). What the new process prints is lost. It
+/// inherits the caller's environment.
 ///
-/// `program` is the exact file to run: it is never searched on `PATH`, and
-/// nothing goes through a shell. `cwd` is the working folder of the new
-/// process, or the caller's own if `None`.
+/// `program` must be an absolute path to an `.exe`: it is never searched on
+/// `PATH`, and nothing goes through a shell. A `.bat` or `.cmd` file is
+/// refused, because Windows would run it through `cmd.exe`, which reads the
+/// command line by other rules than the ones written here (CVE-2024-24576).
+/// `cwd` is the working folder of the new process, or the caller's own if
+/// `None`.
 ///
 /// # Errors
 ///
-/// `InvalidInput` for a NUL inside `program`, an argument, or `cwd`, or a
-/// command line longer than 32,767 characters. Otherwise the Win32 error of
+/// `InvalidInput` for a program that is not an absolute `.exe` path or holds
+/// a quote, a NUL inside `program`, an argument, or `cwd`, or a command line
+/// longer than 32,767 characters. Otherwise the Win32 error of
 /// `CreateProcessW`, for example `NotFound`.
-pub fn spawn_detached(
+pub(crate) fn spawn_detached(
     program: &Path,
     args: &[&OsStr],
     cwd: Option<&Path>,
 ) -> io::Result<DetachedProcess> {
+    check_program(program)?;
     let application = wide(program.as_os_str())?;
     let mut command_line = command_line(program.as_os_str(), args)?;
     let cwd = cwd.map(|dir| wide(dir.as_os_str())).transpose()?;
     // SAFETY: `application`, `command_line`, and `cwd` are NUL-terminated
     // UTF-16 buffers that live through the call; `command_line` is mutable,
     // as `CreateProcessW` may write to it. `startup` is zeroed plain data
-    // with its size set, so it names no handles and no desktop. `info` is
-    // filled only on success; then both of its handles are open and owned
-    // here: the thread handle is closed, and the process handle moves into
-    // an `OwnedHandle`, which closes it on drop.
+    // with its size set: it passes no handles, and its null desktop means the
+    // caller's desktop. `info` is filled only on success; then both of its
+    // handles are open and owned here: the thread handle is closed, and the
+    // process handle moves into an `OwnedHandle`, which closes it on drop.
     unsafe {
         let mut startup: STARTUPINFOW = zeroed();
         startup.cb = size_of::<STARTUPINFOW>() as u32;
+        // No busy cursor while a program that never shows a window starts.
+        startup.dwFlags = STARTF_FORCEOFFFEEDBACK;
         let mut info: PROCESS_INFORMATION = zeroed();
         let created = CreateProcessW(
             application.as_ptr(),
@@ -200,6 +211,27 @@ pub fn spawn_detached(
     }
 }
 
+/// An absolute path to an `.exe` (any letter case), with no quote in it.
+fn check_program(program: &Path) -> io::Result<()> {
+    if !program.is_absolute() {
+        return Err(invalid("the program is not an absolute path"));
+    }
+    let exe = program
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"));
+    if !exe {
+        return Err(invalid("the program is not an .exe file"));
+    }
+    if program
+        .as_os_str()
+        .encode_wide()
+        .any(|unit| unit == u16::from(b'"'))
+    {
+        return Err(invalid("the program path holds a quote"));
+    }
+    Ok(())
+}
+
 /// `text` as NUL-terminated UTF-16.
 fn wide(text: &OsStr) -> io::Result<Vec<u16>> {
     let mut wide: Vec<u16> = text.encode_wide().collect();
@@ -214,16 +246,31 @@ fn invalid(reason: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, reason)
 }
 
-/// The command line for `CreateProcessW`: the program in quotes, then every
-/// argument, quoted the way the Microsoft C runtime (and Rust's `std::env`)
-/// reads them back. NUL-terminated.
+/// The command line for `CreateProcessW`: the program between quotes as it
+/// is, then every argument, quoted the way the Microsoft C runtime (and
+/// Rust's `std::env`) reads them back. NUL-terminated.
+///
+/// The program is `argv[0]`, which the C runtime reads by its own rule: it
+/// runs from the opening quote to the next quote, and backslashes are never
+/// escapes there. So it is written as it is, like std does, and a quote in it
+/// is refused ([`check_program`]; here too, for the tests).
 fn command_line(program: &OsStr, args: &[&OsStr]) -> io::Result<Vec<u16>> {
-    let mut line = Vec::new();
-    // Always quoted, so a space in the folder name cannot split the path.
-    append_arg(&mut line, program, true)?;
+    const QUOTE: u16 = b'"' as u16;
+
+    let program: Vec<u16> = program.encode_wide().collect();
+    if program.contains(&QUOTE) {
+        return Err(invalid("the program path holds a quote"));
+    }
+    if program.contains(&0) {
+        return Err(invalid("a NUL character in a path or an argument"));
+    }
+    let mut line = Vec::with_capacity(program.len() + 2);
+    line.push(QUOTE);
+    line.extend(program);
+    line.push(QUOTE);
     for arg in args {
         line.push(u16::from(b' '));
-        append_arg(&mut line, arg, false)?;
+        append_arg(&mut line, arg)?;
     }
     line.push(0);
     if line.len() > MAX_COMMAND_LINE {
@@ -236,7 +283,7 @@ fn command_line(program: &OsStr, args: &[&OsStr]) -> io::Result<Vec<u16>> {
 /// argument with a space or a tab, and an empty one, goes in quotes; a quote
 /// is written `\"`; backslashes are literal unless a quote follows them, and
 /// then each one is doubled.
-fn append_arg(line: &mut Vec<u16>, arg: &OsStr, force_quotes: bool) -> io::Result<()> {
+fn append_arg(line: &mut Vec<u16>, arg: &OsStr) -> io::Result<()> {
     const QUOTE: u16 = b'"' as u16;
     const BACKSLASH: u16 = b'\\' as u16;
 
@@ -244,8 +291,7 @@ fn append_arg(line: &mut Vec<u16>, arg: &OsStr, force_quotes: bool) -> io::Resul
     if arg.contains(&0) {
         return Err(invalid("a NUL character in a path or an argument"));
     }
-    let quotes = force_quotes
-        || arg.is_empty()
+    let quotes = arg.is_empty()
         || arg
             .iter()
             .any(|unit| *unit == u16::from(b' ') || *unit == u16::from(b'\t'));
@@ -279,7 +325,7 @@ mod tests {
     use std::env;
     use std::fs;
     use std::io::Read;
-    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::thread;
@@ -312,6 +358,37 @@ mod tests {
             line(r"C:\marsa\marsad.exe", &["--data-dir", r"C:\data"]),
             r#""C:\marsa\marsad.exe" --data-dir C:\data"#
         );
+    }
+
+    /// `argv[0]` has its own rule: between quotes, as it is.
+    #[test]
+    fn the_program_is_written_as_it_is_and_a_quote_in_it_is_refused() {
+        assert_eq!(line(r"C:\my data\x.exe", &[]), r#""C:\my data\x.exe""#);
+        let err = command_line(OsStr::new(r#"C:\a"b.exe"#), &[]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// A batch file would run through `cmd.exe` (CVE-2024-24576), and a
+    /// relative path would depend on the working folder.
+    #[test]
+    fn only_an_absolute_exe_without_quotes_is_started() {
+        for good in [r"C:\marsa\marsad.exe", r"C:\marsa\MARSAD.EXE"] {
+            assert!(check_program(Path::new(good)).is_ok(), "{good}");
+        }
+        let bad = [
+            "marsad.exe",
+            r"marsa\marsad.exe",
+            r"C:\marsa\run.bat",
+            r"C:\marsa\run.cmd",
+            r"C:\marsa\run.CMD",
+            r"C:\marsa\marsad",
+            r"C:\marsa\marsad.exe.txt",
+            r#"C:\ma"rsa\marsad.exe"#,
+        ];
+        for bad in bad {
+            let err = spawn_detached(Path::new(bad), &[], None).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad}");
+        }
     }
 
     #[test]
@@ -398,7 +475,7 @@ mod tests {
         };
         if !env::args().any(|arg| arg == NO_JOB_ARG) {
             join_kill_on_close_job().unwrap();
-            // The second call makes no second job.
+            // A second call gives the same answer (`OnceLock`: no second job).
             join_kill_on_close_job().unwrap();
         }
         let mut child = Command::new(env::current_exe().unwrap())
@@ -427,6 +504,14 @@ mod tests {
         stay_until_stopped(&dir);
     }
 
+    /// Whether something accepts on `port`. With a short limit: on Windows a
+    /// refused loopback connect is retried for about 2 s, and a live
+    /// listener answers at once.
+    fn accepts(port: u16) -> bool {
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_ok()
+    }
+
     /// Kills the parent and says whether the child's port still accepts two
     /// seconds later.
     fn child_outlives_a_killed_parent(with_job: bool) -> bool {
@@ -446,7 +531,7 @@ mod tests {
         let port_file = dir.join("port");
         wait_for("the child's port", || port_file.is_file());
         let port: u16 = fs::read_to_string(&port_file).unwrap().parse().unwrap();
-        let accepts = || TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_ok();
+        let accepts = || accepts(port);
         assert!(accepts(), "the child listens before the parent is killed");
 
         // `TerminateProcess`, like "End task": the parent runs no clean-up.
@@ -544,17 +629,33 @@ mod tests {
 
         fs::write(dir.join("stop"), "").unwrap();
         wait_for("the child's exit", || dir.join("child-done").is_file());
+        // The folder is the child's working folder until it has exited, and
+        // Windows keeps a folder in use. Gone here, so the drop leaves none.
+        wait_for("the folder to be free", || fs::remove_dir_all(dir).is_ok());
+    }
+
+    /// Role `exiting_child`: says it runs, waits for `stop`, and exits with
+    /// the code of a second `marsad` that found the lock taken, which the
+    /// client reads through `try_wait`.
+    #[test]
+    fn role_exiting_child() {
+        let Some(dir) = role_dir() else {
+            return;
+        };
+        fs::write(dir.join("started"), "").unwrap();
+        stay_until_stopped(&dir);
+        std::process::exit(super::super::spawn::EXIT_ALREADY_RUNNING);
     }
 
     #[test]
     fn try_wait_reports_the_exit_code_only_after_the_exit() {
         let temp = TempDir::new().unwrap();
         let dir = temp.path();
-        let args = role_args("detached_child", dir);
+        let args = role_args("exiting_child", dir);
         let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
         let mut child = spawn_detached(&env::current_exe().unwrap(), &args, None).unwrap();
         assert_ne!(child.id(), 0);
-        wait_for("the child's folder", || dir.join("child-cwd").is_file());
+        wait_for("the child's start", || dir.join("started").is_file());
         assert!(child.try_wait().unwrap().is_none());
 
         fs::write(dir.join("stop"), "").unwrap();
@@ -563,7 +664,49 @@ mod tests {
             status = child.try_wait().unwrap();
             status.is_some()
         });
-        // A test program whose one test passed exits with 0.
-        assert_eq!(status.unwrap().code(), Some(0));
+        assert_eq!(status.unwrap().code(), Some(3));
+    }
+
+    /// Arguments that the quoting must carry. None starts with `-`: the
+    /// test harness would read it as an option.
+    const AWKWARD: [&str; 10] = [
+        "",
+        "a b",
+        "a\tb",
+        r#"say "hi""#,
+        r#"a\"b"#,
+        r"C:\my data\",
+        r"C:\data\",
+        r#"a\\"b c"#,
+        "\u{645}\u{631}\u{633}\u{649} \u{fc}",
+        "end",
+    ];
+
+    /// Role `echo_args`: writes the arguments after its own four to
+    /// `args.json`, then exits.
+    #[test]
+    fn role_echo_args() {
+        let Some(dir) = role_dir() else {
+            return;
+        };
+        let args: Vec<String> = env::args().skip(5).collect();
+        let json = serde_json::to_string(&args).unwrap();
+        fs::write(dir.join("args.json.tmp"), json).unwrap();
+        fs::rename(dir.join("args.json.tmp"), dir.join("args.json")).unwrap();
+    }
+
+    /// The round trip: what `spawn_detached` sends is what the program reads.
+    #[test]
+    fn arguments_reach_the_program_as_they_were_sent() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        let mut args = role_args("echo_args", dir);
+        args.extend(AWKWARD.map(str::to_owned));
+        let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+        let mut child = spawn_detached(&env::current_exe().unwrap(), &args, None).unwrap();
+        wait_for("the child's exit", || child.try_wait().unwrap().is_some());
+        let json = fs::read_to_string(dir.join("args.json")).unwrap();
+        let read: Vec<String> = serde_json::from_str(&json).unwrap();
+        assert_eq!(read, AWKWARD);
     }
 }
