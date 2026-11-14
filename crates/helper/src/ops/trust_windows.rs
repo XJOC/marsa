@@ -10,6 +10,19 @@
 //! SHA-256 (spike S-11); the thumbprint only finds the certificate, it
 //! decides nothing about trust.
 //!
+//! `certutil` reads its certificate id as an index, a serial number, a
+//! name, or a hash. An id of digits only is an index: `-store Root 000…0`
+//! lists the store's first certificate. So a thumbprint without a letter
+//! (about 7 in a billion) is never passed: `trust_install` refuses that
+//! certificate. Another root whose serial number or name is exactly Marsa's
+//! thumbprint would match too; only an administrator can put one there.
+//!
+//! The same certificate in the store without Marsa's file (Marsa's file was
+//! deleted, or `caddy trust` ran elevated on Marsa's own CA) is recorded as
+//! Marsa's: the CA's key is Marsa's own, and `marsa uninstall --all` must
+//! leave nothing. Only the machine store is touched: a copy in one user's
+//! own Root store stays.
+//!
 //! Which certificate the service may trust at all is the service's check,
 //! before any op runs (task M4-19f). No message holds any part of the PEM.
 
@@ -52,11 +65,20 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
             return OpResult::failed(INSTALL, TRUST_CERT_INVALID, format!("pem {reason}"));
         }
     };
+    let thumbprint = sha1_hex(&der);
+    if !is_hash_id(&thumbprint) {
+        let message = "its SHA-1 has no letter, and certutil reads such an id as an index";
+        return OpResult::failed(INSTALL, TRUST_CERT_INVALID, message.to_owned());
+    }
     let path = match ca_path(INSTALL, TRUST_WRITE, system) {
         Ok(path) => path,
         Err(failed) => return failed,
     };
-    let thumbprint = sha1_hex(&der);
+    // `certutil` gets the file's path as text.
+    let Some(file) = path.to_str() else {
+        let message = format!("{} is not valid Unicode", path.display());
+        return OpResult::failed(INSTALL, TRUST_WRITE, message);
+    };
     match stored_thumbprint(INSTALL, &path, system) {
         Ok(Some(old)) if old == thumbprint => match in_store(INSTALL, &thumbprint, system) {
             Ok(true) => return result(INSTALL, Outcome::Unchanged),
@@ -69,16 +91,30 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
                 return failed;
             }
         }
-        Ok(None) => {}
+        Ok(None) => match in_store(INSTALL, &thumbprint, system) {
+            // Trusted already, without Marsa's file: recorded as Marsa's
+            // (see the module doc), and the store stays as it is.
+            Ok(true) => {
+                return match write_file(&path, &der, system) {
+                    Ok(()) => result(INSTALL, Outcome::Unchanged),
+                    Err(failed) => failed,
+                };
+            }
+            Ok(false) => {}
+            Err(failed) => return failed,
+        },
         Err(failed) => return failed,
     }
-    if let Err(err) = system.write_atomic(&path, &to_pem(&der), MODE) {
-        let message = format!("cannot write {}: {}", path.display(), err.kind());
-        return OpResult::failed(INSTALL, TRUST_WRITE, message);
+    if let Err(failed) = write_file(&path, &der, system) {
+        return failed;
     }
-    let file = path.to_string_lossy();
-    let added = system.run_system_tool(CERTUTIL, &["-addstore", STORE, &file]);
+    let added = system.run_system_tool(CERTUTIL, &["-addstore", STORE, file]);
     if !program::succeeded(&added) {
+        // `-addstore` can stop half way, after it added the certificate. The
+        // steps of `trust_remove` undo that, and they delete the file only if
+        // every step worked, so the thumbprint is never lost. The failed add
+        // is the error either way.
+        let _ = remove_steps(INSTALL, &path, &thumbprint, system);
         return command_failed(INSTALL, TRUST_ADD_FAILED, "-addstore", &added);
     }
     // `-addstore` exits with 0 when the certificate is already there too, so
@@ -86,6 +122,8 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
     match in_store(INSTALL, &thumbprint, system) {
         Ok(true) => result(INSTALL, Outcome::Done),
         Ok(false) => {
+            // Nothing of it is trusted, so the record goes too.
+            let _ = remove_steps(INSTALL, &path, &thumbprint, system);
             let message =
                 "certutil -addstore exited with code 0, but the certificate is not in the store"
                     .to_owned();
@@ -127,6 +165,16 @@ fn ca_path(
         .map_err(|err| {
             let message = format!("cannot find Marsa's program folder: {}", err.kind());
             OpResult::failed(op, code, message)
+        })
+}
+
+/// Writes Marsa's clean copy of the certificate.
+fn write_file(path: &Path, der: &[u8], system: &impl System) -> Result<(), OpResult> {
+    system
+        .write_atomic(path, &to_pem(der), MODE)
+        .map_err(|err| {
+            let message = format!("cannot write {}: {}", path.display(), err.kind());
+            OpResult::failed(INSTALL, TRUST_WRITE, message)
         })
 }
 
@@ -183,6 +231,15 @@ fn remove_steps(
     thumbprint: &str,
     system: &impl System,
 ) -> Result<(), OpResult> {
+    // `install` refuses such a certificate, so only a file that Marsa did not
+    // write gets here. As an index, it would delete another root.
+    if !is_hash_id(thumbprint) {
+        let message = format!(
+            "{} holds a certificate whose SHA-1 has no letter, so it was left as it is",
+            path.display()
+        );
+        return Err(OpResult::failed(op, TRUST_REMOVE_FAILED, message));
+    }
     if in_store(op, thumbprint, system)? {
         let deleted = system.run_system_tool(CERTUTIL, &["-delstore", STORE, thumbprint]);
         if !program::succeeded(&deleted) {
@@ -228,9 +285,16 @@ fn sha1_hex(der: &[u8]) -> String {
         .collect()
 }
 
+/// Whether `certutil` can read `thumbprint` only as a hash, not as an
+/// index: it holds a letter (see the module doc).
+fn is_hash_id(thumbprint: &str) -> bool {
+    thumbprint.bytes().any(|byte| byte.is_ascii_alphabetic())
+}
+
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeSet;
     use std::ffi::OsStr;
     use std::fs;
 
@@ -243,6 +307,7 @@ mod tests {
     use crate::system::FakeSystem;
 
     const INSTALL_DIR: &str = r"C:\Program Files\Marsa";
+    const SYSTEM_DIR: &str = r"C:\Windows\System32";
 
     fn pem() -> String {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
@@ -253,45 +318,77 @@ mod tests {
         sha1_hex(&parse_pem(&pem()).unwrap())
     }
 
+    /// Another certificate: the test CA with one byte of its signature
+    /// changed. Its PEM and its thumbprint.
+    fn other() -> (String, String) {
+        let mut der = parse_pem(&pem()).unwrap();
+        *der.last_mut().unwrap() ^= 1;
+        let old = sha1_hex(&der);
+        assert_ne!(old, thumbprint());
+        (String::from_utf8(to_pem(&der)).unwrap(), old)
+    }
+
     fn ca_file() -> PathBuf {
         Path::new(INSTALL_DIR).join(FILE)
     }
 
     /// A Windows machine whose Root store `certutil` changes: files and the
     /// call log come from a [`FakeSystem`], and `run_system_tool` acts like
-    /// `certutil` on one certificate, the test CA.
+    /// `certutil` on a store of thumbprints.
     struct Machine {
         fake: FakeSystem,
-        /// The test CA is in the Root store.
-        present: Cell<bool>,
-        /// `-addstore` puts it there, `-delstore` takes it out.
+        /// The thumbprints in the Root store.
+        store: RefCell<BTreeSet<String>>,
+        /// `-addstore` puts the certificate of its file there, and
+        /// `-delstore` takes the one it names out.
         add_works: bool,
         delete_works: bool,
-        /// The exit code of `-addstore`.
-        add_code: i32,
+        /// The exit code of `-addstore`; `None` is a time out.
+        add_code: Option<i32>,
+        /// The exit code of `-delstore`.
+        delete_code: i32,
         /// Every `-store` exits with this code, if set.
         query_code: Option<i32>,
+        /// `-store` calls that still answer as asked; after them, every one
+        /// exits with `query_code`.
+        queries_before_failing: Cell<usize>,
     }
 
     impl Machine {
         fn new(present: bool) -> Self {
-            Self {
+            let machine = Self {
                 fake: FakeSystem {
                     install_dir: Some(PathBuf::from(INSTALL_DIR)),
+                    system_dir: Some(PathBuf::from(SYSTEM_DIR)),
                     ..FakeSystem::default()
                 },
-                present: Cell::new(present),
+                store: RefCell::default(),
                 add_works: true,
                 delete_works: true,
-                add_code: 0,
+                add_code: Some(0),
+                delete_code: 0,
                 query_code: None,
+                queries_before_failing: Cell::new(0),
+            };
+            if present {
+                machine.store.borrow_mut().insert(thumbprint());
             }
+            machine
         }
 
         fn with_file(self, text: &str) -> Self {
             let file = (text.as_bytes().to_vec(), MODE);
             self.fake.files.borrow_mut().insert(ca_file(), file);
             self
+        }
+
+        fn with_in_store(self, thumbprint: &str) -> Self {
+            self.store.borrow_mut().insert(thumbprint.to_owned());
+            self
+        }
+
+        fn holds(&self, thumbprint: &str) -> bool {
+            self.store.borrow().contains(thumbprint)
         }
 
         fn file(&self) -> Option<Vec<u8>> {
@@ -307,6 +404,36 @@ mod tests {
             log.iter()
                 .map(|(program, args)| format!("{program} {}", args.join(" ")))
                 .collect()
+        }
+
+        fn query(&self, id: &str) -> io::Result<RunOutput> {
+            let left = self.queries_before_failing.get();
+            match self.query_code {
+                Some(code) if left == 0 => return exit(code),
+                Some(_) => self.queries_before_failing.set(left - 1),
+                None => {}
+            }
+            exit(if self.holds(id) { 0 } else { NOT_FOUND })
+        }
+
+        fn add(&self, file: &str) -> io::Result<RunOutput> {
+            if self.add_works {
+                let bytes = self.fake.read(Path::new(file), MAX_FILE_BYTES).unwrap();
+                let der = parse_pem(std::str::from_utf8(&bytes).unwrap()).unwrap();
+                self.store.borrow_mut().insert(sha1_hex(&der));
+            }
+            match self.add_code {
+                Some(code) => exit(code),
+                None => Err(io::ErrorKind::TimedOut.into()),
+            }
+        }
+
+        fn delete(&self, id: &str) -> io::Result<RunOutput> {
+            if self.delete_works {
+                self.store.borrow_mut().remove(id);
+            }
+            // Like certutil: 0 whether or not anything matched, unless set.
+            exit(self.delete_code)
         }
     }
 
@@ -325,6 +452,14 @@ mod tests {
 
         fn exists(&self, path: &Path) -> bool {
             self.fake.exists(path)
+        }
+
+        fn is_link(&self, path: &Path) -> bool {
+            self.fake.is_link(path)
+        }
+
+        fn is_read_only(&self, path: &Path) -> bool {
+            self.fake.is_read_only(path)
         }
 
         fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
@@ -347,6 +482,10 @@ mod tests {
             self.fake.current_exe()
         }
 
+        fn system_dir(&self) -> io::Result<PathBuf> {
+            self.fake.system_dir()
+        }
+
         fn install_dir(&self) -> io::Result<PathBuf> {
             self.fake.install_dir()
         }
@@ -358,26 +497,10 @@ mod tests {
                 .borrow_mut()
                 .push((program.to_owned(), logged));
             assert_eq!(program, CERTUTIL);
-            let ours = thumbprint();
             match args {
-                ["-store", STORE, id] => match self.query_code {
-                    Some(code) => exit(code),
-                    None if self.present.get() && *id == ours => exit(0),
-                    None => exit(NOT_FOUND),
-                },
-                ["-addstore", STORE, _] => {
-                    if self.add_works {
-                        self.present.set(true);
-                    }
-                    exit(self.add_code)
-                }
-                ["-delstore", STORE, id] => {
-                    if self.delete_works && *id == ours {
-                        self.present.set(false);
-                    }
-                    // Like certutil: 0, whether or not anything matched.
-                    exit(0)
-                }
+                ["-store", STORE, id] => self.query(id),
+                ["-addstore", STORE, file] => self.add(file),
+                ["-delstore", STORE, id] => self.delete(id),
                 other => panic!("unexpected certutil call: {other:?}"),
             }
         }
@@ -391,22 +514,38 @@ mod tests {
         }
     }
 
+    fn message(result: &OpResult) -> &str {
+        match &result.outcome {
+            Outcome::Failed { message, .. } => message,
+            _ => panic!("not failed: {:?}", result.outcome),
+        }
+    }
+
+    fn store(id: &str) -> String {
+        format!("{CERTUTIL} -store Root {id}")
+    }
+
+    fn add() -> String {
+        format!("{CERTUTIL} -addstore Root {}", ca_file().display())
+    }
+
+    fn delete(id: &str) -> String {
+        format!("{CERTUTIL} -delstore Root {id}")
+    }
+
+    fn our_file() -> Option<Vec<u8>> {
+        Some(to_pem(&parse_pem(&pem()).unwrap()))
+    }
+
     #[test]
-    fn install_writes_the_file_adds_it_and_checks_the_store() {
+    fn install_checks_the_store_writes_the_file_adds_it_and_checks_again() {
         let machine = Machine::new(false);
         let result = install(&pem(), &machine);
         assert_eq!((result.op, status(&result)), (INSTALL, "done"));
-        assert!(machine.present.get());
-        assert_eq!(machine.file(), Some(to_pem(&parse_pem(&pem()).unwrap())));
-        let file = ca_file().to_string_lossy().into_owned();
-        let thumb = thumbprint();
-        assert_eq!(
-            machine.calls(),
-            [
-                format!("{CERTUTIL} -addstore Root {file}"),
-                format!("{CERTUTIL} -store Root {thumb}"),
-            ]
-        );
+        let ours = thumbprint();
+        assert!(machine.holds(&ours));
+        assert_eq!(machine.file(), our_file());
+        assert_eq!(machine.calls(), [store(&ours), add(), store(&ours)]);
     }
 
     #[test]
@@ -414,51 +553,115 @@ mod tests {
         let machine = Machine::new(true).with_file(&pem());
         let result = install(&pem(), &machine);
         assert_eq!(status(&result), "unchanged");
-        assert_eq!(machine.calls().len(), 1, "only the query");
+        assert_eq!(machine.calls(), [store(&thumbprint())], "only the query");
+    }
+
+    /// No file, but the store holds it: recorded as Marsa's, so that
+    /// `trust_remove` takes it out later. Nothing is added.
+    #[test]
+    fn the_same_certificate_trusted_without_the_file_is_recorded() {
+        let machine = Machine::new(true);
+        assert_eq!(status(&install(&pem(), &machine)), "unchanged");
+        assert_eq!(machine.calls(), [store(&thumbprint())]);
+        assert_eq!(machine.file(), our_file());
+        assert_eq!(status(&remove(&machine)), "done");
+        assert!(!machine.holds(&thumbprint()));
     }
 
     #[test]
     fn the_same_certificate_removed_by_hand_is_added_again() {
         let machine = Machine::new(false).with_file(&pem());
         assert_eq!(status(&install(&pem(), &machine)), "done");
-        assert!(machine.present.get());
+        assert!(machine.holds(&thumbprint()));
     }
 
-    /// The file holds another certificate (the test CA with one byte of its
-    /// signature changed): it is looked up by its own thumbprint and its file
-    /// replaced, then the new one is added.
+    /// The file names another certificate, which is in the store: it goes
+    /// by its own thumbprint, then the new one is added.
     #[test]
     fn a_different_certificate_from_before_is_removed_first() {
-        let mut der = parse_pem(&pem()).unwrap();
-        *der.last_mut().unwrap() ^= 1;
-        let other = String::from_utf8(to_pem(&der)).unwrap();
-        let old = sha1_hex(&der);
-        assert_ne!(old, thumbprint());
-        let machine = Machine::new(false).with_file(&other);
+        let (other_pem, old) = other();
+        let machine = Machine::new(false)
+            .with_file(&other_pem)
+            .with_in_store(&old);
         assert_eq!(status(&install(&pem(), &machine)), "done");
-        assert_eq!(machine.calls()[0], format!("{CERTUTIL} -store Root {old}"));
-        assert_eq!(machine.file(), Some(to_pem(&parse_pem(&pem()).unwrap())));
+        let ours = thumbprint();
+        assert_eq!(
+            machine.calls(),
+            [store(&old), delete(&old), store(&old), add(), store(&ours)]
+        );
+        assert!(!machine.holds(&old) && machine.holds(&ours));
+        assert_eq!(machine.file(), our_file());
+    }
+
+    /// The old certificate stays in the store: nothing new is written or
+    /// added, and the file still names the old one.
+    #[test]
+    fn an_old_certificate_that_stays_stops_the_install() {
+        let (other_pem, old) = other();
+        let mut machine = Machine::new(false)
+            .with_file(&other_pem)
+            .with_in_store(&old);
+        machine.delete_works = false;
+        assert_eq!(status(&install(&pem(), &machine)), TRUST_REMOVE_FAILED);
+        assert_eq!(machine.calls(), [store(&old), delete(&old), store(&old)]);
+        assert_eq!(machine.file(), Some(other_pem.into_bytes()));
+        assert!(!machine.holds(&thumbprint()));
     }
 
     #[test]
-    fn an_add_that_leaves_nothing_in_the_store_fails() {
+    fn an_add_that_leaves_nothing_in_the_store_fails_and_keeps_no_record() {
         let mut machine = Machine::new(false);
         machine.add_works = false;
         let result = install(&pem(), &machine);
         assert_eq!(status(&result), TRUST_ADD_FAILED);
+        assert!(machine.file().is_none(), "nothing of it is trusted");
     }
 
     #[test]
     fn a_failed_add_names_the_exit_and_not_the_output() {
         let mut machine = Machine::new(false);
         machine.add_works = false;
-        machine.add_code = 5;
+        machine.add_code = Some(5);
         let result = install(&pem(), &machine);
-        let Outcome::Failed { code, message } = &result.outcome else {
-            panic!("not failed");
-        };
-        assert_eq!(*code, TRUST_ADD_FAILED);
-        assert_eq!(message, "certutil -addstore exited with code 5");
+        assert_eq!(status(&result), TRUST_ADD_FAILED);
+        assert_eq!(message(&result), "certutil -addstore exited with code 5");
+        assert!(machine.file().is_none());
+    }
+
+    /// `-addstore` added the certificate and then timed out: the steps of
+    /// `trust_remove` take it out again, and the add is the error.
+    #[test]
+    fn an_add_that_times_out_half_way_is_undone() {
+        let mut machine = Machine::new(false);
+        machine.add_code = None;
+        let result = install(&pem(), &machine);
+        assert_eq!(status(&result), TRUST_ADD_FAILED);
+        assert_eq!(message(&result), "certutil -addstore timed out");
+        let ours = thumbprint();
+        assert!(!machine.holds(&ours) && machine.file().is_none());
+        assert_eq!(
+            machine.calls(),
+            [
+                store(&ours),
+                add(),
+                store(&ours),
+                delete(&ours),
+                store(&ours)
+            ]
+        );
+    }
+
+    /// The undo fails too: the file stays, so `trust_remove` can finish.
+    #[test]
+    fn a_failed_add_whose_undo_fails_keeps_the_file() {
+        let mut machine = Machine::new(false);
+        machine.add_code = None;
+        machine.delete_works = false;
+        assert_eq!(status(&install(&pem(), &machine)), TRUST_ADD_FAILED);
+        assert_eq!(machine.file(), our_file());
+        machine.delete_works = true;
+        assert_eq!(status(&remove(&machine)), "done");
+        assert!(!machine.holds(&thumbprint()) && machine.file().is_none());
     }
 
     #[test]
@@ -474,16 +677,9 @@ mod tests {
         let machine = Machine::new(true).with_file(&pem());
         let result = remove(&machine);
         assert_eq!((result.op, status(&result)), (REMOVE, "done"));
-        assert!(!machine.present.get() && machine.file().is_none());
-        let thumb = thumbprint();
-        assert_eq!(
-            machine.calls(),
-            [
-                format!("{CERTUTIL} -store Root {thumb}"),
-                format!("{CERTUTIL} -delstore Root {thumb}"),
-                format!("{CERTUTIL} -store Root {thumb}"),
-            ]
-        );
+        let ours = thumbprint();
+        assert!(!machine.holds(&ours) && machine.file().is_none());
+        assert_eq!(machine.calls(), [store(&ours), delete(&ours), store(&ours)]);
     }
 
     #[test]
@@ -499,15 +695,28 @@ mod tests {
         let machine = Machine::new(true);
         assert_eq!(status(&remove(&machine)), "unchanged");
         assert!(machine.calls().is_empty());
-        assert!(machine.present.get(), "not Marsa's to remove");
+        assert!(machine.holds(&thumbprint()), "not Marsa's to remove");
     }
 
     #[test]
     fn a_delete_that_leaves_the_certificate_keeps_the_file() {
         let mut machine = Machine::new(true).with_file(&pem());
         machine.delete_works = false;
-        assert_eq!(status(&remove(&machine)), TRUST_REMOVE_FAILED);
+        let result = remove(&machine);
+        assert_eq!(status(&result), TRUST_REMOVE_FAILED);
+        assert!(message(&result).contains("still in the store"));
         assert!(machine.file().is_some(), "kept for a retry");
+    }
+
+    #[test]
+    fn a_failed_delete_names_its_exit_and_keeps_the_file() {
+        let mut machine = Machine::new(true).with_file(&pem());
+        machine.delete_works = false;
+        machine.delete_code = 1;
+        let result = remove(&machine);
+        assert_eq!(status(&result), TRUST_REMOVE_FAILED);
+        assert_eq!(message(&result), "certutil -delstore exited with code 1");
+        assert!(machine.file().is_some());
     }
 
     #[test]
@@ -529,19 +738,25 @@ mod tests {
         assert!(machine.file().is_some());
     }
 
+    /// The check after `-delstore` fails: not `done`, and the file stays.
     #[test]
-    fn without_the_install_folder_nothing_runs() {
-        let machine = Machine::new(false);
-        machine_without_folder(machine, |machine| {
-            assert_eq!(status(&install(&pem(), machine)), TRUST_WRITE);
-            assert_eq!(status(&remove(machine)), TRUST_READ);
-            assert!(machine.calls().is_empty());
-        });
+    fn a_check_that_fails_after_the_delete_keeps_the_file() {
+        let mut machine = Machine::new(true).with_file(&pem());
+        machine.query_code = Some(1);
+        machine.queries_before_failing.set(1);
+        let result = remove(&machine);
+        assert_eq!(status(&result), TRUST_REMOVE_FAILED);
+        assert_eq!(message(&result), "certutil -store exited with code 1");
+        assert!(machine.file().is_some());
     }
 
-    fn machine_without_folder(mut machine: Machine, check: impl Fn(&Machine)) {
+    #[test]
+    fn without_the_install_folder_nothing_runs() {
+        let mut machine = Machine::new(false);
         machine.fake.install_dir = None;
-        check(&machine);
+        assert_eq!(status(&install(&pem(), &machine)), TRUST_WRITE);
+        assert_eq!(status(&remove(&machine)), TRUST_READ);
+        assert!(machine.calls().is_empty());
     }
 
     #[test]
@@ -549,8 +764,28 @@ mod tests {
         assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
     }
 
+    #[test]
+    fn only_a_thumbprint_with_a_letter_is_a_hash_for_certutil() {
+        assert!(is_hash_id(&thumbprint()));
+        assert!(is_hash_id(&format!("{}a", "0".repeat(39))));
+        assert!(!is_hash_id(&"0".repeat(40)));
+        assert!(!is_hash_id(&"1234567890".repeat(4)));
+    }
+
+    /// A file that Marsa did not write, whose certificate's SHA-1 has no
+    /// letter: as an index it would name another root, so nothing runs.
+    #[test]
+    fn a_stored_thumbprint_without_a_letter_is_never_passed() {
+        let machine = Machine::new(false);
+        let path = ca_file();
+        let result = remove_steps(REMOVE, &path, &"0".repeat(40), &machine);
+        let failed = result.unwrap_err();
+        assert_eq!(status(&failed), TRUST_REMOVE_FAILED);
+        assert!(machine.calls().is_empty());
+    }
+
     /// Through the parser and `ops::apply`, as the service runs it; and the
-    /// removal that `uninstall_all` runs on Windows.
+    /// removals that `uninstall_all` runs on Windows.
     #[test]
     fn requests_trust_and_untrust_on_windows() {
         let apply = |ops: serde_json::Value, machine: &Machine| {
@@ -566,7 +801,7 @@ mod tests {
         let trust = json!([{ "op": "trust_install", "pem": pem() }]);
         assert_eq!(apply(trust, &machine), [(INSTALL, "done")]);
         let all = apply(json!([{ "op": "uninstall_all" }]), &machine);
-        assert!(all.contains(&(REMOVE, "done")), "{all:?}");
-        assert!(!machine.present.get());
+        assert_eq!(all, [("hosts_remove", "unchanged"), (REMOVE, "done")]);
+        assert!(!machine.holds(&thumbprint()));
     }
 }
