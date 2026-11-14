@@ -393,7 +393,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         // `marsa setup`: the setup route (task M4-13), its skipped steps, and
         // the failure codes of `marsa-helper`.
         "setup_running" => "Another setup is running. Wait for it to end, then try again.".into(),
-        "setup_not_supported" => "\"marsa setup\" works on macOS and Linux only for now.".into(),
+        "setup_not_supported" => "\"marsa setup\" works on macOS, Linux, and Windows only.".into(),
         "setup_cancelled" => "The password prompt was cancelled, so nothing was changed. Run \
              \"marsa setup\" again when you are ready."
             .into(),
@@ -435,6 +435,33 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             .into(),
         "setup_helper_rejected" => "marsa-helper refused the setup request, so nothing was \
              changed. This is a bug in Marsa: report it with the file logs/marsad.log."
+            .into(),
+        // Windows: the helper service behind its pipe (ADR 0018, task M4-19g2).
+        "setup_helper_not_the_service" => "Another program holds the name of Marsa's helper \
+             service, so Marsa sent it nothing and nothing was changed. Restart Windows, then \
+             run \"marsa setup\" again; if it repeats, report it with the file \
+             logs/marsad.log."
+            .into(),
+        "setup_helper_busy" => "Marsa's helper service is busy with another request. Wait a \
+             moment, then run \"marsa setup\" again."
+            .into(),
+        "setup_helper_no_answer" => "Marsa's helper service gave no answer, so the result of \
+             setup is not known. Run \"marsa doctor\" to see what is set up, then run \"marsa \
+             setup\" again."
+            .into(),
+        "hosts_read" => "Marsa did not change the hosts file \
+             (C:\\Windows\\System32\\drivers\\etc\\hosts): it cannot be read, or it is a link, \
+             read-only, or larger than 16 MiB. Fix the file, then run \"marsa setup\" again."
+            .into(),
+        "hosts_write" => "Windows did not let Marsa write the hosts file. Another program may \
+             hold it (some security tools do); close it, then run \"marsa setup\" again."
+            .into(),
+        "hosts_block_broken" => "The hosts file has a \"# Marsa start\" line without its \"# \
+             Marsa end\" line, or the other way round, so Marsa left it as it is. Remove \
+             Marsa's lines from it, then run \"marsa setup\" again."
+            .into(),
+        "service_failed" => "Marsa's helper service did not install, start, or stop. \
+             Windows' service log and the file logs/marsad.log say why."
             .into(),
         "redirect_port_held" => "Another program uses port 80 or 443, and the redirect would \
              take its traffic. Stop that program, or turn off its web server, then run \
@@ -484,7 +511,8 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              be read, or a file or link Marsa did not write is in its place (on macOS in \
              /Library/Application Support/Marsa; on Linux \
              /usr/local/share/ca-certificates/marsa-local-ca.crt or \
-             /etc/pki/ca-trust/source/anchors/marsa-local-ca.pem). So Marsa left the trust for \
+             /etc/pki/ca-trust/source/anchors/marsa-local-ca.pem; on Windows \
+             C:\\Program Files\\Marsa\\ca-root.pem). So Marsa left the trust for \
              all users as it is. If you put a file there, move it away; then run the command \
              again. If it repeats, report it."
             .into(),
@@ -497,6 +525,18 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         ),
         "trust_delete" => "Marsa could not delete its copy of its certificate authority in a \
              system folder. Run the command again; if it repeats, report it."
+            .into(),
+        // Windows: `certutil` and the machine's Root store, not the user's
+        // keychain (ADR 0018).
+        "trust_add_failed" if cfg!(windows) => "Windows did not add Marsa's certificate \
+             authority to the trusted root certificates, so browsers will not trust Marsa's \
+             sites yet. Run \"marsa setup\" again; if it repeats, report it with the file \
+             logs/marsad.log."
+            .into(),
+        "trust_remove_failed" if cfg!(windows) => "Windows did not remove Marsa's certificate \
+             authority from the trusted root certificates. Run the command again; if it \
+             repeats, remove \"Marsa Local CA\" with certlm.msc (Trusted Root Certification \
+             Authorities) and report it."
             .into(),
         "trust_add_failed" => "Your browser will not trust Marsa's sites yet: the trust for \
              your user was not added. Run \"marsa setup\" in Terminal on the Mac's desktop and \
@@ -1647,6 +1687,13 @@ mod tests {
         "resolver_foreign",
         "resolver_read",
         "resolver_write",
+        "setup_helper_not_the_service",
+        "setup_helper_busy",
+        "setup_helper_no_answer",
+        "hosts_read",
+        "hosts_write",
+        "hosts_block_broken",
+        "service_failed",
         "trust_cert_invalid",
         "trust_read",
         "trust_write",
