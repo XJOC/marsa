@@ -32,7 +32,11 @@ struct Marsad {
 impl Marsad {
     /// Starts `marsad` and waits for `run/daemon.json`.
     async fn start() -> Self {
-        let dir = TempDir::new().expect("temp data folder");
+        Self::start_in(TempDir::new().expect("temp data folder")).await
+    }
+
+    /// [`Marsad::start`] on a data folder a test filled first.
+    async fn start_in(dir: TempDir) -> Self {
         let child = command(&dir)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -159,6 +163,24 @@ async fn health_needs_the_token_and_gives_the_version() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(error_code(response).await, "not_found");
+}
+
+/// What an uninstall left when its delete stopped half way goes before the
+/// daemon serves (task M5-07); the versions stay.
+#[tokio::test]
+async fn the_start_deletes_unfinished_uninstalls() {
+    let dir = TempDir::new().expect("temp data folder");
+    let php = dir.path().join("runtimes").join("php");
+    for folder in ["del-0a1b2c3d/bin", "8.3.12/bin"] {
+        fs::create_dir_all(php.join(folder)).expect("a folder");
+    }
+    let marsad = Marsad::start_in(dir).await;
+    let php = marsad.dir.path().join("runtimes").join("php");
+    let names: Vec<_> = fs::read_dir(&php)
+        .expect("runtimes/php")
+        .map(|entry| entry.expect("an entry").file_name())
+        .collect();
+    assert_eq!(names, ["8.3.12"]);
 }
 
 #[tokio::test]

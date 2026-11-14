@@ -1,5 +1,7 @@
-//! `marsa install` and `marsa runtimes` through the daemon (task M3-12), and
-//! `marsa use` with its route, `PUT /v1/runtimes/{tool}/default` (task M5-01).
+//! `marsa install` and `marsa runtimes` through the daemon (task M3-12),
+//! `marsa use` with its route, `PUT /v1/runtimes/{tool}/default` (task M5-01),
+//! and `marsa uninstall` with `DELETE /v1/runtimes/{tool}/{version}` (task
+//! M5-07).
 //!
 //! The real `marsa` binary talks to the real router, auth layer, and runtimes
 //! routes, served in this process on `127.0.0.1` for a temp data folder, with
@@ -24,10 +26,12 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use marsa::daemon::api::router;
 use marsa::daemon::auth::AuthConfig;
+use marsa::daemon::php::fpm_id;
 use marsa::daemon::runtimes_api::{InstallFuture, RunInstall};
 use marsa::daemon::state::Daemon;
 use marsa_core::config::{self, ConfigPaths};
 use marsa_core::installer::{InstallError, InstallRequest, InstalledVersion};
+use marsa_core::php::PhpMinor;
 use marsa_core::platform::daemon_file::{
     DaemonFile, Token, daemon_authority, daemon_lock_path, write_daemon_file,
 };
@@ -35,7 +39,7 @@ use marsa_core::recipes::Platform;
 use marsa_core::runtimes::{Runtime, RuntimesDir};
 use marsa_core::types::{
     DefaultVersion, ErrorBody, Event, InstallAccepted, InstallEvent, InstallProgress,
-    InstallUpdate, RuntimeList, SiteList,
+    InstallUpdate, RuntimeList, SiteList, Uninstalled, VersionInUse,
 };
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
@@ -906,4 +910,240 @@ async fn a_refused_default_leaves_global_toml_as_it_was() {
         .await;
     let text = fs::read_to_string(&global_toml).expect("global.toml");
     assert_eq!(text, "php = 1\n");
+}
+
+// ---------------------------------------------------------------------------
+// Uninstall (task M5-07)
+
+/// Registers a task as the running service `id`, as the supervisor does.
+/// `on_stop` runs when the daemon stops it.
+fn pretend_runs(served: &Served, id: &str, on_stop: impl FnOnce() + Send + 'static) {
+    use marsa::daemon::supervisor::{ServiceHandle, ServiceRuntime};
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let stopped = cancel.clone();
+    let task = tokio::spawn(async move {
+        stopped.cancelled().await;
+        on_stop();
+    });
+    let runtime = Arc::new(Mutex::new(ServiceRuntime::new(id)));
+    let handle = ServiceHandle {
+        cancel,
+        task,
+        runtime,
+    };
+    served.daemon.add_proc(id, handle);
+}
+
+/// The entries of `runtimes/<runtime>/`, sorted.
+fn entries(served: &Served, runtime: Runtime) -> Vec<String> {
+    let dir = RuntimesDir::in_dir(served.path()).runtime_dir(runtime);
+    let names = fs::read_dir(dir).expect("the runtime folder").flatten();
+    let mut names: Vec<String> = names
+        .map(|e| e.file_name().to_string_lossy().into())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uninstall_deletes_a_version_nothing_uses() {
+    let served = Served::start(FakeInstall::default()).await;
+    install_dirs(
+        &served,
+        &[(Runtime::Php, "8.3.12"), (Runtime::Php, "8.4.23")],
+    );
+    let out = "Uninstalled PHP 8.3.12.\n";
+    served
+        .expect(&["uninstall", "php", "8.3"], 0, out, "")
+        .await;
+    assert_eq!(entries(&served, Runtime::Php), ["8.4.23"], "no del- folder");
+    let list: RuntimeList = served
+        .json("GET", "/v1/runtimes", None, StatusCode::OK)
+        .await;
+    assert_eq!(list.runtimes[0].installed, ["8.4.23"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_version_in_use_is_refused_and_nothing_changes() {
+    let served = Served::start(FakeInstall::default()).await;
+    let (php, caddy) = (Runtime::Php, Runtime::Caddy);
+    let versions = [
+        (php, "8.3.12"),
+        (php, "8.4.23"),
+        (caddy, "2.11.7"),
+        (caddy, "2.11.8"),
+    ];
+    install_dirs(&served, &versions);
+    let paths = ConfigPaths::in_dir(served.path());
+    let mut global = config::GlobalConfig::default();
+    global.php.default = Some("8.3".into());
+    config::save_global(&paths.global, &global).expect("global.toml");
+    let site = |(name, php): (&str, &str)| {
+        let root = served.path().join(name);
+        let (php, node, secure, proxy) = (Some(php.into()), None, true, None);
+        let site = config::SiteSettings {
+            root,
+            php,
+            node,
+            secure,
+            proxy,
+        };
+        (name.to_owned(), site)
+    };
+    let sites = [("blog", "8.4"), ("shop", "8.4.23"), ("old", "8.3.12")].map(site);
+    let sites = config::SitesConfig {
+        parked: Vec::new(),
+        sites: sites.into(),
+    };
+    config::save_sites(&paths.sites, &sites).expect("sites.toml");
+    // Caddy 2.11.7 runs, though 2.11.8 is newer: it started before.
+    let program =
+        RuntimesDir::in_dir(served.path()).version_dir(caddy, &"2.11.7".parse().expect("v"));
+    *served.daemon.caddy.started.lock().expect("lock") = Some(program.join("caddy"));
+    pretend_runs(&served, "caddy", || {});
+    let files = || [&paths.global, &paths.sites].map(|path| fs::read(path).expect("a file"));
+    let before = files();
+
+    let refused = async |path: &str| -> VersionInUse {
+        let body: ErrorBody = served
+            .json("DELETE", path, None, StatusCode::CONFLICT)
+            .await;
+        assert_eq!(body.error.code, "version_in_use");
+        body.in_use.expect("what uses it")
+    };
+    let want = VersionInUse {
+        version: "8.3.12".into(),
+        default: Some("8.3".into()),
+        sites: vec!["old".into()],
+        caddy: false,
+    };
+    assert_eq!(refused("/v1/runtimes/php/8.3.12").await, want);
+    let running = refused("/v1/runtimes/caddy/2.11.7").await;
+    assert!(running.caddy && running.default.is_none() && running.sites.is_empty());
+    let err = "marsa: PHP 8.4.23 is in use, so it was not uninstalled. The sites blog, shop are \
+               set to it: give them another version first. [version_in_use]\n";
+    served
+        .expect(&["uninstall", "php", "8.4"], 1, "", err)
+        .await;
+    assert_eq!(files(), before);
+    assert_eq!(entries(&served, php), ["8.3.12", "8.4.23"]);
+
+    // The Caddy that does not run goes.
+    let done: Uninstalled = served
+        .json("DELETE", "/v1/runtimes/caddy/2.11.8", None, StatusCode::OK)
+        .await;
+    assert_eq!((done.runtime, done.version.as_str()), (caddy, "2.11.8"));
+    assert_eq!(entries(&served, caddy), ["2.11.7"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_pool_of_the_version_stops_before_the_delete_and_the_sites_follow() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let served = Served::start(FakeInstall::default()).await;
+    install_dirs(
+        &served,
+        &[(Runtime::Php, "8.3.12"), (Runtime::Php, "8.4.23")],
+    );
+    let php = RuntimesDir::in_dir(served.path()).runtime_dir(Runtime::Php);
+    fs::create_dir_all(php.join("8.3.12").join("bin")).expect("bin");
+    // A PHP site that asks for 8.3 in a version file: no default, no setting.
+    let blog = served.path().join("code").join("blog");
+    fs::create_dir_all(&blog).expect("a site folder");
+    fs::write(blog.join("index.php"), "<?php").expect("index.php");
+    fs::write(blog.join(".php-version"), "8.3\n").expect(".php-version");
+    let park = serde_json::json!({ "path": served.path().join("code") }).to_string();
+    let list: SiteList = served
+        .json("POST", "/v1/sites/park", Some(&park), StatusCode::OK)
+        .await;
+    assert_eq!(php_of(&list, "blog").as_deref(), Some("8.3.12"));
+    // The service ids of the two pools: php-fpm, or php-cgi on Windows.
+    let (pool83, pool84) = (
+        fpm_id(PhpMinor { major: 8, minor: 3 }),
+        fpm_id(PhpMinor { major: 8, minor: 4 }),
+    );
+    // When the pool stops, the folder moved aside is still whole.
+    let whole = Arc::new(AtomicBool::new(false));
+    pretend_runs(&served, &pool83, {
+        let whole = whole.clone();
+        move || {
+            let mut names = fs::read_dir(&php).expect("php").flatten();
+            let aside = names.find(|e| e.file_name().to_string_lossy().starts_with("del-"));
+            let bin = aside.map(|aside| aside.path().join("bin"));
+            whole.store(bin.is_some_and(|bin| bin.is_dir()), Ordering::SeqCst);
+        }
+    });
+    pretend_runs(&served, &pool84, || {});
+    let mut events = served.daemon.events.subscribe();
+
+    let _: Uninstalled = served
+        .json("DELETE", "/v1/runtimes/php/8.3.12", None, StatusCode::OK)
+        .await;
+    assert!(whole.load(Ordering::SeqCst), "stopped before the delete");
+    assert!(!served.daemon.proc_alive(&pool83));
+    assert!(served.daemon.proc_alive(&pool84), "another line runs on");
+    assert_eq!(php_of(&next_sites(&mut events).await, "blog"), None);
+    assert_eq!(entries(&served, Runtime::Php), ["8.4.23"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bad_uninstall_requests_get_their_codes() {
+    let served = Served::start(FakeInstall::gated()).await;
+    install_dirs(
+        &served,
+        &[(Runtime::Php, "8.3.12"), (Runtime::Php, "8.3.20")],
+    );
+    let (bad, missing) = (StatusCode::BAD_REQUEST, StatusCode::NOT_FOUND);
+    for (method, path, status, want) in [
+        (
+            "DELETE",
+            "/v1/runtimes/php/8.9",
+            missing,
+            "version_not_installed",
+        ),
+        (
+            "DELETE",
+            "/v1/runtimes/php/8.3",
+            StatusCode::CONFLICT,
+            "version_ambiguous",
+        ),
+        ("DELETE", "/v1/runtimes/php/abc", bad, "invalid_version"),
+        (
+            "DELETE",
+            "/v1/runtimes/php/latest",
+            bad,
+            "unsupported_alias",
+        ),
+        ("DELETE", "/v1/runtimes/ruby/3.0.0", missing, "unknown_tool"),
+        (
+            "GET",
+            "/v1/runtimes/php/8.3.12",
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+        ),
+    ] {
+        let got = served.error(method, path, None, status).await;
+        assert_eq!(got, want, "{method} {path}");
+    }
+    let err = "marsa: PHP 8.9 is not installed. Run \"marsa runtimes php\" to see the installed \
+               versions. [version_not_installed]\n";
+    served
+        .expect(&["uninstall", "php", "8.9"], 1, "", err)
+        .await;
+
+    // While an install runs: its own code, and nothing moves.
+    let install = served
+        .command(&["install", "node"])
+        .spawn()
+        .expect("start marsa");
+    served.wait_running(true).await;
+    served
+        .expect(&["uninstall", "php", "8.3.12"], 1, "", BUSY)
+        .await;
+    served.fake.open_gate();
+    let out = tokio::time::timeout(WAIT, install.wait_with_output()).await;
+    assert_eq!(
+        out.expect("in time").expect("marsa ran").status.code(),
+        Some(0)
+    );
+    assert_eq!(entries(&served, Runtime::Php), ["8.3.12", "8.3.20"]);
 }

@@ -122,9 +122,9 @@ impl RuntimesDir {
 
     /// The installed versions of `runtime`, oldest first.
     ///
-    /// Skipped: names that are not a full `semver` version (`8.4`, `.tmp`,
-    /// `abc`), names that are not UTF-8, and entries that are not folders. A
-    /// symlink to a folder counts as a folder.
+    /// Skipped: names that are not a full `semver` version (`8.4`, `.tmp`, an
+    /// uninstall's `del-0a1b2c3d`), names that are not UTF-8, and entries that
+    /// are not folders. A symlink to a folder counts as a folder.
     ///
     /// # Errors
     ///
@@ -295,7 +295,17 @@ mod tests {
 
     #[test]
     fn parse_skips_names_that_are_not_full_versions() {
-        let names = ["8.4.3", "8.4", ".tmp", "abc", "v8.3.0", "", "8.3.14"];
+        // `del-<hex>` is a version folder an uninstall moved aside (M5-07).
+        let names = [
+            "8.4.3",
+            "8.4",
+            ".tmp",
+            "abc",
+            "v8.3.0",
+            "",
+            "8.3.14",
+            "del-0a1b2c3d",
+        ];
         assert_eq!(parse_installed(names), [v("8.3.14"), v("8.4.3")]);
     }
 

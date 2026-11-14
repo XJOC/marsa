@@ -45,7 +45,8 @@ use crate::runtimes::Runtime;
 use crate::types::{
     API_VERSION, AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, ErrorBody,
     Event, Health, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest, RuntimeList,
-    ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, XdebugRequest, XdebugState,
+    ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, UninstallReport, Uninstalled,
+    XdebugRequest, XdebugState,
 };
 use error::daemon_text;
 
@@ -57,6 +58,9 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// For one call that is not a stream, and for the start of a stream. A
 /// service restart fits well inside.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// For `DELETE /v1/runtimes/{tool}/{version}`: a Node.js folder holds
+/// thousands of files, and a virus scanner may slow their delete.
+const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// For `POST /v1/setup`: longer than the daemon's slowest setup, which is
 /// about 12 minutes when every program runs to its limit. The daemon gives
 /// the user 5 minutes at the admin prompt and 5 more at the trust dialog
@@ -64,6 +68,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// `security verify-cert`) up to 10 seconds. A test in the daemon's
 /// `setup_api.rs` holds this above the sum of the daemon's own limits.
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(13 * 60);
+/// For `POST /v1/uninstall`: longer than the daemon's slowest uninstall,
+/// about 15 minutes and 20 seconds when every program runs to its limit. The
+/// user has 5 minutes at the admin prompt, then up to 5 at each of the two
+/// dialogs macOS may show to take the user's trust away and to delete the
+/// certificate; the keychain listing gets 10 seconds. A test in the daemon's
+/// `uninstall_api.rs` holds this above the sum of the daemon's own limits.
+pub const UNINSTALL_ALL_TIMEOUT: Duration = Duration::from_secs(16 * 60);
 /// How long a new daemon has to answer. The wait ends as soon as it does, so
 /// this only bounds a real failure. macOS checks a program the first time it
 /// runs after an install or an update: about 2 s when the machine is idle,
@@ -248,6 +259,37 @@ impl DaemonClient {
         self.call_with(Method::PUT, &path, &body).await
     }
 
+    /// `DELETE /v1/runtimes/{tool}/{version}` (task M5-07): deletes the
+    /// installed version that `version` names: `8.3.12`, or `8.3` when one
+    /// installed version matches it. A php-fpm pool that runs it is stopped
+    /// first. Returns once the folder is gone and the site list is built
+    /// again; a changed list also comes on [`DaemonClient::events`] as
+    /// `Event::SitesChanged`. A refusal changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`], and these codes from the daemon:
+    ///
+    /// - `version_in_use` (409) as [`ClientError::InUse`], with what uses
+    ///   it: the default in `global.toml`, sites set to it in `sites.toml`,
+    ///   or the running Caddy;
+    /// - `install_busy` (409) while an install or another uninstall runs;
+    /// - `version_not_installed` (404) when no installed version matches;
+    /// - `version_ambiguous` (409) when more than one does;
+    /// - `invalid_version` or `unsupported_alias` (400) for text that is not
+    ///   a version, and `unknown_tool` (404);
+    /// - `uninstall_io` (500) when the folder cannot be moved aside (on
+    ///   Windows: a program from it still runs);
+    /// - `runtimes_read`, `config_read`, or `config_invalid` (500).
+    pub async fn uninstall(
+        &self,
+        runtime: Runtime,
+        version: &str,
+    ) -> Result<Uninstalled, ClientError> {
+        let path = ["v1", "runtimes", runtime.dir_name(), version];
+        self.call(Method::DELETE, &path, UNINSTALL_TIMEOUT).await
+    }
+
     /// `GET /v1/sites`: every site, sorted by name, and the folders that did
     /// not become one.
     pub async fn sites(&self) -> Result<SiteList, ClientError> {
@@ -302,6 +344,36 @@ impl DaemonClient {
             .await
     }
 
+    /// `DELETE /v1/sites/{name}`: the linked site `name` is no longer served,
+    /// and its own settings (PHP version, HTTPS, proxy) go with it. The list
+    /// after the change. Sent without a body, so `park` is unlinked too.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; the daemon's `site_not_found` (404) for a name
+    /// with no site, and `site_is_parked` (409) for a site from a parked
+    /// folder: [`DaemonClient::forget`] removes those.
+    pub async fn unlink(&self, name: &str) -> Result<SiteList, ClientError> {
+        self.call(Method::DELETE, &["v1", "sites", name], REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// `DELETE /v1/sites/park` with `{"path": ...}`: `path` is no longer
+    /// parked, so its sites are no longer served, and their own settings go
+    /// with them. The list after the change.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `site_path_not_utf8` before any request, and the
+    /// daemon's `site_path_relative` (400) and `folder_not_parked` (404).
+    pub async fn forget(&self, path: &Path) -> Result<SiteList, ClientError> {
+        let body = ParkRequest {
+            path: utf8_path(path)?,
+        };
+        self.call_with(Method::DELETE, &["v1", "sites", "park"], &body)
+            .await
+    }
+
     /// `POST /v1/setup`: the first setup. On macOS the user is asked twice:
     /// for an administrator password, then to approve the trust in Marsa's
     /// certificate authority for this user. Waits until it ends, up to 13
@@ -316,6 +388,23 @@ impl DaemonClient {
     /// cancelled prompt is not an error: it is in [`SetupReport::error`].
     pub async fn setup(&self) -> Result<SetupReport, ClientError> {
         self.call(Method::POST, &["v1", "setup"], SETUP_TIMEOUT)
+            .await
+    }
+
+    /// `POST /v1/uninstall` (task M5-13): one admin prompt for the helper's
+    /// removals, then the user's trust and the login file. Waits until it
+    /// ends, up to 16 minutes ([`UNINSTALL_ALL_TIMEOUT`]). When
+    /// [`UninstallReport::stopping`] is `true` the daemon stops right after
+    /// this answer: [`stop_daemon`] waits until it has.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `uninstall_running` or `setup_running` (409)
+    /// while one of them runs, and `uninstall_not_supported` (501) on Linux
+    /// and Windows for now. A cancelled prompt is not an error: it is in
+    /// [`UninstallReport::error`].
+    pub async fn uninstall_all(&self) -> Result<UninstallReport, ClientError> {
+        self.call(Method::POST, &["v1", "uninstall"], UNINSTALL_ALL_TIMEOUT)
             .await
     }
 
@@ -557,6 +646,14 @@ pub async fn stop_daemon(data_dir: &Path) -> Result<bool, ClientError> {
         sleep(POLL).await;
     }
     Ok(true)
+}
+
+/// Whether a daemon holds `<data_dir>/run/daemon.lock` now: one runs, or is
+/// starting or stopping. Sends nothing and starts nothing. `marsa uninstall
+/// --all` uses it to see whether the Marsa window or the menu-bar icon
+/// started a daemon again (task M5-13).
+pub fn is_daemon_running(data_dir: &Path) -> bool {
+    lock_is_held(&daemon_lock_path(&run_dir(data_dir)))
 }
 
 /// `marsad` is looked up only when it must be started, so a running daemon

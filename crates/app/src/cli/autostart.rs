@@ -130,7 +130,8 @@ mod tests {
         assert_eq!(
             failure.line(),
             format!(
-                "marsa: Cannot write {}. Check the folder's permissions. [autostart_write]",
+                "marsa: Cannot change {}. Check the permissions of the file and its folder. \
+                 [autostart_write]",
                 file.display()
             )
         );
