@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
-use crate::orphan::{Liveness, PidRecord, is_instance_id};
+use crate::caddy::Dial;
+use crate::orphan::{ChildProcess, Liveness, PidRecord, is_instance_id};
 
 /// Whether the daemon looks for an orphan Caddy before it starts one: macOS
 /// only, where ADR 0009 is accepted. Linux waits for spike S-06b. On Windows,
@@ -153,7 +154,7 @@ pub async fn identity(pid: u32) -> Liveness {
         Err(_) => Err(Liveness::Unknown),
     };
     let read = || -> Result<Liveness, Liveness> {
-        let (state, started) = stat()?;
+        let crate::orphan::ProcStat { state, started, .. } = stat()?;
         if matches!(state, 'Z' | 'X') {
             return Ok(Liveness::Gone);
         }
@@ -162,7 +163,7 @@ pub async fn identity(pid: u32) -> Liveness {
             _ => Liveness::Unknown,
         })?;
         // Read again: the pid may have changed hands between the two reads.
-        if stat()?.1 != started {
+        if stat()?.started != started {
             return Ok(Liveness::Unknown);
         }
         Ok(Liveness::Alive {
@@ -268,6 +269,103 @@ pub async fn executable(pid: u32) -> Option<PathBuf> {
 /// Not known on this system.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub async fn executable(_pid: u32) -> Option<PathBuf> {
+    None
+}
+
+/// The children of `ppid` now, each with its start time in the form
+/// [`identity`] gives. For the workers of a php-fpm master that died from
+/// SIGKILL (task M4-25): a list, never a proof. The caller checks each pid
+/// with [`real_identity`] before it acts. macOS asks `/bin/ps` for the whole
+/// process table once, with `LC_ALL=C` and `TZ=UTC0` as [`identity`] does,
+/// so the times compare. `None` when the table cannot be read: then nothing
+/// is signalled.
+#[cfg(target_os = "macos")]
+pub async fn children(ppid: u32) -> Option<Vec<ChildProcess>> {
+    let mut ps = Command::new("/bin/ps");
+    ps.args(["-axo", "pid=,ppid=,lstart="])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC0");
+    let out = run_tool(ps).await?;
+    if !out.status.success() {
+        return None;
+    }
+    let table = String::from_utf8_lossy(&out.stdout);
+    Some(crate::orphan::parse_ps_children(&table, ppid))
+}
+
+/// The children of `ppid` now, from `/proc` with `std` only: a list, never a
+/// proof, as on macOS. A process that cannot be read is skipped, so it is
+/// never signalled. `None` when `/proc` cannot be listed.
+#[cfg(target_os = "linux")]
+pub async fn children(ppid: u32) -> Option<Vec<ChildProcess>> {
+    let mut children = Vec::new();
+    for entry in fs::read_dir("/proc").ok()? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(text) = fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(stat) = crate::orphan::parse_proc_stat(&text) else {
+            continue;
+        };
+        if stat.ppid == ppid && !matches!(stat.state, 'Z' | 'X') {
+            children.push(ChildProcess {
+                pid,
+                started: stat.started.to_string(),
+            });
+        }
+    }
+    Some(children)
+}
+
+/// Not known on this system: nothing is signalled.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub async fn children(_ppid: u32) -> Option<Vec<ChildProcess>> {
+    None
+}
+
+/// The processes that hold a listener at `listen` open now: a Unix socket
+/// bound to that path, or a TCP listener on `127.0.0.1:<port>`. A child that
+/// inherited the listener from its parent holds it too. It says who holds a
+/// listener there, not who inherited it from whom: a filter for the workers
+/// of a php-fpm (task M4-25), never a proof alone. The caller checks each
+/// pid with [`real_identity`] too. macOS asks `/usr/sbin/lsof` once, and in
+/// the same run for the files of this process: if `lsof` does not describe
+/// this process, or a signal ended it, its answer proves nothing. `None`
+/// when it cannot be told: then nothing is signalled.
+#[cfg(target_os = "macos")]
+pub async fn listener_holders(listen: &Dial) -> Option<Vec<u32>> {
+    let own = std::process::id();
+    let mut lsof = Command::new("/usr/sbin/lsof");
+    // No `-a`: the files of this process, or the sockets asked for.
+    lsof.args(["-nP", "-p", &own.to_string()]);
+    match listen {
+        Dial::Unix(_) => lsof.arg("-U"),
+        Dial::Tcp(port) => {
+            let address = format!("-iTCP@127.0.0.1:{port}");
+            lsof.args([address.as_str(), "-sTCP:LISTEN"])
+        }
+    };
+    lsof.arg("-FptPnT").env("LC_ALL", "C");
+    let out = run_tool(lsof).await?;
+    // 1: a selection matched nothing. No code at all: a signal ended `lsof`,
+    // so its list may be cut short.
+    if !matches!(out.status.code(), Some(0 | 1)) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    crate::orphan::parse_lsof_holders(&text, listen, own)
+}
+
+/// Not known on this system: nothing is signalled. Linux, where `lsof` is
+/// often absent, would read `/proc/net/unix`, `/proc/net/tcp`, and
+/// `/proc/<pid>/fd` (spike S-06b).
+#[cfg(not(target_os = "macos"))]
+pub async fn listener_holders(_listen: &Dial) -> Option<Vec<u32>> {
     None
 }
 
@@ -457,6 +555,26 @@ mod tests {
         }
     }
 
+    /// Asks `look` until `done` holds for its answer, for up to 10 s, and
+    /// gives that answer. With glibc's `posix_spawn` (Linux), `spawn` returns
+    /// before the child's exec is done, and until then its `exe` link names
+    /// this test binary.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    async fn after_exec<T: std::fmt::Debug>(
+        mut look: impl AsyncFnMut() -> T,
+        done: impl Fn(&T) -> bool,
+    ) -> T {
+        let started = std::time::Instant::now();
+        loop {
+            let now = look().await;
+            if done(&now) {
+                return now;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "{now:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     // The systems where `identity` reads a process.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
@@ -466,10 +584,12 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id();
-        let Liveness::Alive { exe, started } = identity(pid).await else {
+        let is_sleep = |now: &Liveness| matches!(now, Liveness::Alive { exe, .. } if exe.file_name().is_some_and(|n| n == "sleep"));
+        let Liveness::Alive { exe, started } =
+            after_exec(async || identity(pid).await, is_sleep).await
+        else {
             panic!("no identity for {pid}");
         };
-        assert_eq!(exe.file_name().unwrap(), "sleep");
         assert!(!started.is_empty());
         // The same answer again: the start time is stable.
         let again = identity(pid).await;
@@ -492,10 +612,13 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id();
-        let Liveness::Alive { exe, started } = real_identity(pid).await else {
+        let sleep = fs::canonicalize("/bin/sleep").unwrap();
+        let is_sleep = |now: &Liveness| matches!(now, Liveness::Alive { exe, .. } if *exe == sleep);
+        let Liveness::Alive { started, .. } =
+            after_exec(async || real_identity(pid).await, is_sleep).await
+        else {
             panic!("no identity for {pid}");
         };
-        assert_eq!(exe, fs::canonicalize("/bin/sleep").unwrap());
         assert!(!started.is_empty());
         // `identity` and `real_identity` give the same start time.
         if let Liveness::Alive { started: same, .. } = identity(pid).await {
@@ -515,11 +638,71 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id();
-        let exe = executable(pid).await.expect("an executable");
-        assert_eq!(exe, fs::canonicalize("/bin/sleep").unwrap());
+        let sleep = fs::canonicalize("/bin/sleep").unwrap();
+        let is_sleep = |exe: &Option<PathBuf>| exe.as_ref() == Some(&sleep);
+        after_exec(async || executable(pid).await, is_sleep).await;
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(executable(pid).await, None);
+    }
+
+    // The systems where `children` reads the process table.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn children_lists_a_child_with_the_start_time_identity_gives() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let Liveness::Alive { started, .. } = identity(pid).await else {
+            panic!("no identity for {pid}");
+        };
+        // Other tests spawn children of this process too: only ours matters.
+        let listed = children(std::process::id()).await.expect("the table");
+        let want = ChildProcess { pid, started };
+        assert!(listed.contains(&want), "{want:?} in {listed:?}");
+        // Every entry is a child of ours, so none is pid 1 or this process.
+        assert!(
+            listed
+                .iter()
+                .all(|c| c.pid > 1 && c.pid != std::process::id())
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let listed = children(std::process::id()).await.expect("the table");
+        assert!(listed.iter().all(|c| c.pid != pid), "{listed:?}");
+    }
+
+    // Only macOS lists the holders of a listener (`lsof`).
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn listener_holders_are_the_processes_with_the_socket_or_port_open() {
+        let own = std::process::id();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("php-8.4.sock");
+        let socket = Dial::Unix(path.clone());
+        // Nobody holds it yet: an empty list, which is not `None`.
+        assert_eq!(listener_holders(&socket).await, Some(Vec::new()));
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        // A process that does not hold it is not named.
+        let mut sleeper = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        assert_eq!(listener_holders(&socket).await, Some(vec![own]));
+        sleeper.kill().unwrap();
+        sleeper.wait().unwrap();
+        drop(listener);
+        // The file is still there, and nobody holds the socket.
+        assert!(path.exists());
+        assert_eq!(listener_holders(&socket).await, Some(Vec::new()));
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = Dial::Tcp(listener.local_addr().unwrap().port());
+        assert_eq!(listener_holders(&port).await, Some(vec![own]));
+        drop(listener);
+        assert_eq!(listener_holders(&port).await, Some(Vec::new()));
     }
 
     #[test]

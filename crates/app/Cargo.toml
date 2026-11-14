@@ -29,6 +29,8 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `test-util`: tests that pause the clock (`start_paused`).
+tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 
 [lints]

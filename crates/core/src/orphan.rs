@@ -16,10 +16,13 @@
 //! Caddy that answers only to the shared `marsa-srv` tag belongs to another
 //! Marsa (another data folder, or another user), and is never touched.
 
+use std::cmp::Ordering;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::caddy::Dial;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PidfileState {
@@ -239,6 +242,83 @@ pub fn classify_pidfile(record: &PidRecord, accepted: &[PathBuf], now: &Liveness
     PidfileState::Ours { pid }
 }
 
+/// One child of a process, as the process table lists it: its pid and its
+/// start time, in the form [`Liveness::Alive`] gives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildProcess {
+    pub pid: u32,
+    pub started: String,
+}
+
+/// Compares two start times in the form [`Liveness::Alive`] gives: `lstart`
+/// text (`Wed Nov 4 03:31:27 2026`, macOS, always in UTC) or clock ticks
+/// since boot (Linux). `None` when they are not both of one form: then
+/// nothing can be said, and the caller fails closed.
+pub fn started_order(a: &str, b: &str) -> Option<Ordering> {
+    if let (Ok(a), Ok(b)) = (a.parse::<u64>(), b.parse::<u64>()) {
+        return Some(a.cmp(&b));
+    }
+    Some(lstart_key(a)?.cmp(&lstart_key(b)?))
+}
+
+/// `Www Mmm d HH:MM:SS YYYY` as `[year, month, day, hour, minute, second]`,
+/// which sorts in the order of time.
+fn lstart_key(text: &str) -> Option<[u32; 6]> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let [_weekday, month, day, clock, year] = words.as_slice() else {
+        return None;
+    };
+    let month = MONTHS.iter().position(|name| name == month)?;
+    let month = u32::try_from(month).ok()? + 1;
+    let mut clock = clock.split(':').map(str::parse::<u32>);
+    let (Some(Ok(hour)), Some(Ok(minute)), Some(Ok(second)), None) =
+        (clock.next(), clock.next(), clock.next(), clock.next())
+    else {
+        return None;
+    };
+    Some([
+        year.parse().ok()?,
+        month,
+        day.parse().ok()?,
+        hour,
+        minute,
+        second,
+    ])
+}
+
+/// Whether `now`, what the OS says about `pid`, shows a worker of the php-fpm
+/// master `master` names: alive, running the master's very executable, which
+/// must be one of `accepted`, and started no earlier than the master (a
+/// master forks its workers). The master's own pid is never its worker: the
+/// pid file's pid is judged by [`classify_pidfile`] alone. Gives the worker's
+/// own record, for the checks before each of its signals
+/// ([`classify_pidfile`]). A start time that cannot be compared counts as
+/// earlier, so nothing is signalled.
+pub fn worker_of(
+    master: &PidRecord,
+    accepted: &[PathBuf],
+    pid: u32,
+    now: &Liveness,
+) -> Option<PidRecord> {
+    let Liveness::Alive { exe, started } = now else {
+        return None;
+    };
+    if pid == master.pid || *exe != master.exe || !accepted.contains(exe) {
+        return None;
+    }
+    if started_order(started, &master.started)? == Ordering::Less {
+        return None;
+    }
+    Some(PidRecord {
+        pid,
+        exe: exe.clone(),
+        started: started.clone(),
+    })
+}
+
 /// The start of the `@id` the daemon puts on Caddy's `admin` object.
 pub const INSTANCE_TAG_PREFIX: &str = "marsa-instance-";
 
@@ -313,16 +393,51 @@ pub fn parse_ps_start(text: &str) -> Option<(char, String)> {
     Some((state.chars().next()?, started.join(" ")))
 }
 
-/// Reads `/proc/<pid>/stat` (Linux): the state letter and the start time in
-/// clock ticks since boot. The name in parentheses may hold any character, so
-/// the fields are counted after the last `)`.
-pub fn parse_proc_stat(text: &str) -> Option<(char, u64)> {
+/// Reads `ps -axo pid=,ppid=,lstart=` output run with `LC_ALL=C` and
+/// `TZ=UTC0` (macOS): the children of `ppid`, each with its start time in the
+/// form of [`parse_ps_start`]. A line in another shape is skipped: a process
+/// that cannot be read is never signalled.
+pub fn parse_ps_children(text: &str, ppid: u32) -> Vec<ChildProcess> {
+    text.lines()
+        .filter_map(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let [pid, parent, started @ ..] = words.as_slice() else {
+                return None;
+            };
+            if started.len() != 5 || parent.parse::<u32>().ok()? != ppid {
+                return None;
+            }
+            Some(ChildProcess {
+                pid: pid.parse().ok()?,
+                started: started.join(" "),
+            })
+        })
+        .collect()
+}
+
+/// What `/proc/<pid>/stat` says (Linux): the state letter, the parent, and
+/// the start time in clock ticks since boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcStat {
+    pub state: char,
+    pub ppid: u32,
+    pub started: u64,
+}
+
+/// Reads `/proc/<pid>/stat` (Linux). The name in parentheses may hold any
+/// character, so the fields are counted after the last `)`.
+pub fn parse_proc_stat(text: &str) -> Option<ProcStat> {
     let (_, fields) = text.rsplit_once(')')?;
     let mut fields = fields.split_whitespace();
-    // Field 3 of `man 5 proc` is the state; field 22 is the start time.
+    // Of `man 5 proc`: field 3 is the state, 4 the parent, 22 the start time.
     let state = fields.next()?.chars().next()?;
-    let started = fields.nth(18)?.parse().ok()?;
-    Some((state, started))
+    let ppid = fields.next()?.parse().ok()?;
+    let started = fields.nth(17)?.parse().ok()?;
+    Some(ProcStat {
+        state,
+        ppid,
+        started,
+    })
 }
 
 /// Reads `lsof -p <pid> -a -d txt -Fn` output (macOS): the first `n<path>`
@@ -353,6 +468,72 @@ pub fn parse_lsof(text: &str) -> Option<String> {
         }
     }
     Some(format!("{}({})", name.unwrap_or_default(), pid?))
+}
+
+/// Reads `lsof -FptPnT` output (macOS) for the processes that hold the
+/// listener at `listen` open: a Unix socket bound to that very path, or a
+/// TCP socket in the LISTEN state on `127.0.0.1:<port>`. A child that
+/// inherited the listener holds it too. Sorted, each pid once.
+///
+/// `control` is a pid whose files the same `lsof` run was asked for (the
+/// daemon itself). If the output does not describe it, `lsof` did not do its
+/// work, so its answer proves nothing: `None`, which is not "nobody". `lsof`
+/// escapes odd characters in a name, so such a path never matches, and the
+/// check fails closed.
+pub fn parse_lsof_holders(text: &str, listen: &Dial, control: u32) -> Option<Vec<u32>> {
+    /// The fields of one open file.
+    #[derive(Default)]
+    struct OpenFile<'t> {
+        kind: &'t str,
+        protocol: &'t str,
+        name: &'t str,
+        state: &'t str,
+    }
+    let address = match listen {
+        Dial::Tcp(port) => format!("127.0.0.1:{port}"),
+        Dial::Unix(_) => String::new(),
+    };
+    let holds = |file: &OpenFile<'_>| match listen {
+        Dial::Unix(path) => file.kind == "unix" && Path::new(file.name) == path.as_path(),
+        Dial::Tcp(_) => {
+            file.kind == "IPv4"
+                && file.protocol == "TCP"
+                && file.state == "LISTEN"
+                && file.name == address
+        }
+    };
+    let mut holders = Vec::new();
+    let mut described = false;
+    let mut pid = None;
+    let mut file = OpenFile::default();
+    // A `p` line starts a process and an `f` line a file: the file before
+    // either is complete. The `p` added at the end closes the last file.
+    let lines = text.lines().map(|line| line.trim_end_matches('\r'));
+    for line in lines.chain(["p"]) {
+        if line.starts_with(['p', 'f']) {
+            if let Some(pid) = pid
+                && holds(&file)
+                && !holders.contains(&pid)
+            {
+                holders.push(pid);
+            }
+            file = OpenFile::default();
+        }
+        if let Some(value) = line.strip_prefix('p') {
+            pid = value.parse::<u32>().ok();
+            described |= pid == Some(control);
+        } else if let Some(value) = line.strip_prefix('t') {
+            file.kind = value;
+        } else if let Some(value) = line.strip_prefix('P') {
+            file.protocol = value;
+        } else if let Some(value) = line.strip_prefix('n') {
+            file.name = value;
+        } else if let Some(value) = line.strip_prefix("TST=") {
+            file.state = value;
+        }
+    }
+    holders.sort_unstable();
+    described.then_some(holders)
 }
 
 #[cfg(test)]
@@ -735,13 +916,131 @@ mod tests {
     }
 
     #[test]
-    fn proc_stat_gives_the_state_and_start_ticks_after_the_name() {
+    fn proc_stat_gives_the_state_parent_and_start_ticks_after_the_name() {
         // A name with spaces and `)` in it, as a program may choose.
         let stat = "4242 (cad dy) x) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 9 0 \
                     987654 1000000 200 18446744073709551615";
-        assert_eq!(parse_proc_stat(stat), Some(('S', 987_654)));
+        let want = ProcStat {
+            state: 'S',
+            ppid: 1,
+            started: 987_654,
+        };
+        assert_eq!(parse_proc_stat(stat), Some(want));
         assert_eq!(parse_proc_stat("4242 (caddy) Z 1 2"), None);
         assert_eq!(parse_proc_stat("no parenthesis"), None);
+    }
+
+    #[test]
+    fn ps_child_lines_give_the_children_of_one_parent() {
+        let table = "    1     0 Thu Jan  1 00:00:06 1970\n\
+                     4242     1 Wed Nov  4 03:31:27 2026\n\
+                     4301  4242 Wed Nov  4 03:31:27 2026\n\
+                     4302  4242 Wed Nov  4 03:31:28 2026\n\
+                     4303  4242 Wed Nov  4 03:31\n\
+                     x     4242 Wed Nov  4 03:31:28 2026\n\
+                     4304  4300 Wed Nov  4 03:31:28 2026\n";
+        let child = |pid, started: &str| ChildProcess {
+            pid,
+            started: started.to_owned(),
+        };
+        assert_eq!(
+            parse_ps_children(table, 4242),
+            [
+                child(4301, "Wed Nov 4 03:31:27 2026"),
+                child(4302, "Wed Nov 4 03:31:28 2026"),
+            ]
+        );
+        assert_eq!(
+            parse_ps_children(table, 1),
+            [child(4242, "Wed Nov 4 03:31:27 2026")]
+        );
+        assert!(parse_ps_children(table, 9999).is_empty());
+        assert!(parse_ps_children("", 1).is_empty());
+    }
+
+    #[test]
+    fn start_times_compare_as_times_in_both_forms() {
+        use Ordering::{Equal, Greater, Less};
+        let order = started_order;
+        // `lstart` text, with single or double spaces.
+        let t = "Wed Nov 4 03:31:27 2026";
+        assert_eq!(order(t, "Wed Nov  4 03:31:27 2026"), Some(Equal));
+        assert_eq!(order(t, "Wed Nov 4 03:31:28 2026"), Some(Less));
+        assert_eq!(order(t, "Wed Nov 4 03:30:59 2026"), Some(Greater));
+        assert_eq!(order(t, "Thu Nov 5 00:00:00 2026"), Some(Less));
+        assert_eq!(order(t, "Sat Oct 31 23:59:59 2026"), Some(Greater));
+        assert_eq!(order(t, "Thu Dec 4 03:31:27 2025"), Some(Greater));
+        // The weekday is not compared: `ps` derives it from the date.
+        assert_eq!(order(t, "Mon Nov 4 03:31:27 2026"), Some(Equal));
+        // Clock ticks since boot (Linux).
+        assert_eq!(order("987654", "987654"), Some(Equal));
+        assert_eq!(order("987654", "987655"), Some(Less));
+        assert_eq!(order("1000000", "987655"), Some(Greater));
+        // Mixed or broken forms say nothing.
+        for (a, b) in [
+            (t, "987654"),
+            (t, ""),
+            (t, "Wed Nov 4 03:31 2026"),
+            (t, "Wed Foo 4 03:31:27 2026"),
+            (t, "Wed Nov 4 03:31:27:00 2026"),
+            ("", ""),
+        ] {
+            assert_eq!(order(a, b), None, "{a:?} {b:?}");
+            assert_eq!(order(b, a), None, "{b:?} {a:?}");
+        }
+    }
+
+    #[test]
+    fn a_worker_runs_the_masters_executable_and_started_no_earlier() {
+        let master = PidRecord {
+            pid: 4242,
+            exe: PathBuf::from("/data/runtimes/php/8.4.3/bin/php-fpm"),
+            started: "Wed Nov 4 03:31:27 2026".to_owned(),
+        };
+        let accepted = [
+            master.exe.clone(),
+            PathBuf::from("/data/runtimes/php/8.3.1/bin/php-fpm"),
+        ];
+        let fpm = "/data/runtimes/php/8.4.3/bin/php-fpm";
+        let same = "Wed Nov 4 03:31:27 2026";
+        let later = "Wed Nov 4 03:31:28 2026";
+        for started in [same, later] {
+            let now = alive(fpm, started);
+            let want = PidRecord {
+                pid: 4301,
+                exe: master.exe.clone(),
+                started: started.to_owned(),
+            };
+            assert_eq!(worker_of(&master, &accepted, 4301, &now), Some(want));
+        }
+        let rejected = [
+            ("another program", alive("/bin/sleep", later)),
+            (
+                "a php-fpm of another data folder",
+                alive("/other/runtimes/php/8.4.3/bin/php-fpm", later),
+            ),
+            (
+                "another installed php-fpm, not the master's",
+                alive("/data/runtimes/php/8.3.1/bin/php-fpm", later),
+            ),
+            (
+                "earlier than the master",
+                alive(fpm, "Wed Nov 4 03:31:26 2026"),
+            ),
+            ("a start time of another form", alive(fpm, "987654")),
+            ("a start time that cannot be read", alive(fpm, "")),
+            ("gone", Liveness::Gone),
+            ("unknown", Liveness::Unknown),
+        ];
+        for (what, now) in rejected {
+            assert_eq!(worker_of(&master, &accepted, 4301, &now), None, "{what}");
+        }
+        // The master's own pid, whatever it runs now.
+        let now = alive(fpm, later);
+        assert_eq!(worker_of(&master, &accepted, 4242, &now), None);
+        // The master's executable must still be accepted (installed).
+        let removed = [PathBuf::from("/data/runtimes/php/8.3.1/bin/php-fpm")];
+        assert_eq!(worker_of(&master, &removed, 4301, &now), None);
     }
 
     #[test]
@@ -752,5 +1051,60 @@ mod tests {
         );
         assert_eq!(parse_lsof(""), None);
         assert_eq!(parse_lsof("cnginx\n"), None);
+    }
+
+    #[test]
+    fn lsof_holders_of_a_socket_are_the_pids_with_that_very_socket_open() {
+        let socket = Dial::Unix(PathBuf::from("/data/a b/run/php-8.4.sock"));
+        // Two workers inherited the socket. Pid 500 holds another pool's
+        // socket, pid 600 a plain file of that name, pid 601 a connection,
+        // and pid 7 is the daemon that asked.
+        let out = "p4302\nf7\ntunix\nn/data/a b/run/php-8.4.sock\n\
+                   f8\ntunix\nn/data/a b/run/php-8.4.sock\n\
+                   p4301\nf0\ntunix\nn->0x66963a7f3f40cd83\n\
+                   f3\ntunix\nn/data/a b/run/php-8.4.sock\n\
+                   p500\nf3\ntunix\nn/data/a b/run/php-8.3.sock\n\
+                   p600\nf4\ntREG\nn/data/a b/run/php-8.4.sock\n\
+                   p601\nf5\ntunix\nn->0x66963a7f3f40cd84\n\
+                   p7\nfcwd\ntDIR\nn/\n";
+        let holders = parse_lsof_holders(out, &socket, 7);
+        assert_eq!(holders, Some(vec![4301, 4302]));
+        // Nobody holds it: an empty list, since `lsof` described the daemon.
+        let other = Dial::Unix(PathBuf::from("/data/a b/run/php-8.2.sock"));
+        assert_eq!(parse_lsof_holders(out, &other, 7), Some(Vec::new()));
+        // The last file of the output counts too.
+        let last = "p7\nfcwd\ntDIR\nn/\np4301\nf3\ntunix\nn/data/a b/run/php-8.4.sock";
+        assert_eq!(parse_lsof_holders(last, &socket, 7), Some(vec![4301]));
+        // Without the daemon in it, the output proves nothing.
+        assert_eq!(parse_lsof_holders(out, &socket, 8), None);
+        assert_eq!(parse_lsof_holders("", &socket, 7), None);
+    }
+
+    #[test]
+    fn lsof_holders_of_a_port_are_the_tcp_listeners_on_localhost() {
+        let port = Dial::Tcp(9084);
+        let listener = |pid: u32| {
+            format!("p{pid}\nf4\ntIPv4\nPTCP\nn127.0.0.1:9084\nTST=LISTEN\nTQR=0\nTQS=0\n")
+        };
+        // After the two listeners: UDP on the same address, a connection to
+        // the port, another port, IPv6, every address, and a closed socket.
+        let others = "p500\nf4\ntIPv4\nPUDP\nn127.0.0.1:9084\n\
+                      p501\nf5\ntIPv4\nPTCP\nn127.0.0.1:50000->127.0.0.1:9084\nTST=ESTABLISHED\n\
+                      p502\nf6\ntIPv4\nPTCP\nn127.0.0.1:9085\nTST=LISTEN\n\
+                      p503\nf7\ntIPv6\nPTCP\nn[::1]:9084\nTST=LISTEN\n\
+                      p504\nf8\ntIPv4\nPTCP\nn*:9084\nTST=LISTEN\n\
+                      p505\nf9\ntIPv4\nPTCP\nn127.0.0.1:9084\nTST=CLOSED\n\
+                      p7\nfcwd\ntDIR\nn/\n";
+        let out = format!("{}{}{others}", listener(4302), listener(4301));
+        assert_eq!(parse_lsof_holders(&out, &port, 7), Some(vec![4301, 4302]));
+        let free = Dial::Tcp(9086);
+        assert_eq!(parse_lsof_holders(&out, &free, 7), Some(Vec::new()));
+        assert_eq!(parse_lsof_holders(&out, &port, 8), None);
+        // The fields of one file never carry over to the next.
+        let split = "p7\nf4\ntIPv4\nPTCP\nTST=LISTEN\nf5\ntIPv4\nPTCP\nn127.0.0.1:9084\n";
+        assert_eq!(parse_lsof_holders(split, &port, 7), Some(Vec::new()));
+        // A socket path is no port, and a port no socket path.
+        let socket = Dial::Unix(PathBuf::from("127.0.0.1:9084"));
+        assert_eq!(parse_lsof_holders(&out, &socket, 7), Some(Vec::new()));
     }
 }

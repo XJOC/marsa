@@ -9,8 +9,9 @@
 //! prints one line per step: done, already done, failed, or skipped and why.
 //!
 //! Exit code 1 if a step failed or the helper did not run (the prompt was
-//! cancelled, for example). A skipped step alone, such as `ca_not_ready`
-//! before the first secure site, is not a failure: its line says what to do.
+//! cancelled, for example). A skipped step alone, such as
+//! `caddy_not_installed` before Caddy is installed, is not a failure: its
+//! line says what to do.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -22,6 +23,7 @@ use marsa_core::types::{OpStatus, PortHolder, SetupReport};
 use super::daemon::{ClientFailure, connect, failure};
 use super::sites::printable;
 use super::strings::{self, Details};
+use crate::daemon::setup_api::user_trust::{self, TrustFiles};
 
 /// Starts the daemon if needed, runs the setup, and prints its report.
 pub async fn run(data_dir: &Path) -> ExitCode {
@@ -75,7 +77,12 @@ pub fn render(report: &SetupReport, data_dir: &Path) -> String {
             OpStatus::Unchanged => strings::setup_unchanged(&step),
             OpStatus::Failed => {
                 let code = printable(result.code.as_deref().unwrap_or_default());
-                let reason = strings::message(&code, &Details::default());
+                // The uninstall's text for this code is about its record.
+                let reason = if code == user_trust::TRUST_RECORD_UNUSABLE {
+                    strings::setup_trust_dir_unusable(TrustFiles::in_dir(data_dir).dir())
+                } else {
+                    strings::message(&code, &Details::default())
+                };
                 strings::setup_failed(&step, &reason, &code)
             }
         });
@@ -88,7 +95,12 @@ pub fn render(report: &SetupReport, data_dir: &Path) -> String {
             path: Some(&ca_root),
             ..Details::default()
         };
-        let reason = strings::message(&code, &details);
+        // The general text of this code is for `marsa services start caddy`.
+        let reason = if code == "caddy_not_installed" {
+            strings::SETUP_CADDY_NOT_INSTALLED.to_owned()
+        } else {
+            strings::message(&code, &details)
+        };
         push(strings::setup_skipped(&step, &reason, &code));
         if code == "redirect_port_held" {
             for holder in &report.port_holders {
@@ -113,8 +125,9 @@ pub fn error(report: &SetupReport) -> Option<ClientFailure> {
     })
 }
 
-/// `  Port 80 is used by nginx-arm64 (PID 15464, Herd).`
-fn port_held(holder: &PortHolder) -> String {
+/// `  Port 80 is used by nginx-arm64 (PID 15464, Herd).` `marsa doctor`
+/// shows the same lines.
+pub(super) fn port_held(holder: &PortHolder) -> String {
     let name = holder
         .process
         .as_deref()
@@ -213,11 +226,67 @@ mod tests {
         assert!(text.contains("[resolver_foreign]\n"), "{text}");
         assert!(
             text.contains(
-                "Trust Marsa's HTTPS certificates: skipped. Marsa's certificate authority does \
-                 not exist yet"
+                "Trust Marsa's HTTPS certificates: skipped. Caddy did not make Marsa's \
+                 certificate authority in time"
             ),
             "{text}"
         );
+        assert!(
+            text.contains("Run \"marsa logs caddy\" to see why"),
+            "{text}"
+        );
+        assert!(text.ends_with("[ca_not_ready]\n"), "{text}");
+    }
+
+    /// Task M5-15b: Caddy did not start. The reason is in its recent lines,
+    /// which `marsa logs caddy` shows.
+    #[test]
+    fn a_caddy_that_did_not_start_says_to_look_at_its_logs() {
+        let report = SetupReport {
+            skipped: vec![skip("trust_install", "caddy_not_started")],
+            ..SetupReport::default()
+        };
+        assert_eq!(
+            render(&report, &data()),
+            "Trust Marsa's HTTPS certificates: skipped. Caddy did not start, so Marsa's \
+             certificate authority is not there yet. Run \"marsa logs caddy\" to see why, then \
+             run \"marsa setup\" again. [caddy_not_started]\n"
+        );
+    }
+
+    /// Task M5-15: no Caddy, so no CA. The line says to install Caddy, then
+    /// to run setup again, and names no path.
+    #[test]
+    fn no_caddy_says_to_install_it_then_to_run_setup_again() {
+        let report = SetupReport {
+            skipped: vec![skip("trust_install", "caddy_not_installed")],
+            ..SetupReport::default()
+        };
+        assert_eq!(
+            render(&report, &data()),
+            "Trust Marsa's HTTPS certificates: skipped. Caddy is not installed, so Marsa's \
+             certificate authority does not exist yet. Run \"marsa install caddy\", then run \
+             \"marsa setup\" again. [caddy_not_installed]\n"
+        );
+    }
+
+    #[test]
+    fn an_unusable_trust_folder_names_it_and_says_to_run_setup_again() {
+        let report = SetupReport {
+            results: vec![result(
+                "trust_install",
+                OpStatus::Failed,
+                Some("trust_record_unusable"),
+            )],
+            ..SetupReport::default()
+        };
+        let text = render(&report, &data());
+        let trust = data().join("trust");
+        assert!(text.contains(&trust.display().to_string()), "{text}");
+        assert!(text.contains("not a link"), "{text}");
+        assert!(text.contains("run \"marsa setup\" again"), "{text}");
+        assert!(!text.contains("Keychain Access"), "{text}");
+        assert!(text.ends_with("[trust_record_unusable]\n"), "{text}");
     }
 
     #[test]
