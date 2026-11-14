@@ -148,7 +148,23 @@ export PATH="$SHIMS:$BIN:$PATH"
 run marsa --version
 run marsa-helper version
 . /etc/os-release
-echo "system: $PRETTY_NAME, systemd $(systemctl --version | awk 'NR==1 {print $2}'), kernel $(uname -r)"
+SYSTEMD=$(systemctl --version | awk 'NR==1 {print $2}')
+echo "system: $PRETTY_NAME, systemd $SYSTEMD, kernel $(uname -r)"
+# systemd 250 and later: the helper makes marsa0 (task M4-18h). Before 250
+# it refuses with resolved_systemd_too_old until task M4-18k, and curl
+# reaches the site with --resolve; ports and trust are tested all the same.
+if [ "$SYSTEMD" -ge 250 ]; then LINK=yes; else LINK=no; fi
+echo "marsa0 on this system: $LINK"
+NAME=()
+RESOLVED_DONE=done
+RESOLVED_SAME=unchanged
+RESOLVED_GONE=done
+if [ "$LINK" = no ]; then
+  NAME=(--resolve "$SITE:443:127.0.0.1" --resolve "$SITE:80:127.0.0.1")
+  RESOLVED_DONE=failed
+  RESOLVED_SAME=failed
+  RESOLVED_GONE=unchanged
+fi
 
 # Part A: the helper alone. It needs no runtime, only marsad's DNS server.
 
@@ -179,23 +195,30 @@ sudo mkdir -p "$(dirname "$DROPIN")"
 printf '# Managed by Marsa. Do not edit.\n[Resolve]\nDNS=127.0.0.1:18053\nDomains=~test\n' | sudo tee "$DROPIN"
 sudo systemctl reset-failed systemd-resolved
 sudo systemctl restart systemd-resolved
-helper '[{"op":"resolved_install","port":18053},{"op":"ports_install"}]' || fail "the helper exited with $?"
-[ "$(statuses)" = "done done" ] || fail "expected done done, got: $(statuses)"
+helper '[{"op":"resolved_install","port":18053},{"op":"ports_install"}]' || true
+[ "$(statuses)" = "$RESOLVED_DONE done" ] || fail "expected $RESOLVED_DONE done, got: $(statuses)"
 [ ! -e "$DROPIN" ] || fail "the old drop-in $DROPIN is still there"
-run cat "$UNIT"
 run cat "$SYSCTL_FILE"
-[ "$(stat -c '%U:%G %a' "$UNIT")" = "root:root 644" ] || fail "wrong owner or mode on $UNIT"
 [ "$(stat -c '%U:%G %a' "$SYSCTL_FILE")" = "root:root 644" ] || fail "wrong owner or mode on $SYSCTL_FILE"
-[ "$(systemctl is-enabled marsa-dns-link.service)" = enabled ] || fail "the unit is not enabled"
-[ "$(systemctl is-active marsa-dns-link.service)" = active ] || fail "the unit is not active"
 [ "$(cat "$PORT_START")" = 80 ] || fail "ip_unprivileged_port_start is $(cat "$PORT_START"), not 80"
-run resolvectl status marsa0
-run ip -brief addr show marsa0
-# The real DNS server of marsad answers, through systemd-resolved.
-wait_for_name "$SITE" || fail "$SITE does not resolve"
-run resolvectl query "$SITE"
-run getent hosts "$SITE"
+if [ "$LINK" = yes ]; then
+  run cat "$UNIT"
+  [ "$(stat -c '%U:%G %a' "$UNIT")" = "root:root 644" ] || fail "wrong owner or mode on $UNIT"
+  [ "$(systemctl is-enabled marsa-dns-link.service)" = enabled ] || fail "the unit is not enabled"
+  [ "$(systemctl is-active marsa-dns-link.service)" = active ] || fail "the unit is not active"
+  run resolvectl status marsa0
+  run ip -brief addr show marsa0
+  # The real DNS server of marsad answers, through systemd-resolved.
+  wait_for_name "$SITE" || fail "$SITE does not resolve"
+  run resolvectl query "$SITE"
+  run getent hosts "$SITE"
+else
+  [ "$(codes)" = resolved_systemd_too_old ] || fail "expected resolved_systemd_too_old, got: $(codes)"
+  [ ! -e "$UNIT" ] || fail "a unit was written on systemd $SYSTEMD"
+  ! ip link show marsa0 >/dev/null 2>&1 || fail "marsa0 was made on systemd $SYSTEMD"
+fi
 
+if [ "$LINK" = yes ]; then
 step "only .test names reach port 18053: a forger there cannot answer other names"
 # marsad stops, so its port is free, and a stand-in that answers every name
 # with 10.9.9.9 takes it, as a program that grabs the port would.
@@ -220,15 +243,16 @@ wait "$FORGER" 2>/dev/null || true
 run sudo resolvectl flush-caches
 run marsa daemon start
 wait_for_name "$SITE" || fail "$SITE does not resolve again"
+fi
 
 step "the same request again changes nothing"
-helper '[{"op":"resolved_install","port":18053},{"op":"ports_install"}]' || fail "the helper exited with $?"
-[ "$(statuses)" = "unchanged unchanged" ] || fail "expected unchanged unchanged, got: $(statuses)"
+helper '[{"op":"resolved_install","port":18053},{"op":"ports_install"}]' || true
+[ "$(statuses)" = "$RESOLVED_SAME unchanged" ] || fail "expected $RESOLVED_SAME unchanged, got: $(statuses)"
 
 step "removal"
 remove_all() {
   helper '[{"op":"ports_remove"},{"op":"resolved_remove"}]' || fail "the helper exited with $?"
-  [ "$(statuses)" = "done done" ] || fail "expected done done, got: $(statuses)"
+  [ "$(statuses)" = "done $RESOLVED_GONE" ] || fail "expected done $RESOLVED_GONE, got: $(statuses)"
   [ ! -e "$UNIT" ] || fail "$UNIT is still there"
   ! ip link show marsa0 >/dev/null 2>&1 || fail "marsa0 is still there"
   [ "$(systemctl is-enabled marsa-dns-link.service 2>/dev/null || true)" != enabled ] || fail "the unit is still enabled"
@@ -243,6 +267,7 @@ remove_all
 helper '[{"op":"ports_remove"},{"op":"resolved_remove"}]' || fail "the helper exited with $?"
 [ "$(statuses)" = "unchanged unchanged" ] || fail "expected unchanged unchanged, got: $(statuses)"
 
+if [ "$LINK" = yes ]; then
 step "the install five more times, each from an old drop-in and a restart"
 # Run 43603392848 failed once here on 22.04 (the check saw another server
 # list on marsa0). Each round: the old drop-in, a restart, the install, the
@@ -257,6 +282,7 @@ for round in 1 2 3 4 5; do
   helper '[{"op":"resolved_remove"}]' || fail "round $round: the helper exited with $?"
   [ "$(statuses)" = "done" ] || fail "round $round: expected done, got: $(statuses)"
 done
+fi
 
 step "removal reloads only Marsa's key from the other sysctl files"
 helper '[{"op":"ports_install"}]' || fail "the helper exited with $?"
@@ -293,6 +319,7 @@ helper '[{"op":"trust_remove"}]' || fail "the helper exited with $?"
 helper '[{"op":"trust_remove"}]' || fail "the helper exited with $?"
 [ "$(statuses)" = "unchanged" ] || fail "expected unchanged, got: $(statuses)"
 
+if [ "$LINK" = yes ]; then
 step "next to another global DNS server, .test names still work"
 # With the old global drop-in, .test never resolved here (spike S-02: 0 of 6).
 sudo systemctl reset-failed systemd-resolved
@@ -307,6 +334,7 @@ sudo rm /etc/systemd/resolved.conf.d/00-someone-else.conf
 sudo systemctl reset-failed systemd-resolved
 sudo systemctl restart systemd-resolved
 run resolvectl query example.com
+fi
 echo
 kill "$WATCHER" 2>/dev/null || true
 echo "PASS: part A, the helper"
@@ -333,9 +361,9 @@ step "before the helper: Caddy on its high ports"
 wait_for_laravel -k --resolve "$SITE:18443:127.0.0.1" "https://$SITE:18443/"
 
 step "the helper again, for the site"
-helper '[{"op":"resolved_install","port":18053},{"op":"ports_install"}]' || fail "the helper exited with $?"
-[ "$(statuses)" = "done done" ] || fail "expected done done, got: $(statuses)"
-wait_for_name "$SITE" || fail "$SITE does not resolve"
+helper '[{"op":"resolved_install","port":18053},{"op":"ports_install"}]' || true
+[ "$(statuses)" = "$RESOLVED_DONE done" ] || fail "expected $RESOLVED_DONE done, got: $(statuses)"
+[ "$LINK" = no ] || wait_for_name "$SITE" || fail "$SITE does not resolve"
 
 step "trust: Caddy's CA in the system store"
 helper "$(trust_ops "$CA")" || fail "the helper exited with $?"
@@ -345,10 +373,10 @@ step "after the helper: Caddy on ports 80 and 443"
 # The daemon picks the ports at every config. Phase 2: `marsa setup` asks for
 # the new config itself. Here, a restart of Caddy writes it.
 run marsa services restart caddy
-wait_for_laravel -k "https://$SITE/"
+wait_for_laravel -k "${NAME[@]}" "https://$SITE/"
 # The certificate, checked against the system store: no -k, no --cacert.
-run curl -fsS -o /dev/null --max-time 10 -w 'https://%{remote_ip}:%{remote_port} -> %{http_code}\n' "https://$SITE/"
-redirect=$(curl -sS -o /dev/null --max-time 10 -w '%{http_code} %{redirect_url}' "http://$SITE/")
+run curl -fsS -o /dev/null --max-time 10 "${NAME[@]}" -w 'https://%{remote_ip}:%{remote_port} -> %{http_code}\n' "https://$SITE/"
+redirect=$(curl -sS -o /dev/null --max-time 10 "${NAME[@]}" -w '%{http_code} %{redirect_url}' "http://$SITE/")
 echo "http://$SITE/ -> $redirect"
 [ "$redirect" = "308 https://$SITE/" ] || fail "expected a 308 to https://$SITE/"
 listeners=$(sudo ss -H -ltnp | grep '"caddy"' | awk '{print $4}' | sort | tr '\n' ' ')
