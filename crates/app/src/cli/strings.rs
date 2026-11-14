@@ -445,15 +445,38 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "resolver_foreign" => "/etc/resolver/test belongs to another tool, so Marsa left it as \
              it is. Remove that tool's .test setting, then run \"marsa setup\" again."
             .into(),
-        "resolver_read" | "resolver_write" => "macOS did not let Marsa write \
-             /etc/resolver/test. Run \"marsa setup\" again; if it repeats, report it."
+        "resolver_write" => "macOS did not let Marsa write /etc/resolver/test. Run \"marsa \
+             setup\" again; if it repeats, report it."
+            .into(),
+        // Setup and the uninstall both meet it: no advice for one of them.
+        "resolver_read" => "macOS did not let Marsa read /etc/resolver/test, so Marsa left it \
+             as it is. Run the command again; if it repeats, report it."
+            .into(),
+        "resolver_delete" => "macOS did not let Marsa delete /etc/resolver/test, so .test \
+             names still go to Marsa. Run \"marsa uninstall --all\" again; if it repeats, \
+             report it."
             .into(),
         "trust_cert_invalid" => "The root certificate of Marsa's certificate authority is not \
              valid, so it was not trusted. Report it."
             .into(),
-        "trust_read" | "trust_write" => "Marsa could not add its certificate authority to \
-             the system's trusted certificates. Run \"marsa setup\" again; if it repeats, \
-             report it."
+        "trust_write" => "Marsa could not add its certificate authority to the system's \
+             trusted certificates. Run \"marsa setup\" again; if it repeats, report it."
+            .into(),
+        // Setup and the uninstall both meet it: no advice for one of them.
+        "trust_read" => "macOS did not let Marsa read its copy of its certificate authority \
+             in /Library/Application Support/Marsa, so Marsa left the trust for all users as it \
+             is. Run the command again; if it repeats, report it."
+            .into(),
+        "trust_record_unusable" => format!(
+            "Marsa cannot use {}: it is not a plain file in a folder of yours, or not the \
+             certificate Marsa trusted. So Marsa left that trust as it is. If you did not put \
+             the file there, delete it by hand and run the command again; to take a trust away \
+             yourself, remove \"Marsa Local CA\" in Keychain Access.",
+            shown("its record of the trusted certificate")
+        ),
+        "trust_delete" => "Marsa took away the trust for all users, but could not delete its \
+             copy of the certificate in /Library/Application Support/Marsa. Run the command \
+             again; if it repeats, report it."
             .into(),
         "trust_add_failed" => "Your browser will not trust Marsa's sites yet: the trust for \
              your user was not added. Run \"marsa setup\" in Terminal on the Mac's desktop and \
@@ -467,12 +490,87 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "pf_write" | "pf_load_failed" => "macOS did not load the redirect of ports 80 and 443. \
              Run \"marsa setup\" again; if it repeats, report it."
             .into(),
+        "pf_flush_failed" | "pf_delete" => "macOS did not let Marsa remove the redirect of \
+             ports 80 and 443 completely. Run \"marsa uninstall --all\" again; if it repeats, \
+             report it."
+            .into(),
         "pf_helper_unreadable" => "The admin part of Marsa could not read marsa-helper, so \
              ports 80 and 443 were not redirected. Run \"marsa daemon stop\" first. If \
              Marsa's programs are in Desktop, Documents, or Downloads, move them to \
              ~/Library/Application Support/dev.marsa.Marsa/bin; otherwise reinstall Marsa. \
              Then run \"marsa setup\" again."
             .into(),
+
+        // `marsa uninstall --all` (task M5-13): the uninstall route, and the
+        // command's own questions and the data folder.
+        "uninstall_running" => {
+            "An uninstall is running. Wait for it to end, then try again.".into()
+        }
+        "uninstall_not_supported" => "\"marsa uninstall --all\" works on macOS only for now. \
+             Nothing was removed."
+            .into(),
+        "uninstall_cancelled" => "The password prompt was cancelled, so nothing was removed. \
+             Run \"marsa uninstall --all\" again when you are ready."
+            .into(),
+        "uninstall_timed_out" => format!(
+            "Marsa stopped waiting for the uninstall after 5 minutes. {UNINSTALL_MAY_HAVE_RUN}"
+        ),
+        "uninstall_interrupted" => format!(
+            "The Marsa daemon stopped during the uninstall, so Marsa stopped waiting. \
+             {UNINSTALL_MAY_HAVE_RUN}"
+        ),
+        "uninstall_not_authorized" => "macOS did not give Marsa admin rights, so nothing was \
+             removed. The password was not accepted, or the prompt could not open (over SSH, \
+             for example). Run \"marsa daemon stop\", then run \"marsa uninstall --all\" again \
+             in Terminal on your desktop and enter the password of an administrator account."
+            .into(),
+        "uninstall_helper_missing" => "The marsa-helper program is not next to marsad, so \
+             nothing was removed. Reinstall Marsa, then try again."
+            .into(),
+        "uninstall_helper_unsafe" => "Another user could change the marsa-helper program or \
+             its folder, so Marsa did not ask for the password and nothing was removed. Make \
+             both yours and writable only by you (chmod go-w), then run \"marsa uninstall \
+             --all\" again. The path is in the file logs/marsad.log."
+            .into(),
+        "uninstall_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the \
+             result is not known, and Marsa removed nothing else. Run \"marsa uninstall --all\" \
+             again; if it repeats, report it with the file logs/marsad.log."
+            .into(),
+        "uninstall_helper_rejected" => "marsa-helper refused the uninstall request, so nothing \
+             was removed. This is a bug in Marsa: report it with the file logs/marsad.log."
+            .into(),
+        "uninstall_all_needs_yes" => "The input is not a terminal, so Marsa cannot ask you to \
+             type yes, and nothing was removed. Run \"marsa uninstall --all --yes\" to remove \
+             Marsa without the question."
+            .into(),
+        "uninstall_all_not_confirmed" => "You did not type yes, so nothing was removed.".into(),
+        "uninstall_all_data_dir_not_default" => format!(
+            "Marsa deletes only its own data folder, not one given with --data-dir, so {} was \
+             kept. Delete it yourself if you no longer need it.",
+            shown("the folder")
+        ),
+        "uninstall_all_data_dir_unsafe" => format!(
+            "{} is not a plain folder at a full path (a link, for example), so Marsa did not \
+             delete it. Check it, then delete it yourself.",
+            shown("The data folder")
+        ),
+        "uninstall_all_data_delete_failed" => format!(
+            "Marsa could not delete all of {}. Check the folder's permissions, then delete \
+             what is left yourself.",
+            shown("the data folder")
+        ),
+        "uninstall_all_daemon_restarted" => format!(
+            "A Marsa daemon started again, so Marsa did not delete {}. Quit the Marsa window \
+             and the menu-bar icon, run \"marsa daemon stop\", then delete the folder \
+             yourself.",
+            shown("the data folder")
+        ),
+        "uninstall_all_data_dir_back" => format!(
+            "Marsa deleted the data folder, but a Marsa daemon made {} again meanwhile. Quit \
+             the Marsa window and the menu-bar icon, run \"marsa daemon stop\", then delete \
+             the folder yourself.",
+            shown("it")
+        ),
 
         // `marsa autostart`: the autostart route (task M5-03).
         "autostart_unsupported" => {
@@ -492,8 +590,9 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             "Cannot read {}. Check the file's permissions.",
             shown("the login file")
         ),
+        // Writing it and deleting it both fail with this code.
         "autostart_write" => format!(
-            "Cannot write {}. Check the folder's permissions.",
+            "Cannot change {}. Check the permissions of the file and its folder.",
             shown("the login file")
         ),
 
@@ -877,6 +976,166 @@ pub const AUTOSTART_TURNED_ON: &str =
 /// `marsa autostart off`.
 pub const AUTOSTART_TURNED_OFF: &str = "Start at login: off.";
 
+// `marsa uninstall --all`.
+
+/// After Marsa stopped waiting for the helper, which may still have run.
+const UNINSTALL_MAY_HAVE_RUN: &str = "Some steps may already have run with admin rights. \
+     Running \"marsa uninstall --all\" again is safe: each step checks what is already done.";
+
+/// What `marsa uninstall --all` removes, on stderr before the question.
+/// `deletable`: the data folder is Marsa's own, not one from `--data-dir`;
+/// `delete`: `--delete-data` was given for it.
+pub fn uninstall_all_plan(data_dir: &Path, deletable: bool, delete: bool) -> String {
+    let data = match (deletable, delete) {
+        (true, true) => format!(
+            "The data folder {} will be deleted once every step has succeeded.",
+            data_dir.display()
+        ),
+        (true, false) => format!(
+            "The data folder stays unless you choose to delete it: {}",
+            data_dir.display()
+        ),
+        (false, _) => format!(
+            "The data folder given with --data-dir stays: {}",
+            data_dir.display()
+        ),
+    };
+    let lines = [
+        "This removes Marsa from this system:".to_owned(),
+        "  - the redirect of ports 80 and 443, and its job at startup".to_owned(),
+        "  - the setting that sends .test names to Marsa (/etc/resolver/test)".to_owned(),
+        "  - the trust in Marsa's certificate authority, for all users and for you".to_owned(),
+        "  - the start at login".to_owned(),
+        "Then the Marsa daemon stops, with Caddy, PHP, and the DNS server. macOS asks for an \
+         administrator password, and may ask you to approve taking the trust away. Quit the \
+         Marsa window and the menu-bar icon first: they would start the daemon again."
+            .to_owned(),
+        data,
+    ];
+    let mut text = lines.join("\n");
+    text.push('\n');
+    text
+}
+
+/// The question before anything changes. Only `yes` goes on.
+pub const UNINSTALL_ALL_CONFIRM: &str = "Type yes to remove Marsa: ";
+/// On stderr before the call, which may wait for the admin prompt and then
+/// for the trust dialogs.
+pub const UNINSTALL_ALL_STARTED: &str = "Removing Marsa. macOS will ask for an administrator \
+     password, and may then ask you to approve taking away the trust in Marsa's certificate \
+     authority.";
+/// The data folder question, after the daemon stopped. No is the default.
+pub const UNINSTALL_ALL_DATA_QUESTION: &str =
+    "Delete the data folder (runtimes, settings, the CA)? [y/N] ";
+/// When a step failed: the step lines above say which.
+pub const UNINSTALL_ALL_INCOMPLETE: &str = "Some steps failed, so Marsa is not fully removed. \
+     Running \"marsa uninstall --all\" again is safe: each step checks what is already done.";
+/// When the daemon's answer never came: the steps may have run or not.
+pub const UNINSTALL_ALL_RESULT_UNKNOWN: &str = "Marsa does not know how far the uninstall \
+     got. Running \"marsa uninstall --all\" again is safe: each step checks what is already \
+     done.";
+/// After the daemon stopped, when another started on the same folder.
+pub const UNINSTALL_ALL_DAEMON_BACK: &str = "A Marsa daemon started again: the Marsa window \
+     or the menu-bar icon starts it. Quit both, then run \"marsa daemon stop\".";
+/// The heading of what Marsa does not do itself.
+pub const UNINSTALL_ALL_LEFT_TO_DO: &str = "Left to do by hand:";
+/// Under [`UNINSTALL_ALL_LEFT_TO_DO`], always: either would start the daemon
+/// again.
+pub const QUIT_WINDOW_LEFT: &str = "  Quit the Marsa window and the menu-bar icon if they are \
+     open.";
+
+/// After Ctrl+C while the daemon stops after its answer.
+pub const UNINSTALL_ALL_STOP_CTRL_C: &str = "Stopped waiting. The Marsa daemon may still be \
+     stopping: run \"marsa daemon status\" to see. The data folder was kept.";
+
+/// After Ctrl+C at the data folder question: the same as no.
+pub fn data_kept_ctrl_c(path: &Path) -> String {
+    format!("Kept the data folder {}.", path.display())
+}
+
+/// Setup's text for `trust_record_unusable`: the trust folder `dir` (task
+/// M5-13) could not be used. The uninstall's text is in `known`.
+pub fn setup_trust_dir_unusable(dir: &Path) -> String {
+    format!(
+        "Marsa cannot use its folder {} for the trusted certificate: it must be your own \
+         folder, not a link. Fix or delete it, then run \"marsa setup\" again.",
+        dir.display()
+    )
+}
+
+/// After Ctrl+C while the daemon works: it goes on without this command.
+pub fn uninstall_all_ctrl_c(log: &Path) -> String {
+    format!(
+        "Stopped waiting. The uninstall goes on in marsad: a macOS prompt that is open can \
+         still be cancelled there. Its result is in {}.",
+        log.display()
+    )
+}
+
+/// A step of `marsa uninstall --all`. A step this build does not know shows
+/// its own name.
+pub fn uninstall_all_step(op: &str) -> String {
+    match op {
+        "pf_remove" => "Remove the redirect of ports 80 and 443".to_owned(),
+        "resolver_remove" => "Stop sending .test names to Marsa".to_owned(),
+        "trust_remove" => "Remove the trust in Marsa's certificates for all users".to_owned(),
+        "user_trust_remove" => "Remove the trust in Marsa's certificates for you".to_owned(),
+        "autostart_remove" => "Stop starting Marsa at login".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+pub fn data_deleted(path: &Path) -> String {
+    format!("Deleted the data folder {}.", path.display())
+}
+
+/// The data folder after a step failed.
+pub fn data_kept_for_retry(path: &Path) -> String {
+    format!(
+        "Kept the data folder {}: running \"marsa uninstall --all\" again needs it.",
+        path.display()
+    )
+}
+
+/// The data folder when every step went well but a daemon still runs on it.
+pub fn data_kept_daemon_runs(path: &Path) -> String {
+    format!(
+        "Kept the data folder {}: a Marsa daemon still runs on it.",
+        path.display()
+    )
+}
+
+/// Under [`UNINSTALL_ALL_LEFT_TO_DO`]: the `PATH` line the install printed
+/// for the user to add, for Marsa's default folder `default_dir`.
+pub fn path_left(default_dir: Option<&Path>) -> String {
+    let start = "  If you added Marsa to PATH, delete that line from your shell's startup file, \
+                 such as ~/.zprofile or ~/.zshrc";
+    match default_dir {
+        Some(dir) => format!(
+            "{start}: it names {} and {}.",
+            dir.join("bin").display(),
+            dir.join("shims").display()
+        ),
+        None => format!("{start}."),
+    }
+}
+
+/// Under [`UNINSTALL_ALL_LEFT_TO_DO`], when the data folder stays and is not
+/// needed for a retry.
+pub fn data_left(path: &Path) -> String {
+    format!(
+        "  Delete the data folder {} once you no longer need its runtimes, settings, and \
+         certificate authority.",
+        path.display()
+    )
+}
+
+/// Under [`UNINSTALL_ALL_LEFT_TO_DO`], when the programs are outside the
+/// data folder.
+pub fn programs_left(dir: &Path) -> String {
+    format!("  Delete Marsa's programs in {}.", dir.display())
+}
+
 // `marsa xdebug`.
 
 /// `marsa xdebug`, while it is off.
@@ -1071,6 +1330,30 @@ mod tests {
         "pf_write",
         "pf_load_failed",
         "pf_helper_unreadable",
+        // The uninstall route (task M5-13), the removal codes of
+        // `marsa-helper`, and `marsa uninstall --all` itself.
+        "uninstall_running",
+        "uninstall_not_supported",
+        "uninstall_cancelled",
+        "uninstall_timed_out",
+        "uninstall_interrupted",
+        "uninstall_not_authorized",
+        "uninstall_helper_missing",
+        "uninstall_helper_unsafe",
+        "uninstall_helper_failed",
+        "uninstall_helper_rejected",
+        "uninstall_all_needs_yes",
+        "uninstall_all_not_confirmed",
+        "uninstall_all_data_dir_not_default",
+        "uninstall_all_data_dir_unsafe",
+        "uninstall_all_data_delete_failed",
+        "uninstall_all_daemon_restarted",
+        "uninstall_all_data_dir_back",
+        "trust_record_unusable",
+        "pf_flush_failed",
+        "pf_delete",
+        "resolver_delete",
+        "trust_delete",
         // The autostart route (task M5-03) and `AutostartError` in core.
         "autostart_unsupported",
         "tray_not_found",

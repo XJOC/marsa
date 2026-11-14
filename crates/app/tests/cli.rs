@@ -102,6 +102,37 @@ fn bad_arguments_exit_with_code_2() {
     assert!(text(&out.stderr).contains("ruby"), "{}", text(&out.stderr));
 }
 
+/// `marsa uninstall --all` with no terminal to ask on and no `--yes`
+/// (`Command::output` gives the child no stdin): it refuses before anything,
+/// so no daemon starts and the data folder stays empty. Off macOS it says the
+/// uninstall is not supported there, also before anything.
+#[test]
+fn uninstall_without_a_terminal_and_without_yes_changes_nothing() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let data = tmp.path().join("data");
+    fs::create_dir(&data).expect("mkdir");
+    for args in [
+        &["uninstall", "--all"][..],
+        &["uninstall", "--all", "--delete-data"],
+    ] {
+        let out = marsa(&data, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stderr = text(&out.stderr);
+        let code = if cfg!(target_os = "macos") {
+            "[uninstall_all_needs_yes]"
+        } else {
+            "[uninstall_not_supported]"
+        };
+        assert!(stderr.contains(code), "{args:?}: {stderr}");
+        assert_eq!(text(&out.stdout), "", "{args:?}");
+        let left: Vec<_> = fs::read_dir(&data).expect("read").collect();
+        assert!(left.is_empty(), "{args:?}: {left:?}");
+    }
+    // Without --all it is not a command yet.
+    let out = marsa(&data, &["uninstall", "--yes"]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
 #[test]
 fn help_and_version_work() {
     let tmp = tempfile::tempdir().expect("temp dir");

@@ -134,6 +134,21 @@ impl Autostart {
         })
     }
 
+    /// Deletes the login file for `marsa uninstall --all` (task M5-13):
+    /// `true` if there was one, `false` if not. Blocking.
+    pub(super) fn remove_for_uninstall(&self) -> Result<bool, HttpError> {
+        let (kind, dir) = self.target()?;
+        let _one = self.lock();
+        // `symlink_metadata`: a link in its place counts, and is deleted, not
+        // followed.
+        let there = std::fs::symlink_metadata(kind.file_in(dir)).is_ok();
+        autostart::remove(kind, dir).map_err(file_error)?;
+        if there {
+            tracing::info!(dir = %dir.display(), "deleted the login file for the uninstall");
+        }
+        Ok(there)
+    }
+
     fn target(&self) -> Result<(AutostartKind, &Path), HttpError> {
         let kind = self.kind.ok_or_else(|| {
             let message = "start at login works on macOS and Linux only for now";
