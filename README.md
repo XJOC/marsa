@@ -24,7 +24,8 @@ SHA-256 of the download, and the [signature](#verify-a-download) too if
 [`install.sh`](install.sh).
 
 Then add Marsa to your `PATH`, as the script prints: add this line at the end
-of `~/.zprofile` and `~/.zshrc`, and open a new terminal.
+of `~/.zshrc` (with bash, the file the script names, usually
+`~/.bash_profile`), and open a new terminal.
 
 ```sh
 export PATH="$HOME/Library/Application Support/dev.marsa.Marsa/shims:$HOME/Library/Application Support/dev.marsa.Marsa/bin:$PATH"
@@ -125,7 +126,8 @@ It asks before it removes anything. Then it stops Marsa and removes what
 also asks whether to delete Marsa's data folder: the installed runtimes, the
 settings, and the certificate authority. `--delete-data` deletes the folder
 without that question, and `--yes` answers the first one. At the end, remove
-the `PATH` line from `~/.zprofile` and `~/.zshrc`.
+the `PATH` line from your shell's startup file: `~/.zshrc`, and `~/.zprofile`
+if you added it there for 0.1.0-rc.1.
 
 ## Verify a download
 

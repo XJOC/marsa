@@ -480,6 +480,12 @@ mod tests {
             shims: shims.clone(),
         });
         let unix = render(Check::Path, &missing, &data(), false);
+        // Every interactive zsh reads ~/.zshrc; a terminal that is not a
+        // login shell never reads ~/.zprofile (task M5-18).
+        assert!(
+            unix.contains("~/.zshrc") && !unix.contains(".zprofile"),
+            "{unix}"
+        );
         assert!(
             unix.ends_with(&format!(
                 "then open a new terminal: export PATH=\"{}:$PATH\"",
@@ -504,7 +510,10 @@ mod tests {
             text.starts_with("✗ /opt/homebrew/bin/php comes before Marsa's shims in PATH"),
             "{text}"
         );
-        assert!(text.contains("after Homebrew's"), "{text}");
+        assert!(
+            text.contains("~/.zshrc") && text.contains("after any other line that changes PATH"),
+            "{text}"
+        );
     }
 
     #[test]
