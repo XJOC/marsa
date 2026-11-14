@@ -33,12 +33,16 @@ done
 
 T="$(mktemp -d)"
 server=""
+# Keeps the exit status: otherwise a syntax error in this file could end
+# with the status of `rm` (0), and CI would read it as a pass.
 cleanup() {
+  local code=$?
   if [ -n "$server" ]; then
     kill "$server" 2> /dev/null || true
     wait "$server" 2> /dev/null || true
   fi
   rm -rf "$T"
+  exit "$code"
 }
 trap cleanup EXIT
 
