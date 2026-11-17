@@ -52,8 +52,11 @@ pub enum Install {
     Exited(u32),
     /// The user said No.
     Cancelled,
-    /// It still runs: past [`INSTALL_LIMIT`], or from an earlier setup.
+    /// An earlier run still runs (it passed [`INSTALL_LIMIT`]): this one
+    /// did not start, so no second prompt showed.
     StillRunning,
+    /// This run started and still runs at [`INSTALL_LIMIT`].
+    TimedOut,
     /// It did not start, and why.
     Failed(String),
 }
@@ -74,18 +77,25 @@ pub trait Service: Send + Sync {
     /// still runs: the hosts lines, the CA, the service, and its folder go.
     /// Blocking.
     fn uninstall(&self, helper: &Path) -> Install;
+    /// Whether the service runs now, as the service manager reports it.
+    fn running(&self) -> bool;
 }
 
 /// `marsa uninstall --all` on Windows: `marsa-helper uninstall` behind the
 /// UAC prompt, which takes out everything `install` and the service put on
 /// the machine (task M4-19j). The prompt gives back only the exit code: 0
-/// is one `uninstall_all` result, `done`. The service stays when a removal
-/// failed (exit 1), so the caller may keep using it.
+/// is one `uninstall_all` result, `done` (also when there was nothing left
+/// to remove: the code cannot say more).
 ///
 /// # Errors
 ///
-/// `uninstall_cancelled` for a No at the prompt, `uninstall_interrupted`
-/// once the daemon stops, `uninstall_helper_failed` for anything else.
+/// - `uninstall_cancelled`: a No at the prompt; nothing changed.
+/// - `uninstall_interrupted`: the daemon stops; no prompt showed.
+/// - `uninstall_helper_partial`: exit 1, some of it may be left (the hosts
+///   lines, the CA, the service, or its folder).
+/// - `uninstall_helper_running`: this run, or an earlier one, still runs.
+/// - `uninstall_helper_failed`: the helper did not run as asked (it did not
+///   start, or its arguments were refused); nothing changed.
 pub fn uninstall(
     service: &dyn Service,
     helper: &Path,
@@ -108,19 +118,24 @@ pub fn uninstall(
                 "the UAC prompt was declined",
             ))
         }
+        Install::Exited(1) => {
+            tracing::warn!("marsa-helper uninstall did not remove everything");
+            Err(failure(
+                &flow.code("helper_partial"),
+                "the helper could not remove everything",
+            ))
+        }
         Install::Exited(code) => {
-            tracing::warn!(
-                code,
-                "marsa-helper uninstall failed; Windows' service log says why"
-            );
+            tracing::warn!(code, "marsa-helper uninstall did not run as asked");
             Err(failed(format!(
-                "the helper could not remove everything (exit code {code})"
+                "the helper did not run as asked (exit code {code})"
             )))
         }
-        Install::StillRunning => {
-            tracing::warn!("an install of the helper service still runs; no uninstall now");
-            Err(failed(
-                "an install of the helper service still runs".to_owned(),
+        Install::StillRunning | Install::TimedOut => {
+            tracing::warn!("a run of marsa-helper still goes on; no uninstall now");
+            Err(failure(
+                &flow.code("helper_running"),
+                "a run of the helper still goes on",
             ))
         }
         Install::Failed(reason) => {
@@ -181,7 +196,7 @@ pub fn launch(
                 "the helper service was not installed (exit code {code})"
             )));
         }
-        Install::StillRunning => {
+        Install::StillRunning | Install::TimedOut => {
             tracing::warn!("marsa-helper install still runs; no second prompt");
             return Err(failure(
                 &flow.code("helper_install_running"),
@@ -349,6 +364,11 @@ impl Service for RealService {
     fn uninstall(&self, helper: &Path) -> Install {
         self.elevated(helper, &[std::ffi::OsStr::new("uninstall")])
     }
+
+    fn running(&self) -> bool {
+        use marsa_core::platform::windows::helper_pipe::{SERVICE_NAME, service_process_id};
+        matches!(service_process_id(SERVICE_NAME), Ok(Some(_)))
+    }
 }
 
 // Windows only: its calls are Win32.
@@ -375,7 +395,7 @@ impl RealService {
             Ok(Elevated::Cancelled) => Install::Cancelled,
             Ok(Elevated::TimedOut(process)) => {
                 *running = Some(process);
-                Install::StillRunning
+                Install::TimedOut
             }
             Err(err) => Install::Failed(err.to_string()),
         }
@@ -445,6 +465,10 @@ mod tests {
             assert_eq!(helper, helper_path());
             self.calls.lock().unwrap().push("uninstall".to_owned());
             self.install.clone()
+        }
+
+        fn running(&self) -> bool {
+            false
         }
     }
 
@@ -535,8 +559,10 @@ mod tests {
             let fake = Fake::new(vec![Err("helper_not_running")], install);
             assert_eq!(code(run(&fake, Some(HASH))), "setup_helper_install_failed");
         }
-        let fake = Fake::new(vec![Err("helper_not_running")], Install::StillRunning);
-        assert_eq!(code(run(&fake, Some(HASH))), "setup_helper_install_running");
+        for install in [Install::StillRunning, Install::TimedOut] {
+            let fake = Fake::new(vec![Err("helper_not_running")], install);
+            assert_eq!(code(run(&fake, Some(HASH))), "setup_helper_install_running");
+        }
     }
 
     /// Another program holds the pipe's name: nothing is sent, and no
@@ -617,8 +643,10 @@ mod tests {
         assert_eq!(fake.calls(), ["uninstall"]);
         let cases = [
             (Install::Cancelled, "uninstall_cancelled"),
-            (Install::Exited(1), "uninstall_helper_failed"),
-            (Install::StillRunning, "uninstall_helper_failed"),
+            (Install::Exited(1), "uninstall_helper_partial"),
+            (Install::Exited(2), "uninstall_helper_failed"),
+            (Install::StillRunning, "uninstall_helper_running"),
+            (Install::TimedOut, "uninstall_helper_running"),
             (Install::Failed("x".to_owned()), "uninstall_helper_failed"),
         ];
         for (answer, expected) in cases {

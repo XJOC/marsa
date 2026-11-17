@@ -1,4 +1,5 @@
-//! `POST /v1/uninstall`: take Marsa out of the system (macOS). Task M5-13.
+//! `POST /v1/uninstall`: take Marsa out of the system (macOS: task M5-13;
+//! Windows: task M4-19g2).
 //!
 //! | Route | Answer |
 //! | --- | --- |
@@ -189,28 +190,42 @@ fn run_windows(
     stop: &CancellationToken,
 ) -> UninstallReport {
     let mut report = UninstallReport::default();
-    // First: a sites pass or a retry between the helper's removal of the
-    // hosts lines and its end would write them back.
-    let marker = data_dir.join(hosts_sync::MARKER);
-    let had_marker = marker.exists();
-    if had_marker && let Err(err) = std::fs::remove_file(&marker) {
-        tracing::warn!(path = %marker.display(), error = %err, "cannot delete the marker");
+    let result = setup.uninstall_windows(stop);
+    // The marker of `hosts_sync` goes once no service is left to take the
+    // names; while one runs, the daemon keeps sending them. The helper stops
+    // the service before it removes anything, so no pass writes the block
+    // back meanwhile.
+    if result.is_ok() || !setup.windows_service_running() {
+        let marker = data_dir.join(hosts_sync::MARKER);
+        match std::fs::remove_file(&marker) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                tracing::warn!(path = %marker.display(), error = %err, "cannot delete the marker");
+            }
+        }
     }
-    match setup.uninstall_windows(stop) {
+    match result {
         Ok(result) => report.results.push(result),
         Err(error) => {
             tracing::warn!(code = %error.code, "the helper did not remove everything; nothing else changes");
-            // Its service still runs: the daemon keeps sending the names.
-            if had_marker && let Err(err) = std::fs::write(&marker, "") {
-                tracing::warn!(path = %marker.display(), error = %err, "cannot restore the marker");
-            }
             report.error = Some(error);
             return report;
         }
     }
-    report.results.push(remove_login_file(autostart));
+    // A system with no login file of Marsa's (Windows, for now) skips the
+    // step.
+    if let Some(result) = remove_login_file_if_any(autostart) {
+        report.results.push(result);
+    }
     report.stopping = true;
     report
+}
+
+/// The login file, unless this system has none (`autostart_unsupported`).
+fn remove_login_file_if_any(autostart: &Autostart) -> Option<OpResult> {
+    let result = remove_login_file(autostart);
+    (result.code.as_deref() != Some("autostart_unsupported")).then_some(result)
 }
 
 /// The current user's trust in Marsa's CA (ADR 0015), from the record in
@@ -534,11 +549,14 @@ mod tests {
 
     impl App {
         fn new(dir: &Dir, setup: Setup) -> Self {
+            Self::with_daemon(setup, dir.daemon())
+        }
+
+        fn with_daemon(setup: Setup, daemon: Arc<Daemon>) -> Self {
             let token = Token::generate().unwrap();
             let bearer = token.bearer_header();
             let auth = AuthConfig::new(Arc::new(token), PORT);
             let setup = Arc::new(setup);
-            let daemon = dir.daemon();
             let router = setup_api::routes(Arc::clone(&setup))
                 .merge(routes(setup))
                 .with_state(Arc::clone(&daemon))
@@ -843,6 +861,8 @@ mod tests {
     struct WindowsService {
         answer: Install,
         calls: Mutex<usize>,
+        /// Whether the service still runs after the uninstall.
+        running: bool,
     }
 
     impl Service for WindowsService {
@@ -862,34 +882,50 @@ mod tests {
             *self.calls.lock().unwrap() += 1;
             self.answer.clone()
         }
+
+        fn running(&self) -> bool {
+            self.running
+        }
     }
 
-    /// Windows, with the helper in the user's folder, as an install puts it.
-    fn windows_app(dir: &Dir, answer: Install) -> (App, Arc<WindowsService>) {
+    /// Windows, with the helper in the user's folder (`home`, unless given),
+    /// as an install puts it, and no login file: Windows has none of
+    /// Marsa's yet.
+    fn windows_app(
+        dir: &Dir,
+        answer: Install,
+        running: bool,
+        home: Option<PathBuf>,
+    ) -> (App, Arc<WindowsService>) {
         let fake = Fake::no_prompt();
         let service = Arc::new(WindowsService {
             answer,
             calls: Mutex::new(0),
+            running,
         });
         let runner: Arc<dyn Runner> = fake;
+        let home = home.unwrap_or_else(|| dir.dir.path().to_path_buf());
         let setup = Setup::with(
             runner,
             Some(Platform::WindowsX64),
             Some(dir.helper()),
-            Some(dir.dir.path().to_path_buf()),
+            Some(home),
         )
         .with_windows(service.clone());
-        (App::new(dir, setup), service)
+        let mut daemon = Daemon::new(dir.data());
+        daemon.autostart = Autostart::with(None, None, None);
+        (App::with_daemon(setup, Arc::new(daemon)), service)
     }
 
-    /// Windows: the marker goes first, then the helper's `uninstall` behind
-    /// one UAC prompt, then the login file, then the daemon stops.
+    /// Windows: the helper's `uninstall` behind one UAC prompt, then the
+    /// marker goes and the daemon stops. With no login file step, every
+    /// step is done.
     #[tokio::test]
     async fn windows_runs_the_helpers_uninstall_then_stops() {
         let dir = Dir::new();
         let marker = dir.data().join(hosts_sync::MARKER);
         fs::write(&marker, "").unwrap();
-        let (app, service) = windows_app(&dir, Install::Exited(0));
+        let (app, service) = windows_app(&dir, Install::Exited(0), false, None);
         let (status, report) = app.post("/v1/uninstall").await;
         assert_eq!(status, StatusCode::OK, "{report}");
         let steps: Vec<(&str, &str)> = report["results"]
@@ -903,59 +939,51 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(
-            steps,
-            [("uninstall_all", "done"), ("autostart_remove", "done")],
-            "{report}"
-        );
+        assert_eq!(steps, [("uninstall_all", "done")], "{report}");
+        assert!(report["error"].is_null(), "{report}");
         assert!(app.stopping());
         assert!(!marker.exists());
         assert_eq!(*service.calls.lock().unwrap(), 1);
     }
 
-    /// The helper did not remove everything: its service still runs, so the
-    /// marker comes back, nothing else changes, and the daemon runs on.
+    /// The helper did not remove everything, or did not run: nothing else
+    /// changes, and the daemon runs on. The marker stays while the service
+    /// runs, and goes with a service that is gone or stopped.
     #[tokio::test]
-    async fn windows_keeps_the_marker_when_the_helper_did_not_remove_everything() {
+    async fn windows_keeps_the_marker_only_while_the_service_runs() {
         for (answer, code) in [
-            (Install::Exited(1), "uninstall_helper_failed"),
+            (Install::Exited(1), "uninstall_helper_partial"),
             (Install::Cancelled, "uninstall_cancelled"),
+            (Install::TimedOut, "uninstall_helper_running"),
         ] {
-            let dir = Dir::new();
-            let marker = dir.data().join(hosts_sync::MARKER);
-            fs::write(&marker, "").unwrap();
-            let (app, _) = windows_app(&dir, answer);
-            let (_, report) = app.post("/v1/uninstall").await;
-            assert_eq!(report["error"]["code"], code, "{report}");
-            assert!(marker.exists());
-            assert!(dir.untouched() && !app.stopping());
+            for running in [true, false] {
+                let dir = Dir::new();
+                let marker = dir.data().join(hosts_sync::MARKER);
+                fs::write(&marker, "").unwrap();
+                let (app, _) = windows_app(&dir, answer.clone(), running, None);
+                let (_, report) = app.post("/v1/uninstall").await;
+                assert_eq!(report["error"]["code"], code, "{report}");
+                assert_eq!(marker.exists(), running, "{code} {running}");
+                assert!(dir.untouched() && !app.stopping());
+            }
         }
     }
 
-    /// Windows: a helper outside the user's folder gets no prompt.
+    /// Windows: a helper outside the user's folder gets no prompt, and the
+    /// marker of the running service stays.
     #[tokio::test]
     async fn windows_refuses_a_helper_outside_the_users_folder() {
         let dir = Dir::new();
-        let fake = Fake::no_prompt();
-        let service = Arc::new(WindowsService {
-            answer: Install::Exited(0),
-            calls: Mutex::new(0),
-        });
-        let runner: Arc<dyn Runner> = fake;
-        let setup = Setup::with(
-            runner,
-            Some(Platform::WindowsX64),
-            Some(dir.helper()),
-            Some(dir.home()),
-        )
-        .with_windows(service.clone());
-        let app = App::new(&dir, setup);
+        let marker = dir.data().join(hosts_sync::MARKER);
+        fs::write(&marker, "").unwrap();
+        let (app, service) = windows_app(&dir, Install::Exited(0), true, Some(dir.home()));
         let (_, report) = app.post("/v1/uninstall").await;
         assert_eq!(
             report["error"]["code"], "uninstall_helper_unsafe",
             "{report}"
         );
         assert_eq!(*service.calls.lock().unwrap(), 0);
+        assert!(marker.exists());
     }
 
     #[tokio::test]
@@ -1109,6 +1137,14 @@ mod tests {
             UNINSTALL_ALL_TIMEOUT >= SLOWEST_UNINSTALL_ALL + margin,
             "the client waits {UNINSTALL_ALL_TIMEOUT:?}, and an uninstall may take \
              {SLOWEST_UNINSTALL_ALL:?}"
+        );
+        // Windows: the helper's run after the UAC prompt, to its limit. The
+        // prompt itself has none.
+        let windows = crate::daemon::setup_api::windows::INSTALL_LIMIT;
+        assert!(
+            UNINSTALL_ALL_TIMEOUT >= windows + margin,
+            "the client waits {UNINSTALL_ALL_TIMEOUT:?}, and a Windows uninstall may take \
+             {windows:?}"
         );
 
         // The sum holds every program an uninstall runs: a full run runs all

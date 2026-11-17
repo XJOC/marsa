@@ -1096,6 +1096,13 @@ impl Setup {
         Ok(helper)
     }
 
+    /// Whether the Windows helper service runs now. `false` elsewhere.
+    pub(super) fn windows_service_running(&self) -> bool {
+        self.windows
+            .as_deref()
+            .is_some_and(windows::Service::running)
+    }
+
     /// `marsa uninstall --all` on Windows: the checked helper's `uninstall`
     /// behind the UAC prompt ([`windows::uninstall`]).
     ///
@@ -4464,6 +4471,10 @@ mod tests {
         fn uninstall(&self, _helper: &Path) -> windows::Install {
             *self.installed.lock().unwrap() = None;
             windows::Install::Exited(0)
+        }
+
+        fn running(&self) -> bool {
+            self.installed.lock().unwrap().is_some()
         }
     }
 

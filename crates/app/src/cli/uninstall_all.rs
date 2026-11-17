@@ -1,4 +1,4 @@
-//! `marsa uninstall --all`: take Marsa out of this system (macOS). Task
+//! `marsa uninstall --all`: take Marsa out of this system (macOS and Windows). Task
 //! M5-13.
 //!
 //! 1. Prints what will be removed, and asks for `yes` unless `--yes` is
@@ -425,6 +425,12 @@ fn delete_when_stopped(data_dir: &Path) -> Result<(), Failure> {
             "uninstall_all_daemon_restarted",
             Some(data_dir),
         ));
+    }
+    // Windows: a program that runs can be neither deleted nor moved, and
+    // this marsa may run from the data folder (`<data>\bin`). The CLI runs
+    // on the machine marsad runs on.
+    if cfg!(windows) && programs_dir().is_some_and(|dir| dir.starts_with(data_dir)) {
+        return Err(own_failure("uninstall_all_data_dir_in_use", Some(data_dir)));
     }
     let home = std::env::home_dir();
     delete_data_dir(data_dir, home.as_deref()).map(|_| ())
@@ -1002,7 +1008,7 @@ mod tests {
         let text = left(default, false, Some(inside.as_path())).render();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "Left to do by hand:");
-        assert!(lines[1].contains("menu-bar icon"), "{text}");
+        assert!(lines[1].contains("menu bar or the system tray"), "{text}");
         assert!(
             lines[2].starts_with("  If you added Marsa to PATH"),
             "{text}"
