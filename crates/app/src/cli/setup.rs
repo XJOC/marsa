@@ -45,14 +45,21 @@ pub async fn run(data_dir: &Path) -> ExitCode {
     print!("{}", render(&report, data_dir));
     match error(&report) {
         Some(failure) => failure.report(),
-        None if report
-            .results
-            .iter()
-            .any(|result| result.status == OpStatus::Failed) =>
-        {
-            ExitCode::FAILURE
-        }
-        None => ExitCode::SUCCESS,
+        None => exit_code(&report),
+    }
+}
+
+/// Exit code 1 if a step failed. The error of a helper that did not run is
+/// the caller's to print.
+pub(super) fn exit_code(report: &SetupReport) -> ExitCode {
+    let failed = report
+        .results
+        .iter()
+        .any(|result| result.status == OpStatus::Failed);
+    if failed || report.error.is_some() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
