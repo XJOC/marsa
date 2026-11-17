@@ -58,8 +58,8 @@
 //!    report as `trust_install`, after the helper's results.
 //!
 //! One setup at a time: a second request gets 409 `setup_running`, and one
-//! during an uninstall gets 409 `uninstall_running`. Windows gets 501
-//! `setup_not_supported` until task M4-19.
+//! during an uninstall gets 409 `uninstall_running`. On Windows the helper
+//! is a service, reached through [`windows`] (ADR 0018).
 //!
 //! `POST /v1/uninstall` (task M5-13, `uninstall_api.rs`) shares [`Setup`]:
 //! the same runner, the same helper file check and admin prompt ([`Flow`]
@@ -73,6 +73,7 @@ pub mod hosts;
 pub mod linux_dns;
 pub mod pkexec;
 pub mod user_trust;
+pub mod windows;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env::consts::EXE_SUFFIX;
@@ -574,6 +575,9 @@ pub struct Setup {
     /// How setup starts Caddy for its CA. `None`, the default: the daemon's
     /// own Caddy ([`DaemonCaddy`]). Tests put a fake here.
     caddy: Option<Arc<dyn StartCaddy>>,
+    /// The helper service on Windows (ADR 0018): the daemon's own there,
+    /// `None` elsewhere. Tests put a fake here.
+    windows: Option<Arc<dyn windows::Service>>,
     /// Linux: the hosts file whose Marsa block setup reads, never writes
     /// ([`linux_dns::read_block`]). [`linux_dns::HOSTS_FILE`] for the
     /// daemon; `None`, as if it had no block, until a test sets one.
@@ -613,10 +617,18 @@ impl Setup {
             helper,
             home,
             caddy: None,
+            windows: default_windows_service(),
             hosts_file: None,
             ca_wait: CA_WAIT,
             running: AtomicU8::new(IDLE),
         }
+    }
+
+    /// For tests: `service` stands for the Windows helper service.
+    #[must_use]
+    pub fn with_windows(mut self, service: Arc<dyn windows::Service>) -> Self {
+        self.windows = Some(service);
+        self
     }
 
     /// The hosts file setup reads on Linux: [`linux_dns::HOSTS_FILE`] for
@@ -675,6 +687,16 @@ impl Setup {
         let mut trust_for_user = None;
         match self.ca(&ca_root, starter, stop) {
             Ok(pem) if is_macos(platform) => trust_for_user = Some(pem),
+            // Windows: the service is installed for this root's SHA-256 (ADR
+            // 0018). A root the helper's strict parser refuses has none, and
+            // every setup would ask UAC in vain.
+            Ok(pem)
+                if is_windows(platform)
+                    && marsa_core::helper::certificate_sha256(&pem).is_none() =>
+            {
+                tracing::warn!("the CA root is not one strict certificate; no trust_install");
+                report.skipped.push(skip(TRUST_INSTALL, "ca_unreadable"));
+            }
             Ok(pem) => ops.push(HelperOp::TrustInstall { pem }),
             Err(code) => report.skipped.push(skip(TRUST_INSTALL, code)),
         }
@@ -692,14 +714,32 @@ impl Setup {
                 LinuxPath::Hosts => push_hosts_ops(&mut ops, &mut report, names),
             }
             linux = Some((path, block));
+        } else if is_windows(platform) {
+            // Windows: the hosts block with the names of the sites now, so
+            // that a setup again does not empty it (ADR 0018).
+            match names {
+                Some(names) if dns::hosts_names_fit(names) => {
+                    ops.push(HelperOp::HostsSync {
+                        names: names.to_vec(),
+                    });
+                }
+                Some(_) => report
+                    .skipped
+                    .push(skip(linux_dns::HOSTS_SYNC, linux_dns::HOSTS_TOO_MANY_NAMES)),
+                None => report
+                    .skipped
+                    .push(skip(linux_dns::HOSTS_SYNC, linux_dns::HOSTS_SITES_UNKNOWN)),
+            }
         } else if let Some(dns) = dns::strategy_for(platform) {
             ops.push(dns.setup_op());
         }
         if is_linux(platform) {
             ops.push(HelperOp::PortsInstall);
-        } else {
+        } else if !is_windows(platform) {
             self.pf_op(caddy, &mut ops, &mut report, stop);
         }
+        // Windows: Caddy binds ports 80 and 443 itself (ADR 0018), so
+        // there is nothing to redirect and nothing to allow.
         match self.apply(ops, platform, stop) {
             Ok(results) => report.results = results,
             Err(error) => report.error = Some(error),
@@ -1039,6 +1079,24 @@ impl Setup {
             );
             return Err(failure("setup_helper_protected_folder", message));
         }
+        // Windows: no owner check like the one of Unix below. The user's own
+        // folder is writable by this user only, and the user runs what they
+        // choose anyway (ADR 0018); a folder elsewhere (under `C:\`, say)
+        // may let any user of the PC change the program behind the prompt.
+        if is_windows(platform)
+            && !self
+                .home
+                .as_deref()
+                .is_some_and(|home| inside(helper, home))
+        {
+            tracing::warn!(
+                path = %helper.display(),
+                "marsa-helper is outside this user's folder; no UAC prompt"
+            );
+            let message = "marsa-helper is outside your user folder, where another user could \
+                           change it";
+            return Err(failure(&flow.code("helper_unsafe"), message));
+        }
         match check_helper(helper) {
             Ok(()) => {}
             Err(HelperFault::Missing) => return Err(missing()),
@@ -1064,13 +1122,31 @@ impl Setup {
             .map(op_name)
             .collect::<Result<Vec<_>, _>>()
             .map_err(cannot_write)?;
+        // Windows: the service trusts only the CA named at its install, so it
+        // is installed for the CA this request trusts, if any.
+        let ca_sha256 = ops.iter().find_map(|op| match op {
+            HelperOp::TrustInstall { pem } if is_windows(platform) => {
+                marsa_core::helper::certificate_sha256(pem)
+            }
+            _ => None,
+        });
         let request = serde_json::to_string(&HelperRequest::new(ops)).map_err(cannot_write)?;
-        tracing::info!(helper = %helper.display(), "asking for admin rights to run marsa-helper");
-        let results = if is_linux(platform) {
+        let results = if is_windows(platform) {
+            let Some(service) = self.windows.as_deref() else {
+                tracing::error!("no helper service on this system");
+                return Err(failure(
+                    &flow.code("helper_failed"),
+                    "no helper service here",
+                ));
+            };
+            windows::launch(flow, service, helper, &request, ca_sha256.as_deref(), stop)?
+        } else if is_linux(platform) {
+            tracing::info!(helper = %helper.display(), "asking for admin rights to run marsa-helper");
             let args = pkexec::args(helper, &request);
             let answer = self.runner.run(pkexec::PKEXEC, &args, PROMPT_LIMIT, stop);
             pkexec::read_answer(flow, answer)?
         } else {
+            tracing::info!(helper = %helper.display(), "asking for admin rights to run marsa-helper");
             let args = osascript_args(helper, &request);
             let answer = self.runner.run(OSASCRIPT, &args, PROMPT_LIMIT, stop);
             read_answer_for(flow, answer)?
@@ -1135,15 +1211,16 @@ impl Drop for Running {
 async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport>, HttpError> {
     let platform = setup
         .platform
-        .filter(|platform| is_macos(*platform) || is_linux(*platform))
+        .filter(|platform| is_macos(*platform) || is_linux(*platform) || is_windows(*platform))
         .ok_or_else(|| {
-            let message = "setup runs on macOS and Linux only for now";
+            let message = "setup runs on macOS, Linux, and Windows only";
             HttpError::new(StatusCode::NOT_IMPLEMENTED, "setup_not_supported", message)
         })?;
     let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
     tracing::info!("setup started");
-    // The hosts file on Linux needs them; elsewhere the list is not read.
-    let names = if is_linux(platform) {
+    // The hosts file on Linux and Windows needs them; elsewhere the list is
+    // not read.
+    let names = if is_linux(platform) || is_windows(platform) {
         host_names(&daemon).await
     } else {
         Some(Vec::new())
@@ -1285,6 +1362,31 @@ fn home_dir() -> Option<PathBuf> {
 
 pub(super) fn is_macos(platform: Platform) -> bool {
     matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64)
+}
+
+/// Whether `path` is inside `dir`, folder by folder, with no regard to case,
+/// as Windows compares names (`C:\Users\Omar` and `c:\users\omar`).
+fn inside(path: &Path, dir: &Path) -> bool {
+    let mut path = path.components();
+    dir.components().all(|part| {
+        path.next().is_some_and(|other| {
+            part.as_os_str().to_string_lossy().to_lowercase()
+                == other.as_os_str().to_string_lossy().to_lowercase()
+        })
+    })
+}
+
+fn is_windows(platform: Platform) -> bool {
+    platform == Platform::WindowsX64
+}
+
+/// The daemon's helper service on Windows; no other system has one.
+fn default_windows_service() -> Option<Arc<dyn windows::Service>> {
+    // `RealService` is Windows only: its calls are Win32.
+    #[cfg(windows)]
+    return Some(Arc::new(windows::RealService::default()));
+    #[cfg(not(windows))]
+    None
 }
 
 pub(super) fn is_linux(platform: Platform) -> bool {
@@ -1490,8 +1592,8 @@ fn check_owners(helper: &Path, file: &fs::Metadata) -> Result<(), HelperFault> {
 }
 
 /// `#[cfg]` outside `platform`: this check reads Unix owners and modes.
-/// Windows answers 501 before setup runs; its helper service is protected in
-/// task M4-19.
+/// Windows has none of them; `launch` checks there that the helper is in the
+/// user's own folder instead (ADR 0018).
 #[cfg(not(unix))]
 fn check_owners(_helper: &Path, _file: &fs::Metadata) -> Result<(), HelperFault> {
     Ok(())
@@ -2444,6 +2546,13 @@ mod tests {
         assert!(
             SETUP_TIMEOUT >= SLOWEST_SETUP + margin,
             "the client waits {SETUP_TIMEOUT:?}, and a setup may take {SLOWEST_SETUP:?}"
+        );
+        // Windows: the CA, a request, the install after the UAC prompt, and
+        // the request again, each to its limit. The prompt itself has none.
+        let windows = CA_WAIT + 2 * windows::SEND_LIMIT + windows::INSTALL_LIMIT;
+        assert!(
+            SETUP_TIMEOUT >= windows + margin,
+            "the client waits {SETUP_TIMEOUT:?}, and a Windows setup may take {windows:?}"
         );
 
         // The sum holds every step a setup waits for. A full run with no CA
@@ -4241,10 +4350,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn windows_and_other_systems_get_setup_not_supported() {
+    async fn other_systems_get_setup_not_supported() {
         let dir = Dir::new(true);
         let fake = Fake::new(|program| panic!("{program} ran"));
-        for platform in [Some(Platform::WindowsX64), Some(Platform::Any), None] {
+        for platform in [Some(Platform::Any), None] {
             let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
             let setup = Setup::with(fake.clone(), platform, Some(dir.helper()), Some(dir.home()));
             let app = App::new(daemon, setup);
@@ -4255,6 +4364,151 @@ mod tests {
             assert_eq!(app.refused().await, refused, "{platform:?}");
         }
         assert!(fake.calls().is_empty());
+    }
+
+    /// A Windows helper service that is not installed until `install`, and
+    /// then answers `done` for every op of a request.
+    #[derive(Default)]
+    struct WindowsService {
+        installed: std::sync::Mutex<Option<(String, String)>>,
+        requests: std::sync::Mutex<Vec<Value>>,
+    }
+
+    impl windows::Service for WindowsService {
+        fn user_sid(&self) -> Result<String, String> {
+            Ok("S-1-5-21-1-2-3-1001".to_owned())
+        }
+
+        fn send(&self, request: &[u8], _stop: &CancellationToken) -> Result<Vec<u8>, &'static str> {
+            let Some((_, approved)) = self.installed.lock().unwrap().clone() else {
+                return Err("helper_not_running");
+            };
+            let request: Value = serde_json::from_slice(request).unwrap();
+            // As the service: a CA other than the approved one refuses the
+            // whole request.
+            for op in request["ops"].as_array().unwrap() {
+                if op["op"] == "trust_install" {
+                    let pem = op["pem"].as_str().unwrap();
+                    if marsa_core::helper::certificate_sha256(pem).as_deref() != Some(&approved) {
+                        let refused = json!({
+                            "version": 1,
+                            "error": { "code": "trust_not_allowed", "message": "no" },
+                        });
+                        return Ok(refused.to_string().into_bytes());
+                    }
+                }
+            }
+            let results: Vec<Value> = request["ops"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|op| json!({ "op": op["op"], "status": "done" }))
+                .collect();
+            self.requests.lock().unwrap().push(request);
+            Ok(json!({ "version": 1, "results": results })
+                .to_string()
+                .into_bytes())
+        }
+
+        fn install(&self, _helper: &Path, sid: &str, hash: &str) -> windows::Install {
+            *self.installed.lock().unwrap() = Some((sid.to_owned(), hash.to_owned()));
+            windows::Install::Exited(0)
+        }
+    }
+
+    /// Windows: one install of the service, for this CA, then the CA and the
+    /// hosts block through its pipe. No other program runs: no pf, no
+    /// `osascript`, no `pkexec`.
+    #[tokio::test]
+    async fn windows_setup_installs_the_service_for_its_ca_and_sends_trust_and_hosts() {
+        let dir = Dir::new(true);
+        let fake = Fake::new(|program| panic!("{program} ran"));
+        let service = Arc::new(WindowsService::default());
+        let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+        // The user's folder holds Marsa's programs, as an install puts them.
+        let setup = Setup::with(
+            fake.clone(),
+            Some(Platform::WindowsX64),
+            Some(dir.helper()),
+            Some(dir.dir.path().to_path_buf()),
+        )
+        .with_windows(service.clone());
+        let app = App::new(daemon, setup);
+        let (status, report) = app.post().await;
+        assert_eq!(status, StatusCode::OK, "{report}");
+        let ops: Vec<&str> = report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| result["op"].as_str().unwrap())
+            .collect();
+        assert_eq!(ops, ["trust_install", "hosts_sync"], "{report}");
+        let hash = marsa_core::helper::certificate_sha256(TEST_CA).unwrap();
+        let installed = service.installed.lock().unwrap().clone();
+        assert_eq!(installed, Some(("S-1-5-21-1-2-3-1001".to_owned(), hash)));
+        assert_eq!(service.requests.lock().unwrap().len(), 1);
+        assert!(fake.calls().is_empty());
+    }
+
+    /// Windows with no CA root yet and no Caddy to make one: the trust is
+    /// skipped, the service is installed for no CA (`-`), and the hosts
+    /// block still goes.
+    #[tokio::test]
+    async fn windows_setup_without_a_ca_installs_for_none_and_sends_the_hosts() {
+        let dir = Dir::new(false);
+        let fake = Fake::new(|program| panic!("{program} ran"));
+        let service = Arc::new(WindowsService::default());
+        let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+        let setup = Setup::with(
+            fake.clone(),
+            Some(Platform::WindowsX64),
+            Some(dir.helper()),
+            Some(dir.dir.path().to_path_buf()),
+        )
+        .with_windows(service.clone())
+        .with_caddy(dir.caddy.clone());
+        let app = App::new(daemon, setup);
+        let (status, report) = app.post().await;
+        assert_eq!(status, StatusCode::OK, "{report}");
+        assert_eq!(report["results"][0]["op"], "hosts_sync", "{report}");
+        assert_eq!(report["skipped"][0]["op"], "trust_install", "{report}");
+        let installed = service.installed.lock().unwrap().clone();
+        assert_eq!(
+            installed,
+            Some(("S-1-5-21-1-2-3-1001".to_owned(), "-".to_owned()))
+        );
+        assert!(fake.calls().is_empty());
+    }
+
+    #[test]
+    fn inside_compares_folders_with_no_regard_to_case() {
+        let home = Path::new("/Users/Omar");
+        assert!(inside(Path::new("/users/omar/bin/marsa-helper"), home));
+        assert!(inside(Path::new("/Users/Omar/bin/marsa-helper"), home));
+        assert!(!inside(Path::new("/Users/Omarx/bin/marsa-helper"), home));
+        assert!(!inside(Path::new("/Users"), home));
+        assert!(!inside(Path::new("/tools/marsa-helper"), home));
+    }
+
+    /// Windows: a marsa-helper outside the user's folder gets no prompt.
+    #[tokio::test]
+    async fn windows_setup_refuses_a_helper_outside_the_users_folder() {
+        let dir = Dir::new(true);
+        let fake = Fake::new(|program| panic!("{program} ran"));
+        let service = Arc::new(WindowsService::default());
+        let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+        let elsewhere = TempDir::new().unwrap();
+        let setup = Setup::with(
+            fake.clone(),
+            Some(Platform::WindowsX64),
+            Some(dir.helper()),
+            Some(elsewhere.path().to_path_buf()),
+        )
+        .with_windows(service.clone());
+        let app = App::new(daemon, setup);
+        let (_, report) = app.post().await;
+        assert_eq!(report["error"]["code"], "setup_helper_unsafe", "{report}");
+        assert!(service.installed.lock().unwrap().is_none());
     }
 
     #[tokio::test]
