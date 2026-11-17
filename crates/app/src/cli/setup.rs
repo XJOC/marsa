@@ -1,7 +1,9 @@
 //! `marsa setup`: the first setup (macOS and Linux). macOS may ask for an
 //! administrator password, and may then ask the user to approve trusting
 //! Marsa's certificate authority for this user. Linux asks for the password
-//! once. Task M4-13, task M4-26 for the trust, and task M4-18e for Linux.
+//! once, or twice when the `.test` names need a second request (task
+//! M4-18k2). Task M4-13, task M4-26 for the trust, and task M4-18e for
+//! Linux.
 //!
 //! One call to `marsad` (`POST /v1/setup`, in `daemon/setup_api.rs`),
 //! started if needed. On macOS the daemon checks ports 80 and 443, asks for
@@ -210,6 +212,62 @@ mod tests {
              Port 443 is used by an unknown program.\n"
         );
         assert!(error(&report).is_none());
+    }
+
+    /// The hosts way on Linux (task M4-18k): the output names the file, and
+    /// a link the helper refused is a skipped step that says why. Not on
+    /// Windows, whose hosts file has another path in the text.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_hosts_way_names_the_file() {
+        let report = SetupReport {
+            results: vec![
+                result("resolved_remove", OpStatus::Unchanged, None),
+                result("hosts_sync", OpStatus::Done, None),
+            ],
+            skipped: vec![skip("resolved_install", "resolved_not_running")],
+            ..SetupReport::default()
+        };
+        assert_eq!(
+            render(&report, &data()),
+            "Take out Marsa's link for .test names: already done.\n\
+             Put the sites' .test names in /etc/hosts: done.\n\
+             Send .test names to Marsa: skipped. systemd-resolved does not run on this system, \
+             so Marsa did not make its link for .test names: they go into /etc/hosts instead. \
+             [resolved_not_running]\n"
+        );
+    }
+
+    /// Linux: a second request that did not run (task M4-18k2). The steps
+    /// above it stand, and the error says so.
+    #[test]
+    fn a_second_request_that_did_not_run_says_the_steps_above_are_done() {
+        let report = SetupReport {
+            results: vec![
+                result("trust_install", OpStatus::Done, None),
+                result("ports_install", OpStatus::Done, None),
+            ],
+            skipped: vec![skip("resolved_install", "resolved_use_hosts")],
+            error: Some(ApiError {
+                code: "setup_hosts_not_written".into(),
+                message: "x".into(),
+            }),
+            ..SetupReport::default()
+        };
+        let text = render(&report, &data());
+        assert!(
+            text.starts_with("Trust Marsa's HTTPS certificates: done.\n"),
+            "{text}"
+        );
+        let failure = error(&report).unwrap();
+        assert_eq!(failure.code, "setup_hosts_not_written");
+        assert!(
+            failure
+                .message
+                .starts_with("The steps above are done, but the second password"),
+            "{}",
+            failure.message
+        );
     }
 
     #[test]
