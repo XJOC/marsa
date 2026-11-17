@@ -1,7 +1,9 @@
 //! Stopping a managed process, the options every child of `marsad` gets, and
 //! what the daemon needs to find an orphan Caddy or php-fpm (ADR 0009): who
 //! runs under a pid, its real executable, who listens on a port, signals, the
-//! pid files in `run/`, and the data folder's instance id.
+//! pid files in `run/`, and the data folder's instance id. Also what a client
+//! needs to tell a daemon left from an earlier login session (task M5-21),
+//! and the parent process that `marsad` logs at start-up.
 //!
 //! The `#[cfg]` for these lives here, so the supervisor has none. Every tool
 //! runs with an absolute path and an argument array, never through a shell.
@@ -326,6 +328,189 @@ pub async fn children(ppid: u32) -> Option<Vec<ChildProcess>> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub async fn children(_ppid: u32) -> Option<Vec<ChildProcess>> {
     None
+}
+
+/// The program that runs a user's GUI login session on macOS, as `ps` shows
+/// it. macOS starts a new one for each login, after the last session ended.
+const LOGINWINDOW: &str = "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow";
+/// The Dock, which starts with each GUI login session, a little after its
+/// first login items. Read only when there is no `loginwindow` of the user:
+/// `killall Dock` starts a new one within the same session.
+const DOCK: &str = "/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock";
+
+/// One line of `ps -axo pid=,uid=,lstart=,comm=` run with `LC_ALL=C` and
+/// `TZ=UTC0` (macOS).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessRow {
+    pub pid: u32,
+    /// The effective user id.
+    pub uid: u32,
+    /// The start time, in the form [`identity`] gives.
+    pub started: String,
+    /// The `comm` column: `argv[0]`, which the process chose. A label, never
+    /// proof of the program it runs.
+    pub command: PathBuf,
+}
+
+/// Reads `ps -axo pid=,uid=,lstart=,comm=` output: the pid, the uid, five
+/// words of start time, then `argv[0]`, which may hold spaces. A line in
+/// another shape is skipped.
+pub fn parse_process_table(text: &str) -> Vec<ProcessRow> {
+    text.lines().filter_map(parse_process_row).collect()
+}
+
+fn parse_process_row(line: &str) -> Option<ProcessRow> {
+    let mut rest = line.trim();
+    let mut words = [""; 7];
+    for word in &mut words {
+        let end = rest.find(char::is_whitespace)?;
+        *word = &rest[..end];
+        rest = rest[end..].trim_start();
+    }
+    let [pid, uid, started @ ..] = words;
+    let started = started.join(" ");
+    // A time that cannot be compared is of no use here.
+    crate::orphan::lstart_seconds(&started)?;
+    Some(ProcessRow {
+        pid: pid.parse().ok()?,
+        uid: uid.parse().ok()?,
+        started,
+        command: PathBuf::from(rest),
+    })
+}
+
+/// When the GUI login session of `uid` started (task M5-21): the start of
+/// its `loginwindow`, or of its Dock when it has none, the latest if there
+/// are several. `None` when `uid` has no GUI session in `table`, as for a
+/// login over SSH only.
+pub fn login_session_start(table: &[ProcessRow], uid: u32) -> Option<&str> {
+    [LOGINWINDOW, DOCK].into_iter().find_map(|program| {
+        table
+            .iter()
+            .filter(|row| row.uid == uid && row.command.as_path() == Path::new(program))
+            .max_by_key(|row| crate::orphan::lstart_seconds(&row.started))
+            .map(|row| row.started.as_str())
+    })
+}
+
+/// When a daemon started, and when the current GUI login session of its user
+/// did (task M5-21). Both in the form [`identity`] gives, in UTC.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginTimes {
+    /// When the daemon started.
+    pub started: String,
+    /// When the login session started.
+    pub login: String,
+}
+
+/// The [`LoginTimes`] of the `marsad` at `pid`, from `table`. `own` is the
+/// pid of the process that asks. `None` unless `pid` was started as a
+/// program named `marsad` by the same user as `own`, and that user has a GUI
+/// session: then the daemon is never judged.
+pub fn login_times(table: &[ProcessRow], pid: u32, own: u32) -> Option<LoginTimes> {
+    let row = |pid| table.iter().find(|row| row.pid == pid);
+    let daemon = row(pid)?;
+    let uid = row(own)?.uid;
+    if daemon.uid != uid || daemon.command.file_name()? != "marsad" {
+        return None;
+    }
+    Some(LoginTimes {
+        started: daemon.started.clone(),
+        login: login_session_start(table, uid)?.to_owned(),
+    })
+}
+
+/// The [`LoginTimes`] of the daemon at `pid` now (task M5-21). macOS reads
+/// the process table once with `/bin/ps`, with `LC_ALL=C` and `TZ=UTC0` as
+/// [`identity`] does, so the times compare. `None` when it cannot be told.
+#[cfg(target_os = "macos")]
+pub async fn read_login_times(pid: u32) -> Option<LoginTimes> {
+    login_times(&process_table().await?, pid, std::process::id())
+}
+
+/// Not known on this system: no daemon is replaced for it.
+#[cfg(not(target_os = "macos"))]
+pub async fn read_login_times(_pid: u32) -> Option<LoginTimes> {
+    None
+}
+
+/// Every process now, from `/bin/ps`. `None` when the table cannot be read.
+#[cfg(target_os = "macos")]
+async fn process_table() -> Option<Vec<ProcessRow>> {
+    let mut ps = Command::new("/bin/ps");
+    ps.args(["-ww", "-axo", "pid=,uid=,lstart=,comm="])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC0");
+    let out = run_tool(ps).await?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(parse_process_table(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// The process that started this one, for the log only (task M5-21).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentProcess {
+    pub pid: u32,
+    /// Its name, without control characters. `None` when it cannot be read.
+    pub name: Option<String>,
+}
+
+/// The process that started this one, if it still runs: its pid from `std`,
+/// and its name from `/bin/ps` on macOS or `/proc` on Linux.
+#[cfg(unix)]
+pub async fn parent_process() -> Option<ParentProcess> {
+    let pid = std::os::unix::process::parent_id();
+    Some(ParentProcess {
+        pid,
+        name: process_name(pid).await,
+    })
+}
+
+/// Not known on Windows: `std` gives no parent pid there, and Win32 gives it
+/// only through `unsafe` calls.
+#[cfg(not(unix))]
+pub async fn parent_process() -> Option<ParentProcess> {
+    None
+}
+
+/// The `comm` column of `pid`: the path it was started with.
+#[cfg(target_os = "macos")]
+async fn process_name(pid: u32) -> Option<String> {
+    let mut ps = Command::new("/bin/ps");
+    ps.args(["-ww", "-p", &pid.to_string(), "-o", "comm="])
+        .env("LC_ALL", "C");
+    let out = run_tool(ps).await?;
+    if !out.status.success() {
+        return None;
+    }
+    printable_name(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `/proc/<pid>/comm`: the name of the program, cut to 15 bytes.
+#[cfg(target_os = "linux")]
+async fn process_name(pid: u32) -> Option<String> {
+    let path = Path::new("/proc").join(pid.to_string()).join("comm");
+    printable_name(&fs::read_to_string(path).ok()?)
+}
+
+/// Not known on this system.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+async fn process_name(_pid: u32) -> Option<String> {
+    None
+}
+
+/// `text` without control characters, which could forge a log line, and at
+/// most 256 characters. `None` when nothing is left.
+#[cfg(unix)]
+fn printable_name(text: &str) -> Option<String> {
+    let name: String = text
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(256)
+        .collect();
+    (!name.is_empty()).then_some(name)
 }
 
 /// The processes that hold a listener at `listen` open now: a Unix socket
@@ -672,6 +857,202 @@ mod tests {
         child.wait().unwrap();
         let listed = children(std::process::id()).await.expect("the table");
         assert!(listed.iter().all(|c| c.pid != pid), "{listed:?}");
+    }
+
+    /// `ps -axo pid=,uid=,lstart=,comm=` as `LC_ALL=C TZ=UTC0` gives it on
+    /// macOS: a real table cut down, with lines added.
+    const TABLE: &str = "\
+    1     0 Thu Jan  1 00:00:06 1970     /sbin/launchd
+  300     0 Wed Nov 11 05:52:40 2026     /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow
+ 5793   501 Wed Nov 11 10:12:30 2026     /Users/me/Library/Application Support/dev.marsa.Marsa/bin/marsad
+37805   501 Sat Nov 14 13:28:04 2026     /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow
+37949   501 Sat Nov 14 13:28:16 2026     /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock
+37986   501 Sat Nov 14 13:28:17 2026     /System/Library/CoreServices/Dock.app/Contents/XPCServices/com.apple.dock.extra.xpc/Contents/MacOS/com.apple.dock.extra
+40686   501 Sat Nov 14 13:28:26 2026     /Users/me/Library/Application Support/dev.marsa.Marsa/bin/marsa-tray
+40700   501 Sat Nov 14 13:30:00 2026     /fake/loginwindow
+40800   501 Sat Nov 14 13:31:00 2026     ./marsad
+40900   501 Sat Nov 14 13:31:30 2026     /usr/bin/marsad-helper
+41000   502 Sat Nov 14 14:00:00 2026     /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock
+41001   502 Sat Nov 14 14:00:09 2026     /Users/other/bin/marsad
+41100   503 Sat Nov 14 14:05:00 2026     /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow
+41101   503 Sat Nov 14 14:06:00 2026     /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow
+41102   503 Sat Nov 14 14:07:00 2026     /bin/zsh
+41103   503 Sat Nov 14 14:07:01 2026     /Users/third/bin/marsad
+41200   504 Sat Nov 14 14:10:00 2026     /bin/zsh
+41201   504 Sat Nov 14 14:10:01 2026     /Users/ssh/bin/marsad
+42000   501 Sat Nov 14 13:31\x20
+x       501 Sat Nov 14 13:31:00 2026     /bin/zsh
+42100   501 Sat Nov 14 13:31:00 2026
+42200   501 Sat Nov 14 13:31:00 2026     /bin/zsh\r
+";
+
+    #[test]
+    fn process_table_lines_give_pid_uid_start_and_command() {
+        let table = parse_process_table(TABLE);
+        let row = |pid| table.iter().find(|row| row.pid == pid).cloned();
+        // A command with spaces is kept whole.
+        assert_eq!(
+            row(5793),
+            Some(ProcessRow {
+                pid: 5793,
+                uid: 501,
+                started: "Wed Nov 11 10:12:30 2026".into(),
+                command: PathBuf::from(
+                    "/Users/me/Library/Application Support/dev.marsa.Marsa/bin/marsad"
+                ),
+            })
+        );
+        assert_eq!(row(1).map(|row| row.uid), Some(0));
+        // `\r` is trimmed.
+        assert_eq!(row(42200).map(|row| row.command), Some("/bin/zsh".into()));
+        // A cut time and a line without a command are skipped, and so is a
+        // pid that is no number.
+        for skipped in [42000, 42100] {
+            assert_eq!(row(skipped), None, "{skipped}");
+        }
+        assert_eq!(table.len(), 19, "{table:#?}");
+        assert!(parse_process_table("").is_empty());
+    }
+
+    #[test]
+    fn the_login_session_starts_with_the_users_loginwindow_else_its_dock() {
+        let table = parse_process_table(TABLE);
+        // This user's own loginwindow: not root's at the login screen, not a
+        // process that calls itself loginwindow, and not the Dock.
+        assert_eq!(
+            login_session_start(&table, 501),
+            Some("Sat Nov 14 13:28:04 2026")
+        );
+        assert_eq!(
+            login_session_start(&table, 0),
+            Some("Wed Nov 11 05:52:40 2026")
+        );
+        // No loginwindow of its own: the Dock, never `com.apple.dock.extra`.
+        assert_eq!(
+            login_session_start(&table, 502),
+            Some("Sat Nov 14 14:00:00 2026")
+        );
+        // Two of them: the latest.
+        assert_eq!(
+            login_session_start(&table, 503),
+            Some("Sat Nov 14 14:06:00 2026")
+        );
+        // No GUI session, as over SSH.
+        assert_eq!(login_session_start(&table, 504), None);
+        assert_eq!(login_session_start(&table, 9999), None);
+        assert_eq!(login_session_start(&[], 501), None);
+    }
+
+    #[test]
+    fn login_times_are_read_for_a_marsad_of_the_asking_user_only() {
+        let table = parse_process_table(TABLE);
+        let times = |started: &str, login: &str| LoginTimes {
+            started: started.into(),
+            login: login.into(),
+        };
+        // The incident: a daemon from the session before.
+        assert_eq!(
+            login_times(&table, 5793, 40686),
+            Some(times(
+                "Wed Nov 11 10:12:30 2026",
+                "Sat Nov 14 13:28:04 2026"
+            ))
+        );
+        // Started from a terminal as `./marsad`.
+        assert_eq!(
+            login_times(&table, 40800, 40686),
+            Some(times(
+                "Sat Nov 14 13:31:00 2026",
+                "Sat Nov 14 13:28:04 2026"
+            ))
+        );
+        // From the Dock when the user has no loginwindow.
+        assert_eq!(
+            login_times(&table, 41001, 41000),
+            Some(times(
+                "Sat Nov 14 14:00:09 2026",
+                "Sat Nov 14 14:00:00 2026"
+            ))
+        );
+        for (pid, own) in [
+            // Another user's daemon.
+            (41001, 40686),
+            // Not named `marsad`.
+            (40686, 40686),
+            (40900, 40686),
+            (37805, 40686),
+            // No such daemon, or no such asker.
+            (77777, 40686),
+            (5793, 77777),
+            // A user without a GUI session.
+            (41201, 41200),
+        ] {
+            assert_eq!(login_times(&table, pid, own), None, "{pid} {own}");
+        }
+    }
+
+    // Only macOS reads the process table with `ps`.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn the_real_process_table_lists_this_process_and_a_marsad_child() {
+        use std::os::unix::process::CommandExt as _;
+
+        // A program that calls itself marsad, as `marsad` from a terminal does.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg0("/x/marsad")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let is_marsad = |now: &Liveness| matches!(now, Liveness::Alive { exe, .. } if exe == Path::new("/x/marsad"));
+        let Liveness::Alive { started, .. } =
+            after_exec(async || identity(pid).await, is_marsad).await
+        else {
+            panic!("no identity for {pid}");
+        };
+        let table = process_table().await.expect("the table");
+        let own = table.iter().find(|row| row.pid == std::process::id());
+        let own = own.expect("this process is listed");
+        let want = ProcessRow {
+            pid,
+            uid: own.uid,
+            started,
+            command: PathBuf::from("/x/marsad"),
+        };
+        assert!(table.contains(&want), "{want:?}");
+        // Without a GUI session (a build machine may have none) it cannot be
+        // told. With one, the child started in it.
+        if let Some(times) = read_login_times(pid).await {
+            assert_eq!(times.started, want.started);
+            let order = crate::orphan::started_order(&times.login, &times.started);
+            assert_ne!(order, Some(std::cmp::Ordering::Greater), "{times:?}");
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_parent_process_is_the_one_that_started_this_one() {
+        let parent = parent_process().await.expect("a parent on Unix");
+        assert_eq!(parent.pid, std::os::unix::process::parent_id());
+        // The test runner, which waits for this process.
+        assert!(parent.name.is_some_and(|name| !name.is_empty()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_printable_name_has_no_control_characters() {
+        assert_eq!(printable_name(" /bin/zsh\n").as_deref(), Some("/bin/zsh"));
+        assert_eq!(
+            printable_name("evil\nmarsad started\r").as_deref(),
+            Some("evilmarsad started")
+        );
+        assert_eq!(
+            printable_name(&"x".repeat(300)).map(|name| name.len()),
+            Some(256)
+        );
+        assert_eq!(printable_name(" \n"), None);
     }
 
     // Only macOS lists the holders of a listener (`lsof`).

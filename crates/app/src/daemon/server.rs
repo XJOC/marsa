@@ -16,6 +16,7 @@ use axum::Router;
 use marsa_core::installer::uninstall::clean_retired;
 use marsa_core::platform::daemon_file::{self, DaemonFile, Token};
 use marsa_core::platform::low_ports;
+use marsa_core::platform::process;
 use marsa_core::platform::signals::shutdown_signal;
 use marsa_core::runtimes::RuntimesDir;
 use marsa_core::types::Event;
@@ -81,6 +82,11 @@ impl std::error::Error for AlreadyRunning {}
 pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     let run_dir = data_dir.join("run");
     let lock = lock_instance(&run_dir).await?;
+    // Who started this daemon, for the log only (task M5-21): a daemon left
+    // from an earlier login session is easier to trace. Asked now, while
+    // that process still waits for this one to answer, and alongside the
+    // rest of the start-up. It never stops the start.
+    let parent = tokio::spawn(process::parent_process());
     // A file left by a crash goes as soon as this daemon owns the lock, so no
     // client reads its stale port and token.
     if let Err(err) = daemon_file::remove_daemon_file(&run_dir) {
@@ -109,7 +115,13 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
     daemon_file::write_daemon_file(&run_dir, &file)?;
-    tracing::info!(port, pid = file.pid, version = %file.app_version, "marsad started");
+    let parent = parent.await.ok().flatten();
+    let parent_pid = parent.as_ref().map(|parent| parent.pid);
+    let parent_name = parent.as_ref().and_then(|parent| parent.name.as_deref());
+    // A field that is `None` is left out of the line. `marsa doctor` looks
+    // for this message, and its test for `"marsad started");` here.
+    tracing::info!(port, pid = file.pid, version = %file.app_version, parent_pid, parent_name,
+        "marsad started");
     let auth = AuthConfig::new(Arc::new(file.token), port);
 
     let mut daemon = Daemon::new(data_dir);

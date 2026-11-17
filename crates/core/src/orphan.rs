@@ -289,6 +289,34 @@ fn lstart_key(text: &str) -> Option<[u32; 6]> {
     ])
 }
 
+/// `lstart` text (`Wed Nov 4 03:31:27 2026`, macOS, read with `TZ=UTC0`) as
+/// seconds since 1970-01-01 UTC, so two start times can be told apart by a
+/// margin (task M5-21). `None` for any other form, Linux clock ticks
+/// included, and for a field out of range.
+pub fn lstart_seconds(text: &str) -> Option<i64> {
+    let [year, month, day, hour, minute, second] = lstart_key(text)?;
+    // 60: a leap second.
+    if !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let days = days_from_civil(i64::from(year), month, day);
+    Some(days * 86_400 + i64::from(hour * 3_600 + minute * 60 + second))
+}
+
+/// Days from 1970-01-01 to `year-month-day` in the Gregorian calendar, by
+/// Howard Hinnant's `days_from_civil`. `month` is 1 to 12.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    // Years start in March here, so a leap day is the last day of its year.
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let month_from_march = i64::from((month + 9) % 12);
+    let day_of_year = (153 * month_from_march + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    // 719 468 days from 0000-03-01 to 1970-01-01.
+    era * 146_097 + day_of_era - 719_468
+}
+
 /// Whether `now`, what the OS says about `pid`, shows a worker of the php-fpm
 /// master `master` names: alive, running the master's very executable, which
 /// must be one of `accepted`, and started no earlier than the master (a
@@ -987,6 +1015,44 @@ mod tests {
         ] {
             assert_eq!(order(a, b), None, "{a:?} {b:?}");
             assert_eq!(order(b, a), None, "{b:?} {a:?}");
+        }
+    }
+
+    #[test]
+    fn lstart_text_reads_as_seconds_since_1970() {
+        // The values `date -u -j -f "%Y-%m-%d %H:%M:%S" <time> +%s` gives.
+        assert_eq!(lstart_seconds("Thu Jan  1 00:00:00 1970"), Some(0));
+        assert_eq!(lstart_seconds("Thu Jan 1 00:00:06 1970"), Some(6));
+        assert_eq!(
+            lstart_seconds("Wed Nov  4 03:31:27 2026"),
+            Some(1_793_763_087)
+        );
+        assert_eq!(
+            lstart_seconds("Sat Nov 14 13:28:04 2026"),
+            Some(1_794_662_884)
+        );
+        // Across a leap day: one second apart.
+        assert_eq!(
+            lstart_seconds("Tue Feb 29 23:59:59 2028"),
+            Some(1_835_481_599)
+        );
+        assert_eq!(
+            lstart_seconds("Wed Mar  1 00:00:00 2028"),
+            Some(1_835_481_600)
+        );
+        // Other forms, and fields out of range, say nothing.
+        for bad in [
+            "",
+            "987654",
+            "Wed Nov 4 03:31 2026",
+            "Wed Foo 4 03:31:27 2026",
+            "Wed Nov 0 03:31:27 2026",
+            "Wed Nov 32 03:31:27 2026",
+            "Wed Nov 4 24:00:00 2026",
+            "Wed Nov 4 03:60:00 2026",
+            "Wed Nov 4 03:31:61 2026",
+        ] {
+            assert_eq!(lstart_seconds(bad), None, "{bad:?}");
         }
     }
 
