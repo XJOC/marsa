@@ -13,7 +13,7 @@ use std::time::Duration;
 use eframe::egui;
 use marsa_core::client::{self, ClientError, DaemonClient, StreamItem};
 use marsa_core::types::{
-    Event, InstallProgress, InstallUpdate, ServiceAction, SiteList, SitePatch,
+    Event, HostsStatus, InstallProgress, InstallUpdate, ServiceAction, SiteList, SitePatch,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -52,6 +52,9 @@ pub enum Command {
     Remove(Removal),
     /// The Xdebug box.
     SetXdebug(bool),
+    /// "Add to /etc/hosts" (Linux, task M4-18k3): the only way the window
+    /// syncs the hosts file, so a password prompt comes from a click only.
+    SyncHosts,
 }
 
 /// The window's end of the bridge.
@@ -197,7 +200,14 @@ async fn session(
                         &event,
                         Event::Install(InstallProgress { update: InstallUpdate::Done(_), .. })
                     );
+                    // A new site may lack its hosts line; setup may have
+                    // written the block (Linux, task M4-18k3).
+                    let hosts_changed =
+                        matches!(&event, Event::SitesChanged(_) | Event::SetupFinished(_));
                     if !window.send(Update::Event(event)) {
+                        return End::Closed;
+                    }
+                    if hosts_changed && !window.send(hosts(&client).await) {
                         return End::Closed;
                     }
                     // A new version, and maybe a first default: no event
@@ -266,12 +276,29 @@ async fn refresh(client: &DaemonClient, window: &Window) -> bool {
         Ok(lines) => Update::Log(lines),
         Err(err) => notice("cannot read the log", &err),
     };
+    let hosts = hosts(client).await;
     window.send(services)
         && window.send(sites)
+        && window.send(hosts)
         && window.send(runtimes)
         && window.send(autostart)
         && window.send(xdebug)
         && window.send(log)
+}
+
+/// Whether the hosts file holds this data folder's names (Linux). Reading
+/// shows no prompt. A daemon of an older build has no such route; any
+/// failure counts as "not used", in the log only: `marsa doctor` checks it.
+async fn hosts(client: &DaemonClient) -> Update {
+    match client.hosts().await {
+        Ok(status) => Update::Hosts(status),
+        Err(err) => {
+            if err.code() != "not_found" {
+                tracing::warn!(code = err.code(), error = %err, "cannot read the hosts status");
+            }
+            Update::Hosts(HostsStatus::default())
+        }
+    }
 }
 
 /// Whether PHP loads Xdebug, or why it cannot be read.
@@ -397,6 +424,24 @@ fn run_command(
                 // ended, and the next session reads everything.
                 if uninstall {
                     let _ = reread.send(());
+                }
+                None
+            }
+            Command::SyncHosts => {
+                let update = match client.sync_hosts().await {
+                    Ok(report) => {
+                        let error = report.error.as_ref().map(|error| error.code.as_str());
+                        tracing::info!(error, "hosts sync finished");
+                        Update::HostsSynced(report)
+                    }
+                    Err(err) => {
+                        tracing::warn!(code = err.code(), error = %err, "hosts sync did not run");
+                        Update::HostsSyncFailed(err.code().to_owned())
+                    }
+                };
+                // No event tells of the new block: read it again.
+                if window.send(update) {
+                    window.send(hosts(&client).await);
                 }
                 None
             }

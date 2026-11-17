@@ -8,12 +8,13 @@ use std::collections::VecDeque;
 use std::mem;
 use std::path::{Path, PathBuf};
 
+use marsa_core::helper::OpStatus;
 use marsa_core::resolver;
 use marsa_core::runtimes::Runtime;
 use marsa_core::sites;
 use marsa_core::types::{
-    Event, Health, InstallEvent, InstallFailure, InstallProgress, InstallUpdate, LogLine,
-    LogStream, RuntimeList, ServiceAction, ServiceState, ServiceStatus, SetupReport, Site,
+    Event, Health, HostsStatus, InstallEvent, InstallFailure, InstallProgress, InstallUpdate,
+    LogLine, LogStream, RuntimeList, ServiceAction, ServiceState, ServiceStatus, SetupReport, Site,
     SiteList, Source, VersionInUse, XdebugState,
 };
 use semver::Version;
@@ -123,7 +124,27 @@ pub enum Update {
     /// The answer to the Xdebug box: the state after the change, or a client
     /// error code.
     XdebugAnswered(Result<XdebugState, String>),
+    /// Linux (task M4-18k3): whether the hosts file holds this data
+    /// folder's names, and the sites it lacks. Read when a session starts,
+    /// after each site list, after setup, and after "Add to /etc/hosts".
+    Hosts(HostsStatus),
+    /// The answer to "Add to /etc/hosts".
+    HostsSynced(SetupReport),
+    /// "Add to /etc/hosts" did not run, or the daemon could not be reached.
+    /// A client error code.
+    HostsSyncFailed(String),
     Event(Event),
+}
+
+/// The "Add to /etc/hosts" button (Linux, task M4-18k3).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum HostsSync {
+    #[default]
+    Idle,
+    /// Sent; the daemon may wait up to 5 minutes for the password prompt.
+    Running,
+    /// The names did not go in: the code of why.
+    Failed(String),
 }
 
 /// One runtime in the Runtimes section.
@@ -478,6 +499,9 @@ pub struct Model {
     xdebug_pending: Option<bool>,
     /// The last Xdebug read or change failed. A client error code.
     pub xdebug_notice: Option<String>,
+    /// Linux: the sites the hosts file lacks (task M4-18k3).
+    pub hosts: HostsStatus,
+    pub hosts_sync: HostsSync,
 }
 
 impl Model {
@@ -539,6 +563,14 @@ impl Model {
             Update::InstallAccepted { job, id } => self.accepted(&job, id),
             Update::InstallRefused { job, code } => self.refused(&job, code),
             Update::SetupDone(report) => self.setup = Setup::Finished(report),
+            Update::Hosts(status) => self.hosts = status,
+            Update::HostsSynced(report) => {
+                self.hosts_sync = match not_added(&report) {
+                    Some(code) => HostsSync::Failed(code),
+                    None => HostsSync::Idle,
+                };
+            }
+            Update::HostsSyncFailed(code) => self.hosts_sync = HostsSync::Failed(code),
             Update::SetupFailed(code) => self.setup = Setup::Failed(code),
             Update::Autostart(state) => self.autostart = state,
             Update::AutostartFailed(code) => {
@@ -964,6 +996,18 @@ impl Model {
         self.first_run_closed = true;
     }
 
+    /// "Add to /etc/hosts". `false` while it or a setup runs, with no
+    /// daemon, or with nothing to add.
+    pub fn start_hosts_sync(&mut self) -> bool {
+        let nothing = !self.hosts.used || self.hosts.missing.is_empty();
+        let busy = self.hosts_sync == HostsSync::Running || self.setup == Setup::Running;
+        if !self.is_connected() || nothing || busy {
+            return false;
+        }
+        self.hosts_sync = HostsSync::Running;
+        true
+    }
+
     /// "Run setup". `false` while one runs, or with no daemon.
     pub fn start_setup(&mut self) -> bool {
         if !self.is_connected() || self.setup == Setup::Running {
@@ -1245,6 +1289,28 @@ impl Model {
 }
 
 /// Applies one daemon event.
+/// Why "Add to /etc/hosts" did not put the names in: the code of the
+/// error, of a skipped step, or of a failed one. `None` if it did, or there
+/// was nothing to add.
+fn not_added(report: &SetupReport) -> Option<String> {
+    if let Some(error) = &report.error {
+        return Some(error.code.clone());
+    }
+    if let Some(skipped) = report.skipped.first() {
+        return Some(skipped.code.clone());
+    }
+    report
+        .results
+        .iter()
+        .find(|result| result.status == OpStatus::Failed)
+        .map(|result| {
+            result
+                .code
+                .clone()
+                .unwrap_or_else(|| "hosts_sync".to_owned())
+        })
+}
+
 pub fn apply(model: &mut Model, event: Event) {
     match event {
         Event::ServiceChanged(status) => {
@@ -2284,6 +2350,82 @@ mod tests {
             }],
             ..SetupReport::default()
         }
+    }
+
+    /// Task M4-18k3: "Add to /etc/hosts" runs only with something to add,
+    /// one at a time, never during a setup, and says why when the names
+    /// did not go in.
+    #[test]
+    fn the_hosts_button_runs_only_with_names_to_add() {
+        use marsa_core::helper::OpResult;
+        use marsa_core::types::{ApiError, SetupSkip};
+
+        let mut model = connected();
+        assert!(!model.start_hosts_sync(), "nothing to add");
+        model.update(Update::Hosts(HostsStatus {
+            used: false,
+            missing: vec!["shop.test".into()],
+        }));
+        assert!(!model.start_hosts_sync(), "not the hosts way");
+        model.update(Update::Hosts(HostsStatus {
+            used: true,
+            missing: vec!["shop.test".into()],
+        }));
+        model.setup = Setup::Running;
+        assert!(!model.start_hosts_sync(), "during a setup");
+        model.setup = Setup::Idle;
+        assert!(model.start_hosts_sync());
+        assert!(!model.start_hosts_sync(), "one at a time");
+
+        let report =
+            |error: Option<&str>, skipped: Option<&str>, failed: Option<&str>| SetupReport {
+                results: failed
+                    .map(|code| OpResult {
+                        op: "hosts_sync".into(),
+                        status: OpStatus::Failed,
+                        code: Some(code.into()),
+                        message: None,
+                    })
+                    .into_iter()
+                    .collect(),
+                skipped: skipped
+                    .map(|code| SetupSkip {
+                        op: "hosts_sync".into(),
+                        code: code.into(),
+                    })
+                    .into_iter()
+                    .collect(),
+                error: error.map(|code| ApiError {
+                    code: code.into(),
+                    message: "x".into(),
+                }),
+                ..SetupReport::default()
+            };
+        model.update(Update::HostsSynced(report(None, None, None)));
+        assert_eq!(model.hosts_sync, HostsSync::Idle);
+        for (report, code) in [
+            (
+                report(Some("setup_cancelled"), None, None),
+                "setup_cancelled",
+            ),
+            (
+                report(None, Some("hosts_too_many_names"), None),
+                "hosts_too_many_names",
+            ),
+            (
+                report(None, None, Some("hosts_block_broken")),
+                "hosts_block_broken",
+            ),
+        ] {
+            model.update(Update::HostsSynced(report));
+            assert_eq!(model.hosts_sync, HostsSync::Failed(code.into()));
+        }
+        model.update(Update::HostsSyncFailed("setup_running".into()));
+        assert_eq!(model.hosts_sync, HostsSync::Failed("setup_running".into()));
+        // A new session starts clean.
+        model.update(Update::Connected(health()));
+        assert_eq!(model.hosts, HostsStatus::default());
+        assert_eq!(model.hosts_sync, HostsSync::Idle);
     }
 
     #[test]
