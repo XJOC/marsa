@@ -230,10 +230,15 @@ jobs:
       - name: Check the archives, write SHA256SUMS and the notes
         run: bash tools/release/collect.sh "$RUNNER_TEMP/dist" "$RUNNER_TEMP/notes.md"
 
+      # A version with a suffix (0.1.1-rc.1) is a pre-release: never the
+      # latest. A plain version (0.1.1) is a stable release: install.sh
+      # installs the one GitHub marks as the latest, so it must become that
+      # when the owner publishes it.
       - name: Create the draft release
         run: |
+          if [[ "$VERSION" == *-* ]]; then kind=(--prerelease --latest=false); else kind=(); fi
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --draft --prerelease --latest=false --target "$GITHUB_SHA" \
+            --draft "${kind[@]}" --target "$GITHUB_SHA" \
             --title "Marsa $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
             "$RUNNER_TEMP"/dist/*
           {
@@ -249,4 +254,9 @@ jobs:
             echo
             echo "Then read the draft and publish it on GitHub. Upload the signature first:"
             echo "install.sh refuses a release without it on every machine that has minisign."
+            if [[ "$VERSION" != *-* ]]; then
+              echo
+              echo "A stable release: publish it as the latest release (not a pre-release), then check that"
+              echo "https://github.com/$GITHUB_REPOSITORY/releases/latest opens $TAG. install.sh installs that one."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
