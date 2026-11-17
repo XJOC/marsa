@@ -715,6 +715,9 @@ impl Setup {
             let files = user_trust::TrustFiles::in_dir(data_dir);
             report.results.push(self.trust_for_user(&pem, &files, stop));
         }
+        if linux.is_some() {
+            linux_dns::record_way(data_dir, &report.results);
+        }
         report
     }
 
@@ -1866,7 +1869,7 @@ mod tests {
                 .collect()
         }
 
-        fn programs(&self) -> Vec<&'static str> {
+        pub(super) fn programs(&self) -> Vec<&'static str> {
             self.calls().iter().map(|call| call.program).collect()
         }
 
@@ -2873,6 +2876,8 @@ mod tests {
             );
             assert_eq!((report.error, report.skipped), (None, Vec::new()));
             assert_eq!(fake.pkexec_calls(), 1, "{system:?}");
+            // So `marsa park` and `marsa link` keep the block up to date.
+            assert!(linux_dns::marker(dir.dir.path()).is_file(), "{system:?}");
         }
     }
 
@@ -2951,6 +2956,7 @@ mod tests {
                 answer
             });
             let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts.clone());
+            fs::write(linux_dns::marker(dir.dir.path()), "").unwrap();
             let report = run_linux_with(&setup, &dir, &["shop.test"]);
             let first = linux_request(vec![HelperOp::ResolvedInstall { port: 18053 }]).ops;
             assert_eq!(
@@ -2958,6 +2964,8 @@ mod tests {
                 [first, vec![HelperOp::HostsRemove]],
                 "{status}"
             );
+            // The link is made: `marsa park` no longer syncs the hosts file.
+            assert!(!linux_dns::marker(dir.dir.path()).is_file());
             let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
             assert_eq!(
                 steps,

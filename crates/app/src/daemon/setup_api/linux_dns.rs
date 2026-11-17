@@ -34,11 +34,11 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use marsa_core::dns::{self, LinuxFacts, LinuxPath, NETWORKD_UNITS};
+use marsa_core::dns::{self, LinuxFacts, NETWORKD_UNITS};
 use marsa_core::helper::{HelperOp, OpResult, OpStatus};
 use marsa_core::types::HostsStatus;
 use tokio_util::sync::CancellationToken;
@@ -165,29 +165,73 @@ pub fn read_block(path: &Path) -> Option<BTreeSet<String>> {
     }
 }
 
-/// What `GET /v1/hosts` answers on Linux: the hosts file is used on the
-/// hosts way, and also where it holds Marsa's block (the helper chose it at
-/// the last setup); then `missing` lists the `names` the block lacks.
-pub fn status(
-    runner: &dyn Runner,
-    hosts_file: Option<&Path>,
-    names: &[String],
-    stop: &CancellationToken,
-) -> HostsStatus {
-    let path = dns::linux_path(facts(runner, stop));
-    let block = hosts_file.and_then(read_block);
-    if path == LinuxPath::Link && block.is_none() {
+/// The file in the data folder that says this folder's setup took the
+/// hosts way: `<data>/hosts-block` (review of #132). Setup writes it after
+/// a `hosts_sync` that is done, and takes it out once the link is made.
+/// Only its presence counts. A data folder whose setup never wrote the
+/// block, such as a test's or a scratch one, never syncs the hosts file
+/// from `marsa park` or `marsa link`, so it never asks for the password.
+pub fn marker(data_dir: &Path) -> PathBuf {
+    data_dir.join(HOSTS_MARKER)
+}
+
+const HOSTS_MARKER: &str = "hosts-block";
+const MARKER_TEXT: &str = "marsa setup put .test names in /etc/hosts for this data folder\n";
+
+/// Records the way setup took, from its `results`: the marker after a
+/// `hosts_sync` that is done, none once the link is made. A failure is a
+/// warning only: without the marker, `marsa park` and `marsa link` leave
+/// the hosts file to the next `marsa setup`.
+pub fn record_way(data_dir: &Path, results: &[OpResult]) {
+    let synced = results.iter().any(|result| {
+        result.op == HOSTS_SYNC && matches!(result.status, OpStatus::Done | OpStatus::Unchanged)
+    });
+    let path = marker(data_dir);
+    let outcome = if synced {
+        fs::write(&path, MARKER_TEXT)
+    } else if link_made(results) {
+        fs::remove_file(&path).or_else(|err| match err.kind() {
+            io::ErrorKind::NotFound => Ok(()),
+            _ => Err(err),
+        })
+    } else {
+        return;
+    };
+    if let Err(err) = outcome {
+        tracing::warn!(path = %path.display(), error = %err, "cannot record the way of .test names");
+    }
+}
+
+/// What `GET /v1/hosts` answers on Linux. The hosts file is used where this
+/// data folder's setup wrote Marsa's block ([`marker`]) and the block is
+/// still there; then `missing` lists the `names` it lacks. No program runs.
+pub fn status(data_dir: &Path, hosts_file: Option<&Path>, names: &[String]) -> HostsStatus {
+    if !marker(data_dir).is_file() {
         return HostsStatus::default();
     }
+    let Some(block) = hosts_file.and_then(read_block) else {
+        return HostsStatus::default();
+    };
     let missing = names
         .iter()
-        .filter(|name| !block.as_ref().is_some_and(|block| block.contains(*name)))
+        .filter(|name| !block.contains(*name))
         .cloned()
         .collect();
     HostsStatus {
         used: true,
         missing,
     }
+}
+
+/// The names a sync from `marsa park` or `marsa link` sends: the sites'
+/// `names` and every name the block in `hosts_file` has now, sorted. Such a
+/// sync only adds: a site whose folder cannot be read for a moment, or a
+/// name of another data folder, keeps its line. `marsa setup` sends the
+/// exact list.
+pub fn names_to_add(hosts_file: Option<&Path>, names: &[String]) -> Vec<String> {
+    let mut all: BTreeSet<String> = hosts_file.and_then(read_block).unwrap_or_default();
+    all.extend(names.iter().cloned());
+    all.into_iter().collect()
 }
 
 /// The operations of the hosts way: `resolved_remove`, then `hosts_sync`
@@ -242,6 +286,63 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    fn result(op: &str, status: OpStatus) -> OpResult {
+        OpResult {
+            op: op.to_owned(),
+            status,
+            code: None,
+            message: None,
+        }
+    }
+
+    /// The marker follows the way setup took: written after a `hosts_sync`
+    /// that is done or unchanged, gone once the link is made, and left as it
+    /// is otherwise (review of #132).
+    #[test]
+    fn the_marker_follows_the_way_setup_took() {
+        let dir = TempDir::new().unwrap();
+        let marked = || marker(dir.path()).is_file();
+        record_way(dir.path(), &[result("hosts_sync", OpStatus::Failed)]);
+        assert!(!marked());
+        record_way(dir.path(), &[result("hosts_sync", OpStatus::Unchanged)]);
+        assert!(marked());
+        record_way(dir.path(), &[result("resolved_install", OpStatus::Failed)]);
+        assert!(marked());
+        record_way(dir.path(), &[result("resolved_install", OpStatus::Done)]);
+        assert!(!marked());
+        // Gone already: no error.
+        record_way(
+            dir.path(),
+            &[result("resolved_install", OpStatus::Unchanged)],
+        );
+        assert!(!marked());
+    }
+
+    /// Used only with the marker and the block both there.
+    #[test]
+    fn the_status_needs_the_marker_and_the_block() {
+        let dir = TempDir::new().unwrap();
+        let hosts = dir.path().join("hosts");
+        fs::write(&hosts, "# Marsa start\n127.0.0.1 a.test\n# Marsa end\n").unwrap();
+        let names = ["a.test".to_owned(), "b.test".to_owned()];
+        assert_eq!(
+            status(dir.path(), Some(&hosts), &names),
+            HostsStatus::default()
+        );
+        fs::write(marker(dir.path()), "").unwrap();
+        let expected = HostsStatus {
+            used: true,
+            missing: vec!["b.test".to_owned()],
+        };
+        assert_eq!(status(dir.path(), Some(&hosts), &names), expected);
+        assert_eq!(status(dir.path(), None, &names), HostsStatus::default());
+        fs::write(&hosts, "127.0.0.1 localhost\n").unwrap();
+        assert_eq!(
+            status(dir.path(), Some(&hosts), &names),
+            HostsStatus::default()
+        );
+    }
 
     /// The block's names; nothing for no file, a folder, or a file larger
     /// than the helper reads (review of #130).

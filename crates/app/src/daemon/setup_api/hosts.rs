@@ -14,16 +14,24 @@
 //! (manager decision, task M4-18k2). A site that the folder watcher finds
 //! waits in `missing` until then, and `marsa doctor` and the window say so.
 //!
+//! The hosts file counts as used only where **this data folder's setup**
+//! wrote Marsa's block, and the block is still there ([`linux_dns::status`],
+//! [`linux_dns::marker`]). Before the first `marsa setup`, on the link way,
+//! and in a test's or a scratch data folder, `used` is `false`: nothing
+//! syncs and no prompt shows (review of #132). Setup then writes every name.
+//!
 //! The sync shares [`Setup`]: its runner, its checks of the helper file,
 //! and its one-at-a-time flag, so it never runs next to a setup or an
-//! uninstall (409 `setup_running` or `uninstall_running`). The way and the
-//! block are read again for each request ([`linux_dns::status`]). With no
-//! site missing, nothing runs and no prompt shows. The request carries the
-//! name of every site, so names of removed sites leave the block too. The
-//! error codes are setup's (`setup_cancelled`, and so on).
+//! uninstall (409 `setup_running` or `uninstall_running`). The marker and
+//! the block are read again for each request; no program runs to read
+//! them. With no site missing, nothing runs and no prompt shows. The sync
+//! only adds ([`linux_dns::names_to_add`]): a site whose folder cannot be
+//! read for a moment keeps its line; `marsa setup` takes out the names of
+//! removed sites. The error codes are setup's (`setup_cancelled`, and so
+//! on).
 //!
 //! On macOS and Windows `used` is `false`, and the sync answers 409
-//! `hosts_not_used`; so does Linux with the link.
+//! `hosts_not_used`; so does Linux where the block is not this folder's.
 
 use std::sync::Arc;
 
@@ -90,7 +98,7 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
         }
         // A request the helper refuses as a whole would change nothing
         // either, after a password for nothing.
-        if !dns::hosts_names_fit(&names) {
+        if !dns::hosts_names_fit(&linux_dns::names_to_add(setup.hosts_file(), &names)) {
             let skipped = SetupSkip {
                 op: linux_dns::HOSTS_SYNC.to_owned(),
                 code: linux_dns::HOSTS_TOO_MANY_NAMES.to_owned(),
@@ -99,6 +107,7 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
             return Ok(report);
         }
         tracing::info!(missing = ?status.missing, "adding sites to the hosts file");
+        let names = linux_dns::names_to_add(setup.hosts_file(), &names);
         let ops = vec![HelperOp::HostsSync { names }];
         match setup.launch(Flow::Setup, ops, platform, &daemon.shutdown) {
             Ok(results) => report.results = results,
@@ -123,9 +132,9 @@ async fn site_names(daemon: &Arc<Daemon>) -> Result<Vec<String>, HttpError> {
     Ok(names_of(&list))
 }
 
-/// [`linux_dns::status`] for `names`. Blocking.
+/// [`linux_dns::status`] for `names`. Blocking: it reads the hosts file.
 fn read_status(daemon: &Daemon, setup: &Setup, names: &[String]) -> HostsStatus {
-    linux_dns::status(setup.runner(), setup.hosts_file(), names, &daemon.shutdown)
+    linux_dns::status(&daemon.data_dir, setup.hosts_file(), names)
 }
 
 fn not_used() -> HttpError {
@@ -157,8 +166,7 @@ mod tests {
     use tower::ServiceExt as _;
 
     use super::super::tests::{
-        DEBIAN_12, Fake, Systemd, UBUNTU_2204_SERVER, UBUNTU_2404, answer_for, exit, linux_fake_on,
-        make_helper,
+        Fake, Systemd, UBUNTU_2204_SERVER, answer_for, exit, linux_fake_on, make_helper,
     };
     use super::*;
     use crate::daemon::auth::{AuthConfig, require_auth};
@@ -204,6 +212,12 @@ mod tests {
 
         fn hosts(&self) -> PathBuf {
             self.dir.path().join("hosts")
+        }
+
+        /// This data folder's setup wrote the block.
+        fn marked(self) -> Self {
+            fs::write(linux_dns::marker(self.dir.path()), "").unwrap();
+            self
         }
 
         fn app(&self, fake: &Arc<Fake>, platform: Platform) -> App {
@@ -289,46 +303,56 @@ mod tests {
     }
 
     const BLOCK: &str = "127.0.0.1 localhost\n# Marsa start\n127.0.0.1 blog.test\n# Marsa end\n";
+    /// What setup leaves with no site.
+    const EMPTY_BLOCK: &str = "127.0.0.1 localhost\n# Marsa start\n# Marsa end\n";
 
     fn done_fake(system: Systemd) -> Arc<Fake> {
         linux_fake_on(system, |request| answer_for(&request, &[]))
     }
 
-    /// The hosts way: the sites the block lacks. Reading shows no prompt.
-    #[tokio::test]
-    async fn the_status_lists_the_sites_the_block_lacks() {
-        for system in [UBUNTU_2204_SERVER, DEBIAN_12] {
-            let place = Place::new(&["blog", "shop"], BLOCK);
-            let fake = done_fake(system);
-            let app = place.app(&fake, Platform::LinuxX64);
-            assert_eq!(app.status().await, missing(&["shop.test"]), "{system:?}");
-            assert_eq!(fake.pkexec_calls(), 0);
-        }
-        // No block yet: every site is missing.
-        let place = Place::new(&["blog", "shop"], "127.0.0.1 localhost\n");
-        let app = place.app(&done_fake(UBUNTU_2204_SERVER), Platform::LinuxX64);
-        assert_eq!(app.status().await, missing(&["blog.test", "shop.test"]));
+    /// A runner that must not be used.
+    fn no_programs() -> Arc<Fake> {
+        Fake::answering(|program, _| panic!("{program} ran"))
     }
 
-    /// The link: nothing to do, unless the helper chose the hosts file at
-    /// the last setup and left a block (task M4-18k2a).
+    /// Setup put the block there for this data folder: the sites the block
+    /// lacks. Reading runs no program.
     #[tokio::test]
-    async fn the_link_uses_the_hosts_file_only_if_a_block_is_there() {
-        let place = Place::new(&["blog", "shop"], "127.0.0.1 localhost\n");
-        let app = place.app(&done_fake(UBUNTU_2404), Platform::LinuxX64);
-        assert_eq!(app.status().await, HostsStatus::default());
-
-        let place = Place::new(&["blog", "shop"], BLOCK);
-        let app = place.app(&done_fake(UBUNTU_2404), Platform::LinuxX64);
+    async fn the_status_lists_the_sites_the_block_lacks() {
+        let place = Place::new(&["blog", "shop"], BLOCK).marked();
+        let app = place.app(&no_programs(), Platform::LinuxX64);
         assert_eq!(app.status().await, missing(&["shop.test"]));
+    }
+
+    /// No marker (before the first setup, on the link way, a test's or a
+    /// scratch data folder), or no block (another tool rewrote the file):
+    /// not used, and nothing syncs (review of #132).
+    #[tokio::test]
+    async fn without_this_folders_block_nothing_syncs() {
+        for (hosts, marked) in [(BLOCK, false), ("127.0.0.1 localhost\n", true), ("", false)] {
+            let mut place = Place::new(&["blog", "shop"], hosts);
+            if marked {
+                place = place.marked();
+            }
+            let fake = no_programs();
+            let app = place.app(&fake, Platform::LinuxX64);
+            assert_eq!(app.status().await, HostsStatus::default(), "{hosts:?}");
+            let (status, json) = app.sync().await;
+            assert_eq!(
+                (status, code(&json)),
+                (StatusCode::CONFLICT, "hosts_not_used".to_owned()),
+                "{hosts:?}"
+            );
+            assert!(fake.calls().is_empty());
+        }
     }
 
     /// macOS and Windows run nothing.
     #[tokio::test]
     async fn other_systems_do_not_use_it() {
         for platform in [Platform::DarwinArm64, Platform::WindowsX64] {
-            let place = Place::new(&["shop"], "");
-            let fake = Fake::answering(|program, _| panic!("{program} ran"));
+            let place = Place::new(&["shop"], BLOCK).marked();
+            let fake = no_programs();
             let app = place.app(&fake, platform);
             assert_eq!(app.status().await, HostsStatus::default());
             let (status, json) = app.sync().await;
@@ -340,10 +364,13 @@ mod tests {
         }
     }
 
-    /// One prompt, with every site's name; the file itself is the helper's.
+    /// One prompt. The sync only adds: a name in the block that is no site
+    /// now (a folder that cannot be read for a moment, say) keeps its line.
+    /// The file itself is the helper's.
     #[tokio::test]
-    async fn the_sync_sends_every_name_once() {
-        let place = Place::new(&["shop", "blog"], BLOCK);
+    async fn the_sync_adds_and_never_takes_out() {
+        let hosts = "# Marsa start\n127.0.0.1 blog.test\n127.0.0.1 gone.test\n# Marsa end\n";
+        let place = Place::new(&["shop", "blog"], hosts).marked();
         let fake = done_fake(UBUNTU_2204_SERVER);
         let app = place.app(&fake, Platform::LinuxX64);
         let (status, json) = app.sync().await;
@@ -352,36 +379,29 @@ mod tests {
         assert_eq!(report.results.len(), 1);
         assert_eq!(report.results[0].op, "hosts_sync");
         assert_eq!(report.error, None);
-        assert_eq!(fake.pkexec_calls(), 1);
-        let names = vec!["blog.test".to_owned(), "shop.test".to_owned()];
+        assert_eq!(fake.programs(), ["/usr/bin/pkexec"]);
+        let names = ["blog.test", "gone.test", "shop.test"]
+            .map(str::to_owned)
+            .to_vec();
         assert_eq!(
             fake.pkexec_request(),
             HelperRequest::new(vec![HelperOp::HostsSync { names }])
         );
-        assert_eq!(fs::read_to_string(place.hosts()).unwrap(), BLOCK);
+        assert_eq!(fs::read_to_string(place.hosts()).unwrap(), hosts);
     }
 
-    /// Nothing missing, or the link: no prompt.
+    /// Nothing missing: no prompt.
     #[tokio::test]
     async fn no_missing_site_means_no_prompt() {
-        let place = Place::new(&["blog"], BLOCK);
-        let fake = done_fake(UBUNTU_2204_SERVER);
+        let place = Place::new(&["blog"], BLOCK).marked();
+        let fake = no_programs();
         let (status, json) = place.app(&fake, Platform::LinuxX64).sync().await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(
             serde_json::from_value::<SetupReport>(json).unwrap(),
             SetupReport::default()
         );
-        assert_eq!(fake.pkexec_calls(), 0);
-
-        let place = Place::new(&["blog"], "");
-        let fake = done_fake(UBUNTU_2404);
-        let (status, json) = place.app(&fake, Platform::LinuxX64).sync().await;
-        assert_eq!(
-            (status, code(&json)),
-            (StatusCode::CONFLICT, "hosts_not_used".to_owned())
-        );
-        assert_eq!(fake.pkexec_calls(), 0);
+        assert!(fake.calls().is_empty());
     }
 
     /// More names than the helper takes: no prompt for a request it would
@@ -390,20 +410,20 @@ mod tests {
     async fn too_many_names_are_skipped_with_no_prompt() {
         let names: Vec<String> = (0..1001).map(|i| format!("s{i}")).collect();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        let place = Place::new(&names, "");
-        let fake = done_fake(UBUNTU_2204_SERVER);
+        let place = Place::new(&names, EMPTY_BLOCK).marked();
+        let fake = no_programs();
         let (status, json) = place.app(&fake, Platform::LinuxX64).sync().await;
         assert_eq!(status, StatusCode::OK, "{json}");
         let report: SetupReport = serde_json::from_value(json).unwrap();
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].code, "hosts_too_many_names");
-        assert_eq!(fake.pkexec_calls(), 0);
+        assert!(fake.calls().is_empty());
     }
 
     /// A dismissed prompt is in the report, as for setup.
     #[tokio::test]
     async fn a_dismissed_prompt_is_the_error_of_the_report() {
-        let place = Place::new(&["shop"], "");
+        let place = Place::new(&["shop"], EMPTY_BLOCK).marked();
         let fake = linux_fake_on(UBUNTU_2204_SERVER, |_| exit(126, "Request dismissed"));
         let (status, json) = place.app(&fake, Platform::LinuxX64).sync().await;
         assert_eq!(status, StatusCode::OK, "{json}");
@@ -415,43 +435,45 @@ mod tests {
 
     /// One at a time with setup and the uninstall.
     #[tokio::test]
-    async fn the_sync_waits_for_no_setup() {
-        let place = Place::new(&["shop"], "");
-        let fake = done_fake(UBUNTU_2204_SERVER);
-        let setup = Arc::new(place.setup(&fake, Platform::LinuxX64));
-        let running = Running::take(&setup, Flow::Setup).unwrap();
-        let token = Token::generate().unwrap();
-        let bearer = token.bearer_header();
-        let auth = AuthConfig::new(Arc::new(token), PORT);
-        let router: Router = routes(Arc::clone(&setup))
-            .with_state(Arc::clone(&place.daemon))
-            .layer(from_fn_with_state(auth, require_auth));
-        let app = App { router, bearer };
-        let (status, json) = app.sync().await;
-        assert_eq!(
-            (status, code(&json)),
-            (StatusCode::CONFLICT, "setup_running".to_owned())
-        );
-        drop(running);
-        assert_eq!(app.sync().await.0, StatusCode::OK);
-        assert_eq!(fake.pkexec_calls(), 1);
+    async fn the_sync_waits_for_no_setup_and_no_uninstall() {
+        for (flow, busy) in [
+            (Flow::Setup, "setup_running"),
+            (Flow::Uninstall, "uninstall_running"),
+        ] {
+            let place = Place::new(&["shop"], EMPTY_BLOCK).marked();
+            let fake = done_fake(UBUNTU_2204_SERVER);
+            let setup = Arc::new(place.setup(&fake, Platform::LinuxX64));
+            let running = Running::take(&setup, flow).unwrap();
+            let token = Token::generate().unwrap();
+            let bearer = token.bearer_header();
+            let auth = AuthConfig::new(Arc::new(token), PORT);
+            let router: Router = routes(Arc::clone(&setup))
+                .with_state(Arc::clone(&place.daemon))
+                .layer(from_fn_with_state(auth, require_auth));
+            let app = App { router, bearer };
+            let (status, json) = app.sync().await;
+            assert_eq!(
+                (status, code(&json)),
+                (StatusCode::CONFLICT, busy.to_owned())
+            );
+            drop(running);
+            assert_eq!(app.sync().await.0, StatusCode::OK);
+            assert_eq!(fake.pkexec_calls(), 1);
+        }
     }
 
-    /// The client waits longer than the slowest sync: four `systemctl`
-    /// checks, the prompt, and the helper's pipes.
+    /// The client waits longer than the slowest sync: the prompt and the
+    /// helper's pipes. No other program runs.
     #[test]
     fn the_client_waits_longer_than_the_slowest_sync() {
-        let slowest = 4 * super::super::CHECK_LIMIT
-            + super::super::PROMPT_LIMIT
-            + 5 * super::super::PIPE_GRACE;
+        let slowest = super::super::PROMPT_LIMIT + super::super::PIPE_GRACE;
         assert!(marsa_core::client::HOSTS_SYNC_TIMEOUT > slowest);
     }
 
-    /// The rejection paths (AGENTS.md section 5): nothing runs, not even
-    /// `systemctl`.
+    /// The rejection paths (AGENTS.md section 5): nothing runs.
     #[tokio::test]
     async fn a_request_without_the_token_with_an_origin_or_another_host_runs_nothing() {
-        let place = Place::new(&["shop"], "");
+        let place = Place::new(&["shop"], EMPTY_BLOCK).marked();
         let fake = done_fake(UBUNTU_2204_SERVER);
         let app = place.app(&fake, Platform::LinuxX64);
         let host = daemon_authority(PORT);

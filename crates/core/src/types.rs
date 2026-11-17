@@ -543,10 +543,10 @@ pub struct SetupReport {
 /// lacks. `POST /v1/hosts/sync` adds them, behind the password prompt.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostsStatus {
-    /// `true` on Linux where the `marsa0` link cannot be used, or where the
-    /// hosts file holds Marsa's block. `false` on macOS, on Windows (its
-    /// helper service keeps the block up to date by itself), and on Linux
-    /// with the link.
+    /// `true` on Linux where this data folder's `marsa setup` put Marsa's
+    /// block in the hosts file, and the block is still there. `false`
+    /// before that setup, on the `marsa0` link, on macOS, and on Windows
+    /// (its helper service keeps the block up to date by itself).
     pub used: bool,
     /// The host names of the sites that are not in the block, sorted. Such
     /// a site does not open until they are added. Empty when `used` is

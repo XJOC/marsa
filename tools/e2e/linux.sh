@@ -416,7 +416,13 @@ run composer --version
 step "a real Laravel project in a parked folder"
 mkdir -p "$CODE"
 (cd "$CODE" && run composer create-project --no-interaction --prefer-dist laravel/laravel laravel-app)
-run marsa park "$CODE"
+# Before setup, park leaves /etc/hosts alone and asks for nothing: setup
+# writes every name (review of #132). No polkit rule exists yet, so a
+# prompt here would fail the command.
+out=$(marsa park "$CODE" 2>&1) || fail "marsa park exited with $?: $out"
+echo "$out"
+! grep -q "Adding" <<<"$out" || fail "marsa park asked to change /etc/hosts before setup"
+! grep -q "# Marsa start" /etc/hosts || fail "marsa park wrote /etc/hosts before setup"
 run marsa sites
 run marsa services start caddy
 run marsa services
@@ -465,7 +471,24 @@ if grep -vq '^127\.0\.0\.1:' <<<"$(tr ' ' '\n' <<<"$listeners" | grep .)"; then
   fail "caddy listens on an address that is not 127.0.0.1"
 fi
 
-step "marsa link after setup: on the hosts way the new name goes into /etc/hosts, with one prompt (M4-18k2)"
+# Each pkexec run of marsad logs this line once.
+prompts() { grep -c "asking for admin rights to run marsa-helper" "$DATA/logs/marsad.log" || true; }
+
+step "a site the folder watcher finds asks for no password (manager's rule, M4-18k2)"
+before=$(prompts)
+mkdir -p "$CODE/watched"
+echo watched > "$CODE/watched/index.html"
+found=no
+for _ in $(seq 1 40); do
+  if marsa sites 2>/dev/null | grep -q "watched"; then found=yes; break; fi
+  sleep 0.5
+done
+[ "$found" = yes ] || fail "the watcher did not find $CODE/watched"
+sleep 2
+[ "$(prompts)" = "$before" ] || fail "a site the watcher found started pkexec"
+! grep -q "watched.test" /etc/hosts || fail "a site the watcher found went into /etc/hosts"
+
+step "marsa link after setup: the new names go into /etc/hosts with one prompt on the hosts way (M4-18k2)"
 mkdir -p "$HOME/second"
 echo second > "$HOME/second/index.html"
 code=0
@@ -473,16 +496,24 @@ out=$(marsa link second-site --path "$HOME/second" 2>&1) || code=$?
 echo "$out"
 [ "$code" = 0 ] || fail "marsa link exited with $code"
 if [ "$LINK" = no ]; then
-  grep -q "Adding second-site.test to /etc/hosts" <<<"$out" || fail "marsa link did not add the name"
+  # The watcher's site waited for this command.
+  grep -q "Adding second-site.test, watched.test to /etc/hosts" <<<"$out" || fail "marsa link did not name both sites"
   grep -q "Put the sites' .test names in /etc/hosts: done" <<<"$out" || fail "the hosts step is not done"
-  grep -qxF "127.0.0.1 second-site.test" /etc/hosts || fail "second-site.test is not in /etc/hosts"
+  for name in second-site.test watched.test laravel-app.test; do
+    grep -qxF "127.0.0.1 $name" /etc/hosts || fail "$name is not in /etc/hosts"
+  done
+  [ "$(prompts)" = "$((before + 1))" ] || fail "expected one prompt, got $(($(prompts) - before))"
 else
   ! grep -q "/etc/hosts" <<<"$out" || fail "marsa link touched /etc/hosts on the link way"
+  [ "$(prompts)" = "$before" ] || fail "marsa link started pkexec on the link way"
 fi
 wait_for_name second-site.test || fail "second-site.test does not resolve"
+wait_for_name watched.test || fail "watched.test does not resolve"
 # A second link of a known name asks nothing.
+asked=$(prompts)
 out=$(marsa link second-site --path "$HOME/second" 2>&1) || fail "marsa link again failed: $out"
 ! grep -q "Adding" <<<"$out" || fail "marsa link asked again for a name already there"
+[ "$(prompts)" = "$asked" ] || fail "marsa link started pkexec for names already there"
 run marsa unlink second-site
 
 step "removal, with the site running"

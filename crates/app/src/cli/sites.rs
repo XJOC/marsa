@@ -15,10 +15,11 @@ use std::process::ExitCode;
 
 use marsa_core::client::{ClientError, DaemonClient};
 use marsa_core::config::ConfigPaths;
+use marsa_core::helper::OpStatus;
 use marsa_core::platform::{OpenError, open_url};
 use marsa_core::runtimes::Runtime;
 use marsa_core::sites;
-use marsa_core::types::{Site, SiteList, SitePatch};
+use marsa_core::types::{HostsStatus, SetupReport, Site, SiteList, SitePatch};
 
 use super::daemon::{ClientFailure, connect, failure};
 use super::setup;
@@ -356,40 +357,99 @@ pub async fn run(command: &SitesCommand, data_dir: &Path) -> ExitCode {
     }
 }
 
-/// After `park` and `link` (task M4-18k2): where this system puts `.test`
-/// names in the hosts file, the sites the file lacks go in now, behind the
-/// password prompt. The user's own command asks for it; the daemon never
-/// does by itself. A daemon that cannot tell (an older one, say) is no
-/// error of the command, which is done: `marsa doctor` checks the file.
+/// After `park` and `link` (task M4-18k2): where `marsa setup` put this
+/// data folder's names in the hosts file, the sites the file lacks go in
+/// now, behind the password prompt. The user's own command asks for it; the
+/// daemon never does by itself. Before the first setup nothing happens:
+/// setup writes every name.
+///
+/// The site is saved whatever happens here. Exit code 1 when its name did
+/// not go into the hosts file, so it does not open yet; a line on stderr
+/// says why and what to do. A check that failed is a warning only.
 async fn add_to_hosts(client: &DaemonClient, data_dir: &Path) -> ExitCode {
-    let status = match client.hosts().await {
-        Ok(status) => status,
-        Err(err) => {
-            tracing::debug!(error = %err, "cannot ask marsad about the hosts file");
+    let status = client.hosts().await;
+    let status = status.map_err(|err| failure(&err, data_dir, None));
+    match hosts_to_add(status) {
+        Err(warning) => {
+            eprintln!("{warning}");
             return ExitCode::SUCCESS;
         }
-    };
-    if !status.used || status.missing.is_empty() {
-        return ExitCode::SUCCESS;
+        Ok(None) => return ExitCode::SUCCESS,
+        Ok(Some(line)) => eprintln!("{line}"),
     }
-    let missing: Vec<String> = status.missing.iter().map(|name| printable(name)).collect();
-    eprintln!("{}", strings::hosts_adding(&missing));
-    match client.sync_hosts().await {
-        Ok(report) => {
-            print!("{}", setup::render(&report, data_dir));
-            if let Some(error) = setup::error(&report) {
-                eprintln!("{}", strings::hosts_not_added(&error.message, &error.code));
-            }
-            setup::exit_code(&report)
+    let answer = client.sync_hosts().await;
+    let answer = answer.map_err(|err| failure(&err, data_dir, None));
+    let added = hosts_added(answer, data_dir);
+    print!("{}", added.stdout);
+    if let Some(line) = &added.stderr {
+        eprintln!("{line}");
+    }
+    if added.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// From the answer of `GET /v1/hosts`: the line before the sync, or `None`
+/// for no sync. `Err` is a warning for stderr: the check failed.
+fn hosts_to_add(status: Result<HostsStatus, ClientFailure>) -> Result<Option<String>, String> {
+    match status {
+        // A daemon of an older build, with no such route.
+        Err(failure) if failure.code == "not_found" => Ok(None),
+        Err(failure) => Err(strings::hosts_not_checked(&failure.code)),
+        Ok(status) if !status.used || status.missing.is_empty() => Ok(None),
+        Ok(status) => {
+            let missing: Vec<String> = status.missing.iter().map(|name| printable(name)).collect();
+            Ok(Some(strings::hosts_adding(&missing)))
         }
-        Err(err) => {
-            let failure = failure(&err, data_dir, None);
-            eprintln!(
-                "{}",
-                strings::hosts_not_added(&failure.message, &failure.code)
-            );
-            ExitCode::FAILURE
+    }
+}
+
+/// What `park` and `link` print after `POST /v1/hosts/sync`.
+#[derive(Debug, PartialEq, Eq)]
+struct Added {
+    stdout: String,
+    stderr: Option<String>,
+    /// The names are in the hosts file, or there was nothing to add.
+    ok: bool,
+}
+
+fn hosts_added(answer: Result<SetupReport, ClientFailure>, data_dir: &Path) -> Added {
+    let report = match answer {
+        // Another command added them first, or setup took the link since.
+        Err(failure) if failure.code == "hosts_not_used" => SetupReport::default(),
+        Err(failure) => {
+            return Added {
+                stdout: String::new(),
+                stderr: Some(strings::hosts_not_added(&failure.code)),
+                ok: false,
+            };
         }
+        Ok(report) => report,
+    };
+    let stdout = if report.results.is_empty() && report.skipped.is_empty() {
+        String::new()
+    } else {
+        setup::render(&report, data_dir)
+    };
+    let failed = report
+        .results
+        .iter()
+        .find(|result| result.status == OpStatus::Failed);
+    let code = report
+        .error
+        .as_ref()
+        .map(|error| error.code.clone())
+        .or_else(|| report.skipped.first().map(|skipped| skipped.code.clone()))
+        .or_else(|| failed.map(|result| result.code.clone().unwrap_or_default()));
+    Added {
+        stdout,
+        stderr: code
+            .as_deref()
+            .map(printable)
+            .map(|code| strings::hosts_not_added(&code)),
+        ok: code.is_none(),
     }
 }
 
@@ -549,7 +609,8 @@ pub(super) fn printable(text: &str) -> String {
 mod tests {
     use super::*;
     use clap::Parser as _;
-    use marsa_core::types::{SiteKind, SkippedFolder};
+    use marsa_core::helper::OpResult;
+    use marsa_core::types::{ApiError, SetupSkip, SiteKind, SkippedFolder};
 
     #[derive(Debug, clap::Parser)]
     struct Cli {
@@ -1153,6 +1214,96 @@ mod tests {
         assert_eq!(
             isolate.failure(&api(404, "site_not_found"), &data).message,
             "There is no site named \"shop\". Run \"marsa sites\" to see them."
+        );
+    }
+
+    fn client_failure(code: &str) -> ClientFailure {
+        ClientFailure {
+            code: code.to_owned(),
+            message: "x".to_owned(),
+        }
+    }
+
+    /// Task M4-18k2: whether `park` and `link` sync, from `GET /v1/hosts`.
+    #[test]
+    fn park_and_link_sync_only_names_the_block_lacks() {
+        let used = |missing: &[&str]| HostsStatus {
+            used: true,
+            missing: missing.iter().map(|name| (*name).to_owned()).collect(),
+        };
+        assert_eq!(hosts_to_add(Ok(HostsStatus::default())), Ok(None));
+        assert_eq!(hosts_to_add(Ok(used(&[]))), Ok(None));
+        let line = hosts_to_add(Ok(used(&["shop.test"]))).unwrap().unwrap();
+        assert!(line.starts_with("Adding shop.test to "), "{line}");
+        // An older daemon: no word. Any other failure: a warning.
+        assert_eq!(hosts_to_add(Err(client_failure("not_found"))), Ok(None));
+        let warning = hosts_to_add(Err(client_failure("internal_error"))).unwrap_err();
+        assert!(warning.ends_with("[internal_error]"), "{warning}");
+    }
+
+    /// Task M4-18k2: what `park` and `link` print after the sync, and
+    /// whether the names went in.
+    #[test]
+    fn park_and_link_say_when_the_names_did_not_go_in() {
+        let data = Path::new("/data");
+        let result = |status, code: Option<&str>| OpResult {
+            op: "hosts_sync".to_owned(),
+            status,
+            code: code.map(str::to_owned),
+            message: code.map(|_| "x".to_owned()),
+        };
+        let done = SetupReport {
+            results: vec![result(OpStatus::Done, None)],
+            ..SetupReport::default()
+        };
+        let added = hosts_added(Ok(done), data);
+        assert!(added.stdout.ends_with(": done.\n"), "{}", added.stdout);
+        assert_eq!((added.stderr, added.ok), (None, true));
+
+        // Nothing to add after all: no word, not even "Nothing to set up".
+        let empty = Added {
+            stdout: String::new(),
+            stderr: None,
+            ok: true,
+        };
+        assert_eq!(hosts_added(Ok(SetupReport::default()), data), empty);
+        assert_eq!(
+            hosts_added(Err(client_failure("hosts_not_used")), data),
+            empty
+        );
+
+        let not_added = |added: Added, code: &str| {
+            assert!(!added.ok, "{code}");
+            let line = added.stderr.unwrap();
+            assert!(line.starts_with("marsa: "), "{line}");
+            assert!(line.ends_with(&format!("[{code}]")), "{line}");
+        };
+        let cancelled = SetupReport {
+            error: Some(ApiError {
+                code: "setup_cancelled".to_owned(),
+                message: "x".to_owned(),
+            }),
+            ..SetupReport::default()
+        };
+        not_added(hosts_added(Ok(cancelled), data), "setup_cancelled");
+        let skipped = SetupReport {
+            skipped: vec![SetupSkip {
+                op: "hosts_sync".to_owned(),
+                code: "hosts_too_many_names".to_owned(),
+            }],
+            ..SetupReport::default()
+        };
+        let added = hosts_added(Ok(skipped), data);
+        assert!(added.stdout.contains("skipped"), "{}", added.stdout);
+        not_added(added, "hosts_too_many_names");
+        let failed = SetupReport {
+            results: vec![result(OpStatus::Failed, Some("hosts_block_broken"))],
+            ..SetupReport::default()
+        };
+        not_added(hosts_added(Ok(failed), data), "hosts_block_broken");
+        not_added(
+            hosts_added(Err(client_failure("setup_running")), data),
+            "setup_running",
         );
     }
 }
