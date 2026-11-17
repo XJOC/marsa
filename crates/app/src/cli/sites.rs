@@ -21,6 +21,7 @@ use marsa_core::sites;
 use marsa_core::types::{Site, SiteList, SitePatch};
 
 use super::daemon::{ClientFailure, connect, failure};
+use super::setup;
 use super::strings::{self, Details};
 
 /// The sites commands. `bin/marsa.rs` flattens them into the top level, so
@@ -147,6 +148,12 @@ impl Action {
                 name: checked(name)?,
             },
         })
+    }
+
+    /// Whether the action may add a site, and so a name the hosts file
+    /// lacks: `park` and `link`.
+    fn adds_sites(&self) -> bool {
+        matches!(self, Action::Park { .. } | Action::Link { .. })
     }
 
     async fn send(&self, client: &DaemonClient) -> Result<SiteList, ClientError> {
@@ -330,7 +337,11 @@ pub async fn run(command: &SitesCommand, data_dir: &Path) -> ExitCode {
         Ok(list) => match action.finish(&list, open_url) {
             Ok(text) => {
                 print!("{text}");
-                ExitCode::SUCCESS
+                if action.adds_sites() {
+                    add_to_hosts(&client, data_dir).await
+                } else {
+                    ExitCode::SUCCESS
+                }
             }
             Err(failure) => failure.report(),
         },
@@ -341,6 +352,43 @@ pub async fn run(command: &SitesCommand, data_dir: &Path) -> ExitCode {
                 _ => None,
             };
             action.failure_with(&err, data_dir, list.as_ref()).report()
+        }
+    }
+}
+
+/// After `park` and `link` (task M4-18k2): where this system puts `.test`
+/// names in the hosts file, the sites the file lacks go in now, behind the
+/// password prompt. The user's own command asks for it; the daemon never
+/// does by itself. A daemon that cannot tell (an older one, say) is no
+/// error of the command, which is done: `marsa doctor` checks the file.
+async fn add_to_hosts(client: &DaemonClient, data_dir: &Path) -> ExitCode {
+    let status = match client.hosts().await {
+        Ok(status) => status,
+        Err(err) => {
+            tracing::debug!(error = %err, "cannot ask marsad about the hosts file");
+            return ExitCode::SUCCESS;
+        }
+    };
+    if !status.used || status.missing.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+    let missing: Vec<String> = status.missing.iter().map(|name| printable(name)).collect();
+    eprintln!("{}", strings::hosts_adding(&missing));
+    match client.sync_hosts().await {
+        Ok(report) => {
+            print!("{}", setup::render(&report, data_dir));
+            if let Some(error) = setup::error(&report) {
+                eprintln!("{}", strings::hosts_not_added(&error.message, &error.code));
+            }
+            setup::exit_code(&report)
+        }
+        Err(err) => {
+            let failure = failure(&err, data_dir, None);
+            eprintln!(
+                "{}",
+                strings::hosts_not_added(&failure.message, &failure.code)
+            );
+            ExitCode::FAILURE
         }
     }
 }

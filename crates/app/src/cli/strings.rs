@@ -523,6 +523,9 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             .into(),
         // Linux before systemd 250 with systemd-networkd, or without
         // systemd-resolved (task M4-18k), and Windows (task M4-19).
+        "hosts_not_used" => "This system sends .test names to Marsa without the hosts \
+             file, so there is nothing to add there."
+            .into(),
         "hosts_read" => format!(
             "Marsa did not change the hosts file ({HOSTS_FILE}): it cannot be read, or it is \
              a link, read-only, or larger than 16 MiB. Fix the file, then run \"marsa setup\" \
@@ -1086,6 +1089,38 @@ const HOSTS_FILE: &str = if cfg!(windows) {
 } else {
     "/etc/hosts"
 };
+
+/// The most site names [`hosts_adding`] lists.
+const HOSTS_LISTED: usize = 5;
+
+/// Before the prompt of `marsa park` and `marsa link`, on stderr: the sites
+/// that go into the hosts file (task M4-18k2).
+pub fn hosts_adding(missing: &[String]) -> String {
+    let mut names = missing
+        .iter()
+        .take(HOSTS_LISTED)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if missing.len() > HOSTS_LISTED {
+        names.push_str(&format!(", and {} more", missing.len() - HOSTS_LISTED));
+    }
+    let open = if missing.len() == 1 {
+        "it opens"
+    } else {
+        "they open"
+    };
+    format!("Adding {names} to {HOSTS_FILE} so that {open}: Linux asks for your password.")
+}
+
+/// When `marsa park` or `marsa link` did not add its sites to the hosts
+/// file: why (`reason`, the text of `code`), and what to do.
+pub fn hosts_not_added(reason: &str, code: &str) -> String {
+    format!(
+        "{reason} The new sites do not open until they are in {HOSTS_FILE}: run \"marsa setup\" \
+         to add them. [{code}]"
+    )
+}
 
 /// A helper operation, as a step of `marsa setup`. An operation this build
 /// does not know shows its own name.
@@ -1702,6 +1737,7 @@ mod tests {
         "hosts_read",
         "hosts_write",
         "hosts_block_broken",
+        "hosts_not_used",
         "setup_pkexec_missing",
         "setup_caddy_ports_failed",
         "resolved_stopped",
@@ -2028,6 +2064,31 @@ mod tests {
         assert_eq!(
             checking(Some(Runtime::Caddy), Some("2.11.8")),
             "Checking Caddy 2.11.8..."
+        );
+    }
+
+    /// Task M4-18k2: the line before the prompt of `park` and `link`, and
+    /// the one when the names did not go in.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn park_and_link_say_which_sites_go_into_etc_hosts() {
+        let names =
+            |count: usize| -> Vec<String> { (1..=count).map(|i| format!("s{i}.test")).collect() };
+        assert_eq!(
+            hosts_adding(&names(1)),
+            "Adding s1.test to /etc/hosts so that it opens: Linux asks for your password."
+        );
+        assert_eq!(
+            hosts_adding(&names(7)),
+            "Adding s1.test, s2.test, s3.test, s4.test, s5.test, and 2 more to /etc/hosts so \
+             that they open: Linux asks for your password."
+        );
+        let reason = message("setup_cancelled", &Details::default());
+        assert_eq!(
+            hosts_not_added(&reason, "setup_cancelled"),
+            "The password prompt was cancelled, so nothing was changed. Run \"marsa setup\" \
+             again when you are ready. The new sites do not open until they are in /etc/hosts: \
+             run \"marsa setup\" to add them. [setup_cancelled]"
         );
     }
 }

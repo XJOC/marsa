@@ -47,9 +47,9 @@ use crate::platform::spawn::{EXIT_ALREADY_RUNNING, marsad_path, spawn_marsad};
 use crate::runtimes::Runtime;
 use crate::types::{
     API_VERSION, AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, ErrorBody,
-    Event, Health, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest, RuntimeList,
-    ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, UninstallReport, Uninstalled,
-    XdebugRequest, XdebugState,
+    Event, Health, HostsStatus, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest,
+    RuntimeList, ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, UninstallReport,
+    Uninstalled, XdebugRequest, XdebugState,
 };
 use error::daemon_text;
 
@@ -75,6 +75,15 @@ const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// its CA when there is none yet. A test in the daemon's `setup_api.rs`
 /// holds this above the sum of the daemon's own limits.
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(14 * 60);
+/// For `GET /v1/hosts`: the daemon runs `systemctl` up to four times, each
+/// for up to 10 seconds.
+const HOSTS_TIMEOUT: Duration = Duration::from_secs(60);
+/// For `POST /v1/hosts/sync`: longer than the daemon's slowest sync, the
+/// four `systemctl` checks of [`HOSTS_TIMEOUT`], then 5 minutes at the
+/// password prompt and 2 seconds for the helper's pipes. A test in the
+/// daemon's `setup_api/hosts.rs` holds this above the sum of the daemon's
+/// own limits.
+pub const HOSTS_SYNC_TIMEOUT: Duration = Duration::from_secs(7 * 60);
 /// For `POST /v1/uninstall`: longer than the daemon's slowest uninstall,
 /// about 15 minutes and 20 seconds when every program runs to its limit. The
 /// user has 5 minutes at the admin prompt, then up to 5 at each of the two
@@ -408,6 +417,31 @@ impl DaemonClient {
     /// cancelled prompt is not an error: it is in [`SetupReport::error`].
     pub async fn setup(&self) -> Result<SetupReport, ClientError> {
         self.call(Method::POST, &["v1", "setup"], SETUP_TIMEOUT)
+            .await
+    }
+
+    /// `GET /v1/hosts` (task M4-18k2): whether this system puts `.test`
+    /// names in its hosts file, and which sites are not there yet. Shows no
+    /// prompt.
+    pub async fn hosts(&self) -> Result<HostsStatus, ClientError> {
+        self.call(Method::GET, &["v1", "hosts"], HOSTS_TIMEOUT)
+            .await
+    }
+
+    /// `POST /v1/hosts/sync` (task M4-18k2): the names of every site go into
+    /// Marsa's block in the hosts file, behind the password prompt, if any
+    /// is missing; with none missing, nothing runs. Only for a command of
+    /// the user: never call it from a background task. Waits up to
+    /// [`HOSTS_SYNC_TIMEOUT`]. The helper's result, or why it did not run,
+    /// is in the report, as for setup.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `hosts_not_used` (409) where this system does
+    /// not use the hosts file, and `setup_running` or `uninstall_running`
+    /// (409) while one of those runs.
+    pub async fn sync_hosts(&self) -> Result<SetupReport, ClientError> {
+        self.call(Method::POST, &["v1", "hosts", "sync"], HOSTS_SYNC_TIMEOUT)
             .await
     }
 

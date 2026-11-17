@@ -69,6 +69,7 @@
 //! Every program runs through [`Runner`], so the tests run none: they pass a
 //! fake that records each call and answers from fixtures.
 
+pub mod hosts;
 pub mod linux_dns;
 pub mod pkexec;
 pub mod user_trust;
@@ -222,14 +223,16 @@ const PROTECTED_FOLDERS: [&str; 3] = ["Desktop", "Documents", "Downloads"];
 /// Marsa there.
 const INSTALL_BIN: &str = "~/Library/Application Support/dev.marsa.Marsa/bin";
 
-/// The routes on `setup`, for `api::router` to merge before its fallbacks.
+/// The routes on `setup`, for `api::router` to merge before its fallbacks:
+/// `POST /v1/setup`, and the hosts routes of [`hosts`] (task M4-18k2).
 /// The uninstall route gets the same [`Setup`], so the two never run at once.
 pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
+    let hosts = hosts::routes(Arc::clone(&setup));
     let handler = move |State(daemon): State<Arc<Daemon>>| {
         let setup = Arc::clone(&setup);
         async move { start(daemon, setup).await }
     };
-    Router::new().route("/v1/setup", post(handler))
+    Router::new().route("/v1/setup", post(handler)).merge(hosts)
 }
 
 /// The routes with the given [`Setup`]: tests pass a fake [`Runner`].
@@ -631,6 +634,11 @@ impl Setup {
     /// This system, if Marsa has a build for it.
     pub(super) fn platform(&self) -> Option<Platform> {
         self.platform
+    }
+
+    /// The hosts file whose Marsa block is read on Linux, if any.
+    pub(super) fn hosts_file(&self) -> Option<&Path> {
+        self.hosts_file.as_deref()
     }
 
     /// The home folder of the user `marsad` runs as, if known.
@@ -1153,7 +1161,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
 
 /// The host names of the daemon's sites, sorted, each once. None before the
 /// first site list.
-fn host_names(daemon: &Daemon) -> Vec<String> {
+pub(super) fn host_names(daemon: &Daemon) -> Vec<String> {
     let names: BTreeSet<String> = daemon
         .sites()
         .map(|list| list.sites.iter().map(Site::host).collect())
@@ -1196,7 +1204,7 @@ pub(super) fn is_macos(platform: Platform) -> bool {
     matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64)
 }
 
-fn is_linux(platform: Platform) -> bool {
+pub(super) fn is_linux(platform: Platform) -> bool {
     matches!(platform, Platform::LinuxX64 | Platform::LinuxArm64)
 }
 
@@ -1783,7 +1791,7 @@ mod tests {
         }
 
         /// How many times `pkexec` ran.
-        fn pkexec_calls(&self) -> usize {
+        pub(super) fn pkexec_calls(&self) -> usize {
             self.programs()
                 .iter()
                 .filter(|program| **program == pkexec::PKEXEC)
@@ -1791,7 +1799,7 @@ mod tests {
         }
 
         /// The request the helper would have got, from the last `pkexec`.
-        fn pkexec_request(&self) -> HelperRequest {
+        pub(super) fn pkexec_request(&self) -> HelperRequest {
             let calls = self.calls();
             let call = calls.iter().rfind(|call| call.program == pkexec::PKEXEC);
             let request = &call.expect("a pkexec call").args[3];
@@ -2072,7 +2080,7 @@ mod tests {
 
     /// A helper file at `path`, with the modes of an install, and its
     /// folder.
-    fn make_helper(path: &Path) {
+    pub(super) fn make_helper(path: &Path) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "").unwrap();
         #[cfg(unix)]
@@ -2481,7 +2489,7 @@ mod tests {
 
     /// What `systemctl` says on a test system.
     #[derive(Debug, Clone, Copy)]
-    struct Systemd {
+    pub(super) struct Systemd {
         /// The first line of `systemctl --version`.
         version: &'static str,
         /// The exit code of `is-active --quiet systemd-resolved.service`.
@@ -2491,7 +2499,7 @@ mod tests {
     }
 
     /// Ubuntu 24.04: the `marsa0` link, networkd or not.
-    const UBUNTU_2404: Systemd = Systemd {
+    pub(super) const UBUNTU_2404: Systemd = Systemd {
         version: "systemd 255 (255.4-1ubuntu8)",
         resolved: 0,
         networkd: (
@@ -2500,13 +2508,13 @@ mod tests {
         ),
     };
     /// Ubuntu 22.04 with systemd-networkd, as on servers and CI runners.
-    const UBUNTU_2204_SERVER: Systemd = Systemd {
+    pub(super) const UBUNTU_2204_SERVER: Systemd = Systemd {
         version: "systemd 249 (249.11-0ubuntu3.12)",
         resolved: 0,
         networkd: ("active\nactive\ninactive\n", "enabled\nenabled\ndisabled\n"),
     };
     /// Ubuntu 22.04 desktop: NetworkManager, networkd off for good.
-    const UBUNTU_2204_DESKTOP: Systemd = Systemd {
+    pub(super) const UBUNTU_2204_DESKTOP: Systemd = Systemd {
         version: "systemd 249 (249.11-0ubuntu3.12)",
         resolved: 0,
         networkd: (
@@ -2515,7 +2523,7 @@ mod tests {
         ),
     };
     /// Debian 12 as installed: no systemd-resolved.
-    const DEBIAN_12: Systemd = Systemd {
+    pub(super) const DEBIAN_12: Systemd = Systemd {
         version: "systemd 252 (252.30-1~deb12u2)",
         resolved: 3,
         networkd: (
@@ -2550,7 +2558,7 @@ mod tests {
     }
 
     /// `system`, whose `pkexec` gives `answer(request)`.
-    fn linux_fake_on(
+    pub(super) fn linux_fake_on(
         system: Systemd,
         answer: impl Fn(HelperRequest) -> io::Result<RunOutput> + Send + Sync + 'static,
     ) -> Arc<Fake> {
@@ -2563,7 +2571,10 @@ mod tests {
 
     /// The helper's answer: `done` for each op of `request`, except the
     /// `(op, code)` pairs of `failed`.
-    fn answer_for(request: &HelperRequest, failed: &[(&str, &str)]) -> io::Result<RunOutput> {
+    pub(super) fn answer_for(
+        request: &HelperRequest,
+        failed: &[(&str, &str)],
+    ) -> io::Result<RunOutput> {
         let results: Vec<Value> = request
             .ops
             .iter()

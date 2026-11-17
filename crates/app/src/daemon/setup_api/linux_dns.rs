@@ -32,6 +32,7 @@ use std::path::Path;
 
 use marsa_core::dns::{self, LinuxFacts, LinuxPath, NETWORKD_UNITS};
 use marsa_core::helper::{HelperOp, OpResult, OpStatus};
+use marsa_core::types::HostsStatus;
 use tokio_util::sync::CancellationToken;
 
 use super::{CHECK_LIMIT, Runner};
@@ -128,6 +129,31 @@ pub fn read_block(path: &Path) -> Option<BTreeSet<String>> {
             tracing::warn!(path = %path.display(), error = %err, "cannot read the hosts file");
             None
         }
+    }
+}
+
+/// What `GET /v1/hosts` answers on Linux: the hosts file is used on the
+/// hosts way, and also where it holds Marsa's block (the helper chose it at
+/// the last setup); then `missing` lists the `names` the block lacks.
+pub fn status(
+    runner: &dyn Runner,
+    hosts_file: Option<&Path>,
+    names: &[String],
+    stop: &CancellationToken,
+) -> HostsStatus {
+    let path = dns::linux_path(facts(runner, stop));
+    let block = hosts_file.and_then(read_block);
+    if path == LinuxPath::Link && block.is_none() {
+        return HostsStatus::default();
+    }
+    let missing = names
+        .iter()
+        .filter(|name| !block.as_ref().is_some_and(|block| block.contains(*name)))
+        .cloned()
+        .collect();
+    HostsStatus {
+        used: true,
+        missing,
     }
 }
 

@@ -532,6 +532,23 @@ pub struct SetupReport {
     pub error: Option<ApiError>,
 }
 
+/// The answer to `GET /v1/hosts` (task M4-18k2): whether this system puts
+/// `.test` names in its hosts file, and which sites Marsa's block there
+/// lacks. `POST /v1/hosts/sync` adds them, behind the password prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostsStatus {
+    /// `true` on Linux where the `marsa0` link cannot be used, or where the
+    /// hosts file holds Marsa's block. `false` on macOS, on Windows (its
+    /// helper service keeps the block up to date by itself), and on Linux
+    /// with the link.
+    pub used: bool,
+    /// The host names of the sites that are not in the block, sorted. Such
+    /// a site does not open until they are added. Empty when `used` is
+    /// `false`.
+    #[serde(default)]
+    pub missing: Vec<String>,
+}
+
 /// An operation setup left out of the helper request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupSkip {
