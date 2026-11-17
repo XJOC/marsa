@@ -52,8 +52,6 @@ pub const HOSTS_FILE: &str = "/etc/hosts";
 /// The most of the hosts file that is read: the helper's own limit. A
 /// larger file counts as one with no block, as the helper leaves it alone.
 const MAX_HOSTS_BYTES: u64 = 16 * 1024 * 1024;
-/// `systemctl is-active` for a unit that is not active (LSB "not running").
-const INACTIVE: i32 = 3;
 
 pub const RESOLVED_INSTALL: &str = "resolved_install";
 pub const HOSTS_SYNC: &str = "hosts_sync";
@@ -67,17 +65,13 @@ const HOSTS_ANSWERS: [&str; 2] = ["resolved_use_hosts", "resolved_not_running"];
 
 /// The facts of [`dns::linux_path`], each read with `systemctl`.
 /// systemd-networkd is asked about only where the answer counts: on
-/// systemd 249, and only while systemd-resolved may run.
+/// systemd 249, and only while systemd-resolved runs.
 pub fn facts(runner: &dyn Runner, stop: &CancellationToken) -> LinuxFacts {
     let systemd = output(runner, &["--version"], stop)
         .filter(|(code, _)| *code == 0)
         .and_then(|(_, stdout)| dns::systemd_version(&stdout));
-    let resolved_runs = match output(runner, &["is-active", "--quiet", RESOLVED], stop) {
-        Some((0, _)) => Some(true),
-        Some((INACTIVE, _)) => Some(false),
-        _ => None,
-    };
-    let asks_networkd = resolved_runs != Some(false)
+    let resolved_runs = resolved_runs(runner, stop);
+    let asks_networkd = resolved_runs == Some(true)
         && systemd.is_some_and(|version| {
             (dns::LINK_BEFORE_250..dns::FIRST_LINK_SYSTEMD).contains(&version)
         });
@@ -101,6 +95,32 @@ pub fn facts(runner: &dyn Runner, stop: &CancellationToken) -> LinuxFacts {
 }
 
 const RESOLVED: &str = "systemd-resolved.service";
+
+/// Whether systemd-resolved runs, as the helper reads it: exit 0 runs; any
+/// other exit, or a `systemctl` that cannot start, does not (the helper
+/// answers `resolved_not_running` there). `None` only when the read did not
+/// end: it took longer than [`CHECK_LIMIT`], the daemon stops, or a signal
+/// stopped it. The helper is asked then, so one slow `systemctl` never
+/// takes out a link that works (review of #130).
+fn resolved_runs(runner: &dyn Runner, stop: &CancellationToken) -> Option<bool> {
+    let args = ["is-active", "--quiet", RESOLVED].map(OsString::from);
+    match runner.run(SYSTEMCTL, &args, CHECK_LIMIT, stop) {
+        Ok(output) => output.code.map(|code| code == 0),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+            ) =>
+        {
+            tracing::warn!(error = %err, "systemctl is-active did not end");
+            None
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot run systemctl, so systemd-resolved counts as stopped");
+            Some(false)
+        }
+    }
+}
 
 /// The exit code and the output of `systemctl <args>`, or `None` if it did
 /// not run to its end: it could not start, took longer than

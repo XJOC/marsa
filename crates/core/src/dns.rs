@@ -125,9 +125,8 @@ pub struct LinuxFacts {
     /// The first number of `systemctl --version`; `None` if it could not
     /// be read.
     pub systemd: Option<u32>,
-    /// Whether systemd-resolved runs (`systemctl is-active`); `None` if
-    /// that could not be read, which counts as "does not run", as in the
-    /// helper (`resolved_not_running`).
+    /// Whether systemd-resolved runs (`systemctl is-active`, as the helper
+    /// reads it); `None` if the read did not end, and the helper is asked.
     pub resolved_runs: Option<bool>,
     /// Whether systemd-networkd may run, now or at the next boot
     /// ([`networkd_may_run`]). Only systemd 249 asks.
@@ -145,11 +144,11 @@ pub const LINK_BEFORE_250: u32 = 249;
 /// `marsa-helper`, which stays the judge: an unknown version means the
 /// link, so the helper says what it could not read
 /// (`resolved_systemd_unknown`). Hosts lines work with any resolver, so a
-/// system where systemd-resolved does not run (Debian 12 by default), or
-/// where `systemctl` cannot tell, gets them too: there the helper would
-/// refuse the link with `resolved_not_running`.
+/// system where systemd-resolved does not run (Debian 12 by default) gets
+/// them too: there the helper would refuse the link with
+/// `resolved_not_running`.
 pub fn linux_path(facts: LinuxFacts) -> LinuxPath {
-    if facts.resolved_runs != Some(true) {
+    if facts.resolved_runs == Some(false) {
         return LinuxPath::Hosts;
     }
     match facts.systemd {
@@ -351,12 +350,11 @@ mod tests {
             (facts(Some(247), None, false), Hosts),
             // The helper says what it could not read.
             (facts(None, Some(true), true), Link),
-            // Hosts lines need no resolver at all. A resolved that
-            // systemctl cannot tell about is one the helper refuses.
+            (facts(Some(255), None, true), Link),
+            (facts(None, None, true), Link),
+            // Hosts lines need no resolver at all.
             (facts(Some(255), Some(false), false), Hosts),
             (facts(None, Some(false), false), Hosts),
-            (facts(Some(255), None, true), Hosts),
-            (facts(None, None, true), Hosts),
         ];
         for (facts, path) in table {
             assert_eq!(linux_path(facts), path, "{facts:?}");

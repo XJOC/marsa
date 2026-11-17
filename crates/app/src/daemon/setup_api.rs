@@ -744,6 +744,14 @@ impl Setup {
                 .push(skip(linux_dns::RESOLVED_INSTALL, &code));
             let mut ops = Vec::new();
             push_hosts_ops(&mut ops, report, names);
+            // No names to write, no prompt: after `resolved_use_hosts` the
+            // helper took an earlier link out itself.
+            if !ops
+                .iter()
+                .any(|op| matches!(op, HelperOp::HostsSync { .. }))
+            {
+                return;
+            }
             (ops, SETUP_HOSTS_NOT_WRITTEN)
         } else if block && linux_dns::link_made(&report.results) {
             tracing::info!("the link is made; taking Marsa's old block out of the hosts file");
@@ -753,6 +761,12 @@ impl Setup {
         };
         match self.apply(ops, platform, stop) {
             Ok(results) => report.results.extend(results),
+            // The helper may have run: their texts say so.
+            Err(error)
+                if matches!(error.code.as_str(), "setup_timed_out" | "setup_interrupted") =>
+            {
+                report.error = Some(error);
+            }
             Err(error) => {
                 tracing::warn!(
                     code = %error.code,
@@ -3114,21 +3128,14 @@ mod tests {
         }
     }
 
-    /// `systemctl` that cannot run or cannot tell: the helper would refuse
-    /// the link (`resolved_not_running`), so the hosts way at once, with
-    /// one prompt (review of #130).
+    /// `systemctl` that cannot run, or that says resolved is not active in
+    /// any way: the helper would refuse the link (`resolved_not_running`),
+    /// so the hosts way at once, with one prompt (review of #130).
     #[test]
-    fn a_systemctl_that_cannot_tell_means_the_hosts_file() {
-        let answers: [fn() -> io::Result<RunOutput>; 3] = [
+    fn a_systemctl_that_says_no_means_the_hosts_file() {
+        let answers: [fn() -> io::Result<RunOutput>; 2] = [
             || Err(io::Error::from(io::ErrorKind::NotFound)),
             || exit(1, "Failed to connect to bus"),
-            || {
-                Ok(RunOutput {
-                    code: None,
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                })
-            },
         ];
         for answer in answers {
             let dir = Dir::new(true);
@@ -3145,6 +3152,84 @@ mod tests {
             let dns = vec![HelperOp::ResolvedRemove, hosts_sync(&["a.test"])];
             assert_eq!(requests(&fake), [linux_request(dns).ops]);
         }
+    }
+
+    /// A read of systemd-resolved that did not end (a timeout, a signal):
+    /// the helper is asked, so a slow `systemctl` never takes out a link
+    /// that works (review of #130).
+    #[test]
+    fn a_systemctl_that_did_not_end_leaves_it_to_the_helper() {
+        let answers: [fn() -> io::Result<RunOutput>; 2] = [
+            || Err(io::Error::from(io::ErrorKind::TimedOut)),
+            || {
+                Ok(RunOutput {
+                    code: None,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            },
+        ];
+        for answer in answers {
+            let dir = Dir::new(true);
+            let fake = Fake::answering(move |program, args| match program {
+                linux_dns::SYSTEMCTL if args[0] == "--version" => systemctl(UBUNTU_2404, args),
+                linux_dns::SYSTEMCTL => answer(),
+                pkexec::PKEXEC => answer_for(&serde_json::from_str(&args[3]).unwrap(), &[]),
+                other => panic!("{other} ran"),
+            });
+            run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+            let dns = vec![HelperOp::ResolvedInstall { port: 18053 }];
+            assert_eq!(requests(&fake), [linux_request(dns).ops]);
+        }
+    }
+
+    /// The helper chose the hosts file, but `hosts_sync` cannot be sent: no
+    /// second prompt that would write nothing.
+    #[test]
+    fn no_second_prompt_without_names_to_write() {
+        let dir = Dir::new(true);
+        let fake = linux_fake_on(UBUNTU_2404, |request| {
+            answer_for(&request, &[("resolved_install", "resolved_use_hosts")])
+        });
+        let setup = linux_setup(&fake, dir.helper(), dir.home());
+        let stop = CancellationToken::new();
+        let report = setup.run(
+            dir.dir.path(),
+            CaddyInput::default(),
+            Platform::LinuxX64,
+            dir.caddy.as_ref(),
+            None,
+            &stop,
+        );
+        assert_eq!(fake.pkexec_calls(), 1);
+        assert_eq!(
+            report.skipped,
+            [
+                skip("resolved_install", "resolved_use_hosts"),
+                skip("hosts_sync", "hosts_sites_unknown")
+            ]
+        );
+        assert_eq!(report.error, None);
+    }
+
+    /// A second request that timed out keeps its own code: the helper may
+    /// have run, and that text says so.
+    #[test]
+    fn a_second_request_that_timed_out_says_it_may_have_run() {
+        let dir = Dir::new(true);
+        let fake = linux_fake_on(UBUNTU_2404, |request| {
+            if request.ops.len() == 2 {
+                Err(io::Error::from(io::ErrorKind::TimedOut))
+            } else {
+                answer_for(&request, &[("resolved_install", "resolved_use_hosts")])
+            }
+        });
+        let report = run_linux_with(
+            &linux_setup(&fake, dir.helper(), dir.home()),
+            &dir,
+            &["a.test"],
+        );
+        assert_eq!(error_code(&report), Some("setup_timed_out"));
     }
 
     /// The slowest Linux setup stays under [`SLOWEST_SETUP`]: four

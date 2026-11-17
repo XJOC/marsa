@@ -237,6 +237,38 @@ mod tests {
         );
     }
 
+    /// Linux: a second request that did not run (task M4-18k2). The steps
+    /// above it stand, and the error says so.
+    #[test]
+    fn a_second_request_that_did_not_run_says_the_steps_above_are_done() {
+        let report = SetupReport {
+            results: vec![
+                result("trust_install", OpStatus::Done, None),
+                result("ports_install", OpStatus::Done, None),
+            ],
+            skipped: vec![skip("resolved_install", "resolved_use_hosts")],
+            error: Some(ApiError {
+                code: "setup_hosts_not_written".into(),
+                message: "x".into(),
+            }),
+            ..SetupReport::default()
+        };
+        let text = render(&report, &data());
+        assert!(
+            text.starts_with("Trust Marsa's HTTPS certificates: done.\n"),
+            "{text}"
+        );
+        let failure = error(&report).unwrap();
+        assert_eq!(failure.code, "setup_hosts_not_written");
+        assert!(
+            failure
+                .message
+                .starts_with("The steps above are done, but the second password"),
+            "{}",
+            failure.message
+        );
+    }
+
     #[test]
     fn a_failed_step_and_no_ca_say_why() {
         let report = SetupReport {
