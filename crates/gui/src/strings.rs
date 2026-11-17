@@ -424,6 +424,10 @@ fn setup_step(op: &str) -> String {
         "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
         "resolved_install" => "Send .test names to Marsa".to_owned(),
         "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
+        // The hosts way on Linux (task M4-18k).
+        "resolved_remove" => "Take out Marsa's link for .test names".to_owned(),
+        "hosts_sync" => "Put the sites' .test names in the hosts file".to_owned(),
+        "hosts_remove" => "Take Marsa's names out of the hosts file".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -1033,6 +1037,25 @@ fn error_message(code: &str) -> Option<&'static str> {
              Install the package pkexec (Debian, Ubuntu), polkit (Fedora), or policykit-1 \
              (older systems), then run setup again."
         }
+        // Linux, the second request of setup (task M4-18k2).
+        "setup_hosts_not_written" => {
+            "The steps above are done, but the second password prompt did not go through, so \
+             the sites' .test names are not in /etc/hosts yet and the sites do not open. Run \
+             setup again."
+        }
+        "setup_hosts_not_removed" => {
+            "The steps above are done, and .test names now reach Marsa without /etc/hosts. The \
+             second password prompt did not go through, so Marsa's old lines stay in \
+             /etc/hosts; they do no harm. Run setup again to take them out."
+        }
+        "hosts_sites_unknown" => {
+            "Marsa could not read its site list, so it left the hosts file as it is. Look at \
+             the sites, then run setup again."
+        }
+        "hosts_too_many_names" => {
+            "There are more sites than Marsa can put in the hosts file at once (1000 names), \
+             so it left the file as it is. Remove sites you do not use, then run setup again."
+        }
         "setup_caddy_ports_failed" => {
             "Linux now lets Caddy use ports 80 and 443, but Caddy did not take them. Most often \
              another program listens there (Apache, nginx). Stop it, then restart Caddy; the \
@@ -1046,9 +1069,24 @@ fn error_message(code: &str) -> Option<&'static str> {
             "Linux did not let Marsa change its files for .test names. Run setup again; if it \
              repeats, report it."
         }
+        // Setup then puts the names in /etc/hosts (task M4-18k2).
         "resolved_not_running" => {
-            "Marsa sends .test names to its DNS server through systemd-resolved, which does not \
-             run here, so nothing was changed. Start systemd-resolved, then run setup again."
+            "systemd-resolved does not run here, so Marsa did not make its link for .test \
+             names: they go into /etc/hosts instead."
+        }
+        // Linux (task M4-18k) and Windows (task M4-19).
+        "hosts_read" => {
+            "Marsa did not change the hosts file: it cannot be read, or it is a link, \
+             read-only, or larger than 16 MiB. Fix the file, then run setup again."
+        }
+        "hosts_write" => {
+            "Marsa could not write the hosts file. Another program may hold it (some security \
+             tools do); close it, then run setup again."
+        }
+        "hosts_block_broken" => {
+            "The hosts file has a \"# Marsa start\" line without its \"# Marsa end\" line, or \
+             the other way round, so Marsa left it as it is. Remove Marsa's lines from it, then \
+             run setup again."
         }
         "resolved_tool_missing" => {
             "The ip program (package iproute2) is not on this system, so Marsa could not make \
@@ -1623,6 +1661,13 @@ mod tests {
             "resolved_check_failed",
             "resolved_use_hosts",
             "resolved_systemd_unknown",
+            "hosts_read",
+            "hosts_write",
+            "hosts_block_broken",
+            "hosts_sites_unknown",
+            "hosts_too_many_names",
+            "setup_hosts_not_written",
+            "setup_hosts_not_removed",
             "resolved_restart_failed",
             "resolved_stopped",
             "ports_foreign",
@@ -1796,6 +1841,10 @@ mod tests {
             "Let Caddy use ports 80 and 443"
         );
         assert_eq!(setup_step("resolved_install"), "Send .test names to Marsa");
+        assert_eq!(
+            setup_step("hosts_sync"),
+            "Put the sites' .test names in the hosts file"
+        );
     }
 
     fn result(op: &str, status: OpStatus, code: Option<&str>) -> OpResult {
