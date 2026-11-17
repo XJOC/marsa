@@ -1499,6 +1499,7 @@ pub fn doctor_skip(check: Check, skip: Skip) -> String {
     let check = match check {
         Check::Daemon => "marsad",
         Check::Runtimes => "PHP and Caddy",
+        Check::VcRuntime => "The Microsoft Visual C++ runtime",
         Check::Caddy => "Caddy",
         Check::Dns => ".test names",
         Check::Ports => "Ports 80 and 443",
@@ -1520,6 +1521,24 @@ pub fn doctor_skip(check: Check, skip: Skip) -> String {
     };
     format!("- {check}: not checked. {reason}")
 }
+
+/// Windows: Microsoft's runtime that the official PHP needs (ADR 0019).
+pub fn doctor_vc_runtime_ok(version: &str) -> String {
+    format!("The Microsoft Visual C++ runtime {version} is installed.")
+}
+
+pub const DOCTOR_VC_MISSING: &str = "The Microsoft Visual C++ runtime (x64) is not installed, \
+     so PHP cannot start.";
+
+pub fn doctor_vc_old(found: &str) -> String {
+    format!(
+        "The Microsoft Visual C++ runtime {found} is too old for PHP 8.4 and later, which need \
+         14.44 or newer."
+    )
+}
+
+pub const DOCTOR_VC_INSTALL: &str = "Install the Microsoft Visual C++ Redistributable (x64) \
+     from https://aka.ms/vs/17/release/vc_redist.x64.exe, then run \"marsa doctor\" again.";
 
 pub fn doctor_runtimes_ok(default: &str, version: &str) -> String {
     if default == version {

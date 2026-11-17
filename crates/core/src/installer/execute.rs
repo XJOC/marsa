@@ -42,6 +42,10 @@ const CHECK_OUTPUT_SHOWN: usize = 500;
 /// `STATUS_DLL_NOT_FOUND`, the exit code of a Windows program that misses a
 /// DLL. For PHP and Node that is the Visual C++ runtime. Never a Unix code.
 const STATUS_DLL_NOT_FOUND: i32 = 0xC000_0135_u32.cast_signed();
+/// `STATUS_ENTRYPOINT_NOT_FOUND`: the DLL is there but lacks a function, as
+/// a Visual C++ runtime older than the program's build tools does (ADR
+/// 0019: PHP 8.4 needs 14.44 or later).
+const STATUS_ENTRYPOINT_NOT_FOUND: i32 = 0xC000_0139_u32.cast_signed();
 /// Variables that would change how the check program starts or which
 /// libraries it loads. The rest of the environment stays: Windows programs
 /// need `SystemRoot`.
@@ -526,7 +530,10 @@ async fn run_check(
         }
     };
 
-    if status.code() == Some(STATUS_DLL_NOT_FOUND) {
+    if matches!(
+        status.code(),
+        Some(STATUS_DLL_NOT_FOUND | STATUS_ENTRYPOINT_NOT_FOUND)
+    ) {
         return Err(InstallError::MissingVcRuntime);
     }
     let stdout = String::from_utf8_lossy(&stdout);
@@ -1364,6 +1371,7 @@ into = "bin"
     #[test]
     fn the_missing_dll_code_is_the_windows_status() {
         assert_eq!(STATUS_DLL_NOT_FOUND, -1_073_741_515);
+        assert_eq!(STATUS_ENTRYPOINT_NOT_FOUND, -1_073_741_511);
     }
 
     #[test]

@@ -424,6 +424,42 @@ pub fn run_elevated(program: &Path, args: &[&OsStr], limit: Duration) -> io::Res
     })
 }
 
+/// The Microsoft Visual C++ runtime (x64) that Windows reports as
+/// installed, `(major, minor, build)`, from the key Microsoft documents for
+/// it; `None` when it reports none (ADR 0019). Read only.
+pub fn vc_runtime_version() -> Option<(u32, u32, u32)> {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RegGetValueW,
+    };
+    const KEY: &str = r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64";
+    let key = wide(OsStr::new(KEY)).ok()?;
+    let read = |name: &str| -> Option<u32> {
+        let name = wide(OsStr::new(name)).ok()?;
+        let mut value: u32 = 0;
+        let mut size = size_of::<u32>() as u32;
+        // SAFETY: `key` and `name` are NUL-terminated and live through the
+        // call; `RRF_RT_REG_DWORD` takes a 4-byte value, which `value` is,
+        // and `size` says so. The type out pointer may be null.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                key.as_ptr(),
+                name.as_ptr(),
+                RRF_RT_REG_DWORD,
+                null_mut(),
+                (&raw mut value).cast(),
+                &mut size,
+            )
+        };
+        (status == ERROR_SUCCESS).then_some(value)
+    };
+    if read("Installed")? != 1 {
+        return None;
+    }
+    Some((read("Major")?, read("Minor")?, read("Bld")?))
+}
+
 /// `text` as NUL-terminated UTF-16.
 fn wide(text: &OsStr) -> io::Result<Vec<u16>> {
     let mut wide: Vec<u16> = text.encode_wide().collect();
@@ -935,5 +971,14 @@ mod tests {
             sid.bytes()
                 .all(|b| b.is_ascii_digit() || b == b'S' || b == b'-')
         );
+    }
+
+    /// Read only: GitHub's Windows images install the runtime; a machine
+    /// without it gives `None`, which is fine too.
+    #[test]
+    fn the_vc_runtime_version_is_read_from_the_registry() {
+        if let Some((major, ..)) = vc_runtime_version() {
+            assert_eq!(major, 14);
+        }
     }
 }

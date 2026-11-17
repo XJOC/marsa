@@ -86,6 +86,10 @@ pub async fn run(data_dir: &Path) -> ExitCode {
         .as_ref()
         .is_ok_and(|found| !found.is_empty());
     show(Check::Runtimes, doctor::runtimes(&installed));
+    // The official PHP for Windows needs Microsoft's runtime (ADR 0019).
+    if windows {
+        show(Check::VcRuntime, doctor::vc_runtime(vc_runtime_version()));
+    }
     let caddy = daemon.caddy.as_ref();
     show(Check::Caddy, doctor::caddy(running, caddy, caddy_installed));
     // The checks of the redirect, the resolver file, and the user's trust
@@ -230,6 +234,15 @@ fn log_path(data_dir: &Path) -> PathBuf {
 
 /// The line of one check. `windows`: the PATH fixes speak of the user's
 /// PATH setting, not of `~/.zshrc`.
+/// The Visual C++ runtime that Windows reports; none elsewhere.
+fn vc_runtime_version() -> Option<(u32, u32, u32)> {
+    // `#[cfg]` outside `platform`: the registry is Windows'.
+    #[cfg(windows)]
+    return marsa_core::platform::windows::vc_runtime_version();
+    #[cfg(not(windows))]
+    None
+}
+
 pub fn render(check: Check, verdict: &Verdict, data_dir: &Path, windows: bool) -> String {
     match verdict {
         Verdict::Pass(pass) => strings::doctor_pass(&passed(pass, data_dir)),
@@ -249,6 +262,7 @@ fn passed(pass: &Pass, data_dir: &Path) -> String {
         Pass::Runtimes { default, version } => {
             strings::doctor_runtimes_ok(&printable(default), &version.to_string())
         }
+        Pass::VcRuntime { version } => strings::doctor_vc_runtime_ok(&printable(version)),
         Pass::Caddy => strings::DOCTOR_CADDY_OK.to_owned(),
         Pass::Dns => strings::DOCTOR_DNS_OK.to_owned(),
         Pass::Ports => strings::DOCTOR_PORTS_OK.to_owned(),
@@ -323,6 +337,11 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
             strings::DOCTOR_PORTS_SETUP.to_owned(),
         ),
         Problem::CaUntrusted => pair(strings::DOCTOR_UNTRUSTED, strings::DOCTOR_TRUST_SETUP),
+        Problem::VcRuntimeMissing => pair(strings::DOCTOR_VC_MISSING, strings::DOCTOR_VC_INSTALL),
+        Problem::VcRuntimeOld { found } => (
+            strings::doctor_vc_old(&printable(found)),
+            strings::DOCTOR_VC_INSTALL.to_owned(),
+        ),
         Problem::ShimsNotInPath { shims } => (
             strings::doctor_shims_missing(shims),
             strings::doctor_add_shims(shims, windows),

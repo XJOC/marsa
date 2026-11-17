@@ -22,6 +22,8 @@ use crate::types::{Health, PortHolder, ServiceState};
 pub enum Check {
     Daemon,
     Runtimes,
+    /// Windows only: the Microsoft Visual C++ runtime PHP needs (ADR 0019).
+    VcRuntime,
     Caddy,
     Dns,
     Ports,
@@ -54,6 +56,10 @@ pub enum Pass {
     Runtimes {
         default: String,
         version: Version,
+    },
+    /// The installed runtime's version, `14.44.35211`.
+    VcRuntime {
+        version: String,
     },
     Caddy,
     Dns,
@@ -110,6 +116,14 @@ pub enum Problem {
         ports: Vec<u16>,
     },
     CaUntrusted,
+    /// Windows: no Microsoft Visual C++ runtime (x64), so the official PHP
+    /// does not start.
+    VcRuntimeMissing,
+    /// Windows: a runtime older than [`VC_RUNTIME_MIN`]: PHP 8.4 and 8.5
+    /// need a newer one.
+    VcRuntimeOld {
+        found: String,
+    },
     ShimsNotInPath {
         shims: PathBuf,
     },
@@ -182,6 +196,27 @@ pub fn daemon(answer: Result<(Health, u16), String>) -> Verdict {
             fail(Problem::DaemonNotRunning)
         }
         Err(code) => fail(Problem::DaemonError { code }),
+    }
+}
+
+/// The oldest Visual C++ runtime the official PHP builds run on: 8.4 and
+/// 8.5 are built with MSVC 14.44, and Microsoft asks for a runtime of the
+/// same version or later (ADR 0019).
+pub const VC_RUNTIME_MIN: (u32, u32) = (14, 44);
+
+/// Windows: the Visual C++ runtime that Windows reports, `(major, minor,
+/// build)`, or `None` when it reports none.
+pub fn vc_runtime(found: Option<(u32, u32, u32)>) -> Verdict {
+    match found {
+        None => Verdict::Fail(Problem::VcRuntimeMissing),
+        Some((major, minor, build)) => {
+            let version = format!("{major}.{minor}.{build}");
+            if (major, minor) >= VC_RUNTIME_MIN {
+                Verdict::Pass(Pass::VcRuntime { version })
+            } else {
+                Verdict::Fail(Problem::VcRuntimeOld { found: version })
+            }
+        }
     }
 }
 
@@ -739,5 +774,20 @@ mod tests {
         let name = probe_name(u64::MAX);
         let label = name.strip_suffix(".test").unwrap();
         assert!(crate::sites::validate_name(label).is_ok(), "{name}");
+    }
+
+    #[test]
+    fn the_vc_runtime_must_be_there_and_new_enough() {
+        assert_eq!(vc_runtime(None), Verdict::Fail(Problem::VcRuntimeMissing));
+        let old = Verdict::Fail(Problem::VcRuntimeOld {
+            found: "14.29.30133".to_owned(),
+        });
+        assert_eq!(vc_runtime(Some((14, 29, 30133))), old);
+        for (found, shown) in [((14, 44, 35211), "14.44.35211"), ((14, 52, 0), "14.52.0")] {
+            let pass = Verdict::Pass(Pass::VcRuntime {
+                version: shown.to_owned(),
+            });
+            assert_eq!(vc_runtime(Some(found)), pass);
+        }
     }
 }
