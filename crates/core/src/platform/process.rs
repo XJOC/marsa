@@ -180,15 +180,16 @@ fn proc_identity(dir: &Path) -> Liveness {
 }
 
 /// What a failed read in `dir` says. A process that is reaped during a read
-/// fails it with another error than "not found": `stat` opened before the
-/// reap and read after gives ESRCH, and the `exe` link found before it gives
-/// EACCES (task M4-25c). So such an error is `Gone` once `dir` itself is not
-/// found any more. Anything else stays `Unknown`: a pid that changed hands
-/// since then has a folder again.
+/// may fail it with another error than "not found" (task M4-25c): `stat`
+/// opened before the reap and read after gives ESRCH, and the `exe` link
+/// found before it gives EACCES (ENOENT on newer kernels). So such an error
+/// is `Gone` once `dir` itself is not found any more: only where a new
+/// [`identity`] a moment later would say `Gone` too. Anything else stays
+/// `Unknown`: a pid that changed hands since then has a folder again.
 #[cfg(target_os = "linux")]
 fn read_failed(err: &io::Error, dir: &Path) -> Liveness {
     let not_found = |err: &io::Error| err.kind() == io::ErrorKind::NotFound;
-    if not_found(err) || fs::symlink_metadata(dir).is_err_and(|err| not_found(&err)) {
+    if not_found(err) || fs::symlink_metadata(dir).is_err_and(|lookup| not_found(&lookup)) {
         Liveness::Gone
     } else {
         Liveness::Unknown
