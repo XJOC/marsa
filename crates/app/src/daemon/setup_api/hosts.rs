@@ -96,9 +96,10 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
         if status.missing.is_empty() {
             return Ok(report);
         }
+        let names = linux_dns::names_to_add(setup.hosts_file(), &names);
         // A request the helper refuses as a whole would change nothing
         // either, after a password for nothing.
-        if !dns::hosts_names_fit(&linux_dns::names_to_add(setup.hosts_file(), &names)) {
+        if !dns::hosts_names_fit(&names) {
             let skipped = SetupSkip {
                 op: linux_dns::HOSTS_SYNC.to_owned(),
                 code: linux_dns::HOSTS_TOO_MANY_NAMES.to_owned(),
@@ -107,7 +108,6 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
             return Ok(report);
         }
         tracing::info!(missing = ?status.missing, "adding sites to the hosts file");
-        let names = linux_dns::names_to_add(setup.hosts_file(), &names);
         let ops = vec![HelperOp::HostsSync { names }];
         match setup.launch(Flow::Setup, ops, platform, &daemon.shutdown) {
             Ok(results) => report.results = results,

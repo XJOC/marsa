@@ -417,8 +417,6 @@ struct Added {
 
 fn hosts_added(answer: Result<SetupReport, ClientFailure>, data_dir: &Path) -> Added {
     let report = match answer {
-        // Another command added them first, or setup took the link since.
-        Err(failure) if failure.code == "hosts_not_used" => SetupReport::default(),
         Err(failure) => {
             return Added {
                 stdout: String::new(),
@@ -433,23 +431,28 @@ fn hosts_added(answer: Result<SetupReport, ClientFailure>, data_dir: &Path) -> A
     } else {
         setup::render(&report, data_dir)
     };
+    // A failed step says why on its own line above: the last line only says
+    // what follows.
     let failed = report
         .results
         .iter()
-        .find(|result| result.status == OpStatus::Failed);
-    let code = report
+        .find(|result| result.status == OpStatus::Failed)
+        .map(|result| printable(result.code.as_deref().unwrap_or("hosts_sync")));
+    let reason = report
         .error
         .as_ref()
-        .map(|error| error.code.clone())
-        .or_else(|| report.skipped.first().map(|skipped| skipped.code.clone()))
-        .or_else(|| failed.map(|result| result.code.clone().unwrap_or_default()));
+        .map(|error| error.code.as_str())
+        .or_else(|| report.skipped.first().map(|skipped| skipped.code.as_str()))
+        .map(printable);
+    let stderr = match (reason, failed) {
+        (Some(code), _) => Some(strings::hosts_not_added(&code)),
+        (None, Some(code)) => Some(strings::hosts_not_added_after(&code)),
+        (None, None) => None,
+    };
     Added {
         stdout,
-        stderr: code
-            .as_deref()
-            .map(printable)
-            .map(|code| strings::hosts_not_added(&code)),
-        ok: code.is_none(),
+        ok: stderr.is_none(),
+        stderr,
     }
 }
 
@@ -1267,10 +1270,6 @@ mod tests {
             ok: true,
         };
         assert_eq!(hosts_added(Ok(SetupReport::default()), data), empty);
-        assert_eq!(
-            hosts_added(Err(client_failure("hosts_not_used")), data),
-            empty
-        );
 
         let not_added = |added: Added, code: &str| {
             assert!(!added.ok, "{code}");
@@ -1300,7 +1299,16 @@ mod tests {
             results: vec![result(OpStatus::Failed, Some("hosts_block_broken"))],
             ..SetupReport::default()
         };
-        not_added(hosts_added(Ok(failed), data), "hosts_block_broken");
+        let added = hosts_added(Ok(failed), data);
+        let line = added.stderr.clone().unwrap();
+        // The reason is on the step's line already.
+        assert!(!line.contains("Marsa start"), "{line}");
+        not_added(added, "hosts_block_broken");
+        // The block went away between the two calls: nothing was added.
+        not_added(
+            hosts_added(Err(client_failure("hosts_not_used")), data),
+            "hosts_not_used",
+        );
         not_added(
             hosts_added(Err(client_failure("setup_running")), data),
             "setup_running",

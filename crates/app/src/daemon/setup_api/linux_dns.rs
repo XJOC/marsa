@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 
 use marsa_core::dns::{self, LinuxFacts, NETWORKD_UNITS};
 use marsa_core::helper::{HelperOp, OpResult, OpStatus};
+use marsa_core::sites;
 use marsa_core::types::HostsStatus;
 use tokio_util::sync::CancellationToken;
 
@@ -227,9 +228,19 @@ pub fn status(data_dir: &Path, hosts_file: Option<&Path>, names: &[String]) -> H
 /// `names` and every name the block in `hosts_file` has now, sorted. Such a
 /// sync only adds: a site whose folder cannot be read for a moment, or a
 /// name of another data folder, keeps its line. `marsa setup` sends the
-/// exact list.
+/// exact list. A name in the block that the helper would refuse (one added
+/// by hand, such as `api.shop.test` or `Shop.test`) is left out: it would
+/// make the helper refuse the whole request, after the password (review of
+/// #132).
 pub fn names_to_add(hosts_file: Option<&Path>, names: &[String]) -> Vec<String> {
-    let mut all: BTreeSet<String> = hosts_file.and_then(read_block).unwrap_or_default();
+    let block = hosts_file.and_then(read_block).unwrap_or_default();
+    let mut all: BTreeSet<String> = block
+        .into_iter()
+        .filter(|name| {
+            name.strip_suffix(".test")
+                .is_some_and(|label| sites::validate_name(label).is_ok())
+        })
+        .collect();
     all.extend(names.iter().cloned());
     all.into_iter().collect()
 }
@@ -342,6 +353,20 @@ mod tests {
             status(dir.path(), Some(&hosts), &names),
             HostsStatus::default()
         );
+    }
+
+    /// A sync adds the sites to the block's names, and leaves out a name
+    /// in the block the helper would refuse (review of #132).
+    #[test]
+    fn a_sync_keeps_the_blocks_names_the_helper_takes() {
+        let dir = TempDir::new().unwrap();
+        let hosts = dir.path().join("hosts");
+        let block = "# Marsa start\n127.0.0.1 old.test\n127.0.0.1 api.shop.test\n\
+                     127.0.0.1 Shop.test\n127.0.0.1 -x.test\n127.0.0.1 x.example\n# Marsa end\n";
+        fs::write(&hosts, block).unwrap();
+        let names = ["new.test".to_owned()];
+        assert_eq!(names_to_add(Some(&hosts), &names), ["new.test", "old.test"]);
+        assert_eq!(names_to_add(None, &names), ["new.test"]);
     }
 
     /// The block's names; nothing for no file, a folder, or a file larger

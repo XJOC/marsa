@@ -472,7 +472,10 @@ if grep -vq '^127\.0\.0\.1:' <<<"$(tr ' ' '\n' <<<"$listeners" | grep .)"; then
 fi
 
 # Each pkexec run of marsad logs this line once.
-prompts() { grep -c "asking for admin rights to run marsa-helper" "$DATA/logs/marsad.log" || true; }
+prompts() {
+  [ -f "$DATA/logs/marsad.log" ] || fail "no $DATA/logs/marsad.log to count the prompts in"
+  grep -c "asking for admin rights to run marsa-helper" "$DATA/logs/marsad.log" || true
+}
 
 step "a site the folder watcher finds asks for no password (manager's rule, M4-18k2)"
 before=$(prompts)
@@ -480,7 +483,7 @@ mkdir -p "$CODE/watched"
 echo watched > "$CODE/watched/index.html"
 found=no
 for _ in $(seq 1 40); do
-  if marsa sites 2>/dev/null | grep -q "watched"; then found=yes; break; fi
+  if marsa sites 2>/dev/null | grep -qw "watched"; then found=yes; break; fi
   sleep 0.5
 done
 [ "$found" = yes ] || fail "the watcher did not find $CODE/watched"

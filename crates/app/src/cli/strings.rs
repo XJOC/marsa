@@ -1160,7 +1160,16 @@ pub fn hosts_not_added(code: &str) -> String {
 pub fn hosts_not_checked(code: &str) -> String {
     format!(
         "marsa: Marsa could not check whether the new sites are in {HOSTS_FILE}, so they may not \
-         open yet. Run \"marsa doctor\" to see. [{code}]"
+         open yet. If one does not, run \"marsa setup\". [{code}]"
+    )
+}
+
+/// After the failed step of `marsa park` or `marsa link`, whose line above
+/// says why: what follows, and what to do.
+pub fn hosts_not_added_after(code: &str) -> String {
+    format!(
+        "marsa: The new sites do not open until they are in {HOSTS_FILE}: run \"marsa setup\" to \
+         add them. [{code}]"
     )
 }
 
@@ -2136,6 +2145,6 @@ mod tests {
              in /etc/hosts: run \"marsa setup\" to add them. [setup_cancelled]"
         );
         assert!(hosts_not_added("uninstall_running").starts_with("marsa: Another setup or"));
-        assert!(hosts_not_checked("internal_error").contains("marsa doctor"));
+        assert!(hosts_not_checked("internal_error").contains("run \"marsa setup\""));
     }
 }
