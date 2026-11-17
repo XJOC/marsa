@@ -191,11 +191,13 @@ fn run_windows(
 ) -> UninstallReport {
     let mut report = UninstallReport::default();
     let result = setup.uninstall_windows(stop);
-    // The marker of `hosts_sync` goes once no service is left to take the
-    // names; while one runs, the daemon keeps sending them. The helper stops
-    // the service before it removes anything, so no pass writes the block
-    // back meanwhile.
-    if result.is_ok() || !setup.windows_service_running() {
+    // The marker of `hosts_sync` goes only once the helper removed it all,
+    // service included. After any other outcome the service may still be
+    // installed (and start again), so the daemon keeps sending the names; a
+    // pipe with no service behind it only costs a retry now and then. The
+    // helper stops the service before it removes anything, so no pass
+    // writes the block back meanwhile.
+    if result.is_ok() {
         let marker = data_dir.join(hosts_sync::MARKER);
         match std::fs::remove_file(&marker) {
             Ok(()) => {}
@@ -861,8 +863,6 @@ mod tests {
     struct WindowsService {
         answer: Install,
         calls: Mutex<usize>,
-        /// Whether the service still runs after the uninstall.
-        running: bool,
     }
 
     impl Service for WindowsService {
@@ -882,10 +882,6 @@ mod tests {
             *self.calls.lock().unwrap() += 1;
             self.answer.clone()
         }
-
-        fn running(&self) -> bool {
-            self.running
-        }
     }
 
     /// Windows, with the helper in the user's folder (`home`, unless given),
@@ -894,14 +890,12 @@ mod tests {
     fn windows_app(
         dir: &Dir,
         answer: Install,
-        running: bool,
         home: Option<PathBuf>,
     ) -> (App, Arc<WindowsService>) {
         let fake = Fake::no_prompt();
         let service = Arc::new(WindowsService {
             answer,
             calls: Mutex::new(0),
-            running,
         });
         let runner: Arc<dyn Runner> = fake;
         let home = home.unwrap_or_else(|| dir.dir.path().to_path_buf());
@@ -925,7 +919,7 @@ mod tests {
         let dir = Dir::new();
         let marker = dir.data().join(hosts_sync::MARKER);
         fs::write(&marker, "").unwrap();
-        let (app, service) = windows_app(&dir, Install::Exited(0), false, None);
+        let (app, service) = windows_app(&dir, Install::Exited(0), None);
         let (status, report) = app.post("/v1/uninstall").await;
         assert_eq!(status, StatusCode::OK, "{report}");
         let steps: Vec<(&str, &str)> = report["results"]
@@ -947,25 +941,25 @@ mod tests {
     }
 
     /// The helper did not remove everything, or did not run: nothing else
-    /// changes, and the daemon runs on. The marker stays while the service
-    /// runs, and goes with a service that is gone or stopped.
+    /// changes, the daemon runs on, and the marker stays, since the service
+    /// may still be installed.
     #[tokio::test]
-    async fn windows_keeps_the_marker_only_while_the_service_runs() {
+    async fn windows_keeps_the_marker_unless_everything_went() {
         for (answer, code) in [
             (Install::Exited(1), "uninstall_helper_partial"),
             (Install::Cancelled, "uninstall_cancelled"),
             (Install::TimedOut, "uninstall_helper_running"),
+            (Install::StillRunning, "uninstall_helper_running"),
+            (Install::Exited(2), "uninstall_helper_failed"),
         ] {
-            for running in [true, false] {
-                let dir = Dir::new();
-                let marker = dir.data().join(hosts_sync::MARKER);
-                fs::write(&marker, "").unwrap();
-                let (app, _) = windows_app(&dir, answer.clone(), running, None);
-                let (_, report) = app.post("/v1/uninstall").await;
-                assert_eq!(report["error"]["code"], code, "{report}");
-                assert_eq!(marker.exists(), running, "{code} {running}");
-                assert!(dir.untouched() && !app.stopping());
-            }
+            let dir = Dir::new();
+            let marker = dir.data().join(hosts_sync::MARKER);
+            fs::write(&marker, "").unwrap();
+            let (app, _) = windows_app(&dir, answer.clone(), None);
+            let (_, report) = app.post("/v1/uninstall").await;
+            assert_eq!(report["error"]["code"], code, "{report}");
+            assert!(marker.exists(), "{code}");
+            assert!(dir.untouched() && !app.stopping());
         }
     }
 
@@ -976,7 +970,7 @@ mod tests {
         let dir = Dir::new();
         let marker = dir.data().join(hosts_sync::MARKER);
         fs::write(&marker, "").unwrap();
-        let (app, service) = windows_app(&dir, Install::Exited(0), true, Some(dir.home()));
+        let (app, service) = windows_app(&dir, Install::Exited(0), Some(dir.home()));
         let (_, report) = app.post("/v1/uninstall").await;
         assert_eq!(
             report["error"]["code"], "uninstall_helper_unsafe",

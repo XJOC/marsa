@@ -134,13 +134,23 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
     }
     let stopped = end == DaemonEnd::Stopped;
     ok &= stopped;
-    let decided = data_folder(
-        args,
-        data_dir_given,
-        complete,
-        stopped,
-        terminal.is_terminal(),
-    );
+    // Windows: a program that runs can be neither deleted nor moved, and
+    // this marsa may run from the data folder (`<data>\bin`): then no
+    // question, only a note. The CLI runs on the machine marsad runs on.
+    let in_use =
+        cfg!(windows) && deletable && programs_dir().is_some_and(|dir| inside(&dir, data_dir));
+    let decided = if in_use {
+        println!("{}", strings::data_dir_in_use(data_dir));
+        Some(DataFolder::Keep)
+    } else {
+        data_folder(
+            args,
+            data_dir_given,
+            complete,
+            stopped,
+            terminal.is_terminal(),
+        )
+    };
     let folder = match decided {
         Some(folder) => folder,
         None => match ask_until_ctrl_c(strings::UNINSTALL_ALL_DATA_QUESTION).await {
@@ -429,7 +439,7 @@ fn delete_when_stopped(data_dir: &Path) -> Result<(), Failure> {
     // Windows: a program that runs can be neither deleted nor moved, and
     // this marsa may run from the data folder (`<data>\bin`). The CLI runs
     // on the machine marsad runs on.
-    if cfg!(windows) && programs_dir().is_some_and(|dir| dir.starts_with(data_dir)) {
+    if cfg!(windows) && programs_dir().is_some_and(|dir| inside(&dir, data_dir)) {
         return Err(own_failure("uninstall_all_data_dir_in_use", Some(data_dir)));
     }
     let home = std::env::home_dir();
@@ -554,6 +564,18 @@ fn is_complete(report: &UninstallReport) -> bool {
             .results
             .iter()
             .all(|result| result.status != OpStatus::Failed)
+}
+
+/// Whether `path` is inside `dir`, folder by folder, with no regard to case,
+/// as Windows compares names.
+fn inside(path: &Path, dir: &Path) -> bool {
+    let mut path = path.components();
+    dir.components().all(|part| {
+        path.next().is_some_and(|other| {
+            part.as_os_str().to_string_lossy().to_lowercase()
+                == other.as_os_str().to_string_lossy().to_lowercase()
+        })
+    })
 }
 
 /// The folder of this `marsa`, for the programs left to delete.

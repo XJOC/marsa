@@ -1446,6 +1446,16 @@ pub fn data_deleted(path: &Path) -> String {
     format!("Deleted the data folder {}.", path.display())
 }
 
+/// Windows: the data folder this marsa runs from, which Windows cannot
+/// delete while it runs.
+pub fn data_dir_in_use(path: &Path) -> String {
+    format!(
+        "Kept the data folder {}: Windows cannot delete it while this marsa runs from it. \
+         Delete it yourself once this command has ended.",
+        path.display()
+    )
+}
+
 /// The data folder after a step failed.
 pub fn data_kept_for_retry(path: &Path) -> String {
     format!(

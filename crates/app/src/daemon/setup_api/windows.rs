@@ -77,8 +77,6 @@ pub trait Service: Send + Sync {
     /// still runs: the hosts lines, the CA, the service, and its folder go.
     /// Blocking.
     fn uninstall(&self, helper: &Path) -> Install;
-    /// Whether the service runs now, as the service manager reports it.
-    fn running(&self) -> bool;
 }
 
 /// `marsa uninstall --all` on Windows: `marsa-helper uninstall` behind the
@@ -118,8 +116,10 @@ pub fn uninstall(
                 "the UAC prompt was declined",
             ))
         }
-        Install::Exited(1) => {
-            tracing::warn!("marsa-helper uninstall did not remove everything");
+        // 1: a step failed. Any code but 2 (its arguments refused) may come
+        // from a run that stopped partway, a crash say.
+        Install::Exited(code) if code != 2 => {
+            tracing::warn!(code, "marsa-helper uninstall did not remove everything");
             Err(failure(
                 &flow.code("helper_partial"),
                 "the helper could not remove everything",
@@ -364,11 +364,6 @@ impl Service for RealService {
     fn uninstall(&self, helper: &Path) -> Install {
         self.elevated(helper, &[std::ffi::OsStr::new("uninstall")])
     }
-
-    fn running(&self) -> bool {
-        use marsa_core::platform::windows::helper_pipe::{SERVICE_NAME, service_process_id};
-        matches!(service_process_id(SERVICE_NAME), Ok(Some(_)))
-    }
 }
 
 // Windows only: its calls are Win32.
@@ -465,10 +460,6 @@ mod tests {
             assert_eq!(helper, helper_path());
             self.calls.lock().unwrap().push("uninstall".to_owned());
             self.install.clone()
-        }
-
-        fn running(&self) -> bool {
-            false
         }
     }
 
@@ -644,6 +635,7 @@ mod tests {
         let cases = [
             (Install::Cancelled, "uninstall_cancelled"),
             (Install::Exited(1), "uninstall_helper_partial"),
+            (Install::Exited(0xC000_0005), "uninstall_helper_partial"),
             (Install::Exited(2), "uninstall_helper_failed"),
             (Install::StillRunning, "uninstall_helper_running"),
             (Install::TimedOut, "uninstall_helper_running"),
