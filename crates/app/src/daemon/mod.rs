@@ -7,6 +7,7 @@ pub mod auth;
 pub mod autostart_api;
 pub mod caddy;
 pub mod dns;
+pub mod hosts_sync;
 pub mod php;
 pub mod runtimes_api;
 pub mod server;

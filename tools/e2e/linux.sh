@@ -471,6 +471,15 @@ if grep -vq '^127\.0\.0\.1:' <<<"$(tr ' ' '\n' <<<"$listeners" | grep .)"; then
   fail "caddy listens on an address that is not 127.0.0.1"
 fi
 
+step "marsa doctor checks .test names the way setup took (M4-18k3)"
+out=$(marsa doctor 2>&1 || true)
+echo "$out"
+if [ "$LINK" = no ]; then
+  grep -qF "✓ Every site has its line in /etc/hosts." <<<"$out" || fail "doctor did not pass the hosts file"
+else
+  grep -qF "✓ .test names resolve to 127.0.0.1." <<<"$out" || fail "doctor did not pass the link"
+fi
+
 # Each pkexec run of marsad logs this line once.
 prompts() {
   [ -f "$DATA/logs/marsad.log" ] || fail "no $DATA/logs/marsad.log to count the prompts in"
@@ -490,6 +499,11 @@ done
 sleep 2
 [ "$(prompts)" = "$before" ] || fail "a site the watcher found started pkexec"
 ! grep -q "watched.test" /etc/hosts || fail "a site the watcher found went into /etc/hosts"
+if [ "$LINK" = no ]; then
+  # marsa doctor says so, and what to do.
+  out=$(marsa doctor 2>&1 || true)
+  grep -qF "✗ watched.test is not in /etc/hosts yet" <<<"$out" || fail "doctor did not name the waiting site: $out"
+fi
 
 step "marsa link after setup: the new names go into /etc/hosts with one prompt on the hosts way (M4-18k2)"
 mkdir -p "$HOME/second"
