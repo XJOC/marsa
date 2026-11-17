@@ -1071,20 +1071,6 @@ fn error_message(code: &str) -> Option<&'static str> {
             "Marsa's helper service gave no answer, so the result of setup is not known. Run \
              \"marsa doctor\" in a terminal to see what is set up, then run setup again."
         }
-        "hosts_read" => {
-            "Marsa did not change the hosts file (drivers\\etc\\hosts in Windows' system \
-             folder): it cannot be read, or it is a link, or it is larger than 16 MiB. Fix the \
-             file, then run setup again."
-        }
-        "hosts_write" => {
-            "Marsa could not write the hosts file: it is read-only, or another program holds it \
-             (some security tools do). Fix that, then run setup again."
-        }
-        "hosts_block_broken" => {
-            "The hosts file has a \"# Marsa start\" line without its \"# Marsa end\" line, or \
-             the other way round, so Marsa left it as it is. Remove Marsa's lines from it, then \
-             run setup again."
-        }
         // Linux (tasks M4-18e, M4-18h, M4-18b, M4-18c).
         "setup_pkexec_missing" => {
             "pkexec is not installed, so Marsa cannot ask for the administrator password. \
@@ -1693,9 +1679,6 @@ mod tests {
             "setup_helper_pipe_failed",
             "setup_helper_busy",
             "setup_helper_no_answer",
-            "hosts_read",
-            "hosts_write",
-            "hosts_block_broken",
             "redirect_port_held",
             "ports_not_checked",
             "ca_not_ready",
