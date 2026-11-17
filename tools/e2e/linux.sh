@@ -465,6 +465,26 @@ if grep -vq '^127\.0\.0\.1:' <<<"$(tr ' ' '\n' <<<"$listeners" | grep .)"; then
   fail "caddy listens on an address that is not 127.0.0.1"
 fi
 
+step "marsa link after setup: on the hosts way the new name goes into /etc/hosts, with one prompt (M4-18k2)"
+mkdir -p "$HOME/second"
+echo second > "$HOME/second/index.html"
+code=0
+out=$(marsa link second-site --path "$HOME/second" 2>&1) || code=$?
+echo "$out"
+[ "$code" = 0 ] || fail "marsa link exited with $code"
+if [ "$LINK" = no ]; then
+  grep -q "Adding second-site.test to /etc/hosts" <<<"$out" || fail "marsa link did not add the name"
+  grep -q "Put the sites' .test names in /etc/hosts: done" <<<"$out" || fail "the hosts step is not done"
+  grep -qxF "127.0.0.1 second-site.test" /etc/hosts || fail "second-site.test is not in /etc/hosts"
+else
+  ! grep -q "/etc/hosts" <<<"$out" || fail "marsa link touched /etc/hosts on the link way"
+fi
+wait_for_name second-site.test || fail "second-site.test does not resolve"
+# A second link of a known name asks nothing.
+out=$(marsa link second-site --path "$HOME/second" 2>&1) || fail "marsa link again failed: $out"
+! grep -q "Adding" <<<"$out" || fail "marsa link asked again for a name already there"
+run marsa unlink second-site
+
 step "removal, with the site running"
 if [ "$LINK" = no ]; then
   helper '[{"op":"hosts_remove"}]' || fail "the helper exited with $?"
