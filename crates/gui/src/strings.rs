@@ -131,6 +131,28 @@ pub const CLOSE: &str = "Close";
 // Setup (`POST /v1/setup`), in the first-run panel and in Settings.
 
 pub const RUN_SETUP: &str = "Run setup";
+/// Linux on the hosts way (task M4-18k3): the button under the sites.
+pub const ADD_TO_HOSTS: &str = "Add to /etc/hosts";
+pub const ADD_TO_HOSTS_HINT: &str = "Linux asks for your password once, then the sites' .test \
+     names go into /etc/hosts, so they open in the browser.";
+pub const HOSTS_ADDING: &str = "Waiting for the password…";
+
+/// The sites the hosts file lacks; at most five are named.
+pub fn hosts_waiting(missing: &[String]) -> String {
+    let mut names = missing
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if missing.len() > 5 {
+        names.push_str(&format!(", and {} more", missing.len() - 5));
+    }
+    match missing.len() {
+        1 => format!("{names} is not in /etc/hosts yet, so it does not open."),
+        _ => format!("{names} are not in /etc/hosts yet, so they do not open."),
+    }
+}
 pub const RUN_SETUP_HINT: &str =
     "Each step checks what is already done, so running setup again is safe.";
 /// When setup had no step to report.
@@ -1048,6 +1070,9 @@ fn error_message(code: &str) -> Option<&'static str> {
              second password prompt did not go through, so Marsa's old lines stay in \
              /etc/hosts; they do no harm. Run setup again to take them out."
         }
+        "hosts_not_used" => {
+            "Marsa has no lines in /etc/hosts for this data folder yet. Run setup first."
+        }
         "hosts_sites_unknown" => {
             "Marsa could not read its site list, so it left the hosts file as it is. Look at \
              the sites, then run setup again."
@@ -1666,6 +1691,7 @@ mod tests {
             "hosts_block_broken",
             "hosts_sites_unknown",
             "hosts_too_many_names",
+            "hosts_not_used",
             "setup_hosts_not_written",
             "setup_hosts_not_removed",
             "resolved_restart_failed",
@@ -2201,5 +2227,21 @@ mod tests {
             "{hint}"
         );
         assert_ne!(pick_title(Pick::Park), pick_title(Pick::Link));
+    }
+
+    /// Task M4-18k3: the line over "Add to /etc/hosts".
+    #[test]
+    fn the_hosts_line_names_the_waiting_sites() {
+        let names =
+            |count: usize| -> Vec<String> { (1..=count).map(|i| format!("s{i}.test")).collect() };
+        assert_eq!(
+            hosts_waiting(&names(1)),
+            "s1.test is not in /etc/hosts yet, so it does not open."
+        );
+        assert_eq!(
+            hosts_waiting(&names(6)),
+            "s1.test, s2.test, s3.test, s4.test, s5.test, and 1 more are not in /etc/hosts yet, \
+             so they do not open."
+        );
     }
 }
