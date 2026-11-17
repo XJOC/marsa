@@ -1,16 +1,23 @@
 //! Linux: which way `.test` names go, as `marsad` reads it as a user, and
 //! the helper operations of setup for it (ADR 0014, task M4-18k).
 //!
-//! | Way ([`dns::linux_path`]) | Setup sends |
-//! | --- | --- |
-//! | the `marsa0` link | `resolved_install`, then `hosts_remove` if the hosts file still has Marsa's block |
-//! | the hosts file | `resolved_remove`, then `hosts_sync` with the name of every site |
+//! | Way ([`dns::linux_path`]) | Setup's request | A second request, only if needed |
+//! | --- | --- | --- |
+//! | the `marsa0` link | `resolved_install` | `hosts_remove`, once the link is made, if the hosts file still has Marsa's block |
+//! | the hosts file | `resolved_remove`, then `hosts_sync` with the name of every site | – |
 //!
 //! On the hosts way, `resolved_remove` takes out a link of an earlier
 //! setup: it would meet the race of ADR 0014 (finding 30) at every boot.
 //! With no link it changes nothing. On the link way, `hosts_remove` takes
 //! out the block of an earlier setup, for example from before an upgrade to
-//! systemd 250.
+//! systemd 250. It waits for the link: the helper runs every op of a
+//! request even when one fails, and the block must stay while it is the
+//! only way the sites resolve.
+//!
+//! `hosts_sync` is left out, with a skipped step, when the site list is not
+//! known (`hosts_sites_unknown`): an empty list would empty the block. Also
+//! past the helper's limits (`hosts_too_many_names`): it would refuse the
+//! whole request, the certificate and the ports with it.
 //!
 //! The facts come from `systemctl --version`, `systemctl is-active
 //! systemd-resolved.service`, and on systemd 249 only, the state of
@@ -20,9 +27,10 @@
 //! `marsa-helper` stays the judge (manager decision, task M4-18k2). If it
 //! answers `resolved_use_hosts` or `resolved_not_running` to
 //! `resolved_install` ([`helper_chose_hosts`]), setup logs the difference,
-//! lists `resolved_install` as skipped with that code, and sends
-//! `hosts_sync` in a second request. Only then does one `marsa setup` show
-//! the password prompt twice: when the two copies of the rule disagree.
+//! lists `resolved_install` as skipped with that code, and sends the
+//! operations of the hosts way in a second request. So one `marsa setup`
+//! shows the password prompt twice only when the two copies of the rule
+//! disagree, or once after the move from the hosts file to the link.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -45,27 +53,26 @@ pub const HOSTS_FILE: &str = "/etc/hosts";
 /// The most of the hosts file that is read: the helper's own limit. A
 /// larger file counts as one with no block, as the helper leaves it alone.
 const MAX_HOSTS_BYTES: u64 = 16 * 1024 * 1024;
-/// `systemctl is-active` for a unit that is not active (LSB "not running").
-const INACTIVE: i32 = 3;
 
 pub const RESOLVED_INSTALL: &str = "resolved_install";
+pub const HOSTS_SYNC: &str = "hosts_sync";
+/// Why `hosts_sync` was left out: no site list.
+pub const HOSTS_SITES_UNKNOWN: &str = "hosts_sites_unknown";
+/// Why `hosts_sync` was left out: more names than the helper takes.
+pub const HOSTS_TOO_MANY_NAMES: &str = "hosts_too_many_names";
 /// The helper's answers to `resolved_install` that mean "use the hosts
 /// file here".
 const HOSTS_ANSWERS: [&str; 2] = ["resolved_use_hosts", "resolved_not_running"];
 
 /// The facts of [`dns::linux_path`], each read with `systemctl`.
 /// systemd-networkd is asked about only where the answer counts: on
-/// systemd 249, and only while systemd-resolved may run.
+/// systemd 249, and only while systemd-resolved runs.
 pub fn facts(runner: &dyn Runner, stop: &CancellationToken) -> LinuxFacts {
     let systemd = output(runner, &["--version"], stop)
         .filter(|(code, _)| *code == 0)
         .and_then(|(_, stdout)| dns::systemd_version(&stdout));
-    let resolved_runs = match output(runner, &["is-active", "--quiet", RESOLVED], stop) {
-        Some((0, _)) => Some(true),
-        Some((INACTIVE, _)) => Some(false),
-        _ => None,
-    };
-    let asks_networkd = resolved_runs != Some(false)
+    let resolved_runs = resolved_runs(runner, stop);
+    let asks_networkd = resolved_runs == Some(true)
         && systemd.is_some_and(|version| {
             (dns::LINK_BEFORE_250..dns::FIRST_LINK_SYSTEMD).contains(&version)
         });
@@ -89,6 +96,32 @@ pub fn facts(runner: &dyn Runner, stop: &CancellationToken) -> LinuxFacts {
 }
 
 const RESOLVED: &str = "systemd-resolved.service";
+
+/// Whether systemd-resolved runs, as the helper reads it: exit 0 runs; any
+/// other exit, or a `systemctl` that cannot start, does not (the helper
+/// answers `resolved_not_running` there). `None` only when the read did not
+/// end: it took longer than [`CHECK_LIMIT`], the daemon stops, or a signal
+/// stopped it. The helper is asked then, so one slow `systemctl` never
+/// takes out a link that works (review of #130).
+fn resolved_runs(runner: &dyn Runner, stop: &CancellationToken) -> Option<bool> {
+    let args = ["is-active", "--quiet", RESOLVED].map(OsString::from);
+    match runner.run(SYSTEMCTL, &args, CHECK_LIMIT, stop) {
+        Ok(output) => output.code.map(|code| code == 0),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+            ) =>
+        {
+            tracing::warn!(error = %err, "systemctl is-active did not end");
+            None
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot run systemctl, so systemd-resolved counts as stopped");
+            Some(false)
+        }
+    }
+}
 
 /// The exit code and the output of `systemctl <args>`, or `None` if it did
 /// not run to its end: it could not start, took longer than
@@ -157,20 +190,33 @@ pub fn status(
     }
 }
 
-/// The DNS operations of setup for `path`. `block`: the hosts file has
-/// Marsa's block now. `names`: the host names of the sites, for the hosts
-/// way.
-pub fn setup_ops(path: LinuxPath, block: bool, names: &[String], port: u16) -> Vec<HelperOp> {
-    match path {
-        LinuxPath::Link if block => vec![HelperOp::ResolvedInstall { port }, HelperOp::HostsRemove],
-        LinuxPath::Link => vec![HelperOp::ResolvedInstall { port }],
-        LinuxPath::Hosts => vec![
-            HelperOp::ResolvedRemove,
-            HelperOp::HostsSync {
+/// The operations of the hosts way: `resolved_remove`, then `hosts_sync`
+/// with `names`, the host names of the sites (`None`: not known). The
+/// second value is why `hosts_sync` was left out, if it was.
+pub fn hosts_ops(names: Option<&[String]>) -> (Vec<HelperOp>, Option<&'static str>) {
+    let mut ops = vec![HelperOp::ResolvedRemove];
+    let skipped = match names {
+        None => Some(HOSTS_SITES_UNKNOWN),
+        Some(names) if !dns::hosts_names_fit(names) => Some(HOSTS_TOO_MANY_NAMES),
+        Some(names) => {
+            ops.push(HelperOp::HostsSync {
                 names: names.to_vec(),
-            },
-        ],
+            });
+            None
+        }
+    };
+    if let Some(code) = skipped {
+        tracing::warn!(code, "hosts_sync left out of the request");
     }
+    (ops, skipped)
+}
+
+/// Whether the helper made the `marsa0` link, now or before.
+pub fn link_made(results: &[OpResult]) -> bool {
+    results.iter().any(|result| {
+        result.op == RESOLVED_INSTALL
+            && matches!(result.status, OpStatus::Done | OpStatus::Unchanged)
+    })
 }
 
 /// The code of a failed `resolved_install` that means the helper chose the
@@ -187,4 +233,34 @@ pub fn helper_chose_hosts(results: &[OpResult]) -> Option<String> {
                 .filter(|code| HOSTS_ANSWERS.contains(code))
                 .map(str::to_owned)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// The block's names; nothing for no file, a folder, or a file larger
+    /// than the helper reads (review of #130).
+    #[test]
+    fn the_block_is_read_up_to_the_helpers_limit() {
+        let dir = TempDir::new().unwrap();
+        let hosts = dir.path().join("hosts");
+        assert_eq!(read_block(&hosts), None);
+        assert_eq!(read_block(dir.path()), None);
+
+        let block = "# Marsa start\n127.0.0.1 shop.test\n# Marsa end\n";
+        fs::write(&hosts, block).unwrap();
+        let names = read_block(&hosts).unwrap();
+        assert_eq!(names.into_iter().collect::<Vec<_>>(), ["shop.test"]);
+
+        let filler = "#".repeat(usize::try_from(MAX_HOSTS_BYTES).unwrap() - block.len());
+        fs::write(&hosts, format!("{block}{filler}")).unwrap();
+        assert!(read_block(&hosts).is_some());
+        fs::write(&hosts, format!("{block}{filler}#")).unwrap();
+        assert_eq!(read_block(&hosts), None);
+    }
 }

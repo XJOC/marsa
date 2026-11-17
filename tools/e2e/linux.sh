@@ -438,7 +438,7 @@ else
   grep -q "Put the sites' .test names in /etc/hosts: done" <<<"$out" || fail "the hosts step is not done"
   ! grep -q "skipped" <<<"$out" || fail "a skipped step: the helper and marsad disagree"
   run cat /etc/hosts
-  grep -qx "127.0.0.1 $SITE" /etc/hosts || fail "$SITE is not in /etc/hosts"
+  grep -qxF "127.0.0.1 $SITE" /etc/hosts || fail "$SITE is not in /etc/hosts"
 fi
 grep -q "Let Caddy use ports 80 and 443: done" <<<"$out" || fail "the ports step is not done"
 grep -q "Trust Marsa's HTTPS certificates: done" <<<"$out" || fail "the trust step is not done"

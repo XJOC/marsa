@@ -31,12 +31,13 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use marsa_core::dns;
 use marsa_core::helper::HelperOp;
-use marsa_core::types::{HostsStatus, SetupReport};
+use marsa_core::types::{HostsStatus, SetupReport, SetupSkip};
 
 use super::super::api::HttpError;
 use super::super::state::Daemon;
-use super::{Flow, Running, Setup, host_names, is_linux, linux_dns};
+use super::{Flow, Running, Setup, is_linux, linux_dns, names_of};
 
 /// The routes on `setup`, merged into setup's own.
 pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
@@ -60,7 +61,8 @@ async fn status(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<HostsStat
     if !setup.platform().is_some_and(is_linux) {
         return Ok(Json(HostsStatus::default()));
     }
-    let job = tokio::task::spawn_blocking(move || read_status(&daemon, &setup));
+    let names = site_names(&daemon).await?;
+    let job = tokio::task::spawn_blocking(move || read_status(&daemon, &setup, &names));
     job.await.map(Json).map_err(|err| {
         tracing::error!(error = %err, "the hosts job failed");
         internal_error()
@@ -73,11 +75,12 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
         .filter(|platform| is_linux(*platform))
         .ok_or_else(not_used)?;
     let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
+    let names = site_names(&daemon).await?;
     let job = tokio::task::spawn_blocking(move || {
         // Moved in, so a setup waits for this sync to end even if the client
         // goes away.
         let _running = running;
-        let status = read_status(&daemon, &setup);
+        let status = read_status(&daemon, &setup, &names);
         if !status.used {
             return Err(not_used());
         }
@@ -85,8 +88,17 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
         if status.missing.is_empty() {
             return Ok(report);
         }
+        // A request the helper refuses as a whole would change nothing
+        // either, after a password for nothing.
+        if !dns::hosts_names_fit(&names) {
+            let skipped = SetupSkip {
+                op: linux_dns::HOSTS_SYNC.to_owned(),
+                code: linux_dns::HOSTS_TOO_MANY_NAMES.to_owned(),
+            };
+            report.skipped.push(skipped);
+            return Ok(report);
+        }
         tracing::info!(missing = ?status.missing, "adding sites to the hosts file");
-        let names = host_names(&daemon);
         let ops = vec![HelperOp::HostsSync { names }];
         match setup.launch(Flow::Setup, ops, platform, &daemon.shutdown) {
             Ok(results) => report.results = results,
@@ -101,10 +113,19 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
     Ok(Json(report))
 }
 
-/// [`linux_dns::status`] for the daemon's sites. Blocking.
-fn read_status(daemon: &Daemon, setup: &Setup) -> HostsStatus {
-    let names = host_names(daemon);
-    linux_dns::status(setup.runner(), setup.hosts_file(), &names, &daemon.shutdown)
+/// The host names of the daemon's sites, from the list `GET /v1/sites`
+/// gives: built now if there is none yet, with that route's errors.
+async fn site_names(daemon: &Arc<Daemon>) -> Result<Vec<String>, HttpError> {
+    let list = match daemon.sites() {
+        Some(list) => list,
+        None => daemon.rebuild_sites().await?,
+    };
+    Ok(names_of(&list))
+}
+
+/// [`linux_dns::status`] for `names`. Blocking.
+fn read_status(daemon: &Daemon, setup: &Setup, names: &[String]) -> HostsStatus {
+    linux_dns::status(setup.runner(), setup.hosts_file(), names, &daemon.shutdown)
 }
 
 fn not_used() -> HttpError {
@@ -360,6 +381,22 @@ mod tests {
             (status, code(&json)),
             (StatusCode::CONFLICT, "hosts_not_used".to_owned())
         );
+        assert_eq!(fake.pkexec_calls(), 0);
+    }
+
+    /// More names than the helper takes: no prompt for a request it would
+    /// refuse, and the report says why.
+    #[tokio::test]
+    async fn too_many_names_are_skipped_with_no_prompt() {
+        let names: Vec<String> = (0..1001).map(|i| format!("s{i}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let place = Place::new(&names, "");
+        let fake = done_fake(UBUNTU_2204_SERVER);
+        let (status, json) = place.app(&fake, Platform::LinuxX64).sync().await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let report: SetupReport = serde_json::from_value(json).unwrap();
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].code, "hosts_too_many_names");
         assert_eq!(fake.pkexec_calls(), 0);
     }
 

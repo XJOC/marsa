@@ -9,8 +9,9 @@
 //! | Linux | systemd-resolved sends `~test` to the same server | once, at setup |
 //! | Windows | one hosts file line per site | on every site change |
 //!
-//! The daemon asks the strategy what to send to the helper, so it does not
-//! need to know the system. The strategy only returns data.
+//! On macOS and Windows the daemon asks the strategy what to send to the
+//! helper, so it does not need to know the system. The strategy only returns
+//! data.
 //!
 //! Linux has a second way (ADR 0014, task M4-18k): where systemd-resolved
 //! does not run, or where its systemd is older than 250 and
@@ -124,8 +125,8 @@ pub struct LinuxFacts {
     /// The first number of `systemctl --version`; `None` if it could not
     /// be read.
     pub systemd: Option<u32>,
-    /// Whether systemd-resolved runs (`systemctl is-active`); `None` if
-    /// that could not be read.
+    /// Whether systemd-resolved runs (`systemctl is-active`, as the helper
+    /// reads it); `None` if the read did not end, and the helper is asked.
     pub resolved_runs: Option<bool>,
     /// Whether systemd-networkd may run, now or at the next boot
     /// ([`networkd_may_run`]). Only systemd 249 asks.
@@ -144,7 +145,8 @@ pub const LINK_BEFORE_250: u32 = 249;
 /// link, so the helper says what it could not read
 /// (`resolved_systemd_unknown`). Hosts lines work with any resolver, so a
 /// system where systemd-resolved does not run (Debian 12 by default) gets
-/// them too.
+/// them too: there the helper would refuse the link with
+/// `resolved_not_running`.
 pub fn linux_path(facts: LinuxFacts) -> LinuxPath {
     if facts.resolved_runs == Some(false) {
         return LinuxPath::Hosts;
@@ -197,6 +199,22 @@ pub fn networkd_may_run(active: Option<&str>, enabled: Option<&str>) -> bool {
             .all(|state| matches!(state.as_str(), "disabled" | "masked"))
     });
     !(inactive && off)
+}
+
+/// The most names one `hosts_sync` may carry: `marsa-helper` refuses a
+/// request with more (`request.rs`).
+pub const MAX_HOSTS_NAMES: usize = 1000;
+/// The most bytes the names of one `hosts_sync` may take in the request,
+/// with their quotes and commas. The helper reads at most 64 KiB, and a
+/// certificate of up to 16 KiB may ride in the same request.
+pub const MAX_HOSTS_NAMES_BYTES: usize = 44 * 1024;
+
+/// Whether `names` fit in one `hosts_sync` that the helper accepts
+/// ([`MAX_HOSTS_NAMES`], [`MAX_HOSTS_NAMES_BYTES`]). A request the helper
+/// refuses would lose its other operations too.
+pub fn hosts_names_fit(names: &[String]) -> bool {
+    let bytes: usize = names.iter().map(|name| name.len() + 3).sum();
+    names.len() <= MAX_HOSTS_NAMES && bytes <= MAX_HOSTS_NAMES_BYTES
 }
 
 /// The first line of Marsa's block in a hosts file.
@@ -332,8 +350,8 @@ mod tests {
             (facts(Some(247), None, false), Hosts),
             // The helper says what it could not read.
             (facts(None, Some(true), true), Link),
-            (facts(None, None, true), Link),
             (facts(Some(255), None, true), Link),
+            (facts(None, None, true), Link),
             // Hosts lines need no resolver at all.
             (facts(Some(255), Some(false), false), Hosts),
             (facts(None, Some(false), false), Hosts),
@@ -394,6 +412,22 @@ mod tests {
         }
         assert!(networkd_may_run(None, Some(off)));
         assert!(networkd_may_run(Some(down), None));
+    }
+
+    #[test]
+    fn names_fit_in_one_request_the_helper_takes() {
+        let names = |count: usize, len: usize| -> Vec<String> {
+            (0..count)
+                .map(|i| format!("{:0>width$}.test", i, width = len - 5))
+                .collect()
+        };
+        assert!(hosts_names_fit(&[]));
+        assert!(hosts_names_fit(&names(MAX_HOSTS_NAMES, 20)));
+        assert!(!hosts_names_fit(&names(MAX_HOSTS_NAMES + 1, 10)));
+        // 1000 names of 68 bytes: about 70 KiB, more than the helper reads.
+        assert!(!hosts_names_fit(&names(MAX_HOSTS_NAMES, 68)));
+        assert!(hosts_names_fit(&names(600, 68)));
+        assert!(!hosts_names_fit(&names(700, 68)));
     }
 
     #[test]

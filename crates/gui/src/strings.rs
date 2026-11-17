@@ -1037,6 +1037,25 @@ fn error_message(code: &str) -> Option<&'static str> {
              Install the package pkexec (Debian, Ubuntu), polkit (Fedora), or policykit-1 \
              (older systems), then run setup again."
         }
+        // Linux, the second request of setup (task M4-18k2).
+        "setup_hosts_not_written" => {
+            "The steps above are done, but the second password prompt did not go through, so \
+             the sites' .test names are not in /etc/hosts yet and the sites do not open. Run \
+             setup again."
+        }
+        "setup_hosts_not_removed" => {
+            "The steps above are done, and .test names now reach Marsa without /etc/hosts. The \
+             second password prompt did not go through, so Marsa's old lines stay in \
+             /etc/hosts; they do no harm. Run setup again to take them out."
+        }
+        "hosts_sites_unknown" => {
+            "Marsa could not read its site list, so it left the hosts file as it is. Look at \
+             the sites, then run setup again."
+        }
+        "hosts_too_many_names" => {
+            "There are more sites than Marsa can put in the hosts file at once (1000 names), \
+             so it left the file as it is. Remove sites you do not use, then run setup again."
+        }
         "setup_caddy_ports_failed" => {
             "Linux now lets Caddy use ports 80 and 443, but Caddy did not take them. Most often \
              another program listens there (Apache, nginx). Stop it, then restart Caddy; the \
@@ -1645,6 +1664,10 @@ mod tests {
             "hosts_read",
             "hosts_write",
             "hosts_block_broken",
+            "hosts_sites_unknown",
+            "hosts_too_many_names",
+            "setup_hosts_not_written",
+            "setup_hosts_not_removed",
             "resolved_restart_failed",
             "resolved_stopped",
             "ports_foreign",
