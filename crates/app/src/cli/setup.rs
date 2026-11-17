@@ -307,11 +307,15 @@ mod tests {
             ..SetupReport::default()
         };
         let failure = error(&report).unwrap();
-        assert_eq!(
-            failure.line(),
+        // The CLI runs where marsad runs: Windows' admin prompt is UAC.
+        let expected = if cfg!(windows) {
+            "marsa: The UAC prompt was declined, so nothing was changed. Run \"marsa setup\" \
+             again when you are ready. [setup_cancelled]"
+        } else {
             "marsa: The password prompt was cancelled, so nothing was changed. Run \"marsa \
              setup\" again when you are ready. [setup_cancelled]"
-        );
+        };
+        assert_eq!(failure.line(), expected);
         assert_eq!(
             render(&SetupReport::default(), &data()),
             "Nothing to set up.\n"
