@@ -178,9 +178,9 @@ echo "system: $PRETTY_NAME, systemd $SYSTEMD, kernel $(uname -r)"
 # systemd 250 and later, or before 250 without systemd-networkd: the helper
 # makes marsa0 (tasks M4-18h, M4-18k). Before 250 with networkd (the
 # runners) it answers resolved_use_hosts, and .test names go into
-# /etc/hosts instead (hosts_sync); until setup does that (task M4-18k2),
-# curl reaches the site with --resolve. Ports and trust are tested all the
-# same.
+# /etc/hosts instead (hosts_sync). In part A curl reaches the site with
+# --resolve there; in part B `marsa setup` writes the hosts lines itself
+# (task M4-18k2), and curl needs no --resolve on either way.
 # Mirrors the helper (review of #125): before 250, the link only on 249,
 # and only when networkd's service and socket are inactive and disabled or
 # masked.
@@ -429,19 +429,23 @@ polkit_rule
 code=0
 out=$(marsa setup 2>&1) || code=$?
 echo "$out"
+[ "$code" = 0 ] || fail "marsa setup exited with $code"
 if [ "$LINK" = yes ]; then
-  [ "$code" = 0 ] || fail "marsa setup exited with $code"
   grep -q "Send .test names to Marsa: done" <<<"$out" || fail "the .test step is not done"
+  ! grep -q "/etc/hosts" <<<"$out" || fail "setup took the hosts way on systemd $SYSTEMD"
 else
-  # resolved_use_hosts: a failed step, so exit 1, until setup writes the
-  # hosts lines itself (task M4-18k2).
-  [ "$code" = 1 ] || fail "marsa setup exited with $code, not 1"
-  grep -q "Send .test names to Marsa: failed" <<<"$out" || fail "no failed .test step on systemd $SYSTEMD"
+  # The hosts way, chosen by marsad itself: one prompt, no failed step.
+  grep -q "Put the sites' .test names in /etc/hosts: done" <<<"$out" || fail "the hosts step is not done"
+  ! grep -q "skipped" <<<"$out" || fail "a skipped step: the helper and marsad disagree"
+  run cat /etc/hosts
+  grep -qx "127.0.0.1 $SITE" /etc/hosts || fail "$SITE is not in /etc/hosts"
 fi
 grep -q "Let Caddy use ports 80 and 443: done" <<<"$out" || fail "the ports step is not done"
 grep -q "Trust Marsa's HTTPS certificates: done" <<<"$out" || fail "the trust step is not done"
 [ "$(cat "$PORT_START")" = 80 ] || fail "ip_unprivileged_port_start is $(cat "$PORT_START"), not 80"
-[ "$LINK" = no ] || wait_for_name "$SITE" || fail "$SITE does not resolve"
+wait_for_name "$SITE" || fail "$SITE does not resolve"
+# From here on the name resolves on both ways.
+NAME=()
 
 step "after setup: Caddy on ports 80 and 443, with no restart"
 # Setup sent Caddy its config with ports 80 and 443 itself (M4-18e).
@@ -462,6 +466,11 @@ if grep -vq '^127\.0\.0\.1:' <<<"$(tr ' ' '\n' <<<"$listeners" | grep .)"; then
 fi
 
 step "removal, with the site running"
+if [ "$LINK" = no ]; then
+  helper '[{"op":"hosts_remove"}]' || fail "the helper exited with $?"
+  [ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"
+  cmp -s /etc/hosts "$HOME/hosts-before" || fail "/etc/hosts is not as it was before setup"
+fi
 remove_all
 helper '[{"op":"trust_remove"}]' || fail "the helper exited with $?"
 [ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"

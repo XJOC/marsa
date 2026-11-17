@@ -211,6 +211,29 @@ mod tests {
         assert!(error(&report).is_none());
     }
 
+    /// The hosts way on Linux (task M4-18k): the output names the file, and
+    /// a link the helper refused is a skipped step that says why.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_hosts_way_names_the_file() {
+        let report = SetupReport {
+            results: vec![
+                result("resolved_remove", OpStatus::Unchanged, None),
+                result("hosts_sync", OpStatus::Done, None),
+            ],
+            skipped: vec![skip("resolved_install", "resolved_not_running")],
+            ..SetupReport::default()
+        };
+        assert_eq!(
+            render(&report, &data()),
+            "Take out Marsa's link for .test names: already done.\n\
+             Put the sites' .test names in /etc/hosts: done.\n\
+             Send .test names to Marsa: skipped. systemd-resolved does not run on this system, \
+             so Marsa did not make its link for .test names: they go into /etc/hosts instead. \
+             [resolved_not_running]\n"
+        );
+    }
+
     #[test]
     fn a_failed_step_and_no_ca_say_why() {
         let report = SetupReport {

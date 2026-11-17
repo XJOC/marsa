@@ -21,7 +21,14 @@
 //!    steps still go. On macOS the trust is step 5, by the user;
 //!    elsewhere the certificate goes into `trust_install` as text, for the
 //!    helper (ADR 0011).
-//! 2. **DNS:** the setup operation of [`dns::strategy_for`].
+//! 2. **DNS:** the setup operation of [`dns::strategy_for`]. On Linux, the
+//!    operations of the way that [`linux_dns`] reads as the user: the
+//!    `marsa0` link (`resolved_install`), or the hosts file (`hosts_sync`
+//!    with the name of every site) where systemd-resolved does not run, or
+//!    where systemd is older than 250 and systemd-networkd may run (ADR
+//!    0014, task M4-18k). The helper stays the judge: if it answers
+//!    `resolved_install` with `resolved_use_hosts` or
+//!    `resolved_not_running`, setup sends `hosts_sync` in a second request.
 //! 3. **Ports** on Linux (ADR 0014): `ports_install`, which lets Caddy bind
 //!    80 and 443 itself. Nothing is redirected, so no other program's
 //!    traffic can be taken, and no port check runs first: a program on port
@@ -62,10 +69,11 @@
 //! Every program runs through [`Runner`], so the tests run none: they pass a
 //! fake that records each call and answers from fixtures.
 
+pub mod linux_dns;
 pub mod pkexec;
 pub mod user_trust;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env::consts::EXE_SUFFIX;
 use std::ffi::OsString;
 use std::fmt;
@@ -84,14 +92,14 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use marsa_core::caddy::{CaddyInput, CaddyPaths};
-use marsa_core::dns;
+use marsa_core::dns::{self, DNS_PORT, LinuxPath};
 use marsa_core::helper::{
     HELPER_PROTOCOL_VERSION, HelperOp, HelperRequest, HelperResponse, OpResult, OpStatus,
 };
 use marsa_core::ports::{self, Listener, ProcessInfo};
 use marsa_core::recipes::Platform;
 use marsa_core::types::{
-    ApiError, Event, PortHolder, ServiceAction, ServiceState, SetupReport, SetupSkip,
+    ApiError, Event, PortHolder, ServiceAction, ServiceState, SetupReport, SetupSkip, Site,
 };
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
@@ -150,7 +158,9 @@ const CA_POLL: Duration = Duration::from_millis(100);
 /// start and its CA root at [`CA_WAIT`], `netstat`, [`MAX_PS`] `ps` calls,
 /// and `security verify-cert` at [`CHECK_LIMIT`] each, `osascript` and
 /// `security add-trusted-cert` at [`PROMPT_LIMIT`] each, and [`PIPE_GRACE`]
-/// after each of these programs. A client has to wait longer:
+/// after each of these programs. Linux stays under it: up to four
+/// `systemctl` checks, and two `pkexec` prompts when the helper chooses the
+/// hosts file ([`linux_dns`]). A client has to wait longer:
 /// `marsa_core::client::SETUP_TIMEOUT` does, and a test holds the two
 /// together.
 pub const SLOWEST_SETUP: Duration = Duration::from_secs(
@@ -553,6 +563,10 @@ pub struct Setup {
     /// How setup starts Caddy for its CA. `None`, the default: the daemon's
     /// own Caddy ([`DaemonCaddy`]). Tests put a fake here.
     caddy: Option<Arc<dyn StartCaddy>>,
+    /// Linux: the hosts file whose Marsa block setup reads, never writes
+    /// ([`linux_dns::read_block`]). [`linux_dns::HOSTS_FILE`] for the
+    /// daemon; `None`, as if it had no block, until a test sets one.
+    hosts_file: Option<PathBuf>,
     /// How long setup waits for Caddy and its CA root: [`CA_WAIT`], shorter
     /// in tests.
     ca_wait: Duration,
@@ -572,6 +586,7 @@ impl Setup {
             helper_path(),
             home_dir(),
         )
+        .with_hosts_file(PathBuf::from(linux_dns::HOSTS_FILE))
     }
 
     /// For tests: any runner, system, helper path, and home folder.
@@ -587,9 +602,18 @@ impl Setup {
             helper,
             home,
             caddy: None,
+            hosts_file: None,
             ca_wait: CA_WAIT,
             running: AtomicU8::new(IDLE),
         }
+    }
+
+    /// The hosts file setup reads on Linux: [`linux_dns::HOSTS_FILE`] for
+    /// the daemon, a file of their own for tests.
+    #[must_use]
+    pub fn with_hosts_file(mut self, path: PathBuf) -> Self {
+        self.hosts_file = Some(path);
+        self
     }
 
     /// For tests: `caddy` starts Caddy for the CA step, not the daemon's own.
@@ -615,13 +639,15 @@ impl Setup {
     }
 
     /// The setup itself. Blocking: it runs programs and reads a file.
-    /// `starter` starts Caddy when its CA root is not there yet.
+    /// `starter` starts Caddy when its CA root is not there yet. `names`:
+    /// the host names of the sites, sorted, for the hosts file on Linux.
     fn run(
         &self,
         data_dir: &Path,
         caddy: CaddyInput,
         platform: Platform,
         starter: &dyn StartCaddy,
+        names: &[String],
         stop: &CancellationToken,
     ) -> SetupReport {
         let mut report = SetupReport::default();
@@ -635,7 +661,18 @@ impl Setup {
             Ok(pem) => ops.push(HelperOp::TrustInstall { pem }),
             Err(code) => report.skipped.push(skip(TRUST_INSTALL, code)),
         }
-        if let Some(dns) = dns::strategy_for(platform) {
+        let mut linux_path = None;
+        if is_linux(platform) {
+            let path = dns::linux_path(linux_dns::facts(self.runner.as_ref(), stop));
+            let block = self.hosts_file.as_deref().and_then(linux_dns::read_block);
+            tracing::info!(
+                ?path,
+                block = block.is_some(),
+                "the way of .test names here"
+            );
+            ops.extend(linux_dns::setup_ops(path, block.is_some(), names, DNS_PORT));
+            linux_path = Some(path);
+        } else if let Some(dns) = dns::strategy_for(platform) {
             ops.push(dns.setup_op());
         }
         if is_linux(platform) {
@@ -647,6 +684,9 @@ impl Setup {
             Ok(results) => report.results = results,
             Err(error) => report.error = Some(error),
         }
+        if linux_path == Some(LinuxPath::Link) {
+            self.hosts_if_helper_says(&mut report, platform, names, stop);
+        }
         // Only if the helper ran as asked, or was not needed: a cancelled or
         // refused admin prompt ends setup with nothing changed in the system,
         // and no second dialog. Setup may have started Caddy and made its CA
@@ -656,6 +696,42 @@ impl Setup {
             report.results.push(self.trust_for_user(&pem, &files, stop));
         }
         report
+    }
+
+    /// Linux, after a request with `resolved_install`: the helper is the
+    /// judge of the way (task M4-18k2). If it chose the hosts file
+    /// ([`linux_dns::helper_chose_hosts`]), `resolved_install` moves from
+    /// the results to the skipped steps with the helper's code, and
+    /// `hosts_sync` goes to the helper in a second request: a second
+    /// password prompt, caused by the same `marsa setup`.
+    fn hosts_if_helper_says(
+        &self,
+        report: &mut SetupReport,
+        platform: Platform,
+        names: &[String],
+        stop: &CancellationToken,
+    ) {
+        let Some(code) = linux_dns::helper_chose_hosts(&report.results) else {
+            return;
+        };
+        tracing::warn!(
+            code,
+            "marsad expected the marsa0 link, but marsa-helper chose the hosts file; \
+             sending hosts_sync"
+        );
+        report
+            .results
+            .retain(|result| result.op != linux_dns::RESOLVED_INSTALL);
+        report
+            .skipped
+            .push(skip(linux_dns::RESOLVED_INSTALL, &code));
+        let ops = vec![HelperOp::HostsSync {
+            names: names.to_vec(),
+        }];
+        match self.apply(ops, platform, stop) {
+            Ok(results) => report.results.extend(results),
+            Err(error) => report.error = Some(error),
+        }
     }
 
     /// macOS: `pf_install` if nobody listens on 80 and 443, else the reason
@@ -1019,11 +1095,13 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
                 runtime: runtime.clone(),
             }),
         };
+        let names = host_names(&daemon);
         let mut report = setup.run(
             &daemon.data_dir,
             caddy,
             platform,
             starter.as_ref(),
+            &names,
             &daemon.shutdown,
         );
         tracing::info!(
@@ -1071,6 +1149,16 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
         HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
     })?;
     Ok(Json(report))
+}
+
+/// The host names of the daemon's sites, sorted, each once. None before the
+/// first site list.
+fn host_names(daemon: &Daemon) -> Vec<String> {
+    let names: BTreeSet<String> = daemon
+        .sites()
+        .map(|list| list.sites.iter().map(Site::host).collect())
+        .unwrap_or_default();
+    names.into_iter().collect()
 }
 
 /// Whether the helper's `ports_install` is done, now or before.
@@ -1600,6 +1688,7 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::extract::Request;
     use axum::middleware::from_fn_with_state;
+    use marsa_core::dns::NETWORKD_UNITS;
     use marsa_core::platform::daemon_file::{Token, daemon_authority};
     use marsa_core::types::{ErrorBody, OpStatus};
     use serde_json::{Value, json};
@@ -1691,6 +1780,14 @@ mod tests {
 
         fn programs(&self) -> Vec<&'static str> {
             self.calls().iter().map(|call| call.program).collect()
+        }
+
+        /// How many times `pkexec` ran.
+        fn pkexec_calls(&self) -> usize {
+            self.programs()
+                .iter()
+                .filter(|program| **program == pkexec::PKEXEC)
+                .count()
         }
 
         /// The request the helper would have got, from the last `pkexec`.
@@ -1867,8 +1964,14 @@ mod tests {
             let caddy = CaddyInput::default();
             let stop = CancellationToken::new();
             let platform = Platform::DarwinArm64;
-            self.setup(fake)
-                .run(self.dir.path(), caddy, platform, self.caddy.as_ref(), &stop)
+            self.setup(fake).run(
+                self.dir.path(),
+                caddy,
+                platform,
+                self.caddy.as_ref(),
+                &[],
+                &stop,
+            )
         }
     }
 
@@ -2225,6 +2328,7 @@ mod tests {
             CaddyInput::default(),
             Platform::DarwinArm64,
             dir.caddy.as_ref(),
+            &[],
             &stop,
         );
 
@@ -2299,6 +2403,7 @@ mod tests {
                 CaddyInput::default(),
                 Platform::DarwinArm64,
                 dir.caddy.as_ref(),
+                &[],
                 &stop,
             );
 
@@ -2329,6 +2434,7 @@ mod tests {
             CaddyInput::default(),
             Platform::DarwinArm64,
             dir.caddy.as_ref(),
+            &[],
             &stop,
         );
         assert_eq!(error_code(&report), Some("setup_helper_protected_folder"));
@@ -2373,11 +2479,110 @@ mod tests {
         }
     }
 
-    /// A Linux machine whose `pkexec` gives `answer()`. Nothing else may run.
+    /// What `systemctl` says on a test system.
+    #[derive(Debug, Clone, Copy)]
+    struct Systemd {
+        /// The first line of `systemctl --version`.
+        version: &'static str,
+        /// The exit code of `is-active --quiet systemd-resolved.service`.
+        resolved: i32,
+        /// What `is-active` and `is-enabled` print for networkd's units.
+        networkd: (&'static str, &'static str),
+    }
+
+    /// Ubuntu 24.04: the `marsa0` link, networkd or not.
+    const UBUNTU_2404: Systemd = Systemd {
+        version: "systemd 255 (255.4-1ubuntu8)",
+        resolved: 0,
+        networkd: (
+            "active\ninactive\ninactive\n",
+            "enabled\nenabled\nenabled\n",
+        ),
+    };
+    /// Ubuntu 22.04 with systemd-networkd, as on servers and CI runners.
+    const UBUNTU_2204_SERVER: Systemd = Systemd {
+        version: "systemd 249 (249.11-0ubuntu3.12)",
+        resolved: 0,
+        networkd: ("active\nactive\ninactive\n", "enabled\nenabled\ndisabled\n"),
+    };
+    /// Ubuntu 22.04 desktop: NetworkManager, networkd off for good.
+    const UBUNTU_2204_DESKTOP: Systemd = Systemd {
+        version: "systemd 249 (249.11-0ubuntu3.12)",
+        resolved: 0,
+        networkd: (
+            "inactive\ninactive\ninactive\n",
+            "disabled\ndisabled\nmasked\n",
+        ),
+    };
+    /// Debian 12 as installed: no systemd-resolved.
+    const DEBIAN_12: Systemd = Systemd {
+        version: "systemd 252 (252.30-1~deb12u2)",
+        resolved: 3,
+        networkd: (
+            "inactive\ninactive\ninactive\n",
+            "disabled\ndisabled\ndisabled\n",
+        ),
+    };
+
+    /// `systemctl` on `system`, for the commands of `linux_dns` only.
+    fn systemctl(system: Systemd, args: &[String]) -> io::Result<RunOutput> {
+        let printed = |code, stdout: &str| {
+            Ok(RunOutput {
+                code: Some(code),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        };
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        match args.as_slice() {
+            ["--version"] => printed(0, &format!("{}\n+PAM +AUDIT -SELINUX\n", system.version)),
+            ["is-active", "--quiet", "systemd-resolved.service"] => printed(system.resolved, ""),
+            ["is-active", units @ ..] if units == NETWORKD_UNITS => printed(3, system.networkd.0),
+            ["is-enabled", units @ ..] if units == NETWORKD_UNITS => printed(1, system.networkd.1),
+            other => panic!("systemctl {other:?}"),
+        }
+    }
+
+    /// A Linux machine with the `marsa0` link ([`UBUNTU_2404`]) whose
+    /// `pkexec` gives `answer()`. Nothing else may run.
     fn linux_fake(answer: impl Fn() -> io::Result<RunOutput> + Send + Sync + 'static) -> Arc<Fake> {
-        Fake::answering(move |program, _| match program {
-            pkexec::PKEXEC => answer(),
+        linux_fake_on(UBUNTU_2404, move |_| answer())
+    }
+
+    /// `system`, whose `pkexec` gives `answer(request)`.
+    fn linux_fake_on(
+        system: Systemd,
+        answer: impl Fn(HelperRequest) -> io::Result<RunOutput> + Send + Sync + 'static,
+    ) -> Arc<Fake> {
+        Fake::answering(move |program, args| match program {
+            pkexec::PKEXEC => answer(serde_json::from_str(&args[3]).unwrap()),
+            linux_dns::SYSTEMCTL => systemctl(system, args),
             other => panic!("{other} ran on Linux"),
+        })
+    }
+
+    /// The helper's answer: `done` for each op of `request`, except the
+    /// `(op, code)` pairs of `failed`.
+    fn answer_for(request: &HelperRequest, failed: &[(&str, &str)]) -> io::Result<RunOutput> {
+        let results: Vec<Value> = request
+            .ops
+            .iter()
+            .map(|op| {
+                let op = op_name(op).unwrap();
+                match failed.iter().find(|(name, _)| *name == op) {
+                    Some((_, code)) => json!({ "op": op, "status": "failed", "code": code,
+                                               "message": "x" }),
+                    None => json!({ "op": op, "status": "done" }),
+                }
+            })
+            .collect();
+        let code = if failed.is_empty() { 0 } else { 1 };
+        Ok(RunOutput {
+            code: Some(code),
+            stdout: json!({ "version": 1, "results": results })
+                .to_string()
+                .into_bytes(),
+            stderr: Vec::new(),
         })
     }
 
@@ -2391,12 +2596,19 @@ mod tests {
     }
 
     fn run_linux(setup: &Setup, dir: &Dir) -> SetupReport {
+        run_linux_with(setup, dir, &[])
+    }
+
+    /// Setup on Linux with the sites `names`.
+    fn run_linux_with(setup: &Setup, dir: &Dir, names: &[&str]) -> SetupReport {
         let stop = CancellationToken::new();
+        let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
         setup.run(
             dir.dir.path(),
             CaddyInput::default(),
             Platform::LinuxX64,
             dir.caddy.as_ref(),
+            &names,
             &stop,
         )
     }
@@ -2416,7 +2628,22 @@ mod tests {
         let report = run_linux(&linux_setup(&fake, helper.clone(), dir.home()), &dir);
 
         let calls = fake.calls();
-        assert_eq!(fake.programs(), ["/usr/bin/pkexec"]);
+        assert_eq!(
+            fake.programs(),
+            [
+                "/usr/bin/systemctl",
+                "/usr/bin/systemctl",
+                "/usr/bin/pkexec"
+            ]
+        );
+        // systemd 255: networkd does not count.
+        assert_eq!(calls[0].args, ["--version"]);
+        assert_eq!(
+            calls[1].args,
+            ["is-active", "--quiet", "systemd-resolved.service"]
+        );
+        assert_eq!(calls[1].limit, Duration::from_secs(10));
+        let calls = &calls[2..];
         assert_eq!(calls[0].args.len(), 4);
         assert_eq!(calls[0].args[0], "--disable-internal-agent");
         assert_eq!(calls[0].args[1], helper.to_str().unwrap());
@@ -2508,6 +2735,202 @@ mod tests {
             report.results[1].code.as_deref(),
             Some("resolved_check_failed")
         );
+        // Not an answer that means the hosts file: no second request.
+        assert_eq!(fake.pkexec_calls(), 1);
+        assert!(report.skipped.is_empty());
+    }
+
+    /// `ops` with the certificate first and `ports_install` last, as setup
+    /// sends them on Linux.
+    fn linux_request(dns: Vec<HelperOp>) -> HelperRequest {
+        let mut ops = vec![trust()];
+        ops.extend(dns);
+        ops.push(HelperOp::PortsInstall);
+        HelperRequest::new(ops)
+    }
+
+    fn hosts_sync(names: &[&str]) -> HelperOp {
+        HelperOp::HostsSync {
+            names: names.iter().map(|name| (*name).to_owned()).collect(),
+        }
+    }
+
+    /// systemd older than 250 with systemd-networkd, or no
+    /// systemd-resolved at all: the names of the sites go into the hosts
+    /// file, and a link of an earlier setup goes (task M4-18k).
+    #[test]
+    fn linux_without_a_safe_link_puts_the_sites_in_the_hosts_file() {
+        for system in [UBUNTU_2204_SERVER, DEBIAN_12] {
+            let dir = Dir::new(true);
+            let fake = linux_fake_on(system, |request| answer_for(&request, &[]));
+            let setup = linux_setup(&fake, dir.helper(), dir.home());
+            let report = run_linux_with(&setup, &dir, &["blog.test", "shop.test"]);
+            let dns = vec![
+                HelperOp::ResolvedRemove,
+                hosts_sync(&["blog.test", "shop.test"]),
+            ];
+            assert_eq!(fake.pkexec_request(), linux_request(dns), "{system:?}");
+            let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+            assert_eq!(
+                steps,
+                [
+                    "trust_install",
+                    "resolved_remove",
+                    "hosts_sync",
+                    "ports_install"
+                ]
+            );
+            assert_eq!((report.error, report.skipped), (None, Vec::new()));
+            assert_eq!(fake.pkexec_calls(), 1, "{system:?}");
+        }
+    }
+
+    /// systemd 249 asks about systemd-networkd, and only 249 does. With no
+    /// systemd-resolved, nothing more is asked: the hosts file it is.
+    #[test]
+    fn only_systemd_249_asks_about_networkd() {
+        let networkd = |system| {
+            let dir = Dir::new(true);
+            let fake = linux_fake_on(system, |request| answer_for(&request, &[]));
+            run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+            fake.calls()
+                .iter()
+                .filter(|call| call.program == linux_dns::SYSTEMCTL)
+                .map(|call| call.args[0].clone())
+                .collect::<Vec<_>>()
+        };
+        let asked = ["--version", "is-active", "is-active", "is-enabled"];
+        assert_eq!(networkd(UBUNTU_2204_SERVER), asked);
+        assert_eq!(networkd(UBUNTU_2204_DESKTOP), asked);
+        assert_eq!(networkd(UBUNTU_2404), ["--version", "is-active"]);
+        assert_eq!(networkd(DEBIAN_12), ["--version", "is-active"]);
+    }
+
+    /// Ubuntu 22.04 on the desktop: networkd is off for good, so the link
+    /// (with its local route, in the helper) is safe there too.
+    #[test]
+    fn systemd_249_without_networkd_keeps_the_link() {
+        let dir = Dir::new(true);
+        let fake = linux_fake_on(UBUNTU_2204_DESKTOP, |request| answer_for(&request, &[]));
+        let setup = linux_setup(&fake, dir.helper(), dir.home());
+        run_linux_with(&setup, &dir, &["shop.test"]);
+        let dns = vec![HelperOp::ResolvedInstall { port: 18053 }];
+        assert_eq!(fake.pkexec_request(), linux_request(dns));
+    }
+
+    /// Marsa's block from an earlier setup, on a system that now takes the
+    /// link (an upgrade to systemd 250, say): it goes, in the same request.
+    /// The file itself is only read.
+    #[test]
+    fn the_link_takes_an_old_hosts_block_out() {
+        let dir = Dir::new(true);
+        let hosts = dir.dir.path().join("hosts");
+        let text = "127.0.0.1 localhost\n# Marsa start\n127.0.0.1 shop.test\n# Marsa end\n";
+        fs::write(&hosts, text).unwrap();
+        let fake = linux_fake_on(UBUNTU_2404, |request| answer_for(&request, &[]));
+        let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts.clone());
+        run_linux_with(&setup, &dir, &["shop.test"]);
+        let dns = vec![
+            HelperOp::ResolvedInstall { port: 18053 },
+            HelperOp::HostsRemove,
+        ];
+        assert_eq!(fake.pkexec_request(), linux_request(dns));
+        assert_eq!(fs::read_to_string(&hosts).unwrap(), text);
+
+        // No block, or one whose markers do not pair up: nothing to take out.
+        for text in [
+            "127.0.0.1 localhost\n",
+            "# Marsa start\n127.0.0.1 shop.test\n",
+        ] {
+            fs::write(&hosts, text).unwrap();
+            let fake = linux_fake_on(UBUNTU_2404, |request| answer_for(&request, &[]));
+            let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts.clone());
+            run_linux_with(&setup, &dir, &["shop.test"]);
+            let dns = vec![HelperOp::ResolvedInstall { port: 18053 }];
+            assert_eq!(fake.pkexec_request(), linux_request(dns), "{text:?}");
+        }
+    }
+
+    /// The helper is the judge (task M4-18k2): where marsad expected the
+    /// link but the helper chose the hosts file, `resolved_install` becomes
+    /// a skipped step with the helper's code, and the names go to the
+    /// helper in a second request.
+    #[test]
+    fn the_hosts_file_when_the_helper_says_so() {
+        for code in ["resolved_use_hosts", "resolved_not_running"] {
+            let dir = Dir::new(true);
+            let fake = linux_fake_on(UBUNTU_2404, move |request| {
+                answer_for(&request, &[("resolved_install", code)])
+            });
+            let setup = linux_setup(&fake, dir.helper(), dir.home());
+            let report = run_linux_with(&setup, &dir, &["shop.test"]);
+
+            assert_eq!(fake.pkexec_calls(), 2, "{code}");
+            let request = HelperRequest::new(vec![hosts_sync(&["shop.test"])]);
+            assert_eq!(fake.pkexec_request(), request, "{code}");
+            let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+            assert_eq!(steps, ["trust_install", "ports_install", "hosts_sync"]);
+            assert_eq!(report.skipped, [skip("resolved_install", code)]);
+            assert_eq!(report.error, None);
+            assert!(low_ports_set(&report));
+        }
+    }
+
+    /// The second prompt dismissed: setup says so, and the skipped step
+    /// stays.
+    #[test]
+    fn a_dismissed_second_prompt_is_the_error_of_setup() {
+        let dir = Dir::new(true);
+        let fake = linux_fake_on(UBUNTU_2404, |request| {
+            if request.ops.len() == 1 {
+                exit(
+                    126,
+                    "Error executing command as another user: Request dismissed",
+                )
+            } else {
+                answer_for(&request, &[("resolved_install", "resolved_use_hosts")])
+            }
+        });
+        let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+        assert_eq!(error_code(&report), Some("setup_cancelled"));
+        assert_eq!(
+            report.skipped,
+            [skip("resolved_install", "resolved_use_hosts")]
+        );
+        let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+        assert_eq!(steps, ["trust_install", "ports_install"]);
+    }
+
+    /// The hosts way never falls back the other way: a failed `hosts_sync`
+    /// is a failed step, with one prompt.
+    #[test]
+    fn a_failed_hosts_sync_is_a_failed_step() {
+        let dir = Dir::new(true);
+        let fake = linux_fake_on(UBUNTU_2204_SERVER, |request| {
+            answer_for(&request, &[("hosts_sync", "hosts_block_broken")])
+        });
+        let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+        assert_eq!(fake.pkexec_calls(), 1);
+        assert_eq!(
+            report.results[2].code.as_deref(),
+            Some("hosts_block_broken")
+        );
+        assert_eq!((report.error, report.skipped), (None, Vec::new()));
+    }
+
+    /// `systemctl` that cannot run: the link, and the helper says what it
+    /// finds.
+    #[test]
+    fn no_systemctl_leaves_the_choice_to_the_helper() {
+        let dir = Dir::new(true);
+        let fake = Fake::answering(|program, args| match program {
+            linux_dns::SYSTEMCTL => Err(io::Error::from(io::ErrorKind::NotFound)),
+            pkexec::PKEXEC => answer_for(&serde_json::from_str(&args[3]).unwrap(), &[]),
+            other => panic!("{other} ran"),
+        });
+        run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+        let dns = vec![HelperOp::ResolvedInstall { port: 18053 }];
+        assert_eq!(fake.pkexec_request(), linux_request(dns));
     }
 
     /// The same checks of the helper file as on macOS, before any dialog.
@@ -2519,7 +2942,7 @@ mod tests {
         let fake = linux_fake(|| panic!("pkexec ran"));
         let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
         assert_eq!(error_code(&report), Some("setup_helper_unsafe"));
-        assert!(fake.calls().is_empty());
+        assert!(!fake.programs().contains(&pkexec::PKEXEC));
     }
 
     #[test]
@@ -2608,7 +3031,14 @@ mod tests {
             assert!(fake.calls().is_empty());
         }
         assert_eq!(app.post().await.0, StatusCode::OK);
-        assert_eq!(fake.programs(), ["/usr/bin/pkexec"]);
+        assert_eq!(
+            fake.programs(),
+            [
+                "/usr/bin/systemctl",
+                "/usr/bin/systemctl",
+                "/usr/bin/pkexec"
+            ]
+        );
     }
 
     #[test]
@@ -3134,6 +3564,7 @@ mod tests {
                 CaddyInput::default(),
                 Platform::DarwinArm64,
                 dir.caddy.as_ref(),
+                &[],
                 &stop,
             );
             assert_eq!(error_code(&report), Some("setup_helper_missing"));

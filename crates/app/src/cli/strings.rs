@@ -517,10 +517,27 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              the old /etc/systemd/resolved.conf.d/marsa.conf). Run the command again; if it \
              repeats, report it."
             .into(),
-        "resolved_not_running" => "Marsa sends .test names to its DNS server through \
-             systemd-resolved, which does not run on this system, so nothing was changed. \
-             Start systemd-resolved, then run \"marsa setup\" again."
+        // Setup then puts the names in /etc/hosts (task M4-18k2).
+        "resolved_not_running" => "systemd-resolved does not run on this system, so Marsa \
+             did not make its link for .test names: they go into /etc/hosts instead."
             .into(),
+        // Linux before systemd 250 with systemd-networkd, or without
+        // systemd-resolved (task M4-18k), and Windows (task M4-19).
+        "hosts_read" => format!(
+            "Marsa did not change the hosts file ({HOSTS_FILE}): it cannot be read, or it is \
+             a link, read-only, or larger than 16 MiB. Fix the file, then run \"marsa setup\" \
+             again."
+        ),
+        "hosts_write" => format!(
+            "Marsa could not write the hosts file ({HOSTS_FILE}). Another program may hold it \
+             (some security tools do); close it, then run \"marsa setup\" again. If it \
+             repeats, report it with the file logs/marsad.log."
+        ),
+        "hosts_block_broken" => format!(
+            "The hosts file ({HOSTS_FILE}) has a \"# Marsa start\" line without its \"# Marsa \
+             end\" line, or the other way round, so Marsa left it as it is. Remove Marsa's lines \
+             from it, then run \"marsa setup\" again."
+        ),
         "resolved_tool_missing" => "The ip program (package iproute2) is not on this system, \
              so Marsa could not make its link for .test names. Install iproute2, then run \
              \"marsa setup\" again."
@@ -1063,6 +1080,13 @@ pub const SETUP_NOTHING: &str = "Nothing to set up.";
 pub const SETUP_CADDY_NOT_INSTALLED: &str = "Caddy is not installed, so Marsa's certificate \
      authority does not exist yet. Run \"marsa install caddy\", then run \"marsa setup\" again.";
 
+/// The hosts file, as the user finds it.
+const HOSTS_FILE: &str = if cfg!(windows) {
+    r"C:\Windows\System32\drivers\etc\hosts"
+} else {
+    "/etc/hosts"
+};
+
 /// A helper operation, as a step of `marsa setup`. An operation this build
 /// does not know shows its own name.
 pub fn setup_step(op: &str) -> String {
@@ -1072,6 +1096,10 @@ pub fn setup_step(op: &str) -> String {
         "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
         "resolved_install" => "Send .test names to Marsa".to_owned(),
         "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
+        // The hosts way on Linux (task M4-18k).
+        "resolved_remove" => "Take out Marsa's link for .test names".to_owned(),
+        "hosts_sync" => format!("Put the sites' .test names in {HOSTS_FILE}"),
+        "hosts_remove" => format!("Take Marsa's names out of {HOSTS_FILE}"),
         other => other.to_owned(),
     }
 }
@@ -1671,6 +1699,9 @@ mod tests {
         "resolved_unit_failed",
         "resolved_use_hosts",
         "resolved_systemd_unknown",
+        "hosts_read",
+        "hosts_write",
+        "hosts_block_broken",
         "setup_pkexec_missing",
         "setup_caddy_ports_failed",
         "resolved_stopped",
