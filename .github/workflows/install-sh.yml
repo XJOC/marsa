@@ -37,9 +37,9 @@ defaults:
     shell: bash
 
 jobs:
-  # A merge to main reaches every user of the raw install.sh URL at once, so a
-  # change to the script is a `sensitive` task: two reviewers (AGENTS.md
-  # section 5). The label is how the pull request says so.
+  # Every release ships install.sh as it is on main, and users pipe it into
+  # sh, so a change to the script is a `sensitive` task: two reviewers
+  # (AGENTS.md section 5). The label is how the pull request says so.
   label:
     name: install.sh needs the sensitive label
     if: github.event_name == 'pull_request'
