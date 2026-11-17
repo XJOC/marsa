@@ -109,6 +109,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::api::HttpError;
 use super::caddy::ActionError;
+use super::hosts_sync;
 use super::state::Daemon;
 
 const NETSTAT: &str = "/usr/sbin/netstat";
@@ -1278,6 +1279,28 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
                         .error
                         .get_or_insert_with(|| failure("setup_caddy_ports_failed", message));
                 }
+            }
+        }
+        // Windows: the service took the request, so this data folder's
+        // daemon sends the sites' names after each pass from now on
+        // (`hosts_sync`), and a pass now covers a site added during the UAC
+        // prompt. Not while the daemon stops.
+        if is_windows(platform) && report.error.is_none() && !daemon.shutdown.is_cancelled() {
+            let marker = daemon.data_dir.join(hosts_sync::MARKER);
+            match fs::write(&marker, "") {
+                Ok(()) => {
+                    let daemon = Arc::clone(&daemon);
+                    runtime.spawn(async move {
+                        // Not run: the sync task stopped, and the next
+                        // daemon's first pass sends the names.
+                        let _ = daemon.pass_requests.run_pass().await;
+                    });
+                }
+                Err(err) => tracing::warn!(
+                    path = %marker.display(),
+                    error = %err,
+                    "cannot mark the helper service as set up; the hosts file gets no names"
+                ),
             }
         }
         // Here, not in the handler: the event goes out even if the client
@@ -4448,6 +4471,9 @@ mod tests {
         assert_eq!(installed, Some(("S-1-5-21-1-2-3-1001".to_owned(), hash)));
         assert_eq!(service.requests.lock().unwrap().len(), 1);
         assert!(fake.calls().is_empty());
+        // From now on this data folder's daemon sends the names after each
+        // pass.
+        assert!(dir.dir.path().join(hosts_sync::MARKER).exists());
     }
 
     /// Windows with no CA root yet and no Caddy to make one: the trust is
@@ -4509,6 +4535,7 @@ mod tests {
         let (_, report) = app.post().await;
         assert_eq!(report["error"]["code"], "setup_helper_unsafe", "{report}");
         assert!(service.installed.lock().unwrap().is_none());
+        assert!(!dir.dir.path().join(hosts_sync::MARKER).exists());
     }
 
     #[tokio::test]
