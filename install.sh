@@ -37,7 +37,7 @@ PUBLIC_KEY="RWTuvZZrimY2ASzeaoWovb0LKYQTrVnNIbXoxoTKGJEZmSeLlyomDKxU"
 
 # The file names are fixed here. Nothing that comes from the network is used
 # as a command. One piece of network text reaches a file name and a URL: the
-# version of the newest release, and only after `valid_version` accepts it.
+# version of the latest release, and only after `valid_version` accepts it.
 PROGRAMS="marsa marsad marsa-shim marsa-helper marsa-gui"
 OPTIONAL_PROGRAMS="marsa-tray"
 # Text files of the archive, kept next to the programs.
@@ -132,12 +132,17 @@ find_version() {
     return 0
   fi
   fetch "$RELEASES_API" "$TMP/releases.json" ||
-    fail "cannot read the latest release from GitHub. Try again later, or choose a version: MARSA_VERSION=<version>."
+    fail "cannot read the latest release from GitHub (no connection, GitHub's limit on requests, or no stable release yet). Try again later, or choose a version: MARSA_VERSION=<version>."
   VERSION="$(tr ',' '\n' < "$TMP/releases.json" |
     sed -n 's/.*"tag_name" *: *"v\([0-9][0-9A-Za-z.-]*\)".*/\1/p' |
     grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' | head -n 1)"
   valid_version "$VERSION" ||
     fail "found no Marsa release on GitHub. Choose a version: MARSA_VERSION=<version>."
+  # GitHub never marks a pre-release as the latest. A suffix here means one
+  # was published as stable by mistake: install it only when asked for.
+  case "$VERSION" in
+    *-*) fail "the latest release on GitHub is v$VERSION, a pre-release. To install it anyway: MARSA_VERSION=$VERSION." ;;
+  esac
 }
 
 # The SHA-256 of a file, as 64 lowercase hex characters. Empty if the tool

@@ -22,7 +22,12 @@ never edits your shell files. Before it unpacks anything, it checks the
 SHA-256 of the download, and the [signature](#verify-a-download) too if
 `minisign` is installed. It installs the latest release, never a
 pre-release; to install another version, run it with `MARSA_VERSION=0.1.0 sh`.
-You can read the script first: [`install.sh`](install.sh).
+To read the script first, download it, read it, then run it:
+
+```sh
+curl -fsSLO https://github.com/XJOC/marsa/releases/latest/download/install.sh
+sh install.sh
+```
 
 Then add Marsa to your `PATH`, as the script prints: add this line at the end
 of `~/.zshrc` (with bash, the file the script names, usually
