@@ -178,9 +178,9 @@ echo "system: $PRETTY_NAME, systemd $SYSTEMD, kernel $(uname -r)"
 # systemd 250 and later, or before 250 without systemd-networkd: the helper
 # makes marsa0 (tasks M4-18h, M4-18k). Before 250 with networkd (the
 # runners) it answers resolved_use_hosts, and .test names go into
-# /etc/hosts instead (hosts_sync); until setup does that (task M4-18k2),
-# curl reaches the site with --resolve. Ports and trust are tested all the
-# same.
+# /etc/hosts instead (hosts_sync). In part A curl reaches the site with
+# --resolve there; in part B `marsa setup` writes the hosts lines itself
+# (task M4-18k2), and curl needs no --resolve on either way.
 # Mirrors the helper (review of #125): before 250, the link only on 249,
 # and only when networkd's service and socket are inactive and disabled or
 # masked.
@@ -416,7 +416,13 @@ run composer --version
 step "a real Laravel project in a parked folder"
 mkdir -p "$CODE"
 (cd "$CODE" && run composer create-project --no-interaction --prefer-dist laravel/laravel laravel-app)
-run marsa park "$CODE"
+# Before setup, park leaves /etc/hosts alone and asks for nothing: setup
+# writes every name (review of #132). No polkit rule exists yet, so a
+# prompt here would fail the command.
+out=$(marsa park "$CODE" 2>&1) || fail "marsa park exited with $?: $out"
+echo "$out"
+! grep -q "Adding" <<<"$out" || fail "marsa park asked to change /etc/hosts before setup"
+! grep -q "# Marsa start" /etc/hosts || fail "marsa park wrote /etc/hosts before setup"
 run marsa sites
 run marsa services start caddy
 run marsa services
@@ -429,19 +435,23 @@ polkit_rule
 code=0
 out=$(marsa setup 2>&1) || code=$?
 echo "$out"
+[ "$code" = 0 ] || fail "marsa setup exited with $code"
 if [ "$LINK" = yes ]; then
-  [ "$code" = 0 ] || fail "marsa setup exited with $code"
   grep -q "Send .test names to Marsa: done" <<<"$out" || fail "the .test step is not done"
+  ! grep -q "/etc/hosts" <<<"$out" || fail "setup took the hosts way on systemd $SYSTEMD"
 else
-  # resolved_use_hosts: a failed step, so exit 1, until setup writes the
-  # hosts lines itself (task M4-18k2).
-  [ "$code" = 1 ] || fail "marsa setup exited with $code, not 1"
-  grep -q "Send .test names to Marsa: failed" <<<"$out" || fail "no failed .test step on systemd $SYSTEMD"
+  # The hosts way, chosen by marsad itself: one prompt, no failed step.
+  grep -q "Put the sites' .test names in /etc/hosts: done" <<<"$out" || fail "the hosts step is not done"
+  ! grep -q "skipped" <<<"$out" || fail "a skipped step: the helper and marsad disagree"
+  run cat /etc/hosts
+  grep -qxF "127.0.0.1 $SITE" /etc/hosts || fail "$SITE is not in /etc/hosts"
 fi
 grep -q "Let Caddy use ports 80 and 443: done" <<<"$out" || fail "the ports step is not done"
 grep -q "Trust Marsa's HTTPS certificates: done" <<<"$out" || fail "the trust step is not done"
 [ "$(cat "$PORT_START")" = 80 ] || fail "ip_unprivileged_port_start is $(cat "$PORT_START"), not 80"
-[ "$LINK" = no ] || wait_for_name "$SITE" || fail "$SITE does not resolve"
+wait_for_name "$SITE" || fail "$SITE does not resolve"
+# From here on the name resolves on both ways.
+NAME=()
 
 step "after setup: Caddy on ports 80 and 443, with no restart"
 # Setup sent Caddy its config with ports 80 and 443 itself (M4-18e).
@@ -461,7 +471,60 @@ if grep -vq '^127\.0\.0\.1:' <<<"$(tr ' ' '\n' <<<"$listeners" | grep .)"; then
   fail "caddy listens on an address that is not 127.0.0.1"
 fi
 
+# Each pkexec run of marsad logs this line once.
+prompts() {
+  [ -f "$DATA/logs/marsad.log" ] || fail "no $DATA/logs/marsad.log to count the prompts in"
+  grep -c "asking for admin rights to run marsa-helper" "$DATA/logs/marsad.log" || true
+}
+
+step "a site the folder watcher finds asks for no password (manager's rule, M4-18k2)"
+before=$(prompts)
+mkdir -p "$CODE/watched"
+echo watched > "$CODE/watched/index.html"
+found=no
+for _ in $(seq 1 40); do
+  if marsa sites 2>/dev/null | grep -qw "watched"; then found=yes; break; fi
+  sleep 0.5
+done
+[ "$found" = yes ] || fail "the watcher did not find $CODE/watched"
+sleep 2
+[ "$(prompts)" = "$before" ] || fail "a site the watcher found started pkexec"
+! grep -q "watched.test" /etc/hosts || fail "a site the watcher found went into /etc/hosts"
+
+step "marsa link after setup: the new names go into /etc/hosts with one prompt on the hosts way (M4-18k2)"
+mkdir -p "$HOME/second"
+echo second > "$HOME/second/index.html"
+code=0
+out=$(marsa link second-site --path "$HOME/second" 2>&1) || code=$?
+echo "$out"
+[ "$code" = 0 ] || fail "marsa link exited with $code"
+if [ "$LINK" = no ]; then
+  # The watcher's site waited for this command.
+  grep -q "Adding second-site.test, watched.test to /etc/hosts" <<<"$out" || fail "marsa link did not name both sites"
+  grep -q "Put the sites' .test names in /etc/hosts: done" <<<"$out" || fail "the hosts step is not done"
+  for name in second-site.test watched.test laravel-app.test; do
+    grep -qxF "127.0.0.1 $name" /etc/hosts || fail "$name is not in /etc/hosts"
+  done
+  [ "$(prompts)" = "$((before + 1))" ] || fail "expected one prompt, got $(($(prompts) - before))"
+else
+  ! grep -q "/etc/hosts" <<<"$out" || fail "marsa link touched /etc/hosts on the link way"
+  [ "$(prompts)" = "$before" ] || fail "marsa link started pkexec on the link way"
+fi
+wait_for_name second-site.test || fail "second-site.test does not resolve"
+wait_for_name watched.test || fail "watched.test does not resolve"
+# A second link of a known name asks nothing.
+asked=$(prompts)
+out=$(marsa link second-site --path "$HOME/second" 2>&1) || fail "marsa link again failed: $out"
+! grep -q "Adding" <<<"$out" || fail "marsa link asked again for a name already there"
+[ "$(prompts)" = "$asked" ] || fail "marsa link started pkexec for names already there"
+run marsa unlink second-site
+
 step "removal, with the site running"
+if [ "$LINK" = no ]; then
+  helper '[{"op":"hosts_remove"}]' || fail "the helper exited with $?"
+  [ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"
+  cmp -s /etc/hosts "$HOME/hosts-before" || fail "/etc/hosts is not as it was before setup"
+fi
 remove_all
 helper '[{"op":"trust_remove"}]' || fail "the helper exited with $?"
 [ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"

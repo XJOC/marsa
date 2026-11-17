@@ -503,13 +503,17 @@ where
 /// macOS the daemon then asks the user to approve the trust in Marsa's
 /// certificate authority for this user, in the dialog macOS shows (ADR
 /// 0015). An operation it cannot do safely is left out of that request and
-/// listed in `skipped`; the others still run.
+/// listed in `skipped`; the others still run. On Linux a second request may
+/// follow, behind a second prompt (task M4-18k2): the operations of the
+/// hosts file when the helper refused the `marsa0` link, or `hosts_remove`
+/// once the link is made.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupReport {
     /// The helper's result for each operation it ran, in order, then, on
     /// macOS, the daemon's own `trust_install` result: the trust for the
     /// current user (ADR 0015). Empty if nothing ran: no operation was left,
-    /// or `error` says why.
+    /// or `error` says why. On Linux the results of a second request follow
+    /// those of the first.
     #[serde(default)]
     pub results: Vec<OpResult>,
     /// The operations left out of the request, and why.
@@ -525,11 +529,30 @@ pub struct SetupReport {
     /// `setup_interrupted`, `setup_helper_missing`, `setup_helper_unsafe`,
     /// `setup_helper_protected_folder`, `setup_prompt_failed`,
     /// `setup_helper_failed`, or `setup_helper_rejected`; on Linux also
-    /// `setup_pkexec_missing`, and `setup_caddy_ports_failed` when the
-    /// helper allowed ports 80 and 443 but Caddy did not take them. `None`
+    /// `setup_pkexec_missing`, `setup_caddy_ports_failed` when the helper
+    /// allowed ports 80 and 443 but Caddy did not take them, and
+    /// `setup_hosts_not_written` or `setup_hosts_not_removed` when the
+    /// second request did not run (the results of the first stand). `None`
     /// if the helper answered, or was not needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,
+}
+
+/// The answer to `GET /v1/hosts` (task M4-18k2): whether this system puts
+/// `.test` names in its hosts file, and which sites Marsa's block there
+/// lacks. `POST /v1/hosts/sync` adds them, behind the password prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostsStatus {
+    /// `true` on Linux where this data folder's `marsa setup` put Marsa's
+    /// block in the hosts file, and the block is still there. `false`
+    /// before that setup, on the `marsa0` link, on macOS, and on Windows
+    /// (its helper service keeps the block up to date by itself).
+    pub used: bool,
+    /// The host names of the sites that are not in the block, sorted. Such
+    /// a site does not open until they are added. Empty when `used` is
+    /// `false`.
+    #[serde(default)]
+    pub missing: Vec<String>,
 }
 
 /// An operation setup left out of the helper request.
@@ -539,7 +562,10 @@ pub struct SetupSkip {
     pub op: String,
     /// Why: `redirect_port_held` and `ports_not_checked` for `pf_install`,
     /// `ca_not_ready`, `ca_unreadable`, `caddy_not_installed`, and
-    /// `caddy_not_started` for `trust_install`.
+    /// `caddy_not_started` for `trust_install`; on Linux
+    /// `resolved_use_hosts` and `resolved_not_running` for
+    /// `resolved_install`, and `hosts_sites_unknown` and
+    /// `hosts_too_many_names` for `hosts_sync`.
     pub code: String,
 }
 

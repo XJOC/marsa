@@ -47,9 +47,9 @@ use crate::platform::spawn::{EXIT_ALREADY_RUNNING, marsad_path, spawn_marsad};
 use crate::runtimes::Runtime;
 use crate::types::{
     API_VERSION, AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, ErrorBody,
-    Event, Health, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest, RuntimeList,
-    ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, UninstallReport, Uninstalled,
-    XdebugRequest, XdebugState,
+    Event, Health, HostsStatus, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest,
+    RuntimeList, ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, UninstallReport,
+    Uninstalled, XdebugRequest, XdebugState,
 };
 use error::daemon_text;
 
@@ -74,7 +74,16 @@ const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// verify-cert`) up to 10 seconds, and Caddy 30 seconds to start and make
 /// its CA when there is none yet. A test in the daemon's `setup_api.rs`
 /// holds this above the sum of the daemon's own limits.
-pub const SETUP_TIMEOUT: Duration = Duration::from_secs(14 * 60);
+///
+/// On Windows the slowest setup is longer: a request to the helper service,
+/// the install after the UAC prompt, and the request again, up to 35.5
+/// minutes, and the prompt has no limit of its own.
+pub const SETUP_TIMEOUT: Duration = Duration::from_secs(40 * 60);
+/// For `POST /v1/hosts/sync`: longer than the daemon's slowest sync, 5
+/// minutes at the password prompt and 2 seconds for the helper's pipes. A
+/// test in the daemon's `setup_api/hosts.rs` holds this above the sum of
+/// the daemon's own limits.
+pub const HOSTS_SYNC_TIMEOUT: Duration = Duration::from_secs(6 * 60);
 /// For `POST /v1/uninstall`: longer than the daemon's slowest uninstall,
 /// about 15 minutes and 20 seconds when every program runs to its limit. The
 /// user has 5 minutes at the admin prompt, then up to 5 at each of the two
@@ -396,18 +405,44 @@ impl DaemonClient {
 
     /// `POST /v1/setup`: the first setup. On macOS the user is asked twice:
     /// for an administrator password, then to approve the trust in Marsa's
-    /// certificate authority for this user. Waits until it ends, up to 14
-    /// minutes ([`SETUP_TIMEOUT`]): the user may take a while at each. The
+    /// certificate authority for this user. On Windows UAC may ask once.
+    /// Waits until it ends, up to 40 minutes ([`SETUP_TIMEOUT`]): the user
+    /// may take a while at each prompt. The
     /// same report also comes on [`DaemonClient::events`] as
     /// `Event::SetupFinished`.
     ///
     /// # Errors
     ///
     /// Any [`ClientError`]; `setup_running` (409) while another setup runs,
-    /// and `setup_not_supported` (501) on Windows for now. A
+    /// and `setup_not_supported` (501) on a system Marsa has no setup for. A
     /// cancelled prompt is not an error: it is in [`SetupReport::error`].
     pub async fn setup(&self) -> Result<SetupReport, ClientError> {
         self.call(Method::POST, &["v1", "setup"], SETUP_TIMEOUT)
+            .await
+    }
+
+    /// `GET /v1/hosts` (task M4-18k2): whether this system puts `.test`
+    /// names in its hosts file, and which sites are not there yet. Shows no
+    /// prompt.
+    pub async fn hosts(&self) -> Result<HostsStatus, ClientError> {
+        self.call(Method::GET, &["v1", "hosts"], REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// `POST /v1/hosts/sync` (task M4-18k2): the names of every site go into
+    /// Marsa's block in the hosts file, behind the password prompt, if any
+    /// is missing; with none missing, nothing runs. Only for a command of
+    /// the user: never call it from a background task. Waits up to
+    /// [`HOSTS_SYNC_TIMEOUT`]. The helper's result, or why it did not run,
+    /// is in the report, as for setup.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `hosts_not_used` (409) where this system does
+    /// not use the hosts file, and `setup_running` or `uninstall_running`
+    /// (409) while one of those runs.
+    pub async fn sync_hosts(&self) -> Result<SetupReport, ClientError> {
+        self.call(Method::POST, &["v1", "hosts", "sync"], HOSTS_SYNC_TIMEOUT)
             .await
     }
 

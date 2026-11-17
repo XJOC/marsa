@@ -1,7 +1,9 @@
 //! `marsa setup`: the first setup (macOS and Linux). macOS may ask for an
 //! administrator password, and may then ask the user to approve trusting
 //! Marsa's certificate authority for this user. Linux asks for the password
-//! once. Task M4-13, task M4-26 for the trust, and task M4-18e for Linux.
+//! once, or twice when the `.test` names need a second request (task
+//! M4-18k2). Task M4-13, task M4-26 for the trust, and task M4-18e for
+//! Linux.
 //!
 //! One call to `marsad` (`POST /v1/setup`, in `daemon/setup_api.rs`),
 //! started if needed. On macOS the daemon checks ports 80 and 443, asks for
@@ -43,27 +45,35 @@ pub async fn run(data_dir: &Path) -> ExitCode {
     print!("{}", render(&report, data_dir));
     match error(&report) {
         Some(failure) => failure.report(),
-        None if report
-            .results
-            .iter()
-            .any(|result| result.status == OpStatus::Failed) =>
-        {
-            ExitCode::FAILURE
-        }
-        None => ExitCode::SUCCESS,
+        None => exit_code(&report),
     }
 }
 
-/// The line before the call, which may wait for the password prompt. Only
-/// on macOS and Linux, where the daemon runs setup (the platform check of
+/// Exit code 1 if a step failed. The error of a helper that did not run is
+/// the caller's to print.
+pub(super) fn exit_code(report: &SetupReport) -> ExitCode {
+    let failed = report
+        .results
+        .iter()
+        .any(|result| result.status == OpStatus::Failed);
+    if failed || report.error.is_some() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// The line before the call, which may wait for the admin prompt. Only on
+/// the systems where the daemon runs setup (the platform check of
 /// `daemon/setup_api.rs`); the CLI and the daemon run on the same machine.
 /// Elsewhere the daemon answers `setup_not_supported` at once, and a
-/// password line first would be wrong.
+/// prompt line first would be wrong.
 fn started(platform: Option<Platform>) -> Option<&'static str> {
     match platform? {
         Platform::DarwinArm64 | Platform::DarwinX64 => Some(strings::SETUP_STARTED),
         Platform::LinuxX64 | Platform::LinuxArm64 => Some(strings::SETUP_STARTED_LINUX),
-        Platform::WindowsX64 | Platform::Any => None,
+        Platform::WindowsX64 => Some(strings::SETUP_STARTED_WINDOWS),
+        Platform::Any => None,
     }
 }
 
@@ -211,6 +221,62 @@ mod tests {
         assert!(error(&report).is_none());
     }
 
+    /// The hosts way on Linux (task M4-18k): the output names the file, and
+    /// a link the helper refused is a skipped step that says why. Not on
+    /// Windows, whose hosts file has another path in the text.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_hosts_way_names_the_file() {
+        let report = SetupReport {
+            results: vec![
+                result("resolved_remove", OpStatus::Unchanged, None),
+                result("hosts_sync", OpStatus::Done, None),
+            ],
+            skipped: vec![skip("resolved_install", "resolved_not_running")],
+            ..SetupReport::default()
+        };
+        assert_eq!(
+            render(&report, &data()),
+            "Take out Marsa's link for .test names: already done.\n\
+             Put the sites' .test names in /etc/hosts: done.\n\
+             Send .test names to Marsa: skipped. systemd-resolved does not run on this system, \
+             so Marsa did not make its link for .test names: they go into /etc/hosts instead. \
+             [resolved_not_running]\n"
+        );
+    }
+
+    /// Linux: a second request that did not run (task M4-18k2). The steps
+    /// above it stand, and the error says so.
+    #[test]
+    fn a_second_request_that_did_not_run_says_the_steps_above_are_done() {
+        let report = SetupReport {
+            results: vec![
+                result("trust_install", OpStatus::Done, None),
+                result("ports_install", OpStatus::Done, None),
+            ],
+            skipped: vec![skip("resolved_install", "resolved_use_hosts")],
+            error: Some(ApiError {
+                code: "setup_hosts_not_written".into(),
+                message: "x".into(),
+            }),
+            ..SetupReport::default()
+        };
+        let text = render(&report, &data());
+        assert!(
+            text.starts_with("Trust Marsa's HTTPS certificates: done.\n"),
+            "{text}"
+        );
+        let failure = error(&report).unwrap();
+        assert_eq!(failure.code, "setup_hosts_not_written");
+        assert!(
+            failure
+                .message
+                .starts_with("The steps above are done, but the second password"),
+            "{}",
+            failure.message
+        );
+    }
+
     #[test]
     fn a_failed_step_and_no_ca_say_why() {
         let report = SetupReport {
@@ -306,11 +372,15 @@ mod tests {
             ..SetupReport::default()
         };
         let failure = error(&report).unwrap();
-        assert_eq!(
-            failure.line(),
+        // The CLI runs where marsad runs: Windows' admin prompt is UAC.
+        let expected = if cfg!(windows) {
+            "marsa: The UAC prompt was declined, so nothing was changed. Run \"marsa setup\" \
+             again when you are ready. [setup_cancelled]"
+        } else {
             "marsa: The password prompt was cancelled, so nothing was changed. Run \"marsa \
              setup\" again when you are ready. [setup_cancelled]"
-        );
+        };
+        assert_eq!(failure.line(), expected);
         assert_eq!(
             render(&SetupReport::default(), &data()),
             "Nothing to set up.\n"
@@ -318,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn macos_and_linux_are_told_about_the_password() {
+    fn each_system_is_told_about_its_admin_prompt() {
         for platform in [Platform::DarwinArm64, Platform::DarwinX64] {
             assert_eq!(started(Some(platform)), Some(strings::SETUP_STARTED));
         }
@@ -327,7 +397,13 @@ mod tests {
         }
         // ADR 0014: the one change for every program, before the password.
         assert!(strings::SETUP_STARTED_LINUX.contains("ports 80 to 1023"));
-        for platform in [Some(Platform::WindowsX64), Some(Platform::Any), None] {
+        // Windows: the UAC prompt, which may sit in the taskbar.
+        assert_eq!(
+            started(Some(Platform::WindowsX64)),
+            Some(strings::SETUP_STARTED_WINDOWS)
+        );
+        assert!(strings::SETUP_STARTED_WINDOWS.contains("taskbar"));
+        for platform in [Some(Platform::Any), None] {
             assert_eq!(started(platform), None, "{platform:?}");
         }
     }
