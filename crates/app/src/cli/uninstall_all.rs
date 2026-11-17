@@ -76,7 +76,7 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
     let mut terminal = Terminal;
     // Before the question: the daemon would answer `uninstall_not_supported`
     // only after the user typed yes.
-    if !is_macos(Platform::current()) {
+    if !runs_here(Platform::current()) {
         return own_failure("uninstall_not_supported", None).report();
     }
     let deletable = !data_dir_given;
@@ -91,7 +91,13 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
         Ok(client) => client,
         Err(failure) => return failure.report(),
     };
-    eprintln!("{}", strings::UNINSTALL_ALL_STARTED);
+    // Windows: the CLI runs on the machine marsad runs on (ADR 0018).
+    let started = if cfg!(windows) {
+        strings::UNINSTALL_ALL_STARTED_WINDOWS
+    } else {
+        strings::UNINSTALL_ALL_STARTED
+    };
+    eprintln!("{started}");
     let report = match until_ctrl_c(client.uninstall_all()).await {
         Some(Ok(report)) => report,
         Some(Err(err)) => {
@@ -288,8 +294,12 @@ impl Ask for Terminal {
     }
 }
 
-fn is_macos(platform: Option<Platform>) -> bool {
-    matches!(platform, Some(Platform::DarwinArm64 | Platform::DarwinX64))
+/// The systems the daemon runs the uninstall on (`daemon/uninstall_api.rs`).
+fn runs_here(platform: Option<Platform>) -> bool {
+    matches!(
+        platform,
+        Some(Platform::DarwinArm64 | Platform::DarwinX64 | Platform::WindowsX64)
+    )
 }
 
 /// Goes on with `--yes`, or once the user typed `yes`. Refuses without a
@@ -1067,16 +1077,16 @@ mod tests {
     }
 
     #[test]
-    fn only_macos_runs_the_uninstall() {
-        assert!(is_macos(Some(Platform::DarwinArm64)));
-        assert!(is_macos(Some(Platform::DarwinX64)));
+    fn macos_and_windows_run_the_uninstall() {
         for platform in [
-            Some(Platform::LinuxX64),
-            Some(Platform::LinuxArm64),
-            Some(Platform::WindowsX64),
-            None,
+            Platform::DarwinArm64,
+            Platform::DarwinX64,
+            Platform::WindowsX64,
         ] {
-            assert!(!is_macos(platform), "{platform:?}");
+            assert!(runs_here(Some(platform)), "{platform:?}");
+        }
+        for platform in [Some(Platform::LinuxX64), Some(Platform::LinuxArm64), None] {
+            assert!(!runs_here(platform), "{platform:?}");
         }
     }
 }

@@ -34,8 +34,16 @@
 //! `logs/marsad.log` holds the whole report even if the CLI stopped waiting
 //! (Ctrl+C). The data folder is the CLI's question, never the daemon's.
 //!
+//! On Windows (ADR 0018, task M4-19g2) the steps are fewer: the preflight,
+//! then the marker of [`hosts_sync`] goes, so that no sites pass writes
+//! the hosts block back, then `marsa-helper uninstall` behind the UAC
+//! prompt (the hosts lines, the CA in the machine's Root store, the helper
+//! service and its folder), then the login file, then the stop. A helper
+//! that did not remove everything keeps its service running, so the marker
+//! comes back. There is no trust for the user to take away.
+//!
 //! One request at a time, shared with setup ([`Setup`]): 409
-//! `uninstall_running` or `setup_running`. Linux and Windows get 501
+//! `uninstall_running` or `setup_running`. Linux gets 501
 //! `uninstall_not_supported` for now.
 
 use std::path::Path;
@@ -54,8 +62,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::api::HttpError;
 use super::autostart_api::Autostart;
+use super::hosts_sync;
 use super::setup_api::{
-    CHECK_LIMIT, Flow, PIPE_GRACE, PROMPT_LIMIT, Running, Setup, is_macos, user_trust,
+    CHECK_LIMIT, Flow, PIPE_GRACE, PROMPT_LIMIT, Running, Setup, is_macos, is_windows, user_trust,
 };
 use super::state::Daemon;
 
@@ -85,9 +94,9 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
 async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallReport>, HttpError> {
     let platform = setup
         .platform()
-        .filter(|platform| is_macos(*platform))
+        .filter(|platform| is_macos(*platform) || is_windows(*platform))
         .ok_or_else(|| {
-            let message = "the uninstall runs on macOS only for now";
+            let message = "the uninstall runs on macOS and Windows only for now";
             HttpError::new(
                 StatusCode::NOT_IMPLEMENTED,
                 "uninstall_not_supported",
@@ -150,6 +159,9 @@ pub fn run(
     stop: &CancellationToken,
 ) -> UninstallReport {
     let mut report = UninstallReport::default();
+    if is_windows(platform) {
+        return run_windows(setup, data_dir, autostart, stop);
+    }
     match setup.launch(
         Flow::Uninstall,
         vec![HelperOp::UninstallAll],
@@ -164,6 +176,38 @@ pub fn run(
         }
     }
     report.results.push(untrust_for_user(setup, data_dir, stop));
+    report.results.push(remove_login_file(autostart));
+    report.stopping = true;
+    report
+}
+
+/// The uninstall on Windows (see the module doc).
+fn run_windows(
+    setup: &Setup,
+    data_dir: &Path,
+    autostart: &Autostart,
+    stop: &CancellationToken,
+) -> UninstallReport {
+    let mut report = UninstallReport::default();
+    // First: a sites pass or a retry between the helper's removal of the
+    // hosts lines and its end would write them back.
+    let marker = data_dir.join(hosts_sync::MARKER);
+    let had_marker = marker.exists();
+    if had_marker && let Err(err) = std::fs::remove_file(&marker) {
+        tracing::warn!(path = %marker.display(), error = %err, "cannot delete the marker");
+    }
+    match setup.uninstall_windows(stop) {
+        Ok(result) => report.results.push(result),
+        Err(error) => {
+            tracing::warn!(code = %error.code, "the helper did not remove everything; nothing else changes");
+            // Its service still runs: the daemon keeps sending the names.
+            if had_marker && let Err(err) = std::fs::write(&marker, "") {
+                tracing::warn!(path = %marker.display(), error = %err, "cannot restore the marker");
+            }
+            report.error = Some(error);
+            return report;
+        }
+    }
     report.results.push(remove_login_file(autostart));
     report.stopping = true;
     report
@@ -213,6 +257,7 @@ fn remove_login_file(autostart: &Autostart) -> OpResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::setup_api::windows::{Install, Service};
     use std::ffi::OsString;
     use std::fs;
     use std::io;
@@ -778,8 +823,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn linux_and_windows_get_uninstall_not_supported() {
-        for platform in [Some(Platform::LinuxX64), Some(Platform::WindowsX64), None] {
+    async fn linux_gets_uninstall_not_supported() {
+        for platform in [Some(Platform::LinuxX64), Some(Platform::Any), None] {
             let dir = Dir::new();
             let fake = Fake::no_prompt();
             let setup = dir.setup_with(&fake, platform, Some(dir.helper()));
@@ -791,6 +836,126 @@ mod tests {
             assert_eq!(app.refused("/v1/uninstall").await, refused, "{platform:?}");
             assert!(dir.untouched() && !app.stopping());
         }
+    }
+
+    /// A Windows helper service whose `uninstall` answers `answer`. Nothing
+    /// else may run in an uninstall.
+    struct WindowsService {
+        answer: Install,
+        calls: Mutex<usize>,
+    }
+
+    impl Service for WindowsService {
+        fn user_sid(&self) -> Result<String, String> {
+            panic!("no install in an uninstall")
+        }
+
+        fn send(&self, _: &[u8], _: &CancellationToken) -> Result<Vec<u8>, &'static str> {
+            panic!("no request through the pipe in an uninstall")
+        }
+
+        fn install(&self, _: &Path, _: &str, _: &str) -> Install {
+            panic!("no install in an uninstall")
+        }
+
+        fn uninstall(&self, _helper: &Path) -> Install {
+            *self.calls.lock().unwrap() += 1;
+            self.answer.clone()
+        }
+    }
+
+    /// Windows, with the helper in the user's folder, as an install puts it.
+    fn windows_app(dir: &Dir, answer: Install) -> (App, Arc<WindowsService>) {
+        let fake = Fake::no_prompt();
+        let service = Arc::new(WindowsService {
+            answer,
+            calls: Mutex::new(0),
+        });
+        let runner: Arc<dyn Runner> = fake;
+        let setup = Setup::with(
+            runner,
+            Some(Platform::WindowsX64),
+            Some(dir.helper()),
+            Some(dir.dir.path().to_path_buf()),
+        )
+        .with_windows(service.clone());
+        (App::new(dir, setup), service)
+    }
+
+    /// Windows: the marker goes first, then the helper's `uninstall` behind
+    /// one UAC prompt, then the login file, then the daemon stops.
+    #[tokio::test]
+    async fn windows_runs_the_helpers_uninstall_then_stops() {
+        let dir = Dir::new();
+        let marker = dir.data().join(hosts_sync::MARKER);
+        fs::write(&marker, "").unwrap();
+        let (app, service) = windows_app(&dir, Install::Exited(0));
+        let (status, report) = app.post("/v1/uninstall").await;
+        assert_eq!(status, StatusCode::OK, "{report}");
+        let steps: Vec<(&str, &str)> = report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| {
+                (
+                    step["op"].as_str().unwrap(),
+                    step["status"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            [("uninstall_all", "done"), ("autostart_remove", "done")],
+            "{report}"
+        );
+        assert!(app.stopping());
+        assert!(!marker.exists());
+        assert_eq!(*service.calls.lock().unwrap(), 1);
+    }
+
+    /// The helper did not remove everything: its service still runs, so the
+    /// marker comes back, nothing else changes, and the daemon runs on.
+    #[tokio::test]
+    async fn windows_keeps_the_marker_when_the_helper_did_not_remove_everything() {
+        for (answer, code) in [
+            (Install::Exited(1), "uninstall_helper_failed"),
+            (Install::Cancelled, "uninstall_cancelled"),
+        ] {
+            let dir = Dir::new();
+            let marker = dir.data().join(hosts_sync::MARKER);
+            fs::write(&marker, "").unwrap();
+            let (app, _) = windows_app(&dir, answer);
+            let (_, report) = app.post("/v1/uninstall").await;
+            assert_eq!(report["error"]["code"], code, "{report}");
+            assert!(marker.exists());
+            assert!(dir.untouched() && !app.stopping());
+        }
+    }
+
+    /// Windows: a helper outside the user's folder gets no prompt.
+    #[tokio::test]
+    async fn windows_refuses_a_helper_outside_the_users_folder() {
+        let dir = Dir::new();
+        let fake = Fake::no_prompt();
+        let service = Arc::new(WindowsService {
+            answer: Install::Exited(0),
+            calls: Mutex::new(0),
+        });
+        let runner: Arc<dyn Runner> = fake;
+        let setup = Setup::with(
+            runner,
+            Some(Platform::WindowsX64),
+            Some(dir.helper()),
+            Some(dir.home()),
+        )
+        .with_windows(service.clone());
+        let app = App::new(&dir, setup);
+        let (_, report) = app.post("/v1/uninstall").await;
+        assert_eq!(
+            report["error"]["code"], "uninstall_helper_unsafe",
+            "{report}"
+        );
+        assert_eq!(*service.calls.lock().unwrap(), 0);
     }
 
     #[tokio::test]
