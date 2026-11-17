@@ -112,8 +112,12 @@ The script installs for your user only, without \`sudo\`, and edits no shell fil
 "
 fi
 
+# 0.1.1-rc.1 is a pre-release; 0.1.1 is not.
+kind=""
+if [[ "$VERSION" == *-* ]]; then kind=", a pre-release"; fi
+
 cat > "$NOTES" << EOF
-Marsa $VERSION, a pre-release. Built from commit ${GITHUB_SHA:-unknown} in
+Marsa $VERSION$kind. Built from commit ${GITHUB_SHA:-unknown} in
 ${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}.
 
 $install

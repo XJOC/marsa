@@ -4,6 +4,32 @@ All notable changes to Marsa are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - Unreleased
+
+A fix release for macOS.
+
+### Fixed
+
+- After you log out and in, a daemon left running from the earlier login is
+  now replaced by a new one, so `marsa setup` and `marsa uninstall --all`
+  can show the administrator prompt again. In 0.1.0 they stopped and asked
+  you to run `marsa daemon stop` first.
+
+### Changed
+
+- The install command is now the script of the latest release:
+  `curl -fsSL https://github.com/XJOC/marsa/releases/latest/download/install.sh | sh`.
+  It installs the latest release, never a pre-release, unless
+  `MARSA_VERSION` names another version.
+
+### Known limits
+
+- macOS only. Linux and Windows build in CI but are not released yet.
+- The programs are signed ad hoc, not notarized by Apple.
+- The Intel build has not been tried by a person yet.
+- Without `minisign`, `install.sh` checks only the SHA-256 of the download,
+  not its signature.
+
 ## [0.1.0] - 2026-11-14
 
 The first release, for macOS (Apple Silicon and Intel).
@@ -52,4 +78,5 @@ The first release, for macOS (Apple Silicon and Intel).
   `marsa uninstall --all` say so and stop. Run `marsa daemon stop`, then the
   command again.
 
+[0.1.1]: https://github.com/XJOC/marsa/releases/tag/v0.1.1
 [0.1.0]: https://github.com/XJOC/marsa/releases/tag/v0.1.0
