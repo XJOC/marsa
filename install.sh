@@ -1,10 +1,11 @@
 #!/bin/sh
 # Installs Marsa for the current user on macOS or Linux. No sudo.
 #
-#   curl -fsSL https://raw.githubusercontent.com/XJOC/marsa/main/install.sh | sh
+#   curl -fsSL https://github.com/XJOC/marsa/releases/latest/download/install.sh | sh
 #
 # In order:
-#   1. It finds the newest release, or takes MARSA_VERSION=0.1.0-alpha.1.
+#   1. It takes the release GitHub marks as the latest, which is never a
+#      pre-release, or the version in MARSA_VERSION=0.1.1-rc.1.
 #   2. It downloads SHA256SUMS and this system's archive into a temporary
 #      folder inside Marsa's data folder.
 #   3. It checks them. Always: the SHA-256 of the archive against SHA256SUMS.
@@ -27,7 +28,7 @@
 set -eu
 
 # Where the releases are. No variable replaces these.
-RELEASES_API="https://api.github.com/repos/XJOC/marsa/releases?per_page=100"
+RELEASES_API="https://api.github.com/repos/XJOC/marsa/releases/latest"
 DOWNLOAD_URL="https://github.com/XJOC/marsa/releases/download"
 # The owner's minisign public key: the one built into Marsa
 # (MANIFEST_PUBLIC_KEY in crates/core/src/installer/manifest.rs). It is the
@@ -121,10 +122,9 @@ fetch() {
   esac
 }
 
-# Sets VERSION, from MARSA_VERSION or from the newest release on GitHub whose
-# tag is v<version>. Pre-releases count: GitHub lists the newest first. Tags
-# of other releases (php-..., runtimes-manifest) and other tags that start
-# with v are skipped.
+# Sets VERSION, from MARSA_VERSION or from the release GitHub marks as the
+# latest: never a draft and never a pre-release, so a user who installs
+# without MARSA_VERSION gets a stable release. Its tag must be v<version>.
 find_version() {
   if [ -n "${MARSA_VERSION:-}" ]; then
     VERSION="${MARSA_VERSION#v}"
@@ -132,7 +132,7 @@ find_version() {
     return 0
   fi
   fetch "$RELEASES_API" "$TMP/releases.json" ||
-    fail "cannot read the list of releases from GitHub. Try again later, or choose a version: MARSA_VERSION=<version>."
+    fail "cannot read the latest release from GitHub. Try again later, or choose a version: MARSA_VERSION=<version>."
   VERSION="$(tr ',' '\n' < "$TMP/releases.json" |
     sed -n 's/.*"tag_name" *: *"v\([0-9][0-9A-Za-z.-]*\)".*/\1/p' |
     grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' | head -n 1)"

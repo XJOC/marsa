@@ -317,7 +317,7 @@ constants() {
   key="$(sed -n 's|.*Some("\(RW[A-Za-z0-9+/]\{54\}\)").*|\1|p' "$ROOT/crates/core/src/installer/manifest.rs")"
   [ "${#key}" -eq 56 ] &&
     grep -qx "PUBLIC_KEY=\"$key\"" "$ROOT/install.sh" &&
-    grep -qx 'RELEASES_API="https://api.github.com/repos/XJOC/marsa/releases?per_page=100"' "$ROOT/install.sh" &&
+    grep -qx 'RELEASES_API="https://api.github.com/repos/XJOC/marsa/releases/latest"' "$ROOT/install.sh" &&
     grep -qx 'DOWNLOAD_URL="https://github.com/XJOC/marsa/releases/download"' "$ROOT/install.sh"
 }
 if constants; then pass "the real script trusts the key in manifest.rs and downloads from GitHub over HTTPS"; else fail "constants"; fi
@@ -444,25 +444,22 @@ installed "umask 077"
 [ -z "$(find "$HOME_DIR/.local" "$DATA" -maxdepth 0 -perm -004)" ] ||
   fail "umask 077: the script made folders that others can read"
 
-# The list also holds releases of other things, a newer tag that starts with
-# v but is not a version, and a "tag_name" inside text.
+# Without MARSA_VERSION: GitHub's latest release, one object. Its text and
+# its assets hold other tag-like strings, which must not count.
 release newest darwin-arm64
 mkdir -p "$T/www/newest/api"
 cat > "$T/www/newest/api/releases" << EOF
-[
-  {
-    "tag_name": "runtimes-manifest",
-    "body": "not a tag: \"tag_name\": \"v7.7.7\""
-  },
-  {"tag_name": "vendor-tools", "prerelease": true},
-  {"tag_name":"php-8.4.27-r1","prerelease":true},
-  {"tag_name": "v$VERSION", "prerelease": true},
-  {"tag_name": "v0.0.1", "prerelease": true}
-]
+{
+  "url": "https://api.github.com/repos/XJOC/marsa/releases/1",
+  "body": "not a tag: \"tag_name\": \"v7.7.7\", nor v0.0.1",
+  "assets": [{"name": "marsa-v0.0.1-darwin-arm64.tar.gz", "label": "\"tag_name\": \"v6.6.6\""}],
+  "tag_name": "v$VERSION",
+  "prerelease": false
+}
 EOF
 home newest "$MAC"
 run newest "$MAC"
-installed "no MARSA_VERSION: the newest v<version> release of the list"
+installed "no MARSA_VERSION: the version of GitHub's latest release"
 
 release upgrade darwin-arm64
 home upgrade "$MAC"
@@ -630,9 +627,14 @@ refused "run as root" "not as root and not with sudo"
 run early "$T/as-mac:$T/bin-no-curl" MARSA_VERSION="$VERSION"
 refused "no curl" "the program 'curl' is needed"
 mkdir -p "$T/www/early/api"
-echo '[{"tag_name": "php-8.4.27-r1"}, {"tag_name": "v1.0.0\"; id"}, {"tag_name": "vendor"}]' > "$T/www/early/api/releases"
+for answer in '{"tag_name": "php-8.4.27-r1"}' '{"tag_name": "v1.0.0\"; id"}' '{"tag_name": "vendor"}' '{"message": "Not Found"}'; do
+  echo "$answer" > "$T/www/early/api/releases"
+  run early "$MAC"
+  refused "a latest release with no usable v<version> tag: $answer" "found no Marsa release on GitHub"
+done
+rm "$T/www/early/api/releases"
 run early "$MAC"
-refused "a list of releases with no usable v<version> tag" "found no Marsa release on GitHub"
+refused "no answer from GitHub about the latest release" "cannot read the latest release from GitHub"
 
 echo
 if [ "$failures" -eq 0 ]; then echo "install.sh tests: all passed"; else

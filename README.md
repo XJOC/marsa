@@ -13,15 +13,16 @@ yet. Linux and Windows are coming; they build in CI but are not released yet.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/XJOC/marsa/main/install.sh | sh
+curl -fsSL https://github.com/XJOC/marsa/releases/latest/download/install.sh | sh
 ```
 
 The script installs Marsa for your user only, in
 `~/Library/Application Support/dev.marsa.Marsa`. It never uses `sudo` and
 never edits your shell files. Before it unpacks anything, it checks the
 SHA-256 of the download, and the [signature](#verify-a-download) too if
-`minisign` is installed. You can read the script first:
-[`install.sh`](install.sh).
+`minisign` is installed. It installs the latest release, never a
+pre-release; to install another version, run it with `MARSA_VERSION=0.1.0 sh`.
+You can read the script first: [`install.sh`](install.sh).
 
 Then add Marsa to your `PATH`, as the script prints: add this line at the end
 of `~/.zshrc` (with bash, the file the script names, usually
@@ -199,6 +200,6 @@ Apache-2.0. See [`LICENSE`](LICENSE).
 
 الإصدار 0.1.0 لنظام macOS فقط. Linux وWindows قريباً.
 
-التثبيت: `curl -fsSL https://raw.githubusercontent.com/XJOC/marsa/main/install.sh | sh`،
+التثبيت: `curl -fsSL https://github.com/XJOC/marsa/releases/latest/download/install.sh | sh`،
 ثم سطر `PATH` الذي يطبعه السكربت، ثم `marsa install php 8.4` و`marsa setup`.
 إن لم يعمل شيء: `marsa doctor`. الرخصة: Apache-2.0.
