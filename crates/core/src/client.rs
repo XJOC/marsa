@@ -74,7 +74,11 @@ const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// verify-cert`) up to 10 seconds, and Caddy 30 seconds to start and make
 /// its CA when there is none yet. A test in the daemon's `setup_api.rs`
 /// holds this above the sum of the daemon's own limits.
-pub const SETUP_TIMEOUT: Duration = Duration::from_secs(14 * 60);
+///
+/// On Windows the slowest setup is longer: a request to the helper service,
+/// the install after the UAC prompt, and the request again, up to 35.5
+/// minutes, and the prompt has no limit of its own.
+pub const SETUP_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 /// For `POST /v1/hosts/sync`: longer than the daemon's slowest sync, 5
 /// minutes at the password prompt and 2 seconds for the helper's pipes. A
 /// test in the daemon's `setup_api/hosts.rs` holds this above the sum of
@@ -401,15 +405,16 @@ impl DaemonClient {
 
     /// `POST /v1/setup`: the first setup. On macOS the user is asked twice:
     /// for an administrator password, then to approve the trust in Marsa's
-    /// certificate authority for this user. Waits until it ends, up to 14
-    /// minutes ([`SETUP_TIMEOUT`]): the user may take a while at each. The
+    /// certificate authority for this user. On Windows UAC may ask once.
+    /// Waits until it ends, up to 40 minutes ([`SETUP_TIMEOUT`]): the user
+    /// may take a while at each prompt. The
     /// same report also comes on [`DaemonClient::events`] as
     /// `Event::SetupFinished`.
     ///
     /// # Errors
     ///
     /// Any [`ClientError`]; `setup_running` (409) while another setup runs,
-    /// and `setup_not_supported` (501) on Windows for now. A
+    /// and `setup_not_supported` (501) on a system Marsa has no setup for. A
     /// cancelled prompt is not an error: it is in [`SetupReport::error`].
     pub async fn setup(&self) -> Result<SetupReport, ClientError> {
         self.call(Method::POST, &["v1", "setup"], SETUP_TIMEOUT)
