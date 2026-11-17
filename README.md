@@ -6,7 +6,7 @@ versions you need, picks the right version for each project, and gives every
 site a trusted HTTPS certificate. It is open source (Apache-2.0) and works
 from the terminal or from its window.
 
-**Status: 0.1.0, a first release for macOS.** It is tested on Apple Silicon.
+**Status: 0.1.1, for macOS.** It is tested on Apple Silicon.
 The Intel build passes the same automated checks, but no person has tried it
 yet. Linux and Windows are coming; they build in CI but are not released yet.
 
@@ -167,7 +167,7 @@ Marsa is a Rust workspace. Rust 1.99.1 is pinned in `rust-toolchain.toml`;
 
 ```sh
 cargo build --workspace
-cargo run --bin marsa -- --version   # prints: marsa 0.1.0
+cargo run --bin marsa -- --version   # prints: marsa 0.1.1
 ```
 
 The checks that every pull request passes:
@@ -197,7 +197,7 @@ Apache-2.0. See [`LICENSE`](LICENSE).
 يثبّت إصدارات PHP وNode.js وComposer وCaddy، ويختار لكل مشروع إصداره،
 ويعطي كل موقع شهادة HTTPS موثوقة. يعمل من الطرفية أو من نافذته.
 
-الإصدار 0.1.0 لنظام macOS فقط. Linux وWindows قريباً.
+الإصدار 0.1.1 لنظام macOS فقط. Linux وWindows قريباً.
 
 التثبيت: `curl -fsSL https://raw.githubusercontent.com/XJOC/marsa/main/install.sh | sh`،
 ثم سطر `PATH` الذي يطبعه السكربت، ثم `marsa install php 8.4` و`marsa setup`.
