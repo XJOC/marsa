@@ -447,6 +447,9 @@ fn sites_are_isolated_unlinked_and_forgotten() {
 
     let out = data.marsa(&["park", code_arg]);
     assert!(out.status.success(), "{}", text(&out.stderr));
+    // A data folder whose setup never wrote the hosts file: `park` and
+    // `link` never touch it, and never ask for a password (task M4-18k2).
+    assert_eq!(text(&out.stderr), "");
     let linked = format!("Linked {} as https://api.test.\n", api.display());
     data.expect(&["link", "api", "--path", api_arg], 0, &linked, "");
     // No PHP is installed in the temp data folder.

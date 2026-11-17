@@ -69,6 +69,7 @@
 //! Every program runs through [`Runner`], so the tests run none: they pass a
 //! fake that records each call and answers from fixtures.
 
+pub mod hosts;
 pub mod linux_dns;
 pub mod pkexec;
 pub mod user_trust;
@@ -100,6 +101,7 @@ use marsa_core::ports::{self, Listener, ProcessInfo};
 use marsa_core::recipes::Platform;
 use marsa_core::types::{
     ApiError, Event, PortHolder, ServiceAction, ServiceState, SetupReport, SetupSkip, Site,
+    SiteList,
 };
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
@@ -229,14 +231,16 @@ const PROTECTED_FOLDERS: [&str; 3] = ["Desktop", "Documents", "Downloads"];
 /// Marsa there.
 const INSTALL_BIN: &str = "~/Library/Application Support/dev.marsa.Marsa/bin";
 
-/// The routes on `setup`, for `api::router` to merge before its fallbacks.
+/// The routes on `setup`, for `api::router` to merge before its fallbacks:
+/// `POST /v1/setup`, and the hosts routes of [`hosts`] (task M4-18k2).
 /// The uninstall route gets the same [`Setup`], so the two never run at once.
 pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
+    let hosts = hosts::routes(Arc::clone(&setup));
     let handler = move |State(daemon): State<Arc<Daemon>>| {
         let setup = Arc::clone(&setup);
         async move { start(daemon, setup).await }
     };
-    Router::new().route("/v1/setup", post(handler))
+    Router::new().route("/v1/setup", post(handler)).merge(hosts)
 }
 
 /// The routes with the given [`Setup`]: tests pass a fake [`Runner`].
@@ -640,6 +644,11 @@ impl Setup {
         self.platform
     }
 
+    /// The hosts file whose Marsa block is read on Linux, if any.
+    pub(super) fn hosts_file(&self) -> Option<&Path> {
+        self.hosts_file.as_deref()
+    }
+
     /// The home folder of the user `marsad` runs as, if known.
     pub(super) fn home(&self) -> Option<&Path> {
         self.home.as_deref()
@@ -705,6 +714,9 @@ impl Setup {
         if let Some(pem) = trust_for_user.filter(|_| report.error.is_none()) {
             let files = user_trust::TrustFiles::in_dir(data_dir);
             report.results.push(self.trust_for_user(&pem, &files, stop));
+        }
+        if linux.is_some() {
+            linux_dns::record_way(data_dir, &report.results);
         }
         report
     }
@@ -1207,7 +1219,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
 /// The host names of the daemon's sites, sorted, each once, from the list
 /// `GET /v1/sites` gives: built now if there is none yet. `None` if it
 /// cannot be built (`sites.toml` cannot be read, say).
-async fn host_names(daemon: &Arc<Daemon>) -> Option<Vec<String>> {
+pub(super) async fn host_names(daemon: &Arc<Daemon>) -> Option<Vec<String>> {
     let list = match daemon.sites() {
         Some(list) => list,
         None => match daemon.rebuild_sites().await {
@@ -1221,8 +1233,13 @@ async fn host_names(daemon: &Arc<Daemon>) -> Option<Vec<String>> {
             }
         },
     };
+    Some(names_of(&list))
+}
+
+/// The host names of the sites of `list`, sorted, each once.
+pub(super) fn names_of(list: &SiteList) -> Vec<String> {
     let names: BTreeSet<String> = list.sites.iter().map(Site::host).collect();
-    Some(names.into_iter().collect())
+    names.into_iter().collect()
 }
 
 /// The operations of the hosts way, into `ops`; a `hosts_sync` that cannot
@@ -1270,7 +1287,7 @@ pub(super) fn is_macos(platform: Platform) -> bool {
     matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64)
 }
 
-fn is_linux(platform: Platform) -> bool {
+pub(super) fn is_linux(platform: Platform) -> bool {
     matches!(platform, Platform::LinuxX64 | Platform::LinuxArm64)
 }
 
@@ -1852,12 +1869,12 @@ mod tests {
                 .collect()
         }
 
-        fn programs(&self) -> Vec<&'static str> {
+        pub(super) fn programs(&self) -> Vec<&'static str> {
             self.calls().iter().map(|call| call.program).collect()
         }
 
         /// How many times `pkexec` ran.
-        fn pkexec_calls(&self) -> usize {
+        pub(super) fn pkexec_calls(&self) -> usize {
             self.programs()
                 .iter()
                 .filter(|program| **program == pkexec::PKEXEC)
@@ -1865,7 +1882,7 @@ mod tests {
         }
 
         /// The request the helper would have got, from the last `pkexec`.
-        fn pkexec_request(&self) -> HelperRequest {
+        pub(super) fn pkexec_request(&self) -> HelperRequest {
             let calls = self.calls();
             let call = calls.iter().rfind(|call| call.program == pkexec::PKEXEC);
             let request = &call.expect("a pkexec call").args[3];
@@ -2146,7 +2163,7 @@ mod tests {
 
     /// A helper file at `path`, with the modes of an install, and its
     /// folder.
-    fn make_helper(path: &Path) {
+    pub(super) fn make_helper(path: &Path) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "").unwrap();
         #[cfg(unix)]
@@ -2555,7 +2572,7 @@ mod tests {
 
     /// What `systemctl` says on a test system.
     #[derive(Debug, Clone, Copy)]
-    struct Systemd {
+    pub(super) struct Systemd {
         /// The first line of `systemctl --version`.
         version: &'static str,
         /// The exit code of `is-active --quiet systemd-resolved.service`.
@@ -2565,7 +2582,7 @@ mod tests {
     }
 
     /// Ubuntu 24.04: the `marsa0` link, networkd or not.
-    const UBUNTU_2404: Systemd = Systemd {
+    pub(super) const UBUNTU_2404: Systemd = Systemd {
         version: "systemd 255 (255.4-1ubuntu8)",
         resolved: 0,
         networkd: (
@@ -2574,13 +2591,13 @@ mod tests {
         ),
     };
     /// Ubuntu 22.04 with systemd-networkd, as on servers and CI runners.
-    const UBUNTU_2204_SERVER: Systemd = Systemd {
+    pub(super) const UBUNTU_2204_SERVER: Systemd = Systemd {
         version: "systemd 249 (249.11-0ubuntu3.12)",
         resolved: 0,
         networkd: ("active\nactive\ninactive\n", "enabled\nenabled\ndisabled\n"),
     };
     /// Ubuntu 22.04 desktop: NetworkManager, networkd off for good.
-    const UBUNTU_2204_DESKTOP: Systemd = Systemd {
+    pub(super) const UBUNTU_2204_DESKTOP: Systemd = Systemd {
         version: "systemd 249 (249.11-0ubuntu3.12)",
         resolved: 0,
         networkd: (
@@ -2589,7 +2606,7 @@ mod tests {
         ),
     };
     /// Debian 12 as installed: no systemd-resolved.
-    const DEBIAN_12: Systemd = Systemd {
+    pub(super) const DEBIAN_12: Systemd = Systemd {
         version: "systemd 252 (252.30-1~deb12u2)",
         resolved: 3,
         networkd: (
@@ -2624,7 +2641,7 @@ mod tests {
     }
 
     /// `system`, whose `pkexec` gives `answer(request)`.
-    fn linux_fake_on(
+    pub(super) fn linux_fake_on(
         system: Systemd,
         answer: impl Fn(HelperRequest) -> io::Result<RunOutput> + Send + Sync + 'static,
     ) -> Arc<Fake> {
@@ -2637,7 +2654,10 @@ mod tests {
 
     /// The helper's answer: `done` for each op of `request`, except the
     /// `(op, code)` pairs of `failed`.
-    fn answer_for(request: &HelperRequest, failed: &[(&str, &str)]) -> io::Result<RunOutput> {
+    pub(super) fn answer_for(
+        request: &HelperRequest,
+        failed: &[(&str, &str)],
+    ) -> io::Result<RunOutput> {
         let results: Vec<Value> = request
             .ops
             .iter()
@@ -2856,6 +2876,8 @@ mod tests {
             );
             assert_eq!((report.error, report.skipped), (None, Vec::new()));
             assert_eq!(fake.pkexec_calls(), 1, "{system:?}");
+            // So `marsa park` and `marsa link` keep the block up to date.
+            assert!(linux_dns::marker(dir.dir.path()).is_file(), "{system:?}");
         }
     }
 
@@ -2934,6 +2956,7 @@ mod tests {
                 answer
             });
             let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts.clone());
+            fs::write(linux_dns::marker(dir.dir.path()), "").unwrap();
             let report = run_linux_with(&setup, &dir, &["shop.test"]);
             let first = linux_request(vec![HelperOp::ResolvedInstall { port: 18053 }]).ops;
             assert_eq!(
@@ -2941,6 +2964,8 @@ mod tests {
                 [first, vec![HelperOp::HostsRemove]],
                 "{status}"
             );
+            // The link is made: `marsa park` no longer syncs the hosts file.
+            assert!(!linux_dns::marker(dir.dir.path()).is_file());
             let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
             assert_eq!(
                 steps,
