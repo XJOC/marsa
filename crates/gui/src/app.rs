@@ -15,8 +15,8 @@ use marsa_core::types::{LogStream, ServiceAction, Site, SkippedFolder};
 
 use crate::bridge::{self, Command};
 use crate::model::{
-    self, Autostart, Choice, Connection, FirstRun, InstallStep, Model, Pick, Removal, Setup,
-    SitesNotice, Update,
+    self, Autostart, Choice, Connection, FirstRun, HostsSync, InstallStep, Model, Pick, Removal,
+    Setup, SitesNotice, Update,
 };
 use crate::strings::{self, ReportLine};
 
@@ -689,6 +689,9 @@ fn sites(ui: &mut egui::Ui, model: &mut Model, picking: bool) -> Option<SitesAct
         ui.weak(strings::removing(removal));
     }
     let mut forget = sites_notice(ui, model);
+    if let Some(command) = hosts_line(ui, model) {
+        action = Some(SitesAction::Send(command));
+    }
 
     let view: &Model = model;
     let list = &view.sites;
@@ -746,6 +749,45 @@ fn sites(ui: &mut egui::Ui, model: &mut Model, picking: bool) -> Option<SitesAct
         None => {}
     }
     action
+}
+
+/// Linux on the hosts way (task M4-18k3): the sites the hosts file lacks,
+/// such as one the folder watcher found, with the button that adds them.
+/// The click is the only way the window asks for the password for this.
+fn hosts_line(ui: &mut egui::Ui, model: &mut Model) -> Option<Command> {
+    let failed = match &model.hosts_sync {
+        HostsSync::Failed(code) => Some(strings::error_text(code)),
+        HostsSync::Idle | HostsSync::Running => None,
+    };
+    if !model.hosts.used || model.hosts.missing.is_empty() {
+        if let Some(text) = failed {
+            ui.colored_label(ui.visuals().error_fg_color, text);
+        }
+        return None;
+    }
+    ui.colored_label(
+        ui.visuals().warn_fg_color,
+        strings::hosts_waiting(&model.hosts.missing),
+    );
+    let running = model.hosts_sync == HostsSync::Running;
+    let mut command = None;
+    ui.horizontal(|ui| {
+        let enabled = model.is_connected() && !running && model.setup != Setup::Running;
+        let clicked = ui
+            .add_enabled(enabled, egui::Button::new(strings::ADD_TO_HOSTS))
+            .on_hover_text(strings::ADD_TO_HOSTS_HINT)
+            .clicked();
+        if clicked && model.start_hosts_sync() {
+            command = Some(Command::SyncHosts);
+        }
+        if running {
+            ui.weak(strings::HOSTS_ADDING);
+        }
+    });
+    if let Some(text) = failed {
+        ui.colored_label(ui.visuals().error_fg_color, text);
+    }
+    command
 }
 
 /// The line about the last sites action. After `site_is_parked` it offers
