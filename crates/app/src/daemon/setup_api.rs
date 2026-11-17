@@ -202,6 +202,13 @@ const PF_INSTALL: &str = "pf_install";
 const PORTS_INSTALL: &str = "ports_install";
 const UNINSTALL_ALL: &str = "uninstall_all";
 
+/// Linux: the second request of setup, with the hosts way's operations,
+/// did not run (task M4-18k2). The steps before it are done.
+const SETUP_HOSTS_NOT_WRITTEN: &str = "setup_hosts_not_written";
+/// Linux: the second request of setup, which takes Marsa's old block out of
+/// the hosts file once the link is made, did not run.
+const SETUP_HOSTS_NOT_REMOVED: &str = "setup_hosts_not_removed";
+
 /// [`read_ca`]'s code when the CA root is not there.
 const CA_NOT_READY: &str = "ca_not_ready";
 /// Why the trust was skipped when there is no CA root and no Caddy to make
@@ -640,14 +647,15 @@ impl Setup {
 
     /// The setup itself. Blocking: it runs programs and reads a file.
     /// `starter` starts Caddy when its CA root is not there yet. `names`:
-    /// the host names of the sites, sorted, for the hosts file on Linux.
+    /// the host names of the sites, sorted, for the hosts file on Linux;
+    /// `None` if the site list is not known.
     fn run(
         &self,
         data_dir: &Path,
         caddy: CaddyInput,
         platform: Platform,
         starter: &dyn StartCaddy,
-        names: &[String],
+        names: Option<&[String]>,
         stop: &CancellationToken,
     ) -> SetupReport {
         let mut report = SetupReport::default();
@@ -661,17 +669,20 @@ impl Setup {
             Ok(pem) => ops.push(HelperOp::TrustInstall { pem }),
             Err(code) => report.skipped.push(skip(TRUST_INSTALL, code)),
         }
-        let mut linux_path = None;
+        let mut linux = None;
         if is_linux(platform) {
             let path = dns::linux_path(linux_dns::facts(self.runner.as_ref(), stop));
-            let block = self.hosts_file.as_deref().and_then(linux_dns::read_block);
-            tracing::info!(
-                ?path,
-                block = block.is_some(),
-                "the way of .test names here"
-            );
-            ops.extend(linux_dns::setup_ops(path, block.is_some(), names, DNS_PORT));
-            linux_path = Some(path);
+            let block = self
+                .hosts_file
+                .as_deref()
+                .and_then(linux_dns::read_block)
+                .is_some();
+            tracing::info!(?path, block, "the way of .test names here");
+            match path {
+                LinuxPath::Link => ops.push(HelperOp::ResolvedInstall { port: DNS_PORT }),
+                LinuxPath::Hosts => push_hosts_ops(&mut ops, &mut report, names),
+            }
+            linux = Some((path, block));
         } else if let Some(dns) = dns::strategy_for(platform) {
             ops.push(dns.setup_op());
         }
@@ -684,8 +695,8 @@ impl Setup {
             Ok(results) => report.results = results,
             Err(error) => report.error = Some(error),
         }
-        if linux_path == Some(LinuxPath::Link) {
-            self.hosts_if_helper_says(&mut report, platform, names, stop);
+        if let Some((LinuxPath::Link, block)) = linux {
+            self.after_the_link(&mut report, block, platform, names, stop);
         }
         // Only if the helper ran as asked, or was not needed: a cancelled or
         // refused admin prompt ends setup with nothing changed in the system,
@@ -698,39 +709,62 @@ impl Setup {
         report
     }
 
-    /// Linux, after a request with `resolved_install`: the helper is the
-    /// judge of the way (task M4-18k2). If it chose the hosts file
-    /// ([`linux_dns::helper_chose_hosts`]), `resolved_install` moves from
-    /// the results to the skipped steps with the helper's code, and
-    /// `hosts_sync` goes to the helper in a second request: a second
-    /// password prompt, caused by the same `marsa setup`.
-    fn hosts_if_helper_says(
+    /// Linux, after a request with `resolved_install` (task M4-18k2), and
+    /// only if the helper answered it. The helper is the judge of the way:
+    /// if it chose the hosts file ([`linux_dns::helper_chose_hosts`]),
+    /// `resolved_install` moves from the results to the skipped steps with
+    /// the helper's code, and the operations of the hosts way go to the
+    /// helper in a second request. If it made the link and the hosts file
+    /// still has Marsa's `block`, `hosts_remove` goes in a second request.
+    /// Either is a second password prompt of the same `marsa setup`. When
+    /// that request does not run, the error says that the steps before it
+    /// are done: [`SETUP_HOSTS_NOT_WRITTEN`] or [`SETUP_HOSTS_NOT_REMOVED`].
+    fn after_the_link(
         &self,
         report: &mut SetupReport,
+        block: bool,
         platform: Platform,
-        names: &[String],
+        names: Option<&[String]>,
         stop: &CancellationToken,
     ) {
-        let Some(code) = linux_dns::helper_chose_hosts(&report.results) else {
+        if report.error.is_some() {
+            return;
+        }
+        let (ops, not_run) = if let Some(code) = linux_dns::helper_chose_hosts(&report.results) {
+            tracing::warn!(
+                code,
+                "marsad expected the marsa0 link, but marsa-helper chose the hosts file; \
+                 sending the operations of the hosts way"
+            );
+            report
+                .results
+                .retain(|result| result.op != linux_dns::RESOLVED_INSTALL);
+            report
+                .skipped
+                .push(skip(linux_dns::RESOLVED_INSTALL, &code));
+            let mut ops = Vec::new();
+            push_hosts_ops(&mut ops, report, names);
+            (ops, SETUP_HOSTS_NOT_WRITTEN)
+        } else if block && linux_dns::link_made(&report.results) {
+            tracing::info!("the link is made; taking Marsa's old block out of the hosts file");
+            (vec![HelperOp::HostsRemove], SETUP_HOSTS_NOT_REMOVED)
+        } else {
             return;
         };
-        tracing::warn!(
-            code,
-            "marsad expected the marsa0 link, but marsa-helper chose the hosts file; \
-             sending hosts_sync"
-        );
-        report
-            .results
-            .retain(|result| result.op != linux_dns::RESOLVED_INSTALL);
-        report
-            .skipped
-            .push(skip(linux_dns::RESOLVED_INSTALL, &code));
-        let ops = vec![HelperOp::HostsSync {
-            names: names.to_vec(),
-        }];
         match self.apply(ops, platform, stop) {
             Ok(results) => report.results.extend(results),
-            Err(error) => report.error = Some(error),
+            Err(error) => {
+                tracing::warn!(
+                    code = %error.code,
+                    message = %error.message,
+                    "the second request of setup did not run"
+                );
+                let message = format!(
+                    "the steps before are done, but the second request did not run: {}",
+                    error.code
+                );
+                report.error = Some(failure(not_run, message));
+            }
         }
     }
 
@@ -1082,6 +1116,12 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
         })?;
     let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
     tracing::info!("setup started");
+    // The hosts file on Linux needs them; elsewhere the list is not read.
+    let names = if is_linux(platform) {
+        host_names(&daemon).await
+    } else {
+        Some(Vec::new())
+    };
     let runtime = Handle::current();
     let job = tokio::task::spawn_blocking(move || {
         // Moved in, so the next setup waits for this one to end even if the
@@ -1095,13 +1135,12 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
                 runtime: runtime.clone(),
             }),
         };
-        let names = host_names(&daemon);
         let mut report = setup.run(
             &daemon.data_dir,
             caddy,
             platform,
             starter.as_ref(),
-            &names,
+            names.as_deref(),
             &daemon.shutdown,
         );
         tracing::info!(
@@ -1151,14 +1190,35 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
     Ok(Json(report))
 }
 
-/// The host names of the daemon's sites, sorted, each once. None before the
-/// first site list.
-fn host_names(daemon: &Daemon) -> Vec<String> {
-    let names: BTreeSet<String> = daemon
-        .sites()
-        .map(|list| list.sites.iter().map(Site::host).collect())
-        .unwrap_or_default();
-    names.into_iter().collect()
+/// The host names of the daemon's sites, sorted, each once, from the list
+/// `GET /v1/sites` gives: built now if there is none yet. `None` if it
+/// cannot be built (`sites.toml` cannot be read, say).
+async fn host_names(daemon: &Arc<Daemon>) -> Option<Vec<String>> {
+    let list = match daemon.sites() {
+        Some(list) => list,
+        None => match daemon.rebuild_sites().await {
+            Ok(list) => list,
+            Err(err) => {
+                tracing::warn!(
+                    code = err.code,
+                    "no site list, so no names for the hosts file"
+                );
+                return None;
+            }
+        },
+    };
+    let names: BTreeSet<String> = list.sites.iter().map(Site::host).collect();
+    Some(names.into_iter().collect())
+}
+
+/// The operations of the hosts way, into `ops`; a `hosts_sync` that cannot
+/// be sent goes into `report` as skipped ([`linux_dns::hosts_ops`]).
+fn push_hosts_ops(ops: &mut Vec<HelperOp>, report: &mut SetupReport, names: Option<&[String]>) {
+    let (hosts, skipped) = linux_dns::hosts_ops(names);
+    ops.extend(hosts);
+    if let Some(code) = skipped {
+        report.skipped.push(skip(linux_dns::HOSTS_SYNC, code));
+    }
 }
 
 /// Whether the helper's `ports_install` is done, now or before.
@@ -1969,7 +2029,7 @@ mod tests {
                 caddy,
                 platform,
                 self.caddy.as_ref(),
-                &[],
+                Some(&[]),
                 &stop,
             )
         }
@@ -2328,7 +2388,7 @@ mod tests {
             CaddyInput::default(),
             Platform::DarwinArm64,
             dir.caddy.as_ref(),
-            &[],
+            Some(&[]),
             &stop,
         );
 
@@ -2403,7 +2463,7 @@ mod tests {
                 CaddyInput::default(),
                 Platform::DarwinArm64,
                 dir.caddy.as_ref(),
-                &[],
+                Some(&[]),
                 &stop,
             );
 
@@ -2434,7 +2494,7 @@ mod tests {
             CaddyInput::default(),
             Platform::DarwinArm64,
             dir.caddy.as_ref(),
-            &[],
+            Some(&[]),
             &stop,
         );
         assert_eq!(error_code(&report), Some("setup_helper_protected_folder"));
@@ -2608,7 +2668,7 @@ mod tests {
             CaddyInput::default(),
             Platform::LinuxX64,
             dir.caddy.as_ref(),
-            &names,
+            Some(&names),
             &stop,
         )
     }
@@ -2818,71 +2878,163 @@ mod tests {
         assert_eq!(fake.pkexec_request(), linux_request(dns));
     }
 
-    /// Marsa's block from an earlier setup, on a system that now takes the
-    /// link (an upgrade to systemd 250, say): it goes, in the same request.
-    /// The file itself is only read.
-    #[test]
-    fn the_link_takes_an_old_hosts_block_out() {
-        let dir = Dir::new(true);
+    /// A hosts file with Marsa's block from an earlier setup.
+    fn hosts_with_block(dir: &Dir) -> PathBuf {
         let hosts = dir.dir.path().join("hosts");
         let text = "127.0.0.1 localhost\n# Marsa start\n127.0.0.1 shop.test\n# Marsa end\n";
         fs::write(&hosts, text).unwrap();
-        let fake = linux_fake_on(UBUNTU_2404, |request| answer_for(&request, &[]));
-        let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts.clone());
-        run_linux_with(&setup, &dir, &["shop.test"]);
-        let dns = vec![
-            HelperOp::ResolvedInstall { port: 18053 },
-            HelperOp::HostsRemove,
-        ];
-        assert_eq!(fake.pkexec_request(), linux_request(dns));
-        assert_eq!(fs::read_to_string(&hosts).unwrap(), text);
+        hosts
+    }
+
+    /// The ops of each `pkexec` request, in order.
+    fn requests(fake: &Fake) -> Vec<Vec<HelperOp>> {
+        fake.calls()
+            .iter()
+            .filter(|call| call.program == pkexec::PKEXEC)
+            .map(|call| {
+                serde_json::from_str::<HelperRequest>(&call.args[3])
+                    .unwrap()
+                    .ops
+            })
+            .collect()
+    }
+
+    /// Marsa's block from an earlier setup, on a system that now takes the
+    /// link (an upgrade to systemd 250, say): it goes in a second request,
+    /// once the link is made. The file itself is only read.
+    #[test]
+    fn the_link_takes_an_old_hosts_block_out_once_it_is_made() {
+        for status in ["done", "unchanged"] {
+            let dir = Dir::new(true);
+            let hosts = hosts_with_block(&dir);
+            let text = fs::read_to_string(&hosts).unwrap();
+            let fake = linux_fake_on(UBUNTU_2404, move |request| {
+                let mut answer = answer_for(&request, &[]);
+                if status == "unchanged" {
+                    let out = answer.as_mut().unwrap();
+                    out.stdout = String::from_utf8(out.stdout.clone())
+                        .unwrap()
+                        .replace("\"done\"", "\"unchanged\"")
+                        .into_bytes();
+                }
+                answer
+            });
+            let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts.clone());
+            let report = run_linux_with(&setup, &dir, &["shop.test"]);
+            let first = linux_request(vec![HelperOp::ResolvedInstall { port: 18053 }]).ops;
+            assert_eq!(
+                requests(&fake),
+                [first, vec![HelperOp::HostsRemove]],
+                "{status}"
+            );
+            let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+            assert_eq!(
+                steps,
+                [
+                    "trust_install",
+                    "resolved_install",
+                    "ports_install",
+                    "hosts_remove"
+                ]
+            );
+            assert_eq!(report.error, None);
+            assert_eq!(fs::read_to_string(&hosts).unwrap(), text);
+        }
 
         // No block, or one whose markers do not pair up: nothing to take out.
         for text in [
             "127.0.0.1 localhost\n",
             "# Marsa start\n127.0.0.1 shop.test\n",
         ] {
+            let dir = Dir::new(true);
+            let hosts = dir.dir.path().join("hosts");
             fs::write(&hosts, text).unwrap();
             let fake = linux_fake_on(UBUNTU_2404, |request| answer_for(&request, &[]));
-            let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts.clone());
+            let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts);
             run_linux_with(&setup, &dir, &["shop.test"]);
-            let dns = vec![HelperOp::ResolvedInstall { port: 18053 }];
-            assert_eq!(fake.pkexec_request(), linux_request(dns), "{text:?}");
+            assert_eq!(fake.pkexec_calls(), 1, "{text:?}");
         }
+    }
+
+    /// While the block is the only way the sites resolve, it stays: no link,
+    /// no removal (review of #130).
+    #[test]
+    fn a_link_that_failed_keeps_the_block() {
+        for code in ["resolved_check_failed", "resolved_tool_missing"] {
+            let dir = Dir::new(true);
+            let hosts = hosts_with_block(&dir);
+            let fake = linux_fake_on(UBUNTU_2404, move |request| {
+                answer_for(&request, &[("resolved_install", code)])
+            });
+            let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts);
+            let report = run_linux_with(&setup, &dir, &["shop.test"]);
+            assert_eq!(fake.pkexec_calls(), 1, "{code}");
+            assert_eq!(report.results[1].code.as_deref(), Some(code));
+        }
+    }
+
+    /// The removal's prompt dismissed: the link is made, the old block
+    /// stays, and the error says so.
+    #[test]
+    fn a_dismissed_removal_prompt_says_the_block_stays() {
+        let dir = Dir::new(true);
+        let hosts = hosts_with_block(&dir);
+        let fake = linux_fake_on(UBUNTU_2404, |request| {
+            if request.ops == [HelperOp::HostsRemove] {
+                exit(126, "Request dismissed")
+            } else {
+                answer_for(&request, &[])
+            }
+        });
+        let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts);
+        let report = run_linux_with(&setup, &dir, &["shop.test"]);
+        assert_eq!(error_code(&report), Some("setup_hosts_not_removed"));
+        assert_eq!(report.results.len(), 3);
+        assert!(low_ports_set(&report));
     }
 
     /// The helper is the judge (task M4-18k2): where marsad expected the
     /// link but the helper chose the hosts file, `resolved_install` becomes
-    /// a skipped step with the helper's code, and the names go to the
-    /// helper in a second request.
+    /// a skipped step with the helper's code, and the operations of the
+    /// hosts way go to the helper in a second request. With a block there,
+    /// it is not taken out first.
     #[test]
     fn the_hosts_file_when_the_helper_says_so() {
         for code in ["resolved_use_hosts", "resolved_not_running"] {
             let dir = Dir::new(true);
+            let hosts = hosts_with_block(&dir);
             let fake = linux_fake_on(UBUNTU_2404, move |request| {
                 answer_for(&request, &[("resolved_install", code)])
             });
-            let setup = linux_setup(&fake, dir.helper(), dir.home());
+            let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts);
             let report = run_linux_with(&setup, &dir, &["shop.test"]);
 
-            assert_eq!(fake.pkexec_calls(), 2, "{code}");
-            let request = HelperRequest::new(vec![hosts_sync(&["shop.test"])]);
-            assert_eq!(fake.pkexec_request(), request, "{code}");
+            let first = linux_request(vec![HelperOp::ResolvedInstall { port: 18053 }]).ops;
+            let second = vec![HelperOp::ResolvedRemove, hosts_sync(&["shop.test"])];
+            assert_eq!(requests(&fake), [first, second], "{code}");
             let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
-            assert_eq!(steps, ["trust_install", "ports_install", "hosts_sync"]);
+            assert_eq!(
+                steps,
+                [
+                    "trust_install",
+                    "ports_install",
+                    "resolved_remove",
+                    "hosts_sync"
+                ]
+            );
             assert_eq!(report.skipped, [skip("resolved_install", code)]);
             assert_eq!(report.error, None);
             assert!(low_ports_set(&report));
         }
     }
 
-    /// The second prompt dismissed: setup says so, and the skipped step
-    /// stays.
+    /// The second prompt dismissed: the error says the steps before are
+    /// done and the names are not written; the skipped step stays.
     #[test]
-    fn a_dismissed_second_prompt_is_the_error_of_setup() {
+    fn a_dismissed_second_prompt_says_the_names_are_not_written() {
         let dir = Dir::new(true);
         let fake = linux_fake_on(UBUNTU_2404, |request| {
-            if request.ops.len() == 1 {
+            if request.ops.len() == 2 {
                 exit(
                     126,
                     "Error executing command as another user: Request dismissed",
@@ -2892,13 +3044,25 @@ mod tests {
             }
         });
         let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
-        assert_eq!(error_code(&report), Some("setup_cancelled"));
+        assert_eq!(error_code(&report), Some("setup_hosts_not_written"));
         assert_eq!(
             report.skipped,
             [skip("resolved_install", "resolved_use_hosts")]
         );
         let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
         assert_eq!(steps, ["trust_install", "ports_install"]);
+    }
+
+    /// A first request that failed as a whole: no second one.
+    #[test]
+    fn no_second_request_after_a_failed_first_one() {
+        let dir = Dir::new(true);
+        let hosts = hosts_with_block(&dir);
+        let fake = linux_fake_on(UBUNTU_2404, |_| exit(127, "Not authorized"));
+        let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts);
+        let report = run_linux_with(&setup, &dir, &["shop.test"]);
+        assert_eq!(error_code(&report), Some("setup_not_authorized"));
+        assert_eq!(fake.pkexec_calls(), 1);
     }
 
     /// The hosts way never falls back the other way: a failed `hosts_sync`
@@ -2918,19 +3082,89 @@ mod tests {
         assert_eq!((report.error, report.skipped), (None, Vec::new()));
     }
 
-    /// `systemctl` that cannot run: the link, and the helper says what it
-    /// finds.
+    /// No site list, or more names than the helper takes: `hosts_sync` is
+    /// left out, never sent empty, and never sent so that the helper refuses
+    /// the whole request (review of #130). The rest of setup goes on.
     #[test]
-    fn no_systemctl_leaves_the_choice_to_the_helper() {
+    fn hosts_sync_is_left_out_when_it_cannot_be_right() {
+        let many: Vec<String> = (0..1001).map(|i| format!("s{i}.test")).collect();
+        for (names, code) in [
+            (None, "hosts_sites_unknown"),
+            (Some(many), "hosts_too_many_names"),
+        ] {
+            let dir = Dir::new(true);
+            let fake = linux_fake_on(UBUNTU_2204_SERVER, |request| answer_for(&request, &[]));
+            let setup = linux_setup(&fake, dir.helper(), dir.home());
+            let stop = CancellationToken::new();
+            let report = setup.run(
+                dir.dir.path(),
+                CaddyInput::default(),
+                Platform::LinuxX64,
+                dir.caddy.as_ref(),
+                names.as_deref(),
+                &stop,
+            );
+            assert_eq!(
+                fake.pkexec_request(),
+                linux_request(vec![HelperOp::ResolvedRemove]),
+                "{code}"
+            );
+            assert_eq!(report.skipped, [skip("hosts_sync", code)]);
+            assert_eq!(report.error, None);
+        }
+    }
+
+    /// `systemctl` that cannot run or cannot tell: the helper would refuse
+    /// the link (`resolved_not_running`), so the hosts way at once, with
+    /// one prompt (review of #130).
+    #[test]
+    fn a_systemctl_that_cannot_tell_means_the_hosts_file() {
+        let answers: [fn() -> io::Result<RunOutput>; 3] = [
+            || Err(io::Error::from(io::ErrorKind::NotFound)),
+            || exit(1, "Failed to connect to bus"),
+            || {
+                Ok(RunOutput {
+                    code: None,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            },
+        ];
+        for answer in answers {
+            let dir = Dir::new(true);
+            let fake = Fake::answering(move |program, args| match program {
+                linux_dns::SYSTEMCTL => answer(),
+                pkexec::PKEXEC => answer_for(&serde_json::from_str(&args[3]).unwrap(), &[]),
+                other => panic!("{other} ran"),
+            });
+            run_linux_with(
+                &linux_setup(&fake, dir.helper(), dir.home()),
+                &dir,
+                &["a.test"],
+            );
+            let dns = vec![HelperOp::ResolvedRemove, hosts_sync(&["a.test"])];
+            assert_eq!(requests(&fake), [linux_request(dns).ops]);
+        }
+    }
+
+    /// The slowest Linux setup stays under [`SLOWEST_SETUP`]: four
+    /// `systemctl` checks and two prompts, each with its pipes' grace,
+    /// after Caddy's start (review of #130).
+    #[test]
+    fn the_slowest_linux_setup_fits_in_slowest_setup() {
         let dir = Dir::new(true);
-        let fake = Fake::answering(|program, args| match program {
-            linux_dns::SYSTEMCTL => Err(io::Error::from(io::ErrorKind::NotFound)),
-            pkexec::PKEXEC => answer_for(&serde_json::from_str(&args[3]).unwrap(), &[]),
-            other => panic!("{other} ran"),
+        let fake = linux_fake_on(UBUNTU_2204_DESKTOP, |request| {
+            answer_for(&request, &[("resolved_install", "resolved_use_hosts")])
         });
-        run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
-        let dns = vec![HelperOp::ResolvedInstall { port: 18053 }];
-        assert_eq!(fake.pkexec_request(), linux_request(dns));
+        run_linux_with(
+            &linux_setup(&fake, dir.helper(), dir.home()),
+            &dir,
+            &["a.test"],
+        );
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 6, "{calls:?}");
+        let programs: Duration = calls.iter().map(|call| call.limit + PIPE_GRACE).sum();
+        assert!(CA_WAIT + programs <= SLOWEST_SETUP);
     }
 
     /// The same checks of the helper file as on macOS, before any dialog.
@@ -3564,7 +3798,7 @@ mod tests {
                 CaddyInput::default(),
                 Platform::DarwinArm64,
                 dir.caddy.as_ref(),
-                &[],
+                Some(&[]),
                 &stop,
             );
             assert_eq!(error_code(&report), Some("setup_helper_missing"));

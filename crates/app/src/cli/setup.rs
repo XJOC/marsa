@@ -1,7 +1,9 @@
 //! `marsa setup`: the first setup (macOS and Linux). macOS may ask for an
 //! administrator password, and may then ask the user to approve trusting
 //! Marsa's certificate authority for this user. Linux asks for the password
-//! once. Task M4-13, task M4-26 for the trust, and task M4-18e for Linux.
+//! once, or twice when the `.test` names need a second request (task
+//! M4-18k2). Task M4-13, task M4-26 for the trust, and task M4-18e for
+//! Linux.
 //!
 //! One call to `marsad` (`POST /v1/setup`, in `daemon/setup_api.rs`),
 //! started if needed. On macOS the daemon checks ports 80 and 443, asks for
@@ -212,8 +214,9 @@ mod tests {
     }
 
     /// The hosts way on Linux (task M4-18k): the output names the file, and
-    /// a link the helper refused is a skipped step that says why.
-    #[cfg(target_os = "linux")]
+    /// a link the helper refused is a skipped step that says why. Not on
+    /// Windows, whose hosts file has another path in the text.
+    #[cfg(not(windows))]
     #[test]
     fn the_hosts_way_names_the_file() {
         let report = SetupReport {
