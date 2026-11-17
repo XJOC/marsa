@@ -51,8 +51,8 @@
 //!    report as `trust_install`, after the helper's results.
 //!
 //! One setup at a time: a second request gets 409 `setup_running`, and one
-//! during an uninstall gets 409 `uninstall_running`. Windows gets 501
-//! `setup_not_supported` until task M4-19.
+//! during an uninstall gets 409 `uninstall_running`. On Windows the helper
+//! is a service, reached through [`windows`] (ADR 0018).
 //!
 //! `POST /v1/uninstall` (task M5-13, `uninstall_api.rs`) shares [`Setup`]:
 //! the same runner, the same helper file check and admin prompt ([`Flow`]
@@ -942,7 +942,7 @@ impl Setup {
             && !self
                 .home
                 .as_deref()
-                .is_some_and(|home| helper.starts_with(home))
+                .is_some_and(|home| inside(helper, home))
         {
             tracing::warn!(
                 path = %helper.display(),
@@ -1175,6 +1175,18 @@ fn home_dir() -> Option<PathBuf> {
 
 pub(super) fn is_macos(platform: Platform) -> bool {
     matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64)
+}
+
+/// Whether `path` is inside `dir`, folder by folder, with no regard to case,
+/// as Windows compares names (`C:\Users\Omar` and `c:\users\omar`).
+fn inside(path: &Path, dir: &Path) -> bool {
+    let mut path = path.components();
+    dir.components().all(|part| {
+        path.next().is_some_and(|other| {
+            part.as_os_str().to_string_lossy().to_lowercase()
+                == other.as_os_str().to_string_lossy().to_lowercase()
+        })
+    })
 }
 
 fn is_windows(platform: Platform) -> bool {
@@ -3694,6 +3706,16 @@ mod tests {
             Some(("S-1-5-21-1-2-3-1001".to_owned(), "-".to_owned()))
         );
         assert!(fake.calls().is_empty());
+    }
+
+    #[test]
+    fn inside_compares_folders_with_no_regard_to_case() {
+        let home = Path::new("/Users/Omar");
+        assert!(inside(Path::new("/users/omar/bin/marsa-helper"), home));
+        assert!(inside(Path::new("/Users/Omar/bin/marsa-helper"), home));
+        assert!(!inside(Path::new("/Users/Omarx/bin/marsa-helper"), home));
+        assert!(!inside(Path::new("/Users"), home));
+        assert!(!inside(Path::new("/tools/marsa-helper"), home));
     }
 
     /// Windows: a marsa-helper outside the user's folder gets no prompt.

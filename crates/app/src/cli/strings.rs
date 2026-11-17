@@ -1110,13 +1110,13 @@ pub fn opened(url: &str) -> String {
 pub const SETUP_STARTED: &str = "Setting up Marsa. macOS may ask for an administrator \
      password, and may then ask you to approve trusting Marsa's certificate authority for your \
      user.";
-/// The same on Linux, with the one thing setup changes for every program
-/// (ADR 0014): it says so before the password is asked.
 /// Windows: the UAC prompt may open behind other windows, as the daemon
 /// that asks for it has none.
 pub const SETUP_STARTED_WINDOWS: &str = "Setting up Marsa. Windows may ask for admin rights \
      (UAC) once, to install Marsa's helper service; if no prompt shows, look for it in the \
      taskbar.";
+/// The same on Linux, with the one thing setup changes for every program
+/// (ADR 0014): it says so before the password is asked.
 pub const SETUP_STARTED_LINUX: &str = "Setting up Marsa. Linux may ask for your password. \
      Setup lets every program on this computer use ports 80 to 1023, so that Caddy can serve \
      your sites on ports 80 and 443.";
