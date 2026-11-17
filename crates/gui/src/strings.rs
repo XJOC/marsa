@@ -348,6 +348,12 @@ pub fn setup_explanation(platform: Option<Platform>) -> &'static str {
              it, any program on this computer may use ports 80 to 1023. Your desktop asks for \
              your password once."
         }
+        // ADR 0018: a helper service keeps the hosts file and the trust.
+        Some(Platform::WindowsX64) => {
+            "Setup lets your browser open .test sites over HTTPS: it adds your sites to the \
+             hosts file and trusts Marsa's certificates, through a small Marsa service. Windows \
+             asks for your approval (UAC) the first time."
+        }
         _ => {
             "Setup lets your browser open .test sites over HTTPS. Your system may ask for an \
              administrator's approval once."
@@ -364,6 +370,7 @@ pub fn setup_running(platform: Option<Platform>) -> &'static str {
         Some(Platform::LinuxX64 | Platform::LinuxArm64) => {
             "Setting up… Enter your password when your desktop asks."
         }
+        Some(Platform::WindowsX64) => "Setting up… Choose Yes if Windows asks (UAC).",
         _ => "Setting up… Answer your system's prompt if one opens.",
     }
 }
@@ -1009,7 +1016,13 @@ fn error_message(code: &str) -> Option<&'static str> {
             "Marsa is being removed from this computer (marsa uninstall --all). Wait for it to \
              end, then try again."
         }
-        "setup_not_supported" => "Setup from Marsa works on macOS and Linux only for now.",
+        "setup_not_supported" => "Setup from Marsa works on macOS, Linux, and Windows only.",
+        // The window runs on the machine marsad runs on, so `cfg!` is the
+        // daemon's system too. Its admin prompt is UAC (ADR 0018).
+        "setup_cancelled" if cfg!(windows) => {
+            "The UAC prompt was declined, so nothing was changed. Run setup again when you are \
+             ready."
+        }
         "setup_cancelled" => {
             "The password prompt was cancelled, so nothing was changed. Run setup again when \
              you are ready."
@@ -1026,6 +1039,47 @@ fn error_message(code: &str) -> Option<&'static str> {
             "Your system did not give Marsa admin rights, so nothing was changed: a wrong \
              password, or no password prompt (as over SSH). Run setup again from your desktop \
              and enter the password of an administrator account."
+        }
+        // Windows: the helper service and the hosts file (task M4-19g2, ADR 0018).
+        "setup_helper_not_the_service" => {
+            "Another program holds the name of Marsa's helper service, so Marsa sent it nothing \
+             and nothing was changed. Restart Windows, then run setup again; if it repeats, \
+             report it with the file logs/marsad.log."
+        }
+        "setup_helper_install_failed" => {
+            "Marsa could not install its helper service, so nothing was changed. Windows' \
+             service log and the file logs/marsad.log say why. Run setup again; if it repeats, \
+             report it."
+        }
+        "setup_helper_install_running" => {
+            "The install of Marsa's helper service is still running. Wait a few minutes, then \
+             run setup again."
+        }
+        "setup_helper_pipe_failed" => {
+            "Marsa could not reach its helper service, so nothing was changed. Run setup again; \
+             if it repeats, report it with the file logs/marsad.log."
+        }
+        "setup_helper_busy" => {
+            "Marsa's helper service is busy with another request. Wait a moment, then run \
+             setup again."
+        }
+        "setup_helper_no_answer" => {
+            "Marsa's helper service gave no answer, so the result of setup is not known. Run \
+             \"marsa doctor\" in a terminal to see what is set up, then run setup again."
+        }
+        "hosts_read" => {
+            "Marsa did not change the hosts file (drivers\\etc\\hosts in Windows' system \
+             folder): it cannot be read, or it is a link, or it is larger than 16 MiB. Fix the \
+             file, then run setup again."
+        }
+        "hosts_write" => {
+            "Marsa could not write the hosts file: it is read-only, or another program holds it \
+             (some security tools do). Fix that, then run setup again."
+        }
+        "hosts_block_broken" => {
+            "The hosts file has a \"# Marsa start\" line without its \"# Marsa end\" line, or \
+             the other way round, so Marsa left it as it is. Remove Marsa's lines from it, then \
+             run setup again."
         }
         // Linux (tasks M4-18e, M4-18h, M4-18b, M4-18c).
         "setup_pkexec_missing" => {
@@ -1595,6 +1649,15 @@ mod tests {
             "setup_prompt_failed",
             "setup_helper_failed",
             "setup_helper_rejected",
+            "setup_helper_not_the_service",
+            "setup_helper_install_failed",
+            "setup_helper_install_running",
+            "setup_helper_pipe_failed",
+            "setup_helper_busy",
+            "setup_helper_no_answer",
+            "hosts_read",
+            "hosts_write",
+            "hosts_block_broken",
             "redirect_port_held",
             "ports_not_checked",
             "ca_not_ready",
@@ -1767,6 +1830,26 @@ mod tests {
             FIRST_RUN_INSTALL_HINT.contains(&line),
             "{FIRST_RUN_INSTALL_HINT}"
         );
+    }
+
+    /// ADR 0018: on Windows the prompt is UAC, the first time only.
+    #[test]
+    fn setup_on_windows_names_the_uac_prompt() {
+        let windows = Some(Platform::WindowsX64);
+        assert!(setup_explanation(windows).contains("(UAC)"));
+        assert!(setup_running(windows).contains("UAC"));
+        for other in [Some(Platform::DarwinArm64), Some(Platform::LinuxX64), None] {
+            assert!(!setup_explanation(other).contains("UAC"));
+            assert!(!setup_running(other).contains("UAC"));
+        }
+        let cancelled = error_text("setup_cancelled");
+        let prompt = if cfg!(windows) {
+            "UAC prompt"
+        } else {
+            "password prompt"
+        };
+        assert!(cancelled.contains(prompt), "{cancelled}");
+        assert!(error_text("setup_not_supported").contains("Windows"));
     }
 
     #[test]
