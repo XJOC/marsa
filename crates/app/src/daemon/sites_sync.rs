@@ -13,6 +13,11 @@
 //! 4. PHP again if the bundle just appeared: `php.ini` then points to it, so
 //!    those pools restart.
 //!
+//! After each pass, and after the routes that waited for it have their
+//! answer: on Windows, the sites' names in the hosts file ([`HostsSync`]).
+//! A failure there is tried again after [`RETRY`](super::hosts_sync::RETRY), between
+//! passes too.
+//!
 //! One task, so two passes never overlap, like a queue with one worker. It
 //! owns the [`PhpManager`], so it alone starts and stops the pools. It stops
 //! with the daemon's shutdown token.
@@ -39,6 +44,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use super::caddy::CADDY_ID;
+use super::hosts_sync::HostsSync;
 use super::php::{PhpManager, write_ca_bundle};
 use super::state::Daemon;
 
@@ -129,12 +135,13 @@ async fn run(
 ) {
     let platform = Platform::current();
     let mut php = PhpManager::new(&daemon.data_dir, platform);
+    let mut hosts = HostsSync::new();
     let system = platform.map(system_ca_bundles).unwrap_or_default();
     let shutdown = daemon.shutdown.clone();
     // The requests the coming pass answers. A return drops them unanswered,
     // and with them `requests`, so each waiting route gets `PassNotRun`.
     let mut replies = Vec::new();
-    loop {
+    'passes: loop {
         // Every request queued before the pass starts: its route saved its
         // change first, so this pass reads it. Requests that come during
         // the pass wait in the queue for the next one.
@@ -147,18 +154,33 @@ async fn run(
             // `Err` only when the route is gone (its client hung up).
             reply.send(()).ok();
         }
+        // After the answers, so that no route waits for the helper service.
         tokio::select! {
             () = shutdown.cancelled() => return,
-            Some(reply) = requests.recv() => {
-                // A route waits: no debounce. The pass covers the events so
-                // far too.
-                replies.push(reply);
-                skip_waiting(&mut events);
-                continue;
+            () = hosts.sync(&daemon) => {}
+        }
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                Some(reply) = requests.recv() => {
+                    // A route waits: no debounce. The pass covers the events
+                    // so far too.
+                    replies.push(reply);
+                    skip_waiting(&mut events);
+                    continue 'passes;
+                }
+                more = next_trigger(&mut events) => {
+                    if !more {
+                        return;
+                    }
+                    break;
+                }
+                // The names failed to go before: again, with no pass.
+                () = hosts.retry_due() => tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    () = hosts.sync(&daemon) => {}
+                },
             }
-            more = next_trigger(&mut events) => if !more {
-                return;
-            },
         }
         tokio::select! {
             () = shutdown.cancelled() => return,
