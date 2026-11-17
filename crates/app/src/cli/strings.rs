@@ -394,6 +394,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         // the failure codes of `marsa-helper`.
         "setup_running" => "Another setup is running. Wait for it to end, then try again.".into(),
         "setup_not_supported" => "\"marsa setup\" works on macOS, Linux, and Windows only.".into(),
+        // Windows: the CLI runs on the machine marsad runs on, so `cfg!` is
+        // the daemon's system too. Its admin prompt is UAC (ADR 0018).
+        "setup_cancelled" if cfg!(windows) => "The UAC prompt was declined, so nothing was \
+             changed. Run \"marsa setup\" again when you are ready."
+            .into(),
         "setup_cancelled" => "The password prompt was cancelled, so nothing was changed. Run \
              \"marsa setup\" again when you are ready."
             .into(),
@@ -411,6 +416,13 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             .into(),
         "setup_helper_missing" => "The marsa-helper program is not next to marsad, so nothing \
              was changed. Reinstall Marsa, then try again."
+            .into(),
+        // Windows: the CLI runs on the machine marsad runs on, so `cfg!` is
+        // the daemon's system too. Its admin prompt is UAC (ADR 0018).
+        "setup_helper_unsafe" if cfg!(windows) => "marsa-helper.exe is outside your user \
+             folder, where another user of this computer could change it, so Marsa did not ask \
+             for admin rights and nothing was changed. Install Marsa into your user folder with \
+             its installer, then run \"marsa setup\" again."
             .into(),
         "setup_helper_unsafe" => "Another user could change the marsa-helper program or its \
              folder, so Marsa did not ask for the password and nothing was changed. Make both \
@@ -442,6 +454,18 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              run \"marsa setup\" again; if it repeats, report it with the file \
              logs/marsad.log."
             .into(),
+        "setup_helper_install_failed" => "Marsa could not install its helper service, so \
+             nothing was changed. Windows' service log and the file logs/marsad.log say why. \
+             Run \"marsa setup\" again; if it repeats, report it."
+            .into(),
+        "setup_helper_install_running" => "The install of Marsa's helper service is still \
+             running. Wait a few minutes, then run \"marsa doctor\"; run \"marsa setup\" again \
+             only once it has ended."
+            .into(),
+        "setup_helper_pipe_failed" => "Marsa could not reach its helper service, so nothing \
+             was changed. Run \"marsa setup\" again; if it repeats, report it with the file \
+             logs/marsad.log."
+            .into(),
         "setup_helper_busy" => "Marsa's helper service is busy with another request. Wait a \
              moment, then run \"marsa setup\" again."
             .into(),
@@ -449,19 +473,17 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              setup is not known. Run \"marsa doctor\" to see what is set up, then run \"marsa \
              setup\" again."
             .into(),
-        "hosts_read" => "Marsa did not change the hosts file \
-             (C:\\Windows\\System32\\drivers\\etc\\hosts): it cannot be read, or it is a link, \
-             read-only, or larger than 16 MiB. Fix the file, then run \"marsa setup\" again."
+        "hosts_read" => "Marsa did not change the hosts file (drivers\\etc\\hosts in Windows' \
+             system folder): it cannot be read, or it is a link, or it is larger than 16 MiB. \
+             Fix the file, then run \"marsa setup\" again."
             .into(),
-        "hosts_write" => "Windows did not let Marsa write the hosts file. Another program may \
-             hold it (some security tools do); close it, then run \"marsa setup\" again."
+        "hosts_write" => "Marsa could not write the hosts file: it is read-only, or another \
+             program holds it (some security tools do). Fix that, then run \"marsa setup\" \
+             again."
             .into(),
         "hosts_block_broken" => "The hosts file has a \"# Marsa start\" line without its \"# \
              Marsa end\" line, or the other way round, so Marsa left it as it is. Remove \
              Marsa's lines from it, then run \"marsa setup\" again."
-            .into(),
-        "service_failed" => "Marsa's helper service did not install, start, or stop. \
-             Windows' service log and the file logs/marsad.log say why."
             .into(),
         "redirect_port_held" => "Another program uses port 80 or 443, and the redirect would \
              take its traffic. Stop that program, or turn off its web server, then run \
@@ -511,8 +533,8 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              be read, or a file or link Marsa did not write is in its place (on macOS in \
              /Library/Application Support/Marsa; on Linux \
              /usr/local/share/ca-certificates/marsa-local-ca.crt or \
-             /etc/pki/ca-trust/source/anchors/marsa-local-ca.pem; on Windows \
-             C:\\Program Files\\Marsa\\ca-root.pem). So Marsa left the trust for \
+             /etc/pki/ca-trust/source/anchors/marsa-local-ca.pem; on Windows ca-root.pem in \
+             Marsa's folder in Program Files). So Marsa left the trust for \
              all users as it is. If you put a file there, move it away; then run the command \
              again. If it repeats, report it."
             .into(),
@@ -527,7 +549,8 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              system folder. Run the command again; if it repeats, report it."
             .into(),
         // Windows: `certutil` and the machine's Root store, not the user's
-        // keychain (ADR 0018).
+        // keychain (ADR 0018). The CLI runs on the machine marsad runs on, so
+        // `cfg!` is the daemon's system too.
         "trust_add_failed" if cfg!(windows) => "Windows did not add Marsa's certificate \
              authority to the trusted root certificates, so browsers will not trust Marsa's \
              sites yet. Run \"marsa setup\" again; if it repeats, report it with the file \
@@ -1085,6 +1108,11 @@ pub const SETUP_STARTED: &str = "Setting up Marsa. macOS may ask for an administ
      user.";
 /// The same on Linux, with the one thing setup changes for every program
 /// (ADR 0014): it says so before the password is asked.
+/// Windows: the UAC prompt may open behind other windows, as the daemon
+/// that asks for it has none.
+pub const SETUP_STARTED_WINDOWS: &str = "Setting up Marsa. Windows may ask for admin rights \
+     (UAC) once, to install Marsa's helper service; if no prompt shows, look for it in the \
+     taskbar.";
 pub const SETUP_STARTED_LINUX: &str = "Setting up Marsa. Linux may ask for your password. \
      Setup lets every program on this computer use ports 80 to 1023, so that Caddy can serve \
      your sites on ports 80 and 443.";
@@ -1108,6 +1136,7 @@ pub fn setup_step(op: &str) -> String {
         "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
         "resolved_install" => "Send .test names to Marsa".to_owned(),
         "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
+        "hosts_sync" => "Send .test names to Marsa".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -1688,12 +1717,14 @@ mod tests {
         "resolver_read",
         "resolver_write",
         "setup_helper_not_the_service",
+        "setup_helper_install_failed",
+        "setup_helper_install_running",
+        "setup_helper_pipe_failed",
         "setup_helper_busy",
         "setup_helper_no_answer",
         "hosts_read",
         "hosts_write",
         "hosts_block_broken",
-        "service_failed",
         "trust_cert_invalid",
         "trust_read",
         "trust_write",

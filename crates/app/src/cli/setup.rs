@@ -54,16 +54,17 @@ pub async fn run(data_dir: &Path) -> ExitCode {
     }
 }
 
-/// The line before the call, which may wait for the password prompt. Only
-/// on macOS and Linux, where the daemon runs setup (the platform check of
+/// The line before the call, which may wait for the admin prompt. Only on
+/// the systems where the daemon runs setup (the platform check of
 /// `daemon/setup_api.rs`); the CLI and the daemon run on the same machine.
 /// Elsewhere the daemon answers `setup_not_supported` at once, and a
-/// password line first would be wrong.
+/// prompt line first would be wrong.
 fn started(platform: Option<Platform>) -> Option<&'static str> {
     match platform? {
         Platform::DarwinArm64 | Platform::DarwinX64 => Some(strings::SETUP_STARTED),
         Platform::LinuxX64 | Platform::LinuxArm64 => Some(strings::SETUP_STARTED_LINUX),
-        Platform::WindowsX64 | Platform::Any => None,
+        Platform::WindowsX64 => Some(strings::SETUP_STARTED_WINDOWS),
+        Platform::Any => None,
     }
 }
 
@@ -318,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn macos_and_linux_are_told_about_the_password() {
+    fn each_system_is_told_about_its_admin_prompt() {
         for platform in [Platform::DarwinArm64, Platform::DarwinX64] {
             assert_eq!(started(Some(platform)), Some(strings::SETUP_STARTED));
         }
@@ -327,7 +328,13 @@ mod tests {
         }
         // ADR 0014: the one change for every program, before the password.
         assert!(strings::SETUP_STARTED_LINUX.contains("ports 80 to 1023"));
-        for platform in [Some(Platform::WindowsX64), Some(Platform::Any), None] {
+        // Windows: the UAC prompt, which may sit in the taskbar.
+        assert_eq!(
+            started(Some(Platform::WindowsX64)),
+            Some(strings::SETUP_STARTED_WINDOWS)
+        );
+        assert!(strings::SETUP_STARTED_WINDOWS.contains("taskbar"));
+        for platform in [Some(Platform::Any), None] {
             assert_eq!(started(platform), None, "{platform:?}");
         }
     }

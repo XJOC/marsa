@@ -71,7 +71,11 @@ const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// verify-cert`) up to 10 seconds, and Caddy 30 seconds to start and make
 /// its CA when there is none yet. A test in the daemon's `setup_api.rs`
 /// holds this above the sum of the daemon's own limits.
-pub const SETUP_TIMEOUT: Duration = Duration::from_secs(14 * 60);
+///
+/// On Windows the slowest setup is longer: a request to the helper service,
+/// the install after the UAC prompt, and the request again, up to 35.5
+/// minutes, and the prompt has no limit of its own.
+pub const SETUP_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 /// For `POST /v1/uninstall`: longer than the daemon's slowest uninstall,
 /// about 15 minutes and 20 seconds when every program runs to its limit. The
 /// user has 5 minutes at the admin prompt, then up to 5 at each of the two
