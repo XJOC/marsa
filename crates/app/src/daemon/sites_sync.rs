@@ -12,8 +12,11 @@
 //!    when it first loads a config, with or without sites (task M5-15).
 //! 4. PHP again if the bundle just appeared: `php.ini` then points to it, so
 //!    those pools restart.
-//! 5. Windows: the sites' names in the hosts file, through the helper
-//!    service ([`HostsSync`]).
+//!
+//! After each pass, and after the routes that waited for it have their
+//! answer: on Windows, the sites' names in the hosts file ([`HostsSync`]).
+//! A failure there is tried again after [`RETRY`](super::hosts_sync::RETRY), between
+//! passes too.
 //!
 //! One task, so two passes never overlap, like a queue with one worker. It
 //! owns the [`PhpManager`], so it alone starts and stops the pools. It stops
@@ -138,31 +141,46 @@ async fn run(
     // The requests the coming pass answers. A return drops them unanswered,
     // and with them `requests`, so each waiting route gets `PassNotRun`.
     let mut replies = Vec::new();
-    loop {
+    'passes: loop {
         // Every request queued before the pass starts: its route saved its
         // change first, so this pass reads it. Requests that come during
         // the pass wait in the queue for the next one.
         take_queued(&mut requests, &mut replies);
         tokio::select! {
             () = shutdown.cancelled() => return,
-            () = pass(&daemon, &mut php, &mut hosts, &system) => {}
+            () = pass(&daemon, &mut php, &system) => {}
         }
         for reply in replies.drain(..) {
             // `Err` only when the route is gone (its client hung up).
             reply.send(()).ok();
         }
+        // After the answers, so that no route waits for the helper service.
         tokio::select! {
             () = shutdown.cancelled() => return,
-            Some(reply) = requests.recv() => {
-                // A route waits: no debounce. The pass covers the events so
-                // far too.
-                replies.push(reply);
-                skip_waiting(&mut events);
-                continue;
+            () = hosts.sync(&daemon) => {}
+        }
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                Some(reply) = requests.recv() => {
+                    // A route waits: no debounce. The pass covers the events
+                    // so far too.
+                    replies.push(reply);
+                    skip_waiting(&mut events);
+                    continue 'passes;
+                }
+                more = next_trigger(&mut events) => {
+                    if !more {
+                        return;
+                    }
+                    break;
+                }
+                // The names failed to go before: again, with no pass.
+                () = hosts.retry_due() => tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    () = hosts.sync(&daemon) => {}
+                },
             }
-            more = next_trigger(&mut events) => if !more {
-                return;
-            },
         }
         tokio::select! {
             () = shutdown.cancelled() => return,
@@ -220,24 +238,13 @@ fn skip_waiting(events: &mut broadcast::Receiver<Event>) {
 }
 
 /// One pass: PHP, Caddy, the CA bundle, then PHP again if the bundle is new.
-async fn pass(
-    daemon: &Daemon,
-    php: &mut PhpManager,
-    hosts: &mut HostsSync,
-    system: &[&'static Path],
-) {
-    // `None`: the site list could not be built, which is not "no site": the
-    // hosts block stays as it is.
-    let listed = daemon.sites().map(|list| list.sites);
-    let sites = listed.clone().unwrap_or_default();
+async fn pass(daemon: &Daemon, php: &mut PhpManager, system: &[&'static Path]) {
+    let sites = daemon.sites().map(|list| list.sites).unwrap_or_default();
     let bundle = daemon.caddy.paths.ca_bundle();
     let had_bundle = tokio::fs::try_exists(&bundle).await.unwrap_or(false);
     let ca = had_bundle.then_some(bundle.as_path());
     let pools = php.sync(daemon, &sites, ca).await;
     apply_caddy(daemon, &sites, pools.clone()).await;
-    if let Some(sites) = &listed {
-        hosts.after_pass(sites).await;
-    }
 
     if !write_bundle(&daemon.caddy.paths, system).await || had_bundle {
         return;
