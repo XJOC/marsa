@@ -71,21 +71,9 @@ pub fn no_site_matches(search: &str) -> String {
 /// The connection cell of a site's row: the word beside the lock.
 pub const HTTPS: &str = "HTTPS";
 pub const HTTP: &str = "HTTP";
-/// The rows of a site's menu (⋯): the other connection, and Unlink.
-pub const SWITCH_TO_HTTP: &str = "Switch to HTTP";
-pub const SWITCH_TO_HTTPS: &str = "Switch to HTTPS";
-pub const HTTPS_HINT: &str = "Serve this site over HTTPS";
-pub const HTTP_HINT: &str = "Serve this site over plain HTTP.";
-
 /// What a screen reader says for the version menu of a site's row.
 pub fn php_for_site(site: &str) -> String {
     format!("PHP version for {site}")
-}
-
-/// What a screen reader says, and the tooltip shows, for the ⋯ button of a
-/// site's row.
-pub fn site_menu_label(site: &str) -> String {
-    format!("More actions for {site}")
 }
 
 /// A site's own page (task M5-D7). The way back to Sites at the top is the
@@ -205,7 +193,6 @@ pub const PICKING_HINT: &str = "A folder dialog is open.";
 pub const SKIPPED_TITLE: &str = "Skipped folders";
 /// The column of the Unlink buttons, and of the Uninstall lists.
 pub const COLUMN_REMOVE: &str = "Remove";
-pub const UNLINK_BUTTON: &str = "Unlink…";
 pub const UNLINK_HINT: &str = "Stop serving this site. Its folder and files stay.";
 pub const PARKED_TITLE: &str = "Parked folders";
 /// After the heading of each list under the sites table.
@@ -395,9 +382,10 @@ pub fn pick_title(pick: Pick) -> &'static str {
     }
 }
 
-/// The first line of the link form.
-pub fn link_folder(folder: &Path) -> String {
-    format!("Link {} as:", folder.display())
+/// The first line of the link form: the folder as the window shows it
+/// (`~/Work/blog`, with the full path in a tooltip).
+pub fn link_folder(shown: &str) -> String {
+    format!("Link {shown} as:")
 }
 
 /// After the site name field: `.test`.
@@ -1947,7 +1935,6 @@ mod tests {
             "from composer.json"
         );
         assert_eq!(php_for_site("shop"), "PHP version for shop");
-        assert_eq!(site_menu_label("shop"), "More actions for shop");
         assert_eq!(no_site_matches("sh"), "No site matches “sh”.");
         assert_eq!(search_key_hint(true), "Cmd K");
         assert_eq!(search_key_hint(false), "Ctrl K");
@@ -2660,7 +2647,8 @@ mod tests {
     fn the_link_lines() {
         let folder = Path::new("/work/api");
         assert_eq!(linked("api", folder), "Linked /work/api as api.test.");
-        assert_eq!(link_folder(folder), "Link /work/api as:");
+        assert_eq!(link_folder("/work/api"), "Link /work/api as:");
+        assert_eq!(link_folder("~/Work/api"), "Link ~/Work/api as:");
         assert_eq!(site_suffix(), ".test");
         let hint = version_field_hint(Runtime::Node);
         assert!(

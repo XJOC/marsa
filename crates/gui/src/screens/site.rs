@@ -19,7 +19,7 @@ use eframe::egui::{CursorIcon, Label, RichText, Sense, Ui, vec2};
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::Site;
 
-use super::sites::{self, NoticeLine, Reason, Unlink};
+use super::sites::{self, NoticeLine, Reason};
 use crate::model::{Action, Choice, Model, Route};
 use crate::screens::home::{PhpChoice, php_choices};
 use crate::strings;
@@ -101,6 +101,16 @@ pub enum AddedBy<'a> {
     Linked,
 }
 
+/// Whether the page can unlink the site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unlink<'a> {
+    Allowed,
+    /// Another removal runs.
+    Busy,
+    /// The site comes from this parked folder: forget the folder instead.
+    Parked(&'a Path),
+}
+
 /// The tabs of the page. Only Overview ships now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
@@ -123,11 +133,21 @@ pub fn view<'a>(model: &'a Model, name: &'a str) -> SiteView<'a> {
         removing: sites::removing_line(model),
         php: php(model, site),
         facts: facts(model, site),
-        unlink: sites::unlink_of(model, site),
+        unlink: unlink_of(model, site),
         forget_off: (model.is_connected() && !model.can_remove())
             .then_some(strings::REMOVE_BUSY_HINT),
         home: model.home.as_deref(),
     }))
+}
+
+/// Whether `site` can be unlinked now: not when it comes from a parked
+/// folder (the daemon refuses it too), and not while another removal runs.
+fn unlink_of<'a>(model: &'a Model, site: &Site) -> Unlink<'a> {
+    match model.parked_folder(site) {
+        Some(folder) => Unlink::Parked(folder),
+        None if model.can_remove() => Unlink::Allowed,
+        None => Unlink::Busy,
+    }
 }
 
 fn php<'a>(model: &Model, site: &'a Site) -> PhpView<'a> {

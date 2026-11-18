@@ -9,13 +9,15 @@
 //! user did as [`Action`]s (code.md, State). [Laravel: `view` is the
 //! controller that builds the data; `show` is the Blade template.]
 //!
-//! Until the site's own page ships (task M5-D7), what a site's row can do
-//! besides Open stays in the row's menu (⋯): HTTPS or HTTP, and Unlink.
+//! A click on a row opens the site's page (`site`), where HTTPS or HTTP and
+//! Unlink are (task M5-D7).
 
 use std::path::{Path, PathBuf};
 
 use eframe::egui::os::OperatingSystem;
-use eframe::egui::{Id, Key, KeyboardShortcut, Label, Modifiers, Response, RichText, Ui, vec2};
+use eframe::egui::{
+    Id, Key, KeyboardShortcut, Label, Modifiers, Response, RichText, Role, Ui, WidgetInfo, vec2,
+};
 use marsa_core::types::{Site, SkippedFolder, Source};
 
 use crate::model::{Action, Choice, HostsSync, Model, Pick, Removal, Route, Setup, SitesNotice};
@@ -79,7 +81,6 @@ pub struct SiteRow<'a> {
     pub php: PhpCell<'a>,
     /// Served over HTTPS.
     pub https: bool,
-    pub unlink: Unlink<'a>,
 }
 
 /// The version menu of a row.
@@ -140,16 +141,6 @@ impl Reason<'_> {
             Self::NoMatch => strings::REASON_NO_MATCH.to_owned(),
         }
     }
-}
-
-/// Whether the menu of a row can unlink the site.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Unlink<'a> {
-    Allowed,
-    /// Another removal runs.
-    Busy,
-    /// The site comes from this parked folder: forget the folder instead.
-    Parked(&'a Path),
 }
 
 #[derive(Debug, PartialEq)]
@@ -266,16 +257,6 @@ fn row<'a>(model: &'a Model, site: &'a Site, php: &[PhpChoice]) -> SiteRow<'a> {
         root: &site.root,
         php: php_cell(model, site, php),
         https: site.secure,
-        unlink: unlink_of(model, site),
-    }
-}
-
-/// Whether `site` can be unlinked now.
-pub(super) fn unlink_of<'a>(model: &'a Model, site: &Site) -> Unlink<'a> {
-    match model.parked_folder(site) {
-        Some(folder) => Unlink::Parked(folder),
-        None if model.can_remove() => Unlink::Allowed,
-        None => Unlink::Busy,
     }
 }
 
@@ -381,14 +362,6 @@ fn search_id() -> Id {
 /// Cmd K on macOS, Ctrl K elsewhere: focus the search field.
 const SEARCH_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::K);
 
-/// What a row's menu (⋯) can do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RowChoice {
-    /// Serve over HTTPS (`true`) or plain HTTP.
-    Secure(bool),
-    Unlink,
-}
-
 /// Draws `view`. Returns what the user did.
 pub fn show(ui: &mut Ui, view: &SitesView<'_>, theme: &Theme) -> Vec<Action> {
     let mut actions = Vec::new();
@@ -405,7 +378,7 @@ pub fn show(ui: &mut Ui, view: &SitesView<'_>, theme: &Theme) -> Vec<Action> {
         }
     });
     if let Some(link) = &view.link {
-        link_form(ui, theme, link, &mut actions);
+        link_form(ui, theme, link, view.home, &mut actions);
     }
     if let Some(line) = &view.line {
         notice(ui, theme, line, &mut actions);
@@ -566,13 +539,25 @@ fn hosts_line(ui: &mut Ui, theme: &Theme, hosts: &HostsView, actions: &mut Vec<A
 
 /// The form of a folder picked to link: the name field with `.test` after
 /// it, Link, and Cancel.
-fn link_form(ui: &mut Ui, theme: &Theme, link: &LinkView<'_>, actions: &mut Vec<Action>) {
+fn link_form(
+    ui: &mut Ui,
+    theme: &Theme,
+    link: &LinkView<'_>,
+    home: Option<&Path>,
+    actions: &mut Vec<Action>,
+) {
     padded_card(ui, |ui| {
         ui.spacing_mut().item_spacing.y = theme.space.s2;
-        let title = RichText::new(strings::link_folder(link.folder))
+        // The folder shows as `~/…` under the home folder; the tooltip and a
+        // screen reader have the whole path.
+        let full = link.folder.display().to_string();
+        let title = RichText::new(strings::link_folder(&strings::home_path(link.folder, home)))
             .font(theme.text.body_sm.font_id())
             .color(theme.color.ink);
-        ui.add(Label::new(title).selectable(false));
+        let title = ui.add(Label::new(title).selectable(false));
+        let spoken = strings::link_folder(&full);
+        title.widget_info(|| WidgetInfo::labeled(Role::Label, true, &spoken));
+        title.on_hover_text(full);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme.space.s2;
             let mut name = link.name.to_owned();
@@ -614,7 +599,6 @@ fn table(
         TableColumn::fixed(strings::COLUMN_PHP, SITES_PHP_COLUMN),
         TableColumn::fixed(strings::COLUMN_CONNECTION, SITES_CONNECTION_COLUMN),
         TableColumn::fixed("", SITES_OPEN_COLUMN),
-        TableColumn::fixed("", theme.size.icon_button),
     ];
     // The menus list the same versions on every row.
     let versions: Vec<(usize, &str)> = view
@@ -636,7 +620,6 @@ fn table(
                 actions.push(Action::OpenSite(site.name.to_owned()));
             }
         });
-        row.cell(|ui| row_menu(ui, site, actions));
     });
     if let Some(index) = shown.clicked {
         let name = rows[index].name.to_owned();
@@ -693,40 +676,6 @@ fn connection(ui: &mut Ui, theme: &Theme, https: bool) {
         .font(theme.text.body_sm.font_id())
         .color(color);
     ui.add(Label::new(text).selectable(false));
-}
-
-/// The ⋯ button of a row: the other connection, and Unlink.
-fn row_menu(ui: &mut Ui, site: &SiteRow<'_>, actions: &mut Vec<Action>) {
-    let label = strings::site_menu_label(site.name);
-    let button = ui.add(Button::icon(Icon::More, &label));
-    let secure = if site.https {
-        MenuItem::new(RowChoice::Secure(false), strings::SWITCH_TO_HTTP).hint(strings::HTTP_HINT)
-    } else {
-        MenuItem::new(RowChoice::Secure(true), strings::SWITCH_TO_HTTPS).hint(strings::HTTPS_HINT)
-    };
-    // A site from a parked folder goes with its folder only.
-    let parked = match site.unlink {
-        Unlink::Parked(folder) => Some(strings::unlink_parked_hint(folder)),
-        Unlink::Allowed | Unlink::Busy => None,
-    };
-    let off = match site.unlink {
-        Unlink::Allowed => None,
-        Unlink::Busy => Some(strings::REMOVE_BUSY_HINT),
-        Unlink::Parked(_) => parked.as_deref(),
-    };
-    let unlink = MenuItem::new(RowChoice::Unlink, strings::UNLINK_BUTTON)
-        .danger()
-        .hint(strings::UNLINK_HINT)
-        .disabled_if(off);
-    let items = [secure, unlink];
-    match Menu::new(&items).from_end().show(&button) {
-        Some(RowChoice::Secure(secure)) => actions.push(Action::SetSecure {
-            site: site.name.to_owned(),
-            secure,
-        }),
-        Some(RowChoice::Unlink) => actions.push(Action::AskUnlink(site.name.to_owned())),
-        None => {}
-    }
 }
 
 /// A list of folders under the table: a heading, and a card of dense rows
@@ -1164,24 +1113,17 @@ mod tests {
     }
 
     #[test]
-    fn a_row_can_unlink_unless_its_site_is_parked_or_a_removal_runs() {
+    fn while_a_removal_runs_the_screen_says_so_and_forget_waits() {
         let mut model = model(&["shop", "wiki"]);
         model.sites.parked = vec![PathBuf::from("/code")];
         let view_ = view(&model, false);
-        assert!(
-            rows(&view_)
-                .iter()
-                .all(|row| row.unlink == Unlink::Parked(Path::new("/code")))
-        );
-        model.sites.parked.clear();
-        let view_ = view(&model, false);
-        assert!(rows(&view_).iter().all(|row| row.unlink == Unlink::Allowed));
+        assert_eq!(view_.removing, None);
+        assert_eq!(view_.forget_off, None);
         assert!(model.ask_removal(Removal::Unlink {
             site: "shop".into()
         }));
         model.confirm_removal().expect("sent");
         let view_ = view(&model, false);
-        assert!(rows(&view_).iter().all(|row| row.unlink == Unlink::Busy));
         assert_eq!(view_.removing.as_deref(), Some("Unlinking shop.test…"));
         assert_eq!(view_.forget_off, Some(strings::REMOVE_BUSY_HINT));
     }
@@ -1401,34 +1343,32 @@ mod tests {
     }
 
     #[test]
-    fn the_row_menu_switches_the_connection_and_unlinks() {
+    fn a_row_has_no_menu_any_more_the_page_of_the_site_has_what_it_had() {
+        let (_, tree) = start(&model(&["alpha", "shop"]));
+        for site in ["alpha", "shop"] {
+            assert!(
+                tree.node_with_label(&format!("More actions for {site}"))
+                    .is_none()
+            );
+        }
+        // The other cells of the row stay: the version menu and Open.
+        assert!(tree.node_with_label("PHP version for shop, 8.4").is_some());
+        assert_eq!(tree.nodes_with_label(strings::OPEN).len(), 2);
+    }
+
+    #[test]
+    fn the_open_button_ends_the_row_at_the_card_padding() {
         let model = model(&["shop"]);
-        let button = "More actions for shop";
-        let http = Action::SetSecure {
-            site: "shop".into(),
-            secure: false,
-        };
-        assert_eq!(choose(&model, button, strings::SWITCH_TO_HTTP), [http]);
-        assert_eq!(
-            choose(&model, button, strings::UNLINK_BUTTON),
-            [Action::AskUnlink("shop".into())]
-        );
-    }
-
-    #[test]
-    fn the_menu_of_the_second_row_belongs_to_the_second_row() {
-        let model = model(&["alpha", "shop"]);
-        assert_eq!(
-            choose(&model, "More actions for shop", strings::UNLINK_BUTTON),
-            [Action::AskUnlink("shop".into())]
-        );
-    }
-
-    #[test]
-    fn a_parked_site_cannot_be_unlinked_from_its_row() {
-        let mut model = model(&["shop"]);
-        model.sites.parked = vec![PathBuf::from("/code")];
-        assert!(choose(&model, "More actions for shop", strings::UNLINK_BUTTON).is_empty());
+        let harness = Harness::new(egui::Theme::Light);
+        let mut right = 0.0;
+        let tree = harness.accessibility(|ui| {
+            right = ui.max_rect().right();
+            draw(ui, &model);
+        });
+        let open = tree.node_with_label(strings::OPEN).expect("Open");
+        let edge = f64::from(right - LIGHT.space.s4);
+        let gap = (open.bounds().expect("a place").x1 - edge).abs();
+        assert!(gap < 1.5, "{gap}");
     }
 
     #[test]
@@ -1627,6 +1567,52 @@ mod tests {
         assert!(tree.node_with_text(&label).is_some(), "{label}");
     }
 
+    /// The texts one frame of Sites paints.
+    fn painted(model: &Model) -> Vec<String> {
+        let harness = Harness::new(egui::Theme::Light);
+        let shapes = harness.shapes(|ui| {
+            draw(ui, model);
+        });
+        shapes
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_link_form_names_the_folder_with_a_tilde_and_a_screen_reader_hears_the_whole_path() {
+        let home = abs("/Users/omar");
+        let folder = home.join("Work").join("blog");
+        let mut model = model(&[]);
+        model.home = Some(home.clone());
+        model.pick_link_folder(&folder);
+        let shown = strings::link_folder(&strings::home_path(&folder, Some(&home)));
+        assert!(shown.starts_with("Link ~"), "{shown}");
+        assert_eq!(shown, format!("Link {} as:", tilde(&["Work", "blog"])));
+        let whole = strings::link_folder(&folder.display().to_string());
+        let painted = painted(&model);
+        assert!(painted.contains(&shown), "{painted:?}");
+        assert!(!painted.contains(&whole), "{painted:?}");
+        let (_, tree) = start(&model);
+        assert!(tree.node_with_text(&whole).is_some(), "{whole}");
+
+        // A folder outside home, or no home: shown in full.
+        let elsewhere = abs("/srv/blog");
+        model.pick_link_folder(&elsewhere);
+        let want = strings::link_folder(&elsewhere.display().to_string());
+        assert!(painted_has(&model, &want));
+        model.home = None;
+        model.pick_link_folder(&folder);
+        assert!(painted_has(&model, &whole));
+    }
+
+    fn painted_has(model: &Model, text: &str) -> bool {
+        painted(model).iter().any(|painted| painted == text)
+    }
+
     #[test]
     fn the_parked_and_skipped_lists_show_the_home_folder_as_a_tilde_too() {
         let home = abs("/Users/omar");
@@ -1663,7 +1649,6 @@ mod tests {
         let by_label = |label: &str| middle(tree.node_with_label(label).expect(label));
         let open = by_label("Open");
         assert!((by_label("PHP version for shop, 8.4") - open).abs() < 0.5);
-        assert!((by_label("More actions for shop") - open).abs() < 0.5);
         // The reason and the lock and word of the connection share it too.
         let reason = middle(tree.node_with_text("default").expect("the reason"));
         assert!((reason - open).abs() < 1.0, "{reason} {open}");
