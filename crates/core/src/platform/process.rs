@@ -676,6 +676,14 @@ fn create_new(path: &Path) -> io::Result<File> {
 /// names no pid. A link, even to a regular file, is refused, and so is a FIFO,
 /// whose `open` would wait for a writer without end.
 pub fn read_pid_file(path: &Path) -> Option<PidRecord> {
+    serde_json::from_str(&read_small_file(path)?).ok()
+}
+
+/// Reads a small pid file as text, with the checks of [`read_pid_file`]:
+/// `None` if it is missing, a link, not a regular file, longer than 4096
+/// bytes, or not UTF-8. For a server's own pid file, such as PostgreSQL's
+/// `postmaster.pid` (task M6-03).
+pub fn read_small_file(path: &Path) -> Option<String> {
     if !fs::symlink_metadata(path).ok()?.is_file() {
         return None;
     }
@@ -689,7 +697,7 @@ pub fn read_pid_file(path: &Path) -> Option<PidRecord> {
     if text.len() as u64 > PID_FILE_MAX {
         return None;
     }
-    serde_json::from_str(&text).ok()
+    Some(text)
 }
 
 /// Deletes `run/caddy.pid`. No file is not an error.
