@@ -30,6 +30,11 @@ pub const ORPHAN_RECOVERY: bool = cfg!(target_os = "macos");
 /// How long `kill`, `ps`, or `lsof` may run.
 #[cfg(unix)]
 const TOOL_LIMIT: Duration = Duration::from_secs(2);
+/// How long [`port_lookup`] waits for `lsof`. Longer than [`TOOL_LIMIT`]:
+/// its answer decides a start, and on a busy Mac at login `lsof` can be
+/// slow; a time-out would refuse the start for nothing.
+#[cfg(target_os = "macos")]
+const LOOKUP_LIMIT: Duration = Duration::from_secs(8);
 
 /// The longest `run/caddy.pid` that is read.
 const PID_FILE_MAX: u64 = 4096;
@@ -563,7 +568,7 @@ pub async fn port_owner(port: u16) -> Option<String> {
 /// which sees a listener on `*:<port>` that a bind to `127.0.0.1` misses
 /// (std's bind sets `SO_REUSEADDR`). `lsof` exits with 1 and prints nothing
 /// at all when nothing listens; any other answer, an error message, or no
-/// answer within 2 s is [`PortLookup::Failed`], so a caller can fail closed.
+/// answer within 8 s is [`PortLookup::Failed`], so a caller can fail closed.
 /// `-w`: no warnings about other file systems on stderr.
 #[cfg(target_os = "macos")]
 pub async fn port_lookup(port: u16) -> PortLookup {
@@ -577,7 +582,7 @@ pub async fn port_lookup(port: u16) -> PortLookup {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let Ok(Ok(out)) = tokio::time::timeout(TOOL_LIMIT, lsof.output()).await else {
+    let Ok(Ok(out)) = tokio::time::timeout(LOOKUP_LIMIT, lsof.output()).await else {
         return PortLookup::Failed;
     };
     let text = String::from_utf8_lossy(&out.stdout);
