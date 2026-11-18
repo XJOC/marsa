@@ -85,7 +85,7 @@ fn show_confirm(ctx: &Context, view: &ConfirmView) -> Vec<Action> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     use eframe::egui::{self, Key, Role};
     use marsa_core::runtimes::Runtime;
@@ -96,6 +96,16 @@ mod tests {
     use crate::bridge::Command;
     use crate::model::Update;
     use crate::widgets::harness::{Harness, Tree};
+
+    /// An absolute path on any system: a drive on Windows, where a path that
+    /// starts with `/` is not absolute and `~` is never used.
+    fn abs(unix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
+        } else {
+            PathBuf::from(unix)
+        }
+    }
 
     /// A window with one linked site `shop`, a parked folder `/code` with a
     /// site `api` in it, and PHP 8.3.27 installed, under the home folder
@@ -118,13 +128,13 @@ mod tests {
         };
         model.update(Update::Sites(SiteList {
             sites: vec![
-                site("shop", PathBuf::from("/home/Code/shop")),
+                site("shop", abs("/home/Code/shop")),
                 site("api", PathBuf::from("/code/api")),
             ],
             parked: vec![PathBuf::from("/code")],
             ..SiteList::default()
         }));
-        model.home = Some(PathBuf::from("/home"));
+        model.home = Some(abs("/home"));
         model
     }
 
@@ -169,7 +179,7 @@ mod tests {
         assert_eq!(view.confirm, "Unlink");
         // The folder is under the home folder: `~/…`, with the separator of
         // the system.
-        let shown = strings::home_path(Path::new("/home/Code/shop"), model.home.as_deref());
+        let shown = strings::home_path(&abs("/home/Code/shop"), model.home.as_deref());
         assert!(shown.starts_with('~'), "{shown}");
         assert!(
             view.body

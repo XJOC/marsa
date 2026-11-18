@@ -2715,19 +2715,20 @@ mod tests {
         );
         assert!(confirm_text(&unlink, None, 0, None).ends_with("Its folder and files stay."));
         // Under the home folder, a folder shows as `~/…`, in the title too.
-        let home = Some(Path::new("/work"));
-        let shown = home_path(Path::new("/work/api"), home);
-        let text = confirm_text(&unlink, Some(Path::new("/work/api")), 0, home);
+        let (work, api, code_dir) = (full("/work"), full("/work/api"), full("/work/code"));
+        let home = Some(work.as_path());
+        let shown = home_path(&api, home);
+        assert_eq!(shown, tilde(&["api"]));
+        let text = confirm_text(&unlink, Some(&api), 0, home);
         assert!(
             text.ends_with(&format!("The folder {shown} and its files stay.")),
             "{text}"
         );
-        let code = Removal::Forget {
-            folder: PathBuf::from("/work/code"),
-        };
-        let shown = home_path(Path::new("/work/code"), home);
-        assert_eq!(confirm_title(&code, home), format!("Forget {shown}?"));
-        assert!(shown.starts_with('~'));
+        let code = Removal::Forget { folder: code_dir };
+        assert_eq!(
+            confirm_title(&code, home),
+            format!("Forget {}?", tilde(&["code"]))
+        );
         for (sites, start) in [
             (0, "Marsa stops watching this folder."),
             (1, "Marsa stops serving its site,"),
