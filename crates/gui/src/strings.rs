@@ -643,6 +643,15 @@ pub fn path_step_label(label: &str, state: StepState) -> String {
     format!("{label}, {word}")
 }
 
+/// The first row of a site's version menu: it clears the site's own setting.
+pub const USE_SITE_FILES: &str = "Use the site's files";
+
+/// The name of the dashed "+" of a version picker: "Install another PHP
+/// version".
+pub fn install_another_label(runtime: &str) -> String {
+    format!("Install another {runtime} version")
+}
+
 /// The word of a service's state pill (components.md, Status).
 pub const fn pill_state_word(state: PillState) -> &'static str {
     match state {
@@ -2405,6 +2414,16 @@ mod tests {
         assert_eq!(names.len(), Section::ALL.len(), "two sections share a name");
         assert_eq!(section_name(Section::Sites), SITES);
         assert_eq!(section_name(Section::Services), SERVICES);
+    }
+
+    #[test]
+    fn the_version_widgets_have_their_words_for_any_runtime() {
+        assert_eq!(install_another_label("PHP"), "Install another PHP version");
+        assert_eq!(
+            install_another_label(runtime_name(Runtime::Node)),
+            "Install another Node.js version"
+        );
+        assert_eq!(USE_SITE_FILES, "Use the site's files");
     }
 
     #[test]

@@ -1,0 +1,1236 @@
+//! Version widgets (components.md): the large version picker and the compact
+//! version menu. Both take the versions as a list of `(value, text)`, so they
+//! work for any runtime: PHP "8.4", Node "22", a later Python "3.13" (R5).
+//! They draw what they are given and return what the user chose; the screen
+//! turns that into an action.
+
+use eframe::egui::{
+    Align2, Color32, CornerRadius, EventFilter, InnerResponse, Key, Label, Popup, Pos2, Rect,
+    Response, RichText, Role, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, Widget, WidgetInfo, pos2,
+    vec2,
+};
+
+use super::icons::Icon;
+use super::{
+    Look, Touch, layout, paint_focus_ring, quiet_fill, slot, touched, with_disabled_reason,
+};
+use crate::theme::{Direction, Face, TextToken, Theme, VersionText};
+
+/// A move of the keyboard focus inside a group of buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    Previous,
+    Next,
+    First,
+    Last,
+}
+
+/// The stop the focus moves to: it stops at both ends, it does not wrap.
+/// `stops` is how many buttons the group has.
+pub fn moved(from: usize, stops: usize, step: Step) -> usize {
+    let last = stops.saturating_sub(1);
+    match step {
+        Step::Previous => from.min(last).saturating_sub(1),
+        Step::Next => from.saturating_add(1).min(last),
+        Step::First => 0,
+        Step::Last => last,
+    }
+}
+
+/// What a key does in the group: the arrows along the row, and up and down,
+/// move the focus; Home and End go to the ends. "Forward" along the row is
+/// to the right in a left-to-right language. Enter and Space are not here:
+/// egui turns them into a click on the focused button.
+pub fn step_for(key: Key, direction: Direction) -> Option<Step> {
+    let along = |forward: bool| {
+        if forward != direction.is_rtl() {
+            Step::Next
+        } else {
+            Step::Previous
+        }
+    };
+    match key {
+        Key::ArrowRight => Some(along(true)),
+        Key::ArrowLeft => Some(along(false)),
+        Key::ArrowDown => Some(Step::Next),
+        Key::ArrowUp => Some(Step::Previous),
+        Key::Home => Some(Step::First),
+        Key::End => Some(Step::Last),
+        _ => None,
+    }
+}
+
+/// The keys the group reads, in the order the first match wins.
+const KEYS: [Key; 6] = [
+    Key::ArrowRight,
+    Key::ArrowLeft,
+    Key::ArrowDown,
+    Key::ArrowUp,
+    Key::Home,
+    Key::End,
+];
+
+/// How big the picker is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerSize {
+    /// 92 by 64, `type.version.lg`: Home and the runtimes screen.
+    Large,
+    /// 44 high, `type.version.md`: the menu-bar panel.
+    Medium,
+}
+
+impl PickerSize {
+    /// The size of a version button.
+    pub fn button(self, theme: &Theme) -> Vec2 {
+        match self {
+            Self::Large => theme.size.version_lg,
+            Self::Medium => vec2(theme.size.version_lg.x, theme.size.version_md),
+        }
+    }
+
+    pub const fn text(self, theme: &Theme) -> VersionText {
+        match self {
+            Self::Large => theme.text.version_lg,
+            Self::Medium => theme.text.version_md,
+        }
+    }
+
+    /// The dashed install button is a square as high as the others.
+    pub fn install(self, theme: &Theme) -> Vec2 {
+        Vec2::splat(self.button(theme).y)
+    }
+}
+
+/// What the picker reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VersionPick<T> {
+    /// The user chose another version.
+    Version(T),
+    /// The user pressed the dashed "+": open Install.
+    Install,
+}
+
+/// A version button in one state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ButtonPaint {
+    pub fill: Color32,
+    pub border: Color32,
+    pub text: Color32,
+    pub face: Face,
+}
+
+/// The chosen version is `accent` with `on_accent` text at 500; the others
+/// are `surface` with a `line` border at 300 (components.md).
+pub fn button_paint(theme: &Theme, size: PickerSize, chosen: bool, touch: Touch) -> ButtonPaint {
+    let c = &theme.color;
+    let text = size.text(theme);
+    if chosen {
+        let fill = touched(theme, c.accent, touch);
+        ButtonPaint {
+            fill,
+            border: fill,
+            text: c.on_accent,
+            face: text.selected,
+        }
+    } else {
+        ButtonPaint {
+            fill: touched(theme, c.surface, touch),
+            border: c.line,
+            text: c.ink,
+            face: text.face,
+        }
+    }
+}
+
+/// The points of a rounded rectangle's outline, going around once and ending
+/// where it began: egui dashes a polyline, not a rounded rect.
+fn rounded_outline(rect: Rect, radius: f32) -> Vec<Pos2> {
+    use std::f32::consts::FRAC_PI_2;
+    // Each corner is a quarter of a circle around the rect shrunk by the
+    // radius. `quarter` counts quarter turns from "to the right", with y
+    // growing down; the corners go clockwise from the top right.
+    let inner = rect.shrink(radius);
+    let corners = [
+        (inner.right_top(), 3),
+        (inner.right_bottom(), 0),
+        (inner.left_bottom(), 1),
+        (inner.left_top(), 2),
+    ];
+    let mut points = Vec::with_capacity(corners.len() * (ARC_STEPS + 1) + 1);
+    for (center, quarter) in corners {
+        for step in 0..=ARC_STEPS {
+            let turns = quarter as f32 + step as f32 / ARC_STEPS as f32;
+            let angle = turns * FRAC_PI_2;
+            points.push(center + vec2(angle.cos(), angle.sin()) * radius);
+        }
+    }
+    points.push(points[0]);
+    points
+}
+
+/// The straight pieces of one corner.
+const ARC_STEPS: usize = 6;
+
+/// The large version picker: one button per installed version, an optional
+/// dashed "+" at the end. It is a radio group: Tab reaches each button, the
+/// arrow keys, Home, and End move the focus, and Enter or Space chooses the
+/// focused one. Choosing is separate from moving, so the arrows never switch
+/// a runtime by accident.
+#[derive(Clone, Copy, Debug)]
+#[must_use = "a version picker is drawn only when it is added to a Ui"]
+pub struct VersionPicker<'a, T> {
+    /// What a screen reader says for the group: "Default PHP".
+    label: &'a str,
+    versions: &'a [(T, &'a str)],
+    selected: Option<T>,
+    /// The name of the dashed "+" button: "Install another PHP version".
+    install: Option<&'a str>,
+    size: PickerSize,
+    disabled: Option<&'a str>,
+    /// A button's index and the look to draw it in.
+    forced: Option<(usize, Look)>,
+}
+
+impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
+    pub const fn new(label: &'a str, versions: &'a [(T, &'a str)], selected: Option<T>) -> Self {
+        Self {
+            label,
+            versions,
+            selected,
+            install: None,
+            size: PickerSize::Large,
+            disabled: None,
+            forced: None,
+        }
+    }
+
+    /// Adds the dashed "+" after the versions; `label` names it.
+    pub const fn install(mut self, label: &'a str) -> Self {
+        self.install = Some(label);
+        self
+    }
+
+    pub const fn size(mut self, size: PickerSize) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// Disables the picker. Hovering it shows `reason`.
+    pub const fn disabled(mut self, reason: &'a str) -> Self {
+        self.disabled = Some(reason);
+        self
+    }
+
+    /// Draws the button at `index` (the "+" is after the last version) as it
+    /// looks in `look`, and the others at rest (the gallery and the tests).
+    pub const fn looks(mut self, index: usize, look: Look) -> Self {
+        self.forced = Some((index, look));
+        self
+    }
+
+    /// How many buttons the focus visits: the versions and the "+".
+    pub fn stops(&self) -> usize {
+        self.versions.len() + usize::from(self.install.is_some())
+    }
+
+    /// Draws the picker. `inner` is what the user chose this frame.
+    pub fn show(self, ui: &mut Ui) -> InnerResponse<Option<VersionPick<T>>> {
+        if let Some(reason) = self.disabled {
+            let shown = ui.add_enabled_ui(false, |ui| self.draw(ui)).inner;
+            return InnerResponse::new(
+                shown.inner,
+                with_disabled_reason(shown.response, Some(reason)),
+            );
+        }
+        self.draw(ui)
+    }
+
+    fn draw(self, ui: &mut Ui) -> InnerResponse<Option<VersionPick<T>>> {
+        let theme = Theme::of(ui.ctx());
+        let direction = Direction::CURRENT;
+        let enabled = ui.is_enabled();
+        let button = self.size.button(theme);
+        let text = self.size.text(theme);
+        let gap = theme.space.group_gap;
+        // Sized for the heavier face, so a button keeps its width when the
+        // choice moves to it.
+        let token = TextToken {
+            size: text.size,
+            face: text.selected,
+        };
+        let galleys: Vec<_> = self
+            .versions
+            .iter()
+            .map(|(_, name)| layout(ui.painter(), name, token, Color32::PLACEHOLDER))
+            .collect();
+        let mut widths: Vec<f32> = galleys
+            .iter()
+            .map(|galley| {
+                button
+                    .x
+                    .max(galley.size().x + theme.space.s3 + theme.space.s3)
+            })
+            .collect();
+        if self.install.is_some() {
+            widths.push(self.size.install(theme).x);
+        }
+        let total = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
+        let (rect, group) = ui.allocate_exact_size(vec2(total, button.y), Sense::hover());
+        let label = self.label;
+        group.widget_info(|| WidgetInfo::labeled(Role::RadioGroup, enabled, label));
+
+        let mut spots = Vec::with_capacity(widths.len());
+        let mut offset = 0.0;
+        for width in &widths {
+            let x = slot(direction, rect, offset, *width);
+            spots.push(Rect::from_min_size(
+                pos2(x, rect.top()),
+                vec2(*width, button.y),
+            ));
+            offset += width + gap;
+        }
+        let responses: Vec<Response> = spots
+            .iter()
+            .enumerate()
+            .map(|(index, spot)| ui.interact(*spot, group.id.with(index), Sense::click()))
+            .collect();
+
+        let mut picked = None;
+        for ((value, name), response) in self.versions.iter().zip(&responses) {
+            let chosen = self.selected == Some(*value);
+            if response.clicked() && !chosen {
+                picked = Some(VersionPick::Version(*value));
+            }
+            let name = *name;
+            response.widget_info(|| WidgetInfo::selected(Role::RadioButton, enabled, chosen, name));
+        }
+        if let (Some(name), Some(response)) = (self.install, responses.get(self.versions.len())) {
+            if response.clicked() {
+                picked = Some(VersionPick::Install);
+            }
+            response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, name));
+        }
+        self.move_focus(ui, direction, &responses);
+
+        if ui.is_rect_visible(rect) {
+            for (index, response) in responses.iter().enumerate() {
+                let look = match self.forced {
+                    Some((forced, look)) if forced == index => look,
+                    Some(_) => Look::rest(),
+                    None if enabled => Look::of(response),
+                    None => Look::rest(),
+                };
+                match self.versions.get(index) {
+                    Some((value, name)) => {
+                        let chosen = self.selected == Some(*value);
+                        self.paint_version(ui, theme, spots[index], name, chosen, look);
+                    }
+                    None => Self::paint_install(ui, theme, spots[index], look),
+                }
+            }
+        }
+        InnerResponse::new(picked, group)
+    }
+
+    /// The arrow keys, Home, and End move the focus; the focused button
+    /// asks egui to leave them to the group.
+    fn move_focus(&self, ui: &Ui, direction: Direction, responses: &[Response]) {
+        let Some(at) = responses.iter().position(Response::has_focus) else {
+            return;
+        };
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                responses[at].id,
+                EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    ..EventFilter::default()
+                },
+            );
+        });
+        let step = ui.input(|input| {
+            KEYS.into_iter()
+                .find(|key| input.key_pressed(*key))
+                .and_then(|key| step_for(key, direction))
+        });
+        if let Some(step) = step {
+            responses[moved(at, responses.len(), step)].request_focus();
+        }
+    }
+
+    fn paint_version(
+        &self,
+        ui: &Ui,
+        theme: &Theme,
+        spot: Rect,
+        name: &str,
+        chosen: bool,
+        look: Look,
+    ) {
+        let paint = button_paint(theme, self.size, chosen, look.touch);
+        let painter = ui.painter();
+        let corner = CornerRadius::same(theme.radius.lg);
+        painter.rect_filled(spot, corner, paint.fill);
+        painter.rect_stroke(
+            spot,
+            corner,
+            Stroke::new(theme.size.border, paint.border),
+            StrokeKind::Inside,
+        );
+        let token = TextToken {
+            size: self.size.text(theme).size,
+            face: paint.face,
+        };
+        let galley = layout(painter, name, token, Color32::PLACEHOLDER);
+        let at = Align2::CENTER_CENTER.align_size_within_rect(galley.size(), spot);
+        painter.galley(at.min, galley, paint.text);
+        if look.focused {
+            paint_focus_ring(painter, theme, spot, theme.radius.lg);
+        }
+    }
+
+    fn paint_install(ui: &Ui, theme: &Theme, spot: Rect, look: Look) {
+        let painter = ui.painter();
+        if let Some(fill) = quiet_fill(theme, look.touch) {
+            painter.rect_filled(spot, CornerRadius::same(theme.radius.lg), fill);
+        }
+        let stroke = Stroke::new(theme.size.border, theme.color.control);
+        let outline = rounded_outline(spot, f32::from(theme.radius.lg));
+        painter.extend(Shape::dashed_line(
+            &outline,
+            stroke,
+            theme.size.dash,
+            theme.size.dash_gap,
+        ));
+        let icon =
+            Rect::from_center_size(spot.center(), Vec2::splat(theme.size.version_install_icon));
+        Icon::Plus.paint(painter, theme, icon, theme.color.mute);
+        if look.focused {
+            paint_focus_ring(painter, theme, spot, theme.radius.lg);
+        }
+    }
+}
+
+impl<T: Copy + PartialEq> Widget for VersionPicker<'_, T> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let shown = self.show(ui);
+        let mut response = shown.response;
+        if shown.inner.is_some() {
+            response.mark_changed();
+        }
+        response
+    }
+}
+
+/// What a site's version menu holds: no setting, so the site's own files
+/// decide (`.php-version`, `composer.json`, the default), or one version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Setting<T> {
+    SiteFiles,
+    Version(T),
+}
+
+/// One row of the menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Entry<'a, T> {
+    pub setting: Setting<T>,
+    pub label: &'a str,
+    /// The setting the site has now.
+    pub checked: bool,
+}
+
+/// The rows of the menu, in order: "Use the site's files" first, then every
+/// installed version.
+pub fn entries<'a, T: Copy + PartialEq>(
+    site_files: &'a str,
+    versions: &'a [(T, &'a str)],
+    current: Setting<T>,
+) -> Vec<Entry<'a, T>> {
+    let first = Entry {
+        setting: Setting::SiteFiles,
+        label: site_files,
+        checked: current == Setting::SiteFiles,
+    };
+    let versions = versions.iter().map(|(value, label)| Entry {
+        setting: Setting::Version(*value),
+        label,
+        checked: current == Setting::Version(*value),
+    });
+    std::iter::once(first).chain(versions).collect()
+}
+
+/// The compact version menu of a table row: a 30 high button with the
+/// version and a chevron, then the reason in `caption` ("from
+/// .php-version"). A click opens a menu with the choices.
+#[derive(Clone, Copy, Debug)]
+#[must_use = "a version menu is drawn only when it is added to a Ui"]
+pub struct VersionMenu<'a, T> {
+    /// What a screen reader says: "PHP version for shop".
+    label: &'a str,
+    /// The version in force, as the button shows it.
+    shown: &'a str,
+    /// The first row: "Use the site's files".
+    site_files: &'a str,
+    versions: &'a [(T, &'a str)],
+    setting: Setting<T>,
+    reason: Option<&'a str>,
+    disabled: Option<&'a str>,
+    look: Option<Look>,
+}
+
+impl<'a, T: Copy + PartialEq> VersionMenu<'a, T> {
+    pub const fn new(
+        label: &'a str,
+        shown: &'a str,
+        site_files: &'a str,
+        versions: &'a [(T, &'a str)],
+        setting: Setting<T>,
+    ) -> Self {
+        Self {
+            label,
+            shown,
+            site_files,
+            versions,
+            setting,
+            reason: None,
+            disabled: None,
+            look: None,
+        }
+    }
+
+    /// Why the site has this version, after the button: "from .php-version".
+    pub const fn reason(mut self, reason: &'a str) -> Self {
+        self.reason = Some(reason);
+        self
+    }
+
+    /// Disables the menu. Hovering it shows `reason`.
+    pub const fn disabled(mut self, reason: &'a str) -> Self {
+        self.disabled = Some(reason);
+        self
+    }
+
+    /// Draws the button as it looks in `look` (the gallery and the tests).
+    pub const fn looks(mut self, look: Look) -> Self {
+        self.look = Some(look);
+        self
+    }
+
+    /// Draws the button and its reason. `inner` is the setting the user
+    /// chose from the menu this frame.
+    pub fn show(self, ui: &mut Ui) -> InnerResponse<Option<Setting<T>>> {
+        if let Some(reason) = self.disabled {
+            let shown = ui.add_enabled_ui(false, |ui| self.draw(ui)).inner;
+            return InnerResponse::new(
+                shown.inner,
+                with_disabled_reason(shown.response, Some(reason)),
+            );
+        }
+        self.draw(ui)
+    }
+
+    fn draw(self, ui: &mut Ui) -> InnerResponse<Option<Setting<T>>> {
+        let theme = Theme::of(ui.ctx());
+        ui.spacing_mut().item_spacing.x = theme.space.s2;
+        // Left to right until Arabic ships (rtl.md).
+        let (response, chosen) = ui
+            .horizontal(|ui| {
+                let (response, width) = self.button(ui, theme);
+                let mut chosen = None;
+                Popup::menu(&response).show(|ui| {
+                    ui.set_min_width(width);
+                    chosen = self.list(ui);
+                });
+                if let Some(reason) = self.reason {
+                    let caption = RichText::new(reason)
+                        .font(theme.text.caption.font_id())
+                        .color(theme.color.mute);
+                    ui.add(Label::new(caption).selectable(false));
+                }
+                (response, chosen)
+            })
+            .inner;
+        InnerResponse::new(chosen, response)
+    }
+
+    /// The button: the version, then a chevron. Its response and its width.
+    fn button(&self, ui: &mut Ui, theme: &Theme) -> (Response, f32) {
+        let direction = Direction::CURRENT;
+        let token = TextToken {
+            size: theme.text.body.size,
+            face: Face::Medium,
+        };
+        let galley = layout(ui.painter(), self.shown, token, Color32::PLACEHOLDER);
+        let chevron = theme.size.icon_badge;
+        let (start, end) = (theme.space.s3, theme.space.s2);
+        let content = start + galley.size().x + theme.space.s1 + chevron + end;
+        let width = content.max(theme.size.version_menu_min);
+        let height = theme.size.control_in_row;
+        let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+        if ui.is_rect_visible(rect) {
+            let enabled = ui.is_enabled();
+            let look = match self.look {
+                Some(look) => look,
+                None if enabled => Look::of(&response),
+                None => Look::rest(),
+            };
+            let painter = ui.painter();
+            let corner = CornerRadius::same(theme.radius.md);
+            painter.rect_filled(
+                rect,
+                corner,
+                touched(theme, theme.color.surface, look.touch),
+            );
+            painter.rect_stroke(
+                rect,
+                corner,
+                Stroke::new(theme.size.border, theme.color.control),
+                StrokeKind::Inside,
+            );
+            let x = slot(direction, rect, start, galley.size().x);
+            let spot = Rect::from_min_size(pos2(x, rect.top()), vec2(galley.size().x, height));
+            let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), spot);
+            painter.galley(at.min, galley, theme.color.ink);
+            let x = slot(direction, rect, width - end - chevron, chevron);
+            let spot = Rect::from_min_size(pos2(x, rect.top()), vec2(chevron, height));
+            Icon::ChevronDown.paint(painter, theme, spot, theme.color.mute);
+            if look.focused {
+                paint_focus_ring(painter, theme, rect, theme.radius.md);
+            }
+        }
+        let (enabled, label) = (ui.is_enabled(), format!("{}, {}", self.label, self.shown));
+        response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, &label));
+        (response, width)
+    }
+
+    /// The rows of the menu: what the popup shows, and what the gallery
+    /// shows open. Returns the setting of the row the user chose.
+    pub fn list(&self, ui: &mut Ui) -> Option<Setting<T>> {
+        let theme = Theme::of(ui.ctx());
+        // The rows touch: each has its own height and its own hover fill.
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let mut chosen = None;
+        for (index, entry) in entries(self.site_files, self.versions, self.setting)
+            .into_iter()
+            .enumerate()
+        {
+            if menu_row(ui, theme, &entry).clicked() && !entry.checked {
+                chosen = Some(entry.setting);
+            }
+            if index == 0 {
+                ui.separator();
+            }
+        }
+        chosen
+    }
+}
+
+/// One row of the menu: a check when it is the current setting, then the
+/// text.
+fn menu_row<T>(ui: &mut Ui, theme: &Theme, entry: &Entry<'_, T>) -> Response {
+    let direction = Direction::CURRENT;
+    let pad = theme.space.s3;
+    let check = theme.size.icon_inline;
+    let gap = theme.space.s2;
+    // The row is as wide for the heavier face, so the menu keeps its width
+    // when the check moves.
+    let token = |face| TextToken {
+        size: theme.text.body_sm.size,
+        face,
+    };
+    let widest = layout(
+        ui.painter(),
+        entry.label,
+        token(Face::Medium),
+        Color32::PLACEHOLDER,
+    );
+    let face = if entry.checked {
+        Face::Medium
+    } else {
+        Face::Regular
+    };
+    let galley = layout(ui.painter(), entry.label, token(face), Color32::PLACEHOLDER);
+    let least = pad + check + gap + widest.size().x + pad;
+    let size = vec2(ui.available_width().max(least), theme.size.control_in_row);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let look = Look::of(&response);
+        let painter = ui.painter();
+        let corner = theme.radius.sm;
+        if let Some(fill) = quiet_fill(theme, look.touch) {
+            painter.rect_filled(rect, CornerRadius::same(corner), fill);
+        }
+        let row = |offset: f32, width: f32| {
+            let x = slot(direction, rect, offset, width);
+            Rect::from_min_size(pos2(x, rect.top()), vec2(width, size.y))
+        };
+        if entry.checked {
+            Icon::Check.paint(painter, theme, row(pad, check), theme.color.accent);
+        }
+        let spot = row(pad + check + gap, galley.size().x);
+        let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), spot);
+        painter.galley(at.min, galley, theme.color.ink);
+        if look.focused {
+            paint_focus_ring(painter, theme, rect, corner);
+        }
+    }
+    let (enabled, checked, label) = (ui.is_enabled(), entry.checked, entry.label);
+    response.widget_info(|| WidgetInfo::selected(Role::MenuItemRadio, enabled, checked, label));
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{self, Id};
+
+    use super::*;
+    use crate::strings;
+    use crate::theme::tests::{TEXT, UI, contrast};
+    use crate::theme::{DARK, LIGHT};
+    use crate::widgets::harness::{Harness, over};
+
+    const PHP: [(u8, &str); 3] = [(83, "8.3"), (84, "8.4"), (85, "8.5")];
+    const THEMES: [(&str, &Theme, egui::Theme); 2] = [
+        ("light", &LIGHT, egui::Theme::Light),
+        ("dark", &DARK, egui::Theme::Dark),
+    ];
+
+    #[test]
+    fn the_focus_moves_one_stop_and_stops_at_both_ends() {
+        assert_eq!(moved(0, 4, Step::Next), 1);
+        assert_eq!(moved(2, 4, Step::Next), 3);
+        assert_eq!(moved(3, 4, Step::Next), 3, "no wrap at the end");
+        assert_eq!(moved(1, 4, Step::Previous), 0);
+        assert_eq!(moved(0, 4, Step::Previous), 0, "no wrap at the start");
+        assert_eq!(moved(2, 4, Step::First), 0);
+        assert_eq!(moved(1, 4, Step::Last), 3);
+        // An empty group and a stale position never go out of range.
+        assert_eq!(moved(0, 0, Step::Next), 0);
+        assert_eq!(moved(0, 0, Step::Last), 0);
+        assert_eq!(moved(9, 4, Step::Previous), 2);
+        assert_eq!(moved(usize::MAX, 4, Step::Next), 3);
+    }
+
+    #[test]
+    fn the_keys_map_to_steps_and_a_right_to_left_row_swaps_the_arrows() {
+        let ltr = |key| step_for(key, Direction::Ltr);
+        let rtl = |key| step_for(key, Direction::Rtl);
+        assert_eq!(ltr(Key::ArrowRight), Some(Step::Next));
+        assert_eq!(ltr(Key::ArrowLeft), Some(Step::Previous));
+        assert_eq!(rtl(Key::ArrowRight), Some(Step::Previous));
+        assert_eq!(rtl(Key::ArrowLeft), Some(Step::Next));
+        for direction in [Direction::Ltr, Direction::Rtl] {
+            assert_eq!(step_for(Key::ArrowDown, direction), Some(Step::Next));
+            assert_eq!(step_for(Key::ArrowUp, direction), Some(Step::Previous));
+            assert_eq!(step_for(Key::Home, direction), Some(Step::First));
+            assert_eq!(step_for(Key::End, direction), Some(Step::Last));
+            // Enter and Space are clicks, and Tab is egui's.
+            for key in [Key::Enter, Key::Space, Key::Tab, Key::A] {
+                assert_eq!(step_for(key, direction), None);
+            }
+        }
+        assert!(
+            KEYS.iter()
+                .all(|key| step_for(*key, Direction::Ltr).is_some())
+        );
+    }
+
+    #[test]
+    fn the_chosen_version_is_accent_at_500_and_the_others_are_surface_with_a_line_at_300() {
+        for theme in [&LIGHT, &DARK] {
+            let c = &theme.color;
+            for size in [PickerSize::Large, PickerSize::Medium] {
+                let chosen = button_paint(theme, size, true, Touch::Rest);
+                assert_eq!(chosen.fill, c.accent);
+                assert_eq!(chosen.border, c.accent);
+                assert_eq!(chosen.text, c.on_accent);
+                assert_eq!(chosen.face, Face::Medium);
+                let other = button_paint(theme, size, false, Touch::Rest);
+                assert_eq!(other.fill, c.surface);
+                assert_eq!(other.border, c.line);
+                assert_eq!(other.text, c.ink);
+                assert_eq!(other.face, Face::Light);
+            }
+        }
+    }
+
+    #[test]
+    fn hover_and_pressed_move_a_version_button_toward_ink_by_6_and_12_percent() {
+        for theme in [&LIGHT, &DARK] {
+            for chosen in [true, false] {
+                let fill = |touch| button_paint(theme, PickerSize::Large, chosen, touch).fill;
+                assert_eq!(fill(Touch::Hover), theme.shade(fill(Touch::Rest), 0.06));
+                assert_eq!(fill(Touch::Pressed), theme.shade(fill(Touch::Rest), 0.12));
+            }
+        }
+    }
+
+    #[test]
+    fn the_version_text_reads_in_every_state_and_both_themes() {
+        for (name, theme, _) in THEMES {
+            for size in [PickerSize::Large, PickerSize::Medium] {
+                for chosen in [true, false] {
+                    for touch in [Touch::Rest, Touch::Hover, Touch::Pressed] {
+                        let paint = button_paint(theme, size, chosen, touch);
+                        let ratio = contrast(paint.text, paint.fill);
+                        assert!(
+                            ratio >= TEXT,
+                            "{name} {size:?} chosen {chosen} {touch:?}: {ratio:.2}:1"
+                        );
+                    }
+                }
+            }
+            // The dashed install button: its outline and its plus stand out
+            // on the page, and the plus on its hover fill.
+            let c = &theme.color;
+            let hover = over(c.selected.gamma_multiply(theme.state.row_hover), c.bg);
+            for page in [c.bg, c.surface, hover] {
+                assert!(contrast(c.control, page) >= UI, "{name} dashed outline");
+                assert!(contrast(c.mute, page) >= UI, "{name} plus");
+            }
+        }
+    }
+
+    /// The rect a picker takes.
+    fn picker_rect(theme: egui::Theme, picker: impl Fn() -> VersionPicker<'static, u8>) -> Rect {
+        let harness = Harness::new(theme);
+        let mut rect = Rect::NOTHING;
+        harness.run(|ui| rect = ui.add(picker()).rect);
+        rect
+    }
+
+    #[test]
+    fn a_large_button_is_92_by_64_a_medium_one_44_high_and_the_install_button_a_square() {
+        let theme = &LIGHT;
+        let large = |install: bool| {
+            picker_rect(egui::Theme::Light, move || {
+                let picker = VersionPicker::new("Default PHP", &PHP, Some(84));
+                if install {
+                    picker.install("Install")
+                } else {
+                    picker
+                }
+            })
+        };
+        let gap = theme.space.group_gap;
+        assert_eq!(large(false).height(), 64.0);
+        assert_eq!(large(false).width(), 3.0 * 92.0 + 2.0 * gap);
+        // A square as high as the buttons, after one more gap.
+        assert_eq!(large(true).width(), large(false).width() + gap + 64.0);
+        let medium = picker_rect(egui::Theme::Light, || {
+            VersionPicker::new("Default PHP", &PHP, Some(84))
+                .size(PickerSize::Medium)
+                .install("Install")
+        });
+        assert_eq!(medium.height(), 44.0);
+        assert_eq!(medium.width(), 3.0 * 92.0 + 3.0 * gap + 44.0);
+        assert_eq!(
+            (
+                theme.size.version_lg.x,
+                theme.size.version_lg.y,
+                theme.size.version_md
+            ),
+            (92.0, 64.0, 44.0)
+        );
+        // A text too long for 92 widens its button and nothing else.
+        let wide = picker_rect(egui::Theme::Light, || {
+            VersionPicker::new(
+                "Default PHP",
+                &[(1, "8.4.27-beta-long-name"), (2, "8.5")],
+                Some(2),
+            )
+        });
+        assert!(wide.width() > 2.0 * 92.0 + gap);
+    }
+
+    #[test]
+    fn a_screen_reader_hears_a_radio_group_with_the_chosen_version_and_the_install_button() {
+        let harness = Harness::new(egui::Theme::Light);
+        let tree = harness.accessibility(|ui| {
+            ui.add(
+                VersionPicker::new("Default PHP", &PHP, Some(84))
+                    .install("Install another PHP version"),
+            );
+        });
+        let group = tree.node_with_label("Default PHP").expect("group");
+        assert_eq!(group.role(), egui::Role::RadioGroup);
+        for (version, text) in PHP {
+            let node = tree.node_with_label(text).expect(text);
+            assert_eq!(node.role(), egui::Role::RadioButton);
+            let expected = if version == 84 {
+                egui::accesskit::Toggled::True
+            } else {
+                egui::accesskit::Toggled::False
+            };
+            assert_eq!(node.toggled(), Some(expected), "{text}");
+        }
+        let install = tree
+            .node_with_label("Install another PHP version")
+            .expect("install");
+        assert_eq!(install.role(), egui::Role::Button);
+    }
+
+    /// One frame of a picker; what it chose and which button has the focus.
+    struct Frame {
+        picked: Option<VersionPick<u8>>,
+        focused: Option<usize>,
+    }
+
+    fn frame(harness: &Harness, key: Option<Key>, selected: Option<u8>) -> Frame {
+        let mut picked = None;
+        let mut group = Id::NULL;
+        let draw = |ui: &mut Ui| {
+            let shown = VersionPicker::new("Default PHP", &PHP, selected)
+                .install("Install")
+                .show(ui);
+            picked = shown.inner;
+            group = shown.response.id;
+        };
+        match key {
+            Some(key) => harness.key(key, draw),
+            None => harness.run(draw),
+        }
+        let focused = (0..4).find(|index| harness.ctx.memory(|m| m.has_focus(group.with(*index))));
+        Frame { picked, focused }
+    }
+
+    #[test]
+    fn the_arrows_move_the_focus_and_enter_or_space_choose() {
+        let harness = Harness::new(egui::Theme::Light);
+        frame(&harness, None, Some(84));
+        // Tab reaches the first button; it chooses nothing.
+        let at = frame(&harness, Some(Key::Tab), Some(84));
+        assert_eq!((at.picked, at.focused), (None, Some(0)));
+        // One frame for the focused button to claim the arrows.
+        frame(&harness, None, Some(84));
+        let arrow = |key, harness: &Harness| {
+            let at = frame(harness, Some(key), Some(84));
+            frame(harness, None, Some(84));
+            at.picked
+        };
+        let focus = |harness: &Harness| frame(harness, None, Some(84)).focused;
+        // The arrows move the focus and never choose.
+        assert_eq!(arrow(Key::ArrowRight, &harness), None);
+        assert_eq!(focus(&harness), Some(1));
+        assert_eq!(arrow(Key::ArrowRight, &harness), None);
+        assert_eq!(focus(&harness), Some(2));
+        // The "+" is the last stop, and the arrow stops there.
+        arrow(Key::ArrowRight, &harness);
+        assert_eq!(focus(&harness), Some(3));
+        arrow(Key::ArrowRight, &harness);
+        assert_eq!(focus(&harness), Some(3));
+        arrow(Key::Home, &harness);
+        assert_eq!(focus(&harness), Some(0));
+        arrow(Key::End, &harness);
+        assert_eq!(focus(&harness), Some(3));
+        arrow(Key::ArrowUp, &harness);
+        assert_eq!(focus(&harness), Some(2));
+        arrow(Key::ArrowLeft, &harness);
+        assert_eq!(focus(&harness), Some(1));
+        // Enter chooses the focused version; on the chosen one it does not.
+        arrow(Key::ArrowLeft, &harness);
+        assert_eq!(focus(&harness), Some(0));
+        assert_eq!(
+            frame(&harness, Some(Key::Enter), Some(84)).picked,
+            Some(VersionPick::Version(83))
+        );
+        frame(&harness, None, Some(84));
+        arrow(Key::ArrowRight, &harness);
+        assert_eq!(frame(&harness, Some(Key::Space), Some(84)).picked, None);
+        frame(&harness, None, Some(84));
+        // Space on another version, and Enter on the "+".
+        arrow(Key::ArrowRight, &harness);
+        assert_eq!(
+            frame(&harness, Some(Key::Space), Some(84)).picked,
+            Some(VersionPick::Version(85))
+        );
+        frame(&harness, None, Some(84));
+        arrow(Key::ArrowRight, &harness);
+        assert_eq!(
+            frame(&harness, Some(Key::Enter), Some(84)).picked,
+            Some(VersionPick::Install)
+        );
+    }
+
+    #[test]
+    fn a_click_chooses_another_version_and_the_chosen_one_and_a_disabled_picker_report_nothing() {
+        let harness = Harness::new(egui::Theme::Light);
+        let theme = &LIGHT;
+        let origin = picker_rect(egui::Theme::Light, || {
+            VersionPicker::new("Default PHP", &PHP, Some(84))
+        });
+        let at = |index: usize| {
+            let x = origin.left()
+                + index as f32 * (theme.size.version_lg.x + theme.space.group_gap)
+                + 10.0;
+            pos2(x, origin.center().y)
+        };
+        // A widget is known to egui from the frame before.
+        harness.run(|ui| {
+            ui.add(VersionPicker::new("Default PHP", &PHP, Some(84)));
+        });
+        let click = |index: usize, disabled: bool| {
+            let mut picked = None;
+            harness.click(at(index), |ui| {
+                let picker = VersionPicker::new("Default PHP", &PHP, Some(84));
+                let picker = if disabled {
+                    picker.disabled("Why")
+                } else {
+                    picker
+                };
+                picked = picker.show(ui).inner;
+            });
+            picked
+        };
+        assert_eq!(click(0, false), Some(VersionPick::Version(83)));
+        assert_eq!(click(2, false), Some(VersionPick::Version(85)));
+        assert_eq!(click(1, false), None, "84 was already chosen");
+        assert_eq!(click(0, true), None);
+    }
+
+    #[test]
+    fn it_works_for_any_runtime_not_only_php() {
+        // Node's majors, and a later Python: values and texts are the caller's.
+        let node = [("22", "22"), ("20", "20"), ("18", "18")];
+        let python = [(3_u8, "3.13"), (4, "3.12")];
+        let harness = Harness::new(egui::Theme::Light);
+        let mut rects = Vec::new();
+        harness.run(|ui| {
+            rects.push(
+                ui.add(VersionPicker::new("Default Node.js", &node, Some("20")))
+                    .rect,
+            );
+            rects.push(
+                ui.add(VersionPicker::new("Default Python", &python, None))
+                    .rect,
+            );
+        });
+        assert_eq!(rects[0].height(), LIGHT.size.version_lg.y);
+        assert!(rects[0].width() > rects[1].width());
+        // Nothing chosen is allowed: no button is accent.
+        let chosen = |version: Option<&str>| {
+            harness
+                .shapes(|ui| {
+                    ui.add(VersionPicker::new("Default Node.js", &node, version));
+                })
+                .into_iter()
+                .filter(|shape| matches!(shape, Shape::Rect(r) if r.fill == LIGHT.color.accent))
+                .count()
+        };
+        assert_eq!(chosen(Some("20")), 1);
+        assert_eq!(chosen(None), 0);
+    }
+
+    #[test]
+    fn the_install_button_has_a_dashed_control_colored_outline_and_the_focus_ring() {
+        for (name, theme, active) in THEMES {
+            let harness = Harness::new(active);
+            let shapes = |look: Option<Look>| {
+                harness.shapes(|ui| {
+                    let picker =
+                        VersionPicker::new("Default PHP", &PHP, Some(84)).install("Install");
+                    let picker = match look {
+                        Some(look) => picker.looks(3, look),
+                        None => picker,
+                    };
+                    ui.add(picker);
+                })
+            };
+            let dashes = shapes(None)
+                .into_iter()
+                .filter(|shape| matches!(shape, Shape::LineSegment { stroke, .. } if stroke.color == theme.color.control))
+                .count();
+            assert!(dashes > 8, "{name}: {dashes} dashes");
+            let ring = |look| {
+                shapes(Some(look)).into_iter().any(|shape| matches!(shape, Shape::Rect(r) if r.stroke_kind == StrokeKind::Outside && r.stroke.color == theme.color.accent))
+            };
+            assert!(ring(Look::focused()));
+            assert!(!ring(Look::rest()));
+        }
+    }
+
+    #[test]
+    fn the_dashed_outline_goes_around_the_rect_once_and_closes() {
+        let rect = Rect::from_min_size(pos2(10.0, 20.0), vec2(64.0, 64.0));
+        let points = rounded_outline(rect, 12.0);
+        assert_eq!(points.len(), 4 * (ARC_STEPS + 1) + 1);
+        assert_eq!(points.first(), points.last());
+        let bounds = points.iter().fold(Rect::NOTHING, |bounds, point| {
+            bounds.union(Rect::from_min_max(*point, *point))
+        });
+        assert!((bounds.min - rect.min).length() < 1e-3);
+        assert!((bounds.max - rect.max).length() < 1e-3);
+        // Every point is 12 from a corner's center or on a straight side.
+        for point in &points {
+            assert!(rect.expand(1e-3).contains(*point));
+        }
+    }
+
+    #[test]
+    fn the_menu_lists_the_site_files_first_then_every_version_with_a_check_on_the_setting() {
+        let rows = |setting| entries("Use the site's files", &PHP, setting);
+        let labels: Vec<&str> = rows(Setting::SiteFiles).iter().map(|e| e.label).collect();
+        assert_eq!(labels, ["Use the site's files", "8.3", "8.4", "8.5"]);
+        let checks = |setting| rows(setting).iter().map(|e| e.checked).collect::<Vec<_>>();
+        assert_eq!(checks(Setting::SiteFiles), [true, false, false, false]);
+        assert_eq!(checks(Setting::Version(84)), [false, false, true, false]);
+        assert_eq!(checks(Setting::Version(99)), [false, false, false, false]);
+        assert_eq!(rows(Setting::SiteFiles)[0].setting, Setting::SiteFiles);
+        assert_eq!(rows(Setting::SiteFiles)[3].setting, Setting::Version(85));
+        assert_eq!(strings::USE_SITE_FILES, "Use the site's files");
+    }
+
+    fn menu(setting: Setting<u8>) -> VersionMenu<'static, u8> {
+        VersionMenu::new(
+            "PHP version for shop",
+            "8.4",
+            strings::USE_SITE_FILES,
+            &PHP,
+            setting,
+        )
+        .reason("from .php-version")
+    }
+
+    #[test]
+    fn the_menu_button_is_30_high_at_least_58_wide_and_the_reason_follows_it() {
+        let harness = Harness::new(egui::Theme::Light);
+        let mut rects = Vec::new();
+        let tree = harness.accessibility(|ui| {
+            rects.push(menu(Setting::SiteFiles).show(ui).response.rect);
+            let long = VersionMenu::new(
+                "PHP version for api",
+                "8.4.27-long",
+                "Files",
+                &PHP,
+                Setting::SiteFiles,
+            );
+            rects.push(long.show(ui).response.rect);
+            let short = VersionMenu::new("Node version", "9", "Files", &PHP, Setting::SiteFiles);
+            rects.push(short.show(ui).response.rect);
+        });
+        let theme = &LIGHT;
+        for rect in &rects {
+            assert_eq!(rect.height(), theme.size.control_in_row);
+            assert!(rect.width() >= theme.size.version_menu_min);
+        }
+        assert_eq!(rects[2].width(), theme.size.version_menu_min);
+        assert!(rects[1].width() > rects[0].width());
+        assert_eq!(
+            (theme.size.control_in_row, theme.size.version_menu_min),
+            (30.0, 58.0)
+        );
+        let button = tree
+            .node_with_label("PHP version for shop, 8.4")
+            .expect("button");
+        assert_eq!(button.role(), egui::Role::Button);
+        assert!(
+            tree.node_with_text("from .php-version").is_some(),
+            "the reason"
+        );
+        // The reason reads on a row of a table, at rest and under the pointer.
+        for (name, theme, _) in THEMES {
+            let hover = over(
+                theme.color.selected.gamma_multiply(theme.state.row_hover),
+                theme.color.surface,
+            );
+            for page in [theme.color.surface, hover] {
+                assert!(contrast(theme.color.mute, page) >= TEXT, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_click_opens_the_menu_and_a_row_chooses_a_setting() {
+        let harness = Harness::new(egui::Theme::Light);
+        let mut button = Rect::NOTHING;
+        harness.run(|ui| button = menu(Setting::SiteFiles).show(ui).response.rect);
+        let mut chosen = None;
+        harness.click(button.center(), |ui| {
+            chosen = menu(Setting::SiteFiles).show(ui).inner;
+        });
+        assert_eq!(chosen, None, "opening the menu chooses nothing");
+        assert!(Popup::is_any_open(&harness.ctx));
+        // The menu is open: its rows are in the tree, in order.
+        let tree = harness.accessibility(|ui| {
+            menu(Setting::Version(84)).show(ui);
+        });
+        for label in ["Use the site's files", "8.3", "8.4", "8.5"] {
+            let row = tree.node_with_label(label).expect(label);
+            assert_eq!(row.role(), egui::Role::MenuItemRadio, "{label}");
+        }
+        let checked = |label: &str| tree.node_with_label(label).and_then(|n| n.toggled());
+        assert_eq!(checked("8.4"), Some(egui::accesskit::Toggled::True));
+        assert_eq!(checked("8.5"), Some(egui::accesskit::Toggled::False));
+        // A click on the row of 8.5 chooses it.
+        let bounds = tree
+            .node_with_label("8.5")
+            .and_then(|n| n.bounds())
+            .expect("bounds");
+        let at = pos2(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        );
+        let mut chosen = None;
+        harness.click(at, |ui| {
+            chosen = menu(Setting::Version(84)).show(ui).inner;
+        });
+        assert_eq!(chosen, Some(Setting::Version(85)));
+    }
+
+    #[test]
+    fn the_rows_of_the_menu_choose_the_site_files_and_ignore_the_current_setting() {
+        let harness = Harness::new(egui::Theme::Light);
+        let tree = harness.accessibility(|ui| {
+            menu(Setting::Version(84)).list(ui);
+        });
+        let spot = |label: &str| {
+            let b = tree
+                .node_with_label(label)
+                .and_then(|n| n.bounds())
+                .expect(label);
+            pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32)
+        };
+        let pick = |label: &str| {
+            let mut chosen = None;
+            harness.click(spot(label), |ui| {
+                chosen = menu(Setting::Version(84)).list(ui)
+            });
+            chosen
+        };
+        assert_eq!(pick("Use the site's files"), Some(Setting::SiteFiles));
+        assert_eq!(pick("8.3"), Some(Setting::Version(83)));
+        assert_eq!(pick("8.4"), None, "8.4 is the setting already");
+    }
+
+    #[test]
+    fn a_disabled_menu_says_why_and_opens_nothing() {
+        let harness = Harness::new(egui::Theme::Light);
+        let mut button = Rect::NOTHING;
+        let draw = |ui: &mut Ui| {
+            menu(Setting::SiteFiles)
+                .disabled("No PHP is installed")
+                .show(ui)
+                .response
+                .rect
+        };
+        harness.run(|ui| button = draw(ui));
+        harness.click(button.center(), |ui| {
+            draw(ui);
+        });
+        assert!(!Popup::is_any_open(&harness.ctx));
+    }
+
+    #[test]
+    fn the_check_in_the_menu_stands_out_from_the_menu() {
+        for (name, theme, _) in THEMES {
+            assert!(
+                contrast(theme.color.accent, theme.color.surface) >= UI,
+                "{name}"
+            );
+            assert!(
+                contrast(theme.color.ink, theme.color.surface) >= TEXT,
+                "{name}"
+            );
+        }
+    }
+}

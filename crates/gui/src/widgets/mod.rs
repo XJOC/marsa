@@ -32,6 +32,7 @@ pub mod segmented;
 pub mod status;
 pub mod switch;
 pub mod tile;
+pub mod version;
 
 use std::sync::Arc;
 
@@ -50,6 +51,7 @@ pub use status::{
 };
 pub use switch::Switch;
 pub use tile::{Monogram, SectionTile, TileSize};
+pub use version::{PickerSize, Setting, VersionMenu, VersionPick, VersionPicker};
 
 /// How a pointer touches a control now: the states of components.md that
 /// change its fill.
@@ -300,6 +302,14 @@ pub(crate) mod harness {
     impl Tree {
         pub fn node_with_label(&self, label: &str) -> Option<&accesskit::Node> {
             self.nodes.iter().find(|node| node.label() == Some(label))
+        }
+
+        /// A node named `text`, or showing it as its value: egui gives a
+        /// text label its words as a value, not a name.
+        pub fn node_with_text(&self, text: &str) -> Option<&accesskit::Node> {
+            self.nodes
+                .iter()
+                .find(|node| node.label() == Some(text) || node.value() == Some(text))
         }
     }
 

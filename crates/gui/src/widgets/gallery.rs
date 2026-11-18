@@ -28,6 +28,7 @@ use super::status::{
 };
 use super::switch::Switch;
 use super::tile::{Monogram, SectionTile, TileSize};
+use super::version::{PickerSize, Setting, VersionMenu, VersionPick, VersionPicker};
 use crate::strings;
 use crate::theme::{Section, Theme};
 
@@ -51,6 +52,11 @@ mod label {
     pub const STATUS_SENTENCE: &str = "Status sentence: ok, and error with the path and the fixes";
     pub const PATHS: &str = "Request path: the broken step at each place, and one not reached";
     pub const PILLS: &str = "State pills";
+    pub const PICKER: &str =
+        "Version picker: rest (PHP and Node), then hover, pressed, and focus on one button";
+    pub const PICKER_MORE: &str = "Version picker: medium (menu-bar panel), and disabled";
+    pub const MENU: &str = "Version menu: rest, hover, focus, disabled, and the menu open";
+    pub const VERSIONS_LIVE: &str = "Live: Tab, the arrows, Home, End, Enter, and Space";
     pub const FIELDS: &str = "Fields";
     pub const LIVE: &str = "Live: click, type, and Tab through these";
     pub const DISABLED_NOTE: &str = "Disabled is drawn at 55% opacity. Hover it for the reason: ";
@@ -66,13 +72,15 @@ enum Page {
     Buttons,
     Controls,
     Status,
+    Versions,
 }
 
-const PAGES: [(Page, &str); 4] = [
+const PAGES: [(Page, &str); 5] = [
     (Page::Icons, "1  Icons, tiles, badges"),
     (Page::Buttons, "2  Buttons"),
     (Page::Controls, "3  Switch, segmented, fields"),
     (Page::Status, "4  Status"),
+    (Page::Versions, "5  Versions"),
 ];
 
 /// What the live controls of the third page hold.
@@ -82,6 +90,10 @@ struct Live {
     mode: usize,
     text: String,
     search: String,
+    /// The version the live picker has chosen, and the live menu's setting
+    /// (none: the site's files).
+    version: usize,
+    setting: Option<usize>,
 }
 
 /// Whether `MARSA_GUI_GALLERY=1`.
@@ -142,6 +154,7 @@ fn draw_page(ui: &mut Ui, theme: &Theme, page: Page) {
         Page::Buttons => buttons_page(ui, theme),
         Page::Controls => controls_page(ui, theme),
         Page::Status => status_page(ui, theme),
+        Page::Versions => versions_page(ui, theme),
     }
 }
 
@@ -444,6 +457,96 @@ fn controls_page(ui: &mut Ui, theme: &Theme) {
     ui.ctx().data_mut(|data| data.insert_temp(id, live));
 }
 
+/// PHP's versions, and Node's: the pickers work for any runtime.
+const PHP_VERSIONS: [(usize, &str); 3] = [(0, "8.3"), (1, "8.4"), (2, "8.5")];
+const NODE_VERSIONS: [(usize, &str); 2] = [(0, "22"), (1, "20")];
+
+fn versions_page(ui: &mut Ui, theme: &Theme) {
+    let id = ui.make_persistent_id("gallery_versions");
+    let mut live = ui
+        .ctx()
+        .data(|data| data.get_temp::<Live>(id))
+        .unwrap_or_default();
+    let php = strings::install_another_label("PHP");
+    let node = strings::install_another_label("Node.js");
+    let picker = |selected| VersionPicker::new("Default PHP", &PHP_VERSIONS, Some(selected));
+
+    heading(ui, theme, label::PICKER);
+    row(ui, |ui| {
+        ui.add(picker(1).install(&php));
+        ui.add_space(theme.space.s6);
+        ui.add(VersionPicker::new("Default Node.js", &NODE_VERSIONS, Some(1)).install(&node));
+    });
+    row(ui, |ui| {
+        ui.add(picker(1).looks(0, Look::hover()));
+        ui.add_space(theme.space.s6);
+        ui.add(picker(1).looks(1, Look::pressed()));
+        ui.add_space(theme.space.s6);
+        ui.add(picker(1).looks(2, Look::focused()));
+    });
+
+    heading(ui, theme, label::PICKER_MORE);
+    row(ui, |ui| {
+        ui.add(
+            picker(1)
+                .size(PickerSize::Medium)
+                .install(&php)
+                .looks(3, Look::hover()),
+        );
+        ui.add_space(theme.space.s6);
+        ui.add(picker(1).disabled(REASON));
+    });
+
+    heading(ui, theme, label::MENU);
+    let menu = |setting, shown| {
+        VersionMenu::new(
+            "PHP version for shop",
+            shown,
+            strings::USE_SITE_FILES,
+            &PHP_VERSIONS,
+            setting,
+        )
+        .reason("from .php-version")
+    };
+    ui.horizontal_top(|ui| {
+        // One menu button a line, so each shows its reason after it.
+        ui.vertical(|ui| {
+            menu(Setting::SiteFiles, "8.4").show(ui);
+            menu(Setting::Version(2), "8.5")
+                .looks(Look::hover())
+                .show(ui);
+            menu(Setting::SiteFiles, "8.4")
+                .looks(Look::focused())
+                .show(ui);
+            menu(Setting::SiteFiles, "8.4").disabled(REASON).show(ui);
+        });
+        ui.add_space(theme.space.s6);
+        // The menu open: the same rows the popup shows.
+        Frame::popup(ui.style()).show(ui, |ui| {
+            ui.set_width(theme.size.sidebar);
+            ui.vertical(|ui| menu(Setting::Version(1), "8.4").list(ui));
+        });
+    });
+
+    heading(ui, theme, label::VERSIONS_LIVE);
+    row(ui, |ui| {
+        if let Some(VersionPick::Version(chosen)) =
+            picker(live.version).install(&php).show(ui).inner
+        {
+            live.version = chosen;
+        }
+        let setting = live.setting.map_or(Setting::SiteFiles, Setting::Version);
+        let shown = PHP_VERSIONS[live.setting.unwrap_or(1)].1;
+        if let Some(chosen) = menu(setting, shown).show(ui).inner {
+            live.setting = match chosen {
+                Setting::SiteFiles => None,
+                Setting::Version(version) => Some(version),
+            };
+        }
+    });
+    ui.ctx().data_mut(|data| data.insert_temp(id, live));
+}
+
 /// The title and the caption a status dot has for `health`.
 const fn dot_text(health: Health) -> (&'static str, &'static str) {
     match health {
@@ -601,6 +704,37 @@ mod tests {
     }
 
     #[test]
+    fn the_versions_page_shows_both_pickers_and_the_menu_in_both_themes() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let tree = tree_of(Page::Versions, theme);
+            assert_eq!(
+                tree.node_with_label("Default PHP").expect("php").role(),
+                Role::RadioGroup
+            );
+            assert_eq!(
+                tree.node_with_label("Default Node.js")
+                    .expect("node")
+                    .role(),
+                Role::RadioGroup
+            );
+            assert_eq!(
+                tree.node_with_label("Install another PHP version")
+                    .expect("install")
+                    .role(),
+                Role::Button
+            );
+            assert!(tree.node_with_label("PHP version for shop, 8.4").is_some());
+            // The open menu shows its rows.
+            assert_eq!(
+                tree.node_with_label(strings::USE_SITE_FILES)
+                    .expect("the first row")
+                    .role(),
+                Role::MenuItemRadio
+            );
+        }
+    }
+
+    #[test]
     fn the_status_page_shows_every_health_state_and_path_in_both_themes() {
         for theme in [egui::Theme::Light, egui::Theme::Dark] {
             let tree = tree_of(Page::Status, theme);
@@ -637,6 +771,7 @@ mod tests {
     fn the_first_page_is_counted_from_one_and_falls_back_to_the_first() {
         assert_eq!(page_numbered(Some("2")), Page::Buttons);
         assert_eq!(page_numbered(Some("4")), Page::Status);
+        assert_eq!(page_numbered(Some("5")), Page::Versions);
         for wrong in [None, Some("0"), Some("99"), Some("x"), Some("")] {
             assert_eq!(page_numbered(wrong), Page::Icons, "{wrong:?}");
         }
@@ -644,7 +779,7 @@ mod tests {
 
     #[test]
     fn the_gallery_has_its_pages_and_the_five_states_of_components_md() {
-        assert_eq!(PAGES.len(), 4);
+        assert_eq!(PAGES.len(), 5);
         assert_eq!(
             label::STATES,
             ["Rest", "Hover", "Pressed", "Focus", "Disabled"]
