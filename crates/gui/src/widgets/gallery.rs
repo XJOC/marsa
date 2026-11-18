@@ -24,6 +24,7 @@ use super::Look;
 use super::badge::{CountBadge, RowBadge};
 use super::button::{Button, QuietTone};
 use super::dialog::{Answer, ConfirmDialog};
+use super::facts::fact_card;
 use super::field::Field;
 use super::icons::{Glyph, Icon};
 use super::notice::{Notice, NoticeBar, Notices, Progress};
@@ -34,6 +35,7 @@ use super::status::{
 use super::step::{Stage, StepCard};
 use super::switch::Switch;
 use super::table::{RowHeight, Table, TableColumn, empty_state};
+use super::tabs::Tabs;
 use super::tile::{Monogram, SectionTile, TileSize};
 use super::version::{PickerSize, Setting, VersionMenu, VersionPick, VersionPicker};
 use crate::strings;
@@ -68,6 +70,8 @@ mod label {
     pub const TABLE: &str = "Table: two-line rows, the second selected, hover a row to see it";
     pub const TABLE_DENSE: &str = "Dense table (32): click a row to select it";
     pub const EMPTY: &str = "Empty state";
+    pub const TABS: &str = "Tabs (the site page): click or use the arrows; only Overview ships now";
+    pub const FACTS: &str = "Facts card (the site page): a label column, then each value";
     pub const DIALOG: &str = "Dialog over the scrim: destructive (Cancel has the focus), and calm";
     pub const NOTICES: &str = "Notices: a success (closes in 4 s), and an error (stays)";
     pub const PROGRESS: &str = "Progress: with a share, and with none yet";
@@ -116,6 +120,8 @@ struct Live {
     setting: Option<usize>,
     /// The row of the dense table the user clicked.
     row: Option<usize>,
+    /// The tab the live tab strip has chosen.
+    tab: usize,
     /// The live dialog is open, and what it answered last.
     dialog: bool,
     answer: Option<Answer>,
@@ -273,13 +279,8 @@ fn icons_page(ui: &mut Ui, theme: &Theme) {
 
     heading(ui, theme, label::MONOGRAMS);
     row(ui, |ui| {
-        for runtime in [
-            Runtime::Php,
-            Runtime::Node,
-            Runtime::Composer,
-            Runtime::Caddy,
-        ] {
-            ui.add(Monogram::of(runtime));
+        for runtime in Runtime::ALL {
+            ui.add(Monogram::new(&strings::runtime_monogram(runtime)));
         }
         ui.add(Monogram::new("Py"));
         ui.add(Monogram::new("Co").size(TileSize::Nav));
@@ -721,6 +722,25 @@ fn tables_page(ui: &mut Ui, theme: &Theme) {
 
     heading(ui, theme, label::EMPTY);
     empty_state(ui, "No sites yet.", "Add site…");
+
+    heading(ui, theme, label::TABS);
+    let tabs = [(0, "Overview"), (1, "Mail"), (2, "Dumps"), (3, "Logs")];
+    if let Some(chosen) = Tabs::new("Site", &tabs, live.tab).show(ui).inner {
+        live.tab = chosen;
+    }
+
+    heading(ui, theme, label::FACTS);
+    fact_card(ui, theme.size.version_lg.x, |rows| {
+        rows.row("Connection", |ui| {
+            ui.add(Switch::new(true, "Serve over HTTPS"));
+        });
+        rows.row("Folder", |ui| {
+            ui.label("~/Code/shop");
+        });
+        rows.row("Kind", |ui| {
+            ui.label("Laravel");
+        });
+    });
     ui.ctx().data_mut(|data| data.insert_temp(id, live));
 }
 

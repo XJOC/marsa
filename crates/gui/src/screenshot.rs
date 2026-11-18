@@ -7,12 +7,15 @@
 //! uncompressed 24-bit BMP, then closes the window.
 //! `MARSA_GUI_THEME=light|dark` draws that theme instead of the system's.
 //! `MARSA_GUI_SIZE=900x720` opens the window at that size (task M5-D4).
-//! `MARSA_GUI_ROUTE=home|sites|runtimes|services|logs|settings` opens that
-//! screen. `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras`
+//! `MARSA_GUI_ROUTE=home|sites|runtimes|runtimes:<runtime>|services|logs|settings|site:<name>`
+//! opens that screen (`site:shop` is the page of the site `shop`, task
+//! M5-D7; `runtimes:node` is Node.js chosen, task M5-D8). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install`
 //! draws fixed fake data and starts no daemon (task M5-D5, see `demo`).
 //! `MARSA_GUI_CLICK=x,y` clicks that point (in points, from the top left of
 //! the window) once the window has settled, so a menu is open in the picture
-//! (task M5-D6). On macOS,
+//! (task M5-D6). `MARSA_GUI_HOVER=x,y` then moves the pointer there and waits
+//! for the tooltip, so the reason over a disabled row is in the picture (task
+//! M5-D8; it needs a click). On macOS,
 //! `sips -s format png <file.bmp> --out <file.png>` converts the picture.
 
 use std::path::PathBuf;
@@ -35,6 +38,8 @@ const SIZE_VAR: &str = "MARSA_GUI_SIZE";
 const ROUTE_VAR: &str = "MARSA_GUI_ROUTE";
 /// The point to click before the picture: `600,200`.
 const CLICK_VAR: &str = "MARSA_GUI_CLICK";
+/// The point to rest the pointer on after the click: `640,260`.
+const HOVER_VAR: &str = "MARSA_GUI_HOVER";
 /// The longest wait for the daemon before the picture is taken anyway.
 const LIMIT: Duration = Duration::from_secs(10);
 /// The wait after the window connected, so the daemon's lists arrive and the
@@ -54,16 +59,24 @@ enum ClickStage {
     Release,
     /// The click is done; the menu it opened draws until this time.
     Settle(Instant),
+    /// The next frame moves the pointer to the hover point.
+    Hover,
+    /// The pointer rests there; its tooltip draws until this time.
+    Tip(Instant),
     Done,
 }
 
 /// How long a menu takes to open and fade in.
 const MENU_SETTLE: Duration = Duration::from_millis(500);
+/// How long a tooltip takes to show, after the pointer rests.
+const TIP_SETTLE: Duration = Duration::from_millis(1000);
 
 pub struct Screenshot {
     path: PathBuf,
     /// The click to make before the picture, and how far it is.
     click: Option<(egui::Pos2, ClickStage)>,
+    /// Where the pointer rests after the click.
+    hover: Option<egui::Pos2>,
     started: Instant,
     /// When the window first showed the daemon's data.
     ready_at: Option<Instant>,
@@ -87,9 +100,13 @@ impl Screenshot {
             .ok()
             .and_then(|text| parse_point(&text))
             .map(|at| (at, ClickStage::Wait));
+        let hover = std::env::var(HOVER_VAR)
+            .ok()
+            .and_then(|text| parse_point(&text));
         Some(Self {
             path,
             click,
+            hover,
             started: Instant::now(),
             ready_at: None,
             saved: None,
@@ -128,14 +145,22 @@ impl Screenshot {
             ctx.request_repaint_after(SETTLE);
             return;
         }
+        let hover = self.hover;
         if let Some((_, stage)) = &mut self.click {
             match *stage {
                 ClickStage::Wait => *stage = ClickStage::Press,
-                ClickStage::Press | ClickStage::Release => {}
+                ClickStage::Press | ClickStage::Release | ClickStage::Hover => {}
                 ClickStage::Settle(until) if Instant::now() >= until => {
+                    *stage = if hover.is_some() {
+                        ClickStage::Hover
+                    } else {
+                        ClickStage::Done
+                    };
+                }
+                ClickStage::Tip(until) if Instant::now() >= until => {
                     *stage = ClickStage::Done;
                 }
-                ClickStage::Settle(_) | ClickStage::Done => {}
+                ClickStage::Settle(_) | ClickStage::Tip(_) | ClickStage::Done => {}
             }
             if *stage != ClickStage::Done {
                 ctx.request_repaint();
@@ -158,6 +183,7 @@ impl Screenshot {
     /// Called before each frame, with the input it will read: adds the
     /// press and then the release of the click, one frame each.
     pub fn inject(&mut self, input: &mut egui::RawInput) {
+        let hover = self.hover;
         let Some((at, stage)) = &mut self.click else {
             return;
         };
@@ -177,7 +203,13 @@ impl Screenshot {
                 input.events.push(button(false));
                 *stage = ClickStage::Settle(Instant::now() + MENU_SETTLE);
             }
-            ClickStage::Wait | ClickStage::Settle(_) | ClickStage::Done => {}
+            ClickStage::Hover => {
+                if let Some(over) = hover {
+                    input.events.push(egui::Event::PointerMoved(over));
+                }
+                *stage = ClickStage::Tip(Instant::now() + TIP_SETTLE);
+            }
+            ClickStage::Wait | ClickStage::Settle(_) | ClickStage::Tip(_) | ClickStage::Done => {}
         }
     }
 }
@@ -208,6 +240,13 @@ pub fn route() -> Option<Route> {
 }
 
 fn parse_route(name: &str) -> Option<Route> {
+    if let Some(site) = name.strip_prefix("site:") {
+        return (!site.is_empty()).then(|| Route::Site(site.to_owned()));
+    }
+    if let Some(folder) = name.strip_prefix("runtimes:") {
+        let runtime = Runtime::ALL.into_iter().find(|r| r.dir_name() == folder);
+        return runtime.map(Route::Runtimes);
+    }
     Some(match name {
         "home" => Route::Home,
         "sites" => Route::Sites,
@@ -274,6 +313,13 @@ mod tests {
         assert_eq!(parse_route("sites"), Some(Route::Sites));
         assert_eq!(parse_route("logs"), Some(Route::Logs(LogSource::Caddy)));
         assert_eq!(parse_route("mail"), None);
+        assert_eq!(parse_route("site:shop"), Some(Route::Site("shop".into())));
+        assert_eq!(parse_route("site:"), None);
+        assert_eq!(
+            parse_route("runtimes:node"),
+            Some(Route::Runtimes(Runtime::Node))
+        );
+        assert_eq!(parse_route("runtimes:cobol"), None);
         assert_eq!(parse_point("600, 200"), Some(egui::pos2(600.0, 200.0)));
         assert_eq!(parse_point("600"), None);
     }
@@ -283,6 +329,7 @@ mod tests {
         let mut shot = Screenshot {
             path: PathBuf::new(),
             click: Some((egui::pos2(10.0, 20.0), ClickStage::Press)),
+            hover: Some(egui::pos2(30.0, 40.0)),
             started: Instant::now(),
             ready_at: None,
             saved: None,
@@ -304,6 +351,18 @@ mod tests {
         assert!(matches!(
             shot.click.map(|(_, stage)| stage),
             Some(ClickStage::Settle(_))
+        ));
+        // Then the pointer moves to rest on the hover point, once.
+        shot.click = shot.click.map(|(at, _)| (at, ClickStage::Hover));
+        let mut input = egui::RawInput::default();
+        shot.inject(&mut input);
+        assert!(matches!(
+            input.events[..],
+            [egui::Event::PointerMoved(at)] if at == egui::pos2(30.0, 40.0)
+        ));
+        assert!(matches!(
+            shot.click.map(|(_, stage)| stage),
+            Some(ClickStage::Tip(_))
         ));
         let mut input = egui::RawInput::default();
         shot.inject(&mut input);

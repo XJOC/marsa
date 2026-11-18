@@ -9,14 +9,13 @@ pub mod logs;
 pub mod runtimes;
 pub mod services;
 pub mod settings;
+pub mod site;
 pub mod sites;
 
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{self, Label, RichText, Ui, vec2};
 
-use crate::model::{InstallStep, Model};
-use crate::strings::{self, ReportLine};
-use crate::theme::page::PROGRESS_WIDTH;
+use crate::strings::ReportLine;
 use crate::theme::{Direction, Section, TextToken, Theme};
 use crate::widgets::{SectionTile, TileSize};
 
@@ -70,29 +69,6 @@ pub fn report_line(ui: &mut egui::Ui, line: ReportLine) {
         ui.colored_label(ui.visuals().error_fg_color, line.text);
     } else {
         ui.label(line.text);
-    }
-}
-
-/// The install the model shows: a progress bar while it runs, then one
-/// line. No animation: the bar moves with the daemon's events.
-pub fn install_progress(ui: &mut egui::Ui, model: &Model) {
-    let Some(view) = model.install_view() else {
-        return;
-    };
-    let text = strings::install_status(view);
-    match &view.step {
-        InstallStep::Failed(_) => {
-            ui.colored_label(ui.visuals().error_fg_color, text);
-        }
-        InstallStep::Done { .. } => {
-            ui.label(text);
-        }
-        step => {
-            let bar = egui::ProgressBar::new(step.fraction())
-                .desired_width(PROGRESS_WIDTH)
-                .text(text);
-            ui.add(bar);
-        }
     }
 }
 

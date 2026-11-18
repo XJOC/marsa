@@ -57,6 +57,12 @@ pub fn empty_state(ui: &mut Ui, sentence: &str, action: &str) -> bool {
 /// [`empty_state`], giving the button's response: a button that opens a menu
 /// needs it to anchor the menu.
 pub fn empty_state_button(ui: &mut Ui, sentence: &str, action: &str) -> Response {
+    empty_state_with(ui, sentence, Button::primary(action))
+}
+
+/// [`empty_state_button`] with a button of the caller's making: one that may
+/// be disabled with its reason.
+pub fn empty_state_with(ui: &mut Ui, sentence: &str, button: Button<'_>) -> Response {
     let theme = Theme::of(ui.ctx());
     card(ui, |ui| {
         ui.vertical_centered(|ui| {
@@ -66,7 +72,7 @@ pub fn empty_state_button(ui: &mut Ui, sentence: &str, action: &str) -> Response
                 .color(theme.color.ink2);
             ui.add(Label::new(text).selectable(false));
             ui.add_space(theme.space.s3);
-            let button = ui.add(Button::primary(action));
+            let button = ui.add(button);
             ui.add_space(theme.space.s6);
             button
         })
@@ -160,9 +166,11 @@ impl<'a, 'b> Row<'a, 'b> {
         theme: &'static Theme,
         columns: usize,
         selected: Option<usize>,
+        header: bool,
     ) -> Self {
-        // A divider above each row; the first one closes the header.
-        row.set_overline(true);
+        // A divider above each row; the first one closes the header, so a
+        // table with no header has none above its first row.
+        row.set_overline(header || row.index() > 0);
         row.set_selected(selected == Some(row.index()));
         Self::header(row, theme, columns)
     }
@@ -290,6 +298,7 @@ pub struct Table<'a> {
     height: RowHeight,
     selected: Option<usize>,
     max_height: Option<f32>,
+    header: bool,
 }
 
 impl<'a> Table<'a> {
@@ -301,7 +310,16 @@ impl<'a> Table<'a> {
             height: RowHeight::OneLine,
             selected: None,
             max_height: None,
+            header: true,
         }
+    }
+
+    /// No header row: the rows describe themselves, as the Installed list
+    /// of a runtime does (the mockup). The columns' titles still name the
+    /// cells in the code.
+    pub const fn headerless(mut self) -> Self {
+        self.header = false;
+        self
     }
 
     pub const fn rows(mut self, height: RowHeight) -> Self {
@@ -332,6 +350,7 @@ impl<'a> Table<'a> {
     ) -> TableOutput {
         let theme = Theme::of(ui.ctx());
         let count = self.columns.len();
+        let row_count = rows;
         let mut output = TableOutput {
             clicked: None,
             rect: Rect::NOTHING,
@@ -364,25 +383,31 @@ impl<'a> Table<'a> {
                     Width::Fixed(width) => Column::exact(width),
                 });
             }
-            builder
-                .column(pad)
-                .header(theme.size.table_header, |header| {
-                    let mut row = Row::header(header, theme, count);
-                    for column in self.columns {
-                        row.title(column.title);
+            let builder = builder.column(pad);
+            let rows = self.height.points(theme);
+            let body = |body: egui_extras::TableBody<'_>| {
+                body.rows(rows, row_count, |row| {
+                    let mut row = Row::body(row, theme, count, self.selected, self.header);
+                    let index = row.index();
+                    add_row(&mut row);
+                    if row.finish() {
+                        output.clicked = Some(index);
                     }
-                    row.finish();
-                })
-                .body(|body| {
-                    body.rows(self.height.points(theme), rows, |row| {
-                        let mut row = Row::body(row, theme, count, self.selected);
-                        let index = row.index();
-                        add_row(&mut row);
-                        if row.finish() {
-                            output.clicked = Some(index);
-                        }
-                    });
                 });
+            };
+            if self.header {
+                builder
+                    .header(theme.size.table_header, |header| {
+                        let mut row = Row::header(header, theme, count);
+                        for column in self.columns {
+                            row.title(column.title);
+                        }
+                        row.finish();
+                    })
+                    .body(body);
+            } else {
+                builder.body(body);
+            }
         });
         shown
             .response
@@ -471,6 +496,32 @@ mod tests {
             );
             assert!((rect.width() - width).abs() < 1.5);
         }
+    }
+
+    #[test]
+    fn a_table_with_no_header_is_its_rows_and_no_divider_over_the_first() {
+        let harness = Harness::new(egui::Theme::Light);
+        let theme = &LIGHT;
+        let mut with = Rect::NOTHING;
+        let mut without = Rect::NOTHING;
+        harness.run(|ui| {
+            with = Table::new("with", "With", &COLUMNS)
+                .rows(RowHeight::OneLine)
+                .show(ui, 3, |_| {})
+                .rect;
+            without = Table::new("without", "Without", &COLUMNS)
+                .rows(RowHeight::OneLine)
+                .headerless()
+                .show(ui, 3, |_| {})
+                .rect;
+        });
+        // The header row is the only difference.
+        assert!(
+            (with.height() - without.height() - theme.size.table_header).abs() < 1.5,
+            "{} {}",
+            with.height(),
+            without.height()
+        );
     }
 
     #[test]

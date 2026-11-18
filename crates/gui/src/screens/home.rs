@@ -91,6 +91,8 @@ pub struct DefaultPhp {
     pub choices: Vec<PhpChoice>,
     /// The index of the version the default picks now.
     pub chosen: Option<usize>,
+    /// Why the dashed "+" cannot open the install dialog now.
+    pub install_off: Option<&'static str>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -430,7 +432,11 @@ fn default_php(model: &Model) -> DefaultPhp {
     let chosen = model
         .default_choice(Runtime::Php)
         .and_then(|default| installed.iter().position(|version| *version == default));
-    DefaultPhp { choices, chosen }
+    DefaultPhp {
+        choices,
+        chosen,
+        install_off: (!model.can_install()).then_some(strings::INSTALL_BUSY_HINT),
+    }
 }
 
 /// The installed PHP versions, oldest first, with the text each is saved and
@@ -541,8 +547,11 @@ fn default_php_section(ui: &mut Ui, theme: &Theme, php: &DefaultPhp, actions: &m
             .map(|(index, choice)| (index, choice.label.as_str()))
             .collect();
         let install = strings::install_another_label(strings::runtime_name(Runtime::Php));
-        let picker =
+        let mut picker =
             VersionPicker::new(strings::DEFAULT_PHP, &versions, php.chosen).install(&install);
+        if let Some(reason) = php.install_off {
+            picker = picker.install_disabled(reason);
+        }
         match picker.show(ui).inner {
             Some(VersionPick::Version(index)) => {
                 if let Some(choice) = php.choices.get(index) {
@@ -552,9 +561,7 @@ fn default_php_section(ui: &mut Ui, theme: &Theme, php: &DefaultPhp, actions: &m
                     });
                 }
             }
-            Some(VersionPick::Install) => {
-                actions.push(Action::Navigate(Route::Runtimes(Runtime::Php)));
-            }
+            Some(VersionPick::Install) => actions.push(Action::AskInstall(Runtime::Php)),
             None => {}
         }
     });
@@ -1033,11 +1040,28 @@ mod tests {
         };
         assert_eq!(click(&model, "8.3"), [set]);
         let install = strings::install_another_label("PHP");
-        let install_php = || Action::Navigate(Route::Runtimes(Runtime::Php));
+        let install_php = || Action::AskInstall(Runtime::Php);
         assert_eq!(click(&model, &install), [install_php()]);
         // With no PHP, the dashed button is all there is.
         model.update(Update::Runtimes(runtimes(&[], &["2.11.7"])));
         assert_eq!(click(&model, &install), [install_php()]);
+        // The action opens the install dialog of PHP, where the user is.
+        assert!(model.apply_action(install_php()).is_none());
+        assert_eq!(model.install_dialog, Some(Runtime::Php));
+        assert_eq!(model.route, Route::Home);
+    }
+
+    #[test]
+    fn while_an_install_runs_the_plus_is_off_with_the_reason_and_does_nothing() {
+        let mut model = working(&["shop"]);
+        assert!(model.queue_install(crate::model::InstallJob {
+            runtime: Runtime::Caddy,
+            version: None,
+        }));
+        let view = view(&model);
+        let php = view.default_php.as_ref().expect("the picker");
+        assert_eq!(php.install_off, Some(strings::INSTALL_BUSY_HINT));
+        assert!(click(&model, &strings::install_another_label("PHP")).is_empty());
     }
 
     #[test]

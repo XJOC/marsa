@@ -1,5 +1,5 @@
 //! The small widgets of the design (`docs/design/components.md`): icons,
-//! tiles, buttons, menus, the switch, the segmented control, badges, the text
+//! tiles, list items, buttons, menus, the switch, the segmented control, badges, the text
 //! field, the sidebar item, and the step card. They are the only place that draws these; a screen adds them with
 //! `ui.add(...)` and never reaches for a raw egui button (rules.md 3).
 //! [Laravel: Blade components; each takes its props with a builder and
@@ -23,12 +23,14 @@
 pub mod badge;
 pub mod button;
 pub mod dialog;
+pub mod facts;
 pub mod field;
 // Debug builds only: the page the design review reads (task M5-D2). A
 // release build has no gallery and reads no extra environment variable.
 #[cfg(debug_assertions)]
 pub mod gallery;
 pub mod icons;
+pub mod list_item;
 pub mod menu;
 pub mod nav;
 pub mod notice;
@@ -37,6 +39,7 @@ pub mod status;
 pub mod step;
 pub mod switch;
 pub mod table;
+pub mod tabs;
 pub mod tile;
 pub mod version;
 
@@ -52,8 +55,10 @@ use crate::theme::{Direction, TextToken, Theme};
 pub use badge::{CountBadge, RowBadge};
 pub use button::{Button, Kind as ButtonKind, QuietTone};
 pub use dialog::{Answer, ConfirmDialog};
+pub use facts::{Rows as FactRows, fact_card};
 pub use field::Field;
 pub use icons::{Glyph, Icon};
+pub use list_item::ListItem;
 pub use menu::{Item as MenuItem, Menu};
 pub use nav::NavItem;
 pub use notice::{Notice, NoticeBar, NoticeKind, Notices, Progress, Reaction};
@@ -64,6 +69,7 @@ pub use status::{
 pub use step::{Stage, StepCard};
 pub use switch::Switch;
 pub use table::{RowHeight, Table, TableColumn, TableOutput};
+pub use tabs::Tabs;
 pub use tile::{Monogram, SectionTile, TileSize};
 pub use version::{PickerSize, Setting, VersionMenu, VersionPick, VersionPicker};
 
@@ -353,6 +359,11 @@ pub(crate) mod harness {
     }
 
     impl Tree {
+        /// The first node that has this role.
+        pub fn node_with_role(&self, role: accesskit::Role) -> Option<&accesskit::Node> {
+            self.nodes.iter().find(|node| node.role() == role)
+        }
+
         pub fn node_with_label(&self, label: &str) -> Option<&accesskit::Node> {
             self.nodes.iter().find(|node| node.label() == Some(label))
         }

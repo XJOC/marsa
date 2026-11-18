@@ -71,22 +71,75 @@ pub fn no_site_matches(search: &str) -> String {
 /// The connection cell of a site's row: the word beside the lock.
 pub const HTTPS: &str = "HTTPS";
 pub const HTTP: &str = "HTTP";
-/// The rows of a site's menu (⋯): the other connection, and Unlink.
-pub const SWITCH_TO_HTTP: &str = "Switch to HTTP";
-pub const SWITCH_TO_HTTPS: &str = "Switch to HTTPS";
-pub const HTTPS_HINT: &str = "Serve this site over HTTPS";
-pub const HTTP_HINT: &str = "Serve this site over plain HTTP.";
-
 /// What a screen reader says for the version menu of a site's row.
 pub fn php_for_site(site: &str) -> String {
     format!("PHP version for {site}")
 }
 
-/// What a screen reader says, and the tooltip shows, for the ⋯ button of a
-/// site's row.
-pub fn site_menu_label(site: &str) -> String {
-    format!("More actions for {site}")
+/// A site's own page (task M5-D7). The way back to Sites at the top is the
+/// word `SITES` after an arrow icon.
+pub const OPEN_FOLDER: &str = "Open folder";
+pub const OPEN_IN_BROWSER: &str = "Open in browser";
+/// The heading of the large version picker of the page, and its name for a
+/// screen reader.
+pub const PHP_FOR_THIS_SITE: &str = "PHP for this site";
+
+/// The facts card of the page: its labels, and the HTTPS switch.
+pub const FACT_CONNECTION: &str = "Connection";
+pub const FACT_FOLDER: &str = "Folder";
+pub const FACT_DOCROOT: &str = "Document root";
+pub const FACT_KIND: &str = "Kind";
+pub const FACT_ADDED_AS: &str = "Added as";
+pub const SERVE_OVER_HTTPS: &str = "Serve over HTTPS";
+/// "Added as": a folder the user linked.
+pub const ADDED_AS_LINKED: &str = "Linked folder";
+
+/// "Added as": a site of a parked folder (as the window shows a folder,
+/// `~/Code`).
+pub fn added_as_parked(shown: &str) -> String {
+    format!("Part of parked folder {shown}")
 }
+
+/// Between the reason after a heading and the link that follows it: "8.3 is
+/// set for this site · Use the site's files".
+pub const HINT_SEPARATOR: &str = "·";
+
+/// The quiet button at the end of the page: the confirmation opens.
+pub const UNLINK_THIS_SITE: &str = "Unlink this site…";
+
+/// Under the disabled "Unlink this site…" of a site from a parked folder.
+pub fn site_from_parked(shown: &str) -> String {
+    format!("This site comes from the parked folder {shown}, so it cannot be unlinked alone.")
+}
+
+/// The button beside [`site_from_parked`].
+pub fn forget_folder_shown(shown: &str) -> String {
+    format!("Forget {shown}…")
+}
+
+/// The page of a site that is not in the list: it was unlinked meanwhile, or
+/// the window has no daemon to ask.
+pub fn site_missing(site: &str) -> String {
+    format!("{site}.{TLD} is not in your sites. It may have been unlinked.")
+}
+pub const SITE_OFFLINE: &str = "This site shows here once Marsa is connected to its daemon.";
+
+/// The sentence after the heading of the page's version picker: which
+/// version the site has, and why (components.md, Version menu).
+pub fn php_hint_site(version: &str) -> String {
+    format!("{version} is set for this site")
+}
+pub fn php_hint_file(version: &str, path: &Path) -> String {
+    format!(
+        "{version} comes from the {} file in this folder",
+        file_name(path)
+    )
+}
+pub fn php_hint_default(version: &str) -> String {
+    format!("{version} is the default: the site's files ask for no version")
+}
+pub const PHP_HINT_FILES: &str = "the site's files decide the version";
+pub const PHP_HINT_NO_MATCH: &str = "no installed version fits what the site asks for";
 
 /// Why a site has the PHP version its row shows (components.md, Version
 /// menu): after the version, in `caption`.
@@ -140,9 +193,6 @@ pub const CANCEL: &str = "Cancel";
 /// While a folder dialog is open: the buttons wait for it.
 pub const PICKING_HINT: &str = "A folder dialog is open.";
 pub const SKIPPED_TITLE: &str = "Skipped folders";
-/// The column of the Unlink buttons, and of the Uninstall lists.
-pub const COLUMN_REMOVE: &str = "Remove";
-pub const UNLINK_BUTTON: &str = "Unlink…";
 pub const UNLINK_HINT: &str = "Stop serving this site. Its folder and files stay.";
 pub const PARKED_TITLE: &str = "Parked folders";
 /// After the heading of each list under the sites table.
@@ -156,40 +206,137 @@ pub const REMOVE_BUSY_HINT: &str = "Wait for the removal that runs to end.";
 
 pub const RUNTIMES: &str = "Runtimes";
 pub const NO_RUNTIMES: &str = "No runtimes listed yet.";
-pub const COLUMN_RUNTIME: &str = "Runtime";
-pub const COLUMN_INSTALLED: &str = "Installed";
-pub const COLUMN_DEFAULT: &str = "Default";
 pub const NONE_INSTALLED: &str = "None installed";
-/// The default column of a runtime with a default but none set.
-pub const NO_DEFAULT: &str = "Not set";
-pub const DEFAULT_HINT: &str = "Used where nothing else picks a version: no site setting, \
-     no version file, and no composer.json or package.json.";
-/// The default column of Composer and Caddy.
-pub const NEWEST: &str = "Newest installed";
-pub const NEWEST_HINT: &str =
-    "This program has no default version: the newest installed one is used.";
-pub const COLUMN_INSTALL: &str = "Install";
-/// In an empty version field.
+/// In an empty version field of the install dialog.
 pub const VERSION_FIELD_EMPTY: &str = "newest";
+/// The name of the version field, for a screen reader.
+pub const VERSION_FIELD_LABEL: &str = "Version";
+/// The confirm button of the install dialog.
 pub const INSTALL_BUTTON: &str = "Install";
-pub const INSTALL_HINT: &str = "Download and install this version from Marsa's signed version \
-     list. With an empty field: the newest stable version.";
+/// Over the button that opens the install dialog.
+pub const INSTALL_HINT: &str = "Download and install a version from Marsa's signed version \
+     list. Leave the version empty for the newest stable one.";
 /// Over a disabled Install button.
 pub const INSTALL_BUSY_HINT: &str = "Wait for the install or uninstall that runs to end.";
-/// Opens the list of installed versions to uninstall.
+/// The row of a version's menu that asks to uninstall it.
 pub const UNINSTALL_BUTTON: &str = "Uninstall…";
-pub const UNINSTALL_HINT: &str = "Choose an installed version to delete from Marsa's data folder.";
-/// Over a disabled Uninstall list.
+pub const UNINSTALL_HINT: &str = "Delete this version from Marsa's data folder.";
+/// Over a disabled Uninstall row while another install or removal runs.
 pub const UNINSTALL_BUSY_HINT: &str = "Wait for the install or removal that runs to end.";
+
+// The Runtimes screen: the list, the details, and the Installed table (task
+// M5-D8).
+
+pub const INSTALLED: &str = "Installed";
+pub const INSTALL_A_VERSION: &str = "Install a version…";
+pub const COLUMN_VERSION: &str = "Version";
+pub const COLUMN_USED_BY: &str = "Used by";
+pub const COLUMN_STATUS: &str = "Status";
+/// The column of the row menus (⋯).
+pub const COLUMN_MORE: &str = "More";
+/// The tag of the version the default picks.
+pub const TAG_DEFAULT: &str = "Default";
+/// The tag of the version Marsa uses when its runtime has no default.
+pub const TAG_IN_USE: &str = "In use";
+pub const NO_SITES: &str = "No sites";
+/// After the heading "Default PHP".
+pub const DEFAULT_RUNTIME_HINT: &str = "used where a project does not ask for a version";
+/// The heading of a runtime with no default to pick.
+pub const IN_USE_HEADING: &str = "In use";
+
+/// The heading of the large version buttons: "Default PHP".
+pub fn default_heading(name: &str) -> String {
+    format!("Default {name}")
+}
+
+/// After the heading of a runtime with no default: why there is no picker.
+pub fn newest_is_used(name: &str) -> String {
+    format!("{name} has no default to pick: the newest installed version is used")
+}
+
+/// The line under a runtime in the list: its default and how many versions.
+pub fn summary_default(default: &str, installed: usize) -> String {
+    format!("Default {default}, {installed} installed")
+}
+
+/// The line under a runtime whose default picks no installed version.
+pub fn summary_no_default(installed: usize) -> String {
+    format!("No default, {installed} installed")
+}
+
+/// The line under a runtime with no default: the version in use.
+pub fn summary_newest(newest: &Version) -> String {
+    format!("{newest}, newest is used")
+}
+
+/// The empty state of the Installed list.
+pub fn no_runtime_installed(name: &str) -> String {
+    format!("No {name} installed yet.")
+}
+
+/// The button of the empty state: "Install PHP…".
+pub fn install_runtime(name: &str) -> String {
+    format!("Install {name}…")
+}
+
+/// The title of the install dialog.
+pub fn install_dialog_title(name: &str) -> String {
+    format!("Install a {name} version")
+}
+
+/// The name of a version's menu button, for a screen reader and its tooltip.
+pub fn more_for(name: &str, version: &Version) -> String {
+    format!("More for {name} {version}")
+}
+
+/// The "Used by" cell of a version: how many sites run it, and which ones
+/// when there are few.
+pub fn sites_text(names: &[&str]) -> String {
+    match names {
+        [] => NO_SITES.to_owned(),
+        [site] => format!("1 site: {site}"),
+        // A long list does not fit its cell: the count says enough.
+        names if names.len() > SITES_NAMED => format!("{} sites", names.len()),
+        names => format!("{} sites: {}", names.len(), names.join(", ")),
+    }
+}
+
+/// The most sites named in a "Used by" cell.
+const SITES_NAMED: usize = 3;
+
+/// Why a version cannot be uninstalled: it is the default.
+pub fn uninstall_off_default(name: &str) -> String {
+    format!("It is the default {name}. Pick another default first.")
+}
+
+/// Why a version cannot be uninstalled: sites are set to it.
+pub fn uninstall_off_sites(name: &str, sites: &[&str]) -> String {
+    match sites {
+        [site] => {
+            format!("The site {site}.{TLD} is set to it. Pick another {name} version for it first.")
+        }
+        sites => {
+            let names: Vec<String> = sites.iter().map(|site| format!("{site}.{TLD}")).collect();
+            format!(
+                "The sites {} are set to it. Pick another {name} version for them first.",
+                names.join(", ")
+            )
+        }
+    }
+}
 
 // Xdebug (`GET` and `PUT /v1/php/xdebug`, task M5-11).
 
 pub const XDEBUG: &str = "Xdebug";
-pub const XDEBUG_HINT: &str = "Load Xdebug in every installed PHP that has it, in sites and in \
+/// Under the Xdebug switch: what it does, and what it costs.
+pub const XDEBUG_CAPTION: &str = "Loads Xdebug in every installed PHP that has it, in sites and in \
      the terminal. PHP runs two to four times slower while it is on.";
-/// Under the Xdebug box while it is on.
-pub const XDEBUG_SLOW: &str = "PHP runs two to four times slower while Xdebug is on. Turn it \
-     off when you are done debugging.";
+/// Over the disabled switch before the state is read.
+pub const XDEBUG_UNREAD: &str = "Marsa has not read the Xdebug state yet.";
+/// Over the disabled switch while a change runs.
+pub const XDEBUG_BUSY: &str = "Marsa is changing Xdebug. Wait for it to end.";
+/// Under the caption while Xdebug is on: the cost is already in the caption.
+pub const XDEBUG_TURN_OFF: &str = "Turn it off when you are done debugging.";
 
 // The first-run panel (tasks M5-10 and M5-D5).
 
@@ -332,9 +479,10 @@ pub fn pick_title(pick: Pick) -> &'static str {
     }
 }
 
-/// The first line of the link form.
-pub fn link_folder(folder: &Path) -> String {
-    format!("Link {} as:", folder.display())
+/// The first line of the link form: the folder as the window shows it
+/// (`~/Work/blog`, with the full path in a tooltip).
+pub fn link_folder(shown: &str) -> String {
+    format!("Link {shown} as:")
 }
 
 /// After the site name field: `.test`.
@@ -356,23 +504,30 @@ pub fn linked(name: &str, folder: &Path) -> String {
     format!("Linked {} as {name}.{TLD}.", folder.display())
 }
 
-/// Over an Install field: what to type for this runtime.
-pub fn version_field_hint(runtime: Runtime) -> String {
-    let example = example_version(runtime);
+/// In the install dialog: what to type for the runtime called `name`.
+pub fn version_field_hint(name: &str, example: &str) -> String {
     format!(
-        "A version such as {example}: the newest {} that matches it. Empty: the newest stable \
-         version.",
-        runtime_name(runtime)
+        "A version such as {example}: the newest {name} that matches it. Empty: the newest \
+         stable version."
     )
 }
 
-fn example_version(runtime: Runtime) -> &'static str {
-    match runtime {
-        Runtime::Php => "8.4",
-        Runtime::Node => "22",
-        Runtime::Composer => "2.8",
-        Runtime::Caddy => "2.11",
-        Runtime::Postgres => "18",
+/// A version to write as an example for `runtime`.
+pub fn example_version(runtime: Runtime) -> &'static str {
+    example_version_for(runtime.dir_name())
+}
+
+/// [`example_version`] by the runtime's folder name. These `match`es are on
+/// the name text, not on `Runtime`, so a runtime that core adds later builds
+/// and shows with the default arm until it gets its own (task M5-D8).
+pub fn example_version_for(folder: &str) -> &'static str {
+    match folder {
+        "php" => "8.4",
+        "node" => "22",
+        "composer" => "2.8",
+        "caddy" => "2.11",
+        // Any runtime added later: a plain number.
+        _ => "1.0",
     }
 }
 
@@ -665,26 +820,46 @@ fn file_name(path: &Path) -> String {
     )
 }
 
-/// The name column of the Runtimes section, as the CLI writes it.
+/// The name of a runtime, as the CLI writes it.
 pub fn runtime_name(runtime: Runtime) -> &'static str {
-    match runtime {
-        Runtime::Php => "PHP",
-        Runtime::Node => "Node.js",
-        Runtime::Composer => "Composer",
-        Runtime::Caddy => "Caddy",
-        Runtime::Postgres => "PostgreSQL",
+    runtime_name_for(runtime.dir_name())
+}
+
+/// [`runtime_name`] by the runtime's folder name (`runtimes/<name>`), which
+/// is the one name core gives a runtime. The `match` is on that text, not on
+/// `Runtime`: a runtime that core adds later builds without a change here and
+/// shows under its folder name (`python`) until it gets a nicer one
+/// (task M5-D8).
+pub fn runtime_name_for(folder: &'static str) -> &'static str {
+    match folder {
+        "php" => "PHP",
+        "node" => "Node.js",
+        "composer" => "Composer",
+        "caddy" => "Caddy",
+        // Any runtime added later: core's own name.
+        other => other,
     }
 }
 
 /// The two or three letters on a runtime's tile: a new language needs a
 /// monogram, not a new icon (components.md, Section icon tile).
-pub const fn runtime_monogram(runtime: Runtime) -> &'static str {
-    match runtime {
-        Runtime::Php => "PHP",
-        Runtime::Node => "JS",
-        Runtime::Composer => "Co",
-        Runtime::Caddy => "Ca",
-        Runtime::Postgres => "Pg",
+pub fn runtime_monogram(runtime: Runtime) -> String {
+    monogram_for(runtime.dir_name(), runtime_name(runtime))
+}
+
+/// [`runtime_monogram`] by the folder name and the name shown. Three letters
+/// for PHP, "JS" for Node.js; every other runtime gets the first two letters
+/// of its name ("Co", "Ca", "Po" for Postgres), so a new one needs no entry.
+pub fn monogram_for(folder: &str, name: &str) -> String {
+    match folder {
+        "php" => "PHP".to_owned(),
+        "node" => "JS".to_owned(),
+        _ => {
+            let mut letters = name.chars();
+            let first = letters.next().into_iter().flat_map(char::to_uppercase);
+            let second = letters.next().into_iter().flat_map(char::to_lowercase);
+            first.chain(second).collect()
+        }
     }
 }
 
@@ -860,25 +1035,6 @@ pub const fn pill_state_word(state: PillState) -> &'static str {
         PillState::Waiting => "Waiting",
         PillState::Stopped => "Stopped",
         PillState::Starting => "Starting",
-    }
-}
-
-/// The installed column of the Runtimes section: `8.3.27, 8.4.23`.
-pub fn installed_text(versions: &[Version]) -> String {
-    if versions.is_empty() {
-        return NONE_INSTALLED.to_owned();
-    }
-    let texts: Vec<String> = versions.iter().map(ToString::to_string).collect();
-    texts.join(", ")
-}
-
-/// The closed default list of PHP or Node: the version the default picks,
-/// the saved text when it picks none, or [`NO_DEFAULT`].
-pub fn default_text(chosen: Option<&Version>, saved: Option<&str>) -> String {
-    match (chosen, saved) {
-        (Some(version), _) => version.to_string(),
-        (None, Some(text)) => format!("{text} (not installed)"),
-        (None, None) => NO_DEFAULT.to_owned(),
     }
 }
 
@@ -1081,7 +1237,7 @@ pub fn xdebug_lines(state: &XdebugState, pending: Option<bool>) -> Vec<String> {
         Some(true) => lines.push("Turning Xdebug on…".to_owned()),
         Some(false) => lines.push("Turning Xdebug off…".to_owned()),
         None if state.enabled => {
-            lines.push(XDEBUG_SLOW.to_owned());
+            lines.push(XDEBUG_TURN_OFF.to_owned());
             lines.push(if state.loaded.is_empty() {
                 "No installed PHP loads it.".to_owned()
             } else {
@@ -1144,6 +1300,9 @@ fn error_message(code: &str) -> Option<&'static str> {
         "service_not_found" => "No such service.",
         "unknown_action" => "Unknown service action.",
         "service_busy" => "The service is busy with another action. Try again.",
+        // `marsa_core::platform::OpenError`, and the window's own folder opener.
+        "open_no_program" => "This system has no program to open a folder with.",
+        "open_failed" => "Cannot open the folder.",
         // Codes that come as an answer or in `ServiceState::Failed`.
         "caddy_not_installed" => "Caddy is not installed.",
         "caddy_config_write" => "Cannot write the Caddy config file.",
@@ -1884,23 +2043,51 @@ mod tests {
             "from composer.json"
         );
         assert_eq!(php_for_site("shop"), "PHP version for shop");
-        assert_eq!(site_menu_label("shop"), "More actions for shop");
         assert_eq!(no_site_matches("sh"), "No site matches “sh”.");
         assert_eq!(search_key_hint(true), "Cmd K");
         assert_eq!(search_key_hint(false), "Ctrl K");
     }
 
     #[test]
-    fn the_runtimes_columns() {
+    fn the_runtimes_screen_words() {
         assert_eq!(runtime_name(Runtime::Node), "Node.js");
-        assert_eq!(installed_text(&[]), NONE_INSTALLED);
+        assert_eq!(default_heading("PHP"), "Default PHP");
+        assert_eq!(summary_default("8.4", 4), "Default 8.4, 4 installed");
+        assert_eq!(summary_no_default(2), "No default, 2 installed");
+        assert_eq!(summary_newest(&v("2.8.4")), "2.8.4, newest is used");
+        assert_eq!(no_runtime_installed("PHP"), NO_PHP_YET);
+        assert_eq!(install_runtime("Caddy"), "Install Caddy…");
+        assert_eq!(install_dialog_title("Node.js"), "Install a Node.js version");
+        assert_eq!(more_for("PHP", &v("8.4.27")), "More for PHP 8.4.27");
+        assert!(UNINSTALL_BUTTON.ends_with('…') && INSTALL_A_VERSION.ends_with('…'));
+    }
+
+    #[test]
+    fn the_used_by_cell_counts_the_sites_and_names_a_few() {
+        assert_eq!(sites_text(&[]), "No sites");
+        assert_eq!(sites_text(&["shop"]), "1 site: shop");
         assert_eq!(
-            installed_text(&[v("8.3.27"), v("8.4.23")]),
-            "8.3.27, 8.4.23"
+            sites_text(&["legacy-crm", "wiki"]),
+            "2 sites: legacy-crm, wiki"
         );
-        assert_eq!(default_text(Some(&v("8.4.23")), Some("8.4")), "8.4.23");
-        assert_eq!(default_text(None, Some("8.2")), "8.2 (not installed)");
-        assert_eq!(default_text(None, None), NO_DEFAULT);
+        assert_eq!(sites_text(&["a", "b", "c"]), "3 sites: a, b, c");
+        assert_eq!(sites_text(&["a", "b", "c", "d"]), "4 sites");
+    }
+
+    #[test]
+    fn a_version_that_cannot_be_uninstalled_says_why() {
+        assert_eq!(
+            uninstall_off_default("PHP"),
+            "It is the default PHP. Pick another default first."
+        );
+        assert_eq!(
+            uninstall_off_sites("PHP", &["wiki"]),
+            "The site wiki.test is set to it. Pick another PHP version for it first."
+        );
+        assert_eq!(
+            uninstall_off_sites("PHP", &["legacy-crm", "wiki"]),
+            "The sites legacy-crm.test, wiki.test are set to it. Pick another PHP version for them first."
+        );
     }
 
     // -- Installs, setup, and settings (task M5-10) --
@@ -2561,7 +2748,7 @@ mod tests {
         assert_eq!(
             xdebug_lines(&on, None),
             [
-                XDEBUG_SLOW,
+                XDEBUG_TURN_OFF,
                 "Loaded in PHP 8.3.27, 8.4.23.",
                 "PHP 8.2.1 has no Xdebug and runs without it."
             ]
@@ -2582,7 +2769,7 @@ mod tests {
         };
         assert_eq!(
             xdebug_lines(&none, None),
-            [XDEBUG_SLOW, "No installed PHP loads it."]
+            [XDEBUG_TURN_OFF, "No installed PHP loads it."]
         );
         // While the daemon writes the files: what is asked for.
         assert_eq!(
@@ -2590,16 +2777,18 @@ mod tests {
             ["Turning Xdebug on…"]
         );
         assert_eq!(xdebug_lines(&none, Some(false)), ["Turning Xdebug off…"]);
-        assert!(XDEBUG_HINT.contains("slower") && XDEBUG_SLOW.contains("slower"));
+        // The cost is in the caption, whatever the state.
+        assert!(XDEBUG_CAPTION.ends_with("PHP runs two to four times slower while it is on."));
     }
 
     #[test]
     fn the_link_lines() {
         let folder = Path::new("/work/api");
         assert_eq!(linked("api", folder), "Linked /work/api as api.test.");
-        assert_eq!(link_folder(folder), "Link /work/api as:");
+        assert_eq!(link_folder("/work/api"), "Link /work/api as:");
+        assert_eq!(link_folder("~/Work/api"), "Link ~/Work/api as:");
         assert_eq!(site_suffix(), ".test");
-        let hint = version_field_hint(Runtime::Node);
+        let hint = version_field_hint(runtime_name(Runtime::Node), example_version(Runtime::Node));
         assert!(
             hint.starts_with("A version such as 22: the newest Node.js"),
             "{hint}"
@@ -2623,6 +2812,22 @@ mod tests {
         );
     }
 
+    /// Task M5-D8: a runtime that core adds later (Postgres, MySQL, Valkey)
+    /// shows with no entry here: core's name for it and two letters of it.
+    #[test]
+    fn a_runtime_core_adds_later_needs_no_entry_for_its_name_letters_and_example() {
+        for (folder, letters) in [("postgres", "Po"), ("mysql", "My"), ("valkey", "Va")] {
+            let name = runtime_name_for(folder);
+            assert_eq!(name, folder, "core's own name");
+            assert_eq!(monogram_for(folder, name), letters);
+            assert_eq!(example_version_for(folder), "1.0");
+        }
+        // The nicer names are entries, not the rule.
+        assert_eq!(runtime_name_for("node"), "Node.js");
+        assert_eq!(monogram_for("php", "PHP"), "PHP");
+        assert_eq!(monogram_for("x", ""), "", "an empty name has no letters");
+    }
+
     /// Task M5-D2: the words of the widgets' tiles and badges.
     #[test]
     fn every_runtime_has_a_short_monogram_and_every_section_a_name() {
@@ -2641,6 +2846,8 @@ mod tests {
         );
         assert_eq!(runtime_monogram(Runtime::Php), "PHP");
         assert_eq!(runtime_monogram(Runtime::Node), "JS");
+        assert_eq!(runtime_monogram(Runtime::Composer), "Co");
+        assert_eq!(runtime_monogram(Runtime::Caddy), "Ca");
 
         let mut names: Vec<&str> = Section::ALL.iter().map(|s| section_name(*s)).collect();
         assert!(names.iter().all(|name| !name.is_empty()));

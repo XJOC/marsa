@@ -1,14 +1,17 @@
 //! The frame of the window (layout.md, Shell): the sidebar, the main area
 //! with the screen of the [`Route`], the last notice at the bottom of the
-//! main area, and the confirmation dialog over everything. [Laravel: the
+//! main area, and the dialogs (the confirmation, the install dialog) over
+//! everything. [Laravel: the
 //! layout file; the `match` in `screen` is `routes/web.php`.]
 
 pub mod sidebar;
 
+use std::hash::Hash;
+
 use eframe::egui::{self, CentralPanel, Frame, Margin, Panel, ScrollArea, Ui};
 
 use crate::bridge::Command;
-use crate::model::{Action, Model, Removal};
+use crate::model::{Action, Model, Removal, Route};
 use crate::screens;
 use crate::strings;
 use crate::theme::page::CONFIRM_WIDTH;
@@ -78,6 +81,12 @@ pub fn show(ui: &mut Ui, model: &mut Model, picking: bool) -> Output {
     // Opened by an Uninstall, Unlink, or Forget button.
     let ctx = ui.ctx().clone();
     out.commands.extend(confirm(&ctx, model));
+    // Opened by "Install a version…" or a dashed "+" on any screen, so the
+    // shell draws it, not the Runtimes screen.
+    if let Some(dialog) = screens::runtimes::install_dialog_view(model) {
+        out.actions
+            .extend(screens::runtimes::show_install_dialog(&ctx, &dialog));
+    }
     out
 }
 
@@ -99,17 +108,26 @@ fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
                 out.actions.extend(screens::home::show(ui, &view, theme));
             }
         }),
-        // TODO(M5-D7): a site's own page. Until then it shows the Sites
-        // screen.
-        Item::Sites => scrolled(ui, item, |ui| {
-            let theme = Theme::of(ui.ctx());
-            let view = screens::sites::view(model, picking);
-            out.actions.extend(screens::sites::show(ui, &view, theme));
-        }),
+        // A site's page is a screen of its own under the Sites item.
+        Item::Sites => match &model.route {
+            Route::Site(name) => scrolled(ui, ("site", name), |ui| {
+                let theme = Theme::of(ui.ctx());
+                let view = screens::site::view(model, name);
+                out.actions.extend(screens::site::show(ui, &view, theme));
+            }),
+            _ => scrolled(ui, item, |ui| {
+                let theme = Theme::of(ui.ctx());
+                let view = screens::sites::view(model, picking);
+                out.actions.extend(screens::sites::show(ui, &view, theme));
+            }),
+        },
         // The log fills the height and scrolls itself.
         Item::Logs => screens::logs::show(ui, model),
         Item::Runtimes => scrolled(ui, item, |ui| {
-            screens::runtimes::show(ui, model, &mut out.commands);
+            let theme = Theme::of(ui.ctx());
+            let view = screens::runtimes::view(model);
+            out.actions
+                .extend(screens::runtimes::show(ui, &view, theme));
         }),
         Item::Services => scrolled(ui, item, |ui| {
             out.actions.extend(screens::services::show(ui, model));
@@ -121,10 +139,11 @@ fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
 }
 
 /// A screen that grows with its content scrolls when the window is short.
-/// Each screen keeps its own scroll position.
-fn scrolled(ui: &mut Ui, item: Item, add: impl FnOnce(&mut Ui)) {
+/// Each screen keeps its own scroll position, and so does each site's page:
+/// `key` names it.
+fn scrolled(ui: &mut Ui, key: impl Hash + std::fmt::Debug, add: impl FnOnce(&mut Ui)) {
     ScrollArea::vertical()
-        .id_salt(("screen", item))
+        .id_salt(("screen", key))
         .auto_shrink(false)
         .show(ui, add);
 }
@@ -158,4 +177,119 @@ fn confirm(ctx: &egui::Context, model: &mut Model) -> Option<Command> {
         model.cancel_removal();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use marsa_core::types::{Health, Site, SiteKind, SiteList};
+
+    use super::*;
+    use crate::model::Update;
+    use crate::widgets::harness::Harness;
+
+    fn model_with_shop() -> Model {
+        let mut model = Model::default();
+        model.update(Update::Connected(Health {
+            app_version: "0.0.0".into(),
+            api_version: 1,
+            pid: 7,
+        }));
+        let root = PathBuf::from("/code/shop");
+        model.update(Update::Sites(SiteList {
+            sites: vec![Site {
+                name: "shop".into(),
+                docroot: root.join("public"),
+                root,
+                kind: SiteKind::Laravel,
+                php: None,
+                php_source: None,
+                secure: true,
+            }],
+            ..SiteList::default()
+        }));
+        model
+    }
+
+    /// The tree of one frame of the whole window on `route`.
+    fn tree_on(route: Route) -> crate::widgets::harness::Tree {
+        let mut model = model_with_shop();
+        model.route = route;
+        Harness::new(egui::Theme::Light).accessibility(|ui| {
+            show(ui, &mut model, false);
+        })
+    }
+
+    #[test]
+    fn a_site_route_draws_the_page_of_that_site_under_the_sites_item() {
+        let tree = tree_on(Route::Site("shop".into()));
+        // The page has its own buttons; the Sites screen has none of them.
+        assert!(tree.node_with_label(strings::OPEN_FOLDER).is_some());
+        assert!(tree.node_with_label(strings::ADD_SITE_BUTTON).is_none());
+        let sites = tree_on(Route::Sites);
+        assert!(sites.node_with_label(strings::ADD_SITE_BUTTON).is_some());
+        assert!(sites.node_with_label(strings::OPEN_FOLDER).is_none());
+    }
+
+    /// The tree of the window on `route` after `frames` frames, with the
+    /// install dialog of PHP open.
+    fn tree_with_install_dialog(route: Route) -> crate::widgets::harness::Tree {
+        let mut model = model_with_shop();
+        model.route = route;
+        model.update(Update::Runtimes(marsa_core::types::RuntimeList {
+            runtimes: vec![marsa_core::types::RuntimeVersions {
+                runtime: marsa_core::runtimes::Runtime::Php,
+                installed: vec!["8.4.27".into()],
+                default: Some("8.4".into()),
+            }],
+        }));
+        model.apply_action(Action::AskInstall(marsa_core::runtimes::Runtime::Php));
+        assert_eq!(
+            model.install_dialog,
+            Some(marsa_core::runtimes::Runtime::Php)
+        );
+        let harness = Harness::new(egui::Theme::Light);
+        for _ in 0..20 {
+            harness.run(|ui| {
+                show(ui, &mut model, false);
+            });
+        }
+        harness.accessibility(|ui| {
+            show(ui, &mut model, false);
+        })
+    }
+
+    #[test]
+    fn the_install_dialog_covers_any_screen_not_only_runtimes() {
+        for route in [
+            Route::Home,
+            Route::Site("shop".into()),
+            Route::Sites,
+            Route::Runtimes(marsa_core::runtimes::Runtime::Node),
+        ] {
+            let tree = tree_with_install_dialog(route.clone());
+            assert!(
+                tree.node_with_label("Install a PHP version").is_some(),
+                "{route:?}"
+            );
+            assert!(tree.node_with_label("Version").is_some(), "{route:?}");
+        }
+        // Closed, it is on no screen.
+        assert!(
+            tree_on(Route::Home)
+                .node_with_label("Install a PHP version")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_site_that_is_gone_shows_a_message_and_the_way_back_and_does_not_panic() {
+        let tree = tree_on(Route::Site("gone".into()));
+        assert!(
+            tree.node_with_text(&strings::site_missing("gone"))
+                .is_some()
+        );
+        assert!(tree.node_with_label(strings::OPEN_FOLDER).is_none());
+    }
 }

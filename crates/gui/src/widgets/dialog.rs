@@ -10,6 +10,12 @@
 //! pending question, and drops the question when [`ConfirmDialog::show`]
 //! returns an answer. Clicking the scrim answers nothing: a click beside a
 //! dialog is not a choice.
+//!
+//! A question that needs one answer typed in, such as the version to install,
+//! shows its field between the body and the buttons
+//! ([`ConfirmDialog::show_with`]); the field takes the focus when the dialog
+//! opens ([`ConfirmDialog::field_first`]), because Cancel first would make
+//! Enter cancel before the user typed.
 
 use eframe::egui::{
     Context, CornerRadius, Frame, Id, Key, Label, Margin, Modal, Modifiers, RichText, Role, Stroke,
@@ -45,6 +51,8 @@ pub struct ConfirmDialog<'a> {
     confirm: &'a str,
     cancel: &'a str,
     destructive: bool,
+    /// The body holds a field that takes the focus first, not Cancel.
+    field_first: bool,
 }
 
 impl<'a> ConfirmDialog<'a> {
@@ -56,7 +64,15 @@ impl<'a> ConfirmDialog<'a> {
             confirm,
             cancel: strings::CANCEL,
             destructive: false,
+            field_first: false,
         }
+    }
+
+    /// The body holds a field (added by [`ConfirmDialog::show_with`]): it
+    /// takes the focus when the dialog opens, and Cancel does not.
+    pub const fn field_first(mut self) -> Self {
+        self.field_first = true;
+        self
     }
 
     /// The action destroys something: its button is the danger style, and a
@@ -88,7 +104,13 @@ impl<'a> ConfirmDialog<'a> {
     /// The inside of the card. `new`: the dialog was not there last frame,
     /// so Cancel takes the focus. `preview`: draw Cancel as it looks when it
     /// has the focus, though it has none (the gallery).
-    fn contents(&self, ui: &mut Ui, new: bool, preview: bool) -> Option<Answer> {
+    fn contents(
+        &self,
+        ui: &mut Ui,
+        new: bool,
+        preview: bool,
+        body: impl FnOnce(&mut Ui, bool),
+    ) -> Option<Answer> {
         let theme = Theme::of(ui.ctx());
         // 440 in all: the margins and the border are inside it.
         let chrome = theme.space.s6 + theme.space.s6 + theme.size.border + theme.size.border;
@@ -98,11 +120,14 @@ impl<'a> ConfirmDialog<'a> {
             .font(theme.text.dialog_title.font_id())
             .color(theme.color.ink);
         ui.add(Label::new(title));
-        let body = RichText::new(self.body)
+        let text = RichText::new(self.body)
             .font(theme.text.body.font_id())
             .color(theme.color.ink2)
             .line_height(Some(theme.text.body.size * theme.text.line_height_body));
-        ui.add(Label::new(body));
+        ui.add(Label::new(text));
+        // The field, if the question has one. `new`: the first frame, when
+        // it asks for the focus.
+        body(ui, new);
         ui.add_space(theme.space.s1);
         let mut answer = None;
         let size = vec2(ui.available_width(), theme.size.control);
@@ -123,7 +148,7 @@ impl<'a> ConfirmDialog<'a> {
             } else {
                 cancel
             });
-            if new {
+            if new && !self.field_first {
                 cancel.request_focus();
             }
             if cancel.clicked() {
@@ -143,7 +168,7 @@ impl<'a> ConfirmDialog<'a> {
     pub fn show_card(self, ui: &mut Ui) -> Option<Answer> {
         let theme = Theme::of(ui.ctx());
         Self::frame(theme)
-            .show(ui, |ui| self.contents(ui, false, true))
+            .show(ui, |ui| self.contents(ui, false, true, |_, _| {}))
             .inner
     }
 
@@ -151,13 +176,21 @@ impl<'a> ConfirmDialog<'a> {
     /// answered: a click on a button, Enter or Space on the focused one, or
     /// Esc, which cancels.
     pub fn show(self, ctx: &Context) -> Option<Answer> {
+        self.show_with(ctx, |_, _| {})
+    }
+
+    /// [`ConfirmDialog::show`] with `body` drawn between the text and the
+    /// buttons: a text field, for a question with one typed answer. `body`
+    /// gets whether the dialog was absent last frame, the time to move the
+    /// focus to its field.
+    pub fn show_with(self, ctx: &Context, body: impl FnOnce(&mut Ui, bool)) -> Option<Answer> {
         let theme = Theme::of(ctx);
         let id = Id::unique(("confirm_dialog", self.id));
         let new = is_new(ctx, id);
         let shown = Modal::new(id)
             .backdrop_color(theme.color.scrim)
             .frame(Self::frame(theme))
-            .show(ctx, |ui| self.contents(ui, new, false));
+            .show(ctx, |ui| self.contents(ui, new, false, body));
         // Esc reads only for the top dialog, and not while a menu in it is
         // open (that Esc closes the menu).
         let escape = shown.is_top_modal
@@ -187,6 +220,7 @@ mod tests {
     use super::*;
     use crate::theme::tests::{TEXT, UI, contrast};
     use crate::theme::{DARK, LIGHT};
+    use crate::widgets::Field;
     use crate::widgets::harness::Harness;
 
     const THEMES: [(&str, &Theme, egui::Theme); 2] = [
@@ -415,6 +449,64 @@ mod tests {
                 Role::Button
             );
         }
+    }
+
+    /// The install dialog's shape: a field after the text, taking the focus.
+    fn ask(text: &mut String, id: egui::Id, ui: &egui::Ui) -> Option<Answer> {
+        ConfirmDialog::new(
+            "ask",
+            "Install a PHP version",
+            "Empty: the newest.",
+            "Install",
+        )
+        .field_first()
+        .show_with(ui.ctx(), |ui, new| {
+            let field = ui.add(Field::new(text, "Version").id(id));
+            if new {
+                field.request_focus();
+            }
+        })
+    }
+
+    #[test]
+    fn a_field_sits_between_the_text_and_the_buttons_and_has_the_focus_not_cancel() {
+        let harness = Harness::new(egui::Theme::Light);
+        let id = egui::Id::unique("dialog_field");
+        let mut text = String::new();
+        // Frames enough for the window to size itself and fade in.
+        for _ in 0..20 {
+            harness.run(|ui| {
+                ask(&mut text, id, ui);
+            });
+        }
+        let tree = harness.accessibility(|ui| {
+            ask(&mut text, id, ui);
+        });
+        assert!(harness.ctx.memory(|memory| memory.has_focus(id)));
+        let y = |label: &str| {
+            tree.node_with_label(label)
+                .and_then(|node| node.bounds())
+                .map(|bounds| bounds.y0)
+                .unwrap_or_else(|| panic!("no {label}"))
+        };
+        let (title, field, cancel) = (y("Install a PHP version"), y("Version"), y("Cancel"));
+        assert!(title < field && field < cancel, "{title} {field} {cancel}");
+    }
+
+    #[test]
+    fn enter_in_the_field_does_not_answer_and_escape_still_cancels() {
+        let harness = Harness::new(egui::Theme::Light);
+        let id = egui::Id::unique("dialog_field");
+        let mut text = String::new();
+        harness.run(|ui| {
+            ask(&mut text, id, ui);
+        });
+        let mut answer = Some(Answer::Confirm);
+        harness.key(Key::Enter, |ui| answer = ask(&mut text, id, ui));
+        assert_eq!(answer, None, "the screen reads Enter from the field");
+        let mut answer = None;
+        harness.key(Key::Escape, |ui| answer = ask(&mut text, id, ui));
+        assert_eq!(answer, Some(Answer::Cancel));
     }
 
     #[test]
