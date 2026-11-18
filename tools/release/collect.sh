@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Puts the platform archives together for one release: checks each archive
-# against its .sha256, adds install.sh, writes SHA256SUMS, and writes the
-# release notes.
+# against its .sha256, adds install.sh and install.ps1, writes SHA256SUMS,
+# and writes the release notes.
 #
 #   VERSION=0.1.0 RELEASE_PLATFORMS="darwin-arm64 darwin-x64" collect.sh <dist folder> <notes file>
 #
 # The folder holds what package.sh wrote for every platform. RELEASE_PLATFORMS
 # names the platforms the release holds (default: all five); the archives of
 # the others are dropped. Afterwards the folder holds exactly the files of the
-# release: those archives, install.sh, and SHA256SUMS.
+# release: those archives, install.sh, install.ps1, and SHA256SUMS.
 set -euo pipefail
 # shellcheck source=tools/release/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -53,9 +53,11 @@ for platform in "${PLATFORMS[@]}"; do
     glibc="$(printf '%s\n' "$glibc" "$needs" | sort -V | tail -n 1)"
   fi
 done
-# The install script ships with the release, and the signed list names it too.
-cp "$ROOT/install.sh" install.sh
-printf '%s  %s\n' "$(sha256_of install.sh)" install.sh > install.sh.sha256
+# The install scripts ship with the release, and the signed list names them too.
+for script in install.sh install.ps1; do
+  cp "$ROOT/$script" "$script"
+  printf '%s  %s\n' "$(sha256_of "$script")" "$script" > "$script.sha256"
+done
 cat ./*.sha256 | sort -k2 > SHA256SUMS
 rm ./*.sha256 ./BUILD-INFO-*.txt
 
@@ -128,7 +130,7 @@ One archive per system. Each holds ${programs}\`LICENSE\`, and \`BUILD-INFO.txt\
 $lines
 ## Checksums and signature
 
-\`SHA256SUMS\` lists the sha256 of every archive and of \`install.sh\`. \`SHA256SUMS.minisig\` is its [minisign](https://jedisct1.github.io/minisign/) signature. The owner makes it on their own machine, and the secret key is never in CI:
+\`SHA256SUMS\` lists the sha256 of every archive, of \`install.sh\`, and of \`install.ps1\`. \`SHA256SUMS.minisig\` is its [minisign](https://jedisct1.github.io/minisign/) signature. The owner makes it on their own machine, and the secret key is never in CI:
 
 \`\`\`sh
 minisign -S -s ~/.minisign/marsa-runtimes.key -m SHA256SUMS -t "marsa release v$VERSION"
