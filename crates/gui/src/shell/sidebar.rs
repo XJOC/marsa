@@ -177,8 +177,12 @@ fn nav(model: &Model, item: Item, current: Item, folded: bool) -> NavItem<'stati
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use eframe::egui::{self, Pos2, pos2};
-    use marsa_core::types::Health as DaemonHealth;
+    use marsa_core::types::{
+        Event, Health as DaemonHealth, ServiceState, ServiceStatus, Site, SiteKind, SiteList,
+    };
 
     use super::*;
     use crate::model::Update;
@@ -202,6 +206,44 @@ mod tests {
             api_version: 1,
             pid: 7,
         }));
+        model
+    }
+
+    /// A model whose `overall()` is `overall`.
+    fn model_in(overall: Overall) -> Model {
+        let mut model = connected();
+        let web = |model: &mut Model, state| {
+            let root = PathBuf::from("/code/shop");
+            let sites = SiteList {
+                sites: vec![Site {
+                    name: "shop".into(),
+                    docroot: root.join("public"),
+                    root,
+                    kind: SiteKind::Laravel,
+                    php: None,
+                    php_source: None,
+                    secure: true,
+                }],
+                ..SiteList::default()
+            };
+            model.update(Update::Sites(sites));
+            model.update(Update::Services(vec![ServiceStatus {
+                id: crate::model::WEB_SERVER.into(),
+                state,
+                pid: None,
+                restarts: 0,
+                since_ms: None,
+            }]));
+        };
+        match overall {
+            Overall::Connecting => model = Model::default(),
+            Overall::Stopping => model.update(Update::Event(Event::ShuttingDown)),
+            Overall::DaemonDown => model.update(Update::Failed("daemon_start_failed".into())),
+            Overall::NoSites => {}
+            Overall::Starting => web(&mut model, ServiceState::Starting),
+            Overall::WebServerDown => web(&mut model, ServiceState::Stopped),
+            Overall::Working => web(&mut model, ServiceState::Running),
+        }
         model
     }
 
@@ -350,6 +392,46 @@ mod tests {
         assert_eq!(health(Overall::Connecting), Health::Busy);
         assert_eq!(health(Overall::WebServerDown), Health::Error);
         assert_eq!(health(Overall::Working), Health::Ok);
+    }
+
+    #[test]
+    fn the_name_stays_in_place_whatever_the_status_says() {
+        let all = [
+            Overall::Connecting,
+            Overall::Stopping,
+            Overall::DaemonDown,
+            Overall::NoSites,
+            Overall::Starting,
+            Overall::WebServerDown,
+            Overall::Working,
+        ];
+        let harness = Harness::new(egui::Theme::Light);
+        let mut places = Vec::new();
+        for overall in all {
+            let mut model = model_in(overall);
+            assert_eq!(model.overall(), overall);
+            let tree = harness.accessibility(|ui| {
+                show(ui, &model, false);
+            });
+            let name = tree.node_with_text(strings::APP_NAME).expect("the name");
+            let name = name.bounds().expect("the name's place");
+            // It starts where the tiles under it start.
+            let home = tree.node_with_label(Item::Home.label()).expect("Home");
+            let home = home.bounds().expect("Home's place");
+            let tile = home.x0 + f64::from(LIGHT.size.nav_inset());
+            assert!((name.x0 - tile).abs() < 0.01, "{overall:?}: {name:?}");
+            places.push(name);
+            // Folded, the sidebar shows no name, in any state.
+            model.sidebar_folded = true;
+            let tree = harness.accessibility(|ui| {
+                show(ui, &model, false);
+            });
+            assert!(
+                tree.node_with_text(strings::APP_NAME).is_none(),
+                "{overall:?}"
+            );
+        }
+        assert!(places.iter().all(|place| *place == places[0]), "{places:?}");
     }
 
     #[test]
