@@ -175,13 +175,21 @@ impl eframe::App for App {
         let picking = self.picker.is_some();
         let output = shell::show(ui, &mut self.model, picking);
         for action in output.actions {
-            // A local action: the system opens the site, not a screen
-            // (code.md, State).
-            if let Action::OpenSite(name) = &action {
-                if let Some(url) = self.model.site_url(name) {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            // Local actions: the system opens the site and the folder dialog,
+            // not a screen (code.md, State).
+            match &action {
+                Action::OpenSite(name) => {
+                    if let Some(url) = self.model.site_url(name) {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                    }
+                    continue;
                 }
-                continue;
+                Action::PickFolder(pick) => {
+                    let ctx = ui.ctx().clone();
+                    self.open_picker(&ctx, *pick);
+                    continue;
+                }
+                _ => {}
             }
             if let Some(command) = self.model.apply_action(action) {
                 self.bridge.send(command);

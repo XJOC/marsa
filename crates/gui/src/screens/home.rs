@@ -21,8 +21,8 @@ use marsa_core::types::{ServiceAction, ServiceState};
 use semver::Version;
 
 use crate::model::{
-    self, Action, Connection, FIRST_PHP, HostsSync, InstallJob, InstallStep, LogSource, Model,
-    Route, Setup, WEB_SERVER,
+    self, Action, Connection, FIRST_PHP, HostsSync, InstallJob, InstallStep, InstallView,
+    LogSource, Model, Route, Setup, WEB_SERVER,
 };
 use crate::strings;
 use crate::theme::page::{HOME_OPEN_COLUMN, HOME_PHP_COLUMN};
@@ -401,13 +401,7 @@ fn install_fix(
     let view = model
         .install_view()
         .filter(|view| view.runtime == Some(job.runtime));
-    let progress = view.filter(|_| busy).map(|view| InstallBar {
-        words: strings::install_status(view),
-        fraction: match view.step {
-            InstallStep::Waiting | InstallStep::ListChecked => None,
-            _ => Some(view.step.fraction()),
-        },
-    });
+    let progress = view.filter(|_| busy).map(install_bar);
     let failed = view
         .filter(|view| matches!(view.step, InstallStep::Failed(_)))
         .map(strings::install_status);
@@ -418,6 +412,17 @@ fn install_fix(
         disabled: busy.then_some(strings::INSTALL_BUSY_HINT),
     };
     (vec![fix], progress, failed)
+}
+
+/// The words and the share of an install. Also the first-run panel's.
+pub(super) fn install_bar(view: &InstallView) -> InstallBar {
+    InstallBar {
+        words: strings::install_status(view),
+        fraction: match view.step {
+            InstallStep::Waiting | InstallStep::ListChecked => None,
+            _ => Some(view.step.fraction()),
+        },
+    }
 }
 
 fn default_php(model: &Model) -> DefaultPhp {

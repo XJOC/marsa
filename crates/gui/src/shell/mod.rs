@@ -89,15 +89,16 @@ pub fn show(ui: &mut Ui, model: &mut Model, picking: bool) -> Output {
 fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
     let item = Item::of(&model.route);
     match item {
+        // First run replaces Home until the first site can open.
         Item::Home => scrolled(ui, item, |ui| {
             let theme = Theme::of(ui.ctx());
-            let view = screens::home::view(model);
-            out.actions.extend(screens::home::show(ui, &view, theme));
-            // TODO(M5-D5): first run replaces Home until the first site
-            // opens over HTTPS.
-            if model.first_run.is_some() && model.is_connected() {
-                ui.add_space(Theme::of(ui.ctx()).space.section_gap);
-                out.commands.extend(screens::first_run::show(ui, model));
+            if model.needs_first_run() {
+                let view = screens::first_run::view(model);
+                out.actions
+                    .extend(screens::first_run::show(ui, &view, theme));
+            } else {
+                let view = screens::home::view(model);
+                out.actions.extend(screens::home::show(ui, &view, theme));
             }
         }),
         // TODO(M5-D7): a site's own page. Until then it shows the Sites

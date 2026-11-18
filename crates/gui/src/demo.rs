@@ -1,7 +1,8 @@
 //! Debug builds only: fixed fake data for the design review (task M5-D5).
-//! `MARSA_GUI_DEMO=ok|caddy-stopped` fills the model with a few sites, PHP
-//! and Caddy, and starts no bridge and no daemon: the window draws a state
-//! the review needs without a machine to break. Pair it with
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1` fills the model with a few
+//! sites, PHP and Caddy (or nothing, for the first run), and starts no bridge
+//! and no daemon: the window draws a state the review needs without a
+//! machine to break. Pair it with
 //! `MARSA_GUI_SCREENSHOT` and `MARSA_GUI_THEME` (see `screenshot`).
 //!
 //! Nothing here reaches a real data folder: the names and folders are made
@@ -12,10 +13,11 @@ use std::path::PathBuf;
 
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    Health, RuntimeList, RuntimeVersions, ServiceState, ServiceStatus, Site, SiteKind, SiteList,
+    Event, Health, InstallEvent, InstallProgress, InstallUpdate, RuntimeList, RuntimeVersions,
+    ServiceState, ServiceStatus, Site, SiteKind, SiteList,
 };
 
-use crate::model::{Model, Update, WEB_SERVER};
+use crate::model::{Model, Update, WEB_SERVER, apply};
 
 /// The variable that names the state.
 const VAR: &str = "MARSA_GUI_DEMO";
@@ -27,6 +29,9 @@ pub enum Demo {
     Ok,
     /// The same, with Caddy stopped.
     CaddyStopped,
+    /// A new install: nothing installed, and PHP 8.4 downloading, 18 of
+    /// 31 MB (the first step of the first-run panel).
+    FirstRun1,
 }
 
 /// The state `MARSA_GUI_DEMO` asks for, if it names one.
@@ -38,6 +43,7 @@ fn parse(name: &str) -> Option<Demo> {
     Some(match name {
         "ok" => Demo::Ok,
         "caddy-stopped" => Demo::CaddyStopped,
+        "first-run-1" => Demo::FirstRun1,
         _ => return None,
     })
 }
@@ -49,16 +55,60 @@ pub fn fill(model: &mut Model, demo: Demo) {
         api_version: 1,
         pid: 1,
     }));
+    if demo == Demo::FirstRun1 {
+        return first_run_downloading(model);
+    }
     model.update(Update::Runtimes(runtimes(&["8.3.27", "8.4.27"])));
     let caddy = match demo {
-        Demo::Ok => ServiceState::Running,
         Demo::CaddyStopped => ServiceState::Stopped,
+        Demo::Ok | Demo::FirstRun1 => ServiceState::Running,
     };
     model.update(Update::Services(vec![
         service(WEB_SERVER, caddy),
         service("php-fpm-8.4", ServiceState::Running),
     ]));
     model.update(Update::Sites(sites()));
+}
+
+/// Nothing installed, and the first-run install under way: what the panel
+/// shows once the user pressed its button.
+fn first_run_downloading(model: &mut Model) {
+    model.update(Update::Runtimes(RuntimeList {
+        runtimes: vec![
+            RuntimeVersions {
+                runtime: Runtime::Php,
+                installed: Vec::new(),
+                default: None,
+            },
+            RuntimeVersions {
+                runtime: Runtime::Caddy,
+                installed: Vec::new(),
+                default: None,
+            },
+        ],
+    }));
+    model.start_first_run();
+    let Some(job) = model.next_install() else {
+        return;
+    };
+    model.update(Update::InstallAccepted { job, id: 1 });
+    let progress = |step| {
+        Event::Install(InstallProgress {
+            id: 1,
+            update: InstallUpdate::Running(step),
+        })
+    };
+    let selected = InstallEvent::Selected {
+        runtime: Runtime::Php,
+        version: "8.4.27".into(),
+    };
+    let downloading = InstallEvent::Downloading {
+        artifact: "php-8.4.27-macos-arm64.tar.gz".into(),
+        done: 18_000_000,
+        total: 31_000_000,
+    };
+    apply(model, progress(selected));
+    apply(model, progress(downloading));
 }
 
 fn runtimes(php: &[&str]) -> RuntimeList {
@@ -119,7 +169,18 @@ mod tests {
     fn a_demo_is_named_by_its_state() {
         assert_eq!(parse("ok"), Some(Demo::Ok));
         assert_eq!(parse("caddy-stopped"), Some(Demo::CaddyStopped));
+        assert_eq!(parse("first-run-1"), Some(Demo::FirstRun1));
         assert_eq!(parse("on fire"), None);
+    }
+
+    #[test]
+    fn the_first_run_demo_has_nothing_installed_and_the_php_download_running() {
+        let mut model = Model::default();
+        fill(&mut model, Demo::FirstRun1);
+        assert!(model.needs_first_run());
+        assert!(model.installing());
+        let words = crate::strings::install_status(model.install_view().expect("an install"));
+        assert!(words.starts_with("Downloading PHP 8.4.27"), "{words}");
     }
 
     #[test]

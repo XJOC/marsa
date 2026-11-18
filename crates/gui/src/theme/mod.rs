@@ -317,6 +317,8 @@ pub struct Size {
     pub status_hero: f32,
     /// The state icon in that circle: 22.
     pub status_hero_icon: f32,
+    /// The circle of a step card, with its number or its check: 28.
+    pub step_circle: f32,
     /// The circle of a state pill: 18.
     pub state_circle: f32,
     /// The state icon in that circle: 10.
@@ -477,6 +479,7 @@ pub const SIZE: Size = Size {
     status_dot_icon: 13.0,
     status_hero: 44.0,
     status_hero_icon: 22.0,
+    step_circle: 28.0,
     state_circle: 18.0,
     state_icon: 10.0,
     state_ring: 1.5,

@@ -19,7 +19,7 @@ use crate::model::{
 };
 use crate::theme::Section;
 use crate::tray::menu::Daemon;
-use crate::widgets::{PillState, StepState};
+use crate::widgets::{PillState, Stage, StepState};
 
 pub const APP_NAME: &str = "Marsa";
 
@@ -115,16 +115,45 @@ pub const XDEBUG_HINT: &str = "Load Xdebug in every installed PHP that has it, i
 pub const XDEBUG_SLOW: &str = "PHP runs two to four times slower while Xdebug is on. Turn it \
      off when you are done debugging.";
 
-// The first-run panel (task M5-10).
+// The first-run panel (tasks M5-10 and M5-D5).
 
-pub const FIRST_RUN_TITLE: &str = "Get started";
-pub const FIRST_RUN_TEXT: &str =
-    "Marsa needs PHP and the Caddy web server to serve your sites. Neither is installed yet.";
+pub const FIRST_RUN_WELCOME: &str = "Welcome to Marsa";
+pub const FIRST_RUN_INTRO: &str = "Three steps, and your first site opens over HTTPS.";
 /// Names the version of `model::FIRST_PHP`; a test keeps the two the same.
 pub const FIRST_RUN_INSTALL: &str = "Install PHP 8.4 and Caddy";
-pub const FIRST_RUN_INSTALL_HINT: &str =
-    "Downloads PHP 8.4 and Caddy from Marsa's signed version list, one after the other.";
-pub const FIRST_RUN_READY: &str = "PHP and Caddy are installed. One last step, needed once:";
+pub const FIRST_RUN_INSTALL_BODY: &str = "Downloaded from Marsa's signed version list. PHP runs \
+     your code; Caddy serves your sites.";
+pub const FIRST_RUN_INSTALLED: &str = "PHP and Caddy are installed";
+pub const FIRST_RUN_SETUP: &str = "Set up HTTPS for .test sites";
+pub const FIRST_RUN_SITE: &str = "Add your first site";
+pub const FIRST_RUN_SITE_BODY: &str = "Park a folder of projects, where each sub-folder becomes a \
+     site, or link one project folder.";
+/// The primary button while its step runs.
+pub const INSTALLING: &str = "Installing…";
+pub const INSTALLING_HINT: &str = "The install runs by itself. Wait for it to end.";
+pub const SETTING_UP: &str = "Setting up…";
+
+/// The title of the first step, and the label of its button: what is left
+/// to install.
+pub const fn first_run_install_title(php: bool, caddy: bool) -> &'static str {
+    match (php, caddy) {
+        (true, true) => FIRST_RUN_INSTALL,
+        (true, false) => INSTALL_PHP,
+        (false, true) => INSTALL_CADDY,
+        (false, false) => FIRST_RUN_INSTALLED,
+    }
+}
+
+/// What a screen reader says for a step card: "Step 2: Set up HTTPS, to do
+/// now".
+pub fn step_label(number: u8, title: &str, stage: Stage) -> String {
+    let word = match stage {
+        Stage::Done => "done",
+        Stage::Current => "to do now",
+        Stage::Next => "comes next",
+    };
+    format!("Step {number}: {title}, {word}")
+}
 pub const NOT_NOW: &str = "Not now";
 pub const CLOSE: &str = "Close";
 
@@ -2066,10 +2095,7 @@ mod tests {
         let line = format!("PHP {}", crate::model::FIRST_PHP);
         assert_eq!(INSTALL_PHP, format!("Install {line}"));
         assert!(FIRST_RUN_INSTALL.contains(&line), "{FIRST_RUN_INSTALL}");
-        assert!(
-            FIRST_RUN_INSTALL_HINT.contains(&line),
-            "{FIRST_RUN_INSTALL_HINT}"
-        );
+        assert_eq!(FIRST_RUN_INSTALL, format!("Install {line} and Caddy"));
     }
 
     /// ADR 0018: on Windows the prompt is UAC, the first time only.
