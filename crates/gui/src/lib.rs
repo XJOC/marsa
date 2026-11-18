@@ -10,6 +10,10 @@
 pub mod app;
 pub mod bridge;
 pub mod model;
+// Debug builds only: a design-review aid, so a release build reads no extra
+// environment variable (task M5-D1).
+#[cfg(debug_assertions)]
+pub mod screenshot;
 pub mod startup;
 pub mod strings;
 pub mod theme;

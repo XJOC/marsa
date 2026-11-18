@@ -45,6 +45,10 @@ pub struct App {
     picker: Option<Picker>,
     /// Set until the first frame, to log the time it took.
     started: Option<Instant>,
+    /// The picture of the window that `MARSA_GUI_SCREENSHOT` asks for.
+    // Debug builds only: a design-review aid (see `screenshot`).
+    #[cfg(debug_assertions)]
+    screenshot: Option<crate::screenshot::Screenshot>,
 }
 
 /// A folder dialog that is open on its own thread, so the window keeps
@@ -72,6 +76,9 @@ impl App {
             bridge,
             picker: None,
             started: Some(started),
+            // Debug builds only: a design-review aid (see `screenshot`).
+            #[cfg(debug_assertions)]
+            screenshot: crate::screenshot::Screenshot::start(ctx),
         }
     }
 
@@ -203,6 +210,11 @@ impl eframe::App for App {
         }
         // A button may have queued an install.
         self.send_next_install();
+        // Debug builds only: a design-review aid (see `screenshot`).
+        #[cfg(debug_assertions)]
+        if let Some(screenshot) = &mut self.screenshot {
+            screenshot.frame(ui.ctx(), self.model.is_connected());
+        }
     }
 }
 
