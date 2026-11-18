@@ -34,6 +34,8 @@ pub struct App {
     picker: Option<Picker>,
     /// Set until the first frame, to log the time it took.
     started: Option<Instant>,
+    /// The measurement `MARSA_GUI_MEASURE` asks for (see `measure`).
+    measure: Option<crate::measure::Run>,
     /// The picture of the window that `MARSA_GUI_SCREENSHOT` asks for.
     // Debug builds only: a design-review aid (see `screenshot`).
     #[cfg(debug_assertions)]
@@ -86,6 +88,7 @@ impl App {
             window: None,
             picker: None,
             started: Some(started),
+            measure: None,
             // Debug builds only: a design-review aid (see `screenshot`).
             #[cfg(debug_assertions)]
             screenshot: crate::screenshot::Screenshot::start(ctx),
@@ -93,6 +96,15 @@ impl App {
             #[cfg(debug_assertions)]
             gallery: crate::widgets::gallery::requested(),
         }
+    }
+
+    /// The window in measurement mode: it shows made-up data and counts its
+    /// frames (see `measure`).
+    #[must_use]
+    pub fn measuring(mut self, plan: crate::measure::Plan) -> Self {
+        crate::measure::fill(&mut self.model, plan);
+        self.measure = Some(crate::measure::Run::new(plan));
+        self
     }
 
     /// Sends the next queued install once none of this window runs.
@@ -238,7 +250,11 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if let Some(started) = self.started.take() {
-            tracing::debug!(ms = started.elapsed().as_millis(), "first frame");
+            let ms = started.elapsed().as_millis();
+            tracing::debug!(ms, "first frame");
+            if let Some(run) = &mut self.measure {
+                run.first_frame(ms);
+            }
         }
         // Debug builds only: the widget gallery replaces the screens.
         #[cfg(debug_assertions)]
@@ -288,6 +304,9 @@ impl eframe::App for App {
         }
         // A button may have queued an install.
         self.send_next_install();
+        if let Some(run) = &mut self.measure {
+            run.frame(ui.ctx());
+        }
         self.follow_appearance(ui.ctx());
         self.note_window(ui.ctx());
         // Debug builds only: a design-review aid (see `screenshot`).
@@ -331,6 +350,25 @@ mod tests {
             prefs,
             Instant::now(),
         )
+    }
+
+    #[test]
+    fn the_measuring_window_shows_made_up_sites_and_counts_its_frames() {
+        use crate::measure::Plan;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ctx = egui::Context::default();
+        let plan = Plan {
+            sites: 12,
+            idle: std::time::Duration::from_secs(1),
+        };
+        let measured = app(&ctx, dir.path(), Prefs::default()).measuring(plan);
+        assert!(measured.model.is_connected());
+        assert_eq!(measured.model.sites.sites.len(), 12);
+        assert_eq!(measured.model.route, Route::Sites);
+        assert!(measured.measure.is_some());
+        // Not measuring: no sites, and no count.
+        let plain = app(&ctx, dir.path(), Prefs::default());
+        assert!(plain.measure.is_none() && plain.model.sites.sites.is_empty());
     }
 
     #[test]
