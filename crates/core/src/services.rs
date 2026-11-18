@@ -27,8 +27,93 @@ pub struct ServiceSpec {
     /// The working folder. `None` keeps the daemon's.
     pub cwd: Option<PathBuf>,
     pub restart: RestartPolicy,
-    /// How long a stop waits after SIGTERM before it kills the process.
-    pub stop_grace: Duration,
+    pub stop: StopMethod,
+}
+
+/// A Unix signal that the daemon sends with `/bin/kill`
+/// (`platform::process::send_signal`). Windows has none.
+///
+/// Defined here, not in `platform` (which needs the `full` feature), because
+/// a [`StopMethod`] names its signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// Asks the process to clean up and stop. PostgreSQL reads it as a
+    /// "smart" shutdown that waits for every client, so it never gets it
+    /// (ADR 0023).
+    Term,
+    /// PostgreSQL's "fast" shutdown: it ends the sessions and stops.
+    Int,
+    /// PostgreSQL's "immediate" shutdown: it stops at once and recovers its
+    /// data at the next start.
+    Quit,
+    /// Cannot be caught: the process ends at once.
+    Kill,
+}
+
+impl Signal {
+    /// The name for logs, for example `SIGTERM`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Term => "SIGTERM",
+            Self::Int => "SIGINT",
+            Self::Quit => "SIGQUIT",
+            Self::Kill => "SIGKILL",
+        }
+    }
+}
+
+/// How the supervisor stops a process: each step in turn asks it to stop and
+/// waits up to its own limit for the exit. After the last step, a kill.
+///
+/// A list of steps, not one variant per server, because every stop in
+/// ADR 0023 has this shape and only the way to ask differs:
+///
+/// - Caddy and php-fpm: SIGTERM, then a kill ([`StopMethod::term`]).
+/// - PostgreSQL on macOS and Linux: SIGINT, then SIGQUIT, then a kill
+///   ([`StopMethod::signals`]). Never SIGTERM.
+/// - Later, on Windows (M6-07): a stop command such as
+///   `pg_ctl stop -m fast`, then a kill.
+/// - Later, Valkey (M6-06): `SHUTDOWN SAVE` over its protocol, then SIGTERM,
+///   then a kill.
+///
+/// So each new way to ask is one more [`StopAction`] variant, and the steps,
+/// their limits, and the final kill stay as they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopMethod {
+    pub steps: Vec<StopStep>,
+}
+
+/// One step of a [`StopMethod`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopStep {
+    pub action: StopAction,
+    /// How long to wait for the exit before the next step.
+    pub wait: Duration,
+}
+
+/// How one step asks the process to stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopAction {
+    /// Windows sends no signals: there the step is skipped, with no wait.
+    Signal(Signal),
+}
+
+impl StopMethod {
+    /// SIGTERM, up to `grace` to exit, then a kill: Caddy and php-fpm.
+    pub fn term(grace: Duration) -> Self {
+        Self::signals([(Signal::Term, grace)])
+    }
+
+    /// Each signal in turn, each with its own limit, then a kill.
+    pub fn signals(steps: impl IntoIterator<Item = (Signal, Duration)>) -> Self {
+        let step = |(signal, wait)| StopStep {
+            action: StopAction::Signal(signal),
+            wait,
+        };
+        Self {
+            steps: steps.into_iter().map(step).collect(),
+        }
+    }
 }
 
 /// A relative `program`: `marsad` never searches `PATH`.
@@ -138,6 +223,24 @@ mod tests {
         assert_eq!(delays, [ms(100), ms(200), ms(400), ms(800), ms(1000), None]);
         // No overflow, however many restarts.
         assert_eq!(restart_delay(on_failure(u32::MAX), 40), Some(1000 * MS));
+    }
+
+    #[test]
+    fn stop_methods_keep_each_signal_and_its_limit_in_order() {
+        let step = |signal, ms: u32| StopStep {
+            action: StopAction::Signal(signal),
+            wait: ms * MS,
+        };
+        // Caddy and php-fpm: one SIGTERM step, as before this type.
+        assert_eq!(
+            StopMethod::term(2000 * MS).steps,
+            [step(Signal::Term, 2000)]
+        );
+        // PostgreSQL's ladder (ADR 0023).
+        let ladder = StopMethod::signals([(Signal::Int, 10_000 * MS), (Signal::Quit, 2000 * MS)]);
+        let want = [step(Signal::Int, 10_000), step(Signal::Quit, 2000)];
+        assert_eq!(ladder.steps, want);
+        assert_eq!(Signal::Quit.name(), "SIGQUIT");
     }
 
     #[test]

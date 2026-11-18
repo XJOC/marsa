@@ -11,6 +11,8 @@ use marsa_core::runtimes::Runtime;
 use semver::Version;
 use serde::Deserialize;
 
+use super::upstream::is_segment;
+
 /// The runtimes in manifest order.
 pub const RUNTIMES: [Runtime; 5] = Runtime::ALL;
 
@@ -23,14 +25,12 @@ struct RawPins {
     node: RawList,
     composer: RawList,
     caddy: RawList,
-    /// Optional until the first PostgreSQL version is pinned (M6-02).
-    #[serde(default)]
     postgres: RawList,
     #[serde(default, rename = "override")]
     overrides: Vec<RawOverride>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawList {
     versions: Vec<String>,
@@ -112,8 +112,8 @@ impl Pins {
                 runtime.dir_name()
             );
             ensure!(!o.urls.is_empty(), "{what}: urls is empty");
-            if let Some(url) = o.urls.iter().find(|u| !u.starts_with("https://")) {
-                bail!("{what}: {url:?} is not an https URL");
+            for url in &o.urls {
+                check_url(url).with_context(|| what.clone())?;
             }
             let key = (runtime.dir_name(), version, platform, o.artifact);
             ensure!(
@@ -163,8 +163,36 @@ impl Pins {
         if let Some(rest) = url.strip_prefix(WINDOWS_PHP_RELEASES) {
             urls.push(format!("{WINDOWS_PHP_RELEASES}archives/{rest}"));
         }
+        for url in &urls {
+            check_url(url).with_context(|| format!("the {} recipe", runtime.dir_name()))?;
+        }
         Ok(urls)
     }
+}
+
+/// Refuses a URL that the HTTP client may read another way than it is
+/// written. It must be `https://`, a host of letters, digits, and `-` between
+/// dots, then path parts that are each one [`is_segment`]. So there is no
+/// `\` (read as `/`), `%` (`%2e%2e` is `..`), `?`, `#`, `@`, `:`, whitespace,
+/// control character, or `.` or `..` part, any of which could point the URL
+/// of a known source at another repository.
+fn check_url(url: &str) -> Result<()> {
+    let Some(rest) = url.strip_prefix("https://") else {
+        bail!("{url:?} is not an https URL");
+    };
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host_ok = host.split('.').all(|label| {
+        !label.is_empty()
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    });
+    ensure!(
+        host_ok && path.split('/').all(is_segment),
+        "{url:?} is not a plain https URL: a host, then path parts of [A-Za-z0-9._+-] \
+         that are not `.` or `..`"
+    );
+    Ok(())
 }
 
 const WINDOWS_PHP_RELEASES: &str = "https://windows.php.net/downloads/releases/";
@@ -222,6 +250,9 @@ versions = ["2.11.1"]
 [caddy]
 versions = ["2.11.8"]
 
+[postgres]
+versions = ["18.7.0", "17.12.0"]
+
 [[override]]
 runtime = "php"
 version = "8.3.27"
@@ -246,21 +277,16 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
     }
 
     #[test]
-    fn postgres_is_optional() {
+    fn postgres_is_required() {
         let pins = Pins::parse(FULL).expect("valid pins");
-        assert!(pins.versions(Runtime::Postgres).is_empty());
-
-        let with = FULL.replace(
-            "[caddy]\nversions = [\"2.11.8\"]\n",
-            "[caddy]\nversions = [\"2.11.8\"]\n\n[postgres]\nversions = [\"18.7.0\", \"17.12.0\"]\n",
-        );
-        let pins = Pins::parse(&with).expect("valid pins");
         assert_eq!(
             pins.versions(Runtime::Postgres),
             &[v("18.7.0"), v("17.12.0")]
         );
-        let bad = with.replace("17.12.0", "17.12");
-        assert!(Pins::parse(&bad).is_err());
+        let without = FULL.replace("[postgres]\nversions = [\"18.7.0\", \"17.12.0\"]\n", "");
+        assert!(error(&without).contains("missing field `postgres`"));
+        let bad = FULL.replace("17.12.0", "17.12");
+        assert!(error(&bad).contains("is not semver"));
     }
 
     #[test]
@@ -391,6 +417,135 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
                 assert!(super::super::upstream::sum_file_for(url).is_some());
             }
         }
+    }
+
+    /// PostgreSQL is the theseus-rs release named by the recipe, with no
+    /// override, for all five platforms, and every file has a `.sha256`
+    /// beside it: without one, `build` stops (ADR 0023, section 3).
+    #[test]
+    fn repository_postgres_urls_are_theseus_releases() {
+        use super::super::upstream::{Layout, Source, sum_file_for};
+
+        let pins = Pins::parse(include_str!("../../../recipes/pins.toml")).expect("valid pins");
+        assert!(!pins.versions(Runtime::Postgres).is_empty());
+        let recipe = recipes::builtin(Runtime::Postgres).expect("postgres recipe");
+        for version in pins.versions(Runtime::Postgres) {
+            for platform in Platform::ALL.into_iter().filter(|p| *p != Platform::Any) {
+                let template = recipe
+                    .artifact_url(platform, "archive", version)
+                    .unwrap_or_else(|| panic!("{version} has no {platform} archive"));
+                let urls = pins
+                    .urls(Runtime::Postgres, version, platform, "archive")
+                    .expect("urls");
+                assert_eq!(
+                    urls,
+                    std::slice::from_ref(&template),
+                    "no override for postgres"
+                );
+                let sums = sum_file_for(&template).expect("theseus publishes sums");
+                assert_eq!(
+                    (sums.source, sums.layout, sums.url),
+                    (
+                        Source::Theseus,
+                        Layout::Single,
+                        format!("{template}.sha256")
+                    )
+                );
+            }
+        }
+    }
+
+    /// An override URL of any source that the HTTP client would resolve to
+    /// another place is refused: `\\` is read as `/`, `%2e%2e` and `..` go up.
+    #[test]
+    fn override_urls_must_be_plain() {
+        use super::super::upstream::{CADDY_RELEASES, PHP_RELEASES, THESEUS_RELEASES};
+
+        let evil = r"x-\..\..\..\..\..\..\evil\repo\releases\download\18.7.0\";
+        for (runtime, version, platform, artifact, dir, name) in [
+            (
+                "php",
+                "8.4.23",
+                "darwin-arm64",
+                "php",
+                format!("{PHP_RELEASES}8.4.23-r1"),
+                "php-8.4.23-darwin-arm64.tar.gz",
+            ),
+            (
+                "caddy",
+                "2.11.8",
+                "windows-x64",
+                "archive",
+                format!("{CADDY_RELEASES}2.11.8"),
+                "caddy_2.11.8_windows_amd64.zip",
+            ),
+            (
+                "postgres",
+                "18.7.0",
+                "linux-x64",
+                "archive",
+                format!("{THESEUS_RELEASES}18.7.0"),
+                "postgresql-18.7.0-x86_64-unknown-linux-gnu.tar.gz",
+            ),
+        ] {
+            // A TOML literal string, so `\\` stays as it is.
+            let pins = |url: &str| {
+                format!(
+                    "{FULL}[[override]]\nruntime = \"{runtime}\"\nversion = \"{version}\"\n\
+                     platform = \"{platform}\"\nartifact = \"{artifact}\"\nurls = ['{url}']\n"
+                )
+            };
+            Pins::parse(&pins(&format!("{dir}/{name}"))).expect("a plain URL");
+            for url in [
+                format!("{dir}/{evil}{name}"),
+                format!("{dir}/%2e%2e/%2e%2e/evil/{name}"),
+                format!("{dir}/{name}?x"),
+                format!("{dir}/{name}#x"),
+                format!("{dir}/../../evil/{name}"),
+                format!("{dir}/./{name}"),
+                format!("{dir}/{name} "),
+                format!("{dir}/{name}\t"),
+            ] {
+                let message = error(&pins(&url));
+                assert!(
+                    message.contains("is not a plain https URL"),
+                    "{url}: {message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plain_urls_only() {
+        check_url("https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.gz")
+            .expect("plain");
+        for url in [
+            // The URL from the review of #175: reqwest goes to github.com/evil/repo.
+            r"https://github.com/theseus-rs/postgresql-binaries/releases/download/18.7.0/postgresql-18.7.0-\..\..\..\..\..\..\evil\repo\releases\download\18.7.0\postgresql-18.7.0-x86_64-pc-windows-msvc.zip",
+            "https://github.com/x/%2e%2e/y.zip",
+            "https://github.com/x/y.zip?a",
+            "https://github.com/x/y.zip#a",
+            "https://github.com/x/../y.zip",
+            "https://github.com/./y.zip",
+            "https://github.com/x/y .zip",
+            "https://github.com/x/y\u{0}.zip",
+            "https://github.com/x/y\n.zip",
+            "https://github.com@evil.example/y.zip",
+            "https://github.com:443/y.zip",
+            "https://github..com/y.zip",
+            "https:///y.zip",
+            "https://github.com",
+            "https://github.com/",
+            "https://github.com/x//y.zip",
+        ] {
+            let err = check_url(url).expect_err(url);
+            assert!(
+                err.to_string().contains("is not a plain https URL"),
+                "{err}"
+            );
+        }
+        let err = check_url("http://nodejs.org/dist/x.tar.gz").expect_err("http");
+        assert!(err.to_string().contains("is not an https URL"), "{err}");
     }
 
     /// Caddy is the official release, and every file has an upstream sha512.

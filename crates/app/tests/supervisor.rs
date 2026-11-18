@@ -1,12 +1,17 @@
 //! The supervisor against a fake service. The fake is this test binary: it
 //! runs itself again with `MARSA_FAKE_SERVICE` set, so no external program is
-//! needed and the tests are the same on macOS, Linux, and Windows.
+//! needed and the tests are the same on macOS, Linux, and Windows, except the
+//! stop-method tests (task M6-03).
+//!
+//! `#[cfg(unix)]` on those tests and their helpers: they send SIGINT and
+//! SIGQUIT and record the signals the fake gets, and only Unix has signals.
+//! Windows stops a service with a kill, which the other tests cover.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use marsa::daemon::supervisor::{ServiceHandle, Supervisor};
-use marsa_core::services::{RestartPolicy, ServiceSpec};
+use marsa_core::services::{RestartPolicy, ServiceSpec, StopMethod};
 use marsa_core::types::{Event, LogLine, LogStream, ServiceState};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -47,15 +52,50 @@ fn fake_service() {
             println!("fake ready");
             std::future::pending::<()>().await;
         }),
+        // Print each stop signal they get. `pg` stops on SIGINT and ignores
+        // SIGTERM, like PostgreSQL with a client connected (ADR 0023).
+        // `deaf` ignores them all: only a kill stops it.
+        #[cfg(unix)]
+        "pg" | "deaf" => tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(print_signals(mode == "pg")),
         other => panic!("unknown fake mode {other}"),
+    }
+}
+
+#[cfg(unix)]
+async fn print_signals(stop_on_sigint: bool) {
+    use tokio::signal::unix::{SignalKind, signal};
+    let handler = |kind| signal(kind).expect("a signal handler");
+    let mut term = handler(SignalKind::terminate());
+    let mut int = handler(SignalKind::interrupt());
+    let mut quit = handler(SignalKind::quit());
+    println!("fake ready");
+    loop {
+        // `biased`: a SIGTERM that came with another signal prints first.
+        tokio::select! {
+            biased;
+            _ = term.recv() => println!("fake got SIGTERM"),
+            _ = int.recv() => {
+                println!("fake got SIGINT");
+                if stop_on_sigint {
+                    std::process::exit(0);
+                }
+            }
+            _ = quit.recv() => println!("fake got SIGQUIT"),
+        }
     }
 }
 
 type Started = (ServiceHandle, broadcast::Receiver<Event>, TempDir);
 
-/// Starts the fake in `mode`. Returns the handle, the event bus, and the logs
-/// folder.
+/// Starts the fake in `mode`, stopped like Caddy. Returns the handle, the
+/// event bus, and the logs folder.
 fn start(mode: &str, restart: RestartPolicy) -> Started {
+    start_with(mode, restart, StopMethod::term(GRACE))
+}
+
+fn start_with(mode: &str, restart: RestartPolicy, stop: StopMethod) -> Started {
     let spec = ServiceSpec {
         id: mode.into(),
         program: std::env::current_exe().expect("the test binary has a path"),
@@ -66,7 +106,7 @@ fn start(mode: &str, restart: RestartPolicy) -> Started {
         env: BTreeMap::from([(FAKE.to_owned(), mode.to_owned())]),
         cwd: None,
         restart,
-        stop_grace: GRACE,
+        stop,
     };
     let (tx, rx) = broadcast::channel(1024);
     let logs = tempfile::tempdir().expect("a temp folder");
@@ -194,8 +234,80 @@ fn a_relative_program_is_rejected() {
         env: BTreeMap::new(),
         cwd: None,
         restart: RestartPolicy::Never,
-        stop_grace: GRACE,
+        stop: StopMethod::term(GRACE),
     };
     let err = Supervisor::spawn(spec, tx, std::path::Path::new("logs")).unwrap_err();
     assert_eq!(err.code(), "program_not_absolute");
+}
+
+/// The texts of the fake's lines, in order.
+#[cfg(unix)]
+fn fake_texts(events: &[Event]) -> Vec<String> {
+    fake_lines(events)
+        .into_iter()
+        .map(|line| line.text)
+        .collect()
+}
+
+/// Waits until the fake has its signal handlers.
+#[cfg(unix)]
+async fn ready(handle: &ServiceHandle) {
+    let ready = async {
+        while !handle.recent_logs().iter().any(|l| l.text == "fake ready") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(WAIT, ready)
+        .await
+        .expect("the fake started");
+}
+
+/// PostgreSQL's ladder (ADR 0023): SIGINT, then SIGQUIT, then a kill.
+#[cfg(unix)]
+fn postgres_ladder(wait: Duration) -> StopMethod {
+    use marsa_core::services::Signal;
+    StopMethod::signals([(Signal::Int, wait), (Signal::Quit, wait)])
+}
+
+/// Stops the fake in `mode` with `stop`, and gives its events and how long
+/// the stop took.
+#[cfg(unix)]
+async fn stop_fake(mode: &str, stop: StopMethod) -> (Vec<Event>, Duration) {
+    let (mut handle, mut rx, _logs) = start_with(mode, RestartPolicy::Never, stop);
+    ready(&handle).await;
+    let started = Instant::now();
+    handle.cancel.cancel();
+    let events = finish(&mut handle, &mut rx).await;
+    let elapsed = started.elapsed();
+    let changes = states(&events);
+    assert_eq!(
+        changes[2..],
+        [ServiceState::Stopping, ServiceState::Stopped]
+    );
+    assert_eq!(handle.status().pid, None);
+    (events, elapsed)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_postgres_ladder_stops_on_sigint_and_never_sends_sigterm() {
+    // Long, so a stop that needed a second step would fail the time check.
+    let wait = Duration::from_secs(10);
+    let (events, elapsed) = stop_fake("pg", postgres_ladder(wait)).await;
+    assert!(elapsed < wait, "SIGINT did not stop it: {elapsed:?}");
+    // The fake prints every stop signal it gets, SIGTERM too: SIGINT alone
+    // came.
+    assert_eq!(fake_texts(&events), ["fake ready", "fake got SIGINT"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_postgres_ladder_ends_in_a_kill_after_each_wait() {
+    let (events, elapsed) = stop_fake("deaf", postgres_ladder(GRACE)).await;
+    // The fake ignores SIGINT and SIGQUIT: only the kill ends it, after both
+    // waits. The margin covers two runs of `/bin/kill`.
+    assert!(elapsed >= 2 * GRACE, "killed too early: {elapsed:?}");
+    assert!(elapsed < 2 * GRACE + Duration::from_secs(2), "{elapsed:?}");
+    let want = ["fake ready", "fake got SIGINT", "fake got SIGQUIT"];
+    assert_eq!(fake_texts(&events), want);
 }

@@ -45,7 +45,7 @@ use marsa_core::php::{Listen, PhpError, PhpFiles, PhpMinor, fpm_conf, fpm_listen
 use marsa_core::platform::process;
 use marsa_core::recipes::{self, Platform};
 use marsa_core::runtimes::{Runtime, RuntimesDir, RuntimesError};
-use marsa_core::services::ServiceSpec;
+use marsa_core::services::{ServiceSpec, StopMethod};
 use marsa_core::sites::{Site, SiteKind};
 use marsa_core::types::{Event, LogStream, ServiceState, ServiceStatus};
 use semver::Version;
@@ -140,7 +140,7 @@ pub fn fpm_spec(program: PathBuf, files: &PhpFiles) -> ServiceSpec {
         env: BTreeMap::new(),
         cwd: None,
         restart: RESTART,
-        stop_grace: STOP_GRACE,
+        stop: StopMethod::term(STOP_GRACE),
     }
 }
 
@@ -865,7 +865,7 @@ mod tests {
         assert!(spec.env.is_empty());
         assert_eq!(spec.cwd, None);
         assert_eq!(spec.restart, RESTART);
-        assert_eq!(spec.stop_grace, STOP_GRACE);
+        assert_eq!(spec.stop, StopMethod::term(STOP_GRACE));
     }
 
     #[test]

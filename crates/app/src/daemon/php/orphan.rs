@@ -479,7 +479,7 @@ impl Orphans<'_> {
             // master itself is checked after that, right before its signal.
             let workers = match signal {
                 Signal::Kill => self.workers_under(record, pid, None, reap).await,
-                Signal::Term => Some(Vec::new()),
+                Signal::Term | Signal::Int | Signal::Quit => Some(Vec::new()),
             };
             let state = self.check(record).await;
             match state {
@@ -1383,6 +1383,8 @@ mod tests {
             let after = procs.get(&pid).and_then(|proc| match signal {
                 Signal::Term => proc.after_term.clone(),
                 Signal::Kill => proc.after_kill.clone(),
+                // The orphan code sends neither.
+                Signal::Int | Signal::Quit => None,
             });
             if let Some(state) = after {
                 if state == Liveness::Gone {
