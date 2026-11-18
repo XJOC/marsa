@@ -13,7 +13,7 @@ use eframe::egui::{
 };
 
 use super::icons::Icon;
-use super::{Look, Touch, layout, paint_focus_ring, slot, touched};
+use super::{Look, Touch, layout, paint_focus_ring, quiet_fill, slot, touched};
 use crate::theme::{Direction, Face, TextToken, Theme};
 
 /// What kind of button this is.
@@ -58,14 +58,9 @@ pub struct Colors {
 /// The colors of a button of `kind` while `touch` happens to it.
 pub fn colors(theme: &Theme, kind: Kind, tone: QuietTone, touch: Touch) -> Colors {
     let c = &theme.color;
-    // A button with no fill shows `selected` at 50% under the pointer, as a
-    // table row does, and `selected` when pressed: text on it keeps its
-    // contrast (moving `selected` toward `ink` would not).
-    let no_fill = || match touch {
-        Touch::Rest => None,
-        Touch::Hover => Some(c.selected.gamma_multiply(theme.state.row_hover)),
-        Touch::Pressed => Some(c.selected),
-    };
+    // A button with no fill shows `selected` under the pointer, as a table
+    // row does (see `quiet_fill`).
+    let no_fill = || quiet_fill(theme, touch);
     match kind {
         Kind::Primary => Colors {
             fill: Some(touched(theme, c.accent, touch)),
