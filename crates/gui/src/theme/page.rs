@@ -6,12 +6,10 @@
 /// The width of the site name field of the link form.
 pub const NAME_FIELD_WIDTH: f32 = 180.0;
 
-/// The services table: the narrowest service column, the first width and
-/// the narrowest of the state column, and the narrowest PID column.
-pub const SERVICE_COLUMN_MIN: f32 = 80.0;
-pub const STATE_COLUMN_WIDTH: f32 = 260.0;
-pub const STATE_COLUMN_MIN: f32 = 80.0;
-pub const PID_COLUMN_MIN: f32 = 50.0;
+/// The Services screen (task M5-D10): the columns after the name and its
+/// line, as the mockup has them: the state pill, and the buttons.
+pub const SERVICES_STATE_COLUMN: f32 = 130.0;
+pub const SERVICES_ACTIONS_COLUMN: f32 = 190.0;
 
 /// The Sites screen (task M5-D6): the search field of the header, the
 /// columns after the site (the PHP menu with its reason, the connection, and

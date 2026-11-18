@@ -152,6 +152,16 @@ pub struct TableOutput {
     pub rect: Rect,
 }
 
+/// The color of the second line of a two-line cell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineTone {
+    /// `mute`: a folder, a description.
+    #[default]
+    Mute,
+    /// `error`: why something failed.
+    Error,
+}
+
 /// A row being filled: [`Row::cell`] adds one cell after the other.
 pub struct Row<'a, 'b> {
     row: TableRow<'a, 'b>,
@@ -218,6 +228,12 @@ impl<'a, 'b> Row<'a, 'b> {
     /// (`~/Code/shop`): `full` is the text a screen reader hears and the
     /// tooltip shows while the pointer rests on the cell.
     pub fn two_lines_hover(&mut self, primary: &str, secondary: &str, full: &str) {
+        self.two_lines_toned(primary, secondary, full, LineTone::Mute);
+    }
+
+    /// [`Row::two_lines_hover`] with the second line in `tone`: a service
+    /// that failed says why in `error`, under its name.
+    pub fn two_lines_toned(&mut self, primary: &str, secondary: &str, full: &str, tone: LineTone) {
         let theme = self.theme;
         self.cell(|ui| {
             let width = ui.available_width();
@@ -239,7 +255,11 @@ impl<'a, 'b> Row<'a, 'b> {
             let painter = ui.painter();
             let below = top + vec2(0.0, first.size().y);
             painter.galley(top, first, theme.color.ink);
-            painter.galley(below, second, theme.color.mute);
+            let color = match tone {
+                LineTone::Mute => theme.color.mute,
+                LineTone::Error => theme.color.error,
+            };
+            painter.galley(below, second, color);
             let label = format!("{primary}, {full}");
             response.widget_info(|| WidgetInfo::labeled(Role::Label, true, &label));
             if full != secondary {
@@ -839,6 +859,36 @@ mod tests {
         let wide = texts(&harness, 900.0);
         assert!(narrow <= 120.0 + 1.0, "cut to the column: {narrow}");
         assert!(wide > 300.0, "whole when it fits: {wide}");
+    }
+
+    #[test]
+    fn the_second_line_is_mute_and_a_failure_is_told_in_the_error_color() {
+        for (theme, egui_theme) in [(&LIGHT, egui::Theme::Light), (&DARK, egui::Theme::Dark)] {
+            let harness = Harness::new(egui_theme);
+            let color_of = |text: &str, tone: LineTone| {
+                let columns = [TableColumn::fill("Service")];
+                harness
+                    .shapes(|ui| {
+                        Table::new("tone", "Tone", &columns)
+                            .rows(RowHeight::TwoLine)
+                            .show(ui, 1, |row| row.two_lines_toned("Caddy", text, text, tone));
+                    })
+                    .into_iter()
+                    .find_map(|shape| match shape {
+                        Shape::Text(shape) if shape.galley.text() == text => {
+                            Some(shape.fallback_color)
+                        }
+                        _ => None,
+                    })
+                    .expect("the second line")
+            };
+            assert_eq!(color_of("Runs PHP", LineTone::Mute), theme.color.mute);
+            assert_eq!(color_of("It stopped", LineTone::Error), theme.color.error);
+            // The default tone is the quiet one, so every old caller is unchanged.
+            assert_eq!(LineTone::default(), LineTone::Mute);
+            // The words of a failure read on the card.
+            assert!(contrast(theme.color.error, theme.color.surface) >= TEXT);
+        }
     }
 
     #[test]

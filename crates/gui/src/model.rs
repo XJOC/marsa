@@ -39,7 +39,7 @@ pub const MAIN_RUNTIME: Runtime = Runtime::Php;
 /// The start of the id of each PHP pool: php-fpm on macOS and Linux
 /// (`php-fpm-8.4`), php-cgi on Windows (`php-cgi-8.4`, ADR 0016). The daemon
 /// starts and stops the pools with the sites, and refuses actions on them.
-const POOL_PREFIXES: [&str; 2] = ["php-fpm-", "php-cgi-"];
+const POOLS: [(&str, PoolKind); 2] = [("php-fpm-", PoolKind::Fpm), ("php-cgi-", PoolKind::Cgi)];
 /// The most installs kept for the Runtimes section. The daemon runs one at a
 /// time, so a few are plenty.
 const MAX_INSTALLS: usize = 4;
@@ -908,6 +908,23 @@ impl Model {
             .filter(|site| runs(site))
             .map(|site| site.name.as_str())
             .collect()
+    }
+
+    /// How many sites run a PHP version of `line` (`8.4`): what a pool of that
+    /// line serves. A line that is not `major.minor` has none.
+    pub fn sites_on_line(&self, line: &str) -> usize {
+        let Some((major, minor)) = line.split_once('.') else {
+            return 0;
+        };
+        let (Ok(major), Ok(minor)) = (major.parse::<u64>(), minor.parse::<u64>()) else {
+            return 0;
+        };
+        self.sites
+            .sites
+            .iter()
+            .filter_map(|site| site.php.as_ref())
+            .filter(|php| php.major == major && php.minor == minor)
+            .count()
     }
 
     /// The sites whose own setting picks `version` of `runtime`: the ones the
@@ -1904,10 +1921,27 @@ fn failure(code: String) -> InstallFailure {
     }
 }
 
+/// The program a PHP pool runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolKind {
+    /// php-fpm: macOS and Linux.
+    Fpm,
+    /// php-cgi: Windows.
+    Cgi,
+}
+
 /// Whether the service `id` is a PHP pool, which starts and stops with the
 /// sites that need it.
 pub fn is_pool(id: &str) -> bool {
-    POOL_PREFIXES.iter().any(|prefix| id.starts_with(prefix))
+    pool_of(id).is_some()
+}
+
+/// The program and the PHP line (`8.4`) of the pool `id` names, if it names
+/// one: `php-fpm-8.4`.
+pub fn pool_of(id: &str) -> Option<(PoolKind, &str)> {
+    POOLS
+        .iter()
+        .find_map(|(prefix, kind)| id.strip_prefix(prefix).map(|line| (*kind, line)))
 }
 
 /// The address of a site in the browser: `https://shop.test`, or
@@ -2881,6 +2915,46 @@ mod tests {
         assert!(is_pool("php-cgi-8.4"));
         for id in ["caddy", "php", "php-fpm", "my-php-fpm-8.4", "dns"] {
             assert!(!is_pool(id), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_pool_id_gives_its_program_and_its_php_line() {
+        assert_eq!(pool_of("php-fpm-8.4"), Some((PoolKind::Fpm, "8.4")));
+        assert_eq!(pool_of("php-cgi-8.3"), Some((PoolKind::Cgi, "8.3")));
+        for id in ["caddy", "php-fpm", "mailpit", ""] {
+            assert_eq!(pool_of(id), None, "{id}");
+        }
+    }
+
+    #[test]
+    fn a_line_counts_the_sites_that_run_a_version_of_it() {
+        let site = |name: &str, php: Option<&str>| Site {
+            name: name.into(),
+            root: PathBuf::from("/code").join(name),
+            docroot: PathBuf::from("/code").join(name).join("public"),
+            kind: marsa_core::types::SiteKind::Laravel,
+            php: php.map(|text| text.parse().expect("a version")),
+            php_source: None,
+            secure: true,
+        };
+        let mut model = connected();
+        model.update(Update::Sites(SiteList {
+            sites: vec![
+                site("a", Some("8.4.27")),
+                site("b", Some("8.4.1")),
+                site("c", Some("8.3.27")),
+                site("d", Some("8.40.0")),
+                site("e", None),
+            ],
+            ..SiteList::default()
+        }));
+        assert_eq!(model.sites_on_line("8.4"), 2);
+        assert_eq!(model.sites_on_line("8.3"), 1);
+        // `8.40` is another line than `8.4`, and a text that is no line has none.
+        assert_eq!(model.sites_on_line("8.40"), 1);
+        for line in ["8", "", "x.y", "8.", "9.9"] {
+            assert_eq!(model.sites_on_line(line), 0, "{line:?}");
         }
     }
 
