@@ -582,6 +582,12 @@ pub enum Action {
     ConfirmRemoval,
     /// "Cancel" or Escape in the confirmation.
     CancelRemoval,
+    /// The Start at login switch in Settings.
+    ToggleAutostart,
+    /// "Open folder" on the data folder in Settings. A local action like
+    /// [`Action::OpenFolder`]: `App` shows [`Model::data_dir`] in the system's
+    /// file manager.
+    OpenDataFolder,
     /// An option of the Appearance control in Settings. `App` applies it at
     /// once and writes it to `gui.toml` (task M5-D9).
     SetAppearance(Appearance),
@@ -1706,6 +1712,7 @@ impl Model {
                 None
             }
             Action::ToggleXdebug => self.toggle_xdebug().map(Command::SetXdebug),
+            Action::ToggleAutostart => self.toggle_autostart().map(Command::SetAutostart),
             Action::ConfirmRemoval => self.confirm_removal().map(Command::Remove),
             Action::CancelRemoval => {
                 self.cancel_removal();
@@ -1719,7 +1726,10 @@ impl Model {
             }
             // Done by `App`, with the system's opener and dialog: nothing
             // changes here.
-            Action::OpenSite(_) | Action::OpenFolder(_) | Action::PickFolder(_) => None,
+            Action::OpenSite(_)
+            | Action::OpenFolder(_)
+            | Action::OpenDataFolder
+            | Action::PickFolder(_) => None,
         }
     }
 

@@ -48,3 +48,9 @@ pub const SITE_FACT_LABEL: f32 = 130.0;
 pub const RUNTIMES_LIST_WIDTH: f32 = 220.0;
 pub const RUNTIMES_VERSION_COLUMN: f32 = 110.0;
 pub const RUNTIMES_TAG_COLUMN: f32 = 90.0;
+
+/// The Settings screen (task M5-D9): the width of its column (the mockup's
+/// 680), and the least room the name and hint of a row keep next to its
+/// control, so a long value is cut short instead of squeezing the text.
+pub const SETTINGS_WIDTH: f32 = 680.0;
+pub const SETTINGS_TEXT_MIN: f32 = 220.0;

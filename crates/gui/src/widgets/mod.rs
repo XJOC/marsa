@@ -35,6 +35,7 @@ pub mod menu;
 pub mod nav;
 pub mod notice;
 pub mod segmented;
+pub mod setting_rows;
 pub mod status;
 pub mod step;
 pub mod switch;
@@ -63,6 +64,7 @@ pub use menu::{Item as MenuItem, Menu};
 pub use nav::NavItem;
 pub use notice::{Notice, NoticeBar, NoticeKind, Notices, Progress, Reaction};
 pub use segmented::Segmented;
+pub use setting_rows::{SettingRows, setting_card};
 pub use status::{
     Health, PathStep, PillState, RequestPath, StatePill, StatusDot, StatusSentence, StepState,
 };

@@ -1,5 +1,5 @@
 //! Debug builds only: fixed fake data for the design review (task M5-D5).
-//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install`
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! fills the model with a few sites, PHP and Caddy (or nothing, for the
 //! first run), and starts no bridge and no daemon: the window draws a state the review needs without a
 //! machine to break. Pair it with
@@ -11,13 +11,17 @@
 
 use std::path::PathBuf;
 
+use marsa_core::helper::{OpResult, OpStatus};
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
     Event, Health, InstallEvent, InstallProgress, InstallUpdate, RuntimeList, RuntimeVersions,
-    ServiceState, ServiceStatus, Site, SiteKind, SiteList, SkippedFolder, Source, XdebugState,
+    ServiceState, ServiceStatus, SetupReport, Site, SiteKind, SiteList, SkippedFolder, Source,
+    XdebugState,
 };
 
-use crate::model::{InstallJob, LinkForm, Model, SitesNotice, Update, WEB_SERVER, apply};
+use crate::model::{
+    Autostart, InstallJob, LinkForm, Model, Removal, SitesNotice, Update, WEB_SERVER, apply,
+};
 
 /// The variable that names the state.
 const VAR: &str = "MARSA_GUI_DEMO";
@@ -53,6 +57,22 @@ pub enum Demo {
     RuntimesInstalling,
     /// `Runtimes`, with the install dialog of PHP open.
     RuntimesInstall,
+    /// The same as `Ok`, with Start at login on and nothing known of setup:
+    /// the Settings screen (task M5-D9). Its data folder is a made-up one,
+    /// under the demo's home.
+    Settings,
+    /// `Settings` after a setup of this session: the certificate and the
+    /// `.test` names are done.
+    SettingsSetup,
+    /// The same as `Ok`, with the confirmation of "Unlink shop.test?" open.
+    ConfirmUnlink,
+    /// `Runtimes`, with the confirmation of uninstalling PHP 8.3.27 open.
+    ConfirmUninstall,
+    /// The same as `Ok`, with the success notice of an Unlink.
+    NoticeSuccess,
+    /// The same as `Ok`, with the error notice of a refused Unlink and its
+    /// "Forget ~/Code…" action.
+    NoticeError,
 }
 
 /// The state `MARSA_GUI_DEMO` asks for, if it names one.
@@ -73,6 +93,12 @@ fn parse(name: &str) -> Option<Demo> {
         "runtimes" => Demo::Runtimes,
         "runtimes-installing" => Demo::RuntimesInstalling,
         "runtimes-install" => Demo::RuntimesInstall,
+        "settings" => Demo::Settings,
+        "settings-setup" => Demo::SettingsSetup,
+        "confirm-unlink" => Demo::ConfirmUnlink,
+        "confirm-uninstall" => Demo::ConfirmUninstall,
+        "notice-success" => Demo::NoticeSuccess,
+        "notice-error" => Demo::NoticeError,
         _ => return None,
     })
 }
@@ -125,9 +151,65 @@ pub fn fill(model: &mut Model, demo: Demo) {
     }
     if matches!(
         demo,
-        Demo::Runtimes | Demo::RuntimesInstalling | Demo::RuntimesInstall
+        Demo::Runtimes | Demo::RuntimesInstalling | Demo::RuntimesInstall | Demo::ConfirmUninstall
     ) {
         runtimes_screen(model, demo);
+    }
+    dialogs_and_notices(model, demo);
+    if matches!(demo, Demo::Settings | Demo::SettingsSetup) {
+        settings_screen(model, demo);
+    }
+}
+
+/// The confirmations and the notices of the design review.
+fn dialogs_and_notices(model: &mut Model, demo: Demo) {
+    match demo {
+        Demo::ConfirmUnlink => {
+            model.ask_removal(Removal::Unlink {
+                site: "shop".into(),
+            });
+        }
+        Demo::ConfirmUninstall => {
+            model.ask_removal(Removal::Uninstall {
+                runtime: Runtime::Php,
+                version: "8.3.27".parse().expect("a version"),
+            });
+        }
+        Demo::NoticeSuccess => {
+            model.sites_notice = Some(SitesNotice::Unlinked("old-blog".into()));
+        }
+        Demo::NoticeError => {
+            let folder = PathBuf::from("/demo/Code");
+            model.sites.parked = vec![folder.clone()];
+            model.sites_notice = Some(SitesNotice::SiteIsParked {
+                site: "shop".into(),
+                folder: Some(folder),
+            });
+        }
+        _ => {}
+    }
+}
+
+/// What Settings shows beyond `Ok`: Start at login read, a data folder under
+/// the demo's home, and, for `SettingsSetup`, a setup that ran.
+fn settings_screen(model: &mut Model, demo: Demo) {
+    model.update(Update::Autostart(Autostart::On));
+    model.data_dir = PathBuf::from("/demo/Library/Application Support/Marsa");
+    if demo == Demo::SettingsSetup {
+        let done = |op: &str, status| OpResult {
+            op: op.into(),
+            status,
+            code: None,
+            message: None,
+        };
+        model.update(Update::SetupDone(SetupReport {
+            results: vec![
+                done("resolver_install", OpStatus::Done),
+                done("pf_install", OpStatus::Done),
+                done("trust_install", OpStatus::Unchanged),
+            ],
+            ..SetupReport::default()
+        }));
     }
 }
 
@@ -344,6 +426,12 @@ mod tests {
         assert_eq!(parse("runtimes"), Some(Demo::Runtimes));
         assert_eq!(parse("runtimes-installing"), Some(Demo::RuntimesInstalling));
         assert_eq!(parse("runtimes-install"), Some(Demo::RuntimesInstall));
+        assert_eq!(parse("settings"), Some(Demo::Settings));
+        assert_eq!(parse("settings-setup"), Some(Demo::SettingsSetup));
+        assert_eq!(parse("confirm-unlink"), Some(Demo::ConfirmUnlink));
+        assert_eq!(parse("confirm-uninstall"), Some(Demo::ConfirmUninstall));
+        assert_eq!(parse("notice-success"), Some(Demo::NoticeSuccess));
+        assert_eq!(parse("notice-error"), Some(Demo::NoticeError));
         assert_eq!(parse("on fire"), None);
     }
 
@@ -418,6 +506,51 @@ mod tests {
         let mut asking = Model::default();
         fill(&mut asking, Demo::RuntimesInstall);
         assert_eq!(asking.install_dialog, Some(Runtime::Php));
+    }
+
+    #[test]
+    fn the_settings_demos_read_start_at_login_and_may_have_run_setup() {
+        use crate::screens::settings::{Check, view};
+        let mut model = Model::default();
+        fill(&mut model, Demo::Settings);
+        let shown = view(&model);
+        assert!(shown.general.autostart.on && shown.general.autostart.off.is_none());
+        assert_eq!(
+            (shown.setup.cert, shown.setup.names),
+            (Check::NotChecked, Check::NotChecked)
+        );
+        // Under the demo's home the folder shows as `~/…` (a path that starts
+        // with `/` is not absolute on Windows, which never shortens it).
+        let text = crate::strings::home_path(shown.about.folder, shown.about.home);
+        if shown.about.home.is_some_and(std::path::Path::is_absolute) {
+            assert!(text.starts_with('~') && text.ends_with("Marsa"), "{text}");
+        }
+        let mut model = Model::default();
+        fill(&mut model, Demo::SettingsSetup);
+        let shown = view(&model).setup;
+        assert_eq!((shown.cert, shown.names), (Check::Done, Check::Done));
+    }
+
+    #[test]
+    fn the_dialog_and_notice_demos_open_a_confirmation_or_hold_a_result() {
+        use crate::shell::{dialogs, notices};
+        let mut model = Model::default();
+        fill(&mut model, Demo::ConfirmUnlink);
+        let view = dialogs::confirm_view(&model).expect("a question");
+        assert_eq!(view.title, "Unlink shop.test?");
+        let mut model = Model::default();
+        fill(&mut model, Demo::ConfirmUninstall);
+        let view = dialogs::confirm_view(&model).expect("a question");
+        assert_eq!(view.title, "Uninstall PHP 8.3.27?");
+        let mut model = Model::default();
+        fill(&mut model, Demo::NoticeSuccess);
+        let bar = notices::current(&model).expect("a notice");
+        assert_eq!(bar.notice.kind, crate::widgets::NoticeKind::Success);
+        let mut model = Model::default();
+        fill(&mut model, Demo::NoticeError);
+        let bar = notices::current(&model).expect("a notice");
+        assert_eq!(bar.notice.kind, crate::widgets::NoticeKind::Error);
+        assert!(bar.fix.is_some() && bar.notice.action.is_some());
     }
 
     #[test]

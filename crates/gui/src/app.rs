@@ -269,6 +269,12 @@ impl eframe::App for App {
                     }
                     continue;
                 }
+                Action::OpenDataFolder => {
+                    if let Err(code) = opener::open_folder(&self.model.data_dir) {
+                        self.model.notice = Some(code.to_owned());
+                    }
+                    continue;
+                }
                 Action::PickFolder(pick) => {
                     let ctx = ui.ctx().clone();
                     self.open_picker(&ctx, *pick);
@@ -279,9 +285,6 @@ impl eframe::App for App {
             if let Some(command) = self.model.apply_action(action) {
                 self.bridge.send(command);
             }
-        }
-        for command in output.commands {
-            self.bridge.send(command);
         }
         // A button may have queued an install.
         self.send_next_install();

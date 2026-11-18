@@ -14,9 +14,10 @@ use marsa_core::types::{
 use semver::Version;
 
 use crate::model::{
-    Autostart, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Overall, Pick, Removal,
-    UninstallNotice,
+    Appearance, Autostart, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Overall,
+    Pick, Removal, UninstallNotice,
 };
+use crate::screens::settings::Check;
 use crate::theme::Section;
 use crate::tray::menu::Daemon;
 use crate::widgets::{PillState, Stage, StepState};
@@ -417,14 +418,61 @@ const SETUP_CADDY_NOT_INSTALLED: &str = "Caddy is not installed, so Marsa's cert
 // Settings (task M5-10).
 
 pub const SETTINGS: &str = "Settings";
+/// The three groups of the Settings screen (task M5-D9).
+pub const SETTINGS_GENERAL: &str = "General";
+pub const SETTINGS_SETUP: &str = "Setup";
+pub const SETTINGS_ABOUT: &str = "About";
+pub const APPEARANCE: &str = "Appearance";
+pub const APPEARANCE_HINT: &str = "System follows your computer's setting.";
+
+/// An option of the Appearance control.
+pub const fn appearance_name(appearance: Appearance) -> &'static str {
+    match appearance {
+        Appearance::System => "System",
+        Appearance::Light => "Light",
+        Appearance::Dark => "Dark",
+    }
+}
+
+pub const LANGUAGE: &str = "Language";
+pub const LANGUAGE_NAME: &str = "English";
+pub const LANGUAGE_HINT: &str = "More languages come later.";
+/// Why Start at login or Run setup cannot be pressed now.
+pub const NEEDS_DAEMON_HINT: &str = "Marsa is not connected to its daemon.";
+pub const SETUP_IS_RUNNING: &str = "Setup is running.";
+pub const AUTOSTART_READING: &str = "Marsa is reading this setting.";
+pub const AUTOSTART_UNSUPPORTED: &str = "Not supported on this system yet.";
 pub const AUTOSTART: &str = "Start at login";
 pub const AUTOSTART_HINT: &str =
     "Start Marsa's menu-bar icon when you log in. The icon starts the daemon.";
 pub const DATA_FOLDER: &str = "Data folder";
 pub const DATA_FOLDER_HINT: &str =
     "Where Marsa keeps its programs, settings, and logs. Chosen when Marsa starts.";
+/// The Setup group: what the window knows of the HTTPS certificate and the
+/// `.test` names. It learns it only from a setup report of this session, so
+/// everything else is "Not checked", never a claim.
+pub const SETUP_ROW: &str = "Setup";
+pub const HTTPS_CERT: &str = "HTTPS certificate";
+pub const HTTPS_CERT_HINT: &str = "Marsa knows this only from a setup run in this window.";
+pub const TEST_NAMES: &str = ".test addresses";
+pub const TEST_NAMES_HINT: &str = "Marsa knows this only from a setup run in this window.";
+
+/// How a check of the Setup group stands, by its word.
+pub const fn check_word(check: Check) -> &'static str {
+    match check {
+        Check::Done => "Done",
+        Check::Failed => "Failed",
+        Check::Skipped => "Skipped",
+        Check::NotChecked => "Not checked",
+    }
+}
+
 pub const APP_VERSION: &str = "Marsa version";
 pub const DAEMON_VERSION: &str = "Daemon version";
+/// Under the Marsa version in Settings: which daemon this window talks to.
+pub fn daemon_hint(connection: &Connection) -> String {
+    format!("{DAEMON_VERSION}: {}", daemon_version(connection))
+}
 pub const NOT_CONNECTED: &str = "Not connected";
 
 /// The window's own code: its background thread could not start.
@@ -466,7 +514,7 @@ pub fn autostart_note(state: Autostart) -> Option<&'static str> {
             "The login file starts Marsa from another folder, or it was changed. Turn this on \
              to fix it.",
         ),
-        Autostart::Unsupported => Some("Not supported on this system yet."),
+        Autostart::Unsupported => Some(AUTOSTART_UNSUPPORTED),
         Autostart::Unknown | Autostart::Off | Autostart::On => None,
     }
 }
@@ -990,7 +1038,6 @@ pub const INSTALL_CADDY: &str = "Install Caddy";
 pub const INSTALL_PHP: &str = "Install PHP 8.4";
 
 pub const DEFAULT_PHP: &str = "Default PHP";
-pub const DEFAULT_PHP_HINT: &str = "used where a site does not ask for a version";
 pub const NO_PHP_YET: &str = "No PHP installed yet.";
 pub const HOME_SITES_EMPTY: &str = "Sites you park or link show here.";
 pub const ADD_SITE: &str = "Add a site";
@@ -2589,6 +2636,10 @@ mod tests {
             "0.3.0 (PID 77)"
         );
         assert_eq!(daemon_version(&Connection::Reconnecting), NOT_CONNECTED);
+        assert_eq!(
+            daemon_hint(&Connection::Reconnecting),
+            "Daemon version: Not connected"
+        );
         for state in [Autostart::Stale, Autostart::Unsupported] {
             assert!(autostart_note(state).is_some(), "{state:?}");
         }
