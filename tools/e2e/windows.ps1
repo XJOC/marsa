@@ -254,6 +254,12 @@ try {
 
     Step 'IIS lets go of port 80'
     $iis = Get-Service -Name W3SVC -ErrorAction SilentlyContinue
+    if ($iis -and $iis.Status -eq 'Running') {
+        # marsa doctor names who holds port 80: IIS answers through HTTP.sys,
+        # which Windows shows as System, PID 4 (task M4-19o).
+        Marsa doctor
+        if ($Out -notmatch 'Port 80 is used by System \(PID 4\)') { Fail 'doctor did not name IIS (System, PID 4) on port 80' }
+    }
     if ($iis) {
         Write-Host "W3SVC: $($iis.Status)"
         Stop-Service -Name W3SVC -Force
@@ -365,6 +371,9 @@ try {
     Marsa doctor
     if ($Out -notmatch 'The Microsoft Visual C\+\+ runtime \S+ is installed\.') { Fail 'doctor did not pass the Visual C++ runtime' }
     if ($Out -notmatch 'PHP trusts the \d+ roots Windows trusts for HTTPS') { Fail "doctor did not pass PHP's CA bundle" }
+    foreach ($line in 'Every site has its line in the hosts file.', 'Ports 80 and 443 reach Caddy.', "Marsa's certificate authority is trusted.") {
+        if (-not $Out.Contains("✓ $line")) { Fail "doctor did not pass: $line" }
+    }
 
     Step "PHP through the shim reads Marsa's php.ini (M1-07)"
     $shimPhp = Join-Path $Shims 'php.exe'
