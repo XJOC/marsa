@@ -526,6 +526,12 @@ pub fn example_version_for(folder: &str) -> &'static str {
         "node" => "22",
         "composer" => "2.8",
         "caddy" => "2.11",
+        // The Phase 2 engines, named before core has them: they stay out of
+        // the Runtimes screen, and these are for their own screens and
+        // messages.
+        "postgres" => "18",
+        "mysql" => "8.4",
+        "valkey" => "8.1",
         // Any runtime added later: a plain number.
         _ => "1.0",
     }
@@ -836,6 +842,10 @@ pub fn runtime_name_for(folder: &'static str) -> &'static str {
         "node" => "Node.js",
         "composer" => "Composer",
         "caddy" => "Caddy",
+        // The Phase 2 engines, named before core has them.
+        "postgres" => "PostgreSQL",
+        "mysql" => "MySQL",
+        "valkey" => "Valkey",
         // Any runtime added later: core's own name.
         other => other,
     }
@@ -848,12 +858,16 @@ pub fn runtime_monogram(runtime: Runtime) -> String {
 }
 
 /// [`runtime_monogram`] by the folder name and the name shown. Three letters
-/// for PHP, "JS" for Node.js; every other runtime gets the first two letters
-/// of its name ("Co", "Ca", "Po" for Postgres), so a new one needs no entry.
+/// for PHP, "JS" for Node.js, "Pg", "My", and "Vk" for the Phase 2 engines;
+/// every other runtime gets the first two letters of its name ("Co", "Ca",
+/// "Py" for Python), so a new one needs no entry.
 pub fn monogram_for(folder: &str, name: &str) -> String {
     match folder {
         "php" => "PHP".to_owned(),
         "node" => "JS".to_owned(),
+        "postgres" => "Pg".to_owned(),
+        "mysql" => "My".to_owned(),
+        "valkey" => "Vk".to_owned(),
         _ => {
             let mut letters = name.chars();
             let first = letters.next().into_iter().flat_map(char::to_uppercase);
@@ -1082,20 +1096,27 @@ pub fn unlink_parked_hint(folder: &Path) -> String {
     )
 }
 
-/// The title of the confirmation.
-pub fn confirm_title(removal: &Removal) -> String {
+/// The title of the confirmation: the exact question. A folder under `home`
+/// shows as `~/…` ([`home_path`]).
+pub fn confirm_title(removal: &Removal, home: Option<&Path>) -> String {
     match removal {
         Removal::Uninstall { runtime, version } => {
             format!("Uninstall {} {version}?", runtime_name(*runtime))
         }
         Removal::Unlink { site } => format!("Unlink {site}.{TLD}?"),
-        Removal::Forget { folder } => format!("Forget {}?", folder.display()),
+        Removal::Forget { folder } => format!("Forget {}?", home_path(folder, home)),
     }
 }
 
-/// What the confirmed removal does. `site_root`: the folder of the site to
-/// unlink; `sites`: how many sites the folder to forget gives now.
-pub fn confirm_text(removal: &Removal, site_root: Option<&Path>, sites: usize) -> String {
+/// What the confirmed removal does, and what stays. `site_root`: the folder
+/// of the site to unlink; `sites`: how many sites the folder to forget gives
+/// now; a folder under `home` shows as `~/…`.
+pub fn confirm_text(
+    removal: &Removal,
+    site_root: Option<&Path>,
+    sites: usize,
+    home: Option<&Path>,
+) -> String {
     match removal {
         Removal::Uninstall { runtime, .. } => format!(
             "Its files are deleted from Marsa's data folder. Marsa refuses if the default, a \
@@ -1105,7 +1126,7 @@ pub fn confirm_text(removal: &Removal, site_root: Option<&Path>, sites: usize) -
         Removal::Unlink { .. } => {
             let kept = site_root.map_or_else(
                 || "Its folder and files stay.".to_owned(),
-                |root| format!("The folder {} and its files stay.", root.display()),
+                |root| format!("The folder {} and its files stay.", home_path(root, home)),
             );
             format!(
                 "Marsa stops serving this site, and its own settings (PHP version, HTTPS) are \
@@ -2690,9 +2711,9 @@ mod tests {
         let forget = Removal::Forget {
             folder: PathBuf::from("/code"),
         };
-        assert_eq!(confirm_title(&uninstall), "Uninstall PHP 8.3.27?");
-        assert_eq!(confirm_title(&unlink), "Unlink api.test?");
-        assert_eq!(confirm_title(&forget), "Forget /code?");
+        assert_eq!(confirm_title(&uninstall, None), "Uninstall PHP 8.3.27?");
+        assert_eq!(confirm_title(&unlink, None), "Unlink api.test?");
+        assert_eq!(confirm_title(&forget, None), "Forget /code?");
         assert_eq!(
             [&uninstall, &unlink, &forget].map(removal_button),
             ["Uninstall", "Unlink", "Forget"]
@@ -2701,22 +2722,37 @@ mod tests {
         assert_eq!(removing(&unlink), "Unlinking api.test…");
         assert_eq!(removing(&forget), "Forgetting /code…");
 
-        let text = confirm_text(&unlink, Some(Path::new("/work/api")), 0);
+        let text = confirm_text(&unlink, Some(Path::new("/work/api")), 0, None);
         assert!(
             text.ends_with("The folder /work/api and its files stay."),
             "{text}"
         );
-        assert!(confirm_text(&unlink, None, 0).ends_with("Its folder and files stay."));
+        assert!(confirm_text(&unlink, None, 0, None).ends_with("Its folder and files stay."));
+        // Under the home folder, a folder shows as `~/…`, in the title too.
+        let (work, api, code_dir) = (full("/work"), full("/work/api"), full("/work/code"));
+        let home = Some(work.as_path());
+        let shown = home_path(&api, home);
+        assert_eq!(shown, tilde(&["api"]));
+        let text = confirm_text(&unlink, Some(&api), 0, home);
+        assert!(
+            text.ends_with(&format!("The folder {shown} and its files stay.")),
+            "{text}"
+        );
+        let code = Removal::Forget { folder: code_dir };
+        assert_eq!(
+            confirm_title(&code, home),
+            format!("Forget {}?", tilde(&["code"]))
+        );
         for (sites, start) in [
             (0, "Marsa stops watching this folder."),
             (1, "Marsa stops serving its site,"),
             (3, "Marsa stops serving its 3 sites,"),
         ] {
-            let text = confirm_text(&forget, None, sites);
+            let text = confirm_text(&forget, None, sites, None);
             assert!(text.starts_with(start), "{text}");
             assert!(text.ends_with("The folder and its files stay."), "{text}");
         }
-        assert!(confirm_text(&uninstall, None, 0).contains("install PHP again"));
+        assert!(confirm_text(&uninstall, None, 0, None).contains("install PHP again"));
     }
 
     #[test]
@@ -2812,11 +2848,11 @@ mod tests {
         );
     }
 
-    /// Task M5-D8: a runtime that core adds later (Postgres, MySQL, Valkey)
-    /// shows with no entry here: core's name for it and two letters of it.
+    /// Task M5-D8: a runtime that core adds later (Python, Go) shows with no
+    /// entry here: core's name for it and two letters of it.
     #[test]
     fn a_runtime_core_adds_later_needs_no_entry_for_its_name_letters_and_example() {
-        for (folder, letters) in [("postgres", "Po"), ("mysql", "My"), ("valkey", "Va")] {
+        for (folder, letters) in [("python", "Py"), ("go", "Go"), ("ruby", "Ru")] {
             let name = runtime_name_for(folder);
             assert_eq!(name, folder, "core's own name");
             assert_eq!(monogram_for(folder, name), letters);
@@ -2856,6 +2892,22 @@ mod tests {
         assert_eq!(names.len(), Section::ALL.len(), "two sections share a name");
         assert_eq!(section_name(Section::Sites), SITES);
         assert_eq!(section_name(Section::Services), SERVICES);
+    }
+
+    /// The Phase 2 engines have their own entries before core has them: they
+    /// stay out of the Runtimes screen (`Kind::Engine`), and these words are
+    /// for their future screens and messages.
+    #[test]
+    fn the_phase_two_engines_have_their_name_example_and_monogram() {
+        for (folder, name, example, monogram) in [
+            ("postgres", "PostgreSQL", "18", "Pg"),
+            ("mysql", "MySQL", "8.4", "My"),
+            ("valkey", "Valkey", "8.1", "Vk"),
+        ] {
+            assert_eq!(runtime_name_for(folder), name, "{folder}");
+            assert_eq!(example_version_for(folder), example, "{folder}");
+            assert_eq!(monogram_for(folder, name), monogram, "{folder}");
+        }
     }
 
     #[test]

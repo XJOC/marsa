@@ -19,7 +19,7 @@
 //! window. [`show`] draws that [`RuntimesView`] with the widgets and returns
 //! what the user did as [`Action`]s (code.md, State). Nothing here reaches the
 //! network: an install is a job in the model's queue, and the daemon's
-//! refusals come back as lines.
+//! refusals come back as notices in the shell's bar.
 
 use eframe::egui::{Context, Id, Key, Label, RichText, Ui, vec2};
 use marsa_core::runtimes::Runtime;
@@ -27,14 +27,14 @@ use semver::Version;
 
 use super::home::{InstallBar, install_bar};
 use super::sites::{Mark, message, mute, status_line};
-use crate::model::{self, Action, InstallStep, Model, Removal, Route};
+use crate::model::{self, Action, Model, Removal, Route};
 use crate::strings;
 use crate::theme::page::{RUNTIMES_LIST_WIDTH, RUNTIMES_TAG_COLUMN, RUNTIMES_VERSION_COLUMN};
 use crate::theme::{Direction, Face, Section, TextToken, Theme};
 use crate::widgets::table::{empty_state_with, padded_card};
 use crate::widgets::{
-    Answer, Button, ConfirmDialog, Field, Icon, ListItem, Menu, MenuItem, NoticeKind, Progress,
-    RowHeight, Switch, Table, TableColumn, VersionPick, VersionPicker,
+    Answer, Button, ConfirmDialog, Field, Icon, ListItem, Menu, MenuItem, Progress, RowHeight,
+    Switch, Table, TableColumn, VersionPick, VersionPicker,
 };
 
 /// What the screen knows about one runtime, in one place. The list and the
@@ -259,24 +259,14 @@ pub struct XdebugView {
     pub error: Option<String>,
 }
 
-/// What the installs and the last uninstall say, above the sections.
+/// What an install that runs and an uninstall that waits say, above the
+/// sections. How they end is a notice in the shell's bar (`shell::notices`).
 #[derive(Debug, PartialEq)]
 pub struct Status {
     /// An install runs.
     pub progress: Option<InstallBar>,
     /// "Uninstalling PHP 8.4.27…", while the daemon removes it.
     pub removing: Option<String>,
-    pub lines: Vec<Line>,
-}
-
-/// One line of a result.
-#[derive(Debug, PartialEq)]
-pub struct Line {
-    pub kind: NoticeKind,
-    pub text: String,
-    /// It goes on from the line before it (a reason after "was not
-    /// uninstalled:"), so it has no mark of its own.
-    pub follows: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -449,50 +439,17 @@ fn xdebug(model: &Model) -> XdebugView {
 }
 
 fn status(model: &Model) -> Status {
-    let mut lines = Vec::new();
-    let mut progress = None;
-    let line = |kind, text| Line {
-        kind,
-        text,
-        follows: false,
-    };
-    if let Some(install) = model.install_view() {
-        match &install.step {
-            InstallStep::Failed(_) => {
-                lines.push(line(NoticeKind::Error, strings::install_status(install)));
-            }
-            InstallStep::Done { .. } => {
-                lines.push(line(NoticeKind::Success, strings::install_status(install)));
-            }
-            _ => progress = Some(install_bar(install)),
-        }
-    }
-    if let Some(notice) = &model.uninstall_notice {
-        for (index, report) in strings::uninstall_lines(notice).into_iter().enumerate() {
-            lines.push(Line {
-                kind: if report.problem {
-                    NoticeKind::Error
-                } else {
-                    NoticeKind::Success
-                },
-                text: report.text,
-                follows: index > 0,
-            });
-        }
-    }
-    // While the dialog is open the notice is its field's error.
-    if model.install_dialog.is_none()
-        && let Some(code) = &model.runtimes_notice
-    {
-        lines.push(line(NoticeKind::Error, strings::error_text(code)));
-    }
+    // An install that ended is a notice, not a line of this screen.
+    let progress = model
+        .install_view()
+        .filter(|install| !install.step.is_over())
+        .map(install_bar);
     Status {
         progress,
         removing: match model.removing() {
             Some(removal @ Removal::Uninstall { .. }) => Some(strings::removing(removal)),
             _ => None,
         },
-        lines,
     }
 }
 
@@ -548,7 +505,7 @@ fn list(ui: &mut Ui, theme: &Theme, read: &Read, actions: &mut Vec<Action>) {
     });
 }
 
-/// What the chosen runtime has: the result lines, the default, the Installed
+/// What the chosen runtime has: the progress, the default, the Installed
 /// table, and its extras.
 fn details_of(ui: &mut Ui, theme: &Theme, read: &Read, actions: &mut Vec<Action>) {
     let details = &read.details;
@@ -567,8 +524,7 @@ fn details_of(ui: &mut Ui, theme: &Theme, read: &Read, actions: &mut Vec<Action>
     }
 }
 
-/// The progress of an install and the lines about the last installs and
-/// uninstall.
+/// The progress of an install, and the wait for an uninstall.
 fn status_block(ui: &mut Ui, theme: &Theme, status: &Status) {
     if let Some(bar) = &status.progress {
         padded_card(ui, |ui| {
@@ -577,24 +533,6 @@ fn status_block(ui: &mut Ui, theme: &Theme, status: &Status) {
     }
     if let Some(text) = &status.removing {
         mute(ui, theme, text);
-    }
-    for line in &status.lines {
-        if line.follows {
-            ui.horizontal_wrapped(|ui| {
-                // Under the words of the line before, not under its mark.
-                ui.add_space(theme.size.icon_inline + theme.space.s2);
-                let text = RichText::new(&line.text)
-                    .font(theme.text.body_sm.font_id())
-                    .color(theme.color.ink);
-                ui.add(Label::new(text).selectable(false));
-            });
-            continue;
-        }
-        let mark = match line.kind {
-            NoticeKind::Success => Mark::Success,
-            NoticeKind::Error => Mark::Error,
-        };
-        status_line(ui, theme, mark, &line.text, |_| {});
     }
 }
 
@@ -1205,8 +1143,8 @@ mod tests {
         let dialog = install_dialog_view(&model).expect("the dialog stays");
         assert_eq!(dialog.text, "lts/*");
         assert_eq!(dialog.error, Some(strings::error_text("unsupported_alias")));
-        // The error is the field's, not a line of the screen.
-        assert!(read(&model).status.lines.is_empty());
+        // The error is the field's, not a notice of the bar.
+        assert!(crate::shell::notices::current(&model).is_none());
     }
 
     #[test]
@@ -1278,7 +1216,9 @@ mod tests {
         let status = read(&model).status;
         let bar = status.progress.expect("a bar");
         assert_eq!(bar.words, "Downloading PHP 8.4.27: 18.0 of 31.0 MB");
-        assert!(bar.fraction.is_some() && status.lines.is_empty());
+        assert!(bar.fraction.is_some());
+        // Running, it is a bar on the screen and no notice.
+        assert!(crate::shell::notices::current(&model).is_none());
 
         let done = InstallUpdate::Done(InstallDone {
             runtime: Runtime::Php,
@@ -1295,14 +1235,9 @@ mod tests {
         );
         let status = read(&model).status;
         assert!(status.progress.is_none());
-        assert_eq!(
-            status.lines,
-            [Line {
-                kind: NoticeKind::Success,
-                text: "Installed PHP 8.4.27.".into(),
-                follows: false,
-            }]
-        );
+        // How it ended is a notice of the bar.
+        let notice = crate::shell::notices::current(&model).expect("a notice");
+        assert_eq!(notice.notice.text, "Installed PHP 8.4.27.");
     }
 
     #[test]
@@ -1330,40 +1265,32 @@ mod tests {
         });
         let status = read(&model).status;
         assert_eq!(status.removing, None);
-        let lines: Vec<(NoticeKind, bool)> =
-            status.lines.iter().map(|l| (l.kind, l.follows)).collect();
-        assert_eq!(
-            lines,
-            [(NoticeKind::Error, false), (NoticeKind::Error, true)]
+        // The refusal and what uses the version are one notice of the bar.
+        let notice = crate::shell::notices::current(&model).expect("a notice");
+        assert!(
+            notice
+                .notice
+                .text
+                .starts_with("PHP 8.3.27 is in use, so it was not uninstalled:"),
+            "{}",
+            notice.notice.text
         );
-        assert_eq!(
-            status.lines[0].text,
-            "PHP 8.3.27 is in use, so it was not uninstalled:"
-        );
-        assert!(status.lines[1].text.contains("pinned.test"));
-        // A done uninstall is one line with a check.
+        assert!(notice.notice.text.contains("pinned.test"));
+        // A done uninstall is one sentence.
         model.uninstall_notice = Some(UninstallNotice::Done {
             runtime: Runtime::Php,
             version: v("8.2.28"),
         });
-        assert_eq!(
-            read(&model).status.lines[0],
-            Line {
-                kind: NoticeKind::Success,
-                text: "Uninstalled PHP 8.2.28.".into(),
-                follows: false,
-            }
-        );
+        let notice = crate::shell::notices::current(&model).expect("a notice");
+        assert_eq!(notice.notice.text, "Uninstalled PHP 8.2.28.");
     }
 
     #[test]
-    fn a_failed_default_change_is_a_line_of_the_screen() {
+    fn a_failed_runtimes_read_is_a_notice_of_the_bar_and_not_a_line_of_the_screen() {
         let mut model = model();
         model.update(Update::RuntimesFailed("runtimes_read".into()));
-        let lines = read(&model).status.lines;
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].kind, NoticeKind::Error);
-        assert_eq!(lines[0].text, strings::error_text("runtimes_read"));
+        let notice = crate::shell::notices::current(&model).expect("a notice");
+        assert_eq!(notice.notice.text, strings::error_text("runtimes_read"));
     }
 
     #[test]

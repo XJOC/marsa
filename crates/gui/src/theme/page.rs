@@ -3,8 +3,6 @@
 //! design tokens: the screens of M5-D4 to M5-D10 replace them with the tokens
 //! of [`super::Size`], and each goes with its last use.
 
-/// The widest the confirmation of a removal grows; its text wraps.
-pub const CONFIRM_WIDTH: f32 = 380.0;
 /// The width of the site name field of the link form.
 pub const NAME_FIELD_WIDTH: f32 = 180.0;
 

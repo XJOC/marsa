@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use eframe::egui;
+use marsa_gui::prefs::Prefs;
 use marsa_gui::{app, bridge, startup, strings, theme};
 
 fn main() -> ExitCode {
@@ -39,10 +40,12 @@ fn run(started: Instant) -> anyhow::Result<()> {
     };
     // Connecting starts now, while the window opens.
     let bridge = start_bridge(&data_dir)?;
+    // Read once: the appearance, and the size the window had when it closed.
+    let prefs = Prefs::load(&Prefs::path(&data_dir));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(strings::APP_NAME)
-            .with_inner_size(window_size())
+            .with_inner_size(window_size(&prefs))
             .with_min_inner_size(theme::SIZE.window_min),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
@@ -51,7 +54,7 @@ fn run(started: Instant) -> anyhow::Result<()> {
         strings::APP_NAME,
         options,
         Box::new(move |creation| {
-            let app = app::App::new(&creation.egui_ctx, bridge, data_dir, started);
+            let app = app::App::new(&creation.egui_ctx, bridge, data_dir, prefs, started);
             Ok(Box::new(app))
         }),
     )
@@ -69,13 +72,13 @@ fn start_bridge(data_dir: &Path) -> anyhow::Result<bridge::Handle> {
     bridge::start(data_dir.to_path_buf()).context("cannot start the bridge thread")
 }
 
-/// The size the window opens at.
-fn window_size() -> egui::Vec2 {
+/// The size the window opens at: the one it closed with, else the default.
+fn window_size(prefs: &Prefs) -> egui::Vec2 {
     // Debug builds only: `MARSA_GUI_SIZE` for the design-review pictures
     // (see `screenshot`).
     #[cfg(debug_assertions)]
     if let Some(size) = marsa_gui::screenshot::size() {
         return size;
     }
-    theme::SIZE.window
+    prefs.window_size()
 }

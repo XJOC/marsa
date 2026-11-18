@@ -20,7 +20,7 @@ use eframe::egui::{
 };
 use marsa_core::types::{Site, SkippedFolder, Source};
 
-use crate::model::{Action, Choice, HostsSync, Model, Pick, Removal, Route, Setup, SitesNotice};
+use crate::model::{Action, Choice, HostsSync, Model, Pick, Removal, Route, Setup};
 use crate::screens::home::{PhpChoice, php_choices};
 use crate::strings;
 use crate::theme::page::{
@@ -43,8 +43,6 @@ pub struct SitesView<'a> {
     pub add_off: Option<&'static str>,
     /// The form that names a folder picked to link.
     pub link: Option<LinkView<'a>>,
-    /// The line about the last sites action.
-    pub line: Option<NoticeLine>,
     /// Linux: the sites the hosts file lacks.
     pub hosts: Option<HostsView>,
     /// "Unlinking shop.test…", while the daemon removes it.
@@ -151,22 +149,6 @@ pub struct LinkView<'a> {
     pub replaces: Option<&'a Site>,
 }
 
-/// The line under the header: what the last action did.
-#[derive(Debug, PartialEq)]
-pub struct NoticeLine {
-    pub kind: NoticeKind,
-    pub text: String,
-    pub action: Option<NoticeAction>,
-}
-
-/// The button after a notice: "Forget /code…" after a failed Unlink.
-#[derive(Debug, PartialEq)]
-pub struct NoticeAction {
-    pub label: String,
-    pub action: Action,
-    pub off: Option<&'static str>,
-}
-
 #[derive(Debug, PartialEq)]
 pub struct HostsView {
     /// The sentence that names the sites the hosts file lacks.
@@ -186,7 +168,6 @@ pub fn view(model: &Model, picking: bool) -> SitesView<'_> {
         search: &model.sites_search,
         add_off: add_off(model, picking),
         link: link(model),
-        line: line(model),
         hosts: hosts(model),
         removing: removing_line(model),
         list,
@@ -314,28 +295,6 @@ fn link(model: &Model) -> Option<LinkView<'_>> {
     })
 }
 
-pub(super) fn line(model: &Model) -> Option<NoticeLine> {
-    let failure = |text: String| (NoticeKind::Error, text, None);
-    let done = |text: String| (NoticeKind::Success, text, None);
-    let (kind, text, action) = match model.sites_notice.as_ref()? {
-        SitesNotice::Failed(code) => failure(strings::error_text(code)),
-        SitesNotice::Parked(folder) => done(strings::parked(folder)),
-        SitesNotice::Linked { name, folder } => done(strings::linked(name, folder)),
-        SitesNotice::Unlinked(site) => done(strings::unlinked(site)),
-        SitesNotice::Forgot(folder) => done(strings::forgot(folder)),
-        SitesNotice::SiteIsParked { site, folder } => {
-            let text = strings::site_is_parked(site, folder.as_deref());
-            let action = folder.as_ref().map(|folder| NoticeAction {
-                label: strings::forget_folder(folder),
-                action: Action::AskForget(folder.clone()),
-                off: (!model.can_remove()).then_some(strings::REMOVE_BUSY_HINT),
-            });
-            (NoticeKind::Error, text, action)
-        }
-    };
-    Some(NoticeLine { kind, text, action })
-}
-
 fn hosts(model: &Model) -> Option<HostsView> {
     let failed = match &model.hosts_sync {
         HostsSync::Failed(code) => Some(strings::error_text(code)),
@@ -379,9 +338,6 @@ pub fn show(ui: &mut Ui, view: &SitesView<'_>, theme: &Theme) -> Vec<Action> {
     });
     if let Some(link) = &view.link {
         link_form(ui, theme, link, view.home, &mut actions);
-    }
-    if let Some(line) = &view.line {
-        notice(ui, theme, line, &mut actions);
     }
     if let Some(hosts) = &view.hosts {
         hosts_line(ui, theme, hosts, &mut actions);
@@ -467,7 +423,6 @@ pub(super) fn mute(ui: &mut Ui, theme: &Theme, text: &str) {
 /// How a line of status says what kind it is, besides its words (R8).
 #[derive(Clone, Copy)]
 pub(super) enum Mark {
-    Success,
     Error,
     /// Amber (tokens.md, Color: states).
     Warning,
@@ -482,7 +437,6 @@ pub(super) fn status_line(
     add: impl FnOnce(&mut Ui),
 ) {
     let (icon, color) = match mark {
-        Mark::Success => crate::widgets::notice::mark(theme, NoticeKind::Success),
         Mark::Error => crate::widgets::notice::mark(theme, NoticeKind::Error),
         Mark::Warning => (Icon::Alert, theme.section(Section::Dumps).fg),
     };
@@ -494,29 +448,6 @@ pub(super) fn status_line(
             .color(theme.color.ink);
         ui.add(Label::new(words).selectable(false));
         add(ui);
-    });
-}
-
-/// The line about the last action: a check for what worked, a cross for what
-/// failed, the sentence, the action it offers, and a button that closes it.
-// TODO(M5-D9): notices move to the bar at the bottom of the main area.
-pub(super) fn notice(ui: &mut Ui, theme: &Theme, line: &NoticeLine, actions: &mut Vec<Action>) {
-    let mark = match line.kind {
-        NoticeKind::Success => Mark::Success,
-        NoticeKind::Error => Mark::Error,
-    };
-    status_line(ui, theme, mark, &line.text, |ui| {
-        if let Some(offer) = &line.action {
-            let button = Button::secondary(&offer.label)
-                .in_row()
-                .disabled_if(offer.off.is_some(), offer.off.unwrap_or_default());
-            if ui.add(button).clicked() {
-                actions.push(offer.action.clone());
-            }
-        }
-        if ui.add(Button::icon(Icon::Cross, strings::CLOSE)).clicked() {
-            actions.push(Action::DismissSitesNotice);
-        }
     });
 }
 
@@ -1135,39 +1066,6 @@ mod tests {
     }
 
     #[test]
-    fn the_last_action_is_a_line_and_a_refused_unlink_offers_to_forget_the_folder() {
-        let mut model = model(&["shop"]);
-        assert!(view(&model, false).line.is_none());
-        model.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
-        let line = view(&model, false).line.expect("a line");
-        assert_eq!(line.kind, NoticeKind::Success);
-        assert_eq!(line.text, strings::unlinked("shop"));
-        assert!(line.action.is_none());
-
-        model.sites_notice = Some(SitesNotice::Failed("site_name_invalid".into()));
-        let line = view(&model, false).line.expect("a line");
-        assert_eq!(line.kind, NoticeKind::Error);
-        assert_eq!(line.text, strings::error_text("site_name_invalid"));
-
-        let folder = PathBuf::from("/code");
-        model.sites_notice = Some(SitesNotice::SiteIsParked {
-            site: "shop".into(),
-            folder: Some(folder.clone()),
-        });
-        let line = view(&model, false).line.expect("a line");
-        let offer = line.action.expect("an offer");
-        assert_eq!(offer.label, "Forget /code…");
-        assert_eq!(offer.action, Action::AskForget(folder));
-        assert_eq!(offer.off, None);
-        // Without the folder there is nothing to offer.
-        model.sites_notice = Some(SitesNotice::SiteIsParked {
-            site: "shop".into(),
-            folder: None,
-        });
-        assert!(view(&model, false).line.expect("a line").action.is_none());
-    }
-
-    #[test]
     fn the_hosts_line_shows_only_with_names_waiting_or_a_failure() {
         let mut model = model(&["shop"]);
         assert!(view(&model, false).hosts.is_none());
@@ -1461,22 +1359,6 @@ mod tests {
         let mut actions = Vec::new();
         harness.key(Key::Enter, |ui| actions.extend(draw(ui, &model)));
         assert_eq!(actions, [Action::SubmitLink]);
-    }
-
-    #[test]
-    fn a_notice_closes_and_offers_its_action() {
-        let mut model = model(&["shop"]);
-        model.sites_notice = Some(SitesNotice::Unlinked("old".into()));
-        assert_eq!(click(&model, strings::CLOSE), [Action::DismissSitesNotice]);
-
-        model.sites_notice = Some(SitesNotice::SiteIsParked {
-            site: "shop".into(),
-            folder: Some(PathBuf::from("/code")),
-        });
-        assert_eq!(
-            click(&model, "Forget /code…"),
-            [Action::AskForget(PathBuf::from("/code"))]
-        );
     }
 
     #[test]
