@@ -29,8 +29,8 @@ pub fn show(ui: &mut egui::Ui, model: &mut Model, commands: &mut Vec<Command>) {
         let connected = model.is_connected();
         let can_install = connected && !model.installing() && !model.uninstalling();
         let can_uninstall = model.can_uninstall();
-        // Out of the model while the rows borrow it; put back below.
-        let mut inputs = std::mem::take(&mut model.install_input);
+        // What was typed, applied once the rows no longer borrow the model.
+        let mut typed = Vec::new();
         egui::Grid::new("runtimes")
             .striped(true)
             .num_columns(5)
@@ -72,13 +72,18 @@ pub fn show(ui: &mut egui::Ui, model: &mut Model, commands: &mut Vec<Command>) {
                         ui.weak(strings::NEWEST).on_hover_text(strings::NEWEST_HINT);
                     }
                     ui.horizontal(|ui| {
-                        let input = &mut inputs[model::runtime_index(row.runtime)];
-                        let field = egui::TextEdit::singleline(input)
+                        let mut input = model.install_text(row.runtime).to_owned();
+                        let field = egui::TextEdit::singleline(&mut input)
                             .hint_text(strings::VERSION_FIELD_EMPTY)
                             .desired_width(VERSION_FIELD_WIDTH);
-                        let field = ui
-                            .add_enabled(can_install, field)
-                            .on_hover_text(strings::version_field_hint(row.runtime));
+                        let hint = strings::version_field_hint(
+                            strings::runtime_name(row.runtime),
+                            strings::example_version(row.runtime),
+                        );
+                        let field = ui.add_enabled(can_install, field).on_hover_text(hint);
+                        if field.changed() {
+                            typed.push((row.runtime, input));
+                        }
                         let entered = field.lost_focus()
                             && ui.input(|input| input.key_pressed(egui::Key::Enter));
                         let button = egui::Button::new(strings::INSTALL_BUTTON);
@@ -111,7 +116,9 @@ pub fn show(ui: &mut egui::Ui, model: &mut Model, commands: &mut Vec<Command>) {
                     ui.end_row();
                 }
             });
-        model.install_input = inputs;
+        for (runtime, text) in typed {
+            model.set_install_text(runtime, text);
+        }
     }
     if let Some(runtime) = install {
         // Sent at the end of this frame.

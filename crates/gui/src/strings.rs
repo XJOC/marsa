@@ -409,22 +409,30 @@ pub fn linked(name: &str, folder: &Path) -> String {
     format!("Linked {} as {name}.{TLD}.", folder.display())
 }
 
-/// Over an Install field: what to type for this runtime.
-pub fn version_field_hint(runtime: Runtime) -> String {
-    let example = example_version(runtime);
+/// In the install dialog: what to type for the runtime called `name`.
+pub fn version_field_hint(name: &str, example: &str) -> String {
     format!(
-        "A version such as {example}: the newest {} that matches it. Empty: the newest stable \
-         version.",
-        runtime_name(runtime)
+        "A version such as {example}: the newest {name} that matches it. Empty: the newest \
+         stable version."
     )
 }
 
-fn example_version(runtime: Runtime) -> &'static str {
-    match runtime {
-        Runtime::Php => "8.4",
-        Runtime::Node => "22",
-        Runtime::Composer => "2.8",
-        Runtime::Caddy => "2.11",
+/// A version to write as an example for `runtime`.
+pub fn example_version(runtime: Runtime) -> &'static str {
+    example_version_for(runtime.dir_name())
+}
+
+/// [`example_version`] by the runtime's folder name. These `match`es are on
+/// the name text, not on `Runtime`, so a runtime that core adds later builds
+/// and shows with the default arm until it gets its own (task M5-D8).
+pub fn example_version_for(folder: &str) -> &'static str {
+    match folder {
+        "php" => "8.4",
+        "node" => "22",
+        "composer" => "2.8",
+        "caddy" => "2.11",
+        // Any runtime added later: a plain number.
+        _ => "1.0",
     }
 }
 
@@ -717,24 +725,46 @@ fn file_name(path: &Path) -> String {
     )
 }
 
-/// The name column of the Runtimes section, as the CLI writes it.
+/// The name of a runtime, as the CLI writes it.
 pub fn runtime_name(runtime: Runtime) -> &'static str {
-    match runtime {
-        Runtime::Php => "PHP",
-        Runtime::Node => "Node.js",
-        Runtime::Composer => "Composer",
-        Runtime::Caddy => "Caddy",
+    runtime_name_for(runtime.dir_name())
+}
+
+/// [`runtime_name`] by the runtime's folder name (`runtimes/<name>`), which
+/// is the one name core gives a runtime. The `match` is on that text, not on
+/// `Runtime`: a runtime that core adds later builds without a change here and
+/// shows under its folder name (`postgres`) until it gets a nicer one
+/// (task M5-D8).
+pub fn runtime_name_for(folder: &'static str) -> &'static str {
+    match folder {
+        "php" => "PHP",
+        "node" => "Node.js",
+        "composer" => "Composer",
+        "caddy" => "Caddy",
+        // Any runtime added later: core's own name.
+        other => other,
     }
 }
 
 /// The two or three letters on a runtime's tile: a new language needs a
 /// monogram, not a new icon (components.md, Section icon tile).
-pub const fn runtime_monogram(runtime: Runtime) -> &'static str {
-    match runtime {
-        Runtime::Php => "PHP",
-        Runtime::Node => "JS",
-        Runtime::Composer => "Co",
-        Runtime::Caddy => "Ca",
+pub fn runtime_monogram(runtime: Runtime) -> String {
+    monogram_for(runtime.dir_name(), runtime_name(runtime))
+}
+
+/// [`runtime_monogram`] by the folder name and the name shown. Three letters
+/// for PHP, "JS" for Node.js; every other runtime gets the first two letters
+/// of its name ("Co", "Ca", "Po" for Postgres), so a new one needs no entry.
+pub fn monogram_for(folder: &str, name: &str) -> String {
+    match folder {
+        "php" => "PHP".to_owned(),
+        "node" => "JS".to_owned(),
+        _ => {
+            let mut letters = name.chars();
+            let first = letters.next().into_iter().flat_map(char::to_uppercase);
+            let second = letters.next().into_iter().flat_map(char::to_lowercase);
+            first.chain(second).collect()
+        }
     }
 }
 
@@ -2652,7 +2682,7 @@ mod tests {
         assert_eq!(link_folder("/work/api"), "Link /work/api as:");
         assert_eq!(link_folder("~/Work/api"), "Link ~/Work/api as:");
         assert_eq!(site_suffix(), ".test");
-        let hint = version_field_hint(Runtime::Node);
+        let hint = version_field_hint(runtime_name(Runtime::Node), example_version(Runtime::Node));
         assert!(
             hint.starts_with("A version such as 22: the newest Node.js"),
             "{hint}"
@@ -2676,6 +2706,22 @@ mod tests {
         );
     }
 
+    /// Task M5-D8: a runtime that core adds later (Postgres, MySQL, Valkey)
+    /// shows with no entry here: core's name for it and two letters of it.
+    #[test]
+    fn a_runtime_core_adds_later_needs_no_entry_for_its_name_letters_and_example() {
+        for (folder, letters) in [("postgres", "Po"), ("mysql", "My"), ("valkey", "Va")] {
+            let name = runtime_name_for(folder);
+            assert_eq!(name, folder, "core's own name");
+            assert_eq!(monogram_for(folder, name), letters);
+            assert_eq!(example_version_for(folder), "1.0");
+        }
+        // The nicer names are entries, not the rule.
+        assert_eq!(runtime_name_for("node"), "Node.js");
+        assert_eq!(monogram_for("php", "PHP"), "PHP");
+        assert_eq!(monogram_for("x", ""), "", "an empty name has no letters");
+    }
+
     /// Task M5-D2: the words of the widgets' tiles and badges.
     #[test]
     fn every_runtime_has_a_short_monogram_and_every_section_a_name() {
@@ -2694,6 +2740,8 @@ mod tests {
         );
         assert_eq!(runtime_monogram(Runtime::Php), "PHP");
         assert_eq!(runtime_monogram(Runtime::Node), "JS");
+        assert_eq!(runtime_monogram(Runtime::Composer), "Co");
+        assert_eq!(runtime_monogram(Runtime::Caddy), "Ca");
 
         let mut names: Vec<&str> = Section::ALL.iter().map(|s| section_name(*s)).collect();
         assert!(names.iter().all(|name| !name.is_empty()));

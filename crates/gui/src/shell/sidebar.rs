@@ -4,15 +4,11 @@
 //! Databases, Mail, Dumps, and Queues to these groups.
 
 use eframe::egui::{Layout, RichText, Ui, vec2};
-use marsa_core::runtimes::Runtime;
 
-use crate::model::{Action, LogSource, Model, Overall, Route};
+use crate::model::{Action, LogSource, MAIN_RUNTIME, Model, Overall, Route};
 use crate::strings;
 use crate::theme::{Direction, Face, Section, TextToken, Theme};
 use crate::widgets::{Button, Health, Icon, NavItem, StatusDot};
-
-/// The runtime the Runtimes item opens: the main one.
-const MAIN_RUNTIME: Runtime = Runtime::Php;
 
 /// An item of the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -35,7 +31,9 @@ pub const GROUPS: [&[Item]; 4] = [
 ];
 
 impl Item {
-    /// The route a click on the item opens.
+    /// The route a click on the item opens. The Runtimes item opens the main
+    /// runtime here; a click opens the one the screen showed last
+    /// ([`Model::chosen_runtime`], see [`Item::route_in`]).
     pub fn route(self) -> Route {
         match self {
             Self::Home => Route::Home,
@@ -44,6 +42,15 @@ impl Item {
             Self::Runtimes => Route::Runtimes(MAIN_RUNTIME),
             Self::Services => Route::Services,
             Self::Settings => Route::Settings,
+        }
+    }
+
+    /// [`Item::route`] for a window that remembers where it was: the Runtimes
+    /// item opens the runtime the user chose last.
+    pub fn route_in(self, model: &Model) -> Route {
+        match self {
+            Self::Runtimes => Route::Runtimes(model.chosen_runtime()),
+            _ => self.route(),
         }
     }
 
@@ -138,7 +145,7 @@ pub fn show(ui: &mut Ui, model: &Model, narrow: bool) -> Vec<Action> {
         }
         for &item in *group {
             if ui.add(nav(model, item, current, folded)).clicked() {
-                actions.push(Action::Navigate(item.route()));
+                actions.push(Action::Navigate(item.route_in(model)));
             }
         }
     }
@@ -183,6 +190,8 @@ mod tests {
     use marsa_core::types::{
         Event, Health as DaemonHealth, ServiceState, ServiceStatus, Site, SiteKind, SiteList,
     };
+
+    use marsa_core::runtimes::Runtime;
 
     use super::*;
     use crate::model::Update;
@@ -336,6 +345,16 @@ mod tests {
             assert_eq!(Item::of(&route), item, "{route:?}");
         }
         assert_eq!(Item::Runtimes.route(), Route::Runtimes(Runtime::Php));
+    }
+
+    #[test]
+    fn the_runtimes_item_opens_the_runtime_the_screen_showed_last() {
+        let harness = Harness::new(egui::Theme::Light);
+        let mut model = connected();
+        model.apply_action(Action::Navigate(Route::Runtimes(Runtime::Node)));
+        model.apply_action(Action::Navigate(Route::Home));
+        let actions = click(&harness, &model, false, Item::Runtimes.label());
+        assert_eq!(actions, [Action::Navigate(Route::Runtimes(Runtime::Node))]);
     }
 
     #[test]
