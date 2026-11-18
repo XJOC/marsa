@@ -8,7 +8,7 @@
 //! that it was submitted.
 
 use eframe::egui::{
-    Align, Align2, Color32, CornerRadius, Frame, Margin, Rect, Response, RichText, Role, Sense,
+    Align, Align2, Color32, CornerRadius, Frame, Id, Margin, Rect, Response, RichText, Role, Sense,
     Shape, Stroke, StrokeKind, TextEdit, Ui, Widget, pos2, vec2,
 };
 
@@ -49,6 +49,7 @@ pub struct Field<'a> {
     disabled: Option<&'a str>,
     width: Option<f32>,
     look: Option<Look>,
+    id: Option<Id>,
 }
 
 impl<'a> Field<'a> {
@@ -63,6 +64,7 @@ impl<'a> Field<'a> {
             disabled: None,
             width: None,
             look: None,
+            id: None,
         }
     }
 
@@ -116,6 +118,13 @@ impl<'a> Field<'a> {
         self
     }
 
+    /// The id of the text edit, so a screen can move the focus to the field
+    /// (`Memory::request_focus`), for a shortcut such as Cmd K.
+    pub const fn id(mut self, id: Id) -> Self {
+        self.id = Some(id);
+        self
+    }
+
     /// The role a screen reader hears.
     pub const fn role(&self) -> Role {
         if self.search {
@@ -157,9 +166,13 @@ impl<'a> Field<'a> {
             Rect::from_min_size(pos2(edit_x, rect.top()), vec2(edit_width, rect.height()));
 
         let enabled = ui.is_enabled();
+        let mut text_edit = TextEdit::singleline(self.text);
+        if let Some(id) = self.id {
+            text_edit = text_edit.id(id);
+        }
         let edit = ui.put(
             edit_rect,
-            TextEdit::singleline(self.text)
+            text_edit
                 .frame(Frame::NONE)
                 .margin(Margin::ZERO)
                 .font(theme.text.body_sm.font_id())
@@ -312,6 +325,21 @@ mod tests {
             sizes[1].x > sizes[0].x,
             "no width takes the available width"
         );
+    }
+
+    #[test]
+    fn a_field_with_an_id_takes_the_focus_when_a_screen_asks_for_it() {
+        let harness = Harness::new(egui::Theme::Light);
+        let id = Id::unique("search_test");
+        let mut text = String::new();
+        let mut draw = |ui: &mut Ui| {
+            ui.add(Field::search(&mut text, "Find").id(id));
+        };
+        harness.run(&mut draw);
+        assert!(!harness.ctx.memory(|memory| memory.has_focus(id)));
+        harness.ctx.memory_mut(|memory| memory.request_focus(id));
+        harness.run(&mut draw);
+        assert!(harness.ctx.memory(|memory| memory.has_focus(id)));
     }
 
     #[test]

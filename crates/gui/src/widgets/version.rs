@@ -11,6 +11,7 @@ use eframe::egui::{
 };
 
 use super::icons::Icon;
+use super::menu;
 use super::{
     Look, Touch, group_button, layout, paint_focus_ring, quiet_fill, slot, tab_stop, touched,
     with_disabled_reason,
@@ -572,8 +573,7 @@ impl<'a, T: Copy + PartialEq> VersionMenu<'a, T> {
                 let (response, width) = self.button(ui, theme);
                 let mut chosen = None;
                 Popup::menu(&response).show(|ui| {
-                    ui.set_min_width(width);
-                    chosen = self.list(ui);
+                    chosen = self.rows(ui, width);
                 });
                 if let Some(reason) = self.reason {
                     let caption = RichText::new(reason)
@@ -637,18 +637,27 @@ impl<'a, T: Copy + PartialEq> VersionMenu<'a, T> {
         (response, width)
     }
 
-    /// The rows of the menu: what the popup shows, and what the gallery
+    /// The rows of the menu, as wide as the space `ui` has: what the gallery
     /// shows open. Returns the setting of the row the user chose.
     pub fn list(&self, ui: &mut Ui) -> Option<Setting<T>> {
+        let least = ui.available_width();
+        self.rows(ui, least)
+    }
+
+    /// The rows, `least` points wide or as wide as the widest needs: the
+    /// popup is as wide as the button, and wider for a long text.
+    fn rows(&self, ui: &mut Ui, least: f32) -> Option<Setting<T>> {
         let theme = Theme::of(ui.ctx());
         // The rows touch: each has its own height and its own hover fill.
         ui.spacing_mut().item_spacing.y = 0.0;
+        let entries = entries(self.site_files, self.versions, self.setting);
+        let width = entries
+            .iter()
+            .map(|entry| menu::row_width(ui, theme, &menu_spec(entry)))
+            .fold(least, f32::max);
         let mut chosen = None;
-        for (index, entry) in entries(self.site_files, self.versions, self.setting)
-            .into_iter()
-            .enumerate()
-        {
-            if menu_row(ui, theme, &entry).clicked() && !entry.checked {
+        for (index, entry) in entries.iter().enumerate() {
+            if menu_row(ui, theme, entry, width).clicked() && !entry.checked {
                 chosen = Some(entry.setting);
             }
             if index == 0 {
@@ -659,58 +668,19 @@ impl<'a, T: Copy + PartialEq> VersionMenu<'a, T> {
     }
 }
 
-/// One row of the menu: a check when it is the current setting, then the
-/// text.
-fn menu_row<T>(ui: &mut Ui, theme: &Theme, entry: &Entry<'_, T>) -> Response {
-    let direction = Direction::CURRENT;
-    let pad = theme.space.s3;
-    let check = theme.size.icon_inline;
-    let gap = theme.space.s2;
-    // The row is as wide for the heavier face, so the menu keeps its width
-    // when the check moves.
-    let token = |face| TextToken {
-        size: theme.text.body_sm.size,
-        face,
-    };
-    let widest = layout(
-        ui.painter(),
-        entry.label,
-        token(Face::Medium),
-        Color32::PLACEHOLDER,
-    );
-    let face = if entry.checked {
-        Face::Medium
-    } else {
-        Face::Regular
-    };
-    let galley = layout(ui.painter(), entry.label, token(face), Color32::PLACEHOLDER);
-    let least = pad + check + gap + widest.size().x + pad;
-    let size = vec2(ui.available_width().max(least), theme.size.control_in_row);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    if ui.is_rect_visible(rect) {
-        let look = Look::of(&response);
-        let painter = ui.painter();
-        let corner = theme.radius.sm;
-        if let Some(fill) = quiet_fill(theme, look.touch) {
-            painter.rect_filled(rect, CornerRadius::same(corner), fill);
-        }
-        let row = |offset: f32, width: f32| {
-            let x = slot(direction, rect, offset, width);
-            Rect::from_min_size(pos2(x, rect.top()), vec2(width, size.y))
-        };
-        if entry.checked {
-            Icon::Check.paint(painter, theme, row(pad, check), theme.color.accent);
-        }
-        let spot = row(pad + check + gap, galley.size().x);
-        let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), spot);
-        painter.galley(at.min, galley, theme.color.ink);
-        if look.focused {
-            paint_focus_ring(painter, theme, rect, corner);
-        }
+/// What a row of the menu says: a check when it is the current setting.
+fn menu_spec<'a, T>(entry: &Entry<'a, T>) -> menu::RowSpec<'a> {
+    menu::RowSpec {
+        label: entry.label,
+        mark: menu::Mark::Radio(entry.checked),
+        tone: menu::Tone::Normal,
     }
-    let (enabled, checked, label) = (ui.is_enabled(), entry.checked, entry.label);
-    response.widget_info(|| WidgetInfo::selected(Role::MenuItemRadio, enabled, checked, label));
-    response
+}
+
+/// One row of the menu, `width` wide: a check when it is the current
+/// setting, then the text.
+fn menu_row<T>(ui: &mut Ui, theme: &Theme, entry: &Entry<'_, T>, width: f32) -> Response {
+    menu::row(ui, theme, &menu_spec(entry), width)
 }
 
 #[cfg(test)]

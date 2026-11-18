@@ -8,8 +8,11 @@
 //! `MARSA_GUI_THEME=light|dark` draws that theme instead of the system's.
 //! `MARSA_GUI_SIZE=900x720` opens the window at that size (task M5-D4).
 //! `MARSA_GUI_ROUTE=home|sites|runtimes|services|logs|settings` opens that
-//! screen. `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2` draws fixed fake data and
-//! starts no daemon (task M5-D5, see `demo`). On macOS,
+//! screen. `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2` draws
+//! fixed fake data and starts no daemon (task M5-D5, see `demo`).
+//! `MARSA_GUI_CLICK=x,y` clicks that point (in points, from the top left of
+//! the window) once the window has settled, so a menu is open in the picture
+//! (task M5-D6). On macOS,
 //! `sips -s format png <file.bmp> --out <file.png>` converts the picture.
 
 use std::path::PathBuf;
@@ -30,6 +33,8 @@ const THEME_VAR: &str = "MARSA_GUI_THEME";
 const SIZE_VAR: &str = "MARSA_GUI_SIZE";
 /// The screen the window opens on: `sites`.
 const ROUTE_VAR: &str = "MARSA_GUI_ROUTE";
+/// The point to click before the picture: `600,200`.
+const CLICK_VAR: &str = "MARSA_GUI_CLICK";
 /// The longest wait for the daemon before the picture is taken anyway.
 const LIMIT: Duration = Duration::from_secs(10);
 /// The wait after the window connected, so the daemon's lists arrive and the
@@ -38,8 +43,27 @@ const SETTLE: Duration = Duration::from_secs(1);
 /// The size of the BMP file header and its info header.
 const HEADER: usize = 54;
 
+/// Where a click injected for the picture is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClickStage {
+    /// Not yet: the window has not settled.
+    Wait,
+    /// The next frame presses the button.
+    Press,
+    /// The next frame lets it go.
+    Release,
+    /// The click is done; the menu it opened draws until this time.
+    Settle(Instant),
+    Done,
+}
+
+/// How long a menu takes to open and fade in.
+const MENU_SETTLE: Duration = Duration::from_millis(500);
+
 pub struct Screenshot {
     path: PathBuf,
+    /// The click to make before the picture, and how far it is.
+    click: Option<(egui::Pos2, ClickStage)>,
     started: Instant,
     /// When the window first showed the daemon's data.
     ready_at: Option<Instant>,
@@ -59,8 +83,13 @@ impl Screenshot {
             Ok("dark") => ctx.set_theme(egui::Theme::Dark),
             _ => {}
         }
+        let click = std::env::var(CLICK_VAR)
+            .ok()
+            .and_then(|text| parse_point(&text))
+            .map(|at| (at, ClickStage::Wait));
         Some(Self {
             path,
+            click,
             started: Instant::now(),
             ready_at: None,
             saved: None,
@@ -99,6 +128,20 @@ impl Screenshot {
             ctx.request_repaint_after(SETTLE);
             return;
         }
+        if let Some((_, stage)) = &mut self.click {
+            match *stage {
+                ClickStage::Wait => *stage = ClickStage::Press,
+                ClickStage::Press | ClickStage::Release => {}
+                ClickStage::Settle(until) if Instant::now() >= until => {
+                    *stage = ClickStage::Done;
+                }
+                ClickStage::Settle(_) | ClickStage::Done => {}
+            }
+            if *stage != ClickStage::Done {
+                ctx.request_repaint();
+                return;
+            }
+        }
         let (send, saved) = mpsc::channel();
         let path = self.path.clone();
         let waker = ctx.clone();
@@ -109,6 +152,40 @@ impl Screenshot {
         });
         self.saved = Some(saved);
     }
+}
+
+impl Screenshot {
+    /// Called before each frame, with the input it will read: adds the
+    /// press and then the release of the click, one frame each.
+    pub fn inject(&mut self, input: &mut egui::RawInput) {
+        let Some((at, stage)) = &mut self.click else {
+            return;
+        };
+        let button = |pressed| egui::Event::PointerButton {
+            pos: *at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        match *stage {
+            ClickStage::Press => {
+                input.events.push(egui::Event::PointerMoved(*at));
+                input.events.push(button(true));
+                *stage = ClickStage::Release;
+            }
+            ClickStage::Release => {
+                input.events.push(button(false));
+                *stage = ClickStage::Settle(Instant::now() + MENU_SETTLE);
+            }
+            ClickStage::Wait | ClickStage::Settle(_) | ClickStage::Done => {}
+        }
+    }
+}
+
+/// `600,200` as a point.
+fn parse_point(text: &str) -> Option<egui::Pos2> {
+    let (x, y) = text.split_once(',')?;
+    Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
 
 /// The size `MARSA_GUI_SIZE` asks for, if it names one.
@@ -197,6 +274,40 @@ mod tests {
         assert_eq!(parse_route("sites"), Some(Route::Sites));
         assert_eq!(parse_route("logs"), Some(Route::Logs(LogSource::Caddy)));
         assert_eq!(parse_route("mail"), None);
+        assert_eq!(parse_point("600, 200"), Some(egui::pos2(600.0, 200.0)));
+        assert_eq!(parse_point("600"), None);
+    }
+
+    #[test]
+    fn a_click_is_a_press_then_a_release_then_a_while_to_draw_the_menu() {
+        let mut shot = Screenshot {
+            path: PathBuf::new(),
+            click: Some((egui::pos2(10.0, 20.0), ClickStage::Press)),
+            started: Instant::now(),
+            ready_at: None,
+            saved: None,
+            done: false,
+        };
+        let mut input = egui::RawInput::default();
+        shot.inject(&mut input);
+        assert_eq!(input.events.len(), 2);
+        assert!(matches!(
+            input.events[1],
+            egui::Event::PointerButton { pressed: true, .. }
+        ));
+        let mut input = egui::RawInput::default();
+        shot.inject(&mut input);
+        assert!(matches!(
+            input.events[..],
+            [egui::Event::PointerButton { pressed: false, .. }]
+        ));
+        assert!(matches!(
+            shot.click.map(|(_, stage)| stage),
+            Some(ClickStage::Settle(_))
+        ));
+        let mut input = egui::RawInput::default();
+        shot.inject(&mut input);
+        assert!(input.events.is_empty());
     }
 
     #[test]

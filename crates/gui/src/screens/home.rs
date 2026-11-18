@@ -14,7 +14,6 @@
 //! whether `.test` resolves, so the DNS step shows as not checked and Home
 //! never claims it works.
 
-use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{Label, RichText, Ui, vec2};
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{ServiceAction, ServiceState};
@@ -26,7 +25,7 @@ use crate::model::{
 };
 use crate::strings;
 use crate::theme::page::{HOME_OPEN_COLUMN, HOME_PHP_COLUMN};
-use crate::theme::{Direction, TextToken, Theme};
+use crate::theme::{Direction, Theme};
 use crate::widgets::table::empty_state;
 use crate::widgets::{
     Button, Health, PathStep, Progress, RequestPath, RowHeight, StatusSentence, StepState, Table,
@@ -427,17 +426,24 @@ pub(super) fn install_bar(view: &InstallView) -> InstallBar {
 
 fn default_php(model: &Model) -> DefaultPhp {
     let installed = model.php_versions();
-    let choices = installed
+    let choices = php_choices(model);
+    let chosen = model
+        .default_choice(Runtime::Php)
+        .and_then(|default| installed.iter().position(|version| *version == default));
+    DefaultPhp { choices, chosen }
+}
+
+/// The installed PHP versions, oldest first, with the text each is saved and
+/// shown as. The Sites screen's version menus list them too.
+pub(super) fn php_choices(model: &Model) -> Vec<PhpChoice> {
+    let installed = model.php_versions();
+    installed
         .iter()
         .map(|version| PhpChoice {
             version: version.clone(),
             label: model::version_text(Runtime::Php, version, installed),
         })
-        .collect();
-    let chosen = model
-        .default_choice(Runtime::Php)
-        .and_then(|default| installed.iter().position(|version| *version == default));
-    DefaultPhp { choices, chosen }
+        .collect()
 }
 
 fn sites(model: &Model) -> SitesView {
@@ -517,28 +523,11 @@ fn status_card(ui: &mut Ui, theme: &Theme, status: &StatusView, actions: &mut Ve
     });
 }
 
-/// A heading of a section, with a hint in `caption` after it. One line of
-/// text, so the two sizes share a baseline.
-fn heading(ui: &mut Ui, theme: &Theme, title: &str, hint: Option<&str>) {
-    let format = |token: TextToken, color| TextFormat {
-        font_id: token.font_id(),
-        color,
-        ..TextFormat::default()
-    };
-    let mut job = LayoutJob::default();
-    job.append(title, 0.0, format(theme.text.heading, theme.color.ink));
-    if let Some(hint) = hint {
-        let lead = theme.space.s3;
-        job.append(hint, lead, format(theme.text.caption, theme.color.mute));
-    }
-    ui.add(Label::new(job).selectable(false));
-}
-
 fn default_php_section(ui: &mut Ui, theme: &Theme, php: &DefaultPhp, actions: &mut Vec<Action>) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = theme.space.group_gap_max;
         let hint = strings::DEFAULT_PHP_HINT;
-        heading(ui, theme, strings::DEFAULT_PHP, Some(hint));
+        super::heading(ui, theme, strings::DEFAULT_PHP, Some(hint));
         if php.choices.is_empty() {
             let text = RichText::new(strings::NO_PHP_YET)
                 .font(theme.text.body_sm.font_id())
@@ -577,7 +566,7 @@ fn sites_section(ui: &mut Ui, theme: &Theme, sites: &SitesView, actions: &mut Ve
         // The heading and the link share one line as high as a control.
         let line = vec2(ui.available_width(), theme.size.control);
         ui.allocate_ui_with_layout(line, Direction::CURRENT.row(), |ui| {
-            heading(ui, theme, strings::SITES, None);
+            super::heading(ui, theme, strings::SITES, None);
             ui.with_layout(Direction::CURRENT.row_from_end(), |ui| {
                 if sites.total > 0 {
                     let all = strings::all_sites(sites.total);

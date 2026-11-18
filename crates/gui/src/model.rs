@@ -514,6 +514,26 @@ pub enum Action {
     PickFolder(Pick),
     /// "Not now": Home takes the place of the first-run panel.
     CloseFirstRun,
+    /// The text of the search field of the Sites screen.
+    SearchSites(String),
+    /// An entry of a site's version menu: save `choice` as its PHP, or clear
+    /// its own setting ([`Choice::Auto`]).
+    SitePhp { site: String, choice: Choice },
+    /// The site's menu: serve it over HTTPS (`true`) or plain HTTP.
+    SetSecure { site: String, secure: bool },
+    /// "Unlink…" of a site: the confirmation opens.
+    AskUnlink(String),
+    /// "Forget…" of a parked folder: the confirmation opens.
+    AskForget(PathBuf),
+    /// The site name typed in the link form.
+    SetLinkName(String),
+    /// "Link" in the link form (or Enter): sends the link if the name is
+    /// valid.
+    SubmitLink,
+    /// "Cancel" in the link form.
+    CancelLink,
+    /// Closes the line about the last sites action.
+    DismissSitesNotice,
 }
 
 /// How Marsa works as a whole, as far as the window can tell: the status at
@@ -549,6 +569,9 @@ pub struct Model {
     /// Sites sorted by name, the parked folders, and the skipped folders.
     pub sites: SiteList,
     pub sites_notice: Option<SitesNotice>,
+    /// The text of the Sites search field. Kept across sessions: it is the
+    /// user's typing, not daemon state.
+    pub sites_search: String,
     /// Open after a folder to link was picked. Kept across sessions: it is
     /// the user's typing, not daemon state.
     pub link: Option<LinkForm>,
@@ -612,6 +635,7 @@ impl Model {
                 *self = Model {
                     connection: Connection::Running(health),
                     link: self.link.take(),
+                    sites_search: mem::take(&mut self.sites_search),
                     install_input: mem::take(&mut self.install_input),
                     // Only ended installs with no id are left: what the user
                     // saw last stays on screen.
@@ -1397,6 +1421,49 @@ impl Model {
                 self.close_first_run();
                 None
             }
+            Action::SearchSites(text) => {
+                self.sites_search = text;
+                None
+            }
+            // The site lists are the daemon's: with no daemon, nothing to send.
+            Action::SitePhp { .. } | Action::SetSecure { .. } if !self.is_connected() => None,
+            Action::SitePhp { site, choice } => {
+                self.choose_site_php(&site, choice).map(Command::Save)
+            }
+            Action::SetSecure { site, secure } => {
+                // The notice was about the last action.
+                self.sites_notice = None;
+                Some(Command::Secure { site, secure })
+            }
+            Action::AskUnlink(site) => {
+                self.ask_removal(Removal::Unlink { site });
+                None
+            }
+            Action::AskForget(folder) => {
+                self.ask_removal(Removal::Forget { folder });
+                None
+            }
+            Action::SetLinkName(name) => {
+                if let Some(form) = self.link.as_mut() {
+                    form.name = name;
+                }
+                None
+            }
+            Action::SubmitLink => {
+                if !self.is_connected() {
+                    return None;
+                }
+                let (name, folder) = self.link_request()?;
+                Some(Command::Link { name, folder })
+            }
+            Action::CancelLink => {
+                self.link = None;
+                None
+            }
+            Action::DismissSitesNotice => {
+                self.sites_notice = None;
+                None
+            }
             // Done by `App`, with the system's opener and dialog: nothing
             // changes here.
             Action::OpenSite(_) | Action::PickFolder(_) => None,
@@ -1884,6 +1951,124 @@ mod tests {
         model.update(Update::Connected(health()));
         assert_eq!(model.route, Route::Site("shop".into()));
         assert!(model.sidebar_folded);
+    }
+
+    #[test]
+    fn the_sites_search_is_the_models_and_a_reconnect_keeps_it() {
+        let mut model = connected();
+        assert!(
+            model
+                .apply_action(Action::SearchSites("sh".into()))
+                .is_none()
+        );
+        assert_eq!(model.sites_search, "sh");
+        model.update(Update::Connected(health()));
+        assert_eq!(
+            model.sites_search, "sh",
+            "the user's typing, not daemon state"
+        );
+    }
+
+    #[test]
+    fn the_menu_actions_of_a_site_reach_the_daemon_or_the_confirmation() {
+        let mut model = connected();
+        model.update(Update::Sites(site_list(&["shop"])));
+        let pick = Action::SitePhp {
+            site: "shop".into(),
+            choice: Choice::Version(v("8.3.27")),
+        };
+        let command = model.apply_action(pick.clone());
+        assert!(matches!(command, Some(Command::Save(_))), "{command:?}");
+        assert!(model.apply_action(pick).is_none(), "the same entry again");
+
+        model.sites_notice = Some(SitesNotice::Unlinked("old".into()));
+        let secure = Action::SetSecure {
+            site: "shop".into(),
+            secure: false,
+        };
+        let command = model.apply_action(secure);
+        assert!(
+            matches!(command, Some(Command::Secure { ref site, secure: false }) if site == "shop"),
+            "{command:?}"
+        );
+        assert!(
+            model.sites_notice.is_none(),
+            "the notice was about the last action"
+        );
+
+        assert!(
+            model
+                .apply_action(Action::AskUnlink("shop".into()))
+                .is_none()
+        );
+        assert_eq!(
+            model.confirm,
+            Some(Removal::Unlink {
+                site: "shop".into()
+            })
+        );
+        model.cancel_removal();
+        let folder = PathBuf::from("/code");
+        assert!(
+            model
+                .apply_action(Action::AskForget(folder.clone()))
+                .is_none()
+        );
+        assert_eq!(model.confirm, Some(Removal::Forget { folder }));
+    }
+
+    #[test]
+    fn a_site_menu_action_waits_for_the_daemon() {
+        let mut down = Model::default();
+        let secure = Action::SetSecure {
+            site: "shop".into(),
+            secure: false,
+        };
+        assert!(down.apply_action(secure).is_none());
+        let pick = Action::SitePhp {
+            site: "shop".into(),
+            choice: Choice::Auto,
+        };
+        assert!(down.apply_action(pick).is_none());
+        // The confirmation needs the daemon too: nothing to remove without it.
+        assert!(
+            down.apply_action(Action::AskUnlink("shop".into()))
+                .is_none()
+        );
+        assert!(down.confirm.is_none());
+    }
+
+    #[test]
+    fn the_link_form_actions_edit_send_and_cancel() {
+        let mut model = connected();
+        model.pick_link_folder(&absolute("/work/blog"));
+        model.apply_action(Action::SetLinkName("my-blog".into()));
+        assert_eq!(
+            model.link.as_ref().map(|f| f.name.as_str()),
+            Some("my-blog")
+        );
+
+        // A name that is not valid sends nothing and says why.
+        model.apply_action(Action::SetLinkName("My Blog".into()));
+        assert!(model.apply_action(Action::SubmitLink).is_none());
+        assert!(matches!(model.sites_notice, Some(SitesNotice::Failed(_))));
+        model.apply_action(Action::DismissSitesNotice);
+        assert!(model.sites_notice.is_none());
+
+        model.apply_action(Action::SetLinkName("blog".into()));
+        let command = model.apply_action(Action::SubmitLink);
+        assert!(
+            matches!(command, Some(Command::Link { ref name, .. }) if name == "blog"),
+            "{command:?}"
+        );
+        model.apply_action(Action::CancelLink);
+        assert!(model.link.is_none());
+        // With no form there is nothing to send.
+        assert!(model.apply_action(Action::SubmitLink).is_none());
+        // With no daemon the form sends nothing either.
+        let mut down = Model::default();
+        down.pick_link_folder(&absolute("/work/blog"));
+        assert!(down.apply_action(Action::SubmitLink).is_none());
     }
 
     #[test]
