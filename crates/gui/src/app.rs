@@ -102,6 +102,13 @@ impl App {
         }
     }
 
+    /// The window opens on `route` instead of Home.
+    #[must_use]
+    pub fn opening(mut self, route: Route) -> Self {
+        self.model.route = route;
+        self
+    }
+
     /// The window in measurement mode: it shows made-up data and counts its
     /// frames (see `measure`).
     // Only with the `measure` feature (see the field).
@@ -416,6 +423,16 @@ mod tests {
         // Not measuring: no sites, and no count.
         let plain = app(&ctx, dir.path(), Prefs::default());
         assert!(plain.measure.is_none() && plain.model.sites.sites.is_empty());
+    }
+
+    #[test]
+    fn the_window_opens_on_home_or_on_the_screen_it_was_asked_for() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ctx = egui::Context::default();
+        let plain = app(&ctx, dir.path(), Prefs::default());
+        assert_eq!(plain.model.route, Route::Home);
+        let sites = app(&ctx, dir.path(), Prefs::default()).opening(Route::Sites);
+        assert_eq!(sites.model.route, Route::Sites);
     }
 
     #[test]

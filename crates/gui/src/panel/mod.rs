@@ -26,6 +26,9 @@ pub enum PanelExit {
     FocusLost,
     /// "Open Marsa" (or the status): the tray starts the window.
     OpenWindow,
+    /// "3 more sites in Marsa": the tray starts the window on the Sites
+    /// screen (`marsa-gui --open sites`).
+    OpenSites,
     /// "Stop Marsa": the tray asks the daemon to shut down, as its menu does.
     StopMarsa,
     /// "Start Marsa", when the daemon is not running: the tray starts it, as
@@ -44,6 +47,7 @@ impl PanelExit {
             Self::Closed => 0,
             Self::FocusLost => 20,
             Self::OpenWindow => 21,
+            Self::OpenSites => 25,
             Self::StopMarsa => 22,
             Self::StartMarsa => 23,
             Self::Quit => 24,
@@ -57,6 +61,7 @@ impl PanelExit {
         match code {
             Some(20) => Self::FocusLost,
             Some(21) => Self::OpenWindow,
+            Some(25) => Self::OpenSites,
             Some(22) => Self::StopMarsa,
             Some(23) => Self::StartMarsa,
             Some(24) => Self::Quit,
@@ -74,10 +79,11 @@ impl PanelExit {
 mod tests {
     use super::*;
 
-    const ALL: [PanelExit; 6] = [
+    const ALL: [PanelExit; 7] = [
         PanelExit::Closed,
         PanelExit::FocusLost,
         PanelExit::OpenWindow,
+        PanelExit::OpenSites,
         PanelExit::StopMarsa,
         PanelExit::StartMarsa,
         PanelExit::Quit,

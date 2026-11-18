@@ -294,7 +294,15 @@ fn site_list(ui: &mut Ui, theme: &Theme, sites: &SitesView, actions: &mut Vec<Pa
                 }
             }
             if sites.more > 0 {
-                line(ui, theme, &strings::panel_more_sites(sites.more));
+                // A quiet link: the rest of the sites are in the window.
+                let more = strings::panel_more_sites(sites.more);
+                let shown = ui.horizontal(|ui| {
+                    ui.add_space(theme.space.s1);
+                    ui.add(Button::quiet(&more))
+                });
+                if shown.inner.clicked() {
+                    actions.push(PanelAction::Exit(PanelExit::OpenSites));
+                }
             }
         });
 }
@@ -380,7 +388,10 @@ fn footer(ui: &mut Ui, theme: &Theme, power: &Power, actions: &mut Vec<PanelActi
                     actions.push(PanelAction::Exit(power.exit));
                 }
                 footer_divider(ui);
-                if ui.add(FooterLink::new(strings::TRAY_QUIT, half)).clicked() {
+                // Quit closes the icon; the daemon and the sites go on.
+                let quit =
+                    FooterLink::new(strings::TRAY_QUIT, half).tooltip(strings::PANEL_QUIT_HINT);
+                if ui.add(quit).clicked() {
                     actions.push(PanelAction::Exit(PanelExit::Quit));
                 }
             });
@@ -621,6 +632,16 @@ mod tests {
         )
     }
 
+    /// [`center`] for a node that egui gives its text as a value.
+    fn center_of_text(tree: &Tree, text: &str) -> Pos2 {
+        let node = tree.node_with_text(text).expect("a node");
+        let rect = node.bounds().expect("bounds");
+        egui::pos2(
+            ((rect.x0 + rect.x1) / 2.0) as f32,
+            ((rect.y0 + rect.y1) / 2.0) as f32,
+        )
+    }
+
     /// One frame of the panel in a window the panel's width.
     fn frame_of(
         harness: &Harness,
@@ -749,6 +770,30 @@ mod tests {
         let at = center(&tree, "All sites working, Caddy is running");
         harness.click(at, |ui| actions = show(ui, &view, &LIGHT));
         assert_eq!(actions, [PanelAction::Exit(PanelExit::OpenWindow)]);
+    }
+
+    #[test]
+    fn the_more_sites_line_is_a_link_that_opens_marsa_on_the_sites_screen() {
+        let harness = Harness::new(egui::Theme::Light);
+        let view = view(&working(12, &["8.4.27"]));
+        assert_eq!(view.sites.as_ref().map(|sites| sites.more), Some(3));
+        let tree = harness.accessibility(|ui| {
+            show(ui, &view, &LIGHT);
+        });
+        // A button a screen reader can press: it has a name and bounds.
+        let node = tree.node_with_text("3 more sites in Marsa");
+        assert!(node.is_some(), "{:?}", tree.labels_starting_with(""));
+        let at = center_of_text(&tree, "3 more sites in Marsa");
+        let mut actions = Vec::new();
+        harness.click(at, |ui| actions = show(ui, &view, &LIGHT));
+        assert_eq!(actions, [PanelAction::Exit(PanelExit::OpenSites)]);
+        // Nine sites or fewer: no such line.
+        let nine = self::view(&working(9, &["8.4.27"]));
+        let tree = harness.accessibility(|ui| {
+            show(ui, &nine, &LIGHT);
+        });
+        assert!(tree.labels_starting_with("1 more").is_empty());
+        assert!(tree.labels_starting_with("0 more").is_empty());
     }
 
     #[test]
