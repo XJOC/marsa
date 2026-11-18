@@ -4270,7 +4270,7 @@ mod tests {
     #[cfg(unix)]
     fn sleeping_caddy(dir: &Dir, ready: Duration) -> Arc<Daemon> {
         use crate::daemon::caddy::caddy_spec_for;
-        use marsa_core::services::ServiceSpec;
+        use marsa_core::services::{ServiceSpec, StopMethod};
 
         let mut daemon = Daemon::new(dir.dir.path().to_path_buf());
         // Free ports, so nothing of this machine answers there.
@@ -4288,7 +4288,7 @@ mod tests {
         caddy.ready_limit = ready;
         caddy.spec = Some(ServiceSpec {
             args: vec!["30".to_owned()],
-            stop_grace: Duration::from_millis(200),
+            stop: StopMethod::term(Duration::from_millis(200)),
             ..caddy_spec_for(&caddy.paths, PathBuf::from("/bin/sleep"))
         });
         Arc::new(daemon)

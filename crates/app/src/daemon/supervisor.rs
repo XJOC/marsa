@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use marsa_core::platform::process;
-use marsa_core::services::{LogBuffer, ProgramNotAbsolute, ServiceSpec, restart_delay};
+use marsa_core::services::{LogBuffer, ProgramNotAbsolute, ServiceSpec, StopAction, restart_delay};
 use marsa_core::types::{Event, LogLine, LogStream, ServiceState, ServiceStatus};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -79,8 +79,7 @@ impl ServiceHandle {
         lock(&self.runtime).logs.recent()
     }
 
-    /// Stops the process (SIGTERM, then a kill after `stop_grace`) and waits
-    /// for its task.
+    /// Stops the process by its spec's `stop` method, and waits for its task.
     ///
     /// # Errors
     ///
@@ -286,20 +285,28 @@ async fn run(
     exit
 }
 
-/// SIGTERM, up to `stop_grace` to exit, then a kill. On Windows: a kill.
+/// Follows `spec.stop`: each step asks the process to stop, then waits up to
+/// its limit for the exit. After the last step, a kill. Windows sends no
+/// signals, so there it kills at once.
 async fn stop(child: &mut Child, spec: &ServiceSpec) {
-    if let Some(pid) = child.id() {
-        match process::terminate(pid).await {
-            Ok(true) => {
-                if tokio::time::timeout(spec.stop_grace, child.wait())
-                    .await
-                    .is_ok()
-                {
+    for step in &spec.stop.steps {
+        // `None` once the exit is collected: the pid may be another
+        // process's by then.
+        let Some(pid) = child.id() else {
+            break;
+        };
+        let StopAction::Signal(signal) = step.action;
+        match process::send_signal(pid, signal).await {
+            Ok(()) => {
+                if tokio::time::timeout(step.wait, child.wait()).await.is_ok() {
                     return;
                 }
+                let name = signal.name();
+                warn!(service = %spec.id, wait = ?step.wait, "still running after {name}");
             }
-            Ok(false) => {}
-            Err(err) => warn!(service = %spec.id, %err, "SIGTERM failed"),
+            // Windows: no signals. The kill comes next, as before.
+            Err(err) if err.kind() == io::ErrorKind::Unsupported => {}
+            Err(err) => warn!(service = %spec.id, %err, "{} failed", signal.name()),
         }
     }
     if let Err(err) = child.kill().await {

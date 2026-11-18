@@ -36,7 +36,7 @@ use marsa::daemon::state::Daemon;
 use marsa_core::caddy::{CaddyInput, SERVER_ID};
 use marsa_core::orphan::{Liveness, PidRecord};
 use marsa_core::platform::process::{self, Signal, read_pid_file, write_pid_file};
-use marsa_core::services::ServiceSpec;
+use marsa_core::services::{ServiceSpec, StopMethod};
 use marsa_core::types::{ServiceAction, ServiceState, ServiceStatus};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -247,7 +247,7 @@ fn daemon_on(data: &Path, mode: &str, ports: Ports, processes: Arc<dyn Processes
             (FAKE.to_owned(), mode.to_owned()),
             (CONFIG.to_owned(), config),
         ]),
-        stop_grace: Duration::from_millis(500),
+        stop: StopMethod::term(Duration::from_millis(500)),
         ..caddy_spec_for(&caddy.paths, program())
     });
     daemon

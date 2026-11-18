@@ -16,7 +16,7 @@ use std::path::Path;
 use marsa_core::caddy::Dial;
 use marsa_core::php::{PhpError, PhpFiles, cgi_pool, php_ini};
 use marsa_core::recipes::Platform;
-use marsa_core::services::ServiceSpec;
+use marsa_core::services::{ServiceSpec, StopMethod};
 use semver::Version;
 
 use super::{Pool, Skip, fallback_port, fpm_id};
@@ -62,7 +62,7 @@ pub fn pool_with(files: PhpFiles) -> Result<Pool, Skip> {
         // Like Caddy and php-fpm. A worker that reaches its request limit is
         // replaced by php-cgi itself; only the end of php-cgi counts here.
         restart: RESTART,
-        stop_grace: STOP_GRACE,
+        stop: StopMethod::term(STOP_GRACE),
     };
     Ok(Pool {
         files,
