@@ -362,7 +362,7 @@ fn windows_port_holders() -> Option<Vec<PortHolder>> {
             })
             .clone()
     };
-    let holders = [80, 443]
+    let mut holders = [80, 443]
         .into_iter()
         .flat_map(|port| ports::holders(&listeners, port))
         .map(|listener| {
@@ -381,7 +381,9 @@ fn windows_port_holders() -> Option<Vec<PortHolder>> {
                 app,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+    // One line per program and port: System holds 80 on IPv4 and IPv6.
+    holders.dedup_by_key(|holder| (holder.port, holder.pid));
     Some(holders)
 }
 
