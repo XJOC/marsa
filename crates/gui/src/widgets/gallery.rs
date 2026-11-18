@@ -279,13 +279,8 @@ fn icons_page(ui: &mut Ui, theme: &Theme) {
 
     heading(ui, theme, label::MONOGRAMS);
     row(ui, |ui| {
-        for runtime in [
-            Runtime::Php,
-            Runtime::Node,
-            Runtime::Composer,
-            Runtime::Caddy,
-        ] {
-            ui.add(Monogram::of(runtime));
+        for runtime in Runtime::ALL {
+            ui.add(Monogram::new(&strings::runtime_monogram(runtime)));
         }
         ui.add(Monogram::new("Py"));
         ui.add(Monogram::new("Co").size(TileSize::Nav));

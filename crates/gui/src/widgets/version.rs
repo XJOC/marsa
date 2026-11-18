@@ -5,9 +5,9 @@
 //! turns that into an action.
 
 use eframe::egui::{
-    Align2, Color32, CornerRadius, EventFilter, InnerResponse, Key, Label, Popup, Pos2, Rect,
-    Response, RichText, Role, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, Widget, WidgetInfo, pos2,
-    vec2,
+    Align2, Color32, CornerRadius, EventFilter, InnerResponse, Key, Label, Painter, Popup, Pos2,
+    Rect, Response, RichText, Role, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, Widget, WidgetInfo,
+    pos2, vec2,
 };
 
 use super::icons::Icon;
@@ -200,6 +200,8 @@ pub struct VersionPicker<'a, T> {
     selected: Option<T>,
     /// The name of the dashed "+" button: "Install another PHP version".
     install: Option<&'a str>,
+    /// Why the "+" cannot be pressed now (another install runs).
+    install_off: Option<&'a str>,
     size: PickerSize,
     disabled: Option<&'a str>,
     /// A button's index and the look to draw it in.
@@ -213,6 +215,7 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
             versions,
             selected,
             install: None,
+            install_off: None,
             size: PickerSize::Large,
             disabled: None,
             forced: None,
@@ -222,6 +225,13 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
     /// Adds the dashed "+" after the versions; `label` names it.
     pub const fn install(mut self, label: &'a str) -> Self {
         self.install = Some(label);
+        self
+    }
+
+    /// Disables the dashed "+" alone, with `reason` over it: an install runs,
+    /// and the versions still work.
+    pub const fn install_disabled(mut self, reason: &'a str) -> Self {
+        self.install_off = Some(reason);
         self
     }
 
@@ -320,6 +330,10 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
             .map(|(index, spot)| {
                 if index < radios {
                     group_button(ui, *spot, group.id, index, stop)
+                } else if self.install_off.is_some() {
+                    // Not a Tab stop and not pressable; the pointer still
+                    // finds it, for the reason over it.
+                    ui.interact(*spot, group.id.with(index), Sense::hover())
                 } else {
                     ui.interact(*spot, group.id.with(index), Sense::click())
                 }
@@ -336,10 +350,15 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
             response.widget_info(|| WidgetInfo::selected(Role::RadioButton, enabled, chosen, name));
         }
         if let (Some(name), Some(response)) = (self.install, responses.get(radios)) {
-            if response.clicked() {
+            let off = self.install_off;
+            if response.clicked() && off.is_none() {
                 picked = Some(VersionPick::Install);
             }
-            response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, name));
+            let works = enabled && off.is_none();
+            response.widget_info(|| WidgetInfo::labeled(Role::Button, works, name));
+            if let Some(reason) = off {
+                response.clone().on_hover_text(reason);
+            }
         }
         self.move_focus(ui, direction, &responses[..radios]);
 
@@ -356,7 +375,16 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
                         let chosen = self.selected == Some(*value);
                         self.paint_version(ui, theme, spots[index], name, chosen, look);
                     }
-                    None => Self::paint_install(ui, theme, self.size, spots[index], look),
+                    None if self.install_off.is_some() => {
+                        // Drawn at the opacity of a disabled control, as a
+                        // disabled Ui would.
+                        let mut painter = ui.painter().clone();
+                        painter.multiply_opacity(theme.state.disabled_opacity);
+                        Self::paint_install(&painter, theme, self.size, spots[index], Look::rest());
+                    }
+                    None => {
+                        Self::paint_install(ui.painter(), theme, self.size, spots[index], look);
+                    }
                 }
             }
         }
@@ -423,8 +451,7 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
         }
     }
 
-    fn paint_install(ui: &Ui, theme: &Theme, size: PickerSize, spot: Rect, look: Look) {
-        let painter = ui.painter();
+    fn paint_install(painter: &Painter, theme: &Theme, size: PickerSize, spot: Rect, look: Look) {
         let radius = size.radius(theme);
         if let Some(fill) = quiet_fill(theme, look.touch) {
             painter.rect_filled(spot, CornerRadius::same(radius), fill);
@@ -1257,6 +1284,61 @@ mod tests {
         assert_eq!(click(2, false), Some(VersionPick::Version(85)));
         assert_eq!(click(1, false), None, "84 was already chosen");
         assert_eq!(click(0, true), None);
+    }
+
+    #[test]
+    fn a_disabled_plus_does_nothing_and_says_why_and_the_versions_still_work() {
+        let harness = Harness::new(egui::Theme::Light);
+        let theme = &LIGHT;
+        let busy = |picker: VersionPicker<'static, u8>, off: bool| {
+            let picker = picker.install("Install another PHP version");
+            if off {
+                picker.install_disabled("An install runs")
+            } else {
+                picker
+            }
+        };
+        let origin = picker_rect(egui::Theme::Light, || {
+            VersionPicker::new("Default PHP", &PHP, Some(84)).install("Install")
+        });
+        let at = |index: usize| {
+            let x = origin.left()
+                + index as f32 * (theme.size.version_lg.x + theme.space.group_gap)
+                + 10.0;
+            pos2(x, origin.center().y)
+        };
+        let click = |index: usize, off: bool| {
+            // A widget is known to egui, with its sense, from the frame
+            // before.
+            harness.run(|ui| {
+                let picker = VersionPicker::new("Default PHP", &PHP, Some(84));
+                ui.add(busy(picker, off));
+            });
+            let mut picked = None;
+            harness.click(at(index), |ui| {
+                let picker = VersionPicker::new("Default PHP", &PHP, Some(84));
+                picked = busy(picker, off).show(ui).inner;
+            });
+            picked
+        };
+        assert_eq!(click(3, false), Some(VersionPick::Install));
+        assert_eq!(click(3, true), None, "the plus is off");
+        assert_eq!(
+            click(0, true),
+            Some(VersionPick::Version(83)),
+            "the rest works"
+        );
+        // A screen reader hears a button that is off; Tab goes past it.
+        let tree = harness.accessibility(|ui| {
+            ui.add(busy(
+                VersionPicker::new("Default PHP", &PHP, Some(84)),
+                true,
+            ));
+        });
+        let plus = tree
+            .node_with_label("Install another PHP version")
+            .expect("the plus");
+        assert!(plus.is_disabled());
     }
 
     #[test]
