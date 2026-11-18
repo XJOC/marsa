@@ -207,7 +207,7 @@ pub fn run(data_dir: PathBuf) -> Result<(), TrayError> {
                 };
                 match items.clicked(&click.id) {
                     Some(Click::Open) => {
-                        if !open_window(&window, &data_dir) {
+                        if !open_window(&window, &data_dir, false) {
                             state.apply(Update::Failed(strings::WINDOW_START_FAILED.to_owned()));
                         }
                     }
@@ -276,8 +276,9 @@ fn after_panel(
 ) -> bool {
     match exit {
         PanelExit::Closed | PanelExit::FocusLost => {}
-        PanelExit::OpenWindow => {
-            if !open_window(window, data_dir) {
+        PanelExit::OpenWindow | PanelExit::OpenSites => {
+            let sites = exit == PanelExit::OpenSites;
+            if !open_window(window, data_dir, sites) {
                 state.apply(Update::Failed(strings::WINDOW_START_FAILED.to_owned()));
             }
         }
@@ -649,12 +650,14 @@ fn set_check_item(line: &CheckMenuItem, item: &Item) {
 /// window finds the window lock taken and exits at once
 /// (`startup::window_lock`). The exit status is collected on a small thread,
 /// so the window never stays a zombie. `false` if it could not be started.
-fn open_window(program: &Path, data_dir: &Path) -> bool {
-    let spawned = Command::new(program)
-        .arg("--data-dir")
-        .arg(data_dir)
-        .stdin(Stdio::null())
-        .spawn();
+fn open_window(program: &Path, data_dir: &Path, sites: bool) -> bool {
+    let mut command = Command::new(program);
+    command.arg("--data-dir").arg(data_dir);
+    // The window opens on its Sites screen, as the panel's link says.
+    if sites {
+        command.args(["--open", "sites"]);
+    }
+    let spawned = command.stdin(Stdio::null()).spawn();
     let mut child = match spawned {
         Ok(child) => child,
         Err(err) => {
