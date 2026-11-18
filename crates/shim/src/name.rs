@@ -24,8 +24,35 @@ impl ShimName {
     ///
     /// Not `current_exe()`: on Linux it follows symlinks and gives `marsa-shim`.
     /// The match is exact and case-sensitive.
+    #[cfg_attr(
+        all(windows, not(test)),
+        expect(dead_code, reason = "Windows reads its own program path instead")
+    )]
     pub fn from_argv0(argv0: &OsStr) -> Option<Self> {
-        match Path::new(argv0).file_name()?.to_str()? {
+        Self::from_name(Path::new(argv0).file_name()?.to_str()?)
+    }
+
+    /// Reads the path of a Windows program, such as `C:\...\shims\php.exe`
+    /// from `current_exe()`, or `php` from `argv[0]`: the file name without
+    /// `.exe`, in any letter case, as Windows itself finds `PHP` and
+    /// `php.EXE`. Another extension (`npm.cmd`) is not a shim.
+    #[cfg_attr(
+        all(unix, not(test)),
+        expect(dead_code, reason = "only `sys/windows.rs` reads a program path")
+    )]
+    pub fn from_exe_path(path: &Path) -> Option<Self> {
+        let exe = path
+            .extension()
+            .is_none_or(|extension| extension.eq_ignore_ascii_case("exe"));
+        if !exe {
+            return None;
+        }
+        Self::from_name(&path.file_stem()?.to_str()?.to_ascii_lowercase())
+    }
+
+    /// The exact name, case-sensitive.
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
             "php" => Some(ShimName::Php),
             "node" => Some(ShimName::Node),
             "npm" => Some(ShimName::Npm),
@@ -85,6 +112,37 @@ mod tests {
             "caddy.exe",
         ] {
             assert_eq!(name(text), None, "{text:?}");
+        }
+    }
+
+    fn exe(parts: &[&str]) -> Option<ShimName> {
+        let path: std::path::PathBuf = parts.iter().collect();
+        ShimName::from_exe_path(&path)
+    }
+
+    #[test]
+    fn windows_names_ignore_the_letter_case_and_exe() {
+        for (parts, expected) in [
+            (&["C:", "shims", "php.exe"][..], ShimName::Php),
+            (&["shims", "PHP.EXE"], ShimName::Php),
+            (&["php"], ShimName::Php),
+            (&["Node.Exe"], ShimName::Node),
+            (&["npm.exe"], ShimName::Npm),
+            (&["NPX"], ShimName::Npx),
+            (&["shims", "composer.exe"], ShimName::Composer),
+        ] {
+            assert_eq!(exe(parts), Some(expected), "{parts:?}");
+        }
+        for parts in [
+            &["marsa-shim.exe"][..],
+            &["npm.cmd"],
+            &["composer.bat"],
+            &["php.exe.old"],
+            &["php8.exe"],
+            &["caddy.exe"],
+            &[""],
+        ] {
+            assert_eq!(exe(parts), None, "{parts:?}");
         }
     }
 
