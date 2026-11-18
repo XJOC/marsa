@@ -73,6 +73,7 @@ pub fn options(start: Vec2, anchor: Option<&Anchor>) -> eframe::NativeOptions {
     let mut options = eframe::NativeOptions {
         viewport,
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: lean_wgpu(),
         ..Default::default()
     };
     // macOS only, so the `cfg` is not in `platform`: the activation policy
@@ -84,6 +85,25 @@ pub fn options(start: Vec2, anchor: Option<&Anchor>) -> eframe::NativeOptions {
         options.event_loop_builder = Some(accessory());
     }
     options
+}
+
+/// The graphics set-up of a window that is open for seconds: one frame in
+/// flight, and the allocator told to save memory.
+fn lean_wgpu() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{SurfaceConfig, WgpuConfiguration, WgpuSetup};
+    let mut config = WgpuConfiguration {
+        surface: SurfaceConfig::LOW_LATENCY,
+        ..WgpuConfiguration::default()
+    };
+    if let WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup {
+        let base = std::sync::Arc::clone(&setup.device_descriptor);
+        setup.device_descriptor =
+            std::sync::Arc::new(move |adapter| eframe::wgpu::DeviceDescriptor {
+                memory_hints: eframe::wgpu::MemoryHints::MemoryUsage,
+                ..base(adapter)
+            });
+    }
+    config
 }
 
 /// The hook that gives the event loop the `Accessory` activation policy.
