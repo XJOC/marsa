@@ -494,6 +494,17 @@ pub enum Action {
         service: String,
         action: ServiceAction,
     },
+    /// A version button of the default picker (Home): save `version` as the
+    /// default of `runtime`.
+    SetDefault { runtime: Runtime, version: Version },
+    /// A fix that installs a program (Home: "Install Caddy"). Queued like a
+    /// press of Install; `App` sends it.
+    Install(InstallJob),
+    /// The fix "Add to /etc/hosts" (Linux, task M4-18k3).
+    SyncHosts,
+    /// "Open" on a site. A local action: `App` hands the address
+    /// ([`Model::site_url`]) to the system, never a screen (code.md, State).
+    OpenSite(String),
 }
 
 /// How Marsa works as a whole, as far as the window can tell: the status at
@@ -886,16 +897,23 @@ impl Model {
             return false;
         }
         match install_version(&self.install_input[runtime_index(runtime)]) {
-            Ok(version) => {
-                self.runtimes_notice = None;
-                self.queue.push_back(InstallJob { runtime, version });
-                true
-            }
+            Ok(version) => self.queue_install(InstallJob { runtime, version }),
             Err(code) => {
                 self.runtimes_notice = Some(code.to_owned());
                 false
             }
         }
+    }
+
+    /// Queues `job`, as the Install button does once its field is right.
+    /// `false` if the window has no daemon, or one of its jobs waits or runs.
+    pub fn queue_install(&mut self, job: InstallJob) -> bool {
+        if !self.is_connected() || self.installing() {
+            return false;
+        }
+        self.runtimes_notice = None;
+        self.queue.push_back(job);
+        true
     }
 
     /// The next job to send, once no job of this window runs. It shows as
@@ -1337,7 +1355,27 @@ impl Model {
                 self.notice = None;
                 Some(Command::Service { service, action })
             }
+            Action::SetDefault { runtime, version } => {
+                self.choose_default(runtime, version).map(Command::Save)
+            }
+            Action::Install(job) => {
+                // The job waits in the queue: `App` sends it (`next_install`).
+                self.queue_install(job);
+                None
+            }
+            Action::SyncHosts => self.start_hosts_sync().then_some(Command::SyncHosts),
+            // Done by `App`, with the system's opener: nothing changes here.
+            Action::OpenSite(_) => None,
         }
+    }
+
+    /// The address of the site `name`, for the browser.
+    pub fn site_url(&self, name: &str) -> Option<String> {
+        self.sites
+            .sites
+            .iter()
+            .find(|site| site.name == name)
+            .map(url)
     }
 
     /// How Marsa works as a whole: the daemon, then the sites, then the web
@@ -1691,6 +1729,74 @@ mod tests {
             "{command:?}"
         );
         assert_eq!(model.notice, None);
+    }
+
+    #[test]
+    fn the_home_actions_set_the_default_queue_an_install_and_sync_the_hosts() {
+        // The default picker: the change goes to the daemon, once.
+        let mut model = with_php(Vec::new());
+        let set = Action::SetDefault {
+            runtime: Runtime::Php,
+            version: v("8.3.27"),
+        };
+        let command = model.apply_action(set.clone());
+        let want = Change::Default {
+            runtime: Runtime::Php,
+            version: "8.3".into(),
+        };
+        assert!(matches!(&command, Some(Command::Save(change)) if *change == want));
+        assert!(model.apply_action(set).is_none(), "the default already");
+
+        // A fix queues its install; `App` sends it through `next_install`.
+        let job = InstallJob {
+            runtime: Runtime::Caddy,
+            version: None,
+        };
+        assert!(model.apply_action(Action::Install(job.clone())).is_none());
+        assert!(model.installing());
+        assert_eq!(model.next_install(), Some(job.clone()));
+        // One at a time: a second fix waits for the first to end.
+        assert!(!model.queue_install(job));
+        assert_eq!(model.next_install(), None);
+
+        // The hosts button only runs with names to add.
+        assert!(model.apply_action(Action::SyncHosts).is_none());
+        model.update(Update::Hosts(HostsStatus {
+            used: true,
+            missing: vec!["shop.test".into()],
+        }));
+        let command = model.apply_action(Action::SyncHosts);
+        assert!(matches!(command, Some(Command::SyncHosts)), "{command:?}");
+        assert!(model.apply_action(Action::SyncHosts).is_none(), "it runs");
+        assert_eq!(model.hosts_sync, HostsSync::Running);
+    }
+
+    #[test]
+    fn a_fix_that_installs_needs_the_daemon() {
+        let mut model = Model::default();
+        let job = InstallJob {
+            runtime: Runtime::Php,
+            version: Some(FIRST_PHP.into()),
+        };
+        assert!(!model.queue_install(job));
+        assert!(!model.installing());
+    }
+
+    #[test]
+    fn open_site_changes_nothing_and_the_address_comes_from_the_model() {
+        let mut model = connected();
+        model.update(Update::Sites(site_list(&["shop"])));
+        model.sites.sites[0].secure = false;
+        assert!(
+            model
+                .apply_action(Action::OpenSite("shop".into()))
+                .is_none()
+        );
+        assert_eq!(model.route, Route::Home);
+        assert_eq!(model.site_url("shop").as_deref(), Some("http://shop.test"));
+        model.sites.sites[0].secure = true;
+        assert_eq!(model.site_url("shop").as_deref(), Some("https://shop.test"));
+        assert_eq!(model.site_url("gone"), None);
     }
 
     #[test]

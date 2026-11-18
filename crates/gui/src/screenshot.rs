@@ -8,8 +8,9 @@
 //! `MARSA_GUI_THEME=light|dark` draws that theme instead of the system's.
 //! `MARSA_GUI_SIZE=900x720` opens the window at that size (task M5-D4).
 //! `MARSA_GUI_ROUTE=home|sites|runtimes|services|logs|settings` opens that
-//! screen. On macOS, `sips -s format png <file.bmp> --out <file.png>`
-//! converts the picture.
+//! screen. `MARSA_GUI_DEMO=ok|caddy-stopped` draws fixed fake data and
+//! starts no daemon (task M5-D5, see `demo`). On macOS,
+//! `sips -s format png <file.bmp> --out <file.png>` converts the picture.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};

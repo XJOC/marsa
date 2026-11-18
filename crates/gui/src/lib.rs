@@ -9,6 +9,10 @@
 
 pub mod app;
 pub mod bridge;
+// Debug builds only: fixed fake data for the design review, so a release
+// build reads no extra environment variable (task M5-D5).
+#[cfg(debug_assertions)]
+pub mod demo;
 pub mod model;
 // The window's own screens: only `shell` draws them.
 pub(crate) mod screens;
