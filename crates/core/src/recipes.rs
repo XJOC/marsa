@@ -133,7 +133,8 @@ pub enum ArchiveFormat {
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
     pub name: String,
-    /// Template with `{version}`, used by `cargo xtask manifest` only.
+    /// Template with `{version}`, `{major}`, and `{minor}`, used by
+    /// `cargo xtask manifest` only.
     pub url: String,
     pub format: ArchiveFormat,
     /// Leading path components dropped from every archive entry.
@@ -169,7 +170,8 @@ pub struct Check {
 }
 
 impl Check {
-    /// [`Check::expect_prefix`] with `{version}` filled in.
+    /// [`Check::expect_prefix`] with `{version}`, `{major}`, and `{minor}`
+    /// filled in.
     pub fn expected_prefix(&self, version: &Version) -> String {
         fill(&self.expect_prefix, version)
     }
@@ -253,8 +255,8 @@ impl Recipe {
         self.platforms.iter().map(|(p, r)| (*p, r))
     }
 
-    /// The `url` template of artifact `name` on `platform`, with `{version}`
-    /// filled in. `None` if there is no such platform or artifact.
+    /// The `url` template of artifact `name` on `platform`, with its
+    /// placeholders filled in. `None` if there is no such platform or artifact.
     pub fn artifact_url(
         &self,
         platform: Platform,
@@ -283,8 +285,11 @@ pub enum RecipeError {
     #[error("recipe {recipe}: path {path:?} must be relative, with `/` and no `..`")]
     BadPath { recipe: String, path: String },
 
-    /// A template with a `{...}` other than `{version}`, or a lone brace.
-    #[error("recipe {recipe}: template {template:?} may only use {{version}}")]
+    /// A template with a `{...}` other than `{version}`, `{major}`, or
+    /// `{minor}`, or a lone brace.
+    #[error(
+        "recipe {recipe}: template {template:?} may only use {{version}}, {{major}}, and {{minor}}"
+    )]
     BadTemplate { recipe: String, template: String },
 }
 
@@ -545,19 +550,31 @@ fn check_path(source: &str, path: &str, allow_empty: bool) -> Result<(), RecipeE
 }
 
 /// A template may hold `{version}`, `{major}`, and `{minor}`, and nothing
-/// else between braces.
+/// else between braces. Read from the left, one brace at a time, so a nested
+/// `{mi{major}nor}` is refused: removing the placeholders one after another
+/// would leave a valid-looking `{minor}`.
 fn check_template(source: &str, template: &str) -> Result<(), RecipeError> {
-    let rest = template
-        .replace("{version}", "")
-        .replace("{major}", "")
-        .replace("{minor}", "");
-    if rest.contains(['{', '}']) {
-        return Err(RecipeError::BadTemplate {
+    const PLACEHOLDERS: [&str; 3] = ["version}", "major}", "minor}"];
+    let mut rest = template;
+    let valid = loop {
+        let Some(brace) = rest.find(['{', '}']) else {
+            break true;
+        };
+        let after = &rest[brace + 1..];
+        let known = PLACEHOLDERS.iter().find(|name| after.starts_with(**name));
+        match (&rest[brace..brace + 1], known) {
+            ("{", Some(name)) => rest = &after[name.len()..],
+            _ => break false,
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(RecipeError::BadTemplate {
             recipe: source.to_string(),
             template: template.to_string(),
-        });
+        })
     }
-    Ok(())
 }
 
 /// `{version}` is the whole version (`17.12.0`); `{major}` and `{minor}` are
@@ -1037,13 +1054,17 @@ into = "bin"
     }
 
     #[test]
-    fn templates_accept_only_version() {
+    fn templates_accept_only_the_known_placeholders() {
         for bad in [
             "{arch}",
             "{ version }",
             "{version",
             "version}",
             "{{version}}",
+            "{patch}",
+            "{mi{major}nor}",
+            "{ma{version}jor}",
+            "{major}}",
         ] {
             let url = good_with("{version}", bad);
             assert_eq!(error_code(&url), "recipe_bad_template", "url {bad:?}");

@@ -194,7 +194,8 @@ impl Drop for Started {
 }
 
 async fn runtimes(State(daemon): State<Arc<Daemon>>) -> Result<Json<RuntimeList>, HttpError> {
-    // Four small folder reads and one small file; not worth a blocking thread.
+    // A small folder read per runtime and one small file; not worth a
+    // blocking thread.
     list(&daemon.data_dir).map(Json).map_err(|err| {
         tracing::warn!(code = err.code(), error = %err, "cannot list runtimes");
         HttpError::new(
@@ -1020,12 +1021,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_four_tools_are_known() {
+    fn only_the_known_tools_are_known() {
         for (tool, runtime) in [
             ("php", Runtime::Php),
             ("node", Runtime::Node),
             ("composer", Runtime::Composer),
             ("caddy", Runtime::Caddy),
+            ("postgres", Runtime::Postgres),
         ] {
             assert_eq!(super::runtime(tool).unwrap(), runtime);
         }

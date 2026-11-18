@@ -545,7 +545,7 @@ async fn run_check(
         return Err(InstallError::MissingVcRuntime);
     }
     let stdout = String::from_utf8_lossy(&stdout);
-    if status.success() && stdout.starts_with(&check.expected_prefix(version)) {
+    if status.success() && version_matches(&stdout, &check.expected_prefix(version)) {
         return Ok(());
     }
     let text = format!("{stdout}{}", String::from_utf8_lossy(&stderr));
@@ -553,6 +553,15 @@ async fn run_check(
         text.chars().take(CHECK_OUTPUT_SHOWN).collect(),
         status.code(),
     ))
+}
+
+/// Whether `stdout` starts with `prefix` and the version ends there: the
+/// next character is not a digit. So an expected `17.1` never accepts a
+/// program that prints `17.12`, whatever the recipe's prefix ends with.
+fn version_matches(stdout: &str, prefix: &str) -> bool {
+    stdout
+        .strip_prefix(prefix)
+        .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_digit()))
 }
 
 fn clean_check_env(command: &mut Command) {
@@ -745,6 +754,19 @@ fn io_error(path: &Path) -> impl FnOnce(io::Error) -> InstallError + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_version_ends_where_the_prefix_does() {
+        let pg = "postgres (PostgreSQL) 17.1";
+        assert!(version_matches("postgres (PostgreSQL) 17.1\n", pg));
+        assert!(version_matches("postgres (PostgreSQL) 17.1", pg));
+        assert!(!version_matches("postgres (PostgreSQL) 17.12\n", pg));
+        assert!(!version_matches("postgres (PostgreSQL) 17.10", pg));
+        assert!(!version_matches("postgres (PostgreSQL) 16.1\n", pg));
+        assert!(version_matches("PHP 8.4.1 (cli)", "PHP 8.4.1 "));
+        assert!(!version_matches("PHP 8.4.12 (cli)", "PHP 8.4.1"));
+        assert!(version_matches("v22.11.0\r\n", "v22.11.0"));
+    }
     use crate::installer::Trust;
     use crate::installer::fetch::testing::{MemoryFetch, Reply};
     use crate::installer::install;
@@ -1002,6 +1024,8 @@ into = "bin"
     /// A `.tar.gz` shaped like theseus-rs's PostgreSQL archives: every file
     /// under `postgresql-<version>-<target>/`. `postgres` prints `prints`;
     /// the other programs are placeholders.
+    // `#[cfg(unix)]`: the archive holds a `#!/bin/sh` fake `postgres`, which
+    // only Unix can run for the check.
     #[cfg(unix)]
     fn theseus_archive(top: &str, prints: &str) -> Vec<u8> {
         let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -1031,6 +1055,7 @@ into = "bin"
         gzip.finish().expect("finish gzip")
     }
 
+    // `#[cfg(unix)]`: it runs the `#!/bin/sh` fake from `theseus_archive`.
     #[cfg(unix)]
     #[tokio::test]
     async fn postgres_installs_from_a_theseus_shaped_archive() {
