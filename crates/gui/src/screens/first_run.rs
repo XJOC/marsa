@@ -94,7 +94,7 @@ pub fn view(model: &Model) -> FirstRunView {
         StepView {
             number: 2,
             title: strings::FIRST_RUN_SETUP,
-            body: strings::setup_explanation(platform),
+            body: strings::first_run_setup_body(platform),
             stage: stage(1),
             detail: setup_detail(model, platform),
         },
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(view.steps[0].title, "PHP and Caddy are installed");
         assert_eq!(
             view.steps[1].body,
-            strings::setup_explanation(Platform::current())
+            strings::first_run_setup_body(Platform::current())
         );
         assert_eq!(view.primary.label, "Run setup");
         assert_eq!(view.primary.action, Action::RunSetup);

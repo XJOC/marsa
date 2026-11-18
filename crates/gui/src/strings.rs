@@ -305,16 +305,13 @@ pub fn install_status(view: &InstallView) -> String {
     match &view.step {
         InstallStep::Waiting => format!("Asking the daemon to install {what}…"),
         InstallStep::ListChecked => format!("Installing {what}…"),
-        InstallStep::Downloading {
-            artifact,
-            done,
-            total,
-        } => format!(
-            "Downloading {what} ({artifact}): {} of {} MB",
+        // The archive name is for the log, not the user (design review, D5).
+        InstallStep::Downloading { done, total, .. } => format!(
+            "Downloading {what}: {} of {} MB",
             megabytes(*done),
             megabytes(*total)
         ),
-        InstallStep::Unpacking { artifact } => format!("Unpacking {what} ({artifact})…"),
+        InstallStep::Unpacking { .. } => format!("Unpacking {what}…"),
         InstallStep::Checking => format!("Testing {what}…"),
         InstallStep::Finishing => format!("Finishing the install of {what}…"),
         InstallStep::Done { already: false } => format!("Installed {what}."),
@@ -407,6 +404,30 @@ pub fn setup_explanation(platform: Option<Platform>) -> &'static str {
         }
         _ => {
             "Setup lets your browser open .test sites over HTTPS. Your system may ask for an \
+             administrator's approval once."
+        }
+    }
+}
+
+/// The setup step of the first-run panel: what the user gets, and the prompt
+/// that comes. The details (DNS, certificates, ports) are in
+/// `setup_explanation`, for Settings. Linux keeps the cost of the low ports
+/// (ADR 0014), because the button here runs setup.
+pub fn first_run_setup_body(platform: Option<Platform>) -> &'static str {
+    match platform {
+        Some(Platform::DarwinArm64 | Platform::DarwinX64) => {
+            "Your browser will open .test sites over HTTPS. macOS asks for your password once."
+        }
+        Some(Platform::LinuxX64 | Platform::LinuxArm64) => {
+            "Your browser will open .test sites over HTTPS. After setup, any program on this \
+             computer may use ports 80 to 1023. Your desktop asks for your password once."
+        }
+        Some(Platform::WindowsX64) => {
+            "Your browser will open .test sites over HTTPS. Windows asks for your approval \
+             (UAC) the first time."
+        }
+        _ => {
+            "Your browser will open .test sites over HTTPS. Your system may ask for an \
              administrator's approval once."
         }
     }
@@ -776,6 +797,7 @@ pub fn path_step_label(label: &str, state: StepState) -> String {
         StepState::Working => "working",
         StepState::Broken => "not working",
         StepState::Unreached => "not reached",
+        StepState::NotChecked => "not checked",
     };
     format!("{label}, {word}")
 }
@@ -1997,13 +2019,13 @@ mod tests {
                     done: 12_340_000,
                     total: 30_100_000,
                 }),
-                "Downloading PHP 8.4.23 (cli): 12.3 of 30.1 MB",
+                "Downloading PHP 8.4.23: 12.3 of 30.1 MB",
             ),
             (
                 php(InstallStep::Unpacking {
                     artifact: artifact(),
                 }),
-                "Unpacking PHP 8.4.23 (cli)…",
+                "Unpacking PHP 8.4.23…",
             ),
             (php(InstallStep::Checking), "Testing PHP 8.4.23…"),
             (
@@ -2128,6 +2150,30 @@ mod tests {
         for platform in [Some(Platform::LinuxX64), Some(Platform::WindowsX64), None] {
             assert!(!setup_explanation(platform).contains("macOS"));
             assert!(!setup_running(platform).contains("macOS"));
+        }
+    }
+
+    /// The first-run step says what the user gets and the prompt, and on
+    /// Linux the cost of the low ports (ADR 0014); not how setup works.
+    #[test]
+    fn the_first_run_setup_step_is_short_and_names_the_prompt() {
+        let mac = first_run_setup_body(Some(Platform::DarwinArm64));
+        assert_eq!(
+            mac,
+            "Your browser will open .test sites over HTTPS. macOS asks for your password once."
+        );
+        let linux = first_run_setup_body(Some(Platform::LinuxX64));
+        assert!(linux.contains("any program on this computer may use ports 80 to 1023"));
+        assert!(first_run_setup_body(Some(Platform::WindowsX64)).contains("(UAC)"));
+        for platform in [
+            Some(Platform::DarwinX64),
+            Some(Platform::LinuxArm64),
+            Some(Platform::WindowsX64),
+            None,
+        ] {
+            let text = first_run_setup_body(platform);
+            assert!(text.starts_with("Your browser will open .test sites over HTTPS."));
+            assert!(!text.contains("certificates"), "{text}");
         }
     }
 

@@ -345,7 +345,7 @@ fn request_path(model: &Model, dns: Dns, caddy: &Caddy, php: &Php) -> Vec<PathPi
             match dns {
                 Dns::Working => StepState::Working,
                 Dns::Missing => StepState::Broken,
-                Dns::NotChecked => StepState::Unreached,
+                Dns::NotChecked => StepState::NotChecked,
             },
         ),
         pill(
@@ -741,7 +741,7 @@ mod tests {
         assert_eq!(
             states(&status),
             [
-                ("DNS", StepState::Unreached),
+                ("DNS", StepState::NotChecked),
                 ("Caddy", StepState::Broken),
                 ("PHP 8.4", StepState::Working),
                 ("shop.test", StepState::Unreached),
@@ -824,7 +824,7 @@ mod tests {
             status.explanation
         );
         let status = view(&model(ServiceState::Stopped, &["shop"])).status;
-        assert_eq!(states(&status)[0], ("DNS", StepState::Unreached));
+        assert_eq!(states(&status)[0], ("DNS", StepState::NotChecked));
     }
 
     #[test]
@@ -1024,7 +1024,7 @@ mod tests {
         let alert = tree.node_with_label("Sites are not opening: Caddy stopped.");
         assert_eq!(alert.expect("the sentence").role(), egui::Role::Alert);
         assert!(tree.node_with_label("Caddy, not working").is_some());
-        assert!(tree.node_with_label("DNS, not reached").is_some());
+        assert!(tree.node_with_label("DNS, not checked").is_some());
         let ok = Harness::new(egui::Theme::Light).accessibility(|ui| {
             draw(ui, &working(&["shop"]));
         });

@@ -1,5 +1,5 @@
 //! Debug builds only: fixed fake data for the design review (task M5-D5).
-//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1` fills the model with a few
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2` fills the model with a few
 //! sites, PHP and Caddy (or nothing, for the first run), and starts no bridge
 //! and no daemon: the window draws a state the review needs without a
 //! machine to break. Pair it with
@@ -32,6 +32,9 @@ pub enum Demo {
     /// A new install: nothing installed, and PHP 8.4 downloading, 18 of
     /// 31 MB (the first step of the first-run panel).
     FirstRun1,
+    /// PHP 8.4 and Caddy installed, no sites yet: the first step is done and
+    /// setup is the one to do.
+    FirstRun2,
 }
 
 /// The state `MARSA_GUI_DEMO` asks for, if it names one.
@@ -44,6 +47,7 @@ fn parse(name: &str) -> Option<Demo> {
         "ok" => Demo::Ok,
         "caddy-stopped" => Demo::CaddyStopped,
         "first-run-1" => Demo::FirstRun1,
+        "first-run-2" => Demo::FirstRun2,
         _ => return None,
     })
 }
@@ -58,10 +62,19 @@ pub fn fill(model: &mut Model, demo: Demo) {
     if demo == Demo::FirstRun1 {
         return first_run_downloading(model);
     }
+    if demo == Demo::FirstRun2 {
+        model.update(Update::Runtimes(runtimes(&["8.4.27"])));
+        model.update(Update::Services(vec![service(
+            WEB_SERVER,
+            ServiceState::Running,
+        )]));
+        model.update(Update::Sites(SiteList::default()));
+        return;
+    }
     model.update(Update::Runtimes(runtimes(&["8.3.27", "8.4.27"])));
     let caddy = match demo {
         Demo::CaddyStopped => ServiceState::Stopped,
-        Demo::Ok | Demo::FirstRun1 => ServiceState::Running,
+        Demo::Ok | Demo::FirstRun1 | Demo::FirstRun2 => ServiceState::Running,
     };
     model.update(Update::Services(vec![
         service(WEB_SERVER, caddy),
@@ -170,6 +183,7 @@ mod tests {
         assert_eq!(parse("ok"), Some(Demo::Ok));
         assert_eq!(parse("caddy-stopped"), Some(Demo::CaddyStopped));
         assert_eq!(parse("first-run-1"), Some(Demo::FirstRun1));
+        assert_eq!(parse("first-run-2"), Some(Demo::FirstRun2));
         assert_eq!(parse("on fire"), None);
     }
 
@@ -181,6 +195,16 @@ mod tests {
         assert!(model.installing());
         let words = crate::strings::install_status(model.install_view().expect("an install"));
         assert!(words.starts_with("Downloading PHP 8.4.27"), "{words}");
+    }
+
+    #[test]
+    fn the_second_first_run_demo_has_php_and_caddy_and_no_site() {
+        let mut model = Model::default();
+        fill(&mut model, Demo::FirstRun2);
+        assert!(model.needs_first_run());
+        assert!(!model.installing());
+        assert!(model.sites.sites.is_empty());
+        assert_eq!(model.php_versions().len(), 1);
     }
 
     #[test]

@@ -323,6 +323,9 @@ pub enum StepState {
     Broken,
     /// Not known: the request stops before it. A dash, `mute`.
     Unreached,
+    /// Not known: the window cannot check it (DNS on macOS and Windows).
+    /// Drawn like `Unreached`; only a screen reader hears the difference.
+    NotChecked,
 }
 
 /// How a step of the path is drawn.
@@ -350,7 +353,7 @@ pub fn step_look(theme: &Theme, state: StepState) -> StepLook {
             border: c.error,
             face: Face::SemiBold,
         },
-        StepState::Unreached => StepLook {
+        StepState::Unreached | StepState::NotChecked => StepLook {
             icon: Icon::Dash,
             color: c.mute,
             border: c.line,
@@ -676,6 +679,7 @@ mod tests {
             let working = step_look(theme, StepState::Working);
             let broken = step_look(theme, StepState::Broken);
             let unreached = step_look(theme, StepState::Unreached);
+            assert_eq!(step_look(theme, StepState::NotChecked), unreached);
             assert_eq!(broken.icon, Icon::Cross);
             assert_eq!(broken.color, theme.color.error);
             assert_eq!(broken.border, theme.color.error);
