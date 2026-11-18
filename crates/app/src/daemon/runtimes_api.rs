@@ -63,8 +63,8 @@ use marsa_core::resolver::{self, BadRequest, Tool};
 use marsa_core::runtimes::{Runtime, RuntimesDir, RuntimesError};
 use marsa_core::types::{
     DefaultRequest, DefaultVersion, Event, InstallAccepted, InstallDone, InstallEvent,
-    InstallFailure, InstallProgress, InstallRequest, InstallUpdate, RuntimeList, RuntimeVersions,
-    SiteKind, Uninstalled, VersionInUse,
+    InstallFailure, InstallProgress, InstallRequest, InstallUpdate, OsMismatch, RuntimeList,
+    RuntimeVersions, SiteKind, Uninstalled, VersionInUse,
 };
 use semver::Version;
 
@@ -394,6 +394,12 @@ pub fn failure(err: &InstallError, requested: Option<&str>) -> InstallFailure {
             failure.available.clone_from(available);
         }
         InstallError::CheckFailed { output, .. } => failure.output = Some(output.clone()),
+        InstallError::OsTooOld { needs, found, .. } => {
+            failure.os = Some(Box::new(OsMismatch {
+                needs: needs.clone(),
+                found: found.clone(),
+            }));
+        }
         InstallError::SerialCorrupt { path } | InstallError::Io { path, .. } => {
             failure.path = Some(path.clone());
         }
@@ -968,6 +974,18 @@ mod tests {
         assert_eq!(
             failure(&check, None).output.as_deref(),
             Some("PHP 8.4.22 (cli)")
+        );
+        let old = InstallError::OsTooOld {
+            what: "postgres".into(),
+            needs: "macOS 15.0".into(),
+            found: "macOS 14.6".into(),
+        };
+        let got = failure(&old, None);
+        assert_eq!(got.code, "install_os_too_old");
+        let os = got.os.expect("the versions are in the event");
+        assert_eq!(
+            (os.needs.as_str(), os.found.as_str()),
+            ("macOS 15.0", "macOS 14.6")
         );
         let key = failure(&InstallError::Manifest(ManifestError::NoTrustedKey), None);
         assert_eq!(key.code, "manifest_no_trusted_key");

@@ -179,6 +179,11 @@ pub fn install_failure(failed: &InstallFailure, runtime: Runtime) -> ClientFailu
         text(&failed.cause),
         text(&failed.output),
     );
+    let os = failed.os.as_deref();
+    let (needs, found) = (
+        os.map(|os| printable(&os.needs)),
+        os.map(|os| printable(&os.found)),
+    );
     let available: Vec<String> = failed.available.iter().map(|v| printable(v)).collect();
     let details = Details {
         runtime: Some(runtime),
@@ -189,6 +194,8 @@ pub fn install_failure(failed: &InstallFailure, runtime: Runtime) -> ClientFailu
         url: url.as_deref(),
         cause: cause.as_deref(),
         output: output.as_deref(),
+        needs: needs.as_deref(),
+        found: found.as_deref(),
         service: None,
         site: None,
     };

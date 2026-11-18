@@ -76,6 +76,13 @@ pub(super) async fn run<F: Fetch>(
     let programs = recipe
         .platform(platform)
         .ok_or_else(|| unsupported(platform.to_string()))?;
+    // Before any download: an old system is refused at once.
+    let found = match (&env.os, programs.min_macos().or(programs.min_glibc())) {
+        (Some(os), _) => os.clone(),
+        (None, Some(_)) => plan::OsVersions::probe(),
+        (None, None) => plan::OsVersions::default(),
+    };
+    plan::check_minimum(runtime, programs, &found)?;
     let runtimes = RuntimesDir::in_dir(&env.app_data_dir);
 
     // Shared with every blocking task, so it is freed only after the last
@@ -95,7 +102,7 @@ pub(super) async fn run<F: Fetch>(
     events(InstallEvent::ManifestVerified {
         serial: manifest.serial(),
     });
-    let release = plan::select(&manifest, runtime, req.version)?;
+    let release = plan::select(&manifest, runtime, req.version, platform)?;
     let version = release.version().clone();
     events(InstallEvent::Selected {
         runtime,
@@ -888,6 +895,7 @@ into = "bin"
             platform: Some(Platform::LinuxX64),
             recipe: recipe.map(|text| recipes::parse("test.toml", text).expect("test recipe")),
             trust,
+            os: None,
         }
     }
 
@@ -1264,6 +1272,25 @@ into = "bin"
             "install_unsupported_platform"
         );
         assert!(env.fetch.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_old_system_is_refused_before_any_download() {
+        let data = TempDir::new().expect("temp dir");
+        let recipe = FAKE_PHP.replace(
+            "[platform.linux-x64]\n",
+            "[platform.linux-x64]\nmin_glibc = \"2.36\"\n",
+        );
+        let mut env = env(&data, MemoryFetch::new(), Some(&recipe), Trust::Unsigned);
+        env.os = Some(plan::OsVersions {
+            macos: None,
+            glibc: Some("2.35".to_owned()),
+        });
+        let (result, _) = run_install(&env, Runtime::Php, None, false).await;
+        let err = result.expect_err("glibc 2.35 is too old");
+        assert_eq!(err.code(), "install_os_too_old");
+        assert!(err.to_string().contains("glibc 2.36"), "{err}");
+        assert!(env.fetch.requests().is_empty(), "nothing was downloaded");
     }
 
     #[test]

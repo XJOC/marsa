@@ -419,6 +419,17 @@ pub struct InstallFailure {
     /// What the installed program printed in its check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+    /// For `install_os_too_old`. Boxed so that this type stays small.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<Box<OsMismatch>>,
+}
+
+/// The system version a program needs, and the one this system has. Both read
+/// like `macOS 15.0`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OsMismatch {
+    pub needs: String,
+    pub found: String,
 }
 
 /// `GET /v1/sites`, and the answer to every change of the sites.

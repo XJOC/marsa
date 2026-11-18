@@ -180,6 +180,8 @@ impl Check {
 pub struct PlatformRecipe {
     programs: BTreeMap<String, String>,
     artifacts: Vec<Artifact>,
+    min_macos: Option<String>,
+    min_glibc: Option<String>,
 }
 
 impl PlatformRecipe {
@@ -191,6 +193,18 @@ impl PlatformRecipe {
     /// The artifact called `name`.
     pub fn artifact(&self, name: &str) -> Option<&Artifact> {
         self.artifacts.iter().find(|a| a.name == name)
+    }
+
+    /// The oldest macOS this build runs on (`15.0`), for the darwin
+    /// platforms. `None` means no limit.
+    pub fn min_macos(&self) -> Option<&str> {
+        self.min_macos.as_deref()
+    }
+
+    /// The oldest glibc this build runs on (`2.36`), for the linux
+    /// platforms. `None` means no limit.
+    pub fn min_glibc(&self) -> Option<&str> {
+        self.min_glibc.as_deref()
     }
 
     /// Program names (`php`, `npm-cli`), sorted.
@@ -401,6 +415,23 @@ struct RawPlatform {
     programs: BTreeMap<String, String>,
     #[serde(default)]
     artifact: Vec<Artifact>,
+    min_macos: Option<String>,
+    min_glibc: Option<String>,
+}
+
+/// A system version such as `15.0`, `2.36`, or `14.6.1`: one to three
+/// numbers with `.` between them. Missing parts are 0, so `15` is `15.0.0`
+/// and versions compare with `<`.
+pub fn parse_os_version(text: &str) -> Option<[u32; 3]> {
+    let mut parts = [0; 3];
+    for (index, part) in text.split('.').enumerate() {
+        // `parse` alone would accept a leading `+`.
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) || index == 3 {
+            return None;
+        }
+        parts[index] = part.parse().ok()?;
+    }
+    Some(parts)
 }
 
 fn validate_platform(
@@ -456,9 +487,32 @@ fn validate_platform(
         check_path(source, path, false)?;
     }
 
+    let darwin = matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64);
+    let linux = matches!(platform, Platform::LinuxArm64 | Platform::LinuxX64);
+    for (key, value, allowed) in [
+        ("min_macos", &raw.min_macos, darwin),
+        ("min_glibc", &raw.min_glibc, linux),
+    ] {
+        let Some(value) = value else { continue };
+        if !allowed {
+            return Err(invalid(
+                source,
+                format!("{platform}: {key} does not apply to this platform"),
+            ));
+        }
+        if parse_os_version(value).is_none() {
+            return Err(invalid(
+                source,
+                format!("{platform}: {key} {value:?} is not a version like \"15.0\""),
+            ));
+        }
+    }
+
     Ok(PlatformRecipe {
         programs: raw.programs,
         artifacts: raw.artifact,
+        min_macos: raw.min_macos,
+        min_glibc: raw.min_glibc,
     })
 }
 
@@ -570,6 +624,44 @@ into = "bin"
         parse("test.toml", text)
             .expect_err("the recipe must be refused")
             .code()
+    }
+
+    #[test]
+    fn os_minimums_are_read_and_checked() {
+        let with = |line: &str| {
+            good_with(
+                "programs = { php = \"bin/php\" }",
+                &format!("programs = {{ php = \"bin/php\" }}\n{line}"),
+            )
+        };
+        let linux = with("min_glibc = \"2.36\"");
+        let recipe = parse("test.toml", &linux).expect("valid");
+        let entry = recipe.platform(Platform::LinuxX64).expect("linux");
+        assert_eq!(entry.min_glibc(), Some("2.36"));
+        assert_eq!(entry.min_macos(), None);
+
+        for bad in [
+            "min_glibc = \"\"",
+            "min_glibc = \"2.x\"",
+            "min_glibc = \"2..36\"",
+            "min_glibc = \"1.2.3.4\"",
+            "min_glibc = \"+2.36\"",
+            "min_macos = \"15.0\"",
+        ] {
+            assert_eq!(error_code(&with(bad)), "recipe_invalid", "{bad}");
+        }
+    }
+
+    #[test]
+    fn os_versions_parse_and_compare() {
+        assert_eq!(parse_os_version("15"), Some([15, 0, 0]));
+        assert_eq!(parse_os_version("14.6.1"), Some([14, 6, 1]));
+        assert!(parse_os_version("14.6") < parse_os_version("15.0"));
+        assert!(parse_os_version("2.9") < parse_os_version("2.36"));
+        assert_eq!(parse_os_version("2.36"), parse_os_version("2.36.0"));
+        for bad in ["", ".", "2.", "a", "2.-1", "1.2.3.4"] {
+            assert_eq!(parse_os_version(bad), None, "{bad:?}");
+        }
     }
 
     // --- the built-in recipes ---

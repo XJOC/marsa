@@ -62,6 +62,8 @@ pub struct InstallEnv<F> {
     /// `None`: the built-in recipe of the runtime.
     recipe: Option<Recipe>,
     trust: Trust,
+    /// `None`: ask the system. Tests give fixed versions.
+    os: Option<plan::OsVersions>,
 }
 
 impl InstallEnv<HttpFetch> {
@@ -79,6 +81,7 @@ impl InstallEnv<HttpFetch> {
             platform: Platform::current(),
             recipe: None,
             trust: Trust::Embedded,
+            os: None,
         })
     }
 }
@@ -149,6 +152,15 @@ pub async fn install<F: Fetch>(
 pub enum InstallError {
     #[error("{what} has no build for {platform}")]
     UnsupportedPlatform { what: String, platform: String },
+
+    /// The system is older than the recipe allows. `needs` and `found` read
+    /// like `macOS 15.0` and `macOS 14.6`.
+    #[error("{what} needs {needs} or newer; this system has {found}")]
+    OsTooOld {
+        what: String,
+        needs: String,
+        found: String,
+    },
 
     #[error("another install is running")]
     Busy,
@@ -231,6 +243,7 @@ impl InstallError {
     pub fn code(&self) -> &'static str {
         match self {
             InstallError::UnsupportedPlatform { .. } => "install_unsupported_platform",
+            InstallError::OsTooOld { .. } => "install_os_too_old",
             InstallError::Busy => "install_busy",
             InstallError::NoSuchVersion { .. } => "install_no_such_version",
             InstallError::ManifestMismatch { .. } => "install_manifest_mismatch",
@@ -283,6 +296,14 @@ mod tests {
                     platform: "linux-x64".into(),
                 },
                 "install_unsupported_platform",
+            ),
+            (
+                InstallError::OsTooOld {
+                    what: "postgres".into(),
+                    needs: "macOS 15.0".into(),
+                    found: "macOS 14.6".into(),
+                },
+                "install_os_too_old",
             ),
             (InstallError::Busy, "install_busy"),
             (
