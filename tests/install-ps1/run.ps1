@@ -359,7 +359,9 @@ try {
     $copies = @($Shims | Where-Object { (Get-FileHash -LiteralPath (Join-Path $ShimDir "$_.exe")).Hash -eq $shimHash })
     Check ($copies.Count -eq $Shims.Count) 'fresh install: five shims, each a copy of marsa-shim.exe'
     $userPath = Get-UserPath
-    Check ($userPath -ceq "$ShimDir;$Bin;$StartPath") "fresh install: shims then bin, then every earlier entry in order ($userPath)"
+    # Empty entries (a PATH that ends in `;`) go; every other one stays, in order.
+    $earlier = @($StartPath -split ';' | Where-Object { $_ }) -join ';'
+    Check ($userPath -ceq "$ShimDir;$Bin;$earlier") "fresh install: shims then bin, then every earlier entry in order ($userPath)"
     Check ((Get-Item -LiteralPath $EnvKey).GetValueKind('Path') -eq 'ExpandString') 'fresh install: the PATH keeps its registry type'
     Check (Test-NoTemp) 'fresh install: no temporary folder left'
     Check ((Get-Calls) -ceq "$NewVersion marsa --version`r`n") 'fresh install: the only program run is the new marsa --version'
