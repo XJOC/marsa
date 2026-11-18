@@ -1,0 +1,121 @@
+name: install-ps1
+
+# Checks install.ps1, the script that decides what a Windows user's machine
+# trusts (task M5-26): it parses in Windows PowerShell 5.1 and PowerShell 7,
+# then tests/install-ps1/run.ps1 runs it against fake releases served from
+# 127.0.0.1 (no network).
+#
+# - pull requests and pushes to main that change the script or its tests;
+# - release.yml can call this workflow, so no release is drafted with a
+#   script that fails its tests.
+
+on:
+  pull_request:
+    branches: [main]
+    # labeled and unlabeled: the label check below runs again.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - "install.ps1"
+      - "tests/install-ps1/**"
+      - ".github/workflows/install-ps1.yml"
+      # The tests check that the script trusts the key built into Marsa.
+      - "crates/core/src/installer/manifest.rs"
+      - "install.sh"
+  push:
+    branches: [main]
+    paths:
+      - "install.ps1"
+      - "tests/install-ps1/**"
+      - ".github/workflows/install-ps1.yml"
+      - "crates/core/src/installer/manifest.rs"
+      - "install.sh"
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # Users pipe install.ps1 into iex, so a change to it is a `sensitive` task:
+  # two reviewers (AGENTS.md section 5). The label is how the pull request
+  # says so.
+  label:
+    name: install.ps1 needs the sensitive label
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check the label
+        env:
+          SENSITIVE: ${{ contains(github.event.pull_request.labels.*.name, 'sensitive') }}
+        run: |
+          if [ "$SENSITIVE" != true ]; then
+            echo "::error::this pull request changes install.ps1 or its tests: label it sensitive, and get two reviewers (AGENTS.md section 5)"
+            exit 1
+          fi
+          echo "the sensitive label is set"
+
+  test:
+    name: install.ps1 (windows-2025)
+    # The tests install into the runner user's folders and change its PATH:
+    # a runner is thrown away after the job.
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: The script parses in Windows PowerShell 5.1 and PowerShell 7
+        shell: pwsh
+        run: |
+          $check = {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile("$PWD\install.ps1", [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $errors | ForEach-Object { "$($_.Extent.StartLineNumber): $($_.Message)" }; exit 1 }
+            "parses in PowerShell $($PSVersionTable.PSVersion)"
+          }
+          & $check
+          powershell -NoProfile -Command $check.ToString()
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # On the runner only. The tests need minisign to sign their fake
+      # releases. Pinned: the release of jedisct1/minisign 0.12, whose
+      # signature was checked with its author's key when this was written.
+      - name: minisign 0.12
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'minisign.zip'
+          Invoke-WebRequest -Uri 'https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip' -OutFile $zip
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479') {
+            throw "minisign-0.12-win64.zip has the SHA-256 $hash, not the pinned one"
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'minisign')
+
+      # Windows PowerShell 5.1: Add-Type builds the fake programs there.
+      - name: Tests
+        shell: powershell
+        run: |
+          & .\tests\install-ps1\run.ps1 -Minisign "$env:RUNNER_TEMP\minisign\minisign-win64\x86_64\minisign.exe"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # The real script, as users run it, against GitHub itself: the API, and
+      # a release file that GitHub serves through a redirect, in both
+      # PowerShells. It must get past SHA256SUMS: that proves the HTTPS
+      # download and the check of where its redirects ended. It then installs,
+      # or stops at a release with no Windows zip yet. After the tests: it
+      # may install into this runner.
+      - name: The real script reaches GitHub over HTTPS
+        shell: pwsh
+        run: |
+          $ok = 'Installed: |cannot download marsa-[0-9.]+-windows-x64\.zip'
+          foreach ($run in @(@{ Shell = 'powershell'; Version = '' }, @{ Shell = 'pwsh'; Version = '0.1.1' })) {
+            $env:MARSA_VERSION = $run.Version
+            $out = (& $run.Shell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 2>&1 | Out-String)
+            Write-Host $out
+            if ($out -notmatch $ok -or $out -match 'cannot tell where the download') {
+              throw "$($run.Shell): the real script did not get past SHA256SUMS"
+            }
+          }
+          # The script failed on purpose at a release with no Windows zip,
+          # and the runner's wrapper would exit with its $LASTEXITCODE.
+          exit 0
