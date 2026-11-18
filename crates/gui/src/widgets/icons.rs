@@ -87,10 +87,13 @@ pub enum Icon {
     LockOpen,
     /// Points to the end of a line: right in a left-to-right language.
     Arrow,
+    /// Points to the start of a line: left in a left-to-right language. The
+    /// way back (task M5-D7).
+    Back,
 }
 
 impl Icon {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::Home,
         Self::Sites,
         Self::Runtimes,
@@ -115,6 +118,7 @@ impl Icon {
         Self::Lock,
         Self::LockOpen,
         Self::Arrow,
+        Self::Back,
     ];
 
     /// The icon of a section.
@@ -135,9 +139,13 @@ impl Icon {
     /// The side of the square grid the steps are drawn on.
     pub const fn grid(self) -> f32 {
         match self {
-            Self::Check | Self::Cross | Self::Dash | Self::Ring | Self::Spinner | Self::Arrow => {
-                12.0
-            }
+            Self::Check
+            | Self::Cross
+            | Self::Dash
+            | Self::Ring
+            | Self::Spinner
+            | Self::Arrow
+            | Self::Back => 12.0,
             Self::ChevronDown => 10.0,
             Self::More => 14.0,
             Self::Plus => 20.0,
@@ -156,7 +164,7 @@ impl Icon {
     /// An icon that points along the line of text is mirrored in a
     /// right-to-left language (rules.md 13).
     const fn follows_direction(self) -> bool {
-        matches!(self, Self::Arrow)
+        matches!(self, Self::Arrow | Self::Back)
     }
 
     /// The width of the stroke at `size`, from the tokens.
@@ -368,6 +376,13 @@ impl Icon {
                 Move(6.5, 2.5),
                 Line(10.0, 6.0),
                 Line(6.5, 9.5),
+            ],
+            Self::Back => &[
+                Move(10.0, 6.0),
+                Line(2.0, 6.0),
+                Move(5.5, 2.5),
+                Line(2.0, 6.0),
+                Line(5.5, 9.5),
             ],
             Self::Lock => &[
                 RoundRect(3.0, 7.0, 10.0, 7.0, 1.5),
@@ -757,6 +772,16 @@ mod tests {
         };
         assert!(tail(Direction::Ltr) < rect.center().x);
         assert!(tail(Direction::Rtl) > rect.center().x);
+        // The way back points the other way: to the start of the line.
+        let back = |direction| {
+            let shapes = Icon::Back.shapes_in(direction, rect, Color32::BLACK, 1.0);
+            let Some(Shape::Path(path)) = shapes.first() else {
+                panic!("the shaft is a path");
+            };
+            path.points[0].x
+        };
+        assert!(back(Direction::Ltr) > rect.center().x);
+        assert!(back(Direction::Rtl) < rect.center().x);
         // An icon of an object does not mirror.
         let lock = |direction| Icon::Lock.shapes_in(direction, rect, Color32::BLACK, 1.0);
         assert_eq!(lock(Direction::Ltr).len(), lock(Direction::Rtl).len());
