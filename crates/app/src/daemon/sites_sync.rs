@@ -29,11 +29,10 @@
 //!
 //! [`CaddyManager::apply`]: super::caddy::CaddyManager::apply
 
-use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use marsa_core::caddy::{CaddyPaths, PhpPools, system_ca_bundles};
+use marsa_core::caddy::{CaddyPaths, PhpPools};
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::Runtime;
 use marsa_core::sites::Site;
@@ -45,7 +44,7 @@ use tracing::{debug, warn};
 
 use super::caddy::CADDY_ID;
 use super::hosts_sync::HostsSync;
-use super::php::{PhpManager, write_ca_bundle};
+use super::php::{PhpManager, SystemRoots, write_ca_bundle};
 use super::state::Daemon;
 
 /// How long a pass waits after the first event, so a burst of changes (a
@@ -136,7 +135,7 @@ async fn run(
     let platform = Platform::current();
     let mut php = PhpManager::new(&daemon.data_dir, platform);
     let mut hosts = HostsSync::new();
-    let system = platform.map(system_ca_bundles).unwrap_or_default();
+    let system = SystemRoots::of(platform);
     let shutdown = daemon.shutdown.clone();
     // The requests the coming pass answers. A return drops them unanswered,
     // and with them `requests`, so each waiting route gets `PassNotRun`.
@@ -238,7 +237,7 @@ fn skip_waiting(events: &mut broadcast::Receiver<Event>) {
 }
 
 /// One pass: PHP, Caddy, the CA bundle, then PHP again if the bundle is new.
-async fn pass(daemon: &Daemon, php: &mut PhpManager, system: &[&'static Path]) {
+async fn pass(daemon: &Daemon, php: &mut PhpManager, system: &SystemRoots) {
     let sites = daemon.sites().map(|list| list.sites).unwrap_or_default();
     let bundle = daemon.caddy.paths.ca_bundle();
     let had_bundle = tokio::fs::try_exists(&bundle).await.unwrap_or(false);
@@ -266,9 +265,9 @@ async fn apply_caddy(daemon: &Daemon, sites: &[Site], pools: PhpPools) {
 
 /// [`write_ca_bundle`] on a blocking thread. `true` when the bundle is
 /// written and current.
-async fn write_bundle(paths: &CaddyPaths, system: &[&'static Path]) -> bool {
+async fn write_bundle(paths: &CaddyPaths, system: &SystemRoots) -> bool {
     let paths = paths.clone();
-    let system = system.to_vec();
+    let system = system.clone();
     let job = move || write_ca_bundle(&paths, &system);
     match tokio::task::spawn_blocking(job).await {
         Ok(Ok(written)) => written,

@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 mod ca;
 #[cfg(feature = "full")]
 pub use ca::certificate_sha256;
+/// The strict parser, for the round trip of `caddy::pem_certificates`.
+#[cfg(all(test, feature = "full"))]
+pub(crate) use ca::parse_pem as certificate_der;
 
 /// The protocol version in every request and response.
 pub const HELPER_PROTOCOL_VERSION: u32 = 1;

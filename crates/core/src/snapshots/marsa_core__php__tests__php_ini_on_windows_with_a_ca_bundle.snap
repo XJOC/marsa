@@ -22,7 +22,6 @@ opcache.validate_timestamps = 1
 opcache.revalidate_freq = 0
 
 curl.cainfo = "C:\marsa\caddy\ca-bundle.pem"
-openssl.cafile = "C:\marsa\caddy\ca-bundle.pem"
 
 extension_dir = "C:\marsa\runtimes\php\8.4.3\ext"
 zend_extension = opcache

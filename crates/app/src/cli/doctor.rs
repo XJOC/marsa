@@ -101,6 +101,11 @@ pub async fn run(data_dir: &Path) -> ExitCode {
     // The official PHP for Windows needs Microsoft's runtime (ADR 0019).
     if windows {
         show(Check::VcRuntime, doctor::vc_runtime(vc_runtime_version()));
+        // PHP's curl trusts the bundle marsad builds from this store.
+        show(
+            Check::SystemRoots,
+            doctor::system_roots(windows_root_count()),
+        );
     }
     let caddy = daemon.caddy.as_ref();
     show(Check::Caddy, doctor::caddy(running, caddy, caddy_installed));
@@ -270,6 +275,18 @@ fn log_path(data_dir: &Path) -> PathBuf {
     data_dir.join("logs").join("marsad.log")
 }
 
+/// How many roots Windows' store gives, as marsad reads them for PHP's CA
+/// bundle; never asked for elsewhere.
+fn windows_root_count() -> Result<usize, String> {
+    // `#[cfg]` outside `platform`: the certificate store is Windows'.
+    #[cfg(windows)]
+    return marsa_core::platform::windows::root_certificates()
+        .map(|roots| roots.len())
+        .map_err(|err| err.to_string());
+    #[cfg(not(windows))]
+    Err("not Windows".to_owned())
+}
+
 /// The Visual C++ runtime that Windows reports; none elsewhere.
 fn vc_runtime_version() -> Option<(u32, u32, u32)> {
     // `#[cfg]` outside `platform`: the registry is Windows'.
@@ -301,6 +318,7 @@ fn passed(pass: &Pass, data_dir: &Path) -> String {
             strings::doctor_runtimes_ok(&printable(default), &version.to_string())
         }
         Pass::VcRuntime { version } => strings::doctor_vc_runtime_ok(&printable(version)),
+        Pass::SystemRoots { count } => strings::doctor_system_roots_ok(*count),
         Pass::Caddy => strings::DOCTOR_CADDY_OK.to_owned(),
         Pass::Dns => strings::DOCTOR_DNS_OK.to_owned(),
         Pass::Hosts => strings::DOCTOR_HOSTS_OK.to_owned(),
@@ -389,6 +407,10 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
         Problem::VcRuntimeOld { found } => (
             strings::doctor_vc_old(&printable(found)),
             strings::DOCTOR_VC_INSTALL.to_owned(),
+        ),
+        Problem::SystemRootsUnreadable { reason } => (
+            strings::doctor_system_roots_unreadable(&printable(reason)),
+            strings::DOCTOR_SYSTEM_ROOTS_FIX.to_owned(),
         ),
         Problem::ShimsNotInPath { shims } => (
             strings::doctor_shims_missing(shims),
@@ -659,6 +681,24 @@ mod tests {
             "- Marsa's certificate authority: not checked. It does not exist yet: Caddy makes \
              it when it first starts. Run \"marsa setup\" to make it and trust it."
         );
+    }
+
+    /// Windows: the roots' lines, with the count and the cause.
+    #[test]
+    fn the_windows_roots_lines_name_the_count_and_the_cause() {
+        let data = data();
+        let pass = Verdict::Pass(Pass::SystemRoots { count: 57 });
+        let text = render(Check::SystemRoots, &pass, &data, true);
+        assert!(text.starts_with("✓") && text.contains("57"), "{text}");
+        let problem = Problem::SystemRootsUnreadable {
+            reason: "access denied".to_owned(),
+        };
+        let text = render(Check::SystemRoots, &Verdict::Fail(problem), &data, true);
+        assert!(
+            text.starts_with("✗") && text.contains("access denied"),
+            "{text}"
+        );
+        assert!(text.contains("Fix:"), "{text}");
     }
 
     /// Windows: the runtime's lines, with Microsoft's link in the fix.

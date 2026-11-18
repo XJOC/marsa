@@ -14,6 +14,8 @@
 //! - [`current_user_sid`], [`run_elevated`], and [`helper_pipe`]: what
 //!   `marsad` needs to install and use the helper service (ADR 0018),
 //!   public for the `marsa` crate.
+//! - [`root_certificates`]: the roots Windows trusts, for PHP's CA bundle
+//!   (task M4-19n).
 //!
 //! The only `unsafe` code of `marsa-core` is in this module and its
 //! `helper_pipe` (AGENTS.md section 6). The blocks are short, and every
@@ -477,6 +479,63 @@ fn vc_runtime_in(
     Some((read("Major")?, read("Minor")?, read("Bld")?))
 }
 
+/// The DER of every certificate in this user's `ROOT` store. That store
+/// holds the roots Windows trusts for the user: the machine's
+/// (`LocalMachine\Root`, where `marsa setup` puts Marsa's CA), group
+/// policy's, and the user's own. Read only (task M4-19n).
+///
+/// Windows may add a public root only when it first needs one (automatic
+/// root update), so a fresh machine may lack a root that a browser would
+/// fetch on its first visit.
+///
+/// # Errors
+///
+/// The store cannot be opened or read.
+pub fn root_certificates() -> io::Result<Vec<Vec<u8>>> {
+    use windows_sys::Win32::Foundation::CRYPT_E_NOT_FOUND;
+    use windows_sys::Win32::Security::Cryptography::{
+        CERT_CONTEXT, CertCloseStore, CertEnumCertificatesInStore, CertOpenSystemStoreW,
+    };
+    let name = wide(OsStr::new("ROOT"))?;
+    // SAFETY: no provider (0), and `name` is NUL-terminated and lives
+    // through the call. The store is checked for null and closed below.
+    let store = unsafe { CertOpenSystemStoreW(0, name.as_ptr()) };
+    if store.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let mut certificates = Vec::new();
+    let mut previous: *const CERT_CONTEXT = null();
+    let end = loop {
+        // SAFETY: `store` is open, and `previous` is null or the context
+        // the last call gave, which this call frees.
+        let context = unsafe { CertEnumCertificatesInStore(store, previous) };
+        if context.is_null() {
+            // Read at once: the end of the store, or why the read stopped.
+            break io::Error::last_os_error();
+        }
+        // SAFETY: `context` is valid until the next call frees it, and its
+        // `pbCertEncoded` points at `cbCertEncoded` bytes, copied out here
+        // (a null pointer is skipped: a slice needs a real one).
+        let der = unsafe {
+            let cert = &*context;
+            (!cert.pbCertEncoded.is_null()).then(|| {
+                std::slice::from_raw_parts(cert.pbCertEncoded, cert.cbCertEncoded as usize).to_vec()
+            })
+        };
+        certificates.extend(der);
+        previous = context;
+    };
+    // SAFETY: `store` is open and closed once, here. Every context was freed
+    // by the call after it, and the last call returned none.
+    unsafe {
+        CertCloseStore(store, 0);
+    }
+    if end.raw_os_error() != Some(CRYPT_E_NOT_FOUND) {
+        return Err(end);
+    }
+    Ok(certificates)
+}
+
 /// `text` as NUL-terminated UTF-16.
 fn wide(text: &OsStr) -> io::Result<Vec<u16>> {
     let mut wide: Vec<u16> = text.encode_wide().collect();
@@ -595,6 +654,18 @@ mod tests {
         let line = command_line(OsStr::new(program), &args).unwrap();
         assert_eq!(line.last(), Some(&0));
         String::from_utf16(&line[..line.len() - 1]).unwrap()
+    }
+
+    /// Every Windows has roots, and each is a certificate the strict parser
+    /// takes once it is PEM (task M4-19n).
+    #[test]
+    fn the_root_store_gives_certificates() {
+        let ders = root_certificates().expect("read the ROOT store");
+        assert!(ders.len() >= 5, "only {} roots", ders.len());
+        for der in &ders {
+            let pem = crate::caddy::pem_certificates(std::slice::from_ref(der));
+            assert!(crate::helper::certificate_sha256(&pem).is_some(), "{pem}");
+        }
     }
 
     #[test]

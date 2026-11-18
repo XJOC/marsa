@@ -25,6 +25,9 @@ pub enum Check {
     Runtimes,
     /// Windows only: the Microsoft Visual C++ runtime PHP needs (ADR 0019).
     VcRuntime,
+    /// Windows only: the roots PHP's curl trusts, from Windows' store
+    /// (task M4-19n).
+    SystemRoots,
     Caddy,
     Dns,
     Ports,
@@ -61,6 +64,10 @@ pub enum Pass {
     /// The installed runtime's version, `14.44.35211`.
     VcRuntime {
         version: String,
+    },
+    /// How many roots Windows' store gave for PHP's CA bundle.
+    SystemRoots {
+        count: usize,
     },
     Caddy,
     Dns,
@@ -138,6 +145,11 @@ pub enum Problem {
     /// need a newer one.
     VcRuntimeOld {
         found: String,
+    },
+    /// Windows: Marsa cannot read the roots Windows trusts, so PHP's curl
+    /// trusts only Marsa's CA, and its HTTPS calls to the internet fail.
+    SystemRootsUnreadable {
+        reason: String,
     },
     ShimsNotInPath {
         shims: PathBuf,
@@ -221,6 +233,19 @@ pub fn daemon(answer: Result<(Health, u16), String>) -> Verdict {
 /// moves to PHP built with a newer MSVC (vs18 is 14.5x): `doctor` would
 /// pass on an older runtime that PHP fails on.
 pub const VC_RUNTIME_MIN: (u32, u32) = (14, 44);
+
+/// Windows: the roots read from Windows' store for PHP's CA bundle, as a
+/// count, or why they could not be read. An empty store fails too: every
+/// Windows has roots, so it means the read went wrong.
+pub fn system_roots(found: Result<usize, String>) -> Verdict {
+    match found {
+        Ok(0) => Verdict::Fail(Problem::SystemRootsUnreadable {
+            reason: "the store gave no certificates".to_owned(),
+        }),
+        Ok(count) => Verdict::Pass(Pass::SystemRoots { count }),
+        Err(reason) => Verdict::Fail(Problem::SystemRootsUnreadable { reason }),
+    }
+}
 
 /// Windows: the Visual C++ runtime that Windows reports, `(major, minor,
 /// build)`, or `None` when it reports none.
@@ -824,6 +849,23 @@ mod tests {
         let name = probe_name(u64::MAX);
         let label = name.strip_suffix(".test").unwrap();
         assert!(crate::sites::validate_name(label).is_ok(), "{name}");
+    }
+
+    #[test]
+    fn the_windows_roots_must_be_readable_and_not_empty() {
+        assert_eq!(
+            system_roots(Ok(42)),
+            Verdict::Pass(Pass::SystemRoots { count: 42 })
+        );
+        for found in [Ok(0), Err("access denied".to_owned())] {
+            assert!(
+                matches!(
+                    system_roots(found.clone()),
+                    Verdict::Fail(Problem::SystemRootsUnreadable { .. })
+                ),
+                "{found:?}"
+            );
+        }
     }
 
     #[test]

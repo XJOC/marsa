@@ -254,7 +254,11 @@ pub fn fpm_conf(listen: &Listen, files: &PhpFiles) -> Result<String, PhpError> {
 /// OPcache that checks for changed files on every request.
 ///
 /// - With `files.ca_bundle`: `curl.cainfo` and `openssl.cafile`, so an HTTP
-///   call from PHP to another `.test` site trusts Marsa's CA.
+///   call from PHP to another `.test` site trusts Marsa's CA. On Windows
+///   `curl.cainfo` only: with no `openssl.cafile`, PHP's streams check
+///   certificates with Windows itself, which trusts Marsa's CA after
+///   `marsa setup` and fetches a public root it lacks (task M4-19n). The
+///   bundle holds the roots of Windows' store, then Marsa's.
 /// - On [`Platform::WindowsX64`]: `extension_dir`, `zend_extension = opcache`
 ///   before PHP 8.5, and one `extension` line for each extension Laravel
 ///   needs. Every other platform gets the same text,
@@ -304,7 +308,9 @@ pub fn php_ini(platform: Platform, files: &PhpFiles) -> Result<String, PhpError>
         if let Some(ca_bundle) = ca_bundle {
             writeln!(out)?;
             writeln!(out, "curl.cainfo = \"{ca_bundle}\"")?;
-            writeln!(out, "openssl.cafile = \"{ca_bundle}\"")?;
+            if platform != Platform::WindowsX64 {
+                writeln!(out, "openssl.cafile = \"{ca_bundle}\"")?;
+            }
         }
         if let Some(ext_dir) = ext_dir {
             writeln!(out)?;

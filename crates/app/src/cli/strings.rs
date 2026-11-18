@@ -1574,6 +1574,7 @@ pub fn doctor_skip(check: Check, skip: Skip) -> String {
         Check::Daemon => "marsad",
         Check::Runtimes => "PHP and Caddy",
         Check::VcRuntime => "The Microsoft Visual C++ runtime",
+        Check::SystemRoots => "The root certificates PHP trusts",
         Check::Caddy => "Caddy",
         Check::Dns => ".test names",
         Check::Ports => "Ports 80 and 443",
@@ -1610,6 +1611,23 @@ pub fn doctor_vc_old(found: &str) -> String {
 
 pub const DOCTOR_VC_INSTALL: &str = "Install the latest Microsoft Visual C++ Redistributable \
      (x64) from https://aka.ms/vs/17/release/vc_redist.x64.exe, then run \"marsa doctor\" again.";
+
+/// Windows: the roots of Windows' store that PHP's curl trusts (task
+/// M4-19n).
+pub fn doctor_system_roots_ok(count: usize) -> String {
+    format!("PHP trusts the {count} root certificates of Windows, and Marsa's CA.")
+}
+
+pub fn doctor_system_roots_unreadable(reason: &str) -> String {
+    format!(
+        "Marsa cannot read the root certificates of Windows ({reason}), so PHP trusts only \
+         Marsa's CA: HTTPS calls from PHP to the internet fail."
+    )
+}
+
+pub const DOCTOR_SYSTEM_ROOTS_FIX: &str = "Check that the Windows service \"Cryptographic \
+     Services\" runs, then run \"marsa daemon stop\", \"marsa daemon start\", and \"marsa \
+     doctor\" again.";
 
 pub fn doctor_runtimes_ok(default: &str, version: &str) -> String {
     if default == version {
