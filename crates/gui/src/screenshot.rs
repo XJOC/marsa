@@ -8,8 +8,8 @@
 //! `MARSA_GUI_THEME=light|dark` draws that theme instead of the system's.
 //! `MARSA_GUI_SIZE=900x720` opens the window at that size (task M5-D4).
 //! `MARSA_GUI_ROUTE=home|sites|runtimes|services|logs|settings` opens that
-//! screen. `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2` draws
-//! fixed fake data and starts no daemon (task M5-D5, see `demo`).
+//! screen. `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras`
+//! draws fixed fake data and starts no daemon (task M5-D5, see `demo`).
 //! `MARSA_GUI_CLICK=x,y` clicks that point (in points, from the top left of
 //! the window) once the window has settled, so a menu is open in the picture
 //! (task M5-D6). On macOS,

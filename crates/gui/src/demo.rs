@@ -1,7 +1,7 @@
 //! Debug builds only: fixed fake data for the design review (task M5-D5).
-//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2` fills the model with a few
-//! sites, PHP and Caddy (or nothing, for the first run), and starts no bridge
-//! and no daemon: the window draws a state the review needs without a
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras`
+//! fills the model with a few sites, PHP and Caddy (or nothing, for the
+//! first run), and starts no bridge and no daemon: the window draws a state the review needs without a
 //! machine to break. Pair it with
 //! `MARSA_GUI_SCREENSHOT` and `MARSA_GUI_THEME` (see `screenshot`).
 //!
@@ -14,10 +14,10 @@ use std::path::PathBuf;
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
     Event, Health, InstallEvent, InstallProgress, InstallUpdate, RuntimeList, RuntimeVersions,
-    ServiceState, ServiceStatus, Site, SiteKind, SiteList,
+    ServiceState, ServiceStatus, Site, SiteKind, SiteList, SkippedFolder, Source,
 };
 
-use crate::model::{Model, Update, WEB_SERVER, apply};
+use crate::model::{LinkForm, Model, SitesNotice, Update, WEB_SERVER, apply};
 
 /// The variable that names the state.
 const VAR: &str = "MARSA_GUI_DEMO";
@@ -35,6 +35,14 @@ pub enum Demo {
     /// PHP 8.4 and Caddy installed, no sites yet: the first step is done and
     /// setup is the one to do.
     FirstRun2,
+    /// The same as `Ok`, with "li" in the search field of Sites (task
+    /// M5-D6).
+    SitesSearch,
+    /// The same as `Ok`, with no site: the empty state of Sites.
+    SitesEmpty,
+    /// The same as `Ok`, with the link form open, a line about the last
+    /// action, two parked folders, and two skipped ones.
+    SitesExtras,
 }
 
 /// The state `MARSA_GUI_DEMO` asks for, if it names one.
@@ -48,6 +56,9 @@ fn parse(name: &str) -> Option<Demo> {
         "caddy-stopped" => Demo::CaddyStopped,
         "first-run-1" => Demo::FirstRun1,
         "first-run-2" => Demo::FirstRun2,
+        "sites-search" => Demo::SitesSearch,
+        "sites-empty" => Demo::SitesEmpty,
+        "sites-extras" => Demo::SitesExtras,
         _ => return None,
     })
 }
@@ -72,15 +83,50 @@ pub fn fill(model: &mut Model, demo: Demo) {
         return;
     }
     model.update(Update::Runtimes(runtimes(&["8.3.27", "8.4.27"])));
-    let caddy = match demo {
-        Demo::CaddyStopped => ServiceState::Stopped,
-        Demo::Ok | Demo::FirstRun1 | Demo::FirstRun2 => ServiceState::Running,
+    let caddy = if demo == Demo::CaddyStopped {
+        ServiceState::Stopped
+    } else {
+        ServiceState::Running
     };
     model.update(Update::Services(vec![
         service(WEB_SERVER, caddy),
         service("php-fpm-8.4", ServiceState::Running),
     ]));
-    model.update(Update::Sites(sites()));
+    let list = if demo == Demo::SitesEmpty {
+        SiteList::default()
+    } else {
+        sites()
+    };
+    model.update(Update::Sites(list));
+    if demo == Demo::SitesSearch {
+        model.sites_search = "li".into();
+    }
+    if demo == Demo::SitesExtras {
+        sites_extras(model);
+    }
+}
+
+/// The parts of Sites the plain demo leaves out.
+fn sites_extras(model: &mut Model) {
+    model.sites.parked = vec![
+        PathBuf::from("/demo/Code"),
+        PathBuf::from("/demo/Work/acme"),
+    ];
+    model.sites.skipped = vec![
+        SkippedFolder {
+            path: PathBuf::from("/demo/Code/My Old Site"),
+            code: "site_name_invalid".into(),
+        },
+        SkippedFolder {
+            path: PathBuf::from("/demo/Work/acme/portal-copy"),
+            code: "site_name_taken".into(),
+        },
+    ];
+    model.sites_notice = Some(SitesNotice::Unlinked("old-blog".into()));
+    model.link = Some(LinkForm {
+        folder: PathBuf::from("/demo/Work/blog"),
+        name: "blog".into(),
+    });
 }
 
 /// Nothing installed, and the first-run install under way: what the panel
@@ -148,27 +194,65 @@ fn service(id: &str, state: ServiceState) -> ServiceStatus {
     }
 }
 
+/// Six sites as the mockup lists them: each version has its own reason.
 fn sites() -> SiteList {
-    let site = |name: &str, php: &str| {
-        let root = PathBuf::from("/demo/Code").join(name);
+    let site = |name: &str, folder: &str, php: &str, source: Source, secure: bool| {
+        let root = PathBuf::from("/demo").join(folder);
         Site {
             name: name.into(),
             docroot: root.join("public"),
             root,
             kind: SiteKind::Laravel,
             php: php.parse().ok(),
-            php_source: None,
-            secure: true,
+            php_source: Some(source),
+            secure,
         }
     };
+    let file = |folder: &str, name: &str| PathBuf::from("/demo").join(folder).join(name);
     SiteList {
         sites: vec![
-            site("shop", "8.4.27"),
-            site("billing-api", "8.4.27"),
-            site("legacy-crm", "8.3.27"),
-            site("docs", "8.4.27"),
-            site("client-portal", "8.4.27"),
-            site("wiki", "8.3.27"),
+            site(
+                "shop",
+                "Code/shop",
+                "8.4.27",
+                Source::VersionFile(file("Code/shop", ".php-version")),
+                true,
+            ),
+            site(
+                "billing-api",
+                "Code/billing-api",
+                "8.4.27",
+                Source::GlobalDefault,
+                true,
+            ),
+            site(
+                "legacy-crm",
+                "Code/legacy-crm",
+                "8.3.27",
+                Source::ProjectSetting,
+                true,
+            ),
+            site(
+                "docs",
+                "Code/docs",
+                "8.4.27",
+                Source::Constraint(file("Code/docs", "composer.json")),
+                false,
+            ),
+            site(
+                "client-portal",
+                "Work/acme/portal",
+                "8.4.27",
+                Source::GlobalDefault,
+                true,
+            ),
+            site(
+                "wiki",
+                "Sites/wiki",
+                "8.3.27",
+                Source::VersionFile(file("Sites/wiki", ".php-version")),
+                true,
+            ),
         ],
         ..SiteList::default()
     }
@@ -184,6 +268,9 @@ mod tests {
         assert_eq!(parse("caddy-stopped"), Some(Demo::CaddyStopped));
         assert_eq!(parse("first-run-1"), Some(Demo::FirstRun1));
         assert_eq!(parse("first-run-2"), Some(Demo::FirstRun2));
+        assert_eq!(parse("sites-search"), Some(Demo::SitesSearch));
+        assert_eq!(parse("sites-empty"), Some(Demo::SitesEmpty));
+        assert_eq!(parse("sites-extras"), Some(Demo::SitesExtras));
         assert_eq!(parse("on fire"), None);
     }
 
@@ -205,6 +292,41 @@ mod tests {
         assert!(!model.installing());
         assert!(model.sites.sites.is_empty());
         assert_eq!(model.php_versions().len(), 1);
+    }
+
+    #[test]
+    fn the_sites_demos_search_by_name_or_have_no_site_at_all() {
+        let mut model = Model::default();
+        fill(&mut model, Demo::SitesSearch);
+        assert_eq!(model.sites_search, "li");
+        assert_eq!(model.sites.sites.len(), 6);
+        let mut model = Model::default();
+        fill(&mut model, Demo::SitesEmpty);
+        assert!(model.sites.sites.is_empty() && model.is_connected());
+    }
+
+    #[test]
+    fn the_extras_demo_opens_the_link_form_and_lists_the_folders() {
+        let mut model = Model::default();
+        fill(&mut model, Demo::SitesExtras);
+        assert!(model.link.is_some() && model.sites_notice.is_some());
+        assert_eq!(model.sites.parked.len(), 2);
+        assert_eq!(model.sites.skipped.len(), 2);
+    }
+
+    #[test]
+    fn the_demo_sites_show_every_kind_of_reason_and_both_connections() {
+        let list = sites();
+        let sources: Vec<_> = list
+            .sites
+            .iter()
+            .map(|site| site.php_source.clone().expect("a source"))
+            .collect();
+        assert!(sources.contains(&Source::GlobalDefault));
+        assert!(sources.contains(&Source::ProjectSetting));
+        assert!(sources.iter().any(|s| matches!(s, Source::VersionFile(_))));
+        assert!(sources.iter().any(|s| matches!(s, Source::Constraint(_))));
+        assert!(list.sites.iter().any(|site| !site.secure));
     }
 
     #[test]

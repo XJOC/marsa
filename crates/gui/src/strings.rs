@@ -9,13 +9,13 @@ use marsa_core::runtimes::Runtime;
 use marsa_core::sites::TLD;
 use marsa_core::types::{
     InstallFailure, OpStatus, PortHolder, ServiceAction, ServiceState, SetupReport, Site, SiteKind,
-    Source, VersionInUse, XdebugState,
+    VersionInUse, XdebugState,
 };
 use semver::Version;
 
 use crate::model::{
-    Autostart, Choice, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Overall, Pick,
-    Removal, UninstallNotice,
+    Autostart, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Overall, Pick, Removal,
+    UninstallNotice,
 };
 use crate::theme::Section;
 use crate::tray::menu::Daemon;
@@ -36,23 +36,74 @@ pub const LOG_TITLE: &str = "Caddy log";
 pub const LOG_EMPTY: &str = "No log lines yet.";
 
 pub const SITES: &str = "Sites";
-pub const NO_SITES: &str = "No sites yet. Park a folder of projects, where each sub-folder becomes a site, or link one \
-     project folder.";
 pub const COLUMN_NAME: &str = "Name";
-pub const COLUMN_URL: &str = "URL";
-pub const COLUMN_HTTPS: &str = "HTTPS";
-pub const COLUMN_KIND: &str = "Kind";
+pub const COLUMN_SITE: &str = "Site";
+pub const COLUMN_CONNECTION: &str = "Connection";
 pub const COLUMN_PHP: &str = "PHP";
 pub const COLUMN_FOLDER: &str = "Folder";
+pub const COLUMN_WHY: &str = "Why";
 /// The PHP column of a site with no PHP version: no PHP is installed, or
 /// none matches what the site asks for.
 pub const NO_PHP: &str = "–";
-/// The first entry of a site's PHP list when the window cannot tell which
-/// version clearing the site's setting gives.
-pub const AUTO_PHP: &str = "Default";
-pub const AUTO_PHP_HINT: &str = "No setting for this site: its .php-version file, its \
-     composer.json, or the default PHP picks the version.";
+/// The button at the end of the Sites header, and of its empty state. It
+/// opens a menu, so it ends with "…".
+pub const ADD_SITE_BUTTON: &str = "Add site…";
+/// The empty state of the Sites screen: what this is, and the button that
+/// fills it.
+pub const SITES_EMPTY: &str =
+    "No sites yet. Park a folder of projects, or link one project folder.";
+/// The Sites screen while the window has no daemon to ask.
+pub const SITES_OFFLINE: &str = "Your sites show here once Marsa is connected to its daemon.";
+/// Over the disabled "Add site…" button while the window has no daemon.
+pub const ADD_SITE_OFFLINE: &str = "Waiting for the daemon.";
+/// The name of the search field for a screen reader, and its placeholder.
+pub const FIND_SITE: &str = "Find a site";
+/// The key that focuses the search field, as the field shows it at its end.
+pub const fn search_key_hint(mac: bool) -> &'static str {
+    if mac { "Cmd K" } else { "Ctrl K" }
+}
+
+/// Under the header when the search matches no site.
+pub fn no_site_matches(search: &str) -> String {
+    format!("No site matches “{search}”.")
+}
+
+/// The connection cell of a site's row: the word beside the lock.
+pub const HTTPS: &str = "HTTPS";
+pub const HTTP: &str = "HTTP";
+/// The rows of a site's menu (⋯): the other connection, and Unlink.
+pub const SWITCH_TO_HTTP: &str = "Switch to HTTP";
+pub const SWITCH_TO_HTTPS: &str = "Switch to HTTPS";
 pub const HTTPS_HINT: &str = "Serve this site over HTTPS";
+pub const HTTP_HINT: &str = "Serve this site over plain HTTP.";
+
+/// What a screen reader says for the version menu of a site's row.
+pub fn php_for_site(site: &str) -> String {
+    format!("PHP version for {site}")
+}
+
+/// What a screen reader says, and the tooltip shows, for the ⋯ button of a
+/// site's row.
+pub fn site_menu_label(site: &str) -> String {
+    format!("More actions for {site}")
+}
+
+/// Why a site has the PHP version its row shows (components.md, Version
+/// menu): after the version, in `caption`.
+pub const REASON_SITE: &str = "set for this site";
+pub const REASON_DEFAULT: &str = "default";
+/// Right after the user cleared the site's own setting: the window does not
+/// know yet what the site's files give.
+pub const REASON_FILES: &str = "from the site's files";
+pub const REASON_NO_PHP: &str = "no PHP installed";
+pub const REASON_NO_MATCH: &str = "no installed version fits";
+
+/// `from .php-version`, `from composer.json`: the file the version came
+/// from, by its name.
+pub fn reason_file(path: &Path) -> String {
+    format!("from {}", file_name(path))
+}
+
 pub const PARK_BUTTON: &str = "Park a folder…";
 pub const PARK_BUTTON_HINT: &str =
     "Choose a folder of projects: every sub-folder becomes a site, named after it.";
@@ -72,6 +123,9 @@ pub const COLUMN_REMOVE: &str = "Remove";
 pub const UNLINK_BUTTON: &str = "Unlink…";
 pub const UNLINK_HINT: &str = "Stop serving this site. Its folder and files stay.";
 pub const PARKED_TITLE: &str = "Parked folders";
+/// After the heading of each list under the sites table.
+pub const PARKED_HINT: &str = "every sub-folder is a site";
+pub const SKIPPED_HINT: &str = "these did not become sites";
 pub const FORGET_BUTTON: &str = "Forget…";
 pub const FORGET_HINT: &str =
     "Stop serving the sites in this folder. The folder and its files stay.";
@@ -581,43 +635,6 @@ pub fn kind_text(kind: SiteKind) -> String {
     }
 }
 
-/// The first entry of a site's PHP list: what the site runs with no setting
-/// of its own. `Default (8.4.23)`, `From .php-version (8.3.27)`, or `From
-/// composer.json (8.3.27)` by where its version came from; [`AUTO_PHP`]
-/// when the site has its own setting, so the window cannot tell.
-pub fn auto_php(site: &Site) -> String {
-    match (&site.php_source, &site.php) {
-        (Some(Source::GlobalDefault), Some(version)) => format!("Default ({version})"),
-        (Some(Source::VersionFile(path) | Source::Constraint(path)), Some(version)) => {
-            format!("From {} ({version})", file_name(path))
-        }
-        _ => AUTO_PHP.to_owned(),
-    }
-}
-
-/// The closed PHP list of a site: the entry shown, or [`NO_PHP`] when the
-/// site has no PHP version.
-pub fn php_choice_text(choice: &Choice, site: &Site) -> String {
-    match choice {
-        Choice::Version(version) => version.to_string(),
-        Choice::Auto if site.php.is_none() => NO_PHP.to_owned(),
-        Choice::Auto => auto_php(site),
-    }
-}
-
-/// Over the closed PHP list of a site: what the list does, and the file its
-/// version came from, if any.
-pub fn site_php_hint(site: &Site) -> String {
-    let what = "PHP for this site. A version picked here wins over the project's \
-                .php-version and composer.json.";
-    match &site.php_source {
-        Some(Source::VersionFile(path) | Source::Constraint(path)) => {
-            format!("{what}\nNow from {}.", path.display())
-        }
-        _ => what.to_owned(),
-    }
-}
-
 fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(
         || path.display().to_string(),
@@ -1071,11 +1088,6 @@ pub fn skip_reason(code: &str) -> String {
         _ => return error_text(code),
     };
     reason.to_owned()
-}
-
-/// One line of the skipped folders list.
-pub fn skipped_line(folder: &Path, code: &str) -> String {
-    format!("{}: {}", folder.display(), skip_reason(code))
 }
 
 /// The message for an error code, or a general one with the code for a code
@@ -1751,10 +1763,9 @@ mod tests {
 
     #[test]
     fn a_skipped_folder_says_why() {
-        let folder = Path::new("/code/متجر");
         assert_eq!(
-            skipped_line(folder, "site_name_invalid"),
-            "/code/متجر: Its name gives no valid site name (a-z, 0-9, and -)."
+            skip_reason("site_name_invalid"),
+            "Its name gives no valid site name (a-z, 0-9, and -)."
         );
         for code in [
             "site_path_not_utf8",
@@ -1772,18 +1783,6 @@ mod tests {
         text.parse().unwrap()
     }
 
-    fn shop(php: Option<&str>, source: Option<Source>) -> Site {
-        Site {
-            name: "shop".into(),
-            root: "/code/shop".into(),
-            docroot: "/code/shop/public".into(),
-            kind: SiteKind::Laravel,
-            php: php.map(v),
-            php_source: source,
-            secure: true,
-        }
-    }
-
     #[test]
     fn the_kind_column() {
         assert_eq!(kind_text(SiteKind::Laravel), "Laravel");
@@ -1794,46 +1793,20 @@ mod tests {
     }
 
     #[test]
-    fn the_first_php_entry_says_where_the_version_comes_from() {
-        let file = PathBuf::from("/code/shop/.php-version");
-        let composer = PathBuf::from("/code/shop/composer.json");
-        let cases = [
-            (Some(Source::GlobalDefault), "Default (8.4.23)"),
-            (
-                Some(Source::VersionFile(file)),
-                "From .php-version (8.4.23)",
-            ),
-            (
-                Some(Source::Constraint(composer)),
-                "From composer.json (8.4.23)",
-            ),
-            // The site's own setting: clearing it may give any of the above.
-            (Some(Source::ProjectSetting), "Default"),
-        ];
-        for (source, want) in cases {
-            let site = shop(Some("8.4.23"), source);
-            assert_eq!(auto_php(&site), want);
-            assert_eq!(php_choice_text(&Choice::Auto, &site), want);
-        }
-        let pinned = shop(Some("8.3.27"), Some(Source::ProjectSetting));
+    fn a_reason_names_the_file_the_version_came_from() {
         assert_eq!(
-            php_choice_text(&Choice::Version(v("8.3.27")), &pinned),
-            "8.3.27"
+            reason_file(Path::new("/code/shop/.php-version")),
+            "from .php-version"
         );
-        // No PHP version at all.
-        assert_eq!(php_choice_text(&Choice::Auto, &shop(None, None)), NO_PHP);
-    }
-
-    #[test]
-    fn the_php_hint_names_the_file() {
-        let file = Source::VersionFile(PathBuf::from("/code/shop/.php-version"));
-        let hint = site_php_hint(&shop(Some("8.4.23"), Some(file)));
-        assert!(
-            hint.ends_with("\nNow from /code/shop/.php-version."),
-            "{hint}"
+        assert_eq!(
+            reason_file(Path::new("/code/shop/composer.json")),
+            "from composer.json"
         );
-        let hint = site_php_hint(&shop(Some("8.4.23"), Some(Source::GlobalDefault)));
-        assert!(!hint.contains("Now from"), "{hint}");
+        assert_eq!(php_for_site("shop"), "PHP version for shop");
+        assert_eq!(site_menu_label("shop"), "More actions for shop");
+        assert_eq!(no_site_matches("sh"), "No site matches “sh”.");
+        assert_eq!(search_key_hint(true), "Cmd K");
+        assert_eq!(search_key_hint(false), "Ctrl K");
     }
 
     #[test]

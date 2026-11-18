@@ -206,10 +206,6 @@ impl eframe::App for App {
         for command in output.commands {
             self.bridge.send(command);
         }
-        if let Some(pick) = output.pick {
-            let ctx = ui.ctx().clone();
-            self.open_picker(&ctx, pick);
-        }
         // A button may have queued an install.
         self.send_next_install();
         // Debug builds only: a design-review aid (see `screenshot`).

@@ -8,8 +8,8 @@ pub mod sidebar;
 use eframe::egui::{self, CentralPanel, Frame, Margin, Panel, ScrollArea, Ui};
 
 use crate::bridge::Command;
-use crate::model::{Action, Model, Pick, Removal};
-use crate::screens::{self, sites::SitesAction};
+use crate::model::{Action, Model, Removal};
+use crate::screens;
 use crate::strings;
 use crate::theme::page::CONFIRM_WIDTH;
 use crate::theme::{Direction, Theme};
@@ -23,8 +23,6 @@ pub struct Output {
     pub actions: Vec<Action>,
     /// From the screens that still call the model's methods themselves.
     pub commands: Vec<Command>,
-    /// A folder dialog to open: a local action, done by `App`.
-    pub pick: Option<Pick>,
 }
 
 /// Draws the whole window. `picking`: a folder dialog is open.
@@ -102,12 +100,12 @@ fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
             }
         }),
         // TODO(M5-D7): a site's own page. Until then it shows the Sites
-        // screen. The sites table fills the height and scrolls itself.
-        Item::Sites => match screens::sites::show(ui, model, picking) {
-            Some(SitesAction::Send(command)) => out.commands.push(command),
-            Some(SitesAction::Pick(pick)) => out.pick = Some(pick),
-            None => {}
-        },
+        // screen.
+        Item::Sites => scrolled(ui, item, |ui| {
+            let theme = Theme::of(ui.ctx());
+            let view = screens::sites::view(model, picking);
+            out.actions.extend(screens::sites::show(ui, &view, theme));
+        }),
         // The log fills the height and scrolls itself.
         Item::Logs => screens::logs::show(ui, model),
         Item::Runtimes => scrolled(ui, item, |ui| {
