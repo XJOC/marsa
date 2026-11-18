@@ -35,6 +35,9 @@ const DRAIN_WAIT: Duration = Duration::from_secs(1);
 /// so failures days apart do not use up the retries.
 const STABLE_RUN: Duration = Duration::from_secs(60);
 
+/// The failure code of a run that exited by itself, with no stop request.
+pub const EXITED: &str = "exited";
+
 /// The size at which a log file moves to `<name>.1`: 10 MiB.
 pub const LOG_FILE_LIMIT: u64 = 10 * 1024 * 1024;
 
@@ -244,7 +247,7 @@ async fn supervise(spec: ServiceSpec, shared: Shared, cancel: CancellationToken)
                     if started.elapsed() >= STABLE_RUN {
                         restarts = 0;
                     }
-                    "exited"
+                    EXITED
                 }
             },
             Err(err) => {

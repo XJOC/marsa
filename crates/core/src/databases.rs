@@ -232,9 +232,14 @@ pub enum LockConflict {
 
 /// PostgreSQL's own refusal to start because a live process holds one of
 /// its lock files, from `lines`: the stderr lines, oldest first, of a run
-/// that ended by itself before it took connections. PostgreSQL takes its
-/// lock files before it accepts any connection, so no client can write a
-/// line in that window; the daemon reads no line of a run that got further.
+/// that ended by itself before it took connections.
+///
+/// The guard against text that a client wrote is that timing, not the
+/// match: PostgreSQL takes its lock files before it accepts any connection,
+/// so no client can write a line in that window, and the daemon reads no
+/// line of a run that got further, or that it stopped itself. A line can
+/// end with text a client sent (a `STATEMENT:` line does), so never read
+/// these lines from a server that runs.
 ///
 /// Only these lines count, matched to their end, so whatever
 /// `log_line_prefix` puts first does not matter:
@@ -247,13 +252,20 @@ pub enum LockConflict {
 ///   directory "..."?` or `... using socket file "..."?`, or `postgres`
 ///   for a single-user server.
 ///
+/// A line that starts with a tab is the rest of the line before it (a
+/// value with a line break in it), never one of these.
+///
 /// The text is English: [`postgres_args`] sets `lc_messages=C`.
 pub fn startup_lock_conflict(lines: &[&str], socket: Option<&Path>) -> Option<LockConflict> {
     let refusal = |name: &str| format!("FATAL:  lock file \"{name}\" already exists");
     let data_dir = refusal("postmaster.pid");
     let socket_lock = socket.map(|socket| refusal(&format!("{}.lock", socket.display())));
     for (index, line) in lines.iter().enumerate() {
-        let hint = lines.get(index + 1).copied();
+        if line.starts_with('\t') {
+            continue;
+        }
+        let next = lines.get(index + 1).copied();
+        let hint = next.filter(|next| !next.starts_with('\t'));
         if line.ends_with(&data_dir) {
             let pid = hint.and_then(|hint| hint_pid(hint, "running in data directory \""));
             return Some(LockConflict::DataDir { pid });
@@ -337,9 +349,13 @@ pub enum ServiceBusy {
     /// long. Not "in use", which may not be true.
     #[error("could not check who holds port {port}")]
     PortUnknown { port: u16 },
-    /// A running server still uses the data folder.
-    #[error("the data folder is in use by a running server (pid {pid})")]
-    DataDir { pid: u32 },
+    /// A running server still uses the data folder. `pid` is `None` when
+    /// PostgreSQL refused at its start and named no pid.
+    #[error(
+        "the data folder is in use by a running server{}",
+        .pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default()
+    )]
+    DataDir { pid: Option<u32> },
 }
 
 impl ServiceBusy {
@@ -373,6 +389,7 @@ pub fn decide_start(facts: &StartFacts) -> StartDecision {
     // Every case is listed, so a new one (M6-04's own orphan) needs a decision.
     match facts.pid_file {
         PidFileCheck::Server { pid } => {
+            let pid = Some(pid);
             return StartDecision::Refuse(ServiceBusy::DataDir { pid });
         }
         PidFileCheck::NoPid
@@ -657,7 +674,7 @@ mod tests {
             let owner = owner.map(str::to_owned);
             StartDecision::Refuse(ServiceBusy::Port { port: 5433, owner })
         };
-        let data_dir_busy = StartDecision::Refuse(ServiceBusy::DataDir { pid: 7 });
+        let data_dir_busy = StartDecision::Refuse(ServiceBusy::DataDir { pid: Some(7) });
         for pid_file in [NoPid, Dead { pid: 7 }, Other { pid: 7 }, Unknown { pid: 7 }] {
             assert_eq!(decide(&PortCheck::Free, pid_file), StartDecision::Start);
             let herd = decide(&busy(Some("Herd")), pid_file);
@@ -690,9 +707,13 @@ mod tests {
         assert_eq!(text, "port 5432 is in use by Docker");
         let text = port(None).to_string();
         assert_eq!(text, "port 5432 is in use by another program");
-        let data = ServiceBusy::DataDir { pid: 7 };
+        let data = ServiceBusy::DataDir { pid: Some(7) };
         assert_eq!(data.code(), "service_data_dir_busy");
         assert!(data.to_string().contains("pid 7"), "{data}");
+        let no_pid = ServiceBusy::DataDir { pid: None };
+        assert_eq!(no_pid.code(), "service_data_dir_busy");
+        let text = no_pid.to_string();
+        assert_eq!(text, "the data folder is in use by a running server");
         let unknown = ServiceBusy::PortUnknown { port: 5432 };
         assert_eq!(unknown.code(), "service_port_unknown");
         assert_eq!(unknown.to_string(), "could not check who holds port 5432");
@@ -749,8 +770,11 @@ mod tests {
         assert_eq!(conflict(&lines), Some(LockConflict::Socket { pid: None }));
     }
 
-    /// Text that a client chooses (a user or database name) lands inside
-    /// PostgreSQL's own message, never at its end.
+    /// Lines like those that a client can make a running server log. The
+    /// match at their end is not the guard: a `STATEMENT:` line can end
+    /// with any text a client sent. The guard is that only a run that ended
+    /// by itself before it took connections is read. These lines only show
+    /// that the match does not pick PostgreSQL's usual messages.
     #[test]
     fn a_lock_line_that_a_client_wrote_is_no_refusal() {
         let forged = [
@@ -759,8 +783,15 @@ mod tests {
             "FATAL:  role \"lock file \"postmaster.pid\" already exists\" does not exist",
             "ERROR:  lock file \"postmaster.pid\" already exists at character 7",
             "LOG:  database system is ready to accept connections",
+            // The rest of a value with a line break: a continuation line.
+            "\tFATAL:  lock file \"postmaster.pid\" already exists",
         ];
         assert_eq!(startup_lock_conflict(&forged, None), None);
+        // A continuation line where the hint goes gives no pid.
+        let fatal = "FATAL:  lock file \"postmaster.pid\" already exists";
+        let tabbed = "\tHINT:  Is another postmaster (PID 9) running in data directory \"/m\"?";
+        let found = startup_lock_conflict(&[fatal, tabbed], None);
+        assert_eq!(found, Some(LockConflict::DataDir { pid: None }));
         // Junk where the hint's pid goes.
         let fatal = "FATAL:  lock file \"postmaster.pid\" already exists";
         for hint in [

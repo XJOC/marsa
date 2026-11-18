@@ -39,7 +39,7 @@ use marsa_core::ports::PortLookup;
 use marsa_core::recipes::{self, Platform};
 use marsa_core::runtimes::{Runtime, RuntimesDir};
 use marsa_core::services::{ProgramNotAbsolute, RestartPolicy, ServiceSpec};
-use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceStatus};
+use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceState, ServiceStatus};
 use semver::Version;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
@@ -50,7 +50,7 @@ use super::caddy::orphan::BoxFuture;
 use super::caddy::{note, set_failed};
 use super::php::orphan::accepted;
 use super::state::Daemon;
-use super::supervisor::{ServiceRuntime, Supervisor, lock};
+use super::supervisor::{EXITED, ServiceRuntime, Supervisor, lock};
 
 /// The service id: the key in `Daemon::procs`, and the log file
 /// `logs/postgres.log`.
@@ -644,12 +644,21 @@ impl PostgresManager {
         match self.wait_ready(daemon, port).await {
             Ready::Yes => info!(port, "postgres takes connections"),
             Ready::Ended => {
-                let refused = self.lock_refusal(first_seq, &data, socket.as_deref(), port);
-                if let Some((busy, reason)) = refused.await {
-                    self.fail(&daemon.events, busy.code(), &reason);
-                    return Err(ActionError::InUse(busy));
+                // Only a run that exited by itself: a shutdown that took the
+                // handle and stopped it leaves `Stopped`, and its lines are
+                // not read.
+                let state = self.status().state;
+                let exited = ServiceState::Failed {
+                    code: EXITED.to_owned(),
+                };
+                if state == exited {
+                    let refused = self.lock_refusal(first_seq, &data, socket.as_deref(), port);
+                    if let Some((busy, reason)) = refused.await {
+                        self.fail(&daemon.events, busy.code(), &reason);
+                        return Err(ActionError::InUse(busy));
+                    }
                 }
-                warn!(state = ?self.status().state, "postgres ended before it was ready");
+                warn!(?state, "postgres ended before it was ready");
             }
             Ready::TimedOut => {
                 warn!(limit = ?self.ready_limit, "postgres takes no connections; stopping it");
@@ -760,7 +769,7 @@ impl PostgresManager {
     ///
     /// - `postmaster.pid`: `service_data_dir_busy`, as the check before the
     ///   start reports it. The pid comes from PostgreSQL's hint, else from
-    ///   `postmaster.pid` (read only);
+    ///   `postmaster.pid` (read only), and may stay unknown;
     /// - the lock of the socket: `service_port_busy`, the server that uses
     ///   the socket of this port.
     ///
@@ -787,10 +796,15 @@ impl PostgresManager {
                 let pid = pid.or_else(|| {
                     let text = process::read_small_file(&data.join("postmaster.pid"))?;
                     postmaster_pid(&text)
-                })?;
-                let program = self.program_at(pid).await;
+                });
                 let busy = ServiceBusy::DataDir { pid };
-                let reason = format!("{busy}; pid {pid} runs {program} now, {no_signal}");
+                let reason = match pid {
+                    Some(pid) => {
+                        let program = self.program_at(pid).await;
+                        format!("{busy}; pid {pid} runs {program} now, {no_signal}")
+                    }
+                    None => format!("{busy}; PostgreSQL named no pid, {no_signal}"),
+                };
                 Some((busy, reason))
             }
             LockConflict::Socket { pid } => {
@@ -1020,7 +1034,7 @@ mod tests {
         };
         // Our older version still runs on the folder: refused, whatever
         // holds the port.
-        let busy = StartDecision::Refuse(ServiceBusy::DataDir { pid: 4242 });
+        let busy = StartDecision::Refuse(ServiceBusy::DataDir { pid: Some(4242) });
         assert_eq!(decide(free_port(), alive(&ours), None).await, busy);
         // A stale file, or a pid that another program has now: PostgreSQL
         // decides at its start.
@@ -1090,8 +1104,6 @@ mod tests {
         use marsa_core::config::GlobalConfig;
         use tempfile::TempDir;
 
-        use marsa_core::types::ServiceState;
-
         use crate::daemon::supervisor::STOP_MARGIN;
 
         const FAKE: &str = "MARSA_FAKE_POSTGRES";
@@ -1110,7 +1122,11 @@ mod tests {
         /// - `noisy` serves too, but prints PostgreSQL's refusal for
         ///   `postmaster.pid` first, and again after its first answer.
         /// - `locked` prints that refusal, held by pid 4242, and exits 1.
-        /// - `socket-locked` does the same for the lock of its socket.
+        /// - `locked-no-hint` prints the refusal alone, and exits 1.
+        /// - `locked-hang` prints the refusal, then waits for a signal: a
+        ///   shutdown stops it.
+        /// - `socket-locked` does the same as `locked` for the lock of its
+        ///   socket.
         #[test]
         fn fake_postgres() {
             let Ok(mode) = std::env::var(FAKE) else {
@@ -1134,6 +1150,20 @@ mod tests {
                 "locked" => {
                     data_dir();
                     std::process::exit(1);
+                }
+                "locked-no-hint" => {
+                    eprintln!("{at} FATAL:  lock file \"postmaster.pid\" already exists");
+                    std::process::exit(1);
+                }
+                "locked-hang" => {
+                    data_dir();
+                    let hang = async {
+                        use tokio::signal::unix::{SignalKind, signal};
+                        let mut int = signal(SignalKind::interrupt()).unwrap();
+                        int.recv().await;
+                        std::process::exit(0);
+                    };
+                    tokio::runtime::Runtime::new().unwrap().block_on(hang);
                 }
                 "socket-locked" => {
                     let socket = format!("{}/.s.PGSQL.{port}", setting("unix_socket_directories="));
@@ -1400,6 +1430,47 @@ mod tests {
             assert_eq!(pg.count("server"), 1);
             assert!(!pg.daemon.proc_alive(POSTGRES_ID));
             assert_eq!(pg.daemon.postgres.status().state, failed(busy));
+        }
+
+        /// No hint and no `postmaster.pid`: still the data folder, with the
+        /// pid unknown.
+        #[tokio::test]
+        async fn a_lock_file_refusal_without_a_pid_is_still_data_dir_busy() {
+            let pg = pg("locked-no-hint", probes(alive(Path::new(OTHER)), None));
+            let err = pg.act(ServiceAction::Start).await.unwrap_err();
+            assert_eq!(err.code(), "service_data_dir_busy");
+            let text = err.to_string();
+            assert_eq!(text, "the data folder is in use by a running server");
+            let state = pg.daemon.postgres.status().state;
+            assert_eq!(state, failed("service_data_dir_busy"));
+            let last = pg.texts().pop().unwrap();
+            assert!(last.contains("named no pid"), "{last}");
+            assert!(pg.probes.asked.lock().unwrap().is_empty());
+        }
+
+        /// A shutdown stops the run during its start: its lines are not
+        /// read, even with PostgreSQL's refusal among them.
+        #[tokio::test]
+        async fn a_run_that_a_shutdown_stopped_is_not_read() {
+            let pg = pg("locked-hang", probes(alive(Path::new(OTHER)), None));
+            let daemon = Arc::clone(&pg.daemon);
+            let start = tokio::spawn(async move {
+                let postgres = &daemon.postgres;
+                postgres
+                    .run_waiting(&daemon, ServiceAction::Start, WAIT)
+                    .await
+            });
+            let fatal = "FATAL:  lock file \"postmaster.pid\" already exists";
+            let printed = async {
+                while !pg.texts().iter().any(|text| text.ends_with(fatal)) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            tokio::time::timeout(WAIT, printed).await.unwrap();
+            pg.daemon.stop_procs(WAIT).await;
+            let status = start.await.unwrap().unwrap();
+            assert_eq!(status.state, ServiceState::Stopped);
+            assert!(pg.probes.asked.lock().unwrap().is_empty());
         }
 
         /// Another server holds the lock of our socket for this port.
