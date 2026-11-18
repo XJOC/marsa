@@ -31,7 +31,7 @@ use tray_icon::menu::{
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::panel::PanelExit;
-use crate::strings;
+use crate::{opener, strings};
 use menu::{Item, Layout, State, Update};
 use panel::{Monitor, Px, Slot, Toggle};
 
@@ -68,6 +68,9 @@ enum Click {
     Open,
     /// A line of the PHP submenu, by its position.
     Php(usize),
+    /// A site, by its position: it opens in the browser.
+    Site(usize),
+    Xdebug,
     Autostart,
     Power,
     Quit,
@@ -210,6 +213,17 @@ pub fn run(data_dir: PathBuf) -> Result<(), TrayError> {
                     }
                     Some(Click::Php(index)) => {
                         if let Some(command) = state.pick_php(index) {
+                            worker.send(command);
+                        }
+                    }
+                    Some(Click::Site(index)) => {
+                        let opened = state.site_url(index).map(opener::open_url);
+                        if let Some(Err(code)) = opened {
+                            state.apply(Update::Failed(code.to_owned()));
+                        }
+                    }
+                    Some(Click::Xdebug) => {
+                        if let Some(command) = state.toggle_xdebug() {
                             worker.send(command);
                         }
                     }
@@ -404,9 +418,14 @@ struct Items {
     notice: MenuItem,
     /// Whether `notice` is in the menu now.
     notice_shown: bool,
+    /// The sites, between the first separator and `sites_end`.
+    sites: Vec<MenuItem>,
+    /// The line under the sites: they are put in before it.
+    sites_end: PredefinedMenuItem,
     open: MenuItem,
     php: Submenu,
     php_versions: Vec<CheckMenuItem>,
+    xdebug: CheckMenuItem,
     autostart: CheckMenuItem,
     power: MenuItem,
     quit: MenuItem,
@@ -428,16 +447,25 @@ impl Items {
         for item in &php_versions {
             php.append(item).map_err(TrayError::Menu)?;
         }
+        let xdebug = check_item(&layout.xdebug);
         let autostart = check_item(&layout.autostart);
         let power = text_item(&layout.power);
         let quit = text_item(&layout.quit);
+        let sites: Vec<MenuItem> = layout.sites.iter().map(text_item).collect();
+        let sites_end = PredefinedMenuItem::separator();
         let menu = Menu::new();
+        menu.append(&status).map_err(TrayError::Menu)?;
+        menu.append(&PredefinedMenuItem::separator())
+            .map_err(TrayError::Menu)?;
+        for site in &sites {
+            menu.append(site).map_err(TrayError::Menu)?;
+        }
         menu.append_items(&[
-            &status,
-            &PredefinedMenuItem::separator(),
+            &sites_end,
             &open,
             &PredefinedMenuItem::separator(),
             &php,
+            &xdebug,
             &autostart,
             &PredefinedMenuItem::separator(),
             &power,
@@ -459,9 +487,12 @@ impl Items {
             status,
             notice,
             notice_shown: false,
+            sites,
+            sites_end,
             open,
             php,
             php_versions,
+            xdebug,
             autostart,
             power,
             quit,
@@ -474,10 +505,12 @@ impl Items {
     fn apply(&mut self, layout: &Layout) {
         set_text_item(&self.status, &layout.status);
         self.show_notice(layout.notice.as_ref());
+        self.set_sites(&layout.sites);
         set_text_item(&self.open, &layout.open);
         self.php.set_text(&layout.php.label);
         self.php.set_enabled(layout.php.enabled);
         self.set_versions(&layout.php_versions);
+        set_check_item(&self.xdebug, &layout.xdebug);
         set_check_item(&self.autostart, &layout.autostart);
         set_text_item(&self.power, &layout.power);
         set_text_item(&self.quit, &layout.quit);
@@ -500,6 +533,44 @@ impl Items {
                 Err(err) => tracing::warn!(error = %err, "cannot remove the notice line"),
             },
             (None, false) => {}
+        }
+    }
+
+    /// The site lines: put in again, before the line that ends them, when the
+    /// sites changed; else only their enabled flags are set.
+    fn set_sites(&mut self, sites: &[Item]) {
+        let same = self.sites.len() == sites.len()
+            && self
+                .sites
+                .iter()
+                .zip(sites)
+                .all(|(have, want)| have.text() == want.label);
+        if same {
+            for (item, want) in self.sites.iter().zip(sites) {
+                set_text_item(item, want);
+            }
+            return;
+        }
+        for item in self.sites.drain(..) {
+            if let Err(err) = self.menu.remove(&item) {
+                tracing::warn!(error = %err, "cannot remove a site line");
+            }
+        }
+        let end = self
+            .menu
+            .items()
+            .iter()
+            .position(|kind| kind.id() == self.sites_end.id());
+        let Some(end) = end else {
+            tracing::warn!("cannot find where the site lines go");
+            return;
+        };
+        for (offset, want) in sites.iter().enumerate() {
+            let item = text_item(want);
+            match self.menu.insert(&item, end + offset) {
+                Ok(()) => self.sites.push(item),
+                Err(err) => tracing::warn!(error = %err, "cannot add a site line"),
+            }
         }
     }
 
@@ -536,12 +607,16 @@ impl Items {
     fn clicked(&self, id: &MenuId) -> Option<Click> {
         if id == self.open.id() {
             Some(Click::Open)
+        } else if id == self.xdebug.id() {
+            Some(Click::Xdebug)
         } else if id == self.autostart.id() {
             Some(Click::Autostart)
         } else if id == self.power.id() {
             Some(Click::Power)
         } else if id == self.quit.id() {
             Some(Click::Quit)
+        } else if let Some(index) = self.sites.iter().position(|item| item.id() == id) {
+            Some(Click::Site(index))
         } else {
             self.php_versions
                 .iter()
