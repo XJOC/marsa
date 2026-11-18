@@ -7,10 +7,12 @@
 //!
 //! The screen draws [`Descriptor`]s, never a runtime by name. [`descriptor`]
 //! is the one place that knows what PHP has more than the others, and
-//! [`Descriptor::plain`] is all a runtime needs that core adds later (Postgres,
-//! MySQL, Valkey): the list comes from [`Runtime::ALL`], so a new variant
-//! shows up with its name, two letters, and an install button, with no change
-//! here.
+//! [`Descriptor::plain`] is all a runtime needs that core adds later (Python,
+//! Go): the list comes from [`Runtime::ALL`], so a new variant shows up with
+//! its name, two letters, and an install button, with no change here. A
+//! database or cache server (an [`Kind::Engine`]: Postgres, MySQL, Valkey) is
+//! left out of the list until the screens for them exist; they are named in
+//! [`kind_for`], so they stay out when core adds them.
 //!
 //! Like Home and Sites it is two functions. [`view`] reads the [`Model`] and
 //! decides what the screen says: pure, so the tests assert it without a
@@ -19,7 +21,7 @@
 //! network: an install is a job in the model's queue, and the daemon's
 //! refusals come back as lines.
 
-use eframe::egui::{Id, Key, Label, RichText, Ui, vec2};
+use eframe::egui::{Context, Id, Key, Label, RichText, Ui, vec2};
 use marsa_core::runtimes::Runtime;
 use semver::Version;
 
@@ -44,6 +46,8 @@ use crate::widgets::{
 pub struct Descriptor {
     /// The key of the runtime in the model and in the daemon's commands.
     pub runtime: Runtime,
+    /// What it is: only languages and tools are listed here.
+    pub kind: Kind,
     pub name: &'static str,
     /// The letters of its tile.
     pub monogram: String,
@@ -60,6 +64,36 @@ pub struct Descriptor {
     pub example: &'static str,
 }
 
+/// What a runtime is. The Runtimes screen lists languages and tools.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A language Marsa runs your code with: PHP, Node.js, later Python, Go.
+    Language,
+    /// A program that serves or builds: Composer, Caddy.
+    Tool,
+    /// A database or cache server (Postgres, MySQL, Valkey). It belongs
+    /// under Databases and Services, so it is not listed here.
+    Engine,
+}
+
+impl Kind {
+    /// Whether the Runtimes screen lists it.
+    pub const fn listed(self) -> bool {
+        matches!(self, Self::Language | Self::Tool)
+    }
+}
+
+/// The kind of the runtime in the folder `folder`. The Phase 2 engines are
+/// named now, so they stay out of the list when core adds them; any other
+/// name, known or not, is listed: a new language is the likeliest.
+pub fn kind_for(folder: &str) -> Kind {
+    match folder {
+        "composer" | "caddy" => Kind::Tool,
+        "postgres" | "mysql" | "valkey" => Kind::Engine,
+        _ => Kind::Language,
+    }
+}
+
 /// A section of a runtime's details that only some runtimes have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Extra {
@@ -69,13 +103,14 @@ pub enum Extra {
 
 impl Descriptor {
     /// What any runtime is until it asks for more: the name core gives it
-    /// (its folder `folder`, as `strings::runtime_name_for` has it), the first
-    /// two letters of that name on its tile, the Runtimes colors, no default,
-    /// no site counts, and no extra section.
+    /// (its folder `folder`, as `strings::runtime_name_for` has it), a kind
+    /// from [`kind_for`], the first two letters of that name on its tile, the
+    /// Runtimes colors, no default, no site counts, and no extra section.
     pub fn plain(runtime: Runtime, folder: &'static str) -> Self {
         let name = strings::runtime_name_for(folder);
         Self {
             runtime,
+            kind: kind_for(folder),
             name,
             monogram: strings::monogram_for(folder, name),
             section: Section::Runtimes,
@@ -105,9 +140,15 @@ pub fn descriptor(runtime: Runtime) -> Descriptor {
     }
 }
 
-/// Every runtime, in the order of [`Runtime::ALL`]: the list of the screen.
+/// The runtimes of [`Runtime::ALL`], in its order, that the screen lists:
+/// the languages and the tools.
 pub fn descriptors() -> Vec<Descriptor> {
-    Runtime::ALL.into_iter().map(descriptor).collect()
+    listed(Runtime::ALL.into_iter().map(descriptor))
+}
+
+/// `all` without the engines.
+pub fn listed(all: impl IntoIterator<Item = Descriptor>) -> Vec<Descriptor> {
+    all.into_iter().filter(|d| d.kind.listed()).collect()
 }
 
 /// What the screen says.
@@ -128,8 +169,6 @@ pub struct Read {
     pub chosen: usize,
     pub details: Details,
     pub status: Status,
-    /// The install dialog, when it is open.
-    pub dialog: Option<InstallDialog>,
 }
 
 /// One runtime in the list.
@@ -277,7 +316,6 @@ pub fn build(model: &Model, table: &[Descriptor], chosen: usize) -> RuntimesView
         chosen,
         details: details(model, shown),
         status: status(model),
-        dialog: dialog(model, table),
     }))
 }
 
@@ -458,16 +496,22 @@ fn status(model: &Model) -> Status {
     }
 }
 
-fn dialog(model: &Model, table: &[Descriptor]) -> Option<InstallDialog> {
+/// The install dialog, when it is open. The shell draws it over any screen
+/// ([`show_install_dialog`]), because Home and a site's page open it too, so
+/// it is not part of [`RuntimesView`].
+pub fn install_dialog_view(model: &Model) -> Option<InstallDialog> {
     let runtime = model.install_dialog?;
-    let d = table.iter().find(|d| d.runtime == runtime)?;
-    Some(InstallDialog {
-        runtime,
+    Some(dialog(model, &descriptor(runtime)))
+}
+
+fn dialog(model: &Model, d: &Descriptor) -> InstallDialog {
+    InstallDialog {
+        runtime: d.runtime,
         title: strings::install_dialog_title(d.name),
         body: strings::version_field_hint(d.name, d.example),
-        text: model.install_text(runtime).to_owned(),
+        text: model.install_text(d.runtime).to_owned(),
         error: model.runtimes_notice.as_deref().map(strings::error_text),
-    })
+    }
 }
 
 /// Draws `view`. Returns what the user did.
@@ -483,9 +527,6 @@ pub fn show(ui: &mut Ui, view: &RuntimesView, theme: &Theme) -> Vec<Action> {
                 list(ui, theme, read, &mut actions);
                 ui.vertical(|ui| details_of(ui, theme, read, &mut actions));
             });
-            if let Some(dialog) = &read.dialog {
-                install_dialog(ui, dialog, &mut actions);
-            }
         }
     }
     actions
@@ -716,12 +757,8 @@ fn xdebug_card(ui: &mut Ui, theme: &Theme, x: &XdebugView, actions: &mut Vec<Act
         ui.spacing_mut().item_spacing.y = theme.space.s2;
         let switch = Switch::new(x.on, strings::XDEBUG)
             .disabled_if(x.off.is_some(), x.off.unwrap_or_default());
-        let response = ui.add(switch);
-        if response.clicked() {
+        if ui.add(switch).clicked() {
             actions.push(Action::ToggleXdebug);
-        }
-        if x.off.is_none() {
-            response.on_hover_text(strings::XDEBUG_HINT);
         }
         mute(ui, theme, strings::XDEBUG_CAPTION);
         for line in &x.lines {
@@ -734,8 +771,10 @@ fn xdebug_card(ui: &mut Ui, theme: &Theme, x: &XdebugView, actions: &mut Vec<Act
 }
 
 /// The install dialog over the window: a version field and Install. Enter in
-/// the field installs; Escape and Cancel close the dialog.
-fn install_dialog(ui: &mut Ui, dialog: &InstallDialog, actions: &mut Vec<Action>) {
+/// the field installs; Escape and Cancel close the dialog. The shell draws it
+/// after the screen, so it covers any screen.
+pub fn show_install_dialog(ctx: &Context, dialog: &InstallDialog) -> Vec<Action> {
+    let mut actions = Vec::new();
     let id = Id::unique(("install_version", dialog.runtime.dir_name()));
     let mut text = dialog.text.clone();
     let mut entered = false;
@@ -746,7 +785,7 @@ fn install_dialog(ui: &mut Ui, dialog: &InstallDialog, actions: &mut Vec<Action>
         strings::INSTALL_BUTTON,
     )
     .field_first()
-    .show_with(ui.ctx(), |ui, new| {
+    .show_with(ctx, |ui, new| {
         let field = Field::new(&mut text, strings::VERSION_FIELD_LABEL)
             .hint(strings::VERSION_FIELD_EMPTY)
             .error_if(dialog.error.as_deref())
@@ -763,7 +802,7 @@ fn install_dialog(ui: &mut Ui, dialog: &InstallDialog, actions: &mut Vec<Action>
             text,
         });
         // The next frame shows the error, or none, for the new text.
-        ui.ctx().request_repaint();
+        ctx.request_repaint();
     }
     match asked {
         Some(Answer::Confirm) => actions.push(Action::SubmitInstall(dialog.runtime)),
@@ -771,6 +810,7 @@ fn install_dialog(ui: &mut Ui, dialog: &InstallDialog, actions: &mut Vec<Action>
         None if entered => actions.push(Action::SubmitInstall(dialog.runtime)),
         None => {}
     }
+    actions
 }
 
 #[cfg(test)]
@@ -1122,7 +1162,7 @@ mod tests {
         let on = xdebug(&model);
         assert!(on.on && on.off.is_none());
         // The slow-PHP note and where it is loaded.
-        assert_eq!(on.lines[0], strings::XDEBUG_SLOW);
+        assert_eq!(on.lines[0], strings::XDEBUG_TURN_OFF);
         assert_eq!(on.lines[1], "Loaded in PHP 8.3.27, 8.4.23.");
         // The switch asks for the other state, and shows it at once.
         let sent = model.apply_action(Action::ToggleXdebug);
@@ -1141,9 +1181,9 @@ mod tests {
     #[test]
     fn the_dialog_is_closed_until_asked_and_then_says_what_to_type_for_that_runtime() {
         let mut model = model();
-        assert_eq!(read(&model).dialog, None);
+        assert_eq!(install_dialog_view(&model), None);
         model.apply_action(Action::AskInstall(Runtime::Node));
-        let dialog = read(&model).dialog.expect("the dialog is open");
+        let dialog = install_dialog_view(&model).expect("the dialog is open");
         assert_eq!(dialog.runtime, Runtime::Node);
         assert_eq!(dialog.title, "Install a Node.js version");
         assert_eq!(
@@ -1156,7 +1196,7 @@ mod tests {
             text: "lts/*".into(),
         });
         model.apply_action(Action::SubmitInstall(Runtime::Node));
-        let dialog = read(&model).dialog.expect("the dialog stays");
+        let dialog = install_dialog_view(&model).expect("the dialog stays");
         assert_eq!(dialog.text, "lts/*");
         assert_eq!(dialog.error, Some(strings::error_text("unsupported_alias")));
         // The error is the field's, not a line of the screen.
@@ -1172,7 +1212,7 @@ mod tests {
                 .apply_action(Action::SubmitInstall(Runtime::Php))
                 .is_none()
         );
-        assert_eq!(read(&model).dialog, None, "the dialog closes");
+        assert_eq!(install_dialog_view(&model), None, "the dialog closes");
         assert_eq!(model.next_install(), Some(job(Runtime::Php, None)));
 
         let mut model = self::model();
@@ -1320,9 +1360,41 @@ mod tests {
         assert_eq!(lines[0].text, strings::error_text("runtimes_read"));
     }
 
+    #[test]
+    fn languages_and_tools_are_listed_and_the_phase_two_engines_are_left_out() {
+        let kinds: Vec<(&str, Kind)> = descriptors().iter().map(|d| (d.name, d.kind)).collect();
+        assert_eq!(
+            kinds,
+            [
+                ("PHP", Kind::Language),
+                ("Node.js", Kind::Language),
+                ("Composer", Kind::Tool),
+                ("Caddy", Kind::Tool),
+            ]
+        );
+        // The engines are named before core has them: they are not listed.
+        for folder in ["postgres", "mysql", "valkey"] {
+            let engine = Descriptor::plain(Runtime::Caddy, folder);
+            assert_eq!(engine.kind, Kind::Engine, "{folder}");
+            assert!(!engine.kind.listed());
+        }
+        // A name nobody knows is shown, as a language.
+        let unknown = Descriptor::plain(Runtime::Caddy, "python");
+        assert_eq!(unknown.kind, Kind::Language);
+        let all = [
+            descriptor(Runtime::Php),
+            Descriptor::plain(Runtime::Caddy, "postgres"),
+            Descriptor::plain(Runtime::Caddy, "python"),
+            Descriptor::plain(Runtime::Caddy, "mysql"),
+            Descriptor::plain(Runtime::Caddy, "valkey"),
+        ];
+        let shown: Vec<&str> = listed(all).iter().map(|d| d.name).collect();
+        assert_eq!(shown, ["PHP", "python"]);
+    }
+
     // -- a runtime core does not have yet --
 
-    /// Task M5-D8: a runtime that core adds later (Postgres, MySQL, Valkey)
+    /// Task M5-D8: a runtime that core adds later (Python, Go)
     /// is in the list, with its details and its install dialog, and no line
     /// of this screen changes. `Runtime::Composer` and `Runtime::Node` stand
     /// in for the keys of variants that do not exist yet, so the fakes have
@@ -1330,10 +1402,10 @@ mod tests {
     #[test]
     fn a_runtime_core_adds_later_is_listed_and_detailed_with_no_screen_code() {
         let mut table = descriptors();
-        table.push(Descriptor::plain(Runtime::Composer, "postgres"));
+        table.push(Descriptor::plain(Runtime::Composer, "python"));
         table.push(Descriptor {
             default: true,
-            ..Descriptor::plain(Runtime::Node, "valkey")
+            ..Descriptor::plain(Runtime::Node, "go")
         });
         let model = model();
 
@@ -1344,18 +1416,18 @@ mod tests {
         let fifth = &plain.entries[4];
         assert_eq!(
             (fifth.name, fifth.monogram.as_str(), fifth.section),
-            ("postgres", "Po", Section::Runtimes)
+            ("python", "Py", Section::Runtimes)
         );
         assert_eq!(fifth.summary, "2.8.3, newest is used");
         assert_eq!(plain.chosen, 4);
         // Details: no default to pick, no site counts, and no extra.
-        assert_eq!(plain.details.name, "postgres");
+        assert_eq!(plain.details.name, "python");
         assert!(matches!(
             plain.details.version,
             VersionSection::Newest { .. }
         ));
         assert!(!plain.details.sites_column && plain.details.xdebug.is_none());
-        assert_eq!(plain.details.rows[0].more, "More for postgres 2.8.3");
+        assert_eq!(plain.details.rows[0].more, "More for python 2.8.3");
         assert_eq!(plain.details.rows[0].tag, Some("In use"));
 
         // The sixth has a default version: the large buttons, and the tag.
@@ -1365,8 +1437,8 @@ mod tests {
         let VersionSection::Default(picker) = &sixth.details.version else {
             panic!("a default picker");
         };
-        assert_eq!(picker.heading, "Default valkey");
-        assert_eq!(picker.install, "Install another valkey version");
+        assert_eq!(picker.heading, "Default go");
+        assert_eq!(picker.install, "Install another go version");
         assert_eq!(sixth.details.rows[0].tag, Some("Default"));
 
         // Drawn: the list and the details have the new runtimes with no
@@ -1382,32 +1454,23 @@ mod tests {
             panic!("read");
         };
         let (harness, tree, view) = draw_read(read);
-        assert!(tree.node_with_label("postgres").is_some());
-        assert!(tree.node_with_label("valkey").is_some());
+        assert!(tree.node_with_label("python").is_some());
+        assert!(tree.node_with_label("go").is_some());
         assert!(tree.node_with_label("Install a version…").is_some());
         assert!(tree.node_with_label("Xdebug").is_none());
         let mut actions = Vec::new();
-        harness.click(bounds_center(&tree, "valkey"), |ui| {
+        harness.click(bounds_center(&tree, "go"), |ui| {
             actions = show(ui, &view, &LIGHT);
         });
         assert_eq!(actions, [Action::Navigate(Route::Runtimes(Runtime::Node))]);
-        // The install dialog of a new runtime says what to type for it.
-        // The dialog is found by the runtime's key, so the fake takes
-        // Composer's place for it.
-        let swapped: Vec<Descriptor> = descriptors()
-            .into_iter()
-            .map(|d| match d.runtime {
-                Runtime::Composer => Descriptor::plain(Runtime::Composer, "postgres"),
-                _ => d,
-            })
-            .collect();
+        // The dialog of a new runtime says what to type for it.
         let mut asked = self::model();
         asked.install_dialog = Some(Runtime::Composer);
-        let dialog = dialog(&asked, &swapped).expect("the dialog");
-        assert_eq!(dialog.title, "Install a postgres version");
+        let dialog = dialog(&asked, &Descriptor::plain(Runtime::Composer, "python"));
+        assert_eq!(dialog.title, "Install a python version");
         assert_eq!(
             dialog.body,
-            "A version such as 1.0: the newest postgres that matches it. Empty: the newest stable version."
+            "A version such as 1.0: the newest python that matches it. Empty: the newest stable version."
         );
     }
 
@@ -1422,8 +1485,13 @@ mod tests {
         pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32)
     }
 
+    /// The screen, then the dialog over it, as the shell draws them.
     fn draw(ui: &mut Ui, model: &Model) -> Vec<Action> {
-        show(ui, &view(model), &LIGHT)
+        let mut actions = show(ui, &view(model), &LIGHT);
+        if let Some(dialog) = install_dialog_view(model) {
+            actions.extend(show_install_dialog(ui.ctx(), &dialog));
+        }
+        actions
     }
 
     fn start(model: &Model) -> (Harness, Tree) {
@@ -1492,6 +1560,11 @@ mod tests {
             tree.node_with_label("Node.js")
                 .and_then(|n| n.is_selected()),
             Some(false)
+        );
+        // The card says what Xdebug does and what it costs.
+        assert!(tree.node_with_text(strings::XDEBUG_CAPTION).is_some());
+        assert!(
+            strings::XDEBUG_CAPTION.contains("PHP runs two to four times slower while it is on.")
         );
         // Node has no Xdebug.
         let (_, node) = start(&with_route(model(), Runtime::Node));
@@ -1564,7 +1637,7 @@ mod tests {
         );
         // Asked anyway (a stale click), the model does not open the dialog.
         model.apply_action(Action::AskInstall(Runtime::Php));
-        assert_eq!(read(&model).dialog, None);
+        assert_eq!(install_dialog_view(&model), None);
     }
 
     #[test]

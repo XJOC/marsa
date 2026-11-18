@@ -328,18 +328,15 @@ pub fn uninstall_off_sites(name: &str, sites: &[&str]) -> String {
 // Xdebug (`GET` and `PUT /v1/php/xdebug`, task M5-11).
 
 pub const XDEBUG: &str = "Xdebug";
-/// Under the Xdebug switch.
-pub const XDEBUG_CAPTION: &str =
-    "Loads Xdebug in every installed PHP that has it, in sites and in the terminal.";
+/// Under the Xdebug switch: what it does, and what it costs.
+pub const XDEBUG_CAPTION: &str = "Loads Xdebug in every installed PHP that has it, in sites and in \
+     the terminal. PHP runs two to four times slower while it is on.";
 /// Over the disabled switch before the state is read.
 pub const XDEBUG_UNREAD: &str = "Marsa has not read the Xdebug state yet.";
 /// Over the disabled switch while a change runs.
 pub const XDEBUG_BUSY: &str = "Marsa is changing Xdebug. Wait for it to end.";
-pub const XDEBUG_HINT: &str = "Load Xdebug in every installed PHP that has it, in sites and in \
-     the terminal. PHP runs two to four times slower while it is on.";
-/// Under the Xdebug box while it is on.
-pub const XDEBUG_SLOW: &str = "PHP runs two to four times slower while Xdebug is on. Turn it \
-     off when you are done debugging.";
+/// Under the caption while Xdebug is on: the cost is already in the caption.
+pub const XDEBUG_TURN_OFF: &str = "Turn it off when you are done debugging.";
 
 // The first-run panel (tasks M5-10 and M5-D5).
 
@@ -831,7 +828,7 @@ pub fn runtime_name(runtime: Runtime) -> &'static str {
 /// [`runtime_name`] by the runtime's folder name (`runtimes/<name>`), which
 /// is the one name core gives a runtime. The `match` is on that text, not on
 /// `Runtime`: a runtime that core adds later builds without a change here and
-/// shows under its folder name (`postgres`) until it gets a nicer one
+/// shows under its folder name (`python`) until it gets a nicer one
 /// (task M5-D8).
 pub fn runtime_name_for(folder: &'static str) -> &'static str {
     match folder {
@@ -1240,7 +1237,7 @@ pub fn xdebug_lines(state: &XdebugState, pending: Option<bool>) -> Vec<String> {
         Some(true) => lines.push("Turning Xdebug on…".to_owned()),
         Some(false) => lines.push("Turning Xdebug off…".to_owned()),
         None if state.enabled => {
-            lines.push(XDEBUG_SLOW.to_owned());
+            lines.push(XDEBUG_TURN_OFF.to_owned());
             lines.push(if state.loaded.is_empty() {
                 "No installed PHP loads it.".to_owned()
             } else {
@@ -2751,7 +2748,7 @@ mod tests {
         assert_eq!(
             xdebug_lines(&on, None),
             [
-                XDEBUG_SLOW,
+                XDEBUG_TURN_OFF,
                 "Loaded in PHP 8.3.27, 8.4.23.",
                 "PHP 8.2.1 has no Xdebug and runs without it."
             ]
@@ -2772,7 +2769,7 @@ mod tests {
         };
         assert_eq!(
             xdebug_lines(&none, None),
-            [XDEBUG_SLOW, "No installed PHP loads it."]
+            [XDEBUG_TURN_OFF, "No installed PHP loads it."]
         );
         // While the daemon writes the files: what is asked for.
         assert_eq!(
@@ -2780,7 +2777,8 @@ mod tests {
             ["Turning Xdebug on…"]
         );
         assert_eq!(xdebug_lines(&none, Some(false)), ["Turning Xdebug off…"]);
-        assert!(XDEBUG_HINT.contains("slower") && XDEBUG_SLOW.contains("slower"));
+        // The cost is in the caption, whatever the state.
+        assert!(XDEBUG_CAPTION.ends_with("PHP runs two to four times slower while it is on."));
     }
 
     #[test]

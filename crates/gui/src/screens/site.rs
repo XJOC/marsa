@@ -79,6 +79,8 @@ pub struct PhpView<'a> {
     pub hint: Option<String>,
     /// The site has a setting of its own: "Use the site's files" shows.
     pub own: bool,
+    /// Why the dashed "+" cannot open the install dialog now.
+    pub install_off: Option<&'static str>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -152,6 +154,7 @@ fn php<'a>(model: &Model, site: &'a Site) -> PhpView<'a> {
         hint: cell.reason.map(|reason| reason.hint(&cell.shown)),
         reason: cell.reason,
         own: matches!(model.site_choice(site), Choice::Version(_)),
+        install_off: (!model.can_install()).then_some(strings::INSTALL_BUSY_HINT),
         choices,
     }
 }
@@ -283,8 +286,11 @@ fn php_section(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<A
             .map(|(index, choice)| (index, choice.label.as_str()))
             .collect();
         let install = strings::install_another_label(strings::runtime_name(Runtime::Php));
-        let picker =
+        let mut picker =
             VersionPicker::new(strings::PHP_FOR_THIS_SITE, &versions, php.chosen).install(&install);
+        if let Some(reason) = php.install_off {
+            picker = picker.install_disabled(reason);
+        }
         match picker.show(ui).inner {
             Some(VersionPick::Version(index)) => {
                 if let Some(choice) = php.choices.get(index) {
@@ -294,9 +300,7 @@ fn php_section(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<A
                     });
                 }
             }
-            Some(VersionPick::Install) => {
-                actions.push(Action::Navigate(Route::Runtimes(Runtime::Php)));
-            }
+            Some(VersionPick::Install) => actions.push(Action::AskInstall(Runtime::Php)),
             None => {}
         }
     });
@@ -820,12 +824,29 @@ mod tests {
     }
 
     #[test]
-    fn the_plus_after_the_versions_goes_to_the_runtimes_screen() {
+    fn the_plus_after_the_versions_opens_the_install_dialog_of_php_on_this_page() {
         let label = strings::install_another_label(strings::runtime_name(Runtime::Php));
-        assert_eq!(
-            click(&model(), &label),
-            [Action::Navigate(Route::Runtimes(Runtime::Php))]
+        assert_eq!(click(&model(), &label), [Action::AskInstall(Runtime::Php)]);
+        let mut model = model();
+        model.route = Route::Site("shop".into());
+        assert!(
+            model
+                .apply_action(Action::AskInstall(Runtime::Php))
+                .is_none()
         );
+        assert_eq!(model.install_dialog, Some(Runtime::Php));
+        assert_eq!(model.route, Route::Site("shop".into()));
+        // While an install runs, the plus is off with its reason.
+        let mut busy = self::model();
+        assert!(busy.queue_install(crate::model::InstallJob {
+            runtime: Runtime::Caddy,
+            version: None,
+        }));
+        assert_eq!(
+            found(&view(&busy, "shop")).php.install_off,
+            Some(strings::INSTALL_BUSY_HINT)
+        );
+        assert!(click(&busy, &label).is_empty());
     }
 
     #[test]

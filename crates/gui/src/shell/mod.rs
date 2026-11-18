@@ -1,6 +1,7 @@
 //! The frame of the window (layout.md, Shell): the sidebar, the main area
 //! with the screen of the [`Route`], the last notice at the bottom of the
-//! main area, and the confirmation dialog over everything. [Laravel: the
+//! main area, and the dialogs (the confirmation, the install dialog) over
+//! everything. [Laravel: the
 //! layout file; the `match` in `screen` is `routes/web.php`.]
 
 pub mod sidebar;
@@ -80,6 +81,12 @@ pub fn show(ui: &mut Ui, model: &mut Model, picking: bool) -> Output {
     // Opened by an Uninstall, Unlink, or Forget button.
     let ctx = ui.ctx().clone();
     out.commands.extend(confirm(&ctx, model));
+    // Opened by "Install a version…" or a dashed "+" on any screen, so the
+    // shell draws it, not the Runtimes screen.
+    if let Some(dialog) = screens::runtimes::install_dialog_view(model) {
+        out.actions
+            .extend(screens::runtimes::show_install_dialog(&ctx, &dialog));
+    }
     out
 }
 
@@ -223,6 +230,57 @@ mod tests {
         let sites = tree_on(Route::Sites);
         assert!(sites.node_with_label(strings::ADD_SITE_BUTTON).is_some());
         assert!(sites.node_with_label(strings::OPEN_FOLDER).is_none());
+    }
+
+    /// The tree of the window on `route` after `frames` frames, with the
+    /// install dialog of PHP open.
+    fn tree_with_install_dialog(route: Route) -> crate::widgets::harness::Tree {
+        let mut model = model_with_shop();
+        model.route = route;
+        model.update(Update::Runtimes(marsa_core::types::RuntimeList {
+            runtimes: vec![marsa_core::types::RuntimeVersions {
+                runtime: marsa_core::runtimes::Runtime::Php,
+                installed: vec!["8.4.27".into()],
+                default: Some("8.4".into()),
+            }],
+        }));
+        model.apply_action(Action::AskInstall(marsa_core::runtimes::Runtime::Php));
+        assert_eq!(
+            model.install_dialog,
+            Some(marsa_core::runtimes::Runtime::Php)
+        );
+        let harness = Harness::new(egui::Theme::Light);
+        for _ in 0..20 {
+            harness.run(|ui| {
+                show(ui, &mut model, false);
+            });
+        }
+        harness.accessibility(|ui| {
+            show(ui, &mut model, false);
+        })
+    }
+
+    #[test]
+    fn the_install_dialog_covers_any_screen_not_only_runtimes() {
+        for route in [
+            Route::Home,
+            Route::Site("shop".into()),
+            Route::Sites,
+            Route::Runtimes(marsa_core::runtimes::Runtime::Node),
+        ] {
+            let tree = tree_with_install_dialog(route.clone());
+            assert!(
+                tree.node_with_label("Install a PHP version").is_some(),
+                "{route:?}"
+            );
+            assert!(tree.node_with_label("Version").is_some(), "{route:?}");
+        }
+        // Closed, it is on no screen.
+        assert!(
+            tree_on(Route::Home)
+                .node_with_label("Install a PHP version")
+                .is_none()
+        );
     }
 
     #[test]
