@@ -284,6 +284,20 @@ pub struct Size {
     pub switch_inset: f32,
     /// The height of a row badge: 26 (components.md, Badges).
     pub badge: f32,
+    /// The circle of a status dot with word: 26 (components.md, Status).
+    pub status_dot: f32,
+    /// The state icon in that circle: 13.
+    pub status_dot_icon: f32,
+    /// The circle of the Home status sentence: 44.
+    pub status_hero: f32,
+    /// The state icon in that circle: 22.
+    pub status_hero_icon: f32,
+    /// The circle of a state pill: 18.
+    pub state_circle: f32,
+    /// The state icon in that circle: 10.
+    pub state_icon: f32,
+    /// The ring of a state pill that waits: 1.5.
+    pub state_ring: f32,
     /// The dot on a folded sidebar item's tile: 8.
     pub dot: f32,
     /// The ring around that dot, in the sidebar's color: 2.
@@ -418,6 +432,13 @@ pub const SIZE: Size = Size {
     switch_knob: 16.0,
     switch_inset: 3.0,
     badge: 26.0,
+    status_dot: 26.0,
+    status_dot_icon: 13.0,
+    status_hero: 44.0,
+    status_hero_icon: 22.0,
+    state_circle: 18.0,
+    state_icon: 10.0,
+    state_ring: 1.5,
     dot: 8.0,
     dot_ring: 2.0,
     segmented_inset: 2.0,

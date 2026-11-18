@@ -29,6 +29,7 @@ pub mod field;
 pub mod gallery;
 pub mod icons;
 pub mod segmented;
+pub mod status;
 pub mod switch;
 pub mod tile;
 
@@ -44,6 +45,9 @@ pub use button::{Button, Kind as ButtonKind, QuietTone};
 pub use field::Field;
 pub use icons::{Glyph, Icon};
 pub use segmented::Segmented;
+pub use status::{
+    Health, PathStep, PillState, RequestPath, StatePill, StatusDot, StatusSentence, StepState,
+};
 pub use switch::Switch;
 pub use tile::{Monogram, SectionTile, TileSize};
 
@@ -126,6 +130,24 @@ pub fn touched(theme: &Theme, rest: Color32, touch: Touch) -> Color32 {
         Touch::Hover => theme.shade(rest, theme.state.hover),
         Touch::Pressed => theme.shade(rest, theme.state.pressed),
     }
+}
+
+/// The fill of a control that has none at rest, such as a quiet button, an
+/// icon button, or a sidebar item: `selected` at 50% under the pointer, and
+/// `selected` when pressed. Text on it keeps its contrast, which moving the
+/// fill toward `ink` would not.
+pub fn quiet_fill(theme: &Theme, touch: Touch) -> Option<Color32> {
+    match touch {
+        Touch::Rest => None,
+        Touch::Hover => Some(theme.color.selected.gamma_multiply(theme.state.row_hover)),
+        Touch::Pressed => Some(theme.color.selected),
+    }
+}
+
+/// A margin in whole points from a space token (the tokens are whole
+/// numbers, and egui's margins are `i8`).
+pub fn whole(points: f32) -> i8 {
+    points as i8
 }
 
 /// The focus ring: 2 px of `accent`, 2 px outside the control (tokens.md,

@@ -19,6 +19,7 @@ use crate::model::{
 };
 use crate::theme::Section;
 use crate::tray::menu::Daemon;
+use crate::widgets::{PillState, StepState};
 
 pub const APP_NAME: &str = "Marsa";
 
@@ -625,6 +626,31 @@ pub fn row_badge_label(section: Section, count: u32) -> String {
         Section::Queues => ("job", "jobs"),
     };
     format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// The name of the request path for a screen reader (components.md,
+/// Status): the steps are DNS, Caddy, the runtime, and the site.
+pub const REQUEST_PATH: &str = "Where the request stops";
+
+/// What a screen reader says for one step of the request path: "Caddy, not
+/// working". The icon and the weight say it to the eye (R8).
+pub fn path_step_label(label: &str, state: StepState) -> String {
+    let word = match state {
+        StepState::Working => "working",
+        StepState::Broken => "not working",
+        StepState::Unreached => "not reached",
+    };
+    format!("{label}, {word}")
+}
+
+/// The word of a service's state pill (components.md, Status).
+pub const fn pill_state_word(state: PillState) -> &'static str {
+    match state {
+        PillState::Running => "Running",
+        PillState::Waiting => "Waiting",
+        PillState::Stopped => "Stopped",
+        PillState::Starting => "Starting",
+    }
 }
 
 /// The installed column of the Runtimes section: `8.3.27, 8.4.23`.

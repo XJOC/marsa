@@ -4,8 +4,8 @@
 //! gallery and reads no extra environment variable.
 //!
 //! `MARSA_GUI_GALLERY=1 marsa-gui --data-dir <scratch>` shows it instead of
-//! the window. `MARSA_GUI_GALLERY_PAGE=1|2|3` picks the first page (the tabs
-//! at the top change it). With `MARSA_GUI_SCREENSHOT` and `MARSA_GUI_THEME`
+//! the window. `MARSA_GUI_GALLERY_PAGE=<n>` picks the first page, counting
+//! from 1 (the buttons at the top change it). With `MARSA_GUI_SCREENSHOT` and `MARSA_GUI_THEME`
 //! (see `screenshot`) it saves that page as a picture.
 //!
 //! The states are forced with `looks(...)`, because a still picture has no
@@ -23,6 +23,9 @@ use super::button::{Button, QuietTone};
 use super::field::Field;
 use super::icons::{Glyph, Icon};
 use super::segmented::Segmented;
+use super::status::{
+    Health, PathStep, PillState, RequestPath, StatePill, StatusDot, StatusSentence, StepState,
+};
 use super::switch::Switch;
 use super::tile::{Monogram, SectionTile, TileSize};
 use crate::strings;
@@ -30,7 +33,7 @@ use crate::theme::{Section, Theme};
 
 /// Set to `1` to show the gallery.
 const GALLERY_VAR: &str = "MARSA_GUI_GALLERY";
-/// The page to open first: 1, 2, or 3.
+/// The page to open first, counting from 1.
 const PAGE_VAR: &str = "MARSA_GUI_GALLERY_PAGE";
 
 /// What the reviewer reads: not product text.
@@ -44,6 +47,10 @@ mod label {
     pub const BUTTONS: &str = "Buttons";
     pub const SWITCH: &str = "Switch";
     pub const SEGMENTED: &str = "Segmented control: rest, rest, focus, disabled";
+    pub const STATUS_DOT: &str = "Status dot with word: each health, then hover and focus";
+    pub const STATUS_SENTENCE: &str = "Status sentence: ok, and error with the path and the fixes";
+    pub const PATHS: &str = "Request path: the broken step at each place, and one not reached";
+    pub const PILLS: &str = "State pills";
     pub const FIELDS: &str = "Fields";
     pub const LIVE: &str = "Live: click, type, and Tab through these";
     pub const DISABLED_NOTE: &str = "Disabled is drawn at 55% opacity. Hover it for the reason: ";
@@ -58,12 +65,14 @@ enum Page {
     Icons,
     Buttons,
     Controls,
+    Status,
 }
 
-const PAGES: [(Page, &str); 3] = [
+const PAGES: [(Page, &str); 4] = [
     (Page::Icons, "1  Icons, tiles, badges"),
     (Page::Buttons, "2  Buttons"),
     (Page::Controls, "3  Switch, segmented, fields"),
+    (Page::Status, "4  Status"),
 ];
 
 /// What the live controls of the third page hold.
@@ -81,11 +90,15 @@ pub fn requested() -> bool {
 }
 
 fn first_page() -> Page {
-    match std::env::var(PAGE_VAR).as_deref() {
-        Ok("2") => Page::Buttons,
-        Ok("3") => Page::Controls,
-        _ => Page::Icons,
-    }
+    page_numbered(std::env::var(PAGE_VAR).ok().as_deref())
+}
+
+/// The page with this number, counting from 1; the first page for none.
+fn page_numbered(number: Option<&str>) -> Page {
+    number
+        .and_then(|number| number.parse::<usize>().ok())
+        .and_then(|number| PAGES.get(number.checked_sub(1)?))
+        .map_or(Page::Icons, |(page, _)| *page)
 }
 
 /// Draws the gallery over the whole window.
@@ -107,10 +120,16 @@ pub fn show(ui: &mut Ui) {
         ui.spacing_mut().item_spacing = Vec2::splat(theme.space.s3);
         ui.horizontal(|ui| {
             heading(ui, theme, label::TITLE);
-            if let Some(chosen) = Segmented::new("Gallery page", &PAGES, page).show(ui).inner
-                && let Some(index) = PAGES.iter().position(|(page, _)| *page == chosen)
-            {
-                ui.ctx().data_mut(|data| data.insert_temp(page_id, index));
+            // One button per page: a segmented control holds 2 to 4 options.
+            for (index, (candidate, name)) in PAGES.iter().enumerate() {
+                let button = if *candidate == page {
+                    Button::primary(name)
+                } else {
+                    Button::secondary(name)
+                };
+                if ui.add(button).clicked() {
+                    ui.ctx().data_mut(|data| data.insert_temp(page_id, index));
+                }
             }
         });
         ScrollArea::vertical().show(ui, |ui| draw_page(ui, theme, page));
@@ -122,6 +141,7 @@ fn draw_page(ui: &mut Ui, theme: &Theme, page: Page) {
         Page::Icons => icons_page(ui, theme),
         Page::Buttons => buttons_page(ui, theme),
         Page::Controls => controls_page(ui, theme),
+        Page::Status => status_page(ui, theme),
     }
 }
 
@@ -424,6 +444,102 @@ fn controls_page(ui: &mut Ui, theme: &Theme) {
     ui.ctx().data_mut(|data| data.insert_temp(id, live));
 }
 
+/// The title and the caption a status dot has for `health`.
+const fn dot_text(health: Health) -> (&'static str, &'static str) {
+    match health {
+        Health::Ok => ("All sites working", "DNS, Caddy, PHP"),
+        Health::Warning => ("Check the setup", "HTTPS is not trusted"),
+        Health::Error => ("Sites not opening", "Caddy stopped"),
+        Health::Busy => ("Starting Marsa", "Starting Caddy"),
+    }
+}
+
+fn status_page(ui: &mut Ui, theme: &Theme) {
+    heading(ui, theme, label::STATUS_DOT);
+    row(ui, |ui| {
+        for health in Health::ALL {
+            let (title, caption) = dot_text(health);
+            ui.add(StatusDot::new(health, title, caption));
+        }
+    });
+    row(ui, |ui| {
+        let (title, caption) = dot_text(Health::Ok);
+        ui.add(StatusDot::new(Health::Ok, title, caption).looks(Look::hover()));
+        ui.add(StatusDot::new(Health::Ok, title, caption).looks(Look::focused()));
+    });
+
+    heading(ui, theme, label::STATUS_SENTENCE);
+    ui.add(StatusSentence::new(
+        Health::Ok,
+        "All 6 sites are working.",
+        "DNS, Caddy, and PHP 8.4 are running. PHP 8.3 starts when one of its sites gets a visit.",
+    ));
+    StatusSentence::new(
+        Health::Error,
+        "Sites are not opening: Caddy stopped.",
+        "Caddy is the web server that answers every .test address. It stopped at 14:02.",
+    )
+    .show_with(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.add(RequestPath::new(strings::REQUEST_PATH, &SHOP_PATH));
+            ui.add(Button::danger("Start Caddy"));
+            ui.add(Button::secondary("Show log"));
+        });
+    });
+
+    heading(ui, theme, label::PATHS);
+    let paths: Vec<_> = (0..SHOP_PATH.len()).map(broken_at).collect();
+    for pair in paths.chunks(2) {
+        row(ui, |ui| {
+            for steps in pair {
+                ui.add(RequestPath::new(strings::REQUEST_PATH, steps));
+                ui.add_space(theme.space.s6);
+            }
+        });
+    }
+
+    heading(ui, theme, label::PILLS);
+    row(ui, |ui| {
+        for state in PillState::ALL {
+            ui.add(StatePill::new(state));
+        }
+    });
+}
+
+/// The shop path with the step at `broken` stopped: the steps before it
+/// work, the steps after it are not reached.
+fn broken_at(broken: usize) -> [PathStep<'static>; 4] {
+    let mut steps = SHOP_PATH;
+    for (index, step) in steps.iter_mut().enumerate() {
+        step.state = match index.cmp(&broken) {
+            std::cmp::Ordering::Less => StepState::Working,
+            std::cmp::Ordering::Equal => StepState::Broken,
+            std::cmp::Ordering::Greater => StepState::Unreached,
+        };
+    }
+    steps
+}
+
+/// The steps of a request to `shop.test`, in the order it takes them.
+const SHOP_PATH: [PathStep<'static>; 4] = [
+    PathStep {
+        label: "DNS",
+        state: StepState::Working,
+    },
+    PathStep {
+        label: "Caddy",
+        state: StepState::Broken,
+    },
+    PathStep {
+        label: "PHP 8.4",
+        state: StepState::Working,
+    },
+    PathStep {
+        label: "shop.test",
+        state: StepState::Unreached,
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use eframe::egui::Role;
@@ -485,8 +601,50 @@ mod tests {
     }
 
     #[test]
-    fn the_gallery_has_three_pages_and_the_five_states_of_components_md() {
-        assert_eq!(PAGES.len(), 3);
+    fn the_status_page_shows_every_health_state_and_path_in_both_themes() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let tree = tree_of(Page::Status, theme);
+            for health in Health::ALL {
+                let (title, caption) = dot_text(health);
+                let label = format!("{title}, {caption}");
+                assert_eq!(
+                    tree.node_with_label(&label).expect("a dot").role(),
+                    Role::Status
+                );
+            }
+            assert_eq!(
+                tree.node_with_label("Sites are not opening: Caddy stopped.")
+                    .expect("the error sentence")
+                    .role(),
+                Role::Alert
+            );
+            assert_eq!(
+                tree.node_with_label("Caddy, not working")
+                    .expect("the broken step")
+                    .role(),
+                Role::ListItem
+            );
+            for state in PillState::ALL {
+                assert!(
+                    tree.node_with_label(strings::pill_state_word(state))
+                        .is_some()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_first_page_is_counted_from_one_and_falls_back_to_the_first() {
+        assert_eq!(page_numbered(Some("2")), Page::Buttons);
+        assert_eq!(page_numbered(Some("4")), Page::Status);
+        for wrong in [None, Some("0"), Some("99"), Some("x"), Some("")] {
+            assert_eq!(page_numbered(wrong), Page::Icons, "{wrong:?}");
+        }
+    }
+
+    #[test]
+    fn the_gallery_has_its_pages_and_the_five_states_of_components_md() {
+        assert_eq!(PAGES.len(), 4);
         assert_eq!(
             label::STATES,
             ["Rest", "Hover", "Pressed", "Focus", "Disabled"]

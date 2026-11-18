@@ -17,7 +17,7 @@ use eframe::egui::{
     Ui, Vec2, Widget, WidgetInfo, pos2, vec2,
 };
 
-use crate::theme::{Section, Theme};
+use crate::theme::{Direction, Section, Theme};
 
 /// One piece of an icon, on the icon's grid. Lines and curves continue from
 /// the current point, like the path of an SVG.
@@ -75,6 +75,9 @@ pub enum Icon {
     Dash,
     Ring,
     Alert,
+    /// A busy mark: a ring with a gap. Still, because nothing animates on its
+    /// own (rules.md 10).
+    Spinner,
     // Marks of controls and rows.
     Search,
     Plus,
@@ -82,10 +85,12 @@ pub enum Icon {
     ChevronDown,
     Lock,
     LockOpen,
+    /// Points to the end of a line: right in a left-to-right language.
+    Arrow,
 }
 
 impl Icon {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 24] = [
         Self::Home,
         Self::Sites,
         Self::Runtimes,
@@ -102,12 +107,14 @@ impl Icon {
         Self::Dash,
         Self::Ring,
         Self::Alert,
+        Self::Spinner,
         Self::Search,
         Self::Plus,
         Self::More,
         Self::ChevronDown,
         Self::Lock,
         Self::LockOpen,
+        Self::Arrow,
     ];
 
     /// The icon of a section.
@@ -128,7 +135,9 @@ impl Icon {
     /// The side of the square grid the steps are drawn on.
     pub const fn grid(self) -> f32 {
         match self {
-            Self::Check | Self::Cross | Self::Dash | Self::Ring => 12.0,
+            Self::Check | Self::Cross | Self::Dash | Self::Ring | Self::Spinner | Self::Arrow => {
+                12.0
+            }
             Self::ChevronDown => 10.0,
             Self::More => 14.0,
             Self::Plus => 20.0,
@@ -138,7 +147,16 @@ impl Icon {
 
     /// Status marks are drawn heavier than the other icons.
     const fn bold(self) -> bool {
-        matches!(self, Self::Check | Self::Cross | Self::Dash | Self::Ring)
+        matches!(
+            self,
+            Self::Check | Self::Cross | Self::Dash | Self::Ring | Self::Spinner
+        )
+    }
+
+    /// An icon that points along the line of text is mirrored in a
+    /// right-to-left language (rules.md 13).
+    const fn follows_direction(self) -> bool {
+        matches!(self, Self::Arrow)
     }
 
     /// The width of the stroke at `size`, from the tokens.
@@ -307,6 +325,15 @@ impl Icon {
             ],
             Self::Dash => &[Move(3.0, 6.0), Line(9.0, 6.0)],
             Self::Ring => &[Circle(6.0, 6.0, 4.0)],
+            // Three quarters of a circle, open at the top right.
+            Self::Spinner => &[Arc {
+                cx: 6.0,
+                cy: 6.0,
+                rx: 4.2,
+                ry: 4.2,
+                from: 0.0,
+                to: 270.0,
+            }],
             Self::Alert => &[
                 Circle(8.0, 8.0, 6.0),
                 Move(8.0, 4.8),
@@ -322,6 +349,13 @@ impl Icon {
             ],
             Self::More => &[Dot(3.0, 7.0, 1.2), Dot(7.0, 7.0, 1.2), Dot(11.0, 7.0, 1.2)],
             Self::ChevronDown => &[Move(2.0, 4.0), Line(5.0, 7.0), Line(8.0, 4.0)],
+            Self::Arrow => &[
+                Move(2.0, 6.0),
+                Line(10.0, 6.0),
+                Move(6.5, 2.5),
+                Line(10.0, 6.0),
+                Line(6.5, 9.5),
+            ],
             Self::Lock => &[
                 RoundRect(3.0, 7.0, 10.0, 7.0, 1.5),
                 Move(5.5, 7.0),
@@ -356,10 +390,26 @@ impl Icon {
     /// The shapes of this icon in `rect`, scaled to fit its smaller side and
     /// centred. Pure: nothing is painted until [`Icon::paint`].
     pub fn shapes(self, rect: Rect, color: Color32, stroke_width: f32) -> Vec<Shape> {
+        self.shapes_in(Direction::CURRENT, rect, color, stroke_width)
+    }
+
+    /// [`Icon::shapes`] for a window that reads in `direction`.
+    fn shapes_in(
+        self,
+        direction: Direction,
+        rect: Rect,
+        color: Color32,
+        stroke_width: f32,
+    ) -> Vec<Shape> {
         let side = rect.width().min(rect.height());
         let scale = side / self.grid();
         let origin = Rect::from_center_size(rect.center(), Vec2::splat(side)).min;
-        let at = |x: f32, y: f32| origin + vec2(x, y) * scale;
+        let mirror = self.follows_direction() && direction.is_rtl();
+        let grid = self.grid();
+        let at = |x: f32, y: f32| {
+            let x = if mirror { grid - x } else { x };
+            origin + vec2(x, y) * scale
+        };
         let stroke = Stroke::new(stroke_width, color);
         let mut shapes = Vec::new();
         let mut line: Vec<Pos2> = Vec::new();
@@ -645,6 +695,28 @@ mod tests {
             assert!((Icon::Mail.stroke_width(theme, 16.0) - 1.5).abs() < 1e-4);
             assert!((Icon::Check.stroke_width(theme, 12.0) - 1.9).abs() < 1e-4);
         }
+    }
+
+    #[test]
+    fn an_arrow_points_to_the_end_of_the_line_and_mirrors_in_right_to_left() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), Vec2::splat(12.0));
+        // The first point of the shaft: its tail.
+        let tail = |direction| {
+            let shapes = Icon::Arrow.shapes_in(direction, rect, Color32::BLACK, 1.0);
+            let Some(Shape::Path(path)) = shapes.first() else {
+                panic!("the shaft is a path");
+            };
+            path.points[0].x
+        };
+        assert!(tail(Direction::Ltr) < rect.center().x);
+        assert!(tail(Direction::Rtl) > rect.center().x);
+        // An icon of an object does not mirror.
+        let lock = |direction| Icon::Lock.shapes_in(direction, rect, Color32::BLACK, 1.0);
+        assert_eq!(lock(Direction::Ltr).len(), lock(Direction::Rtl).len());
+        assert_eq!(
+            lock(Direction::Ltr)[0].visual_bounding_rect(),
+            lock(Direction::Rtl)[0].visual_bounding_rect()
+        );
     }
 
     #[test]
