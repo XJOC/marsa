@@ -13,9 +13,8 @@ pub mod site;
 pub mod sites;
 
 use eframe::egui::text::{LayoutJob, TextFormat};
-use eframe::egui::{self, Label, RichText, Ui, vec2};
+use eframe::egui::{Label, RichText, Ui, vec2};
 
-use crate::strings::ReportLine;
 use crate::theme::{Direction, Section, TextToken, Theme};
 use crate::widgets::{SectionTile, TileSize};
 
@@ -46,6 +45,19 @@ pub fn header(
     title: &str,
     actions: impl FnOnce(&mut Ui),
 ) {
+    header_with_hint(ui, theme, section, title, None, actions);
+}
+
+/// [`header`] with a hint in `caption` after the title: what the screen is
+/// for ("Programs Marsa runs for your sites").
+pub fn header_with_hint(
+    ui: &mut Ui,
+    theme: &Theme,
+    section: Section,
+    title: &str,
+    hint: Option<&str>,
+    actions: impl FnOnce(&mut Ui),
+) {
     let line = vec2(ui.available_width(), theme.size.tile_header);
     ui.allocate_ui_with_layout(line, Direction::CURRENT.row(), |ui| {
         ui.spacing_mut().item_spacing.x = theme.space.s3;
@@ -59,22 +71,19 @@ pub fn header(
             .font(theme.text.title.font_id())
             .color(theme.color.ink);
         ui.add(Label::new(text).selectable(false));
+        if let Some(hint) = hint {
+            let text = RichText::new(hint)
+                .font(theme.text.body_sm.font_id())
+                .color(theme.color.mute);
+            ui.add(Label::new(text).truncate().selectable(false));
+        }
         ui.with_layout(Direction::CURRENT.row_from_end(), actions);
     });
 }
 
-/// One line of a report: in the error color if it tells of a problem.
-pub fn report_line(ui: &mut egui::Ui, line: ReportLine) {
-    if line.problem {
-        ui.colored_label(ui.visuals().error_fg_color, line.text);
-    } else {
-        ui.label(line.text);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use eframe::egui::Rect;
+    use eframe::egui::{self, Rect};
 
     use super::*;
     use crate::theme::LIGHT;
@@ -101,6 +110,26 @@ mod tests {
         assert!((shown.height() - LIGHT.size.tile_header).abs() < 0.5);
         assert!(tree.node_with_text("Sites").is_some());
         assert!(width > 0.0);
+    }
+
+    #[test]
+    fn a_header_may_say_what_the_screen_is_for_after_its_title() {
+        let harness = Harness::new(egui::Theme::Light);
+        let tree = harness.accessibility(|ui| {
+            header_with_hint(
+                ui,
+                &LIGHT,
+                Section::Services,
+                "Services",
+                Some("Programs Marsa runs for your sites"),
+                |_| {},
+            );
+        });
+        assert!(tree.node_with_text("Services").is_some());
+        assert!(
+            tree.node_with_text("Programs Marsa runs for your sites")
+                .is_some()
+        );
     }
 
     #[test]
