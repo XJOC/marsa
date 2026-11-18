@@ -984,10 +984,7 @@ fn report(result: Result<(), JoinError>) {
     }
 }
 
-/// Aborts a task when dropped: a watcher that is aborted takes the
-/// supervisor's task with it, so the `Child` is dropped and killed. Also for
-/// PostgreSQL's watcher (`databases`).
-pub(super) struct AbortOnDrop(pub(super) AbortHandle);
+struct AbortOnDrop(AbortHandle);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {

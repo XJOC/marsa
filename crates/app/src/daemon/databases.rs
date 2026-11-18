@@ -13,7 +13,10 @@
 //!
 //! [`PostgresManager`] starts and stops the server under the supervisor, one
 //! action at a time. A failed start leaves the status `failed`, with the
-//! reason in the recent lines.
+//! reason in the recent lines. A run that ends by itself before it takes
+//! connections is read once: if PostgreSQL refused because a live process
+//! holds one of its lock files, the start fails as the check before it
+//! would have. Nothing reads the log after the server is ready.
 
 use std::fmt;
 use std::io;
@@ -25,43 +28,44 @@ use std::time::Duration;
 
 use marsa_core::config::{self, ConfigError, ConfigPaths, ServerSettings};
 use marsa_core::databases::{
-    PG_HBA_CONF, POSTGRES_PORT, PidFileCheck, PostgresDirs, ROOT_ROLE_SQL, ServiceBusy,
-    StartDecision, StartFacts, classify_postmaster, decide_start, initdb_args,
-    is_lock_file_conflict, line_version, lock_holder_pid, port_check, postgres_args, postgres_stop,
-    postmaster_pid, single_user_args,
+    LockConflict, PG_HBA_CONF, POSTGRES_PORT, PidFileCheck, PostgresDirs, ROOT_ROLE_SQL,
+    ServiceBusy, StartDecision, StartFacts, classify_postmaster, decide_start, initdb_args,
+    line_version, port_check, postgres_args, postgres_socket, postgres_stop, postmaster_pid,
+    single_user_args, startup_lock_conflict,
 };
 use marsa_core::orphan::Liveness;
 use marsa_core::platform::{probe, process};
 use marsa_core::ports::PortLookup;
 use marsa_core::recipes::{self, Platform};
 use marsa_core::runtimes::{Runtime, RuntimesDir};
-use marsa_core::services::{ProgramNotAbsolute, ServiceSpec};
+use marsa_core::services::{ProgramNotAbsolute, RestartPolicy, ServiceSpec};
 use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceStatus};
 use semver::Version;
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
-use tokio::sync::broadcast::{self, error::RecvError};
-use tokio::task::{JoinError, JoinHandle};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 use super::caddy::orphan::BoxFuture;
-use super::caddy::{AbortOnDrop, RESTART, note, set_failed};
+use super::caddy::{note, set_failed};
 use super::php::orphan::accepted;
 use super::state::Daemon;
-use super::supervisor::{ServiceHandle, ServiceRuntime, Supervisor, lock};
+use super::supervisor::{ServiceRuntime, Supervisor, lock};
 
 /// The service id: the key in `Daemon::procs`, and the log file
 /// `logs/postgres.log`.
 pub const POSTGRES_ID: &str = "postgres";
 
-/// How long a start waits for the server to take TCP connections. S-12
-/// measured 50 to 690 ms. The postmaster listens before it recovers its data
+/// How long a start waits for the server to take connections. S-12
+/// measured 50 to 690 ms. The postmaster answers before it recovers its data
 /// after a crash, so a long recovery does not count against this.
 const READY_LIMIT: Duration = Duration::from_secs(15);
 const READY_POLL: Duration = Duration::from_millis(100);
-/// For each connection attempt of the readiness check.
+/// For each attempt of the readiness check.
 const CONNECT_LIMIT: Duration = Duration::from_millis(500);
+/// An `SSLRequest`: its length, 8, then the code 80877103. The first message
+/// a client may send, before any user name.
+const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f];
 
 /// How long `initdb` may run. About a second on a laptop (S-12); a slow disk
 /// or a busy CI machine needs more.
@@ -399,15 +403,17 @@ async fn remove_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// The code of a start that found another server on the data folder: the
-/// check before it, or PostgreSQL's own lock file.
-const DATA_DIR_BUSY: &str = "service_data_dir_busy";
-
 /// How the supervisor runs PostgreSQL: `postgres` with [`postgres_args`],
 /// so on `127.0.0.1:<port>` only and with its socket in `run/`, stopped with
-/// SIGINT, then SIGQUIT, never SIGTERM ([`postgres_stop`]), and restarted
-/// after a failure like Caddy. PostgreSQL logs to stderr, which the
-/// supervisor keeps in `logs/postgres.log`, as for every service.
+/// SIGINT, then SIGQUIT, never SIGTERM ([`postgres_stop`]). PostgreSQL logs
+/// to stderr, which the supervisor keeps in `logs/postgres.log`, as for
+/// every service.
+///
+/// Never restarted after it exits, unlike Caddy. A refusal at its start
+/// (another server on the folder, the port, or the socket) would only come
+/// again, the status must keep the run's own exit, and after a crash of the
+/// postmaster its backends may still hold the shared memory, so a restart
+/// fails too. PostgreSQL restarts its own crashed backends itself.
 pub fn postgres_spec(program: PathBuf, dirs: &PostgresDirs, port: u16) -> ServiceSpec {
     ServiceSpec {
         id: POSTGRES_ID.to_owned(),
@@ -415,7 +421,7 @@ pub fn postgres_spec(program: PathBuf, dirs: &PostgresDirs, port: u16) -> Servic
         args: postgres_args(dirs, port),
         env: std::collections::BTreeMap::new(),
         cwd: None,
-        restart: RESTART,
+        restart: RestartPolicy::Never,
         stop: postgres_stop(),
     }
 }
@@ -511,14 +517,16 @@ impl Default for PostgresManager {
 /// What a start runs, after the check before it and the first init.
 struct Prepared {
     spec: ServiceSpec,
-    /// The cluster, for the watcher.
+    /// The cluster, for its `postmaster.pid`.
     data: PathBuf,
+    /// The socket, for the name of its lock file: `None` for TCP only.
+    socket: Option<PathBuf>,
     port: u16,
 }
 
 enum Ready {
     Yes,
-    /// The task ended first: the status says why.
+    /// The run ended by itself first: the status says why.
     Ended,
     TimedOut,
 }
@@ -608,12 +616,24 @@ impl PostgresManager {
                 return Err(err);
             }
         };
-        let port = prepared.port;
-        self.spawn(daemon, prepared)?;
+        let Prepared {
+            spec,
+            data,
+            socket,
+            port,
+        } = prepared;
+        // This run's lines come after the ones there now.
+        let first_seq = self.recent_logs().last().map_or(0, |line| line.seq + 1);
+        self.spawn(daemon, spec)?;
         match self.wait_ready(daemon, port).await {
             Ready::Yes => info!(port, "postgres takes connections"),
             Ready::Ended => {
-                warn!(state = ?self.status().state, "postgres ended before it was ready")
+                let refused = self.lock_refusal(first_seq, &data, socket.as_deref(), port);
+                if let Some((busy, reason)) = refused.await {
+                    self.fail(&daemon.events, busy.code(), &reason);
+                    return Err(ActionError::InUse(busy));
+                }
+                warn!(state = ?self.status().state, "postgres ended before it was ready");
             }
             Ready::TimedOut => {
                 warn!(limit = ?self.ready_limit, "postgres takes no connections; stopping it");
@@ -648,6 +668,7 @@ impl PostgresManager {
         info!(%version, port, "starting postgres");
         Ok(Prepared {
             spec: postgres_spec(programs.postgres, &dirs, port),
+            socket: postgres_socket(&dirs, port),
             data: dirs.data,
             port,
         })
@@ -679,50 +700,25 @@ impl PostgresManager {
         Ok((platform, version, programs))
     }
 
-    /// Spawns the server under the supervisor, with a [`Watcher`] between
-    /// them, and registers its task in `Daemon::procs`.
-    fn spawn(&self, daemon: &Daemon, prepared: Prepared) -> Result<(), ActionError> {
-        // Before the process starts, so the watcher cannot miss its first line.
-        let lines = daemon.events.subscribe();
-        let first_seq = self.recent_logs().last().map_or(0, |line| line.seq + 1);
+    /// Spawns the server under the supervisor, and registers its task in
+    /// `Daemon::procs`.
+    fn spawn(&self, daemon: &Daemon, spec: ServiceSpec) -> Result<(), ActionError> {
         let logs_dir = daemon.data_dir.join("logs");
-        let program = prepared.spec.program.clone();
+        let program = spec.program.clone();
         let runtime = Arc::clone(&self.runtime);
-        let handle = Supervisor::spawn_on(prepared.spec, daemon.events.clone(), &logs_dir, runtime)
+        let handle = Supervisor::spawn_on(spec, daemon.events.clone(), &logs_dir, runtime)
             .map_err(|err| {
                 self.fail(&daemon.events, err.code(), &err.to_string());
                 ActionError::ProgramNotAbsolute(err)
             })?;
         *lock(&self.started) = Some(program);
-        let ServiceHandle {
-            cancel,
-            task,
-            runtime,
-            stop_limit,
-        } = handle;
-        let watcher = Watcher {
-            lines,
-            first_seq,
-            cancel: cancel.clone(),
-            runtime: Arc::clone(&runtime),
-            events: daemon.events.clone(),
-            data: prepared.data,
-            probes: Arc::clone(&self.probes),
-        };
-        let task = tokio::spawn(watcher.run(task));
         // A handle this replaces belongs to a run that has ended.
-        let handle = ServiceHandle {
-            cancel,
-            task,
-            runtime,
-            stop_limit,
-        };
         daemon.add_proc(POSTGRES_ID, handle);
         Ok(())
     }
 
-    /// Tries a TCP connection to `127.0.0.1:<port>` until one works, the
-    /// task ends, or the limit. The check before the start found the port
+    /// Asks `127.0.0.1:<port>` ([`answers`]) until our server answers, its
+    /// run ends, or the limit. The check before the start found the port
     /// free, so what answers is our server.
     async fn wait_ready(&self, daemon: &Daemon, port: u16) -> Ready {
         let poll = async {
@@ -730,8 +726,7 @@ impl PostgresManager {
                 if !daemon.proc_alive(POSTGRES_ID) {
                     return Ready::Ended;
                 }
-                let connect = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port));
-                if let Ok(Ok(_)) = tokio::time::timeout(CONNECT_LIMIT, connect).await {
+                if answers(port).await {
                     return Ready::Yes;
                 }
                 tokio::time::sleep(READY_POLL).await;
@@ -740,6 +735,69 @@ impl PostgresManager {
         tokio::time::timeout(self.ready_limit, poll)
             .await
             .unwrap_or(Ready::TimedOut)
+    }
+
+    /// Why a run that ended by itself before it took connections did not
+    /// start, when PostgreSQL refused because a live process holds one of
+    /// its lock files ([`startup_lock_conflict`] on this run's stderr, from
+    /// `first_seq`), with the program at that pid now:
+    ///
+    /// - `postmaster.pid`: `service_data_dir_busy`, as the check before the
+    ///   start reports it. The pid comes from PostgreSQL's hint, else from
+    ///   `postmaster.pid` (read only);
+    /// - the lock of the socket: `service_port_busy`, the server that uses
+    ///   the socket of this port.
+    ///
+    /// Only read once the run has ended: a line never stops a server. That
+    /// process gets no signal, and `postmaster.pid` stays: the pid may be
+    /// another program's now (orphans are task M6-04).
+    async fn lock_refusal(
+        &self,
+        first_seq: u64,
+        data: &Path,
+        socket: Option<&Path>,
+        port: u16,
+    ) -> Option<(ServiceBusy, String)> {
+        let recent = self.recent_logs();
+        let stderr: Vec<&str> = recent
+            .iter()
+            .filter(|line| line.seq >= first_seq && line.stream == LogStream::Stderr)
+            .map(|line| line.text.as_str())
+            .collect();
+        let conflict = startup_lock_conflict(&stderr, socket)?;
+        let no_signal = "and Marsa sends it no signal";
+        match conflict {
+            LockConflict::DataDir { pid } => {
+                let pid = pid.or_else(|| {
+                    let text = process::read_small_file(&data.join("postmaster.pid"))?;
+                    postmaster_pid(&text)
+                })?;
+                let program = self.program_at(pid).await;
+                let busy = ServiceBusy::DataDir { pid };
+                let reason = format!("{busy}; pid {pid} runs {program} now, {no_signal}");
+                Some((busy, reason))
+            }
+            LockConflict::Socket { pid } => {
+                let owner = match pid {
+                    Some(pid) => Some(format!("{} (pid {pid})", self.program_at(pid).await)),
+                    None => None,
+                };
+                let busy = ServiceBusy::Port { port, owner };
+                let lock = socket.map(|socket| socket.display().to_string());
+                let lock = lock.unwrap_or_default();
+                let reason = format!("{busy}: it holds the lock of the socket {lock}, {no_signal}");
+                Some((busy, reason))
+            }
+        }
+    }
+
+    /// The program at `pid` now, in words, for a message.
+    async fn program_at(&self, pid: u32) -> String {
+        match self.probes.real_identity(pid).await {
+            Liveness::Alive { exe, .. } => exe.display().to_string(),
+            Liveness::Gone => "nothing (it has ended since)".to_owned(),
+            Liveness::Unknown => "a program that cannot be told".to_owned(),
+        }
     }
 
     /// Stops the task: SIGINT, then SIGQUIT, then a kill, by the spec. A
@@ -771,123 +829,25 @@ fn read_settings(data_dir: &Path) -> Result<ServerSettings, ActionError> {
     Ok(global.postgres)
 }
 
-/// Watches one run of PostgreSQL. It owns the supervisor's task, and its own
-/// task is the one in `Daemon::procs`.
-struct Watcher {
-    /// The event bus, subscribed before the process started.
-    lines: broadcast::Receiver<Event>,
-    /// The `seq` of this run's first line.
-    first_seq: u64,
-    cancel: CancellationToken,
-    runtime: Arc<Mutex<ServiceRuntime>>,
-    events: broadcast::Sender<Event>,
-    /// The cluster, for its `postmaster.pid`.
-    data: PathBuf,
-    probes: Arc<dyn Probes>,
-}
-
-impl Watcher {
-    /// Waits for the supervisor's task. If PostgreSQL says that a live
-    /// process holds its lock file (it exits within its first second then),
-    /// stops the supervisor, so nothing restarts, and sets
-    /// `Failed { service_data_dir_busy }` with that pid and the program at
-    /// it now. That process gets no signal, and `postmaster.pid` stays: it
-    /// may be another program that reused the pid (orphans are task M6-04).
-    async fn run(self, mut supervisor: JoinHandle<()>) {
-        // `stop_procs` aborts this task after its time limit; the abort must
-        // reach the supervisor too, so the `Child` is dropped and killed.
-        let _abort = AbortOnDrop(supervisor.abort_handle());
-        let Watcher {
-            lines,
-            first_seq,
-            cancel,
-            runtime,
-            events,
-            data,
-            probes,
-        } = self;
-        let locked = tokio::select! {
-            result = &mut supervisor => {
-                report(result);
-                false
-            }
-            () = watch_lock(lines, first_seq, &runtime) => true,
-        };
-        if !locked {
-            return;
-        }
-        warn!("a live process holds the lock file of postgres; stopping it without a restart");
-        cancel.cancel();
-        report(supervisor.await);
-        let reason = lock_holder(&runtime, first_seq, &data, &*probes).await;
-        let text = format!("marsad: PostgreSQL did not start: {reason}.");
-        note(&runtime, &events, &text);
-        // After the supervisor's last change, so this one stays.
-        set_failed(&runtime, &events, DATA_DIR_BUSY);
-    }
-}
-
-/// Ends when a stderr line of this run says that a live process holds the
-/// lock file; never ends otherwise.
-async fn watch_lock(
-    mut lines: broadcast::Receiver<Event>,
-    first_seq: u64,
-    runtime: &Mutex<ServiceRuntime>,
-) {
-    let locked = |line: &LogLine| {
-        line.stream == LogStream::Stderr
-            && line.seq >= first_seq
-            && is_lock_file_conflict(&line.text)
+/// Whether PostgreSQL takes connections on `127.0.0.1:<port>`: it answers
+/// an [`SSL_REQUEST`] with one byte, `N` or `S`. Only a postmaster whose
+/// start is done answers: it has taken its lock files and made all its
+/// sockets. A bare TCP connection is not enough, because the TCP listener
+/// is made before the socket and its lock file. PostgreSQL logs nothing for
+/// this: the connection closes before any startup message.
+async fn answers(port: u16) -> bool {
+    let ask = async {
+        let address = (Ipv4Addr::LOCALHOST, port);
+        let mut stream = tokio::net::TcpStream::connect(address).await.ok()?;
+        stream.write_all(&SSL_REQUEST).await.ok()?;
+        let mut answer = [0_u8; 1];
+        stream.read_exact(&mut answer).await.ok()?;
+        Some(matches!(&answer, b"N" | b"S"))
     };
-    loop {
-        match lines.recv().await {
-            Ok(Event::Log(line)) if line.service == POSTGRES_ID && locked(&line) => return,
-            Ok(_) => {}
-            // Too far behind: the skipped lines are still in the buffer.
-            Err(RecvError::Lagged(_)) => {
-                let recent = lock(runtime).logs.recent();
-                if recent.iter().any(locked) {
-                    return;
-                }
-            }
-            Err(RecvError::Closed) => std::future::pending().await,
-        }
-    }
-}
-
-/// Who holds the lock, in words: the pid in PostgreSQL's hint, else the one
-/// in `postmaster.pid` (read only), and the program at that pid now.
-async fn lock_holder(
-    runtime: &Mutex<ServiceRuntime>,
-    first_seq: u64,
-    data: &Path,
-    probes: &dyn Probes,
-) -> String {
-    let recent = lock(runtime).logs.recent();
-    let this_run = recent.iter().filter(|line| line.seq >= first_seq);
-    let hinted = this_run
-        .filter_map(|line| lock_holder_pid(&line.text))
-        .next();
-    let pid = hinted.or_else(|| {
-        let text = process::read_small_file(&data.join("postmaster.pid"))?;
-        postmaster_pid(&text)
-    });
-    let Some(pid) = pid else {
-        return "another server holds its data folder; Marsa sends it no signal".to_owned();
-    };
-    let program = match probes.real_identity(pid).await {
-        Liveness::Alive { exe, .. } => exe.display().to_string(),
-        Liveness::Gone => "nothing (it has ended since)".to_owned(),
-        Liveness::Unknown => "a program that cannot be told".to_owned(),
-    };
-    let busy = ServiceBusy::DataDir { pid };
-    format!("{busy}; pid {pid} runs {program} now, and Marsa sends it no signal")
-}
-
-fn report(result: Result<(), JoinError>) {
-    if let Err(err) = result {
-        warn!(%err, "the postgres supervisor task failed");
-    }
+    matches!(
+        tokio::time::timeout(CONNECT_LIMIT, ask).await,
+        Ok(Some(true))
+    )
 }
 
 #[cfg(test)]
@@ -1095,10 +1055,8 @@ mod tests {
         assert_eq!(spec.program, program);
         assert_eq!(spec.args, postgres_args(&dirs, 5433));
         assert_eq!(spec.stop, postgres_stop());
-        assert_eq!(spec.restart, RESTART);
+        assert_eq!(spec.restart, RestartPolicy::Never);
         assert!(spec.env.is_empty() && spec.cwd.is_none());
-        let refusal = ServiceBusy::DataDir { pid: 1 };
-        assert_eq!(DATA_DIR_BUSY, refusal.code());
     }
 
     /// The test binary stands in for the `postgres` server, run by a script
@@ -1126,40 +1084,59 @@ mod tests {
         /// Not a check: the fake server's entry point. In a normal test run
         /// the variable is unset and this returns at once.
         ///
-        /// - `serve` listens on the `port=` of its arguments, prints each
-        ///   stop signal, ignores SIGTERM, and exits at SIGINT, as PostgreSQL
-        ///   does with a client connected.
-        /// - `locked` prints PostgreSQL's two lines for a lock file held by
-        ///   pid 4242, and exits 1.
+        /// - `serve` listens on the `port=` of its arguments, answers an
+        ///   `SSLRequest` with `N`, prints each stop signal, ignores
+        ///   SIGTERM, and exits at SIGINT, as PostgreSQL does with a client
+        ///   connected.
+        /// - `noisy` serves too, but prints PostgreSQL's refusal for
+        ///   `postmaster.pid` first, and again after its first answer.
+        /// - `locked` prints that refusal, held by pid 4242, and exits 1.
+        /// - `socket-locked` does the same for the lock of its socket.
         #[test]
         fn fake_postgres() {
             let Ok(mode) = std::env::var(FAKE) else {
                 return;
             };
             let args = std::env::var("MARSA_FAKE_POSTGRES_ARGS").unwrap();
-            let me = std::process::id();
-            if mode == "locked" {
-                let at = "2026-11-18 10:00:00.123 UTC";
-                eprintln!("{at} [{me}] FATAL:  lock file \"postmaster.pid\" already exists");
+            let setting = |name: &str| {
+                let found = args.split(' ').find_map(|arg| arg.strip_prefix(name));
+                found.unwrap().to_owned()
+            };
+            let port: u16 = setting("port=").parse().unwrap();
+            let at = format!("2026-11-18 10:00:00.123 UTC [{}]", std::process::id());
+            let data_dir = || {
+                eprintln!("{at} FATAL:  lock file \"postmaster.pid\" already exists");
                 eprintln!(
-                    "{at} [{me}] HINT:  Is another postmaster (PID 4242) running in data \
-                     directory \"/m\"?"
+                    "{at} HINT:  Is another postmaster (PID 4242) running in data directory \
+                     \"/m\"?"
                 );
-                std::process::exit(1);
+            };
+            match mode.as_str() {
+                "locked" => {
+                    data_dir();
+                    std::process::exit(1);
+                }
+                "socket-locked" => {
+                    let socket = format!("{}/.s.PGSQL.{port}", setting("unix_socket_directories="));
+                    eprintln!("{at} FATAL:  lock file \"{socket}.lock\" already exists");
+                    eprintln!(
+                        "{at} HINT:  Is another postmaster (PID 4242) using socket file \
+                         \"{socket}\"?"
+                    );
+                    std::process::exit(1);
+                }
+                "noisy" => data_dir(),
+                _ => {}
             }
-            let port: u16 = args
-                .split(' ')
-                .find_map(|arg| arg.strip_prefix("port="))
-                .unwrap()
-                .parse()
-                .unwrap();
             let serve = async {
+                use tokio::io::AsyncReadExt as _;
                 use tokio::signal::unix::{SignalKind, signal};
                 let mut term = signal(SignalKind::terminate()).unwrap();
                 let mut int = signal(SignalKind::interrupt()).unwrap();
                 let address = (Ipv4Addr::LOCALHOST, port);
                 let listener = tokio::net::TcpListener::bind(address).await.unwrap();
                 eprintln!("fake ready");
+                let mut answered = false;
                 loop {
                     tokio::select! {
                         _ = term.recv() => eprintln!("fake got SIGTERM"),
@@ -1167,7 +1144,18 @@ mod tests {
                             eprintln!("fake got SIGINT");
                             std::process::exit(0);
                         }
-                        _ = listener.accept() => {}
+                        Ok((mut stream, _)) = listener.accept() => {
+                            let mut request = [0_u8; 8];
+                            if stream.read_exact(&mut request).await.is_ok()
+                                && request == SSL_REQUEST
+                            {
+                                let _ = stream.write_all(b"N").await;
+                                if mode == "noisy" && !answered {
+                                    data_dir();
+                                }
+                                answered = true;
+                            }
+                        }
                     }
                 }
             };
@@ -1370,13 +1358,17 @@ mod tests {
         }
 
         /// The pid in `postmaster.pid` now runs another program: the check
-        /// lets the start go, and PostgreSQL refuses by itself.
+        /// lets the start go, and PostgreSQL refuses by itself. The start
+        /// reports it as the check before it would have.
         #[tokio::test]
-        async fn a_fast_lock_file_exit_is_data_dir_busy_without_a_restart() {
+        async fn a_lock_file_refusal_at_the_start_is_data_dir_busy_without_a_restart() {
             let pg = pg("locked", probes(alive(Path::new(OTHER)), None));
             let file = in_use(&pg);
-            let status = pg.act(ServiceAction::Start).await.unwrap();
-            assert_eq!(status.state, failed(DATA_DIR_BUSY));
+            let err = pg.act(ServiceAction::Start).await.unwrap_err();
+            let busy = "service_data_dir_busy";
+            assert_eq!(err.code(), busy);
+            assert!(err.to_string().contains("pid 4242"), "{err}");
+            assert_eq!(pg.daemon.postgres.status().state, failed(busy));
             let last = pg.texts().pop().unwrap();
             assert!(last.contains("pid 4242"), "{last}");
             assert!(last.contains(OTHER), "{last}");
@@ -1384,11 +1376,56 @@ mod tests {
             // to), and its file stays.
             assert_eq!(*pg.probes.asked.lock().unwrap(), [4242, 4242]);
             assert_eq!(fs::read_to_string(&file).unwrap(), POSTMASTER_PID);
-            // Longer than the first restart delay (0.5 s): none came.
+            // Longer than a restart delay would be: none came.
             tokio::time::sleep(Duration::from_millis(1500)).await;
             assert_eq!(pg.count("server"), 1);
             assert!(!pg.daemon.proc_alive(POSTGRES_ID));
-            assert_eq!(pg.daemon.postgres.status().state, failed(DATA_DIR_BUSY));
+            assert_eq!(pg.daemon.postgres.status().state, failed(busy));
+        }
+
+        /// Another server holds the lock of our socket for this port.
+        #[tokio::test]
+        async fn a_socket_lock_refusal_is_port_busy() {
+            let pg = pg("socket-locked", probes(alive(Path::new(OTHER)), None));
+            let err = pg.act(ServiceAction::Start).await.unwrap_err();
+            assert_eq!(err.code(), "service_port_busy");
+            let text = err.to_string();
+            assert!(text.contains(&format!("port {}", pg.port)), "{text}");
+            assert!(text.contains(&format!("{OTHER} (pid 4242)")), "{text}");
+            let state = pg.daemon.postgres.status().state;
+            assert_eq!(state, failed("service_port_busy"));
+            let last = pg.texts().pop().unwrap();
+            assert!(last.contains(".s.PGSQL."), "{last}");
+        }
+
+        /// The fake prints PostgreSQL's refusal at its start and again once
+        /// it answers, as a client could make it log, but runs on. A line
+        /// never stops a server: only a run that ended by itself is read.
+        #[tokio::test]
+        async fn a_lock_line_from_a_running_server_changes_nothing() {
+            let pg = pg("noisy", probes(alive(Path::new(OTHER)), None));
+            let status = pg.act(ServiceAction::Start).await.unwrap();
+            assert_eq!(status.state, ServiceState::Running);
+            let pid = status.pid;
+            // The second refusal comes after its first answer, so after
+            // the start was ready.
+            let fatal = "FATAL:  lock file \"postmaster.pid\" already exists";
+            let printed = async {
+                let count = || pg.texts().iter().filter(|t| t.ends_with(fatal)).count();
+                while count() < 2 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            tokio::time::timeout(WAIT, printed).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            let status = pg.daemon.postgres.status();
+            assert_eq!((status.state, status.pid), (ServiceState::Running, pid));
+            assert!(pg.daemon.proc_alive(POSTGRES_ID));
+            assert!(pg.probes.asked.lock().unwrap().is_empty());
+            let texts = pg.texts();
+            let signals = ["fake got SIGINT", "fake got SIGTERM"];
+            assert!(!texts.iter().any(|t| signals.contains(&t.as_str())));
+            pg.act(ServiceAction::Stop).await.unwrap();
         }
     }
 
