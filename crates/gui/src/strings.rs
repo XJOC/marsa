@@ -50,7 +50,7 @@ pub const FOLLOW_HINT: &str = "Keeps the newest line in view. Scrolling up stops
 /// The Logs screen while the window has no daemon to ask and no log kept.
 pub const LOGS_OFFLINE: &str = "Logs show here once Marsa is connected to its daemon.";
 /// The Logs screen when the filters leave no line.
-pub const LOG_NO_MATCH: &str = "No line matches the filters.";
+pub const LOG_NO_MATCH: &str = "No lines match.";
 
 /// The Logs screen when the program has written nothing yet.
 pub fn log_empty(name: &str) -> String {
