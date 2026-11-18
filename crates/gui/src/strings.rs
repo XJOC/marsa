@@ -1264,10 +1264,20 @@ pub fn site_is_parked(site: &str, folder: Option<&Path>, home: Option<&Path>) ->
 }
 
 /// The action of the notice [`site_is_parked`]: it asks to forget the folder.
-/// A long path keeps its last parts (`…/clients/acme`); the site's page and
-/// the Parked folders list show the whole path.
+/// A long path keeps its last parts (`…/clients/acme`): the sentence before
+/// the button names no long path, and the tooltip of the button has the
+/// whole one.
 pub fn forget_folder(folder: &Path, home: Option<&Path>) -> String {
     forget_folder_shown(&path_tail(&home_path(folder, home), MAX_ACTION_PATH))
+}
+
+/// The tooltip of the action [`forget_folder`]: the whole path of the folder,
+/// which the label may show only the end of.
+pub fn forget_folder_hint(folder: &Path) -> String {
+    format!(
+        "Forget {}: its sites are no longer served. Its files stay.",
+        folder.display()
+    )
 }
 
 /// The longest path a button names in full.
