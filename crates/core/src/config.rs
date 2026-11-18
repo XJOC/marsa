@@ -2,7 +2,8 @@
 //!
 //! Two files live in `<app data dir>/config/` (architecture.md section 7):
 //!
-//! - `global.toml`: the default PHP and Node versions, and Xdebug on or off,
+//! - `global.toml`: the default PHP and Node versions, Xdebug on or off, and
+//!   the PostgreSQL server,
 //! - `sites.toml`: the settings of each site.
 //!
 //! The functions take the file path as input, so tests use temp folders. Only
@@ -30,6 +31,8 @@ pub struct GlobalConfig {
     pub php: ToolDefaults,
     #[serde(deserialize_with = "node_defaults", skip_serializing_if = "is_default")]
     pub node: ToolDefaults,
+    #[serde(skip_serializing_if = "is_default")]
+    pub postgres: ServerSettings,
 }
 
 /// The `[php]` or `[node]` table in `global.toml`. One table per tool leaves
@@ -45,6 +48,26 @@ pub struct ToolDefaults {
     /// file from before this key reads as off.
     #[serde(skip_serializing_if = "is_false")]
     pub xdebug: bool,
+}
+
+/// A database server's table in `global.toml`: `[postgres]` (task M6-03),
+/// later `[mysql]` and `[valkey]` (ADR 0023).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServerSettings {
+    /// The major line that runs, as the user wrote it: `"18"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// The server starts with `marsad`. `marsa services stop` turns it off.
+    #[serde(skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// `None` is the server's own port, for PostgreSQL
+    /// [`crate::databases::POSTGRES_PORT`]. Never `0`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "server_port"
+    )]
+    pub port: Option<u16>,
 }
 
 /// `sites.toml`.
@@ -345,14 +368,25 @@ fn check_absolute(key: &str, path: &Path) -> Result<(), String> {
     }
 }
 
-/// `proxy` is a TCP port from 1 to 65535: port `0` is not a real port. Read as
-/// `i64` (a TOML integer), so `0`, `-1`, and `70000` all get the same message.
 fn proxy_port<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u16>, D::Error> {
+    tcp_port("proxy", deserializer)
+}
+
+fn server_port<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u16>, D::Error> {
+    tcp_port("port", deserializer)
+}
+
+/// `key` is a TCP port from 1 to 65535: port `0` is not a real port. Read as
+/// `i64` (a TOML integer), so `0`, `-1`, and `70000` all get the same message.
+fn tcp_port<'de, D: Deserializer<'de>>(
+    key: &str,
+    deserializer: D,
+) -> Result<Option<u16>, D::Error> {
     let number = i64::deserialize(deserializer)?;
     match u16::try_from(number) {
         Ok(port) if port != 0 => Ok(Some(port)),
         _ => Err(serde::de::Error::custom(format!(
-            "proxy must be a port from 1 to 65535, not {number}"
+            "{key} must be a port from 1 to 65535, not {number}"
         ))),
     }
 }
@@ -463,6 +497,7 @@ mod tests {
                 default: Some(node.to_owned()),
                 xdebug: false,
             },
+            postgres: ServerSettings::default(),
         }
     }
 
@@ -539,6 +574,68 @@ mod tests {
         assert_invalid(&load_global(&path).unwrap_err(), &path, "xdebug");
         let path = file(&dir, "text.toml", "[php]\nxdebug = \"on\"\n");
         assert_invalid(&load_global(&path).unwrap_err(), &path, "line 2");
+    }
+
+    #[test]
+    fn postgres_table_reads_writes_and_round_trips() {
+        let text = format!("{HEADER}\n[postgres]\ndefault = \"18\"\nenabled = true\nport = 5433\n");
+        let config = parse_global(&text, Path::new("global.toml")).unwrap();
+        let default = Some("18".to_owned());
+        let want = ServerSettings {
+            default,
+            enabled: true,
+            port: Some(5433),
+        };
+        assert_eq!(config.postgres, want);
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("global.toml");
+        save_global(&path, &config).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        assert_eq!(load_global(&path).unwrap(), config);
+    }
+
+    #[test]
+    fn postgres_defaults_leave_no_key_and_no_table() {
+        // A file from before the table, and a table at its defaults.
+        for text in [
+            "[php]\ndefault = \"8.4\"\n",
+            "[postgres]\nenabled = false\n",
+        ] {
+            let config = parse_global(text, Path::new("global.toml")).unwrap();
+            assert_eq!(config.postgres, ServerSettings::default(), "{text}");
+        }
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("global.toml");
+        let mut config = GlobalConfig::default();
+        config.postgres.default = Some("18".to_owned());
+        save_global(&path, &config).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text, format!("{HEADER}\n[postgres]\ndefault = \"18\"\n"));
+        config.postgres.default = None;
+        save_global(&path, &config).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), format!("{HEADER}\n"));
+    }
+
+    #[test]
+    fn postgres_port_must_be_a_real_port() {
+        let path = Path::new("global.toml");
+        for port in ["0", "-1", "65536"] {
+            let text = format!("[postgres]\nenabled = true\nport = {port}\n");
+            let err = parse_global(&text, path).unwrap_err();
+            assert_invalid(
+                &err,
+                path,
+                &format!("port must be a port from 1 to 65535, not {port}"),
+            );
+            assert_invalid(&err, path, "line 3");
+        }
+        for port in [1, 65535] {
+            let config = parse_global(&format!("[postgres]\nport = {port}\n"), path).unwrap();
+            assert_eq!(config.postgres.port, Some(port));
+        }
+        let err = parse_global("[postgres]\nversion = \"18\"\n", path).unwrap_err();
+        assert_invalid(&err, path, "version");
     }
 
     #[test]
