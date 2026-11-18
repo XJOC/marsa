@@ -62,7 +62,9 @@ pub struct ServerSettings {
     #[serde(skip_serializing_if = "is_false")]
     pub enabled: bool,
     /// `None` is the server's own port, for PostgreSQL
-    /// [`crate::databases::POSTGRES_PORT`]. Never `0`.
+    /// [`crate::databases::POSTGRES_PORT`]. From 1 to 65535, like the server
+    /// accepts. Never `0`: a bind test on port 0 always succeeds, so the
+    /// check before a start would miss a busy port.
     #[serde(
         skip_serializing_if = "Option::is_none",
         deserialize_with = "server_port"
@@ -618,9 +620,18 @@ mod tests {
     }
 
     #[test]
+    fn postgres_port_zero_is_refused() {
+        // A bind test on port 0 always succeeds: the OS picks a free port.
+        let path = Path::new("global.toml");
+        let err = parse_global("[postgres]\nport = 0\n", path).unwrap_err();
+        assert_invalid(&err, path, "port must be a port from 1 to 65535, not 0");
+        assert_invalid(&err, path, "line 2");
+    }
+
+    #[test]
     fn postgres_port_must_be_a_real_port() {
         let path = Path::new("global.toml");
-        for port in ["0", "-1", "65536"] {
+        for port in ["-1", "65536"] {
             let text = format!("[postgres]\nenabled = true\nport = {port}\n");
             let err = parse_global(&text, path).unwrap_err();
             assert_invalid(
