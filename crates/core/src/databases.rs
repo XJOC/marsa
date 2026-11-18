@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use semver::Version;
+
 use crate::orphan::Liveness;
 use crate::php::MAX_SOCKET_PATH;
 use crate::services::{Signal, StopMethod};
@@ -193,6 +195,18 @@ pub fn postmaster_pid(text: &str) -> Option<u32> {
     }
     let pid: i32 = digits.parse().ok()?;
     u32::try_from(pid).ok().filter(|&pid| pid != 0)
+}
+
+/// The version to run for `[postgres] default`: the newest of `installed`
+/// in that major line (`"18"`), or the newest of all when it is not set.
+/// `None` when no version fits, or when `default` is not a major number.
+pub fn line_version(default: Option<&str>, installed: &[Version]) -> Option<Version> {
+    let major = match default {
+        Some(text) => Some(text.trim().parse::<u64>().ok()?),
+        None => None,
+    };
+    let in_line = |version: &&Version| major.is_none_or(|major| version.major == major);
+    installed.iter().filter(in_line).max().cloned()
 }
 
 /// Who holds the server's port, from the daemon's bind test.
@@ -577,6 +591,22 @@ mod tests {
         let data = ServiceBusy::DataDir { pid: 7 };
         assert_eq!(data.code(), "service_data_dir_busy");
         assert!(data.to_string().contains("pid 7"), "{data}");
+    }
+
+    #[test]
+    fn the_default_line_runs_its_newest_version() {
+        let versions: Vec<Version> = ["17.12.0", "18.6.0", "18.7.0", "17.9.0"]
+            .iter()
+            .map(|text| Version::parse(text).unwrap())
+            .collect();
+        let pick = |default| line_version(default, &versions).map(|v| v.to_string());
+        assert_eq!(pick(Some("18")).as_deref(), Some("18.7.0"));
+        assert_eq!(pick(Some(" 17 ")).as_deref(), Some("17.12.0"));
+        assert_eq!(pick(None).as_deref(), Some("18.7.0"));
+        for default in ["16", "18.7", "x", ""] {
+            assert_eq!(pick(Some(default)), None, "{default}");
+        }
+        assert_eq!(line_version(None, &[]), None);
     }
 
     #[test]

@@ -992,9 +992,9 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Adds a line from the daemon to Caddy's recent lines, so `marsa logs caddy`
-/// shows why Caddy did not start.
-fn note(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, text: &str) {
+/// Adds a line from the daemon to a service's recent lines, so `marsa logs
+/// caddy` (or `postgres`) shows why it did not start.
+pub(super) fn note(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, text: &str) {
     let mut runtime = lock(runtime);
     let line = runtime.logs.push(LogStream::Stderr, text, now_ms());
     // Under the lock, like the supervisor, so events come in `seq` order.
@@ -1003,7 +1003,11 @@ fn note(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, text
 
 /// Sets `Failed { code }` and tells every reader, under the lock like the
 /// supervisor, so events come in the order of the changes.
-fn set_failed(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, code: &str) {
+pub(super) fn set_failed(
+    runtime: &Mutex<ServiceRuntime>,
+    events: &broadcast::Sender<Event>,
+    code: &str,
+) {
     let mut runtime = lock(runtime);
     let status = &mut runtime.status;
     status.state = ServiceState::Failed {
