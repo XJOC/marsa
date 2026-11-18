@@ -17,6 +17,7 @@ use crate::model::{
     Autostart, Choice, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Pick, Removal,
     UninstallNotice,
 };
+use crate::theme::Section;
 use crate::tray::menu::Daemon;
 
 pub const APP_NAME: &str = "Marsa";
@@ -581,6 +582,49 @@ pub fn runtime_name(runtime: Runtime) -> &'static str {
         Runtime::Composer => "Composer",
         Runtime::Caddy => "Caddy",
     }
+}
+
+/// The two or three letters on a runtime's tile: a new language needs a
+/// monogram, not a new icon (components.md, Section icon tile).
+pub const fn runtime_monogram(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Php => "PHP",
+        Runtime::Node => "JS",
+        Runtime::Composer => "Co",
+        Runtime::Caddy => "Ca",
+    }
+}
+
+/// A section's name: its sidebar label, and what a screen reader says for
+/// its tile.
+pub const fn section_name(section: Section) -> &'static str {
+    match section {
+        Section::Home => "Home",
+        Section::Sites => SITES,
+        Section::Runtimes => "Runtimes",
+        Section::Services => SERVICES,
+        Section::Mail => "Mail",
+        Section::Dumps => "Dumps",
+        Section::Logs => "Logs",
+        Section::Databases => "Databases",
+        Section::Queues => "Queues",
+    }
+}
+
+/// What a screen reader says for a row badge: "3 new mails", "9 dumps".
+pub fn row_badge_label(section: Section, count: u32) -> String {
+    let (one, many) = match section {
+        Section::Home => ("event", "events"),
+        Section::Sites => ("site", "sites"),
+        Section::Runtimes => ("runtime", "runtimes"),
+        Section::Services => ("service", "services"),
+        Section::Mail => ("new mail", "new mails"),
+        Section::Dumps => ("dump", "dumps"),
+        Section::Logs => ("log line", "log lines"),
+        Section::Databases => ("database", "databases"),
+        Section::Queues => ("job", "jobs"),
+    };
+    format!("{count} {}", if count == 1 { one } else { many })
 }
 
 /// The installed column of the Runtimes section: `8.3.27, 8.4.23`.
@@ -2307,5 +2351,44 @@ mod tests {
             "s1.test, s2.test, s3.test, s4.test, s5.test, and 1 more are not in /etc/hosts yet, \
              so they do not open."
         );
+    }
+
+    /// Task M5-D2: the words of the widgets' tiles and badges.
+    #[test]
+    fn every_runtime_has_a_short_monogram_and_every_section_a_name() {
+        let mut monograms = Vec::new();
+        for runtime in Runtime::ALL {
+            let letters = runtime_monogram(runtime);
+            assert!((2..=3).contains(&letters.len()), "{runtime:?}: {letters}");
+            monograms.push(letters);
+        }
+        monograms.sort_unstable();
+        monograms.dedup();
+        assert_eq!(
+            monograms.len(),
+            Runtime::ALL.len(),
+            "two runtimes share letters"
+        );
+        assert_eq!(runtime_monogram(Runtime::Php), "PHP");
+        assert_eq!(runtime_monogram(Runtime::Node), "JS");
+
+        let mut names: Vec<&str> = Section::ALL.iter().map(|s| section_name(*s)).collect();
+        assert!(names.iter().all(|name| !name.is_empty()));
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), Section::ALL.len(), "two sections share a name");
+        assert_eq!(section_name(Section::Sites), SITES);
+        assert_eq!(section_name(Section::Services), SERVICES);
+    }
+
+    #[test]
+    fn a_row_badge_label_counts_in_words() {
+        assert_eq!(row_badge_label(Section::Mail, 3), "3 new mails");
+        assert_eq!(row_badge_label(Section::Mail, 1), "1 new mail");
+        assert_eq!(row_badge_label(Section::Dumps, 9), "9 dumps");
+        assert_eq!(row_badge_label(Section::Dumps, 1), "1 dump");
+        for section in Section::ALL {
+            assert!(row_badge_label(section, 2).starts_with("2 "));
+        }
     }
 }

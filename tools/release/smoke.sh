@@ -47,6 +47,17 @@ for name in "${PROGRAMS[@]}"; do
 done
 for name in "${OPTIONAL_PROGRAMS[@]}"; do allowed+=("$name$EXE"); done
 check "LICENSE is in the archive" not_empty LICENSE
+# LICENSE starts with Marsa's whole licence, byte for byte, and carries each
+# font's copyright line.
+fonts_licensed() {
+  local licence
+  head -c "$(wc -c < "$ROOT/LICENSE" | tr -d ' ')" "$DIR/LICENSE" | cmp -s - "$ROOT/LICENSE" || return 1
+  for licence in "$ROOT"/crates/gui/assets/fonts/*-OFL.txt; do
+    [ -f "$licence" ] || return 1
+    grep -qF -- "$(head -n 1 "$licence" | tr -d '\r')" "$DIR/LICENSE" || { echo "missing in LICENSE: $licence" >&2; return 1; }
+  done
+}
+check "LICENSE holds Marsa's licence and the fonts' licences" fonts_licensed
 check "BUILD-INFO.txt is in the archive" not_empty BUILD-INFO.txt
 only_allowed() {
   local file
