@@ -21,7 +21,7 @@ use eframe::egui::{CursorIcon, Label, RichText, Sense, Ui, vec2};
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::Site;
 
-use super::sites::{self, NoticeLine, Reason};
+use super::sites::{self, Reason};
 use crate::model::{Action, Choice, Model, Route};
 use crate::screens::home::{PhpChoice, php_choices};
 use crate::strings;
@@ -52,9 +52,6 @@ pub struct Found<'a> {
     pub name: &'a str,
     /// What the browser opens: `https://shop.test`.
     pub url: String,
-    /// The line about the last sites action: a failed change shows here, as
-    /// it shows on Sites.
-    pub line: Option<NoticeLine>,
     /// "Unlinking shop.test…", while the daemon removes it.
     pub removing: Option<String>,
     pub php: PhpView<'a>,
@@ -125,7 +122,6 @@ pub fn view<'a>(model: &'a Model, name: &'a str) -> SiteView<'a> {
     SiteView::Found(Box::new(Found {
         name: &site.name,
         url: crate::model::url(site),
-        line: sites::line(model),
         removing: sites::removing_line(model),
         php: php(model, site),
         facts: facts(model, site),
@@ -198,9 +194,6 @@ pub fn show(ui: &mut Ui, view: &SiteView<'_>, theme: &Theme) -> Vec<Action> {
 
 fn found(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Action>) {
     header(ui, theme, page, actions);
-    if let Some(line) = &page.line {
-        sites::notice(ui, theme, line, actions);
-    }
     if let Some(text) = &page.removing {
         sites::mute(ui, theme, text);
     }
@@ -416,7 +409,7 @@ mod tests {
 
     use super::*;
     use crate::bridge::Command;
-    use crate::model::{Change, Removal, SitesNotice, Update};
+    use crate::model::{Change, Removal, Update};
     use crate::theme::LIGHT;
     use crate::widgets::harness::{Harness, Tree};
 
@@ -657,16 +650,6 @@ mod tests {
             found(&view(&model, "shop")).unlink,
             Unlink::Parked(parked.as_path())
         );
-    }
-
-    #[test]
-    fn a_failed_change_shows_as_the_line_the_sites_screen_shows() {
-        let mut model = model();
-        assert!(found(&view(&model, "shop")).line.is_none());
-        model.sites_notice = Some(SitesNotice::Failed("site_not_found".into()));
-        let view_ = view(&model, "shop");
-        let line = found(&view_).line.as_ref().expect("a line");
-        assert_eq!(line.text, strings::error_text("site_not_found"));
     }
 
     // -- show --
@@ -1053,17 +1036,5 @@ mod tests {
             ring_on_link(&harness)
         });
         assert!(reached, "Tab reaches the link and the ring shows");
-    }
-
-    #[test]
-    fn a_failed_change_and_its_close_button_show_on_the_page() {
-        let mut model = model();
-        model.sites_notice = Some(SitesNotice::Failed("config_write".into()));
-        let (_, tree) = start(&model, "shop");
-        assert!(
-            tree.node_with_text(&strings::error_text("config_write"))
-                .is_some()
-        );
-        assert_eq!(click(&model, strings::CLOSE), [Action::DismissSitesNotice]);
     }
 }

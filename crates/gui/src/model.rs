@@ -243,6 +243,26 @@ pub enum SitesNotice {
     Failed(String),
 }
 
+/// Which of the model's results a notice in the bar tells about. Closing the
+/// notice clears that result ([`Model::dismiss_notice`]), so the bar shows the
+/// next one (task M5-D9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NoticeSource {
+    /// A call to the daemon failed ([`Model::notice`]).
+    Call,
+    /// The last sites action ([`Model::sites_notice`]).
+    Sites,
+    /// How the install shown ended ([`Model::install_result`]).
+    Install,
+    /// The last uninstall ([`Model::uninstall_notice`]).
+    Uninstall,
+    /// The runtimes could not be read, or a default not saved
+    /// ([`Model::runtimes_notice`]).
+    Runtimes,
+    /// Start at login failed ([`Model::settings_notice`]).
+    Autostart,
+}
+
 /// Something the window removes once the user confirms it (task M5-10).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Removal {
@@ -408,6 +428,8 @@ struct Install {
     /// Started by this window: its end starts the next job of the queue.
     ours: bool,
     view: InstallView,
+    /// Its result was shown in a notice that has since closed.
+    noticed: bool,
 }
 
 impl Install {
@@ -538,8 +560,9 @@ pub enum Action {
     SubmitLink,
     /// "Cancel" in the link form.
     CancelLink,
-    /// Closes the line about the last sites action.
-    DismissSitesNotice,
+    /// The close button of a notice, or its 4 seconds running out: the
+    /// result it told about goes.
+    DismissNotice(NoticeSource),
     /// "Install a version…" (or the dashed "+") of a runtime: its install
     /// dialog opens (task M5-D8).
     AskInstall(Runtime),
@@ -1010,12 +1033,23 @@ impl Model {
     /// The install the Runtimes section shows: one this window started that
     /// has not ended, else the newest one, whoever started it.
     pub fn install_view(&self) -> Option<&InstallView> {
+        self.install_slot().map(|index| &self.installs[index].view)
+    }
+
+    /// Where [`Model::install_view`] is in the list.
+    fn install_slot(&self) -> Option<usize> {
         self.installs
             .iter()
-            .rev()
-            .find(|install| install.runs_for_us())
-            .or_else(|| self.installs.last())
-            .map(|install| &install.view)
+            .rposition(Install::runs_for_us)
+            .or_else(|| self.installs.len().checked_sub(1))
+    }
+
+    /// How the install shown ended, until the notice about it is closed. The
+    /// bar says it once; Home and the first-run panel keep their own words
+    /// about a failure beside the button that fixes it.
+    pub fn install_result(&self) -> Option<&InstallView> {
+        let install = &self.installs[self.install_slot()?];
+        (install.view.step.is_over() && !install.noticed).then_some(&install.view)
     }
 
     /// Whether a job of this window waits or runs. The install buttons wait
@@ -1116,6 +1150,7 @@ impl Model {
             id: None,
             ours: true,
             view: InstallView::waiting(&job),
+            noticed: false,
         });
         Some(job)
     }
@@ -1193,6 +1228,7 @@ impl Model {
                         version: None,
                         step: InstallStep::Waiting,
                     },
+                    noticed: false,
                 });
                 self.installs.len() - 1
             }
@@ -1278,6 +1314,12 @@ impl Model {
             && !self.first_run_closed
             && !self.runtimes.is_empty()
             && (first_run_needed(&self.runtimes) || self.sites.sites.is_empty())
+    }
+
+    /// Whether the first-run panel is what the main area shows: Home, while
+    /// [`Model::needs_first_run`].
+    pub fn first_run_shown(&self) -> bool {
+        self.route == Route::Home && self.needs_first_run()
     }
 
     /// "Not now" or "Close" in the first-run panel.
@@ -1537,6 +1579,23 @@ impl Model {
         Some(enabled)
     }
 
+    /// A notice was closed: the result it told about is cleared, so it does
+    /// not come back, and the next result may show.
+    pub fn dismiss_notice(&mut self, source: NoticeSource) {
+        match source {
+            NoticeSource::Call => self.notice = None,
+            NoticeSource::Sites => self.sites_notice = None,
+            NoticeSource::Install => {
+                if let Some(index) = self.install_slot() {
+                    self.installs[index].noticed = true;
+                }
+            }
+            NoticeSource::Uninstall => self.uninstall_notice = None,
+            NoticeSource::Runtimes => self.runtimes_notice = None,
+            NoticeSource::Autostart => self.settings_notice = None,
+        }
+    }
+
     pub fn is_connected(&self) -> bool {
         matches!(self.connection, Connection::Running(_))
     }
@@ -1619,8 +1678,8 @@ impl Model {
                 self.link = None;
                 None
             }
-            Action::DismissSitesNotice => {
-                self.sites_notice = None;
+            Action::DismissNotice(source) => {
+                self.dismiss_notice(source);
                 None
             }
             Action::AskInstall(runtime) => {
@@ -2270,7 +2329,7 @@ mod tests {
         model.apply_action(Action::SetLinkName("My Blog".into()));
         assert!(model.apply_action(Action::SubmitLink).is_none());
         assert!(matches!(model.sites_notice, Some(SitesNotice::Failed(_))));
-        model.apply_action(Action::DismissSitesNotice);
+        model.apply_action(Action::DismissNotice(NoticeSource::Sites));
         assert!(model.sites_notice.is_none());
 
         model.apply_action(Action::SetLinkName("blog".into()));

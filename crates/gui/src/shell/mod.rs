@@ -1,20 +1,21 @@
 //! The frame of the window (layout.md, Shell): the sidebar, the main area
-//! with the screen of the [`Route`], the last notice at the bottom of the
+//! with the screen of the [`Route`], the notice bar at the bottom of the
 //! main area, and the dialogs (the confirmation, the install dialog) over
 //! everything. [Laravel: the
 //! layout file; the `match` in `screen` is `routes/web.php`.]
 
 pub mod dialogs;
+pub mod notices;
 pub mod sidebar;
 
 use std::hash::Hash;
+use std::time::Instant;
 
-use eframe::egui::{CentralPanel, Frame, Margin, Panel, ScrollArea, Ui};
+use eframe::egui::{CentralPanel, Frame, Margin, ScrollArea, Ui};
 
 use crate::bridge::Command;
 use crate::model::{Action, Model, Route};
 use crate::screens;
-use crate::strings;
 use crate::theme::{Direction, Theme};
 use crate::widgets::whole;
 use sidebar::Item;
@@ -30,6 +31,12 @@ pub struct Output {
 
 /// Draws the whole window. `picking`: a folder dialog is open.
 pub fn show(ui: &mut Ui, model: &mut Model, picking: bool) -> Output {
+    show_at(ui, model, picking, Instant::now())
+}
+
+/// [`show`] at the time `now`: the notice bar closes a success by the clock,
+/// so a test moves the clock by hand.
+pub fn show_at(ui: &mut Ui, model: &mut Model, picking: bool, now: Instant) -> Output {
     let theme = Theme::of(ui.ctx());
     let mut out = Output::default();
     let narrow = sidebar::is_narrow(theme, ui.max_rect().width());
@@ -62,22 +69,15 @@ pub fn show(ui: &mut Ui, model: &mut Model, picking: bool) -> Output {
         top,
         bottom: top,
     });
-    CentralPanel::default().frame(main).show(ui, |ui| {
-        if let Some(code) = &model.notice {
-            // TODO(M5-D9): a `widgets::NoticeBar` that closes.
-            let gap = Margin {
-                top: whole(theme.space.s3),
-                ..Margin::ZERO
-            };
-            Panel::bottom("notice")
-                .frame(Frame::new().inner_margin(gap))
-                .show_separator_line(false)
-                .show(ui, |ui| {
-                    ui.colored_label(ui.visuals().error_fg_color, strings::error_text(code));
-                });
-        }
-        screen(ui, model, picking, &mut out);
-    });
+    let main_area = CentralPanel::default()
+        .frame(main)
+        .show(ui, |ui| screen(ui, model, picking, &mut out))
+        .response
+        .rect;
+    // The result of the last action, over the bottom of the main area: on any
+    // screen, and under the dialogs.
+    out.actions
+        .extend(notices::show(ui.ctx(), main_area, model, now));
     // The confirmation of an Uninstall, Unlink, or Forget, or the install
     // dialog ("Install a version…" or a dashed "+" on any screen): the shell
     // draws them, not a screen.
@@ -152,6 +152,7 @@ mod tests {
 
     use super::*;
     use crate::model::Update;
+    use crate::strings;
     use crate::widgets::harness::Harness;
 
     fn model_with_shop() -> Model {
@@ -246,6 +247,54 @@ mod tests {
                 .node_with_label("Install a PHP version")
                 .is_none()
         );
+    }
+
+    /// The tree of the window on `route` after frames enough for the bar to
+    /// size itself, with `model` as it is.
+    fn tree_of(model: &mut Model) -> crate::widgets::harness::Tree {
+        let harness = Harness::new(egui::Theme::Light);
+        for _ in 0..20 {
+            harness.run(|ui| {
+                show(ui, model, false);
+            });
+        }
+        harness.accessibility(|ui| {
+            show(ui, model, false);
+        })
+    }
+
+    #[test]
+    fn a_result_shows_in_the_bar_whatever_screen_the_user_is_on() {
+        use crate::model::SitesNotice;
+        let text = strings::unlinked("shop");
+        for route in [
+            Route::Home,
+            Route::Sites,
+            Route::Site("shop".into()),
+            Route::Runtimes(marsa_core::runtimes::Runtime::Node),
+            Route::Services,
+            Route::Settings,
+        ] {
+            let mut model = model_with_shop();
+            model.route = route.clone();
+            model.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
+            let tree = tree_of(&mut model);
+            assert!(tree.node_with_text(&text).is_some(), "{route:?}");
+        }
+        // No result, no bar.
+        let mut model = model_with_shop();
+        assert!(tree_of(&mut model).node_with_text(&text).is_none());
+    }
+
+    #[test]
+    fn a_failed_call_is_an_error_notice_that_stays_and_closes_with_its_button() {
+        let mut model = model_with_shop();
+        model.notice = Some("service_busy".into());
+        let tree = tree_of(&mut model);
+        let error = strings::error_text("service_busy");
+        let bar = tree.node_with_text(&error).expect("the bar");
+        assert_eq!(bar.role(), egui::Role::Alert);
+        assert!(tree.node_with_label(strings::CLOSE).is_some());
     }
 
     #[test]

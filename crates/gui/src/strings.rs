@@ -526,6 +526,12 @@ pub fn example_version_for(folder: &str) -> &'static str {
         "node" => "22",
         "composer" => "2.8",
         "caddy" => "2.11",
+        // The Phase 2 engines, named before core has them: they stay out of
+        // the Runtimes screen, and these are for their own screens and
+        // messages.
+        "postgres" => "18",
+        "mysql" => "8.4",
+        "valkey" => "8.1",
         // Any runtime added later: a plain number.
         _ => "1.0",
     }
@@ -836,6 +842,10 @@ pub fn runtime_name_for(folder: &'static str) -> &'static str {
         "node" => "Node.js",
         "composer" => "Composer",
         "caddy" => "Caddy",
+        // The Phase 2 engines, named before core has them.
+        "postgres" => "PostgreSQL",
+        "mysql" => "MySQL",
+        "valkey" => "Valkey",
         // Any runtime added later: core's own name.
         other => other,
     }
@@ -848,12 +858,16 @@ pub fn runtime_monogram(runtime: Runtime) -> String {
 }
 
 /// [`runtime_monogram`] by the folder name and the name shown. Three letters
-/// for PHP, "JS" for Node.js; every other runtime gets the first two letters
-/// of its name ("Co", "Ca", "Po" for Postgres), so a new one needs no entry.
+/// for PHP, "JS" for Node.js, "Pg", "My", and "Vk" for the Phase 2 engines;
+/// every other runtime gets the first two letters of its name ("Co", "Ca",
+/// "Py" for Python), so a new one needs no entry.
 pub fn monogram_for(folder: &str, name: &str) -> String {
     match folder {
         "php" => "PHP".to_owned(),
         "node" => "JS".to_owned(),
+        "postgres" => "Pg".to_owned(),
+        "mysql" => "My".to_owned(),
+        "valkey" => "Vk".to_owned(),
         _ => {
             let mut letters = name.chars();
             let first = letters.next().into_iter().flat_map(char::to_uppercase);
@@ -2834,11 +2848,11 @@ mod tests {
         );
     }
 
-    /// Task M5-D8: a runtime that core adds later (Postgres, MySQL, Valkey)
-    /// shows with no entry here: core's name for it and two letters of it.
+    /// Task M5-D8: a runtime that core adds later (Python, Go) shows with no
+    /// entry here: core's name for it and two letters of it.
     #[test]
     fn a_runtime_core_adds_later_needs_no_entry_for_its_name_letters_and_example() {
-        for (folder, letters) in [("postgres", "Po"), ("mysql", "My"), ("valkey", "Va")] {
+        for (folder, letters) in [("python", "Py"), ("go", "Go"), ("ruby", "Ru")] {
             let name = runtime_name_for(folder);
             assert_eq!(name, folder, "core's own name");
             assert_eq!(monogram_for(folder, name), letters);
@@ -2878,6 +2892,22 @@ mod tests {
         assert_eq!(names.len(), Section::ALL.len(), "two sections share a name");
         assert_eq!(section_name(Section::Sites), SITES);
         assert_eq!(section_name(Section::Services), SERVICES);
+    }
+
+    /// The Phase 2 engines have their own entries before core has them: they
+    /// stay out of the Runtimes screen (`Kind::Engine`), and these words are
+    /// for their future screens and messages.
+    #[test]
+    fn the_phase_two_engines_have_their_name_example_and_monogram() {
+        for (folder, name, example, monogram) in [
+            ("postgres", "PostgreSQL", "18", "Pg"),
+            ("mysql", "MySQL", "8.4", "My"),
+            ("valkey", "Valkey", "8.1", "Vk"),
+        ] {
+            assert_eq!(runtime_name_for(folder), name, "{folder}");
+            assert_eq!(example_version_for(folder), example, "{folder}");
+            assert_eq!(monogram_for(folder, name), monogram, "{folder}");
+        }
     }
 
     #[test]
