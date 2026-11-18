@@ -361,9 +361,10 @@ try {
     }
     if ($listeners | Where-Object { $_.LocalAddress -ne '127.0.0.1' }) { Fail 'caddy listens on an address that is not 127.0.0.1' }
 
-    Step 'marsa doctor finds the Visual C++ runtime (M4-19i)'
+    Step "marsa doctor finds the Visual C++ runtime (M4-19i) and Windows' roots in PHP's bundle (M4-19n)"
     Marsa doctor
     if ($Out -notmatch 'The Microsoft Visual C\+\+ runtime \S+ is installed\.') { Fail 'doctor did not pass the Visual C++ runtime' }
+    if ($Out -notmatch 'PHP trusts the \d+ roots Windows trusts for HTTPS') { Fail "doctor did not pass PHP's CA bundle" }
 
     Step "PHP through the shim reads Marsa's php.ini (M1-07)"
     $shimPhp = Join-Path $Shims 'php.exe'
@@ -389,8 +390,9 @@ try {
     Step "PHP trusts the internet and the other .test sites (M4-19n, ADR 0020)"
     $iniText = Get-Content -LiteralPath $marsaIni -Raw
     $bundle = Join-Path $Data 'caddy\ca-bundle.pem'
-    if (-not $iniText.Contains("curl.cainfo = `"$bundle`"")) { Fail "php.ini does not point curl.cainfo at $bundle" }
-    if ($iniText.Contains('openssl.cafile')) { Fail 'php.ini names openssl.cafile on Windows' }
+    foreach ($key in 'curl.cainfo', 'openssl.cafile') {
+        if (-not $iniText.Contains("$key = `"$bundle`"")) { Fail "php.ini does not point $key at $bundle" }
+    }
     $blocks = @(Select-String -LiteralPath $bundle -SimpleMatch -- '-----BEGIN CERTIFICATE-----').Count
     Write-Host "ca-bundle.pem: $blocks certificates"
     if ($blocks -lt 6) { Fail "ca-bundle.pem holds $blocks certificates, not Windows' roots and Marsa's" }
@@ -411,7 +413,15 @@ function by_curl(string $url): string {
 function by_stream(string $url): string {
     $context = stream_context_create(['http' => ['method' => 'HEAD', 'timeout' => 20]]);
     $ok = @file_get_contents($url, false, $context) !== false;
-    return $ok ? 'ok' : 'failed: ' . (error_get_last()['message'] ?? 'unknown');
+    if ($ok) {
+        return 'ok';
+    }
+    // OpenSSL's own lines say why; PHP's last warning only says "failed".
+    $why = [error_get_last()['message'] ?? 'unknown'];
+    while (($line = openssl_error_string()) !== false) {
+        $why[] = $line;
+    }
+    return 'failed: ' . implode(' | ', $why);
 }
 foreach (['public' => 'https://repo.packagist.org/packages.json', 'test' => 'https://laravel-app.test/'] as $name => $url) {
     echo "curl $name: " . by_curl($url) . "\n";
