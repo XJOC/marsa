@@ -1,5 +1,5 @@
 //! Debug builds only: fixed fake data for the design review (task M5-D5).
-//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras`
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked`
 //! fills the model with a few sites, PHP and Caddy (or nothing, for the
 //! first run), and starts no bridge and no daemon: the window draws a state the review needs without a
 //! machine to break. Pair it with
@@ -43,6 +43,9 @@ pub enum Demo {
     /// The same as `Ok`, with the link form open, a line about the last
     /// action, two parked folders, and two skipped ones.
     SitesExtras,
+    /// The same as `Ok`, with `~/Code` parked: the sites in it come from that
+    /// folder, so their pages cannot unlink them (task M5-D7).
+    SiteParked,
 }
 
 /// The state `MARSA_GUI_DEMO` asks for, if it names one.
@@ -59,6 +62,7 @@ fn parse(name: &str) -> Option<Demo> {
         "sites-search" => Demo::SitesSearch,
         "sites-empty" => Demo::SitesEmpty,
         "sites-extras" => Demo::SitesExtras,
+        "site-parked" => Demo::SiteParked,
         _ => return None,
     })
 }
@@ -105,6 +109,9 @@ pub fn fill(model: &mut Model, demo: Demo) {
     }
     if demo == Demo::SitesExtras {
         sites_extras(model);
+    }
+    if demo == Demo::SiteParked {
+        model.sites.parked = vec![PathBuf::from("/demo/Code")];
     }
 }
 
@@ -273,6 +280,7 @@ mod tests {
         assert_eq!(parse("sites-search"), Some(Demo::SitesSearch));
         assert_eq!(parse("sites-empty"), Some(Demo::SitesEmpty));
         assert_eq!(parse("sites-extras"), Some(Demo::SitesExtras));
+        assert_eq!(parse("site-parked"), Some(Demo::SiteParked));
         assert_eq!(parse("on fire"), None);
     }
 
@@ -314,6 +322,23 @@ mod tests {
         assert!(model.link.is_some() && model.sites_notice.is_some());
         assert_eq!(model.sites.parked.len(), 2);
         assert_eq!(model.sites.skipped.len(), 2);
+    }
+
+    #[test]
+    fn the_parked_demo_gives_the_sites_of_its_folder_a_parked_page() {
+        let mut model = Model::default();
+        fill(&mut model, Demo::SiteParked);
+        let by_name = |name: &str| {
+            model
+                .sites
+                .sites
+                .iter()
+                .find(|site| site.name == name)
+                .expect("a demo site")
+        };
+        // `shop` is in `~/Code`; `client-portal` is elsewhere, so it is linked.
+        assert!(model.parked_folder(by_name("shop")).is_some());
+        assert!(model.parked_folder(by_name("client-portal")).is_none());
     }
 
     #[test]

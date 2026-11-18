@@ -71,22 +71,75 @@ pub fn no_site_matches(search: &str) -> String {
 /// The connection cell of a site's row: the word beside the lock.
 pub const HTTPS: &str = "HTTPS";
 pub const HTTP: &str = "HTTP";
-/// The rows of a site's menu (⋯): the other connection, and Unlink.
-pub const SWITCH_TO_HTTP: &str = "Switch to HTTP";
-pub const SWITCH_TO_HTTPS: &str = "Switch to HTTPS";
-pub const HTTPS_HINT: &str = "Serve this site over HTTPS";
-pub const HTTP_HINT: &str = "Serve this site over plain HTTP.";
-
 /// What a screen reader says for the version menu of a site's row.
 pub fn php_for_site(site: &str) -> String {
     format!("PHP version for {site}")
 }
 
-/// What a screen reader says, and the tooltip shows, for the ⋯ button of a
-/// site's row.
-pub fn site_menu_label(site: &str) -> String {
-    format!("More actions for {site}")
+/// A site's own page (task M5-D7). The way back to Sites at the top is the
+/// word `SITES` after an arrow icon.
+pub const OPEN_FOLDER: &str = "Open folder";
+pub const OPEN_IN_BROWSER: &str = "Open in browser";
+/// The heading of the large version picker of the page, and its name for a
+/// screen reader.
+pub const PHP_FOR_THIS_SITE: &str = "PHP for this site";
+
+/// The facts card of the page: its labels, and the HTTPS switch.
+pub const FACT_CONNECTION: &str = "Connection";
+pub const FACT_FOLDER: &str = "Folder";
+pub const FACT_DOCROOT: &str = "Document root";
+pub const FACT_KIND: &str = "Kind";
+pub const FACT_ADDED_AS: &str = "Added as";
+pub const SERVE_OVER_HTTPS: &str = "Serve over HTTPS";
+/// "Added as": a folder the user linked.
+pub const ADDED_AS_LINKED: &str = "Linked folder";
+
+/// "Added as": a site of a parked folder (as the window shows a folder,
+/// `~/Code`).
+pub fn added_as_parked(shown: &str) -> String {
+    format!("Part of parked folder {shown}")
 }
+
+/// Between the reason after a heading and the link that follows it: "8.3 is
+/// set for this site · Use the site's files".
+pub const HINT_SEPARATOR: &str = "·";
+
+/// The quiet button at the end of the page: the confirmation opens.
+pub const UNLINK_THIS_SITE: &str = "Unlink this site…";
+
+/// Under the disabled "Unlink this site…" of a site from a parked folder.
+pub fn site_from_parked(shown: &str) -> String {
+    format!("This site comes from the parked folder {shown}, so it cannot be unlinked alone.")
+}
+
+/// The button beside [`site_from_parked`].
+pub fn forget_folder_shown(shown: &str) -> String {
+    format!("Forget {shown}…")
+}
+
+/// The page of a site that is not in the list: it was unlinked meanwhile, or
+/// the window has no daemon to ask.
+pub fn site_missing(site: &str) -> String {
+    format!("{site}.{TLD} is not in your sites. It may have been unlinked.")
+}
+pub const SITE_OFFLINE: &str = "This site shows here once Marsa is connected to its daemon.";
+
+/// The sentence after the heading of the page's version picker: which
+/// version the site has, and why (components.md, Version menu).
+pub fn php_hint_site(version: &str) -> String {
+    format!("{version} is set for this site")
+}
+pub fn php_hint_file(version: &str, path: &Path) -> String {
+    format!(
+        "{version} comes from the {} file in this folder",
+        file_name(path)
+    )
+}
+pub fn php_hint_default(version: &str) -> String {
+    format!("{version} is the default: the site's files ask for no version")
+}
+pub const PHP_HINT_FILES: &str = "the site's files decide the version";
+pub const PHP_HINT_NO_MATCH: &str = "no installed version fits what the site asks for";
 
 /// Why a site has the PHP version its row shows (components.md, Version
 /// menu): after the version, in `caption`.
@@ -142,7 +195,6 @@ pub const PICKING_HINT: &str = "A folder dialog is open.";
 pub const SKIPPED_TITLE: &str = "Skipped folders";
 /// The column of the Unlink buttons, and of the Uninstall lists.
 pub const COLUMN_REMOVE: &str = "Remove";
-pub const UNLINK_BUTTON: &str = "Unlink…";
 pub const UNLINK_HINT: &str = "Stop serving this site. Its folder and files stay.";
 pub const PARKED_TITLE: &str = "Parked folders";
 /// After the heading of each list under the sites table.
@@ -332,9 +384,10 @@ pub fn pick_title(pick: Pick) -> &'static str {
     }
 }
 
-/// The first line of the link form.
-pub fn link_folder(folder: &Path) -> String {
-    format!("Link {} as:", folder.display())
+/// The first line of the link form: the folder as the window shows it
+/// (`~/Work/blog`, with the full path in a tooltip).
+pub fn link_folder(shown: &str) -> String {
+    format!("Link {shown} as:")
 }
 
 /// After the site name field: `.test`.
@@ -1141,6 +1194,9 @@ fn error_message(code: &str) -> Option<&'static str> {
         "service_not_found" => "No such service.",
         "unknown_action" => "Unknown service action.",
         "service_busy" => "The service is busy with another action. Try again.",
+        // `marsa_core::platform::OpenError`, and the window's own folder opener.
+        "open_no_program" => "This system has no program to open a folder with.",
+        "open_failed" => "Cannot open the folder.",
         // Codes that come as an answer or in `ServiceState::Failed`.
         "caddy_not_installed" => "Caddy is not installed.",
         "caddy_config_write" => "Cannot write the Caddy config file.",
@@ -1881,7 +1937,6 @@ mod tests {
             "from composer.json"
         );
         assert_eq!(php_for_site("shop"), "PHP version for shop");
-        assert_eq!(site_menu_label("shop"), "More actions for shop");
         assert_eq!(no_site_matches("sh"), "No site matches “sh”.");
         assert_eq!(search_key_hint(true), "Cmd K");
         assert_eq!(search_key_hint(false), "Ctrl K");
@@ -2594,7 +2649,8 @@ mod tests {
     fn the_link_lines() {
         let folder = Path::new("/work/api");
         assert_eq!(linked("api", folder), "Linked /work/api as api.test.");
-        assert_eq!(link_folder(folder), "Link /work/api as:");
+        assert_eq!(link_folder("/work/api"), "Link /work/api as:");
+        assert_eq!(link_folder("~/Work/api"), "Link ~/Work/api as:");
         assert_eq!(site_suffix(), ".test");
         let hint = version_field_hint(Runtime::Node);
         assert!(

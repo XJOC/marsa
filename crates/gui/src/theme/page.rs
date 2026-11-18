@@ -42,3 +42,7 @@ pub const HOME_OPEN_COLUMN: f32 = 58.0;
 /// The first-run panel's column (task M5-D5): wide enough for the steps'
 /// lines, narrower than the window.
 pub const FIRST_RUN_WIDTH: f32 = 560.0;
+
+/// A site's page (task M5-D7): the column of the labels in its facts card
+/// (the mockup's 130).
+pub const SITE_FACT_LABEL: f32 = 130.0;
