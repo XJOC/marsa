@@ -414,6 +414,9 @@ try {
     if ($gone -eq 0) { Fail "https://$Site/ still answers after the uninstall" }
 
     Write-Host "`nPASS: Windows end to end"
+    # The last curl failed on purpose, and the runner's pwsh wrapper exits
+    # with $LASTEXITCODE.
+    exit 0
 } catch {
     Write-Host $_.ToString()
     Write-Host $_.ScriptStackTrace
