@@ -10,12 +10,12 @@
 
 use eframe::egui::text::{LayoutJob, TextWrapping};
 use eframe::egui::{
-    Align2, Color32, CornerRadius, Frame, InnerResponse, Label, Rect, RichText, Role, Sense,
-    Stroke, Ui, Vec2, WidgetInfo, vec2,
+    Align2, Color32, CornerRadius, Frame, InnerResponse, Label, Margin, Rect, Response, RichText,
+    Role, Sense, Stroke, Ui, Vec2, WidgetInfo, vec2,
 };
 use egui_extras::{Column, TableBuilder, TableRow};
 
-use super::Button;
+use super::{Button, whole};
 use crate::theme::{Direction, TextToken, Theme};
 
 /// The card that holds a table or a list: `surface`, a 1 px `line` border,
@@ -32,10 +32,31 @@ pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> 
         })
 }
 
+/// A card with room inside, for a form or a message: [`card`] with
+/// `space.4` of padding.
+pub fn padded_card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    let theme = Theme::of(ui.ctx());
+    Frame::new()
+        .fill(theme.color.surface)
+        .stroke(Stroke::new(theme.size.border, theme.color.line))
+        .corner_radius(CornerRadius::same(theme.radius.lg))
+        .inner_margin(Margin::same(whole(theme.space.s4)))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+}
+
 /// The empty state of a list: one sentence that says what this is, and one
 /// primary button that fills it ("No sites yet." and "Add site…"). Returns
 /// whether the button was pressed.
 pub fn empty_state(ui: &mut Ui, sentence: &str, action: &str) -> bool {
+    empty_state_button(ui, sentence, action).clicked()
+}
+
+/// [`empty_state`], giving the button's response: a button that opens a menu
+/// needs it to anchor the menu.
+pub fn empty_state_button(ui: &mut Ui, sentence: &str, action: &str) -> Response {
     let theme = Theme::of(ui.ctx());
     card(ui, |ui| {
         ui.vertical_centered(|ui| {
@@ -45,9 +66,9 @@ pub fn empty_state(ui: &mut Ui, sentence: &str, action: &str) -> bool {
                 .color(theme.color.ink2);
             ui.add(Label::new(text).selectable(false));
             ui.add_space(theme.space.s3);
-            let pressed = ui.add(Button::primary(action)).clicked();
+            let button = ui.add(Button::primary(action));
             ui.add_space(theme.space.s6);
-            pressed
+            button
         })
         .inner
     })
@@ -673,6 +694,35 @@ mod tests {
         });
         assert!(pressed);
         let _ = Event::Copy;
+    }
+
+    #[test]
+    fn a_padded_card_fills_the_width_and_keeps_its_content_off_the_edge() {
+        let harness = Harness::new(egui::Theme::Light);
+        let theme = &LIGHT;
+        let (mut card_rect, mut inner, mut width) = (Rect::NOTHING, Rect::NOTHING, 0.0);
+        harness.run(|ui| {
+            width = ui.available_width();
+            let shown = padded_card(ui, |ui| ui.label("Link /code as:").rect);
+            card_rect = shown.response.rect;
+            inner = shown.inner;
+        });
+        assert!(
+            (card_rect.width() - width).abs() < 0.5,
+            "{}",
+            card_rect.width()
+        );
+        let gap = inner.left() - card_rect.left();
+        assert!(gap >= theme.space.s4, "{gap}");
+        assert!(inner.top() - card_rect.top() >= theme.space.s4);
+    }
+
+    #[test]
+    fn the_empty_state_button_gives_the_response_a_menu_anchors_to() {
+        let harness = Harness::new(egui::Theme::Light);
+        let mut rect = Rect::NOTHING;
+        harness.run(|ui| rect = empty_state_button(ui, "No sites yet.", "Add site…").rect);
+        assert_eq!(rect.height(), LIGHT.size.control);
     }
 
     #[test]

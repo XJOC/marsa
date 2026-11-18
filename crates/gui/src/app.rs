@@ -137,6 +137,14 @@ impl App {
 }
 
 impl eframe::App for App {
+    // Debug builds only: the design review's click (see `screenshot`).
+    #[cfg(debug_assertions)]
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(screenshot) = &mut self.screenshot {
+            screenshot.inject(raw_input);
+        }
+    }
+
     /// Takes every waiting update before the frame is drawn.
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         loop {
