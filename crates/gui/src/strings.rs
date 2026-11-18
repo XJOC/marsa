@@ -14,8 +14,8 @@ use marsa_core::types::{
 use semver::Version;
 
 use crate::model::{
-    Appearance, Autostart, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Overall,
-    Pick, PoolKind, Removal, UninstallNotice, WEB_SERVER, pool_of,
+    Appearance, Autostart, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, LogLevel,
+    Overall, Pick, PoolKind, Removal, UninstallNotice, WEB_SERVER, pool_of,
 };
 use crate::screens::settings::Check;
 use crate::theme::Section;
@@ -40,9 +40,56 @@ pub const COLUMN_ACTIONS: &str = "Actions";
 /// Over the disabled buttons of a php-fpm pool.
 pub const MANAGED_BY_SITES_HINT: &str =
     "Starts and stops with the sites that need its PHP version.";
-
 pub const LOG_TITLE: &str = "Caddy log";
 pub const LOG_EMPTY: &str = "No log lines yet.";
+
+pub const LOGS: &str = "Logs";
+/// The name of the control that picks whose log is shown.
+pub const LOG_SOURCE: &str = "Log source";
+/// The name of the filter field of Logs for a screen reader, and its
+/// placeholder.
+pub const FILTER_LINES: &str = "Filter lines";
+pub const FOLLOW: &str = "Follow";
+/// Over the Follow chip.
+pub const FOLLOW_HINT: &str = "Keeps the newest line in view. Scrolling up stops it.";
+/// The Logs screen while the window has no daemon to ask and no log kept.
+pub const LOGS_OFFLINE: &str = "Logs show here once Marsa is connected to its daemon.";
+/// The Logs screen when the filters leave no line.
+pub const LOG_NO_MATCH: &str = "No line matches the filters.";
+
+/// The Logs screen when the program has written nothing yet.
+pub fn log_empty(name: &str) -> String {
+    format!("{name} has not written anything yet.")
+}
+
+/// A level in the filter chips.
+pub const fn log_level_name(level: LogLevel) -> &'static str {
+    match level {
+        LogLevel::Info => "Info",
+        LogLevel::Warning => "Warning",
+        LogLevel::Error => "Error",
+    }
+}
+
+/// A level as the word at the start of a line, in the mono face.
+pub const fn log_level_word(level: LogLevel) -> &'static str {
+    match level {
+        LogLevel::Info => "INFO",
+        LogLevel::Warning => "WARN",
+        LogLevel::Error => "ERROR",
+    }
+}
+
+/// What a screen reader says for a line: its level, then the message.
+pub fn log_entry_label(level: LogLevel, message: &str) -> String {
+    format!("{}: {message}", log_level_name(level))
+}
+
+/// The button that opens the list of logs, when there are too many for the
+/// segmented control. It opens a menu, so it ends with "…".
+pub fn log_source_menu(name: &str) -> String {
+    format!("{name}…")
+}
 
 /// What a service is called: `caddy` is Caddy, `php-fpm-8.4` is PHP-FPM 8.4.
 /// A service this window does not know shows under its id.
@@ -1015,7 +1062,7 @@ pub const fn section_name(section: Section) -> &'static str {
         Section::Services => SERVICES,
         Section::Mail => "Mail",
         Section::Dumps => "Dumps",
-        Section::Logs => "Logs",
+        Section::Logs => LOGS,
         Section::Databases => "Databases",
         Section::Queues => "Queues",
     }

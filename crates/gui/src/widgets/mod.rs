@@ -1,7 +1,8 @@
 //! The small widgets of the design (`docs/design/components.md`): icons,
-//! tiles, list items, buttons, menus, the switch, the segmented control, badges, the text
-//! field, the sidebar item, and the step card. They are the only place that draws these; a screen adds them with
-//! `ui.add(...)` and never reaches for a raw egui button (rules.md 3).
+//! tiles, list items, buttons, chips, menus, the switch, the segmented
+//! control, badges, the text field, the log line, the sidebar item, and the
+//! step card. They are the only place that draws these; a screen adds them
+//! with `ui.add(...)` and never reaches for a raw egui button (rules.md 3).
 //! [Laravel: Blade components; each takes its props with a builder and
 //! returns what the user did.]
 //!
@@ -22,6 +23,7 @@
 
 pub mod badge;
 pub mod button;
+pub mod chip;
 pub mod dialog;
 pub mod facts;
 pub mod field;
@@ -31,6 +33,7 @@ pub mod field;
 pub mod gallery;
 pub mod icons;
 pub mod list_item;
+pub mod log_entry;
 pub mod menu;
 pub mod nav;
 pub mod notice;
@@ -55,11 +58,13 @@ use crate::theme::{Direction, TextToken, Theme};
 
 pub use badge::{CountBadge, RowBadge};
 pub use button::{Button, Kind as ButtonKind, QuietTone};
+pub use chip::Chip;
 pub use dialog::{Answer, ConfirmDialog};
 pub use facts::{Rows as FactRows, fact_card};
 pub use field::Field;
 pub use icons::{Glyph, Icon};
 pub use list_item::ListItem;
+pub use log_entry::{LogEntry, level_color};
 pub use menu::{Item as MenuItem, Menu};
 pub use nav::NavItem;
 pub use notice::{Notice, NoticeBar, NoticeKind, Notices, Progress, Reaction};
