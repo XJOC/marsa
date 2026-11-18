@@ -40,8 +40,9 @@ impl PostgresDirs {
 /// The arguments of `initdb` for a new cluster in `dirs.data`.
 ///
 /// - `-U postgres -A trust`: the superuser `postgres`, and no password for
-///   local clients. The daemon adds the superuser `root` after this (M6-03c):
-///   Laravel's default `.env` connects as `root`.
+///   local clients. The daemon then writes [`PG_HBA_CONF`] over initdb's
+///   `pg_hba.conf` and adds the role `root` ([`ROOT_ROLE_SQL`]), which is not
+///   a superuser: Laravel's default `.env` connects as `root`.
 /// - `--locale-provider=builtin --builtin-locale=C.UTF-8` (PostgreSQL 17 and
 ///   later): sorting and case rules come from PostgreSQL itself, so they are
 ///   the same on every OS and do not change with an OS update.
@@ -55,6 +56,72 @@ pub fn initdb_args(dirs: &PostgresDirs) -> Vec<String> {
     let mut args = vec!["-D".to_owned(), arg_path(&dirs.data)];
     args.extend(user.into_iter().chain(builtin).map(str::to_owned));
     args
+}
+
+/// Marsa's `pg_hba.conf`, written over initdb's in a new cluster before the
+/// cluster is moved into place (ADR 0023, "Access", option B). A superuser
+/// on TCP with trust would let any local user run OS commands as the owner
+/// (`COPY ... TO PROGRAM`), so:
+///
+/// - `postgres`, the superuser, connects only over the Unix socket in `run/`,
+///   a folder only the owner can open;
+/// - on TCP only `root` connects, from `127.0.0.1`, and it is not a
+///   superuser ([`ROOT_ROLE_SQL`]);
+/// - every other line refuses: `postgres` on TCP, any other role, and
+///   replication, which `all` does not match.
+///
+/// PostgreSQL uses the first line that matches, and refuses a connection that
+/// no line matches. The reject lines say so, so nobody takes a missing line
+/// for an oversight. Written once: a later change by the user stays.
+pub const PG_HBA_CONF: &str = "\
+# Written by Marsa when it made this cluster (ADR 0023, \"Access\").
+#
+# - postgres, the superuser, connects only over the Unix socket in Marsa's
+#   run/ folder, which only its owner can open.
+# - On TCP (127.0.0.1) only root connects. root is not a superuser.
+# - Everything else is refused, replication too.
+#
+# TYPE  DATABASE     USER      ADDRESS        METHOD
+local   all          postgres                 trust
+host    all          root      127.0.0.1/32   trust
+local   all          all                      reject
+host    all          all       all            reject
+local   replication  all                      reject
+host    replication  all       all            reject
+";
+
+/// The SQL that makes the role `root` and its database `root` in a new
+/// cluster, so Laravel's default `.env` (`DB_USERNAME=root`, no password)
+/// and `psql -U root` work. `root` may log in and create databases, and
+/// nothing more: not a superuser, so no `COPY ... TO PROGRAM`, and no
+/// CREATEROLE, REPLICATION, or BYPASSRLS.
+///
+/// One statement per line: single-user mode ends a command at each newline
+/// and runs it as its own transaction, which `CREATE DATABASE` needs. No
+/// backslash, which would join two lines.
+pub const ROOT_ROLE_SQL: &str = "\
+CREATE ROLE root WITH LOGIN CREATEDB NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE DATABASE root OWNER root;
+";
+
+/// The arguments of the single-user `postgres` that runs [`ROOT_ROLE_SQL`],
+/// read from stdin, on the cluster in `data`: no server, no socket, no port.
+///
+/// - `--single` must come first, and the database, `postgres`, last.
+/// - `exit_on_error=true`, as initdb runs its own single-user steps: an error
+///   ends the session with exit code 1. Without it the session goes on with
+///   the next line and exits with 0.
+pub fn single_user_args(data: &Path) -> Vec<String> {
+    let data = arg_path(data);
+    let args = [
+        "--single",
+        "-D",
+        &data,
+        "-c",
+        "exit_on_error=true",
+        "postgres",
+    ];
+    args.map(str::to_owned).to_vec()
 }
 
 /// The socket PostgreSQL makes on `port`: `<sockets>/.s.PGSQL.<port>`. `None`
@@ -80,12 +147,17 @@ pub fn postgres_socket(dirs: &PostgresDirs, port: u16) -> Option<PathBuf> {
 /// `127.0.0.1:<port>` only, with a socket in `dirs.sockets` when
 /// [`postgres_socket`] allows one. No shell reads them, so "no socket" is an
 /// empty value, not the `''` of `postgresql.conf`.
+///
+/// `unix_socket_permissions=0700`: the socket is the superuser's only way in
+/// ([`PG_HBA_CONF`]), so it is the owner's alone, a second guard behind the
+/// owner-only `run/` folder. PostgreSQL's default is `0777`.
 pub fn postgres_args(dirs: &PostgresDirs, port: u16) -> Vec<String> {
     let sockets = postgres_socket(dirs, port).map_or_else(String::new, |_| arg_path(&dirs.sockets));
     let settings = [
         "listen_addresses=127.0.0.1".to_owned(),
         format!("port={port}"),
         format!("unix_socket_directories={sockets}"),
+        "unix_socket_permissions=0700".to_owned(),
     ];
     let mut args = vec!["-D".to_owned(), arg_path(&dirs.data)];
     for setting in settings {
@@ -267,6 +339,78 @@ mod tests {
     }
 
     #[test]
+    fn pg_hba_conf_as_written() {
+        insta::assert_snapshot!(PG_HBA_CONF);
+    }
+
+    /// Who gets in, and how: the first line that matches decides, as in
+    /// PostgreSQL, and no match is a refusal.
+    #[test]
+    fn only_postgres_on_the_socket_and_root_on_tcp_get_in() {
+        let lines: Vec<Vec<&str>> = PG_HBA_CONF
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .map(|line| line.split_whitespace().collect())
+            .collect();
+        // `all` matches every database but `replication`.
+        let names = |field: &str, name: &str| field == name || field == "all";
+        let databases =
+            |field: &str, db: &str| field == db || (field == "all" && db != "replication");
+        let method = |tcp: bool, db: &str, user: &str, address: &str| {
+            let kind = if tcp { "host" } else { "local" };
+            let first = lines.iter().find(|line| {
+                let from = !tcp || names(line[3], address);
+                line[0] == kind && databases(line[1], db) && names(line[2], user) && from
+            });
+            first.map_or("no line", |line| line[line.len() - 1])
+        };
+        assert_eq!(method(false, "postgres", "postgres", ""), "trust");
+        assert_eq!(method(true, "laravel", "root", "127.0.0.1/32"), "trust");
+        for (tcp, user, address) in [
+            (true, "postgres", "127.0.0.1/32"),
+            (true, "root", "::1/128"),
+            (true, "app", "127.0.0.1/32"),
+            (false, "root", ""),
+            (false, "app", ""),
+        ] {
+            let got = method(tcp, "postgres", user, address);
+            assert_eq!(got, "reject", "{user} {address}");
+        }
+        for tcp in [false, true] {
+            let got = method(tcp, "replication", "postgres", "127.0.0.1/32");
+            assert_eq!(got, "reject");
+        }
+        // Only those two lines let anyone in.
+        let trusted = lines.iter().filter(|line| line.last() == Some(&"trust"));
+        assert_eq!(trusted.count(), 2);
+    }
+
+    #[test]
+    fn root_logs_in_and_creates_databases_and_is_no_superuser() {
+        let lines: Vec<_> = ROOT_ROLE_SQL.lines().collect();
+        let role = "CREATE ROLE root WITH LOGIN CREATEDB NOSUPERUSER NOCREATEROLE \
+                    NOREPLICATION NOBYPASSRLS;";
+        assert_eq!(lines, [role, "CREATE DATABASE root OWNER root;"]);
+        // Each attribute that gives more is there in its `NO` form only.
+        let words: Vec<_> = ROOT_ROLE_SQL
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .collect();
+        for power in ["SUPERUSER", "CREATEROLE", "REPLICATION", "BYPASSRLS"] {
+            assert!(!words.contains(&power), "{power}");
+            assert!(words.contains(&format!("NO{power}").as_str()), "{power}");
+        }
+        assert!(!ROOT_ROLE_SQL.contains('\\'));
+        assert!(ROOT_ROLE_SQL.ends_with(";\n"));
+    }
+
+    #[test]
+    fn single_user_mode_stops_at_the_first_error() {
+        let args = single_user_args(Path::new("/m/databases/postgres/.18.init-1"));
+        let want = "--single -D /m/databases/postgres/.18.init-1 -c exit_on_error=true postgres";
+        assert_eq!(args, words(want));
+    }
+
+    #[test]
     fn postgres_listens_on_loopback_only_on_every_os() {
         let args = postgres_args(&PostgresDirs::new(Path::new("/m"), 18), 5432);
         let listen: Vec<_> = args
@@ -275,6 +419,9 @@ mod tests {
             .collect();
         assert_eq!(listen, [["-c", "listen_addresses=127.0.0.1"]]);
         assert!(args.windows(2).any(|pair| pair == ["-c", "port=5432"]));
+        // The superuser's socket is the owner's alone.
+        let owner_only = ["-c", "unix_socket_permissions=0700"];
+        assert!(args.windows(2).any(|pair| pair == owner_only));
     }
 
     /// Unix paths: an absolute path on Windows needs a drive, and PostgreSQL
@@ -285,14 +432,18 @@ mod tests {
 
         fn sockets_arg(folder: &str, port: u16) -> String {
             let args = postgres_args(&dirs("/d", folder), port);
-            args.last().unwrap().clone()
+            let setting = args
+                .iter()
+                .find(|arg| arg.starts_with("unix_socket_directories="));
+            setting.unwrap().clone()
         }
 
         #[test]
         fn postgres_listens_on_loopback_and_its_socket() {
             let args = postgres_args(&dirs("/m/databases/postgres/18", "/m/run"), 5433);
             let want = "-D /m/databases/postgres/18 -c listen_addresses=127.0.0.1 \
-                        -c port=5433 -c unix_socket_directories=/m/run";
+                        -c port=5433 -c unix_socket_directories=/m/run \
+                        -c unix_socket_permissions=0700";
             assert_eq!(args, words(want));
         }
 
