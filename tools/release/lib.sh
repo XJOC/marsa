@@ -43,6 +43,19 @@ is_adhoc_signed() {
   grep -qx 'Signature=adhoc' <<< "$info"
 }
 
+# Succeeds if the Windows program in $1 needs no Visual C++ runtime DLL: no
+# vcruntime140*.dll or msvcp140*.dll among its imports. A clean Windows has
+# neither, and a program that imports one does not even start (task M5-27).
+# The names of imported DLLs are plain ASCII in the file, so a search for
+# them in any letter case finds every import.
+needs_no_vc_runtime() {
+  if grep -aqi -e 'vcruntime140' -e 'msvcp140' "$1"; then
+    echo "$1 imports the Visual C++ runtime:" >&2
+    grep -aoi -e 'vcruntime140[_0-9a-z]*\.dll' -e 'msvcp140[_0-9a-z]*\.dll' "$1" | sort -u >&2
+    return 1
+  fi
+}
+
 # The names inside an archive, one per line, sorted.
 archive_names() {
   case "$1" in
