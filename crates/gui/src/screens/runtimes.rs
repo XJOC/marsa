@@ -919,7 +919,13 @@ mod tests {
     #[test]
     fn the_list_is_every_runtime_core_has_in_its_order() {
         let listed: Vec<Runtime> = descriptors().iter().map(|d| d.runtime).collect();
-        assert_eq!(listed, Runtime::ALL);
+        let want: Vec<Runtime> = Runtime::ALL
+            .into_iter()
+            .filter(|r| kind_for(r.dir_name()).listed())
+            .collect();
+        assert_eq!(listed, want);
+        // The engines belong under Databases and Services (task M6-01).
+        assert!(!listed.contains(&Runtime::Postgres));
     }
 
     #[test]
