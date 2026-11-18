@@ -188,13 +188,14 @@ if [ "$OS" = Darwin ]; then
   rec quarantine_xattrs "$(xattr -lr "$ROOT" 2>/dev/null | grep -c 'com.apple.quarantine')"
   deps=""
   for p in $PROGS; do [ -x "$ROOT/bin/$p" ] && deps="$deps
-$(otool -L "$ROOT/bin/$p" | tail -n +2 | awk '{print $1}')"; done
+$(otool -L "$ROOT/bin/$p" | awk '/^[[:space:]]/{print $1}')"; done
   for f in $(find "$ROOT/lib" -maxdepth 1 -name '*.dylib' -type f 2>/dev/null | head -40); do deps="$deps
-$(otool -L "$f" | tail -n +2 | awk '{print $1}')"; done
+$(otool -L "$f" | awk '/^[[:space:]]/{print $1}')"; done
   deps="$(echo "$deps" | sort -u | grep -v '^$')"
   rec dylib_system "$(echo "$deps" | grep -cE '^(/usr/lib/|/System/)')"
   rec dylib_relative "$(echo "$deps" | grep -cE '^@')"
   rec dylib_other_absolute "$(echo "$deps" | grep -vE '^(/usr/lib/|/System/|@)' | head -8 | tr '\n' ' ')"
+  rec main_binary_deps "$(otool -L "$BIN" | awk '/^[[:space:]]/{print $1}' | tr '\n' ' ')"
   rec minos "$(otool -l "$BIN" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
   rec archs "$(lipo -archs "$BIN" 2>/dev/null)"
   rec codesign "$(codesign -dv --verbose=2 "$BIN" 2>&1 | grep -E 'Authority=|TeamIdentifier|Signature=|flags=' | head -4 | tr '\n' ' ')"
@@ -237,7 +238,7 @@ $(objdump -T "$f" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -uV | tail -
   if [ "${S12_DOCKER:-0}" = 1 ] && command -v docker >/dev/null; then
     for img in ubuntu:22.04 debian:12 almalinux:9 alpine:3.20; do
       docker pull -q "$img" >/dev/null 2>&1
-      o="$(docker run --rm -v "$ROOT:/opt/db:ro" "$img" /opt/db/bin/$MAIN --version 2>&1 | head -2 | tr '\n' ' ')"
+      o="$(docker run --rm -v "$ROOT:/opt/db:ro" ${LD_LIBRARY_PATH:+-v "$LD_LIBRARY_PATH:/opt/libs:ro" -e LD_LIBRARY_PATH=/opt/libs} "$img" /opt/db/bin/$MAIN --version 2>&1 | head -2 | tr '\n' ' ')"
       case "$o" in
         *"$MAIN"*"Ver "* | *"PostgreSQL"*) rec "compat_$img" "ok: $o" ;;
         *) rec "compat_$img" "FAIL: $o" ;;
@@ -425,7 +426,8 @@ t0=$(ms)
 CP=$!
 if wait_gone "$CP" 40; then
   wait "$CP" 2>/dev/null
-  rec port_conflict "server exited with code $? after $(($(ms) - t0)) ms; $(grep -hiE 'already in use|already running|bind|address|FATAL' "$W/conflict.out" "$SRVLOG" 2>/dev/null | tail -2 | tr '\n' ' ')"
+  rc=$?
+  rec port_conflict "server exited with code $rc after $(($(ms) - t0)) ms; $(grep -hiE 'already in use|already running|bind|address|FATAL' "$W/conflict.out" "$SRVLOG" 2>/dev/null | tail -2 | tr '\n' ' ')"
 else
   rec port_conflict "server kept running 40 s although the port was taken; $(tail -3 "$W/conflict.out" | tr '\n' ' ')"
   kill -KILL "$CP" 2>/dev/null
@@ -494,7 +496,8 @@ t0=$(ms)
 SP=$!
 if wait_gone "$SP" 150; then
   wait "$SP" 2>/dev/null
-  rec orphan_second_start "refused after $(($(ms) - t0)) ms, exit code $? ; $(cat "$W/second.out" | grep -iE 'lock|already|in use|FATAL|Unable|ERROR' | tail -3 | tr '\n' ' ') $([ "$SERVER" = mysql ] && tail -n 40 "$SRVLOG" | grep -iE 'lock|already|in use|Unable|ERROR' | tail -2 | tr '\n' ' ')"
+  rc=$?
+  rec orphan_second_start "refused after $(($(ms) - t0)) ms, exit code $rc ; $(cat "$W/second.out" | grep -iE 'lock|already|in use|FATAL|Unable|ERROR' | tail -3 | tr '\n' ' ') $([ "$SERVER" = mysql ] && tail -n 40 "$SRVLOG" | grep -iE 'lock|already|in use|Unable|ERROR' | tail -2 | tr '\n' ' ')"
 else
   rec orphan_second_start "second server was still running after 150 s (retrying, or two servers on one data dir)"
   kill -KILL "$SP" 2>/dev/null

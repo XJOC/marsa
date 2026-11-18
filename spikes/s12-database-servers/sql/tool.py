@@ -46,6 +46,10 @@ def wait(host, port, seconds):
 
 def hold_port(host, port):
     s = socket.socket()
+    if sys.platform != "win32":
+        # A port in TIME_WAIT (a client just left) must not stop us. On Windows
+        # this option would let the server share the port, so it stays off.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((host, int(port)))
     s.listen(5)
     print("holding", host, port, flush=True)

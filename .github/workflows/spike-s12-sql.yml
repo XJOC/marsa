@@ -86,3 +86,43 @@ jobs:
         with:
           name: s12-sql-${{ matrix.os }}-${{ matrix.set }}
           path: ${{ runner.temp }}/s12-out
+
+  # What would building PostgreSQL ourselves take? One container with an old
+  # glibc, on x64 and on arm64.
+  build-pg:
+    name: build PostgreSQL from source (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build in an AlmaLinux 8 container
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/build-out"
+          chmod 0777 "$RUNNER_TEMP/build-out"
+          docker run --rm \
+            -v "$PWD/spikes/s12-database-servers/sql:/spike:ro" \
+            -v "$RUNNER_TEMP/build-out:/out" \
+            almalinux:8 bash /spike/build-pg.sh 17.12 /out
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## build-pg ${{ matrix.os }}"
+            echo '```text'
+            cat "$RUNNER_TEMP/build-out/build.tsv"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s12-build-pg-${{ matrix.os }}
+          path: ${{ runner.temp }}/build-out/build.tsv

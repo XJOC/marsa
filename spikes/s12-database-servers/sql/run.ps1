@@ -92,7 +92,7 @@ if ($sigUrl -ne '-' -and (Test-Path $gpg)) {
   if ($o -match 'NO_PUBKEY (\S+)') {
     $keyid = $Matches[1]
     if ($server -eq 'mysql') {
-      & curl.exe -fsSL --max-time 60 -o (Join-Path $W 'dl\key.asc') https://repo.mysql.com/RPM-GPG-KEY-mysql-2023
+      & curl.exe -fsSL --max-time 60 -o (Join-Path $W 'dl\key.asc') https://repo.mysql.com/RPM-GPG-KEY-mysql-2025
       & $gpg --batch --import (Join-Path $W 'dl\key.asc') *> $null
     } else {
       & $gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys $keyid *> $null
@@ -106,14 +106,15 @@ if ($sigUrl -ne '-' -and (Test-Path $gpg)) {
 else { Rec gpg_status 'no signature published' }
 
 # ---------------------------------------------------------------- unpack
+$bsdtar = Join-Path $env:SystemRoot 'System32\tar.exe' # not Git's GNU tar: it reads D: as a host name
 $t0 = Ms
 switch ($format) {
-  'zip' { & tar.exe -xf $file -C $U }
+  'zip' { & $bsdtar -xf $file -C $U }
   'jar' {
     $jar = Join-Path $W 'jar'; New-Item -ItemType Directory -Force -Path $jar | Out-Null
-    & tar.exe -xf $file -C $jar
+    & $bsdtar -xf $file -C $jar
     $txz = Get-ChildItem $jar -Recurse -Filter *.txz | Select-Object -First 1
-    & tar.exe -xf $txz.FullName -C $U
+    & $bsdtar -xf $txz.FullName -C $U
   }
 }
 Rec unpack_ms ((Ms) - $t0)
@@ -131,7 +132,7 @@ $progs = if ($server -eq 'mysql') { 'mysqld', 'mysql', 'mysqladmin' } else { 'po
 Rec client_tools (($progs | ForEach-Object { if (Test-Path "$ROOT\bin\$_.exe") { $_ } else { "NO-$_" } }) -join ' ')
 $sigInfo = Get-AuthenticodeSignature $exe.FullName
 Rec authenticode "$($sigInfo.Status) $($sigInfo.SignerCertificate.Subject)"
-Rec bundled_vc_runtime ((Get-ChildItem "$ROOT\bin" -Filter 'vcruntime*.dll', 'msvcp*.dll' -ErrorAction SilentlyContinue | ForEach-Object Name) -join ' ')
+Rec bundled_vc_runtime ((Get-ChildItem "$ROOT\bin" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(vcruntime|msvcp|concrt|vccorlib)' } | ForEach-Object Name) -join ' ')
 Rec dll_count ((Get-ChildItem "$ROOT\bin" -Filter *.dll -ErrorAction SilentlyContinue | Measure-Object).Count)
 Rec server_version_output ((& $exe.FullName --version 2>&1 | Select-Object -First 1) -join ' ')
 
