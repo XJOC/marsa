@@ -12,16 +12,21 @@
 //! pointer. The labels below are for the designer who reads this page: they
 //! are not texts of the product, so they stay out of `strings.rs`.
 
+use std::time::Instant;
+
 use eframe::egui::{
-    self, Frame, Grid, InnerResponse, Margin, RichText, ScrollArea, Ui, Vec2, vec2,
+    self, Frame, Grid, InnerResponse, Margin, Rect, RichText, ScrollArea, Sense, Ui, UiBuilder,
+    Vec2, pos2, vec2,
 };
 use marsa_core::runtimes::Runtime;
 
 use super::Look;
 use super::badge::{CountBadge, RowBadge};
 use super::button::{Button, QuietTone};
+use super::dialog::{Answer, ConfirmDialog};
 use super::field::Field;
 use super::icons::{Glyph, Icon};
+use super::notice::{Notice, NoticeBar, Notices, Progress};
 use super::segmented::Segmented;
 use super::status::{
     Health, PathStep, PillState, RequestPath, StatePill, StatusDot, StatusSentence, StepState,
@@ -62,6 +67,10 @@ mod label {
     pub const TABLE: &str = "Table: two-line rows, the second selected, hover a row to see it";
     pub const TABLE_DENSE: &str = "Dense table (32): click a row to select it";
     pub const EMPTY: &str = "Empty state";
+    pub const DIALOG: &str = "Dialog over the scrim: destructive (Cancel has the focus), and calm";
+    pub const NOTICES: &str = "Notices: a success (closes in 4 s), and an error (stays)";
+    pub const PROGRESS: &str = "Progress: with a share, and with none yet";
+    pub const DIALOG_LIVE: &str = "Live: open the dialog (Esc cancels), or show a notice";
     pub const FIELDS: &str = "Fields";
     pub const LIVE: &str = "Live: click, type, and Tab through these";
     pub const DISABLED_NOTE: &str = "Disabled is drawn at 55% opacity. Hover it for the reason: ";
@@ -79,15 +88,17 @@ enum Page {
     Status,
     Versions,
     Tables,
+    Dialogs,
 }
 
-const PAGES: [(Page, &str); 6] = [
+const PAGES: [(Page, &str); 7] = [
     (Page::Icons, "1  Icons, tiles, badges"),
     (Page::Buttons, "2  Buttons"),
     (Page::Controls, "3  Switch, segmented, fields"),
     (Page::Status, "4  Status"),
     (Page::Versions, "5  Versions"),
     (Page::Tables, "6  Tables"),
+    (Page::Dialogs, "7  Dialogs, notices"),
 ];
 
 /// What the live controls of the third page hold.
@@ -103,6 +114,10 @@ struct Live {
     setting: Option<usize>,
     /// The row of the dense table the user clicked.
     row: Option<usize>,
+    /// The live dialog is open, and what it answered last.
+    dialog: bool,
+    answer: Option<Answer>,
+    notices: Notices,
 }
 
 /// Whether `MARSA_GUI_GALLERY=1`.
@@ -165,6 +180,7 @@ fn draw_page(ui: &mut Ui, theme: &Theme, page: Page) {
         Page::Status => status_page(ui, theme),
         Page::Versions => versions_page(ui, theme),
         Page::Tables => tables_page(ui, theme),
+        Page::Dialogs => dialogs_page(ui, theme),
     }
 }
 
@@ -464,6 +480,113 @@ fn controls_page(ui: &mut Ui, theme: &Theme) {
                 .width(width),
         );
     });
+    ui.ctx().data_mut(|data| data.insert_temp(id, live));
+}
+
+/// How much of `total` is `done`: "18 of 31 MB".
+fn share_of(done: u8, total: u8) -> f32 {
+    f32::from(done) / f32::from(total)
+}
+
+/// The question of the sample dialogs.
+fn unlink() -> ConfirmDialog<'static> {
+    ConfirmDialog::new(
+        "gallery_unlink",
+        "Unlink shop?",
+        "Marsa stops serving https://shop.test. The folder ~/Code/shop and its files stay where they are.",
+        "Unlink",
+    )
+    .danger()
+}
+
+fn dialogs_page(ui: &mut Ui, theme: &Theme) {
+    let id = ui.make_persistent_id("gallery_dialogs");
+    let mut live = ui
+        .ctx()
+        .data(|data| data.get_temp::<Live>(id))
+        .unwrap_or_default();
+
+    heading(ui, theme, label::DIALOG);
+    // A window behind a scrim, with the dialog on it, and a calm dialog
+    // beside it.
+    let height = theme.size.sidebar + theme.space.s6;
+    let (region, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    let mut page = ui.new_child(UiBuilder::new().max_rect(region));
+    let columns = [
+        TableColumn::fill("Site"),
+        TableColumn::fixed("PHP", theme.size.version_lg.x),
+    ];
+    Table::new("gallery_behind", "Sites", &columns).show(&mut page, 3, |row| {
+        let name = ["shop", "blog", "docs"][row.index()];
+        row.cell(|ui| {
+            ui.label(name);
+        });
+        row.cell(|ui| {
+            ui.label("8.4");
+        });
+    });
+    ui.painter()
+        .rect_filled(region, theme.radius.lg, theme.color.scrim);
+    let at = pos2(
+        region.left() + theme.space.s6,
+        region.top() + theme.space.s6,
+    );
+    let card = Rect::from_min_size(at, vec2(theme.size.dialog_width, height));
+    unlink().show_card(&mut ui.new_child(UiBuilder::new().max_rect(card)));
+    let calm = Rect::from_min_size(
+        pos2(card.right() + theme.space.s6, at.y),
+        vec2(theme.size.dialog_width, height),
+    );
+    let dialog = ConfirmDialog::new(
+        "gallery_install",
+        "Install PHP 8.5?",
+        "Marsa downloads 31 MB and keeps PHP 8.4 as the default.",
+        "Install",
+    );
+    dialog.show_card(&mut ui.new_child(UiBuilder::new().max_rect(calm)));
+
+    heading(ui, theme, label::NOTICES);
+    row(ui, |ui| {
+        NoticeBar::new(&Notice::success("Unlinked shop.").with_action("Undo")).show(ui);
+        NoticeBar::new(&Notice::error("Caddy stopped.").with_action("Show log")).show(ui);
+    });
+
+    heading(ui, theme, label::PROGRESS);
+    row(ui, |ui| {
+        ui.set_width(theme.size.dialog_width);
+        ui.add(Progress::new(
+            "Downloading PHP 8.4.27: 18 of 31 MB",
+            Some(share_of(18, 31)),
+        ));
+    });
+    row(ui, |ui| {
+        ui.set_width(theme.size.dialog_width);
+        ui.add(Progress::new("Starting Caddy…", None));
+    });
+
+    heading(ui, theme, label::DIALOG_LIVE);
+    row(ui, |ui| {
+        live.dialog |= ui.add(Button::secondary("Unlink shop…")).clicked();
+        if ui.add(Button::secondary("Show a success")).clicked() {
+            let notice = Notice::success("Unlinked shop.").with_action("Undo");
+            live.notices.push(notice, Instant::now());
+        }
+        if ui.add(Button::secondary("Show an error")).clicked() {
+            let notice = Notice::error("Caddy stopped.").with_action("Show log");
+            live.notices.push(notice, Instant::now());
+        }
+        if let Some(answer) = live.answer {
+            caption(ui, theme, &format!("Answered: {answer:?}"));
+        }
+    });
+    if live.dialog
+        && let Some(answer) = unlink().show(ui.ctx())
+    {
+        live.dialog = false;
+        live.answer = Some(answer);
+    }
+    live.notices
+        .show(ui.ctx(), ui.ctx().content_rect(), Instant::now());
     ui.ctx().data_mut(|data| data.insert_temp(id, live));
 }
 
@@ -827,6 +950,41 @@ mod tests {
     }
 
     #[test]
+    fn the_dialogs_page_shows_the_dialogs_the_notices_and_the_progress_in_both_themes() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let tree = tree_of(Page::Dialogs, theme);
+            assert_eq!(
+                tree.node_with_label("Unlink shop?").expect("dialog").role(),
+                Role::AlertDialog
+            );
+            assert_eq!(
+                tree.node_with_label("Install PHP 8.5?")
+                    .expect("calm dialog")
+                    .role(),
+                Role::Dialog
+            );
+            assert_eq!(
+                tree.node_with_label("Unlinked shop.")
+                    .expect("success")
+                    .role(),
+                Role::Status
+            );
+            assert_eq!(
+                tree.node_with_label("Caddy stopped.")
+                    .expect("error")
+                    .role(),
+                Role::Alert
+            );
+            assert_eq!(
+                tree.node_with_label("Downloading PHP 8.4.27: 18 of 31 MB")
+                    .expect("progress")
+                    .role(),
+                Role::ProgressIndicator
+            );
+        }
+    }
+
+    #[test]
     fn the_tables_page_shows_a_table_a_dense_table_and_the_empty_state() {
         for theme in [egui::Theme::Light, egui::Theme::Dark] {
             let tree = tree_of(Page::Tables, theme);
@@ -920,6 +1078,7 @@ mod tests {
         assert_eq!(page_numbered(Some("4")), Page::Status);
         assert_eq!(page_numbered(Some("5")), Page::Versions);
         assert_eq!(page_numbered(Some("6")), Page::Tables);
+        assert_eq!(page_numbered(Some("7")), Page::Dialogs);
         for wrong in [None, Some("0"), Some("99"), Some("x"), Some("")] {
             assert_eq!(page_numbered(wrong), Page::Icons, "{wrong:?}");
         }
@@ -927,7 +1086,7 @@ mod tests {
 
     #[test]
     fn the_gallery_has_its_pages_and_the_five_states_of_components_md() {
-        assert_eq!(PAGES.len(), 6);
+        assert_eq!(PAGES.len(), 7);
         assert_eq!(
             label::STATES,
             ["Rest", "Hover", "Pressed", "Focus", "Disabled"]
