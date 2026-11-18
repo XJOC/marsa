@@ -76,6 +76,7 @@ pub struct Manifest {
     node: Vec<Release>,
     composer: Vec<Release>,
     caddy: Vec<Release>,
+    postgres: Vec<Release>,
 }
 
 /// One version of a runtime and its files for each platform.
@@ -155,6 +156,7 @@ impl Manifest {
             Runtime::Node => &self.node,
             Runtime::Composer => &self.composer,
             Runtime::Caddy => &self.caddy,
+            Runtime::Postgres => &self.postgres,
         }
     }
 
@@ -336,6 +338,7 @@ fn parse_verified(json: &[u8], last_seen: Option<u64>) -> Result<Manifest, Manif
         node: releases("node", raw.runtimes.node)?,
         composer: releases("composer", raw.runtimes.composer)?,
         caddy: releases("caddy", raw.runtimes.caddy)?,
+        postgres: releases("postgres", raw.runtimes.postgres)?,
     })
 }
 
@@ -371,6 +374,9 @@ struct RawRuntimes {
     /// without it has no Caddy.
     #[serde(default)]
     caddy: Vec<RawRelease>,
+    /// Added in M6-01 within schema 1, like Caddy.
+    #[serde(default)]
+    postgres: Vec<RawRelease>,
 }
 
 #[derive(Deserialize)]

@@ -113,6 +113,7 @@ impl RunInstall for FakeInstall {
                 Runtime::Node => "22.11.0",
                 Runtime::Composer => "2.8.4",
                 Runtime::Caddy => "2.11.8",
+                Runtime::Postgres => "18.7.0",
             };
             events(InstallEvent::Selected {
                 runtime,
@@ -375,10 +376,11 @@ async fn install_through_the_daemon_prints_progress_and_installs() {
         .expect(
             &["runtimes"],
             0,
-            "PHP       none installed\n\
-             Node.js   none installed\n\
-             Composer  none installed\n\
-             Caddy     none installed\n",
+            "PHP         none installed\n\
+             Node.js     none installed\n\
+             Composer    none installed\n\
+             Caddy       none installed\n\
+             PostgreSQL  none installed\n",
             "",
         )
         .await;
@@ -411,7 +413,7 @@ async fn install_through_the_daemon_prints_progress_and_installs() {
     );
 
     served
-        .expect(&["runtimes", "php"], 0, "PHP       8.4.23\n", "")
+        .expect(&["runtimes", "php"], 0, "PHP         8.4.23\n", "")
         .await;
     let list: RuntimeList = served
         .json("GET", "/v1/runtimes", None, StatusCode::OK)
@@ -1116,7 +1118,7 @@ async fn the_last_node_goes_with_its_default() {
     assert!(node.installed.is_empty());
     assert_eq!(list.runtimes[0].default.as_deref(), Some("8.4"));
     served
-        .expect(&["runtimes", "node"], 0, "Node.js   none installed\n", "")
+        .expect(&["runtimes", "node"], 0, "Node.js     none installed\n", "")
         .await;
 }
 

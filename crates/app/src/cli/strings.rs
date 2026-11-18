@@ -862,6 +862,7 @@ fn example_version(runtime: Option<Runtime>) -> &'static str {
         Some(Runtime::Node) => "22",
         Some(Runtime::Composer) => "2.8",
         Some(Runtime::Caddy) => "2.11",
+        Some(Runtime::Postgres) => "18",
         Some(Runtime::Php) | None => "8.4",
     }
 }
@@ -873,6 +874,7 @@ pub fn runtime_name(runtime: Runtime) -> &'static str {
         Runtime::Node => "Node.js",
         Runtime::Composer => "Composer",
         Runtime::Caddy => "Caddy",
+        Runtime::Postgres => "PostgreSQL",
     }
 }
 
@@ -2361,7 +2363,7 @@ mod tests {
     #[test]
     fn every_runtime_has_its_own_name_and_example() {
         let names: Vec<&str> = Runtime::ALL.into_iter().map(runtime_name).collect();
-        assert_eq!(names, ["PHP", "Node.js", "Composer", "Caddy"]);
+        assert_eq!(names, ["PHP", "Node.js", "Composer", "Caddy", "PostgreSQL"]);
         for runtime in Runtime::ALL {
             let example = example_version(Some(runtime));
             assert!(

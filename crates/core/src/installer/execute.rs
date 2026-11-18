@@ -545,7 +545,7 @@ async fn run_check(
         return Err(InstallError::MissingVcRuntime);
     }
     let stdout = String::from_utf8_lossy(&stdout);
-    if status.success() && stdout.starts_with(&check.expected_prefix(version)) {
+    if status.success() && version_matches(&stdout, &check.expected_prefix(version)) {
         return Ok(());
     }
     let text = format!("{stdout}{}", String::from_utf8_lossy(&stderr));
@@ -553,6 +553,15 @@ async fn run_check(
         text.chars().take(CHECK_OUTPUT_SHOWN).collect(),
         status.code(),
     ))
+}
+
+/// Whether `stdout` starts with `prefix` and the version ends there: the
+/// next character is not a digit. So an expected `17.1` never accepts a
+/// program that prints `17.12`, whatever the recipe's prefix ends with.
+fn version_matches(stdout: &str, prefix: &str) -> bool {
+    stdout
+        .strip_prefix(prefix)
+        .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_digit()))
 }
 
 fn clean_check_env(command: &mut Command) {
@@ -745,6 +754,19 @@ fn io_error(path: &Path) -> impl FnOnce(io::Error) -> InstallError + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_version_ends_where_the_prefix_does() {
+        let pg = "postgres (PostgreSQL) 17.1";
+        assert!(version_matches("postgres (PostgreSQL) 17.1\n", pg));
+        assert!(version_matches("postgres (PostgreSQL) 17.1", pg));
+        assert!(!version_matches("postgres (PostgreSQL) 17.12\n", pg));
+        assert!(!version_matches("postgres (PostgreSQL) 17.10", pg));
+        assert!(!version_matches("postgres (PostgreSQL) 16.1\n", pg));
+        assert!(version_matches("PHP 8.4.1 (cli)", "PHP 8.4.1 "));
+        assert!(!version_matches("PHP 8.4.12 (cli)", "PHP 8.4.1"));
+        assert!(version_matches("v22.11.0\r\n", "v22.11.0"));
+    }
     use crate::installer::Trust;
     use crate::installer::fetch::testing::{MemoryFetch, Reply};
     use crate::installer::install;
@@ -997,6 +1019,91 @@ into = "bin"
         );
         assert!(events.contains(&InstallEvent::Checking));
         assert_eq!(events.last(), Some(&InstallEvent::Installed { dir }));
+    }
+
+    /// A `.tar.gz` shaped like theseus-rs's PostgreSQL archives: every file
+    /// under `postgresql-<version>-<target>/`. `postgres` prints `prints`;
+    /// the other programs are placeholders.
+    // `#[cfg(unix)]`: the archive holds a `#!/bin/sh` fake `postgres`, which
+    // only Unix can run for the check.
+    #[cfg(unix)]
+    fn theseus_archive(top: &str, prints: &str) -> Vec<u8> {
+        let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut builder = tar::Builder::new(gzip);
+        let script = format!("#!/bin/sh\necho '{prints}'\n");
+        let files = [
+            ("bin/postgres", script.as_str()),
+            ("bin/initdb", "x"),
+            ("bin/pg_ctl", "x"),
+            ("bin/psql", "x"),
+            ("bin/pg_dump", "x"),
+            ("bin/pg_restore", "x"),
+            ("bin/pg_isready", "x"),
+            ("share/postgres.bki", "x"),
+            ("LICENSE", "x"),
+        ];
+        for (path, data) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o755);
+            header.set_entry_type(tar::EntryType::Regular);
+            builder
+                .append_data(&mut header, format!("{top}/{path}"), data.as_bytes())
+                .expect("append to tar");
+        }
+        let gzip = builder.into_inner().expect("finish tar");
+        gzip.finish().expect("finish gzip")
+    }
+
+    // `#[cfg(unix)]`: it runs the `#!/bin/sh` fake from `theseus_archive`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn postgres_installs_from_a_theseus_shaped_archive() {
+        let top = "postgresql-17.12.0-x86_64-unknown-linux-gnu";
+        let data = TempDir::new().expect("temp dir");
+        let served = Served::new("postgres", "linux-x64").release(
+            "17.12.0",
+            &[(
+                "archive",
+                theseus_archive(top, "postgres (PostgreSQL) 17.12"),
+            )],
+        );
+        let mut first = env(&data, served.fetch(1), None, Trust::Unsigned);
+        // The built-in recipe asks for glibc 2.36.
+        first.os = Some(plan::OsVersions {
+            macos: None,
+            glibc: Some("2.36".to_owned()),
+        });
+        let (result, _) = run_install(&first, Runtime::Postgres, Some("17"), false).await;
+
+        let installed = result.expect("install succeeds");
+        let dir = runtimes(&data).version_dir(Runtime::Postgres, &version("17.12.0"));
+        assert_eq!(installed.dir, dir);
+        // The top folder is gone: programs sit in `bin/` of the version.
+        for program in ["postgres", "initdb", "pg_ctl", "psql", "pg_dump"] {
+            assert!(dir.join("bin").join(program).is_file(), "{program}");
+        }
+        assert!(dir.join("share").join("postgres.bki").is_file());
+        assert!(!dir.join(top).exists());
+        assert_tmp_is_clean(&data);
+
+        // Another minor version in the output fails the check.
+        let served = Served::new("postgres", "linux-x64").release(
+            "17.12.0",
+            &[(
+                "archive",
+                theseus_archive(top, "postgres (PostgreSQL) 17.1"),
+            )],
+        );
+        let data = TempDir::new().expect("temp dir");
+        let mut env = env(&data, served.fetch(1), None, Trust::Unsigned);
+        env.os = Some(plan::OsVersions {
+            macos: None,
+            glibc: Some("2.36".to_owned()),
+        });
+        let (result, _) = run_install(&env, Runtime::Postgres, Some("17"), false).await;
+        let err = result.expect_err("17.1 is not 17.12");
+        assert_eq!(err.code(), "install_check_failed");
     }
 
     #[cfg(unix)]

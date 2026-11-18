@@ -12,7 +12,7 @@ use semver::Version;
 use serde::Deserialize;
 
 /// The runtimes in manifest order.
-pub const RUNTIMES: [Runtime; 4] = Runtime::ALL;
+pub const RUNTIMES: [Runtime; 5] = Runtime::ALL;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,11 +23,14 @@ struct RawPins {
     node: RawList,
     composer: RawList,
     caddy: RawList,
+    /// Optional until the first PostgreSQL version is pinned (M6-02).
+    #[serde(default)]
+    postgres: RawList,
     #[serde(default, rename = "override")]
     overrides: Vec<RawOverride>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RawList {
     versions: Vec<String>,
@@ -79,6 +82,7 @@ impl Pins {
                 Runtime::Node => &mut raw.node,
                 Runtime::Composer => &mut raw.composer,
                 Runtime::Caddy => &mut raw.caddy,
+                Runtime::Postgres => &mut raw.postgres,
             };
             let list = std::mem::take(&mut list.versions);
             versions.insert(runtime.dir_name(), versions_of(runtime, list)?);
@@ -239,6 +243,24 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
         assert_eq!(pins.versions(Runtime::Node), &[v("22.23.4")]);
         assert_eq!(pins.versions(Runtime::Composer), &[v("2.11.1")]);
         assert_eq!(pins.versions(Runtime::Caddy), &[v("2.11.8")]);
+    }
+
+    #[test]
+    fn postgres_is_optional() {
+        let pins = Pins::parse(FULL).expect("valid pins");
+        assert!(pins.versions(Runtime::Postgres).is_empty());
+
+        let with = FULL.replace(
+            "[caddy]\nversions = [\"2.11.8\"]\n",
+            "[caddy]\nversions = [\"2.11.8\"]\n\n[postgres]\nversions = [\"18.7.0\", \"17.12.0\"]\n",
+        );
+        let pins = Pins::parse(&with).expect("valid pins");
+        assert_eq!(
+            pins.versions(Runtime::Postgres),
+            &[v("18.7.0"), v("17.12.0")]
+        );
+        let bad = with.replace("17.12.0", "17.12");
+        assert!(Pins::parse(&bad).is_err());
     }
 
     #[test]
