@@ -17,6 +17,10 @@
 //! connections is read once: if PostgreSQL refused because a live process
 //! holds one of its lock files, the start fails as the check before it
 //! would have. Nothing reads the log after the server is ready.
+//!
+//! [`start_at_launch`] starts it with `marsad` when `[postgres] enabled =
+//! true` (ADR 0023: a server that is on starts with the daemon). A failure
+//! leaves the daemon running and the status `failed`.
 
 use std::fmt;
 use std::io;
@@ -39,7 +43,7 @@ use marsa_core::ports::PortLookup;
 use marsa_core::recipes::{self, Platform};
 use marsa_core::runtimes::{Runtime, RuntimesDir};
 use marsa_core::services::{ProgramNotAbsolute, RestartPolicy, ServiceSpec};
-use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceStatus};
+use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceState, ServiceStatus};
 use semver::Version;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
@@ -47,7 +51,7 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 use super::caddy::orphan::BoxFuture;
-use super::caddy::{note, set_failed};
+use super::caddy::{Launch, Launched, note, set_failed};
 use super::php::orphan::accepted;
 use super::state::Daemon;
 use super::supervisor::{ServiceRuntime, Supervisor, lock};
@@ -829,6 +833,76 @@ fn read_settings(data_dir: &Path) -> Result<ServerSettings, ActionError> {
     Ok(global.postgres)
 }
 
+/// Starts PostgreSQL in the background when `[postgres] enabled = true` and
+/// a version of its `default` line is installed (ADR 0023, section 5), the
+/// way Caddy starts with the daemon (task M5-16): the start of
+/// `marsa services start postgres`, with the check before it. Its turn is
+/// taken here, before the API serves, so a request waits for it. A failure
+/// only sets the status `Failed` with its code: the daemon runs on.
+///
+/// A shutdown drops the start at its next `.await`. The spawn and
+/// `add_proc` have no `.await` between them, so a server it spawned is in
+/// `Daemon::procs`, which the shutdown stops. A dropped init kills its
+/// program (`kill_on_drop`) and leaves a temp folder, which the next init
+/// deletes.
+pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
+    let postgres = &daemon.postgres;
+    let settings = match read_settings(&daemon.data_dir) {
+        Ok(settings) => settings,
+        Err(err) => {
+            postgres.fail(&daemon.events, err.code(), &err.to_string());
+            return Launch::ended(POSTGRES_ID, Launched::Failed(err.code()));
+        }
+    };
+    if !settings.enabled {
+        info!("postgres is off; it does not start with the daemon");
+        return Launch::ended(POSTGRES_ID, Launched::Off);
+    }
+    // First, so a missing version does not mark the status failed.
+    if let Err(err) = postgres.installed(&daemon.data_dir, &settings) {
+        warn!(code = err.code(), %err, "postgres is on, but does not start with the daemon");
+        return Launch::ended(POSTGRES_ID, Launched::NotInstalled);
+    }
+    let Ok(busy) = Arc::clone(&postgres.busy).try_lock_owned() else {
+        info!("another action on postgres runs; it decides instead of the start with the daemon");
+        return Launch::ended(POSTGRES_ID, Launched::Busy);
+    };
+    info!("starting postgres with the daemon");
+    let daemon = Arc::clone(daemon);
+    let task = tokio::spawn(async move {
+        tokio::select! {
+            // A daemon that already stops starts nothing.
+            biased;
+            () = daemon.shutdown.cancelled() => Launched::ShuttingDown,
+            launched = launch(&daemon, busy) => launched,
+        }
+    });
+    Launch::running(POSTGRES_ID, task)
+}
+
+async fn launch(daemon: &Daemon, busy: tokio::sync::OwnedMutexGuard<()>) -> Launched {
+    match daemon
+        .postgres
+        .act(daemon, ServiceAction::Start, busy)
+        .await
+    {
+        Ok(status) => {
+            match &status.state {
+                ServiceState::Running => info!("postgres started with the daemon"),
+                ServiceState::Failed { code } => {
+                    warn!(%code, "postgres did not start with the daemon");
+                }
+                state => warn!(?state, "postgres is not running after its start"),
+            }
+            Launched::Ran(status)
+        }
+        Err(err) => {
+            warn!(code = err.code(), %err, "postgres did not start with the daemon");
+            Launched::Failed(err.code())
+        }
+    }
+}
+
 /// Whether PostgreSQL takes connections on `127.0.0.1:<port>`: it answers
 /// an [`SSL_REQUEST`] with one byte, `N` or `S`. Only a postmaster whose
 /// start is done answers: it has taken its lock files and made all its
@@ -1070,8 +1144,6 @@ mod tests {
 
         use marsa_core::config::GlobalConfig;
         use tempfile::TempDir;
-
-        use marsa_core::types::ServiceState;
 
         use crate::daemon::supervisor::STOP_MARGIN;
 
@@ -1426,6 +1498,36 @@ mod tests {
             let signals = ["fake got SIGINT", "fake got SIGTERM"];
             assert!(!texts.iter().any(|t| signals.contains(&t.as_str())));
             pg.act(ServiceAction::Stop).await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn postgres_starts_with_the_daemon_only_when_it_is_on() {
+            let pg = pg("serve", probes(Liveness::Gone, None));
+            let launched = start_at_launch(&pg.daemon).wait(WAIT).await;
+            let Some(Launched::Ran(status)) = launched else {
+                panic!("{launched:?}");
+            };
+            assert_eq!(status.state, ServiceState::Running);
+            pg.daemon.stop_procs(WAIT).await;
+
+            let data = &pg.daemon.data_dir;
+            set_postgres(data, Some("18"), false, pg.port);
+            let launched = start_at_launch(&pg.daemon).wait(WAIT).await;
+            assert_eq!(launched, Some(Launched::Off));
+            // On, but its line is not installed: the status stays as it was.
+            set_postgres(data, Some("17"), true, pg.port);
+            let launched = start_at_launch(&pg.daemon).wait(WAIT).await;
+            assert_eq!(launched, Some(Launched::NotInstalled));
+            assert_eq!(pg.daemon.postgres.status().state, ServiceState::Stopped);
+            assert_eq!(pg.count("server"), 1);
+
+            // A failed start: the status says why, and the daemon runs on.
+            set_postgres(data, Some("18"), true, pg.port);
+            let _held = TcpListener::bind((Ipv4Addr::LOCALHOST, pg.port)).unwrap();
+            let launched = start_at_launch(&pg.daemon).wait(WAIT).await;
+            assert_eq!(launched, Some(Launched::Failed("service_port_busy")));
+            let state = pg.daemon.postgres.status().state;
+            assert_eq!(state, failed("service_port_busy"));
         }
     }
 
