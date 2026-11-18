@@ -5,6 +5,7 @@
 //! | --- | --- |
 //! | `marsad` answers `/v1/health` | it does not |
 //! | PHP and Caddy are installed, with a default PHP | one is missing |
+//! | the Microsoft Visual C++ runtime PHP needs (Windows, ADR 0019) | Windows reports none, or one older than 14.44 |
 //! | Caddy runs | it does not |
 //! | `doctor-<hex>.test` resolves to `127.0.0.1` (macOS, and Linux on the `marsa0` link) | it does not, or to another address |
 //! | every site has its line in Marsa's block of `/etc/hosts` (Linux on the hosts way) | one has none, or the block is gone |
@@ -97,6 +98,10 @@ pub async fn run(data_dir: &Path) -> ExitCode {
         .as_ref()
         .is_ok_and(|found| !found.is_empty());
     show(Check::Runtimes, doctor::runtimes(&installed));
+    // The official PHP for Windows needs Microsoft's runtime (ADR 0019).
+    if windows {
+        show(Check::VcRuntime, doctor::vc_runtime(vc_runtime_version()));
+    }
     let caddy = daemon.caddy.as_ref();
     show(Check::Caddy, doctor::caddy(running, caddy, caddy_installed));
     // The checks of the redirect, the resolver file, and the user's trust
@@ -265,6 +270,15 @@ fn log_path(data_dir: &Path) -> PathBuf {
     data_dir.join("logs").join("marsad.log")
 }
 
+/// The Visual C++ runtime that Windows reports; none elsewhere.
+fn vc_runtime_version() -> Option<(u32, u32, u32)> {
+    // `#[cfg]` outside `platform`: the registry is Windows'.
+    #[cfg(windows)]
+    return marsa_core::platform::windows::vc_runtime_version();
+    #[cfg(not(windows))]
+    None
+}
+
 /// The line of one check. `windows`: the PATH fixes speak of the user's
 /// PATH setting, not of `~/.zshrc`.
 pub fn render(check: Check, verdict: &Verdict, data_dir: &Path, windows: bool) -> String {
@@ -286,6 +300,7 @@ fn passed(pass: &Pass, data_dir: &Path) -> String {
         Pass::Runtimes { default, version } => {
             strings::doctor_runtimes_ok(&printable(default), &version.to_string())
         }
+        Pass::VcRuntime { version } => strings::doctor_vc_runtime_ok(&printable(version)),
         Pass::Caddy => strings::DOCTOR_CADDY_OK.to_owned(),
         Pass::Dns => strings::DOCTOR_DNS_OK.to_owned(),
         Pass::Hosts => strings::DOCTOR_HOSTS_OK.to_owned(),
@@ -370,6 +385,11 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
             strings::DOCTOR_PORTS_SETUP.to_owned(),
         ),
         Problem::CaUntrusted => pair(strings::DOCTOR_UNTRUSTED, strings::DOCTOR_TRUST_SETUP),
+        Problem::VcRuntimeMissing => pair(strings::DOCTOR_VC_MISSING, strings::DOCTOR_VC_INSTALL),
+        Problem::VcRuntimeOld { found } => (
+            strings::doctor_vc_old(&printable(found)),
+            strings::DOCTOR_VC_INSTALL.to_owned(),
+        ),
         Problem::ShimsNotInPath { shims } => (
             strings::doctor_shims_missing(shims),
             strings::doctor_add_shims(shims, windows),
@@ -639,5 +659,29 @@ mod tests {
             "- Marsa's certificate authority: not checked. It does not exist yet: Caddy makes \
              it when it first starts. Run \"marsa setup\" to make it and trust it."
         );
+    }
+
+    /// Windows: the runtime's lines, with Microsoft's link in the fix.
+    #[test]
+    fn the_vc_runtime_lines_name_the_version_and_the_link() {
+        let data = data();
+        let pass = Verdict::Pass(Pass::VcRuntime {
+            version: "14.44.35211".to_owned(),
+        });
+        let text = render(Check::VcRuntime, &pass, &data, true);
+        assert!(text.contains("14.44.35211"), "{text}");
+        for problem in [
+            Problem::VcRuntimeMissing,
+            Problem::VcRuntimeOld {
+                found: "14.29.30133".to_owned(),
+            },
+        ] {
+            let text = render(Check::VcRuntime, &Verdict::Fail(problem), &data, true);
+            assert!(
+                text.contains("https://aka.ms/vs/17/release/vc_redist.x64.exe"),
+                "{text}"
+            );
+            assert!(text.contains("Fix:"), "{text}");
+        }
     }
 }
