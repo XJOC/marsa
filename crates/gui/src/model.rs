@@ -554,6 +554,11 @@ pub enum Action {
     AskUninstall { runtime: Runtime, version: Version },
     /// The Xdebug switch.
     ToggleXdebug,
+    /// The confirmation's action ("Unlink", "Forget", "Uninstall"): sends the
+    /// removal it asked about (task M5-D9).
+    ConfirmRemoval,
+    /// "Cancel" or Escape in the confirmation.
+    CancelRemoval,
     /// An option of the Appearance control in Settings. `App` applies it at
     /// once and writes it to `gui.toml` (task M5-D9).
     SetAppearance(Appearance),
@@ -1642,6 +1647,11 @@ impl Model {
                 None
             }
             Action::ToggleXdebug => self.toggle_xdebug().map(Command::SetXdebug),
+            Action::ConfirmRemoval => self.confirm_removal().map(Command::Remove),
+            Action::CancelRemoval => {
+                self.cancel_removal();
+                None
+            }
             Action::SetAppearance(appearance) => {
                 // `App` sees the change after the frame: it sets egui's
                 // theme and writes `gui.toml`.
@@ -2207,6 +2217,22 @@ mod tests {
                 .is_none()
         );
         assert_eq!(model.confirm, Some(Removal::Forget { folder }));
+    }
+
+    #[test]
+    fn the_confirmations_answers_send_the_removal_or_drop_it() {
+        let mut model = with_parked();
+        model.apply_action(Action::AskUnlink("api".into()));
+        assert!(model.apply_action(Action::CancelRemoval).is_none());
+        assert!(model.confirm.is_none() && model.removing().is_none());
+        // Nothing waits: the answer sends nothing.
+        assert!(model.apply_action(Action::ConfirmRemoval).is_none());
+
+        model.apply_action(Action::AskForget(PathBuf::from("/code")));
+        let sent = model.apply_action(Action::ConfirmRemoval);
+        assert!(matches!(sent, Some(Command::Remove(ref r)) if *r == forget("/code")));
+        assert_eq!(model.removing(), Some(&forget("/code")));
+        assert!(model.confirm.is_none());
     }
 
     #[test]

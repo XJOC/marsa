@@ -4,17 +4,17 @@
 //! everything. [Laravel: the
 //! layout file; the `match` in `screen` is `routes/web.php`.]
 
+pub mod dialogs;
 pub mod sidebar;
 
 use std::hash::Hash;
 
-use eframe::egui::{self, CentralPanel, Frame, Margin, Panel, ScrollArea, Ui};
+use eframe::egui::{CentralPanel, Frame, Margin, Panel, ScrollArea, Ui};
 
 use crate::bridge::Command;
-use crate::model::{Action, Model, Removal, Route};
+use crate::model::{Action, Model, Route};
 use crate::screens;
 use crate::strings;
-use crate::theme::page::CONFIRM_WIDTH;
 use crate::theme::{Direction, Theme};
 use crate::widgets::whole;
 use sidebar::Item;
@@ -78,15 +78,10 @@ pub fn show(ui: &mut Ui, model: &mut Model, picking: bool) -> Output {
         }
         screen(ui, model, picking, &mut out);
     });
-    // Opened by an Uninstall, Unlink, or Forget button.
-    let ctx = ui.ctx().clone();
-    out.commands.extend(confirm(&ctx, model));
-    // Opened by "Install a version…" or a dashed "+" on any screen, so the
-    // shell draws it, not the Runtimes screen.
-    if let Some(dialog) = screens::runtimes::install_dialog_view(model) {
-        out.actions
-            .extend(screens::runtimes::show_install_dialog(&ctx, &dialog));
-    }
+    // The confirmation of an Uninstall, Unlink, or Forget, or the install
+    // dialog ("Install a version…" or a dashed "+" on any screen): the shell
+    // draws them, not a screen.
+    out.actions.extend(dialogs::show(ui.ctx(), model));
     out
 }
 
@@ -148,41 +143,11 @@ fn scrolled(ui: &mut Ui, key: impl Hash + std::fmt::Debug, add: impl FnOnce(&mut
         .show(ui, add);
 }
 
-/// The confirmation of an Uninstall, Unlink, or Forget, over the whole
-/// window. Escape or a click beside it cancels. Returns the removal to send
-/// once the user confirms.
-// TODO(M5-D9): the design's `widgets::ConfirmDialog` over the scrim.
-fn confirm(ctx: &egui::Context, model: &mut Model) -> Option<Command> {
-    let removal = model.confirm.clone()?;
-    let text = match &removal {
-        Removal::Unlink { site } => strings::confirm_text(&removal, model.site_root(site), 0),
-        Removal::Forget { folder } => strings::confirm_text(&removal, None, model.sites_in(folder)),
-        Removal::Uninstall { .. } => strings::confirm_text(&removal, None, 0),
-    };
-    let mut confirmed = false;
-    let mut cancelled = false;
-    let modal = egui::Modal::new(egui::Id::unique("confirm_removal")).show(ctx, |ui| {
-        ui.set_max_width(CONFIRM_WIDTH);
-        ui.strong(strings::confirm_title(&removal));
-        ui.label(text);
-        ui.horizontal(|ui| {
-            confirmed = ui.button(strings::removal_button(&removal)).clicked();
-            cancelled = ui.button(strings::CANCEL).clicked();
-        });
-    });
-    if confirmed {
-        return model.confirm_removal().map(Command::Remove);
-    }
-    if cancelled || modal.should_close() {
-        model.cancel_removal();
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
+    use eframe::egui;
     use marsa_core::types::{Health, Site, SiteKind, SiteList};
 
     use super::*;

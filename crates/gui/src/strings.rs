@@ -1082,20 +1082,27 @@ pub fn unlink_parked_hint(folder: &Path) -> String {
     )
 }
 
-/// The title of the confirmation.
-pub fn confirm_title(removal: &Removal) -> String {
+/// The title of the confirmation: the exact question. A folder under `home`
+/// shows as `~/…` ([`home_path`]).
+pub fn confirm_title(removal: &Removal, home: Option<&Path>) -> String {
     match removal {
         Removal::Uninstall { runtime, version } => {
             format!("Uninstall {} {version}?", runtime_name(*runtime))
         }
         Removal::Unlink { site } => format!("Unlink {site}.{TLD}?"),
-        Removal::Forget { folder } => format!("Forget {}?", folder.display()),
+        Removal::Forget { folder } => format!("Forget {}?", home_path(folder, home)),
     }
 }
 
-/// What the confirmed removal does. `site_root`: the folder of the site to
-/// unlink; `sites`: how many sites the folder to forget gives now.
-pub fn confirm_text(removal: &Removal, site_root: Option<&Path>, sites: usize) -> String {
+/// What the confirmed removal does, and what stays. `site_root`: the folder
+/// of the site to unlink; `sites`: how many sites the folder to forget gives
+/// now; a folder under `home` shows as `~/…`.
+pub fn confirm_text(
+    removal: &Removal,
+    site_root: Option<&Path>,
+    sites: usize,
+    home: Option<&Path>,
+) -> String {
     match removal {
         Removal::Uninstall { runtime, .. } => format!(
             "Its files are deleted from Marsa's data folder. Marsa refuses if the default, a \
@@ -1105,7 +1112,7 @@ pub fn confirm_text(removal: &Removal, site_root: Option<&Path>, sites: usize) -
         Removal::Unlink { .. } => {
             let kept = site_root.map_or_else(
                 || "Its folder and files stay.".to_owned(),
-                |root| format!("The folder {} and its files stay.", root.display()),
+                |root| format!("The folder {} and its files stay.", home_path(root, home)),
             );
             format!(
                 "Marsa stops serving this site, and its own settings (PHP version, HTTPS) are \
@@ -2690,9 +2697,9 @@ mod tests {
         let forget = Removal::Forget {
             folder: PathBuf::from("/code"),
         };
-        assert_eq!(confirm_title(&uninstall), "Uninstall PHP 8.3.27?");
-        assert_eq!(confirm_title(&unlink), "Unlink api.test?");
-        assert_eq!(confirm_title(&forget), "Forget /code?");
+        assert_eq!(confirm_title(&uninstall, None), "Uninstall PHP 8.3.27?");
+        assert_eq!(confirm_title(&unlink, None), "Unlink api.test?");
+        assert_eq!(confirm_title(&forget, None), "Forget /code?");
         assert_eq!(
             [&uninstall, &unlink, &forget].map(removal_button),
             ["Uninstall", "Unlink", "Forget"]
@@ -2701,22 +2708,36 @@ mod tests {
         assert_eq!(removing(&unlink), "Unlinking api.test…");
         assert_eq!(removing(&forget), "Forgetting /code…");
 
-        let text = confirm_text(&unlink, Some(Path::new("/work/api")), 0);
+        let text = confirm_text(&unlink, Some(Path::new("/work/api")), 0, None);
         assert!(
             text.ends_with("The folder /work/api and its files stay."),
             "{text}"
         );
-        assert!(confirm_text(&unlink, None, 0).ends_with("Its folder and files stay."));
+        assert!(confirm_text(&unlink, None, 0, None).ends_with("Its folder and files stay."));
+        // Under the home folder, a folder shows as `~/…`, in the title too.
+        let home = Some(Path::new("/work"));
+        let shown = home_path(Path::new("/work/api"), home);
+        let text = confirm_text(&unlink, Some(Path::new("/work/api")), 0, home);
+        assert!(
+            text.ends_with(&format!("The folder {shown} and its files stay.")),
+            "{text}"
+        );
+        let code = Removal::Forget {
+            folder: PathBuf::from("/work/code"),
+        };
+        let shown = home_path(Path::new("/work/code"), home);
+        assert_eq!(confirm_title(&code, home), format!("Forget {shown}?"));
+        assert!(shown.starts_with('~'));
         for (sites, start) in [
             (0, "Marsa stops watching this folder."),
             (1, "Marsa stops serving its site,"),
             (3, "Marsa stops serving its 3 sites,"),
         ] {
-            let text = confirm_text(&forget, None, sites);
+            let text = confirm_text(&forget, None, sites, None);
             assert!(text.starts_with(start), "{text}");
             assert!(text.ends_with("The folder and its files stay."), "{text}");
         }
-        assert!(confirm_text(&uninstall, None, 0).contains("install PHP again"));
+        assert!(confirm_text(&uninstall, None, 0, None).contains("install PHP again"));
     }
 
     #[test]
