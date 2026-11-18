@@ -466,7 +466,7 @@ pub(super) fn mute(ui: &mut Ui, theme: &Theme, text: &str) {
 
 /// How a line of status says what kind it is, besides its words (R8).
 #[derive(Clone, Copy)]
-enum Mark {
+pub(super) enum Mark {
     Success,
     Error,
     /// Amber (tokens.md, Color: states).
@@ -474,7 +474,13 @@ enum Mark {
 }
 
 /// An icon and a sentence that wraps, then whatever `add` puts after them.
-fn status_line(ui: &mut Ui, theme: &Theme, mark: Mark, text: &str, add: impl FnOnce(&mut Ui)) {
+pub(super) fn status_line(
+    ui: &mut Ui,
+    theme: &Theme,
+    mark: Mark,
+    text: &str,
+    add: impl FnOnce(&mut Ui),
+) {
     let (icon, color) = match mark {
         Mark::Success => crate::widgets::notice::mark(theme, NoticeKind::Success),
         Mark::Error => crate::widgets::notice::mark(theme, NoticeKind::Error),

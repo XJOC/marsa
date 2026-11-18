@@ -117,7 +117,10 @@ fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
         // The log fills the height and scrolls itself.
         Item::Logs => screens::logs::show(ui, model),
         Item::Runtimes => scrolled(ui, item, |ui| {
-            screens::runtimes::show(ui, model, &mut out.commands);
+            let theme = Theme::of(ui.ctx());
+            let view = screens::runtimes::view(model);
+            out.actions
+                .extend(screens::runtimes::show(ui, &view, theme));
         }),
         Item::Services => scrolled(ui, item, |ui| {
             out.actions.extend(screens::services::show(ui, model));

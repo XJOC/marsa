@@ -193,8 +193,6 @@ pub const CANCEL: &str = "Cancel";
 /// While a folder dialog is open: the buttons wait for it.
 pub const PICKING_HINT: &str = "A folder dialog is open.";
 pub const SKIPPED_TITLE: &str = "Skipped folders";
-/// The column of the Unlink buttons, and of the Uninstall lists.
-pub const COLUMN_REMOVE: &str = "Remove";
 pub const UNLINK_HINT: &str = "Stop serving this site. Its folder and files stay.";
 pub const PARKED_TITLE: &str = "Parked folders";
 /// After the heading of each list under the sites table.
@@ -208,35 +206,135 @@ pub const REMOVE_BUSY_HINT: &str = "Wait for the removal that runs to end.";
 
 pub const RUNTIMES: &str = "Runtimes";
 pub const NO_RUNTIMES: &str = "No runtimes listed yet.";
-pub const COLUMN_RUNTIME: &str = "Runtime";
-pub const COLUMN_INSTALLED: &str = "Installed";
-pub const COLUMN_DEFAULT: &str = "Default";
 pub const NONE_INSTALLED: &str = "None installed";
-/// The default column of a runtime with a default but none set.
-pub const NO_DEFAULT: &str = "Not set";
-pub const DEFAULT_HINT: &str = "Used where nothing else picks a version: no site setting, \
-     no version file, and no composer.json or package.json.";
-/// The default column of Composer and Caddy.
-pub const NEWEST: &str = "Newest installed";
-pub const NEWEST_HINT: &str =
-    "This program has no default version: the newest installed one is used.";
-pub const COLUMN_INSTALL: &str = "Install";
-/// In an empty version field.
+/// In an empty version field of the install dialog.
 pub const VERSION_FIELD_EMPTY: &str = "newest";
+/// The name of the version field, for a screen reader.
+pub const VERSION_FIELD_LABEL: &str = "Version";
+/// The confirm button of the install dialog.
 pub const INSTALL_BUTTON: &str = "Install";
-pub const INSTALL_HINT: &str = "Download and install this version from Marsa's signed version \
-     list. With an empty field: the newest stable version.";
+/// Over the button that opens the install dialog.
+pub const INSTALL_HINT: &str = "Download and install a version from Marsa's signed version \
+     list. Leave the version empty for the newest stable one.";
 /// Over a disabled Install button.
 pub const INSTALL_BUSY_HINT: &str = "Wait for the install or uninstall that runs to end.";
-/// Opens the list of installed versions to uninstall.
+/// The row of a version's menu that asks to uninstall it.
 pub const UNINSTALL_BUTTON: &str = "Uninstall…";
-pub const UNINSTALL_HINT: &str = "Choose an installed version to delete from Marsa's data folder.";
-/// Over a disabled Uninstall list.
+pub const UNINSTALL_HINT: &str = "Delete this version from Marsa's data folder.";
+/// Over a disabled Uninstall row while another install or removal runs.
 pub const UNINSTALL_BUSY_HINT: &str = "Wait for the install or removal that runs to end.";
+
+// The Runtimes screen: the list, the details, and the Installed table (task
+// M5-D8).
+
+pub const INSTALLED: &str = "Installed";
+pub const INSTALL_A_VERSION: &str = "Install a version…";
+pub const COLUMN_VERSION: &str = "Version";
+pub const COLUMN_USED_BY: &str = "Used by";
+pub const COLUMN_STATUS: &str = "Status";
+/// The column of the row menus (⋯).
+pub const COLUMN_MORE: &str = "More";
+/// The tag of the version the default picks.
+pub const TAG_DEFAULT: &str = "Default";
+/// The tag of the version Marsa uses when its runtime has no default.
+pub const TAG_IN_USE: &str = "In use";
+pub const NO_SITES: &str = "No sites";
+/// After the heading "Default PHP".
+pub const DEFAULT_RUNTIME_HINT: &str = "used where a project does not ask for a version";
+/// The heading of a runtime with no default to pick.
+pub const IN_USE_HEADING: &str = "In use";
+
+/// The heading of the large version buttons: "Default PHP".
+pub fn default_heading(name: &str) -> String {
+    format!("Default {name}")
+}
+
+/// After the heading of a runtime with no default: why there is no picker.
+pub fn newest_is_used(name: &str) -> String {
+    format!("{name} has no default to pick: the newest installed version is used")
+}
+
+/// The line under a runtime in the list: its default and how many versions.
+pub fn summary_default(default: &str, installed: usize) -> String {
+    format!("Default {default}, {installed} installed")
+}
+
+/// The line under a runtime whose default picks no installed version.
+pub fn summary_no_default(installed: usize) -> String {
+    format!("No default, {installed} installed")
+}
+
+/// The line under a runtime with no default: the version in use.
+pub fn summary_newest(newest: &Version) -> String {
+    format!("{newest}, newest is used")
+}
+
+/// The empty state of the Installed list.
+pub fn no_runtime_installed(name: &str) -> String {
+    format!("No {name} installed yet.")
+}
+
+/// The button of the empty state: "Install PHP…".
+pub fn install_runtime(name: &str) -> String {
+    format!("Install {name}…")
+}
+
+/// The title of the install dialog.
+pub fn install_dialog_title(name: &str) -> String {
+    format!("Install a {name} version")
+}
+
+/// The name of a version's menu button, for a screen reader and its tooltip.
+pub fn more_for(name: &str, version: &Version) -> String {
+    format!("More for {name} {version}")
+}
+
+/// The "Used by" cell of a version: how many sites run it, and which ones
+/// when there are few.
+pub fn sites_text(names: &[&str]) -> String {
+    match names {
+        [] => NO_SITES.to_owned(),
+        [site] => format!("1 site: {site}"),
+        // A long list does not fit its cell: the count says enough.
+        names if names.len() > SITES_NAMED => format!("{} sites", names.len()),
+        names => format!("{} sites: {}", names.len(), names.join(", ")),
+    }
+}
+
+/// The most sites named in a "Used by" cell.
+const SITES_NAMED: usize = 3;
+
+/// Why a version cannot be uninstalled: it is the default.
+pub fn uninstall_off_default(name: &str) -> String {
+    format!("It is the default {name}. Pick another default first.")
+}
+
+/// Why a version cannot be uninstalled: sites are set to it.
+pub fn uninstall_off_sites(name: &str, sites: &[&str]) -> String {
+    match sites {
+        [site] => {
+            format!("The site {site}.{TLD} is set to it. Pick another {name} version for it first.")
+        }
+        sites => {
+            let names: Vec<String> = sites.iter().map(|site| format!("{site}.{TLD}")).collect();
+            format!(
+                "The sites {} are set to it. Pick another {name} version for them first.",
+                names.join(", ")
+            )
+        }
+    }
+}
 
 // Xdebug (`GET` and `PUT /v1/php/xdebug`, task M5-11).
 
 pub const XDEBUG: &str = "Xdebug";
+/// Under the Xdebug switch.
+pub const XDEBUG_CAPTION: &str =
+    "Loads Xdebug in every installed PHP that has it, in sites and in the terminal.";
+/// Over the disabled switch before the state is read.
+pub const XDEBUG_UNREAD: &str = "Marsa has not read the Xdebug state yet.";
+/// Over the disabled switch while a change runs.
+pub const XDEBUG_BUSY: &str = "Marsa is changing Xdebug. Wait for it to end.";
 pub const XDEBUG_HINT: &str = "Load Xdebug in every installed PHP that has it, in sites and in \
      the terminal. PHP runs two to four times slower while it is on.";
 /// Under the Xdebug box while it is on.
@@ -940,25 +1038,6 @@ pub const fn pill_state_word(state: PillState) -> &'static str {
         PillState::Waiting => "Waiting",
         PillState::Stopped => "Stopped",
         PillState::Starting => "Starting",
-    }
-}
-
-/// The installed column of the Runtimes section: `8.3.27, 8.4.23`.
-pub fn installed_text(versions: &[Version]) -> String {
-    if versions.is_empty() {
-        return NONE_INSTALLED.to_owned();
-    }
-    let texts: Vec<String> = versions.iter().map(ToString::to_string).collect();
-    texts.join(", ")
-}
-
-/// The closed default list of PHP or Node: the version the default picks,
-/// the saved text when it picks none, or [`NO_DEFAULT`].
-pub fn default_text(chosen: Option<&Version>, saved: Option<&str>) -> String {
-    match (chosen, saved) {
-        (Some(version), _) => version.to_string(),
-        (None, Some(text)) => format!("{text} (not installed)"),
-        (None, None) => NO_DEFAULT.to_owned(),
     }
 }
 
@@ -1973,16 +2052,45 @@ mod tests {
     }
 
     #[test]
-    fn the_runtimes_columns() {
+    fn the_runtimes_screen_words() {
         assert_eq!(runtime_name(Runtime::Node), "Node.js");
-        assert_eq!(installed_text(&[]), NONE_INSTALLED);
+        assert_eq!(default_heading("PHP"), "Default PHP");
+        assert_eq!(summary_default("8.4", 4), "Default 8.4, 4 installed");
+        assert_eq!(summary_no_default(2), "No default, 2 installed");
+        assert_eq!(summary_newest(&v("2.8.4")), "2.8.4, newest is used");
+        assert_eq!(no_runtime_installed("PHP"), NO_PHP_YET);
+        assert_eq!(install_runtime("Caddy"), "Install Caddy…");
+        assert_eq!(install_dialog_title("Node.js"), "Install a Node.js version");
+        assert_eq!(more_for("PHP", &v("8.4.27")), "More for PHP 8.4.27");
+        assert!(UNINSTALL_BUTTON.ends_with('…') && INSTALL_A_VERSION.ends_with('…'));
+    }
+
+    #[test]
+    fn the_used_by_cell_counts_the_sites_and_names_a_few() {
+        assert_eq!(sites_text(&[]), "No sites");
+        assert_eq!(sites_text(&["shop"]), "1 site: shop");
         assert_eq!(
-            installed_text(&[v("8.3.27"), v("8.4.23")]),
-            "8.3.27, 8.4.23"
+            sites_text(&["legacy-crm", "wiki"]),
+            "2 sites: legacy-crm, wiki"
         );
-        assert_eq!(default_text(Some(&v("8.4.23")), Some("8.4")), "8.4.23");
-        assert_eq!(default_text(None, Some("8.2")), "8.2 (not installed)");
-        assert_eq!(default_text(None, None), NO_DEFAULT);
+        assert_eq!(sites_text(&["a", "b", "c"]), "3 sites: a, b, c");
+        assert_eq!(sites_text(&["a", "b", "c", "d"]), "4 sites");
+    }
+
+    #[test]
+    fn a_version_that_cannot_be_uninstalled_says_why() {
+        assert_eq!(
+            uninstall_off_default("PHP"),
+            "It is the default PHP. Pick another default first."
+        );
+        assert_eq!(
+            uninstall_off_sites("PHP", &["wiki"]),
+            "The site wiki.test is set to it. Pick another PHP version for it first."
+        );
+        assert_eq!(
+            uninstall_off_sites("PHP", &["legacy-crm", "wiki"]),
+            "The sites legacy-crm.test, wiki.test are set to it. Pick another PHP version for them first."
+        );
     }
 
     // -- Installs, setup, and settings (task M5-10) --
