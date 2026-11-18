@@ -5,8 +5,10 @@
 //! | --- | --- |
 //! | `marsad` answers `/v1/health` | it does not |
 //! | PHP and Caddy are installed, with a default PHP | one is missing |
+//! | the Microsoft Visual C++ runtime PHP needs (Windows, ADR 0019) | Windows reports none, or one older than 14.44 |
 //! | Caddy runs | it does not |
-//! | `doctor-<hex>.test` resolves to `127.0.0.1` (macOS) | it does not, or to another address |
+//! | `doctor-<hex>.test` resolves to `127.0.0.1` (macOS, and Linux on the `marsa0` link) | it does not, or to another address |
+//! | every site has its line in Marsa's block of `/etc/hosts` (Linux on the hosts way) | one has none, or the block is gone |
 //! | ports 80 and 443 reach Caddy (macOS) | another program holds one, or one misses Caddy |
 //! | Marsa's CA is trusted (macOS) | it is not |
 //! | `shims/` is in `PATH` before any other `php` | it is not |
@@ -25,6 +27,13 @@
 //! with the greeting of Marsa's Caddy, and, once a site is secure,
 //! `127.0.0.1:443` takes a connection. Nothing listens on 80 or 443 then, so
 //! only the `pf` redirect (ADR 0008) can answer there.
+//!
+//! On Linux the `.test` check follows the way setup took (ADR 0014, task
+//! M4-18k3). Where this data folder's setup wrote Marsa's block in
+//! `/etc/hosts` (the marker `<data>/hosts-block`), each site needs its line
+//! there; a random name never resolves on that way. Elsewhere the random
+//! name goes through systemd-resolved and the `marsa0` link. Ports and
+//! trust have no Linux check yet.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -38,7 +47,7 @@ use marsa_core::doctor::{self, Check, Installed, Pass, Ports, Problem, Skip, Ver
 use marsa_core::platform::probe;
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::{Runtime, RuntimesDir};
-use marsa_core::types::{Health, ServiceState};
+use marsa_core::types::{Health, ServiceState, Site};
 use tokio_util::sync::CancellationToken;
 
 use super::daemon::{ClientFailure, failure};
@@ -46,7 +55,7 @@ use super::setup::port_held;
 use super::sites::printable;
 use super::strings::{self, Details};
 use crate::daemon::caddy::CADDY_ID;
-use crate::daemon::setup_api::{RealRunner, Setup, user_trust};
+use crate::daemon::setup_api::{RealRunner, Setup, linux_dns, user_trust};
 
 /// How long the system resolver may take for the `.test` name.
 const DNS_LIMIT: Duration = Duration::from_secs(5);
@@ -64,12 +73,15 @@ struct FromDaemon {
     caddy: Option<ServiceState>,
     /// Whether any site is secure. `None` if not known.
     secure_site: Option<bool>,
+    /// The host names of the sites. `None` if not known.
+    site_names: Option<Vec<String>>,
 }
 
 /// Runs the checks in order and prints each line as soon as it is known.
 pub async fn run(data_dir: &Path) -> ExitCode {
     let platform = Platform::current();
     let macos = matches!(platform, Some(Platform::DarwinArm64 | Platform::DarwinX64));
+    let linux = matches!(platform, Some(Platform::LinuxX64 | Platform::LinuxArm64));
     let windows = platform == Some(Platform::WindowsX64);
     let mut failed = false;
     let mut show = |check: Check, verdict: Verdict| {
@@ -86,6 +98,10 @@ pub async fn run(data_dir: &Path) -> ExitCode {
         .as_ref()
         .is_ok_and(|found| !found.is_empty());
     show(Check::Runtimes, doctor::runtimes(&installed));
+    // The official PHP for Windows needs Microsoft's runtime (ADR 0019).
+    if windows {
+        show(Check::VcRuntime, doctor::vc_runtime(vc_runtime_version()));
+    }
     let caddy = daemon.caddy.as_ref();
     show(Check::Caddy, doctor::caddy(running, caddy, caddy_installed));
     // The checks of the redirect, the resolver file, and the user's trust
@@ -98,6 +114,12 @@ pub async fn run(data_dir: &Path) -> ExitCode {
         let facts = ports(&name, caddy_running, daemon.secure_site);
         show(Check::Ports, doctor::ports(facts));
         show(Check::Trust, trust(data_dir));
+    } else if linux {
+        let names = daemon.site_names.as_deref();
+        show(Check::Dns, linux_names(data_dir, running, names));
+        for check in [Check::Ports, Check::Trust] {
+            show(check, Verdict::Skip(Skip::NotOnThisSystem));
+        }
     } else {
         for check in [Check::Dns, Check::Ports, Check::Trust] {
             show(check, Verdict::Skip(Skip::NotOnThisSystem));
@@ -119,6 +141,7 @@ async fn ask_daemon(data_dir: &Path) -> FromDaemon {
         health: Err(failure(&err, data_dir, None).code),
         caddy: None,
         secure_site: None,
+        site_names: None,
     };
     let client = match DaemonClient::connect(data_dir) {
         Ok(client) => client,
@@ -131,12 +154,16 @@ async fn ask_daemon(data_dir: &Path) -> FromDaemon {
     let caddy = answer(client.services().await, data_dir)
         .and_then(|services| services.into_iter().find(|service| service.id == CADDY_ID))
         .map(|service| service.state);
-    let secure_site = answer(client.sites().await, data_dir)
+    let sites = answer(client.sites().await, data_dir);
+    let secure_site = sites
+        .as_ref()
         .map(|list| list.sites.iter().any(|site| site.secure));
+    let site_names = sites.map(|list| list.sites.iter().map(Site::host).collect());
     FromDaemon {
         health: Ok((health, client.port())),
         caddy,
         secure_site,
+        site_names,
     }
 }
 
@@ -161,6 +188,21 @@ fn installed(data_dir: &Path) -> Installed {
             .map(|global| global.php.default)
             .map_err(|err| err.code().to_owned()),
     }
+}
+
+/// Linux: the hosts file where this data folder's setup wrote Marsa's
+/// block, else a random name through the `marsa0` link. Reads only: the
+/// marker, and `/etc/hosts`, which every user may read.
+fn linux_names(data_dir: &Path, running: bool, sites: Option<&[String]>) -> Verdict {
+    if linux_dns::marker(data_dir).is_file() {
+        let block = linux_dns::read_block(Path::new(linux_dns::HOSTS_FILE));
+        return doctor::hosts(block.as_ref(), sites);
+    }
+    let name = doctor::probe_name(probe::random());
+    let answer = probe::resolve(&name, DNS_LIMIT)
+        .map_err(|err| tracing::debug!(name, error = %err, "the .test name did not resolve"))
+        .ok();
+    doctor::link(running, answer.as_deref())
 }
 
 fn dns(name: &str, running: bool) -> Verdict {
@@ -228,6 +270,15 @@ fn log_path(data_dir: &Path) -> PathBuf {
     data_dir.join("logs").join("marsad.log")
 }
 
+/// The Visual C++ runtime that Windows reports; none elsewhere.
+fn vc_runtime_version() -> Option<(u32, u32, u32)> {
+    // `#[cfg]` outside `platform`: the registry is Windows'.
+    #[cfg(windows)]
+    return marsa_core::platform::windows::vc_runtime_version();
+    #[cfg(not(windows))]
+    None
+}
+
 /// The line of one check. `windows`: the PATH fixes speak of the user's
 /// PATH setting, not of `~/.zshrc`.
 pub fn render(check: Check, verdict: &Verdict, data_dir: &Path, windows: bool) -> String {
@@ -249,8 +300,10 @@ fn passed(pass: &Pass, data_dir: &Path) -> String {
         Pass::Runtimes { default, version } => {
             strings::doctor_runtimes_ok(&printable(default), &version.to_string())
         }
+        Pass::VcRuntime { version } => strings::doctor_vc_runtime_ok(&printable(version)),
         Pass::Caddy => strings::DOCTOR_CADDY_OK.to_owned(),
         Pass::Dns => strings::DOCTOR_DNS_OK.to_owned(),
+        Pass::Hosts => strings::DOCTOR_HOSTS_OK.to_owned(),
         Pass::Ports => strings::DOCTOR_PORTS_OK.to_owned(),
         Pass::Trust => strings::DOCTOR_TRUST_OK.to_owned(),
         Pass::Path => strings::DOCTOR_PATH_OK.to_owned(),
@@ -303,6 +356,15 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
             ClientFailure::new(code, data_dir, Some(CADDY_ID)).message,
         ),
         Problem::DnsNoAnswer => pair(strings::DOCTOR_DNS_NO_ANSWER, strings::DOCTOR_DNS_SETUP),
+        Problem::LinkNoAnswer => pair(strings::DOCTOR_DNS_NO_ANSWER, strings::DOCTOR_LINK_SETUP),
+        Problem::HostsMissing { names } => {
+            let names: Vec<String> = names.iter().map(|name| printable(name)).collect();
+            (
+                strings::doctor_hosts_missing(&names),
+                strings::DOCTOR_HOSTS_SETUP.to_owned(),
+            )
+        }
+        Problem::HostsBlockGone => pair(strings::DOCTOR_HOSTS_GONE, strings::DOCTOR_HOSTS_BACK),
         Problem::DnsWrongAddress { addresses } => {
             let list: Vec<String> = addresses.iter().map(ToString::to_string).collect();
             (
@@ -323,6 +385,11 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
             strings::DOCTOR_PORTS_SETUP.to_owned(),
         ),
         Problem::CaUntrusted => pair(strings::DOCTOR_UNTRUSTED, strings::DOCTOR_TRUST_SETUP),
+        Problem::VcRuntimeMissing => pair(strings::DOCTOR_VC_MISSING, strings::DOCTOR_VC_INSTALL),
+        Problem::VcRuntimeOld { found } => (
+            strings::doctor_vc_old(&printable(found)),
+            strings::DOCTOR_VC_INSTALL.to_owned(),
+        ),
         Problem::ShimsNotInPath { shims } => (
             strings::doctor_shims_missing(shims),
             strings::doctor_add_shims(shims, windows),
@@ -382,6 +449,41 @@ mod tests {
                 log_path(&data).display()
             )
         );
+    }
+
+    /// Linux (task M4-18k3): the hosts way and the `marsa0` link.
+    #[test]
+    fn linux_says_how_its_names_resolve_and_how_to_fix_them() {
+        let pass = render(Check::Dns, &Verdict::Pass(Pass::Hosts), &data(), false);
+        assert_eq!(pass, "✓ Every site has its line in /etc/hosts.");
+        let names =
+            |count: usize| -> Vec<String> { (1..=count).map(|i| format!("s{i}.test")).collect() };
+        assert_eq!(
+            fail(Problem::HostsMissing { names: names(1) }),
+            "✗ s1.test is not in /etc/hosts yet, so it does not open.\n  Fix: Run \"marsa \
+             setup\" to add them, with one password prompt. From then on \"marsa park\" and \
+             \"marsa link\" add new sites themselves; a site that appears in a parked folder \
+             waits for one of these commands."
+        );
+        let many = fail(Problem::HostsMissing { names: names(7) });
+        assert!(
+            many.starts_with(
+                "✗ s1.test, s2.test, s3.test, s4.test, s5.test, and 2 more are not in /etc/hosts"
+            ),
+            "{many}"
+        );
+        let gone = fail(Problem::HostsBlockGone);
+        assert!(
+            gone.starts_with("✗ Marsa's lines are gone from /etc/hosts"),
+            "{gone}"
+        );
+        assert!(
+            gone.contains("Fix: Run \"marsa setup\" to put them back."),
+            "{gone}"
+        );
+        let link = fail(Problem::LinkNoAnswer);
+        assert!(link.contains("resolvectl status marsa0"), "{link}");
+        assert!(!link.contains("/etc/resolver"), "{link}");
     }
 
     #[test]
@@ -557,5 +659,29 @@ mod tests {
             "- Marsa's certificate authority: not checked. It does not exist yet: Caddy makes \
              it when it first starts. Run \"marsa setup\" to make it and trust it."
         );
+    }
+
+    /// Windows: the runtime's lines, with Microsoft's link in the fix.
+    #[test]
+    fn the_vc_runtime_lines_name_the_version_and_the_link() {
+        let data = data();
+        let pass = Verdict::Pass(Pass::VcRuntime {
+            version: "14.44.35211".to_owned(),
+        });
+        let text = render(Check::VcRuntime, &pass, &data, true);
+        assert!(text.contains("14.44.35211"), "{text}");
+        for problem in [
+            Problem::VcRuntimeMissing,
+            Problem::VcRuntimeOld {
+                found: "14.29.30133".to_owned(),
+            },
+        ] {
+            let text = render(Check::VcRuntime, &Verdict::Fail(problem), &data, true);
+            assert!(
+                text.contains("https://aka.ms/vs/17/release/vc_redist.x64.exe"),
+                "{text}"
+            );
+            assert!(text.contains("Fix:"), "{text}");
+        }
     }
 }

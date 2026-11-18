@@ -1573,6 +1573,7 @@ pub fn doctor_skip(check: Check, skip: Skip) -> String {
     let check = match check {
         Check::Daemon => "marsad",
         Check::Runtimes => "PHP and Caddy",
+        Check::VcRuntime => "The Microsoft Visual C++ runtime",
         Check::Caddy => "Caddy",
         Check::Dns => ".test names",
         Check::Ports => "Ports 80 and 443",
@@ -1595,6 +1596,21 @@ pub fn doctor_skip(check: Check, skip: Skip) -> String {
     format!("- {check}: not checked. {reason}")
 }
 
+/// Windows: Microsoft's runtime that the official PHP needs (ADR 0019).
+pub fn doctor_vc_runtime_ok(version: &str) -> String {
+    format!("The Microsoft Visual C++ runtime {version} is installed.")
+}
+
+pub const DOCTOR_VC_MISSING: &str = "Windows does not report the Microsoft Visual C++ runtime \
+     (x64), which PHP needs.";
+
+pub fn doctor_vc_old(found: &str) -> String {
+    format!("The Microsoft Visual C++ runtime {found} is too old: PHP needs 14.44 or newer.")
+}
+
+pub const DOCTOR_VC_INSTALL: &str = "Install the latest Microsoft Visual C++ Redistributable \
+     (x64) from https://aka.ms/vs/17/release/vc_redist.x64.exe, then run \"marsa doctor\" again.";
+
 pub fn doctor_runtimes_ok(default: &str, version: &str) -> String {
     if default == version {
         format!("PHP and Caddy are installed, and PHP {default} is the default.")
@@ -1605,6 +1621,33 @@ pub fn doctor_runtimes_ok(default: &str, version: &str) -> String {
 
 pub const DOCTOR_CADDY_OK: &str = "Caddy is running.";
 pub const DOCTOR_DNS_OK: &str = ".test names resolve to 127.0.0.1.";
+/// Linux on the `marsa0` link (task M4-18k3).
+pub const DOCTOR_LINK_SETUP: &str = "Run \"marsa setup\": it sends .test names to Marsa through \
+     systemd-resolved. If they still do not resolve, \"resolvectl status marsa0\" shows whether \
+     systemd-resolved sends .test names to Marsa.";
+/// Linux on the hosts way (task M4-18k3).
+pub const DOCTOR_HOSTS_OK: &str = "Every site has its line in /etc/hosts.";
+pub const DOCTOR_HOSTS_SETUP: &str = "Run \"marsa setup\" to add them, with one password \
+     prompt. From then on \"marsa park\" and \"marsa link\" add new sites themselves; a site \
+     that appears in a parked folder waits for one of these commands.";
+pub const DOCTOR_HOSTS_GONE: &str = "Marsa's lines are gone from /etc/hosts, so .test names do \
+     not resolve. Another program may have written the file again, as WSL and cloud-init do at \
+     boot.";
+pub const DOCTOR_HOSTS_BACK: &str = "Run \"marsa setup\" to put them back. If they go again \
+     after each restart, stop the program that rewrites /etc/hosts (in WSL, \
+     generateHosts=false in /etc/wsl.conf).";
+
+/// The sites whose names are not in `/etc/hosts`; at most five are named.
+pub fn doctor_hosts_missing(names: &[String]) -> String {
+    let mut list = names.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    if names.len() > 5 {
+        list.push_str(&format!(", and {} more", names.len() - 5));
+    }
+    match names.len() {
+        1 => format!("{list} is not in /etc/hosts yet, so it does not open."),
+        _ => format!("{list} are not in /etc/hosts yet, so they do not open."),
+    }
+}
 pub const DOCTOR_PORTS_OK: &str = "Ports 80 and 443 reach Caddy.";
 pub const DOCTOR_TRUST_OK: &str = "Marsa's certificate authority is trusted.";
 pub const DOCTOR_PATH_OK: &str = "Marsa's shims come first in PATH.";

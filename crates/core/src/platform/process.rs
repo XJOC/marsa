@@ -149,21 +149,22 @@ pub async fn identity(pid: u32) -> Liveness {
     if pid == 0 {
         return Liveness::Unknown;
     }
-    let dir = Path::new("/proc").join(pid.to_string());
+    proc_identity(&Path::new("/proc").join(pid.to_string()))
+}
+
+/// [`identity`] from `dir`, the process's folder in `/proc`.
+#[cfg(target_os = "linux")]
+fn proc_identity(dir: &Path) -> Liveness {
     let stat = || match fs::read_to_string(dir.join("stat")) {
         Ok(text) => crate::orphan::parse_proc_stat(&text).ok_or(Liveness::Unknown),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Err(Liveness::Gone),
-        Err(_) => Err(Liveness::Unknown),
+        Err(err) => Err(read_failed(&err, dir)),
     };
     let read = || -> Result<Liveness, Liveness> {
         let crate::orphan::ProcStat { state, started, .. } = stat()?;
         if matches!(state, 'Z' | 'X') {
             return Ok(Liveness::Gone);
         }
-        let exe = fs::read_link(dir.join("exe")).map_err(|err| match err.kind() {
-            io::ErrorKind::NotFound => Liveness::Gone,
-            _ => Liveness::Unknown,
-        })?;
+        let exe = fs::read_link(dir.join("exe")).map_err(|err| read_failed(&err, dir))?;
         // Read again: the pid may have changed hands between the two reads.
         if stat()?.started != started {
             return Ok(Liveness::Unknown);
@@ -175,6 +176,23 @@ pub async fn identity(pid: u32) -> Liveness {
     };
     match read() {
         Ok(state) | Err(state) => state,
+    }
+}
+
+/// What a failed read in `dir` says. A process that is reaped during a read
+/// may fail it with another error than "not found" (task M4-25c): `stat`
+/// opened before the reap and read after gives ESRCH, and the `exe` link
+/// found before it gives EACCES (ENOENT on newer kernels). So such an error
+/// is `Gone` once `dir` itself is not found any more: only where a new
+/// [`identity`] a moment later would say `Gone` too. Anything else stays
+/// `Unknown`: a pid that changed hands since then has a folder again.
+#[cfg(target_os = "linux")]
+fn read_failed(err: &io::Error, dir: &Path) -> Liveness {
+    let not_found = |err: &io::Error| err.kind() == io::ErrorKind::NotFound;
+    if not_found(err) || fs::symlink_metadata(dir).is_err_and(|lookup| not_found(&lookup)) {
+        Liveness::Gone
+    } else {
+        Liveness::Unknown
     }
 }
 
@@ -782,6 +800,71 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(identity(pid).await, Liveness::Gone);
+    }
+
+    /// `proc_identity` on a fake `/proc/<pid>` folder (task M4-25c).
+    #[cfg(target_os = "linux")]
+    mod proc_folder {
+        use super::*;
+
+        // `pid (comm) state ppid`, 17 more fields, then the start time.
+        const STAT: &str = "4145 (php-fpm) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 98765 0 0\n";
+        const EXE: &str = "/opt/php/sbin/php-fpm";
+
+        fn folder(stat: &str) -> tempfile::TempDir {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join("stat"), stat).unwrap();
+            std::os::unix::fs::symlink(EXE, dir.path().join("exe")).unwrap();
+            dir
+        }
+
+        #[test]
+        fn a_readable_folder_is_alive() {
+            let dir = folder(STAT);
+            let want = Liveness::Alive {
+                exe: EXE.into(),
+                started: "98765".into(),
+            };
+            assert_eq!(proc_identity(dir.path()), want);
+        }
+
+        #[test]
+        fn a_zombie_and_a_missing_folder_are_gone() {
+            let zombie = folder(&STAT.replace(" S ", " Z "));
+            assert_eq!(proc_identity(zombie.path()), Liveness::Gone);
+            let missing = zombie.path().join("4146");
+            assert_eq!(proc_identity(&missing), Liveness::Gone);
+        }
+
+        #[test]
+        fn a_failed_read_in_a_folder_that_is_still_there_is_unknown() {
+            // `exe` is a file, not a link: `read_link` fails with EINVAL.
+            let dir = folder(STAT);
+            fs::remove_file(dir.path().join("exe")).unwrap();
+            fs::write(dir.path().join("exe"), "").unwrap();
+            assert_eq!(proc_identity(dir.path()), Liveness::Unknown);
+            // `stat` is a folder: reading it fails with EISDIR.
+            let dir = folder(STAT);
+            fs::remove_file(dir.path().join("stat")).unwrap();
+            fs::create_dir(dir.path().join("stat")).unwrap();
+            assert_eq!(proc_identity(dir.path()), Liveness::Unknown);
+        }
+
+        #[test]
+        fn a_failed_read_is_gone_once_the_folder_is_gone() {
+            // What a reap during the read gives: ESRCH (3) from `stat`, EACCES
+            // from the `exe` link.
+            let reaped = [
+                io::Error::from_raw_os_error(3),
+                io::Error::from(io::ErrorKind::PermissionDenied),
+            ];
+            let dir = tempfile::tempdir().unwrap();
+            let gone = dir.path().join("4145");
+            for err in &reaped {
+                assert_eq!(read_failed(err, &gone), Liveness::Gone, "{err}");
+                assert_eq!(read_failed(err, dir.path()), Liveness::Unknown, "{err}");
+            }
+        }
     }
 
     // The systems where `real_identity` reads a process.

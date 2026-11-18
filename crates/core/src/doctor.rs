@@ -8,6 +8,7 @@
 //! itself, so the tests run no program and open no socket. The text of each
 //! verdict is in the CLI's strings module (AGENTS.md section 9).
 
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,8 @@ use crate::types::{Health, PortHolder, ServiceState};
 pub enum Check {
     Daemon,
     Runtimes,
+    /// Windows only: the Microsoft Visual C++ runtime PHP needs (ADR 0019).
+    VcRuntime,
     Caddy,
     Dns,
     Ports,
@@ -55,8 +58,14 @@ pub enum Pass {
         default: String,
         version: Version,
     },
+    /// The installed runtime's version, `14.44.35211`.
+    VcRuntime {
+        version: String,
+    },
     Caddy,
     Dns,
+    /// Linux on the hosts way: every site has its line in the hosts file.
+    Hosts,
     Ports,
     Trust,
     Path,
@@ -99,9 +108,21 @@ pub enum Problem {
         code: String,
     },
     DnsNoAnswer,
+    /// Linux on the `marsa0` link: a `.test` name did not resolve. Its fix
+    /// names the link, not macOS's resolver file.
+    LinkNoAnswer,
     DnsWrongAddress {
         addresses: Vec<IpAddr>,
     },
+    /// Linux on the hosts way: the sites whose names are not in Marsa's
+    /// block yet, sorted (task M4-18k3).
+    HostsMissing {
+        names: Vec<String>,
+    },
+    /// Linux: this data folder's setup wrote Marsa's block in the hosts
+    /// file, and it is gone. Another program may have written the file
+    /// again (WSL and cloud-init do at boot).
+    HostsBlockGone,
     PortsHeld {
         holders: Vec<PortHolder>,
     },
@@ -110,6 +131,14 @@ pub enum Problem {
         ports: Vec<u16>,
     },
     CaUntrusted,
+    /// Windows: no Microsoft Visual C++ runtime (x64), so the official PHP
+    /// does not start.
+    VcRuntimeMissing,
+    /// Windows: a runtime older than [`VC_RUNTIME_MIN`]: PHP 8.4 and 8.5
+    /// need a newer one.
+    VcRuntimeOld {
+        found: String,
+    },
     ShimsNotInPath {
         shims: PathBuf,
     },
@@ -127,7 +156,8 @@ pub enum Problem {
 /// Why a check did not run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
-    /// Marsa has no such check on this system yet (only macOS for now).
+    /// Marsa has no such check on this system yet: ports and trust on
+    /// Linux, and every system check on Windows.
     NotOnThisSystem,
     NeedsDaemon,
     NeedsCaddy,
@@ -182,6 +212,29 @@ pub fn daemon(answer: Result<(Health, u16), String>) -> Verdict {
             fail(Problem::DaemonNotRunning)
         }
         Err(code) => fail(Problem::DaemonError { code }),
+    }
+}
+
+/// The oldest Visual C++ runtime the official PHP builds run on: 8.4 and
+/// 8.5 are built with MSVC 14.44, and Microsoft asks for a runtime of the
+/// same version or later (ADR 0019). Raise it when `recipes/pins.toml`
+/// moves to PHP built with a newer MSVC (vs18 is 14.5x): `doctor` would
+/// pass on an older runtime that PHP fails on.
+pub const VC_RUNTIME_MIN: (u32, u32) = (14, 44);
+
+/// Windows: the Visual C++ runtime that Windows reports, `(major, minor,
+/// build)`, or `None` when it reports none.
+pub fn vc_runtime(found: Option<(u32, u32, u32)>) -> Verdict {
+    match found {
+        None => Verdict::Fail(Problem::VcRuntimeMissing),
+        Some((major, minor, build)) => {
+            let version = format!("{major}.{minor}.{build}");
+            if (major, minor) >= VC_RUNTIME_MIN {
+                Verdict::Pass(Pass::VcRuntime { version })
+            } else {
+                Verdict::Fail(Problem::VcRuntimeOld { found: version })
+            }
+        }
     }
 }
 
@@ -266,6 +319,38 @@ pub fn dns(daemon_running: bool, answer: Option<&[IpAddr]>) -> Verdict {
     } else {
         fail(Problem::DnsNoAnswer)
     }
+}
+
+/// Linux on the `marsa0` link: [`dns`], with the link's own fix.
+pub fn link(daemon_running: bool, answer: Option<&[IpAddr]>) -> Verdict {
+    match dns(daemon_running, answer) {
+        Verdict::Fail(Problem::DnsNoAnswer) => fail(Problem::LinkNoAnswer),
+        verdict => verdict,
+    }
+}
+
+/// Linux on the hosts way (ADR 0014, task M4-18k3): `block`, the names in
+/// Marsa's block of the hosts file (`None`: no block); `sites`, the host
+/// names of the sites (`None`: the daemon gave no list). Every site needs
+/// its line; a name in the block that is no site does no harm.
+pub fn hosts(block: Option<&BTreeSet<String>>, sites: Option<&[String]>) -> Verdict {
+    let Some(block) = block else {
+        return fail(Problem::HostsBlockGone);
+    };
+    let Some(sites) = sites else {
+        return Verdict::Skip(Skip::NeedsDaemon);
+    };
+    let mut names: Vec<String> = sites
+        .iter()
+        .filter(|name| !block.contains(*name))
+        .cloned()
+        .collect();
+    if names.is_empty() {
+        return Verdict::Pass(Pass::Hosts);
+    }
+    names.sort();
+    names.dedup();
+    fail(Problem::HostsMissing { names })
 }
 
 /// Ports 80 and 443 reach Marsa's Caddy through the `pf` redirect (ADR
@@ -739,5 +824,75 @@ mod tests {
         let name = probe_name(u64::MAX);
         let label = name.strip_suffix(".test").unwrap();
         assert!(crate::sites::validate_name(label).is_ok(), "{name}");
+    }
+
+    #[test]
+    fn the_vc_runtime_must_be_there_and_new_enough() {
+        assert_eq!(vc_runtime(None), Verdict::Fail(Problem::VcRuntimeMissing));
+        let old = Verdict::Fail(Problem::VcRuntimeOld {
+            found: "14.29.30133".to_owned(),
+        });
+        assert_eq!(vc_runtime(Some((14, 29, 30133))), old);
+        let just_below = Verdict::Fail(Problem::VcRuntimeOld {
+            found: "14.43.99".to_owned(),
+        });
+        assert_eq!(vc_runtime(Some((14, 43, 99))), just_below);
+        for (found, shown) in [
+            ((14, 44, 0), "14.44.0"),
+            ((14, 44, 35211), "14.44.35211"),
+            ((14, 52, 0), "14.52.0"),
+        ] {
+            let pass = Verdict::Pass(Pass::VcRuntime {
+                version: shown.to_owned(),
+            });
+            assert_eq!(vc_runtime(Some(found)), pass);
+        }
+    }
+
+    /// Task M4-18k3: the hosts way on Linux.
+    #[test]
+    fn every_site_needs_its_line_in_the_hosts_file() {
+        let set = |names: &[&str]| -> BTreeSet<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let list = |names: &[&str]| -> Vec<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let block = set(&["blog.test", "old.test"]);
+        assert_eq!(
+            hosts(Some(&block), Some(&list(&["blog.test"]))),
+            Verdict::Pass(Pass::Hosts)
+        );
+        assert_eq!(hosts(Some(&block), Some(&[])), Verdict::Pass(Pass::Hosts));
+        assert_eq!(
+            hosts(
+                Some(&block),
+                Some(&list(&["shop.test", "blog.test", "api.test"]))
+            ),
+            Verdict::Fail(Problem::HostsMissing {
+                names: list(&["api.test", "shop.test"])
+            })
+        );
+        assert_eq!(
+            hosts(None, Some(&list(&["blog.test"]))),
+            Verdict::Fail(Problem::HostsBlockGone)
+        );
+        assert_eq!(hosts(None, None), Verdict::Fail(Problem::HostsBlockGone));
+        assert_eq!(hosts(Some(&block), None), Verdict::Skip(Skip::NeedsDaemon));
+    }
+
+    /// Task M4-18k3: the `marsa0` link on Linux has its own fix, and is
+    /// otherwise the probe of macOS.
+    #[test]
+    fn the_link_gives_its_own_fix() {
+        let local = [IpAddr::V4(Ipv4Addr::LOCALHOST)];
+        assert_eq!(link(true, Some(&local)), Verdict::Pass(Pass::Dns));
+        assert_eq!(link(true, None), Verdict::Fail(Problem::LinkNoAnswer));
+        assert_eq!(link(false, None), Verdict::Skip(Skip::NeedsDaemon));
+        let other = [IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))];
+        assert!(matches!(
+            link(true, Some(&other)),
+            Verdict::Fail(Problem::DnsWrongAddress { .. })
+        ));
     }
 }
