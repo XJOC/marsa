@@ -254,6 +254,13 @@ pub struct Size {
     pub version_lg: Vec2,
     /// `size.version.md`: the height of a menu-bar panel version button.
     pub version_md: f32,
+    /// The plus in the dashed install button after the version buttons: 18.
+    pub version_install_icon: f32,
+    /// The least width of the compact version menu's button: 58.
+    pub version_menu_min: f32,
+    /// A dash of a dashed border, and the gap after it: 4 and 3.
+    pub dash: f32,
+    pub dash_gap: f32,
     /// `size.sidebar`, open.
     pub sidebar: f32,
     /// `size.sidebar`, folded to icons.
@@ -420,6 +427,10 @@ pub const SIZE: Size = Size {
     nav_tile: 26.0,
     version_lg: vec2(92.0, 64.0),
     version_md: 44.0,
+    version_install_icon: 18.0,
+    version_menu_min: 58.0,
+    dash: 4.0,
+    dash_gap: 3.0,
     sidebar: 224.0,
     sidebar_folded: 64.0,
     target_min: 24.0,

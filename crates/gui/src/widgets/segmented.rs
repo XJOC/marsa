@@ -1,8 +1,9 @@
 //! The segmented control (components.md): two to four options in a track
 //! tinted with `selected`; the chosen option is a raised `surface` pill. It
 //! is a radio group: one option is chosen, and the arrow keys move the choice
-//! (Tab reaches each option, Space and Enter choose it). Used for Appearance
-//! and for the log source.
+//! and the focus with it. It is one Tab stop (the WAI-ARIA "roving focus"):
+//! Tab enters on the chosen option and the next Tab leaves. Space and Enter
+//! choose the focused option. Used for Appearance and for the log source.
 //!
 //! The control draws the option it is given and returns the option the user
 //! chose, like the other widgets: the screen turns that into an action.
@@ -12,7 +13,7 @@ use eframe::egui::{
     Stroke, StrokeKind, Ui, Widget, WidgetInfo, pos2, vec2,
 };
 
-use super::{Look, Touch, layout, paint_focus_ring, touched};
+use super::{Look, Touch, group_button, layout, paint_focus_ring, tab_stop, touched};
 use crate::theme::{Direction, Face, TextToken, Theme};
 
 /// The most and the fewest options a control has (components.md).
@@ -167,10 +168,17 @@ impl<'a, T: Copy + PartialEq> Segmented<'a, T> {
             spots.push(spot);
             x += width + inset;
         }
+        // One Tab stop for the whole control: the option that has the focus,
+        // or else the chosen one.
+        let chosen_at = self
+            .options
+            .iter()
+            .position(|(value, _)| *value == self.selected);
+        let stop = tab_stop(ui, group.id, spots.len(), chosen_at);
         let responses: Vec<Response> = spots
             .iter()
             .enumerate()
-            .map(|(index, spot)| ui.interact(*spot, group.id.with(index), Sense::click()))
+            .map(|(index, spot)| group_button(ui, *spot, group.id, index, stop))
             .collect();
         for ((value, text), response) in self.options.iter().zip(&responses) {
             let is_chosen = *value == self.selected;
@@ -416,6 +424,45 @@ mod tests {
             draw(ui, &mut chosen);
         });
         assert_eq!(chosen, None);
+    }
+
+    #[test]
+    fn the_control_is_one_tab_stop_entered_on_the_chosen_option() {
+        let harness = Harness::new(egui::Theme::Light);
+        // The control between two buttons: the option that has the focus, or
+        // `None`, with the id of the button before and the one after.
+        let frame = |harness: &Harness, key: Option<(Key, egui::Modifiers)>, selected: Mode| {
+            let (mut before, mut after, mut group) =
+                (egui::Id::NULL, egui::Id::NULL, egui::Id::NULL);
+            let draw = |ui: &mut Ui| {
+                before = ui.add(crate::widgets::Button::secondary("Before")).id;
+                group = show(ui, selected, &mut None).id;
+                after = ui.add(crate::widgets::Button::secondary("After")).id;
+            };
+            match key {
+                Some((key, modifiers)) => harness.key_with(key, modifiers, draw),
+                None => harness.run(draw),
+            }
+            let focused = harness.ctx.memory(|memory| memory.focused());
+            let option = (0..MODES.len()).find(|index| focused == Some(group.with(*index)));
+            (focused == Some(before), option, focused == Some(after))
+        };
+        let tab = |harness: &Harness, modifiers, selected| {
+            frame(harness, Some((Key::Tab, modifiers)), selected);
+            frame(harness, None, selected)
+        };
+        let none = egui::Modifiers::NONE;
+        // Tab enters on the chosen option (Light, the second), not on the first.
+        assert_eq!(tab(&harness, none, Mode::Light), (true, None, false));
+        assert_eq!(tab(&harness, none, Mode::Light), (false, Some(1), false));
+        // The next Tab leaves: it does not visit Dark.
+        assert_eq!(tab(&harness, none, Mode::Light), (false, None, true));
+        // Shift+Tab comes back in on the chosen option.
+        let shift = egui::Modifiers::SHIFT;
+        assert_eq!(tab(&harness, shift, Mode::Light), (false, Some(1), false));
+        // The choice moved to Dark: Tab from outside now enters on Dark.
+        assert_eq!(tab(&harness, none, Mode::Dark), (false, None, true));
+        assert_eq!(tab(&harness, shift, Mode::Dark), (false, Some(2), false));
     }
 
     #[test]

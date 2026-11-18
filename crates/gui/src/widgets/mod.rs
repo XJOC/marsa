@@ -32,11 +32,14 @@ pub mod segmented;
 pub mod status;
 pub mod switch;
 pub mod tile;
+pub mod version;
 
 use std::sync::Arc;
 
 use eframe::egui::text::Galley;
-use eframe::egui::{Color32, CornerRadius, Painter, Rect, Response, Stroke, StrokeKind};
+use eframe::egui::{
+    Color32, CornerRadius, Id, Painter, Rect, Response, Sense, Stroke, StrokeKind, Ui, accesskit,
+};
 
 use crate::theme::{Direction, TextToken, Theme};
 
@@ -50,6 +53,7 @@ pub use status::{
 };
 pub use switch::Switch;
 pub use tile::{Monogram, SectionTile, TileSize};
+pub use version::{PickerSize, Setting, VersionMenu, VersionPick, VersionPicker};
 
 /// How a pointer touches a control now: the states of components.md that
 /// change its fill.
@@ -187,6 +191,40 @@ pub fn with_disabled_reason(response: Response, reason: Option<&str>) -> Respons
     }
 }
 
+/// The button of a group that is its one Tab stop: the one that has the
+/// focus, or else the chosen one, or else the first (the WAI-ARIA radio
+/// group, "roving focus"). Tab enters the group there and the next Tab leaves
+/// it; the arrow keys move the focus inside. `group` is the id the buttons'
+/// ids come from, `chosen` the index of the chosen button.
+pub fn tab_stop(ui: &Ui, group: Id, buttons: usize, chosen: Option<usize>) -> usize {
+    (0..buttons)
+        .find(|index| ui.memory(|memory| memory.has_focus(group.with(index))))
+        .or(chosen)
+        .unwrap_or(0)
+}
+
+/// The button at `index` of a group whose Tab stop is `stop`. egui gives the
+/// focus to a widget only when it is focusable, so the others sense clicks
+/// and nothing else: the pointer, and the keyboard once the focus is on
+/// them, still work. Their id is `group.with(index)`.
+pub fn group_button(ui: &Ui, rect: Rect, group: Id, index: usize, stop: usize) -> Response {
+    let id = group.with(index);
+    if index == stop {
+        return ui.interact(rect, id, Sense::click());
+    }
+    let response = ui.interact(rect, id, Sense::CLICK);
+    // A screen reader still moves its focus to any button of the group,
+    // as a browser lets it focus a radio that is not the Tab stop. The
+    // node is made here, so the buttons keep their order in the tree.
+    let focus = accesskit::Action::Focus;
+    ui.ctx()
+        .accesskit_node_builder(id, |node| node.add_action(focus));
+    if ui.input(|input| input.has_accesskit_action_request(id, focus)) {
+        response.request_focus();
+    }
+    response
+}
+
 /// A frame for the tests of the widgets: egui runs a frame with no window,
 /// so sizes, states, and what a screen reader hears can be read directly.
 #[cfg(test)]
@@ -278,13 +316,18 @@ pub(crate) mod harness {
 
         /// A frame with the key pressed once.
         pub fn key(&self, key: egui::Key, add: impl FnMut(&mut Ui)) {
+            self.key_with(key, Modifiers::NONE, add);
+        }
+
+        /// A frame with the key pressed once while `modifiers` are held.
+        pub fn key_with(&self, key: egui::Key, modifiers: Modifiers, add: impl FnMut(&mut Ui)) {
             let input = RawInput {
                 events: vec![Event::Key {
                     key,
                     physical_key: Some(key),
                     pressed: true,
                     repeat: false,
-                    modifiers: Modifiers::NONE,
+                    modifiers,
                 }],
                 ..RawInput::default()
             };
@@ -300,6 +343,14 @@ pub(crate) mod harness {
     impl Tree {
         pub fn node_with_label(&self, label: &str) -> Option<&accesskit::Node> {
             self.nodes.iter().find(|node| node.label() == Some(label))
+        }
+
+        /// A node named `text`, or showing it as its value: egui gives a
+        /// text label its words as a value, not a name.
+        pub fn node_with_text(&self, text: &str) -> Option<&accesskit::Node> {
+            self.nodes
+                .iter()
+                .find(|node| node.label() == Some(text) || node.value() == Some(text))
         }
     }
 
