@@ -4,29 +4,36 @@
 //! clicks reach the loop through its `EventLoopProxy`. [`menu`] decides what
 //! the menu shows; this module copies that onto the real menu items.
 //!
-//! The menu is the whole UI: Linux sends no click events for the icon
-//! (architecture.md section 10), so none are used. The icon starts `marsad`
-//! and stays after the window closes; "Quit" closes the icon only.
+//! On macOS and Windows a left click starts the panel ([`panel`], ADR 0022):
+//! `marsa-gui --panel`, a borderless window under the icon. The right click
+//! shows the menu. On Linux the menu is the whole UI: the default backend
+//! sends no click events and no place for the icon (architecture.md section
+//! 10), and Wayland cannot place a window. The icon starts `marsad` and stays
+//! after the window closes; "Quit" closes the icon only.
 
 pub mod icon;
 pub mod menu;
+pub mod panel;
 pub mod worker;
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
+use std::time::Instant;
 
 use marsa_core::platform::spawn::sibling_program;
 use tao::event::{Event, StartCause};
-use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
+use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopWindowTarget};
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
+use crate::panel::PanelExit;
 use crate::strings;
 use menu::{Item, Layout, State, Update};
+use panel::{Monitor, Px, Slot, Toggle};
 
 /// The window program, next to the tray.
 const WINDOW_PROGRAM: &str = "marsa-gui";
@@ -52,6 +59,8 @@ enum UserEvent {
     Update(Update),
     /// A click on a menu line, from the menu's own callback.
     Menu(MenuEvent),
+    /// A click on the icon itself, from the icon's own callback.
+    Icon(TrayIconEvent),
 }
 
 /// What a click asks for.
@@ -83,16 +92,36 @@ pub fn run(data_dir: PathBuf) -> Result<(), TrayError> {
         let _ = proxy.send_event(UserEvent::Menu(event));
     }));
     let proxy = event_loop.create_proxy();
+    TrayIconEvent::set_event_handler(Some(move |event| {
+        let _ = proxy.send_event(UserEvent::Icon(event));
+    }));
+    let proxy = event_loop.create_proxy();
     let worker = worker::start(data_dir.clone(), move |update| {
         proxy.send_event(UserEvent::Update(update)).is_ok()
     })
     .map_err(TrayError::Worker)?;
 
     let mut state = State::default();
+    // The one panel that may be open.
+    let mut slot: Slot<Child> = Slot::new();
+    // Debug builds only: the design review's click (see `selftest`).
+    #[cfg(debug_assertions)]
+    let (mut selftest, test_proxy) = (selftest_clicks(), event_loop.create_proxy());
     // Built once the loop runs: tray-icon on macOS wants that. Dropping it
     // would remove the icon from the menu bar.
     let mut items: Option<Items> = None;
-    event_loop.run(move |event, _target, control_flow| {
+    event_loop.run(move |event, target, control_flow| {
+        // A panel that has ended asks something of the icon (its exit code).
+        // Looked at on every wake; while one is open the loop wakes often.
+        if let Some(exit) = slot.poll(Instant::now()) {
+            if after_panel(exit, &mut state, &worker, &window, &data_dir) {
+                *control_flow = ControlFlow::Exit;
+                return;
+            }
+            if let Some(items) = &mut items {
+                items.apply(&menu::layout(&state));
+            }
+        }
         match event {
             // The first event. `control_flow` keeps its value between events.
             Event::NewEvents(StartCause::Init) => match Items::build(&menu::layout(&state)) {
@@ -101,6 +130,11 @@ pub fn run(data_dir: PathBuf) -> Result<(), TrayError> {
                     // Sleep until the next click or update: tao polls by
                     // default, which would keep a core busy.
                     *control_flow = ControlFlow::Wait;
+                    // Debug builds only: wake once, to click the icon.
+                    #[cfg(debug_assertions)]
+                    if selftest > 0 {
+                        *control_flow = ControlFlow::WaitUntil(Instant::now() + SELFTEST_WAIT);
+                    }
                 }
                 Err(err) => {
                     tracing::error!(
@@ -114,6 +148,54 @@ pub fn run(data_dir: PathBuf) -> Result<(), TrayError> {
                 state.apply(update);
                 if let Some(items) = &mut items {
                     items.apply(&menu::layout(&state));
+                }
+            }
+            // Debug builds only: the click of the self-test, on the icon's
+            // real place, as the system would have sent it.
+            #[cfg(debug_assertions)]
+            Event::NewEvents(StartCause::ResumeTimeReached { .. }) if selftest > 0 => {
+                selftest -= 1;
+                if let Some(rect) = items.as_ref().and_then(Items::rect) {
+                    let click = selftest_click(rect);
+                    let _ = test_proxy.send_event(UserEvent::Icon(click));
+                } else {
+                    tracing::warn!("the self-test found no place for the icon");
+                }
+                if selftest > 0 {
+                    *control_flow = ControlFlow::WaitUntil(Instant::now() + SELFTEST_GAP);
+                }
+            }
+            // The left click: open the panel, or close the one that is open.
+            Event::UserEvent(UserEvent::Icon(TrayIconEvent::Click {
+                rect,
+                button: MouseButton::Left,
+                button_state,
+                ..
+            })) if acts_on(button_state) => {
+                let toggle = slot.click(Instant::now());
+                if toggle != Toggle::Open {
+                    tracing::info!(?toggle, "a click on the icon with a panel to deal with");
+                }
+                if toggle == Toggle::Open {
+                    let icon = Px {
+                        x: rect.position.x,
+                        y: rect.position.y,
+                        width: f64::from(rect.size.width),
+                        height: f64::from(rect.size.height),
+                    };
+                    let anchor = panel::anchor(icon, &monitors(target));
+                    tracing::info!(?icon, ?anchor, "starting the panel");
+                    let args = panel::args(&data_dir, anchor.as_ref());
+                    match panel::spawn(&window, &args) {
+                        Ok(child) => slot.start(child),
+                        Err(err) => {
+                            tracing::warn!(error = %err, "cannot start the panel");
+                            state.apply(Update::Failed(strings::WINDOW_START_FAILED.to_owned()));
+                            if let Some(items) = &mut items {
+                                items.apply(&menu::layout(&state));
+                            }
+                        }
+                    }
                 }
             }
             Event::UserEvent(UserEvent::Menu(click)) => {
@@ -151,7 +233,141 @@ pub fn run(data_dir: PathBuf) -> Result<(), TrayError> {
             }
             _ => {}
         }
+        // While a panel is open the loop wakes to see it end; otherwise it
+        // sleeps until the next click or update. (The self-test's wake-up is
+        // left to come.)
+        #[cfg(debug_assertions)]
+        let waiting_to_click = selftest > 0;
+        #[cfg(not(debug_assertions))]
+        let waiting_to_click = false;
+        if !waiting_to_click
+            && matches!(*control_flow, ControlFlow::Wait | ControlFlow::WaitUntil(_))
+        {
+            *control_flow = if slot.is_open() {
+                ControlFlow::WaitUntil(Instant::now() + panel::POLL)
+            } else {
+                ControlFlow::Wait
+            };
+        }
     })
+}
+
+/// Does what a panel that has ended asked for. `true` when the icon quits.
+fn after_panel(
+    exit: PanelExit,
+    state: &mut State,
+    worker: &worker::Handle,
+    window: &Path,
+    data_dir: &Path,
+) -> bool {
+    match exit {
+        PanelExit::Closed | PanelExit::FocusLost => {}
+        PanelExit::OpenWindow => {
+            if !open_window(window, data_dir) {
+                state.apply(Update::Failed(strings::WINDOW_START_FAILED.to_owned()));
+            }
+        }
+        PanelExit::StopMarsa => {
+            if let Some(command) = state.stop() {
+                worker.send(command);
+            }
+        }
+        PanelExit::StartMarsa => {
+            if let Some(command) = state.start() {
+                worker.send(command);
+            }
+        }
+        PanelExit::Quit => return true,
+    }
+    false
+}
+
+/// The monitors, the primary one first, in the physical pixels the system
+/// reports.
+fn monitors(target: &EventLoopWindowTarget<UserEvent>) -> Vec<Monitor> {
+    let primary = target.primary_monitor();
+    primary
+        .into_iter()
+        .chain(target.available_monitors())
+        .map(|monitor| {
+            let (at, size) = (monitor.position(), monitor.size());
+            Monitor {
+                rect: Px {
+                    x: f64::from(at.x),
+                    y: f64::from(at.y),
+                    width: f64::from(size.width),
+                    height: f64::from(size.height),
+                },
+                scale: monitor.scale_factor(),
+            }
+        })
+        .collect()
+}
+
+/// Debug builds only: with this variable set to a number (`1` if it is not
+/// one), the icon clicks itself that many times: the first three seconds after
+/// it is up, then every second and a half, with the place the system gives
+/// it. It starts the panel under the real icon, so the design review can see
+/// where it lands, what its exit code asks for, and that a second click
+/// closes it, with no one at the mouse (task M5-D11).
+#[cfg(debug_assertions)]
+const SELFTEST_VAR: &str = "MARSA_TRAY_SELFTEST";
+#[cfg(debug_assertions)]
+const SELFTEST_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(debug_assertions)]
+const SELFTEST_GAP: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// How many times the self-test clicks: none unless it is asked for.
+#[cfg(debug_assertions)]
+fn selftest_clicks() -> u32 {
+    std::env::var(SELFTEST_VAR)
+        .ok()
+        .map_or(0, |text| text.parse().unwrap_or(1))
+}
+
+/// The click of the self-test: the half that [`acts_on`] reads.
+#[cfg(debug_assertions)]
+fn selftest_click(rect: tray_icon::Rect) -> TrayIconEvent {
+    let state = if acts_on(MouseButtonState::Down) {
+        MouseButtonState::Down
+    } else {
+        MouseButtonState::Up
+    };
+    TrayIconEvent::Click {
+        id: tray_icon::TrayIconId::new("selftest"),
+        position: rect.position,
+        rect,
+        button: MouseButton::Left,
+        button_state: state,
+    }
+}
+
+/// Which half of a click starts the panel. macOS sends only the press of the
+/// icon (no release), and acts on it at once; the other systems send both,
+/// and a click is complete on the release (ADR 0022). Linux sends none. The
+/// `cfg` is here and not in `platform` because it only names which of
+/// tray-icon's two events to use.
+#[cfg(target_os = "macos")]
+const fn acts_on(state: MouseButtonState) -> bool {
+    matches!(state, MouseButtonState::Down)
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn acts_on(state: MouseButtonState) -> bool {
+    matches!(state, MouseButtonState::Up)
+}
+
+/// macOS and Windows: the left click starts the panel, so it no longer opens
+/// the menu; the right click does. Linux keeps the click that opens the
+/// menu, which is all there is there.
+#[cfg(any(target_os = "macos", windows))]
+fn with_click(builder: TrayIconBuilder) -> TrayIconBuilder {
+    builder.with_menu_on_left_click(false)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn with_click(builder: TrayIconBuilder) -> TrayIconBuilder {
+    builder
 }
 
 /// macOS only: a menu-bar program has no Dock icon and no app menu
@@ -181,6 +397,7 @@ fn with_icon(builder: TrayIconBuilder, icon: Icon) -> TrayIconBuilder {
 
 /// The real menu lines, kept so each update changes them in place.
 struct Items {
+    /// Kept: dropping it removes the icon.
     _tray: TrayIcon,
     menu: Menu,
     status: MenuItem,
@@ -196,6 +413,12 @@ struct Items {
 }
 
 impl Items {
+    /// Where the icon is, if the system says (macOS and Windows).
+    #[cfg(debug_assertions)]
+    fn rect(&self) -> Option<tray_icon::Rect> {
+        self._tray.rect()
+    }
+
     fn build(layout: &Layout) -> Result<Self, TrayError> {
         let status = text_item(&layout.status);
         let notice = MenuItem::new("", false, None);
@@ -227,7 +450,9 @@ impl Items {
         let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu.clone()))
             .with_tooltip(strings::TRAY_TOOLTIP);
-        let tray = with_icon(builder, icon).build().map_err(TrayError::Build)?;
+        let tray = with_icon(with_click(builder), icon)
+            .build()
+            .map_err(TrayError::Build)?;
         let mut items = Self {
             _tray: tray,
             menu,
@@ -375,4 +600,21 @@ fn open_window(program: &Path, data_dir: &Path) -> bool {
         tracing::debug!(error = %err, "cannot start a thread to reap the window");
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The icon acts on one half of a click: the press on macOS, which sends
+    /// no release, and the release elsewhere. Never both, so one click is one
+    /// panel.
+    #[test]
+    fn one_click_is_one_half_of_the_click() {
+        let (down, up) = (MouseButtonState::Down, MouseButtonState::Up);
+        assert_eq!(acts_on(down), cfg!(target_os = "macos"));
+        assert_eq!(acts_on(up), !cfg!(target_os = "macos"));
+        assert_ne!(acts_on(down), acts_on(up));
+        assert!(!acts_on(MouseButtonState::Down) || !acts_on(MouseButtonState::Up));
+    }
 }
