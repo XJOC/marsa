@@ -301,6 +301,11 @@ pub struct Size {
     pub badge: f32,
     /// The header row of a table: 34 (components.md, Tables and lists).
     pub table_header: f32,
+    /// The height of a tab strip, with its 1 px line: 38 (components.md,
+    /// Tabs).
+    pub tab: f32,
+    /// The underline of the chosen tab: 2.
+    pub tab_bar: f32,
     /// The width of a dialog: 440 (components.md, Dialogs).
     pub dialog_width: f32,
     /// The height of a notice bar: 40 (components.md, Notices).
@@ -471,6 +476,8 @@ pub const SIZE: Size = Size {
     switch_inset: 3.0,
     badge: 26.0,
     table_header: 34.0,
+    tab: 38.0,
+    tab_bar: 2.0,
     dialog_width: 440.0,
     notice: 40.0,
     progress: 6.0,
