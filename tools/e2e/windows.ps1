@@ -176,9 +176,10 @@ function Prompts {
     return @(Select-String -LiteralPath $files.FullName -SimpleMatch 'behind the UAC prompt').Count
 }
 
-# The processes of these names that still run.
+# How many processes of these names still run. A count, not the list:
+# PowerShell turns an empty list it returns into $null.
 function Running([string[]]$Names) {
-    return @(Get-Process -Name $Names -ErrorAction SilentlyContinue)
+    return @(Get-Process -Name $Names -ErrorAction SilentlyContinue).Count
 }
 
 # What helps to understand a failure. Never `run\daemon.json`: it holds the
@@ -343,7 +344,7 @@ try {
     $redirect = (& $Curl -sS -o NUL --max-time 10 -w '%{http_code} %{redirect_url}' "http://$Site/") -join ''
     Write-Host "http://$Site/ -> $redirect"
     if ($redirect -ne "308 https://$Site/") { Fail "expected a 308 to https://$Site/" }
-    $caddy = @(Running 'caddy' | ForEach-Object { $_.Id })
+    $caddy = @(Get-Process -Name 'caddy' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
     if ($caddy.Count -eq 0) { Fail 'caddy does not run' }
     $listeners = @(Get-NetTCPConnection -State Listen | Where-Object { $_.OwningProcess -in $caddy })
     $listeners | Format-Table LocalAddress, LocalPort | Out-Host
@@ -401,11 +402,11 @@ try {
         Fail 'the hosts file is not as it was before setup'
     }
     # The daemon stopped, and its Job Object ended Caddy and php-cgi with it.
-    for ($i = 1; $i -le 20 -and (Running 'marsad', 'caddy', 'php-cgi').Count -gt 0; $i++) {
+    for ($i = 1; $i -le 20 -and (Running 'marsad', 'caddy', 'php-cgi') -gt 0; $i++) {
         Start-Sleep -Milliseconds 500
     }
-    $left = Running 'marsad', 'caddy', 'php-cgi'
-    if ($left.Count -gt 0) { Fail "still running after the uninstall: $(($left | ForEach-Object { $_.ProcessName }) -join ', ')" }
+    $left = @(Get-Process -Name 'marsad', 'caddy', 'php-cgi' -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName })
+    if ($left.Count -gt 0) { Fail "still running after the uninstall: $($left -join ', ')" }
     $ErrorActionPreference = 'Continue'
     & $Curl -sS -o NUL --max-time 5 --ssl-revoke-best-effort "https://$Site/" 2>$null
     $gone = $LASTEXITCODE
