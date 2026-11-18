@@ -101,8 +101,10 @@ jobs:
 
       # The shim runs before every php, node, npm, npx, and composer command,
       # so its size is watched (task M1-06). Sizes at M1-06b: Linux 1,054,944,
-      # macOS 903,168, Windows 599,040 bytes (still the stub). The limit is the
-      # largest plus about 25%, rounded, and is the same on every system.
+      # macOS 903,168, Windows 599,040 bytes (still the stub). At M1-07b:
+      # Linux 1,211,120, macOS 1,025,104, Windows 761,856. The limit is the
+      # largest at M1-06b plus about 25%, rounded, and is the same on every
+      # system.
       - name: Check the shim binary size
         run: |
           limit=1400000
