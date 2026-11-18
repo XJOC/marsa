@@ -1,0 +1,574 @@
+# Tests install.ps1 against fake releases served from 127.0.0.1 (task M5-26).
+#
+#   powershell -NoProfile -ExecutionPolicy Bypass -File tests/install-ps1/run.ps1 -Minisign <minisign.exe>
+#
+# No network. It runs only on a GitHub-hosted runner with no Marsa folder:
+# install.ps1 installs into this user's real local app data folder and
+# changes this user's PATH in the registry, and nothing redirects either.
+# Every test starts with no Marsa folder and the PATH as it was, and the end
+# puts the PATH back.
+#
+# Every program in a fake release is a small C# program (Add-Type) that writes
+# each call into one log, so a refused install shows how far it went: which
+# version of which program ran. A refusal before the unpack must leave the log
+# empty: no downloaded program runs before the checks pass.
+#
+# The script under test is a copy of install.ps1 with three constants
+# replaced: the two URLs (to reach the local server) and the public key (the
+# real secret key is not here). Nothing else differs, and `constants` below
+# checks the real values. Needs python (the server) and minisign.
+
+param(
+    [Parameter(Mandatory = $true)][string]$Minisign
+)
+
+Set-StrictMode -Version 3.0
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+# It deletes %LOCALAPPDATA%\marsa and rewrites the user PATH: only on a
+# throwaway GitHub runner, and only if no Marsa is there.
+if ($env:CI -ne 'true' -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
+    throw 'run.ps1 deletes this user''s Marsa folder and changes this user''s PATH. It runs only on a GitHub-hosted runner.'
+}
+$Marsa = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'marsa'
+if (Test-Path -LiteralPath $Marsa) {
+    throw "run.ps1 refuses to start: $Marsa already exists, and the tests would delete it."
+}
+
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$T = Join-Path ([IO.Path]::GetTempPath()) "install-ps1-$([IO.Path]::GetRandomFileName())"
+New-Item -ItemType Directory -Path $T | Out-Null
+$Www = Join-Path $T 'www'
+New-Item -ItemType Directory -Path $Www | Out-Null
+$CallLog = Join-Path $T 'calls.log'
+$Data = Join-Path $Marsa 'Marsa\data'
+$Bin = Join-Path $Data 'bin'
+$ShimDir = Join-Path $Data 'shims'
+$OldVersion = '9.9.8'
+$NewVersion = '9.9.9'
+$Programs = @('marsa', 'marsad', 'marsa-shim', 'marsa-helper', 'marsa-gui')
+$Shims = @('php', 'node', 'npm', 'npx', 'composer')
+$Minisign = (Resolve-Path $Minisign).Path
+$Failures = New-Object System.Collections.Generic.List[string]
+
+function Pass([string]$Text) { Write-Host "ok: $Text" }
+function Check([bool]$Ok, [string]$Text) {
+    if ($Ok) { Pass $Text } else { Write-Host "FAIL: $Text" -ForegroundColor Red; $Failures.Add($Text) }
+}
+
+# Runs a program and returns its exit code and output; stderr too.
+function Run([string]$Program, [string[]]$Arguments) {
+    $ErrorActionPreference = 'Continue'
+    $lines = @(& $Program @Arguments 2>&1 | ForEach-Object { "$_" })
+    [pscustomobject]@{ Code = $LASTEXITCODE; Out = ($lines -join "`n") }
+}
+
+# The call log, as a string (an empty file gives no value at all in Windows
+# PowerShell, hence the quotes).
+function Get-Calls { "$(Get-Content -LiteralPath $CallLog -Raw)" }
+
+# ---------------------------------------------------------- fake programs
+
+# A console program that answers `--version` with `marsa <version>` and
+# `$VersionExit`, sleeps on `--sleep`, fails `daemon stop` when
+# MARSA_TEST_FAIL_STOP is 1, and logs every call as `<version> <name> <args>`.
+$Fakes = @{}
+function Get-Fake([string]$Version, [int]$VersionExit = 0) {
+    $key = "$Version-$VersionExit"
+    if ($Fakes.ContainsKey($key)) { return $Fakes[$key] }
+    $class = 'Fake' + ($key -replace '[^0-9A-Za-z]', '_')
+    $source = @"
+using System;
+using System.IO;
+using System.Threading;
+public static class $class {
+    public static int Main(string[] args) {
+        string name = Path.GetFileNameWithoutExtension(Environment.GetCommandLineArgs()[0]);
+        string log = Environment.GetEnvironmentVariable("MARSA_TEST_CALLS");
+        if (!string.IsNullOrEmpty(log)) {
+            File.AppendAllText(log, "$Version " + name + " " + string.Join(" ", args) + "\r\n");
+        }
+        if (args.Length == 1 && args[0] == "--version") { Console.WriteLine("marsa $Version"); return $VersionExit; }
+        if (args.Length == 1 && args[0] == "--sleep") { Thread.Sleep(120000); return 0; }
+        if (args.Length == 2 && args[0] == "daemon" && args[1] == "stop"
+            && Environment.GetEnvironmentVariable("MARSA_TEST_FAIL_STOP") == "1") { return 1; }
+        return 0;
+    }
+}
+"@
+    $path = Join-Path $T "fake-$key.exe"
+    Add-Type -TypeDefinition $source -OutputAssembly $path -OutputType ConsoleApplication
+    $Fakes[$key] = $path
+    $path
+}
+
+# ------------------------------------------------------------ fake releases
+
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+
+# A zip of `$Entries` (name in the zip -> file on disk).
+function New-Zip([string]$Zip, [System.Collections.Specialized.OrderedDictionary]$Entries) {
+    $stream = [IO.File]::Open($Zip, [IO.FileMode]::Create)
+    $archive = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($name in $Entries.Keys) {
+            [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $Entries[$name], $name) | Out-Null
+        }
+    } finally {
+        $archive.Dispose()
+        $stream.Dispose()
+    }
+}
+
+# Two minisign keys: Marsa's stand-in, and another one.
+function New-Key([string]$Name) {
+    $null = Run $Minisign @('-G', '-W', '-f', '-p', "$T\$Name.pub", '-s', "$T\$Name.sec")
+    (Get-Content -LiteralPath "$T\$Name.pub")[1].Trim()
+}
+$TestKey = New-Key 'test'
+$OtherKey = New-Key 'other'
+Check ($TestKey -ne $OtherKey -and $TestKey.Length -gt 40) 'two minisign keys'
+
+$LicenseFile = Join-Path $T 'LICENSE'
+Set-Content -LiteralPath $LicenseFile -Value 'license' -Encoding ascii
+$BuildInfo = Join-Path $T 'BUILD-INFO.txt'
+Set-Content -LiteralPath $BuildInfo -Value 'built for the tests' -Encoding ascii
+
+function Write-Sums([string]$Dir, [string[]]$Lines) {
+    [IO.File]::WriteAllText((Join-Path $Dir 'SHA256SUMS'), ($Lines -join "`n") + "`n")
+}
+
+# Writes the release of `$Version` for case `$Case` under $Www\$Case:
+# api/latest.json, and releases/download/v<version>/ with the zip,
+# SHA256SUMS, and its signature. Each option changes one thing.
+function New-Release([string]$Case, [string]$Version, [hashtable]$Options = @{}) {
+    $caseDir = Join-Path $Www $Case
+    $releaseDir = Join-Path $caseDir "releases\download\v$Version"
+    New-Item -ItemType Directory -Path $releaseDir, (Join-Path $caseDir 'api') -Force | Out-Null
+    $tag = "v$Version"
+    if ($Options.ContainsKey('Tag')) { $tag = $Options['Tag'] }
+    Set-Content -LiteralPath (Join-Path $caseDir 'api\latest.json') -Value "{`"tag_name`": `"$tag`", `"draft`": false}" -Encoding ascii
+
+    $programVersion = $Version
+    if ($Options.ContainsKey('ProgramVersion')) { $programVersion = $Options['ProgramVersion'] }
+    $versionExit = 0
+    if ($Options.ContainsKey('VersionExit')) { $versionExit = $Options['VersionExit'] }
+    $fake = Get-Fake $programVersion $versionExit
+    $entries = New-Object System.Collections.Specialized.OrderedDictionary
+    foreach ($name in $Programs) {
+        if ($Options.ContainsKey('Leave') -and $Options['Leave'] -eq $name) { continue }
+        $entries["$name.exe"] = $fake
+    }
+    $entries['LICENSE'] = $LicenseFile
+    $entries['BUILD-INFO.txt'] = $BuildInfo
+    if ($Options.ContainsKey('Extra')) { $entries[$Options['Extra']] = $fake }
+    $archive = "marsa-$Version-windows-x64.zip"
+    $zip = Join-Path $releaseDir $archive
+    New-Zip $zip $entries
+
+    $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    $other = ('0' * 64) + '  install.sh'
+    $sums = @("$hash  $archive", $other)
+    if ($Options.ContainsKey('Twice')) { $sums += "$hash  $archive" }
+    if ($Options.ContainsKey('NotListed')) { $sums = @($other) }
+    Write-Sums $releaseDir $sums
+    $sumsFile = Join-Path $releaseDir 'SHA256SUMS'
+    if (-not $Options.ContainsKey('NoSignature')) {
+        $key = 'test'
+        if ($Options.ContainsKey('Key')) { $key = $Options['Key'] }
+        $comment = "marsa release v$Version"
+        if ($Options.ContainsKey('Comment')) { $comment = $Options['Comment'] }
+        $null = Run $Minisign @('-S', '-s', "$T\$key.sec", '-m', $sumsFile, '-x', "$sumsFile.minisig", '-t', $comment)
+    }
+    if ($Options.ContainsKey('Tamper')) {
+        # The zip changes after SHA256SUMS was written.
+        [IO.File]::AppendAllText($zip, 'x')
+    }
+    if ($Options.ContainsKey('Resum')) {
+        # The zip changes, and so does SHA256SUMS, but not its signature.
+        [IO.File]::AppendAllText($zip, 'x')
+        $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+        Write-Sums $releaseDir @("$hash  $archive", $other)
+    }
+    if ($Options.ContainsKey('EditComment')) {
+        # Someone edits the trusted comment line after signing.
+        $lines = Get-Content -LiteralPath "$sumsFile.minisig"
+        $lines[2] = "trusted comment: marsa release v$Version edited"
+        [IO.File]::WriteAllText("$sumsFile.minisig", ($lines -join "`n") + "`n")
+    }
+}
+
+# --------------------------------------------------------------- the server
+
+$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+$listener.Start()
+$Port = $listener.LocalEndpoint.Port
+$listener.Stop()
+$python = (Get-Command python -CommandType Application | Select-Object -First 1).Source
+$server = Start-Process -FilePath $python -ArgumentList @('-m', 'http.server', $Port, '--bind', '127.0.0.1', '--directory', $Www) -PassThru -WindowStyle Hidden
+for ($i = 0; $i -lt 50; $i++) {
+    try {
+        $client = [Net.Sockets.TcpClient]::new('127.0.0.1', $Port)
+        $client.Dispose()
+        break
+    } catch {
+        Start-Sleep -Milliseconds 200
+    }
+}
+
+# ------------------------------------------------------- the script under test
+
+$Real = Get-Content -LiteralPath (Join-Path $Root 'install.ps1') -Raw
+$RealApi = "`$ReleasesApi = 'https://api.github.com/repos/XJOC/marsa/releases/latest'"
+$RealDownload = "`$DownloadUrl = 'https://github.com/XJOC/marsa/releases/download'"
+$RealKeyLine = [regex]::Match($Real, "\`$PublicKey = '([^']+)'")
+
+# The copy of install.ps1 for one case: its server folder, and $Key.
+function Get-Script([string]$Case, [string]$Key = $TestKey) {
+    $text = $Real.Replace($RealApi, "`$ReleasesApi = 'http://127.0.0.1:$Port/$Case/api/latest.json'")
+    $text = $text.Replace($RealDownload, "`$DownloadUrl = 'http://127.0.0.1:$Port/$Case/releases/download'")
+    $text = $text.Replace($RealKeyLine.Value, "`$PublicKey = '$Key'")
+    $path = Join-Path $T "install-$Case.ps1"
+    [IO.File]::WriteAllText($path, $text)
+    $path
+}
+
+$MinisignDir = Split-Path -Parent $Minisign
+$Shells = @{
+    'powershell' = (Get-Command powershell -CommandType Application | Select-Object -First 1).Source
+    'pwsh' = (Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+}
+
+# Runs a copy of install.ps1 in a new PowerShell with a small PATH: Windows'
+# own folders, and minisign's only with -WithMinisign. -Command runs the
+# given text instead (the script path is in $Script there).
+function Invoke-Install([string]$Script, [hashtable]$Env = @{}, [switch]$WithMinisign, [string]$Shell = 'powershell', [string]$Command, [string]$Policy = 'Bypass') {
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $Shells[$Shell]
+    if ($Command) {
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Command.Replace('SCRIPT', $Script)))
+        $psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy $Policy -EncodedCommand $encoded"
+    } else {
+        $psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy $Policy -File `"$Script`""
+    }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $path = @("$env:SystemRoot\System32", $env:SystemRoot, "$env:SystemRoot\System32\WindowsPowerShell\v1.0")
+    if ($WithMinisign) { $path += $MinisignDir }
+    $psi.EnvironmentVariables['PATH'] = $path -join ';'
+    $psi.EnvironmentVariables['MARSA_TEST_CALLS'] = $CallLog
+    foreach ($name in @('MARSA_VERSION', 'MARSA_NO_PATH', 'MARSA_TEST_FAIL_STOP')) {
+        if ($psi.EnvironmentVariables.ContainsKey($name)) { $psi.EnvironmentVariables.Remove($name) }
+    }
+    foreach ($name in $Env.Keys) { $psi.EnvironmentVariables[$name] = $Env[$name] }
+    $process = [Diagnostics.Process]::Start($psi)
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $stderr = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit(300000)) {
+        $process.Kill()
+        throw "install.ps1 did not end within 300 s: $Script"
+    }
+    $process.WaitForExit()
+    [pscustomobject]@{ Code = $process.ExitCode; Out = $stdout.Result + $stderr.Result }
+}
+
+# ------------------------------------------------------------- the state
+
+$EnvKey = 'HKCU:\Environment'
+$SavedPath = (Get-Item -LiteralPath $EnvKey).GetValue('Path', $null, 'DoNotExpandEnvironmentNames')
+# An entry of the user's own, which must stay unexpanded.
+$UserEntry = '%USERPROFILE%\marsa-test-tools'
+$StartPath = $UserEntry
+if ($SavedPath) { $StartPath = "$SavedPath;$UserEntry" }
+
+# The fake programs still running from the Marsa folder. By name first:
+# reading the path of every process on the machine can be refused.
+function Stop-Fakes {
+    $names = @($Programs + $Shims)
+    Get-Process -Name $names -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and $_.Path.StartsWith($Marsa, [StringComparison]::OrdinalIgnoreCase) } |
+        Stop-Process -Force
+    Start-Sleep -Milliseconds 300
+}
+
+# No Marsa folder, no leftover sleeper, the PATH as it was plus the user's
+# own entry (as an expandable string), and an empty log.
+function Reset-State {
+    Stop-Fakes
+    if (Test-Path -LiteralPath $Marsa) { Remove-Item -LiteralPath $Marsa -Recurse -Force }
+    Set-ItemProperty -LiteralPath $EnvKey -Name 'Path' -Value $StartPath -Type ExpandString
+    Set-Content -LiteralPath $CallLog -Value $null
+}
+
+function Get-UserPath {
+    (Get-Item -LiteralPath $EnvKey).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+}
+
+# The version the installed marsa.exe reports, or ''.
+function Get-Installed {
+    $marsa = Join-Path $Bin 'marsa.exe'
+    if (-not (Test-Path -LiteralPath $marsa)) { return '' }
+    (Run $marsa @('--version')).Out
+}
+
+# Every installed file and its hash.
+function Get-Snapshot {
+    "$(Get-ChildItem -LiteralPath $Bin, $ShimDir -File -Force -ErrorAction SilentlyContinue |
+        Sort-Object FullName |
+        ForEach-Object { "$($_.FullName)=$((Get-FileHash -LiteralPath $_.FullName).Hash)" })"
+}
+
+function Test-NoTemp {
+    -not (Get-ChildItem -LiteralPath $Data -Filter '.install-*' -Force -ErrorAction SilentlyContinue)
+}
+
+# ------------------------------------------------------------------ tests
+
+New-Release 'good' $NewVersion
+New-Release 'old' $OldVersion
+$Good = Get-Script 'good'
+$OldScript = Get-Script 'old'
+
+function Install-Old {
+    $result = Invoke-Install $OldScript
+    if ($result.Code -ne 0 -or (Get-Installed) -ne "marsa $OldVersion") { throw "the old install failed: $($result.Out)" }
+    Set-Content -LiteralPath $CallLog -Value $null
+}
+
+try {
+    # constants: the real script trusts Marsa's key, the same as install.sh
+    # and the key built into Marsa, and asks the real addresses.
+    $manifest = Get-Content -LiteralPath (Join-Path $Root 'crates\core\src\installer\manifest.rs') -Raw
+    $shKey = [regex]::Match((Get-Content -LiteralPath (Join-Path $Root 'install.sh') -Raw), 'PUBLIC_KEY="([^"]+)"').Groups[1].Value
+    Check ($RealKeyLine.Success -and $manifest.Contains($RealKeyLine.Groups[1].Value)) 'constants: the key is the one built into Marsa'
+    Check ($RealKeyLine.Groups[1].Value -ceq $shKey) 'constants: the key is the one in install.sh'
+    Check ($Real.Contains($RealApi) -and $Real.Contains($RealDownload)) 'constants: the real addresses'
+
+    # ----------------------------------------------------- installs that work
+
+    Reset-State
+    $result = Invoke-Install $Good
+    Check ($result.Code -eq 0) "fresh install, no minisign: exit 0 ($($result.Out))"
+    Check ($result.Out.Contains('the signature will NOT be checked')) 'fresh install: says the signature is not checked'
+    Check ((Get-Installed) -eq "marsa $NewVersion") 'fresh install: marsa.exe is the new one'
+    $all = @($Programs | ForEach-Object { Join-Path $Bin "$_.exe" }) + @((Join-Path $Bin 'LICENSE'), (Join-Path $Bin 'BUILD-INFO.txt'))
+    Check (@($all | Where-Object { -not (Test-Path -LiteralPath $_) }).Count -eq 0) 'fresh install: every program and text file in bin'
+    $shimHash = (Get-FileHash -LiteralPath (Join-Path $Bin 'marsa-shim.exe')).Hash
+    $copies = @($Shims | Where-Object { (Get-FileHash -LiteralPath (Join-Path $ShimDir "$_.exe")).Hash -eq $shimHash })
+    Check ($copies.Count -eq $Shims.Count) 'fresh install: five shims, each a copy of marsa-shim.exe'
+    $userPath = Get-UserPath
+    # Empty entries (a PATH that ends in `;`) go; every other one stays, in order.
+    $earlier = @($StartPath -split ';' | Where-Object { $_ }) -join ';'
+    Check ($userPath -ceq "$ShimDir;$Bin;$earlier") "fresh install: shims then bin, then every earlier entry in order ($userPath)"
+    Check ((Get-Item -LiteralPath $EnvKey).GetValueKind('Path') -eq 'ExpandString') 'fresh install: the PATH keeps its registry type'
+    Check (Test-NoTemp) 'fresh install: no temporary folder left'
+    Check ((Get-Calls) -ceq "$NewVersion marsa --version`r`n") 'fresh install: the only program run is the new marsa --version'
+
+    Reset-State
+    $result = Invoke-Install $Good -WithMinisign
+    Check ($result.Code -eq 0 -and $result.Out.Contains('The signature of SHA256SUMS is good.')) 'minisign: a good signature installs'
+
+    Reset-State
+    New-Release 'comment-space' $NewVersion @{ Comment = "marsa release v$NewVersion built 2026-11-18" }
+    $result = Invoke-Install (Get-Script 'comment-space') -WithMinisign
+    Check ($result.Code -eq 0) 'minisign: the comment may go on after a space'
+
+    Reset-State
+    $result = Invoke-Install $Good @{ MARSA_VERSION = "v$NewVersion" }
+    Check ($result.Code -eq 0 -and (Get-Installed) -eq "marsa $NewVersion") 'MARSA_VERSION: a v prefix installs that version'
+
+    Reset-State
+    $pre = '9.9.10-rc.1'
+    New-Release 'pre' $pre @{ Tag = "v$NewVersion" }
+    $result = Invoke-Install (Get-Script 'pre') @{ MARSA_VERSION = $pre }
+    Check ($result.Code -eq 0 -and (Get-Installed) -eq "marsa $pre") "MARSA_VERSION: a pre-release installs when asked for ($($result.Out))"
+
+    Reset-State
+    Install-Old
+    $gui = Start-Process -FilePath (Join-Path $Bin 'marsa-gui.exe') -ArgumentList '--sleep' -PassThru -WindowStyle Hidden
+    $php = Start-Process -FilePath (Join-Path $ShimDir 'php.exe') -ArgumentList '--sleep' -PassThru -WindowStyle Hidden
+    Start-Sleep -Milliseconds 500
+    $result = Invoke-Install $Good
+    Check ($result.Code -eq 0) "update: exit 0 while the old window and a php shim run ($($result.Out))"
+    Check ((Get-Calls) -match "$OldVersion marsa daemon stop") 'update: the old marsa stopped the daemon'
+    Check ((Run (Join-Path $Bin 'marsa-gui.exe') @('--version')).Out -eq "marsa $NewVersion") 'update: marsa-gui.exe is the new one'
+    Check ((Run (Join-Path $ShimDir 'php.exe') @('--version')).Out -eq "marsa $NewVersion") 'update: php.exe is the new one'
+    Check ((Test-Path -LiteralPath (Join-Path $Bin 'marsa-gui.exe.old')) -and (Test-Path -LiteralPath (Join-Path $ShimDir 'php.exe.old'))) 'update: the running programs were renamed to .old'
+    Check ($result.Out.Contains('still run')) 'update: says old programs still run'
+    $result = Invoke-Install $Good
+    Check ($result.Code -eq 0 -and (Test-Path -LiteralPath (Join-Path $ShimDir 'php.exe.old'))) 'update again while the first .old still runs'
+    $gui, $php | Stop-Process -Force
+    $gui.WaitForExit()
+    $php.WaitForExit()
+    $result = Invoke-Install $Good
+    $olds = @(Get-ChildItem -LiteralPath $Bin, $ShimDir -Filter '*.old' -File -Force)
+    Check ($result.Code -eq 0 -and $olds.Count -eq 0) 'update: the next install deletes every .old file'
+    $entries = @((Get-UserPath) -split ';')
+    Check (@($entries | Where-Object { $_ -eq $ShimDir }).Count -eq 1 -and @($entries | Where-Object { $_ -eq $Bin }).Count -eq 1) 'update: each Marsa folder once in PATH'
+
+    Reset-State
+    Install-Old
+    $result = Invoke-Install $Good @{ MARSA_TEST_FAIL_STOP = '1' }
+    Check ($result.Code -eq 0 -and $result.Out.Contains("'marsa daemon stop' failed") -and (Get-Installed) -eq "marsa $NewVersion") 'update: a failing daemon stop is a warning'
+
+    Reset-State
+    Install-Old
+    [IO.File]::WriteAllBytes((Join-Path $Bin 'marsa.exe'), [byte[]]@())
+    $result = Invoke-Install $Good
+    Check ($result.Code -eq 0 -and $result.Out.Contains("'marsa daemon stop' failed") -and (Get-Installed) -eq "marsa $NewVersion") "update: an old marsa.exe that cannot start is a warning, and the install repairs it ($($result.Out))"
+
+    Reset-State
+    $result = Invoke-Install $Good @{ MARSA_NO_PATH = '1' }
+    Check ($result.Code -eq 0 -and (Get-UserPath) -ceq $StartPath -and $result.Out.Contains('was not changed')) 'MARSA_NO_PATH=1: the PATH stays as it was'
+
+    Reset-State
+    Set-ItemProperty -LiteralPath $EnvKey -Name 'Path' -Value 'C:\a;C:\b' -Type String
+    $result = Invoke-Install $Good
+    Check ($result.Code -eq 0 -and (Get-UserPath) -ceq "$ShimDir;$Bin;C:\a;C:\b" -and (Get-Item -LiteralPath $EnvKey).GetValueKind('Path') -eq 'String') 'PATH: a REG_SZ value stays REG_SZ'
+
+    Reset-State
+    Remove-ItemProperty -LiteralPath $EnvKey -Name 'Path'
+    $result = Invoke-Install $Good
+    Check ($result.Code -eq 0 -and (Get-UserPath) -ceq "$ShimDir;$Bin" -and (Get-Item -LiteralPath $EnvKey).GetValueKind('Path') -eq 'ExpandString') 'PATH: no Path value gets one'
+
+    if ($Shells['pwsh']) {
+        Reset-State
+        $result = Invoke-Install $Good -Shell pwsh -WithMinisign
+        Check ($result.Code -eq 0 -and $result.Out.Contains('The signature of SHA256SUMS is good.') -and (Get-Installed) -eq "marsa $NewVersion") "PowerShell 7: installs with the signature checked ($($result.Out))"
+    } else {
+        Check $false 'PowerShell 7 is on the runner'
+    }
+
+    # irm | iex: the user's session keeps its preferences, gets no function
+    # or variable of the script, keeps its TLS setting, and stays open after
+    # a failure. A Restricted execution policy does not stop it.
+    $session = @'
+$ErrorActionPreference = 'Continue'
+$tls = "$([Net.ServicePointManager]::SecurityProtocol)"
+try { Get-Content -Raw -LiteralPath 'SCRIPT' | Invoke-Expression; 'result=done' } catch { 'result=caught' }
+'alive'
+"fail-function=$(Test-Path function:Fail)"
+"programs-variable=$(Test-Path variable:Programs)"
+"preference=$ErrorActionPreference"
+"tls-same=$($tls -eq "$([Net.ServicePointManager]::SecurityProtocol)")"
+'@
+    Reset-State
+    $result = Invoke-Install $Good -Command $session -Policy Restricted
+    Check ($result.Out.Contains('result=done') -and (Get-Installed) -eq "marsa $NewVersion") "irm | iex: installs under a Restricted policy ($($result.Out))"
+    foreach ($line in @('alive', 'fail-function=False', 'programs-variable=False', 'preference=Continue', 'tls-same=True')) {
+        Check ($result.Out.Contains($line)) "irm | iex: the session after an install: $line"
+    }
+    New-Release 'iex-bad' $NewVersion @{ Tamper = $true }
+    Reset-State
+    $result = Invoke-Install (Get-Script 'iex-bad') -Command $session
+    foreach ($line in @('result=caught', 'alive', 'fail-function=False', 'preference=Continue', 'tls-same=True')) {
+        Check ($result.Out.Contains($line)) "irm | iex: the session after a refusal: $line"
+    }
+
+    # A download cut off part way: the script does not parse, so nothing runs.
+    $text = [IO.File]::ReadAllText($Good)
+    $cuts = @([int]($text.Length * 0.3), [int]($text.Length * 0.7), $text.TrimEnd().LastIndexOf("`n"))
+    foreach ($cut in $cuts) {
+        Reset-State
+        $partial = Join-Path $T "partial-$cut.ps1"
+        [IO.File]::WriteAllText($partial, $text.Substring(0, $cut))
+        $result = Invoke-Install $partial
+        Check ($result.Code -ne 0 -and -not (Test-Path -LiteralPath $Marsa) -and (Get-Calls) -eq '') "a download cut at $cut of $($text.Length) characters runs nothing"
+    }
+
+    # ------------------------------------------------------------ refusals
+
+    # Every refusal, from an old install: the message, then nothing new ran
+    # (`Ran`: the only log lines allowed), the installed files are the same,
+    # and no temporary folder or stray file is left.
+    $refusals = @(
+        @{ Name = 'a wrong checksum'; Release = @{ Tamper = $true }; Expect = 'is wrong' },
+        @{ Name = 'an archive listed twice'; Release = @{ Twice = $true }; Expect = 'exactly once' },
+        @{ Name = 'an archive not listed'; Release = @{ NotListed = $true }; Expect = 'exactly once' },
+        @{ Name = 'another key''s signature'; Release = @{ Key = 'other' }; Expect = 'does not verify'; Minisign = $true },
+        @{ Name = 'a changed archive and SHA256SUMS with the old signature'; Release = @{ Resum = $true }; Expect = 'does not verify'; Minisign = $true },
+        @{ Name = 'an edited trusted comment'; Release = @{ EditComment = $true }; Expect = 'does not verify'; Minisign = $true },
+        @{ Name = 'another release''s comment'; Release = @{ Comment = 'marsa release v1.0.0' }; Expect = 'not as the release'; Minisign = $true },
+        @{ Name = 'a comment of a longer version'; Release = @{ Comment = "marsa release v${NewVersion}0" }; Expect = 'not as the release'; Minisign = $true },
+        @{ Name = 'a comment of a pre-release'; Release = @{ Comment = "marsa release v$NewVersion-rc" }; Expect = 'not as the release'; Minisign = $true },
+        @{ Name = 'the comment of the runtimes list'; Release = @{ Comment = 'marsa runtimes manifest serial=1' }; Expect = 'not as the release'; Minisign = $true },
+        @{ Name = 'a comment without marsa'; Release = @{ Comment = "release v$NewVersion" }; Expect = 'not as the release'; Minisign = $true },
+        @{ Name = 'a missing signature'; Release = @{ NoSignature = $true }; Expect = 'cannot download SHA256SUMS.minisig'; Minisign = $true },
+        @{ Name = 'a pre-release marked as the latest'; Release = @{ Tag = "v$NewVersion-rc.1" }; Expect = 'a pre-release' },
+        @{ Name = 'a latest tag that is not a version'; Release = @{ Tag = 'php-8.4.27-r1' }; Expect = 'found no Marsa release' },
+        @{ Name = 'a file in the data folder'; Release = @{ Extra = '..\..\evil.exe' }; Expect = 'does not know' },
+        @{ Name = 'a file above the data folder'; Release = @{ Extra = '..\..\..\evil.exe' }; Expect = 'does not know' },
+        @{ Name = 'a file in a sub-folder'; Release = @{ Extra = 'sub/marsa.exe' }; Expect = 'does not know' },
+        @{ Name = 'a missing program'; Release = @{ Leave = 'marsad' }; Expect = 'does not hold the program marsad.exe' },
+        @{ Name = 'another version inside'; Release = @{ ProgramVersion = $OldVersion }; Expect = 'holds another version'; Ran = "$OldVersion marsa --version`r`n" },
+        @{ Name = 'a new marsa that fails'; Release = @{ VersionExit = 3 }; Expect = 'does not start'; Ran = "$NewVersion marsa --version`r`n" },
+        @{ Name = 'a new marsa that misses a DLL'; Release = @{ VersionExit = -1073741515 }; Expect = 'vc_redist.x64.exe'; Ran = "$NewVersion marsa --version`r`n" },
+        @{ Name = 'a version with no release'; Release = @{}; Env = @{ MARSA_VERSION = '9.9.7' }; Expect = 'cannot download SHA256SUMS' },
+        @{ Name = 'another processor'; Release = @{}; Env = @{ PROCESSOR_ARCHITECTURE = 'ARM64' }; Expect = 'no Windows build for the processor' }
+    )
+    foreach ($bad in @('9.9.9;calc', "9.9.9`n", 'latest', '9.9', '..\9.9.9', 'V9.9.9')) {
+        $refusals += @{ Name = "MARSA_VERSION '$($bad.Trim())'"; Release = @{}; Env = @{ MARSA_VERSION = $bad }; Expect = 'must be a version' }
+    }
+    # Under PowerShell 7 as well: native programs and errors differ there.
+    foreach ($index in @(0, 3, 6, 14)) {
+        $copy = $refusals[$index].Clone()
+        $copy.Name = "$($copy.Name), in PowerShell 7"
+        $copy.Shell = 'pwsh'
+        $refusals += $copy
+    }
+    $index = 0
+    foreach ($case in $refusals) {
+        $index++
+        $name = "refuse$index"
+        New-Release $name $NewVersion $case.Release
+        Reset-State
+        Install-Old
+        $before = Get-Snapshot
+        $caseEnv = @{}
+        if ($case.ContainsKey('Env')) { $caseEnv = $case.Env }
+        $shell = 'powershell'
+        if ($case.ContainsKey('Shell')) { $shell = $case.Shell }
+        $result = Invoke-Install (Get-Script $name) $caseEnv -WithMinisign:([bool]$case['Minisign']) -Shell $shell
+        $ran = ''
+        if ($case.ContainsKey('Ran')) { $ran = $case.Ran }
+        Check ($result.Code -ne 0 -and $result.Out.Contains($case.Expect)) "refuses $($case.Name) ($($result.Out))"
+        Check ((Get-Calls) -ceq $ran) "refuses $($case.Name): no downloaded program ran before the checks"
+        Check ((Get-Snapshot) -ceq $before) "refuses $($case.Name): every installed file is the same"
+        Check (Test-NoTemp) "refuses $($case.Name): no temporary folder left"
+        Check (-not (Test-Path -LiteralPath (Join-Path $Data 'evil.exe')) -and -not (Test-Path -LiteralPath (Join-Path $Marsa 'Marsa\evil.exe'))) "refuses $($case.Name): nothing written outside the temporary folder"
+    }
+
+    # A first install that fails leaves no folder behind.
+    Reset-State
+    $result = Invoke-Install (Get-Script 'refuse1')
+    Check ($result.Code -ne 0 -and -not (Test-Path -LiteralPath $Marsa)) 'a failed first install leaves no Marsa folder'
+
+    # A folder where a program goes: refused before anything changes.
+    Reset-State
+    Install-Old
+    Stop-Fakes
+    Remove-Item -LiteralPath (Join-Path $Bin 'marsad.exe') -Force
+    New-Item -ItemType Directory -Path (Join-Path $Bin 'marsad.exe') | Out-Null
+    $before = Get-Snapshot
+    $result = Invoke-Install $Good
+    Check ($result.Code -ne 0 -and $result.Out.Contains('is a folder') -and (Get-Snapshot) -ceq $before -and -not (Get-Calls).Contains('daemon stop')) 'refuses a folder where a program goes, before anything changes'
+} finally {
+    Stop-Fakes
+    if ($server -and -not $server.HasExited) { $server | Stop-Process -Force }
+    if ($null -eq $SavedPath) {
+        Remove-ItemProperty -LiteralPath $EnvKey -Name 'Path' -ErrorAction SilentlyContinue
+    } else {
+        Set-ItemProperty -LiteralPath $EnvKey -Name 'Path' -Value $SavedPath -Type ExpandString
+    }
+    if (Test-Path -LiteralPath $Marsa) { Remove-Item -LiteralPath $Marsa -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Write-Host
+if ($Failures.Count -gt 0) {
+    Write-Host "$($Failures.Count) failed:" -ForegroundColor Red
+    $Failures | ForEach-Object { Write-Host "  $_" }
+    exit 1
+}
+Write-Host 'all install.ps1 tests passed'

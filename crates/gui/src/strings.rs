@@ -14,14 +14,14 @@ use marsa_core::types::{
 use semver::Version;
 
 use crate::model::{
-    Autostart, Choice, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Pick, Removal,
-    UninstallNotice,
+    Autostart, Choice, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Overall, Pick,
+    Removal, UninstallNotice,
 };
+use crate::theme::Section;
 use crate::tray::menu::Daemon;
+use crate::widgets::{PillState, Stage, StepState};
 
 pub const APP_NAME: &str = "Marsa";
-pub const WINDOW_SIZE: [f32; 2] = [900.0, 600.0];
-pub const WINDOW_MIN_SIZE: [f32; 2] = [480.0, 320.0];
 
 pub const SERVICES: &str = "Services";
 pub const NO_SERVICES: &str = "No services.";
@@ -115,22 +115,73 @@ pub const XDEBUG_HINT: &str = "Load Xdebug in every installed PHP that has it, i
 pub const XDEBUG_SLOW: &str = "PHP runs two to four times slower while Xdebug is on. Turn it \
      off when you are done debugging.";
 
-// The first-run panel (task M5-10).
+// The first-run panel (tasks M5-10 and M5-D5).
 
-pub const FIRST_RUN_TITLE: &str = "Get started";
-pub const FIRST_RUN_TEXT: &str =
-    "Marsa needs PHP and the Caddy web server to serve your sites. Neither is installed yet.";
+pub const FIRST_RUN_WELCOME: &str = "Welcome to Marsa";
+pub const FIRST_RUN_INTRO: &str = "Three steps, and your first site opens over HTTPS.";
 /// Names the version of `model::FIRST_PHP`; a test keeps the two the same.
 pub const FIRST_RUN_INSTALL: &str = "Install PHP 8.4 and Caddy";
-pub const FIRST_RUN_INSTALL_HINT: &str =
-    "Downloads PHP 8.4 and Caddy from Marsa's signed version list, one after the other.";
-pub const FIRST_RUN_READY: &str = "PHP and Caddy are installed. One last step, needed once:";
+pub const FIRST_RUN_INSTALL_BODY: &str = "Downloaded from Marsa's signed version list. PHP runs \
+     your code; Caddy serves your sites.";
+pub const FIRST_RUN_INSTALLED: &str = "PHP and Caddy are installed";
+pub const FIRST_RUN_SETUP: &str = "Set up HTTPS for .test sites";
+pub const FIRST_RUN_SITE: &str = "Add your first site";
+pub const FIRST_RUN_SITE_BODY: &str = "Park a folder of projects, where each sub-folder becomes a \
+     site, or link one project folder.";
+/// The primary button while its step runs.
+pub const INSTALLING: &str = "Installing…";
+pub const INSTALLING_HINT: &str = "The install runs by itself. Wait for it to end.";
+pub const SETTING_UP: &str = "Setting up…";
+
+/// The title of the first step, and the label of its button: what is left
+/// to install.
+pub const fn first_run_install_title(php: bool, caddy: bool) -> &'static str {
+    match (php, caddy) {
+        (true, true) => FIRST_RUN_INSTALL,
+        (true, false) => INSTALL_PHP,
+        (false, true) => INSTALL_CADDY,
+        (false, false) => FIRST_RUN_INSTALLED,
+    }
+}
+
+/// What a screen reader says for a step card: "Step 2: Set up HTTPS, to do
+/// now".
+pub fn step_label(number: u8, title: &str, stage: Stage) -> String {
+    let word = match stage {
+        Stage::Done => "done",
+        Stage::Current => "to do now",
+        Stage::Next => "comes next",
+    };
+    format!("Step {number}: {title}, {word}")
+}
 pub const NOT_NOW: &str = "Not now";
 pub const CLOSE: &str = "Close";
 
 // Setup (`POST /v1/setup`), in the first-run panel and in Settings.
 
 pub const RUN_SETUP: &str = "Run setup";
+/// Linux on the hosts way (task M4-18k3): the button under the sites.
+pub const ADD_TO_HOSTS: &str = "Add to /etc/hosts";
+pub const ADD_TO_HOSTS_HINT: &str = "Linux asks for your password once, then the sites' .test \
+     names go into /etc/hosts, so they open in the browser.";
+pub const HOSTS_ADDING: &str = "Waiting for the password…";
+
+/// The sites the hosts file lacks; at most five are named.
+pub fn hosts_waiting(missing: &[String]) -> String {
+    let mut names = missing
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if missing.len() > 5 {
+        names.push_str(&format!(", and {} more", missing.len() - 5));
+    }
+    match missing.len() {
+        1 => format!("{names} is not in /etc/hosts yet, so it does not open."),
+        _ => format!("{names} are not in /etc/hosts yet, so they do not open."),
+    }
+}
 pub const RUN_SETUP_HINT: &str =
     "Each step checks what is already done, so running setup again is safe.";
 /// When setup had no step to report.
@@ -254,16 +305,13 @@ pub fn install_status(view: &InstallView) -> String {
     match &view.step {
         InstallStep::Waiting => format!("Asking the daemon to install {what}…"),
         InstallStep::ListChecked => format!("Installing {what}…"),
-        InstallStep::Downloading {
-            artifact,
-            done,
-            total,
-        } => format!(
-            "Downloading {what} ({artifact}): {} of {} MB",
+        // The archive name is for the log, not the user (design review, D5).
+        InstallStep::Downloading { done, total, .. } => format!(
+            "Downloading {what}: {} of {} MB",
             megabytes(*done),
             megabytes(*total)
         ),
-        InstallStep::Unpacking { artifact } => format!("Unpacking {what} ({artifact})…"),
+        InstallStep::Unpacking { .. } => format!("Unpacking {what}…"),
         InstallStep::Checking => format!("Testing {what}…"),
         InstallStep::Finishing => format!("Finishing the install of {what}…"),
         InstallStep::Done { already: false } => format!("Installed {what}."),
@@ -341,8 +389,45 @@ pub fn setup_explanation(platform: Option<Platform>) -> &'static str {
              Marsa, trusts Marsa's certificates, and routes ports 80 and 443 to Marsa. macOS \
              asks for your password once."
         }
+        // ADR 0014: the setup text says what the low ports cost.
+        Some(Platform::LinuxX64 | Platform::LinuxArm64) => {
+            "Setup lets your browser open .test sites over HTTPS: it sends .test names to \
+             Marsa, trusts Marsa's certificates, and lets Caddy use ports 80 and 443. After \
+             it, any program on this computer may use ports 80 to 1023. Your desktop asks for \
+             your password once."
+        }
+        // ADR 0018: a helper service keeps the hosts file and the trust.
+        Some(Platform::WindowsX64) => {
+            "Setup lets your browser open .test sites over HTTPS: it adds your sites to the \
+             hosts file and trusts Marsa's certificates, through a small Marsa service. Windows \
+             asks for your approval (UAC) the first time."
+        }
         _ => {
             "Setup lets your browser open .test sites over HTTPS. Your system may ask for an \
+             administrator's approval once."
+        }
+    }
+}
+
+/// The setup step of the first-run panel: what the user gets, and the prompt
+/// that comes. The details (DNS, certificates, ports) are in
+/// `setup_explanation`, for Settings. Linux keeps the cost of the low ports
+/// (ADR 0014), because the button here runs setup.
+pub fn first_run_setup_body(platform: Option<Platform>) -> &'static str {
+    match platform {
+        Some(Platform::DarwinArm64 | Platform::DarwinX64) => {
+            "Your browser will open .test sites over HTTPS. macOS asks for your password once."
+        }
+        Some(Platform::LinuxX64 | Platform::LinuxArm64) => {
+            "Your browser will open .test sites over HTTPS. After setup, any program on this \
+             computer may use ports 80 to 1023. Your desktop asks for your password once."
+        }
+        Some(Platform::WindowsX64) => {
+            "Your browser will open .test sites over HTTPS. Windows asks for your approval \
+             (UAC) the first time."
+        }
+        _ => {
+            "Your browser will open .test sites over HTTPS. Your system may ask for an \
              administrator's approval once."
         }
     }
@@ -354,6 +439,10 @@ pub fn setup_running(platform: Option<Platform>) -> &'static str {
         Some(Platform::DarwinArm64 | Platform::DarwinX64) => {
             "Setting up… Enter your password when macOS asks."
         }
+        Some(Platform::LinuxX64 | Platform::LinuxArm64) => {
+            "Setting up… Enter your password when your desktop asks."
+        }
+        Some(Platform::WindowsX64) => "Setting up… Choose Yes if Windows asks (UAC).",
         _ => "Setting up… Answer your system's prompt if one opens.",
     }
 }
@@ -412,6 +501,12 @@ fn setup_step(op: &str) -> String {
         "trust_install" => "Trust Marsa's HTTPS certificates".to_owned(),
         "resolver_install" => "Send .test names to Marsa".to_owned(),
         "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
+        "resolved_install" => "Send .test names to Marsa".to_owned(),
+        "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
+        // The hosts way on Linux (task M4-18k).
+        "resolved_remove" => "Take out Marsa's link for .test names".to_owned(),
+        "hosts_sync" => "Put the sites' .test names in the hosts file".to_owned(),
+        "hosts_remove" => "Take Marsa's names out of the hosts file".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -537,6 +632,192 @@ pub fn runtime_name(runtime: Runtime) -> &'static str {
         Runtime::Node => "Node.js",
         Runtime::Composer => "Composer",
         Runtime::Caddy => "Caddy",
+    }
+}
+
+/// The two or three letters on a runtime's tile: a new language needs a
+/// monogram, not a new icon (components.md, Section icon tile).
+pub const fn runtime_monogram(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Php => "PHP",
+        Runtime::Node => "JS",
+        Runtime::Composer => "Co",
+        Runtime::Caddy => "Ca",
+    }
+}
+
+/// A section's name: its sidebar label, and what a screen reader says for
+/// its tile.
+pub const fn section_name(section: Section) -> &'static str {
+    match section {
+        Section::Home => "Home",
+        Section::Sites => SITES,
+        Section::Runtimes => "Runtimes",
+        Section::Services => SERVICES,
+        Section::Mail => "Mail",
+        Section::Dumps => "Dumps",
+        Section::Logs => "Logs",
+        Section::Databases => "Databases",
+        Section::Queues => "Queues",
+    }
+}
+
+/// The sidebar's fold button, by what a press does.
+pub const HIDE_LABELS: &str = "Hide labels";
+pub const SHOW_LABELS: &str = "Show labels";
+/// Why the fold button does nothing in a narrow window.
+pub const FOLD_NARROW_HINT: &str =
+    "The window is too narrow for labels. Make it wider to show them.";
+
+/// The status at the bottom of the sidebar: a title and a caption, short
+/// enough for its width.
+pub const fn overall_text(overall: Overall) -> (&'static str, &'static str) {
+    match overall {
+        Overall::Connecting => ("Connecting…", "Waiting for Marsa"),
+        Overall::Stopping => ("Marsa is stopping", "Sites stop with it"),
+        Overall::DaemonDown => ("Sites not opening", "Marsa is not running"),
+        Overall::NoSites => ("Marsa is running", "No sites yet"),
+        Overall::Starting => ("Sites starting", "Caddy is starting"),
+        Overall::WebServerDown => ("Sites not opening", "Caddy stopped"),
+        Overall::Working => ("All sites working", "Caddy is running"),
+    }
+}
+
+// Home (task M5-D5): the status sentence, its fixes, the default PHP, and the
+// first sites.
+
+/// The sentence and the line under it, while the window waits for the daemon.
+pub const HOME_CONNECTING: (&str, &str) = ("Connecting to Marsa…", "Waiting for the daemon.");
+pub const HOME_STOPPING: (&str, &str) = ("Marsa is stopping.", "Your sites stop with it.");
+/// The line under it is the connection's own (`status_line`).
+pub const HOME_DAEMON_DOWN: &str = "Sites are not opening: Marsa is not running.";
+pub const HOME_CADDY_NOT_INSTALLED: (&str, &str) = (
+    "Sites are not opening: Caddy is not installed.",
+    "Caddy is the web server that answers every .test address. Install it to serve your sites.",
+);
+pub const HOME_CADDY_STOPPED: (&str, &str) = (
+    "Sites are not opening: Caddy stopped.",
+    "Caddy is the web server that answers every .test address. It is not running.",
+);
+pub const HOME_CADDY_FAILED: &str = "Sites are not opening: Caddy failed.";
+pub const HOME_CADDY_STARTING: (&str, &str) =
+    ("Caddy is starting.", "Your sites open as soon as it runs.");
+pub const HOME_CADDY_STOPPING: (&str, &str) = (
+    "Caddy is stopping.",
+    "Your sites do not open until it starts again.",
+);
+pub const HOME_PHP_NOT_INSTALLED: (&str, &str) = (
+    "Sites are not opening: PHP is not installed.",
+    "PHP runs your code. Install a version to serve your sites.",
+);
+pub const HOME_DNS_MISSING: &str = "Sites are not opening: DNS does not know them yet.";
+pub const HOME_NO_SITES: &str = "No sites yet.";
+
+/// The sentence when a pool failed: only the sites of that PHP are down.
+pub fn home_php_failed(minor: &str) -> String {
+    format!("PHP {minor} failed: its sites are not opening.")
+}
+
+/// The sentence when all work.
+pub fn home_working(sites: usize) -> String {
+    match sites {
+        1 => "Your site is working.".to_owned(),
+        n => format!("All {n} sites are working."),
+    }
+}
+
+/// The line under it: what runs. `php` is `8.4`, or nothing while the list
+/// of runtimes is not read.
+pub fn home_running(php: Option<&str>) -> String {
+    match php {
+        Some(minor) => format!("Caddy is running and PHP {minor} is ready."),
+        None => "Caddy is running.".to_owned(),
+    }
+}
+
+/// The line under "No sites yet." when all else works.
+pub fn home_no_sites(php: Option<&str>) -> String {
+    format!(
+        "{} Park a folder of projects, or link one, to add your first site.",
+        home_running(php)
+    )
+}
+
+/// `PHP 8.4`, or `PHP` while the line is not known.
+pub fn php_line(minor: Option<&str>) -> String {
+    minor.map_or_else(|| "PHP".to_owned(), |minor| format!("PHP {minor}"))
+}
+
+pub const PATH_DNS: &str = "DNS";
+pub const PATH_CADDY: &str = "Caddy";
+
+/// The fixes of the status sentence.
+pub const START_CADDY: &str = "Start Caddy";
+pub const SHOW_LOG: &str = "Show log";
+pub const INSTALL_CADDY: &str = "Install Caddy";
+/// Names the version of `model::FIRST_PHP`; a test keeps the two the same.
+pub const INSTALL_PHP: &str = "Install PHP 8.4";
+
+pub const DEFAULT_PHP: &str = "Default PHP";
+pub const DEFAULT_PHP_HINT: &str = "used where a site does not ask for a version";
+pub const NO_PHP_YET: &str = "No PHP installed yet.";
+pub const HOME_SITES_EMPTY: &str = "Sites you park or link show here.";
+pub const ADD_SITE: &str = "Add a site";
+pub const OPEN: &str = "Open";
+
+/// The link after the heading "Sites" on Home.
+pub fn all_sites(count: usize) -> String {
+    format!("All {count} sites")
+}
+
+/// What a screen reader says for a row badge: "3 new mails", "9 dumps".
+pub fn row_badge_label(section: Section, count: u32) -> String {
+    let (one, many) = match section {
+        Section::Home => ("event", "events"),
+        Section::Sites => ("site", "sites"),
+        Section::Runtimes => ("runtime", "runtimes"),
+        Section::Services => ("service", "services"),
+        Section::Mail => ("new mail", "new mails"),
+        Section::Dumps => ("dump", "dumps"),
+        Section::Logs => ("log line", "log lines"),
+        Section::Databases => ("database", "databases"),
+        Section::Queues => ("job", "jobs"),
+    };
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// The name of the request path for a screen reader (components.md,
+/// Status): the steps are DNS, Caddy, the runtime, and the site.
+pub const REQUEST_PATH: &str = "Where the request stops";
+
+/// What a screen reader says for one step of the request path: "Caddy, not
+/// working". The icon and the weight say it to the eye (R8).
+pub fn path_step_label(label: &str, state: StepState) -> String {
+    let word = match state {
+        StepState::Working => "working",
+        StepState::Broken => "not working",
+        StepState::Unreached => "not reached",
+        StepState::NotChecked => "not checked",
+    };
+    format!("{label}, {word}")
+}
+
+/// The first row of a site's version menu: it clears the site's own setting.
+pub const USE_SITE_FILES: &str = "Use the site's files";
+
+/// The name of the dashed "+" of a version picker: "Install another PHP
+/// version".
+pub fn install_another_label(runtime: &str) -> String {
+    format!("Install another {runtime} version")
+}
+
+/// The word of a service's state pill (components.md, Status).
+pub const fn pill_state_word(state: PillState) -> &'static str {
+    match state {
+        PillState::Running => "Running",
+        PillState::Waiting => "Waiting",
+        PillState::Stopped => "Stopped",
+        PillState::Starting => "Starting",
     }
 }
 
@@ -997,7 +1278,13 @@ fn error_message(code: &str) -> Option<&'static str> {
             "Marsa is being removed from this computer (marsa uninstall --all). Wait for it to \
              end, then try again."
         }
-        "setup_not_supported" => "Setup from Marsa works on macOS only for now.",
+        "setup_not_supported" => "Setup from Marsa works on macOS, Linux, and Windows only.",
+        // The window runs on the machine marsad runs on, so `cfg!` is the
+        // daemon's system too. Its admin prompt is UAC (ADR 0018).
+        "setup_cancelled" if cfg!(windows) => {
+            "The UAC prompt was declined, so nothing was changed. Run setup again when you are \
+             ready."
+        }
         "setup_cancelled" => {
             "The password prompt was cancelled, so nothing was changed. Run setup again when \
              you are ready."
@@ -1011,8 +1298,151 @@ fn error_message(code: &str) -> Option<&'static str> {
              again is safe."
         }
         "setup_not_authorized" => {
-            "macOS did not give Marsa admin rights, so nothing was changed. Run setup again and \
-             enter the password of an administrator account."
+            "Your system did not give Marsa admin rights, so nothing was changed: a wrong \
+             password, or no password prompt (as over SSH). Run setup again from your desktop \
+             and enter the password of an administrator account."
+        }
+        // Windows: the helper service and the hosts file (task M4-19g2, ADR 0018).
+        "setup_helper_not_the_service" => {
+            "Another program holds the name of Marsa's helper service, so Marsa sent it nothing \
+             and nothing was changed. Restart Windows, then run setup again; if it repeats, \
+             report it with the file logs/marsad.log."
+        }
+        "setup_helper_install_failed" => {
+            "Marsa could not install its helper service, so nothing was changed. Windows' \
+             service log and the file logs/marsad.log say why. Run setup again; if it repeats, \
+             report it."
+        }
+        "setup_helper_install_running" => {
+            "The install of Marsa's helper service is still running. Wait a few minutes, then \
+             run setup again."
+        }
+        "setup_helper_pipe_failed" => {
+            "Marsa could not reach its helper service, so nothing was changed. Run setup again; \
+             if it repeats, report it with the file logs/marsad.log."
+        }
+        "setup_helper_busy" => {
+            "Marsa's helper service is busy with another request. Wait a moment, then run \
+             setup again."
+        }
+        "setup_helper_no_answer" => {
+            "Marsa's helper service gave no answer, so the result of setup is not known. Run \
+             \"marsa doctor\" in a terminal to see what is set up, then run setup again."
+        }
+        // Linux (tasks M4-18e, M4-18h, M4-18b, M4-18c).
+        "setup_pkexec_missing" => {
+            "pkexec is not installed, so Marsa cannot ask for the administrator password. \
+             Install the package pkexec (Debian, Ubuntu), polkit (Fedora), or policykit-1 \
+             (older systems), then run setup again."
+        }
+        // Linux, the second request of setup (task M4-18k2).
+        "setup_hosts_not_written" => {
+            "The steps above are done, but the second password prompt did not go through, so \
+             the sites' .test names are not in /etc/hosts yet and the sites do not open. Run \
+             setup again."
+        }
+        "setup_hosts_not_removed" => {
+            "The steps above are done, and .test names now reach Marsa without /etc/hosts. The \
+             second password prompt did not go through, so Marsa's old lines stay in \
+             /etc/hosts; they do no harm. Run setup again to take them out."
+        }
+        "hosts_not_used" => {
+            "Marsa has no lines in /etc/hosts for this data folder yet. Run setup first."
+        }
+        "hosts_sites_unknown" => {
+            "Marsa could not read its site list, so it left the hosts file as it is. Look at \
+             the sites, then run setup again."
+        }
+        "hosts_too_many_names" => {
+            "There are more sites than Marsa can put in the hosts file at once (1000 names), \
+             so it left the file as it is. Remove sites you do not use, then run setup again."
+        }
+        "setup_caddy_ports_failed" => {
+            "Linux now lets Caddy use ports 80 and 443, but Caddy did not take them. Most often \
+             another program listens there (Apache, nginx). Stop it, then restart Caddy; the \
+             Caddy log says why."
+        }
+        "resolved_foreign" => {
+            "/etc/systemd/system/marsa-dns-link.service belongs to another tool, so Marsa left \
+             it as it is. Move that file away, then run setup again."
+        }
+        "resolved_read" | "resolved_write" | "resolved_delete" => {
+            "Linux did not let Marsa change its files for .test names. Run setup again; if it \
+             repeats, report it."
+        }
+        // Setup then puts the names in /etc/hosts (task M4-18k2).
+        "resolved_not_running" => {
+            "systemd-resolved does not run here, so Marsa did not make its link for .test \
+             names: they go into /etc/hosts instead."
+        }
+        // Linux (task M4-18k) and Windows (task M4-19).
+        "hosts_read" => {
+            "Marsa did not change the hosts file: it cannot be read, or it is a link, \
+             read-only, or larger than 16 MiB. Fix the file, then run setup again."
+        }
+        "hosts_write" => {
+            "Marsa could not write the hosts file. Another program may hold it (some security \
+             tools do); close it, then run setup again."
+        }
+        "hosts_block_broken" => {
+            "The hosts file has a \"# Marsa start\" line without its \"# Marsa end\" line, or \
+             the other way round, so Marsa left it as it is. Remove Marsa's lines from it, then \
+             run setup again."
+        }
+        "resolved_tool_missing" => {
+            "The ip program (package iproute2) is not on this system, so Marsa could not make \
+             its link for .test names. Install iproute2, then run setup again."
+        }
+        "resolved_unit_failed" => {
+            "systemd did not start or stop Marsa's link for .test names \
+             (marsa-dns-link.service). Run setup again; if it repeats, report it."
+        }
+        "resolved_check_failed" => {
+            "Marsa could not confirm that systemd-resolved sends .test names, and only them, to \
+             its DNS server, so it took its link out again. Run setup again; if it repeats, \
+             report it."
+        }
+        "resolved_use_hosts" => {
+            "This system's systemd is older than version 250 and systemd-networkd may run, so \
+             systemd-resolved can drop the setting that sends .test names to Marsa. Marsa did \
+             not make it: .test names here go into /etc/hosts instead."
+        }
+        "resolved_systemd_unknown" => {
+            "Marsa could not read the version of systemd here, so it did not make its link for \
+             .test names. Report it."
+        }
+        "resolved_restart_failed" => {
+            "systemd-resolved did not restart after Marsa removed an old setting, so it may \
+             still send every name to Marsa's DNS server. Restart systemd-resolved."
+        }
+        "resolved_stopped" => {
+            "systemd-resolved stopped and did not start again, so no name resolves on this \
+             computer now. Start systemd-resolved, then run setup again."
+        }
+        "ports_foreign" => {
+            "/etc/sysctl.d/60-marsa.conf belongs to another tool, so Caddy cannot use ports 80 \
+             and 443. Move that file away, then run setup again."
+        }
+        "ports_read" | "ports_write" | "ports_delete" => {
+            "Linux did not let Marsa change /etc/sysctl.d/60-marsa.conf. Run setup again; if it \
+             repeats, report it."
+        }
+        "ports_apply_failed" => {
+            "Linux did not let Caddy use ports 80 and 443, so Marsa took its setting out again. \
+             Run setup again; if it repeats, report it."
+        }
+        "ports_restore_failed" => {
+            "Marsa removed its setting for ports 80 and 443, but every program may use ports 80 \
+             to 1023 until the computer restarts."
+        }
+        "trust_tool_missing" => {
+            "This system has no tool Marsa knows for its trusted certificates, so the trust in \
+             Marsa's certificate authority was not changed. On Debian, Ubuntu, or Fedora, \
+             install the ca-certificates package, then run setup again."
+        }
+        "trust_store_update_failed" => {
+            "The system's store of trusted certificates could not be updated. Run setup again; \
+             if it repeats, report it."
         }
         "setup_helper_missing" => {
             "The marsa-helper program is not next to marsad, so nothing was changed. Reinstall \
@@ -1504,6 +1934,12 @@ mod tests {
             "setup_prompt_failed",
             "setup_helper_failed",
             "setup_helper_rejected",
+            "setup_helper_not_the_service",
+            "setup_helper_install_failed",
+            "setup_helper_install_running",
+            "setup_helper_pipe_failed",
+            "setup_helper_busy",
+            "setup_helper_no_answer",
             "redirect_port_held",
             "ports_not_checked",
             "ca_not_ready",
@@ -1520,6 +1956,36 @@ mod tests {
             "trust_add_failed",
             "pf_write",
             "pf_load_failed",
+            "setup_pkexec_missing",
+            "setup_caddy_ports_failed",
+            "resolved_foreign",
+            "resolved_read",
+            "resolved_write",
+            "resolved_delete",
+            "resolved_not_running",
+            "resolved_tool_missing",
+            "resolved_unit_failed",
+            "resolved_check_failed",
+            "resolved_use_hosts",
+            "resolved_systemd_unknown",
+            "hosts_read",
+            "hosts_write",
+            "hosts_block_broken",
+            "hosts_sites_unknown",
+            "hosts_too_many_names",
+            "hosts_not_used",
+            "setup_hosts_not_written",
+            "setup_hosts_not_removed",
+            "resolved_restart_failed",
+            "resolved_stopped",
+            "ports_foreign",
+            "ports_read",
+            "ports_write",
+            "ports_delete",
+            "ports_apply_failed",
+            "ports_restore_failed",
+            "trust_tool_missing",
+            "trust_store_update_failed",
         ];
         for code in built.chain(listed.map(str::to_owned)) {
             assert!(error_message(&code).is_some(), "no message for {code}");
@@ -1553,13 +2019,13 @@ mod tests {
                     done: 12_340_000,
                     total: 30_100_000,
                 }),
-                "Downloading PHP 8.4.23 (cli): 12.3 of 30.1 MB",
+                "Downloading PHP 8.4.23: 12.3 of 30.1 MB",
             ),
             (
                 php(InstallStep::Unpacking {
                     artifact: artifact(),
                 }),
-                "Unpacking PHP 8.4.23 (cli)…",
+                "Unpacking PHP 8.4.23…",
             ),
             (php(InstallStep::Checking), "Testing PHP 8.4.23…"),
             (
@@ -1649,11 +2115,29 @@ mod tests {
     #[test]
     fn the_first_run_button_names_the_php_it_installs() {
         let line = format!("PHP {}", crate::model::FIRST_PHP);
+        assert_eq!(INSTALL_PHP, format!("Install {line}"));
         assert!(FIRST_RUN_INSTALL.contains(&line), "{FIRST_RUN_INSTALL}");
-        assert!(
-            FIRST_RUN_INSTALL_HINT.contains(&line),
-            "{FIRST_RUN_INSTALL_HINT}"
-        );
+        assert_eq!(FIRST_RUN_INSTALL, format!("Install {line} and Caddy"));
+    }
+
+    /// ADR 0018: on Windows the prompt is UAC, the first time only.
+    #[test]
+    fn setup_on_windows_names_the_uac_prompt() {
+        let windows = Some(Platform::WindowsX64);
+        assert!(setup_explanation(windows).contains("(UAC)"));
+        assert!(setup_running(windows).contains("UAC"));
+        for other in [Some(Platform::DarwinArm64), Some(Platform::LinuxX64), None] {
+            assert!(!setup_explanation(other).contains("UAC"));
+            assert!(!setup_running(other).contains("UAC"));
+        }
+        let cancelled = error_text("setup_cancelled");
+        let prompt = if cfg!(windows) {
+            "UAC prompt"
+        } else {
+            "password prompt"
+        };
+        assert!(cancelled.contains(prompt), "{cancelled}");
+        assert!(error_text("setup_not_supported").contains("Windows"));
     }
 
     #[test]
@@ -1667,6 +2151,50 @@ mod tests {
             assert!(!setup_explanation(platform).contains("macOS"));
             assert!(!setup_running(platform).contains("macOS"));
         }
+    }
+
+    /// The first-run step says what the user gets and the prompt, and on
+    /// Linux the cost of the low ports (ADR 0014); not how setup works.
+    #[test]
+    fn the_first_run_setup_step_is_short_and_names_the_prompt() {
+        let mac = first_run_setup_body(Some(Platform::DarwinArm64));
+        assert_eq!(
+            mac,
+            "Your browser will open .test sites over HTTPS. macOS asks for your password once."
+        );
+        let linux = first_run_setup_body(Some(Platform::LinuxX64));
+        assert!(linux.contains("any program on this computer may use ports 80 to 1023"));
+        assert!(first_run_setup_body(Some(Platform::WindowsX64)).contains("(UAC)"));
+        for platform in [
+            Some(Platform::DarwinX64),
+            Some(Platform::LinuxArm64),
+            Some(Platform::WindowsX64),
+            None,
+        ] {
+            let text = first_run_setup_body(platform);
+            assert!(text.starts_with("Your browser will open .test sites over HTTPS."));
+            assert!(!text.contains("certificates"), "{text}");
+        }
+    }
+
+    /// ADR 0014: on Linux the setup text says that ports 80 to 1023 become
+    /// open to every program, before the password prompt.
+    #[test]
+    fn setup_on_linux_names_the_cost_of_the_low_ports() {
+        for platform in [Platform::LinuxX64, Platform::LinuxArm64] {
+            let text = setup_explanation(Some(platform));
+            assert!(text.contains("any program on this computer may use ports 80 to 1023"));
+            assert!(setup_running(Some(platform)).contains("desktop"));
+        }
+        assert_eq!(
+            setup_step("ports_install"),
+            "Let Caddy use ports 80 and 443"
+        );
+        assert_eq!(setup_step("resolved_install"), "Send .test names to Marsa");
+        assert_eq!(
+            setup_step("hosts_sync"),
+            "Put the sites' .test names in the hosts file"
+        );
     }
 
     fn result(op: &str, status: OpStatus, code: Option<&str>) -> OpResult {
@@ -2023,5 +2551,70 @@ mod tests {
             "{hint}"
         );
         assert_ne!(pick_title(Pick::Park), pick_title(Pick::Link));
+    }
+
+    /// Task M4-18k3: the line over "Add to /etc/hosts".
+    #[test]
+    fn the_hosts_line_names_the_waiting_sites() {
+        let names =
+            |count: usize| -> Vec<String> { (1..=count).map(|i| format!("s{i}.test")).collect() };
+        assert_eq!(
+            hosts_waiting(&names(1)),
+            "s1.test is not in /etc/hosts yet, so it does not open."
+        );
+        assert_eq!(
+            hosts_waiting(&names(6)),
+            "s1.test, s2.test, s3.test, s4.test, s5.test, and 1 more are not in /etc/hosts yet, \
+             so they do not open."
+        );
+    }
+
+    /// Task M5-D2: the words of the widgets' tiles and badges.
+    #[test]
+    fn every_runtime_has_a_short_monogram_and_every_section_a_name() {
+        let mut monograms = Vec::new();
+        for runtime in Runtime::ALL {
+            let letters = runtime_monogram(runtime);
+            assert!((2..=3).contains(&letters.len()), "{runtime:?}: {letters}");
+            monograms.push(letters);
+        }
+        monograms.sort_unstable();
+        monograms.dedup();
+        assert_eq!(
+            monograms.len(),
+            Runtime::ALL.len(),
+            "two runtimes share letters"
+        );
+        assert_eq!(runtime_monogram(Runtime::Php), "PHP");
+        assert_eq!(runtime_monogram(Runtime::Node), "JS");
+
+        let mut names: Vec<&str> = Section::ALL.iter().map(|s| section_name(*s)).collect();
+        assert!(names.iter().all(|name| !name.is_empty()));
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), Section::ALL.len(), "two sections share a name");
+        assert_eq!(section_name(Section::Sites), SITES);
+        assert_eq!(section_name(Section::Services), SERVICES);
+    }
+
+    #[test]
+    fn the_version_widgets_have_their_words_for_any_runtime() {
+        assert_eq!(install_another_label("PHP"), "Install another PHP version");
+        assert_eq!(
+            install_another_label(runtime_name(Runtime::Node)),
+            "Install another Node.js version"
+        );
+        assert_eq!(USE_SITE_FILES, "Use the site's files");
+    }
+
+    #[test]
+    fn a_row_badge_label_counts_in_words() {
+        assert_eq!(row_badge_label(Section::Mail, 3), "3 new mails");
+        assert_eq!(row_badge_label(Section::Mail, 1), "1 new mail");
+        assert_eq!(row_badge_label(Section::Dumps, 9), "9 dumps");
+        assert_eq!(row_badge_label(Section::Dumps, 1), "1 dump");
+        for section in Section::ALL {
+            assert!(row_badge_label(section, 2).starts_with("2 "));
+        }
     }
 }

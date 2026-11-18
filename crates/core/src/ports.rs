@@ -115,6 +115,51 @@ pub fn holders(listeners: &[Listener], port: u16) -> Vec<&Listener> {
         .collect()
 }
 
+/// Reads the output of Windows' `netstat -ano`: the listening TCP sockets,
+/// each with its PID (task M4-19o). A row is `TCP <local> <foreign> <state>
+/// <pid>`, and it is a listener when its foreign address is `0.0.0.0:0` or
+/// `[::]:0`: the state column is in the language of Windows (`LISTENING`,
+/// `ABHÖREN`), the addresses are not. The brackets of an IPv6 address go:
+/// `[::1]:80` is `::1` and 80. UDP rows, headers, and rows that cannot be
+/// read are skipped. Windows prints no process name: `process` is `None`.
+pub fn parse_netstat_windows(text: &str) -> Vec<Listener> {
+    text.lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let [protocol, local, foreign, _state, pid] = fields.as_slice() else {
+                return None;
+            };
+            if !protocol.eq_ignore_ascii_case("TCP") || !matches!(*foreign, "0.0.0.0:0" | "[::]:0")
+            {
+                return None;
+            }
+            let (address, port) = local.rsplit_once(':')?;
+            Some(Listener {
+                address: address
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_owned(),
+                port: port.parse().ok()?,
+                process: None,
+                pid: pid.parse().ok(),
+            })
+        })
+        .collect()
+}
+
+/// The image name in the output of `tasklist /FI "PID eq <pid>" /FO CSV
+/// /NH`: `"caddy.exe","1788","Console","1","40,112 K"` gives `caddy.exe`.
+/// `None` when no process matched: tasklist then prints a message, in the
+/// language of Windows, with no quoted field.
+pub fn parse_tasklist(text: &str) -> Option<String> {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with('"'))?;
+    let name = line.strip_prefix('"')?.split('"').next()?;
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 /// Reads the output of `/bin/ps -p <pid> -o user=,comm=`: the user, then the
 /// command after the first run of whitespace. The command can contain spaces
 /// (`nginx: worker process`). Only the first line that is not empty is read,
@@ -621,6 +666,60 @@ mod tests {
         ];
         for (command, app) in cases {
             assert_eq!(known_app(command), app, "{command}");
+        }
+    }
+
+    /// `netstat -ano` on Windows Server 2025, with IIS stopped and Caddy on
+    /// 127.0.0.1 (task M4-19o), cut.
+    const NETSTAT_WINDOWS: &str = "\r
+Active Connections\r
+\r
+  Proto  Local Address          Foreign Address        State           PID\r
+  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1012\r
+  TCP    0.0.0.0:80             0.0.0.0:0              ABHÖREN         4\r
+  TCP    127.0.0.1:443          0.0.0.0:0              LISTENING       5244\r
+  TCP    127.0.0.1:80           0.0.0.0:0              LISTENING       5244\r
+  TCP    10.1.0.101:49712       20.42.65.85:443        ESTABLISHED     3204\r
+  TCP    [::]:80                [::]:0                 LISTENING       4\r
+  TCP    [::1]:443              [::]:0                 LISTENING       77\r
+  UDP    0.0.0.0:5353           *:*                                    2120\r
+";
+
+    #[test]
+    fn windows_netstat_gives_the_listeners_in_any_language() {
+        let listeners = parse_netstat_windows(NETSTAT_WINDOWS);
+        let rows: Vec<(&str, u16, Option<u32>)> = listeners
+            .iter()
+            .map(|l| (l.address.as_str(), l.port, l.pid))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("0.0.0.0", 135, Some(1012)),
+                ("0.0.0.0", 80, Some(4)),
+                ("127.0.0.1", 443, Some(5244)),
+                ("127.0.0.1", 80, Some(5244)),
+                ("::", 80, Some(4)),
+                ("::1", 443, Some(77)),
+            ]
+        );
+        assert!(listeners.iter().all(|l| l.process.is_none()));
+        let on_80: Vec<Option<u32>> = holders(&listeners, 80).iter().map(|l| l.pid).collect();
+        assert_eq!(on_80, [Some(4), Some(5244), Some(4)]);
+    }
+
+    #[test]
+    fn tasklist_gives_the_image_name_or_none() {
+        let found = "\r\n\"caddy.exe\",\"5244\",\"Console\",\"2\",\"40,112 K\"\r\n";
+        assert_eq!(parse_tasklist(found).as_deref(), Some("caddy.exe"));
+        let system = "\"System\",\"4\",\"Services\",\"0\",\"144 K\"";
+        assert_eq!(parse_tasklist(system).as_deref(), Some("System"));
+        for none in [
+            "INFO: No tasks are running which match the specified criteria.\r\n",
+            "",
+            "\"\"",
+        ] {
+            assert_eq!(parse_tasklist(none), None, "{none:?}");
         }
     }
 }

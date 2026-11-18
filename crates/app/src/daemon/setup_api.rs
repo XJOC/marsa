@@ -1,7 +1,8 @@
-//! `POST /v1/setup`: the first setup on macOS. The user may be asked twice:
-//! for an administrator password (the helper), then to approve the trust in
-//! Marsa's certificate authority for this user. Task M4-13, with the port
-//! check of task M4-14b and the user trust of task M4-26.
+//! `POST /v1/setup`: the first setup on macOS and Linux. On macOS the user
+//! may be asked twice: for an administrator password (the helper), then to
+//! approve the trust in Marsa's certificate authority for this user. On
+//! Linux once, for the password (`pkexec`). Task M4-13, with the port check
+//! of task M4-14b, the user trust of task M4-26, and Linux (task M4-18e).
 //!
 //! | Route | Answer |
 //! | --- | --- |
@@ -20,8 +21,21 @@
 //!    steps still go. On macOS the trust is step 5, by the user;
 //!    elsewhere the certificate goes into `trust_install` as text, for the
 //!    helper (ADR 0011).
-//! 2. **DNS:** the setup operation of [`dns::strategy_for`].
-//! 3. **Ports** (M4-14b): `/usr/sbin/netstat -anv -p tcp` lists the sockets
+//! 2. **DNS:** the setup operation of [`dns::strategy_for`]. On Linux, the
+//!    operations of the way that [`linux_dns`] reads as the user: the
+//!    `marsa0` link (`resolved_install`), or the hosts file (`hosts_sync`
+//!    with the name of every site) where systemd-resolved does not run, or
+//!    where systemd is older than 250 and systemd-networkd may run (ADR
+//!    0014, task M4-18k). The helper stays the judge: if it answers
+//!    `resolved_install` with `resolved_use_hosts` or
+//!    `resolved_not_running`, setup sends `hosts_sync` in a second request.
+//! 3. **Ports** on Linux (ADR 0014): `ports_install`, which lets Caddy bind
+//!    80 and 443 itself. Nothing is redirected, so no other program's
+//!    traffic can be taken, and no port check runs first: a program on port
+//!    80 makes Caddy's own bind fail (`port_in_use`). After the helper, the
+//!    daemon sends Caddy its config again, which now has ports 80 and 443.
+//!
+//!    **Ports** on macOS (M4-14b): `/usr/sbin/netstat -anv -p tcp` lists the sockets
 //!    that listen, [`ports::holders`] picks those on 80 and 443, and `/bin/ps`
 //!    names each process. A holder, or a check that fails, means no
 //!    `pf_install`: the redirect would take that program's traffic without a
@@ -30,7 +44,8 @@
 //! 4. **Helper:** if any operation is left and the `marsa-helper` file can
 //!    be changed only by its owner (this user or root), `/usr/bin/osascript`
 //!    runs `marsa-helper apply <request>` with administrator privileges,
-//!    through the constant script of ADR 0012. The helper's JSON answer gives
+//!    through the constant script of ADR 0012. On Linux `/usr/bin/pkexec`
+//!    runs it, with no shell ([`pkexec`]). The helper's JSON answer gives
 //!    one result per operation, in the order sent. No operation left: no
 //!    prompt. A helper inside `~/Desktop`, `~/Documents`, or `~/Downloads`
 //!    ends setup before the prompt with `setup_helper_protected_folder`:
@@ -43,8 +58,8 @@
 //!    report as `trust_install`, after the helper's results.
 //!
 //! One setup at a time: a second request gets 409 `setup_running`, and one
-//! during an uninstall gets 409 `uninstall_running`. Linux and Windows get
-//! 501 `setup_not_supported` until tasks M4-18 and M4-19.
+//! during an uninstall gets 409 `uninstall_running`. On Windows the helper
+//! is a service, reached through [`windows`] (ADR 0018).
 //!
 //! `POST /v1/uninstall` (task M5-13, `uninstall_api.rs`) shares [`Setup`]:
 //! the same runner, the same helper file check and admin prompt ([`Flow`]
@@ -54,9 +69,13 @@
 //! Every program runs through [`Runner`], so the tests run none: they pass a
 //! fake that records each call and answers from fixtures.
 
+pub mod hosts;
+pub mod linux_dns;
+pub mod pkexec;
 pub mod user_trust;
+pub mod windows;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env::consts::EXE_SUFFIX;
 use std::ffi::OsString;
 use std::fmt;
@@ -75,20 +94,22 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use marsa_core::caddy::{CaddyInput, CaddyPaths};
-use marsa_core::dns;
+use marsa_core::dns::{self, DNS_PORT, LinuxPath};
 use marsa_core::helper::{
-    HELPER_PROTOCOL_VERSION, HelperOp, HelperRequest, HelperResponse, OpResult,
+    HELPER_PROTOCOL_VERSION, HelperOp, HelperRequest, HelperResponse, OpResult, OpStatus,
 };
 use marsa_core::ports::{self, Listener, ProcessInfo};
 use marsa_core::recipes::Platform;
 use marsa_core::types::{
-    ApiError, Event, PortHolder, ServiceAction, ServiceState, SetupReport, SetupSkip,
+    ApiError, Event, PortHolder, ServiceAction, ServiceState, SetupReport, SetupSkip, Site,
+    SiteList,
 };
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use super::api::HttpError;
 use super::caddy::ActionError;
+use super::hosts_sync;
 use super::state::Daemon;
 
 const NETSTAT: &str = "/usr/sbin/netstat";
@@ -141,7 +162,9 @@ const CA_POLL: Duration = Duration::from_millis(100);
 /// start and its CA root at [`CA_WAIT`], `netstat`, [`MAX_PS`] `ps` calls,
 /// and `security verify-cert` at [`CHECK_LIMIT`] each, `osascript` and
 /// `security add-trusted-cert` at [`PROMPT_LIMIT`] each, and [`PIPE_GRACE`]
-/// after each of these programs. A client has to wait longer:
+/// after each of these programs. Linux stays under it: up to four
+/// `systemctl` checks, and two `pkexec` prompts when the helper chooses the
+/// hosts file ([`linux_dns`]). A client has to wait longer:
 /// `marsa_core::client::SETUP_TIMEOUT` does, and a test holds the two
 /// together.
 pub const SLOWEST_SETUP: Duration = Duration::from_secs(
@@ -180,7 +203,15 @@ const O_NONBLOCK: i32 = 0;
 
 const TRUST_INSTALL: &str = "trust_install";
 const PF_INSTALL: &str = "pf_install";
+const PORTS_INSTALL: &str = "ports_install";
 const UNINSTALL_ALL: &str = "uninstall_all";
+
+/// Linux: the second request of setup, with the hosts way's operations,
+/// did not run (task M4-18k2). The steps before it are done.
+const SETUP_HOSTS_NOT_WRITTEN: &str = "setup_hosts_not_written";
+/// Linux: the second request of setup, which takes Marsa's old block out of
+/// the hosts file once the link is made, did not run.
+const SETUP_HOSTS_NOT_REMOVED: &str = "setup_hosts_not_removed";
 
 /// [`read_ca`]'s code when the CA root is not there.
 const CA_NOT_READY: &str = "ca_not_ready";
@@ -202,14 +233,16 @@ const PROTECTED_FOLDERS: [&str; 3] = ["Desktop", "Documents", "Downloads"];
 /// Marsa there.
 const INSTALL_BIN: &str = "~/Library/Application Support/dev.marsa.Marsa/bin";
 
-/// The routes on `setup`, for `api::router` to merge before its fallbacks.
+/// The routes on `setup`, for `api::router` to merge before its fallbacks:
+/// `POST /v1/setup`, and the hosts routes of [`hosts`] (task M4-18k2).
 /// The uninstall route gets the same [`Setup`], so the two never run at once.
 pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
+    let hosts = hosts::routes(Arc::clone(&setup));
     let handler = move |State(daemon): State<Arc<Daemon>>| {
         let setup = Arc::clone(&setup);
         async move { start(daemon, setup).await }
     };
-    Router::new().route("/v1/setup", post(handler))
+    Router::new().route("/v1/setup", post(handler)).merge(hosts)
 }
 
 /// The routes with the given [`Setup`]: tests pass a fake [`Runner`].
@@ -339,7 +372,7 @@ impl Runner for RealRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // Not the daemon's working folder. `/` is a Unix path, and setup runs
-        // on macOS only for now (Linux in task M4-18, Windows in M4-19).
+        // on macOS and Linux only for now (Windows in task M4-19).
         #[cfg(unix)]
         command.current_dir("/");
         let mut child = command.spawn()?;
@@ -360,6 +393,13 @@ fn finish(child: &mut Child, limit: Duration, stop: &CancellationToken) -> io::R
 }
 
 /// Waits for `child` until `deadline` or `stop`, and collects its output.
+///
+/// At `deadline` or `stop` the child is killed. A kill that is refused
+/// (`PermissionDenied`) means the child now runs as root: on Linux `pkexec`
+/// becomes the helper after the password, and the daemon cannot stop it.
+/// Then the wait goes on until it ends, within its own limits, and its
+/// answer is used: reporting a timeout would hide what it did (review of
+/// #120).
 fn collect(
     child: &mut Child,
     deadline: Instant,
@@ -367,16 +407,31 @@ fn collect(
 ) -> io::Result<RunOutput> {
     let stdout = read_in_background(child.stdout.take())?;
     let stderr = read_in_background(child.stderr.take())?;
+    let mut unstoppable = false;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if stop.is_cancelled() {
+        let ended = if unstoppable {
+            None
+        } else if stop.is_cancelled() {
             let reason = "the daemon is stopping";
-            return Err(io::Error::new(io::ErrorKind::Interrupted, reason));
-        }
-        if Instant::now() >= deadline {
-            return Err(timed_out());
+            Some(io::Error::new(io::ErrorKind::Interrupted, reason))
+        } else if Instant::now() >= deadline {
+            Some(timed_out())
+        } else {
+            None
+        };
+        if let Some(err) = ended {
+            match child.kill() {
+                Err(kill) if kill.kind() == io::ErrorKind::PermissionDenied => {
+                    tracing::warn!(
+                        "the helper runs as root and cannot be stopped; waiting for it to end"
+                    );
+                    unstoppable = true;
+                }
+                _ => return Err(err),
+            }
         }
         thread::sleep(POLL);
     };
@@ -521,6 +576,13 @@ pub struct Setup {
     /// How setup starts Caddy for its CA. `None`, the default: the daemon's
     /// own Caddy ([`DaemonCaddy`]). Tests put a fake here.
     caddy: Option<Arc<dyn StartCaddy>>,
+    /// The helper service on Windows (ADR 0018): the daemon's own there,
+    /// `None` elsewhere. Tests put a fake here.
+    windows: Option<Arc<dyn windows::Service>>,
+    /// Linux: the hosts file whose Marsa block setup reads, never writes
+    /// ([`linux_dns::read_block`]). [`linux_dns::HOSTS_FILE`] for the
+    /// daemon; `None`, as if it had no block, until a test sets one.
+    hosts_file: Option<PathBuf>,
     /// How long setup waits for Caddy and its CA root: [`CA_WAIT`], shorter
     /// in tests.
     ca_wait: Duration,
@@ -540,6 +602,7 @@ impl Setup {
             helper_path(),
             home_dir(),
         )
+        .with_hosts_file(PathBuf::from(linux_dns::HOSTS_FILE))
     }
 
     /// For tests: any runner, system, helper path, and home folder.
@@ -555,9 +618,26 @@ impl Setup {
             helper,
             home,
             caddy: None,
+            windows: default_windows_service(),
+            hosts_file: None,
             ca_wait: CA_WAIT,
             running: AtomicU8::new(IDLE),
         }
+    }
+
+    /// For tests: `service` stands for the Windows helper service.
+    #[must_use]
+    pub fn with_windows(mut self, service: Arc<dyn windows::Service>) -> Self {
+        self.windows = Some(service);
+        self
+    }
+
+    /// The hosts file setup reads on Linux: [`linux_dns::HOSTS_FILE`] for
+    /// the daemon, a file of their own for tests.
+    #[must_use]
+    pub fn with_hosts_file(mut self, path: PathBuf) -> Self {
+        self.hosts_file = Some(path);
+        self
     }
 
     /// For tests: `caddy` starts Caddy for the CA step, not the daemon's own.
@@ -577,19 +657,27 @@ impl Setup {
         self.platform
     }
 
+    /// The hosts file whose Marsa block is read on Linux, if any.
+    pub(super) fn hosts_file(&self) -> Option<&Path> {
+        self.hosts_file.as_deref()
+    }
+
     /// The home folder of the user `marsad` runs as, if known.
     pub(super) fn home(&self) -> Option<&Path> {
         self.home.as_deref()
     }
 
     /// The setup itself. Blocking: it runs programs and reads a file.
-    /// `starter` starts Caddy when its CA root is not there yet.
+    /// `starter` starts Caddy when its CA root is not there yet. `names`:
+    /// the host names of the sites, sorted, for the hosts file on Linux;
+    /// `None` if the site list is not known.
     fn run(
         &self,
         data_dir: &Path,
         caddy: CaddyInput,
         platform: Platform,
         starter: &dyn StartCaddy,
+        names: Option<&[String]>,
         stop: &CancellationToken,
     ) -> SetupReport {
         let mut report = SetupReport::default();
@@ -600,12 +688,162 @@ impl Setup {
         let mut trust_for_user = None;
         match self.ca(&ca_root, starter, stop) {
             Ok(pem) if is_macos(platform) => trust_for_user = Some(pem),
+            // Windows: the service is installed for this root's SHA-256 (ADR
+            // 0018). A root the helper's strict parser refuses has none, and
+            // every setup would ask UAC in vain.
+            Ok(pem)
+                if is_windows(platform)
+                    && marsa_core::helper::certificate_sha256(&pem).is_none() =>
+            {
+                tracing::warn!("the CA root is not one strict certificate; no trust_install");
+                report.skipped.push(skip(TRUST_INSTALL, "ca_unreadable"));
+            }
             Ok(pem) => ops.push(HelperOp::TrustInstall { pem }),
             Err(code) => report.skipped.push(skip(TRUST_INSTALL, code)),
         }
-        if let Some(dns) = dns::strategy_for(platform) {
+        let mut linux = None;
+        if is_linux(platform) {
+            let path = dns::linux_path(linux_dns::facts(self.runner.as_ref(), stop));
+            let block = self
+                .hosts_file
+                .as_deref()
+                .and_then(linux_dns::read_block)
+                .is_some();
+            tracing::info!(?path, block, "the way of .test names here");
+            match path {
+                LinuxPath::Link => ops.push(HelperOp::ResolvedInstall { port: DNS_PORT }),
+                LinuxPath::Hosts => push_hosts_ops(&mut ops, &mut report, names),
+            }
+            linux = Some((path, block));
+        } else if is_windows(platform) {
+            // Windows: the hosts block with the names of the sites now, so
+            // that a setup again does not empty it (ADR 0018).
+            match names {
+                Some(names) if dns::hosts_names_fit(names) => {
+                    ops.push(HelperOp::HostsSync {
+                        names: names.to_vec(),
+                    });
+                }
+                Some(_) => report
+                    .skipped
+                    .push(skip(linux_dns::HOSTS_SYNC, linux_dns::HOSTS_TOO_MANY_NAMES)),
+                None => report
+                    .skipped
+                    .push(skip(linux_dns::HOSTS_SYNC, linux_dns::HOSTS_SITES_UNKNOWN)),
+            }
+        } else if let Some(dns) = dns::strategy_for(platform) {
             ops.push(dns.setup_op());
         }
+        if is_linux(platform) {
+            ops.push(HelperOp::PortsInstall);
+        } else if !is_windows(platform) {
+            self.pf_op(caddy, &mut ops, &mut report, stop);
+        }
+        // Windows: Caddy binds ports 80 and 443 itself (ADR 0018), so
+        // there is nothing to redirect and nothing to allow.
+        match self.apply(ops, platform, stop) {
+            Ok(results) => report.results = results,
+            Err(error) => report.error = Some(error),
+        }
+        if let Some((LinuxPath::Link, block)) = linux {
+            self.after_the_link(&mut report, block, platform, names, stop);
+        }
+        // Only if the helper ran as asked, or was not needed: a cancelled or
+        // refused admin prompt ends setup with nothing changed in the system,
+        // and no second dialog. Setup may have started Caddy and made its CA
+        // by then: Marsa's own process and data.
+        if let Some(pem) = trust_for_user.filter(|_| report.error.is_none()) {
+            let files = user_trust::TrustFiles::in_dir(data_dir);
+            report.results.push(self.trust_for_user(&pem, &files, stop));
+        }
+        if linux.is_some() {
+            linux_dns::record_way(data_dir, &report.results);
+        }
+        report
+    }
+
+    /// Linux, after a request with `resolved_install` (task M4-18k2), and
+    /// only if the helper answered it. The helper is the judge of the way:
+    /// if it chose the hosts file ([`linux_dns::helper_chose_hosts`]),
+    /// `resolved_install` moves from the results to the skipped steps with
+    /// the helper's code, and the operations of the hosts way go to the
+    /// helper in a second request. If it made the link and the hosts file
+    /// still has Marsa's `block`, `hosts_remove` goes in a second request.
+    /// Either is a second password prompt of the same `marsa setup`. When
+    /// that request does not run, the error says that the steps before it
+    /// are done: [`SETUP_HOSTS_NOT_WRITTEN`] or [`SETUP_HOSTS_NOT_REMOVED`].
+    fn after_the_link(
+        &self,
+        report: &mut SetupReport,
+        block: bool,
+        platform: Platform,
+        names: Option<&[String]>,
+        stop: &CancellationToken,
+    ) {
+        if report.error.is_some() {
+            return;
+        }
+        let (ops, not_run) = if let Some(code) = linux_dns::helper_chose_hosts(&report.results) {
+            tracing::warn!(
+                code,
+                "marsad expected the marsa0 link, but marsa-helper chose the hosts file; \
+                 sending the operations of the hosts way"
+            );
+            report
+                .results
+                .retain(|result| result.op != linux_dns::RESOLVED_INSTALL);
+            report
+                .skipped
+                .push(skip(linux_dns::RESOLVED_INSTALL, &code));
+            let mut ops = Vec::new();
+            push_hosts_ops(&mut ops, report, names);
+            // No names to write, no prompt: after `resolved_use_hosts` the
+            // helper took an earlier link out itself.
+            if !ops
+                .iter()
+                .any(|op| matches!(op, HelperOp::HostsSync { .. }))
+            {
+                return;
+            }
+            (ops, SETUP_HOSTS_NOT_WRITTEN)
+        } else if block && linux_dns::link_made(&report.results) {
+            tracing::info!("the link is made; taking Marsa's old block out of the hosts file");
+            (vec![HelperOp::HostsRemove], SETUP_HOSTS_NOT_REMOVED)
+        } else {
+            return;
+        };
+        match self.apply(ops, platform, stop) {
+            Ok(results) => report.results.extend(results),
+            // The helper may have run: their texts say so.
+            Err(error)
+                if matches!(error.code.as_str(), "setup_timed_out" | "setup_interrupted") =>
+            {
+                report.error = Some(error);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    code = %error.code,
+                    message = %error.message,
+                    "the second request of setup did not run"
+                );
+                let message = format!(
+                    "the steps before are done, but the second request did not run: {}",
+                    error.code
+                );
+                report.error = Some(failure(not_run, message));
+            }
+        }
+    }
+
+    /// macOS: `pf_install` if nobody listens on 80 and 443, else the reason
+    /// why not in `report` (ADR 0008, "Herd conflict").
+    fn pf_op(
+        &self,
+        caddy: CaddyInput,
+        ops: &mut Vec<HelperOp>,
+        report: &mut SetupReport,
+        stop: &CancellationToken,
+    ) {
         match self.port_holders(stop) {
             Some(holders) if holders.is_empty() => ops.push(HelperOp::PfInstall {
                 http_port: caddy.http_port,
@@ -626,19 +864,6 @@ impl Setup {
             }
             None => report.skipped.push(skip(PF_INSTALL, "ports_not_checked")),
         }
-        match self.apply(ops, platform, stop) {
-            Ok(results) => report.results = results,
-            Err(error) => report.error = Some(error),
-        }
-        // Only if the helper ran as asked, or was not needed: a cancelled or
-        // refused admin prompt ends setup with nothing changed in the system,
-        // and no second dialog. Setup may have started Caddy and made its CA
-        // by then: Marsa's own process and data.
-        if let Some(pem) = trust_for_user.filter(|_| report.error.is_none()) {
-            let files = user_trust::TrustFiles::in_dir(data_dir);
-            report.results.push(self.trust_for_user(&pem, &files, stop));
-        }
-        report
     }
 
     /// The text of Caddy's root certificate at `path`, as [`read_ca`] gives
@@ -806,28 +1031,10 @@ impl Setup {
         self.launch(Flow::Setup, ops, platform, stop)
     }
 
-    /// Sends `ops` to the helper behind the admin prompt and reads its
-    /// answer, with the error codes of `flow`. With no operation nothing
-    /// runs and no prompt shows. The helper is checked first: a file that is
-    /// missing or that another user could change means no prompt, and so
-    /// does, for setup only, a path in a folder macOS keeps root out of (on
-    /// macOS; by the path alone, before any look at the file).
-    ///
-    /// The uninstall skips the folder check: root runs a helper from those
-    /// folders through `osascript` (task M4-17: `resolver_install` worked
-    /// from `~/Desktop`), and only the boot job's copy of the binary, which
-    /// `pf_install` reads, fails there. `uninstall_all` reads no binary, so
-    /// moving Marsa first would only be in the user's way.
-    pub(super) fn launch(
-        &self,
-        flow: Flow,
-        ops: Vec<HelperOp>,
-        platform: Platform,
-        stop: &CancellationToken,
-    ) -> Result<Vec<OpResult>, ApiError> {
-        if ops.is_empty() {
-            return Ok(Vec::new());
-        }
+    /// The helper, checked before any prompt: there, not in a folder macOS
+    /// keeps root out of (setup only), in the user's own folder on Windows,
+    /// and safe from other users. Each refusal has its code of `flow`.
+    fn checked_helper(&self, flow: Flow, platform: Platform) -> Result<&Path, ApiError> {
         let missing = || {
             tracing::warn!(path = ?self.helper, "marsa-helper is not next to marsad");
             failure(
@@ -855,6 +1062,24 @@ impl Setup {
             );
             return Err(failure("setup_helper_protected_folder", message));
         }
+        // Windows: no owner check like the one of Unix below. The user's own
+        // folder is writable by this user only, and the user runs what they
+        // choose anyway (ADR 0018); a folder elsewhere (under `C:\`, say)
+        // may let any user of the PC change the program behind the prompt.
+        if is_windows(platform)
+            && !self
+                .home
+                .as_deref()
+                .is_some_and(|home| inside(helper, home))
+        {
+            tracing::warn!(
+                path = %helper.display(),
+                "marsa-helper is outside this user's folder; no UAC prompt"
+            );
+            let message = "marsa-helper is outside your user folder, where another user could \
+                           change it";
+            return Err(failure(&flow.code("helper_unsafe"), message));
+        }
         match check_helper(helper) {
             Ok(()) => {}
             Err(HelperFault::Missing) => return Err(missing()),
@@ -868,6 +1093,47 @@ impl Setup {
                 return Err(failure(&flow.code("helper_unsafe"), message));
             }
         }
+        Ok(helper)
+    }
+
+    /// `marsa uninstall --all` on Windows: the checked helper's `uninstall`
+    /// behind the UAC prompt ([`windows::uninstall`]).
+    ///
+    /// # Errors
+    ///
+    /// The `uninstall_*` codes of the preflight and of the helper.
+    pub(super) fn uninstall_windows(&self, stop: &CancellationToken) -> Result<OpResult, ApiError> {
+        let helper = self.checked_helper(Flow::Uninstall, Platform::WindowsX64)?;
+        let Some(service) = self.windows.as_deref() else {
+            tracing::error!("no helper service on this system");
+            return Err(failure("uninstall_helper_failed", "no helper service here"));
+        };
+        windows::uninstall(service, helper, stop)
+    }
+
+    /// Sends `ops` to the helper behind the admin prompt and reads its
+    /// answer, with the error codes of `flow`. With no operation nothing
+    /// runs and no prompt shows. The helper is checked first: a file that is
+    /// missing or that another user could change means no prompt, and so
+    /// does, for setup only, a path in a folder macOS keeps root out of (on
+    /// macOS; by the path alone, before any look at the file).
+    ///
+    /// The uninstall skips the folder check: root runs a helper from those
+    /// folders through `osascript` (task M4-17: `resolver_install` worked
+    /// from `~/Desktop`), and only the boot job's copy of the binary, which
+    /// `pf_install` reads, fails there. `uninstall_all` reads no binary, so
+    /// moving Marsa first would only be in the user's way.
+    pub(super) fn launch(
+        &self,
+        flow: Flow,
+        ops: Vec<HelperOp>,
+        platform: Platform,
+        stop: &CancellationToken,
+    ) -> Result<Vec<OpResult>, ApiError> {
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let helper = self.checked_helper(flow, platform)?;
         let cannot_write = |err: serde_json::Error| {
             tracing::error!(error = %err, "cannot write the helper request");
             failure(
@@ -880,11 +1146,35 @@ impl Setup {
             .map(op_name)
             .collect::<Result<Vec<_>, _>>()
             .map_err(cannot_write)?;
+        // Windows: the service trusts only the CA named at its install, so it
+        // is installed for the CA this request trusts, if any.
+        let ca_sha256 = ops.iter().find_map(|op| match op {
+            HelperOp::TrustInstall { pem } if is_windows(platform) => {
+                marsa_core::helper::certificate_sha256(pem)
+            }
+            _ => None,
+        });
         let request = serde_json::to_string(&HelperRequest::new(ops)).map_err(cannot_write)?;
-        tracing::info!(helper = %helper.display(), "asking for admin rights to run marsa-helper");
-        let args = osascript_args(helper, &request);
-        let answer = self.runner.run(OSASCRIPT, &args, PROMPT_LIMIT, stop);
-        let results = read_answer_for(flow, answer)?;
+        let results = if is_windows(platform) {
+            let Some(service) = self.windows.as_deref() else {
+                tracing::error!("no helper service on this system");
+                return Err(failure(
+                    &flow.code("helper_failed"),
+                    "no helper service here",
+                ));
+            };
+            windows::launch(flow, service, helper, &request, ca_sha256.as_deref(), stop)?
+        } else if is_linux(platform) {
+            tracing::info!(helper = %helper.display(), "asking for admin rights to run marsa-helper");
+            let args = pkexec::args(helper, &request);
+            let answer = self.runner.run(pkexec::PKEXEC, &args, PROMPT_LIMIT, stop);
+            pkexec::read_answer(flow, answer)?
+        } else {
+            tracing::info!(helper = %helper.display(), "asking for admin rights to run marsa-helper");
+            let args = osascript_args(helper, &request);
+            let answer = self.runner.run(OSASCRIPT, &args, PROMPT_LIMIT, stop);
+            read_answer_for(flow, answer)?
+        };
         if !results_match(&names, &results) {
             tracing::warn!(
                 sent = ?names,
@@ -945,13 +1235,20 @@ impl Drop for Running {
 async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport>, HttpError> {
     let platform = setup
         .platform
-        .filter(|platform| is_macos(*platform))
+        .filter(|platform| is_macos(*platform) || is_linux(*platform) || is_windows(*platform))
         .ok_or_else(|| {
-            let message = "setup runs on macOS only for now";
+            let message = "setup runs on macOS, Linux, and Windows only";
             HttpError::new(StatusCode::NOT_IMPLEMENTED, "setup_not_supported", message)
         })?;
     let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
     tracing::info!("setup started");
+    // The hosts file on Linux and Windows needs them; elsewhere the list is
+    // not read.
+    let names = if is_linux(platform) || is_windows(platform) {
+        host_names(&daemon).await
+    } else {
+        Some(Vec::new())
+    };
     let runtime = Handle::current();
     let job = tokio::task::spawn_blocking(move || {
         // Moved in, so the next setup waits for this one to end even if the
@@ -962,14 +1259,15 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
             Some(fake) => Arc::clone(fake),
             None => Arc::new(DaemonCaddy {
                 daemon: Arc::clone(&daemon),
-                runtime,
+                runtime: runtime.clone(),
             }),
         };
-        let report = setup.run(
+        let mut report = setup.run(
             &daemon.data_dir,
             caddy,
             platform,
             starter.as_ref(),
+            names.as_deref(),
             &daemon.shutdown,
         );
         tracing::info!(
@@ -978,15 +1276,109 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
             error = report.error.as_ref().map(|error| error.code.as_str()),
             "setup finished"
         );
+        // Linux: Caddy may now bind ports 80 and 443 itself. The next config
+        // has them (`CaddyManager::ports`), so it goes to Caddy now, before
+        // the event and the answer: the sites open on the usual ports as
+        // soon as setup ends. Here, not in the handler, so it happens even
+        // if the client went away.
+        // Not while the daemon stops: the runtime may be going away, and
+        // Caddy reads its file when it starts again.
+        if is_linux(platform) && low_ports_set(&report) && !daemon.shutdown.is_cancelled() {
+            match runtime.block_on(daemon.caddy.reapply(&daemon)) {
+                Ok(applied) => {
+                    tracing::info!(?applied, "caddy config sent again with ports 80 and 443")
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        code = err.code(),
+                        error = %err,
+                        "caddy did not take the config with ports 80 and 443"
+                    );
+                    // The system now allows the ports, but Caddy did not
+                    // take them: most often another program listens on 80
+                    // or 443 (ADR 0014). Setup must not look done.
+                    let message = format!("Caddy did not take ports 80 and 443: {}", err.code());
+                    report
+                        .error
+                        .get_or_insert_with(|| failure("setup_caddy_ports_failed", message));
+                }
+            }
+        }
+        // Windows: the service took the request, so this data folder's
+        // daemon sends the sites' names after each pass from now on
+        // (`hosts_sync`), and a pass now covers a site added during the UAC
+        // prompt. Not while the daemon stops.
+        if is_windows(platform) && report.error.is_none() && !daemon.shutdown.is_cancelled() {
+            let marker = daemon.data_dir.join(hosts_sync::MARKER);
+            match fs::write(&marker, "") {
+                Ok(()) => {
+                    let daemon = Arc::clone(&daemon);
+                    runtime.spawn(async move {
+                        // Not run: the sync task stopped, and the next
+                        // daemon's first pass sends the names.
+                        let _ = daemon.pass_requests.run_pass().await;
+                    });
+                }
+                Err(err) => tracing::warn!(
+                    path = %marker.display(),
+                    error = %err,
+                    "cannot mark the helper service as set up; the hosts file gets no names"
+                ),
+            }
+        }
         // Here, not in the handler: the event goes out even if the client
         // went away.
         daemon.publish(Event::SetupFinished(report.clone()));
         report
     });
-    job.await.map(Json).map_err(|err| {
+    let report = job.await.map_err(|err| {
         tracing::error!(error = %err, "the setup job failed");
         let message = "the setup job failed";
         HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+    })?;
+    Ok(Json(report))
+}
+
+/// The host names of the daemon's sites, sorted, each once, from the list
+/// `GET /v1/sites` gives: built now if there is none yet. `None` if it
+/// cannot be built (`sites.toml` cannot be read, say).
+pub(super) async fn host_names(daemon: &Arc<Daemon>) -> Option<Vec<String>> {
+    let list = match daemon.sites() {
+        Some(list) => list,
+        None => match daemon.rebuild_sites().await {
+            Ok(list) => list,
+            Err(err) => {
+                tracing::warn!(
+                    code = err.code,
+                    "no site list, so no names for the hosts file"
+                );
+                return None;
+            }
+        },
+    };
+    Some(names_of(&list))
+}
+
+/// The host names of the sites of `list`, sorted, each once.
+pub(super) fn names_of(list: &SiteList) -> Vec<String> {
+    let names: BTreeSet<String> = list.sites.iter().map(Site::host).collect();
+    names.into_iter().collect()
+}
+
+/// The operations of the hosts way, into `ops`; a `hosts_sync` that cannot
+/// be sent goes into `report` as skipped ([`linux_dns::hosts_ops`]).
+fn push_hosts_ops(ops: &mut Vec<HelperOp>, report: &mut SetupReport, names: Option<&[String]>) {
+    let (hosts, skipped) = linux_dns::hosts_ops(names);
+    ops.extend(hosts);
+    if let Some(code) = skipped {
+        report.skipped.push(skip(linux_dns::HOSTS_SYNC, code));
+    }
+}
+
+/// Whether the helper's `ports_install` is done, now or before.
+fn low_ports_set(report: &SetupReport) -> bool {
+    report.results.iter().any(|result| {
+        result.op == PORTS_INSTALL && matches!(result.status, OpStatus::Done | OpStatus::Unchanged)
     })
 }
 
@@ -1016,6 +1408,35 @@ fn home_dir() -> Option<PathBuf> {
 
 pub(super) fn is_macos(platform: Platform) -> bool {
     matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64)
+}
+
+/// Whether `path` is inside `dir`, folder by folder, with no regard to case,
+/// as Windows compares names (`C:\Users\Omar` and `c:\users\omar`).
+fn inside(path: &Path, dir: &Path) -> bool {
+    let mut path = path.components();
+    dir.components().all(|part| {
+        path.next().is_some_and(|other| {
+            part.as_os_str().to_string_lossy().to_lowercase()
+                == other.as_os_str().to_string_lossy().to_lowercase()
+        })
+    })
+}
+
+pub(super) fn is_windows(platform: Platform) -> bool {
+    platform == Platform::WindowsX64
+}
+
+/// The daemon's helper service on Windows; no other system has one.
+fn default_windows_service() -> Option<Arc<dyn windows::Service>> {
+    // `RealService` is Windows only: its calls are Win32.
+    #[cfg(windows)]
+    return Some(Arc::new(windows::RealService::default()));
+    #[cfg(not(windows))]
+    None
+}
+
+pub(super) fn is_linux(platform: Platform) -> bool {
+    matches!(platform, Platform::LinuxX64 | Platform::LinuxArm64)
 }
 
 /// The folder of [`PROTECTED_FOLDERS`] under `home` that holds `helper`, if
@@ -1217,8 +1638,8 @@ fn check_owners(helper: &Path, file: &fs::Metadata) -> Result<(), HelperFault> {
 }
 
 /// `#[cfg]` outside `platform`: this check reads Unix owners and modes.
-/// Windows answers 501 before setup runs; its helper service is protected in
-/// task M4-19.
+/// Windows has none of them; `launch` checks there that the helper is in the
+/// user's own folder instead (ADR 0018).
 #[cfg(not(unix))]
 fn check_owners(_helper: &Path, _file: &fs::Metadata) -> Result<(), HelperFault> {
     Ok(())
@@ -1306,30 +1727,7 @@ fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError>
 /// characters: the request holds op names, ports, and paths, nothing secret,
 /// and the password goes to macOS's prompt, never to this text.
 fn read_answer_for(flow: Flow, output: io::Result<RunOutput>) -> Result<Vec<OpResult>, ApiError> {
-    let noun = flow.noun();
-    let output = match output {
-        Ok(output) => output,
-        Err(err) if err.kind() == io::ErrorKind::TimedOut => {
-            tracing::warn!("{noun} took more than 5 minutes; Marsa stopped waiting");
-            let message = format!(
-                "Marsa stopped waiting for {noun} after 5 minutes; some steps may already have \
-                 run as root, and running {noun} again is safe"
-            );
-            return Err(failure(&flow.code("timed_out"), message));
-        }
-        Err(err) if err.kind() == io::ErrorKind::Interrupted => {
-            tracing::warn!("the daemon is stopping; Marsa stopped waiting for {noun}");
-            let message = format!(
-                "the daemon stopped, so Marsa stopped waiting for {noun}; some steps may \
-                 already have run as root, and running {noun} again is safe"
-            );
-            return Err(failure(&flow.code("interrupted"), message));
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, "cannot run osascript");
-            return Err(failure(&flow.code("helper_failed"), "cannot run osascript"));
-        }
-    };
+    let output = output.map_err(|err| not_finished(flow, &err, "osascript"))?;
     let text = if output.success() {
         &output.stdout
     } else {
@@ -1379,6 +1777,46 @@ fn read_answer_for(flow: Flow, output: io::Result<RunOutput>) -> Result<Vec<OpRe
             "the helper's answer cannot be read",
         ));
     };
+    results_of(flow, answer, output.code)
+}
+
+/// Why `flow` stopped waiting for `program`, the program that asks for the
+/// password and runs the helper: a timeout, a stopping daemon, or a program
+/// that could not run.
+fn not_finished(flow: Flow, err: &io::Error, program: &str) -> ApiError {
+    let noun = flow.noun();
+    match err.kind() {
+        io::ErrorKind::TimedOut => {
+            tracing::warn!("{noun} took more than 5 minutes; Marsa stopped waiting");
+            let message = format!(
+                "Marsa stopped waiting for {noun} after 5 minutes; some steps may already have \
+                 run as root, and running {noun} again is safe"
+            );
+            failure(&flow.code("timed_out"), message)
+        }
+        io::ErrorKind::Interrupted => {
+            tracing::warn!("the daemon is stopping; Marsa stopped waiting for {noun}");
+            let message = format!(
+                "the daemon stopped, so Marsa stopped waiting for {noun}; some steps may \
+                 already have run as root, and running {noun} again is safe"
+            );
+            failure(&flow.code("interrupted"), message)
+        }
+        _ => {
+            tracing::warn!(error = %err, program, "cannot run the program that asks for the password");
+            failure(&flow.code("helper_failed"), format!("cannot run {program}"))
+        }
+    }
+}
+
+/// The results in the helper's `answer`, or why there are none, with the
+/// error codes of `flow`. `exit` is the exit code it came with, for the log.
+fn results_of(
+    flow: Flow,
+    answer: HelperResponse,
+    exit: Option<i32>,
+) -> Result<Vec<OpResult>, ApiError> {
+    let noun = flow.noun();
     if let Some(refused) = answer.error {
         let code = short_code(&refused.code);
         tracing::warn!(code = %code, "marsa-helper refused the request of {noun}");
@@ -1386,7 +1824,7 @@ fn read_answer_for(flow: Flow, output: io::Result<RunOutput>) -> Result<Vec<OpRe
         return Err(failure(&flow.code("helper_rejected"), message));
     }
     if answer.results.is_empty() {
-        tracing::warn!(exit = ?output.code, "marsa-helper answered with no result");
+        tracing::warn!(?exit, "marsa-helper answered with no result");
         return Err(failure(
             &flow.code("helper_failed"),
             "the helper gave no result",
@@ -1489,6 +1927,7 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::extract::Request;
     use axum::middleware::from_fn_with_state;
+    use marsa_core::dns::NETWORKD_UNITS;
     use marsa_core::platform::daemon_file::{Token, daemon_authority};
     use marsa_core::types::{ErrorBody, OpStatus};
     use serde_json::{Value, json};
@@ -1578,8 +2017,24 @@ mod tests {
                 .collect()
         }
 
-        fn programs(&self) -> Vec<&'static str> {
+        pub(super) fn programs(&self) -> Vec<&'static str> {
             self.calls().iter().map(|call| call.program).collect()
+        }
+
+        /// How many times `pkexec` ran.
+        pub(super) fn pkexec_calls(&self) -> usize {
+            self.programs()
+                .iter()
+                .filter(|program| **program == pkexec::PKEXEC)
+                .count()
+        }
+
+        /// The request the helper would have got, from the last `pkexec`.
+        pub(super) fn pkexec_request(&self) -> HelperRequest {
+            let calls = self.calls();
+            let call = calls.iter().rfind(|call| call.program == pkexec::PKEXEC);
+            let request = &call.expect("a pkexec call").args[3];
+            serde_json::from_str(request).unwrap()
         }
 
         /// The request the helper would have got, from the last `osascript`.
@@ -1748,8 +2203,14 @@ mod tests {
             let caddy = CaddyInput::default();
             let stop = CancellationToken::new();
             let platform = Platform::DarwinArm64;
-            self.setup(fake)
-                .run(self.dir.path(), caddy, platform, self.caddy.as_ref(), &stop)
+            self.setup(fake).run(
+                self.dir.path(),
+                caddy,
+                platform,
+                self.caddy.as_ref(),
+                Some(&[]),
+                &stop,
+            )
         }
     }
 
@@ -1850,7 +2311,7 @@ mod tests {
 
     /// A helper file at `path`, with the modes of an install, and its
     /// folder.
-    fn make_helper(path: &Path) {
+    pub(super) fn make_helper(path: &Path) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "").unwrap();
         #[cfg(unix)]
@@ -2106,6 +2567,7 @@ mod tests {
             CaddyInput::default(),
             Platform::DarwinArm64,
             dir.caddy.as_ref(),
+            Some(&[]),
             &stop,
         );
 
@@ -2130,6 +2592,13 @@ mod tests {
         assert!(
             SETUP_TIMEOUT >= SLOWEST_SETUP + margin,
             "the client waits {SETUP_TIMEOUT:?}, and a setup may take {SLOWEST_SETUP:?}"
+        );
+        // Windows: the CA, a request, the install after the UAC prompt, and
+        // the request again, each to its limit. The prompt itself has none.
+        let windows = CA_WAIT + 2 * windows::SEND_LIMIT + windows::INSTALL_LIMIT;
+        assert!(
+            SETUP_TIMEOUT >= windows + margin,
+            "the client waits {SETUP_TIMEOUT:?}, and a Windows setup may take {windows:?}"
         );
 
         // The sum holds every step a setup waits for. A full run with no CA
@@ -2180,6 +2649,7 @@ mod tests {
                 CaddyInput::default(),
                 Platform::DarwinArm64,
                 dir.caddy.as_ref(),
+                Some(&[]),
                 &stop,
             );
 
@@ -2210,6 +2680,7 @@ mod tests {
             CaddyInput::default(),
             Platform::DarwinArm64,
             dir.caddy.as_ref(),
+            Some(&[]),
             &stop,
         );
         assert_eq!(error_code(&report), Some("setup_helper_protected_folder"));
@@ -2254,36 +2725,819 @@ mod tests {
         }
     }
 
-    #[test]
-    fn linux_keeps_trust_install_for_the_helper_and_runs_no_security() {
-        // ADR 0011 stays off macOS: the request carries the certificate, and
-        // neither the user trust nor the protected folder check runs. Setup
-        // itself answers 501 there until task M4-18; this pins the request it
-        // will send.
-        let dir = Dir::new(true);
-        let helper = dir.home().join("Desktop").join("marsa-helper");
-        make_helper(&helper);
-        let answer = all_done(&["trust_install", "resolved_install", "pf_install"]);
-        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
-        let setup = Setup::with(
+    /// What `systemctl` says on a test system.
+    #[derive(Debug, Clone, Copy)]
+    pub(super) struct Systemd {
+        /// The first line of `systemctl --version`.
+        version: &'static str,
+        /// The exit code of `is-active --quiet systemd-resolved.service`.
+        resolved: i32,
+        /// What `is-active` and `is-enabled` print for networkd's units.
+        networkd: (&'static str, &'static str),
+    }
+
+    /// Ubuntu 24.04: the `marsa0` link, networkd or not.
+    pub(super) const UBUNTU_2404: Systemd = Systemd {
+        version: "systemd 255 (255.4-1ubuntu8)",
+        resolved: 0,
+        networkd: (
+            "active\ninactive\ninactive\n",
+            "enabled\nenabled\nenabled\n",
+        ),
+    };
+    /// Ubuntu 22.04 with systemd-networkd, as on servers and CI runners.
+    pub(super) const UBUNTU_2204_SERVER: Systemd = Systemd {
+        version: "systemd 249 (249.11-0ubuntu3.12)",
+        resolved: 0,
+        networkd: ("active\nactive\ninactive\n", "enabled\nenabled\ndisabled\n"),
+    };
+    /// Ubuntu 22.04 desktop: NetworkManager, networkd off for good.
+    pub(super) const UBUNTU_2204_DESKTOP: Systemd = Systemd {
+        version: "systemd 249 (249.11-0ubuntu3.12)",
+        resolved: 0,
+        networkd: (
+            "inactive\ninactive\ninactive\n",
+            "disabled\ndisabled\nmasked\n",
+        ),
+    };
+    /// Debian 12 as installed: no systemd-resolved.
+    pub(super) const DEBIAN_12: Systemd = Systemd {
+        version: "systemd 252 (252.30-1~deb12u2)",
+        resolved: 3,
+        networkd: (
+            "inactive\ninactive\ninactive\n",
+            "disabled\ndisabled\ndisabled\n",
+        ),
+    };
+
+    /// `systemctl` on `system`, for the commands of `linux_dns` only.
+    fn systemctl(system: Systemd, args: &[String]) -> io::Result<RunOutput> {
+        let printed = |code, stdout: &str| {
+            Ok(RunOutput {
+                code: Some(code),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        };
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        match args.as_slice() {
+            ["--version"] => printed(0, &format!("{}\n+PAM +AUDIT -SELINUX\n", system.version)),
+            ["is-active", "--quiet", "systemd-resolved.service"] => printed(system.resolved, ""),
+            ["is-active", units @ ..] if units == NETWORKD_UNITS => printed(3, system.networkd.0),
+            ["is-enabled", units @ ..] if units == NETWORKD_UNITS => printed(1, system.networkd.1),
+            other => panic!("systemctl {other:?}"),
+        }
+    }
+
+    /// A Linux machine with the `marsa0` link ([`UBUNTU_2404`]) whose
+    /// `pkexec` gives `answer()`. Nothing else may run.
+    fn linux_fake(answer: impl Fn() -> io::Result<RunOutput> + Send + Sync + 'static) -> Arc<Fake> {
+        linux_fake_on(UBUNTU_2404, move |_| answer())
+    }
+
+    /// `system`, whose `pkexec` gives `answer(request)`.
+    pub(super) fn linux_fake_on(
+        system: Systemd,
+        answer: impl Fn(HelperRequest) -> io::Result<RunOutput> + Send + Sync + 'static,
+    ) -> Arc<Fake> {
+        Fake::answering(move |program, args| match program {
+            pkexec::PKEXEC => answer(serde_json::from_str(&args[3]).unwrap()),
+            linux_dns::SYSTEMCTL => systemctl(system, args),
+            other => panic!("{other} ran on Linux"),
+        })
+    }
+
+    /// The helper's answer: `done` for each op of `request`, except the
+    /// `(op, code)` pairs of `failed`.
+    pub(super) fn answer_for(
+        request: &HelperRequest,
+        failed: &[(&str, &str)],
+    ) -> io::Result<RunOutput> {
+        let results: Vec<Value> = request
+            .ops
+            .iter()
+            .map(|op| {
+                let op = op_name(op).unwrap();
+                match failed.iter().find(|(name, _)| *name == op) {
+                    Some((_, code)) => json!({ "op": op, "status": "failed", "code": code,
+                                               "message": "x" }),
+                    None => json!({ "op": op, "status": "done" }),
+                }
+            })
+            .collect();
+        let code = if failed.is_empty() { 0 } else { 1 };
+        Ok(RunOutput {
+            code: Some(code),
+            stdout: json!({ "version": 1, "results": results })
+                .to_string()
+                .into_bytes(),
+            stderr: Vec::new(),
+        })
+    }
+
+    fn linux_setup(fake: &Arc<Fake>, helper: PathBuf, home: PathBuf) -> Setup {
+        Setup::with(
             fake.clone(),
             Some(Platform::LinuxX64),
             Some(helper),
-            Some(dir.home()),
+            Some(home),
+        )
+    }
+
+    fn run_linux(setup: &Setup, dir: &Dir) -> SetupReport {
+        run_linux_with(setup, dir, &[])
+    }
+
+    /// Setup on Linux with the sites `names`.
+    fn run_linux_with(setup: &Setup, dir: &Dir, names: &[&str]) -> SetupReport {
+        let stop = CancellationToken::new();
+        let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+        setup.run(
+            dir.dir.path(),
+            CaddyInput::default(),
+            Platform::LinuxX64,
+            dir.caddy.as_ref(),
+            Some(&names),
+            &stop,
+        )
+    }
+
+    /// ADR 0011 stays on Linux: the request carries the certificate. ADR
+    /// 0014: `ports_install` instead of a port check and `pf_install`. The
+    /// helper runs through `pkexec`, with no shell, and nothing else runs:
+    /// no `netstat`, no `security`, and no protected folder check (the
+    /// helper here is in `~/Desktop`).
+    #[test]
+    fn linux_sends_trust_resolved_and_ports_through_pkexec() {
+        let dir = Dir::new(true);
+        let helper = dir.home().join("Desktop").join("marsa-helper");
+        make_helper(&helper);
+        let answer = all_done(&["trust_install", "resolved_install", "ports_install"]);
+        let fake = linux_fake(move || ok(&answer));
+        let report = run_linux(&linux_setup(&fake, helper.clone(), dir.home()), &dir);
+
+        let calls = fake.calls();
+        assert_eq!(
+            fake.programs(),
+            [
+                "/usr/bin/systemctl",
+                "/usr/bin/systemctl",
+                "/usr/bin/pkexec"
+            ]
         );
+        // systemd 255: networkd does not count.
+        assert_eq!(calls[0].args, ["--version"]);
+        assert_eq!(
+            calls[1].args,
+            ["is-active", "--quiet", "systemd-resolved.service"]
+        );
+        assert_eq!(calls[1].limit, Duration::from_secs(10));
+        let calls = &calls[2..];
+        assert_eq!(calls[0].args.len(), 4);
+        assert_eq!(calls[0].args[0], "--disable-internal-agent");
+        assert_eq!(calls[0].args[1], helper.to_str().unwrap());
+        assert_eq!(calls[0].args[2], "apply");
+        assert_eq!(calls[0].limit, Duration::from_secs(300));
+        let ops = [
+            trust(),
+            HelperOp::ResolvedInstall { port: 18053 },
+            HelperOp::PortsInstall,
+        ];
+        assert_eq!(fake.pkexec_request(), HelperRequest::new(ops.to_vec()));
+        let names: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+        assert_eq!(
+            names,
+            ["trust_install", "resolved_install", "ports_install"]
+        );
+        assert_eq!((report.error, report.skipped), (None, Vec::new()));
+    }
+
+    /// An answer for other ops than sent, through pkexec: no results, so
+    /// Caddy's config is not sent again for ports 80 and 443 either.
+    #[test]
+    fn linux_results_for_other_operations_are_setup_helper_failed() {
+        let dir = Dir::new(true);
+        let answer = all_done(&["ports_install", "trust_install", "resolved_install"]);
+        let fake = linux_fake(move || ok(&answer));
+        let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code.as_str()),
+            Some("setup_helper_failed")
+        );
+        assert!(report.results.is_empty());
+        assert!(!low_ports_set(&report));
+    }
+
+    /// No CA root and no Caddy to make one (task M5-15): the names and the
+    /// ports still go to the helper.
+    #[test]
+    fn linux_without_a_ca_still_sets_up_names_and_ports() {
+        let dir = Dir::new(false);
+        let answer = all_done(&["resolved_install", "ports_install"]);
+        let fake = linux_fake(move || ok(&answer));
+        let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+        let ops = vec![
+            HelperOp::ResolvedInstall { port: 18053 },
+            HelperOp::PortsInstall,
+        ];
+        assert_eq!(fake.pkexec_request(), HelperRequest::new(ops));
+        assert_eq!(
+            report.skipped,
+            [skip("trust_install", "caddy_not_installed")]
+        );
+        assert_eq!(report.error, None);
+    }
+
+    /// `pkexec`'s own exit codes, with no answer of the helper (spike S-02).
+    #[test]
+    fn a_dismissed_or_refused_password_dialog_on_linux() {
+        for (code, expected) in [(126, "setup_cancelled"), (127, "setup_not_authorized")] {
+            let dir = Dir::new(true);
+            let fake = linux_fake(move || exit(code, "Error executing command as another user"));
+            let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+            assert_eq!(error_code(&report), Some(expected), "{code}");
+            assert!(report.results.is_empty());
+        }
+    }
+
+    /// The helper's answer comes on stdout also when an op failed (exit 1).
+    #[test]
+    fn a_failed_op_on_linux_is_in_the_results() {
+        let dir = Dir::new(true);
+        let answer = json!({ "version": 1, "results": [
+            { "op": "trust_install", "status": "done" },
+            { "op": "resolved_install", "status": "failed", "code": "resolved_check_failed",
+              "message": "x" },
+            { "op": "ports_install", "status": "done" },
+        ]})
+        .to_string();
+        let fake = linux_fake(move || {
+            Ok(RunOutput {
+                code: Some(1),
+                stdout: answer.clone().into_bytes(),
+                stderr: Vec::new(),
+            })
+        });
+        let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+        assert_eq!(report.error, None);
+        assert_eq!(
+            report.results[1].code.as_deref(),
+            Some("resolved_check_failed")
+        );
+        // Not an answer that means the hosts file: no second request.
+        assert_eq!(fake.pkexec_calls(), 1);
+        assert!(report.skipped.is_empty());
+    }
+
+    /// `ops` with the certificate first and `ports_install` last, as setup
+    /// sends them on Linux.
+    fn linux_request(dns: Vec<HelperOp>) -> HelperRequest {
+        let mut ops = vec![trust()];
+        ops.extend(dns);
+        ops.push(HelperOp::PortsInstall);
+        HelperRequest::new(ops)
+    }
+
+    fn hosts_sync(names: &[&str]) -> HelperOp {
+        HelperOp::HostsSync {
+            names: names.iter().map(|name| (*name).to_owned()).collect(),
+        }
+    }
+
+    /// systemd older than 250 with systemd-networkd, or no
+    /// systemd-resolved at all: the names of the sites go into the hosts
+    /// file, and a link of an earlier setup goes (task M4-18k).
+    #[test]
+    fn linux_without_a_safe_link_puts_the_sites_in_the_hosts_file() {
+        for system in [UBUNTU_2204_SERVER, DEBIAN_12] {
+            let dir = Dir::new(true);
+            let fake = linux_fake_on(system, |request| answer_for(&request, &[]));
+            let setup = linux_setup(&fake, dir.helper(), dir.home());
+            let report = run_linux_with(&setup, &dir, &["blog.test", "shop.test"]);
+            let dns = vec![
+                HelperOp::ResolvedRemove,
+                hosts_sync(&["blog.test", "shop.test"]),
+            ];
+            assert_eq!(fake.pkexec_request(), linux_request(dns), "{system:?}");
+            let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+            assert_eq!(
+                steps,
+                [
+                    "trust_install",
+                    "resolved_remove",
+                    "hosts_sync",
+                    "ports_install"
+                ]
+            );
+            assert_eq!((report.error, report.skipped), (None, Vec::new()));
+            assert_eq!(fake.pkexec_calls(), 1, "{system:?}");
+            // So `marsa park` and `marsa link` keep the block up to date.
+            assert!(linux_dns::marker(dir.dir.path()).is_file(), "{system:?}");
+        }
+    }
+
+    /// systemd 249 asks about systemd-networkd, and only 249 does. With no
+    /// systemd-resolved, nothing more is asked: the hosts file it is.
+    #[test]
+    fn only_systemd_249_asks_about_networkd() {
+        let networkd = |system| {
+            let dir = Dir::new(true);
+            let fake = linux_fake_on(system, |request| answer_for(&request, &[]));
+            run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+            fake.calls()
+                .iter()
+                .filter(|call| call.program == linux_dns::SYSTEMCTL)
+                .map(|call| call.args[0].clone())
+                .collect::<Vec<_>>()
+        };
+        let asked = ["--version", "is-active", "is-active", "is-enabled"];
+        assert_eq!(networkd(UBUNTU_2204_SERVER), asked);
+        assert_eq!(networkd(UBUNTU_2204_DESKTOP), asked);
+        assert_eq!(networkd(UBUNTU_2404), ["--version", "is-active"]);
+        assert_eq!(networkd(DEBIAN_12), ["--version", "is-active"]);
+    }
+
+    /// Ubuntu 22.04 on the desktop: networkd is off for good, so the link
+    /// (with its local route, in the helper) is safe there too.
+    #[test]
+    fn systemd_249_without_networkd_keeps_the_link() {
+        let dir = Dir::new(true);
+        let fake = linux_fake_on(UBUNTU_2204_DESKTOP, |request| answer_for(&request, &[]));
+        let setup = linux_setup(&fake, dir.helper(), dir.home());
+        run_linux_with(&setup, &dir, &["shop.test"]);
+        let dns = vec![HelperOp::ResolvedInstall { port: 18053 }];
+        assert_eq!(fake.pkexec_request(), linux_request(dns));
+    }
+
+    /// A hosts file with Marsa's block from an earlier setup.
+    fn hosts_with_block(dir: &Dir) -> PathBuf {
+        let hosts = dir.dir.path().join("hosts");
+        let text = "127.0.0.1 localhost\n# Marsa start\n127.0.0.1 shop.test\n# Marsa end\n";
+        fs::write(&hosts, text).unwrap();
+        hosts
+    }
+
+    /// The ops of each `pkexec` request, in order.
+    fn requests(fake: &Fake) -> Vec<Vec<HelperOp>> {
+        fake.calls()
+            .iter()
+            .filter(|call| call.program == pkexec::PKEXEC)
+            .map(|call| {
+                serde_json::from_str::<HelperRequest>(&call.args[3])
+                    .unwrap()
+                    .ops
+            })
+            .collect()
+    }
+
+    /// Marsa's block from an earlier setup, on a system that now takes the
+    /// link (an upgrade to systemd 250, say): it goes in a second request,
+    /// once the link is made. The file itself is only read.
+    #[test]
+    fn the_link_takes_an_old_hosts_block_out_once_it_is_made() {
+        for status in ["done", "unchanged"] {
+            let dir = Dir::new(true);
+            let hosts = hosts_with_block(&dir);
+            let text = fs::read_to_string(&hosts).unwrap();
+            let fake = linux_fake_on(UBUNTU_2404, move |request| {
+                let mut answer = answer_for(&request, &[]);
+                if status == "unchanged" {
+                    let out = answer.as_mut().unwrap();
+                    out.stdout = String::from_utf8(out.stdout.clone())
+                        .unwrap()
+                        .replace("\"done\"", "\"unchanged\"")
+                        .into_bytes();
+                }
+                answer
+            });
+            let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts.clone());
+            fs::write(linux_dns::marker(dir.dir.path()), "").unwrap();
+            let report = run_linux_with(&setup, &dir, &["shop.test"]);
+            let first = linux_request(vec![HelperOp::ResolvedInstall { port: 18053 }]).ops;
+            assert_eq!(
+                requests(&fake),
+                [first, vec![HelperOp::HostsRemove]],
+                "{status}"
+            );
+            // The link is made: `marsa park` no longer syncs the hosts file.
+            assert!(!linux_dns::marker(dir.dir.path()).is_file());
+            let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+            assert_eq!(
+                steps,
+                [
+                    "trust_install",
+                    "resolved_install",
+                    "ports_install",
+                    "hosts_remove"
+                ]
+            );
+            assert_eq!(report.error, None);
+            assert_eq!(fs::read_to_string(&hosts).unwrap(), text);
+        }
+
+        // No block, or one whose markers do not pair up: nothing to take out.
+        for text in [
+            "127.0.0.1 localhost\n",
+            "# Marsa start\n127.0.0.1 shop.test\n",
+        ] {
+            let dir = Dir::new(true);
+            let hosts = dir.dir.path().join("hosts");
+            fs::write(&hosts, text).unwrap();
+            let fake = linux_fake_on(UBUNTU_2404, |request| answer_for(&request, &[]));
+            let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts);
+            run_linux_with(&setup, &dir, &["shop.test"]);
+            assert_eq!(fake.pkexec_calls(), 1, "{text:?}");
+        }
+    }
+
+    /// While the block is the only way the sites resolve, it stays: no link,
+    /// no removal (review of #130).
+    #[test]
+    fn a_link_that_failed_keeps_the_block() {
+        for code in ["resolved_check_failed", "resolved_tool_missing"] {
+            let dir = Dir::new(true);
+            let hosts = hosts_with_block(&dir);
+            let fake = linux_fake_on(UBUNTU_2404, move |request| {
+                answer_for(&request, &[("resolved_install", code)])
+            });
+            let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts);
+            let report = run_linux_with(&setup, &dir, &["shop.test"]);
+            assert_eq!(fake.pkexec_calls(), 1, "{code}");
+            assert_eq!(report.results[1].code.as_deref(), Some(code));
+        }
+    }
+
+    /// The removal's prompt dismissed: the link is made, the old block
+    /// stays, and the error says so.
+    #[test]
+    fn a_dismissed_removal_prompt_says_the_block_stays() {
+        let dir = Dir::new(true);
+        let hosts = hosts_with_block(&dir);
+        let fake = linux_fake_on(UBUNTU_2404, |request| {
+            if request.ops == [HelperOp::HostsRemove] {
+                exit(126, "Request dismissed")
+            } else {
+                answer_for(&request, &[])
+            }
+        });
+        let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts);
+        let report = run_linux_with(&setup, &dir, &["shop.test"]);
+        assert_eq!(error_code(&report), Some("setup_hosts_not_removed"));
+        assert_eq!(report.results.len(), 3);
+        assert!(low_ports_set(&report));
+    }
+
+    /// The helper is the judge (task M4-18k2): where marsad expected the
+    /// link but the helper chose the hosts file, `resolved_install` becomes
+    /// a skipped step with the helper's code, and the operations of the
+    /// hosts way go to the helper in a second request. With a block there,
+    /// it is not taken out first.
+    #[test]
+    fn the_hosts_file_when_the_helper_says_so() {
+        for code in ["resolved_use_hosts", "resolved_not_running"] {
+            let dir = Dir::new(true);
+            let hosts = hosts_with_block(&dir);
+            let fake = linux_fake_on(UBUNTU_2404, move |request| {
+                answer_for(&request, &[("resolved_install", code)])
+            });
+            let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts);
+            let report = run_linux_with(&setup, &dir, &["shop.test"]);
+
+            let first = linux_request(vec![HelperOp::ResolvedInstall { port: 18053 }]).ops;
+            let second = vec![HelperOp::ResolvedRemove, hosts_sync(&["shop.test"])];
+            assert_eq!(requests(&fake), [first, second], "{code}");
+            let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+            assert_eq!(
+                steps,
+                [
+                    "trust_install",
+                    "ports_install",
+                    "resolved_remove",
+                    "hosts_sync"
+                ]
+            );
+            assert_eq!(report.skipped, [skip("resolved_install", code)]);
+            assert_eq!(report.error, None);
+            assert!(low_ports_set(&report));
+        }
+    }
+
+    /// The second prompt dismissed: the error says the steps before are
+    /// done and the names are not written; the skipped step stays.
+    #[test]
+    fn a_dismissed_second_prompt_says_the_names_are_not_written() {
+        let dir = Dir::new(true);
+        let fake = linux_fake_on(UBUNTU_2404, |request| {
+            if request.ops.len() == 2 {
+                exit(
+                    126,
+                    "Error executing command as another user: Request dismissed",
+                )
+            } else {
+                answer_for(&request, &[("resolved_install", "resolved_use_hosts")])
+            }
+        });
+        let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+        assert_eq!(error_code(&report), Some("setup_hosts_not_written"));
+        assert_eq!(
+            report.skipped,
+            [skip("resolved_install", "resolved_use_hosts")]
+        );
+        let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+        assert_eq!(steps, ["trust_install", "ports_install"]);
+    }
+
+    /// A first request that failed as a whole: no second one.
+    #[test]
+    fn no_second_request_after_a_failed_first_one() {
+        let dir = Dir::new(true);
+        let hosts = hosts_with_block(&dir);
+        let fake = linux_fake_on(UBUNTU_2404, |_| exit(127, "Not authorized"));
+        let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts);
+        let report = run_linux_with(&setup, &dir, &["shop.test"]);
+        assert_eq!(error_code(&report), Some("setup_not_authorized"));
+        assert_eq!(fake.pkexec_calls(), 1);
+    }
+
+    /// The hosts way never falls back the other way: a failed `hosts_sync`
+    /// is a failed step, with one prompt.
+    #[test]
+    fn a_failed_hosts_sync_is_a_failed_step() {
+        let dir = Dir::new(true);
+        let fake = linux_fake_on(UBUNTU_2204_SERVER, |request| {
+            answer_for(&request, &[("hosts_sync", "hosts_block_broken")])
+        });
+        let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+        assert_eq!(fake.pkexec_calls(), 1);
+        assert_eq!(
+            report.results[2].code.as_deref(),
+            Some("hosts_block_broken")
+        );
+        assert_eq!((report.error, report.skipped), (None, Vec::new()));
+    }
+
+    /// No site list, or more names than the helper takes: `hosts_sync` is
+    /// left out, never sent empty, and never sent so that the helper refuses
+    /// the whole request (review of #130). The rest of setup goes on.
+    #[test]
+    fn hosts_sync_is_left_out_when_it_cannot_be_right() {
+        let many: Vec<String> = (0..1001).map(|i| format!("s{i}.test")).collect();
+        for (names, code) in [
+            (None, "hosts_sites_unknown"),
+            (Some(many), "hosts_too_many_names"),
+        ] {
+            let dir = Dir::new(true);
+            let fake = linux_fake_on(UBUNTU_2204_SERVER, |request| answer_for(&request, &[]));
+            let setup = linux_setup(&fake, dir.helper(), dir.home());
+            let stop = CancellationToken::new();
+            let report = setup.run(
+                dir.dir.path(),
+                CaddyInput::default(),
+                Platform::LinuxX64,
+                dir.caddy.as_ref(),
+                names.as_deref(),
+                &stop,
+            );
+            assert_eq!(
+                fake.pkexec_request(),
+                linux_request(vec![HelperOp::ResolvedRemove]),
+                "{code}"
+            );
+            assert_eq!(report.skipped, [skip("hosts_sync", code)]);
+            assert_eq!(report.error, None);
+        }
+    }
+
+    /// `systemctl` that cannot run, or that says resolved is not active in
+    /// any way: the helper would refuse the link (`resolved_not_running`),
+    /// so the hosts way at once, with one prompt (review of #130).
+    #[test]
+    fn a_systemctl_that_says_no_means_the_hosts_file() {
+        let answers: [fn() -> io::Result<RunOutput>; 2] = [
+            || Err(io::Error::from(io::ErrorKind::NotFound)),
+            || exit(1, "Failed to connect to bus"),
+        ];
+        for answer in answers {
+            let dir = Dir::new(true);
+            let fake = Fake::answering(move |program, args| match program {
+                linux_dns::SYSTEMCTL => answer(),
+                pkexec::PKEXEC => answer_for(&serde_json::from_str(&args[3]).unwrap(), &[]),
+                other => panic!("{other} ran"),
+            });
+            run_linux_with(
+                &linux_setup(&fake, dir.helper(), dir.home()),
+                &dir,
+                &["a.test"],
+            );
+            let dns = vec![HelperOp::ResolvedRemove, hosts_sync(&["a.test"])];
+            assert_eq!(requests(&fake), [linux_request(dns).ops]);
+        }
+    }
+
+    /// A read of systemd-resolved that did not end (a timeout, a signal):
+    /// the helper is asked, so a slow `systemctl` never takes out a link
+    /// that works (review of #130).
+    #[test]
+    fn a_systemctl_that_did_not_end_leaves_it_to_the_helper() {
+        let answers: [fn() -> io::Result<RunOutput>; 2] = [
+            || Err(io::Error::from(io::ErrorKind::TimedOut)),
+            || {
+                Ok(RunOutput {
+                    code: None,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            },
+        ];
+        for answer in answers {
+            let dir = Dir::new(true);
+            let fake = Fake::answering(move |program, args| match program {
+                linux_dns::SYSTEMCTL if args[0] == "--version" => systemctl(UBUNTU_2404, args),
+                linux_dns::SYSTEMCTL => answer(),
+                pkexec::PKEXEC => answer_for(&serde_json::from_str(&args[3]).unwrap(), &[]),
+                other => panic!("{other} ran"),
+            });
+            run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+            let dns = vec![HelperOp::ResolvedInstall { port: 18053 }];
+            assert_eq!(requests(&fake), [linux_request(dns).ops]);
+        }
+    }
+
+    /// The helper chose the hosts file, but `hosts_sync` cannot be sent: no
+    /// second prompt that would write nothing.
+    #[test]
+    fn no_second_prompt_without_names_to_write() {
+        let dir = Dir::new(true);
+        let fake = linux_fake_on(UBUNTU_2404, |request| {
+            answer_for(&request, &[("resolved_install", "resolved_use_hosts")])
+        });
+        let setup = linux_setup(&fake, dir.helper(), dir.home());
         let stop = CancellationToken::new();
         let report = setup.run(
             dir.dir.path(),
             CaddyInput::default(),
             Platform::LinuxX64,
             dir.caddy.as_ref(),
+            None,
             &stop,
         );
-
-        assert_eq!(fake.request().ops[0], trust());
-        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
-        assert_eq!(report.results.len(), 3);
+        assert_eq!(fake.pkexec_calls(), 1);
+        assert_eq!(
+            report.skipped,
+            [
+                skip("resolved_install", "resolved_use_hosts"),
+                skip("hosts_sync", "hosts_sites_unknown")
+            ]
+        );
         assert_eq!(report.error, None);
+    }
+
+    /// A second request that timed out keeps its own code: the helper may
+    /// have run, and that text says so.
+    #[test]
+    fn a_second_request_that_timed_out_says_it_may_have_run() {
+        let dir = Dir::new(true);
+        let fake = linux_fake_on(UBUNTU_2404, |request| {
+            if request.ops.len() == 2 {
+                Err(io::Error::from(io::ErrorKind::TimedOut))
+            } else {
+                answer_for(&request, &[("resolved_install", "resolved_use_hosts")])
+            }
+        });
+        let report = run_linux_with(
+            &linux_setup(&fake, dir.helper(), dir.home()),
+            &dir,
+            &["a.test"],
+        );
+        assert_eq!(error_code(&report), Some("setup_timed_out"));
+    }
+
+    /// The slowest Linux setup stays under [`SLOWEST_SETUP`]: four
+    /// `systemctl` checks and two prompts, each with its pipes' grace,
+    /// after Caddy's start (review of #130).
+    #[test]
+    fn the_slowest_linux_setup_fits_in_slowest_setup() {
+        let dir = Dir::new(true);
+        let fake = linux_fake_on(UBUNTU_2204_DESKTOP, |request| {
+            answer_for(&request, &[("resolved_install", "resolved_use_hosts")])
+        });
+        run_linux_with(
+            &linux_setup(&fake, dir.helper(), dir.home()),
+            &dir,
+            &["a.test"],
+        );
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 6, "{calls:?}");
+        let programs: Duration = calls.iter().map(|call| call.limit + PIPE_GRACE).sum();
+        assert!(CA_WAIT + programs <= SLOWEST_SETUP);
+    }
+
+    /// The same checks of the helper file as on macOS, before any dialog.
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_others_could_change_on_linux_means_no_pkexec() {
+        let dir = Dir::new(true);
+        set_mode(&dir.helper(), 0o777);
+        let fake = linux_fake(|| panic!("pkexec ran"));
+        let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
+        assert_eq!(error_code(&report), Some("setup_helper_unsafe"));
+        assert!(!fake.programs().contains(&pkexec::PKEXEC));
+    }
+
+    #[test]
+    fn low_ports_are_set_when_ports_install_is_done_or_unchanged() {
+        let report = |status| SetupReport {
+            results: vec![OpResult {
+                op: "ports_install".into(),
+                status,
+                code: None,
+                message: None,
+            }],
+            ..SetupReport::default()
+        };
+        assert!(low_ports_set(&report(OpStatus::Done)));
+        assert!(low_ports_set(&report(OpStatus::Unchanged)));
+        assert!(!low_ports_set(&report(OpStatus::Failed)));
+        assert!(!low_ports_set(&SetupReport::default()));
+        let other = SetupReport {
+            results: vec![done("resolved_install")],
+            ..SetupReport::default()
+        };
+        assert!(!low_ports_set(&other));
+    }
+
+    /// After setup on Linux, Caddy's config is written again with ports 80
+    /// and 443 (Caddy does not run here, so only the file shows it). Not
+    /// after a `ports_install` that failed.
+    #[tokio::test]
+    async fn linux_setup_sends_caddy_its_config_with_ports_80_and_443() {
+        for (status, port) in [("done", Some(80)), ("failed", None)] {
+            let dir = Dir::new(true);
+            let answer = json!({ "version": 1, "results": [
+                { "op": "trust_install", "status": "done" },
+                { "op": "resolved_install", "status": "done" },
+                { "op": "ports_install", "status": status, "code": "x", "message": "x" },
+            ]})
+            .to_string();
+            let fake = linux_fake(move || ok(&answer));
+            let mut daemon = Daemon::new(dir.dir.path().to_path_buf());
+            daemon.caddy.low_ports = || true;
+            let daemon = Arc::new(daemon);
+            let app = App::new(
+                Arc::clone(&daemon),
+                linux_setup(&fake, dir.helper(), dir.home()),
+            );
+            assert_eq!(app.post().await.0, StatusCode::OK, "{status}");
+            let written = fs::read_to_string(&daemon.caddy.paths.config_file)
+                .ok()
+                .map(|text| serde_json::from_str::<Value>(&text).unwrap());
+            let http_port = written.and_then(|config| config["apps"]["http"]["http_port"].as_u64());
+            assert_eq!(http_port, port, "{status}");
+        }
+    }
+
+    /// The rejection paths of the route (AGENTS.md section 5) on Linux too.
+    #[tokio::test]
+    async fn on_linux_a_request_without_the_token_with_an_origin_or_another_host_runs_nothing() {
+        let dir = Dir::new(true);
+        let answer = all_done(&["trust_install", "resolved_install", "ports_install"]);
+        let fake = linux_fake(move || ok(&answer));
+        let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+        let app = App::new(daemon, linux_setup(&fake, dir.helper(), dir.home()));
+        let host = daemon_authority(PORT);
+        let other_host = daemon_authority(PORT + 1);
+        let bearer = app.bearer.clone();
+        let cases = [
+            (vec![("host", host.as_str())], StatusCode::UNAUTHORIZED),
+            (
+                vec![
+                    ("host", host.as_str()),
+                    ("authorization", bearer.as_str()),
+                    ("origin", "http://evil.test"),
+                ],
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                vec![
+                    ("host", other_host.as_str()),
+                    ("authorization", bearer.as_str()),
+                ],
+                StatusCode::FORBIDDEN,
+            ),
+        ];
+        for (headers, status) in cases {
+            assert_eq!(app.send(&headers).await.0, status, "{headers:?}");
+            assert!(fake.calls().is_empty());
+        }
+        assert_eq!(app.post().await.0, StatusCode::OK);
+        assert_eq!(
+            fake.programs(),
+            [
+                "/usr/bin/systemctl",
+                "/usr/bin/systemctl",
+                "/usr/bin/pkexec"
+            ]
+        );
     }
 
     #[test]
@@ -2809,6 +4063,7 @@ mod tests {
                 CaddyInput::default(),
                 Platform::DarwinArm64,
                 dir.caddy.as_ref(),
+                Some(&[]),
                 &stop,
             );
             assert_eq!(error_code(&report), Some("setup_helper_missing"));
@@ -3141,10 +4396,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn linux_and_windows_get_setup_not_supported() {
+    async fn other_systems_get_setup_not_supported() {
         let dir = Dir::new(true);
         let fake = Fake::new(|program| panic!("{program} ran"));
-        for platform in [Some(Platform::LinuxX64), Some(Platform::WindowsX64), None] {
+        for platform in [Some(Platform::Any), None] {
             let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
             let setup = Setup::with(fake.clone(), platform, Some(dir.helper()), Some(dir.home()));
             let app = App::new(daemon, setup);
@@ -3155,6 +4410,160 @@ mod tests {
             assert_eq!(app.refused().await, refused, "{platform:?}");
         }
         assert!(fake.calls().is_empty());
+    }
+
+    /// A Windows helper service that is not installed until `install`, and
+    /// then answers `done` for every op of a request.
+    #[derive(Default)]
+    struct WindowsService {
+        installed: std::sync::Mutex<Option<(String, String)>>,
+        requests: std::sync::Mutex<Vec<Value>>,
+    }
+
+    impl windows::Service for WindowsService {
+        fn user_sid(&self) -> Result<String, String> {
+            Ok("S-1-5-21-1-2-3-1001".to_owned())
+        }
+
+        fn send(&self, request: &[u8], _stop: &CancellationToken) -> Result<Vec<u8>, &'static str> {
+            let Some((_, approved)) = self.installed.lock().unwrap().clone() else {
+                return Err("helper_not_running");
+            };
+            let request: Value = serde_json::from_slice(request).unwrap();
+            // As the service: a CA other than the approved one refuses the
+            // whole request.
+            for op in request["ops"].as_array().unwrap() {
+                if op["op"] == "trust_install" {
+                    let pem = op["pem"].as_str().unwrap();
+                    if marsa_core::helper::certificate_sha256(pem).as_deref() != Some(&approved) {
+                        let refused = json!({
+                            "version": 1,
+                            "error": { "code": "trust_not_allowed", "message": "no" },
+                        });
+                        return Ok(refused.to_string().into_bytes());
+                    }
+                }
+            }
+            let results: Vec<Value> = request["ops"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|op| json!({ "op": op["op"], "status": "done" }))
+                .collect();
+            self.requests.lock().unwrap().push(request);
+            Ok(json!({ "version": 1, "results": results })
+                .to_string()
+                .into_bytes())
+        }
+
+        fn install(&self, _helper: &Path, sid: &str, hash: &str) -> windows::Install {
+            *self.installed.lock().unwrap() = Some((sid.to_owned(), hash.to_owned()));
+            windows::Install::Exited(0)
+        }
+
+        fn uninstall(&self, _helper: &Path) -> windows::Install {
+            *self.installed.lock().unwrap() = None;
+            windows::Install::Exited(0)
+        }
+    }
+
+    /// Windows: one install of the service, for this CA, then the CA and the
+    /// hosts block through its pipe. No other program runs: no pf, no
+    /// `osascript`, no `pkexec`.
+    #[tokio::test]
+    async fn windows_setup_installs_the_service_for_its_ca_and_sends_trust_and_hosts() {
+        let dir = Dir::new(true);
+        let fake = Fake::new(|program| panic!("{program} ran"));
+        let service = Arc::new(WindowsService::default());
+        let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+        // The user's folder holds Marsa's programs, as an install puts them.
+        let setup = Setup::with(
+            fake.clone(),
+            Some(Platform::WindowsX64),
+            Some(dir.helper()),
+            Some(dir.dir.path().to_path_buf()),
+        )
+        .with_windows(service.clone());
+        let app = App::new(daemon, setup);
+        let (status, report) = app.post().await;
+        assert_eq!(status, StatusCode::OK, "{report}");
+        let ops: Vec<&str> = report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| result["op"].as_str().unwrap())
+            .collect();
+        assert_eq!(ops, ["trust_install", "hosts_sync"], "{report}");
+        let hash = marsa_core::helper::certificate_sha256(TEST_CA).unwrap();
+        let installed = service.installed.lock().unwrap().clone();
+        assert_eq!(installed, Some(("S-1-5-21-1-2-3-1001".to_owned(), hash)));
+        assert_eq!(service.requests.lock().unwrap().len(), 1);
+        assert!(fake.calls().is_empty());
+        // From now on this data folder's daemon sends the names after each
+        // pass.
+        assert!(dir.dir.path().join(hosts_sync::MARKER).exists());
+    }
+
+    /// Windows with no CA root yet and no Caddy to make one: the trust is
+    /// skipped, the service is installed for no CA (`-`), and the hosts
+    /// block still goes.
+    #[tokio::test]
+    async fn windows_setup_without_a_ca_installs_for_none_and_sends_the_hosts() {
+        let dir = Dir::new(false);
+        let fake = Fake::new(|program| panic!("{program} ran"));
+        let service = Arc::new(WindowsService::default());
+        let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+        let setup = Setup::with(
+            fake.clone(),
+            Some(Platform::WindowsX64),
+            Some(dir.helper()),
+            Some(dir.dir.path().to_path_buf()),
+        )
+        .with_windows(service.clone())
+        .with_caddy(dir.caddy.clone());
+        let app = App::new(daemon, setup);
+        let (status, report) = app.post().await;
+        assert_eq!(status, StatusCode::OK, "{report}");
+        assert_eq!(report["results"][0]["op"], "hosts_sync", "{report}");
+        assert_eq!(report["skipped"][0]["op"], "trust_install", "{report}");
+        let installed = service.installed.lock().unwrap().clone();
+        assert_eq!(
+            installed,
+            Some(("S-1-5-21-1-2-3-1001".to_owned(), "-".to_owned()))
+        );
+        assert!(fake.calls().is_empty());
+    }
+
+    #[test]
+    fn inside_compares_folders_with_no_regard_to_case() {
+        let home = Path::new("/Users/Omar");
+        assert!(inside(Path::new("/users/omar/bin/marsa-helper"), home));
+        assert!(inside(Path::new("/Users/Omar/bin/marsa-helper"), home));
+        assert!(!inside(Path::new("/Users/Omarx/bin/marsa-helper"), home));
+        assert!(!inside(Path::new("/Users"), home));
+        assert!(!inside(Path::new("/tools/marsa-helper"), home));
+    }
+
+    /// Windows: a marsa-helper outside the user's folder gets no prompt.
+    #[tokio::test]
+    async fn windows_setup_refuses_a_helper_outside_the_users_folder() {
+        let dir = Dir::new(true);
+        let fake = Fake::new(|program| panic!("{program} ran"));
+        let service = Arc::new(WindowsService::default());
+        let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+        let elsewhere = TempDir::new().unwrap();
+        let setup = Setup::with(
+            fake.clone(),
+            Some(Platform::WindowsX64),
+            Some(dir.helper()),
+            Some(elsewhere.path().to_path_buf()),
+        )
+        .with_windows(service.clone());
+        let app = App::new(daemon, setup);
+        let (_, report) = app.post().await;
+        assert_eq!(report["error"]["code"], "setup_helper_unsafe", "{report}");
+        assert!(service.installed.lock().unwrap().is_none());
+        assert!(!dir.dir.path().join(hosts_sync::MARKER).exists());
     }
 
     #[tokio::test]

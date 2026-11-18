@@ -1,8 +1,16 @@
+use std::ffi::OsStr;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
 use crate::error::ShimError;
+use crate::name::ShimName;
+
+/// The tool, from `argv[0]`. Not `current_exe()`: on Linux it follows
+/// symlinks and gives `marsa-shim`.
+pub fn own_name(argv0: &OsStr) -> Option<ShimName> {
+    ShimName::from_argv0(argv0)
+}
 
 /// Replaces this process with `command`, like `pcntl_exec()` in PHP. No child
 /// process stays, so signals, the exit code, and stdin, stdout, and stderr

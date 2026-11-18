@@ -38,12 +38,6 @@ pub enum ShimError {
     #[error("stopped after {depth} nested shims; a link in runtimes/ may point back to the shim")]
     Loop { depth: u32 },
 
-    // Only `sys/unix.rs` builds this variant (and the tests). M1-07 builds it on
-    // Windows too.
-    #[cfg_attr(
-        all(windows, not(test)),
-        expect(dead_code, reason = "the Windows stub never runs a program")
-    )]
     #[error("cannot run {}", .path.display())]
     Exec {
         path: PathBuf,
@@ -51,12 +45,8 @@ pub enum ShimError {
         source: io::Error,
     },
 
-    // Only `sys/windows.rs` builds this variant (and the tests).
-    #[cfg_attr(
-        all(not(windows), not(test)),
-        expect(dead_code, reason = "only the Windows stub returns it")
-    )]
-    #[error("the shim does not run on Windows yet")]
+    /// A system Marsa has no builds for.
+    #[error("the shim does not run on this system yet")]
     UnsupportedPlatform,
 }
 

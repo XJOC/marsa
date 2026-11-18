@@ -13,6 +13,11 @@
 //! 4. PHP again if the bundle just appeared: `php.ini` then points to it, so
 //!    those pools restart.
 //!
+//! After each pass, and after the routes that waited for it have their
+//! answer: on Windows, the sites' names in the hosts file ([`HostsSync`]).
+//! A failure there is tried again after [`RETRY`](super::hosts_sync::RETRY), between
+//! passes too.
+//!
 //! One task, so two passes never overlap, like a queue with one worker. It
 //! owns the [`PhpManager`], so it alone starts and stops the pools. It stops
 //! with the daemon's shutdown token.
@@ -24,11 +29,10 @@
 //!
 //! [`CaddyManager::apply`]: super::caddy::CaddyManager::apply
 
-use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use marsa_core::caddy::{CaddyPaths, PhpPools, system_ca_bundles};
+use marsa_core::caddy::{CaddyPaths, PhpPools};
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::Runtime;
 use marsa_core::sites::Site;
@@ -39,7 +43,8 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use super::caddy::CADDY_ID;
-use super::php::{PhpManager, write_ca_bundle};
+use super::hosts_sync::HostsSync;
+use super::php::{PhpManager, SystemRoots, write_ca_bundle};
 use super::state::Daemon;
 
 /// How long a pass waits after the first event, so a burst of changes (a
@@ -122,6 +127,10 @@ impl SitesSync {
     }
 }
 
+/// How often `marsad` reads Windows' roots again for PHP's CA bundle. The
+/// bundle file changes only when the roots did.
+const ROOTS_REFRESH: Duration = Duration::from_secs(60 * 60);
+
 async fn run(
     daemon: Arc<Daemon>,
     mut events: broadcast::Receiver<Event>,
@@ -129,12 +138,20 @@ async fn run(
 ) {
     let platform = Platform::current();
     let mut php = PhpManager::new(&daemon.data_dir, platform);
-    let system = platform.map(system_ca_bundles).unwrap_or_default();
+    let mut hosts = HostsSync::new();
+    let system = SystemRoots::of(platform);
+    // Windows' roots change without an event (automatic root update, group
+    // policy), so their bundle is read again on a slow timer too.
+    let refresh_roots = system == SystemRoots::WindowsStore;
+    let mut roots_due =
+        tokio::time::interval_at(tokio::time::Instant::now() + ROOTS_REFRESH, ROOTS_REFRESH);
+    // After a sleep, one read, not one per missed hour.
+    roots_due.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let shutdown = daemon.shutdown.clone();
     // The requests the coming pass answers. A return drops them unanswered,
     // and with them `requests`, so each waiting route gets `PassNotRun`.
     let mut replies = Vec::new();
-    loop {
+    'passes: loop {
         // Every request queued before the pass starts: its route saved its
         // change first, so this pass reads it. Requests that come during
         // the pass wait in the queue for the next one.
@@ -147,18 +164,37 @@ async fn run(
             // `Err` only when the route is gone (its client hung up).
             reply.send(()).ok();
         }
+        // After the answers, so that no route waits for the helper service.
         tokio::select! {
             () = shutdown.cancelled() => return,
-            Some(reply) = requests.recv() => {
-                // A route waits: no debounce. The pass covers the events so
-                // far too.
-                replies.push(reply);
-                skip_waiting(&mut events);
-                continue;
+            () = hosts.sync(&daemon) => {}
+        }
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                Some(reply) = requests.recv() => {
+                    // A route waits: no debounce. The pass covers the events
+                    // so far too.
+                    replies.push(reply);
+                    skip_waiting(&mut events);
+                    continue 'passes;
+                }
+                more = next_trigger(&mut events) => {
+                    if !more {
+                        return;
+                    }
+                    break;
+                }
+                // The names failed to go before: again, with no pass.
+                () = hosts.retry_due() => tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    () = hosts.sync(&daemon) => {}
+                },
+                _ = roots_due.tick(), if refresh_roots => tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    _ = write_bundle(&daemon.caddy.paths, &system) => {}
+                },
             }
-            more = next_trigger(&mut events) => if !more {
-                return;
-            },
         }
         tokio::select! {
             () = shutdown.cancelled() => return,
@@ -216,7 +252,7 @@ fn skip_waiting(events: &mut broadcast::Receiver<Event>) {
 }
 
 /// One pass: PHP, Caddy, the CA bundle, then PHP again if the bundle is new.
-async fn pass(daemon: &Daemon, php: &mut PhpManager, system: &[&'static Path]) {
+async fn pass(daemon: &Daemon, php: &mut PhpManager, system: &SystemRoots) {
     let sites = daemon.sites().map(|list| list.sites).unwrap_or_default();
     let bundle = daemon.caddy.paths.ca_bundle();
     let had_bundle = tokio::fs::try_exists(&bundle).await.unwrap_or(false);
@@ -244,9 +280,9 @@ async fn apply_caddy(daemon: &Daemon, sites: &[Site], pools: PhpPools) {
 
 /// [`write_ca_bundle`] on a blocking thread. `true` when the bundle is
 /// written and current.
-async fn write_bundle(paths: &CaddyPaths, system: &[&'static Path]) -> bool {
+async fn write_bundle(paths: &CaddyPaths, system: &SystemRoots) -> bool {
     let paths = paths.clone();
-    let system = system.to_vec();
+    let system = system.clone();
     let job = move || write_ca_bundle(&paths, &system);
     match tokio::task::spawn_blocking(job).await {
         Ok(Ok(written)) => written,

@@ -10,8 +10,9 @@ name: release
 #   (14 days). No release.
 # - workflow_dispatch: the same; with `release` on (main only), also a DRAFT,
 #   pre-release GitHub Release v<version> with the archives of the platforms
-#   input (macOS only for 0.1.0), install.sh, and SHA256SUMS. The owner signs SHA256SUMS with minisign on their own machine,
-#   uploads SHA256SUMS.minisig, reads the draft, and publishes it. The minisign
+#   input (all five by default), install.sh, install.ps1, and SHA256SUMS.
+#   The owner signs SHA256SUMS with minisign on their own machine, uploads
+#   SHA256SUMS.minisig, reads the draft, and publishes it. The minisign
 #   key never enters CI, and this workflow never publishes.
 
 on:
@@ -30,12 +31,12 @@ on:
         description: "Create a DRAFT release v<version> with the archives (main only)"
         type: boolean
         default: false
-      # 0.1.0 is for macOS only (2026-11-14): Linux and Windows still build
-      # here, but their archives stay out of the release until they are ready.
+      # 0.1.x held macOS only. From 0.2.0 a release holds all five; Linux and
+      # Windows are a preview (tested on GitHub runners, not yet by a person).
       platforms:
         description: "The platforms the release holds; all five build either way"
         type: string
-        default: "darwin-arm64 darwin-x64"
+        default: "darwin-arm64 darwin-x64 linux-x64 linux-arm64 windows-x64"
 
 permissions:
   contents: read
@@ -200,9 +201,14 @@ jobs:
     name: install.sh
     uses: ./.github/workflows/install-sh.yml
 
+  # install.ps1 ships with every release too, so its tests run here as well.
+  install-ps1:
+    name: install.ps1
+    uses: ./.github/workflows/install-ps1.yml
+
   release:
     name: draft release
-    needs: [check, build, install-sh]
+    needs: [check, build, install-sh, install-ps1]
     if: github.event_name == 'workflow_dispatch' && inputs.release
     runs-on: ubuntu-24.04
     permissions:
@@ -230,10 +236,15 @@ jobs:
       - name: Check the archives, write SHA256SUMS and the notes
         run: bash tools/release/collect.sh "$RUNNER_TEMP/dist" "$RUNNER_TEMP/notes.md"
 
+      # A version with a suffix (0.1.1-rc.1) is a pre-release: never the
+      # latest. A plain version (0.1.1) is a stable release: install.sh
+      # installs the one GitHub marks as the latest, so it must become that
+      # when the owner publishes it.
       - name: Create the draft release
         run: |
+          if [[ "$VERSION" == *-* ]]; then kind=(--prerelease --latest=false); else kind=(); fi
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --draft --prerelease --latest=false --target "$GITHUB_SHA" \
+            --draft "${kind[@]}" --target "$GITHUB_SHA" \
             --title "Marsa $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
             "$RUNNER_TEMP"/dist/*
           {
@@ -249,4 +260,9 @@ jobs:
             echo
             echo "Then read the draft and publish it on GitHub. Upload the signature first:"
             echo "install.sh refuses a release without it on every machine that has minisign."
+            if [[ "$VERSION" != *-* ]]; then
+              echo
+              echo "A stable release: publish it as the latest release (not a pre-release), then check that"
+              echo "https://github.com/$GITHUB_REPOSITORY/releases/latest opens $TAG. install.sh installs that one."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

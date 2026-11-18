@@ -1,0 +1,86 @@
+name: windows-e2e
+
+# The Windows side of the Phase 1 gate (task M4-19h): from the built
+# programs to an open Laravel page over HTTPS that Windows trusts, on a real
+# Windows machine. The job installs a service, writes the hosts file, and
+# adds a root certificate to the machine's store, which is fine here and
+# only here: a runner is thrown away after the job. It is not part of the
+# tests that `cargo nextest` runs.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["task/M4-19*", main]
+    paths:
+      - "crates/helper/**"
+      - "crates/core/src/platform/**"
+      - "crates/core/src/caddy.rs"
+      - "crates/core/src/helper.rs"
+      - "crates/core/src/helper/**"
+      - "crates/core/src/php.rs"
+      - "crates/core/src/doctor.rs"
+      - "crates/core/src/ports.rs"
+      - "crates/app/src/cli/doctor.rs"
+      - "crates/app/src/daemon/**"
+      - "crates/app/src/cli/setup.rs"
+      - "crates/app/src/cli/uninstall_all.rs"
+      - "crates/shim/**"
+      - "tools/e2e/windows.ps1"
+      - ".github/workflows/windows-e2e.yml"
+
+# Read-only on purpose: the job never writes to the repository.
+permissions:
+  contents: read
+
+# A new run on the same branch cancels the older one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e:
+    name: windows-2025
+    # Pinned, not windows-latest: the run is evidence for one system.
+    runs-on: windows-2025
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+
+      # Reads the pinned version from rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-e2e
+
+      - name: Build marsa, marsad, and marsa-helper
+        run: cargo build --release -p marsa -p marsa-helper
+
+      # Built alone: workspace feature unification would drag tokio into the
+      # shim (architecture.md section 3).
+      - name: Build the shim
+        run: cargo build --release -p marsa-shim
+
+      - name: End to end
+        shell: pwsh
+        # Each wait in the script has its own limit; this one ends a hang
+        # that none of them covers.
+        timeout-minutes: 45
+        env:
+          # Composer downloads packages from GitHub. With the job's own
+          # read-only token it is not held back by the anonymous rate limit.
+          COMPOSER_AUTH: '{"github-oauth": {"github.com": "${{ github.token }}"}}'
+        run: ./tools/e2e/windows.ps1
+
+      # Logs only, copied there by the script after a failure.
+      # `run\daemon.json` holds the daemon token and is never uploaded.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: marsa-logs-windows-2025
+          path: ${{ runner.temp }}/marsa-logs
+          if-no-files-found: ignore

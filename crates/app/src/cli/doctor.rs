@@ -5,8 +5,10 @@
 //! | --- | --- |
 //! | `marsad` answers `/v1/health` | it does not |
 //! | PHP and Caddy are installed, with a default PHP | one is missing |
+//! | the Microsoft Visual C++ runtime PHP needs (Windows, ADR 0019) | Windows reports none, or one older than 14.44 |
 //! | Caddy runs | it does not |
-//! | `doctor-<hex>.test` resolves to `127.0.0.1` (macOS) | it does not, or to another address |
+//! | `doctor-<hex>.test` resolves to `127.0.0.1` (macOS, and Linux on the `marsa0` link) | it does not, or to another address |
+//! | every site has its line in Marsa's block of `/etc/hosts` (Linux on the hosts way) | one has none, or the block is gone |
 //! | ports 80 and 443 reach Caddy (macOS) | another program holds one, or one misses Caddy |
 //! | Marsa's CA is trusted (macOS) | it is not |
 //! | `shims/` is in `PATH` before any other `php` | it is not |
@@ -25,7 +27,15 @@
 //! with the greeting of Marsa's Caddy, and, once a site is secure,
 //! `127.0.0.1:443` takes a connection. Nothing listens on 80 or 443 then, so
 //! only the `pf` redirect (ADR 0008) can answer there.
+//!
+//! On Linux the `.test` check follows the way setup took (ADR 0014, task
+//! M4-18k3). Where this data folder's setup wrote Marsa's block in
+//! `/etc/hosts` (the marker `<data>/hosts-block`), each site needs its line
+//! there; a random name never resolves on that way. Elsewhere the random
+//! name goes through systemd-resolved and the `marsa0` link. Ports and
+//! trust have no Linux check yet.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -36,9 +46,10 @@ use marsa_core::client::{ClientError, DaemonClient};
 use marsa_core::config::{self, ConfigPaths};
 use marsa_core::doctor::{self, Check, Installed, Pass, Ports, Problem, Skip, Verdict};
 use marsa_core::platform::probe;
+use marsa_core::ports;
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::{Runtime, RuntimesDir};
-use marsa_core::types::{Health, ServiceState};
+use marsa_core::types::{Health, PortHolder, ServiceState, Site};
 use tokio_util::sync::CancellationToken;
 
 use super::daemon::{ClientFailure, failure};
@@ -46,7 +57,7 @@ use super::setup::port_held;
 use super::sites::printable;
 use super::strings::{self, Details};
 use crate::daemon::caddy::CADDY_ID;
-use crate::daemon::setup_api::{RealRunner, Setup, user_trust};
+use crate::daemon::setup_api::{RealRunner, Setup, linux_dns, user_trust};
 
 /// How long the system resolver may take for the `.test` name.
 const DNS_LIMIT: Duration = Duration::from_secs(5);
@@ -62,14 +73,19 @@ struct FromDaemon {
     /// Its health and port, or the code of the client error.
     health: Result<(Health, u16), String>,
     caddy: Option<ServiceState>,
+    /// Caddy's PID, while it runs.
+    caddy_pid: Option<u32>,
     /// Whether any site is secure. `None` if not known.
     secure_site: Option<bool>,
+    /// The host names of the sites. `None` if not known.
+    site_names: Option<Vec<String>>,
 }
 
 /// Runs the checks in order and prints each line as soon as it is known.
 pub async fn run(data_dir: &Path) -> ExitCode {
     let platform = Platform::current();
     let macos = matches!(platform, Some(Platform::DarwinArm64 | Platform::DarwinX64));
+    let linux = matches!(platform, Some(Platform::LinuxX64 | Platform::LinuxArm64));
     let windows = platform == Some(Platform::WindowsX64);
     let mut failed = false;
     let mut show = |check: Check, verdict: Verdict| {
@@ -86,11 +102,20 @@ pub async fn run(data_dir: &Path) -> ExitCode {
         .as_ref()
         .is_ok_and(|found| !found.is_empty());
     show(Check::Runtimes, doctor::runtimes(&installed));
+    // The official PHP for Windows needs Microsoft's runtime (ADR 0019).
+    if windows {
+        show(Check::VcRuntime, doctor::vc_runtime(vc_runtime_version()));
+        // PHP trusts the bundle marsad builds from Windows' store.
+        show(
+            Check::SystemRoots,
+            doctor::system_roots(roots_facts(data_dir)),
+        );
+    }
     let caddy = daemon.caddy.as_ref();
     show(Check::Caddy, doctor::caddy(running, caddy, caddy_installed));
     // The checks of the redirect, the resolver file, and the user's trust
     // are macOS ones (ADR 0008, ADR 0015). Linux and Windows set these up
-    // in other ways, which have no check yet.
+    // in other ways, each with checks of its own.
     if macos {
         let name = doctor::probe_name(probe::random());
         show(Check::Dns, dns(&name, running));
@@ -98,6 +123,23 @@ pub async fn run(data_dir: &Path) -> ExitCode {
         let facts = ports(&name, caddy_running, daemon.secure_site);
         show(Check::Ports, doctor::ports(facts));
         show(Check::Trust, trust(data_dir));
+    } else if linux {
+        let names = daemon.site_names.as_deref();
+        show(Check::Dns, linux_names(data_dir, running, names));
+        for check in [Check::Ports, Check::Trust] {
+            show(check, Verdict::Skip(Skip::NotOnThisSystem));
+        }
+    } else if windows {
+        let names = daemon.site_names.as_deref();
+        let block = linux_dns::read_block(&windows_system32().join(r"drivers\etc\hosts"));
+        show(Check::Dns, doctor::hosts(block.as_ref(), names));
+        let caddy_running = caddy == Some(&ServiceState::Running);
+        let caddy = running.then(|| daemon.caddy_pid.filter(|_| caddy_running));
+        show(
+            Check::Ports,
+            doctor::windows_ports(windows_port_holders(), caddy),
+        );
+        show(Check::Trust, windows_trust(data_dir));
     } else {
         for check in [Check::Dns, Check::Ports, Check::Trust] {
             show(check, Verdict::Skip(Skip::NotOnThisSystem));
@@ -118,7 +160,9 @@ async fn ask_daemon(data_dir: &Path) -> FromDaemon {
     let down = |err: ClientError| FromDaemon {
         health: Err(failure(&err, data_dir, None).code),
         caddy: None,
+        caddy_pid: None,
         secure_site: None,
+        site_names: None,
     };
     let client = match DaemonClient::connect(data_dir) {
         Ok(client) => client,
@@ -128,15 +172,21 @@ async fn ask_daemon(data_dir: &Path) -> FromDaemon {
         Ok(health) => health,
         Err(err) => return down(err),
     };
-    let caddy = answer(client.services().await, data_dir)
-        .and_then(|services| services.into_iter().find(|service| service.id == CADDY_ID))
-        .map(|service| service.state);
-    let secure_site = answer(client.sites().await, data_dir)
+    let caddy_status = answer(client.services().await, data_dir)
+        .and_then(|services| services.into_iter().find(|service| service.id == CADDY_ID));
+    let caddy_pid = caddy_status.as_ref().and_then(|service| service.pid);
+    let caddy = caddy_status.map(|service| service.state);
+    let sites = answer(client.sites().await, data_dir);
+    let secure_site = sites
+        .as_ref()
         .map(|list| list.sites.iter().any(|site| site.secure));
+    let site_names = sites.map(|list| list.sites.iter().map(Site::host).collect());
     FromDaemon {
         health: Ok((health, client.port())),
         caddy,
+        caddy_pid,
         secure_site,
+        site_names,
     }
 }
 
@@ -161,6 +211,21 @@ fn installed(data_dir: &Path) -> Installed {
             .map(|global| global.php.default)
             .map_err(|err| err.code().to_owned()),
     }
+}
+
+/// Linux: the hosts file where this data folder's setup wrote Marsa's
+/// block, else a random name through the `marsa0` link. Reads only: the
+/// marker, and `/etc/hosts`, which every user may read.
+fn linux_names(data_dir: &Path, running: bool, sites: Option<&[String]>) -> Verdict {
+    if linux_dns::marker(data_dir).is_file() {
+        let block = linux_dns::read_block(Path::new(linux_dns::HOSTS_FILE));
+        return doctor::hosts(block.as_ref(), sites);
+    }
+    let name = doctor::probe_name(probe::random());
+    let answer = probe::resolve(&name, DNS_LIMIT)
+        .map_err(|err| tracing::debug!(name, error = %err, "the .test name did not resolve"))
+        .ok();
+    doctor::link(running, answer.as_deref())
 }
 
 fn dns(name: &str, running: bool) -> Verdict {
@@ -228,11 +293,132 @@ fn log_path(data_dir: &Path) -> PathBuf {
     data_dir.join("logs").join("marsad.log")
 }
 
+/// The roots Windows trusts now, read as marsad reads them, and PHP's CA
+/// bundle with its age.
+fn roots_facts(data_dir: &Path) -> doctor::RootsFacts {
+    let path = CaddyPaths::in_dir(data_dir).ca_bundle();
+    let bundle = std::fs::read_to_string(&path).ok().map(|text| {
+        let age = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|written| written.elapsed().ok())
+            .map_or(0, |age| age.as_secs() / 86_400);
+        (text, age)
+    });
+    let marsa_root = std::fs::read_to_string(CaddyPaths::in_dir(data_dir).ca_root()).ok();
+    doctor::RootsFacts {
+        windows: windows_roots(),
+        bundle,
+        marsa_root,
+    }
+}
+
+/// The roots Windows trusts for HTTPS, and how many others the store holds;
+/// never asked for elsewhere.
+fn windows_roots() -> Result<(Vec<Vec<u8>>, usize), String> {
+    // `#[cfg]` outside `platform`: the certificate store is Windows'.
+    #[cfg(windows)]
+    return marsa_core::platform::windows::root_certificates()
+        .map(|roots| (roots.trusted, roots.left_out))
+        .map_err(|err| err.to_string());
+    #[cfg(not(windows))]
+    Err("not Windows".to_owned())
+}
+
+/// Windows' `System32` folder, from `SystemRoot`, which Windows sets for every
+/// process (task M4-19o).
+fn windows_system32() -> PathBuf {
+    let root =
+        std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    root.join("System32")
+}
+
+/// Windows: who listens on 80 and 443, from `netstat -ano`, each named by
+/// `tasklist`. Both run from `System32`, with no shell. `None` if netstat
+/// could not run or listed no listener.
+fn windows_port_holders() -> Option<Vec<PortHolder>> {
+    let system = windows_system32();
+    let netstat = std::process::Command::new(system.join("NETSTAT.EXE"))
+        .arg("-ano")
+        .output()
+        .map_err(|err| tracing::debug!(error = %err, "cannot run netstat"))
+        .ok()
+        .filter(|output| output.status.success())?;
+    let listeners = ports::parse_netstat_windows(&String::from_utf8_lossy(&netstat.stdout));
+    if listeners.is_empty() {
+        return None;
+    }
+    let mut names: BTreeMap<u32, Option<String>> = BTreeMap::new();
+    let mut name_of = |pid: u32| {
+        names
+            .entry(pid)
+            .or_insert_with(|| {
+                let filter = format!("PID eq {pid}");
+                std::process::Command::new(system.join("tasklist.exe"))
+                    .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
+                    .output()
+                    .ok()
+                    .and_then(|out| ports::parse_tasklist(&String::from_utf8_lossy(&out.stdout)))
+            })
+            .clone()
+    };
+    let mut holders = [80, 443]
+        .into_iter()
+        .flat_map(|port| ports::holders(&listeners, port))
+        .map(|listener| {
+            let process = listener.pid.and_then(&mut name_of);
+            let app = process
+                .as_deref()
+                .and_then(ports::known_app)
+                .map(str::to_owned);
+            PortHolder {
+                port: listener.port,
+                address: listener.address.clone(),
+                process,
+                pid: listener.pid,
+                user: None,
+                command: None,
+                app,
+            }
+        })
+        .collect::<Vec<_>>();
+    // One line per program and port: System holds 80 on IPv4 and IPv6.
+    holders.dedup_by_key(|holder| (holder.port, holder.pid));
+    Some(holders)
+}
+
+/// Windows: whether Marsa's CA root is among the roots Windows trusts, read
+/// as for PHP's bundle (setup puts it in `LocalMachine\Root`).
+fn windows_trust(data_dir: &Path) -> Verdict {
+    let root = std::fs::read_to_string(CaddyPaths::in_dir(data_dir).ca_root()).ok();
+    let want = root
+        .as_deref()
+        .and_then(marsa_core::helper::certificate_sha256);
+    let trusted = windows_roots().ok().map(|(ders, _)| {
+        want.as_ref().is_some_and(|want| {
+            ders.iter().any(|der| {
+                let pem = marsa_core::caddy::pem_certificates(std::slice::from_ref(der));
+                marsa_core::helper::certificate_sha256(&pem).as_ref() == Some(want)
+            })
+        })
+    });
+    doctor::trust(root.is_some(), trusted)
+}
+
+/// The Visual C++ runtime that Windows reports; none elsewhere.
+fn vc_runtime_version() -> Option<(u32, u32, u32)> {
+    // `#[cfg]` outside `platform`: the registry is Windows'.
+    #[cfg(windows)]
+    return marsa_core::platform::windows::vc_runtime_version();
+    #[cfg(not(windows))]
+    None
+}
+
 /// The line of one check. `windows`: the PATH fixes speak of the user's
 /// PATH setting, not of `~/.zshrc`.
 pub fn render(check: Check, verdict: &Verdict, data_dir: &Path, windows: bool) -> String {
     match verdict {
-        Verdict::Pass(pass) => strings::doctor_pass(&passed(pass, data_dir)),
+        Verdict::Pass(pass) => strings::doctor_pass(&passed(pass, data_dir, windows)),
         Verdict::Fail(problem) => {
             let (text, fix) = problem_text(problem, data_dir, windows);
             strings::doctor_fail(&text, &fix)
@@ -241,7 +427,7 @@ pub fn render(check: Check, verdict: &Verdict, data_dir: &Path, windows: bool) -
     }
 }
 
-fn passed(pass: &Pass, data_dir: &Path) -> String {
+fn passed(pass: &Pass, data_dir: &Path, windows: bool) -> String {
     match pass {
         Pass::Daemon { version, pid, port } => {
             strings::daemon_running(&printable(version), *pid, *port)
@@ -249,8 +435,17 @@ fn passed(pass: &Pass, data_dir: &Path) -> String {
         Pass::Runtimes { default, version } => {
             strings::doctor_runtimes_ok(&printable(default), &version.to_string())
         }
+        Pass::VcRuntime { version } => strings::doctor_vc_runtime_ok(&printable(version)),
+        Pass::SystemRoots {
+            count,
+            left_out,
+            marsa,
+            age_days,
+        } => strings::doctor_system_roots_ok(*count, *left_out, *marsa, *age_days),
         Pass::Caddy => strings::DOCTOR_CADDY_OK.to_owned(),
         Pass::Dns => strings::DOCTOR_DNS_OK.to_owned(),
+        Pass::Hosts if windows => strings::DOCTOR_HOSTS_OK_WINDOWS.to_owned(),
+        Pass::Hosts => strings::DOCTOR_HOSTS_OK.to_owned(),
         Pass::Ports => strings::DOCTOR_PORTS_OK.to_owned(),
         Pass::Trust => strings::DOCTOR_TRUST_OK.to_owned(),
         Pass::Path => strings::DOCTOR_PATH_OK.to_owned(),
@@ -303,6 +498,21 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
             ClientFailure::new(code, data_dir, Some(CADDY_ID)).message,
         ),
         Problem::DnsNoAnswer => pair(strings::DOCTOR_DNS_NO_ANSWER, strings::DOCTOR_DNS_SETUP),
+        Problem::LinkNoAnswer => pair(strings::DOCTOR_DNS_NO_ANSWER, strings::DOCTOR_LINK_SETUP),
+        Problem::HostsMissing { names } => {
+            let names: Vec<String> = names.iter().map(|name| printable(name)).collect();
+            let fix = if windows {
+                strings::DOCTOR_HOSTS_SYNC_WINDOWS
+            } else {
+                strings::DOCTOR_HOSTS_SETUP
+            };
+            (strings::doctor_hosts_missing(&names), fix.to_owned())
+        }
+        Problem::HostsBlockGone if windows => pair(
+            strings::DOCTOR_HOSTS_GONE_WINDOWS,
+            strings::DOCTOR_HOSTS_BACK_WINDOWS,
+        ),
+        Problem::HostsBlockGone => pair(strings::DOCTOR_HOSTS_GONE, strings::DOCTOR_HOSTS_BACK),
         Problem::DnsWrongAddress { addresses } => {
             let list: Vec<String> = addresses.iter().map(ToString::to_string).collect();
             (
@@ -316,13 +526,43 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
                 text.push_str("\n  ");
                 text.push_str(&port_held(holder));
             }
-            (text, strings::DOCTOR_FREE_PORTS.to_owned())
+            let fix = if windows {
+                strings::DOCTOR_FREE_PORTS_WINDOWS
+            } else {
+                strings::DOCTOR_FREE_PORTS
+            };
+            (text, fix.to_owned())
         }
-        Problem::PortsNotRouted { ports } => (
-            strings::doctor_ports_not_routed(ports),
-            strings::DOCTOR_PORTS_SETUP.to_owned(),
+        Problem::PortsNotRouted { ports } => {
+            let fix = if windows {
+                strings::DOCTOR_CADDY_PORTS_WINDOWS
+            } else {
+                strings::DOCTOR_PORTS_SETUP
+            };
+            (strings::doctor_ports_not_routed(ports), fix.to_owned())
+        }
+        Problem::CaUntrusted if windows => pair(
+            strings::DOCTOR_UNTRUSTED,
+            strings::DOCTOR_TRUST_SETUP_WINDOWS,
         ),
         Problem::CaUntrusted => pair(strings::DOCTOR_UNTRUSTED, strings::DOCTOR_TRUST_SETUP),
+        Problem::VcRuntimeMissing => pair(strings::DOCTOR_VC_MISSING, strings::DOCTOR_VC_INSTALL),
+        Problem::VcRuntimeOld { found } => (
+            strings::doctor_vc_old(&printable(found)),
+            strings::DOCTOR_VC_INSTALL.to_owned(),
+        ),
+        Problem::SystemRootsUnreadable { error } => (
+            strings::doctor_system_roots_unreadable(&printable(error)),
+            strings::DOCTOR_SYSTEM_ROOTS_FIX.to_owned(),
+        ),
+        Problem::SystemRootsEmpty => pair(
+            strings::DOCTOR_SYSTEM_ROOTS_EMPTY,
+            strings::DOCTOR_SYSTEM_ROOTS_FIX,
+        ),
+        Problem::SystemRootsMissing { missing } => (
+            strings::doctor_system_roots_missing(*missing),
+            strings::DOCTOR_SYSTEM_ROOTS_RESTART.to_owned(),
+        ),
         Problem::ShimsNotInPath { shims } => (
             strings::doctor_shims_missing(shims),
             strings::doctor_add_shims(shims, windows),
@@ -382,6 +622,41 @@ mod tests {
                 log_path(&data).display()
             )
         );
+    }
+
+    /// Linux (task M4-18k3): the hosts way and the `marsa0` link.
+    #[test]
+    fn linux_says_how_its_names_resolve_and_how_to_fix_them() {
+        let pass = render(Check::Dns, &Verdict::Pass(Pass::Hosts), &data(), false);
+        assert_eq!(pass, "✓ Every site has its line in /etc/hosts.");
+        let names =
+            |count: usize| -> Vec<String> { (1..=count).map(|i| format!("s{i}.test")).collect() };
+        assert_eq!(
+            fail(Problem::HostsMissing { names: names(1) }),
+            "✗ s1.test is not in /etc/hosts yet, so it does not open.\n  Fix: Run \"marsa \
+             setup\" to add them, with one password prompt. From then on \"marsa park\" and \
+             \"marsa link\" add new sites themselves; a site that appears in a parked folder \
+             waits for one of these commands."
+        );
+        let many = fail(Problem::HostsMissing { names: names(7) });
+        assert!(
+            many.starts_with(
+                "✗ s1.test, s2.test, s3.test, s4.test, s5.test, and 2 more are not in /etc/hosts"
+            ),
+            "{many}"
+        );
+        let gone = fail(Problem::HostsBlockGone);
+        assert!(
+            gone.starts_with("✗ Marsa's lines are gone from /etc/hosts"),
+            "{gone}"
+        );
+        assert!(
+            gone.contains("Fix: Run \"marsa setup\" to put them back."),
+            "{gone}"
+        );
+        let link = fail(Problem::LinkNoAnswer);
+        assert!(link.contains("resolvectl status marsa0"), "{link}");
+        assert!(!link.contains("/etc/resolver"), "{link}");
     }
 
     #[test]
@@ -557,5 +832,135 @@ mod tests {
             "- Marsa's certificate authority: not checked. It does not exist yet: Caddy makes \
              it when it first starts. Run \"marsa setup\" to make it and trust it."
         );
+    }
+
+    /// Windows (task M4-19o): the hosts, ports, and trust lines speak of
+    /// Windows, not of /etc/hosts, pf, or the Mac's dialog.
+    #[test]
+    fn windows_system_lines_name_windows_fixes() {
+        let data = data();
+        let text = render(Check::Dns, &Verdict::Pass(Pass::Hosts), &data, true);
+        assert_eq!(text, "✓ Every site has its line in the hosts file.");
+        let missing = Verdict::Fail(Problem::HostsMissing {
+            names: vec!["shop.test".to_owned()],
+        });
+        let text = render(Check::Dns, &missing, &data, true);
+        assert!(
+            text.contains("helper service") && !text.contains("password"),
+            "{text}"
+        );
+        let gone = render(
+            Check::Dns,
+            &Verdict::Fail(Problem::HostsBlockGone),
+            &data,
+            true,
+        );
+        assert!(
+            !gone.contains("/etc/hosts") && gone.contains("marsa setup"),
+            "{gone}"
+        );
+        let iis = PortHolder {
+            port: 80,
+            address: "0.0.0.0".to_owned(),
+            process: Some("System".to_owned()),
+            pid: Some(4),
+            user: None,
+            command: None,
+            app: None,
+        };
+        let held = Verdict::Fail(Problem::PortsHeld { holders: vec![iis] });
+        let text = render(Check::Ports, &held, &data, true);
+        assert!(
+            text.contains("System (PID 4)") && text.contains("W3SVC"),
+            "{text}"
+        );
+        let quiet = Verdict::Fail(Problem::PortsNotRouted { ports: vec![80] });
+        let text = render(Check::Ports, &quiet, &data, true);
+        assert!(text.contains("marsa logs caddy"), "{text}");
+        let untrusted = render(
+            Check::Trust,
+            &Verdict::Fail(Problem::CaUntrusted),
+            &data,
+            true,
+        );
+        assert!(
+            untrusted.contains("UAC") && !untrusted.contains("Mac"),
+            "{untrusted}"
+        );
+        // macOS keeps its own lines.
+        let mac = render(
+            Check::Trust,
+            &Verdict::Fail(Problem::CaUntrusted),
+            &data,
+            false,
+        );
+        assert!(mac.contains("Mac"), "{mac}");
+    }
+
+    /// Windows: the roots' lines, with the count and the cause.
+    #[test]
+    fn the_windows_roots_lines_name_the_count_and_the_cause() {
+        let data = data();
+        let pass = Verdict::Pass(Pass::SystemRoots {
+            count: 57,
+            left_out: 4,
+            marsa: true,
+            age_days: 0,
+        });
+        let text = render(Check::SystemRoots, &pass, &data, true);
+        assert!(text.starts_with("✓") && text.contains("57"), "{text}");
+        assert!(
+            text.contains("today") && text.contains("and Marsa's CA"),
+            "{text}"
+        );
+        let before = Verdict::Pass(Pass::SystemRoots {
+            count: 57,
+            left_out: 4,
+            marsa: false,
+            age_days: 2,
+        });
+        let text = render(Check::SystemRoots, &before, &data, true);
+        assert!(
+            text.contains("not made yet") && text.contains("2 days ago"),
+            "{text}"
+        );
+        for (problem, part) in [
+            (
+                Problem::SystemRootsUnreadable {
+                    error: "access denied".to_owned(),
+                },
+                "access denied",
+            ),
+            (Problem::SystemRootsEmpty, "no roots"),
+            (Problem::SystemRootsMissing { missing: 2 }, "2 roots"),
+        ] {
+            let text = render(Check::SystemRoots, &Verdict::Fail(problem), &data, true);
+            assert!(text.starts_with("✗") && text.contains(part), "{text}");
+            assert!(text.contains("Fix:"), "{text}");
+        }
+    }
+
+    /// Windows: the runtime's lines, with Microsoft's link in the fix.
+    #[test]
+    fn the_vc_runtime_lines_name_the_version_and_the_link() {
+        let data = data();
+        let pass = Verdict::Pass(Pass::VcRuntime {
+            version: "14.44.35211".to_owned(),
+        });
+        let text = render(Check::VcRuntime, &pass, &data, true);
+        assert!(text.contains("14.44.35211"), "{text}");
+        for problem in [
+            Problem::VcRuntimeMissing,
+            Problem::VcRuntimeOld {
+                found: "14.29.30133".to_owned(),
+            },
+        ] {
+            let text = render(Check::VcRuntime, &Verdict::Fail(problem), &data, true);
+            assert!(
+                text.contains("https://aka.ms/vs/17/release/vc_redist.x64.exe"),
+                "{text}"
+            );
+            assert!(text.contains("Fix:"), "{text}");
+        }
     }
 }

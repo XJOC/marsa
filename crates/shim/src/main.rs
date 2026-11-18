@@ -18,6 +18,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use marsa_core::config::{self, ConfigPaths};
+use marsa_core::recipes::Platform;
 use marsa_core::resolver::{self, Tool};
 use marsa_core::runtimes::{Runtime, RuntimesDir};
 use semver::Version;
@@ -36,7 +37,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// Never returns `Ok`: on success the process has become the real program.
+/// Never returns `Ok`: on success the process has become the real program
+/// (Unix), or has exited with the real program's code (Windows).
 /// The cheapest steps come first.
 fn run() -> Result<Infallible, ShimError> {
     let depth = depth::parse(env::var_os(depth::VAR).as_deref());
@@ -45,7 +47,7 @@ fn run() -> Result<Infallible, ShimError> {
     // `args_os`, not `args`: arguments may not be UTF-8, and `args` panics on them.
     let mut args = env::args_os();
     let argv0 = args.next().unwrap_or_default();
-    let name = ShimName::from_argv0(&argv0).ok_or(ShimError::UnknownName { name: argv0 })?;
+    let name = sys::own_name(&argv0).ok_or(ShimError::UnknownName { name: argv0 })?;
 
     // The physical path: symlinks resolved, letter case as on disk. `$PWD` is
     // not read.
@@ -61,7 +63,8 @@ fn run() -> Result<Infallible, ShimError> {
         _ => None,
     };
 
-    let mut plan = Plan::new(name, &runtimes, &version, composer.as_ref(), args)?;
+    let platform = Platform::current().ok_or(ShimError::UnsupportedPlatform)?;
+    let mut plan = Plan::new(name, platform, &runtimes, &version, composer.as_ref(), args)?;
     plan.check()?;
     plan.trust = trust_env(TrustVar::for_shim(name, &data_dir, &version));
     Err(sys::exec(plan.command(depth)))

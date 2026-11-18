@@ -8,12 +8,13 @@
 //! `marsa-gui [--data-dir <PATH>]`, see [`startup`]. Only one window runs per
 //! data folder: a second one exits at once (task M5-04).
 
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 
 use anyhow::Context as _;
 use eframe::egui;
-use marsa_gui::{app, bridge, startup, strings};
+use marsa_gui::{app, bridge, startup, strings, theme};
 
 fn main() -> ExitCode {
     let started = Instant::now();
@@ -37,12 +38,12 @@ fn run(started: Instant) -> anyhow::Result<()> {
         return Ok(());
     };
     // Connecting starts now, while the window opens.
-    let bridge = bridge::start(data_dir.clone()).context("cannot start the bridge thread")?;
+    let bridge = start_bridge(&data_dir)?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(strings::APP_NAME)
-            .with_inner_size(strings::WINDOW_SIZE)
-            .with_min_inner_size(strings::WINDOW_MIN_SIZE),
+            .with_inner_size(window_size())
+            .with_min_inner_size(theme::SIZE.window_min),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
@@ -55,4 +56,26 @@ fn run(started: Instant) -> anyhow::Result<()> {
         }),
     )
     .map_err(|err| anyhow::anyhow!("cannot open the window: {err}"))
+}
+
+/// Starts the bridge to the daemon.
+fn start_bridge(data_dir: &Path) -> anyhow::Result<bridge::Handle> {
+    // Debug builds only: the design review's demo draws fixed data and
+    // starts no daemon (see `demo`).
+    #[cfg(debug_assertions)]
+    if marsa_gui::demo::requested().is_some() {
+        return Ok(bridge::Handle::detached());
+    }
+    bridge::start(data_dir.to_path_buf()).context("cannot start the bridge thread")
+}
+
+/// The size the window opens at.
+fn window_size() -> egui::Vec2 {
+    // Debug builds only: `MARSA_GUI_SIZE` for the design-review pictures
+    // (see `screenshot`).
+    #[cfg(debug_assertions)]
+    if let Some(size) = marsa_gui::screenshot::size() {
+        return size;
+    }
+    theme::SIZE.window
 }

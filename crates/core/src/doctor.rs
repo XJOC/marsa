@@ -8,6 +8,7 @@
 //! itself, so the tests run no program and open no socket. The text of each
 //! verdict is in the CLI's strings module (AGENTS.md section 9).
 
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,11 @@ use crate::types::{Health, PortHolder, ServiceState};
 pub enum Check {
     Daemon,
     Runtimes,
+    /// Windows only: the Microsoft Visual C++ runtime PHP needs (ADR 0019).
+    VcRuntime,
+    /// Windows only: the roots PHP's curl trusts, from Windows' store
+    /// (task M4-19n).
+    SystemRoots,
     Caddy,
     Dns,
     Ports,
@@ -55,8 +61,23 @@ pub enum Pass {
         default: String,
         version: Version,
     },
+    /// The installed runtime's version, `14.44.35211`.
+    VcRuntime {
+        version: String,
+    },
+    /// PHP's CA bundle holds every root Windows trusts for HTTPS now:
+    /// `count` of them, with `left_out` others of the store left out, and
+    /// Marsa's CA when `marsa`; the bundle was written `age_days` ago.
+    SystemRoots {
+        count: usize,
+        left_out: usize,
+        marsa: bool,
+        age_days: u64,
+    },
     Caddy,
     Dns,
+    /// Linux on the hosts way: every site has its line in the hosts file.
+    Hosts,
     Ports,
     Trust,
     Path,
@@ -99,9 +120,21 @@ pub enum Problem {
         code: String,
     },
     DnsNoAnswer,
+    /// Linux on the `marsa0` link: a `.test` name did not resolve. Its fix
+    /// names the link, not macOS's resolver file.
+    LinkNoAnswer,
     DnsWrongAddress {
         addresses: Vec<IpAddr>,
     },
+    /// Linux on the hosts way: the sites whose names are not in Marsa's
+    /// block yet, sorted (task M4-18k3).
+    HostsMissing {
+        names: Vec<String>,
+    },
+    /// Linux: this data folder's setup wrote Marsa's block in the hosts
+    /// file, and it is gone. Another program may have written the file
+    /// again (WSL and cloud-init do at boot).
+    HostsBlockGone,
     PortsHeld {
         holders: Vec<PortHolder>,
     },
@@ -110,6 +143,25 @@ pub enum Problem {
         ports: Vec<u16>,
     },
     CaUntrusted,
+    /// Windows: no Microsoft Visual C++ runtime (x64), so the official PHP
+    /// does not start.
+    VcRuntimeMissing,
+    /// Windows: a runtime older than [`VC_RUNTIME_MIN`]: PHP 8.4 and 8.5
+    /// need a newer one.
+    VcRuntimeOld {
+        found: String,
+    },
+    /// Windows: Marsa cannot read the roots Windows trusts, so PHP trusts
+    /// only Marsa's CA, and its HTTPS calls to the internet fail.
+    SystemRootsUnreadable {
+        error: String,
+    },
+    /// Windows: the store gave no root for HTTPS, with the same effect.
+    SystemRootsEmpty,
+    /// Windows: roots Windows trusts now are not in PHP's CA bundle yet.
+    SystemRootsMissing {
+        missing: usize,
+    },
     ShimsNotInPath {
         shims: PathBuf,
     },
@@ -127,13 +179,16 @@ pub enum Problem {
 /// Why a check did not run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
-    /// Marsa has no such check on this system yet (only macOS for now).
+    /// Marsa has no such check on this system yet: ports and trust on
+    /// Linux.
     NotOnThisSystem,
     NeedsDaemon,
     NeedsCaddy,
     CaddyNotInstalled,
     /// No CA yet: Caddy makes it when it first starts (task M5-15).
     NoCa,
+    /// Windows: no CA bundle for PHP yet; marsad writes it when it starts.
+    NoBundle,
     NoLog,
     /// The check could not get its facts (`netstat` or `security` failed,
     /// the daemon gave no answer). The log says why.
@@ -182,6 +237,73 @@ pub fn daemon(answer: Result<(Health, u16), String>) -> Verdict {
             fail(Problem::DaemonNotRunning)
         }
         Err(code) => fail(Problem::DaemonError { code }),
+    }
+}
+
+/// The oldest Visual C++ runtime the official PHP builds run on: 8.4 and
+/// 8.5 are built with MSVC 14.44, and Microsoft asks for a runtime of the
+/// same version or later (ADR 0019). Raise it when `recipes/pins.toml`
+/// moves to PHP built with a newer MSVC (vs18 is 14.5x): `doctor` would
+/// pass on an older runtime that PHP fails on.
+pub const VC_RUNTIME_MIN: (u32, u32) = (14, 44);
+
+/// Windows: the facts of the check of PHP's CA bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootsFacts {
+    /// The DER of each root Windows trusts for HTTPS now, and how many other
+    /// roots the store holds; or why the store could not be read.
+    pub windows: Result<(Vec<Vec<u8>>, usize), String>,
+    /// The bundle marsad wrote, and its age in days; `None` when there is
+    /// none.
+    pub bundle: Option<(String, u64)>,
+    /// Marsa's root certificate, once Caddy has made it.
+    pub marsa_root: Option<String>,
+}
+
+/// Windows: whether PHP's CA bundle holds every root that Windows trusts for
+/// HTTPS now (ADR 0020). The roots are read here again, the same way marsad
+/// reads them, and each must be in the bundle, so an old bundle that is
+/// still complete passes. An empty store fails: every Windows has roots.
+pub fn system_roots(facts: RootsFacts) -> Verdict {
+    let (roots, left_out) = match facts.windows {
+        Err(error) => return Verdict::Fail(Problem::SystemRootsUnreadable { error }),
+        Ok((roots, _)) if roots.is_empty() => return Verdict::Fail(Problem::SystemRootsEmpty),
+        Ok(found) => found,
+    };
+    let Some((bundle, age_days)) = facts.bundle else {
+        return Verdict::Skip(Skip::NoBundle);
+    };
+    let missing = roots
+        .iter()
+        .filter(|der| !bundle.contains(&crate::caddy::pem_certificates(std::slice::from_ref(der))))
+        .count();
+    if missing > 0 {
+        return Verdict::Fail(Problem::SystemRootsMissing { missing });
+    }
+    let marsa = facts
+        .marsa_root
+        .is_some_and(|root| !root.trim().is_empty() && bundle.contains(root.trim()));
+    Verdict::Pass(Pass::SystemRoots {
+        count: roots.len(),
+        left_out,
+        marsa,
+        age_days,
+    })
+}
+
+/// Windows: the Visual C++ runtime that Windows reports, `(major, minor,
+/// build)`, or `None` when it reports none.
+pub fn vc_runtime(found: Option<(u32, u32, u32)>) -> Verdict {
+    match found {
+        None => Verdict::Fail(Problem::VcRuntimeMissing),
+        Some((major, minor, build)) => {
+            let version = format!("{major}.{minor}.{build}");
+            if (major, minor) >= VC_RUNTIME_MIN {
+                Verdict::Pass(Pass::VcRuntime { version })
+            } else {
+                Verdict::Fail(Problem::VcRuntimeOld { found: version })
+            }
+        }
     }
 }
 
@@ -268,6 +390,38 @@ pub fn dns(daemon_running: bool, answer: Option<&[IpAddr]>) -> Verdict {
     }
 }
 
+/// Linux on the `marsa0` link: [`dns`], with the link's own fix.
+pub fn link(daemon_running: bool, answer: Option<&[IpAddr]>) -> Verdict {
+    match dns(daemon_running, answer) {
+        Verdict::Fail(Problem::DnsNoAnswer) => fail(Problem::LinkNoAnswer),
+        verdict => verdict,
+    }
+}
+
+/// Linux on the hosts way (ADR 0014, task M4-18k3): `block`, the names in
+/// Marsa's block of the hosts file (`None`: no block); `sites`, the host
+/// names of the sites (`None`: the daemon gave no list). Every site needs
+/// its line; a name in the block that is no site does no harm.
+pub fn hosts(block: Option<&BTreeSet<String>>, sites: Option<&[String]>) -> Verdict {
+    let Some(block) = block else {
+        return fail(Problem::HostsBlockGone);
+    };
+    let Some(sites) = sites else {
+        return Verdict::Skip(Skip::NeedsDaemon);
+    };
+    let mut names: Vec<String> = sites
+        .iter()
+        .filter(|name| !block.contains(*name))
+        .cloned()
+        .collect();
+    if names.is_empty() {
+        return Verdict::Pass(Pass::Hosts);
+    }
+    names.sort();
+    names.dedup();
+    fail(Problem::HostsMissing { names })
+}
+
 /// Ports 80 and 443 reach Marsa's Caddy through the `pf` redirect (ADR
 /// 0008). A program that listens on either fails the check even if the
 /// redirect works: the redirect takes its traffic without a word.
@@ -294,6 +448,32 @@ pub fn ports(facts: Ports) -> Verdict {
         Verdict::Pass(Pass::Ports)
     } else {
         fail(Problem::PortsNotRouted { ports })
+    }
+}
+
+/// Windows: Caddy listens on 80 and 443 itself (task M4-19c), so a holder
+/// fails only when it is not Caddy: IIS, or `System` (PID 4) for another
+/// HTTP.sys server. `caddy`: `None` when the daemon does not run,
+/// `Some(None)` when Caddy does not, else Caddy's PID (task M4-19o).
+pub fn windows_ports(holders: Option<Vec<PortHolder>>, caddy: Option<Option<u32>>) -> Verdict {
+    let Some(holders) = holders else {
+        return Verdict::Skip(Skip::NotChecked);
+    };
+    let caddy_pid = caddy.flatten();
+    let (caddys, others): (Vec<PortHolder>, Vec<PortHolder>) = holders
+        .into_iter()
+        .partition(|holder| caddy_pid.is_some() && holder.pid == caddy_pid);
+    if !others.is_empty() {
+        return fail(Problem::PortsHeld { holders: others });
+    }
+    match caddy {
+        None => Verdict::Skip(Skip::NeedsDaemon),
+        Some(None) => Verdict::Skip(Skip::NeedsCaddy),
+        // Port 80 always: Caddy answers there for every site, secure or not.
+        Some(Some(_)) if caddys.iter().any(|holder| holder.port == 80) => {
+            Verdict::Pass(Pass::Ports)
+        }
+        Some(Some(_)) => fail(Problem::PortsNotRouted { ports: vec![80] }),
     }
 }
 
@@ -739,5 +919,175 @@ mod tests {
         let name = probe_name(u64::MAX);
         let label = name.strip_suffix(".test").unwrap();
         assert!(crate::sites::validate_name(label).is_ok(), "{name}");
+    }
+
+    #[test]
+    fn the_windows_roots_must_all_be_in_phps_bundle() {
+        let roots = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        let all = crate::caddy::ca_bundle_text(&crate::caddy::pem_certificates(&roots), "root");
+        let facts = |windows, bundle| {
+            system_roots(RootsFacts {
+                windows,
+                bundle,
+                marsa_root: Some("root".to_owned()),
+            })
+        };
+        assert_eq!(
+            facts(Ok((roots.clone(), 7)), Some((all.clone(), 3))),
+            Verdict::Pass(Pass::SystemRoots {
+                count: 2,
+                left_out: 7,
+                marsa: true,
+                age_days: 3,
+            })
+        );
+        // Before Caddy makes Marsa's root, the bundle has Windows' alone.
+        let before = system_roots(RootsFacts {
+            windows: Ok((roots.clone(), 0)),
+            bundle: Some((crate::caddy::pem_certificates(&roots), 0)),
+            marsa_root: None,
+        });
+        assert!(
+            matches!(
+                before,
+                Verdict::Pass(Pass::SystemRoots { marsa: false, .. })
+            ),
+            "{before:?}"
+        );
+        let one = crate::caddy::pem_certificates(&roots[..1]);
+        assert_eq!(
+            facts(Ok((roots.clone(), 0)), Some((one, 0))),
+            Verdict::Fail(Problem::SystemRootsMissing { missing: 1 })
+        );
+        assert_eq!(facts(Ok((roots, 0)), None), Verdict::Skip(Skip::NoBundle));
+        assert_eq!(
+            facts(Ok((Vec::new(), 3)), Some((all, 0))),
+            Verdict::Fail(Problem::SystemRootsEmpty)
+        );
+        assert_eq!(
+            facts(Err("access denied".to_owned()), None),
+            Verdict::Fail(Problem::SystemRootsUnreadable {
+                error: "access denied".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn windows_ports_fail_only_for_a_holder_that_is_not_caddy() {
+        let held = |port, pid, name: &str| PortHolder {
+            port,
+            address: "0.0.0.0".to_owned(),
+            process: Some(name.to_owned()),
+            pid: Some(pid),
+            user: None,
+            command: None,
+            app: None,
+        };
+        let caddy = vec![held(80, 5244, "caddy.exe"), held(443, 5244, "caddy.exe")];
+        assert_eq!(
+            windows_ports(Some(caddy.clone()), Some(Some(5244))),
+            Verdict::Pass(Pass::Ports)
+        );
+        let mut with_iis = caddy.clone();
+        with_iis.push(held(80, 4, "System"));
+        assert_eq!(
+            windows_ports(Some(with_iis), Some(Some(5244))),
+            Verdict::Fail(Problem::PortsHeld {
+                holders: vec![held(80, 4, "System")]
+            })
+        );
+        // Caddy stopped: its old PID means nothing, and IIS still fails.
+        assert_eq!(
+            windows_ports(Some(vec![held(80, 4, "System")]), Some(None)),
+            Verdict::Fail(Problem::PortsHeld {
+                holders: vec![held(80, 4, "System")]
+            })
+        );
+        assert_eq!(
+            windows_ports(Some(Vec::new()), Some(None)),
+            Verdict::Skip(Skip::NeedsCaddy)
+        );
+        assert_eq!(
+            windows_ports(Some(Vec::new()), None),
+            Verdict::Skip(Skip::NeedsDaemon)
+        );
+        assert_eq!(
+            windows_ports(Some(vec![held(443, 5244, "caddy.exe")]), Some(Some(5244))),
+            Verdict::Fail(Problem::PortsNotRouted { ports: vec![80] })
+        );
+        assert_eq!(
+            windows_ports(None, Some(Some(5244))),
+            Verdict::Skip(Skip::NotChecked)
+        );
+    }
+
+    #[test]
+    fn the_vc_runtime_must_be_there_and_new_enough() {
+        assert_eq!(vc_runtime(None), Verdict::Fail(Problem::VcRuntimeMissing));
+        let old = Verdict::Fail(Problem::VcRuntimeOld {
+            found: "14.29.30133".to_owned(),
+        });
+        assert_eq!(vc_runtime(Some((14, 29, 30133))), old);
+        let just_below = Verdict::Fail(Problem::VcRuntimeOld {
+            found: "14.43.99".to_owned(),
+        });
+        assert_eq!(vc_runtime(Some((14, 43, 99))), just_below);
+        for (found, shown) in [
+            ((14, 44, 0), "14.44.0"),
+            ((14, 44, 35211), "14.44.35211"),
+            ((14, 52, 0), "14.52.0"),
+        ] {
+            let pass = Verdict::Pass(Pass::VcRuntime {
+                version: shown.to_owned(),
+            });
+            assert_eq!(vc_runtime(Some(found)), pass);
+        }
+    }
+
+    /// Task M4-18k3: the hosts way on Linux.
+    #[test]
+    fn every_site_needs_its_line_in_the_hosts_file() {
+        let set = |names: &[&str]| -> BTreeSet<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let list = |names: &[&str]| -> Vec<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let block = set(&["blog.test", "old.test"]);
+        assert_eq!(
+            hosts(Some(&block), Some(&list(&["blog.test"]))),
+            Verdict::Pass(Pass::Hosts)
+        );
+        assert_eq!(hosts(Some(&block), Some(&[])), Verdict::Pass(Pass::Hosts));
+        assert_eq!(
+            hosts(
+                Some(&block),
+                Some(&list(&["shop.test", "blog.test", "api.test"]))
+            ),
+            Verdict::Fail(Problem::HostsMissing {
+                names: list(&["api.test", "shop.test"])
+            })
+        );
+        assert_eq!(
+            hosts(None, Some(&list(&["blog.test"]))),
+            Verdict::Fail(Problem::HostsBlockGone)
+        );
+        assert_eq!(hosts(None, None), Verdict::Fail(Problem::HostsBlockGone));
+        assert_eq!(hosts(Some(&block), None), Verdict::Skip(Skip::NeedsDaemon));
+    }
+
+    /// Task M4-18k3: the `marsa0` link on Linux has its own fix, and is
+    /// otherwise the probe of macOS.
+    #[test]
+    fn the_link_gives_its_own_fix() {
+        let local = [IpAddr::V4(Ipv4Addr::LOCALHOST)];
+        assert_eq!(link(true, Some(&local)), Verdict::Pass(Pass::Dns));
+        assert_eq!(link(true, None), Verdict::Fail(Problem::LinkNoAnswer));
+        assert_eq!(link(false, None), Verdict::Skip(Skip::NeedsDaemon));
+        let other = [IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))];
+        assert!(matches!(
+            link(true, Some(&other)),
+            Verdict::Fail(Problem::DnsWrongAddress { .. })
+        ));
     }
 }

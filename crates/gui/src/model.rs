@@ -1,27 +1,32 @@
 //! The window's state, and how each message from the bridge changes it.
 //!
 //! Pure: no drawing and no I/O, so the tests run without a window. The
-//! drawing code in `app` only reads a [`Model`], and calls its methods when
-//! the user presses something.
+//! drawing code in `shell` and `screens` reads a [`Model`], and returns an
+//! [`Action`] when the user presses something (or, in the screens not
+//! converted yet, calls the model's methods).
 
 use std::collections::VecDeque;
 use std::mem;
 use std::path::{Path, PathBuf};
 
+use marsa_core::helper::OpStatus;
 use marsa_core::resolver;
 use marsa_core::runtimes::Runtime;
 use marsa_core::sites;
 use marsa_core::types::{
-    Event, Health, InstallEvent, InstallFailure, InstallProgress, InstallUpdate, LogLine,
-    LogStream, RuntimeList, ServiceAction, ServiceState, ServiceStatus, SetupReport, Site,
+    Event, Health, HostsStatus, InstallEvent, InstallFailure, InstallProgress, InstallUpdate,
+    LogLine, LogStream, RuntimeList, ServiceAction, ServiceState, ServiceStatus, SetupReport, Site,
     SiteList, Source, VersionInUse, XdebugState,
 };
 use semver::Version;
 
+use crate::bridge::Command;
 pub use crate::tray::menu::Autostart;
 
 /// The service whose log the window shows.
 pub const LOG_SERVICE: &str = "caddy";
+/// The service that serves every site: no site opens while it is down.
+pub const WEB_SERVER: &str = "caddy";
 /// The most log lines kept. The oldest go first.
 pub const MAX_LOG_LINES: usize = 5000;
 /// This build's version, shown in the Settings section.
@@ -123,7 +128,27 @@ pub enum Update {
     /// The answer to the Xdebug box: the state after the change, or a client
     /// error code.
     XdebugAnswered(Result<XdebugState, String>),
+    /// Linux (task M4-18k3): whether the hosts file holds this data
+    /// folder's names, and the sites it lacks. Read when a session starts,
+    /// after each site list, after setup, and after "Add to /etc/hosts".
+    Hosts(HostsStatus),
+    /// The answer to "Add to /etc/hosts".
+    HostsSynced(SetupReport),
+    /// "Add to /etc/hosts" did not run, or the daemon could not be reached.
+    /// A client error code.
+    HostsSyncFailed(String),
     Event(Event),
+}
+
+/// The "Add to /etc/hosts" button (Linux, task M4-18k3).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum HostsSync {
+    #[default]
+    Idle,
+    /// Sent; the daemon may wait up to 5 minutes for the password prompt.
+    Running,
+    /// The names did not go in: the code of why.
+    Failed(String),
 }
 
 /// One runtime in the Runtimes section.
@@ -427,6 +452,110 @@ pub enum Pick {
     Link,
 }
 
+/// The screen the main area shows (code.md, Router). The window's own
+/// state, not the daemon's: a reconnect keeps it. [Laravel: the route that
+/// picks the view.]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Route {
+    #[default]
+    Home,
+    Sites,
+    /// One site's page, by name. M5-D7 draws it; until then it shows the
+    /// Sites screen.
+    Site(String),
+    /// The Runtimes screen with this runtime chosen.
+    Runtimes(Runtime),
+    Services,
+    Logs(LogSource),
+    Settings,
+}
+
+/// The log the Logs screen shows: Caddy's, as before. M5-D10 adds the
+/// others.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LogSource {
+    #[default]
+    Caddy,
+}
+
+/// What the user did in the window. The shell and the screens return it,
+/// and [`Model::apply_action`] turns it into state, and into a bridge
+/// [`Command`] when the daemon must act (code.md, State). [Laravel: a form
+/// posted to a controller.] The screens that still call the model's methods
+/// move here with their own tasks (M5-D5 to M5-D10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// A sidebar item, or the status at its bottom.
+    Navigate(Route),
+    /// The fold button of the sidebar: hide or show the labels.
+    FoldSidebar,
+    /// A service's Start, Stop, or Restart.
+    Service {
+        service: String,
+        action: ServiceAction,
+    },
+    /// A version button of the default picker (Home): save `version` as the
+    /// default of `runtime`.
+    SetDefault { runtime: Runtime, version: Version },
+    /// A fix that installs a program (Home: "Install Caddy"). Queued like a
+    /// press of Install; `App` sends it.
+    Install(InstallJob),
+    /// The fix "Add to /etc/hosts" (Linux, task M4-18k3).
+    SyncHosts,
+    /// "Open" on a site. A local action: `App` hands the address
+    /// ([`Model::site_url`]) to the system, never a screen (code.md, State).
+    OpenSite(String),
+    /// The first-run button that installs what is missing.
+    StartFirstRun,
+    /// "Run setup".
+    RunSetup,
+    /// "Park a folder…" or "Link a folder…". A local action: `App` opens the
+    /// system's folder dialog, and takes the folder it gives back.
+    PickFolder(Pick),
+    /// "Not now": Home takes the place of the first-run panel.
+    CloseFirstRun,
+    /// The text of the search field of the Sites screen.
+    SearchSites(String),
+    /// An entry of a site's version menu: save `choice` as its PHP, or clear
+    /// its own setting ([`Choice::Auto`]).
+    SitePhp { site: String, choice: Choice },
+    /// The site's menu: serve it over HTTPS (`true`) or plain HTTP.
+    SetSecure { site: String, secure: bool },
+    /// "Unlink…" of a site: the confirmation opens.
+    AskUnlink(String),
+    /// "Forget…" of a parked folder: the confirmation opens.
+    AskForget(PathBuf),
+    /// The site name typed in the link form.
+    SetLinkName(String),
+    /// "Link" in the link form (or Enter): sends the link if the name is
+    /// valid.
+    SubmitLink,
+    /// "Cancel" in the link form.
+    CancelLink,
+    /// Closes the line about the last sites action.
+    DismissSitesNotice,
+}
+
+/// How Marsa works as a whole, as far as the window can tell: the status at
+/// the bottom of the sidebar (principles 1). M5-D5 adds the request path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overall {
+    /// Connecting to the daemon, or again after it went away.
+    Connecting,
+    /// The daemon is shutting down.
+    Stopping,
+    /// The daemon cannot be reached or started: no site opens.
+    DaemonDown,
+    /// The daemon runs, and there is no site yet.
+    NoSites,
+    /// The web server is starting.
+    Starting,
+    /// The web server does not run: no site opens.
+    WebServerDown,
+    /// The daemon and the web server run.
+    Working,
+}
+
 #[derive(Debug, Default)]
 pub struct Model {
     pub connection: Connection,
@@ -440,6 +569,9 @@ pub struct Model {
     /// Sites sorted by name, the parked folders, and the skipped folders.
     pub sites: SiteList,
     pub sites_notice: Option<SitesNotice>,
+    /// The text of the Sites search field. Kept across sessions: it is the
+    /// user's typing, not daemon state.
+    pub sites_search: String,
     /// Open after a folder to link was picked. Kept across sessions: it is
     /// the user's typing, not daemon state.
     pub link: Option<LinkForm>,
@@ -478,6 +610,14 @@ pub struct Model {
     xdebug_pending: Option<bool>,
     /// The last Xdebug read or change failed. A client error code.
     pub xdebug_notice: Option<String>,
+    /// Linux: the sites the hosts file lacks (task M4-18k3).
+    pub hosts: HostsStatus,
+    pub hosts_sync: HostsSync,
+    /// The screen the main area shows.
+    pub route: Route,
+    /// The user folded the sidebar to its icons. A narrow window folds it
+    /// anyway (`shell::sidebar`).
+    pub sidebar_folded: bool,
 }
 
 impl Model {
@@ -495,12 +635,16 @@ impl Model {
                 *self = Model {
                     connection: Connection::Running(health),
                     link: self.link.take(),
+                    sites_search: mem::take(&mut self.sites_search),
                     install_input: mem::take(&mut self.install_input),
                     // Only ended installs with no id are left: what the user
                     // saw last stays on screen.
                     installs: mem::take(&mut self.installs),
                     first_run_closed: self.first_run_closed,
                     data_dir: mem::take(&mut self.data_dir),
+                    // Where the user is, not daemon state.
+                    route: mem::take(&mut self.route),
+                    sidebar_folded: self.sidebar_folded,
                     ..Model::default()
                 };
             }
@@ -539,6 +683,14 @@ impl Model {
             Update::InstallAccepted { job, id } => self.accepted(&job, id),
             Update::InstallRefused { job, code } => self.refused(&job, code),
             Update::SetupDone(report) => self.setup = Setup::Finished(report),
+            Update::Hosts(status) => self.hosts = status,
+            Update::HostsSynced(report) => {
+                self.hosts_sync = match not_added(&report) {
+                    Some(code) => HostsSync::Failed(code),
+                    None => HostsSync::Idle,
+                };
+            }
+            Update::HostsSyncFailed(code) => self.hosts_sync = HostsSync::Failed(code),
             Update::SetupFailed(code) => self.setup = Setup::Failed(code),
             Update::Autostart(state) => self.autostart = state,
             Update::AutostartFailed(code) => {
@@ -721,6 +873,8 @@ impl Model {
                     .unwrap_or_default();
                 self.sites_notice = None;
                 self.link = Some(LinkForm { folder, name });
+                // The form is drawn on Sites; the first-run panel has none.
+                self.route = Route::Sites;
             }
             Err(code) => self.sites_notice = Some(SitesNotice::Failed(code.to_owned())),
         }
@@ -778,16 +932,23 @@ impl Model {
             return false;
         }
         match install_version(&self.install_input[runtime_index(runtime)]) {
-            Ok(version) => {
-                self.runtimes_notice = None;
-                self.queue.push_back(InstallJob { runtime, version });
-                true
-            }
+            Ok(version) => self.queue_install(InstallJob { runtime, version }),
             Err(code) => {
                 self.runtimes_notice = Some(code.to_owned());
                 false
             }
         }
+    }
+
+    /// Queues `job`, as the Install button does once its field is right.
+    /// `false` if the window has no daemon, or one of its jobs waits or runs.
+    pub fn queue_install(&mut self, job: InstallJob) -> bool {
+        if !self.is_connected() || self.installing() {
+            return false;
+        }
+        self.runtimes_notice = None;
+        self.queue.push_back(job);
+        true
     }
 
     /// The next job to send, once no job of this window runs. It shows as
@@ -937,31 +1098,55 @@ impl Model {
 
     // -- First run, setup, and settings (task M5-10) --
 
-    /// "Install PHP 8.4 and Caddy": the two jobs, in that order. `false` if
-    /// the panel does not offer it now.
+    /// "Install PHP 8.4 and Caddy": the jobs of what is missing, PHP first.
+    /// `false` if the panel does not offer it now.
     pub fn start_first_run(&mut self) -> bool {
-        if self.first_run != Some(FirstRun::Offer) || !self.is_connected() || self.installing() {
+        let offered = first_run_needed(&self.runtimes) && !self.first_run_closed;
+        if !offered || !self.is_connected() || self.installing() {
             return false;
         }
         self.runtimes_notice = None;
-        self.queue.extend([
-            InstallJob {
-                runtime: Runtime::Php,
-                version: Some(FIRST_PHP.to_owned()),
-            },
-            InstallJob {
-                runtime: Runtime::Caddy,
-                version: None,
-            },
-        ]);
+        let jobs = [
+            (Runtime::Php, Some(FIRST_PHP.to_owned())),
+            (Runtime::Caddy, None),
+        ];
+        let missing = jobs
+            .into_iter()
+            .filter(|(runtime, _)| runtime_missing(&self.runtimes, *runtime));
+        self.queue
+            .extend(missing.map(|(runtime, version)| InstallJob { runtime, version }));
         self.first_run = Some(FirstRun::Installing);
         true
+    }
+
+    /// Whether Home gives way to the first-run panel (principles 2): the
+    /// daemon answers, the user did not say "Not now", and the first site
+    /// cannot open yet. That is when PHP or Caddy is not installed, or when
+    /// there is no site. The window cannot read whether setup ran in an
+    /// earlier session, so the sites decide: the first site ends it.
+    pub fn needs_first_run(&self) -> bool {
+        self.is_connected()
+            && !self.first_run_closed
+            && !self.runtimes.is_empty()
+            && (first_run_needed(&self.runtimes) || self.sites.sites.is_empty())
     }
 
     /// "Not now" or "Close" in the first-run panel.
     pub fn close_first_run(&mut self) {
         self.first_run = None;
         self.first_run_closed = true;
+    }
+
+    /// "Add to /etc/hosts". `false` while it or a setup runs, with no
+    /// daemon, or with nothing to add.
+    pub fn start_hosts_sync(&mut self) -> bool {
+        let nothing = !self.hosts.used || self.hosts.missing.is_empty();
+        let busy = self.hosts_sync == HostsSync::Running || self.setup == Setup::Running;
+        if !self.is_connected() || nothing || busy {
+            return false;
+        }
+        self.hosts_sync = HostsSync::Running;
+        true
     }
 
     /// "Run setup". `false` while one runs, or with no daemon.
@@ -1200,6 +1385,122 @@ impl Model {
         matches!(self.connection, Connection::Running(_))
     }
 
+    /// Applies what the user did. Returns the command to send to the
+    /// daemon, if any.
+    pub fn apply_action(&mut self, action: Action) -> Option<Command> {
+        match action {
+            Action::Navigate(route) => {
+                self.route = route;
+                None
+            }
+            Action::FoldSidebar => {
+                self.sidebar_folded = !self.sidebar_folded;
+                None
+            }
+            Action::Service { service, action } => {
+                // The notice was about the last action.
+                self.notice = None;
+                Some(Command::Service { service, action })
+            }
+            Action::SetDefault { runtime, version } => {
+                self.choose_default(runtime, version).map(Command::Save)
+            }
+            Action::Install(job) => {
+                // The job waits in the queue: `App` sends it (`next_install`).
+                self.queue_install(job);
+                None
+            }
+            Action::SyncHosts => self.start_hosts_sync().then_some(Command::SyncHosts),
+            Action::StartFirstRun => {
+                // The jobs wait in the queue: `App` sends them.
+                self.start_first_run();
+                None
+            }
+            Action::RunSetup => self.start_setup().then_some(Command::Setup),
+            Action::CloseFirstRun => {
+                self.close_first_run();
+                None
+            }
+            Action::SearchSites(text) => {
+                self.sites_search = text;
+                None
+            }
+            // The site lists are the daemon's: with no daemon, nothing to send.
+            Action::SitePhp { .. } | Action::SetSecure { .. } if !self.is_connected() => None,
+            Action::SitePhp { site, choice } => {
+                self.choose_site_php(&site, choice).map(Command::Save)
+            }
+            Action::SetSecure { site, secure } => {
+                // The notice was about the last action.
+                self.sites_notice = None;
+                Some(Command::Secure { site, secure })
+            }
+            Action::AskUnlink(site) => {
+                self.ask_removal(Removal::Unlink { site });
+                None
+            }
+            Action::AskForget(folder) => {
+                self.ask_removal(Removal::Forget { folder });
+                None
+            }
+            Action::SetLinkName(name) => {
+                if let Some(form) = self.link.as_mut() {
+                    form.name = name;
+                }
+                None
+            }
+            Action::SubmitLink => {
+                if !self.is_connected() {
+                    return None;
+                }
+                let (name, folder) = self.link_request()?;
+                Some(Command::Link { name, folder })
+            }
+            Action::CancelLink => {
+                self.link = None;
+                None
+            }
+            Action::DismissSitesNotice => {
+                self.sites_notice = None;
+                None
+            }
+            // Done by `App`, with the system's opener and dialog: nothing
+            // changes here.
+            Action::OpenSite(_) | Action::PickFolder(_) => None,
+        }
+    }
+
+    /// The address of the site `name`, for the browser.
+    pub fn site_url(&self, name: &str) -> Option<String> {
+        self.sites
+            .sites
+            .iter()
+            .find(|site| site.name == name)
+            .map(url)
+    }
+
+    /// How Marsa works as a whole: the daemon, then the sites, then the web
+    /// server that serves them.
+    pub fn overall(&self) -> Overall {
+        match &self.connection {
+            Connection::Connecting | Connection::Reconnecting => Overall::Connecting,
+            Connection::ShuttingDown => Overall::Stopping,
+            Connection::Failed(_) => Overall::DaemonDown,
+            Connection::Running(_) if self.sites.sites.is_empty() => Overall::NoSites,
+            Connection::Running(_) => {
+                let web = self
+                    .services
+                    .iter()
+                    .find(|service| service.id == WEB_SERVER);
+                match web.map(|service| &service.state) {
+                    Some(ServiceState::Running) => Overall::Working,
+                    Some(ServiceState::Starting) => Overall::Starting,
+                    _ => Overall::WebServerDown,
+                }
+            }
+        }
+    }
+
     /// The tables show live state only, so they go. The log stays: it may
     /// tell why the daemon stopped.
     fn disconnect(&mut self, connection: Connection) {
@@ -1245,6 +1546,28 @@ impl Model {
 }
 
 /// Applies one daemon event.
+/// Why "Add to /etc/hosts" did not put the names in: the code of the
+/// error, of a skipped step, or of a failed one. `None` if it did, or there
+/// was nothing to add.
+fn not_added(report: &SetupReport) -> Option<String> {
+    if let Some(error) = &report.error {
+        return Some(error.code.clone());
+    }
+    if let Some(skipped) = report.skipped.first() {
+        return Some(skipped.code.clone());
+    }
+    report
+        .results
+        .iter()
+        .find(|result| result.status == OpStatus::Failed)
+        .map(|result| {
+            result
+                .code
+                .clone()
+                .unwrap_or_else(|| "hosts_sync".to_owned())
+        })
+}
+
 pub fn apply(model: &mut Model, event: Event) {
     match event {
         Event::ServiceChanged(status) => {
@@ -1277,15 +1600,18 @@ pub fn apply(model: &mut Model, event: Event) {
     }
 }
 
-/// Whether the first-run panel is for this list: it has been read, and
-/// neither PHP nor Caddy is installed.
+/// Whether the first-run panel is for this list: it has been read, and PHP
+/// or Caddy is not installed. Both are needed to open a site.
 pub fn first_run_needed(rows: &[RuntimeRow]) -> bool {
-    let missing = |runtime| {
-        rows.iter()
-            .find(|row| row.runtime == runtime)
-            .is_none_or(|row| row.installed.is_empty())
-    };
-    !rows.is_empty() && missing(Runtime::Php) && missing(Runtime::Caddy)
+    !rows.is_empty()
+        && (runtime_missing(rows, Runtime::Php) || runtime_missing(rows, Runtime::Caddy))
+}
+
+/// Whether `runtime` has no installed version in the list `rows`.
+pub fn runtime_missing(rows: &[RuntimeRow], runtime: Runtime) -> bool {
+    rows.iter()
+        .find(|row| row.runtime == runtime)
+        .is_none_or(|row| row.installed.is_empty())
 }
 
 /// The position of `runtime` in [`Runtime::ALL`], and in
@@ -1470,6 +1796,313 @@ mod tests {
         } else {
             PathBuf::from(unix)
         }
+    }
+
+    #[test]
+    fn navigate_and_fold_change_the_window_only() {
+        let mut model = connected();
+        assert_eq!(model.route, Route::Home);
+        assert!(!model.sidebar_folded);
+        let route = Route::Runtimes(Runtime::Node);
+        assert!(
+            model
+                .apply_action(Action::Navigate(route.clone()))
+                .is_none()
+        );
+        assert_eq!(model.route, route);
+        assert!(model.apply_action(Action::FoldSidebar).is_none());
+        assert!(model.sidebar_folded);
+        assert!(model.apply_action(Action::FoldSidebar).is_none());
+        assert!(!model.sidebar_folded);
+    }
+
+    #[test]
+    fn a_service_action_clears_the_notice_and_becomes_a_command() {
+        let mut model = connected();
+        model.update(Update::Notice("service_busy".into()));
+        let action = Action::Service {
+            service: "caddy".into(),
+            action: ServiceAction::Restart,
+        };
+        let command = model.apply_action(action);
+        assert!(
+            matches!(
+                &command,
+                Some(Command::Service { service, action: ServiceAction::Restart }) if service == "caddy"
+            ),
+            "{command:?}"
+        );
+        assert_eq!(model.notice, None);
+    }
+
+    #[test]
+    fn the_home_actions_set_the_default_queue_an_install_and_sync_the_hosts() {
+        // The default picker: the change goes to the daemon, once.
+        let mut model = with_php(Vec::new());
+        let set = Action::SetDefault {
+            runtime: Runtime::Php,
+            version: v("8.3.27"),
+        };
+        let command = model.apply_action(set.clone());
+        let want = Change::Default {
+            runtime: Runtime::Php,
+            version: "8.3".into(),
+        };
+        assert!(matches!(&command, Some(Command::Save(change)) if *change == want));
+        assert!(model.apply_action(set).is_none(), "the default already");
+
+        // A fix queues its install; `App` sends it through `next_install`.
+        let job = InstallJob {
+            runtime: Runtime::Caddy,
+            version: None,
+        };
+        assert!(model.apply_action(Action::Install(job.clone())).is_none());
+        assert!(model.installing());
+        assert_eq!(model.next_install(), Some(job.clone()));
+        // One at a time: a second fix waits for the first to end.
+        assert!(!model.queue_install(job));
+        assert_eq!(model.next_install(), None);
+
+        // The hosts button only runs with names to add.
+        assert!(model.apply_action(Action::SyncHosts).is_none());
+        model.update(Update::Hosts(HostsStatus {
+            used: true,
+            missing: vec!["shop.test".into()],
+        }));
+        let command = model.apply_action(Action::SyncHosts);
+        assert!(matches!(command, Some(Command::SyncHosts)), "{command:?}");
+        assert!(model.apply_action(Action::SyncHosts).is_none(), "it runs");
+        assert_eq!(model.hosts_sync, HostsSync::Running);
+    }
+
+    #[test]
+    fn the_first_run_actions_install_set_up_and_close() {
+        let mut model = with_runtimes(&[], &[]);
+        assert!(model.apply_action(Action::StartFirstRun).is_none());
+        assert_eq!(model.first_run, Some(FirstRun::Installing));
+        assert_eq!(
+            model.next_install(),
+            Some(job(Runtime::Php, Some(FIRST_PHP)))
+        );
+
+        let command = model.apply_action(Action::RunSetup);
+        assert!(matches!(command, Some(Command::Setup)), "{command:?}");
+        assert_eq!(model.setup, Setup::Running);
+        assert!(
+            model.apply_action(Action::RunSetup).is_none(),
+            "one at a time"
+        );
+
+        // The folder dialog is `App`'s: the model keeps out of it.
+        assert!(model.apply_action(Action::PickFolder(Pick::Park)).is_none());
+        assert!(model.apply_action(Action::CloseFirstRun).is_none());
+        assert!(model.first_run.is_none() && !model.needs_first_run());
+    }
+
+    #[test]
+    fn a_linked_folder_opens_its_form_on_the_sites_screen() {
+        let mut model = connected();
+        assert_eq!(model.route, Route::Home);
+        model.pick_link_folder(Path::new("relative/folder"));
+        assert_eq!(model.route, Route::Home, "a bad folder opens no form");
+        assert!(model.link.is_none());
+        model.pick_link_folder(&absolute("/code/My_App"));
+        assert_eq!(model.route, Route::Sites);
+        assert_eq!(
+            model.link.as_ref().map(|form| form.name.as_str()),
+            Some("my-app")
+        );
+    }
+
+    #[test]
+    fn a_fix_that_installs_needs_the_daemon() {
+        let mut model = Model::default();
+        let job = InstallJob {
+            runtime: Runtime::Php,
+            version: Some(FIRST_PHP.into()),
+        };
+        assert!(!model.queue_install(job));
+        assert!(!model.installing());
+    }
+
+    #[test]
+    fn open_site_changes_nothing_and_the_address_comes_from_the_model() {
+        let mut model = connected();
+        model.update(Update::Sites(site_list(&["shop"])));
+        model.sites.sites[0].secure = false;
+        assert!(
+            model
+                .apply_action(Action::OpenSite("shop".into()))
+                .is_none()
+        );
+        assert_eq!(model.route, Route::Home);
+        assert_eq!(model.site_url("shop").as_deref(), Some("http://shop.test"));
+        model.sites.sites[0].secure = true;
+        assert_eq!(model.site_url("shop").as_deref(), Some("https://shop.test"));
+        assert_eq!(model.site_url("gone"), None);
+    }
+
+    #[test]
+    fn a_reconnect_keeps_the_route_and_the_fold() {
+        let mut model = connected();
+        model.apply_action(Action::Navigate(Route::Site("shop".into())));
+        model.apply_action(Action::FoldSidebar);
+        model.update(Update::Failed("daemon_start_failed".into()));
+        model.update(Update::Connected(health()));
+        assert_eq!(model.route, Route::Site("shop".into()));
+        assert!(model.sidebar_folded);
+    }
+
+    #[test]
+    fn the_sites_search_is_the_models_and_a_reconnect_keeps_it() {
+        let mut model = connected();
+        assert!(
+            model
+                .apply_action(Action::SearchSites("sh".into()))
+                .is_none()
+        );
+        assert_eq!(model.sites_search, "sh");
+        model.update(Update::Connected(health()));
+        assert_eq!(
+            model.sites_search, "sh",
+            "the user's typing, not daemon state"
+        );
+    }
+
+    #[test]
+    fn the_menu_actions_of_a_site_reach_the_daemon_or_the_confirmation() {
+        let mut model = connected();
+        model.update(Update::Sites(site_list(&["shop"])));
+        let pick = Action::SitePhp {
+            site: "shop".into(),
+            choice: Choice::Version(v("8.3.27")),
+        };
+        let command = model.apply_action(pick.clone());
+        assert!(matches!(command, Some(Command::Save(_))), "{command:?}");
+        assert!(model.apply_action(pick).is_none(), "the same entry again");
+
+        model.sites_notice = Some(SitesNotice::Unlinked("old".into()));
+        let secure = Action::SetSecure {
+            site: "shop".into(),
+            secure: false,
+        };
+        let command = model.apply_action(secure);
+        assert!(
+            matches!(command, Some(Command::Secure { ref site, secure: false }) if site == "shop"),
+            "{command:?}"
+        );
+        assert!(
+            model.sites_notice.is_none(),
+            "the notice was about the last action"
+        );
+
+        assert!(
+            model
+                .apply_action(Action::AskUnlink("shop".into()))
+                .is_none()
+        );
+        assert_eq!(
+            model.confirm,
+            Some(Removal::Unlink {
+                site: "shop".into()
+            })
+        );
+        model.cancel_removal();
+        let folder = PathBuf::from("/code");
+        assert!(
+            model
+                .apply_action(Action::AskForget(folder.clone()))
+                .is_none()
+        );
+        assert_eq!(model.confirm, Some(Removal::Forget { folder }));
+    }
+
+    #[test]
+    fn a_site_menu_action_waits_for_the_daemon() {
+        let mut down = Model::default();
+        let secure = Action::SetSecure {
+            site: "shop".into(),
+            secure: false,
+        };
+        assert!(down.apply_action(secure).is_none());
+        let pick = Action::SitePhp {
+            site: "shop".into(),
+            choice: Choice::Auto,
+        };
+        assert!(down.apply_action(pick).is_none());
+        // The confirmation needs the daemon too: nothing to remove without it.
+        assert!(
+            down.apply_action(Action::AskUnlink("shop".into()))
+                .is_none()
+        );
+        assert!(down.confirm.is_none());
+    }
+
+    #[test]
+    fn the_link_form_actions_edit_send_and_cancel() {
+        let mut model = connected();
+        model.pick_link_folder(&absolute("/work/blog"));
+        model.apply_action(Action::SetLinkName("my-blog".into()));
+        assert_eq!(
+            model.link.as_ref().map(|f| f.name.as_str()),
+            Some("my-blog")
+        );
+
+        // A name that is not valid sends nothing and says why.
+        model.apply_action(Action::SetLinkName("My Blog".into()));
+        assert!(model.apply_action(Action::SubmitLink).is_none());
+        assert!(matches!(model.sites_notice, Some(SitesNotice::Failed(_))));
+        model.apply_action(Action::DismissSitesNotice);
+        assert!(model.sites_notice.is_none());
+
+        model.apply_action(Action::SetLinkName("blog".into()));
+        let command = model.apply_action(Action::SubmitLink);
+        assert!(
+            matches!(command, Some(Command::Link { ref name, .. }) if name == "blog"),
+            "{command:?}"
+        );
+        model.apply_action(Action::CancelLink);
+        assert!(model.link.is_none());
+        // With no form there is nothing to send.
+        assert!(model.apply_action(Action::SubmitLink).is_none());
+        // With no daemon the form sends nothing either.
+        let mut down = Model::default();
+        down.pick_link_folder(&absolute("/work/blog"));
+        assert!(down.apply_action(Action::SubmitLink).is_none());
+    }
+
+    #[test]
+    fn overall_says_the_daemon_first_then_the_sites_then_the_web_server() {
+        let mut model = Model::default();
+        assert_eq!(model.overall(), Overall::Connecting);
+        model.update(Update::Failed("daemon_start_failed".into()));
+        assert_eq!(model.overall(), Overall::DaemonDown);
+        model.update(Update::Connected(health()));
+        // No site yet: nothing fails to open, whatever Caddy does.
+        assert_eq!(model.overall(), Overall::NoSites);
+        model.update(Update::Sites(site_list(&["shop"])));
+        // Caddy not listed yet counts as down.
+        assert_eq!(model.overall(), Overall::WebServerDown);
+        for (state, overall) in [
+            (ServiceState::Starting, Overall::Starting),
+            (ServiceState::Running, Overall::Working),
+            (ServiceState::Stopping, Overall::WebServerDown),
+            (ServiceState::Stopped, Overall::WebServerDown),
+            (
+                ServiceState::Failed {
+                    code: "port_in_use".into(),
+                },
+                Overall::WebServerDown,
+            ),
+        ] {
+            model.update(Update::Services(vec![
+                status("php-fpm-8.4", ServiceState::Running),
+                status(WEB_SERVER, state),
+            ]));
+            assert_eq!(model.overall(), overall);
+        }
+        model.update(Update::Reconnecting);
+        assert_eq!(model.overall(), Overall::Connecting);
     }
 
     #[test]
@@ -2203,18 +2836,81 @@ mod tests {
     // -- First run (task M5-10) --
 
     #[test]
-    fn the_first_run_panel_shows_with_no_php_and_no_caddy() {
+    fn the_first_run_panel_shows_with_no_php_or_no_caddy() {
         assert!(with_runtimes(&[], &[]).first_run == Some(FirstRun::Offer));
-        assert!(with_runtimes(&["8.4.23"], &[]).first_run.is_none());
-        assert!(with_runtimes(&[], &["2.11.7"]).first_run.is_none());
+        // Either one missing is enough: no site opens without both.
+        assert!(with_runtimes(&["8.4.23"], &[]).first_run == Some(FirstRun::Offer));
+        assert!(with_runtimes(&[], &["2.11.7"]).first_run == Some(FirstRun::Offer));
+        assert!(with_runtimes(&["8.4.23"], &["2.11.7"]).first_run.is_none());
         // Not before the list is read.
         assert!(connected().first_run.is_none());
         assert!(!first_run_needed(&[]));
 
-        // PHP installed from a terminal closes the offer.
+        // PHP installed from a terminal: Caddy is still missing. Then Caddy
+        // closes the offer.
         let mut model = with_runtimes(&[], &[]);
         model.update(Update::Runtimes(list(&["8.4.23"], &[])));
+        assert_eq!(model.first_run, Some(FirstRun::Offer));
+        model.update(Update::Runtimes(list(&["8.4.23"], &["2.11.7"])));
         assert!(model.first_run.is_none());
+    }
+
+    #[test]
+    fn the_first_run_installs_only_what_is_missing() {
+        let mut model = with_runtimes(&["8.4.23"], &[]);
+        assert!(model.start_first_run());
+        assert_eq!(
+            model.next_install(),
+            Some(job(Runtime::Caddy, None)),
+            "PHP is there: only Caddy"
+        );
+        let mut model = with_runtimes(&[], &["2.11.7"]);
+        assert!(model.start_first_run());
+        assert_eq!(
+            model.next_install(),
+            Some(job(Runtime::Php, Some(FIRST_PHP)))
+        );
+        model.update(Update::InstallAccepted {
+            job: job(Runtime::Php, Some(FIRST_PHP)),
+            id: 1,
+        });
+        apply(&mut model, done(1, Runtime::Php, "8.4.23"));
+        assert_eq!(model.next_install(), None, "Caddy is there: no second job");
+        assert_eq!(model.first_run, Some(FirstRun::Setup));
+        // Nothing to install: nothing to start.
+        assert!(!with_runtimes(&["8.4.23"], &["2.11.7"]).start_first_run());
+    }
+
+    /// Principles 2: first run replaces Home until PHP and Caddy are
+    /// installed and there is a first site, unless the user said "Not now".
+    #[test]
+    fn first_run_replaces_home_until_the_first_site_can_open() {
+        // Not before the runtimes are read, and not without the daemon.
+        assert!(!connected().needs_first_run());
+        assert!(!Model::default().needs_first_run());
+
+        let mut model = with_runtimes(&[], &[]);
+        assert!(model.needs_first_run(), "nothing installed");
+        model.update(Update::Runtimes(list(&["8.4.23"], &[])));
+        model.update(Update::Sites(site_list(&["shop"])));
+        assert!(model.needs_first_run(), "a site cannot open without Caddy");
+        model.update(Update::Runtimes(list(&["8.4.23"], &["2.11.7"])));
+        assert!(!model.needs_first_run(), "installed, and a first site");
+        model.update(Update::Sites(SiteList::default()));
+        assert!(model.needs_first_run(), "installed, and no site yet");
+
+        // The first site ends it, as an event from the daemon says.
+        apply(&mut model, Event::SitesChanged(site_list(&["shop"])));
+        assert!(!model.needs_first_run());
+        apply(&mut model, Event::SitesChanged(SiteList::default()));
+        assert!(model.needs_first_run());
+        model.close_first_run();
+        assert!(!model.needs_first_run(), "\"Not now\" stays for the window");
+        // A lost session does not bring it back.
+        model.update(Update::Reconnecting);
+        model.update(Update::Connected(health()));
+        model.update(Update::Runtimes(list(&[], &[])));
+        assert!(!model.needs_first_run());
     }
 
     #[test]
@@ -2243,7 +2939,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_caddy_closes_the_first_run_once_php_is_there() {
+    fn a_failed_caddy_offers_the_install_again_once_php_is_there() {
         let mut model = with_runtimes(&[], &[]);
         model.start_first_run();
         let php = model.next_install().unwrap();
@@ -2253,8 +2949,8 @@ mod tests {
         let caddy = model.next_install().unwrap();
         model.update(Update::InstallAccepted { job: caddy, id: 2 });
         apply(&mut model, failed(2, "download_failed"));
-        // PHP is there: Caddy is installed from the Runtimes section.
-        assert!(model.first_run.is_none());
+        // PHP is there and Caddy is not: the panel offers the install again.
+        assert_eq!(model.first_run, Some(FirstRun::Offer));
         assert_eq!(
             step(&model),
             InstallStep::Failed(failure("download_failed".into()))
@@ -2284,6 +2980,82 @@ mod tests {
             }],
             ..SetupReport::default()
         }
+    }
+
+    /// Task M4-18k3: "Add to /etc/hosts" runs only with something to add,
+    /// one at a time, never during a setup, and says why when the names
+    /// did not go in.
+    #[test]
+    fn the_hosts_button_runs_only_with_names_to_add() {
+        use marsa_core::helper::OpResult;
+        use marsa_core::types::{ApiError, SetupSkip};
+
+        let mut model = connected();
+        assert!(!model.start_hosts_sync(), "nothing to add");
+        model.update(Update::Hosts(HostsStatus {
+            used: false,
+            missing: vec!["shop.test".into()],
+        }));
+        assert!(!model.start_hosts_sync(), "not the hosts way");
+        model.update(Update::Hosts(HostsStatus {
+            used: true,
+            missing: vec!["shop.test".into()],
+        }));
+        model.setup = Setup::Running;
+        assert!(!model.start_hosts_sync(), "during a setup");
+        model.setup = Setup::Idle;
+        assert!(model.start_hosts_sync());
+        assert!(!model.start_hosts_sync(), "one at a time");
+
+        let report =
+            |error: Option<&str>, skipped: Option<&str>, failed: Option<&str>| SetupReport {
+                results: failed
+                    .map(|code| OpResult {
+                        op: "hosts_sync".into(),
+                        status: OpStatus::Failed,
+                        code: Some(code.into()),
+                        message: None,
+                    })
+                    .into_iter()
+                    .collect(),
+                skipped: skipped
+                    .map(|code| SetupSkip {
+                        op: "hosts_sync".into(),
+                        code: code.into(),
+                    })
+                    .into_iter()
+                    .collect(),
+                error: error.map(|code| ApiError {
+                    code: code.into(),
+                    message: "x".into(),
+                }),
+                ..SetupReport::default()
+            };
+        model.update(Update::HostsSynced(report(None, None, None)));
+        assert_eq!(model.hosts_sync, HostsSync::Idle);
+        for (report, code) in [
+            (
+                report(Some("setup_cancelled"), None, None),
+                "setup_cancelled",
+            ),
+            (
+                report(None, Some("hosts_too_many_names"), None),
+                "hosts_too_many_names",
+            ),
+            (
+                report(None, None, Some("hosts_block_broken")),
+                "hosts_block_broken",
+            ),
+        ] {
+            model.update(Update::HostsSynced(report));
+            assert_eq!(model.hosts_sync, HostsSync::Failed(code.into()));
+        }
+        model.update(Update::HostsSyncFailed("setup_running".into()));
+        assert_eq!(model.hosts_sync, HostsSync::Failed("setup_running".into()));
+        // A new session starts clean.
+        model.update(Update::Connected(health()));
+        assert_eq!(model.hosts, HostsStatus::default());
+        assert_eq!(model.hosts_sync, HostsSync::Idle);
     }
 
     #[test]
@@ -2527,7 +3299,7 @@ mod tests {
 
     #[test]
     fn an_uninstall_drops_the_version_and_the_list_is_read_again() {
-        let mut model = with_runtimes(&["8.3.27", "8.4.23"], &[]);
+        let mut model = with_runtimes(&["8.3.27", "8.4.23"], &["2.11.7"]);
         let sent = send(&mut model, uninstall(Runtime::Php, "8.3.27"));
         model.update(Update::Removed(sent));
         assert_eq!(model.php_versions(), [v("8.4.23")]);
@@ -2537,13 +3309,13 @@ mod tests {
         };
         assert_eq!(model.uninstall_notice, Some(uninstalled));
 
-        // The last PHP, with no Caddy: the list read again after it opens
-        // the first-run panel.
+        // The last PHP: the list read again after it opens the first-run
+        // panel, since no site can open without PHP.
         let sent = send(&mut model, uninstall(Runtime::Php, "8.4.23"));
         model.update(Update::Removed(sent));
         assert!(model.php_versions().is_empty());
         assert!(model.first_run.is_none(), "not before the list is read");
-        model.update(Update::Runtimes(list(&[], &[])));
+        model.update(Update::Runtimes(list(&[], &["2.11.7"])));
         assert_eq!(model.first_run, Some(FirstRun::Offer));
     }
 

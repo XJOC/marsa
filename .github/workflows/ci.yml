@@ -87,6 +87,25 @@ jobs:
       - name: Build the shim
         run: cargo build -p marsa-shim --release
 
+      # Windows: no program may import the Visual C++ runtime (task M5-27). A
+      # clean Windows does not have it, and the runner does, so only the
+      # imports show it. The test build left the debug programs; the shim is
+      # the release one.
+      - name: Check that no Windows program needs the Visual C++ runtime
+        if: runner.os == 'Windows'
+        run: |
+          source tools/release/lib.sh
+          failed=0
+          for file in target/debug/marsa.exe target/release/marsa-shim.exe target/debug/marsad.exe target/debug/marsa-helper.exe; do
+            if [ ! -f "$file" ]; then
+              # marsa.exe and the shim are always built here; the others when a test needs them.
+              case "$file" in *marsa.exe | *marsa-shim.exe) echo "FAIL: $file was not built"; failed=1 ;; *) echo "skip: $file was not built" ;; esac
+              continue
+            fi
+            if needs_no_vc_runtime "$file"; then echo "ok: $file"; else failed=1; fi
+          done
+          exit "$failed"
+
       # The README command only prints FAIL; here the job must fail too. The
       # tree is saved first: `grep -q` would close the pipe early and the
       # SIGPIPE would look like "no match" under `bash -eo pipefail`.
@@ -101,8 +120,10 @@ jobs:
 
       # The shim runs before every php, node, npm, npx, and composer command,
       # so its size is watched (task M1-06). Sizes at M1-06b: Linux 1,054,944,
-      # macOS 903,168, Windows 599,040 bytes (still the stub). The limit is the
-      # largest plus about 25%, rounded, and is the same on every system.
+      # macOS 903,168, Windows 599,040 bytes (still the stub). At M1-07b:
+      # Linux 1,211,120, macOS 1,025,104, Windows 761,856. The limit is the
+      # largest at M1-06b plus about 25%, rounded, and is the same on every
+      # system.
       - name: Check the shim binary size
         run: |
           limit=1400000

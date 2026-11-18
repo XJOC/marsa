@@ -38,7 +38,20 @@ for name in "${programs[@]}"; do
   chmod 755 "$PKG/$name$EXE"
   files+=("$name$EXE")
 done
-cp "$ROOT/LICENSE" "$PKG/LICENSE"
+# LICENSE is Marsa's own licence, then the licence of each font the window
+# bundles: the OFL asks that every copy of the fonts carries its licence, and
+# install.sh already installs LICENSE. A glob that matches nothing is an error.
+font_licences=("$ROOT"/crates/gui/assets/fonts/*-OFL.txt)
+[ -f "${font_licences[0]}" ] || { echo "no *-OFL.txt in $ROOT/crates/gui/assets/fonts" >&2; exit 1; }
+{
+  cat "$ROOT/LICENSE"
+  for licence in "${font_licences[@]}"; do
+    printf '\n\n================================================================================\n\n'
+    echo "The window (marsa-gui) includes a font under this licence ($(basename "$licence")):"
+    echo
+    cat "$licence"
+  done
+} > "$PKG/LICENSE"
 
 # macOS: an ad-hoc signature on every program (ADR 0004). Apple Silicon runs no
 # arm64 code without one. It is not notarization: Apple has not seen the files.

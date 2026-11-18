@@ -1,39 +1,81 @@
 # Marsa
 
-Marsa (Arabic: مرسى, "harbor") runs your PHP and Node.js projects on your Mac as
-`https://<folder>.test` sites. It installs the PHP, Node.js, Composer, and Caddy
+Marsa (Arabic: مرسى, "harbor") runs your PHP and Node.js projects on your
+computer as `https://<folder>.test` sites. It installs the PHP, Node.js, Composer, and Caddy
 versions you need, picks the right version for each project, and gives every
 site a trusted HTTPS certificate. It is open source (Apache-2.0) and works
 from the terminal or from its window.
 
-**Status: 0.1.0, a first release for macOS.** It is tested on Apple Silicon.
-The Intel build passes the same automated checks, but no person has tried it
-yet. Linux and Windows are coming; they build in CI but are not released yet.
+**Status: 0.2.0.** macOS is stable. It is tested on Apple Silicon; the Intel
+build passes the same automated checks. Linux and Windows are a preview: tested
+end to end on GitHub runners, not yet by a person.
 
 ## Install
 
+### macOS and Linux
+
 ```sh
-curl -fsSL https://raw.githubusercontent.com/XJOC/marsa/main/install.sh | sh
+curl -fsSL https://github.com/XJOC/marsa/releases/latest/download/install.sh | sh
 ```
 
 The script installs Marsa for your user only, in
-`~/Library/Application Support/dev.marsa.Marsa`. It never uses `sudo` and
+`~/Library/Application Support/dev.marsa.Marsa` on macOS, and in
+`${XDG_DATA_HOME:-~/.local/share}/marsa` on Linux. It never uses `sudo` and
 never edits your shell files. Before it unpacks anything, it checks the
 SHA-256 of the download, and the [signature](#verify-a-download) too if
-`minisign` is installed. You can read the script first:
-[`install.sh`](install.sh).
+`minisign` is installed. It installs the latest release, never a
+pre-release; to install another version, run it with `MARSA_VERSION=0.1.0 sh`.
+To read the script first, download it, read it, then run it:
+
+```sh
+curl -fsSLO https://github.com/XJOC/marsa/releases/latest/download/install.sh
+sh install.sh
+```
 
 Then add Marsa to your `PATH`, as the script prints: add this line at the end
 of `~/.zshrc` (with bash, the file the script names, usually
-`~/.bash_profile`), and open a new terminal.
+`~/.bash_profile` on macOS and `~/.bashrc` on Linux), and open a new terminal.
+On macOS the line is:
 
 ```sh
 export PATH="$HOME/Library/Application Support/dev.marsa.Marsa/shims:$HOME/Library/Application Support/dev.marsa.Marsa/bin:$PATH"
 ```
 
+On Linux it is:
+
+```sh
+export PATH="$HOME/.local/share/marsa/shims:$HOME/.local/share/marsa/bin:$PATH"
+```
+
+(or under `$XDG_DATA_HOME/marsa` if you set `XDG_DATA_HOME`; the script prints
+the line for your system).
+
+On Linux, the window needs a desktop session with Vulkan or OpenGL. The
+menu-bar icon needs GTK 3 and AppIndicator: on Debian and Ubuntu, run
+`sudo apt install libgtk-3-0 libayatana-appindicator3-1`.
+
 `shims/` holds `php`, `node`, `npm`, `npx`, and `composer`. Each one runs the
 version the current project asks for. `bin/` holds `marsa` and the other
 Marsa programs.
+
+### Windows (preview)
+
+In PowerShell:
+
+```powershell
+irm https://github.com/XJOC/marsa/releases/latest/download/install.ps1 | iex
+```
+
+The script installs Marsa for your user only, in `%LOCALAPPDATA%\marsa\Marsa\data`.
+It needs no admin rights. It checks the SHA-256 of the download before it
+unpacks anything, and sets your user `PATH` itself: open a new terminal
+afterwards. To read the script first, download it and read it:
+
+```powershell
+irm https://github.com/XJOC/marsa/releases/latest/download/install.ps1 -OutFile install.ps1
+```
+
+When you have read it, run it with `Get-Content .\install.ps1 -Raw | iex`.
 
 ## Quick start
 
@@ -45,9 +87,10 @@ marsa setup                # HTTPS and .test names, once (see below)
 marsa open app             # opens https://app.test, the folder ~/Code/app
 ```
 
-`marsa setup` runs once. macOS asks for your administrator password, then asks
-you to approve trusting Marsa's certificate authority. Run it from Terminal
-on the Mac's desktop, not over SSH, so that macOS can show these dialogs.
+`marsa setup` runs once. The system asks for your administrator password
+once (on Windows, the admin prompt); macOS then also asks you to approve
+trusting Marsa's certificate authority. Run it in a terminal on your desktop,
+not over SSH, so that these dialogs can show.
 
 If something does not work, run `marsa doctor`. It checks each part, says what
 is wrong, and says how to fix it. It changes nothing.
@@ -125,9 +168,15 @@ It asks before it removes anything. Then it stops Marsa and removes what
 `marsa setup` added to the system (macOS asks for your password once). It
 also asks whether to delete Marsa's data folder: the installed runtimes, the
 settings, and the certificate authority. `--delete-data` deletes the folder
-without that question, and `--yes` answers the first one. At the end, remove
-the `PATH` line from your shell's startup file: `~/.zshrc`, and `~/.zprofile`
-if you added it there for 0.1.0-rc.1.
+without that question, and `--yes` answers the first one. At the end, take
+Marsa out of your `PATH`: on macOS and Linux, delete the line from `~/.zshrc`
+(and from `~/.zprofile` if you added it there for 0.1.0-rc.1); on Windows,
+remove Marsa's two folders from your user's environment variables (search for
+"environment variables" in Settings).
+
+This works on macOS and Windows. On Linux it is not available yet: remove
+Marsa's data folder and the `PATH` line by hand. What `marsa setup` changed is
+not undone automatically there.
 
 ## Verify a download
 
@@ -167,7 +216,7 @@ Marsa is a Rust workspace. Rust 1.99.1 is pinned in `rust-toolchain.toml`;
 
 ```sh
 cargo build --workspace
-cargo run --bin marsa -- --version   # prints: marsa 0.1.0
+cargo run --bin marsa -- --version   # prints: marsa 0.2.0
 ```
 
 The checks that every pull request passes:
@@ -197,8 +246,10 @@ Apache-2.0. See [`LICENSE`](LICENSE).
 يثبّت إصدارات PHP وNode.js وComposer وCaddy، ويختار لكل مشروع إصداره،
 ويعطي كل موقع شهادة HTTPS موثوقة. يعمل من الطرفية أو من نافذته.
 
-الإصدار 0.1.0 لنظام macOS فقط. Linux وWindows قريباً.
+الإصدار 0.2.0: macOS مستقر. Linux وWindows نسخة تجريبية (preview)،
+اختُبرتا على خوادم GitHub ولم يجرّبهما شخص بعد.
 
-التثبيت: `curl -fsSL https://raw.githubusercontent.com/XJOC/marsa/main/install.sh | sh`،
+التثبيت على macOS وLinux: `curl -fsSL https://github.com/XJOC/marsa/releases/latest/download/install.sh | sh`
+وعلى Windows (PowerShell): `irm https://github.com/XJOC/marsa/releases/latest/download/install.ps1 | iex`،
 ثم سطر `PATH` الذي يطبعه السكربت، ثم `marsa install php 8.4` و`marsa setup`.
 إن لم يعمل شيء: `marsa doctor`. الرخصة: Apache-2.0.

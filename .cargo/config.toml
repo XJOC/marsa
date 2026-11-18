@@ -1,3 +1,12 @@
 [alias]
 # `cargo xtask <command>` runs the `xtask` package with the arguments after it.
 xtask = "run --package xtask --"
+
+# Windows: the C runtime goes into every program instead of beside it (task
+# M5-27). A clean Windows has no Visual C++ runtime, so a program that imports
+# vcruntime140.dll does not start at all, not even `marsa doctor`, which would
+# say what is missing. CI and the release's smoke tests check the imports
+# (`needs_no_vc_runtime` in tools/release/lib.sh). PHP for Windows still needs
+# the runtime (ADR 0019): that is PHP's build, not Marsa's.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

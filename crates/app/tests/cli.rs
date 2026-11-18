@@ -104,8 +104,8 @@ fn bad_arguments_exit_with_code_2() {
 
 /// `marsa uninstall --all` with no terminal to ask on and no `--yes`
 /// (`Command::output` gives the child no stdin): it refuses before anything,
-/// so no daemon starts and the data folder stays empty. Off macOS it says the
-/// uninstall is not supported there, also before anything.
+/// so no daemon starts and the data folder stays empty. Off macOS and Windows
+/// it says the uninstall is not supported there, also before anything.
 #[test]
 fn uninstall_without_a_terminal_and_without_yes_changes_nothing() {
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -118,7 +118,7 @@ fn uninstall_without_a_terminal_and_without_yes_changes_nothing() {
         let out = marsa(&data, args);
         assert_eq!(out.status.code(), Some(1), "{args:?}");
         let stderr = text(&out.stderr);
-        let code = if cfg!(target_os = "macos") {
+        let code = if cfg!(any(target_os = "macos", windows)) {
             "[uninstall_all_needs_yes]"
         } else {
             "[uninstall_not_supported]"
@@ -447,6 +447,9 @@ fn sites_are_isolated_unlinked_and_forgotten() {
 
     let out = data.marsa(&["park", code_arg]);
     assert!(out.status.success(), "{}", text(&out.stderr));
+    // A data folder whose setup never wrote the hosts file: `park` and
+    // `link` never touch it, and never ask for a password (task M4-18k2).
+    assert_eq!(text(&out.stderr), "");
     let linked = format!("Linked {} as https://api.test.\n", api.display());
     data.expect(&["link", "api", "--path", api_arg], 0, &linked, "");
     // No PHP is installed in the temp data folder.
