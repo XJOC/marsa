@@ -164,7 +164,7 @@ pub struct Check {
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// Template with `{version}`.
+    /// Template with `{version}`, `{major}`, and `{minor}`.
     pub expect_prefix: String,
 }
 
@@ -313,6 +313,7 @@ pub fn builtin(runtime: Runtime) -> Result<&'static Recipe, RecipeError> {
     static NODE: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
     static COMPOSER: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
     static CADDY: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
+    static POSTGRES: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
 
     let (cell, file, text) = match runtime {
         Runtime::Php => (&PHP, "php.toml", include_str!("../../../recipes/php.toml")),
@@ -330,6 +331,11 @@ pub fn builtin(runtime: Runtime) -> Result<&'static Recipe, RecipeError> {
             &CADDY,
             "caddy.toml",
             include_str!("../../../recipes/caddy.toml"),
+        ),
+        Runtime::Postgres => (
+            &POSTGRES,
+            "postgres.toml",
+            include_str!("../../../recipes/postgres.toml"),
         ),
     };
     cell.get_or_init(|| {
@@ -538,9 +544,13 @@ fn check_path(source: &str, path: &str, allow_empty: bool) -> Result<(), RecipeE
     }
 }
 
-/// A template may hold `{version}` and nothing else between braces.
+/// A template may hold `{version}`, `{major}`, and `{minor}`, and nothing
+/// else between braces.
 fn check_template(source: &str, template: &str) -> Result<(), RecipeError> {
-    let rest = template.replace("{version}", "");
+    let rest = template
+        .replace("{version}", "")
+        .replace("{major}", "")
+        .replace("{minor}", "");
     if rest.contains(['{', '}']) {
         return Err(RecipeError::BadTemplate {
             recipe: source.to_string(),
@@ -550,8 +560,13 @@ fn check_template(source: &str, template: &str) -> Result<(), RecipeError> {
     Ok(())
 }
 
+/// `{version}` is the whole version (`17.12.0`); `{major}` and `{minor}` are
+/// its first two numbers, for programs that print `17.12`.
 fn fill(template: &str, version: &Version) -> String {
-    template.replace("{version}", &version.to_string())
+    template
+        .replace("{version}", &version.to_string())
+        .replace("{major}", &version.major.to_string())
+        .replace("{minor}", &version.minor.to_string())
 }
 
 /// `base` joined with each `/`-separated part of a checked relative path. An
@@ -685,6 +700,82 @@ into = "bin"
             assert_eq!(listed, CONCRETE, "{runtime:?}");
             assert!(recipe.check().is_some(), "{runtime:?} has a check");
         }
+    }
+
+    #[test]
+    fn postgres_is_the_theseus_archive_with_one_top_folder_removed() {
+        let recipe = builtin(Runtime::Postgres).expect("built-in recipe is valid");
+        let listed: Vec<Platform> = recipe.platforms().map(|(p, _)| p).collect();
+        assert_eq!(listed, CONCRETE);
+        let minimums: Vec<(Option<&str>, Option<&str>)> = recipe
+            .platforms()
+            .map(|(_, entry)| (entry.min_macos(), entry.min_glibc()))
+            .collect();
+        assert_eq!(
+            minimums,
+            [
+                (Some("15.0"), None),
+                (Some("15.0"), None),
+                (None, Some("2.36")),
+                (None, Some("2.36")),
+                (None, None),
+            ]
+        );
+        let version = v("17.12.0");
+        let targets = [
+            (Platform::DarwinArm64, "aarch64-apple-darwin.tar.gz"),
+            (Platform::DarwinX64, "x86_64-apple-darwin.tar.gz"),
+            (Platform::LinuxX64, "x86_64-unknown-linux-gnu.tar.gz"),
+            (Platform::LinuxArm64, "aarch64-unknown-linux-gnu.tar.gz"),
+            (Platform::WindowsX64, "x86_64-pc-windows-msvc.zip"),
+        ];
+        for (platform, tail) in targets {
+            let entry = recipe.platform(platform).expect("platform listed");
+            let [artifact] = entry.artifacts() else {
+                panic!("one artifact expected on {platform}");
+            };
+            assert_eq!(artifact.strip_components, 1, "{platform}");
+            assert_eq!(
+                recipe
+                    .artifact_url(platform, "archive", &version)
+                    .as_deref(),
+                Some(
+                    format!(
+                        "https://github.com/theseus-rs/postgresql-binaries/releases/download/\
+                         17.12.0/postgresql-17.12.0-{tail}"
+                    )
+                    .as_str()
+                ),
+                "{platform}"
+            );
+            let exe = if platform == Platform::WindowsX64 {
+                ".exe"
+            } else {
+                ""
+            };
+            let dir = Path::new("v");
+            for name in [
+                "postgres",
+                "initdb",
+                "pg_ctl",
+                "psql",
+                "pg_dump",
+                "pg_restore",
+                "pg_isready",
+            ] {
+                assert_eq!(
+                    entry.program_path(dir, name),
+                    Some(dir.join("bin").join(format!("{name}{exe}"))),
+                    "{platform} {name}"
+                );
+            }
+        }
+        // PostgreSQL prints 17.12 for the release 17.12.0.
+        let check = recipe.check().expect("a check");
+        assert_eq!(
+            check.expected_prefix(&version),
+            "postgres (PostgreSQL) 17.12"
+        );
     }
 
     #[test]

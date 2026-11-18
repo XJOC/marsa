@@ -584,7 +584,7 @@ pub struct Model {
     pending: Vec<Pending>,
     /// The version field of each runtime, in [`Runtime::ALL`] order. Empty:
     /// the newest stable version. Kept across sessions.
-    pub install_input: [String; 4],
+    pub install_input: [String; 5],
     /// Oldest first, at most [`MAX_INSTALLS`].
     installs: Vec<Install>,
     /// The window's jobs not sent yet, in order.
@@ -1627,6 +1627,7 @@ pub fn runtime_index(runtime: Runtime) -> usize {
         Runtime::Node => 1,
         Runtime::Composer => 2,
         Runtime::Caddy => 3,
+        Runtime::Postgres => 4,
     }
 }
 
@@ -3133,7 +3134,7 @@ mod tests {
         assert!(!APP_VERSION.is_empty());
         assert_eq!(
             Runtime::ALL.map(runtime_index),
-            [0, 1, 2, 3],
+            [0, 1, 2, 3, 4],
             "the fields follow Runtime::ALL"
         );
     }

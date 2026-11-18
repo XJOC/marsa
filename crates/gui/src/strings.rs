@@ -372,6 +372,7 @@ fn example_version(runtime: Runtime) -> &'static str {
         Runtime::Node => "22",
         Runtime::Composer => "2.8",
         Runtime::Caddy => "2.11",
+        Runtime::Postgres => "18",
     }
 }
 
@@ -671,6 +672,7 @@ pub fn runtime_name(runtime: Runtime) -> &'static str {
         Runtime::Node => "Node.js",
         Runtime::Composer => "Composer",
         Runtime::Caddy => "Caddy",
+        Runtime::Postgres => "PostgreSQL",
     }
 }
 
@@ -682,6 +684,7 @@ pub const fn runtime_monogram(runtime: Runtime) -> &'static str {
         Runtime::Node => "JS",
         Runtime::Composer => "Co",
         Runtime::Caddy => "Ca",
+        Runtime::Postgres => "Pg",
     }
 }
 

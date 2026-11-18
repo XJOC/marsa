@@ -40,10 +40,11 @@ fn runtimes_on_an_empty_data_dir() {
     data.expect(
         &["runtimes"],
         0,
-        "PHP       none installed\n\
-         Node.js   none installed\n\
-         Composer  none installed\n\
-         Caddy     none installed\n",
+        "PHP         none installed\n\
+         Node.js     none installed\n\
+         Composer    none installed\n\
+         Caddy       none installed\n\
+         PostgreSQL  none installed\n",
         "",
     );
 }
@@ -58,13 +59,14 @@ fn runtimes_lists_installed_versions() {
     data.expect(
         &["runtimes"],
         0,
-        "PHP       8.3.27, 8.4.23\n\
-         Node.js   22.11.0\n\
-         Composer  2.8.4\n\
-         Caddy     none installed\n",
+        "PHP         8.3.27, 8.4.23\n\
+         Node.js     22.11.0\n\
+         Composer    2.8.4\n\
+         Caddy       none installed\n\
+         PostgreSQL  none installed\n",
         "",
     );
-    data.expect(&["runtimes", "php"], 0, "PHP       8.3.27, 8.4.23\n", "");
+    data.expect(&["runtimes", "php"], 0, "PHP         8.3.27, 8.4.23\n", "");
 }
 
 /// The real installer in the real `marsad`, up to its file lock: another
