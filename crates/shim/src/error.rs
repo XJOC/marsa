@@ -51,12 +51,9 @@ pub enum ShimError {
         source: io::Error,
     },
 
-    // Only `sys/windows.rs` builds this variant (and the tests).
-    #[cfg_attr(
-        all(not(windows), not(test)),
-        expect(dead_code, reason = "only the Windows stub returns it")
-    )]
-    #[error("the shim does not run on Windows yet")]
+    /// A system Marsa has no builds for, or the Windows stub (until task
+    /// M1-07b).
+    #[error("the shim does not run on this system yet")]
     UnsupportedPlatform,
 }
 

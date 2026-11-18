@@ -9,6 +9,7 @@ use std::process::Command;
 
 use marsa_core::caddy::CaddyPaths;
 use marsa_core::php::PhpFiles;
+use marsa_core::recipes::Platform;
 use marsa_core::resolver::Tool;
 use marsa_core::runtimes::{Runtime, RuntimesDir};
 use semver::Version;
@@ -157,31 +158,30 @@ impl Plan {
     ///
     /// `npm` and `npx` run through `node`, not through `bin/npm`: that file
     /// starts with `#!/usr/bin/env node`, which searches `PATH` and may find the
-    /// shim again or another `node`.
+    /// shim again or another `node` (and on Windows `npm.cmd` would need
+    /// `cmd.exe`).
+    ///
+    /// The paths follow the archives of `platform` ([`Layout`]): `bin/php` on
+    /// macOS and Linux, `php.exe` on Windows.
     ///
     /// # Errors
     ///
     /// `shim_composer_not_installed` for `composer` when `composer` is `None`.
     pub fn new(
         name: ShimName,
+        platform: Platform,
         runtimes: &RuntimesDir,
         version: &Version,
         composer: Option<&Version>,
         user_args: impl IntoIterator<Item = OsString>,
     ) -> Result<Self, ShimError> {
         let runtime = name.runtime();
+        let layout = Layout::of(platform);
         let version_dir = runtimes.version_dir(runtime, version);
-        let npm_bin = || {
-            version_dir
-                .join("lib")
-                .join("node_modules")
-                .join("npm")
-                .join("bin")
-        };
         let script = match name {
             ShimName::Php | ShimName::Node => None,
-            ShimName::Npm => Some(npm_bin().join("npm-cli.js")),
-            ShimName::Npx => Some(npm_bin().join("npx-cli.js")),
+            ShimName::Npm => Some(layout.npm_bin(&version_dir).join("npm-cli.js")),
+            ShimName::Npx => Some(layout.npm_bin(&version_dir).join("npx-cli.js")),
             ShimName::Composer => {
                 let composer = composer.ok_or_else(|| ShimError::ComposerNotInstalled {
                     dir: runtimes.runtime_dir(Runtime::Composer),
@@ -191,7 +191,7 @@ impl Plan {
             }
         };
         Ok(Self {
-            program: version_dir.join("bin").join(runtime.dir_name()),
+            program: layout.program(&version_dir, runtime),
             script,
             args: user_args.into_iter().collect(),
             trust: None,
@@ -237,6 +237,49 @@ impl Plan {
     }
 }
 
+/// Where the programs sit inside a version folder: how the archives of each
+/// system are laid out. The built-in recipes say the same (`programs` in
+/// `recipes/*.toml`), and a test checks that they agree: the shim does not
+/// parse the recipes before every command (170 KB more and a TOML parse).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// macOS and Linux builds: `bin/php`, `bin/node`, `lib/node_modules`.
+    Unix,
+    /// The official Windows zips: `php.exe` and `node.exe` at the top, and
+    /// `node_modules` next to them.
+    Windows,
+}
+
+impl Layout {
+    fn of(platform: Platform) -> Self {
+        match platform {
+            Platform::WindowsX64 => Layout::Windows,
+            Platform::DarwinArm64
+            | Platform::DarwinX64
+            | Platform::LinuxX64
+            | Platform::LinuxArm64
+            | Platform::Any => Layout::Unix,
+        }
+    }
+
+    /// `php` or `node` of `runtime`, in its version folder `dir`.
+    fn program(self, dir: &Path, runtime: Runtime) -> PathBuf {
+        match self {
+            Layout::Unix => dir.join("bin").join(runtime.dir_name()),
+            Layout::Windows => dir.join(format!("{}.exe", runtime.dir_name())),
+        }
+    }
+
+    /// The folder of `npm-cli.js` and `npx-cli.js`, in a Node folder `dir`.
+    fn npm_bin(self, dir: &Path) -> PathBuf {
+        let modules = match self {
+            Layout::Unix => dir.join("lib").join("node_modules"),
+            Layout::Windows => dir.join("node_modules"),
+        };
+        modules.join("npm").join("bin")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,10 +291,28 @@ mod tests {
     }
 
     fn plan(name: ShimName, version: &str, composer: Option<&str>, args: &[&str]) -> Plan {
+        plan_on(Platform::LinuxX64, name, version, composer, args)
+    }
+
+    fn plan_on(
+        platform: Platform,
+        name: ShimName,
+        version: &str,
+        composer: Option<&str>,
+        args: &[&str],
+    ) -> Plan {
         let runtimes = RuntimesDir::in_dir(Path::new("/data"));
         let composer = composer.map(v);
         let args = args.iter().map(OsString::from);
-        Plan::new(name, &runtimes, &v(version), composer.as_ref(), args).expect("valid plan")
+        Plan::new(
+            name,
+            platform,
+            &runtimes,
+            &v(version),
+            composer.as_ref(),
+            args,
+        )
+        .expect("valid plan")
     }
 
     #[test]
@@ -296,9 +357,94 @@ mod tests {
     #[test]
     fn composer_needs_an_installed_composer() {
         let runtimes = RuntimesDir::in_dir(Path::new("/data"));
-        let err = Plan::new(ShimName::Composer, &runtimes, &v("8.4.3"), None, [])
-            .expect_err("no composer version");
+        let err = Plan::new(
+            ShimName::Composer,
+            Platform::LinuxX64,
+            &runtimes,
+            &v("8.4.3"),
+            None,
+            [],
+        )
+        .expect_err("no composer version");
         assert_eq!(err.code(), "shim_composer_not_installed");
+    }
+
+    #[test]
+    fn macos_runs_the_same_layout_as_linux() {
+        for name in [
+            ShimName::Php,
+            ShimName::Node,
+            ShimName::Npm,
+            ShimName::Composer,
+        ] {
+            let mac = plan_on(Platform::DarwinArm64, name, "22.11.0", Some("2.8.4"), &[]);
+            assert_eq!(mac, plan(name, "22.11.0", Some("2.8.4"), &[]), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn windows_runs_the_exe_files_of_the_zip_layout() {
+        let on =
+            |name, version| plan_on(Platform::WindowsX64, name, version, Some("2.8.4"), &["x"]);
+        let php = Path::new("/data/runtimes/php/8.4.3");
+        let node = Path::new("/data/runtimes/node/22.11.0");
+        let npm_bin = node.join("node_modules").join("npm").join("bin");
+
+        let plan = on(ShimName::Php, "8.4.3");
+        assert_eq!(plan.program, php.join("php.exe"));
+        assert_eq!(plan.script, None);
+        assert_eq!(plan.args, ["x"]);
+
+        let plan = on(ShimName::Composer, "8.4.3");
+        assert_eq!(plan.program, php.join("php.exe"));
+        let phar = Path::new("/data/runtimes/composer/2.8.4/composer.phar");
+        assert_eq!(plan.script.as_deref(), Some(phar));
+
+        let plan = on(ShimName::Node, "22.11.0");
+        assert_eq!(plan.program, node.join("node.exe"));
+        assert_eq!(plan.script, None);
+
+        for (name, script) in [(ShimName::Npm, "npm-cli.js"), (ShimName::Npx, "npx-cli.js")] {
+            let plan = on(name, "22.11.0");
+            assert_eq!(plan.program, node.join("node.exe"), "{name:?}");
+            assert_eq!(plan.script, Some(npm_bin.join(script)), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn every_path_is_where_the_recipe_puts_it() {
+        use marsa_core::recipes;
+        let runtimes = RuntimesDir::in_dir(Path::new("/data"));
+        let recipe_path = |runtime, platform, version: &str, program| {
+            let dir = runtimes.version_dir(runtime, &v(version));
+            recipes::builtin(runtime)
+                .expect("built-in recipe is valid")
+                .platform(platform)
+                .and_then(|layout| layout.program_path(&dir, program))
+                .expect("the recipe names the program")
+        };
+        for platform in [
+            Platform::DarwinArm64,
+            Platform::DarwinX64,
+            Platform::LinuxX64,
+            Platform::LinuxArm64,
+            Platform::WindowsX64,
+        ] {
+            let on = |name| plan_on(platform, name, "8.4.3", Some("2.8.4"), &[]);
+            let php = recipe_path(Runtime::Php, platform, "8.4.3", "php");
+            let node = recipe_path(Runtime::Node, platform, "8.4.3", "node");
+            let phar = recipe_path(Runtime::Composer, platform, "2.8.4", "composer");
+            assert_eq!(on(ShimName::Php).program, php, "{platform:?}");
+            assert_eq!(on(ShimName::Node).program, node, "{platform:?}");
+            assert_eq!(on(ShimName::Composer).program, php, "{platform:?}");
+            assert_eq!(on(ShimName::Composer).script, Some(phar), "{platform:?}");
+            for (name, program) in [(ShimName::Npm, "npm-cli"), (ShimName::Npx, "npx-cli")] {
+                let plan = on(name);
+                assert_eq!(plan.program, node, "{platform:?}");
+                let script = recipe_path(Runtime::Node, platform, "8.4.3", program);
+                assert_eq!(plan.script, Some(script), "{platform:?} {name:?}");
+            }
+        }
     }
 
     // Only Unix lets an argument hold bytes that are not UTF-8.
@@ -308,8 +454,15 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let raw = OsString::from_vec(vec![b'a', 0xff, b'b']);
         let runtimes = RuntimesDir::in_dir(Path::new("/data"));
-        let plan = Plan::new(ShimName::Php, &runtimes, &v("8.4.3"), None, [raw.clone()])
-            .expect("valid plan");
+        let plan = Plan::new(
+            ShimName::Php,
+            Platform::LinuxX64,
+            &runtimes,
+            &v("8.4.3"),
+            None,
+            [raw.clone()],
+        )
+        .expect("valid plan");
         assert_eq!(plan.args, [raw]);
     }
 
@@ -539,8 +692,15 @@ mod tests {
     fn check_reports_a_missing_program_or_script() {
         let data = tempfile::TempDir::new().expect("create temp dir");
         let runtimes = RuntimesDir::in_dir(data.path());
-        let plan =
-            Plan::new(ShimName::Npm, &runtimes, &v("22.11.0"), None, []).expect("valid plan");
+        let plan = Plan::new(
+            ShimName::Npm,
+            Platform::LinuxX64,
+            &runtimes,
+            &v("22.11.0"),
+            None,
+            [],
+        )
+        .expect("valid plan");
         let script = plan.script.clone().expect("npm has a script");
         let missing = |plan: &Plan| match plan.check() {
             Err(ShimError::ProgramMissing { path }) => Some(path),
