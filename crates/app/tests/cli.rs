@@ -154,7 +154,7 @@ fn help_and_version_work() {
 }
 
 /// For the daemon to start or stop, and for a followed log to end. Longer
-/// than `marsa daemon stop`'s own 17 s.
+/// than `marsa daemon stop`'s own 30 s.
 const LIMIT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(20);
 

@@ -953,6 +953,7 @@ pub fn watch(
         cancel,
         task,
         runtime,
+        stop_limit,
     } = handle;
     let watcher = Watcher {
         lines,
@@ -969,6 +970,7 @@ pub fn watch(
         cancel,
         task,
         runtime,
+        stop_limit,
     }
 }
 
@@ -2290,6 +2292,7 @@ mod tests {
             cancel,
             task: tokio::spawn(async move { stopped.cancelled().await }),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(&fpm_id(PHP84)))),
+            stop_limit: Duration::ZERO,
         };
         let program = PathBuf::from(PROGRAM);
         (

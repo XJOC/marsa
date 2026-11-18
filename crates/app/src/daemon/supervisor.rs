@@ -36,6 +36,11 @@ const STABLE_RUN: Duration = Duration::from_secs(60);
 /// The size at which a log file moves to `<name>.1`: 10 MiB.
 pub const LOG_FILE_LIMIT: u64 = 10 * 1024 * 1024;
 
+/// What a stop needs besides the waits of its method: a `/bin/kill` per
+/// step (milliseconds; at most 2 s each if one hangs), the kill, and up to
+/// [`DRAIN_WAIT`] for the last lines.
+pub const STOP_MARGIN: Duration = Duration::from_secs(3);
+
 /// The state and recent output of one service.
 #[derive(Debug)]
 pub struct ServiceRuntime {
@@ -68,6 +73,10 @@ pub struct ServiceHandle {
     pub task: JoinHandle<()>,
     /// Short reads only: never hold the lock across `.await`.
     pub runtime: Arc<Mutex<ServiceRuntime>>,
+    /// How long a stop may take: the waits of the spec's stop method, plus
+    /// [`STOP_MARGIN`]. A shutdown waits at least this long before it aborts
+    /// the task (`Daemon::stop_procs`), so PostgreSQL gets its SIGQUIT.
+    pub stop_limit: Duration,
 }
 
 impl ServiceHandle {
@@ -134,12 +143,14 @@ impl Supervisor {
             events,
             log: Arc::new(Mutex::new(open_log(&spec.id, logs_dir))),
         };
+        let stop_limit = spec.stop.total_wait().saturating_add(STOP_MARGIN);
         let cancel = CancellationToken::new();
         let task = tokio::spawn(supervise(spec, shared, cancel.clone()));
         Ok(ServiceHandle {
             cancel,
             task,
             runtime,
+            stop_limit,
         })
     }
 }
