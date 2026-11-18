@@ -79,7 +79,7 @@ pub(super) async fn run<F: Fetch>(
     // Before any download: an old system is refused at once.
     let found = match (&env.os, programs.min_macos().or(programs.min_glibc())) {
         (Some(os), _) => os.clone(),
-        (None, Some(_)) => plan::OsVersions::probe(),
+        (None, Some(_)) => plan::OsVersions::probe().await,
         (None, None) => plan::OsVersions::default(),
     };
     plan::check_minimum(runtime, programs, &found)?;
