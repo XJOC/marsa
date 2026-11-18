@@ -35,6 +35,7 @@
 //! name goes through systemd-resolved and the `marsa0` link. Ports and
 //! trust have no Linux check yet.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -45,9 +46,10 @@ use marsa_core::client::{ClientError, DaemonClient};
 use marsa_core::config::{self, ConfigPaths};
 use marsa_core::doctor::{self, Check, Installed, Pass, Ports, Problem, Skip, Verdict};
 use marsa_core::platform::probe;
+use marsa_core::ports;
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::{Runtime, RuntimesDir};
-use marsa_core::types::{Health, ServiceState, Site};
+use marsa_core::types::{Health, PortHolder, ServiceState, Site};
 use tokio_util::sync::CancellationToken;
 
 use super::daemon::{ClientFailure, failure};
@@ -71,6 +73,8 @@ struct FromDaemon {
     /// Its health and port, or the code of the client error.
     health: Result<(Health, u16), String>,
     caddy: Option<ServiceState>,
+    /// Caddy's PID, while it runs.
+    caddy_pid: Option<u32>,
     /// Whether any site is secure. `None` if not known.
     secure_site: Option<bool>,
     /// The host names of the sites. `None` if not known.
@@ -111,7 +115,7 @@ pub async fn run(data_dir: &Path) -> ExitCode {
     show(Check::Caddy, doctor::caddy(running, caddy, caddy_installed));
     // The checks of the redirect, the resolver file, and the user's trust
     // are macOS ones (ADR 0008, ADR 0015). Linux and Windows set these up
-    // in other ways, which have no check yet.
+    // in other ways, each with checks of its own.
     if macos {
         let name = doctor::probe_name(probe::random());
         show(Check::Dns, dns(&name, running));
@@ -125,6 +129,17 @@ pub async fn run(data_dir: &Path) -> ExitCode {
         for check in [Check::Ports, Check::Trust] {
             show(check, Verdict::Skip(Skip::NotOnThisSystem));
         }
+    } else if windows {
+        let names = daemon.site_names.as_deref();
+        let block = linux_dns::read_block(&windows_system32().join(r"drivers\etc\hosts"));
+        show(Check::Dns, doctor::hosts(block.as_ref(), names));
+        let caddy_running = caddy == Some(&ServiceState::Running);
+        let caddy = running.then(|| daemon.caddy_pid.filter(|_| caddy_running));
+        show(
+            Check::Ports,
+            doctor::windows_ports(windows_port_holders(), caddy),
+        );
+        show(Check::Trust, windows_trust(data_dir));
     } else {
         for check in [Check::Dns, Check::Ports, Check::Trust] {
             show(check, Verdict::Skip(Skip::NotOnThisSystem));
@@ -145,6 +160,7 @@ async fn ask_daemon(data_dir: &Path) -> FromDaemon {
     let down = |err: ClientError| FromDaemon {
         health: Err(failure(&err, data_dir, None).code),
         caddy: None,
+        caddy_pid: None,
         secure_site: None,
         site_names: None,
     };
@@ -156,9 +172,10 @@ async fn ask_daemon(data_dir: &Path) -> FromDaemon {
         Ok(health) => health,
         Err(err) => return down(err),
     };
-    let caddy = answer(client.services().await, data_dir)
-        .and_then(|services| services.into_iter().find(|service| service.id == CADDY_ID))
-        .map(|service| service.state);
+    let caddy_status = answer(client.services().await, data_dir)
+        .and_then(|services| services.into_iter().find(|service| service.id == CADDY_ID));
+    let caddy_pid = caddy_status.as_ref().and_then(|service| service.pid);
+    let caddy = caddy_status.map(|service| service.state);
     let sites = answer(client.sites().await, data_dir);
     let secure_site = sites
         .as_ref()
@@ -167,6 +184,7 @@ async fn ask_daemon(data_dir: &Path) -> FromDaemon {
     FromDaemon {
         health: Ok((health, client.port())),
         caddy,
+        caddy_pid,
         secure_site,
         site_names,
     }
@@ -307,6 +325,84 @@ fn windows_roots() -> Result<(Vec<Vec<u8>>, usize), String> {
     Err("not Windows".to_owned())
 }
 
+/// Windows' `System32` folder, from `SystemRoot`, which Windows sets for every
+/// process (task M4-19o).
+fn windows_system32() -> PathBuf {
+    let root =
+        std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    root.join("System32")
+}
+
+/// Windows: who listens on 80 and 443, from `netstat -ano`, each named by
+/// `tasklist`. Both run from `System32`, with no shell. `None` if netstat
+/// could not run or listed no listener.
+fn windows_port_holders() -> Option<Vec<PortHolder>> {
+    let system = windows_system32();
+    let netstat = std::process::Command::new(system.join("NETSTAT.EXE"))
+        .arg("-ano")
+        .output()
+        .map_err(|err| tracing::debug!(error = %err, "cannot run netstat"))
+        .ok()
+        .filter(|output| output.status.success())?;
+    let listeners = ports::parse_netstat_windows(&String::from_utf8_lossy(&netstat.stdout));
+    if listeners.is_empty() {
+        return None;
+    }
+    let mut names: BTreeMap<u32, Option<String>> = BTreeMap::new();
+    let mut name_of = |pid: u32| {
+        names
+            .entry(pid)
+            .or_insert_with(|| {
+                let filter = format!("PID eq {pid}");
+                std::process::Command::new(system.join("tasklist.exe"))
+                    .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
+                    .output()
+                    .ok()
+                    .and_then(|out| ports::parse_tasklist(&String::from_utf8_lossy(&out.stdout)))
+            })
+            .clone()
+    };
+    let holders = [80, 443]
+        .into_iter()
+        .flat_map(|port| ports::holders(&listeners, port))
+        .map(|listener| {
+            let process = listener.pid.and_then(&mut name_of);
+            let app = process
+                .as_deref()
+                .and_then(ports::known_app)
+                .map(str::to_owned);
+            PortHolder {
+                port: listener.port,
+                address: listener.address.clone(),
+                process,
+                pid: listener.pid,
+                user: None,
+                command: None,
+                app,
+            }
+        })
+        .collect();
+    Some(holders)
+}
+
+/// Windows: whether Marsa's CA root is among the roots Windows trusts, read
+/// as for PHP's bundle (setup puts it in `LocalMachine\Root`).
+fn windows_trust(data_dir: &Path) -> Verdict {
+    let root = std::fs::read_to_string(CaddyPaths::in_dir(data_dir).ca_root()).ok();
+    let want = root
+        .as_deref()
+        .and_then(marsa_core::helper::certificate_sha256);
+    let trusted = windows_roots().ok().map(|(ders, _)| {
+        want.as_ref().is_some_and(|want| {
+            ders.iter().any(|der| {
+                let pem = marsa_core::caddy::pem_certificates(std::slice::from_ref(der));
+                marsa_core::helper::certificate_sha256(&pem).as_ref() == Some(want)
+            })
+        })
+    });
+    doctor::trust(root.is_some(), trusted)
+}
+
 /// The Visual C++ runtime that Windows reports; none elsewhere.
 fn vc_runtime_version() -> Option<(u32, u32, u32)> {
     // `#[cfg]` outside `platform`: the registry is Windows'.
@@ -320,7 +416,7 @@ fn vc_runtime_version() -> Option<(u32, u32, u32)> {
 /// PATH setting, not of `~/.zshrc`.
 pub fn render(check: Check, verdict: &Verdict, data_dir: &Path, windows: bool) -> String {
     match verdict {
-        Verdict::Pass(pass) => strings::doctor_pass(&passed(pass, data_dir)),
+        Verdict::Pass(pass) => strings::doctor_pass(&passed(pass, data_dir, windows)),
         Verdict::Fail(problem) => {
             let (text, fix) = problem_text(problem, data_dir, windows);
             strings::doctor_fail(&text, &fix)
@@ -329,7 +425,7 @@ pub fn render(check: Check, verdict: &Verdict, data_dir: &Path, windows: bool) -
     }
 }
 
-fn passed(pass: &Pass, data_dir: &Path) -> String {
+fn passed(pass: &Pass, data_dir: &Path, windows: bool) -> String {
     match pass {
         Pass::Daemon { version, pid, port } => {
             strings::daemon_running(&printable(version), *pid, *port)
@@ -346,6 +442,7 @@ fn passed(pass: &Pass, data_dir: &Path) -> String {
         } => strings::doctor_system_roots_ok(*count, *left_out, *marsa, *age_days),
         Pass::Caddy => strings::DOCTOR_CADDY_OK.to_owned(),
         Pass::Dns => strings::DOCTOR_DNS_OK.to_owned(),
+        Pass::Hosts if windows => strings::DOCTOR_HOSTS_OK_WINDOWS.to_owned(),
         Pass::Hosts => strings::DOCTOR_HOSTS_OK.to_owned(),
         Pass::Ports => strings::DOCTOR_PORTS_OK.to_owned(),
         Pass::Trust => strings::DOCTOR_TRUST_OK.to_owned(),
@@ -402,11 +499,17 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
         Problem::LinkNoAnswer => pair(strings::DOCTOR_DNS_NO_ANSWER, strings::DOCTOR_LINK_SETUP),
         Problem::HostsMissing { names } => {
             let names: Vec<String> = names.iter().map(|name| printable(name)).collect();
-            (
-                strings::doctor_hosts_missing(&names),
-                strings::DOCTOR_HOSTS_SETUP.to_owned(),
-            )
+            let fix = if windows {
+                strings::DOCTOR_HOSTS_SYNC_WINDOWS
+            } else {
+                strings::DOCTOR_HOSTS_SETUP
+            };
+            (strings::doctor_hosts_missing(&names), fix.to_owned())
         }
+        Problem::HostsBlockGone if windows => pair(
+            strings::DOCTOR_HOSTS_GONE_WINDOWS,
+            strings::DOCTOR_HOSTS_BACK_WINDOWS,
+        ),
         Problem::HostsBlockGone => pair(strings::DOCTOR_HOSTS_GONE, strings::DOCTOR_HOSTS_BACK),
         Problem::DnsWrongAddress { addresses } => {
             let list: Vec<String> = addresses.iter().map(ToString::to_string).collect();
@@ -421,11 +524,24 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
                 text.push_str("\n  ");
                 text.push_str(&port_held(holder));
             }
-            (text, strings::DOCTOR_FREE_PORTS.to_owned())
+            let fix = if windows {
+                strings::DOCTOR_FREE_PORTS_WINDOWS
+            } else {
+                strings::DOCTOR_FREE_PORTS
+            };
+            (text, fix.to_owned())
         }
-        Problem::PortsNotRouted { ports } => (
-            strings::doctor_ports_not_routed(ports),
-            strings::DOCTOR_PORTS_SETUP.to_owned(),
+        Problem::PortsNotRouted { ports } => {
+            let fix = if windows {
+                strings::DOCTOR_CADDY_PORTS_WINDOWS
+            } else {
+                strings::DOCTOR_PORTS_SETUP
+            };
+            (strings::doctor_ports_not_routed(ports), fix.to_owned())
+        }
+        Problem::CaUntrusted if windows => pair(
+            strings::DOCTOR_UNTRUSTED,
+            strings::DOCTOR_TRUST_SETUP_WINDOWS,
         ),
         Problem::CaUntrusted => pair(strings::DOCTOR_UNTRUSTED, strings::DOCTOR_TRUST_SETUP),
         Problem::VcRuntimeMissing => pair(strings::DOCTOR_VC_MISSING, strings::DOCTOR_VC_INSTALL),
@@ -714,6 +830,69 @@ mod tests {
             "- Marsa's certificate authority: not checked. It does not exist yet: Caddy makes \
              it when it first starts. Run \"marsa setup\" to make it and trust it."
         );
+    }
+
+    /// Windows (task M4-19o): the hosts, ports, and trust lines speak of
+    /// Windows, not of /etc/hosts, pf, or the Mac's dialog.
+    #[test]
+    fn windows_system_lines_name_windows_fixes() {
+        let data = data();
+        let text = render(Check::Dns, &Verdict::Pass(Pass::Hosts), &data, true);
+        assert_eq!(text, "✓ Every site has its line in the hosts file.");
+        let missing = Verdict::Fail(Problem::HostsMissing {
+            names: vec!["shop.test".to_owned()],
+        });
+        let text = render(Check::Dns, &missing, &data, true);
+        assert!(
+            text.contains("helper service") && !text.contains("password"),
+            "{text}"
+        );
+        let gone = render(
+            Check::Dns,
+            &Verdict::Fail(Problem::HostsBlockGone),
+            &data,
+            true,
+        );
+        assert!(
+            !gone.contains("/etc/hosts") && gone.contains("marsa setup"),
+            "{gone}"
+        );
+        let iis = PortHolder {
+            port: 80,
+            address: "0.0.0.0".to_owned(),
+            process: Some("System".to_owned()),
+            pid: Some(4),
+            user: None,
+            command: None,
+            app: None,
+        };
+        let held = Verdict::Fail(Problem::PortsHeld { holders: vec![iis] });
+        let text = render(Check::Ports, &held, &data, true);
+        assert!(
+            text.contains("System (PID 4)") && text.contains("W3SVC"),
+            "{text}"
+        );
+        let quiet = Verdict::Fail(Problem::PortsNotRouted { ports: vec![80] });
+        let text = render(Check::Ports, &quiet, &data, true);
+        assert!(text.contains("marsa logs caddy"), "{text}");
+        let untrusted = render(
+            Check::Trust,
+            &Verdict::Fail(Problem::CaUntrusted),
+            &data,
+            true,
+        );
+        assert!(
+            untrusted.contains("UAC") && !untrusted.contains("Mac"),
+            "{untrusted}"
+        );
+        // macOS keeps its own lines.
+        let mac = render(
+            Check::Trust,
+            &Verdict::Fail(Problem::CaUntrusted),
+            &data,
+            false,
+        );
+        assert!(mac.contains("Mac"), "{mac}");
     }
 
     /// Windows: the roots' lines, with the count and the cause.

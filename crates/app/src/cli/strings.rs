@@ -1671,6 +1671,15 @@ pub const DOCTOR_LINK_SETUP: &str = "Run \"marsa setup\": it sends .test names t
      systemd-resolved sends .test names to Marsa.";
 /// Linux on the hosts way (task M4-18k3).
 pub const DOCTOR_HOSTS_OK: &str = "Every site has its line in /etc/hosts.";
+/// Windows (task M4-19o): the hosts file is Windows' own, and marsad adds the
+/// names through the helper service with no prompt.
+pub const DOCTOR_HOSTS_OK_WINDOWS: &str = "Every site has its line in the hosts file.";
+pub const DOCTOR_HOSTS_SYNC_WINDOWS: &str = "marsad adds new sites through Marsa's helper service \
+     within a minute. If they stay missing, run \"marsa setup\"; marsad's log says why the \
+     service refused them.";
+pub const DOCTOR_HOSTS_GONE_WINDOWS: &str = "Marsa's lines are not in the hosts file, so .test \
+     names do not resolve: \"marsa setup\" has not run, or another program wrote the file again.";
+pub const DOCTOR_HOSTS_BACK_WINDOWS: &str = "Run \"marsa setup\" to put them back.";
 pub const DOCTOR_HOSTS_SETUP: &str = "Run \"marsa setup\" to add them, with one password \
      prompt. From then on \"marsa park\" and \"marsa link\" add new sites themselves; a site \
      that appears in a parked folder waits for one of these commands.";
@@ -1763,6 +1772,14 @@ pub const DOCTOR_DNS_FOREIGN: &str = "Another tool answers .test names, such as 
 pub const DOCTOR_PORTS_HELD: &str = "Another program uses port 80 or 443:";
 pub const DOCTOR_FREE_PORTS: &str = "Stop that program, or turn off its web server, then run \
      \"marsa setup\".";
+/// Windows: Caddy listens on 80 and 443 itself; IIS and other HTTP.sys
+/// servers show as `System` (PID 4).
+pub const DOCTOR_FREE_PORTS_WINDOWS: &str = "Stop that program. For IIS, run \"Stop-Service \
+     W3SVC\" in PowerShell as administrator, and set the \"World Wide Web Publishing Service\" to \
+     Manual. For \"System\" (PID 4), another HTTP.sys server holds the port: \"netsh http show \
+     servicestate\" names it.";
+pub const DOCTOR_CADDY_PORTS_WINDOWS: &str = "Caddy runs but does not listen on port 80. Its log \
+     says why: run \"marsa logs caddy\".";
 
 pub fn doctor_ports_not_routed(ports: &[u16]) -> String {
     match ports {
@@ -1777,6 +1794,8 @@ pub const DOCTOR_UNTRUSTED: &str =
     "Marsa's certificate authority is not trusted, so browsers warn on https://*.test sites.";
 pub const DOCTOR_TRUST_SETUP: &str = "Run \"marsa setup\" in Terminal on the Mac's desktop and \
      approve the dialog macOS shows.";
+pub const DOCTOR_TRUST_SETUP_WINDOWS: &str = "Run \"marsa setup\" and answer Yes to the Windows \
+     prompt (UAC).";
 
 pub fn doctor_shims_missing(shims: &Path) -> String {
     format!(
