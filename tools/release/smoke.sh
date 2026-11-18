@@ -89,6 +89,15 @@ if [[ "$PLATFORM" == darwin-* ]]; then
   done
 fi
 
+# Windows: no program may need the Visual C++ runtime, which a clean Windows
+# does not have (task M5-27). The runner has it, so running them proves
+# nothing about that.
+if [ "$PLATFORM" = windows-x64 ]; then
+  for file in "$DIR"/*.exe; do
+    check "$(basename "$file") needs no Visual C++ runtime" needs_no_vc_runtime "$file"
+  done
+fi
+
 if [ "$failed" -eq 0 ]; then echo passed > "$OUT/smoke-status.txt"; else echo FAILED > "$OUT/smoke-status.txt"; fi
 echo "Smoke tests: $(cat "$OUT/smoke-status.txt")"
 exit "$failed"

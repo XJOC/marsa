@@ -87,6 +87,25 @@ jobs:
       - name: Build the shim
         run: cargo build -p marsa-shim --release
 
+      # Windows: no program may import the Visual C++ runtime (task M5-27). A
+      # clean Windows does not have it, and the runner does, so only the
+      # imports show it. The test build left the debug programs; the shim is
+      # the release one.
+      - name: Check that no Windows program needs the Visual C++ runtime
+        if: runner.os == 'Windows'
+        run: |
+          source tools/release/lib.sh
+          failed=0
+          for file in target/debug/marsa.exe target/release/marsa-shim.exe target/debug/marsad.exe target/debug/marsa-helper.exe; do
+            if [ ! -f "$file" ]; then
+              # marsa.exe and the shim are always built here; the others when a test needs them.
+              case "$file" in *marsa.exe | *marsa-shim.exe) echo "FAIL: $file was not built"; failed=1 ;; *) echo "skip: $file was not built" ;; esac
+              continue
+            fi
+            if needs_no_vc_runtime "$file"; then echo "ok: $file"; else failed=1; fi
+          done
+          exit "$failed"
+
       # The README command only prints FAIL; here the job must fail too. The
       # tree is saved first: `grep -q` would close the pipe early and the
       # SIGPIPE would look like "no match" under `bash -eo pipefail`.
