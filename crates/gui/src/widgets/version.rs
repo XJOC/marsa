@@ -567,9 +567,12 @@ impl<'a, T: Copy + PartialEq> VersionMenu<'a, T> {
     fn draw(self, ui: &mut Ui) -> InnerResponse<Option<Setting<T>>> {
         let theme = Theme::of(ui.ctx());
         ui.spacing_mut().item_spacing.x = theme.space.s2;
-        // Left to right until Arabic ships (rtl.md).
+        // A line as high as the button, so a cell of a table centers it:
+        // `ui.horizontal` is only as high as a label, and the button would
+        // hang below the middle of the row.
+        let line = vec2(ui.available_width(), theme.size.control_in_row);
         let (response, chosen) = ui
-            .horizontal(|ui| {
+            .allocate_ui_with_layout(line, Direction::CURRENT.row(), |ui| {
                 let (response, width) = self.button(ui, theme);
                 let mut chosen = None;
                 Popup::menu(&response).show(|ui| {

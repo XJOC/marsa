@@ -203,6 +203,13 @@ impl<'a, 'b> Row<'a, 'b> {
     /// the row: a site's name in `type.body.strong`, and its folder in
     /// `caption`. A line too long for the column ends in an ellipsis.
     pub fn two_lines(&mut self, primary: &str, secondary: &str) {
+        self.two_lines_hover(primary, secondary, secondary);
+    }
+
+    /// [`Row::two_lines`] for a second line that is shortened for the eye
+    /// (`~/Code/shop`): `full` is the text a screen reader hears and the
+    /// tooltip shows while the pointer rests on the cell.
+    pub fn two_lines_hover(&mut self, primary: &str, secondary: &str, full: &str) {
         let theme = self.theme;
         self.cell(|ui| {
             let width = ui.available_width();
@@ -225,8 +232,11 @@ impl<'a, 'b> Row<'a, 'b> {
             let below = top + vec2(0.0, first.size().y);
             painter.galley(top, first, theme.color.ink);
             painter.galley(below, second, theme.color.mute);
-            let label = format!("{primary}, {secondary}");
+            let label = format!("{primary}, {full}");
             response.widget_info(|| WidgetInfo::labeled(Role::Label, true, &label));
+            if full != secondary {
+                response.on_hover_text(full);
+            }
         });
     }
 

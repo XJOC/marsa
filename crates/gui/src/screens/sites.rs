@@ -1,450 +1,1721 @@
-//! Sites: park and link, the sites table, the parked and the skipped
-//! folders.
+//! Sites (layout.md, Screens): the table of sites with the PHP version and
+//! why it is that one, the connection, and Open; the search field; and the
+//! "Add site…" menu. Under the table, the parked folders and the folders that
+//! did not become a site.
+//!
+//! The screen is two functions, like Home. [`view`] reads the [`Model`] and
+//! decides what Sites says: pure, so the tests assert it without a window.
+//! [`show`] draws that [`SitesView`] with the widgets and returns what the
+//! user did as [`Action`]s (code.md, State). [Laravel: `view` is the
+//! controller that builds the data; `show` is the Blade template.]
+//!
+//! Until the site's own page ships (task M5-D7), what a site's row can do
+//! besides Open stays in the row's menu (⋯): HTTPS or HTTP, and Unlink.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use eframe::egui;
-use egui_extras::{Column, Size, StripBuilder, TableBuilder};
-use marsa_core::types::{Site, SkippedFolder};
+use eframe::egui::os::OperatingSystem;
+use eframe::egui::{Id, Key, KeyboardShortcut, Label, Modifiers, Response, RichText, Ui, vec2};
+use marsa_core::types::{Site, SkippedFolder, Source};
 
-use crate::bridge::Command;
-use crate::model::{self, Choice, HostsSync, Model, Pick, Removal, Setup, SitesNotice};
+use crate::model::{Action, Choice, HostsSync, Model, Pick, Removal, Route, Setup, SitesNotice};
+use crate::screens::home::{PhpChoice, php_choices};
 use crate::strings;
 use crate::theme::page::{
-    NAME_FIELD_WIDTH, PHP_COLUMN_WIDTH, SITE_FOLDER_COLUMN_MIN, SITE_KIND_COLUMN_MIN,
-    SITE_NAME_COLUMN_MAX, SITE_NAME_COLUMN_MIN, SITE_URL_COLUMN_MAX, SITE_URL_COLUMN_MIN,
-    SITES_MIN_LINES,
+    NAME_FIELD_WIDTH, SITES_CONNECTION_COLUMN, SITES_FOLDER_ROWS, SITES_FORGET_COLUMN,
+    SITES_OPEN_COLUMN, SITES_PHP_COLUMN, SITES_SEARCH_WIDTH, SITES_WHY_COLUMN,
+};
+use crate::theme::{Section, Theme};
+use crate::widgets::table::{empty_state_button, padded_card};
+use crate::widgets::{
+    Button, Field, Glyph, Icon, Menu, MenuItem, NoticeKind, RowHeight, Setting, Table, TableColumn,
+    VersionMenu,
 };
 
-/// The most skipped folders shown at once; more scroll.
-const SKIPPED_ROWS: usize = 4;
-/// The most parked folders shown at once; more scroll.
-const PARKED_ROWS: usize = 3;
-
-/// What the user did in the sites section.
-pub enum SitesAction {
-    Send(Command),
-    /// Pressed "Park a folder…" or "Link a folder…": the dialog opens.
-    Pick(Pick),
+/// What Sites says.
+#[derive(Debug, PartialEq)]
+pub struct SitesView<'a> {
+    /// The text of the search field, as typed.
+    pub search: &'a str,
+    /// Why "Add site…" cannot be pressed now.
+    pub add_off: Option<&'static str>,
+    /// The form that names a folder picked to link.
+    pub link: Option<LinkView<'a>>,
+    /// The line about the last sites action.
+    pub line: Option<NoticeLine>,
+    /// Linux: the sites the hosts file lacks.
+    pub hosts: Option<HostsView>,
+    /// "Unlinking shop.test…", while the daemon removes it.
+    pub removing: Option<String>,
+    pub list: List<'a>,
+    /// The installed PHP versions, oldest first: the entries of every
+    /// version menu after the first row.
+    pub php: Vec<PhpChoice>,
+    pub parked: &'a [PathBuf],
+    /// The user's home folder: a folder under it is shown as `~/…`, with the
+    /// full path in a tooltip. Display only.
+    pub home: Option<&'a Path>,
+    /// Why a parked folder cannot be forgotten now.
+    pub forget_off: Option<&'static str>,
+    pub skipped: &'a [SkippedFolder],
 }
 
-/// What the user did in the sites table.
-enum SiteAction {
-    /// Flipped the HTTPS switch.
-    Secure(Command),
-    /// Picked an entry in the PHP list of the site `site`.
-    Php { site: String, choice: Choice },
-    /// Pressed Unlink for this site: the confirmation opens.
-    Unlink(String),
+/// The table, or what stands in its place.
+#[derive(Debug, PartialEq)]
+pub enum List<'a> {
+    /// No daemon: there is nothing to list.
+    Offline,
+    /// No site at all: one sentence and the button that adds one.
+    Empty,
+    /// The search matches none of the sites.
+    NoMatch(&'a str),
+    Rows(Vec<SiteRow<'a>>),
 }
 
-/// The sites section: the park and link buttons, the link form, the sites
-/// table, the parked folders, and the folders that did not become a site.
-/// `picking`: a folder dialog is open. Returns what the user asked for, if
-/// anything; an Unlink or Forget press opens the confirmation instead.
-// TODO(M5-D6): return `Action`s instead of calling the model's methods
-// (code.md, State), with the redesign of this screen.
-pub fn show(ui: &mut egui::Ui, model: &mut Model, picking: bool) -> Option<SitesAction> {
-    let connected = model.is_connected();
-    let mut action = None;
-    ui.horizontal(|ui| {
-        ui.strong(strings::SITES);
-        let enabled = connected && !picking;
-        for (pick, text, hint) in [
-            (Pick::Park, strings::PARK_BUTTON, strings::PARK_BUTTON_HINT),
-            (Pick::Link, strings::LINK_BUTTON, strings::LINK_BUTTON_HINT),
-        ] {
-            let clicked = ui
-                .add_enabled(enabled, egui::Button::new(text))
-                .on_hover_text(hint)
-                .on_disabled_hover_text(if picking { strings::PICKING_HINT } else { hint })
-                .clicked();
-            if clicked {
-                action = Some(SitesAction::Pick(pick));
+#[derive(Debug, PartialEq)]
+pub struct SiteRow<'a> {
+    pub name: &'a str,
+    pub root: &'a Path,
+    pub php: PhpCell<'a>,
+    /// Served over HTTPS.
+    pub https: bool,
+    pub unlink: Unlink<'a>,
+}
+
+/// The version menu of a row.
+#[derive(Debug, PartialEq)]
+pub struct PhpCell<'a> {
+    /// What the button shows: `8.4`, or a dash for a site with no PHP.
+    pub shown: String,
+    /// The entry the menu checks: the site's own setting, or its files.
+    pub setting: Setting<usize>,
+    pub reason: Option<Reason<'a>>,
+    /// Why the menu cannot open.
+    pub off: Option<&'static str>,
+}
+
+/// Why a site has the PHP version its row shows (components.md, Version
+/// menu): where `Site::php_source` says it came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reason<'a> {
+    /// The site's own setting, saved by Marsa.
+    Site,
+    /// `.php-version` or `composer.json`: the file's path.
+    File(&'a Path),
+    /// The global default.
+    Default,
+    /// The user cleared the site's own setting and the daemon has not
+    /// answered: the files decide, and the window does not know the version.
+    Files,
+    /// No PHP is installed.
+    NoPhpInstalled,
+    /// PHP is installed, and no version fits what the site asks for.
+    NoMatch,
+}
+
+impl Reason<'_> {
+    pub fn text(&self) -> String {
+        match self {
+            Self::Site => strings::REASON_SITE.to_owned(),
+            Self::File(path) => strings::reason_file(path),
+            Self::Default => strings::REASON_DEFAULT.to_owned(),
+            Self::Files => strings::REASON_FILES.to_owned(),
+            Self::NoPhpInstalled => strings::REASON_NO_PHP.to_owned(),
+            Self::NoMatch => strings::REASON_NO_MATCH.to_owned(),
+        }
+    }
+}
+
+/// Whether the menu of a row can unlink the site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unlink<'a> {
+    Allowed,
+    /// Another removal runs.
+    Busy,
+    /// The site comes from this parked folder: forget the folder instead.
+    Parked(&'a Path),
+}
+
+#[derive(Debug, PartialEq)]
+pub struct LinkView<'a> {
+    pub folder: &'a Path,
+    pub name: &'a str,
+    /// The site the name would replace, if the name is taken.
+    pub replaces: Option<&'a Site>,
+}
+
+/// The line under the header: what the last action did.
+#[derive(Debug, PartialEq)]
+pub struct NoticeLine {
+    pub kind: NoticeKind,
+    pub text: String,
+    pub action: Option<NoticeAction>,
+}
+
+/// The button after a notice: "Forget /code…" after a failed Unlink.
+#[derive(Debug, PartialEq)]
+pub struct NoticeAction {
+    pub label: String,
+    pub action: Action,
+    pub off: Option<&'static str>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct HostsView {
+    /// The sentence that names the sites the hosts file lacks.
+    pub waiting: Option<String>,
+    /// Why "Add to /etc/hosts" cannot be pressed now.
+    pub off: Option<&'static str>,
+    /// The last try failed: its error.
+    pub failed: Option<String>,
+}
+
+/// Decides what Sites says. Pure: the same model gives the same view.
+/// `picking`: a folder dialog is open.
+pub fn view(model: &Model, picking: bool) -> SitesView<'_> {
+    let php = php_choices(model);
+    let list = list(model, &php);
+    SitesView {
+        search: &model.sites_search,
+        add_off: add_off(model, picking),
+        link: link(model),
+        line: line(model),
+        hosts: hosts(model),
+        removing: match model.removing() {
+            Some(removal @ (Removal::Unlink { .. } | Removal::Forget { .. })) => {
+                Some(strings::removing(removal))
             }
-        }
-    });
-    if let Some(command) = link_form(ui, model, connected) {
-        action = Some(SitesAction::Send(command));
+            _ => None,
+        },
+        list,
+        php,
+        parked: &model.sites.parked,
+        home: model.home.as_deref(),
+        forget_off: (model.is_connected() && !model.can_remove())
+            .then_some(strings::REMOVE_BUSY_HINT),
+        skipped: &model.sites.skipped,
     }
-    if let Some(removal @ (Removal::Unlink { .. } | Removal::Forget { .. })) = model.removing() {
-        ui.weak(strings::removing(removal));
-    }
-    let mut forget = sites_notice(ui, model);
-    if let Some(command) = hosts_line(ui, model) {
-        action = Some(SitesAction::Send(command));
-    }
-
-    let view: &Model = model;
-    let list = &view.sites;
-    let line = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
-    let skipped_height = if list.skipped.is_empty() {
-        0.0
-    } else {
-        // The title and up to `SKIPPED_ROWS` lines.
-        line * (list.skipped.len().min(SKIPPED_ROWS) + 1) as f32
-    };
-    let parked_height = if list.parked.is_empty() {
-        0.0
-    } else {
-        // The title and up to `PARKED_ROWS` rows with a button.
-        let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-        line + row * list.parked.len().min(PARKED_ROWS) as f32
-    };
-    let mut row_action = None;
-    StripBuilder::new(ui)
-        .size(Size::remainder().at_least(line * SITES_MIN_LINES))
-        .size(Size::exact(parked_height))
-        .size(Size::exact(skipped_height))
-        .vertical(|mut strip| {
-            strip.cell(|ui| {
-                if list.sites.is_empty() {
-                    ui.weak(strings::NO_SITES);
-                } else {
-                    row_action = site_table(ui, view, connected);
-                }
-            });
-            strip.cell(|ui| {
-                if let Some(folder) = parked(ui, view) {
-                    forget = Some(folder);
-                }
-            });
-            strip.cell(|ui| skipped(ui, &list.skipped));
-        });
-    if let Some(folder) = forget {
-        model.ask_removal(Removal::Forget { folder });
-    }
-    match row_action {
-        Some(SiteAction::Secure(switched)) => {
-            // The notice was about the last action.
-            model.sites_notice = None;
-            action = Some(SitesAction::Send(switched));
-        }
-        Some(SiteAction::Php { site, choice }) => {
-            if let Some(change) = model.choose_site_php(&site, choice) {
-                action = Some(SitesAction::Send(Command::Save(change)));
-            }
-        }
-        Some(SiteAction::Unlink(site)) => {
-            model.ask_removal(Removal::Unlink { site });
-        }
-        None => {}
-    }
-    action
 }
 
-/// Linux on the hosts way (task M4-18k3): the sites the hosts file lacks,
-/// such as one the folder watcher found, with the button that adds them.
-/// The click is the only way the window asks for the password for this.
-fn hosts_line(ui: &mut egui::Ui, model: &mut Model) -> Option<Command> {
+fn add_off(model: &Model, picking: bool) -> Option<&'static str> {
+    if !model.is_connected() {
+        Some(strings::ADD_SITE_OFFLINE)
+    } else if picking {
+        Some(strings::PICKING_HINT)
+    } else {
+        None
+    }
+}
+
+fn list<'a>(model: &'a Model, php: &[PhpChoice]) -> List<'a> {
+    if !model.is_connected() {
+        return List::Offline;
+    }
+    let all = &model.sites.sites;
+    if all.is_empty() {
+        return List::Empty;
+    }
+    let search = model.sites_search.trim();
+    let rows: Vec<_> = all
+        .iter()
+        .filter(|site| matches(&site.name, search))
+        .map(|site| row(model, site, php))
+        .collect();
+    if rows.is_empty() {
+        List::NoMatch(search)
+    } else {
+        List::Rows(rows)
+    }
+}
+
+/// Whether `name` holds `search`, ignoring case. A site name is ASCII
+/// (`a-z`, `0-9`, and `-`), so comparing bytes is exact and allocates
+/// nothing, which matters with hundreds of sites on every frame.
+fn matches(name: &str, search: &str) -> bool {
+    let (name, search) = (name.as_bytes(), search.as_bytes());
+    search.is_empty()
+        || name
+            .windows(search.len())
+            .any(|window| window.eq_ignore_ascii_case(search))
+}
+
+fn row<'a>(model: &'a Model, site: &'a Site, php: &[PhpChoice]) -> SiteRow<'a> {
+    let unlink = match model.parked_folder(site) {
+        Some(folder) => Unlink::Parked(folder),
+        None if model.can_remove() => Unlink::Allowed,
+        None => Unlink::Busy,
+    };
+    SiteRow {
+        name: &site.name,
+        root: &site.root,
+        php: php_cell(model, site, php),
+        https: site.secure,
+        unlink,
+    }
+}
+
+/// The version the row shows, the entry its menu checks, and why. The entry
+/// the user just picked shows until the daemon answers, as the model keeps it
+/// ([`Model::site_choice`]).
+fn php_cell<'a>(model: &Model, site: &'a Site, php: &[PhpChoice]) -> PhpCell<'a> {
+    let (version, reason) = match model.site_choice(site) {
+        Choice::Version(version) => (Some(version), Some(Reason::Site)),
+        Choice::Auto => (site.php.clone(), auto_reason(site, php.is_empty())),
+    };
+    let at = version
+        .as_ref()
+        .and_then(|version| php.iter().position(|choice| choice.version == *version));
+    let shown = match (&version, at) {
+        (Some(_), Some(at)) => php[at].label.clone(),
+        (Some(version), None) => version.to_string(),
+        (None, _) => strings::NO_PHP.to_owned(),
+    };
+    // The site's own setting is checked; with no setting of its own, the
+    // first row is: its files decide.
+    let setting = match (model.site_choice(site), at) {
+        (Choice::Version(_), Some(at)) => Setting::Version(at),
+        _ => Setting::SiteFiles,
+    };
+    PhpCell {
+        shown,
+        setting,
+        reason,
+        off: php.is_empty().then_some(strings::NO_PHP_YET),
+    }
+}
+
+/// Why a site with no setting of its own has the version it has.
+fn auto_reason(site: &Site, no_php: bool) -> Option<Reason<'_>> {
+    match (&site.php_source, &site.php) {
+        // After a click on "Use the site's files", before the answer.
+        (Some(Source::ProjectSetting), _) => Some(Reason::Files),
+        (Some(Source::VersionFile(path) | Source::Constraint(path)), _) => Some(Reason::File(path)),
+        (Some(Source::GlobalDefault), _) => Some(Reason::Default),
+        (None, None) if no_php => Some(Reason::NoPhpInstalled),
+        (None, None) => Some(Reason::NoMatch),
+        // A daemon older than `php_source`: nothing to say.
+        (None, Some(_)) => None,
+    }
+}
+
+fn link(model: &Model) -> Option<LinkView<'_>> {
+    let form = model.link.as_ref()?;
+    Some(LinkView {
+        folder: &form.folder,
+        name: &form.name,
+        replaces: model.link_replaces(),
+    })
+}
+
+fn line(model: &Model) -> Option<NoticeLine> {
+    let failure = |text: String| (NoticeKind::Error, text, None);
+    let done = |text: String| (NoticeKind::Success, text, None);
+    let (kind, text, action) = match model.sites_notice.as_ref()? {
+        SitesNotice::Failed(code) => failure(strings::error_text(code)),
+        SitesNotice::Parked(folder) => done(strings::parked(folder)),
+        SitesNotice::Linked { name, folder } => done(strings::linked(name, folder)),
+        SitesNotice::Unlinked(site) => done(strings::unlinked(site)),
+        SitesNotice::Forgot(folder) => done(strings::forgot(folder)),
+        SitesNotice::SiteIsParked { site, folder } => {
+            let text = strings::site_is_parked(site, folder.as_deref());
+            let action = folder.as_ref().map(|folder| NoticeAction {
+                label: strings::forget_folder(folder),
+                action: Action::AskForget(folder.clone()),
+                off: (!model.can_remove()).then_some(strings::REMOVE_BUSY_HINT),
+            });
+            (NoticeKind::Error, text, action)
+        }
+    };
+    Some(NoticeLine { kind, text, action })
+}
+
+fn hosts(model: &Model) -> Option<HostsView> {
     let failed = match &model.hosts_sync {
         HostsSync::Failed(code) => Some(strings::error_text(code)),
         HostsSync::Idle | HostsSync::Running => None,
     };
-    if !model.hosts.used || model.hosts.missing.is_empty() {
-        if let Some(text) = failed {
-            ui.colored_label(ui.visuals().error_fg_color, text);
-        }
+    let waiting = (model.hosts.used && !model.hosts.missing.is_empty())
+        .then(|| strings::hosts_waiting(&model.hosts.missing));
+    if waiting.is_none() && failed.is_none() {
         return None;
     }
-    ui.colored_label(
-        ui.visuals().warn_fg_color,
-        strings::hosts_waiting(&model.hosts.missing),
-    );
-    let running = model.hosts_sync == HostsSync::Running;
-    let mut command = None;
-    ui.horizontal(|ui| {
-        let enabled = model.is_connected() && !running && model.setup != Setup::Running;
-        let clicked = ui
-            .add_enabled(enabled, egui::Button::new(strings::ADD_TO_HOSTS))
-            .on_hover_text(strings::ADD_TO_HOSTS_HINT)
-            .clicked();
-        if clicked && model.start_hosts_sync() {
-            command = Some(Command::SyncHosts);
-        }
-        if running {
-            ui.weak(strings::HOSTS_ADDING);
+    let busy = model.hosts_sync == HostsSync::Running || model.setup == Setup::Running;
+    Some(HostsView {
+        waiting,
+        off: busy.then_some(strings::HOSTS_ADDING),
+        failed,
+    })
+}
+
+/// The id of the search field, so Cmd or Ctrl K can move the focus to it.
+fn search_id() -> Id {
+    Id::unique("sites_search")
+}
+
+/// Cmd K on macOS, Ctrl K elsewhere: focus the search field.
+const SEARCH_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::K);
+
+/// What a row's menu (⋯) can do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowChoice {
+    /// Serve over HTTPS (`true`) or plain HTTP.
+    Secure(bool),
+    Unlink,
+}
+
+/// Draws `view`. Returns what the user did.
+pub fn show(ui: &mut Ui, view: &SitesView<'_>, theme: &Theme) -> Vec<Action> {
+    let mut actions = Vec::new();
+    ui.spacing_mut().item_spacing.y = theme.space.section_gap;
+    let tools = matches!(view.list, List::Rows(_) | List::NoMatch(_));
+    if tools && ui.input_mut(|input| input.consume_shortcut(&SEARCH_KEY)) {
+        ui.memory_mut(|memory| memory.request_focus(search_id()));
+    }
+    super::header(ui, theme, Section::Sites, strings::SITES, |ui| {
+        if tools {
+            // From the end: the button, then the search before it.
+            add_site(ui, view, &mut actions);
+            search(ui, theme, view, &mut actions);
         }
     });
-    if let Some(text) = failed {
-        ui.colored_label(ui.visuals().error_fg_color, text);
+    if let Some(link) = &view.link {
+        link_form(ui, theme, link, &mut actions);
     }
-    command
+    if let Some(line) = &view.line {
+        notice(ui, theme, line, &mut actions);
+    }
+    if let Some(hosts) = &view.hosts {
+        hosts_line(ui, theme, hosts, &mut actions);
+    }
+    if let Some(text) = &view.removing {
+        mute(ui, theme, text);
+    }
+    match &view.list {
+        List::Offline => message(ui, theme, strings::SITES_OFFLINE),
+        List::Empty => {
+            let button = empty_state_button(ui, strings::SITES_EMPTY, strings::ADD_SITE_BUTTON);
+            add_menu(&button, &mut actions);
+        }
+        List::NoMatch(search) => message(ui, theme, &strings::no_site_matches(search)),
+        List::Rows(rows) => table(ui, theme, view, rows, &mut actions),
+    }
+    parked(ui, theme, view, &mut actions);
+    skipped(ui, theme, view.skipped, view.home);
+    actions
 }
 
-/// The line about the last sites action. After `site_is_parked` it offers
-/// to forget the site's parked folder: returns that folder if pressed.
-fn sites_notice(ui: &mut egui::Ui, model: &Model) -> Option<PathBuf> {
-    let error = ui.visuals().error_fg_color;
-    match model.sites_notice.as_ref()? {
-        SitesNotice::Failed(code) => {
-            ui.colored_label(error, strings::error_text(code));
-        }
-        SitesNotice::Parked(folder) => {
-            ui.weak(strings::parked(folder));
-        }
-        SitesNotice::Linked { name, folder } => {
-            ui.weak(strings::linked(name, folder));
-        }
-        SitesNotice::Unlinked(site) => {
-            ui.weak(strings::unlinked(site));
-        }
-        SitesNotice::Forgot(folder) => {
-            ui.weak(strings::forgot(folder));
-        }
-        SitesNotice::SiteIsParked { site, folder } => {
-            ui.colored_label(error, strings::site_is_parked(site, folder.as_deref()));
-            let folder = folder.as_ref()?;
-            let button = egui::Button::new(strings::forget_folder(folder));
-            let clicked = ui
-                .add_enabled(model.can_remove(), button)
-                .on_hover_text(strings::FORGET_HINT)
-                .clicked();
-            if clicked {
-                return Some(folder.clone());
+/// The primary button of the header, with its menu.
+fn add_site(ui: &mut Ui, view: &SitesView<'_>, actions: &mut Vec<Action>) {
+    let button = Button::primary(strings::ADD_SITE_BUTTON)
+        .disabled_if(view.add_off.is_some(), view.add_off.unwrap_or_default());
+    let response = ui.add(button);
+    add_menu(&response, actions);
+}
+
+/// "Park a folder…" and "Link a folder…" under the button `response`.
+fn add_menu(response: &Response, actions: &mut Vec<Action>) {
+    let items = [
+        MenuItem::new(Pick::Park, strings::PARK_BUTTON).hint(strings::PARK_BUTTON_HINT),
+        MenuItem::new(Pick::Link, strings::LINK_BUTTON).hint(strings::LINK_BUTTON_HINT),
+    ];
+    if let Some(pick) = Menu::new(&items).from_end().show(response) {
+        actions.push(Action::PickFolder(pick));
+    }
+}
+
+/// The search field. The text is the model's: an edit becomes an action, and
+/// the next frame filters by it.
+fn search(ui: &mut Ui, theme: &Theme, view: &SitesView<'_>, actions: &mut Vec<Action>) {
+    let mut text = view.search.to_owned();
+    let key = strings::search_key_hint(ui.ctx().os() == OperatingSystem::Mac);
+    let field = Field::search(&mut text, strings::FIND_SITE)
+        .hint(strings::FIND_SITE)
+        .key_hint(key)
+        .width(SITES_SEARCH_WIDTH)
+        .id(search_id());
+    // A field in a row that runs from the end sits at the start of the space
+    // it is given: give it exactly its own width.
+    let size = vec2(SITES_SEARCH_WIDTH, theme.size.control);
+    let changed = ui.allocate_ui(size, |ui| ui.add(field).changed()).inner;
+    if changed {
+        actions.push(Action::SearchSites(text));
+        // The table filters on the next frame: ask for it, since typing is
+        // the only input there is.
+        ui.ctx().request_repaint();
+    }
+}
+
+/// A sentence in a card, in place of a table.
+fn message(ui: &mut Ui, theme: &Theme, text: &str) {
+    padded_card(ui, |ui| {
+        ui.vertical_centered(|ui| {
+            let text = RichText::new(text)
+                .font(theme.text.body.font_id())
+                .color(theme.color.ink2);
+            ui.add(Label::new(text).selectable(false));
+        });
+    });
+}
+
+/// A line of `caption` text in `mute`.
+fn mute(ui: &mut Ui, theme: &Theme, text: &str) {
+    let text = RichText::new(text)
+        .font(theme.text.caption.font_id())
+        .color(theme.color.mute);
+    ui.add(Label::new(text).selectable(false));
+}
+
+/// How a line of status says what kind it is, besides its words (R8).
+#[derive(Clone, Copy)]
+enum Mark {
+    Success,
+    Error,
+    /// Amber (tokens.md, Color: states).
+    Warning,
+}
+
+/// An icon and a sentence that wraps, then whatever `add` puts after them.
+fn status_line(ui: &mut Ui, theme: &Theme, mark: Mark, text: &str, add: impl FnOnce(&mut Ui)) {
+    let (icon, color) = match mark {
+        Mark::Success => crate::widgets::notice::mark(theme, NoticeKind::Success),
+        Mark::Error => crate::widgets::notice::mark(theme, NoticeKind::Error),
+        Mark::Warning => (Icon::Alert, theme.section(Section::Dumps).fg),
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = theme.space.s2;
+        ui.add(Glyph::new(icon).size(theme.size.icon_inline).color(color));
+        let words = RichText::new(text)
+            .font(theme.text.body_sm.font_id())
+            .color(theme.color.ink);
+        ui.add(Label::new(words).selectable(false));
+        add(ui);
+    });
+}
+
+/// The line about the last action: a check for what worked, a cross for what
+/// failed, the sentence, the action it offers, and a button that closes it.
+// TODO(M5-D9): notices move to the bar at the bottom of the main area.
+fn notice(ui: &mut Ui, theme: &Theme, line: &NoticeLine, actions: &mut Vec<Action>) {
+    let mark = match line.kind {
+        NoticeKind::Success => Mark::Success,
+        NoticeKind::Error => Mark::Error,
+    };
+    status_line(ui, theme, mark, &line.text, |ui| {
+        if let Some(offer) = &line.action {
+            let button = Button::secondary(&offer.label)
+                .in_row()
+                .disabled_if(offer.off.is_some(), offer.off.unwrap_or_default());
+            if ui.add(button).clicked() {
+                actions.push(offer.action.clone());
             }
         }
-    }
-    None
+        if ui.add(Button::icon(Icon::Cross, strings::CLOSE)).clicked() {
+            actions.push(Action::DismissSitesNotice);
+        }
+    });
 }
 
-/// The parked folders, each with its Forget button. `show_rows` lays out the
-/// visible rows only. Returns the folder whose Forget was pressed.
-fn parked(ui: &mut egui::Ui, model: &Model) -> Option<PathBuf> {
-    let folders = &model.sites.parked;
-    if folders.is_empty() {
-        return None;
-    }
-    ui.strong(strings::PARKED_TITLE);
-    let enabled = model.can_remove();
-    let busy = model.is_connected() && !enabled;
-    let row_height = ui.spacing().interact_size.y;
-    let mut pressed = None;
-    egui::ScrollArea::vertical()
-        .id_salt("parked")
-        .auto_shrink(false)
-        .show_rows(ui, row_height, folders.len(), |ui, rows| {
-            for folder in &folders[rows] {
-                ui.horizontal(|ui| {
-                    let button = egui::Button::new(strings::FORGET_BUTTON);
-                    let mut response = ui
-                        .add_enabled(enabled, button)
-                        .on_hover_text(strings::FORGET_HINT);
-                    if busy {
-                        response = response.on_disabled_hover_text(strings::REMOVE_BUSY_HINT);
-                    }
-                    if response.clicked() {
-                        pressed = Some(folder.clone());
-                    }
-                    let shown = folder.display().to_string();
-                    ui.add(egui::Label::new(shown).truncate());
-                });
+/// Linux on the hosts way: the sites the hosts file lacks, with the button
+/// that adds them. The click is the only way the window asks for the
+/// password for this.
+fn hosts_line(ui: &mut Ui, theme: &Theme, hosts: &HostsView, actions: &mut Vec<Action>) {
+    if let Some(waiting) = &hosts.waiting {
+        status_line(ui, theme, Mark::Warning, waiting, |ui| {
+            let button = Button::secondary(strings::ADD_TO_HOSTS)
+                .in_row()
+                .disabled_if(hosts.off.is_some(), hosts.off.unwrap_or_default());
+            let response = ui.add(button);
+            if response.clicked() {
+                actions.push(Action::SyncHosts);
+            }
+            if hosts.off.is_none() {
+                response.on_hover_text(strings::ADD_TO_HOSTS_HINT);
             }
         });
-    pressed
+    }
+    if let Some(failed) = &hosts.failed {
+        status_line(ui, theme, Mark::Error, failed, |_| {});
+    }
 }
 
-/// The link form, once a folder to link was picked: the site name, Link,
-/// and Cancel. Returns the link to send, if the user confirmed a valid name.
-fn link_form(ui: &mut egui::Ui, model: &mut Model, connected: bool) -> Option<Command> {
-    let mut submit = false;
-    let mut cancel = false;
-    {
-        let form = model.link.as_mut()?;
-        ui.label(strings::link_folder(&form.folder));
+/// The form of a folder picked to link: the name field with `.test` after
+/// it, Link, and Cancel.
+fn link_form(ui: &mut Ui, theme: &Theme, link: &LinkView<'_>, actions: &mut Vec<Action>) {
+    padded_card(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = theme.space.s2;
+        let title = RichText::new(strings::link_folder(link.folder))
+            .font(theme.text.body_sm.font_id())
+            .color(theme.color.ink);
+        ui.add(Label::new(title).selectable(false));
         ui.horizontal(|ui| {
-            ui.label(strings::LINK_NAME);
-            let field = egui::TextEdit::singleline(&mut form.name)
-                .hint_text(strings::LINK_NAME_HINT)
-                .desired_width(NAME_FIELD_WIDTH);
+            ui.spacing_mut().item_spacing.x = theme.space.s2;
+            let mut name = link.name.to_owned();
+            let field = Field::new(&mut name, strings::LINK_NAME)
+                .hint(strings::LINK_NAME_HINT)
+                .width(NAME_FIELD_WIDTH);
             let field = ui.add(field);
-            let entered =
-                field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            ui.weak(strings::site_suffix());
-            let clicked = ui
-                .add_enabled(connected, egui::Button::new(strings::LINK_CONFIRM))
-                .clicked();
-            submit = connected && (clicked || entered);
-            cancel = ui.button(strings::CANCEL).clicked();
-        });
-    }
-    if let Some(site) = model.link_replaces() {
-        ui.weak(strings::link_replaces(site));
-    }
-    if cancel {
-        model.link = None;
-        return None;
-    }
-    if !submit {
-        return None;
-    }
-    let (name, folder) = model.link_request()?;
-    Some(Command::Link { name, folder })
-}
-
-/// The sites table. `rows` draws the visible rows only. Returns what the
-/// user did in it, if anything.
-fn site_table(ui: &mut egui::Ui, model: &Model, connected: bool) -> Option<SiteAction> {
-    let sites = &model.sites.sites;
-    let row_height = ui.spacing().interact_size.y;
-    let can_remove = model.can_remove();
-    let busy = connected && !can_remove;
-    let mut action = None;
-    TableBuilder::new(ui)
-        .id_salt("sites")
-        .striped(true)
-        // Fill the space above the skipped folders, and scroll inside it.
-        .auto_shrink(false)
-        .min_scrolled_height(0.0)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(
-            Column::auto()
-                .at_least(SITE_NAME_COLUMN_MIN)
-                .at_most(SITE_NAME_COLUMN_MAX)
-                .clip(true),
-        )
-        .column(
-            Column::auto()
-                .at_least(SITE_URL_COLUMN_MIN)
-                .at_most(SITE_URL_COLUMN_MAX)
-                .clip(true),
-        )
-        .column(Column::auto())
-        .column(Column::auto().at_least(SITE_KIND_COLUMN_MIN))
-        .column(Column::auto().at_least(PHP_COLUMN_WIDTH))
-        .column(Column::auto())
-        .column(
-            Column::remainder()
-                .at_least(SITE_FOLDER_COLUMN_MIN)
-                .clip(true),
-        )
-        .header(row_height, |mut header| {
-            for title in [
-                strings::COLUMN_NAME,
-                strings::COLUMN_URL,
-                strings::COLUMN_HTTPS,
-                strings::COLUMN_KIND,
-                strings::COLUMN_PHP,
-                strings::COLUMN_REMOVE,
-                strings::COLUMN_FOLDER,
-            ] {
-                header.col(|ui| {
-                    ui.strong(title);
-                });
+            let entered = field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+            if field.changed() {
+                actions.push(Action::SetLinkName(name));
+                ui.ctx().request_repaint();
             }
-        })
-        .body(|body| {
-            body.rows(row_height, sites.len(), |mut row| {
-                let site = &sites[row.index()];
-                row.col(|ui| {
-                    ui.add(egui::Label::new(&site.name).truncate());
-                });
-                row.col(|ui| {
-                    let url = model::url(site);
-                    if ui.link(&url).clicked() {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                    }
-                });
-                row.col(|ui| {
-                    // A copy: the box shows the daemon's value again on the
-                    // next frame, and the `sites_changed` event then sets it.
-                    let mut secure = site.secure;
-                    let switch = egui::Checkbox::without_text(&mut secure);
-                    let response = ui
-                        .add_enabled(connected, switch)
-                        .on_hover_text(strings::HTTPS_HINT);
-                    if response.changed() {
-                        action = Some(SiteAction::Secure(Command::Secure {
-                            site: site.name.clone(),
-                            secure,
-                        }));
-                    }
-                });
-                row.col(|ui| {
-                    ui.label(strings::kind_text(site.kind));
-                });
-                row.col(|ui| {
-                    if let Some(choice) = site_php(ui, model, site, connected) {
-                        let site = site.name.clone();
-                        action = Some(SiteAction::Php { site, choice });
-                    }
-                });
-                row.col(|ui| {
-                    // A site from a parked folder goes with its folder only.
-                    let holder = model.parked_folder(site);
-                    let enabled = can_remove && holder.is_none();
-                    let button = egui::Button::new(strings::UNLINK_BUTTON);
-                    let mut response = ui
-                        .add_enabled(enabled, button)
-                        .on_hover_text(strings::UNLINK_HINT);
-                    if let Some(folder) = holder {
-                        response = response.on_disabled_hover_ui(|ui| {
-                            ui.label(strings::unlink_parked_hint(folder));
-                        });
-                    } else if busy {
-                        response = response.on_disabled_hover_text(strings::REMOVE_BUSY_HINT);
-                    }
-                    if response.clicked() {
-                        action = Some(SiteAction::Unlink(site.name.clone()));
-                    }
-                });
-                row.col(|ui| {
-                    let folder = site.root.display().to_string();
-                    ui.add(egui::Label::new(folder).truncate());
-                });
-            });
+            mute(ui, theme, &strings::site_suffix());
+            // The one main action of the form.
+            if ui.add(Button::primary(strings::LINK_CONFIRM)).clicked() || entered {
+                actions.push(Action::SubmitLink);
+            }
+            if ui.add(Button::secondary(strings::CANCEL)).clicked() {
+                actions.push(Action::CancelLink);
+            }
         });
-    action
+        if let Some(site) = link.replaces {
+            mute(ui, theme, &strings::link_replaces(site));
+        }
+    });
 }
 
-/// The PHP list of one site: first what the site runs with no setting of its
-/// own, then each installed PHP. Like the HTTPS switch, it shows the model's
-/// value on every frame. Returns the entry the user clicked, if any.
-fn site_php(ui: &mut egui::Ui, model: &Model, site: &Site, connected: bool) -> Option<Choice> {
-    let installed = model.php_versions();
-    if installed.is_empty() && site.php.is_none() {
-        ui.label(strings::NO_PHP);
-        return None;
+/// The sites table. Only the rows in view are drawn (`Table` is over
+/// `TableBuilder`): 500 sites cost what 12 do.
+fn table(
+    ui: &mut Ui,
+    theme: &Theme,
+    view: &SitesView<'_>,
+    rows: &[SiteRow<'_>],
+    actions: &mut Vec<Action>,
+) {
+    let columns = [
+        TableColumn::fill(strings::COLUMN_SITE),
+        TableColumn::fixed(strings::COLUMN_PHP, SITES_PHP_COLUMN),
+        TableColumn::fixed(strings::COLUMN_CONNECTION, SITES_CONNECTION_COLUMN),
+        TableColumn::fixed("", SITES_OPEN_COLUMN),
+        TableColumn::fixed("", theme.size.icon_button),
+    ];
+    // The menus list the same versions on every row.
+    let versions: Vec<(usize, &str)> = view
+        .php
+        .iter()
+        .enumerate()
+        .map(|(index, choice)| (index, choice.label.as_str()))
+        .collect();
+    let table = Table::new("sites", strings::SITES, &columns).rows(RowHeight::TwoLine);
+    let shown = table.show(ui, rows.len(), |row| {
+        let site = &rows[row.index()];
+        let full = site.root.display().to_string();
+        let shown = strings::home_path(site.root, view.home);
+        row.two_lines_hover(site.name, &shown, &full);
+        row.cell(|ui| php_menu(ui, view, site, &versions, actions));
+        row.cell(|ui| connection(ui, theme, site.https));
+        row.cell(|ui| {
+            if ui.add(Button::secondary(strings::OPEN).in_row()).clicked() {
+                actions.push(Action::OpenSite(site.name.to_owned()));
+            }
+        });
+        row.cell(|ui| row_menu(ui, site, actions));
+    });
+    if let Some(index) = shown.clicked {
+        let name = rows[index].name.to_owned();
+        actions.push(Action::Navigate(Route::Site(name)));
     }
-    let chosen = model.site_choice(site);
-    let mut clicked = None;
-    ui.add_enabled_ui(connected, |ui| {
-        let list = egui::ComboBox::from_id_salt(("php", &site.name))
-            .selected_text(strings::php_choice_text(&chosen, site))
-            .show_ui(ui, |ui| {
-                let auto = ui
-                    .selectable_label(chosen == Choice::Auto, strings::auto_php(site))
-                    .on_hover_text(strings::AUTO_PHP_HINT);
-                if auto.clicked() {
-                    clicked = Some(Choice::Auto);
+}
+
+/// The version button of a row, with the reason after it.
+fn php_menu(
+    ui: &mut Ui,
+    view: &SitesView<'_>,
+    site: &SiteRow<'_>,
+    versions: &[(usize, &str)],
+    actions: &mut Vec<Action>,
+) {
+    let label = strings::php_for_site(site.name);
+    let reason = site.php.reason.map(|reason| reason.text());
+    let mut menu = VersionMenu::new(
+        &label,
+        &site.php.shown,
+        strings::USE_SITE_FILES,
+        versions,
+        site.php.setting,
+    );
+    if let Some(reason) = &reason {
+        menu = menu.reason(reason);
+    }
+    if let Some(off) = site.php.off {
+        menu = menu.disabled(off);
+    }
+    let choice = match menu.show(ui).inner {
+        Some(Setting::SiteFiles) => Choice::Auto,
+        Some(Setting::Version(index)) => match view.php.get(index) {
+            Some(choice) => Choice::Version(choice.version.clone()),
+            None => return,
+        },
+        None => return,
+    };
+    actions.push(Action::SitePhp {
+        site: site.name.to_owned(),
+        choice,
+    });
+}
+
+/// The lock and the word: HTTPS, or HTTP in `mute`.
+fn connection(ui: &mut Ui, theme: &Theme, https: bool) {
+    let (icon, word, color) = if https {
+        (Icon::Lock, strings::HTTPS, theme.color.ink2)
+    } else {
+        (Icon::LockOpen, strings::HTTP, theme.color.mute)
+    };
+    ui.add(Glyph::new(icon).size(theme.size.icon_inline).color(color));
+    let text = RichText::new(word)
+        .font(theme.text.body_sm.font_id())
+        .color(color);
+    ui.add(Label::new(text).selectable(false));
+}
+
+/// The ⋯ button of a row: the other connection, and Unlink.
+fn row_menu(ui: &mut Ui, site: &SiteRow<'_>, actions: &mut Vec<Action>) {
+    let label = strings::site_menu_label(site.name);
+    let button = ui.add(Button::icon(Icon::More, &label));
+    let secure = if site.https {
+        MenuItem::new(RowChoice::Secure(false), strings::SWITCH_TO_HTTP).hint(strings::HTTP_HINT)
+    } else {
+        MenuItem::new(RowChoice::Secure(true), strings::SWITCH_TO_HTTPS).hint(strings::HTTPS_HINT)
+    };
+    // A site from a parked folder goes with its folder only.
+    let parked = match site.unlink {
+        Unlink::Parked(folder) => Some(strings::unlink_parked_hint(folder)),
+        Unlink::Allowed | Unlink::Busy => None,
+    };
+    let off = match site.unlink {
+        Unlink::Allowed => None,
+        Unlink::Busy => Some(strings::REMOVE_BUSY_HINT),
+        Unlink::Parked(_) => parked.as_deref(),
+    };
+    let unlink = MenuItem::new(RowChoice::Unlink, strings::UNLINK_BUTTON)
+        .danger()
+        .hint(strings::UNLINK_HINT)
+        .disabled_if(off);
+    let items = [secure, unlink];
+    match Menu::new(&items).from_end().show(&button) {
+        Some(RowChoice::Secure(secure)) => actions.push(Action::SetSecure {
+            site: site.name.to_owned(),
+            secure,
+        }),
+        Some(RowChoice::Unlink) => actions.push(Action::AskUnlink(site.name.to_owned())),
+        None => {}
+    }
+}
+
+/// A list of folders under the table: a heading, and a card of dense rows
+/// that scrolls inside itself past a few.
+fn folders(
+    ui: &mut Ui,
+    theme: &Theme,
+    title: (&str, &str),
+    table: Table<'_>,
+    height: RowHeight,
+    rows: usize,
+    add_row: impl FnMut(&mut crate::widgets::table::Row<'_, '_>),
+) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = theme.space.group_gap_max;
+        super::heading(ui, theme, title.0, Some(title.1));
+        let scrolls = height.points(theme) * SITES_FOLDER_ROWS;
+        table
+            .rows(height)
+            .scrolls_past(scrolls)
+            .show(ui, rows, add_row);
+    });
+}
+
+/// The parked folders, each with its Forget button.
+fn parked(ui: &mut Ui, theme: &Theme, view: &SitesView<'_>, actions: &mut Vec<Action>) {
+    if view.parked.is_empty() {
+        return;
+    }
+    let columns = [
+        TableColumn::fill(strings::COLUMN_FOLDER),
+        TableColumn::fixed("", SITES_FORGET_COLUMN),
+    ];
+    let table = Table::new("parked", strings::PARKED_TITLE, &columns);
+    let title = (strings::PARKED_TITLE, strings::PARKED_HINT);
+    folders(
+        ui,
+        theme,
+        title,
+        table,
+        RowHeight::OneLine,
+        view.parked.len(),
+        |row| {
+            let folder = &view.parked[row.index()];
+            row.cell(|ui| path(ui, theme, folder, view.home));
+            row.cell(|ui| {
+                let button = Button::secondary(strings::FORGET_BUTTON)
+                    .in_row()
+                    .disabled_if(
+                        view.forget_off.is_some(),
+                        view.forget_off.unwrap_or_default(),
+                    );
+                let response = ui.add(button);
+                if response.clicked() {
+                    actions.push(Action::AskForget(folder.clone()));
                 }
-                for version in installed {
-                    let selected = matches!(&chosen, Choice::Version(v) if v == version);
-                    if ui.selectable_label(selected, version.to_string()).clicked() {
-                        clicked = Some(Choice::Version(version.clone()));
-                    }
+                if view.forget_off.is_none() {
+                    response.on_hover_text(strings::FORGET_HINT);
                 }
             });
-        list.response.on_hover_text(strings::site_php_hint(site));
-    });
-    clicked
+        },
+    );
 }
 
 /// The folders that did not become a site, each with the reason.
-/// `show_rows` lays out the visible lines only.
-fn skipped(ui: &mut egui::Ui, folders: &[SkippedFolder]) {
-    if folders.is_empty() {
+fn skipped(ui: &mut Ui, theme: &Theme, folders_skipped: &[SkippedFolder], home: Option<&Path>) {
+    if folders_skipped.is_empty() {
         return;
     }
-    ui.strong(strings::SKIPPED_TITLE);
-    let row_height = ui.text_style_height(&egui::TextStyle::Body);
-    egui::ScrollArea::vertical()
-        .id_salt("skipped")
-        .auto_shrink(false)
-        .show_rows(ui, row_height, folders.len(), |ui, rows| {
-            for folder in &folders[rows] {
-                let line = strings::skipped_line(&folder.path, &folder.code);
-                ui.add(egui::Label::new(line).truncate());
-            }
+    let columns = [
+        TableColumn::fill(strings::COLUMN_FOLDER),
+        TableColumn::fixed(strings::COLUMN_WHY, SITES_WHY_COLUMN),
+    ];
+    let table = Table::new("skipped", strings::SKIPPED_TITLE, &columns);
+    let title = (strings::SKIPPED_TITLE, strings::SKIPPED_HINT);
+    folders(
+        ui,
+        theme,
+        title,
+        table,
+        RowHeight::Dense,
+        folders_skipped.len(),
+        |row| {
+            let folder = &folders_skipped[row.index()];
+            row.cell(|ui| path(ui, theme, &folder.path, home));
+            row.cell(|ui| {
+                let reason = strings::skip_reason(&folder.code);
+                let text = RichText::new(&reason)
+                    .font(theme.text.body_sm.font_id())
+                    .color(theme.color.ink2);
+                ui.add(Label::new(text).truncate().selectable(false))
+                    .on_hover_text(&reason);
+            });
+        },
+    );
+}
+
+/// A folder's path in the mono face, as `~/…` under the home folder, cut
+/// short at the end of the column. The tooltip has the full path.
+fn path(ui: &mut Ui, theme: &Theme, folder: &Path, home: Option<&Path>) {
+    let shown = strings::home_path(folder, home);
+    let text = RichText::new(&shown)
+        .font(theme.text.mono_sm.font_id())
+        .color(theme.color.ink);
+    let response = ui.add(Label::new(text).truncate().selectable(false));
+    // Shortened for the eye, or cut short by the column: the whole path is
+    // one hover away.
+    response.on_hover_text(folder.display().to_string());
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use eframe::egui::{self, Event, Pos2, RawInput, pos2, vec2};
+    use marsa_core::runtimes::Runtime;
+    use marsa_core::types::{
+        Health as DaemonHealth, HostsStatus, RuntimeList, RuntimeVersions, SiteKind, SiteList,
+    };
+    use semver::Version;
+
+    use super::*;
+    use crate::model::{Update, apply};
+    use crate::theme::LIGHT;
+    use crate::widgets::harness::{Harness, Tree};
+
+    fn connected() -> Model {
+        let mut model = Model::default();
+        model.update(Update::Connected(DaemonHealth {
+            app_version: "0.0.0".into(),
+            api_version: 1,
+            pid: 7,
+        }));
+        model
+    }
+
+    fn v(text: &str) -> Version {
+        text.parse().expect("a version")
+    }
+
+    /// An absolute path on this system, from Unix-style parts (a Windows
+    /// path needs a drive to be absolute).
+    fn abs(unix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
+        } else {
+            PathBuf::from(unix)
+        }
+    }
+
+    /// `~` and the parts after it, with the separator of the system.
+    fn tilde(parts: &[&str]) -> String {
+        let sep = std::path::MAIN_SEPARATOR;
+        parts
+            .iter()
+            .fold(String::from("~"), |text, part| format!("{text}{sep}{part}"))
+    }
+
+    fn site(name: &str, php: Option<&str>, source: Option<Source>) -> Site {
+        let root = PathBuf::from("/code").join(name);
+        Site {
+            name: name.into(),
+            docroot: root.join("public"),
+            root,
+            kind: SiteKind::Laravel,
+            php: php.map(v),
+            php_source: source,
+            secure: true,
+        }
+    }
+
+    fn runtimes(php: &[&str]) -> RuntimeList {
+        RuntimeList {
+            runtimes: vec![RuntimeVersions {
+                runtime: Runtime::Php,
+                installed: php.iter().map(|text| (*text).to_owned()).collect(),
+                default: Some("8.4".into()),
+            }],
+        }
+    }
+
+    /// PHP 8.3 and 8.4 installed, and these sites with PHP 8.4.27 from the
+    /// global default.
+    fn model(names: &[&str]) -> Model {
+        let mut model = connected();
+        model.update(Update::Runtimes(runtimes(&["8.3.27", "8.4.27"])));
+        let sites = names
+            .iter()
+            .map(|name| site(name, Some("8.4.27"), Some(Source::GlobalDefault)))
+            .collect();
+        model.update(Update::Sites(SiteList {
+            sites,
+            ..SiteList::default()
+        }));
+        model
+    }
+
+    fn with_sites(model: &mut Model, sites: Vec<Site>) {
+        model.update(Update::Sites(SiteList {
+            sites,
+            ..SiteList::default()
+        }));
+    }
+
+    fn rows<'a, 'b>(view: &'b SitesView<'a>) -> &'b [SiteRow<'a>] {
+        match &view.list {
+            List::Rows(rows) => rows,
+            other => panic!("expected rows, got {other:?}"),
+        }
+    }
+
+    fn names<'a>(view: &SitesView<'a>) -> Vec<&'a str> {
+        rows(view).iter().map(|row| row.name).collect()
+    }
+
+    // -- view --
+
+    #[test]
+    fn the_search_filters_by_name_ignoring_case_and_the_spaces_around_it() {
+        let mut model = model(&["shop", "billing-api", "legacy-crm", "wiki"]);
+        assert_eq!(
+            names(&view(&model, false)),
+            ["billing-api", "legacy-crm", "shop", "wiki"]
+        );
+        for (search, want) in [
+            ("sh", &["shop"][..]),
+            ("SH", &["shop"]),
+            ("  Api ", &["billing-api"]),
+            ("l", &["billing-api", "legacy-crm"]),
+            ("-", &["billing-api", "legacy-crm"]),
+            ("", &["billing-api", "legacy-crm", "shop", "wiki"]),
+            ("   ", &["billing-api", "legacy-crm", "shop", "wiki"]),
+        ] {
+            model.sites_search = search.to_owned();
+            assert_eq!(names(&view(&model, false)), want, "{search:?}");
+        }
+        // The folder is not searched, only the name.
+        model.sites_search = "code".into();
+        assert!(matches!(view(&model, false).list, List::NoMatch("code")));
+        // The text of the field is what the user typed, spaces and all.
+        model.sites_search = "  Api ".into();
+        assert_eq!(view(&model, false).search, "  Api ");
+    }
+
+    #[test]
+    fn a_search_that_matches_nothing_says_so_and_is_not_the_empty_state() {
+        let mut model = model(&["shop"]);
+        model.sites_search = " nope ".into();
+        let view = view(&model, false);
+        assert_eq!(view.list, List::NoMatch("nope"));
+        assert_eq!(strings::no_site_matches("nope"), "No site matches “nope”.");
+        // The same search over no sites at all is the empty state.
+        let mut none = model;
+        with_sites(&mut none, Vec::new());
+        assert_eq!(super::view(&none, false).list, List::Empty);
+    }
+
+    #[test]
+    fn matching_works_on_bytes_and_survives_odd_input() {
+        assert!(matches("shop", "OP"));
+        assert!(matches("shop", ""));
+        assert!(!matches("shop", "shops"));
+        assert!(!matches("", "a"));
+        // Not ASCII: no site name has it, so nothing matches.
+        assert!(!matches("shop", "é"));
+        assert!(matches("a-b", "-"));
+    }
+
+    #[test]
+    fn the_reason_of_each_source_is_shown_after_the_version() {
+        let dir = PathBuf::from("/code/shop");
+        let mut model = model(&[]);
+        let cases = [
+            (
+                Some(Source::ProjectSetting),
+                Some(Reason::Site),
+                "set for this site",
+            ),
+            (
+                Some(Source::VersionFile(dir.join(".php-version"))),
+                Some(Reason::File(Path::new("/code/shop/.php-version"))),
+                "from .php-version",
+            ),
+            (
+                Some(Source::Constraint(dir.join("composer.json"))),
+                Some(Reason::File(Path::new("/code/shop/composer.json"))),
+                "from composer.json",
+            ),
+            (
+                Some(Source::GlobalDefault),
+                Some(Reason::Default),
+                "default",
+            ),
+        ];
+        for (source, reason, text) in cases {
+            with_sites(&mut model, vec![site("shop", Some("8.4.27"), source)]);
+            let view = view(&model, false);
+            let cell = &rows(&view)[0].php;
+            assert_eq!(cell.reason, reason, "{text}");
+            assert_eq!(
+                cell.reason.map(|reason| reason.text()).as_deref(),
+                Some(text)
+            );
+            assert_eq!(cell.shown, "8.4");
+        }
+    }
+
+    #[test]
+    fn a_site_with_no_php_says_why_and_a_daemon_with_no_reason_says_nothing() {
+        let mut model = model(&[]);
+        with_sites(&mut model, vec![site("shop", None, None)]);
+        let view_ = view(&model, false);
+        let cell = &rows(&view_)[0].php;
+        assert_eq!(cell.shown, strings::NO_PHP);
+        assert_eq!(cell.reason, Some(Reason::NoMatch));
+        assert_eq!(
+            cell.reason.map(|r| r.text()).as_deref(),
+            Some("no installed version fits")
+        );
+        assert_eq!(cell.off, None);
+
+        // No PHP at all: the menu is off, and says what to do.
+        model.update(Update::Runtimes(runtimes(&[])));
+        let view_ = view(&model, false);
+        let cell = &rows(&view_)[0].php;
+        assert_eq!(cell.reason, Some(Reason::NoPhpInstalled));
+        assert_eq!(cell.off, Some(strings::NO_PHP_YET));
+        assert_eq!(strings::REASON_NO_PHP, "no PHP installed");
+
+        // A daemon from before `php_source`.
+        with_sites(&mut model, vec![site("old", Some("8.4.27"), None)]);
+        model.update(Update::Runtimes(runtimes(&["8.4.27"])));
+        let view_ = view(&model, false);
+        assert_eq!(rows(&view_)[0].php.reason, None);
+    }
+
+    #[test]
+    fn the_menu_checks_the_site_setting_or_the_site_files() {
+        let mut model = model(&[]);
+        with_sites(
+            &mut model,
+            vec![
+                site("pinned", Some("8.3.27"), Some(Source::ProjectSetting)),
+                site("files", Some("8.4.27"), Some(Source::GlobalDefault)),
+            ],
+        );
+        let view_ = view(&model, false);
+        let rows = rows(&view_);
+        // Sorted by name: `files`, then `pinned`.
+        assert_eq!(rows[0].name, "files");
+        assert_eq!(rows[0].php.setting, Setting::SiteFiles);
+        assert_eq!(rows[1].php.setting, Setting::Version(0));
+        assert_eq!(rows[1].php.shown, "8.3");
+        let labels: Vec<_> = view_.php.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["8.3", "8.4"]);
+    }
+
+    #[test]
+    fn a_version_just_picked_shows_until_the_daemon_answers() {
+        let mut model = model(&["shop"]);
+        model
+            .choose_site_php("shop", Choice::Version(v("8.3.27")))
+            .expect("a change");
+        let view_ = view(&model, false);
+        let cell = &rows(&view_)[0].php;
+        assert_eq!(
+            (cell.shown.as_str(), cell.reason),
+            ("8.3", Some(Reason::Site))
+        );
+        assert_eq!(cell.setting, Setting::Version(0));
+
+        // Clearing the setting of a pinned site: the files decide, version
+        // unknown until the answer.
+        let mut model = model_with_pin();
+        model
+            .choose_site_php("shop", Choice::Auto)
+            .expect("a change");
+        let view_ = view(&model, false);
+        let cell = &rows(&view_)[0].php;
+        assert_eq!(cell.reason, Some(Reason::Files));
+        assert_eq!(cell.setting, Setting::SiteFiles);
+        assert_eq!(strings::REASON_FILES, "from the site's files");
+    }
+
+    fn model_with_pin() -> Model {
+        let mut model = model(&[]);
+        with_sites(
+            &mut model,
+            vec![site("shop", Some("8.3.27"), Some(Source::ProjectSetting))],
+        );
+        model
+    }
+
+    #[test]
+    fn the_connection_comes_from_secure_and_the_row_carries_its_folder() {
+        let mut model = model(&[]);
+        let mut plain = site("docs", Some("8.4.27"), Some(Source::GlobalDefault));
+        plain.secure = false;
+        with_sites(
+            &mut model,
+            vec![
+                plain,
+                site("shop", Some("8.4.27"), Some(Source::GlobalDefault)),
+            ],
+        );
+        let view_ = view(&model, false);
+        let rows = rows(&view_);
+        assert_eq!((rows[0].name, rows[0].https), ("docs", false));
+        assert_eq!((rows[1].name, rows[1].https), ("shop", true));
+        assert_eq!(rows[1].root, Path::new("/code/shop"));
+    }
+
+    #[test]
+    fn no_daemon_no_sites_and_no_match_each_have_their_own_body() {
+        let model = Model::default();
+        let offline = view(&model, false);
+        assert_eq!(offline.list, List::Offline);
+        assert_eq!(offline.add_off, Some(strings::ADD_SITE_OFFLINE));
+
+        let no_sites = model_without_sites();
+        let empty = view(&no_sites, false);
+        assert_eq!(empty.list, List::Empty);
+        assert_eq!(empty.add_off, None);
+    }
+
+    fn model_without_sites() -> Model {
+        model(&[])
+    }
+
+    #[test]
+    fn add_site_waits_for_a_folder_dialog_that_is_open() {
+        let model = model(&["shop"]);
+        assert_eq!(view(&model, false).add_off, None);
+        assert_eq!(view(&model, true).add_off, Some(strings::PICKING_HINT));
+    }
+
+    #[test]
+    fn a_row_can_unlink_unless_its_site_is_parked_or_a_removal_runs() {
+        let mut model = model(&["shop", "wiki"]);
+        model.sites.parked = vec![PathBuf::from("/code")];
+        let view_ = view(&model, false);
+        assert!(
+            rows(&view_)
+                .iter()
+                .all(|row| row.unlink == Unlink::Parked(Path::new("/code")))
+        );
+        model.sites.parked.clear();
+        let view_ = view(&model, false);
+        assert!(rows(&view_).iter().all(|row| row.unlink == Unlink::Allowed));
+        assert!(model.ask_removal(Removal::Unlink {
+            site: "shop".into()
+        }));
+        model.confirm_removal().expect("sent");
+        let view_ = view(&model, false);
+        assert!(rows(&view_).iter().all(|row| row.unlink == Unlink::Busy));
+        assert_eq!(view_.removing.as_deref(), Some("Unlinking shop.test…"));
+        assert_eq!(view_.forget_off, Some(strings::REMOVE_BUSY_HINT));
+    }
+
+    #[test]
+    fn the_last_action_is_a_line_and_a_refused_unlink_offers_to_forget_the_folder() {
+        let mut model = model(&["shop"]);
+        assert!(view(&model, false).line.is_none());
+        model.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
+        let line = view(&model, false).line.expect("a line");
+        assert_eq!(line.kind, NoticeKind::Success);
+        assert_eq!(line.text, strings::unlinked("shop"));
+        assert!(line.action.is_none());
+
+        model.sites_notice = Some(SitesNotice::Failed("site_name_invalid".into()));
+        let line = view(&model, false).line.expect("a line");
+        assert_eq!(line.kind, NoticeKind::Error);
+        assert_eq!(line.text, strings::error_text("site_name_invalid"));
+
+        let folder = PathBuf::from("/code");
+        model.sites_notice = Some(SitesNotice::SiteIsParked {
+            site: "shop".into(),
+            folder: Some(folder.clone()),
         });
+        let line = view(&model, false).line.expect("a line");
+        let offer = line.action.expect("an offer");
+        assert_eq!(offer.label, "Forget /code…");
+        assert_eq!(offer.action, Action::AskForget(folder));
+        assert_eq!(offer.off, None);
+        // Without the folder there is nothing to offer.
+        model.sites_notice = Some(SitesNotice::SiteIsParked {
+            site: "shop".into(),
+            folder: None,
+        });
+        assert!(view(&model, false).line.expect("a line").action.is_none());
+    }
+
+    #[test]
+    fn the_hosts_line_shows_only_with_names_waiting_or_a_failure() {
+        let mut model = model(&["shop"]);
+        assert!(view(&model, false).hosts.is_none());
+        model.update(Update::Hosts(HostsStatus {
+            used: true,
+            missing: vec!["shop.test".into()],
+        }));
+        let hosts = view(&model, false).hosts.expect("a line");
+        assert_eq!(
+            hosts.waiting,
+            Some(strings::hosts_waiting(&["shop.test".into()]))
+        );
+        assert_eq!(hosts.off, None);
+        assert!(model.start_hosts_sync());
+        assert_eq!(
+            view(&model, false).hosts.expect("a line").off,
+            Some(strings::HOSTS_ADDING)
+        );
+        // Names gone in, but the last try failed: the error stays.
+        model.update(Update::Hosts(HostsStatus {
+            used: true,
+            missing: Vec::new(),
+        }));
+        model.hosts_sync = HostsSync::Failed("hosts_failed".into());
+        let hosts = view(&model, false).hosts.expect("a line");
+        assert_eq!(hosts.waiting, None);
+        assert_eq!(hosts.failed, Some(strings::error_text("hosts_failed")));
+    }
+
+    #[test]
+    fn the_link_form_shows_the_folder_the_name_and_the_site_it_would_replace() {
+        let mut model = model(&["shop"]);
+        assert!(view(&model, false).link.is_none());
+        model.pick_link_folder(&abs("/work/Shop"));
+        let view_ = view(&model, false);
+        let link = view_.link.as_ref().expect("the form");
+        assert_eq!(
+            (link.folder, link.name),
+            (abs("/work/Shop").as_path(), "shop")
+        );
+        assert_eq!(link.replaces.map(|site| site.name.as_str()), Some("shop"));
+    }
+
+    // -- show --
+
+    fn bounds_center(tree: &Tree, label: &str) -> Pos2 {
+        let node = tree
+            .node_with_label(label)
+            .or_else(|| tree.node_with_text(label))
+            .unwrap_or_else(|| panic!("no widget named {label}"));
+        let b = node.bounds().expect("a node with bounds");
+        pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32)
+    }
+
+    fn draw(ui: &mut Ui, model: &Model) -> Vec<Action> {
+        show(ui, &view(model, false), &LIGHT)
+    }
+
+    /// A harness that has drawn `model` once, and its accessibility tree.
+    fn start(model: &Model) -> (Harness, Tree) {
+        let harness = Harness::new(egui::Theme::Light);
+        let tree = harness.accessibility(|ui| {
+            draw(ui, model);
+        });
+        (harness, tree)
+    }
+
+    /// One click on the widget named `label`; what Sites returned.
+    fn click(model: &Model, label: &str) -> Vec<Action> {
+        let (harness, tree) = start(model);
+        let mut actions = Vec::new();
+        harness.click(bounds_center(&tree, label), |ui| {
+            actions.extend(draw(ui, model));
+        });
+        actions
+    }
+
+    /// A click on `button`, which opens a menu, then one on its row `row`.
+    fn choose(model: &Model, button: &str, row: &str) -> Vec<Action> {
+        let (harness, tree) = start(model);
+        harness.click(bounds_center(&tree, button), |ui| {
+            draw(ui, model);
+        });
+        assert!(
+            egui::Popup::is_any_open(&harness.ctx),
+            "{button} opens a menu"
+        );
+        let tree = harness.accessibility(|ui| {
+            draw(ui, model);
+        });
+        let mut actions = Vec::new();
+        harness.click(bounds_center(&tree, row), |ui| {
+            actions.extend(draw(ui, model));
+        });
+        actions
+    }
+
+    #[test]
+    fn open_opens_the_site_and_a_click_on_the_row_opens_its_page() {
+        let model = model(&["shop"]);
+        assert_eq!(
+            click(&model, "Open"),
+            [Action::OpenSite("shop".into())],
+            "the button is not also a row click"
+        );
+        // The name and the folder are one cell, named by both. The folder is
+        // written the system's way (`\` on Windows).
+        let label = format!("shop, {}", Path::new("/code").join("shop").display());
+        assert_eq!(
+            click(&model, &label),
+            [Action::Navigate(Route::Site("shop".into()))]
+        );
+    }
+
+    #[test]
+    fn add_site_opens_a_menu_with_park_and_link() {
+        let model = model(&["shop"]);
+        assert_eq!(
+            choose(&model, strings::ADD_SITE_BUTTON, strings::PARK_BUTTON),
+            [Action::PickFolder(Pick::Park)]
+        );
+        assert_eq!(
+            choose(&model, strings::ADD_SITE_BUTTON, strings::LINK_BUTTON),
+            [Action::PickFolder(Pick::Link)]
+        );
+    }
+
+    #[test]
+    fn the_empty_state_is_one_sentence_and_the_same_button_with_the_same_menu() {
+        let model = model_without_sites();
+        let (_, tree) = start(&model);
+        assert!(tree.node_with_text(strings::SITES_EMPTY).is_some());
+        // One Add site button, not two: the header keeps the title only.
+        assert_eq!(
+            choose(&model, strings::ADD_SITE_BUTTON, strings::LINK_BUTTON),
+            [Action::PickFolder(Pick::Link)]
+        );
+        assert!(tree.node_with_label(strings::FIND_SITE).is_none());
+    }
+
+    #[test]
+    fn add_site_does_nothing_while_a_dialog_is_open_or_with_no_daemon() {
+        let model = model(&["shop"]);
+        let harness = Harness::new(egui::Theme::Light);
+        let tree = harness.accessibility(|ui| {
+            show(ui, &view(&model, true), &LIGHT);
+        });
+        harness.click(bounds_center(&tree, strings::ADD_SITE_BUTTON), |ui| {
+            show(ui, &view(&model, true), &LIGHT);
+        });
+        assert!(!egui::Popup::is_any_open(&harness.ctx));
+    }
+
+    #[test]
+    fn the_version_menu_sets_a_version_or_clears_the_site_setting() {
+        let model = model(&["shop"]);
+        let button = "PHP version for shop, 8.4";
+        let set = Action::SitePhp {
+            site: "shop".into(),
+            choice: Choice::Version(v("8.3.27")),
+        };
+        assert_eq!(choose(&model, button, "8.3"), [set]);
+
+        let model = model_with_pin();
+        let clear = Action::SitePhp {
+            site: "shop".into(),
+            choice: Choice::Auto,
+        };
+        assert_eq!(
+            choose(&model, "PHP version for shop, 8.3", strings::USE_SITE_FILES),
+            [clear]
+        );
+    }
+
+    #[test]
+    fn the_reason_is_in_the_tree_beside_the_version() {
+        let (_, tree) = start(&model(&["shop"]));
+        assert!(tree.node_with_text("default").is_some());
+    }
+
+    #[test]
+    fn the_row_menu_switches_the_connection_and_unlinks() {
+        let model = model(&["shop"]);
+        let button = "More actions for shop";
+        let http = Action::SetSecure {
+            site: "shop".into(),
+            secure: false,
+        };
+        assert_eq!(choose(&model, button, strings::SWITCH_TO_HTTP), [http]);
+        assert_eq!(
+            choose(&model, button, strings::UNLINK_BUTTON),
+            [Action::AskUnlink("shop".into())]
+        );
+    }
+
+    #[test]
+    fn the_menu_of_the_second_row_belongs_to_the_second_row() {
+        let model = model(&["alpha", "shop"]);
+        assert_eq!(
+            choose(&model, "More actions for shop", strings::UNLINK_BUTTON),
+            [Action::AskUnlink("shop".into())]
+        );
+    }
+
+    #[test]
+    fn a_parked_site_cannot_be_unlinked_from_its_row() {
+        let mut model = model(&["shop"]);
+        model.sites.parked = vec![PathBuf::from("/code")];
+        assert!(choose(&model, "More actions for shop", strings::UNLINK_BUTTON).is_empty());
+    }
+
+    #[test]
+    fn typing_in_the_search_field_returns_the_text_and_cmd_k_focuses_it() {
+        let model = model(&["shop", "wiki"]);
+        let harness = Harness::new(egui::Theme::Light);
+        harness.run(|ui| {
+            draw(ui, &model);
+        });
+        assert!(!harness.ctx.memory(|memory| memory.has_focus(search_id())));
+        harness.key_with(Key::K, Modifiers::COMMAND, |ui| {
+            draw(ui, &model);
+        });
+        assert!(harness.ctx.memory(|memory| memory.has_focus(search_id())));
+
+        let input = RawInput {
+            events: vec![Event::Text("wi".into())],
+            ..RawInput::default()
+        };
+        let mut actions = Vec::new();
+        harness.frame(input, |ui| actions.extend(draw(ui, &model)));
+        assert_eq!(actions, [Action::SearchSites("wi".into())]);
+    }
+
+    #[test]
+    fn the_search_field_is_a_named_search_input_with_the_key_hint() {
+        let (_, tree) = start(&model(&["shop"]));
+        let field = tree.node_with_label(strings::FIND_SITE).expect("the field");
+        assert_eq!(field.role(), egui::Role::SearchInput);
+    }
+
+    #[test]
+    fn only_the_rows_in_view_are_drawn() {
+        let names: Vec<String> = (0..2000).map(|i| format!("site-{i:04}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let model = model(&refs);
+        let harness = Harness::new(egui::Theme::Light);
+        let screen = egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 600.0));
+        let input = RawInput {
+            screen_rect: Some(screen),
+            ..RawInput::default()
+        };
+        let mut count = 0;
+        let tree = harness.frame(input, |ui| {
+            count = match &view(&model, false).list {
+                List::Rows(rows) => rows.len(),
+                _ => 0,
+            };
+            draw(ui, &model);
+        });
+        assert_eq!(count, 2000);
+        let drawn = (0..2000)
+            .filter(|i| {
+                tree.node_with_label(&format!("PHP version for site-{i:04}, 8.4"))
+                    .is_some()
+            })
+            .count();
+        assert!((1..=20).contains(&drawn), "{drawn} rows were drawn");
+    }
+
+    #[test]
+    fn the_link_form_returns_its_edits_and_sends_with_link_or_enter() {
+        let mut model = model(&[]);
+        model.pick_link_folder(&abs("/work/blog"));
+        assert_eq!(click(&model, strings::LINK_CONFIRM), [Action::SubmitLink]);
+        assert_eq!(click(&model, strings::CANCEL), [Action::CancelLink]);
+
+        // Typing in the name field.
+        let harness = Harness::new(egui::Theme::Light);
+        let tree = harness.accessibility(|ui| {
+            draw(ui, &model);
+        });
+        harness.click(bounds_center(&tree, strings::LINK_NAME), |ui| {
+            draw(ui, &model);
+        });
+        let input = RawInput {
+            events: vec![Event::Text("x".into())],
+            ..RawInput::default()
+        };
+        let mut actions = Vec::new();
+        harness.frame(input, |ui| actions.extend(draw(ui, &model)));
+        assert_eq!(actions, [Action::SetLinkName("blogx".into())]);
+        // Enter in the field sends the link.
+        let mut actions = Vec::new();
+        harness.key(Key::Enter, |ui| actions.extend(draw(ui, &model)));
+        assert_eq!(actions, [Action::SubmitLink]);
+    }
+
+    #[test]
+    fn a_notice_closes_and_offers_its_action() {
+        let mut model = model(&["shop"]);
+        model.sites_notice = Some(SitesNotice::Unlinked("old".into()));
+        assert_eq!(click(&model, strings::CLOSE), [Action::DismissSitesNotice]);
+
+        model.sites_notice = Some(SitesNotice::SiteIsParked {
+            site: "shop".into(),
+            folder: Some(PathBuf::from("/code")),
+        });
+        assert_eq!(
+            click(&model, "Forget /code…"),
+            [Action::AskForget(PathBuf::from("/code"))]
+        );
+    }
+
+    #[test]
+    fn the_hosts_button_returns_sync_hosts_and_is_off_while_it_waits() {
+        let mut model = model(&["shop"]);
+        model.update(Update::Hosts(HostsStatus {
+            used: true,
+            missing: vec!["shop.test".into()],
+        }));
+        assert_eq!(click(&model, strings::ADD_TO_HOSTS), [Action::SyncHosts]);
+        assert!(model.start_hosts_sync());
+        assert!(click(&model, strings::ADD_TO_HOSTS).is_empty());
+    }
+
+    #[test]
+    fn the_parked_folders_forget_and_the_skipped_ones_say_why() {
+        let mut model = model(&["shop"]);
+        model.sites.parked = vec![PathBuf::from("/code"), PathBuf::from("/work")];
+        model.sites.skipped = vec![SkippedFolder {
+            path: PathBuf::from("/code/My Site"),
+            code: "site_name_invalid".into(),
+        }];
+        // Either row's button asks about its own folder.
+        let asked = click(&model, strings::FORGET_BUTTON);
+        assert!(
+            asked == [Action::AskForget(PathBuf::from("/code"))]
+                || asked == [Action::AskForget(PathBuf::from("/work"))],
+            "{asked:?}"
+        );
+        let (_, tree) = start(&model);
+        assert!(tree.node_with_text("/code/My Site").is_some());
+        assert!(
+            tree.node_with_text(&strings::skip_reason("site_name_invalid"))
+                .is_some()
+        );
+        // While a removal runs, no folder can be forgotten.
+        assert!(model.ask_removal(Removal::Unlink {
+            site: "shop".into()
+        }));
+        model.confirm_removal().expect("sent");
+        assert!(click(&model, strings::FORGET_BUTTON).is_empty());
+    }
+
+    #[test]
+    fn the_folders_under_home_show_with_a_tilde_and_a_screen_reader_hears_the_full_path() {
+        let home = abs("/Users/omar");
+        let mut model = model(&[]);
+        let places = [
+            ("docs", abs("/Users/omarx/Code/docs")),
+            ("shop", home.join("Code").join("shop")),
+            ("wiki", abs("/srv/www/wiki")),
+        ];
+        let sites = places
+            .iter()
+            .map(|(name, root)| {
+                let mut site = site(name, Some("8.4.27"), Some(Source::GlobalDefault));
+                site.root = root.clone();
+                site
+            })
+            .collect();
+        with_sites(&mut model, sites);
+        model.home = Some(home.clone());
+        assert_eq!(view(&model, false).home, Some(home.as_path()));
+
+        let harness = Harness::new(egui::Theme::Light);
+        let mut painted = Vec::new();
+        let shapes = harness.shapes(|ui| {
+            draw(ui, &model);
+        });
+        for shape in shapes {
+            if let egui::Shape::Text(text) = shape {
+                painted.push(text.galley.text().to_owned());
+            }
+        }
+        // Under home: shortened. Beside home, and elsewhere: in full.
+        assert!(painted.contains(&tilde(&["Code", "shop"])), "{painted:?}");
+        assert!(
+            painted.contains(&places[0].1.display().to_string()),
+            "{painted:?}"
+        );
+        assert!(
+            painted.contains(&places[2].1.display().to_string()),
+            "{painted:?}"
+        );
+        assert!(
+            !painted
+                .iter()
+                .any(|text| text.contains("Users") && text.starts_with('~')),
+            "{painted:?}"
+        );
+        // The tree has the whole path, so the tilde is never all there is.
+        let (_, tree) = start(&model);
+        let label = format!("shop, {}", places[1].1.display());
+        assert!(tree.node_with_text(&label).is_some(), "{label}");
+    }
+
+    #[test]
+    fn the_parked_and_skipped_lists_show_the_home_folder_as_a_tilde_too() {
+        let home = abs("/Users/omar");
+        let mut model = model(&["shop"]);
+        model.home = Some(home.clone());
+        model.sites.parked = vec![home.join("Code"), abs("/srv/www")];
+        model.sites.skipped = vec![SkippedFolder {
+            path: home.join("Code").join("My Site"),
+            code: "site_name_invalid".into(),
+        }];
+        let (_, tree) = start(&model);
+        assert!(tree.node_with_text(&tilde(&["Code"])).is_some());
+        assert!(tree.node_with_text(&tilde(&["Code", "My Site"])).is_some());
+        assert!(
+            tree.node_with_text(&abs("/srv/www").display().to_string())
+                .is_some()
+        );
+        // With no home, the same folders are shown in full.
+        model.home = None;
+        let (_, tree) = start(&model);
+        let full = home.join("Code").display().to_string();
+        assert!(tree.node_with_text(&full).is_some(), "{full}");
+        assert!(tree.node_with_text(&tilde(&["Code"])).is_none());
+    }
+
+    #[test]
+    fn every_cell_of_a_row_is_centered_on_the_middle_of_the_row() {
+        let model = model(&["shop"]);
+        let (_, tree) = start(&model);
+        let middle = |node: &eframe::egui::accesskit::Node| {
+            let bounds = node.bounds().expect("a place");
+            (bounds.y0 + bounds.y1) / 2.0
+        };
+        let by_label = |label: &str| middle(tree.node_with_label(label).expect(label));
+        let open = by_label("Open");
+        assert!((by_label("PHP version for shop, 8.4") - open).abs() < 0.5);
+        assert!((by_label("More actions for shop") - open).abs() < 0.5);
+        // The reason and the lock and word of the connection share it too.
+        let reason = middle(tree.node_with_text("default").expect("the reason"));
+        assert!((reason - open).abs() < 1.0, "{reason} {open}");
+        let word = middle(tree.node_with_text(strings::HTTPS).expect("the word"));
+        assert!((word - open).abs() < 1.0, "{word} {open}");
+    }
+
+    #[test]
+    fn the_forget_buttons_are_30_high_and_sit_inside_rows_of_at_least_46() {
+        let mut model = model(&["shop"]);
+        model.sites.parked = vec![PathBuf::from("/code"), PathBuf::from("/work")];
+        let (_, tree) = start(&model);
+        let mut buttons: Vec<_> = tree
+            .nodes_with_label(strings::FORGET_BUTTON)
+            .into_iter()
+            .map(|node| node.bounds().expect("a place"))
+            .collect();
+        assert_eq!(buttons.len(), 2);
+        buttons.sort_by(|a, b| a.y0.total_cmp(&b.y0));
+        let height = buttons[0].y1 - buttons[0].y0;
+        assert_eq!(height, f64::from(LIGHT.size.control_in_row));
+        // One row down is one row's height.
+        let row = buttons[1].y0 - buttons[0].y0;
+        assert!(row >= 46.0, "{row}");
+        assert_eq!(row, f64::from(RowHeight::OneLine.points(&LIGHT)));
+        // The divider of a row is 1 px: the button clears it on both sides.
+        assert!(
+            row - height >= 2.0 * f64::from(LIGHT.size.border),
+            "{row} {height}"
+        );
+    }
+
+    #[test]
+    fn link_is_the_primary_button_of_the_form_and_cancel_is_not() {
+        let accent = |model: &Model| {
+            let harness = Harness::new(egui::Theme::Light);
+            let shapes = harness.shapes(|ui| {
+                draw(ui, model);
+            });
+            shapes
+                .iter()
+                .filter(|shape| matches!(shape, egui::Shape::Rect(rect) if rect.fill == LIGHT.color.accent))
+                .count()
+        };
+        let mut model = model(&["shop"]);
+        // "Add site…" is the only accent button.
+        assert_eq!(accent(&model), 1);
+        model.pick_link_folder(&abs("/work/blog"));
+        // Link is the second; Cancel stays secondary (a `surface` fill).
+        assert_eq!(accent(&model), 2);
+    }
+
+    #[test]
+    fn a_site_row_is_as_high_as_a_two_line_row() {
+        let model = model(&["alpha", "shop"]);
+        let (_, tree) = start(&model);
+        let top = |label: &str| {
+            let node = tree.node_with_label(label).expect(label);
+            node.bounds().expect("a place").y0
+        };
+        let step = top("PHP version for shop, 8.4") - top("PHP version for alpha, 8.4");
+        assert!((step - f64::from(LIGHT.size.row_max)).abs() < 0.5, "{step}");
+    }
+
+    #[test]
+    fn the_screen_after_a_site_came_in_through_the_daemon_events() {
+        // The table follows `sites_changed`: a new site shows on the next view.
+        let mut model = model(&["shop"]);
+        apply(
+            &mut model,
+            marsa_core::types::Event::SitesChanged(SiteList {
+                sites: vec![
+                    site("blog", Some("8.4.27"), Some(Source::GlobalDefault)),
+                    site("shop", Some("8.4.27"), Some(Source::GlobalDefault)),
+                ],
+                ..SiteList::default()
+            }),
+        );
+        assert_eq!(names(&view(&model, false)), ["blog", "shop"]);
+    }
 }

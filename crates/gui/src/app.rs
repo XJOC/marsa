@@ -58,6 +58,8 @@ impl App {
         theme::style::apply(ctx);
         bridge.attach(ctx);
         let mut model = Model::new(data_dir);
+        // Once: the window shows a folder under it as `~/…`.
+        model.home = std::env::home_dir();
         // Debug builds only: fixed data for the design review (see `demo`).
         #[cfg(debug_assertions)]
         if let Some(demo) = crate::demo::requested() {
@@ -205,10 +207,6 @@ impl eframe::App for App {
         }
         for command in output.commands {
             self.bridge.send(command);
-        }
-        if let Some(pick) = output.pick {
-            let ctx = ui.ctx().clone();
-            self.open_picker(&ctx, pick);
         }
         // A button may have queued an install.
         self.send_next_install();
