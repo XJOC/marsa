@@ -8,6 +8,7 @@
 //! itself, so the tests run no program and open no socket. The text of each
 //! verdict is in the CLI's strings module (AGENTS.md section 9).
 
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
@@ -63,6 +64,8 @@ pub enum Pass {
     },
     Caddy,
     Dns,
+    /// Linux on the hosts way: every site has its line in the hosts file.
+    Hosts,
     Ports,
     Trust,
     Path,
@@ -105,9 +108,21 @@ pub enum Problem {
         code: String,
     },
     DnsNoAnswer,
+    /// Linux on the `marsa0` link: a `.test` name did not resolve. Its fix
+    /// names the link, not macOS's resolver file.
+    LinkNoAnswer,
     DnsWrongAddress {
         addresses: Vec<IpAddr>,
     },
+    /// Linux on the hosts way: the sites whose names are not in Marsa's
+    /// block yet, sorted (task M4-18k3).
+    HostsMissing {
+        names: Vec<String>,
+    },
+    /// Linux: this data folder's setup wrote Marsa's block in the hosts
+    /// file, and it is gone. Another program may have written the file
+    /// again (WSL and cloud-init do at boot).
+    HostsBlockGone,
     PortsHeld {
         holders: Vec<PortHolder>,
     },
@@ -141,7 +156,8 @@ pub enum Problem {
 /// Why a check did not run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
-    /// Marsa has no such check on this system yet (only macOS for now).
+    /// Marsa has no such check on this system yet: ports and trust on
+    /// Linux, and every system check on Windows.
     NotOnThisSystem,
     NeedsDaemon,
     NeedsCaddy,
@@ -303,6 +319,38 @@ pub fn dns(daemon_running: bool, answer: Option<&[IpAddr]>) -> Verdict {
     } else {
         fail(Problem::DnsNoAnswer)
     }
+}
+
+/// Linux on the `marsa0` link: [`dns`], with the link's own fix.
+pub fn link(daemon_running: bool, answer: Option<&[IpAddr]>) -> Verdict {
+    match dns(daemon_running, answer) {
+        Verdict::Fail(Problem::DnsNoAnswer) => fail(Problem::LinkNoAnswer),
+        verdict => verdict,
+    }
+}
+
+/// Linux on the hosts way (ADR 0014, task M4-18k3): `block`, the names in
+/// Marsa's block of the hosts file (`None`: no block); `sites`, the host
+/// names of the sites (`None`: the daemon gave no list). Every site needs
+/// its line; a name in the block that is no site does no harm.
+pub fn hosts(block: Option<&BTreeSet<String>>, sites: Option<&[String]>) -> Verdict {
+    let Some(block) = block else {
+        return fail(Problem::HostsBlockGone);
+    };
+    let Some(sites) = sites else {
+        return Verdict::Skip(Skip::NeedsDaemon);
+    };
+    let mut names: Vec<String> = sites
+        .iter()
+        .filter(|name| !block.contains(*name))
+        .cloned()
+        .collect();
+    if names.is_empty() {
+        return Verdict::Pass(Pass::Hosts);
+    }
+    names.sort();
+    names.dedup();
+    fail(Problem::HostsMissing { names })
 }
 
 /// Ports 80 and 443 reach Marsa's Caddy through the `pf` redirect (ADR
@@ -799,5 +847,52 @@ mod tests {
             });
             assert_eq!(vc_runtime(Some(found)), pass);
         }
+    }
+
+    /// Task M4-18k3: the hosts way on Linux.
+    #[test]
+    fn every_site_needs_its_line_in_the_hosts_file() {
+        let set = |names: &[&str]| -> BTreeSet<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let list = |names: &[&str]| -> Vec<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let block = set(&["blog.test", "old.test"]);
+        assert_eq!(
+            hosts(Some(&block), Some(&list(&["blog.test"]))),
+            Verdict::Pass(Pass::Hosts)
+        );
+        assert_eq!(hosts(Some(&block), Some(&[])), Verdict::Pass(Pass::Hosts));
+        assert_eq!(
+            hosts(
+                Some(&block),
+                Some(&list(&["shop.test", "blog.test", "api.test"]))
+            ),
+            Verdict::Fail(Problem::HostsMissing {
+                names: list(&["api.test", "shop.test"])
+            })
+        );
+        assert_eq!(
+            hosts(None, Some(&list(&["blog.test"]))),
+            Verdict::Fail(Problem::HostsBlockGone)
+        );
+        assert_eq!(hosts(None, None), Verdict::Fail(Problem::HostsBlockGone));
+        assert_eq!(hosts(Some(&block), None), Verdict::Skip(Skip::NeedsDaemon));
+    }
+
+    /// Task M4-18k3: the `marsa0` link on Linux has its own fix, and is
+    /// otherwise the probe of macOS.
+    #[test]
+    fn the_link_gives_its_own_fix() {
+        let local = [IpAddr::V4(Ipv4Addr::LOCALHOST)];
+        assert_eq!(link(true, Some(&local)), Verdict::Pass(Pass::Dns));
+        assert_eq!(link(true, None), Verdict::Fail(Problem::LinkNoAnswer));
+        assert_eq!(link(false, None), Verdict::Skip(Skip::NeedsDaemon));
+        let other = [IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))];
+        assert!(matches!(
+            link(true, Some(&other)),
+            Verdict::Fail(Problem::DnsWrongAddress { .. })
+        ));
     }
 }
