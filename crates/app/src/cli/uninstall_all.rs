@@ -1007,11 +1007,15 @@ mod tests {
         };
         assert_eq!(render(&report, Path::new("/data")), "");
         assert!(!is_complete(&report));
-        assert_eq!(
-            error(&report).unwrap().line(),
+        // The CLI runs where marsad runs: Windows' admin prompt is UAC.
+        let expected = if cfg!(windows) {
+            "marsa: The UAC prompt was declined, so nothing was removed. Run \"marsa uninstall \
+             --all\" again when you are ready. [uninstall_cancelled]"
+        } else {
             "marsa: The password prompt was cancelled, so nothing was removed. Run \"marsa \
              uninstall --all\" again when you are ready. [uninstall_cancelled]"
-        );
+        };
+        assert_eq!(error(&report).unwrap().line(), expected);
     }
 
     #[test]
@@ -1036,7 +1040,16 @@ mod tests {
             "{text}"
         );
         assert!(lines[2].contains(&inside.display().to_string()), "{text}");
-        assert!(lines[2].contains("shims") && lines[2].contains("~/.zprofile"));
+        // The CLI runs where marsad runs: Windows keeps PATH in a setting.
+        let startup = if cfg!(windows) {
+            "environment variables"
+        } else {
+            "~/.zprofile"
+        };
+        assert!(
+            lines[2].contains("shims") && lines[2].contains(startup),
+            "{text}"
+        );
         assert_eq!(lines.len(), 3, "{text}");
 
         // The data folder kept by choice, and programs elsewhere.
@@ -1092,14 +1105,27 @@ mod tests {
                 .contains("The data folder /data will be deleted once every step has succeeded."),
             "{deleted}"
         );
-        for part in [
-            "ports 80 and 443",
-            "/etc/resolver/test",
-            "for all users and for you",
-            "start at login",
-            "administrator password",
-            "menu-bar icon",
-        ] {
+        // The CLI runs where marsad runs: Windows has its own plan.
+        let parts: &[&str] = if cfg!(windows) {
+            &[
+                "hosts file",
+                "for all users",
+                "helper service",
+                "Program Files",
+                "UAC",
+                "tray icon",
+            ]
+        } else {
+            &[
+                "ports 80 and 443",
+                "/etc/resolver/test",
+                "for all users and for you",
+                "start at login",
+                "administrator password",
+                "menu-bar icon",
+            ]
+        };
+        for part in parts {
             assert!(kept.contains(part), "{part}: {kept}");
         }
     }
