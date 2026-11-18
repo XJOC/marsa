@@ -23,6 +23,7 @@
 pub mod badge;
 pub mod button;
 pub mod dialog;
+pub mod facts;
 pub mod field;
 // Debug builds only: the page the design review reads (task M5-D2). A
 // release build has no gallery and reads no extra environment variable.
@@ -37,6 +38,7 @@ pub mod status;
 pub mod step;
 pub mod switch;
 pub mod table;
+pub mod tabs;
 pub mod tile;
 pub mod version;
 
@@ -52,6 +54,7 @@ use crate::theme::{Direction, TextToken, Theme};
 pub use badge::{CountBadge, RowBadge};
 pub use button::{Button, Kind as ButtonKind, QuietTone};
 pub use dialog::{Answer, ConfirmDialog};
+pub use facts::{Rows as FactRows, fact_card};
 pub use field::Field;
 pub use icons::{Glyph, Icon};
 pub use menu::{Item as MenuItem, Menu};
@@ -64,6 +67,7 @@ pub use status::{
 pub use step::{Stage, StepCard};
 pub use switch::Switch;
 pub use table::{RowHeight, Table, TableColumn, TableOutput};
+pub use tabs::Tabs;
 pub use tile::{Monogram, SectionTile, TileSize};
 pub use version::{PickerSize, Setting, VersionMenu, VersionPick, VersionPicker};
 
