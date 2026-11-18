@@ -35,8 +35,8 @@ const FIT_LIMIT: Duration = Duration::from_millis(400);
 /// A window that has not had the focus by now is not going to (the system
 /// refused it), and a panel that nothing can close is closed at once.
 const FOCUS_LIMIT: Duration = Duration::from_secs(3);
-/// A size that differs by less than this is the same: the system rounds.
-const SAME_SIZE: f32 = 1.0;
+/// A size that differs by less than a point is the same: the system rounds.
+const SAME_SIZE: f32 = theme::UNIT;
 
 /// The options of the panel's window: borderless and transparent, the corners
 /// are the panel's own; always on top; no entry in the taskbar. The system's

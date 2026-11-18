@@ -1,5 +1,5 @@
 //! Debug builds only: fixed fake data for the design review (task M5-D5).
-//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|confirm-unlink|confirm-uninstall|notice-success|notice-error`
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|many-sites|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! fills the model with a few sites, PHP and Caddy (or nothing, for the
 //! first run), and starts no bridge and no daemon: the window draws a state the review needs without a
 //! machine to break. Pair it with
@@ -34,6 +34,10 @@ pub enum Demo {
     Ok,
     /// The same, with Caddy stopped.
     CaddyStopped,
+    /// The same as `Ok`, with twelve sites and four PHP versions: the
+    /// menu-bar panel lists nine, says how many more there are, and puts the
+    /// version buttons on two rows (task M5-D11).
+    ManySites,
     /// A new install: nothing installed, and PHP 8.4 downloading, 18 of
     /// 31 MB (the first step of the first-run panel).
     FirstRun1,
@@ -101,6 +105,7 @@ fn parse(name: &str) -> Option<Demo> {
     Some(match name {
         "ok" => Demo::Ok,
         "caddy-stopped" => Demo::CaddyStopped,
+        "many-sites" => Demo::ManySites,
         "first-run-1" => Demo::FirstRun1,
         "first-run-2" => Demo::FirstRun2,
         "sites-search" => Demo::SitesSearch,
@@ -146,7 +151,12 @@ pub fn fill(model: &mut Model, demo: Demo) {
         model.update(Update::Sites(SiteList::default()));
         return;
     }
-    model.update(Update::Runtimes(runtimes(&["8.3.27", "8.4.27"])));
+    let php: &[&str] = if demo == Demo::ManySites {
+        &["8.2.30", "8.3.27", "8.4.27", "8.5.0"]
+    } else {
+        &["8.3.27", "8.4.27"]
+    };
+    model.update(Update::Runtimes(runtimes(php)));
     let caddy = if demo == Demo::CaddyStopped {
         ServiceState::Stopped
     } else {
@@ -156,12 +166,19 @@ pub fn fill(model: &mut Model, demo: Demo) {
         service(WEB_SERVER, caddy),
         service("php-fpm-8.4", ServiceState::Running),
     ]));
-    let list = if demo == Demo::SitesEmpty {
-        SiteList::default()
-    } else {
-        sites()
+    let list = match demo {
+        Demo::SitesEmpty => SiteList::default(),
+        Demo::ManySites => many_sites(),
+        _ => sites(),
     };
     model.update(Update::Sites(list));
+    // The menu-bar panel's Xdebug switch is read (the Runtimes demos read it
+    // on their own, with the same answer).
+    model.update(Update::Xdebug(XdebugState {
+        enabled: false,
+        loaded: Vec::new(),
+        missing: Vec::new(),
+    }));
     if demo == Demo::SitesSearch {
         model.sites_search = "li".into();
     }
@@ -566,9 +583,49 @@ fn sites() -> SiteList {
     }
 }
 
+/// The six sites of `sites`, and six more.
+fn many_sites() -> SiteList {
+    let mut list = sites();
+    let more = [
+        ("api-gateway", "Code/api-gateway", "8.5.0"),
+        ("blog", "Sites/blog", "8.2.30"),
+        ("cms", "Work/acme/cms", "8.4.27"),
+        ("forum", "Sites/forum", "8.3.27"),
+        ("intranet", "Work/acme/intranet", "8.4.27"),
+        ("status-page", "Code/status-page", "8.5.0"),
+    ];
+    for (name, folder, php) in more {
+        let root = PathBuf::from("/demo").join(folder);
+        list.sites.push(Site {
+            name: name.into(),
+            docroot: root.join("public"),
+            root,
+            kind: SiteKind::Laravel,
+            php: php.parse().ok(),
+            php_source: Some(Source::GlobalDefault),
+            secure: true,
+        });
+    }
+    list
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_many_sites_demo_has_twelve_sites_and_four_php_versions() {
+        assert_eq!(parse("many-sites"), Some(Demo::ManySites));
+        let mut model = Model::default();
+        fill(&mut model, Demo::ManySites);
+        assert_eq!(model.sites.sites.len(), 12);
+        assert_eq!(model.php_versions().len(), 4);
+        // The panel's switch is read, and nothing starts a daemon.
+        assert!(model.xdebug.is_some());
+        let mut plain = Model::default();
+        fill(&mut plain, Demo::Ok);
+        assert_eq!(plain.sites.sites.len(), 6);
+    }
 
     #[test]
     fn a_demo_is_named_by_its_state() {
