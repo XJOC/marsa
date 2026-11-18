@@ -113,7 +113,7 @@ impl Probes for SystemProbes {
 /// The facts `decide_start` needs, read from the system now:
 ///
 /// - the port: a bind to `127.0.0.1:<port>`, and who listens on it on any
-///   address; a look that fails counts as busy ([`port_check`]);
+///   address; a look that fails refuses too ([`port_check`]);
 /// - `postmaster.pid` in the cluster `data`: read with a size cap, never
 ///   through a link ([`process::read_small_file`]), and the program at its
 ///   pid, by its real executable ([`classify_postmaster`] against
@@ -464,14 +464,17 @@ mod tests {
     }
 
     /// macOS: when lsof fails or takes too long, a holder of `*:<port>`
-    /// could be there unseen, so the port counts as busy.
+    /// could be there unseen, so there is no start, and it says why.
     #[tokio::test]
-    async fn a_failed_look_at_the_port_is_busy() {
+    async fn a_failed_look_at_the_port_refuses_as_unknown() {
         let data = tempfile::tempdir().unwrap();
         let mut failed = probes(Liveness::Gone, None);
         failed.lookup = PortLookup::Failed;
-        let facts = start_facts(&failed, free_port(), data.path(), &[]).await;
-        assert_eq!(facts.port_check, PortCheck::Busy { owner: None });
+        let port = free_port();
+        let facts = start_facts(&failed, port, data.path(), &[]).await;
+        assert_eq!(facts.port_check, PortCheck::Unknown);
+        let refused = StartDecision::Refuse(ServiceBusy::PortUnknown { port });
+        assert_eq!(decide_start(&facts), refused);
     }
 
     #[tokio::test]
