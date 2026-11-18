@@ -290,7 +290,8 @@ fn runtime(tool: &str) -> Result<Runtime, HttpError> {
         .into_iter()
         .find(|runtime| runtime.dir_name() == tool)
         .ok_or_else(|| {
-            let message = format!("no tool named {tool:?}; use php, node, composer, or caddy");
+            let names: Vec<&str> = Runtime::ALL.iter().map(|r| r.dir_name()).collect();
+            let message = format!("no tool named {tool:?}; use one of: {}", names.join(", "));
             HttpError::new(StatusCode::NOT_FOUND, "unknown_tool", message)
         })
 }
@@ -884,6 +885,16 @@ fn global_error(err: &ConfigError) -> HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unknown_tool_is_refused_with_every_known_name() {
+        assert_eq!(runtime("postgres").unwrap(), Runtime::Postgres);
+        let err = runtime("ruby").unwrap_err();
+        assert_eq!(err.code, "unknown_tool");
+        for known in Runtime::ALL {
+            assert!(err.message.contains(known.dir_name()), "{}", err.message);
+        }
+    }
 
     #[test]
     fn the_first_php_and_node_become_the_default() {
