@@ -670,6 +670,17 @@ impl PostgresManager {
             .await
             .map_err(ActionError::Init)?;
         info!(%version, port, "starting postgres");
+        // `pg_hba.conf` lets the superuser in over the socket only, so
+        // without one nobody can connect as `postgres` (ADR 0023, "Access").
+        if postgres_socket(&dirs, port).is_none() {
+            let folder = dirs.sockets.display();
+            warn!(%folder, "no Unix socket for postgres: TCP only, no superuser");
+            let text = format!(
+                "marsad: The path of the socket in {folder} is too long, so PostgreSQL \
+                 takes TCP connections only, and its superuser postgres cannot connect."
+            );
+            note(&self.runtime, &daemon.events, &text);
+        }
         Ok(Prepared {
             spec: postgres_spec(programs.postgres, &dirs, port),
             socket: postgres_socket(&dirs, port),
@@ -1245,8 +1256,13 @@ mod tests {
         }
 
         fn pg(mode: &str, probes: FakeProbes) -> Pg {
+            pg_in("data", mode, probes)
+        }
+
+        /// [`pg`] with the daemon's data folder named `name`.
+        fn pg_in(name: &str, mode: &str, probes: FakeProbes) -> Pg {
             let dir = tempfile::tempdir().unwrap();
-            let data = dir.path().join("data");
+            let data = dir.path().join(name);
             let platform = Platform::current().unwrap();
             let version = Version::new(18, 7, 0);
             let programs = programs(&data, platform, &version).unwrap();
@@ -1365,8 +1381,30 @@ mod tests {
             let texts = pg.texts();
             assert_eq!(texts.iter().filter(|t| *t == "fake got SIGINT").count(), 2);
             assert!(!texts.iter().any(|text| text == "fake got SIGTERM"));
+            assert!(
+                !texts
+                    .iter()
+                    .any(|text| text.contains("TCP connections only"))
+            );
             let log = fs::read_to_string(pg.daemon.data_dir.join("logs/postgres.log")).unwrap();
             assert!(log.contains("fake got SIGINT"), "{log}");
+        }
+
+        /// Past the socket path limit: TCP only, and the recent lines say
+        /// that the superuser cannot connect then.
+        #[tokio::test]
+        async fn a_data_folder_too_deep_for_a_socket_says_the_superuser_is_out() {
+            let pg = pg_in(&"d".repeat(100), "serve", probes(Liveness::Gone, None));
+            let status = pg.act(ServiceAction::Start).await.unwrap();
+            assert_eq!(status.state, ServiceState::Running);
+            let server = pg.calls().pop().unwrap();
+            assert!(server.ends_with(" -c unix_socket_directories="), "{server}");
+            let texts = pg.texts();
+            let said = texts.iter().any(|text| {
+                text.contains("TCP connections only") && text.contains("superuser postgres")
+            });
+            assert!(said, "{texts:?}");
+            pg.act(ServiceAction::Stop).await.unwrap();
         }
 
         #[tokio::test]
