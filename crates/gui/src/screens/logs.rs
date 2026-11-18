@@ -26,7 +26,8 @@ use super::sites::message;
 use crate::logline::{self, LogLevel};
 use crate::model::{Action, LOG_SERVICE, LogRow, LogSource, Model, Route};
 use crate::strings;
-use crate::theme::{Direction, Section, Theme};
+use crate::theme::{Direction, Section, Theme, UNIT};
+use crate::widgets::log_entry::width_for;
 use crate::widgets::table::card;
 use crate::widgets::{Button, Chip, Field, LogEntry, Menu, MenuItem, Segmented, level_color};
 
@@ -102,6 +103,19 @@ impl<'a> Lines<'a> {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The most columns of the mono face any line that shows takes.
+    pub fn widest(&self) -> usize {
+        let columns = |row: &LogRow| row.columns;
+        match &self.shown {
+            Shown::All(_) => self.rows.iter().map(columns).max().unwrap_or(0),
+            Shown::Some(indexes) => indexes
+                .iter()
+                .map(|index| columns(&self.rows[*index]))
+                .max()
+                .unwrap_or(0),
+        }
     }
 
     /// The `n`th line that shows. `n` is below [`Lines::len`].
@@ -282,7 +296,10 @@ fn tools(ui: &mut Ui, theme: &Theme, view: &LogsView<'_>, actions: &mut Vec<Acti
 }
 
 /// The lines in a card that fills the height that is left. Only the rows in
-/// view are drawn.
+/// view are drawn, and the list holds a whole number of rows: at the end of
+/// the log no row is cut at the top, and the space left over goes above and
+/// under the rows. A line wider than the card is not cut: the list scrolls
+/// sideways.
 fn list(
     ui: &mut Ui,
     theme: &Theme,
@@ -292,10 +309,18 @@ fn list(
 ) {
     let row = theme.size.log_row;
     card(ui, |ui| {
-        // The rows touch, and the card has room above the first and under
-        // the last.
+        // The rows touch.
         ui.spacing_mut().item_spacing = Vec2::ZERO;
-        ui.add_space(theme.space.s2);
+        let room = ui.available_height();
+        let fit = ((room - theme.space.s2 - theme.space.s2) / row)
+            .floor()
+            .max(UNIT);
+        let height = fit * row;
+        // Half of what is left over above the rows, half under them.
+        let spare = 0.0_f32.midpoint(room - height);
+        ui.add_space(spare);
+        // A row is as wide as the card, or as the widest line if that is wider.
+        let width = ui.available_width().max(width_for(ui, lines.widest()));
         let id = ui.make_persistent_id("log");
         // What the last frame saw: whether Follow was on, and how many
         // lines there were.
@@ -303,10 +328,10 @@ fn list(
             data.get_temp::<(bool, usize)>(id)
                 .unwrap_or((view.follow, lines.len()))
         });
-        let mut area = ScrollArea::vertical()
+        let mut area = ScrollArea::both()
             .id_salt(id)
             .auto_shrink(false)
-            .max_height((ui.available_height() - theme.space.s2).max(row))
+            .max_height(height)
             .stick_to_bottom(view.follow);
         // Follow just came back: go to the end, once. Every frame would not
         // let the user scroll.
@@ -315,7 +340,7 @@ fn list(
         }
         let out = area.show_rows(ui, row, lines.len(), |ui, range| {
             for n in range {
-                entry(ui, lines.get(n));
+                entry(ui, lines.get(n), width);
             }
         });
         // The user scrolled away from the end: Follow is off now, and its
@@ -331,16 +356,17 @@ fn list(
             ui.ctx().request_repaint();
         }
         ui.data_mut(|data| data.insert_temp(id, (view.follow, lines.len())));
-        ui.add_space(theme.space.s2);
+        ui.add_space(spare);
     });
 }
 
-/// One row: its level, and its message in the words of the program. A line
-/// the program wrote to its standard output is drawn quiet.
-fn entry(ui: &mut Ui, row: &LogRow) {
+/// One row, `width` wide: its level, and its message in the words of the
+/// program. A line the program wrote to its standard output is drawn quiet.
+fn entry(ui: &mut Ui, row: &LogRow, width: f32) {
     let message = logline::message(&row.text);
+    let shown = logline::clipped(&message);
     let quiet = row.stream == LogStream::Stdout;
-    ui.add(LogEntry::new(row.level, &message, &row.text).quiet(quiet));
+    ui.add(LogEntry::new(row.level, &shown, &row.text, width).quiet(quiet));
 }
 
 #[cfg(test)]
@@ -905,6 +931,143 @@ mod tests {
         }
     }
 
+    /// A frame of the window `height` high, 1120 wide.
+    fn input_of(height: f32, events: Vec<Event>) -> RawInput {
+        RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1120.0, height))),
+            events,
+            ..RawInput::default()
+        }
+    }
+
+    #[test]
+    fn at_any_window_height_the_list_holds_whole_rows_and_none_is_cut_at_the_top() {
+        // A log of errors only: every row has a tint, which is the row's own
+        // rectangle, so a row that is cut shows as a tint that sticks out of
+        // the area it is drawn in.
+        let texts = vec![ERROR; 300];
+        let model = with_lines(&texts);
+        for height in (520..=760).step_by(7) {
+            let height = height as f32;
+            let harness = Harness::new(egui::Theme::Light);
+            for _ in 0..3 {
+                harness.run(|ui| {
+                    draw(ui, &model, &LogSource::Caddy);
+                });
+            }
+            let shapes = harness.clipped_shapes(input_of(height, Vec::new()), |ui| {
+                draw(ui, &model, &LogSource::Caddy);
+            });
+            let tints: Vec<_> = shapes
+                .iter()
+                .filter_map(|(clip, shape)| match shape {
+                    Shape::Rect(rect) if rect.fill == LIGHT.color.error_bg => {
+                        Some((*clip, rect.rect))
+                    }
+                    _ => None,
+                })
+                .collect();
+            // `show_rows` also lays out one row just past the end, which the
+            // clip rect hides whole: only the rows that show are checked.
+            let tints: Vec<_> = tints
+                .into_iter()
+                .filter(|(clip, rect)| clip.intersect(*rect).height() > 0.5)
+                .collect();
+            assert!(tints.len() >= 5, "{height}: {} rows", tints.len());
+            for (clip, rect) in &tints {
+                assert!(
+                    clip.expand(0.5).contains_rect(*rect),
+                    "{height}: a row {rect:?} is cut by {clip:?}"
+                );
+            }
+            // The rows are as many as fit, one under the other.
+            let mut tops: Vec<f32> = tints.iter().map(|(_, rect)| rect.top()).collect();
+            tops.sort_by(f32::total_cmp);
+            assert!(
+                tops.windows(2)
+                    .all(|pair| (pair[1] - pair[0] - LIGHT.size.log_row).abs() < 0.5)
+            );
+        }
+    }
+
+    /// The long line of the sideways tests: wider than the window.
+    fn long_line() -> String {
+        let words = "slow answer from legacy-crm.test while the upstream pool was busy".to_owned();
+        format!(
+            "{{\"level\":\"warn\",\"msg\":\"{}\"}}",
+            [words.as_str(); 6].join(" ")
+        )
+    }
+
+    #[test]
+    fn a_line_wider_than_the_card_is_whole_and_the_list_scrolls_sideways_to_it() {
+        let long = long_line();
+        let message = logline::message(&long).into_owned();
+        let model = with_lines(&[INFO, &long, INFO]);
+        let harness = Harness::new(egui::Theme::Light);
+        let frame = |events: Vec<Event>| {
+            harness.frame(input_of(720.0, events), |ui| {
+                draw(ui, &model, &LogSource::Caddy);
+            })
+        };
+        for _ in 0..4 {
+            frame(Vec::new());
+        }
+        let tree = frame(Vec::new());
+        let label = strings::log_entry_label(LogLevel::Warning, &message);
+        let place = |tree: &Tree, text: &str| {
+            tree.node_with_text(text)
+                .and_then(|node| node.bounds())
+                .map(|b| (b.x0 as f32, b.x1 as f32))
+                .expect("a row")
+        };
+        let (left, right) = place(&tree, &label);
+        // The row is as wide as its message: wider than the window, not cut.
+        assert!(right - left > 1120.0, "{left}..{right}");
+        // Every row is that wide, so a tint would span the whole line.
+        let (short_left, short_right) = place(&tree, "Info: serving shop.test");
+        assert_eq!((short_left, short_right), (left, right));
+        // A wheel to the side moves the rows to the start side.
+        let wheel = Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(-500.0, 0.0),
+            phase: TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+            source: MouseWheelSource::Wheel,
+        };
+        frame(vec![Event::PointerMoved(pos2(700.0, 300.0)), wheel]);
+        let mut scrolled = tree;
+        for _ in 0..40 {
+            scrolled = frame(Vec::new());
+        }
+        let (now_left, now_right) = place(&scrolled, &label);
+        assert!(now_left < left - 100.0, "{now_left} against {left}");
+        // The end of the line comes into view: its right edge is inside the window.
+        assert!(
+            now_right <= 1120.0 + 1.0 || now_left < left - 400.0,
+            "{now_left}..{now_right}"
+        );
+    }
+
+    #[test]
+    fn a_log_with_only_short_lines_has_rows_as_wide_as_the_card_and_no_sideways_scroll() {
+        let model = mixed();
+        let harness = Harness::new(egui::Theme::Light);
+        let mut tree = None;
+        for _ in 0..4 {
+            tree = Some(harness.frame(input_of(720.0, Vec::new()), |ui| {
+                draw(ui, &model, &LogSource::Caddy);
+            }));
+        }
+        let tree = tree.expect("a frame");
+        let b = tree
+            .node_with_text("Info: serving shop.test")
+            .and_then(|node| node.bounds())
+            .expect("a row");
+        // As wide as the window it is drawn in (the test has no sidebar).
+        assert!(b.x1 - b.x0 <= 1120.0, "{}..{}", b.x0, b.x1);
+    }
+
     #[test]
     fn a_log_that_says_nothing_or_matches_nothing_has_a_sentence_and_the_tools() {
         for (model, text) in [
@@ -920,6 +1083,11 @@ mod tests {
         hidden.log_filter = "nothing like this".into();
         let (_, tree) = settle(&Harness::new(egui::Theme::Light), &hidden, 2);
         assert!(tree.node_with_text(strings::LOG_NO_MATCH).is_some());
+        assert_eq!(strings::LOG_NO_MATCH, "No lines match.");
+        // The chips and the filter field stay, so the user can undo the filter.
+        for label in ["Info", "Warning", "Error", "Follow", strings::FILTER_LINES] {
+            assert!(tree.node_with_label(label).is_some(), "{label}");
+        }
     }
 
     #[test]
