@@ -612,6 +612,8 @@ mod tests {
             self.signals.lock().unwrap().push((pid, signal));
             let event = match signal {
                 Signal::Term => "TERM",
+                Signal::Int => "INT",
+                Signal::Quit => "QUIT",
                 Signal::Kill => "KILL",
             };
             self.events.lock().unwrap().push(event);

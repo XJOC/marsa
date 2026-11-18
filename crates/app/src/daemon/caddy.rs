@@ -33,7 +33,7 @@ use std::time::Duration;
 use marsa_core::caddy::{CaddyError, CaddyInput, CaddyPaths, PhpPools, caddy_env, sites_config};
 use marsa_core::orphan::instance_tag;
 use marsa_core::platform::process;
-use marsa_core::services::{ProgramNotAbsolute, RestartPolicy, ServiceSpec};
+use marsa_core::services::{ProgramNotAbsolute, RestartPolicy, ServiceSpec, StopMethod};
 use marsa_core::sites::Site;
 use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceState, ServiceStatus};
 use reqwest::redirect;
@@ -107,7 +107,7 @@ pub fn caddy_spec_for(paths: &CaddyPaths, program: PathBuf) -> ServiceSpec {
         env: caddy_env(paths),
         cwd: None,
         restart: RESTART,
-        stop_grace: STOP_GRACE,
+        stop: StopMethod::term(STOP_GRACE),
     }
 }
 
@@ -1186,7 +1186,7 @@ mod tests {
         };
         assert_eq!(spec.restart, restart);
         assert_eq!(RESTART, restart);
-        assert_eq!(spec.stop_grace, Duration::from_secs(2));
+        assert_eq!(spec.stop, StopMethod::term(Duration::from_secs(2)));
         assert_eq!(caddy_spec_for(&paths, program), spec);
     }
 
