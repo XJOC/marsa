@@ -190,6 +190,8 @@ pub struct Type {
     pub title: TextToken,
     /// A site's name on its page.
     pub display: TextToken,
+    /// The question a dialog asks: 18 at 500 (the mockups' dialog title).
+    pub dialog_title: TextToken,
     /// Large version buttons.
     pub version_lg: VersionText,
     /// Version buttons of the menu-bar panel.
@@ -296,6 +298,14 @@ pub struct Size {
     pub badge: f32,
     /// The header row of a table: 34 (components.md, Tables and lists).
     pub table_header: f32,
+    /// The width of a dialog: 440 (components.md, Dialogs).
+    pub dialog_width: f32,
+    /// The height of a notice bar: 40 (components.md, Notices).
+    pub notice: f32,
+    /// The height of a progress bar: 6 (components.md, Progress).
+    pub progress: f32,
+    /// The widest a notice bar gets: 560.
+    pub notice_max: f32,
     /// The circle of a status dot with word: 26 (components.md, Status).
     pub status_dot: f32,
     /// The state icon in that circle: 13.
@@ -370,6 +380,11 @@ pub struct StateLayers {
     pub row_hover: f32,
 }
 
+/// A whole, for fractions such as the share a progress bar has filled.
+pub const UNIT: f32 = 1.0;
+/// A hundred, to say a fraction as a percent.
+pub const PERCENT: f32 = 100.0;
+
 /// The light theme, built at compile time.
 pub static LIGHT: Theme = Theme::light();
 /// The dark theme, built at compile time.
@@ -384,6 +399,7 @@ pub const TYPE: Type = Type {
     heading: text(15.0, Face::Medium),
     title: text(24.0, Face::Medium),
     display: text(30.0, Face::Medium),
+    dialog_title: text(18.0, Face::Medium),
     version_lg: VersionText {
         size: 26.0,
         face: Face::Light,
@@ -449,6 +465,10 @@ pub const SIZE: Size = Size {
     switch_inset: 3.0,
     badge: 26.0,
     table_header: 34.0,
+    dialog_width: 440.0,
+    notice: 40.0,
+    progress: 6.0,
+    notice_max: 560.0,
     status_dot: 26.0,
     status_dot_icon: 13.0,
     status_hero: 44.0,

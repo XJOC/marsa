@@ -22,12 +22,14 @@
 
 pub mod badge;
 pub mod button;
+pub mod dialog;
 pub mod field;
 // Debug builds only: the page the design review reads (task M5-D2). A
 // release build has no gallery and reads no extra environment variable.
 #[cfg(debug_assertions)]
 pub mod gallery;
 pub mod icons;
+pub mod notice;
 pub mod segmented;
 pub mod status;
 pub mod switch;
@@ -46,8 +48,10 @@ use crate::theme::{Direction, TextToken, Theme};
 
 pub use badge::{CountBadge, RowBadge};
 pub use button::{Button, Kind as ButtonKind, QuietTone};
+pub use dialog::{Answer, ConfirmDialog};
 pub use field::Field;
 pub use icons::{Glyph, Icon};
+pub use notice::{Notice, NoticeBar, NoticeKind, Notices, Progress, Reaction};
 pub use segmented::Segmented;
 pub use status::{
     Health, PathStep, PillState, RequestPath, StatePill, StatusDot, StatusSentence, StepState,
