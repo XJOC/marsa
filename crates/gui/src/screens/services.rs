@@ -15,11 +15,12 @@ use eframe::egui::{Role, Ui, WidgetInfo};
 use marsa_core::types::{ServiceAction, ServiceState, ServiceStatus};
 
 use super::sites::{message, mute};
-use crate::model::{self, Action, Model};
+use crate::model::{self, Action, LogSource, Model, Route};
 use crate::strings;
 use crate::theme::page::{SERVICES_ACTIONS_COLUMN, SERVICES_STATE_COLUMN};
 use crate::theme::{Direction, Section, Theme};
-use crate::widgets::{Button, LineTone, PillState, RowHeight, StatePill, Table, TableColumn};
+use crate::widgets::table::wrapped_row_height;
+use crate::widgets::{Button, LineTone, PillState, StatePill, Table, TableColumn};
 
 /// The buttons a program may have, in the order they are drawn.
 const ACTIONS: [ServiceAction; 3] = [
@@ -57,16 +58,19 @@ pub struct ServiceRow<'a> {
     pub failure: Option<String>,
     /// The process id, while it runs.
     pub pid: Option<u32>,
-    /// Only the buttons that make sense in the state.
-    pub actions: Vec<ServiceButton>,
+    /// Only the buttons that make sense in the state, in the order they are
+    /// drawn. A pool has none: the sites start and stop it, and the line
+    /// under the table says so.
+    pub actions: Vec<RowButton>,
 }
 
 /// A button of a row.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ServiceButton {
-    pub action: ServiceAction,
-    /// Why it cannot be pressed now: it is shown, and disabled.
-    pub off: Option<&'static str>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowButton {
+    /// Start, Restart, or Stop.
+    Service(ServiceAction),
+    /// A service that failed and wrote a log: the Logs screen opens on it.
+    ShowLog,
 }
 
 /// Decides what Services says. Pure: the same model gives the same view.
@@ -94,9 +98,6 @@ fn row<'a>(model: &Model, service: &'a ServiceStatus) -> ServiceRow<'a> {
         ServiceState::Failed { code } => Some(strings::error_text(code)),
         _ => None,
     };
-    // A pool starts and stops with the sites that need it: the daemon
-    // refuses every action on it, so each button is off, with that reason.
-    let off = pool.map(|_| strings::MANAGED_BY_SITES_HINT);
     ServiceRow {
         id: &service.id,
         name: strings::service_name(&service.id),
@@ -104,12 +105,30 @@ fn row<'a>(model: &Model, service: &'a ServiceStatus) -> ServiceRow<'a> {
         state,
         failure,
         pid: service.pid,
-        actions: ACTIONS
-            .into_iter()
-            .filter(|action| model::can(&service.state, *action))
-            .map(|action| ServiceButton { action, off })
-            .collect(),
+        actions: buttons(model, service, pool.is_some()),
     }
+}
+
+/// The buttons of a row. A pool starts and stops with the sites that need
+/// it, and the daemon refuses every action on it, so it has none: a button
+/// that cannot work is not shown (the line under the table says why). A
+/// service that failed and wrote a log may show that log.
+fn buttons(model: &Model, service: &ServiceStatus, pool: bool) -> Vec<RowButton> {
+    let mut buttons = Vec::new();
+    if matches!(service.state, ServiceState::Failed { .. })
+        && !model.log_rows(&service.id).is_empty()
+    {
+        buttons.push(RowButton::ShowLog);
+    }
+    if !pool {
+        let actions = ACTIONS.into_iter();
+        buttons.extend(
+            actions
+                .filter(|action| model::can(&service.state, *action))
+                .map(RowButton::Service),
+        );
+    }
+    buttons
 }
 
 /// The pill of a state. A pool that is stopped is not broken: no site needs
@@ -150,7 +169,16 @@ pub fn show(ui: &mut Ui, view: &ServicesView<'_>, theme: &Theme) -> Vec<Action> 
     actions
 }
 
+impl ServiceRow<'_> {
+    /// The second line of the row: why it failed, or what it does.
+    fn note(&self) -> &str {
+        self.failure.as_deref().unwrap_or(&self.description)
+    }
+}
+
 /// The rows: the name over its line, the state, and the buttons at the end.
+/// The line wraps in at most two lines and is never cut, so a row is as high
+/// as its lines need.
 fn table(ui: &mut Ui, rows: &[ServiceRow<'_>], actions: &mut Vec<Action>) {
     let columns = [
         TableColumn::fill(strings::COLUMN_SERVICE),
@@ -158,15 +186,21 @@ fn table(ui: &mut Ui, rows: &[ServiceRow<'_>], actions: &mut Vec<Action>) {
         TableColumn::fixed(strings::COLUMN_ACTIONS, SERVICES_ACTIONS_COLUMN),
     ];
     // The rows describe themselves: no header row.
-    let table = Table::new("services", strings::SERVICES, &columns)
-        .headerless()
-        .rows(RowHeight::TwoLine);
-    table.show(ui, rows.len(), |row| {
+    let base = Table::new("services", strings::SERVICES, &columns).headerless();
+    let width = base.fill_width(ui);
+    let heights: Vec<f32> = rows
+        .iter()
+        .map(|service| wrapped_row_height(ui, width, service.note()))
+        .collect();
+    base.heights(&heights).show(ui, rows.len(), |row| {
         let service = &rows[row.index()];
-        match &service.failure {
-            Some(reason) => row.two_lines_toned(&service.name, reason, reason, LineTone::Error),
-            None => row.two_lines(&service.name, &service.description),
-        }
+        let tone = if service.failure.is_some() {
+            LineTone::Error
+        } else {
+            LineTone::Mute
+        };
+        let note = service.note();
+        row.two_lines_wrapped(&service.name, note, note, tone);
         row.cell(|ui| {
             let state = ui.add(StatePill::new(service.state));
             if let Some(pid) = service.pid {
@@ -178,10 +212,15 @@ fn table(ui: &mut Ui, rows: &[ServiceRow<'_>], actions: &mut Vec<Action>) {
             // buttons are added the other way round to read in order.
             ui.with_layout(Direction::CURRENT.row_from_end(), |ui| {
                 for button in service.actions.iter().rev() {
-                    if press(ui, service, button) {
-                        actions.push(Action::Service {
-                            service: service.id.to_owned(),
-                            action: button.action,
+                    if press(ui, service, *button) {
+                        actions.push(match button {
+                            RowButton::Service(action) => Action::Service {
+                                service: service.id.to_owned(),
+                                action: *action,
+                            },
+                            RowButton::ShowLog => {
+                                Action::Navigate(Route::Logs(LogSource::of(service.id)))
+                            }
                         });
                     }
                 }
@@ -191,17 +230,21 @@ fn table(ui: &mut Ui, rows: &[ServiceRow<'_>], actions: &mut Vec<Action>) {
 }
 
 /// One button. Whether it was pressed. A screen reader hears which program
-/// it is for ("Restart Caddy").
-fn press(ui: &mut Ui, service: &ServiceRow<'_>, button: &ServiceButton) -> bool {
-    let widget = Button::secondary(strings::action_text(button.action))
-        .in_row()
-        .disabled_if(button.off.is_some(), button.off.unwrap_or_default());
-    let response = ui.add(widget);
-    let (enabled, label) = (
-        response.enabled(),
-        strings::service_action_label(button.action, &service.name),
-    );
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, &label));
+/// it is for ("Restart Caddy"). The ones that act on the program are
+/// secondary; "Show log" is quiet, a way to read more.
+fn press(ui: &mut Ui, service: &ServiceRow<'_>, button: RowButton) -> bool {
+    let (widget, label) = match button {
+        RowButton::Service(action) => (
+            Button::secondary(strings::action_text(action)),
+            strings::service_action_label(action, &service.name),
+        ),
+        RowButton::ShowLog => (
+            Button::quiet(strings::SHOW_LOG),
+            strings::service_show_log_label(&service.name),
+        ),
+    };
+    let response = ui.add(widget.in_row());
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
     response.clicked()
 }
 
@@ -210,7 +253,7 @@ mod tests {
     use std::path::PathBuf;
 
     use eframe::egui::{self, Pos2, pos2};
-    use marsa_core::types::{Health as DaemonHealth, Site, SiteKind, SiteList};
+    use marsa_core::types::{Health as DaemonHealth, LogLine, LogStream, Site, SiteKind, SiteList};
 
     use super::*;
     use crate::model::Update;
@@ -265,12 +308,27 @@ mod tests {
 
     /// The one row of a model with one service.
     fn only(id: &str, state: ServiceState) -> ServiceRowCopy {
-        let model = model(vec![service(id, state)]);
+        only_with(id, state, false)
+    }
+
+    /// The one row of a model with one service, whose log has a line if
+    /// `logged`.
+    fn only_with(id: &str, state: ServiceState, logged: bool) -> ServiceRowCopy {
+        let mut model = model(vec![service(id, state)]);
+        if logged {
+            model.update(Update::Log(vec![LogLine {
+                service: id.into(),
+                seq: 0,
+                at_ms: 0,
+                stream: LogStream::Stderr,
+                text: "failed".into(),
+            }]));
+        }
         let view = view(&model);
         let row = &rows(&view)[0];
         ServiceRowCopy {
             state: row.state,
-            actions: row.actions.iter().map(|b| (b.action, b.off)).collect(),
+            actions: row.actions.clone(),
             failure: row.failure.clone(),
         }
     }
@@ -279,7 +337,7 @@ mod tests {
     #[derive(Debug)]
     struct ServiceRowCopy {
         state: PillState,
-        actions: Vec<(ServiceAction, Option<&'static str>)>,
+        actions: Vec<RowButton>,
         failure: Option<String>,
     }
 
@@ -310,15 +368,13 @@ mod tests {
         for (state, pill, want) in cases {
             let row = only("caddy", state.clone());
             assert_eq!(row.state, pill, "{state:?}");
-            let actions: Vec<_> = row.actions.iter().map(|(action, _)| *action).collect();
-            assert_eq!(actions, want, "{state:?}");
-            // Caddy's buttons all work: none is off.
-            assert!(
-                row.actions.iter().all(|(_, off)| off.is_none()),
-                "{state:?}"
-            );
+            let want: Vec<_> = want.into_iter().map(RowButton::Service).collect();
+            assert_eq!(row.actions, want, "{state:?}");
             // A button is shown only where the model says it makes sense.
-            for (action, _) in &row.actions {
+            for button in &row.actions {
+                let RowButton::Service(action) = button else {
+                    panic!("only service buttons here: {button:?}");
+                };
                 assert!(model::can(&state, *action), "{state:?} {action:?}");
             }
         }
@@ -353,27 +409,50 @@ mod tests {
     }
 
     #[test]
-    fn a_pool_that_is_stopped_waits_and_every_button_of_a_pool_is_off_with_the_reason() {
-        use ServiceAction::{Restart, Start, Stop};
-        let why = Some(strings::MANAGED_BY_SITES_HINT);
+    fn a_pool_that_is_stopped_waits_and_a_pool_has_no_action_button() {
         for id in ["php-fpm-8.4", "php-cgi-8.3"] {
             let running = only(id, ServiceState::Running);
             assert_eq!(running.state, PillState::Running);
-            assert_eq!(running.actions, [(Restart, why), (Stop, why)], "{id}");
+            assert_eq!(running.actions, [], "{id}");
             // Not broken: no site needs it now, so it waits for one.
             let stopped = only(id, ServiceState::Stopped);
             assert_eq!(stopped.state, PillState::Waiting, "{id}");
-            assert_eq!(stopped.actions, [(Start, why)], "{id}");
-            // A pool that failed is broken, whatever starts it.
-            let failed = only(
-                id,
-                ServiceState::Failed {
-                    code: "php_fpm_orphan_stuck".into(),
-                },
-            );
-            assert_eq!(failed.state, PillState::Failed, "{id}");
-            assert!(failed.failure.is_some());
-            assert_eq!(failed.actions, [(Start, why)], "{id}");
+            assert_eq!(stopped.actions, [], "{id}");
+            // A pool that failed is broken, whatever starts it. Its log, if it
+            // wrote one, is a button; the sites start it, so there is no Start.
+            let failed = ServiceState::Failed {
+                code: "php_fpm_orphan_stuck".into(),
+            };
+            let without = only(id, failed.clone());
+            assert_eq!(without.state, PillState::Failed, "{id}");
+            assert!(without.failure.is_some());
+            assert_eq!(without.actions, [], "{id}");
+            let with = only_with(id, failed, true);
+            assert_eq!(with.actions, [RowButton::ShowLog], "{id}");
+        }
+    }
+
+    #[test]
+    fn a_failed_service_with_a_log_shows_it_before_its_start_and_no_other_state_does() {
+        use ServiceAction::Start;
+        let failed = ServiceState::Failed {
+            code: "port_in_use".into(),
+        };
+        assert_eq!(
+            only_with("caddy", failed.clone(), true).actions,
+            [RowButton::ShowLog, RowButton::Service(Start)]
+        );
+        // No line written: nothing to show.
+        assert_eq!(only("caddy", failed).actions, [RowButton::Service(Start)]);
+        // A program that is fine has no use for it, log or not.
+        for state in [
+            ServiceState::Running,
+            ServiceState::Stopped,
+            ServiceState::Starting,
+            ServiceState::Stopping,
+        ] {
+            let row = only_with("caddy", state.clone(), true);
+            assert!(!row.actions.contains(&RowButton::ShowLog), "{state:?}");
         }
     }
 
@@ -384,8 +463,7 @@ mod tests {
         let row = &rows(&view)[0];
         assert_eq!((row.id, row.name.as_str()), ("mailpit", "mailpit"));
         assert_eq!(row.description, "A program Marsa runs for your sites.");
-        // It is not a pool: its buttons work.
-        assert!(row.actions.iter().all(|button| button.off.is_none()));
+        // It is not a pool: it has its buttons.
         assert_eq!(row.actions.len(), 2);
         // No line under the table about pools.
         assert!(matches!(view, ServicesView::Rows { pools: false, .. }));
@@ -502,13 +580,16 @@ mod tests {
         // The state is a word, read as a status.
         assert_eq!(tree.nodes_with_label("Running").len(), 2);
         // Many buttons say "Restart": each says which program it is for.
+        for label in ["Restart Caddy", "Stop Caddy"] {
+            assert!(tree.node_with_label(label).is_some(), "{label}");
+        }
+        // A pool has no button: the sites start and stop it.
         for label in [
-            "Restart Caddy",
-            "Stop Caddy",
             "Restart PHP-FPM 8.4",
             "Stop PHP-FPM 8.4",
+            "Start PHP-FPM 8.4",
         ] {
-            assert!(tree.node_with_label(label).is_some(), "{label}");
+            assert!(tree.node_with_label(label).is_none(), "{label}");
         }
         // The line about pools is there while a pool is.
         assert!(tree.node_with_text(strings::SERVICES_POOLS_NOTE).is_some());
@@ -521,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn a_button_of_caddy_returns_its_action_and_a_button_of_a_pool_does_nothing() {
+    fn a_button_of_caddy_returns_its_action() {
         let model = two_services();
         assert_eq!(
             click(&model, "Restart Caddy"),
@@ -537,9 +618,6 @@ mod tests {
                 action: ServiceAction::Stop,
             }]
         );
-        // The pool's buttons are there, and off.
-        assert!(click(&model, "Restart PHP-FPM 8.4").is_empty());
-        assert!(click(&model, "Stop PHP-FPM 8.4").is_empty());
         let stopped = model_with_stopped_caddy();
         assert_eq!(
             click(&stopped, "Start Caddy"),
@@ -582,6 +660,145 @@ mod tests {
         );
         assert!(tree.node_with_label("Failed").is_some());
         assert!(tree.node_with_label("Start Caddy").is_some());
+    }
+
+    #[test]
+    fn show_log_opens_the_log_of_that_service_and_is_named_for_it() {
+        let mut model = model(vec![
+            service("caddy", ServiceState::Running),
+            service(
+                "php-fpm-8.2",
+                ServiceState::Failed {
+                    code: "spawn_failed".into(),
+                },
+            ),
+        ]);
+        model.update(Update::Log(vec![LogLine {
+            service: "php-fpm-8.2".into(),
+            seq: 0,
+            at_ms: 0,
+            stream: LogStream::Stderr,
+            text: "[18-Nov-2026 14:30:00] ERROR: cannot bind".into(),
+        }]));
+        let (_, tree) = start(&model);
+        assert!(tree.node_with_label("Show log of PHP-FPM 8.2").is_some());
+        // Caddy runs: no log to show.
+        assert!(tree.node_with_label("Show log of Caddy").is_none());
+        assert_eq!(
+            click(&model, "Show log of PHP-FPM 8.2"),
+            [Action::Navigate(Route::Logs(LogSource::Service(
+                "php-fpm-8.2".into()
+            )))]
+        );
+    }
+
+    /// A frame of the window at `width` wide (the narrowest the window opens
+    /// is 760 with the sidebar folded to 64, and 32 on each side: 632).
+    fn tree_at(model: &Model, width: f32) -> (Harness, Tree) {
+        let harness = Harness::new(egui::Theme::Light);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                egui::vec2(width, 900.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let tree = harness.frame(input, |ui| {
+            draw(ui, model);
+        });
+        (harness, tree)
+    }
+
+    #[test]
+    fn every_line_a_service_can_have_fits_in_two_lines_at_the_narrowest_window() {
+        use crate::widgets::table::{NOTE_LINES, note_galley};
+        // The codes a program fails with (`ServiceState::Failed`), and every
+        // description, at the width the fill column has at 760.
+        let codes = [
+            "caddy_not_installed",
+            "caddy_config_write",
+            "caddy_start_timeout",
+            "port_in_use",
+            "caddy_orphan_stuck",
+            "caddy_other_marsa",
+            "php_fpm_orphan_stuck",
+            "exited",
+            "spawn_failed",
+            "program_not_absolute",
+            "internal_error",
+            "brand_new_code",
+        ];
+        let mut texts: Vec<String> = codes.iter().map(|code| strings::error_text(code)).collect();
+        for id in ["caddy", "php-fpm-8.4", "php-cgi-8.4", "mailpit"] {
+            for waiting in [false, true] {
+                for sites in [0, 1, 25] {
+                    texts.push(strings::service_description(id, waiting, sites));
+                }
+            }
+        }
+        let width = {
+            let model = model(vec![service("caddy", ServiceState::Running)]);
+            let harness = Harness::new(egui::Theme::Light);
+            let mut width = 0.0;
+            harness.run(|ui| {
+                ui.allocate_ui(egui::vec2(632.0, 400.0), |ui| {
+                    let columns = [
+                        TableColumn::fill(strings::COLUMN_SERVICE),
+                        TableColumn::fixed(strings::COLUMN_STATE, SERVICES_STATE_COLUMN),
+                        TableColumn::fixed(strings::COLUMN_ACTIONS, SERVICES_ACTIONS_COLUMN),
+                    ];
+                    width = Table::new("services", strings::SERVICES, &columns).fill_width(ui);
+                    draw(ui, &model);
+                });
+            });
+            width
+        };
+        let harness = Harness::new(egui::Theme::Light);
+        let mut cut = Vec::new();
+        harness.run(|ui| {
+            for text in &texts {
+                let galley = note_galley(ui.painter(), &LIGHT, text, width);
+                if galley.elided || galley.rows.len() > NOTE_LINES {
+                    cut.push(text.clone());
+                }
+            }
+        });
+        assert!(cut.is_empty(), "cut at {width} wide: {cut:#?}");
+    }
+
+    #[test]
+    fn a_row_is_as_high_as_its_lines_need_and_the_text_is_whole_for_a_screen_reader() {
+        let long = ServiceState::Failed {
+            code: "php_fpm_orphan_stuck".into(),
+        };
+        let short = ServiceState::Failed {
+            code: "exited".into(),
+        };
+        let measure = |state: ServiceState, width: f32| {
+            let model = model(vec![service("php-fpm-8.4", state)]);
+            let (_, tree) = tree_at(&model, width);
+            let reason = match &view(&model) {
+                ServicesView::Rows { rows, .. } => rows[0].failure.clone().expect("a reason"),
+                other => panic!("{other:?}"),
+            };
+            let cell = tree
+                .node_with_text(&format!("PHP-FPM 8.4, {reason}"))
+                .expect("the whole reason is there");
+            let b = cell.bounds().expect("a place");
+            b.y1 - b.y0
+        };
+        // A line that wraps makes a taller row than one that does not.
+        let (tall, flat) = (measure(long, 632.0), measure(short, 632.0));
+        assert!(tall > flat, "{tall} against {flat}");
+        // At a wide window the same line fits in one line: the row is the usual one.
+        assert!(
+            measure(
+                ServiceState::Failed {
+                    code: "php_fpm_orphan_stuck".into()
+                },
+                1400.0
+            ) <= flat + 1.0
+        );
     }
 
     #[test]

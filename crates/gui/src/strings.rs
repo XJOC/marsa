@@ -37,9 +37,6 @@ pub const SERVICES_POOLS_NOTE: &str = "PHP pools start and stop with the sites t
 pub const COLUMN_SERVICE: &str = "Service";
 pub const COLUMN_STATE: &str = "State";
 pub const COLUMN_ACTIONS: &str = "Actions";
-/// Over the disabled buttons of a php-fpm pool.
-pub const MANAGED_BY_SITES_HINT: &str =
-    "Starts and stops with the sites that need its PHP version.";
 
 pub const LOGS: &str = "Logs";
 /// The name of the control that picks whose log is shown.
@@ -122,6 +119,11 @@ pub fn service_description(id: &str, waiting: bool, sites: usize) -> String {
 /// The tooltip of a state: the process id, while there is one.
 pub fn service_pid(pid: u32) -> String {
     format!("Process {pid}")
+}
+
+/// What a screen reader says for the "Show log" of a service.
+pub fn service_show_log_label(name: &str) -> String {
+    format!("{SHOW_LOG} of {name}")
 }
 
 /// What a screen reader says for a service's button: "Restart Caddy".

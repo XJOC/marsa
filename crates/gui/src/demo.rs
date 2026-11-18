@@ -265,7 +265,7 @@ const POOL_LOG: [(&str, &str); 4] = [
 
 /// What the Services screen shows beyond `Ok`: Caddy with its process, the
 /// pool of PHP 8.4 running, the one of 8.3 waiting for a site, and the one
-/// of 8.2 failed.
+/// of 8.2 failed, with a long reason and a log to show.
 fn services_screen(model: &mut Model) {
     let mut caddy = service(WEB_SERVER, ServiceState::Running);
     caddy.pid = Some(4242);
@@ -278,10 +278,18 @@ fn services_screen(model: &mut Model) {
         service(
             "php-fpm-8.2",
             ServiceState::Failed {
-                code: "spawn_failed".into(),
+                code: "php_fpm_orphan_stuck".into(),
             },
         ),
     ]));
+    // The failed pool wrote a line before it stopped, so its row can open it.
+    model.update(Update::Log(vec![LogLine {
+        service: "php-fpm-8.2".into(),
+        seq: 0,
+        at_ms: 0,
+        stream: LogStream::Stderr,
+        text: "[18-Nov-2026 14:29:58] ERROR: unable to bind listening socket".into(),
+    }]));
 }
 
 /// The confirmations and the notices of the design review.
@@ -681,6 +689,17 @@ mod tests {
             ]
         );
         assert!(rows[1].failure.is_some());
+        // The failed pool wrote a log: its row can show it. The others cannot.
+        assert_eq!(
+            rows[1].actions,
+            [crate::screens::services::RowButton::ShowLog]
+        );
+        assert!(rows.iter().enumerate().all(|(n, row)| {
+            n == 1
+                || !row
+                    .actions
+                    .contains(&crate::screens::services::RowButton::ShowLog)
+        }));
     }
 
     #[test]
