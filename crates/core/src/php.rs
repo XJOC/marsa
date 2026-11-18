@@ -254,7 +254,10 @@ pub fn fpm_conf(listen: &Listen, files: &PhpFiles) -> Result<String, PhpError> {
 /// OPcache that checks for changed files on every request.
 ///
 /// - With `files.ca_bundle`: `curl.cainfo` and `openssl.cafile`, so an HTTP
-///   call from PHP to another `.test` site trusts Marsa's CA.
+///   call from PHP to another `.test` site, or to the internet, trusts the
+///   bundle: the system's roots, then Marsa's. On Windows too (ADR 0020):
+///   without `openssl.cafile`, PHP's streams check with Windows itself, which
+///   asks for revocation data that Caddy's local certificates do not have.
 /// - On [`Platform::WindowsX64`]: `extension_dir`, `zend_extension = opcache`
 ///   before PHP 8.5, and one `extension` line for each extension Laravel
 ///   needs. Every other platform gets the same text,

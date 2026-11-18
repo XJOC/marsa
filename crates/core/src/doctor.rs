@@ -25,6 +25,9 @@ pub enum Check {
     Runtimes,
     /// Windows only: the Microsoft Visual C++ runtime PHP needs (ADR 0019).
     VcRuntime,
+    /// Windows only: the roots PHP's curl trusts, from Windows' store
+    /// (task M4-19n).
+    SystemRoots,
     Caddy,
     Dns,
     Ports,
@@ -61,6 +64,15 @@ pub enum Pass {
     /// The installed runtime's version, `14.44.35211`.
     VcRuntime {
         version: String,
+    },
+    /// PHP's CA bundle holds every root Windows trusts for HTTPS now:
+    /// `count` of them, with `left_out` others of the store left out, and
+    /// Marsa's CA when `marsa`; the bundle was written `age_days` ago.
+    SystemRoots {
+        count: usize,
+        left_out: usize,
+        marsa: bool,
+        age_days: u64,
     },
     Caddy,
     Dns,
@@ -139,6 +151,17 @@ pub enum Problem {
     VcRuntimeOld {
         found: String,
     },
+    /// Windows: Marsa cannot read the roots Windows trusts, so PHP trusts
+    /// only Marsa's CA, and its HTTPS calls to the internet fail.
+    SystemRootsUnreadable {
+        error: String,
+    },
+    /// Windows: the store gave no root for HTTPS, with the same effect.
+    SystemRootsEmpty,
+    /// Windows: roots Windows trusts now are not in PHP's CA bundle yet.
+    SystemRootsMissing {
+        missing: usize,
+    },
     ShimsNotInPath {
         shims: PathBuf,
     },
@@ -164,6 +187,8 @@ pub enum Skip {
     CaddyNotInstalled,
     /// No CA yet: Caddy makes it when it first starts (task M5-15).
     NoCa,
+    /// Windows: no CA bundle for PHP yet; marsad writes it when it starts.
+    NoBundle,
     NoLog,
     /// The check could not get its facts (`netstat` or `security` failed,
     /// the daemon gave no answer). The log says why.
@@ -221,6 +246,50 @@ pub fn daemon(answer: Result<(Health, u16), String>) -> Verdict {
 /// moves to PHP built with a newer MSVC (vs18 is 14.5x): `doctor` would
 /// pass on an older runtime that PHP fails on.
 pub const VC_RUNTIME_MIN: (u32, u32) = (14, 44);
+
+/// Windows: the facts of the check of PHP's CA bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootsFacts {
+    /// The DER of each root Windows trusts for HTTPS now, and how many other
+    /// roots the store holds; or why the store could not be read.
+    pub windows: Result<(Vec<Vec<u8>>, usize), String>,
+    /// The bundle marsad wrote, and its age in days; `None` when there is
+    /// none.
+    pub bundle: Option<(String, u64)>,
+    /// Marsa's root certificate, once Caddy has made it.
+    pub marsa_root: Option<String>,
+}
+
+/// Windows: whether PHP's CA bundle holds every root that Windows trusts for
+/// HTTPS now (ADR 0020). The roots are read here again, the same way marsad
+/// reads them, and each must be in the bundle, so an old bundle that is
+/// still complete passes. An empty store fails: every Windows has roots.
+pub fn system_roots(facts: RootsFacts) -> Verdict {
+    let (roots, left_out) = match facts.windows {
+        Err(error) => return Verdict::Fail(Problem::SystemRootsUnreadable { error }),
+        Ok((roots, _)) if roots.is_empty() => return Verdict::Fail(Problem::SystemRootsEmpty),
+        Ok(found) => found,
+    };
+    let Some((bundle, age_days)) = facts.bundle else {
+        return Verdict::Skip(Skip::NoBundle);
+    };
+    let missing = roots
+        .iter()
+        .filter(|der| !bundle.contains(&crate::caddy::pem_certificates(std::slice::from_ref(der))))
+        .count();
+    if missing > 0 {
+        return Verdict::Fail(Problem::SystemRootsMissing { missing });
+    }
+    let marsa = facts
+        .marsa_root
+        .is_some_and(|root| !root.trim().is_empty() && bundle.contains(root.trim()));
+    Verdict::Pass(Pass::SystemRoots {
+        count: roots.len(),
+        left_out,
+        marsa,
+        age_days,
+    })
+}
 
 /// Windows: the Visual C++ runtime that Windows reports, `(major, minor,
 /// build)`, or `None` when it reports none.
@@ -824,6 +893,57 @@ mod tests {
         let name = probe_name(u64::MAX);
         let label = name.strip_suffix(".test").unwrap();
         assert!(crate::sites::validate_name(label).is_ok(), "{name}");
+    }
+
+    #[test]
+    fn the_windows_roots_must_all_be_in_phps_bundle() {
+        let roots = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        let all = crate::caddy::ca_bundle_text(&crate::caddy::pem_certificates(&roots), "root");
+        let facts = |windows, bundle| {
+            system_roots(RootsFacts {
+                windows,
+                bundle,
+                marsa_root: Some("root".to_owned()),
+            })
+        };
+        assert_eq!(
+            facts(Ok((roots.clone(), 7)), Some((all.clone(), 3))),
+            Verdict::Pass(Pass::SystemRoots {
+                count: 2,
+                left_out: 7,
+                marsa: true,
+                age_days: 3,
+            })
+        );
+        // Before Caddy makes Marsa's root, the bundle has Windows' alone.
+        let before = system_roots(RootsFacts {
+            windows: Ok((roots.clone(), 0)),
+            bundle: Some((crate::caddy::pem_certificates(&roots), 0)),
+            marsa_root: None,
+        });
+        assert!(
+            matches!(
+                before,
+                Verdict::Pass(Pass::SystemRoots { marsa: false, .. })
+            ),
+            "{before:?}"
+        );
+        let one = crate::caddy::pem_certificates(&roots[..1]);
+        assert_eq!(
+            facts(Ok((roots.clone(), 0)), Some((one, 0))),
+            Verdict::Fail(Problem::SystemRootsMissing { missing: 1 })
+        );
+        assert_eq!(facts(Ok((roots, 0)), None), Verdict::Skip(Skip::NoBundle));
+        assert_eq!(
+            facts(Ok((Vec::new(), 3)), Some((all, 0))),
+            Verdict::Fail(Problem::SystemRootsEmpty)
+        );
+        assert_eq!(
+            facts(Err("access denied".to_owned()), None),
+            Verdict::Fail(Problem::SystemRootsUnreadable {
+                error: "access denied".to_owned()
+            })
+        );
     }
 
     #[test]

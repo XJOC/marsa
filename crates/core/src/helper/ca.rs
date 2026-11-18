@@ -36,7 +36,7 @@ pub fn certificate_sha256(pem: &str) -> Option<String> {
 /// The DER of the one certificate in `text`: exactly one `CERTIFICATE`
 /// block with only spaces, tabs, and line breaks around it, strict base64,
 /// and the shape of an X.509 certificate.
-fn parse_pem(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn parse_pem(text: &str) -> Option<Vec<u8>> {
     let block = text.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'));
     let body = block.strip_prefix(BEGIN)?.strip_suffix(END)?;
     let der = decode(body)?;
@@ -88,7 +88,7 @@ fn sextet(c: u8) -> Option<u8> {
 
 /// The shape of an X.509 certificate (RFC 5280): one SEQUENCE, with nothing
 /// after it, that holds exactly a SEQUENCE, a SEQUENCE, and a BIT STRING.
-fn is_certificate(der: &[u8]) -> bool {
+pub(crate) fn is_certificate(der: &[u8]) -> bool {
     let Some((0x30, header, total)) = element(der) else {
         return false;
     };

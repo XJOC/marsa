@@ -211,7 +211,8 @@ pub fn caddy_env(paths: &CaddyPaths) -> BTreeMap<String, String> {
 /// - macOS: `/etc/ssl/cert.pem`.
 /// - Linux: `/etc/ssl/certs/ca-certificates.crt` (Debian, Ubuntu, Arch), then
 ///   `/etc/pki/tls/certs/ca-bundle.crt` (Fedora, RHEL).
-/// - Windows: none for now. Its trust store is not a PEM file.
+/// - Windows: none. Its trust store is not a PEM file: `marsad` exports it
+///   with [`pem_certificates`] instead (task M4-19n).
 /// - [`Platform::Any`]: none. It is not a system.
 pub fn system_ca_bundles(platform: Platform) -> Vec<&'static Path> {
     let paths: &[&'static str] = match platform {
@@ -223,6 +224,47 @@ pub fn system_ca_bundles(platform: Platform) -> Vec<&'static Path> {
         Platform::WindowsX64 | Platform::Any => &[],
     };
     paths.iter().copied().map(Path::new).collect()
+}
+
+/// `ders`, each a certificate in DER, as PEM text: one `CERTIFICATE` block
+/// each, standard base64 in lines of 64 characters, LF line endings. The
+/// system part of [`ca_bundle_text`] on Windows, whose trust store gives DER
+/// (task M4-19n).
+pub fn pem_certificates(ders: &[Vec<u8>]) -> String {
+    let mut text = String::new();
+    for der in ders {
+        text.push_str("-----BEGIN CERTIFICATE-----\n");
+        let body = base64(der);
+        let mut rest = body.as_str();
+        while !rest.is_empty() {
+            let (line, more) = rest.split_at(rest.len().min(64));
+            text.push_str(line);
+            text.push('\n');
+            rest = more;
+        }
+        text.push_str("-----END CERTIFICATE-----\n");
+    }
+    text
+}
+
+/// Standard base64 (RFC 4648) with `=` padding, on one line.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut text = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let mut group = [0_u8; 3];
+        group[..chunk.len()].copy_from_slice(chunk);
+        let bits = u32::from_be_bytes([0, group[0], group[1], group[2]]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                let sextet = (bits >> (18 - 6 * i)) & 0x3f;
+                text.push(char::from(ALPHABET[sextet as usize]));
+            } else {
+                text.push('=');
+            }
+        }
+    }
+    text
 }
 
 /// The text of [`CaddyPaths::ca_bundle`]: the system bundle as it is, one
@@ -1247,5 +1289,69 @@ mod tests {
         )]));
         let err = sites_config(&input, &[shop()], &pools).expect_err("bad socket");
         assert_eq!(err, CaddyError::PathNotUtf8 { path: bad });
+    }
+
+    #[test]
+    fn base64_matches_rfc_4648() {
+        for (bytes, text) in [
+            (&b""[..], ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+            (b"fooba", "Zm9vYmE="),
+            (b"foobar", "Zm9vYmFy"),
+            (&[0xff, 0xfe, 0xfd], "//79"),
+        ] {
+            assert_eq!(base64(bytes), text, "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn pem_certificates_wraps_at_64_and_ends_each_block() {
+        assert_eq!(pem_certificates(&[]), "");
+        // 48 bytes are exactly one line of 64; 49 bytes start a second.
+        let one = pem_certificates(&[vec![0; 48]]);
+        assert_eq!(
+            one,
+            format!(
+                "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+                "A".repeat(64)
+            )
+        );
+        let two = pem_certificates(&[vec![0; 49], vec![1, 2, 3]]);
+        let lines: Vec<&str> = two.lines().collect();
+        assert_eq!(lines[1].len(), 64);
+        assert_eq!(lines[2], "AA==");
+        assert_eq!(lines[3], "-----END CERTIFICATE-----");
+        assert_eq!(
+            &lines[4..],
+            [
+                "-----BEGIN CERTIFICATE-----",
+                "AQID",
+                "-----END CERTIFICATE-----"
+            ]
+        );
+    }
+
+    /// The PEM of the test CA, rebuilt from its DER, is the same
+    /// certificate to the helper's strict parser.
+    #[cfg(feature = "full")]
+    #[test]
+    fn pem_certificates_round_trips_the_test_ca() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/helper");
+        let pem = std::fs::read_to_string(fixtures.join("test-ca.pem")).expect("read the test CA");
+        let der = crate::helper::certificate_der(&pem).expect("the test CA parses");
+        let again = pem_certificates(&[der]);
+        let expected =
+            std::fs::read_to_string(fixtures.join("test-ca.sha256")).expect("read the hash");
+        assert_eq!(
+            crate::helper::certificate_sha256(&again).as_deref(),
+            Some(expected.trim())
+        );
+        assert_eq!(
+            again.replace("\r\n", "\n").trim(),
+            pem.replace("\r\n", "\n").trim()
+        );
     }
 }
