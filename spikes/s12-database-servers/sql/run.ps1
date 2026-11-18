@@ -112,9 +112,11 @@ switch ($format) {
   'zip' { & $bsdtar -xf $file -C $U }
   'jar' {
     $jar = Join-Path $W 'jar'; New-Item -ItemType Directory -Force -Path $jar | Out-Null
-    & $bsdtar -xf $file -C $jar
+    $sz = 'C:\Program Files\7-Zip\7z.exe'
+    & $sz x $file "-o$jar" -y *> $null
     $txz = Get-ChildItem $jar -Recurse -Filter *.txz | Select-Object -First 1
-    & $bsdtar -xf $txz.FullName -C $U
+    & $sz x $txz.FullName "-o$jar\tar" -y *> $null
+    & $sz x (Get-ChildItem "$jar\tar" -Filter *.tar | Select-Object -First 1).FullName "-o$U" -y *> $null
   }
 }
 Rec unpack_ms ((Ms) - $t0)
@@ -145,6 +147,7 @@ $script:SrvLog = $null
 $script:N = 0
 $script:Extra = @() # extra server arguments, used by the "small config" memory test
 if ($server -eq 'mysql') {
+  $SrvExe = $exe.FullName
   $PIDFILE = Join-Path $W 'mysqld.pid'
   $MYLOG = Join-Path $W 'mysqld.err'
   $RECOVERY = 'crash recovery|Crash recovery|was not properly shut down'
@@ -165,7 +168,14 @@ if ($server -eq 'mysql') {
   $PIDFILE = Join-Path $DATA 'postmaster.pid'
   $RECOVERY = 'automatic recovery in progress|not properly shut down|was interrupted'
   $CLEAN = 'database system is shut down'
-  function SrvArgs([int]$p) { @('-D', $DATA, '-p', "$p", '-c', 'listen_addresses=127.0.0.1') + $script:Extra }
+  # postgres.exe refuses to run in an administrator account (the CI runner is one). pg_ctl start
+  # drops the admin rights itself, so on Windows the server is started through pg_ctl.
+  $SrvExe = "$ROOT\bin\pg_ctl.exe"
+  function SrvArgs([int]$p) {
+    $script:SrvLog = Join-Path $W ("pg-{0}.log" -f [guid]::NewGuid().ToString('N').Substring(0, 6))
+    $o = (@('-p', "$p", '-c', 'listen_addresses=127.0.0.1') + $script:Extra) -join ' '
+    @('start', '-D', $DATA, '-l', $script:SrvLog, '-w', '-t', '60', '-o', "`"$o`"")
+  }
   function DoInit { & "$ROOT\bin\initdb.exe" -D $DATA -U postgres -A trust -E UTF8 --locale=C }
   function Ready([int]$p, [int]$s) { ToolOk pgwait 127.0.0.1 $p $s }
   function Smoke([int]$p) {
@@ -205,16 +215,25 @@ function Alive($proc) { return ($proc -and -not $proc.HasExited) }
 # ---------------------------------------------------------------- lifecycle
 function Start-Srv([int]$port, [string]$tag) {
   $script:N++
-  $script:SrvLog = if ($server -eq 'mysql') { $MYLOG } else { Join-Path $W "stderr-$($script:N).log" }
+  $argv = SrvArgs $port
+  if ($server -eq 'mysql') { $script:SrvLog = $MYLOG }
   $before = if ($server -eq 'mysql' -and (Test-Path $MYLOG)) { (Get-Item $MYLOG).Length } else { 0 }
   $t0 = Ms
-  $script:Srv = Start-Process -FilePath $exe.FullName -ArgumentList (SrvArgs $port) -PassThru -WindowStyle Hidden `
+  $script:Srv = Start-Process -FilePath $SrvExe -ArgumentList $argv -PassThru -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $W "stdout-$($script:N).log") -RedirectStandardError (Join-Path $W "stderr-$($script:N).log")
   $null = $script:Srv.Handle
-  if ((Ready $port 90) -and (Alive $script:Srv)) {
+  $ok = Ready $port 90
+  # The process Start-Process returns is not the server (pg_ctl exits; mysqld.exe is not always it): trust the pid file.
+  $real = [int](Get-Content $PIDFILE -TotalCount 1 -ErrorAction SilentlyContinue)
+  if ($real -and $real -ne $script:Srv.Id) {
+    Rec "start_${tag}_pid_note" "Start-Process gave pid $($script:Srv.Id), the pid file says $real"
+    $script:Srv = Get-Process -Id $real -ErrorAction SilentlyContinue
+    if ($script:Srv) { $null = $script:Srv.Handle }
+  }
+  if ($ok -and (Alive $script:Srv)) {
     Rec "start_${tag}_ready_ms" ((Ms) - $t0)
   } else {
-    Rec "start_${tag}_ready_ms" ("FAILED: " + (Get-Content (Join-Path $W "stderr-$($script:N).log") -Tail 6 -ErrorAction SilentlyContinue) -join ' ')
+    Rec "start_${tag}_ready_ms" ("FAILED: " + ((Get-Content (Join-Path $W "stderr-$($script:N).log"), $script:SrvLog -Tail 6 -ErrorAction SilentlyContinue) -join ' '))
     return $false
   }
   $txt = if (Test-Path $script:SrvLog) { Get-Content $script:SrvLog -Raw } else { '' }
@@ -280,10 +299,10 @@ Stop-Srv $cleanStop 'final1' $PORT
 $hp = Start-Process $py -ArgumentList @($tool, 'hold-port', '127.0.0.1', "$PORT") -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 1
 $script:N++
-$cp = Start-Process -FilePath $exe.FullName -ArgumentList (SrvArgs $PORT) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $W 'conflict.out') -RedirectStandardError (Join-Path $W 'conflict.err')
+$cp = Start-Process -FilePath $SrvExe -ArgumentList (SrvArgs $PORT) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $W 'conflict.out') -RedirectStandardError (Join-Path $W 'conflict.err')
 $null = $cp.Handle
 if ($cp.WaitForExit(40000)) {
-  $msg = (Get-Content (Join-Path $W 'conflict.err'), $MYLOG -ErrorAction SilentlyContinue | Where-Object { $_ -match 'already in use|already running|bind|address|10048' } | Select-Object -Last 2) -join ' '
+  $msg = (Get-Content (Join-Path $W 'conflict.err'), (Join-Path $W 'conflict.out'), $MYLOG, $script:SrvLog -ErrorAction SilentlyContinue | Where-Object { $_ -match 'already in use|already running|bind|address|10048' } | Select-Object -Last 2) -join ' '
   Rec port_conflict "server exited with code $($cp.ExitCode); $msg"
 } else {
   Rec port_conflict 'server kept running although the port was taken'
@@ -322,10 +341,12 @@ function Orphan-Start {
   $argFile = Join-Path $W 'args.txt'; $childFile = Join-Path $W 'child.pid'
   Remove-Item $childFile -ErrorAction SilentlyContinue
   Set-Content -Path $argFile -Value (SrvArgs $PORT)
-  $script:SrvLog = if ($server -eq 'mysql') { $MYLOG } else { Join-Path $W "orphan-$($script:N).err" }
-  $script:Parent = Start-Process pwsh -ArgumentList @('-NoProfile', '-File', $parentScript, $exe.FullName, $argFile, $childFile, (Join-Path $W "orphan-$($script:N).out"), (Join-Path $W "orphan-$($script:N).err")) -PassThru -WindowStyle Hidden
+  if ($server -eq 'mysql') { $script:SrvLog = $MYLOG }
+  $script:Parent = Start-Process pwsh -ArgumentList @('-NoProfile', '-File', $parentScript, $SrvExe, $argFile, $childFile, (Join-Path $W "orphan-$($script:N).out"), (Join-Path $W "orphan-$($script:N).err")) -PassThru -WindowStyle Hidden
   $null = Ready $PORT 90
   $script:Child = [int](Get-Content $childFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+  $real = [int](Get-Content $PIDFILE -TotalCount 1 -ErrorAction SilentlyContinue)
+  if ($real) { $script:Child = $real } # pg_ctl and the pid file: the server, not the launcher
 }
 function Orphan-Report([string]$prefix) {
   $c = Get-Process -Id $script:Child -ErrorAction SilentlyContinue
@@ -342,10 +363,10 @@ Start-Sleep -Seconds 1
 Orphan-Report 'orphan_after_parent_kill'
 Rec orphan_still_answers ((Smoke $PORT | Select-Object -First 2) -join ' ')
 $script:N++
-$sp = Start-Process -FilePath $exe.FullName -ArgumentList (SrvArgs $PORT) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $W 'second.out') -RedirectStandardError (Join-Path $W 'second.err')
+$sp = Start-Process -FilePath $SrvExe -ArgumentList (SrvArgs $PORT) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $W 'second.out') -RedirectStandardError (Join-Path $W 'second.err')
 $null = $sp.Handle
 if ($sp.WaitForExit(40000)) {
-  $msg = (Get-Content (Join-Path $W 'second.err'), $MYLOG -ErrorAction SilentlyContinue | Where-Object { $_ -match 'lock|already|in use|FATAL|Unable|ERROR' } | Select-Object -Last 3) -join ' '
+  $msg = (Get-Content (Join-Path $W 'second.err'), (Join-Path $W 'second.out'), $MYLOG, $script:SrvLog -ErrorAction SilentlyContinue | Where-Object { $_ -match 'lock|already|in use|FATAL|Unable|ERROR' } | Select-Object -Last 3) -join ' '
   Rec orphan_second_start "refused, exit code $($sp.ExitCode); $msg"
 } else {
   Rec orphan_second_start 'second server kept running (two servers on one data dir?)'

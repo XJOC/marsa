@@ -66,7 +66,14 @@ jobs:
           New-Item -ItemType Directory -Force -Path $out | Out-Null
           foreach ($id in '${{ matrix.ids }}'.Split(' ')) {
             Write-Host "::group::$id"
-            try { & ./spikes/s12-database-servers/sql/run.ps1 -Id $id -Out $out } catch { Write-Host "run.ps1 failed: $_" }
+            # A child process with a time limit, so one stuck candidate cannot eat the whole job.
+            $script = (Resolve-Path ./spikes/s12-database-servers/sql/run.ps1).Path
+            $p = Start-Process pwsh -ArgumentList @('-NoProfile', '-File', $script, '-Id', $id, '-Out', $out) -PassThru -NoNewWindow
+            if (-not $p.WaitForExit(540000)) {
+              Write-Host "TIMEOUT: $id took more than 9 minutes, killing it"
+              taskkill /PID $p.Id /T /F | Out-Null
+              Add-Content -Path (Join-Path $out "$id.tsv") -Value "status`tTIMEOUT after 9 minutes (the script hung)"
+            }
             Write-Host "::endgroup::"
           }
 
