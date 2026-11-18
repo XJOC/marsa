@@ -10,8 +10,9 @@ name: release
 #   (14 days). No release.
 # - workflow_dispatch: the same; with `release` on (main only), also a DRAFT,
 #   pre-release GitHub Release v<version> with the archives of the platforms
-#   input (macOS only for 0.1.0), install.sh, install.ps1, and SHA256SUMS. The owner signs SHA256SUMS with minisign on their own machine,
-#   uploads SHA256SUMS.minisig, reads the draft, and publishes it. The minisign
+#   input (macOS only for 0.1.0), install.sh, install.ps1, and SHA256SUMS.
+#   The owner signs SHA256SUMS with minisign on their own machine, uploads
+#   SHA256SUMS.minisig, reads the draft, and publishes it. The minisign
 #   key never enters CI, and this workflow never publishes.
 
 on:

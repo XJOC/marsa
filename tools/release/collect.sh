@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Puts the platform archives together for one release: checks each archive
-# against its .sha256, adds install.sh and install.ps1, writes SHA256SUMS, and writes the
-# release notes.
+# against its .sha256, adds install.sh and install.ps1, writes SHA256SUMS,
+# and writes the release notes.
 #
 #   VERSION=0.1.0 RELEASE_PLATFORMS="darwin-arm64 darwin-x64" collect.sh <dist folder> <notes file>
 #
