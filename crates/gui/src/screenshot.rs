@@ -7,9 +7,9 @@
 //! uncompressed 24-bit BMP, then closes the window.
 //! `MARSA_GUI_THEME=light|dark` draws that theme instead of the system's.
 //! `MARSA_GUI_SIZE=900x720` opens the window at that size (task M5-D4).
-//! `MARSA_GUI_ROUTE=home|sites|runtimes|runtimes:<runtime>|services|logs|settings|site:<name>`
+//! `MARSA_GUI_ROUTE=home|sites|runtimes|runtimes:<runtime>|services|logs|logs:<service>|settings|site:<name>`
 //! opens that screen (`site:shop` is the page of the site `shop`, task
-//! M5-D7; `runtimes:node` is Node.js chosen, task M5-D8). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|confirm-unlink|confirm-uninstall|notice-success|notice-error`
+//! M5-D7; `runtimes:node` is Node.js chosen, task M5-D8). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! draws fixed fake data and starts no daemon (task M5-D5, see `demo`).
 //! `MARSA_GUI_CLICK=x,y` clicks that point (in points, from the top left of
 //! the window) once the window has settled, so a menu is open in the picture
@@ -243,6 +243,9 @@ fn parse_route(name: &str) -> Option<Route> {
     if let Some(site) = name.strip_prefix("site:") {
         return (!site.is_empty()).then(|| Route::Site(site.to_owned()));
     }
+    if let Some(id) = name.strip_prefix("logs:") {
+        return (!id.is_empty()).then(|| Route::Logs(LogSource::of(id)));
+    }
     if let Some(folder) = name.strip_prefix("runtimes:") {
         let runtime = Runtime::ALL.into_iter().find(|r| r.dir_name() == folder);
         return runtime.map(Route::Runtimes);
@@ -312,6 +315,15 @@ mod tests {
         assert_eq!(parse_size("wide x 720"), None);
         assert_eq!(parse_route("sites"), Some(Route::Sites));
         assert_eq!(parse_route("logs"), Some(Route::Logs(LogSource::Caddy)));
+        assert_eq!(
+            parse_route("logs:php-fpm-8.4"),
+            Some(Route::Logs(LogSource::Service("php-fpm-8.4".into())))
+        );
+        assert_eq!(
+            parse_route("logs:caddy"),
+            Some(Route::Logs(LogSource::Caddy))
+        );
+        assert_eq!(parse_route("logs:"), None);
         assert_eq!(parse_route("mail"), None);
         assert_eq!(parse_route("site:shop"), Some(Route::Site("shop".into())));
         assert_eq!(parse_route("site:"), None);

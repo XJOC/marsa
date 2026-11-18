@@ -40,8 +40,6 @@ pub const COLUMN_ACTIONS: &str = "Actions";
 /// Over the disabled buttons of a php-fpm pool.
 pub const MANAGED_BY_SITES_HINT: &str =
     "Starts and stops with the sites that need its PHP version.";
-pub const LOG_TITLE: &str = "Caddy log";
-pub const LOG_EMPTY: &str = "No log lines yet.";
 
 pub const LOGS: &str = "Logs";
 /// The name of the control that picks whose log is shown.
