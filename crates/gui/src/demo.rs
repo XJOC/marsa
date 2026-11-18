@@ -1,5 +1,5 @@
 //! Debug builds only: fixed fake data for the design review (task M5-D5).
-//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|confirm-unlink|confirm-uninstall|notice-success|notice-error`
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! fills the model with a few sites, PHP and Caddy (or nothing, for the
 //! first run), and starts no bridge and no daemon: the window draws a state the review needs without a
 //! machine to break. Pair it with
@@ -75,6 +75,12 @@ pub enum Demo {
     Logs,
     /// `Logs` with the Info level turned off: only warnings and errors.
     LogsFiltered,
+    /// `Logs` with a filter that no line holds: "No lines match.", and the
+    /// chips still there.
+    LogsNoMatch,
+    /// `Logs` whose PHP 8.4 pool wrote a line wider than the window: open the
+    /// pool's log and scroll sideways to read it.
+    LogsLong,
     /// The same as `Ok`, with the confirmation of "Unlink shop.test?" open.
     ConfirmUnlink,
     /// `Runtimes`, with the confirmation of uninstalling PHP 8.3.27 open.
@@ -109,6 +115,8 @@ fn parse(name: &str) -> Option<Demo> {
         "services" => Demo::Services,
         "logs" => Demo::Logs,
         "logs-filtered" => Demo::LogsFiltered,
+        "logs-no-match" => Demo::LogsNoMatch,
+        "logs-long" => Demo::LogsLong,
         "confirm-unlink" => Demo::ConfirmUnlink,
         "confirm-uninstall" => Demo::ConfirmUninstall,
         "notice-success" => Demo::NoticeSuccess,
@@ -176,7 +184,10 @@ pub fn fill(model: &mut Model, demo: Demo) {
     if demo == Demo::Services {
         services_screen(model);
     }
-    if matches!(demo, Demo::Logs | Demo::LogsFiltered) {
+    if matches!(
+        demo,
+        Demo::Logs | Demo::LogsFiltered | Demo::LogsNoMatch | Demo::LogsLong
+    ) {
         logs_screen(model, demo);
     }
 }
@@ -211,6 +222,21 @@ fn logs_screen(model: &mut Model, demo: Demo) {
     model.update(Update::Log(pool.collect()));
     if demo == Demo::LogsFiltered {
         model.apply_action(Action::ToggleLogLevel(LogLevel::Info));
+    }
+    if demo == Demo::LogsNoMatch {
+        model.apply_action(Action::SetLogFilter("no line says this".into()));
+    }
+    if demo == Demo::LogsLong {
+        // A PHP warning with a file name and a line: php-fpm puts it on one
+        // line, wider than the window.
+        let text = r#"[18-Nov-2026 14:30:09] WARNING: [pool www] child 4261 said into stderr: "NOTICE: PHP message: PHP Warning:  Undefined array key \"price\" in /demo/Code/shop/app/Http/Controllers/CartController.php on line 128""#.to_owned();
+        model.update(Update::Log(vec![LogLine {
+            service: "php-fpm-8.4".into(),
+            seq: POOL_LOG.len() as u64,
+            at_ms: 0,
+            stream: LogStream::Stderr,
+            text,
+        }]));
     }
 }
 
@@ -566,6 +592,8 @@ mod tests {
         assert_eq!(parse("services"), Some(Demo::Services));
         assert_eq!(parse("logs"), Some(Demo::Logs));
         assert_eq!(parse("logs-filtered"), Some(Demo::LogsFiltered));
+        assert_eq!(parse("logs-no-match"), Some(Demo::LogsNoMatch));
+        assert_eq!(parse("logs-long"), Some(Demo::LogsLong));
         assert_eq!(parse("on fire"), None);
     }
 
@@ -733,6 +761,18 @@ mod tests {
                 LogLevel::Error
             ]
         );
+        // A filter no line holds: no lines, and the screen says so.
+        let mut none = Model::default();
+        fill(&mut none, Demo::LogsNoMatch);
+        assert_eq!(view(&none, &LogSource::Caddy).body, Body::NoMatch);
+        // The long line is wider than the window can hold at 1120.
+        let mut long = Model::default();
+        fill(&mut long, Demo::LogsLong);
+        let long_view = view(&long, &LogSource::of("php-fpm-8.4"));
+        let Body::Lines(long_lines) = &long_view.body else {
+            panic!("lines");
+        };
+        assert!(long_lines.widest() > 150, "{}", long_lines.widest());
         let mut filtered = Model::default();
         fill(&mut filtered, Demo::LogsFiltered);
         let view = view(&filtered, &LogSource::Caddy);
