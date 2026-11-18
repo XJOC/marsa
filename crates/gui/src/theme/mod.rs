@@ -125,8 +125,6 @@ pub struct Sections {
     pub home: SectionColors,
     pub sites: SectionColors,
     pub runtimes: SectionColors,
-    /// Light: 4.49:1 on its tint, so on its tint it carries icons and bold
-    /// text only (tokens.md).
     pub services: SectionColors,
     pub mail: SectionColors,
     /// Also the warning color (tokens.md).
@@ -482,11 +480,11 @@ impl Theme {
                 home: section(0x2E3C47, 0xE1E6EA),
                 sites: section(0x1F5F8B, 0xDCE8F1),
                 runtimes: section(0x5B4BB7, 0xE7E3F7),
-                services: section(0x1E7A4A, 0xDDF0E5),
+                services: section(0x1B7045, 0xDDF0E5),
                 mail: section(0xB42E5A, 0xF8E1E9),
                 dumps: section(0x8A5A00, 0xF8ECCF),
                 logs: section(0x4A5A68, 0xE3E8EC),
-                databases: section(0x0B7285, 0xD7EFF2),
+                databases: section(0x0A6878, 0xD7EFF2),
                 queues: section(0xA4480F, 0xF9E4D6),
             },
             elevation: Elevation {
@@ -701,6 +699,15 @@ pub(crate) mod tests {
                 pairs.push((format!("ok on {bg_name}"), c.ok, bg, TEXT));
                 let warning = theme.sections.dumps.fg;
                 pairs.push((format!("warning on {bg_name}"), warning, bg, TEXT));
+            }
+            // A section color is text (a count, a badge) on every surface it
+            // sits on: the sidebar, its selected item, the page, and its tint.
+            for (bg_name, bg) in [
+                ("bg", c.bg),
+                ("side", c.side),
+                ("surface", c.surface),
+                ("selected", c.selected),
+            ] {
                 for section in Section::ALL {
                     let fg = theme.section(section).fg;
                     pairs.push((format!("{section:?} on {bg_name}"), fg, bg, TEXT));
@@ -714,18 +721,11 @@ pub(crate) mod tests {
             ]);
             for section in Section::ALL {
                 let colors = theme.section(section);
-                // tokens.md: light `section.services` is 4.49:1 on its tint,
-                // so there it carries icons and bold text only.
-                let min = if section == Section::Services && !theme.dark {
-                    UI
-                } else {
-                    TEXT
-                };
                 pairs.push((
                     format!("{section:?} on its tint"),
                     colors.fg,
                     colors.tint,
-                    min,
+                    TEXT,
                 ));
             }
             let pairs: Vec<_> = pairs

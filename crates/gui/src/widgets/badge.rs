@@ -252,27 +252,20 @@ mod tests {
         }
     }
 
-    /// tokens.md: these section colors fall short of 4.5:1 on `selected`
-    /// (a fresh count in the selected sidebar item), light theme. Listed so a
-    /// new shortfall fails this test; the report to the manager names them.
-    const SHORT_ON_SELECTED: [Section; 2] = [Section::Services, Section::Databases];
-
     #[test]
     fn a_count_reads_on_the_sidebar_and_on_its_selected_item() {
         for theme in [&LIGHT, &DARK] {
             for section in Section::ALL {
                 for fresh in [true, false] {
                     let color = count_look(theme, section, fresh).color;
-                    let known_short = fresh && !theme.dark && SHORT_ON_SELECTED.contains(&section);
                     let ratio = contrast(color, theme.color.side);
                     assert!(
                         ratio >= TEXT,
                         "{section:?} fresh {fresh} on side: {ratio:.2}:1"
                     );
                     let ratio = contrast(color, theme.color.selected);
-                    assert_eq!(
-                        ratio < TEXT,
-                        known_short,
+                    assert!(
+                        ratio >= TEXT,
                         "{section:?} fresh {fresh} on selected: {ratio:.2}:1"
                     );
                 }
