@@ -1,4 +1,4 @@
-//! `marsa setup`: the first setup (macOS and Linux). macOS may ask for an
+//! `marsa setup`: the first setup (macOS, Linux, and Windows). macOS may ask for an
 //! administrator password, and may then ask the user to approve trusting
 //! Marsa's certificate authority for this user. Linux asks for the password
 //! once, or twice when the `.test` names need a second request (task
