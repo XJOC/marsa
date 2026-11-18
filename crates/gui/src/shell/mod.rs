@@ -90,7 +90,9 @@ fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
     let item = Item::of(&model.route);
     match item {
         Item::Home => scrolled(ui, item, |ui| {
-            screens::home::show(ui, model);
+            let theme = Theme::of(ui.ctx());
+            let view = screens::home::view(model);
+            out.actions.extend(screens::home::show(ui, &view, theme));
             // TODO(M5-D5): first run replaces Home until the first site
             // opens over HTTPS.
             if model.first_run.is_some() && model.is_connected() {

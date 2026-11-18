@@ -31,3 +31,8 @@ pub const PHP_COLUMN_WIDTH: f32 = 110.0;
 pub const SITE_FOLDER_COLUMN_MIN: f32 = 80.0;
 /// The sites table keeps at least this many lines of height.
 pub const SITES_MIN_LINES: f32 = 2.0;
+
+/// The Home sites list (task M5-D5): the PHP column fits `PHP 8.4`, and the
+/// last column fits the Open button, so the button ends at the card's edge.
+pub const HOME_PHP_COLUMN: f32 = 56.0;
+pub const HOME_OPEN_COLUMN: f32 = 58.0;

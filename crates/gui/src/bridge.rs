@@ -62,6 +62,9 @@ pub struct Handle {
     pub updates: mpsc::Receiver<Update>,
     commands: UnboundedSender<Command>,
     repaint: Arc<OnceLock<egui::Context>>,
+    /// The demo's end of `updates`: kept so the channel stays open and the
+    /// window does not take it for a bridge that stopped.
+    _demo: Option<mpsc::Sender<Update>>,
 }
 
 impl Handle {
@@ -70,6 +73,21 @@ impl Handle {
     pub fn attach(&self, ctx: &egui::Context) {
         // A second call keeps the first context: there is only one.
         let _ = self.repaint.set(ctx.clone());
+    }
+
+    /// A bridge with no thread and no daemon behind it, for the design
+    /// review's demo (see `demo`). Its commands go nowhere.
+    // Debug builds only: a design-review aid.
+    #[cfg(debug_assertions)]
+    pub fn detached() -> Self {
+        let (demo, updates) = mpsc::channel();
+        let (commands, _) = unbounded_channel();
+        Self {
+            updates,
+            commands,
+            repaint: Arc::new(OnceLock::new()),
+            _demo: Some(demo),
+        }
     }
 
     pub fn send(&self, command: Command) {
@@ -118,6 +136,7 @@ pub fn start(data_dir: PathBuf) -> std::io::Result<Handle> {
         updates,
         commands,
         repaint,
+        _demo: None,
     })
 }
 

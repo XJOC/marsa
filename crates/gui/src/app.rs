@@ -16,7 +16,7 @@ use std::time::Instant;
 use eframe::egui;
 
 use crate::bridge::{self, Command};
-use crate::model::{Connection, Model, Pick, Route, Update};
+use crate::model::{Action, Connection, Model, Pick, Route, Update};
 use crate::{shell, strings, theme};
 
 pub struct App {
@@ -58,6 +58,11 @@ impl App {
         theme::style::apply(ctx);
         bridge.attach(ctx);
         let mut model = Model::new(data_dir);
+        // Debug builds only: fixed data for the design review (see `demo`).
+        #[cfg(debug_assertions)]
+        if let Some(demo) = crate::demo::requested() {
+            crate::demo::fill(&mut model, demo);
+        }
         model.route = first_route();
         Self {
             model,
@@ -170,6 +175,14 @@ impl eframe::App for App {
         let picking = self.picker.is_some();
         let output = shell::show(ui, &mut self.model, picking);
         for action in output.actions {
+            // A local action: the system opens the site, not a screen
+            // (code.md, State).
+            if let Action::OpenSite(name) = &action {
+                if let Some(url) = self.model.site_url(name) {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                }
+                continue;
+            }
             if let Some(command) = self.model.apply_action(action) {
                 self.bridge.send(command);
             }

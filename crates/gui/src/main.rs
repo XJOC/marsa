@@ -8,6 +8,7 @@
 //! `marsa-gui [--data-dir <PATH>]`, see [`startup`]. Only one window runs per
 //! data folder: a second one exits at once (task M5-04).
 
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -37,7 +38,7 @@ fn run(started: Instant) -> anyhow::Result<()> {
         return Ok(());
     };
     // Connecting starts now, while the window opens.
-    let bridge = bridge::start(data_dir.clone()).context("cannot start the bridge thread")?;
+    let bridge = start_bridge(&data_dir)?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(strings::APP_NAME)
@@ -55,6 +56,17 @@ fn run(started: Instant) -> anyhow::Result<()> {
         }),
     )
     .map_err(|err| anyhow::anyhow!("cannot open the window: {err}"))
+}
+
+/// Starts the bridge to the daemon.
+fn start_bridge(data_dir: &Path) -> anyhow::Result<bridge::Handle> {
+    // Debug builds only: the design review's demo draws fixed data and
+    // starts no daemon (see `demo`).
+    #[cfg(debug_assertions)]
+    if marsa_gui::demo::requested().is_some() {
+        return Ok(bridge::Handle::detached());
+    }
+    bridge::start(data_dir.to_path_buf()).context("cannot start the bridge thread")
 }
 
 /// The size the window opens at.
