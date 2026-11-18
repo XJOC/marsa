@@ -7,9 +7,11 @@
 pub const NAME_FIELD_WIDTH: f32 = 180.0;
 
 /// The Services screen (task M5-D10): the columns after the name and its
-/// line, as the mockup has them: the state pill, and the buttons.
+/// line: the state pill, and the buttons ("Show log" and Start, or Restart
+/// and Stop, side by side). The mockup's buttons are wider than they need,
+/// and the name and its two lines are the ones that need the room.
 pub const SERVICES_STATE_COLUMN: f32 = 130.0;
-pub const SERVICES_ACTIONS_COLUMN: f32 = 190.0;
+pub const SERVICES_ACTIONS_COLUMN: f32 = 150.0;
 
 /// The Sites screen (task M5-D6): the search field of the header, the
 /// columns after the site (the PHP menu with its reason, the connection, and
