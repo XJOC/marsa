@@ -33,6 +33,13 @@ versions = ["2.11.1"]
 # caddy_<version>_checksums.txt (sha512) is checked by `manifest build`.
 versions = ["2.11.8"]
 
+[postgres]
+# The theseus-rs/postgresql-binaries builds, as they are (ADR 0023): the
+# newest 17.x and 18.x on 2026-11-18, both released on 2026-11-12. The
+# `<archive>.sha256` beside each archive is checked by `manifest build`, and
+# without it the build stops.
+versions = ["17.12.0", "18.7.0"]
+
 # A URL for one version, platform, and artifact that replaces the recipe
 # template. `urls`: the first is the main one, the rest are mirrors.
 

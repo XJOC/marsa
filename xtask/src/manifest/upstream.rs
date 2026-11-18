@@ -3,7 +3,7 @@
 //! manifest itself always stores sha256. Pure functions: the build step
 //! downloads the text.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 /// Where our own PHP builds are published: one GitHub Release per build,
 /// `php-<version>-r<revision>`, made by `.github/workflows/php-build.yml`
@@ -13,6 +13,11 @@ pub const PHP_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/
 /// Caddy's official releases (ADR 0008): tag `v<version>`, with
 /// `caddy_<version>_checksums.txt` (sha512) beside the archives.
 pub const CADDY_RELEASES: &str = "https://github.com/caddyserver/caddy/releases/download/v";
+
+/// The PostgreSQL builds of theseus-rs (ADR 0023): tag `<version>`, with
+/// `<file>.sha256` beside every archive.
+pub const THESEUS_RELEASES: &str =
+    "https://github.com/theseus-rs/postgresql-binaries/releases/download/";
 
 /// The hash in a sum file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +44,28 @@ impl Algorithm {
     }
 }
 
+/// How a sum file lists its hashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// Lines for many files; [`find_sum`] picks the line of ours.
+    List,
+    /// One line, for our file only; [`single_sum`] reads it.
+    Single,
+}
+
+/// Who publishes a sum file, so `build` can ask for one source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// Our PHP builds, [`PHP_RELEASES`].
+    OurPhp,
+    Node,
+    WindowsPhp,
+    Composer,
+    Caddy,
+    /// theseus-rs, [`THESEUS_RELEASES`].
+    Theseus,
+}
+
 /// Where the upstream hash of one file is published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SumFile {
@@ -47,40 +74,126 @@ pub struct SumFile {
     /// The name the file has in it.
     pub name: String,
     pub algorithm: Algorithm,
+    pub layout: Layout,
+    pub source: Source,
+}
+
+impl SumFile {
+    /// The hash of [`SumFile::name`] in `text`, the body of [`SumFile::url`].
+    pub fn find(&self, text: &str) -> Result<Vec<u8>> {
+        match self.layout {
+            Layout::List => find_sum(text, &self.name, self.algorithm),
+            Layout::Single => single_sum(text, &self.name, self.algorithm),
+        }
+    }
 }
 
 /// Where the upstream hash of the file at `url` is published. `None` when
 /// the source publishes none: `windows.php.net/.../archives/` (it only has
-/// `sha1sum.txt`) and any other host.
+/// `sha1sum.txt`) and any other host. Also `None` unless the URL is a known
+/// folder, then one tag (such as `18.7.0`; windows.php.net has none), then
+/// the file name, where the tag and the name are each one [`is_segment`]. So
+/// `\\`, `%`, `?`, `#`, and `..` cannot point the URL somewhere else.
 pub fn sum_file_for(url: &str) -> Option<SumFile> {
+    use Algorithm::{Sha256, Sha512};
+    use Layout::{List, Single};
+
     let (dir, name) = url.rsplit_once('/')?;
-    let sum = |url: String, algorithm| {
+    if !is_segment(name) {
+        return None;
+    }
+    let tag = |prefix: &str| dir.strip_prefix(prefix).filter(|tag| is_segment(tag));
+    let sum = |url: String, algorithm, layout, source| {
         Some(SumFile {
             url,
             name: name.to_owned(),
             algorithm,
+            layout,
+            source,
         })
     };
-    if url.starts_with(PHP_RELEASES) {
-        sum(format!("{dir}/sha256sums.txt"), Algorithm::Sha256)
-    } else if url.starts_with("https://nodejs.org/dist/") {
-        sum(format!("{dir}/SHASUMS256.txt"), Algorithm::Sha256)
-    } else if dir == "https://windows.php.net/downloads/releases" {
-        sum(format!("{dir}/sha256sum.txt"), Algorithm::Sha256)
-    } else if url.starts_with("https://getcomposer.org/download/") {
-        sum(format!("{url}.sha256sum"), Algorithm::Sha256)
-    } else if let Some(version) = dir.strip_prefix(CADDY_RELEASES) {
-        // `.../v<version>/<file>`: the tag is the only part between.
-        if version.is_empty() || version.contains('/') {
-            return None;
-        }
+    if tag(PHP_RELEASES).is_some() {
         sum(
-            format!("{dir}/caddy_{version}_checksums.txt"),
-            Algorithm::Sha512,
+            format!("{dir}/sha256sums.txt"),
+            Sha256,
+            List,
+            Source::OurPhp,
         )
+    } else if tag("https://nodejs.org/dist/").is_some() {
+        sum(format!("{dir}/SHASUMS256.txt"), Sha256, List, Source::Node)
+    } else if dir == "https://windows.php.net/downloads/releases" {
+        sum(
+            format!("{dir}/sha256sum.txt"),
+            Sha256,
+            List,
+            Source::WindowsPhp,
+        )
+    } else if tag("https://getcomposer.org/download/").is_some() {
+        sum(format!("{url}.sha256sum"), Sha256, List, Source::Composer)
+    } else if let Some(version) = tag(CADDY_RELEASES) {
+        // `.../v<version>/<file>`.
+        let sums = format!("{dir}/caddy_{version}_checksums.txt");
+        sum(sums, Sha512, List, Source::Caddy)
+    } else if tag(THESEUS_RELEASES).is_some() {
+        // theseus-rs is a third party, and it serves this `.sha256` from the
+        // same place as the archive, so the sum proves only that the download
+        // is whole. The trust comes from the owner's signature on the manifest
+        // that pins this hash (ADR 0023, section 3). M6-09 adds the check of
+        // the GitHub artifact attestations.
+        sum(format!("{url}.sha256"), Sha256, Single, Source::Theseus)
     } else {
         None
     }
+}
+
+/// One plain part of a URL path: only `[A-Za-z0-9._+-]`, and not empty,
+/// `.`, or `..`.
+pub fn is_segment(part: &str) -> bool {
+    !matches!(part, "" | "." | "..")
+        && part
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
+}
+
+/// The first 120 characters of upstream text, quoted, for an error message.
+fn excerpt(text: &str) -> String {
+    match text.char_indices().nth(120) {
+        Some((end, _)) => format!("{:?}...", &text[..end]),
+        None => format!("{text:?}"),
+    }
+}
+
+/// Reads a sum file for one file only, as `sha256sum` writes it and as
+/// theseus-rs publishes it: one line, `<hex>  <name>`, with two spaces, a
+/// lowercase hex of the length of `algorithm`, and `name` exactly. The line
+/// ends with `\n`, `\r\n`, or nothing. Anything else is refused: an empty
+/// file, a second line (even an empty one), a lone `\r`, or another name.
+pub fn single_sum(text: &str, name: &str, algorithm: Algorithm) -> Result<Vec<u8>> {
+    let line = match text.strip_suffix('\n') {
+        Some(line) => line.strip_suffix('\r').unwrap_or(line),
+        None => text,
+    };
+    ensure!(
+        !line.is_empty(),
+        "the upstream sum file for {name} is empty"
+    );
+    ensure!(
+        !line.contains(['\n', '\r']),
+        "the upstream sum file for {name} is not one line"
+    );
+    let Some((hex, file)) = line.split_once("  ") else {
+        bail!(
+            "the upstream sum file for {name} is not `<hex>  <name>`: {}",
+            excerpt(line)
+        );
+    };
+    ensure!(
+        file == name,
+        "the upstream sum file is for {}, not for {name}",
+        excerpt(file)
+    );
+    parse_hex_bytes(hex, algorithm.size())
+        .with_context(|| format!("bad {} for {name}: {}", algorithm.name(), excerpt(hex)))
 }
 
 /// Finds `name` in a sum file: one `<hex> <name>` per line, with one or two
@@ -96,7 +209,7 @@ pub fn find_sum(text: &str, name: &str, algorithm: Algorithm) -> Result<Vec<u8>>
         let file = file.strip_prefix('*').unwrap_or(file);
         if file == name {
             return parse_hex_bytes(&hex.to_ascii_lowercase(), algorithm.size())
-                .with_context(|| format!("bad {} for {name}: {hex:?}", algorithm.name()));
+                .with_context(|| format!("bad {} for {name}: {}", algorithm.name(), excerpt(hex)));
         }
     }
     bail!("{name} is not in the upstream sum file")
@@ -137,6 +250,11 @@ mod tests {
     const CADDY: &str = "34d29142d6aeef494fdbf0c31805be896acfa223c6aaf7ed20b204b8ba836bedb73ff0362b12d1498c922512bc115d2608041754aba9c03e2319bda01505cf6b  caddy_2.11.8_mac_arm64.sbom\n\
         0c6992b1bb40629b6090d72cdc4a3f3722a7f6b667606db9fe67bfea0e42e9c40736d10925d406bf103628a5e906e59300d616a0709bc8855d9e85efbcfece81  caddy_2.11.8_mac_arm64.tar.gz\n\
         fff45b117b9d9ea5cc3f824f3c18de89630bcb43a0b759ca5e7163b7a3c1fb39ec7dae7f3147012d602213c950a46c8b0ef8095c77109e807ebf90132deeb759  caddy_2.11.8_windows_amd64.zip\n";
+    // The whole of theseus-rs's postgresql-17.12.0-aarch64-apple-darwin.tar.gz.sha256
+    // (2026-11-18): one line, two spaces, `\n`.
+    const THESEUS: &str = "2f752033b208f9a6a12ef64a9ee23bf19149cff160841980db1e221bf7d24809  postgresql-17.12.0-aarch64-apple-darwin.tar.gz\n";
+    const THESEUS_HASH: &str = "2f752033b208f9a6a12ef64a9ee23bf19149cff160841980db1e221bf7d24809";
+    const THESEUS_NAME: &str = "postgresql-17.12.0-aarch64-apple-darwin.tar.gz";
 
     fn sha256_of(text: &str, name: &str) -> Result<Vec<u8>> {
         find_sum(text, name, Algorithm::Sha256)
@@ -194,6 +312,132 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_theseus_sum() {
+        assert_eq!(THESEUS.len(), 113, "the size GitHub lists for the asset");
+        let sums = sum_file_for(&format!(
+            "{THESEUS_RELEASES}17.12.0/postgresql-17.12.0-aarch64-apple-darwin.tar.gz"
+        ))
+        .expect("theseus publishes sums");
+        assert_eq!(hex(&sums.find(THESEUS).expect("real file")), THESEUS_HASH);
+        // Without the final newline, and with `\r\n`.
+        for text in [THESEUS.trim_end().to_owned(), THESEUS.replace('\n', "\r\n")] {
+            let sum = single_sum(&text, THESEUS_NAME, Algorithm::Sha256).expect("one line");
+            assert_eq!(hex(&sum), THESEUS_HASH);
+        }
+    }
+
+    #[test]
+    fn bad_theseus_sums_are_refused() {
+        let line = |hash: &str, name: &str| format!("{hash}  {name}\n");
+        let cases = [
+            (String::new(), "is empty"),
+            ("\n".to_owned(), "is empty"),
+            (line(&THESEUS_HASH[..63], THESEUS_NAME), "bad sha256"),
+            (
+                line(&format!("{THESEUS_HASH}0"), THESEUS_NAME),
+                "bad sha256",
+            ),
+            (
+                line(&THESEUS_HASH.to_uppercase(), THESEUS_NAME),
+                "bad sha256",
+            ),
+            (line(&"g".repeat(64), THESEUS_NAME), "bad sha256"),
+            (format!("{THESEUS}{THESEUS}"), "is not one line"),
+            (format!("{THESEUS}\n"), "is not one line"),
+            (THESEUS.replace('\n', "\r"), "is not one line"),
+            (THESEUS.replace('\n', "\r\r\n"), "is not one line"),
+            (
+                format!("{THESEUS_HASH} {THESEUS_NAME}\n"),
+                "is not `<hex>  <name>`",
+            ),
+            (THESEUS_HASH.to_owned(), "is not `<hex>  <name>`"),
+            (line(THESEUS_HASH, &format!("*{THESEUS_NAME}")), "not for"),
+            (line(THESEUS_HASH, &format!(" {THESEUS_NAME}")), "not for"),
+            (
+                line(
+                    THESEUS_HASH,
+                    "postgresql-17.12.0-x86_64-apple-darwin.tar.gz",
+                ),
+                "not for",
+            ),
+            (line(THESEUS_HASH, ""), "not for"),
+        ];
+        for (text, expected) in cases {
+            let err = single_sum(&text, THESEUS_NAME, Algorithm::Sha256).expect_err(&text);
+            assert!(err.to_string().contains(expected), "{text:?}: {err}");
+        }
+        // A list with our line among others is not what theseus publishes.
+        let list = format!("{THESEUS}{}", NODE.replace("\r", ""));
+        assert!(single_sum(&list, THESEUS_NAME, Algorithm::Sha256).is_err());
+        // A long line is cut in the message (the sum file may be 1 MiB).
+        for text in [
+            "x".repeat(1 << 20),
+            format!("{THESEUS_HASH}  {}", "x".repeat(1 << 20)),
+            format!("{}  {THESEUS_NAME}", "0".repeat(1 << 20)),
+        ] {
+            let err = single_sum(&text, THESEUS_NAME, Algorithm::Sha256).expect_err("refused");
+            assert!(err.to_string().len() < 300, "{}", err.to_string().len());
+        }
+    }
+
+    /// A URL that the HTTP client would resolve somewhere else has no sum
+    /// file, for every source: `\\` is read as `/`, `%2e%2e` and `..` go up.
+    #[test]
+    fn urls_that_leave_the_release_have_no_sum_file() {
+        let evil = r"x-\..\..\..\..\..\..\evil\repo\releases\download\1.0.0\";
+        for (dir, name) in [
+            (
+                format!("{PHP_RELEASES}8.4.27-r2"),
+                "php-8.4.27-linux-x64.tar.gz",
+            ),
+            (
+                "https://nodejs.org/dist/v22.23.4".to_owned(),
+                "node-v22.23.4-win-x64.zip",
+            ),
+            (
+                "https://getcomposer.org/download/2.11.1".to_owned(),
+                "composer.phar",
+            ),
+            (
+                "https://windows.php.net/downloads/releases".to_owned(),
+                "php-8.4.27-1-nts-Win32-vs17-x64.zip",
+            ),
+            (
+                format!("{CADDY_RELEASES}2.11.8"),
+                "caddy_2.11.8_mac_arm64.tar.gz",
+            ),
+            (
+                format!("{THESEUS_RELEASES}18.7.0"),
+                "postgresql-18.7.0-x86_64-pc-windows-msvc.zip",
+            ),
+        ] {
+            assert!(sum_file_for(&format!("{dir}/{name}")).is_some(), "{dir}");
+            let (base, tag) = dir.rsplit_once('/').expect("a tag");
+            for url in [
+                format!("{dir}/{evil}{name}"),
+                format!("{dir}/..%2f..%2fevil%2f{name}"),
+                format!("{dir}/%2e%2e/%2e%2e/{name}"),
+                format!("{dir}/{name}?x={name}"),
+                format!("{dir}/{name}#{name}"),
+                format!("{dir}/../../evil/{name}"),
+                format!("{dir}/./{name}"),
+                format!("{dir}/.."),
+                format!("{dir}/{name} x"),
+                format!("{base}/{tag}%2f..%2f..%2fevil/{name}"),
+                format!("{base}/../{name}"),
+            ] {
+                assert_eq!(sum_file_for(&url), None, "{url}");
+            }
+        }
+        assert!(is_segment("postgresql-18.7.0+build_1.tar.gz"));
+        for part in [
+            "", ".", "..", "a/b", r"a\b", "%2e", "a?b", "a#b", "a b", "a\tb", "é",
+        ] {
+            assert!(!is_segment(part), "{part:?}");
+        }
+    }
+
+    #[test]
     fn missing_name_is_an_error() {
         for (text, name) in [
             (NODE, "node-v22.23.4-linux-x64.tar.gz"),
@@ -210,6 +454,7 @@ mod tests {
     #[test]
     fn sum_file_urls() {
         use Algorithm::{Sha256, Sha512};
+        use Source::{Caddy, Composer, Node, OurPhp, WindowsPhp};
         let cases = [
             (
                 "https://nodejs.org/dist/v22.23.4/node-v22.23.4-win-x64.zip",
@@ -217,6 +462,7 @@ mod tests {
                     "https://nodejs.org/dist/v22.23.4/SHASUMS256.txt",
                     "node-v22.23.4-win-x64.zip",
                     Sha256,
+                    Node,
                 )),
             ),
             (
@@ -225,6 +471,7 @@ mod tests {
                     "https://windows.php.net/downloads/releases/sha256sum.txt",
                     "php-8.4.27-1-nts-Win32-vs17-x64.zip",
                     Sha256,
+                    WindowsPhp,
                 )),
             ),
             (
@@ -233,6 +480,7 @@ mod tests {
                     "https://getcomposer.org/download/2.11.1/composer.phar.sha256sum",
                     "composer.phar",
                     Sha256,
+                    Composer,
                 )),
             ),
             (
@@ -245,6 +493,7 @@ mod tests {
                     "https://github.com/XJOC/marsa/releases/download/php-8.4.27-r1/sha256sums.txt",
                     "php-8.4.27-linux-x64.tar.gz",
                     Sha256,
+                    OurPhp,
                 )),
             ),
             (
@@ -253,6 +502,7 @@ mod tests {
                     "https://github.com/caddyserver/caddy/releases/download/v2.11.8/caddy_2.11.8_checksums.txt",
                     "caddy_2.11.8_mac_arm64.tar.gz",
                     Sha512,
+                    Caddy,
                 )),
             ),
             (
@@ -261,6 +511,7 @@ mod tests {
                     "https://github.com/caddyserver/caddy/releases/download/v2.11.8/caddy_2.11.8_checksums.txt",
                     "caddy_2.11.8_windows_amd64.zip",
                     Sha512,
+                    Caddy,
                 )),
             ),
             // Not a release asset: no tag, or a folder below the tag.
@@ -283,12 +534,40 @@ mod tests {
         ];
         for (url, expected) in cases {
             let got = sum_file_for(url);
-            let expected = expected.map(|(sums, name, algorithm)| SumFile {
+            let expected = expected.map(|(sums, name, algorithm, source)| SumFile {
                 url: sums.to_owned(),
                 name: name.to_owned(),
                 algorithm,
+                layout: Layout::List,
+                source,
             });
             assert_eq!(got, expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn theseus_sum_file_urls() {
+        let url = format!("{THESEUS_RELEASES}18.7.0/postgresql-18.7.0-x86_64-pc-windows-msvc.zip");
+        assert_eq!(
+            sum_file_for(&url),
+            Some(SumFile {
+                url: format!("{url}.sha256"),
+                name: "postgresql-18.7.0-x86_64-pc-windows-msvc.zip".to_owned(),
+                algorithm: Algorithm::Sha256,
+                layout: Layout::Single,
+                source: Source::Theseus,
+            })
+        );
+        // Not a release asset: no tag, a folder below the tag, no file name,
+        // or another repository.
+        for url in [
+            format!("{THESEUS_RELEASES}postgresql-18.7.0-x86_64-pc-windows-msvc.zip"),
+            format!("{THESEUS_RELEASES}/postgresql-18.7.0-x86_64-pc-windows-msvc.zip"),
+            format!("{THESEUS_RELEASES}18.7.0/x/postgresql-18.7.0-x86_64-pc-windows-msvc.zip"),
+            format!("{THESEUS_RELEASES}18.7.0/"),
+            "https://github.com/theseus-rs/postgresql-binaries-fork/releases/download/18.7.0/postgresql-18.7.0-x86_64-pc-windows-msvc.zip".to_owned(),
+        ] {
+            assert_eq!(sum_file_for(&url), None, "{url}");
         }
     }
 
