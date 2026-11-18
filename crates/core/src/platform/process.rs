@@ -33,47 +33,21 @@ const TOOL_LIMIT: Duration = Duration::from_secs(2);
 /// The longest `run/caddy.pid` that is read.
 const PID_FILE_MAX: u64 = 4096;
 
-/// A signal for [`send_signal`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Signal {
-    Term,
-    Kill,
-}
+/// The signals [`send_signal`] sends. Defined in `services`, which has no
+/// `full` feature, because a `ServiceSpec`'s stop method names them.
+pub use crate::services::Signal;
 
-/// Asks process `pid` to stop, so it can clean up first.
-///
-/// macOS and Linux: runs `/bin/kill -TERM <pid>`, with an absolute path and
-/// an argument array (ADR 0009), and returns `Ok(true)`. Windows has no
-/// SIGTERM: returns `Ok(false)` at once, and the caller kills the process.
+/// Sends `signal` to `pid`: runs `/bin/kill -TERM|-INT|-QUIT|-KILL <pid>`,
+/// with an absolute path and an argument array (ADR 0009), for up to 2 s. It
+/// does not check who the process is: the caller must, right before
+/// (ADR 0009).
 ///
 /// # Errors
 ///
 /// `InvalidInput` for pid 0 or a pid above `i32::MAX` (`kill` would read them
 /// as "my process group" or "every process"), for pid 1, and for this
-/// process. An error if `/bin/kill` cannot start or fails, for example
-/// because the process is gone.
-#[cfg(unix)]
-pub async fn terminate(pid: u32) -> io::Result<bool> {
-    send_signal(pid, Signal::Term).await.map(|()| true)
-}
-
-/// Asks process `pid` to stop. Windows has no SIGTERM: always `Ok(false)`, and
-/// the caller kills the process instead.
-///
-/// # Errors
-///
-/// None on Windows. The `Result` matches the macOS and Linux version.
-#[cfg(not(unix))]
-pub async fn terminate(_pid: u32) -> io::Result<bool> {
-    Ok(false)
-}
-
-/// Sends `signal` to `pid` with `/bin/kill`, which may run for 2 s. It does
-/// not check who the process is: the caller must, right before (ADR 0009).
-///
-/// # Errors
-///
-/// As [`terminate`], and `TimedOut` if `/bin/kill` takes longer.
+/// process. `TimedOut` if `/bin/kill` takes longer. An error if `/bin/kill`
+/// cannot start or fails, for example because the process is gone.
 #[cfg(unix)]
 pub async fn send_signal(pid: u32, signal: Signal) -> io::Result<()> {
     let plain = matches!(i32::try_from(pid), Ok(p) if p > 1);
@@ -85,6 +59,8 @@ pub async fn send_signal(pid: u32, signal: Signal) -> io::Result<()> {
     }
     let flag = match signal {
         Signal::Term => "-TERM",
+        Signal::Int => "-INT",
+        Signal::Quit => "-QUIT",
         Signal::Kill => "-KILL",
     };
     let mut kill = Command::new("/bin/kill");
@@ -109,7 +85,7 @@ pub async fn send_signal(pid: u32, signal: Signal) -> io::Result<()> {
 ///
 /// # Errors
 ///
-/// Always `Unsupported`.
+/// Always `Unsupported`: the caller kills the process instead.
 #[cfg(not(unix))]
 pub async fn send_signal(pid: u32, _signal: Signal) -> io::Result<()> {
     Err(io::Error::new(
@@ -746,15 +722,28 @@ pub fn hide_console_window(cmd: &mut Command) {
 mod tests {
     use super::*;
 
-    // Only Unix sends signals; on Windows `terminate` does nothing.
+    const SIGNALS: [Signal; 4] = [Signal::Term, Signal::Int, Signal::Quit, Signal::Kill];
+
+    // Only Unix sends signals.
     #[cfg(unix)]
     #[tokio::test]
-    async fn terminate_refuses_pids_that_kill_reads_as_groups() {
-        for pid in [0, 1, u32::MAX, 1 << 31, std::process::id()] {
-            let err = terminate(pid).await.unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{pid}");
-            let err = send_signal(pid, Signal::Kill).await.unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{pid}");
+    async fn every_signal_refuses_pids_that_kill_reads_as_groups() {
+        for signal in SIGNALS {
+            for pid in [0, 1, u32::MAX, 1 << 31, std::process::id()] {
+                let err = send_signal(pid, signal).await.unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{signal:?} {pid}");
+            }
+        }
+    }
+
+    // Nothing is sent, whatever the pid. The supervisor reads `Unsupported`
+    // as "kill at once".
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn windows_sends_no_signal() {
+        for signal in SIGNALS {
+            let err = send_signal(4242, signal).await.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{signal:?}");
         }
     }
 

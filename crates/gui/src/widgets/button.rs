@@ -7,6 +7,9 @@
 //! says why). A button whose action opens a dialog or a menu ends its label
 //! with "…": that is the caller's text.
 
+use std::sync::Arc;
+
+use eframe::egui::text::Galley;
 use eframe::egui::{
     Align2, Color32, CornerRadius, Rect, Response, Role, Sense, Stroke, StrokeKind, Ui, Widget,
     WidgetInfo, pos2, vec2,
@@ -97,6 +100,16 @@ pub fn colors(theme: &Theme, kind: Kind, tone: QuietTone, touch: Touch) -> Color
 /// `ui.add(Button::secondary("Open folder").disabled("No folder yet"))`.
 /// `Response::clicked` tells that the user pressed it.
 #[derive(Clone, Debug)]
+/// What [`Button::measure`] finds.
+struct Measure {
+    galley: Option<Arc<Galley>>,
+    text_width: f32,
+    icon_width: f32,
+    between: f32,
+    content_width: f32,
+    width: f32,
+}
+
 #[must_use = "a button does nothing until it is added to a Ui"]
 pub struct Button<'a> {
     kind: Kind,
@@ -229,30 +242,58 @@ impl<'a> Button<'a> {
         }
     }
 
-    fn show(self, ui: &mut Ui) -> Response {
-        let theme = Theme::of(ui.ctx());
-        let direction = Direction::CURRENT;
+    /// The text laid out, and the widths of the parts of the button.
+    fn measure(&self, ui: &Ui, theme: &Theme) -> Measure {
         let token = TextToken {
             size: theme.text.body_sm.size,
             face: self.face(),
         };
-        let height = self.height(theme);
-        let icon_size = theme.size.icon_inline;
-        let gap = theme.space.s2;
         let galley = (self.kind != Kind::Icon)
             .then(|| layout(ui.painter(), self.label, token, Color32::PLACEHOLDER));
         let text_width = galley.as_ref().map_or(0.0, |galley| galley.size().x);
-        let icon_width = if self.icon.is_some() { icon_size } else { 0.0 };
+        let icon_width = if self.icon.is_some() {
+            theme.size.icon_inline
+        } else {
+            0.0
+        };
         let between = if self.icon.is_some() && galley.is_some() {
-            gap
+            theme.space.s2
         } else {
             0.0
         };
         let content_width = icon_width + between + text_width;
         let width = match self.kind {
-            Kind::Icon => height,
+            Kind::Icon => self.height(theme),
             _ => content_width + self.padding(theme) + self.padding(theme),
         };
+        Measure {
+            galley,
+            text_width,
+            icon_width,
+            between,
+            content_width,
+            width,
+        }
+    }
+
+    /// How wide the button is when added to `ui`: a container that places
+    /// buttons by hand (a notice) reserves the room first.
+    pub fn width(&self, ui: &Ui) -> f32 {
+        self.measure(ui, Theme::of(ui.ctx())).width
+    }
+
+    fn show(self, ui: &mut Ui) -> Response {
+        let theme = Theme::of(ui.ctx());
+        let direction = Direction::CURRENT;
+        let height = self.height(theme);
+        let Measure {
+            galley,
+            text_width,
+            icon_width,
+            between,
+            content_width,
+            width,
+        } = self.measure(ui, theme);
         let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
         if ui.is_rect_visible(rect) {
             let look = match self.look {

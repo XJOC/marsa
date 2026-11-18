@@ -30,7 +30,7 @@ use marsa_core::caddy::{PhpPools, SERVER_ID};
 use marsa_core::config::SitesConfig;
 use marsa_core::platform::daemon_file::{Token, daemon_authority};
 use marsa_core::platform::process;
-use marsa_core::services::ServiceSpec;
+use marsa_core::services::{ServiceSpec, StopMethod};
 use marsa_core::types::{ErrorBody, Event, LogLine, ServiceAction, ServiceState, ServiceStatus};
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
@@ -187,7 +187,7 @@ impl App {
                     (FAKE.to_owned(), mode.to_owned()),
                     (FAKE_CONFIG.to_owned(), config),
                 ]),
-                stop_grace: Duration::from_millis(500),
+                stop: StopMethod::term(Duration::from_millis(500)),
                 ..caddy_spec_for(&caddy.paths, program)
             });
         }
