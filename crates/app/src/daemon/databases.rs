@@ -34,8 +34,8 @@ use marsa_core::config::{self, ConfigError, ConfigPaths, ServerSettings};
 use marsa_core::databases::{
     LockConflict, PG_HBA_CONF, POSTGRES_PORT, PidFileCheck, PostgresDirs, ROOT_ROLE_SQL,
     ServiceBusy, StartDecision, StartFacts, classify_postmaster, decide_start, initdb_args,
-    line_version, port_check, postgres_args, postgres_socket, postgres_stop, postmaster_pid,
-    single_user_args, startup_lock_conflict,
+    line_version, port_check, postgres_args, postgres_stop, postmaster_pid, single_user_args,
+    socket_for, startup_lock_conflict,
 };
 use marsa_core::orphan::Liveness;
 use marsa_core::platform::{probe, process};
@@ -672,18 +672,19 @@ impl PostgresManager {
         info!(%version, port, "starting postgres");
         // `pg_hba.conf` lets the superuser in over the socket only, so
         // without one nobody can connect as `postgres` (ADR 0023, "Access").
-        if postgres_socket(&dirs, port).is_none() {
+        let socket = socket_for(&dirs, port);
+        if let Err(why) = &socket {
             let folder = dirs.sockets.display();
-            warn!(%folder, "no Unix socket for postgres: TCP only, no superuser");
+            warn!(%folder, %why, "no Unix socket for postgres: TCP only, no superuser");
             let text = format!(
-                "marsad: The path of the socket in {folder} is too long, so PostgreSQL \
-                 takes TCP connections only, and its superuser postgres cannot connect."
+                "marsad: PostgreSQL gets no Unix socket in {folder}: {why}. So it takes TCP \
+                 connections only, and its superuser postgres cannot connect."
             );
             note(&self.runtime, &daemon.events, &text);
         }
         Ok(Prepared {
             spec: postgres_spec(programs.postgres, &dirs, port),
-            socket: postgres_socket(&dirs, port),
+            socket: socket.ok(),
             data: dirs.data,
             port,
         })
@@ -860,6 +861,15 @@ pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
     let postgres = &daemon.postgres;
     let settings = match read_settings(&daemon.data_dir) {
         Ok(settings) => settings,
+        // Without PostgreSQL, a broken `global.toml` is none of its business:
+        // its status and lines stay as they are.
+        Err(err) if !any_installed(&daemon.data_dir) => {
+            info!(
+                code = err.code(),
+                "no postgres is installed; it does not start with the daemon"
+            );
+            return Launch::ended(POSTGRES_ID, Launched::NotInstalled);
+        }
         Err(err) => {
             postgres.fail(&daemon.events, err.code(), &err.to_string());
             return Launch::ended(POSTGRES_ID, Launched::Failed(err.code()));
@@ -889,6 +899,13 @@ pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
         }
     });
     Launch::running(POSTGRES_ID, task)
+}
+
+/// Whether any PostgreSQL version is installed. A folder that cannot be read
+/// counts as one: then the error is reported.
+fn any_installed(data_dir: &Path) -> bool {
+    let installed = RuntimesDir::in_dir(data_dir).installed(Runtime::Postgres);
+    installed.map_or(true, |versions| !versions.is_empty())
 }
 
 async fn launch(daemon: &Daemon, busy: tokio::sync::OwnedMutexGuard<()>) -> Launched {
@@ -1129,6 +1146,33 @@ mod tests {
         }
         let mut names = servers.iter().filter_map(|path| path.file_stem());
         assert!(names.all(|name| name == "postgres"));
+    }
+
+    /// A broken `global.toml` (task M6-03 review): without PostgreSQL it
+    /// leaves PostgreSQL's status and lines alone; with one, the status
+    /// says why it did not start.
+    #[tokio::test]
+    async fn a_broken_global_toml_fails_postgres_only_when_one_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = ConfigPaths::in_dir(dir.path()).global;
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        std::fs::write(&global, "[postgres\n").unwrap();
+        let daemon = Arc::new(Daemon::new(dir.path().to_path_buf()));
+        let launched = start_at_launch(&daemon).wait(Duration::from_secs(5)).await;
+        assert_eq!(launched, Some(Launched::NotInstalled));
+        assert_eq!(daemon.postgres.status().state, ServiceState::Stopped);
+        assert!(daemon.postgres.recent_logs().is_empty());
+
+        let version =
+            RuntimesDir::in_dir(dir.path()).version_dir(Runtime::Postgres, &Version::new(18, 7, 0));
+        std::fs::create_dir_all(version).unwrap();
+        let launched = start_at_launch(&daemon).wait(Duration::from_secs(5)).await;
+        assert_eq!(launched, Some(Launched::Failed("config_invalid")));
+        let failed = ServiceState::Failed {
+            code: "config_invalid".into(),
+        };
+        assert_eq!(daemon.postgres.status().state, failed);
+        assert_eq!(daemon.postgres.recent_logs().len(), 1);
     }
 
     #[test]
@@ -1390,21 +1434,26 @@ mod tests {
             assert!(log.contains("fake got SIGINT"), "{log}");
         }
 
-        /// Past the socket path limit: TCP only, and the recent lines say
-        /// that the superuser cannot connect then.
+        /// No socket (a path too long, or a comma in it): TCP only, and the
+        /// recent lines say why, and that the superuser cannot connect then.
         #[tokio::test]
-        async fn a_data_folder_too_deep_for_a_socket_says_the_superuser_is_out() {
-            let pg = pg_in(&"d".repeat(100), "serve", probes(Liveness::Gone, None));
-            let status = pg.act(ServiceAction::Start).await.unwrap();
-            assert_eq!(status.state, ServiceState::Running);
-            let server = pg.calls().pop().unwrap();
-            assert!(server.ends_with(" -c unix_socket_directories="), "{server}");
-            let texts = pg.texts();
-            let said = texts.iter().any(|text| {
-                text.contains("TCP connections only") && text.contains("superuser postgres")
-            });
-            assert!(said, "{texts:?}");
-            pg.act(ServiceAction::Stop).await.unwrap();
+        async fn a_data_folder_with_no_socket_says_why_and_that_the_superuser_is_out() {
+            let deep = "d".repeat(100);
+            for (folder, why) in [(deep.as_str(), "bytes long"), ("a,b", "a comma")] {
+                let pg = pg_in(folder, "serve", probes(Liveness::Gone, None));
+                let status = pg.act(ServiceAction::Start).await.unwrap();
+                assert_eq!(status.state, ServiceState::Running);
+                let server = pg.calls().pop().unwrap();
+                assert!(server.contains(" -c unix_socket_directories= "), "{server}");
+                let texts = pg.texts();
+                let said = texts.iter().any(|text| {
+                    text.contains(why)
+                        && text.contains("TCP connections only")
+                        && text.contains("superuser postgres")
+                });
+                assert!(said, "{texts:?}");
+                pg.act(ServiceAction::Stop).await.unwrap();
+            }
         }
 
         #[tokio::test]

@@ -140,11 +140,48 @@ pub fn single_user_args(data: &Path) -> Vec<String> {
 /// - the folder has a control character. PostgreSQL writes it as line 5 of
 ///   `postmaster.pid`, and a line break would move the lines after it.
 pub fn postgres_socket(dirs: &PostgresDirs, port: u16) -> Option<PathBuf> {
-    let dir = dirs.sockets.to_str()?;
-    let odd = |c: char| c == ',' || c == '"' || c.is_control();
-    let plain = dirs.sockets.is_absolute() && !dir.contains(odd) && dir.trim_end() == dir;
+    socket_for(dirs, port).ok()
+}
+
+/// Why [`postgres_socket`] gives no socket. Its text completes "PostgreSQL
+/// gets no Unix socket in `<folder>`: ...".
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NoSocket {
+    #[error("the folder's path is not UTF-8")]
+    NotUtf8,
+    #[error("the folder's path is not absolute")]
+    NotAbsolute,
+    #[error("the folder's path has a comma, a quote, or a control character")]
+    OddCharacter,
+    #[error("the folder's path ends with a space")]
+    TrailingSpace,
+    #[error("the socket's path would be {bytes} bytes long, more than {MAX_SOCKET_PATH}")]
+    TooLong { bytes: usize },
+}
+
+/// [`postgres_socket`], or the reason there is none.
+///
+/// # Errors
+///
+/// [`NoSocket`]: the first rule of [`postgres_socket`] that the folder
+/// breaks.
+pub fn socket_for(dirs: &PostgresDirs, port: u16) -> Result<PathBuf, NoSocket> {
+    let dir = dirs.sockets.to_str().ok_or(NoSocket::NotUtf8)?;
+    if !dirs.sockets.is_absolute() {
+        return Err(NoSocket::NotAbsolute);
+    }
+    if dir.contains(|c: char| c == ',' || c == '"' || c.is_control()) {
+        return Err(NoSocket::OddCharacter);
+    }
+    if dir.trim_end() != dir {
+        return Err(NoSocket::TrailingSpace);
+    }
     let socket = dirs.sockets.join(format!(".s.PGSQL.{port}"));
-    (plain && socket.as_os_str().as_encoded_bytes().len() <= MAX_SOCKET_PATH).then_some(socket)
+    let bytes = socket.as_os_str().as_encoded_bytes().len();
+    if bytes > MAX_SOCKET_PATH {
+        return Err(NoSocket::TooLong { bytes });
+    }
+    Ok(socket)
 }
 
 /// The arguments of `postgres`: the cluster in `dirs.data`, on
@@ -595,6 +632,41 @@ mod tests {
             let folder = "/Users/a/Library/Application Support/dev.marsa.Marsa/run";
             let want = format!("unix_socket_directories={folder}");
             assert_eq!(sockets_arg(folder, 5432), want);
+        }
+
+        #[test]
+        fn each_folder_without_a_socket_says_why() {
+            let why = |folder: &str| socket_for(&dirs("/d", folder), 5432).unwrap_err();
+            assert_eq!(why("run"), NoSocket::NotAbsolute);
+            assert_eq!(why("@/run"), NoSocket::NotAbsolute);
+            for folder in ["/a,b/run", "/a\"b/run", "/a\nb/run", "/a\tb"] {
+                assert_eq!(why(folder), NoSocket::OddCharacter, "{folder:?}");
+            }
+            assert_eq!(why("/run "), NoSocket::TrailingSpace);
+            // 86 bytes, then `/.s.PGSQL.5432`: one byte over.
+            let deep = format!("/{}", "s".repeat(MAX_SOCKET_PATH - 14));
+            assert_eq!(why(&deep), NoSocket::TooLong { bytes: 101 });
+            let text = why(&deep).to_string();
+            assert_eq!(
+                text,
+                "the socket's path would be 101 bytes long, more than 100"
+            );
+            let text = why("/a,b").to_string();
+            assert!(text.contains("comma"), "{text}");
+        }
+
+        /// A path that is not UTF-8: Unix only, where any bytes may name a
+        /// file.
+        #[test]
+        fn a_folder_that_is_not_utf8_has_no_socket() {
+            use std::os::unix::ffi::OsStrExt as _;
+            let folder = std::ffi::OsStr::from_bytes(b"/r\xffn");
+            let dirs = PostgresDirs {
+                data: "/d".into(),
+                sockets: folder.into(),
+            };
+            assert_eq!(socket_for(&dirs, 5432), Err(NoSocket::NotUtf8));
+            assert_eq!(postgres_socket(&dirs, 5432), None);
         }
     }
 

@@ -106,10 +106,10 @@ pub const START_WAIT: Duration = Duration::from_secs(15);
 /// - its processes: 25 s while PostgreSQL runs (SIGINT and SIGQUIT, 10 s
 ///   each, and a 5 s margin for the kill; task M6-03), 10 s otherwise;
 /// - its open connections: 5 s;
-/// - the parked folder watcher, the sites sync, the start of Caddy with the
-///   daemon, and the DNS server: 2 s each, 8 s.
+/// - the parked folder watcher, the sites sync, the starts of Caddy and of
+///   PostgreSQL with the daemon, and the DNS server: 2 s each, 10 s.
 ///
-/// 38 s in all. The second sweep of the processes returns at once: a process
+/// 40 s in all. The second sweep of the processes returns at once: a process
 /// added after the first sweep was told to stop when it was added. So 45 s.
 const STOP_WAIT: Duration = Duration::from_secs(45);
 /// How much earlier than the login session a daemon may have started and
