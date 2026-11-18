@@ -20,8 +20,6 @@ use crate::model::{
 use crate::tray::menu::Daemon;
 
 pub const APP_NAME: &str = "Marsa";
-pub const WINDOW_SIZE: [f32; 2] = [900.0, 600.0];
-pub const WINDOW_MIN_SIZE: [f32; 2] = [480.0, 320.0];
 
 pub const SERVICES: &str = "Services";
 pub const NO_SERVICES: &str = "No services.";

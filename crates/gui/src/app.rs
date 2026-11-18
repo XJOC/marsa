@@ -19,6 +19,13 @@ use crate::model::{
     Setup, SitesNotice, Update,
 };
 use crate::strings::{self, ReportLine};
+use crate::theme;
+use crate::theme::page::{
+    CONFIRM_WIDTH, LOG_HEIGHT, NAME_FIELD_WIDTH, PHP_COLUMN_WIDTH, PID_COLUMN_MIN, PROGRESS_WIDTH,
+    SERVICE_COLUMN_MIN, SETTINGS_HEIGHT, SITE_FOLDER_COLUMN_MIN, SITE_KIND_COLUMN_MIN,
+    SITE_NAME_COLUMN_MAX, SITE_NAME_COLUMN_MIN, SITE_URL_COLUMN_MAX, SITE_URL_COLUMN_MIN,
+    SITES_MIN_LINES, STATE_COLUMN_MIN, STATE_COLUMN_WIDTH, VERSION_FIELD_WIDTH,
+};
 
 const ACTIONS: [ServiceAction; 3] = [
     ServiceAction::Start,
@@ -26,24 +33,10 @@ const ACTIONS: [ServiceAction; 3] = [
     ServiceAction::Restart,
 ];
 
-/// The first height of the log panel at the bottom. The user can drag it.
-const LOG_HEIGHT: f32 = 170.0;
 /// The most skipped folders shown at once; more scroll.
 const SKIPPED_ROWS: usize = 4;
 /// The most parked folders shown at once; more scroll.
 const PARKED_ROWS: usize = 3;
-/// The widest the confirmation of a removal grows; its text wraps.
-const CONFIRM_WIDTH: f32 = 380.0;
-/// The narrowest PHP column: a closed list with a version in it.
-const PHP_COLUMN_WIDTH: f32 = 110.0;
-/// The width of a version field in the Runtimes section.
-const VERSION_FIELD_WIDTH: f32 = 70.0;
-/// The width of the site name field of the link form.
-const NAME_FIELD_WIDTH: f32 = 180.0;
-/// The width of an install's progress bar.
-const PROGRESS_WIDTH: f32 = 420.0;
-/// The most height the Settings section takes before it scrolls.
-const SETTINGS_HEIGHT: f32 = 240.0;
 
 pub struct App {
     model: Model,
@@ -70,6 +63,9 @@ impl App {
         data_dir: PathBuf,
         started: Instant,
     ) -> Self {
+        // The fonts and the light and dark styles, once: egui then follows
+        // the system's setting.
+        theme::style::apply(ctx);
         bridge.attach(ctx);
         Self {
             model: Model::new(data_dir),
@@ -374,9 +370,13 @@ fn services(ui: &mut egui::Ui, model: &Model) -> Option<Command> {
         .striped(true)
         .vscroll(false)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::auto().at_least(80.0))
-        .column(Column::initial(260.0).at_least(80.0).clip(true))
-        .column(Column::auto().at_least(50.0))
+        .column(Column::auto().at_least(SERVICE_COLUMN_MIN))
+        .column(
+            Column::initial(STATE_COLUMN_WIDTH)
+                .at_least(STATE_COLUMN_MIN)
+                .clip(true),
+        )
+        .column(Column::auto().at_least(PID_COLUMN_MIN))
         .column(Column::remainder())
         .header(row_height, |mut header| {
             for title in [
@@ -711,7 +711,7 @@ fn sites(ui: &mut egui::Ui, model: &mut Model, picking: bool) -> Option<SitesAct
     };
     let mut row_action = None;
     StripBuilder::new(ui)
-        .size(Size::remainder().at_least(line * 2.0))
+        .size(Size::remainder().at_least(line * SITES_MIN_LINES))
         .size(Size::exact(parked_height))
         .size(Size::exact(skipped_height))
         .vertical(|mut strip| {
@@ -915,13 +915,27 @@ fn site_table(ui: &mut egui::Ui, model: &Model, connected: bool) -> Option<SiteA
         .auto_shrink(false)
         .min_scrolled_height(0.0)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::auto().at_least(80.0).at_most(240.0).clip(true))
-        .column(Column::auto().at_least(120.0).at_most(320.0).clip(true))
+        .column(
+            Column::auto()
+                .at_least(SITE_NAME_COLUMN_MIN)
+                .at_most(SITE_NAME_COLUMN_MAX)
+                .clip(true),
+        )
+        .column(
+            Column::auto()
+                .at_least(SITE_URL_COLUMN_MIN)
+                .at_most(SITE_URL_COLUMN_MAX)
+                .clip(true),
+        )
         .column(Column::auto())
-        .column(Column::auto().at_least(60.0))
+        .column(Column::auto().at_least(SITE_KIND_COLUMN_MIN))
         .column(Column::auto().at_least(PHP_COLUMN_WIDTH))
         .column(Column::auto())
-        .column(Column::remainder().at_least(80.0).clip(true))
+        .column(
+            Column::remainder()
+                .at_least(SITE_FOLDER_COLUMN_MIN)
+                .clip(true),
+        )
         .header(row_height, |mut header| {
             for title in [
                 strings::COLUMN_NAME,

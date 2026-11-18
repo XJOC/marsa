@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use eframe::egui;
-use marsa_gui::{app, bridge, startup, strings};
+use marsa_gui::{app, bridge, startup, strings, theme};
 
 fn main() -> ExitCode {
     let started = Instant::now();
@@ -41,8 +41,8 @@ fn run(started: Instant) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(strings::APP_NAME)
-            .with_inner_size(strings::WINDOW_SIZE)
-            .with_min_inner_size(strings::WINDOW_MIN_SIZE),
+            .with_inner_size(theme::SIZE.window)
+            .with_min_inner_size(theme::SIZE.window_min),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
