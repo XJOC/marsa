@@ -383,6 +383,16 @@ pub(crate) mod harness {
                 .collect()
         }
 
+        /// The names and values that start with `prefix`, in the order of the
+        /// tree (egui gives a text label its words as a value).
+        pub fn labels_starting_with(&self, prefix: &str) -> Vec<&str> {
+            self.nodes
+                .iter()
+                .filter_map(|node| node.label().or_else(|| node.value()))
+                .filter(|label| label.starts_with(prefix))
+                .collect()
+        }
+
         /// A node named `text`, or showing it as its value: egui gives a
         /// text label its words as a value, not a name.
         pub fn node_with_text(&self, text: &str) -> Option<&accesskit::Node> {

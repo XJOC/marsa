@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use eframe::egui::{CentralPanel, Frame, Margin, ScrollArea, Ui};
 
-use crate::model::{Action, Model, Route};
+use crate::model::{Action, LogSource, Model, Route};
 use crate::screens;
 use crate::theme::{Direction, Theme};
 use crate::widgets::whole;
@@ -83,7 +83,7 @@ pub fn show_at(ui: &mut Ui, model: &mut Model, picking: bool, now: Instant) -> O
 }
 
 /// The screen of the route, in the main area. Every screen returns what the
-/// user did as actions, except Logs, which has nothing to press.
+/// user did as actions.
 fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
     let item = Item::of(&model.route);
     match item {
@@ -113,7 +113,15 @@ fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
             }),
         },
         // The log fills the height and scrolls itself.
-        Item::Logs => screens::logs::show(ui, model),
+        Item::Logs => {
+            let theme = Theme::of(ui.ctx());
+            let source = match &model.route {
+                Route::Logs(source) => source.clone(),
+                _ => LogSource::default(),
+            };
+            let view = screens::logs::view(model, &source);
+            out.actions.extend(screens::logs::show(ui, &view, theme));
+        }
         Item::Runtimes => scrolled(ui, item, |ui| {
             let theme = Theme::of(ui.ctx());
             let view = screens::runtimes::view(model);
