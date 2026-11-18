@@ -90,7 +90,11 @@ pub const HOSTS_SYNC_TIMEOUT: Duration = Duration::from_secs(6 * 60);
 /// dialogs macOS may show to take the user's trust away and to delete the
 /// certificate; the keychain listing gets 10 seconds. A test in the daemon's
 /// `uninstall_api.rs` holds this above the sum of the daemon's own limits.
-pub const UNINSTALL_ALL_TIMEOUT: Duration = Duration::from_secs(16 * 60);
+///
+/// On Windows the slowest uninstall is the helper's run after the UAC
+/// prompt, up to 15 minutes, and the prompt has no limit of its own: 40
+/// minutes leaves the user time to find it, as for setup.
+pub const UNINSTALL_ALL_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 /// How long a new daemon has to answer. The wait ends as soon as it does, so
 /// this only bounds a real failure. macOS checks a program the first time it
 /// runs after an install or an update: about 2 s when the machine is idle,
@@ -448,7 +452,7 @@ impl DaemonClient {
 
     /// `POST /v1/uninstall` (task M5-13): one admin prompt for the helper's
     /// removals, then the user's trust and the login file. Waits until it
-    /// ends, up to 16 minutes ([`UNINSTALL_ALL_TIMEOUT`]). When
+    /// ends, up to 40 minutes ([`UNINSTALL_ALL_TIMEOUT`]). When
     /// [`UninstallReport::stopping`] is `true` the daemon stops right after
     /// this answer: [`stop_daemon`] waits until it has.
     ///
