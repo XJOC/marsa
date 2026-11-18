@@ -180,7 +180,7 @@ pub enum Problem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
     /// Marsa has no such check on this system yet: ports and trust on
-    /// Linux, and every system check on Windows.
+    /// Linux.
     NotOnThisSystem,
     NeedsDaemon,
     NeedsCaddy,
@@ -448,6 +448,32 @@ pub fn ports(facts: Ports) -> Verdict {
         Verdict::Pass(Pass::Ports)
     } else {
         fail(Problem::PortsNotRouted { ports })
+    }
+}
+
+/// Windows: Caddy listens on 80 and 443 itself (task M4-19c), so a holder
+/// fails only when it is not Caddy: IIS, or `System` (PID 4) for another
+/// HTTP.sys server. `caddy`: `None` when the daemon does not run,
+/// `Some(None)` when Caddy does not, else Caddy's PID (task M4-19o).
+pub fn windows_ports(holders: Option<Vec<PortHolder>>, caddy: Option<Option<u32>>) -> Verdict {
+    let Some(holders) = holders else {
+        return Verdict::Skip(Skip::NotChecked);
+    };
+    let caddy_pid = caddy.flatten();
+    let (caddys, others): (Vec<PortHolder>, Vec<PortHolder>) = holders
+        .into_iter()
+        .partition(|holder| caddy_pid.is_some() && holder.pid == caddy_pid);
+    if !others.is_empty() {
+        return fail(Problem::PortsHeld { holders: others });
+    }
+    match caddy {
+        None => Verdict::Skip(Skip::NeedsDaemon),
+        Some(None) => Verdict::Skip(Skip::NeedsCaddy),
+        // Port 80 always: Caddy answers there for every site, secure or not.
+        Some(Some(_)) if caddys.iter().any(|holder| holder.port == 80) => {
+            Verdict::Pass(Pass::Ports)
+        }
+        Some(Some(_)) => fail(Problem::PortsNotRouted { ports: vec![80] }),
     }
 }
 
@@ -943,6 +969,55 @@ mod tests {
             Verdict::Fail(Problem::SystemRootsUnreadable {
                 error: "access denied".to_owned()
             })
+        );
+    }
+
+    #[test]
+    fn windows_ports_fail_only_for_a_holder_that_is_not_caddy() {
+        let held = |port, pid, name: &str| PortHolder {
+            port,
+            address: "0.0.0.0".to_owned(),
+            process: Some(name.to_owned()),
+            pid: Some(pid),
+            user: None,
+            command: None,
+            app: None,
+        };
+        let caddy = vec![held(80, 5244, "caddy.exe"), held(443, 5244, "caddy.exe")];
+        assert_eq!(
+            windows_ports(Some(caddy.clone()), Some(Some(5244))),
+            Verdict::Pass(Pass::Ports)
+        );
+        let mut with_iis = caddy.clone();
+        with_iis.push(held(80, 4, "System"));
+        assert_eq!(
+            windows_ports(Some(with_iis), Some(Some(5244))),
+            Verdict::Fail(Problem::PortsHeld {
+                holders: vec![held(80, 4, "System")]
+            })
+        );
+        // Caddy stopped: its old PID means nothing, and IIS still fails.
+        assert_eq!(
+            windows_ports(Some(vec![held(80, 4, "System")]), Some(None)),
+            Verdict::Fail(Problem::PortsHeld {
+                holders: vec![held(80, 4, "System")]
+            })
+        );
+        assert_eq!(
+            windows_ports(Some(Vec::new()), Some(None)),
+            Verdict::Skip(Skip::NeedsCaddy)
+        );
+        assert_eq!(
+            windows_ports(Some(Vec::new()), None),
+            Verdict::Skip(Skip::NeedsDaemon)
+        );
+        assert_eq!(
+            windows_ports(Some(vec![held(443, 5244, "caddy.exe")]), Some(Some(5244))),
+            Verdict::Fail(Problem::PortsNotRouted { ports: vec![80] })
+        );
+        assert_eq!(
+            windows_ports(None, Some(Some(5244))),
+            Verdict::Skip(Skip::NotChecked)
         );
     }
 

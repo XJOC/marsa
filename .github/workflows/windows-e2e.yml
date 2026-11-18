@@ -18,9 +18,13 @@ on:
       - "crates/core/src/helper.rs"
       - "crates/core/src/helper/**"
       - "crates/core/src/php.rs"
+      - "crates/core/src/doctor.rs"
+      - "crates/core/src/ports.rs"
+      - "crates/app/src/cli/doctor.rs"
       - "crates/app/src/daemon/**"
       - "crates/app/src/cli/setup.rs"
       - "crates/app/src/cli/uninstall_all.rs"
+      - "crates/shim/**"
       - "tools/e2e/windows.ps1"
       - ".github/workflows/windows-e2e.yml"
 
@@ -55,6 +59,11 @@ jobs:
 
       - name: Build marsa, marsad, and marsa-helper
         run: cargo build --release -p marsa -p marsa-helper
+
+      # Built alone: workspace feature unification would drag tokio into the
+      # shim (architecture.md section 3).
+      - name: Build the shim
+        run: cargo build --release -p marsa-shim
 
       - name: End to end
         shell: pwsh

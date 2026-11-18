@@ -9,7 +9,8 @@
 # afterwards: a GitHub runner. It refuses to start anywhere else. It is not
 # part of `cargo nextest`.
 #
-# Before it: `cargo build --release -p marsa -p marsa-helper`.
+# Before it: `cargo build --release -p marsa -p marsa-helper`, then
+# `cargo build --release -p marsa-shim` (the shim is always built alone).
 #
 # The job's user is an administrator, so the UAC prompt of `marsa setup` is
 # granted with no click: the run proves everything after the user's Yes,
@@ -31,6 +32,7 @@ $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $Data = Join-Path $env:LOCALAPPDATA 'marsa\Marsa\data'
 # Inside the user's folder: setup refuses a helper outside it.
 $Bin = Join-Path $Data 'bin'
+$Shims = Join-Path $Data 'shims'
 $Logs = Join-Path $Data 'logs'
 # Written by setup; the daemon sends the sites' names only when it is there.
 $Marker = Join-Path $Data 'helper-service'
@@ -234,6 +236,12 @@ try {
     foreach ($program in 'marsa', 'marsad', 'marsa-helper') {
         Copy-Item -LiteralPath (Join-Path $Repo "target\release\$program.exe") -Destination $Bin
     }
+    # The shims are copies of marsa-shim.exe, one per tool (architecture.md
+    # section 7). Node is not installed here.
+    New-Item -ItemType Directory -Force -Path $Shims | Out-Null
+    foreach ($tool in 'php', 'composer') {
+        Copy-Item -LiteralPath (Join-Path $Repo 'target\release\marsa-shim.exe') -Destination (Join-Path $Shims "$tool.exe")
+    }
     $env:PATH = "$Bin;$env:PATH"
     MarsaOk --version
     Write-Host "marsa-helper $(& (Join-Path $Bin 'marsa-helper.exe') version)"
@@ -246,6 +254,12 @@ try {
 
     Step 'IIS lets go of port 80'
     $iis = Get-Service -Name W3SVC -ErrorAction SilentlyContinue
+    if ($iis -and $iis.Status -eq 'Running') {
+        # marsa doctor names who holds port 80: IIS answers through HTTP.sys,
+        # which Windows shows as System, PID 4 (task M4-19o).
+        Marsa doctor
+        if ($Out -notmatch 'Port 80 is used by System \(PID 4\)') { Fail 'doctor did not name IIS (System, PID 4) on port 80' }
+    }
     if ($iis) {
         Write-Host "W3SVC: $($iis.Status)"
         Stop-Service -Name W3SVC -Force
@@ -353,9 +367,108 @@ try {
     }
     if ($listeners | Where-Object { $_.LocalAddress -ne '127.0.0.1' }) { Fail 'caddy listens on an address that is not 127.0.0.1' }
 
-    Step 'marsa doctor finds the Visual C++ runtime (M4-19i)'
+    Step "marsa doctor finds the Visual C++ runtime (M4-19i) and Windows' roots in PHP's bundle (M4-19n)"
     Marsa doctor
     if ($Out -notmatch 'The Microsoft Visual C\+\+ runtime \S+ is installed\.') { Fail 'doctor did not pass the Visual C++ runtime' }
+    if ($Out -notmatch 'PHP trusts the \d+ roots Windows trusts for HTTPS') { Fail "doctor did not pass PHP's CA bundle" }
+    foreach ($line in 'Every site has its line in the hosts file.', 'Ports 80 and 443 reach Caddy.', "Marsa's certificate authority is trusted.") {
+        if (-not $Out.Contains("✓ $line")) { Fail "doctor did not pass: $line" }
+    }
+
+    Step "PHP through the shim reads Marsa's php.ini (M1-07)"
+    $shimPhp = Join-Path $Shims 'php.exe'
+    Push-Location -LiteralPath (Join-Path $Code 'laravel-app')
+    try {
+        $ErrorActionPreference = 'Continue'
+        $version = (& $shimPhp -v 2>&1 | ForEach-Object { "$_" }) -join "`n"
+        $versionExit = $LASTEXITCODE
+        $ini = (& $shimPhp --ini 2>&1 | ForEach-Object { "$_" }) -join "`n"
+        & $shimPhp -r 'exit(7);'
+        $seven = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+    } finally {
+        Pop-Location
+    }
+    Write-Host $version
+    Write-Host $ini
+    if ($versionExit -ne 0 -or $version -notmatch '^PHP 8\.4\.') { Fail "php -v through the shim gave $versionExit" }
+    $marsaIni = Join-Path $Data 'php\8.4\php.ini'
+    if (-not $ini.Contains($marsaIni)) { Fail "php through the shim did not load $marsaIni" }
+    if ($seven -ne 7) { Fail "php -r 'exit(7);' through the shim exited with $seven" }
+
+    Step "PHP trusts the internet and the other .test sites (M4-19n, ADR 0020)"
+    $iniText = Get-Content -LiteralPath $marsaIni -Raw
+    $bundle = Join-Path $Data 'caddy\ca-bundle.pem'
+    foreach ($key in 'curl.cainfo', 'openssl.cafile') {
+        if (-not $iniText.Contains("$key = `"$bundle`"")) { Fail "php.ini does not point $key at $bundle" }
+    }
+    $blocks = @(Select-String -LiteralPath $bundle -SimpleMatch -- '-----BEGIN CERTIFICATE-----').Count
+    Write-Host "ca-bundle.pem: $blocks certificates"
+    if ($blocks -lt 6) { Fail "ca-bundle.pem holds $blocks certificates, not Windows' roots and Marsa's" }
+    $check = Join-Path $Code 'trust-check'
+    New-Item -ItemType Directory -Force -Path $check | Out-Null
+    $page = @'
+<?php
+// Each line: how PHP reached one HTTPS address, through curl and through
+// a stream (file_get_contents).
+function by_curl(string $url): string {
+    $c = curl_init($url);
+    curl_setopt_array($c, [CURLOPT_NOBODY => true, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 20]);
+    $ok = curl_exec($c) !== false;
+    $error = curl_error($c);
+    curl_close($c);
+    return $ok ? 'ok' : "failed: $error";
+}
+function by_stream(string $url): string {
+    $context = stream_context_create(['http' => ['method' => 'HEAD', 'timeout' => 20]]);
+    $ok = @file_get_contents($url, false, $context) !== false;
+    if ($ok) {
+        return 'ok';
+    }
+    // OpenSSL's own lines say why; PHP's last warning only says "failed".
+    $why = [error_get_last()['message'] ?? 'unknown'];
+    while (($line = openssl_error_string()) !== false) {
+        $why[] = $line;
+    }
+    return 'failed: ' . implode(' | ', $why);
+}
+foreach (['public' => 'https://repo.packagist.org/packages.json', 'test' => 'https://laravel-app.test/'] as $name => $url) {
+    echo "curl $name: " . by_curl($url) . "\n";
+    echo "stream $name: " . by_stream($url) . "\n";
+}
+'@
+    Set-Content -LiteralPath (Join-Path $check 'index.php') -Value $page -Encoding ascii
+    WaitForHosts 'trust-check.test'
+    WaitForName 'trust-check.test'
+    $report = ''
+    for ($i = 1; $i -le 30; $i++) {
+        $report = (& $Curl -sS --ssl-revoke-best-effort --max-time 60 'https://trust-check.test/' 2>&1) -join "`n"
+        if ($report -match 'stream test:') { break }
+        Start-Sleep -Seconds 1
+    }
+    Write-Host $report
+    foreach ($line in 'curl public', 'stream public', 'curl test', 'stream test') {
+        if ($report -notmatch "(?m)^$line`: ok\r?$") { Fail "PHP on the site: $line is not ok" }
+    }
+    Remove-Item -LiteralPath $check -Recurse -Force
+
+    Step 'Composer through the shim reaches Packagist (M4-19n)'
+    $shimComposer = Join-Path $Shims 'composer.exe'
+    $probe = Join-Path $env:RUNNER_TEMP 'composer-probe'
+    New-Item -ItemType Directory -Force -Path $probe | Out-Null
+    Push-Location -LiteralPath $probe
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $shimComposer --version
+        $composerVersion = $LASTEXITCODE
+        & $shimComposer show --available --no-interaction psr/log
+        $composerShow = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+    } finally {
+        Pop-Location
+    }
+    if ($composerVersion -ne 0) { Fail "composer --version through the shim exited with $composerVersion" }
+    if ($composerShow -ne 0) { Fail "composer show --available psr/log through the shim exited with $composerShow" }
 
     Step 'new sites after setup go into the hosts file with no prompt (M4-19g2)'
     $prompts = Prompts
