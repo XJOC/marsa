@@ -1,7 +1,7 @@
 # Marsa
 
-Marsa (Arabic: مرسى, "harbor") runs your PHP and Node.js projects on your Mac as
-`https://<folder>.test` sites. It installs the PHP, Node.js, Composer, and Caddy
+Marsa (Arabic: مرسى, "harbor") runs your PHP and Node.js projects on your
+computer as `https://<folder>.test` sites. It installs the PHP, Node.js, Composer, and Caddy
 versions you need, picks the right version for each project, and gives every
 site a trusted HTTPS certificate. It is open source (Apache-2.0) and works
 from the terminal or from its window.
@@ -41,8 +41,14 @@ On macOS the line is:
 export PATH="$HOME/Library/Application Support/dev.marsa.Marsa/shims:$HOME/Library/Application Support/dev.marsa.Marsa/bin:$PATH"
 ```
 
-On Linux, use the data folder above instead:
-`${XDG_DATA_HOME:-$HOME/.local/share}/marsa/shims` and `.../marsa/bin`.
+On Linux it is:
+
+```sh
+export PATH="$HOME/.local/share/marsa/shims:$HOME/.local/share/marsa/bin:$PATH"
+```
+
+(or under `$XDG_DATA_HOME/marsa` if you set `XDG_DATA_HOME`; the script prints
+the line for your system).
 
 On Linux, the window needs a desktop session with Vulkan or OpenGL. The
 menu-bar icon needs GTK 3 and AppIndicator: on Debian and Ubuntu, run
@@ -81,9 +87,10 @@ marsa setup                # HTTPS and .test names, once (see below)
 marsa open app             # opens https://app.test, the folder ~/Code/app
 ```
 
-`marsa setup` runs once. macOS asks for your administrator password, then asks
-you to approve trusting Marsa's certificate authority. Run it from Terminal
-on the Mac's desktop, not over SSH, so that macOS can show these dialogs.
+`marsa setup` runs once. The system asks for your administrator password
+once (on Windows, the admin prompt); macOS then also asks you to approve
+trusting Marsa's certificate authority. Run it in a terminal on your desktop,
+not over SSH, so that these dialogs can show.
 
 If something does not work, run `marsa doctor`. It checks each part, says what
 is wrong, and says how to fix it. It changes nothing.
@@ -161,9 +168,11 @@ It asks before it removes anything. Then it stops Marsa and removes what
 `marsa setup` added to the system (macOS asks for your password once). It
 also asks whether to delete Marsa's data folder: the installed runtimes, the
 settings, and the certificate authority. `--delete-data` deletes the folder
-without that question, and `--yes` answers the first one. At the end, remove
-the `PATH` line from your shell's startup file: `~/.zshrc`, and `~/.zprofile`
-if you added it there for 0.1.0-rc.1.
+without that question, and `--yes` answers the first one. At the end, take
+Marsa out of your `PATH`: on macOS and Linux, delete the line from `~/.zshrc`
+(and from `~/.zprofile` if you added it there for 0.1.0-rc.1); on Windows,
+remove Marsa's two folders from your user's environment variables (search for
+"environment variables" in Settings).
 
 This works on macOS and Windows. On Linux it is not available yet: remove
 Marsa's data folder and the `PATH` line by hand. What `marsa setup` changed is
