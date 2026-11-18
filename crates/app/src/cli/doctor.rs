@@ -596,7 +596,7 @@ mod tests {
         ] {
             let text = render(Check::VcRuntime, &Verdict::Fail(problem), &data, true);
             assert!(
-                text.contains("https://aka.ms/vc14/vc_redist.x64.exe"),
+                text.contains("https://aka.ms/vs/17/release/vc_redist.x64.exe"),
                 "{text}"
             );
             assert!(text.contains("Fix:"), "{text}");
