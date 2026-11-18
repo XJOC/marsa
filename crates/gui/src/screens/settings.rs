@@ -88,8 +88,7 @@ pub struct SetupGroup {
 #[derive(Debug, PartialEq, Eq)]
 pub struct About<'a> {
     pub version: &'static str,
-    /// Under the version: the daemon's version and PID, or that there is no
-    /// daemon.
+    /// Under the version: the daemon's version, or that there is no daemon.
     pub daemon: String,
     pub folder: &'a Path,
     /// The user's home folder: a folder under it is shown as `~/…`, with
@@ -403,15 +402,12 @@ mod tests {
         let model = connected();
         let about = view(&model).about;
         assert_eq!(about.version, model::APP_VERSION);
-        assert_eq!(about.daemon, "Daemon version: 0.3.1 (PID 4242)");
+        assert_eq!(about.daemon, "Daemon version 0.3.1");
         assert_eq!(about.folder, model.data_dir.as_path());
         assert_eq!(about.home, model.home.as_deref());
         // No daemon: the row says so.
         let down = Model::default();
-        assert_eq!(
-            view(&down).about.daemon,
-            format!("{}: {}", strings::DAEMON_VERSION, strings::NOT_CONNECTED)
-        );
+        assert_eq!(view(&down).about.daemon, strings::DAEMON_NOT_CONNECTED);
         assert_eq!(down.connection, Connection::Connecting);
     }
 
@@ -644,7 +640,7 @@ mod tests {
             strings::APP_VERSION,
             strings::DATA_FOLDER,
             strings::OPEN_FOLDER,
-            "Daemon version: 0.3.1 (PID 4242)",
+            "Daemon version 0.3.1",
             strings::setup_explanation(Platform::current()),
         ] {
             assert!(tree.node_with_text(words).is_some(), "{words}");

@@ -235,9 +235,69 @@ pub struct NoticeBar<'a> {
     notice: &'a Notice,
 }
 
+/// The action and the close button of `notice`, if it has them.
+fn controls(notice: &Notice) -> (Option<Button<'_>>, Option<Button<'static>>) {
+    let action = notice.action.as_deref().map(|label| {
+        let off = notice.action_off.as_deref();
+        Button::quiet(label)
+            .in_row()
+            .disabled_if(off.is_some(), off.unwrap_or_default())
+    });
+    let close =
+        (notice.kind == NoticeKind::Error).then(|| Button::icon(Icon::Cross, strings::CLOSE));
+    (action, close)
+}
+
+/// What the icon and the buttons take of a bar `available` wide, each with
+/// the gap before it, and what is left for the sentence.
+fn room(
+    theme: &Theme,
+    available: f32,
+    action_width: Option<f32>,
+    close_width: Option<f32>,
+) -> (f32, f32) {
+    let (gap, side) = (theme.space.s2, theme.size.icon_inline);
+    let reserved = side
+        + [action_width, close_width]
+            .into_iter()
+            .flatten()
+            .map(|width| gap + width)
+            .sum::<f32>();
+    // The bar's width less its margins and what is not the sentence.
+    let margin = theme.space.s3 + theme.size.border;
+    (
+        reserved,
+        (available - margin - margin - reserved - gap).max(0.0),
+    )
+}
+
 impl<'a> NoticeBar<'a> {
     pub const fn new(notice: &'a Notice) -> Self {
         Self { notice }
+    }
+
+    /// How many lines the sentence takes in a bar `available` wide. A notice
+    /// is at most two (task M5-D9): the words that explain more belong to
+    /// the screen.
+    pub fn lines(&self, ui: &Ui, available: f32) -> usize {
+        let theme = Theme::of(ui.ctx());
+        let (action, close) = controls(self.notice);
+        let room = room(
+            theme,
+            available,
+            action.as_ref().map(|button| button.width(ui)),
+            close.as_ref().map(|button| button.width(ui)),
+        )
+        .1;
+        ui.painter()
+            .layout(
+                self.notice.text.clone(),
+                theme.text.body_sm.font_id(),
+                theme.color.ink,
+                room,
+            )
+            .rows
+            .len()
     }
 
     /// Draws the bar in `ui`. `Some` when the user pressed a button in it.
@@ -257,27 +317,10 @@ impl<'a> NoticeBar<'a> {
         // The height of one line of content: the bar less its borders.
         let zone = theme.size.notice - border - border;
         let (gap, side) = (theme.space.s2, theme.size.icon_inline);
-        let action = notice.action.as_deref().map(|label| {
-            let off = notice.action_off.as_deref();
-            Button::quiet(label)
-                .in_row()
-                .disabled_if(off.is_some(), off.unwrap_or_default())
-        });
-        let close =
-            (notice.kind == NoticeKind::Error).then(|| Button::icon(Icon::Cross, strings::CLOSE));
+        let (action, close) = controls(notice);
         let action_width = action.as_ref().map(|button| button.width(ui));
         let close_width = close.as_ref().map(|button| button.width(ui));
-        // The icon and the buttons, each with the gap before it.
-        let reserved = side
-            + [action_width, close_width]
-                .into_iter()
-                .flatten()
-                .map(|width| gap + width)
-                .sum::<f32>();
-        // What the sentence may take: the bar's width less its margins and
-        // what is not the sentence.
-        let margin = theme.space.s3 + border;
-        let room = (ui.available_width() - margin - margin - reserved - gap).max(0.0);
+        let (reserved, room) = room(theme, ui.available_width(), action_width, close_width);
         let font = theme.text.body_sm.font_id();
         let text = notice.text.clone();
         let one_line = ui
