@@ -1,6 +1,6 @@
 //! The code of the two desktop programs (architecture.md section 3): the
-//! window `marsa-gui` (`app`, `bridge`, `model`) and the menu-bar icon
-//! `marsa-tray` (`tray`). Both are clients of the daemon through
+//! window `marsa-gui` (`app`, `bridge`, `model`, `theme`) and the menu-bar
+//! icon `marsa-tray` (`tray`). Both are clients of the daemon through
 //! `marsa_core::client`; neither changes state by itself. `startup` and
 //! `strings` serve both.
 //!
@@ -12,4 +12,5 @@ pub mod bridge;
 pub mod model;
 pub mod startup;
 pub mod strings;
+pub mod theme;
 pub mod tray;
