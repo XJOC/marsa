@@ -9,7 +9,10 @@ use crate::model::{self, Autostart, Model, Setup};
 use crate::strings;
 
 /// Start at login, the data folder, the versions, and setup.
+// TODO(M5-D9): return `Action`s instead of calling the model's methods
+// (code.md, State), with the redesign of this screen.
 pub fn show(ui: &mut egui::Ui, model: &mut Model) -> Option<Command> {
+    ui.strong(strings::SETTINGS);
     let mut command = None;
     ui.horizontal(|ui| {
         let mut on = model.autostart == Autostart::On;

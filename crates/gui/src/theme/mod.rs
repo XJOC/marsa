@@ -267,6 +267,9 @@ pub struct Size {
     pub sidebar: f32,
     /// `size.sidebar`, folded to icons.
     pub sidebar_folded: f32,
+    /// A window narrower than this folds the sidebar, whatever the user
+    /// chose (layout.md, Window): 980.
+    pub sidebar_fold_below: f32,
     /// `size.target.min`: the smallest click target (R9).
     pub target_min: f32,
     /// The 1 px border of cards, inputs, and buttons (components.md).
@@ -451,6 +454,7 @@ pub const SIZE: Size = Size {
     dash_gap: 3.0,
     sidebar: 224.0,
     sidebar_folded: 64.0,
+    sidebar_fold_below: 980.0,
     target_min: 24.0,
     border: 1.0,
     icon_button: 30.0,
@@ -482,6 +486,20 @@ pub const SIZE: Size = Size {
     window: vec2(1120.0, 720.0),
     window_min: vec2(760.0, 520.0),
 };
+
+impl Size {
+    /// The space around the tile of a sidebar item, which sits in a square
+    /// as high as the item: 6.
+    pub const fn nav_inset(&self) -> f32 {
+        (self.nav_item - self.nav_tile) / 2.0
+    }
+
+    /// The space at the start and the end of the sidebar, so the folded
+    /// sidebar is one column of square items: 13.
+    pub const fn sidebar_inset(&self) -> f32 {
+        (self.sidebar_folded - self.nav_item) / 2.0
+    }
+}
 
 /// The radii: the same in both themes.
 pub const RADIUS: Radius = Radius {
@@ -841,9 +859,9 @@ pub(crate) mod tests {
     /// How strict the literal check is with a file.
     #[derive(Clone, Copy, PartialEq)]
     enum Rules {
-        /// `app.rs`, `main.rs`, and the screens: no color word at all, and
-        /// no float other than zero: egui sizes are `f32`. The tests at the
-        /// end of a screen are not checked.
+        /// `app.rs`, `main.rs`, the screens, and the shell: no color word at
+        /// all, and no float other than zero: egui sizes are `f32`. The tests
+        /// at the end of a file are not checked.
         Drawing,
         /// `strings.rs`: no color word and no `f32`; its other floats are
         /// unit conversions.
@@ -881,9 +899,9 @@ pub(crate) mod tests {
                 Rules::Strings,
             ),
         ];
-        // Every file of `widgets/` and `screens/`, so a new one is checked
-        // at once.
-        for (folder, least) in [("widgets", 9), ("screens", 7)] {
+        // Every file of `widgets/`, `screens/`, and `shell/`, so a new one
+        // is checked at once.
+        for (folder, least) in [("widgets", 9), ("screens", 7), ("shell", 2)] {
             for (name, source) in folder_sources(folder, least) {
                 let rules = match (folder, name.as_str()) {
                     ("widgets", "icons.rs") => Rules::Geometry,

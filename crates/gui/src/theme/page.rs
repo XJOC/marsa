@@ -3,12 +3,8 @@
 //! design tokens: the screens of M5-D4 to M5-D10 replace them with the tokens
 //! of [`super::Size`], and each goes with its last use.
 
-/// The first height of the log panel at the bottom. The user can drag it.
-pub const LOG_HEIGHT: f32 = 170.0;
 /// The widest the confirmation of a removal grows; its text wraps.
 pub const CONFIRM_WIDTH: f32 = 380.0;
-/// The most height the Settings section takes before it scrolls.
-pub const SETTINGS_HEIGHT: f32 = 240.0;
 /// The width of an install's progress bar.
 pub const PROGRESS_WIDTH: f32 = 420.0;
 /// The width of a version field in the Runtimes section.

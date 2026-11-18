@@ -16,6 +16,8 @@ use crate::theme::page::VERSION_FIELD_WIDTH;
 /// default the user picked, if it is a change, and an Xdebug change; an
 /// Install press queues a job in the model instead, and an uninstall opens
 /// the confirmation.
+// TODO(M5-D8): return `Action`s instead of calling the model's methods
+// (code.md, State), with the redesign of this screen.
 pub fn show(ui: &mut egui::Ui, model: &mut Model, commands: &mut Vec<Command>) {
     ui.strong(strings::RUNTIMES);
     let mut picked = None;

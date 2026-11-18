@@ -42,6 +42,8 @@ enum SiteAction {
 /// table, the parked folders, and the folders that did not become a site.
 /// `picking`: a folder dialog is open. Returns what the user asked for, if
 /// anything; an Unlink or Forget press opens the confirmation instead.
+// TODO(M5-D6): return `Action`s instead of calling the model's methods
+// (code.md, State), with the redesign of this screen.
 pub fn show(ui: &mut egui::Ui, model: &mut Model, picking: bool) -> Option<SitesAction> {
     let connected = model.is_connected();
     let mut action = None;

@@ -10,6 +10,8 @@ use crate::model::{FirstRun, Model, Setup};
 use crate::strings;
 
 /// The first-run panel: one button that installs PHP and Caddy, then setup.
+// TODO(M5-D5): return `Action`s instead of calling the model's methods
+// (code.md, State), with the redesign of this screen.
 pub fn show(ui: &mut egui::Ui, model: &mut Model) -> Option<Command> {
     ui.strong(strings::FIRST_RUN_TITLE);
     let mut command = None;

@@ -14,8 +14,8 @@ use marsa_core::types::{
 use semver::Version;
 
 use crate::model::{
-    Autostart, Choice, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Pick, Removal,
-    UninstallNotice,
+    Autostart, Choice, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Overall, Pick,
+    Removal, UninstallNotice,
 };
 use crate::theme::Section;
 use crate::tray::menu::Daemon;
@@ -609,6 +609,27 @@ pub const fn section_name(section: Section) -> &'static str {
         Section::Logs => "Logs",
         Section::Databases => "Databases",
         Section::Queues => "Queues",
+    }
+}
+
+/// The sidebar's fold button, by what a press does.
+pub const HIDE_LABELS: &str = "Hide labels";
+pub const SHOW_LABELS: &str = "Show labels";
+/// Why the fold button does nothing in a narrow window.
+pub const FOLD_NARROW_HINT: &str =
+    "The window is too narrow for labels. Make it wider to show them.";
+
+/// The status at the bottom of the sidebar: a title and a caption, short
+/// enough for its width.
+pub const fn overall_text(overall: Overall) -> (&'static str, &'static str) {
+    match overall {
+        Overall::Connecting => ("Connecting…", "Waiting for Marsa"),
+        Overall::Stopping => ("Marsa is stopping", "Sites stop with it"),
+        Overall::DaemonDown => ("Sites not opening", "Marsa is not running"),
+        Overall::NoSites => ("Marsa is running", "No sites yet"),
+        Overall::Starting => ("Sites starting", "Caddy is starting"),
+        Overall::WebServerDown => ("Sites not opening", "Caddy stopped"),
+        Overall::Working => ("All sites working", "Caddy is running"),
     }
 }
 

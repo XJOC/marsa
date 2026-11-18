@@ -291,24 +291,37 @@ impl Icon {
                 Move(3.0, 12.0),
                 Line(9.0, 12.0),
             ],
+            // A cog: a body with 6 square teeth, each 2.4 wide with
+            // parallel sides, from radius 4.5 out to 6.6, and a hole of 2.1.
+            // Six teeth leave gaps that stay open at 15 px. Not a sun, which
+            // would read as the light appearance.
             Self::Settings => &[
-                Circle(8.0, 8.0, 2.2),
-                Move(8.0, 1.5),
-                Line(8.0, 3.5),
-                Move(8.0, 12.5),
-                Line(8.0, 14.5),
-                Move(1.5, 8.0),
-                Line(3.5, 8.0),
-                Move(12.5, 8.0),
-                Line(14.5, 8.0),
-                Move(3.4, 3.4),
-                Line(4.8, 4.8),
-                Move(11.2, 11.2),
-                Line(12.6, 12.6),
-                Move(3.4, 12.6),
-                Line(4.8, 11.2),
-                Move(11.2, 4.8),
-                Line(12.6, 3.4),
+                Move(12.36, 9.13),
+                Line(14.32, 10.26),
+                Line(13.12, 12.34),
+                Line(11.16, 11.21),
+                Line(9.2, 12.34),
+                Line(9.2, 14.6),
+                Line(6.8, 14.6),
+                Line(6.8, 12.34),
+                Line(4.84, 11.21),
+                Line(2.88, 12.34),
+                Line(1.68, 10.26),
+                Line(3.64, 9.13),
+                Line(3.64, 6.87),
+                Line(1.68, 5.74),
+                Line(2.88, 3.66),
+                Line(4.84, 4.79),
+                Line(6.8, 3.66),
+                Line(6.8, 1.4),
+                Line(9.2, 1.4),
+                Line(9.2, 3.66),
+                Line(11.16, 4.79),
+                Line(13.12, 3.66),
+                Line(14.32, 5.74),
+                Line(12.36, 6.87),
+                Close,
+                Circle(8.0, 8.0, 2.1),
             ],
             // A window with its sidebar: the fold button.
             Self::Fold => &[
@@ -683,6 +696,40 @@ mod tests {
         // A line and one round cap at each end.
         let dash = Icon::Dash.shapes(rect, Color32::BLACK, 1.5);
         assert_eq!(dash.len(), 3);
+    }
+
+    #[test]
+    fn settings_is_a_cog_with_six_square_teeth_and_a_hole() {
+        let steps = Icon::Settings.steps();
+        let centre = pos2(8.0, 8.0);
+        let corners: Vec<Pos2> = steps
+            .iter()
+            .filter_map(|step| match *step {
+                Move(x, y) | Line(x, y) => Some(pos2(x, y)),
+                _ => None,
+            })
+            .collect();
+        // Each tooth has two outer corners, past the body's radius.
+        let outer: Vec<Pos2> = corners
+            .iter()
+            .copied()
+            .filter(|corner| corner.distance(centre) > 5.5)
+            .collect();
+        assert_eq!(outer.len(), 2 * 6, "six teeth");
+        // Square teeth: the two outer corners of a tooth are as far apart
+        // as its two corners on the body, so its sides are parallel.
+        for tooth in corners.chunks(4) {
+            let base = tooth[0].distance(tooth[3]);
+            let tip = tooth[1].distance(tooth[2]);
+            assert!((base - tip).abs() < 0.05, "{tooth:?}");
+        }
+        assert!(steps.contains(&Close), "one closed outline");
+        assert!(steps.contains(&Circle(8.0, 8.0, 2.1)), "the hole");
+        // The same stroke as the other section and sidebar icons.
+        assert_eq!(
+            Icon::Settings.stroke_width(&LIGHT, 16.0),
+            Icon::Home.stroke_width(&LIGHT, 16.0)
+        );
     }
 
     #[test]
