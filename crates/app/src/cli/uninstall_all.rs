@@ -1,4 +1,4 @@
-//! `marsa uninstall --all`: take Marsa out of this system (macOS). Task
+//! `marsa uninstall --all`: take Marsa out of this system (macOS and Windows). Task
 //! M5-13.
 //!
 //! 1. Prints what will be removed, and asks for `yes` unless `--yes` is
@@ -76,7 +76,7 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
     let mut terminal = Terminal;
     // Before the question: the daemon would answer `uninstall_not_supported`
     // only after the user typed yes.
-    if !is_macos(Platform::current()) {
+    if !runs_here(Platform::current()) {
         return own_failure("uninstall_not_supported", None).report();
     }
     let deletable = !data_dir_given;
@@ -91,7 +91,13 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
         Ok(client) => client,
         Err(failure) => return failure.report(),
     };
-    eprintln!("{}", strings::UNINSTALL_ALL_STARTED);
+    // Windows: the CLI runs on the machine marsad runs on (ADR 0018).
+    let started = if cfg!(windows) {
+        strings::UNINSTALL_ALL_STARTED_WINDOWS
+    } else {
+        strings::UNINSTALL_ALL_STARTED
+    };
+    eprintln!("{started}");
     let report = match until_ctrl_c(client.uninstall_all()).await {
         Some(Ok(report)) => report,
         Some(Err(err)) => {
@@ -135,6 +141,20 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
         stopped,
         terminal.is_terminal(),
     );
+    // Windows: a program that runs can be neither deleted nor moved, and
+    // this marsa may run from the data folder (`<data>\bin`): where the
+    // folder would be deleted or asked about, a note instead. The CLI runs
+    // on the machine marsad runs on.
+    let in_use = cfg!(windows) && programs_dir().is_some_and(|dir| inside(&dir, data_dir));
+    let decided = match decided {
+        None | Some(DataFolder::Delete) if in_use => {
+            println!("{}", strings::data_dir_in_use(data_dir));
+            // Asked for with --delete-data, and not done.
+            ok &= !args.delete_data;
+            Some(DataFolder::Keep)
+        }
+        other => other,
+    };
     let folder = match decided {
         Some(folder) => folder,
         None => match ask_until_ctrl_c(strings::UNINSTALL_ALL_DATA_QUESTION).await {
@@ -288,8 +308,12 @@ impl Ask for Terminal {
     }
 }
 
-fn is_macos(platform: Option<Platform>) -> bool {
-    matches!(platform, Some(Platform::DarwinArm64 | Platform::DarwinX64))
+/// The systems the daemon runs the uninstall on (`daemon/uninstall_api.rs`).
+fn runs_here(platform: Option<Platform>) -> bool {
+    matches!(
+        platform,
+        Some(Platform::DarwinArm64 | Platform::DarwinX64 | Platform::WindowsX64)
+    )
 }
 
 /// Goes on with `--yes`, or once the user typed `yes`. Refuses without a
@@ -416,6 +440,12 @@ fn delete_when_stopped(data_dir: &Path) -> Result<(), Failure> {
             Some(data_dir),
         ));
     }
+    // Windows: a program that runs can be neither deleted nor moved, and
+    // this marsa may run from the data folder (`<data>\bin`). The CLI runs
+    // on the machine marsad runs on.
+    if cfg!(windows) && programs_dir().is_some_and(|dir| inside(&dir, data_dir)) {
+        return Err(own_failure("uninstall_all_data_dir_in_use", Some(data_dir)));
+    }
     let home = std::env::home_dir();
     delete_data_dir(data_dir, home.as_deref()).map(|_| ())
 }
@@ -538,6 +568,18 @@ fn is_complete(report: &UninstallReport) -> bool {
             .results
             .iter()
             .all(|result| result.status != OpStatus::Failed)
+}
+
+/// Whether `path` is inside `dir`, folder by folder, with no regard to case,
+/// as Windows compares names.
+fn inside(path: &Path, dir: &Path) -> bool {
+    let mut path = path.components();
+    dir.components().all(|part| {
+        path.next().is_some_and(|other| {
+            part.as_os_str().to_string_lossy().to_lowercase()
+                == other.as_os_str().to_string_lossy().to_lowercase()
+        })
+    })
 }
 
 /// The folder of this `marsa`, for the programs left to delete.
@@ -969,11 +1011,15 @@ mod tests {
         };
         assert_eq!(render(&report, Path::new("/data")), "");
         assert!(!is_complete(&report));
-        assert_eq!(
-            error(&report).unwrap().line(),
+        // The CLI runs where marsad runs: Windows' admin prompt is UAC.
+        let expected = if cfg!(windows) {
+            "marsa: The UAC prompt was declined, so nothing was removed. Run \"marsa uninstall \
+             --all\" again when you are ready. [uninstall_cancelled]"
+        } else {
             "marsa: The password prompt was cancelled, so nothing was removed. Run \"marsa \
              uninstall --all\" again when you are ready. [uninstall_cancelled]"
-        );
+        };
+        assert_eq!(error(&report).unwrap().line(), expected);
     }
 
     #[test]
@@ -992,13 +1038,22 @@ mod tests {
         let text = left(default, false, Some(inside.as_path())).render();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "Left to do by hand:");
-        assert!(lines[1].contains("menu-bar icon"), "{text}");
+        assert!(lines[1].contains("menu bar or the system tray"), "{text}");
         assert!(
             lines[2].starts_with("  If you added Marsa to PATH"),
             "{text}"
         );
         assert!(lines[2].contains(&inside.display().to_string()), "{text}");
-        assert!(lines[2].contains("shims") && lines[2].contains("~/.zprofile"));
+        // The CLI runs where marsad runs: Windows keeps PATH in a setting.
+        let startup = if cfg!(windows) {
+            "environment variables"
+        } else {
+            "~/.zprofile"
+        };
+        assert!(
+            lines[2].contains("shims") && lines[2].contains(startup),
+            "{text}"
+        );
         assert_eq!(lines.len(), 3, "{text}");
 
         // The data folder kept by choice, and programs elsewhere.
@@ -1031,7 +1086,12 @@ mod tests {
         };
         let text = none.render();
         let path_line = text.lines().nth(2).unwrap();
-        assert!(path_line.ends_with("~/.zshrc."), "{path_line}");
+        let end = if cfg!(windows) {
+            "in Settings)."
+        } else {
+            "~/.zshrc."
+        };
+        assert!(path_line.ends_with(end), "{path_line}");
         assert!(!path_line.contains("it names"), "{path_line}");
     }
 
@@ -1054,29 +1114,42 @@ mod tests {
                 .contains("The data folder /data will be deleted once every step has succeeded."),
             "{deleted}"
         );
-        for part in [
-            "ports 80 and 443",
-            "/etc/resolver/test",
-            "for all users and for you",
-            "start at login",
-            "administrator password",
-            "menu-bar icon",
-        ] {
+        // The CLI runs where marsad runs: Windows has its own plan.
+        let parts: &[&str] = if cfg!(windows) {
+            &[
+                "hosts file",
+                "for all users",
+                "helper service",
+                "Program Files",
+                "UAC",
+                "tray icon",
+            ]
+        } else {
+            &[
+                "ports 80 and 443",
+                "/etc/resolver/test",
+                "for all users and for you",
+                "start at login",
+                "administrator password",
+                "menu-bar icon",
+            ]
+        };
+        for part in parts {
             assert!(kept.contains(part), "{part}: {kept}");
         }
     }
 
     #[test]
-    fn only_macos_runs_the_uninstall() {
-        assert!(is_macos(Some(Platform::DarwinArm64)));
-        assert!(is_macos(Some(Platform::DarwinX64)));
+    fn macos_and_windows_run_the_uninstall() {
         for platform in [
-            Some(Platform::LinuxX64),
-            Some(Platform::LinuxArm64),
-            Some(Platform::WindowsX64),
-            None,
+            Platform::DarwinArm64,
+            Platform::DarwinX64,
+            Platform::WindowsX64,
         ] {
-            assert!(!is_macos(platform), "{platform:?}");
+            assert!(runs_here(Some(platform)), "{platform:?}");
+        }
+        for platform in [Some(Platform::LinuxX64), Some(Platform::LinuxArm64), None] {
+            assert!(!runs_here(platform), "{platform:?}");
         }
     }
 }

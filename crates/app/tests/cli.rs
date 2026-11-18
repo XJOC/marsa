@@ -104,8 +104,8 @@ fn bad_arguments_exit_with_code_2() {
 
 /// `marsa uninstall --all` with no terminal to ask on and no `--yes`
 /// (`Command::output` gives the child no stdin): it refuses before anything,
-/// so no daemon starts and the data folder stays empty. Off macOS it says the
-/// uninstall is not supported there, also before anything.
+/// so no daemon starts and the data folder stays empty. Off macOS and Windows
+/// it says the uninstall is not supported there, also before anything.
 #[test]
 fn uninstall_without_a_terminal_and_without_yes_changes_nothing() {
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -118,7 +118,7 @@ fn uninstall_without_a_terminal_and_without_yes_changes_nothing() {
         let out = marsa(&data, args);
         assert_eq!(out.status.code(), Some(1), "{args:?}");
         let stderr = text(&out.stderr);
-        let code = if cfg!(target_os = "macos") {
+        let code = if cfg!(any(target_os = "macos", windows)) {
             "[uninstall_all_needs_yes]"
         } else {
             "[uninstall_not_supported]"

@@ -697,8 +697,13 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "uninstall_running" => {
             "An uninstall is running. Wait for it to end, then try again.".into()
         }
-        "uninstall_not_supported" => "\"marsa uninstall --all\" works on macOS only for now. \
-             Nothing was removed."
+        "uninstall_not_supported" => "\"marsa uninstall --all\" works on macOS and Windows \
+             only for now. Nothing was removed."
+            .into(),
+        // Windows: the CLI runs on the machine marsad runs on, so `cfg!` is
+        // the daemon's system too. Its admin prompt is UAC (ADR 0018).
+        "uninstall_cancelled" if cfg!(windows) => "The UAC prompt was declined, so nothing \
+             was removed. Run \"marsa uninstall --all\" again when you are ready."
             .into(),
         "uninstall_cancelled" => "The password prompt was cancelled, so nothing was removed. \
              Run \"marsa uninstall --all\" again when you are ready."
@@ -718,6 +723,13 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "uninstall_helper_missing" => "The marsa-helper program is not next to marsad, so \
              nothing was removed. Reinstall Marsa, then try again."
             .into(),
+        // Windows: the CLI runs on the machine marsad runs on, so `cfg!` is
+        // the daemon's system too. Its admin prompt is UAC (ADR 0018).
+        "uninstall_helper_unsafe" if cfg!(windows) => "marsa-helper.exe is outside your user \
+             folder, or it is not a plain file, so another user of this computer could change \
+             it: Marsa did not ask for admin rights and nothing was removed. Put Marsa back in \
+             your user folder with its installer, then run \"marsa uninstall --all\" again."
+            .into(),
         "uninstall_helper_unsafe" => "Another user could change the marsa-helper program or \
              its folder, so Marsa did not ask for the password and nothing was removed. Make \
              both yours and writable only by you (chmod go-w), then run \"marsa uninstall \
@@ -728,6 +740,20 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              this Mac's desktop and it is unlocked. Quit the Marsa window and the menu-bar icon, \
              run \"marsa daemon stop\", then run \"marsa uninstall --all\" again in Terminal. \
              The error number is in the file logs/marsad.log."
+            .into(),
+        // Windows: the CLI runs on the machine marsad runs on, so `cfg!` is
+        // the daemon's system too. Its admin prompt is UAC (ADR 0018).
+        "uninstall_helper_failed" if cfg!(windows) => "Marsa could not run its helper as \
+             asked, so nothing was removed. The file logs/marsad.log says why. Run \"marsa \
+             uninstall --all\" again; if it repeats, report it."
+            .into(),
+        "uninstall_helper_partial" => "Marsa's helper could not remove everything: some of \
+             Marsa's lines in the hosts file, its certificate authority, or its helper service \
+             may be left. Run \"marsa uninstall --all\" again; if it repeats, report it with \
+             the file logs/marsad.log."
+            .into(),
+        "uninstall_helper_running" => "A run of Marsa's helper is still going on, so Marsa \
+             started no other. Wait a few minutes, then run \"marsa uninstall --all\" again."
             .into(),
         "uninstall_helper_failed" => "marsa-helper gave an answer Marsa cannot read, so the \
              result is not known, and Marsa removed nothing else. Run \"marsa uninstall --all\" \
@@ -756,10 +782,15 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              what is left yourself.",
             shown("the data folder")
         ),
+        "uninstall_all_data_dir_in_use" => format!(
+            "Windows cannot delete {} while this marsa runs from it. Delete the folder \
+             yourself once this command has ended.",
+            shown("the data folder")
+        ),
         "uninstall_all_daemon_restarted" => format!(
             "A Marsa daemon started again, so Marsa did not delete {}. Quit the Marsa window \
-             and the menu-bar icon, run \"marsa daemon stop\", then delete the folder \
-             yourself.",
+             and Marsa's icon (in the menu bar or the system tray), run \"marsa daemon stop\", \
+             then delete the folder yourself.",
             shown("the data folder")
         ),
         "uninstall_all_data_dir_back" => format!(
@@ -1300,6 +1331,24 @@ pub fn uninstall_all_plan(data_dir: &Path, deletable: bool, delete: bool) -> Str
             data_dir.display()
         ),
     };
+    // Windows: the CLI runs on the machine marsad runs on, so `cfg!` is the
+    // daemon's system too (ADR 0018).
+    if cfg!(windows) {
+        let lines = [
+            "This removes Marsa from this system:".to_owned(),
+            "  - the sites' .test names in the hosts file".to_owned(),
+            "  - the trust in Marsa's certificate authority, for all users".to_owned(),
+            "  - Marsa's helper service, and its folder in Program Files".to_owned(),
+            "Then the Marsa daemon stops, with Caddy and PHP. Windows asks for admin rights \
+             (UAC) once. Quit the Marsa window and the tray icon first: they would start the \
+             daemon again."
+                .to_owned(),
+            data,
+        ];
+        let mut text = lines.join("\n");
+        text.push('\n');
+        return text;
+    }
     let lines = [
         "This removes Marsa from this system:".to_owned(),
         "  - the redirect of ports 80 and 443, and its job at startup".to_owned(),
@@ -1324,6 +1373,9 @@ pub const UNINSTALL_ALL_CONFIRM: &str = "Type yes to remove Marsa: ";
 pub const UNINSTALL_ALL_STARTED: &str = "Removing Marsa. macOS will ask for an administrator \
      password, and may then ask you to approve taking away the trust in Marsa's certificate \
      authority.";
+/// The same on Windows: one UAC prompt, which may sit in the taskbar.
+pub const UNINSTALL_ALL_STARTED_WINDOWS: &str = "Removing Marsa. Windows will ask for admin \
+     rights (UAC) once; if no prompt shows, look for it in the taskbar.";
 /// The data folder question, after the daemon stopped. No is the default.
 pub const UNINSTALL_ALL_DATA_QUESTION: &str =
     "Delete the data folder (runtimes, settings, the CA)? [y/N] ";
@@ -1336,13 +1388,14 @@ pub const UNINSTALL_ALL_RESULT_UNKNOWN: &str = "Marsa does not know how far the 
      done.";
 /// After the daemon stopped, when another started on the same folder.
 pub const UNINSTALL_ALL_DAEMON_BACK: &str = "A Marsa daemon started again: the Marsa window \
-     or the menu-bar icon starts it. Quit both, then run \"marsa daemon stop\".";
+     or Marsa's icon (in the menu bar or the system tray) starts it. Quit both, then run \"marsa \
+     daemon stop\".";
 /// The heading of what Marsa does not do itself.
 pub const UNINSTALL_ALL_LEFT_TO_DO: &str = "Left to do by hand:";
 /// Under [`UNINSTALL_ALL_LEFT_TO_DO`], always: either would start the daemon
 /// again.
-pub const QUIT_WINDOW_LEFT: &str = "  Quit the Marsa window and the menu-bar icon if they are \
-     open.";
+pub const QUIT_WINDOW_LEFT: &str = "  Quit the Marsa window and Marsa's icon (in the menu \
+     bar or the system tray) if they are open.";
 
 /// After Ctrl+C while the daemon stops after its answer.
 pub const UNINSTALL_ALL_STOP_CTRL_C: &str = "Stopped waiting. The Marsa daemon may still be \
@@ -1366,7 +1419,7 @@ pub fn setup_trust_dir_unusable(dir: &Path) -> String {
 /// After Ctrl+C while the daemon works: it goes on without this command.
 pub fn uninstall_all_ctrl_c(log: &Path) -> String {
     format!(
-        "Stopped waiting. The uninstall goes on in marsad: a macOS prompt that is open can \
+        "Stopped waiting. The uninstall goes on in marsad: an admin prompt that is open can \
          still be cancelled there. Its result is in {}.",
         log.display()
     )
@@ -1381,12 +1434,26 @@ pub fn uninstall_all_step(op: &str) -> String {
         "trust_remove" => "Remove the trust in Marsa's certificates for all users".to_owned(),
         "user_trust_remove" => "Remove the trust in Marsa's certificates for you".to_owned(),
         "autostart_remove" => "Stop starting Marsa at login".to_owned(),
+        "uninstall_all" => {
+            "Remove Marsa's hosts lines, its certificate authority, and its helper service"
+                .to_owned()
+        }
         other => other.to_owned(),
     }
 }
 
 pub fn data_deleted(path: &Path) -> String {
     format!("Deleted the data folder {}.", path.display())
+}
+
+/// Windows: the data folder this marsa runs from, which Windows cannot
+/// delete while it runs.
+pub fn data_dir_in_use(path: &Path) -> String {
+    format!(
+        "Kept the data folder {}: Windows cannot delete it while this marsa runs from it. \
+         Delete it yourself once this command has ended.",
+        path.display()
+    )
 }
 
 /// The data folder after a step failed.
@@ -1408,8 +1475,15 @@ pub fn data_kept_daemon_runs(path: &Path) -> String {
 /// Under [`UNINSTALL_ALL_LEFT_TO_DO`]: the `PATH` line the install printed
 /// for the user to add, for Marsa's default folder `default_dir`.
 pub fn path_left(default_dir: Option<&Path>) -> String {
-    let start = "  If you added Marsa to PATH, delete that line from your shell's startup file, \
-                 such as ~/.zprofile or ~/.zshrc";
+    // Windows: the CLI runs on the machine marsad runs on; its PATH is a
+    // setting of the user, not a file.
+    let start = if cfg!(windows) {
+        "  If you added Marsa to PATH, take it out of your user's environment variables (search \
+         for \"environment variables\" in Settings)"
+    } else {
+        "  If you added Marsa to PATH, delete that line from your shell's startup file, such as \
+         ~/.zprofile or ~/.zshrc"
+    };
     match default_dir {
         Some(dir) => format!(
             "{start}: it names {} and {}.",
@@ -1927,6 +2001,9 @@ mod tests {
         "uninstall_all_data_dir_unsafe",
         "uninstall_all_data_delete_failed",
         "uninstall_all_daemon_restarted",
+        "uninstall_all_data_dir_in_use",
+        "uninstall_helper_partial",
+        "uninstall_helper_running",
         "uninstall_all_data_dir_back",
         "trust_record_unusable",
         "pf_flush_failed",
