@@ -13,7 +13,8 @@ use crate::strings;
 /// so stderr keeps the normal text color and stdout is the one drawn weak.
 pub fn show(ui: &mut egui::Ui, model: &Model) {
     ui.strong(strings::LOG_TITLE);
-    if model.log.is_empty() {
+    let rows = model.log_rows(crate::model::LOG_SERVICE);
+    if rows.is_empty() {
         ui.weak(strings::LOG_EMPTY);
         return;
     }
@@ -22,8 +23,8 @@ pub fn show(ui: &mut egui::Ui, model: &Model) {
         .id_salt("log")
         .auto_shrink(false)
         .stick_to_bottom(true)
-        .show_rows(ui, row_height, model.log.len(), |ui, rows| {
-            for row in model.log.range(rows) {
+        .show_rows(ui, row_height, rows.len(), |ui, range| {
+            for row in rows.range(range) {
                 let mut text = egui::RichText::new(&row.text).monospace();
                 if row.stream == LogStream::Stdout {
                     text = text.weak();

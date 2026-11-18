@@ -1,5 +1,5 @@
 //! Debug builds only: fixed fake data for the design review (task M5-D5).
-//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|confirm-unlink|confirm-uninstall|notice-success|notice-error`
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! fills the model with a few sites, PHP and Caddy (or nothing, for the
 //! first run), and starts no bridge and no daemon: the window draws a state the review needs without a
 //! machine to break. Pair it with
@@ -64,6 +64,10 @@ pub enum Demo {
     /// `Settings` after a setup of this session: the certificate and the
     /// `.test` names are done.
     SettingsSetup,
+    /// The same as `Ok`, with Caddy running and three PHP pools: one running,
+    /// one waiting, one failed with its reason: the Services screen (task
+    /// M5-D10).
+    Services,
     /// The same as `Ok`, with the confirmation of "Unlink shop.test?" open.
     ConfirmUnlink,
     /// `Runtimes`, with the confirmation of uninstalling PHP 8.3.27 open.
@@ -95,6 +99,7 @@ fn parse(name: &str) -> Option<Demo> {
         "runtimes-install" => Demo::RuntimesInstall,
         "settings" => Demo::Settings,
         "settings-setup" => Demo::SettingsSetup,
+        "services" => Demo::Services,
         "confirm-unlink" => Demo::ConfirmUnlink,
         "confirm-uninstall" => Demo::ConfirmUninstall,
         "notice-success" => Demo::NoticeSuccess,
@@ -159,6 +164,30 @@ pub fn fill(model: &mut Model, demo: Demo) {
     if matches!(demo, Demo::Settings | Demo::SettingsSetup) {
         settings_screen(model, demo);
     }
+    if demo == Demo::Services {
+        services_screen(model);
+    }
+}
+
+/// What the Services screen shows beyond `Ok`: Caddy with its process, the
+/// pool of PHP 8.4 running, the one of 8.3 waiting for a site, and the one
+/// of 8.2 failed.
+fn services_screen(model: &mut Model) {
+    let mut caddy = service(WEB_SERVER, ServiceState::Running);
+    caddy.pid = Some(4242);
+    let mut running = service("php-fpm-8.4", ServiceState::Running);
+    running.pid = Some(4251);
+    model.update(Update::Services(vec![
+        caddy,
+        running,
+        service("php-fpm-8.3", ServiceState::Stopped),
+        service(
+            "php-fpm-8.2",
+            ServiceState::Failed {
+                code: "spawn_failed".into(),
+            },
+        ),
+    ]));
 }
 
 /// The confirmations and the notices of the design review.
@@ -432,6 +461,7 @@ mod tests {
         assert_eq!(parse("confirm-uninstall"), Some(Demo::ConfirmUninstall));
         assert_eq!(parse("notice-success"), Some(Demo::NoticeSuccess));
         assert_eq!(parse("notice-error"), Some(Demo::NoticeError));
+        assert_eq!(parse("services"), Some(Demo::Services));
         assert_eq!(parse("on fire"), None);
     }
 
@@ -529,6 +559,32 @@ mod tests {
         fill(&mut model, Demo::SettingsSetup);
         let shown = view(&model).setup;
         assert_eq!((shown.cert, shown.names), (Check::Done, Check::Done));
+    }
+
+    #[test]
+    fn the_services_demo_has_a_running_a_waiting_and_a_failed_pool_beside_caddy() {
+        use crate::screens::services::{ServicesView, view};
+        use crate::widgets::PillState;
+        let mut model = Model::default();
+        fill(&mut model, Demo::Services);
+        let ServicesView::Rows { rows, pools } = view(&model) else {
+            panic!("rows");
+        };
+        assert!(pools);
+        let states: Vec<_> = rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.state))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("Caddy", PillState::Running),
+                ("PHP-FPM 8.2", PillState::Failed),
+                ("PHP-FPM 8.3", PillState::Waiting),
+                ("PHP-FPM 8.4", PillState::Running),
+            ]
+        );
+        assert!(rows[1].failure.is_some());
     }
 
     #[test]

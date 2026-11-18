@@ -121,7 +121,10 @@ fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
                 .extend(screens::runtimes::show(ui, &view, theme));
         }),
         Item::Services => scrolled(ui, item, |ui| {
-            out.actions.extend(screens::services::show(ui, model));
+            let theme = Theme::of(ui.ctx());
+            let view = screens::services::view(model);
+            out.actions
+                .extend(screens::services::show(ui, &view, theme));
         }),
         Item::Settings => scrolled(ui, item, |ui| {
             let theme = Theme::of(ui.ctx());

@@ -13,6 +13,8 @@ pub mod bridge;
 // build reads no extra environment variable (task M5-D5).
 #[cfg(debug_assertions)]
 pub mod demo;
+// What a line of a program's output says: its level and its message.
+pub mod logline;
 pub mod model;
 // The system's opener of a folder: only `app` runs it.
 pub(crate) mod opener;

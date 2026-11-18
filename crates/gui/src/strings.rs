@@ -8,14 +8,14 @@ use marsa_core::recipes::Platform;
 use marsa_core::runtimes::Runtime;
 use marsa_core::sites::TLD;
 use marsa_core::types::{
-    InstallFailure, OpStatus, PortHolder, ServiceAction, ServiceState, SetupReport, Site, SiteKind,
-    VersionInUse, XdebugState,
+    InstallFailure, OpStatus, PortHolder, ServiceAction, SetupReport, Site, SiteKind, VersionInUse,
+    XdebugState,
 };
 use semver::Version;
 
 use crate::model::{
     Appearance, Autostart, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Overall,
-    Pick, Removal, UninstallNotice,
+    Pick, PoolKind, Removal, UninstallNotice, WEB_SERVER, pool_of,
 };
 use crate::screens::settings::Check;
 use crate::theme::Section;
@@ -25,16 +25,64 @@ use crate::widgets::{PillState, Stage, StepState};
 pub const APP_NAME: &str = "Marsa";
 
 pub const SERVICES: &str = "Services";
-pub const NO_SERVICES: &str = "No services.";
+/// After the title of Services: what the screen is for.
+pub const SERVICES_HINT: &str = "Programs Marsa runs for your sites";
+/// The Services screen while the window has no daemon to ask.
+pub const SERVICES_OFFLINE: &str = "Your services show here once Marsa is connected to its daemon.";
+/// The Services screen when the daemon lists no program.
+pub const NO_SERVICES: &str = "No services yet. A program shows here once Marsa starts it.";
+/// Under the Services table, while a PHP pool is listed.
+pub const SERVICES_POOLS_NOTE: &str = "PHP pools start and stop with the sites that need them.";
+/// The names of the columns, for a screen reader (the table has no header).
 pub const COLUMN_SERVICE: &str = "Service";
 pub const COLUMN_STATE: &str = "State";
-pub const COLUMN_PID: &str = "PID";
 pub const COLUMN_ACTIONS: &str = "Actions";
 /// Over the disabled buttons of a php-fpm pool.
 pub const MANAGED_BY_SITES_HINT: &str =
     "Starts and stops with the sites that need its PHP version.";
+
 pub const LOG_TITLE: &str = "Caddy log";
 pub const LOG_EMPTY: &str = "No log lines yet.";
+
+/// What a service is called: `caddy` is Caddy, `php-fpm-8.4` is PHP-FPM 8.4.
+/// A service this window does not know shows under its id.
+pub fn service_name(id: &str) -> String {
+    if id == WEB_SERVER {
+        return "Caddy".to_owned();
+    }
+    match pool_of(id) {
+        Some((PoolKind::Fpm, line)) => format!("PHP-FPM {line}"),
+        Some((PoolKind::Cgi, line)) => format!("PHP-CGI {line}"),
+        None => id.to_owned(),
+    }
+}
+
+/// What a service does, in one line under its name. `waiting`: a pool that
+/// no site needs now. `sites`: how many sites run the PHP line of a pool.
+pub fn service_description(id: &str, waiting: bool, sites: usize) -> String {
+    if id == WEB_SERVER {
+        return "The web server for every .test site.".to_owned();
+    }
+    let Some((_, line)) = pool_of(id) else {
+        return "A program Marsa runs for your sites.".to_owned();
+    };
+    match (waiting, sites) {
+        (true, _) => format!("No site needs PHP {line} now. It starts when one does."),
+        (false, 0) => format!("Runs PHP {line} for your sites."),
+        (false, 1) => format!("Runs PHP {line} for 1 site."),
+        (false, n) => format!("Runs PHP {line} for {n} sites."),
+    }
+}
+
+/// The tooltip of a state: the process id, while there is one.
+pub fn service_pid(pid: u32) -> String {
+    format!("Process {pid}")
+}
+
+/// What a screen reader says for a service's button: "Restart Caddy".
+pub fn service_action_label(action: ServiceAction, name: &str) -> String {
+    format!("{} {name}", action_text(action))
+}
 
 pub const SITES: &str = "Sites";
 pub const COLUMN_NAME: &str = "Name";
@@ -881,16 +929,6 @@ pub fn status_line(connection: &Connection) -> String {
     }
 }
 
-pub fn state_text(state: &ServiceState) -> String {
-    match state {
-        ServiceState::Stopped => "Stopped".to_owned(),
-        ServiceState::Starting => "Starting".to_owned(),
-        ServiceState::Running => "Running".to_owned(),
-        ServiceState::Stopping => "Stopping".to_owned(),
-        ServiceState::Failed { code } => format!("Failed: {}", error_text(code)),
-    }
-}
-
 pub fn action_text(action: ServiceAction) -> &'static str {
     match action {
         ServiceAction::Start => "Start",
@@ -1138,6 +1176,8 @@ pub const fn pill_state_word(state: PillState) -> &'static str {
         PillState::Waiting => "Waiting",
         PillState::Stopped => "Stopped",
         PillState::Starting => "Starting",
+        PillState::Stopping => "Stopping",
+        PillState::Failed => "Failed",
     }
 }
 
