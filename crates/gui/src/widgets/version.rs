@@ -12,7 +12,8 @@ use eframe::egui::{
 
 use super::icons::Icon;
 use super::{
-    Look, Touch, layout, paint_focus_ring, quiet_fill, slot, touched, with_disabled_reason,
+    Look, Touch, group_button, layout, paint_focus_ring, quiet_fill, slot, tab_stop, touched,
+    with_disabled_reason,
 };
 use crate::theme::{Direction, Face, TextToken, Theme, VersionText};
 
@@ -39,8 +40,7 @@ pub fn moved(from: usize, stops: usize, step: Step) -> usize {
 
 /// What a key does in the group: the arrows along the row, and up and down,
 /// move the focus; Home and End go to the ends. "Forward" along the row is
-/// to the right in a left-to-right language. Enter and Space are not here:
-/// egui turns them into a click on the focused button.
+/// to the right in a left-to-right language.
 pub fn step_for(key: Key, direction: Direction) -> Option<Step> {
     let along = |forward: bool| {
         if forward != direction.is_rtl() {
@@ -60,7 +60,8 @@ pub fn step_for(key: Key, direction: Direction) -> Option<Step> {
     }
 }
 
-/// The keys the group reads, in the order the first match wins.
+/// The keys the group reads, in the order the first match wins. Enter and
+/// Space are not here: egui turns them into a click on the focused button.
 const KEYS: [Key; 6] = [
     Key::ArrowRight,
     Key::ArrowLeft,
@@ -120,7 +121,8 @@ pub struct ButtonPaint {
 }
 
 /// The chosen version is `accent` with `on_accent` text at 500; the others
-/// are `surface` with a `line` border at 300 (components.md).
+/// are `surface` with a 1 px `control` border at 300 (components.md): a
+/// `line` border is under 3:1 on `bg` (WCAG 1.4.11).
 pub fn button_paint(theme: &Theme, size: PickerSize, chosen: bool, touch: Touch) -> ButtonPaint {
     let c = &theme.color;
     let text = size.text(theme);
@@ -135,7 +137,7 @@ pub fn button_paint(theme: &Theme, size: PickerSize, chosen: bool, touch: Touch)
     } else {
         ButtonPaint {
             fill: touched(theme, c.surface, touch),
-            border: c.line,
+            border: c.control,
             text: c.ink,
             face: text.face,
         }
@@ -172,10 +174,12 @@ fn rounded_outline(rect: Rect, radius: f32) -> Vec<Pos2> {
 const ARC_STEPS: usize = 6;
 
 /// The large version picker: one button per installed version, an optional
-/// dashed "+" at the end. It is a radio group: Tab reaches each button, the
-/// arrow keys, Home, and End move the focus, and Enter or Space chooses the
-/// focused one. Choosing is separate from moving, so the arrows never switch
-/// a runtime by accident.
+/// dashed "+" at the end. It is a radio group with one Tab stop (the WAI-ARIA
+/// pattern, "roving focus"): Tab enters on the chosen version, or on the
+/// first when none is chosen, and the next Tab leaves. Inside, the arrow
+/// keys, Home, and End move the focus, and Enter or Space chooses the
+/// focused button. Choosing is separate from moving, so the arrows never
+/// switch a runtime by accident.
 #[derive(Clone, Copy, Debug)]
 #[must_use = "a version picker is drawn only when it is added to a Ui"]
 pub struct VersionPicker<'a, T> {
@@ -235,19 +239,25 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
 
     /// Draws the picker. `inner` is what the user chose this frame.
     pub fn show(self, ui: &mut Ui) -> InnerResponse<Option<VersionPick<T>>> {
+        self.show_in(ui, Direction::CURRENT)
+    }
+
+    /// [`Self::show`] in a row that runs in `direction`.
+    fn show_in(self, ui: &mut Ui, direction: Direction) -> InnerResponse<Option<VersionPick<T>>> {
         if let Some(reason) = self.disabled {
-            let shown = ui.add_enabled_ui(false, |ui| self.draw(ui)).inner;
+            let shown = ui
+                .add_enabled_ui(false, |ui| self.draw(ui, direction))
+                .inner;
             return InnerResponse::new(
                 shown.inner,
                 with_disabled_reason(shown.response, Some(reason)),
             );
         }
-        self.draw(ui)
+        self.draw(ui, direction)
     }
 
-    fn draw(self, ui: &mut Ui) -> InnerResponse<Option<VersionPick<T>>> {
+    fn draw(self, ui: &mut Ui, direction: Direction) -> InnerResponse<Option<VersionPick<T>>> {
         let theme = Theme::of(ui.ctx());
-        let direction = Direction::CURRENT;
         let enabled = ui.is_enabled();
         let button = self.size.button(theme);
         let text = self.size.text(theme);
@@ -289,10 +299,17 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
             ));
             offset += width + gap;
         }
+        // One Tab stop for the whole group: the button that has the focus,
+        // or else the chosen one, or else the first.
+        let chosen_at = self
+            .versions
+            .iter()
+            .position(|(value, _)| self.selected == Some(*value));
+        let stop = tab_stop(ui, group.id, spots.len(), chosen_at);
         let responses: Vec<Response> = spots
             .iter()
             .enumerate()
-            .map(|(index, spot)| ui.interact(*spot, group.id.with(index), Sense::click()))
+            .map(|(index, spot)| group_button(ui, *spot, group.id, index, stop))
             .collect();
 
         let mut picked = None;
@@ -333,7 +350,8 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
     }
 
     /// The arrow keys, Home, and End move the focus; the focused button
-    /// asks egui to leave them to the group.
+    /// asks egui to leave them to the group. The button the focus moves to
+    /// becomes the Tab stop on the next frame.
     fn move_focus(&self, ui: &Ui, direction: Direction, responses: &[Response]) {
         let Some(at) = responses.iter().position(Response::has_focus) else {
             return;
@@ -681,12 +699,13 @@ fn menu_row<T>(ui: &mut Ui, theme: &Theme, entry: &Entry<'_, T>) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use eframe::egui::{self, Id};
+    use eframe::egui::{self, Event, Id, Modifiers, RawInput};
 
     use super::*;
     use crate::strings;
     use crate::theme::tests::{TEXT, UI, contrast};
     use crate::theme::{DARK, LIGHT};
+    use crate::widgets::Button;
     use crate::widgets::harness::{Harness, over};
 
     const PHP: [(u8, &str); 3] = [(83, "8.3"), (84, "8.4"), (85, "8.5")];
@@ -736,7 +755,8 @@ mod tests {
     }
 
     #[test]
-    fn the_chosen_version_is_accent_at_500_and_the_others_are_surface_with_a_line_at_300() {
+    fn the_chosen_version_is_accent_at_500_and_the_others_are_surface_with_a_control_border_at_300()
+    {
         for theme in [&LIGHT, &DARK] {
             let c = &theme.color;
             for size in [PickerSize::Large, PickerSize::Medium] {
@@ -747,7 +767,7 @@ mod tests {
                 assert_eq!(chosen.face, Face::Medium);
                 let other = button_paint(theme, size, false, Touch::Rest);
                 assert_eq!(other.fill, c.surface);
-                assert_eq!(other.border, c.line);
+                assert_eq!(other.border, c.control);
                 assert_eq!(other.text, c.ink);
                 assert_eq!(other.face, Face::Light);
             }
@@ -761,6 +781,26 @@ mod tests {
                 let fill = |touch| button_paint(theme, PickerSize::Large, chosen, touch).fill;
                 assert_eq!(fill(Touch::Hover), theme.shade(fill(Touch::Rest), 0.06));
                 assert_eq!(fill(Touch::Pressed), theme.shade(fill(Touch::Rest), 0.12));
+            }
+        }
+    }
+
+    #[test]
+    fn the_border_of_an_unselected_version_stands_out_in_both_themes() {
+        for (name, theme, _) in THEMES {
+            let c = &theme.color;
+            for size in [PickerSize::Large, PickerSize::Medium] {
+                let rest = button_paint(theme, size, false, Touch::Rest);
+                assert_eq!(rest.border, c.control, "{name}: the control border");
+                // The border is the button's edge: it stands out from the
+                // page outside, and from the button's own fill at rest
+                // (WCAG 1.4.11, 3:1).
+                let ratio = contrast(rest.border, rest.fill);
+                assert!(ratio >= UI, "{name} {size:?} on its fill: {ratio:.2}:1");
+            }
+            for (page_name, page) in [("bg", c.bg), ("side", c.side), ("surface", c.surface)] {
+                let ratio = contrast(c.control, page);
+                assert!(ratio >= UI, "{name} on {page_name}: {ratio:.2}:1");
             }
         }
     }
@@ -870,86 +910,257 @@ mod tests {
         assert_eq!(install.role(), egui::Role::Button);
     }
 
-    /// One frame of a picker; what it chose and which button has the focus.
-    struct Frame {
-        picked: Option<VersionPick<u8>>,
-        focused: Option<usize>,
+    /// Where the keyboard focus is.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum At {
+        Nowhere,
+        Before,
+        /// The picker's button of this index: the versions, then the "+".
+        Button(usize),
+        After,
     }
 
-    fn frame(harness: &Harness, key: Option<Key>, selected: Option<u8>) -> Frame {
+    /// One frame of a picker between two buttons, so Tab has somewhere to go
+    /// before it and after it: what it chose and where the focus is.
+    struct Frame {
+        picked: Option<VersionPick<u8>>,
+        at: At,
+        group: Id,
+    }
+
+    fn frame_with(
+        harness: &Harness,
+        input: RawInput,
+        selected: Option<u8>,
+        direction: Direction,
+    ) -> Frame {
         let mut picked = None;
-        let mut group = Id::NULL;
+        let (mut before, mut group, mut after) = (Id::NULL, Id::NULL, Id::NULL);
         let draw = |ui: &mut Ui| {
+            before = ui.add(Button::secondary("Before")).id;
             let shown = VersionPicker::new("Default PHP", &PHP, selected)
                 .install("Install")
-                .show(ui);
+                .show_in(ui, direction);
             picked = shown.inner;
             group = shown.response.id;
+            after = ui.add(Button::secondary("After")).id;
         };
-        match key {
-            Some(key) => harness.key(key, draw),
-            None => harness.run(draw),
+        harness.frame(input, draw);
+        let focused = harness.ctx.memory(|m| m.focused());
+        let at = if focused.is_none() {
+            At::Nowhere
+        } else if focused == Some(before) {
+            At::Before
+        } else if focused == Some(after) {
+            At::After
+        } else {
+            (0..4)
+                .find(|index| focused == Some(group.with(*index)))
+                .map_or(At::Nowhere, At::Button)
+        };
+        Frame { picked, at, group }
+    }
+
+    fn frame_in(
+        harness: &Harness,
+        press: Option<(Key, Modifiers)>,
+        selected: Option<u8>,
+        direction: Direction,
+    ) -> Frame {
+        let events = press.map_or_else(Vec::new, |(key, modifiers)| {
+            vec![Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }]
+        });
+        let input = RawInput {
+            events,
+            ..RawInput::default()
+        };
+        frame_with(harness, input, selected, direction)
+    }
+
+    fn frame(harness: &Harness, press: Option<Key>, selected: Option<u8>) -> Frame {
+        let press = press.map(|key| (key, Modifiers::NONE));
+        frame_in(harness, press, selected, Direction::Ltr)
+    }
+
+    /// A key press, then a frame with no input: egui moves the focus of a
+    /// Shift+Tab a frame late, and a button that has just got the focus
+    /// asks for the arrows in the frame after. What the key chose, and where
+    /// the focus is then.
+    fn press_in(
+        harness: &Harness,
+        key: Key,
+        modifiers: Modifiers,
+        selected: Option<u8>,
+        direction: Direction,
+    ) -> (Option<VersionPick<u8>>, At) {
+        let pressed = frame_in(harness, Some((key, modifiers)), selected, direction);
+        let settled = frame_in(harness, None, selected, direction);
+        (pressed.picked, settled.at)
+    }
+
+    fn press(harness: &Harness, key: Key, selected: Option<u8>) -> (Option<VersionPick<u8>>, At) {
+        press_in(harness, key, Modifiers::NONE, selected, Direction::Ltr)
+    }
+
+    fn shift_tab(harness: &Harness, selected: Option<u8>) -> At {
+        press_in(
+            harness,
+            Key::Tab,
+            Modifiers::SHIFT,
+            selected,
+            Direction::Ltr,
+        )
+        .1
+    }
+
+    #[test]
+    fn the_picker_is_one_tab_stop_entered_on_the_chosen_version() {
+        let harness = Harness::new(egui::Theme::Light);
+        let selected = Some(84);
+        assert_eq!(frame(&harness, None, selected).at, At::Nowhere);
+        // Tab walks Before, the picker, After: one stop for the picker's
+        // four buttons, and it is on the chosen version (8.4, the second).
+        assert_eq!(press(&harness, Key::Tab, selected), (None, At::Before));
+        assert_eq!(press(&harness, Key::Tab, selected), (None, At::Button(1)));
+        // The next Tab leaves the group; it does not visit 8.5 or the "+".
+        assert_eq!(press(&harness, Key::Tab, selected), (None, At::After));
+        assert_eq!(press(&harness, Key::Tab, selected).1, At::Before, "a loop");
+        // Shift+Tab from After comes back in on the chosen version too.
+        press(&harness, Key::Tab, selected);
+        press(&harness, Key::Tab, selected);
+        assert_eq!(shift_tab(&harness, selected), At::Button(1));
+        // Tab leaves from a button the arrows moved to, and the way back in
+        // is on the chosen version, not on the button that was left.
+        assert_eq!(press(&harness, Key::ArrowRight, selected).1, At::Button(2));
+        assert_eq!(press(&harness, Key::Tab, selected).1, At::After);
+        assert_eq!(shift_tab(&harness, selected), At::Button(1));
+        // Shift+Tab leaves the group backwards, to the button before it.
+        assert_eq!(shift_tab(&harness, selected), At::Before);
+    }
+
+    #[test]
+    fn with_no_version_chosen_tab_enters_the_picker_on_the_first_button() {
+        let harness = Harness::new(egui::Theme::Light);
+        press(&harness, Key::Tab, None);
+        assert_eq!(press(&harness, Key::Tab, None).1, At::Button(0));
+        assert_eq!(press(&harness, Key::Tab, None).1, At::After);
+        // A chosen version that is not in the list is no choice either.
+        let harness = Harness::new(egui::Theme::Light);
+        press(&harness, Key::Tab, Some(99));
+        assert_eq!(press(&harness, Key::Tab, Some(99)).1, At::Button(0));
+    }
+
+    #[test]
+    fn tab_enters_on_whichever_version_is_chosen() {
+        for (selected, button) in [(83, 0), (84, 1), (85, 2)] {
+            let harness = Harness::new(egui::Theme::Light);
+            press(&harness, Key::Tab, Some(selected));
+            let entered = press(&harness, Key::Tab, Some(selected));
+            assert_eq!(entered, (None, At::Button(button)), "{selected}");
         }
-        let focused = (0..4).find(|index| harness.ctx.memory(|m| m.has_focus(group.with(*index))));
-        Frame { picked, focused }
     }
 
     #[test]
     fn the_arrows_move_the_focus_and_enter_or_space_choose() {
         let harness = Harness::new(egui::Theme::Light);
-        frame(&harness, None, Some(84));
-        // Tab reaches the first button; it chooses nothing.
-        let at = frame(&harness, Some(Key::Tab), Some(84));
-        assert_eq!((at.picked, at.focused), (None, Some(0)));
-        // One frame for the focused button to claim the arrows.
-        frame(&harness, None, Some(84));
-        let arrow = |key, harness: &Harness| {
-            let at = frame(harness, Some(key), Some(84));
-            frame(harness, None, Some(84));
-            at.picked
-        };
-        let focus = |harness: &Harness| frame(harness, None, Some(84)).focused;
+        let selected = Some(84);
+        frame(&harness, None, selected);
+        press(&harness, Key::Tab, selected);
+        // Tab enters on the chosen version, and chooses nothing.
+        assert_eq!(press(&harness, Key::Tab, selected), (None, At::Button(1)));
+        let arrow = |key| press(&harness, key, selected);
         // The arrows move the focus and never choose.
-        assert_eq!(arrow(Key::ArrowRight, &harness), None);
-        assert_eq!(focus(&harness), Some(1));
-        assert_eq!(arrow(Key::ArrowRight, &harness), None);
-        assert_eq!(focus(&harness), Some(2));
+        assert_eq!(arrow(Key::ArrowRight), (None, At::Button(2)));
         // The "+" is the last stop, and the arrow stops there.
-        arrow(Key::ArrowRight, &harness);
-        assert_eq!(focus(&harness), Some(3));
-        arrow(Key::ArrowRight, &harness);
-        assert_eq!(focus(&harness), Some(3));
-        arrow(Key::Home, &harness);
-        assert_eq!(focus(&harness), Some(0));
-        arrow(Key::End, &harness);
-        assert_eq!(focus(&harness), Some(3));
-        arrow(Key::ArrowUp, &harness);
-        assert_eq!(focus(&harness), Some(2));
-        arrow(Key::ArrowLeft, &harness);
-        assert_eq!(focus(&harness), Some(1));
-        // Enter chooses the focused version; on the chosen one it does not.
-        arrow(Key::ArrowLeft, &harness);
-        assert_eq!(focus(&harness), Some(0));
+        assert_eq!(arrow(Key::ArrowRight), (None, At::Button(3)));
+        assert_eq!(arrow(Key::ArrowRight), (None, At::Button(3)));
+        assert_eq!(arrow(Key::Home), (None, At::Button(0)));
+        assert_eq!(arrow(Key::ArrowLeft), (None, At::Button(0)));
+        assert_eq!(arrow(Key::End), (None, At::Button(3)));
+        assert_eq!(arrow(Key::ArrowUp), (None, At::Button(2)));
+        assert_eq!(arrow(Key::ArrowDown), (None, At::Button(3)));
+        assert_eq!(arrow(Key::ArrowLeft), (None, At::Button(2)));
+        assert_eq!(arrow(Key::ArrowLeft), (None, At::Button(1)));
+        assert_eq!(arrow(Key::ArrowLeft), (None, At::Button(0)));
+        // Enter chooses the focused version, and the focus stays on it.
         assert_eq!(
-            frame(&harness, Some(Key::Enter), Some(84)).picked,
-            Some(VersionPick::Version(83))
+            press(&harness, Key::Enter, selected),
+            (Some(VersionPick::Version(83)), At::Button(0))
         );
-        frame(&harness, None, Some(84));
-        arrow(Key::ArrowRight, &harness);
-        assert_eq!(frame(&harness, Some(Key::Space), Some(84)).picked, None);
-        frame(&harness, None, Some(84));
+        // On the chosen version, Space does not.
+        arrow(Key::ArrowRight);
+        assert_eq!(press(&harness, Key::Space, selected), (None, At::Button(1)));
         // Space on another version, and Enter on the "+".
-        arrow(Key::ArrowRight, &harness);
+        arrow(Key::ArrowRight);
         assert_eq!(
-            frame(&harness, Some(Key::Space), Some(84)).picked,
-            Some(VersionPick::Version(85))
+            press(&harness, Key::Space, selected),
+            (Some(VersionPick::Version(85)), At::Button(2))
         );
-        frame(&harness, None, Some(84));
-        arrow(Key::ArrowRight, &harness);
+        arrow(Key::ArrowRight);
         assert_eq!(
-            frame(&harness, Some(Key::Enter), Some(84)).picked,
-            Some(VersionPick::Install)
+            press(&harness, Key::Enter, selected),
+            (Some(VersionPick::Install), At::Button(3))
         );
+    }
+
+    #[test]
+    fn in_a_right_to_left_row_the_arrows_are_mirrored_and_the_tab_stop_is_the_same() {
+        let harness = Harness::new(egui::Theme::Light);
+        let selected = Some(84);
+        let rtl = |key| press_in(&harness, key, Modifiers::NONE, selected, Direction::Rtl);
+        rtl(Key::Tab);
+        assert_eq!(rtl(Key::Tab).1, At::Button(1));
+        // The first button is at the right: the left arrow goes on, the
+        // right arrow goes back, and neither chooses.
+        assert_eq!(rtl(Key::ArrowLeft), (None, At::Button(2)));
+        assert_eq!(rtl(Key::ArrowLeft), (None, At::Button(3)));
+        assert_eq!(rtl(Key::ArrowRight), (None, At::Button(2)));
+        assert_eq!(rtl(Key::ArrowRight), (None, At::Button(1)));
+        assert_eq!(rtl(Key::ArrowRight), (None, At::Button(0)));
+        assert_eq!(rtl(Key::ArrowRight), (None, At::Button(0)));
+        assert_eq!(rtl(Key::End).1, At::Button(3));
+        assert_eq!(rtl(Key::Home).1, At::Button(0));
+        // Up and Down do not depend on the direction.
+        assert_eq!(rtl(Key::ArrowDown).1, At::Button(1));
+        assert_eq!(rtl(Key::Tab).1, At::After);
+    }
+
+    #[test]
+    fn a_screen_reader_can_focus_any_button_not_only_the_tab_stop() {
+        let harness = Harness::new(egui::Theme::Light);
+        let selected = Some(84);
+        let group = frame(&harness, None, selected).group;
+        let tree = harness.accessibility(|ui| {
+            ui.add(VersionPicker::new("Default PHP", &PHP, selected).install("Install"));
+        });
+        for label in ["8.3", "8.4", "8.5", "Install"] {
+            let node = tree.node_with_label(label).expect(label);
+            assert!(
+                node.supports_action(egui::accesskit::Action::Focus),
+                "{label}"
+            );
+        }
+        // It asks for the focus on 8.5, which is not the Tab stop.
+        let request = egui::accesskit::ActionRequest {
+            action: egui::accesskit::Action::Focus,
+            target_node: group.with(2).accesskit_id(),
+            target_tree: egui::accesskit::TreeId::ROOT,
+            data: None,
+        };
+        let input = RawInput {
+            events: vec![Event::AccessKitActionRequest(request)],
+            ..RawInput::default()
+        };
+        frame_with(&harness, input, selected, Direction::Ltr);
+        assert_eq!(frame(&harness, None, selected).at, At::Button(2));
+        // The focus is on 8.5 now, so it is the Tab stop and Tab leaves.
+        assert_eq!(press(&harness, Key::Tab, selected).1, At::After);
     }
 
     #[test]
