@@ -77,6 +77,10 @@ pub struct Colors {
     pub error_line: Color32,
     /// `color.off`: a switch track when off.
     pub off: Color32,
+    /// `color.knob.off`: the knob of a switch that is off. White in both
+    /// themes, as in the mockups; the knob of a switch that is on is
+    /// `on_accent`.
+    pub knob_off: Color32,
 }
 
 /// A section of the window. Each has its own colors and icon shape, so
@@ -257,6 +261,37 @@ pub struct Size {
     pub target_min: f32,
     /// The 1 px border of cards, inputs, and buttons (components.md).
     pub border: f32,
+    /// An icon button: 30 by 30 (components.md, Buttons).
+    pub icon_button: f32,
+    /// The icon tile of a screen header: 32 by 32 (components.md, Section
+    /// icon tile). The sidebar's is [`Size::nav_tile`].
+    pub tile_header: f32,
+    /// The icon inside a section tile: 15.
+    pub icon_tile: f32,
+    /// An icon next to text in a button, a field, or a message: 14.
+    pub icon_inline: f32,
+    /// The icon in a row badge: 12.
+    pub icon_badge: f32,
+    /// The stroke of an icon, as a share of its size: 1.5 on the 16 unit
+    /// grid of the section icons.
+    pub icon_stroke: f32,
+    /// The stroke of a status icon (check, cross), as a share of its size:
+    /// 1.9 on the 12 unit grid.
+    pub icon_stroke_bold: f32,
+    /// A switch track: 36 by 22 (components.md, Switch).
+    pub switch: Vec2,
+    /// The knob of a switch: 16.
+    pub switch_knob: f32,
+    /// The space between a switch's track and its knob: 3.
+    pub switch_inset: f32,
+    /// The height of a row badge: 26 (components.md, Badges).
+    pub badge: f32,
+    /// The dot on a folded sidebar item's tile: 8.
+    pub dot: f32,
+    /// The ring around that dot, in the sidebar's color: 2.
+    pub dot_ring: f32,
+    /// The space between a segmented control's track and its options: 2.
+    pub segmented_inset: f32,
     /// The window when it opens.
     pub window: Vec2,
     /// The smallest the window gets: the sidebar and a table must fit.
@@ -270,6 +305,8 @@ pub struct Radius {
     pub sm: u8,
     /// Controls, sidebar items.
     pub md: u8,
+    /// `radius.md` "7 for 26": the corner of the sidebar's 26 by 26 tile.
+    pub tile_nav: u8,
     /// Cards, tables, version buttons.
     pub lg: u8,
     /// Dialogs, the menu-bar panel.
@@ -304,6 +341,9 @@ pub struct StateLayers {
     pub pressed: f32,
     /// A disabled control is drawn at this opacity.
     pub disabled_opacity: f32,
+    /// The pointer over a row, or over a control with no fill: `selected` at
+    /// this opacity (components.md, Tables and lists).
+    pub row_hover: f32,
 }
 
 /// The light theme, built at compile time.
@@ -369,6 +409,20 @@ pub const SIZE: Size = Size {
     sidebar_folded: 64.0,
     target_min: 24.0,
     border: 1.0,
+    icon_button: 30.0,
+    tile_header: 32.0,
+    icon_tile: 15.0,
+    icon_inline: 14.0,
+    icon_badge: 12.0,
+    icon_stroke: 1.5 / 16.0,
+    icon_stroke_bold: 1.9 / 12.0,
+    switch: vec2(36.0, 22.0),
+    switch_knob: 16.0,
+    switch_inset: 3.0,
+    badge: 26.0,
+    dot: 8.0,
+    dot_ring: 2.0,
+    segmented_inset: 2.0,
     window: vec2(1120.0, 720.0),
     window_min: vec2(760.0, 520.0),
 };
@@ -377,6 +431,7 @@ pub const SIZE: Size = Size {
 pub const RADIUS: Radius = Radius {
     sm: 6,
     md: 8,
+    tile_nav: 7,
     lg: 12,
     xl: 14,
     full: u8::MAX,
@@ -393,6 +448,7 @@ pub const STATE: StateLayers = StateLayers {
     hover: 0.06,
     pressed: 0.12,
     disabled_opacity: 0.55,
+    row_hover: 0.5,
 };
 
 impl Theme {
@@ -420,6 +476,7 @@ impl Theme {
                 error_bg: hex(0xFBECEC),
                 error_line: hex(0xEBC3C4),
                 off: hex(0xB4BEC6),
+                knob_off: hex(0xFFFFFF),
             },
             sections: Sections {
                 home: section(0x2E3C47, 0xE1E6EA),
@@ -469,6 +526,7 @@ impl Theme {
                 error_bg: hex(0x2A1717),
                 error_line: hex(0x5A2A28),
                 off: hex(0x4A545E),
+                knob_off: hex(0xFFFFFF),
             },
             sections: Sections {
                 home: section(0xC3CDD3, 0x25313B),
@@ -501,6 +559,12 @@ impl Theme {
             egui::Theme::Light => &LIGHT,
             egui::Theme::Dark => &DARK,
         }
+    }
+
+    /// `color` moved `amount` toward `ink`: darker in the light theme,
+    /// lighter in the dark one (components.md: hover and pressed).
+    pub fn shade(&self, color: Color32, amount: f32) -> Color32 {
+        color.lerp_to_gamma(self.color.ink, amount)
     }
 
     pub const fn section(&self, section: Section) -> SectionColors {
@@ -553,15 +617,17 @@ const fn text(size: f32, face: Face) -> TextToken {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::path::Path;
+
     use super::*;
 
     /// WCAG 2.2 text contrast: normal text, and the minimum the design asks
     /// for everything that carries words (R9).
-    const TEXT: f64 = 4.5;
+    pub(crate) const TEXT: f64 = 4.5;
     /// WCAG 2.2 non-text contrast: borders of controls, icons, the focus
     /// ring.
-    const UI: f64 = 3.0;
+    pub(crate) const UI: f64 = 3.0;
 
     /// The WCAG 2.2 relative luminance of an sRGB color.
     fn luminance(color: Color32) -> f64 {
@@ -577,13 +643,13 @@ mod tests {
     }
 
     /// The WCAG 2.2 contrast ratio, from 1 to 21.
-    pub(super) fn contrast(a: Color32, b: Color32) -> f64 {
+    pub(crate) fn contrast(a: Color32, b: Color32) -> f64 {
         let (a, b) = (luminance(a), luminance(b));
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
     /// Checks every pair and lists all the failures at once.
-    pub(super) fn check(theme: &str, pairs: &[(&str, Color32, Color32, f64)]) {
+    pub(crate) fn check(theme: &str, pairs: &[(&str, Color32, Color32, f64)]) {
         let failures: Vec<String> = pairs
             .iter()
             .filter(|(_, fg, bg, min)| contrast(*fg, *bg) < *min)
@@ -710,39 +776,173 @@ mod tests {
         assert_eq!(LIGHT.elevation.dialog.color.a(), 41);
     }
 
-    /// Rules.md 2: no color or size literal outside `theme`. The drawing
-    /// code (`app.rs`, `main.rs`) has no color constructor and no float
-    /// literal other than zero: egui sizes are `f32`. `strings.rs`, which
-    /// held the window's size until M5-D1, has no color and no `f32`; its
-    /// other floats are unit conversions. Comments and strings, such as a
-    /// version "8.4" in a text, are skipped.
+    /// How strict the literal check is with a file.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Rules {
+        /// `app.rs` and `main.rs`: no color word at all, and no float other
+        /// than zero: egui sizes are `f32`.
+        Drawing,
+        /// `strings.rs`: no color word and no `f32`; its other floats are
+        /// unit conversions.
+        Strings,
+        /// The widgets: they name the color type, so only a color made by
+        /// hand or a named color is wrong; no float other than zero; no
+        /// corner or margin written as a number. The tests at the end of a
+        /// file are not checked.
+        Widget,
+        /// `widgets/icons.rs`: the coordinates of its icons are drawing
+        /// data on the icon's own grid, so floats are allowed; the rest is
+        /// as for a widget.
+        Geometry,
+    }
+
+    /// Rules.md 2: no color or size literal outside `theme`. Comments and
+    /// strings, such as a version "8.4" in a text, are skipped.
     #[test]
     fn the_drawing_code_has_no_color_or_size_literal() {
         const COLOR_WORDS: [&str; 5] = ["Color32", "Rgba", "from_rgb", "from_gray", "hex_color"];
-        let files = [
-            ("app.rs", include_str!("../app.rs"), true),
-            ("main.rs", include_str!("../main.rs"), true),
-            ("strings.rs", include_str!("../strings.rs"), false),
+        let mut files = vec![
+            (
+                "app.rs".to_owned(),
+                include_str!("../app.rs").to_owned(),
+                Rules::Drawing,
+            ),
+            (
+                "main.rs".to_owned(),
+                include_str!("../main.rs").to_owned(),
+                Rules::Drawing,
+            ),
+            (
+                "strings.rs".to_owned(),
+                include_str!("../strings.rs").to_owned(),
+                Rules::Strings,
+            ),
         ];
+        // Every file of `widgets/`, so a new widget is checked at once.
+        let widgets = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/widgets");
+        let mut names: Vec<_> = std::fs::read_dir(&widgets)
+            .expect("the widgets folder")
+            .map(|entry| entry.expect("a directory entry").file_name())
+            .collect();
+        names.sort();
+        assert!(
+            names.len() >= 9,
+            "the widgets folder is missing files: {names:?}"
+        );
+        for name in names {
+            let name = name.to_string_lossy().into_owned();
+            let source = std::fs::read_to_string(widgets.join(&name)).expect("a widget file");
+            let rules = if name == "icons.rs" {
+                Rules::Geometry
+            } else {
+                Rules::Widget
+            };
+            files.push((
+                format!("widgets/{name}"),
+                before_tests(&source).to_owned(),
+                rules,
+            ));
+        }
         let mut found = Vec::new();
-        for (file, source, drawing) in files {
+        for (file, source, rules) in &files {
             for (index, code) in code_only(source).lines().enumerate() {
                 let line = index + 1;
-                for word in COLOR_WORDS {
-                    if code.contains(word) {
-                        found.push(format!("{file}:{line}: {word}"));
+                match rules {
+                    Rules::Drawing | Rules::Strings => {
+                        for word in COLOR_WORDS {
+                            if code.contains(word) {
+                                found.push(format!("{file}:{line}: {word}"));
+                            }
+                        }
+                    }
+                    Rules::Widget | Rules::Geometry => {
+                        for word in hand_made_colors(code) {
+                            found.push(format!("{file}:{line}: {word}"));
+                        }
+                        for number in numbered_corners(code) {
+                            found.push(format!("{file}:{line}: {number}"));
+                        }
                     }
                 }
-                if drawing {
-                    for literal in float_literals(code) {
-                        found.push(format!("{file}:{line}: {literal}"));
+                match rules {
+                    Rules::Drawing | Rules::Widget => {
+                        for literal in float_literals(code) {
+                            found.push(format!("{file}:{line}: {literal}"));
+                        }
                     }
-                } else if code.contains("f32") {
-                    found.push(format!("{file}:{line}: f32"));
+                    Rules::Strings if code.contains("f32") => {
+                        found.push(format!("{file}:{line}: f32"));
+                    }
+                    Rules::Strings | Rules::Geometry => {}
                 }
             }
         }
         assert!(found.is_empty(), "literals outside theme: {found:#?}");
+    }
+
+    /// `source` up to its `#[cfg(test)]` module.
+    fn before_tests(source: &str) -> &str {
+        source
+            .find("\n#[cfg(test)]")
+            .map_or(source, |end| &source[..end])
+    }
+
+    /// A color made by hand (`from_rgb`, `hex_color`) or named
+    /// (`Color32::WHITE`) in `code`. `PLACEHOLDER` (text with no color yet)
+    /// and `TRANSPARENT` are not design colors.
+    fn hand_made_colors(code: &str) -> Vec<String> {
+        const MADE: [&str; 8] = [
+            "from_rgb",
+            "from_rgba",
+            "from_gray",
+            "from_black_alpha",
+            "from_white_alpha",
+            "hex_color",
+            "Rgba",
+            "Hsva",
+        ];
+        let mut found: Vec<String> = MADE
+            .iter()
+            .filter(|word| code.contains(*word))
+            .map(|word| (*word).to_owned())
+            .collect();
+        let mut rest = code;
+        while let Some(at) = rest.find("Color32::") {
+            rest = &rest[at + "Color32::".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            let constant = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit());
+            if constant && name != "PLACEHOLDER" && name != "TRANSPARENT" {
+                found.push(format!("Color32::{name}"));
+            }
+        }
+        found
+    }
+
+    /// A corner or margin written as a number: `CornerRadius::same(7)`.
+    fn numbered_corners(code: &str) -> Vec<String> {
+        const MAKERS: [&str; 4] = [
+            "CornerRadius::same(",
+            "Margin::same(",
+            "Margin::symmetric(",
+            "CornerRadius::from(",
+        ];
+        let mut found = Vec::new();
+        for maker in MAKERS {
+            let mut rest = code;
+            while let Some(at) = rest.find(maker) {
+                rest = &rest[at + maker.len()..];
+                if rest.starts_with(|c: char| c.is_ascii_digit()) {
+                    found.push(format!("{maker}{}", &rest[..1]));
+                }
+            }
+        }
+        found
     }
 
     /// `source` with its comments and string literals blanked out, line
@@ -833,6 +1033,22 @@ mod tests {
         let found: Vec<String> = code_only(source).lines().flat_map(float_literals).collect();
         assert_eq!(found, ["1.5", "4.5", "5.5"]);
         assert_eq!(code_only("x\n\"a \\\n b\"\ny").lines().count(), 4);
+    }
+
+    #[test]
+    fn the_widget_check_finds_made_colors_and_numbered_corners_and_skips_the_rest() {
+        assert_eq!(hand_made_colors("Color32::from_rgb(1, 2, 3)"), ["from_rgb"]);
+        assert_eq!(hand_made_colors("fill: Color32::WHITE"), ["Color32::WHITE"]);
+        assert!(hand_made_colors("fn f(color: Color32) -> Color32 { color }").is_empty());
+        assert!(hand_made_colors("layout(p, t, k, Color32::PLACEHOLDER)").is_empty());
+        assert!(hand_made_colors("fill: Color32::TRANSPARENT").is_empty());
+        assert_eq!(numbered_corners("CornerRadius::same(7)").len(), 1);
+        assert_eq!(numbered_corners("Margin::symmetric(8, 9)").len(), 1);
+        assert!(numbered_corners("CornerRadius::same(theme.radius.md)").is_empty());
+        assert!(numbered_corners("Margin::symmetric(whole(a), whole(b))").is_empty());
+        let source = "fn a() {}\n#[cfg(test)]\nmod tests { fn b() { 1.5 } }";
+        assert_eq!(before_tests(source), "fn a() {}");
+        assert_eq!(before_tests("no tests"), "no tests");
     }
 
     #[test]

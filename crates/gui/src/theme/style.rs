@@ -115,19 +115,13 @@ fn widgets(theme: &Theme) -> Widgets {
             ..control(c.bg, rest)
         },
         inactive: control(c.surface, rest),
-        hovered: control(tone(theme, c.surface, theme.state.hover), rest),
+        hovered: control(theme.shade(c.surface, theme.state.hover), rest),
         active: control(
-            tone(theme, c.surface, theme.state.pressed),
+            theme.shade(c.surface, theme.state.pressed),
             Stroke::new(theme.focus.width, c.accent),
         ),
         open: control(c.selected, rest),
     }
-}
-
-/// `color` moved `amount` toward `ink`: darker in the light theme, lighter
-/// in the dark one (components.md, hover and pressed).
-fn tone(theme: &Theme, color: Color32, amount: f32) -> Color32 {
-    color.lerp_to_gamma(theme.color.ink, amount)
 }
 
 #[cfg(test)]
