@@ -80,9 +80,6 @@ pub fn php_for_site(site: &str) -> String {
 /// word `SITES` after an arrow icon.
 pub const OPEN_FOLDER: &str = "Open folder";
 pub const OPEN_IN_BROWSER: &str = "Open in browser";
-/// What a screen reader says for the tab strip of the page, and its one tab.
-pub const SITE_TABS: &str = "Site";
-pub const TAB_OVERVIEW: &str = "Overview";
 /// The heading of the large version picker of the page, and its name for a
 /// screen reader.
 pub const PHP_FOR_THIS_SITE: &str = "PHP for this site";
@@ -92,15 +89,20 @@ pub const FACT_CONNECTION: &str = "Connection";
 pub const FACT_FOLDER: &str = "Folder";
 pub const FACT_DOCROOT: &str = "Document root";
 pub const FACT_KIND: &str = "Kind";
-pub const FACT_ADDED_BY: &str = "Added by";
+pub const FACT_ADDED_AS: &str = "Added as";
 pub const SERVE_OVER_HTTPS: &str = "Serve over HTTPS";
-pub const ADDED_BY_LINK: &str = "Linked by you";
+/// "Added as": a folder the user linked.
+pub const ADDED_AS_LINKED: &str = "Linked folder";
 
-/// "Added by": the parked folder that gives the site (as the window shows
-/// a folder, `~/Code`).
-pub fn added_by_parked(shown: &str) -> String {
-    format!("Parked folder {shown}")
+/// "Added as": a site of a parked folder (as the window shows a folder,
+/// `~/Code`).
+pub fn added_as_parked(shown: &str) -> String {
+    format!("Part of parked folder {shown}")
 }
+
+/// Between the reason after a heading and the link that follows it: "8.3 is
+/// set for this site · Use the site's files".
+pub const HINT_SEPARATOR: &str = "·";
 
 /// The quiet button at the end of the page: the confirmation opens.
 pub const UNLINK_THIS_SITE: &str = "Unlink this site…";

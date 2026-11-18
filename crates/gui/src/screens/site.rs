@@ -1,7 +1,7 @@
 //! A site's own page (layout.md, Screens: Site page): the name and its
-//! address with "Open folder" and "Open in browser", the Overview tab, the
-//! site's PHP on the large version buttons with the reason, the facts (the
-//! HTTPS switch, the folder, the kind), and "Unlink this site…" at the end.
+//! address with "Open folder" and "Open in browser", the site's PHP on the
+//! large version buttons with the reason, the facts (the HTTPS switch, the
+//! folder, the kind), and "Unlink this site…" at the end.
 //!
 //! It is two functions, like Home and Sites. [`view`] reads the [`Model`]
 //! and decides what the page says: pure, so the tests assert it without a
@@ -9,9 +9,11 @@
 //! the user did as [`Action`]s (code.md, State). [Laravel: `view` is the
 //! controller that builds the data; `show` is the Blade template.]
 //!
-//! Only the Overview tab exists: Mail, Dumps, Database, and Logs join with
-//! their features (rules.md 8). The window has one Caddy log, not a log per
-//! site, so there is no Logs tab yet.
+//! There is no tab bar yet: with one part (the overview) a bar would look like
+//! navigation that goes nowhere. It comes back with the second part, drawn by
+//! [`crate::widgets::Tabs`], when Mail, Dumps, Database, or Logs ship
+//! (rules.md 8). The window has one Caddy log, not a log per site, so there is
+//! no Logs part yet.
 
 use std::path::Path;
 
@@ -25,9 +27,7 @@ use crate::screens::home::{PhpChoice, php_choices};
 use crate::strings;
 use crate::theme::page::SITE_FACT_LABEL;
 use crate::theme::{Direction, Theme};
-use crate::widgets::{
-    Button, Icon, QuietTone, Switch, Tabs, VersionPick, VersionPicker, fact_card,
-};
+use crate::widgets::{Button, Icon, QuietTone, Switch, VersionPick, VersionPicker, fact_card};
 
 /// What the page says.
 #[derive(Debug, PartialEq)]
@@ -90,12 +90,12 @@ pub struct Facts<'a> {
     /// (`public` for Laravel).
     pub docroot: Option<&'a Path>,
     pub kind: String,
-    pub added_by: AddedBy<'a>,
+    pub added_as: AddedAs<'a>,
 }
 
 /// How the site came to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AddedBy<'a> {
+pub enum AddedAs<'a> {
     /// A sub-folder of this parked folder.
     Parked(&'a Path),
     Linked,
@@ -109,12 +109,6 @@ pub enum Unlink<'a> {
     Busy,
     /// The site comes from this parked folder: forget the folder instead.
     Parked(&'a Path),
-}
-
-/// The tabs of the page. Only Overview ships now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tab {
-    Overview,
 }
 
 /// Decides what the page of the site `name` says. Pure: the same model gives
@@ -168,9 +162,9 @@ fn facts<'a>(model: &'a Model, site: &'a Site) -> Facts<'a> {
         root: &site.root,
         docroot: (site.docroot != site.root).then_some(site.docroot.as_path()),
         kind: strings::kind_text(site.kind),
-        added_by: model
+        added_as: model
             .parked_folder(site)
-            .map_or(AddedBy::Linked, AddedBy::Parked),
+            .map_or(AddedAs::Linked, AddedAs::Parked),
     }
 }
 
@@ -207,10 +201,6 @@ fn found(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Action>
     if let Some(text) = &page.removing {
         sites::mute(ui, theme, text);
     }
-    // One tab, so the choice has nowhere to go yet: the screen keeps it in
-    // its state when the second tab ships.
-    let tabs = [(Tab::Overview, strings::TAB_OVERVIEW)];
-    ui.add(Tabs::new(strings::SITE_TABS, &tabs, Tab::Overview));
     php_section(ui, theme, page, actions);
     facts_card(ui, theme, page, actions);
     unlink(ui, theme, page, actions);
@@ -254,23 +244,37 @@ fn header(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Action
 }
 
 /// "PHP for this site": the large version buttons, the reason after the
-/// heading, and the way back to the site's files.
+/// heading, and after the reason the way back to the site's files.
 fn php_section(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Action>) {
     let php = &page.php;
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = theme.space.group_gap_max;
-        // The heading and the button share one line as high as a control.
+        // The heading, the reason, and the link share one line as high as a
+        // control, whether the link is there or not. The link shows only
+        // with a setting of the site's own, whose reason is short, so the
+        // line fits the narrowest window.
         let line = vec2(ui.available_width(), theme.size.control);
         ui.allocate_ui_with_layout(line, Direction::CURRENT.row(), |ui| {
+            ui.spacing_mut().item_spacing.x = theme.space.s1;
             super::heading(ui, theme, strings::PHP_FOR_THIS_SITE, php.hint.as_deref());
-            ui.with_layout(Direction::CURRENT.row_from_end(), |ui| {
-                if php.own && ui.add(Button::quiet(strings::USE_SITE_FILES)).clicked() {
+            if php.own {
+                // "8.3 is set for this site · Use the site's files".
+                // A middle dot is small: the heavier face and `ink2` keep it
+                // seen (it is decoration, the link names itself).
+                // The link has padding of its own after the dot, so the dot
+                // gets some before it.
+                ui.add_space(theme.space.s2);
+                let dot = RichText::new(strings::HINT_SEPARATOR)
+                    .font(theme.text.body_strong.font_id())
+                    .color(theme.color.ink2);
+                ui.add(Label::new(dot).selectable(false));
+                if ui.add(Button::quiet(strings::USE_SITE_FILES)).clicked() {
                     actions.push(Action::SitePhp {
                         site: page.name.to_owned(),
                         choice: Choice::Auto,
                     });
                 }
-            });
+            }
         });
         let versions: Vec<(usize, &str)> = php
             .choices
@@ -323,15 +327,15 @@ fn facts_card(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Ac
         rows.row(strings::FACT_KIND, |ui| {
             text(ui, theme, &facts.kind);
         });
-        rows.row(strings::FACT_ADDED_BY, |ui| match facts.added_by {
-            AddedBy::Parked(folder) => {
+        rows.row(strings::FACT_ADDED_AS, |ui| match facts.added_as {
+            AddedAs::Parked(folder) => {
                 let shown = strings::home_path(folder, page.home);
-                let response = text(ui, theme, &strings::added_by_parked(&shown));
+                let response = text(ui, theme, &strings::added_as_parked(&shown));
                 // Shortened for the eye: the whole path is one hover away.
                 response.on_hover_text(folder.display().to_string());
             }
-            AddedBy::Linked => {
-                text(ui, theme, strings::ADDED_BY_LINK);
+            AddedAs::Linked => {
+                text(ui, theme, strings::ADDED_AS_LINKED);
             }
         });
     });
@@ -603,16 +607,21 @@ mod tests {
     }
 
     #[test]
-    fn a_site_is_added_by_its_parked_folder_or_by_a_link() {
+    fn a_site_is_added_as_part_of_its_parked_folder_or_as_a_linked_folder() {
         let mut model = model();
-        assert_eq!(found(&view(&model, "shop")).facts.added_by, AddedBy::Linked);
+        assert_eq!(found(&view(&model, "shop")).facts.added_as, AddedAs::Linked);
         model.sites.parked = vec![abs("/code")];
         let parked = abs("/code");
         assert_eq!(
-            found(&view(&model, "shop")).facts.added_by,
-            AddedBy::Parked(parked.as_path())
+            found(&view(&model, "shop")).facts.added_as,
+            AddedAs::Parked(parked.as_path())
         );
-        assert_eq!(strings::added_by_parked("~/Code"), "Parked folder ~/Code");
+        assert_eq!(
+            strings::added_as_parked("~/Code"),
+            "Part of parked folder ~/Code"
+        );
+        assert_eq!(strings::ADDED_AS_LINKED, "Linked folder");
+        assert_eq!(strings::FACT_ADDED_AS, "Added as");
     }
 
     #[test]
@@ -935,7 +944,7 @@ mod tests {
             let shown = tilde(&path);
             assert!(shown.starts_with('~'), "{shown}");
             let wanted = if path == home.join("Code") {
-                strings::added_by_parked(&shown)
+                strings::added_as_parked(&shown)
             } else {
                 shown
             };
@@ -951,14 +960,78 @@ mod tests {
     }
 
     #[test]
-    fn the_page_has_the_overview_tab_and_no_tab_of_a_feature_that_is_not_there() {
+    fn the_page_has_no_tab_bar_while_it_has_one_part_and_no_part_of_a_feature_that_is_not_there() {
         let (_, tree) = start(&model(), "shop");
-        let tab = tree.node_with_label(strings::TAB_OVERVIEW).expect("a tab");
-        assert_eq!(tab.role(), egui::Role::Tab);
-        assert_eq!(tab.toggled(), Some(egui::accesskit::Toggled::True));
-        for absent in ["Mail", "Dumps", "Logs", "Database"] {
+        assert!(tree.node_with_role(egui::Role::TabList).is_none());
+        assert!(tree.node_with_role(egui::Role::Tab).is_none());
+        for absent in ["Overview", "Mail", "Dumps", "Logs", "Database"] {
             assert!(tree.node_with_label(absent).is_none(), "{absent}");
         }
+    }
+
+    #[test]
+    fn the_way_back_to_the_files_follows_the_reason_on_the_same_line() {
+        let model = model_with("8.3.27", Source::ProjectSetting);
+        let (_, tree) = start(&model, "shop");
+        let bounds = |node: &egui::accesskit::Node| node.bounds().expect("a place");
+        let hint = tree
+            .node_with_text("PHP for this site8.3 is set for this site")
+            .expect("the heading and the reason");
+        let separator = tree
+            .node_with_text(strings::HINT_SEPARATOR)
+            .expect("the separator");
+        let link = tree
+            .node_with_label(strings::USE_SITE_FILES)
+            .expect("the link");
+        // One line: the reason, then the separator, then the link.
+        assert!(bounds(hint).x1 <= bounds(separator).x0);
+        assert!(bounds(separator).x1 <= bounds(link).x0);
+        let middle = |node| (bounds(node).y0 + bounds(node).y1) / 2.0;
+        assert!((middle(hint) - middle(link)).abs() < 2.0);
+        assert!((middle(separator) - middle(link)).abs() < 2.0);
+        // Without a setting of its own there is no link and no separator.
+        let (_, tree) = start(&self::model(), "shop");
+        assert!(tree.node_with_label(strings::USE_SITE_FILES).is_none());
+        assert!(tree.node_with_text(strings::HINT_SEPARATOR).is_none());
+    }
+
+    #[test]
+    fn the_link_to_the_sites_files_is_a_tab_stop_that_shows_the_focus_ring() {
+        let model = model_with("8.3.27", Source::ProjectSetting);
+        let (harness, tree) = start(&model, "shop");
+        let b = tree
+            .node_with_label(strings::USE_SITE_FILES)
+            .expect("the link")
+            .bounds()
+            .expect("a place");
+        let ring = LIGHT.focus.offset;
+        let link = egui::Rect::from_min_max(
+            pos2(b.x0 as f32 - ring, b.y0 as f32 - ring),
+            pos2(b.x1 as f32 + ring, b.y1 as f32 + ring),
+        );
+        let ring_on_link = |harness: &Harness| {
+            harness
+                .shapes(|ui| {
+                    draw(ui, &model, "shop");
+                })
+                .iter()
+                .any(|shape| {
+                    matches!(shape, egui::Shape::Rect(rect)
+                        if rect.stroke.color == LIGHT.color.accent
+                            && rect.stroke.width == LIGHT.focus.width
+                            && rect.rect.min.distance(link.min) < 1.0
+                            && rect.rect.max.distance(link.max) < 1.0)
+                })
+        };
+        assert!(!ring_on_link(&harness), "no ring before the keyboard comes");
+        // Tab walks the page: the link is one of its stops.
+        let reached = (0..30).any(|_| {
+            harness.key(egui::Key::Tab, |ui| {
+                draw(ui, &model, "shop");
+            });
+            ring_on_link(&harness)
+        });
+        assert!(reached, "Tab reaches the link and the ring shows");
     }
 
     #[test]

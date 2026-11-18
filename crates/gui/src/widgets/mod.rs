@@ -357,6 +357,11 @@ pub(crate) mod harness {
     }
 
     impl Tree {
+        /// The first node that has this role.
+        pub fn node_with_role(&self, role: accesskit::Role) -> Option<&accesskit::Node> {
+            self.nodes.iter().find(|node| node.role() == role)
+        }
+
         pub fn node_with_label(&self, label: &str) -> Option<&accesskit::Node> {
             self.nodes.iter().find(|node| node.label() == Some(label))
         }
