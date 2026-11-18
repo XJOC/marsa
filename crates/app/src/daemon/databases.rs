@@ -143,10 +143,15 @@ pub async fn start_facts(
 }
 
 /// Why the first init of a cluster failed. Nothing is left behind: no
-/// cluster, and no temp folder.
+/// cluster, and no temp folder. Except when `in_place`: then the cluster
+/// was moved into place, and only the sync of its folder failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitError {
     pub reason: String,
+    /// The new cluster is in place, and the next start uses it. Only the
+    /// sync of the folder that holds it failed, so a crash before the OS
+    /// writes that folder could still undo the rename.
+    pub in_place: bool,
 }
 
 impl InitError {
@@ -155,20 +160,30 @@ impl InitError {
         "postgres_init_failed"
     }
 
-    fn io(what: &str, err: &io::Error) -> Self {
+    fn new(reason: String) -> Self {
         Self {
-            reason: format!("{what}: {err}"),
+            reason,
+            in_place: false,
         }
+    }
+
+    fn io(what: &str, err: &io::Error) -> Self {
+        Self::new(format!("{what}: {err}"))
     }
 }
 
 impl fmt::Display for InitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "the PostgreSQL data folder was not made: {}",
-            self.reason
-        )
+        let reason = &self.reason;
+        if self.in_place {
+            write!(
+                f,
+                "the PostgreSQL data folder was made and is in place, but {reason}; \
+                 the next start uses it"
+            )
+        } else {
+            write!(f, "the PostgreSQL data folder was not made: {reason}")
+        }
     }
 }
 
@@ -203,7 +218,7 @@ pub async fn ensure_cluster(programs: &Programs, dirs: &PostgresDirs) -> Result<
     }
     let (Some(parent), Some(name)) = (dirs.data.parent(), dirs.data.file_name()) else {
         let reason = format!("{} has no parent folder", dirs.data.display());
-        return Err(InitError { reason });
+        return Err(InitError::new(reason));
     };
     let prefix = format!(".{}.init-", name.to_string_lossy());
     tokio::fs::create_dir_all(parent)
@@ -243,7 +258,7 @@ async fn init_in(programs: &Programs, dirs: &PostgresDirs, temp: &Path) -> Resul
     // Checked again: a rename would replace an empty folder made meanwhile.
     if tokio::fs::symlink_metadata(&dirs.data).await.is_ok() {
         let reason = format!("{} appeared during the init", dirs.data.display());
-        return Err(InitError { reason });
+        return Err(InitError::new(reason));
     }
     tokio::fs::rename(temp, &dirs.data)
         .await
@@ -256,7 +271,10 @@ async fn init_in(programs: &Programs, dirs: &PostgresDirs, temp: &Path) -> Resul
         .await
         .map_err(io::Error::other)
         .flatten()
-        .map_err(|err| InitError::io("cannot sync the databases folder", &err))?;
+        .map_err(|err| InitError {
+            reason: format!("its folder could not be synced to disk: {err}"),
+            in_place: true,
+        })?;
     info!(data = %dirs.data.display(), "the PostgreSQL data folder is ready");
     Ok(())
 }
@@ -308,9 +326,7 @@ async fn run_step(
     .stderr(Stdio::piped())
     .kill_on_drop(true);
     process::hide_console_window(&mut cmd);
-    let failed = |reason: String| InitError {
-        reason: format!("{what} {reason}"),
-    };
+    let failed = |reason: String| InitError::new(format!("{what} {reason}"));
     let mut child = cmd
         .spawn()
         .map_err(|err| failed(format!("did not start: {err}")))?;
@@ -563,6 +579,29 @@ mod tests {
         }
         let mut names = servers.iter().filter_map(|path| path.file_stem());
         assert!(names.all(|name| name == "postgres"));
+    }
+
+    /// A failed sync after the rename does not say that nothing was made.
+    #[test]
+    fn an_init_error_says_whether_the_cluster_is_in_place() {
+        let failed = InitError::new("initdb failed".to_owned());
+        let text = failed.to_string();
+        assert_eq!(
+            text,
+            "the PostgreSQL data folder was not made: initdb failed"
+        );
+        let synced = InitError {
+            reason: "its folder could not be synced to disk: I/O error".to_owned(),
+            in_place: true,
+        };
+        let text = synced.to_string();
+        assert!(
+            text.contains("was made and is in place, but its folder"),
+            "{text}"
+        );
+        assert!(text.ends_with("the next start uses it"), "{text}");
+        assert!(!text.contains("not made"), "{text}");
+        assert_eq!(synced.code(), failed.code());
     }
 
     /// Shell scripts stand in for `initdb` and `postgres`: macOS and Linux
