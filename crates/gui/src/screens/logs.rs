@@ -252,7 +252,7 @@ fn tools(ui: &mut Ui, theme: &Theme, view: &LogsView<'_>, actions: &mut Vec<Acti
     ui.allocate_ui_with_layout(line, Direction::CURRENT.row_from_end(), |ui| {
         ui.spacing_mut().item_spacing.x = theme.space.s2;
         let follow = Chip::new(strings::FOLLOW, view.follow)
-            .accent()
+            .check()
             .hint(strings::FOLLOW_HINT);
         if ui.add(follow).clicked() {
             actions.push(Action::SetLogFollow(!view.follow));
@@ -260,7 +260,7 @@ fn tools(ui: &mut Ui, theme: &Theme, view: &LogsView<'_>, actions: &mut Vec<Acti
         // From the end, so the chips are added the other way round.
         for chip in view.levels.iter().rev() {
             let name = strings::log_level_name(chip.level);
-            let widget = Chip::new(name, chip.on).dot(level_color(theme, chip.level));
+            let widget = Chip::new(name, chip.on).square(level_color(theme, chip.level));
             if ui.add(widget).clicked() {
                 actions.push(Action::ToggleLogLevel(chip.level));
             }
