@@ -1,7 +1,8 @@
 //! `cargo xtask manifest build`: for every pinned version, platform, and
 //! artifact, download the file (or reuse the cache), hash it, compare with
 //! the upstream sum (sha256, or sha512 for Caddy), run the PHP checks, then
-//! write `manifest.json`.
+//! write `manifest.json`. A database server without an upstream sum stops
+//! the build; the older runtimes only get a warning.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -18,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 
 use super::pins::{Pins, RUNTIMES};
-use super::upstream::{Algorithm, find_sum, hex, parse_hex, sum_file_for};
+use super::upstream::{Algorithm, hex, parse_hex, sum_file_for};
 
 /// The JSON that `marsa_core::installer::manifest` reads (M2-02). Field
 /// order is the output order, and maps are `BTreeMap`, so the same inputs
@@ -109,6 +110,18 @@ pub fn is_spc_platform(platform: Platform) -> bool {
     )
 }
 
+/// Whether every file of `runtime` must have an upstream sum. The database
+/// servers of M6 must (ADR 0023, section 3): without one, the build stops.
+/// The older runtimes keep the warning, which today is for Windows PHP in
+/// `releases/archives/` (windows.php.net lists only sha1 there). An
+/// exhaustive `match`, so each new runtime has to choose.
+fn needs_upstream_sum(runtime: Runtime) -> bool {
+    match runtime {
+        Runtime::Php | Runtime::Node | Runtime::Composer | Runtime::Caddy => false,
+        Runtime::Postgres => true,
+    }
+}
+
 /// The result: the manifest, one line per file for the report, and warnings.
 pub struct Built {
     pub manifest: ManifestJson,
@@ -184,7 +197,8 @@ pub async fn build(
                                 sum_files.insert(sum_url.clone(), text);
                             }
                             let text = sum_files.get(sum_url).map_or("", String::as_str);
-                            let expected = find_sum(text, &sums.name, sums.algorithm)
+                            let expected = sums
+                                .find(text)
                                 .with_context(|| format!("{what}: {sum_url}"))?;
                             // The manifest keeps our sha256; the upstream hash
                             // is only compared.
@@ -206,6 +220,12 @@ pub async fn build(
                                 Algorithm::Sha512 => "upstream sha512 matches",
                             });
                         }
+                        None if needs_upstream_sum(runtime) => bail!(
+                            "{what}: {} publishes no sum that `manifest build` knows, and a {} \
+                             file is never recorded without one",
+                            file.url,
+                            runtime.dir_name()
+                        ),
                         None => {
                             warnings.push(format!(
                                 "{what}: {} publishes no sha256, so only our own sha256 is recorded",
@@ -424,6 +444,8 @@ versions = ["22.23.4"]
 versions = ["2.11.1"]
 [caddy]
 versions = ["2.11.8"]
+[postgres]
+versions = ["18.7.0"]
 [[override]]
 runtime = "php"
 version = "8.4.23"
@@ -520,8 +542,9 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
         assert_eq!(json, to_json(&third.manifest).expect("json"));
         let new_requests = fetch.requests().len() - requests;
         assert_eq!(
-            new_requests, 4,
-            "only the php, node, composer and caddy sum files are fetched again"
+            new_requests, 9,
+            "only the php, node, composer and caddy sum files, and the five \
+             postgres .sha256 files, are fetched again"
         );
 
         // The local checks (the same rules as M2-02) accept it.
@@ -579,6 +602,23 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             caddy_row.ends_with("(upstream sha512 matches)"),
             "{caddy_row}"
         );
+        // PostgreSQL: the theseus archive, our sha256, checked with its .sha256.
+        let postgres = &value["runtimes"]["postgres"][0];
+        assert_eq!(postgres["version"], "18.7.0");
+        assert_eq!(postgres["platforms"].as_object().map(|o| o.len()), Some(5));
+        let url = "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.7.0/postgresql-18.7.0-x86_64-pc-windows-msvc.zip";
+        let postgres_windows = &postgres["platforms"]["windows-x64"][0];
+        assert_eq!(postgres_windows["urls"][0], url);
+        assert_eq!(postgres_windows["sha256"], sha(url.as_bytes()));
+        let postgres_rows: Vec<&String> = first
+            .rows
+            .iter()
+            .filter(|row| row.starts_with("postgres 18.7.0 "))
+            .collect();
+        assert_eq!(postgres_rows.len(), 5);
+        for row in postgres_rows {
+            assert!(row.ends_with("(upstream sha256 matches)"), "{row}");
+        }
 
         // The PHP checks ran for each macOS and Linux archive, every run.
         let seen = stub.0.lock().expect("lock").clone();
@@ -600,6 +640,99 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
         );
         // Only archived Windows PHP has no upstream sum.
         assert_eq!(first.warnings.len(), 1, "{:?}", first.warnings);
+        assert!(
+            first.warnings[0].starts_with("php 8.4.23 windows-x64 zip: "),
+            "{:?}",
+            first.warnings
+        );
+    }
+
+    /// One `[[override]]` that sends a file to a host without a known sum.
+    fn moved(runtime: &str, version: &str, platform: &str, url: &str) -> String {
+        format!(
+            "{PINS}[[override]]\nruntime = \"{runtime}\"\nversion = \"{version}\"\n\
+             platform = \"{platform}\"\nartifact = \"archive\"\nurls = [\"{url}\"]\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn postgres_without_upstream_sum_stops_the_build() {
+        // The older runtimes keep the warning: Node from another host.
+        let url = "https://example.org/node-v22.23.4-linux-x64.tar.gz";
+        let pins = Pins::parse(&moved("node", "22.23.4", "linux-x64", url)).expect("pins");
+        let cache = tempfile::tempdir().expect("tempdir");
+        let built = build(&fetcher(&pins, None), &pins, cache.path(), &Stub::default())
+            .await
+            .expect("node without a sum is a warning");
+        assert_eq!(built.warnings.len(), 2, "{:?}", built.warnings);
+        assert!(
+            built.warnings[1].contains(&format!("{url} publishes no sha256")),
+            "{:?}",
+            built.warnings
+        );
+
+        // PostgreSQL from the same kind of host: refused.
+        let url = "https://example.org/postgresql-18.7.0-x86_64-unknown-linux-gnu.tar.gz";
+        let pins = Pins::parse(&moved("postgres", "18.7.0", "linux-x64", url)).expect("pins");
+        let cache = tempfile::tempdir().expect("tempdir");
+        let err = build(&fetcher(&pins, None), &pins, cache.path(), &Stub::default())
+            .await
+            .err()
+            .expect("refused");
+        let message = format!("{err:#}");
+        assert!(
+            message.starts_with(&format!(
+                "postgres 18.7.0 linux-x64 archive: {url} publishes no sum"
+            )),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bad_theseus_sum_file_stops_the_build() {
+        let pins = Pins::parse(PINS).expect("pins");
+        let archive = "postgresql-18.7.0-aarch64-apple-darwin.tar.gz";
+        let sum_url = format!(
+            "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.7.0/{archive}.sha256"
+        );
+        let hash = sha(sum_url.trim_end_matches(".sha256").as_bytes());
+        let cases = [
+            (Reply::Status(404), "answered with HTTP status 404"),
+            (Reply::Chunks(vec![]), "is empty"),
+            (
+                Reply::Chunks(vec![format!("{hash}  {archive}\n{hash}  x\n").into_bytes()]),
+                "more than one line",
+            ),
+            (
+                Reply::Chunks(vec![format!("{hash}  other.tar.gz\n").into_bytes()]),
+                "not for",
+            ),
+            (Reply::Chunks(vec![vec![0xff; 4]]), "is not text"),
+        ];
+        for (reply, expected) in cases {
+            let fetch = fetcher(&pins, None).with(&sum_url, reply);
+            let cache = tempfile::tempdir().expect("tempdir");
+            let err = build(&fetch, &pins, cache.path(), &Stub::default())
+                .await
+                .err()
+                .expect("refused");
+            let message = format!("{err:#}");
+            assert!(message.contains(archive), "names the file: {message}");
+            assert!(message.contains(expected), "{expected:?}: {message}");
+        }
+        // The sum is right, the archive is not.
+        let fetch = fetcher(&pins, Some(archive));
+        let cache = tempfile::tempdir().expect("tempdir");
+        let err = build(&fetch, &pins, cache.path(), &Stub::default())
+            .await
+            .err()
+            .expect("refused");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("postgres 18.7.0 darwin-arm64 archive: sha256 is")
+                && message.contains(&format!("but {sum_url} says")),
+            "{message}"
+        );
     }
 
     #[tokio::test]

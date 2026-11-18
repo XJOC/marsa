@@ -3,7 +3,7 @@
 //! manifest itself always stores sha256. Pure functions: the build step
 //! downloads the text.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 /// Where our own PHP builds are published: one GitHub Release per build,
 /// `php-<version>-r<revision>`, made by `.github/workflows/php-build.yml`
@@ -13,6 +13,11 @@ pub const PHP_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/
 /// Caddy's official releases (ADR 0008): tag `v<version>`, with
 /// `caddy_<version>_checksums.txt` (sha512) beside the archives.
 pub const CADDY_RELEASES: &str = "https://github.com/caddyserver/caddy/releases/download/v";
+
+/// The PostgreSQL builds of theseus-rs (ADR 0023): tag `<version>`, with
+/// `<file>.sha256` beside every archive.
+pub const THESEUS_RELEASES: &str =
+    "https://github.com/theseus-rs/postgresql-binaries/releases/download/";
 
 /// The hash in a sum file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +44,15 @@ impl Algorithm {
     }
 }
 
+/// How a sum file lists its hashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// Lines for many files; [`find_sum`] picks the line of ours.
+    List,
+    /// One line, for our file only; [`single_sum`] reads it.
+    Single,
+}
+
 /// Where the upstream hash of one file is published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SumFile {
@@ -47,6 +61,17 @@ pub struct SumFile {
     /// The name the file has in it.
     pub name: String,
     pub algorithm: Algorithm,
+    pub layout: Layout,
+}
+
+impl SumFile {
+    /// The hash of [`SumFile::name`] in `text`, the body of [`SumFile::url`].
+    pub fn find(&self, text: &str) -> Result<Vec<u8>> {
+        match self.layout {
+            Layout::List => find_sum(text, &self.name, self.algorithm),
+            Layout::Single => single_sum(text, &self.name, self.algorithm),
+        }
+    }
 }
 
 /// Where the upstream hash of the file at `url` is published. `None` when
@@ -59,6 +84,7 @@ pub fn sum_file_for(url: &str) -> Option<SumFile> {
             url,
             name: name.to_owned(),
             algorithm,
+            layout: Layout::List,
         })
     };
     if url.starts_with(PHP_RELEASES) {
@@ -78,9 +104,51 @@ pub fn sum_file_for(url: &str) -> Option<SumFile> {
             format!("{dir}/caddy_{version}_checksums.txt"),
             Algorithm::Sha512,
         )
+    } else if let Some(tag) = dir.strip_prefix(THESEUS_RELEASES) {
+        if tag.is_empty() || tag.contains('/') || name.is_empty() {
+            return None;
+        }
+        // theseus-rs is a third party, and it serves this `.sha256` from the
+        // same place as the archive, so the sum proves only that the download
+        // is whole. The trust comes from the owner's signature on the manifest
+        // that pins this hash (ADR 0023, section 3). M6-09 adds the check of
+        // the GitHub artifact attestations.
+        Some(SumFile {
+            url: format!("{url}.sha256"),
+            name: name.to_owned(),
+            algorithm: Algorithm::Sha256,
+            layout: Layout::Single,
+        })
     } else {
         None
     }
+}
+
+/// Reads a sum file for one file only, as `sha256sum` writes it and as
+/// theseus-rs publishes it: one line, `<hex>  <name>`, with two spaces, a
+/// lowercase hex of the length of `algorithm`, and `name` exactly. The line
+/// may end with `\n` or `\r\n`. Anything else is refused: an empty file,
+/// a second line (even an empty one), or another name.
+pub fn single_sum(text: &str, name: &str, algorithm: Algorithm) -> Result<Vec<u8>> {
+    let line = text.strip_suffix('\n').unwrap_or(text);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    ensure!(
+        !line.is_empty(),
+        "the upstream sum file for {name} is empty"
+    );
+    ensure!(
+        !line.contains(['\n', '\r']),
+        "the upstream sum file for {name} has more than one line"
+    );
+    let Some((hex, file)) = line.split_once("  ") else {
+        bail!("the upstream sum file for {name} is not `<hex>  <name>`: {line:?}");
+    };
+    ensure!(
+        file == name,
+        "the upstream sum file is for {file:?}, not for {name}"
+    );
+    parse_hex_bytes(hex, algorithm.size())
+        .with_context(|| format!("bad {} for {name}: {hex:?}", algorithm.name()))
 }
 
 /// Finds `name` in a sum file: one `<hex> <name>` per line, with one or two
@@ -137,6 +205,11 @@ mod tests {
     const CADDY: &str = "34d29142d6aeef494fdbf0c31805be896acfa223c6aaf7ed20b204b8ba836bedb73ff0362b12d1498c922512bc115d2608041754aba9c03e2319bda01505cf6b  caddy_2.11.8_mac_arm64.sbom\n\
         0c6992b1bb40629b6090d72cdc4a3f3722a7f6b667606db9fe67bfea0e42e9c40736d10925d406bf103628a5e906e59300d616a0709bc8855d9e85efbcfece81  caddy_2.11.8_mac_arm64.tar.gz\n\
         fff45b117b9d9ea5cc3f824f3c18de89630bcb43a0b759ca5e7163b7a3c1fb39ec7dae7f3147012d602213c950a46c8b0ef8095c77109e807ebf90132deeb759  caddy_2.11.8_windows_amd64.zip\n";
+    // The whole of theseus-rs's postgresql-17.12.0-aarch64-apple-darwin.tar.gz.sha256
+    // (2026-11-18): one line, two spaces, `\n`.
+    const THESEUS: &str = "2f752033b208f9a6a12ef64a9ee23bf19149cff160841980db1e221bf7d24809  postgresql-17.12.0-aarch64-apple-darwin.tar.gz\n";
+    const THESEUS_HASH: &str = "2f752033b208f9a6a12ef64a9ee23bf19149cff160841980db1e221bf7d24809";
+    const THESEUS_NAME: &str = "postgresql-17.12.0-aarch64-apple-darwin.tar.gz";
 
     fn sha256_of(text: &str, name: &str) -> Result<Vec<u8>> {
         find_sum(text, name, Algorithm::Sha256)
@@ -191,6 +264,64 @@ mod tests {
         // Not hex.
         let bad = format!("{}  caddy.tar.gz\n", "g".repeat(128));
         assert!(find_sum(&bad, "caddy.tar.gz", Algorithm::Sha512).is_err());
+    }
+
+    #[test]
+    fn reads_a_theseus_sum() {
+        assert_eq!(THESEUS.len(), 113, "the size GitHub lists for the asset");
+        let sums = sum_file_for(&format!(
+            "{THESEUS_RELEASES}17.12.0/postgresql-17.12.0-aarch64-apple-darwin.tar.gz"
+        ))
+        .expect("theseus publishes sums");
+        assert_eq!(hex(&sums.find(THESEUS).expect("real file")), THESEUS_HASH);
+        // Without the final newline, and with `\r\n`.
+        for text in [THESEUS.trim_end().to_owned(), THESEUS.replace('\n', "\r\n")] {
+            let sum = single_sum(&text, THESEUS_NAME, Algorithm::Sha256).expect("one line");
+            assert_eq!(hex(&sum), THESEUS_HASH);
+        }
+    }
+
+    #[test]
+    fn bad_theseus_sums_are_refused() {
+        let line = |hash: &str, name: &str| format!("{hash}  {name}\n");
+        let cases = [
+            (String::new(), "is empty"),
+            ("\n".to_owned(), "is empty"),
+            (line(&THESEUS_HASH[..63], THESEUS_NAME), "bad sha256"),
+            (
+                line(&format!("{THESEUS_HASH}0"), THESEUS_NAME),
+                "bad sha256",
+            ),
+            (
+                line(&THESEUS_HASH.to_uppercase(), THESEUS_NAME),
+                "bad sha256",
+            ),
+            (line(&"g".repeat(64), THESEUS_NAME), "bad sha256"),
+            (format!("{THESEUS}{THESEUS}"), "more than one line"),
+            (format!("{THESEUS}\n"), "more than one line"),
+            (
+                format!("{THESEUS_HASH} {THESEUS_NAME}\n"),
+                "is not `<hex>  <name>`",
+            ),
+            (THESEUS_HASH.to_owned(), "is not `<hex>  <name>`"),
+            (line(THESEUS_HASH, &format!("*{THESEUS_NAME}")), "not for"),
+            (line(THESEUS_HASH, &format!(" {THESEUS_NAME}")), "not for"),
+            (
+                line(
+                    THESEUS_HASH,
+                    "postgresql-17.12.0-x86_64-apple-darwin.tar.gz",
+                ),
+                "not for",
+            ),
+            (line(THESEUS_HASH, ""), "not for"),
+        ];
+        for (text, expected) in cases {
+            let err = single_sum(&text, THESEUS_NAME, Algorithm::Sha256).expect_err(&text);
+            assert!(err.to_string().contains(expected), "{text:?}: {err}");
+        }
+        // A list with our line among others is not what theseus publishes.
+        let list = format!("{THESEUS}{}", NODE.replace("\r", ""));
+        assert!(single_sum(&list, THESEUS_NAME, Algorithm::Sha256).is_err());
     }
 
     #[test]
@@ -287,8 +418,34 @@ mod tests {
                 url: sums.to_owned(),
                 name: name.to_owned(),
                 algorithm,
+                layout: Layout::List,
             });
             assert_eq!(got, expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn theseus_sum_file_urls() {
+        let url = format!("{THESEUS_RELEASES}18.7.0/postgresql-18.7.0-x86_64-pc-windows-msvc.zip");
+        assert_eq!(
+            sum_file_for(&url),
+            Some(SumFile {
+                url: format!("{url}.sha256"),
+                name: "postgresql-18.7.0-x86_64-pc-windows-msvc.zip".to_owned(),
+                algorithm: Algorithm::Sha256,
+                layout: Layout::Single,
+            })
+        );
+        // Not a release asset: no tag, a folder below the tag, no file name,
+        // or another repository.
+        for url in [
+            format!("{THESEUS_RELEASES}postgresql-18.7.0-x86_64-pc-windows-msvc.zip"),
+            format!("{THESEUS_RELEASES}/postgresql-18.7.0-x86_64-pc-windows-msvc.zip"),
+            format!("{THESEUS_RELEASES}18.7.0/x/postgresql-18.7.0-x86_64-pc-windows-msvc.zip"),
+            format!("{THESEUS_RELEASES}18.7.0/"),
+            "https://github.com/theseus-rs/postgresql-binaries-fork/releases/download/18.7.0/postgresql-18.7.0-x86_64-pc-windows-msvc.zip".to_owned(),
+        ] {
+            assert_eq!(sum_file_for(&url), None, "{url}");
         }
     }
 

@@ -23,14 +23,12 @@ struct RawPins {
     node: RawList,
     composer: RawList,
     caddy: RawList,
-    /// Optional until the first PostgreSQL version is pinned (M6-02).
-    #[serde(default)]
     postgres: RawList,
     #[serde(default, rename = "override")]
     overrides: Vec<RawOverride>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawList {
     versions: Vec<String>,
@@ -222,6 +220,9 @@ versions = ["2.11.1"]
 [caddy]
 versions = ["2.11.8"]
 
+[postgres]
+versions = ["18.7.0", "17.12.0"]
+
 [[override]]
 runtime = "php"
 version = "8.3.27"
@@ -246,21 +247,16 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
     }
 
     #[test]
-    fn postgres_is_optional() {
+    fn postgres_is_required() {
         let pins = Pins::parse(FULL).expect("valid pins");
-        assert!(pins.versions(Runtime::Postgres).is_empty());
-
-        let with = FULL.replace(
-            "[caddy]\nversions = [\"2.11.8\"]\n",
-            "[caddy]\nversions = [\"2.11.8\"]\n\n[postgres]\nversions = [\"18.7.0\", \"17.12.0\"]\n",
-        );
-        let pins = Pins::parse(&with).expect("valid pins");
         assert_eq!(
             pins.versions(Runtime::Postgres),
             &[v("18.7.0"), v("17.12.0")]
         );
-        let bad = with.replace("17.12.0", "17.12");
-        assert!(Pins::parse(&bad).is_err());
+        let without = FULL.replace("[postgres]\nversions = [\"18.7.0\", \"17.12.0\"]\n", "");
+        assert!(error(&without).contains("missing field `postgres`"));
+        let bad = FULL.replace("17.12.0", "17.12");
+        assert!(error(&bad).contains("is not semver"));
     }
 
     #[test]
@@ -389,6 +385,42 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
                 );
                 assert_eq!(name, format!("php-{version}-{platform}.tar.gz"));
                 assert!(super::super::upstream::sum_file_for(url).is_some());
+            }
+        }
+    }
+
+    /// PostgreSQL is the theseus-rs release, and every file has a `.sha256`
+    /// beside it: without one, `build` stops (ADR 0023, section 3).
+    #[test]
+    fn repository_postgres_urls_are_theseus_releases() {
+        use super::super::upstream::{Algorithm, Layout, THESEUS_RELEASES, sum_file_for};
+
+        let pins = Pins::parse(include_str!("../../../recipes/pins.toml")).expect("valid pins");
+        assert_eq!(
+            pins.versions(Runtime::Postgres),
+            &[v("17.12.0"), v("18.7.0")]
+        );
+        let recipe = recipes::builtin(Runtime::Postgres).expect("postgres recipe");
+        for version in pins.versions(Runtime::Postgres) {
+            for (platform, _) in recipe.platforms() {
+                let urls = pins
+                    .urls(Runtime::Postgres, version, platform, "archive")
+                    .expect("urls");
+                let [url] = urls.as_slice() else {
+                    panic!("one URL expected for {platform}: {urls:?}");
+                };
+                assert!(
+                    url.starts_with(&format!(
+                        "{THESEUS_RELEASES}{version}/postgresql-{version}-"
+                    )),
+                    "{url}"
+                );
+                let sums = sum_file_for(url).expect("theseus publishes sums");
+                assert_eq!(sums.url, format!("{url}.sha256"));
+                assert_eq!(
+                    (sums.algorithm, sums.layout),
+                    (Algorithm::Sha256, Layout::Single)
+                );
             }
         }
     }
