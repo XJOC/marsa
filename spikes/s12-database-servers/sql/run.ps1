@@ -154,11 +154,11 @@ if ($server -eq 'mysql') {
   function Ready([int]$p, [int]$s) { ToolOk wait 127.0.0.1 $p $s }
   function Smoke([int]$p) {
     if (-not (Test-Path "$ROOT\bin\mysql.exe")) { return 'no mysql client in this archive' }
-    & "$ROOT\bin\mysql.exe" --no-defaults -uroot -h127.0.0.1 "-P$p" --protocol=tcp --default-character-set=utf8mb4 -N -e "select version(); create database if not exists marsa_smoke; use marsa_smoke; create table if not exists t(id int primary key, name varchar(20)); insert into t values (1,'mrsa') on duplicate key update name=name; select id,name from t; select @@bind_address, @@port;" 2>&1
+    & "$ROOT\bin\mysql.exe" --no-defaults --user=root --host=127.0.0.1 "--port=$p" --protocol=tcp --default-character-set=utf8mb4 -N -e "select version(); create database if not exists marsa_smoke; use marsa_smoke; create table if not exists t(id int primary key, name varchar(20)); insert into t values (1,'mrsa') on duplicate key update name=name; select id,name from t; select @@bind_address, @@port;" 2>&1
   }
   function HoldConn([int]$p) {
     if (Test-Path "$ROOT\bin\mysql.exe") {
-      return Start-Process "$ROOT\bin\mysql.exe" -ArgumentList @('--no-defaults', '-uroot', '-h127.0.0.1', "-P$p", '--protocol=tcp', '-e', '"select sleep(600)"') -PassThru -WindowStyle Hidden
+      return Start-Process "$ROOT\bin\mysql.exe" -ArgumentList @('--no-defaults', '--user=root', '--host=127.0.0.1', "--port=$p", '--protocol=tcp', '-e', '"select sleep(600)"') -PassThru -WindowStyle Hidden
     }
   }
 } else {
@@ -227,7 +227,7 @@ function Stop-Srv([string]$method, [string]$tag, [int]$port) {
   Start-Sleep -Seconds 1
   $t0 = Ms
   switch ($method) {
-    'mysqladmin' { & "$ROOT\bin\mysqladmin.exe" --no-defaults -h127.0.0.1 "-P$port" -uroot --protocol=tcp shutdown *> $null }
+    'mysqladmin' { & "$ROOT\bin\mysqladmin.exe" --no-defaults --host=127.0.0.1 "--port=$port" --user=root --protocol=tcp shutdown *> $null }
     'pg_ctl_fast' { & "$ROOT\bin\pg_ctl.exe" stop -m fast -D $DATA -t 30 *> $null }
     'pg_ctl_smart' { & "$ROOT\bin\pg_ctl.exe" stop -m smart -D $DATA -t 15 *> $null }
     'pg_ctl_immediate' { & "$ROOT\bin\pg_ctl.exe" stop -m immediate -D $DATA -t 30 *> $null }
@@ -354,7 +354,7 @@ if ($sp.WaitForExit(40000)) {
 # recovery: stop the orphan the polite way through its data dir (no signals on Windows)
 $opid = [int](Get-Content $PIDFILE -TotalCount 1 -ErrorAction SilentlyContinue)
 Rec orphan_pid_matches_pidfile $(if ($opid -eq $script:Child) { 'yes' } else { "NO ($opid vs $($script:Child))" })
-if ($server -eq 'mysql') { & "$ROOT\bin\mysqladmin.exe" --no-defaults -h127.0.0.1 "-P$PORT" -uroot --protocol=tcp shutdown *> $null }
+if ($server -eq 'mysql') { & "$ROOT\bin\mysqladmin.exe" --no-defaults --host=127.0.0.1 "--port=$PORT" --user=root --protocol=tcp shutdown *> $null }
 else { & "$ROOT\bin\pg_ctl.exe" stop -m fast -D $DATA -t 30 *> $null }
 $gone = $false
 for ($i = 0; $i -lt 60; $i++) { if (-not (Get-Process -Id $script:Child -ErrorAction SilentlyContinue)) { $gone = $true; break }; Start-Sleep -Milliseconds 500 }
