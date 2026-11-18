@@ -37,7 +37,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// Never returns `Ok`: on success the process has become the real program.
+/// Never returns `Ok`: on success the process has become the real program
+/// (Unix), or has exited with the real program's code (Windows).
 /// The cheapest steps come first.
 fn run() -> Result<Infallible, ShimError> {
     let depth = depth::parse(env::var_os(depth::VAR).as_deref());
