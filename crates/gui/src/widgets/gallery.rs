@@ -31,6 +31,7 @@ use super::segmented::Segmented;
 use super::status::{
     Health, PathStep, PillState, RequestPath, StatePill, StatusDot, StatusSentence, StepState,
 };
+use super::step::{Stage, StepCard};
 use super::switch::Switch;
 use super::table::{RowHeight, Table, TableColumn, empty_state};
 use super::tile::{Monogram, SectionTile, TileSize};
@@ -70,6 +71,7 @@ mod label {
     pub const DIALOG: &str = "Dialog over the scrim: destructive (Cancel has the focus), and calm";
     pub const NOTICES: &str = "Notices: a success (closes in 4 s), and an error (stays)";
     pub const PROGRESS: &str = "Progress: with a share, and with none yet";
+    pub const STEPS: &str = "Step cards (first run): done, to do now with its progress, and next";
     pub const DIALOG_LIVE: &str = "Live: open the dialog (Esc cancels), or show a notice";
     pub const FIELDS: &str = "Fields";
     pub const LIVE: &str = "Live: click, type, and Tab through these";
@@ -562,6 +564,25 @@ fn dialogs_page(ui: &mut Ui, theme: &Theme) {
     row(ui, |ui| {
         ui.set_width(theme.size.dialog_width);
         ui.add(Progress::new("Starting Caddy…", None));
+    });
+
+    heading(ui, theme, label::STEPS);
+    ui.scope(|ui| {
+        ui.set_width(theme.size.dialog_width);
+        ui.spacing_mut().item_spacing.y = theme.space.group_gap_max;
+        let steps = [
+            (1, "Install PHP 8.4 and Caddy", Stage::Done),
+            (2, "Set up HTTPS for .test sites", Stage::Current),
+            (3, "Add your first site", Stage::Next),
+        ];
+        for (number, title, stage) in steps {
+            let card = StepCard::new(number, title, "One line that says what this does.", stage);
+            card.show_with(ui, |ui| {
+                if stage == Stage::Current {
+                    ui.add(Progress::new("Setting up: 2 of 3", Some(share_of(2, 3))));
+                }
+            });
+        }
     });
 
     heading(ui, theme, label::DIALOG_LIVE);

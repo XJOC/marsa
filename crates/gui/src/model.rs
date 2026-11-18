@@ -505,6 +505,15 @@ pub enum Action {
     /// "Open" on a site. A local action: `App` hands the address
     /// ([`Model::site_url`]) to the system, never a screen (code.md, State).
     OpenSite(String),
+    /// The first-run button that installs what is missing.
+    StartFirstRun,
+    /// "Run setup".
+    RunSetup,
+    /// "Park a folder…" or "Link a folder…". A local action: `App` opens the
+    /// system's folder dialog, and takes the folder it gives back.
+    PickFolder(Pick),
+    /// "Not now": Home takes the place of the first-run panel.
+    CloseFirstRun,
 }
 
 /// How Marsa works as a whole, as far as the window can tell: the status at
@@ -840,6 +849,8 @@ impl Model {
                     .unwrap_or_default();
                 self.sites_notice = None;
                 self.link = Some(LinkForm { folder, name });
+                // The form is drawn on Sites; the first-run panel has none.
+                self.route = Route::Sites;
             }
             Err(code) => self.sites_notice = Some(SitesNotice::Failed(code.to_owned())),
         }
@@ -1063,25 +1074,37 @@ impl Model {
 
     // -- First run, setup, and settings (task M5-10) --
 
-    /// "Install PHP 8.4 and Caddy": the two jobs, in that order. `false` if
-    /// the panel does not offer it now.
+    /// "Install PHP 8.4 and Caddy": the jobs of what is missing, PHP first.
+    /// `false` if the panel does not offer it now.
     pub fn start_first_run(&mut self) -> bool {
-        if self.first_run != Some(FirstRun::Offer) || !self.is_connected() || self.installing() {
+        let offered = first_run_needed(&self.runtimes) && !self.first_run_closed;
+        if !offered || !self.is_connected() || self.installing() {
             return false;
         }
         self.runtimes_notice = None;
-        self.queue.extend([
-            InstallJob {
-                runtime: Runtime::Php,
-                version: Some(FIRST_PHP.to_owned()),
-            },
-            InstallJob {
-                runtime: Runtime::Caddy,
-                version: None,
-            },
-        ]);
+        let jobs = [
+            (Runtime::Php, Some(FIRST_PHP.to_owned())),
+            (Runtime::Caddy, None),
+        ];
+        let missing = jobs
+            .into_iter()
+            .filter(|(runtime, _)| runtime_missing(&self.runtimes, *runtime));
+        self.queue
+            .extend(missing.map(|(runtime, version)| InstallJob { runtime, version }));
         self.first_run = Some(FirstRun::Installing);
         true
+    }
+
+    /// Whether Home gives way to the first-run panel (principles 2): the
+    /// daemon answers, the user did not say "Not now", and the first site
+    /// cannot open yet. That is when PHP or Caddy is not installed, or when
+    /// there is no site. The window cannot read whether setup ran in an
+    /// earlier session, so the sites decide: the first site ends it.
+    pub fn needs_first_run(&self) -> bool {
+        self.is_connected()
+            && !self.first_run_closed
+            && !self.runtimes.is_empty()
+            && (first_run_needed(&self.runtimes) || self.sites.sites.is_empty())
     }
 
     /// "Not now" or "Close" in the first-run panel.
@@ -1364,8 +1387,19 @@ impl Model {
                 None
             }
             Action::SyncHosts => self.start_hosts_sync().then_some(Command::SyncHosts),
-            // Done by `App`, with the system's opener: nothing changes here.
-            Action::OpenSite(_) => None,
+            Action::StartFirstRun => {
+                // The jobs wait in the queue: `App` sends them.
+                self.start_first_run();
+                None
+            }
+            Action::RunSetup => self.start_setup().then_some(Command::Setup),
+            Action::CloseFirstRun => {
+                self.close_first_run();
+                None
+            }
+            // Done by `App`, with the system's opener and dialog: nothing
+            // changes here.
+            Action::OpenSite(_) | Action::PickFolder(_) => None,
         }
     }
 
@@ -1499,15 +1533,18 @@ pub fn apply(model: &mut Model, event: Event) {
     }
 }
 
-/// Whether the first-run panel is for this list: it has been read, and
-/// neither PHP nor Caddy is installed.
+/// Whether the first-run panel is for this list: it has been read, and PHP
+/// or Caddy is not installed. Both are needed to open a site.
 pub fn first_run_needed(rows: &[RuntimeRow]) -> bool {
-    let missing = |runtime| {
-        rows.iter()
-            .find(|row| row.runtime == runtime)
-            .is_none_or(|row| row.installed.is_empty())
-    };
-    !rows.is_empty() && missing(Runtime::Php) && missing(Runtime::Caddy)
+    !rows.is_empty()
+        && (runtime_missing(rows, Runtime::Php) || runtime_missing(rows, Runtime::Caddy))
+}
+
+/// Whether `runtime` has no installed version in the list `rows`.
+pub fn runtime_missing(rows: &[RuntimeRow], runtime: Runtime) -> bool {
+    rows.iter()
+        .find(|row| row.runtime == runtime)
+        .is_none_or(|row| row.installed.is_empty())
 }
 
 /// The position of `runtime` in [`Runtime::ALL`], and in
@@ -1769,6 +1806,45 @@ mod tests {
         assert!(matches!(command, Some(Command::SyncHosts)), "{command:?}");
         assert!(model.apply_action(Action::SyncHosts).is_none(), "it runs");
         assert_eq!(model.hosts_sync, HostsSync::Running);
+    }
+
+    #[test]
+    fn the_first_run_actions_install_set_up_and_close() {
+        let mut model = with_runtimes(&[], &[]);
+        assert!(model.apply_action(Action::StartFirstRun).is_none());
+        assert_eq!(model.first_run, Some(FirstRun::Installing));
+        assert_eq!(
+            model.next_install(),
+            Some(job(Runtime::Php, Some(FIRST_PHP)))
+        );
+
+        let command = model.apply_action(Action::RunSetup);
+        assert!(matches!(command, Some(Command::Setup)), "{command:?}");
+        assert_eq!(model.setup, Setup::Running);
+        assert!(
+            model.apply_action(Action::RunSetup).is_none(),
+            "one at a time"
+        );
+
+        // The folder dialog is `App`'s: the model keeps out of it.
+        assert!(model.apply_action(Action::PickFolder(Pick::Park)).is_none());
+        assert!(model.apply_action(Action::CloseFirstRun).is_none());
+        assert!(model.first_run.is_none() && !model.needs_first_run());
+    }
+
+    #[test]
+    fn a_linked_folder_opens_its_form_on_the_sites_screen() {
+        let mut model = connected();
+        assert_eq!(model.route, Route::Home);
+        model.pick_link_folder(Path::new("relative/folder"));
+        assert_eq!(model.route, Route::Home, "a bad folder opens no form");
+        assert!(model.link.is_none());
+        model.pick_link_folder(&absolute("/code/My_App"));
+        assert_eq!(model.route, Route::Sites);
+        assert_eq!(
+            model.link.as_ref().map(|form| form.name.as_str()),
+            Some("my-app")
+        );
     }
 
     #[test]
@@ -2575,18 +2651,81 @@ mod tests {
     // -- First run (task M5-10) --
 
     #[test]
-    fn the_first_run_panel_shows_with_no_php_and_no_caddy() {
+    fn the_first_run_panel_shows_with_no_php_or_no_caddy() {
         assert!(with_runtimes(&[], &[]).first_run == Some(FirstRun::Offer));
-        assert!(with_runtimes(&["8.4.23"], &[]).first_run.is_none());
-        assert!(with_runtimes(&[], &["2.11.7"]).first_run.is_none());
+        // Either one missing is enough: no site opens without both.
+        assert!(with_runtimes(&["8.4.23"], &[]).first_run == Some(FirstRun::Offer));
+        assert!(with_runtimes(&[], &["2.11.7"]).first_run == Some(FirstRun::Offer));
+        assert!(with_runtimes(&["8.4.23"], &["2.11.7"]).first_run.is_none());
         // Not before the list is read.
         assert!(connected().first_run.is_none());
         assert!(!first_run_needed(&[]));
 
-        // PHP installed from a terminal closes the offer.
+        // PHP installed from a terminal: Caddy is still missing. Then Caddy
+        // closes the offer.
         let mut model = with_runtimes(&[], &[]);
         model.update(Update::Runtimes(list(&["8.4.23"], &[])));
+        assert_eq!(model.first_run, Some(FirstRun::Offer));
+        model.update(Update::Runtimes(list(&["8.4.23"], &["2.11.7"])));
         assert!(model.first_run.is_none());
+    }
+
+    #[test]
+    fn the_first_run_installs_only_what_is_missing() {
+        let mut model = with_runtimes(&["8.4.23"], &[]);
+        assert!(model.start_first_run());
+        assert_eq!(
+            model.next_install(),
+            Some(job(Runtime::Caddy, None)),
+            "PHP is there: only Caddy"
+        );
+        let mut model = with_runtimes(&[], &["2.11.7"]);
+        assert!(model.start_first_run());
+        assert_eq!(
+            model.next_install(),
+            Some(job(Runtime::Php, Some(FIRST_PHP)))
+        );
+        model.update(Update::InstallAccepted {
+            job: job(Runtime::Php, Some(FIRST_PHP)),
+            id: 1,
+        });
+        apply(&mut model, done(1, Runtime::Php, "8.4.23"));
+        assert_eq!(model.next_install(), None, "Caddy is there: no second job");
+        assert_eq!(model.first_run, Some(FirstRun::Setup));
+        // Nothing to install: nothing to start.
+        assert!(!with_runtimes(&["8.4.23"], &["2.11.7"]).start_first_run());
+    }
+
+    /// Principles 2: first run replaces Home until PHP and Caddy are
+    /// installed and there is a first site, unless the user said "Not now".
+    #[test]
+    fn first_run_replaces_home_until_the_first_site_can_open() {
+        // Not before the runtimes are read, and not without the daemon.
+        assert!(!connected().needs_first_run());
+        assert!(!Model::default().needs_first_run());
+
+        let mut model = with_runtimes(&[], &[]);
+        assert!(model.needs_first_run(), "nothing installed");
+        model.update(Update::Runtimes(list(&["8.4.23"], &[])));
+        model.update(Update::Sites(site_list(&["shop"])));
+        assert!(model.needs_first_run(), "a site cannot open without Caddy");
+        model.update(Update::Runtimes(list(&["8.4.23"], &["2.11.7"])));
+        assert!(!model.needs_first_run(), "installed, and a first site");
+        model.update(Update::Sites(SiteList::default()));
+        assert!(model.needs_first_run(), "installed, and no site yet");
+
+        // The first site ends it, as an event from the daemon says.
+        apply(&mut model, Event::SitesChanged(site_list(&["shop"])));
+        assert!(!model.needs_first_run());
+        apply(&mut model, Event::SitesChanged(SiteList::default()));
+        assert!(model.needs_first_run());
+        model.close_first_run();
+        assert!(!model.needs_first_run(), "\"Not now\" stays for the window");
+        // A lost session does not bring it back.
+        model.update(Update::Reconnecting);
+        model.update(Update::Connected(health()));
+        model.update(Update::Runtimes(list(&[], &[])));
+        assert!(!model.needs_first_run());
     }
 
     #[test]
@@ -2615,7 +2754,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_caddy_closes_the_first_run_once_php_is_there() {
+    fn a_failed_caddy_offers_the_install_again_once_php_is_there() {
         let mut model = with_runtimes(&[], &[]);
         model.start_first_run();
         let php = model.next_install().unwrap();
@@ -2625,8 +2764,8 @@ mod tests {
         let caddy = model.next_install().unwrap();
         model.update(Update::InstallAccepted { job: caddy, id: 2 });
         apply(&mut model, failed(2, "download_failed"));
-        // PHP is there: Caddy is installed from the Runtimes section.
-        assert!(model.first_run.is_none());
+        // PHP is there and Caddy is not: the panel offers the install again.
+        assert_eq!(model.first_run, Some(FirstRun::Offer));
         assert_eq!(
             step(&model),
             InstallStep::Failed(failure("download_failed".into()))
@@ -2975,7 +3114,7 @@ mod tests {
 
     #[test]
     fn an_uninstall_drops_the_version_and_the_list_is_read_again() {
-        let mut model = with_runtimes(&["8.3.27", "8.4.23"], &[]);
+        let mut model = with_runtimes(&["8.3.27", "8.4.23"], &["2.11.7"]);
         let sent = send(&mut model, uninstall(Runtime::Php, "8.3.27"));
         model.update(Update::Removed(sent));
         assert_eq!(model.php_versions(), [v("8.4.23")]);
@@ -2985,13 +3124,13 @@ mod tests {
         };
         assert_eq!(model.uninstall_notice, Some(uninstalled));
 
-        // The last PHP, with no Caddy: the list read again after it opens
-        // the first-run panel.
+        // The last PHP: the list read again after it opens the first-run
+        // panel, since no site can open without PHP.
         let sent = send(&mut model, uninstall(Runtime::Php, "8.4.23"));
         model.update(Update::Removed(sent));
         assert!(model.php_versions().is_empty());
         assert!(model.first_run.is_none(), "not before the list is read");
-        model.update(Update::Runtimes(list(&[], &[])));
+        model.update(Update::Runtimes(list(&[], &["2.11.7"])));
         assert_eq!(model.first_run, Some(FirstRun::Offer));
     }
 

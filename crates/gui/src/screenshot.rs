@@ -8,7 +8,7 @@
 //! `MARSA_GUI_THEME=light|dark` draws that theme instead of the system's.
 //! `MARSA_GUI_SIZE=900x720` opens the window at that size (task M5-D4).
 //! `MARSA_GUI_ROUTE=home|sites|runtimes|services|logs|settings` opens that
-//! screen. `MARSA_GUI_DEMO=ok|caddy-stopped` draws fixed fake data and
+//! screen. `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2` draws fixed fake data and
 //! starts no daemon (task M5-D5, see `demo`). On macOS,
 //! `sips -s format png <file.bmp> --out <file.png>` converts the picture.
 

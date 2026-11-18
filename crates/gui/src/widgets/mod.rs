@@ -1,6 +1,6 @@
 //! The small widgets of the design (`docs/design/components.md`): icons,
 //! tiles, buttons, the switch, the segmented control, badges, the text
-//! field, and the sidebar item. They are the only place that draws these; a screen adds them with
+//! field, the sidebar item, and the step card. They are the only place that draws these; a screen adds them with
 //! `ui.add(...)` and never reaches for a raw egui button (rules.md 3).
 //! [Laravel: Blade components; each takes its props with a builder and
 //! returns what the user did.]
@@ -33,6 +33,7 @@ pub mod nav;
 pub mod notice;
 pub mod segmented;
 pub mod status;
+pub mod step;
 pub mod switch;
 pub mod table;
 pub mod tile;
@@ -58,6 +59,7 @@ pub use segmented::Segmented;
 pub use status::{
     Health, PathStep, PillState, RequestPath, StatePill, StatusDot, StatusSentence, StepState,
 };
+pub use step::{Stage, StepCard};
 pub use switch::Switch;
 pub use table::{RowHeight, Table, TableColumn, TableOutput};
 pub use tile::{Monogram, SectionTile, TileSize};

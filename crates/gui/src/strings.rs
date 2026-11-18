@@ -19,7 +19,7 @@ use crate::model::{
 };
 use crate::theme::Section;
 use crate::tray::menu::Daemon;
-use crate::widgets::{PillState, StepState};
+use crate::widgets::{PillState, Stage, StepState};
 
 pub const APP_NAME: &str = "Marsa";
 
@@ -115,16 +115,45 @@ pub const XDEBUG_HINT: &str = "Load Xdebug in every installed PHP that has it, i
 pub const XDEBUG_SLOW: &str = "PHP runs two to four times slower while Xdebug is on. Turn it \
      off when you are done debugging.";
 
-// The first-run panel (task M5-10).
+// The first-run panel (tasks M5-10 and M5-D5).
 
-pub const FIRST_RUN_TITLE: &str = "Get started";
-pub const FIRST_RUN_TEXT: &str =
-    "Marsa needs PHP and the Caddy web server to serve your sites. Neither is installed yet.";
+pub const FIRST_RUN_WELCOME: &str = "Welcome to Marsa";
+pub const FIRST_RUN_INTRO: &str = "Three steps, and your first site opens over HTTPS.";
 /// Names the version of `model::FIRST_PHP`; a test keeps the two the same.
 pub const FIRST_RUN_INSTALL: &str = "Install PHP 8.4 and Caddy";
-pub const FIRST_RUN_INSTALL_HINT: &str =
-    "Downloads PHP 8.4 and Caddy from Marsa's signed version list, one after the other.";
-pub const FIRST_RUN_READY: &str = "PHP and Caddy are installed. One last step, needed once:";
+pub const FIRST_RUN_INSTALL_BODY: &str = "Downloaded from Marsa's signed version list. PHP runs \
+     your code; Caddy serves your sites.";
+pub const FIRST_RUN_INSTALLED: &str = "PHP and Caddy are installed";
+pub const FIRST_RUN_SETUP: &str = "Set up HTTPS for .test sites";
+pub const FIRST_RUN_SITE: &str = "Add your first site";
+pub const FIRST_RUN_SITE_BODY: &str = "Park a folder of projects, where each sub-folder becomes a \
+     site, or link one project folder.";
+/// The primary button while its step runs.
+pub const INSTALLING: &str = "Installing…";
+pub const INSTALLING_HINT: &str = "The install runs by itself. Wait for it to end.";
+pub const SETTING_UP: &str = "Setting up…";
+
+/// The title of the first step, and the label of its button: what is left
+/// to install.
+pub const fn first_run_install_title(php: bool, caddy: bool) -> &'static str {
+    match (php, caddy) {
+        (true, true) => FIRST_RUN_INSTALL,
+        (true, false) => INSTALL_PHP,
+        (false, true) => INSTALL_CADDY,
+        (false, false) => FIRST_RUN_INSTALLED,
+    }
+}
+
+/// What a screen reader says for a step card: "Step 2: Set up HTTPS, to do
+/// now".
+pub fn step_label(number: u8, title: &str, stage: Stage) -> String {
+    let word = match stage {
+        Stage::Done => "done",
+        Stage::Current => "to do now",
+        Stage::Next => "comes next",
+    };
+    format!("Step {number}: {title}, {word}")
+}
 pub const NOT_NOW: &str = "Not now";
 pub const CLOSE: &str = "Close";
 
@@ -276,16 +305,13 @@ pub fn install_status(view: &InstallView) -> String {
     match &view.step {
         InstallStep::Waiting => format!("Asking the daemon to install {what}…"),
         InstallStep::ListChecked => format!("Installing {what}…"),
-        InstallStep::Downloading {
-            artifact,
-            done,
-            total,
-        } => format!(
-            "Downloading {what} ({artifact}): {} of {} MB",
+        // The archive name is for the log, not the user (design review, D5).
+        InstallStep::Downloading { done, total, .. } => format!(
+            "Downloading {what}: {} of {} MB",
             megabytes(*done),
             megabytes(*total)
         ),
-        InstallStep::Unpacking { artifact } => format!("Unpacking {what} ({artifact})…"),
+        InstallStep::Unpacking { .. } => format!("Unpacking {what}…"),
         InstallStep::Checking => format!("Testing {what}…"),
         InstallStep::Finishing => format!("Finishing the install of {what}…"),
         InstallStep::Done { already: false } => format!("Installed {what}."),
@@ -378,6 +404,30 @@ pub fn setup_explanation(platform: Option<Platform>) -> &'static str {
         }
         _ => {
             "Setup lets your browser open .test sites over HTTPS. Your system may ask for an \
+             administrator's approval once."
+        }
+    }
+}
+
+/// The setup step of the first-run panel: what the user gets, and the prompt
+/// that comes. The details (DNS, certificates, ports) are in
+/// `setup_explanation`, for Settings. Linux keeps the cost of the low ports
+/// (ADR 0014), because the button here runs setup.
+pub fn first_run_setup_body(platform: Option<Platform>) -> &'static str {
+    match platform {
+        Some(Platform::DarwinArm64 | Platform::DarwinX64) => {
+            "Your browser will open .test sites over HTTPS. macOS asks for your password once."
+        }
+        Some(Platform::LinuxX64 | Platform::LinuxArm64) => {
+            "Your browser will open .test sites over HTTPS. After setup, any program on this \
+             computer may use ports 80 to 1023. Your desktop asks for your password once."
+        }
+        Some(Platform::WindowsX64) => {
+            "Your browser will open .test sites over HTTPS. Windows asks for your approval \
+             (UAC) the first time."
+        }
+        _ => {
+            "Your browser will open .test sites over HTTPS. Your system may ask for an \
              administrator's approval once."
         }
     }
@@ -747,6 +797,7 @@ pub fn path_step_label(label: &str, state: StepState) -> String {
         StepState::Working => "working",
         StepState::Broken => "not working",
         StepState::Unreached => "not reached",
+        StepState::NotChecked => "not checked",
     };
     format!("{label}, {word}")
 }
@@ -1968,13 +2019,13 @@ mod tests {
                     done: 12_340_000,
                     total: 30_100_000,
                 }),
-                "Downloading PHP 8.4.23 (cli): 12.3 of 30.1 MB",
+                "Downloading PHP 8.4.23: 12.3 of 30.1 MB",
             ),
             (
                 php(InstallStep::Unpacking {
                     artifact: artifact(),
                 }),
-                "Unpacking PHP 8.4.23 (cli)…",
+                "Unpacking PHP 8.4.23…",
             ),
             (php(InstallStep::Checking), "Testing PHP 8.4.23…"),
             (
@@ -2066,10 +2117,7 @@ mod tests {
         let line = format!("PHP {}", crate::model::FIRST_PHP);
         assert_eq!(INSTALL_PHP, format!("Install {line}"));
         assert!(FIRST_RUN_INSTALL.contains(&line), "{FIRST_RUN_INSTALL}");
-        assert!(
-            FIRST_RUN_INSTALL_HINT.contains(&line),
-            "{FIRST_RUN_INSTALL_HINT}"
-        );
+        assert_eq!(FIRST_RUN_INSTALL, format!("Install {line} and Caddy"));
     }
 
     /// ADR 0018: on Windows the prompt is UAC, the first time only.
@@ -2102,6 +2150,30 @@ mod tests {
         for platform in [Some(Platform::LinuxX64), Some(Platform::WindowsX64), None] {
             assert!(!setup_explanation(platform).contains("macOS"));
             assert!(!setup_running(platform).contains("macOS"));
+        }
+    }
+
+    /// The first-run step says what the user gets and the prompt, and on
+    /// Linux the cost of the low ports (ADR 0014); not how setup works.
+    #[test]
+    fn the_first_run_setup_step_is_short_and_names_the_prompt() {
+        let mac = first_run_setup_body(Some(Platform::DarwinArm64));
+        assert_eq!(
+            mac,
+            "Your browser will open .test sites over HTTPS. macOS asks for your password once."
+        );
+        let linux = first_run_setup_body(Some(Platform::LinuxX64));
+        assert!(linux.contains("any program on this computer may use ports 80 to 1023"));
+        assert!(first_run_setup_body(Some(Platform::WindowsX64)).contains("(UAC)"));
+        for platform in [
+            Some(Platform::DarwinX64),
+            Some(Platform::LinuxArm64),
+            Some(Platform::WindowsX64),
+            None,
+        ] {
+            let text = first_run_setup_body(platform);
+            assert!(text.starts_with("Your browser will open .test sites over HTTPS."));
+            assert!(!text.contains("certificates"), "{text}");
         }
     }
 

@@ -36,3 +36,7 @@ pub const SITES_MIN_LINES: f32 = 2.0;
 /// last column fits the Open button, so the button ends at the card's edge.
 pub const HOME_PHP_COLUMN: f32 = 56.0;
 pub const HOME_OPEN_COLUMN: f32 = 58.0;
+
+/// The first-run panel's column (task M5-D5): wide enough for the steps'
+/// lines, narrower than the window.
+pub const FIRST_RUN_WIDTH: f32 = 560.0;

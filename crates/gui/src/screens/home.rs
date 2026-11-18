@@ -21,8 +21,8 @@ use marsa_core::types::{ServiceAction, ServiceState};
 use semver::Version;
 
 use crate::model::{
-    self, Action, Connection, FIRST_PHP, HostsSync, InstallJob, InstallStep, LogSource, Model,
-    Route, Setup, WEB_SERVER,
+    self, Action, Connection, FIRST_PHP, HostsSync, InstallJob, InstallStep, InstallView,
+    LogSource, Model, Route, Setup, WEB_SERVER,
 };
 use crate::strings;
 use crate::theme::page::{HOME_OPEN_COLUMN, HOME_PHP_COLUMN};
@@ -345,7 +345,7 @@ fn request_path(model: &Model, dns: Dns, caddy: &Caddy, php: &Php) -> Vec<PathPi
             match dns {
                 Dns::Working => StepState::Working,
                 Dns::Missing => StepState::Broken,
-                Dns::NotChecked => StepState::Unreached,
+                Dns::NotChecked => StepState::NotChecked,
             },
         ),
         pill(
@@ -401,13 +401,7 @@ fn install_fix(
     let view = model
         .install_view()
         .filter(|view| view.runtime == Some(job.runtime));
-    let progress = view.filter(|_| busy).map(|view| InstallBar {
-        words: strings::install_status(view),
-        fraction: match view.step {
-            InstallStep::Waiting | InstallStep::ListChecked => None,
-            _ => Some(view.step.fraction()),
-        },
-    });
+    let progress = view.filter(|_| busy).map(install_bar);
     let failed = view
         .filter(|view| matches!(view.step, InstallStep::Failed(_)))
         .map(strings::install_status);
@@ -418,6 +412,17 @@ fn install_fix(
         disabled: busy.then_some(strings::INSTALL_BUSY_HINT),
     };
     (vec![fix], progress, failed)
+}
+
+/// The words and the share of an install. Also the first-run panel's.
+pub(super) fn install_bar(view: &InstallView) -> InstallBar {
+    InstallBar {
+        words: strings::install_status(view),
+        fraction: match view.step {
+            InstallStep::Waiting | InstallStep::ListChecked => None,
+            _ => Some(view.step.fraction()),
+        },
+    }
 }
 
 fn default_php(model: &Model) -> DefaultPhp {
@@ -736,7 +741,7 @@ mod tests {
         assert_eq!(
             states(&status),
             [
-                ("DNS", StepState::Unreached),
+                ("DNS", StepState::NotChecked),
                 ("Caddy", StepState::Broken),
                 ("PHP 8.4", StepState::Working),
                 ("shop.test", StepState::Unreached),
@@ -819,7 +824,7 @@ mod tests {
             status.explanation
         );
         let status = view(&model(ServiceState::Stopped, &["shop"])).status;
-        assert_eq!(states(&status)[0], ("DNS", StepState::Unreached));
+        assert_eq!(states(&status)[0], ("DNS", StepState::NotChecked));
     }
 
     #[test]
@@ -1019,7 +1024,7 @@ mod tests {
         let alert = tree.node_with_label("Sites are not opening: Caddy stopped.");
         assert_eq!(alert.expect("the sentence").role(), egui::Role::Alert);
         assert!(tree.node_with_label("Caddy, not working").is_some());
-        assert!(tree.node_with_label("DNS, not reached").is_some());
+        assert!(tree.node_with_label("DNS, not checked").is_some());
         let ok = Harness::new(egui::Theme::Light).accessibility(|ui| {
             draw(ui, &working(&["shop"]));
         });
