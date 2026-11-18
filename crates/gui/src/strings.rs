@@ -88,6 +88,69 @@ pub fn site_menu_label(site: &str) -> String {
     format!("More actions for {site}")
 }
 
+/// A site's own page (task M5-D7). The way back to Sites at the top is the
+/// word `SITES` after an arrow icon.
+pub const OPEN_FOLDER: &str = "Open folder";
+pub const OPEN_IN_BROWSER: &str = "Open in browser";
+/// What a screen reader says for the tab strip of the page, and its one tab.
+pub const SITE_TABS: &str = "Site";
+pub const TAB_OVERVIEW: &str = "Overview";
+/// The heading of the large version picker of the page, and its name for a
+/// screen reader.
+pub const PHP_FOR_THIS_SITE: &str = "PHP for this site";
+
+/// The facts card of the page: its labels, and the HTTPS switch.
+pub const FACT_CONNECTION: &str = "Connection";
+pub const FACT_FOLDER: &str = "Folder";
+pub const FACT_DOCROOT: &str = "Document root";
+pub const FACT_KIND: &str = "Kind";
+pub const FACT_ADDED_BY: &str = "Added by";
+pub const SERVE_OVER_HTTPS: &str = "Serve over HTTPS";
+pub const ADDED_BY_LINK: &str = "Linked by you";
+
+/// "Added by": the parked folder that gives the site (as the window shows
+/// a folder, `~/Code`).
+pub fn added_by_parked(shown: &str) -> String {
+    format!("Parked folder {shown}")
+}
+
+/// The quiet button at the end of the page: the confirmation opens.
+pub const UNLINK_THIS_SITE: &str = "Unlink this site…";
+
+/// Under the disabled "Unlink this site…" of a site from a parked folder.
+pub fn site_from_parked(shown: &str) -> String {
+    format!("This site comes from the parked folder {shown}, so it cannot be unlinked alone.")
+}
+
+/// The button beside [`site_from_parked`].
+pub fn forget_folder_shown(shown: &str) -> String {
+    format!("Forget {shown}…")
+}
+
+/// The page of a site that is not in the list: it was unlinked meanwhile, or
+/// the window has no daemon to ask.
+pub fn site_missing(site: &str) -> String {
+    format!("{site}.{TLD} is not in your sites. It may have been unlinked.")
+}
+pub const SITE_OFFLINE: &str = "This site shows here once Marsa is connected to its daemon.";
+
+/// The sentence after the heading of the page's version picker: which
+/// version the site has, and why (components.md, Version menu).
+pub fn php_hint_site(version: &str) -> String {
+    format!("{version} is set for this site")
+}
+pub fn php_hint_file(version: &str, path: &Path) -> String {
+    format!(
+        "{version} comes from the {} file in this folder",
+        file_name(path)
+    )
+}
+pub fn php_hint_default(version: &str) -> String {
+    format!("{version} is the default: the site's files ask for no version")
+}
+pub const PHP_HINT_FILES: &str = "the site's files decide the version";
+pub const PHP_HINT_NO_MATCH: &str = "no installed version fits what the site asks for";
+
 /// Why a site has the PHP version its row shows (components.md, Version
 /// menu): after the version, in `caption`.
 pub const REASON_SITE: &str = "set for this site";
@@ -1141,6 +1204,9 @@ fn error_message(code: &str) -> Option<&'static str> {
         "service_not_found" => "No such service.",
         "unknown_action" => "Unknown service action.",
         "service_busy" => "The service is busy with another action. Try again.",
+        // `marsa_core::platform::OpenError`, and the window's own folder opener.
+        "open_no_program" => "This system has no program to open a folder with.",
+        "open_failed" => "Cannot open the folder.",
         // Codes that come as an answer or in `ServiceState::Failed`.
         "caddy_not_installed" => "Caddy is not installed.",
         "caddy_config_write" => "Cannot write the Caddy config file.",

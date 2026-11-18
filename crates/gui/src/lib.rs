@@ -14,6 +14,8 @@ pub mod bridge;
 #[cfg(debug_assertions)]
 pub mod demo;
 pub mod model;
+// The system's opener of a folder: only `app` runs it.
+pub(crate) mod opener;
 // The window's own screens: only `shell` draws them.
 pub(crate) mod screens;
 // Debug builds only: a design-review aid, so a release build reads no extra

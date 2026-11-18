@@ -87,6 +87,9 @@ pub struct SiteRow<'a> {
 pub struct PhpCell<'a> {
     /// What the button shows: `8.4`, or a dash for a site with no PHP.
     pub shown: String,
+    /// The index (in [`SitesView::php`]) of the version in force, if it is
+    /// installed: the one a large picker chooses.
+    pub at: Option<usize>,
     /// The entry the menu checks: the site's own setting, or its files.
     pub setting: Setting<usize>,
     pub reason: Option<Reason<'a>>,
@@ -114,6 +117,19 @@ pub enum Reason<'a> {
 }
 
 impl Reason<'_> {
+    /// The sentence after the heading of a site's page: the version
+    /// `shown` and why the site has it (components.md, Version menu).
+    pub fn hint(&self, shown: &str) -> String {
+        match self {
+            Self::Site => strings::php_hint_site(shown),
+            Self::File(path) => strings::php_hint_file(shown, path),
+            Self::Default => strings::php_hint_default(shown),
+            Self::Files => strings::PHP_HINT_FILES.to_owned(),
+            Self::NoPhpInstalled => strings::NO_PHP_YET.to_owned(),
+            Self::NoMatch => strings::PHP_HINT_NO_MATCH.to_owned(),
+        }
+    }
+
     pub fn text(&self) -> String {
         match self {
             Self::Site => strings::REASON_SITE.to_owned(),
@@ -181,12 +197,7 @@ pub fn view(model: &Model, picking: bool) -> SitesView<'_> {
         link: link(model),
         line: line(model),
         hosts: hosts(model),
-        removing: match model.removing() {
-            Some(removal @ (Removal::Unlink { .. } | Removal::Forget { .. })) => {
-                Some(strings::removing(removal))
-            }
-            _ => None,
-        },
+        removing: removing_line(model),
         list,
         php,
         parked: &model.sites.parked,
@@ -194,6 +205,16 @@ pub fn view(model: &Model, picking: bool) -> SitesView<'_> {
         forget_off: (model.is_connected() && !model.can_remove())
             .then_some(strings::REMOVE_BUSY_HINT),
         skipped: &model.sites.skipped,
+    }
+}
+
+/// "Unlinking shop.test…", while the daemon removes a site or a folder.
+pub(super) fn removing_line(model: &Model) -> Option<String> {
+    match model.removing() {
+        Some(removal @ (Removal::Unlink { .. } | Removal::Forget { .. })) => {
+            Some(strings::removing(removal))
+        }
+        _ => None,
     }
 }
 
@@ -240,24 +261,28 @@ fn matches(name: &str, search: &str) -> bool {
 }
 
 fn row<'a>(model: &'a Model, site: &'a Site, php: &[PhpChoice]) -> SiteRow<'a> {
-    let unlink = match model.parked_folder(site) {
-        Some(folder) => Unlink::Parked(folder),
-        None if model.can_remove() => Unlink::Allowed,
-        None => Unlink::Busy,
-    };
     SiteRow {
         name: &site.name,
         root: &site.root,
         php: php_cell(model, site, php),
         https: site.secure,
-        unlink,
+        unlink: unlink_of(model, site),
+    }
+}
+
+/// Whether `site` can be unlinked now.
+pub(super) fn unlink_of<'a>(model: &'a Model, site: &Site) -> Unlink<'a> {
+    match model.parked_folder(site) {
+        Some(folder) => Unlink::Parked(folder),
+        None if model.can_remove() => Unlink::Allowed,
+        None => Unlink::Busy,
     }
 }
 
 /// The version the row shows, the entry its menu checks, and why. The entry
 /// the user just picked shows until the daemon answers, as the model keeps it
 /// ([`Model::site_choice`]).
-fn php_cell<'a>(model: &Model, site: &'a Site, php: &[PhpChoice]) -> PhpCell<'a> {
+pub(super) fn php_cell<'a>(model: &Model, site: &'a Site, php: &[PhpChoice]) -> PhpCell<'a> {
     let (version, reason) = match model.site_choice(site) {
         Choice::Version(version) => (Some(version), Some(Reason::Site)),
         Choice::Auto => (site.php.clone(), auto_reason(site, php.is_empty())),
@@ -278,6 +303,7 @@ fn php_cell<'a>(model: &Model, site: &'a Site, php: &[PhpChoice]) -> PhpCell<'a>
     };
     PhpCell {
         shown,
+        at,
         setting,
         reason,
         off: php.is_empty().then_some(strings::NO_PHP_YET),
@@ -307,7 +333,7 @@ fn link(model: &Model) -> Option<LinkView<'_>> {
     })
 }
 
-fn line(model: &Model) -> Option<NoticeLine> {
+pub(super) fn line(model: &Model) -> Option<NoticeLine> {
     let failure = |text: String| (NoticeKind::Error, text, None);
     let done = |text: String| (NoticeKind::Success, text, None);
     let (kind, text, action) = match model.sites_notice.as_ref()? {
@@ -446,7 +472,7 @@ fn search(ui: &mut Ui, theme: &Theme, view: &SitesView<'_>, actions: &mut Vec<Ac
 }
 
 /// A sentence in a card, in place of a table.
-fn message(ui: &mut Ui, theme: &Theme, text: &str) {
+pub(super) fn message(ui: &mut Ui, theme: &Theme, text: &str) {
     padded_card(ui, |ui| {
         ui.vertical_centered(|ui| {
             let text = RichText::new(text)
@@ -458,7 +484,7 @@ fn message(ui: &mut Ui, theme: &Theme, text: &str) {
 }
 
 /// A line of `caption` text in `mute`.
-fn mute(ui: &mut Ui, theme: &Theme, text: &str) {
+pub(super) fn mute(ui: &mut Ui, theme: &Theme, text: &str) {
     let text = RichText::new(text)
         .font(theme.text.caption.font_id())
         .color(theme.color.mute);
@@ -495,7 +521,7 @@ fn status_line(ui: &mut Ui, theme: &Theme, mark: Mark, text: &str, add: impl FnO
 /// The line about the last action: a check for what worked, a cross for what
 /// failed, the sentence, the action it offers, and a button that closes it.
 // TODO(M5-D9): notices move to the bar at the bottom of the main area.
-fn notice(ui: &mut Ui, theme: &Theme, line: &NoticeLine, actions: &mut Vec<Action>) {
+pub(super) fn notice(ui: &mut Ui, theme: &Theme, line: &NoticeLine, actions: &mut Vec<Action>) {
     let mark = match line.kind {
         NoticeKind::Success => Mark::Success,
         NoticeKind::Error => Mark::Error,
@@ -800,7 +826,7 @@ fn skipped(ui: &mut Ui, theme: &Theme, folders_skipped: &[SkippedFolder], home: 
 
 /// A folder's path in the mono face, as `~/…` under the home folder, cut
 /// short at the end of the column. The tooltip has the full path.
-fn path(ui: &mut Ui, theme: &Theme, folder: &Path, home: Option<&Path>) {
+pub(super) fn path(ui: &mut Ui, theme: &Theme, folder: &Path, home: Option<&Path>) {
     let shown = strings::home_path(folder, home);
     let text = RichText::new(&shown)
         .font(theme.text.mono_sm.font_id())

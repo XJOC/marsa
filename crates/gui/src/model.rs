@@ -460,8 +460,7 @@ pub enum Route {
     #[default]
     Home,
     Sites,
-    /// One site's page, by name. M5-D7 draws it; until then it shows the
-    /// Sites screen.
+    /// One site's page, by name.
     Site(String),
     /// The Runtimes screen with this runtime chosen.
     Runtimes(Runtime),
@@ -505,6 +504,10 @@ pub enum Action {
     /// "Open" on a site. A local action: `App` hands the address
     /// ([`Model::site_url`]) to the system, never a screen (code.md, State).
     OpenSite(String),
+    /// "Open folder" on a site's page: the system's file manager shows the
+    /// site's folder. A local action like [`Action::OpenSite`]: `App` finds
+    /// the folder ([`Model::site_root`]) and starts the system's opener.
+    OpenFolder(String),
     /// The first-run button that installs what is missing.
     StartFirstRun,
     /// "Run setup".
@@ -1281,7 +1284,14 @@ impl Model {
                 self.uninstall_notice = Some(UninstallNotice::Done { runtime, version });
             }
             // The new list comes as `sites_changed`.
-            Removal::Unlink { site } => self.sites_notice = Some(SitesNotice::Unlinked(site)),
+            Removal::Unlink { site } => {
+                // The page of the site is gone: back to the list, where the
+                // line about it shows.
+                if self.route == Route::Site(site.clone()) {
+                    self.route = Route::Sites;
+                }
+                self.sites_notice = Some(SitesNotice::Unlinked(site));
+            }
             Removal::Forget { folder } => self.sites_notice = Some(SitesNotice::Forgot(folder)),
         }
     }
@@ -1471,7 +1481,7 @@ impl Model {
             }
             // Done by `App`, with the system's opener and dialog: nothing
             // changes here.
-            Action::OpenSite(_) | Action::PickFolder(_) => None,
+            Action::OpenSite(_) | Action::OpenFolder(_) | Action::PickFolder(_) => None,
         }
     }
 
@@ -3279,6 +3289,34 @@ mod tests {
         let unlinked = SitesNotice::Unlinked("api".into());
         assert_eq!(model.sites_notice, Some(unlinked));
         assert!(model.removing().is_none() && model.can_remove());
+    }
+
+    #[test]
+    fn unlinking_from_the_page_of_the_site_goes_back_to_sites_and_other_pages_stay() {
+        let mut model = with_parked();
+        model.apply_action(Action::Navigate(Route::Site("api".into())));
+        model.apply_action(Action::AskUnlink("api".into()));
+        assert_eq!(model.confirm, Some(unlink("api")));
+        assert!(model.confirm_removal().is_some());
+        // Waiting for the answer: the page is still there.
+        assert_eq!(model.route, Route::Site("api".into()));
+        model.update(Update::Removed(unlink("api")));
+        // The line about it shows on Sites.
+        assert_eq!(model.route, Route::Sites);
+        assert_eq!(
+            model.sites_notice,
+            Some(SitesNotice::Unlinked("api".into()))
+        );
+
+        // The page of another site, or another screen, is not moved.
+        for route in [Route::Site("blog".into()), Route::Settings] {
+            let mut model = with_parked();
+            model.route = route.clone();
+            model.apply_action(Action::AskUnlink("api".into()));
+            model.confirm_removal().expect("sent");
+            model.update(Update::Removed(unlink("api")));
+            assert_eq!(model.route, route);
+        }
     }
 
     #[test]

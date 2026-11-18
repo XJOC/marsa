@@ -9,6 +9,7 @@ pub mod logs;
 pub mod runtimes;
 pub mod services;
 pub mod settings;
+pub mod site;
 pub mod sites;
 
 use eframe::egui::text::{LayoutJob, TextFormat};
