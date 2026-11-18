@@ -1615,15 +1615,21 @@ pub const DOCTOR_VC_INSTALL: &str = "Install the latest Microsoft Visual C++ Red
 
 /// Windows: PHP's CA bundle against the roots Windows trusts (task M4-19n,
 /// ADR 0020).
-pub fn doctor_system_roots_ok(count: usize, left_out: usize, age_days: u64) -> String {
+pub fn doctor_system_roots_ok(count: usize, left_out: usize, marsa: bool, age_days: u64) -> String {
     let written = match age_days {
         0 => "today".to_owned(),
         1 => "1 day ago".to_owned(),
         days => format!("{days} days ago"),
     };
+    let marsa = if marsa {
+        ", and Marsa's CA"
+    } else {
+        " (Marsa's CA is not made yet)"
+    };
     format!(
-        "PHP trusts the {count} roots Windows trusts for HTTPS, and Marsa's CA ({left_out} other \
-         roots of Windows are not for HTTPS). The bundle was written {written}."
+        "PHP trusts the {count} roots Windows trusts for HTTPS{marsa}; {left_out} other roots of \
+         Windows were left out (not for HTTPS, expired, or disallowed). The bundle was written \
+         {written}."
     )
 }
 
@@ -1637,8 +1643,9 @@ pub fn doctor_system_roots_unreadable(error: &str) -> String {
 pub const DOCTOR_SYSTEM_ROOTS_EMPTY: &str = "Windows' certificate store gave no roots for HTTPS, \
      so PHP trusts only Marsa's CA: HTTPS calls from PHP to the internet fail.";
 
-pub const DOCTOR_SYSTEM_ROOTS_FIX: &str = "Open \"Manage user certificates\" (certmgr.msc) and \
-     look at \"Trusted Root Certification Authorities\", then run \"marsa doctor\" again.";
+pub const DOCTOR_SYSTEM_ROOTS_FIX: &str = "Check that Windows' date and time are right (roots \
+     outside their dates are left out), and that \"Trusted Root Certification Authorities\" in \
+     \"Manage user certificates\" (certmgr.msc) lists roots. Then run \"marsa doctor\" again.";
 
 pub fn doctor_system_roots_missing(missing: usize) -> String {
     let roots = if missing == 1 { "root" } else { "roots" };

@@ -494,8 +494,10 @@ pub struct Roots {
 /// of the current user holds the machine's roots (`LocalMachine\Root`,
 /// where `marsa setup` puts Marsa's CA), group policy's, and the user's
 /// own. Windows keeps a root's limits in the store, not in the certificate,
-/// so they are applied here, as Windows itself would: the enhanced key
-/// usage, the dates, and the `Disallowed` store. Read only.
+/// so the ones that matter here are applied: the enhanced key usage, the
+/// dates, and the `Disallowed` store. Windows' newer distrust data (the
+/// disallowed list it downloads, distrust dates) is not, as in curl's own
+/// import. Read only.
 ///
 /// Windows may add a public root only when its own certificate check first
 /// needs one (automatic root update), so a fresh machine may lack a root
@@ -506,14 +508,24 @@ pub struct Roots {
 /// A store cannot be opened or read.
 pub fn root_certificates() -> io::Result<Roots> {
     use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
-    let disallowed: Vec<Vec<u8>> = match store_certificates("Disallowed") {
-        Ok(found) => found.into_iter().map(|(der, _)| der).collect(),
-        // No such store for this user: nothing is disallowed.
-        Err(err) if err.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => Vec::new(),
-        Err(err) => return Err(err),
+    use windows_sys::Win32::Security::Cryptography::{
+        CERT_SYSTEM_STORE_CURRENT_USER, CERT_SYSTEM_STORE_LOCAL_MACHINE,
     };
+    let missing = |err: &io::Error| err.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32);
+    // The user's `Disallowed` holds the machine's too. A profile without one
+    // falls back to the machine's own; with neither, nothing is disallowed.
+    let disallowed = match store_certificates("Disallowed", CERT_SYSTEM_STORE_CURRENT_USER) {
+        Err(err) if missing(&err) => {
+            match store_certificates("Disallowed", CERT_SYSTEM_STORE_LOCAL_MACHINE) {
+                Err(err) if missing(&err) => Vec::new(),
+                other => other?,
+            }
+        }
+        other => other?,
+    };
+    let disallowed: Vec<Vec<u8>> = disallowed.into_iter().map(|(der, _)| der).collect();
     let mut roots = Roots::default();
-    for (der, for_servers) in store_certificates("ROOT")? {
+    for (der, for_servers) in store_certificates("ROOT", CERT_SYSTEM_STORE_CURRENT_USER)? {
         if for_servers && !disallowed.contains(&der) && crate::helper::ca::is_certificate(&der) {
             roots.trusted.push(der);
         } else {
@@ -523,19 +535,18 @@ pub fn root_certificates() -> io::Result<Roots> {
     Ok(roots)
 }
 
-/// The DER of each certificate in this user's system store `name`, and
-/// whether it is valid now for HTTPS servers ([`for_https_servers`]). The
-/// store is opened read-only, and only if it exists.
-fn store_certificates(name: &str) -> io::Result<Vec<(Vec<u8>, bool)>> {
+/// The DER of each certificate in the system store `name` of `location`
+/// (`CERT_SYSTEM_STORE_CURRENT_USER` or `_LOCAL_MACHINE`), and whether it is
+/// valid now for HTTPS servers ([`for_https_servers`]). The store is opened
+/// read-only, and only if it exists.
+fn store_certificates(name: &str, location: u32) -> io::Result<Vec<(Vec<u8>, bool)>> {
     use windows_sys::Win32::Foundation::{CRYPT_E_NOT_FOUND, ERROR_NO_MORE_FILES};
     use windows_sys::Win32::Security::Cryptography::{
         CERT_CONTEXT, CERT_STORE_OPEN_EXISTING_FLAG, CERT_STORE_PROV_SYSTEM_W,
-        CERT_STORE_READONLY_FLAG, CERT_SYSTEM_STORE_CURRENT_USER, CertCloseStore,
-        CertEnumCertificatesInStore, CertOpenStore,
+        CERT_STORE_READONLY_FLAG, CertCloseStore, CertEnumCertificatesInStore, CertOpenStore,
     };
     let name = wide(OsStr::new(name))?;
-    let flags =
-        CERT_SYSTEM_STORE_CURRENT_USER | CERT_STORE_READONLY_FLAG | CERT_STORE_OPEN_EXISTING_FLAG;
+    let flags = location | CERT_STORE_READONLY_FLAG | CERT_STORE_OPEN_EXISTING_FLAG;
     // SAFETY: the system-store provider takes `pvPara` as a NUL-terminated
     // UTF-16 name, which `name` is, and it lives through the call. No
     // encoding type and no provider (0) for a system store. The store is
@@ -565,7 +576,8 @@ fn store_certificates(name: &str) -> io::Result<Vec<(Vec<u8>, bool)>> {
             })
         };
         if let Some(der) = der {
-            found.push((der, for_https_servers(context)));
+            // SAFETY: `context` is valid until the next enumeration.
+            found.push((der, unsafe { for_https_servers(context) }));
         }
         previous = context;
     };
@@ -584,12 +596,16 @@ fn store_certificates(name: &str) -> io::Result<Vec<(Vec<u8>, bool)>> {
 /// Whether Windows trusts the certificate of `context` for HTTPS servers
 /// now: within its dates, and with an enhanced key usage (the certificate's
 /// own, narrowed by the store's property) that is "any" or names server
-/// authentication.
-fn for_https_servers(
+/// authentication. Any failure leaves the certificate out.
+///
+/// # Safety
+///
+/// `context` points at a valid certificate context for the whole call.
+unsafe fn for_https_servers(
     context: *const windows_sys::Win32::Security::Cryptography::CERT_CONTEXT,
 ) -> bool {
     use std::ffi::CStr;
-    use windows_sys::Win32::Foundation::CRYPT_E_NOT_FOUND;
+    use windows_sys::Win32::Foundation::{CRYPT_E_NOT_FOUND, SetLastError};
     use windows_sys::Win32::Security::Cryptography::{
         CTL_USAGE, CertGetEnhancedKeyUsage, CertVerifyTimeValidity,
     };
@@ -605,13 +621,19 @@ fn for_https_servers(
     if unsafe { CertGetEnhancedKeyUsage(context, 0, null_mut(), &mut size) } == 0 {
         return false;
     }
-    // `u64`s, so the buffer is aligned for `CTL_USAGE`, whose pointers come
-    // first.
-    let mut buffer = vec![0_u64; (size as usize).div_ceil(8).max(1)];
+    // `u64`s, so the buffer is aligned for the pointer in `CTL_USAGE`, and
+    // never smaller than one `CTL_USAGE`.
+    let words = (size as usize).max(size_of::<CTL_USAGE>()).div_ceil(8);
+    let mut buffer = vec![0_u64; words];
     let usage = buffer.as_mut_ptr().cast::<CTL_USAGE>();
-    // SAFETY: `buffer` holds at least `size` bytes, aligned for `CTL_USAGE`,
-    // and lives through the call and the reads below.
-    if unsafe { CertGetEnhancedKeyUsage(context, 0, usage, &mut size) } == 0 {
+    // SAFETY: `buffer` holds at least `size` bytes and a whole `CTL_USAGE`,
+    // aligned for it, and lives through the call and the reads below. The
+    // last error is cleared first, so the answer read below is this call's.
+    let read = unsafe {
+        SetLastError(0);
+        CertGetEnhancedKeyUsage(context, 0, usage, &mut size)
+    };
+    if read == 0 {
         return false;
     }
     // Read at once: with no usage listed, it says "all uses" or "none".
@@ -759,6 +781,8 @@ mod tests {
             "only {} roots",
             roots.trusted.len()
         );
+        // Every Windows keeps some expired legacy roots: the filter acts.
+        assert!(roots.left_out >= 1, "no root was left out");
         for der in &roots.trusted {
             let pem = crate::caddy::pem_certificates(std::slice::from_ref(der));
             assert!(crate::helper::certificate_sha256(&pem).is_some(), "{pem}");
@@ -768,9 +792,62 @@ mod tests {
     /// A store that does not exist is an error, and opening it creates none.
     #[test]
     fn a_missing_store_is_an_error() {
+        use windows_sys::Win32::Security::Cryptography::CERT_SYSTEM_STORE_CURRENT_USER;
         let name = "marsa-test-no-such-store";
-        assert!(store_certificates(name).is_err());
-        assert!(store_certificates(name).is_err(), "the first open made it");
+        let user = CERT_SYSTEM_STORE_CURRENT_USER;
+        assert!(store_certificates(name, user).is_err());
+        assert!(
+            store_certificates(name, user).is_err(),
+            "the first open made it"
+        );
+    }
+
+    /// The usage decisions, on the test CA in memory (valid to 2126, no
+    /// usage of its own): no property, server auth, code signing only, and
+    /// an empty list, which Windows reads as "disabled for every use".
+    #[test]
+    fn only_roots_for_https_servers_are_kept() {
+        use windows_sys::Win32::Security::Cryptography::{
+            CTL_USAGE, CertCreateCertificateContext, CertFreeCertificateContext,
+            CertSetEnhancedKeyUsage, PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
+        };
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/helper");
+        let pem = fs::read_to_string(fixtures.join("test-ca.pem")).unwrap();
+        let der = crate::helper::ca::parse_pem(&pem).unwrap();
+        let mut server = *b"1.3.6.1.5.5.7.3.1\0";
+        let mut signing = *b"1.3.6.1.5.5.7.3.3\0";
+        // SAFETY: `der` lives through the call, which copies it into the new
+        // context; the context is checked for null and freed at the end.
+        let context = unsafe {
+            CertCreateCertificateContext(
+                X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                der.as_ptr(),
+                der.len() as u32,
+            )
+        };
+        assert!(!context.is_null());
+        let with = |oids: &mut [*mut u8]| {
+            let usage = CTL_USAGE {
+                cUsageIdentifier: oids.len() as u32,
+                rgpszUsageIdentifier: oids.as_mut_ptr(),
+            };
+            // SAFETY: `context` is valid; `usage` and the OID strings it
+            // points at live through the call, which copies them into a
+            // property of this in-memory context only.
+            unsafe {
+                assert_ne!(CertSetEnhancedKeyUsage(context, &usage), 0);
+                for_https_servers(context)
+            }
+        };
+        // SAFETY: `context` is valid until it is freed below.
+        assert!(unsafe { for_https_servers(context) }, "no usage at all");
+        assert!(with(&mut [server.as_mut_ptr()]), "server auth");
+        assert!(!with(&mut [signing.as_mut_ptr()]), "code signing only");
+        assert!(!with(&mut []), "disabled for every use");
+        // SAFETY: `context` is valid and freed once, here.
+        unsafe {
+            CertFreeCertificateContext(context);
+        }
     }
 
     #[test]
