@@ -370,11 +370,11 @@ try {
         Reset-State
         Install-Old
         $result = Invoke-Install (Get-Script $name) -WithMinisign:([bool]$case['Minisign'])
-        $calls = Get-Content -LiteralPath $Calls -Raw
-        if (-not $calls) { $calls = '' }
+        # Not `$calls`: PowerShell names ignore case, and $Calls is the log.
+        $logged = [string](Get-Content -LiteralPath $Calls -Raw)
         Check ($result.Code -ne 0 -and $result.Out.Contains($case.Expect)) "refuses $($case.Name) ($($result.Out))"
         Check ((Get-Installed) -eq "marsa $OldVersion") "refuses $($case.Name): the old programs stay"
-        Check (-not $calls.Contains("daemon stop")) "refuses $($case.Name): the old Marsa was not stopped"
+        Check (-not $logged.Contains('daemon stop')) "refuses $($case.Name): the old Marsa was not stopped"
         Check (Test-NoTemp) "refuses $($case.Name): no temporary folder left"
         Check (-not (Test-Path -LiteralPath (Join-Path $Data 'evil.exe')) -and -not (Test-Path -LiteralPath (Join-Path $Marsa 'evil.exe'))) "refuses $($case.Name): nothing outside the temporary folder"
     }
