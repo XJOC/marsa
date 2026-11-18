@@ -5,10 +5,6 @@
 
 /// The widest the confirmation of a removal grows; its text wraps.
 pub const CONFIRM_WIDTH: f32 = 380.0;
-/// The width of an install's progress bar.
-pub const PROGRESS_WIDTH: f32 = 420.0;
-/// The width of a version field in the Runtimes section.
-pub const VERSION_FIELD_WIDTH: f32 = 70.0;
 /// The width of the site name field of the link form.
 pub const NAME_FIELD_WIDTH: f32 = 180.0;
 
@@ -46,3 +42,11 @@ pub const FIRST_RUN_WIDTH: f32 = 560.0;
 /// A site's page (task M5-D7): the column of the labels in its facts card
 /// (the mockup's 130).
 pub const SITE_FACT_LABEL: f32 = 130.0;
+
+/// The Runtimes screen (task M5-D8): the list on the start side (layout.md,
+/// Master and detail: 190 to 220), and the columns of the Installed table
+/// after the version, as the mockup has them (the menu column is an icon
+/// button wide).
+pub const RUNTIMES_LIST_WIDTH: f32 = 220.0;
+pub const RUNTIMES_VERSION_COLUMN: f32 = 110.0;
+pub const RUNTIMES_TAG_COLUMN: f32 = 90.0;
