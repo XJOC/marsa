@@ -27,6 +27,7 @@ use super::status::{
     Health, PathStep, PillState, RequestPath, StatePill, StatusDot, StatusSentence, StepState,
 };
 use super::switch::Switch;
+use super::table::{RowHeight, Table, TableColumn, empty_state};
 use super::tile::{Monogram, SectionTile, TileSize};
 use super::version::{PickerSize, Setting, VersionMenu, VersionPick, VersionPicker};
 use crate::strings;
@@ -58,6 +59,9 @@ mod label {
     pub const MENU: &str = "Version menu: rest, hover, focus, disabled, and the menu open";
     pub const VERSIONS_LIVE: &str =
         "Live: Tab (one stop, then the +), the arrows, Home, End, Enter, and Space";
+    pub const TABLE: &str = "Table: two-line rows, the second selected, hover a row to see it";
+    pub const TABLE_DENSE: &str = "Dense table (32): click a row to select it";
+    pub const EMPTY: &str = "Empty state";
     pub const FIELDS: &str = "Fields";
     pub const LIVE: &str = "Live: click, type, and Tab through these";
     pub const DISABLED_NOTE: &str = "Disabled is drawn at 55% opacity. Hover it for the reason: ";
@@ -74,14 +78,16 @@ enum Page {
     Controls,
     Status,
     Versions,
+    Tables,
 }
 
-const PAGES: [(Page, &str); 5] = [
+const PAGES: [(Page, &str); 6] = [
     (Page::Icons, "1  Icons, tiles, badges"),
     (Page::Buttons, "2  Buttons"),
     (Page::Controls, "3  Switch, segmented, fields"),
     (Page::Status, "4  Status"),
     (Page::Versions, "5  Versions"),
+    (Page::Tables, "6  Tables"),
 ];
 
 /// What the live controls of the third page hold.
@@ -95,6 +101,8 @@ struct Live {
     /// (none: the site's files).
     version: usize,
     setting: Option<usize>,
+    /// The row of the dense table the user clicked.
+    row: Option<usize>,
 }
 
 /// Whether `MARSA_GUI_GALLERY=1`.
@@ -156,6 +164,7 @@ fn draw_page(ui: &mut Ui, theme: &Theme, page: Page) {
         Page::Controls => controls_page(ui, theme),
         Page::Status => status_page(ui, theme),
         Page::Versions => versions_page(ui, theme),
+        Page::Tables => tables_page(ui, theme),
     }
 }
 
@@ -458,6 +467,119 @@ fn controls_page(ui: &mut Ui, theme: &Theme) {
     ui.ctx().data_mut(|data| data.insert_temp(id, live));
 }
 
+/// One site of the sample table.
+struct Site {
+    name: &'static str,
+    folder: &'static str,
+    version: (usize, &'static str),
+    reason: &'static str,
+    mail: u32,
+    dumps: u32,
+}
+
+const SITES: [Site; 3] = [
+    Site {
+        name: "shop",
+        folder: "~/Code/shop",
+        version: (1, "8.4"),
+        reason: "from .php-version",
+        mail: 3,
+        dumps: 12,
+    },
+    Site {
+        name: "blog",
+        folder: "~/Code/blog",
+        version: (0, "8.3"),
+        reason: "from composer.json",
+        mail: 0,
+        dumps: 0,
+    },
+    Site {
+        name: "docs-with-a-long-name",
+        folder: "~/Code/work/clients/acme/projects/docs-with-a-long-name",
+        version: (2, "8.5"),
+        reason: "set for this site",
+        mail: 1,
+        dumps: 0,
+    },
+];
+
+fn tables_page(ui: &mut Ui, theme: &Theme) {
+    let id = ui.make_persistent_id("gallery_tables");
+    let mut live = ui
+        .ctx()
+        .data(|data| data.get_temp::<Live>(id))
+        .unwrap_or_default();
+
+    heading(ui, theme, label::TABLE);
+    let columns = [
+        TableColumn::fill("Site"),
+        TableColumn::fixed("PHP", theme.size.sidebar - theme.space.s4),
+        TableColumn::fixed("Connection", theme.size.version_lg.x),
+        TableColumn::fixed("Caught", theme.size.version_lg.x + theme.space.s6),
+        TableColumn::fixed("", theme.size.icon_button),
+    ];
+    Table::new("gallery_sites", "Sites", &columns)
+        .rows(RowHeight::TwoLine)
+        .selected(Some(1))
+        .show(ui, SITES.len(), |row| {
+            let site = &SITES[row.index()];
+            row.two_lines(site.name, site.folder);
+            row.cell(|ui| {
+                let setting = Setting::Version(site.version.0);
+                VersionMenu::new(
+                    "PHP version for a site",
+                    site.version.1,
+                    strings::USE_SITE_FILES,
+                    &PHP_VERSIONS,
+                    setting,
+                )
+                .reason(site.reason)
+                .show(ui);
+            });
+            row.cell(|ui| {
+                ui.add(Glyph::new(Icon::Lock).color(theme.color.ink2));
+                caption(ui, theme, "HTTPS");
+            });
+            row.cell(|ui| {
+                if site.mail > 0 {
+                    ui.add(RowBadge::new(Section::Mail, site.mail));
+                }
+                if site.dumps > 0 {
+                    ui.add(RowBadge::new(Section::Dumps, site.dumps));
+                }
+            });
+            row.cell(|ui| {
+                ui.add(Button::icon(Icon::More, "More for a site"));
+            });
+        });
+
+    heading(ui, theme, label::TABLE_DENSE);
+    let columns = [
+        TableColumn::fill("Name"),
+        TableColumn::fixed("Rows", theme.size.version_lg.x),
+    ];
+    let output = Table::new("gallery_grid", "Tables", &columns)
+        .rows(RowHeight::Dense)
+        .selected(live.row)
+        .show(ui, 4, |row| {
+            let index = row.index();
+            row.cell(|ui| {
+                ui.label(["users", "sites", "mail", "jobs"][index]);
+            });
+            row.cell(|ui| {
+                caption(ui, theme, ["1,204", "6", "48", "0"][index]);
+            });
+        });
+    if output.clicked.is_some() {
+        live.row = output.clicked;
+    }
+
+    heading(ui, theme, label::EMPTY);
+    empty_state(ui, "No sites yet.", "Add site…");
+    ui.ctx().data_mut(|data| data.insert_temp(id, live));
+}
+
 /// PHP's versions, and Node's: the pickers work for any runtime.
 const PHP_VERSIONS: [(usize, &str); 3] = [(0, "8.3"), (1, "8.4"), (2, "8.5")];
 const NODE_VERSIONS: [(usize, &str); 2] = [(0, "22"), (1, "20")];
@@ -705,6 +827,30 @@ mod tests {
     }
 
     #[test]
+    fn the_tables_page_shows_a_table_a_dense_table_and_the_empty_state() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let tree = tree_of(Page::Tables, theme);
+            assert_eq!(
+                tree.node_with_label("Sites").expect("table").role(),
+                Role::Table
+            );
+            assert_eq!(
+                tree.node_with_label("Connection").expect("header").role(),
+                Role::ColumnHeader
+            );
+            assert!(
+                tree.node_with_label("PHP version for a site, 8.4")
+                    .is_some()
+            );
+            assert!(tree.node_with_label("3 new mails").is_some());
+            assert_eq!(
+                tree.node_with_label("Add site…").expect("empty").role(),
+                Role::Button
+            );
+        }
+    }
+
+    #[test]
     fn the_versions_page_shows_both_pickers_and_the_menu_in_both_themes() {
         for theme in [egui::Theme::Light, egui::Theme::Dark] {
             let tree = tree_of(Page::Versions, theme);
@@ -773,6 +919,7 @@ mod tests {
         assert_eq!(page_numbered(Some("2")), Page::Buttons);
         assert_eq!(page_numbered(Some("4")), Page::Status);
         assert_eq!(page_numbered(Some("5")), Page::Versions);
+        assert_eq!(page_numbered(Some("6")), Page::Tables);
         for wrong in [None, Some("0"), Some("99"), Some("x"), Some("")] {
             assert_eq!(page_numbered(wrong), Page::Icons, "{wrong:?}");
         }
@@ -780,7 +927,7 @@ mod tests {
 
     #[test]
     fn the_gallery_has_its_pages_and_the_five_states_of_components_md() {
-        assert_eq!(PAGES.len(), 5);
+        assert_eq!(PAGES.len(), 6);
         assert_eq!(
             label::STATES,
             ["Rest", "Hover", "Pressed", "Focus", "Disabled"]

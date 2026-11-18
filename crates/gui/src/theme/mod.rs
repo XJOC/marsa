@@ -294,6 +294,8 @@ pub struct Size {
     pub switch_inset: f32,
     /// The height of a row badge: 26 (components.md, Badges).
     pub badge: f32,
+    /// The header row of a table: 34 (components.md, Tables and lists).
+    pub table_header: f32,
     /// The circle of a status dot with word: 26 (components.md, Status).
     pub status_dot: f32,
     /// The state icon in that circle: 13.
@@ -446,6 +448,7 @@ pub const SIZE: Size = Size {
     switch_knob: 16.0,
     switch_inset: 3.0,
     badge: 26.0,
+    table_header: 34.0,
     status_dot: 26.0,
     status_dot_icon: 13.0,
     status_hero: 44.0,

@@ -31,6 +31,7 @@ pub mod icons;
 pub mod segmented;
 pub mod status;
 pub mod switch;
+pub mod table;
 pub mod tile;
 pub mod version;
 
@@ -52,6 +53,7 @@ pub use status::{
     Health, PathStep, PillState, RequestPath, StatePill, StatusDot, StatusSentence, StepState,
 };
 pub use switch::Switch;
+pub use table::{RowHeight, Table, TableColumn, TableOutput};
 pub use tile::{Monogram, SectionTile, TileSize};
 pub use version::{PickerSize, Setting, VersionMenu, VersionPick, VersionPicker};
 
