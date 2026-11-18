@@ -6,7 +6,10 @@
 //! window has connected to the daemon (or after [`LIMIT`]) as an
 //! uncompressed 24-bit BMP, then closes the window.
 //! `MARSA_GUI_THEME=light|dark` draws that theme instead of the system's.
-//! On macOS, `sips -s format png <file.bmp> --out <file.png>` converts it.
+//! `MARSA_GUI_SIZE=900x720` opens the window at that size (task M5-D4).
+//! `MARSA_GUI_ROUTE=home|sites|runtimes|services|logs|settings` opens that
+//! screen. On macOS, `sips -s format png <file.bmp> --out <file.png>`
+//! converts the picture.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -14,11 +17,18 @@ use std::time::{Duration, Instant};
 use std::{fs, io};
 
 use eframe::egui;
+use marsa_core::runtimes::Runtime;
+
+use crate::model::{LogSource, Route};
 
 /// The file to save; read once at start.
 const PATH_VAR: &str = "MARSA_GUI_SCREENSHOT";
 /// `light` or `dark`.
 const THEME_VAR: &str = "MARSA_GUI_THEME";
+/// The window's size when it opens: `900x720`.
+const SIZE_VAR: &str = "MARSA_GUI_SIZE";
+/// The screen the window opens on: `sites`.
+const ROUTE_VAR: &str = "MARSA_GUI_ROUTE";
 /// The longest wait for the daemon before the picture is taken anyway.
 const LIMIT: Duration = Duration::from_secs(10);
 /// The wait after the window connected, so the daemon's lists arrive and the
@@ -100,6 +110,37 @@ impl Screenshot {
     }
 }
 
+/// The size `MARSA_GUI_SIZE` asks for, if it names one.
+pub fn size() -> Option<egui::Vec2> {
+    parse_size(&std::env::var(SIZE_VAR).ok()?)
+}
+
+/// `900x720` as a width and a height.
+fn parse_size(text: &str) -> Option<egui::Vec2> {
+    let (width, height) = text.split_once('x')?;
+    Some(egui::vec2(
+        width.trim().parse().ok()?,
+        height.trim().parse().ok()?,
+    ))
+}
+
+/// The screen `MARSA_GUI_ROUTE` asks for, if it names one.
+pub fn route() -> Option<Route> {
+    parse_route(&std::env::var(ROUTE_VAR).ok()?)
+}
+
+fn parse_route(name: &str) -> Option<Route> {
+    Some(match name {
+        "home" => Route::Home,
+        "sites" => Route::Sites,
+        "runtimes" => Route::Runtimes(Runtime::Php),
+        "services" => Route::Services,
+        "logs" => Route::Logs(LogSource::Caddy),
+        "settings" => Route::Settings,
+        _ => return None,
+    })
+}
+
 /// `image` as an uncompressed 24-bit BMP: rows from the bottom up, each
 /// padded to 4 bytes, blue before green before red.
 fn bmp(image: &egui::ColorImage) -> io::Result<Vec<u8>> {
@@ -146,6 +187,16 @@ mod tests {
     use eframe::egui::Color32;
 
     use super::*;
+
+    #[test]
+    fn a_size_and_a_route_are_read_from_their_names() {
+        assert_eq!(parse_size("900x720"), Some(egui::vec2(900.0, 720.0)));
+        assert_eq!(parse_size("900"), None);
+        assert_eq!(parse_size("wide x 720"), None);
+        assert_eq!(parse_route("sites"), Some(Route::Sites));
+        assert_eq!(parse_route("logs"), Some(Route::Logs(LogSource::Caddy)));
+        assert_eq!(parse_route("mail"), None);
+    }
 
     #[test]
     fn a_bmp_has_its_headers_and_padded_bottom_up_rows() {

@@ -4,8 +4,7 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use marsa_core::types::ServiceAction;
 
-use crate::bridge::Command;
-use crate::model::{self, Model};
+use crate::model::{self, Action, Model};
 use crate::strings;
 use crate::theme::page::{
     PID_COLUMN_MIN, SERVICE_COLUMN_MIN, STATE_COLUMN_MIN, STATE_COLUMN_WIDTH,
@@ -18,15 +17,15 @@ const ACTIONS: [ServiceAction; 3] = [
 ];
 
 /// The services table. Returns the button pressed, if any.
-pub fn show(ui: &mut egui::Ui, model: &Model) -> Option<Command> {
+pub fn show(ui: &mut egui::Ui, model: &Model) -> Vec<Action> {
     ui.strong(strings::SERVICES);
     if model.services.is_empty() {
         ui.weak(strings::NO_SERVICES);
-        return None;
+        return Vec::new();
     }
     let connected = model.is_connected();
     let row_height = ui.spacing().interact_size.y;
-    let mut pressed = None;
+    let mut pressed = Vec::new();
     TableBuilder::new(ui)
         .id_salt("services")
         .striped(true)
@@ -77,7 +76,7 @@ pub fn show(ui: &mut egui::Ui, model: &Model) -> Option<Command> {
                                 response.on_disabled_hover_text(strings::MANAGED_BY_SITES_HINT);
                         }
                         if response.clicked() {
-                            pressed = Some(Command::Service {
+                            pressed.push(Action::Service {
                                 service: service.id.clone(),
                                 action,
                             });

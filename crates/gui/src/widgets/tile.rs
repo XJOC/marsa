@@ -4,7 +4,8 @@
 //! a new language needs a monogram and no new icon (rules.md 9).
 
 use eframe::egui::{
-    Align, Align2, CornerRadius, Rect, Response, Role, Sense, Ui, Vec2, Widget, WidgetInfo, pos2,
+    Align, Align2, CornerRadius, Painter, Rect, Response, Role, Sense, Ui, Vec2, Widget,
+    WidgetInfo, pos2,
 };
 use marsa_core::runtimes::Runtime;
 
@@ -121,27 +122,35 @@ impl Widget for SectionTile<'_> {
         let side = self.size.side(theme);
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
         if ui.is_rect_visible(rect) {
-            let colors = section_colors(theme, self.section);
-            let painter = ui.painter();
-            painter.rect_filled(
-                rect,
-                CornerRadius::same(self.size.radius(theme)),
-                colors.tint,
-            );
-            let icon = Rect::from_center_size(rect.center(), Vec2::splat(theme.size.icon_tile));
-            Icon::of(self.section).paint(painter, theme, icon, colors.fg);
-            if self.dot {
-                let corner = Rect::from_min_size(
-                    pos2(rect.right() - theme.size.dot, rect.top()),
-                    Vec2::splat(theme.size.dot),
-                );
-                // The ring is the sidebar's color, so the dot stands off the tile.
-                paint_dot(painter, theme, corner.center(), colors.fg, theme.color.side);
-            }
+            paint_section(ui.painter(), theme, rect, self.section, self.size, self.dot);
         }
         let (access, name) = (self.access, strings::section_name(self.section));
         response.widget_info(|| tile_info(access, name));
         response
+    }
+}
+
+/// Paints the tile of `section` in `rect`, with the dot of something new
+/// when `dot` is set. The sidebar's items paint their tiles with it too.
+pub fn paint_section(
+    painter: &Painter,
+    theme: &Theme,
+    rect: Rect,
+    section: Section,
+    size: TileSize,
+    dot: bool,
+) {
+    let colors = section_colors(theme, section);
+    painter.rect_filled(rect, CornerRadius::same(size.radius(theme)), colors.tint);
+    let icon = Rect::from_center_size(rect.center(), Vec2::splat(theme.size.icon_tile));
+    Icon::of(section).paint(painter, theme, icon, colors.fg);
+    if dot {
+        let corner = Rect::from_min_size(
+            pos2(rect.right() - theme.size.dot, rect.top()),
+            Vec2::splat(theme.size.dot),
+        );
+        // The ring is the sidebar's color, so the dot stands off the tile.
+        paint_dot(painter, theme, corner.center(), colors.fg, theme.color.side);
     }
 }
 

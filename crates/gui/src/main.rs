@@ -41,7 +41,7 @@ fn run(started: Instant) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(strings::APP_NAME)
-            .with_inner_size(theme::SIZE.window)
+            .with_inner_size(window_size())
             .with_min_inner_size(theme::SIZE.window_min),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
@@ -55,4 +55,15 @@ fn run(started: Instant) -> anyhow::Result<()> {
         }),
     )
     .map_err(|err| anyhow::anyhow!("cannot open the window: {err}"))
+}
+
+/// The size the window opens at.
+fn window_size() -> egui::Vec2 {
+    // Debug builds only: `MARSA_GUI_SIZE` for the design-review pictures
+    // (see `screenshot`).
+    #[cfg(debug_assertions)]
+    if let Some(size) = marsa_gui::screenshot::size() {
+        return size;
+    }
+    theme::SIZE.window
 }

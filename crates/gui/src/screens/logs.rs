@@ -1,4 +1,5 @@
-//! Logs: the Caddy log.
+//! Logs: the Caddy log. M5-D10 adds the other sources of
+//! [`crate::model::LogSource`], the filters, and Follow.
 
 use eframe::egui;
 use marsa_core::types::LogStream;
@@ -6,10 +7,10 @@ use marsa_core::types::LogStream;
 use crate::model::Model;
 use crate::strings;
 
-/// The log of [`crate::model::LOG_SERVICE`]. `show_rows` lays out the visible lines
-/// only. It follows new lines while scrolled to the end, and stays put once
-/// the user scrolls up. Caddy writes its whole log to stderr, so stderr keeps
-/// the normal text color and stdout is the one drawn weak.
+/// The log of [`crate::model::LOG_SERVICE`]. `show_rows` lays out the
+/// visible lines only. It follows new lines while scrolled to the end, and
+/// stays put once the user scrolls up. Caddy writes its whole log to stderr,
+/// so stderr keeps the normal text color and stdout is the one drawn weak.
 pub fn show(ui: &mut egui::Ui, model: &Model) {
     ui.strong(strings::LOG_TITLE);
     if model.log.is_empty() {

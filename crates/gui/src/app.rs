@@ -1,7 +1,12 @@
-//! Drawing. egui is immediate mode: `ui` runs on every frame and draws the
-//! whole window again from the [`Model`], like a Blade view rendered again on
-//! every request. A frame runs only on input or when the bridge sends an
-//! update; nothing here asks for continuous repaints.
+//! The window's loop. egui is immediate mode: `ui` runs on every frame and
+//! draws the whole window again from the [`Model`] through `shell`, like a
+//! Blade view rendered again on every request. A frame runs only on input or
+//! when the bridge sends an update; nothing here asks for continuous
+//! repaints.
+//!
+//! Each frame: `logic` applies the bridge's updates, `shell::show` draws and
+//! returns what the user did, and `ui` applies the actions and sends the
+//! commands (code.md, State).
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -11,11 +16,8 @@ use std::time::Instant;
 use eframe::egui;
 
 use crate::bridge::{self, Command};
-use crate::model::{Connection, Model, Pick, Removal, Update};
-use crate::screens::{self, sites::SitesAction};
-use crate::strings;
-use crate::theme;
-use crate::theme::page::{CONFIRM_WIDTH, LOG_HEIGHT};
+use crate::model::{Connection, Model, Pick, Route, Update};
+use crate::{shell, strings, theme};
 
 pub struct App {
     model: Model,
@@ -55,8 +57,10 @@ impl App {
         // the system's setting.
         theme::style::apply(ctx);
         bridge.attach(ctx);
+        let mut model = Model::new(data_dir);
+        model.route = first_route();
         Self {
-            model: Model::new(data_dir),
+            model,
             bridge,
             picker: None,
             started: Some(started),
@@ -163,47 +167,17 @@ impl eframe::App for App {
             }
             return;
         }
-        let mut commands = Vec::new();
-        let mut pick = None;
-        egui::Panel::top("status").show(ui, |ui| {
-            commands.extend(screens::home::show(ui, &mut self.model));
-        });
-        if self.model.first_run.is_some() && self.model.is_connected() {
-            egui::Panel::top("first_run").show(ui, |ui| {
-                commands.extend(screens::first_run::show(ui, &mut self.model));
-            });
-        }
-        egui::Panel::top("services").show(ui, |ui| {
-            if let Some(command) = screens::services::show(ui, &self.model) {
-                // The notice was about the last action.
-                self.model.notice = None;
-                commands.push(command);
-            }
-        });
-        egui::Panel::top("runtimes").show(ui, |ui| {
-            screens::runtimes::show(ui, &mut self.model, &mut commands);
-        });
-        egui::Panel::bottom("log")
-            .resizable(true)
-            .default_size(LOG_HEIGHT)
-            .show(ui, |ui| screens::logs::show(ui, &self.model));
-        // The sites get the space that is left: their list grows with the
-        // user's projects.
         let picking = self.picker.is_some();
-        egui::CentralPanel::default().show(ui, |ui| {
-            match screens::sites::show(ui, &mut self.model, picking) {
-                Some(SitesAction::Send(command)) => commands.push(command),
-                Some(SitesAction::Pick(chosen)) => pick = Some(chosen),
-                None => {}
+        let output = shell::show(ui, &mut self.model, picking);
+        for action in output.actions {
+            if let Some(command) = self.model.apply_action(action) {
+                self.bridge.send(command);
             }
-        });
-        // Opened by an Uninstall, Unlink, or Forget button above.
-        let ctx = ui.ctx().clone();
-        commands.extend(confirm(&ctx, &mut self.model));
-        for command in commands {
+        }
+        for command in output.commands {
             self.bridge.send(command);
         }
-        if let Some(pick) = pick {
+        if let Some(pick) = output.pick {
             let ctx = ui.ctx().clone();
             self.open_picker(&ctx, pick);
         }
@@ -217,32 +191,13 @@ impl eframe::App for App {
     }
 }
 
-/// The confirmation of an Uninstall, Unlink, or Forget, over the whole
-/// window. Escape or a click beside it cancels. Returns the removal to send
-/// once the user confirms.
-fn confirm(ctx: &egui::Context, model: &mut Model) -> Option<Command> {
-    let removal = model.confirm.clone()?;
-    let text = match &removal {
-        Removal::Unlink { site } => strings::confirm_text(&removal, model.site_root(site), 0),
-        Removal::Forget { folder } => strings::confirm_text(&removal, None, model.sites_in(folder)),
-        Removal::Uninstall { .. } => strings::confirm_text(&removal, None, 0),
-    };
-    let mut confirmed = false;
-    let mut cancelled = false;
-    let modal = egui::Modal::new(egui::Id::unique("confirm_removal")).show(ctx, |ui| {
-        ui.set_max_width(CONFIRM_WIDTH);
-        ui.strong(strings::confirm_title(&removal));
-        ui.label(text);
-        ui.horizontal(|ui| {
-            confirmed = ui.button(strings::removal_button(&removal)).clicked();
-            cancelled = ui.button(strings::CANCEL).clicked();
-        });
-    });
-    if confirmed {
-        return model.confirm_removal().map(Command::Remove);
+/// The screen the window opens on: Home.
+fn first_route() -> Route {
+    // Debug builds only: `MARSA_GUI_ROUTE` opens another screen for the
+    // design-review pictures (see `screenshot`).
+    #[cfg(debug_assertions)]
+    if let Some(route) = crate::screenshot::route() {
+        return route;
     }
-    if cancelled || modal.should_close() {
-        model.cancel_removal();
-    }
-    None
+    Route::Home
 }

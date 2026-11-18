@@ -80,13 +80,16 @@ fn paint_mark(painter: &Painter, theme: &Theme, circle: Rect, mark: Mark, icon_s
 /// The status dot with its word: a 26 circle in the state tint with the
 /// state icon, then a title and a caption. At the bottom of the sidebar and
 /// in the header of the menu-bar panel. A click opens the status: see
-/// `Response::clicked`.
+/// `Response::clicked`. In the folded sidebar the circle shows alone and the
+/// words show in a tooltip.
 #[derive(Clone, Copy, Debug)]
 #[must_use = "a status dot is drawn only when it is added to a Ui"]
 pub struct StatusDot<'a> {
     health: Health,
     title: &'a str,
     caption: &'a str,
+    width: Option<f32>,
+    folded: bool,
     look: Option<Look>,
 }
 
@@ -96,8 +99,22 @@ impl<'a> StatusDot<'a> {
             health,
             title,
             caption,
+            width: None,
+            folded: false,
             look: None,
         }
+    }
+
+    /// At least this wide, as the items above it in the sidebar.
+    pub const fn width(mut self, width: f32) -> Self {
+        self.width = Some(width);
+        self
+    }
+
+    /// The circle alone, in the middle; the words in a tooltip.
+    pub const fn folded(mut self, folded: bool) -> Self {
+        self.folded = folded;
+        self
     }
 
     /// Draws the dot as it looks in `look` (the gallery and the tests).
@@ -113,6 +130,8 @@ impl Widget for StatusDot<'_> {
         let direction = Direction::CURRENT;
         let circle = theme.size.status_dot;
         let pad = theme.space.s2;
+        // The circle lines up with the tiles of the sidebar items.
+        let inset = theme.size.nav_inset();
         let gap = theme.space.group_gap_max;
         let title_token = TextToken {
             size: theme.text.body_sm.size,
@@ -125,12 +144,21 @@ impl Widget for StatusDot<'_> {
             theme.text.caption,
             Color32::PLACEHOLDER,
         );
-        let text = vec2(
-            title.size().x.max(caption.size().x),
-            title.size().y + caption.size().y,
-        );
+        let text = if self.folded {
+            Vec2::ZERO
+        } else {
+            vec2(
+                title.size().x.max(caption.size().x),
+                title.size().y + caption.size().y,
+            )
+        };
+        let content = if self.folded {
+            circle
+        } else {
+            circle + gap + text.x
+        };
         let size = vec2(
-            pad + circle + gap + text.x + pad,
+            (inset + content + inset).max(self.width.unwrap_or_default()),
             circle.max(text.y) + pad + pad,
         );
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
@@ -141,13 +169,16 @@ impl Widget for StatusDot<'_> {
             if let Some(fill) = quiet_fill(theme, look.touch) {
                 painter.rect_filled(rect, CornerRadius::same(corner), fill);
             }
-            let inner = rect.shrink(pad);
+            let inner = rect.shrink2(vec2(inset, pad));
             let spot = |offset: f32, width: f32| {
                 let x = slot(direction, inner, offset, width);
                 Rect::from_min_size(pos2(x, inner.top()), vec2(width, inner.height()))
             };
-            let circle_rect =
-                Align2::LEFT_CENTER.align_size_within_rect(Vec2::splat(circle), spot(0.0, circle));
+            let circle_rect = if self.folded {
+                Rect::from_center_size(rect.center(), Vec2::splat(circle))
+            } else {
+                Align2::LEFT_CENTER.align_size_within_rect(Vec2::splat(circle), spot(0.0, circle))
+            };
             paint_mark(
                 painter,
                 theme,
@@ -155,17 +186,22 @@ impl Widget for StatusDot<'_> {
                 mark(theme, self.health),
                 theme.size.status_dot_icon,
             );
-            let block = spot(circle + gap, text.x);
-            let top = Align2::LEFT_CENTER.align_size_within_rect(text, block).min;
-            let caption_top = top + vec2(0.0, title.size().y);
-            painter.galley(top, title, theme.color.ink);
-            painter.galley(caption_top, caption, theme.color.mute);
+            if !self.folded {
+                let block = spot(circle + gap, text.x);
+                let top = Align2::LEFT_CENTER.align_size_within_rect(text, block).min;
+                let caption_top = top + vec2(0.0, title.size().y);
+                painter.galley(top, title, theme.color.ink);
+                painter.galley(caption_top, caption, theme.color.mute);
+            }
             if look.focused {
                 paint_focus_ring(painter, theme, rect, corner);
             }
         }
         let label = format!("{}, {}", self.title, self.caption);
         response.widget_info(|| WidgetInfo::labeled(Role::Status, true, &label));
+        if self.folded {
+            return response.on_hover_text(label);
+        }
         response
     }
 }
@@ -929,6 +965,26 @@ mod tests {
         assert_eq!(role("Sites are not opening."), egui::Role::Alert);
         assert_eq!(role("Sites not opening, Caddy stopped"), egui::Role::Status);
         assert_eq!(role("Stopped"), egui::Role::Status);
+    }
+
+    #[test]
+    fn the_status_dot_fills_its_width_and_folds_to_its_circle() {
+        let harness = Harness::new(egui::Theme::Light);
+        let dot = StatusDot::new(Health::Error, "Sites not opening", "Caddy stopped");
+        let (mut wide, mut folded) = (Rect::NOTHING, Rect::NOTHING);
+        harness.run(|ui| {
+            wide = ui.add(dot.width(LIGHT.size.sidebar)).rect;
+            folded = ui.add(dot.folded(true)).rect;
+        });
+        assert_eq!(wide.width(), LIGHT.size.sidebar);
+        // The circle with the inset of a sidebar tile on each side: as wide
+        // as a folded sidebar item.
+        assert_eq!(folded.width(), LIGHT.size.nav_item);
+        let tree = harness.accessibility(|ui| {
+            ui.add(dot.folded(true));
+        });
+        let node = tree.node_with_label("Sites not opening, Caddy stopped");
+        assert!(node.is_some(), "a folded dot keeps its words");
     }
 
     #[test]

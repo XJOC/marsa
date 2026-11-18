@@ -1,29 +1,13 @@
-//! Home. For now the status line and the last notice, with the Settings
-//! section folded under them, as in the old one-page window.
+//! Home: for now the status line of the old one-page window. The shell adds
+//! the first-run panel under it. M5-D5 draws the design's Home: the status
+//! sentence, the default version, the first sites.
 
 use eframe::egui;
 
-use super::settings;
-use crate::bridge::Command;
 use crate::model::Model;
 use crate::strings;
-use crate::theme::page::SETTINGS_HEIGHT;
 
-/// The status line, the last notice, and the Settings section.
-pub fn show(ui: &mut egui::Ui, model: &mut Model) -> Option<Command> {
+/// The status line.
+pub fn show(ui: &mut egui::Ui, model: &Model) {
     ui.label(strings::status_line(&model.connection));
-    if let Some(code) = &model.notice {
-        ui.colored_label(ui.visuals().error_fg_color, strings::error_text(code));
-    }
-    let mut command = None;
-    egui::CollapsingHeader::new(strings::SETTINGS)
-        .id_salt("settings")
-        .default_open(false)
-        .show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("settings_scroll")
-                .max_height(SETTINGS_HEIGHT)
-                .show(ui, |ui| command = settings::show(ui, model));
-        });
-    command
 }

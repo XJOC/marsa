@@ -1,8 +1,9 @@
 //! The window's state, and how each message from the bridge changes it.
 //!
 //! Pure: no drawing and no I/O, so the tests run without a window. The
-//! drawing code in `app` only reads a [`Model`], and calls its methods when
-//! the user presses something.
+//! drawing code in `shell` and `screens` reads a [`Model`], and returns an
+//! [`Action`] when the user presses something (or, in the screens not
+//! converted yet, calls the model's methods).
 
 use std::collections::VecDeque;
 use std::mem;
@@ -19,10 +20,13 @@ use marsa_core::types::{
 };
 use semver::Version;
 
+use crate::bridge::Command;
 pub use crate::tray::menu::Autostart;
 
 /// The service whose log the window shows.
 pub const LOG_SERVICE: &str = "caddy";
+/// The service that serves every site: no site opens while it is down.
+pub const WEB_SERVER: &str = "caddy";
 /// The most log lines kept. The oldest go first.
 pub const MAX_LOG_LINES: usize = 5000;
 /// This build's version, shown in the Settings section.
@@ -448,6 +452,70 @@ pub enum Pick {
     Link,
 }
 
+/// The screen the main area shows (code.md, Router). The window's own
+/// state, not the daemon's: a reconnect keeps it. [Laravel: the route that
+/// picks the view.]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Route {
+    #[default]
+    Home,
+    Sites,
+    /// One site's page, by name. M5-D7 draws it; until then it shows the
+    /// Sites screen.
+    Site(String),
+    /// The Runtimes screen with this runtime chosen.
+    Runtimes(Runtime),
+    Services,
+    Logs(LogSource),
+    Settings,
+}
+
+/// The log the Logs screen shows: Caddy's, as before. M5-D10 adds the
+/// others.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LogSource {
+    #[default]
+    Caddy,
+}
+
+/// What the user did in the window. The shell and the screens return it,
+/// and [`Model::apply_action`] turns it into state, and into a bridge
+/// [`Command`] when the daemon must act (code.md, State). [Laravel: a form
+/// posted to a controller.] The screens that still call the model's methods
+/// move here with their own tasks (M5-D5 to M5-D10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// A sidebar item, or the status at its bottom.
+    Navigate(Route),
+    /// The fold button of the sidebar: hide or show the labels.
+    FoldSidebar,
+    /// A service's Start, Stop, or Restart.
+    Service {
+        service: String,
+        action: ServiceAction,
+    },
+}
+
+/// How Marsa works as a whole, as far as the window can tell: the status at
+/// the bottom of the sidebar (principles 1). M5-D5 adds the request path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overall {
+    /// Connecting to the daemon, or again after it went away.
+    Connecting,
+    /// The daemon is shutting down.
+    Stopping,
+    /// The daemon cannot be reached or started: no site opens.
+    DaemonDown,
+    /// The daemon runs, and there is no site yet.
+    NoSites,
+    /// The web server is starting.
+    Starting,
+    /// The web server does not run: no site opens.
+    WebServerDown,
+    /// The daemon and the web server run.
+    Working,
+}
+
 #[derive(Debug, Default)]
 pub struct Model {
     pub connection: Connection,
@@ -502,6 +570,11 @@ pub struct Model {
     /// Linux: the sites the hosts file lacks (task M4-18k3).
     pub hosts: HostsStatus,
     pub hosts_sync: HostsSync,
+    /// The screen the main area shows.
+    pub route: Route,
+    /// The user folded the sidebar to its icons. A narrow window folds it
+    /// anyway (`shell::sidebar`).
+    pub sidebar_folded: bool,
 }
 
 impl Model {
@@ -525,6 +598,9 @@ impl Model {
                     installs: mem::take(&mut self.installs),
                     first_run_closed: self.first_run_closed,
                     data_dir: mem::take(&mut self.data_dir),
+                    // Where the user is, not daemon state.
+                    route: mem::take(&mut self.route),
+                    sidebar_folded: self.sidebar_folded,
                     ..Model::default()
                 };
             }
@@ -1244,6 +1320,48 @@ impl Model {
         matches!(self.connection, Connection::Running(_))
     }
 
+    /// Applies what the user did. Returns the command to send to the
+    /// daemon, if any.
+    pub fn apply_action(&mut self, action: Action) -> Option<Command> {
+        match action {
+            Action::Navigate(route) => {
+                self.route = route;
+                None
+            }
+            Action::FoldSidebar => {
+                self.sidebar_folded = !self.sidebar_folded;
+                None
+            }
+            Action::Service { service, action } => {
+                // The notice was about the last action.
+                self.notice = None;
+                Some(Command::Service { service, action })
+            }
+        }
+    }
+
+    /// How Marsa works as a whole: the daemon, then the sites, then the web
+    /// server that serves them.
+    pub fn overall(&self) -> Overall {
+        match &self.connection {
+            Connection::Connecting | Connection::Reconnecting => Overall::Connecting,
+            Connection::ShuttingDown => Overall::Stopping,
+            Connection::Failed(_) => Overall::DaemonDown,
+            Connection::Running(_) if self.sites.sites.is_empty() => Overall::NoSites,
+            Connection::Running(_) => {
+                let web = self
+                    .services
+                    .iter()
+                    .find(|service| service.id == WEB_SERVER);
+                match web.map(|service| &service.state) {
+                    Some(ServiceState::Running) => Overall::Working,
+                    Some(ServiceState::Starting) => Overall::Starting,
+                    _ => Overall::WebServerDown,
+                }
+            }
+        }
+    }
+
     /// The tables show live state only, so they go. The log stays: it may
     /// tell why the daemon stopped.
     fn disconnect(&mut self, connection: Connection) {
@@ -1536,6 +1654,88 @@ mod tests {
         } else {
             PathBuf::from(unix)
         }
+    }
+
+    #[test]
+    fn navigate_and_fold_change_the_window_only() {
+        let mut model = connected();
+        assert_eq!(model.route, Route::Home);
+        assert!(!model.sidebar_folded);
+        let route = Route::Runtimes(Runtime::Node);
+        assert!(
+            model
+                .apply_action(Action::Navigate(route.clone()))
+                .is_none()
+        );
+        assert_eq!(model.route, route);
+        assert!(model.apply_action(Action::FoldSidebar).is_none());
+        assert!(model.sidebar_folded);
+        assert!(model.apply_action(Action::FoldSidebar).is_none());
+        assert!(!model.sidebar_folded);
+    }
+
+    #[test]
+    fn a_service_action_clears_the_notice_and_becomes_a_command() {
+        let mut model = connected();
+        model.update(Update::Notice("service_busy".into()));
+        let action = Action::Service {
+            service: "caddy".into(),
+            action: ServiceAction::Restart,
+        };
+        let command = model.apply_action(action);
+        assert!(
+            matches!(
+                &command,
+                Some(Command::Service { service, action: ServiceAction::Restart }) if service == "caddy"
+            ),
+            "{command:?}"
+        );
+        assert_eq!(model.notice, None);
+    }
+
+    #[test]
+    fn a_reconnect_keeps_the_route_and_the_fold() {
+        let mut model = connected();
+        model.apply_action(Action::Navigate(Route::Site("shop".into())));
+        model.apply_action(Action::FoldSidebar);
+        model.update(Update::Failed("daemon_start_failed".into()));
+        model.update(Update::Connected(health()));
+        assert_eq!(model.route, Route::Site("shop".into()));
+        assert!(model.sidebar_folded);
+    }
+
+    #[test]
+    fn overall_says_the_daemon_first_then_the_sites_then_the_web_server() {
+        let mut model = Model::default();
+        assert_eq!(model.overall(), Overall::Connecting);
+        model.update(Update::Failed("daemon_start_failed".into()));
+        assert_eq!(model.overall(), Overall::DaemonDown);
+        model.update(Update::Connected(health()));
+        // No site yet: nothing fails to open, whatever Caddy does.
+        assert_eq!(model.overall(), Overall::NoSites);
+        model.update(Update::Sites(site_list(&["shop"])));
+        // Caddy not listed yet counts as down.
+        assert_eq!(model.overall(), Overall::WebServerDown);
+        for (state, overall) in [
+            (ServiceState::Starting, Overall::Starting),
+            (ServiceState::Running, Overall::Working),
+            (ServiceState::Stopping, Overall::WebServerDown),
+            (ServiceState::Stopped, Overall::WebServerDown),
+            (
+                ServiceState::Failed {
+                    code: "port_in_use".into(),
+                },
+                Overall::WebServerDown,
+            ),
+        ] {
+            model.update(Update::Services(vec![
+                status("php-fpm-8.4", ServiceState::Running),
+                status(WEB_SERVER, state),
+            ]));
+            assert_eq!(model.overall(), overall);
+        }
+        model.update(Update::Reconnecting);
+        assert_eq!(model.overall(), Overall::Connecting);
     }
 
     #[test]
