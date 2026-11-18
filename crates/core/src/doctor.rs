@@ -66,11 +66,12 @@ pub enum Pass {
         version: String,
     },
     /// PHP's CA bundle holds every root Windows trusts for HTTPS now:
-    /// `count` of them, with `left_out` others of the store not for HTTPS;
-    /// the bundle was written `age_days` ago.
+    /// `count` of them, with `left_out` others of the store left out, and
+    /// Marsa's CA when `marsa`; the bundle was written `age_days` ago.
     SystemRoots {
         count: usize,
         left_out: usize,
+        marsa: bool,
         age_days: u64,
     },
     Caddy,
@@ -255,6 +256,8 @@ pub struct RootsFacts {
     /// The bundle marsad wrote, and its age in days; `None` when there is
     /// none.
     pub bundle: Option<(String, u64)>,
+    /// Marsa's root certificate, once Caddy has made it.
+    pub marsa_root: Option<String>,
 }
 
 /// Windows: whether PHP's CA bundle holds every root that Windows trusts for
@@ -277,9 +280,13 @@ pub fn system_roots(facts: RootsFacts) -> Verdict {
     if missing > 0 {
         return Verdict::Fail(Problem::SystemRootsMissing { missing });
     }
+    let marsa = facts
+        .marsa_root
+        .is_some_and(|root| !root.trim().is_empty() && bundle.contains(root.trim()));
     Verdict::Pass(Pass::SystemRoots {
         count: roots.len(),
         left_out,
+        marsa,
         age_days,
     })
 }
@@ -892,14 +899,34 @@ mod tests {
     fn the_windows_roots_must_all_be_in_phps_bundle() {
         let roots = vec![vec![1, 2, 3], vec![4, 5, 6]];
         let all = crate::caddy::ca_bundle_text(&crate::caddy::pem_certificates(&roots), "root");
-        let facts = |windows, bundle| system_roots(RootsFacts { windows, bundle });
+        let facts = |windows, bundle| {
+            system_roots(RootsFacts {
+                windows,
+                bundle,
+                marsa_root: Some("root".to_owned()),
+            })
+        };
         assert_eq!(
             facts(Ok((roots.clone(), 7)), Some((all.clone(), 3))),
             Verdict::Pass(Pass::SystemRoots {
                 count: 2,
                 left_out: 7,
+                marsa: true,
                 age_days: 3,
             })
+        );
+        // Before Caddy makes Marsa's root, the bundle has Windows' alone.
+        let before = system_roots(RootsFacts {
+            windows: Ok((roots.clone(), 0)),
+            bundle: Some((crate::caddy::pem_certificates(&roots), 0)),
+            marsa_root: None,
+        });
+        assert!(
+            matches!(
+                before,
+                Verdict::Pass(Pass::SystemRoots { marsa: false, .. })
+            ),
+            "{before:?}"
         );
         let one = crate::caddy::pem_certificates(&roots[..1]);
         assert_eq!(

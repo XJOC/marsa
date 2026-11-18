@@ -287,9 +287,11 @@ fn roots_facts(data_dir: &Path) -> doctor::RootsFacts {
             .map_or(0, |age| age.as_secs() / 86_400);
         (text, age)
     });
+    let marsa_root = std::fs::read_to_string(CaddyPaths::in_dir(data_dir).ca_root()).ok();
     doctor::RootsFacts {
         windows: windows_roots(),
         bundle,
+        marsa_root,
     }
 }
 
@@ -339,8 +341,9 @@ fn passed(pass: &Pass, data_dir: &Path) -> String {
         Pass::SystemRoots {
             count,
             left_out,
+            marsa,
             age_days,
-        } => strings::doctor_system_roots_ok(*count, *left_out, *age_days),
+        } => strings::doctor_system_roots_ok(*count, *left_out, *marsa, *age_days),
         Pass::Caddy => strings::DOCTOR_CADDY_OK.to_owned(),
         Pass::Dns => strings::DOCTOR_DNS_OK.to_owned(),
         Pass::Hosts => strings::DOCTOR_HOSTS_OK.to_owned(),
@@ -720,11 +723,26 @@ mod tests {
         let pass = Verdict::Pass(Pass::SystemRoots {
             count: 57,
             left_out: 4,
+            marsa: true,
             age_days: 0,
         });
         let text = render(Check::SystemRoots, &pass, &data, true);
         assert!(text.starts_with("✓") && text.contains("57"), "{text}");
-        assert!(text.contains("today"), "{text}");
+        assert!(
+            text.contains("today") && text.contains("and Marsa's CA"),
+            "{text}"
+        );
+        let before = Verdict::Pass(Pass::SystemRoots {
+            count: 57,
+            left_out: 4,
+            marsa: false,
+            age_days: 2,
+        });
+        let text = render(Check::SystemRoots, &before, &data, true);
+        assert!(
+            text.contains("not made yet") && text.contains("2 days ago"),
+            "{text}"
+        );
         for (problem, part) in [
             (
                 Problem::SystemRootsUnreadable {

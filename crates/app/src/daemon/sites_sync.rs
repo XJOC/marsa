@@ -145,6 +145,8 @@ async fn run(
     let refresh_roots = system == SystemRoots::WindowsStore;
     let mut roots_due =
         tokio::time::interval_at(tokio::time::Instant::now() + ROOTS_REFRESH, ROOTS_REFRESH);
+    // After a sleep, one read, not one per missed hour.
+    roots_due.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let shutdown = daemon.shutdown.clone();
     // The requests the coming pass answers. A return drops them unanswered,
     // and with them `requests`, so each waiting route gets `PassNotRun`.
