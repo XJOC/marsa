@@ -529,9 +529,16 @@ mod tests {
         let view = view(&working(0, &["8.4.27"]));
         assert_eq!(view.status.title, "Marsa is running");
         assert_eq!(view.status.caption, "No sites yet");
-        let sites = view.sites.expect("sites");
+        let sites = view.sites.as_ref().expect("sites");
         assert!(sites.rows.is_empty() && sites.more == 0);
         assert!(view.php.is_some());
+        // The list says what to do, once: the status says there is none.
+        let harness = Harness::new(egui::Theme::Light);
+        let tree = harness.accessibility(|ui| {
+            show(ui, &view, &LIGHT);
+        });
+        assert!(tree.node_with_text("Add a site in Marsa.").is_some());
+        assert!(tree.node_with_text("No sites yet.").is_none());
     }
 
     #[test]

@@ -600,8 +600,9 @@ pub const PANEL_NAME: &str = "Marsa panel";
 pub const PANEL_SITES: &str = "Sites";
 /// Under the name of the Xdebug switch.
 pub const PANEL_XDEBUG_CAPTION: &str = "PHP runs slower while it is on";
-/// Where the list of sites has none.
-pub const PANEL_NO_SITES: &str = HOME_NO_SITES;
+/// Where the list of sites has none (the status above already says "No sites
+/// yet"): what to do about it.
+pub const PANEL_NO_SITES: &str = "Add a site in Marsa.";
 /// Why "Stop Marsa" cannot be pressed: the daemon is not there yet.
 pub const PANEL_NOT_CONNECTED: &str = "Marsa is not connected yet.";
 /// Why "Stop Marsa" cannot be pressed: it is stopping already.
