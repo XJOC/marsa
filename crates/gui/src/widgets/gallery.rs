@@ -56,7 +56,8 @@ mod label {
         "Version picker: rest (PHP and Node), then hover, pressed, and focus on one button";
     pub const PICKER_MORE: &str = "Version picker: medium (menu-bar panel), and disabled";
     pub const MENU: &str = "Version menu: rest, hover, focus, disabled, and the menu open";
-    pub const VERSIONS_LIVE: &str = "Live: Tab (one stop), the arrows, Home, End, Enter, and Space";
+    pub const VERSIONS_LIVE: &str =
+        "Live: Tab (one stop, then the +), the arrows, Home, End, Enter, and Space";
     pub const FIELDS: &str = "Fields";
     pub const LIVE: &str = "Live: click, type, and Tab through these";
     pub const DISABLED_NOTE: &str = "Disabled is drawn at 55% opacity. Hover it for the reason: ";
