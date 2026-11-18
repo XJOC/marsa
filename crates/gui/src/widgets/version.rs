@@ -89,6 +89,14 @@ impl PickerSize {
         }
     }
 
+    /// components.md: the large size is `radius.lg`, the medium `radius.md`.
+    pub const fn radius(self, theme: &Theme) -> u8 {
+        match self {
+            Self::Large => theme.radius.lg,
+            Self::Medium => theme.radius.md,
+        }
+    }
+
     pub const fn text(self, theme: &Theme) -> VersionText {
         match self {
             Self::Large => theme.text.version_lg,
@@ -347,7 +355,7 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
                         let chosen = self.selected == Some(*value);
                         self.paint_version(ui, theme, spots[index], name, chosen, look);
                     }
-                    None => Self::paint_install(ui, theme, spots[index], look),
+                    None => Self::paint_install(ui, theme, self.size, spots[index], look),
                 }
             }
         }
@@ -393,7 +401,8 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
     ) {
         let paint = button_paint(theme, self.size, chosen, look.touch);
         let painter = ui.painter();
-        let corner = CornerRadius::same(theme.radius.lg);
+        let radius = self.size.radius(theme);
+        let corner = CornerRadius::same(radius);
         painter.rect_filled(spot, corner, paint.fill);
         painter.rect_stroke(
             spot,
@@ -409,17 +418,18 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
         let at = Align2::CENTER_CENTER.align_size_within_rect(galley.size(), spot);
         painter.galley(at.min, galley, paint.text);
         if look.focused {
-            paint_focus_ring(painter, theme, spot, theme.radius.lg);
+            paint_focus_ring(painter, theme, spot, radius);
         }
     }
 
-    fn paint_install(ui: &Ui, theme: &Theme, spot: Rect, look: Look) {
+    fn paint_install(ui: &Ui, theme: &Theme, size: PickerSize, spot: Rect, look: Look) {
         let painter = ui.painter();
+        let radius = size.radius(theme);
         if let Some(fill) = quiet_fill(theme, look.touch) {
-            painter.rect_filled(spot, CornerRadius::same(theme.radius.lg), fill);
+            painter.rect_filled(spot, CornerRadius::same(radius), fill);
         }
         let stroke = Stroke::new(theme.size.border, theme.color.control);
-        let outline = rounded_outline(spot, f32::from(theme.radius.lg));
+        let outline = rounded_outline(spot, f32::from(radius));
         painter.extend(Shape::dashed_line(
             &outline,
             stroke,
@@ -430,7 +440,7 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
             Rect::from_center_size(spot.center(), Vec2::splat(theme.size.version_install_icon));
         Icon::Plus.paint(painter, theme, icon, theme.color.mute);
         if look.focused {
-            paint_focus_ring(painter, theme, spot, theme.radius.lg);
+            paint_focus_ring(painter, theme, spot, radius);
         }
     }
 }
@@ -1572,6 +1582,14 @@ mod tests {
                 contrast(theme.color.ink, theme.color.surface) >= TEXT,
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn the_large_size_has_the_large_corner_and_the_medium_size_the_medium_one() {
+        for theme in [&crate::theme::LIGHT, &crate::theme::DARK] {
+            assert_eq!(PickerSize::Large.radius(theme), theme.radius.lg);
+            assert_eq!(PickerSize::Medium.radius(theme), theme.radius.md);
         }
     }
 }
