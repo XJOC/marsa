@@ -1,9 +1,10 @@
 //! The step card (task M5-D5, the first-run panel): a numbered circle, a
-//! title, a line of explanation, and whatever the screen adds under them,
-//! such as a progress bar. Three looks tell where the user is: the step
-//! to do now has the `surface` fill and an `accent` border, a step done has
-//! a check, and a step to come is quiet. The number or the check and the
-//! word for a screen reader say it too, so color is never alone (R8).
+//! title, a line of explanation (until the step is done), and whatever the
+//! screen adds under them, such as a progress bar. Three looks tell where
+//! the user is: the step to do now has the `surface` fill and an `accent`
+//! border, a step done has a check, and a step to come is quiet. The number
+//! or the check and the word for a screen reader say it too, so color is
+//! never alone (R8).
 
 use eframe::egui::{
     Align2, Color32, CornerRadius, Frame, InnerResponse, Label, Margin, Rect, RichText, Role,
@@ -110,10 +111,14 @@ impl<'a> StepCard<'a> {
                         .font(theme.text.body_strong.font_id())
                         .color(look.title);
                     ui.add(Label::new(title).selectable(false));
-                    let body = RichText::new(self.body)
-                        .font(theme.text.body_sm.font_id())
-                        .color(theme.color.mute);
-                    ui.add(Label::new(body).selectable(false));
+                    // A finished step keeps only its checked title, so the
+                    // step to do stands out (design review, D5).
+                    if self.stage != Stage::Done {
+                        let body = RichText::new(self.body)
+                            .font(theme.text.body_sm.font_id())
+                            .color(theme.color.mute);
+                        ui.add(Label::new(body).selectable(false));
+                    }
                     below(ui)
                 })
                 .inner
@@ -213,6 +218,26 @@ mod tests {
         // The circle, and the card's margin around it.
         let least = LIGHT.size.step_circle + 2.0 * LIGHT.space.s4;
         assert!(short.height() >= least, "{}", short.height());
+    }
+
+    #[test]
+    fn a_finished_step_drops_its_explanation() {
+        let harness = Harness::new(egui::Theme::Light);
+        let body = "A long explanation that wraps onto a second line in a narrow card.";
+        let (mut done, mut next) = (Rect::NOTHING, Rect::NOTHING);
+        harness.run(|ui| {
+            done = StepCard::new(1, "Install", body, Stage::Done)
+                .show_with(ui, |_| {})
+                .response
+                .rect;
+            next = StepCard::new(2, "Install", body, Stage::Next)
+                .show_with(ui, |_| {})
+                .response
+                .rect;
+        });
+        // The same title and body: only the stage differs, so the done card
+        // is shorter by the explanation.
+        assert!(done.height() < next.height());
     }
 
     #[test]
