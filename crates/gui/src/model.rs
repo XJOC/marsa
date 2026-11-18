@@ -599,6 +599,10 @@ pub struct Model {
     pub settings_notice: Option<String>,
     /// The data folder this window and its daemon use. Shown, never changed.
     pub data_dir: PathBuf,
+    /// The user's home folder, read once at start. Display only: a folder
+    /// under it is shown as `~/…` (`strings::home_path`), and no program ever
+    /// gets the shortened text.
+    pub home: Option<PathBuf>,
     /// The removal the confirmation dialog asks about.
     pub confirm: Option<Removal>,
     /// The removal sent and not answered yet. One at a time.
@@ -642,6 +646,7 @@ impl Model {
                     installs: mem::take(&mut self.installs),
                     first_run_closed: self.first_run_closed,
                     data_dir: mem::take(&mut self.data_dir),
+                    home: self.home.take(),
                     // Where the user is, not daemon state.
                     route: mem::take(&mut self.route),
                     sidebar_folded: self.sidebar_folded,

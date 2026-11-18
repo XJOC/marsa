@@ -52,6 +52,9 @@ pub struct SitesView<'a> {
     /// version menu after the first row.
     pub php: Vec<PhpChoice>,
     pub parked: &'a [PathBuf],
+    /// The user's home folder: a folder under it is shown as `~/…`, with the
+    /// full path in a tooltip. Display only.
+    pub home: Option<&'a Path>,
     /// Why a parked folder cannot be forgotten now.
     pub forget_off: Option<&'static str>,
     pub skipped: &'a [SkippedFolder],
@@ -187,6 +190,7 @@ pub fn view(model: &Model, picking: bool) -> SitesView<'_> {
         list,
         php,
         parked: &model.sites.parked,
+        home: model.home.as_deref(),
         forget_off: (model.is_connected() && !model.can_remove())
             .then_some(strings::REMOVE_BUSY_HINT),
         skipped: &model.sites.skipped,
@@ -396,7 +400,7 @@ pub fn show(ui: &mut Ui, view: &SitesView<'_>, theme: &Theme) -> Vec<Action> {
         List::Rows(rows) => table(ui, theme, view, rows, &mut actions),
     }
     parked(ui, theme, view, &mut actions);
-    skipped(ui, theme, view.skipped);
+    skipped(ui, theme, view.skipped, view.home);
     actions
 }
 
@@ -556,7 +560,8 @@ fn link_form(ui: &mut Ui, theme: &Theme, link: &LinkView<'_>, actions: &mut Vec<
                 ui.ctx().request_repaint();
             }
             mute(ui, theme, &strings::site_suffix());
-            if ui.add(Button::secondary(strings::LINK_CONFIRM)).clicked() || entered {
+            // The one main action of the form.
+            if ui.add(Button::primary(strings::LINK_CONFIRM)).clicked() || entered {
                 actions.push(Action::SubmitLink);
             }
             if ui.add(Button::secondary(strings::CANCEL)).clicked() {
@@ -595,7 +600,9 @@ fn table(
     let table = Table::new("sites", strings::SITES, &columns).rows(RowHeight::TwoLine);
     let shown = table.show(ui, rows.len(), |row| {
         let site = &rows[row.index()];
-        row.two_lines(site.name, &site.root.display().to_string());
+        let full = site.root.display().to_string();
+        let shown = strings::home_path(site.root, view.home);
+        row.two_lines_hover(site.name, &shown, &full);
         row.cell(|ui| php_menu(ui, view, site, &versions, actions));
         row.cell(|ui| connection(ui, theme, site.https));
         row.cell(|ui| {
@@ -738,7 +745,7 @@ fn parked(ui: &mut Ui, theme: &Theme, view: &SitesView<'_>, actions: &mut Vec<Ac
         view.parked.len(),
         |row| {
             let folder = &view.parked[row.index()];
-            row.cell(|ui| path(ui, theme, folder));
+            row.cell(|ui| path(ui, theme, folder, view.home));
             row.cell(|ui| {
                 let button = Button::secondary(strings::FORGET_BUTTON)
                     .in_row()
@@ -759,7 +766,7 @@ fn parked(ui: &mut Ui, theme: &Theme, view: &SitesView<'_>, actions: &mut Vec<Ac
 }
 
 /// The folders that did not become a site, each with the reason.
-fn skipped(ui: &mut Ui, theme: &Theme, folders_skipped: &[SkippedFolder]) {
+fn skipped(ui: &mut Ui, theme: &Theme, folders_skipped: &[SkippedFolder], home: Option<&Path>) {
     if folders_skipped.is_empty() {
         return;
     }
@@ -778,7 +785,7 @@ fn skipped(ui: &mut Ui, theme: &Theme, folders_skipped: &[SkippedFolder]) {
         folders_skipped.len(),
         |row| {
             let folder = &folders_skipped[row.index()];
-            row.cell(|ui| path(ui, theme, &folder.path));
+            row.cell(|ui| path(ui, theme, &folder.path, home));
             row.cell(|ui| {
                 let reason = strings::skip_reason(&folder.code);
                 let text = RichText::new(&reason)
@@ -791,12 +798,17 @@ fn skipped(ui: &mut Ui, theme: &Theme, folders_skipped: &[SkippedFolder]) {
     );
 }
 
-/// A folder's path in the mono face, cut short at the end of the column.
-fn path(ui: &mut Ui, theme: &Theme, folder: &Path) {
-    let text = RichText::new(folder.display().to_string())
+/// A folder's path in the mono face, as `~/…` under the home folder, cut
+/// short at the end of the column. The tooltip has the full path.
+fn path(ui: &mut Ui, theme: &Theme, folder: &Path, home: Option<&Path>) {
+    let shown = strings::home_path(folder, home);
+    let text = RichText::new(&shown)
         .font(theme.text.mono_sm.font_id())
         .color(theme.color.ink);
-    ui.add(Label::new(text).truncate().selectable(false));
+    let response = ui.add(Label::new(text).truncate().selectable(false));
+    // Shortened for the eye, or cut short by the column: the whole path is
+    // one hover away.
+    response.on_hover_text(folder.display().to_string());
 }
 
 #[cfg(test)]
@@ -827,6 +839,24 @@ mod tests {
 
     fn v(text: &str) -> Version {
         text.parse().expect("a version")
+    }
+
+    /// An absolute path on this system, from Unix-style parts (a Windows
+    /// path needs a drive to be absolute).
+    fn abs(unix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
+        } else {
+            PathBuf::from(unix)
+        }
+    }
+
+    /// `~` and the parts after it, with the separator of the system.
+    fn tilde(parts: &[&str]) -> String {
+        let sep = std::path::MAIN_SEPARATOR;
+        parts
+            .iter()
+            .fold(String::from("~"), |text, part| format!("{text}{sep}{part}"))
     }
 
     fn site(name: &str, php: Option<&str>, source: Option<Source>) -> Site {
@@ -1197,10 +1227,13 @@ mod tests {
     fn the_link_form_shows_the_folder_the_name_and_the_site_it_would_replace() {
         let mut model = model(&["shop"]);
         assert!(view(&model, false).link.is_none());
-        model.pick_link_folder(Path::new("/work/Shop"));
+        model.pick_link_folder(&abs("/work/Shop"));
         let view_ = view(&model, false);
         let link = view_.link.as_ref().expect("the form");
-        assert_eq!((link.folder, link.name), (Path::new("/work/Shop"), "shop"));
+        assert_eq!(
+            (link.folder, link.name),
+            (abs("/work/Shop").as_path(), "shop")
+        );
         assert_eq!(link.replaces.map(|site| site.name.as_str()), Some("shop"));
     }
 
@@ -1431,7 +1464,7 @@ mod tests {
     #[test]
     fn the_link_form_returns_its_edits_and_sends_with_link_or_enter() {
         let mut model = model(&[]);
-        model.pick_link_folder(Path::new("/work/blog"));
+        model.pick_link_folder(&abs("/work/blog"));
         assert_eq!(click(&model, strings::LINK_CONFIRM), [Action::SubmitLink]);
         assert_eq!(click(&model, strings::CANCEL), [Action::CancelLink]);
 
@@ -1511,6 +1544,148 @@ mod tests {
         }));
         model.confirm_removal().expect("sent");
         assert!(click(&model, strings::FORGET_BUTTON).is_empty());
+    }
+
+    #[test]
+    fn the_folders_under_home_show_with_a_tilde_and_a_screen_reader_hears_the_full_path() {
+        let home = abs("/Users/omar");
+        let mut model = model(&[]);
+        let places = [
+            ("docs", abs("/Users/omarx/Code/docs")),
+            ("shop", home.join("Code").join("shop")),
+            ("wiki", abs("/srv/www/wiki")),
+        ];
+        let sites = places
+            .iter()
+            .map(|(name, root)| {
+                let mut site = site(name, Some("8.4.27"), Some(Source::GlobalDefault));
+                site.root = root.clone();
+                site
+            })
+            .collect();
+        with_sites(&mut model, sites);
+        model.home = Some(home.clone());
+        assert_eq!(view(&model, false).home, Some(home.as_path()));
+
+        let harness = Harness::new(egui::Theme::Light);
+        let mut painted = Vec::new();
+        let shapes = harness.shapes(|ui| {
+            draw(ui, &model);
+        });
+        for shape in shapes {
+            if let egui::Shape::Text(text) = shape {
+                painted.push(text.galley.text().to_owned());
+            }
+        }
+        // Under home: shortened. Beside home, and elsewhere: in full.
+        assert!(painted.contains(&tilde(&["Code", "shop"])), "{painted:?}");
+        assert!(
+            painted.contains(&places[0].1.display().to_string()),
+            "{painted:?}"
+        );
+        assert!(
+            painted.contains(&places[2].1.display().to_string()),
+            "{painted:?}"
+        );
+        assert!(
+            !painted
+                .iter()
+                .any(|text| text.contains("Users") && text.starts_with('~')),
+            "{painted:?}"
+        );
+        // The tree has the whole path, so the tilde is never all there is.
+        let (_, tree) = start(&model);
+        let label = format!("shop, {}", places[1].1.display());
+        assert!(tree.node_with_text(&label).is_some(), "{label}");
+    }
+
+    #[test]
+    fn the_parked_and_skipped_lists_show_the_home_folder_as_a_tilde_too() {
+        let home = abs("/Users/omar");
+        let mut model = model(&["shop"]);
+        model.home = Some(home.clone());
+        model.sites.parked = vec![home.join("Code"), abs("/srv/www")];
+        model.sites.skipped = vec![SkippedFolder {
+            path: home.join("Code").join("My Site"),
+            code: "site_name_invalid".into(),
+        }];
+        let (_, tree) = start(&model);
+        assert!(tree.node_with_text(&tilde(&["Code"])).is_some());
+        assert!(tree.node_with_text(&tilde(&["Code", "My Site"])).is_some());
+        assert!(
+            tree.node_with_text(&abs("/srv/www").display().to_string())
+                .is_some()
+        );
+        // With no home, the same folders are shown in full.
+        model.home = None;
+        let (_, tree) = start(&model);
+        let full = home.join("Code").display().to_string();
+        assert!(tree.node_with_text(&full).is_some(), "{full}");
+        assert!(tree.node_with_text(&tilde(&["Code"])).is_none());
+    }
+
+    #[test]
+    fn every_cell_of_a_row_is_centered_on_the_middle_of_the_row() {
+        let model = model(&["shop"]);
+        let (_, tree) = start(&model);
+        let middle = |node: &eframe::egui::accesskit::Node| {
+            let bounds = node.bounds().expect("a place");
+            (bounds.y0 + bounds.y1) / 2.0
+        };
+        let by_label = |label: &str| middle(tree.node_with_label(label).expect(label));
+        let open = by_label("Open");
+        assert!((by_label("PHP version for shop, 8.4") - open).abs() < 0.5);
+        assert!((by_label("More actions for shop") - open).abs() < 0.5);
+        // The reason and the lock and word of the connection share it too.
+        let reason = middle(tree.node_with_text("default").expect("the reason"));
+        assert!((reason - open).abs() < 1.0, "{reason} {open}");
+        let word = middle(tree.node_with_text(strings::HTTPS).expect("the word"));
+        assert!((word - open).abs() < 1.0, "{word} {open}");
+    }
+
+    #[test]
+    fn the_forget_buttons_are_30_high_and_sit_inside_rows_of_at_least_46() {
+        let mut model = model(&["shop"]);
+        model.sites.parked = vec![PathBuf::from("/code"), PathBuf::from("/work")];
+        let (_, tree) = start(&model);
+        let mut buttons: Vec<_> = tree
+            .nodes_with_label(strings::FORGET_BUTTON)
+            .into_iter()
+            .map(|node| node.bounds().expect("a place"))
+            .collect();
+        assert_eq!(buttons.len(), 2);
+        buttons.sort_by(|a, b| a.y0.total_cmp(&b.y0));
+        let height = buttons[0].y1 - buttons[0].y0;
+        assert_eq!(height, f64::from(LIGHT.size.control_in_row));
+        // One row down is one row's height.
+        let row = buttons[1].y0 - buttons[0].y0;
+        assert!(row >= 46.0, "{row}");
+        assert_eq!(row, f64::from(RowHeight::OneLine.points(&LIGHT)));
+        // The divider of a row is 1 px: the button clears it on both sides.
+        assert!(
+            row - height >= 2.0 * f64::from(LIGHT.size.border),
+            "{row} {height}"
+        );
+    }
+
+    #[test]
+    fn link_is_the_primary_button_of_the_form_and_cancel_is_not() {
+        let accent = |model: &Model| {
+            let harness = Harness::new(egui::Theme::Light);
+            let shapes = harness.shapes(|ui| {
+                draw(ui, model);
+            });
+            shapes
+                .iter()
+                .filter(|shape| matches!(shape, egui::Shape::Rect(rect) if rect.fill == LIGHT.color.accent))
+                .count()
+        };
+        let mut model = model(&["shop"]);
+        // "Add site…" is the only accent button.
+        assert_eq!(accent(&model), 1);
+        model.pick_link_folder(&abs("/work/blog"));
+        // Link is the second; Cancel stays secondary (a `surface` fill).
+        assert_eq!(accent(&model), 2);
     }
 
     #[test]

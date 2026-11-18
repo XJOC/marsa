@@ -2,7 +2,7 @@
 //! second language can be added later without touching the drawing code.
 //! Errors are shown by their stable code, never by their English message.
 
-use std::path::Path;
+use std::path::{MAIN_SEPARATOR, Path};
 
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::Runtime;
@@ -97,6 +97,28 @@ pub const REASON_DEFAULT: &str = "default";
 pub const REASON_FILES: &str = "from the site's files";
 pub const REASON_NO_PHP: &str = "no PHP installed";
 pub const REASON_NO_MATCH: &str = "no installed version fits";
+
+/// A folder as the window shows it: `~` for the home folder and `~/Code/shop`
+/// for one under it, with the separator of the system; any other path as it
+/// is. Display only: this text is never given to a program, and the tooltip
+/// shows the full path. The match is by whole path parts
+/// ([`Path::strip_prefix`]), so `/Users/omarx/Code` is not under
+/// `/Users/omar`, and a home that is not a full path, or is the root, is
+/// ignored.
+pub fn home_path(path: &Path, home: Option<&Path>) -> String {
+    let under = home
+        .filter(|home| home.is_absolute() && home.parent().is_some())
+        .and_then(|home| path.strip_prefix(home).ok());
+    let Some(rest) = under else {
+        return path.display().to_string();
+    };
+    let mut shown = String::from("~");
+    for part in rest.components() {
+        shown.push(MAIN_SEPARATOR);
+        shown.push_str(&part.as_os_str().to_string_lossy());
+    }
+    shown
+}
 
 /// `from .php-version`, `from composer.json`: the file the version came
 /// from, by its name.
@@ -1790,6 +1812,62 @@ mod tests {
             kind_text(SiteKind::NodeProxy { port: 5173 }),
             "Proxy to port 5173"
         );
+    }
+
+    /// An absolute path from Unix-style parts (a Windows path needs a drive).
+    fn full(unix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
+        } else {
+            PathBuf::from(unix)
+        }
+    }
+
+    /// `~` and the parts after it, with the separator of the system.
+    fn tilde(parts: &[&str]) -> String {
+        let mut text = String::from("~");
+        for part in parts {
+            text.push(MAIN_SEPARATOR);
+            text.push_str(part);
+        }
+        text
+    }
+
+    #[test]
+    fn a_folder_under_home_is_shown_with_a_tilde_and_any_other_is_left_alone() {
+        let home = full("/Users/omar");
+        let shown = |path: &str| home_path(&full(path), Some(&home));
+        assert_eq!(shown("/Users/omar/Code/shop"), tilde(&["Code", "shop"]));
+        assert_eq!(shown("/Users/omar/Code"), tilde(&["Code"]));
+        assert_eq!(shown("/Users/omar"), "~", "the home folder itself");
+        // A trailing separator and `.` parts do not change the match.
+        assert_eq!(shown("/Users/omar/Code/"), tilde(&["Code"]));
+        // Outside home: the full path, as `display` writes it.
+        assert_eq!(
+            shown("/srv/www/shop"),
+            full("/srv/www/shop").display().to_string()
+        );
+        // Only a prefix of the text, not of the path parts.
+        assert_eq!(
+            shown("/Users/omarx/Code/shop"),
+            full("/Users/omarx/Code/shop").display().to_string()
+        );
+        assert_eq!(
+            shown("/Users/oma"),
+            full("/Users/oma").display().to_string()
+        );
+    }
+
+    #[test]
+    fn with_no_usable_home_every_path_is_shown_in_full() {
+        let path = full("/Users/omar/Code/shop");
+        let text = path.display().to_string();
+        assert_eq!(home_path(&path, None), text);
+        // Not a full path: it would match everything or nothing.
+        assert_eq!(home_path(&path, Some(Path::new(""))), text);
+        assert_eq!(home_path(&path, Some(Path::new("omar"))), text);
+        // The root as home would turn every path into `~/…`.
+        assert_eq!(home_path(&path, Some(&full("/"))), text);
     }
 
     #[test]

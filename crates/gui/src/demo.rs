@@ -70,6 +70,8 @@ pub fn fill(model: &mut Model, demo: Demo) {
         api_version: 1,
         pid: 1,
     }));
+    // The made-up folders are under this "home", so they show as `~/…`.
+    model.home = Some(PathBuf::from("/demo"));
     if demo == Demo::FirstRun1 {
         return first_run_downloading(model);
     }
@@ -335,6 +337,7 @@ mod tests {
             let mut model = Model::default();
             fill(&mut model, demo);
             assert!(model.is_connected());
+            assert_eq!(model.home.as_deref(), Some(std::path::Path::new("/demo")));
             assert_eq!(model.sites.sites.len(), 6);
             assert_eq!(model.php_versions().len(), 2);
             assert_eq!(model.services.len(), 2);

@@ -357,6 +357,14 @@ pub(crate) mod harness {
             self.nodes.iter().find(|node| node.label() == Some(label))
         }
 
+        /// Every node named `label`, in the order of the tree.
+        pub fn nodes_with_label(&self, label: &str) -> Vec<&accesskit::Node> {
+            self.nodes
+                .iter()
+                .filter(|node| node.label() == Some(label))
+                .collect()
+        }
+
         /// A node named `text`, or showing it as its value: egui gives a
         /// text label its words as a value, not a name.
         pub fn node_with_text(&self, text: &str) -> Option<&accesskit::Node> {
