@@ -841,8 +841,9 @@ pub(crate) mod tests {
     /// How strict the literal check is with a file.
     #[derive(Clone, Copy, PartialEq)]
     enum Rules {
-        /// `app.rs` and `main.rs`: no color word at all, and no float other
-        /// than zero: egui sizes are `f32`.
+        /// `app.rs`, `main.rs`, and the screens: no color word at all, and
+        /// no float other than zero: egui sizes are `f32`. The tests at the
+        /// end of a screen are not checked.
         Drawing,
         /// `strings.rs`: no color word and no `f32`; its other floats are
         /// unit conversions.
@@ -880,30 +881,21 @@ pub(crate) mod tests {
                 Rules::Strings,
             ),
         ];
-        // Every file of `widgets/`, so a new widget is checked at once.
-        let widgets = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/widgets");
-        let mut names: Vec<_> = std::fs::read_dir(&widgets)
-            .expect("the widgets folder")
-            .map(|entry| entry.expect("a directory entry").file_name())
-            .collect();
-        names.sort();
-        assert!(
-            names.len() >= 9,
-            "the widgets folder is missing files: {names:?}"
-        );
-        for name in names {
-            let name = name.to_string_lossy().into_owned();
-            let source = std::fs::read_to_string(widgets.join(&name)).expect("a widget file");
-            let rules = if name == "icons.rs" {
-                Rules::Geometry
-            } else {
-                Rules::Widget
-            };
-            files.push((
-                format!("widgets/{name}"),
-                before_tests(&source).to_owned(),
-                rules,
-            ));
+        // Every file of `widgets/` and `screens/`, so a new one is checked
+        // at once.
+        for (folder, least) in [("widgets", 9), ("screens", 7)] {
+            for (name, source) in folder_sources(folder, least) {
+                let rules = match (folder, name.as_str()) {
+                    ("widgets", "icons.rs") => Rules::Geometry,
+                    ("widgets", _) => Rules::Widget,
+                    _ => Rules::Drawing,
+                };
+                files.push((
+                    format!("{folder}/{name}"),
+                    before_tests(&source).to_owned(),
+                    rules,
+                ));
+            }
         }
         let mut found = Vec::new();
         for (file, source, rules) in &files {
@@ -940,6 +932,30 @@ pub(crate) mod tests {
             }
         }
         assert!(found.is_empty(), "literals outside theme: {found:#?}");
+    }
+
+    /// The name and the text of each file of `src/<folder>`, by name; at
+    /// least `least` of them.
+    fn folder_sources(folder: &str, least: usize) -> Vec<(String, String)> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join(folder);
+        let mut names: Vec<_> = std::fs::read_dir(&path)
+            .expect("a source folder")
+            .map(|entry| entry.expect("a directory entry").file_name())
+            .collect();
+        names.sort();
+        assert!(
+            names.len() >= least,
+            "the {folder} folder is missing files: {names:?}"
+        );
+        names
+            .into_iter()
+            .map(|name| {
+                let source = std::fs::read_to_string(path.join(&name)).expect("a source file");
+                (name.to_string_lossy().into_owned(), source)
+            })
+            .collect()
     }
 
     /// `source` up to its `#[cfg(test)]` module.

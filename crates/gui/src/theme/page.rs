@@ -1,7 +1,7 @@
-//! The sizes of today's one-page window (`app.rs`), unchanged, kept here so
-//! no size is written outside `theme` (rules.md 2). They are not design
-//! tokens: the screens of M5-D4 to M5-D10 replace them with the tokens of
-//! [`super::Size`], and each goes with its last use.
+//! The sizes of the old one-page window (now `screens/`), unchanged, kept
+//! here so no size is written outside `theme` (rules.md 2). They are not
+//! design tokens: the screens of M5-D4 to M5-D10 replace them with the tokens
+//! of [`super::Size`], and each goes with its last use.
 
 /// The first height of the log panel at the bottom. The user can drag it.
 pub const LOG_HEIGHT: f32 = 170.0;
