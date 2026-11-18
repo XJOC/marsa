@@ -1,6 +1,11 @@
 //! The supervisor against a fake service. The fake is this test binary: it
 //! runs itself again with `MARSA_FAKE_SERVICE` set, so no external program is
-//! needed and the tests are the same on macOS, Linux, and Windows.
+//! needed and the tests are the same on macOS, Linux, and Windows, except the
+//! stop-method tests (task M6-03).
+//!
+//! `#[cfg(unix)]` on those tests and their helpers: they send SIGINT and
+//! SIGQUIT and record the signals the fake gets, and only Unix has signals.
+//! Windows stops a service with a kill, which the other tests cover.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
