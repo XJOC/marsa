@@ -3,22 +3,25 @@
 //! A notice is a 40 high bar at the bottom of the main area: an icon, one
 //! sentence that repeats the verb of the action ("Unlinked shop."), and at
 //! most one action ("Undo", "Show log"). A success closes by itself after 4
-//! seconds; an error stays until the user closes it.
+//! seconds; an error stays until the user closes it. A sentence too long for
+//! one line wraps, and the bar grows with it, so no message is cut (task
+//! M5-D9).
 //!
 //! [`Notices`] is the queue with that timing. It takes the time from the
 //! caller, so a test moves the clock by hand and a screen passes
-//! `Instant::now()`. [`NoticeBar`] draws one notice, and [`Progress`] is the
-//! bar of a long task, filled with `accent`.
+//! `Instant::now()`. [`NoticeBar`] draws one notice, [`show_bar`] puts it at
+//! the bottom of the main area, and [`Progress`] is the bar of a long task,
+//! filled with `accent`.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    Align2, Area, Color32, Context, Frame, Id, Label, Margin, Order, Rect, Response, RichText,
-    Role, Sense, Stroke, Ui, Widget, WidgetInfo, pos2, vec2,
+    Align2, Area, Color32, Context, Frame, Id, Margin, Order, Pos2, Rect, Response, Role, Sense,
+    Stroke, Ui, Vec2, Widget, WidgetInfo, pos2, vec2,
 };
 
-use super::icons::Icon;
+use super::icons::{Glyph, Icon};
 use super::{Button, layout, slot, whole};
 use crate::strings;
 use crate::theme::{Direction, PERCENT, TextToken, Theme, UNIT};
@@ -53,6 +56,9 @@ pub struct Notice {
     pub text: String,
     /// The label of the one action: "Undo".
     pub action: Option<String>,
+    /// Why the action cannot be pressed now (another job runs), if it
+    /// cannot: the button is drawn off, and the reason is its tooltip.
+    pub action_off: Option<String>,
 }
 
 impl Notice {
@@ -61,6 +67,7 @@ impl Notice {
             kind: NoticeKind::Success,
             text: text.into(),
             action: None,
+            action_off: None,
         }
     }
 
@@ -69,11 +76,18 @@ impl Notice {
             kind: NoticeKind::Error,
             text: text.into(),
             action: None,
+            action_off: None,
         }
     }
 
     pub fn with_action(mut self, label: impl Into<String>) -> Self {
         self.action = Some(label.into());
+        self
+    }
+
+    /// The action is off while `reason` holds (with no reason, it is on).
+    pub fn with_action_off(mut self, reason: Option<&str>) -> Self {
+        self.action_off = reason.map(str::to_owned);
         self
     }
 }
@@ -168,24 +182,31 @@ impl Notices {
             ctx.request_repaint_after(wait);
         }
         let notice = self.current()?.clone();
-        let theme = Theme::of(ctx);
-        let anchor = main_area.center_bottom() - vec2(0.0, theme.space.s4);
-        let widest = (main_area.width() - theme.space.screen_side - theme.space.screen_side)
-            .min(theme.size.notice_max);
-        let reaction = Area::new(Id::unique("notice_bar"))
-            .order(Order::Foreground)
-            .pivot(Align2::CENTER_BOTTOM)
-            .fixed_pos(anchor)
-            .show(ctx, |ui| {
-                ui.set_max_width(widest);
-                NoticeBar::new(&notice).show(ui)
-            })
-            .inner;
+        let reaction = show_bar(ctx, main_area, &notice);
         if reaction.is_some() {
             self.close(now);
         }
         reaction
     }
+}
+
+/// Draws `notice` over the bottom of `main_area`, in its middle, and returns
+/// what the user pressed. A window whose notices live in its own state (the
+/// shell) draws the one it holds with this; [`Notices`] uses it too.
+pub fn show_bar(ctx: &Context, main_area: Rect, notice: &Notice) -> Option<Reaction> {
+    let theme = Theme::of(ctx);
+    let anchor = main_area.center_bottom() - vec2(0.0, theme.space.s4);
+    let widest = (main_area.width() - theme.space.screen_side - theme.space.screen_side)
+        .min(theme.size.notice_max);
+    Area::new(Id::unique("notice_bar"))
+        .order(Order::Foreground)
+        .pivot(Align2::CENTER_BOTTOM)
+        .fixed_pos(anchor)
+        .show(ctx, |ui| {
+            ui.set_max_width(widest);
+            NoticeBar::new(notice).show(ui)
+        })
+        .inner
 }
 
 /// What the user did to a notice.
@@ -205,7 +226,9 @@ pub fn mark(theme: &Theme, kind: NoticeKind) -> (Icon, Color32) {
     }
 }
 
-/// One notice as a bar: 40 high, `surface`, `elevation.1`.
+/// One notice as a bar: 40 high, `surface`, `elevation.1`. A sentence that
+/// does not fit on one line wraps, and the bar grows by whole lines, with the
+/// icon and the buttons level with the first line.
 #[derive(Clone, Copy, Debug)]
 #[must_use = "a notice is drawn only when it is shown"]
 pub struct NoticeBar<'a> {
@@ -221,43 +244,102 @@ impl<'a> NoticeBar<'a> {
     /// An error has a close button; a success closes by itself.
     pub fn show(self, ui: &mut Ui) -> Option<Reaction> {
         let theme = Theme::of(ui.ctx());
-        let (icon, color) = mark(theme, self.notice.kind);
+        let direction = Direction::CURRENT;
+        let notice = self.notice;
+        let (icon, color) = mark(theme, notice.kind);
+        let border = theme.size.border;
         let frame = Frame::new()
             .fill(theme.color.surface)
-            .stroke(Stroke::new(theme.size.border, theme.color.line))
+            .stroke(Stroke::new(border, theme.color.line))
             .corner_radius(theme.radius.md)
             .shadow(theme.elevation.menu)
             .inner_margin(Margin::symmetric(whole(theme.space.s3), 0));
+        // The height of one line of content: the bar less its borders.
+        let zone = theme.size.notice - border - border;
+        let (gap, side) = (theme.space.s2, theme.size.icon_inline);
+        let action = notice.action.as_deref().map(|label| {
+            let off = notice.action_off.as_deref();
+            Button::quiet(label)
+                .in_row()
+                .disabled_if(off.is_some(), off.unwrap_or_default())
+        });
+        let close =
+            (notice.kind == NoticeKind::Error).then(|| Button::icon(Icon::Cross, strings::CLOSE));
+        let action_width = action.as_ref().map(|button| button.width(ui));
+        let close_width = close.as_ref().map(|button| button.width(ui));
+        // The icon and the buttons, each with the gap before it.
+        let reserved = side
+            + [action_width, close_width]
+                .into_iter()
+                .flatten()
+                .map(|width| gap + width)
+                .sum::<f32>();
+        // What the sentence may take: the bar's width less its margins and
+        // what is not the sentence.
+        let margin = theme.space.s3 + border;
+        let room = (ui.available_width() - margin - margin - reserved - gap).max(0.0);
+        let font = theme.text.body_sm.font_id();
+        let text = notice.text.clone();
+        let one_line = ui
+            .painter()
+            .layout_no_wrap(text.clone(), font.clone(), theme.color.ink);
+        let galley = if one_line.size().x <= room {
+            one_line.clone()
+        } else {
+            ui.painter().layout(text, font, theme.color.ink, room)
+        };
+        // The first line sits level with the icon and the buttons: the space
+        // above it is what is left of the zone's height, shared.
+        let line_zone = Rect::from_min_size(Pos2::ZERO, vec2(one_line.size().x, zone));
+        let first_line = Align2::LEFT_CENTER.align_size_within_rect(one_line.size(), line_zone);
+        let pad = first_line.top().max(0.0);
+        let height = (galley.size().y + pad + pad).max(zone);
+        let width = reserved + gap + galley.size().x;
         let mut reaction = None;
         let shown = frame.show(ui, |ui| {
-            ui.set_height(theme.size.notice - theme.size.border - theme.size.border);
-            ui.spacing_mut().item_spacing.x = theme.space.s2;
-            ui.horizontal_centered(|ui| {
-                let side = theme.size.icon_inline;
-                ui.add(super::icons::Glyph::new(icon).size(side).color(color));
-                let text = RichText::new(&self.notice.text)
-                    .font(theme.text.body_sm.font_id())
-                    .color(theme.color.ink);
-                ui.add(Label::new(text));
-                if let Some(action) = &self.notice.action
-                    && ui.add(Button::quiet(action).in_row()).clicked()
-                {
-                    reaction = Some(Reaction::Action);
-                }
-                if self.notice.kind == NoticeKind::Error
-                    && ui.add(Button::icon(Icon::Cross, strings::CLOSE)).clicked()
-                {
-                    reaction = Some(Reaction::Closed);
-                }
-            });
+            let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+            // `size` at `offset` from the start, level with the first line.
+            let centered = |size: Vec2, offset: f32| {
+                let x = slot(direction, rect, offset, size.x);
+                let line = Rect::from_min_size(pos2(x, rect.top()), vec2(size.x, zone));
+                Align2::LEFT_CENTER.align_size_within_rect(size, line)
+            };
+            ui.put(
+                centered(vec2(side, side), 0.0),
+                Glyph::new(icon).size(side).color(color),
+            );
+            let x = slot(direction, rect, side + gap, galley.size().x);
+            ui.painter()
+                .galley(pos2(x, rect.top() + pad), galley, theme.color.ink);
+            // From the end: the close button, then the action before it.
+            let mut offset = width;
+            let mut place = |width: f32, height: f32| {
+                offset -= width;
+                let at = centered(vec2(width, height), offset);
+                offset -= gap;
+                at
+            };
+            let close_at = close_width.map(|w| place(w, theme.size.icon_button));
+            let action_at = action_width.map(|w| place(w, theme.size.control_in_row));
+            // The action comes first in the Tab order.
+            if let (Some(button), Some(at)) = (action, action_at)
+                && ui.put(at, button).clicked()
+            {
+                reaction = Some(Reaction::Action);
+            }
+            if let (Some(button), Some(at)) = (close, close_at)
+                && ui.put(at, button).clicked()
+            {
+                reaction = Some(Reaction::Closed);
+            }
         });
         // An error is an alert; a success is a status a screen reader reads
         // when it appears.
-        let role = match self.notice.kind {
+        let role = match notice.kind {
             NoticeKind::Error => Role::Alert,
             NoticeKind::Success => Role::Status,
         };
-        let text = self.notice.text.as_str();
+        let text = notice.text.as_str();
         shown
             .response
             .widget_info(|| WidgetInfo::labeled(role, true, text));
@@ -641,6 +723,94 @@ mod tests {
             "{bottom}"
         );
         assert!((bar.x1 - bar.x0) as f32 <= theme.size.notice_max + 4.0);
+    }
+
+    /// The bounds of a node, as a rectangle.
+    fn rect_of(tree: &crate::widgets::harness::Tree, label: &str) -> Rect {
+        let bounds = tree
+            .node_with_label(label)
+            .and_then(|node| node.bounds())
+            .unwrap_or_else(|| panic!("no {label}"));
+        Rect::from_min_max(
+            pos2(bounds.x0 as f32, bounds.y0 as f32),
+            pos2(bounds.x1 as f32, bounds.y1 as f32),
+        )
+    }
+
+    #[test]
+    fn a_sentence_too_long_for_one_line_wraps_and_the_bar_grows_with_the_buttons_in_it() {
+        let theme = &LIGHT;
+        let long = "shop.test comes from the parked folder /Users/someone/Code, so it cannot \
+                    be unlinked alone. Forget that folder to stop serving it and the folder's \
+                    other sites.";
+        let area = Rect::from_min_size(pos2(224.0, 0.0), egui::vec2(896.0, 720.0));
+        let harness = Harness::new(egui::Theme::Light);
+        let start = Instant::now();
+        let mut notices = Notices::default();
+        notices.push(
+            Notice::error(long).with_action("Forget /Users/someone/Code…"),
+            start,
+        );
+        for _ in 0..20 {
+            show(&harness, &mut notices, area, start, None);
+        }
+        let tree = harness.accessibility(|ui| {
+            notices.show(ui.ctx(), area, start);
+        });
+        let bar = rect_of(&tree, long);
+        // Not cut: the whole sentence is the bar's name, on more than one line.
+        assert!(bar.height() > theme.size.notice + 10.0, "{}", bar.height());
+        assert!(
+            bar.width() <= theme.size.notice_max + 4.0,
+            "{}",
+            bar.width()
+        );
+        // The bar stays at the bottom, growing up.
+        assert!((bar.bottom() - (area.bottom() - theme.space.s4)).abs() < 3.0);
+        // The buttons are inside the bar, level with its first line.
+        for label in ["Forget /Users/someone/Code…", "Close"] {
+            let button = rect_of(&tree, label);
+            assert!(bar.contains_rect(button), "{label} is inside the bar");
+            assert!(
+                button.center().y < bar.top() + theme.size.notice,
+                "{label} is level with the first line"
+            );
+        }
+        // And they still work.
+        let at = rect_of(&tree, "Close").center();
+        assert_eq!(
+            show(&harness, &mut notices, area, start, Some(at)),
+            Some(Reaction::Closed)
+        );
+    }
+
+    #[test]
+    fn an_action_that_is_off_says_why_and_does_nothing() {
+        let area = Rect::from_min_size(pos2(224.0, 0.0), egui::vec2(896.0, 720.0));
+        let harness = Harness::new(egui::Theme::Light);
+        let start = Instant::now();
+        let mut notices = Notices::default();
+        let notice = Notice::error("shop.test cannot be unlinked alone.")
+            .with_action("Forget /code…")
+            .with_action_off(Some("Another removal runs."));
+        assert_eq!(notice.action_off.as_deref(), Some("Another removal runs."));
+        notices.push(notice, start);
+        for _ in 0..20 {
+            show(&harness, &mut notices, area, start, None);
+        }
+        let tree = harness.accessibility(|ui| {
+            notices.show(ui.ctx(), area, start);
+        });
+        let button = tree.node_with_label("Forget /code…").expect("the action");
+        assert!(button.is_disabled(), "drawn off");
+        let at = rect_of(&tree, "Forget /code…").center();
+        assert_eq!(show(&harness, &mut notices, area, start, Some(at)), None);
+        assert!(!notices.is_empty(), "the notice stays");
+        // With no reason the action is on.
+        let on = Notice::error("x")
+            .with_action("Forget")
+            .with_action_off(None);
+        assert_eq!(on.action_off, None);
     }
 
     #[test]
