@@ -430,10 +430,12 @@ mod tests {
         shim.wait().expect("wait for the shim");
         thread::sleep(Duration::from_millis(500));
         let (child, grandchild) = (length("child"), length("grandchild"));
-        // Polled, so a slow runner does not fail the test: up to 5 s for the
-        // grandchild's next beat.
+        // At least 1 s (about ten beats), so a child the kill missed shows;
+        // up to 5 s for the grandchild's next beat on a slow runner.
         let start = Instant::now();
-        while length("grandchild") == grandchild && start.elapsed() < Duration::from_secs(5) {
+        while start.elapsed() < Duration::from_secs(1)
+            || (length("grandchild") == grandchild && start.elapsed() < Duration::from_secs(5))
+        {
             thread::sleep(Duration::from_millis(50));
         }
         let still_beating = length("grandchild") > grandchild;
