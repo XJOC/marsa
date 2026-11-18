@@ -443,10 +443,12 @@ fn sites(model: &Model) -> SitesView {
         .take(HOME_SITES)
         .map(|site| SiteRow {
             name: site.name.clone(),
-            php: site.php.as_ref().map_or_else(
-                || strings::NO_PHP.to_owned(),
-                |version| strings::php_line(Some(&minor(version))),
-            ),
+            // The column header says PHP, so the cell is the version only,
+            // as in the Sites table.
+            php: site
+                .php
+                .as_ref()
+                .map_or_else(|| strings::NO_PHP.to_owned(), minor),
         })
         .collect();
     SitesView {
@@ -953,15 +955,7 @@ mod tests {
             .iter()
             .map(|row| (row.name.as_str(), row.php.as_str()))
             .collect();
-        assert_eq!(
-            rows,
-            [
-                ("a", "PHP 8.4"),
-                ("b", "–"),
-                ("c", "PHP 8.3"),
-                ("d", "PHP 8.4")
-            ]
-        );
+        assert_eq!(rows, [("a", "8.4"), ("b", "–"), ("c", "8.3"), ("d", "8.4")]);
     }
 
     #[test]
