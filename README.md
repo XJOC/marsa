@@ -6,18 +6,21 @@ versions you need, picks the right version for each project, and gives every
 site a trusted HTTPS certificate. It is open source (Apache-2.0) and works
 from the terminal or from its window.
 
-**Status: 0.1.1, for macOS.** It is tested on Apple Silicon.
-The Intel build passes the same automated checks, but no person has tried it
-yet. Linux and Windows are coming; they build in CI but are not released yet.
+**Status: 0.1.1.** macOS is stable. It is tested on Apple Silicon; the Intel
+build passes the same automated checks. Linux and Windows are a preview: tested
+end to end on GitHub runners, not yet by a person.
 
 ## Install
+
+### macOS and Linux
 
 ```sh
 curl -fsSL https://github.com/XJOC/marsa/releases/latest/download/install.sh | sh
 ```
 
 The script installs Marsa for your user only, in
-`~/Library/Application Support/dev.marsa.Marsa`. It never uses `sudo` and
+`~/Library/Application Support/dev.marsa.Marsa` on macOS, and in
+`${XDG_DATA_HOME:-~/.local/share}/marsa` on Linux. It never uses `sudo` and
 never edits your shell files. Before it unpacks anything, it checks the
 SHA-256 of the download, and the [signature](#verify-a-download) too if
 `minisign` is installed. It installs the latest release, never a
@@ -31,15 +34,42 @@ sh install.sh
 
 Then add Marsa to your `PATH`, as the script prints: add this line at the end
 of `~/.zshrc` (with bash, the file the script names, usually
-`~/.bash_profile`), and open a new terminal.
+`~/.bash_profile` on macOS and `~/.bashrc` on Linux), and open a new terminal.
+On macOS the line is:
 
 ```sh
 export PATH="$HOME/Library/Application Support/dev.marsa.Marsa/shims:$HOME/Library/Application Support/dev.marsa.Marsa/bin:$PATH"
 ```
 
+On Linux, use the data folder above instead:
+`${XDG_DATA_HOME:-$HOME/.local/share}/marsa/shims` and `.../marsa/bin`.
+
+On Linux, the window needs a desktop session with Vulkan or OpenGL. The
+menu-bar icon needs GTK 3 and AppIndicator: on Debian and Ubuntu, run
+`sudo apt install libgtk-3-0 libayatana-appindicator3-1`.
+
 `shims/` holds `php`, `node`, `npm`, `npx`, and `composer`. Each one runs the
 version the current project asks for. `bin/` holds `marsa` and the other
 Marsa programs.
+
+### Windows (preview)
+
+In PowerShell:
+
+```powershell
+irm https://github.com/XJOC/marsa/releases/latest/download/install.ps1 | iex
+```
+
+The script installs Marsa for your user only, in `%LOCALAPPDATA%\marsa\Marsa\data`.
+It needs no admin rights. It checks the SHA-256 of the download before it
+unpacks anything, and sets your user `PATH` itself: open a new terminal
+afterwards. To read the script first, download it and read it:
+
+```powershell
+irm https://github.com/XJOC/marsa/releases/latest/download/install.ps1 -OutFile install.ps1
+```
+
+When you have read it, run it with `Get-Content .\install.ps1 -Raw | iex`.
 
 ## Quick start
 
@@ -135,6 +165,10 @@ without that question, and `--yes` answers the first one. At the end, remove
 the `PATH` line from your shell's startup file: `~/.zshrc`, and `~/.zprofile`
 if you added it there for 0.1.0-rc.1.
 
+This works on macOS and Windows. On Linux it is not available yet: remove
+Marsa's data folder and the `PATH` line by hand. What `marsa setup` changed is
+not undone automatically there.
+
 ## Verify a download
 
 Each release has `SHA256SUMS`, which lists the SHA-256 of every file, and
@@ -203,8 +237,10 @@ Apache-2.0. See [`LICENSE`](LICENSE).
 يثبّت إصدارات PHP وNode.js وComposer وCaddy، ويختار لكل مشروع إصداره،
 ويعطي كل موقع شهادة HTTPS موثوقة. يعمل من الطرفية أو من نافذته.
 
-الإصدار 0.1.1 لنظام macOS فقط. Linux وWindows قريباً.
+الإصدار 0.1.1: macOS مستقر. Linux وWindows نسخة تجريبية (preview)،
+اختُبرتا على خوادم GitHub ولم يجرّبهما شخص بعد.
 
-التثبيت: `curl -fsSL https://github.com/XJOC/marsa/releases/latest/download/install.sh | sh`،
+التثبيت على macOS وLinux: `curl -fsSL https://github.com/XJOC/marsa/releases/latest/download/install.sh | sh`
+وعلى Windows (PowerShell): `irm https://github.com/XJOC/marsa/releases/latest/download/install.ps1 | iex`،
 ثم سطر `PATH` الذي يطبعه السكربت، ثم `marsa install php 8.4` و`marsa setup`.
 إن لم يعمل شيء: `marsa doctor`. الرخصة: Apache-2.0.
