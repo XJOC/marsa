@@ -421,7 +421,7 @@ mod tests {
                 ("PHP-FPM 8.2", "Runs PHP 8.2 for your sites."),
                 (
                     "PHP-FPM 8.3",
-                    "No site needs PHP 8.3 now. It starts when one does."
+                    "No site needs it now. It starts when one does."
                 ),
                 ("PHP-FPM 8.4", "Runs PHP 8.4 for 2 sites."),
             ]

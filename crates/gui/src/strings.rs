@@ -112,7 +112,7 @@ pub fn service_description(id: &str, waiting: bool, sites: usize) -> String {
         return "A program Marsa runs for your sites.".to_owned();
     };
     match (waiting, sites) {
-        (true, _) => format!("No site needs PHP {line} now. It starts when one does."),
+        (true, _) => "No site needs it now. It starts when one does.".to_owned(),
         (false, 0) => format!("Runs PHP {line} for your sites."),
         (false, 1) => format!("Runs PHP {line} for 1 site."),
         (false, n) => format!("Runs PHP {line} for {n} sites."),
