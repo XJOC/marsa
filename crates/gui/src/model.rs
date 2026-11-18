@@ -21,14 +21,17 @@ use marsa_core::types::{
 use semver::Version;
 
 use crate::bridge::Command;
+use crate::logline;
+pub use crate::logline::{HiddenLevels, LogLevel};
 pub use crate::prefs::Appearance;
 pub use crate::tray::menu::Autostart;
 
-/// The service whose log the window shows.
+/// The service whose log the Logs screen opens on, and the one the window
+/// always reads (the other logs are the services the daemon lists).
 pub const LOG_SERVICE: &str = "caddy";
 /// The service that serves every site: no site opens while it is down.
 pub const WEB_SERVER: &str = "caddy";
-/// The most log lines kept. The oldest go first.
+/// The most log lines kept for each service. The oldest go first.
 pub const MAX_LOG_LINES: usize = 5000;
 /// This build's version, shown in the Settings section.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -62,7 +65,8 @@ pub enum Update {
     Failed(String),
     /// The whole services table.
     Services(Vec<ServiceStatus>),
-    /// Recent lines of [`LOG_SERVICE`], oldest first.
+    /// Recent lines of the services' logs (each line names its service),
+    /// oldest first.
     Log(Vec<LogLine>),
     /// A call failed but the connection is fine. A client error code.
     Notice(String),
@@ -296,7 +300,20 @@ pub enum UninstallNotice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogRow {
     pub stream: LogStream,
+    /// Read from the text once, when the line arrives (`logline`).
+    pub level: LogLevel,
+    /// The line as the program wrote it.
     pub text: String,
+}
+
+/// What the window keeps of one service's output: the newest
+/// [`MAX_LOG_LINES`] lines.
+#[derive(Debug, Default)]
+pub struct ServiceLog {
+    /// Oldest first.
+    pub rows: VecDeque<LogRow>,
+    /// The `seq` of the newest line in `rows`.
+    last_seq: Option<u64>,
 }
 
 /// One install the window asks the daemon for:
@@ -494,12 +511,33 @@ pub enum Route {
     Settings,
 }
 
-/// The log the Logs screen shows: Caddy's, as before. M5-D10 adds the
-/// others.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The log the Logs screen shows: one service's, by its id (task M5-D10).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum LogSource {
     #[default]
     Caddy,
+    /// Any other service the daemon lists, such as `php-fpm-8.4`. Made with
+    /// [`LogSource::of`], so Caddy is never written twice.
+    Service(String),
+}
+
+impl LogSource {
+    /// The source of the service `id`.
+    pub fn of(id: &str) -> Self {
+        if id == LOG_SERVICE {
+            Self::Caddy
+        } else {
+            Self::Service(id.to_owned())
+        }
+    }
+
+    /// The id of the service whose log this is.
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Caddy => LOG_SERVICE,
+            Self::Service(id) => id,
+        }
+    }
 }
 
 /// What the user did in the window. The shell and the screens return it,
@@ -518,6 +556,13 @@ pub enum Action {
         service: String,
         action: ServiceAction,
     },
+    /// A level filter of the Logs screen: show or hide its lines.
+    ToggleLogLevel(LogLevel),
+    /// The text of the filter field of the Logs screen.
+    SetLogFilter(String),
+    /// The Follow button of the Logs screen, or a scroll away from the end
+    /// of the log: keep the newest line in view, or stop.
+    SetLogFollow(bool),
     /// A version button of the default picker (Home): save `version` as the
     /// default of `runtime`.
     SetDefault { runtime: Runtime, version: Version },
@@ -618,9 +663,16 @@ pub struct Model {
     pub connection: Connection,
     /// Sorted by id.
     pub services: Vec<ServiceStatus>,
-    pub log: VecDeque<LogRow>,
-    /// The `seq` of the newest line in `log`.
-    last_seq: Option<u64>,
+    /// The log of each service that has written one, by the service's id.
+    logs: BTreeMap<String, ServiceLog>,
+    /// The levels the user turned off in the Logs filters. Kept across
+    /// sessions: it is the user's choice, not daemon state.
+    pub log_hidden: HiddenLevels,
+    /// The text of the Logs filter field. Kept across sessions.
+    pub log_filter: String,
+    /// Follow is off: the Logs screen stays where the user scrolled. Kept
+    /// across sessions; `false`, which is what [`Default`] gives, follows.
+    pub log_paused: bool,
     /// The last error that did not break the connection, as a code.
     pub notice: Option<String>,
     /// Sites sorted by name, the parked folders, and the skipped folders.
@@ -710,6 +762,9 @@ impl Model {
                     connection: Connection::Running(health),
                     link: self.link.take(),
                     sites_search: mem::take(&mut self.sites_search),
+                    log_hidden: self.log_hidden,
+                    log_filter: mem::take(&mut self.log_filter),
+                    log_paused: self.log_paused,
                     install_input: mem::take(&mut self.install_input),
                     runtime_chosen: self.runtime_chosen,
                     // Only ended installs with no id are left: what the user
@@ -729,6 +784,10 @@ impl Model {
             Update::Failed(code) => self.disconnect(Connection::Failed(code)),
             Update::Services(mut services) => {
                 services.sort_by(|a, b| a.id.cmp(&b.id));
+                // The log of a service the daemon no longer lists goes with
+                // it: a log never outlives its source.
+                self.logs
+                    .retain(|id, _| services.iter().any(|service| service.id == *id));
                 self.services = services;
             }
             Update::Log(lines) => lines.into_iter().for_each(|line| self.push_log(line)),
@@ -1638,6 +1697,18 @@ impl Model {
                 self.sidebar_folded = !self.sidebar_folded;
                 None
             }
+            Action::ToggleLogLevel(level) => {
+                self.log_hidden = self.log_hidden.toggled(level);
+                None
+            }
+            Action::SetLogFilter(text) => {
+                self.log_filter = text;
+                None
+            }
+            Action::SetLogFollow(follow) => {
+                self.log_paused = !follow;
+                None
+            }
             Action::Service { service, action } => {
                 // The notice was about the last action.
                 self.notice = None;
@@ -1812,18 +1883,29 @@ impl Model {
         self.sites = list;
     }
 
+    /// Adds a line to the log of its service, unless the window has it
+    /// already (the recent lines and the live ones overlap).
     fn push_log(&mut self, line: LogLine) {
-        if line.service != LOG_SERVICE || self.last_seq.is_some_and(|last| line.seq <= last) {
+        let log = self.logs.entry(line.service).or_default();
+        if log.last_seq.is_some_and(|last| line.seq <= last) {
             return;
         }
-        self.last_seq = Some(line.seq);
-        if self.log.len() == MAX_LOG_LINES {
-            self.log.pop_front();
+        log.last_seq = Some(line.seq);
+        if log.rows.len() == MAX_LOG_LINES {
+            log.rows.pop_front();
         }
-        self.log.push_back(LogRow {
+        log.rows.push_back(LogRow {
             stream: line.stream,
+            level: logline::level(&line.text),
             text: line.text,
         });
+    }
+
+    /// The lines of the log of the service `id`, oldest first. Empty when it
+    /// has written none.
+    pub fn log_rows(&self, id: &str) -> &VecDeque<LogRow> {
+        static NONE: VecDeque<LogRow> = VecDeque::new();
+        self.logs.get(id).map_or(&NONE, |log| &log.rows)
     }
 }
 
@@ -1853,10 +1935,12 @@ fn not_added(report: &SetupReport) -> Option<String> {
 pub fn apply(model: &mut Model, event: Event) {
     match event {
         Event::ServiceChanged(status) => {
-            // A new run of the log service may get a new log buffer whose
-            // `seq` starts again at 0, so the old `seq` must not hide it.
-            if status.id == LOG_SERVICE && status.state == ServiceState::Starting {
-                model.last_seq = None;
+            // A new run of a service may get a new log buffer whose `seq`
+            // starts again at 0, so the old `seq` must not hide it.
+            if status.state == ServiceState::Starting
+                && let Some(log) = model.logs.get_mut(&status.id)
+            {
+                log.last_seq = None;
             }
             match model.services.binary_search_by(|s| s.id.cmp(&status.id)) {
                 Ok(index) => model.services[index] = status,
@@ -2048,8 +2132,13 @@ mod tests {
         Event::Log(log_line(service, seq))
     }
 
-    fn texts(model: &Model) -> Vec<&str> {
-        model.log.iter().map(|row| row.text.as_str()).collect()
+    /// The text of each line of the log of `service`.
+    fn texts<'a>(model: &'a Model, service: &str) -> Vec<&'a str> {
+        model
+            .log_rows(service)
+            .iter()
+            .map(|row| row.text.as_str())
+            .collect()
     }
 
     fn site(name: &str, secure: bool) -> Site {
@@ -2445,7 +2534,7 @@ mod tests {
         for seq in 0..6000 {
             apply(&mut model, line("caddy", seq));
         }
-        let texts = texts(&model);
+        let texts = texts(&model, "caddy");
         assert_eq!(texts.len(), MAX_LOG_LINES);
         assert_eq!((texts[0], texts[4999]), ("line 1000", "line 5999"));
     }
@@ -2457,7 +2546,7 @@ mod tests {
         for seq in [4, 3, 5, 5] {
             apply(&mut model, line("caddy", seq));
         }
-        assert_eq!(texts(&model), ["line 4", "line 5"]);
+        assert_eq!(texts(&model, "caddy"), ["line 4", "line 5"]);
     }
 
     #[test]
@@ -2466,14 +2555,108 @@ mod tests {
         apply(&mut model, line("caddy", 9));
         apply(&mut model, changed("caddy", ServiceState::Starting));
         apply(&mut model, line("caddy", 0));
-        assert_eq!(texts(&model), ["line 9", "line 0"]);
+        assert_eq!(texts(&model, "caddy"), ["line 9", "line 0"]);
     }
 
     #[test]
-    fn lines_of_other_services_are_not_shown() {
+    fn each_service_has_its_own_log_with_its_own_seq_and_limit() {
         let mut model = connected();
-        apply(&mut model, line("php", 0));
-        assert!(model.log.is_empty());
+        apply(&mut model, line("caddy", 5));
+        apply(&mut model, line("php-fpm-8.4", 0));
+        apply(&mut model, line("php-fpm-8.4", 1));
+        // The same seq in another service is another line.
+        apply(&mut model, line("caddy", 5));
+        assert_eq!(texts(&model, "caddy"), ["line 5"]);
+        assert_eq!(texts(&model, "php-fpm-8.4"), ["line 0", "line 1"]);
+        assert!(model.log_rows("php-fpm-8.3").is_empty());
+        // A new run of one service does not let the other repeat a line.
+        apply(&mut model, changed("php-fpm-8.4", ServiceState::Starting));
+        apply(&mut model, line("php-fpm-8.4", 0));
+        apply(&mut model, line("caddy", 5));
+        assert_eq!(texts(&model, "php-fpm-8.4").len(), 3);
+        assert_eq!(texts(&model, "caddy").len(), 1);
+        // Each log is kept to the newest lines, separately.
+        for seq in 0..6000 {
+            apply(&mut model, line("php-fpm-8.3", seq));
+        }
+        assert_eq!(model.log_rows("php-fpm-8.3").len(), MAX_LOG_LINES);
+        assert_eq!(model.log_rows("caddy").len(), 1);
+    }
+
+    #[test]
+    fn a_line_has_its_level_from_its_own_text_and_its_stream() {
+        let mut model = connected();
+        let line = |text: &str, seq| LogLine {
+            text: text.to_owned(),
+            stream: LogStream::Stdout,
+            ..log_line("caddy", seq)
+        };
+        model.update(Update::Log(vec![
+            line(r#"{"level":"error","msg":"boom"}"#, 0),
+            line(r#"{"level":"warn","msg":"hm"}"#, 1),
+            line("ready", 2),
+        ]));
+        let levels: Vec<_> = model.log_rows("caddy").iter().map(|r| r.level).collect();
+        assert_eq!(levels, [LogLevel::Error, LogLevel::Warning, LogLevel::Info]);
+        // The text stays as the program wrote it.
+        assert_eq!(
+            model.log_rows("caddy")[0].text,
+            r#"{"level":"error","msg":"boom"}"#
+        );
+        assert_eq!(model.log_rows("caddy")[0].stream, LogStream::Stdout);
+    }
+
+    #[test]
+    fn the_log_of_a_service_the_daemon_stopped_listing_goes_with_it() {
+        let mut model = connected();
+        model.update(Update::Services(vec![
+            status("caddy", ServiceState::Running),
+            status("php-fpm-8.3", ServiceState::Running),
+        ]));
+        apply(&mut model, line("caddy", 0));
+        apply(&mut model, line("php-fpm-8.3", 0));
+        model.update(Update::Services(vec![status(
+            "caddy",
+            ServiceState::Running,
+        )]));
+        assert_eq!(texts(&model, "caddy"), ["line 0"]);
+        assert!(model.log_rows("php-fpm-8.3").is_empty());
+    }
+
+    #[test]
+    fn a_log_source_is_a_service_and_caddy_is_never_written_twice() {
+        assert_eq!(LogSource::of("caddy"), LogSource::Caddy);
+        assert_eq!(LogSource::default(), LogSource::Caddy);
+        let pool = LogSource::of("php-fpm-8.4");
+        assert_eq!(pool, LogSource::Service("php-fpm-8.4".into()));
+        assert_eq!((LogSource::Caddy.id(), pool.id()), ("caddy", "php-fpm-8.4"));
+    }
+
+    #[test]
+    fn the_log_filters_and_follow_are_the_users_and_survive_a_new_session() {
+        let mut model = connected();
+        assert!(!model.log_paused && model.log_hidden.is_empty());
+        // They are the window's own: nothing goes to the daemon.
+        let local = [
+            Action::ToggleLogLevel(LogLevel::Info),
+            Action::SetLogFilter("shop".into()),
+            Action::SetLogFollow(false),
+        ];
+        for action in local {
+            assert!(model.apply_action(action).is_none());
+        }
+        assert!(model.log_hidden.hides(LogLevel::Info) && model.log_paused);
+        assert_eq!(model.log_filter, "shop");
+        // A restarted daemon is a new session; the user's choices stay.
+        model.update(Update::Connected(health()));
+        assert!(model.log_hidden.hides(LogLevel::Info));
+        assert_eq!(
+            (model.log_filter.as_str(), model.log_paused),
+            ("shop", true)
+        );
+        model.apply_action(Action::SetLogFollow(true));
+        model.apply_action(Action::ToggleLogLevel(LogLevel::Info));
+        assert!(!model.log_paused && model.log_hidden.is_empty());
     }
 
     #[test]
@@ -2496,14 +2679,14 @@ mod tests {
         model.update(Update::Notice("service_not_found".into()));
         model.update(Update::Reconnecting);
         assert_eq!(model.connection, Connection::Reconnecting);
-        assert_eq!(texts(&model), ["line 3"]);
+        assert_eq!(texts(&model, "caddy"), ["line 3"]);
 
         model.update(Update::Connected(health()));
         assert!(model.is_connected());
-        assert!(model.log.is_empty() && model.notice.is_none());
+        assert!(model.log_rows("caddy").is_empty() && model.notice.is_none());
         // The restarted daemon counts from 0 again.
         apply(&mut model, line("caddy", 0));
-        assert_eq!(texts(&model), ["line 0"]);
+        assert_eq!(texts(&model, "caddy"), ["line 0"]);
     }
 
     #[test]
