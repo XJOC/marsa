@@ -59,6 +59,9 @@ pub struct Notice {
     /// Why the action cannot be pressed now (another job runs), if it
     /// cannot: the button is drawn off, and the reason is its tooltip.
     pub action_off: Option<String>,
+    /// What the action does, in full, over the button while the pointer
+    /// rests on it: the label may show only the end of a long path.
+    pub action_hint: Option<String>,
 }
 
 impl Notice {
@@ -68,6 +71,7 @@ impl Notice {
             text: text.into(),
             action: None,
             action_off: None,
+            action_hint: None,
         }
     }
 
@@ -77,11 +81,18 @@ impl Notice {
             text: text.into(),
             action: None,
             action_off: None,
+            action_hint: None,
         }
     }
 
     pub fn with_action(mut self, label: impl Into<String>) -> Self {
         self.action = Some(label.into());
+        self
+    }
+
+    /// The tooltip of the action while it is on.
+    pub fn with_action_hint(mut self, hint: impl Into<String>) -> Self {
+        self.action_hint = Some(hint.into());
         self
     }
 
@@ -365,10 +376,15 @@ impl<'a> NoticeBar<'a> {
             let close_at = close_width.map(|w| place(w, theme.size.icon_button));
             let action_at = action_width.map(|w| place(w, theme.size.control_in_row));
             // The action comes first in the Tab order.
-            if let (Some(button), Some(at)) = (action, action_at)
-                && ui.put(at, button).clicked()
-            {
-                reaction = Some(Reaction::Action);
+            if let (Some(button), Some(at)) = (action, action_at) {
+                let response = ui.put(at, button);
+                // An action that is off says why instead.
+                if let (Some(hint), None) = (&notice.action_hint, &notice.action_off) {
+                    response.clone().on_hover_text(hint);
+                }
+                if response.clicked() {
+                    reaction = Some(Reaction::Action);
+                }
             }
             if let (Some(button), Some(at)) = (close, close_at)
                 && ui.put(at, button).clicked()

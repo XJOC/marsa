@@ -77,13 +77,59 @@ struct CaddyLine<'a> {
 }
 
 /// A line that says no more than its level and its message.
-struct Parsed<'a> {
-    level: LogLevel,
-    message: Cow<'a, str>,
+#[derive(Debug)]
+pub struct Parsed<'a> {
+    pub level: LogLevel,
+    pub message: Cow<'a, str>,
 }
 
 fn parse(text: &str) -> Option<Parsed<'_>> {
     caddy(text).or_else(|| fpm(text))
+}
+
+/// The level and the message of `text`, read once. A line in no known
+/// format is information, shown whole.
+pub fn read(text: &str) -> Parsed<'_> {
+    parse(text).unwrap_or(Parsed {
+        level: LogLevel::Info,
+        message: Cow::Borrowed(text),
+    })
+}
+
+/// The most columns of a message the Logs screen draws: a line longer than
+/// this ends in an ellipsis, and the tooltip has it whole. It bounds what one
+/// row costs to lay out, and how far the list scrolls sideways.
+pub const MAX_LINE_COLUMNS: usize = 4000;
+
+/// How many columns of the mono face `message` takes, at most
+/// [`MAX_LINE_COLUMNS`]. A character that is not ASCII counts for two: the
+/// room is never short, and a line with a wide character scrolls a little
+/// further than it must.
+pub fn columns(message: &str) -> usize {
+    let wide = message
+        .chars()
+        .map(|c| if c.is_ascii() { 1 } else { 2 })
+        .sum::<usize>();
+    wide.min(MAX_LINE_COLUMNS)
+}
+
+/// `message`, or its first columns and an ellipsis if it is longer than
+/// [`MAX_LINE_COLUMNS`].
+pub fn clipped(message: &str) -> Cow<'_, str> {
+    if columns(message) < MAX_LINE_COLUMNS {
+        return Cow::Borrowed(message);
+    }
+    let mut kept = String::new();
+    let mut used = 0;
+    for c in message.chars() {
+        used += if c.is_ascii() { 1 } else { 2 };
+        if used >= MAX_LINE_COLUMNS {
+            break;
+        }
+        kept.push(c);
+    }
+    kept.push('…');
+    Cow::Owned(kept)
 }
 
 fn caddy(text: &str) -> Option<Parsed<'_>> {
@@ -125,13 +171,13 @@ fn fpm(text: &str) -> Option<Parsed<'_>> {
 
 /// How serious the line `text` is.
 pub fn level(text: &str) -> LogLevel {
-    parse(text).map_or(LogLevel::Info, |line| line.level)
+    read(text).level
 }
 
 /// The line without what the screen shows elsewhere (its level, and the
 /// JSON around a Caddy message). A line in no known format is shown whole.
 pub fn message(text: &str) -> Cow<'_, str> {
-    parse(text).map_or(Cow::Borrowed(text), |line| line.message)
+    read(text).message
 }
 
 #[cfg(test)]
@@ -219,6 +265,26 @@ mod tests {
             assert_eq!(level(text), LogLevel::Info, "{text:?}");
             assert_eq!(message(text), text, "{text:?}");
         }
+    }
+
+    #[test]
+    fn a_message_takes_its_columns_and_a_very_long_one_is_cut_with_an_ellipsis() {
+        assert_eq!(columns(""), 0);
+        assert_eq!(columns("ready"), 5);
+        // A character that is not ASCII counts for two: the room is never short.
+        assert_eq!(columns("é漢"), 4);
+        let long = "x".repeat(MAX_LINE_COLUMNS + 500);
+        assert_eq!(columns(&long), MAX_LINE_COLUMNS);
+        assert_eq!(clipped("short"), "short");
+        let cut = clipped(&long);
+        assert!(cut.ends_with('…'));
+        assert_eq!(cut.chars().count(), MAX_LINE_COLUMNS);
+        // Just under the limit: whole.
+        let fits = "y".repeat(MAX_LINE_COLUMNS - 1);
+        assert_eq!(clipped(&fits), fits.as_str());
+        // Wide characters are cut by their columns, not their count.
+        let wide = "漢".repeat(MAX_LINE_COLUMNS);
+        assert!(columns(&clipped(&wide)) <= MAX_LINE_COLUMNS);
     }
 
     #[test]

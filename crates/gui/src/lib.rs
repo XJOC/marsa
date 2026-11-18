@@ -15,6 +15,12 @@ pub mod bridge;
 pub mod demo;
 // What a line of a program's output says: its level and its message.
 pub mod logline;
+// The measurement mode: made-up data and a frame count, for a release build
+// with no daemon. It needs an empty data folder (task M5-D10). Behind the
+// cargo feature `measure`, off by default, so a shipped binary has no made-up
+// data in it.
+#[cfg(feature = "measure")]
+pub mod measure;
 pub mod model;
 // The system's opener of a folder: only `app` runs it.
 pub(crate) mod opener;

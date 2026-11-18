@@ -111,11 +111,17 @@ fn sites(model: &Model) -> Option<Bar> {
             match folder {
                 Some(folder) => {
                     let off = (!model.can_remove()).then_some(strings::REMOVE_BUSY_HINT);
-                    bar.with_fix(
+                    let mut bar = bar.with_fix(
                         &strings::forget_folder(folder, home),
                         Action::AskForget(folder.clone()),
                         off,
-                    )
+                    );
+                    // The label keeps the end of a long path: the tooltip
+                    // has the whole one.
+                    bar.notice = bar
+                        .notice
+                        .with_action_hint(strings::forget_folder_hint(folder));
+                    bar
                 }
                 None => bar,
             }
@@ -514,6 +520,67 @@ mod tests {
         assert_eq!(bar.fix, Some(Action::AskForget(folder)));
         let lines = lines_of(&[("refused unlink".to_owned(), bar)]);
         assert!(lines[0].0 <= 2, "{lines:?}");
+    }
+
+    #[test]
+    fn the_forget_action_of_a_long_folder_shows_its_end_and_the_tooltip_has_the_whole_path() {
+        let mut model = connected();
+        model.home = Some(abs("/Users/omar"));
+        let folder = abs("/Users/omar/Code/clients/acme/projects");
+        model.sites_notice = Some(SitesNotice::SiteIsParked {
+            site: "shop".into(),
+            folder: Some(folder.clone()),
+        });
+        let bar = current(&model).expect("a notice");
+        // The sentence names no long path; the button keeps the last parts.
+        assert_eq!(bar.notice.text, "shop.test is part of a parked folder.");
+        let sep = std::path::MAIN_SEPARATOR;
+        let label = format!("Forget …{sep}clients{sep}acme{sep}projects…");
+        assert_eq!(bar.notice.action.as_deref(), Some(label.as_str()));
+        // The tooltip has the whole path, not the shortened one and not `~`.
+        let hint = bar.notice.action_hint.as_deref().expect("a tooltip");
+        assert!(hint.contains(&folder.display().to_string()), "{hint}");
+        assert!(!hint.contains('~') && !hint.contains('…'), "{hint}");
+        assert_eq!(bar.fix, Some(Action::AskForget(folder)));
+        // Over the button, a screen and a pointer both get that text.
+        let start = Instant::now();
+        let harness = Harness::new(egui::Theme::Light);
+        let area = Rect::from_min_size(egui::pos2(224.0, 0.0), egui::vec2(896.0, 720.0));
+        // The bar sizes itself over a few frames.
+        for _ in 0..20 {
+            harness.run(|ui| {
+                show(ui.ctx(), area, &model, start);
+            });
+        }
+        let tree = harness.accessibility(|ui| {
+            show(ui.ctx(), area, &model, start);
+        });
+        let bounds = tree
+            .node_with_label(&label)
+            .and_then(|node| node.bounds())
+            .expect("the action");
+        let over = egui::pos2(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        );
+        // No wait before a tooltip: the test has no clock.
+        harness
+            .ctx
+            .all_styles_mut(|style| style.interaction.tooltip_delay = 0.0);
+        let mut tip = None;
+        for _ in 0..30 {
+            harness.hover(over, |ui| {
+                show(ui.ctx(), area, &model, start);
+            });
+            let tree = harness.accessibility(|ui| {
+                show(ui.ctx(), area, &model, start);
+            });
+            if tree.node_with_text(hint).is_some() {
+                tip = Some(hint);
+                break;
+            }
+        }
+        assert_eq!(tip, Some(hint), "the tooltip shows over the action");
     }
 
     /// Every result the sites actions say, with a long folder under home.

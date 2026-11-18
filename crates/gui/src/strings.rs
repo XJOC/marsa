@@ -37,9 +37,6 @@ pub const SERVICES_POOLS_NOTE: &str = "PHP pools start and stop with the sites t
 pub const COLUMN_SERVICE: &str = "Service";
 pub const COLUMN_STATE: &str = "State";
 pub const COLUMN_ACTIONS: &str = "Actions";
-/// Over the disabled buttons of a php-fpm pool.
-pub const MANAGED_BY_SITES_HINT: &str =
-    "Starts and stops with the sites that need its PHP version.";
 
 pub const LOGS: &str = "Logs";
 /// The name of the control that picks whose log is shown.
@@ -53,7 +50,7 @@ pub const FOLLOW_HINT: &str = "Keeps the newest line in view. Scrolling up stops
 /// The Logs screen while the window has no daemon to ask and no log kept.
 pub const LOGS_OFFLINE: &str = "Logs show here once Marsa is connected to its daemon.";
 /// The Logs screen when the filters leave no line.
-pub const LOG_NO_MATCH: &str = "No line matches the filters.";
+pub const LOG_NO_MATCH: &str = "No lines match.";
 
 /// The Logs screen when the program has written nothing yet.
 pub fn log_empty(name: &str) -> String {
@@ -112,7 +109,7 @@ pub fn service_description(id: &str, waiting: bool, sites: usize) -> String {
         return "A program Marsa runs for your sites.".to_owned();
     };
     match (waiting, sites) {
-        (true, _) => format!("No site needs PHP {line} now. It starts when one does."),
+        (true, _) => "No site needs it now. It starts when one does.".to_owned(),
         (false, 0) => format!("Runs PHP {line} for your sites."),
         (false, 1) => format!("Runs PHP {line} for 1 site."),
         (false, n) => format!("Runs PHP {line} for {n} sites."),
@@ -122,6 +119,11 @@ pub fn service_description(id: &str, waiting: bool, sites: usize) -> String {
 /// The tooltip of a state: the process id, while there is one.
 pub fn service_pid(pid: u32) -> String {
     format!("Process {pid}")
+}
+
+/// What a screen reader says for the "Show log" of a service.
+pub fn service_show_log_label(name: &str) -> String {
+    format!("{SHOW_LOG} of {name}")
 }
 
 /// What a screen reader says for a service's button: "Restart Caddy".
@@ -1264,10 +1266,20 @@ pub fn site_is_parked(site: &str, folder: Option<&Path>, home: Option<&Path>) ->
 }
 
 /// The action of the notice [`site_is_parked`]: it asks to forget the folder.
-/// A long path keeps its last parts (`…/clients/acme`); the site's page and
-/// the Parked folders list show the whole path.
+/// A long path keeps its last parts (`…/clients/acme`): the sentence before
+/// the button names no long path, and the tooltip of the button has the
+/// whole one.
 pub fn forget_folder(folder: &Path, home: Option<&Path>) -> String {
     forget_folder_shown(&path_tail(&home_path(folder, home), MAX_ACTION_PATH))
+}
+
+/// The tooltip of the action [`forget_folder`]: the whole path of the folder,
+/// which the label may show only the end of.
+pub fn forget_folder_hint(folder: &Path) -> String {
+    format!(
+        "Forget {}: its sites are no longer served. Its files stay.",
+        folder.display()
+    )
 }
 
 /// The longest path a button names in full.

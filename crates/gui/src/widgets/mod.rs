@@ -299,6 +299,24 @@ pub(crate) mod harness {
             shapes
         }
 
+        /// The shapes one frame paints with the clip rect each is drawn in,
+        /// for a frame of `input`: a shape that sticks out of its clip rect
+        /// is cut on screen.
+        pub fn clipped_shapes(
+            &self,
+            input: RawInput,
+            add: impl FnMut(&mut Ui),
+        ) -> Vec<(egui::Rect, egui::Shape)> {
+            let output = self.ctx.run_ui(input, add);
+            let shapes = output
+                .shapes
+                .iter()
+                .map(|clipped| (clipped.clip_rect, clipped.shape.clone()))
+                .collect();
+            output.drop_without_applying_deltas();
+            shapes
+        }
+
         /// One frame with no input.
         pub fn run(&self, add: impl FnMut(&mut Ui)) {
             self.frame(RawInput::default(), add);

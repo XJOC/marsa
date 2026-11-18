@@ -9,6 +9,13 @@ description = "The Marsa window (egui with the wgpu renderer) and the menu-bar i
 # (src/bin/marsa-tray.rs, the menu-bar icon). The library holds the code of
 # both and exists for them only (task M5-04).
 
+[features]
+# The measurement mode (`src/measure.rs`, task M5-D10): `MARSA_GUI_MEASURE`
+# fills the window with made-up data and times its frames, for a release
+# build with no daemon. Off by default, so a shipped binary carries none of
+# it; measure with `cargo build -p marsa-gui --release --features measure`.
+measure = []
+
 [dependencies]
 # With `full` (the default): the window talks to the daemon through
 # `marsa_core::client`, like the CLI.

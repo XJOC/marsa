@@ -302,6 +302,10 @@ pub struct LogRow {
     pub stream: LogStream,
     /// Read from the text once, when the line arrives (`logline`).
     pub level: LogLevel,
+    /// The columns of the mono face the message takes (`logline::columns`),
+    /// so the list knows how far to scroll sideways without laying out a
+    /// line it does not draw.
+    pub columns: usize,
     /// The line as the program wrote it.
     pub text: String,
 }
@@ -1894,9 +1898,12 @@ impl Model {
         if log.rows.len() == MAX_LOG_LINES {
             log.rows.pop_front();
         }
+        let read = logline::read(&line.text);
+        let (level, columns) = (read.level, logline::columns(&read.message));
         log.rows.push_back(LogRow {
             stream: line.stream,
-            level: logline::level(&line.text),
+            level,
+            columns,
             text: line.text,
         });
     }
@@ -2598,6 +2605,9 @@ mod tests {
         ]));
         let levels: Vec<_> = model.log_rows("caddy").iter().map(|r| r.level).collect();
         assert_eq!(levels, [LogLevel::Error, LogLevel::Warning, LogLevel::Info]);
+        // The columns are those of the message, not of the JSON around it.
+        let columns: Vec<_> = model.log_rows("caddy").iter().map(|r| r.columns).collect();
+        assert_eq!(columns, ["boom".len(), "hm".len(), "ready".len()]);
         // The text stays as the program wrote it.
         assert_eq!(
             model.log_rows("caddy")[0].text,

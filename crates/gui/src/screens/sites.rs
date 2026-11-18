@@ -48,6 +48,9 @@ pub struct SitesView<'a> {
     /// "Unlinking shop.test…", while the daemon removes it.
     pub removing: Option<String>,
     pub list: List<'a>,
+    /// Where the rows are built from: a row is made when the table asks for
+    /// it ([`SitesView::row`]), never for every site.
+    model: ReadFrom<'a>,
     /// The installed PHP versions, oldest first: the entries of every
     /// version menu after the first row.
     pub php: Vec<PhpChoice>,
@@ -60,6 +63,23 @@ pub struct SitesView<'a> {
     pub skipped: &'a [SkippedFolder],
 }
 
+/// The model a view builds its rows from. A model is not `PartialEq`, so
+/// two views are equal when they read the same model.
+#[derive(Clone, Copy)]
+struct ReadFrom<'a>(&'a Model);
+
+impl PartialEq for ReadFrom<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.0, other.0)
+    }
+}
+
+impl std::fmt::Debug for ReadFrom<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the model")
+    }
+}
+
 /// The table, or what stands in its place.
 #[derive(Debug, PartialEq)]
 pub enum List<'a> {
@@ -69,7 +89,32 @@ pub enum List<'a> {
     Empty,
     /// The search matches none of the sites.
     NoMatch(&'a str),
-    Rows(Vec<SiteRow<'a>>),
+    /// The sites the search lets through. No row exists yet: the table asks
+    /// for the rows in view (R16), and 500 sites cost what 12 do.
+    Rows(Matches),
+}
+
+/// Which of the model's sites the search lets through, in order.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Matches {
+    /// Their indexes in the model's list; none while the search is empty
+    /// and every site shows.
+    found: Option<Vec<usize>>,
+    count: usize,
+}
+
+impl Matches {
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    /// The index in the model's list of the `n`th site that shows.
+    fn site(&self, n: usize) -> Option<usize> {
+        match &self.found {
+            Some(found) => found.get(n).copied(),
+            None => (n < self.count).then_some(n),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -163,7 +208,7 @@ pub struct HostsView {
 /// `picking`: a folder dialog is open.
 pub fn view(model: &Model, picking: bool) -> SitesView<'_> {
     let php = php_choices(model);
-    let list = list(model, &php);
+    let list = list(model);
     SitesView {
         search: &model.sites_search,
         add_off: add_off(model, picking),
@@ -171,6 +216,7 @@ pub fn view(model: &Model, picking: bool) -> SitesView<'_> {
         hosts: hosts(model),
         removing: removing_line(model),
         list,
+        model: ReadFrom(model),
         php,
         parked: &model.sites.parked,
         home: model.home.as_deref(),
@@ -200,7 +246,7 @@ fn add_off(model: &Model, picking: bool) -> Option<&'static str> {
     }
 }
 
-fn list<'a>(model: &'a Model, php: &[PhpChoice]) -> List<'a> {
+fn list(model: &Model) -> List<'_> {
     if !model.is_connected() {
         return List::Offline;
     }
@@ -209,15 +255,19 @@ fn list<'a>(model: &'a Model, php: &[PhpChoice]) -> List<'a> {
         return List::Empty;
     }
     let search = model.sites_search.trim();
-    let rows: Vec<_> = all
-        .iter()
-        .filter(|site| matches(&site.name, search))
-        .map(|site| row(model, site, php))
-        .collect();
-    if rows.is_empty() {
+    // Only the indexes: a row is built when the table draws it.
+    let found: Option<Vec<usize>> = (!search.is_empty()).then(|| {
+        all.iter()
+            .enumerate()
+            .filter(|(_, site)| matches(&site.name, search))
+            .map(|(index, _)| index)
+            .collect()
+    });
+    let count = found.as_ref().map_or(all.len(), Vec::len);
+    if count == 0 {
         List::NoMatch(search)
     } else {
-        List::Rows(rows)
+        List::Rows(Matches { found, count })
     }
 }
 
@@ -232,13 +282,32 @@ fn matches(name: &str, search: &str) -> bool {
             .any(|window| window.eq_ignore_ascii_case(search))
 }
 
-fn row<'a>(model: &'a Model, site: &'a Site, php: &[PhpChoice]) -> SiteRow<'a> {
-    SiteRow {
-        name: &site.name,
-        root: &site.root,
-        php: php_cell(model, site, php),
-        https: site.secure,
+impl<'a> SitesView<'a> {
+    /// The `n`th row of the table, built now. `None` past the last one, and
+    /// when the screen has no table.
+    pub fn row(&self, n: usize) -> Option<SiteRow<'a>> {
+        let List::Rows(matches) = &self.list else {
+            return None;
+        };
+        let model = self.model.0;
+        let site = model.sites.sites.get(matches.site(n)?)?;
+        #[cfg(test)]
+        BUILT.with(|built| built.set(built.get() + 1));
+        Some(SiteRow {
+            name: &site.name,
+            root: &site.root,
+            php: php_cell(model, site, &self.php),
+            https: site.secure,
+        })
     }
+}
+
+// Tests only: how many rows were built, so a test can tell that a screen of
+// 2000 sites built a screenful and not 2000. A counter in a release build
+// would be a cost with no use.
+#[cfg(test)]
+thread_local! {
+    static BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The version the row shows, the entry its menu checks, and why. The entry
@@ -352,7 +421,7 @@ pub fn show(ui: &mut Ui, view: &SitesView<'_>, theme: &Theme) -> Vec<Action> {
             add_menu(&button, &mut actions);
         }
         List::NoMatch(search) => message(ui, theme, &strings::no_site_matches(search)),
-        List::Rows(rows) => table(ui, theme, view, rows, &mut actions),
+        List::Rows(matches) => table(ui, theme, view, matches.len(), &mut actions),
     }
     parked(ui, theme, view, &mut actions);
     skipped(ui, theme, view.skipped, view.home);
@@ -528,7 +597,7 @@ fn table(
     ui: &mut Ui,
     theme: &Theme,
     view: &SitesView<'_>,
-    rows: &[SiteRow<'_>],
+    count: usize,
     actions: &mut Vec<Action>,
 ) {
     let columns = [
@@ -545,12 +614,15 @@ fn table(
         .map(|(index, choice)| (index, choice.label.as_str()))
         .collect();
     let table = Table::new("sites", strings::SITES, &columns).rows(RowHeight::TwoLine);
-    let shown = table.show(ui, rows.len(), |row| {
-        let site = &rows[row.index()];
+    let shown = table.show(ui, count, |row| {
+        // Built here, for the rows in view only.
+        let Some(site) = view.row(row.index()) else {
+            return;
+        };
         let full = site.root.display().to_string();
         let shown = strings::home_path(site.root, view.home);
         row.two_lines_hover(site.name, &shown, &full);
-        row.cell(|ui| php_menu(ui, view, site, &versions, actions));
+        row.cell(|ui| php_menu(ui, view, &site, &versions, actions));
         row.cell(|ui| connection(ui, theme, site.https));
         row.cell(|ui| {
             if ui.add(Button::secondary(strings::OPEN).in_row()).clicked() {
@@ -558,9 +630,8 @@ fn table(
             }
         });
     });
-    if let Some(index) = shown.clicked {
-        let name = rows[index].name.to_owned();
-        actions.push(Action::Navigate(Route::Site(name)));
+    if let Some(site) = shown.clicked.and_then(|index| view.row(index)) {
+        actions.push(Action::Navigate(Route::Site(site.name.to_owned())));
     }
 }
 
@@ -817,11 +888,19 @@ mod tests {
         }));
     }
 
-    fn rows<'a, 'b>(view: &'b SitesView<'a>) -> &'b [SiteRow<'a>] {
+    /// Every row of the table, built (a screen builds only the ones in view).
+    fn rows<'a>(view: &SitesView<'a>) -> Vec<SiteRow<'a>> {
         match &view.list {
-            List::Rows(rows) => rows,
+            List::Rows(matches) => (0..matches.len())
+                .map(|n| view.row(n).expect("a row"))
+                .collect(),
             other => panic!("expected rows, got {other:?}"),
         }
+    }
+
+    /// The `n`th row.
+    fn row_of<'a>(view: &SitesView<'a>, n: usize) -> SiteRow<'a> {
+        view.row(n).expect("a row")
     }
 
     fn names<'a>(view: &SitesView<'a>) -> Vec<&'a str> {
@@ -910,7 +989,7 @@ mod tests {
         for (source, reason, text) in cases {
             with_sites(&mut model, vec![site("shop", Some("8.4.27"), source)]);
             let view = view(&model, false);
-            let cell = &rows(&view)[0].php;
+            let cell = row_of(&view, 0).php;
             assert_eq!(cell.reason, reason, "{text}");
             assert_eq!(
                 cell.reason.map(|reason| reason.text()).as_deref(),
@@ -925,7 +1004,7 @@ mod tests {
         let mut model = model(&[]);
         with_sites(&mut model, vec![site("shop", None, None)]);
         let view_ = view(&model, false);
-        let cell = &rows(&view_)[0].php;
+        let cell = row_of(&view_, 0).php;
         assert_eq!(cell.shown, strings::NO_PHP);
         assert_eq!(cell.reason, Some(Reason::NoMatch));
         assert_eq!(
@@ -937,7 +1016,7 @@ mod tests {
         // No PHP at all: the menu is off, and says what to do.
         model.update(Update::Runtimes(runtimes(&[])));
         let view_ = view(&model, false);
-        let cell = &rows(&view_)[0].php;
+        let cell = row_of(&view_, 0).php;
         assert_eq!(cell.reason, Some(Reason::NoPhpInstalled));
         assert_eq!(cell.off, Some(strings::NO_PHP_YET));
         assert_eq!(strings::REASON_NO_PHP, "no PHP installed");
@@ -977,7 +1056,7 @@ mod tests {
             .choose_site_php("shop", Choice::Version(v("8.3.27")))
             .expect("a change");
         let view_ = view(&model, false);
-        let cell = &rows(&view_)[0].php;
+        let cell = row_of(&view_, 0).php;
         assert_eq!(
             (cell.shown.as_str(), cell.reason),
             ("8.3", Some(Reason::Site))
@@ -991,7 +1070,7 @@ mod tests {
             .choose_site_php("shop", Choice::Auto)
             .expect("a change");
         let view_ = view(&model, false);
-        let cell = &rows(&view_)[0].php;
+        let cell = row_of(&view_, 0).php;
         assert_eq!(cell.reason, Some(Reason::Files));
         assert_eq!(cell.setting, Setting::SiteFiles);
         assert_eq!(strings::REASON_FILES, "from the site's files");
@@ -1316,14 +1395,26 @@ mod tests {
             ..RawInput::default()
         };
         let mut count = 0;
+        let (mut after_view, mut after_frame) = (0, 0);
+        BUILT.with(|built| built.set(0));
         let tree = harness.frame(input, |ui| {
-            count = match &view(&model, false).list {
+            let shown = view(&model, false);
+            count = match &shown.list {
                 List::Rows(rows) => rows.len(),
                 _ => 0,
             };
-            draw(ui, &model);
+            after_view = BUILT.with(std::cell::Cell::get);
+            show(ui, &shown, &LIGHT);
+            after_frame = BUILT.with(std::cell::Cell::get);
         });
         assert_eq!(count, 2000);
+        // The view holds the 2000 matches and builds no row; the table builds
+        // the rows in view, and only those (R16).
+        assert_eq!(after_view, 0, "the view builds no row");
+        assert!(
+            (1..=20).contains(&after_frame),
+            "{after_frame} rows were built for 2000 sites"
+        );
         let drawn = (0..2000)
             .filter(|i| {
                 tree.node_with_label(&format!("PHP version for site-{i:04}, 8.4"))
