@@ -82,10 +82,10 @@ if has darwin-; then
 fi
 if has linux-; then
   systems+=(Linux)
-  lines+="- **Linux** (\`linux-x64\`, \`linux-arm64\`): needs glibc $glibc or newer. \`marsa-gui\` needs a desktop session (X11 or Wayland) with Vulkan or OpenGL.$tray"$'\n'
+  lines+="- **Linux** (\`linux-x64\`, \`linux-arm64\`): Preview: tested end to end on GitHub runners, not yet by a person. Needs glibc $glibc or newer. \`marsa-gui\` needs a desktop session (X11 or Wayland) with Vulkan or OpenGL.$tray"$'\n'
 fi
 if has windows-; then
-  lines+="- **Windows** (\`windows-x64\`): the programs are not code-signed yet, so SmartScreen may warn."$'\n'
+  lines+="- **Windows** (\`windows-x64\`): Preview: tested end to end on GitHub runners, not yet by a person. The programs are not code-signed yet, so SmartScreen may warn."$'\n'
 fi
 left_out=()
 for family in macOS:darwin- Linux:linux- Windows:windows-; do
@@ -111,6 +111,19 @@ curl -fsSL https://github.com/XJOC/marsa/releases/download/v$VERSION/install.sh 
 \`\`\`
 
 The script installs for your user only, without \`sudo\`, and edits no shell file. It checks the SHA-256 of the archive before it unpacks it, and the signature below if \`minisign\` is installed.
+"
+fi
+if has windows-; then
+  install+="${install:+
+}## Install on Windows
+
+In PowerShell:
+
+\`\`\`powershell
+\$env:MARSA_VERSION = '$VERSION'; irm https://github.com/XJOC/marsa/releases/download/v$VERSION/install.ps1 | iex
+\`\`\`
+
+The script installs for your user only, without admin rights. It checks the SHA-256 of the archive before it unpacks anything, and the signature below if \`minisign\` is installed. It puts Marsa in your user PATH.
 "
 fi
 
