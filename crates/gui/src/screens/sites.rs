@@ -1299,9 +1299,11 @@ mod tests {
             [Action::OpenSite("shop".into())],
             "the button is not also a row click"
         );
-        // The name and the folder are one cell, named by both.
+        // The name and the folder are one cell, named by both. The folder is
+        // written the system's way (`\` on Windows).
+        let label = format!("shop, {}", Path::new("/code").join("shop").display());
         assert_eq!(
-            click(&model, "shop, /code/shop"),
+            click(&model, &label),
             [Action::Navigate(Route::Site("shop".into()))]
         );
     }
