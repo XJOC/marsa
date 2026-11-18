@@ -21,6 +21,7 @@ use marsa_core::types::{
 use semver::Version;
 
 use crate::bridge::Command;
+pub use crate::prefs::Appearance;
 pub use crate::tray::menu::Autostart;
 
 /// The service whose log the window shows.
@@ -553,6 +554,9 @@ pub enum Action {
     AskUninstall { runtime: Runtime, version: Version },
     /// The Xdebug switch.
     ToggleXdebug,
+    /// An option of the Appearance control in Settings. `App` applies it at
+    /// once and writes it to `gui.toml` (task M5-D9).
+    SetAppearance(Appearance),
 }
 
 /// How Marsa works as a whole, as far as the window can tell: the status at
@@ -650,6 +654,10 @@ pub struct Model {
     /// The user folded the sidebar to its icons. A narrow window folds it
     /// anyway (`shell::sidebar`).
     pub sidebar_folded: bool,
+    /// The Appearance setting: System, Light, or Dark. Read from `gui.toml`
+    /// at start; `App` applies a change and writes it back. The window's own
+    /// setting, not the daemon's, so a reconnect keeps it.
+    pub appearance: Appearance,
 }
 
 impl Model {
@@ -679,6 +687,7 @@ impl Model {
                     // Where the user is, not daemon state.
                     route: mem::take(&mut self.route),
                     sidebar_folded: self.sidebar_folded,
+                    appearance: self.appearance,
                     ..Model::default()
                 };
             }
@@ -1633,6 +1642,12 @@ impl Model {
                 None
             }
             Action::ToggleXdebug => self.toggle_xdebug().map(Command::SetXdebug),
+            Action::SetAppearance(appearance) => {
+                // `App` sees the change after the frame: it sets egui's
+                // theme and writes `gui.toml`.
+                self.appearance = appearance;
+                None
+            }
             // Done by `App`, with the system's opener and dialog: nothing
             // changes here.
             Action::OpenSite(_) | Action::OpenFolder(_) | Action::PickFolder(_) => None,
@@ -2112,6 +2127,22 @@ mod tests {
         model.update(Update::Connected(health()));
         assert_eq!(model.route, Route::Site("shop".into()));
         assert!(model.sidebar_folded);
+    }
+
+    #[test]
+    fn the_appearance_is_the_windows_own_setting_and_a_reconnect_keeps_it() {
+        let mut model = connected();
+        assert_eq!(model.appearance, Appearance::System);
+        // No command: the daemon has nothing to do with it.
+        assert!(
+            model
+                .apply_action(Action::SetAppearance(Appearance::Dark))
+                .is_none()
+        );
+        assert_eq!(model.appearance, Appearance::Dark);
+        model.update(Update::Failed("daemon_start_failed".into()));
+        model.update(Update::Connected(health()));
+        assert_eq!(model.appearance, Appearance::Dark);
     }
 
     #[test]
