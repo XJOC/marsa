@@ -215,6 +215,25 @@ pub fn line_version(default: Option<&str>, installed: &[Version]) -> Option<Vers
     installed.iter().filter(in_line).max().cloned()
 }
 
+/// Whether `line`, from PostgreSQL's stderr, says that it found the lock
+/// file of a live process: `FATAL:  lock file "postmaster.pid" already
+/// exists`, or the same for the lock file of its socket. PostgreSQL exits at
+/// once then, and a restart would fail the same way. The text is English:
+/// initdb's `--locale=C` sets `lc_messages`.
+pub fn is_lock_file_conflict(line: &str) -> bool {
+    line.contains("lock file \"") && line.contains("\" already exists")
+}
+
+/// The pid in the hint that follows that error: `HINT:  Is another
+/// postmaster (PID 4242) running in data directory "..."?`, `... using
+/// socket file "..."?`, or `another postgres` for a single-user server.
+pub fn lock_holder_pid(line: &str) -> Option<u32> {
+    let (_, hint) = line.split_once("HINT:")?;
+    let (_, rest) = hint.split_once("(PID ")?;
+    let (digits, _) = rest.split_once(')')?;
+    postmaster_pid(digits)
+}
+
 /// Who holds the server's port, from the daemon's bind test.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortCheck {
@@ -622,6 +641,37 @@ mod tests {
             assert_eq!(pick(Some(default)), None, "{default}");
         }
         assert_eq!(line_version(None, &[]), None);
+    }
+
+    /// The two lines PostgreSQL 18 prints when another server holds the
+    /// folder, with the default `log_line_prefix`.
+    #[test]
+    fn a_lock_file_refusal_and_its_holder_are_read_from_the_log() {
+        let fatal = "2026-11-18 10:00:00.123 UTC [5150] FATAL:  lock file \"postmaster.pid\" \
+                     already exists";
+        let hint = "2026-11-18 10:00:00.123 UTC [5150] HINT:  Is another postmaster \
+                    (PID 4242) running in data directory \"/m/databases/postgres/18\"?";
+        assert!(is_lock_file_conflict(fatal));
+        assert!(!is_lock_file_conflict(hint));
+        assert_eq!(lock_holder_pid(hint), Some(4242));
+        assert_eq!(lock_holder_pid(fatal), None);
+        // The lock of the socket, and a single-user server.
+        let socket = "FATAL:  lock file \"/m/run/.s.PGSQL.5432.lock\" already exists";
+        assert!(is_lock_file_conflict(socket));
+        let single =
+            "HINT:  Is another postgres (PID 77) using socket file \"/m/run/.s.PGSQL.5432\"?";
+        assert_eq!(lock_holder_pid(single), Some(77));
+        // Other lines, and junk where the pid goes.
+        let ready = "LOG:  database system is ready to accept connections";
+        assert!(!is_lock_file_conflict(ready));
+        for junk in [
+            "HINT:  (PID 0)",
+            "HINT:  (PID x1)",
+            "HINT:  (PID 1",
+            "(PID 9) HINT:",
+        ] {
+            assert_eq!(lock_holder_pid(junk), None, "{junk}");
+        }
     }
 
     #[test]
