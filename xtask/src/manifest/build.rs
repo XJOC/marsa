@@ -40,6 +40,8 @@ pub struct RuntimesJson {
     pub composer: Vec<ReleaseJson>,
     #[serde(default)]
     pub caddy: Vec<ReleaseJson>,
+    #[serde(default)]
+    pub postgres: Vec<ReleaseJson>,
 }
 
 impl RuntimesJson {
@@ -49,6 +51,7 @@ impl RuntimesJson {
             Runtime::Node => &self.node,
             Runtime::Composer => &self.composer,
             Runtime::Caddy => &self.caddy,
+            Runtime::Postgres => &self.postgres,
         }
     }
 
@@ -58,6 +61,7 @@ impl RuntimesJson {
             Runtime::Node => &mut self.node,
             Runtime::Composer => &mut self.composer,
             Runtime::Caddy => &mut self.caddy,
+            Runtime::Postgres => &mut self.postgres,
         }
     }
 }

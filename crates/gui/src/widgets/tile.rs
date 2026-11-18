@@ -321,7 +321,7 @@ mod tests {
             .into_iter()
             .map(strings::runtime_monogram)
             .collect();
-        assert_eq!(letters, ["PHP", "JS", "Co", "Ca"]);
+        assert_eq!(letters, ["PHP", "JS", "Co", "Ca", "Po"]);
         assert!(letters.iter().all(|text| (2..=3).contains(&text.len())));
     }
 

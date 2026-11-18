@@ -194,7 +194,8 @@ impl Drop for Started {
 }
 
 async fn runtimes(State(daemon): State<Arc<Daemon>>) -> Result<Json<RuntimeList>, HttpError> {
-    // Four small folder reads and one small file; not worth a blocking thread.
+    // A small folder read per runtime and one small file; not worth a
+    // blocking thread.
     list(&daemon.data_dir).map(Json).map_err(|err| {
         tracing::warn!(code = err.code(), error = %err, "cannot list runtimes");
         HttpError::new(
@@ -225,7 +226,7 @@ pub fn list(data_dir: &Path) -> Result<RuntimeList, RuntimesError> {
             let default = match runtime {
                 Runtime::Php => global.php.default.clone(),
                 Runtime::Node => global.node.default.clone(),
-                Runtime::Composer | Runtime::Caddy => None,
+                Runtime::Composer | Runtime::Caddy | Runtime::Postgres => None,
             };
             Ok(RuntimeVersions {
                 runtime,
@@ -290,7 +291,8 @@ fn runtime(tool: &str) -> Result<Runtime, HttpError> {
         .into_iter()
         .find(|runtime| runtime.dir_name() == tool)
         .ok_or_else(|| {
-            let message = format!("no tool named {tool:?}; use php, node, composer, or caddy");
+            let names: Vec<&str> = Runtime::ALL.iter().map(|r| r.dir_name()).collect();
+            let message = format!("no tool named {tool:?}; use one of: {}", names.join(", "));
             HttpError::new(StatusCode::NOT_FOUND, "unknown_tool", message)
         })
 }
@@ -800,7 +802,7 @@ fn in_use(
     let setting: fn(&SiteSettings) -> Option<&String> = match runtime {
         Runtime::Php => |site| site.php.as_ref(),
         Runtime::Node => |site| site.node.as_ref(),
-        Runtime::Composer | Runtime::Caddy => |_| None,
+        Runtime::Composer | Runtime::Caddy | Runtime::Postgres => |_| None,
     };
     let default = default_tool(runtime).and_then(|tool| match tool {
         Tool::Php => global.php.default.as_ref(),
@@ -844,7 +846,7 @@ fn default_tool(runtime: Runtime) -> Option<Tool> {
     match runtime {
         Runtime::Php => Some(Tool::Php),
         Runtime::Node => Some(Tool::Node),
-        Runtime::Composer | Runtime::Caddy => None,
+        Runtime::Composer | Runtime::Caddy | Runtime::Postgres => None,
     }
 }
 
@@ -884,6 +886,16 @@ fn global_error(err: &ConfigError) -> HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unknown_tool_is_refused_with_every_known_name() {
+        assert_eq!(runtime("postgres").unwrap(), Runtime::Postgres);
+        let err = runtime("ruby").unwrap_err();
+        assert_eq!(err.code, "unknown_tool");
+        for known in Runtime::ALL {
+            assert!(err.message.contains(known.dir_name()), "{}", err.message);
+        }
+    }
 
     #[test]
     fn the_first_php_and_node_become_the_default() {
@@ -1009,12 +1021,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_four_tools_are_known() {
+    fn only_the_known_tools_are_known() {
         for (tool, runtime) in [
             ("php", Runtime::Php),
             ("node", Runtime::Node),
             ("composer", Runtime::Composer),
             ("caddy", Runtime::Caddy),
+            ("postgres", Runtime::Postgres),
         ] {
             assert_eq!(super::runtime(tool).unwrap(), runtime);
         }
@@ -1049,6 +1062,7 @@ mod tests {
             (Runtime::Node, "22.11.0".to_owned(), None),
             (Runtime::Composer, String::new(), None),
             (Runtime::Caddy, "2.11.7".to_owned(), None),
+            (Runtime::Postgres, String::new(), None),
         ];
         assert_eq!(shown(list(tmp.path()).unwrap()), want);
 
@@ -1057,12 +1071,13 @@ mod tests {
         global.php.default = Some("8.4".into());
         global.node.default = Some("22".into());
         config::save_global(&ConfigPaths::in_dir(tmp.path()).global, &global).unwrap();
-        let [php, node, composer, caddy] = want;
+        let [php, node, composer, caddy, postgres] = want;
         let want = [
             (php.0, php.1, Some("8.4".to_owned())),
             (node.0, node.1, Some("22".to_owned())),
             composer,
             caddy,
+            postgres,
         ];
         assert_eq!(shown(list(tmp.path()).unwrap()), want);
 

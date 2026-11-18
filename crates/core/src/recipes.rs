@@ -133,7 +133,8 @@ pub enum ArchiveFormat {
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
     pub name: String,
-    /// Template with `{version}`, used by `cargo xtask manifest` only.
+    /// Template with `{version}`, `{major}`, and `{minor}`, used by
+    /// `cargo xtask manifest` only.
     pub url: String,
     pub format: ArchiveFormat,
     /// Leading path components dropped from every archive entry.
@@ -164,12 +165,13 @@ pub struct Check {
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// Template with `{version}`.
+    /// Template with `{version}`, `{major}`, and `{minor}`.
     pub expect_prefix: String,
 }
 
 impl Check {
-    /// [`Check::expect_prefix`] with `{version}` filled in.
+    /// [`Check::expect_prefix`] with `{version}`, `{major}`, and `{minor}`
+    /// filled in.
     pub fn expected_prefix(&self, version: &Version) -> String {
         fill(&self.expect_prefix, version)
     }
@@ -253,8 +255,8 @@ impl Recipe {
         self.platforms.iter().map(|(p, r)| (*p, r))
     }
 
-    /// The `url` template of artifact `name` on `platform`, with `{version}`
-    /// filled in. `None` if there is no such platform or artifact.
+    /// The `url` template of artifact `name` on `platform`, with its
+    /// placeholders filled in. `None` if there is no such platform or artifact.
     pub fn artifact_url(
         &self,
         platform: Platform,
@@ -283,8 +285,11 @@ pub enum RecipeError {
     #[error("recipe {recipe}: path {path:?} must be relative, with `/` and no `..`")]
     BadPath { recipe: String, path: String },
 
-    /// A template with a `{...}` other than `{version}`, or a lone brace.
-    #[error("recipe {recipe}: template {template:?} may only use {{version}}")]
+    /// A template with a `{...}` other than `{version}`, `{major}`, or
+    /// `{minor}`, or a lone brace.
+    #[error(
+        "recipe {recipe}: template {template:?} may only use {{version}}, {{major}}, and {{minor}}"
+    )]
     BadTemplate { recipe: String, template: String },
 }
 
@@ -313,6 +318,7 @@ pub fn builtin(runtime: Runtime) -> Result<&'static Recipe, RecipeError> {
     static NODE: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
     static COMPOSER: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
     static CADDY: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
+    static POSTGRES: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
 
     let (cell, file, text) = match runtime {
         Runtime::Php => (&PHP, "php.toml", include_str!("../../../recipes/php.toml")),
@@ -330,6 +336,11 @@ pub fn builtin(runtime: Runtime) -> Result<&'static Recipe, RecipeError> {
             &CADDY,
             "caddy.toml",
             include_str!("../../../recipes/caddy.toml"),
+        ),
+        Runtime::Postgres => (
+            &POSTGRES,
+            "postgres.toml",
+            include_str!("../../../recipes/postgres.toml"),
         ),
     };
     cell.get_or_init(|| {
@@ -538,20 +549,41 @@ fn check_path(source: &str, path: &str, allow_empty: bool) -> Result<(), RecipeE
     }
 }
 
-/// A template may hold `{version}` and nothing else between braces.
+/// A template may hold `{version}`, `{major}`, and `{minor}`, and nothing
+/// else between braces. Read from the left, one brace at a time, so a nested
+/// `{mi{major}nor}` is refused: removing the placeholders one after another
+/// would leave a valid-looking `{minor}`.
 fn check_template(source: &str, template: &str) -> Result<(), RecipeError> {
-    let rest = template.replace("{version}", "");
-    if rest.contains(['{', '}']) {
-        return Err(RecipeError::BadTemplate {
+    const PLACEHOLDERS: [&str; 3] = ["version}", "major}", "minor}"];
+    let mut rest = template;
+    let valid = loop {
+        let Some(brace) = rest.find(['{', '}']) else {
+            break true;
+        };
+        let after = &rest[brace + 1..];
+        let known = PLACEHOLDERS.iter().find(|name| after.starts_with(**name));
+        match (&rest[brace..brace + 1], known) {
+            ("{", Some(name)) => rest = &after[name.len()..],
+            _ => break false,
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(RecipeError::BadTemplate {
             recipe: source.to_string(),
             template: template.to_string(),
-        });
+        })
     }
-    Ok(())
 }
 
+/// `{version}` is the whole version (`17.12.0`); `{major}` and `{minor}` are
+/// its first two numbers, for programs that print `17.12`.
 fn fill(template: &str, version: &Version) -> String {
-    template.replace("{version}", &version.to_string())
+    template
+        .replace("{version}", &version.to_string())
+        .replace("{major}", &version.major.to_string())
+        .replace("{minor}", &version.minor.to_string())
 }
 
 /// `base` joined with each `/`-separated part of a checked relative path. An
@@ -685,6 +717,82 @@ into = "bin"
             assert_eq!(listed, CONCRETE, "{runtime:?}");
             assert!(recipe.check().is_some(), "{runtime:?} has a check");
         }
+    }
+
+    #[test]
+    fn postgres_is_the_theseus_archive_with_one_top_folder_removed() {
+        let recipe = builtin(Runtime::Postgres).expect("built-in recipe is valid");
+        let listed: Vec<Platform> = recipe.platforms().map(|(p, _)| p).collect();
+        assert_eq!(listed, CONCRETE);
+        let minimums: Vec<(Option<&str>, Option<&str>)> = recipe
+            .platforms()
+            .map(|(_, entry)| (entry.min_macos(), entry.min_glibc()))
+            .collect();
+        assert_eq!(
+            minimums,
+            [
+                (Some("15.0"), None),
+                (Some("15.0"), None),
+                (None, Some("2.36")),
+                (None, Some("2.36")),
+                (None, None),
+            ]
+        );
+        let version = v("17.12.0");
+        let targets = [
+            (Platform::DarwinArm64, "aarch64-apple-darwin.tar.gz"),
+            (Platform::DarwinX64, "x86_64-apple-darwin.tar.gz"),
+            (Platform::LinuxX64, "x86_64-unknown-linux-gnu.tar.gz"),
+            (Platform::LinuxArm64, "aarch64-unknown-linux-gnu.tar.gz"),
+            (Platform::WindowsX64, "x86_64-pc-windows-msvc.zip"),
+        ];
+        for (platform, tail) in targets {
+            let entry = recipe.platform(platform).expect("platform listed");
+            let [artifact] = entry.artifacts() else {
+                panic!("one artifact expected on {platform}");
+            };
+            assert_eq!(artifact.strip_components, 1, "{platform}");
+            assert_eq!(
+                recipe
+                    .artifact_url(platform, "archive", &version)
+                    .as_deref(),
+                Some(
+                    format!(
+                        "https://github.com/theseus-rs/postgresql-binaries/releases/download/\
+                         17.12.0/postgresql-17.12.0-{tail}"
+                    )
+                    .as_str()
+                ),
+                "{platform}"
+            );
+            let exe = if platform == Platform::WindowsX64 {
+                ".exe"
+            } else {
+                ""
+            };
+            let dir = Path::new("v");
+            for name in [
+                "postgres",
+                "initdb",
+                "pg_ctl",
+                "psql",
+                "pg_dump",
+                "pg_restore",
+                "pg_isready",
+            ] {
+                assert_eq!(
+                    entry.program_path(dir, name),
+                    Some(dir.join("bin").join(format!("{name}{exe}"))),
+                    "{platform} {name}"
+                );
+            }
+        }
+        // PostgreSQL prints 17.12 for the release 17.12.0.
+        let check = recipe.check().expect("a check");
+        assert_eq!(
+            check.expected_prefix(&version),
+            "postgres (PostgreSQL) 17.12"
+        );
     }
 
     #[test]
@@ -946,13 +1054,17 @@ into = "bin"
     }
 
     #[test]
-    fn templates_accept_only_version() {
+    fn templates_accept_only_the_known_placeholders() {
         for bad in [
             "{arch}",
             "{ version }",
             "{version",
             "version}",
             "{{version}}",
+            "{patch}",
+            "{mi{major}nor}",
+            "{ma{version}jor}",
+            "{major}}",
         ] {
             let url = good_with("{version}", bad);
             assert_eq!(error_code(&url), "recipe_bad_template", "url {bad:?}");

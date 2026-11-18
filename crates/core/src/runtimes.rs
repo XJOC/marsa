@@ -7,7 +7,8 @@
 //! ├── php/8.4.3/bin/php
 //! ├── node/22.11.0/bin/node
 //! ├── composer/2.8.4/composer.phar
-//! └── caddy/2.11.8/caddy
+//! ├── caddy/2.11.8/caddy
+//! └── postgres/18.7.0/bin/postgres
 //! ```
 //!
 //! The list of installed versions is the folder names that are valid
@@ -39,15 +40,19 @@ pub enum Runtime {
     /// The web server `marsad` runs (task M2-10). Not a shim tool: nothing
     /// in a project picks its version.
     Caddy,
+    /// PostgreSQL (task M6-01). Installed like the others; it is a service,
+    /// not a shim tool.
+    Postgres,
 }
 
 impl Runtime {
     /// Every runtime, in the order lists show them.
-    pub const ALL: [Runtime; 4] = [
+    pub const ALL: [Runtime; 5] = [
         Runtime::Php,
         Runtime::Node,
         Runtime::Composer,
         Runtime::Caddy,
+        Runtime::Postgres,
     ];
 
     /// The folder name under `runtimes/`.
@@ -57,6 +62,7 @@ impl Runtime {
             Runtime::Node => "node",
             Runtime::Composer => "composer",
             Runtime::Caddy => "caddy",
+            Runtime::Postgres => "postgres",
         }
     }
 }
@@ -268,7 +274,7 @@ mod tests {
     #[test]
     fn all_lists_each_runtime_once_in_order() {
         let names: Vec<&str> = Runtime::ALL.iter().map(|r| r.dir_name()).collect();
-        assert_eq!(names, ["php", "node", "composer", "caddy"]);
+        assert_eq!(names, ["php", "node", "composer", "caddy", "postgres"]);
     }
 
     #[test]

@@ -57,7 +57,7 @@ pub fn render(list: &RuntimeList, tool: Option<Tool>) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        text.push_str(&format!("{:<10}{shown}\n", strings::runtime_name(runtime)));
+        text.push_str(&format!("{:<12}{shown}\n", strings::runtime_name(runtime)));
     }
     text
 }
@@ -90,10 +90,11 @@ mod tests {
         ]);
         assert_eq!(
             render(&empty, None),
-            "PHP       none installed\n\
-             Node.js   none installed\n\
-             Composer  none installed\n\
-             Caddy     none installed\n"
+            "PHP         none installed\n\
+             Node.js     none installed\n\
+             Composer    none installed\n\
+             Caddy       none installed\n\
+             PostgreSQL  none installed\n"
         );
     }
 
@@ -106,19 +107,20 @@ mod tests {
         ]);
         assert_eq!(
             render(&found, None),
-            "PHP       8.3.27, 8.4.23\n\
-             Node.js   22.11.0\n\
-             Composer  none installed\n\
-             Caddy     2.11.8\n"
+            "PHP         8.3.27, 8.4.23\n\
+             Node.js     22.11.0\n\
+             Composer    none installed\n\
+             Caddy       2.11.8\n\
+             PostgreSQL  none installed\n"
         );
-        assert_eq!(render(&found, Some(Tool::Node)), "Node.js   22.11.0\n");
-        assert_eq!(render(&found, Some(Tool::Caddy)), "Caddy     2.11.8\n");
+        assert_eq!(render(&found, Some(Tool::Node)), "Node.js     22.11.0\n");
+        assert_eq!(render(&found, Some(Tool::Caddy)), "Caddy       2.11.8\n");
         assert_eq!(
             render(
                 &list(&[(Runtime::Php, &["8.4.23\u{1b}[2J"])]),
                 Some(Tool::Php)
             ),
-            "PHP       8.4.23[2J\n"
+            "PHP         8.4.23[2J\n"
         );
     }
 }
