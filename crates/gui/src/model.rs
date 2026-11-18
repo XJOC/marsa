@@ -21,6 +21,7 @@ use marsa_core::types::{
 use semver::Version;
 
 use crate::bridge::Command;
+pub use crate::prefs::Appearance;
 pub use crate::tray::menu::Autostart;
 
 /// The service whose log the window shows.
@@ -553,6 +554,14 @@ pub enum Action {
     AskUninstall { runtime: Runtime, version: Version },
     /// The Xdebug switch.
     ToggleXdebug,
+    /// The confirmation's action ("Unlink", "Forget", "Uninstall"): sends the
+    /// removal it asked about (task M5-D9).
+    ConfirmRemoval,
+    /// "Cancel" or Escape in the confirmation.
+    CancelRemoval,
+    /// An option of the Appearance control in Settings. `App` applies it at
+    /// once and writes it to `gui.toml` (task M5-D9).
+    SetAppearance(Appearance),
 }
 
 /// How Marsa works as a whole, as far as the window can tell: the status at
@@ -650,6 +659,10 @@ pub struct Model {
     /// The user folded the sidebar to its icons. A narrow window folds it
     /// anyway (`shell::sidebar`).
     pub sidebar_folded: bool,
+    /// The Appearance setting: System, Light, or Dark. Read from `gui.toml`
+    /// at start; `App` applies a change and writes it back. The window's own
+    /// setting, not the daemon's, so a reconnect keeps it.
+    pub appearance: Appearance,
 }
 
 impl Model {
@@ -679,6 +692,7 @@ impl Model {
                     // Where the user is, not daemon state.
                     route: mem::take(&mut self.route),
                     sidebar_folded: self.sidebar_folded,
+                    appearance: self.appearance,
                     ..Model::default()
                 };
             }
@@ -1633,6 +1647,17 @@ impl Model {
                 None
             }
             Action::ToggleXdebug => self.toggle_xdebug().map(Command::SetXdebug),
+            Action::ConfirmRemoval => self.confirm_removal().map(Command::Remove),
+            Action::CancelRemoval => {
+                self.cancel_removal();
+                None
+            }
+            Action::SetAppearance(appearance) => {
+                // `App` sees the change after the frame: it sets egui's
+                // theme and writes `gui.toml`.
+                self.appearance = appearance;
+                None
+            }
             // Done by `App`, with the system's opener and dialog: nothing
             // changes here.
             Action::OpenSite(_) | Action::OpenFolder(_) | Action::PickFolder(_) => None,
@@ -2115,6 +2140,22 @@ mod tests {
     }
 
     #[test]
+    fn the_appearance_is_the_windows_own_setting_and_a_reconnect_keeps_it() {
+        let mut model = connected();
+        assert_eq!(model.appearance, Appearance::System);
+        // No command: the daemon has nothing to do with it.
+        assert!(
+            model
+                .apply_action(Action::SetAppearance(Appearance::Dark))
+                .is_none()
+        );
+        assert_eq!(model.appearance, Appearance::Dark);
+        model.update(Update::Failed("daemon_start_failed".into()));
+        model.update(Update::Connected(health()));
+        assert_eq!(model.appearance, Appearance::Dark);
+    }
+
+    #[test]
     fn the_sites_search_is_the_models_and_a_reconnect_keeps_it() {
         let mut model = connected();
         assert!(
@@ -2176,6 +2217,22 @@ mod tests {
                 .is_none()
         );
         assert_eq!(model.confirm, Some(Removal::Forget { folder }));
+    }
+
+    #[test]
+    fn the_confirmations_answers_send_the_removal_or_drop_it() {
+        let mut model = with_parked();
+        model.apply_action(Action::AskUnlink("api".into()));
+        assert!(model.apply_action(Action::CancelRemoval).is_none());
+        assert!(model.confirm.is_none() && model.removing().is_none());
+        // Nothing waits: the answer sends nothing.
+        assert!(model.apply_action(Action::ConfirmRemoval).is_none());
+
+        model.apply_action(Action::AskForget(PathBuf::from("/code")));
+        let sent = model.apply_action(Action::ConfirmRemoval);
+        assert!(matches!(sent, Some(Command::Remove(ref r)) if *r == forget("/code")));
+        assert_eq!(model.removing(), Some(&forget("/code")));
+        assert!(model.confirm.is_none());
     }
 
     #[test]
