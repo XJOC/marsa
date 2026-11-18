@@ -2555,6 +2555,7 @@ dependencies = [
  "rfd",
  "semver",
  "serde",
+ "serde_json",
  "tao",
  "tempfile",
  "thiserror 2.0.21",
