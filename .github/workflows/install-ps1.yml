@@ -97,3 +97,22 @@ jobs:
         run: |
           & .\tests\install-ps1\run.ps1 -Minisign "$env:RUNNER_TEMP\minisign\minisign-win64\x86_64\minisign.exe"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # The real script, as users run it, against GitHub itself: the API, and
+      # a release file that GitHub serves through a redirect, in both
+      # PowerShells. It must get past SHA256SUMS: that proves the HTTPS
+      # download and the check of where its redirects ended. It then installs,
+      # or stops at a release with no Windows zip yet. After the tests: it
+      # may install into this runner.
+      - name: The real script reaches GitHub over HTTPS
+        shell: pwsh
+        run: |
+          $ok = 'Installed: |cannot download marsa-[0-9.]+-windows-x64\.zip'
+          foreach ($run in @(@{ Shell = 'powershell'; Version = '' }, @{ Shell = 'pwsh'; Version = '0.1.1' })) {
+            $env:MARSA_VERSION = $run.Version
+            $out = (& $run.Shell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 2>&1 | Out-String)
+            Write-Host $out
+            if ($out -notmatch $ok -or $out -match 'cannot tell where the download') {
+              throw "$($run.Shell): the real script did not get past SHA256SUMS"
+            }
+          }

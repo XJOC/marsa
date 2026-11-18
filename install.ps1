@@ -73,8 +73,9 @@
     }
 
     # Runs a program with no shell; its exit code, and stdout and stderr as
-    # lines. A program Windows will not start (blocked, broken, a missing
-    # DLL it is linked to) gives the code -1 and the reason. `Continue`:
+    # lines. A program Windows will not start at all (blocked, empty, not a
+    # program) gives the code -1 and the reason; one that starts but misses
+    # a DLL ends with STATUS_DLL_NOT_FOUND ($DllNotFound). `Continue`:
     # Windows PowerShell turns any stderr line into an error, which `Stop`
     # would throw.
     function Invoke-Program([string]$Program, [string[]]$Arguments) {
@@ -107,7 +108,11 @@
                 $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $File -PassThru -TimeoutSec 600
                 break
             } catch {
-                if ($try -ge $tries) { throw }
+                # An answer such as 404 comes again: only a failed connection
+                # or a server error is worth another try.
+                $status = 0
+                try { $status = [int]$_.Exception.Response.StatusCode } catch { $status = 0 }
+                if ($try -ge $tries -or ($status -ge 400 -and $status -lt 500)) { throw }
                 Start-Sleep -Seconds (2 * $try)
             }
         }
@@ -119,6 +124,10 @@
             $final = $base.ResponseUri
         } elseif ($base.PSObject.Properties['RequestMessage']) {
             $final = $base.RequestMessage.RequestUri
+        }
+        if (-not $final -and -not $local) {
+            Remove-Item -LiteralPath $File -Force -ErrorAction SilentlyContinue
+            Fail "cannot tell where the download of $(Show $Url) ended, so it is not used. Nothing was installed."
         }
         if ($final -and $final.Scheme -ne 'https' -and -not $local) {
             Remove-Item -LiteralPath $File -Force -ErrorAction SilentlyContinue
@@ -142,7 +151,7 @@
             Get-File $ReleasesApi $json
             $tag = "$((Get-Content -LiteralPath $json -Raw | ConvertFrom-Json).tag_name)"
         } catch {
-            Fail "cannot read the latest release from GitHub (no connection, GitHub's limit on requests, or no stable release yet): $($_.Exception.Message) Try again later, or choose a version: `$env:MARSA_VERSION = '<version>'."
+            Fail "cannot read the latest release from GitHub (no connection, GitHub's limit on requests, or no stable release yet): $(Show $_.Exception.Message) Try again later, or choose a version: `$env:MARSA_VERSION = '<version>'."
         }
         if (-not $tag.StartsWith('v', [StringComparison]::Ordinal) -or -not (Test-Version $tag.Substring(1))) {
             Fail "found no Marsa release on GitHub. Choose a version: `$env:MARSA_VERSION = '<version>'."
@@ -168,7 +177,7 @@
         try {
             Get-File "$Base/SHA256SUMS.minisig" $signature
         } catch {
-            Fail "cannot download SHA256SUMS.minisig, so the signature of this release cannot be checked: $($_.Exception.Message) Nothing was installed."
+            Fail "cannot download SHA256SUMS.minisig, so the signature of this release cannot be checked: $(Show $_.Exception.Message) Nothing was installed."
         }
         # -Q prints the trusted comment, and only after the signature of the
         # file and of the comment are both good.
@@ -231,7 +240,7 @@
             if ($_.Exception.Message.StartsWith('install.ps1:', [StringComparison]::Ordinal)) {
                 throw
             }
-            Fail "cannot unpack ${Archive}: $($_.Exception.Message) Nothing was installed."
+            Fail "cannot unpack ${Archive}: $(Show $_.Exception.Message) Nothing was installed."
         } finally {
             if ($zip) { $zip.Dispose() }
         }
@@ -292,16 +301,22 @@
     }
 
     # The programs in the system PATH that come before Marsa's shims in every
-    # new terminal: Windows puts the system PATH before the user's.
+    # new terminal: Windows puts the system PATH before the user's. Advice
+    # only: an entry that cannot be read (a drive that is gone, quotes, bad
+    # characters) is skipped, and nothing here may fail the install.
     function Find-Shadowing {
         $machine = "$([Environment]::GetEnvironmentVariable('Path', 'Machine'))"
-        foreach ($folder in @($machine -split ';' | Where-Object { $_ })) {
-            $folder = [Environment]::ExpandEnvironmentVariables($folder)
-            foreach ($tool in $ShimNames) {
-                foreach ($extension in @('.exe', '.cmd', '.bat')) {
-                    $file = Join-Path $folder "$tool$extension"
-                    if (Test-Path -LiteralPath $file -PathType Leaf) { $file }
+        foreach ($entry in @($machine -split ';' | Where-Object { $_ })) {
+            try {
+                $folder = [Environment]::ExpandEnvironmentVariables($entry.Trim('"'))
+                foreach ($tool in $ShimNames) {
+                    foreach ($extension in @('.exe', '.cmd', '.bat')) {
+                        $file = [IO.Path]::Combine($folder, "$tool$extension")
+                        if (Test-Path -LiteralPath $file -PathType Leaf -ErrorAction SilentlyContinue) { $file }
+                    }
                 }
+            } catch {
+                continue
             }
         }
     }
@@ -361,13 +376,13 @@
         try {
             Get-File "$base/SHA256SUMS" (Join-Path $tmp 'SHA256SUMS')
         } catch {
-            Fail "cannot download SHA256SUMS of the release v$version from ${base}: $($_.Exception.Message) Is the version right?"
+            Fail "cannot download SHA256SUMS of the release v$version from ${base}: $(Show $_.Exception.Message) Is the version right?"
         }
         Test-Signature $tmp $base $version $archive
         try {
             Get-File "$base/$archive" (Join-Path $tmp $archive)
         } catch {
-            Fail "cannot download $archive from ${base}: $($_.Exception.Message)"
+            Fail "cannot download $archive from ${base}: $(Show $_.Exception.Message)"
         }
         Test-Archive $tmp $archive
 
@@ -470,7 +485,8 @@
         if ($pathSet) {
             # This PowerShell too, when the script runs in it (`irm | iex`).
             $env:Path = (@($shims, $bin) + @($env:Path -split ';' | Where-Object { $_ -and $_ -ne $shims -and $_ -ne $bin })) -join ';'
-            $shadowing = @(Find-Shadowing)
+            $shadowing = @()
+            try { $shadowing = @(Find-Shadowing) } catch { $shadowing = @() }
             if ($shadowing.Count -gt 0) {
                 Say
                 Say 'Warning: Windows puts the system PATH before your user PATH, so in new terminals these come before Marsa''s:'

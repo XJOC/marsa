@@ -504,6 +504,7 @@ try { Get-Content -Raw -LiteralPath 'SCRIPT' | Invoke-Expression; 'result=done' 
         @{ Name = 'a missing program'; Release = @{ Leave = 'marsad' }; Expect = 'does not hold the program marsad.exe' },
         @{ Name = 'another version inside'; Release = @{ ProgramVersion = $OldVersion }; Expect = 'holds another version'; Ran = "$OldVersion marsa --version`r`n" },
         @{ Name = 'a new marsa that fails'; Release = @{ VersionExit = 3 }; Expect = 'does not start'; Ran = "$NewVersion marsa --version`r`n" },
+        @{ Name = 'a new marsa that misses a DLL'; Release = @{ VersionExit = -1073741515 }; Expect = 'vc_redist.x64.exe'; Ran = "$NewVersion marsa --version`r`n" },
         @{ Name = 'a version with no release'; Release = @{}; Env = @{ MARSA_VERSION = '9.9.7' }; Expect = 'cannot download SHA256SUMS' },
         @{ Name = 'another processor'; Release = @{}; Env = @{ PROCESSOR_ARCHITECTURE = 'ARM64' }; Expect = 'no Windows build for the processor' }
     )
