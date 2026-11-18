@@ -96,20 +96,23 @@ fn sites(model: &Model) -> Option<Bar> {
     if model.first_run_shown() {
         return None;
     }
-    let source = NoticeSource::Sites;
+    let (source, home) = (NoticeSource::Sites, model.home.as_deref());
     Some(match model.sites_notice.as_ref()? {
         SitesNotice::Failed(code) => Bar::error(source, strings::error_text(code)),
-        SitesNotice::Parked(folder) => Bar::success(source, strings::parked(folder)),
-        SitesNotice::Linked { name, folder } => Bar::success(source, strings::linked(name, folder)),
+        SitesNotice::Parked(folder) => Bar::success(source, strings::parked(folder, home)),
+        SitesNotice::Linked { name, folder } => {
+            Bar::success(source, strings::linked(name, folder, home))
+        }
         SitesNotice::Unlinked(site) => Bar::success(source, strings::unlinked(site)),
-        SitesNotice::Forgot(folder) => Bar::success(source, strings::forgot(folder)),
+        SitesNotice::Forgot(folder) => Bar::success(source, strings::forgot(folder, home)),
         SitesNotice::SiteIsParked { site, folder } => {
-            let bar = Bar::error(source, strings::site_is_parked(site, folder.as_deref()));
+            let text = strings::site_is_parked(site, folder.as_deref(), home);
+            let bar = Bar::error(source, text);
             match folder {
                 Some(folder) => {
                     let off = (!model.can_remove()).then_some(strings::REMOVE_BUSY_HINT);
                     bar.with_fix(
-                        &strings::forget_folder(folder),
+                        &strings::forget_folder(folder, home),
                         Action::AskForget(folder.clone()),
                         off,
                     )
@@ -131,20 +134,14 @@ fn install(model: &Model) -> Option<Bar> {
     })
 }
 
-/// The last uninstall. A refusal that names what uses the version is one
-/// sentence after another, so they are one notice.
+/// The last uninstall, in one sentence. A refusal does not list what uses the
+/// version: the Runtimes screen says it beside the version's menu.
 fn uninstall(model: &Model) -> Option<Bar> {
-    let lines = strings::uninstall_lines(model.uninstall_notice.as_ref()?);
-    let problem = lines.iter().any(|line| line.problem);
-    let text = lines
-        .into_iter()
-        .map(|line| line.text)
-        .collect::<Vec<_>>()
-        .join(" ");
-    Some(if problem {
-        Bar::error(NoticeSource::Uninstall, text)
+    let line = strings::uninstall_notice(model.uninstall_notice.as_ref()?);
+    Some(if line.problem {
+        Bar::error(NoticeSource::Uninstall, line.text)
     } else {
-        Bar::success(NoticeSource::Uninstall, text)
+        Bar::success(NoticeSource::Uninstall, line.text)
     })
 }
 
@@ -267,6 +264,8 @@ mod tests {
 
     use super::*;
     use crate::model::{InstallJob, Route, UninstallNotice, Update, apply};
+    use crate::theme::LIGHT;
+    use crate::widgets::NoticeBar;
     use crate::widgets::harness::Harness;
 
     fn connected() -> Model {
@@ -314,7 +313,7 @@ mod tests {
             (
                 SitesNotice::Parked(folder.clone()),
                 NoticeKind::Success,
-                strings::parked(&folder),
+                strings::parked(&folder, None),
             ),
             (
                 SitesNotice::Linked {
@@ -322,12 +321,12 @@ mod tests {
                     folder: folder.clone(),
                 },
                 NoticeKind::Success,
-                strings::linked("shop", &folder),
+                strings::linked("shop", &folder, None),
             ),
             (
                 SitesNotice::Forgot(folder.clone()),
                 NoticeKind::Success,
-                strings::forgot(&folder),
+                strings::forgot(&folder, None),
             ),
             (
                 SitesNotice::Failed("site_name_invalid".into()),
@@ -398,7 +397,7 @@ mod tests {
         assert_eq!(bar.notice.kind, NoticeKind::Error);
         assert_eq!(
             bar.notice.text,
-            strings::site_is_parked("shop", Some(&folder))
+            strings::site_is_parked("shop", Some(&folder), None)
         );
         assert_eq!(bar.notice.action.as_deref(), Some("Forget /code…"));
         assert_eq!(bar.notice.action_off, None);
@@ -464,6 +463,229 @@ mod tests {
         model.route = Route::Home;
         model.notice = Some("service_busy".into());
         assert_eq!(current(&model).map(|b| b.source), Some(NoticeSource::Call));
+    }
+
+    /// An absolute path on any system: a drive on Windows, where a path that
+    /// starts with `/` is not absolute and `~` is never used.
+    fn abs(unix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
+        } else {
+            PathBuf::from(unix)
+        }
+    }
+
+    /// How many lines each notice takes in a bar of the widest size (a
+    /// window 1120 wide has a 560 bar), measured as the bar lays it out.
+    fn lines_of(bars: &[(String, Bar)]) -> Vec<(usize, String)> {
+        let harness = Harness::new(egui::Theme::Light);
+        let mut counts = Vec::new();
+        harness.run(|ui| {
+            for (name, bar) in bars {
+                let width = LIGHT.size.notice_max;
+                let lines = NoticeBar::new(&bar.notice).lines(ui, width);
+                counts.push((lines, format!("{name}: {}", bar.notice.text)));
+            }
+        });
+        counts
+    }
+
+    #[test]
+    fn the_refused_unlink_is_one_short_sentence_with_the_folder_under_a_tilde_and_fits_two_lines() {
+        let mut model = connected();
+        model.home = Some(abs("/Users/omar"));
+        let folder = abs("/Users/omar/Code");
+        model.sites_notice = Some(SitesNotice::SiteIsParked {
+            site: "shop".into(),
+            folder: Some(folder.clone()),
+        });
+        let bar = current(&model).expect("a notice");
+        let tilde = strings::home_path(&folder, model.home.as_deref());
+        assert!(tilde.starts_with('~'), "{tilde}");
+        assert_eq!(
+            bar.notice.text,
+            format!("shop.test is part of the parked folder {tilde}.")
+        );
+        assert_eq!(
+            bar.notice.action.as_deref(),
+            Some(format!("Forget {tilde}…").as_str())
+        );
+        // The action still asks about the whole folder, not the shortened text.
+        assert_eq!(bar.fix, Some(Action::AskForget(folder)));
+        let lines = lines_of(&[("refused unlink".to_owned(), bar)]);
+        assert!(lines[0].0 <= 2, "{lines:?}");
+    }
+
+    /// Every result the sites actions say, with a long folder under home.
+    fn sites_bars() -> Vec<(String, Bar)> {
+        let mut model = connected();
+        model.home = Some(abs("/Users/omar"));
+        let folder = abs("/Users/omar/Code/clients/acme/projects");
+        let notices = [
+            SitesNotice::Parked(folder.clone()),
+            SitesNotice::Linked {
+                name: "acme-portal".into(),
+                folder: folder.clone(),
+            },
+            SitesNotice::Unlinked("acme-portal".into()),
+            SitesNotice::Forgot(folder.clone()),
+            SitesNotice::SiteIsParked {
+                site: "acme-portal".into(),
+                folder: Some(folder),
+            },
+            SitesNotice::SiteIsParked {
+                site: "acme-portal".into(),
+                folder: None,
+            },
+        ];
+        notices
+            .into_iter()
+            .map(|notice| {
+                model.sites_notice = Some(notice.clone());
+                let bar = current(&model).expect("a notice");
+                (format!("{notice:?}"), bar)
+            })
+            .collect()
+    }
+
+    /// The codes `strings::error_text` has a sentence for, read from its
+    /// source: a code is a quoted name before `|` or `=>` in `error_message`.
+    fn error_codes() -> Vec<String> {
+        let source = include_str!("../strings.rs");
+        let start = source
+            .find("fn error_message(code: &str)")
+            .expect("the table of error texts");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("its end")];
+        let mut codes = Vec::new();
+        let mut rest = body;
+        while let Some(open) = rest.find('"') {
+            let after = &rest[open + 1..];
+            let mut end = 0;
+            let bytes = after.as_bytes();
+            while end < bytes.len() && bytes[end] != b'"' {
+                end += if bytes[end] == b'\\' { 2 } else { 1 };
+            }
+            let literal = &after[..end.min(after.len())];
+            rest = &after[(end + 1).min(after.len())..];
+            let next = rest.trim_start();
+            let name = !literal.is_empty()
+                && literal
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            if name && (next.starts_with('|') || next.starts_with("=>")) {
+                codes.push(literal.to_owned());
+            }
+        }
+        codes
+    }
+
+    #[test]
+    fn the_codes_of_the_error_table_are_read_from_its_source() {
+        let codes = error_codes();
+        assert!(codes.len() > 100, "{}", codes.len());
+        for code in ["daemon_not_running", "site_is_parked", "install_os_too_old"] {
+            assert!(codes.iter().any(|c| c == code), "{code}");
+        }
+        // Texts are not codes.
+        assert!(!codes.iter().any(|c| c.contains(' ')));
+    }
+
+    #[test]
+    fn no_notice_takes_more_than_two_lines_in_the_widest_bar() {
+        let mut bars = sites_bars();
+        // A failed call, a failed sites action, a failed read, a failed
+        // Start at login: any error code, with its close button.
+        // Not the codes only a setup says: Settings and the first-run panel
+        // show those in full, in their own report.
+        let setup = [
+            "setup_",
+            "hosts_",
+            "resolved_",
+            "resolver_",
+            "trust_",
+            "pf_",
+            "ports_",
+            "redirect_",
+            "ca_",
+        ];
+        let codes: Vec<String> = error_codes()
+            .into_iter()
+            .filter(|code| !setup.iter().any(|start| code.starts_with(start)))
+            .collect();
+        assert!(codes.len() > 90, "{}", codes.len());
+        for code in &codes {
+            bars.push((
+                code.clone(),
+                Bar::error(NoticeSource::Call, strings::error_text(code)),
+            ));
+        }
+        // An install that failed, with the facts the daemon sends.
+        for code in codes {
+            let failure = marsa_core::types::InstallFailure {
+                code: code.clone(),
+                requested: Some("8.4".into()),
+                available: (1..=9).map(|n| format!("8.{n}.0")).collect(),
+                output: Some("dyld: Library not loaded: @rpath/libxml2.2.dylib".into()),
+                os: Some(Box::new(marsa_core::types::OsMismatch {
+                    needs: "macOS 15.0".into(),
+                    found: "macOS 14.6".into(),
+                })),
+                ..marsa_core::types::InstallFailure::default()
+            };
+            let view = crate::model::InstallView {
+                runtime: Some(Runtime::Php),
+                version: Some("8.4.27".into()),
+                step: crate::model::InstallStep::Failed(failure),
+            };
+            if code.starts_with("install_")
+                || ["download_", "checksum_", "manifest_", "extract_", "recipe_"]
+                    .iter()
+                    .any(|start| code.starts_with(start))
+            {
+                bars.push((
+                    format!("install {code}"),
+                    Bar::error(NoticeSource::Install, strings::install_status(&view)),
+                ));
+            }
+        }
+        // An uninstall: every kind.
+        let version: Version = "8.3.27".parse().expect("a version");
+        let in_use = marsa_core::types::VersionInUse {
+            version: "8.3.27".into(),
+            default: Some("8.3".into()),
+            sites: vec!["shop".into(), "blog".into(), "docs".into()],
+            caddy: true,
+            ..marsa_core::types::VersionInUse::default()
+        };
+        for notice in [
+            UninstallNotice::Done {
+                runtime: Runtime::Php,
+                version: version.clone(),
+            },
+            UninstallNotice::InUse {
+                runtime: Runtime::Php,
+                in_use,
+            },
+            UninstallNotice::Failed {
+                runtime: Runtime::Php,
+                version,
+                code: "uninstall_failed".into(),
+            },
+        ] {
+            let line = strings::uninstall_notice(&notice);
+            let bar = if line.problem {
+                Bar::error(NoticeSource::Uninstall, line.text)
+            } else {
+                Bar::success(NoticeSource::Uninstall, line.text)
+            };
+            bars.push((format!("{notice:?}"), bar));
+        }
+        let wrapping: Vec<_> = lines_of(&bars)
+            .into_iter()
+            .filter(|(lines, _)| *lines > 2)
+            .collect();
+        assert!(wrapping.is_empty(), "{wrapping:#?}");
     }
 
     /// An install of PHP that ended with `update`.
@@ -672,7 +894,7 @@ mod tests {
             show(ui.ctx(), area, &model, now);
         });
         let alert = tree
-            .node_with_text(&strings::site_is_parked("shop", Some(&folder)))
+            .node_with_text(&strings::site_is_parked("shop", Some(&folder), None))
             .expect("the bar");
         assert_eq!(alert.role(), egui::Role::Alert);
         let middle = |label: &str| {

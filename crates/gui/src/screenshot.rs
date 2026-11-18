@@ -9,7 +9,7 @@
 //! `MARSA_GUI_SIZE=900x720` opens the window at that size (task M5-D4).
 //! `MARSA_GUI_ROUTE=home|sites|runtimes|runtimes:<runtime>|services|logs|settings|site:<name>`
 //! opens that screen (`site:shop` is the page of the site `shop`, task
-//! M5-D7; `runtimes:node` is Node.js chosen, task M5-D8). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install`
+//! M5-D7; `runtimes:node` is Node.js chosen, task M5-D8). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! draws fixed fake data and starts no daemon (task M5-D5, see `demo`).
 //! `MARSA_GUI_CLICK=x,y` clicks that point (in points, from the top left of
 //! the window) once the window has settled, so a menu is open in the picture

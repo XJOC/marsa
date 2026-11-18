@@ -13,9 +13,8 @@ pub mod site;
 pub mod sites;
 
 use eframe::egui::text::{LayoutJob, TextFormat};
-use eframe::egui::{self, Label, RichText, Ui, vec2};
+use eframe::egui::{Label, RichText, Ui, vec2};
 
-use crate::strings::ReportLine;
 use crate::theme::{Direction, Section, TextToken, Theme};
 use crate::widgets::{SectionTile, TileSize};
 
@@ -63,18 +62,9 @@ pub fn header(
     });
 }
 
-/// One line of a report: in the error color if it tells of a problem.
-pub fn report_line(ui: &mut egui::Ui, line: ReportLine) {
-    if line.problem {
-        ui.colored_label(ui.visuals().error_fg_color, line.text);
-    } else {
-        ui.label(line.text);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use eframe::egui::Rect;
+    use eframe::egui::{self, Rect};
 
     use super::*;
     use crate::theme::LIGHT;

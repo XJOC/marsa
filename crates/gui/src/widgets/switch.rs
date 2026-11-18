@@ -45,6 +45,7 @@ pub struct Switch<'a> {
     label: &'a str,
     disabled: Option<&'a str>,
     look: Option<Look>,
+    bare: bool,
 }
 
 impl<'a> Switch<'a> {
@@ -54,7 +55,16 @@ impl<'a> Switch<'a> {
             label,
             disabled: None,
             look: None,
+            bare: false,
         }
+    }
+
+    /// The track alone: the label is not drawn, and stays the name a screen
+    /// reader hears. For a switch whose own row names it (Settings): the row
+    /// is the label, and it makes its text part of the click target.
+    pub const fn bare(mut self) -> Self {
+        self.bare = true;
+        self
     }
 
     /// Disables the switch. Hovering it shows `reason`.
@@ -95,7 +105,11 @@ impl<'a> Switch<'a> {
         );
         // At least the smallest click target (R9).
         let height = track_size.y.max(galley.size().y).max(theme.size.target_min);
-        let width = track_size.x + theme.space.s3 + galley.size().x;
+        let width = if self.bare {
+            track_size.x
+        } else {
+            track_size.x + theme.space.s3 + galley.size().x
+        };
         let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
         if ui.is_rect_visible(rect) {
             let look = match self.look {
@@ -121,15 +135,18 @@ impl<'a> Switch<'a> {
                 track.shrink(theme.size.switch_inset),
             );
             painter.rect_filled(knob, CornerRadius::same(theme.radius.full), paint.knob);
-            let x = slot(
-                direction,
-                rect,
-                track_size.x + theme.space.s3,
-                galley.size().x,
-            );
-            let text_slot = Rect::from_min_size(pos2(x, rect.top()), vec2(galley.size().x, height));
-            let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), text_slot);
-            painter.galley(at.min, galley, theme.color.ink);
+            if !self.bare {
+                let x = slot(
+                    direction,
+                    rect,
+                    track_size.x + theme.space.s3,
+                    galley.size().x,
+                );
+                let text_slot =
+                    Rect::from_min_size(pos2(x, rect.top()), vec2(galley.size().x, height));
+                let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), text_slot);
+                painter.galley(at.min, galley, theme.color.ink);
+            }
             if look.focused {
                 paint_focus_ring(painter, theme, rect, theme.radius.sm);
             }
@@ -223,6 +240,30 @@ mod tests {
         let mut clicked = false;
         harness.click(label, |ui| {
             clicked |= ui.add(Switch::new(false, "Start at login")).clicked();
+        });
+        assert!(clicked);
+    }
+
+    #[test]
+    fn a_bare_switch_is_the_track_alone_and_keeps_its_name_for_a_screen_reader() {
+        let harness = Harness::new(egui::Theme::Light);
+        let mut bare = egui::Rect::NOTHING;
+        let mut full = egui::Rect::NOTHING;
+        let tree = harness.accessibility(|ui| {
+            bare = ui.add(Switch::new(true, "Start at login").bare()).rect;
+            full = ui.add(Switch::new(true, "Start at login")).rect;
+        });
+        // The track, and nothing after it.
+        assert_eq!(bare.width(), LIGHT.size.switch.x);
+        assert!(full.width() > bare.width() + LIGHT.space.s3);
+        assert!(bare.height() >= LIGHT.size.target_min);
+        let named = tree.nodes_with_label("Start at login");
+        assert_eq!(named.len(), 2, "both are named, the bare one too");
+        assert!(named.iter().all(|node| node.role() == egui::Role::Switch));
+        // It still flips on a click.
+        let mut clicked = false;
+        harness.click(bare.center(), |ui| {
+            clicked |= ui.add(Switch::new(true, "Start at login").bare()).clicked();
         });
         assert!(clicked);
     }
