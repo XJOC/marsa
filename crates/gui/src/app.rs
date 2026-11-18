@@ -244,20 +244,7 @@ impl eframe::App for App {
 
     /// Takes every waiting update before the frame is drawn.
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        loop {
-            match self.bridge.updates.try_recv() {
-                Ok(update) => self.model.update(update),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    let failed = Connection::Failed(strings::BRIDGE_FAILED.to_owned());
-                    if self.model.connection != failed {
-                        self.model
-                            .update(Update::Failed(strings::BRIDGE_FAILED.to_owned()));
-                    }
-                    break;
-                }
-            }
-        }
+        take_updates(&self.bridge, &mut self.model);
         self.take_pick();
         // An install that ended may start the next one.
         self.send_next_install();
@@ -292,9 +279,7 @@ impl eframe::App for App {
             // dialog, not a screen (code.md, State).
             match &action {
                 Action::OpenSite(name) => {
-                    if let Some(url) = self.model.site_url(name) {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                    }
+                    open_site(ui.ctx(), &self.model, name);
                     continue;
                 }
                 Action::OpenFolder(name) => {
@@ -338,6 +323,41 @@ impl eframe::App for App {
             screenshot.frame(ui.ctx(), self.model.is_connected());
         }
     }
+}
+
+/// Applies every update the bridge has sent, before a frame is drawn. A
+/// bridge that has stopped is a failed connection, said once.
+pub(crate) fn take_updates(bridge: &bridge::Handle, model: &mut Model) {
+    loop {
+        match bridge.updates.try_recv() {
+            Ok(update) => model.update(update),
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                let failed = Connection::Failed(strings::BRIDGE_FAILED.to_owned());
+                if model.connection != failed {
+                    model.update(Update::Failed(strings::BRIDGE_FAILED.to_owned()));
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// Opens the site `name` in the browser: a local action, done by the system
+/// and never by a screen (code.md, State). The window and the menu-bar panel
+/// both use it.
+pub(crate) fn open_site(ctx: &egui::Context, model: &Model, name: &str) {
+    let Some(url) = model.site_url(name) else {
+        return;
+    };
+    // Debug builds only: the design review's demo has made-up sites, and
+    // none of them is a page to open in a real browser.
+    #[cfg(debug_assertions)]
+    if crate::demo::requested().is_some() {
+        tracing::info!(%url, "demo: a site would open in the browser");
+        return;
+    }
+    ctx.open_url(egui::OpenUrl::new_tab(url));
 }
 
 /// The screen the window opens on: Home.
