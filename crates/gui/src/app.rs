@@ -35,6 +35,9 @@ pub struct App {
     /// Set until the first frame, to log the time it took.
     started: Option<Instant>,
     /// The measurement `MARSA_GUI_MEASURE` asks for (see `measure`).
+    // Only with the `measure` feature, off by default: a shipped binary has
+    // no measurement mode.
+    #[cfg(feature = "measure")]
     measure: Option<crate::measure::Run>,
     /// The picture of the window that `MARSA_GUI_SCREENSHOT` asks for.
     // Debug builds only: a design-review aid (see `screenshot`).
@@ -88,6 +91,7 @@ impl App {
             window: None,
             picker: None,
             started: Some(started),
+            #[cfg(feature = "measure")]
             measure: None,
             // Debug builds only: a design-review aid (see `screenshot`).
             #[cfg(debug_assertions)]
@@ -100,6 +104,8 @@ impl App {
 
     /// The window in measurement mode: it shows made-up data and counts its
     /// frames (see `measure`).
+    // Only with the `measure` feature (see the field).
+    #[cfg(feature = "measure")]
     #[must_use]
     pub fn measuring(mut self, plan: crate::measure::Plan) -> Self {
         crate::measure::fill(&mut self.model, plan);
@@ -210,12 +216,21 @@ impl App {
 }
 
 impl eframe::App for App {
-    // Debug builds only: the design review's click (see `screenshot`).
-    #[cfg(debug_assertions)]
+    // Debug builds only: the design review's click (see `screenshot`); and
+    // the `measure` feature: the wheel of its scroll (see `measure`).
+    #[cfg(any(debug_assertions, feature = "measure"))]
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        #[cfg(debug_assertions)]
         if let Some(screenshot) = &mut self.screenshot {
             screenshot.inject(raw_input);
         }
+        #[cfg(feature = "measure")]
+        if let Some(run) = &mut self.measure {
+            run.inject(raw_input);
+        }
+        // Neither is on in a shipped binary: nothing to inject.
+        #[cfg(not(any(debug_assertions, feature = "measure")))]
+        let _ = raw_input;
     }
 
     /// The window closes: its size goes to `gui.toml` (once, and only when
@@ -248,14 +263,18 @@ impl eframe::App for App {
         self.send_next_install();
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if let Some(started) = self.started.take() {
             let ms = started.elapsed().as_millis();
             tracing::debug!(ms, "first frame");
+            #[cfg(feature = "measure")]
             if let Some(run) = &mut self.measure {
                 run.first_frame(ms);
             }
         }
+        // What building the window takes, for the measurement mode.
+        #[cfg(feature = "measure")]
+        let building = std::time::Instant::now();
         // Debug builds only: the widget gallery replaces the screens.
         #[cfg(debug_assertions)]
         if self.gallery {
@@ -304,9 +323,13 @@ impl eframe::App for App {
         }
         // A button may have queued an install.
         self.send_next_install();
+        #[cfg(feature = "measure")]
         if let Some(run) = &mut self.measure {
-            run.frame(ui.ctx());
+            run.frame(ui.ctx(), building.elapsed(), frame.info().cpu_usage);
         }
+        // `frame` is the measurement mode's: nothing else reads it.
+        #[cfg(not(feature = "measure"))]
+        let _ = frame;
         self.follow_appearance(ui.ctx());
         self.note_window(ui.ctx());
         // Debug builds only: a design-review aid (see `screenshot`).
@@ -352,6 +375,8 @@ mod tests {
         )
     }
 
+    // Only with the `measure` feature, as the mode is.
+    #[cfg(feature = "measure")]
     #[test]
     fn the_measuring_window_shows_made_up_sites_and_counts_its_frames() {
         use crate::measure::Plan;
@@ -359,7 +384,9 @@ mod tests {
         let ctx = egui::Context::default();
         let plan = Plan {
             sites: 12,
+            logs: 0,
             idle: std::time::Duration::from_secs(1),
+            scroll: 0,
         };
         let measured = app(&ctx, dir.path(), Prefs::default()).measuring(plan);
         assert!(measured.model.is_connected());

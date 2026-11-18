@@ -79,6 +79,9 @@ impl Handle {
     /// A bridge with no thread and no daemon behind it, for the design
     /// review's demo (see `demo`) and the measurement mode (see `measure`).
     /// Its commands go nowhere.
+    // Debug builds, the `measure` feature, and the tests only: a shipped
+    // binary has no bridge that goes nowhere.
+    #[cfg(any(debug_assertions, feature = "measure", test))]
     pub fn detached() -> Self {
         let (demo, updates) = mpsc::channel();
         let (commands, _) = unbounded_channel();
