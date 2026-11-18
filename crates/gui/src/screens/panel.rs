@@ -17,7 +17,7 @@ use eframe::egui::{Align2, Key, Label, Margin, Rect, RichText, ScrollArea, Ui, v
 use super::home::{self, DefaultPhp};
 use super::sites::{Mark, mute, status_line};
 use crate::model::{Action, Connection, MAIN_RUNTIME, Model};
-use crate::panel::PanelExit;
+use crate::panel::{MAX_SITES, PanelExit};
 use crate::shell::sidebar;
 use crate::strings;
 use crate::theme::{Direction, Theme, UNIT};
@@ -25,9 +25,6 @@ use crate::widgets::panel::{
     FooterLink, SiteRow, SwitchRow, divider, footer_divider, footer_link_height, frame,
 };
 use crate::widgets::{Button, Health, PickerSize, StatusDot, VersionPick, VersionPicker, whole};
-
-/// The most sites the panel lists: one for each key from 1 to 9.
-pub const MAX_SITES: usize = 9;
 
 /// The keys that open the sites, in order: the first opens the first site.
 const DIGITS: [Key; MAX_SITES] = [

@@ -18,10 +18,11 @@ use std::time::Duration;
 use marsa_core::client::{self, ClientError, DaemonClient, StreamItem};
 use marsa_core::platform::daemon_file::DaemonFileError;
 use marsa_core::runtimes::Runtime;
-use marsa_core::types::{Event, InstallProgress, InstallUpdate};
+use marsa_core::types::{Event, InstallProgress, InstallUpdate, SiteList};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use super::menu::{Autostart, Command, Daemon, Update};
+use super::menu::{Autostart, Command, Daemon, SiteEntry, Update};
+use crate::model::url;
 use crate::strings;
 
 /// How often a stopped daemon is looked for.
@@ -213,7 +214,7 @@ async fn session(
         return End::Closed;
     }
     let menu = reporter.menu;
-    if !read_php(client, menu).await || !read_autostart(client, menu).await {
+    if !read_all(client, menu).await {
         return End::Closed;
     }
     loop {
@@ -224,6 +225,8 @@ async fn session(
                         Event::DefaultChanged(default) if default.runtime == Runtime::Php => {
                             menu.send(Update::PhpDefault(default.default))
                         }
+                        // The event carries the whole list.
+                        Event::SitesChanged(list) => menu.send(Update::Sites(entries(&list))),
                         // A new version, and maybe a first default: no
                         // event carries the whole list.
                         Event::Install(InstallProgress { update: InstallUpdate::Done(_), .. }) => {
@@ -239,7 +242,7 @@ async fn session(
                 // Events were dropped, so the menu may be stale.
                 Some(Ok(StreamItem::Lagged(count))) => {
                     tracing::warn!(count, "the daemon dropped events; reading the state again");
-                    if !read_php(client, menu).await || !read_autostart(client, menu).await {
+                    if !read_all(client, menu).await {
                         return End::Closed;
                     }
                 }
@@ -254,6 +257,50 @@ async fn session(
                 Some(command) => run_command(client, command, menu.clone()),
                 None => return End::Closed,
             },
+        }
+    }
+}
+
+/// Reads everything the menu shows from the daemon. `false` once the menu is
+/// gone.
+async fn read_all(client: &DaemonClient, menu: &Menu) -> bool {
+    read_php(client, menu).await
+        && read_sites(client, menu).await
+        && read_xdebug(client, menu).await
+        && read_autostart(client, menu).await
+}
+
+/// The sites of the menu: the name, and the address the browser opens.
+fn entries(list: &SiteList) -> Vec<SiteEntry> {
+    list.sites
+        .iter()
+        .map(|site| SiteEntry {
+            name: site.name.clone(),
+            url: url(site),
+        })
+        .collect()
+}
+
+/// Sends the sites. A failure is a notice: the menu keeps what it had.
+/// `false` once the menu is gone.
+async fn read_sites(client: &DaemonClient, menu: &Menu) -> bool {
+    match client.sites().await {
+        Ok(list) => menu.send(Update::Sites(entries(&list))),
+        Err(err) => {
+            tracing::warn!(code = err.code(), error = %err, "cannot read the sites");
+            menu.send(Update::Failed(err.code().to_owned()))
+        }
+    }
+}
+
+/// Sends whether PHP loads Xdebug. A failure leaves the line disabled, with a
+/// notice that says why. `false` once the menu is gone.
+async fn read_xdebug(client: &DaemonClient, menu: &Menu) -> bool {
+    match client.xdebug().await {
+        Ok(state) => menu.send(Update::Xdebug(state.enabled)),
+        Err(err) => {
+            tracing::warn!(code = err.code(), error = %err, "cannot read the Xdebug state");
+            menu.send(Update::Failed(err.code().to_owned()))
         }
     }
 }
@@ -322,6 +369,17 @@ fn run_command(client: &DaemonClient, command: Command, menu: Menu) {
                 Err(err) => {
                     tracing::warn!(code = err.code(), error = %err, "cannot change the default PHP");
                     read_php(&client, &menu).await;
+                    menu.send(Update::Failed(err.code().to_owned()));
+                }
+            },
+            Command::SetXdebug(enabled) => match client.set_xdebug(enabled).await {
+                Ok(state) => {
+                    tracing::info!(enabled, "Xdebug changed");
+                    menu.send(Update::Xdebug(state.enabled));
+                }
+                Err(err) => {
+                    tracing::warn!(code = err.code(), error = %err, "cannot change Xdebug");
+                    read_xdebug(&client, &menu).await;
                     menu.send(Update::Failed(err.code().to_owned()));
                 }
             },
