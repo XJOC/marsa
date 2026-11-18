@@ -1,5 +1,5 @@
 //! Debug builds only: fixed fake data for the design review (task M5-D5).
-//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked`
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install`
 //! fills the model with a few sites, PHP and Caddy (or nothing, for the
 //! first run), and starts no bridge and no daemon: the window draws a state the review needs without a
 //! machine to break. Pair it with
@@ -14,10 +14,10 @@ use std::path::PathBuf;
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
     Event, Health, InstallEvent, InstallProgress, InstallUpdate, RuntimeList, RuntimeVersions,
-    ServiceState, ServiceStatus, Site, SiteKind, SiteList, SkippedFolder, Source,
+    ServiceState, ServiceStatus, Site, SiteKind, SiteList, SkippedFolder, Source, XdebugState,
 };
 
-use crate::model::{LinkForm, Model, SitesNotice, Update, WEB_SERVER, apply};
+use crate::model::{InstallJob, LinkForm, Model, SitesNotice, Update, WEB_SERVER, apply};
 
 /// The variable that names the state.
 const VAR: &str = "MARSA_GUI_DEMO";
@@ -46,6 +46,13 @@ pub enum Demo {
     /// The same as `Ok`, with `~/Code` parked: the sites in it come from that
     /// folder, so their pages cannot unlink them (task M5-D7).
     SiteParked,
+    /// The same as `Ok`, with Node.js and Composer listed too, and the Xdebug
+    /// state read: the Runtimes screen (task M5-D8).
+    Runtimes,
+    /// `Runtimes`, with PHP 8.5 downloading, 18 of 31 MB.
+    RuntimesInstalling,
+    /// `Runtimes`, with the install dialog of PHP open.
+    RuntimesInstall,
 }
 
 /// The state `MARSA_GUI_DEMO` asks for, if it names one.
@@ -63,6 +70,9 @@ fn parse(name: &str) -> Option<Demo> {
         "sites-empty" => Demo::SitesEmpty,
         "sites-extras" => Demo::SitesExtras,
         "site-parked" => Demo::SiteParked,
+        "runtimes" => Demo::Runtimes,
+        "runtimes-installing" => Demo::RuntimesInstalling,
+        "runtimes-install" => Demo::RuntimesInstall,
         _ => return None,
     })
 }
@@ -113,6 +123,50 @@ pub fn fill(model: &mut Model, demo: Demo) {
     if demo == Demo::SiteParked {
         model.sites.parked = vec![PathBuf::from("/demo/Code")];
     }
+    if matches!(
+        demo,
+        Demo::Runtimes | Demo::RuntimesInstalling | Demo::RuntimesInstall
+    ) {
+        runtimes_screen(model, demo);
+    }
+}
+
+/// What the Runtimes screen shows beyond `Ok`: Node.js and Composer, the
+/// Xdebug state, and an install or its dialog.
+fn runtimes_screen(model: &mut Model, demo: Demo) {
+    let row = |runtime, installed: &[&str], default: Option<&str>| RuntimeVersions {
+        runtime,
+        installed: installed.iter().map(|text| (*text).to_owned()).collect(),
+        default: default.map(str::to_owned),
+    };
+    model.update(Update::Runtimes(RuntimeList {
+        runtimes: vec![
+            row(Runtime::Php, &["8.3.27", "8.4.27"], Some("8.4")),
+            row(Runtime::Node, &["20.18.0", "22.11.0"], Some("22")),
+            row(Runtime::Composer, &["2.8.4"], None),
+            row(Runtime::Caddy, &["2.11.7"], None),
+        ],
+    }));
+    model.update(Update::Xdebug(XdebugState {
+        enabled: false,
+        loaded: Vec::new(),
+        missing: Vec::new(),
+    }));
+    match demo {
+        Demo::RuntimesInstalling => {
+            let job = InstallJob {
+                runtime: Runtime::Php,
+                version: Some("8.5".to_owned()),
+            };
+            if model.queue_install(job) {
+                downloading(model, Runtime::Php, "8.5.0");
+            }
+        }
+        Demo::RuntimesInstall => {
+            model.open_install(Runtime::Php);
+        }
+        _ => {}
+    }
 }
 
 /// The parts of Sites the plain demo leaves out.
@@ -156,6 +210,12 @@ fn first_run_downloading(model: &mut Model) {
         ],
     }));
     model.start_first_run();
+    downloading(model, Runtime::Php, "8.4.27");
+}
+
+/// The next queued install, accepted by the daemon and 18 of 31 MB of the
+/// download of `version` done.
+fn downloading(model: &mut Model, runtime: Runtime, version: &str) {
     let Some(job) = model.next_install() else {
         return;
     };
@@ -167,16 +227,16 @@ fn first_run_downloading(model: &mut Model) {
         })
     };
     let selected = InstallEvent::Selected {
-        runtime: Runtime::Php,
-        version: "8.4.27".into(),
+        runtime,
+        version: version.into(),
     };
-    let downloading = InstallEvent::Downloading {
-        artifact: "php-8.4.27-macos-arm64.tar.gz".into(),
+    let download = InstallEvent::Downloading {
+        artifact: format!("{}-{version}-macos-arm64.tar.gz", runtime.dir_name()),
         done: 18_000_000,
         total: 31_000_000,
     };
     apply(model, progress(selected));
-    apply(model, progress(downloading));
+    apply(model, progress(download));
 }
 
 fn runtimes(php: &[&str]) -> RuntimeList {
@@ -281,6 +341,9 @@ mod tests {
         assert_eq!(parse("sites-empty"), Some(Demo::SitesEmpty));
         assert_eq!(parse("sites-extras"), Some(Demo::SitesExtras));
         assert_eq!(parse("site-parked"), Some(Demo::SiteParked));
+        assert_eq!(parse("runtimes"), Some(Demo::Runtimes));
+        assert_eq!(parse("runtimes-installing"), Some(Demo::RuntimesInstalling));
+        assert_eq!(parse("runtimes-install"), Some(Demo::RuntimesInstall));
         assert_eq!(parse("on fire"), None);
     }
 
@@ -339,6 +402,22 @@ mod tests {
         // `shop` is in `~/Code`; `client-portal` is elsewhere, so it is linked.
         assert!(model.parked_folder(by_name("shop")).is_some());
         assert!(model.parked_folder(by_name("client-portal")).is_none());
+    }
+
+    #[test]
+    fn the_runtimes_demos_list_four_runtimes_read_xdebug_and_start_no_daemon() {
+        let mut model = Model::default();
+        fill(&mut model, Demo::Runtimes);
+        assert_eq!(model.runtimes.len(), 4);
+        assert!(model.xdebug.is_some() && !model.installing());
+        assert_eq!(model.install_dialog, None);
+        let mut installing = Model::default();
+        fill(&mut installing, Demo::RuntimesInstalling);
+        let words = crate::strings::install_status(installing.install_view().expect("an install"));
+        assert!(words.starts_with("Downloading PHP 8.5.0"), "{words}");
+        let mut asking = Model::default();
+        fill(&mut asking, Demo::RuntimesInstall);
+        assert_eq!(asking.install_dialog, Some(Runtime::Php));
     }
 
     #[test]
