@@ -8,7 +8,8 @@ use semver::Version;
 
 use super::InstallError;
 use super::manifest::{ArtifactSource, Manifest, Release};
-use crate::recipes::{Artifact, Platform, PlatformRecipe};
+use crate::platform::probe;
+use crate::recipes::{Artifact, Platform, PlatformRecipe, parse_os_version};
 use crate::resolver;
 use crate::runtimes::Runtime;
 
@@ -29,11 +30,65 @@ pub struct ArtifactStep<'a> {
     pub source: &'a ArtifactSource,
 }
 
-/// The release of `runtime` that `requested` asks for.
+/// The system versions the recipe's minimums are checked against. `None`
+/// means the version is not known, and the check lets the install go on: the
+/// check after the install is the guard then.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OsVersions {
+    pub macos: Option<String>,
+    pub glibc: Option<String>,
+}
+
+impl OsVersions {
+    /// What the system says. A tool that fails or hangs gives `None`.
+    pub async fn probe() -> Self {
+        OsVersions {
+            macos: probe::macos_version().await,
+            glibc: probe::glibc_version().await,
+        }
+    }
+}
+
+/// Refuses an install on a system older than the recipe's `min_macos` or
+/// `min_glibc` for this platform. An unknown or unreadable version passes.
+///
+/// # Errors
+///
+/// `install_os_too_old`.
+pub fn check_minimum(
+    runtime: Runtime,
+    entry: &PlatformRecipe,
+    found: &OsVersions,
+) -> Result<(), InstallError> {
+    for (label, min, have) in [
+        ("macOS", entry.min_macos(), found.macos.as_deref()),
+        ("glibc", entry.min_glibc(), found.glibc.as_deref()),
+    ] {
+        let (Some(min), Some(have)) = (min, have) else {
+            continue;
+        };
+        // The recipe's text was checked when it was parsed.
+        if let (Some(needs), Some(has)) = (parse_os_version(min), parse_os_version(have))
+            && has < needs
+        {
+            return Err(InstallError::OsTooOld {
+                what: runtime.dir_name().to_owned(),
+                needs: format!("{label} {min}"),
+                found: format!("{label} {have}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The release of `runtime` that `requested` asks for, among the releases
+/// that have files for `platform` (or `any`).
 ///
 /// `None` gives the highest version without a pre-release tag. Otherwise the
 /// text is matched with [`resolver::best_match`], so `8.4` is the newest
-/// `8.4.x` here too, never `8.5.0` or `8.4.24-rc1`.
+/// `8.4.x` here too, never `8.5.0` or `8.4.24-rc1`. If no release has files
+/// for `platform`, all releases are considered, and [`build`] then refuses
+/// with `install_unsupported_platform`.
 ///
 /// # Errors
 ///
@@ -43,12 +98,19 @@ pub fn select<'m>(
     manifest: &'m Manifest,
     runtime: Runtime,
     requested: Option<&str>,
+    platform: Platform,
 ) -> Result<&'m Release, InstallError> {
-    let releases = manifest.releases(runtime);
+    let all = manifest.releases(runtime);
+    let has_files =
+        |r: &&Release| r.platform(platform).is_some() || r.platform(Platform::Any).is_some();
+    let mut releases: Vec<&Release> = all.iter().filter(has_files).collect();
+    if releases.is_empty() {
+        releases = all.iter().collect();
+    }
     let picked = match requested {
         None => releases
             .iter()
-            .map(Release::version)
+            .map(|r| r.version())
             .filter(|v| v.pre.is_empty())
             .max()
             .cloned(),
@@ -57,6 +119,7 @@ pub fn select<'m>(
             resolver::best_match(text, &versions)?
         }
     };
+    let releases = all;
     picked
         .and_then(|version| manifest.release(runtime, &version))
         .ok_or_else(|| {
@@ -202,11 +265,11 @@ mod tests {
     }
 
     fn pick(manifest: &Manifest, requested: Option<&str>) -> Result<Version, InstallError> {
-        select(manifest, Runtime::Php, requested).map(|r| r.version().clone())
+        select(manifest, Runtime::Php, requested, Platform::LinuxX64).map(|r| r.version().clone())
     }
 
     fn plan_error(manifest: &Manifest, recipe: &Recipe, platform: Platform) -> InstallError {
-        let release = select(manifest, Runtime::Php, None).expect("select");
+        let release = select(manifest, Runtime::Php, None, Platform::LinuxX64).expect("select");
         let linux = recipe.platform(Platform::LinuxX64).expect("linux");
         build(Runtime::Php, release, linux, platform).expect_err("the plan must be refused")
     }
@@ -233,6 +296,93 @@ mod tests {
         assert_eq!(err.code(), "install_no_such_version");
     }
 
+    /// PHP 8.4.13 for every platform but `darwin-x64`, and 8.4.11 for
+    /// `darwin-x64` only.
+    fn split_manifest() -> Manifest {
+        let json = format!(
+            r#"{{"schema": 1, "serial": 1, "runtimes": {{"php": [
+                {{"version": "8.4.13", "platforms": {{
+                    "darwin-arm64": [{f}], "linux-x64": [{f}]}}}},
+                {{"version": "8.4.11", "platforms": {{"darwin-x64": [{f}]}}}}
+            ]}}}}"#,
+            f = file("cli")
+        );
+        Manifest::unsigned_for_tests(json.as_bytes(), None).expect("test manifest is valid")
+    }
+
+    #[test]
+    fn select_picks_the_newest_version_with_files_for_the_platform() {
+        let m = split_manifest();
+        let pick = |platform, requested| {
+            select(&m, Runtime::Php, requested, platform).map(|r| r.version().clone())
+        };
+        assert_eq!(
+            pick(Platform::DarwinX64, None).expect("intel"),
+            version("8.4.11")
+        );
+        assert_eq!(
+            pick(Platform::DarwinX64, Some("8.4")).expect("intel, 8.4"),
+            version("8.4.11")
+        );
+        for platform in [Platform::DarwinArm64, Platform::LinuxX64] {
+            assert_eq!(pick(platform, None).expect("newest"), version("8.4.13"));
+            assert_eq!(pick(platform, Some("8.4")).expect("8.4"), version("8.4.13"));
+        }
+        // No release has files for this platform: the newest is chosen, and
+        // `build` refuses it.
+        assert_eq!(
+            pick(Platform::WindowsX64, None).expect("fallback"),
+            version("8.4.13")
+        );
+    }
+
+    fn entry_with(min: &str) -> Recipe {
+        let text = format!(
+            "name = \"postgres\"\n[platform.darwin-arm64]\n{min}\n\
+             programs = {{ postgres = \"bin/postgres\" }}\n\
+             [[platform.darwin-arm64.artifact]]\nname = \"a\"\n\
+             url = \"https://example.test/x\"\nformat = \"tar.gz\"\n\
+             [platform.linux-x64]\nmin_glibc = \"2.36\"\n\
+             programs = {{ postgres = \"bin/postgres\" }}\n\
+             [[platform.linux-x64.artifact]]\nname = \"a\"\n\
+             url = \"https://example.test/x\"\nformat = \"tar.gz\"\n"
+        );
+        recipes::parse("postgres.toml", &text).expect("test recipe is valid")
+    }
+
+    #[test]
+    fn the_minimum_system_version_is_enforced() {
+        let recipe = entry_with("min_macos = \"15.0\"");
+        let mac = recipe.platform(Platform::DarwinArm64).expect("mac");
+        let linux = recipe.platform(Platform::LinuxX64).expect("linux");
+        let os = |macos: Option<&str>, glibc: Option<&str>| OsVersions {
+            macos: macos.map(str::to_owned),
+            glibc: glibc.map(str::to_owned),
+        };
+        let check = |entry, os: &OsVersions| check_minimum(Runtime::Php, entry, os);
+
+        let err = check(mac, &os(Some("14.6"), None)).expect_err("too old");
+        assert_eq!(err.code(), "install_os_too_old");
+        assert!(err.to_string().contains("macOS 15.0"), "{err}");
+        assert!(err.to_string().contains("macOS 14.6"), "{err}");
+        assert!(check(mac, &os(Some("15.0"), None)).is_ok());
+        assert!(check(mac, &os(Some("15.1.1"), None)).is_ok());
+
+        let err = check(linux, &os(None, Some("2.35"))).expect_err("too old");
+        assert!(err.to_string().contains("glibc 2.36"), "{err}");
+        assert!(check(linux, &os(None, Some("2.36"))).is_ok());
+        assert!(check(linux, &os(None, Some("2.39"))).is_ok());
+
+        // An unknown or unreadable version goes on.
+        assert!(check(mac, &os(None, None)).is_ok());
+        assert!(check(linux, &os(None, None)).is_ok());
+        assert!(check(mac, &os(Some("sonoma"), None)).is_ok());
+        // A recipe without a minimum accepts anything.
+        let none = entry_with("");
+        let mac = none.platform(Platform::DarwinArm64).expect("mac");
+        assert!(check(mac, &os(Some("10.0"), None)).is_ok());
+    }
+
     #[test]
     fn select_refuses_unknown_versions_and_aliases() {
         let m = manifest(&["8.4.23"], &["cli"]);
@@ -246,7 +396,8 @@ mod tests {
             let err = pick(&m, Some(text)).expect_err(text);
             assert_eq!(err.code(), code, "{text}");
         }
-        let err = select(&m, Runtime::Node, None).expect_err("no node in the manifest");
+        let err = select(&m, Runtime::Node, None, Platform::LinuxX64)
+            .expect_err("no node in the manifest");
         assert_eq!(err.code(), "install_no_such_version");
 
         let m = manifest(&["8.4.23", "8.3.27"], &["cli"]);
@@ -267,7 +418,7 @@ mod tests {
     fn build_pairs_recipe_and_manifest_by_name() {
         let m = manifest(&["8.4.23"], &["fpm", "cli"]);
         let r = recipe(&["cli", "fpm"]);
-        let release = select(&m, Runtime::Php, None).expect("select");
+        let release = select(&m, Runtime::Php, None, Platform::LinuxX64).expect("select");
         let linux = r.platform(Platform::LinuxX64).expect("linux");
         let plan = build(Runtime::Php, release, linux, Platform::LinuxX64).expect("build");
         assert_eq!(plan.version, version("8.4.23"));
@@ -291,7 +442,8 @@ mod tests {
     fn build_uses_the_any_files_on_every_platform() {
         let m = manifest(&["8.4.23"], &["cli"]);
         let composer = recipes::builtin(Runtime::Composer).expect("built-in recipe");
-        let release = select(&m, Runtime::Composer, Some("2.8")).expect("select");
+        let release =
+            select(&m, Runtime::Composer, Some("2.8"), Platform::LinuxX64).expect("select");
         for platform in [Platform::LinuxX64, Platform::WindowsX64] {
             let entry = composer.platform(platform).expect("any");
             let plan = build(Runtime::Composer, release, entry, platform).expect("build");

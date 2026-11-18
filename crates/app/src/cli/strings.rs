@@ -30,6 +30,10 @@ pub struct Details<'a> {
     pub cause: Option<&'a str>,
     /// What a program printed.
     pub output: Option<&'a str>,
+    /// The system version needed, such as `macOS 15.0`.
+    pub needs: Option<&'a str>,
+    /// The system version found, such as `macOS 14.6`.
+    pub found: Option<&'a str>,
     /// The id of the service the command is about, such as `caddy`.
     pub service: Option<&'a str>,
     /// The site name the command is about, such as `shop`, or the folder
@@ -75,6 +79,13 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             "Marsa has no {name} build for {}.",
             d.platform.unwrap_or("this system")
         ),
+        "install_os_too_old" => match (d.needs, d.found) {
+            (Some(needs), Some(found)) => format!(
+                "{name} needs {needs} or newer, and this system has {found}. \
+                 Nothing was installed."
+            ),
+            _ => format!("{name} needs a newer system than this one. Nothing was installed."),
+        },
         "install_busy" => "Another install is running. Wait for it to end, then try again.".into(),
         "install_no_such_version" => no_such_version(name, d.requested, d.available),
         "install_manifest_mismatch" => format!(
@@ -1867,6 +1878,7 @@ mod tests {
     /// `RecipeError`, `RuntimesError`, and `config::app_data_dir`.
     const CODES: &[&str] = &[
         "install_unsupported_platform",
+        "install_os_too_old",
         "install_busy",
         "install_no_such_version",
         "install_manifest_mismatch",
@@ -2196,6 +2208,21 @@ mod tests {
         assert_eq!(
             message("exited", &Details::default()),
             "The service stopped by itself. Run \"marsa logs <service>\" to see why."
+        );
+    }
+
+    #[test]
+    fn an_old_system_message_names_both_versions() {
+        let details = Details {
+            runtime: Some(Runtime::Php),
+            needs: Some("macOS 15.0"),
+            found: Some("macOS 14.6"),
+            ..Details::default()
+        };
+        assert_eq!(
+            message("install_os_too_old", &details),
+            "PHP needs macOS 15.0 or newer, and this system has macOS 14.6. \
+             Nothing was installed."
         );
     }
 

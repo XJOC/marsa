@@ -9,6 +9,7 @@ use std::hash::{BuildHasher as _, RandomState};
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs as _};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -119,6 +120,54 @@ pub fn program_in(dir: &Path, name: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// The longest `sw_vers` or `getconf` may run.
+const VERSION_TOOL_LIMIT: Duration = Duration::from_secs(2);
+
+/// The macOS version (`15.0`, `14.6.1`), from `sw_vers`. `None` if the tool
+/// is missing (any system but macOS) or printed nothing usable.
+pub async fn macos_version() -> Option<String> {
+    run_version_tool("/usr/bin/sw_vers", &["-productVersion"]).await
+}
+
+/// The glibc version (`2.36`), from `getconf`. `None` if the tool is missing,
+/// or the C library is not glibc.
+pub async fn glibc_version() -> Option<String> {
+    let output = run_version_tool("/usr/bin/getconf", &["GNU_LIBC_VERSION"]).await?;
+    version_after_name(&output, "glibc")
+}
+
+/// `glibc 2.36` gives `2.36`; text without the name gives `None`.
+fn version_after_name(output: &str, name: &str) -> Option<String> {
+    let rest = output.trim().strip_prefix(name)?;
+    let version = rest.trim();
+    (!version.is_empty()).then(|| version.to_owned())
+}
+
+/// The first line a system tool prints, trimmed. The program is an absolute
+/// path with fixed arguments, and never goes through a shell. The installer
+/// calls it from the daemon's async code, so it waits without blocking a
+/// thread, and a tool that hangs is stopped after [`VERSION_TOOL_LIMIT`]
+/// (`kill_on_drop`): then the version is not known.
+async fn run_version_tool(program: &str, args: &[&str]) -> Option<String> {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(VERSION_TOOL_LIMIT, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().next()?.trim();
+    (!line.is_empty()).then(|| line.to_owned())
+}
+
 fn loopback(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
 }
@@ -136,6 +185,21 @@ mod tests {
     use std::net::TcpListener;
 
     const LIMIT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn the_glibc_version_is_read_after_its_name() {
+        assert_eq!(
+            version_after_name("glibc 2.36\n", "glibc").as_deref(),
+            Some("2.36")
+        );
+        assert_eq!(version_after_name("musl 1.2", "glibc"), None);
+        assert_eq!(version_after_name("glibc ", "glibc"), None);
+    }
+
+    #[tokio::test]
+    async fn a_missing_tool_gives_none() {
+        assert_eq!(run_version_tool("/nonexistent/marsa-tool", &[]).await, None);
+    }
 
     #[test]
     fn random_numbers_differ() {
