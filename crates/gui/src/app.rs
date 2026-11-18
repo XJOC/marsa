@@ -49,6 +49,11 @@ pub struct App {
     // Debug builds only: a design-review aid (see `screenshot`).
     #[cfg(debug_assertions)]
     screenshot: Option<crate::screenshot::Screenshot>,
+    /// `MARSA_GUI_GALLERY=1`: the window shows the widget gallery instead of
+    /// the screens.
+    // Debug builds only: a design-review aid (see `widgets::gallery`).
+    #[cfg(debug_assertions)]
+    gallery: bool,
 }
 
 /// A folder dialog that is open on its own thread, so the window keeps
@@ -79,6 +84,9 @@ impl App {
             // Debug builds only: a design-review aid (see `screenshot`).
             #[cfg(debug_assertions)]
             screenshot: crate::screenshot::Screenshot::start(ctx),
+            // Debug builds only: a design-review aid (see `widgets::gallery`).
+            #[cfg(debug_assertions)]
+            gallery: crate::widgets::gallery::requested(),
         }
     }
 
@@ -165,6 +173,16 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if let Some(started) = self.started.take() {
             tracing::debug!(ms = started.elapsed().as_millis(), "first frame");
+        }
+        // Debug builds only: the widget gallery replaces the screens.
+        #[cfg(debug_assertions)]
+        if self.gallery {
+            crate::widgets::gallery::show(ui);
+            if let Some(screenshot) = &mut self.screenshot {
+                // The gallery needs no daemon: it is ready at once.
+                screenshot.frame(ui.ctx(), true);
+            }
+            return;
         }
         let mut commands = Vec::new();
         let mut pick = None;
