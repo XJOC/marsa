@@ -101,10 +101,10 @@ pub async fn run(data_dir: &Path) -> ExitCode {
     // The official PHP for Windows needs Microsoft's runtime (ADR 0019).
     if windows {
         show(Check::VcRuntime, doctor::vc_runtime(vc_runtime_version()));
-        // PHP's curl trusts the bundle marsad builds from this store.
+        // PHP trusts the bundle marsad builds from Windows' store.
         show(
             Check::SystemRoots,
-            doctor::system_roots(windows_root_count()),
+            doctor::system_roots(roots_facts(data_dir)),
         );
     }
     let caddy = daemon.caddy.as_ref();
@@ -275,13 +275,31 @@ fn log_path(data_dir: &Path) -> PathBuf {
     data_dir.join("logs").join("marsad.log")
 }
 
-/// How many roots Windows' store gives, as marsad reads them for PHP's CA
-/// bundle; never asked for elsewhere.
-fn windows_root_count() -> Result<usize, String> {
+/// The roots Windows trusts now, read as marsad reads them, and PHP's CA
+/// bundle with its age.
+fn roots_facts(data_dir: &Path) -> doctor::RootsFacts {
+    let path = CaddyPaths::in_dir(data_dir).ca_bundle();
+    let bundle = std::fs::read_to_string(&path).ok().map(|text| {
+        let age = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|written| written.elapsed().ok())
+            .map_or(0, |age| age.as_secs() / 86_400);
+        (text, age)
+    });
+    doctor::RootsFacts {
+        windows: windows_roots(),
+        bundle,
+    }
+}
+
+/// The roots Windows trusts for HTTPS, and how many others the store holds;
+/// never asked for elsewhere.
+fn windows_roots() -> Result<(Vec<Vec<u8>>, usize), String> {
     // `#[cfg]` outside `platform`: the certificate store is Windows'.
     #[cfg(windows)]
     return marsa_core::platform::windows::root_certificates()
-        .map(|roots| roots.len())
+        .map(|roots| (roots.trusted, roots.left_out))
         .map_err(|err| err.to_string());
     #[cfg(not(windows))]
     Err("not Windows".to_owned())
@@ -318,7 +336,11 @@ fn passed(pass: &Pass, data_dir: &Path) -> String {
             strings::doctor_runtimes_ok(&printable(default), &version.to_string())
         }
         Pass::VcRuntime { version } => strings::doctor_vc_runtime_ok(&printable(version)),
-        Pass::SystemRoots { count } => strings::doctor_system_roots_ok(*count),
+        Pass::SystemRoots {
+            count,
+            left_out,
+            age_days,
+        } => strings::doctor_system_roots_ok(*count, *left_out, *age_days),
         Pass::Caddy => strings::DOCTOR_CADDY_OK.to_owned(),
         Pass::Dns => strings::DOCTOR_DNS_OK.to_owned(),
         Pass::Hosts => strings::DOCTOR_HOSTS_OK.to_owned(),
@@ -408,9 +430,17 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
             strings::doctor_vc_old(&printable(found)),
             strings::DOCTOR_VC_INSTALL.to_owned(),
         ),
-        Problem::SystemRootsUnreadable { reason } => (
-            strings::doctor_system_roots_unreadable(&printable(reason)),
+        Problem::SystemRootsUnreadable { error } => (
+            strings::doctor_system_roots_unreadable(&printable(error)),
             strings::DOCTOR_SYSTEM_ROOTS_FIX.to_owned(),
+        ),
+        Problem::SystemRootsEmpty => pair(
+            strings::DOCTOR_SYSTEM_ROOTS_EMPTY,
+            strings::DOCTOR_SYSTEM_ROOTS_FIX,
+        ),
+        Problem::SystemRootsMissing { missing } => (
+            strings::doctor_system_roots_missing(*missing),
+            strings::DOCTOR_SYSTEM_ROOTS_RESTART.to_owned(),
         ),
         Problem::ShimsNotInPath { shims } => (
             strings::doctor_shims_missing(shims),
@@ -687,18 +717,28 @@ mod tests {
     #[test]
     fn the_windows_roots_lines_name_the_count_and_the_cause() {
         let data = data();
-        let pass = Verdict::Pass(Pass::SystemRoots { count: 57 });
+        let pass = Verdict::Pass(Pass::SystemRoots {
+            count: 57,
+            left_out: 4,
+            age_days: 0,
+        });
         let text = render(Check::SystemRoots, &pass, &data, true);
         assert!(text.starts_with("✓") && text.contains("57"), "{text}");
-        let problem = Problem::SystemRootsUnreadable {
-            reason: "access denied".to_owned(),
-        };
-        let text = render(Check::SystemRoots, &Verdict::Fail(problem), &data, true);
-        assert!(
-            text.starts_with("✗") && text.contains("access denied"),
-            "{text}"
-        );
-        assert!(text.contains("Fix:"), "{text}");
+        assert!(text.contains("today"), "{text}");
+        for (problem, part) in [
+            (
+                Problem::SystemRootsUnreadable {
+                    error: "access denied".to_owned(),
+                },
+                "access denied",
+            ),
+            (Problem::SystemRootsEmpty, "no roots"),
+            (Problem::SystemRootsMissing { missing: 2 }, "2 roots"),
+        ] {
+            let text = render(Check::SystemRoots, &Verdict::Fail(problem), &data, true);
+            assert!(text.starts_with("✗") && text.contains(part), "{text}");
+            assert!(text.contains("Fix:"), "{text}");
+        }
     }
 
     /// Windows: the runtime's lines, with Microsoft's link in the fix.

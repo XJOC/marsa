@@ -668,7 +668,7 @@ fn set_failed(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SystemRoots {
     /// The first of these files that exists (macOS, Linux).
-    Files(Vec<&'static Path>),
+    Files(Vec<PathBuf>),
     /// Windows' `ROOT` store, read again for each bundle, so a root added to
     /// Windows reaches PHP too. Windows has no bundle file (task M4-19n).
     WindowsStore,
@@ -678,7 +678,12 @@ impl SystemRoots {
     pub fn of(platform: Option<Platform>) -> Self {
         match platform {
             Some(Platform::WindowsX64) => SystemRoots::WindowsStore,
-            Some(platform) => SystemRoots::Files(system_ca_bundles(platform)),
+            Some(platform) => SystemRoots::Files(
+                system_ca_bundles(platform)
+                    .into_iter()
+                    .map(Path::to_path_buf)
+                    .collect(),
+            ),
             None => SystemRoots::Files(Vec::new()),
         }
     }
@@ -702,20 +707,25 @@ impl SystemRoots {
     }
 }
 
-/// The roots Windows trusts, as PEM text.
+/// The roots Windows trusts for HTTPS servers, as PEM text.
 fn windows_roots() -> io::Result<String> {
     // `#[cfg]` outside `platform`: the certificate store is Windows'.
     #[cfg(windows)]
     return marsa_core::platform::windows::root_certificates()
-        .map(|ders| marsa_core::caddy::pem_certificates(&ders));
+        .map(|roots| marsa_core::caddy::pem_certificates(&roots.trusted));
     #[cfg(not(windows))]
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
-/// Writes `caddy/ca-bundle.pem` once Caddy has made Marsa's CA: the roots of
-/// `system`, then Marsa's root ([`ca_bundle_text`]). `false` while there is
-/// no root yet: Caddy makes it when it first loads a config, with or without
-/// sites. The same text already there is left alone.
+/// Writes `caddy/ca-bundle.pem`: the roots of `system`, then Marsa's root
+/// ([`ca_bundle_text`]). `true` when the bundle is written and current. The
+/// same text already there is left alone.
+///
+/// - macOS and Linux: `false` while there is no Marsa root yet (Caddy makes
+///   it when it first loads a config). PHP has the system's file until
+///   then.
+/// - Windows: the roots alone before Caddy makes Marsa's: PHP on Windows has
+///   no CA file of its own, so curl would trust nothing.
 ///
 /// # Errors
 ///
@@ -723,10 +733,17 @@ fn windows_roots() -> io::Result<String> {
 pub fn write_ca_bundle(paths: &CaddyPaths, system: &SystemRoots) -> io::Result<bool> {
     let root = match fs::read_to_string(paths.ca_root()) {
         Ok(root) => root,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => match system {
+            SystemRoots::Files(_) => return Ok(false),
+            SystemRoots::WindowsStore => String::new(),
+        },
         Err(err) => return Err(err),
     };
-    write_if_changed(&paths.ca_bundle(), &ca_bundle_text(&system.pem(), &root))?;
+    let text = ca_bundle_text(&system.pem(), &root);
+    if text.is_empty() {
+        return Ok(false);
+    }
+    write_if_changed(&paths.ca_bundle(), &text)?;
     Ok(true)
 }
 
@@ -935,9 +952,7 @@ mod tests {
         let system = dir.path().join("cert.pem");
         fs::write(&system, SYSTEM).unwrap();
         let missing = dir.path().join("missing.pem");
-        // `Files` takes the system's own fixed paths, which live for ever.
-        let leak = |path: PathBuf| -> &'static Path { Box::leak(path.into_boxed_path()) };
-        let bundles = SystemRoots::Files(vec![leak(missing.clone()), leak(system.clone())]);
+        let bundles = SystemRoots::Files(vec![missing.clone(), system.clone()]);
 
         // No root yet: no bundle.
         assert!(!write_ca_bundle(&paths, &bundles).unwrap());
@@ -952,7 +967,7 @@ mod tests {
         assert!(text.contains("SYSTEM") && text.contains("MARSA"));
 
         // No system bundle: the root alone.
-        let none = SystemRoots::Files(vec![leak(missing)]);
+        let none = SystemRoots::Files(vec![missing]);
         assert!(write_ca_bundle(&paths, &none).unwrap());
         let text = fs::read_to_string(paths.ca_bundle()).unwrap();
         assert_eq!(text, ca_bundle_text("", ROOT));
@@ -965,20 +980,30 @@ mod tests {
             SystemRoots::WindowsStore
         );
         for platform in [Platform::DarwinArm64, Platform::LinuxX64] {
+            let files = system_ca_bundles(platform)
+                .into_iter()
+                .map(Path::to_path_buf);
             assert_eq!(
                 SystemRoots::of(Some(platform)),
-                SystemRoots::Files(system_ca_bundles(platform))
+                SystemRoots::Files(files.collect())
             );
         }
         assert_eq!(SystemRoots::of(None), SystemRoots::Files(Vec::new()));
     }
 
-    /// On Windows the bundle holds the roots of the store, then Marsa's;
-    /// elsewhere the store cannot be read, and Marsa's root stays.
+    /// On Windows the bundle holds the roots of the store, then Marsa's, and
+    /// the roots alone before Caddy makes Marsa's. Elsewhere the store cannot
+    /// be read: no bundle before the root, then Marsa's root alone.
     #[test]
     fn the_windows_store_goes_before_marsas_root() {
         let dir = tempfile::tempdir().unwrap();
         let paths = CaddyPaths::in_dir(dir.path());
+        let before = write_ca_bundle(&paths, &SystemRoots::WindowsStore).unwrap();
+        assert_eq!(before, cfg!(windows));
+        if cfg!(windows) {
+            let text = fs::read_to_string(paths.ca_bundle()).unwrap();
+            assert!(text.matches("-----BEGIN CERTIFICATE-----").count() >= 5);
+        }
         fs::create_dir_all(paths.ca_root().parent().unwrap()).unwrap();
         fs::write(paths.ca_root(), ROOT).unwrap();
         assert!(write_ca_bundle(&paths, &SystemRoots::WindowsStore).unwrap());

@@ -479,31 +479,73 @@ fn vc_runtime_in(
     Some((read("Major")?, read("Minor")?, read("Bld")?))
 }
 
-/// The DER of every certificate in this user's `ROOT` store. That store
-/// holds the roots Windows trusts for the user: the machine's
-/// (`LocalMachine\Root`, where `marsa setup` puts Marsa's CA), group
-/// policy's, and the user's own. Read only (task M4-19n).
+/// The roots in Windows' stores, for PHP's CA bundle (task M4-19n, ADR
+/// 0020).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Roots {
+    /// The DER of each root that Windows trusts for HTTPS servers now.
+    pub trusted: Vec<Vec<u8>>,
+    /// The roots left out: not for HTTPS servers, expired or not valid yet,
+    /// also in the `Disallowed` store, or not a certificate.
+    pub left_out: usize,
+}
+
+/// The roots this user's Windows trusts for HTTPS servers. The `ROOT` store
+/// of the current user holds the machine's roots (`LocalMachine\Root`,
+/// where `marsa setup` puts Marsa's CA), group policy's, and the user's
+/// own. Windows keeps a root's limits in the store, not in the certificate,
+/// so they are applied here, as Windows itself would: the enhanced key
+/// usage, the dates, and the `Disallowed` store. Read only.
 ///
-/// Windows may add a public root only when it first needs one (automatic
-/// root update), so a fresh machine may lack a root that a browser would
-/// fetch on its first visit.
+/// Windows may add a public root only when its own certificate check first
+/// needs one (automatic root update), so a fresh machine may lack a root
+/// for a while.
 ///
 /// # Errors
 ///
-/// The store cannot be opened or read.
-pub fn root_certificates() -> io::Result<Vec<Vec<u8>>> {
-    use windows_sys::Win32::Foundation::CRYPT_E_NOT_FOUND;
-    use windows_sys::Win32::Security::Cryptography::{
-        CERT_CONTEXT, CertCloseStore, CertEnumCertificatesInStore, CertOpenSystemStoreW,
+/// A store cannot be opened or read.
+pub fn root_certificates() -> io::Result<Roots> {
+    use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+    let disallowed: Vec<Vec<u8>> = match store_certificates("Disallowed") {
+        Ok(found) => found.into_iter().map(|(der, _)| der).collect(),
+        // No such store for this user: nothing is disallowed.
+        Err(err) if err.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => Vec::new(),
+        Err(err) => return Err(err),
     };
-    let name = wide(OsStr::new("ROOT"))?;
-    // SAFETY: no provider (0), and `name` is NUL-terminated and lives
-    // through the call. The store is checked for null and closed below.
-    let store = unsafe { CertOpenSystemStoreW(0, name.as_ptr()) };
+    let mut roots = Roots::default();
+    for (der, for_servers) in store_certificates("ROOT")? {
+        if for_servers && !disallowed.contains(&der) && crate::helper::ca::is_certificate(&der) {
+            roots.trusted.push(der);
+        } else {
+            roots.left_out += 1;
+        }
+    }
+    Ok(roots)
+}
+
+/// The DER of each certificate in this user's system store `name`, and
+/// whether it is valid now for HTTPS servers ([`for_https_servers`]). The
+/// store is opened read-only, and only if it exists.
+fn store_certificates(name: &str) -> io::Result<Vec<(Vec<u8>, bool)>> {
+    use windows_sys::Win32::Foundation::{CRYPT_E_NOT_FOUND, ERROR_NO_MORE_FILES};
+    use windows_sys::Win32::Security::Cryptography::{
+        CERT_CONTEXT, CERT_STORE_OPEN_EXISTING_FLAG, CERT_STORE_PROV_SYSTEM_W,
+        CERT_STORE_READONLY_FLAG, CERT_SYSTEM_STORE_CURRENT_USER, CertCloseStore,
+        CertEnumCertificatesInStore, CertOpenStore,
+    };
+    let name = wide(OsStr::new(name))?;
+    let flags =
+        CERT_SYSTEM_STORE_CURRENT_USER | CERT_STORE_READONLY_FLAG | CERT_STORE_OPEN_EXISTING_FLAG;
+    // SAFETY: the system-store provider takes `pvPara` as a NUL-terminated
+    // UTF-16 name, which `name` is, and it lives through the call. No
+    // encoding type and no provider (0) for a system store. The store is
+    // checked for null and closed below.
+    let store =
+        unsafe { CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, flags, name.as_ptr().cast()) };
     if store.is_null() {
         return Err(io::Error::last_os_error());
     }
-    let mut certificates = Vec::new();
+    let mut found = Vec::new();
     let mut previous: *const CERT_CONTEXT = null();
     let end = loop {
         // SAFETY: `store` is open, and `previous` is null or the context
@@ -522,18 +564,69 @@ pub fn root_certificates() -> io::Result<Vec<Vec<u8>>> {
                 std::slice::from_raw_parts(cert.pbCertEncoded, cert.cbCertEncoded as usize).to_vec()
             })
         };
-        certificates.extend(der);
+        if let Some(der) = der {
+            found.push((der, for_https_servers(context)));
+        }
         previous = context;
     };
     // SAFETY: `store` is open and closed once, here. Every context was freed
-    // by the call after it, and the last call returned none.
+    // by the call after it, and the last call returned none. The result is
+    // not read: a read-only store with no context left has nothing to lose.
     unsafe {
         CertCloseStore(store, 0);
     }
-    if end.raw_os_error() != Some(CRYPT_E_NOT_FOUND) {
-        return Err(end);
+    match end.raw_os_error() {
+        Some(code) if code == CRYPT_E_NOT_FOUND || code == ERROR_NO_MORE_FILES as i32 => Ok(found),
+        _ => Err(end),
     }
-    Ok(certificates)
+}
+
+/// Whether Windows trusts the certificate of `context` for HTTPS servers
+/// now: within its dates, and with an enhanced key usage (the certificate's
+/// own, narrowed by the store's property) that is "any" or names server
+/// authentication.
+fn for_https_servers(
+    context: *const windows_sys::Win32::Security::Cryptography::CERT_CONTEXT,
+) -> bool {
+    use std::ffi::CStr;
+    use windows_sys::Win32::Foundation::CRYPT_E_NOT_FOUND;
+    use windows_sys::Win32::Security::Cryptography::{
+        CTL_USAGE, CertGetEnhancedKeyUsage, CertVerifyTimeValidity,
+    };
+    const SERVER_AUTH: &[u8] = b"1.3.6.1.5.5.7.3.1";
+    // SAFETY: `context` is valid for this call (the caller holds it until
+    // its next enumeration), and so is its `pCertInfo`. A null time means
+    // now.
+    if unsafe { CertVerifyTimeValidity(null(), (*context).pCertInfo) } != 0 {
+        return false;
+    }
+    let mut size: u32 = 0;
+    // SAFETY: a null buffer asks for the size only, written to `size`.
+    if unsafe { CertGetEnhancedKeyUsage(context, 0, null_mut(), &mut size) } == 0 {
+        return false;
+    }
+    // `u64`s, so the buffer is aligned for `CTL_USAGE`, whose pointers come
+    // first.
+    let mut buffer = vec![0_u64; (size as usize).div_ceil(8).max(1)];
+    let usage = buffer.as_mut_ptr().cast::<CTL_USAGE>();
+    // SAFETY: `buffer` holds at least `size` bytes, aligned for `CTL_USAGE`,
+    // and lives through the call and the reads below.
+    if unsafe { CertGetEnhancedKeyUsage(context, 0, usage, &mut size) } == 0 {
+        return false;
+    }
+    // Read at once: with no usage listed, it says "all uses" or "none".
+    let reason = io::Error::last_os_error().raw_os_error();
+    // SAFETY: Windows filled `usage`: `cUsageIdentifier` pointers to
+    // NUL-terminated OID strings, all inside `buffer`.
+    unsafe {
+        let usage = &*usage;
+        if usage.cUsageIdentifier == 0 {
+            return reason == Some(CRYPT_E_NOT_FOUND);
+        }
+        std::slice::from_raw_parts(usage.rgpszUsageIdentifier, usage.cUsageIdentifier as usize)
+            .iter()
+            .any(|&oid| CStr::from_ptr(oid.cast()).to_bytes() == SERVER_AUTH)
+    }
 }
 
 /// `text` as NUL-terminated UTF-16.
@@ -656,16 +749,28 @@ mod tests {
         String::from_utf16(&line[..line.len() - 1]).unwrap()
     }
 
-    /// Every Windows has roots, and each is a certificate the strict parser
-    /// takes once it is PEM (task M4-19n).
+    /// Every Windows has roots for HTTPS, and each is a certificate the
+    /// strict parser takes once it is PEM (task M4-19n).
     #[test]
     fn the_root_store_gives_certificates() {
-        let ders = root_certificates().expect("read the ROOT store");
-        assert!(ders.len() >= 5, "only {} roots", ders.len());
-        for der in &ders {
+        let roots = root_certificates().expect("read the ROOT store");
+        assert!(
+            roots.trusted.len() >= 5,
+            "only {} roots",
+            roots.trusted.len()
+        );
+        for der in &roots.trusted {
             let pem = crate::caddy::pem_certificates(std::slice::from_ref(der));
             assert!(crate::helper::certificate_sha256(&pem).is_some(), "{pem}");
         }
+    }
+
+    /// A store that does not exist is an error, and opening it creates none.
+    #[test]
+    fn a_missing_store_is_an_error() {
+        let name = "marsa-test-no-such-store";
+        assert!(store_certificates(name).is_err());
+        assert!(store_certificates(name).is_err(), "the first open made it");
     }
 
     #[test]

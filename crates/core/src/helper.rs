@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 // `sha2` comes with the `full` feature; the shim needs only the types here.
 #[cfg(feature = "full")]
-mod ca;
+pub(crate) mod ca;
 #[cfg(feature = "full")]
 pub use ca::certificate_sha256;
 /// The strict parser, for the round trip of `caddy::pem_certificates`.
