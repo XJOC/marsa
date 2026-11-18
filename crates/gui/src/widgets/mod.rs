@@ -70,7 +70,7 @@ pub use status::{
 };
 pub use step::{Stage, StepCard};
 pub use switch::Switch;
-pub use table::{RowHeight, Table, TableColumn, TableOutput};
+pub use table::{LineTone, RowHeight, Table, TableColumn, TableOutput};
 pub use tabs::Tabs;
 pub use tile::{Monogram, SectionTile, TileSize};
 pub use version::{PickerSize, Setting, VersionMenu, VersionPick, VersionPicker};
