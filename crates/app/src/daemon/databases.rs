@@ -81,7 +81,7 @@ impl std::error::Error for InitError {}
 /// 2. [`PG_HBA_CONF`] over initdb's `pg_hba.conf`;
 /// 3. `postgres --single` with [`ROOT_ROLE_SQL`] on stdin;
 /// 4. a rename to `dirs.data`, on the same volume, so the cluster appears
-///    whole or not at all.
+///    whole or not at all, then a sync of the folder that holds it.
 ///
 /// Temp folders that an earlier init left (a crash, a power cut) are deleted
 /// first: none of them was ever a cluster in use.
@@ -143,7 +143,30 @@ async fn init_in(programs: &Programs, dirs: &PostgresDirs, temp: &Path) -> Resul
     tokio::fs::rename(temp, &dirs.data)
         .await
         .map_err(|err| InitError::io("cannot move the new cluster into place", &err))?;
+    // The rename is on disk only once its folder is: after a crash before
+    // that, the cluster could be back under its temp name, which the next
+    // init deletes as a leftover.
+    let parent = dirs.data.parent().map(Path::to_path_buf);
+    tokio::task::spawn_blocking(move || parent.map_or(Ok(()), |parent| sync_dir(&parent)))
+        .await
+        .map_err(io::Error::other)
+        .flatten()
+        .map_err(|err| InitError::io("cannot sync the databases folder", &err))?;
     info!(data = %dirs.data.display(), "the PostgreSQL data folder is ready");
+    Ok(())
+}
+
+/// Flushes the entries of `dir` (a rename into it) to disk.
+// `#[cfg(unix)]` outside `platform`, as in the installer: a folder's entries
+// are flushed by opening the folder, which only Unix allows. NTFS logs them
+// itself.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 

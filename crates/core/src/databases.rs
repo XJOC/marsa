@@ -147,12 +147,17 @@ pub fn postgres_socket(dirs: &PostgresDirs, port: u16) -> Option<PathBuf> {
 /// `127.0.0.1:<port>` only, with a socket in `dirs.sockets` when
 /// [`postgres_socket`] allows one. No shell reads them, so "no socket" is an
 /// empty value, not the `''` of `postgresql.conf`.
+///
+/// `unix_socket_permissions=0700`: the socket is the superuser's only way in
+/// ([`PG_HBA_CONF`]), so it is the owner's alone, a second guard behind the
+/// owner-only `run/` folder. PostgreSQL's default is `0777`.
 pub fn postgres_args(dirs: &PostgresDirs, port: u16) -> Vec<String> {
     let sockets = postgres_socket(dirs, port).map_or_else(String::new, |_| arg_path(&dirs.sockets));
     let settings = [
         "listen_addresses=127.0.0.1".to_owned(),
         format!("port={port}"),
         format!("unix_socket_directories={sockets}"),
+        "unix_socket_permissions=0700".to_owned(),
     ];
     let mut args = vec!["-D".to_owned(), arg_path(&dirs.data)];
     for setting in settings {
@@ -414,6 +419,9 @@ mod tests {
             .collect();
         assert_eq!(listen, [["-c", "listen_addresses=127.0.0.1"]]);
         assert!(args.windows(2).any(|pair| pair == ["-c", "port=5432"]));
+        // The superuser's socket is the owner's alone.
+        let owner_only = ["-c", "unix_socket_permissions=0700"];
+        assert!(args.windows(2).any(|pair| pair == owner_only));
     }
 
     /// Unix paths: an absolute path on Windows needs a drive, and PostgreSQL
@@ -424,14 +432,18 @@ mod tests {
 
         fn sockets_arg(folder: &str, port: u16) -> String {
             let args = postgres_args(&dirs("/d", folder), port);
-            args.last().unwrap().clone()
+            let setting = args
+                .iter()
+                .find(|arg| arg.starts_with("unix_socket_directories="));
+            setting.unwrap().clone()
         }
 
         #[test]
         fn postgres_listens_on_loopback_and_its_socket() {
             let args = postgres_args(&dirs("/m/databases/postgres/18", "/m/run"), 5433);
             let want = "-D /m/databases/postgres/18 -c listen_addresses=127.0.0.1 \
-                        -c port=5433 -c unix_socket_directories=/m/run";
+                        -c port=5433 -c unix_socket_directories=/m/run \
+                        -c unix_socket_permissions=0700";
             assert_eq!(args, words(want));
         }
 
