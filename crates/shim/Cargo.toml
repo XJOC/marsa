@@ -12,6 +12,11 @@ marsa-core = { path = "../core", default-features = false }
 semver.workspace = true
 thiserror.workspace = true
 
+# Windows: the console's Ctrl+C handler and the Job Object of `sys/windows.rs`
+# (task M1-07b). No tokio either way (architecture.md section 3).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Console"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 

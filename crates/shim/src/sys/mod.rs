@@ -8,8 +8,6 @@ mod unix;
 #[cfg(unix)]
 pub use unix::{exec, own_name};
 
-// `exec` is a stub until task M1-07b, so the shim builds and its tests run in
-// Windows CI.
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
