@@ -371,7 +371,8 @@ try {
         Install-Old
         $result = Invoke-Install (Get-Script $name) -WithMinisign:([bool]$case['Minisign'])
         # Not `$calls`: PowerShell names ignore case, and $Calls is the log.
-        $logged = [string](Get-Content -LiteralPath $Calls -Raw)
+        # In quotes: an empty file gives no value at all in Windows PowerShell.
+        $logged = "$(Get-Content -LiteralPath $Calls -Raw)"
         Check ($result.Code -ne 0 -and $result.Out.Contains($case.Expect)) "refuses $($case.Name) ($($result.Out))"
         Check ((Get-Installed) -eq "marsa $OldVersion") "refuses $($case.Name): the old programs stay"
         Check (-not $logged.Contains('daemon stop')) "refuses $($case.Name): the old Marsa was not stopped"
