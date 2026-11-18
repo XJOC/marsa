@@ -33,7 +33,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use marsa_core::helper::OpResult;
+use marsa_core::helper::{OpResult, OpStatus};
 use tokio_util::sync::CancellationToken;
 
 use super::{ApiError, Flow, failure, parse_answer, results_of};
@@ -52,8 +52,11 @@ pub enum Install {
     Exited(u32),
     /// The user said No.
     Cancelled,
-    /// It still runs: past [`INSTALL_LIMIT`], or from an earlier setup.
+    /// An earlier run still runs (it passed [`INSTALL_LIMIT`]): this one
+    /// did not start, so no second prompt showed.
     StillRunning,
+    /// This run started and still runs at [`INSTALL_LIMIT`].
+    TimedOut,
     /// It did not start, and why.
     Failed(String),
 }
@@ -70,6 +73,78 @@ pub trait Service: Send + Sync {
     /// Runs `helper install <sid> <hash>` behind the UAC prompt, unless an
     /// earlier one still runs. Blocking.
     fn install(&self, helper: &Path, sid: &str, hash: &str) -> Install;
+    /// Runs `helper uninstall` behind the UAC prompt, unless an install
+    /// still runs: the hosts lines, the CA, the service, and its folder go.
+    /// Blocking.
+    fn uninstall(&self, helper: &Path) -> Install;
+}
+
+/// `marsa uninstall --all` on Windows: `marsa-helper uninstall` behind the
+/// UAC prompt, which takes out everything `install` and the service put on
+/// the machine (task M4-19j). The prompt gives back only the exit code: 0
+/// is one `uninstall_all` result, `done` (also when there was nothing left
+/// to remove: the code cannot say more).
+///
+/// # Errors
+///
+/// - `uninstall_cancelled`: a No at the prompt; nothing changed.
+/// - `uninstall_interrupted`: the daemon stops; no prompt showed.
+/// - `uninstall_helper_partial`: exit 1, some of it may be left (the hosts
+///   lines, the CA, the service, or its folder).
+/// - `uninstall_helper_running`: this run, or an earlier one, still runs.
+/// - `uninstall_helper_failed`: the helper did not run as asked (it did not
+///   start, or its arguments were refused); nothing changed.
+pub fn uninstall(
+    service: &dyn Service,
+    helper: &Path,
+    stop: &CancellationToken,
+) -> Result<OpResult, ApiError> {
+    let flow = Flow::Uninstall;
+    interrupted(flow, stop)?;
+    let failed = |message: String| failure(&flow.code("helper_failed"), message);
+    match service.uninstall(helper) {
+        Install::Exited(0) => Ok(OpResult {
+            op: "uninstall_all".to_owned(),
+            status: OpStatus::Done,
+            code: None,
+            message: None,
+        }),
+        Install::Cancelled => {
+            tracing::info!("the UAC prompt was declined");
+            Err(failure(
+                &flow.code("cancelled"),
+                "the UAC prompt was declined",
+            ))
+        }
+        // 1: a step failed. Any code but 2 (its arguments refused) may come
+        // from a run that stopped partway, a crash say.
+        Install::Exited(code) if code != 2 => {
+            tracing::warn!(code, "marsa-helper uninstall did not remove everything");
+            Err(failure(
+                &flow.code("helper_partial"),
+                "the helper could not remove everything",
+            ))
+        }
+        Install::Exited(code) => {
+            tracing::warn!(code, "marsa-helper uninstall did not run as asked");
+            Err(failed(format!(
+                "the helper did not run as asked (exit code {code})"
+            )))
+        }
+        Install::StillRunning | Install::TimedOut => {
+            tracing::warn!("a run of marsa-helper still goes on; no uninstall now");
+            Err(failure(
+                &flow.code("helper_running"),
+                "a run of the helper still goes on",
+            ))
+        }
+        Install::Failed(reason) => {
+            tracing::warn!(%reason, "cannot start marsa-helper uninstall");
+            Err(failed(format!(
+                "cannot start the helper's uninstall: {reason}"
+            )))
+        }
+    }
 }
 
 /// Sends `request` (the JSON of the ops) to the service, and installs the
@@ -121,7 +196,7 @@ pub fn launch(
                 "the helper service was not installed (exit code {code})"
             )));
         }
-        Install::StillRunning => {
+        Install::StillRunning | Install::TimedOut => {
             tracing::warn!("marsa-helper install still runs; no second prompt");
             return Err(failure(
                 &flow.code("helper_install_running"),
@@ -280,6 +355,24 @@ impl Service for RealService {
     fn install(&self, helper: &Path, sid: &str, hash: &str) -> Install {
         use std::ffi::OsStr;
 
+        self.elevated(
+            helper,
+            &[OsStr::new("install"), OsStr::new(sid), OsStr::new(hash)],
+        )
+    }
+
+    fn uninstall(&self, helper: &Path) -> Install {
+        self.elevated(helper, &[std::ffi::OsStr::new("uninstall")])
+    }
+}
+
+// Windows only: its calls are Win32.
+#[cfg(windows)]
+impl RealService {
+    /// `helper` with `args` behind the UAC prompt, unless an earlier run
+    /// still runs; one that runs past [`INSTALL_LIMIT`] is kept, so the
+    /// next call shows no second prompt while it runs.
+    fn elevated(&self, helper: &Path, args: &[&std::ffi::OsStr]) -> Install {
         use marsa_core::platform::windows::{Elevated, run_elevated};
         let mut running = self
             .running
@@ -288,17 +381,16 @@ impl Service for RealService {
         if let Some(process) = running.as_ref() {
             match process.wait(Duration::ZERO) {
                 Ok(None) => return Install::StillRunning,
-                // Ended, or no longer known: a new install may run.
+                // Ended, or no longer known: a new run may start.
                 Ok(Some(_)) | Err(_) => *running = None,
             }
         }
-        let args = [OsStr::new("install"), OsStr::new(sid), OsStr::new(hash)];
-        match run_elevated(helper, &args, INSTALL_LIMIT) {
+        match run_elevated(helper, args, INSTALL_LIMIT) {
             Ok(Elevated::Exited(code)) => Install::Exited(code),
             Ok(Elevated::Cancelled) => Install::Cancelled,
             Ok(Elevated::TimedOut(process)) => {
                 *running = Some(process);
-                Install::StillRunning
+                Install::TimedOut
             }
             Err(err) => Install::Failed(err.to_string()),
         }
@@ -360,6 +452,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("install {sid} {hash}"));
+            self.install.clone()
+        }
+
+        /// The same answer as `install`, for the uninstall.
+        fn uninstall(&self, helper: &Path) -> Install {
+            assert_eq!(helper, helper_path());
+            self.calls.lock().unwrap().push("uninstall".to_owned());
             self.install.clone()
         }
     }
@@ -451,8 +550,10 @@ mod tests {
             let fake = Fake::new(vec![Err("helper_not_running")], install);
             assert_eq!(code(run(&fake, Some(HASH))), "setup_helper_install_failed");
         }
-        let fake = Fake::new(vec![Err("helper_not_running")], Install::StillRunning);
-        assert_eq!(code(run(&fake, Some(HASH))), "setup_helper_install_running");
+        for install in [Install::StillRunning, Install::TimedOut] {
+            let fake = Fake::new(vec![Err("helper_not_running")], install);
+            assert_eq!(code(run(&fake, Some(HASH))), "setup_helper_install_running");
+        }
     }
 
     /// Another program holds the pipe's name: nothing is sent, and no
@@ -519,6 +620,38 @@ mod tests {
         let result = run_flow(Flow::Uninstall, &fake, None);
         assert_eq!(code(result), "uninstall_helper_pipe_failed");
         assert_eq!(fake.calls(), ["send"]);
+    }
+
+    #[test]
+    fn the_uninstall_is_one_result_or_an_error() {
+        let fake = Fake::new(Vec::new(), Install::Exited(0));
+        let stop = CancellationToken::new();
+        let result = uninstall(&fake, &helper_path(), &stop).unwrap();
+        assert_eq!(
+            (result.op.as_str(), result.status),
+            ("uninstall_all", OpStatus::Done)
+        );
+        assert_eq!(fake.calls(), ["uninstall"]);
+        let cases = [
+            (Install::Cancelled, "uninstall_cancelled"),
+            (Install::Exited(1), "uninstall_helper_partial"),
+            (Install::Exited(0xC000_0005), "uninstall_helper_partial"),
+            (Install::Exited(2), "uninstall_helper_failed"),
+            (Install::StillRunning, "uninstall_helper_running"),
+            (Install::TimedOut, "uninstall_helper_running"),
+            (Install::Failed("x".to_owned()), "uninstall_helper_failed"),
+        ];
+        for (answer, expected) in cases {
+            let fake = Fake::new(Vec::new(), answer);
+            let error = uninstall(&fake, &helper_path(), &stop).unwrap_err();
+            assert_eq!(error.code, expected);
+        }
+        // A daemon that stops shows no prompt.
+        let fake = Fake::new(Vec::new(), Install::Exited(0));
+        stop.cancel();
+        let error = uninstall(&fake, &helper_path(), &stop).unwrap_err();
+        assert_eq!(error.code, "uninstall_interrupted");
+        assert!(fake.calls().is_empty());
     }
 
     /// The pipe client's codes, which the table above matches as text.

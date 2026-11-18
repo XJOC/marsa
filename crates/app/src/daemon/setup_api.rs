@@ -1031,28 +1031,10 @@ impl Setup {
         self.launch(Flow::Setup, ops, platform, stop)
     }
 
-    /// Sends `ops` to the helper behind the admin prompt and reads its
-    /// answer, with the error codes of `flow`. With no operation nothing
-    /// runs and no prompt shows. The helper is checked first: a file that is
-    /// missing or that another user could change means no prompt, and so
-    /// does, for setup only, a path in a folder macOS keeps root out of (on
-    /// macOS; by the path alone, before any look at the file).
-    ///
-    /// The uninstall skips the folder check: root runs a helper from those
-    /// folders through `osascript` (task M4-17: `resolver_install` worked
-    /// from `~/Desktop`), and only the boot job's copy of the binary, which
-    /// `pf_install` reads, fails there. `uninstall_all` reads no binary, so
-    /// moving Marsa first would only be in the user's way.
-    pub(super) fn launch(
-        &self,
-        flow: Flow,
-        ops: Vec<HelperOp>,
-        platform: Platform,
-        stop: &CancellationToken,
-    ) -> Result<Vec<OpResult>, ApiError> {
-        if ops.is_empty() {
-            return Ok(Vec::new());
-        }
+    /// The helper, checked before any prompt: there, not in a folder macOS
+    /// keeps root out of (setup only), in the user's own folder on Windows,
+    /// and safe from other users. Each refusal has its code of `flow`.
+    fn checked_helper(&self, flow: Flow, platform: Platform) -> Result<&Path, ApiError> {
         let missing = || {
             tracing::warn!(path = ?self.helper, "marsa-helper is not next to marsad");
             failure(
@@ -1111,6 +1093,47 @@ impl Setup {
                 return Err(failure(&flow.code("helper_unsafe"), message));
             }
         }
+        Ok(helper)
+    }
+
+    /// `marsa uninstall --all` on Windows: the checked helper's `uninstall`
+    /// behind the UAC prompt ([`windows::uninstall`]).
+    ///
+    /// # Errors
+    ///
+    /// The `uninstall_*` codes of the preflight and of the helper.
+    pub(super) fn uninstall_windows(&self, stop: &CancellationToken) -> Result<OpResult, ApiError> {
+        let helper = self.checked_helper(Flow::Uninstall, Platform::WindowsX64)?;
+        let Some(service) = self.windows.as_deref() else {
+            tracing::error!("no helper service on this system");
+            return Err(failure("uninstall_helper_failed", "no helper service here"));
+        };
+        windows::uninstall(service, helper, stop)
+    }
+
+    /// Sends `ops` to the helper behind the admin prompt and reads its
+    /// answer, with the error codes of `flow`. With no operation nothing
+    /// runs and no prompt shows. The helper is checked first: a file that is
+    /// missing or that another user could change means no prompt, and so
+    /// does, for setup only, a path in a folder macOS keeps root out of (on
+    /// macOS; by the path alone, before any look at the file).
+    ///
+    /// The uninstall skips the folder check: root runs a helper from those
+    /// folders through `osascript` (task M4-17: `resolver_install` worked
+    /// from `~/Desktop`), and only the boot job's copy of the binary, which
+    /// `pf_install` reads, fails there. `uninstall_all` reads no binary, so
+    /// moving Marsa first would only be in the user's way.
+    pub(super) fn launch(
+        &self,
+        flow: Flow,
+        ops: Vec<HelperOp>,
+        platform: Platform,
+        stop: &CancellationToken,
+    ) -> Result<Vec<OpResult>, ApiError> {
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let helper = self.checked_helper(flow, platform)?;
         let cannot_write = |err: serde_json::Error| {
             tracing::error!(error = %err, "cannot write the helper request");
             failure(
@@ -1399,7 +1422,7 @@ fn inside(path: &Path, dir: &Path) -> bool {
     })
 }
 
-fn is_windows(platform: Platform) -> bool {
+pub(super) fn is_windows(platform: Platform) -> bool {
     platform == Platform::WindowsX64
 }
 
@@ -4435,6 +4458,11 @@ mod tests {
 
         fn install(&self, _helper: &Path, sid: &str, hash: &str) -> windows::Install {
             *self.installed.lock().unwrap() = Some((sid.to_owned(), hash.to_owned()));
+            windows::Install::Exited(0)
+        }
+
+        fn uninstall(&self, _helper: &Path) -> windows::Install {
+            *self.installed.lock().unwrap() = None;
             windows::Install::Exited(0)
         }
     }
