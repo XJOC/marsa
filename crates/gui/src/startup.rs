@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use marsa_core::config::ConfigError;
 use tracing_subscriber::EnvFilter;
 
+use crate::panel::place::{Anchor, BadAnchor};
+
 /// The lock file of the window, in the daemon's `run/` folder. The window
 /// holds it while it is open, so a second `marsa-gui` (for example from the
 /// tray's "Open Marsa") finds it taken and exits at once (task M5-04).
@@ -28,6 +30,11 @@ const DEFAULT_LOG: &str = "warn,marsa_gui=info,marsa_core=info";
 pub enum StartupError {
     #[error("--data-dir needs a path")]
     MissingPath,
+    #[error("{0} needs a value")]
+    MissingValue(&'static str),
+    /// `--icon`, `--monitor`, or `--scale` of the panel.
+    #[error(transparent)]
+    Anchor(#[from] BadAnchor),
     #[error("unknown argument {0}")]
     UnknownArgument(String),
     /// The OS gives no app data folder.
@@ -54,20 +61,60 @@ pub fn data_dir(args: impl Iterator<Item = OsString>) -> Result<PathBuf, Startup
 
 /// What `marsa-gui` was started to be: the window, or the menu-bar panel
 /// (`--panel`, task M5-D11), with the data folder either way.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Launch {
     pub data_dir: PathBuf,
     /// `--panel`: a borderless panel under the menu-bar icon, not the window.
     pub panel: bool,
+    /// Where the icon is, for the panel: `--icon`, `--monitor`, and
+    /// `--scale`, all three or none. Without them the system places the
+    /// panel.
+    pub anchor: Option<Anchor>,
 }
 
-/// [`data_dir`] and `--panel`: the arguments of `marsa-gui`.
+/// [`data_dir`], `--panel`, and the place of the icon: the arguments of
+/// `marsa-gui`.
 ///
 /// # Errors
 ///
-/// As [`data_dir`].
+/// As [`data_dir`], and an `--icon`, `--monitor`, or `--scale` that is not
+/// usable, or not all three, or with no `--panel`.
 pub fn launch(args: impl Iterator<Item = OsString>) -> Result<Launch, StartupError> {
     parse(args, true)
+}
+
+/// The three flags that say where the icon is.
+#[derive(Clone, Copy)]
+enum AnchorFlag {
+    Icon,
+    Monitor,
+    Scale,
+}
+
+/// `arg` as one of the anchor flags with its value: `--icon value` (the value
+/// is the next argument) or `--icon=value`. `None` for any other argument.
+fn anchor_flag(
+    arg: &OsString,
+    args: &mut impl Iterator<Item = OsString>,
+) -> Result<Option<(AnchorFlag, OsString)>, StartupError> {
+    const FLAGS: [(&str, AnchorFlag); 3] = [
+        ("--icon", AnchorFlag::Icon),
+        ("--monitor", AnchorFlag::Monitor),
+        ("--scale", AnchorFlag::Scale),
+    ];
+    for (name, flag) in FLAGS {
+        if arg == name {
+            let value = args.next().ok_or(StartupError::MissingValue(name))?;
+            return Ok(Some((flag, value)));
+        }
+        let with_value = arg
+            .to_str()
+            .and_then(|a| a.strip_prefix(name)?.strip_prefix('='));
+        if let Some(value) = with_value {
+            return Ok(Some((flag, value.into())));
+        }
+    }
+    Ok(None)
 }
 
 fn parse(
@@ -75,6 +122,7 @@ fn parse(
     panel_allowed: bool,
 ) -> Result<Launch, StartupError> {
     let (mut flag, mut panel) = (None, false);
+    let (mut icon, mut monitor, mut scale) = (None, None, None);
     while let Some(arg) = args.next() {
         if arg == "--data-dir" {
             flag = Some(args.next().ok_or(StartupError::MissingPath)?);
@@ -82,6 +130,12 @@ fn parse(
             flag = Some(value.into());
         } else if panel_allowed && arg == "--panel" {
             panel = true;
+        } else if panel_allowed && let Some((which, value)) = anchor_flag(&arg, &mut args)? {
+            match which {
+                AnchorFlag::Icon => icon = Some(value),
+                AnchorFlag::Monitor => monitor = Some(value),
+                AnchorFlag::Scale => scale = Some(value),
+            }
         } else {
             return Err(StartupError::UnknownArgument(arg.display().to_string()));
         }
@@ -94,7 +148,35 @@ fn parse(
     // passed to `marsad`.
     let data_dir =
         std::path::absolute(&dir).map_err(|source| StartupError::Resolve { path: dir, source })?;
-    Ok(Launch { data_dir, panel })
+    let anchor = anchor(panel, icon, monitor, scale)?;
+    Ok(Launch {
+        data_dir,
+        panel,
+        anchor,
+    })
+}
+
+/// The anchor of the three flags: all of them, or none.
+fn anchor(
+    panel: bool,
+    icon: Option<OsString>,
+    monitor: Option<OsString>,
+    scale: Option<OsString>,
+) -> Result<Option<Anchor>, BadAnchor> {
+    let text = |value: &OsString| {
+        value
+            .to_str()
+            .map(str::to_owned)
+            .ok_or(BadAnchor("--icon, --monitor, and --scale are numbers"))
+    };
+    match (icon, monitor, scale) {
+        (None, None, None) => Ok(None),
+        _ if !panel => Err(BadAnchor("--icon, --monitor, and --scale go with --panel")),
+        (Some(icon), Some(monitor), Some(scale)) => {
+            Anchor::parse(&text(&icon)?, &text(&monitor)?, &text(&scale)?).map(Some)
+        }
+        _ => Err(BadAnchor("--icon, --monitor, and --scale go together")),
+    }
 }
 
 /// Logs to stderr. `MARSA_LOG` sets the filter, as in `marsad`.
@@ -168,7 +250,8 @@ mod tests {
             panel,
             Launch {
                 data_dir: dir.path().to_path_buf(),
-                panel: true
+                panel: true,
+                anchor: None,
             }
         );
         let window = launch(args(&["--data-dir", text])).unwrap();
@@ -187,6 +270,86 @@ mod tests {
         assert!(matches!(
             launch(args(&["--panel", "--data-dir"])),
             Err(StartupError::MissingPath)
+        ));
+    }
+
+    #[test]
+    fn the_icon_the_monitor_and_the_scale_make_the_anchor_in_either_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().to_str().unwrap();
+        let (icon, monitor) = ("2146,0,76,68", "0,0,3024,1964");
+        let spaced = launch(args(&[
+            "--panel",
+            "--data-dir",
+            text,
+            "--icon",
+            icon,
+            "--monitor",
+            monitor,
+            "--scale",
+            "2",
+        ]))
+        .unwrap();
+        let joined = launch(args(&[
+            "--panel",
+            "--scale=2",
+            &format!("--monitor={monitor}"),
+            &format!("--icon={icon}"),
+            &format!("--data-dir={text}"),
+        ]))
+        .unwrap();
+        assert_eq!(spaced, joined);
+        let anchor = spaced.anchor.expect("an anchor");
+        assert_eq!(anchor.scale, 2.0);
+        assert_eq!(anchor.icon.left(), 2146.0);
+        assert_eq!(anchor.monitor.width(), 3024.0);
+        // No flags, no anchor: the system places the panel.
+        assert_eq!(
+            launch(args(&["--panel", "--data-dir", text]))
+                .unwrap()
+                .anchor,
+            None
+        );
+    }
+
+    #[test]
+    fn an_anchor_that_is_partial_bad_or_without_the_panel_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().to_str().unwrap();
+        let base = ["--data-dir", text];
+        let with = |extra: &[&str]| {
+            let all: Vec<&str> = base.iter().chain(extra).copied().collect();
+            launch(args(&all))
+        };
+        // Two of three.
+        let partial = with(&["--panel", "--icon", "1,2,3,4", "--scale", "2"]);
+        assert!(
+            matches!(partial, Err(StartupError::Anchor(_))),
+            "{partial:?}"
+        );
+        // All three, one of them garbage.
+        let bad = with(&[
+            "--panel",
+            "--icon",
+            "x",
+            "--monitor",
+            "0,0,9,9",
+            "--scale",
+            "2",
+        ]);
+        assert!(matches!(bad, Err(StartupError::Anchor(_))), "{bad:?}");
+        // Not for the window.
+        let window = with(&["--icon", "1,2,3,4", "--monitor", "0,0,9,9", "--scale", "2"]);
+        assert!(matches!(window, Err(StartupError::Anchor(_))), "{window:?}");
+        // A flag at the end with no value.
+        assert!(matches!(
+            with(&["--panel", "--icon"]),
+            Err(StartupError::MissingValue("--icon"))
+        ));
+        // The tray takes none of them.
+        assert!(matches!(
+            data_dir(args(&["--icon", "1,2,3,4"])),
+            Err(StartupError::UnknownArgument(_))
         ));
     }
 
