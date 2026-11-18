@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::orphan::Liveness;
 use crate::php::MAX_SOCKET_PATH;
 use crate::services::{Signal, StopMethod};
 
@@ -300,6 +301,42 @@ pub fn decide_start(facts: &StartFacts) -> StartDecision {
     }
 }
 
+/// [`PortCheck`] from the daemon's two looks at the port. Busy if either
+/// says so:
+///
+/// - `bound`: a bind to `127.0.0.1:<port>` worked. Alone it misses a program
+///   on `*:<port>` on macOS: std's bind sets `SO_REUSEADDR`, and there that
+///   lets a bind to one address share the port with a listener on all of
+///   them (Docker, for one).
+/// - `owner`: who listens on the port, on any address, as `lsof` names it
+///   (macOS). Any answer means busy. Linux gives none, and there the bind
+///   already fails next to a listener on all addresses.
+pub fn port_check(bound: bool, owner: Option<String>) -> PortCheck {
+    match (bound, owner) {
+        (true, None) => PortCheck::Free,
+        (_, owner) => PortCheck::Busy { owner },
+    }
+}
+
+/// [`PidFileCheck`] of `pid`, the pid in `postmaster.pid`, from `now`: what
+/// the OS says runs there by the file the process really runs
+/// (`process::real_identity`), because postgres rewrites its own argv
+/// (`postgres: checkpointer`). `servers` holds `bin/postgres` of every
+/// installed PostgreSQL version, and the resolved form of each.
+///
+/// - Gone: [`PidFileCheck::Dead`], a stale file.
+/// - Cannot be told: [`PidFileCheck::Unknown`].
+/// - One of `servers`: [`PidFileCheck::Server`].
+/// - Any other program: [`PidFileCheck::Other`], a pid reused since.
+pub fn classify_postmaster(pid: u32, now: &Liveness, servers: &[PathBuf]) -> PidFileCheck {
+    match now {
+        Liveness::Gone => PidFileCheck::Dead { pid },
+        Liveness::Unknown => PidFileCheck::Unknown { pid },
+        Liveness::Alive { exe, .. } if servers.contains(exe) => PidFileCheck::Server { pid },
+        Liveness::Alive { .. } => PidFileCheck::Other { pid },
+    }
+}
+
 /// `path` as one argument. `to_string_lossy` as in `caddy_spec`: the app data
 /// dir comes from the OS and is valid Unicode in practice.
 fn arg_path(path: &Path) -> String {
@@ -549,5 +586,46 @@ mod tests {
         let data = ServiceBusy::DataDir { pid: 7 };
         assert_eq!(data.code(), "service_data_dir_busy");
         assert!(data.to_string().contains("pid 7"), "{data}");
+    }
+
+    #[test]
+    fn a_port_is_free_only_when_the_bind_works_and_nobody_listens() {
+        let owner = || Some("com.docker.backend(77)".to_owned());
+        assert_eq!(port_check(true, None), PortCheck::Free);
+        // macOS: our bind works next to Docker on `*:5432`, but lsof sees it.
+        let docker = PortCheck::Busy { owner: owner() };
+        assert_eq!(port_check(true, owner()), docker);
+        assert_eq!(port_check(false, owner()), docker);
+        // Linux: no lsof, and the bind fails.
+        assert_eq!(port_check(false, None), PortCheck::Busy { owner: None });
+    }
+
+    #[test]
+    fn the_postmaster_pid_is_ours_only_when_it_runs_an_installed_postgres() {
+        let servers = [
+            PathBuf::from("/m/runtimes/postgres/17.12.0/bin/postgres"),
+            PathBuf::from("/m/runtimes/postgres/18.7.0/bin/postgres"),
+        ];
+        let alive = |exe: &str| Liveness::Alive {
+            exe: exe.into(),
+            started: "Wed Nov 18 10:00:00 2026".into(),
+        };
+        let classify = |now: &Liveness| classify_postmaster(4242, now, &servers);
+        let pid = 4242;
+        // Any installed version: an older one may still run on the folder.
+        for exe in &servers {
+            let now = alive(&exe.display().to_string());
+            assert_eq!(classify(&now), PidFileCheck::Server { pid });
+        }
+        // Another PostgreSQL (Homebrew), or the pid reused by another program.
+        for exe in [
+            "/opt/homebrew/opt/postgresql@18/bin/postgres",
+            "/Applications/Safari.app/Contents/MacOS/Safari",
+            "/m/runtimes/postgres/18.7.0/bin/initdb",
+        ] {
+            assert_eq!(classify(&alive(exe)), PidFileCheck::Other { pid });
+        }
+        assert_eq!(classify(&Liveness::Gone), PidFileCheck::Dead { pid });
+        assert_eq!(classify(&Liveness::Unknown), PidFileCheck::Unknown { pid });
     }
 }
