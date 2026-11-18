@@ -26,6 +26,9 @@ use crate::widgets::panel::{
 };
 use crate::widgets::{Button, Health, PickerSize, StatusDot, VersionPick, VersionPicker, whole};
 
+/// How many version buttons stand in a row of the panel.
+const VERSION_COLUMNS: usize = 4;
+
 /// The keys that open the sites, in order: the first opens the first site.
 const DIGITS: [Key; MAX_SITES] = [
     Key::Num1,
@@ -348,7 +351,7 @@ fn default_php(ui: &mut Ui, php: &DefaultPhp, actions: &mut Vec<PanelAction>) {
         .collect();
     let picker = VersionPicker::new(strings::DEFAULT_PHP, &versions, php.chosen)
         .size(PickerSize::Medium)
-        .wrapping();
+        .columns(VERSION_COLUMNS);
     if let Some(VersionPick::Version(index)) = picker.show(ui).inner
         && let Some(choice) = php.choices.get(index)
     {
@@ -821,8 +824,13 @@ mod tests {
             // line that says how many more.
             assert_eq!(nine - few, 7.0 * theme.size.panel_row, "{mode:?}");
             assert!(twelve > nine && twelve - nine < theme.size.panel_row);
-            // Four versions need a second row of buttons.
-            let two = height(&view(&working(2, &["8.1.0", "8.2.0", "8.3.0", "8.4.27"])));
+            // Four versions stand in one row; a fifth needs a second.
+            let four = height(&view(&working(2, &["8.1.0", "8.2.0", "8.3.0", "8.4.27"])));
+            assert_eq!(four, few);
+            let two = height(&view(&working(
+                2,
+                &["8.1.0", "8.2.0", "8.3.0", "8.4.27", "8.5.0"],
+            )));
             assert_eq!(two - few, theme.size.version_md + theme.space.group_gap);
         }
     }
