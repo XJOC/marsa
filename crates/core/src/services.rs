@@ -70,7 +70,7 @@ impl Signal {
 ///
 /// - Caddy and php-fpm: SIGTERM, then a kill ([`StopMethod::term`]).
 /// - PostgreSQL on macOS and Linux: SIGINT, then SIGQUIT, then a kill
-///   ([`StopMethod::signals`]). Never SIGTERM.
+///   ([`crate::databases::postgres_stop`]). Never SIGTERM.
 /// - Later, on Windows (M6-07): a stop command such as
 ///   `pg_ctl stop -m fast`, then a kill.
 /// - Later, Valkey (M6-06): `SHUTDOWN SAVE` over its protocol, then SIGTERM,
