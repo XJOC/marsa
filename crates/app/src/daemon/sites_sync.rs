@@ -127,6 +127,10 @@ impl SitesSync {
     }
 }
 
+/// How often `marsad` reads Windows' roots again for PHP's CA bundle. The
+/// bundle file changes only when the roots did.
+const ROOTS_REFRESH: Duration = Duration::from_secs(60 * 60);
+
 async fn run(
     daemon: Arc<Daemon>,
     mut events: broadcast::Receiver<Event>,
@@ -136,6 +140,11 @@ async fn run(
     let mut php = PhpManager::new(&daemon.data_dir, platform);
     let mut hosts = HostsSync::new();
     let system = SystemRoots::of(platform);
+    // Windows' roots change without an event (automatic root update, group
+    // policy), so their bundle is read again on a slow timer too.
+    let refresh_roots = system == SystemRoots::WindowsStore;
+    let mut roots_due =
+        tokio::time::interval_at(tokio::time::Instant::now() + ROOTS_REFRESH, ROOTS_REFRESH);
     let shutdown = daemon.shutdown.clone();
     // The requests the coming pass answers. A return drops them unanswered,
     // and with them `requests`, so each waiting route gets `PassNotRun`.
@@ -178,6 +187,10 @@ async fn run(
                 () = hosts.retry_due() => tokio::select! {
                     () = shutdown.cancelled() => return,
                     () = hosts.sync(&daemon) => {}
+                },
+                _ = roots_due.tick(), if refresh_roots => tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    _ = write_bundle(&daemon.caddy.paths, &system) => {}
                 },
             }
         }

@@ -88,7 +88,7 @@ fn sextet(c: u8) -> Option<u8> {
 
 /// The shape of an X.509 certificate (RFC 5280): one SEQUENCE, with nothing
 /// after it, that holds exactly a SEQUENCE, a SEQUENCE, and a BIT STRING.
-fn is_certificate(der: &[u8]) -> bool {
+pub(crate) fn is_certificate(der: &[u8]) -> bool {
     let Some((0x30, header, total)) = element(der) else {
         return false;
     };

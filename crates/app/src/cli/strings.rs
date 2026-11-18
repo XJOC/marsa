@@ -1574,7 +1574,7 @@ pub fn doctor_skip(check: Check, skip: Skip) -> String {
         Check::Daemon => "marsad",
         Check::Runtimes => "PHP and Caddy",
         Check::VcRuntime => "The Microsoft Visual C++ runtime",
-        Check::SystemRoots => "The root certificates PHP trusts",
+        Check::SystemRoots => "PHP's CA bundle",
         Check::Caddy => "Caddy",
         Check::Dns => ".test names",
         Check::Ports => "Ports 80 and 443",
@@ -1592,6 +1592,7 @@ pub fn doctor_skip(check: Check, skip: Skip) -> String {
              make it and trust it."
         }
         Skip::NoLog => "marsad has not written it yet.",
+        Skip::NoBundle => "marsad has not written it yet: it does when it starts.",
         Skip::NotChecked => "The check could not run. Run again with MARSA_LOG=debug for details.",
     };
     format!("- {check}: not checked. {reason}")
@@ -1612,22 +1613,40 @@ pub fn doctor_vc_old(found: &str) -> String {
 pub const DOCTOR_VC_INSTALL: &str = "Install the latest Microsoft Visual C++ Redistributable \
      (x64) from https://aka.ms/vs/17/release/vc_redist.x64.exe, then run \"marsa doctor\" again.";
 
-/// Windows: the roots of Windows' store that PHP's curl trusts (task
-/// M4-19n).
-pub fn doctor_system_roots_ok(count: usize) -> String {
-    format!("PHP trusts the {count} root certificates of Windows, and Marsa's CA.")
+/// Windows: PHP's CA bundle against the roots Windows trusts (task M4-19n,
+/// ADR 0020).
+pub fn doctor_system_roots_ok(count: usize, left_out: usize, age_days: u64) -> String {
+    let written = match age_days {
+        0 => "today".to_owned(),
+        1 => "1 day ago".to_owned(),
+        days => format!("{days} days ago"),
+    };
+    format!(
+        "PHP trusts the {count} roots Windows trusts for HTTPS, and Marsa's CA ({left_out} other \
+         roots of Windows are not for HTTPS). The bundle was written {written}."
+    )
 }
 
-pub fn doctor_system_roots_unreadable(reason: &str) -> String {
+pub fn doctor_system_roots_unreadable(error: &str) -> String {
     format!(
-        "Marsa cannot read the root certificates of Windows ({reason}), so PHP trusts only \
+        "Marsa cannot read the root certificates of Windows ({error}), so PHP trusts only \
          Marsa's CA: HTTPS calls from PHP to the internet fail."
     )
 }
 
-pub const DOCTOR_SYSTEM_ROOTS_FIX: &str = "Check that the Windows service \"Cryptographic \
-     Services\" runs, then run \"marsa daemon stop\", \"marsa daemon start\", and \"marsa \
-     doctor\" again.";
+pub const DOCTOR_SYSTEM_ROOTS_EMPTY: &str = "Windows' certificate store gave no roots for HTTPS, \
+     so PHP trusts only Marsa's CA: HTTPS calls from PHP to the internet fail.";
+
+pub const DOCTOR_SYSTEM_ROOTS_FIX: &str = "Open \"Manage user certificates\" (certmgr.msc) and \
+     look at \"Trusted Root Certification Authorities\", then run \"marsa doctor\" again.";
+
+pub fn doctor_system_roots_missing(missing: usize) -> String {
+    let roots = if missing == 1 { "root" } else { "roots" };
+    format!("{missing} {roots} that Windows trusts now are not in PHP's CA bundle yet.")
+}
+
+pub const DOCTOR_SYSTEM_ROOTS_RESTART: &str = "marsad reads Windows' roots again within an \
+     hour. To do it now, run \"marsa daemon stop\", then \"marsa daemon start\".";
 
 pub fn doctor_runtimes_ok(default: &str, version: &str) -> String {
     if default == version {
