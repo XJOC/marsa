@@ -1086,7 +1086,12 @@ mod tests {
         };
         let text = none.render();
         let path_line = text.lines().nth(2).unwrap();
-        assert!(path_line.ends_with("~/.zshrc."), "{path_line}");
+        let end = if cfg!(windows) {
+            "in Settings)."
+        } else {
+            "~/.zshrc."
+        };
+        assert!(path_line.ends_with(end), "{path_line}");
         assert!(!path_line.contains("it names"), "{path_line}");
     }
 
