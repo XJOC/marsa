@@ -57,6 +57,9 @@ pub struct Colors {
     pub accent: Color32,
     /// `color.on_accent`: text on `accent`.
     pub on_accent: Color32,
+    /// `color.accent.tint`: the background of a busy mark or a Starting
+    /// pill, with `accent` on it.
+    pub accent_tint: Color32,
     /// `color.selected`: the selected sidebar item and list row.
     pub selected: Color32,
     /// `color.scrim`: behind dialogs.
@@ -485,6 +488,7 @@ impl Theme {
                 control: hex(0x7A8790),
                 accent: hex(0x1F5F8B),
                 on_accent: hex(0xFFFFFF),
+                accent_tint: hex(0xDCE8F1),
                 selected: hex(0xDCE5EA),
                 scrim: rgba(22, 35, 46, 0.35),
                 ok: hex(0x1E7A4A),
@@ -535,6 +539,7 @@ impl Theme {
                 control: hex(0x66757F),
                 accent: hex(0x7AB8E0),
                 on_accent: hex(0x0E1B26),
+                accent_tint: hex(0x1B3245),
                 selected: hex(0x1B2A36),
                 scrim: rgba(5, 10, 14, 0.60),
                 ok: hex(0x5CC690),
@@ -771,6 +776,8 @@ pub(crate) mod tests {
                     ("focus ring on surface", c.accent, c.surface, UI),
                     ("ok icon on its tint", c.ok, c.ok_tint, UI),
                     ("error icon on its tint", c.error, c.error_tint, UI),
+                    // A Starting pill's word is `accent` on this tint.
+                    ("accent on its tint", c.accent, c.accent_tint, TEXT),
                 ],
             );
         }

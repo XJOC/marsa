@@ -65,7 +65,7 @@ pub fn mark(theme: &Theme, health: Health) -> Mark {
         Health::Busy => Mark {
             icon: Icon::Spinner,
             fg: c.accent,
-            tint: c.selected,
+            tint: c.accent_tint,
         },
     }
 }
@@ -511,7 +511,7 @@ pub fn pill_look(theme: &Theme, state: PillState) -> PillLook {
             text: c.error,
         },
         PillState::Starting => PillLook {
-            fill: Some(c.selected),
+            fill: Some(c.accent_tint),
             ring: None,
             icon: Some((Icon::Spinner, c.accent)),
             text: c.accent,
