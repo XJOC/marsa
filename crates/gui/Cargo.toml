@@ -43,6 +43,12 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tray-icon.workspace = true
 
+# macOS only: the menu-bar panel's activation policy (`Accessory`: no Dock
+# icon, no menu bar). The trait that sets it is in winit, which eframe does
+# not re-export. The same winit as eframe's, so no second copy is built.
+[target.'cfg(target_os = "macos")'.dependencies]
+winit.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 
