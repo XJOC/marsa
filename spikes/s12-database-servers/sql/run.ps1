@@ -302,7 +302,7 @@ $script:N++
 $cp = Start-Process -FilePath $SrvExe -ArgumentList (SrvArgs $PORT) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $W 'conflict.out') -RedirectStandardError (Join-Path $W 'conflict.err')
 $null = $cp.Handle
 if ($cp.WaitForExit(40000)) {
-  $msg = (Get-Content (Join-Path $W 'conflict.err'), (Join-Path $W 'conflict.out'), $MYLOG, $script:SrvLog -ErrorAction SilentlyContinue | Where-Object { $_ -match 'already in use|already running|bind|address|10048' } | Select-Object -Last 2) -join ' '
+  $msg = (Get-Content -Path @((Join-Path $W 'conflict.err'), (Join-Path $W 'conflict.out'), $MYLOG, $script:SrvLog | Where-Object { $_ -and (Test-Path $_) }) -ErrorAction SilentlyContinue | Where-Object { $_ -match 'already in use|already running|bind|address|10048' } | Select-Object -Last 2) -join ' '
   Rec port_conflict "server exited with code $($cp.ExitCode); $msg"
 } else {
   Rec port_conflict 'server kept running although the port was taken'
@@ -366,7 +366,7 @@ $script:N++
 $sp = Start-Process -FilePath $SrvExe -ArgumentList (SrvArgs $PORT) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $W 'second.out') -RedirectStandardError (Join-Path $W 'second.err')
 $null = $sp.Handle
 if ($sp.WaitForExit(40000)) {
-  $msg = (Get-Content (Join-Path $W 'second.err'), (Join-Path $W 'second.out'), $MYLOG, $script:SrvLog -ErrorAction SilentlyContinue | Where-Object { $_ -match 'lock|already|in use|FATAL|Unable|ERROR' } | Select-Object -Last 3) -join ' '
+  $msg = (Get-Content -Path @((Join-Path $W 'second.err'), (Join-Path $W 'second.out'), $MYLOG, $script:SrvLog | Where-Object { $_ -and (Test-Path $_) }) -ErrorAction SilentlyContinue | Where-Object { $_ -match 'lock|already|in use|FATAL|Unable|ERROR' } | Select-Object -Last 3) -join ' '
   Rec orphan_second_start "refused, exit code $($sp.ExitCode); $msg"
 } else {
   Rec orphan_second_start 'second server kept running (two servers on one data dir?)'

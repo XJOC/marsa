@@ -31,7 +31,7 @@ jobs:
         # macos-15 and macos-26 are both arm64: they show whether a macOS 15
         # build runs on a newer macOS (macos-14 is retired). macos-15-intel is the Intel runner
         # (macos-13 is retired). ubuntu-22.04 has glibc 2.35, 24.04 has 2.39.
-        os: [windows-2022] # TEMP windows only
+        os: [macos-26, macos-15, macos-15-intel, ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm, windows-2022]
         set: [mysql, postgres]
         include:
           - set: mysql
@@ -97,7 +97,6 @@ jobs:
   # What would building PostgreSQL ourselves take? One container with an old
   # glibc, on x64 and on arm64.
   build-pg:
-    if: false # TEMP
     name: build PostgreSQL from source (${{ matrix.os }})
     strategy:
       fail-fast: false
