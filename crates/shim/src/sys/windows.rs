@@ -167,8 +167,9 @@ impl Job {
 
     /// Puts `child` in the job. A child that cannot join still runs.
     ///
-    /// The child runs for a moment before it joins: std cannot start a
-    /// process suspended. If the shim is killed in that moment, the child
+    /// The child runs for a moment before it joins: std gives no handle to
+    /// resume a process started suspended. If the shim is killed in that
+    /// moment, the child
     /// outlives it; a process the child starts then is outside the job, as
     /// every later one is anyway.
     fn add(&self, child: &Child) {
@@ -429,12 +430,27 @@ mod tests {
         shim.wait().expect("wait for the shim");
         thread::sleep(Duration::from_millis(500));
         let (child, grandchild) = (length("child"), length("grandchild"));
-        thread::sleep(Duration::from_secs(1));
+        // Polled, so a slow runner does not fail the test: up to 5 s for the
+        // grandchild's next beat.
+        let start = Instant::now();
+        while length("grandchild") == grandchild && start.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(50));
+        }
         let still_beating = length("grandchild") > grandchild;
+        let child_after = length("child");
+        // The grandchild stops at its next beat; the folder goes only after.
         fs::write(dir.path().join("stop"), "").expect("stop the grandchild");
-        // Time for the grandchild to see it before the folder goes.
-        thread::sleep(Duration::from_millis(300));
-        assert_eq!(length("child"), child, "the child still runs");
+        let mut last = length("grandchild");
+        let start = Instant::now();
+        loop {
+            thread::sleep(Duration::from_millis(300));
+            let now = length("grandchild");
+            if now == last || start.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+            last = now;
+        }
+        assert_eq!(child_after, child, "the child still runs");
         assert!(still_beating, "the grandchild ended with the shim");
     }
 
