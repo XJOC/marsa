@@ -116,3 +116,6 @@ jobs:
               throw "$($run.Shell): the real script did not get past SHA256SUMS"
             }
           }
+          # The script failed on purpose at a release with no Windows zip,
+          # and the runner's wrapper would exit with its $LASTEXITCODE.
+          exit 0
