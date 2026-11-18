@@ -7,8 +7,9 @@
 //! uncompressed 24-bit BMP, then closes the window.
 //! `MARSA_GUI_THEME=light|dark` draws that theme instead of the system's.
 //! `MARSA_GUI_SIZE=900x720` opens the window at that size (task M5-D4).
-//! `MARSA_GUI_ROUTE=home|sites|runtimes|services|logs|settings` opens that
-//! screen. `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras`
+//! `MARSA_GUI_ROUTE=home|sites|runtimes|services|logs|settings|site:<name>`
+//! opens that screen (`site:shop` is the page of the site `shop`, task
+//! M5-D7). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked`
 //! draws fixed fake data and starts no daemon (task M5-D5, see `demo`).
 //! `MARSA_GUI_CLICK=x,y` clicks that point (in points, from the top left of
 //! the window) once the window has settled, so a menu is open in the picture
@@ -208,6 +209,9 @@ pub fn route() -> Option<Route> {
 }
 
 fn parse_route(name: &str) -> Option<Route> {
+    if let Some(site) = name.strip_prefix("site:") {
+        return (!site.is_empty()).then(|| Route::Site(site.to_owned()));
+    }
     Some(match name {
         "home" => Route::Home,
         "sites" => Route::Sites,
@@ -274,6 +278,8 @@ mod tests {
         assert_eq!(parse_route("sites"), Some(Route::Sites));
         assert_eq!(parse_route("logs"), Some(Route::Logs(LogSource::Caddy)));
         assert_eq!(parse_route("mail"), None);
+        assert_eq!(parse_route("site:shop"), Some(Route::Site("shop".into())));
+        assert_eq!(parse_route("site:"), None);
         assert_eq!(parse_point("600, 200"), Some(egui::pos2(600.0, 200.0)));
         assert_eq!(parse_point("600"), None);
     }

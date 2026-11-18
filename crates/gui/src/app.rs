@@ -8,7 +8,7 @@
 //! returns what the user did, and `ui` applies the actions and sends the
 //! commands (code.md, State).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Instant;
@@ -17,7 +17,7 @@ use eframe::egui;
 
 use crate::bridge::{self, Command};
 use crate::model::{Action, Connection, Model, Pick, Route, Update};
-use crate::{shell, strings, theme};
+use crate::{opener, shell, strings, theme};
 
 pub struct App {
     model: Model,
@@ -185,12 +185,19 @@ impl eframe::App for App {
         let picking = self.picker.is_some();
         let output = shell::show(ui, &mut self.model, picking);
         for action in output.actions {
-            // Local actions: the system opens the site and the folder dialog,
-            // not a screen (code.md, State).
+            // Local actions: the system opens the site, a folder, and the folder
+            // dialog, not a screen (code.md, State).
             match &action {
                 Action::OpenSite(name) => {
                     if let Some(url) = self.model.site_url(name) {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                    }
+                    continue;
+                }
+                Action::OpenFolder(name) => {
+                    let folder = self.model.site_root(name).map(Path::to_path_buf);
+                    if let Some(Err(code)) = folder.as_deref().map(opener::open_folder) {
+                        self.model.notice = Some(code.to_owned());
                     }
                     continue;
                 }

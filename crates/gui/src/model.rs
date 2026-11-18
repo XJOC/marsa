@@ -5,7 +5,7 @@
 //! [`Action`] when the user presses something (or, in the screens not
 //! converted yet, calls the model's methods).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::mem;
 use std::path::{Path, PathBuf};
 
@@ -33,6 +33,8 @@ pub const MAX_LOG_LINES: usize = 5000;
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The PHP line the first-run panel installs.
 pub const FIRST_PHP: &str = "8.4";
+/// The runtime the Runtimes screen opens on: the main one.
+pub const MAIN_RUNTIME: Runtime = Runtime::Php;
 /// The start of the id of each PHP pool: php-fpm on macOS and Linux
 /// (`php-fpm-8.4`), php-cgi on Windows (`php-cgi-8.4`, ADR 0016). The daemon
 /// starts and stops the pools with the sites, and refuses actions on them.
@@ -460,8 +462,7 @@ pub enum Route {
     #[default]
     Home,
     Sites,
-    /// One site's page, by name. M5-D7 draws it; until then it shows the
-    /// Sites screen.
+    /// One site's page, by name.
     Site(String),
     /// The Runtimes screen with this runtime chosen.
     Runtimes(Runtime),
@@ -505,6 +506,10 @@ pub enum Action {
     /// "Open" on a site. A local action: `App` hands the address
     /// ([`Model::site_url`]) to the system, never a screen (code.md, State).
     OpenSite(String),
+    /// "Open folder" on a site's page: the system's file manager shows the
+    /// site's folder. A local action like [`Action::OpenSite`]: `App` finds
+    /// the folder ([`Model::site_root`]) and starts the system's opener.
+    OpenFolder(String),
     /// The first-run button that installs what is missing.
     StartFirstRun,
     /// "Run setup".
@@ -534,6 +539,20 @@ pub enum Action {
     CancelLink,
     /// Closes the line about the last sites action.
     DismissSitesNotice,
+    /// "Install a version…" (or the dashed "+") of a runtime: its install
+    /// dialog opens (task M5-D8).
+    AskInstall(Runtime),
+    /// The text typed in the install dialog's version field.
+    SetInstallVersion { runtime: Runtime, text: String },
+    /// "Install" in the dialog (or Enter): queues the version in the field,
+    /// or says why it is wrong. `App` sends the job.
+    SubmitInstall(Runtime),
+    /// "Cancel" or Escape in the install dialog.
+    CancelInstall,
+    /// "Uninstall…" in a version's row menu: the confirmation opens.
+    AskUninstall { runtime: Runtime, version: Version },
+    /// The Xdebug switch.
+    ToggleXdebug,
 }
 
 /// How Marsa works as a whole, as far as the window can tell: the status at
@@ -575,16 +594,25 @@ pub struct Model {
     /// Open after a folder to link was picked. Kept across sessions: it is
     /// the user's typing, not daemon state.
     pub link: Option<LinkForm>,
-    /// In [`Runtime::ALL`] order.
+    /// As the daemon lists them.
     pub runtimes: Vec<RuntimeRow>,
     /// The last runtimes read, default change, or version field failed. A
     /// client error code.
     pub runtimes_notice: Option<String>,
     /// Oldest first.
     pending: Vec<Pending>,
-    /// The version field of each runtime, in [`Runtime::ALL`] order. Empty:
-    /// the newest stable version. Kept across sessions.
-    pub install_input: [String; 4],
+    /// The version typed in the install dialog of each runtime, by the
+    /// runtime's folder name (`Runtime` is neither `Hash` nor `Ord`, and the
+    /// folder name is its stable key). A runtime with no entry has an empty
+    /// field: the newest stable version. A map, not an array in
+    /// [`Runtime::ALL`] order, so a runtime that core adds needs nothing
+    /// here. Kept across sessions (task M5-D8).
+    install_input: BTreeMap<&'static str, String>,
+    /// The runtime whose install dialog is open.
+    pub install_dialog: Option<Runtime>,
+    /// The runtime the Runtimes screen showed last, so the sidebar's item
+    /// opens it again. Kept across sessions.
+    runtime_chosen: Option<Runtime>,
     /// Oldest first, at most [`MAX_INSTALLS`].
     installs: Vec<Install>,
     /// The window's jobs not sent yet, in order.
@@ -641,6 +669,7 @@ impl Model {
                     link: self.link.take(),
                     sites_search: mem::take(&mut self.sites_search),
                     install_input: mem::take(&mut self.install_input),
+                    runtime_chosen: self.runtime_chosen,
                     // Only ended installs with no id are left: what the user
                     // saw last stays on screen.
                     installs: mem::take(&mut self.installs),
@@ -802,6 +831,57 @@ impl Model {
         self.runtimes.iter().find(|row| row.runtime == runtime)
     }
 
+    /// The installed versions of `runtime`, oldest first. Empty until the
+    /// daemon says.
+    pub fn installed(&self, runtime: Runtime) -> &[Version] {
+        self.row(runtime)
+            .map_or(&[], |row| row.installed.as_slice())
+    }
+
+    /// The runtime the Runtimes screen shows: the one of its route, else the
+    /// one it showed last, else the main one.
+    pub fn chosen_runtime(&self) -> Runtime {
+        match &self.route {
+            Route::Runtimes(runtime) => *runtime,
+            _ => self.runtime_chosen.unwrap_or(MAIN_RUNTIME),
+        }
+    }
+
+    /// The sites that run `version` of `runtime` now, by name, in the order
+    /// of the list: the version the daemon says, or the one the user just
+    /// picked for the site. Only PHP has a version per site in the list
+    /// (`Site::php`), so any other runtime has none.
+    pub fn sites_running(&self, runtime: Runtime, version: &Version) -> Vec<&str> {
+        if runtime != Runtime::Php {
+            return Vec::new();
+        }
+        let runs = |site: &Site| match self.site_choice(site) {
+            Choice::Version(own) => own == *version,
+            Choice::Auto => site.php.as_ref() == Some(version),
+        };
+        let sites = &self.sites.sites;
+        sites
+            .iter()
+            .filter(|site| runs(site))
+            .map(|site| site.name.as_str())
+            .collect()
+    }
+
+    /// The sites whose own setting picks `version` of `runtime`: the ones the
+    /// daemon refuses to uninstall it for (`version_in_use`). PHP only, as
+    /// [`Model::sites_running`].
+    pub fn sites_set_to(&self, runtime: Runtime, version: &Version) -> Vec<&str> {
+        if runtime != Runtime::Php {
+            return Vec::new();
+        }
+        let sites = &self.sites.sites;
+        sites
+            .iter()
+            .filter(|site| self.site_choice(site) == Choice::Version(version.clone()))
+            .map(|site| site.name.as_str())
+            .collect()
+    }
+
     /// What the newest unanswered change of `setting` shows, if any.
     fn pending_choice(&self, setting: Setting<'_>) -> Option<&Choice> {
         // Newest first: the user may pick again before the first answer.
@@ -936,13 +1016,63 @@ impl Model {
         if !self.is_connected() || self.installing() {
             return false;
         }
-        match install_version(&self.install_input[runtime_index(runtime)]) {
-            Ok(version) => self.queue_install(InstallJob { runtime, version }),
+        match install_version(self.install_text(runtime)) {
+            Ok(version) => {
+                let queued = self.queue_install(InstallJob { runtime, version });
+                if queued {
+                    // The text is used, and the dialog has done its work.
+                    self.install_input.remove(runtime.dir_name());
+                    self.install_dialog = None;
+                }
+                queued
+            }
             Err(code) => {
                 self.runtimes_notice = Some(code.to_owned());
                 false
             }
         }
+    }
+
+    /// What the version field of `runtime`'s install dialog holds. Empty: the
+    /// newest stable version.
+    pub fn install_text(&self, runtime: Runtime) -> &str {
+        self.install_input
+            .get(runtime.dir_name())
+            .map_or("", String::as_str)
+    }
+
+    /// The user typed `text` in the version field of `runtime`.
+    pub fn set_install_text(&mut self, runtime: Runtime, text: String) {
+        if text.is_empty() {
+            self.install_input.remove(runtime.dir_name());
+        } else {
+            self.install_input.insert(runtime.dir_name(), text);
+        }
+    }
+
+    /// Whether an install can be asked for now: connected, and no install or
+    /// uninstall of this window waits or runs (the daemon runs one at a time).
+    pub fn can_install(&self) -> bool {
+        self.is_connected() && !self.installing() && !self.uninstalling()
+    }
+
+    /// "Install a version…": opens the install dialog of `runtime`. `false`
+    /// when an install cannot be asked for now.
+    pub fn open_install(&mut self, runtime: Runtime) -> bool {
+        if !self.can_install() {
+            return false;
+        }
+        // The notice was about the last action.
+        self.runtimes_notice = None;
+        self.install_dialog = Some(runtime);
+        true
+    }
+
+    /// "Cancel" or Escape in the install dialog. The typed text stays for the
+    /// next time.
+    pub fn close_install(&mut self) {
+        self.install_dialog = None;
+        self.runtimes_notice = None;
     }
 
     /// Queues `job`, as the Install button does once its field is right.
@@ -1281,7 +1411,14 @@ impl Model {
                 self.uninstall_notice = Some(UninstallNotice::Done { runtime, version });
             }
             // The new list comes as `sites_changed`.
-            Removal::Unlink { site } => self.sites_notice = Some(SitesNotice::Unlinked(site)),
+            Removal::Unlink { site } => {
+                // The page of the site is gone: back to the list, where the
+                // line about it shows.
+                if self.route == Route::Site(site.clone()) {
+                    self.route = Route::Sites;
+                }
+                self.sites_notice = Some(SitesNotice::Unlinked(site));
+            }
             Removal::Forget { folder } => self.sites_notice = Some(SitesNotice::Forgot(folder)),
         }
     }
@@ -1395,6 +1532,9 @@ impl Model {
     pub fn apply_action(&mut self, action: Action) -> Option<Command> {
         match action {
             Action::Navigate(route) => {
+                if let Route::Runtimes(runtime) = &route {
+                    self.runtime_chosen = Some(*runtime);
+                }
                 self.route = route;
                 None
             }
@@ -1469,9 +1609,33 @@ impl Model {
                 self.sites_notice = None;
                 None
             }
+            Action::AskInstall(runtime) => {
+                self.open_install(runtime);
+                None
+            }
+            Action::SetInstallVersion { runtime, text } => {
+                self.set_install_text(runtime, text);
+                // The line under the field was about the last text.
+                self.runtimes_notice = None;
+                None
+            }
+            Action::SubmitInstall(runtime) => {
+                // The job waits in the queue: `App` sends it (`next_install`).
+                self.request_install(runtime);
+                None
+            }
+            Action::CancelInstall => {
+                self.close_install();
+                None
+            }
+            Action::AskUninstall { runtime, version } => {
+                self.ask_removal(Removal::Uninstall { runtime, version });
+                None
+            }
+            Action::ToggleXdebug => self.toggle_xdebug().map(Command::SetXdebug),
             // Done by `App`, with the system's opener and dialog: nothing
             // changes here.
-            Action::OpenSite(_) | Action::PickFolder(_) => None,
+            Action::OpenSite(_) | Action::OpenFolder(_) | Action::PickFolder(_) => None,
         }
     }
 
@@ -1517,6 +1681,8 @@ impl Model {
         self.pending.clear();
         self.forget_installs();
         self.first_run = None;
+        // Its buttons are gone with the session.
+        self.install_dialog = None;
         if self.setup == Setup::Running {
             self.setup = Setup::Idle;
         }
@@ -1619,17 +1785,6 @@ pub fn runtime_missing(rows: &[RuntimeRow], runtime: Runtime) -> bool {
         .is_none_or(|row| row.installed.is_empty())
 }
 
-/// The position of `runtime` in [`Runtime::ALL`], and in
-/// [`Model::install_input`].
-pub fn runtime_index(runtime: Runtime) -> usize {
-    match runtime {
-        Runtime::Php => 0,
-        Runtime::Node => 1,
-        Runtime::Composer => 2,
-        Runtime::Caddy => 3,
-    }
-}
-
 /// The version to ask for from a version field: `None` (the newest stable
 /// version) when it is empty, else the text without the spaces around it.
 ///
@@ -1686,7 +1841,8 @@ pub fn folder_path(folder: &Path) -> Result<PathBuf, &'static str> {
 }
 
 /// Whether `runtime` has a default version. Composer and Caddy have none: the
-/// newest installed version is used.
+/// newest installed version is used, and so has any runtime core adds later,
+/// until it is listed here (the `matches!` is false for it, so it builds).
 pub fn has_default(runtime: Runtime) -> bool {
     matches!(runtime, Runtime::Php | Runtime::Node)
 }
@@ -2699,7 +2855,7 @@ mod tests {
     #[test]
     fn an_install_runs_one_job_at_a_time_and_shows_each_step() {
         let mut model = with_runtimes(&["8.3.27"], &["2.11.7"]);
-        model.install_input[runtime_index(Runtime::Php)] = " 8.4 ".into();
+        model.set_install_text(Runtime::Php, " 8.4 ".into());
         assert!(model.request_install(Runtime::Php));
         // One job at a time: a second press waits for the first.
         assert!(!model.request_install(Runtime::Node));
@@ -2742,19 +2898,19 @@ mod tests {
         apply(&mut model, done(7, Runtime::Php, "8.4.23"));
         assert_eq!(step(&model), InstallStep::Done { already: false });
         assert!(!model.installing());
-        model.install_input[runtime_index(Runtime::Node)] = "22".into();
+        model.set_install_text(Runtime::Node, "22".into());
         assert!(model.request_install(Runtime::Node));
     }
 
     #[test]
     fn a_bad_version_field_is_refused_without_a_request() {
         let mut model = with_runtimes(&[], &[]);
-        model.install_input[runtime_index(Runtime::Node)] = "lts/*".into();
+        model.set_install_text(Runtime::Node, "lts/*".into());
         assert!(!model.request_install(Runtime::Node));
         assert_eq!(model.runtimes_notice.as_deref(), Some("unsupported_alias"));
         assert_eq!(model.next_install(), None);
         // An empty field asks for the newest version.
-        model.install_input[runtime_index(Runtime::Node)].clear();
+        model.set_install_text(Runtime::Node, String::new());
         assert!(model.request_install(Runtime::Node));
         assert!(model.runtimes_notice.is_none());
         assert_eq!(model.next_install(), Some(job(Runtime::Node, None)));
@@ -3125,17 +3281,13 @@ mod tests {
     fn the_data_folder_and_the_typing_stay_across_sessions() {
         let mut model = Model::new(absolute("/data"));
         model.update(Update::Connected(health()));
-        model.install_input[runtime_index(Runtime::Php)] = "8.3".into();
+        model.set_install_text(Runtime::Php, "8.3".into());
         model.update(Update::Reconnecting);
         model.update(Update::Connected(health()));
         assert_eq!(model.data_dir, absolute("/data"));
-        assert_eq!(model.install_input[0], "8.3");
+        assert_eq!(model.install_text(Runtime::Php), "8.3");
+        assert_eq!(model.install_text(Runtime::Node), "");
         assert!(!APP_VERSION.is_empty());
-        assert_eq!(
-            Runtime::ALL.map(runtime_index),
-            [0, 1, 2, 3],
-            "the fields follow Runtime::ALL"
-        );
     }
 
     // -- Link (task M5-10) --
@@ -3282,6 +3434,34 @@ mod tests {
     }
 
     #[test]
+    fn unlinking_from_the_page_of_the_site_goes_back_to_sites_and_other_pages_stay() {
+        let mut model = with_parked();
+        model.apply_action(Action::Navigate(Route::Site("api".into())));
+        model.apply_action(Action::AskUnlink("api".into()));
+        assert_eq!(model.confirm, Some(unlink("api")));
+        assert!(model.confirm_removal().is_some());
+        // Waiting for the answer: the page is still there.
+        assert_eq!(model.route, Route::Site("api".into()));
+        model.update(Update::Removed(unlink("api")));
+        // The line about it shows on Sites.
+        assert_eq!(model.route, Route::Sites);
+        assert_eq!(
+            model.sites_notice,
+            Some(SitesNotice::Unlinked("api".into()))
+        );
+
+        // The page of another site, or another screen, is not moved.
+        for route in [Route::Site("blog".into()), Route::Settings] {
+            let mut model = with_parked();
+            model.route = route.clone();
+            model.apply_action(Action::AskUnlink("api".into()));
+            model.confirm_removal().expect("sent");
+            model.update(Update::Removed(unlink("api")));
+            assert_eq!(model.route, route);
+        }
+    }
+
+    #[test]
     fn an_uninstall_and_the_windows_installs_wait_for_each_other() {
         let mut model = with_runtimes(&["8.4.23"], &[]);
         assert!(model.request_install(Runtime::Caddy));
@@ -3294,12 +3474,111 @@ mod tests {
         let sent = send(&mut model, uninstall(Runtime::Php, "8.4.23"));
         assert!(model.uninstalling());
         // An install asked for now is sent after the uninstall's answer.
-        model.install_input[runtime_index(Runtime::Node)] = "22".into();
+        model.set_install_text(Runtime::Node, "22".into());
         assert!(model.request_install(Runtime::Node));
         assert_eq!(model.next_install(), None);
         model.update(not_removed(sent, "install_busy"));
         assert!(!model.uninstalling());
         assert_eq!(model.next_install(), Some(job(Runtime::Node, Some("22"))));
+    }
+
+    // -- The install dialog, the chosen runtime, and sites per version (task M5-D8) --
+
+    #[test]
+    fn the_install_dialog_keeps_a_field_for_each_runtime_and_closes_when_the_job_is_queued() {
+        let mut model = with_runtimes(&["8.3.27"], &["2.11.7"]);
+        assert!(model.open_install(Runtime::Php));
+        assert_eq!(model.install_dialog, Some(Runtime::Php));
+        // Typing is the model's, per runtime; an empty field is no entry.
+        model.apply_action(Action::SetInstallVersion {
+            runtime: Runtime::Php,
+            text: " 8.4 ".into(),
+        });
+        model.apply_action(Action::SetInstallVersion {
+            runtime: Runtime::Node,
+            text: "22".into(),
+        });
+        assert_eq!(model.install_text(Runtime::Php), " 8.4 ");
+        assert_eq!(model.install_text(Runtime::Node), "22");
+        assert_eq!(model.install_text(Runtime::Caddy), "");
+        // Install: the job waits in the queue, the dialog and the text go.
+        assert!(
+            model
+                .apply_action(Action::SubmitInstall(Runtime::Php))
+                .is_none()
+        );
+        assert_eq!(model.install_dialog, None);
+        assert_eq!(model.install_text(Runtime::Php), "");
+        assert_eq!(model.install_text(Runtime::Node), "22", "the others stay");
+        assert_eq!(model.next_install(), Some(job(Runtime::Php, Some("8.4"))));
+    }
+
+    #[test]
+    fn a_wrong_version_keeps_the_dialog_open_and_clears_when_the_text_changes() {
+        let mut model = with_runtimes(&[], &[]);
+        model.apply_action(Action::AskInstall(Runtime::Node));
+        model.set_install_text(Runtime::Node, "lts/*".into());
+        model.apply_action(Action::SubmitInstall(Runtime::Node));
+        assert_eq!(model.install_dialog, Some(Runtime::Node));
+        assert_eq!(model.runtimes_notice.as_deref(), Some("unsupported_alias"));
+        assert_eq!(model.next_install(), None);
+        // The error was about the old text.
+        model.apply_action(Action::SetInstallVersion {
+            runtime: Runtime::Node,
+            text: "22".into(),
+        });
+        assert_eq!(model.runtimes_notice, None);
+        // Cancel closes it and keeps what was typed.
+        model.apply_action(Action::CancelInstall);
+        assert_eq!(model.install_dialog, None);
+        assert_eq!(model.install_text(Runtime::Node), "22");
+    }
+
+    #[test]
+    fn the_install_dialog_does_not_open_while_busy_or_offline_and_closes_with_the_session() {
+        let mut model = with_runtimes(&["8.3.27"], &[]);
+        assert!(model.request_install(Runtime::Caddy));
+        assert!(!model.open_install(Runtime::Php), "an install is queued");
+        let mut idle = with_runtimes(&["8.3.27"], &[]);
+        let sent = send(&mut idle, uninstall(Runtime::Php, "8.3.27"));
+        assert!(!idle.open_install(Runtime::Php), "an uninstall waits");
+        idle.update(Update::Removed(sent));
+        assert!(idle.open_install(Runtime::Php));
+        idle.update(Update::Reconnecting);
+        assert_eq!(idle.install_dialog, None);
+        assert!(!Model::default().open_install(Runtime::Php), "no daemon");
+    }
+
+    #[test]
+    fn the_runtime_the_screen_showed_last_is_kept_for_the_sidebar_and_across_sessions() {
+        let mut model = connected();
+        assert_eq!(model.chosen_runtime(), MAIN_RUNTIME);
+        model.apply_action(Action::Navigate(Route::Runtimes(Runtime::Node)));
+        assert_eq!(model.chosen_runtime(), Runtime::Node);
+        model.apply_action(Action::Navigate(Route::Home));
+        assert_eq!(model.chosen_runtime(), Runtime::Node, "the last one");
+        model.update(Update::Reconnecting);
+        model.update(Update::Connected(health()));
+        assert_eq!(model.chosen_runtime(), Runtime::Node);
+    }
+
+    #[test]
+    fn sites_are_counted_per_version_by_what_runs_and_by_what_they_set() {
+        let pinned = php_site("pinned", Some("8.3.27"), Some(Source::ProjectSetting));
+        let by_default = php_site("shop", Some("8.4.23"), Some(Source::GlobalDefault));
+        let mut model = with_php(vec![by_default, pinned]);
+        let (old, new) = (v("8.3.27"), v("8.4.23"));
+        assert_eq!(model.sites_running(Runtime::Php, &old), ["pinned"]);
+        assert_eq!(model.sites_running(Runtime::Php, &new), ["shop"]);
+        // Only a site's own setting keeps a version from being uninstalled.
+        assert_eq!(model.sites_set_to(Runtime::Php, &old), ["pinned"]);
+        assert!(model.sites_set_to(Runtime::Php, &new).is_empty());
+        // The version the user just picked counts at once.
+        model.choose_site_php("shop", Choice::Version(old.clone()));
+        assert_eq!(model.sites_running(Runtime::Php, &old), ["pinned", "shop"]);
+        assert_eq!(model.sites_set_to(Runtime::Php, &old), ["pinned", "shop"]);
+        // No other runtime has a version per site.
+        assert!(model.sites_running(Runtime::Node, &v("22.11.0")).is_empty());
     }
 
     #[test]

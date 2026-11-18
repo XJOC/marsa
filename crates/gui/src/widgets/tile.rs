@@ -3,17 +3,15 @@
 //! color; a runtime's tile is two or three letters in the Runtimes colors, so
 //! a new language needs a monogram and no new icon (rules.md 9).
 
-use eframe::egui::{
-    Align, Align2, CornerRadius, Painter, Rect, Response, Role, Sense, Ui, Vec2, Widget,
-    WidgetInfo, pos2,
-};
-use marsa_core::runtimes::Runtime;
-
 use super::badge::paint_dot;
 use super::icons::Icon;
 use super::layout;
 use crate::strings;
 use crate::theme::{Face, Section, SectionColors, TextToken, Theme};
+use eframe::egui::{
+    Align, Align2, CornerRadius, Painter, Rect, Response, Role, Sense, Ui, Vec2, Widget,
+    WidgetInfo, pos2,
+};
 
 /// The two sizes of a tile.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -45,11 +43,6 @@ impl TileSize {
 /// The colors of a section's tile: its tint behind, its color on top.
 pub const fn section_colors(theme: &Theme, section: Section) -> SectionColors {
     theme.section(section)
-}
-
-/// The colors of a runtime's monogram: the Runtimes section's.
-pub const fn monogram_colors(theme: &Theme) -> SectionColors {
-    theme.section(Section::Runtimes)
 }
 
 /// What a screen reader says for a tile.
@@ -154,12 +147,31 @@ pub fn paint_section(
     }
 }
 
-/// The tile of a runtime: its letters in the Runtimes colors.
+/// Paints the monogram `text` in `rect`: the tint of `section` behind, the
+/// letters in its color on top. The runtimes list paints its entries with it.
+pub fn paint_monogram(
+    painter: &Painter,
+    theme: &Theme,
+    rect: Rect,
+    text: &str,
+    size: TileSize,
+    section: Section,
+) {
+    let colors = section_colors(theme, section);
+    painter.rect_filled(rect, CornerRadius::same(size.radius(theme)), colors.tint);
+    let galley = layout(painter, text, Monogram::token(theme), colors.fg);
+    let at = Align2([Align::Center, Align::Center]).align_size_within_rect(galley.size(), rect);
+    painter.galley(at.min, galley, colors.fg);
+}
+
+/// The tile of a runtime: its letters in the Runtimes colors, or in the
+/// colors of another section.
 #[derive(Clone, Copy, Debug)]
 #[must_use = "a tile is drawn only when it is added to a Ui"]
 pub struct Monogram<'a> {
     text: &'a str,
     size: TileSize,
+    section: Section,
     access: Access<'a>,
 }
 
@@ -170,17 +182,19 @@ impl<'a> Monogram<'a> {
         Self {
             text,
             size: TileSize::Header,
+            section: Section::Runtimes,
             access: Access::Named,
         }
     }
 
-    /// The tile of a runtime.
-    pub const fn of(runtime: Runtime) -> Monogram<'static> {
-        Monogram::new(strings::runtime_monogram(runtime))
-    }
-
     pub const fn size(mut self, size: TileSize) -> Self {
         self.size = size;
+        self
+    }
+
+    /// The colors of this section instead of the Runtimes colors.
+    pub const fn section(mut self, section: Section) -> Self {
+        self.section = section;
         self
     }
 
@@ -213,17 +227,14 @@ impl Widget for Monogram<'_> {
         let side = self.size.side(theme);
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
         if ui.is_rect_visible(rect) {
-            let colors = monogram_colors(theme);
-            let painter = ui.painter();
-            painter.rect_filled(
+            paint_monogram(
+                ui.painter(),
+                theme,
                 rect,
-                CornerRadius::same(self.size.radius(theme)),
-                colors.tint,
+                self.text,
+                self.size,
+                self.section,
             );
-            let galley = layout(painter, self.text, Self::token(theme), colors.fg);
-            let at =
-                Align2([Align::Center, Align::Center]).align_size_within_rect(galley.size(), rect);
-            painter.galley(at.min, galley, colors.fg);
         }
         let (access, name) = (self.access, self.text);
         response.widget_info(|| tile_info(access, name));
@@ -234,6 +245,8 @@ impl Widget for Monogram<'_> {
 #[cfg(test)]
 mod tests {
     use eframe::egui;
+
+    use marsa_core::runtimes::Runtime;
 
     use super::*;
     use crate::theme::tests::TEXT;
@@ -280,18 +293,34 @@ mod tests {
 
     #[test]
     fn runtimes_share_the_runtimes_colors_and_have_their_own_letters() {
+        // The colors of a tile are its section's: the Runtimes ones unless a
+        // screen asks for another.
         for theme in [&LIGHT, &DARK] {
-            assert_eq!(monogram_colors(theme), theme.section(Section::Runtimes));
+            let shapes = |monogram: Monogram<'static>| {
+                let harness = Harness::new(if theme.dark {
+                    egui::Theme::Dark
+                } else {
+                    egui::Theme::Light
+                });
+                harness.shapes(|ui| {
+                    ui.add(monogram);
+                })
+            };
+            let fill = |shapes: Vec<egui::Shape>| {
+                shapes.into_iter().find_map(|shape| match shape {
+                    egui::Shape::Rect(rect) => Some(rect.fill),
+                    _ => None,
+                })
+            };
+            let runtimes = fill(shapes(Monogram::new("Py")));
+            assert_eq!(runtimes, Some(theme.section(Section::Runtimes).tint));
+            let databases = fill(shapes(Monogram::new("Pg").section(Section::Databases)));
+            assert_eq!(databases, Some(theme.section(Section::Databases).tint));
         }
-        let letters: Vec<&str> = [
-            Runtime::Php,
-            Runtime::Node,
-            Runtime::Composer,
-            Runtime::Caddy,
-        ]
-        .into_iter()
-        .map(|runtime| Monogram::of(runtime).text())
-        .collect();
+        let letters: Vec<String> = Runtime::ALL
+            .into_iter()
+            .map(strings::runtime_monogram)
+            .collect();
         assert_eq!(letters, ["PHP", "JS", "Co", "Ca"]);
         assert!(letters.iter().all(|text| (2..=3).contains(&text.len())));
     }
@@ -334,7 +363,7 @@ mod tests {
                     .rect
                     .size(),
             );
-            sizes.push(ui.add(Monogram::of(Runtime::Php)).rect.size());
+            sizes.push(ui.add(Monogram::new("PHP")).rect.size());
             ui.add(SectionTile::new(Section::Logs).label("Log files"));
             ui.add(SectionTile::new(Section::Queues).decorative());
         });
@@ -354,15 +383,11 @@ mod tests {
     fn the_letters_fit_the_tile() {
         let harness = Harness::new(egui::Theme::Light);
         harness.run(|ui| {
-            for runtime in [
-                Runtime::Php,
-                Runtime::Node,
-                Runtime::Composer,
-                Runtime::Caddy,
-            ] {
+            for runtime in Runtime::ALL {
+                let letters = strings::runtime_monogram(runtime);
                 let galley = layout(
                     ui.painter(),
-                    Monogram::of(runtime).text(),
+                    &letters,
                     Monogram::token(&LIGHT),
                     LIGHT.color.ink,
                 );
