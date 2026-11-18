@@ -40,11 +40,11 @@ pub struct OsVersions {
 }
 
 impl OsVersions {
-    /// What the system says. A tool that fails gives `None`.
-    pub fn probe() -> Self {
+    /// What the system says. A tool that fails or hangs gives `None`.
+    pub async fn probe() -> Self {
         OsVersions {
-            macos: probe::macos_version(),
-            glibc: probe::glibc_version(),
+            macos: probe::macos_version().await,
+            glibc: probe::glibc_version().await,
         }
     }
 }
