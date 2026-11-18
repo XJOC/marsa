@@ -134,22 +134,26 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
     }
     let stopped = end == DaemonEnd::Stopped;
     ok &= stopped;
+    let decided = data_folder(
+        args,
+        data_dir_given,
+        complete,
+        stopped,
+        terminal.is_terminal(),
+    );
     // Windows: a program that runs can be neither deleted nor moved, and
-    // this marsa may run from the data folder (`<data>\bin`): then no
-    // question, only a note. The CLI runs on the machine marsad runs on.
-    let in_use =
-        cfg!(windows) && deletable && programs_dir().is_some_and(|dir| inside(&dir, data_dir));
-    let decided = if in_use {
-        println!("{}", strings::data_dir_in_use(data_dir));
-        Some(DataFolder::Keep)
-    } else {
-        data_folder(
-            args,
-            data_dir_given,
-            complete,
-            stopped,
-            terminal.is_terminal(),
-        )
+    // this marsa may run from the data folder (`<data>\bin`): where the
+    // folder would be deleted or asked about, a note instead. The CLI runs
+    // on the machine marsad runs on.
+    let in_use = cfg!(windows) && programs_dir().is_some_and(|dir| inside(&dir, data_dir));
+    let decided = match decided {
+        None | Some(DataFolder::Delete) if in_use => {
+            println!("{}", strings::data_dir_in_use(data_dir));
+            // Asked for with --delete-data, and not done.
+            ok &= !args.delete_data;
+            Some(DataFolder::Keep)
+        }
+        other => other,
     };
     let folder = match decided {
         Some(folder) => folder,
