@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use marsa_core::platform::process;
-use marsa_core::services::{LogBuffer, ProgramNotAbsolute, ServiceSpec, StopAction, restart_delay};
+use marsa_core::services::{
+    LogBuffer, ProgramNotAbsolute, ServiceSpec, StopAction, StopMethod, restart_delay,
+};
 use marsa_core::types::{Event, LogLine, LogStream, ServiceState, ServiceStatus};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -37,9 +39,13 @@ const STABLE_RUN: Duration = Duration::from_secs(60);
 pub const LOG_FILE_LIMIT: u64 = 10 * 1024 * 1024;
 
 /// What a stop needs besides the waits of its method: a `/bin/kill` per
-/// step (milliseconds; at most 2 s each if one hangs), the kill, and up to
-/// [`DRAIN_WAIT`] for the last lines.
-pub const STOP_MARGIN: Duration = Duration::from_secs(3);
+/// step (milliseconds, but up to 2 s each if one hangs: 4 s for the two of
+/// PostgreSQL), the kill, and up to [`DRAIN_WAIT`] (1 s) for the last lines.
+pub const STOP_MARGIN: Duration = Duration::from_secs(5);
+
+/// The most a shutdown waits for one process, whatever its stop method says,
+/// so a stop method added later cannot hold the shutdown for long.
+pub const STOP_LIMIT_MAX: Duration = Duration::from_secs(60);
 
 /// The state and recent output of one service.
 #[derive(Debug)]
@@ -73,9 +79,9 @@ pub struct ServiceHandle {
     pub task: JoinHandle<()>,
     /// Short reads only: never hold the lock across `.await`.
     pub runtime: Arc<Mutex<ServiceRuntime>>,
-    /// How long a stop may take: the waits of the spec's stop method, plus
-    /// [`STOP_MARGIN`]. A shutdown waits at least this long before it aborts
-    /// the task (`Daemon::stop_procs`), so PostgreSQL gets its SIGQUIT.
+    /// How long a stop may take: [`stop_limit`] of the spec's stop method. A
+    /// shutdown waits at least this long before it aborts the task
+    /// (`Daemon::stop_procs`), so PostgreSQL gets its SIGQUIT.
     pub stop_limit: Duration,
 }
 
@@ -97,6 +103,13 @@ impl ServiceHandle {
         self.cancel.cancel();
         self.task.await
     }
+}
+
+/// How long a stop by `method` may take: the waits of its steps plus
+/// [`STOP_MARGIN`], at most [`STOP_LIMIT_MAX`].
+pub fn stop_limit(method: &StopMethod) -> Duration {
+    let limit = method.total_wait().saturating_add(STOP_MARGIN);
+    limit.min(STOP_LIMIT_MAX)
 }
 
 /// Starts managed processes.
@@ -143,7 +156,7 @@ impl Supervisor {
             events,
             log: Arc::new(Mutex::new(open_log(&spec.id, logs_dir))),
         };
-        let stop_limit = spec.stop.total_wait().saturating_add(STOP_MARGIN);
+        let stop_limit = stop_limit(&spec.stop);
         let cancel = CancellationToken::new();
         let task = tokio::spawn(supervise(spec, shared, cancel.clone()));
         Ok(ServiceHandle {
@@ -495,6 +508,21 @@ mod tests {
 
     fn read(path: &Path) -> String {
         fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn a_stop_may_take_its_waits_and_the_margin_up_to_a_minute() {
+        use marsa_core::services::Signal;
+        let secs = Duration::from_secs;
+        assert_eq!(stop_limit(&StopMethod::term(secs(2))), secs(7));
+        // PostgreSQL: SIGINT and SIGQUIT, 10 s each.
+        let postgres = StopMethod::signals([(Signal::Int, secs(10)), (Signal::Quit, secs(10))]);
+        assert_eq!(stop_limit(&postgres), secs(25));
+        // A method that would wait longer is cut at a minute.
+        let endless = StopMethod::signals([(Signal::Int, Duration::MAX)]);
+        assert_eq!(stop_limit(&endless), STOP_LIMIT_MAX);
+        let long = StopMethod::term(secs(90));
+        assert_eq!(stop_limit(&long), secs(60));
     }
 
     #[test]

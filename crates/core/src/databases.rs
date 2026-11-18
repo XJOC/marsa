@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::orphan::Liveness;
 use crate::php::MAX_SOCKET_PATH;
+use crate::ports::PortLookup;
 use crate::services::{Signal, StopMethod};
 
 /// PostgreSQL's port when `[postgres] port` is not set in `global.toml`. The
@@ -302,19 +303,21 @@ pub fn decide_start(facts: &StartFacts) -> StartDecision {
 }
 
 /// [`PortCheck`] from the daemon's two looks at the port. Busy if either
-/// says so:
+/// says so, or cannot tell:
 ///
 /// - `bound`: a bind to `127.0.0.1:<port>` worked. Alone it misses a program
 ///   on `*:<port>` on macOS: std's bind sets `SO_REUSEADDR`, and there that
 ///   lets a bind to one address share the port with a listener on all of
 ///   them (Docker, for one).
-/// - `owner`: who listens on the port, on any address, as `lsof` names it
-///   (macOS). Any answer means busy. Linux gives none, and there the bind
-///   already fails next to a listener on all addresses.
-pub fn port_check(bound: bool, owner: Option<String>) -> PortCheck {
-    match (bound, owner) {
-        (true, None) => PortCheck::Free,
-        (_, owner) => PortCheck::Busy { owner },
+/// - `lookup`: who listens on the port, on any address, as `lsof` names it
+///   (macOS). Any owner means busy, and so does a failed look: fail closed.
+///   Linux does not look, and there the bind already fails next to a
+///   listener on all addresses.
+pub fn port_check(bound: bool, lookup: PortLookup) -> PortCheck {
+    match (bound, lookup) {
+        (_, PortLookup::Owner(owner)) => PortCheck::Busy { owner: Some(owner) },
+        (true, PortLookup::Nobody | PortLookup::NotChecked) => PortCheck::Free,
+        (false, _) | (true, PortLookup::Failed) => PortCheck::Busy { owner: None },
     }
 }
 
@@ -593,14 +596,25 @@ mod tests {
 
     #[test]
     fn a_port_is_free_only_when_the_bind_works_and_nobody_listens() {
-        let owner = || Some("com.docker.backend(77)".to_owned());
-        assert_eq!(port_check(true, None), PortCheck::Free);
+        let docker = || PortLookup::Owner("com.docker.backend(77)".to_owned());
+        assert_eq!(port_check(true, PortLookup::Nobody), PortCheck::Free);
+        // Linux: no look, and the bind decides.
+        assert_eq!(port_check(true, PortLookup::NotChecked), PortCheck::Free);
         // macOS: our bind works next to Docker on `*:5432`, but lsof sees it.
-        let docker = PortCheck::Busy { owner: owner() };
-        assert_eq!(port_check(true, owner()), docker);
-        assert_eq!(port_check(false, owner()), docker);
-        // Linux: no lsof, and the bind fails.
-        assert_eq!(port_check(false, None), PortCheck::Busy { owner: None });
+        let owner = Some("com.docker.backend(77)".to_owned());
+        let busy_docker = PortCheck::Busy { owner };
+        assert_eq!(port_check(true, docker()), busy_docker);
+        assert_eq!(port_check(false, docker()), busy_docker);
+        // The bind fails, or lsof cannot tell: busy, owner unknown.
+        let unknown = PortCheck::Busy { owner: None };
+        for lookup in [
+            PortLookup::Nobody,
+            PortLookup::NotChecked,
+            PortLookup::Failed,
+        ] {
+            assert_eq!(port_check(false, lookup), unknown);
+        }
+        assert_eq!(port_check(true, PortLookup::Failed), unknown);
     }
 
     #[test]

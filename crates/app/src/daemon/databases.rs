@@ -24,6 +24,7 @@ use marsa_core::databases::{
 };
 use marsa_core::orphan::Liveness;
 use marsa_core::platform::{probe, process};
+use marsa_core::ports::PortLookup;
 use marsa_core::recipes::{self, Platform};
 use marsa_core::runtimes::{Runtime, RuntimesDir};
 use semver::Version;
@@ -89,9 +90,10 @@ pub trait Probes: fmt::Debug + Send + Sync {
     /// By the file the process really runs:
     /// [`marsa_core::platform::process::real_identity`].
     fn real_identity(&self, pid: u32) -> BoxFuture<'_, Liveness>;
-    /// [`marsa_core::platform::process::port_owner`]: for messages, and as
-    /// a sign that the port is busy.
-    fn port_owner(&self, port: u16) -> BoxFuture<'_, Option<String>>;
+    /// Who listens on the port, on any address:
+    /// [`marsa_core::platform::process::port_lookup`]. An owner, or a look
+    /// that failed, means busy.
+    fn port_lookup(&self, port: u16) -> BoxFuture<'_, PortLookup>;
 }
 
 /// The real OS.
@@ -103,15 +105,15 @@ impl Probes for SystemProbes {
         Box::pin(process::real_identity(pid))
     }
 
-    fn port_owner(&self, port: u16) -> BoxFuture<'_, Option<String>> {
-        Box::pin(process::port_owner(port))
+    fn port_lookup(&self, port: u16) -> BoxFuture<'_, PortLookup> {
+        Box::pin(process::port_lookup(port))
     }
 }
 
 /// The facts `decide_start` needs, read from the system now:
 ///
 /// - the port: a bind to `127.0.0.1:<port>`, and who listens on it on any
-///   address ([`port_check`]);
+///   address; a look that fails counts as busy ([`port_check`]);
 /// - `postmaster.pid` in the cluster `data`: read with a size cap, never
 ///   through a link ([`process::read_small_file`]), and the program at its
 ///   pid, by its real executable ([`classify_postmaster`] against
@@ -127,7 +129,7 @@ pub async fn start_facts(
 ) -> StartFacts {
     // The listener closes at once.
     let bound = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok();
-    let owner = probes.port_owner(port).await;
+    let lookup = probes.port_lookup(port).await;
     let text = process::read_small_file(&data.join("postmaster.pid"));
     let pid_file = match text.as_deref().and_then(postmaster_pid) {
         None => PidFileCheck::NoPid,
@@ -135,7 +137,7 @@ pub async fn start_facts(
     };
     StartFacts {
         port,
-        port_check: port_check(bound, owner),
+        port_check: port_check(bound, lookup),
         pid_file,
     }
 }
@@ -380,14 +382,16 @@ mod tests {
     #[derive(Debug)]
     struct FakeProbes {
         now: Liveness,
-        owner: Option<String>,
+        lookup: PortLookup,
         asked: Mutex<Vec<u32>>,
     }
 
+    /// `owner` listens on the port, or nobody.
     fn probes(now: Liveness, owner: Option<&str>) -> FakeProbes {
+        let lookup = owner.map_or(PortLookup::Nobody, |owner| PortLookup::Owner(owner.into()));
         FakeProbes {
             now,
-            owner: owner.map(str::to_owned),
+            lookup,
             asked: Mutex::default(),
         }
     }
@@ -398,8 +402,8 @@ mod tests {
             Box::pin(std::future::ready(self.now.clone()))
         }
 
-        fn port_owner(&self, _port: u16) -> BoxFuture<'_, Option<String>> {
-            Box::pin(std::future::ready(self.owner.clone()))
+        fn port_lookup(&self, _port: u16) -> BoxFuture<'_, PortLookup> {
+            Box::pin(std::future::ready(self.lookup.clone()))
         }
     }
 
@@ -441,6 +445,17 @@ mod tests {
         let port = held.local_addr().unwrap().port();
         let busy = PortCheck::Busy { owner: None };
         assert_eq!(facts(port, None).await, busy);
+    }
+
+    /// macOS: when lsof fails or takes too long, a holder of `*:<port>`
+    /// could be there unseen, so the port counts as busy.
+    #[tokio::test]
+    async fn a_failed_look_at_the_port_is_busy() {
+        let data = tempfile::tempdir().unwrap();
+        let mut failed = probes(Liveness::Gone, None);
+        failed.lookup = PortLookup::Failed;
+        let facts = start_facts(&failed, free_port(), data.path(), &[]).await;
+        assert_eq!(facts.port_check, PortCheck::Busy { owner: None });
     }
 
     #[tokio::test]

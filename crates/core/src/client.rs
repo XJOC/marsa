@@ -100,11 +100,18 @@ pub const UNINSTALL_ALL_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 /// runs after an install or an update: about 2 s when the machine is idle,
 /// more under load, so 5 s was too tight (task M4-20).
 pub const START_WAIT: Duration = Duration::from_secs(15);
-/// How long an old daemon has to stop. `marsad` gives its processes up to
-/// 10 s, or 23 s while PostgreSQL runs (its SIGINT and SIGQUIT, 20 s, and
-/// the kill; task M6-03), and its open connections up to 5 s before it
-/// deletes `daemon.json` (task M3-06), so this is longer than both together.
-const STOP_WAIT: Duration = Duration::from_secs(30);
+/// How long an old daemon has to stop. `marsad` lets go of its lock after
+/// these steps (`server::run`), at most:
+///
+/// - its processes: 25 s while PostgreSQL runs (SIGINT and SIGQUIT, 10 s
+///   each, and a 5 s margin for the kill; task M6-03), 10 s otherwise;
+/// - its open connections: 5 s;
+/// - the parked folder watcher, the sites sync, the start of Caddy with the
+///   daemon, and the DNS server: 2 s each, 8 s.
+///
+/// 38 s in all. The second sweep of the processes returns at once: a process
+/// added after the first sweep was told to stop when it was added. So 45 s.
+const STOP_WAIT: Duration = Duration::from_secs(45);
 /// How much earlier than the login session a daemon may have started and
 /// still count as of that session, in seconds (task M5-21). `ps` gives times
 /// to the second. On the Mac measured for this task the login items, which
@@ -643,7 +650,7 @@ impl DaemonClient {
 /// 2. No daemon holds the lock: start `marsad`, then wait up to 5 s for it to
 ///    answer.
 /// 3. A daemon with a newer API: `daemon_api_too_new`, and it keeps running.
-/// 4. An older daemon: ask it to stop, wait up to 30 s for it to let go of
+/// 4. An older daemon: ask it to stop, wait up to 45 s for it to let go of
 ///    the lock, then step 2. If another client has replaced it meanwhile, the
 ///    new daemon is used.
 /// 5. On macOS, a daemon that started before the user's current GUI login
@@ -652,7 +659,7 @@ impl DaemonClient {
 ///    When either start time is unknown, the daemon is kept.
 ///
 /// A daemon that holds the lock but does not answer yet (starting or
-/// stopping) is waited for, up to 30 s.
+/// stopping) is waited for, up to 45 s.
 ///
 /// # Errors
 ///
@@ -677,12 +684,12 @@ pub async fn ensure_running_with(
 }
 
 /// Stops the running daemon (`marsa daemon stop`): asks it to shut down,
-/// then waits up to 30 s until it has let go of `run/daemon.lock`.
+/// then waits up to 45 s until it has let go of `run/daemon.lock`.
 /// `Ok(false)` if no daemon was running.
 ///
 /// # Errors
 ///
-/// `daemon_stop_failed` if it still runs after 30 s, or the error of the
+/// `daemon_stop_failed` if it still runs after 45 s, or the error of the
 /// shutdown call if waiting cannot fix it.
 pub async fn stop_daemon(data_dir: &Path) -> Result<bool, ClientError> {
     let lock = daemon_lock_path(&run_dir(data_dir));
