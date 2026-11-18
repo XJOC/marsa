@@ -44,7 +44,8 @@ const CHECK_OUTPUT_SHOWN: usize = 500;
 const STATUS_DLL_NOT_FOUND: i32 = 0xC000_0135_u32.cast_signed();
 /// `STATUS_ENTRYPOINT_NOT_FOUND`: the DLL is there but lacks a function, as
 /// a Visual C++ runtime older than the program's build tools does (ADR
-/// 0019: PHP 8.4 needs 14.44 or later).
+/// 0019: PHP 8.4 needs 14.44 or later). A Windows too old for the program
+/// gives it too; Marsa supports none, so the runtime is the likely cause.
 const STATUS_ENTRYPOINT_NOT_FOUND: i32 = 0xC000_0139_u32.cast_signed();
 /// Variables that would change how the check program starts or which
 /// libraries it loads. The rest of the environment stays: Windows programs

@@ -427,7 +427,24 @@ pub fn run_elevated(program: &Path, args: &[&OsStr], limit: Duration) -> io::Res
 /// The Microsoft Visual C++ runtime (x64) that Windows reports as
 /// installed, `(major, minor, build)`, from the key Microsoft documents for
 /// it; `None` when it reports none (ADR 0019). Read only.
+///
+/// The key is in the 64-bit view on some machines, in the 32-bit one
+/// (`Wow6432Node`, where Microsoft's page names it) on others, and in both
+/// on the rest: both are read, and the newer installed version counts.
 pub fn vc_runtime_version() -> Option<(u32, u32, u32)> {
+    use windows_sys::Win32::System::Registry::{
+        REG_ROUTINE_FLAGS, RRF_SUBKEY_WOW6432KEY, RRF_SUBKEY_WOW6464KEY,
+    };
+    [RRF_SUBKEY_WOW6464KEY, RRF_SUBKEY_WOW6432KEY]
+        .into_iter()
+        .filter_map(|view: REG_ROUTINE_FLAGS| vc_runtime_in(view))
+        .max()
+}
+
+/// [`vc_runtime_version`] in one registry view.
+fn vc_runtime_in(
+    view: windows_sys::Win32::System::Registry::REG_ROUTINE_FLAGS,
+) -> Option<(u32, u32, u32)> {
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{
         HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RegGetValueW,
@@ -446,7 +463,7 @@ pub fn vc_runtime_version() -> Option<(u32, u32, u32)> {
                 HKEY_LOCAL_MACHINE,
                 key.as_ptr(),
                 name.as_ptr(),
-                RRF_RT_REG_DWORD,
+                RRF_RT_REG_DWORD | view,
                 null_mut(),
                 (&raw mut value).cast(),
                 &mut size,
@@ -973,11 +990,16 @@ mod tests {
         );
     }
 
-    /// Read only: GitHub's Windows images install the runtime; a machine
-    /// without it gives `None`, which is fine too.
+    /// Read only. GitHub's Windows images install the runtime, so there it
+    /// must be found and new enough: that proves the key, the views, and the
+    /// value types. Another machine may have none.
     #[test]
     fn the_vc_runtime_version_is_read_from_the_registry() {
-        if let Some((major, ..)) = vc_runtime_version() {
+        let found = vc_runtime_version();
+        if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            let (major, minor, _) = found.expect("GitHub's image has the runtime");
+            assert!((major, minor) >= crate::doctor::VC_RUNTIME_MIN, "{found:?}");
+        } else if let Some((major, ..)) = found {
             assert_eq!(major, 14);
         }
     }

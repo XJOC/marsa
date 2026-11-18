@@ -201,7 +201,9 @@ pub fn daemon(answer: Result<(Health, u16), String>) -> Verdict {
 
 /// The oldest Visual C++ runtime the official PHP builds run on: 8.4 and
 /// 8.5 are built with MSVC 14.44, and Microsoft asks for a runtime of the
-/// same version or later (ADR 0019).
+/// same version or later (ADR 0019). Raise it when `recipes/pins.toml`
+/// moves to PHP built with a newer MSVC (vs18 is 14.5x): `doctor` would
+/// pass on an older runtime that PHP fails on.
 pub const VC_RUNTIME_MIN: (u32, u32) = (14, 44);
 
 /// Windows: the Visual C++ runtime that Windows reports, `(major, minor,
@@ -783,7 +785,15 @@ mod tests {
             found: "14.29.30133".to_owned(),
         });
         assert_eq!(vc_runtime(Some((14, 29, 30133))), old);
-        for (found, shown) in [((14, 44, 35211), "14.44.35211"), ((14, 52, 0), "14.52.0")] {
+        let just_below = Verdict::Fail(Problem::VcRuntimeOld {
+            found: "14.43.99".to_owned(),
+        });
+        assert_eq!(vc_runtime(Some((14, 43, 99))), just_below);
+        for (found, shown) in [
+            ((14, 44, 0), "14.44.0"),
+            ((14, 44, 35211), "14.44.35211"),
+            ((14, 52, 0), "14.52.0"),
+        ] {
             let pass = Verdict::Pass(Pass::VcRuntime {
                 version: shown.to_owned(),
             });

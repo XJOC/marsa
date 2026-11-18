@@ -1527,18 +1527,15 @@ pub fn doctor_vc_runtime_ok(version: &str) -> String {
     format!("The Microsoft Visual C++ runtime {version} is installed.")
 }
 
-pub const DOCTOR_VC_MISSING: &str = "The Microsoft Visual C++ runtime (x64) is not installed, \
-     so PHP cannot start.";
+pub const DOCTOR_VC_MISSING: &str = "Windows does not report the Microsoft Visual C++ runtime \
+     (x64), which PHP needs.";
 
 pub fn doctor_vc_old(found: &str) -> String {
-    format!(
-        "The Microsoft Visual C++ runtime {found} is too old for PHP 8.4 and later, which need \
-         14.44 or newer."
-    )
+    format!("The Microsoft Visual C++ runtime {found} is too old: PHP needs 14.44 or newer.")
 }
 
-pub const DOCTOR_VC_INSTALL: &str = "Install the Microsoft Visual C++ Redistributable (x64) \
-     from https://aka.ms/vs/17/release/vc_redist.x64.exe, then run \"marsa doctor\" again.";
+pub const DOCTOR_VC_INSTALL: &str = "Install the latest Microsoft Visual C++ Redistributable \
+     (x64) from https://aka.ms/vc14/vc_redist.x64.exe, then run \"marsa doctor\" again.";
 
 pub fn doctor_runtimes_ok(default: &str, version: &str) -> String {
     if default == version {

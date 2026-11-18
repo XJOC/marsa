@@ -5,6 +5,7 @@
 //! | --- | --- |
 //! | `marsad` answers `/v1/health` | it does not |
 //! | PHP and Caddy are installed, with a default PHP | one is missing |
+//! | the Microsoft Visual C++ runtime PHP needs (Windows, ADR 0019) | Windows reports none, or one older than 14.44 |
 //! | Caddy runs | it does not |
 //! | `doctor-<hex>.test` resolves to `127.0.0.1` (macOS) | it does not, or to another address |
 //! | ports 80 and 443 reach Caddy (macOS) | another program holds one, or one misses Caddy |
@@ -232,8 +233,6 @@ fn log_path(data_dir: &Path) -> PathBuf {
     data_dir.join("logs").join("marsad.log")
 }
 
-/// The line of one check. `windows`: the PATH fixes speak of the user's
-/// PATH setting, not of `~/.zshrc`.
 /// The Visual C++ runtime that Windows reports; none elsewhere.
 fn vc_runtime_version() -> Option<(u32, u32, u32)> {
     // `#[cfg]` outside `platform`: the registry is Windows'.
@@ -243,6 +242,8 @@ fn vc_runtime_version() -> Option<(u32, u32, u32)> {
     None
 }
 
+/// The line of one check. `windows`: the PATH fixes speak of the user's
+/// PATH setting, not of `~/.zshrc`.
 pub fn render(check: Check, verdict: &Verdict, data_dir: &Path, windows: bool) -> String {
     match verdict {
         Verdict::Pass(pass) => strings::doctor_pass(&passed(pass, data_dir)),
@@ -576,5 +577,29 @@ mod tests {
             "- Marsa's certificate authority: not checked. It does not exist yet: Caddy makes \
              it when it first starts. Run \"marsa setup\" to make it and trust it."
         );
+    }
+
+    /// Windows: the runtime's lines, with Microsoft's link in the fix.
+    #[test]
+    fn the_vc_runtime_lines_name_the_version_and_the_link() {
+        let data = data();
+        let pass = Verdict::Pass(Pass::VcRuntime {
+            version: "14.44.35211".to_owned(),
+        });
+        let text = render(Check::VcRuntime, &pass, &data, true);
+        assert!(text.contains("14.44.35211"), "{text}");
+        for problem in [
+            Problem::VcRuntimeMissing,
+            Problem::VcRuntimeOld {
+                found: "14.29.30133".to_owned(),
+            },
+        ] {
+            let text = render(Check::VcRuntime, &Verdict::Fail(problem), &data, true);
+            assert!(
+                text.contains("https://aka.ms/vc14/vc_redist.x64.exe"),
+                "{text}"
+            );
+            assert!(text.contains("Fix:"), "{text}");
+        }
     }
 }
