@@ -1,5 +1,5 @@
 //! Debug builds only: fixed fake data for the design review (task M5-D5).
-//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|confirm-unlink|confirm-uninstall|notice-success|notice-error`
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! fills the model with a few sites, PHP and Caddy (or nothing, for the
 //! first run), and starts no bridge and no daemon: the window draws a state the review needs without a
 //! machine to break. Pair it with
@@ -14,13 +14,14 @@ use std::path::PathBuf;
 use marsa_core::helper::{OpResult, OpStatus};
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    Event, Health, InstallEvent, InstallProgress, InstallUpdate, RuntimeList, RuntimeVersions,
-    ServiceState, ServiceStatus, SetupReport, Site, SiteKind, SiteList, SkippedFolder, Source,
-    XdebugState,
+    Event, Health, InstallEvent, InstallProgress, InstallUpdate, LogLine, LogStream, RuntimeList,
+    RuntimeVersions, ServiceState, ServiceStatus, SetupReport, Site, SiteKind, SiteList,
+    SkippedFolder, Source, XdebugState,
 };
 
 use crate::model::{
-    Autostart, InstallJob, LinkForm, Model, Removal, SitesNotice, Update, WEB_SERVER, apply,
+    Action, Autostart, InstallJob, LinkForm, LogLevel, Model, Removal, SitesNotice, Update,
+    WEB_SERVER, apply,
 };
 
 /// The variable that names the state.
@@ -68,6 +69,12 @@ pub enum Demo {
     /// one waiting, one failed with its reason: the Services screen (task
     /// M5-D10).
     Services,
+    /// The same as `Ok`, with Caddy running, the pools of PHP 8.3 (waiting)
+    /// and 8.4, and a log for each: Logs following Caddy's, with a warning and
+    /// an error among the lines (task M5-D10).
+    Logs,
+    /// `Logs` with the Info level turned off: only warnings and errors.
+    LogsFiltered,
     /// The same as `Ok`, with the confirmation of "Unlink shop.test?" open.
     ConfirmUnlink,
     /// `Runtimes`, with the confirmation of uninstalling PHP 8.3.27 open.
@@ -100,6 +107,8 @@ fn parse(name: &str) -> Option<Demo> {
         "settings" => Demo::Settings,
         "settings-setup" => Demo::SettingsSetup,
         "services" => Demo::Services,
+        "logs" => Demo::Logs,
+        "logs-filtered" => Demo::LogsFiltered,
         "confirm-unlink" => Demo::ConfirmUnlink,
         "confirm-uninstall" => Demo::ConfirmUninstall,
         "notice-success" => Demo::NoticeSuccess,
@@ -167,7 +176,92 @@ pub fn fill(model: &mut Model, demo: Demo) {
     if demo == Demo::Services {
         services_screen(model);
     }
+    if matches!(demo, Demo::Logs | Demo::LogsFiltered) {
+        logs_screen(model, demo);
+    }
 }
+
+/// What the Logs screen shows beyond `Ok`: the services that have a log,
+/// and the lines of Caddy and of the pool of PHP 8.4 (Caddy's as it writes
+/// them: one JSON object a line).
+fn logs_screen(model: &mut Model, demo: Demo) {
+    model.update(Update::Services(vec![
+        service(WEB_SERVER, ServiceState::Running),
+        service("php-fpm-8.3", ServiceState::Stopped),
+        service("php-fpm-8.4", ServiceState::Running),
+    ]));
+    let line = |service: &str, seq: u64, text: String| LogLine {
+        service: service.into(),
+        seq,
+        at_ms: 0,
+        stream: LogStream::Stderr,
+        text,
+    };
+    let caddy = CADDY_LOG.iter().enumerate().map(|(seq, (level, msg))| {
+        let text = format!(
+            r#"{{"level":"{level}","ts":1763476328.{seq},"logger":"http.log.access","msg":"{msg}"}}"#
+        );
+        line(WEB_SERVER, seq as u64, text)
+    });
+    model.update(Update::Log(caddy.collect()));
+    let pool = POOL_LOG.iter().enumerate().map(|(seq, (level, msg))| {
+        let text = format!("[18-Nov-2026 14:30:0{seq}] {level}: {msg}");
+        line("php-fpm-8.4", seq as u64, text)
+    });
+    model.update(Update::Log(pool.collect()));
+    if demo == Demo::LogsFiltered {
+        model.apply_action(Action::ToggleLogLevel(LogLevel::Info));
+    }
+}
+
+/// The lines of Caddy's log in the demo: the level, and the message.
+const CADDY_LOG: [(&str, &str); 22] = [
+    (
+        "info",
+        "maxprocs: Leaving GOMAXPROCS=8: CPU quota undefined",
+    ),
+    ("info", "serving initial configuration"),
+    ("info", "started background certificate maintenance"),
+    ("info", "GET https://shop.test/ 200 38ms"),
+    ("info", "GET https://shop.test/build/app.js 200 4ms"),
+    ("info", "GET https://billing-api.test/health 200 9ms"),
+    ("info", "POST https://shop.test/cart 200 52ms"),
+    ("info", "GET https://wiki.test/ 200 71ms"),
+    (
+        "warn",
+        "tls: certificate for docs.test not requested: site uses HTTP",
+    ),
+    ("info", "GET https://docs.test/ 200 12ms"),
+    ("info", "GET https://shop.test/cart 200 41ms"),
+    ("info", "GET https://shop.test/build/app.css 200 3ms"),
+    ("info", "POST https://shop.test/login 302 88ms"),
+    ("info", "GET https://billing-api.test/invoices 200 57ms"),
+    ("error", "POST https://billing-api.test/invoices 500 120ms"),
+    ("info", "GET https://wiki.test/ 200 64ms"),
+    ("info", "GET https://client-portal.test/dashboard 200 92ms"),
+    ("info", "GET https://shop.test/products?page=2 200 57ms"),
+    (
+        "warn",
+        "reverse proxy: slow answer from legacy-crm.test (1.4 s)",
+    ),
+    ("info", "GET https://shop.test/checkout 200 77ms"),
+    ("info", "GET https://docs.test/ 200 12ms"),
+    ("info", "reload: config applied, 6 sites"),
+];
+
+/// The lines of the log of the PHP 8.4 pool in the demo, as php-fpm writes them.
+const POOL_LOG: [(&str, &str); 4] = [
+    ("NOTICE", "fpm is running, pid 4251"),
+    ("NOTICE", "ready to handle connections"),
+    (
+        "WARNING",
+        "[pool www] child 4260 said into stderr: \"PHP Deprecated: Return type of Foo::bar() should be compatible\"",
+    ),
+    (
+        "ERROR",
+        "[pool www] child 4262 exited on signal 11 (SIGSEGV) after 31.4 seconds from start",
+    ),
+];
 
 /// What the Services screen shows beyond `Ok`: Caddy with its process, the
 /// pool of PHP 8.4 running, the one of 8.3 waiting for a site, and the one
@@ -462,6 +556,8 @@ mod tests {
         assert_eq!(parse("notice-success"), Some(Demo::NoticeSuccess));
         assert_eq!(parse("notice-error"), Some(Demo::NoticeError));
         assert_eq!(parse("services"), Some(Demo::Services));
+        assert_eq!(parse("logs"), Some(Demo::Logs));
+        assert_eq!(parse("logs-filtered"), Some(Demo::LogsFiltered));
         assert_eq!(parse("on fire"), None);
     }
 
@@ -585,6 +681,47 @@ mod tests {
             ]
         );
         assert!(rows[1].failure.is_some());
+    }
+
+    #[test]
+    fn the_logs_demos_have_a_log_for_caddy_and_a_pool_and_the_filtered_one_hides_info() {
+        use crate::model::LogSource;
+        use crate::screens::logs::{Body, view};
+        let mut model = Model::default();
+        fill(&mut model, Demo::Logs);
+        let all = view(&model, &LogSource::Caddy);
+        assert_eq!(all.sources.len(), 3);
+        let Body::Lines(lines) = &all.body else {
+            panic!("lines");
+        };
+        assert_eq!(lines.len(), CADDY_LOG.len());
+        let errors = (0..lines.len())
+            .filter(|n| lines.get(*n).level == LogLevel::Error)
+            .count();
+        assert_eq!(errors, 1);
+        // The pool's log is php-fpm's: the levels come from its own words.
+        let pool = view(&model, &LogSource::of("php-fpm-8.4"));
+        let Body::Lines(pool) = &pool.body else {
+            panic!("lines");
+        };
+        let levels: Vec<_> = (0..pool.len()).map(|n| pool.get(n).level).collect();
+        assert_eq!(
+            levels,
+            [
+                LogLevel::Info,
+                LogLevel::Info,
+                LogLevel::Warning,
+                LogLevel::Error
+            ]
+        );
+        let mut filtered = Model::default();
+        fill(&mut filtered, Demo::LogsFiltered);
+        let view = view(&filtered, &LogSource::Caddy);
+        let Body::Lines(lines) = &view.body else {
+            panic!("lines");
+        };
+        assert_eq!(lines.len(), 3);
+        assert!(filtered.log_hidden.hides(LogLevel::Info));
     }
 
     #[test]
