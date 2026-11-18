@@ -57,6 +57,9 @@ pub struct Colors {
     pub accent: Color32,
     /// `color.on_accent`: text on `accent`.
     pub on_accent: Color32,
+    /// `color.accent.tint`: the background of a busy mark or a Starting
+    /// pill, with `accent` on it.
+    pub accent_tint: Color32,
     /// `color.selected`: the selected sidebar item and list row.
     pub selected: Color32,
     /// `color.scrim`: behind dialogs.
@@ -284,6 +287,20 @@ pub struct Size {
     pub switch_inset: f32,
     /// The height of a row badge: 26 (components.md, Badges).
     pub badge: f32,
+    /// The circle of a status dot with word: 26 (components.md, Status).
+    pub status_dot: f32,
+    /// The state icon in that circle: 13.
+    pub status_dot_icon: f32,
+    /// The circle of the Home status sentence: 44.
+    pub status_hero: f32,
+    /// The state icon in that circle: 22.
+    pub status_hero_icon: f32,
+    /// The circle of a state pill: 18.
+    pub state_circle: f32,
+    /// The state icon in that circle: 10.
+    pub state_icon: f32,
+    /// The ring of a state pill that waits: 1.5.
+    pub state_ring: f32,
     /// The dot on a folded sidebar item's tile: 8.
     pub dot: f32,
     /// The ring around that dot, in the sidebar's color: 2.
@@ -418,6 +435,13 @@ pub const SIZE: Size = Size {
     switch_knob: 16.0,
     switch_inset: 3.0,
     badge: 26.0,
+    status_dot: 26.0,
+    status_dot_icon: 13.0,
+    status_hero: 44.0,
+    status_hero_icon: 22.0,
+    state_circle: 18.0,
+    state_icon: 10.0,
+    state_ring: 1.5,
     dot: 8.0,
     dot_ring: 2.0,
     segmented_inset: 2.0,
@@ -464,6 +488,7 @@ impl Theme {
                 control: hex(0x7A8790),
                 accent: hex(0x1F5F8B),
                 on_accent: hex(0xFFFFFF),
+                accent_tint: hex(0xDCE8F1),
                 selected: hex(0xDCE5EA),
                 scrim: rgba(22, 35, 46, 0.35),
                 ok: hex(0x1E7A4A),
@@ -514,6 +539,7 @@ impl Theme {
                 control: hex(0x66757F),
                 accent: hex(0x7AB8E0),
                 on_accent: hex(0x0E1B26),
+                accent_tint: hex(0x1B3245),
                 selected: hex(0x1B2A36),
                 scrim: rgba(5, 10, 14, 0.60),
                 ok: hex(0x5CC690),
@@ -750,6 +776,8 @@ pub(crate) mod tests {
                     ("focus ring on surface", c.accent, c.surface, UI),
                     ("ok icon on its tint", c.ok, c.ok_tint, UI),
                     ("error icon on its tint", c.error, c.error_tint, UI),
+                    // A Starting pill's word is `accent` on this tint.
+                    ("accent on its tint", c.accent, c.accent_tint, TEXT),
                 ],
             );
         }
