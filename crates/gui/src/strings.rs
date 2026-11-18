@@ -1161,14 +1161,19 @@ pub fn forgot(folder: &Path, home: Option<&Path>) -> String {
 
 /// Why `site` cannot be unlinked: it is part of a parked folder. One short
 /// sentence: the site's page says the rest ([`unlink_parked_hint`]). A long
-/// path keeps its last parts, as in [`forget_folder`]: a notice is two lines
-/// at most, and Windows cannot wrap a line inside `~\Code\clients`.
+/// folder is left to the Forget button beside the sentence
+/// ([`forget_folder`]): a notice is two lines at most, and a path written
+/// with `\` has no place to wrap on Windows.
 pub fn site_is_parked(site: &str, folder: Option<&Path>, home: Option<&Path>) -> String {
     match folder {
-        Some(folder) => format!(
-            "{site}.{TLD} is part of the parked folder {}.",
-            path_tail(&home_path(folder, home), MAX_ACTION_PATH)
-        ),
+        Some(folder) => {
+            let shown = home_path(folder, home);
+            if shown.chars().count() <= MAX_ACTION_PATH {
+                format!("{site}.{TLD} is part of the parked folder {shown}.")
+            } else {
+                format!("{site}.{TLD} is part of a parked folder.")
+            }
+        }
         None => error_text("site_is_parked"),
     }
 }
@@ -3045,8 +3050,8 @@ mod tests {
             format!("shop.test is part of the parked folder {tilde}.")
         );
         assert_eq!(forget_folder(&code, home), format!("Forget {tilde}…"));
-        // A long path keeps its last parts in the button and in the sentence:
-        // a notice is two lines at most.
+        // A long path keeps its last parts in the button, and the sentence
+        // leaves it to the button: a notice is two lines at most.
         let long = full("/Users/omar/Code/clients/acme/projects");
         let sep = MAIN_SEPARATOR;
         assert_eq!(
@@ -3055,7 +3060,7 @@ mod tests {
         );
         assert_eq!(
             site_is_parked("shop", Some(&long), home),
-            format!("shop.test is part of the parked folder …{sep}clients{sep}acme{sep}projects.")
+            "shop.test is part of a parked folder."
         );
         assert_eq!(path_tail("~/short", 22), "~/short");
         let one = path_tail(&"x".repeat(50), 10);
