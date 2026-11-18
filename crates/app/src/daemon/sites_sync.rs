@@ -372,6 +372,7 @@ mod tests {
             cancel,
             task,
             runtime,
+            stop_limit: Duration::ZERO,
         };
         daemon.add_proc(CADDY_ID, handle);
     }

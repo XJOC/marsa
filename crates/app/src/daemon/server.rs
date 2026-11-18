@@ -32,7 +32,10 @@ use super::sites_sync;
 use super::state::Daemon;
 use super::watch;
 
-/// How long shutdown waits for the managed processes to stop.
+/// How long shutdown waits for the managed processes to stop, at least. A
+/// process whose stop method takes longer gets that time
+/// (`ServiceHandle::stop_limit`): PostgreSQL's SIGINT and SIGQUIT take up to
+/// 20 s, and a kill at 10 s would skip the SIGQUIT (task M6-03).
 const PROCS_LIMIT: Duration = Duration::from_secs(10);
 /// How long shutdown then waits for open connections to finish.
 const DRAIN_LIMIT: Duration = Duration::from_secs(5);

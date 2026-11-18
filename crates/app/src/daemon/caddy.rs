@@ -566,6 +566,7 @@ impl CaddyManager {
             cancel,
             task,
             runtime,
+            stop_limit,
         } = handle;
         let watcher = Watcher {
             lines,
@@ -584,6 +585,7 @@ impl CaddyManager {
                 cancel,
                 task,
                 runtime,
+                stop_limit,
             },
         );
 
@@ -1383,6 +1385,7 @@ mod tests {
                 cancel,
                 task,
                 runtime,
+                stop_limit: Duration::ZERO,
             },
         );
     }

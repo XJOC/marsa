@@ -514,6 +514,9 @@ mod tests {
         let signals: Vec<_> = steps.iter().map(signal).collect();
         assert_eq!(signals, [(Signal::Int, 10), (Signal::Quit, 10)]);
         assert!(signals.iter().all(|(signal, _)| *signal != Signal::Term));
+        // Longer than the daemon's 10 s for its processes at shutdown: the
+        // supervisor's handle carries this, so the shutdown waits for it.
+        assert_eq!(postgres_stop().total_wait(), Duration::from_secs(20));
     }
 
     #[test]
