@@ -68,11 +68,31 @@ pub fn options(start: Vec2, anchor: Option<&Anchor>) -> eframe::NativeOptions {
         );
         viewport = viewport.with_position((at.to_vec2() / scale).to_pos2());
     }
-    eframe::NativeOptions {
+    // `mut` is used on macOS only (the hook below).
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut options = eframe::NativeOptions {
         viewport,
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
+    };
+    // macOS only, so the `cfg` is not in `platform`: the activation policy
+    // exists in winit's macOS module alone. The panel is a menu-bar
+    // accessory: no Dock icon, and it does not take the menu bar from the
+    // app the user is in.
+    #[cfg(target_os = "macos")]
+    {
+        options.event_loop_builder = Some(accessory());
     }
+    options
+}
+
+/// The hook that gives the event loop the `Accessory` activation policy.
+#[cfg(target_os = "macos")]
+fn accessory() -> eframe::EventLoopBuilderHook {
+    Box::new(|builder| {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS as _};
+        builder.with_activation_policy(ActivationPolicy::Accessory);
+    })
 }
 
 /// The size the window opens at, before the panel knows its content.
