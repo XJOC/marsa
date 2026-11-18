@@ -34,10 +34,11 @@ has tried them yet. macOS stays the stable system.
 
 ### Changed
 
-- The window uses the colors and the two fonts of Marsa's new design (Readex
-  Pro and JetBrains Mono), in a light and a dark theme that follow your
-  system setting. The screens get their new layout in a later release. The
-  fonts' licences are in `LICENSE`.
+- Marsa's new window design is in progress. Its theme and its base widgets
+  have landed: the window already uses the design's colors and its two fonts
+  (Readex Pro and JetBrains Mono), in a light and a dark theme that follow
+  your system setting. The screens get the new design in the next release.
+  The fonts' licences are in `LICENSE`.
 - Marsa's own programs start on a clean Windows without the Visual C++
   runtime. PHP for Windows still needs it; `marsa doctor` says so.
 
