@@ -25,6 +25,9 @@ pub struct PostgresDirs {
 }
 
 impl PostgresDirs {
+    /// The folders of `major` under `app_data_dir`. Pass an absolute
+    /// `app_data_dir`, as for [`crate::php::PhpFiles::new`]: then no path
+    /// depends on the working folder of `initdb` or `postgres`.
     pub fn new(app_data_dir: &Path, major: u64) -> Self {
         let databases = app_data_dir.join("databases").join("postgres");
         Self {
@@ -62,10 +65,13 @@ pub fn initdb_args(dirs: &PostgresDirs) -> Vec<String> {
 ///   not create any Unix-domain sockets";
 /// - the folder cannot be one item of `unix_socket_directories`, a list: not
 ///   absolute (`@` is an abstract socket on Linux), not UTF-8, a `,` or a
-///   `"`, or whitespace at the end.
+///   `"`, or whitespace at the end;
+/// - the folder has a control character. PostgreSQL writes it as line 5 of
+///   `postmaster.pid`, and a line break would move the lines after it.
 pub fn postgres_socket(dirs: &PostgresDirs, port: u16) -> Option<PathBuf> {
     let dir = dirs.sockets.to_str()?;
-    let plain = dirs.sockets.is_absolute() && !dir.contains([',', '"']) && dir.trim_end() == dir;
+    let odd = |c: char| c == ',' || c == '"' || c.is_control();
+    let plain = dirs.sockets.is_absolute() && !dir.contains(odd) && dir.trim_end() == dir;
     let socket = dirs.sockets.join(format!(".s.PGSQL.{port}"));
     (plain && socket.as_os_str().as_encoded_bytes().len() <= MAX_SOCKET_PATH).then_some(socket)
 }
@@ -89,19 +95,28 @@ pub fn postgres_args(dirs: &PostgresDirs, port: u16) -> Vec<String> {
 }
 
 /// SIGINT ("fast": ends the sessions), up to 10 s, then SIGQUIT
-/// ("immediate"), up to 5 s, then a kill (manager's decision, 2026-11-18).
-/// Never SIGTERM: PostgreSQL then waits for every client, and one idle queue
-/// worker keeps it running (ADR 0023).
+/// ("immediate"), up to 10 s, then a kill (manager's decisions, 2026-11-18).
+///
+/// - Never SIGTERM: PostgreSQL then waits for every client, and one idle
+///   queue worker keeps it running (ADR 0023).
+/// - After SIGQUIT the postmaster kills its own stuck backends after 5 s
+///   (`SIGKILL_CHILDREN_AFTER_SECS`). A kill of the postmaster at that same
+///   moment could leave them running, still holding the shared memory, so
+///   the next start fails. 10 s leaves the postmaster time to do it.
 pub fn postgres_stop() -> StopMethod {
     StopMethod::signals([
         (Signal::Int, Duration::from_secs(10)),
-        (Signal::Quit, Duration::from_secs(5)),
+        (Signal::Quit, Duration::from_secs(10)),
     ])
 }
 
 /// The pid on the first line of `postmaster.pid`, or `None` for junk: `0`, or
 /// above `i32::MAX`, the largest pid. A negative pid is a single-user
 /// `postgres --single`, which holds the folder too, so its sign is dropped.
+///
+/// The daemon only reads this file. It never deletes or rewrites it, not even
+/// a stale one: PostgreSQL reads its line 7, the shared memory key, to find
+/// backends that outlived a dead postmaster.
 pub fn postmaster_pid(text: &str) -> Option<u32> {
     let line = text.lines().next()?.trim();
     let digits = line.strip_prefix('-').unwrap_or(line);
@@ -134,7 +149,9 @@ pub enum PidFileCheck {
     Other { pid: u32 },
     /// The server's own program runs at the pid.
     Server { pid: u32 },
-    /// The OS could not tell.
+    /// The OS could not tell. PostgreSQL may start then (see [`decide_start`]),
+    /// but MySQL must refuse it: a second `mysqld` waits about 100 s for the
+    /// InnoDB lock before it fails.
     Unknown { pid: u32 },
 }
 
@@ -146,6 +163,7 @@ pub struct StartFacts {
     pub pid_file: PidFileCheck,
 }
 
+/// What the daemon does before it starts a server: start it, or refuse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartDecision {
     Start,
@@ -184,9 +202,22 @@ impl ServiceBusy {
 /// 3. Otherwise start. PostgreSQL checks its pid file again: it starts over a
 ///    stale one, but refuses while the pid is alive and runs as the same
 ///    user, even as another program ([`PidFileCheck::Other`]; M6-04).
+///
+/// [`PidFileCheck::Unknown`] starts too, for PostgreSQL only: a second
+/// postmaster cannot run on the folder, because PostgreSQL's
+/// `CreateLockFile` refuses while `kill(pid, 0)` finds the pid, and its
+/// shared memory check refuses while backends of a dead postmaster still
+/// run. MySQL has no such quick refusal and needs its own rule.
 pub fn decide_start(facts: &StartFacts) -> StartDecision {
-    if let PidFileCheck::Server { pid } = facts.pid_file {
-        return StartDecision::Refuse(ServiceBusy::DataDir { pid });
+    // Every case is listed, so a new one (M6-04's own orphan) needs a decision.
+    match facts.pid_file {
+        PidFileCheck::Server { pid } => {
+            return StartDecision::Refuse(ServiceBusy::DataDir { pid });
+        }
+        PidFileCheck::NoPid
+        | PidFileCheck::Dead { .. }
+        | PidFileCheck::Other { .. }
+        | PidFileCheck::Unknown { .. } => {}
     }
     match &facts.port_check {
         PortCheck::Free => StartDecision::Start,
@@ -235,6 +266,17 @@ mod tests {
         assert_eq!(args, words(want));
     }
 
+    #[test]
+    fn postgres_listens_on_loopback_only_on_every_os() {
+        let args = postgres_args(&PostgresDirs::new(Path::new("/m"), 18), 5432);
+        let listen: Vec<_> = args
+            .windows(2)
+            .filter(|pair| pair[1].starts_with("listen_"))
+            .collect();
+        assert_eq!(listen, [["-c", "listen_addresses=127.0.0.1"]]);
+        assert!(args.windows(2).any(|pair| pair == ["-c", "port=5432"]));
+    }
+
     /// Unix paths: an absolute path on Windows needs a drive, and PostgreSQL
     /// on Windows is task M6-07.
     #[cfg(unix)]
@@ -270,7 +312,15 @@ mod tests {
 
         #[test]
         fn a_folder_that_is_not_a_plain_list_item_is_tcp_only() {
-            for folder in ["/a,b/run", "/a\"b/run", "/run ", "run", "@/run"] {
+            for folder in [
+                "/a,b/run",
+                "/a\"b/run",
+                "/a\nb/run",
+                "/a\tb",
+                "/run ",
+                "run",
+                "@/run",
+            ] {
                 assert_eq!(sockets_arg(folder, 5432), "unix_socket_directories=");
             }
             let folder = "/Users/a/Library/Application Support/dev.marsa.Marsa/run";
@@ -286,7 +336,7 @@ mod tests {
             StopAction::Signal(signal) => (signal, step.wait.as_secs()),
         };
         let signals: Vec<_> = steps.iter().map(signal).collect();
-        assert_eq!(signals, [(Signal::Int, 10), (Signal::Quit, 5)]);
+        assert_eq!(signals, [(Signal::Int, 10), (Signal::Quit, 10)]);
         assert!(signals.iter().all(|(signal, _)| *signal != Signal::Term));
     }
 
@@ -304,7 +354,7 @@ mod tests {
     }
 
     fn decide(port_check: &PortCheck, pid_file: PidFileCheck) -> StartDecision {
-        let (port, port_check) = (5432, port_check.clone());
+        let (port, port_check) = (5433, port_check.clone());
         decide_start(&StartFacts {
             port,
             port_check,
@@ -320,7 +370,7 @@ mod tests {
         };
         let refuse_port = |owner: Option<&str>| {
             let owner = owner.map(str::to_owned);
-            StartDecision::Refuse(ServiceBusy::Port { port: 5432, owner })
+            StartDecision::Refuse(ServiceBusy::Port { port: 5433, owner })
         };
         let data_dir_busy = StartDecision::Refuse(ServiceBusy::DataDir { pid: 7 });
         for pid_file in [NoPid, Dead { pid: 7 }, Other { pid: 7 }, Unknown { pid: 7 }] {
