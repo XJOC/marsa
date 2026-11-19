@@ -4,8 +4,11 @@
 #   run-matrix.sh matrix [D1 D5 ...]   death modes x 8 option combinations
 #   run-matrix.sh idle                 30 s without requests, stdio pipe
 #   run-matrix.sh stdin                a stdin pipe as a guard (P4)
+#   run-matrix.sh pdeathsig            Linux: prctl(PR_SET_PDEATHSIG) (P7, S-06b)
+#   run-matrix.sh systemd              Linux: the parent under systemd --user (S-06b)
 #
-# The table goes to results/death.md (matrix) or results/prevention.md.
+# The table goes to death.md (matrix) or prevention.md in the results folder
+# of the system (lib.sh).
 set -u
 . "$(dirname "$0")/lib.sh"
 set -m   # job control: each background job gets its own process group
@@ -80,13 +83,12 @@ run_one() {
 }
 
 matrix() {
-  local results="${ROOT}/results/death.md"
-  mkdir -p "${ROOT}/results"
+  local results="${RESULTS}/death.md"
   {
-    echo "# Death matrix (macOS arm64, Caddy $("${CADDY}" version | cut -d' ' -f1))"
+    echo "# Death matrix (${PLATFORM}, Caddy $("${CADDY}" version | cut -d' ' -f1))"
     echo
     echo "State of Caddy after the parent died: 1 s later, after one request, and 5 s later."
-    echo "\`alive(ppid=1)\` means launchd adopted it. \`dead\` means it exited with its parent."
+    echo "\`alive(ppid=N)\` means the system adopted it: launchd (1) on macOS, pid 1 or the nearest subreaper on Linux (\`ppid of the orphan\` in prevention.md). \`dead\` means it exited with its parent."
     echo
     echo "| Case | group | stdio | kill_on_drop | +1 s | after request | +5 s | notes |"
     echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
@@ -151,12 +153,134 @@ stdin_guard() {
   wait_ports_free 10
 }
 
+# The name of the parent of a pid, for "who adopted the orphan".
+adopter_of() {
+  local ppid
+  ppid="$("${PS}" -p "$1" -o ppid= 2>/dev/null | tr -d ' ')"
+  [ -z "${ppid}" ] && { echo "-"; return; }
+  echo "${ppid}:$("${PS}" -p "${ppid}" -o comm= 2>/dev/null)"
+}
+
+# P7 (Linux): PR_SET_PDEATHSIG=SIGTERM in Caddy before exec. The signal comes
+# when the THREAD that spawned Caddy ends, not the process: tokio worker
+# threads live as long as the runtime, a short thread does not.
+#   $1 label  $2 spawn-from  $3 how the parent ends: kill9 | term | none
+pdeathsig_one() {
+  local label="$1" from="$2" how="$3" out="${WORK}/parent.out" pp cp s1 s5
+  fresh_work
+  "${S06}" parent --group own --stdio file --kill-on-drop off --pdeathsig on \
+    --spawn-from "${from}" --die none >"${out}" 2>&1 &
+  pp=$!
+  if ! wait_for_line "${out}" READY 15; then
+    echo "| ${label} | ${from} | ${how} | START FAILED: $(tail -1 "${out}") | | |"
+    stop_pids "${pp}"; wait_ports_free 10; return
+  fi
+  cp="$(field "${out}" caddy)"
+  /bin/sleep 1
+  case "${how}" in
+    kill9) kill -9 "${pp}"; { wait "${pp}"; } 2>/dev/null ;;
+    term) kill -TERM "${pp}"; { wait "${pp}"; } 2>/dev/null ;;
+    none) ;;
+  esac
+  /bin/sleep 1
+  s1="$(state_of "${cp}")"
+  /bin/sleep 4
+  s5="$(state_of "${cp}")"
+  echo "| ${label} | ${from} | ${how} | ${s1} | ${s5} | $(adopter_of "${cp}") |"
+  stop_pids "${cp}" "${pp}"
+  wait_ports_free 10
+}
+
+pdeathsig() {
+  local results="${RESULTS}/prevention.md"
+  {
+    echo
+    echo "## P7: PR_SET_PDEATHSIG (${PLATFORM})"
+    echo
+    echo "Caddy gets SIGTERM when the thread that spawned it ends. The parent keeps its tokio runtime."
+    echo
+    echo "| Case | spawned from | parent | Caddy +1 s | Caddy +5 s | ppid of Caddy |"
+    echo "| --- | --- | --- | --- | --- | --- |"
+    pdeathsig_one "P7a" task kill9
+    pdeathsig_one "P7b" task term
+    pdeathsig_one "P7c" task none
+    pdeathsig_one "P7d" short-thread none
+  } >>"${results}"
+  echo "wrote ${results}" >&2
+}
+
+# Linux: the parent under systemd. Is Caddy killed with it when the parent
+# dies, and by which KillMode? A desktop session starts apps in a scope;
+# `marsa daemon start` from a terminal is in the terminal's scope.
+#   $1 label  $2 kind: service | scope  $3 KillMode (service only)
+systemd_one() {
+  local label="$1" kind="$2" mode="$3" out="${WORK}/parent.out" pp cp s1 s5 unit
+  fresh_work
+  unit="s06-${label,,}-$$"
+  case "${kind}" in
+    service)
+      systemd-run --user --quiet --unit="${unit}" --property=KillMode="${mode}" \
+        --property=StandardOutput="file:${out}" --property=StandardError="file:${out}" \
+        --setenv=S06_APP_PORT="${APP_PORT}" --setenv=S06_ADMIN_PORT="${ADMIN_PORT}" \
+        --setenv=S06_WORK="${WORK}" \
+        "${S06}" parent --group own --stdio file --kill-on-drop on --die none
+      ;;
+    scope)
+      systemd-run --user --quiet --scope --unit="${unit}" \
+        "${S06}" parent --group own --stdio file --kill-on-drop on --die none >"${out}" 2>&1 &
+      ;;
+  esac
+  if ! wait_for_line "${out}" READY 15; then
+    echo "| ${label} | ${kind} | ${mode} | START FAILED: $(tail -1 "${out}" 2>/dev/null) | | | |"
+    systemctl --user stop "${unit}" >/dev/null 2>&1
+    wait_ports_free 10; return
+  fi
+  pp="$(field "${out}" parent)"
+  cp="$(field "${out}" caddy)"
+  /bin/sleep 1
+  kill -9 "${pp}"
+  /bin/sleep 1
+  s1="$(state_of "${cp}")"
+  /bin/sleep 4
+  s5="$(state_of "${cp}")"
+  echo "| ${label} | ${kind} | ${mode} | ${s1} | ${s5} | $(adopter_of "${cp}") | $(systemctl --user is-active "${unit}" 2>/dev/null) |"
+  stop_pids "${cp}" "${pp}"
+  systemctl --user stop "${unit}" >/dev/null 2>&1
+  systemctl --user reset-failed "${unit}" >/dev/null 2>&1
+  wait_ports_free 10
+}
+
+systemd_cases() {
+  local results="${RESULTS}/prevention.md"
+  {
+    echo
+    echo "## systemd --user (${PLATFORM}, $(systemctl --version | head -1))"
+    echo
+    echo "The parent runs as a transient user unit and is SIGKILLed. \`kill_on_drop\` is on, so only systemd can kill Caddy here."
+    echo
+    echo "| Case | unit | KillMode | Caddy +1 s | Caddy +5 s | ppid of Caddy | unit after |"
+    echo "| --- | --- | --- | --- | --- | --- | --- |"
+    if ! systemctl --user is-system-running >/dev/null 2>&1 \
+      && ! systemctl --user list-units >/dev/null 2>&1; then
+      echo "| - | - | - | no systemd --user manager | | | |"
+    else
+      systemd_one "U1" service control-group
+      systemd_one "U2" service mixed
+      systemd_one "U3" service process
+      systemd_one "U4" scope -
+    fi
+  } >>"${results}"
+  echo "wrote ${results}" >&2
+}
+
 preflight
 case "${MODE}" in
   matrix) matrix ;;
   idle) idle ;;
   stdin) stdin_guard ;;
-  *) echo "usage: $0 matrix|idle|stdin" >&2; exit 1 ;;
+  pdeathsig) pdeathsig ;;
+  systemd) systemd_cases ;;
+  *) echo "usage: $0 matrix|idle|stdin|pdeathsig|systemd" >&2; exit 1 ;;
 esac
 left="$(leftovers)"
 if [ -n "${left}" ]; then echo "LEFTOVERS:"; echo "${left}"; else echo "no leftovers" >&2; fi

@@ -1,0 +1,102 @@
+name: spike-s06b-linux
+
+# Spike S-06b: does Caddy survive a crash of marsad on Linux, and can the next
+# marsad take it back (the Linux half of ADR 0009)? Throwaway code in
+# spikes/s06-caddy-orphan; the results go into an ADR. The job enables
+# lingering for the runner user with sudo, so systemd --user runs. That is
+# fine here and only here: a runner is thrown away after the job.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["task/S-06b-*"]
+    paths:
+      - "spikes/s06-caddy-orphan/**"
+      - ".github/workflows/spike-s06b-linux.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+    working-directory: spikes/s06-caddy-orphan
+
+jobs:
+  spike:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pinned, not ubuntu-latest: the results are evidence for one system.
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      # One folder per system (scripts/lib.sh).
+      S06_RESULTS: ${{ github.workspace }}/spikes/s06-caddy-orphan/results/${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Reads the pinned version from the spike's rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - name: Tools
+        run: |
+          command -v lsof || { sudo apt-get update -q && sudo apt-get install -y -q lsof; }
+          command -v perl curl readlink
+
+      - name: Fetch Caddy (checksum pinned)
+        run: scripts/fetch-caddy.sh
+
+      - name: Build the spike
+        run: cargo build --locked && cargo build --locked --profile abort
+
+      - name: Start systemd --user for the runner user
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >>"$GITHUB_ENV"
+          for _ in $(seq 1 50); do
+            [ -S "/run/user/$(id -u)/systemd/private" ] && break
+            sleep 0.2
+          done
+          XDG_RUNTIME_DIR="/run/user/$(id -u)" systemctl --user is-system-running || true
+
+      - name: Death matrix (D1-D8)
+        run: scripts/run-matrix.sh matrix
+
+      - name: Idle, stdin guard, PR_SET_PDEATHSIG, systemd
+        run: |
+          {
+            echo "# Prevention (Linux)"
+            echo
+            scripts/run-matrix.sh idle
+            scripts/run-matrix.sh stdin
+          } >"${S06_RESULTS}/prevention.md"
+          scripts/run-matrix.sh pdeathsig
+          scripts/run-matrix.sh systemd
+
+      - name: Recovery (R1-R7), gap, Caddy's own pid file
+        run: |
+          scripts/run-recovery.sh recovery
+          scripts/run-recovery.sh gap
+          scripts/run-recovery.sh pidfile | tee -a "${S06_RESULTS}/prevention.md"
+
+      - name: Show the results
+        if: always()
+        run: for f in "${S06_RESULTS}"/*.md; do echo "=== $f"; cat "$f"; done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s06b-${{ matrix.os }}
+          path: spikes/s06-caddy-orphan/results/${{ matrix.os }}/
+          if-no-files-found: warn

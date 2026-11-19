@@ -1,0 +1,13 @@
+INSPECT pidfile=missing admin=timeout app_port=busy(caddy(13749)) admin_port=busy(caddy(13749))
+ADMIN_OWNER Some(13749)
+TIMING pidfile_ms=0.0 admin_ms=1000.8 port_ms=28.6
+DECISION reap(pid=Some(13749))
+STEP t_ms=1029 decided 
+STEP t_ms=3031 stop_api timeout
+STEP t_ms=3032 sigterm pid=13749 sent=true
+STEP t_ms=8050 sigkill pid=13749 sent=true
+STEP t_ms=8050 ports_free after=sigkill
+STEP t_ms=8084 new_caddy_ready pid=13777
+STEP t_ms=8085 serving body="marsa-spike v2"
+READY parent=13766 caddy=13777
+CLEAN_STOP status=Ok(ExitStatus(unix_wait_status(0)))

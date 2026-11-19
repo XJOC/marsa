@@ -1,6 +1,7 @@
-//! Process helpers built on the macOS command line tools, so the spike needs
-//! no `unsafe` and no `libc`/`nix`. Every program is an absolute path and gets
-//! its arguments as an array, never through a shell (AGENTS.md section 6).
+//! Process helpers built on the command line tools of macOS and Linux (and
+//! `/proc` on Linux), so these need no `unsafe`. Every program is an absolute
+//! path and gets its arguments as an array, never through a shell (AGENTS.md
+//! section 6). S-06b added the Linux side.
 
 use std::path::Path;
 use std::time::Duration;
@@ -11,7 +12,10 @@ use tokio::process::Command;
 
 const KILL: &str = "/bin/kill";
 const PS: &str = "/bin/ps";
+#[cfg(target_os = "macos")]
 const LSOF: &str = "/usr/sbin/lsof";
+#[cfg(not(target_os = "macos"))]
+const LSOF: &str = "/usr/bin/lsof";
 
 async fn tool(program: &str, args: &[&str]) -> Result<std::process::Output> {
     Command::new(program)
@@ -50,8 +54,20 @@ pub async fn is_alive(pid: u32) -> bool {
 }
 
 /// The path the process was started with (`ps -o comm=` on macOS).
+#[cfg(target_os = "macos")]
 pub async fn exe_of(pid: u32) -> Option<String> {
     proc_field(pid, "comm").await
+}
+
+/// The program the process runs now: the target of `/proc/<pid>/exe`. On
+/// Linux `ps -o comm=` gives only the first 15 bytes of the name. A process
+/// that is gone, or one of another user, has none.
+#[cfg(not(target_os = "macos"))]
+pub async fn exe_of(pid: u32) -> Option<String> {
+    let link = tokio::fs::read_link(format!("/proc/{pid}/exe"))
+        .await
+        .ok()?;
+    Some(link.to_string_lossy().into_owned())
 }
 
 /// The start time as printed by `ps`, with one second of resolution.
