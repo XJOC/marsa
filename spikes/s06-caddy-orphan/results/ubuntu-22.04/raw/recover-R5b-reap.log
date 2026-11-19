@@ -1,0 +1,6 @@
+INSPECT pidfile=mismatch(pid=13026,found=/home/runner/work/marsa/marsa/spikes/s06-caddy-orphan/vendor/caddy (start time Thu Nov 19 09:52:30 2026 differs from Mon Jan  1 00:00:00 2024)) admin=foreign app_port=busy(caddy(13026)) admin_port=busy(caddy(13026))
+ADMIN_OWNER None
+TIMING pidfile_ms=13.4 admin_ms=1.1 port_ms=107.9
+DECISION conflict(a Caddy that is not ours answers on our admin port)
+STEP t_ms=122 decided 
+CONFLICT a Caddy that is not ours answers on our admin port

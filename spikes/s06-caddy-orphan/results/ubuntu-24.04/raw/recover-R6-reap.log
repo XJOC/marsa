@@ -1,0 +1,6 @@
+INSPECT pidfile=missing admin=no-reply app_port=busy(s06(13548)) admin_port=free
+ADMIN_OWNER None
+TIMING pidfile_ms=0.1 admin_ms=0.4 port_ms=15.6
+DECISION conflict(the site port is held by s06(13548), which is not our Caddy)
+STEP t_ms=16 decided 
+CONFLICT the site port is held by s06(13548), which is not our Caddy
