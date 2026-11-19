@@ -296,7 +296,7 @@ mod tests {
     const THESEUS_NAME: &str = "postgresql-17.12.0-aarch64-apple-darwin.tar.gz";
     // The whole of Oracle's `.md5` for this archive (2026-11-18).
     const MYSQL_MD5: &str =
-        "fb536f5d26e3e43e933aec34679c0740  mysql-8.4.13-linux-glibc2.28-x86_64-minimal.tar.xz\n";
+        include_str!("fixtures/mysql-8.4.13-linux-glibc2.28-x86_64-minimal.tar.xz.md5");
     const MYSQL_NAME: &str = "mysql-8.4.13-linux-glibc2.28-x86_64-minimal.tar.xz";
 
     fn sha256_of(text: &str, name: &str) -> Result<Vec<u8>> {

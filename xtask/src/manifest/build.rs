@@ -275,9 +275,20 @@ pub async fn check_oracle(
         })?;
 
     fs::create_dir_all(work).with_context(|| format!("cannot create {}", work.display()))?;
-    // `sums.name` is one plain path part (`is_segment`).
-    let path = work.join(&sums.name);
-    let asc = work.join(format!("{}.asc", sums.name));
+    // Fixed names, so a run that was killed leaves nothing the next one
+    // does not overwrite or delete.
+    let path = work.join("archive");
+    let asc = work.join("archive.asc");
+    let remove = || {
+        for leftover in [&path, &asc] {
+            if let Err(err) = fs::remove_file(leftover)
+                && err.kind() != io::ErrorKind::NotFound
+            {
+                println!("    warning: cannot delete {}: {err}", leftover.display());
+            }
+        }
+    };
+    remove();
     let checked = async {
         fs::write(&asc, &signature).with_context(|| format!("cannot write {}", asc.display()))?;
         let file = temp_download(fetch, &[url.to_owned()], &path).await?;
@@ -305,13 +316,7 @@ pub async fn check_oracle(
         })
     }
     .await;
-    for leftover in [&path, &asc] {
-        if let Err(err) = fs::remove_file(leftover)
-            && err.kind() != io::ErrorKind::NotFound
-        {
-            println!("    warning: cannot delete {}: {err}", leftover.display());
-        }
-    }
+    remove();
     checked.with_context(|| url.to_owned())
 }
 
@@ -378,6 +383,12 @@ pub async fn build(
                             .allows(url, template.as_deref(), sums.as_ref())
                             .with_context(|| format!("{what}: {url}"))?;
                     }
+                    // Its files only `check_oracle` proves; task M6-05 calls
+                    // it here. Until then, refused before the download.
+                    ensure!(
+                        proof != Proof::OracleSignature,
+                        "{what}: the build loop does not run Oracle's proof yet"
+                    );
                     let file = if proof.keeps_file() {
                         let dir = cache
                             .join(runtime.dir_name())
@@ -1391,6 +1402,8 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
     #[tokio::test]
     async fn oracle_archive_with_a_good_signature_and_md5_is_checked() {
         let work = tempfile::tempdir().expect("tempdir");
+        // What a killed run left.
+        fs::write(work.path().join("archive"), b"stale").expect("write");
         let oracle = StubOracle::new(true, MD5);
         let checked = check_oracle(&oracle_fetch(), MYSQL, work.path(), &oracle)
             .await

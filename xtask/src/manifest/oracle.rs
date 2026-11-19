@@ -46,7 +46,12 @@ const MD5_PATH: &str = "/sbin/md5";
 ///
 /// When none is there: the check is never skipped.
 pub fn find_gpg() -> Result<PathBuf> {
-    GPG_PATHS
+    find_gpg_in(&GPG_PATHS)
+}
+
+/// The first of `paths` that is a file.
+fn find_gpg_in(paths: &[&str]) -> Result<PathBuf> {
+    paths
         .iter()
         .map(PathBuf::from)
         .find(|path| path.is_file())
@@ -54,7 +59,7 @@ pub fn find_gpg() -> Result<PathBuf> {
             format!(
                 "no gpg program at {}: install GnuPG (`brew install gnupg`). Oracle's signature \
                  on MySQL is never skipped",
-                GPG_PATHS.join(", ")
+                paths.join(", ")
             )
         })
 }
@@ -136,12 +141,18 @@ fn verify_in(
     Ok(())
 }
 
-/// gpg in its own `home`, with no prompt, no terminal, and no agent.
+/// gpg in its own `home`, with no prompt, no terminal, no agent, no
+/// options file (not even Homebrew's global one), and no key lookups on
+/// the network.
 fn gpg_command(gpg: &Path, home: &Path) -> Command {
     let mut cmd = Command::new(gpg);
-    cmd.arg("--homedir")
-        .arg(home)
-        .args(["--batch", "--no-tty", "--no-autostart"]);
+    cmd.arg("--homedir").arg(home).args([
+        "--no-options",
+        "--batch",
+        "--no-tty",
+        "--no-autostart",
+        "--no-auto-key-retrieve",
+    ]);
     cmd
 }
 
@@ -154,8 +165,9 @@ fn stderr_of(out: &Output) -> String {
 }
 
 /// Accepts gpg's `--status-fd` lines for one detached signature only when
-/// they say: exactly one signature, `GOODSIG`, and one `VALIDSIG` whose last
-/// field, the **primary** key's fingerprint, is `fingerprint`. The first
+/// they say: exactly one signature, `GOODSIG`, and one `VALIDSIG` of class
+/// `00` (binary: the exact bytes, not text with its line ends normalized)
+/// whose last field, the **primary** key's fingerprint, is `fingerprint`. The first
 /// field is the key that signed, which may be a subkey, so it is not the one
 /// compared. Any sign of a bad, expired, revoked, or unknown key refuses.
 ///
@@ -186,7 +198,9 @@ pub fn check_status(text: &str, fingerprint: &str) -> Result<()> {
     if has(&["BADSIG"]) {
         bail!("the file does not match the signature (BADSIG): it changed after it was signed");
     }
-    if has(&["EXPKEYSIG", "KEYEXPIRED"]) {
+    // Not `KEYEXPIRED`: gpg prints it for an expired subkey that did not
+    // sign too.
+    if has(&["EXPKEYSIG"]) {
         bail!(
             "the key in the key file has expired (EXPKEYSIG): replace the key file with the \
              signer's renewed one, of the same fingerprint {fingerprint}"
@@ -218,7 +232,7 @@ pub fn check_status(text: &str, fingerprint: &str) -> Result<()> {
     };
     // `<signing key> <date> <time> <expires> <version> <reserved> <key
     // algorithm> <hash algorithm> <class> <primary key>`.
-    let [signer, _, _, _, _, _, _, _, _, primary] = fields.as_slice() else {
+    let [signer, _, _, _, _, _, _, _, class, primary] = fields.as_slice() else {
         bail!(
             "the VALIDSIG line has {} fields, not 10, so no primary key fingerprint",
             fields.len()
@@ -227,6 +241,10 @@ pub fn check_status(text: &str, fingerprint: &str) -> Result<()> {
     ensure!(
         *primary == fingerprint,
         "it was made by the key {signer} of the primary key {primary}, not by {fingerprint}"
+    );
+    ensure!(
+        *class == "00",
+        "its class is {class}, not 00: it does not sign the exact bytes"
     );
     Ok(())
 }
@@ -316,7 +334,9 @@ mod tests {
     use super::*;
 
     // Real `gpg --status-fd 1 --verify` output (GnuPG 2.5.20, 2026-11-19).
-    // Oracle's signature on mysql-8.4.13-linux-glibc2.28-x86_64-minimal.tar.xz:
+    // Oracle's signature on mysql-8.4.13-linux-glibc2.28-x86_64-minimal.tar.xz
+    // (`fixtures/mysql-8.4.13-...tar.xz.asc`, kept to show where these came
+    // from):
     const VALID: &str = include_str!("fixtures/mysql-gpg-valid.status");
     const VALID_GPGV: &str = include_str!("fixtures/mysql-gpgv-valid.status");
     // ... on another file.
@@ -334,6 +354,8 @@ mod tests {
     const TWO_SIGS: &str = include_str!("fixtures/gpg-two-sigs.status");
     const TEST_PRIMARY: &str = "09A2D74704B49FDFA6B2478171127E3F5D4D4A74";
     const TEST_SUBKEY: &str = "DD2A3FDEC54375977D59A26C329385C34814BA6F";
+    // Only the tests that run gpg or md5 read it, and those need Unix.
+    #[cfg(unix)]
     const TEST_DATA: &[u8] = b"not the archive\n";
 
     fn refused(text: &str, fingerprint: &str) -> String {
@@ -411,7 +433,14 @@ mod tests {
             ),
         );
         assert!(refused(&twice, ORACLE_FINGERPRINT).contains("2 VALIDSIG"));
-        for keyword in ["REVKEYSIG", "EXPSIG", "FAILURE"] {
+        // A text-mode signature: it would check the file with its line ends
+        // normalized.
+        let text_mode = VALID.replace(" 1 8 00 BCA4", " 1 8 01 BCA4");
+        assert!(refused(&text_mode, ORACLE_FINGERPRINT).contains("class is 01"));
+        // An expired subkey that did not sign is not a refusal by itself.
+        let old_subkey = VALID.replace("[GNUPG:] TRUST", "[GNUPG:] KEYEXPIRED 1\n[GNUPG:] TRUST");
+        check_status(&old_subkey, ORACLE_FINGERPRINT).expect("the primary signed");
+        for keyword in ["REVKEYSIG", "KEYREVOKED", "EXPSIG", "FAILURE"] {
             let text = format!("{VALID}[GNUPG:] {keyword} x\n");
             assert!(
                 check_status(&text, ORACLE_FINGERPRINT).is_err(),
@@ -421,6 +450,27 @@ mod tests {
         // Only machine lines count: a GOODSIG in plain text proves nothing.
         let plain = VALID.replace("[GNUPG:] ", "");
         assert!(refused(&plain, ORACLE_FINGERPRINT).contains("no signature"));
+    }
+
+    /// Without gpg the check stops, and says how to get it.
+    #[test]
+    fn no_gpg_is_an_error_never_a_skip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("gpg").display().to_string();
+        let message = format!(
+            "{:#}",
+            find_gpg_in(&[missing.as_str()]).expect_err("none there")
+        );
+        assert!(message.contains("install GnuPG"), "{message}");
+        let found = find_gpg_in(&[missing.as_str(), env!("CARGO_MANIFEST_DIR")]);
+        assert!(found.is_err(), "a folder is not a program");
+
+        let none = Path::new(&missing);
+        let any = dir.path();
+        let home = dir.path().join("home");
+        let err = verify(none, any, any, any, &home, ORACLE_FINGERPRINT).expect_err("no gpg");
+        assert!(format!("{err:#}").contains("cannot run gpg"), "{err:#}");
+        assert!(!home.exists());
     }
 
     #[test]
