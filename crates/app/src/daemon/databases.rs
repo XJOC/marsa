@@ -55,10 +55,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::caddy::orphan::BoxFuture;
-use super::caddy::{Launch, Launched, note, set_failed};
+use super::caddy::{AbortOnDrop, Launch, Launched, note, set_failed};
 use super::php::orphan::accepted;
 use super::state::Daemon;
-use super::supervisor::{EXITED, ServiceRuntime, Supervisor, lock};
+use super::supervisor::{EXITED, ServiceHandle, ServiceRuntime, Supervisor, lock};
 
 /// The service id: the key in `Daemon::procs`, and the log file
 /// `logs/postgres.log`.
@@ -125,7 +125,8 @@ pub fn installed_servers(data_dir: &Path, platform: Platform) -> Vec<PathBuf> {
 }
 
 /// Who runs under a pid, and who listens on a port: the OS in the daemon
-/// ([`SystemProbes`]), a fake in tests. Only asks; never signals.
+/// ([`SystemProbes`]), a fake in tests. Signals only our old server, checked
+/// right before ([`orphan::clear`]).
 pub trait Probes: fmt::Debug + Send + Sync {
     /// By the file the process really runs:
     /// [`marsa_core::platform::process::real_identity`].
@@ -845,15 +846,9 @@ impl PostgresManager {
         // This run's lines come after the ones there now.
         let first_seq = self.recent_logs().last().map_or(0, |line| line.seq + 1);
         self.spawn(daemon, spec)?;
-        match self.wait_ready(daemon, port).await {
-            Ready::Yes => {
-                info!(port, "postgres takes connections");
-                if let Some(pid) = self.status().pid {
-                    orphan::record(&*self.probes, &daemon.data_dir, &servers, pid).await;
-                }
-            }
+        match self.wait_ready(daemon, port, &servers).await {
+            Ready::Yes => info!(port, "postgres takes connections"),
             Ready::Ended => {
-                orphan::forget(&daemon.data_dir);
                 // Only a run that exited by itself: a shutdown that took the
                 // handle and stopped it leaves `Stopped`, and its lines are
                 // not read.
@@ -888,11 +883,7 @@ impl PostgresManager {
         let cleared = orphan::clear(&*self.probes, &daemon.data_dir, &servers, ladder, port);
         match cleared.await {
             Ok(orphan::Cleared::Stopped { pid, signal }) => {
-                let text = format!(
-                    "marsad: stopped the PostgreSQL (pid {pid}) that an earlier marsad left \
-                     running, with {}.",
-                    signal.name()
-                );
+                let text = orphan::stopped_line(pid, signal);
                 note(&self.runtime, &daemon.events, &text);
             }
             Ok(orphan::Cleared::Nothing | orphan::Cleared::Forgotten) => {}
@@ -966,6 +957,31 @@ impl PostgresManager {
                 ActionError::ProgramNotAbsolute(err)
             })?;
         *lock(&self.started) = Some(program);
+        // The run's end deletes `run/postgres.pid`, whatever ended it: a
+        // stop, a shutdown, or the server itself. PostgreSQL is never
+        // restarted, so the run is the task.
+        let ServiceHandle {
+            cancel,
+            task,
+            runtime,
+            stop_limit,
+        } = handle;
+        let data_dir = daemon.data_dir.clone();
+        let task = tokio::spawn(async move {
+            // `stop_procs` aborts this task after its time limit; the abort
+            // reaches the supervisor too, so its `Child` is dropped.
+            let _abort = AbortOnDrop(task.abort_handle());
+            if let Err(err) = task.await {
+                warn!(%err, "the postgres task failed");
+            }
+            orphan::forget(&data_dir);
+        });
+        let handle = ServiceHandle {
+            cancel,
+            task,
+            runtime,
+            stop_limit,
+        };
         // A handle this replaces belongs to a run that has ended.
         daemon.add_proc(POSTGRES_ID, handle);
         Ok(())
@@ -974,11 +990,18 @@ impl PostgresManager {
     /// Asks `127.0.0.1:<port>` ([`answers`]) until our server answers, its
     /// run ends, or the limit. The check before the start found the port
     /// free, so what answers is our server.
-    async fn wait_ready(&self, daemon: &Daemon, port: u16) -> Ready {
+    /// Its pid goes to `run/postgres.pid` as soon as it runs one of
+    /// `servers`.
+    async fn wait_ready(&self, daemon: &Daemon, port: u16, servers: &[PathBuf]) -> Ready {
+        let mut recorded = false;
         let poll = async {
             loop {
                 if !daemon.proc_alive(POSTGRES_ID) {
                     return Ready::Ended;
+                }
+                if !recorded && let Some(pid) = self.status().pid {
+                    let probes = &*self.probes;
+                    recorded = orphan::record(probes, &daemon.data_dir, servers, pid).await;
                 }
                 if answers(port).await {
                     return Ready::Yes;
@@ -1004,7 +1027,7 @@ impl PostgresManager {
     ///
     /// Only read once the run has ended: a line never stops a server. That
     /// process gets no signal, and `postmaster.pid` stays: the pid may be
-    /// another program's now (orphans are task M6-04).
+    /// another program's now (`orphan::clear` handles our own).
     async fn lock_refusal(
         &self,
         first_seq: u64,
@@ -1059,18 +1082,42 @@ impl PostgresManager {
         }
     }
 
-    /// Stops the task: SIGINT, then SIGQUIT, then a kill, by the spec. A
-    /// PostgreSQL that this daemon did not start is never touched (orphans
-    /// are task M6-04).
+    /// Stops the task: SIGINT, then SIGQUIT, then a kill, by the spec. When
+    /// this daemon runs none, our old server that an earlier `marsad` left
+    /// running is stopped instead ([`orphan::clear`]), so a stop never
+    /// answers "stopped" while it serves. Any other PostgreSQL is never
+    /// touched.
     async fn stop(&self, daemon: &Daemon) {
         // `None`: nothing runs, or a shutdown took the handle and stops it.
         if let Some(handle) = daemon.take_proc(POSTGRES_ID) {
             if let Err(err) = handle.stop().await {
                 warn!(%err, "the postgres task failed");
             }
-            // Only for a server this daemon ran: a file from an earlier
-            // daemon names an orphan that the next start stops.
-            orphan::forget(&daemon.data_dir);
+            return;
+        }
+        if daemon.shutdown.is_cancelled() {
+            return;
+        }
+        let Some(platform) = self.platform else {
+            return;
+        };
+        let port = read_settings(&daemon.data_dir)
+            .ok()
+            .and_then(|settings| settings.port)
+            .unwrap_or(POSTGRES_PORT);
+        let servers = installed_servers(&daemon.data_dir, platform);
+        let ladder = &self.orphan_ladder;
+        let cleared = orphan::clear(&*self.probes, &daemon.data_dir, &servers, ladder, port);
+        match cleared.await {
+            Ok(orphan::Cleared::Stopped { pid, signal }) => {
+                let text = orphan::stopped_line(pid, signal);
+                note(&self.runtime, &daemon.events, &text);
+            }
+            Ok(orphan::Cleared::Nothing | orphan::Cleared::Forgotten) => {}
+            Err(orphan::Stuck(reason)) => {
+                warn!(%reason, "our old postgres did not stop");
+                note(&self.runtime, &daemon.events, &format!("marsad: {reason}."));
+            }
         }
     }
 
@@ -1388,6 +1435,8 @@ mod tests {
         orphans: Mutex<Vec<(u32, PathBuf)>>,
         /// Every signal asked for, to any pid.
         signals: Mutex<Vec<(u32, Signal)>>,
+        /// After the first signal, the orphans cannot be told any more.
+        unknown_after_signal: Mutex<bool>,
     }
 
     /// `owner` listens on the port, or nobody.
@@ -1399,6 +1448,7 @@ mod tests {
             asked: Mutex::default(),
             orphans: Mutex::default(),
             signals: Mutex::default(),
+            unknown_after_signal: Mutex::default(),
         }
     }
 
@@ -1413,10 +1463,15 @@ mod tests {
                 .find(|(p, _)| *p == pid)
                 .cloned();
             let now = self.now.lock().unwrap().clone();
+            let unknown = *self.unknown_after_signal.lock().unwrap()
+                && !self.signals.lock().unwrap().is_empty();
             Box::pin(async move {
                 let Some((_, exe)) = orphan else {
                     return now;
                 };
+                if unknown {
+                    return Liveness::Unknown;
+                }
                 match process::identity(pid).await {
                     Liveness::Alive { started, .. } => Liveness::Alive { exe, started },
                     other => other,
@@ -2017,9 +2072,12 @@ mod tests {
             let last = pg.texts().pop().unwrap();
             assert!(last.contains("pid 4242"), "{last}");
             assert!(last.contains(OTHER), "{last}");
-            // Asked about that pid, never signalled it (the fake has no way
-            // to), and its file stays.
-            assert_eq!(*pg.probes.asked.lock().unwrap(), [4242, 4242]);
+            // Asked about that pid (besides the run itself, for its
+            // record), never signalled it, and its file stays.
+            let asked = pg.probes.asked.lock().unwrap().clone();
+            let about_4242 = asked.iter().filter(|pid| **pid == 4242).count();
+            assert_eq!(about_4242, 2, "{asked:?}");
+            assert!(signals(&pg).is_empty());
             assert_eq!(fs::read_to_string(&file).unwrap(), POSTMASTER_PID);
             // Longer than a restart delay would be: none came.
             tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -2110,7 +2168,7 @@ mod tests {
             // Only about the server itself, for `run/postgres.pid`: the
             // lines named no pid that was looked at.
             let asked = pg.probes.asked.lock().unwrap().clone();
-            assert_eq!(asked, [pid.unwrap()]);
+            assert!(asked.iter().all(|asked| Some(*asked) == pid), "{asked:?}");
             let texts = pg.texts();
             let signals = ["fake got SIGINT", "fake got SIGTERM"];
             assert!(!texts.iter().any(|t| signals.contains(&t.as_str())));
@@ -2370,12 +2428,28 @@ mod tests {
             assert!(!enabled(&pg));
         }
 
-        /// The fake server in `mode` on `port`, as a process a crashed
-        /// `marsad` left: not our child task, not killed on drop. Its own
-        /// stderr goes to `<dir>/orphan.log`.
-        fn orphan_server(pg: &Pg, mode: &str) -> std::process::Child {
+        /// A fake server left running, as by a crashed `marsad`. Killed when
+        /// dropped, so a failed assert leaves no process behind.
+        struct Orphan(std::process::Child);
+
+        impl Orphan {
+            fn id(&self) -> u32 {
+                self.0.id()
+            }
+        }
+
+        impl Drop for Orphan {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        /// The fake server in `mode` on `pg.port`, not our child task and not
+        /// killed by the daemon. Its own stderr goes to `<dir>/orphan.log`.
+        fn orphan_server(pg: &Pg, mode: &str) -> Orphan {
             let log = fs::File::create(pg.dir.path().join("orphan.log")).unwrap();
-            std::process::Command::new(std::env::current_exe().unwrap())
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "daemon::databases::tests::server::fake_postgres",
                     "--exact",
@@ -2387,16 +2461,21 @@ mod tests {
                 .stdout(std::process::Stdio::null())
                 .stderr(log)
                 .spawn()
-                .unwrap()
+                .unwrap();
+            Orphan(child)
+        }
+
+        /// The installed `postgres` of the fake version.
+        fn installed_postgres(pg: &Pg) -> PathBuf {
+            pg.daemon
+                .data_dir
+                .join("runtimes/postgres/18.7.0/bin/postgres")
         }
 
         /// `run/postgres.pid` for `pid`, as the daemon writes it, with its
         /// real start time unless `started` says another.
         async fn record_orphan(pg: &Pg, pid: u32, started: Option<&str>) {
-            let exe = pg
-                .daemon
-                .data_dir
-                .join("runtimes/postgres/18.7.0/bin/postgres");
+            let exe = installed_postgres(pg);
             pg.probes.orphans.lock().unwrap().push((pid, exe.clone()));
             let until = std::time::Instant::now() + WAIT;
             let real = loop {
@@ -2429,48 +2508,73 @@ mod tests {
             fs::read_to_string(pg.dir.path().join("orphan.log")).unwrap_or_default()
         }
 
+        fn signals(pg: &Pg) -> Vec<(u32, Signal)> {
+            pg.probes.signals.lock().unwrap().clone()
+        }
+
+        /// What `run/postgres.pid` names now.
+        fn recorded(pg: &Pg) -> Option<PidRecord> {
+            process::read_pid_file(&orphan::pid_path(&pg.daemon.data_dir))
+        }
+
         /// A `marsad` that died left our server running: the next start
         /// stops it with SIGINT, never SIGTERM, then starts a new one and
-        /// records it. A bystander pid is never signalled.
+        /// records it; the record goes when that run ends. A bystander pid is
+        /// never signalled.
         #[tokio::test]
         async fn our_orphan_is_stopped_with_sigint_and_a_new_server_starts() {
             let pg = pg("serve", probes(Liveness::Gone, None));
             let mut orphan = orphan_server(&pg, "serve");
             listening(pg.port).await;
             record_orphan(&pg, orphan.id(), None).await;
-            let mut bystander = std::process::Command::new("/bin/sleep")
-                .arg("60")
-                .spawn()
-                .unwrap();
+            let mut bystander = Orphan(
+                std::process::Command::new("/bin/sleep")
+                    .arg("60")
+                    .spawn()
+                    .unwrap(),
+            );
+            // The new server runs as our installed `postgres`.
+            *pg.probes.now.lock().unwrap() = alive(&installed_postgres(&pg));
 
             let status = pg.act(ServiceAction::Start).await.unwrap();
             assert_eq!(status.state, ServiceState::Running);
-            let gone = orphan.wait().unwrap();
+            let gone = orphan.0.wait().unwrap();
             assert!(gone.success(), "it ended at SIGINT: {gone:?}");
             let log = orphan_log(&pg);
             assert!(
                 log.contains("fake got SIGINT") && !log.contains("SIGTERM"),
                 "{log}"
             );
-            let signals = pg.probes.signals.lock().unwrap().clone();
-            assert_eq!(signals, [(orphan.id(), Signal::Int)]);
+            assert_eq!(signals(&pg), [(orphan.id(), Signal::Int)]);
             assert!(
-                bystander.try_wait().unwrap().is_none(),
+                bystander.0.try_wait().unwrap().is_none(),
                 "the bystander runs"
             );
-            bystander.kill().unwrap();
             let said = pg
                 .texts()
                 .iter()
-                .any(|t| t.contains("an earlier marsad left running"));
+                .any(|t| t.contains("an earlier marsad left running; it ended after SIGINT"));
             assert!(said, "{:?}", pg.texts());
-            // The new server is recorded: our fake runs as the test binary,
-            // which is not an installed `postgres`, so the probe says.
+
+            let new = recorded(&pg).expect("the new server is recorded");
+            assert_eq!(Some(new.pid), status.pid);
+            assert_eq!(new.exe, installed_postgres(&pg));
             pg.act(ServiceAction::Stop).await.unwrap();
-            assert!(!orphan::pid_path(&pg.daemon.data_dir).exists());
+            assert_eq!(recorded(&pg), None, "the end of the run deletes it");
         }
 
-        /// An orphan that ignores SIGINT and SIGQUIT gets SIGKILL.
+        /// A process that never runs an installed `postgres` is not
+        /// recorded.
+        #[tokio::test]
+        async fn only_our_postgres_is_recorded() {
+            let pg = pg("serve", probes(alive(Path::new("/bin/sleep")), None));
+            pg.act(ServiceAction::Start).await.unwrap();
+            assert_eq!(recorded(&pg), None);
+            pg.act(ServiceAction::Stop).await.unwrap();
+        }
+
+        /// An orphan that ignores SIGINT and SIGQUIT gets SIGKILL, and the
+        /// line says what that may leave.
         #[tokio::test]
         async fn a_deaf_orphan_gets_sigint_then_sigquit_then_sigkill() {
             let mut pg = pg("serve", probes(Liveness::Gone, None));
@@ -2483,18 +2587,47 @@ mod tests {
 
             let status = pg.act(ServiceAction::Start).await.unwrap();
             assert_eq!(status.state, ServiceState::Running);
-            let gone = orphan.wait().unwrap();
+            let gone = orphan.0.wait().unwrap();
             assert!(!gone.success(), "killed: {gone:?}");
-            let signals: Vec<Signal> = pg
-                .probes
-                .signals
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(_, s)| *s)
-                .collect();
-            assert_eq!(signals, [Signal::Int, Signal::Quit, Signal::Kill]);
+            let sent: Vec<Signal> = signals(&pg).iter().map(|(_, s)| *s).collect();
+            assert_eq!(sent, [Signal::Int, Signal::Quit, Signal::Kill]);
+            assert!(pg.texts().iter().any(|t| t.contains("needed SIGKILL")));
             pg.act(ServiceAction::Stop).await.unwrap();
+        }
+
+        /// The check comes again before each signal: a pid that cannot be
+        /// told after SIGINT gets no SIGQUIT, and the start is refused.
+        #[tokio::test]
+        async fn each_signal_needs_its_own_check() {
+            let mut pg = pg("serve", probes(Liveness::Gone, None));
+            let short = Duration::from_millis(300);
+            Arc::get_mut(&mut pg.daemon).unwrap().postgres.orphan_ladder =
+                StopMethod::signals([(Signal::Int, short), (Signal::Quit, short)]);
+            let orphan = orphan_server(&pg, "deaf");
+            listening(pg.port).await;
+            record_orphan(&pg, orphan.id(), None).await;
+            *pg.probes.unknown_after_signal.lock().unwrap() = true;
+
+            let err = pg.act(ServiceAction::Start).await.unwrap_err();
+            assert_eq!(err.code(), "postgres_orphan_stuck");
+            assert_eq!(signals(&pg), [(orphan.id(), Signal::Int)]);
+            assert_eq!(pg.count("server"), 0);
+        }
+
+        /// A stop while this daemon runs nothing stops our orphan, so the
+        /// stop never says "stopped" while it serves.
+        #[tokio::test]
+        async fn a_stop_stops_our_orphan_too() {
+            let pg = pg("serve", probes(Liveness::Gone, None));
+            let mut orphan = orphan_server(&pg, "serve");
+            listening(pg.port).await;
+            record_orphan(&pg, orphan.id(), None).await;
+            let status = pg.act(ServiceAction::Stop).await.unwrap();
+            assert_eq!(status.state, ServiceState::Stopped);
+            assert!(orphan.0.wait().unwrap().success());
+            assert_eq!(signals(&pg), [(orphan.id(), Signal::Int)]);
+            assert_eq!(recorded(&pg), None);
+            assert_eq!(pg.count("server"), 0);
         }
 
         /// The same program at the same pid, started at another time, is not
@@ -2509,34 +2642,28 @@ mod tests {
 
             let err = pg.act(ServiceAction::Start).await.unwrap_err();
             assert_eq!(err.code(), "service_port_busy");
-            assert!(pg.probes.signals.lock().unwrap().is_empty());
-            assert!(orphan.try_wait().unwrap().is_none(), "it still runs");
-            assert!(!orphan::pid_path(&pg.daemon.data_dir).exists());
-            orphan.kill().unwrap();
-            orphan.wait().unwrap();
+            assert!(signals(&pg).is_empty());
+            assert!(orphan.0.try_wait().unwrap().is_none(), "it still runs");
+            assert_eq!(recorded(&pg), None);
         }
 
-        /// A pid the system cannot describe: no signal, the file stays, and
-        /// the start is refused.
+        /// A pid the system cannot describe (another user's process): no
+        /// signal, and the start goes on to its own checks.
         #[tokio::test]
-        async fn an_orphan_that_cannot_be_told_refuses_the_start() {
+        async fn a_record_that_cannot_be_told_gets_no_signal() {
             let pg = pg("serve", probes(Liveness::Unknown, None));
-            let exe = pg
-                .daemon
-                .data_dir
-                .join("runtimes/postgres/18.7.0/bin/postgres");
             let record = PidRecord {
                 pid: 4242,
-                exe,
+                exe: installed_postgres(&pg),
                 started: "x".into(),
             };
             let path = orphan::pid_path(&pg.daemon.data_dir);
             process::write_pid_file(&path, &record).unwrap();
-            let err = pg.act(ServiceAction::Start).await.unwrap_err();
-            assert_eq!(err.code(), "postgres_orphan_stuck");
-            assert!(pg.probes.signals.lock().unwrap().is_empty());
-            assert!(path.exists());
-            assert_eq!(pg.count("server"), 0);
+            let status = pg.act(ServiceAction::Start).await.unwrap();
+            assert_eq!(status.state, ServiceState::Running);
+            assert!(signals(&pg).is_empty());
+            assert_eq!(recorded(&pg), Some(record));
+            pg.act(ServiceAction::Stop).await.unwrap();
         }
 
         /// A pid that is gone, or another program now: the file goes, with no
@@ -2545,22 +2672,18 @@ mod tests {
         async fn a_stale_record_is_deleted_and_the_start_runs() {
             for now in [Liveness::Gone, alive(Path::new("/bin/sleep"))] {
                 let pg = pg("serve", probes(now, None));
-                let exe = pg
-                    .daemon
-                    .data_dir
-                    .join("runtimes/postgres/18.7.0/bin/postgres");
                 let record = PidRecord {
                     pid: 4242,
-                    exe,
+                    exe: installed_postgres(&pg),
                     started: "x".into(),
                 };
                 let path = orphan::pid_path(&pg.daemon.data_dir);
                 process::write_pid_file(&path, &record).unwrap();
                 let status = pg.act(ServiceAction::Start).await.unwrap();
                 assert_eq!(status.state, ServiceState::Running);
-                assert!(pg.probes.signals.lock().unwrap().is_empty());
+                assert!(signals(&pg).is_empty());
+                assert!(!path.exists(), "deleted, and the new run not ours");
                 pg.act(ServiceAction::Stop).await.unwrap();
-                assert!(!path.exists());
             }
         }
 
