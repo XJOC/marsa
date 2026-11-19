@@ -163,6 +163,10 @@ pub fn run_build(options: BuildOptions) -> Result<()> {
     let json = build::to_json(&built.manifest)?;
     verify::check_json(json.as_bytes()).context("the built manifest breaks a rule")?;
 
+    // Nothing may be cached (only PostgreSQL pinned), so the folder may
+    // not exist yet.
+    fs::create_dir_all(&options.out)
+        .with_context(|| format!("cannot create {}", options.out.display()))?;
     let path = options.out.join("manifest.json");
     fs::write(&path, &json).with_context(|| format!("cannot write {}", path.display()))?;
 
