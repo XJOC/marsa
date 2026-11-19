@@ -4,10 +4,10 @@
 //! An op meant for another OS fails with `op_not_supported`.
 //!
 //! Each pair of macOS ops has its own file, so their tasks do not touch the
-//! same code: `resolver` (M4-07), `pf` (M4-08), and `trust` (M4-09). Linux
-//! has `resolved` (M4-18a, M4-18h), `ports` (M4-18b), and `trust_linux`
-//! (M4-18c), which uses the PEM parser of `trust`. Windows has `hosts`
-//! (M4-19d) and `trust_windows` (M4-19e).
+//! same code: `resolver`, `pf`, and `trust`. Linux
+//! has `resolved`, `ports`, and `trust_linux`
+//!, which uses the PEM parser of `trust`. Windows has `hosts`
+//! and `trust_windows`.
 
 mod hosts;
 mod marked;
@@ -115,15 +115,15 @@ fn supported(op: &Op, os: Os) -> bool {
         | Op::ResolvedRemove {}
         | Op::PortsInstall {}
         | Op::PortsRemove {} => os == Os::Linux,
-        // Linux: before systemd 250 with systemd-networkd (task M4-18k).
+        // Linux: before systemd 250 with systemd-networkd.
         Op::HostsSync { .. } | Op::HostsRemove {} => matches!(os, Os::Windows | Os::Linux),
     }
 }
 
 /// One op meant for this OS. Every handler gets `system` for each file and
 /// command, and returns the result of its op. Trust has a handler per OS:
-/// `trust` on macOS (task M4-09), `trust_windows` on Windows (task M4-19e);
-/// Linux gets its own with task M4-18.
+/// `trust` on macOS, `trust_windows` on Windows;
+/// Linux has its own handler.
 fn handle(op: &Op, os: Os, system: &impl System) -> OpResult {
     match op {
         Op::ResolverInstall { port } => resolver::install(*port, system),
