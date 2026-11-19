@@ -207,7 +207,8 @@ pub fn check_serial(serial: u64, published: Option<u64>) -> Result<()> {
     Ok(())
 }
 
-/// Builds the manifest. Every file is saved under `cache`.
+/// Builds the manifest. The files that a later check reads are saved under
+/// `cache` (see `Proof::keeps_file`); the others are only hashed.
 pub async fn build(
     fetch: &impl Fetch,
     pins: &Pins,
@@ -262,8 +263,12 @@ pub async fn build(
                     .with_context(|| what.clone())?;
 
                     let mut notes = Vec::new();
-                    // One of `urls`, so `proof` allows its sum file.
                     let sums = sum_file_for(&file.url);
+                    // Checked above, as one of `urls`; again on the URL that
+                    // answered, so this never rests on that alone.
+                    proof
+                        .allows(&file.url, template.as_deref(), sums.as_ref())
+                        .with_context(|| format!("{what}: {}", file.url))?;
                     match sums {
                         Some(sums) => {
                             let sum_url = &sums.url;
@@ -418,7 +423,8 @@ async fn cached_download(
         file, hasher, size, ..
     } = sink;
     if let Some((mut file, _)) = file {
-        file.flush()?;
+        file.flush()
+            .with_context(|| format!("cannot write {}", part.display()))?;
     }
     let sha256: [u8; 32] = hasher.finalize().into();
     fs::rename(&part, &path).with_context(|| format!("cannot move {}", part.display()))?;
@@ -785,10 +791,67 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
 
     /// One `[[override]]` that sends a file to a host without a known sum.
     fn moved(runtime: &str, version: &str, platform: &str, url: &str) -> String {
+        mirrored(runtime, version, platform, &[url])
+    }
+
+    /// The same, with mirrors after the first URL.
+    fn mirrored(runtime: &str, version: &str, platform: &str, urls: &[&str]) -> String {
+        let urls = urls
+            .iter()
+            .map(|url| format!("\"{url}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         format!(
             "{PINS}[[override]]\nruntime = \"{runtime}\"\nversion = \"{version}\"\n\
-             platform = \"{platform}\"\nartifact = \"archive\"\nurls = [\"{url}\"]\n"
+             platform = \"{platform}\"\nartifact = \"archive\"\nurls = [{urls}]\n"
         )
+    }
+
+    /// Every URL of a file is checked, mirrors too, before the first one is
+    /// downloaded: a mirror lands in the signed manifest's `urls`.
+    #[tokio::test]
+    async fn every_mirror_is_checked_before_the_download() {
+        let recipe_url = "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.7.0/postgresql-18.7.0-x86_64-unknown-linux-gnu.tar.gz";
+        for mirror in [
+            "https://example.org/postgresql-18.7.0-x86_64-unknown-linux-gnu.tar.gz",
+            "https://github.com/theseus-rs/postgresql-binaries/releases/download/17.12.0/postgresql-17.12.0-x86_64-unknown-linux-gnu.tar.gz",
+        ] {
+            let text = mirrored("postgres", "18.7.0", "linux-x64", &[recipe_url, mirror]);
+            let pins = Pins::parse(&text).expect("pins");
+            let fetch = fetcher(&pins, None);
+            let cache = tempfile::tempdir().expect("tempdir");
+            let err = build(&fetch, &pins, cache.path(), &Stub::default())
+                .await
+                .err()
+                .expect("refused");
+            let message = format!("{err:#}");
+            assert!(
+                message.starts_with(&format!("postgres 18.7.0 linux-x64 archive: {mirror}: ")),
+                "{message}"
+            );
+            assert!(message.contains("not the recipe's URL"), "{message}");
+            let asked = fetch.requests();
+            assert!(
+                !asked.iter().any(|u| u.starts_with(recipe_url)),
+                "{asked:?}"
+            );
+        }
+        // An MD5 mirror behind a good first URL, for any runtime.
+        let node = "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.gz";
+        let md5 = "https://cdn.mysql.com/Downloads/MySQL-8.4/node-v22.23.4-linux-x64.tar.gz";
+        let pins =
+            Pins::parse(&mirrored("node", "22.23.4", "linux-x64", &[node, md5])).expect("pins");
+        let fetch = fetcher(&pins, None);
+        let cache = tempfile::tempdir().expect("tempdir");
+        let err = build(&fetch, &pins, cache.path(), &Stub::default())
+            .await
+            .err()
+            .expect("refused");
+        assert!(
+            format!("{err:#}").contains("never accepted alone"),
+            "{err:#}"
+        );
+        assert!(!fetch.requests().iter().any(|u| u == node));
     }
 
     #[tokio::test]
@@ -1041,6 +1104,37 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
         );
         assert!(file.path.is_none());
         assert!(format!("{:#}", file.kept().expect_err("not kept")).contains("not kept"));
+    }
+
+    /// A body that breaks midway is not part of the hash of the mirror that
+    /// answers next, kept or not.
+    #[tokio::test]
+    async fn a_broken_body_then_a_mirror_hashes_the_mirror_only() {
+        let urls = vec![
+            "https://example.org/a/phar".to_owned(),
+            "https://example.org/b/phar".to_owned(),
+        ];
+        let fetch = MemoryFetch::new()
+            .with(&urls[0], Reply::ChunksThenError(vec![b"ph".to_vec()]))
+            .with(&urls[1], Reply::Chunks(vec![b"phar".to_vec()]));
+        let want: [u8; 32] = Sha256::digest(b"phar").into();
+
+        let file = hashed_download(&fetch, &urls).await.expect("mirror works");
+        assert_eq!(
+            (file.url.as_str(), file.size, file.sha256),
+            (urls[1].as_str(), 4, want)
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = cached_download(&fetch, &urls, dir.path(), "phar")
+            .await
+            .expect("mirror works");
+        assert_eq!(
+            (file.url.as_str(), file.size, file.sha256),
+            (urls[1].as_str(), 4, want)
+        );
+        assert_eq!(fs::read(dir.path().join("phar")).expect("saved"), b"phar");
+        assert!(!dir.path().join("phar.part").exists());
     }
 
     #[tokio::test]
