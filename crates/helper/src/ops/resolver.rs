@@ -5,7 +5,7 @@
 //! matters: Laravel Herd runs `dnsmasq` on `127.0.0.1:53` (ADR 0008).
 //!
 //! The helper changes the file only if Marsa wrote it: its first line is
-//! exactly [`MARKER`], the marker of the Linux files ([`marked`]). Herd and
+//! exactly [`MARKER`], the marker of [`marked`] (task M5-22). Herd and
 //! Valet write the same path, and their file is never overwritten or
 //! deleted. Marsa never writes a link, so a link there is someone else's too,
 //! whatever it points to. On a Mac with Herd the file is Herd's

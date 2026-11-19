@@ -855,8 +855,8 @@ mod tests {
                 "is not one certificate",
             ),
             (fake_with(&large), "cannot be read: invalid data"),
-            (dangling, "is a link"),
             (link, "is a link"),
+            (dangling, "is a link"),
             (unreadable, "cannot be read: permission denied"),
         ];
         for (fake, reason) in cases {

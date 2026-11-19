@@ -1,20 +1,18 @@
 //! A file that is Marsa's only if its first line is exactly [`MARKER`].
 //!
-//! The Linux ops write small config files in folders that other tools use
-//! too (`/etc/sysctl.d`, `/etc/systemd/resolved.conf.d`). Before the helper
-//! changes or deletes such a file, it reads it here: a file without the
-//! marker belongs to someone else and is never written over or deleted.
-//! Marsa never writes a link, so a link at the path is someone else's too,
-//! whatever its target holds.
-//!
-//! `resolver` (macOS) checks `/etc/resolver/test` here too (task M5-22).
+//! The helper writes small config files in folders that other tools use
+//! too (`/etc/sysctl.d`, `/etc/systemd/resolved.conf.d` on Linux,
+//! `/etc/resolver` on macOS). Before the helper changes or deletes such a
+//! file, it reads it here: a file without the marker belongs to someone
+//! else and is never written over or deleted. Marsa never writes a link, so
+//! a link at the path is someone else's too, whatever its target holds.
 
 use std::io;
 use std::path::Path;
 
 use crate::system::System;
 
-/// The first line of every file the Linux ops write.
+/// The first line of every config file the helper writes.
 pub const MARKER: &str = "# Managed by Marsa. Do not edit.";
 /// The largest file read. Marsa's files are far smaller, so a larger one
 /// counts as foreign.
