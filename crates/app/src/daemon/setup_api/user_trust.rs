@@ -1262,7 +1262,13 @@ mod tests {
     #[test]
     fn a_record_that_cannot_be_read_is_unusable_and_stays() {
         let fake = Fake::answering(|program, args| panic!("{program} {args:?} ran"));
-        for (ca, record) in [(Some(TEST_CA), "garbage"), (None, "garbage")] {
+        // Half a certificate, with no END line, is not one either (M5-22).
+        let half = &TEST_CA[..TEST_CA.len() / 2];
+        for (ca, record) in [
+            (Some(TEST_CA), "garbage"),
+            (None, "garbage"),
+            (Some(TEST_CA), half),
+        ] {
             let data = Data::new(ca, Some(record));
             let refused = data.remove(&fake);
             assert_eq!(refused.code.as_deref(), Some(TRUST_RECORD_UNUSABLE));

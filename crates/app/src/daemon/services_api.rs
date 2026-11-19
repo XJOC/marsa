@@ -3,12 +3,13 @@
 //!
 //! | Route | Answer |
 //! | --- | --- |
-//! | `GET /v1/services` | `Vec<ServiceStatus>`: Caddy, PostgreSQL when installed, then each pool |
+//! | `GET /v1/services` | `Vec<ServiceStatus>`: Caddy, `dns`, PostgreSQL when installed, then each pool |
 //! | `POST /v1/services/{id}/{action}` | `ServiceStatus` after the action |
 //! | `GET /v1/logs/{id}` | `Vec<LogLine>`, the recent lines |
 //! | `GET /v1/logs/{id}?follow=true` | SSE: the recent lines, then new ones |
 //!
-//! The services are `caddy` and each php-fpm pool started in this run
+//! The services are `caddy`, `dns` on macOS and Linux (the daemon's own DNS
+//! server, task M4-18i), and each php-fpm pool started in this run
 //! (`php-fpm-8.4`). The sites sync starts and stops the pools, so an action
 //! on a pool is `409 service_managed_by_sites`.
 //!
@@ -48,6 +49,7 @@ use tokio_stream::{Stream, StreamExt as _};
 use super::api::HttpError;
 use super::caddy::{ActionError, CADDY_ID, CaddyManager};
 use super::databases::{self, POSTGRES_ID, PostgresManager};
+use super::dns::{DNS_ID, DnsService};
 use super::state::Daemon;
 use super::supervisor::{ServiceRuntime, lock};
 
@@ -86,6 +88,7 @@ pub fn routes() -> Router<Arc<Daemon>> {
 
 async fn services(State(daemon): State<Arc<Daemon>>) -> Json<Vec<ServiceStatus>> {
     let mut services = vec![daemon.caddy.status()];
+    services.extend(daemon.dns.status());
     // It reads `runtimes/postgres/`.
     let worker = Arc::clone(&daemon);
     let listed = tokio::task::spawn_blocking(move || worker.postgres.listed(&worker.data_dir));
@@ -107,6 +110,12 @@ async fn service_action(
     })?;
     if let Service::Postgres(_) = service {
         return postgres_action(&daemon, action).await.map(Json);
+    }
+    if let Service::Dns(dns) = service {
+        tracing::info!(service = %id, %action, "service action");
+        return Ok(Json(
+            dns.run(&daemon.events, &daemon.shutdown, action).await,
+        ));
     }
     let Service::Caddy(caddy) = service else {
         let message = format!(
@@ -259,6 +268,8 @@ enum Service<'a> {
     /// Known whether or not a version is installed: an action then says
     /// `postgres_not_installed`.
     Postgres(&'a PostgresManager),
+    /// The DNS server for `.test`, inside the daemon.
+    Dns(&'a DnsService),
     /// A php-fpm pool: the routes only read it.
     Pool(Arc<Mutex<ServiceRuntime>>),
 }
@@ -269,6 +280,7 @@ impl Service<'_> {
         match self {
             Service::Caddy(caddy) => caddy.recent_logs(),
             Service::Postgres(postgres) => postgres.recent_logs(),
+            Service::Dns(dns) => dns.recent_logs(),
             Service::Pool(runtime) => lock(runtime).logs.recent(),
         }
     }
@@ -281,6 +293,9 @@ fn service<'a>(daemon: &'a Daemon, id: &str) -> Result<Service<'a>, HttpError> {
     }
     if id == POSTGRES_ID {
         return Ok(Service::Postgres(&daemon.postgres));
+    }
+    if id == DNS_ID && daemon.dns.listed() {
+        return Ok(Service::Dns(&daemon.dns));
     }
     if let Some(runtime) = daemon.pools.find(id) {
         return Ok(Service::Pool(runtime));
@@ -566,5 +581,73 @@ mod tests {
         assert!(!config::load_global(&global).unwrap().postgres.enabled);
         let (status, body) = send("POST", "/v1/services/postgres/kill").await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_held_dns_port_is_listed_as_failed_and_a_start_tries_again() {
+        use crate::daemon::api::router;
+        use crate::daemon::auth::AuthConfig;
+        use crate::daemon::dns::DNS_PORT_IN_USE;
+        use axum::http::Request;
+        use marsa_core::platform::daemon_file::{Token, daemon_authority};
+        use marsa_core::types::ServiceState;
+        use tower::ServiceExt as _;
+
+        const PORT: u16 = 51237;
+        let token = Token::generate().unwrap();
+        let bearer = token.bearer_header();
+        let held = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut daemon = Daemon::new(std::path::PathBuf::new());
+        daemon.dns = DnsService::new(Some(held.local_addr().unwrap()));
+        let daemon = Arc::new(daemon);
+        daemon
+            .dns
+            .run(&daemon.events, &daemon.shutdown, ServiceAction::Start)
+            .await;
+        let app = router(daemon.clone(), AuthConfig::new(Arc::new(token), PORT));
+        let send = async |method: &str, path: &str| {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", daemon_authority(PORT))
+                .header("authorization", &bearer)
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            (response.status(), text(response).await)
+        };
+        let failed = ServiceState::Failed {
+            code: DNS_PORT_IN_USE.into(),
+        };
+
+        let (status, body) = send("GET", "/v1/services").await;
+        assert_eq!(status, StatusCode::OK);
+        let list: Vec<ServiceStatus> = serde_json::from_str(&body).unwrap();
+        let ids: Vec<_> = list.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["caddy", DNS_ID]);
+        assert_eq!(list[1].state, failed);
+        let (status, body) = send("GET", "/v1/logs/dns").await;
+        assert_eq!(status, StatusCode::OK);
+        let lines: Vec<LogLine> = serde_json::from_str(&body).unwrap();
+        assert!(lines[0].text.contains("cannot bind UDP"), "{lines:?}");
+
+        // Still held: the start fails again, with the same code.
+        let (status, body) = send("POST", "/v1/services/dns/start").await;
+        assert_eq!(status, StatusCode::OK);
+        let after: ServiceStatus = serde_json::from_str(&body).unwrap();
+        assert_eq!(after.state, failed);
+        drop(held);
+        let (_, body) = send("POST", "/v1/services/dns/start").await;
+        let after: ServiceStatus = serde_json::from_str(&body).unwrap();
+        assert_eq!(after.state, ServiceState::Running);
+        daemon.dns.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn no_dns_service_where_it_is_not_used() {
+        let daemon = Arc::new(Daemon::new(std::path::PathBuf::new()));
+        let Json(list) = services(State(daemon.clone())).await;
+        assert!(list.iter().all(|s| s.id != DNS_ID));
+        assert!(service(&daemon, DNS_ID).is_err());
     }
 }
