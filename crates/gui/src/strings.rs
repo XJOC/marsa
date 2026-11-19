@@ -586,6 +586,8 @@ pub const TRAY_AUTOSTART: &str = "Start at Login";
 /// A login file is there, but it starts another `marsa-tray` (the app
 /// moved): a click writes it again.
 pub const TRAY_AUTOSTART_STALE: &str = "Start at Login (outdated, click to fix)";
+/// The line of the menu where the sites would be.
+pub const TRAY_NO_SITES: &str = "No sites yet";
 pub const TRAY_STOP: &str = "Stop Marsa";
 pub const TRAY_START: &str = "Start Marsa";
 /// Closes the icon only; the daemon and the sites keep running.
