@@ -15,9 +15,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, UiBuilder, Vec2, vec2};
+use eframe::egui::{self, Pos2, UiBuilder, Vec2, vec2};
 
 use super::PanelExit;
+use super::place::Anchor;
 use crate::app::{open_site, take_updates};
 use crate::bridge;
 use crate::model::{Connection, Model};
@@ -37,22 +38,38 @@ const FIT_LIMIT: Duration = Duration::from_millis(400);
 const FOCUS_LIMIT: Duration = Duration::from_secs(3);
 /// A size that differs by less than a point is the same: the system rounds.
 const SAME_SIZE: f32 = theme::UNIT;
+/// How often the window is asked for the same place before the panel takes
+/// it that the system keeps it elsewhere (a window may not cover the menu bar,
+/// or the system moves it) and draws where it is.
+const MOST_MOVES: u8 = 4;
 
 /// The options of the panel's window: borderless and transparent, the corners
 /// are the panel's own; always on top; no entry in the taskbar. The system's
-/// shadow follows the shape on macOS.
-pub fn options(start: Vec2) -> eframe::NativeOptions {
+/// shadow follows the shape on macOS. With an `anchor`, the window is created
+/// under the icon, in points of the icon's monitor; without, the system
+/// places it.
+pub fn options(start: Vec2, anchor: Option<&Anchor>) -> eframe::NativeOptions {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(strings::PANEL_NAME)
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_resizable(false)
+        .with_has_shadow(true)
+        .with_inner_size(start)
+        .with_window_level(egui::WindowLevel::AlwaysOnTop)
+        .with_taskbar(false)
+        .with_active(true);
+    if let Some(anchor) = anchor {
+        let scale = anchor.scale;
+        let at = anchor.place(
+            start * scale,
+            theme::SIZE.panel_gap * scale,
+            theme::SIZE.panel_edge * scale,
+        );
+        viewport = viewport.with_position((at.to_vec2() / scale).to_pos2());
+    }
     eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(strings::PANEL_NAME)
-            .with_decorations(false)
-            .with_transparent(true)
-            .with_resizable(false)
-            .with_has_shadow(true)
-            .with_inner_size(start)
-            .with_window_level(egui::WindowLevel::AlwaysOnTop)
-            .with_taskbar(false)
-            .with_active(true),
+        viewport,
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     }
@@ -78,6 +95,11 @@ pub fn is_ready(model: &Model) -> bool {
 /// Whether two sizes are the same one: the system rounds to whole pixels.
 pub fn same_size(a: Vec2, b: Vec2) -> bool {
     (a.x - b.x).abs() < SAME_SIZE && (a.y - b.y).abs() < SAME_SIZE
+}
+
+/// Whether two places are the same one, to the pixel.
+pub fn same_place(a: Pos2, b: Pos2) -> bool {
+    same_size(a.to_vec2(), b.to_vec2())
 }
 
 /// Watches the focus: a panel that had it and lost it closes (a click
@@ -142,6 +164,10 @@ pub struct PanelApp {
     opened: Instant,
     /// The size last asked of the window.
     asked: Option<Vec2>,
+    /// Where the icon is, if the tray said.
+    anchor: Option<Anchor>,
+    /// The place last asked of the window, and how many times.
+    moved: Option<(Pos2, u8)>,
     focus: Focus,
     /// Set until the first frame, to log the time it took.
     started: Option<Instant>,
@@ -158,6 +184,7 @@ impl PanelApp {
         data_dir: PathBuf,
         started: Instant,
         exit: Arc<AtomicU8>,
+        anchor: Option<Anchor>,
     ) -> Self {
         theme::style::apply(ctx);
         // The same appearance as the window; the panel only reads it.
@@ -189,6 +216,8 @@ impl PanelApp {
             stage: Stage::Waiting,
             opened,
             asked: None,
+            anchor,
+            moved: None,
             focus: Focus::new(opened, watching),
             started: Some(started),
             #[cfg(debug_assertions)]
@@ -227,6 +256,44 @@ impl PanelApp {
                 }
             }
         }
+    }
+
+    /// What the panel may be high, in points: the room under (or over, or
+    /// beside) the icon on its monitor. No anchor, no limit.
+    fn room(&self, ctx: &egui::Context) -> f32 {
+        let scale = ctx.pixels_per_point();
+        self.anchor.map_or(f32::INFINITY, |anchor| {
+            let (gap, edge) = (theme::SIZE.panel_gap, theme::SIZE.panel_edge);
+            anchor.max_height(gap * scale, edge * scale) / scale
+        })
+    }
+
+    /// Asks the window for its place under the icon, for a panel `size`
+    /// big. Returns whether it is there (or the system keeps it elsewhere).
+    fn place(&mut self, ctx: &egui::Context, size: Vec2) -> bool {
+        let Some(anchor) = self.anchor else {
+            return true;
+        };
+        // The anchor is in physical pixels; the window's commands are in the
+        // points of its own monitor, and the system turns them back with the
+        // same scale.
+        let scale = ctx.pixels_per_point();
+        let (gap, edge) = (theme::SIZE.panel_gap, theme::SIZE.panel_edge);
+        let at = anchor.place(size * scale, gap * scale, edge * scale) / scale;
+        let have = ctx.input(|input| input.viewport().outer_rect.map(|rect| rect.min));
+        if have.is_some_and(|have| same_place(have, at)) {
+            return true;
+        }
+        let tries = match self.moved {
+            Some((last, tries)) if same_place(last, at) => tries,
+            _ => 0,
+        };
+        if tries >= MOST_MOVES {
+            return true;
+        }
+        self.moved = Some((at, tries + 1));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(at));
+        false
     }
 
     /// Asks the window for `want` if it has another size. Returns whether it
@@ -296,12 +363,32 @@ impl eframe::App for PanelApp {
             builder = builder.invisible();
         }
         let mut child = ui.new_child(builder);
-        let actions = screen::show(&mut child, &view, theme);
-        let content = child.min_rect().size();
-        let fits = self.fit(&ctx, vec2(theme.size.panel_width, content.y));
+        let actions = screen::show_limited(&mut child, &view, theme, self.room(&ctx));
+        let size = vec2(theme.size.panel_width, child.min_rect().height());
+        // Both, every frame: the place depends on the size, and either may
+        // change when the daemon answers.
+        let (fits, placed) = (self.fit(&ctx, size), self.place(&ctx, size));
+        let fits = fits && placed;
         match self.stage {
             Stage::Fitting(since) if fits || since.elapsed() >= FIT_LIMIT => {
                 self.stage = Stage::Shown;
+                let (outer, inner, monitor, scale) = ctx.input(|input| {
+                    let viewport = input.viewport();
+                    (
+                        viewport.outer_rect,
+                        viewport.inner_rect,
+                        viewport.monitor_size,
+                        input.pixels_per_point,
+                    )
+                });
+                tracing::debug!(
+                    ?outer,
+                    ?inner,
+                    ?monitor,
+                    scale,
+                    ms = since.elapsed().as_millis(),
+                    "panel placed"
+                );
                 ctx.request_repaint();
             }
             Stage::Fitting(_) => ctx.request_repaint_after(Duration::from_millis(16)),
@@ -398,7 +485,7 @@ mod tests {
 
     #[test]
     fn the_options_ask_for_a_borderless_transparent_window_on_top_with_no_taskbar_entry() {
-        let options = options(start_size());
+        let options = options(start_size(), None);
         let viewport = &options.viewport;
         assert_eq!(viewport.decorations, Some(false));
         assert_eq!(viewport.transparent, Some(true));
@@ -420,6 +507,7 @@ mod tests {
             dir.path().to_path_buf(),
             Instant::now(),
             Arc::clone(&exit),
+            None,
         );
         assert_eq!(exit.load(Ordering::Relaxed), PanelExit::Closed.code());
         app.apply(&ctx, vec![PanelAction::Exit(PanelExit::Quit)]);
@@ -443,6 +531,7 @@ mod tests {
             dir.path().to_path_buf(),
             Instant::now(),
             exit,
+            None,
         );
         app.model.update(Update::Connected(Health {
             app_version: "0.0.0".into(),
