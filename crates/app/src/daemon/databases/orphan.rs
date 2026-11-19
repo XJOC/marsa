@@ -1,5 +1,5 @@
 //! A PostgreSQL that a crashed `marsad` left running (ADR 0023, section 8;
-//! the rules of ADR 0009; task M6-04). macOS and Linux only
+//! the rules of ADR 0009). macOS and Linux only
 //! ([`process::DATABASE_ORPHAN_RECOVERY`]): on Windows the Job Object ends
 //! the servers with the daemon (ADR 0017).
 //!
@@ -32,7 +32,7 @@ use super::Probes;
 
 /// Our old PostgreSQL could not be stopped, or cannot be told from another
 /// program: nothing was started.
-pub const ORPHAN_STUCK: &str = "postgres_orphan_stuck";
+pub(super) const ORPHAN_STUCK: &str = "postgres_orphan_stuck";
 
 /// How often a wait looks again.
 const POLL: Duration = Duration::from_millis(50);
@@ -42,13 +42,13 @@ const PORT_WAIT: Duration = Duration::from_secs(5);
 const KILL_WAIT: Duration = Duration::from_secs(5);
 
 /// `run/postgres.pid` of `data_dir`.
-pub fn pid_path(data_dir: &Path) -> PathBuf {
+pub(super) fn pid_path(data_dir: &Path) -> PathBuf {
     data_dir.join("run").join("postgres.pid")
 }
 
 /// Writes `run/postgres.pid` for our server at `pid`, only when the file it
 /// really runs is one of `servers`.
-pub async fn record(probes: &dyn Probes, data_dir: &Path, servers: &[PathBuf], pid: u32) {
+pub(super) async fn record(probes: &dyn Probes, data_dir: &Path, servers: &[PathBuf], pid: u32) {
     if !process::DATABASE_ORPHAN_RECOVERY {
         return;
     }
@@ -70,7 +70,7 @@ pub async fn record(probes: &dyn Probes, data_dir: &Path, servers: &[PathBuf], p
 }
 
 /// Deletes `run/postgres.pid`: the run it names has ended.
-pub fn forget(data_dir: &Path) {
+pub(super) fn forget(data_dir: &Path) {
     if let Err(err) = process::remove_pid_file(&pid_path(data_dir)) {
         warn!(%err, "cannot delete postgres.pid");
     }
@@ -78,11 +78,11 @@ pub fn forget(data_dir: &Path) {
 
 /// Why the start cannot go on.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Stuck(pub String);
+pub(super) struct Stuck(pub(super) String);
 
 /// What [`clear`] did, for the recent lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Cleared {
+pub(super) enum Cleared {
     /// No file, or the start may go on.
     Nothing,
     /// The file named a process that is gone or another program's now: only
@@ -100,7 +100,7 @@ pub enum Cleared {
 ///
 /// [`Stuck`], with the reason, when the process cannot be told from another
 /// program, or still runs after SIGKILL. Nothing else is signalled then.
-pub async fn clear(
+pub(super) async fn clear(
     probes: &dyn Probes,
     data_dir: &Path,
     servers: &[PathBuf],

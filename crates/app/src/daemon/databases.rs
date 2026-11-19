@@ -478,7 +478,7 @@ pub enum ActionError {
     /// The job that writes `[postgres] enabled` failed (a bug).
     Internal,
     /// Our old PostgreSQL, left by a crashed `marsad`, could not be stopped,
-    /// or cannot be told from another program (task M6-04).
+    /// or cannot be told from another program.
     OrphanStuck(String),
 }
 

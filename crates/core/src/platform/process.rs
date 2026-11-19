@@ -35,7 +35,7 @@ pub const FPM_ORPHAN_RECOVERY: bool = cfg!(target_os = "macos");
 
 /// Whether the daemon looks for a database server that a crashed `marsad`
 /// left running, before it starts one: macOS and Linux (ADR 0023, section
-/// 8). S-12 measured the same orphan on both. Caddy's Linux question
+/// 8): the same orphan was measured on both. Caddy's Linux question
 /// ([`ORPHAN_RECOVERY`]) is a separate one. On Windows the Job Object ends
 /// the servers with the daemon (ADR 0017).
 pub const DATABASE_ORPHAN_RECOVERY: bool = cfg!(any(target_os = "macos", target_os = "linux"));
