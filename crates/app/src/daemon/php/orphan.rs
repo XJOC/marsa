@@ -37,8 +37,9 @@
 //!   made is there. Under pid 1 the executable and the start time prove too
 //!   little: a php-fpm of this data folder that the user started by hand
 //!   sits there as well (ADR 0009, R5e). So a child of pid 1 must also hold
-//!   a listener at this pool's socket path or port (`lsof`). That is a
-//!   filter, not a proof: `lsof` shows who holds a listener there, not who
+//!   a listener at this pool's socket path or port (`lsof` on macOS,
+//!   `/proc` on Linux). That is a filter, not a proof: it shows who holds a
+//!   listener there, not who
 //!   inherited it from our master. A child of pid 1 that passes it gets the
 //!   same two signals after the same checks.
 //! - Anything else is never signalled. A stale file is deleted, and the log
@@ -64,14 +65,26 @@
 //!   very same place: one that bound this pool's socket path itself, or one
 //!   on the TCP fallback port, which is not private to Marsa. Such a
 //!   process gets the signals of a worker.
+//! - Linux: workers under a subreaper that is not an ancestor of this
+//!   daemon are not found. The daemon starts detached, so its ancestors can
+//!   differ from those of the daemon that crashed (started from a terminal
+//!   once, from the tray the next time). The search works and finds
+//!   nothing, so the file goes and php-fpm says that its socket is in use.
+//! - Linux: `/proc/net/unix` prints socket paths as they are, so another
+//!   user can bind a path with a newline that reads as one more line. A
+//!   forged line that repeats a real socket's inode is dropped
+//!   ([`orphan::parse_proc_net_unix`]); one that names the inode of a TCP
+//!   socket of this user may add its holder to the list. That holder still
+//!   needs every check of a worker.
 //!
-//! On Linux (ADR 0025) an orphan goes to its nearest
-//! subreaper, for example `systemd --user`, not always to pid 1. So "pid 1"
-//! above means each of [`process::adopters`]: pid 1 on macOS, and the
-//! ancestors of this daemon up to pid 1 on Linux. A php-fpm of this data
-//! folder that the user started by hand under one of those, on this pool's
-//! socket or port, is the known limit above. The holders of a listener come
-//! from `/proc` there ([`process::listener_holders`]).
+//! On Linux (ADR 0025) an orphan goes to its nearest subreaper, for example
+//! `systemd --user`, not always to pid 1. So "pid 1" above means each of
+//! [`process::adopters`]: pid 1 on macOS, and on Linux the ancestors of this
+//! daemon up to pid 1. Most of those adopt nothing (a shell, the tray);
+//! their children are searched with the same checks, so a php-fpm of this
+//! data folder that the user started by hand under one of them, on this
+//! pool's socket or port, is the known limit above. The holders of a
+//! listener come from `/proc` there ([`process::listener_holders`]).
 //!
 //! php-fpm writes its own `argv[0]` (`php-fpm: master process (...)`), so
 //! `ps` shows no path for it. Identity is the file it really runs instead
@@ -642,8 +655,8 @@ impl Orphans<'_> {
     /// The workers of the master `record` names that pid 1 adopted: the
     /// children of pid 1 (each of [`FpmProcesses::adopters`]) that hold a
     /// listener at this pool's socket path or port and pass
-    /// [`orphan::worker_of`]. The listener is a filter, not a
-    /// proof: `lsof` shows who holds a listener at that path or port, not
+    /// [`orphan::worker_of`]. The listener is a filter, not a proof: the
+    /// list shows who holds a listener at that path or port, not
     /// who inherited it from our master. It is what a php-fpm of this data
     /// folder that the user started by hand fails, as long as it listens
     /// elsewhere (ADR 0009, R5e); the same executable and a later start do
@@ -1935,6 +1948,33 @@ mod tests {
         assert_eq!(run(&pid_file, &fake, &listen).await, Ok(()));
         let want = [(MASTER, Signal::Term), (MASTER, Signal::Kill)];
         assert_eq!(fake.signals(), want);
+    }
+
+    /// One adopter whose children cannot be listed proves nothing about
+    /// the others: no signal at all, and the file stays.
+    #[tokio::test]
+    async fn a_subreaper_whose_children_cannot_be_listed_stops_every_signal() {
+        let (_dir, pid_file) = pid_file_of_ours();
+        let (held, listen) = held_port();
+        const SUBREAPER: u32 = 900;
+        let fake = Fake {
+            subreaper: Some(SUBREAPER),
+            unlisted: vec![SUBREAPER],
+            ..Fake::new([Liveness::Gone])
+        }
+        .with(
+            4301,
+            Proc {
+                ppid: INIT,
+                ..worker(LATER)
+            },
+        )
+        .holding([4301], held);
+        let blocked = run(&pid_file, &fake, &listen).await.unwrap_err();
+        assert_eq!(blocked.code, ORPHAN_STUCK);
+        assert!(blocked.reason.contains("cannot be verified"), "{blocked:?}");
+        assert!(fake.signals().is_empty());
+        assert!(pid_file.path.exists(), "kept for the next try");
     }
 
     #[tokio::test]

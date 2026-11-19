@@ -563,8 +563,10 @@ pub async fn listener_holders(listen: &Dial) -> Option<Vec<u32>> {
 pub async fn listener_holders(listen: &Dial) -> Option<Vec<u32>> {
     let inodes = match listen {
         Dial::Unix(path) => {
-            let table = fs::read_to_string("/proc/net/unix").ok()?;
-            crate::orphan::parse_proc_net_unix(&table, path)
+            use std::os::unix::ffi::OsStrExt as _;
+            // Bytes: another user's socket path may not be UTF-8.
+            let table = fs::read("/proc/net/unix").ok()?;
+            crate::orphan::parse_proc_net_unix(&table, path.as_os_str().as_bytes())
         }
         Dial::Tcp(port) => {
             let table = fs::read_to_string("/proc/net/tcp").ok()?;
@@ -575,6 +577,9 @@ pub async fn listener_holders(listen: &Dial) -> Option<Vec<u32>> {
     if inodes.is_empty() {
         return Some(holders);
     }
+    // If not even this process's files can be read, nobody's can: the list
+    // would say "nobody" without having looked.
+    fs::read_dir("/proc/self/fd").ok()?;
     for entry in fs::read_dir("/proc").ok()? {
         let Ok(entry) = entry else {
             continue;
@@ -609,9 +614,11 @@ pub async fn listener_holders(_listen: &Dial) -> Option<Vec<u32>> {
 /// after its death: on macOS pid 1 (launchd) only. On Linux an orphan goes
 /// to its nearest subreaper, such as `systemd --user`, not always to pid 1
 /// (ADR 0025), and which one cannot be read without `prctl`. So: every
-/// ancestor of this daemon, up to pid 1. An earlier daemon of the same
-/// login had the same ones; pid 1 is always there. A list to search, never
-/// a proof: each child found there is checked like any other.
+/// ancestor of this daemon, up to pid 1, which is always there. The daemon
+/// starts detached, so the daemon that crashed may have had others: its
+/// orphans under a subreaper that is not one of these are not found (a known
+/// limit of `php::orphan`). Never this daemon itself. A list to search,
+/// never a proof: each child found there is checked like any other.
 #[cfg(target_os = "macos")]
 pub async fn adopters() -> Vec<u32> {
     vec![1]
@@ -642,6 +649,9 @@ pub async fn adopters() -> Vec<u32> {
     if !adopters.contains(&1) {
         adopters.push(1);
     }
+    // In a container the daemon may be pid 1 itself.
+    let own = std::process::id();
+    adopters.retain(|pid| *pid != own);
     adopters
 }
 
@@ -978,37 +988,14 @@ mod tests {
         assert_eq!(udp_port_owner(port).await, None);
     }
 
-    /// On the real `/proc`: this process holds a Unix socket
-    /// at a path with a space, and a TCP port; once they close, nobody does.
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn listener_holders_reads_proc_on_linux() {
-        let me = std::process::id();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("php fpm.sock");
-        let unix = Dial::Unix(path.clone());
-        assert_eq!(listener_holders(&unix).await, Some(Vec::new()));
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        assert_eq!(listener_holders(&unix).await, Some(vec![me]));
-        drop(listener);
-        assert_eq!(listener_holders(&unix).await, Some(Vec::new()));
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let tcp = Dial::Tcp(port);
-        assert_eq!(listener_holders(&tcp).await, Some(vec![me]));
-        drop(listener);
-        assert_eq!(listener_holders(&tcp).await, Some(Vec::new()));
-        // A connected socket on the port is no listener: the parser test
-        // covers its line.
-    }
-
     /// Pid 1 always, and on Linux this process's parent first.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn adopters_end_at_pid_1() {
         let adopters = adopters().await;
-        assert_eq!(adopters.last(), Some(&1), "{adopters:?}");
+        if std::process::id() != 1 {
+            assert_eq!(adopters.last(), Some(&1), "{adopters:?}");
+        }
         #[cfg(target_os = "linux")]
         {
             let parent = std::os::unix::process::parent_id();
@@ -1377,8 +1364,9 @@ x       501 Sat Nov 14 13:31:00 2026     /bin/zsh
         assert_eq!(printable_name(" \n"), None);
     }
 
-    // Only macOS lists the holders of a listener (`lsof`).
-    #[cfg(target_os = "macos")]
+    // The systems that list the holders of a listener: `lsof` on macOS,
+    // `/proc` on Linux.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn listener_holders_are_the_processes_with_the_socket_or_port_open() {
         let own = std::process::id();
