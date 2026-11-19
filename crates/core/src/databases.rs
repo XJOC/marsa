@@ -7,7 +7,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::orphan::Liveness;
 use crate::php::MAX_SOCKET_PATH;
+use crate::ports::PortLookup;
 use crate::services::{Signal, StopMethod};
 
 /// PostgreSQL's port when `[postgres] port` is not set in `global.toml`. The
@@ -207,6 +209,9 @@ pub enum PortCheck {
     Busy {
         owner: Option<String>,
     },
+    /// The bind worked, but the look for a listener on every address
+    /// failed: a program there could be missed, so no start.
+    Unknown,
 }
 
 /// The pid that the server's own pid file names, and what runs at it now.
@@ -250,6 +255,10 @@ pub enum ServiceBusy {
     /// Another program (Homebrew, Herd, DBngin, Docker) holds the port.
     #[error("port {port} is in use by {}", .owner.as_deref().unwrap_or("another program"))]
     Port { port: u16, owner: Option<String> },
+    /// Who holds the port could not be checked: `lsof` failed or took too
+    /// long. Not "in use", which may not be true.
+    #[error("could not check who holds port {port}")]
+    PortUnknown { port: u16 },
     /// A running server still uses the data folder.
     #[error("the data folder is in use by a running server (pid {pid})")]
     DataDir { pid: u32 },
@@ -260,6 +269,7 @@ impl ServiceBusy {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Port { .. } => "service_port_busy",
+            Self::PortUnknown { .. } => "service_port_unknown",
             Self::DataDir { .. } => "service_data_dir_busy",
         }
     }
@@ -270,7 +280,8 @@ impl ServiceBusy {
 /// 1. The pid file names a running server: `service_data_dir_busy`, even if
 ///    it holds the port too, because that is the exact reason. M6-04 later
 ///    recovers it when it is our own orphan.
-/// 2. Another program holds the port: `service_port_busy`.
+/// 2. Another program holds the port: `service_port_busy`. Or who holds it
+///    could not be checked: `service_port_unknown`.
 /// 3. Otherwise start. PostgreSQL checks its pid file again: it starts over a
 ///    stale one, but refuses while the pid is alive and runs as the same
 ///    user, even as another program ([`PidFileCheck::Other`]; M6-04).
@@ -291,12 +302,54 @@ pub fn decide_start(facts: &StartFacts) -> StartDecision {
         | PidFileCheck::Other { .. }
         | PidFileCheck::Unknown { .. } => {}
     }
+    let port = facts.port;
     match &facts.port_check {
         PortCheck::Free => StartDecision::Start,
         PortCheck::Busy { owner } => StartDecision::Refuse(ServiceBusy::Port {
-            port: facts.port,
+            port,
             owner: owner.clone(),
         }),
+        PortCheck::Unknown => StartDecision::Refuse(ServiceBusy::PortUnknown { port }),
+    }
+}
+
+/// [`PortCheck`] from the daemon's two looks at the port. Busy if either
+/// says so; [`PortCheck::Unknown`], which refuses too, if the bind worked
+/// and the look failed:
+///
+/// - `bound`: a bind to `127.0.0.1:<port>` worked. Alone it misses a program
+///   on `*:<port>` on macOS: std's bind sets `SO_REUSEADDR`, and there that
+///   lets a bind to one address share the port with a listener on all of
+///   them (Docker, for one).
+/// - `lookup`: who listens on the port, on any address, as `lsof` names it
+///   (macOS). Any owner means busy. A failed look fails closed.
+///   Linux does not look, and there the bind already fails next to a
+///   listener on all addresses.
+pub fn port_check(bound: bool, lookup: PortLookup) -> PortCheck {
+    match (bound, lookup) {
+        (_, PortLookup::Owner(owner)) => PortCheck::Busy { owner: Some(owner) },
+        (true, PortLookup::Nobody | PortLookup::NotChecked) => PortCheck::Free,
+        (true, PortLookup::Failed) => PortCheck::Unknown,
+        (false, _) => PortCheck::Busy { owner: None },
+    }
+}
+
+/// [`PidFileCheck`] of `pid`, the pid in `postmaster.pid`, from `now`: what
+/// the OS says runs there by the file the process really runs
+/// (`process::real_identity`), because postgres rewrites its own argv
+/// (`postgres: checkpointer`). `servers` holds `bin/postgres` of every
+/// installed PostgreSQL version, and the resolved form of each.
+///
+/// - Gone: [`PidFileCheck::Dead`], a stale file.
+/// - Cannot be told: [`PidFileCheck::Unknown`].
+/// - One of `servers`: [`PidFileCheck::Server`].
+/// - Any other program: [`PidFileCheck::Other`], a pid reused since.
+pub fn classify_postmaster(pid: u32, now: &Liveness, servers: &[PathBuf]) -> PidFileCheck {
+    match now {
+        Liveness::Gone => PidFileCheck::Dead { pid },
+        Liveness::Unknown => PidFileCheck::Unknown { pid },
+        Liveness::Alive { exe, .. } if servers.contains(exe) => PidFileCheck::Server { pid },
+        Liveness::Alive { .. } => PidFileCheck::Other { pid },
     }
 }
 
@@ -489,6 +542,9 @@ mod tests {
         let signals: Vec<_> = steps.iter().map(signal).collect();
         assert_eq!(signals, [(Signal::Int, 10), (Signal::Quit, 10)]);
         assert!(signals.iter().all(|(signal, _)| *signal != Signal::Term));
+        // Longer than the daemon's 10 s for its processes at shutdown: the
+        // supervisor's handle carries this, so the shutdown waits for it.
+        assert_eq!(postgres_stop().total_wait(), Duration::from_secs(20));
     }
 
     #[test]
@@ -530,7 +586,17 @@ mod tests {
             assert_eq!(herd, refuse_port(Some("Herd")));
             assert_eq!(decide(&busy(None), pid_file), refuse_port(None));
         }
-        for port_check in [PortCheck::Free, busy(Some("postgres")), busy(None)] {
+        let unknown = StartDecision::Refuse(ServiceBusy::PortUnknown { port: 5433 });
+        for pid_file in [NoPid, Dead { pid: 7 }, Other { pid: 7 }, Unknown { pid: 7 }] {
+            assert_eq!(decide(&PortCheck::Unknown, pid_file), unknown);
+        }
+        let checks = [
+            PortCheck::Free,
+            busy(Some("postgres")),
+            busy(None),
+            PortCheck::Unknown,
+        ];
+        for port_check in checks {
             assert_eq!(decide(&port_check, Server { pid: 7 }), data_dir_busy);
         }
     }
@@ -549,5 +615,61 @@ mod tests {
         let data = ServiceBusy::DataDir { pid: 7 };
         assert_eq!(data.code(), "service_data_dir_busy");
         assert!(data.to_string().contains("pid 7"), "{data}");
+        let unknown = ServiceBusy::PortUnknown { port: 5432 };
+        assert_eq!(unknown.code(), "service_port_unknown");
+        assert_eq!(unknown.to_string(), "could not check who holds port 5432");
+    }
+
+    #[test]
+    fn a_port_is_free_only_when_the_bind_works_and_nobody_listens() {
+        let docker = || PortLookup::Owner("com.docker.backend(77)".to_owned());
+        assert_eq!(port_check(true, PortLookup::Nobody), PortCheck::Free);
+        // Linux: no look, and the bind decides.
+        assert_eq!(port_check(true, PortLookup::NotChecked), PortCheck::Free);
+        // macOS: our bind works next to Docker on `*:5432`, but lsof sees it.
+        let owner = Some("com.docker.backend(77)".to_owned());
+        let busy_docker = PortCheck::Busy { owner };
+        assert_eq!(port_check(true, docker()), busy_docker);
+        assert_eq!(port_check(false, docker()), busy_docker);
+        // The bind fails: busy, owner unknown.
+        let busy = PortCheck::Busy { owner: None };
+        for lookup in [
+            PortLookup::Nobody,
+            PortLookup::NotChecked,
+            PortLookup::Failed,
+        ] {
+            assert_eq!(port_check(false, lookup), busy);
+        }
+        // The bind works, but lsof cannot tell: not free either.
+        assert_eq!(port_check(true, PortLookup::Failed), PortCheck::Unknown);
+    }
+
+    #[test]
+    fn the_postmaster_pid_is_ours_only_when_it_runs_an_installed_postgres() {
+        let servers = [
+            PathBuf::from("/m/runtimes/postgres/17.12.0/bin/postgres"),
+            PathBuf::from("/m/runtimes/postgres/18.7.0/bin/postgres"),
+        ];
+        let alive = |exe: &str| Liveness::Alive {
+            exe: exe.into(),
+            started: "Wed Nov 18 10:00:00 2026".into(),
+        };
+        let classify = |now: &Liveness| classify_postmaster(4242, now, &servers);
+        let pid = 4242;
+        // Any installed version: an older one may still run on the folder.
+        for exe in &servers {
+            let now = alive(&exe.display().to_string());
+            assert_eq!(classify(&now), PidFileCheck::Server { pid });
+        }
+        // Another PostgreSQL (Homebrew), or the pid reused by another program.
+        for exe in [
+            "/opt/homebrew/opt/postgresql@18/bin/postgres",
+            "/Applications/Safari.app/Contents/MacOS/Safari",
+            "/m/runtimes/postgres/18.7.0/bin/initdb",
+        ] {
+            assert_eq!(classify(&alive(exe)), PidFileCheck::Other { pid });
+        }
+        assert_eq!(classify(&Liveness::Gone), PidFileCheck::Dead { pid });
+        assert_eq!(classify(&Liveness::Unknown), PidFileCheck::Unknown { pid });
     }
 }

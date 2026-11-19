@@ -45,6 +45,21 @@ pub struct Listener {
     pub pid: Option<u32>,
 }
 
+/// What a look for the program that listens on a TCP port, on any address,
+/// found (`platform::process::port_lookup`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortLookup {
+    /// `lsof` ran and found no listener.
+    Nobody,
+    /// `lsof` found one: `name(pid)`, for messages.
+    Owner(String),
+    /// `lsof` failed, took too long, or said something else: a caller that
+    /// guards the port treats it as busy.
+    Failed,
+    /// No look on this system (Linux, Windows): the bind test alone decides.
+    NotChecked,
+}
+
 /// The user and the program of one process, from `ps`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessInfo {

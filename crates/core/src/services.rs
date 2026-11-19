@@ -114,6 +114,12 @@ impl StopMethod {
             steps: steps.into_iter().map(step).collect(),
         }
     }
+
+    /// The longest the steps wait before the kill: all their limits added up.
+    pub fn total_wait(&self) -> Duration {
+        let add = |total: Duration, step: &StopStep| total.saturating_add(step.wait);
+        self.steps.iter().fold(Duration::ZERO, add)
+    }
 }
 
 /// A relative `program`: `marsad` never searches `PATH`.
@@ -241,6 +247,11 @@ mod tests {
         let want = [step(Signal::Int, 10_000), step(Signal::Quit, 2000)];
         assert_eq!(ladder.steps, want);
         assert_eq!(Signal::Quit.name(), "SIGQUIT");
+        assert_eq!(ladder.total_wait(), 12_000 * MS);
+        assert_eq!(StopMethod::term(2000 * MS).total_wait(), 2000 * MS);
+        assert_eq!(StopMethod::signals([]).total_wait(), Duration::ZERO);
+        let endless = StopMethod::signals([(Signal::Int, Duration::MAX), (Signal::Quit, MS)]);
+        assert_eq!(endless.total_wait(), Duration::MAX);
     }
 
     #[test]

@@ -245,13 +245,20 @@ impl Daemon {
     }
 
     /// Stops every managed process: cancels all tokens in id order, then waits
-    /// for the tasks, at most `limit` in total. Tasks still running then are
-    /// aborted, which drops their `Child`.
+    /// for the tasks, at most `limit` in total, or the longest
+    /// [`ServiceHandle::stop_limit`] if that is longer: the processes stop
+    /// side by side, and each gets the time its own stop method needs.
+    /// PostgreSQL's SIGINT and SIGQUIT take up to 20 s (task M6-03). Tasks
+    /// still running then are aborted, which drops their `Child`.
     pub async fn stop_procs(&self, limit: Duration) {
         let procs = std::mem::take(&mut *self.lock_procs());
         for handle in procs.values() {
             handle.cancel.cancel();
         }
+        let limit = procs
+            .values()
+            .map(|h| h.stop_limit)
+            .fold(limit, Duration::max);
         let aborts: Vec<_> = procs.values().map(|h| h.task.abort_handle()).collect();
         let wait = async {
             for (id, handle) in procs {
@@ -300,6 +307,7 @@ mod tests {
             cancel,
             task,
             runtime,
+            stop_limit: Duration::ZERO,
         }
     }
 

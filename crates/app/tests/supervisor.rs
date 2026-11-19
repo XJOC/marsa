@@ -311,3 +311,34 @@ async fn the_postgres_ladder_ends_in_a_kill_after_each_wait() {
     let want = ["fake ready", "fake got SIGINT", "fake got SIGQUIT"];
     assert_eq!(fake_texts(&events), want);
 }
+
+/// The daemon's shutdown gives each process the time its own stop method
+/// needs, even past the limit it was given: `marsad` gives its processes
+/// 10 s, and PostgreSQL's ladder takes 20 s. Before task M6-03 the shutdown
+/// aborted the task at its limit, so SIGQUIT never came.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_daemon_shutdown_waits_for_the_whole_ladder() {
+    use marsa::daemon::state::Daemon;
+    use marsa::daemon::supervisor::STOP_MARGIN;
+
+    let ladder = postgres_ladder(GRACE);
+    let (handle, mut rx, _logs) = start_with("deaf", RestartPolicy::Never, ladder);
+    assert_eq!(handle.stop_limit, 2 * GRACE + STOP_MARGIN);
+    ready(&handle).await;
+    let data = tempfile::tempdir().expect("a temp folder");
+    let daemon = Daemon::new(data.path().to_path_buf());
+    daemon.add_proc("deaf", handle);
+
+    // Shorter than the ladder, as `marsad`'s 10 s are shorter than 20 s.
+    let started = Instant::now();
+    daemon.stop_procs(GRACE / 5).await;
+    assert!(started.elapsed() >= 2 * GRACE, "{:?}", started.elapsed());
+
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let want = ["fake ready", "fake got SIGINT", "fake got SIGQUIT"];
+    assert_eq!(fake_texts(&events), want);
+    // The supervisor ended the stop itself: an aborted task says nothing.
+    let changes = states(&events);
+    assert_eq!(changes.last(), Some(&ServiceState::Stopped), "{changes:?}");
+}
