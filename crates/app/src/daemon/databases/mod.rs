@@ -75,27 +75,35 @@ mod tests {
 
     use marsa_core::config::{self, ConfigPaths, ServerSettings};
     use marsa_core::databases::{
-        PG_HBA_CONF, PidFileCheck, PortCheck, ROOT_ROLE_SQL, ServiceBusy, StartDecision,
-        decide_start, initdb_args, single_user_args,
+        PidFileCheck, PortCheck, ServiceBusy, StartDecision, decide_start,
     };
     use marsa_core::orphan::Liveness;
     use marsa_core::platform::process::{self, Signal};
     use marsa_core::ports::PortLookup;
     use marsa_core::recipes::Platform;
     use marsa_core::runtimes::{Runtime, RuntimesDir};
-    use marsa_core::services::StopMethod;
-    use marsa_core::types::{ServiceAction, ServiceState, ServiceStatus};
+    use marsa_core::types::ServiceState;
     use semver::Version;
-    use tokio::io::AsyncWriteExt as _;
 
     use super::facts::{Probes, start_facts};
-    use super::init::{Programs, ensure_cluster, installed_servers, programs};
-    use super::manager::SSL_REQUEST;
+    use super::init::{installed_servers, programs};
     use super::settings::{after_install, first_install};
     use crate::daemon::caddy::Launched;
     use crate::daemon::caddy::orphan::BoxFuture;
     use crate::daemon::state::Daemon;
-    use crate::daemon::supervisor::lock;
+
+    // Only the `server` and `init` modules below use these, and they run
+    // fake programs through shell scripts, so on Unix only.
+    #[cfg(unix)]
+    use {
+        super::init::{Programs, ensure_cluster},
+        super::manager::SSL_REQUEST,
+        crate::daemon::supervisor::lock,
+        marsa_core::databases::{PG_HBA_CONF, ROOT_ROLE_SQL, initdb_args, single_user_args},
+        marsa_core::services::StopMethod,
+        marsa_core::types::{ServiceAction, ServiceStatus},
+        tokio::io::AsyncWriteExt as _,
+    };
 
     /// Answers what it was given, and keeps the pids it was asked about.
     #[derive(Debug)]
