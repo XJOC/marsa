@@ -1,6 +1,6 @@
 //! The window's own preferences, in `<app data>/config/gui.toml`: the
 //! appearance (System, Light, Dark) and the size the window had when it
-//! closed (task M5-D9).
+//! closed.
 //!
 //! This is the window's state, not Marsa's: no other program reads the file,
 //! and only `marsa-gui` writes it (AGENTS.md section 9). The file is read once
@@ -78,7 +78,7 @@ pub struct WindowSize {
 
 impl WindowSize {
     /// The size `size` rounds to, kept between the smallest window and
-    /// [`MAX_SIDE`]. Not-a-number gives the smallest.
+    /// `MAX_SIDE`. Not-a-number gives the smallest.
     pub fn of(size: Vec2) -> Self {
         let min = theme::SIZE.window_min;
         // `NaN.clamp(..)` is still NaN, and `NaN as u32` is 0.

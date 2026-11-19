@@ -111,7 +111,7 @@ fn args(dir: &Path, rest: &[&str]) -> Vec<OsString> {
     args
 }
 
-pub(super) fn list_args(dir: &Path, nickname: &str) -> Vec<OsString> {
+fn list_args(dir: &Path, nickname: &str) -> Vec<OsString> {
     args(dir, &["-L", "-n", nickname, "-a"])
 }
 

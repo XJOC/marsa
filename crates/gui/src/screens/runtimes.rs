@@ -1,4 +1,4 @@
-//! Runtimes (layout.md, Screens; task M5-D8): one screen for every runtime.
+//! Runtimes (layout.md, Screens): one screen for every runtime.
 //! A list of runtimes on the start side, each with its tile; the details of
 //! the chosen one: its default version on the large version buttons, the
 //! Installed table with the sites that run each version and a menu (⋯) for
@@ -862,7 +862,7 @@ mod tests {
             .filter(|r| kind_for(r.dir_name()).listed())
             .collect();
         assert_eq!(listed, want);
-        // The engines belong under Databases and Services (task M6-01).
+        // The engines belong under Databases and Services.
         assert!(!listed.contains(&Runtime::Postgres));
     }
 
@@ -1323,7 +1323,7 @@ mod tests {
 
     // -- a runtime core does not have yet --
 
-    /// Task M5-D8: a runtime that core adds later (Python, Go)
+    /// a runtime that core adds later (Python, Go)
     /// is in the list, with its details and its install dialog, and no line
     /// of this screen changes. `Runtime::Composer` and `Runtime::Node` stand
     /// in for the keys of variants that do not exist yet, so the fakes have

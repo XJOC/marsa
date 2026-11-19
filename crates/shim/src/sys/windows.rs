@@ -3,8 +3,7 @@
 //! (architecture.md section 7).
 //!
 //! The shim's only `unsafe` code is here: Win32 features that std does not
-//! wrap, the console's Ctrl+C handler and a Job Object (AGENTS.md section 6,
-//! task M1-07).
+//! wrap, the console's Ctrl+C handler and a Job Object (AGENTS.md section 6).
 
 use std::env;
 use std::ffi::OsStr;

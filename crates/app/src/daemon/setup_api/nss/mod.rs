@@ -59,9 +59,9 @@
 //! message. No `certutil` at all is not a failure: the step is skipped as
 //! `nss_tool_missing`. The whole step stays under [`NSS_BUDGET`].
 //!
-//! The files: [`databases`] finds the databases and checks every folder and
-//! file on the way; [`certutil`] runs `certutil` and reads its output;
-//! [`record`] keeps the fingerprints; this one decides what to run for each
+//! The files: `databases` finds the databases and checks every folder and
+//! file on the way; `certutil` runs `certutil` and reads its output;
+//! `record` keeps the fingerprints; this one decides what to run for each
 //! database.
 
 mod certutil;
@@ -232,7 +232,7 @@ struct Ours {
 
 /// Why one database did not take the certificate.
 #[derive(Debug)]
-pub(super) enum Failure {
+enum Failure {
     /// `certutil` is not there: no database can take it.
     ToolMissing,
     Other(String),

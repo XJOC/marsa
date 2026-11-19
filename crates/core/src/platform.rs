@@ -25,7 +25,7 @@ pub use browser::{OpenError, open_url};
 ///   ends, even after a crash or "End task" (ADR 0017).
 /// - macOS and Linux: nothing to do here. A child of a crashed daemon stays;
 ///   the next daemon finds an orphan Caddy (ADR 0009 and 0025,
-///   `process::CADDY_ORPHAN_RECOVERY`), and on macOS an orphan php-fpm too
+///   `process::CADDY_ORPHAN_RECOVERY`), and an orphan php-fpm too
 ///   (`process::FPM_ORPHAN_RECOVERY`).
 ///
 /// # Errors

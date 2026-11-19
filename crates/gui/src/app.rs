@@ -23,7 +23,7 @@ use crate::{opener, shell, strings, theme};
 pub struct App {
     model: Model,
     bridge: bridge::Handle,
-    /// The window's own preferences, as `gui.toml` holds them (task M5-D9).
+    /// The window's own preferences, as `gui.toml` holds them.
     prefs: Prefs,
     /// Where `gui.toml` is.
     prefs_path: PathBuf,

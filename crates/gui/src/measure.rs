@@ -1,4 +1,4 @@
-//! Measurement mode (task M5-D10): fills the window with made-up data and
+//! Measurement mode: fills the window with made-up data and
 //! counts its frames, so the memory, the idle cost, and the frame time of a
 //! long list can be measured on a release build with no daemon. It is built
 //! only with the cargo feature `measure`, which is off by default, so a

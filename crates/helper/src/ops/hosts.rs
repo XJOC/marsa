@@ -1,7 +1,6 @@
 //! Marsa's block in the hosts file, one `127.0.0.1 <name>` line per site:
 //! on Windows (ADR 0018), and on Linux where systemd is older than 250 and
-//! systemd-networkd runs, so `marsa0` cannot be used (ADR 0014, task
-//! M4-18k). The hosts file has no wildcards, so the block changes with every
+//! systemd-networkd runs, so `marsa0` cannot be used (ADR 0014). The hosts file has no wildcards, so the block changes with every
 //! new site.
 //!
 //! The file belongs to the user and to other tools too. The helper changes
@@ -655,7 +654,7 @@ mod tests {
                                 ip6-localhost ip6-loopback\n";
 
     /// Linux: `/etc/hosts`, LF line endings, every other byte kept, and a
-    /// request runs both ops (task M4-18k).
+    /// request runs both ops.
     #[test]
     fn on_linux_the_block_goes_into_etc_hosts_with_lf() {
         let fake = FakeSystem::default();
