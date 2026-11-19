@@ -4,8 +4,7 @@
 //! sentence that repeats the verb of the action ("Unlinked shop."), and at
 //! most one action ("Undo", "Show log"). A success closes by itself after 4
 //! seconds; an error stays until the user closes it. A sentence too long for
-//! one line wraps, and the bar grows with it, so no message is cut (task
-//! M5-D9).
+//! one line wraps, and the bar grows with it, so no message is cut.
 //!
 //! [`Notices`] is the queue with that timing. It takes the time from the
 //! caller, so a test moves the clock by hand and a screen passes
@@ -288,7 +287,7 @@ impl<'a> NoticeBar<'a> {
     }
 
     /// How many lines the sentence takes in a bar `available` wide. A notice
-    /// is at most two (task M5-D9): the words that explain more belong to
+    /// is at most two: the words that explain more belong to
     /// the screen.
     pub fn lines(&self, ui: &Ui, available: f32) -> usize {
         let theme = Theme::of(ui.ctx());

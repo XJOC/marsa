@@ -1,6 +1,6 @@
 //! Buttons (components.md, Buttons): primary, secondary, danger, quiet, and
 //! icon. One struct with a builder: `ui.add(Button::primary("Add site…"))`.
-//! [Laravel: a Blade component with props; `->disabled('why')` is a prop.]
+//! (Laravel: a Blade component with props; `->disabled('why')` is a prop.)
 //!
 //! Every state is drawn here and nowhere else: rest, hover (6% toward `ink`),
 //! pressed (12%), the focus ring, and disabled (55% opacity, a tooltip that

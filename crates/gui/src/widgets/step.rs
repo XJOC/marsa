@@ -1,4 +1,4 @@
-//! The step card (task M5-D5, the first-run panel): a numbered circle, a
+//! The step card (the first-run panel): a numbered circle, a
 //! title, a line of explanation (until the step is done), and whatever the
 //! screen adds under them, such as a progress bar. Three looks tell where
 //! the user is: the step to do now has the `surface` fill and an `accent`
