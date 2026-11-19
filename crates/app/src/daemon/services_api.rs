@@ -174,7 +174,9 @@ async fn postgres_action(
 fn postgres_error(err: &databases::ActionError) -> HttpError {
     use databases::ActionError as E;
     let status = match err {
-        E::Unsupported | E::NotInstalled(_) | E::InUse(_) | E::Busy => StatusCode::CONFLICT,
+        E::Unsupported | E::NotInstalled(_) | E::InUse(_) | E::Busy | E::OrphanStuck(_) => {
+            StatusCode::CONFLICT
+        }
         E::Config(_) | E::Init(_) | E::ProgramNotAbsolute(_) | E::Internal => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
