@@ -12,6 +12,10 @@ pub mod place;
 
 use std::process::ExitStatus;
 
+/// The most sites the panel lists, and the native menu with it: one for each
+/// key from 1 to 9.
+pub const MAX_SITES: usize = 9;
+
 /// Why the panel closed. The exit code of `marsa-gui --panel`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelExit {

@@ -318,6 +318,10 @@ pub struct VersionInUse {
     /// Caddy runs from this version now.
     #[serde(default)]
     pub caddy: bool,
+    /// A database server runs from this version now: PostgreSQL (task
+    /// M6-03).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub server: bool,
 }
 
 impl VersionInUse {
@@ -326,7 +330,8 @@ impl VersionInUse {
     /// the user knows that another version must be installed first;
     /// `version_in_use` otherwise.
     pub fn code(&self) -> &'static str {
-        let nothing_else = self.default.is_none() && self.sites.is_empty() && !self.caddy;
+        let nothing_else =
+            self.default.is_none() && self.sites.is_empty() && !self.caddy && !self.server;
         if nothing_else && !self.sites_left_without_php.is_empty() {
             "sites_lose_php"
         } else {
@@ -340,6 +345,7 @@ impl VersionInUse {
             || !self.sites.is_empty()
             || !self.sites_left_without_php.is_empty()
             || self.caddy
+            || self.server
     }
 }
 
@@ -524,7 +530,8 @@ pub struct SetupReport {
     /// macOS, the daemon's own `trust_install` result: the trust for the
     /// current user (ADR 0015). Empty if nothing ran: no operation was left,
     /// or `error` says why. On Linux the results of a second request follow
-    /// those of the first.
+    /// those of the first, then the daemon's own `nss_install`: the CA root
+    /// in the user's NSS databases, for Chrome and Firefox (task M4-18g).
     #[serde(default)]
     pub results: Vec<OpResult>,
     /// The operations left out of the request, and why.
@@ -575,8 +582,9 @@ pub struct SetupSkip {
     /// `ca_not_ready`, `ca_unreadable`, `caddy_not_installed`, and
     /// `caddy_not_started` for `trust_install`; on Linux
     /// `resolved_use_hosts` and `resolved_not_running` for
-    /// `resolved_install`, and `hosts_sites_unknown` and
-    /// `hosts_too_many_names` for `hosts_sync`.
+    /// `resolved_install`, `hosts_sites_unknown` and
+    /// `hosts_too_many_names` for `hosts_sync`, and `nss_tool_missing` for
+    /// `nss_install`.
     pub code: String,
 }
 
@@ -1094,6 +1102,21 @@ mod tests {
             ..VersionInUse::default()
         };
         assert_eq!(running.code(), "version_in_use");
+        // M6-03: PostgreSQL runs from it. Written only when true, so an
+        // older client reads the same JSON as before.
+        let server = VersionInUse {
+            version: "18.7.0".into(),
+            server: true,
+            ..VersionInUse::default()
+        };
+        assert!(server.any());
+        assert_eq!(server.code(), "version_in_use");
+        round_trip(
+            &server,
+            json!({ "version": "18.7.0", "caddy": false, "server": true }),
+        );
+        let no_server = serde_json::to_value(VersionInUse::default()).unwrap();
+        assert!(no_server.get("server").is_none(), "{no_server}");
         // An answer from before M5-19 reads with no such sites.
         let old: VersionInUse =
             serde_json::from_value(json!({ "version": "8.3.12", "default": "8.3" })).unwrap();

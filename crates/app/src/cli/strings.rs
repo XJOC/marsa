@@ -726,6 +726,24 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              ca-certificates package, then run the command again. Systems whose tool reads \
              another folder (Arch, openSUSE) are not supported yet."
             .into(),
+        // Chrome and Firefox on Linux (task M4-18g).
+        "nss_tool_missing" => "certutil is not installed, so Chrome and Firefox do not trust \
+             Marsa's sites yet (curl and other programs do). Install libnss3-tools (Debian, \
+             Ubuntu) or nss-tools (Fedora), then run \"marsa setup\" again."
+            .into(),
+        "nss_db_refused" => "Chrome or Firefox may not trust Marsa's sites yet: a \
+             certificate database in your home folder is a link or belongs to another user \
+             (often after a browser or certutil ran with sudo), so Marsa left it alone. \
+             logs/marsad.log names it. Replace a link with a real folder; give a folder of \
+             another user back to yours (sudo chown -R \"$USER\" <folder>). Then run \
+             \"marsa setup\" again."
+            .into(),
+        "nss_add_failed" => "Chrome or Firefox may not trust Marsa's sites yet: a certificate \
+             database in your home folder did not take Marsa's certificate authority. If it has \
+             a password (Firefox's Primary Password), remove the password or add the \
+             certificate by hand; otherwise close the browser and run \"marsa setup\" again. \
+             logs/marsad.log names the database."
+            .into(),
         "trust_store_update_failed" => "The system's store of trusted certificates could not \
              be updated, so Marsa's certificate authority is not trusted, or not removed, yet. \
              Run the command again; if it repeats, report it with the file logs/marsad.log."
@@ -1050,6 +1068,13 @@ pub fn version_in_use(runtime: Runtime, in_use: &VersionInUse) -> String {
     if in_use.caddy {
         text.push_str(" Caddy runs from it: stop Caddy first with \"marsa services stop caddy\".");
     }
+    if in_use.server {
+        text.push_str(&format!(
+            " {name} runs from it: stop it first with \"marsa services stop {}\". Its \
+             databases stay either way.",
+            runtime.dir_name()
+        ));
+    }
     text
 }
 
@@ -1332,6 +1357,8 @@ pub fn setup_step(op: &str) -> String {
         "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
         "resolved_install" => "Send .test names to Marsa".to_owned(),
         "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
+        // Chrome and Firefox on Linux (task M4-18g).
+        "nss_install" => "Trust Marsa's certificates in Chrome and Firefox".to_owned(),
         // The hosts way on Linux (task M4-18k).
         "resolved_remove" => "Take out Marsa's link for .test names".to_owned(),
         "hosts_sync" => format!("Put the sites' .test names in {HOSTS_FILE}"),
@@ -2121,6 +2148,9 @@ mod tests {
         "ports_apply_failed",
         "ports_restore_failed",
         "trust_tool_missing",
+        "nss_tool_missing",
+        "nss_add_failed",
+        "nss_db_refused",
         "trust_store_update_failed",
         // The uninstall route (task M5-13), the removal codes of
         // `marsa-helper`, and `marsa uninstall --all` itself.
