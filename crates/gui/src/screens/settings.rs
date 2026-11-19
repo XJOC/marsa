@@ -1,4 +1,4 @@
-//! Settings (layout.md, Screens; task M5-D9): three groups in cards of rows.
+//! Settings (layout.md, Screens): three groups in cards of rows.
 //! General: Start at login, the Appearance, and the language. Setup: what
 //! the window knows of the HTTPS certificate and the `.test` names, and "Run
 //! setup" with its report. About: the version (with the daemon's under it)

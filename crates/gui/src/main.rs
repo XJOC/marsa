@@ -3,10 +3,10 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 //! `marsa-gui`: the window. A client of the daemon, like the CLI; it never
-//! changes state by itself (task M3-10).
+//! changes state by itself.
 //!
 //! `marsa-gui [--data-dir <PATH>] [--panel]`, see [`startup`]. Only one window
-//! runs per data folder: a second one exits at once (task M5-04). `--panel` is
+//! runs per data folder: a second one exits at once. `--panel` is
 //! the menu-bar panel instead (ADR 0022): a borderless window that the tray
 //! starts under its icon, and that ends with an exit code that tells the tray
 //! what the user asked for (`marsa_gui::panel::PanelExit`).
