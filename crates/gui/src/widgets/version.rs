@@ -182,6 +182,33 @@ fn rounded_outline(rect: Rect, radius: f32) -> Vec<Pos2> {
 /// The straight pieces of one corner.
 const ARC_STEPS: usize = 6;
 
+/// Where a button of a picker starts: its row, and how far from the start of
+/// the row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Cell {
+    row: usize,
+    offset: f32,
+}
+
+/// The place of each button, in order. One row, unless `room` is the width a
+/// row may have: a button that would end past it starts the next row (the
+/// first button of a row always stays on it).
+fn cells(widths: &[f32], gap: f32, room: Option<f32>) -> Vec<Cell> {
+    let (mut row, mut offset) = (0, 0.0);
+    widths
+        .iter()
+        .map(|width| {
+            if offset > 0.0 && room.is_some_and(|room| offset + width > room) {
+                row += 1;
+                offset = 0.0;
+            }
+            let cell = Cell { row, offset };
+            offset += width + gap;
+            cell
+        })
+        .collect()
+}
+
 /// The large version picker: one button per installed version, an optional
 /// dashed "+" at the end. The versions are a radio group with one Tab stop
 /// (the WAI-ARIA pattern, "roving focus"): Tab enters on the chosen version,
@@ -206,6 +233,8 @@ pub struct VersionPicker<'a, T> {
     disabled: Option<&'a str>,
     /// A button's index and the look to draw it in.
     forced: Option<(usize, Look)>,
+    /// Continue on the next row when a button does not fit in the width.
+    wrap: bool,
 }
 
 impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
@@ -219,6 +248,7 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
             size: PickerSize::Large,
             disabled: None,
             forced: None,
+            wrap: false,
         }
     }
 
@@ -243,6 +273,15 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
     /// Disables the picker. Hovering it shows `reason`.
     pub const fn disabled(mut self, reason: &'a str) -> Self {
         self.disabled = Some(reason);
+        self
+    }
+
+    /// A button that does not fit in the width goes on the next row, so the
+    /// menu-bar panel (a fixed width) shows every installed version. The
+    /// group stays one group: the arrow keys move along the order of the
+    /// buttons, row after row.
+    pub const fn wrapping(mut self) -> Self {
+        self.wrap = true;
         self
     }
 
@@ -300,21 +339,27 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
         if self.install.is_some() {
             widths.push(self.size.install(theme).x);
         }
-        let total = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
-        let (rect, group) = ui.allocate_exact_size(vec2(total, button.y), Sense::hover());
+        let cells = cells(&widths, gap, self.wrap.then(|| ui.available_width()));
+        let rows = cells.last().map_or(1, |cell| cell.row + 1);
+        let across = cells
+            .iter()
+            .zip(&widths)
+            .map(|(cell, width)| cell.offset + width)
+            .fold(0.0, f32::max);
+        let high = button.y * rows as f32 + gap * rows.saturating_sub(1) as f32;
+        let (rect, group) = ui.allocate_exact_size(vec2(across, high), Sense::hover());
         let label = self.label;
         group.widget_info(|| WidgetInfo::labeled(Role::RadioGroup, enabled, label));
 
-        let mut spots = Vec::with_capacity(widths.len());
-        let mut offset = 0.0;
-        for width in &widths {
-            let x = slot(direction, rect, offset, *width);
-            spots.push(Rect::from_min_size(
-                pos2(x, rect.top()),
-                vec2(*width, button.y),
-            ));
-            offset += width + gap;
-        }
+        let spots: Vec<Rect> = cells
+            .iter()
+            .zip(&widths)
+            .map(|(cell, width)| {
+                let x = slot(direction, rect, cell.offset, *width);
+                let y = rect.top() + cell.row as f32 * (button.y + gap);
+                Rect::from_min_size(pos2(x, y), vec2(*width, button.y))
+            })
+            .collect();
         // One Tab stop for the group of versions: the version that has the
         // focus, or else the chosen one, or else the first. The "+" after
         // them is no option of the group: it is a Tab stop of its own.
@@ -897,6 +942,62 @@ mod tests {
             )
         });
         assert!(wide.width() > 2.0 * 92.0 + gap);
+    }
+
+    #[test]
+    fn the_cells_of_a_wrapping_picker_start_a_new_row_where_a_button_does_not_fit() {
+        let (width, gap) = (92.0, 8.0);
+        let row = |row, offset| Cell { row, offset };
+        // No room given: one row, however many buttons.
+        assert_eq!(
+            cells(&[width; 4], gap, None),
+            [row(0, 0.0), row(0, 100.0), row(0, 200.0), row(0, 300.0)]
+        );
+        // 328 wide: three buttons and the gaps are 292, the fourth would end
+        // at 392.
+        assert_eq!(
+            cells(&[width; 4], gap, Some(328.0)),
+            [row(0, 0.0), row(0, 100.0), row(0, 200.0), row(1, 0.0)]
+        );
+        // A button wider than the room stays on a row of its own, first.
+        assert_eq!(
+            cells(&[width, 400.0, width], gap, Some(328.0)),
+            [row(0, 0.0), row(1, 0.0), row(2, 0.0)]
+        );
+        assert!(cells(&[], gap, Some(328.0)).is_empty());
+    }
+
+    #[test]
+    fn a_wrapping_picker_is_one_group_over_as_many_rows_as_it_needs() {
+        let theme = &LIGHT;
+        let gap = theme.space.group_gap;
+        let versions: [(u8, &str); 5] =
+            [(1, "8.1"), (2, "8.2"), (3, "8.3"), (4, "8.4"), (5, "8.5")];
+        let harness = Harness::new(egui::Theme::Light);
+        let mut rect = Rect::NOTHING;
+        let tree = harness.accessibility(|ui| {
+            // The panel's room: 360 less its two sides.
+            ui.set_max_width(328.0);
+            let picker = VersionPicker::new("Default PHP", &versions, Some(4))
+                .size(PickerSize::Medium)
+                .wrapping();
+            rect = ui.add(picker).rect;
+        });
+        // Three buttons on the first row, two on the second.
+        assert_eq!(rect.height(), 2.0 * 44.0 + gap);
+        assert_eq!(rect.width(), 3.0 * 92.0 + 2.0 * gap);
+        assert_eq!(tree.labels_starting_with("8.").len(), 5);
+        assert!(tree.node_with_label("Default PHP").is_some());
+        // Not wrapping, the same versions keep one row.
+        let mut one = Rect::NOTHING;
+        harness.run(|ui| {
+            ui.set_max_width(328.0);
+            one = ui
+                .add(VersionPicker::new("Default PHP", &versions, Some(4)).size(PickerSize::Medium))
+                .rect;
+        });
+        assert_eq!(one.height(), 44.0);
+        assert_eq!(one.width(), 5.0 * 92.0 + 4.0 * gap);
     }
 
     #[test]
