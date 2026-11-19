@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -302,33 +302,7 @@ fn save<T: Serialize>(path: &Path, config: &T) -> Result<(), ConfigError> {
         source,
     };
     let body = toml::to_string(config).map_err(|err| fail(io::Error::other(err)))?;
-    write_atomic(path, &format!("{HEADER}\n{body}")).map_err(fail)
-}
-
-/// Writes `text` to a temp file next to `path`, then renames it over `path`.
-/// A reader sees the old file or the new one, never half of one.
-///
-/// The temp file is in the same folder, not the system temp folder, because
-/// `rename` fails across volumes.
-fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("toml.tmp");
-    let result = write_synced(&tmp, text).and_then(|()| fs::rename(&tmp, path));
-    if result.is_err() {
-        // Best effort: the write already failed, and that is the error to report.
-        let _ = fs::remove_file(&tmp);
-    }
-    result
-}
-
-/// Writes and flushes to disk, so a power cut cannot leave an empty file
-/// after the rename.
-fn write_synced(path: &Path, text: &str) -> io::Result<()> {
-    let mut file = fs::File::create(path)?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()
+    crate::fs::write_atomic(path, format!("{HEADER}\n{body}").as_bytes(), None).map_err(fail)
 }
 
 /// Accepts only absolute paths for `root`. Rejecting it here, not after
@@ -868,7 +842,7 @@ mod tests {
         let err = save_global(&path, &GlobalConfig::default()).unwrap_err();
         assert_eq!(err.code(), "config_write");
         assert!(err.to_string().contains(&path.display().to_string()));
-        assert!(!path.with_extension("toml.tmp").exists());
+        assert!(!dir.path().join(".global.toml.tmp").exists());
     }
 
     #[test]
