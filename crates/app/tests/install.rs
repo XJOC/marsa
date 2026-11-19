@@ -932,6 +932,7 @@ fn pretend_runs(served: &Served, id: &str, on_stop: impl FnOnce() + Send + 'stat
         cancel,
         task,
         runtime,
+        stop_limit: Duration::ZERO,
     };
     served.daemon.add_proc(id, handle);
 }

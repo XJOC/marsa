@@ -20,6 +20,7 @@ use tokio::process::Command;
 
 use crate::caddy::Dial;
 use crate::orphan::{ChildProcess, Liveness, PidRecord, is_instance_id};
+use crate::ports::PortLookup;
 
 /// Whether the daemon looks for an orphan Caddy before it starts one: macOS
 /// only, where ADR 0009 is accepted. Linux waits for spike S-06b. On Windows,
@@ -29,6 +30,11 @@ pub const ORPHAN_RECOVERY: bool = cfg!(target_os = "macos");
 /// How long `kill`, `ps`, or `lsof` may run.
 #[cfg(unix)]
 const TOOL_LIMIT: Duration = Duration::from_secs(2);
+/// How long [`port_lookup`] waits for `lsof`. Longer than [`TOOL_LIMIT`]:
+/// its answer decides a start, and on a busy Mac at login `lsof` can be
+/// slow; a time-out would refuse the start for nothing.
+#[cfg(target_os = "macos")]
+const LOOKUP_LIMIT: Duration = Duration::from_secs(8);
 
 /// The longest `run/caddy.pid` that is read.
 const PID_FILE_MAX: u64 = 4096;
@@ -549,27 +555,49 @@ pub async fn listener_holders(_listen: &Dial) -> Option<Vec<u32>> {
 }
 
 /// Who listens on TCP `port`, as `name(pid)`, for messages only: never use it
-/// to pick a pid to signal. macOS asks `/usr/sbin/lsof`.
-#[cfg(target_os = "macos")]
+/// to pick a pid to signal. `None` when [`port_lookup`] finds nobody, fails,
+/// or does not look on this system.
 pub async fn port_owner(port: u16) -> Option<String> {
-    let mut lsof = Command::new("/usr/sbin/lsof");
-    // `+c 0`: the whole command name, not its first 9 characters.
-    lsof.args([
-        "+c",
-        "0",
-        "-nP",
-        &format!("-iTCP:{port}"),
-        "-sTCP:LISTEN",
-        "-Fpc",
-    ]);
-    let out = run_tool(lsof).await?;
-    crate::orphan::parse_lsof(&String::from_utf8_lossy(&out.stdout))
+    match port_lookup(port).await {
+        PortLookup::Owner(owner) => Some(owner),
+        PortLookup::Nobody | PortLookup::Failed | PortLookup::NotChecked => None,
+    }
 }
 
-/// Not known on this system (Linux often has no `lsof`).
+/// Who listens on TCP `port`, on any address: macOS asks `/usr/sbin/lsof`,
+/// which sees a listener on `*:<port>` that a bind to `127.0.0.1` misses
+/// (std's bind sets `SO_REUSEADDR`). `lsof` exits with 1 and prints nothing
+/// at all when nothing listens; any other answer, an error message, or no
+/// answer within 8 s is [`PortLookup::Failed`], so a caller can fail closed.
+/// `-w`: no warnings about other file systems on stderr.
+#[cfg(target_os = "macos")]
+pub async fn port_lookup(port: u16) -> PortLookup {
+    let mut lsof = Command::new("/usr/sbin/lsof");
+    // `+c 0`: the whole command name, not its first 9 characters.
+    let port = format!("-iTCP:{port}");
+    let args = ["-w", "+c", "0", "-nP", &port, "-sTCP:LISTEN", "-Fpc"];
+    lsof.args(args)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let Ok(Ok(out)) = tokio::time::timeout(LOOKUP_LIMIT, lsof.output()).await else {
+        return PortLookup::Failed;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    match (out.status.code(), crate::orphan::parse_lsof(&text)) {
+        (Some(0), Some(owner)) => PortLookup::Owner(owner),
+        (Some(1), None) if out.stdout.is_empty() && out.stderr.is_empty() => PortLookup::Nobody,
+        _ => PortLookup::Failed,
+    }
+}
+
+/// No look on this system: Linux often has no `lsof`, and there a bind to
+/// `127.0.0.1` already fails next to a listener on every address.
 #[cfg(not(target_os = "macos"))]
-pub async fn port_owner(_port: u16) -> Option<String> {
-    None
+pub async fn port_lookup(_port: u16) -> PortLookup {
+    PortLookup::NotChecked
 }
 
 /// Runs a tool with no input, for at most 2 s. `None` if it cannot start or
@@ -676,12 +704,24 @@ fn create_new(path: &Path) -> io::Result<File> {
 /// names no pid. A link, even to a regular file, is refused, and so is a FIFO,
 /// whose `open` would wait for a writer without end.
 pub fn read_pid_file(path: &Path) -> Option<PidRecord> {
-    if !fs::symlink_metadata(path).ok()?.is_file() {
+    serde_json::from_str(&read_small_file(path)?).ok()
+}
+
+/// Reads a small pid file as text, with the checks of [`read_pid_file`]:
+/// `None` if it is missing, a link, not a regular file, longer than 4096
+/// bytes, or not UTF-8, and on Unix if the file opened is not the one
+/// checked (its device and inode). For a server's own pid file, such as
+/// PostgreSQL's `postmaster.pid` (task M6-03).
+pub fn read_small_file(path: &Path) -> Option<String> {
+    let before = fs::symlink_metadata(path).ok()?;
+    if !before.is_file() {
         return None;
     }
     let file = File::open(path).ok()?;
-    // Checked again on the open file: the path may have changed in between.
-    if !file.metadata().ok()?.is_file() {
+    // Checked again on the open file: the path may have changed in between,
+    // for example to a link to another file.
+    let opened = file.metadata().ok()?;
+    if !opened.is_file() || !same_file(&before, &opened) {
         return None;
     }
     let mut text = String::new();
@@ -689,7 +729,20 @@ pub fn read_pid_file(path: &Path) -> Option<PidRecord> {
     if text.len() as u64 > PID_FILE_MAX {
         return None;
     }
-    serde_json::from_str(&text).ok()
+    Some(text)
+}
+
+/// Whether two looks saw the same file: the same device and inode.
+#[cfg(unix)]
+fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    (a.dev(), a.ino()) == (b.dev(), b.ino())
+}
+
+/// Windows: std gives no stable file id; the checks of the type stay.
+#[cfg(not(unix))]
+fn same_file(_a: &fs::Metadata, _b: &fs::Metadata) -> bool {
+    true
 }
 
 /// Deletes `run/caddy.pid`. No file is not an error.
@@ -765,6 +818,23 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(10), "{now:?}");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// lsof runs on macOS only. The listener is this test's own.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn port_lookup_names_a_listener_and_tells_nobody_apart() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let PortLookup::Owner(owner) = port_lookup(port).await else {
+            panic!("no owner for {port}");
+        };
+        assert!(
+            owner.ends_with(&format!("({})", std::process::id())),
+            "{owner}"
+        );
+        drop(listener);
+        assert_eq!(port_lookup(port).await, PortLookup::Nobody);
     }
 
     // The systems where `identity` reads a process.

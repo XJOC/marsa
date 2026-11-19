@@ -7,7 +7,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::orphan::Liveness;
 use crate::php::MAX_SOCKET_PATH;
+use crate::ports::PortLookup;
 use crate::services::{Signal, StopMethod};
 
 /// PostgreSQL's port when `[postgres] port` is not set in `global.toml`. The
@@ -40,8 +42,9 @@ impl PostgresDirs {
 /// The arguments of `initdb` for a new cluster in `dirs.data`.
 ///
 /// - `-U postgres -A trust`: the superuser `postgres`, and no password for
-///   local clients. The daemon adds the superuser `root` after this (M6-03c):
-///   Laravel's default `.env` connects as `root`.
+///   local clients. The daemon then writes [`PG_HBA_CONF`] over initdb's
+///   `pg_hba.conf` and adds the role `root` ([`ROOT_ROLE_SQL`]), which is not
+///   a superuser: Laravel's default `.env` connects as `root`.
 /// - `--locale-provider=builtin --builtin-locale=C.UTF-8` (PostgreSQL 17 and
 ///   later): sorting and case rules come from PostgreSQL itself, so they are
 ///   the same on every OS and do not change with an OS update.
@@ -55,6 +58,72 @@ pub fn initdb_args(dirs: &PostgresDirs) -> Vec<String> {
     let mut args = vec!["-D".to_owned(), arg_path(&dirs.data)];
     args.extend(user.into_iter().chain(builtin).map(str::to_owned));
     args
+}
+
+/// Marsa's `pg_hba.conf`, written over initdb's in a new cluster before the
+/// cluster is moved into place (ADR 0023, "Access", option B). A superuser
+/// on TCP with trust would let any local user run OS commands as the owner
+/// (`COPY ... TO PROGRAM`), so:
+///
+/// - `postgres`, the superuser, connects only over the Unix socket in `run/`,
+///   a folder only the owner can open;
+/// - on TCP only `root` connects, from `127.0.0.1`, and it is not a
+///   superuser ([`ROOT_ROLE_SQL`]);
+/// - every other line refuses: `postgres` on TCP, any other role, and
+///   replication, which `all` does not match.
+///
+/// PostgreSQL uses the first line that matches, and refuses a connection that
+/// no line matches. The reject lines say so, so nobody takes a missing line
+/// for an oversight. Written once: a later change by the user stays.
+pub const PG_HBA_CONF: &str = "\
+# Written by Marsa when it made this cluster (ADR 0023, \"Access\").
+#
+# - postgres, the superuser, connects only over the Unix socket in Marsa's
+#   run/ folder, which only its owner can open.
+# - On TCP (127.0.0.1) only root connects. root is not a superuser.
+# - Everything else is refused, replication too.
+#
+# TYPE  DATABASE     USER      ADDRESS        METHOD
+local   all          postgres                 trust
+host    all          root      127.0.0.1/32   trust
+local   all          all                      reject
+host    all          all       all            reject
+local   replication  all                      reject
+host    replication  all       all            reject
+";
+
+/// The SQL that makes the role `root` and its database `root` in a new
+/// cluster, so Laravel's default `.env` (`DB_USERNAME=root`, no password)
+/// and `psql -U root` work. `root` may log in and create databases, and
+/// nothing more: not a superuser, so no `COPY ... TO PROGRAM`, and no
+/// CREATEROLE, REPLICATION, or BYPASSRLS.
+///
+/// One statement per line: single-user mode ends a command at each newline
+/// and runs it as its own transaction, which `CREATE DATABASE` needs. No
+/// backslash, which would join two lines.
+pub const ROOT_ROLE_SQL: &str = "\
+CREATE ROLE root WITH LOGIN CREATEDB NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE DATABASE root OWNER root;
+";
+
+/// The arguments of the single-user `postgres` that runs [`ROOT_ROLE_SQL`],
+/// read from stdin, on the cluster in `data`: no server, no socket, no port.
+///
+/// - `--single` must come first, and the database, `postgres`, last.
+/// - `exit_on_error=true`, as initdb runs its own single-user steps: an error
+///   ends the session with exit code 1. Without it the session goes on with
+///   the next line and exits with 0.
+pub fn single_user_args(data: &Path) -> Vec<String> {
+    let data = arg_path(data);
+    let args = [
+        "--single",
+        "-D",
+        &data,
+        "-c",
+        "exit_on_error=true",
+        "postgres",
+    ];
+    args.map(str::to_owned).to_vec()
 }
 
 /// The socket PostgreSQL makes on `port`: `<sockets>/.s.PGSQL.<port>`. `None`
@@ -80,12 +149,17 @@ pub fn postgres_socket(dirs: &PostgresDirs, port: u16) -> Option<PathBuf> {
 /// `127.0.0.1:<port>` only, with a socket in `dirs.sockets` when
 /// [`postgres_socket`] allows one. No shell reads them, so "no socket" is an
 /// empty value, not the `''` of `postgresql.conf`.
+///
+/// `unix_socket_permissions=0700`: the socket is the superuser's only way in
+/// ([`PG_HBA_CONF`]), so it is the owner's alone, a second guard behind the
+/// owner-only `run/` folder. PostgreSQL's default is `0777`.
 pub fn postgres_args(dirs: &PostgresDirs, port: u16) -> Vec<String> {
     let sockets = postgres_socket(dirs, port).map_or_else(String::new, |_| arg_path(&dirs.sockets));
     let settings = [
         "listen_addresses=127.0.0.1".to_owned(),
         format!("port={port}"),
         format!("unix_socket_directories={sockets}"),
+        "unix_socket_permissions=0700".to_owned(),
     ];
     let mut args = vec!["-D".to_owned(), arg_path(&dirs.data)];
     for setting in settings {
@@ -135,6 +209,9 @@ pub enum PortCheck {
     Busy {
         owner: Option<String>,
     },
+    /// The bind worked, but the look for a listener on every address
+    /// failed: a program there could be missed, so no start.
+    Unknown,
 }
 
 /// The pid that the server's own pid file names, and what runs at it now.
@@ -178,6 +255,10 @@ pub enum ServiceBusy {
     /// Another program (Homebrew, Herd, DBngin, Docker) holds the port.
     #[error("port {port} is in use by {}", .owner.as_deref().unwrap_or("another program"))]
     Port { port: u16, owner: Option<String> },
+    /// Who holds the port could not be checked: `lsof` failed or took too
+    /// long. Not "in use", which may not be true.
+    #[error("could not check who holds port {port}")]
+    PortUnknown { port: u16 },
     /// A running server still uses the data folder.
     #[error("the data folder is in use by a running server (pid {pid})")]
     DataDir { pid: u32 },
@@ -188,6 +269,7 @@ impl ServiceBusy {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Port { .. } => "service_port_busy",
+            Self::PortUnknown { .. } => "service_port_unknown",
             Self::DataDir { .. } => "service_data_dir_busy",
         }
     }
@@ -198,7 +280,8 @@ impl ServiceBusy {
 /// 1. The pid file names a running server: `service_data_dir_busy`, even if
 ///    it holds the port too, because that is the exact reason. M6-04 later
 ///    recovers it when it is our own orphan.
-/// 2. Another program holds the port: `service_port_busy`.
+/// 2. Another program holds the port: `service_port_busy`. Or who holds it
+///    could not be checked: `service_port_unknown`.
 /// 3. Otherwise start. PostgreSQL checks its pid file again: it starts over a
 ///    stale one, but refuses while the pid is alive and runs as the same
 ///    user, even as another program ([`PidFileCheck::Other`]; M6-04).
@@ -219,12 +302,54 @@ pub fn decide_start(facts: &StartFacts) -> StartDecision {
         | PidFileCheck::Other { .. }
         | PidFileCheck::Unknown { .. } => {}
     }
+    let port = facts.port;
     match &facts.port_check {
         PortCheck::Free => StartDecision::Start,
         PortCheck::Busy { owner } => StartDecision::Refuse(ServiceBusy::Port {
-            port: facts.port,
+            port,
             owner: owner.clone(),
         }),
+        PortCheck::Unknown => StartDecision::Refuse(ServiceBusy::PortUnknown { port }),
+    }
+}
+
+/// [`PortCheck`] from the daemon's two looks at the port. Busy if either
+/// says so; [`PortCheck::Unknown`], which refuses too, if the bind worked
+/// and the look failed:
+///
+/// - `bound`: a bind to `127.0.0.1:<port>` worked. Alone it misses a program
+///   on `*:<port>` on macOS: std's bind sets `SO_REUSEADDR`, and there that
+///   lets a bind to one address share the port with a listener on all of
+///   them (Docker, for one).
+/// - `lookup`: who listens on the port, on any address, as `lsof` names it
+///   (macOS). Any owner means busy. A failed look fails closed.
+///   Linux does not look, and there the bind already fails next to a
+///   listener on all addresses.
+pub fn port_check(bound: bool, lookup: PortLookup) -> PortCheck {
+    match (bound, lookup) {
+        (_, PortLookup::Owner(owner)) => PortCheck::Busy { owner: Some(owner) },
+        (true, PortLookup::Nobody | PortLookup::NotChecked) => PortCheck::Free,
+        (true, PortLookup::Failed) => PortCheck::Unknown,
+        (false, _) => PortCheck::Busy { owner: None },
+    }
+}
+
+/// [`PidFileCheck`] of `pid`, the pid in `postmaster.pid`, from `now`: what
+/// the OS says runs there by the file the process really runs
+/// (`process::real_identity`), because postgres rewrites its own argv
+/// (`postgres: checkpointer`). `servers` holds `bin/postgres` of every
+/// installed PostgreSQL version, and the resolved form of each.
+///
+/// - Gone: [`PidFileCheck::Dead`], a stale file.
+/// - Cannot be told: [`PidFileCheck::Unknown`].
+/// - One of `servers`: [`PidFileCheck::Server`].
+/// - Any other program: [`PidFileCheck::Other`], a pid reused since.
+pub fn classify_postmaster(pid: u32, now: &Liveness, servers: &[PathBuf]) -> PidFileCheck {
+    match now {
+        Liveness::Gone => PidFileCheck::Dead { pid },
+        Liveness::Unknown => PidFileCheck::Unknown { pid },
+        Liveness::Alive { exe, .. } if servers.contains(exe) => PidFileCheck::Server { pid },
+        Liveness::Alive { .. } => PidFileCheck::Other { pid },
     }
 }
 
@@ -267,6 +392,78 @@ mod tests {
     }
 
     #[test]
+    fn pg_hba_conf_as_written() {
+        insta::assert_snapshot!(PG_HBA_CONF);
+    }
+
+    /// Who gets in, and how: the first line that matches decides, as in
+    /// PostgreSQL, and no match is a refusal.
+    #[test]
+    fn only_postgres_on_the_socket_and_root_on_tcp_get_in() {
+        let lines: Vec<Vec<&str>> = PG_HBA_CONF
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .map(|line| line.split_whitespace().collect())
+            .collect();
+        // `all` matches every database but `replication`.
+        let names = |field: &str, name: &str| field == name || field == "all";
+        let databases =
+            |field: &str, db: &str| field == db || (field == "all" && db != "replication");
+        let method = |tcp: bool, db: &str, user: &str, address: &str| {
+            let kind = if tcp { "host" } else { "local" };
+            let first = lines.iter().find(|line| {
+                let from = !tcp || names(line[3], address);
+                line[0] == kind && databases(line[1], db) && names(line[2], user) && from
+            });
+            first.map_or("no line", |line| line[line.len() - 1])
+        };
+        assert_eq!(method(false, "postgres", "postgres", ""), "trust");
+        assert_eq!(method(true, "laravel", "root", "127.0.0.1/32"), "trust");
+        for (tcp, user, address) in [
+            (true, "postgres", "127.0.0.1/32"),
+            (true, "root", "::1/128"),
+            (true, "app", "127.0.0.1/32"),
+            (false, "root", ""),
+            (false, "app", ""),
+        ] {
+            let got = method(tcp, "postgres", user, address);
+            assert_eq!(got, "reject", "{user} {address}");
+        }
+        for tcp in [false, true] {
+            let got = method(tcp, "replication", "postgres", "127.0.0.1/32");
+            assert_eq!(got, "reject");
+        }
+        // Only those two lines let anyone in.
+        let trusted = lines.iter().filter(|line| line.last() == Some(&"trust"));
+        assert_eq!(trusted.count(), 2);
+    }
+
+    #[test]
+    fn root_logs_in_and_creates_databases_and_is_no_superuser() {
+        let lines: Vec<_> = ROOT_ROLE_SQL.lines().collect();
+        let role = "CREATE ROLE root WITH LOGIN CREATEDB NOSUPERUSER NOCREATEROLE \
+                    NOREPLICATION NOBYPASSRLS;";
+        assert_eq!(lines, [role, "CREATE DATABASE root OWNER root;"]);
+        // Each attribute that gives more is there in its `NO` form only.
+        let words: Vec<_> = ROOT_ROLE_SQL
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .collect();
+        for power in ["SUPERUSER", "CREATEROLE", "REPLICATION", "BYPASSRLS"] {
+            assert!(!words.contains(&power), "{power}");
+            assert!(words.contains(&format!("NO{power}").as_str()), "{power}");
+        }
+        assert!(!ROOT_ROLE_SQL.contains('\\'));
+        assert!(ROOT_ROLE_SQL.ends_with(";\n"));
+    }
+
+    #[test]
+    fn single_user_mode_stops_at_the_first_error() {
+        let args = single_user_args(Path::new("/m/databases/postgres/.18.init-1"));
+        let want = "--single -D /m/databases/postgres/.18.init-1 -c exit_on_error=true postgres";
+        assert_eq!(args, words(want));
+    }
+
+    #[test]
     fn postgres_listens_on_loopback_only_on_every_os() {
         let args = postgres_args(&PostgresDirs::new(Path::new("/m"), 18), 5432);
         let listen: Vec<_> = args
@@ -275,6 +472,9 @@ mod tests {
             .collect();
         assert_eq!(listen, [["-c", "listen_addresses=127.0.0.1"]]);
         assert!(args.windows(2).any(|pair| pair == ["-c", "port=5432"]));
+        // The superuser's socket is the owner's alone.
+        let owner_only = ["-c", "unix_socket_permissions=0700"];
+        assert!(args.windows(2).any(|pair| pair == owner_only));
     }
 
     /// Unix paths: an absolute path on Windows needs a drive, and PostgreSQL
@@ -285,14 +485,18 @@ mod tests {
 
         fn sockets_arg(folder: &str, port: u16) -> String {
             let args = postgres_args(&dirs("/d", folder), port);
-            args.last().unwrap().clone()
+            let setting = args
+                .iter()
+                .find(|arg| arg.starts_with("unix_socket_directories="));
+            setting.unwrap().clone()
         }
 
         #[test]
         fn postgres_listens_on_loopback_and_its_socket() {
             let args = postgres_args(&dirs("/m/databases/postgres/18", "/m/run"), 5433);
             let want = "-D /m/databases/postgres/18 -c listen_addresses=127.0.0.1 \
-                        -c port=5433 -c unix_socket_directories=/m/run";
+                        -c port=5433 -c unix_socket_directories=/m/run \
+                        -c unix_socket_permissions=0700";
             assert_eq!(args, words(want));
         }
 
@@ -338,6 +542,9 @@ mod tests {
         let signals: Vec<_> = steps.iter().map(signal).collect();
         assert_eq!(signals, [(Signal::Int, 10), (Signal::Quit, 10)]);
         assert!(signals.iter().all(|(signal, _)| *signal != Signal::Term));
+        // Longer than the daemon's 10 s for its processes at shutdown: the
+        // supervisor's handle carries this, so the shutdown waits for it.
+        assert_eq!(postgres_stop().total_wait(), Duration::from_secs(20));
     }
 
     #[test]
@@ -379,7 +586,17 @@ mod tests {
             assert_eq!(herd, refuse_port(Some("Herd")));
             assert_eq!(decide(&busy(None), pid_file), refuse_port(None));
         }
-        for port_check in [PortCheck::Free, busy(Some("postgres")), busy(None)] {
+        let unknown = StartDecision::Refuse(ServiceBusy::PortUnknown { port: 5433 });
+        for pid_file in [NoPid, Dead { pid: 7 }, Other { pid: 7 }, Unknown { pid: 7 }] {
+            assert_eq!(decide(&PortCheck::Unknown, pid_file), unknown);
+        }
+        let checks = [
+            PortCheck::Free,
+            busy(Some("postgres")),
+            busy(None),
+            PortCheck::Unknown,
+        ];
+        for port_check in checks {
             assert_eq!(decide(&port_check, Server { pid: 7 }), data_dir_busy);
         }
     }
@@ -398,5 +615,61 @@ mod tests {
         let data = ServiceBusy::DataDir { pid: 7 };
         assert_eq!(data.code(), "service_data_dir_busy");
         assert!(data.to_string().contains("pid 7"), "{data}");
+        let unknown = ServiceBusy::PortUnknown { port: 5432 };
+        assert_eq!(unknown.code(), "service_port_unknown");
+        assert_eq!(unknown.to_string(), "could not check who holds port 5432");
+    }
+
+    #[test]
+    fn a_port_is_free_only_when_the_bind_works_and_nobody_listens() {
+        let docker = || PortLookup::Owner("com.docker.backend(77)".to_owned());
+        assert_eq!(port_check(true, PortLookup::Nobody), PortCheck::Free);
+        // Linux: no look, and the bind decides.
+        assert_eq!(port_check(true, PortLookup::NotChecked), PortCheck::Free);
+        // macOS: our bind works next to Docker on `*:5432`, but lsof sees it.
+        let owner = Some("com.docker.backend(77)".to_owned());
+        let busy_docker = PortCheck::Busy { owner };
+        assert_eq!(port_check(true, docker()), busy_docker);
+        assert_eq!(port_check(false, docker()), busy_docker);
+        // The bind fails: busy, owner unknown.
+        let busy = PortCheck::Busy { owner: None };
+        for lookup in [
+            PortLookup::Nobody,
+            PortLookup::NotChecked,
+            PortLookup::Failed,
+        ] {
+            assert_eq!(port_check(false, lookup), busy);
+        }
+        // The bind works, but lsof cannot tell: not free either.
+        assert_eq!(port_check(true, PortLookup::Failed), PortCheck::Unknown);
+    }
+
+    #[test]
+    fn the_postmaster_pid_is_ours_only_when_it_runs_an_installed_postgres() {
+        let servers = [
+            PathBuf::from("/m/runtimes/postgres/17.12.0/bin/postgres"),
+            PathBuf::from("/m/runtimes/postgres/18.7.0/bin/postgres"),
+        ];
+        let alive = |exe: &str| Liveness::Alive {
+            exe: exe.into(),
+            started: "Wed Nov 18 10:00:00 2026".into(),
+        };
+        let classify = |now: &Liveness| classify_postmaster(4242, now, &servers);
+        let pid = 4242;
+        // Any installed version: an older one may still run on the folder.
+        for exe in &servers {
+            let now = alive(&exe.display().to_string());
+            assert_eq!(classify(&now), PidFileCheck::Server { pid });
+        }
+        // Another PostgreSQL (Homebrew), or the pid reused by another program.
+        for exe in [
+            "/opt/homebrew/opt/postgresql@18/bin/postgres",
+            "/Applications/Safari.app/Contents/MacOS/Safari",
+            "/m/runtimes/postgres/18.7.0/bin/initdb",
+        ] {
+            assert_eq!(classify(&alive(exe)), PidFileCheck::Other { pid });
+        }
+        assert_eq!(classify(&Liveness::Gone), PidFileCheck::Dead { pid });
+        assert_eq!(classify(&Liveness::Unknown), PidFileCheck::Unknown { pid });
     }
 }
