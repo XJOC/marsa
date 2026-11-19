@@ -131,7 +131,10 @@ tcp -U root -d app -c "insert into posts (body) values ('مرحبا بالعال
   fail "Arabic full-text search"
 # pg_trgm is a trusted extension: the owner of the database may create it.
 tcp -U root -d app -c 'create extension pg_trgm'
-[ "$(tcp -U root -d app -c "show lc_ctype")" = C.UTF-8 ] || fail "LC_CTYPE is not C.UTF-8"
+# PostgreSQL 16 and later have no `lc_ctype` setting to show; the database
+# keeps it.
+[ "$(tcp -U root -d app -c "select datctype from pg_database where datname = current_database()")" = C.UTF-8 ] ||
+  fail "LC_CTYPE is not C.UTF-8"
 # Under LC_CTYPE=C, pg_trgm finds no letter outside ASCII: the similarity
 # of two Arabic words was 0, and 0.57 with C.UTF-8.
 [ "$(tcp -U root -d app -c "select similarity('مرحبا', 'مرحب') > 0.3")" = t ] || fail "pg_trgm on Arabic"
