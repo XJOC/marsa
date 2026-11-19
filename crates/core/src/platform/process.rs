@@ -566,7 +566,7 @@ pub async fn listener_holders(listen: &Dial) -> Option<Vec<u32>> {
             use std::os::unix::ffi::OsStrExt as _;
             // Bytes: another user's socket path may not be UTF-8.
             let table = fs::read("/proc/net/unix").ok()?;
-            crate::orphan::parse_proc_net_unix(&table, path.as_os_str().as_bytes())
+            crate::orphan::parse_proc_net_unix(&table, path.as_os_str().as_bytes())?
         }
         Dial::Tcp(port) => {
             let table = fs::read_to_string("/proc/net/tcp").ok()?;
@@ -614,7 +614,8 @@ pub async fn listener_holders(_listen: &Dial) -> Option<Vec<u32>> {
 /// after its death: on macOS pid 1 (launchd) only. On Linux an orphan goes
 /// to its nearest subreaper, such as `systemd --user`, not always to pid 1
 /// (ADR 0025), and which one cannot be read without `prctl`. So: every
-/// ancestor of this daemon, up to pid 1, which is always there. The daemon
+/// ancestor of this daemon, up to pid 1, which is always there unless the
+/// daemon is pid 1 itself (a container: then it has no orphans). The daemon
 /// starts detached, so the daemon that crashed may have had others: its
 /// orphans under a subreaper that is not one of these are not found (a known
 /// limit of `php::orphan`). Never this daemon itself. A list to search,
@@ -993,9 +994,10 @@ mod tests {
     #[tokio::test]
     async fn adopters_end_at_pid_1() {
         let adopters = adopters().await;
-        if std::process::id() != 1 {
-            assert_eq!(adopters.last(), Some(&1), "{adopters:?}");
+        if std::process::id() == 1 {
+            return;
         }
+        assert_eq!(adopters.last(), Some(&1), "{adopters:?}");
         #[cfg(target_os = "linux")]
         {
             let parent = std::os::unix::process::parent_id();

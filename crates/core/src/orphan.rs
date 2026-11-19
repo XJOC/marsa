@@ -576,12 +576,16 @@ const TCP_LISTEN: &str = "0A";
 /// was bound. The table is bytes: the kernel prints each path as it is, so
 /// it may not be UTF-8, and a path with a newline reads as more than one
 /// line. A real socket has one line, so an inode on more than one line is
-/// dropped: a forged line cannot name the socket of a real one. The path is
-/// the last column and may hold spaces; a line in another shape, or an
-/// abstract socket (`@...`), never matches.
-pub fn parse_proc_net_unix(table: &[u8], path: &[u8]) -> Vec<u64> {
-    let mut seen: Vec<u64> = Vec::new();
-    let mut ours = Vec::new();
+/// dropped: a forged line cannot name the socket of a real one. If one of
+/// those lines was at `path`, the answer is `None`: the table cannot say who
+/// listens there, and a forged copy must not hide our own listener. The
+/// path is the last column and may hold spaces; a line in another shape, or
+/// an abstract socket (`@...`), never matches.
+pub fn parse_proc_net_unix(table: &[u8], path: &[u8]) -> Option<Vec<u64>> {
+    use std::collections::{BTreeMap, BTreeSet};
+    // Each inode, and whether a line of it listens at `path`.
+    let mut lines: BTreeMap<u64, bool> = BTreeMap::new();
+    let mut repeated = BTreeSet::new();
     // The first line is the header.
     for line in table.split(|&byte| byte == b'\n').skip(1) {
         // `Num RefCount Protocol Flags Type St Inode Path`.
@@ -602,18 +606,23 @@ pub fn parse_proc_net_unix(table: &[u8], path: &[u8]) -> Vec<u64> {
         let Some(inode) = text(fields[6]).and_then(|inode| inode.parse::<u64>().ok()) else {
             continue;
         };
-        if seen.contains(&inode) {
-            ours.retain(|known| *known != inode);
-            continue;
-        }
-        seen.push(inode);
         let hex = |bytes: &[u8]| text(bytes).and_then(|t| u32::from_str_radix(&t, 16).ok());
         let listens = hex(fields[3]).is_some_and(|flags| flags & UNIX_LISTENING != 0);
-        if complete && listens && hex(fields[4]) == Some(UNIX_STREAM) && rest == path {
-            ours.push(inode);
+        let at_path = complete && listens && hex(fields[4]) == Some(UNIX_STREAM) && rest == path;
+        if let Some(before) = lines.insert(inode, at_path) {
+            repeated.insert(inode);
+            lines.insert(inode, before || at_path);
         }
     }
-    ours
+    let mut ours = Vec::new();
+    for (inode, at_path) in lines {
+        match (at_path, repeated.contains(&inode)) {
+            (true, true) => return None,
+            (true, false) => ours.push(inode),
+            (false, _) => {}
+        }
+    }
+    Some(ours)
 }
 
 /// `bytes` without its leading spaces.
@@ -703,36 +712,57 @@ garbage
         // Listening stream sockets only: not a connected one (no
         // `__SO_ACCEPTCON`), not a datagram one, not a longer path, not an
         // abstract socket, not one with no path.
-        assert_eq!(parse_proc_net_unix(text.as_bytes(), path), [23456, 23462]);
-        assert!(parse_proc_net_unix(text.as_bytes(), b"/home/u").is_empty());
+        let found = parse_proc_net_unix(text.as_bytes(), path);
+        assert_eq!(found, Some(vec![23456, 23462]));
+        assert_eq!(
+            parse_proc_net_unix(text.as_bytes(), b"/home/u"),
+            Some(vec![])
+        );
         // The header alone, and nothing.
         let header = text.lines().next().unwrap().as_bytes();
-        assert!(parse_proc_net_unix(header, path).is_empty());
-        assert!(parse_proc_net_unix(b"", path).is_empty());
+        assert_eq!(parse_proc_net_unix(header, path), Some(vec![]));
+        assert_eq!(parse_proc_net_unix(b"", path), Some(vec![]));
+    }
+
+    /// A table of listening stream sockets: `(inode, path)` each.
+    fn unix_table(sockets: &[(u64, &[u8])]) -> Vec<u8> {
+        let mut table = b"Num       RefCount Protocol Flags    Type St Inode Path\n".to_vec();
+        for (inode, path) in sockets {
+            let start = format!("0000000000000000: 00000002 00000000 00010000 0001 01 {inode} ");
+            table.extend_from_slice(start.as_bytes());
+            table.extend_from_slice(path);
+            table.push(b'\n');
+        }
+        table
     }
 
     /// Another user's socket paths are bytes as they are: one that is not
     /// UTF-8 spoils nothing, and one with a newline that forges our line
-    /// for a real socket's inode does not make it ours.
+    /// for another socket's inode does not make it ours. A forged copy of
+    /// our own listener's line makes the table say nothing about our path.
     #[test]
     fn proc_net_unix_survives_odd_paths_of_others() {
-        let path = b"/run/marsa/php-fpm-8.4.sock";
-        let mut table = b"Num       RefCount Protocol Flags    Type St Inode Path\n".to_vec();
-        table.extend_from_slice(
-            b"0000000000000000: 00000002 00000000 00010000 0001 01 101 /tmp/\xff\xfe\n",
-        );
-        table.extend_from_slice(b"0000000000000000: 00000002 00000000 00010000 0001 01 102 /run/marsa/php-fpm-8.4.sock\n");
-        // The real line of inode 103, then the line forged by its path.
-        table.extend_from_slice(
-            b"0000000000000000: 00000002 00000000 00010000 0001 01 103 /tmp/x\n",
-        );
-        table.extend_from_slice(b"0000000000000000: 00000002 00000000 00010000 0001 01 103 /run/marsa/php-fpm-8.4.sock\n");
-        // A forged line first, then the real line of the same inode.
-        table.extend_from_slice(b"0000000000000000: 00000002 00000000 00010000 0001 01 104 /run/marsa/php-fpm-8.4.sock\n");
-        table.extend_from_slice(
-            b"0000000000000000: 00000002 00000000 00010000 0001 01 104 /tmp/y\n",
-        );
-        assert_eq!(parse_proc_net_unix(&table, path), [102]);
+        let path: &[u8] = b"/run/marsa/php-fpm-8.4.sock";
+        let other_text: &[u8] = b"/tmp/\xff\xfe";
+        // 103: its real line, then a line forged by its path; 104 the other
+        // way round.
+        let table = unix_table(&[
+            (101, other_text),
+            (102, path),
+            (103, b"/tmp/x"),
+            (103, path),
+            (104, path),
+            (104, b"/tmp/y"),
+        ]);
+        assert_eq!(parse_proc_net_unix(&table, path), None);
+        // Repeated lines elsewhere: only the real one at our path.
+        let table = unix_table(&[
+            (101, other_text),
+            (102, path),
+            (105, b"/tmp/z"),
+            (105, b"/tmp/w"),
+        ]);
+        assert_eq!(parse_proc_net_unix(&table, path), Some(vec![102]));
     }
 
     /// Lines of a real `/proc/net/tcp` (x86-64).

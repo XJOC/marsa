@@ -73,9 +73,11 @@
 //! - Linux: `/proc/net/unix` prints socket paths as they are, so another
 //!   user can bind a path with a newline that reads as one more line. A
 //!   forged line that repeats a real socket's inode is dropped
-//!   ([`orphan::parse_proc_net_unix`]); one that names the inode of a TCP
-//!   socket of this user may add its holder to the list. That holder still
-//!   needs every check of a worker.
+//!   ([`orphan::parse_proc_net_unix`]); one that repeats our own
+//!   listener's makes the holders unknown, so the pool waits with
+//!   `php_fpm_orphan_stuck` and nothing is signalled. One that names the
+//!   inode of a TCP socket of this user may add its holder to the list.
+//!   That holder still needs every check of a worker.
 //!
 //! On Linux (ADR 0025) an orphan goes to its nearest subreaper, for example
 //! `systemd --user`, not always to pid 1. So "pid 1" above means each of
