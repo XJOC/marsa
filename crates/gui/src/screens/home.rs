@@ -330,8 +330,8 @@ fn php(model: &Model) -> Php {
     Php::Ready(shown.as_ref().map(minor))
 }
 
-/// `8.4` of `8.4.27`.
-fn minor(version: &Version) -> String {
+/// `8.4` of `8.4.27`. The menu-bar panel names a site's PHP the same way.
+pub(super) fn minor(version: &Version) -> String {
     format!("{}.{}", version.major, version.minor)
 }
 
@@ -426,7 +426,8 @@ pub(super) fn install_bar(view: &InstallView) -> InstallBar {
     }
 }
 
-fn default_php(model: &Model) -> DefaultPhp {
+/// The large picker's data. The menu-bar panel's picker uses it too.
+pub(super) fn default_php(model: &Model) -> DefaultPhp {
     let installed = model.php_versions();
     let choices = php_choices(model);
     let chosen = model
