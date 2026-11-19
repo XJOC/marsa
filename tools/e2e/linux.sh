@@ -456,7 +456,9 @@ fi
 grep -q "Let Caddy use ports 80 and 443: done" <<<"$out" || fail "the ports step is not done"
 grep -q "Trust Marsa's HTTPS certificates: done" <<<"$out" || fail "the trust step is not done"
 grep -q "Trust Marsa's certificates in Chrome and Firefox: done" <<<"$out" || fail "the NSS step is not done"
-run certutil -d "sql:$HOME/.pki/nssdb" -L -n "Marsa Local CA"
+run certutil -d "sql:$HOME/.pki/nssdb" -L
+# The nickname carries the root's fingerprint, and the root is trusted (C).
+certutil -d "sql:$HOME/.pki/nssdb" -L | grep -Eq "^Marsa Local CA [0-9a-f]{16} +C" || fail "Chrome's database has no trusted Marsa root"
 [ "$(cat "$PORT_START")" = 80 ] || fail "ip_unprivileged_port_start is $(cat "$PORT_START"), not 80"
 wait_for_name "$SITE" || fail "$SITE does not resolve"
 # From here on the name resolves on both ways.
