@@ -10,28 +10,28 @@
 pub mod app;
 pub mod bridge;
 // Debug builds only: fixed fake data for the design review, so a release
-// build reads no extra environment variable (task M5-D5).
+// build reads no extra environment variable.
 #[cfg(debug_assertions)]
 pub mod demo;
 // What a line of a program's output says: its level and its message.
 pub mod logline;
 // The measurement mode: made-up data and a frame count, for a release build
-// with no daemon. It needs an empty data folder (task M5-D10). Behind the
+// with no daemon. It needs an empty data folder. Behind the
 // cargo feature `measure`, off by default, so a shipped binary has no made-up
 // data in it.
 #[cfg(feature = "measure")]
 pub mod measure;
 pub mod model;
-// The menu-bar panel's window mode, `marsa-gui --panel` (task M5-D11).
+// The menu-bar panel's window mode, `marsa-gui --panel`.
 pub mod panel;
 // The system's opener of a folder: only `app` runs it.
 pub(crate) mod opener;
-// The window's own preferences, in `config/gui.toml` (task M5-D9).
+// The window's own preferences, in `config/gui.toml`.
 pub mod prefs;
 // The window's own screens: only `shell` draws them.
 pub(crate) mod screens;
 // Debug builds only: a design-review aid, so a release build reads no extra
-// environment variable (task M5-D1).
+// environment variable.
 #[cfg(debug_assertions)]
 pub mod screenshot;
 // The sidebar and the router: only `app` draws them.

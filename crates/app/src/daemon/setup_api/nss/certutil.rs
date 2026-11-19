@@ -2,6 +2,7 @@
 //! through [`Runner`] with no shell, and what their output says.
 
 use std::ffi::OsString;
+use std::fs;
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use super::super::user_trust::{self, PEM_END};
 use super::super::{PEM_BEGIN, PIPE_GRACE, RunOutput, Runner};
 use super::Failure;
+use super::databases::CERT_DB;
 
 /// The tool, by its absolute path (AGENTS.md section 6).
 pub const CERTUTIL: &str = "/usr/bin/certutil";
@@ -65,12 +67,22 @@ impl Calls<'_> {
     }
 
     /// The rows of `certutil -L` whose nickname starts with Marsa's name. A
-    /// listing that fails (no database yet) has none.
+    /// folder with no `cert9.db` has none; a listing that fails where there
+    /// is one is a failure, so no fingerprint counts as gone from it.
     pub(super) fn rows(&self, dir: &Path) -> Result<Vec<Row>, Failure> {
         let mut args = database_args(dir);
         args.push("-L".into());
         let output = self.run(&args)?;
         if output.code != Some(0) {
+            let database = fs::symlink_metadata(dir.join(CERT_DB)).is_ok_and(|meta| meta.is_file());
+            if database {
+                return Err(Failure::Other(format!(
+                    "certutil -L ended with exit code {}",
+                    output
+                        .code
+                        .map_or_else(|| "none".to_owned(), |code| code.to_string())
+                )));
+            }
             return Ok(Vec::new());
         }
         Ok(rows(&String::from_utf8_lossy(&output.stdout)))
@@ -111,7 +123,7 @@ fn args(dir: &Path, rest: &[&str]) -> Vec<OsString> {
     args
 }
 
-pub(super) fn list_args(dir: &Path, nickname: &str) -> Vec<OsString> {
+fn list_args(dir: &Path, nickname: &str) -> Vec<OsString> {
     args(dir, &["-L", "-n", nickname, "-a"])
 }
 

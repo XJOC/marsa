@@ -1,6 +1,5 @@
 //! Windows: `marsa-helper install` and `marsa-helper uninstall`, which
-//! `marsad` runs once each, elevated through the UAC prompt (ADR 0018). Task
-//! M4-19j.
+//! `marsad` runs once each, elevated through the UAC prompt (ADR 0018).
 //!
 //! ```text
 //! marsa-helper install <user SID> <CA SHA-256 | ->

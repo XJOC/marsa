@@ -2,8 +2,7 @@
 //!
 //! Pure: no drawing and no I/O, so the tests run without a window. The
 //! drawing code in `shell` and `screens` reads a [`Model`], and returns an
-//! [`Action`] when the user presses something (or, in the screens not
-//! converted yet, calls the model's methods).
+//! [`Action`] when the user presses something.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::mem;
@@ -31,7 +30,7 @@ pub use crate::tray::menu::Autostart;
 pub const LOG_SERVICE: &str = "caddy";
 /// The service that serves every site: no site opens while it is down.
 pub const WEB_SERVER: &str = "caddy";
-/// The daemon's DNS server for `.test` names, on macOS and Linux (task M4-18i).
+/// The daemon's DNS server for `.test` names, on macOS and Linux.
 pub const DNS_SERVER: &str = "dns";
 /// The most log lines kept for each service. The oldest go first.
 pub const MAX_LOG_LINES: usize = 5000;
@@ -137,7 +136,7 @@ pub enum Update {
     /// The answer to the Xdebug box: the state after the change, or a client
     /// error code.
     XdebugAnswered(Result<XdebugState, String>),
-    /// Linux (task M4-18k3): whether the hosts file holds this data
+    /// Linux: whether the hosts file holds this data
     /// folder's names, and the sites it lacks. Read when a session starts,
     /// after each site list, after setup, and after "Add to /etc/hosts".
     Hosts(HostsStatus),
@@ -149,7 +148,7 @@ pub enum Update {
     Event(Event),
 }
 
-/// The "Add to /etc/hosts" button (Linux, task M4-18k3).
+/// The "Add to /etc/hosts" button (Linux).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum HostsSync {
     #[default]
@@ -251,7 +250,7 @@ pub enum SitesNotice {
 
 /// Which of the model's results a notice in the bar tells about. Closing the
 /// notice clears that result ([`Model::dismiss_notice`]), so the bar shows the
-/// next one (task M5-D9).
+/// next one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NoticeSource {
     /// A call to the daemon failed ([`Model::notice`]).
@@ -269,7 +268,7 @@ pub enum NoticeSource {
     Autostart,
 }
 
-/// Something the window removes once the user confirms it (task M5-10).
+/// Something the window removes once the user confirms it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Removal {
     /// `DELETE /v1/runtimes/{tool}/{version}`, with the full version.
@@ -517,7 +516,7 @@ pub enum Route {
     Settings,
 }
 
-/// The log the Logs screen shows: one service's, by its id (task M5-D10).
+/// The log the Logs screen shows: one service's, by its id.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum LogSource {
     #[default]
@@ -549,8 +548,7 @@ impl LogSource {
 /// What the user did in the window. The shell and the screens return it,
 /// and [`Model::apply_action`] turns it into state, and into a bridge
 /// [`Command`] when the daemon must act (code.md, State). [Laravel: a form
-/// posted to a controller.] The screens that still call the model's methods
-/// move here with their own tasks (M5-D5 to M5-D10).
+/// posted to a controller.]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// A sidebar item, or the status at its bottom.
@@ -575,7 +573,7 @@ pub enum Action {
     /// A fix that installs a program (Home: "Install Caddy"). Queued like a
     /// press of Install; `App` sends it.
     Install(InstallJob),
-    /// The fix "Add to /etc/hosts" (Linux, task M4-18k3).
+    /// The fix "Add to /etc/hosts" (Linux).
     SyncHosts,
     /// "Open" on a site. A local action: `App` hands the address
     /// ([`Model::site_url`]) to the system, never a screen (code.md, State).
@@ -615,7 +613,7 @@ pub enum Action {
     /// result it told about goes.
     DismissNotice(NoticeSource),
     /// "Install a version…" (or the dashed "+") of a runtime: its install
-    /// dialog opens (task M5-D8).
+    /// dialog opens.
     AskInstall(Runtime),
     /// The text typed in the install dialog's version field.
     SetInstallVersion { runtime: Runtime, text: String },
@@ -629,7 +627,7 @@ pub enum Action {
     /// The Xdebug switch.
     ToggleXdebug,
     /// The confirmation's action ("Unlink", "Forget", "Uninstall"): sends the
-    /// removal it asked about (task M5-D9).
+    /// removal it asked about.
     ConfirmRemoval,
     /// "Cancel" or Escape in the confirmation.
     CancelRemoval,
@@ -640,12 +638,12 @@ pub enum Action {
     /// file manager.
     OpenDataFolder,
     /// An option of the Appearance control in Settings. `App` applies it at
-    /// once and writes it to `gui.toml` (task M5-D9).
+    /// once and writes it to `gui.toml`.
     SetAppearance(Appearance),
 }
 
 /// How Marsa works as a whole, as far as the window can tell: the status at
-/// the bottom of the sidebar (principles 1). M5-D5 adds the request path.
+/// the bottom of the sidebar (principles 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overall {
     /// Connecting to the daemon, or again after it went away.
@@ -702,7 +700,7 @@ pub struct Model {
     /// folder name is its stable key). A runtime with no entry has an empty
     /// field: the newest stable version. A map, not an array in
     /// [`Runtime::ALL`] order, so a runtime that core adds needs nothing
-    /// here. Kept across sessions (task M5-D8).
+    /// here. Kept across sessions.
     install_input: BTreeMap<&'static str, String>,
     /// The runtime whose install dialog is open.
     pub install_dialog: Option<Runtime>,
@@ -738,7 +736,7 @@ pub struct Model {
     xdebug_pending: Option<bool>,
     /// The last Xdebug read or change failed. A client error code.
     pub xdebug_notice: Option<String>,
-    /// Linux: the sites the hosts file lacks (task M4-18k3).
+    /// Linux: the sites the hosts file lacks.
     pub hosts: HostsStatus,
     pub hosts_sync: HostsSync,
     /// The screen the main area shows.
@@ -1053,7 +1051,7 @@ impl Model {
         }
     }
 
-    // -- Sites: park and link with the folder dialog (task M5-10) --
+    // -- Sites: park and link with the folder dialog --
 
     /// The user picked `folder` to park. Returns the folder to send, or
     /// `None` if it is not an absolute path; the notice line then says why.
@@ -1116,7 +1114,7 @@ impl Model {
             .find(|site| site.name == name && site.root != form.folder)
     }
 
-    // -- Runtimes: installs (task M5-10) --
+    // -- Runtimes: installs --
 
     /// The install the Runtimes section shows: one this window started that
     /// has not ended, else the newest one, whoever started it.
@@ -1369,7 +1367,7 @@ impl Model {
         }
     }
 
-    // -- First run, setup, and settings (task M5-10) --
+    // -- First run, setup, and settings --
 
     /// "Install PHP 8.4 and Caddy": the jobs of what is missing, PHP first.
     /// `false` if the panel does not offer it now.
@@ -1458,7 +1456,7 @@ impl Model {
         Some(enabled)
     }
 
-    // -- Removals: uninstall, unlink, and forget, after a confirmation (task M5-10) --
+    // -- Removals: uninstall, unlink, and forget, after a confirmation --
 
     /// Whether a removal can be asked for now: connected, and no other
     /// removal waits for its answer.
@@ -1542,8 +1540,7 @@ impl Model {
             Removal::Uninstall { runtime, version } => {
                 // The bridge reads the list again; until it comes, the
                 // version is gone from the table already. The last version
-                // took the default that picked it, as in the daemon (task
-                // M5-19).
+                // took the default that picked it, as in the daemon.
                 if let Some(row) = self.runtimes.iter_mut().find(|r| r.runtime == runtime) {
                     let picks = |text: &str| resolver::best_match(text, &row.installed);
                     let picked = row.default.as_deref().and_then(|t| picks(t).ok().flatten());
@@ -1639,7 +1636,7 @@ impl Model {
             .map(|site| site.root.as_path())
     }
 
-    // -- Xdebug (tasks M5-11 and M5-10) --
+    // -- Xdebug --
 
     /// Whether the Xdebug box shows a tick: the state asked for until the
     /// daemon answers, else the daemon's. `None` until it is read.
@@ -1918,7 +1915,6 @@ impl Model {
     }
 }
 
-/// Applies one daemon event.
 /// Why "Add to /etc/hosts" did not put the names in: the code of the
 /// error, of a skipped step, or of a failed one. `None` if it did, or there
 /// was nothing to add.
@@ -1941,6 +1937,7 @@ fn not_added(report: &SetupReport) -> Option<String> {
         })
 }
 
+/// Applies one daemon event.
 pub fn apply(model: &mut Model, event: Event) {
     match event {
         Event::ServiceChanged(status) => {
@@ -2821,7 +2818,7 @@ mod tests {
         assert_eq!(model.sites_notice, Some(failed));
     }
 
-    // -- The PHP and Node lists (task M5-02) --
+    // -- The PHP and Node lists --
 
     fn v(text: &str) -> Version {
         text.parse().unwrap()
@@ -3153,7 +3150,7 @@ mod tests {
         }
     }
 
-    // -- Installs (task M5-10) --
+    // -- Installs --
 
     use marsa_core::types::{InstallDone, SetupSkip};
 
@@ -3389,7 +3386,7 @@ mod tests {
         assert_eq!(ids, [Some(3), Some(4), Some(5), Some(6)]);
     }
 
-    // -- First run (task M5-10) --
+    // -- First run --
 
     #[test]
     fn the_first_run_panel_shows_with_no_php_or_no_caddy() {
@@ -3526,7 +3523,7 @@ mod tests {
         assert!(!model.start_first_run());
     }
 
-    // -- Setup (task M5-10) --
+    // -- Setup --
 
     fn report(code: &str) -> SetupReport {
         SetupReport {
@@ -3538,7 +3535,7 @@ mod tests {
         }
     }
 
-    /// Task M4-18k3: "Add to /etc/hosts" runs only with something to add,
+    /// "Add to /etc/hosts" runs only with something to add,
     /// one at a time, never during a setup, and says why when the names
     /// did not go in.
     #[test]
@@ -3640,7 +3637,7 @@ mod tests {
         assert_eq!(model.setup, Setup::Idle);
     }
 
-    // -- Settings (task M5-10) --
+    // -- Settings --
 
     #[test]
     fn start_at_login_follows_each_state() {
@@ -3685,7 +3682,7 @@ mod tests {
         assert!(!APP_VERSION.is_empty());
     }
 
-    // -- Link (task M5-10) --
+    // -- Link --
 
     #[test]
     fn a_picked_folder_gets_a_name_made_from_it() {
@@ -3751,7 +3748,7 @@ mod tests {
         assert_eq!(model.link.as_ref().unwrap().name, "web");
     }
 
-    // -- Removals: uninstall, unlink, and forget (task M5-10) --
+    // -- Removals: uninstall, unlink, and forget --
 
     fn uninstall(runtime: Runtime, version: &str) -> Removal {
         Removal::Uninstall {
@@ -3877,7 +3874,7 @@ mod tests {
         assert_eq!(model.next_install(), Some(job(Runtime::Node, Some("22"))));
     }
 
-    // -- The install dialog, the chosen runtime, and sites per version (task M5-D8) --
+    // -- The install dialog, the chosen runtime, and sites per version --
 
     #[test]
     fn the_install_dialog_keeps_a_field_for_each_runtime_and_closes_when_the_job_is_queued() {
@@ -4133,7 +4130,7 @@ mod tests {
         assert!(model.sites_notice.is_none());
     }
 
-    // -- Xdebug (task M5-10) --
+    // -- Xdebug --
 
     fn xdebug(enabled: bool) -> XdebugState {
         XdebugState {

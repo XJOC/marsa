@@ -28,7 +28,7 @@
 //! another place. Flatpak browsers keep their own databases and are not
 //! covered (ADR 0014).
 //!
-//! **Each data folder touches only its own certificates** ([`record`]): a
+//! **Each data folder touches only its own certificates** (`record`): a
 //! nickname carries the certificate's fingerprint, and only the
 //! fingerprints this data folder recorded are ever deleted: by setup, an
 //! older root of its own; by the uninstall ([`remove`]), all of them.
@@ -37,7 +37,10 @@
 //! -d sql:<dir> -L` gives the nickname and trust of each row:
 //!
 //! 1. Each recorded fingerprint other than this certificate's whose row is
-//!    there: `-D -n <its nickname>`. One that fails stays in the record.
+//!    there: `-D -n <its nickname>`. The older fingerprints leave the
+//!    record only when every database was read and none failed; a database
+//!    left alone, left out, or that `certutil` could not list may still
+//!    hold them. Without `certutil` the record is put back as it was.
 //! 2. This certificate's row with `C` in its SSL trust, and the certificate
 //!    among `-L -n <nickname> -a` (every certificate with Marsa's subject):
 //!    `unchanged`. Its row without `C`: `-M -n <nickname> -t C,,`.
@@ -46,6 +49,8 @@
 //!    the nickname of a certificate that is there already): `--rename` it to its
 //!    own nickname, then `-M -t C,,`. Only when that row and this
 //!    certificate are the only ones the other rows do not account for.
+//!    The certificate there under a row that is not its own and not provably
+//!    the plain one: `nss_add_failed`, since `-A` would keep that nickname.
 //! 4. Otherwise `-A -t C,, -n <nickname> -i <file>`. `<file>` is
 //!    `<data>/trust/nss.pem`, the checked text setup sent to the helper,
 //!    written for this step and deleted after it. An `-A` that fails is
@@ -63,9 +68,9 @@
 //! message. No `certutil` at all is not a failure: the step is skipped as
 //! `nss_tool_missing`. The whole step stays under [`NSS_BUDGET`].
 //!
-//! The files: [`databases`] finds the databases and checks every folder and
-//! file on the way; [`certutil`] runs `certutil` and reads its output;
-//! [`record`] keeps the fingerprints; this one decides what to run for each
+//! The files: `databases` finds the databases and checks every folder and
+//! file on the way; `certutil` runs `certutil` and reads its output;
+//! `record` keeps the fingerprints; this one decides what to run for each
 //! database.
 
 mod certutil;
@@ -143,25 +148,21 @@ pub fn install(
     let Some(fingerprint) = Fingerprint::of(pem) else {
         return failed("the CA root is not one certificate".into());
     };
-    let (databases, refused) = databases(home);
+    let found = databases(home);
     let file = files.dir().join(PEM_FILE);
     // The record first, with this certificate in it: a step stopped half
     // way still leaves what the uninstall needs to find.
     let ready = user_trust::private_dir(files.dir())
         .and_then(|()| read_record(files))
-        .and_then(|mut recorded| {
-            let old: Vec<Fingerprint> = recorded
-                .iter()
-                .filter(|fp| **fp != fingerprint)
-                .cloned()
-                .collect();
+        .and_then(|before| {
+            let mut recorded = before.clone();
             recorded.insert(fingerprint.clone());
             write_record(files, &recorded)?;
             user_trust::write_pending(&file, pem)?;
-            Ok(old)
+            Ok(before)
         });
-    let old = match ready {
-        Ok(old) => old,
+    let before = match ready {
+        Ok(before) => before,
         Err(problem) => {
             tracing::warn!(problem = %problem, "the trust folder cannot be used; certutil does not run");
             return failed(problem);
@@ -177,13 +178,16 @@ pub fn install(
         fingerprint,
         file: file.clone(),
     };
+    let old: Vec<Fingerprint> = before
+        .iter()
+        .filter(|fp| **fp != ours.fingerprint)
+        .cloned()
+        .collect();
     let mut failures = Vec::new();
-    // Older certificates of this data folder that some database still holds.
-    let mut kept = BTreeSet::new();
     let mut changed = 0;
-    for database in &databases {
+    for database in &found.databases {
         let dir = database.dir.display();
-        match add(&mut calls, database, &ours, &old, &mut kept) {
+        match add(&mut calls, database, &ours, &old) {
             Ok(true) => {
                 tracing::info!(%dir, "Marsa's CA root added to an NSS database");
                 changed += 1;
@@ -191,6 +195,11 @@ pub fn install(
             Ok(false) => tracing::info!(%dir, "Marsa's CA root is in this NSS database already"),
             Err(Failure::ToolMissing) => {
                 user_trust::discard(&file);
+                // Nothing was added anywhere: the record goes back to what it
+                // was, so the uninstall does not look for this root.
+                if let Err(problem) = write_record(files, &before) {
+                    tracing::warn!(problem = %problem, "cannot put the record of NSS fingerprints back");
+                }
                 tracing::warn!(
                     "{CERTUTIL} is not installed; Chrome and Firefox do not trust Marsa's CA"
                 );
@@ -203,12 +212,16 @@ pub fn install(
         }
     }
     user_trust::discard(&file);
-    let left: BTreeSet<Fingerprint> = kept.into_iter().chain([ours.fingerprint]).collect();
-    if let Err(problem) = write_record(files, &left) {
-        // The record still lists every older fingerprint: the uninstall
-        // looks for each, and finds the deleted ones gone.
-        tracing::warn!(problem = %problem, "cannot update the record of NSS fingerprints");
+    // An older fingerprint leaves the record only when every database was
+    // read and none still holds it: a database left alone, left out, or
+    // one `certutil` failed on may still trust it.
+    if failures.is_empty() && found.refused.is_empty() && found.complete {
+        let left = BTreeSet::from([ours.fingerprint.clone()]);
+        if let Err(problem) = write_record(files, &left) {
+            tracing::warn!(problem = %problem, "cannot update the record of NSS fingerprints");
+        }
     }
+    let refused = found.refused;
     if !failures.is_empty() || !refused.is_empty() {
         // A database `certutil` failed on is the more useful code: the
         // refused ones are in the message too.
@@ -320,7 +333,7 @@ pub fn remove(
 
 /// This data folder's certificate.
 struct Ours {
-    /// Its base64, as [`bodies`] gives it.
+    /// Its base64, as `certutil::bodies` gives it.
     body: String,
     fingerprint: Fingerprint,
     /// The checked copy `certutil -i` reads.
@@ -329,7 +342,7 @@ struct Ours {
 
 /// Why one database did not take the certificate.
 #[derive(Debug)]
-pub(super) enum Failure {
+enum Failure {
     /// `certutil` is not there: no database can take it.
     ToolMissing,
     Other(String),
@@ -346,14 +359,12 @@ impl Failure {
 }
 
 /// `true` once `database` changed, `false` if it had the certificate,
-/// trusted, under its own nickname already. Older recorded certificates
-/// whose deletion failed go into `kept`.
+/// trusted, under its own nickname already.
 fn add(
     calls: &mut Calls<'_>,
     database: &Database,
     ours: &Ours,
     old: &[Fingerprint],
-    kept: &mut BTreeSet<Fingerprint>,
 ) -> Result<bool, Failure> {
     let dir = &database.dir;
     // The rows first, before any folder is made: it is also how a missing
@@ -369,18 +380,17 @@ fn add(
         tracing::info!(dir = %dir.display(), %nickname, "deleting an older CA of this data folder");
         match calls.expect_success(&delete_args(dir, &nickname), "-D") {
             Ok(()) => changed = true,
-            Err(Failure::Other(why)) => {
-                kept.insert(fingerprint.clone());
-                problems.push(why);
-            }
+            Err(Failure::Other(why)) => problems.push(why),
             Err(missing) => return Err(missing),
         }
     }
     let nickname = ours.fingerprint.nickname();
     let own = rows.iter().find(|row| row.nickname == nickname);
-    let added = if let Some(row) =
-        own.filter(|_| calls.holds(dir, &nickname, &ours.body).unwrap_or(false))
-    {
+    let held = match own {
+        Some(_) => calls.holds(dir, &nickname, &ours.body)?,
+        None => false,
+    };
+    let added = if let Some(row) = own.filter(|_| held) {
         if row.trusted() {
             false
         } else {
@@ -397,6 +407,17 @@ fn add(
             // A row with this certificate's nickname but another
             // certificate: the nickname is this certificate's alone.
             calls.expect_success(&delete_args(dir, &nickname), "-D")?;
+        } else if let Some(row) = rows.first() {
+            // `-A` keeps the nickname of a certificate that is there
+            // already, so this one would never get its own row, and no
+            // uninstall could find it.
+            if calls.holds(dir, &row.nickname, &ours.body)? {
+                return Err(Failure::Other(
+                    "Marsa's CA root is in this database under another nickname; delete it \
+                     with certutil -D, then run setup again"
+                        .into(),
+                ));
+            }
         }
         if database.new {
             make_dir(dir).map_err(Failure::Other)?;
@@ -424,7 +445,7 @@ fn add(
     }
 }
 
-/// Whether the row with the plain nickname of task M4-18g holds this
+/// Whether the row with the plain nickname of the first NSS step holds this
 /// certificate. `-L -n` lists every certificate with Marsa's subject, so
 /// the rows named after a fingerprint account for theirs; the plain row
 /// holds ours only if it is the one row left and ours the one certificate
@@ -468,12 +489,27 @@ mod tests {
     use super::certutil::{CALL_LIMIT, bodies};
     use super::databases::{CERT_DB, CHROME, under};
 
+    use super::super::RunOutput;
     use super::super::tests::{Call, Fake, TEST_CA, TEST_CA_2, exit, ok};
     use super::*;
     use tempfile::TempDir;
 
-    /// What `certutil -L` prints when the nickname is not there.
+    /// What `certutil -L` prints for a folder with no database yet.
+    const NO_DATABASE: &str = "certutil: function failed: SEC_ERROR_BAD_DATABASE\n";
+    /// What `certutil -L -n` prints when no certificate has the nickname.
     const NOT_FOUND: &str = "certutil: Could not find cert: Marsa Local CA\n";
+
+    /// `certutil -L` as on a real system with no Marsa root: an empty table
+    /// where there is a database, `SEC_ERROR_BAD_DATABASE` where there is
+    /// none; `-L -n` finds nothing.
+    fn no_marsa_rows(args: &[String]) -> io::Result<RunOutput> {
+        let dir = Path::new(args[1].trim_start_matches("sql:"));
+        match (args.len(), dir.join(CERT_DB).is_file()) {
+            (3, true) => ok(&listing(&[])),
+            (3, false) => exit(255, NO_DATABASE),
+            _ => exit(255, NOT_FOUND),
+        }
+    }
 
     /// A home folder and a data folder.
     struct Home {
@@ -521,7 +557,7 @@ mod tests {
         Fake::answering(|program, args| {
             assert_eq!(program, CERTUTIL);
             match args[2].as_str() {
-                "-L" => exit(255, NOT_FOUND),
+                "-L" => no_marsa_rows(args),
                 _ => ok(""),
             }
         })
@@ -584,6 +620,11 @@ mod tests {
             .iter()
             .map(|call| call.args[2..].to_vec())
             .collect()
+    }
+
+    fn write_record_of(home: &Home, lines: &str) {
+        fs::create_dir_all(home.files().dir()).unwrap();
+        fs::write(record_path(&home.files()), lines).unwrap();
     }
 
     fn record(home: &Home) -> String {
@@ -712,9 +753,46 @@ mod tests {
         assert_eq!(record(&home), format!("{HASH_OURS}\n{SECOND_SHA256}\n"));
     }
 
-    /// The plain nickname of task M4-18g, holding this certificate: it is
+    /// An older fingerprint stays recorded while any database may still
+    /// hold it: one left alone, or one `certutil` could not list.
+    #[test]
+    fn older_fingerprints_stay_recorded_until_every_database_was_read() {
+        for broken in ["refused", "unlisted"] {
+            let home = Home::new();
+            write_record_of(&home, &format!("{SECOND_SHA256}\n"));
+            let profile = home.profile(&[".mozilla", "firefox"], "a.default");
+            let unlisted = sql(&profile);
+            if broken == "refused" {
+                fs::write(home.home().join(".pki"), "").unwrap();
+            }
+            let rows = listing(&[(SECOND, "C,,")]);
+            let fail_list = broken == "unlisted";
+            let fake = Fake::answering(move |_, args| match (args[2].as_str(), args.len()) {
+                ("-L", 3) if fail_list && args[1] == unlisted => {
+                    exit(255, "SEC_ERROR_BAD_DATABASE")
+                }
+                ("-L", 3) => ok(&rows),
+                ("-L", _) => exit(255, NOT_FOUND),
+                _ => ok(""),
+            });
+            assert_eq!(
+                result(home.install(&fake)).status,
+                OpStatus::Failed,
+                "{broken}"
+            );
+            assert_eq!(
+                record(&home),
+                format!("{HASH_OURS}\n{SECOND_SHA256}\n"),
+                "{broken}"
+            );
+        }
+    }
+
+    /// The plain nickname of the first NSS step, holding this certificate: it is
     /// renamed, so the uninstall finds it by its fingerprint. Holding
-    /// another one, or with an unknown row beside it, it is left alone.
+    /// another one, it is left alone. (The fake lists the same roots for
+    /// every nickname, as real `-L -n` does for one subject; `TEST_CA`'s own
+    /// subject differs, which the code never looks at.)
     #[test]
     fn the_plain_nickname_is_renamed_only_when_it_holds_this_certificate() {
         let home = Home::new();
@@ -740,21 +818,33 @@ mod tests {
             ]
         );
 
-        let other: &[(&str, &str)] = &[(CA_NAME, "C,,")];
+        // The plain row holds another root: this one is added beside it.
+        let home = Home::new();
+        let fake = chrome_with(&home, &[(CA_NAME, "C,,")], &[TEST_CA_2]);
+        assert_eq!(result(home.install(&fake)).status, OpStatus::Done);
+        let calls = tails(&fake);
+        assert!(
+            calls
+                .iter()
+                .all(|args| args[0] != "--rename" && args[0] != "-D"),
+            "{calls:?}"
+        );
+        assert_eq!(calls.last().unwrap()[0], "-A");
+
+        // This root is there, but which row holds it cannot be told: two
+        // plain rows (`--rename` would pick either), or an unknown one
+        // beside the plain one. `-A` would keep that row's nickname, so the
+        // step says so and changes nothing.
+        let two: &[(&str, &str)] = &[(CA_NAME, "C,,"), (CA_NAME, "C,,")];
         let unknown: &[(&str, &str)] = &[(CA_NAME, "C,,"), ("Marsa Local CA mine", "C,,")];
-        let cases = [(other, [TEST_CA_2]), (unknown, [TEST_CA])];
-        for (rows, pems) in cases {
+        for rows in [two, unknown] {
             let home = Home::new();
-            let fake = chrome_with(&home, rows, &pems);
-            assert_eq!(result(home.install(&fake)).status, OpStatus::Done);
-            let tails = tails(&fake);
-            assert!(
-                tails
-                    .iter()
-                    .all(|args| args[0] != "--rename" && args[0] != "-D"),
-                "{tails:?}"
-            );
-            assert_eq!(tails.last().unwrap()[0], "-A");
+            let fake = chrome_with(&home, rows, &[TEST_CA]);
+            let failed = result(home.install(&fake));
+            assert_eq!(failed.code.as_deref(), Some(NSS_ADD_FAILED), "{rows:?}");
+            assert!(failed.message.unwrap().contains("under another nickname"));
+            let calls = tails(&fake);
+            assert!(calls.iter().all(|args| args[0] == "-L"), "{calls:?}");
         }
     }
 
@@ -763,7 +853,7 @@ mod tests {
     fn a_failed_add_is_taken_out_again() {
         let home = Home::new();
         let fake = Fake::answering(|_, args| match args[2].as_str() {
-            "-L" => exit(255, NOT_FOUND),
+            "-L" => no_marsa_rows(args),
             "-A" => exit(255, "SEC_ERROR_TOKEN_NOT_LOGGED_IN"),
             _ => ok(""),
         });
@@ -810,6 +900,8 @@ mod tests {
         let fake = Fake::answering(|_, _| Err(io::Error::from(io::ErrorKind::NotFound)));
         assert_eq!(home.install(&fake), Outcome::Skipped(NSS_TOOL_MISSING));
         assert_eq!(fake.calls().len(), 1);
+        // Nothing was added, so nothing is recorded for the uninstall.
+        assert!(!record_path(&home.files()).exists());
         // Nothing made for a step that did not run.
         assert!(!home.home().join(".pki").exists());
         assert!(!home.files().dir().join(PEM_FILE).exists());
@@ -822,7 +914,7 @@ mod tests {
         let second = home.profile(&[".mozilla", "firefox"], "b.default");
         let broken = sql(&first);
         let fake = Fake::answering(move |_, args| match args[2].as_str() {
-            "-L" => exit(255, NOT_FOUND),
+            "-L" => no_marsa_rows(args),
             "-A" if args[1] == broken => exit(255, "SEC_ERROR_READ_ONLY"),
             _ => ok(""),
         });
@@ -852,8 +944,11 @@ mod tests {
         for n in 0..=MAX_PROFILES {
             home.profile(&base, &format!("p{n:02}"));
         }
-        let (found, refused) = databases(&home.home());
-        assert!(refused.is_empty(), "{refused:?}");
+        let all = databases(&home.home());
+        assert!(all.refused.is_empty(), "{:?}", all.refused);
+        // One profile left out: the scan is not complete.
+        assert!(!all.complete);
+        let found = all.databases;
         // Chrome's, then the first profiles by name.
         assert_eq!(found.len(), 1 + MAX_PROFILES);
         assert!(found[1].dir.ends_with("p00"));

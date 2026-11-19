@@ -4,7 +4,7 @@
 //! `app_data_dir()` points inside the temp folder. Nothing touches the user's
 //! folders, the network, or the real `PATH`.
 
-// Unix only: the shim `exec`s only on Unix (Windows is task M1-07), and the
+// Unix only: the shim `exec`s only on Unix (the Windows shim does not exec), and the
 // `directories` crate does not read `HOME` on Windows.
 #![cfg(unix)]
 
@@ -293,7 +293,7 @@ done < "$PHPRC"
 exit 0
 "#;
 
-/// Task M5-11. The daemon writes `php/<minor>/php.ini` with
+/// The daemon writes `php/<minor>/php.ini` with
 /// `marsa_core::php::php_ini`; the shim points `PHPRC` at that file. So this
 /// test writes the file the same way, and runs `php -m` through the shim.
 #[test]

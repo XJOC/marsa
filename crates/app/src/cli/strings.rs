@@ -344,6 +344,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "postgres_start_timeout" => "PostgreSQL started but took no connections in time, so it \
              was stopped. Run \"marsa logs postgres\" to see why."
             .into(),
+        "postgres_orphan_stuck" => "An old PostgreSQL of this Marsa, left running when the \
+             Marsa daemon stopped, still runs after SIGKILL, or can no longer be told apart \
+             from another program. Run \"marsa logs postgres\" to see its pid; quit that \
+             process in your system's process list only if it is PostgreSQL, then try again."
+            .into(),
         "postgres_unsupported_platform" => {
             "Marsa runs PostgreSQL on macOS and Linux only for now.".into()
         }
@@ -2094,6 +2099,7 @@ mod tests {
         "postgres_init_failed",
         "postgres_start_timeout",
         "postgres_unsupported_platform",
+        "postgres_orphan_stuck",
         "service_managed_by_sites",
         "php_fpm_orphan_stuck",
         "exited",

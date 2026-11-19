@@ -47,7 +47,7 @@ impl ValidRequest {
     }
 }
 
-/// One op from the closed list (task M4-05). The helper never opens or writes
+/// One op from the closed list. The helper never opens or writes
 /// a path from the request: every path it touches is a constant in its code.
 ///
 /// Ops without fields are empty struct variants (`TrustRemove {}`), not unit
@@ -58,7 +58,7 @@ impl ValidRequest {
 pub enum Op {
     /// Trusts a CA root certificate, sent as PEM text. The text, not a path:
     /// root must never open a path the caller chose (a symlink, a FIFO, a
-    /// network share). Task M4-09 parses the PEM.
+    /// network share). The trust op parses the PEM.
     TrustInstall {
         pem: String,
     },
@@ -260,7 +260,7 @@ fn check_port(field: String, port: u16) -> Result<(), RequestError> {
     Ok(())
 }
 
-/// Only the size and the bytes. Task M4-09 parses the PEM itself.
+/// Only the size and the bytes. The trust op parses the PEM itself.
 fn check_pem(field: String, pem: &str) -> Result<(), RequestError> {
     let reason = if pem.is_empty() {
         "is empty"

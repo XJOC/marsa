@@ -1,4 +1,4 @@
-//! Logs (layout.md, Screens; task M5-D10): the output of one program at a
+//! Logs (layout.md, Screens): the output of one program at a
 //! time, as a list of lines that fills the window. The source is the control
 //! at the end of the header (Caddy, and each PHP pool the daemon lists); under
 //! it, a field that filters the lines, a chip for each level, and Follow.

@@ -27,7 +27,7 @@ const MAX_RECORD_BYTES: u64 = 64 * 1024;
 
 /// The SHA-256 of one certificate, as 64 lower-case hex digits.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct Fingerprint(String);
+pub(super) struct Fingerprint(String);
 
 impl Fingerprint {
     /// The 64 hex digits.
@@ -36,7 +36,7 @@ impl Fingerprint {
     }
 
     /// The fingerprint of the one certificate in `pem`.
-    pub(crate) fn of(pem: &str) -> Option<Self> {
+    pub(super) fn of(pem: &str) -> Option<Self> {
         marsa_core::helper::certificate_sha256(pem).map(|hex| Self(hex.to_ascii_lowercase()))
     }
 
@@ -52,7 +52,7 @@ impl Fingerprint {
     }
 
     /// Its nickname in an NSS database: `Marsa Local CA 29e433200254dfce`.
-    pub(crate) fn nickname(&self) -> String {
+    pub(super) fn nickname(&self) -> String {
         format!("{CA_NAME} {}", &self.0[..NICKNAME_DIGITS])
     }
 }

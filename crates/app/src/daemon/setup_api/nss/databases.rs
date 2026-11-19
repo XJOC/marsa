@@ -35,9 +35,10 @@ pub(super) struct Database {
 }
 
 /// The databases under `home`, and why each refused one cannot be used.
-pub(super) fn databases(home: &Path) -> (Vec<Database>, Vec<String>) {
+pub(super) fn databases(home: &Path) -> Found {
     let mut found = Vec::new();
     let mut refused = Vec::new();
+    let mut complete = true;
     let chrome = under(home, &CHROME);
     match real_folders(home, &CHROME) {
         Folders::Real => match db_files(&chrome) {
@@ -70,6 +71,7 @@ pub(super) fn databases(home: &Path) -> (Vec<Database>, Vec<String>) {
         }
         for dir in profile_dirs(&under(home, parts)) {
             if profiles == MAX_PROFILES {
+                complete = false;
                 tracing::warn!(dir = %dir.display(), "more than {MAX_PROFILES} Firefox profiles; this one is left out");
                 continue;
             }
@@ -84,7 +86,21 @@ pub(super) fn databases(home: &Path) -> (Vec<Database>, Vec<String>) {
             }
         }
     }
-    (found, refused)
+    Found {
+        databases: found,
+        refused,
+        complete,
+    }
+}
+
+/// What [`databases`] found.
+pub(super) struct Found {
+    pub(super) databases: Vec<Database>,
+    /// Why each database left alone cannot be used.
+    pub(super) refused: Vec<String>,
+    /// `false` when some profiles were left out: more than
+    /// [`MAX_PROFILES`].
+    pub(super) complete: bool,
 }
 
 /// The real folders in `dir`, sorted. A link is not looked into.

@@ -1,4 +1,4 @@
-//! What a line of a program's output says (task M5-D10): how serious it is,
+//! What a line of a program's output says: how serious it is,
 //! and the message without the parts the Logs screen shows elsewhere. The
 //! daemon sends the text as the program wrote it, so the window reads the two
 //! formats the programs it runs use today:

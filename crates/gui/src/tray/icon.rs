@@ -1,5 +1,5 @@
 //! The icon's image, drawn in code so no image file ships: a ring with a dot,
-//! the shape the S-09 spike used. A temporary, simple image until
+//! the shape the first tray spike used. A temporary, simple image until
 //! `docs/design/` exists (AGENTS.md section 9).
 //!
 //! The shape is white with a thin dark rim, so it shows on a light and on a

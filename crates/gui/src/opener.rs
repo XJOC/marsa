@@ -1,5 +1,5 @@
 //! Opening a site's folder in the system's file manager ("Open folder" on a
-//! site's page, task M5-D7). A local action: `App` does it, never a screen
+//! site's page). A local action: `App` does it, never a screen
 //! (code.md, State).
 //!
 //! The program is the one `marsa open` opens a URL with, found by its
@@ -15,7 +15,7 @@
 //! never joined into a command line, and never shortened (`~` is display
 //! only).
 //!
-//! The menu-bar icon opens a site the same way ([`open_url`], task M5-D11): the
+//! The menu-bar icon opens a site the same way ([`open_url`]): the
 //! window's own button hands the address to egui, which has no window to do it
 //! in the icon's program.
 
