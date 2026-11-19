@@ -131,8 +131,18 @@ tcp -U root -d app -c "insert into posts (body) values ('مرحبا بالعال
   fail "Arabic full-text search"
 # pg_trgm is a trusted extension: the owner of the database may create it.
 tcp -U root -d app -c 'create extension pg_trgm'
-[ "$(tcp -U root -d app -c "select similarity('مرحبا', 'مرحب') > 0.3")" = t ] || fail "pg_trgm on Arabic"
-echo "lower() under the builtin C.UTF-8 locale: $(tcp -U root -d app -c "select lower('ÄÖ ABC')")"
+[ "$(tcp -U root -d app -c "select similarity('hello', 'hell') > 0.3")" = t ] || fail "pg_trgm"
+# Measured, not required: initdb runs with LC_CTYPE=C (task M6-03, part B),
+# under which pg_trgm finds no Arabic letters. A database of its own with
+# LC_CTYPE=C.UTF-8 shows whether that fixes it on this system.
+echo "pg_trgm on Arabic, LC_CTYPE=C: $(tcp -U root -d app -c "select similarity('مرحبا', 'مرحب')")"
+echo "lower() under the cluster's locale: $(tcp -U root -d app -c "select lower('ÄÖ ABC')")"
+if tcp -U root -d postgres -c "create database utf8 template template0 locale_provider builtin builtin_locale 'C.UTF-8' lc_collate 'C' lc_ctype 'C.UTF-8'"; then
+  tcp -U root -d utf8 -c 'create extension pg_trgm'
+  echo "pg_trgm on Arabic, LC_CTYPE=C.UTF-8: $(tcp -U root -d utf8 -c "select similarity('مرحبا', 'مرحب')")"
+else
+  echo "no database with LC_CTYPE=C.UTF-8 on this system"
+fi
 
 step "PHP's pdo_pgsql as root with no password, as Laravel's default .env"
 run marsa install php 8.4
