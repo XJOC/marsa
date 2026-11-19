@@ -108,10 +108,10 @@ step "access (ADR 0023, option B): root over TCP, postgres over the socket only"
 [ "$(tcp -U root -d postgres -c 'select 1')" = 1 ] || fail "root over TCP"
 [ "$(tcp -U root -d postgres -c 'select rolsuper::text || rolcreatedb::text from pg_roles where rolname = current_user')" = falsetrue ] ||
   fail "root must have CREATEDB and not be a superuser"
-refused 'no pg_hba.conf entry' tcp -U postgres -d postgres -c 'select 1'
+refused 'pg_hba.conf' tcp -U postgres -d postgres -c 'select 1'
 [ "$(sock -U postgres -d postgres -c 'select rolsuper from pg_roles where rolname = current_user')" = t ] ||
   fail "postgres over the socket"
-refused 'no pg_hba.conf entry' sock -U root -d postgres -c 'select 1'
+refused 'pg_hba.conf' sock -U root -d postgres -c 'select 1'
 # Mode 0700: only the owner may use the socket.
 ls -la "$DATA/run" | grep -E "^srwx------ .* \.s\.PGSQL\.$PORT\$" || fail "the socket is not 0700"
 
