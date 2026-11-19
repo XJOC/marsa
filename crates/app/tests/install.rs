@@ -1370,9 +1370,17 @@ async fn the_last_php_stays_while_sites_run_it_with_no_default() {
         sites_left_without_php: vec!["api".into()],
         ..VersionInUse::default()
     };
-    assert_eq!((code.as_str(), used), ("sites_lose_php", want));
+    assert_eq!((code.as_str(), used), ("sites_lose_php", want.clone()));
     assert_eq!(global_text(&served), before);
     assert_eq!(entries(&served, Runtime::Php), ["8.3.12"]);
+
+    // A default that picks nothing installed is no default here either.
+    save_defaults(&served, Some("8.4"), None);
+    let stale = global_text(&served);
+    let (code, used) = refusal(&served, "/v1/runtimes/php/8.3.12").await;
+    assert_eq!((code.as_str(), used), ("sites_lose_php", want));
+    assert_eq!(global_text(&served), stale);
+    save_defaults(&served, None, None);
 
     // The check builds the site list from the disk: api is static now.
     let api = served.path().join("code").join("api");
