@@ -314,7 +314,7 @@ impl DaemonClient {
     ///   it: the default in `global.toml` while another version is
     ///   installed, sites set to it in `sites.toml`, or the running Caddy;
     /// - `sites_lose_php` (409) as [`ClientError::InUse`] too: it is the
-    ///   only PHP and the default, and the sites that run it, which would
+    ///   only PHP installed, and the sites that run it, which would
     ///   have no PHP after it, are in `sites_left_without_php`;
     /// - `install_busy` (409) while an install or another uninstall runs;
     /// - `version_not_installed` (404) when no installed version matches;
