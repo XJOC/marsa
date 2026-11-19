@@ -58,6 +58,12 @@ pub trait System {
     /// `write_atomic` then makes it as root with mode `0755`. The
     /// precondition above rests on this for Marsa's own folders, which the
     /// helper finds already made (task M5-31). No default, as for `is_link`.
+    ///
+    /// Only `dir` itself is checked: the folders above Marsa's are the
+    /// system's (`/Library`, `/Library/Application Support`, root's with
+    /// mode `0755`). ACLs are not read: only root, the owner, can add one to
+    /// such a folder. On Windows an existing folder is always `false`: no
+    /// Windows op asks, and one that did would refuse rather than trust it.
     fn is_root_only_dir(&self, dir: &Path) -> bool;
 
     /// Whether the file at `path` is marked read-only (the Windows file
@@ -182,15 +188,16 @@ impl System for RealSystem {
         if !meta.is_dir() {
             return false;
         }
-        // Unix only: the ops that ask run on macOS and Linux. Windows keeps
-        // Marsa's folder for admins through its ACL (ADR 0018).
+        // Unix only: only macOS ops ask. Windows has no owner and mode to
+        // read here, so it says no: a Windows op must check its folder's ACL
+        // another way (ADR 0018).
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             meta.uid() == 0 && meta.mode() & 0o022 == 0
         }
         #[cfg(not(unix))]
-        true
+        false
     }
 
     fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
@@ -739,8 +746,8 @@ mod tests {
         }
     }
 
-    /// Task M5-31, on the real disk. Unix: Windows answers `true` for any
-    /// folder, and its own folder is kept by an ACL.
+    /// Task M5-31, on the real disk. Unix: Windows answers `false` for any
+    /// folder that is there.
     #[cfg(unix)]
     #[test]
     fn only_a_folder_of_root_that_others_cannot_write_is_root_only() {

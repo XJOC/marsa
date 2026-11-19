@@ -23,7 +23,9 @@
 //! Marsa never writes a link, so a link at one of its paths is someone
 //! else's: the helper never reads, loads, or gives back a token through one,
 //! and an install writes a file in its place (task M5-31). It also writes,
-//! reads, and loads only in folders that only root can change.
+//! reads, and loads only in folders that only root can change. A removal
+//! still stops the job, flushes the anchor, and deletes the files there: a
+//! delete never follows a link.
 
 use std::io;
 use std::path::Path;
@@ -32,7 +34,8 @@ use std::time::Duration;
 use crate::response::{OpResult, Outcome};
 use crate::system::{RunOutput, System};
 
-/// Writing a file of the redirect failed.
+/// Writing a file of the redirect failed, or a folder of the redirect is one
+/// that not only root can change, so nothing was written (task M5-31).
 pub const PF_WRITE: &str = "pf_write";
 /// The running helper could not be found or read, so it was not copied for
 /// the boot job, and nothing was written (task M4-27): its path is not
@@ -45,7 +48,9 @@ pub const PF_WRITE: &str = "pf_write";
 pub const PF_HELPER_UNREADABLE: &str = "pf_helper_unreadable";
 /// Deleting a file of the redirect failed.
 pub const PF_DELETE: &str = "pf_delete";
-/// `pfctl -f` did not load the rules file into the anchor.
+/// `pfctl -f` did not load the rules file into the anchor, or it was not
+/// asked to: the rules file is a link, or its folder is one that not only
+/// root can change (task M5-31).
 pub const PF_LOAD_FAILED: &str = "pf_load_failed";
 /// `pfctl -E` printed no reference token.
 pub const PF_TOKEN_MISSING: &str = "pf_token_missing";
@@ -168,7 +173,8 @@ fn install_files(
     })?;
     if let Some(dir) = open_dir(system) {
         let message = format!(
-            "{} is not a folder that only root can change, so nothing was written",
+            "{} is not a folder that only root can change (owner root, no write for group \
+             or others), so nothing was written",
             dir.display()
         );
         return Err(failure(PF_WRITE, message));
@@ -180,11 +186,12 @@ fn install_files(
         (COPY, helper, 0o755),
         (PLIST, plist().into_bytes(), 0o644),
     ];
-    // In place only if pf shows the rules and Marsa holds a reference too.
+    // In place only if pf shows the rules and Marsa holds a reference too: a
+    // token file of its own, not a link (task M5-31).
     let in_place = files
         .iter()
         .all(|(path, bytes, _)| same(system, path, bytes))
-        && system.exists(Path::new(TOKEN))
+        && saved_token(system).is_some()
         && rules_loaded(system);
     if in_place {
         return Ok(Outcome::Unchanged);
@@ -211,7 +218,8 @@ fn load(system: &impl System, held: &mut Option<u64>) -> Result<(), Failure> {
     // folder they can change.
     if system.is_link(Path::new(RULES)) || open_dir(system).is_some() {
         let message = format!(
-            "{RULES} is a link or in a folder that not only root can change, so it was not loaded"
+            "{RULES} is a link or in a folder that not only root can change (owner root, no \
+             write for group or others), so it was not loaded"
         );
         return Err(failure(PF_LOAD_FAILED, message));
     }
@@ -1024,13 +1032,14 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
 
     /// Task M5-31: a link at the token file, to a file with a token, is
     /// someone else's. Neither op gives that token back. The install writes
-    /// Marsa's token in its place, and the removal deletes the link itself.
+    /// Marsa's token in its place, also when pf shows the rules, and the
+    /// removal deletes the link itself.
     #[test]
     fn a_token_through_a_link_is_never_given_back() {
-        let mut mac = installed(&["", LISTED]);
+        let mut mac = installed(&[LISTED]);
         mac.fake.links.insert(PathBuf::from(TOKEN));
         assert_eq!(install(18080, 18443, &mac), result(INSTALL, Outcome::Done));
-        let expected = [pf(&SHOW_ARGS), pf(&LOAD_ARGS), pf(&["-E"]), pf(&SHOW_ARGS)];
+        let expected = [pf(&LOAD_ARGS), pf(&["-E"]), pf(&SHOW_ARGS)];
         assert_eq!(commands(&mac), expected);
         assert_eq!(file(&mac, TOKEN), token_file(NEW));
 
@@ -1074,7 +1083,8 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         let mut mac = fresh(&[]);
         mac.fake.open_dirs.insert(marsa.clone());
         let message = format!(
-            "{} is not a folder that only root can change, so nothing was written",
+            "{} is not a folder that only root can change (owner root, no write for group \
+             or others), so nothing was written",
             marsa.display()
         );
         let expected = OpResult::failed(INSTALL, PF_WRITE, message);

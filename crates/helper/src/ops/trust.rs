@@ -148,7 +148,9 @@ fn stored_hash(op: &'static str, system: &impl System) -> Result<Option<String>,
     let reason = if system.is_link(path) {
         "is a link".to_owned()
     } else if open.is_some() {
-        "is in a folder that not only root can change".to_owned()
+        "is in a folder that not only root can change (owner root, no write for group or \
+         others)"
+            .to_owned()
     } else {
         match system.read(path, MAX_FILE_BYTES) {
             Ok(bytes) => match std::str::from_utf8(&bytes).map(parse_pem) {
@@ -863,7 +865,8 @@ mod tests {
         open.open_dirs.insert(folder.clone());
         let mut open_empty = fake();
         open_empty.open_dirs.insert(folder);
-        let in_open = "is in a folder that not only root can change";
+        let in_open = "is in a folder that not only root can change (owner root, no write for \
+                       group or others)";
         let cases = [
             (
                 fake_with(&TEST_CA.as_bytes()[..100]),
