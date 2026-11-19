@@ -388,6 +388,20 @@ async fn bind_both(addr: SocketAddr) -> anyhow::Result<(UdpSocket, TcpListener)>
     }
 }
 
+/// A UDP socket and a TCP listener on one loopback port that both
+/// protocols accept, for a test to hold and then let go of, so that a start
+/// on that port can bind both. A UDP port picked alone may sit in a range of
+/// TCP ports that Windows reserves ([`bind_both`]): a start there fails with
+/// `dns_start_failed` once the UDP socket is gone.
+#[cfg(test)]
+pub(crate) async fn held_dns_port() -> (std::net::UdpSocket, std::net::TcpListener) {
+    let any = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+    let (udp, tcp) = bind_both(any).await.expect("a port for UDP and TCP");
+    let udp = udp.into_std().expect("a std UDP socket");
+    let tcp = tcp.into_std().expect("a std TCP listener");
+    (udp, tcp)
+}
+
 /// A running DNS server, from [`start`].
 #[derive(Debug)]
 pub struct DnsServer {
@@ -730,7 +744,8 @@ mod tests {
     async fn a_held_port_is_a_failed_service_until_a_start_finds_it_free() {
         let shutdown = CancellationToken::new();
         let (events, mut seen) = broadcast::channel(64);
-        let udp = std::net::UdpSocket::bind(any_port()).unwrap();
+        // UDP is bound first, so the held UDP socket is the one named.
+        let (udp, tcp) = held_dns_port().await;
         let addr = udp.local_addr().unwrap();
         let service = DnsService::new(Some(addr));
         assert_eq!(service.status().unwrap().state, ServiceState::Stopped);
@@ -756,7 +771,7 @@ mod tests {
         }
         assert_eq!(states, [ServiceState::Starting, failed(DNS_PORT_IN_USE)]);
 
-        drop(udp);
+        drop((udp, tcp));
         let status = service.run(&events, &shutdown, ServiceAction::Start).await;
         assert_eq!(status.state, ServiceState::Running);
         assert_eq!(status.pid, Some(std::process::id()));

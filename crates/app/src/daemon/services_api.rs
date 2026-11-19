@@ -589,7 +589,7 @@ mod tests {
     async fn a_held_dns_port_is_listed_as_failed_and_a_start_tries_again() {
         use crate::daemon::api::router;
         use crate::daemon::auth::AuthConfig;
-        use crate::daemon::dns::DNS_PORT_IN_USE;
+        use crate::daemon::dns::{DNS_PORT_IN_USE, held_dns_port};
         use axum::http::Request;
         use marsa_core::platform::daemon_file::{Token, daemon_authority};
         use marsa_core::types::ServiceState;
@@ -598,9 +598,11 @@ mod tests {
         const PORT: u16 = 51237;
         let token = Token::generate().unwrap();
         let bearer = token.bearer_header();
-        let held = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        // A port free for TCP too: on Windows a UDP port picked alone may be
+        // in a reserved TCP range, and the last start would fail on it.
+        let held = held_dns_port().await;
         let mut daemon = Daemon::new(std::path::PathBuf::new());
-        daemon.dns = DnsService::new(Some(held.local_addr().unwrap()));
+        daemon.dns = DnsService::new(Some(held.0.local_addr().unwrap()));
         let daemon = Arc::new(daemon);
         daemon
             .dns
@@ -641,7 +643,9 @@ mod tests {
         drop(held);
         let (_, body) = send("POST", "/v1/services/dns/start").await;
         let after: ServiceStatus = serde_json::from_str(&body).unwrap();
-        assert_eq!(after.state, ServiceState::Running);
+        // The server's own line says why, if it did not start.
+        let (_, lines) = send("GET", "/v1/logs/dns").await;
+        assert_eq!(after.state, ServiceState::Running, "{lines}");
         daemon.dns.shutdown(Duration::from_secs(5)).await;
     }
 
