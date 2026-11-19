@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use marsa_core::config::ConfigError;
 use tracing_subscriber::EnvFilter;
 
+use crate::model::Route;
 use crate::panel::place::{Anchor, BadAnchor};
 
 /// The lock file of the window, in the daemon's `run/` folder. The window
@@ -32,6 +33,9 @@ pub enum StartupError {
     MissingPath,
     #[error("{0} needs a value")]
     MissingValue(&'static str),
+    /// `--open` names a screen the window has no such way to open.
+    #[error("--open takes `sites`, not {0}")]
+    UnknownScreen(String),
     /// `--icon`, `--monitor`, or `--scale` of the panel.
     #[error(transparent)]
     Anchor(#[from] BadAnchor),
@@ -70,6 +74,10 @@ pub struct Launch {
     /// `--scale`, all three or none. Without them the system places the
     /// panel.
     pub anchor: Option<Anchor>,
+    /// `--open sites`: the screen the window opens on, instead of Home (the
+    /// tray starts the window so when the panel says "3 more sites in
+    /// Marsa"). Only `sites`.
+    pub open: Option<Route>,
 }
 
 /// [`data_dir`], `--panel`, and the place of the icon: the arguments of
@@ -123,6 +131,7 @@ fn parse(
 ) -> Result<Launch, StartupError> {
     let (mut flag, mut panel) = (None, false);
     let (mut icon, mut monitor, mut scale) = (None, None, None);
+    let mut open = None;
     while let Some(arg) = args.next() {
         if arg == "--data-dir" {
             flag = Some(args.next().ok_or(StartupError::MissingPath)?);
@@ -130,6 +139,14 @@ fn parse(
             flag = Some(value.into());
         } else if panel_allowed && arg == "--panel" {
             panel = true;
+        } else if panel_allowed && arg == "--open" {
+            open = Some(match args.next() {
+                None => return Err(StartupError::MissingValue("--open")),
+                Some(screen) if screen == "sites" => Route::Sites,
+                Some(screen) => {
+                    return Err(StartupError::UnknownScreen(screen.display().to_string()));
+                }
+            });
         } else if panel_allowed && let Some((which, value)) = anchor_flag(&arg, &mut args)? {
             match which {
                 AnchorFlag::Icon => icon = Some(value),
@@ -153,6 +170,7 @@ fn parse(
         data_dir,
         panel,
         anchor,
+        open,
     })
 }
 
@@ -252,6 +270,7 @@ mod tests {
                 data_dir: dir.path().to_path_buf(),
                 panel: true,
                 anchor: None,
+                open: None,
             }
         );
         let window = launch(args(&["--data-dir", text])).unwrap();
@@ -349,6 +368,31 @@ mod tests {
         // The tray takes none of them.
         assert!(matches!(
             data_dir(args(&["--icon", "1,2,3,4"])),
+            Err(StartupError::UnknownArgument(_))
+        ));
+    }
+
+    #[test]
+    fn the_window_may_be_asked_to_open_on_the_sites_screen_and_on_no_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().to_str().unwrap();
+        let sites = launch(args(&["--data-dir", text, "--open", "sites"])).unwrap();
+        assert_eq!(sites.open, Some(Route::Sites));
+        assert_eq!(launch(args(&["--data-dir", text])).unwrap().open, None);
+        for refused in ["home", "", "../sites"] {
+            let result = launch(args(&["--data-dir", text, "--open", refused]));
+            assert!(
+                matches!(result, Err(StartupError::UnknownScreen(_))),
+                "{refused:?}: {result:?}"
+            );
+        }
+        assert!(matches!(
+            launch(args(&["--open"])),
+            Err(StartupError::MissingValue("--open"))
+        ));
+        // The tray takes no such flag.
+        assert!(matches!(
+            data_dir(args(&["--open", "sites"])),
             Err(StartupError::UnknownArgument(_))
         ));
     }

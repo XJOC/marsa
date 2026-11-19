@@ -16,7 +16,7 @@ use super::{
     Look, Touch, group_button, layout, paint_focus_ring, quiet_fill, slot, tab_stop, touched,
     with_disabled_reason,
 };
-use crate::theme::{Direction, Face, TextToken, Theme, VersionText};
+use crate::theme::{Direction, Face, TextToken, Theme, UNIT, VersionText};
 
 /// A move of the keyboard focus inside a group of buttons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,6 +182,15 @@ fn rounded_outline(rect: Rect, radius: f32) -> Vec<Pos2> {
 /// The straight pieces of one corner.
 const ARC_STEPS: usize = 6;
 
+/// The width of one of `columns` equal columns that fill `room` with `gap`
+/// between them, in whole points, and at least `least`.
+pub fn column_width(room: f32, gap: f32, columns: usize, least: f32) -> f32 {
+    let columns = columns.max(1) as f32;
+    ((room - gap * (columns - UNIT)) / columns)
+        .floor()
+        .max(least)
+}
+
 /// Where a button of a picker starts: its row, and how far from the start of
 /// the row.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -233,8 +242,9 @@ pub struct VersionPicker<'a, T> {
     disabled: Option<&'a str>,
     /// A button's index and the look to draw it in.
     forced: Option<(usize, Look)>,
-    /// Continue on the next row when a button does not fit in the width.
-    wrap: bool,
+    /// `Some(n)`: equal columns, `n` to a row, as wide as the room gives
+    /// them ([`column_width`]); more versions go on the next row.
+    columns: Option<usize>,
 }
 
 impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
@@ -248,7 +258,7 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
             size: PickerSize::Large,
             disabled: None,
             forced: None,
-            wrap: false,
+            columns: None,
         }
     }
 
@@ -276,12 +286,13 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
         self
     }
 
-    /// A button that does not fit in the width goes on the next row, so the
-    /// menu-bar panel (a fixed width) shows every installed version. The
-    /// group stays one group: the arrow keys move along the order of the
-    /// buttons, row after row.
-    pub const fn wrapping(mut self) -> Self {
-        self.wrap = true;
+    /// Equal columns that fill the width, `columns` to a row: the menu-bar
+    /// panel (a fixed width) shows every installed version. A version past
+    /// the last column goes on the next row, in a column of the same width,
+    /// so a short last row does not look broken. It stays one group: the
+    /// arrow keys move along the order of the buttons, row after row.
+    pub const fn columns(mut self, columns: usize) -> Self {
+        self.columns = Some(columns);
         self
     }
 
@@ -328,6 +339,7 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
             .iter()
             .map(|(_, name)| layout(ui.painter(), name, token, Color32::PLACEHOLDER))
             .collect();
+        let room = ui.available_width();
         let mut widths: Vec<f32> = galleys
             .iter()
             .map(|galley| {
@@ -336,10 +348,20 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
                     .max(galley.size().x + theme.space.s3 + theme.space.s3)
             })
             .collect();
+        if let Some(columns) = self.columns {
+            // One width for all, that of a column; wider only for a text that
+            // does not fit in it.
+            let text = galleys
+                .iter()
+                .map(|galley| galley.size().x + theme.space.s3 + theme.space.s3)
+                .fold(0.0, f32::max);
+            let column = column_width(room, gap, columns, theme.size.version_menu_min).max(text);
+            widths.iter_mut().for_each(|width| *width = column);
+        }
         if self.install.is_some() {
             widths.push(self.size.install(theme).x);
         }
-        let cells = cells(&widths, gap, self.wrap.then(|| ui.available_width()));
+        let cells = cells(&widths, gap, self.columns.map(|_| room));
         let rows = cells.last().map_or(1, |cell| cell.row + 1);
         let across = cells
             .iter()
@@ -968,30 +990,59 @@ mod tests {
     }
 
     #[test]
-    fn a_wrapping_picker_is_one_group_over_as_many_rows_as_it_needs() {
+    fn a_column_is_a_fourth_of_the_room_less_the_gaps_and_never_narrower_than_the_least() {
+        // The panel: 326 of room, gaps of 8, four columns.
+        assert_eq!(column_width(326.0, 8.0, 4, 58.0), 75.0);
+        assert_eq!(column_width(328.0, 8.0, 4, 58.0), 76.0);
+        assert_eq!(column_width(326.0, 8.0, 1, 58.0), 326.0);
+        // A room too narrow for four gives the least.
+        assert_eq!(column_width(100.0, 8.0, 4, 58.0), 58.0);
+        assert_eq!(column_width(326.0, 8.0, 0, 58.0), 326.0);
+    }
+
+    #[test]
+    fn the_columns_of_a_picker_are_equal_up_to_four_to_a_row_and_a_second_row_keeps_them() {
         let theme = &LIGHT;
         let gap = theme.space.group_gap;
-        let versions: [(u8, &str); 5] =
-            [(1, "8.1"), (2, "8.2"), (3, "8.3"), (4, "8.4"), (5, "8.5")];
+        let names = ["8.1", "8.2", "8.3", "8.4", "8.5"];
+        let column = column_width(326.0, gap, 4, theme.size.version_menu_min);
         let harness = Harness::new(egui::Theme::Light);
-        let mut rect = Rect::NOTHING;
-        let tree = harness.accessibility(|ui| {
-            // The panel's room: 360 less its two sides.
-            ui.set_max_width(328.0);
-            let picker = VersionPicker::new("Default PHP", &versions, Some(4))
-                .size(PickerSize::Medium)
-                .wrapping();
-            rect = ui.add(picker).rect;
-        });
-        // Three buttons on the first row, two on the second.
-        assert_eq!(rect.height(), 2.0 * 44.0 + gap);
-        assert_eq!(rect.width(), 3.0 * 92.0 + 2.0 * gap);
-        assert_eq!(tree.labels_starting_with("8.").len(), 5);
-        assert!(tree.node_with_label("Default PHP").is_some());
-        // Not wrapping, the same versions keep one row.
+        for count in [1, 2, 4, 5] {
+            let versions: Vec<(u8, &str)> = names[..count]
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (index as u8 + 1, *name))
+                .collect();
+            let mut rect = Rect::NOTHING;
+            let tree = harness.accessibility(|ui| {
+                ui.set_max_width(326.0);
+                let picker = VersionPicker::new("Default PHP", &versions, Some(2))
+                    .size(PickerSize::Medium)
+                    .columns(4);
+                rect = ui.add(picker).rect;
+            });
+            let rows = count.div_ceil(4) as f32;
+            let across = count.min(4) as f32;
+            assert_eq!(
+                rect.width(),
+                across * column + (across - 1.0) * gap,
+                "{count}"
+            );
+            assert_eq!(rect.height(), rows * 44.0 + (rows - 1.0) * gap, "{count}");
+            // Every button is a column wide, the lone one on the second row too.
+            for name in &names[..count] {
+                let node = tree.node_with_label(name).expect("a button");
+                let bounds = node.bounds().expect("bounds");
+                assert_eq!((bounds.x1 - bounds.x0) as f32, column, "{count}: {name}");
+            }
+            assert_eq!(tree.labels_starting_with("8.").len(), count);
+            assert!(tree.node_with_label("Default PHP").is_some());
+        }
+        // The picker that has no columns keeps one row of its own widths.
+        let versions: Vec<(u8, &str)> = names.iter().zip(1..).map(|(n, i)| (i, *n)).collect();
         let mut one = Rect::NOTHING;
         harness.run(|ui| {
-            ui.set_max_width(328.0);
+            ui.set_max_width(326.0);
             one = ui
                 .add(VersionPicker::new("Default PHP", &versions, Some(4)).size(PickerSize::Medium))
                 .rect;

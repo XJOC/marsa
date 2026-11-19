@@ -26,6 +26,9 @@ use crate::widgets::panel::{
 };
 use crate::widgets::{Button, Health, PickerSize, StatusDot, VersionPick, VersionPicker, whole};
 
+/// How many version buttons stand in a row of the panel.
+const VERSION_COLUMNS: usize = 4;
+
 /// The keys that open the sites, in order: the first opens the first site.
 const DIGITS: [Key; MAX_SITES] = [
     Key::Num1,
@@ -291,7 +294,15 @@ fn site_list(ui: &mut Ui, theme: &Theme, sites: &SitesView, actions: &mut Vec<Pa
                 }
             }
             if sites.more > 0 {
-                line(ui, theme, &strings::panel_more_sites(sites.more));
+                // A quiet link: the rest of the sites are in the window.
+                let more = strings::panel_more_sites(sites.more);
+                let shown = ui.horizontal(|ui| {
+                    ui.add_space(theme.space.s1);
+                    ui.add(Button::quiet(&more))
+                });
+                if shown.inner.clicked() {
+                    actions.push(PanelAction::Exit(PanelExit::OpenSites));
+                }
             }
         });
 }
@@ -348,7 +359,7 @@ fn default_php(ui: &mut Ui, php: &DefaultPhp, actions: &mut Vec<PanelAction>) {
         .collect();
     let picker = VersionPicker::new(strings::DEFAULT_PHP, &versions, php.chosen)
         .size(PickerSize::Medium)
-        .wrapping();
+        .columns(VERSION_COLUMNS);
     if let Some(VersionPick::Version(index)) = picker.show(ui).inner
         && let Some(choice) = php.choices.get(index)
     {
@@ -377,7 +388,10 @@ fn footer(ui: &mut Ui, theme: &Theme, power: &Power, actions: &mut Vec<PanelActi
                     actions.push(PanelAction::Exit(power.exit));
                 }
                 footer_divider(ui);
-                if ui.add(FooterLink::new(strings::TRAY_QUIT, half)).clicked() {
+                // Quit closes the icon; the daemon and the sites go on.
+                let quit =
+                    FooterLink::new(strings::TRAY_QUIT, half).tooltip(strings::PANEL_QUIT_HINT);
+                if ui.add(quit).clicked() {
                     actions.push(PanelAction::Exit(PanelExit::Quit));
                 }
             });
@@ -529,9 +543,16 @@ mod tests {
         let view = view(&working(0, &["8.4.27"]));
         assert_eq!(view.status.title, "Marsa is running");
         assert_eq!(view.status.caption, "No sites yet");
-        let sites = view.sites.expect("sites");
+        let sites = view.sites.as_ref().expect("sites");
         assert!(sites.rows.is_empty() && sites.more == 0);
         assert!(view.php.is_some());
+        // The list says what to do, once: the status says there is none.
+        let harness = Harness::new(egui::Theme::Light);
+        let tree = harness.accessibility(|ui| {
+            show(ui, &view, &LIGHT);
+        });
+        assert!(tree.node_with_text("Add a site in Marsa.").is_some());
+        assert!(tree.node_with_text("No sites yet.").is_none());
     }
 
     #[test]
@@ -604,6 +625,16 @@ mod tests {
             .into_iter()
             .next()
             .unwrap_or_else(|| panic!("no node {label}"));
+        let rect = node.bounds().expect("bounds");
+        egui::pos2(
+            ((rect.x0 + rect.x1) / 2.0) as f32,
+            ((rect.y0 + rect.y1) / 2.0) as f32,
+        )
+    }
+
+    /// [`center`] for a node that egui gives its text as a value.
+    fn center_of_text(tree: &Tree, text: &str) -> Pos2 {
+        let node = tree.node_with_text(text).expect("a node");
         let rect = node.bounds().expect("bounds");
         egui::pos2(
             ((rect.x0 + rect.x1) / 2.0) as f32,
@@ -742,6 +773,30 @@ mod tests {
     }
 
     #[test]
+    fn the_more_sites_line_is_a_link_that_opens_marsa_on_the_sites_screen() {
+        let harness = Harness::new(egui::Theme::Light);
+        let view = view(&working(12, &["8.4.27"]));
+        assert_eq!(view.sites.as_ref().map(|sites| sites.more), Some(3));
+        let tree = harness.accessibility(|ui| {
+            show(ui, &view, &LIGHT);
+        });
+        // A button a screen reader can press: it has a name and bounds.
+        let node = tree.node_with_text("3 more sites in Marsa");
+        assert!(node.is_some(), "{:?}", tree.labels_starting_with(""));
+        let at = center_of_text(&tree, "3 more sites in Marsa");
+        let mut actions = Vec::new();
+        harness.click(at, |ui| actions = show(ui, &view, &LIGHT));
+        assert_eq!(actions, [PanelAction::Exit(PanelExit::OpenSites)]);
+        // Nine sites or fewer: no such line.
+        let nine = self::view(&working(9, &["8.4.27"]));
+        let tree = harness.accessibility(|ui| {
+            show(ui, &nine, &LIGHT);
+        });
+        assert!(tree.labels_starting_with("1 more").is_empty());
+        assert!(tree.labels_starting_with("0 more").is_empty());
+    }
+
+    #[test]
     fn with_no_daemon_the_footer_starts_it_and_stop_says_why_it_waits() {
         let harness = Harness::new(egui::Theme::Light);
         let mut down = Model::default();
@@ -814,8 +869,13 @@ mod tests {
             // line that says how many more.
             assert_eq!(nine - few, 7.0 * theme.size.panel_row, "{mode:?}");
             assert!(twelve > nine && twelve - nine < theme.size.panel_row);
-            // Four versions need a second row of buttons.
-            let two = height(&view(&working(2, &["8.1.0", "8.2.0", "8.3.0", "8.4.27"])));
+            // Four versions stand in one row; a fifth needs a second.
+            let four = height(&view(&working(2, &["8.1.0", "8.2.0", "8.3.0", "8.4.27"])));
+            assert_eq!(four, few);
+            let two = height(&view(&working(
+                2,
+                &["8.1.0", "8.2.0", "8.3.0", "8.4.27", "8.5.0"],
+            )));
             assert_eq!(two - few, theme.size.version_md + theme.space.group_gap);
         }
     }
