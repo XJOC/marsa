@@ -2,8 +2,9 @@ name: install-e2e
 
 # The goal of milestone 2 (task M2-08): `marsa install php 8.4`, `node 22`,
 # and `composer` from the signed runtimes manifest, on the three systems and
-# both architectures, and the programs run. The job downloads from the real
-# internet, so it is not part of the tests that `cargo nextest` runs. Weekly,
+# both architectures, and the programs run; and the published signed list
+# checks out with the key built into marsa. The jobs download from the real
+# internet, so they are not part of the tests that `cargo nextest` runs. Weekly,
 # so a file a source took down is found before a user finds it.
 
 on:
@@ -66,3 +67,35 @@ jobs:
 
       - name: Install and run PHP, Node, and Composer
         run: bash tools/e2e/install.sh
+
+  # The signed list as a user's marsa downloads it: from the public release
+  # link, with no login, checked with the key built into marsa.
+  manifest:
+    name: published manifest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: manifest
+
+      - name: Download manifest.json and its signature
+        run: |
+          base=https://github.com/XJOC/marsa/releases/download/runtimes-manifest
+          mkdir -p "$RUNNER_TEMP/manifest"
+          for file in manifest.json manifest.json.minisig; do
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/manifest/$file" "$base/$file"
+          done
+          ls -l "$RUNNER_TEMP/manifest"
+
+      - name: cargo xtask manifest verify
+        run: |
+          out=$(cargo xtask manifest verify "$RUNNER_TEMP/manifest/manifest.json")
+          echo "$out"
+          grep -q "^Local JSON check: OK" <<<"$out"
+          grep -q "^Signature: OK with the key built into marsa" <<<"$out"
