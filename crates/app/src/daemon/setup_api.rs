@@ -528,14 +528,25 @@ impl StartCaddy for DaemonCaddy {
         if !caddy.installed() {
             return CaddyStart::NotInstalled;
         }
+        let deadline = tokio::time::Instant::now() + limit;
         let start = async {
             loop {
                 match caddy.run(&self.daemon, ServiceAction::Start).await {
                     // Another start or stop runs now. Ask again until it has
                     // ended, so a stop in the meantime does not leave Caddy
                     // stopped. A refused call returns at once, and the
-                    // timeout below bounds the loop.
-                    Err(ActionError::Busy) => tokio::time::sleep(CA_POLL).await,
+                    // timeout below bounds the loop. A start waits up to
+                    // Caddy's ready limit for its admin API, so none begins
+                    // with less left, where the timeout would cut that wait
+                    // short (task M5-22). Only that wait is covered: an
+                    // orphan to stop first can still make a start longer.
+                    Err(ActionError::Busy) => {
+                        let next = tokio::time::Instant::now() + CA_POLL;
+                        if deadline.saturating_duration_since(next) < caddy.ready_limit {
+                            return Err(ActionError::Busy);
+                        }
+                        tokio::time::sleep(CA_POLL).await;
+                    }
                     other => return other,
                 }
             }
@@ -550,6 +561,12 @@ impl StartCaddy for DaemonCaddy {
             None => CaddyStart::Failed("the daemon is stopping".to_owned()),
             // Still starting. The wait for the root has the same limit.
             Some(Err(_)) => CaddyStart::Started,
+            // Another action still runs with too little time left to start
+            // after it. It may be the start that makes the root, so the
+            // wait for it has the rest of the limit. If it was a stop or a
+            // failed start, the skip says `ca_not_ready`, not
+            // `caddy_not_started`.
+            Some(Ok(Err(ActionError::Busy))) => CaddyStart::Started,
             Some(Ok(Ok(status))) => match status.state {
                 ServiceState::Running | ServiceState::Starting => CaddyStart::Started,
                 ServiceState::Failed { code } => CaddyStart::Failed(code),
@@ -882,9 +899,11 @@ impl Setup {
     }
 
     /// The text of Caddy's root certificate at `path`, as [`read_ca`] gives
-    /// it. A root that is there is read at once. With no root yet, `starter`
-    /// starts Caddy if it does not run, and setup waits for the root up to
-    /// `ca_wait`: Caddy makes it when it loads its config (task M5-15).
+    /// it. A whole root that is there is read at once. With no root yet, or
+    /// one that may be half written (empty, or no END line yet; task M5-22),
+    /// `starter` starts Caddy if it does not run, and setup waits for the
+    /// root up to `ca_wait`: Caddy makes it when it loads its config (task
+    /// M5-15).
     ///
     /// # Errors
     ///
@@ -898,14 +917,23 @@ impl Setup {
         starter: &dyn StartCaddy,
         stop: &CancellationToken,
     ) -> Result<String, &'static str> {
-        let found = read_ca(path);
-        if !matches!(found, Err(CA_NOT_READY)) {
-            return found;
-        }
-        tracing::info!("no CA root yet; starting Caddy so that it makes one");
+        let partial = match load_ca(path) {
+            Ok(pem) => return Ok(pem),
+            Err(CaProblem::Missing) => {
+                tracing::info!("no CA root yet; starting Caddy so that it makes one");
+                false
+            }
+            Err(CaProblem::Partial) => {
+                tracing::info!("the CA root has no END line yet; waiting for Caddy to finish it");
+                true
+            }
+            Err(problem) => return Err(ca_code(path, problem)),
+        };
         let deadline = Instant::now() + self.ca_wait;
         match starter.start(self.ca_wait, stop) {
             CaddyStart::Started => wait_for_ca(path, deadline, stop),
+            // No Caddy will finish it: the root that is there is unusable.
+            CaddyStart::NotInstalled if partial => Err(ca_code(path, CaProblem::Partial)),
             CaddyStart::NotInstalled => {
                 tracing::warn!("no CA root, and no Caddy to make one: install Caddy first");
                 Err(CADDY_NOT_INSTALLED)
@@ -1474,7 +1502,8 @@ fn protected_folder(helper: &Path, home: Option<&Path>) -> Option<PathBuf> {
 /// Looks for the CA root at `path` every [`CA_POLL`] until it can be used,
 /// `deadline`, or `stop`, and gives what [`read_ca`] gives then. A root that
 /// is there but cannot be used yet, or has no END line yet, is waited for
-/// too: the root was missing at the first look, so it may be half written.
+/// too: the root was missing or partial at the first look, so it may be
+/// half written.
 fn wait_for_ca(
     path: &Path,
     deadline: Instant,
@@ -1482,8 +1511,7 @@ fn wait_for_ca(
 ) -> Result<String, &'static str> {
     loop {
         let problem = match load_ca(path) {
-            Ok(pem) if pem.contains(user_trust::PEM_END) => return Ok(pem),
-            Ok(_) => CaProblem::Unusable(format!("no {} line", user_trust::PEM_END)),
+            Ok(pem) => return Ok(pem),
             Err(problem) => problem,
         };
         let left = deadline.saturating_duration_since(Instant::now());
@@ -1502,6 +1530,9 @@ fn wait_for_ca(
 enum CaProblem {
     /// No file yet.
     Missing,
+    /// A file that may be half written: empty, a part of the BEGIN line,
+    /// or a start that passes the checks with no END line yet.
+    Partial,
     /// A file that cannot be used, and why, for the log.
     Unusable(String),
 }
@@ -1511,6 +1542,10 @@ enum CaProblem {
 fn ca_code(path: &Path, problem: CaProblem) -> &'static str {
     match problem {
         CaProblem::Missing => CA_NOT_READY,
+        CaProblem::Partial => ca_code(
+            path,
+            CaProblem::Unusable(format!("no {} line", user_trust::PEM_END)),
+        ),
         CaProblem::Unusable(reason) => {
             tracing::warn!(path = %path.display(), %reason, "cannot use the CA root certificate");
             "ca_unreadable"
@@ -1523,8 +1558,8 @@ fn ca_code(path: &Path, problem: CaProblem) -> &'static str {
 /// # Errors
 ///
 /// `ca_not_ready` if there is no file yet, and `ca_unreadable` if it is not
-/// a regular file, is larger than 16 KiB, cannot be read, or would fail the
-/// helper's own checks ([`pem_problem`]).
+/// a regular file, is larger than 16 KiB, cannot be read, would fail the
+/// helper's own checks ([`pem_problem`]), or has no END line.
 fn read_ca(path: &Path) -> Result<String, &'static str> {
     load_ca(path).map_err(|problem| ca_code(path, problem))
 }
@@ -1550,8 +1585,11 @@ fn load_ca(path: &Path) -> Result<String, CaProblem> {
     if pem.len() as u64 > MAX_CA_BYTES {
         return Err(unusable(&"larger than 16 KiB"));
     }
+    let start = pem.trim_start_matches([' ', '\t', '\r', '\n']);
     match pem_problem(&pem) {
+        Some(_) if PEM_BEGIN.starts_with(start) => Err(CaProblem::Partial),
         Some(problem) => Err(unusable(&problem)),
+        None if !pem.contains(user_trust::PEM_END) => Err(CaProblem::Partial),
         None => Ok(pem),
     }
 }
@@ -3811,6 +3849,49 @@ mod tests {
         assert_eq!(report.skipped, [skip("trust_install", "ca_unreadable")]);
     }
 
+    /// Task M5-22: a root with no END line at the first look may be half
+    /// written too, so it is waited for, never trusted as it is. So is an
+    /// empty file or a part of the BEGIN line.
+    #[test]
+    fn a_root_with_no_end_line_at_the_first_look_is_waited_for() {
+        for part in [&TEST_CA[..TEST_CA.len() / 2], "", "-----BEG"] {
+            let dir = Dir::new(false);
+            let root = dir.ca_root();
+            fs::create_dir_all(root.parent().unwrap()).unwrap();
+            fs::write(&root, part).unwrap();
+            let ca = Some((root, Duration::from_millis(300)));
+            let dir = dir.with_fake(FakeCaddy::new(CaddyStart::Started, ca));
+            let answer = all_done(&["resolver_install", "pf_install"]);
+            let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+            let report = dir.run(&fake);
+
+            assert_eq!(dir.caddy.limits(), [CA_WAIT], "{part:?}");
+            assert!(report.skipped.is_empty(), "{part:?} {:?}", report.skipped);
+            assert_eq!(report.results[2], done("trust_install"), "{part:?}");
+            let record = user_trust::TrustFiles::in_dir(dir.dir.path()).record();
+            assert_eq!(fs::read_to_string(record).unwrap(), TEST_CA, "{part:?}");
+        }
+    }
+
+    /// Task M5-22: Caddy did not start, and half a root is there. The one
+    /// more look does not trust it, and does not wait for the rest.
+    #[test]
+    fn a_half_root_after_a_failed_start_is_ca_unreadable() {
+        let dir = Dir::new(false);
+        let fake_caddy = FakeCaddy {
+            half: Some(dir.ca_root()),
+            ..FakeCaddy::new(CaddyStart::Failed("port_in_use".into()), None)
+        };
+        let dir = dir.with_fake(fake_caddy);
+        let fake = Fake::scripted(netstat_free(), || ok(DONE));
+        let began = Instant::now();
+        let report = dir.run(&fake);
+
+        assert!(began.elapsed() < Duration::from_secs(5));
+        assert_eq!(report.skipped, [skip("trust_install", "ca_unreadable")]);
+        assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
+    }
+
     /// Task M5-15b: Caddy's start and the wait for its root share one
     /// limit. A start that takes most of it leaves only the rest to wait.
     #[test]
@@ -4426,7 +4507,8 @@ mod tests {
 
     /// Task M5-15b: another start of Caddy runs when setup asks for one.
     /// Setup asks again once it has ended, so its own start runs too, and
-    /// the busy answer is never taken for a running Caddy.
+    /// the busy answer is not taken for a running Caddy while Caddy's ready
+    /// limit still fits in the time left (task M5-22).
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_busy_caddy_is_asked_again_once_the_other_action_ends() {
@@ -4457,6 +4539,94 @@ mod tests {
         assert_eq!(last.state, first.state);
         // A second start, after the first one ended.
         assert!(last.since_ms > first.since_ms, "{first:?} {last:?}");
+        daemon.stop_procs(Duration::from_secs(5)).await;
+    }
+
+    /// A start of the daemon's Caddy, which holds the busy flag until its
+    /// ready limit runs out ([`sleeping_caddy`]). Returns once it began.
+    /// Unix only, as `sleeping_caddy`: it runs `/bin/sleep`.
+    #[cfg(unix)]
+    async fn a_first_start(
+        daemon: &Arc<Daemon>,
+    ) -> tokio::task::JoinHandle<Result<marsa_core::types::ServiceStatus, ActionError>> {
+        let first = tokio::spawn({
+            let daemon = Arc::clone(daemon);
+            async move { daemon.caddy.run(&daemon, ServiceAction::Start).await }
+        });
+        while daemon.caddy.status().state == ServiceState::Stopped {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        first
+    }
+
+    /// [`DaemonCaddy::start`] from a blocking thread, as setup calls it.
+    /// Unix only: its callers use `sleeping_caddy`.
+    #[cfg(unix)]
+    async fn daemon_start(
+        daemon: &Arc<Daemon>,
+        limit: Duration,
+        stop: &CancellationToken,
+    ) -> CaddyStart {
+        let starter = DaemonCaddy {
+            daemon: Arc::clone(daemon),
+            runtime: Handle::current(),
+        };
+        let stop = stop.clone();
+        tokio::task::spawn_blocking(move || starter.start(limit, &stop))
+            .await
+            .unwrap()
+    }
+
+    /// Task M5-22: another action holds Caddy, and less than Caddy's ready
+    /// limit would be left for a start after it. Setup asks no more, so no
+    /// start is cut off half way, and waits for a root the other action may
+    /// make.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_start_begins_with_less_than_the_ready_limit_left() {
+        let dir = Dir::new(false);
+        let daemon = sleeping_caddy(&dir, Duration::from_secs(2));
+        let first = a_first_start(&daemon).await;
+
+        let began = Instant::now();
+        let limit = Duration::from_secs(1);
+        let started = daemon_start(&daemon, limit, &CancellationToken::new()).await;
+        assert_eq!(started, CaddyStart::Started);
+        assert!(began.elapsed() < limit, "{:?}", began.elapsed());
+
+        let first = first.await.unwrap().unwrap();
+        // Only the first start ran.
+        assert_eq!(daemon.caddy.status(), first);
+        daemon.stop_procs(Duration::from_secs(5)).await;
+    }
+
+    /// Task M5-22: the daemon stops while setup asks a busy Caddy again.
+    /// The retry ends at once, without a start of its own.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stop_during_the_retry_ends_it() {
+        let dir = Dir::new(false);
+        let daemon = sleeping_caddy(&dir, Duration::from_secs(2));
+        let first = a_first_start(&daemon).await;
+
+        let stop = CancellationToken::new();
+        let cancel = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel.cancel();
+        });
+        let began = Instant::now();
+        let started = daemon_start(&daemon, Duration::from_secs(20), &stop).await;
+        let stopping = CaddyStart::Failed("the daemon is stopping".to_owned());
+        assert_eq!(started, stopping);
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            began.elapsed()
+        );
+
+        let first = first.await.unwrap().unwrap();
+        assert_eq!(daemon.caddy.status(), first);
         daemon.stop_procs(Duration::from_secs(5)).await;
     }
 
