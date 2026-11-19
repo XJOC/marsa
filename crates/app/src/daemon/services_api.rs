@@ -643,7 +643,9 @@ mod tests {
         drop(held);
         let (_, body) = send("POST", "/v1/services/dns/start").await;
         let after: ServiceStatus = serde_json::from_str(&body).unwrap();
-        assert_eq!(after.state, ServiceState::Running);
+        // The server's own line says why, if it did not start.
+        let (_, lines) = send("GET", "/v1/logs/dns").await;
+        assert_eq!(after.state, ServiceState::Running, "{lines}");
         daemon.dns.shutdown(Duration::from_secs(5)).await;
     }
 
