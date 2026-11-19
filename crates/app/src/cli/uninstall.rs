@@ -115,6 +115,17 @@ mod tests {
             "marsa: Caddy 2.11.7 is in use, so it was not uninstalled. Caddy runs from it: \
              stop Caddy first with \"marsa services stop caddy\". [version_in_use]"
         );
+        let postgres = in_use(VersionInUse {
+            version: "18.7.0".into(),
+            server: true,
+            ..VersionInUse::default()
+        });
+        assert_eq!(
+            line(&postgres, Runtime::Postgres),
+            "marsa: PostgreSQL 18.7.0 is in use, so it was not uninstalled. PostgreSQL runs from \
+             it: stop it first with \"marsa services stop postgres\". Its databases stay either \
+             way. [version_in_use]"
+        );
         // M5-19: the only PHP, with sites that would have no PHP after it.
         let last = in_use(VersionInUse {
             version: "8.3.12".into(),

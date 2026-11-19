@@ -28,9 +28,13 @@
 //! matches. It takes the install's guard, so it never runs with an install,
 //! and refuses (409 `version_in_use`, nothing changed) a version that the
 //! default in `global.toml` or a site's own setting in `sites.toml` picks
-//! now, or that the running Caddy or PostgreSQL runs from. Then the folder is moved aside
-//! (`installer::uninstall`), each php-fpm pool that runs the version is
-//! stopped, the folder is deleted, and the site list is built again.
+//! now, or that the running Caddy or PostgreSQL runs from. A PostgreSQL
+//! version is refused (409 `service_busy`) while an action on PostgreSQL
+//! runs, such as a start that may pick it; the uninstall then holds
+//! PostgreSQL's turn until the folder is moved aside. Then the folder is
+//! moved aside (`installer::uninstall`), each php-fpm pool that runs the
+//! version is stopped, the folder is deleted, and the site list is built
+//! again.
 //!
 //! The default of the only installed PHP or Node version has no other
 //! version to pick, so it does not keep the version: it is cleared from
@@ -40,12 +44,12 @@
 //! it: 409 `sites_lose_php`, with their names. That holds with no default
 //! too (task M5-22).
 //!
-//! PostgreSQL (task M6-03): its first install, when `[postgres]` has no
-//! `default` yet, writes the version's major line as the default, turns it
-//! on, and starts it in the background (ADR 0023: the install is the user's
-//! request). A later install of another line changes neither, so a user of
-//! 17 never moves to an empty 18 cluster. An uninstall never touches
-//! `databases/`: it removes `runtimes/postgres/<version>/` only.
+//! PostgreSQL (task M6-03): after an install, `databases::after_install`
+//! sets `[postgres] default` (the first install also turns it on and starts
+//! it: ADR 0023, the install is the user's request), in the background and
+//! in PostgreSQL's turn. A later install of another line never moves a user
+//! to its empty cluster. An uninstall never touches `databases/`: it
+//! removes `runtimes/postgres/<version>/` only.
 
 use std::error::Error;
 use std::fmt;
@@ -368,7 +372,7 @@ async fn run(started: Started, runtime: Runtime, body: InstallRequest) {
                 let _ = daemon.rebuild_sites().await;
             }
             if runtime == Runtime::Postgres {
-                first_postgres(&daemon, &done.version).await;
+                databases::start_after_install(&daemon, done.version.clone());
             }
             InstallUpdate::Done(InstallDone {
                 runtime: done.runtime,
@@ -462,29 +466,6 @@ fn chain(err: &dyn Error) -> String {
         cause = current.source();
     }
     text
-}
-
-/// After an install of PostgreSQL `version`: when `[postgres]` has no
-/// `default` yet, writes its major line, turns it on, and starts it in the
-/// background, which a stop may drop (`PostgresManager::run_waiting`).
-async fn first_postgres(daemon: &Arc<Daemon>, version: &Version) {
-    let worker = Arc::clone(daemon);
-    let major = version.major;
-    let job = tokio::task::spawn_blocking(move || {
-        let _one = worker.lock_global();
-        databases::first_install(&worker.data_dir, major)
-    });
-    match job.await {
-        Ok(Ok(true)) => {
-            tracing::info!(%version, "the first PostgreSQL: on, and starting it");
-            databases::start_after_install(daemon);
-        }
-        Ok(Ok(false)) => {}
-        Ok(Err(err)) => {
-            tracing::warn!(code = err.code(), error = %err, "cannot turn PostgreSQL on");
-        }
-        Err(err) => tracing::warn!(error = %err, "cannot turn PostgreSQL on"),
-    }
 }
 
 /// Makes `version` the default of `runtime` in `global.toml` when it has
@@ -650,6 +631,25 @@ async fn remove_version(
     text: String,
 ) -> Result<Json<Uninstalled>, HttpError> {
     let daemon = Arc::clone(&started.daemon);
+    // A start in PostgreSQL's turn may be about to run a version, and is
+    // not in `running_program` yet. Held until the folder is moved aside: a
+    // tokio lock held across `.await` as a serialization token (manager
+    // decision 2026-11-14).
+    let postgres_turn = match runtime {
+        Runtime::Postgres => match daemon.postgres.try_turn() {
+            Some(turn) => Some(turn),
+            None => {
+                let message = "another action on PostgreSQL runs, and a start may pick this \
+                               version; nothing was uninstalled";
+                return Err(HttpError::new(
+                    StatusCode::CONFLICT,
+                    "service_busy",
+                    message,
+                ));
+            }
+        },
+        _ => None,
+    };
     let caddy = daemon.caddy.running_program(&daemon);
     let server = daemon.postgres.running_program(&daemon);
     let worker = Arc::clone(&daemon);
@@ -671,6 +671,8 @@ async fn remove_version(
             "the uninstall job failed",
         )
     })??;
+    // Moved aside: a start now finds no such version.
+    drop(postgres_turn);
     if let Some(default) = cleared {
         let tool = runtime.dir_name();
         tracing::info!(runtime = tool, %default, "cleared the default of the last version");
