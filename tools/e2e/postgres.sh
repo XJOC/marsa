@@ -108,21 +108,43 @@ step "access (ADR 0023, option B): root over TCP, postgres over the socket only"
 [ "$(tcp -U root -d postgres -c 'select 1')" = 1 ] || fail "root over TCP"
 [ "$(tcp -U root -d postgres -c 'select rolsuper::text || rolcreatedb::text from pg_roles where rolname = current_user')" = falsetrue ] ||
   fail "root must have CREATEDB and not be a superuser"
-refused 'pg_hba.conf' tcp -U postgres -d postgres -c 'select 1'
+refused 'pg_hba.conf rejects connection' tcp -U postgres -d postgres -c 'select 1'
+refused 'pg_hba.conf rejects connection' tcp -U nobody -d postgres -c 'select 1'
 [ "$(sock -U postgres -d postgres -c 'select rolsuper from pg_roles where rolname = current_user')" = t ] ||
   fail "postgres over the socket"
-refused 'pg_hba.conf' sock -U root -d postgres -c 'select 1'
-# Mode 0700: only the owner may use the socket.
+refused 'pg_hba.conf rejects connection' sock -U root -d postgres -c 'select 1'
+# Physical replication: refused by pg_hba.conf. Logical: `all` matches it,
+# and root has no REPLICATION.
+refused 'replication connection' sql -d "host=127.0.0.1 port=$PORT user=root dbname=postgres replication=true" -c 'IDENTIFY_SYSTEM'
+refused 'WAL sender' sql -d "host=127.0.0.1 port=$PORT user=root dbname=postgres replication=database" -c 'IDENTIFY_SYSTEM'
+# Mode 0700: only the owner may open run/ and use the socket.
+[ "$(ls -ld "$DATA/run" | cut -c1-10)" = drwx------ ] || fail "run/ is not 0700"
 ls -la "$DATA/run" | grep -E "^srwx------ .* \.s\.PGSQL\.$PORT\$" || fail "the socket is not 0700"
 
-step "root cannot run programs or read files as the owner"
-refused 'permission denied' tcp -U root -d postgres -c "copy (select 1) to program 'id'"
-refused 'permission denied' tcp -U root -d postgres -c "select pg_read_file('/etc/passwd')"
+step "root cannot become more than it is"
+[ "$(tcp -U root -d postgres -c "select string_agg(rolname, ',' order by rolname) from pg_roles where rolsuper or rolcreaterole or rolreplication or rolbypassrls")" = postgres ] ||
+  fail "a privileged role other than postgres"
+[ "$(tcp -U root -d postgres -c "select count(*) from pg_auth_members where member = 'root'::regrole")" = 0 ] ||
+  fail "root is a member of a role"
+refused 'permission denied to grant role' tcp -U root -d postgres -c 'grant pg_execute_server_program to root'
+refused 'permission denied to create role' tcp -U root -d postgres -c 'create role evil superuser login'
+refused 'permission denied to alter role' tcp -U root -d postgres -c 'alter role root superuser'
+refused 'permission denied to set role' tcp -U root -d postgres -c 'set role postgres'
+refused 'permission denied to set parameter' tcp -U root -d postgres -c "alter system set archive_command = 'id'"
+
+step "root cannot run programs, or read or write files, as the owner"
+refused 'permission denied to COPY to or from an external program' tcp -U root -d postgres -c "copy (select 1) to program 'id'"
+refused 'permission denied for function pg_read_file' tcp -U root -d postgres -c "select pg_read_file('/etc/passwd')"
+refused 'COPY to a file' tcp -U root -d postgres -c "copy (select 1) to '$RUNNER_TEMP/pwn'"
+refused 'COPY from a file' tcp -U root -d postgres -c "create temp table t (l text); copy t from '/etc/passwd'"
+refused 'permission denied for function lo_import' tcp -U root -d postgres -c "select lo_import('/etc/passwd')"
+refused 'permission denied for function lo_export' tcp -U root -d postgres -c "select lo_export(1, '$RUNNER_TEMP/pwn')"
+[ ! -e "$RUNNER_TEMP/pwn" ] || fail "root wrote a file"
 tcp -U root -d postgres -c 'create database app'
 for extension in dblink postgres_fdw plpython3u; do
-  # Not trusted, or not in this build: refused either way.
-  refused 'ERROR' tcp -U root -d app -c "create extension $extension"
+  refused 'permission denied to create extension' tcp -U root -d app -c "create extension $extension"
 done
+refused 'permission denied for language c' tcp -U root -d app -c "create function sh(text) returns int as 'libc.so.6', 'system' language c"
 
 step "a Laravel-like app database: tables, Arabic full-text search, pg_trgm"
 tcp -U root -d app -c 'create table posts (id bigserial primary key, body text not null)'
