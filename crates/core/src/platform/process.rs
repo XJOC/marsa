@@ -28,10 +28,10 @@ use crate::ports::PortLookup;
 /// the daemon (ADR 0017).
 pub const CADDY_ORPHAN_RECOVERY: bool = cfg!(any(target_os = "macos", target_os = "linux"));
 
-/// The same for php-fpm (task M4-23): macOS only. On Linux the workers of a
-/// master that died from SIGKILL cannot be told apart yet: the holders of a
-/// listener are not listed there ([`listener_holders`]).
-pub const FPM_ORPHAN_RECOVERY: bool = cfg!(target_os = "macos");
+/// The same for php-fpm, on macOS and Linux, where
+/// [`listener_holders`] and [`adopters`] name the workers of a master that
+/// died from SIGKILL.
+pub const FPM_ORPHAN_RECOVERY: bool = cfg!(any(target_os = "macos", target_os = "linux"));
 
 /// How long `kill`, `ps`, or `lsof` may run.
 #[cfg(unix)]
@@ -552,12 +552,104 @@ pub async fn listener_holders(listen: &Dial) -> Option<Vec<u32>> {
     crate::orphan::parse_lsof_holders(&text, listen, own)
 }
 
-/// Not known on this system: nothing is signalled. Linux, where `lsof` is
-/// often absent, would read `/proc/net/unix`, `/proc/net/tcp`, and
-/// `/proc/<pid>/fd` (spike S-06b).
-#[cfg(not(target_os = "macos"))]
+/// The processes that hold the listener at `listen` open now, from `/proc`
+/// with `std` only, with the meaning of the macOS version: a
+/// filter, never a proof. The inodes of the listening sockets come from
+/// `/proc/net/unix` or `/proc/net/tcp`, then each process's `fd` folder is
+/// read for them. A process whose files cannot be read (another user's, or
+/// gone) does not hold it here, so it is never signalled for it. `None` when
+/// the socket tables or `/proc` cannot be read.
+#[cfg(target_os = "linux")]
+pub async fn listener_holders(listen: &Dial) -> Option<Vec<u32>> {
+    let inodes = match listen {
+        Dial::Unix(path) => {
+            let table = fs::read_to_string("/proc/net/unix").ok()?;
+            crate::orphan::parse_proc_net_unix(&table, path)
+        }
+        Dial::Tcp(port) => {
+            let table = fs::read_to_string("/proc/net/tcp").ok()?;
+            crate::orphan::parse_proc_net_tcp(&table, *port)
+        }
+    };
+    let mut holders = Vec::new();
+    if inodes.is_empty() {
+        return Some(holders);
+    }
+    for entry in fs::read_dir("/proc").ok()? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(fds) = fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        let holds = fds.flatten().any(|fd| {
+            fs::read_link(fd.path())
+                .ok()
+                .and_then(|target| crate::orphan::socket_inode(&target))
+                .is_some_and(|inode| inodes.contains(&inode))
+        });
+        if holds {
+            holders.push(pid);
+        }
+    }
+    holders.sort_unstable();
+    Some(holders)
+}
+
+/// Not known on this system: nothing is signalled.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub async fn listener_holders(_listen: &Dial) -> Option<Vec<u32>> {
     None
+}
+
+/// The processes that may have adopted a child of an earlier `marsad`
+/// after its death: on macOS pid 1 (launchd) only. On Linux an orphan goes
+/// to its nearest subreaper, such as `systemd --user`, not always to pid 1
+/// (ADR 0025), and which one cannot be read without `prctl`. So: every
+/// ancestor of this daemon, up to pid 1. An earlier daemon of the same
+/// login had the same ones; pid 1 is always there. A list to search, never
+/// a proof: each child found there is checked like any other.
+#[cfg(target_os = "macos")]
+pub async fn adopters() -> Vec<u32> {
+    vec![1]
+}
+
+/// See the macOS version.
+#[cfg(target_os = "linux")]
+pub async fn adopters() -> Vec<u32> {
+    let mut adopters = Vec::new();
+    let mut pid = std::process::id();
+    // A chain longer than this is no process tree; stop at pid 1 at the latest.
+    for _ in 0..64 {
+        let stat = fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("stat"));
+        let Some(stat) = stat
+            .ok()
+            .and_then(|text| crate::orphan::parse_proc_stat(&text))
+        else {
+            break;
+        };
+        // pid 0: the parent of pid 1, or of a process whose parent is in
+        // another pid namespace.
+        if stat.ppid == 0 || adopters.contains(&stat.ppid) {
+            break;
+        }
+        adopters.push(stat.ppid);
+        pid = stat.ppid;
+    }
+    if !adopters.contains(&1) {
+        adopters.push(1);
+    }
+    adopters
+}
+
+/// Nothing adopts here: no orphan of the daemon outlives it (Windows: a Job
+/// Object, ADR 0017).
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub async fn adopters() -> Vec<u32> {
+    Vec::new()
 }
 
 /// Who listens on TCP `port`, as `name(pid)`, for messages only: never use it
@@ -884,6 +976,45 @@ mod tests {
         );
         drop(socket);
         assert_eq!(udp_port_owner(port).await, None);
+    }
+
+    /// On the real `/proc`: this process holds a Unix socket
+    /// at a path with a space, and a TCP port; once they close, nobody does.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn listener_holders_reads_proc_on_linux() {
+        let me = std::process::id();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("php fpm.sock");
+        let unix = Dial::Unix(path.clone());
+        assert_eq!(listener_holders(&unix).await, Some(Vec::new()));
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert_eq!(listener_holders(&unix).await, Some(vec![me]));
+        drop(listener);
+        assert_eq!(listener_holders(&unix).await, Some(Vec::new()));
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let tcp = Dial::Tcp(port);
+        assert_eq!(listener_holders(&tcp).await, Some(vec![me]));
+        drop(listener);
+        assert_eq!(listener_holders(&tcp).await, Some(Vec::new()));
+        // A connected socket on the port is no listener: the parser test
+        // covers its line.
+    }
+
+    /// Pid 1 always, and on Linux this process's parent first.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn adopters_end_at_pid_1() {
+        let adopters = adopters().await;
+        assert_eq!(adopters.last(), Some(&1), "{adopters:?}");
+        #[cfg(target_os = "linux")]
+        {
+            let parent = std::os::unix::process::parent_id();
+            assert_eq!(adopters.first(), Some(&parent), "{adopters:?}");
+        }
+        assert!(!adopters.contains(&std::process::id()));
     }
 
     // The systems where `identity` reads a process.

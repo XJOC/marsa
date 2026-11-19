@@ -65,16 +65,20 @@
 //!   on the TCP fallback port, which is not private to Marsa. Such a
 //!   process gets the signals of a worker.
 //!
-//! For Linux (spike S-06b; none of this runs there today): an orphan goes to
-//! the nearest subreaper, for example `systemd --user`, not always to pid 1,
-//! and the holders of a listener are not listed there yet
-//! ([`process::listener_holders`]).
+//! On Linux (ADR 0025) an orphan goes to its nearest
+//! subreaper, for example `systemd --user`, not always to pid 1. So "pid 1"
+//! above means each of [`process::adopters`]: pid 1 on macOS, and the
+//! ancestors of this daemon up to pid 1 on Linux. A php-fpm of this data
+//! folder that the user started by hand under one of those, on this pool's
+//! socket or port, is the known limit above. The holders of a listener come
+//! from `/proc` there ([`process::listener_holders`]).
 //!
 //! php-fpm writes its own `argv[0]` (`php-fpm: master process (...)`), so
 //! `ps` shows no path for it. Identity is the file it really runs instead
 //! ([`process::real_identity`]: `lsof` on macOS, `/proc` on Linux).
 //!
-//! All of this runs only where `process::FPM_ORPHAN_RECOVERY` is on (macOS now).
+//! All of this runs only where `process::FPM_ORPHAN_RECOVERY` is on (macOS
+//! and Linux).
 //! Elsewhere no pid file is written, nothing is signalled, and a file left
 //! from before is deleted.
 
@@ -112,6 +116,8 @@ pub const STOPPING_ORPHAN: &str = "marsad: Stopping an old php-fpm left by a cra
 const POLL: Duration = Duration::from_millis(50);
 
 /// Pid 1 (`launchd` on macOS), which adopts a process whose parent died.
+/// Only the tests' fake OS uses it: the code asks [`FpmProcesses::adopters`].
+#[cfg(test)]
 const INIT: u32 = 1;
 
 /// How long a probe of the socket may wait for a connection.
@@ -131,6 +137,9 @@ pub trait FpmProcesses: fmt::Debug + Send + Sync {
     /// inherited one too: a list, never a proof alone. `None` when they
     /// cannot be listed: then no child of pid 1 is signalled.
     fn listener_holders<'a>(&'a self, listen: &'a Dial) -> BoxFuture<'a, Option<Vec<u32>>>;
+    /// Who may have adopted the children of an earlier daemon
+    /// ([`process::adopters`]): a list to search, never a proof.
+    fn adopters(&self) -> BoxFuture<'_, Vec<u32>>;
     /// Sends `signal` to `pid`. The caller checked the pid right before.
     fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>>;
 }
@@ -150,6 +159,10 @@ impl FpmProcesses for SystemFpm {
 
     fn listener_holders<'a>(&'a self, listen: &'a Dial) -> BoxFuture<'a, Option<Vec<u32>>> {
         Box::pin(process::listener_holders(listen))
+    }
+
+    fn adopters(&self) -> BoxFuture<'_, Vec<u32>> {
+        Box::pin(process::adopters())
     }
 
     fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
@@ -627,8 +640,9 @@ impl Orphans<'_> {
     }
 
     /// The workers of the master `record` names that pid 1 adopted: the
-    /// children of pid 1 that hold a listener at this pool's socket path or
-    /// port and pass [`orphan::worker_of`]. The listener is a filter, not a
+    /// children of pid 1 (each of [`FpmProcesses::adopters`]) that hold a
+    /// listener at this pool's socket path or port and pass
+    /// [`orphan::worker_of`]. The listener is a filter, not a
     /// proof: `lsof` shows who holds a listener at that path or port, not
     /// who inherited it from our master. It is what a php-fpm of this data
     /// folder that the user started by hand fails, as long as it listens
@@ -648,7 +662,19 @@ impl Orphans<'_> {
             );
             return None;
         };
-        self.workers_under(record, INIT, Some(&holders), reap).await
+        let mut workers: Vec<PidRecord> = Vec::new();
+        for adopter in self.processes.adopters().await {
+            let found = self
+                .workers_under(record, adopter, Some(&holders), reap)
+                .await?;
+            for worker in found {
+                if !workers.iter().any(|known| known.pid == worker.pid) {
+                    workers.push(worker);
+                }
+            }
+        }
+        workers.sort_by_key(|worker| worker.pid);
+        Some(workers)
     }
 
     /// The children of `ppid` that are workers of the master `record` names
@@ -1276,6 +1302,9 @@ mod tests {
         /// The pids that hold the pool's listener, each until a signal ends
         /// it.
         holders: Mutex<BTreeSet<u32>>,
+        /// A subreaper that adopts orphans instead of pid 1, as
+        /// `systemd --user` does on Linux. It is searched before pid 1.
+        subreaper: Option<u32>,
         /// The port they hold, let go with the last of them.
         port: Mutex<Option<TcpListener>>,
         signals: Mutex<Vec<(u32, Signal)>>,
@@ -1372,6 +1401,11 @@ mod tests {
             Box::pin(async move { children })
         }
 
+        fn adopters(&self) -> BoxFuture<'_, Vec<u32>> {
+            let adopters = self.subreaper.into_iter().chain([INIT]).collect();
+            Box::pin(async move { adopters })
+        }
+
         fn listener_holders<'a>(&'a self, _listen: &'a Dial) -> BoxFuture<'a, Option<Vec<u32>>> {
             *self.searches.lock().unwrap() += 1;
             let holders =
@@ -1397,7 +1431,7 @@ mod tests {
                         *self.port.lock().unwrap() = None;
                     }
                     for orphan in procs.values_mut().filter(|proc| proc.ppid == pid) {
-                        orphan.ppid = 1;
+                        orphan.ppid = self.subreaper.unwrap_or(INIT);
                         orphan.late = false;
                     }
                 }
@@ -1848,6 +1882,29 @@ mod tests {
         assert_eq!(fake.signals(), [(4301, Signal::Term), (4302, Signal::Term)]);
         assert_eq!(fake.announced(), 1, "once, before the first signal");
         assert!(!pid_file.path.exists());
+    }
+
+    /// On Linux a subreaper (`systemd --user`) adopts the
+    /// workers, and one stays under pid 1. Both are searched; a worker of
+    /// another parent, on the port too, is not.
+    #[tokio::test]
+    async fn workers_under_a_subreaper_are_stopped_too() {
+        let (_dir, pid_file) = pid_file_of_ours();
+        let (held, listen) = held_port();
+        const SUBREAPER: u32 = 900;
+        let under = |ppid: u32, proc: Proc| Proc { ppid, ..proc };
+        let fake = Fake {
+            subreaper: Some(SUBREAPER),
+            ..Fake::new([Liveness::Gone])
+        }
+        .with(4301, under(SUBREAPER, worker(STARTED)))
+        .with(4302, under(INIT, worker(LATER)))
+        .with(4303, under(4999, worker(LATER)))
+        .holding([4301, 4302, 4303], held);
+        let result = run(&pid_file, &fake, &listen).await;
+        assert_eq!(fake.signals(), [(4301, Signal::Term), (4302, Signal::Term)]);
+        // 4303 still holds the port: what holds it is not ours.
+        assert_eq!(result.unwrap_err().code, ORPHAN_STUCK);
     }
 
     #[tokio::test]
@@ -2731,6 +2788,10 @@ mod tests {
                 Box::pin(process::listener_holders(listen))
             }
 
+            fn adopters(&self) -> BoxFuture<'_, Vec<u32>> {
+                Box::pin(process::adopters())
+            }
+
             fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
                 self.signals.lock().unwrap().push((pid, signal));
                 if self.send {
@@ -3174,10 +3235,8 @@ mod tests {
             assert_eq!(lock(&runtime).status.state, ServiceState::Stopped);
         }
 
-        // The search under pid 1 needs the holders of the listener, which
-        // only macOS lists (`process::listener_holders`), and only there do
-        // orphans always go to pid 1. Linux waits for spike S-06b.
-        #[cfg(target_os = "macos")]
+        /// "Pid 1" is each of `process::adopters`: on Linux the nearest
+        /// subreaper may adopt the orphans.
         #[tokio::test]
         async fn under_pid_1_only_the_worker_on_the_pools_socket_is_stopped() {
             let dir = tempfile::tempdir().unwrap();
@@ -3217,10 +3276,15 @@ mod tests {
                 .await;
             assert!(matches!(recorded, Recorded::Written(_)), "{recorded:?}");
 
-            // The master dies as from a SIGKILL, and pid 1 adopts both.
+            // The master dies as from a SIGKILL, and pid 1, or a subreaper
+            // on Linux, adopts both.
             drop(master);
-            wait_until("pid 1 adopts both", async || {
-                let adopted = process::children(1).await.unwrap_or_default();
+            let adopters = process::adopters().await;
+            wait_until("an adopter adopts both", async || {
+                let mut adopted = Vec::new();
+                for adopter in &adopters {
+                    adopted.extend(process::children(*adopter).await.unwrap_or_default());
+                }
                 let under_init = |pid: &u32| adopted.iter().any(|c| c.pid == *pid);
                 children.iter().all(under_init)
             })

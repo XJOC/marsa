@@ -564,6 +564,80 @@ pub fn parse_lsof_holders(text: &str, listen: &Dial, control: u32) -> Option<Vec
     described.then_some(holders)
 }
 
+/// The `__SO_ACCEPTCON` flag of `/proc/net/unix`: the socket listens.
+const UNIX_LISTENING: u32 = 0x0001_0000;
+/// `SOCK_STREAM` in the `Type` column of `/proc/net/unix`.
+const UNIX_STREAM: u32 = 1;
+/// `TCP_LISTEN` in the `st` column of `/proc/net/tcp`.
+const TCP_LISTEN: &str = "0A";
+
+/// Reads `/proc/net/unix` (Linux) for the inodes of the stream
+/// sockets that listen at `path`, the path exactly as it was bound. The path
+/// is the last column and may hold spaces; a line in another shape, or an
+/// abstract socket (`@...`), never matches.
+pub fn parse_proc_net_unix(text: &str, path: &Path) -> Vec<u64> {
+    let mut inodes = Vec::new();
+    // The first line is the header.
+    for line in text.lines().skip(1) {
+        // `Num RefCount Protocol Flags Type St Inode Path`.
+        let mut rest = line.trim_start();
+        let mut fields = [""; 7];
+        let mut complete = true;
+        for field in &mut fields {
+            let Some(end) = rest.find(' ') else {
+                complete = false;
+                break;
+            };
+            *field = &rest[..end];
+            rest = rest[end..].trim_start_matches(' ');
+        }
+        let [_, _, _, flags, kind, _, inode] = fields;
+        let hex = |text: &str| u32::from_str_radix(text, 16).ok();
+        let listens = hex(flags).is_some_and(|flags| flags & UNIX_LISTENING != 0);
+        if complete
+            && listens
+            && hex(kind) == Some(UNIX_STREAM)
+            && Path::new(rest) == path
+            && let Ok(inode) = inode.parse()
+        {
+            inodes.push(inode);
+        }
+    }
+    inodes
+}
+
+/// Reads `/proc/net/tcp` (Linux) for the inodes of the TCP
+/// sockets that listen on `127.0.0.1:<port>`. The address is the kernel's
+/// `u32` in host byte order, so `0100007F` on a little-endian machine and
+/// `7F000001` on a big-endian one; the port is plain hex.
+pub fn parse_proc_net_tcp(text: &str, port: u16) -> Vec<u64> {
+    let ours = [
+        format!("0100007F:{port:04X}"),
+        format!("7F000001:{port:04X}"),
+    ];
+    text.lines()
+        .skip(1)
+        .filter_map(|line| {
+            // `sl local_address rem_address st ... uid timeout inode`.
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let (local, state, inode) = (fields.get(1)?, fields.get(3)?, fields.get(9)?);
+            let listens = *state == TCP_LISTEN && ours.iter().any(|ours| ours == local);
+            listens.then(|| inode.parse().ok()).flatten()
+        })
+        .collect()
+}
+
+/// The inode of a socket from the target of a `/proc/<pid>/fd/<n>` link:
+/// `socket:[<inode>]`. `None` for any other file.
+pub fn socket_inode(target: &Path) -> Option<u64> {
+    target
+        .to_str()?
+        .strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,6 +661,65 @@ mod tests {
             app_port: app,
             admin_port: adm,
             admin_owner: None,
+        }
+    }
+
+    /// Lines of a real `/proc/net/unix` (Ubuntu 24.04), plus the
+    /// cases around ours.
+    #[test]
+    fn proc_net_unix_gives_the_listeners_at_the_exact_path() {
+        let path = Path::new("/home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock");
+        let text = "\
+Num       RefCount Protocol Flags    Type St Inode Path
+0000000000000000: 00000002 00000000 00010000 0001 01 23456 /home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock
+0000000000000000: 00000003 00000000 00000000 0001 03 23457 /home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock
+0000000000000000: 00000002 00000000 00010000 0002 01 23458 /home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock
+0000000000000000: 00000002 00000000 00010000 0001 01 23459 /home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock2
+0000000000000000: 00000002 00000000 00010000 0001 01 23460 @/home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock
+0000000000000000: 00000002 00000000 00010000 0001 01 23461
+0000000000000000: 00000002 00000000 00010000 0001 01 23462 /home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock
+garbage
+";
+        // Listening stream sockets only: not a connected one (no
+        // `__SO_ACCEPTCON`), not a datagram one, not a longer path, not an
+        // abstract socket, not one with no path.
+        assert_eq!(parse_proc_net_unix(text, path), [23456, 23462]);
+        assert!(parse_proc_net_unix(text, Path::new("/home/u")).is_empty());
+        // The header alone, and nothing.
+        assert!(parse_proc_net_unix(text.lines().next().unwrap(), path).is_empty());
+        assert!(parse_proc_net_unix("", path).is_empty());
+    }
+
+    /// Lines of a real `/proc/net/tcp` (x86-64).
+    #[test]
+    fn proc_net_tcp_gives_the_listeners_on_127_0_0_1() {
+        let text = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:4E9C 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 31001 1 0000000000000000 100 0 0 10 0
+   1: 00000000:4E9C 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 31002 1 0000000000000000 100 0 0 10 0
+   2: 0100007F:4E9C 0100007F:D4A2 01 00000000:00000000 00:00000000 00000000  1000        0 31003 1 0000000000000000 20 4 30 10 -1
+   3: 0100007F:4E9D 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 31004 1 0000000000000000 100 0 0 10 0
+   4: 7F000001:4E9C 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 31005 1 0000000000000000 100 0 0 10 0
+   5: 0100007F:4E9C
+";
+        // 20124 is 0x4E9C. Not `0.0.0.0`, not an established connection,
+        // not another port; the big-endian spelling counts.
+        assert_eq!(parse_proc_net_tcp(text, 20124), [31001, 31005]);
+        assert!(parse_proc_net_tcp(text, 80).is_empty());
+        assert!(parse_proc_net_tcp("", 20124).is_empty());
+    }
+
+    #[test]
+    fn a_socket_link_names_its_inode() {
+        assert_eq!(socket_inode(Path::new("socket:[23456]")), Some(23456));
+        for other in [
+            "pipe:[23456]",
+            "/dev/null",
+            "socket:[]",
+            "socket:[12a]",
+            "socket:[1",
+        ] {
+            assert_eq!(socket_inode(Path::new(other)), None, "{other}");
         }
     }
 
