@@ -22,10 +22,16 @@ use crate::caddy::Dial;
 use crate::orphan::{ChildProcess, Liveness, PidRecord, is_instance_id};
 use crate::ports::PortLookup;
 
-/// Whether the daemon looks for an orphan Caddy before it starts one: macOS
-/// only, where ADR 0009 is accepted. Linux waits for spike S-06b. On Windows,
-/// Job Objects will stop Caddy with the daemon (architecture.md section 9).
-pub const ORPHAN_RECOVERY: bool = cfg!(target_os = "macos");
+/// Whether the daemon writes `run/caddy.pid` after each start of Caddy, and
+/// looks for an orphan Caddy before it starts one: macOS (ADR 0009) and
+/// Linux (ADR 0025, task M4-18m). On Windows a Job Object stops Caddy with
+/// the daemon (ADR 0017).
+pub const CADDY_ORPHAN_RECOVERY: bool = cfg!(any(target_os = "macos", target_os = "linux"));
+
+/// The same for php-fpm (task M4-23): macOS only. On Linux the workers of a
+/// master that died from SIGKILL cannot be told apart yet: the holders of a
+/// listener are not listed there ([`listener_holders`]).
+pub const FPM_ORPHAN_RECOVERY: bool = cfg!(target_os = "macos");
 
 /// How long `kill`, `ps`, or `lsof` may run.
 #[cfg(unix)]

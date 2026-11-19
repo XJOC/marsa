@@ -74,7 +74,7 @@
 //! `ps` shows no path for it. Identity is the file it really runs instead
 //! ([`process::real_identity`]: `lsof` on macOS, `/proc` on Linux).
 //!
-//! All of this runs only where `process::ORPHAN_RECOVERY` is on (macOS now).
+//! All of this runs only where `process::FPM_ORPHAN_RECOVERY` is on (macOS now).
 //! Elsewhere no pid file is written, nothing is signalled, and a file left
 //! from before is deleted.
 

@@ -1,12 +1,14 @@
 //! Finds and stops a Caddy that a crashed `marsad` left running (ADR 0009).
-//! Task M3-11. macOS only for now: `ORPHAN_RECOVERY` is off elsewhere.
+//! Task M3-11, and on Linux task M4-18m (ADR 0025). Off on Windows:
+//! `CADDY_ORPHAN_RECOVERY`.
 //!
 //! The manager inspects three things: `run/caddy.pid`; the admin port's answer
 //! to `GET /id/marsa-instance-<id>` (this data folder's tag), then to
 //! `GET /id/marsa-srv` (any Marsa); and the ports. `marsa_core::orphan::decide`
 //! picks the action. A reap is `POST /stop`, then SIGTERM, then SIGKILL.
 //! Before each signal the pid is checked again: start path and start time
-//! from `ps`, and the real executable from `lsof`. Anything that is not ours
+//! (`ps` on macOS, `/proc` on Linux), and the real executable (`lsof` on
+//! macOS, the `exe` link on Linux). Anything that is not ours
 //! is never signalled, and another Marsa's Caddy does not even get `/stop`.
 
 use std::error::Error as _;
@@ -36,6 +38,10 @@ pub const OTHER_MARSA: &str = "caddy_other_marsa";
 
 /// How often a wait checks the ports again.
 const POLL: Duration = Duration::from_millis(50);
+
+/// How long [`PidFile::record`] looks again at a Caddy just spawned that
+/// does not run Caddy yet, every [`POLL`].
+pub const RECORD_LIMIT: Duration = Duration::from_secs(5);
 
 /// The largest answer to `GET /id/...` that is read. The server's config grows
 /// with the sites; a longer answer counts as not ours.
@@ -146,27 +152,54 @@ impl PidFile {
         }
     }
 
-    /// Writes the file for a Caddy just spawned, only if `pid` was started as
-    /// our Caddy.
+    /// Writes the file for a Caddy just spawned, once `pid` runs our Caddy.
+    /// On Linux `spawn` can return before the exec is done, and until then
+    /// the `exe` link names the daemon (as for php-fpm,
+    /// `php::orphan::Recorded::NotYet`). So while the pid runs the daemon's
+    /// own executable, or cannot be told, it looks again every [`POLL`] for
+    /// up to [`RECORD_LIMIT`] (task M4-18m). A change of the start time
+    /// means the pid changed hands: then it is never written.
     pub(super) async fn record(&self, processes: &dyn Processes, pid: u32) {
-        if !process::ORPHAN_RECOVERY {
+        if !process::CADDY_ORPHAN_RECOVERY {
             return;
         }
-        match processes.identity(pid).await {
-            Liveness::Alive { exe, started } if self.accepted.contains(&exe) => {
-                let record = PidRecord { pid, exe, started };
-                match process::write_pid_file(&self.path, &record) {
-                    Ok(()) => debug!(pid, "caddy.pid written"),
-                    Err(err) => warn!(%err, "cannot write caddy.pid"),
+        let own = own_executable();
+        let until = tokio::time::Instant::now() + RECORD_LIMIT;
+        let mut first: Option<String> = None;
+        loop {
+            let now = processes.identity(pid).await;
+            let not_yet = match &now {
+                Liveness::Alive { exe, started } => {
+                    if first.get_or_insert_with(|| started.clone()) != started {
+                        warn!(pid, "caddy.pid not written: the pid changed hands");
+                        return;
+                    }
+                    if self.accepted.contains(exe) {
+                        let record = PidRecord {
+                            pid,
+                            exe: exe.clone(),
+                            started: started.clone(),
+                        };
+                        match process::write_pid_file(&self.path, &record) {
+                            Ok(()) => debug!(pid, "caddy.pid written"),
+                            Err(err) => warn!(%err, "cannot write caddy.pid"),
+                        }
+                        return;
+                    }
+                    own.contains(exe)
                 }
+                // It exited at once; the supervisor reports why.
+                Liveness::Gone => {
+                    debug!(pid, "caddy exited before caddy.pid was written");
+                    return;
+                }
+                Liveness::Unknown => true,
+            };
+            if !not_yet || tokio::time::Instant::now() >= until {
+                warn!(pid, ?now, "caddy.pid not written: the pid is not our Caddy");
+                return;
             }
-            // It exited at once; the supervisor reports why.
-            Liveness::Gone => debug!(pid, "caddy exited before caddy.pid was written"),
-            other => warn!(
-                pid,
-                ?other,
-                "caddy.pid not written: the pid is not our Caddy"
-            ),
+            tokio::time::sleep(POLL).await;
         }
     }
 
@@ -223,7 +256,7 @@ impl Orphans<'_> {
     /// Inspects the pid file, the admin port, and the ports, and decides.
     /// `None` where the OS has no orphan recovery.
     pub(super) async fn inspect(&self) -> Option<Found> {
-        if !process::ORPHAN_RECOVERY {
+        if !process::CADDY_ORPHAN_RECOVERY {
             return None;
         }
         let record = process::read_pid_file(&self.pid_file.path);
@@ -440,6 +473,22 @@ impl Orphans<'_> {
     }
 }
 
+/// The daemon's own executable, as written and with links resolved: what the
+/// `exe` link of a child names until its exec is done. Only compared.
+fn own_executable() -> Vec<PathBuf> {
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    let real = std::fs::canonicalize(&exe).ok();
+    let mut own = vec![exe];
+    if let Some(real) = real
+        && !own.contains(&real)
+    {
+        own.push(real);
+    }
+    own
+}
+
 /// `reason`, plus the owner of each busy port it does not name yet.
 fn with_owners(reason: &str, inspection: &Inspection) -> String {
     let mut text = reason.to_owned();
@@ -555,9 +604,9 @@ fn failed(err: &reqwest::Error) -> Probe {
     Probe::Broken
 }
 
-// Only macOS runs the checks; elsewhere `inspect` returns `None` at once.
+// Only macOS and Linux run the checks; elsewhere `inspect` returns `None`.
 #[cfg(test)]
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
@@ -672,6 +721,60 @@ mod tests {
         }
     }
 
+    /// The daemon's own executable, as the `exe` link of a child names it
+    /// until its exec is done (Linux).
+    fn not_exec_yet() -> Liveness {
+        Liveness::Alive {
+            exe: std::env::current_exe().unwrap(),
+            started: STARTED.into(),
+        }
+    }
+
+    /// Task M4-18m: the first looks see the daemon's own executable, or
+    /// cannot tell; the file is written once the pid runs our Caddy.
+    #[tokio::test(start_paused = true)]
+    async fn the_pid_file_waits_for_the_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = PidFile::new(dir.path(), &[PathBuf::from(PROGRAM)]);
+        let fake = Fake::new([not_exec_yet(), Liveness::Unknown, not_exec_yet(), ours()]);
+        pid_file.record(&fake, 4242).await;
+        let written = process::read_pid_file(&pid_file.path).expect("caddy.pid");
+        assert_eq!((written.pid, written.exe), (4242, PathBuf::from(PROGRAM)));
+        assert_eq!(written.started, STARTED);
+    }
+
+    /// Task M4-18m: the look stops, and nothing is written, at a change of
+    /// the start time, at another program, and after the limit.
+    #[tokio::test(start_paused = true)]
+    async fn the_pid_file_is_never_written_for_another_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = PidFile::new(dir.path(), &[PathBuf::from(PROGRAM)]);
+        let later = Liveness::Alive {
+            exe: PathBuf::from(PROGRAM),
+            started: "Wed Nov 4 03:31:28 2026".into(),
+        };
+        let sleep = Liveness::Alive {
+            exe: PathBuf::from("/bin/sleep"),
+            started: STARTED.into(),
+        };
+        let cases = [
+            vec![not_exec_yet(), later],
+            vec![sleep, ours()],
+            vec![Liveness::Gone, ours()],
+        ];
+        for looks in cases {
+            pid_file.record(&Fake::new(looks.clone()), 4242).await;
+            assert_eq!(process::read_pid_file(&pid_file.path), None, "{looks:?}");
+        }
+        // Always the daemon's executable: the limit ends the looks.
+        let fake = Fake::new(std::iter::repeat_n(not_exec_yet(), 1000));
+        let began = tokio::time::Instant::now();
+        pid_file.record(&fake, 4242).await;
+        assert!(began.elapsed() >= RECORD_LIMIT, "{:?}", began.elapsed());
+        assert!(began.elapsed() < RECORD_LIMIT + POLL * 2);
+        assert_eq!(process::read_pid_file(&pid_file.path), None);
+    }
+
     fn setup() -> (Setup, TcpListener) {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = PidFile::new(dir.path(), &[PathBuf::from(PROGRAM)]);
@@ -711,7 +814,7 @@ mod tests {
             ladder: SHORT,
             tag: TAG,
         };
-        let found = orphans.inspect().await.expect("macOS inspects");
+        let found = orphans.inspect().await.expect("macOS and Linux inspect");
         orphans.clear_for_start(found).await
     }
 

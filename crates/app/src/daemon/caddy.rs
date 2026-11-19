@@ -675,7 +675,7 @@ impl CaddyManager {
     async fn stop_orphan(&self, daemon: &Daemon, admin: &Admin) -> bool {
         // No check on this OS, so no instance id file either. Without the
         // program there is no Caddy of ours to recognize.
-        if !process::ORPHAN_RECOVERY {
+        if !process::CADDY_ORPHAN_RECOVERY {
             return true;
         }
         let program = match self.spec_to_run() {

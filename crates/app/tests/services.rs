@@ -912,7 +912,7 @@ async fn another_marsas_caddy_on_our_admin_port_gets_no_config_and_no_stop() {
     let status: ServiceStatus = app
         .json("POST", "/v1/services/caddy/start", StatusCode::OK)
         .await;
-    let code = if process::ORPHAN_RECOVERY {
+    let code = if process::CADDY_ORPHAN_RECOVERY {
         "caddy_other_marsa"
     } else {
         "caddy_start_timeout"
