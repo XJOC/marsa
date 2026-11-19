@@ -572,11 +572,38 @@ pub async fn port_owner(port: u16) -> Option<String> {
 /// `-w`: no warnings about other file systems on stderr.
 #[cfg(target_os = "macos")]
 pub async fn port_lookup(port: u16) -> PortLookup {
+    let port = format!("-iTCP:{port}");
+    lsof_lookup(&[&port, "-sTCP:LISTEN"]).await
+}
+
+/// Who has UDP `port` open, as `name(pid)`, for messages only (task
+/// M4-18i: the DNS port). `None` when nobody has it, the look fails, or this
+/// system has no look: only macOS asks `lsof`.
+pub async fn udp_port_owner(port: u16) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let port = format!("-iUDP:{port}");
+        match lsof_lookup(&[&port]).await {
+            PortLookup::Owner(owner) => Some(owner),
+            PortLookup::Nobody | PortLookup::Failed | PortLookup::NotChecked => None,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = port;
+        None
+    }
+}
+
+/// Runs `/usr/sbin/lsof` with `select` (the sockets to look at) and reads
+/// the first process, as [`port_lookup`] says.
+#[cfg(target_os = "macos")]
+async fn lsof_lookup(select: &[&str]) -> PortLookup {
     let mut lsof = Command::new("/usr/sbin/lsof");
     // `+c 0`: the whole command name, not its first 9 characters.
-    let port = format!("-iTCP:{port}");
-    let args = ["-w", "+c", "0", "-nP", &port, "-sTCP:LISTEN", "-Fpc"];
-    lsof.args(args)
+    lsof.args(["-w", "+c", "0", "-nP"])
+        .args(select)
+        .arg("-Fpc")
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -835,6 +862,22 @@ mod tests {
         );
         drop(listener);
         assert_eq!(port_lookup(port).await, PortLookup::Nobody);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn udp_port_owner_names_the_socket_and_then_nobody() {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let owner = udp_port_owner(port)
+            .await
+            .expect("this test holds the port");
+        assert!(
+            owner.ends_with(&format!("({})", std::process::id())),
+            "{owner}"
+        );
+        drop(socket);
+        assert_eq!(udp_port_owner(port).await, None);
     }
 
     // The systems where `identity` reads a process.

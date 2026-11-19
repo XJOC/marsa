@@ -204,6 +204,7 @@ const O_NONBLOCK: i32 = 0;
 const TRUST_INSTALL: &str = "trust_install";
 const PF_INSTALL: &str = "pf_install";
 const PORTS_INSTALL: &str = "ports_install";
+const RESOLVER_INSTALL: &str = "resolver_install";
 const UNINSTALL_ALL: &str = "uninstall_all";
 
 /// Linux: the second request of setup, with the hosts way's operations,
@@ -670,7 +671,13 @@ impl Setup {
     /// The setup itself. Blocking: it runs programs and reads a file.
     /// `starter` starts Caddy when its CA root is not there yet. `names`:
     /// the host names of the sites, sorted, for the hosts file on Linux;
-    /// `None` if the site list is not known.
+    /// `None` if the site list is not known. `dns_down`: why the daemon's
+    /// DNS server does not answer (`DnsService::not_serving`); the DNS
+    /// operation is then skipped with that code (task M4-18i).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the inputs of one setup; a struct would only rename them"
+    )]
     fn run(
         &self,
         data_dir: &Path,
@@ -678,6 +685,7 @@ impl Setup {
         platform: Platform,
         starter: &dyn StartCaddy,
         names: Option<&[String]>,
+        dns_down: Option<&str>,
         stop: &CancellationToken,
     ) -> SetupReport {
         let mut report = SetupReport::default();
@@ -710,9 +718,14 @@ impl Setup {
                 .and_then(linux_dns::read_block)
                 .is_some();
             tracing::info!(?path, block, "the way of .test names here");
-            match path {
-                LinuxPath::Link => ops.push(HelperOp::ResolvedInstall { port: DNS_PORT }),
-                LinuxPath::Hosts => push_hosts_ops(&mut ops, &mut report, names),
+            match (path, dns_down) {
+                (LinuxPath::Link, Some(code)) => {
+                    dns_skipped(&mut report, linux_dns::RESOLVED_INSTALL, code);
+                }
+                (LinuxPath::Link, None) => {
+                    ops.push(HelperOp::ResolvedInstall { port: DNS_PORT });
+                }
+                (LinuxPath::Hosts, _) => push_hosts_ops(&mut ops, &mut report, names),
             }
             linux = Some((path, block));
         } else if is_windows(platform) {
@@ -731,6 +744,8 @@ impl Setup {
                     .skipped
                     .push(skip(linux_dns::HOSTS_SYNC, linux_dns::HOSTS_SITES_UNKNOWN)),
             }
+        } else if let Some(code) = dns_down {
+            dns_skipped(&mut report, RESOLVER_INSTALL, code);
         } else if let Some(dns) = dns::strategy_for(platform) {
             ops.push(dns.setup_op());
         }
@@ -1249,6 +1264,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
     } else {
         Some(Vec::new())
     };
+    let dns_down = daemon.dns.not_serving();
     let runtime = Handle::current();
     let job = tokio::task::spawn_blocking(move || {
         // Moved in, so the next setup waits for this one to end even if the
@@ -1268,6 +1284,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
             platform,
             starter.as_ref(),
             names.as_deref(),
+            dns_down.as_deref(),
             &daemon.shutdown,
         );
         tracing::info!(
@@ -1911,6 +1928,18 @@ fn skip(op: &str, code: &str) -> SetupSkip {
     }
 }
 
+/// Leaves `op`, the DNS step, out: the daemon's DNS server does not answer,
+/// so `.test` names would go to a port that no one, or another program,
+/// answers on (task M4-18i).
+fn dns_skipped(report: &mut SetupReport, op: &str, code: &str) {
+    tracing::warn!(
+        op,
+        code,
+        "the DNS server for .test does not run; no DNS setup"
+    );
+    report.skipped.push(skip(op, code));
+}
+
 fn failure(code: &str, message: impl Into<String>) -> ApiError {
     ApiError {
         code: code.to_owned(),
@@ -2209,6 +2238,7 @@ mod tests {
                 platform,
                 self.caddy.as_ref(),
                 Some(&[]),
+                None,
                 &stop,
             )
         }
@@ -2568,6 +2598,7 @@ mod tests {
             Platform::DarwinArm64,
             dir.caddy.as_ref(),
             Some(&[]),
+            None,
             &stop,
         );
 
@@ -2650,6 +2681,7 @@ mod tests {
                 Platform::DarwinArm64,
                 dir.caddy.as_ref(),
                 Some(&[]),
+                None,
                 &stop,
             );
 
@@ -2681,6 +2713,7 @@ mod tests {
             Platform::DarwinArm64,
             dir.caddy.as_ref(),
             Some(&[]),
+            None,
             &stop,
         );
         assert_eq!(error_code(&report), Some("setup_helper_protected_folder"));
@@ -2858,6 +2891,7 @@ mod tests {
             Platform::LinuxX64,
             dir.caddy.as_ref(),
             Some(&names),
+            None,
             &stop,
         )
     }
@@ -2910,6 +2944,64 @@ mod tests {
             ["trust_install", "resolved_install", "ports_install"]
         );
         assert_eq!((report.error, report.skipped), (None, Vec::new()));
+    }
+
+    /// Task M4-18i: with the DNS port held by another program, the link
+    /// would send `.test` names to it. The other steps still go.
+    #[test]
+    fn linux_without_the_dns_server_skips_the_link() {
+        let dir = Dir::new(true);
+        make_helper(&dir.helper());
+        let answer = all_done(&["trust_install", "ports_install"]);
+        let fake = linux_fake(move || ok(&answer));
+        let setup = linux_setup(&fake, dir.helper(), dir.home());
+        let stop = CancellationToken::new();
+        let report = setup.run(
+            dir.dir.path(),
+            CaddyInput::default(),
+            Platform::LinuxX64,
+            dir.caddy.as_ref(),
+            Some(&[]),
+            Some("dns_port_in_use"),
+            &stop,
+        );
+        assert_eq!(requests(&fake), [vec![trust(), HelperOp::PortsInstall]]);
+        assert_eq!(
+            report.skipped,
+            [skip("resolved_install", "dns_port_in_use")]
+        );
+        assert_eq!(report.error, None);
+    }
+
+    /// macOS: the same for the resolver file.
+    #[test]
+    fn macos_without_the_dns_server_skips_the_resolver_file() {
+        let dir = Dir::new(false);
+        let fake = Fake::scripted(netstat_free(), || ok(DONE));
+        let stop = CancellationToken::new();
+        let report = dir.setup(&fake).run(
+            dir.dir.path(),
+            CaddyInput::default(),
+            Platform::DarwinArm64,
+            dir.caddy.as_ref(),
+            Some(&[]),
+            Some("dns_not_running"),
+            &stop,
+        );
+        let osascript = fake.calls().last().unwrap().clone();
+        assert_eq!(osascript.program, "/usr/bin/osascript");
+        assert_eq!(
+            serde_json::from_str::<Value>(&osascript.args[7]).unwrap(),
+            json!({ "version": 1, "ops": [
+                { "op": "pf_install", "http_port": 18080, "https_port": 18443 },
+            ] })
+        );
+        assert!(
+            report
+                .skipped
+                .contains(&skip("resolver_install", "dns_not_running")),
+            "{report:?}"
+        );
     }
 
     /// An answer for other ops than sent, through pkexec: no results, so
@@ -3296,6 +3388,7 @@ mod tests {
                 Platform::LinuxX64,
                 dir.caddy.as_ref(),
                 names.as_deref(),
+                None,
                 &stop,
             );
             assert_eq!(
@@ -3378,6 +3471,7 @@ mod tests {
             CaddyInput::default(),
             Platform::LinuxX64,
             dir.caddy.as_ref(),
+            None,
             None,
             &stop,
         );
@@ -4064,6 +4158,7 @@ mod tests {
                 Platform::DarwinArm64,
                 dir.caddy.as_ref(),
                 Some(&[]),
+                None,
                 &stop,
             );
             assert_eq!(error_code(&report), Some("setup_helper_missing"));
