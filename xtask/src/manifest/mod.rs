@@ -5,6 +5,7 @@
 //! `minisign`, because the secret key never enters the repository or CI.
 
 mod build;
+mod oracle;
 mod php_smoke;
 mod pins;
 mod upstream;
@@ -107,6 +108,31 @@ pub fn run_check_php(
         println!("warning: {warning}");
     }
     println!("{}: PHP checks passed", archive.display());
+    Ok(())
+}
+
+/// `cargo xtask manifest check-mysql <url>`: Oracle's whole proof for one
+/// MySQL 8.4 archive on cdn.mysql.com, as `build` runs it for MySQL (task
+/// M6-05): its `.md5` and `.asc`, the GPG signature by the pinned key, and
+/// the MD5. Prints the size and sha256 the manifest would record. Keeps
+/// nothing: the archive is deleted after.
+pub fn run_check_mysql(url: &str) -> Result<()> {
+    let root = workspace_root()?;
+    let work = root.join("target").join("check-mysql");
+    let system = oracle::System {
+        home: work.join("gnupg"),
+        root,
+    };
+    let runtime = tokio::runtime::Runtime::new().context("cannot start tokio")?;
+    let fetch = HttpFetch::new()?;
+    let checked = runtime.block_on(build::check_oracle(&fetch, url, &work, &system))?;
+    println!(
+        "{}: {} bytes, sha256 {} (Oracle's signature by {} is good; upstream md5 matches)",
+        checked.url,
+        checked.size,
+        upstream::hex(&checked.sha256),
+        oracle::ORACLE_FINGERPRINT
+    );
     Ok(())
 }
 

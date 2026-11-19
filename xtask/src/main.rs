@@ -104,6 +104,15 @@ fn cli() -> Command {
                         ),
                 )
                 .subcommand(
+                    Command::new("check-mysql")
+                        .about("Check Oracle's GPG signature and MD5 of one MySQL 8.4 archive, and print its sha256")
+                        .arg(
+                            Arg::new("url")
+                                .required(true)
+                                .help("https://cdn.mysql.com/Downloads/MySQL-8.4/<file>"),
+                        ),
+                )
+                .subcommand(
                     Command::new("verify")
                         .about("Check manifest.json and its signature with the key built into marsa")
                         .arg(
@@ -160,6 +169,12 @@ fn manifest_command(args: &ArgMatches) -> Result<()> {
                 .cloned()
                 .unwrap_or_else(|| root.join("recipes").join("pins.toml"));
             manifest::run_check_php(archive, *platform, version, &pins)
+        }
+        Some(("check-mysql", args)) => {
+            let url = args
+                .get_one::<String>("url")
+                .context("clap requires the url")?;
+            manifest::run_check_mysql(url)
         }
         Some(("verify", args)) => match args.get_one::<PathBuf>("manifest") {
             Some(path) => manifest::verify(path, args.get_one::<PathBuf>("signature").cloned()),
