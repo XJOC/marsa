@@ -6,11 +6,11 @@
 //!
 //! ```text
 //! marsa-helper apply <json>   run a request, print the response
-//! marsa-helper pf-load        boot job: load the pf redirect (task M4-08)
+//! marsa-helper pf-load        boot job: load the pf redirect
 //! marsa-helper version        print the version
-//! marsa-helper service <SID> <hash>   Windows: the service (task M4-19f)
-//! marsa-helper install <SID> <hash>   Windows, elevated: install it (M4-19j)
-//! marsa-helper uninstall              Windows, elevated: remove it all (M4-19j)
+//! marsa-helper service <SID> <hash>   Windows: the service
+//! marsa-helper install <SID> <hash>   Windows, elevated: install it
+//! marsa-helper uninstall              Windows, elevated: remove it all
 //! ```
 //!
 //! The request is one argument, not stdin: osascript's `do shell script` has
@@ -353,7 +353,7 @@ mod tests {
         fixtures(folder).remove(file).unwrap()
     }
 
-    /// The contract with `marsa-core` (task M4-06): every request fixture is
+    /// The contract with `marsa-core`: every request fixture is
     /// valid on every OS.
     #[test]
     fn request_fixtures_are_valid() {

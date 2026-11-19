@@ -7,7 +7,7 @@
 //! a folder only administrators can write. That file is the record of what
 //! Marsa trusted: `trust_remove` reads it and deletes by the certificate's
 //! SHA-1 thumbprint, never by name. `certutil` matches a SHA-1, not a
-//! SHA-256 (spike S-11); the thumbprint only finds the certificate, it
+//! SHA-256; the thumbprint only finds the certificate, it
 //! decides nothing about trust.
 //!
 //! `certutil` reads its certificate id as an index, a serial number, a
@@ -26,7 +26,7 @@
 //! own Root store stays.
 //!
 //! Which certificate the service may trust at all is the service's check,
-//! before any op runs (task M4-19f). No message holds any part of the PEM.
+//! before any op runs. No message holds any part of the PEM.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -51,7 +51,7 @@ const MODE: u32 = 0o644;
 /// The largest file read back, as on macOS.
 const MAX_FILE_BYTES: u64 = 32 * 1024;
 /// `certutil -store` exits with `NTE_NOT_FOUND` (0x80090011) when no
-/// certificate matches (spike S-11). An `HRESULT` is an `i32`.
+/// certificate matches. An `HRESULT` is an `i32`.
 const NOT_FOUND: i32 = 0x8009_0011_u32 as i32;
 
 const INSTALL: &str = "trust_install";
@@ -252,7 +252,7 @@ fn remove_steps(
                 &deleted,
             ));
         }
-        // `-delstore` exits with 0 when nothing matched too (spike S-11).
+        // `-delstore` exits with 0 when nothing matched too.
         if in_store(op, thumbprint, system)? {
             let message =
                 "certutil -delstore exited with code 0, but the certificate is still in the store"
