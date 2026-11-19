@@ -38,7 +38,6 @@ use marsa_core::sites::Site;
 use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceState, ServiceStatus};
 use reqwest::redirect;
 use serde_json::Value;
-use tokio::io::AsyncWriteExt as _;
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -1062,24 +1061,10 @@ fn tag_config(config: &mut Value, tag: &str) {
 async fn write_config(path: &Path, config: &Value) -> io::Result<()> {
     let mut body = serde_json::to_vec_pretty(config).map_err(io::Error::other)?;
     body.push(b'\n');
-    if let Some(dir) = path.parent() {
-        tokio::fs::create_dir_all(dir).await?;
-    }
-    let temp = path.with_extension("json.tmp");
-    let written = async {
-        let mut file = tokio::fs::File::create(&temp).await?;
-        file.write_all(&body).await?;
-        file.sync_all().await?;
-        // Closed before the rename: Windows cannot rename an open file.
-        drop(file);
-        tokio::fs::rename(&temp, path).await
-    }
-    .await;
-    if written.is_err() {
-        // Best effort: the write already failed, and that is the error to report.
-        let _ = tokio::fs::remove_file(&temp).await;
-    }
-    written
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || marsa_core::fs::write_atomic(&path, &body, None))
+        .await
+        .map_err(io::Error::other)?
 }
 
 /// Caddy's admin API on `127.0.0.1:<admin port>`.

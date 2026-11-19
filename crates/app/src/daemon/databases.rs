@@ -315,29 +315,17 @@ async fn init_in(programs: &Programs, dirs: &PostgresDirs, temp: &Path) -> Resul
     // that, the cluster could be back under its temp name, which the next
     // init deletes as a leftover.
     let parent = dirs.data.parent().map(Path::to_path_buf);
-    tokio::task::spawn_blocking(move || parent.map_or(Ok(()), |parent| sync_dir(&parent)))
-        .await
-        .map_err(io::Error::other)
-        .flatten()
-        .map_err(|err| InitError {
-            reason: format!("its folder could not be synced to disk: {err}"),
-            in_place: true,
-        })?;
+    tokio::task::spawn_blocking(move || {
+        parent.map_or(Ok(()), |parent| marsa_core::fs::sync_dir(&parent))
+    })
+    .await
+    .map_err(io::Error::other)
+    .flatten()
+    .map_err(|err| InitError {
+        reason: format!("its folder could not be synced to disk: {err}"),
+        in_place: true,
+    })?;
     info!(data = %dirs.data.display(), "the PostgreSQL data folder is ready");
-    Ok(())
-}
-
-/// Flushes the entries of `dir` (a rename into it) to disk.
-// `#[cfg(unix)]` outside `platform`, as in the installer: a folder's entries
-// are flushed by opening the folder, which only Unix allows. NTFS logs them
-// itself.
-#[cfg(unix)]
-fn sync_dir(dir: &Path) -> io::Result<()> {
-    std::fs::File::open(dir)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 

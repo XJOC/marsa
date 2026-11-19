@@ -8,8 +8,8 @@
 //! The `#[cfg]` for these lives here, so the supervisor has none. Every tool
 //! runs with an absolute path and an argument array, never through a shell.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read as _, Write as _};
+use std::fs::{self, File};
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::Stdio;
@@ -760,8 +760,6 @@ async fn run_tool(mut command: Command) -> Option<std::process::Output> {
 
 /// Writes `run/caddy.pid` whole: a temp file next to it, then a rename, so a
 /// reader never sees half a file. On Unix the file is `0600` from the start.
-/// There is no `fsync`: the file only has to survive a crash of the daemon,
-/// not of the OS, which ends Caddy too.
 ///
 /// # Errors
 ///
@@ -769,7 +767,7 @@ async fn run_tool(mut command: Command) -> Option<std::process::Output> {
 pub fn write_pid_file(path: &Path, record: &PidRecord) -> io::Result<()> {
     let mut body = serde_json::to_vec(record).map_err(io::Error::other)?;
     body.push(b'\n');
-    write_private(path, &body)
+    crate::fs::write_atomic(path, &body, Some(0o600))
 }
 
 /// The instance id of a data folder, kept in `path` (`caddy/instance-id`):
@@ -801,45 +799,8 @@ pub fn instance_id(path: &Path) -> io::Result<String> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|err| io::Error::other(err.to_string()))?;
     let id: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    write_private(path, format!("{id}\n").as_bytes())?;
+    crate::fs::write_atomic(path, format!("{id}\n").as_bytes(), Some(0o600))?;
     Ok(id)
-}
-
-/// Writes `body` to `path` whole and owner-only, through a temp file next to
-/// it and a rename.
-fn write_private(path: &Path, body: &[u8]) -> io::Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(".tmp");
-    let temp = Path::new(&temp);
-    let result = create_new(temp)
-        .or_else(|err| {
-            if err.kind() != io::ErrorKind::AlreadyExists {
-                return Err(err);
-            }
-            // Left by a write that stopped half way.
-            fs::remove_file(temp)?;
-            create_new(temp)
-        })
-        .and_then(|mut file| file.write_all(body))
-        // The file is closed here: Windows cannot rename an open file.
-        .and_then(|()| fs::rename(temp, path));
-    if result.is_err() {
-        // Best effort: the write already failed, and that is the error to report.
-        let _ = fs::remove_file(temp);
-    }
-    result
-}
-
-fn create_new(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    // `create_new` also refuses a symlink that is already there.
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)
 }
 
 /// Reads a pid file (`run/caddy.pid`, `run/php-fpm-<minor>.pid`). `None` if
@@ -1460,7 +1421,7 @@ x       501 Sat Nov 14 13:31:00 2026     /bin/zsh
             started: "Wed Nov  4 03:31:27 2026".into(),
         };
         write_pid_file(&path, &record).unwrap();
-        fs::write(dir.path().join("run").join("caddy.pid.tmp"), "half").unwrap();
+        fs::write(dir.path().join("run").join(".caddy.pid.tmp"), "half").unwrap();
         write_pid_file(&path, &record).unwrap();
         assert_eq!(read_pid_file(&path), Some(record));
         let names: Vec<_> = fs::read_dir(dir.path().join("run"))

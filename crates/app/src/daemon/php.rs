@@ -34,8 +34,8 @@ pub mod cgi;
 pub mod orphan;
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{self, Write as _};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -761,25 +761,8 @@ pub fn write_if_changed(path: &Path, text: &str) -> io::Result<bool> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
         Err(err) => return Err(err),
     }
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    let temp = path.with_file_name(name);
-    let written = (|| {
-        let mut file = File::create(&temp)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        // Closed before the rename: Windows cannot rename an open file.
-        drop(file);
-        fs::rename(&temp, path)
-    })();
-    if written.is_err() {
-        // Best effort: the write already failed, and that is the error.
-        let _ = fs::remove_file(&temp);
-    }
-    written.map(|()| true)
+    marsa_core::fs::write_atomic(path, text.as_bytes(), None)?;
+    Ok(true)
 }
 
 #[cfg(test)]
