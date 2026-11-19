@@ -24,8 +24,8 @@ use crate::system::{RunOutput, System};
 /// The request's `pem` is not exactly one certificate. On Windows also: its
 /// SHA-1 has no letter, which `certutil` would read as an index.
 pub const TRUST_CERT_INVALID: &str = "trust_cert_invalid";
-/// Marsa's file ([`CA_PATH`] on macOS) cannot be read as one certificate, so
-/// it was left as it is and no command ran.
+/// Marsa's file ([`CA_PATH`] on macOS) is a link or cannot be read as one
+/// certificate, so it was left as it is and no command ran.
 pub const TRUST_READ: &str = "trust_read";
 /// Writing Marsa's file failed.
 pub const TRUST_WRITE: &str = "trust_write";
@@ -139,17 +139,23 @@ fn result(op: &'static str, outcome: Outcome) -> OpResult {
 /// there.
 fn stored_hash(op: &'static str, system: &impl System) -> Result<Option<String>, OpResult> {
     let path = Path::new(CA_PATH);
-    let reason = match system.read(path, MAX_FILE_BYTES) {
-        Ok(bytes) => match std::str::from_utf8(&bytes).map(parse_pem) {
-            Ok(Ok(der)) => return Ok(Some(sha256_hex(&der))),
-            _ => "is not one certificate".to_owned(),
-        },
-        // `read` follows symlinks and `exists` does not, so a dangling link
-        // is something there, not nothing.
-        Err(err) if err.kind() == io::ErrorKind::NotFound && !system.exists(path) => {
-            return Ok(None);
+    // Marsa never writes a link, so one here is someone else's, whatever it
+    // points to: `read` and `security` would follow it (task M5-22).
+    let reason = if system.is_link(path) {
+        "is a link".to_owned()
+    } else {
+        match system.read(path, MAX_FILE_BYTES) {
+            Ok(bytes) => match std::str::from_utf8(&bytes).map(parse_pem) {
+                Ok(Ok(der)) => return Ok(Some(sha256_hex(&der))),
+                _ => "is not one certificate".to_owned(),
+            },
+            // A link that appeared after the check above: `read` follows it
+            // and `exists` does not, so a dangling one is something there.
+            Err(err) if err.kind() == io::ErrorKind::NotFound && !system.exists(path) => {
+                return Ok(None);
+            }
+            Err(err) => format!("cannot be read: {}", err.kind()),
         }
-        Err(err) => format!("cannot be read: {}", err.kind()),
     };
     let message = format!("{CA_PATH} {reason}, so it was left as it is");
     Err(OpResult::failed(op, TRUST_READ, message))
@@ -829,14 +835,18 @@ mod tests {
         assert_eq!(file(&fake), test_ca(OLD_MODE));
     }
 
-    /// Cut short, too large, a dangling link, unreadable: both ops leave the
-    /// file and run no command, because the hash to remove is unknown.
+    /// Cut short, too large, unreadable, or a link: both ops leave the file
+    /// and run no command, because the hash to remove is unknown. A link is
+    /// left alone even when it points to the very certificate (task M5-22):
+    /// Marsa never writes one, and `security` would follow it.
     #[test]
     fn a_stored_file_that_is_not_one_certificate_is_left_alone() {
         let path = PathBuf::from(CA_PATH);
         let large = vec![b' '; usize::try_from(MAX_FILE_BYTES).unwrap() + 1];
         let mut dangling = fake();
         dangling.dangling.insert(path.clone());
+        let mut link = fake_with(TEST_CA.as_bytes());
+        link.links.insert(path.clone());
         let mut unreadable = fake_with(TEST_CA.as_bytes());
         unreadable.fail_reads.insert(path);
         let cases = [
@@ -845,7 +855,8 @@ mod tests {
                 "is not one certificate",
             ),
             (fake_with(&large), "cannot be read: invalid data"),
-            (dangling, "cannot be read: entity not found"),
+            (dangling, "is a link"),
+            (link, "is a link"),
             (unreadable, "cannot be read: permission denied"),
         ];
         for (fake, reason) in cases {

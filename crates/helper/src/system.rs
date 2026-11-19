@@ -48,16 +48,13 @@ pub trait System {
 
     /// Whether `path` itself is a link: a symlink, or on Windows any reparse
     /// point (a junction too). Not followed. `false` if nothing is there.
-    /// The default, `false`, is for test systems that have no links;
-    /// [`RealSystem`] asks the file system.
-    fn is_link(&self, path: &Path) -> bool {
-        let _ = path;
-        false
-    }
+    /// No default: a test system that forgot it would turn the link checks
+    /// off without a sign (task M5-22).
+    fn is_link(&self, path: &Path) -> bool;
 
     /// Whether the file at `path` is marked read-only (the Windows file
     /// attribute; on Unix, no write bit at all). `false` if nothing is
-    /// there. The default, `false`, is for test systems, as for `is_link`.
+    /// there. The default, `false`, is for test systems.
     fn is_read_only(&self, path: &Path) -> bool {
         let _ = path;
         false

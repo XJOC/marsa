@@ -448,6 +448,9 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         fn exists(&self, path: &Path) -> bool {
             self.fake.exists(path)
         }
+        fn is_link(&self, path: &Path) -> bool {
+            self.fake.is_link(path)
+        }
         fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
             self.fake.write_atomic(path, bytes, mode)
         }

@@ -5,8 +5,10 @@
 //! matters: Laravel Herd runs `dnsmasq` on `127.0.0.1:53` (ADR 0008).
 //!
 //! The helper changes the file only if Marsa wrote it: its first line is
-//! exactly [`MARKER`]. Herd and Valet write the same path, and their file is
-//! never overwritten or deleted. On a Mac with Herd the file is Herd's
+//! exactly [`MARKER`], the marker of the Linux files ([`marked`]). Herd and
+//! Valet write the same path, and their file is never overwritten or
+//! deleted. Marsa never writes a link, so a link there is someone else's too,
+//! whatever it points to. On a Mac with Herd the file is Herd's
 //! (`nameserver 127.0.0.1`), so `resolver_install` fails there with
 //! `resolver_foreign`. `marsad` decides what to do then (a later task).
 //!
@@ -16,6 +18,7 @@
 use std::io;
 use std::path::Path;
 
+use super::marked::{self, Current, MARKER};
 use crate::response::{OpResult, Outcome, code};
 use crate::system::System;
 
@@ -23,32 +26,14 @@ use crate::system::System;
 const PATH: &str = "/etc/resolver/test";
 /// Everyone can read it, and only root can change it.
 const MODE: u32 = 0o644;
-/// The first line of the file Marsa writes.
-const MARKER: &str = "# Managed by Marsa. Do not edit.";
-/// The largest file the helper reads. Marsa's file is far smaller, so a
-/// larger one counts as foreign.
-const MAX_BYTES: u64 = 4 * 1024;
 
 const INSTALL: &str = "resolver_install";
 const REMOVE: &str = "resolver_remove";
 
-/// What is at [`PATH`] now.
-enum Current {
-    Missing,
-    /// Marsa's file, with its content.
-    Ours(Vec<u8>),
-    /// Another tool's file, a file over [`MAX_BYTES`], a folder, or a
-    /// dangling symlink.
-    Foreign,
-    /// Reading failed for another reason. Left as it is too, but reported
-    /// with its own code, so the message does not blame another tool.
-    Unreadable(io::ErrorKind),
-}
-
 /// `resolver_install`: names under `.test` go to `127.0.0.1:<port>`.
 pub fn install(port: u16, system: &impl System) -> OpResult {
     let content = content(port);
-    let outcome = match current(system) {
+    let outcome = match marked::current(system, Path::new(PATH)) {
         Current::Foreign => {
             // The path only: the content of another tool's file stays out.
             let message = format!("{PATH} was not written by Marsa, so it was left as it is");
@@ -73,7 +58,7 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
 /// `resolver_remove`: deletes the file if Marsa wrote it. A missing or
 /// foreign file is `unchanged`: nothing of Marsa's is there to remove.
 pub fn remove(system: &impl System) -> OpResult {
-    let outcome = match current(system) {
+    let outcome = match marked::current(system, Path::new(PATH)) {
         Current::Missing | Current::Foreign => Outcome::Unchanged,
         Current::Unreadable(kind) => return unreadable(REMOVE, kind),
         Current::Ours(_) => {
@@ -95,37 +80,9 @@ fn content(port: u16) -> String {
     format!("{MARKER}\nnameserver 127.0.0.1\nport {port}\n")
 }
 
-fn current(system: &impl System) -> Current {
-    match system.read(Path::new(PATH), MAX_BYTES) {
-        Ok(bytes) if is_ours(&bytes) => Current::Ours(bytes),
-        // `read` follows symlinks, so a dangling link also says `NotFound`.
-        // `exists` does not follow them: a link there is someone else's.
-        Err(err) if err.kind() == io::ErrorKind::NotFound && !system.exists(Path::new(PATH)) => {
-            Current::Missing
-        }
-        // Fail safe: anything the helper cannot read in full is never
-        // changed. `InvalidData` is a file over the limit and `InvalidInput`
-        // is not a regular file (`System::read`); a dangling link is
-        // `NotFound` with something at the path.
-        Ok(_) => Current::Foreign,
-        Err(err) => match err.kind() {
-            io::ErrorKind::NotFound | io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => {
-                Current::Foreign
-            }
-            kind => Current::Unreadable(kind),
-        },
-    }
-}
-
 fn unreadable(op: &'static str, kind: io::ErrorKind) -> OpResult {
     let message = format!("cannot read {PATH}: {kind}, so it was left as it is");
     OpResult::failed(op, code::RESOLVER_READ, message)
-}
-
-/// The first line is exactly the marker. Nothing is trimmed: a near match
-/// (a `\r`, a space) is not a file Marsa wrote, so it counts as foreign.
-fn is_ours(bytes: &[u8]) -> bool {
-    bytes.split(|&byte| byte == b'\n').next() == Some(MARKER.as_bytes())
 }
 
 #[cfg(test)]
@@ -304,6 +261,19 @@ mod tests {
         assert_eq!(remove(&fake), result(REMOVE, Outcome::Unchanged));
         assert_eq!(file(&fake), None);
         assert!(fake.exists(Path::new(PATH)));
+    }
+
+    /// A link to a file with Marsa's content reads as Marsa's, but Marsa
+    /// never writes a link: neither op replaces or deletes it (task M5-22).
+    #[test]
+    fn a_symlink_to_our_file_is_foreign_and_kept() {
+        for port in [18053, 18054] {
+            let mut fake = fake_with(&ours(18054));
+            fake.links.insert(PathBuf::from(PATH));
+            assert_eq!(install(port, &fake), foreign(), "{port}");
+            assert_eq!(remove(&fake), result(REMOVE, Outcome::Unchanged));
+            assert_eq!(file(&fake), Some((ours(18054), OLD_MODE)));
+        }
     }
 
     #[test]

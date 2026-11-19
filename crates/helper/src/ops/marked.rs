@@ -7,7 +7,7 @@
 //! Marsa never writes a link, so a link at the path is someone else's too,
 //! whatever its target holds.
 //!
-//! `resolver` (macOS, task M4-07) has its own copy of this check.
+//! `resolver` (macOS) checks `/etc/resolver/test` here too (task M5-22).
 
 use std::io;
 use std::path::Path;
