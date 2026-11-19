@@ -19,6 +19,13 @@
 //! copy of the helper, never the helper in the app's `bin/` folder: the user
 //! can write there, so any user process could swap the binary and get root at
 //! the next boot.
+//!
+//! Marsa never writes a link, so a link at one of its paths is someone
+//! else's: the helper never reads, loads, or gives back a token through one,
+//! and an install writes a file in its place (task M5-31). It also writes,
+//! reads, and loads only in folders that only root can change. A removal
+//! still stops the job, flushes the anchor, and deletes the files there: a
+//! delete never follows a link.
 
 use std::io;
 use std::path::Path;
@@ -27,7 +34,8 @@ use std::time::Duration;
 use crate::response::{OpResult, Outcome};
 use crate::system::{RunOutput, System};
 
-/// Writing a file of the redirect failed.
+/// Writing a file of the redirect failed, or a folder of the redirect is one
+/// that not only root can change, so nothing was written (task M5-31).
 pub const PF_WRITE: &str = "pf_write";
 /// The running helper could not be found or read, so it was not copied for
 /// the boot job, and nothing was written (task M4-27): its path is not
@@ -40,7 +48,9 @@ pub const PF_WRITE: &str = "pf_write";
 pub const PF_HELPER_UNREADABLE: &str = "pf_helper_unreadable";
 /// Deleting a file of the redirect failed.
 pub const PF_DELETE: &str = "pf_delete";
-/// `pfctl -f` did not load the rules file into the anchor.
+/// `pfctl -f` did not load the rules file into the anchor, or it was not
+/// asked to: the rules file is a link, or its folder is one that not only
+/// root can change (task M5-31).
 pub const PF_LOAD_FAILED: &str = "pf_load_failed";
 /// `pfctl -E` printed no reference token.
 pub const PF_TOKEN_MISSING: &str = "pf_token_missing";
@@ -161,6 +171,14 @@ fn install_files(
         );
         failure(PF_HELPER_UNREADABLE, message)
     })?;
+    if let Some(dir) = open_dir(system) {
+        let message = format!(
+            "{} is not a folder that only root can change (owner root, no write for group \
+             or others), so nothing was written",
+            dir.display()
+        );
+        return Err(failure(PF_WRITE, message));
+    }
     // The plist comes last, so launchd never finds a job whose program is not
     // there yet.
     let files = [
@@ -168,11 +186,12 @@ fn install_files(
         (COPY, helper, 0o755),
         (PLIST, plist().into_bytes(), 0o644),
     ];
-    // In place only if pf shows the rules and Marsa holds a reference too.
+    // In place only if pf shows the rules and Marsa holds a reference too: a
+    // token file of its own, not a link (task M5-31).
     let in_place = files
         .iter()
         .all(|(path, bytes, _)| same(system, path, bytes))
-        && system.exists(Path::new(TOKEN))
+        && saved_token(system).is_some()
         && rules_loaded(system);
     if in_place {
         return Ok(Outcome::Unchanged);
@@ -195,6 +214,15 @@ fn install_files(
 /// neither `held` nor the file, so it is never given back twice: pf may hand
 /// the same number to another tool later.
 fn load(system: &impl System, held: &mut Option<u64>) -> Result<(), Failure> {
+    // `pfctl -f` follows a link, and reads whatever another user put in a
+    // folder they can change.
+    if system.is_link(Path::new(RULES)) || open_dir(system).is_some() {
+        let message = format!(
+            "{RULES} is a link or in a folder that not only root can change (owner root, no \
+             write for group or others), so it was not loaded"
+        );
+        return Err(failure(PF_LOAD_FAILED, message));
+    }
     let loaded = system.run(PFCTL, &["-a", ANCHOR, "-f", RULES]);
     if !exited_0(&loaded) {
         let message = format!(
@@ -266,8 +294,13 @@ fn remove_all(system: &impl System) -> Result<Outcome, Failure> {
     Ok(Outcome::Done)
 }
 
-/// The token in [`TOKEN`], if the file holds a valid one.
+/// The token in [`TOKEN`], if the file holds a valid one. Never through a
+/// link or from a folder that not only root can change: that token could be
+/// another tool's reference, and `pfctl -X` would give it back.
 fn saved_token(system: &impl System) -> Option<u64> {
+    if system.is_link(Path::new(TOKEN)) || open_dir(system).is_some() {
+        return None;
+    }
     let bytes = system.read(Path::new(TOKEN), MAX_TOKEN_BYTES).ok()?;
     digits(String::from_utf8_lossy(&bytes).trim())
 }
@@ -354,12 +387,24 @@ fn plist() -> String {
     )
 }
 
-/// The file at `path` has exactly `bytes`. A larger file fails the read.
+/// The file at `path` has exactly `bytes`. A larger file fails the read,
+/// and a link is never the same: an install writes a file in its place.
 fn same(system: &impl System, path: &str, bytes: &[u8]) -> bool {
+    if system.is_link(Path::new(path)) {
+        return false;
+    }
     let max = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     system
         .read(Path::new(path), max)
         .is_ok_and(|current| current == bytes)
+}
+
+/// The first folder of [`FILES`] that not only root can change, if any.
+fn open_dir(system: &impl System) -> Option<&'static Path> {
+    FILES
+        .iter()
+        .filter_map(|path| Path::new(path).parent())
+        .find(|dir| !system.is_root_only_dir(dir))
 }
 
 fn exited_0(result: &io::Result<RunOutput>) -> bool {
@@ -395,6 +440,7 @@ fn finish(op: &'static str, outcome: Result<Outcome, Failure>) -> OpResult {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     use super::*;
@@ -431,6 +477,9 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
     struct Mac {
         fake: FakeSystem,
         answers: RefCell<Vec<(Vec<String>, RunOutput)>>,
+        /// Paths `write_atomic` wrote: a link there is a file now, as the
+        /// rename of the real one replaces the link itself.
+        written: RefCell<BTreeSet<PathBuf>>,
     }
 
     impl Mac {
@@ -449,10 +498,15 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
             self.fake.exists(path)
         }
         fn is_link(&self, path: &Path) -> bool {
-            self.fake.is_link(path)
+            self.fake.is_link(path) && !self.written.borrow().contains(path)
+        }
+        fn is_root_only_dir(&self, dir: &Path) -> bool {
+            self.fake.is_root_only_dir(dir)
         }
         fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-            self.fake.write_atomic(path, bytes, mode)
+            self.fake.write_atomic(path, bytes, mode)?;
+            self.written.borrow_mut().insert(path.to_path_buf());
+            Ok(())
         }
         fn remove(&self, path: &Path) -> io::Result<()> {
             self.fake.remove(path)
@@ -497,6 +551,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         let mac = Mac {
             fake,
             answers: RefCell::default(),
+            written: RefCell::default(),
         };
         for listing in listings {
             mac.answer(&SHOW_ARGS, listing);
@@ -973,6 +1028,87 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         let expected = OpResult::failed(LOAD, PF_NOT_INSTALLED, message);
         assert_eq!(boot(&mac, |_| panic!("the boot job waited")), expected);
         assert!(commands(&mac).is_empty());
+    }
+
+    /// Task M5-31: a link at the token file, to a file with a token, is
+    /// someone else's. Neither op gives that token back. The install writes
+    /// Marsa's token in its place, also when pf shows the rules, and the
+    /// removal deletes the link itself.
+    #[test]
+    fn a_token_through_a_link_is_never_given_back() {
+        let mut mac = installed(&[LISTED]);
+        mac.fake.links.insert(PathBuf::from(TOKEN));
+        assert_eq!(install(18080, 18443, &mac), result(INSTALL, Outcome::Done));
+        let expected = [pf(&LOAD_ARGS), pf(&["-E"]), pf(&SHOW_ARGS)];
+        assert_eq!(commands(&mac), expected);
+        assert_eq!(file(&mac, TOKEN), token_file(NEW));
+
+        let mut mac = installed(&[]);
+        mac.fake.links.insert(PathBuf::from(TOKEN));
+        assert_eq!(remove(&mac), result(REMOVE, Outcome::Done));
+        assert_eq!(commands(&mac), [bootout(), pf(&FLUSH_ARGS)]);
+        assert_eq!(file(&mac, TOKEN), None);
+    }
+
+    /// Task M5-31: links at every path, to files with Marsa's very content.
+    /// The install is not `unchanged`: it writes files in their place, then
+    /// loads its own. The boot job never loads the rules through a link.
+    #[test]
+    fn links_are_replaced_by_install_and_never_loaded() {
+        let mut mac = installed(&[LISTED]);
+        for path in FILES {
+            mac.fake.links.insert(PathBuf::from(path));
+        }
+        assert_eq!(install(18080, 18443, &mac), result(INSTALL, Outcome::Done));
+        // A link is never the same, so pf is not even asked before the load.
+        let expected = [pf(&LOAD_ARGS), pf(&["-E"]), pf(&SHOW_ARGS)];
+        assert_eq!(commands(&mac), expected);
+        for path in FILES {
+            assert!(!mac.is_link(Path::new(path)), "{path}");
+        }
+
+        let mut mac = installed(&[]);
+        mac.fake.links.insert(PathBuf::from(RULES));
+        let failed = boot(&mac, |_| {});
+        assert_eq!(code_of(&failed), PF_LOAD_FAILED);
+        assert!(commands(&mac).is_empty(), "{:?}", commands(&mac));
+    }
+
+    /// Task M5-31: a folder of Marsa's that another user can change. Nothing
+    /// is written, loaded, or given back; the removal still flushes and
+    /// deletes.
+    #[test]
+    fn an_open_folder_gets_nothing_written_loaded_or_given_back() {
+        let marsa = Path::new(RULES).parent().unwrap().to_path_buf();
+        let mut mac = fresh(&[]);
+        mac.fake.open_dirs.insert(marsa.clone());
+        let message = format!(
+            "{} is not a folder that only root can change (owner root, no write for group \
+             or others), so nothing was written",
+            marsa.display()
+        );
+        let expected = OpResult::failed(INSTALL, PF_WRITE, message);
+        assert_eq!(install(18080, 18443, &mac), expected);
+        assert!(commands(&mac).is_empty());
+        assert_eq!(mac.fake.files.borrow().len(), 1, "the running helper only");
+
+        // Another folder of the redirect counts too.
+        let mut mac = fresh(&[]);
+        mac.fake
+            .open_dirs
+            .insert(PathBuf::from("/Library/LaunchDaemons"));
+        assert_eq!(code_of(&install(18080, 18443, &mac)), PF_WRITE);
+        assert!(commands(&mac).is_empty());
+
+        let mut mac = installed(&[]);
+        mac.fake.open_dirs.insert(marsa.clone());
+        assert_eq!(code_of(&boot(&mac, |_| {})), PF_LOAD_FAILED);
+        assert!(commands(&mac).is_empty());
+
+        let mut mac = installed(&[]);
+        mac.fake.open_dirs.insert(marsa);
+        assert_eq!(remove(&mac), result(REMOVE, Outcome::Done));
+        assert_eq!(commands(&mac), [bootout(), pf(&FLUSH_ARGS)]);
     }
 
     /// The check that every test runs on its commands catches each case.
