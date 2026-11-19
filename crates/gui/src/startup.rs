@@ -48,13 +48,40 @@ pub enum StartupError {
 /// # Errors
 ///
 /// An unknown argument, a missing path, or no app data folder.
-pub fn data_dir(mut args: impl Iterator<Item = OsString>) -> Result<PathBuf, StartupError> {
-    let mut flag = None;
+pub fn data_dir(args: impl Iterator<Item = OsString>) -> Result<PathBuf, StartupError> {
+    parse(args, false).map(|launch| launch.data_dir)
+}
+
+/// What `marsa-gui` was started to be: the window, or the menu-bar panel
+/// (`--panel`, task M5-D11), with the data folder either way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Launch {
+    pub data_dir: PathBuf,
+    /// `--panel`: a borderless panel under the menu-bar icon, not the window.
+    pub panel: bool,
+}
+
+/// [`data_dir`] and `--panel`: the arguments of `marsa-gui`.
+///
+/// # Errors
+///
+/// As [`data_dir`].
+pub fn launch(args: impl Iterator<Item = OsString>) -> Result<Launch, StartupError> {
+    parse(args, true)
+}
+
+fn parse(
+    mut args: impl Iterator<Item = OsString>,
+    panel_allowed: bool,
+) -> Result<Launch, StartupError> {
+    let (mut flag, mut panel) = (None, false);
     while let Some(arg) = args.next() {
         if arg == "--data-dir" {
             flag = Some(args.next().ok_or(StartupError::MissingPath)?);
         } else if let Some(value) = arg.to_str().and_then(|a| a.strip_prefix("--data-dir=")) {
             flag = Some(value.into());
+        } else if panel_allowed && arg == "--panel" {
+            panel = true;
         } else {
             return Err(StartupError::UnknownArgument(arg.display().to_string()));
         }
@@ -65,7 +92,9 @@ pub fn data_dir(mut args: impl Iterator<Item = OsString>) -> Result<PathBuf, Sta
     };
     // Not `canonicalize`: that gives `\\?\` paths on Windows, and the path is
     // passed to `marsad`.
-    std::path::absolute(&dir).map_err(|source| StartupError::Resolve { path: dir, source })
+    let data_dir =
+        std::path::absolute(&dir).map_err(|source| StartupError::Resolve { path: dir, source })?;
+    Ok(Launch { data_dir, panel })
 }
 
 /// Logs to stderr. `MARSA_LOG` sets the filter, as in `marsad`.
@@ -128,6 +157,37 @@ mod tests {
                 .unwrap()
                 .is_absolute()
         );
+    }
+
+    #[test]
+    fn the_panel_flag_is_for_the_window_program_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().to_str().unwrap();
+        let panel = launch(args(&["--panel", "--data-dir", text])).unwrap();
+        assert_eq!(
+            panel,
+            Launch {
+                data_dir: dir.path().to_path_buf(),
+                panel: true
+            }
+        );
+        let window = launch(args(&["--data-dir", text])).unwrap();
+        assert!(!window.panel);
+        // The tray takes no panel flag.
+        assert!(matches!(
+            data_dir(args(&["--panel", "--data-dir", text])),
+            Err(StartupError::UnknownArgument(arg)) if arg == "--panel"
+        ));
+        // The order does not matter, and a path still needs its flag's value.
+        assert!(
+            launch(args(&["--data-dir", text, "--panel"]))
+                .unwrap()
+                .panel
+        );
+        assert!(matches!(
+            launch(args(&["--panel", "--data-dir"])),
+            Err(StartupError::MissingPath)
+        ));
     }
 
     #[test]

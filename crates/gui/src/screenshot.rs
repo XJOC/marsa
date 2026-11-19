@@ -17,7 +17,12 @@
 //! for the tooltip, so the reason over a disabled row is in the picture (task
 //! M5-D8; it needs a click). `MARSA_GUI_SCROLL=x,y,dx,dy` puts the pointer on
 //! that point and turns the wheel by that much, so a list that scrolls
-//! sideways is scrolled in the picture (task M5-D10). On macOS,
+//! sideways is scrolled in the picture (task M5-D10). `MARSA_GUI_KEY=1|esc`
+//! presses that key once the window has settled (task M5-D11: a number opens
+//! a site of the menu-bar panel, Esc closes it, so no picture comes and the
+//! exit code is the result; the window of a picture has no daemon to ask).
+//! A window with see-through corners (the panel) is drawn over a gray
+//! backdrop in the picture. On macOS,
 //! `sips -s format png <file.bmp> --out <file.png>` converts the picture.
 
 use std::path::PathBuf;
@@ -45,6 +50,11 @@ const HOVER_VAR: &str = "MARSA_GUI_HOVER";
 /// A wheel to turn over a point, before the picture: `700,400,-400,0` (the
 /// point, then how far to move the content, sideways and down).
 const SCROLL_VAR: &str = "MARSA_GUI_SCROLL";
+/// A key to press before the picture: `1`, or `esc`.
+const KEY_VAR: &str = "MARSA_GUI_KEY";
+/// What shows behind the see-through parts of a window in the picture: a
+/// gray that neither theme's panel blends into.
+const BACKDROP: [u8; 3] = [0x8a, 0x8f, 0x94];
 /// The longest wait for the daemon before the picture is taken anyway.
 const LIMIT: Duration = Duration::from_secs(10);
 /// The wait after the window connected, so the daemon's lists arrive and the
@@ -83,6 +93,18 @@ enum ScrollStage {
     Done,
 }
 
+/// Where a key press injected for the picture is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyStage {
+    /// Not yet: the window has not settled.
+    Wait,
+    /// The next frame presses the key and lets it go.
+    Send,
+    /// The window reacts until this time.
+    Settle(Instant),
+    Done,
+}
+
 /// How long the content takes to scroll after the wheel turned.
 const SCROLL_SETTLE: Duration = Duration::from_millis(1000);
 
@@ -99,6 +121,8 @@ pub struct Screenshot {
     hover: Option<egui::Pos2>,
     /// The wheel to turn: over this point, by this much.
     scroll: Option<(egui::Pos2, egui::Vec2, ScrollStage)>,
+    /// The key to press.
+    key: Option<(egui::Key, KeyStage)>,
     started: Instant,
     /// When the window first showed the daemon's data.
     ready_at: Option<Instant>,
@@ -129,11 +153,16 @@ impl Screenshot {
             .ok()
             .and_then(|text| parse_wheel(&text))
             .map(|(at, delta)| (at, delta, ScrollStage::Wait));
+        let key = std::env::var(KEY_VAR)
+            .ok()
+            .and_then(|text| parse_key(&text))
+            .map(|key| (key, KeyStage::Wait));
         Some(Self {
             path,
             click,
             hover,
             scroll,
+            key,
             started: Instant::now(),
             ready_at: None,
             saved: None,
@@ -207,6 +236,17 @@ impl Screenshot {
                 return;
             }
         }
+        if let Some((_, stage)) = &mut self.key {
+            match *stage {
+                KeyStage::Wait => *stage = KeyStage::Send,
+                KeyStage::Settle(until) if Instant::now() >= until => *stage = KeyStage::Done,
+                KeyStage::Send | KeyStage::Settle(_) | KeyStage::Done => {}
+            }
+            if *stage != KeyStage::Done {
+                ctx.request_repaint();
+                return;
+            }
+        }
         let (send, saved) = mpsc::channel();
         let path = self.path.clone();
         let waker = ctx.clone();
@@ -235,6 +275,20 @@ impl Screenshot {
                 source: egui::MouseWheelSource::Wheel,
             });
             *stage = ScrollStage::Settle(Instant::now() + SCROLL_SETTLE);
+        }
+        if let Some((key, stage)) = &mut self.key
+            && *stage == KeyStage::Send
+        {
+            let press = |pressed| egui::Event::Key {
+                key: *key,
+                physical_key: Some(*key),
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            };
+            input.events.push(press(true));
+            input.events.push(press(false));
+            *stage = KeyStage::Settle(Instant::now() + MENU_SETTLE);
         }
         let hover = self.hover;
         let Some((at, stage)) = &mut self.click else {
@@ -271,6 +325,23 @@ impl Screenshot {
 fn parse_point(text: &str) -> Option<egui::Pos2> {
     let (x, y) = text.split_once(',')?;
     Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
+
+/// `1` to `9`, or `esc`, as a key.
+fn parse_key(text: &str) -> Option<egui::Key> {
+    Some(match text.trim() {
+        "1" => egui::Key::Num1,
+        "2" => egui::Key::Num2,
+        "3" => egui::Key::Num3,
+        "4" => egui::Key::Num4,
+        "5" => egui::Key::Num5,
+        "6" => egui::Key::Num6,
+        "7" => egui::Key::Num7,
+        "8" => egui::Key::Num8,
+        "9" => egui::Key::Num9,
+        "esc" => egui::Key::Escape,
+        _ => return None,
+    })
 }
 
 /// `700,400,-400,0` as a point and how far to move the content.
@@ -362,8 +433,19 @@ fn bmp(image: &egui::ColorImage) -> io::Result<Vec<u8>> {
     out.extend_from_slice(&0_u32.to_le_bytes());
     for y in (0..height).rev() {
         for pixel in &image.pixels[y * width..(y + 1) * width] {
-            let [red, green, blue, _] = pixel.to_srgba_unmultiplied();
-            out.extend_from_slice(&[blue, green, red]);
+            // The pixel is premultiplied: what is behind it shows through in
+            // the share the pixel does not cover.
+            let [red, green, blue, alpha] = pixel.to_array();
+            let behind = |back: u8| {
+                let share = u16::from(255 - alpha);
+                u8::try_from((u16::from(back) * share + 127) / 255).unwrap_or(u8::MAX)
+            };
+            let [back_red, back_green, back_blue] = BACKDROP;
+            out.extend_from_slice(&[
+                blue.saturating_add(behind(back_blue)),
+                green.saturating_add(behind(back_green)),
+                red.saturating_add(behind(back_red)),
+            ]);
         }
         out.resize(out.len() + row - width * 3, 0);
     }
@@ -411,6 +493,7 @@ mod tests {
             click: Some((egui::pos2(10.0, 20.0), ClickStage::Press)),
             hover: Some(egui::pos2(30.0, 40.0)),
             scroll: None,
+            key: None,
             started: Instant::now(),
             ready_at: None,
             saved: None,
@@ -468,6 +551,7 @@ mod tests {
                 egui::vec2(-10.0, 0.0),
                 ScrollStage::Send,
             )),
+            key: None,
             started: Instant::now(),
             ready_at: None,
             saved: None,
@@ -490,6 +574,66 @@ mod tests {
         let mut input = egui::RawInput::default();
         shot.inject(&mut input);
         assert!(input.events.is_empty());
+    }
+
+    #[test]
+    fn a_key_is_read_from_its_name_and_pressed_and_let_go_once() {
+        assert_eq!(parse_key("1"), Some(egui::Key::Num1));
+        assert_eq!(parse_key(" 9 "), Some(egui::Key::Num9));
+        assert_eq!(parse_key("esc"), Some(egui::Key::Escape));
+        assert_eq!(parse_key("0"), None);
+        assert_eq!(parse_key("enter"), None);
+        let mut shot = Screenshot {
+            path: PathBuf::new(),
+            click: None,
+            hover: None,
+            scroll: None,
+            key: Some((egui::Key::Num3, KeyStage::Wait)),
+            started: Instant::now(),
+            ready_at: None,
+            saved: None,
+            done: false,
+        };
+        // Not yet: the window has not settled.
+        let mut input = egui::RawInput::default();
+        shot.inject(&mut input);
+        assert!(input.events.is_empty());
+        shot.key = Some((egui::Key::Num3, KeyStage::Send));
+        shot.inject(&mut input);
+        assert!(matches!(
+            input.events[..],
+            [
+                egui::Event::Key {
+                    key: egui::Key::Num3,
+                    pressed: true,
+                    ..
+                },
+                egui::Event::Key {
+                    key: egui::Key::Num3,
+                    pressed: false,
+                    ..
+                },
+            ]
+        ));
+        // Once.
+        let mut input = egui::RawInput::default();
+        shot.inject(&mut input);
+        assert!(input.events.is_empty());
+    }
+
+    #[test]
+    fn a_see_through_pixel_shows_the_backdrop_and_a_solid_one_does_not() {
+        let clear = Color32::TRANSPARENT;
+        let half = Color32::from_rgba_premultiplied(100, 100, 100, 128);
+        let image = egui::ColorImage::new([3, 1], vec![clear, Color32::RED, half]);
+        let bytes = bmp(&image).unwrap();
+        let pixel = |x: usize| &bytes[HEADER + 3 * x..HEADER + 3 * x + 3];
+        let [red, green, blue] = BACKDROP;
+        assert_eq!(pixel(0), [blue, green, red]);
+        assert_eq!(pixel(1), [0, 0, 255]);
+        // Half covered: its own light plus half of the backdrop.
+        let mix = |own: u8, back: u8| own + ((u16::from(back) * 127 + 127) / 255) as u8;
+        assert_eq!(pixel(2), [mix(100, blue), mix(100, green), mix(100, red)]);
     }
 
     #[test]

@@ -935,9 +935,9 @@ pub(crate) mod tests {
                 Rules::Strings,
             ),
         ];
-        // Every file of `widgets/`, `screens/`, and `shell/`, so a new one
-        // is checked at once.
-        for (folder, least) in [("widgets", 9), ("screens", 7), ("shell", 2)] {
+        // Every file of `widgets/`, `screens/`, `shell/`, and `panel/`, so a
+        // new one is checked at once.
+        for (folder, least) in [("widgets", 9), ("screens", 7), ("shell", 2), ("panel", 2)] {
             for (name, source) in folder_sources(folder, least) {
                 let rules = match (folder, name.as_str()) {
                     ("widgets", "icons.rs") => Rules::Geometry,
