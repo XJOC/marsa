@@ -52,6 +52,14 @@ pub trait System {
     /// off without a sign (task M5-22).
     fn is_link(&self, path: &Path) -> bool;
 
+    /// Whether only root can change what is in the folder `dir`: it is a
+    /// real folder (not a link) owned by root, and neither its group nor
+    /// others can write it. `true` if nothing is there, because
+    /// `write_atomic` then makes it as root with mode `0755`. The
+    /// precondition above rests on this for Marsa's own folders, which the
+    /// helper finds already made (task M5-31). No default, as for `is_link`.
+    fn is_root_only_dir(&self, dir: &Path) -> bool;
+
     /// Whether the file at `path` is marked read-only (the Windows file
     /// attribute; on Unix, no write bit at all). `false` if nothing is
     /// there. The default, `false`, is for test systems.
@@ -164,6 +172,25 @@ impl System for RealSystem {
 
     fn is_read_only(&self, path: &Path) -> bool {
         fs::symlink_metadata(path).is_ok_and(|meta| meta.permissions().readonly())
+    }
+
+    fn is_root_only_dir(&self, dir: &Path) -> bool {
+        let meta = match fs::symlink_metadata(dir) {
+            Ok(meta) => meta,
+            Err(err) => return err.kind() == io::ErrorKind::NotFound,
+        };
+        if !meta.is_dir() {
+            return false;
+        }
+        // Unix only: the ops that ask run on macOS and Linux. Windows keeps
+        // Marsa's folder for admins through its ACL (ADR 0018).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            meta.uid() == 0 && meta.mode() & 0o022 == 0
+        }
+        #[cfg(not(unix))]
+        true
     }
 
     fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
@@ -515,6 +542,9 @@ mod fake {
         pub links: BTreeSet<PathBuf>,
         /// Files marked read-only.
         pub read_only: BTreeSet<PathBuf>,
+        /// Folders that another user could change: `is_root_only_dir` is
+        /// false for them, and true for any other path.
+        pub open_dirs: BTreeSet<PathBuf>,
         /// What `system_dir` returns. `None`, the default, is a system
         /// without one: macOS or Linux.
         pub system_dir: Option<PathBuf>,
@@ -559,6 +589,10 @@ mod fake {
 
         fn is_read_only(&self, path: &Path) -> bool {
             self.read_only.contains(path)
+        }
+
+        fn is_root_only_dir(&self, dir: &Path) -> bool {
+            !self.open_dirs.contains(dir)
         }
 
         fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
@@ -703,6 +737,36 @@ mod tests {
             let err = FakeSystem::default().read(&path, 4096).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::NotFound);
         }
+    }
+
+    /// Task M5-31, on the real disk. Unix: Windows answers `true` for any
+    /// folder, and its own folder is kept by an ACL.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_folder_of_root_that_others_cannot_write_is_root_only() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = TempDir::new().unwrap();
+        // Nothing there yet: `write_atomic` makes it as root.
+        assert!(RealSystem.is_root_only_dir(&tmp.path().join("missing")));
+        // `/` belongs to root with mode 0755 on macOS and Linux.
+        assert!(RealSystem.is_root_only_dir(Path::new("/")));
+        // A folder of this user, unless the tests run as root.
+        if fs::metadata(tmp.path()).unwrap().uid() != 0 {
+            assert!(!RealSystem.is_root_only_dir(tmp.path()));
+        }
+        // Root's, but everyone can write it (mode 1777). `/tmp` is a link to
+        // `/private/tmp` on macOS, so the folder itself is checked.
+        let open = fs::canonicalize("/tmp").unwrap();
+        let meta = fs::symlink_metadata(&open).unwrap();
+        assert!(meta.is_dir() && meta.uid() == 0 && meta.mode() & 0o002 != 0);
+        assert!(!RealSystem.is_root_only_dir(&open));
+        // A link to a root folder, a file: not a folder.
+        let link = tmp.path().join("to-root");
+        std::os::unix::fs::symlink("/", &link).unwrap();
+        assert!(!RealSystem.is_root_only_dir(&link));
+        let file = tmp.path().join("file");
+        fs::write(&file, b"x").unwrap();
+        assert!(!RealSystem.is_root_only_dir(&file));
     }
 
     #[test]

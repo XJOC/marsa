@@ -345,6 +345,10 @@ mod tests {
             self.fake.is_link(path)
         }
 
+        fn is_root_only_dir(&self, dir: &Path) -> bool {
+            self.fake.is_root_only_dir(dir)
+        }
+
         fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
             self.fake.write_atomic(path, bytes, mode)
         }

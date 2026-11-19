@@ -24,8 +24,9 @@ use crate::system::{RunOutput, System};
 /// The request's `pem` is not exactly one certificate. On Windows also: its
 /// SHA-1 has no letter, which `certutil` would read as an index.
 pub const TRUST_CERT_INVALID: &str = "trust_cert_invalid";
-/// Marsa's file ([`CA_PATH`] on macOS) is a link or cannot be read as one
-/// certificate, so it was left as it is and no command ran.
+/// Marsa's file ([`CA_PATH`] on macOS) is a link, is in a folder that not
+/// only root can change, or cannot be read as one certificate, so it was
+/// left as it is and no command ran.
 pub const TRUST_READ: &str = "trust_read";
 /// Writing Marsa's file failed.
 pub const TRUST_WRITE: &str = "trust_write";
@@ -141,8 +142,13 @@ fn stored_hash(op: &'static str, system: &impl System) -> Result<Option<String>,
     let path = Path::new(CA_PATH);
     // Marsa never writes a link, so one here is someone else's, whatever it
     // points to: `read` and `security` would follow it (task M5-22).
+    // Another user who can change the folder could put another certificate
+    // there, and `trust_remove` would untrust and delete that one (task M5-31).
+    let open = path.parent().filter(|dir| !system.is_root_only_dir(dir));
     let reason = if system.is_link(path) {
         "is a link".to_owned()
+    } else if open.is_some() {
+        "is in a folder that not only root can change".to_owned()
     } else {
         match system.read(path, MAX_FILE_BYTES) {
             Ok(bytes) => match std::str::from_utf8(&bytes).map(parse_pem) {
@@ -835,10 +841,11 @@ mod tests {
         assert_eq!(file(&fake), test_ca(OLD_MODE));
     }
 
-    /// Cut short, too large, unreadable, or a link: both ops leave the file
-    /// and run no command, because the hash to remove is unknown. A link is
-    /// left alone even when it points to the very certificate (task M5-22):
-    /// Marsa never writes one, and `security` would follow it.
+    /// Cut short, too large, unreadable, a link, or in a folder another user
+    /// can change: both ops leave the file and run no command, because the
+    /// hash to remove is unknown or cannot be trusted. A link is left alone
+    /// even when it points to the very certificate (task M5-22): Marsa never
+    /// writes one, and `security` would follow it.
     #[test]
     fn a_stored_file_that_is_not_one_certificate_is_left_alone() {
         let path = PathBuf::from(CA_PATH);
@@ -848,7 +855,15 @@ mod tests {
         let mut link = fake_with(TEST_CA.as_bytes());
         link.links.insert(path.clone());
         let mut unreadable = fake_with(TEST_CA.as_bytes());
-        unreadable.fail_reads.insert(path);
+        unreadable.fail_reads.insert(path.clone());
+        // Task M5-31: a folder another user can change, with Marsa's very
+        // certificate in it, or with nothing yet.
+        let folder = path.parent().unwrap().to_path_buf();
+        let mut open = fake_with(TEST_CA.as_bytes());
+        open.open_dirs.insert(folder.clone());
+        let mut open_empty = fake();
+        open_empty.open_dirs.insert(folder);
+        let in_open = "is in a folder that not only root can change";
         let cases = [
             (
                 fake_with(&TEST_CA.as_bytes()[..100]),
@@ -858,6 +873,8 @@ mod tests {
             (link, "is a link"),
             (dangling, "is a link"),
             (unreadable, "cannot be read: permission denied"),
+            (open, in_open),
+            (open_empty, in_open),
         ];
         for (fake, reason) in cases {
             let before = file(&fake);
