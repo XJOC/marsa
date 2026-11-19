@@ -48,16 +48,20 @@ impl PostgresDirs {
 ///   `pg_hba.conf` and adds the role `root` ([`ROOT_ROLE_SQL`]), which is not
 ///   a superuser: Laravel's default `.env` connects as `root`.
 /// - `--locale-provider=builtin --builtin-locale=C.UTF-8` (PostgreSQL 17 and
-///   later): sorting and case rules come from PostgreSQL itself, so they are
-///   the same on every OS and do not change with an OS update.
+///   later): sorting, `upper` and `lower`, and regular expression classes
+///   come from PostgreSQL itself, so they are the same on every OS and do
+///   not change with an OS update.
 /// - `--locale=C` for what still comes from the C library (messages, number
 ///   and date formats).
-/// - `--lc-ctype=C.UTF-8`, the one C library category that is not `C`:
-///   under `LC_CTYPE=C`, `pg_trgm` finds no letter outside ASCII, so its
-///   similarity of two Arabic words is 0 (0.57 with `C.UTF-8`; measured by
-///   the postgres-e2e workflow on ubuntu-24.04 and macOS 15, task M6-03).
-///   Both C libraries have `C.UTF-8`. Windows has none: task M6-07 must
-///   choose there.
+/// - `--lc-ctype=C.UTF-8`, the one C library category that is not `C`. The
+///   text search parser and `pg_trgm` ask the C library which characters
+///   are letters: under `C` none outside ASCII, so the similarity of two
+///   Arabic words was 0, and 0.57 with `C.UTF-8` (the postgres-e2e
+///   workflow, task M6-03, on Ubuntu 24.04 and macOS 15 and 26). Those
+///   answers come from each OS's tables, so the workflow checks that
+///   Arabic words with diacritics split the same on each. A cluster made
+///   before this keeps `C`: nothing makes a cluster again. Windows has no
+///   `C.UTF-8`: task M6-07 chooses there.
 pub fn initdb_args(dirs: &PostgresDirs) -> Vec<String> {
     let user = ["-U", "postgres", "-A", "trust", "-E", "UTF8", "--locale=C"];
     let ctype = ["--lc-ctype=C.UTF-8"];

@@ -20,7 +20,8 @@ BIN=$REPO/target/release
 VERSION=18.7.0
 # Short, so the socket path `<data>/run/.s.PGSQL.5432` stays under the
 # limit of a Unix socket (about 103 bytes on macOS).
-DATA=${RUNNER_TEMP:-/tmp}/pg-e2e
+RUNNER_TEMP=${RUNNER_TEMP:?the runner sets RUNNER_TEMP}
+DATA=$RUNNER_TEMP/pg-e2e
 PORT=5432
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64) TARGET=x86_64-unknown-linux-gnu ;;
@@ -161,6 +162,11 @@ tcp -U root -d app -c 'create extension pg_trgm'
 # of two Arabic words was 0, and 0.57 with C.UTF-8.
 [ "$(tcp -U root -d app -c "select similarity('مرحبا', 'مرحب') > 0.3")" = t ] || fail "pg_trgm on Arabic"
 [ "$(tcp -U root -d app -c "select lower('ÄÖ ABC')")" = 'äö abc' ] || fail "lower() outside ASCII"
+# The text search parser classifies letters by the C library's LC_CTYPE:
+# Arabic with diacritics and the Arabic comma, the same tokens on every OS.
+echo "tokens: $(tcp -U root -d app -c "select string_agg(token || ':' || alias, ' ') from ts_debug('simple', 'مَرْحَبًا، بالعالم')")"
+[ "$(tcp -U root -d app -c "select count(*) from ts_debug('simple', 'مَرْحَبًا، بالعالم') where alias = 'word'")" = 2 ] ||
+  fail "Arabic words with diacritics"
 
 step "PHP's pdo_pgsql as root with no password, as Laravel's default .env"
 run marsa install php 8.4
@@ -198,11 +204,14 @@ fi
 grep -q 'enabled = true' "$DATA/config/global.toml" && fail "the stop did not turn it off"
 
 step "a stale socket lock whose pid is another program now: refused, nothing signaled"
-sleep 300 &
+# It writes down every signal it gets: `sleep` in a script ignores SIGINT and
+# SIGQUIT, PostgreSQL's stop signals, so a signal could go unseen.
+perl -e '$SIG{$_} = sub { open my $f, ">>", $ARGV[0]; print $f "@_\n" } for qw(INT QUIT TERM HUP); sleep 300' "$RUNNER_TEMP/signals" &
 OTHER=$!
 printf '%s\n%s\n' "$OTHER" "$DATA/databases/postgres/18" >"$DATA/run/.s.PGSQL.$PORT.lock"
 refused 'service_port_busy' marsa services start postgres
 kill -0 "$OTHER" || fail "the other program was signaled"
+[ ! -e "$RUNNER_TEMP/signals" ] || fail "the other program got $(cat "$RUNNER_TEMP/signals")"
 kill "$OTHER"
 rm -f "$DATA/run/.s.PGSQL.$PORT.lock"
 

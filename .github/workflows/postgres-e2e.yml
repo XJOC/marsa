@@ -16,6 +16,9 @@ on:
       - "crates/app/src/daemon/databases.rs"
       - "crates/app/src/daemon/databases/**"
       - "crates/app/src/daemon/services_api.rs"
+      - "crates/app/src/cli/strings.rs"
+      - "crates/app/src/cli/services.rs"
+      - "crates/app/src/daemon/runtimes_api.rs"
       - "crates/app/src/daemon/supervisor.rs"
       - "crates/core/src/databases.rs"
       - "crates/core/src/platform/process.rs"
@@ -28,6 +31,9 @@ on:
       - "crates/app/src/daemon/databases.rs"
       - "crates/app/src/daemon/databases/**"
       - "crates/app/src/daemon/services_api.rs"
+      - "crates/app/src/cli/strings.rs"
+      - "crates/app/src/cli/services.rs"
+      - "crates/app/src/daemon/runtimes_api.rs"
       - "crates/app/src/daemon/supervisor.rs"
       - "crates/core/src/databases.rs"
       - "crates/core/src/platform/process.rs"
@@ -57,12 +63,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # theseus-rs builds need glibc 2.36 and macOS 15 (ADR 0023).
-        os: [ubuntu-24.04, macos-latest]
+        # theseus-rs builds need glibc 2.36 and macOS 15 (ADR 0023):
+        # macos-15 is the oldest macOS Marsa installs PostgreSQL on.
+        os: [ubuntu-24.04, macos-15, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
+      # The job runs downloaded programs: no token is left in .git.
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       # Reads the pinned version from rust-toolchain.toml.
       - name: Install the pinned Rust toolchain
