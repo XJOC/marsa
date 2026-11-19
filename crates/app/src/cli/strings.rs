@@ -204,7 +204,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "version_in_use" => "This version is in use: it is a default, a site is set to it, \
              or Caddy runs from it. Nothing was uninstalled."
             .into(),
-        // M5-19: the only PHP and the default, and sites run it.
+        // M5-19, M5-22: the only PHP, and sites run it.
         "sites_lose_php" => "This is the only PHP version installed, and sites run it: they \
              would have no PHP. Install another PHP version and make it the default first. \
              Nothing was uninstalled."

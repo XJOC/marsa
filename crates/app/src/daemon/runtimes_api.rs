@@ -35,9 +35,10 @@
 //! The default of the only installed PHP or Node version has no other
 //! version to pick, so it does not keep the version: it is cleared from
 //! `global.toml` with the uninstall (task M5-19). The Laravel and PHP sites
-//! that run that last PHP would have no PHP after it, whatever picked it for
+//! that run the last PHP would have no PHP after it, whatever picked it for
 //! them (the default, a version file, `composer.json`), so they still keep
-//! it: 409 `sites_lose_php`, with their names.
+//! it: 409 `sites_lose_php`, with their names. That holds with no default
+//! too (task M5-22).
 
 use std::error::Error;
 use std::fmt;
@@ -712,12 +713,14 @@ fn retire_unused(
     used.caddy = caddy.is_some_and(|program| program.starts_with(&dir));
     // The default of the only installed version has no other version to
     // pick, so it goes with this one. The PHP sites that run this last PHP
-    // would have none after it, so they keep the version instead.
-    let clear = match (default_tool(runtime), installed.len()) {
-        (Some(tool), 1) => used.default.take().map(|default| (tool, default)),
+    // would have none after it, so they keep the version instead, whether
+    // the default picks it or not (task M5-22).
+    let last = installed.len() == 1;
+    let clear = match default_tool(runtime) {
+        Some(tool) if last => used.default.take().map(|default| (tool, default)),
         _ => None,
     };
-    if clear.is_some() && runtime == Runtime::Php {
+    if last && runtime == Runtime::Php {
         let mut left = sites_running(data_dir, &sites, &version);
         // A site set to it in `sites.toml` is named once, as set to it.
         left.retain(|name| !used.sites.contains(name));

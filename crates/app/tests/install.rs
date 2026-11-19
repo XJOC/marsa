@@ -1342,6 +1342,48 @@ async fn the_last_php_stays_while_sites_run_it() {
     assert_eq!(entries(&served, Runtime::Php), ["8.3.12"]);
 }
 
+/// Task M5-22: the last PHP is not the default (there is none), yet a site
+/// runs it through a version file. It keeps the version too. Once no PHP
+/// site runs it, it goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_php_stays_while_sites_run_it_with_no_default() {
+    let served = Served::start(FakeInstall::default()).await;
+    install_dirs(&served, &[(Runtime::Php, "8.3.12")]);
+    save_defaults(&served, None, None);
+    let list = park_sites(
+        &served,
+        &[
+            ("api", &["index.php", ".php-version"]),
+            ("shop", &["index.php"]),
+            ("docs", &[]),
+        ],
+    )
+    .await;
+    assert_eq!(php_of(&list, "api").as_deref(), Some("8.3.12"));
+    // No default and no version file: no PHP already.
+    assert_eq!(php_of(&list, "shop"), None);
+    let before = global_text(&served);
+
+    let (code, used) = refusal(&served, "/v1/runtimes/php/8.3.12").await;
+    let want = VersionInUse {
+        version: "8.3.12".into(),
+        sites_left_without_php: vec!["api".into()],
+        ..VersionInUse::default()
+    };
+    assert_eq!((code.as_str(), used), ("sites_lose_php", want));
+    assert_eq!(global_text(&served), before);
+    assert_eq!(entries(&served, Runtime::Php), ["8.3.12"]);
+
+    // The check builds the site list from the disk: api is static now.
+    let api = served.path().join("code").join("api");
+    fs::remove_file(api.join("index.php")).expect("index.php");
+    let _: Uninstalled = served
+        .json("DELETE", "/v1/runtimes/php/8.3.12", None, StatusCode::OK)
+        .await;
+    assert!(entries(&served, Runtime::Php).is_empty());
+    assert_eq!(global_text(&served), before);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_pool_of_the_version_stops_before_the_delete_and_the_sites_follow() {
     use std::sync::atomic::{AtomicBool, Ordering};
