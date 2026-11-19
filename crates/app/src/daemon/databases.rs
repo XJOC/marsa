@@ -618,6 +618,12 @@ impl PostgresManager {
         lock(&self.runtime).logs.recent()
     }
 
+    /// PostgreSQL's turn, if no action runs now. An uninstall holds it, so
+    /// no start picks the version while its folder is moved aside.
+    pub fn try_turn(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        Arc::clone(&self.busy).try_lock_owned().ok()
+    }
+
     /// Whether `GET /v1/services` lists PostgreSQL: when a version is
     /// installed, or when its status says more than `stopped` (a start
     /// that failed because none is installed).
@@ -1068,47 +1074,124 @@ pub fn set_enabled(data_dir: &Path, enabled: bool) -> Result<(), ConfigError> {
     config::save_global(&path, &global)
 }
 
-/// After an install of a PostgreSQL of the line `major`: when `[postgres]`
-/// has no `default` yet, makes `major` the default and turns it on, and
-/// returns `true`, so the caller starts it. Otherwise changes nothing. The
-/// caller holds `Daemon::lock_global`.
+/// What an install of PostgreSQL `version` changes in `[postgres]`, now
+/// that `installed` holds it, and whether PostgreSQL then starts:
+///
+/// - no `default`, and no other version installed: the first install. Its
+///   line becomes the default, it is turned on, and it starts (ADR 0023,
+///   section 5: the install is the user's request);
+/// - no `default`, and other versions installed: the default becomes the
+///   line that ran until now, the newest of the others, so the next start
+///   does not move to the new line's empty cluster. `enabled` stays;
+/// - a `default` whose line has no installed version any more (its last
+///   one was uninstalled): the new line becomes the default, and it starts
+///   if it is on. Otherwise no start could ever run again without a hand
+///   edit of `global.toml`;
+/// - any other `default`, or one that is not a number: nothing changes.
+pub fn after_install(
+    settings: &mut ServerSettings,
+    version: &Version,
+    installed: &[Version],
+) -> bool {
+    let others = installed.iter().filter(|other| *other != version);
+    match settings.default.as_deref() {
+        None => match others.max() {
+            None => {
+                settings.default = Some(version.major.to_string());
+                settings.enabled = true;
+                true
+            }
+            Some(ran) => {
+                settings.default = Some(ran.major.to_string());
+                false
+            }
+        },
+        Some(line) => match line.trim().parse::<u64>() {
+            Ok(major) if !installed.iter().any(|v| v.major == major) => {
+                settings.default = Some(version.major.to_string());
+                settings.enabled
+            }
+            _ => false,
+        },
+    }
+}
+
+/// [`after_install`] on `global.toml`, written only when it changes. Returns
+/// whether PostgreSQL starts. The caller holds `Daemon::lock_global`.
 ///
 /// # Errors
 ///
 /// The `config_*` codes when `global.toml` cannot be read or written.
-pub fn first_install(data_dir: &Path, major: u64) -> Result<bool, ConfigError> {
+pub fn first_install(
+    data_dir: &Path,
+    version: &Version,
+    installed: &[Version],
+) -> Result<bool, ConfigError> {
     let path = ConfigPaths::in_dir(data_dir).global;
     let mut global = config::load_global(&path)?;
-    if global.postgres.default.is_some() {
-        return Ok(false);
+    let before = global.postgres.clone();
+    let start = after_install(&mut global.postgres, version, installed);
+    if global.postgres != before {
+        config::save_global(&path, &global)?;
     }
-    global.postgres.default = Some(major.to_string());
-    global.postgres.enabled = true;
-    config::save_global(&path, &global)?;
-    Ok(true)
+    Ok(start)
 }
 
-/// Starts PostgreSQL in the background after its first install. A stop
-/// drops it (`run_waiting`), and a daemon that stops starts nothing. A
-/// failure only sets the status: the install has succeeded.
-pub fn start_after_install(daemon: &Arc<Daemon>) {
+/// After an install of PostgreSQL `version`, in the background: takes
+/// PostgreSQL's turn, writes `[postgres]` ([`first_install`]), and starts it
+/// in that same turn when it says so. A stop asked meanwhile waits for the
+/// turn and drops the start ([`PostgresManager::run_waiting`]); a daemon
+/// that stops starts nothing. A failure is only logged, or sets the status:
+/// the install has succeeded either way.
+pub fn start_after_install(daemon: &Arc<Daemon>, version: Version) {
     let daemon = Arc::clone(daemon);
     tokio::spawn(async move {
         let postgres = &daemon.postgres;
-        let start = postgres.run_waiting(&daemon, ServiceAction::Start, START_WAIT);
-        let result = tokio::select! {
+        let turn = tokio::time::timeout(START_WAIT, Arc::clone(&postgres.busy).lock_owned());
+        let turn = tokio::select! {
             biased;
             () = daemon.shutdown.cancelled() => return,
-            result = start => result,
+            turn = turn => turn,
         };
-        match result {
-            Ok(status) => info!(state = ?status.state, "postgres after its first install"),
+        let Ok(turn) = turn else {
+            warn!(%version, "another action on postgres ran too long; [postgres] is as it was");
+            return;
+        };
+        let worker = Arc::clone(&daemon);
+        let installed = version.clone();
+        let job = tokio::task::spawn_blocking(move || {
+            let _one = worker.lock_global();
+            let versions = RuntimesDir::in_dir(&worker.data_dir).installed(Runtime::Postgres);
+            let versions = versions.unwrap_or_else(|_| vec![installed.clone()]);
+            first_install(&worker.data_dir, &installed, &versions)
+        });
+        match job.await {
+            Ok(Ok(true)) => info!(%version, "the first PostgreSQL: on, and starting it"),
+            Ok(Ok(false)) => return,
+            Ok(Err(err)) => {
+                warn!(code = err.code(), %err, "cannot write [postgres] after the install");
+                return;
+            }
+            Err(err) => {
+                warn!(%err, "cannot write [postgres] after the install");
+                return;
+            }
+        }
+        let start = postgres.act(&daemon, ServiceAction::Start, &turn);
+        let started = tokio::select! {
+            biased;
+            () = daemon.shutdown.cancelled() => return,
+            started = start => started,
+        };
+        drop(turn);
+        match started {
+            Ok(_) => info!(state = ?postgres.status().state, "postgres after its first install"),
             Err(err) => warn!(code = err.code(), %err, "postgres did not start after its install"),
         }
     });
 }
 
-/// How long the start after an install waits for another action on
+/// How long the work after an install waits for another action on
 /// PostgreSQL, such as a start the user asked for meanwhile.
 const START_WAIT: Duration = Duration::from_secs(30);
 
@@ -2090,6 +2173,95 @@ mod tests {
             }
         }
 
+        /// `DELETE /v1/runtimes/postgres/18.7.0` through the routes.
+        async fn uninstall(pg: &Pg) -> (u16, marsa_core::types::ErrorBody) {
+            use crate::daemon::api::router;
+            use crate::daemon::auth::AuthConfig;
+            use axum::body::{Body, to_bytes};
+            use axum::http::Request;
+            use marsa_core::platform::daemon_file::{Token, daemon_authority};
+            use tower::ServiceExt as _;
+
+            const PORT: u16 = 51239;
+            let token = Token::generate().unwrap();
+            let bearer = token.bearer_header();
+            let app = router(
+                Arc::clone(&pg.daemon),
+                AuthConfig::new(Arc::new(token), PORT),
+            );
+            let request = Request::builder()
+                .method("DELETE")
+                .uri("/v1/runtimes/postgres/18.7.0")
+                .header("host", daemon_authority(PORT))
+                .header("authorization", &bearer)
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status().as_u16();
+            let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            (status, serde_json::from_slice(&body).unwrap())
+        }
+
+        /// The running version, or one a start may pick, cannot be
+        /// uninstalled; its folder stays.
+        #[tokio::test]
+        async fn a_running_or_starting_postgres_keeps_its_version() {
+            let pg = pg("serve", probes(Liveness::Gone, None));
+            let version_dir = pg.daemon.data_dir.join("runtimes/postgres/18.7.0");
+            slow_init(&pg);
+            let start = spawn_saved(&pg, ServiceAction::Start);
+            until("initdb", || pg.count("initdb") > 0).await;
+            let (status, body) = uninstall(&pg).await;
+            assert_eq!((status, body.error.code.as_str()), (409, "service_busy"));
+            pg.act(ServiceAction::Stop).await.unwrap();
+            start.await.unwrap().unwrap();
+            assert!(version_dir.is_dir());
+
+            let pg = pg_in("data2", "serve", probes(Liveness::Gone, None));
+            pg.act(ServiceAction::Start).await.unwrap();
+            let (status, body) = uninstall(&pg).await;
+            assert_eq!((status, body.error.code.as_str()), (409, "version_in_use"));
+            assert!(body.in_use.unwrap().server);
+            assert!(pg.daemon.data_dir.join("runtimes/postgres/18.7.0").is_dir());
+            pg.act(ServiceAction::Stop).await.unwrap();
+        }
+
+        /// The first install writes `[postgres]` and starts it; a stop asked
+        /// while it waits for its turn drops that start.
+        #[tokio::test]
+        async fn the_first_install_starts_it_unless_a_stop_comes_first() {
+            let pg = pg("serve", probes(Liveness::Gone, None));
+            set_postgres(&pg.daemon.data_dir, None, false, pg.port);
+            let global = ConfigPaths::in_dir(&pg.daemon.data_dir).global;
+            start_after_install(&pg.daemon, Version::new(18, 7, 0));
+            until("running", || {
+                pg.daemon.postgres.status().state == ServiceState::Running
+            })
+            .await;
+            let settings = config::load_global(&global).unwrap().postgres;
+            assert_eq!(
+                (settings.default.as_deref(), settings.enabled),
+                (Some("18"), true)
+            );
+            pg.wait_for("fake ready").await;
+            pg.act(ServiceAction::Stop).await.unwrap();
+
+            // Again from no default: a stop waits in line first.
+            set_postgres(&pg.daemon.data_dir, None, false, pg.port);
+            let held = Arc::clone(&pg.daemon.postgres.busy).lock_owned().await;
+            start_after_install(&pg.daemon, Version::new(18, 7, 0));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let stop = spawn_saved(&pg, ServiceAction::Stop);
+            until("the stop in line", || {
+                lock(&pg.daemon.postgres.starting).stops_waiting == 1
+            })
+            .await;
+            drop(held);
+            stop.await.unwrap().unwrap();
+            assert_eq!(pg.count("server"), 1, "no second server");
+            assert!(!enabled(&pg));
+        }
+
         #[tokio::test]
         async fn postgres_starts_with_the_daemon_only_when_it_is_on() {
             let pg = pg("serve", probes(Liveness::Gone, None));
@@ -2121,29 +2293,110 @@ mod tests {
         }
     }
 
-    /// A failed sync after the rename does not say that nothing was made.
-    /// The first install makes its line the default and turns it on; a
-    /// later one, of any line, changes nothing.
+    /// Each rule of `after_install`.
     #[test]
-    fn only_the_first_install_turns_postgres_on() {
+    fn an_install_sets_the_default_line_and_starts_only_the_first() {
+        let v = |text: &str| Version::parse(text).unwrap();
+        let settings = |default: Option<&str>, enabled| ServerSettings {
+            default: default.map(str::to_owned),
+            enabled,
+            port: None,
+        };
+        let cases = [
+            // The first install: its line, on, and a start.
+            (
+                settings(None, false),
+                "18.7.0",
+                &["18.7.0"][..],
+                settings(Some("18"), true),
+                true,
+            ),
+            // Another line ran without a default: pinned to it, no start.
+            (
+                settings(None, true),
+                "18.7.0",
+                &["17.12.0", "18.7.0"],
+                settings(Some("17"), true),
+                false,
+            ),
+            (
+                settings(None, false),
+                "17.12.0",
+                &["17.12.0", "18.7.0"],
+                settings(Some("18"), false),
+                false,
+            ),
+            // A newer patch of the default line: nothing.
+            (
+                settings(Some("18"), false),
+                "18.8.0",
+                &["18.7.0", "18.8.0"],
+                settings(Some("18"), false),
+                false,
+            ),
+            // Another line beside the default: nothing.
+            (
+                settings(Some("18"), true),
+                "17.12.0",
+                &["17.12.0", "18.7.0"],
+                settings(Some("18"), true),
+                false,
+            ),
+            // The default line is gone: the new line, started if on.
+            (
+                settings(Some("18"), true),
+                "17.12.0",
+                &["17.12.0"],
+                settings(Some("17"), true),
+                true,
+            ),
+            (
+                settings(Some("18"), false),
+                "17.12.0",
+                &["17.12.0"],
+                settings(Some("17"), false),
+                false,
+            ),
+            // A default that is not a line: left alone.
+            (
+                settings(Some("x"), true),
+                "17.12.0",
+                &["17.12.0"],
+                settings(Some("x"), true),
+                false,
+            ),
+        ];
+        for (before, version, installed, after, start) in cases {
+            let installed: Vec<Version> = installed.iter().map(|text| v(text)).collect();
+            let mut got = before.clone();
+            let started = after_install(&mut got, &v(version), &installed);
+            assert_eq!((got, started), (after, start), "{before:?} + {version}");
+        }
+    }
+
+    /// Only a change is written.
+    #[test]
+    fn first_install_writes_global_toml_only_for_a_change() {
         let data = tempfile::tempdir().unwrap();
         let path = ConfigPaths::in_dir(data.path()).global;
-        assert!(first_install(data.path(), 18).unwrap());
+        let v18 = Version::new(18, 7, 0);
+        assert!(first_install(data.path(), &v18, std::slice::from_ref(&v18)).unwrap());
         let settings = config::load_global(&path).unwrap().postgres;
         assert_eq!(
             (settings.default.as_deref(), settings.enabled),
             (Some("18"), true)
         );
-
-        set_enabled(data.path(), false).unwrap();
-        assert!(!first_install(data.path(), 17).unwrap());
-        let settings = config::load_global(&path).unwrap().postgres;
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "[postgres]\ndefault = \"18\"\n").unwrap();
+        let v17 = Version::new(17, 12, 0);
+        assert!(!first_install(data.path(), &v17, &[v17.clone(), v18]).unwrap());
         assert_eq!(
-            (settings.default.as_deref(), settings.enabled),
-            (Some("18"), false)
+            std::fs::read_to_string(&path).unwrap(),
+            "[postgres]\ndefault = \"18\"\n"
         );
     }
 
+    /// A failed sync after the rename does not say that nothing was made.
     #[test]
     fn an_init_error_says_whether_the_cluster_is_in_place() {
         let failed = InitError::new("initdb failed".to_owned());

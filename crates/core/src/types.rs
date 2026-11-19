@@ -1100,6 +1100,21 @@ mod tests {
             ..VersionInUse::default()
         };
         assert_eq!(running.code(), "version_in_use");
+        // M6-03: PostgreSQL runs from it. Written only when true, so an
+        // older client reads the same JSON as before.
+        let server = VersionInUse {
+            version: "18.7.0".into(),
+            server: true,
+            ..VersionInUse::default()
+        };
+        assert!(server.any());
+        assert_eq!(server.code(), "version_in_use");
+        round_trip(
+            &server,
+            json!({ "version": "18.7.0", "caddy": false, "server": true }),
+        );
+        let no_server = serde_json::to_value(VersionInUse::default()).unwrap();
+        assert!(no_server.get("server").is_none(), "{no_server}");
         // An answer from before M5-19 reads with no such sites.
         let old: VersionInUse =
             serde_json::from_value(json!({ "version": "8.3.12", "default": "8.3" })).unwrap();
