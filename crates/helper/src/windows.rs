@@ -262,7 +262,7 @@ impl PipeServer {
 
     /// One message, framed like [`PipeServer::read_message`], then waits
     /// until the client has read it. A client that never reads holds the
-    /// service as long as it stays connected (task M4-19f, open question).
+    /// service as long as it stays connected (an open question).
     ///
     /// # Errors
     ///

@@ -88,7 +88,7 @@ pub enum Icon {
     /// Points to the end of a line: right in a left-to-right language.
     Arrow,
     /// Points to the start of a line: left in a left-to-right language. The
-    /// way back (task M5-D7).
+    /// way back.
     Back,
 }
 

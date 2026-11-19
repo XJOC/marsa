@@ -19,7 +19,7 @@ use crate::panel::place::{Anchor, BadAnchor};
 
 /// The lock file of the window, in the daemon's `run/` folder. The window
 /// holds it while it is open, so a second `marsa-gui` (for example from the
-/// tray's "Open Marsa") finds it taken and exits at once (task M5-04).
+/// tray's "Open Marsa") finds it taken and exits at once.
 pub const WINDOW_LOCK: &str = "gui.lock";
 
 /// The default log filter of both programs: `MARSA_LOG` overrides it. It
@@ -64,7 +64,7 @@ pub fn data_dir(args: impl Iterator<Item = OsString>) -> Result<PathBuf, Startup
 }
 
 /// What `marsa-gui` was started to be: the window, or the menu-bar panel
-/// (`--panel`, task M5-D11), with the data folder either way.
+/// (`--panel`), with the data folder either way.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Launch {
     pub data_dir: PathBuf,

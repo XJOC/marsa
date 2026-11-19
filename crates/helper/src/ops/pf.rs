@@ -3,7 +3,7 @@
 //! Caddy runs without root on high ports of `127.0.0.1`. Four `rdr` rules on
 //! `lo0` send ports 80 and 443 there, so `https://shop.test` needs no port.
 //! The two `inet6` rules for `::1` reach no listener today: Caddy binds IPv4
-//! only, and `.test` names resolve to `127.0.0.1` only (task M5-17). Removing
+//! only, and `.test` names resolve to `127.0.0.1` only. Removing
 //! them is left for after 0.1.0. The rules sit in Marsa's own anchor under
 //! `com.apple/`, which the default `/etc/pf.conf` already evaluates, so no
 //! system file is edited.
@@ -22,7 +22,7 @@
 //!
 //! Marsa never writes a link, so a link at one of its paths is someone
 //! else's: the helper never reads, loads, or gives back a token through one,
-//! and an install writes a file in its place (task M5-31). It also writes,
+//! and an install writes a file in its place. It also writes,
 //! reads, and loads only in folders that only root can change. A removal
 //! still stops the job, flushes the anchor, and deletes the files there: a
 //! delete never follows a link.
@@ -35,10 +35,10 @@ use crate::response::{OpResult, Outcome};
 use crate::system::{RunOutput, System};
 
 /// Writing a file of the redirect failed, or a folder of the redirect is one
-/// that not only root can change, so nothing was written (task M5-31).
+/// that not only root can change, so nothing was written.
 pub const PF_WRITE: &str = "pf_write";
 /// The running helper could not be found or read, so it was not copied for
-/// the boot job, and nothing was written (task M4-27): its path is not
+/// the boot job, and nothing was written: its path is not
 /// known, the file is gone or larger than 64 MiB, or the read was refused.
 /// A refused read is what the folder protection of macOS gives: root cannot
 /// read the user's Desktop, Documents, and Downloads folders until the user
@@ -50,7 +50,7 @@ pub const PF_HELPER_UNREADABLE: &str = "pf_helper_unreadable";
 pub const PF_DELETE: &str = "pf_delete";
 /// `pfctl -f` did not load the rules file into the anchor, or it was not
 /// asked to: the rules file is a link, or its folder is one that not only
-/// root can change (task M5-31).
+/// root can change.
 pub const PF_LOAD_FAILED: &str = "pf_load_failed";
 /// `pfctl -E` printed no reference token.
 pub const PF_TOKEN_MISSING: &str = "pf_token_missing";
@@ -187,7 +187,7 @@ fn install_files(
         (PLIST, plist().into_bytes(), 0o644),
     ];
     // In place only if pf shows the rules and Marsa holds a reference too: a
-    // token file of its own, not a link (task M5-31).
+    // token file of its own, not a link.
     let in_place = files
         .iter()
         .all(|(path, bytes, _)| same(system, path, bytes))
@@ -861,7 +861,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         }
     }
 
-    /// Root could not read the running helper (task M4-27): on macOS, a
+    /// Root could not read the running helper: on macOS, a
     /// helper run from `~/Desktop` is behind the folder protection.
     #[test]
     fn a_helper_root_cannot_read_is_pf_helper_unreadable_and_runs_nothing() {
@@ -1030,7 +1030,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         assert!(commands(&mac).is_empty());
     }
 
-    /// Task M5-31: a link at the token file, to a file with a token, is
+    /// a link at the token file, to a file with a token, is
     /// someone else's. Neither op gives that token back. The install writes
     /// Marsa's token in its place, also when pf shows the rules, and the
     /// removal deletes the link itself.
@@ -1050,7 +1050,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         assert_eq!(file(&mac, TOKEN), None);
     }
 
-    /// Task M5-31: links at every path, to files with Marsa's very content.
+    /// links at every path, to files with Marsa's very content.
     /// The install is not `unchanged`: it writes files in their place, then
     /// loads its own. The boot job never loads the rules through a link.
     #[test]
@@ -1074,7 +1074,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         assert!(commands(&mac).is_empty(), "{:?}", commands(&mac));
     }
 
-    /// Task M5-31: a folder of Marsa's that another user can change. Nothing
+    /// a folder of Marsa's that another user can change. Nothing
     /// is written, loaded, or given back; the removal still flushes and
     /// deletes.
     #[test]
