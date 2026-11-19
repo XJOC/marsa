@@ -1,7 +1,8 @@
 //! Start-up and shutdown: lock file, bind, `run/daemon.json`, serve. Task M3-06.
 //! The DNS server for `.test` starts and stops with it (task M4-12), and so
 //! does the parked folder watcher (task M4-10d). An installed Caddy starts
-//! with it too (task M5-16).
+//! with it too (task M5-16), and so does PostgreSQL when it is on (task
+//! M6-03).
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -27,6 +28,7 @@ use super::api;
 use super::auth::AuthConfig;
 use super::autostart_api::Autostart;
 use super::caddy;
+use super::databases;
 use super::dns;
 use super::sites_sync;
 use super::state::Daemon;
@@ -43,8 +45,8 @@ const DRAIN_LIMIT: Duration = Duration::from_secs(5);
 const DNS_STOP_LIMIT: Duration = Duration::from_secs(2);
 /// How long shutdown waits for the parked folder watcher.
 const WATCH_STOP_LIMIT: Duration = Duration::from_secs(2);
-/// How long shutdown waits for the start of Caddy with the daemon. It ends at
-/// once at the shutdown token.
+/// How long shutdown waits for the start of Caddy, and that of PostgreSQL,
+/// with the daemon. Each ends at once at the shutdown token.
 const LAUNCH_STOP_LIMIT: Duration = Duration::from_secs(2);
 /// How long a busy `run/daemon.lock` is tried again before giving up. A
 /// client probes it with a short shared lock every 50 ms; a probe must not
@@ -145,6 +147,8 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     // sync task subscribed, so Caddy's `Running` asks it for a pass. A
     // failure is only a warning and Caddy's status: the daemon runs on.
     let launch = caddy::start_at_launch(&daemon);
+    // PostgreSQL when `[postgres] enabled = true` (ADR 0023), the same way.
+    let postgres = databases::start_at_launch(&daemon);
     // After the first build, so it starts from its parked folders. It stops
     // when `daemon.shutdown` is cancelled.
     let watcher = watch::start(&daemon);
@@ -159,9 +163,10 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     }
     sync.stop().await;
     launch.wait(LAUNCH_STOP_LIMIT).await;
-    // A pool or a Caddy that one of these tasks put in `procs` after the
-    // shutdown's own sweep: `add_proc` told it to stop, and this waits for it.
-    // The map is empty otherwise, and this returns at once.
+    postgres.wait(LAUNCH_STOP_LIMIT).await;
+    // A pool, a Caddy, or a PostgreSQL that one of these tasks put in `procs`
+    // after the shutdown's own sweep: `add_proc` told it to stop, and this
+    // waits for it. The map is empty otherwise, and this returns at once.
     daemon.stop_procs(PROCS_LIMIT).await;
     // Before the lock goes, so the next daemon finds the DNS port free.
     if let Some(dns) = dns {
