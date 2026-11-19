@@ -738,6 +738,12 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              another user back to yours (sudo chown -R \"$USER\" <folder>). Then run \
              \"marsa setup\" again."
             .into(),
+        "nss_remove_failed" => "Marsa's certificate authority is still in a certificate \
+             database of Chrome or Firefox in your home folder. If certutil is missing, install \
+             libnss3-tools (Debian, Ubuntu) or nss-tools (Fedora); if the database has a \
+             password, remove it. Close the browser, then run \"marsa uninstall --all\" again. \
+             logs/marsad.log names the database."
+            .into(),
         "nss_add_failed" => "Chrome or Firefox may not trust Marsa's sites yet: a certificate \
              database in your home folder did not take Marsa's certificate authority. If it has \
              a password (Firefox's Primary Password), remove the password or add the \
@@ -785,6 +791,18 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             "The Marsa daemon stopped during the uninstall, so Marsa stopped waiting. \
              {UNINSTALL_MAY_HAVE_RUN}"
         ),
+        // Linux: pkexec found no agent to ask with, or the password was
+        // not accepted.
+        "uninstall_not_authorized" if cfg!(target_os = "linux") => "Linux did not give Marsa \
+             admin rights, so nothing was removed. The password was not accepted, or no \
+             password dialog could open (over SSH, for example). Run \"marsa daemon stop\", \
+             then run \"marsa uninstall --all\" again in a terminal of your desktop session."
+            .into(),
+        "uninstall_pkexec_missing" => "pkexec is not installed, so Marsa cannot ask for the \
+             administrator password, and nothing was removed. Install the package pkexec \
+             (Debian, Ubuntu), polkit (Fedora), or policykit-1 (older systems), then run \
+             \"marsa uninstall --all\" again."
+            .into(),
         "uninstall_not_authorized" => "macOS did not give Marsa admin rights, so nothing was \
              removed. The password was not accepted, or the prompt could not open (over SSH, \
              for example). Run \"marsa daemon stop\", then run \"marsa uninstall --all\" again \
@@ -1441,6 +1459,27 @@ pub fn uninstall_all_plan(data_dir: &Path, deletable: bool, delete: bool) -> Str
         text.push('\n');
         return text;
     }
+    // Linux: the same, as for Windows above.
+    if cfg!(target_os = "linux") {
+        let lines = [
+            "This removes Marsa from this system:".to_owned(),
+            "  - the setting that lets Caddy use ports 80 and 443".to_owned(),
+            "  - the setting that sends .test names to Marsa, or the sites' lines in /etc/hosts"
+                .to_owned(),
+            "  - the trust in Marsa's certificate authority, for the system and in your Chrome \
+             and Firefox"
+                .to_owned(),
+            "  - the start at login".to_owned(),
+            "Then the Marsa daemon stops, with Caddy, PHP, PostgreSQL, and the DNS server. Linux \
+             asks for your password once. Quit the Marsa window and the tray icon first: they \
+             would start the daemon again."
+                .to_owned(),
+            data,
+        ];
+        let mut text = lines.join("\n");
+        text.push('\n');
+        return text;
+    }
     let lines = [
         "This removes Marsa from this system:".to_owned(),
         "  - the redirect of ports 80 and 443, and its job at startup".to_owned(),
@@ -1466,6 +1505,9 @@ pub const UNINSTALL_ALL_CONFIRM: &str = "Type yes to remove Marsa: ";
 pub const UNINSTALL_ALL_STARTED: &str = "Removing Marsa. macOS will ask for an administrator \
      password, and may then ask you to approve taking away the trust in Marsa's certificate \
      authority.";
+/// The same on Linux: one password prompt (pkexec).
+pub const UNINSTALL_ALL_STARTED_LINUX: &str = "Removing Marsa. Linux will ask for your password \
+     once.";
 /// The same on Windows: one UAC prompt, which may sit in the taskbar.
 pub const UNINSTALL_ALL_STARTED_WINDOWS: &str = "Removing Marsa. Windows will ask for admin \
      rights (UAC) once; if no prompt shows, look for it in the taskbar.";
@@ -1526,6 +1568,13 @@ pub fn uninstall_all_step(op: &str) -> String {
         "resolver_remove" => "Stop sending .test names to Marsa".to_owned(),
         "trust_remove" => "Remove the trust in Marsa's certificates for all users".to_owned(),
         "user_trust_remove" => "Remove the trust in Marsa's certificates for you".to_owned(),
+        // Linux.
+        "ports_remove" => "Stop letting Caddy use ports 80 and 443".to_owned(),
+        "resolved_remove" => "Take out Marsa's link for .test names".to_owned(),
+        "hosts_remove" => format!("Take Marsa's names out of {HOSTS_FILE}"),
+        "nss_remove" => {
+            "Remove the trust in Marsa's certificates from Chrome and Firefox".to_owned()
+        }
         "autostart_remove" => "Stop starting Marsa at login".to_owned(),
         "uninstall_all" => {
             "Remove Marsa's hosts lines, its certificate authority, and its helper service"
@@ -2150,6 +2199,7 @@ mod tests {
         "trust_tool_missing",
         "nss_tool_missing",
         "nss_add_failed",
+        "nss_remove_failed",
         "nss_db_refused",
         "trust_store_update_failed",
         // The uninstall route (task M5-13), the removal codes of
@@ -2160,6 +2210,7 @@ mod tests {
         "uninstall_timed_out",
         "uninstall_interrupted",
         "uninstall_not_authorized",
+        "uninstall_pkexec_missing",
         "uninstall_helper_missing",
         "uninstall_helper_unsafe",
         "uninstall_prompt_failed",

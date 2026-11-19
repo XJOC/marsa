@@ -68,7 +68,7 @@ pub(super) fn fingerprint_digits(nickname: &str) -> Option<&str> {
 }
 
 /// `<data>/trust/nss-fingerprints`.
-pub(super) fn record_path(files: &TrustFiles) -> std::path::PathBuf {
+pub(crate) fn record_path(files: &TrustFiles) -> std::path::PathBuf {
     files.dir().join(RECORD)
 }
 

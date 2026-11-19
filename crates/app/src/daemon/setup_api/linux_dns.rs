@@ -57,6 +57,7 @@ const MAX_HOSTS_BYTES: u64 = 16 * 1024 * 1024;
 
 pub const RESOLVED_INSTALL: &str = "resolved_install";
 pub const HOSTS_SYNC: &str = "hosts_sync";
+pub const HOSTS_REMOVE: &str = "hosts_remove";
 /// Why `hosts_sync` was left out: no site list.
 pub const HOSTS_SITES_UNKNOWN: &str = "hosts_sites_unknown";
 /// Why `hosts_sync` was left out: more names than the helper takes.
