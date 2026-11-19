@@ -534,6 +534,9 @@ pub struct PostgresManager {
     /// The program of the last start, so an uninstall never deletes the
     /// version that runs. Use [`PostgresManager::running_program`].
     started: Mutex<Option<PathBuf>>,
+    /// The pid the run that started last wrote to `run/postgres.pid`, so its
+    /// end deletes only its own record.
+    recorded: Mutex<Arc<Mutex<Option<u32>>>>,
     /// The status and recent lines, kept across runs, so `seq` never goes
     /// back and the lines of a failed run stay readable.
     runtime: Arc<Mutex<ServiceRuntime>>,
@@ -557,6 +560,7 @@ impl Default for PostgresManager {
             platform: Platform::current(),
             orphan_ladder: postgres_stop(),
             started: Mutex::default(),
+            recorded: Mutex::default(),
             starting: Mutex::default(),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(POSTGRES_ID))),
             busy: Arc::default(),
@@ -847,7 +851,17 @@ impl PostgresManager {
         let first_seq = self.recent_logs().last().map_or(0, |line| line.seq + 1);
         self.spawn(daemon, spec)?;
         match self.wait_ready(daemon, port, &servers).await {
-            Ready::Yes => info!(port, "postgres takes connections"),
+            Ready::Yes => {
+                info!(port, "postgres takes connections");
+                let slot = Arc::clone(&lock(&self.recorded));
+                if process::DATABASE_ORPHAN_RECOVERY && lock(&slot).is_none() {
+                    warn!(
+                        "postgres runs, but not as an installed postgres the system could tell, \
+                         so run/postgres.pid was not written: a crash of marsad now leaves it \
+                         unrecorded"
+                    );
+                }
+            }
             Ready::Ended => {
                 // Only a run that exited by itself: a shutdown that took the
                 // handle and stopped it leaves `Stopped`, and its lines are
@@ -957,7 +971,10 @@ impl PostgresManager {
                 ActionError::ProgramNotAbsolute(err)
             })?;
         *lock(&self.started) = Some(program);
-        // The run's end deletes `run/postgres.pid`, whatever ended it: a
+        // This run's own record, set once `wait_ready` writes it.
+        let recorded = Arc::new(Mutex::new(None));
+        *lock(&self.recorded) = Arc::clone(&recorded);
+        // The run's end deletes its `run/postgres.pid`, whatever ended it: a
         // stop, a shutdown, or the server itself. PostgreSQL is never
         // restarted, so the run is the task.
         let ServiceHandle {
@@ -974,7 +991,9 @@ impl PostgresManager {
             if let Err(err) = task.await {
                 warn!(%err, "the postgres task failed");
             }
-            orphan::forget(&data_dir);
+            if let Some(pid) = *lock(&recorded) {
+                orphan::forget_run(&data_dir, pid);
+            }
         });
         let handle = ServiceHandle {
             cancel,
@@ -1002,6 +1021,10 @@ impl PostgresManager {
                 if !recorded && let Some(pid) = self.status().pid {
                     let probes = &*self.probes;
                     recorded = orphan::record(probes, &daemon.data_dir, servers, pid).await;
+                    if recorded {
+                        let slot = Arc::clone(&lock(&self.recorded));
+                        *lock(&slot) = Some(pid);
+                    }
                 }
                 if answers(port).await {
                     return Ready::Yes;
@@ -1084,9 +1107,9 @@ impl PostgresManager {
 
     /// Stops the task: SIGINT, then SIGQUIT, then a kill, by the spec. When
     /// this daemon runs none, our old server that an earlier `marsad` left
-    /// running is stopped instead ([`orphan::clear`]), so a stop never
-    /// answers "stopped" while it serves. Any other PostgreSQL is never
-    /// touched.
+    /// running is stopped instead ([`orphan::clear`]). If that one cannot be
+    /// stopped, the recent lines say why; the next start refuses then. Any
+    /// other PostgreSQL is never touched.
     async fn stop(&self, daemon: &Daemon) {
         // `None`: nothing runs, or a shutdown took the handle and stops it.
         if let Some(handle) = daemon.take_proc(POSTGRES_ID) {

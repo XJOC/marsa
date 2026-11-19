@@ -78,7 +78,15 @@ pub(super) async fn record(
     }
 }
 
-/// Deletes `run/postgres.pid`: the run it names has ended.
+/// Deletes `run/postgres.pid` when it names `pid`, a run that has ended. A
+/// record of another pid (a newer run, or one that could not be told) stays.
+pub(super) fn forget_run(data_dir: &Path, pid: u32) {
+    if process::read_pid_file(&pid_path(data_dir)).is_some_and(|record| record.pid == pid) {
+        forget(data_dir);
+    }
+}
+
+/// Deletes `run/postgres.pid`.
 pub(super) fn forget(data_dir: &Path) {
     if let Err(err) = process::remove_pid_file(&pid_path(data_dir)) {
         warn!(%err, "cannot delete postgres.pid");
