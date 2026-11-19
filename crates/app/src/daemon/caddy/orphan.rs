@@ -138,8 +138,9 @@ impl PidFile {
             if !accepted.contains(program) {
                 accepted.push(program.clone());
             }
-            // `lsof` reports the path with links resolved. Only compared,
-            // never passed to a program (architecture.md section 10).
+            // `lsof` (macOS) and the `exe` link (Linux) give the path with
+            // links resolved. Only compared, never passed to a program
+            // (architecture.md section 10).
             if let Ok(real) = std::fs::canonicalize(program)
                 && !accepted.contains(&real)
             {
@@ -158,8 +159,17 @@ impl PidFile {
     /// `php::orphan::Recorded::NotYet`). So while the pid runs the daemon's
     /// own executable, or cannot be told, it looks again every [`POLL`] for
     /// up to [`RECORD_LIMIT`] (task M4-18m). A change of the start time
-    /// means the pid changed hands: then it is never written.
-    pub(super) async fn record(&self, processes: &dyn Processes, pid: u32) {
+    /// means the pid changed hands: then it is never written. `running`
+    /// says whether the supervisor still runs this pid: once it reaped the
+    /// child, the pid may be anyone's, also between two looks that could
+    /// not tell the start time. No parent check is needed beyond that: the
+    /// pid comes from our own `Child`.
+    pub(super) async fn record(
+        &self,
+        processes: &dyn Processes,
+        pid: u32,
+        running: &(dyn Fn() -> bool + Send + Sync),
+    ) {
         if !process::CADDY_ORPHAN_RECOVERY {
             return;
         }
@@ -172,6 +182,10 @@ impl PidFile {
                 Liveness::Alive { exe, started } => {
                     if first.get_or_insert_with(|| started.clone()) != started {
                         warn!(pid, "caddy.pid not written: the pid changed hands");
+                        return;
+                    }
+                    if !running() {
+                        debug!(pid, "caddy exited before caddy.pid was written");
                         return;
                     }
                     if self.accepted.contains(exe) {
@@ -210,7 +224,8 @@ impl PidFile {
         }
     }
 
-    /// The file against what `ps` says now.
+    /// The file against what the system says now (`ps` on macOS, `/proc`
+    /// on Linux).
     async fn check(&self, record: &PidRecord, processes: &dyn Processes) -> PidfileState {
         let now = processes.identity(record.pid).await;
         orphan::classify_pidfile(record, &self.accepted, &now)
@@ -246,7 +261,12 @@ pub(super) struct Orphans<'a> {
     pub pid_file: &'a PidFile,
     pub processes: &'a dyn Processes,
     pub admin: &'a Admin,
-    pub input: &'a CaddyInput,
+    /// The ports the next Caddy needs: on Linux after setup, 80 and 443.
+    pub input: CaddyInput,
+    /// The other ports an orphan may hold: the high ports of the config
+    /// when the next Caddy takes 80 and 443 (Linux, task M4-18m). An orphan
+    /// may have started before setup. `None` when they are the same.
+    pub other: Option<CaddyInput>,
     pub ladder: Ladder,
     /// This data folder's tag: `marsa-instance-<id>`.
     pub tag: &'a str,
@@ -421,8 +441,9 @@ impl Orphans<'_> {
         Err(Blocked::new(ORPHAN_STUCK, reason))
     }
 
-    /// Right before a signal: the start path and start time from `ps`, then
-    /// the file the process really runs, from `lsof`. Both must be ours.
+    /// Right before a signal: the start path and start time (`ps` on macOS,
+    /// `/proc` on Linux), then the file the process really runs (`lsof` on
+    /// macOS, the `exe` link on Linux). Both must be ours.
     async fn verdict(&self, record: &PidRecord) -> Verdict {
         match self.pid_file.check(record, self.processes).await {
             PidfileState::Ours { .. } => {}
@@ -467,9 +488,12 @@ impl Orphans<'_> {
         }
     }
 
+    /// Every port of [`Orphans::input`] and [`Orphans::other`].
     fn ports_free(&self) -> bool {
-        let input = self.input;
-        ports_free(&[input.http_port, input.https_port, input.admin_port])
+        [Some(self.input), self.other]
+            .into_iter()
+            .flatten()
+            .all(|input| ports_free(&[input.http_port, input.https_port, input.admin_port]))
     }
 }
 
@@ -505,7 +529,8 @@ fn with_owners(reason: &str, inspection: &Inspection) -> String {
     text
 }
 
-/// Free if it can be bound on `127.0.0.1` now. Else `lsof` names the owner.
+/// Free if it can be bound on `127.0.0.1` now. Else `lsof` names the owner
+/// (macOS; Linux has no look, so "an unknown program").
 async fn port_state(port: u16) -> PortState {
     if ports_free(&[port]) {
         return PortState::Free;
@@ -731,13 +756,15 @@ mod tests {
     }
 
     /// Task M4-18m: the first looks see the daemon's own executable, or
-    /// cannot tell; the file is written once the pid runs our Caddy.
+    /// cannot tell; the file is written once the pid runs our Caddy. Only
+    /// this test reaches the retry: in `tests/caddy_orphan.rs` the fake
+    /// Caddy is the test binary, which is also the daemon there.
     #[tokio::test(start_paused = true)]
     async fn the_pid_file_waits_for_the_exec() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = PidFile::new(dir.path(), &[PathBuf::from(PROGRAM)]);
         let fake = Fake::new([not_exec_yet(), Liveness::Unknown, not_exec_yet(), ours()]);
-        pid_file.record(&fake, 4242).await;
+        pid_file.record(&fake, 4242, &|| true).await;
         let written = process::read_pid_file(&pid_file.path).expect("caddy.pid");
         assert_eq!((written.pid, written.exe), (4242, PathBuf::from(PROGRAM)));
         assert_eq!(written.started, STARTED);
@@ -763,15 +790,22 @@ mod tests {
             vec![Liveness::Gone, ours()],
         ];
         for looks in cases {
-            pid_file.record(&Fake::new(looks.clone()), 4242).await;
+            pid_file
+                .record(&Fake::new(looks.clone()), 4242, &|| true)
+                .await;
             assert_eq!(process::read_pid_file(&pid_file.path), None, "{looks:?}");
         }
         // Always the daemon's executable: the limit ends the looks.
         let fake = Fake::new(std::iter::repeat_n(not_exec_yet(), 1000));
         let began = tokio::time::Instant::now();
-        pid_file.record(&fake, 4242).await;
+        pid_file.record(&fake, 4242, &|| true).await;
         assert!(began.elapsed() >= RECORD_LIMIT, "{:?}", began.elapsed());
         assert!(began.elapsed() < RECORD_LIMIT + POLL * 2);
+        assert_eq!(process::read_pid_file(&pid_file.path), None);
+        // The supervisor reaped it while the looks could not tell: the pid
+        // that runs our Caddy now may be another process.
+        let fake = Fake::new([Liveness::Unknown, ours()]);
+        pid_file.record(&fake, 4242, &|| false).await;
         assert_eq!(process::read_pid_file(&pid_file.path), None);
     }
 
@@ -810,7 +844,8 @@ mod tests {
             pid_file: &setup.pid_file,
             processes: fake,
             admin: &setup.admin,
-            input: &setup.input,
+            input: setup.input,
+            other: None,
             ladder: SHORT,
             tag: TAG,
         };
@@ -944,6 +979,33 @@ mod tests {
             }
         });
         (port, seen)
+    }
+
+    /// Task M4-18m: with 80 and 443 (Linux after setup), an orphan may
+    /// still hold the high ports of before setup. Free means free in both.
+    #[tokio::test]
+    async fn the_ports_of_before_setup_count_too() {
+        let (setup, held) = setup();
+        let free = CaddyInput {
+            http_port: free_port(),
+            https_port: free_port(),
+            admin_port: setup.input.admin_port,
+        };
+        let fake = Fake::new([]);
+        let orphans = |other| Orphans {
+            pid_file: &setup.pid_file,
+            processes: &fake,
+            admin: &setup.admin,
+            input: free,
+            other,
+            ladder: SHORT,
+            tag: TAG,
+        };
+        assert!(orphans(None).ports_free());
+        // `setup.input` has its site port held.
+        assert!(!orphans(Some(setup.input)).ports_free());
+        drop(held);
+        assert!(orphans(Some(setup.input)).ports_free());
     }
 
     #[tokio::test]
