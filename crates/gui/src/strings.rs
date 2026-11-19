@@ -14,8 +14,8 @@ use marsa_core::types::{
 use semver::Version;
 
 use crate::model::{
-    Appearance, Autostart, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, LogLevel,
-    Overall, Pick, PoolKind, Removal, UninstallNotice, WEB_SERVER, pool_of,
+    Appearance, Autostart, Connection, DNS_SERVER, INSTALL_INTERRUPTED, InstallStep, InstallView,
+    LogLevel, Overall, Pick, PoolKind, Removal, UninstallNotice, WEB_SERVER, pool_of,
 };
 use crate::screens::settings::Check;
 use crate::theme::Section;
@@ -92,6 +92,9 @@ pub fn service_name(id: &str) -> String {
     if id == WEB_SERVER {
         return "Caddy".to_owned();
     }
+    if id == DNS_SERVER {
+        return "DNS".to_owned();
+    }
     match pool_of(id) {
         Some((PoolKind::Fpm, line)) => format!("PHP-FPM {line}"),
         Some((PoolKind::Cgi, line)) => format!("PHP-CGI {line}"),
@@ -104,6 +107,9 @@ pub fn service_name(id: &str) -> String {
 pub fn service_description(id: &str, waiting: bool, sites: usize) -> String {
     if id == WEB_SERVER {
         return "The web server for every .test site.".to_owned();
+    }
+    if id == DNS_SERVER {
+        return "Finds every .test site on this computer.".to_owned();
     }
     let Some((_, line)) = pool_of(id) else {
         return "A program Marsa runs for your sites.".to_owned();
@@ -1633,6 +1639,12 @@ fn error_message(code: &str) -> Option<&'static str> {
              stopped safely."
         }
         "exited" => "The process exited.",
+        // The DNS server (task M4-18i), and why setup skipped its DNS step.
+        "dns_port_in_use" => {
+            "Another program holds port 18053 and may answer .test names. Its log names it."
+        }
+        "dns_start_failed" => "Marsa's DNS server did not start. Its log says why.",
+        "dns_not_running" => "Marsa's DNS server is stopped. Start it, then run setup again.",
         "spawn_failed" => "The process could not be started.",
         "program_not_absolute" => "The service program has no full path.",
         "internal_error" => "The daemon hit a bug. Try again; if it repeats, report it.",
@@ -2124,6 +2136,9 @@ mod tests {
             "service_managed_by_sites",
             "php_fpm_orphan_stuck",
             "exited",
+            "dns_port_in_use",
+            "dns_start_failed",
+            "dns_not_running",
             "spawn_failed",
             "program_not_absolute",
             "invalid_body",

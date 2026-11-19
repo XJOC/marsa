@@ -1,0 +1,6 @@
+INSPECT pidfile=mismatch(pid=35728,found=<repo>/spikes/s06-caddy-orphan/vendor/caddy (start time Wed Nov  4 00:40:54 2026 differs from Mon Jan  1 00:00:00 2024)) admin=foreign app_port=busy(caddy(35728)) admin_port=busy(caddy(35728))
+ADMIN_OWNER None
+TIMING pidfile_ms=4.8 admin_ms=0.7 port_ms=55.0
+DECISION conflict(a Caddy that is not ours answers on our admin port)
+STEP t_ms=60 decided 
+CONFLICT a Caddy that is not ours answers on our admin port

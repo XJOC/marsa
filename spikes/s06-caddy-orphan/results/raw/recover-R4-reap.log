@@ -1,0 +1,10 @@
+INSPECT pidfile=mismatch(pid=35552,found=/bin/sleep) admin=no-reply app_port=free admin_port=free
+ADMIN_OWNER None
+TIMING pidfile_ms=2.9 admin_ms=0.3 port_ms=0.0
+DECISION start-fresh(remove_pidfile=true)
+STEP t_ms=3 decided 
+STEP t_ms=3 removed_stale_pidfile 
+STEP t_ms=60 new_caddy_ready pid=35561
+STEP t_ms=61 serving body="marsa-spike v2"
+READY parent=35558 caddy=35561
+CLEAN_STOP status=Ok(ExitStatus(unix_wait_status(0)))

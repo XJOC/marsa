@@ -11,12 +11,17 @@
 //!
 //! `hickory-server` reads the queries and writes the answers on the sockets;
 //! this file only decides what to answer.
+//!
+//! [`DnsService`] makes the server a service of the daemon, `dns` in
+//! `marsa services` (task M4-18i): a port that another program holds is a
+//! failed service, and `marsa services start dns` tries again.
 
 use std::future::Future;
-use std::iter;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::{fmt, io, iter};
 
 use anyhow::Context as _;
 use hickory_server::Server;
@@ -29,10 +34,15 @@ use hickory_server::proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::MessageResponseBuilder;
 use marsa_core::dns::DNS_PORT;
+use marsa_core::platform::process;
 use marsa_core::recipes::Platform;
+use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceState, ServiceStatus};
 use tokio::net::{TcpListener, UdpSocket};
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+
+use super::supervisor::{ServiceRuntime, lock, now_ms};
 
 /// How long a resolver may keep an answer, in seconds.
 pub const TTL: u32 = 1;
@@ -53,33 +63,245 @@ pub fn serves_test_names(platform: Option<Platform>) -> bool {
     )
 }
 
-/// Starts the server on `127.0.0.1:DNS_PORT` for the daemon, on the systems
-/// that use it. `None` on Windows, or when it cannot start: then a warning
-/// is logged and the daemon runs on without it.
-pub async fn start_for_daemon(shutdown: &CancellationToken) -> Option<DnsServer> {
-    if !serves_test_names(Platform::current()) {
-        tracing::debug!("no DNS server: this system finds .test names in the hosts file");
-        return None;
-    }
-    start_or_warn(SocketAddr::from((Ipv4Addr::LOCALHOST, DNS_PORT)), shutdown).await
+/// The id of the DNS server in `GET /v1/services` (task M4-18i).
+pub const DNS_ID: &str = "dns";
+/// Another program holds the DNS port, so `.test` names that come there get
+/// its answers, not ours. `marsa logs dns` names it where it can.
+pub const DNS_PORT_IN_USE: &str = "dns_port_in_use";
+/// The server did not start for another reason; `marsa logs dns` says why.
+pub const DNS_START_FAILED: &str = "dns_start_failed";
+/// The user stopped the server. A setup code only: the service is `stopped`.
+pub const DNS_NOT_RUNNING: &str = "dns_not_running";
+/// How long a stop waits for both sockets to close.
+pub const STOP_LIMIT: Duration = Duration::from_secs(2);
+
+/// The DNS server as a service of the daemon (task M4-18i): its state and
+/// recent lines for `GET /v1/services` and `marsa logs dns`, and the server
+/// itself while it runs. A port that another program holds is a failed
+/// service with a code, not only a line in the daemon's log: that program
+/// may answer `.test` names with any address.
+#[derive(Debug)]
+pub struct DnsService {
+    /// `None` where `.test` names never come here (Windows): no service.
+    addr: Option<SocketAddr>,
+    /// Short reads only: never held across `.await`.
+    runtime: Arc<Mutex<ServiceRuntime>>,
+    server: Mutex<Option<DnsServer>>,
+    /// One action at a time. A `tokio::sync::Mutex` held across `.await`
+    /// as a serialization token only (AGENTS.md section 6): it guards no
+    /// data.
+    turn: tokio::sync::Mutex<()>,
 }
 
-/// [`start`], but an error is only a warning in the log, and `None`. The
-/// usual error is a port that another program holds.
-pub async fn start_or_warn(addr: SocketAddr, shutdown: &CancellationToken) -> Option<DnsServer> {
-    match start(addr, shutdown).await {
-        Ok(server) => {
-            tracing::info!(addr = %server.addr(), "DNS server for .test started");
-            Some(server)
+impl DnsService {
+    /// A service on `addr`, not started; `None` lists no service.
+    pub fn new(addr: Option<SocketAddr>) -> Self {
+        Self {
+            addr,
+            runtime: Arc::new(Mutex::new(ServiceRuntime::new(DNS_ID))),
+            server: Mutex::default(),
+            turn: tokio::sync::Mutex::default(),
         }
-        Err(err) => {
-            tracing::warn!(
-                %addr,
-                error = format!("{err:#}"),
-                "cannot start the DNS server; .test names will not resolve"
-            );
-            None
+    }
+
+    /// The daemon's: `127.0.0.1:DNS_PORT` on the systems that send `.test`
+    /// names to it, no service elsewhere.
+    pub fn for_daemon() -> Self {
+        let used = serves_test_names(Platform::current());
+        Self::new(used.then(|| SocketAddr::from((Ipv4Addr::LOCALHOST, DNS_PORT))))
+    }
+
+    /// Whether `GET /v1/services` lists it.
+    pub fn listed(&self) -> bool {
+        self.addr.is_some()
+    }
+
+    /// Its status, if it is listed.
+    pub fn status(&self) -> Option<ServiceStatus> {
+        self.addr?;
+        Some(lock(&self.runtime).status.clone())
+    }
+
+    pub fn recent_logs(&self) -> Vec<LogLine> {
+        lock(&self.runtime).logs.recent()
+    }
+
+    /// Why `.test` names sent to the DNS port get no answer from us: the
+    /// failure code, or [`DNS_NOT_RUNNING`]. `None` while the server runs,
+    /// and where it is not used.
+    pub fn not_serving(&self) -> Option<String> {
+        self.addr?;
+        match &lock(&self.runtime).status.state {
+            ServiceState::Running => None,
+            ServiceState::Failed { code } => Some(code.clone()),
+            _ => Some(DNS_NOT_RUNNING.to_owned()),
         }
+    }
+
+    /// Runs `action` and returns the status after it. `start` on a running
+    /// server and `stop` on a stopped one change nothing; `restart` is
+    /// `stop`, then `start`. A start that fails is the `Failed` state, not
+    /// an error. Nothing starts once `shutdown` is cancelled.
+    pub async fn run(
+        &self,
+        events: &broadcast::Sender<Event>,
+        shutdown: &CancellationToken,
+        action: ServiceAction,
+    ) -> ServiceStatus {
+        let _turn = self.turn.lock().await;
+        if matches!(action, ServiceAction::Stop | ServiceAction::Restart) {
+            self.stop_server(events).await;
+        }
+        if matches!(action, ServiceAction::Start | ServiceAction::Restart) {
+            self.start_server(events, shutdown).await;
+        }
+        lock(&self.runtime).status.clone()
+    }
+
+    /// Stops the server at the daemon's end, after any action that runs.
+    pub async fn shutdown(&self, limit: Duration) {
+        let _turn = self.turn.lock().await;
+        let server = lock(&self.server).take();
+        if let Some(server) = server {
+            server.stop(limit).await;
+        }
+    }
+
+    async fn start_server(&self, events: &broadcast::Sender<Event>, shutdown: &CancellationToken) {
+        let Some(addr) = self.addr else { return };
+        if lock(&self.server).is_some() || shutdown.is_cancelled() {
+            return;
+        }
+        self.set_state(events, ServiceState::Starting);
+        match start(addr, shutdown).await {
+            Ok(server) => {
+                tracing::info!(addr = %server.addr(), "DNS server for .test started");
+                let text = format!("answering .test names on {} (UDP and TCP)", server.addr());
+                self.note(events, LogStream::Stdout, &text);
+                *lock(&self.server) = Some(server);
+                self.set_state(events, ServiceState::Running);
+            }
+            Err(err) => {
+                let held = err
+                    .downcast_ref::<BindError>()
+                    .filter(|bind| bind.source.kind() == io::ErrorKind::AddrInUse);
+                let code = if held.is_some() {
+                    DNS_PORT_IN_USE
+                } else {
+                    DNS_START_FAILED
+                };
+                tracing::warn!(
+                    %addr,
+                    code,
+                    error = format!("{err:#}"),
+                    "cannot start the DNS server; .test names will not resolve"
+                );
+                let text = format!("{err:#}; .test names do not resolve");
+                self.note(events, LogStream::Stderr, &text);
+                self.set_state(
+                    events,
+                    ServiceState::Failed {
+                        code: code.to_owned(),
+                    },
+                );
+                if let Some(held) = held {
+                    self.name_the_holder(held.protocol, addr.port(), events.clone());
+                }
+            }
+        }
+    }
+
+    async fn stop_server(&self, events: &broadcast::Sender<Event>) {
+        let server = lock(&self.server).take();
+        let Some(server) = server else { return };
+        self.set_state(events, ServiceState::Stopping);
+        server.stop(STOP_LIMIT).await;
+        self.note(events, LogStream::Stdout, "stopped");
+        self.set_state(events, ServiceState::Stopped);
+    }
+
+    /// Looks for the program that holds the port, for its line only. On
+    /// its own task, so a slow `lsof` (up to 8 s) never holds the daemon's
+    /// start or an action.
+    fn name_the_holder(&self, protocol: Protocol, port: u16, events: broadcast::Sender<Event>) {
+        let runtime = Arc::clone(&self.runtime);
+        tokio::spawn(async move {
+            let owner = match protocol {
+                Protocol::Udp => process::udp_port_owner(port).await,
+                Protocol::Tcp => process::port_owner(port).await,
+            };
+            if let Some(owner) = owner {
+                tracing::warn!(port, %protocol, owner, "another program holds the DNS port");
+                let text = format!("{protocol} port {port} is held by {owner}");
+                note(&runtime, &events, LogStream::Stderr, &text);
+            }
+        });
+    }
+
+    fn note(&self, events: &broadcast::Sender<Event>, stream: LogStream, text: &str) {
+        note(&self.runtime, events, stream, text);
+    }
+
+    /// Sets `state` and tells every reader, under the lock like the
+    /// supervisor, so events come in the order of the changes.
+    fn set_state(&self, events: &broadcast::Sender<Event>, state: ServiceState) {
+        let mut runtime = lock(&self.runtime);
+        let status = &mut runtime.status;
+        // The server runs inside `marsad`.
+        status.pid = (state == ServiceState::Running).then(std::process::id);
+        status.state = state;
+        status.since_ms = Some(now_ms());
+        // An error only means that nobody listens right now.
+        let _ = events.send(Event::ServiceChanged(status.clone()));
+    }
+}
+
+/// Adds a line to the recent lines of `dns`, and sends it to every reader
+/// under the lock, so lines come in `seq` order.
+fn note(
+    runtime: &Mutex<ServiceRuntime>,
+    events: &broadcast::Sender<Event>,
+    stream: LogStream,
+    text: &str,
+) {
+    let mut runtime = lock(runtime);
+    let line = runtime.logs.push(stream, text, now_ms());
+    let _ = events.send(Event::Log(line));
+}
+
+/// The protocol of a socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Protocol {
+    Udp,
+    Tcp,
+}
+
+impl fmt::Display for Protocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Protocol::Udp => "UDP",
+            Protocol::Tcp => "TCP",
+        })
+    }
+}
+
+/// A fixed port that one protocol could not bind.
+#[derive(Debug)]
+struct BindError {
+    protocol: Protocol,
+    addr: SocketAddr,
+    source: io::Error,
+}
+
+impl fmt::Display for BindError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cannot bind {} {}", self.protocol, self.addr)
+    }
+}
+
+impl std::error::Error for BindError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
     }
 }
 
@@ -137,12 +359,17 @@ const PICK_TRIES: usize = 50;
 /// name it.
 async fn bind_both(addr: SocketAddr) -> anyhow::Result<(UdpSocket, TcpListener)> {
     if addr.port() != 0 {
-        let udp = UdpSocket::bind(addr)
-            .await
-            .with_context(|| format!("cannot bind UDP {addr}"))?;
+        let failed = |protocol| {
+            move |source| BindError {
+                protocol,
+                addr,
+                source,
+            }
+        };
+        let udp = UdpSocket::bind(addr).await.map_err(failed(Protocol::Udp))?;
         let tcp = TcpListener::bind(addr)
             .await
-            .with_context(|| format!("cannot bind TCP {addr}"))?;
+            .map_err(failed(Protocol::Tcp))?;
         return Ok((udp, tcp));
     }
     let mut tries = 0;
@@ -491,18 +718,123 @@ mod tests {
         assert!(!serves_test_names(None));
     }
 
-    #[tokio::test]
-    async fn a_taken_port_is_a_warning_not_a_failure() {
-        let shutdown = CancellationToken::new();
-        let udp = UdpSocket::bind(any_port()).await.unwrap();
-        let taken = udp.local_addr().unwrap();
-        let started = tokio::time::timeout(LIMIT, start_or_warn(taken, &shutdown));
-        assert!(started.await.expect("returns at once").is_none());
+    fn failed(code: &str) -> ServiceState {
+        ServiceState::Failed { code: code.into() }
+    }
 
-        let tcp = TcpListener::bind(any_port()).await.unwrap();
-        let taken = tcp.local_addr().unwrap();
-        let started = tokio::time::timeout(LIMIT, start_or_warn(taken, &shutdown));
-        assert!(started.await.expect("returns at once").is_none());
+    fn texts(service: &DnsService) -> Vec<String> {
+        service.recent_logs().into_iter().map(|l| l.text).collect()
+    }
+
+    #[tokio::test]
+    async fn a_held_port_is_a_failed_service_until_a_start_finds_it_free() {
+        let shutdown = CancellationToken::new();
+        let (events, mut seen) = broadcast::channel(64);
+        let udp = std::net::UdpSocket::bind(any_port()).unwrap();
+        let addr = udp.local_addr().unwrap();
+        let service = DnsService::new(Some(addr));
+        assert_eq!(service.status().unwrap().state, ServiceState::Stopped);
+
+        let run = service.run(&events, &shutdown, ServiceAction::Start);
+        let status = tokio::time::timeout(LIMIT, run).await.expect("at once");
+        assert_eq!(status.state, failed(DNS_PORT_IN_USE));
+        assert_eq!(status.pid, None);
+        assert_eq!(service.status(), Some(status.clone()));
+        assert_eq!(service.not_serving().as_deref(), Some(DNS_PORT_IN_USE));
+        let line = format!("cannot bind UDP {addr}");
+        assert!(
+            texts(&service)[0].starts_with(&line),
+            "{:?}",
+            texts(&service)
+        );
+        // Each change went out as an event, in order.
+        let mut states = Vec::new();
+        while let Ok(event) = seen.try_recv() {
+            if let Event::ServiceChanged(status) = event {
+                states.push(status.state);
+            }
+        }
+        assert_eq!(states, [ServiceState::Starting, failed(DNS_PORT_IN_USE)]);
+
+        drop(udp);
+        let status = service.run(&events, &shutdown, ServiceAction::Start).await;
+        assert_eq!(status.state, ServiceState::Running);
+        assert_eq!(status.pid, Some(std::process::id()));
+        assert_eq!(service.not_serving(), None);
+        let reply = ask(Transport::Udp, addr, "shop.test.", RecordType::A).await;
+        assert_eq!(reply.answers.len(), 1);
+
+        let status = service.run(&events, &shutdown, ServiceAction::Stop).await;
+        assert_eq!(status.state, ServiceState::Stopped);
+        assert_eq!(service.not_serving().as_deref(), Some(DNS_NOT_RUNNING));
+        let status = service
+            .run(&events, &shutdown, ServiceAction::Restart)
+            .await;
+        assert_eq!(status.state, ServiceState::Running);
+        service.shutdown(LIMIT).await;
+    }
+
+    #[tokio::test]
+    async fn a_held_tcp_port_fails_too_and_frees_the_udp_one() {
+        let shutdown = CancellationToken::new();
+        let events = broadcast::channel(64).0;
+        let tcp = std::net::TcpListener::bind(any_port()).unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let service = DnsService::new(Some(addr));
+        let status = service.run(&events, &shutdown, ServiceAction::Start).await;
+        assert_eq!(status.state, failed(DNS_PORT_IN_USE));
+        assert!(texts(&service)[0].starts_with(&format!("cannot bind TCP {addr}")));
+        std::net::UdpSocket::bind(addr).expect("the UDP socket was closed");
+    }
+
+    /// `lsof` runs on macOS only. The holder is this test.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn the_line_names_the_program_that_holds_the_port() {
+        let shutdown = CancellationToken::new();
+        let events = broadcast::channel(64).0;
+        let udp = std::net::UdpSocket::bind(any_port()).unwrap();
+        let addr = udp.local_addr().unwrap();
+        let service = DnsService::new(Some(addr));
+        service.run(&events, &shutdown, ServiceAction::Start).await;
+        let held = format!("UDP port {} is held by ", addr.port());
+        let pid = format!("({})", std::process::id());
+        let started = std::time::Instant::now();
+        while !texts(&service)
+            .iter()
+            .any(|text| text.starts_with(&held) && text.ends_with(&pid))
+        {
+            assert!(started.elapsed() < LIMIT, "{:?}", texts(&service));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn another_error_has_its_own_code_and_no_service_is_none() {
+        let shutdown = CancellationToken::new();
+        let events = broadcast::channel(64).0;
+        let any = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
+        let service = DnsService::new(Some(any));
+        let status = service.run(&events, &shutdown, ServiceAction::Start).await;
+        assert_eq!(status.state, failed(DNS_START_FAILED));
+
+        let none = DnsService::new(None);
+        assert!(!none.listed());
+        assert_eq!(none.status(), None);
+        assert_eq!(none.not_serving(), None);
+        let status = none.run(&events, &shutdown, ServiceAction::Start).await;
+        assert_eq!(status.state, ServiceState::Stopped);
+        assert!(none.recent_logs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn nothing_starts_once_the_daemon_stops() {
+        let shutdown = CancellationToken::new();
+        let events = broadcast::channel(64).0;
+        let service = DnsService::new(Some(any_port()));
+        shutdown.cancel();
+        let status = service.run(&events, &shutdown, ServiceAction::Start).await;
+        assert_eq!(status.state, ServiceState::Stopped);
     }
 
     #[tokio::test]

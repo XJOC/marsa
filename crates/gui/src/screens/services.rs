@@ -513,6 +513,11 @@ mod tests {
         let view = super::view(&model);
         assert_eq!(rows(&view)[3].description, "Runs PHP 8.4 for 1 site.");
         assert_eq!(strings::service_name("php-cgi-8.4"), "PHP-CGI 8.4");
+        assert_eq!(strings::service_name("dns"), "DNS");
+        assert_eq!(
+            strings::service_description("dns", false, 0),
+            "Finds every .test site on this computer."
+        );
     }
 
     #[test]
@@ -723,13 +728,15 @@ mod tests {
             "caddy_other_marsa",
             "php_fpm_orphan_stuck",
             "exited",
+            "dns_port_in_use",
+            "dns_start_failed",
             "spawn_failed",
             "program_not_absolute",
             "internal_error",
             "brand_new_code",
         ];
         let mut texts: Vec<String> = codes.iter().map(|code| strings::error_text(code)).collect();
-        for id in ["caddy", "php-fpm-8.4", "php-cgi-8.4", "mailpit"] {
+        for id in ["caddy", "dns", "php-fpm-8.4", "php-cgi-8.4", "mailpit"] {
             for waiting in [false, true] {
                 for sites in [0, 1, 25] {
                     texts.push(strings::service_description(id, waiting, sites));

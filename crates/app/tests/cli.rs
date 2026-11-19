@@ -256,6 +256,31 @@ impl DaemonDir {
         assert_eq!(text(&out.stdout), stdout, "{context}");
         assert_eq!(text(&out.stderr), stderr, "{context}");
     }
+
+    /// `marsa services`, compared with `want` without the `dns` row and its
+    /// failure line, and with each run of spaces as one. The DNS server binds
+    /// the fixed port 18053 on macOS and Linux (task M4-18i): it runs, or
+    /// fails when another daemon on this machine holds the port, and its row
+    /// changes the column widths.
+    fn expect_services(&self, want: &str) {
+        let out = self.marsa(&["services"]);
+        let context = format!(
+            "stdout:\n{}\nstderr:\n{}\nmarsad.log:\n{}",
+            text(&out.stdout),
+            text(&out.stderr),
+            self.log()
+        );
+        assert_eq!(out.status.code(), Some(0), "{context}");
+        assert_eq!(text(&out.stderr), "", "{context}");
+        let rows = |table: &str| -> Vec<String> {
+            table
+                .lines()
+                .filter(|line| !line.starts_with("dns "))
+                .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+                .collect()
+        };
+        assert_eq!(rows(&text(&out.stdout)), rows(want), "{context}");
+    }
 }
 
 impl Drop for DaemonDir {
@@ -370,12 +395,9 @@ fn daemon_start_status_services_and_stop() {
     // A second start finds the same daemon.
     data.expect(&["daemon", "start"], 0, &running(&file), "");
 
-    data.expect(
-        &["services"],
-        0,
+    data.expect_services(
         "SERVICE  STATE    PID  RESTARTS\n\
          caddy    stopped  -    0\n",
-        "",
     );
 
     let caddy = CaddyPaths::in_dir(data.path()).runtime_dir();
@@ -390,16 +412,11 @@ fn daemon_start_status_services_and_stop() {
         &format!("marsa: {not_installed} [caddy_not_installed]\n"),
     );
     // The table shows the failed start, and why.
-    data.expect(
-        &["services"],
-        0,
-        &format!(
-            "SERVICE  STATE   PID  RESTARTS\n\
-             caddy    failed  -    0\n\
-             caddy failed: {not_installed} [caddy_not_installed]\n"
-        ),
-        "",
-    );
+    data.expect_services(&format!(
+        "SERVICE  STATE   PID  RESTARTS\n\
+         caddy    failed  -    0\n\
+         caddy failed: {not_installed} [caddy_not_installed]\n"
+    ));
     data.expect(
         &["services", "restart", "nope"],
         1,
