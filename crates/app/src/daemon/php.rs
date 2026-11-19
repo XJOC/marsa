@@ -465,7 +465,7 @@ pub struct PhpManager {
     /// The warning about Windows was logged: once per run is enough.
     warned: bool,
     /// Whether pid files are written and orphans stopped:
-    /// `process::ORPHAN_RECOVERY`. Only tests change it.
+    /// `process::FPM_ORPHAN_RECOVERY`. Only tests change it.
     recovery: bool,
     /// Who runs under a pid, and signals, for the orphan check.
     processes: Arc<dyn FpmProcesses>,
@@ -482,7 +482,7 @@ impl PhpManager {
             platform,
             running: BTreeMap::new(),
             warned: false,
-            recovery: process::ORPHAN_RECOVERY,
+            recovery: process::FPM_ORPHAN_RECOVERY,
             processes: Arc::new(SystemFpm),
             ladder: Ladder::default(),
             worker_ladder: Ladder::default(),

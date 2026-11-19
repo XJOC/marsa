@@ -901,8 +901,8 @@ async fn other_marsa(port: u16) -> (Arc<Mutex<Vec<String>>>, tokio::task::JoinHa
     (calls, server)
 }
 
-/// Where no orphan check runs first (Linux and Windows), only the tag keeps
-/// the start from taking another Marsa's Caddy for ours. On macOS the orphan
+/// Where no orphan check runs first (Windows), only the tag keeps the start
+/// from taking another Marsa's Caddy for ours. On macOS and Linux the orphan
 /// check finds it first. Either way it gets no config and no stop.
 #[tokio::test]
 async fn another_marsas_caddy_on_our_admin_port_gets_no_config_and_no_stop() {
@@ -912,7 +912,7 @@ async fn another_marsas_caddy_on_our_admin_port_gets_no_config_and_no_stop() {
     let status: ServiceStatus = app
         .json("POST", "/v1/services/caddy/start", StatusCode::OK)
         .await;
-    let code = if process::ORPHAN_RECOVERY {
+    let code = if process::CADDY_ORPHAN_RECOVERY {
         "caddy_other_marsa"
     } else {
         "caddy_start_timeout"
