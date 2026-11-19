@@ -29,7 +29,7 @@
 //!
 //! This covers `curl`, PHP, and most programs. Chrome and Firefox keep their
 //! own stores in the user's folders: `marsad` adds the certificate there as
-//! the user (task M4-18g).
+//! the user.
 //!
 //! No message holds any part of the PEM or the output of a tool.
 //!

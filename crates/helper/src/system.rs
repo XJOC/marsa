@@ -1,6 +1,6 @@
 //! Every file and process access of the helper goes through [`System`].
 //!
-//! The ops get a `&impl System`, so tests run them against [`FakeSystem`]
+//! The ops get a `&impl System`, so tests run them against `FakeSystem`
 //! (like `Http::fake()` in Laravel) and never touch the real machine.
 
 use std::ffi::OsString;
@@ -49,7 +49,7 @@ pub trait System {
     /// Whether `path` itself is a link: a symlink, or on Windows any reparse
     /// point (a junction too). Not followed. `false` if nothing is there.
     /// No default: a test system that forgot it would turn the link checks
-    /// off without a sign (task M5-22).
+    /// off without a sign.
     fn is_link(&self, path: &Path) -> bool;
 
     /// Whether only root can change what is in the folder `dir`: it is a
@@ -57,7 +57,7 @@ pub trait System {
     /// others can write it. `true` if nothing is there, because
     /// `write_atomic` then makes it as root with mode `0755`. The
     /// precondition above rests on this for Marsa's own folders, which the
-    /// helper finds already made (task M5-31). No default, as for `is_link`.
+    /// helper finds already made. No default, as for `is_link`.
     ///
     /// Only `dir` itself is checked: the folders above Marsa's are the
     /// system's (`/Library`, `/Library/Application Support`, root's with
@@ -97,7 +97,7 @@ pub trait System {
     /// the program exited but something it started still holds a pipe open.
     fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput>;
 
-    /// The path of the running helper, for the boot job (task M4-08).
+    /// The path of the running helper, for the boot job.
     fn current_exe(&self) -> io::Result<PathBuf>;
 
     /// The Windows system folder, `C:\Windows\System32` on most machines.
@@ -746,7 +746,7 @@ mod tests {
         }
     }
 
-    /// Task M5-31, on the real disk. Unix: Windows answers `false` for any
+    /// On the real disk. Unix: Windows answers `false` for any
     /// folder that is there.
     #[cfg(unix)]
     #[test]

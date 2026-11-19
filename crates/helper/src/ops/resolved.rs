@@ -1,5 +1,5 @@
 //! Linux: names under `.test` go to the DNS server of `marsad`, and no other
-//! name does (ADR 0014, spike S-02b). The macOS twin is `resolver`.
+//! name does (ADR 0014). The macOS twin is `resolver`.
 //!
 //! A root unit of Marsa's, [`UNIT_FILE`], makes a dummy link `marsa0` with
 //! the address `169.254.53.53/32`. Then it tells systemd-resolved, through
@@ -34,7 +34,7 @@
 //! socket, and `systemd-networkd-wait-online` are all inactive, and all
 //! disabled or masked. Anything else, or an answer that
 //! cannot be read, gives [`RESOLVED_USE_HOSTS`]: the daemon writes
-//! `/etc/hosts` lines instead (task M4-18k).
+//! `/etc/hosts` lines instead.
 //!
 //! On every version the unit sets `default-route false` and `domain ~test`
 //! again after `dns`: whatever clears the link's settings at any moment,
@@ -98,7 +98,7 @@ pub const RESOLVED_SYSTEMD_UNKNOWN: &str = "resolved_systemd_unknown";
 /// cannot tell): that resolved counts a link networkd calls "initialized"
 /// as managed and clears what was set on it (ADR 0014, finding 30), so
 /// Marsa makes no link. The daemon writes `/etc/hosts` lines instead
-/// (`hosts_sync`, task M4-18k). Nothing was changed but the removal of an
+/// (`hosts_sync`). Nothing was changed but the removal of an
 /// old drop-in (and of an earlier unit).
 pub const RESOLVED_USE_HOSTS: &str = "resolved_use_hosts";
 
@@ -106,7 +106,7 @@ pub const RESOLVED_USE_HOSTS: &str = "resolved_use_hosts";
 /// every boot.
 const UNIT_FILE: &str = "/etc/systemd/system/marsa-dns-link.service";
 const UNIT_NAME: &str = "marsa-dns-link.service";
-/// The global drop-in of earlier builds (task M4-18a).
+/// The global drop-in of earlier builds.
 const DROP_IN: &str = "/etc/systemd/resolved.conf.d/marsa.conf";
 /// Everyone can read it, and only root can change it.
 const MODE: u32 = 0o644;
@@ -161,11 +161,11 @@ const FIRST_SYSTEMD: u32 = 250;
 /// The first systemd whose resolved does not bind its socket to the link
 /// for a server on localhost; before it, the unit adds the local route.
 const NO_BIND_BUG: u32 = 253;
-/// Before 250 the link is made on 249 only, the version tested (S-02c);
+/// Before 250 the link is made on 249 only, the version tested;
 /// older ones lack the `ip:port` server syntax or the `Protocols:` line.
 const LINK_BEFORE_250: u32 = 249;
 /// How many times the link is checked after the start, with a pause in
-/// between: resolved may take a moment to use a new link (S-02b).
+/// between: resolved may take a moment to use a new link.
 const CHECKS: u32 = 10;
 const CHECK_PAUSE: Duration = Duration::from_millis(500);
 /// The end of a message when systemd-resolved stays down.
@@ -418,7 +418,7 @@ fn systemd_version(system: &impl System) -> Result<u32, String> {
 
 /// Loads the unit file, adds the unit to the boot, and (re)starts it. A
 /// failed state is cleared first: systemd refuses a sixth start in ten
-/// seconds (spike S-02c).
+/// seconds.
 fn start(system: &impl System) -> Result<(), String> {
     let _ = system.run(SYSTEMCTL, &RESET_FAILED_UNIT);
     for args in [&DAEMON_RELOAD[..], &ENABLE, &RESTART_UNIT] {
@@ -719,7 +719,7 @@ mod tests {
     const FOREIGN: &[u8] = b"[Unit]\nDescription=someone else's\n";
     const FOREIGN_DROP_IN: &[u8] = b"[Resolve]\nDNS=9.9.9.9\n";
 
-    /// The global drop-in of task M4-18a, as it wrote it.
+    /// The global drop-in, as an older version wrote it.
     fn drop_in() -> Vec<u8> {
         format!("{MARKER}\n[Resolve]\nDNS=127.0.0.1:18053\nDomains=~test\n").into_bytes()
     }

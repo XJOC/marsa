@@ -1,5 +1,5 @@
 //! Windows: the helper as a LocalSystem service behind a named pipe (ADR
-//! 0018). Task M4-19f.
+//! 0018).
 //!
 //! ```text
 //! marsa-helper service <user SID> <CA SHA-256 | ->    started by the SCM
@@ -19,7 +19,7 @@
 //!    JSON response, then drops the client.
 //!
 //! The SID and the hash come from the service's own command line, which only
-//! an administrator can set (`install`, task M4-19j). Steps 2 to 4 are
+//! an administrator can set (`install`). Steps 2 to 4 are
 //! [`answer`], which runs on every system, so the tests do not need Windows.
 
 // The service runs on Windows only, but its checks are built everywhere so
@@ -88,7 +88,7 @@ impl Allowed {
 ///
 /// A local or domain group has the same shape as a user and passes here.
 /// The exact compare in [`answer`] still serves only that SID, which no
-/// client's user SID equals; `install` (task M4-19j) also checks with
+/// client's user SID equals; `install` also checks with
 /// Windows that the SID names a user.
 fn is_user_sid(sid: &str) -> bool {
     let (rest, parts) = if let Some(rest) = sid.strip_prefix("S-1-5-21-") {
