@@ -118,6 +118,16 @@ impl Window {
     }
 }
 
+/// What the bridge does when no daemon runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Daemon {
+    /// Start `marsad`: the window is a way to use Marsa.
+    Start,
+    /// Wait for one: the menu-bar panel only looks. "Stop Marsa" in the icon
+    /// stays stopped when the panel opens.
+    Attach,
+}
+
 /// Starts the bridge thread. It connects to the daemon (starting `marsad` if
 /// needed) at once, while the window opens.
 ///
@@ -125,6 +135,21 @@ impl Window {
 ///
 /// The OS cannot start a thread.
 pub fn start(data_dir: PathBuf) -> std::io::Result<Handle> {
+    start_with(data_dir, Daemon::Start)
+}
+
+/// [`start`] for the menu-bar panel (task M5-D11): it connects to a daemon
+/// that runs, and never starts one. With none, the model says the daemon is
+/// not running, and tries again every second.
+///
+/// # Errors
+///
+/// The OS cannot start a thread.
+pub fn attach(data_dir: PathBuf) -> std::io::Result<Handle> {
+    start_with(data_dir, Daemon::Attach)
+}
+
+fn start_with(data_dir: PathBuf, daemon: Daemon) -> std::io::Result<Handle> {
     let (updates_tx, updates) = mpsc::channel();
     let (commands, commands_rx) = unbounded_channel();
     let repaint = Arc::new(OnceLock::new());
@@ -134,7 +159,7 @@ pub fn start(data_dir: PathBuf) -> std::io::Result<Handle> {
     };
     thread::Builder::new()
         .name("bridge".into())
-        .spawn(move || run(&data_dir, &window, commands_rx))?;
+        .spawn(move || run(&data_dir, &window, commands_rx, daemon))?;
     Ok(Handle {
         updates,
         commands,
@@ -143,13 +168,13 @@ pub fn start(data_dir: PathBuf) -> std::io::Result<Handle> {
     })
 }
 
-fn run(data_dir: &Path, window: &Window, commands: UnboundedReceiver<Command>) {
+fn run(data_dir: &Path, window: &Window, commands: UnboundedReceiver<Command>, daemon: Daemon) {
     // One thread is enough: the bridge waits on the network most of the time.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build();
     match runtime {
-        Ok(runtime) => runtime.block_on(serve(data_dir, window, commands)),
+        Ok(runtime) => runtime.block_on(serve(data_dir, window, commands, daemon)),
         Err(err) => {
             tracing::error!(error = %err, "cannot start the bridge runtime");
             window.send(Update::Failed(strings::BRIDGE_FAILED.to_owned()));
@@ -167,9 +192,14 @@ enum End {
     Failed(ClientError),
 }
 
-async fn serve(data_dir: &Path, window: &Window, mut commands: UnboundedReceiver<Command>) {
+async fn serve(
+    data_dir: &Path,
+    window: &Window,
+    mut commands: UnboundedReceiver<Command>,
+    daemon: Daemon,
+) {
     loop {
-        let update = match session(data_dir, window, &mut commands).await {
+        let update = match session(data_dir, window, &mut commands, daemon).await {
             End::Closed => return,
             End::Lost => Update::Reconnecting,
             End::Failed(err) => {
@@ -190,9 +220,13 @@ async fn session(
     data_dir: &Path,
     window: &Window,
     commands: &mut UnboundedReceiver<Command>,
+    daemon: Daemon,
 ) -> End {
     let connected = async {
-        let client = client::ensure_running(data_dir).await?;
+        let client = match daemon {
+            Daemon::Start => client::ensure_running(data_dir).await?,
+            Daemon::Attach => DaemonClient::connect(data_dir)?,
+        };
         let health = client.health().await?;
         // Subscribe before reading the state, so no change falls in between.
         let events = client.events().await?;
@@ -634,5 +668,24 @@ mod tests {
         // Caddy is read even when the table has none, or could not be read.
         assert_eq!(log_ids(&[service("php-fpm-8.4")]), ["caddy", "php-fpm-8.4"]);
         assert_eq!(log_ids(&[]), ["caddy"]);
+    }
+
+    /// The menu-bar panel looks; it never starts a daemon. In an empty data
+    /// folder its bridge says the daemon is not running, and starts nothing:
+    /// the window's bridge would run `marsad` there.
+    #[test]
+    fn an_attached_bridge_reports_no_daemon_and_starts_none() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let handle = attach(dir.path().to_path_buf()).expect("a thread");
+        let update = handle
+            .updates
+            .recv_timeout(Duration::from_secs(10))
+            .expect("an answer");
+        assert!(
+            matches!(&update, Update::Failed(code) if code == "daemon_not_running"),
+            "{update:?}"
+        );
+        // Nothing was written where a daemon would put its files.
+        assert!(!dir.path().join("run").join("daemon.json").exists());
     }
 }
