@@ -260,7 +260,7 @@ pub fn parse_hex(text: &str) -> Option<[u8; 32]> {
 }
 
 /// `2 * len` lowercase hex characters to `len` bytes.
-fn parse_hex_bytes(text: &str, len: usize) -> Option<Vec<u8>> {
+pub fn parse_hex_bytes(text: &str, len: usize) -> Option<Vec<u8>> {
     if text.len() != len * 2 || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return None;
     }
