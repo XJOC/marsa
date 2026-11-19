@@ -19,10 +19,11 @@
 //! its stop then runs after that start instead of failing.
 //!
 //! PostgreSQL (`postgres`) has the same actions. A start or restart that
-//! ends without an error turns it on in `global.toml` (`[postgres] enabled
-//! = true`), so it starts with the daemon; a stop turns it off (ADR 0023,
-//! section 5). A stop drops a start that runs instead of waiting for it
-//! (`PostgresManager::run_waiting`).
+//! ran turns it on in `global.toml` (`[postgres] enabled = true`), so it
+//! starts with the daemon; a stop turns it off (ADR 0023, section 5); a
+//! refusal or a dropped start changes nothing (`PostgresManager::
+//! run_and_save`). A stop drops a start that runs, and those before it in
+//! line, instead of waiting for them.
 //!
 //! Every error, the extractors' own included, is an `ErrorBody`.
 
@@ -66,8 +67,9 @@ pub const ACTION_WAIT: Duration = Duration::from_secs(20);
 /// How long an action on PostgreSQL waits for another one to end before
 /// `409 service_busy`. A stop never waits for a start (it drops it), so
 /// the longest it waits for is another stop: SIGINT and SIGQUIT, 10 s
-/// each, then a kill. A start that waits for a first start (up to about
-/// 3 minutes of `initdb` and single-user mode) gets `service_busy`.
+/// each, then a kill, or a start's own stop after its ready timeout. A
+/// start that waits for a first start (up to about 3 minutes of `initdb`
+/// and single-user mode) gets `service_busy`.
 pub const POSTGRES_ACTION_WAIT: Duration = Duration::from_secs(30);
 
 /// A `:` comment this often on a quiet stream, as on `/v1/events`: the
@@ -103,8 +105,8 @@ async fn service_action(
     let action: ServiceAction = action.parse().map_err(|err: UnknownAction| {
         HttpError::new(StatusCode::BAD_REQUEST, err.code(), err.to_string())
     })?;
-    if let Service::Postgres(postgres) = service {
-        return postgres_action(&daemon, postgres, action).await.map(Json);
+    if let Service::Postgres(_) = service {
+        return postgres_action(&daemon, action).await.map(Json);
     }
     let Service::Caddy(caddy) = service else {
         let message = format!(
@@ -127,42 +129,30 @@ async fn service_action(
     }
 }
 
-/// `action` on PostgreSQL, then `[postgres] enabled` as the action leaves
-/// it: on after a start or restart without an error, off after a stop.
+/// `action` on PostgreSQL, then `[postgres] enabled` as it leaves it
+/// (`PostgresManager::run_and_save`). In a task of its own, so a client
+/// that hangs up cannot stop it between the action and the write.
 async fn postgres_action(
     daemon: &Arc<Daemon>,
-    postgres: &PostgresManager,
     action: ServiceAction,
 ) -> Result<ServiceStatus, HttpError> {
     tracing::info!(service = POSTGRES_ID, %action, "service action");
-    let status = postgres
-        .run_waiting(daemon, action, POSTGRES_ACTION_WAIT)
-        .await
-        .map_err(|err| {
-            tracing::warn!(service = POSTGRES_ID, %action, code = err.code(), error = %err, "service action failed");
-            postgres_error(&err)
-        })?;
-    let enabled = action != ServiceAction::Stop;
     let worker = Arc::clone(daemon);
-    let saved = tokio::task::spawn_blocking(move || {
-        let _one = worker.lock_global();
-        databases::set_enabled(&worker.data_dir, enabled)
-    })
-    .await;
-    match saved {
-        Ok(Ok(())) => Ok(status),
+    let task = tokio::spawn(async move {
+        let postgres = &worker.postgres;
+        postgres
+            .run_and_save(&worker, action, POSTGRES_ACTION_WAIT)
+            .await
+    });
+    match task.await {
+        Ok(Ok(status)) => Ok(status),
         Ok(Err(err)) => {
-            tracing::warn!(code = err.code(), error = %err, enabled, "cannot save [postgres] enabled");
-            let message = format!("PostgreSQL was {action}ed, but {err}");
-            Err(HttpError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                err.code(),
-                message,
-            ))
+            tracing::warn!(service = POSTGRES_ID, %action, code = err.code(), error = %err, "service action failed");
+            Err(postgres_error(&err))
         }
         Err(err) => {
-            tracing::error!(error = %err, "the [postgres] enabled job failed");
-            let message = "the [postgres] enabled job failed";
+            tracing::error!(error = %err, "the postgres action task failed");
+            let message = "the postgres action task failed";
             Err(HttpError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
@@ -555,8 +545,11 @@ mod tests {
         assert_eq!(stopped.state, ServiceState::Stopped);
         assert!(!config::load_global(&global).unwrap().postgres.enabled);
 
-        // A start with none installed: refused, and still off. Then listed,
-        // so the failure shows.
+        // Installed (an empty version folder): listed, stopped.
+        std::fs::create_dir_all(data.join("runtimes/postgres/18.7.0")).unwrap();
+        assert_eq!(ids().await, ["caddy", "postgres"]);
+
+        // A start without its program: refused, and still off.
         let (status, body) = send("POST", "/v1/services/postgres/start").await;
         let error: ErrorBody = serde_json::from_str(&body).unwrap();
         let code = if cfg!(windows) {
@@ -569,12 +562,6 @@ mod tests {
             (StatusCode::CONFLICT, code)
         );
         assert!(!config::load_global(&global).unwrap().postgres.enabled);
-        assert_eq!(ids().await, ["caddy", "postgres"]);
-
-        // Installed: listed.
-        let daemon = Arc::new(Daemon::new(data.clone()));
-        std::fs::create_dir_all(data.join("runtimes/postgres/18.7.0")).unwrap();
-        assert!(daemon.postgres.listed(&data));
         let (status, body) = send("POST", "/v1/services/postgres/kill").await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }

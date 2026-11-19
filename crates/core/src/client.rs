@@ -67,8 +67,9 @@ const SERVICE_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 /// The same for PostgreSQL (`postgres`, task M6-03). The daemon waits up to
 /// 30 s for another action, a restart stops it first (SIGINT and SIGQUIT,
 /// up to about 23 s), and a first start reads the port (lsof, up to 8 s),
-/// runs `initdb` (up to 120 s) and single-user mode (up to 60 s), then waits
-/// up to 15 s for the server: about 256 s in all.
+/// runs `initdb` (up to 120 s) and single-user mode (up to 60 s), waits up
+/// to 15 s for the server, and stops one that never answered (23 s): about
+/// 279 s in all.
 const POSTGRES_ACTION_TIMEOUT: Duration = Duration::from_secs(300);
 /// For `DELETE /v1/runtimes/{tool}/{version}`: a Node.js folder holds
 /// thousands of files, and a virus scanner may slow their delete.
@@ -1103,8 +1104,8 @@ mod tests {
     fn a_postgres_action_waits_longer_than_its_worst_case() {
         assert_eq!(action_timeout("caddy"), SERVICE_ACTION_TIMEOUT);
         // Waiting 30, stopping 23, then lsof 8, initdb 120, single-user 60,
-        // ready 15.
-        let worst = Duration::from_secs(30 + 23 + 8 + 120 + 60 + 15);
+        // ready 15, and the stop of a server that never answered, 23.
+        let worst = Duration::from_secs(30 + 23 + 8 + 120 + 60 + 15 + 23);
         assert!(action_timeout("postgres") > worst);
     }
 
