@@ -1009,7 +1009,9 @@ fn report(result: Result<(), JoinError>) {
     }
 }
 
-struct AbortOnDrop(AbortHandle);
+/// Aborts a task when this guard goes: a wrapper task that `stop_procs`
+/// aborts takes the task it waits for along.
+pub(super) struct AbortOnDrop(pub(super) AbortHandle);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
