@@ -18,6 +18,7 @@ use super::api::HttpError;
 use super::autostart_api::Autostart;
 use super::caddy::CaddyManager;
 use super::databases::PostgresManager;
+use super::dns::DnsService;
 use super::php::Pools;
 use super::runtimes_api::Installs;
 use super::sites_api;
@@ -69,6 +70,9 @@ pub struct Daemon {
     /// PostgreSQL: its status, its recent lines, and its actions (task
     /// M6-03).
     pub postgres: PostgresManager,
+    /// The DNS server for `.test` (task M4-18i). Not listed here;
+    /// `server::run` sets [`DnsService::for_daemon`].
+    pub dns: DnsService,
     /// The status and recent lines of each php-fpm pool (task M4-23). The
     /// sites sync starts and stops the pools.
     pub pools: Pools,
@@ -96,6 +100,7 @@ impl Daemon {
         Self {
             caddy: CaddyManager::new(&data_dir),
             postgres: PostgresManager::default(),
+            dns: DnsService::new(None),
             pools: Pools::default(),
             pass_requests: PassRequests::default(),
             data_dir,

@@ -14,8 +14,8 @@ use marsa_core::types::{
 use semver::Version;
 
 use crate::model::{
-    Appearance, Autostart, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, LogLevel,
-    Overall, Pick, PoolKind, Removal, UninstallNotice, WEB_SERVER, pool_of,
+    Appearance, Autostart, Connection, DNS_SERVER, INSTALL_INTERRUPTED, InstallStep, InstallView,
+    LogLevel, Overall, Pick, PoolKind, Removal, UninstallNotice, WEB_SERVER, pool_of,
 };
 use crate::screens::settings::Check;
 use crate::theme::Section;
@@ -92,6 +92,9 @@ pub fn service_name(id: &str) -> String {
     if id == WEB_SERVER {
         return "Caddy".to_owned();
     }
+    if id == DNS_SERVER {
+        return "DNS".to_owned();
+    }
     match pool_of(id) {
         Some((PoolKind::Fpm, line)) => format!("PHP-FPM {line}"),
         Some((PoolKind::Cgi, line)) => format!("PHP-CGI {line}"),
@@ -104,6 +107,9 @@ pub fn service_name(id: &str) -> String {
 pub fn service_description(id: &str, waiting: bool, sites: usize) -> String {
     if id == WEB_SERVER {
         return "The web server for every .test site.".to_owned();
+    }
+    if id == DNS_SERVER {
+        return "Finds every .test site on this computer.".to_owned();
     }
     let Some((_, line)) = pool_of(id) else {
         return "A program Marsa runs for your sites.".to_owned();
@@ -588,6 +594,41 @@ pub const TRAY_QUIT: &str = "Quit";
 pub const TRAY_WORKER_FAILED: &str = "tray_worker_failed";
 /// The icon's own code: `marsa-gui` could not be started.
 pub const WINDOW_START_FAILED: &str = "window_start_failed";
+
+// The menu-bar panel (`marsa-gui --panel`, task M5-D11). "Open Marsa", "Stop
+// Marsa", "Start Marsa", and "Quit" are the icon's own words above.
+
+/// The name of the panel for a screen reader, and the title of its window.
+pub const PANEL_NAME: &str = "Marsa panel";
+/// The name of the list of sites, for a screen reader.
+pub const PANEL_SITES: &str = "Sites";
+/// Under the name of the Xdebug switch.
+pub const PANEL_XDEBUG_CAPTION: &str = "PHP runs slower while it is on";
+/// Where the list of sites has none.
+pub const PANEL_NO_SITES: &str = HOME_NO_SITES;
+/// Why "Stop Marsa" cannot be pressed: the daemon is not there yet.
+pub const PANEL_NOT_CONNECTED: &str = "Marsa is not connected yet.";
+/// Why "Stop Marsa" cannot be pressed: it is stopping already.
+pub const PANEL_ALREADY_STOPPING: &str = "Marsa is stopping already.";
+
+/// A site's caption in the panel: `minor` is `8.4`.
+pub fn panel_php(minor: &str) -> String {
+    format!("PHP {minor}")
+}
+
+/// What a screen reader says for a site of the panel, and what the key does.
+pub fn panel_open_site(name: &str) -> String {
+    format!("Open {name}")
+}
+
+/// Under the nine sites of the panel, when there are more: the window has
+/// them all.
+pub fn panel_more_sites(more: usize) -> String {
+    match more {
+        1 => "1 more site in Marsa".to_owned(),
+        n => format!("{n} more sites in Marsa"),
+    }
+}
 
 /// Under the Marsa version in Settings: the daemon's version while
 /// connected.
@@ -1598,6 +1639,12 @@ fn error_message(code: &str) -> Option<&'static str> {
              stopped safely."
         }
         "exited" => "The process exited.",
+        // The DNS server (task M4-18i), and why setup skipped its DNS step.
+        "dns_port_in_use" => {
+            "Another program holds port 18053 and may answer .test names. Its log names it."
+        }
+        "dns_start_failed" => "Marsa's DNS server did not start. Its log says why.",
+        "dns_not_running" => "Marsa's DNS server is stopped. Start it, then run setup again.",
         "spawn_failed" => "The process could not be started.",
         "program_not_absolute" => "The service program has no full path.",
         "internal_error" => "The daemon hit a bug. Try again; if it repeats, report it.",
@@ -2089,6 +2136,9 @@ mod tests {
             "service_managed_by_sites",
             "php_fpm_orphan_stuck",
             "exited",
+            "dns_port_in_use",
+            "dns_start_failed",
+            "dns_not_running",
             "spawn_failed",
             "program_not_absolute",
             "invalid_body",

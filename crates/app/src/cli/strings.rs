@@ -204,7 +204,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "version_in_use" => "This version is in use: it is a default, a site is set to it, \
              or Caddy runs from it. Nothing was uninstalled."
             .into(),
-        // M5-19: the only PHP and the default, and sites run it.
+        // M5-19, M5-22: the only PHP, and sites run it.
         "sites_lose_php" => "This is the only PHP version installed, and sites run it: they \
              would have no PHP. Install another PHP version and make it the default first. \
              Nothing was uninstalled."
@@ -291,6 +291,20 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             "A port {service} needs is used by another program. Run \"marsa logs {id}\" to \
              see which one."
         ),
+        // The DNS server for .test (task M4-18i): a service, and a reason
+        // setup skips its DNS step.
+        "dns_port_in_use" => "Another program holds port 18053, where Marsa answers .test \
+             names, so it may answer them instead. Run \"marsa logs dns\" to see which one \
+             and stop it. Then run \"marsa services start dns\", and \"marsa setup\" if it \
+             skipped this step."
+            .into(),
+        "dns_start_failed" => "Marsa's DNS server for .test names did not start. Run \
+             \"marsa logs dns\" to see why. Then run \"marsa services start dns\", and \
+             \"marsa setup\" if it skipped this step."
+            .into(),
+        "dns_not_running" => "Marsa's DNS server for .test names is stopped. Run \"marsa \
+             services start dns\", then \"marsa setup\" again."
+            .into(),
         "caddy_orphan_stuck" => format!(
             "An old Caddy, left running when the Marsa daemon crashed, still holds the ports, \
              and Marsa could not stop it safely. Run \"marsa logs {id}\" to see its process, \
@@ -1960,6 +1974,9 @@ mod tests {
         "caddy_config_write",
         "caddy_start_timeout",
         "port_in_use",
+        "dns_port_in_use",
+        "dns_start_failed",
+        "dns_not_running",
         "caddy_orphan_stuck",
         "caddy_other_marsa",
         "service_managed_by_sites",

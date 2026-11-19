@@ -1,0 +1,5 @@
+# The Caddy binary is downloaded by scripts/fetch-caddy.sh and never committed.
+vendor/
+# Runtime state of one experiment run.
+work/
+target/

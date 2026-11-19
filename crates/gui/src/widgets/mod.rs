@@ -37,6 +37,7 @@ pub mod log_entry;
 pub mod menu;
 pub mod nav;
 pub mod notice;
+pub mod panel;
 pub mod segmented;
 pub mod setting_rows;
 pub mod status;

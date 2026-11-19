@@ -6,6 +6,7 @@
 pub mod first_run;
 pub mod home;
 pub mod logs;
+pub mod panel;
 pub mod runtimes;
 pub mod services;
 pub mod settings;
