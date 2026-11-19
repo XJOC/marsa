@@ -8,6 +8,7 @@
 //! no file are involved, and the exit code carries no data.
 
 pub mod app;
+pub mod place;
 
 use std::process::ExitStatus;
 
