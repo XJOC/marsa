@@ -28,9 +28,13 @@
 //! matches. It takes the install's guard, so it never runs with an install,
 //! and refuses (409 `version_in_use`, nothing changed) a version that the
 //! default in `global.toml` or a site's own setting in `sites.toml` picks
-//! now, or that the running Caddy runs from. Then the folder is moved aside
-//! (`installer::uninstall`), each php-fpm pool that runs the version is
-//! stopped, the folder is deleted, and the site list is built again.
+//! now, or that the running Caddy or PostgreSQL runs from. A PostgreSQL
+//! version is refused (409 `service_busy`) while an action on PostgreSQL
+//! runs, such as a start that may pick it; the uninstall then holds
+//! PostgreSQL's turn until the folder is moved aside. Then the folder is
+//! moved aside (`installer::uninstall`), each php-fpm pool that runs the
+//! version is stopped, the folder is deleted, and the site list is built
+//! again.
 //!
 //! The default of the only installed PHP or Node version has no other
 //! version to pick, so it does not keep the version: it is cleared from
@@ -39,6 +43,13 @@
 //! them (the default, a version file, `composer.json`), so they still keep
 //! it: 409 `sites_lose_php`, with their names. That holds with no default
 //! too (task M5-22).
+//!
+//! PostgreSQL (task M6-03): after an install, `databases::after_install`
+//! sets `[postgres] default` (the first install also turns it on and starts
+//! it: ADR 0023, the install is the user's request), in the background and
+//! in PostgreSQL's turn. A later install of another line never moves a user
+//! to its empty cluster. An uninstall never touches `databases/`: it
+//! removes `runtimes/postgres/<version>/` only.
 
 use std::error::Error;
 use std::fmt;
@@ -70,6 +81,7 @@ use marsa_core::types::{
 use semver::Version;
 
 use super::api::HttpError;
+use super::databases;
 use super::php::{fpm_id, wanted_pools};
 use super::sites_api;
 use super::state::Daemon;
@@ -359,6 +371,9 @@ async fn run(started: Started, runtime: Runtime, body: InstallRequest) {
             if runtime == Runtime::Php {
                 let _ = daemon.rebuild_sites().await;
             }
+            if runtime == Runtime::Postgres {
+                databases::start_after_install(&daemon, done.version.clone());
+            }
             InstallUpdate::Done(InstallDone {
                 runtime: done.runtime,
                 version: done.version.to_string(),
@@ -616,13 +631,37 @@ async fn remove_version(
     text: String,
 ) -> Result<Json<Uninstalled>, HttpError> {
     let daemon = Arc::clone(&started.daemon);
+    // A start in PostgreSQL's turn may be about to run a version, and is
+    // not in `running_program` yet. Held until the folder is moved aside: a
+    // tokio lock held across `.await` as a serialization token (manager
+    // decision 2026-11-14).
+    let postgres_turn = match runtime {
+        Runtime::Postgres => match daemon.postgres.try_turn() {
+            Some(turn) => Some(turn),
+            None => {
+                let message = "another action on PostgreSQL runs, and a start may pick this \
+                               version; nothing was uninstalled";
+                return Err(HttpError::new(
+                    StatusCode::CONFLICT,
+                    "service_busy",
+                    message,
+                ));
+            }
+        },
+        _ => None,
+    };
     let caddy = daemon.caddy.running_program(&daemon);
+    let server = daemon.postgres.running_program(&daemon);
     let worker = Arc::clone(&daemon);
     let job = tokio::task::spawn_blocking(move || {
         // `marsa use` waits, so the version cannot become the default
         // between the check and the rename.
         let _one = worker.lock_global();
-        retire_unused(&worker.data_dir, runtime, text.trim(), caddy.as_deref())
+        let running = Running {
+            caddy: caddy.as_deref(),
+            server: server.as_deref(),
+        };
+        retire_unused(&worker.data_dir, runtime, text.trim(), running)
     });
     let (version, retired, cleared) = job.await.map_err(|err| {
         tracing::error!(error = %err, "the uninstall job failed");
@@ -632,6 +671,8 @@ async fn remove_version(
             "the uninstall job failed",
         )
     })??;
+    // Moved aside: a start now finds no such version.
+    drop(postgres_turn);
     if let Some(default) = cleared {
         let tool = runtime.dir_name();
         tracing::info!(runtime = tool, %default, "cleared the default of the last version");
@@ -663,13 +704,13 @@ async fn remove_version(
 /// Picks the installed version `text` names, checks that nothing uses it,
 /// and moves its folder aside. Also returns the default it cleared, if any:
 /// the default of the only installed version goes with it (task M5-19). A
-/// refusal changes nothing on disk. `caddy` is the program the running Caddy
-/// runs from. The caller holds [`Daemon::lock_global`].
+/// refusal changes nothing on disk. `running` has the programs that run
+/// now. The caller holds [`Daemon::lock_global`].
 fn retire_unused(
     data_dir: &Path,
     runtime: Runtime,
     text: &str,
-    caddy: Option<&Path>,
+    running: Running<'_>,
 ) -> Result<(Version, Retired, Option<String>), HttpError> {
     resolver::best_match(text, &[]).map_err(|err| bad_version(text, err))?;
     let runtimes = RuntimesDir::in_dir(data_dir);
@@ -710,7 +751,9 @@ fn retire_unused(
     })?;
     let mut used = in_use(runtime, &version, &installed, &global, &sites);
     let dir = runtimes.version_dir(runtime, &version);
-    used.caddy = caddy.is_some_and(|program| program.starts_with(&dir));
+    let runs = |program: Option<&Path>| program.is_some_and(|program| program.starts_with(&dir));
+    used.caddy = runs(running.caddy);
+    used.server = runs(running.server);
     // The default of the only installed version has no other version to
     // pick, so it goes with this one. The PHP sites that run this last PHP
     // would have none after it, so they keep the version instead, whether
@@ -760,6 +803,15 @@ fn retire_unused(
         }
     };
     Ok((version, retired, clear.map(|(_, default)| default)))
+}
+
+/// The programs that run now, which an uninstall must not take away.
+#[derive(Debug, Clone, Copy)]
+struct Running<'a> {
+    /// The running Caddy's program.
+    caddy: Option<&'a Path>,
+    /// The running PostgreSQL's `postgres`.
+    server: Option<&'a Path>,
 }
 
 /// The answer for an uninstall that could not move the folder aside.
@@ -823,6 +875,7 @@ fn in_use(
             .collect(),
         sites_left_without_php: Vec::new(),
         caddy: false,
+        server: false,
     }
 }
 
@@ -1106,5 +1159,44 @@ mod tests {
         if let Err(err) = result {
             assert_eq!(err.code(), "runtimes_read");
         }
+    }
+
+    /// The PostgreSQL that runs keeps its version; one that does not run
+    /// goes, and its cluster in `databases/` stays.
+    #[test]
+    fn the_running_postgres_keeps_its_version_and_databases_stay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        let version_dir =
+            RuntimesDir::in_dir(data).version_dir(Runtime::Postgres, &Version::new(18, 7, 0));
+        std::fs::create_dir_all(version_dir.join("bin")).unwrap();
+        let cluster = data.join("databases/postgres/18");
+        std::fs::create_dir_all(&cluster).unwrap();
+        std::fs::write(cluster.join("PG_VERSION"), "18\n").unwrap();
+        let program = version_dir.join("bin/postgres");
+
+        let running = Running {
+            caddy: None,
+            server: Some(&program),
+        };
+        let err = retire_unused(data, Runtime::Postgres, "18.7.0", running).unwrap_err();
+        assert_eq!(err.code, "version_in_use");
+        let in_use = err.in_use.expect("the facts");
+        assert!(in_use.server && !in_use.caddy, "{in_use:?}");
+        assert!(version_dir.is_dir(), "a refusal changes nothing");
+
+        let stopped = Running {
+            caddy: None,
+            server: None,
+        };
+        let (version, retired, cleared) =
+            retire_unused(data, Runtime::Postgres, "18.7.0", stopped).unwrap();
+        assert_eq!((version, cleared), (Version::new(18, 7, 0), None));
+        retired.remove().unwrap();
+        assert!(!version_dir.exists());
+        assert_eq!(
+            std::fs::read_to_string(cluster.join("PG_VERSION")).unwrap(),
+            "18\n"
+        );
     }
 }

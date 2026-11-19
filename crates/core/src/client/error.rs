@@ -148,6 +148,7 @@ impl ClientError {
                     sites: names(&in_use.sites),
                     sites_left_without_php: names(&in_use.sites_left_without_php),
                     caddy: in_use.caddy,
+                    server: in_use.server,
                 }),
             };
         }

@@ -318,6 +318,10 @@ pub struct VersionInUse {
     /// Caddy runs from this version now.
     #[serde(default)]
     pub caddy: bool,
+    /// A database server runs from this version now: PostgreSQL (task
+    /// M6-03).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub server: bool,
 }
 
 impl VersionInUse {
@@ -326,7 +330,8 @@ impl VersionInUse {
     /// the user knows that another version must be installed first;
     /// `version_in_use` otherwise.
     pub fn code(&self) -> &'static str {
-        let nothing_else = self.default.is_none() && self.sites.is_empty() && !self.caddy;
+        let nothing_else =
+            self.default.is_none() && self.sites.is_empty() && !self.caddy && !self.server;
         if nothing_else && !self.sites_left_without_php.is_empty() {
             "sites_lose_php"
         } else {
@@ -340,6 +345,7 @@ impl VersionInUse {
             || !self.sites.is_empty()
             || !self.sites_left_without_php.is_empty()
             || self.caddy
+            || self.server
     }
 }
 
@@ -1094,6 +1100,21 @@ mod tests {
             ..VersionInUse::default()
         };
         assert_eq!(running.code(), "version_in_use");
+        // M6-03: PostgreSQL runs from it. Written only when true, so an
+        // older client reads the same JSON as before.
+        let server = VersionInUse {
+            version: "18.7.0".into(),
+            server: true,
+            ..VersionInUse::default()
+        };
+        assert!(server.any());
+        assert_eq!(server.code(), "version_in_use");
+        round_trip(
+            &server,
+            json!({ "version": "18.7.0", "caddy": false, "server": true }),
+        );
+        let no_server = serde_json::to_value(VersionInUse::default()).unwrap();
+        assert!(no_server.get("server").is_none(), "{no_server}");
         // An answer from before M5-19 reads with no such sites.
         let old: VersionInUse =
             serde_json::from_value(json!({ "version": "8.3.12", "default": "8.3" })).unwrap();
