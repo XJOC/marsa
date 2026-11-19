@@ -192,7 +192,7 @@ fn site_detail(model: &Model) -> Detail {
         Some(SitesNotice::Failed(code)) => problem(strings::error_text(code)),
         Some(SitesNotice::Parked(folder)) if model.sites.sites.is_empty() => {
             Detail::Lines(vec![ReportLine {
-                text: strings::parked(folder),
+                text: strings::parked(folder, model.home.as_deref()),
                 problem: false,
             }])
         }
@@ -536,7 +536,7 @@ mod tests {
         let Detail::Lines(lines) = &view.steps[2].detail else {
             panic!("the park shows");
         };
-        assert_eq!(lines[0].text, strings::parked(Path::new("/code")));
+        assert_eq!(lines[0].text, strings::parked(Path::new("/code"), None));
         assert!(!lines[0].problem);
         model.update(Update::SitesFailed("site_path_relative".into()));
         let view = super::view(&model);

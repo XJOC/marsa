@@ -1,7 +1,8 @@
 //! The small widgets of the design (`docs/design/components.md`): icons,
-//! tiles, list items, buttons, menus, the switch, the segmented control, badges, the text
-//! field, the sidebar item, and the step card. They are the only place that draws these; a screen adds them with
-//! `ui.add(...)` and never reaches for a raw egui button (rules.md 3).
+//! tiles, list items, buttons, chips, menus, the switch, the segmented
+//! control, badges, the text field, the log line, the sidebar item, and the
+//! step card. They are the only place that draws these; a screen adds them
+//! with `ui.add(...)` and never reaches for a raw egui button (rules.md 3).
 //! [Laravel: Blade components; each takes its props with a builder and
 //! returns what the user did.]
 //!
@@ -22,6 +23,7 @@
 
 pub mod badge;
 pub mod button;
+pub mod chip;
 pub mod dialog;
 pub mod facts;
 pub mod field;
@@ -31,10 +33,12 @@ pub mod field;
 pub mod gallery;
 pub mod icons;
 pub mod list_item;
+pub mod log_entry;
 pub mod menu;
 pub mod nav;
 pub mod notice;
 pub mod segmented;
+pub mod setting_rows;
 pub mod status;
 pub mod step;
 pub mod switch;
@@ -54,21 +58,24 @@ use crate::theme::{Direction, TextToken, Theme};
 
 pub use badge::{CountBadge, RowBadge};
 pub use button::{Button, Kind as ButtonKind, QuietTone};
+pub use chip::Chip;
 pub use dialog::{Answer, ConfirmDialog};
 pub use facts::{Rows as FactRows, fact_card};
 pub use field::Field;
 pub use icons::{Glyph, Icon};
 pub use list_item::ListItem;
+pub use log_entry::{LogEntry, level_color};
 pub use menu::{Item as MenuItem, Menu};
 pub use nav::NavItem;
 pub use notice::{Notice, NoticeBar, NoticeKind, Notices, Progress, Reaction};
 pub use segmented::Segmented;
+pub use setting_rows::{SettingRows, setting_card};
 pub use status::{
     Health, PathStep, PillState, RequestPath, StatePill, StatusDot, StatusSentence, StepState,
 };
 pub use step::{Stage, StepCard};
 pub use switch::Switch;
-pub use table::{RowHeight, Table, TableColumn, TableOutput};
+pub use table::{LineTone, RowHeight, Table, TableColumn, TableOutput};
 pub use tabs::Tabs;
 pub use tile::{Monogram, SectionTile, TileSize};
 pub use version::{PickerSize, Setting, VersionMenu, VersionPick, VersionPicker};
@@ -292,6 +299,24 @@ pub(crate) mod harness {
             shapes
         }
 
+        /// The shapes one frame paints with the clip rect each is drawn in,
+        /// for a frame of `input`: a shape that sticks out of its clip rect
+        /// is cut on screen.
+        pub fn clipped_shapes(
+            &self,
+            input: RawInput,
+            add: impl FnMut(&mut Ui),
+        ) -> Vec<(egui::Rect, egui::Shape)> {
+            let output = self.ctx.run_ui(input, add);
+            let shapes = output
+                .shapes
+                .iter()
+                .map(|clipped| (clipped.clip_rect, clipped.shape.clone()))
+                .collect();
+            output.drop_without_applying_deltas();
+            shapes
+        }
+
         /// One frame with no input.
         pub fn run(&self, add: impl FnMut(&mut Ui)) {
             self.frame(RawInput::default(), add);
@@ -373,6 +398,16 @@ pub(crate) mod harness {
             self.nodes
                 .iter()
                 .filter(|node| node.label() == Some(label))
+                .collect()
+        }
+
+        /// The names and values that start with `prefix`, in the order of the
+        /// tree (egui gives a text label its words as a value).
+        pub fn labels_starting_with(&self, prefix: &str) -> Vec<&str> {
+            self.nodes
+                .iter()
+                .filter_map(|node| node.label().or_else(|| node.value()))
+                .filter(|label| label.starts_with(prefix))
                 .collect()
         }
 

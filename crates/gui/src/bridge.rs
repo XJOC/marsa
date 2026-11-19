@@ -13,7 +13,8 @@ use std::time::Duration;
 use eframe::egui;
 use marsa_core::client::{self, ClientError, DaemonClient, StreamItem};
 use marsa_core::types::{
-    Event, HostsStatus, InstallProgress, InstallUpdate, ServiceAction, SiteList, SitePatch,
+    Event, HostsStatus, InstallProgress, InstallUpdate, ServiceAction, ServiceStatus, SiteList,
+    SitePatch,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -76,9 +77,11 @@ impl Handle {
     }
 
     /// A bridge with no thread and no daemon behind it, for the design
-    /// review's demo (see `demo`). Its commands go nowhere.
-    // Debug builds only: a design-review aid.
-    #[cfg(debug_assertions)]
+    /// review's demo (see `demo`) and the measurement mode (see `measure`).
+    /// Its commands go nowhere.
+    // Debug builds, the `measure` feature, and the tests only: a shipped
+    // binary has no bridge that goes nowhere.
+    #[cfg(any(debug_assertions, feature = "measure", test))]
     pub fn detached() -> Self {
         let (demo, updates) = mpsc::channel();
         let (commands, _) = unbounded_channel();
@@ -274,7 +277,11 @@ async fn runtimes_changed(client: &DaemonClient, window: &Window) -> bool {
 /// A failed read is a notice: the events still keep the window up to date.
 /// `false` once the window is gone.
 async fn refresh(client: &DaemonClient, window: &Window) -> bool {
-    let services = match client.services().await {
+    let table = client.services().await;
+    // The log of every service the daemon lists, and Caddy's whatever the
+    // table says: the Logs screen has one source for each (task M5-D10).
+    let log_ids = log_ids(table.as_deref().unwrap_or_default());
+    let services = match table {
         Ok(services) => Update::Services(services),
         Err(err) => notice("cannot read the services", &err),
     };
@@ -291,10 +298,13 @@ async fn refresh(client: &DaemonClient, window: &Window) -> bool {
     let autostart = autostart(client).await;
     // No event either: only the Xdebug box and `marsa xdebug` change it.
     let xdebug = xdebug(client).await;
-    let log = match client.logs(LOG_SERVICE).await {
-        Ok(lines) => Update::Log(lines),
-        Err(err) => notice("cannot read the log", &err),
-    };
+    let mut logs = Vec::with_capacity(log_ids.len());
+    for id in &log_ids {
+        logs.push(match client.logs(id).await {
+            Ok(lines) => Update::Log(lines),
+            Err(err) => notice("cannot read the log", &err),
+        });
+    }
     let hosts = hosts(client).await;
     window.send(services)
         && window.send(sites)
@@ -302,7 +312,19 @@ async fn refresh(client: &DaemonClient, window: &Window) -> bool {
         && window.send(runtimes)
         && window.send(autostart)
         && window.send(xdebug)
-        && window.send(log)
+        && logs.into_iter().all(|log| window.send(log))
+}
+
+/// The ids whose logs are read: Caddy, then each other service listed.
+fn log_ids(table: &[ServiceStatus]) -> Vec<String> {
+    let others = table
+        .iter()
+        .map(|service| service.id.as_str())
+        .filter(|id| *id != LOG_SERVICE);
+    std::iter::once(LOG_SERVICE)
+        .chain(others)
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Whether the hosts file holds this data folder's names (Linux). Reading
@@ -583,4 +605,34 @@ fn log_sites(what: &str, list: &SiteList) {
         parked = list.parked.len(),
         "{what}"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use marsa_core::types::ServiceState;
+
+    use super::*;
+
+    fn service(id: &str) -> ServiceStatus {
+        ServiceStatus {
+            id: id.into(),
+            state: ServiceState::Running,
+            pid: None,
+            restarts: 0,
+            since_ms: None,
+        }
+    }
+
+    #[test]
+    fn the_logs_read_are_caddys_and_each_other_service_listed_once() {
+        let table = [
+            service("caddy"),
+            service("php-fpm-8.3"),
+            service("php-fpm-8.4"),
+        ];
+        assert_eq!(log_ids(&table), ["caddy", "php-fpm-8.3", "php-fpm-8.4"]);
+        // Caddy is read even when the table has none, or could not be read.
+        assert_eq!(log_ids(&[service("php-fpm-8.4")]), ["caddy", "php-fpm-8.4"]);
+        assert_eq!(log_ids(&[]), ["caddy"]);
+    }
 }

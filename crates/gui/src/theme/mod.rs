@@ -351,6 +351,9 @@ pub struct Radius {
     pub md: u8,
     /// `radius.md` "7 for 26": the corner of the sidebar's 26 by 26 tile.
     pub tile_nav: u8,
+    /// The small square before a log level in a filter chip: 2 (components.md,
+    /// Chips).
+    pub chip_dot: u8,
     /// Cards, tables, version buttons.
     pub lg: u8,
     /// Dialogs, the menu-bar panel.
@@ -516,6 +519,7 @@ pub const RADIUS: Radius = Radius {
     sm: 6,
     md: 8,
     tile_nav: 7,
+    chip_dot: 2,
     lg: 12,
     xl: 14,
     full: u8::MAX,

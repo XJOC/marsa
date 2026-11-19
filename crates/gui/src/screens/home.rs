@@ -532,7 +532,7 @@ fn status_card(ui: &mut Ui, theme: &Theme, status: &StatusView, actions: &mut Ve
 fn default_php_section(ui: &mut Ui, theme: &Theme, php: &DefaultPhp, actions: &mut Vec<Action>) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = theme.space.group_gap_max;
-        let hint = strings::DEFAULT_PHP_HINT;
+        let hint = strings::DEFAULT_RUNTIME_HINT;
         super::heading(ui, theme, strings::DEFAULT_PHP, Some(hint));
         if php.choices.is_empty() {
             let text = RichText::new(strings::NO_PHP_YET)
@@ -1025,6 +1025,22 @@ mod tests {
             draw(ui, &working(&["shop"]));
         });
         assert!(ok.node_with_label(strings::REQUEST_PATH).is_none());
+    }
+
+    #[test]
+    fn the_default_php_hint_is_the_one_the_runtimes_screen_says() {
+        let harness = Harness::new(egui::Theme::Light);
+        let model = working(&["shop"]);
+        let tree = harness.accessibility(|ui| {
+            draw(ui, &model);
+        });
+        // One label holds the heading and its hint (`screens::heading`).
+        let words = format!("{}{}", strings::DEFAULT_PHP, strings::DEFAULT_RUNTIME_HINT);
+        assert!(tree.node_with_text(&words).is_some(), "{words}");
+        assert_eq!(
+            strings::DEFAULT_RUNTIME_HINT,
+            "used where a project does not ask for a version"
+        );
     }
 
     #[test]

@@ -13,8 +13,7 @@ use std::time::Instant;
 
 use eframe::egui::{CentralPanel, Frame, Margin, ScrollArea, Ui};
 
-use crate::bridge::Command;
-use crate::model::{Action, Model, Route};
+use crate::model::{Action, LogSource, Model, Route};
 use crate::screens;
 use crate::theme::{Direction, Theme};
 use crate::widgets::whole;
@@ -25,8 +24,6 @@ use sidebar::Item;
 pub struct Output {
     /// For [`Model::apply_action`].
     pub actions: Vec<Action>,
-    /// From the screens that still call the model's methods themselves.
-    pub commands: Vec<Command>,
 }
 
 /// Draws the whole window. `picking`: a folder dialog is open.
@@ -85,9 +82,8 @@ pub fn show_at(ui: &mut Ui, model: &mut Model, picking: bool, now: Instant) -> O
     out
 }
 
-/// The screen of the route, in the main area. The screens that do not
-/// return actions yet still call the model's methods; each one's own task
-/// converts it.
+/// The screen of the route, in the main area. Every screen returns what the
+/// user did as actions.
 fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
     let item = Item::of(&model.route);
     match item {
@@ -117,7 +113,15 @@ fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
             }),
         },
         // The log fills the height and scrolls itself.
-        Item::Logs => screens::logs::show(ui, model),
+        Item::Logs => {
+            let theme = Theme::of(ui.ctx());
+            let source = match &model.route {
+                Route::Logs(source) => source.clone(),
+                _ => LogSource::default(),
+            };
+            let view = screens::logs::view(model, &source);
+            out.actions.extend(screens::logs::show(ui, &view, theme));
+        }
         Item::Runtimes => scrolled(ui, item, |ui| {
             let theme = Theme::of(ui.ctx());
             let view = screens::runtimes::view(model);
@@ -125,10 +129,16 @@ fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
                 .extend(screens::runtimes::show(ui, &view, theme));
         }),
         Item::Services => scrolled(ui, item, |ui| {
-            out.actions.extend(screens::services::show(ui, model));
+            let theme = Theme::of(ui.ctx());
+            let view = screens::services::view(model);
+            out.actions
+                .extend(screens::services::show(ui, &view, theme));
         }),
         Item::Settings => scrolled(ui, item, |ui| {
-            out.commands.extend(screens::settings::show(ui, model));
+            let theme = Theme::of(ui.ctx());
+            let view = screens::settings::view(model);
+            out.actions
+                .extend(screens::settings::show(ui, &view, theme));
         }),
     }
 }
