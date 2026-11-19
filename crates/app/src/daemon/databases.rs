@@ -935,6 +935,50 @@ pub fn set_enabled(data_dir: &Path, enabled: bool) -> Result<(), ConfigError> {
     config::save_global(&path, &global)
 }
 
+/// After an install of a PostgreSQL of the line `major`: when `[postgres]`
+/// has no `default` yet, makes `major` the default and turns it on, and
+/// returns `true`, so the caller starts it. Otherwise changes nothing. The
+/// caller holds `Daemon::lock_global`.
+///
+/// # Errors
+///
+/// The `config_*` codes when `global.toml` cannot be read or written.
+pub fn first_install(data_dir: &Path, major: u64) -> Result<bool, ConfigError> {
+    let path = ConfigPaths::in_dir(data_dir).global;
+    let mut global = config::load_global(&path)?;
+    if global.postgres.default.is_some() {
+        return Ok(false);
+    }
+    global.postgres.default = Some(major.to_string());
+    global.postgres.enabled = true;
+    config::save_global(&path, &global)?;
+    Ok(true)
+}
+
+/// Starts PostgreSQL in the background after its first install. A stop
+/// drops it (`run_waiting`), and a daemon that stops starts nothing. A
+/// failure only sets the status: the install has succeeded.
+pub fn start_after_install(daemon: &Arc<Daemon>) {
+    let daemon = Arc::clone(daemon);
+    tokio::spawn(async move {
+        let postgres = &daemon.postgres;
+        let start = postgres.run_waiting(&daemon, ServiceAction::Start, START_WAIT);
+        let result = tokio::select! {
+            biased;
+            () = daemon.shutdown.cancelled() => return,
+            result = start => result,
+        };
+        match result {
+            Ok(status) => info!(state = ?status.state, "postgres after its first install"),
+            Err(err) => warn!(code = err.code(), %err, "postgres did not start after its install"),
+        }
+    });
+}
+
+/// How long the start after an install waits for another action on
+/// PostgreSQL, such as a start the user asked for meanwhile.
+const START_WAIT: Duration = Duration::from_secs(30);
+
 /// `[postgres]` of `global.toml`.
 fn read_settings(data_dir: &Path) -> Result<ServerSettings, ActionError> {
     let path = ConfigPaths::in_dir(data_dir).global;
@@ -1821,6 +1865,28 @@ mod tests {
     }
 
     /// A failed sync after the rename does not say that nothing was made.
+    /// The first install makes its line the default and turns it on; a
+    /// later one, of any line, changes nothing.
+    #[test]
+    fn only_the_first_install_turns_postgres_on() {
+        let data = tempfile::tempdir().unwrap();
+        let path = ConfigPaths::in_dir(data.path()).global;
+        assert!(first_install(data.path(), 18).unwrap());
+        let settings = config::load_global(&path).unwrap().postgres;
+        assert_eq!(
+            (settings.default.as_deref(), settings.enabled),
+            (Some("18"), true)
+        );
+
+        set_enabled(data.path(), false).unwrap();
+        assert!(!first_install(data.path(), 17).unwrap());
+        let settings = config::load_global(&path).unwrap().postgres;
+        assert_eq!(
+            (settings.default.as_deref(), settings.enabled),
+            (Some("18"), false)
+        );
+    }
+
     #[test]
     fn an_init_error_says_whether_the_cluster_is_in_place() {
         let failed = InitError::new("initdb failed".to_owned());

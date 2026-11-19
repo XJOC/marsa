@@ -1008,6 +1008,13 @@ pub fn version_in_use(runtime: Runtime, in_use: &VersionInUse) -> String {
     if in_use.caddy {
         text.push_str(" Caddy runs from it: stop Caddy first with \"marsa services stop caddy\".");
     }
+    if in_use.server {
+        text.push_str(&format!(
+            " {name} runs from it: stop it first with \"marsa services stop {}\". Its \
+             databases stay either way.",
+            runtime.dir_name()
+        ));
+    }
     text
 }
 

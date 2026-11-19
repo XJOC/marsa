@@ -318,6 +318,10 @@ pub struct VersionInUse {
     /// Caddy runs from this version now.
     #[serde(default)]
     pub caddy: bool,
+    /// A database server runs from this version now: PostgreSQL (task
+    /// M6-03).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub server: bool,
 }
 
 impl VersionInUse {
@@ -326,7 +330,8 @@ impl VersionInUse {
     /// the user knows that another version must be installed first;
     /// `version_in_use` otherwise.
     pub fn code(&self) -> &'static str {
-        let nothing_else = self.default.is_none() && self.sites.is_empty() && !self.caddy;
+        let nothing_else =
+            self.default.is_none() && self.sites.is_empty() && !self.caddy && !self.server;
         if nothing_else && !self.sites_left_without_php.is_empty() {
             "sites_lose_php"
         } else {
@@ -340,6 +345,7 @@ impl VersionInUse {
             || !self.sites.is_empty()
             || !self.sites_left_without_php.is_empty()
             || self.caddy
+            || self.server
     }
 }
 
