@@ -319,6 +319,14 @@ pub fn remove(
     if all_read && let Err(problem) = write_record(files, &BTreeSet::new()) {
         tracing::warn!(problem = %problem, "cannot delete the record of NSS fingerprints");
     }
+    if !all_read && failures.is_empty() {
+        tracing::warn!(
+            left_alone = found.refused.len(),
+            complete = found.complete,
+            "some NSS databases were not read, so the record of Marsa's roots stays; check them \
+             by hand"
+        );
+    }
     if !failures.is_empty() {
         let message = format!(
             "Marsa's CA root is still in {} NSS database(s): {}",
