@@ -9,8 +9,8 @@ name: postgres-e2e
 
 on:
   workflow_dispatch:
-  # Every M6 branch, and every pull request that changes these paths, so a
-  # change to the PostgreSQL code runs this before it merges.
+  # Every pull request that changes these paths, so a change to the
+  # PostgreSQL code runs this before it merges, and main after it.
   pull_request:
     paths:
       - "crates/app/src/daemon/databases.rs"
@@ -26,7 +26,7 @@ on:
       - "tools/e2e/postgres.sh"
       - ".github/workflows/postgres-e2e.yml"
   push:
-    branches: ["task/M6-*", main]
+    branches: [main]
     paths:
       - "crates/app/src/daemon/databases.rs"
       - "crates/app/src/daemon/databases/**"

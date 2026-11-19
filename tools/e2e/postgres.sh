@@ -164,9 +164,9 @@ tcp -U root -d app -c 'create extension pg_trgm'
 [ "$(tcp -U root -d app -c "select lower('ÄÖ ABC')")" = 'äö abc' ] || fail "lower() outside ASCII"
 # The text search parser classifies letters by the C library's LC_CTYPE:
 # Arabic with diacritics and the Arabic comma, the same tokens on every OS.
-echo "tokens: $(tcp -U root -d app -c "select string_agg(token || ':' || alias, ' ') from ts_debug('simple', 'مَرْحَبًا، بالعالم')")"
-[ "$(tcp -U root -d app -c "select count(*) from ts_debug('simple', 'مَرْحَبًا، بالعالم') where alias = 'word'")" = 2 ] ||
-  fail "Arabic words with diacritics"
+tokens=$(tcp -U root -d app -c "select string_agg(token || ':' || alias, ' ') from ts_debug('simple', 'مَرْحَبًا، بالعالم')")
+echo "tokens: $tokens"
+[ "$tokens" = 'مَرْحَبًا:word ، :blank بالعالم:word' ] || fail "Arabic words with diacritics"
 
 step "PHP's pdo_pgsql as root with no password, as Laravel's default .env"
 run marsa install php 8.4
