@@ -5,15 +5,21 @@
 //! `marsa-gui`: the window. A client of the daemon, like the CLI; it never
 //! changes state by itself (task M3-10).
 //!
-//! `marsa-gui [--data-dir <PATH>]`, see [`startup`]. Only one window runs per
-//! data folder: a second one exits at once (task M5-04).
+//! `marsa-gui [--data-dir <PATH>] [--panel]`, see [`startup`]. Only one window
+//! runs per data folder: a second one exits at once (task M5-04). `--panel` is
+//! the menu-bar panel instead (ADR 0022): a borderless window that the tray
+//! starts under its icon, and that ends with an exit code that tells the tray
+//! what the user asked for (`marsa_gui::panel::PanelExit`).
 
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Instant;
 
 use anyhow::Context as _;
 use eframe::egui;
+use marsa_gui::panel::{self, PanelExit};
 use marsa_gui::prefs::Prefs;
 use marsa_gui::{app, bridge, startup, strings, theme};
 
@@ -21,7 +27,7 @@ fn main() -> ExitCode {
     let started = Instant::now();
     startup::init_logging();
     match run(started) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             tracing::error!(error = format!("{err:#}"), "marsa-gui failed");
             ExitCode::FAILURE
@@ -29,8 +35,12 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(started: Instant) -> anyhow::Result<()> {
-    let data_dir = startup::data_dir(std::env::args_os().skip(1))?;
+fn run(started: Instant) -> anyhow::Result<ExitCode> {
+    let launch = startup::launch(std::env::args_os().skip(1))?;
+    if launch.panel {
+        return run_panel(launch.data_dir, started);
+    }
+    let data_dir = launch.data_dir;
     // `MARSA_GUI_MEASURE` fills the window with made-up data and starts no
     // daemon. It is read before the lock is taken: it needs a data folder
     // that is missing or empty, so it never touches one Marsa used.
@@ -47,7 +57,7 @@ fn run(started: Instant) -> anyhow::Result<()> {
     let Some(_lock) = startup::window_lock(&data_dir).context("cannot take the window lock")?
     else {
         tracing::info!("the window is already open; this one exits");
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     };
     // Connecting starts now, while the window opens.
     let bridge = start_bridge(&data_dir, measuring)?;
@@ -75,7 +85,40 @@ fn run(started: Instant) -> anyhow::Result<()> {
             Ok(Box::new(app))
         }),
     )
-    .map_err(|err| anyhow::anyhow!("cannot open the window: {err}"))
+    .map_err(|err| anyhow::anyhow!("cannot open the window: {err}"))?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The menu-bar panel: no window lock (it runs beside the window), a bridge
+/// that never starts the daemon, and an exit code that says why it closed.
+fn run_panel(data_dir: std::path::PathBuf, started: Instant) -> anyhow::Result<ExitCode> {
+    // Debug builds only: the design review's demo draws fixed data and
+    // starts no daemon (see `demo`).
+    #[cfg(debug_assertions)]
+    let bridge = if marsa_gui::demo::requested().is_some() {
+        bridge::Handle::detached()
+    } else {
+        bridge::attach(data_dir.clone()).context("cannot start the bridge thread")?
+    };
+    #[cfg(not(debug_assertions))]
+    let bridge = bridge::attach(data_dir.clone()).context("cannot start the bridge thread")?;
+    let exit = Arc::new(AtomicU8::new(PanelExit::Closed.code()));
+    let report = Arc::clone(&exit);
+    eframe::run_native(
+        strings::PANEL_NAME,
+        panel::app::options(panel::app::start_size()),
+        Box::new(move |creation| {
+            Ok(Box::new(panel::app::PanelApp::new(
+                &creation.egui_ctx,
+                bridge,
+                data_dir,
+                started,
+                report,
+            )))
+        }),
+    )
+    .map_err(|err| anyhow::anyhow!("cannot open the panel: {err}"))?;
+    Ok(ExitCode::from(exit.load(Ordering::Relaxed)))
 }
 
 /// Starts the bridge to the daemon. `measuring`: there is no daemon to
