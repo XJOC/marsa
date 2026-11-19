@@ -17,3 +17,17 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo nextest run -p marsa held --stress-count 300
+  # The same on main, before the fix: does the old test fail under stress?
+  stress-main:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+      - run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: cargo nextest run -p marsa held --stress-count 300 --no-fail-fast
