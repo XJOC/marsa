@@ -53,6 +53,16 @@ pub enum StdinMode {
     Pipe,
 }
 
+/// Which thread calls `spawn` (S-06b). `PR_SET_PDEATHSIG` fires when that
+/// thread ends, not when the process does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum SpawnFrom {
+    /// The tokio worker that runs the parent's task, which lives on.
+    Task,
+    /// A thread made for the call, which ends right after it.
+    ShortThread,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Die {
     /// Wait for a signal from the script.
@@ -81,6 +91,12 @@ pub struct Args {
     pub stdin: StdinMode,
     #[arg(long, value_enum, default_value_t = Die::None)]
     pub die: Die,
+    /// Linux only: `prctl(PR_SET_PDEATHSIG, SIGTERM)` in the child before
+    /// `exec` (S-06b, P7).
+    #[arg(long, value_enum, default_value_t = OnOff::Off)]
+    pub pdeathsig: OnOff,
+    #[arg(long, value_enum, default_value_t = SpawnFrom::Task)]
+    pub spawn_from: SpawnFrom,
     /// The text that the site answers with.
     #[arg(long, default_value = "marsa-spike v1")]
     pub body: String,
@@ -94,6 +110,8 @@ pub struct SpawnOpts {
     pub kill_on_drop: bool,
     pub pidfile: PidfileMode,
     pub stdin: StdinMode,
+    pub pdeathsig: bool,
+    pub spawn_from: SpawnFrom,
 }
 
 impl SpawnOpts {
@@ -105,6 +123,8 @@ impl SpawnOpts {
             kill_on_drop: true,
             pidfile: PidfileMode::Ours,
             stdin: StdinMode::Null,
+            pdeathsig: false,
+            spawn_from: SpawnFrom::Task,
         }
     }
 }
@@ -117,6 +137,8 @@ impl From<&Args> for SpawnOpts {
             kill_on_drop: a.kill_on_drop == OnOff::On,
             pidfile: a.pidfile,
             stdin: a.stdin,
+            pdeathsig: a.pdeathsig == OnOff::On,
+            spawn_from: a.spawn_from,
         }
     }
 }
@@ -214,8 +236,26 @@ pub async fn spawn_caddy(env: &Env, opts: SpawnOpts, body: &str) -> Result<Spawn
         }
     }
 
+    if opts.pdeathsig {
+        set_pdeathsig(&mut cmd)?;
+    }
+
     let spawned_at = Instant::now();
-    let mut child = cmd.spawn().context("spawn Caddy")?;
+    let mut child = match opts.spawn_from {
+        SpawnFrom::Task => cmd.spawn().context("spawn Caddy")?,
+        SpawnFrom::ShortThread => {
+            // tokio reaps its children through the runtime, so the thread
+            // enters it for the call. The thread ends right after `spawn`.
+            let handle = tokio::runtime::Handle::current();
+            std::thread::spawn(move || {
+                let _runtime = handle.enter();
+                cmd.spawn()
+            })
+            .join()
+            .map_err(|_| anyhow::anyhow!("the spawn thread panicked"))?
+            .context("spawn Caddy")?
+        }
+    };
     let pid = child.id().context("the child has no pid")?;
     let ring = Ring::default();
     if let Some(out) = child.stdout.take() {
@@ -247,6 +287,27 @@ pub async fn spawn_caddy(env: &Env, opts: SpawnOpts, body: &str) -> Result<Spawn
         ring,
         pidfile_delay,
     })
+}
+
+/// Linux: the child gets SIGTERM when the thread that spawned it ends.
+#[cfg(target_os = "linux")]
+fn set_pdeathsig(cmd: &mut Command) -> Result<()> {
+    // SAFETY: the closure runs in the child between `fork` and `exec`. It
+    // calls only `prctl`, which is async-signal-safe, and allocates nothing.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_pdeathsig(_cmd: &mut Command) -> Result<()> {
+    bail!("--pdeathsig on is Linux only")
 }
 
 /// Polls the admin API until Caddy answers.

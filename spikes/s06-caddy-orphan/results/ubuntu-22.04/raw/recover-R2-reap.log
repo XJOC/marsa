@@ -1,0 +1,11 @@
+INSPECT pidfile=missing admin=ours app_port=busy(caddy(12645)) admin_port=busy(caddy(12645))
+ADMIN_OWNER Some(12645)
+TIMING pidfile_ms=0.1 admin_ms=1.1 port_ms=163.0
+DECISION reap(pid=Some(12645))
+STEP t_ms=164 decided 
+STEP t_ms=165 stop_api http=200
+STEP t_ms=165 ports_free after=stop_api
+STEP t_ms=202 new_caddy_ready pid=12671
+STEP t_ms=203 serving body="marsa-spike v2"
+READY parent=12662 caddy=12671
+CLEAN_STOP status=Ok(ExitStatus(unix_wait_status(0)))

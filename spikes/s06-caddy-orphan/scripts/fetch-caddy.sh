@@ -1,14 +1,23 @@
 #!/bin/bash
-# Downloads the official Caddy release for macOS arm64 into vendor/ and checks
-# its SHA-512 against the value pinned below. The pinned value was copied from
-# caddy_2.11.7_checksums.txt in the same release. This catches a corrupt
+# Downloads the official Caddy release for macOS arm64 or Linux amd64 (S-06b)
+# into vendor/ and checks its SHA-512 against the value pinned below. The
+# pinned values were copied from caddy_2.11.7_checksums.txt in the same release. This catches a corrupt
 # download; it does not check Caddy's signature (out of scope for the spike).
 # Nothing is installed outside this folder.
 set -euo pipefail
 
 VERSION="2.11.7"
-ASSET="caddy_${VERSION}_mac_arm64.tar.gz"
-EXPECTED_SHA512="68f592df8f0ec058fbdb9b137b64e9a0aa792d28c06e1e3b9ec12d0e7fb371683a54e73ef6d8e6d0dd70dc6b941a5b5d5b73faedd3f89de119ad2eb78bdc668e"
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64)
+    ASSET="caddy_${VERSION}_mac_arm64.tar.gz"
+    EXPECTED_SHA512="68f592df8f0ec058fbdb9b137b64e9a0aa792d28c06e1e3b9ec12d0e7fb371683a54e73ef6d8e6d0dd70dc6b941a5b5d5b73faedd3f89de119ad2eb78bdc668e"
+    ;;
+  Linux-x86_64)
+    ASSET="caddy_${VERSION}_linux_amd64.tar.gz"
+    EXPECTED_SHA512="a7a433a1b133efc3c8d10eb0b99d52a24b5ef5c322dc77f5282182b1c0402139ab83f3a99f0c52409df77d20123fb0b523edad8a66d8f5e49136197bf61ef0e7"
+    ;;
+  *) echo "no pinned Caddy for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+esac
 URL="https://github.com/caddyserver/caddy/releases/download/v${VERSION}/${ASSET}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,7 +33,11 @@ TMP="$(mktemp -d "${VENDOR}/dl.XXXXXX")"
 trap 'rm -rf "${TMP}"' EXIT
 
 curl --fail --silent --show-error --location --output "${TMP}/${ASSET}" "${URL}"
-ACTUAL="$(shasum -a 512 "${TMP}/${ASSET}" | cut -d' ' -f1)"
+if command -v sha512sum >/dev/null; then
+  ACTUAL="$(sha512sum "${TMP}/${ASSET}" | cut -d' ' -f1)"
+else
+  ACTUAL="$(shasum -a 512 "${TMP}/${ASSET}" | cut -d' ' -f1)"
+fi
 if [ "${ACTUAL}" != "${EXPECTED_SHA512}" ]; then
   echo "FAIL: checksum mismatch for ${ASSET}" >&2
   echo "  expected ${EXPECTED_SHA512}" >&2
@@ -38,9 +51,11 @@ mv "${TMP}/caddy" "${VENDOR}/caddy"
 chmod 755 "${VENDOR}/caddy"
 
 # curl does not set the quarantine attribute, so Gatekeeper should not object.
-if xattr "${VENDOR}/caddy" | grep -q quarantine; then
-  echo "WARN: quarantine attribute present on ${VENDOR}/caddy"
-else
-  echo "no quarantine attribute"
+if [ "$(uname -s)" = Darwin ]; then
+  if xattr "${VENDOR}/caddy" | grep -q quarantine; then
+    echo "WARN: quarantine attribute present on ${VENDOR}/caddy"
+  else
+    echo "no quarantine attribute"
+  fi
 fi
 "${VENDOR}/caddy" version
