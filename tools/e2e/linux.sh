@@ -482,7 +482,9 @@ step "Chrome, headless, trusts the site after setup (M4-18g)"
 # Chrome does not read the system store (ADR 0014, finding 14): the page
 # loads only through the user's NSS database that setup filled. No
 # --ignore-certificate-errors.
-CHROME=$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)
+# google-chrome only: the snap Chromium of Ubuntu reads its own database
+# under ~/snap, which the step does not cover.
+CHROME=$(command -v google-chrome || true)
 if [ -n "$CHROME" ]; then
   run "$CHROME" --version
   loaded=no

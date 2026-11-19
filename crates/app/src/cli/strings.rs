@@ -704,6 +704,12 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              Marsa's sites yet (curl and other programs do). Install libnss3-tools (Debian, \
              Ubuntu) or nss-tools (Fedora), then run \"marsa setup\" again."
             .into(),
+        "nss_db_refused" => "Chrome or Firefox may not trust Marsa's sites yet: a \
+             certificate database in your home folder is a link or belongs to another user \
+             (often after a browser or certutil ran with sudo), so Marsa left it alone. \
+             logs/marsad.log names it. Give it back to your user (sudo chown -R \"$USER\" \
+             <folder>), then run \"marsa setup\" again."
+            .into(),
         "nss_add_failed" => "Chrome or Firefox may not trust Marsa's sites yet: a certificate \
              database in your home folder did not take Marsa's certificate authority. Close \
              the browser and run \"marsa setup\" again; logs/marsad.log names the database."
@@ -2088,6 +2094,7 @@ mod tests {
         "trust_tool_missing",
         "nss_tool_missing",
         "nss_add_failed",
+        "nss_db_refused",
         "trust_store_update_failed",
         // The uninstall route (task M5-13), the removal codes of
         // `marsa-helper`, and `marsa uninstall --all` itself.

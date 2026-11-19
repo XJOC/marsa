@@ -1719,8 +1719,8 @@ fn check_owners(_helper: &Path, _file: &fs::Metadata) -> Result<(), HelperFault>
 /// not an approved dependency (AGENTS.md section 8), so this reads the owner
 /// of a new pipe: macOS and Linux give a pipe the effective user of the
 /// process that asks. A test compares it with a new file's owner.
-// `#[cfg]` outside `platform`: only `check_owners`, and the trust folder
-// check of `user_trust`, need it, on Unix.
+// `#[cfg]` outside `platform`: only `check_owners`, the trust folder check
+// of `user_trust`, and the owner checks of `nss` need it, on Unix.
 #[cfg(unix)]
 fn current_uid() -> io::Result<u32> {
     use std::os::fd::OwnedFd;
@@ -3040,7 +3040,7 @@ mod tests {
         );
         let add = fake.calls().last().unwrap().args.clone();
         assert_eq!(add[2], "-A");
-        assert!(add[8].ends_with("nss.pem"), "{add:?}");
+        assert!(add.last().unwrap().ends_with("nss.pem"), "{add:?}");
         let names: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
         assert_eq!(
             names,
@@ -3053,6 +3053,27 @@ mod tests {
         );
         assert_eq!(report.results[3].status, OpStatus::Done);
         assert_eq!((report.error, report.skipped), (None, Vec::new()));
+    }
+
+    /// No home folder: the step fails with its code, the rest stands.
+    #[test]
+    fn nss_without_a_home_folder_is_a_failed_step() {
+        let dir = Dir::new(true);
+        make_helper(&dir.helper());
+        let answer = all_done(&["trust_install", "resolved_install", "ports_install"]);
+        let fake = nss_fake(move || ok(&answer), |_| panic!("certutil ran"));
+        let setup = Setup::with(
+            fake.clone(),
+            Some(Platform::LinuxX64),
+            Some(dir.helper()),
+            None,
+        )
+        .with_nss();
+        let report = run_linux(&setup, &dir);
+        let last = report.results.last().unwrap();
+        assert_eq!(last.op, "nss_install");
+        assert_eq!(last.code.as_deref(), Some("nss_add_failed"));
+        assert_eq!(report.error, None);
     }
 
     /// A cancelled password dialog changes nothing, NSS included; no

@@ -1930,8 +1930,12 @@ fn error_message(code: &str) -> Option<&'static str> {
         }
         // Chrome and Firefox on Linux (task M4-18g).
         "nss_tool_missing" => {
-            "Chrome and Firefox need certutil: install libnss3-tools (Ubuntu) or nss-tools \
-             (Fedora), then run setup again."
+            "Chrome and Firefox need certutil: install libnss3-tools (Debian, Ubuntu) or \
+             nss-tools (Fedora), then run setup again."
+        }
+        "nss_db_refused" => {
+            "A certificate database of Chrome or Firefox is a link or another user's (often \
+             after sudo). Give it back to your user, then run setup again."
         }
         "nss_add_failed" => {
             "A certificate database of Chrome or Firefox did not take Marsa's certificate \
@@ -2537,6 +2541,7 @@ mod tests {
             "trust_tool_missing",
             "nss_tool_missing",
             "nss_add_failed",
+            "nss_db_refused",
             "trust_store_update_failed",
         ];
         for code in built.chain(listed.map(str::to_owned)) {
