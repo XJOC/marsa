@@ -564,6 +564,109 @@ pub fn parse_lsof_holders(text: &str, listen: &Dial, control: u32) -> Option<Vec
     described.then_some(holders)
 }
 
+/// The `__SO_ACCEPTCON` flag of `/proc/net/unix`: the socket listens.
+const UNIX_LISTENING: u32 = 0x0001_0000;
+/// `SOCK_STREAM` in the `Type` column of `/proc/net/unix`.
+const UNIX_STREAM: u32 = 1;
+/// `TCP_LISTEN` in the `st` column of `/proc/net/tcp`.
+const TCP_LISTEN: &str = "0A";
+
+/// Reads `/proc/net/unix` (Linux) for the inodes of the stream sockets
+/// that listen at `path`, its bytes compared exactly with the path as it
+/// was bound. The table is bytes: the kernel prints each path as it is, so
+/// it may not be UTF-8, and a path with a newline reads as more than one
+/// line. A real socket has one line, so an inode on more than one line is
+/// dropped: a forged line cannot name the socket of a real one. If one of
+/// those lines was at `path`, the answer is `None`: the table cannot say who
+/// listens there, and a forged copy must not hide our own listener. The
+/// path is the last column and may hold spaces; a line in another shape, or
+/// an abstract socket (`@...`), never matches.
+pub fn parse_proc_net_unix(table: &[u8], path: &[u8]) -> Option<Vec<u64>> {
+    use std::collections::{BTreeMap, BTreeSet};
+    // Each inode, and whether a line of it listens at `path`.
+    let mut lines: BTreeMap<u64, bool> = BTreeMap::new();
+    let mut repeated = BTreeSet::new();
+    // The first line is the header.
+    for line in table.split(|&byte| byte == b'\n').skip(1) {
+        // `Num RefCount Protocol Flags Type St Inode Path`.
+        let mut rest = line.trim_ascii_start();
+        let mut fields: [&[u8]; 7] = [b""; 7];
+        let mut complete = true;
+        for field in &mut fields {
+            let Some(end) = rest.iter().position(|&byte| byte == b' ') else {
+                *field = rest;
+                rest = b"";
+                complete = false;
+                break;
+            };
+            *field = &rest[..end];
+            rest = trim_spaces(&rest[end..]);
+        }
+        let text = |bytes: &[u8]| std::str::from_utf8(bytes).ok().map(str::to_owned);
+        let Some(inode) = text(fields[6]).and_then(|inode| inode.parse::<u64>().ok()) else {
+            continue;
+        };
+        let hex = |bytes: &[u8]| text(bytes).and_then(|t| u32::from_str_radix(&t, 16).ok());
+        let listens = hex(fields[3]).is_some_and(|flags| flags & UNIX_LISTENING != 0);
+        let at_path = complete && listens && hex(fields[4]) == Some(UNIX_STREAM) && rest == path;
+        if let Some(before) = lines.insert(inode, at_path) {
+            repeated.insert(inode);
+            lines.insert(inode, before || at_path);
+        }
+    }
+    let mut ours = Vec::new();
+    for (inode, at_path) in lines {
+        match (at_path, repeated.contains(&inode)) {
+            (true, true) => return None,
+            (true, false) => ours.push(inode),
+            (false, _) => {}
+        }
+    }
+    Some(ours)
+}
+
+/// `bytes` without its leading spaces.
+fn trim_spaces(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|&byte| byte != b' ')
+        .unwrap_or(bytes.len());
+    &bytes[start..]
+}
+
+/// Reads `/proc/net/tcp` (Linux) for the inodes of the TCP sockets that
+/// listen on `127.0.0.1:<port>`. The address is the kernel's `u32` in host
+/// byte order (`0100007F` on a little-endian machine); the port is plain hex.
+pub fn parse_proc_net_tcp(text: &str, port: u16) -> Vec<u64> {
+    let loopback = if cfg!(target_endian = "little") {
+        "0100007F"
+    } else {
+        "7F000001"
+    };
+    let ours = [format!("{loopback}:{port:04X}")];
+    text.lines()
+        .skip(1)
+        .filter_map(|line| {
+            // `sl local_address rem_address st ... uid timeout inode`.
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let (local, state, inode) = (fields.get(1)?, fields.get(3)?, fields.get(9)?);
+            let listens = *state == TCP_LISTEN && ours.iter().any(|ours| ours == local);
+            listens.then(|| inode.parse().ok()).flatten()
+        })
+        .collect()
+}
+
+/// The inode of a socket from the target of a `/proc/<pid>/fd/<n>` link:
+/// `socket:[<inode>]`. `None` for any other file.
+pub fn socket_inode(target: &Path) -> Option<u64> {
+    target
+        .to_str()?
+        .strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,6 +690,116 @@ mod tests {
             app_port: app,
             admin_port: adm,
             admin_owner: None,
+        }
+    }
+
+    /// Lines of a real `/proc/net/unix` (Ubuntu 24.04), plus the
+    /// cases around ours.
+    #[test]
+    fn proc_net_unix_gives_the_listeners_at_the_exact_path() {
+        let path = b"/home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock";
+        let text = "\
+Num       RefCount Protocol Flags    Type St Inode Path
+0000000000000000: 00000002 00000000 00010000 0001 01 23456 /home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock
+0000000000000000: 00000003 00000000 00000000 0001 03 23457 /home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock
+0000000000000000: 00000002 00000000 00010000 0002 01 23458 /home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock
+0000000000000000: 00000002 00000000 00010000 0001 01 23459 /home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock2
+0000000000000000: 00000002 00000000 00010000 0001 01 23460 @/home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock
+0000000000000000: 00000002 00000000 00010000 0001 01 23461
+0000000000000000: 00000002 00000000 00010000 0001 01 23462 /home/u/.local/share/Marsa Data/run/php-fpm-8.4.sock
+garbage
+";
+        // Listening stream sockets only: not a connected one (no
+        // `__SO_ACCEPTCON`), not a datagram one, not a longer path, not an
+        // abstract socket, not one with no path.
+        let found = parse_proc_net_unix(text.as_bytes(), path);
+        assert_eq!(found, Some(vec![23456, 23462]));
+        assert_eq!(
+            parse_proc_net_unix(text.as_bytes(), b"/home/u"),
+            Some(vec![])
+        );
+        // The header alone, and nothing.
+        let header = text.lines().next().unwrap().as_bytes();
+        assert_eq!(parse_proc_net_unix(header, path), Some(vec![]));
+        assert_eq!(parse_proc_net_unix(b"", path), Some(vec![]));
+    }
+
+    /// A table of listening stream sockets: `(inode, path)` each.
+    fn unix_table(sockets: &[(u64, &[u8])]) -> Vec<u8> {
+        let mut table = b"Num       RefCount Protocol Flags    Type St Inode Path\n".to_vec();
+        for (inode, path) in sockets {
+            let start = format!("0000000000000000: 00000002 00000000 00010000 0001 01 {inode} ");
+            table.extend_from_slice(start.as_bytes());
+            table.extend_from_slice(path);
+            table.push(b'\n');
+        }
+        table
+    }
+
+    /// Another user's socket paths are bytes as they are: one that is not
+    /// UTF-8 spoils nothing, and one with a newline that forges our line
+    /// for another socket's inode does not make it ours. A forged copy of
+    /// our own listener's line makes the table say nothing about our path.
+    #[test]
+    fn proc_net_unix_survives_odd_paths_of_others() {
+        let path: &[u8] = b"/run/marsa/php-fpm-8.4.sock";
+        let other_text: &[u8] = b"/tmp/\xff\xfe";
+        // 103: its real line, then a line forged by its path; 104 the other
+        // way round.
+        let table = unix_table(&[
+            (101, other_text),
+            (102, path),
+            (103, b"/tmp/x"),
+            (103, path),
+            (104, path),
+            (104, b"/tmp/y"),
+        ]);
+        assert_eq!(parse_proc_net_unix(&table, path), None);
+        // Repeated lines elsewhere: only the real one at our path.
+        let table = unix_table(&[
+            (101, other_text),
+            (102, path),
+            (105, b"/tmp/z"),
+            (105, b"/tmp/w"),
+        ]);
+        assert_eq!(parse_proc_net_unix(&table, path), Some(vec![102]));
+    }
+
+    /// Lines of a real `/proc/net/tcp` (x86-64).
+    #[test]
+    fn proc_net_tcp_gives_the_listeners_on_127_0_0_1() {
+        let text = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:4E9C 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 31001 1 0000000000000000 100 0 0 10 0
+   1: 00000000:4E9C 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 31002 1 0000000000000000 100 0 0 10 0
+   2: 0100007F:4E9C 0100007F:D4A2 01 00000000:00000000 00:00000000 00000000  1000        0 31003 1 0000000000000000 20 4 30 10 -1
+   3: 0100007F:4E9D 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 31004 1 0000000000000000 100 0 0 10 0
+   4: 7F000001:4E9C 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 31005 1 0000000000000000 100 0 0 10 0
+   5: 0100007F:4E9C
+";
+        // 20124 is 0x4E9C. Not `0.0.0.0`, not an established connection,
+        // not another port; the other byte order is another address.
+        let want = if cfg!(target_endian = "little") {
+            31001
+        } else {
+            31005
+        };
+        assert_eq!(parse_proc_net_tcp(text, 20124), [want]);
+        assert!(parse_proc_net_tcp(text, 80).is_empty());
+        assert!(parse_proc_net_tcp("", 20124).is_empty());
+    }
+
+    #[test]
+    fn a_socket_link_names_its_inode() {
+        assert_eq!(socket_inode(Path::new("socket:[23456]")), Some(23456));
+        for other in [
+            "pipe:[23456]",
+            "/dev/null",
+            "socket:[]",
+            "socket:[12a]",
+            "socket:[1",
+        ] {
+            assert_eq!(socket_inode(Path::new(other)), None, "{other}");
         }
     }
 
