@@ -53,8 +53,8 @@
 //!
 //! There is no removal yet: `POST /v1/uninstall` does not run on Linux.
 //!
-//! The files: [`databases`] finds the databases and checks every folder and
-//! file on the way; [`certutil`] runs `certutil` and reads its output; this
+//! The files: `databases` finds the databases and checks every folder and
+//! file on the way; `certutil` runs `certutil` and reads its output; this
 //! one decides what to run for each database.
 
 mod certutil;
@@ -183,7 +183,7 @@ pub fn install(
 
 /// Why one database did not take the certificate.
 #[derive(Debug)]
-pub(super) enum Failure {
+enum Failure {
     /// `certutil` is not there: no database can take it.
     ToolMissing,
     Other(String),
@@ -244,8 +244,7 @@ mod tests {
     use std::io;
     use std::path::PathBuf;
 
-    use super::super::PEM_BEGIN;
-    use super::super::PIPE_GRACE;
+    use super::super::{PEM_BEGIN, PIPE_GRACE};
     use super::certutil::{CALL_LIMIT, bodies, trust_rows};
     use super::databases::{CERT_DB, CHROME, under};
     use std::sync::Arc;

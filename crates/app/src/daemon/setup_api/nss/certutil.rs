@@ -97,7 +97,7 @@ fn database_args(dir: &Path) -> Vec<OsString> {
     vec!["-d".into(), database]
 }
 
-pub(super) fn list_args(dir: &Path) -> Vec<OsString> {
+fn list_args(dir: &Path) -> Vec<OsString> {
     let mut args = database_args(dir);
     args.extend(["-L".into(), "-n".into(), NICKNAME.into(), "-a".into()]);
     args
