@@ -1088,11 +1088,18 @@ pub fn set_enabled(data_dir: &Path, enabled: bool) -> Result<(), ConfigError> {
 ///   if it is on. Otherwise no start could ever run again without a hand
 ///   edit of `global.toml`;
 /// - any other `default`, or one that is not a number: nothing changes.
+///
+/// A `version` that is no longer in `installed` (an uninstall came first)
+/// changes nothing.
 pub fn after_install(
     settings: &mut ServerSettings,
     version: &Version,
     installed: &[Version],
 ) -> bool {
+    // An uninstall took PostgreSQL's turn first and removed it.
+    if !installed.contains(version) {
+        return false;
+    }
     let others = installed.iter().filter(|other| *other != version);
     match settings.default.as_deref() {
         None => match others.max() {
@@ -1161,14 +1168,20 @@ pub fn start_after_install(daemon: &Arc<Daemon>, version: Version) {
         let installed = version.clone();
         let job = tokio::task::spawn_blocking(move || {
             let _one = worker.lock_global();
-            let versions = RuntimesDir::in_dir(&worker.data_dir).installed(Runtime::Postgres);
-            let versions = versions.unwrap_or_else(|_| vec![installed.clone()]);
-            first_install(&worker.data_dir, &installed, &versions)
+            // A list that cannot be read changes nothing: it could hide
+            // another line.
+            let versions = RuntimesDir::in_dir(&worker.data_dir)
+                .installed(Runtime::Postgres)
+                .map_err(|err| {
+                    warn!(code = err.code(), %err, "cannot list the PostgreSQL versions");
+                })
+                .ok()?;
+            Some(first_install(&worker.data_dir, &installed, &versions))
         });
         match job.await {
-            Ok(Ok(true)) => info!(%version, "the first PostgreSQL: on, and starting it"),
-            Ok(Ok(false)) => return,
-            Ok(Err(err)) => {
+            Ok(Some(Ok(true))) => info!(%version, "the first PostgreSQL: on, and starting it"),
+            Ok(None | Some(Ok(false))) => return,
+            Ok(Some(Err(err))) => {
                 warn!(code = err.code(), %err, "cannot write [postgres] after the install");
                 return;
             }
@@ -2363,6 +2376,14 @@ mod tests {
                 "17.12.0",
                 &["17.12.0"],
                 settings(Some("x"), true),
+                false,
+            ),
+            // Uninstalled before its turn came: nothing.
+            (
+                settings(None, false),
+                "18.7.0",
+                &[],
+                settings(None, false),
                 false,
             ),
         ];

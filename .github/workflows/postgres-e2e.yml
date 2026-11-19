@@ -1,0 +1,98 @@
+name: postgres-e2e
+
+# PostgreSQL as a service of marsad, with a real server (task M6-03, part
+# C3; ADR 0023): the first init, the access rules (root over TCP, the
+# superuser over the socket only), the stop with an idle client, PHP's
+# pdo_pgsql, and the start with marsad. tools/e2e/postgres.sh downloads
+# PostgreSQL and PHP and runs every marsa command with --data-dir in a new
+# folder. No sudo. It is not part of the tests that `cargo nextest` runs.
+
+on:
+  workflow_dispatch:
+  # Every pull request that changes these paths, so a change to the
+  # PostgreSQL code runs this before it merges, and main after it.
+  pull_request:
+    paths:
+      - "crates/app/src/daemon/databases.rs"
+      - "crates/app/src/daemon/databases/**"
+      - "crates/app/src/daemon/services_api.rs"
+      - "crates/app/src/cli/strings.rs"
+      - "crates/app/src/cli/services.rs"
+      - "crates/app/src/daemon/runtimes_api.rs"
+      - "crates/app/src/daemon/supervisor.rs"
+      - "crates/core/src/databases.rs"
+      - "crates/core/src/platform/process.rs"
+      - "recipes/postgres.toml"
+      - "tools/e2e/postgres.sh"
+      - ".github/workflows/postgres-e2e.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/app/src/daemon/databases.rs"
+      - "crates/app/src/daemon/databases/**"
+      - "crates/app/src/daemon/services_api.rs"
+      - "crates/app/src/cli/strings.rs"
+      - "crates/app/src/cli/services.rs"
+      - "crates/app/src/daemon/runtimes_api.rs"
+      - "crates/app/src/daemon/supervisor.rs"
+      - "crates/core/src/databases.rs"
+      - "crates/core/src/platform/process.rs"
+      - "recipes/postgres.toml"
+      - "tools/e2e/postgres.sh"
+      - ".github/workflows/postgres-e2e.yml"
+
+# Read-only on purpose: the job never writes to the repository.
+permissions:
+  contents: read
+
+# A new run on the same branch cancels the older one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  e2e:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # theseus-rs builds need glibc 2.36 and macOS 15 (ADR 0023):
+        # macos-15 is the oldest macOS Marsa installs PostgreSQL on.
+        os: [ubuntu-24.04, macos-15, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      # The job runs downloaded programs: no token is left in .git.
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Reads the pinned version from rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Build marsa and marsad
+        run: cargo build --release -p marsa
+
+      - name: End to end
+        run: bash tools/e2e/postgres.sh
+
+      # Logs only. `run/daemon.json` holds the daemon token and is never
+      # uploaded.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: postgres-e2e-logs-${{ matrix.os }}
+          path: ${{ runner.temp }}/pg-e2e/logs/
+          if-no-files-found: ignore
