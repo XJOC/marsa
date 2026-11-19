@@ -56,7 +56,10 @@ pub fn uninstall_failure(
     version: &str,
     data_dir: &Path,
 ) -> ClientFailure {
-    let mut failure = failure(err, data_dir, None);
+    // `service_busy`: an action on PostgreSQL runs, and a start may pick
+    // the version (task M6-03).
+    let service = (runtime == Runtime::Postgres).then_some("postgres");
+    let mut failure = failure(err, data_dir, service);
     let requested = printable(version.trim());
     failure.message = match (err, failure.code.as_str()) {
         // The client cleaned its text already.
