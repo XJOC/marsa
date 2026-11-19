@@ -39,7 +39,7 @@ use marsa_core::recipes::Platform;
 use marsa_core::runtimes::{Runtime, RuntimesDir};
 use marsa_core::types::{
     DefaultVersion, ErrorBody, Event, InstallAccepted, InstallEvent, InstallProgress,
-    InstallUpdate, RuntimeList, SiteList, Uninstalled, VersionInUse,
+    InstallUpdate, RuntimeList, ServiceState, SiteList, Uninstalled, VersionInUse,
 };
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
@@ -964,6 +964,54 @@ async fn uninstall_deletes_a_version_nothing_uses() {
         .json("GET", "/v1/runtimes", None, StatusCode::OK)
         .await;
     assert_eq!(list.runtimes[0].installed, ["8.4.23"]);
+}
+
+/// The first PostgreSQL install makes its line the default, turns it on,
+/// and starts it in the background (task M6-03). The fake installs no
+/// program, so that start fails, and says so in the status: the install
+/// stays done.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_postgres_install_turns_it_on_and_starts_it() {
+    let served = Served::start(FakeInstall::default()).await;
+    let mut events = served.daemon.events.subscribe();
+    let accepted: InstallAccepted = served
+        .json(
+            "POST",
+            "/v1/runtimes/postgres/install",
+            Some("{}"),
+            StatusCode::ACCEPTED,
+        )
+        .await;
+    match last_update(&mut events, accepted.id).await {
+        InstallUpdate::Done(done) => assert_eq!(done.version, "18.7.0"),
+        other => panic!("not done: {other:?}"),
+    }
+    let paths = ConfigPaths::in_dir(served.path());
+    let started = async {
+        loop {
+            let state = served.daemon.postgres.status().state;
+            if state != ServiceState::Stopped {
+                return state;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let state = tokio::time::timeout(Duration::from_secs(30), started)
+        .await
+        .expect("a start after the install");
+    let code = if cfg!(windows) {
+        "postgres_unsupported_platform"
+    } else {
+        "postgres_not_installed"
+    };
+    assert_eq!(state, ServiceState::Failed { code: code.into() });
+    let settings = config::load_global(&paths.global)
+        .expect("global.toml")
+        .postgres;
+    assert_eq!(
+        (settings.default.as_deref(), settings.enabled),
+        (Some("18"), true)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

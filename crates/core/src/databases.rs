@@ -48,17 +48,27 @@ impl PostgresDirs {
 ///   `pg_hba.conf` and adds the role `root` ([`ROOT_ROLE_SQL`]), which is not
 ///   a superuser: Laravel's default `.env` connects as `root`.
 /// - `--locale-provider=builtin --builtin-locale=C.UTF-8` (PostgreSQL 17 and
-///   later): sorting and case rules come from PostgreSQL itself, so they are
-///   the same on every OS and do not change with an OS update.
+///   later): sorting, `upper` and `lower`, and regular expression classes
+///   come from PostgreSQL itself, so they are the same on every OS and do
+///   not change with an OS update.
 /// - `--locale=C` for what still comes from the C library (messages, number
-///   and date formats). `--locale=C.UTF-8` would make initdb stop with
-///   "invalid locale name" where the C library has no `C.UTF-8`: Windows,
-///   and macOS releases that S-12 did not check.
+///   and date formats).
+/// - `--lc-ctype=C.UTF-8`, the one C library category that is not `C`. The
+///   text search parser and `pg_trgm` ask the C library which characters
+///   are letters: under `C` none outside ASCII, so the similarity of two
+///   Arabic words was 0, and 0.57 with `C.UTF-8` (the postgres-e2e
+///   workflow, task M6-03, on Ubuntu 24.04 and macOS 15 and 26). Those
+///   answers come from each OS's tables, so the workflow checks that
+///   Arabic words with diacritics split the same on each. A cluster made
+///   before this keeps `C`: nothing makes a cluster again. Windows has no
+///   `C.UTF-8`: task M6-07 chooses there.
 pub fn initdb_args(dirs: &PostgresDirs) -> Vec<String> {
     let user = ["-U", "postgres", "-A", "trust", "-E", "UTF8", "--locale=C"];
+    let ctype = ["--lc-ctype=C.UTF-8"];
     let builtin = ["--locale-provider=builtin", "--builtin-locale=C.UTF-8"];
     let mut args = vec!["-D".to_owned(), arg_path(&dirs.data)];
-    args.extend(user.into_iter().chain(builtin).map(str::to_owned));
+    let all = user.into_iter().chain(ctype).chain(builtin);
+    args.extend(all.map(str::to_owned));
     args
 }
 
@@ -519,7 +529,7 @@ mod tests {
     fn initdb_makes_a_trust_cluster_with_the_builtin_locale() {
         let args = initdb_args(&dirs("/m/databases/postgres/18", "/m/run"));
         let want = "-D /m/databases/postgres/18 -U postgres -A trust -E UTF8 --locale=C \
-                    --locale-provider=builtin --builtin-locale=C.UTF-8";
+                    --lc-ctype=C.UTF-8 --locale-provider=builtin --builtin-locale=C.UTF-8";
         assert_eq!(args, words(want));
     }
 
