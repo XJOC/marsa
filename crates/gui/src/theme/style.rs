@@ -18,7 +18,7 @@ pub fn apply(ctx: &egui::Context) {
 }
 
 /// egui's style for `theme`. Spacing stays egui's: the screens keep their
-/// layout until the widgets of M5-D2 draw with the size tokens.
+/// layout until the widgets draw with the size tokens.
 pub fn style(theme: &Theme) -> egui::Style {
     egui::Style {
         text_styles: text_styles(theme),

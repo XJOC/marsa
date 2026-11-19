@@ -4,7 +4,7 @@
 //! tells the tray what the user asked for.
 //!
 //! Each frame, `logic` applies the bridge's updates, and `ui` draws
-//! [`screens::panel`](crate::screens::panel) and applies what it returns. The
+//! `screens::panel` and applies what it returns. The
 //! panel opens in three steps, so it never shows a small panel that jumps to
 //! its size: it waits for the daemon's answer (a short time at most), then
 //! asks the system for the window's size, and draws once the window has it.

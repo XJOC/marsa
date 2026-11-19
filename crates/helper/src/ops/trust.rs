@@ -141,9 +141,9 @@ fn result(op: &'static str, outcome: Outcome) -> OpResult {
 fn stored_hash(op: &'static str, system: &impl System) -> Result<Option<String>, OpResult> {
     let path = Path::new(CA_PATH);
     // Marsa never writes a link, so one here is someone else's, whatever it
-    // points to: `read` and `security` would follow it (task M5-22).
+    // points to: `read` and `security` would follow it.
     // Another user who can change the folder could put another certificate
-    // there, and `trust_remove` would untrust and delete that one (task M5-31).
+    // there, and `trust_remove` would untrust and delete that one.
     let open = path.parent().filter(|dir| !system.is_root_only_dir(dir));
     let reason = if system.is_link(path) {
         "is a link".to_owned()
@@ -846,7 +846,7 @@ mod tests {
     /// Cut short, too large, unreadable, a link, or in a folder another user
     /// can change: both ops leave the file and run no command, because the
     /// hash to remove is unknown or cannot be trusted. A link is left alone
-    /// even when it points to the very certificate (task M5-22): Marsa never
+    /// even when it points to the very certificate: Marsa never
     /// writes one, and `security` would follow it.
     #[test]
     fn a_stored_file_that_is_not_one_certificate_is_left_alone() {
@@ -858,7 +858,7 @@ mod tests {
         link.links.insert(path.clone());
         let mut unreadable = fake_with(TEST_CA.as_bytes());
         unreadable.fail_reads.insert(path.clone());
-        // Task M5-31: a folder another user can change, with Marsa's very
+        // a folder another user can change, with Marsa's very
         // certificate in it, or with nothing yet.
         let folder = path.parent().unwrap().to_path_buf();
         let mut open = fake_with(TEST_CA.as_bytes());
@@ -890,7 +890,7 @@ mod tests {
         }
     }
 
-    /// The fixture's text passes the request checks of task M4-05.
+    /// The fixture's text passes the request checks.
     #[test]
     fn a_request_installs_then_removes_the_fixture() {
         let ops = json!([{ "op": "trust_install", "pem": TEST_CA }, { "op": "trust_remove" }]);

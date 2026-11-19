@@ -1,7 +1,7 @@
 //! Start and end instead of left and right (rtl.md, rules.md 13). Layout
 //! code asks a [`Direction`] which side a row starts on, so a right-to-left
 //! language later mirrors the window without new layout code. egui has no
-//! global direction (spike S-14): each place picks its layout from here.
+//! global direction: each place picks its layout from here.
 
 use eframe::egui::{self, Align, Layout, Rect};
 
@@ -11,7 +11,7 @@ pub enum Direction {
     /// Left to right: English, and every language of the window today.
     #[default]
     Ltr,
-    /// Right to left: Arabic, after the bidi work S-14 asks for.
+    /// Right to left: Arabic, after the bidi layer (`docs/design/rtl.md`).
     Rtl,
 }
 
