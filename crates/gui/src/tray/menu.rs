@@ -161,14 +161,34 @@ impl State {
     /// "Stop Marsa" or "Start Marsa" was clicked. `None` while the daemon
     /// is on its way up or down.
     pub fn power(&mut self) -> Option<Command> {
-        let (next, command) = match self.daemon {
-            Daemon::Running => (Daemon::Stopping, Command::Stop),
-            Daemon::Stopped | Daemon::Failed(_) => (Daemon::Starting, Command::Start),
-            Daemon::Starting | Daemon::Stopping => return None,
-        };
+        match self.daemon {
+            Daemon::Running => self.stop(),
+            Daemon::Stopped | Daemon::Failed(_) => self.start(),
+            Daemon::Starting | Daemon::Stopping => None,
+        }
+    }
+
+    /// "Stop Marsa", from the menu or the panel. `None` unless the daemon
+    /// runs: the panel asks for exactly this, and a daemon that is stopped
+    /// must not be started by it.
+    pub fn stop(&mut self) -> Option<Command> {
+        if self.daemon != Daemon::Running {
+            return None;
+        }
         self.notice = None;
-        self.daemon = next;
-        Some(command)
+        self.daemon = Daemon::Stopping;
+        Some(Command::Stop)
+    }
+
+    /// "Start Marsa", from the menu or the panel. `None` unless the daemon is
+    /// stopped or could not be reached.
+    pub fn start(&mut self) -> Option<Command> {
+        if !matches!(self.daemon, Daemon::Stopped | Daemon::Failed(_)) {
+            return None;
+        }
+        self.notice = None;
+        self.daemon = Daemon::Starting;
+        Some(Command::Start)
     }
 }
 
@@ -397,6 +417,33 @@ mod tests {
         assert_eq!(menu.power.label, "Stop Marsa");
         assert!(!menu.power.enabled);
         assert_eq!(state.power(), None, "already starting");
+    }
+
+    /// The panel asks for "Stop" or for "Start", never for "whichever": a
+    /// daemon that is stopped is not started by a panel that asked to stop.
+    #[test]
+    fn the_panel_stops_a_running_daemon_and_starts_one_that_is_not_and_never_the_other_way() {
+        let mut running = running_with(&[], None);
+        assert_eq!(running.start(), None, "it runs");
+        assert_eq!(running.stop(), Some(Command::Stop));
+        assert_eq!(running.daemon, Daemon::Stopping);
+        assert_eq!(running.stop(), None, "once");
+        for down in [
+            Daemon::Stopped,
+            Daemon::Failed("daemon_start_failed".into()),
+        ] {
+            let mut state = State::default();
+            state.apply(Update::Daemon(down));
+            assert_eq!(state.stop(), None, "nothing to stop");
+            assert_eq!(state.start(), Some(Command::Start));
+            assert_eq!(state.daemon, Daemon::Starting);
+            assert_eq!(state.start(), None, "once");
+        }
+        for busy in [Daemon::Starting, Daemon::Stopping] {
+            let mut state = State::default();
+            state.apply(Update::Daemon(busy));
+            assert_eq!((state.stop(), state.start()), (None, None));
+        }
     }
 
     #[test]
