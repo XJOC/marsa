@@ -1,5 +1,5 @@
 //! Linux: Marsa's CA root in the user's NSS databases, for Chrome and
-//! Firefox (ADR 0014 point 4, task M4-18g).
+//! Firefox (ADR 0014 point 4).
 //!
 //! Chrome and Firefox on Linux do not read the system store that the
 //! helper's `trust_install` fills (ADR 0011): each reads NSS databases in the
@@ -52,22 +52,28 @@
 //! [`NSS_BUDGET`].
 //!
 //! There is no removal yet: `POST /v1/uninstall` does not run on Linux.
+//!
+//! The files: `databases` finds the databases and checks every folder and
+//! file on the way; `certutil` runs `certutil` and reads its output; this
+//! one decides what to run for each database.
 
-use std::ffi::OsString;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+mod certutil;
+mod databases;
+
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use marsa_core::helper::OpResult;
 use marsa_core::types::OpStatus;
 use tokio_util::sync::CancellationToken;
 
-use super::user_trust::{self, PEM_END, TrustFiles};
-use super::{PEM_BEGIN, PIPE_GRACE, RunOutput, Runner};
+use super::Runner;
+use super::user_trust::{self, TrustFiles};
+pub use certutil::CERTUTIL;
+use certutil::{Calls, NICKNAME, add_args, delete_args};
+pub use databases::MAX_PROFILES;
+use databases::{Database, databases, make_dir};
 
-/// The tool, by its absolute path (AGENTS.md section 6).
-pub const CERTUTIL: &str = "/usr/bin/certutil";
 /// The op name of the step in a report.
 pub const NSS_INSTALL: &str = "nss_install";
 /// `certutil` is not installed: the step is skipped with this code.
@@ -77,34 +83,11 @@ pub const NSS_ADD_FAILED: &str = "nss_add_failed";
 /// A database was left alone: a link, or another user's (often after a
 /// browser or `certutil` ran with `sudo`). No `certutil` failed.
 pub const NSS_DB_REFUSED: &str = "nss_db_refused";
-/// `certutil` reads no password from here: a database with one fails at
-/// once instead of asking on the terminal `marsad` may still have.
-const NO_PASSWORD: &str = "/dev/null";
 /// The longest the whole step takes, the pipe grace after each `certutil`
 /// included. Part of `SLOWEST_SETUP` on Linux.
 pub const NSS_BUDGET: Duration = Duration::from_secs(40);
-/// The most one `certutil` may take. Each takes milliseconds.
-const CALL_LIMIT: Duration = Duration::from_secs(10);
-/// The most Firefox profiles that get the certificate.
-pub const MAX_PROFILES: usize = 32;
 /// The most older certificates with Marsa's nickname deleted in one database.
 const MAX_DELETES: usize = 8;
-/// The nickname of Marsa's root in each database: `CA_NAME` in
-/// `marsa_core::caddy`, as in `user_trust`.
-const NICKNAME: &str = "Marsa Local CA";
-/// Chrome's database, under the home folder.
-const CHROME: [&str; 2] = [".pki", "nssdb"];
-/// The folders that hold Firefox profiles, under the home folder.
-const FIREFOX: [&[&str]; 3] = [
-    &[".mozilla", "firefox"],
-    // Firefox 147 and later, for a new profile with no `~/.mozilla`.
-    &[".config", "mozilla", "firefox"],
-    &["snap", "firefox", "common", ".mozilla", "firefox"],
-];
-/// The files of a database. None may be a link: `certutil` opens them all.
-const DB_FILES: [&str; 3] = [CERT_DB, "key4.db", "pkcs11.txt"];
-/// The file of a database in the SQL format, the only one used here.
-const CERT_DB: &str = "cert9.db";
 /// The checked certificate for `certutil -i`, in the trust folder.
 const PEM_FILE: &str = "nss.pem";
 
@@ -198,14 +181,6 @@ pub fn install(
     Outcome::Ran(user_trust::result(NSS_INSTALL, status))
 }
 
-/// One NSS database.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Database {
-    dir: PathBuf,
-    /// The folder is not there yet: Chrome's, made before `-A`.
-    new: bool,
-}
-
 /// Why one database did not take the certificate.
 #[derive(Debug)]
 enum Failure {
@@ -243,7 +218,7 @@ fn add(
             return Err(Failure::Other(why));
         }
         if listed.iter().any(|body| body != ours) {
-            // Another Marsa data folder of this user may own it (M4-18g2).
+            // Another Marsa data folder of this user may own it.
             tracing::warn!(dir = %dir.display(), "deleting another certificate named {NICKNAME}");
         }
         calls.expect_success(&delete_args(dir), "-D")?;
@@ -263,336 +238,15 @@ fn add(
     Ok(true)
 }
 
-/// The `certutil` calls of one step, all within one deadline.
-struct Calls<'a> {
-    runner: &'a dyn Runner,
-    stop: &'a CancellationToken,
-    deadline: Instant,
-}
-
-impl Calls<'_> {
-    /// Runs `certutil` with `args`, at most [`CALL_LIMIT`] and never past
-    /// the deadline, its pipe grace included.
-    fn run(&self, args: &[OsString]) -> Result<RunOutput, Failure> {
-        let left = self.deadline.saturating_duration_since(Instant::now());
-        let limit = left.saturating_sub(PIPE_GRACE).min(CALL_LIMIT);
-        if limit.is_zero() {
-            return Err(Failure::Other("out of time".into()));
-        }
-        match self.runner.run(CERTUTIL, args, limit, self.stop) {
-            Ok(output) => Ok(output),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Err(Failure::ToolMissing),
-            Err(err) => Err(Failure::Other(format!(
-                "certutil did not run: {}",
-                err.kind()
-            ))),
-        }
-    }
-
-    /// Runs `certutil`; an exit code other than 0 is a failure of `command`.
-    fn expect_success(&self, args: &[OsString], command: &str) -> Result<(), Failure> {
-        let output = self.run(args)?;
-        if output.code == Some(0) {
-            return Ok(());
-        }
-        let exit = output
-            .code
-            .map_or_else(|| "a signal".to_owned(), |code| format!("exit code {code}"));
-        Err(Failure::Other(format!(
-            "certutil {command} ended with {exit}"
-        )))
-    }
-
-    /// Whether a certificate named [`NICKNAME`] in `dir` is trusted to issue
-    /// server certificates: `C` in the SSL field of its row in `certutil
-    /// -L` (`c` is only "valid", not trusted).
-    fn trusted(&self, dir: &Path) -> Result<bool, Failure> {
-        let output = self.run(
-            &database_args(dir)
-                .into_iter()
-                .chain(["-L".into()])
-                .collect::<Vec<_>>(),
-        )?;
-        if output.code != Some(0) {
-            return Ok(false);
-        }
-        Ok(trust_rows(&String::from_utf8_lossy(&output.stdout)).any(|ssl| ssl.contains('C')))
-    }
-
-    /// The certificates named [`NICKNAME`] in `dir`, as base64. A listing
-    /// that fails (the usual "Could not find cert") lists none.
-    fn list(&self, dir: &Path) -> Result<Vec<String>, Failure> {
-        let output = self.run(&list_args(dir))?;
-        if output.code != Some(0) {
-            return Ok(Vec::new());
-        }
-        Ok(bodies(&String::from_utf8_lossy(&output.stdout)))
-    }
-}
-
-/// The databases under `home`, and why each refused one cannot be used.
-fn databases(home: &Path) -> (Vec<Database>, Vec<String>) {
-    let mut found = Vec::new();
-    let mut refused = Vec::new();
-    let chrome = under(home, &CHROME);
-    match real_folders(home, &CHROME) {
-        Folders::Real => match db_files(&chrome) {
-            Ok(_) => found.push(Database {
-                dir: chrome,
-                new: false,
-            }),
-            Err(why) => refused.push(why),
-        },
-        Folders::Missing => found.push(Database {
-            dir: chrome,
-            new: true,
-        }),
-        Folders::Refused(why) => refused.push(why),
-    }
-    let mut profiles = 0;
-    for parts in FIREFOX {
-        match real_folders(home, parts) {
-            Folders::Real => {}
-            Folders::Missing => continue,
-            Folders::Refused(why) => {
-                refused.push(why);
-                continue;
-            }
-        }
-        for dir in profile_dirs(&under(home, parts)) {
-            if profiles == MAX_PROFILES {
-                tracing::warn!(dir = %dir.display(), "more than {MAX_PROFILES} Firefox profiles; this one is left out");
-                continue;
-            }
-            match profile(&dir) {
-                Ok(true) => {
-                    profiles += 1;
-                    found.push(Database { dir, new: false });
-                }
-                // A folder that is not a profile, such as `Crash Reports`.
-                Ok(false) => {}
-                Err(why) => refused.push(why),
-            }
-        }
-    }
-    (found, refused)
-}
-
-/// The real folders in `dir`, sorted. A link is not looked into.
-fn profile_dirs(dir: &Path) -> Vec<PathBuf> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(err) => {
-            tracing::warn!(dir = %dir.display(), error = %err, "cannot list the Firefox profiles");
-            return Vec::new();
-        }
-    };
-    let mut dirs: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            // Does not follow a link.
-            entry.file_type().is_ok_and(|kind| kind.is_dir())
-        })
-        .map(|entry| entry.path())
-        .collect();
-    dirs.sort();
-    dirs
-}
-
-/// `home` joined with `parts`.
-fn under(home: &Path, parts: &[&str]) -> PathBuf {
-    parts
-        .iter()
-        .fold(home.to_path_buf(), |path, part| path.join(part))
-}
-
-/// What [`real_folders`] found.
-#[derive(Debug, PartialEq, Eq)]
-enum Folders {
-    /// Each one is a real folder of this user's.
-    Real,
-    /// One is not there; each one before it is real.
-    Missing,
-    /// One is a link, a file, or another user's.
-    Refused(String),
-}
-
-/// Checks each folder from `home` down through `parts`. `home` itself is
-/// not checked: the system says where it is.
-fn real_folders(home: &Path, parts: &[&str]) -> Folders {
-    let mut path = home.to_path_buf();
-    for part in parts {
-        path.push(part);
-        match fs::symlink_metadata(&path) {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Folders::Missing,
-            Err(err) => {
-                return Folders::Refused(format!(
-                    "{} cannot be checked: {}",
-                    path.display(),
-                    err.kind()
-                ));
-            }
-            Ok(meta) if !meta.file_type().is_dir() => {
-                return Folders::Refused(format!(
-                    "{} is not a folder (a link, or a file)",
-                    path.display()
-                ));
-            }
-            Ok(meta) if !owned(&meta) => {
-                return Folders::Refused(format!("{} belongs to another user", path.display()));
-            }
-            Ok(_) => {}
-        }
-    }
-    Folders::Real
-}
-
-/// Whether `dir` holds a database: `true` when `cert9.db` is there. Each
-/// of [`DB_FILES`] that is there must be a real file of this user's.
-///
-/// # Errors
-///
-/// Why one of them cannot be used.
-fn db_files(dir: &Path) -> Result<bool, String> {
-    let mut database = false;
-    for name in DB_FILES {
-        let there = file_kind(&dir.join(name))?;
-        database |= there && name == CERT_DB;
-    }
-    Ok(database)
-}
-
-/// Whether `dir` is a Firefox profile: it holds a database. A folder with
-/// none is skipped before its owner counts: a root-owned `Crash Reports`
-/// after `sudo firefox` is no profile.
-///
-/// # Errors
-///
-/// A profile, or a file in it, that cannot be used.
-fn profile(dir: &Path) -> Result<bool, String> {
-    if !db_files(dir)? {
-        return Ok(false);
-    }
-    owned_dir(dir)?;
-    Ok(true)
-}
-
-/// A profile folder of this user's; one of another user's is refused.
-fn owned_dir(dir: &Path) -> Result<(), String> {
-    match fs::symlink_metadata(dir) {
-        Ok(meta) if owned(&meta) => Ok(()),
-        Ok(_) => Err(format!("{} belongs to another user", dir.display())),
-        Err(err) => Err(format!(
-            "{} cannot be checked: {}",
-            dir.display(),
-            err.kind()
-        )),
-    }
-}
-
-/// `true` for a real file of this user's, `false` if there is none.
-///
-/// # Errors
-///
-/// A link, a folder, another user's file, or one that cannot be checked.
-fn file_kind(path: &Path) -> Result<bool, String> {
-    match fs::symlink_metadata(path) {
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(format!(
-            "{} cannot be checked: {}",
-            path.display(),
-            err.kind()
-        )),
-        Ok(meta) if !meta.file_type().is_file() => Err(format!(
-            "{} is not a file (a link, or a folder)",
-            path.display()
-        )),
-        Ok(meta) if !owned(&meta) => Err(format!("{} belongs to another user", path.display())),
-        Ok(_) => Ok(true),
-    }
-}
-
-/// Whether the file belongs to the user `marsad` runs as.
-// `#[cfg]` outside `platform`: Unix owners, as in `user_trust`. The step
-// runs on Linux only; elsewhere this compiles for the tests.
-#[cfg(unix)]
-fn owned(meta: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    super::current_uid().is_ok_and(|me| meta.uid() == me)
-}
-
-// No owners to compare on Windows, where the step never runs.
-#[cfg(not(unix))]
-fn owned(_meta: &fs::Metadata) -> bool {
-    true
-}
-
-/// Makes Chrome's folder, and `~/.pki` if needed, for this user only.
-fn make_dir(dir: &Path) -> Result<(), String> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    // `#[cfg]` outside `platform`: the Unix mode of the new folders.
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder
-        .create(dir)
-        .map_err(|err| format!("cannot make {}: {}", dir.display(), err.kind()))
-}
-
-/// `-d sql:<dir>`: the database, in the SQL format.
-fn database_args(dir: &Path) -> Vec<OsString> {
-    let mut database = OsString::from("sql:");
-    database.push(dir.as_os_str());
-    vec!["-d".into(), database]
-}
-
-fn list_args(dir: &Path) -> Vec<OsString> {
-    let mut args = database_args(dir);
-    args.extend(["-L".into(), "-n".into(), NICKNAME.into(), "-a".into()]);
-    args
-}
-
-fn delete_args(dir: &Path) -> Vec<OsString> {
-    let mut args = database_args(dir);
-    args.extend(["-D", "-n", NICKNAME, "-f", NO_PASSWORD].map(OsString::from));
-    args
-}
-
-fn add_args(dir: &Path, file: &Path) -> Vec<OsString> {
-    let mut args = database_args(dir);
-    let rest = ["-A", "-t", "C,,", "-n", NICKNAME, "-f", NO_PASSWORD, "-i"];
-    args.extend(rest.map(OsString::from));
-    args.push(file.into());
-    args
-}
-
-/// The SSL trust field of each row named [`NICKNAME`] in the output of
-/// `certutil -L`: `Marsa Local CA      C,,` gives `C`.
-fn trust_rows(text: &str) -> impl Iterator<Item = &str> {
-    text.lines().filter_map(|line| {
-        let (name, trust) = line.trim_end().rsplit_once(char::is_whitespace)?;
-        (name.trim() == NICKNAME).then(|| trust.split(',').next().unwrap_or_default())
-    })
-}
-
-/// The base64 of each certificate in `text`, without line breaks.
-fn bodies(text: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(PEM_BEGIN) {
-        let Some(end) = rest[start..].find(PEM_END) else {
-            break;
-        };
-        let end = start + end + PEM_END.len();
-        found.extend(user_trust::body(&rest[start..end]));
-        rest = &rest[end..];
-    }
-    found
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io;
+    use std::path::PathBuf;
+
+    use super::super::{PEM_BEGIN, PIPE_GRACE};
+    use super::certutil::{CALL_LIMIT, bodies, trust_rows};
+    use super::databases::{CERT_DB, CHROME, under};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

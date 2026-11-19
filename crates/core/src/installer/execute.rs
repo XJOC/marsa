@@ -11,7 +11,7 @@
 //! after the last write, even when the future is gone.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -345,10 +345,9 @@ async fn verified_manifest<F: Fetch>(
     let manifest = env.trust.verify(&json, &sig, last_seen)?;
     let serial = manifest.serial();
     if last_seen != Some(serial) {
-        let tmp = runtimes.tmp_dir();
         let lock = Arc::clone(lock);
         blocking(&serial_path.clone(), move || {
-            let result = write_serial(&serial_path, &tmp, serial);
+            let result = write_serial(&serial_path, serial);
             drop(lock);
             result
         })
@@ -374,23 +373,9 @@ fn read_serial(path: &Path) -> Result<Option<u64>, InstallError> {
     }
 }
 
-/// Writes `serial` to a new file in `tmp`, then renames it over `path`.
-fn write_serial(path: &Path, tmp: &Path, serial: u64) -> Result<(), InstallError> {
-    let temp = tmp.join(format!("serial-{}", random_hex()?));
-    let written = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .and_then(|mut file| {
-            file.write_all(format!("{serial}\n").as_bytes())?;
-            file.sync_all()
-        })
-        .map_err(io_error(path))
-        .and_then(|()| rename(&temp, path));
-    if written.is_err() {
-        remove_quietly(&temp);
-    }
-    written
+/// Writes `serial` over `path`, whole.
+fn write_serial(path: &Path, serial: u64) -> Result<(), InstallError> {
+    crate::fs::write_atomic(path, format!("{serial}\n").as_bytes(), None).map_err(io_error(path))
 }
 
 /// `runtimes/.tmp/i-<8 hex>/`, new for each install, with `dl/` for the
@@ -622,7 +607,7 @@ fn sync_tree(root: &Path) -> Result<(), InstallError> {
                 sync_path(&path).map_err(io_error(&path))?;
             }
         }
-        sync_dir(&dir).map_err(io_error(&dir))?;
+        crate::fs::sync_dir(&dir).map_err(io_error(&dir))?;
     }
     Ok(())
 }
@@ -634,18 +619,6 @@ fn sync_path(path: &Path) -> io::Result<()> {
         .write(cfg!(windows))
         .open(path)?
         .sync_all()
-}
-
-// `#[cfg(unix)]` outside `platform`: a folder's entries are flushed by
-// opening the folder, which only Unix allows. NTFS logs them itself.
-#[cfg(unix)]
-fn sync_dir(dir: &Path) -> io::Result<()> {
-    File::open(dir)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 /// Renames `root` to `target`. If `target` exists (`force`), it is first
@@ -677,7 +650,7 @@ fn move_into_place(root: &Path, target: &Path, old: &Path) -> Result<(), Install
         return Err(err);
     }
     if let Some(parent) = target.parent() {
-        sync_dir(parent).map_err(io_error(parent))?;
+        crate::fs::sync_dir(parent).map_err(io_error(parent))?;
     }
     if moved {
         // On Windows a running program cannot be deleted: then the old folder
@@ -687,32 +660,9 @@ fn move_into_place(root: &Path, target: &Path, old: &Path) -> Result<(), Install
     Ok(())
 }
 
-/// `fs::rename`, tried again on Windows while another program holds a file:
-/// antivirus programs hold files that were just unpacked for a short time.
-/// rustup does the same. Blocking (it sleeps between tries).
+/// [`crate::fs::rename_retry`] with the error as an [`InstallError`].
 pub(super) fn rename(from: &Path, to: &Path) -> Result<(), InstallError> {
-    let mut delay = Duration::from_millis(100);
-    let mut tries = 0;
-    loop {
-        match fs::rename(from, to) {
-            Ok(()) => return Ok(()),
-            Err(err) if is_held_on_windows(&err) && tries < 5 => {
-                std::thread::sleep(delay);
-                delay *= 2;
-                tries += 1;
-            }
-            Err(err) => return Err(io_error(from)(err)),
-        }
-    }
-}
-
-/// `ERROR_ACCESS_DENIED` (5), `ERROR_SHARING_VIOLATION` (32), or
-/// `ERROR_LOCK_VIOLATION` (33).
-fn is_held_on_windows(err: &io::Error) -> bool {
-    // `cfg!` outside `platform`: one known Windows behavior, std only.
-    cfg!(windows)
-        && (err.kind() == io::ErrorKind::PermissionDenied
-            || matches!(err.raw_os_error(), Some(5 | 32 | 33)))
+    crate::fs::rename_retry(from, to).map_err(io_error(from))
 }
 
 /// 8 hex characters from the OS random source, for temp names.
@@ -733,14 +683,6 @@ fn remove_tree(path: &Path) {
         Err(err) => {
             tracing::warn!(path = %path.display(), error = %err, "cannot delete a temp folder");
         }
-    }
-}
-
-fn remove_quietly(path: &Path) {
-    if let Err(err) = fs::remove_file(path)
-        && err.kind() != io::ErrorKind::NotFound
-    {
-        tracing::warn!(path = %path.display(), error = %err, "cannot delete a temp file");
     }
 }
 
@@ -1573,18 +1515,6 @@ into = "bin"
             "old-php-../../x-deadbeef",
         ] {
             assert_eq!(target(bad), None, "{bad}");
-        }
-    }
-
-    #[test]
-    fn only_windows_retries_a_held_file() {
-        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
-        let sharing = io::Error::from_raw_os_error(32);
-        let missing = io::Error::from(io::ErrorKind::NotFound);
-        assert_eq!(is_held_on_windows(&denied), cfg!(windows));
-        assert!(!is_held_on_windows(&missing));
-        if cfg!(windows) {
-            assert!(is_held_on_windows(&sharing));
         }
     }
 }
