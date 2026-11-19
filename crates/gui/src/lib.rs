@@ -22,6 +22,8 @@ pub mod logline;
 #[cfg(feature = "measure")]
 pub mod measure;
 pub mod model;
+// The menu-bar panel's window mode, `marsa-gui --panel` (task M5-D11).
+pub mod panel;
 // The system's opener of a folder: only `app` runs it.
 pub(crate) mod opener;
 // The window's own preferences, in `config/gui.toml` (task M5-D9).

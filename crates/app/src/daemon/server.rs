@@ -20,7 +20,7 @@ use marsa_core::platform::low_ports;
 use marsa_core::platform::process;
 use marsa_core::platform::signals::shutdown_signal;
 use marsa_core::runtimes::RuntimesDir;
-use marsa_core::types::Event;
+use marsa_core::types::{Event, ServiceAction};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -41,8 +41,6 @@ use super::watch;
 const PROCS_LIMIT: Duration = Duration::from_secs(10);
 /// How long shutdown then waits for open connections to finish.
 const DRAIN_LIMIT: Duration = Duration::from_secs(5);
-/// How long shutdown waits for the DNS server to close its sockets.
-const DNS_STOP_LIMIT: Duration = Duration::from_secs(2);
 /// How long shutdown waits for the parked folder watcher.
 const WATCH_STOP_LIMIT: Duration = Duration::from_secs(2);
 /// How long shutdown waits for the start of Caddy, and that of PostgreSQL,
@@ -135,6 +133,8 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     daemon.autostart = Autostart::this_user();
     // The real system's answer, only in the real daemon (task M4-18d).
     daemon.caddy.low_ports = low_ports::low_ports_allowed;
+    // The DNS server on macOS and Linux (task M4-18i).
+    daemon.dns = dns::DnsService::for_daemon();
     let daemon = Arc::new(daemon);
     // The first site list, so the first client gets it at once. A broken
     // sites.toml is logged; the routes report it again with its code.
@@ -153,8 +153,11 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     // when `daemon.shutdown` is cancelled.
     let watcher = watch::start(&daemon);
     // After the API listener. It stops when `daemon.shutdown` is cancelled. A
-    // port in use is only a warning: the daemon runs on without it.
-    let dns = dns::start_for_daemon(&daemon.shutdown).await;
+    // port in use is a failed `dns` service: the daemon runs on without it.
+    daemon
+        .dns
+        .run(&daemon.events, &daemon.shutdown, ServiceAction::Start)
+        .await;
     let app = api::router(daemon.clone(), auth);
     let result = serve(listener, app, Arc::clone(&daemon), signal).await;
     // The watcher first: it is what asks the sync task for passes.
@@ -169,9 +172,7 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     // waits for it. The map is empty otherwise, and this returns at once.
     daemon.stop_procs(PROCS_LIMIT).await;
     // Before the lock goes, so the next daemon finds the DNS port free.
-    if let Some(dns) = dns {
-        dns.stop(DNS_STOP_LIMIT).await;
-    }
+    daemon.dns.shutdown(dns::STOP_LIMIT).await;
 
     // The file goes before the lock, so a daemon that takes the lock next
     // never finds our file.

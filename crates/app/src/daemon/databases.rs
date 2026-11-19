@@ -465,6 +465,8 @@ pub enum ActionError {
     /// Another action on PostgreSQL has not finished.
     Busy,
     ProgramNotAbsolute(ProgramNotAbsolute),
+    /// The job that writes `[postgres] enabled` failed (a bug).
+    Internal,
 }
 
 impl ActionError {
@@ -478,6 +480,7 @@ impl ActionError {
             Self::InUse(busy) => busy.code(),
             Self::Busy => "service_busy",
             Self::ProgramNotAbsolute(err) => err.code(),
+            Self::Internal => "internal_error",
         }
     }
 }
@@ -492,6 +495,7 @@ impl fmt::Display for ActionError {
             Self::InUse(busy) => busy.fmt(f),
             Self::Busy => f.write_str("another action on this service is running"),
             Self::ProgramNotAbsolute(err) => err.fmt(f),
+            Self::Internal => f.write_str("the job that writes [postgres] enabled failed"),
         }
     }
 }
@@ -708,8 +712,10 @@ impl PostgresManager {
         if let (Some(daemon), Some(enabled)) = (save, enabled) {
             save_enabled(daemon, enabled).await?;
         }
+        // Before the next action can change it.
+        let status = self.status();
         drop(busy);
-        Ok(self.status())
+        Ok(status)
     }
 
     /// Runs `action`. `_busy` proves that no other action runs.
@@ -1040,7 +1046,7 @@ async fn save_enabled(daemon: &Arc<Daemon>, enabled: bool) -> Result<(), ActionE
         }),
         Err(err) => {
             warn!(%err, "the [postgres] enabled job failed");
-            Err(ActionError::Busy)
+            Err(ActionError::Internal)
         }
     }
 }
@@ -1995,15 +2001,15 @@ mod tests {
         #[tokio::test]
         async fn a_stop_drops_a_start_that_runs() {
             let pg = pg("serve", probes(Liveness::Gone, None));
+            set_postgres(&pg.daemon.data_dir, Some("18"), false, pg.port);
             slow_init(&pg);
             let start = spawn_saved(&pg, ServiceAction::Start);
             until("initdb", || pg.count("initdb") > 0).await;
 
+            // A stop that writes nothing, so a write of the dropped start
+            // would show.
             let begun = std::time::Instant::now();
-            let status = spawn_saved(&pg, ServiceAction::Stop)
-                .await
-                .unwrap()
-                .unwrap();
+            let status = pg.act(ServiceAction::Stop).await.unwrap();
             assert!(
                 begun.elapsed() < Duration::from_secs(10),
                 "{:?}",
@@ -2016,6 +2022,29 @@ mod tests {
             assert!(!pg.dirs.data.exists());
             assert!(!pg.daemon.proc_alive(POSTGRES_ID));
             assert!(!enabled(&pg), "the dropped start wrote nothing");
+            assert!(nothing_left(&pg));
+        }
+
+        /// A daemon that stops drops an API start: `service_busy` at once,
+        /// no cluster, and `enabled` as it was.
+        #[tokio::test]
+        async fn a_shutdown_drops_a_start_of_the_api() {
+            let pg = pg("serve", probes(Liveness::Gone, None));
+            set_postgres(&pg.daemon.data_dir, Some("18"), false, pg.port);
+            slow_init(&pg);
+            let start = spawn_saved(&pg, ServiceAction::Start);
+            until("initdb", || pg.count("initdb") > 0).await;
+            let begun = std::time::Instant::now();
+            pg.daemon.shutdown.cancel();
+            let err = start.await.unwrap().unwrap_err();
+            assert_eq!(err.code(), "service_busy");
+            assert!(
+                begun.elapsed() < Duration::from_secs(10),
+                "{:?}",
+                begun.elapsed()
+            );
+            assert!(!pg.dirs.data.exists());
+            assert!(!enabled(&pg));
             assert!(nothing_left(&pg));
         }
 
