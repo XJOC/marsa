@@ -197,7 +197,8 @@ pub fn install(
                 user_trust::discard(&file);
                 // Nothing was added anywhere: the record goes back to what it
                 // was, so the uninstall does not look for this root.
-                if let Err(problem) = write_record(files, &before) {
+                let nothing_added = changed == 0 && failures.is_empty();
+                if nothing_added && let Err(problem) = write_record(files, &before) {
                     tracing::warn!(problem = %problem, "cannot put the record of NSS fingerprints back");
                 }
                 tracing::warn!(
@@ -410,16 +411,21 @@ fn add(
             // A row with this certificate's nickname but another
             // certificate: the nickname is this certificate's alone.
             calls.expect_success(&delete_args(dir, &nickname), "-D")?;
-        } else if let Some(row) = rows.first() {
+        } else {
             // `-A` keeps the nickname of a certificate that is there
             // already, so this one would never get its own row, and no
-            // uninstall could find it.
-            if calls.holds(dir, &row.nickname, &ours.body)? {
-                return Err(Failure::Other(
-                    "Marsa's CA root is in this database under another nickname; delete it \
-                     with certutil -D, then run setup again"
-                        .into(),
-                ));
+            // uninstall could find it. Each row left is asked: one with
+            // another subject lists other certificates.
+            let deleted: Vec<String> = old.iter().map(Fingerprint::nickname).collect();
+            for row in rows.iter().filter(|row| !deleted.contains(&row.nickname)) {
+                if calls.holds(dir, &row.nickname, &ours.body)? {
+                    return Err(Failure::Other(
+                        "Marsa's CA root is in this database under another nickname; find the \
+                         row that holds it with certutil -L, delete that row with certutil -D, \
+                         then run setup again"
+                            .into(),
+                    ));
+                }
             }
         }
         if database.new {

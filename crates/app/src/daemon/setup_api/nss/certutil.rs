@@ -58,12 +58,7 @@ impl Calls<'_> {
         if output.code == Some(0) {
             return Ok(());
         }
-        let exit = output
-            .code
-            .map_or_else(|| "a signal".to_owned(), |code| format!("exit code {code}"));
-        Err(Failure::Other(format!(
-            "certutil {command} ended with {exit}"
-        )))
+        Err(Failure::Other(ended(command, &output)))
     }
 
     /// The rows of `certutil -L` whose nickname starts with Marsa's name. A
@@ -76,12 +71,7 @@ impl Calls<'_> {
         if output.code != Some(0) {
             let database = fs::symlink_metadata(dir.join(CERT_DB)).is_ok_and(|meta| meta.is_file());
             if database {
-                return Err(Failure::Other(format!(
-                    "certutil -L ended with exit code {}",
-                    output
-                        .code
-                        .map_or_else(|| "none".to_owned(), |code| code.to_string())
-                )));
+                return Err(Failure::Other(ended("-L", &output)));
             }
             return Ok(Vec::new());
         }
@@ -107,6 +97,14 @@ impl Calls<'_> {
             .iter()
             .any(|listed| listed == body))
     }
+}
+
+/// How `certutil <command>` ended, for a message.
+fn ended(command: &str, output: &RunOutput) -> String {
+    let exit = output
+        .code
+        .map_or_else(|| "a signal".to_owned(), |code| format!("exit code {code}"));
+    format!("certutil {command} ended with {exit}")
 }
 
 /// `-d sql:<dir>`: the database, in the SQL format.
