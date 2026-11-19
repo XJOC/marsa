@@ -310,9 +310,9 @@ pub struct VersionInUse {
     pub sites: Vec<String>,
     /// The Laravel and PHP sites that run this version now and would have no
     /// PHP after the uninstall, by name, whatever picked it for them (the
-    /// default, a version file, `composer.json`). Set only when the default
-    /// picks this version and it is the only installed PHP. A site already in
-    /// `sites` is not named again (task M5-19).
+    /// default, a version file, `composer.json`). Set only when this is the
+    /// only installed PHP, whether a default picks it or not (task M5-22). A
+    /// site already in `sites` is not named again (task M5-19).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sites_left_without_php: Vec<String>,
     /// Caddy runs from this version now.

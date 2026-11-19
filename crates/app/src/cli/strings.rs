@@ -204,7 +204,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "version_in_use" => "This version is in use: it is a default, a site is set to it, \
              or Caddy runs from it. Nothing was uninstalled."
             .into(),
-        // M5-19: the only PHP and the default, and sites run it.
+        // M5-19, M5-22: the only PHP, and sites run it.
         "sites_lose_php" => "This is the only PHP version installed, and sites run it: they \
              would have no PHP. Install another PHP version and make it the default first. \
              Nothing was uninstalled."
@@ -320,6 +320,33 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              {id}\" to see its process and stop it. Then run \"marsa services restart caddy\" \
              to try again; it briefly interrupts every site."
         ),
+        // PostgreSQL (task M6-03): `databases::ActionError` and
+        // `ServiceBusy` in core. Marsa never stops the other program.
+        "service_port_busy" => format!(
+            "Another program uses the port {service} needs, and Marsa stops nothing. Quit it, or \
+             set another port in global.toml ([{id}] port), then try again. Run \"marsa logs \
+             {id}\" to see which program."
+        ),
+        "service_data_dir_busy" => format!(
+            "Another {service} server already runs on its data folder, so Marsa started no \
+             second one and stopped nothing. Run \"marsa logs {id}\" to see its process."
+        ),
+        "service_port_unknown" => format!(
+            "Marsa could not check which program uses the port {service} needs, so it did not \
+             start it. Try again; run \"marsa logs {id}\" for details."
+        ),
+        "postgres_not_installed" => "PostgreSQL of the version set in global.toml is not \
+             installed. Run \"marsa install postgres\", then try again."
+            .into(),
+        "postgres_init_failed" => "Marsa could not make PostgreSQL's data folder. Run \"marsa \
+             logs postgres\" to see why."
+            .into(),
+        "postgres_start_timeout" => "PostgreSQL started but took no connections in time, so it \
+             was stopped. Run \"marsa logs postgres\" to see why."
+            .into(),
+        "postgres_unsupported_platform" => {
+            "Marsa runs PostgreSQL on macOS and Linux only for now.".into()
+        }
         "caddy_other_marsa" => format!(
             "The Caddy of another Marsa (another data folder, or another user) uses the ports \
              {service} needs. Stop that Marsa first. Run \"marsa logs {id}\" for details."
@@ -914,6 +941,7 @@ pub fn runtime_name(runtime: Runtime) -> &'static str {
 pub fn service_name(id: &str) -> &str {
     match id {
         "caddy" => "Caddy",
+        "postgres" => "PostgreSQL",
         other => other,
     }
 }
@@ -1070,6 +1098,15 @@ pub fn state_name(state: &ServiceState) -> &'static str {
         ServiceState::Stopping => "stopping",
         ServiceState::Failed { .. } => "failed",
     }
+}
+
+/// The line under the table while PostgreSQL runs: how a Laravel `.env`
+/// connects to it. `root` is not a superuser (ADR 0023, "Access").
+pub fn postgres_connection(port: u16) -> String {
+    format!(
+        "postgres: 127.0.0.1:{port}, user root, no password (DB_CONNECTION=pgsql, \
+         DB_HOST=127.0.0.1, DB_PORT={port}, DB_USERNAME=root)"
+    )
 }
 
 /// The line under the table for a failed service: why it failed.
@@ -1366,11 +1403,12 @@ const UNINSTALL_MAY_HAVE_RUN: &str = "Some steps may already have run with admin
 pub fn uninstall_all_plan(data_dir: &Path, deletable: bool, delete: bool) -> String {
     let data = match (deletable, delete) {
         (true, true) => format!(
-            "The data folder {} will be deleted once every step has succeeded.",
+            "The data folder {} will be deleted once every step has succeeded, with the \
+             databases in it (databases/).",
             data_dir.display()
         ),
         (true, false) => format!(
-            "The data folder stays unless you choose to delete it: {}",
+            "The data folder stays, with the databases in it, unless you choose to delete it: {}",
             data_dir.display()
         ),
         (false, _) => format!(
@@ -1402,7 +1440,8 @@ pub fn uninstall_all_plan(data_dir: &Path, deletable: bool, delete: bool) -> Str
         "  - the setting that sends .test names to Marsa (/etc/resolver/test)".to_owned(),
         "  - the trust in Marsa's certificate authority, for all users and for you".to_owned(),
         "  - the start at login".to_owned(),
-        "Then the Marsa daemon stops, with Caddy, PHP, and the DNS server. macOS asks for an \
+        "Then the Marsa daemon stops, with Caddy, PHP, PostgreSQL, and the DNS server. macOS \
+         asks for an \
          administrator password, and may ask you to approve taking the trust away. Quit the \
          Marsa window and the menu-bar icon first: they would start the daemon again."
             .to_owned(),
@@ -1425,7 +1464,7 @@ pub const UNINSTALL_ALL_STARTED_WINDOWS: &str = "Removing Marsa. Windows will as
      rights (UAC) once; if no prompt shows, look for it in the taskbar.";
 /// The data folder question, after the daemon stopped. No is the default.
 pub const UNINSTALL_ALL_DATA_QUESTION: &str =
-    "Delete the data folder (runtimes, settings, the CA)? [y/N] ";
+    "Delete the data folder (runtimes, settings, the CA, and every database in databases/)? [y/N] ";
 /// When a step failed: the step lines above say which.
 pub const UNINSTALL_ALL_INCOMPLETE: &str = "Some steps failed, so Marsa is not fully removed. \
      Running \"marsa uninstall --all\" again is safe: each step checks what is already done.";
@@ -1992,6 +2031,13 @@ mod tests {
         "dns_not_running",
         "caddy_orphan_stuck",
         "caddy_other_marsa",
+        "service_port_busy",
+        "service_data_dir_busy",
+        "service_port_unknown",
+        "postgres_not_installed",
+        "postgres_init_failed",
+        "postgres_start_timeout",
+        "postgres_unsupported_platform",
         "service_managed_by_sites",
         "php_fpm_orphan_stuck",
         "exited",
@@ -2227,6 +2273,24 @@ mod tests {
             assert!(CODES.contains(&code), "{code} is missing from CODES");
             assert!(known(code, &Details::default()).is_some(), "{code}");
         }
+    }
+
+    /// The PostgreSQL refusals name it and say what to do.
+    #[test]
+    fn postgres_messages_name_it_and_what_to_do() {
+        let postgres = Details {
+            service: Some("postgres"),
+            ..Details::default()
+        };
+        assert_eq!(
+            message("service_port_busy", &postgres),
+            "Another program uses the port PostgreSQL needs, and Marsa stops nothing. Quit it, \
+             or set another port in global.toml ([postgres] port), then try again. Run \
+             \"marsa logs postgres\" to see which program."
+        );
+        let busy = message("service_data_dir_busy", &postgres);
+        assert!(busy.starts_with("Another PostgreSQL server"), "{busy}");
+        assert!(message("postgres_not_installed", &postgres).contains("marsa install postgres"));
     }
 
     #[test]

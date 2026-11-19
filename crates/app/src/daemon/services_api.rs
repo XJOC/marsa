@@ -1,8 +1,9 @@
-//! The services and logs routes. Task M3-07; the php-fpm pools since M4-23.
+//! The services and logs routes. Task M3-07; the php-fpm pools since M4-23;
+//! PostgreSQL since M6-03.
 //!
 //! | Route | Answer |
 //! | --- | --- |
-//! | `GET /v1/services` | `Vec<ServiceStatus>`: Caddy, `dns`, then each pool |
+//! | `GET /v1/services` | `Vec<ServiceStatus>`: Caddy, `dns`, PostgreSQL when installed, then each pool |
 //! | `POST /v1/services/{id}/{action}` | `ServiceStatus` after the action |
 //! | `GET /v1/logs/{id}` | `Vec<LogLine>`, the recent lines |
 //! | `GET /v1/logs/{id}?follow=true` | SSE: the recent lines, then new ones |
@@ -17,6 +18,13 @@
 //! `409 service_busy`. The usual one is the start of Caddy with the daemon
 //! (task M5-16): `marsa services stop caddy` starts the daemon itself, and
 //! its stop then runs after that start instead of failing.
+//!
+//! PostgreSQL (`postgres`) has the same actions. A start or restart that
+//! ran turns it on in `global.toml` (`[postgres] enabled = true`), so it
+//! starts with the daemon; a stop turns it off (ADR 0023, section 5); a
+//! refusal or a dropped start changes nothing (`PostgresManager::
+//! run_and_save`). A stop drops a start that runs, and those before it in
+//! line, instead of waiting for them.
 //!
 //! Every error, the extractors' own included, is an `ErrorBody`.
 
@@ -40,6 +48,7 @@ use tokio_stream::{Stream, StreamExt as _};
 
 use super::api::HttpError;
 use super::caddy::{ActionError, CADDY_ID, CaddyManager};
+use super::databases::{self, POSTGRES_ID, PostgresManager};
 use super::dns::{DNS_ID, DnsService};
 use super::state::Daemon;
 use super::supervisor::{ServiceRuntime, lock};
@@ -57,6 +66,14 @@ pub const MANAGED_BY_SITES: &str = "service_managed_by_sites";
 /// (`marsa_core::client`).
 pub const ACTION_WAIT: Duration = Duration::from_secs(20);
 
+/// How long an action on PostgreSQL waits for another one to end before
+/// `409 service_busy`. A stop never waits for a start (it drops it), so
+/// the longest it waits for is another stop: SIGINT and SIGQUIT, 10 s
+/// each, then a kill, or a start's own stop after its ready timeout. A
+/// start that waits for a first start (up to about 3 minutes of `initdb`
+/// and single-user mode) gets `service_busy`.
+pub const POSTGRES_ACTION_WAIT: Duration = Duration::from_secs(30);
+
 /// A `:` comment this often on a quiet stream, as on `/v1/events`: the
 /// client gives up after 45 s without a byte.
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
@@ -72,6 +89,12 @@ pub fn routes() -> Router<Arc<Daemon>> {
 async fn services(State(daemon): State<Arc<Daemon>>) -> Json<Vec<ServiceStatus>> {
     let mut services = vec![daemon.caddy.status()];
     services.extend(daemon.dns.status());
+    // It reads `runtimes/postgres/`.
+    let worker = Arc::clone(&daemon);
+    let listed = tokio::task::spawn_blocking(move || worker.postgres.listed(&worker.data_dir));
+    if listed.await.unwrap_or(true) {
+        services.push(daemon.postgres.status());
+    }
     services.extend(daemon.pools.statuses());
     Json(services)
 }
@@ -85,6 +108,9 @@ async fn service_action(
     let action: ServiceAction = action.parse().map_err(|err: UnknownAction| {
         HttpError::new(StatusCode::BAD_REQUEST, err.code(), err.to_string())
     })?;
+    if let Service::Postgres(_) = service {
+        return postgres_action(&daemon, action).await.map(Json);
+    }
     if let Service::Dns(dns) = service {
         tracing::info!(service = %id, %action, "service action");
         return Ok(Json(
@@ -110,6 +136,50 @@ async fn service_action(
             Err(action_error(&err))
         }
     }
+}
+
+/// `action` on PostgreSQL, then `[postgres] enabled` as it leaves it
+/// (`PostgresManager::run_and_save`). In a task of its own, so a client
+/// that hangs up cannot stop it between the action and the write.
+async fn postgres_action(
+    daemon: &Arc<Daemon>,
+    action: ServiceAction,
+) -> Result<ServiceStatus, HttpError> {
+    tracing::info!(service = POSTGRES_ID, %action, "service action");
+    let worker = Arc::clone(daemon);
+    let task = tokio::spawn(async move {
+        let postgres = &worker.postgres;
+        postgres
+            .run_and_save(&worker, action, POSTGRES_ACTION_WAIT)
+            .await
+    });
+    match task.await {
+        Ok(Ok(status)) => Ok(status),
+        Ok(Err(err)) => {
+            tracing::warn!(service = POSTGRES_ID, %action, code = err.code(), error = %err, "service action failed");
+            Err(postgres_error(&err))
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "the postgres action task failed");
+            let message = "the postgres action task failed";
+            Err(HttpError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                message,
+            ))
+        }
+    }
+}
+
+fn postgres_error(err: &databases::ActionError) -> HttpError {
+    use databases::ActionError as E;
+    let status = match err {
+        E::Unsupported | E::NotInstalled(_) | E::InUse(_) | E::Busy => StatusCode::CONFLICT,
+        E::Config(_) | E::Init(_) | E::ProgramNotAbsolute(_) | E::Internal => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    HttpError::new(status, err.code(), err.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,6 +265,9 @@ fn line_event(line: &LogLine) -> SseEvent {
 /// A managed service.
 enum Service<'a> {
     Caddy(&'a CaddyManager),
+    /// Known whether or not a version is installed: an action then says
+    /// `postgres_not_installed`.
+    Postgres(&'a PostgresManager),
     /// The DNS server for `.test`, inside the daemon.
     Dns(&'a DnsService),
     /// A php-fpm pool: the routes only read it.
@@ -206,16 +279,20 @@ impl Service<'_> {
     fn recent_logs(&self) -> Vec<LogLine> {
         match self {
             Service::Caddy(caddy) => caddy.recent_logs(),
+            Service::Postgres(postgres) => postgres.recent_logs(),
             Service::Dns(dns) => dns.recent_logs(),
             Service::Pool(runtime) => lock(runtime).logs.recent(),
         }
     }
 }
 
-/// Service `id`: Caddy, or a php-fpm pool started in this run.
+/// Service `id`: Caddy, PostgreSQL, or a php-fpm pool started in this run.
 fn service<'a>(daemon: &'a Daemon, id: &str) -> Result<Service<'a>, HttpError> {
     if id == CADDY_ID {
         return Ok(Service::Caddy(&daemon.caddy));
+    }
+    if id == POSTGRES_ID {
+        return Ok(Service::Postgres(&daemon.postgres));
     }
     if id == DNS_ID && daemon.dns.listed() {
         return Ok(Service::Dns(&daemon.dns));
@@ -424,6 +501,86 @@ mod tests {
         }
         // The actions changed nothing.
         assert_eq!(lock(&runtime).status.state, ServiceState::Running);
+    }
+
+    /// PostgreSQL is listed once a version is installed, has its actions
+    /// and its logs, and a stop turns it off in `global.toml`.
+    #[tokio::test]
+    async fn postgres_is_listed_when_installed_and_a_stop_turns_it_off() {
+        use crate::daemon::api::router;
+        use crate::daemon::auth::AuthConfig;
+        use axum::http::Request;
+        use marsa_core::config::{self, ConfigPaths, GlobalConfig, ServerSettings};
+        use marsa_core::platform::daemon_file::{Token, daemon_authority};
+        use marsa_core::types::{ErrorBody, ServiceState};
+        use tower::ServiceExt as _;
+
+        const PORT: u16 = 51237;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let global = ConfigPaths::in_dir(&data).global;
+        let on = GlobalConfig {
+            postgres: ServerSettings {
+                default: Some("18".into()),
+                enabled: true,
+                port: None,
+            },
+            ..GlobalConfig::default()
+        };
+        config::save_global(&global, &on).unwrap();
+        let token = Token::generate().unwrap();
+        let bearer = token.bearer_header();
+        let daemon = Arc::new(Daemon::new(data.clone()));
+        let app = router(daemon.clone(), AuthConfig::new(Arc::new(token), PORT));
+        let send = async |method: &str, path: &str| {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", daemon_authority(PORT))
+                .header("authorization", &bearer)
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            (response.status(), text(response).await)
+        };
+        let ids = async || {
+            let (status, body) = send("GET", "/v1/services").await;
+            assert_eq!(status, StatusCode::OK);
+            let list: Vec<ServiceStatus> = serde_json::from_str(&body).unwrap();
+            list.into_iter().map(|s| s.id).collect::<Vec<_>>()
+        };
+
+        // Not installed: not listed, but known.
+        assert_eq!(ids().await, ["caddy"]);
+        let (status, body) = send("GET", "/v1/logs/postgres").await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "[]"));
+
+        // A stop of a PostgreSQL that does not run: stopped, and off.
+        let (status, body) = send("POST", "/v1/services/postgres/stop").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let stopped: ServiceStatus = serde_json::from_str(&body).unwrap();
+        assert_eq!(stopped.state, ServiceState::Stopped);
+        assert!(!config::load_global(&global).unwrap().postgres.enabled);
+
+        // Installed (an empty version folder): listed, stopped.
+        std::fs::create_dir_all(data.join("runtimes/postgres/18.7.0")).unwrap();
+        assert_eq!(ids().await, ["caddy", "postgres"]);
+
+        // A start without its program: refused, and still off.
+        let (status, body) = send("POST", "/v1/services/postgres/start").await;
+        let error: ErrorBody = serde_json::from_str(&body).unwrap();
+        let code = if cfg!(windows) {
+            "postgres_unsupported_platform"
+        } else {
+            "postgres_not_installed"
+        };
+        assert_eq!(
+            (status, error.error.code.as_str()),
+            (StatusCode::CONFLICT, code)
+        );
+        assert!(!config::load_global(&global).unwrap().postgres.enabled);
+        let (status, body) = send("POST", "/v1/services/postgres/kill").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 
     #[tokio::test]

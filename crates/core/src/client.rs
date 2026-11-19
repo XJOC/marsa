@@ -64,6 +64,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// another action on the service, then runs this one; a restart that stops
 /// an old Caddy first takes about 23 s. About 43 s in all.
 const SERVICE_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
+/// The same for PostgreSQL (`postgres`, task M6-03). The daemon waits up to
+/// 30 s for another action, a restart stops it first (SIGINT and SIGQUIT,
+/// up to about 23 s), and a first start reads the port (lsof, up to 8 s),
+/// runs `initdb` (up to 120 s) and single-user mode (up to 60 s), waits up
+/// to 15 s for the server, and stops one that never answered (23 s): about
+/// 279 s in all.
+const POSTGRES_ACTION_TIMEOUT: Duration = Duration::from_secs(300);
 /// For `DELETE /v1/runtimes/{tool}/{version}`: a Node.js folder holds
 /// thousands of files, and a virus scanner may slow their delete.
 const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -222,7 +229,7 @@ impl DaemonClient {
         action: ServiceAction,
     ) -> Result<ServiceStatus, ClientError> {
         let path = ["v1", "services", id, action.as_str()];
-        self.call(Method::POST, &path, SERVICE_ACTION_TIMEOUT).await
+        self.call(Method::POST, &path, action_timeout(id)).await
     }
 
     /// `GET /v1/logs/{id}`: the recent lines.
@@ -314,7 +321,7 @@ impl DaemonClient {
     ///   it: the default in `global.toml` while another version is
     ///   installed, sites set to it in `sites.toml`, or the running Caddy;
     /// - `sites_lose_php` (409) as [`ClientError::InUse`] too: it is the
-    ///   only PHP and the default, and the sites that run it, which would
+    ///   only PHP installed, and the sites that run it, which would
     ///   have no PHP after it, are in `sites_left_without_php`;
     /// - `install_busy` (409) while an install or another uninstall runs;
     /// - `version_not_installed` (404) when no installed version matches;
@@ -683,6 +690,14 @@ pub async fn ensure_running_with(
     marsad: &Path,
 ) -> Result<DaemonClient, ClientError> {
     ensure(data_dir, || Ok(marsad.to_path_buf()), read_login_times).await
+}
+
+/// How long the client waits for an action on the service `id`.
+fn action_timeout(id: &str) -> Duration {
+    match id {
+        "postgres" => POSTGRES_ACTION_TIMEOUT,
+        _ => SERVICE_ACTION_TIMEOUT,
+    }
 }
 
 /// Stops the running daemon (`marsa daemon stop`): asks it to shut down,
@@ -1083,6 +1098,16 @@ mod tests {
 
     use super::*;
     use crate::platform::daemon_file::{Token, remove_daemon_file, write_daemon_file};
+
+    /// PostgreSQL's first start runs `initdb`, so its actions get longer.
+    #[test]
+    fn a_postgres_action_waits_longer_than_its_worst_case() {
+        assert_eq!(action_timeout("caddy"), SERVICE_ACTION_TIMEOUT);
+        // Waiting 30, stopping 23, then lsof 8, initdb 120, single-user 60,
+        // ready 15, and the stop of a server that never answered, 23.
+        let worst = Duration::from_secs(30 + 23 + 8 + 120 + 60 + 15 + 23);
+        assert!(action_timeout("postgres") > worst);
+    }
 
     #[test]
     fn only_an_older_daemon_is_replaced() {

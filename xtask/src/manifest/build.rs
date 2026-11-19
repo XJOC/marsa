@@ -118,8 +118,8 @@ pub fn is_spc_platform(platform: Platform) -> bool {
 /// The upstream proof a file needs before its sha256 goes in the manifest.
 /// The database servers of M6 each need the proof of their own source (ADR
 /// 0023, section 3); without it the build stops. An `Md5` sum is never
-/// accepted alone: MySQL (M6-02 part B2) gets a variant that needs Oracle's
-/// GPG signature as well as the MD5.
+/// accepted alone: only [`Proof::OracleSignature`] takes one, together with
+/// Oracle's GPG signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Proof {
     /// The upstream sum if the source publishes one `build` knows. Without
@@ -129,6 +129,11 @@ enum Proof {
     /// The theseus-rs `<archive>.sha256` ([`Layout::Single`]) and no other
     /// source, of the recipe's own URL. PostgreSQL.
     TheseusSha256,
+    /// Oracle's GPG signature `<archive>.asc` by the pinned key, and its
+    /// `<archive>.md5`, both, of the recipe's own URL on `cdn.mysql.com`
+    /// ([`check_oracle`]). MySQL: task M6-05 gives `Runtime::Mysql` this
+    /// proof; until then `cargo xtask manifest check-mysql` runs it.
+    OracleSignature,
 }
 
 impl Proof {
@@ -148,10 +153,14 @@ impl Proof {
     /// The sum is compared after the download.
     fn allows(self, url: &str, template: Option<&str>, sums: Option<&SumFile>) -> Result<()> {
         match (self, sums) {
-            (_, Some(sums)) if sums.algorithm == Algorithm::Md5 => bail!(
-                "its only upstream sum is the MD5 {}, and an MD5 is never accepted alone",
-                sums.url
-            ),
+            (Proof::SumIfPublished | Proof::TheseusSha256, Some(sums))
+                if sums.algorithm == Algorithm::Md5 =>
+            {
+                bail!(
+                    "its only upstream sum is the MD5 {}, and an MD5 is never accepted alone",
+                    sums.url
+                )
+            }
             (Proof::SumIfPublished, _) => Ok(()),
             // An override could name another theseus-rs archive, of another
             // version or target, with its own matching `.sha256`.
@@ -174,18 +183,141 @@ impl Proof {
                 "no upstream sum that `manifest build` knows, and only the theseus-rs \
                  `.sha256` is accepted"
             ),
+            // Another signed Oracle archive, such as an older MySQL with
+            // known holes, would pass the signature check too.
+            (Proof::OracleSignature, _) if template != Some(url) => bail!(
+                "it is not the recipe's URL {}, and only that Oracle archive is accepted",
+                template.unwrap_or("(none)")
+            ),
+            (Proof::OracleSignature, Some(sums))
+                if sums.source == Source::Oracle
+                    && sums.layout == Layout::Single
+                    && sums.algorithm == Algorithm::Md5 =>
+            {
+                Ok(())
+            }
+            (Proof::OracleSignature, _) => bail!(
+                "only an Oracle MySQL 8.4 archive on cdn.mysql.com, with its `.md5` and its \
+                 signature `.asc`, is accepted"
+            ),
         }
     }
 
     /// Whether the file is kept in the cache after the build: only when a
     /// later check reads it (PHP, the sha512 of Caddy). A file this proof
-    /// checks by its sha256 alone is hashed on the way and never written.
+    /// checks by its sha256 alone is hashed on the way and never written,
+    /// and a MySQL archive is deleted after its checks.
     fn keeps_file(self) -> bool {
         match self {
             Proof::SumIfPublished => true,
-            Proof::TheseusSha256 => false,
+            Proof::TheseusSha256 | Proof::OracleSignature => false,
         }
     }
+}
+
+/// The programs behind Oracle's proof: `oracle::System` in the build, a
+/// stub in tests.
+pub trait OracleCheck {
+    /// Checks that `signature`, the `.asc`, is Oracle's good signature on
+    /// `file`, by the pinned key.
+    fn signature(&self, signature: &Path, file: &Path) -> Result<()>;
+    /// The MD5 of `file`.
+    fn md5(&self, file: &Path) -> Result<[u8; 16]>;
+}
+
+/// A file whose proof passed: what the manifest records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checked {
+    pub url: String,
+    pub sha256: [u8; 32],
+    pub size: u64,
+}
+
+/// Oracle's whole proof for the MySQL archive at `url`
+/// ([`Proof::OracleSignature`]), with `url` as the recipe's own URL:
+///
+/// 1. `url` is an Oracle MySQL 8.4 archive, checked before any download;
+/// 2. its `.md5` and its signature `.asc` are fetched first, so without
+///    either nothing large is downloaded;
+/// 3. the archive is downloaded to `work` and hashed on the way;
+/// 4. the signature is good and by the pinned key, then its MD5 matches,
+///    then its sha256 is still the one hashed on the way, so all three are
+///    of the same bytes.
+///
+/// The archive and its `.asc` are deleted after, whatever the result: they
+/// are 80 to 834 MB.
+///
+/// # Errors
+///
+/// The first step that fails, with the URL.
+pub async fn check_oracle(
+    fetch: &impl Fetch,
+    url: &str,
+    work: &Path,
+    check: &impl OracleCheck,
+) -> Result<Checked> {
+    let sums = sum_file_for(url);
+    Proof::OracleSignature
+        .allows(url, Some(url), sums.as_ref())
+        .with_context(|| url.to_owned())?;
+    let sums = sums.with_context(|| format!("{url} has no Oracle `.md5`"))?;
+    let md5_text = fetch_bytes(fetch, &sums.url, 4096)
+        .await
+        .with_context(|| format!("{url}: Oracle's md5"))?;
+    let md5_text =
+        String::from_utf8(md5_text).with_context(|| format!("{} is not text", sums.url))?;
+    let expected = sums.find(&md5_text).with_context(|| sums.url.clone())?;
+    let signature_url = format!("{url}.asc");
+    let signature = fetch_bytes(fetch, &signature_url, 64 * 1024)
+        .await
+        .with_context(|| {
+            format!("{url}: Oracle's signature, without which an MD5 is never accepted")
+        })?;
+
+    fs::create_dir_all(work).with_context(|| format!("cannot create {}", work.display()))?;
+    // Fixed names, so a run that was killed leaves nothing the next one
+    // does not overwrite or delete.
+    let path = work.join("archive");
+    let asc = work.join("archive.asc");
+    let remove = || {
+        for leftover in [&path, &asc] {
+            if let Err(err) = fs::remove_file(leftover)
+                && err.kind() != io::ErrorKind::NotFound
+            {
+                println!("    warning: cannot delete {}: {err}", leftover.display());
+            }
+        }
+    };
+    remove();
+    let checked = async {
+        fs::write(&asc, &signature).with_context(|| format!("cannot write {}", asc.display()))?;
+        let file = temp_download(fetch, &[url.to_owned()], &path).await?;
+        check
+            .signature(&asc, &path)
+            .context("Oracle's signature check failed")?;
+        let md5 = check.md5(&path)?;
+        ensure!(
+            md5.as_slice() == expected.as_slice(),
+            "md5 is {}, but {} says {}",
+            hex(&md5),
+            sums.url,
+            hex(&expected)
+        );
+        let (now, _) = hash_file(&path)?;
+        ensure!(
+            now == file.sha256,
+            "{} changed on disk during its checks",
+            path.display()
+        );
+        Ok(Checked {
+            url: file.url,
+            sha256: file.sha256,
+            size: file.size,
+        })
+    }
+    .await;
+    remove();
+    checked.with_context(|| url.to_owned())
 }
 
 /// The result: the manifest, one line per file for the report, and warnings.
@@ -251,6 +383,12 @@ pub async fn build(
                             .allows(url, template.as_deref(), sums.as_ref())
                             .with_context(|| format!("{what}: {url}"))?;
                     }
+                    // Its files only `check_oracle` proves; task M6-05 calls
+                    // it here. Until then, refused before the download.
+                    ensure!(
+                        proof != Proof::OracleSignature,
+                        "{what}: the build loop does not run Oracle's proof yet"
+                    );
                     let file = if proof.keeps_file() {
                         let dir = cache
                             .join(runtime.dir_name())
@@ -295,7 +433,9 @@ pub async fn build(
                                     (sha512.to_vec(), "upstream sha512 matches")
                                 }
                                 // `Proof::allows` refused it before the
-                                // download.
+                                // download, except for `OracleSignature`,
+                                // whose files only `check_oracle` proves
+                                // (task M6-05 calls it here).
                                 Algorithm::Md5 => {
                                     bail!("{what}: an MD5 is never accepted alone")
                                 }
@@ -446,6 +586,31 @@ async fn hashed_download(fetch: &impl Fetch, urls: &[String]) -> Result<Download
         url,
         sha256: sink.hasher.finalize().into(),
         size: sink.size,
+    })
+}
+
+/// Downloads the first URL that answers to `path`, hashing on the way, for
+/// checks that read the file before the caller deletes it. A URL that fails
+/// leaves a partial file, which the next one overwrites.
+async fn temp_download(fetch: &impl Fetch, urls: &[String], path: &Path) -> Result<Downloaded> {
+    let (url, sink) = first_answer(fetch, urls, |url| {
+        let file =
+            File::create(path).with_context(|| format!("cannot create {}", path.display()))?;
+        Ok(HashSink::new(url, Some((file, path.to_path_buf()))))
+    })
+    .await?;
+    let HashSink {
+        file, hasher, size, ..
+    } = sink;
+    if let Some((mut file, _)) = file {
+        file.flush()
+            .with_context(|| format!("cannot write {}", path.display()))?;
+    }
+    Ok(Downloaded {
+        path: Some(path.to_path_buf()),
+        url,
+        sha256: hasher.finalize().into(),
+        size,
     })
 }
 
@@ -1173,5 +1338,154 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             assert!(err.to_string().contains("must be greater"));
         }
         assert!(check_serial(0, None).is_err());
+    }
+
+    const MYSQL: &str = "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.13-linux-glibc2.28-x86_64-minimal.tar.xz";
+    const MYSQL_NAME: &str = "mysql-8.4.13-linux-glibc2.28-x86_64-minimal.tar.xz";
+    const BODY: &[u8] = b"the mysql archive";
+    const MD5: [u8; 16] = [7; 16];
+
+    /// Oracle's checks, answering what it was given, and what it was asked.
+    struct StubOracle {
+        signature_ok: bool,
+        md5: [u8; 16],
+        /// The `.asc` and archive bytes it was asked about.
+        seen: std::sync::Mutex<Vec<(Vec<u8>, Vec<u8>)>>,
+    }
+
+    impl StubOracle {
+        fn new(signature_ok: bool, md5: [u8; 16]) -> Self {
+            Self {
+                signature_ok,
+                md5,
+                seen: std::sync::Mutex::default(),
+            }
+        }
+    }
+
+    impl OracleCheck for StubOracle {
+        fn signature(&self, signature: &Path, file: &Path) -> Result<()> {
+            let read = (fs::read(signature)?, fs::read(file)?);
+            self.seen.lock().expect("lock").push(read);
+            ensure!(self.signature_ok, "BADSIG");
+            Ok(())
+        }
+
+        fn md5(&self, _file: &Path) -> Result<[u8; 16]> {
+            Ok(self.md5)
+        }
+    }
+
+    /// The archive, its `.md5` (of [`MD5`]), and its `.asc`.
+    fn oracle_fetch() -> MemoryFetch {
+        let md5 = format!("{}  {MYSQL_NAME}\n", hex(&MD5));
+        MemoryFetch::new()
+            .with(
+                MYSQL,
+                Reply::Chunks(vec![BODY[..4].to_vec(), BODY[4..].to_vec()]),
+            )
+            .with(
+                &format!("{MYSQL}.md5"),
+                Reply::Chunks(vec![md5.into_bytes()]),
+            )
+            .with(
+                &format!("{MYSQL}.asc"),
+                Reply::Chunks(vec![b"signature".to_vec()]),
+            )
+    }
+
+    /// The work folder holds nothing after a check.
+    fn empty(dir: &Path) -> bool {
+        fs::read_dir(dir).map_or(true, |mut entries| entries.next().is_none())
+    }
+
+    #[tokio::test]
+    async fn oracle_archive_with_a_good_signature_and_md5_is_checked() {
+        let work = tempfile::tempdir().expect("tempdir");
+        // What a killed run left.
+        fs::write(work.path().join("archive"), b"stale").expect("write");
+        let oracle = StubOracle::new(true, MD5);
+        let checked = check_oracle(&oracle_fetch(), MYSQL, work.path(), &oracle)
+            .await
+            .expect("both proofs pass");
+        assert_eq!(
+            checked,
+            Checked {
+                url: MYSQL.to_owned(),
+                sha256: Sha256::digest(BODY).into(),
+                size: BODY.len() as u64,
+            }
+        );
+        let seen = oracle.seen.lock().expect("lock").clone();
+        assert_eq!(seen, [(b"signature".to_vec(), BODY.to_vec())]);
+        assert!(empty(work.path()), "the archive and its .asc are deleted");
+    }
+
+    #[tokio::test]
+    async fn oracle_archive_needs_both_proofs() {
+        // A bad signature, then a good signature with another MD5.
+        for (oracle, expected) in [
+            (
+                StubOracle::new(false, MD5),
+                "Oracle's signature check failed",
+            ),
+            (StubOracle::new(true, [8; 16]), "md5 is 0808"),
+        ] {
+            let work = tempfile::tempdir().expect("tempdir");
+            let err = check_oracle(&oracle_fetch(), MYSQL, work.path(), &oracle)
+                .await
+                .expect_err("refused");
+            assert!(format!("{err:#}").contains(expected), "{err:#}");
+            assert!(empty(work.path()), "deleted after a refusal too");
+        }
+        // Without the `.asc` or the `.md5`: refused, and the archive is
+        // never downloaded.
+        for (missing, expected) in [("asc", "Oracle's signature"), ("md5", "Oracle's md5")] {
+            let fetch = oracle_fetch().with(&format!("{MYSQL}.{missing}"), Reply::Status(404));
+            let work = tempfile::tempdir().expect("tempdir");
+            let oracle = StubOracle::new(true, MD5);
+            let err = check_oracle(&fetch, MYSQL, work.path(), &oracle)
+                .await
+                .expect_err("refused");
+            assert!(format!("{err:#}").contains(expected), "{err:#}");
+            assert!(!fetch.requests().iter().any(|url| url == MYSQL));
+            assert!(oracle.seen.lock().expect("lock").is_empty());
+        }
+    }
+
+    /// Only an Oracle MySQL 8.4 archive, before any request.
+    #[tokio::test]
+    async fn oracle_proof_takes_oracle_archives_only() {
+        for url in [
+            "https://cdn.mysql.com/Downloads/MySQL-9.7/mysql-9.7.4-linux-x64.tar.xz",
+            "https://example.org/mysql-8.4.13.tar.xz",
+            "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.7.0/postgresql-18.7.0-x86_64-pc-windows-msvc.zip",
+            "https://github.com/XJOC/marsa/releases/download/valkey-8.1.11-r1/valkey.tar.gz",
+        ] {
+            let fetch = oracle_fetch();
+            let work = tempfile::tempdir().expect("tempdir");
+            let err = check_oracle(&fetch, url, work.path(), &StubOracle::new(true, MD5))
+                .await
+                .expect_err("refused");
+            assert!(
+                format!("{err:#}").contains("only an Oracle MySQL 8.4 archive"),
+                "{err:#}"
+            );
+            assert!(fetch.requests().is_empty());
+        }
+        // In the build, a URL that is not the recipe's.
+        let sums = sum_file_for(MYSQL);
+        let err = Proof::OracleSignature
+            .allows(
+                MYSQL,
+                Some("https://cdn.mysql.com/Downloads/MySQL-8.4/x.tar.xz"),
+                sums.as_ref(),
+            )
+            .expect_err("another archive");
+        assert!(
+            err.to_string().contains("only that Oracle archive"),
+            "{err}"
+        );
+        assert!(!Proof::OracleSignature.keeps_file());
     }
 }

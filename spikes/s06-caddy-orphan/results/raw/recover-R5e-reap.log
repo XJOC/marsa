@@ -1,0 +1,10 @@
+INSPECT pidfile=ours(pid=36037) admin=no-reply app_port=busy(s06(36045)) admin_port=free
+ADMIN_OWNER None
+TIMING pidfile_ms=3.1 admin_ms=0.4 port_ms=27.5
+DECISION reap(pid=Some(36037))
+STEP t_ms=31 decided 
+STEP t_ms=31 stop_api error=error sending request for url (http://127.0.0.1:2106/stop)
+STEP t_ms=2054 sigterm pid=36037 sent=true
+REFUSED signal=KILL pid=36037 found=None
+STEP t_ms=7073 sigkill pid=36037 sent=false
+Error: the ports are still busy after SIGKILL

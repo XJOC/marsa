@@ -460,6 +460,10 @@ mod tests {
             self.fake.is_link(path)
         }
 
+        fn is_root_only_dir(&self, dir: &Path) -> bool {
+            self.fake.is_root_only_dir(dir)
+        }
+
         fn is_read_only(&self, path: &Path) -> bool {
             self.fake.is_read_only(path)
         }
