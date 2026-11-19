@@ -29,9 +29,8 @@ use super::spawn::sibling_program;
 pub const LABEL: &str = "dev.marsa.Marsa.tray";
 /// The program that starts at login. It sits next to `marsad`.
 pub const TRAY_PROGRAM: &str = "marsa-tray";
-/// The mode of the file on Unix. launchd refuses a LaunchAgent that other
-/// users can write to.
-#[cfg(unix)]
+/// The mode of the file on Unix (ignored on Windows). launchd refuses a
+/// LaunchAgent that other users can write to.
 const FILE_MODE: u32 = 0o644;
 /// The real files are under 1 KiB. A longer one is not ours.
 const MAX_LEN: u64 = 64 * 1024;

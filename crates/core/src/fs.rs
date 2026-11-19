@@ -60,6 +60,7 @@ fn write_new(temp: &Path, bytes: &[u8], mode: Option<u32>) -> io::Result<()> {
         other => other?,
     };
     file.write_all(bytes)?;
+    // `#[cfg(unix)]` outside `platform`: mode bits exist only on Unix, std only.
     #[cfg(unix)]
     if let Some(mode) = mode {
         use std::os::unix::fs::PermissionsExt;
@@ -74,6 +75,7 @@ fn write_new(temp: &Path, bytes: &[u8], mode: Option<u32>) -> io::Result<()> {
 pub fn create_new(path: &Path, mode: Option<u32>) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
+    // `#[cfg(unix)]` outside `platform`: mode bits exist only on Unix, std only.
     #[cfg(unix)]
     if let Some(mode) = mode {
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, mode);
