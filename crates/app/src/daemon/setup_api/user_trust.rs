@@ -396,7 +396,7 @@ fn not_absolute(home: &Path, trust_dir: &Path) -> Option<&'static str> {
 
 /// The trust folder, made for this user only if it is missing. One that is
 /// there must pass [`existing_private_dir`].
-fn private_dir(dir: &Path) -> Result<(), String> {
+pub(super) fn private_dir(dir: &Path) -> Result<(), String> {
     if existing_private_dir(dir)? {
         return Ok(());
     }
@@ -460,7 +460,7 @@ fn close_to_others(_dir: &Path, _meta: &fs::Metadata) -> Result<(), &'static str
 }
 
 /// Writes `pem` to `pending` for `security`: see [`write_atomic`].
-fn write_pending(pending: &Path, pem: &str) -> Result<(), String> {
+pub(super) fn write_pending(pending: &Path, pem: &str) -> Result<(), String> {
     write_atomic(pending, pem.as_bytes())
         .map_err(|err| format!("cannot write {}: {}", pending.display(), err.kind()))
 }
@@ -482,8 +482,8 @@ fn keep_record(pending: &Path, record: &Path) {
     }
 }
 
-/// Deletes `pending` after a trust that failed.
-fn discard(pending: &Path) {
+/// Deletes `pending` after a trust that failed, or after the NSS step.
+pub(super) fn discard(pending: &Path) {
     match fs::remove_file(pending) {
         Ok(()) => {}
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
@@ -561,7 +561,7 @@ pub(crate) fn failed(op: &str, code: &str, message: impl Into<String>) -> OpResu
     }
 }
 
-fn result(op: &str, status: OpStatus) -> OpResult {
+pub(super) fn result(op: &str, status: OpStatus) -> OpResult {
     OpResult {
         op: op.to_owned(),
         status,
@@ -758,7 +758,7 @@ fn is_sha256(text: &str) -> bool {
 }
 
 /// The base64 of the certificate in `pem`, without line breaks.
-fn body(pem: &str) -> Option<String> {
+pub(super) fn body(pem: &str) -> Option<String> {
     let start = pem.find(PEM_BEGIN)? + PEM_BEGIN.len();
     let end = start + pem[start..].find(PEM_END)?;
     let body: String = pem[start..end]
