@@ -56,6 +56,9 @@
 //!    with `security add-trusted-cert` against the login keychain, behind the
 //!    dialog macOS shows (ADR 0015, [`user_trust`]). Its result goes into the
 //!    report as `trust_install`, after the helper's results.
+//! 6. **NSS (Linux):** under the same condition, `marsad` adds the CA root
+//!    to the user's NSS databases for Chrome and Firefox ([`nss`], ADR 0014),
+//!    as `nss_install`, or skips it as `nss_tool_missing` without `certutil`.
 //!
 //! One setup at a time: a second request gets 409 `setup_running`, and one
 //! during an uninstall gets 409 `uninstall_running`. On Windows the helper
@@ -71,6 +74,7 @@
 
 pub mod hosts;
 pub mod linux_dns;
+pub mod nss;
 pub mod pkexec;
 pub mod user_trust;
 pub mod windows;
@@ -163,8 +167,8 @@ const CA_POLL: Duration = Duration::from_millis(100);
 /// and `security verify-cert` at [`CHECK_LIMIT`] each, `osascript` and
 /// `security add-trusted-cert` at [`PROMPT_LIMIT`] each, and [`PIPE_GRACE`]
 /// after each of these programs. Linux stays under it: up to four
-/// `systemctl` checks, and two `pkexec` prompts when the helper chooses the
-/// hosts file ([`linux_dns`]). A client has to wait longer:
+/// `systemctl` checks, two `pkexec` prompts when the helper chooses the
+/// hosts file ([`linux_dns`]), and the NSS step at [`nss::NSS_BUDGET`]. A client has to wait longer:
 /// `marsa_core::client::SETUP_TIMEOUT` does, and a test holds the two
 /// together.
 pub const SLOWEST_SETUP: Duration = Duration::from_secs(
@@ -584,6 +588,10 @@ pub struct Setup {
     /// ([`linux_dns::read_block`]). [`linux_dns::HOSTS_FILE`] for the
     /// daemon; `None`, as if it had no block, until a test sets one.
     hosts_file: Option<PathBuf>,
+    /// Linux: whether setup adds the CA root to the user's NSS databases
+    /// ([`nss`]). On for the daemon; off until a test turns it on, so the
+    /// other tests run no `certutil`.
+    nss: bool,
     /// How long setup waits for Caddy and its CA root: [`CA_WAIT`], shorter
     /// in tests.
     ca_wait: Duration,
@@ -604,6 +612,7 @@ impl Setup {
             home_dir(),
         )
         .with_hosts_file(PathBuf::from(linux_dns::HOSTS_FILE))
+        .with_nss()
     }
 
     /// For tests: any runner, system, helper path, and home folder.
@@ -621,9 +630,17 @@ impl Setup {
             caddy: None,
             windows: default_windows_service(),
             hosts_file: None,
+            nss: false,
             ca_wait: CA_WAIT,
             running: AtomicU8::new(IDLE),
         }
+    }
+
+    /// Linux: the CA root goes into the user's NSS databases too ([`nss`]).
+    #[must_use]
+    pub fn with_nss(mut self) -> Self {
+        self.nss = true;
+        self
     }
 
     /// For tests: `service` stands for the Windows helper service.
@@ -694,8 +711,17 @@ impl Setup {
         // macOS: the user's own trust, after the helper (ADR 0015). Elsewhere
         // the helper trusts the CA as root (ADR 0011).
         let mut trust_for_user = None;
+        let mut nss_pem = None;
         match self.ca(&ca_root, starter, stop) {
             Ok(pem) if is_macos(platform) => trust_for_user = Some(pem),
+            // Linux: the system store through the helper, then the user's
+            // NSS databases as the user (ADR 0014).
+            Ok(pem) if is_linux(platform) => {
+                if self.nss {
+                    nss_pem = Some(pem.clone());
+                }
+                ops.push(HelperOp::TrustInstall { pem });
+            }
             // Windows: the service is installed for this root's SHA-256 (ADR
             // 0018). A root the helper's strict parser refuses has none, and
             // every setup would ask UAC in vain.
@@ -770,6 +796,10 @@ impl Setup {
         if let Some(pem) = trust_for_user.filter(|_| report.error.is_none()) {
             let files = user_trust::TrustFiles::in_dir(data_dir);
             report.results.push(self.trust_for_user(&pem, &files, stop));
+        }
+        // The same condition as the user trust on macOS.
+        if let Some(pem) = nss_pem.filter(|_| report.error.is_none()) {
+            self.nss_install(&mut report, &pem, data_dir, stop);
         }
         if linux.is_some() {
             linux_dns::record_way(data_dir, &report.results);
@@ -942,6 +972,29 @@ impl Setup {
                                login keychain cannot be found";
                 user_trust::failed(TRUST_INSTALL, user_trust::TRUST_ADD_FAILED, message)
             }
+        }
+    }
+
+    /// Linux: the CA root whose checked text is `pem` into the user's NSS
+    /// databases ([`nss`]), as a result or a skipped step of `report`.
+    fn nss_install(
+        &self,
+        report: &mut SetupReport,
+        pem: &str,
+        data_dir: &Path,
+        stop: &CancellationToken,
+    ) {
+        let Some(home) = &self.home else {
+            tracing::warn!("the home folder is not known, so the NSS databases cannot be found");
+            let message = "the home folder of the current user is not known";
+            let failed = user_trust::failed(nss::NSS_INSTALL, nss::NSS_ADD_FAILED, message);
+            report.results.push(failed);
+            return;
+        };
+        let files = user_trust::TrustFiles::in_dir(data_dir);
+        match nss::install(self.runner.as_ref(), home, pem, &files, stop) {
+            nss::Outcome::Ran(result) => report.results.push(result),
+            nss::Outcome::Skipped(code) => report.skipped.push(skip(nss::NSS_INSTALL, code)),
         }
     }
 
@@ -2946,6 +2999,86 @@ mod tests {
         assert_eq!((report.error, report.skipped), (None, Vec::new()));
     }
 
+    /// Linux with `certutil` answering `certutil(args)`, and `pkexec`
+    /// giving `pkexec()`.
+    fn nss_fake(
+        pkexec: impl Fn() -> io::Result<RunOutput> + Send + Sync + 'static,
+        certutil: impl Fn(&[String]) -> io::Result<RunOutput> + Send + Sync + 'static,
+    ) -> Arc<Fake> {
+        Fake::answering(move |program, args| match program {
+            pkexec::PKEXEC => pkexec(),
+            linux_dns::SYSTEMCTL => systemctl(UBUNTU_2404, args),
+            nss::CERTUTIL => certutil(args),
+            other => panic!("{other} ran on Linux"),
+        })
+    }
+
+    /// Task M4-18g: after the helper, the CA root goes into the user's NSS
+    /// databases, as the user, with the checked text.
+    #[test]
+    fn linux_adds_the_ca_to_the_nss_databases_after_the_helper() {
+        let dir = Dir::new(true);
+        make_helper(&dir.helper());
+        fs::create_dir_all(dir.home()).unwrap();
+        let answer = all_done(&["trust_install", "resolved_install", "ports_install"]);
+        let fake = nss_fake(
+            move || ok(&answer),
+            |args| match args[2].as_str() {
+                "-L" => exit(255, "certutil: Could not find cert"),
+                _ => ok(""),
+            },
+        );
+        let setup = linux_setup(&fake, dir.helper(), dir.home()).with_nss();
+        let report = run_linux(&setup, &dir);
+
+        let programs = fake.programs();
+        assert_eq!(programs[2], pkexec::PKEXEC);
+        assert!(
+            programs[3..]
+                .iter()
+                .all(|program| *program == nss::CERTUTIL)
+        );
+        let add = fake.calls().last().unwrap().args.clone();
+        assert_eq!(add[2], "-A");
+        assert!(add[8].ends_with("nss.pem"), "{add:?}");
+        let names: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "trust_install",
+                "resolved_install",
+                "ports_install",
+                "nss_install"
+            ]
+        );
+        assert_eq!(report.results[3].status, OpStatus::Done);
+        assert_eq!((report.error, report.skipped), (None, Vec::new()));
+    }
+
+    /// A cancelled password dialog changes nothing, NSS included; no
+    /// `certutil` is a skipped step, not an error.
+    #[test]
+    fn nss_waits_for_the_helper_and_needs_certutil() {
+        let dir = Dir::new(true);
+        make_helper(&dir.helper());
+        fs::create_dir_all(dir.home()).unwrap();
+        let fake = nss_fake(|| exit(126, ""), |_| panic!("certutil ran"));
+        let setup = linux_setup(&fake, dir.helper(), dir.home()).with_nss();
+        let report = run_linux(&setup, &dir);
+        assert_eq!(error_code(&report), Some("setup_cancelled"));
+
+        let answer = all_done(&["trust_install", "resolved_install", "ports_install"]);
+        let fake = nss_fake(
+            move || ok(&answer),
+            |_| Err(io::Error::from(io::ErrorKind::NotFound)),
+        );
+        let setup = linux_setup(&fake, dir.helper(), dir.home()).with_nss();
+        let report = run_linux(&setup, &dir);
+        assert_eq!(report.error, None);
+        assert_eq!(report.skipped, [skip("nss_install", "nss_tool_missing")]);
+        assert_eq!(report.results.len(), 3);
+    }
+
     /// Task M4-18i: with the DNS port held by another program, the link
     /// would send `.test` names to it. The other steps still go.
     #[test]
@@ -3508,7 +3641,7 @@ mod tests {
 
     /// The slowest Linux setup stays under [`SLOWEST_SETUP`]: four
     /// `systemctl` checks and two prompts, each with its pipes' grace,
-    /// after Caddy's start (review of #130).
+    /// after Caddy's start (review of #130), then the NSS step.
     #[test]
     fn the_slowest_linux_setup_fits_in_slowest_setup() {
         let dir = Dir::new(true);
@@ -3523,7 +3656,7 @@ mod tests {
         let calls = fake.calls();
         assert_eq!(calls.len(), 6, "{calls:?}");
         let programs: Duration = calls.iter().map(|call| call.limit + PIPE_GRACE).sum();
-        assert!(CA_WAIT + programs <= SLOWEST_SETUP);
+        assert!(CA_WAIT + programs + nss::NSS_BUDGET <= SLOWEST_SETUP);
     }
 
     /// The same checks of the helper file as on macOS, before any dialog.
