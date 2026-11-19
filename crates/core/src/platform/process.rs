@@ -33,6 +33,13 @@ pub const CADDY_ORPHAN_RECOVERY: bool = cfg!(any(target_os = "macos", target_os 
 /// listener are not listed there ([`listener_holders`]).
 pub const FPM_ORPHAN_RECOVERY: bool = cfg!(target_os = "macos");
 
+/// Whether the daemon looks for a database server that a crashed `marsad`
+/// left running, before it starts one: macOS and Linux (ADR 0023, section
+/// 8), where the same orphan was measured, as for Caddy
+/// ([`CADDY_ORPHAN_RECOVERY`]). On Windows the Job Object ends the servers
+/// with the daemon (ADR 0017).
+pub const DATABASE_ORPHAN_RECOVERY: bool = cfg!(any(target_os = "macos", target_os = "linux"));
+
 /// How long `kill`, `ps`, or `lsof` may run.
 #[cfg(unix)]
 const TOOL_LIMIT: Duration = Duration::from_secs(2);
