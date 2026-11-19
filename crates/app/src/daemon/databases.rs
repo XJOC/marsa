@@ -17,6 +17,10 @@
 //! connections is read once: if PostgreSQL refused because a live process
 //! holds one of its lock files, the start fails as the check before it
 //! would have. Nothing reads the log after the server is ready.
+//!
+//! [`start_at_launch`] starts it with `marsad` when `[postgres] enabled =
+//! true` (ADR 0023: a server that is on starts with the daemon). A failure
+//! leaves the daemon running and the status `failed`.
 
 use std::fmt;
 use std::io;
@@ -30,8 +34,8 @@ use marsa_core::config::{self, ConfigError, ConfigPaths, ServerSettings};
 use marsa_core::databases::{
     LockConflict, PG_HBA_CONF, POSTGRES_PORT, PidFileCheck, PostgresDirs, ROOT_ROLE_SQL,
     ServiceBusy, StartDecision, StartFacts, classify_postmaster, decide_start, initdb_args,
-    line_version, port_check, postgres_args, postgres_socket, postgres_stop, postmaster_pid,
-    single_user_args, startup_lock_conflict,
+    line_version, port_check, postgres_args, postgres_stop, postmaster_pid, single_user_args,
+    socket_for, startup_lock_conflict,
 };
 use marsa_core::orphan::Liveness;
 use marsa_core::platform::{probe, process};
@@ -47,7 +51,7 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 use super::caddy::orphan::BoxFuture;
-use super::caddy::{note, set_failed};
+use super::caddy::{Launch, Launched, note, set_failed};
 use super::php::orphan::accepted;
 use super::state::Daemon;
 use super::supervisor::{EXITED, ServiceRuntime, Supervisor, lock};
@@ -691,9 +695,21 @@ impl PostgresManager {
             .await
             .map_err(ActionError::Init)?;
         info!(%version, port, "starting postgres");
+        // `pg_hba.conf` lets the superuser in over the socket only, so
+        // without one nobody can connect as `postgres` (ADR 0023, "Access").
+        let socket = socket_for(&dirs, port);
+        if let Err(why) = &socket {
+            let folder = dirs.sockets.display();
+            warn!(%folder, %why, "no Unix socket for postgres: TCP only, no superuser");
+            let text = format!(
+                "marsad: PostgreSQL gets no Unix socket in {folder}: {why}. So it takes TCP \
+                 connections only, and its superuser postgres cannot connect."
+            );
+            note(&self.runtime, &daemon.events, &text);
+        }
         Ok(Prepared {
             spec: postgres_spec(programs.postgres, &dirs, port),
-            socket: postgres_socket(&dirs, port),
+            socket: socket.ok(),
             data: dirs.data,
             port,
         })
@@ -857,6 +873,92 @@ fn read_settings(data_dir: &Path) -> Result<ServerSettings, ActionError> {
     let path = ConfigPaths::in_dir(data_dir).global;
     let global = config::load_global(&path).map_err(ActionError::Config)?;
     Ok(global.postgres)
+}
+
+/// Starts PostgreSQL in the background when `[postgres] enabled = true` and
+/// a version of its `default` line is installed (ADR 0023, section 5), the
+/// way Caddy starts with the daemon (task M5-16): the start of
+/// `marsa services start postgres`, with the check before it. Its turn is
+/// taken here, before the API serves, so a request waits for it. A failure
+/// only sets the status `Failed` with its code: the daemon runs on.
+///
+/// A shutdown drops the start at its next `.await`. The spawn and
+/// `add_proc` have no `.await` between them, so a server it spawned is in
+/// `Daemon::procs`, which the shutdown stops. A dropped init kills its
+/// program (`kill_on_drop`) and leaves a temp folder, which the next init
+/// deletes.
+pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
+    let postgres = &daemon.postgres;
+    let settings = match read_settings(&daemon.data_dir) {
+        Ok(settings) => settings,
+        // Without PostgreSQL, a broken `global.toml` is none of its business:
+        // its status and lines stay as they are.
+        Err(err) if !any_installed(&daemon.data_dir) => {
+            info!(
+                code = err.code(),
+                "no postgres is installed; it does not start with the daemon"
+            );
+            return Launch::ended(POSTGRES_ID, Launched::NotInstalled);
+        }
+        Err(err) => {
+            postgres.fail(&daemon.events, err.code(), &err.to_string());
+            return Launch::ended(POSTGRES_ID, Launched::Failed(err.code()));
+        }
+    };
+    if !settings.enabled {
+        info!("postgres is off; it does not start with the daemon");
+        return Launch::ended(POSTGRES_ID, Launched::Off);
+    }
+    // First, so a missing version does not mark the status failed.
+    if let Err(err) = postgres.installed(&daemon.data_dir, &settings) {
+        warn!(code = err.code(), %err, "postgres is on, but does not start with the daemon");
+        return Launch::ended(POSTGRES_ID, Launched::NotInstalled);
+    }
+    let Ok(busy) = Arc::clone(&postgres.busy).try_lock_owned() else {
+        info!("another action on postgres runs; it decides instead of the start with the daemon");
+        return Launch::ended(POSTGRES_ID, Launched::Busy);
+    };
+    info!("starting postgres with the daemon");
+    let daemon = Arc::clone(daemon);
+    let task = tokio::spawn(async move {
+        tokio::select! {
+            // A daemon that already stops starts nothing.
+            biased;
+            () = daemon.shutdown.cancelled() => Launched::ShuttingDown,
+            launched = launch(&daemon, busy) => launched,
+        }
+    });
+    Launch::running(POSTGRES_ID, task)
+}
+
+/// Whether any PostgreSQL version is installed. A folder that cannot be read
+/// counts as one: then the error is reported.
+fn any_installed(data_dir: &Path) -> bool {
+    let installed = RuntimesDir::in_dir(data_dir).installed(Runtime::Postgres);
+    installed.map_or(true, |versions| !versions.is_empty())
+}
+
+async fn launch(daemon: &Daemon, busy: tokio::sync::OwnedMutexGuard<()>) -> Launched {
+    match daemon
+        .postgres
+        .act(daemon, ServiceAction::Start, busy)
+        .await
+    {
+        Ok(status) => {
+            match &status.state {
+                ServiceState::Running => info!("postgres started with the daemon"),
+                ServiceState::Failed { code } => {
+                    warn!(%code, "postgres did not start with the daemon");
+                }
+                state => warn!(?state, "postgres is not running after its start"),
+            }
+            Launched::Ran(status)
+        }
+        Err(err) => {
+            warn!(code = err.code(), %err, "postgres did not start with the daemon");
+            Launched::Failed(err.code())
+        }
+    }
 }
 
 /// Whether PostgreSQL takes connections on `127.0.0.1:<port>`: it answers
@@ -1079,6 +1181,33 @@ mod tests {
         assert!(names.all(|name| name == "postgres"));
     }
 
+    /// A broken `global.toml` (task M6-03 review): without PostgreSQL it
+    /// leaves PostgreSQL's status and lines alone; with one, the status
+    /// says why it did not start.
+    #[tokio::test]
+    async fn a_broken_global_toml_fails_postgres_only_when_one_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = ConfigPaths::in_dir(dir.path()).global;
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        std::fs::write(&global, "[postgres\n").unwrap();
+        let daemon = Arc::new(Daemon::new(dir.path().to_path_buf()));
+        let launched = start_at_launch(&daemon).wait(Duration::from_secs(5)).await;
+        assert_eq!(launched, Some(Launched::NotInstalled));
+        assert_eq!(daemon.postgres.status().state, ServiceState::Stopped);
+        assert!(daemon.postgres.recent_logs().is_empty());
+
+        let version =
+            RuntimesDir::in_dir(dir.path()).version_dir(Runtime::Postgres, &Version::new(18, 7, 0));
+        std::fs::create_dir_all(version).unwrap();
+        let launched = start_at_launch(&daemon).wait(Duration::from_secs(5)).await;
+        assert_eq!(launched, Some(Launched::Failed("config_invalid")));
+        let failed = ServiceState::Failed {
+            code: "config_invalid".into(),
+        };
+        assert_eq!(daemon.postgres.status().state, failed);
+        assert_eq!(daemon.postgres.recent_logs().len(), 1);
+    }
+
     #[test]
     fn postgres_runs_on_loopback_and_stops_with_sigint_then_sigquit() {
         let dirs = PostgresDirs::new(Path::new("/m"), 18);
@@ -1222,8 +1351,13 @@ mod tests {
         }
 
         fn pg(mode: &str, probes: FakeProbes) -> Pg {
+            pg_in("data", mode, probes)
+        }
+
+        /// [`pg`] with the daemon's data folder named `name`.
+        fn pg_in(name: &str, mode: &str, probes: FakeProbes) -> Pg {
             let dir = tempfile::tempdir().unwrap();
-            let data = dir.path().join("data");
+            let data = dir.path().join(name);
             let platform = Platform::current().unwrap();
             let version = Version::new(18, 7, 0);
             let programs = programs(&data, platform, &version).unwrap();
@@ -1342,8 +1476,35 @@ mod tests {
             let texts = pg.texts();
             assert_eq!(texts.iter().filter(|t| *t == "fake got SIGINT").count(), 2);
             assert!(!texts.iter().any(|text| text == "fake got SIGTERM"));
+            assert!(
+                !texts
+                    .iter()
+                    .any(|text| text.contains("TCP connections only"))
+            );
             let log = fs::read_to_string(pg.daemon.data_dir.join("logs/postgres.log")).unwrap();
             assert!(log.contains("fake got SIGINT"), "{log}");
+        }
+
+        /// No socket (a path too long, or a comma in it): TCP only, and the
+        /// recent lines say why, and that the superuser cannot connect then.
+        #[tokio::test]
+        async fn a_data_folder_with_no_socket_says_why_and_that_the_superuser_is_out() {
+            let deep = "d".repeat(100);
+            for (folder, why) in [(deep.as_str(), "bytes long"), ("a,b", "a comma")] {
+                let pg = pg_in(folder, "serve", probes(Liveness::Gone, None));
+                let status = pg.act(ServiceAction::Start).await.unwrap();
+                assert_eq!(status.state, ServiceState::Running);
+                let server = pg.calls().pop().unwrap();
+                assert!(server.contains(" -c unix_socket_directories= "), "{server}");
+                let texts = pg.texts();
+                let said = texts.iter().any(|text| {
+                    text.contains(why)
+                        && text.contains("TCP connections only")
+                        && text.contains("superuser postgres")
+                });
+                assert!(said, "{texts:?}");
+                pg.act(ServiceAction::Stop).await.unwrap();
+            }
         }
 
         #[tokio::test]
@@ -1516,6 +1677,36 @@ mod tests {
             let signals = ["fake got SIGINT", "fake got SIGTERM"];
             assert!(!texts.iter().any(|t| signals.contains(&t.as_str())));
             pg.act(ServiceAction::Stop).await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn postgres_starts_with_the_daemon_only_when_it_is_on() {
+            let pg = pg("serve", probes(Liveness::Gone, None));
+            let launched = start_at_launch(&pg.daemon).wait(WAIT).await;
+            let Some(Launched::Ran(status)) = launched else {
+                panic!("{launched:?}");
+            };
+            assert_eq!(status.state, ServiceState::Running);
+            pg.daemon.stop_procs(WAIT).await;
+
+            let data = &pg.daemon.data_dir;
+            set_postgres(data, Some("18"), false, pg.port);
+            let launched = start_at_launch(&pg.daemon).wait(WAIT).await;
+            assert_eq!(launched, Some(Launched::Off));
+            // On, but its line is not installed: the status stays as it was.
+            set_postgres(data, Some("17"), true, pg.port);
+            let launched = start_at_launch(&pg.daemon).wait(WAIT).await;
+            assert_eq!(launched, Some(Launched::NotInstalled));
+            assert_eq!(pg.daemon.postgres.status().state, ServiceState::Stopped);
+            assert_eq!(pg.count("server"), 1);
+
+            // A failed start: the status says why, and the daemon runs on.
+            set_postgres(data, Some("18"), true, pg.port);
+            let _held = TcpListener::bind((Ipv4Addr::LOCALHOST, pg.port)).unwrap();
+            let launched = start_at_launch(&pg.daemon).wait(WAIT).await;
+            assert_eq!(launched, Some(Launched::Failed("service_port_busy")));
+            let state = pg.daemon.postgres.status().state;
+            assert_eq!(state, failed("service_port_busy"));
         }
     }
 
