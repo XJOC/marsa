@@ -19,19 +19,40 @@ pub const CADDY_RELEASES: &str = "https://github.com/caddyserver/caddy/releases/
 pub const THESEUS_RELEASES: &str =
     "https://github.com/theseus-rs/postgresql-binaries/releases/download/";
 
+/// Our Valkey builds (ADR 0023, task M6-06): one GitHub Release per build,
+/// `valkey-<version>-r<revision>`, with a `sha256sums.txt`, as for PHP.
+pub const VALKEY_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/valkey-";
+
+/// Our `libaio.so.1` builds for MySQL on Linux (ADR 0023, task M6-05):
+/// `libaio-<version>-r<revision>`, with a `sha256sums.txt`.
+pub const LIBAIO_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/libaio-";
+
+/// The folders of Oracle's MySQL 8.4 archives (ADR 0023): the current
+/// releases, and the older ones. No tag: the file name has the version.
+/// Beside each file are `<file>.md5` and `<file>.asc`, Oracle's GPG
+/// signature.
+pub const MYSQL_FOLDERS: [&str; 2] = [
+    "https://cdn.mysql.com/Downloads/MySQL-8.4",
+    "https://cdn.mysql.com/archives/mysql-8.4",
+];
+
 /// The hash in a sum file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Algorithm {
     Sha256,
     Sha512,
+    /// Oracle's `.md5` for MySQL. Never enough alone (ADR 0023, section 3):
+    /// only the check of Oracle's signature makes it count.
+    Md5,
 }
 
 impl Algorithm {
-    /// `sha256` or `sha512`, for messages.
+    /// `sha256`, `sha512`, or `md5`, for messages.
     pub fn name(self) -> &'static str {
         match self {
             Algorithm::Sha256 => "sha256",
             Algorithm::Sha512 => "sha512",
+            Algorithm::Md5 => "md5",
         }
     }
 
@@ -40,6 +61,7 @@ impl Algorithm {
         match self {
             Algorithm::Sha256 => 32,
             Algorithm::Sha512 => 64,
+            Algorithm::Md5 => 16,
         }
     }
 }
@@ -64,6 +86,12 @@ pub enum Source {
     Caddy,
     /// theseus-rs, [`THESEUS_RELEASES`].
     Theseus,
+    /// Our Valkey builds, [`VALKEY_RELEASES`].
+    OurValkey,
+    /// Our libaio builds, [`LIBAIO_RELEASES`].
+    OurLibaio,
+    /// Oracle's MySQL archives, [`MYSQL_FOLDERS`]: an MD5 only.
+    Oracle,
 }
 
 /// Where the upstream hash of one file is published.
@@ -91,11 +119,12 @@ impl SumFile {
 /// Where the upstream hash of the file at `url` is published. `None` when
 /// the source publishes none: `windows.php.net/.../archives/` (it only has
 /// `sha1sum.txt`) and any other host. Also `None` unless the URL is a known
-/// folder, then one tag (such as `18.7.0`; windows.php.net has none), then
-/// the file name, where the tag and the name are each one [`is_segment`]. So
-/// `\\`, `%`, `?`, `#`, and `..` cannot point the URL somewhere else.
+/// folder, then one tag (such as `18.7.0`; windows.php.net and Oracle have
+/// none), then the file name, where the tag and the name are each one
+/// [`is_segment`]. So `\\`, `%`, `?`, `#`, and `..` cannot point the URL
+/// somewhere else.
 pub fn sum_file_for(url: &str) -> Option<SumFile> {
-    use Algorithm::{Sha256, Sha512};
+    use Algorithm::{Md5, Sha256, Sha512};
     use Layout::{List, Single};
 
     let (dir, name) = url.rsplit_once('/')?;
@@ -141,6 +170,16 @@ pub fn sum_file_for(url: &str) -> Option<SumFile> {
         // that pins this hash (ADR 0023, section 3). M6-09 adds the check of
         // the GitHub artifact attestations.
         sum(format!("{url}.sha256"), Sha256, Single, Source::Theseus)
+    } else if tag(VALKEY_RELEASES).is_some() {
+        let sums = format!("{dir}/sha256sums.txt");
+        sum(sums, Sha256, List, Source::OurValkey)
+    } else if tag(LIBAIO_RELEASES).is_some() {
+        let sums = format!("{dir}/sha256sums.txt");
+        sum(sums, Sha256, List, Source::OurLibaio)
+    } else if MYSQL_FOLDERS.contains(&dir) {
+        // `<hex>  <name>\n`, as `md5sum` writes it. Proves nothing alone:
+        // it is served from the same place as the archive.
+        sum(format!("{url}.md5"), Md5, Single, Source::Oracle)
     } else {
         None
     }
@@ -255,6 +294,10 @@ mod tests {
     const THESEUS: &str = "2f752033b208f9a6a12ef64a9ee23bf19149cff160841980db1e221bf7d24809  postgresql-17.12.0-aarch64-apple-darwin.tar.gz\n";
     const THESEUS_HASH: &str = "2f752033b208f9a6a12ef64a9ee23bf19149cff160841980db1e221bf7d24809";
     const THESEUS_NAME: &str = "postgresql-17.12.0-aarch64-apple-darwin.tar.gz";
+    // The whole of Oracle's `.md5` for this archive (2026-11-18).
+    const MYSQL_MD5: &str =
+        "fb536f5d26e3e43e933aec34679c0740  mysql-8.4.13-linux-glibc2.28-x86_64-minimal.tar.xz\n";
+    const MYSQL_NAME: &str = "mysql-8.4.13-linux-glibc2.28-x86_64-minimal.tar.xz";
 
     fn sha256_of(text: &str, name: &str) -> Result<Vec<u8>> {
         find_sum(text, name, Algorithm::Sha256)
@@ -410,6 +453,16 @@ mod tests {
                 format!("{THESEUS_RELEASES}18.7.0"),
                 "postgresql-18.7.0-x86_64-pc-windows-msvc.zip",
             ),
+            (
+                format!("{VALKEY_RELEASES}8.1.11-r1"),
+                "valkey-8.1.11-linux-x64.tar.gz",
+            ),
+            (
+                format!("{LIBAIO_RELEASES}0.3.113-r1"),
+                "libaio-0.3.113-linux-x64.tar.gz",
+            ),
+            (MYSQL_FOLDERS[0].to_owned(), MYSQL_NAME),
+            (MYSQL_FOLDERS[1].to_owned(), MYSQL_NAME),
         ] {
             assert!(sum_file_for(&format!("{dir}/{name}")).is_some(), "{dir}");
             let (base, tag) = dir.rsplit_once('/').expect("a tag");
@@ -566,6 +619,79 @@ mod tests {
             format!("{THESEUS_RELEASES}18.7.0/x/postgresql-18.7.0-x86_64-pc-windows-msvc.zip"),
             format!("{THESEUS_RELEASES}18.7.0/"),
             "https://github.com/theseus-rs/postgresql-binaries-fork/releases/download/18.7.0/postgresql-18.7.0-x86_64-pc-windows-msvc.zip".to_owned(),
+        ] {
+            assert_eq!(sum_file_for(&url), None, "{url}");
+        }
+    }
+
+    /// Our Valkey and libaio releases are read like our PHP releases.
+    #[test]
+    fn our_server_release_sum_file_urls() {
+        for (prefix, tag, name, source) in [
+            (
+                VALKEY_RELEASES,
+                "8.1.11-r1",
+                "valkey-8.1.11-darwin-arm64.tar.gz",
+                Source::OurValkey,
+            ),
+            (
+                LIBAIO_RELEASES,
+                "0.3.113-r1",
+                "libaio-0.3.113-linux-arm64.tar.gz",
+                Source::OurLibaio,
+            ),
+        ] {
+            let dir = format!("{prefix}{tag}");
+            assert_eq!(
+                sum_file_for(&format!("{dir}/{name}")),
+                Some(SumFile {
+                    url: format!("{dir}/sha256sums.txt"),
+                    name: name.to_owned(),
+                    algorithm: Algorithm::Sha256,
+                    layout: Layout::List,
+                    source,
+                })
+            );
+            // No tag, or a folder below the tag.
+            assert_eq!(sum_file_for(&format!("{prefix}/{name}")), None);
+            assert_eq!(sum_file_for(&format!("{dir}/x/{name}")), None);
+        }
+        // Another repository's release of the same name.
+        let url =
+            "https://github.com/XJOC/marsa-fork/releases/download/valkey-8.1.11-r1/valkey.tar.gz";
+        assert_eq!(sum_file_for(url), None);
+    }
+
+    /// Oracle's MySQL archives have an MD5 beside them, one line, read as
+    /// such: the build never takes it alone.
+    #[test]
+    fn mysql_sum_file_is_an_md5() {
+        for folder in MYSQL_FOLDERS {
+            let url = format!("{folder}/{MYSQL_NAME}");
+            let sums = sum_file_for(&url).expect("oracle publishes an md5");
+            assert_eq!(
+                sums,
+                SumFile {
+                    url: format!("{url}.md5"),
+                    name: MYSQL_NAME.to_owned(),
+                    algorithm: Algorithm::Md5,
+                    layout: Layout::Single,
+                    source: Source::Oracle,
+                }
+            );
+            let md5 = sums.find(MYSQL_MD5).expect("the real file");
+            assert_eq!(hex(&md5), "fb536f5d26e3e43e933aec34679c0740");
+        }
+        // Read as a sha256 it is too short; a sha256 line is too long for it.
+        assert!(single_sum(MYSQL_MD5, MYSQL_NAME, Algorithm::Sha256).is_err());
+        let sha256 = format!("{THESEUS_HASH}  {MYSQL_NAME}\n");
+        assert!(single_sum(&sha256, MYSQL_NAME, Algorithm::Md5).is_err());
+        // Another MySQL line, another host, or a folder below.
+        for url in [
+            format!("https://cdn.mysql.com/Downloads/MySQL-9.7/{MYSQL_NAME}"),
+            format!("https://dev.mysql.com/Downloads/MySQL-8.4/{MYSQL_NAME}"),
+            format!("{}/x/{MYSQL_NAME}", MYSQL_FOLDERS[0]),
+            format!("http://cdn.mysql.com/Downloads/MySQL-8.4/{MYSQL_NAME}"),
         ] {
             assert_eq!(sum_file_for(&url), None, "{url}");
         }
