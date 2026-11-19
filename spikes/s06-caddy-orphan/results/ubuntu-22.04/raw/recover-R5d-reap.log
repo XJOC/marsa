@@ -1,0 +1,6 @@
+INSPECT pidfile=mismatch(pid=13209,found=/home/runner/work/marsa/marsa/spikes/s06-caddy-orphan/vendor/caddy (start time Thu Nov 19 09:52:32 2026 differs from Mon Jan  1 00:00:00 2024)) admin=no-reply app_port=busy(s06(13222)) admin_port=free
+ADMIN_OWNER None
+TIMING pidfile_ms=13.3 admin_ms=0.4 port_ms=54.6
+DECISION conflict(the site port is held by s06(13222), which is not our Caddy)
+STEP t_ms=68 decided 
+CONFLICT the site port is held by s06(13222), which is not our Caddy

@@ -1,0 +1,6 @@
+INSPECT pidfile=missing admin=foreign app_port=busy(caddy(12938)) admin_port=busy(caddy(12938))
+ADMIN_OWNER None
+TIMING pidfile_ms=0.1 admin_ms=1.2 port_ms=108.0
+DECISION conflict(a Caddy that is not ours answers on our admin port)
+STEP t_ms=109 decided 
+CONFLICT a Caddy that is not ours answers on our admin port
