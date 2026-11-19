@@ -38,7 +38,7 @@ fn main() -> ExitCode {
 fn run(started: Instant) -> anyhow::Result<ExitCode> {
     let launch = startup::launch(std::env::args_os().skip(1))?;
     if launch.panel {
-        return run_panel(launch.data_dir, started);
+        return run_panel(launch.data_dir, launch.anchor, started);
     }
     let data_dir = launch.data_dir;
     // `MARSA_GUI_MEASURE` fills the window with made-up data and starts no
@@ -91,7 +91,11 @@ fn run(started: Instant) -> anyhow::Result<ExitCode> {
 
 /// The menu-bar panel: no window lock (it runs beside the window), a bridge
 /// that never starts the daemon, and an exit code that says why it closed.
-fn run_panel(data_dir: std::path::PathBuf, started: Instant) -> anyhow::Result<ExitCode> {
+fn run_panel(
+    data_dir: std::path::PathBuf,
+    anchor: Option<panel::place::Anchor>,
+    started: Instant,
+) -> anyhow::Result<ExitCode> {
     // Debug builds only: the design review's demo draws fixed data and
     // starts no daemon (see `demo`).
     #[cfg(debug_assertions)]
@@ -106,7 +110,7 @@ fn run_panel(data_dir: std::path::PathBuf, started: Instant) -> anyhow::Result<E
     let report = Arc::clone(&exit);
     eframe::run_native(
         strings::PANEL_NAME,
-        panel::app::options(panel::app::start_size()),
+        panel::app::options(panel::app::start_size(), anchor.as_ref()),
         Box::new(move |creation| {
             Ok(Box::new(panel::app::PanelApp::new(
                 &creation.egui_ctx,
@@ -114,6 +118,7 @@ fn run_panel(data_dir: std::path::PathBuf, started: Instant) -> anyhow::Result<E
                 data_dir,
                 started,
                 report,
+                anchor,
             )))
         }),
     )

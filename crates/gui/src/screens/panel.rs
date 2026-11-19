@@ -6,13 +6,13 @@
 //!
 //! The screen is two functions, as the others are. [`view`] reads the model
 //! and decides what the panel says: pure, so the tests assert it without a
-//! window. [`show`] draws that [`PanelView`] and returns what the user did as
+//! window. [`show_limited`] draws that [`PanelView`] and returns what the user did as
 //! [`PanelAction`]s. The panel shows only what the window already knows how
 //! to do: a site opens in the browser, a version is saved as the default,
 //! Xdebug flips. The footer asks the tray, by the way the panel exits
 //! ([`PanelExit`]).
 
-use eframe::egui::{Align2, Key, Label, Margin, Rect, RichText, Ui, vec2};
+use eframe::egui::{Align2, Key, Label, Margin, Rect, RichText, ScrollArea, Ui, vec2};
 
 use super::home::{self, DefaultPhp};
 use super::sites::{Mark, mute, status_line};
@@ -211,20 +211,32 @@ pub fn keys(view: &PanelView, pressed: impl Fn(Key) -> bool, plain: bool) -> Vec
     actions
 }
 
-/// Draws `view`. Returns what the user did.
-pub fn show(ui: &mut Ui, view: &PanelView, theme: &Theme) -> Vec<PanelAction> {
+/// Draws `view` in a window that is at most `limit` high: when the panel
+/// needs more, the sites and the controls scroll between the header and the
+/// footer, which stay. Returns what the user did.
+pub fn show_limited(ui: &mut Ui, view: &PanelView, theme: &Theme, limit: f32) -> Vec<PanelAction> {
     let mut actions =
         ui.input(|input| keys(view, |key| input.key_pressed(key), !input.modifiers.any()));
     frame(ui, |ui| {
         header(ui, theme, &view.status, &mut actions);
-        if let Some(sites) = &view.sites {
-            site_list(ui, theme, sites, &mut actions);
-        }
-        let controls = view.php.is_some() || view.xdebug.is_some();
-        if controls {
-            divider(ui);
-            controls_section(ui, theme, view, &mut actions);
-        }
+        // What is left for the body: the limit, less the border of the frame
+        // on both sides, what the header took, and the footer with its line.
+        let border = theme.size.border;
+        let taken = border + border + ui.min_rect().height() + border + theme.size.panel_footer;
+        let room = (limit - taken).max(theme.size.panel_row);
+        ScrollArea::vertical()
+            .id_salt("panel_body")
+            .max_height(room)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                if let Some(sites) = &view.sites {
+                    site_list(ui, theme, sites, &mut actions);
+                }
+                if view.php.is_some() || view.xdebug.is_some() {
+                    divider(ui);
+                    controls_section(ui, theme, view, &mut actions);
+                }
+            });
         divider(ui);
         footer(ui, theme, &view.power, &mut actions);
     });
@@ -390,6 +402,11 @@ mod tests {
     use crate::model::{Update, WEB_SERVER};
     use crate::theme::{DARK, LIGHT};
     use crate::widgets::harness::{Harness, Tree};
+
+    /// The panel with all the room it needs.
+    fn show(ui: &mut Ui, view: &PanelView, theme: &Theme) -> Vec<PanelAction> {
+        show_limited(ui, view, theme, f32::INFINITY)
+    }
 
     fn connected() -> Model {
         let mut model = Model::default();
@@ -748,6 +765,35 @@ mod tests {
         let at = center(&tree, "Stop Marsa");
         harness.click(at, |ui| actions = show(ui, &waiting, &LIGHT));
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn a_panel_taller_than_the_room_scrolls_its_body_between_the_header_and_the_footer() {
+        let harness = Harness::new(egui::Theme::Light);
+        let nine = view(&working(9, &["8.4.27"]));
+        let height = |limit: f32| {
+            let mut rect = egui::Rect::NOTHING;
+            harness.run(|ui| {
+                let before = ui.cursor().min;
+                show_limited(ui, &nine, &LIGHT, limit);
+                rect = egui::Rect::from_min_max(before, ui.min_rect().max);
+            });
+            rect.height()
+        };
+        let whole = height(f32::INFINITY);
+        // Room enough: the panel is what it is.
+        assert_eq!(height(whole + 100.0), whole);
+        // Less room: the panel is as high as the room, never more.
+        for limit in [300.0, 420.0, whole - 1.0] {
+            let shown = height(limit);
+            assert!((shown - limit).abs() < 1.0, "{limit}: {shown}");
+        }
+        // The footer is still there, and its links work, in a short panel.
+        let tree = harness.accessibility(|ui| {
+            show_limited(ui, &nine, &LIGHT, 300.0);
+        });
+        assert!(tree.node_with_label("Quit").is_some());
+        assert!(tree.node_with_label("Open Marsa").is_some());
     }
 
     #[test]
