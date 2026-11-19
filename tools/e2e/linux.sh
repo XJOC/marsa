@@ -432,6 +432,11 @@ wait_for_laravel -k --resolve "$SITE:18443:127.0.0.1" "https://$SITE:18443/"
 
 step "marsa setup, through pkexec: a polkit rule stands in for the password"
 polkit_rule
+# certutil, for the NSS step of Chrome and Firefox (M4-18g). Not in a default
+# install (ADR 0014, finding 15).
+if ! command -v certutil >/dev/null; then
+  sudo apt-get install -y -q libnss3-tools >/dev/null 2>&1 || fail "cannot install libnss3-tools"
+fi
 code=0
 out=$(marsa setup 2>&1) || code=$?
 echo "$out"
@@ -448,6 +453,8 @@ else
 fi
 grep -q "Let Caddy use ports 80 and 443: done" <<<"$out" || fail "the ports step is not done"
 grep -q "Trust Marsa's HTTPS certificates: done" <<<"$out" || fail "the trust step is not done"
+grep -q "Trust Marsa's certificates in Chrome and Firefox: done" <<<"$out" || fail "the NSS step is not done"
+run certutil -d "sql:$HOME/.pki/nssdb" -L -n "Marsa Local CA"
 [ "$(cat "$PORT_START")" = 80 ] || fail "ip_unprivileged_port_start is $(cat "$PORT_START"), not 80"
 wait_for_name "$SITE" || fail "$SITE does not resolve"
 # From here on the name resolves on both ways.
@@ -469,6 +476,27 @@ case "$listeners" in
 esac
 if grep -vq '^127\.0\.0\.1:' <<<"$(tr ' ' '\n' <<<"$listeners" | grep .)"; then
   fail "caddy listens on an address that is not 127.0.0.1"
+fi
+
+step "Chrome, headless, trusts the site after setup (M4-18g)"
+# Chrome does not read the system store (ADR 0014, finding 14): the page
+# loads only through the user's NSS database that setup filled. No
+# --ignore-certificate-errors.
+CHROME=$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)
+if [ -n "$CHROME" ]; then
+  run "$CHROME" --version
+  loaded=no
+  for i in 1 2 3; do
+    if timeout 90 "$CHROME" --headless=new --no-sandbox --disable-gpu --dump-dom "https://$SITE/" 2>/tmp/chrome.err | grep -q Laravel; then
+      loaded=yes
+      echo "Chrome loads https://$SITE/ (try $i)"
+      break
+    fi
+    sleep 2
+  done
+  [ "$loaded" = yes ] || { tail -n 20 /tmp/chrome.err; fail "Chrome does not load https://$SITE/"; }
+else
+  echo "no Chrome on this runner; the NSS database was checked above"
 fi
 
 step "marsa doctor checks .test names the way setup took (M4-18k3)"
