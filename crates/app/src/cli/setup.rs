@@ -245,6 +245,31 @@ mod tests {
         );
     }
 
+    /// Linux: the NSS step of Chrome and Firefox (task M4-18g), done, or
+    /// skipped without `certutil` with the package to install.
+    #[test]
+    fn the_nss_step_names_the_browsers_and_the_package() {
+        let done = SetupReport {
+            results: vec![result("nss_install", OpStatus::Done, None)],
+            ..SetupReport::default()
+        };
+        assert_eq!(
+            render(&done, &data()),
+            "Trust Marsa's certificates in Chrome and Firefox: done.\n"
+        );
+        let skipped = SetupReport {
+            skipped: vec![skip("nss_install", "nss_tool_missing")],
+            ..SetupReport::default()
+        };
+        assert_eq!(
+            render(&skipped, &data()),
+            "Trust Marsa's certificates in Chrome and Firefox: skipped. certutil is not \
+             installed, so Chrome and Firefox do not trust Marsa's sites yet (curl and other \
+             programs do). Install libnss3-tools (Debian, Ubuntu) or nss-tools (Fedora), then \
+             run \"marsa setup\" again. [nss_tool_missing]\n"
+        );
+    }
+
     /// Linux: a second request that did not run (task M4-18k2). The steps
     /// above it stand, and the error says so.
     #[test]

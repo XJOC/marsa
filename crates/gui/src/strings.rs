@@ -932,6 +932,8 @@ fn setup_step(op: &str) -> String {
         "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
         "resolved_install" => "Send .test names to Marsa".to_owned(),
         "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
+        // Chrome and Firefox on Linux (task M4-18g).
+        "nss_install" => "Trust Marsa's certificates in Chrome and Firefox".to_owned(),
         // The hosts way on Linux (task M4-18k).
         "resolved_remove" => "Take out Marsa's link for .test names".to_owned(),
         "hosts_sync" => "Put the sites' .test names in the hosts file".to_owned(),
@@ -1926,6 +1928,15 @@ fn error_message(code: &str) -> Option<&'static str> {
              Marsa's certificate authority was not changed. On Debian, Ubuntu, or Fedora, \
              install the ca-certificates package, then run setup again."
         }
+        // Chrome and Firefox on Linux (task M4-18g).
+        "nss_tool_missing" => {
+            "Chrome and Firefox need certutil: install libnss3-tools (Ubuntu) or nss-tools \
+             (Fedora), then run setup again."
+        }
+        "nss_add_failed" => {
+            "A certificate database of Chrome or Firefox did not take Marsa's certificate \
+             authority. Close the browser, then run setup again."
+        }
         "trust_store_update_failed" => {
             "The system's store of trusted certificates could not be updated. Run setup again; \
              if it repeats, report it."
@@ -2524,6 +2535,8 @@ mod tests {
             "ports_apply_failed",
             "ports_restore_failed",
             "trust_tool_missing",
+            "nss_tool_missing",
+            "nss_add_failed",
             "trust_store_update_failed",
         ];
         for code in built.chain(listed.map(str::to_owned)) {
