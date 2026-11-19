@@ -1,0 +1,9 @@
+INSPECT pidfile=ours(pid=36480) admin=ours app_port=busy(caddy(36480)) admin_port=busy(caddy(36480))
+ADMIN_OWNER Some(36480)
+TIMING pidfile_ms=9.0 admin_ms=1.5 port_ms=91.6
+DECISION adopt(pid=Some(36480))
+STEP t_ms=102 decided 
+STEP t_ms=105 load http=200
+STEP t_ms=105 serving body="marsa-spike v2"
+ADOPTED pid=Some(36480)
+WATCH pid=36480 alive=true

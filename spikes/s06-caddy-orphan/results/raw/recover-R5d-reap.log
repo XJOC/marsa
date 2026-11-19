@@ -1,0 +1,6 @@
+INSPECT pidfile=mismatch(pid=35930,found=<repo>/spikes/s06-caddy-orphan/vendor/caddy (start time Wed Nov  4 00:40:55 2026 differs from Mon Jan  1 00:00:00 2024)) admin=no-reply app_port=busy(s06(35947)) admin_port=free
+ADMIN_OWNER None
+TIMING pidfile_ms=4.5 admin_ms=0.4 port_ms=26.0
+DECISION conflict(the site port is held by s06(35947), which is not our Caddy)
+STEP t_ms=30 decided 
+CONFLICT the site port is held by s06(35947), which is not our Caddy
