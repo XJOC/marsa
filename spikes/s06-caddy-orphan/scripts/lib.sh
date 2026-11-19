@@ -16,8 +16,30 @@ export S06_APP_PORT="${APP_PORT}" S06_ADMIN_PORT="${ADMIN_PORT}"
 export S06_WORK="${S06_WORK:-${ROOT}/work}"
 WORK="${S06_WORK}"
 APP_URL="http://127.0.0.1:${APP_PORT}/"
-LSOF=/usr/sbin/lsof
 PS=/bin/ps
+# S-06b: the same scripts run on Linux. The results of each system go to a
+# folder of their own, and the tables name the system.
+if [ "$(uname -s)" = Linux ]; then
+  LSOF=/usr/bin/lsof
+  RESULTS="${S06_RESULTS:-${ROOT}/results/linux}"
+  PLATFORM="Linux $(uname -m), $(. /etc/os-release && echo "${PRETTY_NAME}")"
+else
+  LSOF=/usr/sbin/lsof
+  RESULTS="${ROOT}/results"
+  PLATFORM="macOS $(uname -m)"
+fi
+mkdir -p "${RESULTS}/raw"
+
+# The program a pid runs. macOS: `ps -o comm=` is the path it was started
+# with. Linux: `comm` is only the first 15 bytes of the name, so the target
+# of /proc/<pid>/exe.
+exe_of() {
+  if [ -e /proc/self/exe ]; then
+    readlink "/proc/$1/exe" 2>/dev/null
+  else
+    "${PS}" -p "$1" -o comm= 2>/dev/null
+  fi
+}
 
 # Whether something listens on a TCP port (127.0.0.1 or any address).
 port_busy() {
@@ -70,7 +92,7 @@ is_alive() {
 # Sends a signal to a pid only if its executable path is one of ours.
 kill_if_ours() {
   local sig="$1" pid="$2" comm
-  comm="$("${PS}" -p "${pid}" -o comm= 2>/dev/null)"
+  comm="$(exe_of "${pid}")"
   case "${comm}" in
     "${CADDY}" | "${S06}" | "${S06_ABORT}") kill -"${sig}" "${pid}" 2>/dev/null ;;
     *) return 1 ;;
@@ -95,7 +117,8 @@ stop_pids() {
 
 # Final check: lists any process that still runs one of our binaries.
 leftovers() {
-  "${PS}" -axo pid=,comm= | while read -r pid comm; do
+  "${PS}" -axo pid= | while read -r pid; do
+    comm="$(exe_of "${pid}")"
     case "${comm}" in
       "${CADDY}" | "${S06}" | "${S06_ABORT}") echo "${pid} ${comm}" ;;
     esac

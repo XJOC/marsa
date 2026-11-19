@@ -18,6 +18,11 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "net", "sync", "fs"] }
 tokio-util = "0.7"
 
+# S-06b, P7 only: `prctl(PR_SET_PDEATHSIG)` in `pre_exec`. Spike only: the
+# product has no `libc` (AGENTS.md section 8).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 # Same lints as the product (AGENTS.md section 6).
 [lints.clippy]
 await_holding_lock = "deny"

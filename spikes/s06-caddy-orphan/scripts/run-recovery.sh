@@ -169,8 +169,8 @@ run_case() { # $1 case id  $2 action (reap|adopt)
   echo "| ${id} | ${desc} | ${pidfile} | ${admin} | ${app} / ${adm} | ${decision} |" >>"${DETECT_ROWS}"
   echo "| ${id} | ${action} | $(steps_of "${out}") | ${result} | ${orphan_state}; bystander: ${bystander_state} | ${total_ms} ms |" >>"${ACTION_ROWS}"
 
-  mkdir -p "${ROOT}/results/raw"
-  cp "${out}" "${ROOT}/results/raw/recover-${id}-${action}.log"
+  mkdir -p "${RESULTS}/raw"
+  cp "${out}" "${RESULTS}/raw/recover-${id}-${action}.log"
   stop_pids ${TRACK}
   # The bystander of R4 is a plain \`sleep\`, which stop_pids refuses to touch.
   if [ "${id}" = R4 ] && [ -n "${BYSTANDER}" ]; then kill "${BYSTANDER}" 2>/dev/null; fi
@@ -178,9 +178,9 @@ run_case() { # $1 case id  $2 action (reap|adopt)
 }
 
 recovery() {
-  local results="${ROOT}/results/recovery.md"
-  DETECT_ROWS="${ROOT}/results/.detect.rows"
-  ACTION_ROWS="${ROOT}/results/.action.rows"
+  local results="${RESULTS}/recovery.md"
+  DETECT_ROWS="${RESULTS}/.detect.rows"
+  ACTION_ROWS="${RESULTS}/.action.rows"
   : >"${DETECT_ROWS}"; : >"${ACTION_ROWS}"
   mkdir -p "${ROOT}/results"
   local id action
@@ -193,7 +193,7 @@ recovery() {
     run_case "${id}" adopt
   done
   {
-    echo "# Recovery (macOS arm64, Caddy $("${CADDY}" version | cut -d' ' -f1))"
+    echo "# Recovery (${PLATFORM}, Caddy $("${CADDY}" version | cut -d' ' -f1))"
     echo
     echo "## What each detection method says, and what the pure \`decide\` function returns"
     echo
@@ -242,10 +242,10 @@ gap_run() { # $1 strategy; prints "gap_ms failed ready_ms detect_ms"
 }
 
 gap() {
-  local results="${ROOT}/results/gap.md" strategy i line
+  local results="${RESULTS}/gap.md" strategy i line
   mkdir -p "${ROOT}/results"
   {
-    echo "# Request gap during recovery (macOS arm64, Caddy $("${CADDY}" version | cut -d' ' -f1))"
+    echo "# Request gap during recovery (${PLATFORM}, Caddy $("${CADDY}" version | cut -d' ' -f1))"
     echo
     echo "A probe sends one HTTP request every 25 ms to the site (300 ms timeout) while \`s06 recover\`"
     echo "handles an orphan (case R1). The gap is the time from the last good answer before the failures"
