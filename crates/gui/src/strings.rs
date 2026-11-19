@@ -1935,11 +1935,11 @@ fn error_message(code: &str) -> Option<&'static str> {
         }
         "nss_db_refused" => {
             "A certificate database of Chrome or Firefox is a link or another user's (often \
-             after sudo). Give it back to your user, then run setup again."
+             after sudo). Make it a real folder of your user, then run setup again."
         }
         "nss_add_failed" => {
-            "A certificate database of Chrome or Firefox did not take Marsa's certificate \
-             authority. Close the browser, then run setup again."
+            "A Chrome or Firefox certificate database did not take Marsa's CA. Remove its \
+             password if it has one, or close the browser, then run setup again."
         }
         "trust_store_update_failed" => {
             "The system's store of trusted certificates could not be updated. Run setup again; \

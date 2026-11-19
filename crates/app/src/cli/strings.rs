@@ -707,12 +707,15 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "nss_db_refused" => "Chrome or Firefox may not trust Marsa's sites yet: a \
              certificate database in your home folder is a link or belongs to another user \
              (often after a browser or certutil ran with sudo), so Marsa left it alone. \
-             logs/marsad.log names it. Give it back to your user (sudo chown -R \"$USER\" \
-             <folder>), then run \"marsa setup\" again."
+             logs/marsad.log names it. Replace a link with a real folder; give a folder of \
+             another user back to yours (sudo chown -R \"$USER\" <folder>). Then run \
+             \"marsa setup\" again."
             .into(),
         "nss_add_failed" => "Chrome or Firefox may not trust Marsa's sites yet: a certificate \
-             database in your home folder did not take Marsa's certificate authority. Close \
-             the browser and run \"marsa setup\" again; logs/marsad.log names the database."
+             database in your home folder did not take Marsa's certificate authority. If it has \
+             a password (Firefox's Primary Password), remove the password or add the \
+             certificate by hand; otherwise close the browser and run \"marsa setup\" again. \
+             logs/marsad.log names the database."
             .into(),
         "trust_store_update_failed" => "The system's store of trusted certificates could not \
              be updated, so Marsa's certificate authority is not trusted, or not removed, yet. \

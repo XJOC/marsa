@@ -364,7 +364,7 @@ fn databases(home: &Path) -> (Vec<Database>, Vec<String>) {
                 tracing::warn!(dir = %dir.display(), "more than {MAX_PROFILES} Firefox profiles; this one is left out");
                 continue;
             }
-            match owned_dir(&dir).and_then(|()| db_files(&dir)) {
+            match profile(&dir) {
                 Ok(true) => {
                     profiles += 1;
                     found.push(Database { dir, new: false });
@@ -460,6 +460,21 @@ fn db_files(dir: &Path) -> Result<bool, String> {
         database |= there && name == CERT_DB;
     }
     Ok(database)
+}
+
+/// Whether `dir` is a Firefox profile: it holds a database. A folder with
+/// none is skipped before its owner counts: a root-owned `Crash Reports`
+/// after `sudo firefox` is no profile.
+///
+/// # Errors
+///
+/// A profile, or a file in it, that cannot be used.
+fn profile(dir: &Path) -> Result<bool, String> {
+    if !db_files(dir)? {
+        return Ok(false);
+    }
+    owned_dir(dir)?;
+    Ok(true)
 }
 
 /// A profile folder of this user's; one of another user's is refused.

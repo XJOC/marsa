@@ -437,6 +437,8 @@ polkit_rule
 if ! command -v certutil >/dev/null; then
   sudo apt-get install -y -q libnss3-tools >/dev/null 2>&1 || fail "cannot install libnss3-tools"
 fi
+# No Chrome database yet, so setup always makes a new one with `-A`.
+rm -rf "$HOME/.pki/nssdb"
 code=0
 out=$(marsa setup 2>&1) || code=$?
 echo "$out"
