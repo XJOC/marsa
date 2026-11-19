@@ -1,8 +1,13 @@
 //! `cargo xtask manifest build`: for every pinned version, platform, and
-//! artifact, download the file (or reuse the cache), hash it, compare with
-//! the upstream sum (sha256, or sha512 for Caddy), run the PHP checks, then
-//! write `manifest.json`. A database server without an upstream sum stops
-//! the build; the older runtimes only get a warning.
+//! artifact, check that its URLs can give the proof its runtime needs,
+//! download the file (or reuse the cache), hash it, compare with the
+//! upstream sum (sha256, or sha512 for Caddy), run the PHP checks, then
+//! write `manifest.json`. A database server without the proof of its own
+//! source stops the build; the older runtimes only get a warning without an
+//! upstream sum. An MD5 alone is never accepted.
+//!
+//! The database servers' archives are large (PostgreSQL is about 60 MB a
+//! file, 620 MB a build), so they are hashed on the way and not kept.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -113,7 +118,7 @@ pub fn is_spc_platform(platform: Platform) -> bool {
 /// The upstream proof a file needs before its sha256 goes in the manifest.
 /// The database servers of M6 each need the proof of their own source (ADR
 /// 0023, section 3); without it the build stops. An `Md5` sum is never
-/// accepted alone: MySQL (M6-02 part B) gets a variant that needs Oracle's
+/// accepted alone: MySQL (M6-02 part B2) gets a variant that needs Oracle's
 /// GPG signature as well as the MD5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Proof {
@@ -122,7 +127,7 @@ enum Proof {
     /// (windows.php.net lists only sha1 there). PHP, Node, Composer, Caddy.
     SumIfPublished,
     /// The theseus-rs `<archive>.sha256` ([`Layout::Single`]) and no other
-    /// source. PostgreSQL.
+    /// source, of the recipe's own URL. PostgreSQL.
     TheseusSha256,
 }
 
@@ -137,12 +142,23 @@ impl Proof {
         }
     }
 
-    /// Whether `sums`, the sum file `sum_file_for` found for the file
-    /// (`None`: no known one), can give this proof. The sum is compared
-    /// after this.
-    fn allows(self, sums: Option<&SumFile>) -> Result<()> {
+    /// Whether the file at `url` can give this proof, before anything is
+    /// downloaded. `sums` is the sum file [`sum_file_for`] finds for `url`
+    /// (`None`: no known one), and `template` the recipe's URL for the file.
+    /// The sum is compared after the download.
+    fn allows(self, url: &str, template: Option<&str>, sums: Option<&SumFile>) -> Result<()> {
         match (self, sums) {
+            (_, Some(sums)) if sums.algorithm == Algorithm::Md5 => bail!(
+                "its only upstream sum is the MD5 {}, and an MD5 is never accepted alone",
+                sums.url
+            ),
             (Proof::SumIfPublished, _) => Ok(()),
+            // An override could name another theseus-rs archive, of another
+            // version or target, with its own matching `.sha256`.
+            (Proof::TheseusSha256, _) if template != Some(url) => bail!(
+                "it is not the recipe's URL {}, and only that theseus-rs archive is accepted",
+                template.unwrap_or("(none)")
+            ),
             (Proof::TheseusSha256, Some(sums))
                 if sums.source == Source::Theseus
                     && sums.layout == Layout::Single
@@ -158,6 +174,16 @@ impl Proof {
                 "no upstream sum that `manifest build` knows, and only the theseus-rs \
                  `.sha256` is accepted"
             ),
+        }
+    }
+
+    /// Whether the file is kept in the cache after the build: only when a
+    /// later check reads it (PHP, the sha512 of Caddy). A file this proof
+    /// checks by its sha256 alone is hashed on the way and never written.
+    fn keeps_file(self) -> bool {
+        match self {
+            Proof::SumIfPublished => true,
+            Proof::TheseusSha256 => false,
         }
     }
 }
@@ -216,19 +242,28 @@ pub async fn build(
                         artifact.name
                     );
                     let urls = pins.urls(runtime, version, platform, &artifact.name)?;
-                    let dir = cache
-                        .join(runtime.dir_name())
-                        .join(version.to_string())
-                        .join(platform.as_str());
-                    let file = cached_download(fetch, &urls, &dir, &artifact.name)
-                        .await
-                        .with_context(|| what.clone())?;
+                    let template = recipe.artifact_url(platform, &artifact.name, version);
+                    let proof = Proof::of(runtime);
+                    for url in &urls {
+                        let sums = sum_file_for(url);
+                        proof
+                            .allows(url, template.as_deref(), sums.as_ref())
+                            .with_context(|| format!("{what}: {url}"))?;
+                    }
+                    let file = if proof.keeps_file() {
+                        let dir = cache
+                            .join(runtime.dir_name())
+                            .join(version.to_string())
+                            .join(platform.as_str());
+                        cached_download(fetch, &urls, &dir, &artifact.name).await
+                    } else {
+                        hashed_download(fetch, &urls).await
+                    }
+                    .with_context(|| what.clone())?;
 
                     let mut notes = Vec::new();
+                    // One of `urls`, so `proof` allows its sum file.
                     let sums = sum_file_for(&file.url);
-                    Proof::of(runtime)
-                        .allows(sums.as_ref())
-                        .with_context(|| format!("{what}: {}", file.url))?;
                     match sums {
                         Some(sums) => {
                             let sum_url = &sums.url;
@@ -246,10 +281,18 @@ pub async fn build(
                                 .with_context(|| format!("{what}: {sum_url}"))?;
                             // The manifest keeps our sha256; the upstream hash
                             // is only compared.
-                            let actual = match sums.algorithm {
-                                Algorithm::Sha256 => file.sha256.to_vec(),
+                            let (actual, note) = match sums.algorithm {
+                                Algorithm::Sha256 => {
+                                    (file.sha256.to_vec(), "upstream sha256 matches")
+                                }
                                 Algorithm::Sha512 => {
-                                    sha512_file(&file.path, &file.sha256)?.to_vec()
+                                    let sha512 = sha512_file(file.kept()?, &file.sha256)?;
+                                    (sha512.to_vec(), "upstream sha512 matches")
+                                }
+                                // `Proof::allows` refused it before the
+                                // download.
+                                Algorithm::Md5 => {
+                                    bail!("{what}: an MD5 is never accepted alone")
                                 }
                             };
                             let algorithm = sums.algorithm.name();
@@ -259,10 +302,7 @@ pub async fn build(
                                 hex(&actual),
                                 hex(&expected)
                             );
-                            notes.push(match sums.algorithm {
-                                Algorithm::Sha256 => "upstream sha256 matches",
-                                Algorithm::Sha512 => "upstream sha512 matches",
-                            });
+                            notes.push(note);
                         }
                         None => {
                             warnings.push(format!(
@@ -274,7 +314,7 @@ pub async fn build(
                     }
                     if runtime == Runtime::Php && is_spc_platform(platform) {
                         let found = inspect
-                            .php_build(&target, &file.path)
+                            .php_build(&target, file.kept()?)
                             .with_context(|| format!("{what}: PHP check failed"))?;
                         warnings.extend(found);
                         notes.push("PHP checks passed");
@@ -309,10 +349,20 @@ pub async fn build(
 
 /// A downloaded file, and the URL that served it.
 struct Downloaded {
-    path: PathBuf,
+    /// Where it is kept, or `None` when it was only hashed.
+    path: Option<PathBuf>,
     url: String,
     sha256: [u8; 32],
     size: u64,
+}
+
+impl Downloaded {
+    /// The file on disk, for a check that reads it.
+    fn kept(&self) -> Result<&Path> {
+        self.path
+            .as_deref()
+            .with_context(|| format!("{} was hashed on the way and not kept", self.url))
+    }
 }
 
 /// Saves the first URL that answers to `dir/<name>`, with `dir/<name>.sha256`
@@ -341,7 +391,7 @@ async fn cached_download(
         let (sha256, size) = hash_file(&path)?;
         if parse_hex(saved_hex) == Some(sha256) && urls.iter().any(|u| u == url) {
             return Ok(Downloaded {
-                path,
+                path: Some(path),
                 url: url.to_owned(),
                 sha256,
                 size,
@@ -350,60 +400,100 @@ async fn cached_download(
     }
 
     let part = dir.join(format!("{name}.part"));
+    let result = first_answer(fetch, urls, |url| {
+        let _ = fs::remove_file(&part);
+        let file =
+            File::create(&part).with_context(|| format!("cannot create {}", part.display()))?;
+        Ok(HashSink::new(url, Some((file, part.clone()))))
+    })
+    .await;
+    let (url, sink) = match result {
+        Ok(found) => found,
+        Err(err) => {
+            let _ = fs::remove_file(&part);
+            return Err(err);
+        }
+    };
+    let HashSink {
+        file, hasher, size, ..
+    } = sink;
+    if let Some((mut file, _)) = file {
+        file.flush()?;
+    }
+    let sha256: [u8; 32] = hasher.finalize().into();
+    fs::rename(&part, &path).with_context(|| format!("cannot move {}", part.display()))?;
+    fs::write(&record, format!("{} {url}\n", hex(&sha256)))?;
+    Ok(Downloaded {
+        path: Some(path),
+        url,
+        sha256,
+        size,
+    })
+}
+
+/// Hashes the body of the first URL that answers, and keeps nothing: for
+/// large files that only their sha256 proves.
+async fn hashed_download(fetch: &impl Fetch, urls: &[String]) -> Result<Downloaded> {
+    let (url, sink) = first_answer(fetch, urls, |url| Ok(HashSink::new(url, None))).await?;
+    Ok(Downloaded {
+        path: None,
+        url,
+        sha256: sink.hasher.finalize().into(),
+        size: sink.size,
+    })
+}
+
+/// Tries `urls` in order, each into a new sink from `sink_for`, and returns
+/// the first that answers in full, with its sink. An HTTP error status or a
+/// network error tries the next URL; any other error stops.
+async fn first_answer(
+    fetch: &impl Fetch,
+    urls: &[String],
+    mut sink_for: impl FnMut(&str) -> Result<HashSink>,
+) -> Result<(String, HashSink)> {
     let mut last = None;
     for url in urls {
-        let _ = fs::remove_file(&part);
-        let mut sink = FileSink {
-            file: File::create(&part)
-                .with_context(|| format!("cannot create {}", part.display()))?,
-            path: part.clone(),
-            url: url.clone(),
-            hasher: Sha256::new(),
-            size: 0,
-        };
+        let mut sink = sink_for(url)?;
         println!("  downloading {url}");
         match fetch.get(url, &mut sink).await {
             Ok(()) => {
-                sink.file.flush()?;
                 ensure!(sink.size > 0, "{url} is empty");
-                let sha256: [u8; 32] = sink.hasher.finalize().into();
-                fs::rename(&part, &path)
-                    .with_context(|| format!("cannot move {}", part.display()))?;
-                fs::write(&record, format!("{} {url}\n", hex(&sha256)))?;
-                return Ok(Downloaded {
-                    path,
-                    url: url.clone(),
-                    sha256,
-                    size: sink.size,
-                });
+                return Ok((url.clone(), sink));
             }
             Err(err @ (FetchError::HttpStatus { .. } | FetchError::Network { .. })) => {
                 println!("    {err}; trying the next URL");
                 last = Some(err);
             }
-            Err(err) => {
-                let _ = fs::remove_file(&part);
-                return Err(err.into());
-            }
+            Err(err) => return Err(err.into()),
         }
     }
-    let _ = fs::remove_file(&part);
     match last {
         Some(err) => Err(anyhow::Error::from(err).context("no URL worked")),
         None => bail!("no URL"),
     }
 }
 
-/// Writes the body to a file and hashes it on the way.
-struct FileSink {
-    file: File,
-    path: PathBuf,
+/// Hashes the body on the way, and writes it to a file when it has one.
+struct HashSink {
+    /// The file, and its path for errors.
+    file: Option<(File, PathBuf)>,
     url: String,
     hasher: Sha256,
     size: u64,
 }
 
-impl ChunkSink for FileSink {
+impl HashSink {
+    fn new(url: &str, file: Option<(File, PathBuf)>) -> Self {
+        Self {
+            file,
+            url: url.to_owned(),
+            hasher: Sha256::new(),
+            size: 0,
+        }
+    }
+}
+
+impl ChunkSink for HashSink {
     fn accept(&mut self, chunk: &[u8]) -> Result<(), FetchError> {
         self.size = self.size.saturating_add(chunk.len() as u64);
         if self.size > MAX_ARTIFACT_SIZE {
@@ -413,10 +503,13 @@ impl ChunkSink for FileSink {
             });
         }
         self.hasher.update(chunk);
-        self.file.write_all(chunk).map_err(|source| FetchError::Io {
-            path: self.path.clone(),
-            source,
-        })
+        match &mut self.file {
+            Some((file, path)) => file.write_all(chunk).map_err(|source| FetchError::Io {
+                path: path.clone(),
+                source,
+            }),
+            None => Ok(()),
+        }
     }
 }
 
@@ -515,6 +608,8 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
         match algorithm {
             Algorithm::Sha256 => sha(body),
             Algorithm::Sha512 => hex(Sha512::digest(body).as_slice()),
+            // Never read: the build refuses an MD5 before the download.
+            Algorithm::Md5 => "0".repeat(32),
         }
     }
 
@@ -580,10 +675,13 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
         assert_eq!(json, to_json(&third.manifest).expect("json"));
         let new_requests = fetch.requests().len() - requests;
         assert_eq!(
-            new_requests, 9,
+            new_requests, 14,
             "only the php, node, composer and caddy sum files, and the five \
-             postgres .sha256 files, are fetched again"
+             postgres archives and their .sha256 files, are fetched again"
         );
+        // The PostgreSQL archives were hashed on the way, never written.
+        assert!(cache.path().join("php").is_dir());
+        assert!(!cache.path().join("postgres").exists());
 
         // The local checks (the same rules as M2-02) accept it.
         let checked = check_json(json.as_bytes()).expect("valid manifest");
@@ -709,8 +807,11 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             built.warnings
         );
 
-        // PostgreSQL from a host without a sum, or from a known source that
-        // is not theseus-rs (whose sum the fetcher makes match): refused.
+        // PostgreSQL from any URL but the recipe's: refused before any
+        // download. A host without a sum, a known source that is not
+        // theseus-rs, and another theseus-rs archive, whose own `.sha256`
+        // the fetcher makes match.
+        let recipe_url = "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.7.0/postgresql-18.7.0-x86_64-unknown-linux-gnu.tar.gz";
         for url in [
             "https://example.org/postgresql-18.7.0-x86_64-unknown-linux-gnu.tar.gz",
             "https://nodejs.org/dist/v18.7.0/postgresql-18.7.0.tar.gz",
@@ -718,10 +819,14 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             "https://getcomposer.org/download/18.7.0/postgresql-18.7.0.tar.gz",
             "https://github.com/caddyserver/caddy/releases/download/v18.7.0/postgresql-18.7.0.tar.gz",
             "https://github.com/XJOC/marsa/releases/download/php-18.7.0-r1/postgresql-18.7.0.tar.gz",
+            "https://cdn.mysql.com/Downloads/MySQL-8.4/postgresql-18.7.0.tar.gz",
+            "https://github.com/theseus-rs/postgresql-binaries/releases/download/17.12.0/postgresql-17.12.0-x86_64-unknown-linux-gnu.tar.gz",
+            "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.7.0/postgresql-18.7.0-aarch64-unknown-linux-gnu.tar.gz",
         ] {
             let pins = Pins::parse(&moved("postgres", "18.7.0", "linux-x64", url)).expect("pins");
+            let fetch = fetcher(&pins, None);
             let cache = tempfile::tempdir().expect("tempdir");
-            let err = build(&fetcher(&pins, None), &pins, cache.path(), &Stub::default())
+            let err = build(&fetch, &pins, cache.path(), &Stub::default())
                 .await
                 .err()
                 .expect("refused");
@@ -730,11 +835,73 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
                 message.starts_with(&format!("postgres 18.7.0 linux-x64 archive: {url}: ")),
                 "{message}"
             );
-            assert!(
-                message.ends_with("only the theseus-rs `.sha256` is accepted"),
-                "{message}"
-            );
+            let refusal = if url.starts_with("https://cdn.mysql.com/") {
+                "an MD5 is never accepted alone".to_owned()
+            } else {
+                format!("not the recipe's URL {recipe_url}, and only that theseus-rs archive")
+            };
+            assert!(message.contains(&refusal), "{message}");
+            let asked = fetch.requests();
+            assert!(!asked.iter().any(|u| u.starts_with(url)), "{asked:?}");
         }
+    }
+
+    /// An MD5 is never enough for any runtime, and the build asks for
+    /// nothing from such a URL.
+    #[tokio::test]
+    async fn an_md5_alone_is_refused_before_the_download() {
+        let url = "https://cdn.mysql.com/Downloads/MySQL-8.4/node-v22.23.4-linux-x64.tar.gz";
+        let pins = Pins::parse(&moved("node", "22.23.4", "linux-x64", url)).expect("pins");
+        let fetch = fetcher(&pins, None);
+        let cache = tempfile::tempdir().expect("tempdir");
+        let err = build(&fetch, &pins, cache.path(), &Stub::default())
+            .await
+            .err()
+            .expect("refused");
+        let message = format!("{err:#}");
+        assert!(
+            message.starts_with(&format!("node 22.23.4 linux-x64 archive: {url}: ")),
+            "{message}"
+        );
+        assert!(
+            message.ends_with(&format!(
+                "its only upstream sum is the MD5 {url}.md5, and an MD5 is never accepted alone"
+            )),
+            "{message}"
+        );
+        assert!(!fetch.requests().iter().any(|u| u.starts_with(url)));
+    }
+
+    /// Every way `TheseusSha256` refuses, also for a recipe URL that would
+    /// not be theseus-rs.
+    #[test]
+    fn theseus_proof_needs_the_recipe_url_and_its_sum() {
+        let url = format!(
+            "{}18.7.0/postgresql-18.7.0.zip",
+            super::super::upstream::THESEUS_RELEASES
+        );
+        let proof = Proof::TheseusSha256;
+        let theseus = sum_file_for(&url);
+        proof
+            .allows(&url, Some(&url), theseus.as_ref())
+            .expect("the recipe's theseus-rs URL");
+        let refused = |url: &str, template: Option<&str>, sums: Option<&SumFile>| {
+            format!("{:#}", proof.allows(url, template, sums).expect_err(url))
+        };
+        assert!(refused(&url, None, theseus.as_ref()).contains("not the recipe's URL (none)"));
+        let other = "https://example.org/postgresql-18.7.0.zip";
+        assert!(refused(other, Some(other), None).contains("no upstream sum"));
+        let caddy = "https://github.com/caddyserver/caddy/releases/download/v2.11.8/caddy.zip";
+        let sums = sum_file_for(caddy);
+        assert!(
+            refused(caddy, Some(caddy), sums.as_ref())
+                .contains("only the theseus-rs `.sha256` is accepted")
+        );
+        let mysql = "https://cdn.mysql.com/Downloads/MySQL-8.4/postgresql.zip";
+        let sums = sum_file_for(mysql);
+        assert!(refused(mysql, Some(mysql), sums.as_ref()).contains("never accepted alone"));
+        assert!(!proof.keeps_file());
+        assert!(Proof::SumIfPublished.keeps_file());
     }
 
     #[tokio::test]
@@ -864,6 +1031,29 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             .err()
             .expect("bad name");
         assert!(err.to_string().contains("is not [a-z0-9._-]+"));
+
+        // Hashed only: the same answer, and nothing on disk.
+        let file = hashed_download(&fetch, &urls).await.expect("mirror works");
+        assert_eq!(file.url, urls[1]);
+        assert_eq!(
+            (file.size, file.sha256),
+            (4, Sha256::digest(b"phar").into())
+        );
+        assert!(file.path.is_none());
+        assert!(format!("{:#}", file.kept().expect_err("not kept")).contains("not kept"));
+    }
+
+    #[tokio::test]
+    async fn an_empty_or_missing_file_is_an_error_when_only_hashed() {
+        let urls = vec!["https://example.org/a.tar.gz".to_owned()];
+        for (reply, expected) in [
+            (Reply::Chunks(vec![]), "is empty"),
+            (Reply::Status(404), "no URL worked"),
+        ] {
+            let fetch = MemoryFetch::new().with(&urls[0], reply);
+            let err = hashed_download(&fetch, &urls).await.err().expect("refused");
+            assert!(format!("{err:#}").contains(expected), "{err:#}");
+        }
     }
 
     #[test]
