@@ -1,4 +1,5 @@
-//! Orphan Caddy recovery (task M3-11, ADR 0009). This test binary plays every
+//! Orphan Caddy recovery (task M3-11, ADR 0009; Linux: task M4-18m, ADR
+//! 0025). This test binary plays every
 //! part, run again with `MARSA_ORPHAN_FAKE` set:
 //!
 //! - `serve`: a fake Caddy. It reads the `caddy.json` the daemon wrote,
@@ -13,13 +14,15 @@
 //! The rejection tests record the signals and send none. Every fake ends by
 //! itself after two minutes, so a failed test leaves nothing running for long.
 
-// The orphan check runs on macOS only (ADR 0009): Linux waits for spike
-// S-06b, and Windows for Job Objects (architecture.md section 9).
-#![cfg(target_os = "macos")]
+// The orphan check runs on macOS and Linux (`CADDY_ORPHAN_RECOVERY`). On
+// Windows a Job Object stops Caddy with the daemon (ADR 0017).
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead as _, BufReader, Write as _};
 use std::net::{Ipv4Addr, TcpListener};
+// `arg0`, for the macOS-only test of a claimed path.
+#[cfg(target_os = "macos")]
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -523,6 +526,10 @@ async fn a_pid_file_with_another_start_time_is_never_signalled() {
     );
 }
 
+// macOS only: there `ps` shows `argv[0]`, which the process chose. Linux
+// reads the `exe` link, so a claimed path never matches the pid file in the
+// first place (the R4 test covers that).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_process_that_only_claims_our_path_is_never_signalled() {
     // `argv[0]` is chosen by whoever starts a process: this `sleep` shows our
@@ -648,9 +655,14 @@ async fn a_port_held_by_another_program_is_a_conflict() {
     let notes = notes(&daemon);
     let note = notes.iter().find(|n| n.contains("site port is held by"));
     let note = note.unwrap_or_else(|| panic!("no note in {notes:?}"));
-    // `lsof` names the owner, once.
-    let me = format!("({})", std::process::id());
-    assert_eq!(note.matches(&me).count(), 1, "{note}");
+    // macOS: `lsof` names the owner, once. Linux has no look (ADR 0025): a
+    // port never names a pid to signal, so the message says less.
+    if cfg!(target_os = "macos") {
+        let me = format!("({})", std::process::id());
+        assert_eq!(note.matches(&me).count(), 1, "{note}");
+    } else {
+        assert!(note.contains("held by an unknown program"), "{note}");
+    }
 }
 
 #[tokio::test]

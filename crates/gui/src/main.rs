@@ -40,7 +40,7 @@ fn run(started: Instant) -> anyhow::Result<ExitCode> {
     if launch.panel {
         return run_panel(launch.data_dir, launch.anchor, started);
     }
-    let data_dir = launch.data_dir;
+    let (data_dir, open) = (launch.data_dir, launch.open);
     // `MARSA_GUI_MEASURE` fills the window with made-up data and starts no
     // daemon. It is read before the lock is taken: it needs a data folder
     // that is missing or empty, so it never touches one Marsa used.
@@ -76,6 +76,11 @@ fn run(started: Instant) -> anyhow::Result<ExitCode> {
         options,
         Box::new(move |creation| {
             let app = app::App::new(&creation.egui_ctx, bridge, data_dir, prefs, started);
+            // `--open sites`, from the menu-bar panel's "more sites" link.
+            let app = match open {
+                Some(route) => app.opening(route),
+                None => app,
+            };
             // Only with the `measure` feature (see above).
             #[cfg(feature = "measure")]
             let app = match measure {

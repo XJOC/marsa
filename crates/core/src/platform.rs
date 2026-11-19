@@ -24,7 +24,9 @@ pub use browser::{OpenError, open_url};
 /// - Windows: the daemon joins a Job Object that ends its children when it
 ///   ends, even after a crash or "End task" (ADR 0017).
 /// - macOS and Linux: nothing to do here. A child of a crashed daemon stays;
-///   on macOS the next daemon finds it (ADR 0009, `process::ORPHAN_RECOVERY`).
+///   the next daemon finds an orphan Caddy (ADR 0009 and 0025,
+///   `process::CADDY_ORPHAN_RECOVERY`), and on macOS an orphan php-fpm too
+///   (`process::FPM_ORPHAN_RECOVERY`).
 ///
 /// # Errors
 ///

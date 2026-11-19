@@ -68,11 +68,31 @@ pub fn options(start: Vec2, anchor: Option<&Anchor>) -> eframe::NativeOptions {
         );
         viewport = viewport.with_position((at.to_vec2() / scale).to_pos2());
     }
-    eframe::NativeOptions {
+    // `mut` is used on macOS only (the hook below).
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut options = eframe::NativeOptions {
         viewport,
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
+    };
+    // macOS only, so the `cfg` is not in `platform`: the activation policy
+    // exists in winit's macOS module alone. The panel is a menu-bar
+    // accessory: no Dock icon, and it does not take the menu bar from the
+    // app the user is in.
+    #[cfg(target_os = "macos")]
+    {
+        options.event_loop_builder = Some(accessory());
     }
+    options
+}
+
+/// The hook that gives the event loop the `Accessory` activation policy.
+#[cfg(target_os = "macos")]
+fn accessory() -> eframe::EventLoopBuilderHook {
+    Box::new(|builder| {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS as _};
+        builder.with_activation_policy(ActivationPolicy::Accessory);
+    })
 }
 
 /// The size the window opens at, before the panel knows its content.
@@ -169,8 +189,10 @@ pub struct PanelApp {
     /// The place last asked of the window, and how many times.
     moved: Option<(Pos2, u8)>,
     focus: Focus,
-    /// Set until the first frame, to log the time it took.
-    started: Option<Instant>,
+    /// When the program started, to log how long the first frame and the
+    /// drawn panel took.
+    started: Instant,
+    first_frame: bool,
     /// The picture that `MARSA_GUI_SCREENSHOT` asks for.
     // Debug builds only: a design-review aid (see `screenshot`).
     #[cfg(debug_assertions)]
@@ -219,7 +241,8 @@ impl PanelApp {
             anchor,
             moved: None,
             focus: Focus::new(opened, watching),
-            started: Some(started),
+            started,
+            first_frame: true,
             #[cfg(debug_assertions)]
             screenshot,
         }
@@ -333,8 +356,8 @@ impl eframe::App for PanelApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if let Some(started) = self.started.take() {
-            tracing::debug!(ms = started.elapsed().as_millis(), "panel first frame");
+        if std::mem::take(&mut self.first_frame) {
+            tracing::debug!(ms = self.started.elapsed().as_millis(), "panel first frame");
         }
         let now = Instant::now();
         if let Some(reason) = self
@@ -387,6 +410,7 @@ impl eframe::App for PanelApp {
                     ?monitor,
                     scale,
                     ms = since.elapsed().as_millis(),
+                    since_start_ms = self.started.elapsed().as_millis(),
                     "panel placed"
                 );
                 ctx.request_repaint();

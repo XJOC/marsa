@@ -530,7 +530,8 @@ pub struct SetupReport {
     /// macOS, the daemon's own `trust_install` result: the trust for the
     /// current user (ADR 0015). Empty if nothing ran: no operation was left,
     /// or `error` says why. On Linux the results of a second request follow
-    /// those of the first.
+    /// those of the first, then the daemon's own `nss_install`: the CA root
+    /// in the user's NSS databases, for Chrome and Firefox (task M4-18g).
     #[serde(default)]
     pub results: Vec<OpResult>,
     /// The operations left out of the request, and why.
@@ -581,8 +582,9 @@ pub struct SetupSkip {
     /// `ca_not_ready`, `ca_unreadable`, `caddy_not_installed`, and
     /// `caddy_not_started` for `trust_install`; on Linux
     /// `resolved_use_hosts` and `resolved_not_running` for
-    /// `resolved_install`, and `hosts_sites_unknown` and
-    /// `hosts_too_many_names` for `hosts_sync`.
+    /// `resolved_install`, `hosts_sites_unknown` and
+    /// `hosts_too_many_names` for `hosts_sync`, and `nss_tool_missing` for
+    /// `nss_install`.
     pub code: String,
 }
 

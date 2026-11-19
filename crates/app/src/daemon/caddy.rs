@@ -340,8 +340,8 @@ impl CaddyManager {
     /// `ports_install` allows it at setup, so the next config after setup
     /// moves a running Caddy to 80 and 443, with no restart.
     ///
-    /// The orphan check still looks at the ports of `input`. It runs on
-    /// macOS only; a Linux orphan check (spike S-06b) must ask here.
+    /// The orphan check looks at these ports and at those of `input`
+    /// ([`CaddyManager::orphans`]): an orphan may have started before setup.
     pub fn ports(&self) -> CaddyInput {
         if (self.low_ports)() {
             self.input.on_low_ports()
@@ -609,8 +609,8 @@ impl CaddyManager {
     /// Polls `GET /id/<tag>` until our Caddy answers, the task ends, or the
     /// limit. Only our tag counts: another program on the admin port, a
     /// second user's Caddy for one, is never taken for ours, so no config
-    /// goes to it. Where no orphan check runs first (Linux and Windows) this
-    /// is the only check.
+    /// goes to it. Where no orphan check runs first (Windows) this is the
+    /// only check.
     async fn wait_ready(&self, daemon: &Daemon, admin: &Admin, tag: &str) -> Ready {
         let poll = async {
             loop {
@@ -675,7 +675,7 @@ impl CaddyManager {
     async fn stop_orphan(&self, daemon: &Daemon, admin: &Admin) -> bool {
         // No check on this OS, so no instance id file either. Without the
         // program there is no Caddy of ours to recognize.
-        if !process::ORPHAN_RECOVERY {
+        if !process::CADDY_ORPHAN_RECOVERY {
             return true;
         }
         let program = match self.spec_to_run() {
@@ -714,13 +714,16 @@ impl CaddyManager {
         Ok(instance_tag(&id))
     }
 
-    /// The orphan check for one start or stop.
+    /// The orphan check for one start or stop: the ports the next Caddy
+    /// needs, and the high ones too when it takes 80 and 443 (Linux).
     fn orphans<'a>(&'a self, pid_file: &'a PidFile, admin: &'a Admin, tag: &'a str) -> Orphans<'a> {
+        let input = self.ports();
         Orphans {
             pid_file,
             processes: &*self.processes,
             admin,
-            input: &self.input,
+            input,
+            other: (input != self.input).then_some(self.input),
             ladder: self.ladder,
             tag,
         }
@@ -983,7 +986,11 @@ async fn watch(
             && let Some(pid) = status.pid
             && recorded != Some(pid)
         {
-            pid_file.record(processes, pid).await;
+            let running = || {
+                let status = &lock(runtime).status;
+                status.state == ServiceState::Running && status.pid == Some(pid)
+            };
+            pid_file.record(processes, pid, &running).await;
             recorded = Some(pid);
         }
     }

@@ -8,6 +8,7 @@ use marsa_core::types::AutostartState;
 use semver::Version;
 
 use crate::model::version_text;
+use crate::panel::MAX_SITES;
 use crate::strings;
 
 /// The daemon, as the icon last saw it.
@@ -52,10 +53,22 @@ impl From<AutostartState> for Autostart {
     }
 }
 
+/// A site in the menu: its name, and the address the browser opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteEntry {
+    pub name: String,
+    pub url: String,
+}
+
 /// Everything the menu is drawn from.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct State {
     pub daemon: Daemon,
+    /// The sites in the daemon's order. Kept while the daemon is stopped,
+    /// shown disabled; read again when it is back.
+    pub sites: Vec<SiteEntry>,
+    /// Whether PHP loads Xdebug, as the daemon said. `None` until read.
+    pub xdebug: Option<bool>,
     /// The installed PHP versions, oldest first. Kept while the daemon is
     /// stopped, shown disabled; read again when it is back.
     pub php: Vec<Version>,
@@ -79,6 +92,11 @@ pub enum Update {
     },
     /// The daemon's `default_changed` event for PHP: as saved (`8.4`).
     PhpDefault(String),
+    /// The sites, read when a session starts and when they change.
+    Sites(Vec<SiteEntry>),
+    /// Whether PHP loads Xdebug: read when a session starts, and the answer
+    /// to a change.
+    Xdebug(bool),
     Autostart(Autostart),
     /// An action failed; the state it touched was read again before this.
     /// A client error code.
@@ -96,6 +114,8 @@ pub enum Command {
     SetPhp(String),
     /// `PUT /v1/autostart`.
     SetAutostart(bool),
+    /// `PUT /v1/php/xdebug`.
+    SetXdebug(bool),
 }
 
 impl State {
@@ -111,6 +131,8 @@ impl State {
                 self.php_default = default;
             }
             Update::PhpDefault(default) => self.php_default = Some(default),
+            Update::Sites(sites) => self.sites = sites,
+            Update::Xdebug(enabled) => self.xdebug = Some(enabled),
             Update::Autostart(autostart) => self.autostart = autostart,
             Update::Failed(code) => self.notice = Some(code),
         }
@@ -140,6 +162,27 @@ impl State {
         self.notice = None;
         self.php_default = Some(text.clone());
         Some(Command::SetPhp(text))
+    }
+
+    /// The address of the site at `index` of the menu, if the click may open
+    /// it: the daemon runs, and the site is one of the first [`MAX_SITES`].
+    pub fn site_url(&self, index: usize) -> Option<&str> {
+        if self.daemon != Daemon::Running || index >= MAX_SITES {
+            return None;
+        }
+        self.sites.get(index).map(|site| site.url.as_str())
+    }
+
+    /// "Xdebug" was clicked. The mark flips at once; the command sends it.
+    /// `None` when the line is disabled.
+    pub fn toggle_xdebug(&mut self) -> Option<Command> {
+        if self.daemon != Daemon::Running {
+            return None;
+        }
+        let enabled = !self.xdebug?;
+        self.notice = None;
+        self.xdebug = Some(enabled);
+        Some(Command::SetXdebug(enabled))
     }
 
     /// "Start at Login" was clicked. The mark flips at once; the command
@@ -227,12 +270,16 @@ pub struct Layout {
     pub status: Item,
     /// Why the last action failed, under the status line. Never enabled.
     pub notice: Option<Item>,
+    /// The first [`MAX_SITES`] sites, a line each; one disabled line that says
+    /// there are none when there are none.
+    pub sites: Vec<Item>,
     pub open: Item,
     /// The PHP submenu's own line: enabled when there is a version to pick.
     pub php: Item,
     /// The lines inside it, in the order of [`State::php`], the default
     /// checked.
     pub php_versions: Vec<Item>,
+    pub xdebug: Item,
     pub autostart: Item,
     /// "Stop Marsa" or "Start Marsa".
     pub power: Item,
@@ -244,10 +291,11 @@ impl Layout {
     pub fn lines(&self) -> Vec<&Item> {
         let mut lines = vec![&self.status];
         lines.extend(self.notice.as_ref());
+        lines.extend(&self.sites);
         lines.push(&self.open);
         lines.push(&self.php);
         lines.extend(&self.php_versions);
-        lines.extend([&self.autostart, &self.power, &self.quit]);
+        lines.extend([&self.xdebug, &self.autostart, &self.power, &self.quit]);
         lines
     }
 }
@@ -267,6 +315,21 @@ pub fn layout(state: &State) -> Layout {
             )
         })
         .collect();
+    let sites = if state.sites.is_empty() {
+        vec![Item::text(strings::TRAY_NO_SITES, false)]
+    } else {
+        state
+            .sites
+            .iter()
+            .take(MAX_SITES)
+            .map(|site| Item::text(site.name.as_str(), running))
+            .collect()
+    };
+    let xdebug = Item::check(
+        strings::XDEBUG,
+        running && state.xdebug.is_some(),
+        state.xdebug == Some(true),
+    );
     let (autostart_label, checked, enabled) = match state.autostart {
         Autostart::Unknown | Autostart::Unsupported => (strings::TRAY_AUTOSTART, false, false),
         Autostart::Off => (strings::TRAY_AUTOSTART, false, running),
@@ -285,9 +348,11 @@ pub fn layout(state: &State) -> Layout {
             .notice
             .as_deref()
             .map(|code| Item::text(strings::error_text(code), false)),
+        sites,
         open: Item::text(strings::TRAY_OPEN, true),
         php: Item::text(strings::TRAY_PHP, running && !state.php.is_empty()),
         php_versions,
+        xdebug,
         autostart: Item::check(autostart_label, enabled, checked),
         power,
         quit: Item::text(strings::TRAY_QUIT, true),
@@ -337,13 +402,17 @@ mod tests {
             labels(&menu),
             [
                 "Starting Marsa…",
+                "No sites yet",
                 "Open Marsa",
                 "PHP",
+                "Xdebug",
                 "Start at Login",
                 "Stop Marsa",
                 "Quit",
             ]
         );
+        assert!(!menu.sites[0].enabled, "no site to open");
+        assert!(!menu.xdebug.enabled, "not read yet");
         assert!(!menu.status.enabled);
         assert!(menu.notice.is_none());
         assert!(menu.open.enabled);
@@ -373,7 +442,7 @@ mod tests {
         assert_eq!(menu.power.label, "Stop Marsa");
         assert!(menu.power.enabled);
         // The submenu's lines come right after its own line.
-        assert_eq!(labels(&menu)[2..5], ["PHP", "8.3.27", "8.4.23"]);
+        assert_eq!(labels(&menu)[3..6], ["PHP", "8.3.27", "8.4.23"]);
     }
 
     #[test]
@@ -417,6 +486,105 @@ mod tests {
         assert_eq!(menu.power.label, "Stop Marsa");
         assert!(!menu.power.enabled);
         assert_eq!(state.power(), None, "already starting");
+    }
+
+    fn sites(count: usize) -> Vec<SiteEntry> {
+        (1..=count)
+            .map(|n| SiteEntry {
+                name: format!("site-{n}"),
+                url: format!("https://site-{n}.test"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_menu_lists_at_most_nine_sites_in_order_and_says_when_there_are_none() {
+        for (count, shown) in [(0, 1), (1, 1), (9, 9), (12, 9)] {
+            let mut state = running_with(&[], None);
+            state.apply(Update::Sites(sites(count)));
+            let menu = layout(&state);
+            assert_eq!(menu.sites.len(), shown, "{count} sites");
+            if count == 0 {
+                assert_eq!(menu.sites[0].label, "No sites yet");
+                assert!(!menu.sites[0].enabled);
+            } else {
+                let names: Vec<&str> = menu.sites.iter().map(|i| i.label.as_str()).collect();
+                let want: Vec<String> = (1..=shown).map(|n| format!("site-{n}")).collect();
+                assert_eq!(names, want);
+                assert!(menu.sites.iter().all(|item| item.enabled));
+            }
+        }
+        // The sites come between the status and "Open Marsa".
+        let mut state = running_with(&[], None);
+        state.apply(Update::Sites(sites(2)));
+        let all = labels(&layout(&state));
+        assert_eq!(
+            all[..4],
+            ["Marsa is running", "site-1", "site-2", "Open Marsa"]
+        );
+    }
+
+    #[test]
+    fn a_site_opens_only_while_the_daemon_runs_and_only_among_the_first_nine() {
+        let mut state = running_with(&[], None);
+        state.apply(Update::Sites(sites(12)));
+        assert_eq!(state.site_url(0), Some("https://site-1.test"));
+        assert_eq!(state.site_url(8), Some("https://site-9.test"));
+        assert_eq!(state.site_url(9), None, "the tenth is not in the menu");
+        assert_eq!(state.site_url(99), None);
+        // Stopped: the sites stay, disabled, and open nothing.
+        state.apply(Update::Daemon(Daemon::Stopped));
+        assert_eq!(state.sites.len(), 12);
+        assert!(layout(&state).sites.iter().all(|item| !item.enabled));
+        assert_eq!(state.site_url(0), None);
+    }
+
+    #[test]
+    fn the_xdebug_line_is_checked_as_the_daemon_said_and_a_click_flips_it_and_sends_it() {
+        let mut state = running_with(&[], None);
+        // Not read yet: disabled, and a click does nothing.
+        assert!(!layout(&state).xdebug.enabled);
+        assert_eq!(state.toggle_xdebug(), None);
+        state.apply(Update::Xdebug(false));
+        let menu = layout(&state);
+        assert_eq!(menu.xdebug.label, "Xdebug");
+        assert_eq!(
+            (menu.xdebug.enabled, menu.xdebug.checked),
+            (true, Some(false))
+        );
+        assert_eq!(state.toggle_xdebug(), Some(Command::SetXdebug(true)));
+        assert_eq!(layout(&state).xdebug.checked, Some(true));
+        assert_eq!(state.toggle_xdebug(), Some(Command::SetXdebug(false)));
+        // The daemon's answer is what stays.
+        state.apply(Update::Xdebug(true));
+        assert_eq!(layout(&state).xdebug.checked, Some(true));
+        // Stopped: shown, disabled, no command.
+        state.apply(Update::Daemon(Daemon::Stopped));
+        assert!(!layout(&state).xdebug.enabled);
+        assert_eq!(state.toggle_xdebug(), None);
+    }
+
+    #[test]
+    fn the_whole_menu_has_the_panels_items_in_order() {
+        let mut state = running_with(&["8.3.27", "8.4.23"], Some("8.4"));
+        state.apply(Update::Sites(sites(2)));
+        state.apply(Update::Xdebug(false));
+        assert_eq!(
+            labels(&layout(&state)),
+            [
+                "Marsa is running",
+                "site-1",
+                "site-2",
+                "Open Marsa",
+                "PHP",
+                "8.3.27",
+                "8.4.23",
+                "Xdebug",
+                "Start at Login",
+                "Stop Marsa",
+                "Quit",
+            ]
+        );
     }
 
     /// The panel asks for "Stop" or for "Start", never for "whichever": a

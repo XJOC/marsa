@@ -14,6 +14,10 @@
 //! The folder is the one argument, as the path itself: never a shell string,
 //! never joined into a command line, and never shortened (`~` is display
 //! only).
+//!
+//! The menu-bar icon opens a site the same way ([`open_url`], task M5-D11): the
+//! window's own button hands the address to egui, which has no window to do it
+//! in the icon's program.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -50,7 +54,34 @@ pub fn folder_opener(folder: &Path) -> Result<Opener, &'static str> {
 /// The code of why it did not start: see [`folder_opener`], and
 /// `open_failed` when the program cannot be run.
 pub fn open_folder(folder: &Path) -> Result<(), &'static str> {
-    let opener = folder_opener(folder)?;
+    start(folder_opener(folder)?)
+}
+
+/// The opener for the address of a site (`https://shop.test`), or the code of
+/// why there is none: `open_failed` for anything that is not an `http` or an
+/// `https` address with no space in it (an argument that starts with `-` would
+/// pass for an option, and `file:` would open a file), `open_no_program` when
+/// the system has no opener.
+pub fn url_opener(url: &str) -> Result<Opener, &'static str> {
+    let web = url.starts_with("https://") || url.starts_with("http://");
+    if !web || url.chars().any(char::is_whitespace) {
+        return Err(FAILED);
+    }
+    browser::opener(url).map_err(|err| err.code())
+}
+
+/// Opens `url` in the browser: [`url_opener`], started as [`open_folder`]
+/// does.
+///
+/// # Errors
+///
+/// As [`url_opener`], and `open_failed` when the program cannot be run.
+pub fn open_url(url: &str) -> Result<(), &'static str> {
+    start(url_opener(url)?)
+}
+
+/// Starts `opener` and returns at once.
+fn start(opener: Opener) -> Result<(), &'static str> {
     let mut child = Command::new(&opener.program)
         .args(&opener.args)
         .stdin(Stdio::null())
@@ -58,7 +89,7 @@ pub fn open_folder(folder: &Path) -> Result<(), &'static str> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|err| {
-            tracing::warn!(error = %err, program = %opener.program.display(), "cannot open the folder");
+            tracing::warn!(error = %err, program = %opener.program.display(), "cannot open it");
             FAILED
         })?;
     let Opener {
@@ -67,7 +98,7 @@ pub fn open_folder(folder: &Path) -> Result<(), &'static str> {
         ..
     } = opener;
     let reaper = thread::Builder::new()
-        .name("folder-opener".to_owned())
+        .name("opener".to_owned())
         .stack_size(64 * 1024)
         .spawn(move || match child.wait() {
             // `explorer.exe` exits with 1 even when it opened the folder.
@@ -121,6 +152,36 @@ mod tests {
                 "{relative:?}"
             );
             assert_eq!(open_folder(Path::new(relative)), Err("open_failed"));
+        }
+    }
+
+    #[test]
+    fn only_a_web_address_without_spaces_opens_in_the_browser() {
+        for refused in [
+            "",
+            "shop.test",
+            "-n",
+            "file:///etc/passwd",
+            "ftp://shop.test",
+            "https://shop.test and more",
+            "https://shop.test\n--args",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(
+                url_opener(refused).map(|_| ()),
+                Err("open_failed"),
+                "{refused:?}"
+            );
+            assert_eq!(open_url(refused), Err("open_failed"), "{refused:?}");
+        }
+        // The address is the one argument, as it is.
+        match url_opener("https://shop.test") {
+            Ok(opener) => {
+                assert!(opener.program.is_absolute(), "{opener:?}");
+                assert_eq!(opener.args, [OsString::from("https://shop.test")]);
+            }
+            // A bare Linux image has no `xdg-open`.
+            Err(code) => assert_eq!(code, "open_no_program"),
         }
     }
 

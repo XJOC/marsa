@@ -165,6 +165,7 @@ pub struct FooterLink<'a> {
     label: &'a str,
     width: f32,
     disabled: Option<&'a str>,
+    tooltip: Option<&'a str>,
     look: Option<Look>,
 }
 
@@ -174,8 +175,15 @@ impl<'a> FooterLink<'a> {
             label,
             width,
             disabled: None,
+            tooltip: None,
             look: None,
         }
+    }
+
+    /// Says what the link does, under the pointer, when it is not disabled.
+    pub const fn tooltip(mut self, text: &'a str) -> Self {
+        self.tooltip = Some(text);
+        self
     }
 
     /// Disables the link. Hovering it shows `reason`.
@@ -221,9 +229,13 @@ impl<'a> FooterLink<'a> {
 
 impl Widget for FooterLink<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        let reason = self.disabled;
+        let (reason, tooltip) = (self.disabled, self.tooltip);
         if reason.is_none() {
-            return self.show(ui);
+            let response = self.show(ui);
+            return match tooltip {
+                Some(text) => response.on_hover_text(text),
+                None => response,
+            };
         }
         let response = ui.add_enabled_ui(false, |ui| self.show(ui)).inner;
         with_disabled_reason(response, reason)
@@ -427,6 +439,38 @@ mod tests {
                 .expect("a button")
                 .is_disabled()
         );
+    }
+
+    #[test]
+    fn a_footer_link_says_what_it_does_under_the_pointer() {
+        let harness = Harness::new(egui::Theme::Light);
+        // No wait for the tooltip, and none for the pointer to be still.
+        harness.ctx.all_styles_mut(|style| {
+            style.interaction.tooltip_delay = 0.0;
+            style.interaction.show_tooltips_only_when_still = false;
+        });
+        let words = "Closes this icon. Sites keep working.";
+        let link = |ui: &mut Ui| {
+            ui.add(FooterLink::new("Quit", 170.0).tooltip(words));
+        };
+        let texts = |shapes: Vec<Shape>| -> Vec<String> {
+            shapes
+                .iter()
+                .filter_map(|shape| match shape {
+                    Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect()
+        };
+        harness.run(link);
+        // Away from the link: no tooltip.
+        harness.hover(egui::pos2(300.0, 300.0), link);
+        assert!(!texts(harness.shapes(link)).contains(&words.to_owned()));
+        // Over it: the words.
+        harness.hover(egui::pos2(40.0, 15.0), link);
+        harness.hover(egui::pos2(41.0, 15.0), link);
+        let over = texts(harness.shapes(link));
+        assert!(over.contains(&words.to_owned()), "{over:?}");
     }
 
     #[test]
