@@ -8,10 +8,12 @@
 //! cells are `space.3` apart. Those spaces are cells of their own, so the
 //! fill of a hovered or selected row reaches both edges of the card.
 
-use eframe::egui::text::{LayoutJob, TextWrapping};
+use std::sync::Arc;
+
+use eframe::egui::text::{Galley, LayoutJob, TextWrapping};
 use eframe::egui::{
-    Align2, Color32, CornerRadius, Frame, InnerResponse, Label, Margin, Rect, Response, RichText,
-    Role, Sense, Stroke, Ui, Vec2, WidgetInfo, vec2,
+    Align2, Color32, CornerRadius, Frame, InnerResponse, Label, Margin, Painter, Rect, Response,
+    RichText, Role, Sense, Stroke, Ui, Vec2, WidgetInfo, vec2,
 };
 use egui_extras::{Column, TableBuilder, TableRow};
 
@@ -152,6 +154,53 @@ pub struct TableOutput {
     pub rect: Rect,
 }
 
+/// The color of the second line of a two-line cell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineTone {
+    /// `mute`: a folder, a description.
+    #[default]
+    Mute,
+    /// `error`: why something failed.
+    Error,
+}
+
+/// The most lines of a wrapped second line: a longer one is cut with an
+/// ellipsis, and the tooltip has it whole. The texts of the window are
+/// written to fit.
+pub const NOTE_LINES: usize = 2;
+
+/// `text` in `caption`, wrapped to `width` in at most [`NOTE_LINES`] lines.
+pub fn note_galley(painter: &Painter, theme: &Theme, text: &str, width: f32) -> Arc<Galley> {
+    let mut job = LayoutJob::simple(
+        text.to_owned(),
+        theme.text.caption.font_id(),
+        Color32::PLACEHOLDER,
+        width,
+    );
+    job.wrap = TextWrapping {
+        max_width: width,
+        max_rows: NOTE_LINES,
+        break_anywhere: false,
+        overflow_character: Some('…'),
+    };
+    painter.layout_job(job)
+}
+
+/// How high a row is whose second line is `note`, wrapped to `width` (the
+/// fill column, [`Table::fill_width`]): its name and its lines with room above and below,
+/// and never less than a two-line row.
+pub fn wrapped_row_height(ui: &Ui, width: f32, note: &str) -> f32 {
+    let theme = Theme::of(ui.ctx());
+    let name = ui.painter().layout_no_wrap(
+        "A".to_owned(),
+        theme.text.body_strong.font_id(),
+        Color32::PLACEHOLDER,
+    );
+    let lines = note_galley(ui.painter(), theme, note, width);
+    let text = name.size().y + lines.size().y + theme.space.s2 + theme.space.s2;
+    text.max(RowHeight::TwoLine.points(theme))
+}
+
 /// A row being filled: [`Row::cell`] adds one cell after the other.
 pub struct Row<'a, 'b> {
     row: TableRow<'a, 'b>,
@@ -218,10 +267,34 @@ impl<'a, 'b> Row<'a, 'b> {
     /// (`~/Code/shop`): `full` is the text a screen reader hears and the
     /// tooltip shows while the pointer rests on the cell.
     pub fn two_lines_hover(&mut self, primary: &str, secondary: &str, full: &str) {
+        self.two_lines_toned(primary, secondary, full, LineTone::Mute);
+    }
+
+    /// [`Row::two_lines_hover`] with the second line in `tone`: a service
+    /// that failed says why in `error`, under its name.
+    pub fn two_lines_toned(&mut self, primary: &str, secondary: &str, full: &str, tone: LineTone) {
+        self.lines(primary, secondary, full, tone, false);
+    }
+
+    /// [`Row::two_lines_toned`] for a second line that wraps instead of
+    /// being cut, in at most [`NOTE_LINES`] lines: a service says what it
+    /// does, or why it failed, in words. The row is taller for it: the table
+    /// is given the heights ([`Table::heights`], [`wrapped_row_height`]).
+    pub fn two_lines_wrapped(
+        &mut self,
+        primary: &str,
+        secondary: &str,
+        full: &str,
+        tone: LineTone,
+    ) {
+        self.lines(primary, secondary, full, tone, true);
+    }
+
+    fn lines(&mut self, primary: &str, secondary: &str, full: &str, tone: LineTone, wrap: bool) {
         let theme = self.theme;
         self.cell(|ui| {
             let width = ui.available_width();
-            let line = |ui: &Ui, text: &str, token: TextToken| {
+            let cut = |ui: &Ui, text: &str, token: TextToken| {
                 let mut job = LayoutJob::simple_singleline(
                     text.to_owned(),
                     token.font_id(),
@@ -230,8 +303,13 @@ impl<'a, 'b> Row<'a, 'b> {
                 job.wrap = TextWrapping::truncate_at_width(width);
                 ui.painter().layout_job(job)
             };
-            let first = line(ui, primary, theme.text.body_strong);
-            let second = line(ui, secondary, theme.text.caption);
+            let first = cut(ui, primary, theme.text.body_strong);
+            let second = if wrap {
+                note_galley(ui.painter(), theme, secondary, width)
+            } else {
+                cut(ui, secondary, theme.text.caption)
+            };
+            let elided = second.elided;
             let text = vec2(width, first.size().y + second.size().y);
             let (rect, response) =
                 ui.allocate_exact_size(vec2(width, ui.available_height()), Sense::hover());
@@ -239,10 +317,14 @@ impl<'a, 'b> Row<'a, 'b> {
             let painter = ui.painter();
             let below = top + vec2(0.0, first.size().y);
             painter.galley(top, first, theme.color.ink);
-            painter.galley(below, second, theme.color.mute);
+            let color = match tone {
+                LineTone::Mute => theme.color.mute,
+                LineTone::Error => theme.color.error,
+            };
+            painter.galley(below, second, color);
             let label = format!("{primary}, {full}");
             response.widget_info(|| WidgetInfo::labeled(Role::Label, true, &label));
-            if full != secondary {
+            if full != secondary || elided {
                 response.on_hover_text(full);
             }
         });
@@ -296,6 +378,9 @@ pub struct Table<'a> {
     label: &'a str,
     columns: &'a [TableColumn<'a>],
     height: RowHeight,
+    /// The height of each row, when they differ (a row that wraps a long
+    /// line): the table is as tall as they add up to.
+    heights: Option<&'a [f32]>,
     selected: Option<usize>,
     max_height: Option<f32>,
     header: bool,
@@ -308,6 +393,7 @@ impl<'a> Table<'a> {
             label,
             columns,
             height: RowHeight::OneLine,
+            heights: None,
             selected: None,
             max_height: None,
             header: true,
@@ -325,6 +411,34 @@ impl<'a> Table<'a> {
     pub const fn rows(mut self, height: RowHeight) -> Self {
         self.height = height;
         self
+    }
+
+    /// One height for each row, where they differ: a row whose second line
+    /// wraps ([`Row::two_lines_wrapped`], [`wrapped_row_height`]). There is
+    /// one for every row, in order; the rows in view are drawn all the same.
+    pub const fn heights(mut self, heights: &'a [f32]) -> Self {
+        self.heights = Some(heights);
+        self
+    }
+
+    /// How wide the fill column is when the table is shown in `ui`: what is
+    /// left of the width after the card's border, the padding, the gaps, and
+    /// the fixed columns. A screen that wraps a line needs it to know how
+    /// many lines it takes.
+    pub fn fill_width(&self, ui: &Ui) -> f32 {
+        let theme = Theme::of(ui.ctx());
+        let fixed: f32 = self
+            .columns
+            .iter()
+            .map(|column| match column.width {
+                Width::Fill => 0.0,
+                Width::Fixed(width) => width,
+            })
+            .sum();
+        let gaps = self.columns.len().saturating_sub(1) as f32 * theme.space.s3;
+        let pads = theme.space.s4 + theme.space.s4;
+        let border = theme.size.border + theme.size.border;
+        (ui.available_width() - border - pads - gaps - fixed).max(0.0)
     }
 
     /// The row drawn as selected: the `selected` fill.
@@ -386,14 +500,18 @@ impl<'a> Table<'a> {
             let builder = builder.column(pad);
             let rows = self.height.points(theme);
             let body = |body: egui_extras::TableBody<'_>| {
-                body.rows(rows, row_count, |row| {
+                let mut build = |row: TableRow<'_, '_>| {
                     let mut row = Row::body(row, theme, count, self.selected, self.header);
                     let index = row.index();
                     add_row(&mut row);
                     if row.finish() {
                         output.clicked = Some(index);
                     }
-                });
+                };
+                match self.heights {
+                    Some(heights) => body.heterogeneous_rows(heights.iter().copied(), &mut build),
+                    None => body.rows(rows, row_count, &mut build),
+                }
             };
             if self.header {
                 builder
@@ -839,6 +957,125 @@ mod tests {
         let wide = texts(&harness, 900.0);
         assert!(narrow <= 120.0 + 1.0, "cut to the column: {narrow}");
         assert!(wide > 300.0, "whole when it fits: {wide}");
+    }
+
+    #[test]
+    fn the_second_line_is_mute_and_a_failure_is_told_in_the_error_color() {
+        for (theme, egui_theme) in [(&LIGHT, egui::Theme::Light), (&DARK, egui::Theme::Dark)] {
+            let harness = Harness::new(egui_theme);
+            let color_of = |text: &str, tone: LineTone| {
+                let columns = [TableColumn::fill("Service")];
+                harness
+                    .shapes(|ui| {
+                        Table::new("tone", "Tone", &columns)
+                            .rows(RowHeight::TwoLine)
+                            .show(ui, 1, |row| row.two_lines_toned("Caddy", text, text, tone));
+                    })
+                    .into_iter()
+                    .find_map(|shape| match shape {
+                        Shape::Text(shape) if shape.galley.text() == text => {
+                            Some(shape.fallback_color)
+                        }
+                        _ => None,
+                    })
+                    .expect("the second line")
+            };
+            assert_eq!(color_of("Runs PHP", LineTone::Mute), theme.color.mute);
+            assert_eq!(color_of("It stopped", LineTone::Error), theme.color.error);
+            // The default tone is the quiet one, so every old caller is unchanged.
+            assert_eq!(LineTone::default(), LineTone::Mute);
+            // The words of a failure read on the card.
+            assert!(contrast(theme.color.error, theme.color.surface) >= TEXT);
+        }
+    }
+
+    #[test]
+    fn the_fill_width_is_the_width_the_fill_cell_gets() {
+        let harness = Harness::new(egui::Theme::Light);
+        for width in [632.0_f32, 900.0, 1400.0] {
+            let (mut said, mut got) = (0.0, 0.0);
+            harness.run(|ui| {
+                ui.allocate_ui(vec2(width, 600.0), |ui| {
+                    let table = Table::new("fill", "Fill", &COLUMNS).rows(RowHeight::TwoLine);
+                    said = table.fill_width(ui);
+                    table.show(ui, 1, |row| {
+                        row.cell(|ui| got = ui.available_width());
+                    });
+                });
+            });
+            assert!((said - got).abs() < 0.5, "{width}: said {said}, got {got}");
+        }
+    }
+
+    #[test]
+    fn a_long_second_line_wraps_in_two_lines_and_a_row_grows_for_it() {
+        let harness = Harness::new(egui::Theme::Light);
+        let theme = &LIGHT;
+        let short = "Runs PHP 8.4 for 4 sites.";
+        let long = "An old php-fpm from a crashed daemon holds the socket or port and could not be \
+                    stopped safely.";
+        let very_long = long.repeat(3);
+        let mut heights = Vec::new();
+        let mut galleys = Vec::new();
+        harness.run(|ui| {
+            for text in [short, long, very_long.as_str()] {
+                heights.push(wrapped_row_height(ui, 300.0, text));
+                galleys.push(note_galley(ui.painter(), theme, text, 300.0));
+            }
+        });
+        // A line that fits keeps the usual two-line row; two lines are taller.
+        assert_eq!(heights[0], theme.size.row_max);
+        assert!(heights[1] > heights[0], "{heights:?}");
+        // Never more than two lines: the rest is cut with an ellipsis.
+        assert_eq!(galleys[0].rows.len(), 1);
+        assert_eq!(galleys[1].rows.len(), 2);
+        assert!(!galleys[1].elided);
+        assert_eq!(galleys[2].rows.len(), NOTE_LINES);
+        assert!(galleys[2].elided);
+        assert_eq!(heights[2], heights[1]);
+    }
+
+    #[test]
+    fn rows_of_different_heights_are_each_as_high_as_they_were_given() {
+        let harness = Harness::new(egui::Theme::Light);
+        let heights = [54.0, 70.0, 54.0];
+        let mut tops = Vec::new();
+        harness.run(|ui| {
+            Table::new("tall", "Tall", &COLUMNS)
+                .headerless()
+                .heights(&heights)
+                .show(ui, heights.len(), |row| {
+                    row.cell(|ui| {
+                        // Each cell is as high as its row.
+                        tops.push((ui.max_rect().top(), ui.available_height()));
+                    });
+                });
+        });
+        assert_eq!(tops.len(), 3);
+        let spans: Vec<f32> = tops.windows(2).map(|pair| pair[1].0 - pair[0].0).collect();
+        assert!(
+            (spans[0] - 54.0).abs() < 1.5 && (spans[1] - 70.0).abs() < 1.5,
+            "{spans:?}"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_line_is_whole_in_its_cell_and_shows_the_whole_text_to_a_screen_reader() {
+        let harness = Harness::new(egui::Theme::Light);
+        let long = "An old php-fpm from a crashed daemon holds the socket or port and could not be \
+                    stopped safely.";
+        let columns = [TableColumn::fixed("Name", 300.0)];
+        let tree = harness.accessibility(|ui| {
+            Table::new("wrap", "Wrap", &columns)
+                .headerless()
+                .show(ui, 1, |row| {
+                    row.two_lines_wrapped("PHP-FPM 8.2", long, long, LineTone::Error);
+                });
+        });
+        assert!(
+            tree.node_with_text(&format!("PHP-FPM 8.2, {long}"))
+                .is_some()
+        );
     }
 
     #[test]

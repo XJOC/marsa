@@ -1241,7 +1241,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_uninstall_lists_what_uses_the_version_one_line_after_the_other() {
+    fn a_refused_uninstall_is_one_sentence_in_the_bar() {
         let mut model = model();
         let removal = Removal::Uninstall {
             runtime: Runtime::Php,
@@ -1265,17 +1265,13 @@ mod tests {
         });
         let status = read(&model).status;
         assert_eq!(status.removing, None);
-        // The refusal and what uses the version are one notice of the bar.
+        // The bar says the refusal in one sentence; what uses the version is
+        // said by the screen, beside the version's menu.
         let notice = crate::shell::notices::current(&model).expect("a notice");
-        assert!(
-            notice
-                .notice
-                .text
-                .starts_with("PHP 8.3.27 is in use, so it was not uninstalled:"),
-            "{}",
-            notice.notice.text
+        assert_eq!(
+            notice.notice.text,
+            "PHP 8.3.27 is in use, so it was not uninstalled."
         );
-        assert!(notice.notice.text.contains("pinned.test"));
         // A done uninstall is one sentence.
         model.uninstall_notice = Some(UninstallNotice::Done {
             runtime: Runtime::Php,

@@ -509,10 +509,22 @@ pub enum PillState {
     Stopped,
     /// A ring with a gap, `accent`.
     Starting,
+    /// A dash, `accent` like Starting: the program is on its way down.
+    Stopping,
+    /// An alert, `error`: the program stopped by an error (the reason is
+    /// the screen's to say).
+    Failed,
 }
 
 impl PillState {
-    pub const ALL: [Self; 4] = [Self::Running, Self::Waiting, Self::Stopped, Self::Starting];
+    pub const ALL: [Self; 6] = [
+        Self::Running,
+        Self::Waiting,
+        Self::Stopped,
+        Self::Starting,
+        Self::Stopping,
+        Self::Failed,
+    ];
 }
 
 /// How a state pill is drawn.
@@ -554,6 +566,18 @@ pub fn pill_look(theme: &Theme, state: PillState) -> PillLook {
             ring: None,
             icon: Some((Icon::Spinner, c.accent)),
             text: c.accent,
+        },
+        PillState::Stopping => PillLook {
+            fill: Some(c.accent_tint),
+            ring: None,
+            icon: Some((Icon::Dash, c.accent)),
+            text: c.accent,
+        },
+        PillState::Failed => PillLook {
+            fill: Some(c.error_tint),
+            ring: None,
+            icon: Some((Icon::Alert, c.error)),
+            text: c.error,
         },
     }
 }
@@ -851,6 +875,8 @@ mod tests {
             assert_eq!(pill_look(theme, PillState::Running).text, c.ok);
             assert_eq!(pill_look(theme, PillState::Stopped).text, c.error);
             assert_eq!(pill_look(theme, PillState::Starting).text, c.accent);
+            assert_eq!(pill_look(theme, PillState::Stopping).text, c.accent);
+            assert_eq!(pill_look(theme, PillState::Failed).text, c.error);
             for state in PillState::ALL {
                 let look = pill_look(theme, state);
                 // The word on a row of a table: at rest, and under the
@@ -873,7 +899,12 @@ mod tests {
     #[test]
     fn the_words_of_the_pill_states_are_in_strings() {
         let words = PillState::ALL.map(strings::pill_state_word);
-        assert_eq!(words, ["Running", "Waiting", "Stopped", "Starting"]);
+        assert_eq!(
+            words,
+            [
+                "Running", "Waiting", "Stopped", "Starting", "Stopping", "Failed"
+            ]
+        );
     }
 
     #[test]

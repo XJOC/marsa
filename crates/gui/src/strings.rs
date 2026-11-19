@@ -8,15 +8,16 @@ use marsa_core::recipes::Platform;
 use marsa_core::runtimes::Runtime;
 use marsa_core::sites::TLD;
 use marsa_core::types::{
-    InstallFailure, OpStatus, PortHolder, ServiceAction, ServiceState, SetupReport, Site, SiteKind,
-    VersionInUse, XdebugState,
+    InstallFailure, OpStatus, PortHolder, ServiceAction, SetupReport, Site, SiteKind, VersionInUse,
+    XdebugState,
 };
 use semver::Version;
 
 use crate::model::{
-    Autostart, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Overall, Pick, Removal,
-    UninstallNotice,
+    Appearance, Autostart, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, LogLevel,
+    Overall, Pick, PoolKind, Removal, UninstallNotice, WEB_SERVER, pool_of,
 };
+use crate::screens::settings::Check;
 use crate::theme::Section;
 use crate::tray::menu::Daemon;
 use crate::widgets::{PillState, Stage, StepState};
@@ -24,16 +25,111 @@ use crate::widgets::{PillState, Stage, StepState};
 pub const APP_NAME: &str = "Marsa";
 
 pub const SERVICES: &str = "Services";
-pub const NO_SERVICES: &str = "No services.";
+/// After the title of Services: what the screen is for.
+pub const SERVICES_HINT: &str = "Programs Marsa runs for your sites";
+/// The Services screen while the window has no daemon to ask.
+pub const SERVICES_OFFLINE: &str = "Your services show here once Marsa is connected to its daemon.";
+/// The Services screen when the daemon lists no program.
+pub const NO_SERVICES: &str = "No services yet. A program shows here once Marsa starts it.";
+/// Under the Services table, while a PHP pool is listed.
+pub const SERVICES_POOLS_NOTE: &str = "PHP pools start and stop with the sites that need them.";
+/// The names of the columns, for a screen reader (the table has no header).
 pub const COLUMN_SERVICE: &str = "Service";
 pub const COLUMN_STATE: &str = "State";
-pub const COLUMN_PID: &str = "PID";
 pub const COLUMN_ACTIONS: &str = "Actions";
-/// Over the disabled buttons of a php-fpm pool.
-pub const MANAGED_BY_SITES_HINT: &str =
-    "Starts and stops with the sites that need its PHP version.";
-pub const LOG_TITLE: &str = "Caddy log";
-pub const LOG_EMPTY: &str = "No log lines yet.";
+
+pub const LOGS: &str = "Logs";
+/// The name of the control that picks whose log is shown.
+pub const LOG_SOURCE: &str = "Log source";
+/// The name of the filter field of Logs for a screen reader, and its
+/// placeholder.
+pub const FILTER_LINES: &str = "Filter lines";
+pub const FOLLOW: &str = "Follow";
+/// Over the Follow chip.
+pub const FOLLOW_HINT: &str = "Keeps the newest line in view. Scrolling up stops it.";
+/// The Logs screen while the window has no daemon to ask and no log kept.
+pub const LOGS_OFFLINE: &str = "Logs show here once Marsa is connected to its daemon.";
+/// The Logs screen when the filters leave no line.
+pub const LOG_NO_MATCH: &str = "No lines match.";
+
+/// The Logs screen when the program has written nothing yet.
+pub fn log_empty(name: &str) -> String {
+    format!("{name} has not written anything yet.")
+}
+
+/// A level in the filter chips.
+pub const fn log_level_name(level: LogLevel) -> &'static str {
+    match level {
+        LogLevel::Info => "Info",
+        LogLevel::Warning => "Warning",
+        LogLevel::Error => "Error",
+    }
+}
+
+/// A level as the word at the start of a line, in the mono face.
+pub const fn log_level_word(level: LogLevel) -> &'static str {
+    match level {
+        LogLevel::Info => "INFO",
+        LogLevel::Warning => "WARN",
+        LogLevel::Error => "ERROR",
+    }
+}
+
+/// What a screen reader says for a line: its level, then the message.
+pub fn log_entry_label(level: LogLevel, message: &str) -> String {
+    format!("{}: {message}", log_level_name(level))
+}
+
+/// The button that opens the list of logs, when there are too many for the
+/// segmented control. It opens a menu, so it ends with "…".
+pub fn log_source_menu(name: &str) -> String {
+    format!("{name}…")
+}
+
+/// What a service is called: `caddy` is Caddy, `php-fpm-8.4` is PHP-FPM 8.4.
+/// A service this window does not know shows under its id.
+pub fn service_name(id: &str) -> String {
+    if id == WEB_SERVER {
+        return "Caddy".to_owned();
+    }
+    match pool_of(id) {
+        Some((PoolKind::Fpm, line)) => format!("PHP-FPM {line}"),
+        Some((PoolKind::Cgi, line)) => format!("PHP-CGI {line}"),
+        None => id.to_owned(),
+    }
+}
+
+/// What a service does, in one line under its name. `waiting`: a pool that
+/// no site needs now. `sites`: how many sites run the PHP line of a pool.
+pub fn service_description(id: &str, waiting: bool, sites: usize) -> String {
+    if id == WEB_SERVER {
+        return "The web server for every .test site.".to_owned();
+    }
+    let Some((_, line)) = pool_of(id) else {
+        return "A program Marsa runs for your sites.".to_owned();
+    };
+    match (waiting, sites) {
+        (true, _) => "No site needs it now. It starts when one does.".to_owned(),
+        (false, 0) => format!("Runs PHP {line} for your sites."),
+        (false, 1) => format!("Runs PHP {line} for 1 site."),
+        (false, n) => format!("Runs PHP {line} for {n} sites."),
+    }
+}
+
+/// The tooltip of a state: the process id, while there is one.
+pub fn service_pid(pid: u32) -> String {
+    format!("Process {pid}")
+}
+
+/// What a screen reader says for the "Show log" of a service.
+pub fn service_show_log_label(name: &str) -> String {
+    format!("{SHOW_LOG} of {name}")
+}
+
+/// What a screen reader says for a service's button: "Restart Caddy".
+pub fn service_action_label(action: ServiceAction, name: &str) -> String {
+    format!("{} {name}", action_text(action))
+}
 
 pub const SITES: &str = "Sites";
 pub const COLUMN_NAME: &str = "Name";
@@ -417,15 +513,58 @@ const SETUP_CADDY_NOT_INSTALLED: &str = "Caddy is not installed, so Marsa's cert
 // Settings (task M5-10).
 
 pub const SETTINGS: &str = "Settings";
+/// The three groups of the Settings screen (task M5-D9).
+pub const SETTINGS_GENERAL: &str = "General";
+pub const SETTINGS_SETUP: &str = "Setup";
+pub const SETTINGS_ABOUT: &str = "About";
+pub const APPEARANCE: &str = "Appearance";
+pub const APPEARANCE_HINT: &str = "System follows your computer's setting.";
+
+/// An option of the Appearance control.
+pub const fn appearance_name(appearance: Appearance) -> &'static str {
+    match appearance {
+        Appearance::System => "System",
+        Appearance::Light => "Light",
+        Appearance::Dark => "Dark",
+    }
+}
+
+pub const LANGUAGE: &str = "Language";
+pub const LANGUAGE_NAME: &str = "English";
+pub const LANGUAGE_HINT: &str = "More languages come later.";
+/// Why Start at login or Run setup cannot be pressed now.
+pub const NEEDS_DAEMON_HINT: &str = "Marsa is not connected to its daemon.";
+pub const SETUP_IS_RUNNING: &str = "Setup is running.";
+pub const AUTOSTART_READING: &str = "Marsa is reading this setting.";
+pub const AUTOSTART_UNSUPPORTED: &str = "Not supported on this system yet.";
 pub const AUTOSTART: &str = "Start at login";
 pub const AUTOSTART_HINT: &str =
     "Start Marsa's menu-bar icon when you log in. The icon starts the daemon.";
 pub const DATA_FOLDER: &str = "Data folder";
 pub const DATA_FOLDER_HINT: &str =
     "Where Marsa keeps its programs, settings, and logs. Chosen when Marsa starts.";
+/// The Setup group: what the window knows of the HTTPS certificate and the
+/// `.test` names. It learns it only from a setup report of this session, so
+/// everything else is "Not checked", never a claim.
+pub const SETUP_ROW: &str = "Setup";
+pub const HTTPS_CERT: &str = "HTTPS certificate";
+pub const HTTPS_CERT_HINT: &str = "Marsa knows this only from a setup run in this window.";
+pub const TEST_NAMES: &str = ".test addresses";
+pub const TEST_NAMES_HINT: &str = "Marsa knows this only from a setup run in this window.";
+
+/// How a check of the Setup group stands, by its word.
+pub const fn check_word(check: Check) -> &'static str {
+    match check {
+        Check::Done => "Done",
+        Check::Failed => "Failed",
+        Check::Skipped => "Skipped",
+        Check::NotChecked => "Not checked",
+    }
+}
+
 pub const APP_VERSION: &str = "Marsa version";
 pub const DAEMON_VERSION: &str = "Daemon version";
-pub const NOT_CONNECTED: &str = "Not connected";
+pub const DAEMON_NOT_CONNECTED: &str = "Daemon not connected";
 
 /// The window's own code: its background thread could not start.
 pub const BRIDGE_FAILED: &str = "bridge_failed";
@@ -450,11 +589,12 @@ pub const TRAY_WORKER_FAILED: &str = "tray_worker_failed";
 /// The icon's own code: `marsa-gui` could not be started.
 pub const WINDOW_START_FAILED: &str = "window_start_failed";
 
-/// The daemon column of Settings: its version and PID while connected.
-pub fn daemon_version(connection: &Connection) -> String {
+/// Under the Marsa version in Settings: the daemon's version while
+/// connected.
+pub fn daemon_hint(connection: &Connection) -> String {
     match connection {
-        Connection::Running(health) => format!("{} (PID {})", health.app_version, health.pid),
-        _ => NOT_CONNECTED.to_owned(),
+        Connection::Running(health) => format!("{DAEMON_VERSION} {}", health.app_version),
+        _ => DAEMON_NOT_CONNECTED.to_owned(),
     }
 }
 
@@ -466,7 +606,7 @@ pub fn autostart_note(state: Autostart) -> Option<&'static str> {
             "The login file starts Marsa from another folder, or it was changed. Turn this on \
              to fix it.",
         ),
-        Autostart::Unsupported => Some("Not supported on this system yet."),
+        Autostart::Unsupported => Some(AUTOSTART_UNSUPPORTED),
         Autostart::Unknown | Autostart::Off | Autostart::On => None,
     }
 }
@@ -499,9 +639,10 @@ pub fn link_replaces(site: &Site) -> String {
     )
 }
 
-/// Under the sites buttons once the daemon linked the folder.
-pub fn linked(name: &str, folder: &Path) -> String {
-    format!("Linked {} as {name}.{TLD}.", folder.display())
+/// The notice after the daemon linked the folder. A folder under `home`
+/// shows as `~/…` ([`home_path`]).
+pub fn linked(name: &str, folder: &Path, home: Option<&Path>) -> String {
+    format!("Linked {} as {name}.{TLD}.", home_path(folder, home))
 }
 
 /// In the install dialog: what to type for the runtime called `name`.
@@ -589,6 +730,14 @@ pub fn install_failure(runtime: Option<Runtime>, failure: &InstallFailure) -> St
             "Marsa has no {name} build for {}.",
             failure.platform.as_deref().unwrap_or("this system")
         ),
+        // Same wording as the CLI (`marsa install`).
+        "install_os_too_old" => match failure.os.as_deref() {
+            Some(os) => format!(
+                "{name} needs {} or newer, and this system has {}. Nothing was installed.",
+                os.needs, os.found
+            ),
+            None => format!("{name} needs a newer system than this one. Nothing was installed."),
+        },
         "install_no_such_version" => {
             let wanted = match requested {
                 Some(text) => format!("No {name} version matches \"{text}\"."),
@@ -597,12 +746,21 @@ pub fn install_failure(runtime: Option<Runtime>, failure: &InstallFailure) -> St
             if failure.available.is_empty() {
                 format!("{wanted} The version list has no {name} versions.")
             } else {
-                format!("{wanted} Available: {}.", failure.available.join(", "))
+                format!(
+                    "{wanted} Available: {}.",
+                    versions_shown(&failure.available)
+                )
             }
         }
         "install_check_failed" => {
-            let output = failure.output.as_deref().map(str::trim);
-            match output.filter(|output| !output.is_empty()) {
+            // A notice is at most two lines: the first line of what the
+            // program printed, cut short.
+            let output = failure
+                .output
+                .as_deref()
+                .and_then(|output| output.lines().map(str::trim).find(|line| !line.is_empty()))
+                .map(|line| cut(line, MAX_PRINTED));
+            match output {
                 Some(output) => format!(
                     "The new {name} failed its test run, so it was not installed. It printed: \
                      {output}"
@@ -617,6 +775,33 @@ pub fn install_failure(runtime: Option<Runtime>, failure: &InstallFailure) -> St
         ),
         code => error_text(code),
     }
+}
+
+/// The most characters of a program's output the install failure shows.
+const MAX_PRINTED: usize = 60;
+/// The most versions "Available:" names.
+const MAX_AVAILABLE: usize = 4;
+
+/// `text` cut to `most` characters, with an ellipsis if it was longer.
+fn cut(text: &str, most: usize) -> String {
+    if text.chars().count() <= most {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(most).collect();
+    format!("{}…", kept.trim_end())
+}
+
+/// The versions the list has, the first few named: `8.3.27, 8.4.23, and 3
+/// more`.
+fn versions_shown(available: &[String]) -> String {
+    if available.len() <= MAX_AVAILABLE {
+        return available.join(", ");
+    }
+    format!(
+        "{}, and {} more",
+        available[..MAX_AVAILABLE].join(", "),
+        available.len() - MAX_AVAILABLE
+    )
 }
 
 /// What setup does, and the prompt it may bring, on this system.
@@ -791,16 +976,6 @@ pub fn status_line(connection: &Connection) -> String {
     }
 }
 
-pub fn state_text(state: &ServiceState) -> String {
-    match state {
-        ServiceState::Stopped => "Stopped".to_owned(),
-        ServiceState::Starting => "Starting".to_owned(),
-        ServiceState::Running => "Running".to_owned(),
-        ServiceState::Stopping => "Stopping".to_owned(),
-        ServiceState::Failed { code } => format!("Failed: {}", error_text(code)),
-    }
-}
-
 pub fn action_text(action: ServiceAction) -> &'static str {
     match action {
         ServiceAction::Start => "Start",
@@ -887,7 +1062,7 @@ pub const fn section_name(section: Section) -> &'static str {
         Section::Services => SERVICES,
         Section::Mail => "Mail",
         Section::Dumps => "Dumps",
-        Section::Logs => "Logs",
+        Section::Logs => LOGS,
         Section::Databases => "Databases",
         Section::Queues => "Queues",
     }
@@ -990,7 +1165,6 @@ pub const INSTALL_CADDY: &str = "Install Caddy";
 pub const INSTALL_PHP: &str = "Install PHP 8.4";
 
 pub const DEFAULT_PHP: &str = "Default PHP";
-pub const DEFAULT_PHP_HINT: &str = "used where a site does not ask for a version";
 pub const NO_PHP_YET: &str = "No PHP installed yet.";
 pub const HOME_SITES_EMPTY: &str = "Sites you park or link show here.";
 pub const ADD_SITE: &str = "Add a site";
@@ -1049,12 +1223,14 @@ pub const fn pill_state_word(state: PillState) -> &'static str {
         PillState::Waiting => "Waiting",
         PillState::Stopped => "Stopped",
         PillState::Starting => "Starting",
+        PillState::Stopping => "Stopping",
+        PillState::Failed => "Failed",
     }
 }
 
-/// Under the sites buttons once the daemon accepted the folder to park.
-pub fn parked(folder: &Path) -> String {
-    format!("Parked {}.", folder.display())
+/// The notice after the daemon accepted the folder to park.
+pub fn parked(folder: &Path, home: Option<&Path>) -> String {
+    format!("Parked {}.", home_path(folder, home))
 }
 
 /// Under the sites buttons once the daemon unlinked the site.
@@ -1062,29 +1238,79 @@ pub fn unlinked(site: &str) -> String {
     format!("Unlinked {site}.{TLD}. Its folder and files stay.")
 }
 
-/// Under the sites buttons once the daemon forgot the parked folder.
-pub fn forgot(folder: &Path) -> String {
+/// The notice after the daemon forgot the parked folder.
+pub fn forgot(folder: &Path, home: Option<&Path>) -> String {
     format!(
-        "Forgot {}: its sites are no longer served. The folder and its files stay.",
-        folder.display()
+        "Forgot {}: its sites are no longer served. Its files stay.",
+        home_path(folder, home)
     )
 }
 
-/// Why `site` cannot be unlinked: it comes from a parked folder.
-pub fn site_is_parked(site: &str, folder: Option<&Path>) -> String {
+/// Why `site` cannot be unlinked: it is part of a parked folder. One short
+/// sentence: the site's page says the rest ([`unlink_parked_hint`]). A long
+/// folder is left to the Forget button beside the sentence
+/// ([`forget_folder`]): a notice is two lines at most, and a path written
+/// with `\` has no place to wrap on Windows.
+pub fn site_is_parked(site: &str, folder: Option<&Path>, home: Option<&Path>) -> String {
     match folder {
-        Some(folder) => format!(
-            "{site}.{TLD} comes from the parked folder {}, so it cannot be unlinked alone. \
-             Forget that folder to stop serving it and the folder's other sites.",
-            folder.display()
-        ),
+        Some(folder) => {
+            let shown = home_path(folder, home);
+            if shown.chars().count() <= MAX_ACTION_PATH {
+                format!("{site}.{TLD} is part of the parked folder {shown}.")
+            } else {
+                format!("{site}.{TLD} is part of a parked folder.")
+            }
+        }
         None => error_text("site_is_parked"),
     }
 }
 
-/// The button next to [`site_is_parked`]: it asks to forget the folder.
-pub fn forget_folder(folder: &Path) -> String {
-    format!("Forget {}…", folder.display())
+/// The action of the notice [`site_is_parked`]: it asks to forget the folder.
+/// A long path keeps its last parts (`…/clients/acme`): the sentence before
+/// the button names no long path, and the tooltip of the button has the
+/// whole one.
+pub fn forget_folder(folder: &Path, home: Option<&Path>) -> String {
+    forget_folder_shown(&path_tail(&home_path(folder, home), MAX_ACTION_PATH))
+}
+
+/// The tooltip of the action [`forget_folder`]: the whole path of the folder,
+/// which the label may show only the end of.
+pub fn forget_folder_hint(folder: &Path) -> String {
+    format!(
+        "Forget {}: its sites are no longer served. Its files stay.",
+        folder.display()
+    )
+}
+
+/// The longest path a button names in full.
+const MAX_ACTION_PATH: usize = 22;
+
+/// `shown`, or its last parts after an ellipsis if it is longer than `most`
+/// characters: `~/Code/clients/acme/projects` is `…/clients/acme/projects`
+/// at 25. A last part that is too long on its own is cut.
+fn path_tail(shown: &str, most: usize) -> String {
+    if shown.chars().count() <= most {
+        return shown.to_owned();
+    }
+    let mut tail = String::new();
+    for part in shown.rsplit(MAIN_SEPARATOR) {
+        let joined = if tail.is_empty() {
+            part.to_owned()
+        } else {
+            format!("{part}{MAIN_SEPARATOR}{tail}")
+        };
+        if joined.chars().count() > most {
+            break;
+        }
+        tail = joined;
+    }
+    if tail.is_empty() {
+        // One part longer than `most`: its end says more than its start.
+        let kept: Vec<char> = shown.chars().rev().take(most).collect();
+        tail = kept.into_iter().rev().collect();
+        return format!("…{tail}");
+    }
+    format!("…{MAIN_SEPARATOR}{tail}")
 }
 
 /// Over the disabled Unlink button of a site from a parked folder.
@@ -1177,18 +1403,14 @@ pub fn uninstall_lines(notice: &UninstallNotice) -> Vec<ReportLine> {
     };
     match notice {
         UninstallNotice::Done { runtime, version } => vec![ReportLine {
-            text: format!("Uninstalled {} {version}.", runtime_name(*runtime)),
+            text: uninstalled(*runtime, version),
             problem: false,
         }],
         UninstallNotice::Failed {
             runtime,
             version,
             code,
-        } => vec![problem(format!(
-            "Cannot uninstall {} {version}. {}",
-            runtime_name(*runtime),
-            error_text(code)
-        ))],
+        } => vec![problem(uninstall_failed(*runtime, version, code))],
         UninstallNotice::InUse { runtime, in_use } => {
             let mut lines = vec![problem(format!(
                 "{} {} is in use, so it was not uninstalled:",
@@ -1199,6 +1421,41 @@ pub fn uninstall_lines(notice: &UninstallNotice) -> Vec<ReportLine> {
             lines
         }
     }
+}
+
+/// The notice about the last uninstall: one sentence. A refusal for a version
+/// that is in use does not list what uses it: the Runtimes screen says that
+/// beside the version's menu ([`uninstall_lines`] has the whole list).
+pub fn uninstall_notice(notice: &UninstallNotice) -> ReportLine {
+    let (text, problem) = match notice {
+        UninstallNotice::Done { runtime, version } => (uninstalled(*runtime, version), false),
+        UninstallNotice::Failed {
+            runtime,
+            version,
+            code,
+        } => (uninstall_failed(*runtime, version, code), true),
+        UninstallNotice::InUse { runtime, in_use } => (
+            format!(
+                "{} {} is in use, so it was not uninstalled.",
+                runtime_name(*runtime),
+                in_use.version
+            ),
+            true,
+        ),
+    };
+    ReportLine { text, problem }
+}
+
+fn uninstalled(runtime: Runtime, version: &Version) -> String {
+    format!("Uninstalled {} {version}.", runtime_name(runtime))
+}
+
+fn uninstall_failed(runtime: Runtime, version: &Version, code: &str) -> String {
+    format!(
+        "Cannot uninstall {} {version}. {}",
+        runtime_name(runtime),
+        error_text(code)
+    )
 }
 
 /// One line for each thing that uses the version, with what to do first.
@@ -1355,10 +1612,7 @@ fn error_message(code: &str) -> Option<&'static str> {
         }
         "site_read_dir" => "Cannot read that folder. Check its permissions.",
         // M5-09: `DELETE /v1/sites/{name}` and `DELETE /v1/sites/park`.
-        "site_is_parked" => {
-            "This site comes from a parked folder, so it cannot be unlinked alone. Forget the \
-             parked folder to stop serving it and the folder's other sites."
-        }
+        "site_is_parked" => "This site is part of a parked folder, so it cannot be unlinked alone.",
         "folder_not_parked" => "That folder is not parked. It may have just been removed.",
         // `ConfigError`, for the sites settings file.
         "config_read" => "Cannot read the Marsa settings file.",
@@ -1408,6 +1662,9 @@ fn error_message(code: &str) -> Option<&'static str> {
             "Another install or uninstall is running. Wait for it to end, then try again."
         }
         "install_unsupported_platform" => "Marsa has no build of this program for this system.",
+        "install_os_too_old" => {
+            "This program needs a newer system than this one. Nothing was installed."
+        }
         "install_no_such_version" => "The version list has no version that matches.",
         "install_manifest_mismatch" => {
             "The version list and this build of Marsa disagree on the files to install. \
@@ -1423,7 +1680,7 @@ fn error_message(code: &str) -> Option<&'static str> {
         }
         "install_serial_corrupt" => {
             "The file runtimes/.manifest-serial in the data folder is damaged. Delete it, then \
-             try again: Marsa then accepts the current version list."
+             try again."
         }
         "install_io" => {
             "Cannot write to the data folder. Check the free disk space and the folder's \
@@ -2125,6 +2382,11 @@ mod tests {
                 what: "php".into(),
                 platform: "x".into(),
             },
+            InstallError::OsTooOld {
+                what: "php".into(),
+                needs: "macOS 15.0".into(),
+                found: "macOS 14.6".into(),
+            },
             InstallError::Busy,
             InstallError::NoSuchVersion {
                 runtime: "php",
@@ -2358,6 +2620,67 @@ mod tests {
             install_failure(Some(Runtime::Caddy), &platform),
             "Marsa has no Caddy build for linux-arm64."
         );
+        // An OS that is too old: the facts, in the words of the CLI.
+        let old = InstallFailure {
+            code: "install_os_too_old".into(),
+            os: Some(Box::new(marsa_core::types::OsMismatch {
+                needs: "macOS 15.0".into(),
+                found: "macOS 14.4".into(),
+            })),
+            ..InstallFailure::default()
+        };
+        assert_eq!(
+            install_failure(Some(Runtime::Php), &old),
+            "PHP needs macOS 15.0 or newer, and this system has macOS 14.4. Nothing was \
+             installed."
+        );
+        // Without the facts: the same sentence without them.
+        let old_no_facts = InstallFailure {
+            code: "install_os_too_old".into(),
+            ..InstallFailure::default()
+        };
+        assert_eq!(
+            install_failure(Some(Runtime::Php), &old_no_facts),
+            "PHP needs a newer system than this one. Nothing was installed."
+        );
+        assert_eq!(
+            install_failure(None, &old_no_facts),
+            "the program needs a newer system than this one. Nothing was installed."
+        );
+        assert_eq!(
+            install_status(&failed(old)),
+            "Cannot install PHP 8.9. PHP needs macOS 15.0 or newer, and this system has macOS \
+             14.4. Nothing was installed."
+        );
+        // The general text, for a place with no name to give.
+        assert_eq!(
+            error_text("install_os_too_old"),
+            "This program needs a newer system than this one. Nothing was installed."
+        );
+        // A long list of versions, and a long printout, are cut short.
+        let many = InstallFailure {
+            code: "install_no_such_version".into(),
+            requested: Some("9".into()),
+            available: (1..=7).map(|n| format!("8.{n}.0")).collect(),
+            ..InstallFailure::default()
+        };
+        assert!(
+            install_failure(Some(Runtime::Php), &many)
+                .ends_with("Available: 8.1.0, 8.2.0, 8.3.0, 8.4.0, and 3 more."),
+            "{}",
+            install_failure(Some(Runtime::Php), &many)
+        );
+        let noisy = InstallFailure {
+            code: "install_check_failed".into(),
+            output: Some(format!("\n  {}\nsecond line\n", "x".repeat(200))),
+            ..InstallFailure::default()
+        };
+        let text = install_failure(Some(Runtime::Php), &noisy);
+        assert!(
+            text.ends_with(&format!("{}…", "x".repeat(MAX_PRINTED))),
+            "{text}"
+        );
+        assert!(!text.contains("second line"));
         // Any other code: its general text; a new one shows its name.
         let busy = InstallFailure {
             code: "install_busy".into(),
@@ -2584,11 +2907,15 @@ mod tests {
             api_version: 1,
             pid: 77,
         };
+        // The PID is for the log, not for a person.
         assert_eq!(
-            daemon_version(&Connection::Running(health)),
-            "0.3.0 (PID 77)"
+            daemon_hint(&Connection::Running(health)),
+            "Daemon version 0.3.0"
         );
-        assert_eq!(daemon_version(&Connection::Reconnecting), NOT_CONNECTED);
+        assert_eq!(
+            daemon_hint(&Connection::Reconnecting),
+            "Daemon not connected"
+        );
         for state in [Autostart::Stale, Autostart::Unsupported] {
             assert!(autostart_note(state).is_some(), "{state:?}");
         }
@@ -2610,6 +2937,32 @@ mod tests {
                 ..VersionInUse::default()
             },
         }
+    }
+
+    /// The bar says an uninstall in one sentence; the list of what uses the
+    /// version stays in [`uninstall_lines`].
+    #[test]
+    fn the_uninstall_notice_is_one_sentence() {
+        let notice = uninstall_notice(&in_use(Some("8.3"), &["shop", "blog"], true));
+        assert_eq!(
+            (notice.text.as_str(), notice.problem),
+            ("PHP 8.3.27 is in use, so it was not uninstalled.", true)
+        );
+        let version: Version = "8.2.28".parse().expect("a version");
+        let done = uninstall_notice(&UninstallNotice::Done {
+            runtime: Runtime::Php,
+            version: version.clone(),
+        });
+        assert_eq!(
+            (done.text.as_str(), done.problem),
+            ("Uninstalled PHP 8.2.28.", false)
+        );
+        let failed = uninstall_notice(&UninstallNotice::Failed {
+            runtime: Runtime::Php,
+            version,
+            code: "uninstall_failed".into(),
+        });
+        assert!(failed.problem && failed.text.starts_with("Cannot uninstall PHP 8.2.28. "));
     }
 
     #[test]
@@ -2762,16 +3115,58 @@ mod tests {
             unlinked("api"),
             "Unlinked api.test. Its folder and files stay."
         );
-        assert!(forgot(folder).starts_with("Forgot /code: "));
-        assert_eq!(forget_folder(folder), "Forget /code…");
-        let text = site_is_parked("shop", Some(folder));
-        assert!(
-            text.starts_with("shop.test comes from the parked folder /code,"),
-            "{text}"
+        assert!(forgot(folder, None).starts_with("Forgot /code: "));
+        assert_eq!(forget_folder(folder, None), "Forget /code…");
+        assert_eq!(
+            site_is_parked("shop", Some(folder), None),
+            "shop.test is part of the parked folder /code."
         );
-        assert_eq!(site_is_parked("shop", None), error_text("site_is_parked"));
+        assert_eq!(
+            site_is_parked("shop", None, None),
+            error_text("site_is_parked")
+        );
         assert!(unlink_parked_hint(folder).contains("/code"));
         assert!(unlink_parked_hint(folder).contains(PARKED_TITLE));
+    }
+
+    /// A folder under the home folder is `~/…` in every notice text and in
+    /// the action that offers to forget it.
+    #[test]
+    fn a_notice_shows_a_folder_under_home_with_a_tilde() {
+        let (home, code) = (full("/Users/omar"), full("/Users/omar/Code"));
+        let home = Some(home.as_path());
+        let tilde = tilde(&["Code"]);
+        assert_eq!(parked(&code, home), format!("Parked {tilde}."));
+        assert_eq!(
+            linked("shop", &code, home),
+            format!("Linked {tilde} as shop.test.")
+        );
+        assert!(forgot(&code, home).starts_with(&format!("Forgot {tilde}: ")));
+        assert_eq!(
+            site_is_parked("shop", Some(&code), home),
+            format!("shop.test is part of the parked folder {tilde}.")
+        );
+        assert_eq!(forget_folder(&code, home), format!("Forget {tilde}…"));
+        // A long path keeps its last parts in the button, and the sentence
+        // leaves it to the button: a notice is two lines at most.
+        let long = full("/Users/omar/Code/clients/acme/projects");
+        let sep = MAIN_SEPARATOR;
+        assert_eq!(
+            forget_folder(&long, home),
+            format!("Forget …{sep}clients{sep}acme{sep}projects…")
+        );
+        assert_eq!(
+            site_is_parked("shop", Some(&long), home),
+            "shop.test is part of a parked folder."
+        );
+        assert_eq!(path_tail("~/short", 22), "~/short");
+        let one = path_tail(&"x".repeat(50), 10);
+        assert_eq!(one, format!("…{}", "x".repeat(10)));
+        // Elsewhere the whole path stays.
+        assert_eq!(
+            parked(&full("/srv/www"), home),
+            format!("Parked {}.", full("/srv/www").display())
+        );
     }
 
     #[test]
@@ -2820,7 +3215,7 @@ mod tests {
     #[test]
     fn the_link_lines() {
         let folder = Path::new("/work/api");
-        assert_eq!(linked("api", folder), "Linked /work/api as api.test.");
+        assert_eq!(linked("api", folder, None), "Linked /work/api as api.test.");
         assert_eq!(link_folder("/work/api"), "Link /work/api as:");
         assert_eq!(link_folder("~/Work/api"), "Link ~/Work/api as:");
         assert_eq!(site_suffix(), ".test");
