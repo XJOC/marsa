@@ -5,6 +5,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use marsa_core::client::DaemonClient;
+use marsa_core::config::{self, ConfigPaths};
+use marsa_core::databases::POSTGRES_PORT;
 use marsa_core::types::{ServiceAction, ServiceState, ServiceStatus};
 
 use super::daemon::{ClientFailure, connect, failure};
@@ -98,12 +100,23 @@ async fn act(client: &DaemonClient, command: &ServicesCommand, data_dir: &Path) 
     }
 }
 
-/// The table, then one line per failed service that says why it failed.
+/// The table, then one line per failed service that says why it failed,
+/// and how to connect to PostgreSQL while it runs.
 pub fn render(services: &[ServiceStatus], data_dir: &Path) -> String {
     if services.is_empty() {
         return format!("{}\n", strings::NO_SERVICES);
     }
     let mut text = table(services);
+    let postgres = services
+        .iter()
+        .any(|status| status.id == "postgres" && status.state == ServiceState::Running);
+    if postgres {
+        // The port the daemon gave it: `[postgres] port`, read only.
+        let global = config::load_global(&ConfigPaths::in_dir(data_dir).global);
+        let port = global.map_or(None, |global| global.postgres.port);
+        text.push_str(&strings::postgres_connection(port.unwrap_or(POSTGRES_PORT)));
+        text.push('\n');
+    }
     for status in services {
         if let ServiceState::Failed { code } = &status.state {
             let failure = ClientFailure::new(code, data_dir, Some(&status.id));
@@ -191,6 +204,28 @@ mod tests {
              caddy failed: A port Caddy needs is used by another program. Run \
              \"marsa logs caddy\" to see which one. [port_in_use]\n"
         );
+    }
+
+    /// While PostgreSQL runs, the table says how Laravel connects, on the
+    /// port of `global.toml`.
+    #[test]
+    fn a_running_postgres_shows_how_to_connect() {
+        let data = tempfile::tempdir().unwrap();
+        let running = [status("postgres", ServiceState::Running, Some(7), 0)];
+        let text = render(&running, data.path());
+        assert!(
+            text.ends_with(
+                "postgres: 127.0.0.1:5432, user root, no password (DB_CONNECTION=pgsql, \
+                 DB_HOST=127.0.0.1, DB_PORT=5432, DB_USERNAME=root)\n"
+            ),
+            "{text}"
+        );
+        std::fs::create_dir_all(data.path().join("config")).unwrap();
+        let global = ConfigPaths::in_dir(data.path()).global;
+        std::fs::write(&global, "[postgres]\nport = 5433\n").unwrap();
+        assert!(render(&running, data.path()).contains("127.0.0.1:5433, user root"));
+        let stopped = [status("postgres", ServiceState::Stopped, None, 0)];
+        assert!(!render(&stopped, data.path()).contains("user root"));
     }
 
     #[test]

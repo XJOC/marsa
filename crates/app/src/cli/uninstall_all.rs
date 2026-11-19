@@ -827,7 +827,8 @@ mod tests {
         }
         assert_eq!(
             strings::UNINSTALL_ALL_DATA_QUESTION,
-            "Delete the data folder (runtimes, settings, the CA)? [y/N] "
+            "Delete the data folder (runtimes, settings, the CA, and every database in \
+             databases/)? [y/N] "
         );
         let kept = strings::data_kept_ctrl_c(Path::new("/data"));
         assert!(kept.contains("Kept the data folder /data"), "{kept}");
@@ -1110,8 +1111,10 @@ mod tests {
         );
         let deleted = strings::uninstall_all_plan(data, true, true);
         assert!(
-            deleted
-                .contains("The data folder /data will be deleted once every step has succeeded."),
+            deleted.contains(
+                "The data folder /data will be deleted once every step has succeeded, with the \
+                 databases in it (databases/)."
+            ),
             "{deleted}"
         );
         // The CLI runs where marsad runs: Windows has its own plan.
