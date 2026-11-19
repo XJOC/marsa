@@ -19,8 +19,8 @@
 //! tests pass a temp folder. Only `marsad` calls `write` and `remove`: only
 //! the daemon changes state (AGENTS.md section 6).
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use super::spawn::sibling_program;
@@ -29,9 +29,8 @@ use super::spawn::sibling_program;
 pub const LABEL: &str = "dev.marsa.Marsa.tray";
 /// The program that starts at login. It sits next to `marsad`.
 pub const TRAY_PROGRAM: &str = "marsa-tray";
-/// The mode of the file on Unix. launchd refuses a LaunchAgent that other
-/// users can write to.
-#[cfg(unix)]
+/// The mode of the file on Unix (ignored on Windows). launchd refuses a
+/// LaunchAgent that other users can write to.
 const FILE_MODE: u32 = 0o644;
 /// The real files are under 1 KiB. A longer one is not ours.
 const MAX_LEN: u64 = 64 * 1024;
@@ -93,8 +92,10 @@ impl AutostartKind {
         }
     }
 
-    /// The temp file of [`write`]: hidden, and without the `.plist` or
-    /// `.desktop` extension, so a half-written file is never loaded.
+    /// The temp file of [`write`] (see `crate::fs::write_atomic`): hidden, and
+    /// without the `.plist` or `.desktop` extension, so a half-written file is
+    /// never loaded. Only tests need the name.
+    #[cfg(test)]
     fn temp_name(self) -> String {
         format!(".{}.tmp", self.file_name())
     }
@@ -259,18 +260,10 @@ pub fn read(kind: AutostartKind, dir: &Path, tray: &Path) -> Result<AutostartFil
 pub fn write(kind: AutostartKind, dir: &Path, tray: &Path) -> Result<PathBuf, AutostartError> {
     let text = kind.render(tray)?;
     let path = kind.file_in(dir);
-    let temp = dir.join(kind.temp_name());
-    // `write_new` closes its handle before the `rename`: Windows cannot
-    // rename an open file.
-    let result = fs::create_dir_all(dir)
-        .and_then(|()| write_new(&temp, text.as_bytes()))
-        .and_then(|()| fs::rename(&temp, &path));
-    if let Err(source) = result {
-        // Best effort: the write already failed, and that is the error to report.
-        let _ = fs::remove_file(&temp);
-        return Err(AutostartError::Write { path, source });
+    match crate::fs::write_atomic(&path, text.as_bytes(), Some(FILE_MODE)) {
+        Ok(()) => Ok(path),
+        Err(source) => Err(AutostartError::Write { path, source }),
     }
-    Ok(path)
 }
 
 /// Deletes the login file in `dir`. No file is not an error.
@@ -357,46 +350,6 @@ fn exec_arg(arg: &str) -> String {
     }
     out.push('"');
     out
-}
-
-/// Creates the temp file and writes `body` to disk. `create_new` refuses a
-/// file or a symlink that is already there.
-fn write_new(path: &Path, body: &[u8]) -> io::Result<()> {
-    let mut file = match create_new(path) {
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-            // Left by a write that stopped half way. The daemon writes one
-            // login file at a time.
-            fs::remove_file(path)?;
-            create_new(path)?
-        }
-        other => other?,
-    };
-    file.write_all(body)?;
-    set_mode(&file)?;
-    file.sync_all()
-}
-
-fn create_new(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, FILE_MODE);
-    options.open(path)
-}
-
-/// [`FILE_MODE`] again: the umask may have taken bits off the mode of
-/// `create_new` (a umask of `077` gives `0600`).
-#[cfg(unix)]
-fn set_mode(file: &File) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    file.set_permissions(fs::Permissions::from_mode(FILE_MODE))
-}
-
-/// Windows has no mode bits, and no login file yet.
-#[cfg(not(unix))]
-fn set_mode(_file: &File) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

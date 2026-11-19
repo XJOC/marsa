@@ -8,7 +8,7 @@
 //! checks are tested with [`testing::MemoryFetch`] and no network.
 
 use std::error::Error as StdError;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::future::Future;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -234,11 +234,10 @@ pub async fn download_verified(
     dest: &Path,
     progress: &mut (dyn FnMut(u64, u64) + Send),
 ) -> Result<VerifiedFile, FetchError> {
-    download_with(fetch, urls, expected, dest, progress, create_new).await
-}
-
-fn create_new(path: &Path) -> io::Result<File> {
-    OpenOptions::new().write(true).create_new(true).open(path)
+    download_with(fetch, urls, expected, dest, progress, |path| {
+        crate::fs::create_new(path, None)
+    })
+    .await
 }
 
 /// [`download_verified`] with the file opener as a parameter, so a test can
@@ -965,7 +964,7 @@ mod tests {
     async fn a_failed_write_is_download_io_and_stops() {
         // Create the file, then hand back a read-only handle: every write fails.
         fn read_only(path: &Path) -> io::Result<File> {
-            create_new(path)?;
+            crate::fs::create_new(path, None)?;
             File::open(path)
         }
         let fetch = MemoryFetch::new()
