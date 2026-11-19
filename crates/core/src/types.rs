@@ -681,9 +681,11 @@ mod autostart_tests {
 ///
 /// One admin prompt runs the helper's `uninstall_all`. Only if the helper
 /// ran does the daemon go on: it takes away the current user's trust in
-/// Marsa's certificate authority (macOS, ADR 0015), deletes the login file
-/// (task M5-03), answers, and then stops, with Caddy, the PHP pools, and
-/// the DNS server. The data folder stays: the CLI asks about it on its own.
+/// Marsa's certificate authority (macOS, ADR 0015) or deletes this data
+/// folder's roots from the user's NSS databases (Linux, ADR 0014), deletes
+/// the login file where the system has one (no `autostart_remove`
+/// otherwise), answers, and then stops, with Caddy, the PHP pools, and the
+/// DNS server. The data folder stays: the CLI asks about it on its own.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UninstallReport {
     /// One result per step, in order: the helper's removals (`pf_remove`,

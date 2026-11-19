@@ -842,9 +842,24 @@ mod tests {
 
     #[tokio::test]
     async fn a_request_without_the_token_with_an_origin_or_another_host_runs_nothing() {
-        let dir = Dir::new();
-        let fake = Fake::all_done();
-        let app = App::new(&dir, dir.setup(&fake));
+        // macOS, then Linux: on both, the auth layer refuses before any
+        // prompt (`osascript` or `pkexec`).
+        for linux in [false, true] {
+            refusals_run_nothing(linux).await;
+        }
+    }
+
+    async fn refusals_run_nothing(linux: bool) {
+        let (dir, fake) = if linux {
+            (linux_dir(), linux_fake(|| ok(&answer(&LINUX_REMOVALS))))
+        } else {
+            (Dir::new(), Fake::all_done())
+        };
+        let app = if linux {
+            linux_app(&dir, &fake)
+        } else {
+            App::new(&dir, dir.setup(&fake))
+        };
         let host = daemon_authority(PORT);
         let other_host = daemon_authority(PORT + 1);
         let wrong = Token::generate().unwrap().bearer_header();
@@ -999,6 +1014,26 @@ mod tests {
         );
         // The data folder is the CLI's question.
         assert!(dir.ca_root().is_file());
+    }
+
+    /// No `/usr/bin/pkexec`: nothing runs or changes, and the code says so.
+    #[tokio::test]
+    async fn no_pkexec_on_linux_changes_nothing() {
+        let dir = linux_dir();
+        let fake = linux_fake(|| Err(io::Error::from(io::ErrorKind::NotFound)));
+        let app = linux_app(&dir, &fake);
+        let report = app.uninstall().await;
+        assert_eq!(
+            report.error.map(|error| error.code).as_deref(),
+            Some("uninstall_pkexec_missing")
+        );
+        assert!(report.results.is_empty() && !app.stopping());
+        assert!(
+            fake.programs()
+                .iter()
+                .all(|program| *program == setup_api::pkexec::PKEXEC)
+        );
+        assert!(dir.untouched() && linux_dns::marker(&dir.data()).exists());
     }
 
     /// A dismissed password dialog: nothing else runs or changes.

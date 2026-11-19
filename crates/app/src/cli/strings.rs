@@ -636,17 +636,17 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             .into(),
         "hosts_read" => format!(
             "Marsa did not change the hosts file ({HOSTS_FILE}): it cannot be read, or it is \
-             a link, or it is larger than 16 MiB. Fix the file, then run \"marsa setup\" again."
+             a link, or it is larger than 16 MiB. Fix the file, then run the command again."
         ),
         "hosts_write" => format!(
             "Marsa could not write the hosts file ({HOSTS_FILE}): it is read-only, or another \
-             program holds it (some security tools do). Fix that, then run \"marsa setup\" \
-             again. If it repeats, report it with the file logs/marsad.log."
+             program holds it (some security tools do). Fix that, then run the command again. \
+             If it repeats, report it with the file logs/marsad.log."
         ),
         "hosts_block_broken" => format!(
             "The hosts file ({HOSTS_FILE}) has a \"# Marsa start\" line without its \"# Marsa \
              end\" line, or the other way round, so Marsa left it as it is. Remove Marsa's lines \
-             from it, then run \"marsa setup\" again."
+             from it, then run the command again."
         ),
         "resolved_tool_missing" => "The ip program (package iproute2) is not on this system, \
              so Marsa could not make its link for .test names. Install iproute2, then run \
@@ -714,7 +714,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              run \"marsa setup\" again."
             .into(),
         "ports_read" | "ports_write" | "ports_delete" => "Linux did not let Marsa change \
-             /etc/sysctl.d/60-marsa.conf. Run \"marsa setup\" again; if it repeats, report it."
+             /etc/sysctl.d/60-marsa.conf. Run the command again; if it repeats, report it."
             .into(),
         "ports_apply_failed" => "Linux did not let Caddy use ports 80 and 443, so Marsa took \
              its setting out again. Run \"marsa setup\" again; if it repeats, report it with \
@@ -778,8 +778,8 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "uninstall_running" => {
             "An uninstall is running. Wait for it to end, then try again.".into()
         }
-        "uninstall_not_supported" => "\"marsa uninstall --all\" works on macOS and Windows \
-             only for now. Nothing was removed."
+        "uninstall_not_supported" => "\"marsa uninstall --all\" works on macOS, Linux, and \
+             Windows only. Nothing was removed."
             .into(),
         // Windows: the CLI runs on the machine marsad runs on, so `cfg!` is
         // the daemon's system too. Its admin prompt is UAC (ADR 0018).
@@ -797,7 +797,8 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              {UNINSTALL_MAY_HAVE_RUN}"
         ),
         // Linux: pkexec found no agent to ask with, or the password was
-        // not accepted.
+        // not accepted. The CLI runs on the machine marsad runs on, so `cfg!`
+        // is the daemon's system too.
         "uninstall_not_authorized" if cfg!(target_os = "linux") => "Linux did not give Marsa \
              admin rights, so nothing was removed. The password was not accepted, or no \
              password dialog could open (over SSH, for example). Run \"marsa daemon stop\", \
@@ -1476,7 +1477,7 @@ pub fn uninstall_all_plan(data_dir: &Path, deletable: bool, delete: bool) -> Str
                 .to_owned(),
             "  - the start at login".to_owned(),
             "Then the Marsa daemon stops, with Caddy, PHP, PostgreSQL, and the DNS server. Linux \
-             asks for your password once. Quit the Marsa window and the tray icon first: they \
+             may ask for your password once. Quit the Marsa window and the tray icon first: they \
              would start the daemon again."
                 .to_owned(),
             data,
@@ -1511,7 +1512,7 @@ pub const UNINSTALL_ALL_STARTED: &str = "Removing Marsa. macOS will ask for an a
      password, and may then ask you to approve taking away the trust in Marsa's certificate \
      authority.";
 /// The same on Linux: one password prompt (pkexec).
-pub const UNINSTALL_ALL_STARTED_LINUX: &str = "Removing Marsa. Linux will ask for your password \
+pub const UNINSTALL_ALL_STARTED_LINUX: &str = "Removing Marsa. Linux may ask for your password \
      once.";
 /// The same on Windows: one UAC prompt, which may sit in the taskbar.
 pub const UNINSTALL_ALL_STARTED_WINDOWS: &str = "Removing Marsa. Windows will ask for admin \
@@ -1575,8 +1576,7 @@ pub fn uninstall_all_step(op: &str) -> String {
         "user_trust_remove" => "Remove the trust in Marsa's certificates for you".to_owned(),
         // Linux.
         "ports_remove" => "Stop letting Caddy use ports 80 and 443".to_owned(),
-        "resolved_remove" => "Take out Marsa's link for .test names".to_owned(),
-        "hosts_remove" => format!("Take Marsa's names out of {HOSTS_FILE}"),
+        "resolved_remove" | "hosts_remove" => setup_step(op),
         "nss_remove" => {
             "Remove the trust in Marsa's certificates from Chrome and Firefox".to_owned()
         }
@@ -1630,6 +1630,13 @@ pub fn path_left(default_dir: Option<&Path>) -> String {
     } else {
         "  If you added Marsa to PATH, delete that line from your shell's startup file, such as \
          ~/.zprofile or ~/.zshrc"
+    };
+    // Linux, the same way: the usual shell is bash.
+    let start = if cfg!(target_os = "linux") {
+        "  If you added Marsa to PATH, delete that line from your shell's startup file, such as \
+         ~/.bashrc or ~/.profile"
+    } else {
+        start
     };
     match default_dir {
         Some(dir) => format!(

@@ -267,7 +267,8 @@ pub(super) fn snap_chromium(home: &Path) -> Option<Result<Database, String>> {
     let link = snap.join(SNAP_CURRENT);
     let target = match fs::read_link(&link) {
         Ok(target) => target,
-        // No revision installed, or `current` is not a link.
+        // No revision installed: no `current`. One that is not a link
+        // (a real folder) is refused below, like any other surprise.
         Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
         Err(err) => {
             return Some(Err(format!(

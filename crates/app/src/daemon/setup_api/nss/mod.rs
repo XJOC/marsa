@@ -247,10 +247,13 @@ pub fn install(
 }
 
 /// `nss_remove`, for the uninstall: deletes each root in this data folder's
-/// record from every database that has its row, and keeps in the record
-/// only those that could not be deleted. `unchanged` with no record, or
-/// when no database had them; nothing is made, and a refused database is
-/// left alone, as setup left it.
+/// record from every database that has its row. The record goes only when
+/// every database was read and every deletion worked; otherwise it stays
+/// whole, for the next uninstall: a database left alone (a link, another
+/// user's) or left out (past [`MAX_PROFILES`]) may still hold a root.
+/// `unchanged` with no record, or when no database had them; nothing is
+/// made. Without `certutil` while roots are recorded: `nss_remove_failed`,
+/// since they may still be trusted.
 pub fn remove(
     runner: &dyn Runner,
     home: &Path,
@@ -269,24 +272,23 @@ pub fn remove(
     if recorded.is_empty() {
         return user_trust::result(NSS_REMOVE, OpStatus::Unchanged);
     }
-    let (databases, refused) = databases(home);
-    for why in &refused {
-        tracing::info!(why = %why, "an NSS database setup left alone is left alone");
+    let found = databases(home);
+    for why in &found.refused {
+        tracing::warn!(why = %why, "an NSS database is left alone; the record stays");
     }
     let calls = Calls {
         runner,
         stop,
         deadline,
     };
-    let mut kept = BTreeSet::new();
     let mut failures = Vec::new();
     let mut deleted = 0;
-    for database in databases.iter().filter(|database| !database.new) {
+    for database in found.databases.iter().filter(|database| !database.new) {
         let dir = &database.dir;
         let rows = match calls.rows(dir) {
             Ok(rows) => rows,
             Err(failure) => {
-                kept.extend(recorded.iter().cloned());
+                tracing::warn!(dir = %dir.display(), why = %failure.text(), "cannot list an NSS database");
                 failures.push(format!("{}: {}", dir.display(), failure.text()));
                 // Without `certutil`, no other database can be read either.
                 if matches!(failure, Failure::ToolMissing) {
@@ -306,14 +308,15 @@ pub fn remove(
                     deleted += 1;
                 }
                 Err(failure) => {
-                    kept.insert(fingerprint.clone());
+                    tracing::warn!(dir = %dir.display(), %nickname, why = %failure.text(), "cannot delete Marsa's CA root from an NSS database");
                     failures.push(format!("{}: {}", dir.display(), failure.text()));
                 }
             }
         }
     }
-    if let Err(problem) = write_record(files, &kept) {
-        tracing::warn!(problem = %problem, "cannot update the record of NSS fingerprints");
+    let all_read = failures.is_empty() && found.refused.is_empty() && found.complete;
+    if all_read && let Err(problem) = write_record(files, &BTreeSet::new()) {
+        tracing::warn!(problem = %problem, "cannot delete the record of NSS fingerprints");
     }
     if !failures.is_empty() {
         let message = format!(
@@ -1048,11 +1051,6 @@ mod tests {
         remove(fake.as_ref(), &home.home(), &home.files(), &stop)
     }
 
-    fn write_record_of(home: &Home, lines: &str) {
-        fs::create_dir_all(home.files().dir()).unwrap();
-        fs::write(record_path(&home.files()), lines).unwrap();
-    }
-
     /// No record: nothing of this data folder's to take out, and nothing
     /// runs, not even `certutil -L`.
     #[test]
@@ -1131,6 +1129,23 @@ mod tests {
             fs::read_to_string(record_path(&home.files())).unwrap(),
             format!("{HASH_OURS}\n")
         );
+    }
+
+    /// A database left alone may still hold a root: the record stays,
+    /// though every database that was read lost its row.
+    #[test]
+    fn removal_with_a_database_left_alone_keeps_the_record() {
+        let home = Home::new();
+        write_record_of(&home, &format!("{HASH_OURS}\n"));
+        home.profile(&[".mozilla", "firefox"], "a.default");
+        fs::write(home.home().join(".pki"), "").unwrap();
+        let rows = listing(&[(OURS, "C,,")]);
+        let fake = Fake::answering(move |_, args| match args[2].as_str() {
+            "-L" => ok(&rows),
+            _ => ok(""),
+        });
+        assert_eq!(remove_all(&home, &fake).status, OpStatus::Done);
+        assert_eq!(record(&home), format!("{HASH_OURS}\n"));
     }
 
     #[test]
