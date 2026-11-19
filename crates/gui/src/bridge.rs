@@ -53,7 +53,7 @@ pub enum Command {
     Remove(Removal),
     /// The Xdebug box.
     SetXdebug(bool),
-    /// "Add to /etc/hosts" (Linux, task M4-18k3): the only way the window
+    /// "Add to /etc/hosts" (Linux): the only way the window
     /// syncs the hosts file, so a password prompt comes from a click only.
     SyncHosts,
 }
@@ -138,7 +138,7 @@ pub fn start(data_dir: PathBuf) -> std::io::Result<Handle> {
     start_with(data_dir, Daemon::Start)
 }
 
-/// [`start`] for the menu-bar panel (task M5-D11): it connects to a daemon
+/// [`start`] for the menu-bar panel: it connects to a daemon
 /// that runs, and never starts one. With none, the model says the daemon is
 /// not running, and tries again every second.
 ///
@@ -257,7 +257,7 @@ async fn session(
                         Event::Install(InstallProgress { update: InstallUpdate::Done(_), .. })
                     );
                     // A new site may lack its hosts line; setup may have
-                    // written the block (Linux, task M4-18k3).
+                    // written the block (Linux).
                     let hosts_changed =
                         matches!(&event, Event::SitesChanged(_) | Event::SetupFinished(_));
                     if !window.send(Update::Event(event)) {
@@ -313,7 +313,7 @@ async fn runtimes_changed(client: &DaemonClient, window: &Window) -> bool {
 async fn refresh(client: &DaemonClient, window: &Window) -> bool {
     let table = client.services().await;
     // The log of every service the daemon lists, and Caddy's whatever the
-    // table says: the Logs screen has one source for each (task M5-D10).
+    // table says: the Logs screen has one source for each.
     let log_ids = log_ids(table.as_deref().unwrap_or_default());
     let services = match table {
         Ok(services) => Update::Services(services),

@@ -27,7 +27,7 @@ pub mod chip;
 pub mod dialog;
 pub mod facts;
 pub mod field;
-// Debug builds only: the page the design review reads (task M5-D2). A
+// Debug builds only: the page the design review reads. A
 // release build has no gallery and reads no extra environment variable.
 #[cfg(debug_assertions)]
 pub mod gallery;

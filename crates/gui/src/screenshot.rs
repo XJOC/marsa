@@ -1,24 +1,22 @@
 //! Debug builds only: the window saves a picture of itself for design
-//! review (task M5-D1). The picture comes from the window's own frame, not
+//! review. The picture comes from the window's own frame, not
 //! from the screen, so the system asks for no screen-recording permission.
 //!
 //! `MARSA_GUI_SCREENSHOT=<file.bmp>` saves the first frame drawn once the
-//! window has connected to the daemon (or after [`LIMIT`]) as an
+//! window has connected to the daemon (or after `LIMIT`) as an
 //! uncompressed 24-bit BMP, then closes the window.
 //! `MARSA_GUI_THEME=light|dark` draws that theme instead of the system's.
-//! `MARSA_GUI_SIZE=900x720` opens the window at that size (task M5-D4).
+//! `MARSA_GUI_SIZE=900x720` opens the window at that size.
 //! `MARSA_GUI_ROUTE=home|sites|runtimes|runtimes:<runtime>|services|logs|logs:<service>|settings|site:<name>`
-//! opens that screen (`site:shop` is the page of the site `shop`, task
-//! M5-D7; `runtimes:node` is Node.js chosen, task M5-D8). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|confirm-unlink|confirm-uninstall|notice-success|notice-error`
-//! draws fixed fake data and starts no daemon (task M5-D5, see `demo`).
+//! opens that screen (`site:shop` is the page of the site `shop`; `runtimes:node` is Node.js chosen). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|confirm-unlink|confirm-uninstall|notice-success|notice-error`
+//! draws fixed fake data and starts no daemon (see `demo`).
 //! `MARSA_GUI_CLICK=x,y` clicks that point (in points, from the top left of
 //! the window) once the window has settled, so a menu is open in the picture
-//! (task M5-D6). `MARSA_GUI_HOVER=x,y` then moves the pointer there and waits
-//! for the tooltip, so the reason over a disabled row is in the picture (task
-//! M5-D8; it needs a click). `MARSA_GUI_SCROLL=x,y,dx,dy` puts the pointer on
+//!. `MARSA_GUI_HOVER=x,y` then moves the pointer there and waits
+//! for the tooltip, so the reason over a disabled row is in the picture (it needs a click). `MARSA_GUI_SCROLL=x,y,dx,dy` puts the pointer on
 //! that point and turns the wheel by that much, so a list that scrolls
-//! sideways is scrolled in the picture (task M5-D10). `MARSA_GUI_KEY=1|esc`
-//! presses that key once the window has settled (task M5-D11: a number opens
+//! sideways is scrolled in the picture. `MARSA_GUI_KEY=1|esc`
+//! presses that key once the window has settled (a number opens
 //! a site of the menu-bar panel, Esc closes it, so no picture comes and the
 //! exit code is the result; the window of a picture has no daemon to ask).
 //! A window with see-through corners (the panel) is drawn over a gray
