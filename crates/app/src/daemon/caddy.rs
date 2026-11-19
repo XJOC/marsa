@@ -741,10 +741,15 @@ impl CaddyManager {
     }
 }
 
-/// How the start of Caddy with the daemon ended (task M5-16).
+/// How the start of a service with the daemon ended: Caddy (task M5-16),
+/// and PostgreSQL (`databases::start_at_launch`, task M6-03).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Launched {
-    /// No Caddy is installed: nothing was tried, and the status is unchanged.
+    /// The service is off in `global.toml` (PostgreSQL): nothing was tried,
+    /// and the status is unchanged.
+    Off,
+    /// Nothing to run is installed: nothing was tried, and the status is
+    /// unchanged.
     NotInstalled,
     /// The start ran. Caddy's status after it: `Running`, or `Failed` with
     /// the reason.
@@ -759,10 +764,14 @@ pub enum Launched {
     ShuttingDown,
 }
 
-/// The start of Caddy with the daemon. Its task ends after the start, or at
-/// once when the daemon's shutdown token is cancelled.
+/// The start of a service with the daemon. Its task ends after the start, or
+/// at once when the daemon's shutdown token is cancelled.
 #[derive(Debug)]
-pub struct Launch(LaunchState);
+pub struct Launch {
+    /// The service id, for the logs.
+    service: &'static str,
+    state: LaunchState,
+}
 
 #[derive(Debug)]
 enum LaunchState {
@@ -772,10 +781,23 @@ enum LaunchState {
 }
 
 impl Launch {
+    /// A start decided before any task.
+    pub(super) fn ended(service: &'static str, launched: Launched) -> Self {
+        let state = LaunchState::Ended(launched);
+        Self { service, state }
+    }
+
+    /// A start that runs in `task`.
+    pub(super) fn running(service: &'static str, task: JoinHandle<Launched>) -> Self {
+        let state = LaunchState::Running(task);
+        Self { service, state }
+    }
+
     /// Waits for the start to end, at most `limit`, then aborts it. `None`
     /// when it did not end in time or its task failed.
     pub async fn wait(self, limit: Duration) -> Option<Launched> {
-        let task = match self.0 {
+        let service = self.service;
+        let task = match self.state {
             LaunchState::Ended(launched) => return Some(launched),
             LaunchState::Running(task) => task,
         };
@@ -783,14 +805,11 @@ impl Launch {
         match tokio::time::timeout(limit, task).await {
             Ok(Ok(launched)) => Some(launched),
             Ok(Err(err)) => {
-                warn!(error = %err, "the start of caddy with the daemon failed");
+                warn!(%service, error = %err, "the start with the daemon failed");
                 None
             }
             Err(_) => {
-                warn!(
-                    ?limit,
-                    "the start of caddy with the daemon still runs; aborting it"
-                );
+                warn!(%service, ?limit, "the start with the daemon still runs; aborting it");
                 abort.abort();
                 None
             }
@@ -822,11 +841,11 @@ pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
     // First, so a missing Caddy does not mark Caddy's status failed.
     if !caddy.installed() {
         info!("no caddy is installed; it does not start with the daemon");
-        return Launch(LaunchState::Ended(Launched::NotInstalled));
+        return Launch::ended(CADDY_ID, Launched::NotInstalled);
     }
     let Ok(busy) = Arc::clone(&caddy.busy).try_lock_owned() else {
         info!("another action on caddy runs; it decides instead of the start with the daemon");
-        return Launch(LaunchState::Ended(Launched::Busy));
+        return Launch::ended(CADDY_ID, Launched::Busy);
     };
     info!("starting caddy with the daemon");
     let daemon = Arc::clone(daemon);
@@ -839,7 +858,7 @@ pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
             launched = launch(&daemon, busy) => launched,
         }
     });
-    Launch(LaunchState::Running(task))
+    Launch::running(CADDY_ID, task)
 }
 
 async fn launch(daemon: &Daemon, busy: tokio::sync::OwnedMutexGuard<()>) -> Launched {
@@ -992,9 +1011,9 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Adds a line from the daemon to Caddy's recent lines, so `marsa logs caddy`
-/// shows why Caddy did not start.
-fn note(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, text: &str) {
+/// Adds a line from the daemon to a service's recent lines, so `marsa logs
+/// caddy` (or `postgres`) shows why it did not start.
+pub(super) fn note(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, text: &str) {
     let mut runtime = lock(runtime);
     let line = runtime.logs.push(LogStream::Stderr, text, now_ms());
     // Under the lock, like the supervisor, so events come in `seq` order.
@@ -1003,7 +1022,11 @@ fn note(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, text
 
 /// Sets `Failed { code }` and tells every reader, under the lock like the
 /// supervisor, so events come in the order of the changes.
-fn set_failed(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, code: &str) {
+pub(super) fn set_failed(
+    runtime: &Mutex<ServiceRuntime>,
+    events: &broadcast::Sender<Event>,
+    code: &str,
+) {
     let mut runtime = lock(runtime);
     let status = &mut runtime.status;
     status.state = ServiceState::Failed {

@@ -31,6 +31,8 @@ pub use crate::tray::menu::Autostart;
 pub const LOG_SERVICE: &str = "caddy";
 /// The service that serves every site: no site opens while it is down.
 pub const WEB_SERVER: &str = "caddy";
+/// The daemon's DNS server for `.test` names, on macOS and Linux (task M4-18i).
+pub const DNS_SERVER: &str = "dns";
 /// The most log lines kept for each service. The oldest go first.
 pub const MAX_LOG_LINES: usize = 5000;
 /// This build's version, shown in the Settings section.

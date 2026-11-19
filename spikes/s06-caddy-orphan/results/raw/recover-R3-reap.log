@@ -1,0 +1,10 @@
+INSPECT pidfile=stale(pid=35446) admin=no-reply app_port=free admin_port=free
+ADMIN_OWNER None
+TIMING pidfile_ms=3.1 admin_ms=0.7 port_ms=0.0
+DECISION start-fresh(remove_pidfile=true)
+STEP t_ms=3 decided 
+STEP t_ms=4 removed_stale_pidfile 
+STEP t_ms=63 new_caddy_ready pid=35472
+STEP t_ms=64 serving body="marsa-spike v2"
+READY parent=35470 caddy=35472
+CLEAN_STOP status=Ok(ExitStatus(unix_wait_status(0)))

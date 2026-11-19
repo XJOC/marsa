@@ -340,6 +340,21 @@ pub struct Size {
     pub window: Vec2,
     /// The smallest the window gets: the sidebar and a table must fit.
     pub window_min: Vec2,
+    /// The width of the menu-bar panel: 360 (components.md, Menu-bar panel).
+    pub panel_width: f32,
+    /// The height its window opens at, before the panel knows its content:
+    /// the window is empty and see-through until it is the content's height.
+    pub panel_start: f32,
+    /// A site in the menu-bar panel: 42 high, as the mockup has it.
+    pub panel_row: f32,
+    /// The footer links of the menu-bar panel: 40 high.
+    pub panel_footer: f32,
+    /// The column of a site's key (1 to 9) in the panel: 18.
+    pub panel_key: f32,
+    /// The least room between the panel and the edge of the screen: 8.
+    pub panel_edge: f32,
+    /// The room between the menu-bar icon and the panel: 4.
+    pub panel_gap: f32,
 }
 
 /// `radius.*`, in egui's whole points.
@@ -498,6 +513,13 @@ pub const SIZE: Size = Size {
     segmented_inset: 2.0,
     window: vec2(1120.0, 720.0),
     window_min: vec2(760.0, 520.0),
+    panel_width: 360.0,
+    panel_start: 120.0,
+    panel_row: 42.0,
+    panel_footer: 40.0,
+    panel_key: 18.0,
+    panel_edge: 8.0,
+    panel_gap: 4.0,
 };
 
 impl Size {

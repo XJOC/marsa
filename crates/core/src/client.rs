@@ -106,11 +106,13 @@ pub const START_WAIT: Duration = Duration::from_secs(15);
 /// - its processes: 25 s while PostgreSQL runs (SIGINT and SIGQUIT, 10 s
 ///   each, and a 5 s margin for the kill; task M6-03), 10 s otherwise;
 /// - its open connections: 5 s;
-/// - the parked folder watcher, the sites sync, the start of Caddy with the
-///   daemon, and the DNS server: 2 s each, 8 s.
+/// - the parked folder watcher, the sites sync, the starts of Caddy and of
+///   PostgreSQL with the daemon, and the DNS server: 2 s each, 10 s.
 ///
-/// 38 s in all. The second sweep of the processes returns at once: a process
-/// added after the first sweep was told to stop when it was added. So 45 s.
+/// 40 s in all. Then a second sweep of the processes waits for one that a
+/// start added after the first sweep. That process was told to stop when it
+/// was added, so the wait is normally under 1 s, and its stop overlaps the
+/// steps above. So 45 s.
 const STOP_WAIT: Duration = Duration::from_secs(45);
 /// How much earlier than the login session a daemon may have started and
 /// still count as of that session, in seconds (task M5-21). `ps` gives times
@@ -312,7 +314,7 @@ impl DaemonClient {
     ///   it: the default in `global.toml` while another version is
     ///   installed, sites set to it in `sites.toml`, or the running Caddy;
     /// - `sites_lose_php` (409) as [`ClientError::InUse`] too: it is the
-    ///   only PHP and the default, and the sites that run it, which would
+    ///   only PHP installed, and the sites that run it, which would
     ///   have no PHP after it, are in `sites_left_without_php`;
     /// - `install_busy` (409) while an install or another uninstall runs;
     /// - `version_not_installed` (404) when no installed version matches;
