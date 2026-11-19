@@ -11,14 +11,13 @@
 //! access to the user only. Task S-08c checks this on a real Windows machine.
 
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 const FILE_NAME: &str = "daemon.json";
-const TEMP_NAME: &str = "daemon.json.tmp";
 /// The real file is under 200 bytes. A longer one is not ours.
 const MAX_LEN: usize = 64 * 1024;
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -223,14 +222,7 @@ pub fn write_daemon_file(run_dir: &Path, file: &DaemonFile) -> Result<(), Daemon
     let mut body =
         serde_json::to_vec_pretty(&on_disk).map_err(|err| fail(io::Error::other(err)))?;
     body.push(b'\n');
-    let temp = run_dir.join(TEMP_NAME);
-    // `write_new` closes its handle before the `rename`: Windows cannot rename an open file.
-    let result = write_new(&temp, &body).and_then(|()| fs::rename(&temp, &path));
-    if result.is_err() {
-        // Best effort: the write already failed, and that is the error to report.
-        let _ = fs::remove_file(&temp);
-    }
-    result.map_err(fail)
+    crate::fs::write_atomic(&path, &body, Some(0o600)).map_err(fail)
 }
 
 /// Reads `run_dir/daemon.json`.
@@ -297,31 +289,6 @@ pub fn remove_daemon_file(run_dir: &Path) -> Result<(), DaemonFileError> {
         }
         _ => Ok(()),
     }
-}
-
-/// Creates the temp file and writes `body` to disk. `create_new` refuses a
-/// file or a symlink that is already there, and on Unix the mode is `0600`
-/// from the first byte, with no `chmod` after the write.
-fn write_new(path: &Path, body: &[u8]) -> io::Result<()> {
-    let mut file = match create_new(path) {
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-            // Left by a daemon that stopped mid-write. The lock means no other
-            // daemon writes here now.
-            fs::remove_file(path)?;
-            create_new(path)?
-        }
-        other => other?,
-    };
-    file.write_all(body)?;
-    file.sync_all()
-}
-
-fn create_new(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)
 }
 
 /// Creates `dir` (and its parents) for the owner only. An existing `dir` that
@@ -474,12 +441,12 @@ mod tests {
     fn write_replaces_the_old_file_and_a_stale_temp_file() {
         let dir = TempDir::new().unwrap();
         write_daemon_file(dir.path(), &sample()).unwrap();
-        fs::write(dir.path().join(TEMP_NAME), "left by a crash").unwrap();
+        fs::write(dir.path().join(".daemon.json.tmp"), "left by a crash").unwrap();
         let mut newer = sample();
         newer.port = 40000;
         write_daemon_file(dir.path(), &newer).unwrap();
         assert_eq!(read_daemon_file(dir.path()).unwrap().port, 40000);
-        assert!(!dir.path().join(TEMP_NAME).exists());
+        assert!(!dir.path().join(".daemon.json.tmp").exists());
     }
 
     #[test]

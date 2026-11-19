@@ -9,6 +9,7 @@ pub mod config;
 pub mod databases;
 pub mod dns;
 pub mod doctor;
+pub mod fs;
 pub mod helper;
 pub mod orphan;
 pub mod php;
