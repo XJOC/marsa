@@ -2,9 +2,9 @@
 // builds keep the console so logs stay visible during development.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-//! `marsa-tray`: the menu-bar icon (task M5-04). A client of the daemon, like
+//! `marsa-tray`: the menu-bar icon. A client of the daemon, like
 //! the window; it starts `marsad` and stays after the window closes. It is
-//! what starts at login (task M5-03).
+//! what starts at login.
 //!
 //! `marsa-tray [--data-dir <PATH>]`, see `marsa_gui::startup`.
 

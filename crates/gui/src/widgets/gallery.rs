@@ -1,6 +1,5 @@
 //! The widget gallery: one page per group of widgets, each widget in each of
-//! its states, in the light or the dark theme, for the design review (task
-//! M5-D2). Debug builds only (see `widgets/mod.rs`): a release build has no
+//! its states, in the light or the dark theme, for the design review. Debug builds only (see `widgets/mod.rs`): a release build has no
 //! gallery and reads no extra environment variable.
 //!
 //! `MARSA_GUI_GALLERY=1 marsa-gui --data-dir <scratch>` shows it instead of

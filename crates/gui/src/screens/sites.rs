@@ -10,7 +10,7 @@
 //! controller that builds the data; `show` is the Blade template.]
 //!
 //! A click on a row opens the site's page (`site`), where HTTPS or HTTP and
-//! Unlink are (task M5-D7).
+//! Unlink are.
 
 use std::path::{Path, PathBuf};
 

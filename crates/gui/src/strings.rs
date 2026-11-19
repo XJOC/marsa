@@ -178,7 +178,7 @@ pub fn php_for_site(site: &str) -> String {
     format!("PHP version for {site}")
 }
 
-/// A site's own page (task M5-D7). The way back to Sites at the top is the
+/// A site's own page. The way back to Sites at the top is the
 /// word `SITES` after an arrow icon.
 pub const OPEN_FOLDER: &str = "Open folder";
 pub const OPEN_IN_BROWSER: &str = "Open in browser";
@@ -326,8 +326,7 @@ pub const UNINSTALL_HINT: &str = "Delete this version from Marsa's data folder."
 /// Over a disabled Uninstall row while another install or removal runs.
 pub const UNINSTALL_BUSY_HINT: &str = "Wait for the install or removal that runs to end.";
 
-// The Runtimes screen: the list, the details, and the Installed table (task
-// M5-D8).
+// The Runtimes screen: the list, the details, and the Installed table.
 
 pub const INSTALLED: &str = "Installed";
 pub const INSTALL_A_VERSION: &str = "Install a version…";
@@ -427,7 +426,7 @@ pub fn uninstall_off_sites(name: &str, sites: &[&str]) -> String {
     }
 }
 
-// Xdebug (`GET` and `PUT /v1/php/xdebug`, task M5-11).
+// Xdebug (`GET` and `PUT /v1/php/xdebug`).
 
 pub const XDEBUG: &str = "Xdebug";
 /// Under the Xdebug switch: what it does, and what it costs.
@@ -440,7 +439,7 @@ pub const XDEBUG_BUSY: &str = "Marsa is changing Xdebug. Wait for it to end.";
 /// Under the caption while Xdebug is on: the cost is already in the caption.
 pub const XDEBUG_TURN_OFF: &str = "Turn it off when you are done debugging.";
 
-// The first-run panel (tasks M5-10 and M5-D5).
+// The first-run panel.
 
 pub const FIRST_RUN_WELCOME: &str = "Welcome to Marsa";
 pub const FIRST_RUN_INTRO: &str = "Three steps, and your first site opens over HTTPS.";
@@ -485,7 +484,7 @@ pub const CLOSE: &str = "Close";
 // Setup (`POST /v1/setup`), in the first-run panel and in Settings.
 
 pub const RUN_SETUP: &str = "Run setup";
-/// Linux on the hosts way (task M4-18k3): the button under the sites.
+/// Linux on the hosts way: the button under the sites.
 pub const ADD_TO_HOSTS: &str = "Add to /etc/hosts";
 pub const ADD_TO_HOSTS_HINT: &str = "Linux asks for your password once, then the sites' .test \
      names go into /etc/hosts, so they open in the browser.";
@@ -512,14 +511,14 @@ pub const RUN_SETUP_HINT: &str =
 /// When setup had no step to report.
 pub const SETUP_NOTHING: &str = "Nothing to set up.";
 /// Why setup skipped the trust when no Caddy is installed to make the
-/// certificate authority (task M5-15).
+/// certificate authority.
 const SETUP_CADDY_NOT_INSTALLED: &str = "Caddy is not installed, so Marsa's certificate \
      authority does not exist yet. Install Caddy, then run setup again.";
 
-// Settings (task M5-10).
+// Settings.
 
 pub const SETTINGS: &str = "Settings";
-/// The three groups of the Settings screen (task M5-D9).
+/// The three groups of the Settings screen.
 pub const SETTINGS_GENERAL: &str = "General";
 pub const SETTINGS_SETUP: &str = "Setup";
 pub const SETTINGS_ABOUT: &str = "About";
@@ -575,7 +574,7 @@ pub const DAEMON_NOT_CONNECTED: &str = "Daemon not connected";
 /// The window's own code: its background thread could not start.
 pub const BRIDGE_FAILED: &str = "bridge_failed";
 
-// The menu-bar icon (`marsa-tray`, task M5-04).
+// The menu-bar icon (`marsa-tray`).
 
 /// The tooltip of the icon.
 pub const TRAY_TOOLTIP: &str = "Marsa";
@@ -597,7 +596,7 @@ pub const TRAY_WORKER_FAILED: &str = "tray_worker_failed";
 /// The icon's own code: `marsa-gui` could not be started.
 pub const WINDOW_START_FAILED: &str = "window_start_failed";
 
-// The menu-bar panel (`marsa-gui --panel`, task M5-D11). "Open Marsa", "Stop
+// The menu-bar panel (`marsa-gui --panel`). "Open Marsa", "Stop
 // Marsa", "Start Marsa", and "Quit" are the icon's own words above.
 
 /// The name of the panel for a screen reader, and the title of its window.
@@ -706,7 +705,7 @@ pub fn example_version(runtime: Runtime) -> &'static str {
 
 /// [`example_version`] by the runtime's folder name. These `match`es are on
 /// the name text, not on `Runtime`, so a runtime that core adds later builds
-/// and shows with the default arm until it gets its own (task M5-D8).
+/// and shows with the default arm until it gets its own.
 pub fn example_version_for(folder: &str) -> &'static str {
     match folder {
         "php" => "8.4",
@@ -972,9 +971,9 @@ fn setup_step(op: &str) -> String {
         "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
         "resolved_install" => "Send .test names to Marsa".to_owned(),
         "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
-        // Chrome and Firefox on Linux (task M4-18g).
+        // Chrome and Firefox on Linux.
         "nss_install" => "Trust Marsa's certificates in Chrome and Firefox".to_owned(),
-        // The hosts way on Linux (task M4-18k).
+        // The hosts way on Linux.
         "resolved_remove" => "Take out Marsa's link for .test names".to_owned(),
         "hosts_sync" => "Put the sites' .test names in the hosts file".to_owned(),
         "hosts_remove" => "Take Marsa's names out of the hosts file".to_owned(),
@@ -1058,7 +1057,7 @@ pub fn runtime_name(runtime: Runtime) -> &'static str {
 /// is the one name core gives a runtime. The `match` is on that text, not on
 /// `Runtime`: a runtime that core adds later builds without a change here and
 /// shows under its folder name (`python`) until it gets a nicer one
-/// (task M5-D8).
+///.
 pub fn runtime_name_for(folder: &'static str) -> &'static str {
     match folder {
         "php" => "PHP",
@@ -1137,7 +1136,7 @@ pub const fn overall_text(overall: Overall) -> (&'static str, &'static str) {
     }
 }
 
-// Home (task M5-D5): the status sentence, its fixes, the default PHP, and the
+// Home: the status sentence, its fixes, the default PHP, and the
 // first sites.
 
 /// The sentence and the line under it, while the window waits for the daemon.
@@ -1646,7 +1645,7 @@ fn error_message(code: &str) -> Option<&'static str> {
              stopped safely."
         }
         "exited" => "The process exited.",
-        // The DNS server (task M4-18i), and why setup skipped its DNS step.
+        // The DNS server, and why setup skipped its DNS step.
         "dns_port_in_use" => {
             "Another program holds port 18053 and may answer .test names. Its log names it."
         }
@@ -1655,7 +1654,7 @@ fn error_message(code: &str) -> Option<&'static str> {
         "spawn_failed" => "The process could not be started.",
         "program_not_absolute" => "The service program has no full path.",
         "internal_error" => "The daemon hit a bug. Try again; if it repeats, report it.",
-        // The sites routes (M4-10b), `SiteError`, and `ClientError::PathNotUtf8`.
+        // The sites routes, `SiteError`, and `ClientError::PathNotUtf8`.
         "site_not_found" => "No such site. It may have just been removed.",
         "site_name_invalid" => "That is not a valid site name.",
         "site_name_taken" => "Another folder already has that site name.",
@@ -1665,27 +1664,27 @@ fn error_message(code: &str) -> Option<&'static str> {
             "That folder's path is not valid UTF-8, so Marsa cannot serve it. Rename the folder."
         }
         "site_read_dir" => "Cannot read that folder. Check its permissions.",
-        // M5-09: `DELETE /v1/sites/{name}` and `DELETE /v1/sites/park`.
+        // `DELETE /v1/sites/{name}` and `DELETE /v1/sites/park`.
         "site_is_parked" => "This site is part of a parked folder, so it cannot be unlinked alone.",
         "folder_not_parked" => "That folder is not parked. It may have just been removed.",
         // `ConfigError`, for the sites settings file.
         "config_read" => "Cannot read the Marsa settings file.",
         "config_invalid" => "The Marsa settings file has an error. Fix the file, then try again.",
         "config_write" => "Cannot write the Marsa settings file.",
-        // `PUT /v1/runtimes/{tool}/default` (M5-01), `GET /v1/runtimes`, and
-        // the PHP version of a site (M5-02).
+        // `PUT /v1/runtimes/{tool}/default`, `GET /v1/runtimes`, and
+        // the PHP version of a site.
         "version_not_installed" => "That version is not installed. Install it first.",
         "no_default_version" => "This program has no default version: the newest one is used.",
         "invalid_version" => "That is not a valid version number.",
         "unsupported_alias" => "Version names such as \"latest\" are not supported. Pick a number.",
         "unknown_tool" => "This daemon does not know that program.",
         "runtimes_read" => "Cannot read the folder of installed versions.",
-        // `DELETE /v1/runtimes/{tool}/{version}` (M5-07).
+        // `DELETE /v1/runtimes/{tool}/{version}`.
         "version_in_use" => {
             "This version is in use: it is a default, a site is set to it, or Caddy runs from \
              it. Nothing was uninstalled."
         }
-        // M5-19: the only PHP and the default, and sites run it.
+        // The only PHP and the default, and sites run it.
         "sites_lose_php" => {
             "This is the only PHP version installed, and sites run it: they would have no PHP. \
              Install another PHP version and pick it as the default first."
@@ -1695,13 +1694,13 @@ fn error_message(code: &str) -> Option<&'static str> {
             "Cannot delete this version: a program from it may still run, or its folder is not \
              writable. Quit that program, then try again."
         }
-        // `PUT /v1/php/xdebug` (M5-11).
+        // `PUT /v1/php/xdebug`.
         "xdebug_interrupted" => {
             "The daemon stopped before the change reached PHP. The setting is saved: Marsa \
              applies it when it starts again."
         }
-        // `GET` and `PUT /v1/autostart` (M5-03), behind the tray's "Start at
-        // Login" line (M5-04).
+        // `GET` and `PUT /v1/autostart`, behind the tray's "Start at
+        // Login" line.
         "tray_not_found" => {
             "marsa-tray was not found next to marsad, so Marsa cannot start at login."
         }
@@ -1710,7 +1709,7 @@ fn error_message(code: &str) -> Option<&'static str> {
         "autostart_no_home" => "The system gives no home folder for the login file.",
         "autostart_read" => "Cannot read the login file.",
         "autostart_write" => "Cannot write the login file.",
-        // Installs (task M5-10): `InstallError` and the codes under it, in
+        // Installs: `InstallError` and the codes under it, in
         // the `failed` event or the answer to the request.
         "install_busy" => {
             "Another install or uninstall is running. Wait for it to end, then try again."
@@ -1798,10 +1797,10 @@ fn error_message(code: &str) -> Option<&'static str> {
         | "recipe_unknown_platform"
         | "recipe_bad_path"
         | "recipe_bad_template" => "This build of Marsa has a broken install recipe. Report it.",
-        // Setup (`POST /v1/setup`, task M4-13): why it did not run, the
+        // Setup (`POST /v1/setup`): why it did not run, the
         // steps it skipped, and the codes of `marsa-helper`.
         "setup_running" => "Another setup is running. Wait for it to end, then try again.",
-        // `marsa uninstall --all` runs (M5-13): setup waits for it.
+        // `marsa uninstall --all` runs: setup waits for it.
         "uninstall_running" => {
             "Marsa is being removed from this computer (marsa uninstall --all). Wait for it to \
              end, then try again."
@@ -1830,7 +1829,7 @@ fn error_message(code: &str) -> Option<&'static str> {
              password, or no password prompt (as over SSH). Run setup again from your desktop \
              and enter the password of an administrator account."
         }
-        // Windows: the helper service and the hosts file (task M4-19g2, ADR 0018).
+        // Windows: the helper service and the hosts file (ADR 0018).
         "setup_helper_not_the_service" => {
             "Another program holds the name of Marsa's helper service, so Marsa sent it nothing \
              and nothing was changed. Restart Windows, then run setup again; if it repeats, \
@@ -1857,13 +1856,13 @@ fn error_message(code: &str) -> Option<&'static str> {
             "Marsa's helper service gave no answer, so the result of setup is not known. Run \
              \"marsa doctor\" in a terminal to see what is set up, then run setup again."
         }
-        // Linux (tasks M4-18e, M4-18h, M4-18b, M4-18c).
+        // Linux.
         "setup_pkexec_missing" => {
             "pkexec is not installed, so Marsa cannot ask for the administrator password. \
              Install the package pkexec (Debian, Ubuntu), polkit (Fedora), or policykit-1 \
              (older systems), then run setup again."
         }
-        // Linux, the second request of setup (task M4-18k2).
+        // Linux, the second request of setup.
         "setup_hosts_not_written" => {
             "The steps above are done, but the second password prompt did not go through, so \
              the sites' .test names are not in /etc/hosts yet and the sites do not open. Run \
@@ -1898,12 +1897,12 @@ fn error_message(code: &str) -> Option<&'static str> {
             "Linux did not let Marsa change its files for .test names. Run setup again; if it \
              repeats, report it."
         }
-        // Setup then puts the names in /etc/hosts (task M4-18k2).
+        // Setup then puts the names in /etc/hosts.
         "resolved_not_running" => {
             "systemd-resolved does not run here, so Marsa did not make its link for .test \
              names: they go into /etc/hosts instead."
         }
-        // Linux (task M4-18k) and Windows (task M4-19).
+        // Linux and Windows.
         "hosts_read" => {
             "Marsa did not change the hosts file: it cannot be read, or it is a link, \
              read-only, or larger than 16 MiB. Fix the file, then run setup again."
@@ -1968,7 +1967,7 @@ fn error_message(code: &str) -> Option<&'static str> {
              Marsa's certificate authority was not changed. On Debian, Ubuntu, or Fedora, \
              install the ca-certificates package, then run setup again."
         }
-        // Chrome and Firefox on Linux (task M4-18g).
+        // Chrome and Firefox on Linux.
         "nss_tool_missing" => {
             "Chrome and Firefox need certutil: install libnss3-tools (Debian, Ubuntu) or \
              nss-tools (Fedora), then run setup again."
@@ -2041,7 +2040,7 @@ fn error_message(code: &str) -> Option<&'static str> {
             "The root certificate of Marsa's certificate authority is not valid, so it was not \
              trusted. Report it."
         }
-        // Setup's trust folder in the data folder (M5-13).
+        // Setup's trust folder in the data folder.
         "trust_record_unusable" => {
             "Marsa cannot use its folder for the trusted certificate (trust in the data folder): \
              it must be your own folder, not a link. Fix or delete it, then run setup again."
@@ -2133,9 +2132,9 @@ mod tests {
 
     #[test]
     fn known_daemon_codes_have_a_message() {
-        // Auth (M3-03), routes (M3-06), services and Caddy (M3-07), the
-        // orphan check (M3-11), sites (M4-10b), php-fpm pools (M4-23), the
-        // default version (M5-01), and the runtimes list (M5-02).
+        // Auth, routes, services and Caddy, the
+        // orphan check, sites, php-fpm pools, the
+        // default version, and the runtimes list.
         for code in [
             "unauthorized",
             "origin_rejected",
@@ -2163,7 +2162,7 @@ mod tests {
             "program_not_absolute",
             "invalid_body",
             "internal_error",
-            // Sites (M4-10b) and the settings files.
+            // Sites and the settings files.
             "site_not_found",
             "site_name_invalid",
             "site_name_taken",
@@ -2171,31 +2170,31 @@ mod tests {
             "site_path_relative",
             "site_path_not_utf8",
             "site_read_dir",
-            // M5-09: unlink and forget.
+            // Unlink and forget.
             "site_is_parked",
             "folder_not_parked",
-            // M5-07 and M5-19: uninstall a version.
+            // Uninstall a version.
             "version_in_use",
             "sites_lose_php",
             "version_ambiguous",
             "uninstall_io",
             "install_busy",
-            // M5-11: Xdebug.
+            // Xdebug.
             "xdebug_interrupted",
-            // M5-13: setup during `marsa uninstall --all`, and its trust folder.
+            // Setup during `marsa uninstall --all`, and its trust folder.
             "uninstall_running",
             "trust_record_unusable",
             "config_read",
             "config_invalid",
             "config_write",
-            // The default version (M5-01) and the PHP lists (M5-02).
+            // The default version and the PHP lists.
             "version_not_installed",
             "no_default_version",
             "invalid_version",
             "unsupported_alias",
             "unknown_tool",
             "runtimes_read",
-            // Autostart (M5-03), shown by the tray (M5-04).
+            // Autostart, shown by the tray.
             "tray_not_found",
             "autostart_path_invalid",
             "autostart_unsupported",
@@ -2438,7 +2437,7 @@ mod tests {
         );
     }
 
-    // -- Installs, setup, and settings (task M5-10) --
+    // -- Installs, setup, and settings --
 
     use marsa_core::installer::InstallError;
     use marsa_core::installer::manifest::ManifestError;
@@ -2929,7 +2928,7 @@ mod tests {
         );
     }
 
-    /// Task M5-15: the two reasons for no CA say what to do.
+    /// the two reasons for no CA say what to do.
     #[test]
     fn a_skipped_trust_says_how_to_get_the_ca() {
         let skipped = |code: &str| SetupReport {
@@ -2997,7 +2996,7 @@ mod tests {
         }
     }
 
-    // -- Uninstall, unlink, forget, and Xdebug (task M5-10) --
+    // -- Uninstall, unlink, forget, and Xdebug --
 
     fn in_use(default: Option<&str>, sites: &[&str], caddy: bool) -> UninstallNotice {
         UninstallNotice::InUse {
@@ -3088,7 +3087,7 @@ mod tests {
         let general = error_text("version_in_use");
         assert_eq!(texts(&lines), [title, (general.as_str(), true)]);
 
-        // M5-19: the only PHP, with sites that would have no PHP after it.
+        // The only PHP, with sites that would have no PHP after it.
         let mut last = in_use(None, &[], false);
         let one = "The site blog.test would have no PHP: PHP 8.3.27 is the only PHP installed. \
                    Install another PHP version and pick it as the default above first.";
@@ -3300,7 +3299,7 @@ mod tests {
         assert_ne!(pick_title(Pick::Park), pick_title(Pick::Link));
     }
 
-    /// Task M4-18k3: the line over "Add to /etc/hosts".
+    /// the line over "Add to /etc/hosts".
     #[test]
     fn the_hosts_line_names_the_waiting_sites() {
         let names =
@@ -3316,7 +3315,7 @@ mod tests {
         );
     }
 
-    /// Task M5-D8: a runtime that core adds later (Python, Go) shows with no
+    /// a runtime that core adds later (Python, Go) shows with no
     /// entry here: core's name for it and two letters of it.
     #[test]
     fn a_runtime_core_adds_later_needs_no_entry_for_its_name_letters_and_example() {
@@ -3332,7 +3331,7 @@ mod tests {
         assert_eq!(monogram_for("x", ""), "", "an empty name has no letters");
     }
 
-    /// Task M5-D2: the words of the widgets' tiles and badges.
+    /// the words of the widgets' tiles and badges.
     #[test]
     fn every_runtime_has_a_short_monogram_and_every_section_a_name() {
         let mut monograms = Vec::new();

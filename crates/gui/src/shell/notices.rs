@@ -1,8 +1,7 @@
 //! The notice bar of the shell (components.md, Notices): one bar at the
-//! bottom of the main area for the result of what the user just did. Every
-//! screen used to carry its own lines (the last sites action, the installs and
-//! the last uninstall, a failed call); now they are one bar, so a result shows
-//! on whatever screen the user is on (task M5-D9).
+//! bottom of the main area for the result of what the user just did (the last
+//! sites action, an install, an uninstall, a failed call). It is one bar for
+//! the whole window, so a result shows on whatever screen the user is on.
 //!
 //! The results stay where they were, in the [`Model`]. [`current`] reads
 //! them and decides which one the bar shows: pure, so the tests assert it

@@ -1,7 +1,7 @@
 //! The screens of the window (code.md, Target layout): one file per
 //! screen. [Laravel: the views.] The sections of the old one-page window
-//! moved here without a change in behavior (task M5-D4); each screen's own
-//! task redesigns it (M5-D5 to M5-D10).
+//! moved here without a change in behavior; each screen's own
+//! task redesigns it.
 
 pub mod first_run;
 pub mod home;

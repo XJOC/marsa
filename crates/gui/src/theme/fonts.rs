@@ -1,5 +1,5 @@
 //! The bundled fonts (ADR 0021): Readex Pro, one variable file whose weights
-//! 300 to 600 come from its `wght` axis (`VariationCoords`, spike S-14), and
+//! 300 to 600 come from its `wght` axis (`VariationCoords`), and
 //! JetBrains Mono Regular. Both are compiled into the program with
 //! `include_bytes!`, so nothing is read from disk. Licences and sources:
 //! `crates/gui/assets/fonts/README.md`.

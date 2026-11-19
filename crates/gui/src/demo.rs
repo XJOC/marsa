@@ -1,4 +1,4 @@
-//! Debug builds only: fixed fake data for the design review (task M5-D5).
+//! Debug builds only: fixed fake data for the design review.
 //! `MARSA_GUI_DEMO=ok|caddy-stopped|many-sites|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! fills the model with a few sites, PHP and Caddy (or nothing, for the
 //! first run), and starts no bridge and no daemon: the window draws a state the review needs without a
@@ -36,7 +36,7 @@ pub enum Demo {
     CaddyStopped,
     /// The same as `Ok`, with twelve sites and four PHP versions: the
     /// menu-bar panel lists nine, says how many more there are, and puts the
-    /// version buttons on two rows (task M5-D11).
+    /// version buttons on two rows.
     ManySites,
     /// A new install: nothing installed, and PHP 8.4 downloading, 18 of
     /// 31 MB (the first step of the first-run panel).
@@ -44,8 +44,7 @@ pub enum Demo {
     /// PHP 8.4 and Caddy installed, no sites yet: the first step is done and
     /// setup is the one to do.
     FirstRun2,
-    /// The same as `Ok`, with "li" in the search field of Sites (task
-    /// M5-D6).
+    /// The same as `Ok`, with "li" in the search field of Sites.
     SitesSearch,
     /// The same as `Ok`, with no site: the empty state of Sites.
     SitesEmpty,
@@ -53,29 +52,28 @@ pub enum Demo {
     /// action, two parked folders, and two skipped ones.
     SitesExtras,
     /// The same as `Ok`, with `~/Code` parked: the sites in it come from that
-    /// folder, so their pages cannot unlink them (task M5-D7).
+    /// folder, so their pages cannot unlink them.
     SiteParked,
     /// The same as `Ok`, with Node.js and Composer listed too, and the Xdebug
-    /// state read: the Runtimes screen (task M5-D8).
+    /// state read: the Runtimes screen.
     Runtimes,
     /// `Runtimes`, with PHP 8.5 downloading, 18 of 31 MB.
     RuntimesInstalling,
     /// `Runtimes`, with the install dialog of PHP open.
     RuntimesInstall,
     /// The same as `Ok`, with Start at login on and nothing known of setup:
-    /// the Settings screen (task M5-D9). Its data folder is a made-up one,
+    /// the Settings screen. Its data folder is a made-up one,
     /// under the demo's home.
     Settings,
     /// `Settings` after a setup of this session: the certificate and the
     /// `.test` names are done.
     SettingsSetup,
     /// The same as `Ok`, with Caddy running and three PHP pools: one running,
-    /// one waiting, one failed with its reason: the Services screen (task
-    /// M5-D10).
+    /// one waiting, one failed with its reason: the Services screen.
     Services,
     /// The same as `Ok`, with Caddy running, the pools of PHP 8.3 (waiting)
     /// and 8.4, and a log for each: Logs following Caddy's, with a warning and
-    /// an error among the lines (task M5-D10).
+    /// an error among the lines.
     Logs,
     /// `Logs` with the Info level turned off: only warnings and errors.
     LogsFiltered,

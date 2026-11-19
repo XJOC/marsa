@@ -1,4 +1,4 @@
-//! The menu-bar icon (task M5-04): a `tao` event loop on the main thread
+//! The menu-bar icon: a `tao` event loop on the main thread
 //! (macOS requires it) that owns the icon and its menu, and a worker thread
 //! with the daemon client ([`worker`]). The worker's updates and the menu's
 //! clicks reach the loop through its `EventLoopProxy`. [`menu`] decides what
@@ -324,7 +324,7 @@ fn monitors(target: &EventLoopWindowTarget<UserEvent>) -> Vec<Monitor> {
 /// it is up, then every second and a half, with the place the system gives
 /// it. It starts the panel under the real icon, so the design review can see
 /// where it lands, what its exit code asks for, and that a second click
-/// closes it, with no one at the mouse (task M5-D11).
+/// closes it, with no one at the mouse.
 #[cfg(debug_assertions)]
 const SELFTEST_VAR: &str = "MARSA_TRAY_SELFTEST";
 #[cfg(debug_assertions)]
