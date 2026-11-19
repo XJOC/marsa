@@ -48,6 +48,7 @@ use semver::Version;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::caddy::orphan::BoxFuture;
@@ -513,6 +514,9 @@ pub struct PostgresManager {
     /// The status and recent lines, kept across runs, so `seq` never goes
     /// back and the lines of a failed run stay readable.
     runtime: Arc<Mutex<ServiceRuntime>>,
+    /// The start that runs now, so a stop can drop it instead of waiting
+    /// for it: a first start may run `initdb` for up to 2 minutes.
+    starting: Mutex<Option<CancellationToken>>,
     /// Held for the whole of each action, so two starts never run two
     /// servers. A tokio lock held across `.await` as a serialization token,
     /// not a guard of data (manager decision 2026-11-14). In an `Arc`, so a
@@ -528,6 +532,7 @@ impl Default for PostgresManager {
             ready_limit: READY_LIMIT,
             platform: Platform::current(),
             started: Mutex::default(),
+            starting: Mutex::default(),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(POSTGRES_ID))),
             busy: Arc::default(),
         }
@@ -561,6 +566,13 @@ impl PostgresManager {
         lock(&self.runtime).logs.recent()
     }
 
+    /// Whether `GET /v1/services` lists PostgreSQL: when a version is
+    /// installed, or when its status says more than `stopped` (a start
+    /// that failed because none is installed).
+    pub fn listed(&self, data_dir: &Path) -> bool {
+        self.status().state != ServiceState::Stopped || any_installed(data_dir)
+    }
+
     /// The program PostgreSQL runs from now, or `None` while it does not run.
     pub fn running_program(&self, daemon: &Daemon) -> Option<PathBuf> {
         if !daemon.proc_alive(POSTGRES_ID) {
@@ -575,6 +587,10 @@ impl PostgresManager {
     /// `stop` on a stopped one change nothing. Once the daemon begins to
     /// stop, nothing runs: the shutdown stops PostgreSQL itself.
     ///
+    /// A `stop` does not wait for a start: it drops it first (the start
+    /// with the daemon, of the API, or after an install), then takes its
+    /// turn and stops what that start spawned.
+    ///
     /// # Errors
     ///
     /// `service_busy` when the wait runs out or the daemon stops; the errors
@@ -585,6 +601,9 @@ impl PostgresManager {
         action: ServiceAction,
         wait: Duration,
     ) -> Result<ServiceStatus, ActionError> {
+        if action == ServiceAction::Stop {
+            self.drop_start();
+        }
         let busy = match Arc::clone(&self.busy).try_lock_owned() {
             Ok(busy) => busy,
             Err(_) => {
@@ -611,14 +630,45 @@ impl PostgresManager {
         _busy: tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<ServiceStatus, ActionError> {
         match action {
-            ServiceAction::Start => self.start(daemon).await?,
+            ServiceAction::Start => self.start_or_drop(daemon).await?,
             ServiceAction::Stop => self.stop(daemon).await,
             ServiceAction::Restart => {
                 self.stop(daemon).await;
-                self.start(daemon).await?;
+                self.start_or_drop(daemon).await?;
             }
         }
         Ok(self.status())
+    }
+
+    /// [`Self::start`], until a stop drops it ([`Self::drop_start`]). A
+    /// dropped start ends at its next `.await`: a step of the first init
+    /// is killed (`kill_on_drop`) and leaves a temp folder that the next
+    /// init deletes; a server it spawned is in `Daemon::procs` already,
+    /// because the spawn and `add_proc` have no `.await` between them, so
+    /// the stop that dropped it stops it.
+    async fn start_or_drop(&self, daemon: &Daemon) -> Result<(), ActionError> {
+        let token = CancellationToken::new();
+        *lock(&self.starting) = Some(token.clone());
+        let result = tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                info!("a stop dropped the start of postgres");
+                Ok(())
+            }
+            result = self.start(daemon) => result,
+        };
+        // Only this action runs (`busy`), so the token there is this one,
+        // unless a stop took it.
+        lock(&self.starting).take();
+        result
+    }
+
+    /// Drops the start that runs now, if any.
+    fn drop_start(&self) {
+        if let Some(token) = lock(&self.starting).take() {
+            info!("a stop drops the start of postgres that runs");
+            token.cancel();
+        }
     }
 
     async fn start(&self, daemon: &Daemon) -> Result<(), ActionError> {
@@ -868,6 +918,23 @@ impl PostgresManager {
     }
 }
 
+/// Turns PostgreSQL on or off in `global.toml` (`[postgres] enabled`), for
+/// the start with the daemon. Writes only a change. The caller holds
+/// `Daemon::lock_global`.
+///
+/// # Errors
+///
+/// The `config_*` codes when `global.toml` cannot be read or written.
+pub fn set_enabled(data_dir: &Path, enabled: bool) -> Result<(), ConfigError> {
+    let path = ConfigPaths::in_dir(data_dir).global;
+    let mut global = config::load_global(&path)?;
+    if global.postgres.enabled == enabled {
+        return Ok(());
+    }
+    global.postgres.enabled = enabled;
+    config::save_global(&path, &global)
+}
+
 /// `[postgres]` of `global.toml`.
 fn read_settings(data_dir: &Path) -> Result<ServerSettings, ActionError> {
     let path = ConfigPaths::in_dir(data_dir).global;
@@ -933,7 +1000,7 @@ pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
 
 /// Whether any PostgreSQL version is installed. A folder that cannot be read
 /// counts as one: then the error is reported.
-fn any_installed(data_dir: &Path) -> bool {
+pub fn any_installed(data_dir: &Path) -> bool {
     let installed = RuntimesDir::in_dir(data_dir).installed(Runtime::Postgres);
     installed.map_or(true, |versions| !versions.is_empty())
 }
@@ -1677,6 +1744,49 @@ mod tests {
             let signals = ["fake got SIGINT", "fake got SIGTERM"];
             assert!(!texts.iter().any(|t| signals.contains(&t.as_str())));
             pg.act(ServiceAction::Stop).await.unwrap();
+        }
+
+        /// A stop does not wait for a first start: it drops it, `initdb` and
+        /// all, and nothing runs after.
+        #[tokio::test]
+        async fn a_stop_drops_a_start_that_runs() {
+            let pg = pg("serve", probes(Liveness::Gone, None));
+            let platform = Platform::current().unwrap();
+            let programs = programs(&pg.daemon.data_dir, platform, &Version::new(18, 7, 0));
+            let calls = pg.dir.path().join("calls.log").display().to_string();
+            let slow = format!("#!/bin/sh\necho initdb >> '{calls}'\nexec sleep 60\n");
+            fs::write(programs.unwrap().initdb, slow).unwrap();
+
+            let daemon = Arc::clone(&pg.daemon);
+            let start = tokio::spawn(async move {
+                let postgres = &daemon.postgres;
+                postgres
+                    .run_waiting(&daemon, ServiceAction::Start, WAIT)
+                    .await
+            });
+            let init = async {
+                while pg.count("initdb") == 0 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            tokio::time::timeout(WAIT, init).await.unwrap();
+
+            let begun = std::time::Instant::now();
+            let status = pg.act(ServiceAction::Stop).await.unwrap();
+            assert!(
+                begun.elapsed() < Duration::from_secs(10),
+                "{:?}",
+                begun.elapsed()
+            );
+            assert_eq!(status.state, ServiceState::Stopped);
+            // The start ended without an error and started nothing.
+            let started = start.await.unwrap().unwrap();
+            assert_eq!(started.state, ServiceState::Stopped);
+            assert_eq!(pg.count("server"), 0);
+            assert!(!pg.dirs.data.exists());
+            assert!(!pg.daemon.proc_alive(POSTGRES_ID));
+            // Nothing is left to drop, and the next start runs as usual.
+            assert!(lock(&pg.daemon.postgres.starting).is_none());
         }
 
         #[tokio::test]
