@@ -1,13 +1,14 @@
-//! `marsa uninstall --all`: take Marsa out of this system (macOS and Windows). Task
-//! M5-13.
+//! `marsa uninstall --all`: take Marsa out of this system (macOS, Linux, and
+//! Windows).
 //!
 //! 1. Prints what will be removed, and asks for `yes` unless `--yes` is
 //!    given. Without a terminal to ask on, and without `--yes`, it stops
 //!    there: nothing has changed, and no daemon has started.
 //! 2. One call to `marsad` (`POST /v1/uninstall`, in
-//!    `daemon/uninstall_api.rs`), started if needed. The daemon asks macOS
-//!    for the administrator password once and runs `marsa-helper`, then takes
-//!    the user's trust away and deletes the login file. This prints one line
+//!    `daemon/uninstall_api.rs`), started if needed. The daemon asks for the
+//!    admin password once (macOS: osascript, Linux: pkexec, Windows: UAC) and
+//!    runs `marsa-helper`, then takes the user's trust away and deletes the
+//!    login file. This prints one line
 //!    per step. A cancelled prompt ends the command: nothing was removed.
 //!    Ctrl+C while it waits stops only this command: the uninstall goes on in
 //!    `marsad`, which writes each step to `logs/marsad.log`.
@@ -94,6 +95,8 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
     // Windows: the CLI runs on the machine marsad runs on (ADR 0018).
     let started = if cfg!(windows) {
         strings::UNINSTALL_ALL_STARTED_WINDOWS
+    } else if cfg!(target_os = "linux") {
+        strings::UNINSTALL_ALL_STARTED_LINUX
     } else {
         strings::UNINSTALL_ALL_STARTED
     };
@@ -312,7 +315,13 @@ impl Ask for Terminal {
 fn runs_here(platform: Option<Platform>) -> bool {
     matches!(
         platform,
-        Some(Platform::DarwinArm64 | Platform::DarwinX64 | Platform::WindowsX64)
+        Some(
+            Platform::DarwinArm64
+                | Platform::DarwinX64
+                | Platform::LinuxX64
+                | Platform::LinuxArm64
+                | Platform::WindowsX64
+        )
     )
 }
 
@@ -1048,6 +1057,8 @@ mod tests {
         // The CLI runs where marsad runs: Windows keeps PATH in a setting.
         let startup = if cfg!(windows) {
             "environment variables"
+        } else if cfg!(target_os = "linux") {
+            "~/.bashrc"
         } else {
             "~/.zprofile"
         };
@@ -1089,6 +1100,8 @@ mod tests {
         let path_line = text.lines().nth(2).unwrap();
         let end = if cfg!(windows) {
             "in Settings)."
+        } else if cfg!(target_os = "linux") {
+            "~/.profile."
         } else {
             "~/.zshrc."
         };
@@ -1117,8 +1130,18 @@ mod tests {
             ),
             "{deleted}"
         );
-        // The CLI runs where marsad runs: Windows has its own plan.
-        let parts: &[&str] = if cfg!(windows) {
+        // The CLI runs where marsad runs: Windows and Linux have their own
+        // plans.
+        let parts: &[&str] = if cfg!(target_os = "linux") {
+            &[
+                "ports 80 and 443",
+                "/etc/hosts",
+                "Chrome and Firefox",
+                "start at login",
+                "your password once",
+                "tray icon",
+            ]
+        } else if cfg!(windows) {
             &[
                 "hosts file",
                 "for all users",
@@ -1143,16 +1166,11 @@ mod tests {
     }
 
     #[test]
-    fn macos_and_windows_run_the_uninstall() {
-        for platform in [
-            Platform::DarwinArm64,
-            Platform::DarwinX64,
-            Platform::WindowsX64,
-        ] {
-            assert!(runs_here(Some(platform)), "{platform:?}");
+    fn every_system_with_a_build_runs_the_uninstall() {
+        for platform in Platform::ALL {
+            let expected = platform != Platform::Any;
+            assert_eq!(runs_here(Some(platform)), expected, "{platform:?}");
         }
-        for platform in [Some(Platform::LinuxX64), Some(Platform::LinuxArm64), None] {
-            assert!(!runs_here(platform), "{platform:?}");
-        }
+        assert!(!runs_here(None));
     }
 }

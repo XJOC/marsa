@@ -459,6 +459,7 @@ grep -q "Trust Marsa's certificates in Chrome and Firefox: done" <<<"$out" || fa
 run certutil -d "sql:$HOME/.pki/nssdb" -L
 # The nickname carries the root's fingerprint, and the root is trusted (C).
 certutil -d "sql:$HOME/.pki/nssdb" -L | grep -Eq "^Marsa Local CA [0-9a-f]{16} +C" || fail "Chrome's database has no trusted Marsa root"
+[ -s "$DATA/trust/nss-fingerprints" ] || fail "setup recorded no NSS fingerprint"
 [ "$(cat "$PORT_START")" = 80 ] || fail "ip_unprivileged_port_start is $(cat "$PORT_START"), not 80"
 wait_for_name "$SITE" || fail "$SITE does not resolve"
 # From here on the name resolves on both ways.
@@ -567,19 +568,37 @@ out=$(marsa link second-site --path "$HOME/second" 2>&1) || fail "marsa link aga
 [ "$(prompts)" = "$asked" ] || fail "marsa link started pkexec for names already there"
 run marsa unlink second-site
 
-step "removal, with the site running"
+step "marsa uninstall --all, through pkexec: everything setup did goes"
+asked=$(prompts)
+code=0
+out=$(marsa uninstall --all --yes 2>&1) || code=$?
+echo "$out"
+[ "$code" = 0 ] || fail "marsa uninstall --all exited with $code"
+grep -q "Remove the trust in Marsa's certificates from Chrome and Firefox: done" <<<"$out" || fail "the NSS step is not done"
+[ "$(prompts)" = "$((asked + 1))" ] || fail "expected one password prompt, got $(($(prompts) - asked))"
+[ ! -e "$DATA/hosts-block" ] || fail "the hosts marker is still there"
+[ ! -e "$UNIT" ] || fail "$UNIT is still there"
+! ip link show marsa0 >/dev/null 2>&1 || fail "marsa0 is still there"
+[ ! -e "$SYSCTL_FILE" ] || fail "$SYSCTL_FILE is still there"
+[ "$(cat "$PORT_START")" = 1024 ] || fail "ip_unprivileged_port_start is $(cat "$PORT_START"), not 1024"
 if [ "$LINK" = no ]; then
-  helper '[{"op":"hosts_remove"}]' || fail "the helper exited with $?"
-  [ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"
   cmp -s /etc/hosts "$HOME/hosts-before" || fail "/etc/hosts is not as it was before setup"
 fi
-remove_all
-helper '[{"op":"trust_remove"}]' || fail "the helper exited with $?"
-[ "$(statuses)" = "done" ] || fail "expected done, got: $(statuses)"
 if openssl verify -CAfile "$BUNDLE" "$CA" >/dev/null 2>&1; then
   fail "the system store still trusts Caddy's CA"
 fi
 [ -z "$(dangling_links)" ] || fail "dangling links after the removal: $(dangling_links)"
+run certutil -d "sql:$HOME/.pki/nssdb" -L
+! certutil -d "sql:$HOME/.pki/nssdb" -L | grep -q "Marsa Local CA" || fail "Chrome's database still has a Marsa root"
+[ ! -e "$DATA/trust/nss-fingerprints" ] || fail "the record of NSS roots is still there"
+sudo resolvectl flush-caches
+# The name itself is gone, on either way (link or hosts file).
+if getent ahostsv4 "$SITE" >/dev/null; then
+  fail "$SITE still resolves after the uninstall"
+fi
+if curl -fsS -o /dev/null --max-time 10 "https://$SITE/" 2>/dev/null; then
+  fail "https://$SITE/ still opens after the uninstall"
+fi
 
 step "stop"
 run marsa daemon stop

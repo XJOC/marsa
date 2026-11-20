@@ -681,14 +681,18 @@ mod autostart_tests {
 ///
 /// One admin prompt runs the helper's `uninstall_all`. Only if the helper
 /// ran does the daemon go on: it takes away the current user's trust in
-/// Marsa's certificate authority (macOS, ADR 0015), deletes the login file
-/// (task M5-03), answers, and then stops, with Caddy, the PHP pools, and
-/// the DNS server. The data folder stays: the CLI asks about it on its own.
+/// Marsa's certificate authority (macOS, ADR 0015) or deletes this data
+/// folder's roots from the user's NSS databases (Linux, ADR 0014), deletes
+/// the login file where the system has one (no `autostart_remove`
+/// otherwise), answers, and then stops, with Caddy, the PHP pools, and the
+/// DNS server. The data folder stays: the CLI asks about it on its own.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UninstallReport {
     /// One result per step, in order: the helper's removals (`pf_remove`,
-    /// `resolver_remove`, `trust_remove` on macOS), then the daemon's own
-    /// `user_trust_remove` and `autostart_remove`. Empty when `error` says
+    /// `resolver_remove`, `trust_remove` on macOS; `ports_remove`,
+    /// `resolved_remove`, `hosts_remove`, `trust_remove` on Linux), then the
+    /// daemon's own `user_trust_remove` (macOS) or `nss_remove` (Linux), and
+    /// `autostart_remove`. Empty when `error` says
     /// why nothing ran.
     #[serde(default)]
     pub results: Vec<OpResult>,
@@ -697,7 +701,8 @@ pub struct UninstallReport {
     /// `uninstall_timed_out`, `uninstall_interrupted`,
     /// `uninstall_helper_missing`, `uninstall_helper_unsafe`,
     /// `uninstall_prompt_failed`, `uninstall_helper_failed`, or
-    /// `uninstall_helper_rejected`. Nothing after the helper ran then, and the
+    /// `uninstall_helper_rejected`; on Linux also `uninstall_pkexec_missing`.
+    /// Nothing after the helper ran then, and the
     /// daemon keeps running. `None` if the helper answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,

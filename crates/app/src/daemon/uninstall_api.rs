@@ -43,9 +43,16 @@
 //! that did not remove everything keeps its service running, so the marker
 //! comes back. There is no trust for the user to take away.
 //!
+//! On Linux (ADR 0014) the helper's `uninstall_all` runs behind the one
+//! pkexec prompt: the sysctl of ports 80 and 443, the `marsa0` link, the
+//! hosts lines, and the CA in the system store. Then, once the helper ran,
+//! the marker of the hosts way goes if `hosts_remove` succeeded, the daemon
+//! deletes this data folder's roots from the user's NSS databases
+//! (`nss_remove`, [`nss::remove`]), and the login file goes, where Linux
+//! has one. Then the stop, as on macOS.
+//!
 //! One request at a time, shared with setup ([`Setup`]): 409
-//! `uninstall_running` or `setup_running`. Linux gets 501
-//! `uninstall_not_supported` for now.
+//! `uninstall_running` or `setup_running`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -65,7 +72,8 @@ use super::api::HttpError;
 use super::autostart_api::Autostart;
 use super::hosts_sync;
 use super::setup_api::{
-    CHECK_LIMIT, Flow, PIPE_GRACE, PROMPT_LIMIT, Running, Setup, is_macos, is_windows, user_trust,
+    CHECK_LIMIT, Flow, PIPE_GRACE, PROMPT_LIMIT, Running, Setup, is_linux, is_macos, is_windows,
+    linux_dns, nss, user_trust,
 };
 use super::state::Daemon;
 
@@ -75,7 +83,8 @@ const AUTOSTART_REMOVE: &str = "autostart_remove";
 /// The longest an uninstall takes, when every program runs to its limit:
 /// `osascript`, then `security remove-trusted-cert` and `delete-certificate`
 /// at [`PROMPT_LIMIT`] each (both may show a dialog), `find-certificate` at
-/// [`CHECK_LIMIT`], and [`PIPE_GRACE`] after each of these four. A client
+/// [`CHECK_LIMIT`], and [`PIPE_GRACE`] after each of these four. Linux, with
+/// one `pkexec` prompt and the NSS step, stays under it. A client
 /// has to wait longer: `marsa_core::client::UNINSTALL_ALL_TIMEOUT` does, and a
 /// test holds the two together.
 pub const SLOWEST_UNINSTALL_ALL: Duration = Duration::from_secs(
@@ -95,9 +104,9 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
 async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallReport>, HttpError> {
     let platform = setup
         .platform()
-        .filter(|platform| is_macos(*platform) || is_windows(*platform))
+        .filter(|platform| is_macos(*platform) || is_linux(*platform) || is_windows(*platform))
         .ok_or_else(|| {
-            let message = "the uninstall runs on macOS and Windows only for now";
+            let message = "the uninstall runs on macOS, Linux, and Windows only";
             HttpError::new(
                 StatusCode::NOT_IMPLEMENTED,
                 "uninstall_not_supported",
@@ -176,10 +185,56 @@ pub fn run(
             return report;
         }
     }
-    report.results.push(untrust_for_user(setup, data_dir, stop));
-    report.results.push(remove_login_file(autostart));
+    if is_linux(platform) {
+        after_the_helper_on_linux(&mut report, setup, data_dir, autostart, stop);
+    } else {
+        report.results.push(untrust_for_user(setup, data_dir, stop));
+        report.results.push(remove_login_file(autostart));
+    }
     report.stopping = true;
     report
+}
+
+/// Linux, once the helper ran (see the module doc).
+fn after_the_helper_on_linux(
+    report: &mut UninstallReport,
+    setup: &Setup,
+    data_dir: &Path,
+    autostart: &Autostart,
+    stop: &CancellationToken,
+) {
+    let hosts_gone = report.results.iter().any(|result| {
+        result.op == linux_dns::HOSTS_REMOVE
+            && matches!(result.status, OpStatus::Done | OpStatus::Unchanged)
+    });
+    // The block is gone, so no sites pass may write it back. A failed
+    // removal keeps the marker, and with it `marsa doctor`'s hosts check.
+    if hosts_gone {
+        remove_marker(&linux_dns::marker(data_dir));
+    }
+    let files = user_trust::TrustFiles::in_dir(data_dir);
+    report.results.push(match setup.home() {
+        Some(home) => nss::remove(setup.runner(), home, &files, stop),
+        None => {
+            tracing::warn!("the home folder is not known, so the NSS databases cannot be found");
+            let message = "the home folder of the current user is not known";
+            user_trust::failed(nss::NSS_REMOVE, nss::NSS_REMOVE_FAILED, message)
+        }
+    });
+    if let Some(result) = remove_login_file_if_any(autostart) {
+        report.results.push(result);
+    }
+}
+
+/// Deletes a marker file; one that is not there is fine.
+fn remove_marker(marker: &Path) {
+    match std::fs::remove_file(marker) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            tracing::warn!(path = %marker.display(), error = %err, "cannot delete the marker");
+        }
+    }
 }
 
 /// The uninstall on Windows (see the module doc).
@@ -198,14 +253,7 @@ fn run_windows(
     // helper stops the service before it removes anything, so no pass
     // writes the block back meanwhile.
     if result.is_ok() {
-        let marker = data_dir.join(hosts_sync::MARKER);
-        match std::fs::remove_file(&marker) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => {
-                tracing::warn!(path = %marker.display(), error = %err, "cannot delete the marker");
-            }
-        }
+        remove_marker(&data_dir.join(hosts_sync::MARKER));
     }
     match result {
         Ok(result) => report.results.push(result),
@@ -293,7 +341,7 @@ mod tests {
     use tower::ServiceExt as _;
 
     use crate::daemon::auth::{AuthConfig, require_auth};
-    use crate::daemon::setup_api::{self, RunOutput, Runner};
+    use crate::daemon::setup_api::{self, RunOutput, Runner, linux_dns, nss};
 
     /// The daemon port in the `Host` header. No socket is bound for it.
     const PORT: u16 = 51237;
@@ -794,9 +842,24 @@ mod tests {
 
     #[tokio::test]
     async fn a_request_without_the_token_with_an_origin_or_another_host_runs_nothing() {
-        let dir = Dir::new();
-        let fake = Fake::all_done();
-        let app = App::new(&dir, dir.setup(&fake));
+        // macOS, then Linux: on both, the auth layer refuses before any
+        // prompt (`osascript` or `pkexec`).
+        for linux in [false, true] {
+            refusals_run_nothing(linux).await;
+        }
+    }
+
+    async fn refusals_run_nothing(linux: bool) {
+        let (dir, fake) = if linux {
+            (linux_dir(), linux_fake(|| ok(&answer(&LINUX_REMOVALS))))
+        } else {
+            (Dir::new(), Fake::all_done())
+        };
+        let app = if linux {
+            linux_app(&dir, &fake)
+        } else {
+            App::new(&dir, dir.setup(&fake))
+        };
         let host = daemon_authority(PORT);
         let other_host = daemon_authority(PORT + 1);
         let wrong = Token::generate().unwrap().bearer_header();
@@ -843,8 +906,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn linux_gets_uninstall_not_supported() {
-        for platform in [Some(Platform::LinuxX64), Some(Platform::Any), None] {
+    async fn a_system_without_a_build_gets_uninstall_not_supported() {
+        for platform in [Some(Platform::Any), None] {
             let dir = Dir::new();
             let fake = Fake::no_prompt();
             let setup = dir.setup_with(&fake, platform, Some(dir.helper()));
@@ -856,6 +919,187 @@ mod tests {
             assert_eq!(app.refused("/v1/uninstall").await, refused, "{platform:?}");
             assert!(dir.untouched() && !app.stopping());
         }
+    }
+
+    /// The removals of `uninstall_all` on Linux (`ops/mod.rs` of the helper).
+    const LINUX_REMOVALS: [&str; 4] = [
+        "ports_remove",
+        "resolved_remove",
+        "hosts_remove",
+        "trust_remove",
+    ];
+    /// The NSS nickname of the test CA: the first 16 digits of [`HASH`].
+    const NICKNAME: &str = "Marsa Local CA 29e433200254dfce";
+
+    /// Linux: `pkexec` answers `pkexec()`, and `certutil` lists the test
+    /// CA's row in each database and deletes it.
+    fn linux_fake(pkexec: impl Fn() -> io::Result<RunOutput> + Send + Sync + 'static) -> Arc<Fake> {
+        Fake::new(move |program, args| match program {
+            setup_api::pkexec::PKEXEC => pkexec(),
+            nss::CERTUTIL if args[2] == "-L" => ok(&format!("{NICKNAME}     C,,\n")),
+            nss::CERTUTIL => ok(""),
+            other => panic!("unexpected program {other}"),
+        })
+    }
+
+    /// A Linux data folder: the hosts marker, the NSS record of the test
+    /// CA, and Chrome's database in the home folder.
+    fn linux_dir() -> Dir {
+        let dir = Dir::new();
+        fs::write(linux_dns::marker(&dir.data()), "").unwrap();
+        let files = user_trust::TrustFiles::in_dir(&dir.data());
+        fs::write(
+            nss::record_path(&files),
+            format!("{}\n", HASH.to_lowercase()),
+        )
+        .unwrap();
+        let chrome = dir.home().join(".pki").join("nssdb");
+        fs::create_dir_all(&chrome).unwrap();
+        fs::write(chrome.join("cert9.db"), "").unwrap();
+        dir
+    }
+
+    fn linux_app(dir: &Dir, fake: &Arc<Fake>) -> App {
+        App::new(
+            dir,
+            dir.setup_with(fake, Some(Platform::LinuxX64), Some(dir.helper())),
+        )
+    }
+
+    #[tokio::test]
+    async fn linux_runs_the_helper_through_pkexec_then_takes_its_roots_out_of_nss() {
+        let dir = linux_dir();
+        let fake = linux_fake(|| ok(&answer(&LINUX_REMOVALS)));
+        let app = linux_app(&dir, &fake);
+
+        let report = app.uninstall().await;
+        let mut want: Vec<_> = LINUX_REMOVALS
+            .iter()
+            .map(|op| result(op, OpStatus::Done))
+            .collect();
+        want.push(result("nss_remove", OpStatus::Done));
+        want.push(result("autostart_remove", OpStatus::Done));
+        assert_eq!(report.results, want);
+        assert!(report.stopping && app.stopping());
+        assert!(!linux_dns::marker(&dir.data()).exists());
+        let files = user_trust::TrustFiles::in_dir(&dir.data());
+        assert!(!nss::record_path(&files).exists());
+
+        let calls = fake.calls();
+        let (program, args, limit) = &calls[0];
+        assert_eq!(*program, setup_api::pkexec::PKEXEC);
+        let helper = dir.helper();
+        assert_eq!(
+            args[..3],
+            [
+                "--disable-internal-agent",
+                helper.to_str().unwrap(),
+                "apply"
+            ]
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&args[3]).unwrap(),
+            json!({ "version": 1, "ops": [{ "op": "uninstall_all" }] })
+        );
+        assert_eq!(*limit, Duration::from_secs(300));
+        // Chrome's database: its rows, then the one root of this folder.
+        let chrome = format!("sql:{}", dir.home().join(".pki").join("nssdb").display());
+        let tails: Vec<_> = calls[1..].iter().map(|(_, args, _)| args.clone()).collect();
+        assert_eq!(
+            tails,
+            [
+                vec!["-d", &chrome, "-L"],
+                vec!["-d", &chrome, "-D", "-n", NICKNAME, "-f", "/dev/null"],
+            ]
+        );
+        // The data folder is the CLI's question.
+        assert!(dir.ca_root().is_file());
+    }
+
+    /// No `/usr/bin/pkexec`: nothing runs or changes, and the code says so.
+    #[tokio::test]
+    async fn no_pkexec_on_linux_changes_nothing() {
+        let dir = linux_dir();
+        let fake = linux_fake(|| Err(io::Error::from(io::ErrorKind::NotFound)));
+        let app = linux_app(&dir, &fake);
+        let report = app.uninstall().await;
+        assert_eq!(
+            report.error.map(|error| error.code).as_deref(),
+            Some("uninstall_pkexec_missing")
+        );
+        assert!(report.results.is_empty() && !app.stopping());
+        assert!(
+            fake.programs()
+                .iter()
+                .all(|program| *program == setup_api::pkexec::PKEXEC)
+        );
+        assert!(dir.untouched() && linux_dns::marker(&dir.data()).exists());
+    }
+
+    /// A dismissed password dialog: nothing else runs or changes.
+    #[tokio::test]
+    async fn a_dismissed_password_dialog_on_linux_changes_nothing() {
+        let dir = linux_dir();
+        let fake = linux_fake(|| {
+            Ok(RunOutput {
+                code: Some(126),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        });
+        let app = linux_app(&dir, &fake);
+        let report = app.uninstall().await;
+        assert_eq!(
+            report.error.map(|error| error.code).as_deref(),
+            Some("uninstall_cancelled")
+        );
+        assert!(report.results.is_empty() && !app.stopping());
+        assert_eq!(fake.programs(), [setup_api::pkexec::PKEXEC]);
+        assert!(dir.untouched() && linux_dns::marker(&dir.data()).exists());
+        let files = user_trust::TrustFiles::in_dir(&dir.data());
+        assert!(nss::record_path(&files).is_file());
+    }
+
+    /// A failed `hosts_remove` keeps the marker; a root `certutil` could
+    /// not delete stays in the record.
+    #[tokio::test]
+    async fn what_was_not_removed_on_linux_stays_recorded() {
+        let dir = linux_dir();
+        let failed = json!({ "version": 1, "results": [
+            { "op": "ports_remove", "status": "done" },
+            { "op": "resolved_remove", "status": "unchanged" },
+            { "op": "hosts_remove", "status": "failed", "code": "hosts_write", "message": "x" },
+            { "op": "trust_remove", "status": "done" },
+        ] })
+        .to_string();
+        let fake = Fake::new(move |program, args| match program {
+            setup_api::pkexec::PKEXEC => Ok(RunOutput {
+                code: Some(1),
+                stdout: failed.clone().into_bytes(),
+                stderr: Vec::new(),
+            }),
+            nss::CERTUTIL if args[2] == "-L" => ok(&format!("{NICKNAME}     C,,\n")),
+            nss::CERTUTIL => Ok(RunOutput {
+                code: Some(255),
+                stdout: Vec::new(),
+                stderr: b"SEC_ERROR_TOKEN_NOT_LOGGED_IN".to_vec(),
+            }),
+            other => panic!("unexpected program {other}"),
+        });
+        let app = linux_app(&dir, &fake);
+        let report = app.uninstall().await;
+        assert!(linux_dns::marker(&dir.data()).exists());
+        let nss = report
+            .results
+            .iter()
+            .find(|r| r.op == "nss_remove")
+            .unwrap();
+        assert_eq!(nss.code.as_deref(), Some("nss_remove_failed"));
+        let files = user_trust::TrustFiles::in_dir(&dir.data());
+        assert_eq!(
+            fs::read_to_string(nss::record_path(&files)).unwrap(),
+            format!("{}\n", HASH.to_lowercase())
+        );
     }
 
     /// A Windows helper service whose `uninstall` answers `answer`. Nothing
@@ -1139,6 +1383,13 @@ mod tests {
             UNINSTALL_ALL_TIMEOUT >= windows + margin,
             "the client waits {UNINSTALL_ALL_TIMEOUT:?}, and a Windows uninstall may take \
              {windows:?}"
+        );
+        // Linux: the pkexec prompt, then the NSS step, which keeps its own
+        // budget, pipe grace included.
+        let linux = PROMPT_LIMIT + PIPE_GRACE + nss::NSS_BUDGET;
+        assert!(
+            SLOWEST_UNINSTALL_ALL >= linux,
+            "a Linux uninstall may take {linux:?}"
         );
 
         // The sum holds every program an uninstall runs: a full run runs all

@@ -12,22 +12,26 @@
 //! - Chrome: `~/.pki/nssdb`. Made (mode 0700) when it is not there, so that
 //!   a Chrome started later finds the trust; `certutil -A` makes the database
 //!   files in it, with no password.
+//! - Chromium, the snap of Ubuntu: `~/snap/chromium/current/.pki/nssdb`,
+//!   made the same way when `~/snap/chromium` is there. `current` is the
+//!   link snap keeps to the folder of the installed revision: it is followed
+//!   only when it names a folder right next to it.
 //! - Firefox: each profile folder with a `cert9.db` under
 //!   `~/.mozilla/firefox/`, `~/.config/mozilla/firefox/` (Firefox 147 and
 //!   later), and `~/snap/firefox/common/.mozilla/firefox/` (the snap of
 //!   Ubuntu), at most [`MAX_PROFILES`]. A profile is never made.
 //!
-//! Every folder on the way from the home folder, and the database
+//! Every other folder on the way from the home folder, and the database
 //! files (`cert9.db`, `key4.db`, `pkcs11.txt`), must be real (not a link)
 //! and belong to this user; otherwise that database is left alone and
 //! reported as `nss_db_refused`. So a link never takes the certificate to
-//! another place. Snap Chromium and Flatpak browsers keep their own
-//! databases and are not covered.
+//! another place. Flatpak browsers keep their own databases and are not
+//! covered (ADR 0014).
 //!
 //! **Each data folder touches only its own certificates** (`record`): a
 //! nickname carries the certificate's fingerprint, and only the
-//! fingerprints this data folder recorded are ever deleted. Nothing
-//! removes them yet: `POST /v1/uninstall` does not run on Linux.
+//! fingerprints this data folder recorded are ever deleted: by setup, an
+//! older root of its own; by the uninstall ([`remove`]), all of them.
 //!
 //! For each database, with separate arguments and no shell, after `certutil
 //! -d sql:<dir> -L` gives the nickname and trust of each row:
@@ -87,6 +91,9 @@ pub use certutil::CERTUTIL;
 use certutil::{CA_NAME, Calls, Row, add_args, delete_args, rename_args, trust_args};
 pub use databases::MAX_PROFILES;
 use databases::{Database, databases, make_dir};
+// Tests elsewhere write and read the record where the code does.
+#[cfg(test)]
+pub(crate) use record::record_path;
 use record::{Fingerprint, fingerprint_digits, read_record, write_record};
 
 /// The op name of the step in a report.
@@ -101,6 +108,11 @@ pub const NSS_DB_REFUSED: &str = "nss_db_refused";
 /// The longest the whole step takes, the pipe grace after each `certutil`
 /// included. Part of `SLOWEST_SETUP` on Linux.
 pub const NSS_BUDGET: Duration = Duration::from_secs(40);
+/// The op name of the removal in an uninstall report.
+pub const NSS_REMOVE: &str = "nss_remove";
+/// A recorded root is still in a database, or `certutil` is not there to
+/// take it out. The record keeps it, so the next uninstall tries again.
+pub const NSS_REMOVE_FAILED: &str = "nss_remove_failed";
 /// The checked certificate for `certutil -i`, in the trust folder.
 const PEM_FILE: &str = "nss.pem";
 
@@ -235,6 +247,102 @@ pub fn install(
     Outcome::Ran(user_trust::result(NSS_INSTALL, status))
 }
 
+/// `nss_remove`, for the uninstall: deletes each root in this data folder's
+/// record from every database that has its row. The record goes only when
+/// every database was read and every deletion worked; otherwise it stays
+/// whole, for the next uninstall: a database left alone (a link, another
+/// user's) or left out (past [`MAX_PROFILES`]) may still hold a root.
+/// `unchanged` with no record, or when no database had them; nothing is
+/// made. Without `certutil` while roots are recorded: `nss_remove_failed`,
+/// since they may still be trusted.
+pub fn remove(
+    runner: &dyn Runner,
+    home: &Path,
+    files: &TrustFiles,
+    stop: &CancellationToken,
+) -> OpResult {
+    let deadline = Instant::now() + NSS_BUDGET;
+    let failed = |message: String| user_trust::failed(NSS_REMOVE, NSS_REMOVE_FAILED, message);
+    if !home.is_absolute() || !files.dir().is_absolute() {
+        return failed("the home folder or the trust folder is not an absolute path".into());
+    }
+    let recorded = match read_record(files) {
+        Ok(recorded) => recorded,
+        Err(problem) => return failed(problem),
+    };
+    if recorded.is_empty() {
+        return user_trust::result(NSS_REMOVE, OpStatus::Unchanged);
+    }
+    let found = databases(home);
+    for why in &found.refused {
+        tracing::warn!(why = %why, "an NSS database is left alone; the record stays");
+    }
+    let calls = Calls {
+        runner,
+        stop,
+        deadline,
+    };
+    let mut failures = Vec::new();
+    let mut deleted = 0;
+    for database in found.databases.iter().filter(|database| !database.new) {
+        let dir = &database.dir;
+        let rows = match calls.rows(dir) {
+            Ok(rows) => rows,
+            Err(failure) => {
+                tracing::warn!(dir = %dir.display(), why = %failure.text(), "cannot list an NSS database");
+                failures.push(format!("{}: {}", dir.display(), failure.text()));
+                // Without `certutil`, no other database can be read either.
+                if matches!(failure, Failure::ToolMissing) {
+                    break;
+                }
+                continue;
+            }
+        };
+        for fingerprint in &recorded {
+            let nickname = fingerprint.nickname();
+            if !rows.iter().any(|row| row.nickname == nickname) {
+                continue;
+            }
+            match calls.expect_success(&delete_args(dir, &nickname), "-D") {
+                Ok(()) => {
+                    tracing::info!(dir = %dir.display(), %nickname, "Marsa's CA root deleted from an NSS database");
+                    deleted += 1;
+                }
+                Err(failure) => {
+                    tracing::warn!(dir = %dir.display(), %nickname, why = %failure.text(), "cannot delete Marsa's CA root from an NSS database");
+                    failures.push(format!("{}: {}", dir.display(), failure.text()));
+                }
+            }
+        }
+    }
+    let all_read = failures.is_empty() && found.refused.is_empty() && found.complete;
+    if all_read && let Err(problem) = write_record(files, &BTreeSet::new()) {
+        tracing::warn!(problem = %problem, "cannot delete the record of NSS fingerprints");
+    }
+    if !all_read && failures.is_empty() {
+        tracing::warn!(
+            left_alone = found.refused.len(),
+            complete = found.complete,
+            "some NSS databases were not read, so the record of Marsa's roots stays; check them \
+             by hand"
+        );
+    }
+    if !failures.is_empty() {
+        let message = format!(
+            "Marsa's CA root is still in {} NSS database(s): {}",
+            failures.len(),
+            failures.join("; ")
+        );
+        return failed(message);
+    }
+    let status = if deleted > 0 {
+        OpStatus::Done
+    } else {
+        OpStatus::Unchanged
+    };
+    user_trust::result(NSS_REMOVE, status)
+}
+
 /// This data folder's certificate.
 struct Ours {
     /// Its base64, as `certutil::bodies` gives it.
@@ -250,6 +358,16 @@ enum Failure {
     /// `certutil` is not there: no database can take it.
     ToolMissing,
     Other(String),
+}
+
+impl Failure {
+    /// For a message.
+    fn text(&self) -> String {
+        match self {
+            Failure::ToolMissing => format!("{CERTUTIL} is not installed"),
+            Failure::Other(why) => why.clone(),
+        }
+    }
 }
 
 /// `true` once `database` changed, `false` if it had the certificate,
@@ -387,7 +505,6 @@ mod tests {
     use super::certutil::tests::listing;
     use super::certutil::{CALL_LIMIT, bodies};
     use super::databases::{CERT_DB, CHROME, under};
-    use super::record::record_path;
 
     use super::super::RunOutput;
     use super::super::tests::{Call, Fake, TEST_CA, TEST_CA_2, exit, ok};
@@ -941,6 +1058,108 @@ mod tests {
             .collect();
         assert_eq!(touched, [sql(&real), sql(&real)]);
         assert!(!elsewhere.join("nssdb").exists());
+    }
+
+    fn remove_all(home: &Home, fake: &Arc<Fake>) -> OpResult {
+        let stop = CancellationToken::new();
+        remove(fake.as_ref(), &home.home(), &home.files(), &stop)
+    }
+
+    /// No record: nothing of this data folder's to take out, and nothing
+    /// runs, not even `certutil -L`.
+    #[test]
+    fn removal_without_a_record_runs_nothing() {
+        let home = Home::new();
+        let fake = fresh();
+        let unchanged = remove_all(&home, &fake);
+        assert_eq!(
+            (unchanged.op.as_str(), unchanged.status),
+            (NSS_REMOVE, OpStatus::Unchanged)
+        );
+        assert!(fake.calls().is_empty());
+    }
+
+    /// Each recorded root goes from each database that has its row; the
+    /// root of another data folder stays, and a database that is not there
+    /// is not made.
+    #[test]
+    fn removal_deletes_only_recorded_roots_and_then_the_record() {
+        let home = Home::new();
+        write_record_of(&home, &format!("{HASH_OURS}\n{SECOND_SHA256}\n"));
+        let firefox = home.profile(&[".mozilla", "firefox"], "a.default");
+        let rows = listing(&[(OURS, "C,,"), (ELSEWHERE, "C,,")]);
+        let fake = Fake::answering(move |_, args| match args[2].as_str() {
+            "-L" => ok(&rows),
+            _ => ok(""),
+        });
+        let done = remove_all(&home, &fake);
+        assert_eq!(
+            (done.op.as_str(), done.status),
+            (NSS_REMOVE, OpStatus::Done)
+        );
+        // Chrome's folder is not there: only the profile is read.
+        assert!(!home.chrome().exists());
+        assert_eq!(
+            fake.calls()
+                .iter()
+                .map(|call| call.args.clone())
+                .collect::<Vec<_>>(),
+            [
+                vec!["-d".to_owned(), sql(&firefox), "-L".to_owned()],
+                ["-d", &sql(&firefox), "-D", "-n", OURS, "-f", "/dev/null"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            ]
+        );
+        assert!(!record_path(&home.files()).exists());
+    }
+
+    /// Without `certutil`, or with a `-D` that fails, the roots stay
+    /// recorded, so the next uninstall tries again.
+    #[test]
+    fn removal_that_fails_keeps_the_record() {
+        let home = Home::new();
+        write_record_of(&home, &format!("{HASH_OURS}\n"));
+        home.profile(&[".mozilla", "firefox"], "a.default");
+        let missing = Fake::answering(|_, _| Err(io::Error::from(io::ErrorKind::NotFound)));
+        let failed = remove_all(&home, &missing);
+        assert_eq!(failed.code.as_deref(), Some(NSS_REMOVE_FAILED));
+        assert!(
+            failed
+                .message
+                .unwrap()
+                .contains("certutil is not installed")
+        );
+        assert_eq!(missing.calls().len(), 1);
+
+        let rows = listing(&[(OURS, "C,,")]);
+        let refused = Fake::answering(move |_, args| match args[2].as_str() {
+            "-L" => ok(&rows),
+            _ => exit(255, "SEC_ERROR_TOKEN_NOT_LOGGED_IN"),
+        });
+        let failed = remove_all(&home, &refused);
+        assert_eq!(failed.code.as_deref(), Some(NSS_REMOVE_FAILED));
+        assert_eq!(
+            fs::read_to_string(record_path(&home.files())).unwrap(),
+            format!("{HASH_OURS}\n")
+        );
+    }
+
+    /// A database left alone may still hold a root: the record stays,
+    /// though every database that was read lost its row.
+    #[test]
+    fn removal_with_a_database_left_alone_keeps_the_record() {
+        let home = Home::new();
+        write_record_of(&home, &format!("{HASH_OURS}\n"));
+        home.profile(&[".mozilla", "firefox"], "a.default");
+        fs::write(home.home().join(".pki"), "").unwrap();
+        let rows = listing(&[(OURS, "C,,")]);
+        let fake = Fake::answering(move |_, args| match args[2].as_str() {
+            "-L" => ok(&rows),
+            _ => ok(""),
+        });
+        assert_eq!(remove_all(&home, &fake).status, OpStatus::Done);
+        assert_eq!(record(&home), format!("{HASH_OURS}\n"));
     }
 
     #[test]
