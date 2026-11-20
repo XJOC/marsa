@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use axum::Router;
+use marsa_core::databases::ServerKind;
 use marsa_core::installer::uninstall::clean_retired;
 use marsa_core::platform::daemon_file::{self, DaemonFile, Token};
 use marsa_core::platform::low_ports;
@@ -147,8 +148,12 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     // sync task subscribed, so Caddy's `Running` asks it for a pass. A
     // failure is only a warning and Caddy's status: the daemon runs on.
     let launch = caddy::start_at_launch(&daemon);
-    // PostgreSQL when `[postgres] enabled = true` (ADR 0023), the same way.
-    let postgres = databases::start_at_launch(&daemon);
+    // Each database server whose table says `enabled = true` (ADR 0023),
+    // the same way.
+    let servers: Vec<_> = ServerKind::ALL
+        .into_iter()
+        .map(|kind| databases::start_at_launch(&daemon, kind))
+        .collect();
     // After the first build, so it starts from its parked folders. It stops
     // when `daemon.shutdown` is cancelled.
     let watcher = watch::start(&daemon);
@@ -166,7 +171,9 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     }
     sync.stop().await;
     launch.wait(LAUNCH_STOP_LIMIT).await;
-    postgres.wait(LAUNCH_STOP_LIMIT).await;
+    for server in servers {
+        server.wait(LAUNCH_STOP_LIMIT).await;
+    }
     // A pool, a Caddy, or a PostgreSQL that one of these tasks put in `procs`
     // after the shutdown's own sweep: `add_proc` told it to stop, and this
     // waits for it. The map is empty otherwise, and this returns at once.

@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use marsa_core::config::{self, ConfigError, ConfigPaths, SitesConfig};
+use marsa_core::databases::ServerKind;
 use marsa_core::types::{Event, SiteList};
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
@@ -17,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use super::api::HttpError;
 use super::autostart_api::Autostart;
 use super::caddy::CaddyManager;
-use super::databases::PostgresManager;
+use super::databases::ServerManager;
 use super::dns::DnsService;
 use super::php::Pools;
 use super::runtimes_api::Installs;
@@ -67,9 +68,9 @@ pub struct Daemon {
     pub shutdown: CancellationToken,
     /// Caddy: how it runs, its status, and its recent lines.
     pub caddy: CaddyManager,
-    /// PostgreSQL: its status, its recent lines, and its actions (task
-    /// M6-03).
-    pub postgres: PostgresManager,
+    /// PostgreSQL: its status, its recent lines, and its actions. Use
+    /// [`Daemon::server`] for any database server.
+    pub postgres: ServerManager,
     /// The DNS server for `.test` (task M4-18i). Not listed here;
     /// `server::run` sets [`DnsService::for_daemon`].
     pub dns: DnsService,
@@ -99,7 +100,7 @@ impl Daemon {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
             caddy: CaddyManager::new(&data_dir),
-            postgres: PostgresManager::default(),
+            postgres: ServerManager::new(ServerKind::Postgres),
             dns: DnsService::new(None),
             pools: Pools::default(),
             pass_requests: PassRequests::default(),
@@ -113,6 +114,13 @@ impl Daemon {
             sites_lock: Mutex::default(),
             global_lock: Mutex::default(),
             parked: watch::Sender::new(Vec::new()),
+        }
+    }
+
+    /// The manager of the database server `kind`.
+    pub fn server(&self, kind: ServerKind) -> &ServerManager {
+        match kind {
+            ServerKind::Postgres => &self.postgres,
         }
     }
 

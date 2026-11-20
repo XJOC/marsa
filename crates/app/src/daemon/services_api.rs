@@ -19,11 +19,11 @@
 //! (task M5-16): `marsa services stop caddy` starts the daemon itself, and
 //! its stop then runs after that start instead of failing.
 //!
-//! PostgreSQL (`postgres`) has the same actions. A start or restart that
-//! ran turns it on in `global.toml` (`[postgres] enabled = true`), so it
-//! starts with the daemon; a stop turns it off (ADR 0023, section 5); a
-//! refusal or a dropped start changes nothing (`PostgresManager::
-//! run_and_save`). A stop drops a start that runs, and those before it in
+//! The database servers (`postgres`) have the same actions. A start or
+//! restart that ran turns the server on in `global.toml` (`[postgres]
+//! enabled = true`), so it starts with the daemon; a stop turns it off (ADR
+//! 0023, section 5); a refusal or a dropped start changes nothing
+//! (`ServerManager::run_and_save`). A stop drops a start that runs, and those before it in
 //! line, instead of waiting for them.
 //!
 //! Every error, the extractors' own included, is an `ErrorBody`.
@@ -39,6 +39,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use marsa_core::databases::ServerKind;
 use marsa_core::types::{Event, LogLine, ServiceAction, ServiceStatus, UnknownAction};
 use serde::Deserialize;
 use tokio::sync::broadcast;
@@ -48,7 +49,7 @@ use tokio_stream::{Stream, StreamExt as _};
 
 use super::api::HttpError;
 use super::caddy::{ActionError, CADDY_ID, CaddyManager};
-use super::databases::{self, POSTGRES_ID, PostgresManager};
+use super::databases::{self, ServerManager};
 use super::dns::{DNS_ID, DnsService};
 use super::state::Daemon;
 use super::supervisor::{ServiceRuntime, lock};
@@ -66,13 +67,14 @@ pub const MANAGED_BY_SITES: &str = "service_managed_by_sites";
 /// (`marsa_core::client`).
 pub const ACTION_WAIT: Duration = Duration::from_secs(20);
 
-/// How long an action on PostgreSQL waits for another one to end before
+/// How long an action on a database server waits for another one to end
+/// before
 /// `409 service_busy`. A stop never waits for a start (it drops it), so
-/// the longest it waits for is another stop: SIGINT and SIGQUIT, 10 s
-/// each, then a kill, or a start's own stop after its ready timeout. A
-/// start that waits for a first start (up to about 3 minutes of `initdb`
-/// and single-user mode) gets `service_busy`.
-pub const POSTGRES_ACTION_WAIT: Duration = Duration::from_secs(30);
+/// the longest it waits for is another stop: for PostgreSQL SIGINT and
+/// SIGQUIT, 10 s each, then a kill, or a start's own stop after its ready
+/// timeout. A start that waits for a first start (up to about 3 minutes of
+/// `initdb` and single-user mode) gets `service_busy`.
+pub const SERVER_ACTION_WAIT: Duration = Duration::from_secs(30);
 
 /// A `:` comment this often on a quiet stream, as on `/v1/events`: the
 /// client gives up after 45 s without a byte.
@@ -89,11 +91,14 @@ pub fn routes() -> Router<Arc<Daemon>> {
 async fn services(State(daemon): State<Arc<Daemon>>) -> Json<Vec<ServiceStatus>> {
     let mut services = vec![daemon.caddy.status()];
     services.extend(daemon.dns.status());
-    // It reads `runtimes/postgres/`.
-    let worker = Arc::clone(&daemon);
-    let listed = tokio::task::spawn_blocking(move || worker.postgres.listed(&worker.data_dir));
-    if listed.await.unwrap_or(true) {
-        services.push(daemon.postgres.status());
+    for kind in ServerKind::ALL {
+        // It reads `runtimes/<runtime>/`.
+        let worker = Arc::clone(&daemon);
+        let listed =
+            tokio::task::spawn_blocking(move || worker.server(kind).listed(&worker.data_dir));
+        if listed.await.unwrap_or(true) {
+            services.push(daemon.server(kind).status());
+        }
     }
     services.extend(daemon.pools.statuses());
     Json(services)
@@ -108,8 +113,10 @@ async fn service_action(
     let action: ServiceAction = action.parse().map_err(|err: UnknownAction| {
         HttpError::new(StatusCode::BAD_REQUEST, err.code(), err.to_string())
     })?;
-    if let Service::Postgres(_) = service {
-        return postgres_action(&daemon, action).await.map(Json);
+    if let Service::Server(server) = service {
+        return server_action(&daemon, server.kind(), action)
+            .await
+            .map(Json);
     }
     if let Service::Dns(dns) = service {
         tracing::info!(service = %id, %action, "service action");
@@ -138,30 +145,32 @@ async fn service_action(
     }
 }
 
-/// `action` on PostgreSQL, then `[postgres] enabled` as it leaves it
-/// (`PostgresManager::run_and_save`). In a task of its own, so a client
-/// that hangs up cannot stop it between the action and the write.
-async fn postgres_action(
+/// `action` on the database server `kind`, then `enabled` in its table as
+/// it leaves it (`ServerManager::run_and_save`). In a task of its own, so a
+/// client that hangs up cannot stop it between the action and the write.
+async fn server_action(
     daemon: &Arc<Daemon>,
+    kind: ServerKind,
     action: ServiceAction,
 ) -> Result<ServiceStatus, HttpError> {
-    tracing::info!(service = POSTGRES_ID, %action, "service action");
+    let service = kind.id();
+    tracing::info!(service, %action, "service action");
     let worker = Arc::clone(daemon);
     let task = tokio::spawn(async move {
-        let postgres = &worker.postgres;
-        postgres
-            .run_and_save(&worker, action, POSTGRES_ACTION_WAIT)
+        let server = worker.server(kind);
+        server
+            .run_and_save(&worker, action, SERVER_ACTION_WAIT)
             .await
     });
     match task.await {
         Ok(Ok(status)) => Ok(status),
         Ok(Err(err)) => {
-            tracing::warn!(service = POSTGRES_ID, %action, code = err.code(), error = %err, "service action failed");
-            Err(postgres_error(&err))
+            tracing::warn!(service, %action, code = err.code(), error = %err, "service action failed");
+            Err(server_error(&err))
         }
         Err(err) => {
-            tracing::error!(error = %err, "the postgres action task failed");
-            let message = "the postgres action task failed";
+            tracing::error!(service, error = %err, "the action task failed");
+            let message = "the action task of the database server failed";
             Err(HttpError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
@@ -171,10 +180,10 @@ async fn postgres_action(
     }
 }
 
-fn postgres_error(err: &databases::ActionError) -> HttpError {
+fn server_error(err: &databases::ActionError) -> HttpError {
     use databases::ActionError as E;
     let status = match err {
-        E::Unsupported | E::NotInstalled(_) | E::InUse(_) | E::Busy | E::OrphanStuck(_) => {
+        E::Unsupported(_) | E::NotInstalled(..) | E::InUse(_) | E::Busy | E::OrphanStuck(..) => {
             StatusCode::CONFLICT
         }
         E::Config(_) | E::Init(_) | E::ProgramNotAbsolute(_) | E::Internal => {
@@ -269,7 +278,7 @@ enum Service<'a> {
     Caddy(&'a CaddyManager),
     /// Known whether or not a version is installed: an action then says
     /// `postgres_not_installed`.
-    Postgres(&'a PostgresManager),
+    Server(&'a ServerManager),
     /// The DNS server for `.test`, inside the daemon.
     Dns(&'a DnsService),
     /// A php-fpm pool: the routes only read it.
@@ -281,7 +290,7 @@ impl Service<'_> {
     fn recent_logs(&self) -> Vec<LogLine> {
         match self {
             Service::Caddy(caddy) => caddy.recent_logs(),
-            Service::Postgres(postgres) => postgres.recent_logs(),
+            Service::Server(server) => server.recent_logs(),
             Service::Dns(dns) => dns.recent_logs(),
             Service::Pool(runtime) => lock(runtime).logs.recent(),
         }
@@ -293,8 +302,8 @@ fn service<'a>(daemon: &'a Daemon, id: &str) -> Result<Service<'a>, HttpError> {
     if id == CADDY_ID {
         return Ok(Service::Caddy(&daemon.caddy));
     }
-    if id == POSTGRES_ID {
-        return Ok(Service::Postgres(&daemon.postgres));
+    if let Some(kind) = ServerKind::from_id(id) {
+        return Ok(Service::Server(daemon.server(kind)));
     }
     if id == DNS_ID && daemon.dns.listed() {
         return Ok(Service::Dns(&daemon.dns));
