@@ -315,7 +315,8 @@ pub(super) fn make_dir(dir: &Path) -> Result<(), String> {
         .map_err(|err| format!("cannot make {}: {}", dir.display(), err.kind()))
 }
 
-#[cfg(test)]
+// The only test makes symbolic links, which need Unix here.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -331,7 +332,6 @@ mod tests {
     }
 
     /// The Chromium snap: `current` names the revision folder next to it.
-    #[cfg(unix)]
     #[test]
     fn the_chromium_snap_follows_current_only_to_its_revision() {
         use std::os::unix::fs::symlink;

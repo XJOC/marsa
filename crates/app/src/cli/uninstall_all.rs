@@ -1057,6 +1057,8 @@ mod tests {
         // The CLI runs where marsad runs: Windows keeps PATH in a setting.
         let startup = if cfg!(windows) {
             "environment variables"
+        } else if cfg!(target_os = "linux") {
+            "~/.bashrc"
         } else {
             "~/.zprofile"
         };
