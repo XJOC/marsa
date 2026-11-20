@@ -217,7 +217,7 @@ rm -f "$DATA/run/.s.PGSQL.$PORT.lock"
 
 step "a second start makes no new cluster, and it starts with marsad when on"
 run marsa services start postgres
-[ "$(grep -c 'making the PostgreSQL data folder' "$DATA/logs/marsad.log")" = 1 ] || fail "initdb ran twice"
+[ "$(grep -c 'making the data folder.*server="postgres"' "$DATA/logs/marsad.log")" = 1 ] || fail "initdb ran twice"
 run marsa daemon stop
 run marsa daemon start
 started=false
