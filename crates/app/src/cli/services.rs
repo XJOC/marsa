@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use marsa_core::client::DaemonClient;
 use marsa_core::config::{self, ConfigPaths};
-use marsa_core::databases::POSTGRES_PORT;
+use marsa_core::databases::ServerKind;
 use marsa_core::types::{ServiceAction, ServiceState, ServiceStatus};
 
 use super::daemon::{ClientFailure, connect, failure};
@@ -101,20 +101,30 @@ async fn act(client: &DaemonClient, command: &ServicesCommand, data_dir: &Path) 
 }
 
 /// The table, then one line per failed service that says why it failed,
-/// and how to connect to PostgreSQL while it runs.
+/// and how to connect to each database server while it runs.
 pub fn render(services: &[ServiceStatus], data_dir: &Path) -> String {
     if services.is_empty() {
         return format!("{}\n", strings::NO_SERVICES);
     }
     let mut text = table(services);
-    let postgres = services
-        .iter()
-        .any(|status| status.id == "postgres" && status.state == ServiceState::Running);
-    if postgres {
-        // The port the daemon gave it: `[postgres] port`, read only.
-        let global = config::load_global(&ConfigPaths::in_dir(data_dir).global);
-        let port = global.map_or(None, |global| global.postgres.port);
-        text.push_str(&strings::postgres_connection(port.unwrap_or(POSTGRES_PORT)));
+    let global = config::load_global(&ConfigPaths::in_dir(data_dir).global).ok();
+    for kind in ServerKind::ALL {
+        let running = services
+            .iter()
+            .any(|status| status.id == kind.id() && status.state == ServiceState::Running);
+        if !running {
+            continue;
+        }
+        // The port the daemon gave it: `[<id>] port`, read only.
+        let port = global
+            .as_ref()
+            .and_then(|global| kind.settings(global).port);
+        let port = port.unwrap_or(kind.default_port());
+        let line = match kind {
+            ServerKind::Postgres => strings::postgres_connection(port),
+            ServerKind::Mysql => strings::mysql_connection(port),
+        };
+        text.push_str(&line);
         text.push('\n');
     }
     for status in services {

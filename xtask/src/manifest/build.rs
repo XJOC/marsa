@@ -48,6 +48,9 @@ pub struct RuntimesJson {
     pub caddy: Vec<ReleaseJson>,
     #[serde(default)]
     pub postgres: Vec<ReleaseJson>,
+    /// Left out while empty, so a manifest without MySQL stays as it was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mysql: Vec<ReleaseJson>,
 }
 
 impl RuntimesJson {
@@ -58,6 +61,7 @@ impl RuntimesJson {
             Runtime::Composer => &self.composer,
             Runtime::Caddy => &self.caddy,
             Runtime::Postgres => &self.postgres,
+            Runtime::Mysql => &self.mysql,
         }
     }
 
@@ -68,6 +72,7 @@ impl RuntimesJson {
             Runtime::Composer => &mut self.composer,
             Runtime::Caddy => &mut self.caddy,
             Runtime::Postgres => &mut self.postgres,
+            Runtime::Mysql => &mut self.mysql,
         }
     }
 }
@@ -144,6 +149,7 @@ impl Proof {
                 Proof::SumIfPublished
             }
             Runtime::Postgres => Proof::TheseusSha256,
+            Runtime::Mysql => Proof::OracleSignature,
         }
     }
 

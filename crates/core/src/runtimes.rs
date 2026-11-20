@@ -8,7 +8,8 @@
 //! ├── node/22.11.0/bin/node
 //! ├── composer/2.8.4/composer.phar
 //! ├── caddy/2.11.8/caddy
-//! └── postgres/18.7.0/bin/postgres
+//! ├── postgres/18.7.0/bin/postgres
+//! └── mysql/8.4.13/bin/mysqld
 //! ```
 //!
 //! The list of installed versions is the folder names that are valid
@@ -43,16 +44,20 @@ pub enum Runtime {
     /// PostgreSQL (task M6-01). Installed like the others; it is a service,
     /// not a shim tool.
     Postgres,
+    /// MySQL 8.4 (task M6-05), Oracle's build as it is. A service, like
+    /// PostgreSQL.
+    Mysql,
 }
 
 impl Runtime {
     /// Every runtime, in the order lists show them.
-    pub const ALL: [Runtime; 5] = [
+    pub const ALL: [Runtime; 6] = [
         Runtime::Php,
         Runtime::Node,
         Runtime::Composer,
         Runtime::Caddy,
         Runtime::Postgres,
+        Runtime::Mysql,
     ];
 
     /// The folder name under `runtimes/`.
@@ -63,6 +68,7 @@ impl Runtime {
             Runtime::Composer => "composer",
             Runtime::Caddy => "caddy",
             Runtime::Postgres => "postgres",
+            Runtime::Mysql => "mysql",
         }
     }
 }
@@ -274,7 +280,10 @@ mod tests {
     #[test]
     fn all_lists_each_runtime_once_in_order() {
         let names: Vec<&str> = Runtime::ALL.iter().map(|r| r.dir_name()).collect();
-        assert_eq!(names, ["php", "node", "composer", "caddy", "postgres"]);
+        assert_eq!(
+            names,
+            ["php", "node", "composer", "caddy", "postgres", "mysql"]
+        );
     }
 
     #[test]

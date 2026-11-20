@@ -158,22 +158,40 @@ impl Artifact {
 }
 
 /// The check run after install: `program` (a key in the platform's programs)
-/// with `args`; its output must start with `expect_prefix`.
+/// with `args`; its output must show the version, by one of
+/// `expect_prefix` and `expect_contains`, never both.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Check {
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// Template with `{version}`, `{major}`, and `{minor}`.
-    pub expect_prefix: String,
+    /// The output starts with this. Template with `{version}`, `{major}`,
+    /// and `{minor}`.
+    #[serde(default)]
+    pub expect_prefix: Option<String>,
+    /// The output has this after its start, for a program that prints its
+    /// own path first, which the template cannot know: `mysqld --version`
+    /// prints `<path>  Ver 8.4.13 for macos15 on arm64 (...)`. The same
+    /// template as `expect_prefix`.
+    #[serde(default)]
+    pub expect_contains: Option<String>,
 }
 
 impl Check {
     /// [`Check::expect_prefix`] with `{version}`, `{major}`, and `{minor}`
     /// filled in.
-    pub fn expected_prefix(&self, version: &Version) -> String {
-        fill(&self.expect_prefix, version)
+    pub fn expected_prefix(&self, version: &Version) -> Option<String> {
+        self.expect_prefix
+            .as_deref()
+            .map(|template| fill(template, version))
+    }
+
+    /// [`Check::expect_contains`], filled in the same way.
+    pub fn expected_contains(&self, version: &Version) -> Option<String> {
+        self.expect_contains
+            .as_deref()
+            .map(|template| fill(template, version))
     }
 }
 
@@ -319,6 +337,7 @@ pub fn builtin(runtime: Runtime) -> Result<&'static Recipe, RecipeError> {
     static COMPOSER: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
     static CADDY: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
     static POSTGRES: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
+    static MYSQL: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
 
     let (cell, file, text) = match runtime {
         Runtime::Php => (&PHP, "php.toml", include_str!("../../../recipes/php.toml")),
@@ -341,6 +360,11 @@ pub fn builtin(runtime: Runtime) -> Result<&'static Recipe, RecipeError> {
             &POSTGRES,
             "postgres.toml",
             include_str!("../../../recipes/postgres.toml"),
+        ),
+        Runtime::Mysql => (
+            &MYSQL,
+            "mysql.toml",
+            include_str!("../../../recipes/mysql.toml"),
         ),
     };
     cell.get_or_init(|| {
@@ -372,7 +396,14 @@ pub fn parse(source: &str, text: &str) -> Result<Recipe, RecipeError> {
     let raw: RawRecipe = toml::from_str(text).map_err(|e| invalid(source, e.to_string()))?;
 
     if let Some(check) = &raw.check {
-        check_template(source, &check.expect_prefix)?;
+        let expect = match (&check.expect_prefix, &check.expect_contains) {
+            (Some(template), None) | (None, Some(template)) => template,
+            _ => {
+                let why = "check needs one of expect_prefix and expect_contains";
+                return Err(invalid(source, why.to_string()));
+            }
+        };
+        check_template(source, expect)?;
     }
     if raw.platform.is_empty() {
         return Err(invalid(source, "no platform".to_string()));
@@ -790,8 +821,8 @@ into = "bin"
         // PostgreSQL prints 17.12 for the release 17.12.0.
         let check = recipe.check().expect("a check");
         assert_eq!(
-            check.expected_prefix(&version),
-            "postgres (PostgreSQL) 17.12"
+            check.expected_prefix(&version).as_deref(),
+            Some("postgres (PostgreSQL) 17.12")
         );
     }
 
@@ -860,7 +891,7 @@ into = "bin"
         assert_eq!(check.program, "caddy");
         assert_eq!(check.args, ["version"]);
         // `caddy version` prints `v2.11.8 h1:<hash>=`.
-        let prefix = check.expected_prefix(&version);
+        let prefix = check.expected_prefix(&version).unwrap();
         assert_eq!(prefix, "v2.11.8 ");
         assert!("v2.11.8 h1:E2pv1BoZ5bJaWqFkU6QvLa21iGAX8bDzlEQG4dDQ/Vc=".starts_with(&prefix));
         assert!(!"v2.11.80 h1:x=".starts_with(&prefix));
@@ -921,7 +952,8 @@ into = "bin"
         let node = builtin(Runtime::Node).expect("built-in recipe is valid");
         let check = node.check().expect("node has a check");
         assert_eq!(check.program, "node");
-        assert_eq!(check.expected_prefix(&v("22.11.0")), "v22.11.0");
+        assert_eq!(check.expected_prefix(&v("22.11.0")).unwrap(), "v22.11.0");
+        assert_eq!(check.expected_contains(&v("22.11.0")), None);
     }
 
     #[test]
@@ -1089,5 +1121,25 @@ into = "bin"
     fn check_program_must_exist_on_every_platform() {
         let text = good_with("php = \"bin/php\"", "php-cli = \"bin/php\"");
         assert_eq!(error_code(&text), "recipe_invalid");
+    }
+
+    #[test]
+    fn a_check_expects_a_prefix_or_a_text_inside_never_both() {
+        let prefix = "expect_prefix = \"PHP {version} \"";
+        let contains = "expect_contains = \" Ver {version} \"";
+        let text = recipe_with(GOOD_PLATFORM).replace(prefix, contains);
+        let recipe = parse("test.toml", &text).unwrap();
+        let check = recipe.check().unwrap();
+        assert_eq!(check.expected_prefix(&v("8.4.13")), None);
+        assert_eq!(
+            check.expected_contains(&v("8.4.13")).unwrap(),
+            " Ver 8.4.13 "
+        );
+        let both = recipe_with(GOOD_PLATFORM).replace(prefix, &format!("{prefix}\n{contains}"));
+        assert_eq!(error_code(&both), "recipe_invalid");
+        let none = recipe_with(GOOD_PLATFORM).replace(prefix, "");
+        assert_eq!(error_code(&none), "recipe_invalid");
+        let bad = recipe_with(GOOD_PLATFORM).replace(prefix, "expect_contains = \"{v}\"");
+        assert_eq!(error_code(&bad), "recipe_bad_template");
     }
 }

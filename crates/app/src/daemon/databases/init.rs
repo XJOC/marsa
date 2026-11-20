@@ -86,6 +86,7 @@ impl InitError {
     pub fn code(&self) -> &'static str {
         match self.kind {
             ServerKind::Postgres => "postgres_init_failed",
+            ServerKind::Mysql => "mysql_init_failed",
         }
     }
 

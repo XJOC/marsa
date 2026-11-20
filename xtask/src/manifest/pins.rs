@@ -14,7 +14,7 @@ use serde::Deserialize;
 use super::upstream::is_segment;
 
 /// The runtimes in manifest order.
-pub const RUNTIMES: [Runtime; 5] = Runtime::ALL;
+pub const RUNTIMES: [Runtime; 6] = Runtime::ALL;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,11 +26,14 @@ struct RawPins {
     composer: RawList,
     caddy: RawList,
     postgres: RawList,
+    /// Optional until the first MySQL is published.
+    #[serde(default)]
+    mysql: RawList,
     #[serde(default, rename = "override")]
     overrides: Vec<RawOverride>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawList {
     versions: Vec<String>,
@@ -83,6 +86,7 @@ impl Pins {
                 Runtime::Composer => &mut raw.composer,
                 Runtime::Caddy => &mut raw.caddy,
                 Runtime::Postgres => &mut raw.postgres,
+                Runtime::Mysql => &mut raw.mysql,
             };
             let list = std::mem::take(&mut list.versions);
             versions.insert(runtime.dir_name(), versions_of(runtime, list)?);

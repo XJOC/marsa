@@ -69,8 +69,9 @@ const SERVICE_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 /// up to about 23 s), and a first start reads the port (lsof, up to 8 s),
 /// runs `initdb` (up to 120 s) and single-user mode (up to 60 s), waits up
 /// to 15 s for the server, and stops one that never answered (23 s): about
-/// 279 s in all.
-const POSTGRES_ACTION_TIMEOUT: Duration = Duration::from_secs(300);
+/// 279 s in all. MySQL (`mysql`) takes less: its first init (up to 120 s)
+/// is one step, and its stop is SIGTERM, then a kill after 30 s.
+const SERVER_ACTION_TIMEOUT: Duration = Duration::from_secs(300);
 /// For `DELETE /v1/runtimes/{tool}/{version}`: a Node.js folder holds
 /// thousands of files, and a virus scanner may slow their delete.
 const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -695,7 +696,7 @@ pub async fn ensure_running_with(
 /// How long the client waits for an action on the service `id`.
 fn action_timeout(id: &str) -> Duration {
     match id {
-        "postgres" => POSTGRES_ACTION_TIMEOUT,
+        "postgres" | "mysql" => SERVER_ACTION_TIMEOUT,
         _ => SERVICE_ACTION_TIMEOUT,
     }
 }
@@ -1107,6 +1108,9 @@ mod tests {
         // ready 15, and the stop of a server that never answered, 23.
         let worst = Duration::from_secs(30 + 23 + 8 + 120 + 60 + 15 + 23);
         assert!(action_timeout("postgres") > worst);
+        // Waiting 30, stopping 35, lsof 8, init 120, ready 15, stop 35.
+        let worst = Duration::from_secs(30 + 35 + 8 + 120 + 15 + 35);
+        assert!(action_timeout("mysql") > worst);
     }
 
     #[test]

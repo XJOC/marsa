@@ -77,6 +77,7 @@ pub struct Manifest {
     composer: Vec<Release>,
     caddy: Vec<Release>,
     postgres: Vec<Release>,
+    mysql: Vec<Release>,
 }
 
 /// One version of a runtime and its files for each platform.
@@ -157,6 +158,7 @@ impl Manifest {
             Runtime::Composer => &self.composer,
             Runtime::Caddy => &self.caddy,
             Runtime::Postgres => &self.postgres,
+            Runtime::Mysql => &self.mysql,
         }
     }
 
@@ -339,6 +341,7 @@ fn parse_verified(json: &[u8], last_seen: Option<u64>) -> Result<Manifest, Manif
         composer: releases("composer", raw.runtimes.composer)?,
         caddy: releases("caddy", raw.runtimes.caddy)?,
         postgres: releases("postgres", raw.runtimes.postgres)?,
+        mysql: releases("mysql", raw.runtimes.mysql)?,
     })
 }
 
@@ -377,6 +380,9 @@ struct RawRuntimes {
     /// Added in M6-01 within schema 1, like Caddy.
     #[serde(default)]
     postgres: Vec<RawRelease>,
+    /// Added in M6-05 within schema 1, like Caddy.
+    #[serde(default)]
+    mysql: Vec<RawRelease>,
 }
 
 #[derive(Deserialize)]

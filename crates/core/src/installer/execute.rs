@@ -530,7 +530,7 @@ async fn run_check(
         return Err(InstallError::MissingVcRuntime);
     }
     let stdout = String::from_utf8_lossy(&stdout);
-    if status.success() && version_matches(&stdout, &check.expected_prefix(version)) {
+    if status.success() && shows_version(&stdout, check, version) {
         return Ok(());
     }
     let text = format!("{stdout}{}", String::from_utf8_lossy(&stderr));
@@ -538,6 +538,20 @@ async fn run_check(
         text.chars().take(CHECK_OUTPUT_SHOWN).collect(),
         status.code(),
     ))
+}
+
+/// Whether `stdout` shows `version` as `check` expects it: at its start
+/// ([`version_matches`]), or after its start, at any place where the
+/// expected text is followed by no digit.
+fn shows_version(stdout: &str, check: &Check, version: &Version) -> bool {
+    if let Some(prefix) = check.expected_prefix(version) {
+        return version_matches(stdout, &prefix);
+    }
+    check.expected_contains(version).is_some_and(|text| {
+        stdout
+            .match_indices(text.as_str())
+            .any(|(at, _)| version_matches(&stdout[at..], &text))
+    })
 }
 
 /// Whether `stdout` starts with `prefix` and the version ends there: the
@@ -708,6 +722,30 @@ mod tests {
         assert!(version_matches("PHP 8.4.1 (cli)", "PHP 8.4.1 "));
         assert!(!version_matches("PHP 8.4.12 (cli)", "PHP 8.4.1"));
         assert!(version_matches("v22.11.0\r\n", "v22.11.0"));
+    }
+
+    /// `mysqld --version` prints its own path first.
+    #[test]
+    fn a_version_inside_the_output_ends_where_the_text_does() {
+        let text = "name = \"mysql\"\n[check]\nprogram = \"mysqld\"\nargs = [\"--version\"]\n\
+                    expect_contains = \" Ver {version}\"\n[platform.darwin-arm64]\n\
+                    programs = { mysqld = \"bin/mysqld\" }\n[[platform.darwin-arm64.artifact]]\n\
+                    name = \"a\"\nurl = \"https://example.test/a.tar.gz\"\nformat = \"tar.gz\"\n";
+        let recipe = recipes::parse("mysql.toml", text).unwrap();
+        let check = recipe.check().unwrap();
+        let version = Version::new(8, 4, 1);
+        let shows = |stdout: &str| shows_version(stdout, check, &version);
+        let path = "/Users/a/Library/Application Support/dev.marsa.Marsa/runtimes/mysql/8.4.1";
+        assert!(shows(&format!(
+            "{path}/bin/mysqld  Ver 8.4.1 for macos15 on arm64 (MySQL Community Server - GPL)\n"
+        )));
+        assert!(!shows(&format!(
+            "{path}/bin/mysqld  Ver 8.4.13 for macos15 on arm64\n"
+        )));
+        // Any place counts: a path with ` Ver 8.4.13` in it is passed over.
+        assert!(shows("/x Ver 8.4.13/mysqld  Ver 8.4.1 for linux\n"));
+        assert!(!shows("mysqld  Ver 8.4.10 for linux\n"));
+        assert!(!shows(""));
     }
     use crate::installer::Trust;
     use crate::installer::fetch::testing::{MemoryFetch, Reply};

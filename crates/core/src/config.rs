@@ -33,6 +33,8 @@ pub struct GlobalConfig {
     pub node: ToolDefaults,
     #[serde(skip_serializing_if = "is_default")]
     pub postgres: ServerSettings,
+    #[serde(skip_serializing_if = "is_default")]
+    pub mysql: ServerSettings,
 }
 
 /// The `[php]` or `[node]` table in `global.toml`. One table per tool leaves
@@ -51,18 +53,19 @@ pub struct ToolDefaults {
 }
 
 /// A database server's table in `global.toml`: `[postgres]` (task M6-03),
-/// later `[mysql]` and `[valkey]` (ADR 0023).
+/// `[mysql]` (task M6-05), later `[valkey]` (ADR 0023).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerSettings {
-    /// The major line that runs, as the user wrote it: `"18"`.
+    /// The line that runs, as the user wrote it: `"18"` for PostgreSQL,
+    /// `"8.4"` for MySQL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     /// The server starts with `marsad`. `marsa services stop` turns it off.
     #[serde(skip_serializing_if = "is_false")]
     pub enabled: bool,
-    /// `None` is the server's own port, for PostgreSQL
-    /// [`crate::databases::POSTGRES_PORT`]. From 1 to 65535, like the server
+    /// `None` is the server's own port: [`crate::databases::POSTGRES_PORT`],
+    /// [`crate::databases::mysql::MYSQL_PORT`]. From 1 to 65535, like the server
     /// accepts. Never `0`: a bind test on port 0 always succeeds, so the
     /// check before a start would miss a busy port.
     #[serde(
@@ -474,6 +477,7 @@ mod tests {
                 xdebug: false,
             },
             postgres: ServerSettings::default(),
+            mysql: ServerSettings::default(),
         }
     }
 
@@ -550,6 +554,27 @@ mod tests {
         assert_invalid(&load_global(&path).unwrap_err(), &path, "xdebug");
         let path = file(&dir, "text.toml", "[php]\nxdebug = \"on\"\n");
         assert_invalid(&load_global(&path).unwrap_err(), &path, "line 2");
+    }
+
+    #[test]
+    fn mysql_table_comes_after_postgres_and_round_trips() {
+        let text = format!(
+            "{HEADER}\n[postgres]\nenabled = true\n\n[mysql]\ndefault = \"8.4\"\nport = 3307\n"
+        );
+        let config = parse_global(&text, Path::new("global.toml")).unwrap();
+        let want = ServerSettings {
+            default: Some("8.4".to_owned()),
+            enabled: false,
+            port: Some(3307),
+        };
+        assert_eq!(config.mysql, want);
+        assert!(config.postgres.enabled);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("global.toml");
+        save_global(&path, &config).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        let err = parse_global("[mysql]\nport = 0\n", Path::new("global.toml")).unwrap_err();
+        assert_eq!(err.code(), "config_invalid");
     }
 
     #[test]

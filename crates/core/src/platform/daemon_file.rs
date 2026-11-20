@@ -294,7 +294,7 @@ pub fn remove_daemon_file(run_dir: &Path) -> Result<(), DaemonFileError> {
 /// Creates `dir` (and its parents) for the owner only. An existing `dir` that
 /// others may open is closed to them.
 #[cfg(unix)]
-fn create_private_dir(dir: &Path) -> io::Result<()> {
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
     fs::DirBuilder::new()
@@ -309,7 +309,7 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
 
 /// Windows: the folder inherits the user-only ACL of `%LOCALAPPDATA%`.
 #[cfg(not(unix))]
-fn create_private_dir(dir: &Path) -> io::Result<()> {
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 

@@ -1,0 +1,22 @@
+---
+source: crates/core/src/databases/mysql.rs
+expression: text
+---
+# Written by Marsa before each start of MySQL (ADR 0023). A change here is
+# lost at the next start.
+[mysqld]
+basedir="/m/runtimes/mysql/8.4.13"
+datadir="/m/databases/mysql/8.4"
+port=3306
+bind-address=127.0.0.1
+mysqlx=OFF
+socket="/m/run/mysql.sock"
+pid-file="/m/run/mysqld.pid"
+secure_file_priv="/m/databases/mysql/files"
+skip-name-resolve=ON
+host_cache_size=0
+partial_revokes=ON
+performance_schema=OFF
+innodb_buffer_pool_size=64M
+disable_log_bin
+lc_messages=en_US

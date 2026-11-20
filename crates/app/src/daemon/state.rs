@@ -71,6 +71,8 @@ pub struct Daemon {
     /// PostgreSQL: its status, its recent lines, and its actions. Use
     /// [`Daemon::server`] for any database server.
     pub postgres: ServerManager,
+    /// MySQL, the same way.
+    pub mysql: ServerManager,
     /// The DNS server for `.test` (task M4-18i). Not listed here;
     /// `server::run` sets [`DnsService::for_daemon`].
     pub dns: DnsService,
@@ -101,6 +103,7 @@ impl Daemon {
         Self {
             caddy: CaddyManager::new(&data_dir),
             postgres: ServerManager::new(ServerKind::Postgres),
+            mysql: ServerManager::new(ServerKind::Mysql),
             dns: DnsService::new(None),
             pools: Pools::default(),
             pass_requests: PassRequests::default(),
@@ -121,6 +124,7 @@ impl Daemon {
     pub fn server(&self, kind: ServerKind) -> &ServerManager {
         match kind {
             ServerKind::Postgres => &self.postgres,
+            ServerKind::Mysql => &self.mysql,
         }
     }
 

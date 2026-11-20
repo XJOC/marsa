@@ -39,6 +39,7 @@ use super::facts::Probes;
 pub(super) fn stuck_code(kind: ServerKind) -> &'static str {
     match kind {
         ServerKind::Postgres => "postgres_orphan_stuck",
+        ServerKind::Mysql => "mysql_orphan_stuck",
     }
 }
 

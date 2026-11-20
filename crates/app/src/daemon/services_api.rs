@@ -186,7 +186,7 @@ fn server_error(err: &databases::ActionError) -> HttpError {
         E::Unsupported(_) | E::NotInstalled(..) | E::InUse(_) | E::Busy | E::OrphanStuck(..) => {
             StatusCode::CONFLICT
         }
-        E::Config(_) | E::Init(_) | E::ProgramNotAbsolute(_) | E::Internal => {
+        E::Config(_) | E::Init(_) | E::ProgramNotAbsolute(_) | E::Internal | E::Path(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
     };
