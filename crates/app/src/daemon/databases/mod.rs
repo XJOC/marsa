@@ -1,92 +1,67 @@
-//! PostgreSQL as a service of `marsad` (ADR 0023, task M6-03), on macOS and
-//! Linux. `marsa_core::databases` decides; this module runs the programs.
+//! The database servers of `marsad` (ADR 0023), on macOS and Linux:
+//! PostgreSQL. `marsa_core::databases` decides; this module runs the
+//! programs.
 //!
-//! The first start of a major line makes its cluster in
-//! `databases/postgres/<major>/` ([`init::ensure_cluster`]): `initdb`, then Marsa's
-//! `pg_hba.conf`, then the role `root` in single-user mode. All of it happens
-//! in a temp folder next to the target, which is renamed into place at the
-//! end, so a cluster that is half made is never taken for a ready one.
+//! The first start of a line makes its data folder ([`init::ensure_data`]):
+//! for PostgreSQL its cluster in `databases/postgres/<major>/`
+//! ([`postgres::ensure_cluster`]). All of it happens in a temp folder next to
+//! the target, which is renamed into place at the end, so a data folder that
+//! is half made is never taken for a ready one.
 //!
-//! Before each start, [`facts::start_facts`] reads the port and `postmaster.pid`
-//! from the system for `decide_start`. It only reads: nothing here signals a
-//! process or deletes `postmaster.pid`.
+//! Before each start, [`facts::start_facts`] reads the port and the
+//! server's own pid file (`postmaster.pid`) from the system for
+//! `decide_start`. It only reads: nothing here signals a process or deletes
+//! that file.
 //!
-//! [`PostgresManager`] starts and stops the server under the supervisor, one
+//! [`ServerManager`] starts and stops one server under the supervisor, one
 //! action at a time. A failed start leaves the status `failed`, with the
 //! reason in the recent lines. A run that ends by itself before it takes
 //! connections is read once: if PostgreSQL refused because a live process
 //! holds one of its lock files, the start fails as the check before it
 //! would have. Nothing reads the log after the server is ready.
 //!
-//! [`start_at_launch`] starts it with `marsad` when `[postgres] enabled =
-//! true` (ADR 0023: a server that is on starts with the daemon). A failure
-//! leaves the daemon running and the status `failed`.
+//! [`start_at_launch`] starts a server with `marsad` when its table in
+//! `global.toml` says `enabled = true` (ADR 0023: a server that is on
+//! starts with the daemon). A failure leaves the daemon running and the
+//! status `failed`.
 
 mod facts;
 mod init;
 mod manager;
 mod orphan;
+mod postgres;
 mod settings;
 
-use std::path::PathBuf;
-
-use marsa_core::databases::{PostgresDirs, postgres_args, postgres_stop};
-use marsa_core::services::{RestartPolicy, ServiceSpec};
-
 pub use init::InitError;
-pub use manager::{ActionError, PostgresManager};
+pub use manager::{ActionError, ServerManager};
 pub use settings::{start_after_install, start_at_launch};
-
-/// The service id: the key in `Daemon::procs`, and the log file
-/// `logs/postgres.log`.
-pub const POSTGRES_ID: &str = "postgres";
-
-/// How the supervisor runs PostgreSQL: `postgres` with [`postgres_args`],
-/// so on `127.0.0.1:<port>` only and with its socket in `run/`, stopped with
-/// SIGINT, then SIGQUIT, never SIGTERM ([`postgres_stop`]). PostgreSQL logs
-/// to stderr, which the supervisor keeps in `logs/postgres.log`, as for
-/// every service.
-///
-/// Never restarted after it exits, unlike Caddy. A refusal at its start
-/// (another server on the folder, the port, or the socket) would only come
-/// again, the status must keep the run's own exit, and after a crash of the
-/// postmaster its backends may still hold the shared memory, so a restart
-/// fails too. PostgreSQL restarts its own crashed backends itself.
-fn postgres_spec(program: PathBuf, dirs: &PostgresDirs, port: u16) -> ServiceSpec {
-    ServiceSpec {
-        id: POSTGRES_ID.to_owned(),
-        program,
-        args: postgres_args(dirs, port),
-        env: std::collections::BTreeMap::new(),
-        cwd: None,
-        restart: RestartPolicy::Never,
-        stop: postgres_stop(),
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io;
     use std::net::{Ipv4Addr, TcpListener};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use marsa_core::config::{self, ConfigPaths, ServerSettings};
     use marsa_core::databases::{
-        PidFileCheck, PortCheck, ServiceBusy, StartDecision, decide_start,
+        PidFileCheck, PortCheck, PostgresDirs, ServerKind, ServiceBusy, StartDecision,
+        decide_start, postgres_args, postgres_stop, postmaster_pid,
     };
     use marsa_core::orphan::Liveness;
     use marsa_core::platform::process::{self, Signal};
     use marsa_core::ports::PortLookup;
     use marsa_core::recipes::Platform;
     use marsa_core::runtimes::{Runtime, RuntimesDir};
+    use marsa_core::services::RestartPolicy;
     use marsa_core::types::ServiceState;
     use semver::Version;
 
     use super::facts::{Probes, start_facts};
-    use super::init::{installed_servers, programs};
+    use super::init::installed_servers;
+    use super::postgres::{programs, spec as postgres_spec};
     use super::settings::{after_install, first_install};
     use crate::daemon::caddy::Launched;
     use crate::daemon::caddy::orphan::BoxFuture;
@@ -96,8 +71,7 @@ mod tests {
     // fake programs through shell scripts, so on Unix only.
     #[cfg(unix)]
     use {
-        super::init::{Programs, ensure_cluster},
-        super::manager::SSL_REQUEST,
+        super::postgres::{Programs, SSL_REQUEST, ensure_cluster},
         crate::daemon::supervisor::lock,
         marsa_core::databases::{PG_HBA_CONF, ROOT_ROLE_SQL, initdb_args, single_user_args},
         marsa_core::services::StopMethod,
@@ -199,9 +173,15 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let facts = async |port, owner| {
             let probes = probes(Liveness::Gone, owner);
-            start_facts(&probes, port, data.path(), &[])
-                .await
-                .port_check
+            start_facts(
+                &probes,
+                port,
+                &data.path().join("postmaster.pid"),
+                postmaster_pid,
+                &[],
+            )
+            .await
+            .port_check
         };
         let port = free_port();
         assert_eq!(facts(port, None).await, PortCheck::Free);
@@ -226,7 +206,14 @@ mod tests {
         let mut failed = probes(Liveness::Gone, None);
         failed.lookup = PortLookup::Failed;
         let port = free_port();
-        let facts = start_facts(&failed, port, data.path(), &[]).await;
+        let facts = start_facts(
+            &failed,
+            port,
+            &data.path().join("postmaster.pid"),
+            postmaster_pid,
+            &[],
+        )
+        .await;
         assert_eq!(facts.port_check, PortCheck::Unknown);
         let refused = StartDecision::Refuse(ServiceBusy::PortUnknown { port });
         assert_eq!(decide_start(&facts), refused);
@@ -238,7 +225,14 @@ mod tests {
         let servers = [data.path().join("runtimes/postgres/18.7.0/bin/postgres")];
         let check = async |now: Liveness| {
             let probes = probes(now, None);
-            let facts = start_facts(&probes, free_port(), data.path(), &servers).await;
+            let facts = start_facts(
+                &probes,
+                free_port(),
+                &data.path().join("postmaster.pid"),
+                postmaster_pid,
+                &servers,
+            )
+            .await;
             (facts.pid_file, probes.asked.into_inner().unwrap())
         };
         // No file: nobody is asked about any pid.
@@ -276,7 +270,14 @@ mod tests {
         std::fs::write(&real, POSTMASTER_PID).unwrap();
         std::os::unix::fs::symlink(&real, data.path().join("postmaster.pid")).unwrap();
         let probes = probes(Liveness::Gone, None);
-        let facts = start_facts(&probes, free_port(), data.path(), &[]).await;
+        let facts = start_facts(
+            &probes,
+            free_port(),
+            &data.path().join("postmaster.pid"),
+            postmaster_pid,
+            &[],
+        )
+        .await;
         assert_eq!(facts.pid_file, PidFileCheck::NoPid);
         assert!(probes.asked.into_inner().unwrap().is_empty());
     }
@@ -290,7 +291,16 @@ mod tests {
         std::fs::write(data.path().join("postmaster.pid"), POSTMASTER_PID).unwrap();
         let decide = async |port, now, owner| {
             let probes = probes(now, owner);
-            decide_start(&start_facts(&probes, port, data.path(), &servers).await)
+            decide_start(
+                &start_facts(
+                    &probes,
+                    port,
+                    &data.path().join("postmaster.pid"),
+                    postmaster_pid,
+                    &servers,
+                )
+                .await,
+            )
         };
         // Our older version still runs on the folder: refused, whatever
         // holds the port.
@@ -331,7 +341,7 @@ mod tests {
             );
             want.push(programs.postgres);
         }
-        let servers = installed_servers(dir.path(), platform);
+        let servers = installed_servers(ServerKind::Postgres, dir.path(), platform);
         for program in &want {
             assert!(servers.contains(program), "{servers:?}");
         }
@@ -349,7 +359,9 @@ mod tests {
         std::fs::create_dir_all(global.parent().unwrap()).unwrap();
         std::fs::write(&global, "[postgres\n").unwrap();
         let daemon = Arc::new(Daemon::new(dir.path().to_path_buf()));
-        let launched = start_at_launch(&daemon).wait(Duration::from_secs(5)).await;
+        let launched = start_at_launch(&daemon, ServerKind::Postgres)
+            .wait(Duration::from_secs(5))
+            .await;
         assert_eq!(launched, Some(Launched::NotInstalled));
         assert_eq!(daemon.postgres.status().state, ServiceState::Stopped);
         assert!(daemon.postgres.recent_logs().is_empty());
@@ -357,7 +369,9 @@ mod tests {
         let version =
             RuntimesDir::in_dir(dir.path()).version_dir(Runtime::Postgres, &Version::new(18, 7, 0));
         std::fs::create_dir_all(version).unwrap();
-        let launched = start_at_launch(&daemon).wait(Duration::from_secs(5)).await;
+        let launched = start_at_launch(&daemon, ServerKind::Postgres)
+            .wait(Duration::from_secs(5))
+            .await;
         assert_eq!(launched, Some(Launched::Failed("config_invalid")));
         let failed = ServiceState::Failed {
             code: "config_invalid".into(),
@@ -371,7 +385,7 @@ mod tests {
         let dirs = PostgresDirs::new(Path::new("/m"), 18);
         let program = PathBuf::from("/m/runtimes/postgres/18.7.0/bin/postgres");
         let spec = postgres_spec(program.clone(), &dirs, 5433);
-        assert_eq!(spec.id, POSTGRES_ID);
+        assert_eq!(spec.id, ServerKind::Postgres.id());
         assert_eq!(spec.program, program);
         assert_eq!(spec.args, postgres_args(&dirs, 5433));
         assert_eq!(spec.stop, postgres_stop());
@@ -630,7 +644,7 @@ mod tests {
             let program = pg.daemon.postgres.running_program(&pg.daemon).unwrap();
             assert!(program.ends_with("18.7.0/bin/postgres"), "{program:?}");
             // A shutdown gives it the time of its whole ladder.
-            let limit = pg.daemon.procs.lock().unwrap()[POSTGRES_ID].stop_limit;
+            let limit = pg.daemon.procs.lock().unwrap()[ServerKind::Postgres.id()].stop_limit;
             assert_eq!(limit, postgres_stop().total_wait() + STOP_MARGIN);
 
             // A start while it runs changes nothing; a restart makes no
@@ -764,7 +778,7 @@ mod tests {
             // Longer than a restart delay would be: none came.
             tokio::time::sleep(Duration::from_millis(1500)).await;
             assert_eq!(pg.count("server"), 1);
-            assert!(!pg.daemon.proc_alive(POSTGRES_ID));
+            assert!(!pg.daemon.proc_alive(ServerKind::Postgres.id()));
             assert_eq!(pg.daemon.postgres.status().state, failed(busy));
         }
 
@@ -846,7 +860,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(700)).await;
             let status = pg.daemon.postgres.status();
             assert_eq!((status.state, status.pid), (ServiceState::Running, pid));
-            assert!(pg.daemon.proc_alive(POSTGRES_ID));
+            assert!(pg.daemon.proc_alive(ServerKind::Postgres.id()));
             // Only about the server itself, for `run/postgres.pid`: the
             // lines named no pid that was looked at.
             let asked = pg.probes.asked.lock().unwrap().clone();
@@ -951,7 +965,7 @@ mod tests {
             assert_eq!(started.state, ServiceState::Stopped);
             assert_eq!(pg.count("server"), 0);
             assert!(!pg.dirs.data.exists());
-            assert!(!pg.daemon.proc_alive(POSTGRES_ID));
+            assert!(!pg.daemon.proc_alive(ServerKind::Postgres.id()));
             assert!(!enabled(&pg), "the dropped start wrote nothing");
             assert!(nothing_left(&pg));
         }
@@ -993,7 +1007,7 @@ mod tests {
             assert_eq!(status.state, ServiceState::Stopped);
             assert!(pg.texts().iter().any(|text| text == "fake got SIGINT"));
             start.await.unwrap().unwrap();
-            assert!(!pg.daemon.proc_alive(POSTGRES_ID));
+            assert!(!pg.daemon.proc_alive(ServerKind::Postgres.id()));
             assert!(!enabled(&pg));
             assert!(nothing_left(&pg));
         }
@@ -1081,7 +1095,7 @@ mod tests {
             let pg = pg("serve", probes(Liveness::Gone, None));
             set_postgres(&pg.daemon.data_dir, None, false, pg.port);
             let global = ConfigPaths::in_dir(&pg.daemon.data_dir).global;
-            start_after_install(&pg.daemon, Version::new(18, 7, 0));
+            start_after_install(&pg.daemon, ServerKind::Postgres, Version::new(18, 7, 0));
             until("running", || {
                 pg.daemon.postgres.status().state == ServiceState::Running
             })
@@ -1097,7 +1111,7 @@ mod tests {
             // Again from no default: a stop waits in line first.
             set_postgres(&pg.daemon.data_dir, None, false, pg.port);
             let held = Arc::clone(&pg.daemon.postgres.busy).lock_owned().await;
-            start_after_install(&pg.daemon, Version::new(18, 7, 0));
+            start_after_install(&pg.daemon, ServerKind::Postgres, Version::new(18, 7, 0));
             tokio::time::sleep(Duration::from_millis(100)).await;
             let stop = spawn_saved(&pg, ServiceAction::Stop);
             until("the stop in line", || {
@@ -1169,7 +1183,11 @@ mod tests {
             };
             let started = started.map_or(real, str::to_owned);
             let record = PidRecord { pid, exe, started };
-            process::write_pid_file(&orphan::pid_path(&pg.daemon.data_dir), &record).unwrap();
+            process::write_pid_file(
+                &orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir),
+                &record,
+            )
+            .unwrap();
         }
 
         async fn listening(port: u16) {
@@ -1196,7 +1214,7 @@ mod tests {
 
         /// What `run/postgres.pid` names now.
         fn recorded(pg: &Pg) -> Option<PidRecord> {
-            process::read_pid_file(&orphan::pid_path(&pg.daemon.data_dir))
+            process::read_pid_file(&orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir))
         }
 
         /// A `marsad` that died left our server running: the next start
@@ -1339,7 +1357,7 @@ mod tests {
                 exe: installed_postgres(&pg),
                 started: "x".into(),
             };
-            let path = orphan::pid_path(&pg.daemon.data_dir);
+            let path = orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir);
             process::write_pid_file(&path, &record).unwrap();
             let status = pg.act(ServiceAction::Start).await.unwrap();
             assert_eq!(status.state, ServiceState::Running);
@@ -1359,7 +1377,7 @@ mod tests {
                     exe: installed_postgres(&pg),
                     started: "x".into(),
                 };
-                let path = orphan::pid_path(&pg.daemon.data_dir);
+                let path = orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir);
                 process::write_pid_file(&path, &record).unwrap();
                 let status = pg.act(ServiceAction::Start).await.unwrap();
                 assert_eq!(status.state, ServiceState::Running);
@@ -1372,7 +1390,9 @@ mod tests {
         #[tokio::test]
         async fn postgres_starts_with_the_daemon_only_when_it_is_on() {
             let pg = pg("serve", probes(Liveness::Gone, None));
-            let launched = start_at_launch(&pg.daemon).wait(WAIT).await;
+            let launched = start_at_launch(&pg.daemon, ServerKind::Postgres)
+                .wait(WAIT)
+                .await;
             let Some(Launched::Ran(status)) = launched else {
                 panic!("{launched:?}");
             };
@@ -1381,11 +1401,15 @@ mod tests {
 
             let data = &pg.daemon.data_dir;
             set_postgres(data, Some("18"), false, pg.port);
-            let launched = start_at_launch(&pg.daemon).wait(WAIT).await;
+            let launched = start_at_launch(&pg.daemon, ServerKind::Postgres)
+                .wait(WAIT)
+                .await;
             assert_eq!(launched, Some(Launched::Off));
             // On, but its line is not installed: the status stays as it was.
             set_postgres(data, Some("17"), true, pg.port);
-            let launched = start_at_launch(&pg.daemon).wait(WAIT).await;
+            let launched = start_at_launch(&pg.daemon, ServerKind::Postgres)
+                .wait(WAIT)
+                .await;
             assert_eq!(launched, Some(Launched::NotInstalled));
             assert_eq!(pg.daemon.postgres.status().state, ServiceState::Stopped);
             assert_eq!(pg.count("server"), 1);
@@ -1393,7 +1417,9 @@ mod tests {
             // A failed start: the status says why, and the daemon runs on.
             set_postgres(data, Some("18"), true, pg.port);
             let _held = TcpListener::bind((Ipv4Addr::LOCALHOST, pg.port)).unwrap();
-            let launched = start_at_launch(&pg.daemon).wait(WAIT).await;
+            let launched = start_at_launch(&pg.daemon, ServerKind::Postgres)
+                .wait(WAIT)
+                .await;
             assert_eq!(launched, Some(Launched::Failed("service_port_busy")));
             let state = pg.daemon.postgres.status().state;
             assert_eq!(state, failed("service_port_busy"));
@@ -1484,7 +1510,7 @@ mod tests {
         for (before, version, installed, after, start) in cases {
             let installed: Vec<Version> = installed.iter().map(|text| v(text)).collect();
             let mut got = before.clone();
-            let started = after_install(&mut got, &v(version), &installed);
+            let started = after_install(ServerKind::Postgres, &mut got, &v(version), &installed);
             assert_eq!((got, started), (after, start), "{before:?} + {version}");
         }
     }
@@ -1495,7 +1521,15 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let path = ConfigPaths::in_dir(data.path()).global;
         let v18 = Version::new(18, 7, 0);
-        assert!(first_install(data.path(), &v18, std::slice::from_ref(&v18)).unwrap());
+        assert!(
+            first_install(
+                ServerKind::Postgres,
+                data.path(),
+                &v18,
+                std::slice::from_ref(&v18)
+            )
+            .unwrap()
+        );
         let settings = config::load_global(&path).unwrap().postgres;
         assert_eq!(
             (settings.default.as_deref(), settings.enabled),
@@ -1504,7 +1538,9 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, "[postgres]\ndefault = \"18\"\n").unwrap();
         let v17 = Version::new(17, 12, 0);
-        assert!(!first_install(data.path(), &v17, &[v17.clone(), v18]).unwrap());
+        assert!(
+            !first_install(ServerKind::Postgres, data.path(), &v17, &[v17.clone(), v18]).unwrap()
+        );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "[postgres]\ndefault = \"18\"\n"
@@ -1514,13 +1550,14 @@ mod tests {
     /// A failed sync after the rename does not say that nothing was made.
     #[test]
     fn an_init_error_says_whether_the_cluster_is_in_place() {
-        let failed = InitError::new("initdb failed".to_owned());
+        let failed = InitError::new(ServerKind::Postgres, "initdb failed".to_owned());
         let text = failed.to_string();
         assert_eq!(
             text,
             "the PostgreSQL data folder was not made: initdb failed"
         );
         let synced = InitError {
+            kind: ServerKind::Postgres,
             reason: "its folder could not be synced to disk: I/O error".to_owned(),
             in_place: true,
         };

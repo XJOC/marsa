@@ -67,6 +67,7 @@ use axum::{Json, Router};
 use marsa_core::config::{
     self, ConfigError, ConfigPaths, GlobalConfig, SiteSettings, SitesConfig, ToolDefaults,
 };
+use marsa_core::databases::ServerKind;
 use marsa_core::installer::extract::ExtractError;
 use marsa_core::installer::fetch::FetchError;
 use marsa_core::installer::uninstall::{self, Retired, UninstallError};
@@ -371,8 +372,8 @@ async fn run(started: Started, runtime: Runtime, body: InstallRequest) {
             if runtime == Runtime::Php {
                 let _ = daemon.rebuild_sites().await;
             }
-            if runtime == Runtime::Postgres {
-                databases::start_after_install(&daemon, done.version.clone());
+            if let Some(kind) = ServerKind::of_runtime(runtime) {
+                databases::start_after_install(&daemon, kind, done.version.clone());
             }
             InstallUpdate::Done(InstallDone {
                 runtime: done.runtime,
@@ -631,16 +632,20 @@ async fn remove_version(
     text: String,
 ) -> Result<Json<Uninstalled>, HttpError> {
     let daemon = Arc::clone(&started.daemon);
-    // A start in PostgreSQL's turn may be about to run a version, and is
+    // A start in a database server's turn may be about to run a version, and is
     // not in `running_program` yet. Held until the folder is moved aside: a
     // tokio lock held across `.await` as a serialization token (manager
     // decision 2026-11-14).
-    let postgres_turn = match runtime {
-        Runtime::Postgres => match daemon.postgres.try_turn() {
+    let server_kind = ServerKind::of_runtime(runtime);
+    let server_turn = match server_kind {
+        Some(kind) => match daemon.server(kind).try_turn() {
             Some(turn) => Some(turn),
             None => {
-                let message = "another action on PostgreSQL runs, and a start may pick this \
-                               version; nothing was uninstalled";
+                let message = format!(
+                    "another action on {} runs, and a start may pick this version; nothing was \
+                     uninstalled",
+                    kind.name()
+                );
                 return Err(HttpError::new(
                     StatusCode::CONFLICT,
                     "service_busy",
@@ -648,10 +653,10 @@ async fn remove_version(
                 ));
             }
         },
-        _ => None,
+        None => None,
     };
     let caddy = daemon.caddy.running_program(&daemon);
-    let server = daemon.postgres.running_program(&daemon);
+    let server = server_kind.and_then(|kind| daemon.server(kind).running_program(&daemon));
     let worker = Arc::clone(&daemon);
     let job = tokio::task::spawn_blocking(move || {
         // `marsa use` waits, so the version cannot become the default
@@ -672,7 +677,7 @@ async fn remove_version(
         )
     })??;
     // Moved aside: a start now finds no such version.
-    drop(postgres_turn);
+    drop(server_turn);
     if let Some(default) = cleared {
         let tool = runtime.dir_name();
         tracing::info!(runtime = tool, %default, "cleared the default of the last version");

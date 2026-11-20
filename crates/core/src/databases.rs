@@ -9,14 +9,126 @@ use std::time::Duration;
 
 use semver::Version;
 
+use crate::config::{GlobalConfig, ServerSettings};
 use crate::orphan::Liveness;
 use crate::php::MAX_SOCKET_PATH;
 use crate::ports::PortLookup;
+use crate::runtimes::Runtime;
 use crate::services::{Signal, StopMethod};
 
 /// PostgreSQL's port when `[postgres] port` is not set in `global.toml`. The
 /// daemon never moves to another port: the project's `.env` names it.
 pub const POSTGRES_PORT: u16 = 5432;
+
+/// A database server that `marsad` runs as a service (ADR 0023). Each has
+/// its own runtime, port, table in `global.toml`, and stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerKind {
+    Postgres,
+}
+
+impl ServerKind {
+    /// Every server, in the order lists show them.
+    pub const ALL: [ServerKind; 1] = [ServerKind::Postgres];
+
+    /// The service id: the name in `marsa services`, the log file
+    /// `logs/<id>.log`, the table in `global.toml`, and `run/<id>.pid`.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+        }
+    }
+
+    /// The server's name in messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Postgres => "PostgreSQL",
+        }
+    }
+
+    /// The server with this id.
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.id() == id)
+    }
+
+    /// The server whose versions `runtime` installs.
+    pub fn of_runtime(runtime: Runtime) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.runtime() == runtime)
+    }
+
+    /// Where its versions are installed.
+    pub fn runtime(self) -> Runtime {
+        match self {
+            Self::Postgres => Runtime::Postgres,
+        }
+    }
+
+    /// The port when its table in `global.toml` sets none. The daemon never
+    /// moves to another port: the project's `.env` names it.
+    pub fn default_port(self) -> u16 {
+        match self {
+            Self::Postgres => POSTGRES_PORT,
+        }
+    }
+
+    /// The name of the server program in the recipe: the program the
+    /// supervisor runs, and the one a pid file must run to be ours.
+    pub fn server_program(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+        }
+    }
+
+    /// How the supervisor stops it, before a final kill.
+    pub fn stop(self) -> StopMethod {
+        match self {
+            Self::Postgres => postgres_stop(),
+        }
+    }
+
+    /// Its table in `global.toml`.
+    pub fn settings(self, global: &GlobalConfig) -> &ServerSettings {
+        match self {
+            Self::Postgres => &global.postgres,
+        }
+    }
+
+    /// Its table in `global.toml`, to change.
+    pub fn settings_mut(self, global: &mut GlobalConfig) -> &mut ServerSettings {
+        match self {
+            Self::Postgres => &mut global.postgres,
+        }
+    }
+
+    /// The line `version` belongs to, as `default` names it: the major for
+    /// PostgreSQL (`"18"`). Each line has its own data folder.
+    pub fn line(self, version: &Version) -> String {
+        match self {
+            Self::Postgres => version.major.to_string(),
+        }
+    }
+
+    /// Whether `version` is in the line `default` names. `None` when
+    /// `default` names no line: for PostgreSQL, not a major number.
+    pub fn in_line(self, default: &str, version: &Version) -> Option<bool> {
+        match self {
+            Self::Postgres => {
+                let major = default.trim().parse::<u64>().ok()?;
+                Some(version.major == major)
+            }
+        }
+    }
+
+    /// The version to run for `default`: the newest of `installed` in that
+    /// line, or the newest of all when it is not set. `None` when no version
+    /// fits, or when `default` names no line ([`Self::in_line`]).
+    pub fn line_version(self, default: Option<&str>, installed: &[Version]) -> Option<Version> {
+        let fits = |version: &&Version| {
+            default.is_none_or(|line| self.in_line(line, version) == Some(true))
+        };
+        installed.iter().filter(fits).max().cloned()
+    }
+}
 
 /// The folders of one PostgreSQL major line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,18 +364,6 @@ pub fn postmaster_pid(text: &str) -> Option<u32> {
     }
     let pid: i32 = digits.parse().ok()?;
     u32::try_from(pid).ok().filter(|&pid| pid != 0)
-}
-
-/// The version to run for `[postgres] default`: the newest of `installed`
-/// in that major line (`"18"`), or the newest of all when it is not set.
-/// `None` when no version fits, or when `default` is not a major number.
-pub fn line_version(default: Option<&str>, installed: &[Version]) -> Option<Version> {
-    let major = match default {
-        Some(text) => Some(text.trim().parse::<u64>().ok()?),
-        None => None,
-    };
-    let in_line = |version: &&Version| major.is_none_or(|major| version.major == major);
-    installed.iter().filter(in_line).max().cloned()
 }
 
 /// Which of its lock files PostgreSQL found held by a live process at its
@@ -807,6 +907,8 @@ mod tests {
             .iter()
             .map(|text| Version::parse(text).unwrap())
             .collect();
+        let line_version =
+            |default, installed: &[Version]| ServerKind::Postgres.line_version(default, installed);
         let pick = |default| line_version(default, &versions).map(|v| v.to_string());
         assert_eq!(pick(Some("18")).as_deref(), Some("18.7.0"));
         assert_eq!(pick(Some(" 17 ")).as_deref(), Some("17.12.0"));
