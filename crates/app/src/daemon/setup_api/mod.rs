@@ -58,7 +58,9 @@ use super::state::Daemon;
 pub use self::ca::{CA_WAIT, CaddyStart, StartCaddy};
 use self::ca::{DaemonCaddy, PEM_BEGIN, read_ca};
 pub(super) use self::helper::PROMPT_LIMIT;
-use self::helper::{MAX_ANSWER, current_uid, parse_answer, results_of};
+#[cfg(unix)]
+use self::helper::current_uid;
+use self::helper::{MAX_ANSWER, parse_answer, results_of};
 use self::osascript::not_finished;
 pub(super) use self::ports::CHECK_LIMIT;
 use self::ports::MAX_PS;

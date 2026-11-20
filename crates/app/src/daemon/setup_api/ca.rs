@@ -358,31 +358,40 @@ mod tests {
     use super::super::*;
     use super::*;
 
+    #[cfg(unix)]
     use crate::daemon::caddy::ActionError;
     use crate::daemon::state::Daemon;
 
     use axum::http::StatusCode;
 
+    #[cfg(unix)]
     use marsa_core::caddy::CaddyInput;
     use marsa_core::caddy::CaddyPaths;
 
     use marsa_core::recipes::Platform;
+    #[cfg(unix)]
     use marsa_core::types::ServiceAction;
     use marsa_core::types::ServiceState;
     use marsa_core::types::SetupReport;
 
     use std::fs;
 
+    #[cfg(unix)]
     use std::path::PathBuf;
+    #[cfg(unix)]
     use std::process::Command;
     use std::sync::Arc;
 
+    #[cfg(unix)]
     use std::sync::mpsc;
+    #[cfg(unix)]
     use std::thread;
     use std::time::Duration;
     use std::time::Instant;
 
+    #[cfg(unix)]
     use tokio::runtime::Handle;
+    #[cfg(unix)]
     use tokio_util::sync::CancellationToken;
 
     /// Task M5-15: a new user runs setup before any site. Setup starts

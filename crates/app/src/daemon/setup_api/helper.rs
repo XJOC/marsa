@@ -28,6 +28,7 @@ use marsa_core::helper::OpResult;
 use marsa_core::recipes::Platform;
 use marsa_core::types::ApiError;
 use std::fs;
+#[cfg(unix)]
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -372,10 +373,12 @@ mod tests {
 
     use marsa_core::recipes::Platform;
 
+    #[cfg(unix)]
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
 
+    #[cfg(unix)]
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 

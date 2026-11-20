@@ -227,12 +227,17 @@ mod tests {
 
     use super::*;
 
+    #[cfg(unix)]
     use std::ffi::OsString;
     use std::io;
+    #[cfg(unix)]
     use std::process::Command;
+    #[cfg(unix)]
     use std::process::Stdio;
+    #[cfg(unix)]
     use std::thread;
     use std::time::Duration;
+    #[cfg(unix)]
     use std::time::Instant;
     use tokio_util::sync::CancellationToken;
 
