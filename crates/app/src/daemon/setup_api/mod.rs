@@ -37,7 +37,7 @@ pub mod windows;
 use std::collections::BTreeSet;
 use std::env::consts::EXE_SUFFIX;
 use std::fmt;
-use std::fs::{self};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -530,7 +530,6 @@ fn failure(code: &str, message: impl Into<String>) -> ApiError {
     }
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::ca::CA_WAIT;
