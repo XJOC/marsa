@@ -3,12 +3,16 @@
 
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The most Firefox profiles that get the certificate.
 pub const MAX_PROFILES: usize = 32;
 /// Chrome's database, under the home folder.
 pub(super) const CHROME: [&str; 2] = [".pki", "nssdb"];
+/// The snap of Chromium, under the home folder, and the link to the folder
+/// of its installed revision.
+const SNAP_CHROMIUM: [&str; 2] = ["snap", "chromium"];
+const SNAP_CURRENT: &str = "current";
 /// The folders that hold Firefox profiles, under the home folder.
 const FIREFOX: [&[&str]; 3] = [
     &[".mozilla", "firefox"],
@@ -25,7 +29,8 @@ pub(super) const CERT_DB: &str = "cert9.db";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Database {
     pub(super) dir: PathBuf,
-    /// The folder is not there yet: Chrome's, made before `-A`.
+    /// The folder is not there yet: Chrome's or Chromium's, made before
+    /// `-A`.
     pub(super) new: bool,
 }
 
@@ -48,6 +53,11 @@ pub(super) fn databases(home: &Path) -> Found {
             new: true,
         }),
         Folders::Refused(why) => refused.push(why),
+    }
+    match snap_chromium(home) {
+        Some(Ok(database)) => found.push(database),
+        Some(Err(why)) => refused.push(why),
+        None => {}
     }
     let mut profiles = 0;
     for parts in FIREFOX {
@@ -243,7 +253,57 @@ fn owned(_meta: &fs::Metadata) -> bool {
     true
 }
 
-/// Makes Chrome's folder, and `~/.pki` if needed, for this user only.
+/// The database of the Chromium snap, if the snap is there:
+/// `~/snap/chromium/<revision>/.pki/nssdb`, where `<revision>` is what the
+/// link `current` names. A link to anything but a folder right next to it
+/// is refused.
+pub(super) fn snap_chromium(home: &Path) -> Option<Result<Database, String>> {
+    match real_folders(home, &SNAP_CHROMIUM) {
+        Folders::Real => {}
+        Folders::Missing => return None,
+        Folders::Refused(why) => return Some(Err(why)),
+    }
+    let snap = under(home, &SNAP_CHROMIUM);
+    let link = snap.join(SNAP_CURRENT);
+    let target = match fs::read_link(&link) {
+        Ok(target) => target,
+        // No revision installed: no `current`. One that is not a link
+        // (a real folder) is refused below, like any other surprise.
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            return Some(Err(format!(
+                "{} cannot be read: {}",
+                link.display(),
+                err.kind()
+            )));
+        }
+    };
+    let revision = match target.components().collect::<Vec<_>>().as_slice() {
+        [Component::Normal(name)] => name.to_str().map(str::to_owned),
+        _ => None,
+    };
+    let Some(revision) = revision else {
+        let why = format!(
+            "{} names something other than a folder next to it",
+            link.display()
+        );
+        return Some(Err(why));
+    };
+    let parts = [revision.as_str(), CHROME[0], CHROME[1]];
+    let dir = under(&snap, &parts);
+    match real_folders(&snap, &parts) {
+        Folders::Real => Some(db_files(&dir).map(|_| Database { dir, new: false })),
+        // The revision's own folder must be there; `.pki/nssdb` is made.
+        Folders::Missing if matches!(real_folders(&snap, &parts[..1]), Folders::Real) => {
+            Some(Ok(Database { dir, new: true }))
+        }
+        Folders::Missing => None,
+        Folders::Refused(why) => Some(Err(why)),
+    }
+}
+
+/// Makes a database folder, and the folders above it if needed, for this
+/// user only.
 pub(super) fn make_dir(dir: &Path) -> Result<(), String> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -253,4 +313,70 @@ pub(super) fn make_dir(dir: &Path) -> Result<(), String> {
     builder
         .create(dir)
         .map_err(|err| format!("cannot make {}: {}", dir.display(), err.kind()))
+}
+
+// The only test makes symbolic links, which need Unix here.
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    struct Home {
+        dir: TempDir,
+    }
+
+    impl Home {
+        fn home(&self) -> PathBuf {
+            self.dir.path().join("home")
+        }
+    }
+
+    /// The Chromium snap: `current` names the revision folder next to it.
+    #[test]
+    fn the_chromium_snap_follows_current_only_to_its_revision() {
+        use std::os::unix::fs::symlink;
+
+        let home = Home {
+            dir: TempDir::new().unwrap(),
+        };
+        fs::create_dir_all(home.home()).unwrap();
+        assert_eq!(snap_chromium(&home.home()), None);
+        let snap = under(&home.home(), &SNAP_CHROMIUM);
+        fs::create_dir_all(snap.join("2890")).unwrap();
+        // No `current` yet: no revision installed.
+        assert_eq!(snap_chromium(&home.home()), None);
+        symlink("2890", snap.join(SNAP_CURRENT)).unwrap();
+        let nssdb = snap.join("2890").join(".pki").join("nssdb");
+        assert_eq!(
+            snap_chromium(&home.home()),
+            Some(Ok(Database {
+                dir: nssdb.clone(),
+                new: true
+            }))
+        );
+        fs::create_dir_all(&nssdb).unwrap();
+        fs::write(nssdb.join(CERT_DB), "").unwrap();
+        assert_eq!(
+            snap_chromium(&home.home()),
+            Some(Ok(Database {
+                dir: nssdb,
+                new: false
+            }))
+        );
+        for target in ["../2890", "/tmp", "2890/.pki"] {
+            fs::remove_file(snap.join(SNAP_CURRENT)).unwrap();
+            symlink(target, snap.join(SNAP_CURRENT)).unwrap();
+            let refused = snap_chromium(&home.home()).unwrap().unwrap_err();
+            assert!(
+                refused.contains("names something other than a folder"),
+                "{target}: {refused}"
+            );
+        }
+        // A revision folder that is itself a link.
+        fs::remove_file(snap.join(SNAP_CURRENT)).unwrap();
+        symlink(home.dir.path(), snap.join("2891")).unwrap();
+        symlink("2891", snap.join(SNAP_CURRENT)).unwrap();
+        let refused = snap_chromium(&home.home()).unwrap().unwrap_err();
+        assert!(refused.contains("2891 is not a folder"), "{refused}");
+    }
 }
