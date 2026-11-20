@@ -770,7 +770,7 @@ pub(super) fn body(pem: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{Fake, TEST_CA, exit, ok};
+    use super::super::test_support::{Fake, TEST_CA, exit, ok};
     use super::*;
     use marsa_core::caddy::CaddyPaths;
     use tempfile::TempDir;
