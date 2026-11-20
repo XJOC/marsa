@@ -165,7 +165,7 @@ mod tests {
     use tempfile::TempDir;
     use tower::ServiceExt as _;
 
-    use super::super::tests::{
+    use super::super::test_support::{
         Fake, Systemd, UBUNTU_2204_SERVER, answer_for, exit, linux_fake_on, make_helper,
     };
     use super::*;

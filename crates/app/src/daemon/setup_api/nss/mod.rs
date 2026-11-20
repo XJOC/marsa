@@ -507,7 +507,7 @@ mod tests {
     use super::databases::{CERT_DB, CHROME, under};
 
     use super::super::RunOutput;
-    use super::super::tests::{Call, Fake, TEST_CA, TEST_CA_2, exit, ok};
+    use super::super::test_support::{Call, Fake, TEST_CA, TEST_CA_2, exit, ok};
     use super::*;
     use tempfile::TempDir;
 

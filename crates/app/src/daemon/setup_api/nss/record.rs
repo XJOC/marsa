@@ -122,7 +122,7 @@ pub(super) fn write_record(
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::tests::{TEST_CA, TEST_CA_2};
+    use super::super::super::test_support::{TEST_CA, TEST_CA_2};
     use super::*;
 
     const OURS: &str = "Marsa Local CA 29e433200254dfce";

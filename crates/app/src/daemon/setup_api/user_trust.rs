@@ -435,7 +435,7 @@ fn existing_private_dir(dir: &Path) -> Result<bool, String> {
 /// On Unix: the folder belongs to this user, and is set to mode 0700 if
 /// others may open it.
 // `#[cfg]` outside `platform`: Unix owners and modes, as in
-// `setup_api::check_owners`. The Windows twin is below.
+// `setup_api::helper::check_owners`. The Windows twin is below.
 #[cfg(unix)]
 fn close_to_others(dir: &Path, meta: &fs::Metadata) -> Result<(), &'static str> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -770,7 +770,7 @@ pub(super) fn body(pem: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{Fake, TEST_CA, exit, ok};
+    use super::super::test_support::{Fake, TEST_CA, exit, ok};
     use super::*;
     use marsa_core::caddy::CaddyPaths;
     use tempfile::TempDir;
