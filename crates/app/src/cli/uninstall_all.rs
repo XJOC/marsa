@@ -1100,6 +1100,8 @@ mod tests {
         let path_line = text.lines().nth(2).unwrap();
         let end = if cfg!(windows) {
             "in Settings)."
+        } else if cfg!(target_os = "linux") {
+            "~/.profile."
         } else {
             "~/.zshrc."
         };
