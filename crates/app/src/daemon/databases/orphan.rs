@@ -31,7 +31,7 @@ use marsa_core::platform::process::{self, Signal};
 use marsa_core::services::{StopAction, StopMethod};
 use tracing::{debug, info, warn};
 
-use super::Probes;
+use super::facts::Probes;
 
 /// Our old PostgreSQL could not be stopped: nothing was started.
 pub(super) const ORPHAN_STUCK: &str = "postgres_orphan_stuck";
