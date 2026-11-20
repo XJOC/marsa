@@ -2067,6 +2067,8 @@ mod tests {
     const FAILED: &str = include_str!("../../../../fixtures/helper/responses/failed.json");
     const REJECTED: &str = include_str!("../../../../fixtures/helper/responses/rejected.json");
     pub(super) const TEST_CA: &str = include_str!("../../../../fixtures/helper/test-ca.pem");
+    /// Another root with the subject of Marsa's roots, `CN=Marsa Local CA`.
+    pub(super) const TEST_CA_2: &str = include_str!("../../../../fixtures/helper/test-ca-2.pem");
     /// What `security verify-cert` prints for a root nobody trusts.
     const NOT_TRUSTED: &str = "Cert Verify Result: CSSMERR_TP_NOT_TRUSTED\n";
     /// ADR 0012, written out here and not taken from `APPLESCRIPT`, so a

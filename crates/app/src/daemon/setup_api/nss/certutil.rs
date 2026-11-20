@@ -2,6 +2,7 @@
 //! through [`Runner`] with no shell, and what their output says.
 
 use std::ffi::OsString;
+use std::fs;
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use super::super::user_trust::{self, PEM_END};
 use super::super::{PEM_BEGIN, PIPE_GRACE, RunOutput, Runner};
 use super::Failure;
+use super::databases::CERT_DB;
 
 /// The tool, by its absolute path (AGENTS.md section 6).
 pub const CERTUTIL: &str = "/usr/bin/certutil";
@@ -19,9 +21,10 @@ pub const CERTUTIL: &str = "/usr/bin/certutil";
 const NO_PASSWORD: &str = "/dev/null";
 /// The most one `certutil` may take. Each takes milliseconds.
 pub(super) const CALL_LIMIT: Duration = Duration::from_secs(10);
-/// The nickname of Marsa's root in each database: `CA_NAME` in
-/// `marsa_core::caddy`, as in `user_trust`.
-pub(super) const NICKNAME: &str = "Marsa Local CA";
+/// The common name of every Marsa root (`CA_NAME` in `marsa_core::caddy`),
+/// and the nickname of the first NSS step, before nicknames carried a
+/// fingerprint.
+pub(super) const CA_NAME: &str = "Marsa Local CA";
 
 /// The `certutil` calls of one step, all within one deadline.
 pub(super) struct Calls<'a> {
@@ -55,39 +58,53 @@ impl Calls<'_> {
         if output.code == Some(0) {
             return Ok(());
         }
-        let exit = output
-            .code
-            .map_or_else(|| "a signal".to_owned(), |code| format!("exit code {code}"));
-        Err(Failure::Other(format!(
-            "certutil {command} ended with {exit}"
-        )))
+        Err(Failure::Other(ended(command, &output)))
     }
 
-    /// Whether a certificate named [`NICKNAME`] in `dir` is trusted to issue
-    /// server certificates: `C` in the SSL field of its row in `certutil
-    /// -L` (`c` is only "valid", not trusted).
-    pub(super) fn trusted(&self, dir: &Path) -> Result<bool, Failure> {
-        let output = self.run(
-            &database_args(dir)
-                .into_iter()
-                .chain(["-L".into()])
-                .collect::<Vec<_>>(),
-        )?;
+    /// The rows of `certutil -L` whose nickname starts with Marsa's name. A
+    /// folder with no `cert9.db` has none; a listing that fails where there
+    /// is one is a failure, so no fingerprint counts as gone from it.
+    pub(super) fn rows(&self, dir: &Path) -> Result<Vec<Row>, Failure> {
+        let mut args = database_args(dir);
+        args.push("-L".into());
+        let output = self.run(&args)?;
         if output.code != Some(0) {
-            return Ok(false);
+            let database = fs::symlink_metadata(dir.join(CERT_DB)).is_ok_and(|meta| meta.is_file());
+            if database {
+                return Err(Failure::Other(ended("-L", &output)));
+            }
+            return Ok(Vec::new());
         }
-        Ok(trust_rows(&String::from_utf8_lossy(&output.stdout)).any(|ssl| ssl.contains('C')))
+        Ok(rows(&String::from_utf8_lossy(&output.stdout)))
     }
 
-    /// The certificates named [`NICKNAME`] in `dir`, as base64. A listing
-    /// that fails (the usual "Could not find cert") lists none.
-    pub(super) fn list(&self, dir: &Path) -> Result<Vec<String>, Failure> {
-        let output = self.run(&list_args(dir))?;
+    /// The certificates `-L -n <nickname> -a` gives, as base64: every one
+    /// with the subject of the certificate named `nickname`. A listing that
+    /// fails (the usual "Could not find cert") lists none.
+    pub(super) fn list(&self, dir: &Path, nickname: &str) -> Result<Vec<String>, Failure> {
+        let output = self.run(&list_args(dir, nickname))?;
         if output.code != Some(0) {
             return Ok(Vec::new());
         }
         Ok(bodies(&String::from_utf8_lossy(&output.stdout)))
     }
+
+    /// Whether the certificate whose base64 is `body` is among those of
+    /// [`Calls::list`] for `nickname`.
+    pub(super) fn holds(&self, dir: &Path, nickname: &str, body: &str) -> Result<bool, Failure> {
+        Ok(self
+            .list(dir, nickname)?
+            .iter()
+            .any(|listed| listed == body))
+    }
+}
+
+/// How `certutil <command>` ended, for a message.
+fn ended(command: &str, output: &RunOutput) -> String {
+    let exit = output
+        .code
+        .map_or_else(|| "a signal".to_owned(), |code| format!("exit code {code}"));
+    format!("certutil {command} ended with {exit}")
 }
 
 /// `-d sql:<dir>`: the database, in the SQL format.
@@ -97,33 +114,77 @@ fn database_args(dir: &Path) -> Vec<OsString> {
     vec!["-d".into(), database]
 }
 
-fn list_args(dir: &Path) -> Vec<OsString> {
+/// `database_args`, then `rest`.
+fn args(dir: &Path, rest: &[&str]) -> Vec<OsString> {
     let mut args = database_args(dir);
-    args.extend(["-L".into(), "-n".into(), NICKNAME.into(), "-a".into()]);
+    args.extend(rest.iter().map(OsString::from));
     args
 }
 
-pub(super) fn delete_args(dir: &Path) -> Vec<OsString> {
-    let mut args = database_args(dir);
-    args.extend(["-D", "-n", NICKNAME, "-f", NO_PASSWORD].map(OsString::from));
-    args
+fn list_args(dir: &Path, nickname: &str) -> Vec<OsString> {
+    args(dir, &["-L", "-n", nickname, "-a"])
 }
 
-pub(super) fn add_args(dir: &Path, file: &Path) -> Vec<OsString> {
-    let mut args = database_args(dir);
-    let rest = ["-A", "-t", "C,,", "-n", NICKNAME, "-f", NO_PASSWORD, "-i"];
-    args.extend(rest.map(OsString::from));
+pub(super) fn delete_args(dir: &Path, nickname: &str) -> Vec<OsString> {
+    args(dir, &["-D", "-n", nickname, "-f", NO_PASSWORD])
+}
+
+pub(super) fn trust_args(dir: &Path, nickname: &str) -> Vec<OsString> {
+    args(dir, &["-M", "-n", nickname, "-t", "C,,", "-f", NO_PASSWORD])
+}
+
+pub(super) fn rename_args(dir: &Path, from: &str, to: &str) -> Vec<OsString> {
+    args(
+        dir,
+        &["--rename", "-n", from, "--new-n", to, "-f", NO_PASSWORD],
+    )
+}
+
+pub(super) fn add_args(dir: &Path, nickname: &str, file: &Path) -> Vec<OsString> {
+    let mut args = args(
+        dir,
+        &["-A", "-t", "C,,", "-n", nickname, "-f", NO_PASSWORD, "-i"],
+    );
     args.push(file.into());
     args
 }
 
-/// The SSL trust field of each row named [`NICKNAME`] in the output of
-/// `certutil -L`: `Marsa Local CA      C,,` gives `C`.
-pub(super) fn trust_rows(text: &str) -> impl Iterator<Item = &str> {
-    text.lines().filter_map(|line| {
-        let (name, trust) = line.trim_end().rsplit_once(char::is_whitespace)?;
-        (name.trim() == NICKNAME).then(|| trust.split(',').next().unwrap_or_default())
-    })
+/// One row of `certutil -L`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Row {
+    pub(super) nickname: String,
+    /// The trust fields, `SSL,S/MIME,JAR/XPI`: `C,,`.
+    pub(super) trust: String,
+}
+
+impl Row {
+    /// `C` in the SSL field: trusted to issue server certificates (`c` is
+    /// only "valid").
+    pub(super) fn trusted(&self) -> bool {
+        self.trust
+            .split(',')
+            .next()
+            .is_some_and(|ssl| ssl.contains('C'))
+    }
+}
+
+/// The rows of `certutil -L` whose nickname is Marsa's name or starts with
+/// it and a space: `Marsa Local CA 29e433200254dfce      C,,`.
+pub(super) fn rows(text: &str) -> Vec<Row> {
+    text.lines()
+        .filter_map(|line| {
+            let (nickname, trust) = line.trim_end().rsplit_once(char::is_whitespace)?;
+            let nickname = nickname.trim();
+            let ours = nickname == CA_NAME
+                || nickname
+                    .strip_prefix(CA_NAME)
+                    .is_some_and(|rest| rest.starts_with(' '));
+            ours.then(|| Row {
+                nickname: nickname.to_owned(),
+                trust: trust.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// The base64 of each certificate in `text`, without line breaks.
@@ -139,4 +200,42 @@ pub(super) fn bodies(text: &str) -> Vec<String> {
         rest = &rest[end..];
     }
     found
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+
+    const OURS: &str = "Marsa Local CA 29e433200254dfce";
+
+    /// `certutil -L` with `rows`, each `(nickname, trust)`.
+    pub(in super::super) fn listing(rows: &[(&str, &str)]) -> String {
+        let mut text = "\nCertificate Nickname                                         Trust Attributes\n\
+                        \x20                                                            SSL,S/MIME,JAR/XPI\n\n"
+            .to_owned();
+        for (nickname, trust) in rows {
+            text.push_str(&format!("{nickname:<61}{trust:<5}\n"));
+        }
+        text
+    }
+
+    #[test]
+    fn rows_keep_marsas_nicknames_and_their_trust() {
+        let text = listing(&[
+            ("Other CA", "CT,C,C"),
+            (CA_NAME, ",,"),
+            (OURS, "C,,"),
+            ("Marsa Local CAx", "C,,"),
+        ]);
+        let rows = rows(&text);
+        let names: Vec<_> = rows.iter().map(|row| row.nickname.as_str()).collect();
+        assert_eq!(names, [CA_NAME, OURS]);
+        assert!(!rows[0].trusted());
+        assert!(rows[1].trusted());
+        let valid_only = Row {
+            nickname: OURS.into(),
+            trust: "c,,".into(),
+        };
+        assert!(!valid_only.trusted());
+    }
 }

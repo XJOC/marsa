@@ -753,7 +753,7 @@ fn certificates(text: &str) -> Vec<(String, String)> {
     found
 }
 
-fn is_sha256(text: &str) -> bool {
+pub(super) fn is_sha256(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
