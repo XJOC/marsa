@@ -23,24 +23,30 @@ pub(crate) struct Busy;
 ///
 /// # Errors
 ///
-/// [`Busy`] when the wait runs out or `shutdown` is cancelled while waiting.
+/// [`Busy`] when the wait runs out, or `shutdown` is cancelled while waiting
+/// or at the moment the turn comes.
 pub(crate) async fn take_turn(
     busy: &Arc<Mutex<()>>,
     shutdown: &CancellationToken,
     wait: Duration,
     on_wait: impl FnOnce(),
 ) -> Result<OwnedMutexGuard<()>, Busy> {
-    match Arc::clone(busy).try_lock_owned() {
-        Ok(turn) => Ok(turn),
+    let turn = match Arc::clone(busy).try_lock_owned() {
+        Ok(turn) => turn,
         Err(_) => {
             on_wait();
             let turn = tokio::time::timeout(wait, Arc::clone(busy).lock_owned());
             tokio::select! {
-                () = shutdown.cancelled() => Err(Busy),
-                turn = turn => turn.map_err(|_| Busy),
+                () = shutdown.cancelled() => return Err(Busy),
+                turn = turn => turn.map_err(|_| Busy)?,
             }
         }
+    };
+    // Also when the turn came at the same moment as the shutdown.
+    if shutdown.is_cancelled() {
+        return Err(Busy);
     }
+    Ok(turn)
 }
 
 #[cfg(test)]
@@ -103,6 +109,14 @@ mod tests {
         let shutdown = CancellationToken::new();
         shutdown.cancel();
         let result = take_turn(&busy, &shutdown, Duration::from_secs(60), || {}).await;
+        assert_eq!(result.err(), Some(Busy));
+    }
+
+    #[tokio::test]
+    async fn a_free_turn_is_not_given_after_the_daemon_stopped() {
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let result = take_turn(&turn(), &shutdown, Duration::ZERO, || {}).await;
         assert_eq!(result.err(), Some(Busy));
     }
 }
