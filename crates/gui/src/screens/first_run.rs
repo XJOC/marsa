@@ -188,7 +188,7 @@ fn setup_detail(model: &Model, platform: Option<Platform>) -> Detail {
 
 /// What the last park or link said, while there is no site.
 fn site_detail(model: &Model) -> Detail {
-    match &model.session.sites_notice {
+    match &model.session.notices.sites() {
         Some(SitesNotice::Failed(code)) => problem(strings::error_text(code)),
         Some(SitesNotice::Parked(folder)) if model.session.sites.sites.is_empty() => {
             Detail::Lines(vec![ReportLine {
@@ -286,6 +286,7 @@ fn buttons(ui: &mut Ui, theme: &Theme, view: &FirstRunView, actions: &mut Vec<Ac
 
 #[cfg(test)]
 mod tests {
+    use crate::bridge::Command;
     use std::path::{Path, PathBuf};
 
     use eframe::egui::{self, Pos2, pos2};
@@ -354,8 +355,10 @@ mod tests {
 
     /// The PHP job accepted, and `done` of `total` bytes of it downloaded.
     fn downloading(model: &mut Model, done: u64, total: u64) {
-        assert!(model.apply_action(Action::StartFirstRun).is_none());
-        let sent = model.next_install().expect("the first job");
+        let Some(Command::Install(sent)) = model.apply_action(Action::StartFirstRun).command()
+        else {
+            panic!("the first job goes out");
+        };
         model.update(Update::InstallAccepted { job: sent, id: 1 });
         let selected = InstallEvent::Selected {
             runtime: Runtime::Php,
@@ -426,8 +429,10 @@ mod tests {
     #[test]
     fn a_failed_install_says_why_and_offers_the_button_again() {
         let mut model = fresh();
-        assert!(model.apply_action(Action::StartFirstRun).is_none());
-        let sent = model.next_install().expect("the first job");
+        let Some(Command::Install(sent)) = model.apply_action(Action::StartFirstRun).command()
+        else {
+            panic!("the first job goes out");
+        };
         model.update(Update::InstallRefused {
             job: sent,
             code: "install_busy".into(),

@@ -348,12 +348,15 @@ fn dialogs_and_notices(model: &mut Model, demo: Demo) {
             });
         }
         Demo::NoticeSuccess => {
-            model.session.sites_notice = Some(SitesNotice::Unlinked("old-blog".into()));
+            model
+                .session
+                .notices
+                .set_sites(SitesNotice::Unlinked("old-blog".into()));
         }
         Demo::NoticeError => {
             let folder = PathBuf::from("/demo/Code");
             model.session.sites.parked = vec![folder.clone()];
-            model.session.sites_notice = Some(SitesNotice::SiteIsParked {
+            model.session.notices.set_sites(SitesNotice::SiteIsParked {
                 site: "shop".into(),
                 folder: Some(folder),
             });
@@ -439,7 +442,10 @@ fn sites_extras(model: &mut Model) {
             code: "site_name_taken".into(),
         },
     ];
-    model.session.sites_notice = Some(SitesNotice::Unlinked("old-blog".into()));
+    model
+        .session
+        .notices
+        .set_sites(SitesNotice::Unlinked("old-blog".into()));
     model.link = Some(LinkForm {
         folder: PathBuf::from("/demo/Work/blog"),
         name: "blog".into(),
@@ -687,7 +693,7 @@ mod tests {
     fn the_extras_demo_opens_the_link_form_and_lists_the_folders() {
         let mut model = Model::default();
         fill(&mut model, Demo::SitesExtras);
-        assert!(model.link.is_some() && model.session.sites_notice.is_some());
+        assert!(model.link.is_some() && model.session.notices.sites().is_some());
         assert_eq!(model.session.sites.parked.len(), 2);
         assert_eq!(model.session.sites.skipped.len(), 2);
     }

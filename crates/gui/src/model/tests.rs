@@ -126,11 +126,11 @@ fn a_service_action_clears_the_notice_and_becomes_a_command() {
     assert!(
         matches!(
             &command,
-            Some(Command::Service { service, action: ServiceAction::Restart }) if service == "caddy"
+            Effect::Send(Command::Service { service, action: ServiceAction::Restart }) if service == "caddy"
         ),
         "{command:?}"
     );
-    assert_eq!(model.session.notice, None);
+    assert_eq!(model.session.notices.code(NoticeSource::Call), None);
 }
 
 #[test]
@@ -146,17 +146,17 @@ fn the_home_actions_set_the_default_queue_an_install_and_sync_the_hosts() {
         runtime: Runtime::Php,
         version: "8.3".into(),
     };
-    assert!(matches!(&command, Some(Command::Save(change)) if *change == want));
+    assert!(matches!(&command, Effect::Send(Command::Save(change)) if *change == want));
     assert!(model.apply_action(set).is_none(), "the default already");
 
-    // A fix queues its install; `App` sends it through `next_install`.
+    // A fix queues its install, and the effect sends it at once.
     let job = InstallJob {
         runtime: Runtime::Caddy,
         version: None,
     };
-    assert!(model.apply_action(Action::Install(job.clone())).is_none());
+    let sent = model.apply_action(Action::Install(job.clone())).command();
+    assert!(matches!(sent, Some(Command::Install(ref sent)) if *sent == job));
     assert!(model.installing());
-    assert_eq!(model.next_install(), Some(job.clone()));
     // One at a time: a second fix waits for the first to end.
     assert!(!model.queue_install(job));
     assert_eq!(model.next_install(), None);
@@ -168,7 +168,10 @@ fn the_home_actions_set_the_default_queue_an_install_and_sync_the_hosts() {
         missing: vec!["shop.test".into()],
     }));
     let command = model.apply_action(Action::SyncHosts);
-    assert!(matches!(command, Some(Command::SyncHosts)), "{command:?}");
+    assert!(
+        matches!(command, Effect::Send(Command::SyncHosts)),
+        "{command:?}"
+    );
     assert!(model.apply_action(Action::SyncHosts).is_none(), "it runs");
     assert_eq!(model.session.hosts_sync, HostsSync::Running);
 }
@@ -176,23 +179,28 @@ fn the_home_actions_set_the_default_queue_an_install_and_sync_the_hosts() {
 #[test]
 fn the_first_run_actions_install_set_up_and_close() {
     let mut model = with_runtimes(&[], &[]);
-    assert!(model.apply_action(Action::StartFirstRun).is_none());
+    let sent = model.apply_action(Action::StartFirstRun).command();
     assert_eq!(model.session.first_run, Some(FirstRun::Installing));
-    assert_eq!(
-        model.next_install(),
-        Some(job(Runtime::Php, Some(FIRST_PHP)))
+    assert!(
+        matches!(sent, Some(Command::Install(ref sent)) if *sent == job(Runtime::Php, Some(FIRST_PHP)))
     );
 
     let command = model.apply_action(Action::RunSetup);
-    assert!(matches!(command, Some(Command::Setup)), "{command:?}");
+    assert!(
+        matches!(command, Effect::Send(Command::Setup)),
+        "{command:?}"
+    );
     assert_eq!(model.session.setup, Setup::Running);
     assert!(
         model.apply_action(Action::RunSetup).is_none(),
         "one at a time"
     );
 
-    // The folder dialog is `App`'s: the model keeps out of it.
-    assert!(model.apply_action(Action::PickFolder(Pick::Park)).is_none());
+    // The folder dialog is `App`'s: the model only asks for it.
+    assert!(matches!(
+        model.apply_action(Action::PickFolder(Pick::Park)),
+        Effect::PickFolder(Pick::Park)
+    ));
     assert!(model.apply_action(Action::CloseFirstRun).is_none());
     assert!(model.session.first_run.is_none() && !model.needs_first_run());
 }
@@ -228,11 +236,11 @@ fn open_site_changes_nothing_and_the_address_comes_from_the_model() {
     let mut model = connected();
     model.update(Update::Sites(site_list(&["shop"])));
     model.session.sites.sites[0].secure = false;
-    assert!(
-        model
-            .apply_action(Action::OpenSite("shop".into()))
-            .is_none()
-    );
+    // The window opens the browser: the model only says so.
+    assert!(matches!(
+        model.apply_action(Action::OpenSite("shop".into())),
+        Effect::OpenSite(name) if name == "shop"
+    ));
     assert_eq!(model.route, Route::Home);
     assert_eq!(model.site_url("shop").as_deref(), Some("http://shop.test"));
     model.session.sites.sites[0].secure = true;
@@ -292,21 +300,27 @@ fn the_menu_actions_of_a_site_reach_the_daemon_or_the_confirmation() {
         choice: Choice::Version(v("8.3.27")),
     };
     let command = model.apply_action(pick.clone());
-    assert!(matches!(command, Some(Command::Save(_))), "{command:?}");
+    assert!(
+        matches!(command, Effect::Send(Command::Save(_))),
+        "{command:?}"
+    );
     assert!(model.apply_action(pick).is_none(), "the same entry again");
 
-    model.session.sites_notice = Some(SitesNotice::Unlinked("old".into()));
+    model
+        .session
+        .notices
+        .set_sites(SitesNotice::Unlinked("old".into()));
     let secure = Action::SetSecure {
         site: "shop".into(),
         secure: false,
     };
     let command = model.apply_action(secure);
     assert!(
-        matches!(command, Some(Command::Secure { ref site, secure: false }) if site == "shop"),
+        matches!(command, Effect::Send(Command::Secure { ref site, secure: false }) if site == "shop"),
         "{command:?}"
     );
     assert!(
-        model.session.sites_notice.is_none(),
+        model.session.notices.sites().is_none(),
         "the notice was about the last action"
     );
 
@@ -342,7 +356,7 @@ fn the_confirmations_answers_send_the_removal_or_drop_it() {
 
     model.apply_action(Action::AskForget(PathBuf::from("/code")));
     let sent = model.apply_action(Action::ConfirmRemoval);
-    assert!(matches!(sent, Some(Command::Remove(ref r)) if *r == forget("/code")));
+    assert!(matches!(sent, Effect::Send(Command::Remove(ref r)) if *r == forget("/code")));
     assert_eq!(model.removing(), Some(&forget("/code")));
     assert!(model.session.confirm.is_none());
 }
@@ -382,16 +396,16 @@ fn the_link_form_actions_edit_send_and_cancel() {
     model.apply_action(Action::SetLinkName("My Blog".into()));
     assert!(model.apply_action(Action::SubmitLink).is_none());
     assert!(matches!(
-        model.session.sites_notice,
+        model.session.notices.sites().cloned(),
         Some(SitesNotice::Failed(_))
     ));
     model.apply_action(Action::DismissNotice(NoticeSource::Sites));
-    assert!(model.session.sites_notice.is_none());
+    assert!(model.session.notices.sites().is_none());
 
     model.apply_action(Action::SetLinkName("blog".into()));
     let command = model.apply_action(Action::SubmitLink);
     assert!(
-        matches!(command, Some(Command::Link { ref name, .. }) if name == "blog"),
+        matches!(command, Effect::Send(Command::Link { ref name, .. }) if name == "blog"),
         "{command:?}"
     );
     model.apply_action(Action::CancelLink);
@@ -609,7 +623,10 @@ fn a_new_session_starts_clean_and_a_lost_one_keeps_the_log() {
 
     model.update(Update::Connected(health()));
     assert!(model.is_connected());
-    assert!(model.log_rows("caddy").is_empty() && model.session.notice.is_none());
+    assert!(
+        model.log_rows("caddy").is_empty()
+            && model.session.notices.code(NoticeSource::Call).is_none()
+    );
     // The restarted daemon counts from 0 again.
     apply(&mut model, line("caddy", 0));
     assert_eq!(texts(&model, "caddy"), ["line 0"]);
@@ -679,7 +696,7 @@ fn the_sites_go_with_the_connection_but_the_link_form_stays() {
         (form.folder.clone(), form.name.as_str()),
         (absolute("/work/api"), "api")
     );
-    assert!(model.session.sites_notice.is_none());
+    assert!(model.session.notices.sites().is_none());
 }
 
 #[test]
@@ -704,17 +721,17 @@ fn a_relative_folder_is_refused_without_a_request() {
     let mut model = connected();
     assert_eq!(model.park_request(Path::new("code")), None);
     let failed = SitesNotice::Failed("site_path_relative".into());
-    assert_eq!(model.session.sites_notice, Some(failed.clone()));
+    assert_eq!(model.session.notices.sites().cloned(), Some(failed.clone()));
     model.pick_link_folder(Path::new("code"));
     assert!(model.link.is_none());
-    assert_eq!(model.session.sites_notice, Some(failed));
+    assert_eq!(model.session.notices.sites().cloned(), Some(failed));
 
     let picked = format!("{}/", absolute("/code").display());
     assert_eq!(
         model.park_request(Path::new(&picked)),
         Some(absolute("/code"))
     );
-    assert!(model.session.sites_notice.is_none());
+    assert!(model.session.notices.sites().is_none());
 }
 
 #[test]
@@ -722,7 +739,7 @@ fn a_park_says_so() {
     let mut model = connected();
     model.update(Update::Parked(absolute("/code")));
     let parked = SitesNotice::Parked(absolute("/code"));
-    assert_eq!(model.session.sites_notice, Some(parked));
+    assert_eq!(model.session.notices.sites().cloned(), Some(parked));
 }
 
 #[test]
@@ -732,7 +749,7 @@ fn a_failed_sites_call_keeps_the_list_and_shows_the_code() {
     model.update(Update::SitesFailed("site_not_found".into()));
     assert_eq!(names(&model), ["shop"]);
     let failed = SitesNotice::Failed("site_not_found".into());
-    assert_eq!(model.session.sites_notice, Some(failed));
+    assert_eq!(model.session.notices.sites().cloned(), Some(failed));
 }
 
 // -- The PHP and Node lists --
@@ -872,12 +889,12 @@ fn a_refused_default_goes_back_and_says_why() {
     model.update(Update::NotSaved { change, code });
     assert_eq!(model.default_choice(Runtime::Php), Some(v("8.4.23")));
     assert_eq!(
-        model.session.runtimes_notice.as_deref(),
+        model.session.notices.code(NoticeSource::Runtimes),
         Some("version_not_installed")
     );
     // The next pick clears the notice.
     model.choose_default(Runtime::Php, v("8.3.27"));
-    assert!(model.session.runtimes_notice.is_none());
+    assert!(model.session.notices.code(NoticeSource::Runtimes).is_none());
 }
 
 #[test]
@@ -973,7 +990,7 @@ fn a_refused_site_php_goes_back_and_says_why() {
     });
     assert_eq!(choice(&model, "shop"), Choice::Auto);
     let failed = SitesNotice::Failed("config_write".into());
-    assert_eq!(model.session.sites_notice, Some(failed));
+    assert_eq!(model.session.notices.sites().cloned(), Some(failed));
 }
 
 #[test]
@@ -1020,7 +1037,7 @@ fn a_lost_session_drops_the_runtimes_and_the_picks() {
     assert_eq!(choice(&model, "shop"), Choice::Auto);
     model.update(Update::RuntimesFailed("runtimes_read".into()));
     assert_eq!(
-        model.session.runtimes_notice.as_deref(),
+        model.session.notices.code(NoticeSource::Runtimes),
         Some("runtimes_read")
     );
 }
@@ -1226,14 +1243,14 @@ fn a_bad_version_field_is_refused_without_a_request() {
     model.set_install_text(Runtime::Node, "lts/*".into());
     assert!(!model.request_install(Runtime::Node));
     assert_eq!(
-        model.session.runtimes_notice.as_deref(),
+        model.session.notices.code(NoticeSource::Runtimes),
         Some("unsupported_alias")
     );
     assert_eq!(model.next_install(), None);
     // An empty field asks for the newest version.
     model.set_install_text(Runtime::Node, String::new());
     assert!(model.request_install(Runtime::Node));
-    assert!(model.session.runtimes_notice.is_none());
+    assert!(model.session.notices.code(NoticeSource::Runtimes).is_none());
     assert_eq!(model.next_install(), Some(job(Runtime::Node, None)));
 }
 
@@ -1600,17 +1617,23 @@ fn start_at_login_follows_each_state() {
     model.update(Update::AutostartFailed("autostart_write".into()));
     assert_eq!(model.session.autostart, Autostart::Unknown);
     assert_eq!(
-        model.session.settings_notice.as_deref(),
+        model.session.notices.code(NoticeSource::Autostart),
         Some("autostart_write")
     );
     // The bridge reads it again; the notice stays until the next click.
     model.update(Update::Autostart(Autostart::Off));
     assert_eq!(
-        model.session.settings_notice.as_deref(),
+        model.session.notices.code(NoticeSource::Autostart),
         Some("autostart_write")
     );
     model.toggle_autostart();
-    assert!(model.session.settings_notice.is_none());
+    assert!(
+        model
+            .session
+            .notices
+            .code(NoticeSource::Autostart)
+            .is_none()
+    );
 
     model.update(Update::Reconnecting);
     assert_eq!(model.session.autostart, Autostart::Unknown);
@@ -1650,16 +1673,22 @@ fn a_bad_site_name_is_refused_without_a_request() {
     model.pick_link_folder(&absolute("/work/متجر"));
     assert_eq!(model.link_request(), None);
     let invalid = SitesNotice::Failed("site_name_invalid".into());
-    assert_eq!(model.session.sites_notice, Some(invalid.clone()));
+    assert_eq!(
+        model.session.notices.sites().cloned(),
+        Some(invalid.clone())
+    );
     for name in ["Shop", "-shop", "shop-", "my shop", &"a".repeat(64)] {
         model.link.as_mut().unwrap().name = name.to_owned();
         assert_eq!(model.link_request(), None, "{name}");
-        assert_eq!(model.session.sites_notice, Some(invalid.clone()));
+        assert_eq!(
+            model.session.notices.sites().cloned(),
+            Some(invalid.clone())
+        );
     }
     model.link.as_mut().unwrap().name = " shop ".into();
     let want = ("shop".to_owned(), absolute("/work/متجر"));
     assert_eq!(model.link_request(), Some(want));
-    assert!(model.session.sites_notice.is_none());
+    assert!(model.session.notices.sites().is_none());
 }
 
 #[test]
@@ -1681,7 +1710,7 @@ fn linking_over_another_folder_is_named_and_a_link_closes_the_form() {
     });
     assert!(model.link.is_none());
     assert_eq!(
-        model.session.sites_notice,
+        model.session.notices.sites().cloned(),
         Some(SitesNotice::Linked { name, folder })
     );
 }
@@ -1759,9 +1788,9 @@ fn a_removal_waits_for_its_confirmation() {
     // An older notice goes once the user confirms.
     model.update(Update::SitesFailed("site_not_found".into()));
     assert!(model.ask_removal(unlink("api")));
-    assert!(model.session.sites_notice.is_some());
+    assert!(model.session.notices.sites().is_some());
     assert_eq!(model.confirm_removal(), Some(unlink("api")));
-    assert!(model.session.confirm.is_none() && model.session.sites_notice.is_none());
+    assert!(model.session.confirm.is_none() && model.session.notices.sites().is_none());
     assert_eq!(model.removing(), Some(&unlink("api")));
     // One at a time.
     assert!(!model.can_remove());
@@ -1769,7 +1798,7 @@ fn a_removal_waits_for_its_confirmation() {
 
     model.update(Update::Removed(unlink("api")));
     let unlinked = SitesNotice::Unlinked("api".into());
-    assert_eq!(model.session.sites_notice, Some(unlinked));
+    assert_eq!(model.session.notices.sites().cloned(), Some(unlinked));
     assert!(model.removing().is_none() && model.can_remove());
 }
 
@@ -1786,7 +1815,7 @@ fn unlinking_from_the_page_of_the_site_goes_back_to_sites_and_other_pages_stay()
     // The line about it shows on Sites.
     assert_eq!(model.route, Route::Sites);
     assert_eq!(
-        model.session.sites_notice,
+        model.session.notices.sites().cloned(),
         Some(SitesNotice::Unlinked("api".into()))
     );
 
@@ -1841,16 +1870,16 @@ fn the_install_dialog_keeps_a_field_for_each_runtime_and_closes_when_the_job_is_
     assert_eq!(model.install_text(Runtime::Php), " 8.4 ");
     assert_eq!(model.install_text(Runtime::Node), "22");
     assert_eq!(model.install_text(Runtime::Caddy), "");
-    // Install: the job waits in the queue, the dialog and the text go.
+    // Install: the job goes out, the dialog and the text go.
+    let sent = model
+        .apply_action(Action::SubmitInstall(Runtime::Php))
+        .command();
     assert!(
-        model
-            .apply_action(Action::SubmitInstall(Runtime::Php))
-            .is_none()
+        matches!(sent, Some(Command::Install(ref sent)) if *sent == job(Runtime::Php, Some("8.4")))
     );
     assert_eq!(model.session.install_dialog, None);
     assert_eq!(model.install_text(Runtime::Php), "");
     assert_eq!(model.install_text(Runtime::Node), "22", "the others stay");
-    assert_eq!(model.next_install(), Some(job(Runtime::Php, Some("8.4"))));
 }
 
 #[test]
@@ -1861,7 +1890,7 @@ fn a_wrong_version_keeps_the_dialog_open_and_clears_when_the_text_changes() {
     model.apply_action(Action::SubmitInstall(Runtime::Node));
     assert_eq!(model.session.install_dialog, Some(Runtime::Node));
     assert_eq!(
-        model.session.runtimes_notice.as_deref(),
+        model.session.notices.code(NoticeSource::Runtimes),
         Some("unsupported_alias")
     );
     assert_eq!(model.next_install(), None);
@@ -1870,7 +1899,7 @@ fn a_wrong_version_keeps_the_dialog_open_and_clears_when_the_text_changes() {
         runtime: Runtime::Node,
         text: "22".into(),
     });
-    assert_eq!(model.session.runtimes_notice, None);
+    assert_eq!(model.session.notices.code(NoticeSource::Runtimes), None);
     // Cancel closes it and keeps what was typed.
     model.apply_action(Action::CancelInstall);
     assert_eq!(model.session.install_dialog, None);
@@ -1934,7 +1963,10 @@ fn an_uninstall_drops_the_version_and_the_list_is_read_again() {
         runtime: Runtime::Php,
         version: v("8.3.27"),
     };
-    assert_eq!(model.session.uninstall_notice, Some(uninstalled));
+    assert_eq!(
+        model.session.notices.uninstall().cloned(),
+        Some(uninstalled)
+    );
 
     // The last PHP: the list read again after it opens the first-run
     // panel, since no site can open without PHP.
@@ -1986,19 +2018,19 @@ fn a_version_in_use_says_what_uses_it() {
         runtime: Runtime::Php,
         in_use,
     };
-    assert_eq!(model.session.uninstall_notice, Some(notice));
+    assert_eq!(model.session.notices.uninstall().cloned(), Some(notice));
     assert_eq!(model.php_versions().len(), 2, "nothing changed");
 
     // The next confirmation clears it; another failure keeps its code.
     let sent = send(&mut model, uninstall(Runtime::Php, "8.3.27"));
-    assert!(model.session.uninstall_notice.is_none());
+    assert!(model.session.notices.uninstall().is_none());
     model.update(not_removed(sent, "uninstall_io"));
     let failed = UninstallNotice::Failed {
         runtime: Runtime::Php,
         version: v("8.3.27"),
         code: "uninstall_io".into(),
     };
-    assert_eq!(model.session.uninstall_notice, Some(failed));
+    assert_eq!(model.session.notices.uninstall().cloned(), Some(failed));
 }
 
 #[test]
@@ -2031,12 +2063,12 @@ fn a_parked_site_that_is_refused_offers_its_folder() {
         site: "shop".into(),
         folder: Some(PathBuf::from("/code")),
     };
-    assert_eq!(model.session.sites_notice, Some(refused));
+    assert_eq!(model.session.notices.sites().cloned(), Some(refused));
 
     let sent = send(&mut model, forget("/code"));
     model.update(Update::Removed(sent));
     let forgot = SitesNotice::Forgot(PathBuf::from("/code"));
-    assert_eq!(model.session.sites_notice, Some(forgot));
+    assert_eq!(model.session.notices.sites().cloned(), Some(forgot));
 
     // A site the list does not have: no folder to offer.
     let sent = send(&mut model, unlink("gone"));
@@ -2045,7 +2077,7 @@ fn a_parked_site_that_is_refused_offers_its_folder() {
         site: "gone".into(),
         folder: None,
     };
-    assert_eq!(model.session.sites_notice, Some(refused));
+    assert_eq!(model.session.notices.sites().cloned(), Some(refused));
 }
 
 #[test]
@@ -2061,7 +2093,11 @@ fn a_refused_unlink_or_forget_shows_its_code_and_keeps_the_list() {
         let sent = send(&mut model, removal);
         model.update(not_removed(sent, code));
         let failed = SitesNotice::Failed(code.into());
-        assert_eq!(model.session.sites_notice, Some(failed), "{code}");
+        assert_eq!(
+            model.session.notices.sites().cloned(),
+            Some(failed),
+            "{code}"
+        );
         assert!(model.can_remove(), "{code}");
         assert_eq!(names(&model), ["api", "blog", "shop"], "{code}");
     }
@@ -2081,7 +2117,7 @@ fn a_lost_session_closes_the_confirmation_and_drops_its_answer() {
     assert!(model.removing().is_none());
     model.update(Update::Connected(health()));
     model.update(Update::Removed(sent));
-    assert!(model.session.sites_notice.is_none());
+    assert!(model.session.notices.sites().is_none());
 }
 
 // -- Xdebug --
@@ -2121,14 +2157,14 @@ fn the_xdebug_box_follows_each_state() {
     let code = "xdebug_interrupted".to_owned();
     model.update(Update::XdebugAnswered(Err(code)));
     assert_eq!(
-        model.session.xdebug_notice.as_deref(),
+        model.session.notices.code(NoticeSource::Xdebug),
         Some("xdebug_interrupted")
     );
     // The bridge reads it again; until then the last state shows.
     assert_eq!(model.xdebug_on(), Some(true));
     assert_eq!(model.toggle_xdebug(), Some(false));
     assert!(
-        model.session.xdebug_notice.is_none(),
+        model.session.notices.code(NoticeSource::Xdebug).is_none(),
         "the next click clears it"
     );
 
@@ -2138,7 +2174,7 @@ fn the_xdebug_box_follows_each_state() {
     model.update(Update::Connected(health()));
     model.update(Update::XdebugFailed("config_invalid".into()));
     assert_eq!(
-        model.session.xdebug_notice.as_deref(),
+        model.session.notices.code(NoticeSource::Xdebug),
         Some("config_invalid")
     );
     assert_eq!(model.toggle_xdebug(), None);

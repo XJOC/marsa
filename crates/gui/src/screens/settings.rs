@@ -339,6 +339,7 @@ fn check_value(ui: &mut Ui, theme: &Theme, check: Check) {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::Effect;
     use std::path::PathBuf;
 
     use eframe::egui::{self, Rect};
@@ -711,7 +712,7 @@ mod tests {
         model.update(Update::Autostart(Autostart::Off));
         let command = model.apply_action(Action::ToggleAutostart);
         assert!(
-            matches!(command, Some(Command::SetAutostart(true))),
+            matches!(command, Effect::Send(Command::SetAutostart(true))),
             "{command:?}"
         );
         assert!(view(&model).general.autostart.on);
@@ -792,9 +793,10 @@ mod tests {
             click(&model, strings::OPEN_FOLDER),
             [Action::OpenDataFolder]
         );
-        // The model has nothing to do for it: `App` opens the folder.
+        // The model only says which folder: `App` opens it.
         let mut model = connected();
-        assert!(model.apply_action(Action::OpenDataFolder).is_none());
+        let effect = model.apply_action(Action::OpenDataFolder);
+        assert!(matches!(effect, Effect::OpenFolder(folder) if folder == model.data_dir));
     }
 
     #[test]

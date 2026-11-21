@@ -42,20 +42,16 @@ pub enum Overall {
 #[derive(Debug, Default)]
 pub struct Session {
     pub connection: Connection,
+    /// The last result of each place that tells the user about one.
+    pub notices: Notices,
     /// Sorted by id.
     pub services: Vec<ServiceStatus>,
     /// The log of each service that has written one, by the service's id.
     pub(super) logs: BTreeMap<String, ServiceLog>,
-    /// The last error that did not break the connection, as a code.
-    pub notice: Option<String>,
     /// Sites sorted by name, the parked folders, and the skipped folders.
     pub sites: SiteList,
-    pub sites_notice: Option<SitesNotice>,
     /// As the daemon lists them.
     pub runtimes: Vec<RuntimeRow>,
-    /// The last runtimes read, default change, or version field failed. A
-    /// client error code.
-    pub runtimes_notice: Option<String>,
     /// Oldest first.
     pub(super) pending: Vec<Pending>,
     /// The runtime whose install dialog is open.
@@ -65,19 +61,14 @@ pub struct Session {
     pub first_run: Option<FirstRun>,
     pub setup: Setup,
     pub autostart: Autostart,
-    /// The last autostart read or change failed. A client error code.
-    pub settings_notice: Option<String>,
     /// The removal the confirmation dialog asks about.
     pub confirm: Option<Removal>,
     /// The removal sent and not answered yet. One at a time.
     pub(super) removing: Option<Removal>,
-    pub uninstall_notice: Option<UninstallNotice>,
     /// Whether PHP loads Xdebug, as the daemon said last. `None` until read.
     pub xdebug: Option<XdebugState>,
     /// The state the Xdebug box asked for, until the daemon answers.
     pub(super) xdebug_pending: Option<bool>,
-    /// The last Xdebug read or change failed. A client error code.
-    pub xdebug_notice: Option<String>,
     /// Linux: the sites the hosts file lacks.
     pub hosts: HostsStatus,
     pub hosts_sync: HostsSync,

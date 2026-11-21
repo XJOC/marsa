@@ -19,6 +19,7 @@ use semver::Version;
 
 mod installs;
 mod logs;
+mod notices;
 mod removals;
 mod runtimes;
 mod session;
@@ -28,6 +29,7 @@ mod sites;
 use installs::Install;
 pub use installs::{INSTALL_INTERRUPTED, InstallJob, InstallStep, InstallView, install_version};
 pub use logs::{LOG_SERVICE, LogRow, LogSource, MAX_LOG_LINES, ServiceLog};
+pub use notices::{NoticeSource, Notices};
 pub use removals::{Removal, UninstallNotice};
 pub use runtimes::{
     Change, Choice, MAIN_RUNTIME, PoolKind, RuntimeRow, has_default, is_pool, pool_of,
@@ -50,6 +52,42 @@ pub const WEB_SERVER: &str = "caddy";
 pub const DNS_SERVER: &str = "dns";
 /// This build's version, shown in the Settings section.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// What the window does after an [`Action`], beyond changing the model.
+/// [`Model::apply_action`] returns it, so `App` has one place to read it.
+#[derive(Debug)]
+pub enum Effect {
+    /// The model changed, and that is all.
+    None,
+    /// Send a command to the daemon through the bridge.
+    Send(Command),
+    /// Open the site in the browser.
+    OpenSite(String),
+    /// Show a folder in the system's file manager.
+    OpenFolder(PathBuf),
+    /// Open the system's folder dialog.
+    PickFolder(Pick),
+}
+
+impl Effect {
+    /// The command to send, if this is one.
+    pub fn command(self) -> Option<Command> {
+        match self {
+            Self::Send(command) => Some(command),
+            _ => None,
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+impl From<Option<Command>> for Effect {
+    fn from(command: Option<Command>) -> Self {
+        command.map_or(Self::None, Self::Send)
+    }
+}
+
 /// What the bridge sends to the window.
 #[derive(Debug)]
 pub enum Update {
@@ -145,26 +183,6 @@ pub enum Update {
     Event(Event),
 }
 
-/// Which of the model's results a notice in the bar tells about. Closing the
-/// notice clears that result ([`Model::dismiss_notice`]), so the bar shows the
-/// next one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NoticeSource {
-    /// A call to the daemon failed ([`Model::notice`]).
-    Call,
-    /// The last sites action ([`Model::sites_notice`]).
-    Sites,
-    /// How the install shown ended ([`Model::install_result`]).
-    Install,
-    /// The last uninstall ([`Model::uninstall_notice`]).
-    Uninstall,
-    /// The runtimes could not be read, or a default not saved
-    /// ([`Model::runtimes_notice`]).
-    Runtimes,
-    /// Start at login failed ([`Model::settings_notice`]).
-    Autostart,
-}
-
 /// The screen the main area shows (code.md, Router). The window's own
 /// state, not the daemon's: a reconnect keeps it. [Laravel: the route that
 /// picks the view.]
@@ -208,7 +226,7 @@ pub enum Action {
     /// default of `runtime`.
     SetDefault { runtime: Runtime, version: Version },
     /// A fix that installs a program (Home: "Install Caddy"). Queued like a
-    /// press of Install; `App` sends it.
+    /// press of Install; `Model::apply_action` sends it.
     Install(InstallJob),
     /// The fix "Add to /etc/hosts" (Linux).
     SyncHosts,
@@ -360,9 +378,9 @@ impl Model {
                 self.session.services = services;
             }
             Update::Log(lines) => lines.into_iter().for_each(|line| self.push_log(line)),
-            Update::Notice(code) => self.session.notice = Some(code),
+            Update::Notice(code) => self.session.notices.set_code(NoticeSource::Call, code),
             Update::Sites(list) => self.set_sites(list),
-            Update::Parked(path) => self.session.sites_notice = Some(SitesNotice::Parked(path)),
+            Update::Parked(path) => self.session.notices.set_sites(SitesNotice::Parked(path)),
             Update::Linked { name, folder } => {
                 // The user may have picked another folder since.
                 let same = self
@@ -372,20 +390,24 @@ impl Model {
                 if same {
                     self.link = None;
                 }
-                self.session.sites_notice = Some(SitesNotice::Linked { name, folder });
+                self.session
+                    .notices
+                    .set_sites(SitesNotice::Linked { name, folder });
             }
-            Update::SitesFailed(code) => {
-                self.session.sites_notice = Some(SitesNotice::Failed(code))
-            }
+            Update::SitesFailed(code) => self.session.notices.set_sites(SitesNotice::Failed(code)),
             Update::Runtimes(list) => self.set_runtimes(list),
-            Update::RuntimesFailed(code) => self.session.runtimes_notice = Some(code),
+            Update::RuntimesFailed(code) => {
+                self.session.notices.set_code(NoticeSource::Runtimes, code)
+            }
             Update::Saved(change) => self.settle(&change),
             Update::NotSaved { change, code } => {
                 self.settle(&change);
                 match change {
-                    Change::Default { .. } => self.session.runtimes_notice = Some(code),
+                    Change::Default { .. } => {
+                        self.session.notices.set_code(NoticeSource::Runtimes, code)
+                    }
                     Change::SitePhp { .. } => {
-                        self.session.sites_notice = Some(SitesNotice::Failed(code))
+                        self.session.notices.set_sites(SitesNotice::Failed(code))
                     }
                 }
             }
@@ -404,7 +426,7 @@ impl Model {
             Update::Autostart(state) => self.session.autostart = state,
             Update::AutostartFailed(code) => {
                 self.session.autostart = Autostart::Unknown;
-                self.session.settings_notice = Some(code);
+                self.session.notices.set_code(NoticeSource::Autostart, code);
             }
             Update::Removed(removal) => self.removed(removal),
             Update::NotRemoved {
@@ -413,13 +435,13 @@ impl Model {
                 in_use,
             } => self.not_removed(removal, code, in_use),
             Update::Xdebug(state) => self.session.xdebug = Some(state),
-            Update::XdebugFailed(code) => self.session.xdebug_notice = Some(code),
+            Update::XdebugFailed(code) => self.session.notices.set_code(NoticeSource::Xdebug, code),
             Update::XdebugAnswered(answer) => {
                 self.session.xdebug_pending = None;
                 match answer {
                     Ok(state) => self.session.xdebug = Some(state),
                     // The bridge reads the state again.
-                    Err(code) => self.session.xdebug_notice = Some(code),
+                    Err(code) => self.session.notices.set_code(NoticeSource::Xdebug, code),
                 }
             }
             Update::Event(event) => apply(self, event),
@@ -430,22 +452,57 @@ impl Model {
     /// not come back, and the next result may show.
     pub fn dismiss_notice(&mut self, source: NoticeSource) {
         match source {
-            NoticeSource::Call => self.session.notice = None,
-            NoticeSource::Sites => self.session.sites_notice = None,
             NoticeSource::Install => {
                 if let Some(index) = self.install_slot() {
                     self.installs[index].noticed = true;
                 }
             }
-            NoticeSource::Uninstall => self.session.uninstall_notice = None,
-            NoticeSource::Runtimes => self.session.runtimes_notice = None,
-            NoticeSource::Autostart => self.session.settings_notice = None,
+            source => self.session.notices.clear(source),
         }
     }
 
-    /// Applies what the user did. Returns the command to send to the
-    /// daemon, if any.
-    pub fn apply_action(&mut self, action: Action) -> Option<Command> {
+    /// Applies what the user did, and says what the window must do beyond
+    /// the state: send a command, or ask the system. A queued install goes
+    /// out here too, once none of this window runs.
+    pub fn apply_action(&mut self, action: Action) -> Effect {
+        match action {
+            Action::OpenSite(name) => Effect::OpenSite(name),
+            Action::OpenFolder(name) => self
+                .site_root(&name)
+                .map_or(Effect::None, |root| Effect::OpenFolder(root.to_path_buf())),
+            Action::OpenDataFolder => Effect::OpenFolder(self.data_dir.clone()),
+            Action::PickFolder(pick) => Effect::PickFolder(pick),
+            action => self.change(action).or_else(|| self.next_command()).into(),
+        }
+    }
+
+    /// The command the window's next queued job needs, if the daemon is free
+    /// for it. Called after each action and each message from the daemon, so
+    /// a job that waited starts when the one before it ends.
+    pub fn next_command(&mut self) -> Option<Command> {
+        self.next_install().map(Command::Install)
+    }
+
+    /// The folder the user picked in the system's dialog.
+    pub fn picked(&mut self, pick: Pick, folder: &Path) -> Effect {
+        match pick {
+            Pick::Park => self.park_request(folder).map(Command::Park).into(),
+            Pick::Link => {
+                self.pick_link_folder(folder);
+                Effect::None
+            }
+        }
+    }
+
+    /// The window itself failed to do something (the system's opener):
+    /// shown as a call that failed.
+    pub fn report(&mut self, code: &str) {
+        self.session
+            .notices
+            .set_code(NoticeSource::Call, code.to_owned());
+    }
+
+    fn change(&mut self, action: Action) -> Option<Command> {
         match action {
             Action::Navigate(route) => {
                 if let Route::Runtimes(runtime) = &route {
@@ -472,20 +529,20 @@ impl Model {
             }
             Action::Service { service, action } => {
                 // The notice was about the last action.
-                self.session.notice = None;
+                self.session.notices.clear(NoticeSource::Call);
                 Some(Command::Service { service, action })
             }
             Action::SetDefault { runtime, version } => {
                 self.choose_default(runtime, version).map(Command::Save)
             }
             Action::Install(job) => {
-                // The job waits in the queue: `App` sends it (`next_install`).
+                // The job joins the queue; `apply_action` sends it when the daemon is free.
                 self.queue_install(job);
                 None
             }
             Action::SyncHosts => self.start_hosts_sync().then_some(Command::SyncHosts),
             Action::StartFirstRun => {
-                // The jobs wait in the queue: `App` sends them.
+                // The jobs join the queue; the first goes out now, the rest as each ends.
                 self.start_first_run();
                 None
             }
@@ -505,7 +562,7 @@ impl Model {
             }
             Action::SetSecure { site, secure } => {
                 // The notice was about the last action.
-                self.session.sites_notice = None;
+                self.session.notices.clear(NoticeSource::Sites);
                 Some(Command::Secure { site, secure })
             }
             Action::AskUnlink(site) => {
@@ -544,11 +601,11 @@ impl Model {
             Action::SetInstallVersion { runtime, text } => {
                 self.set_install_text(runtime, text);
                 // The line under the field was about the last text.
-                self.session.runtimes_notice = None;
+                self.session.notices.clear(NoticeSource::Runtimes);
                 None
             }
             Action::SubmitInstall(runtime) => {
-                // The job waits in the queue: `App` sends it (`next_install`).
+                // The job joins the queue; `apply_action` sends it when the daemon is free.
                 self.request_install(runtime);
                 None
             }
@@ -573,8 +630,7 @@ impl Model {
                 self.appearance = appearance;
                 None
             }
-            // Done by `App`, with the system's opener and dialog: nothing
-            // changes here.
+            // Done by `apply_action`: they only ask the system.
             Action::OpenSite(_)
             | Action::OpenFolder(_)
             | Action::OpenDataFolder

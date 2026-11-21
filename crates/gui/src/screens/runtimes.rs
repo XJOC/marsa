@@ -27,6 +27,7 @@ use semver::Version;
 
 use super::home::{InstallBar, install_bar};
 use super::sites::{Mark, message, mute, status_line};
+use crate::model::NoticeSource;
 use crate::model::{self, Action, Model, Removal, Route};
 use crate::strings;
 use crate::theme::page::{RUNTIMES_LIST_WIDTH, RUNTIMES_TAG_COLUMN, RUNTIMES_VERSION_COLUMN};
@@ -440,8 +441,8 @@ fn xdebug(model: &Model) -> XdebugView {
         lines,
         error: model
             .session
-            .xdebug_notice
-            .as_deref()
+            .notices
+            .code(NoticeSource::Xdebug)
             .map(strings::error_text),
     }
 }
@@ -477,8 +478,8 @@ fn dialog(model: &Model, d: &Descriptor) -> InstallDialog {
         text: model.install_text(d.runtime).to_owned(),
         error: model
             .session
-            .runtimes_notice
-            .as_deref()
+            .notices
+            .code(NoticeSource::Runtimes)
             .map(strings::error_text),
     }
 }
@@ -765,6 +766,7 @@ pub fn show_install_dialog(ctx: &Context, dialog: &InstallDialog) -> Vec<Action>
 
 #[cfg(test)]
 mod tests {
+    use crate::model::Effect;
     use std::path::PathBuf;
 
     use eframe::egui::{self, Pos2, pos2};
@@ -972,7 +974,7 @@ mod tests {
         });
         assert!(matches!(
             command,
-            Some(Command::Save(Change::Default { runtime: Runtime::Php, ref version })) if version == "8.3"
+            Effect::Send(Command::Save(Change::Default { runtime: Runtime::Php, ref version })) if version == "8.3"
         ));
         // The button shows the pick until the daemon answers.
         let VersionSection::Default(picker) = read(&model).details.version else {
@@ -1122,7 +1124,7 @@ mod tests {
         assert_eq!(on.lines[1], "Loaded in PHP 8.3.27, 8.4.23.");
         // The switch asks for the other state, and shows it at once.
         let sent = model.apply_action(Action::ToggleXdebug);
-        assert!(matches!(sent, Some(Command::SetXdebug(false))));
+        assert!(matches!(sent, Effect::Send(Command::SetXdebug(false))));
         let asked = xdebug(&model);
         assert!(!asked.on);
         assert_eq!(asked.off, Some(strings::XDEBUG_BUSY));
@@ -1163,13 +1165,13 @@ mod tests {
     fn install_sends_the_job_for_the_text_and_an_empty_field_asks_for_the_newest() {
         let mut model = model();
         model.apply_action(Action::AskInstall(Runtime::Php));
+        let sent = model
+            .apply_action(Action::SubmitInstall(Runtime::Php))
+            .command();
         assert!(
-            model
-                .apply_action(Action::SubmitInstall(Runtime::Php))
-                .is_none()
+            matches!(sent, Some(Command::Install(ref sent)) if *sent == job(Runtime::Php, None))
         );
         assert_eq!(install_dialog_view(&model), None, "the dialog closes");
-        assert_eq!(model.next_install(), Some(job(Runtime::Php, None)));
 
         let mut model = self::model();
         model.apply_action(Action::AskInstall(Runtime::Php));
@@ -1177,8 +1179,12 @@ mod tests {
             runtime: Runtime::Php,
             text: " 8.5 ".into(),
         });
-        model.apply_action(Action::SubmitInstall(Runtime::Php));
-        assert_eq!(model.next_install(), Some(job(Runtime::Php, Some("8.5"))));
+        let sent = model
+            .apply_action(Action::SubmitInstall(Runtime::Php))
+            .command();
+        assert!(
+            matches!(sent, Some(Command::Install(ref sent)) if *sent == job(Runtime::Php, Some("8.5")))
+        );
     }
 
     #[test]
@@ -1285,7 +1291,7 @@ mod tests {
             "PHP 8.3.27 is in use, so it was not uninstalled."
         );
         // A done uninstall is one sentence.
-        model.session.uninstall_notice = Some(UninstallNotice::Done {
+        model.session.notices.set_uninstall(UninstallNotice::Done {
             runtime: Runtime::Php,
             version: v("8.2.28"),
         });
