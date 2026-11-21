@@ -43,7 +43,7 @@ use marsa_core::recipes::Platform;
 use marsa_core::types::{OpStatus, UninstallReport};
 
 use super::Failure;
-use super::daemon::{ClientFailure, connect, failure};
+use super::daemon::{connect, failure};
 use super::sites::printable;
 use super::strings::{self, Details};
 use marsa_core::platform::trust;
@@ -74,25 +74,24 @@ pub struct UninstallAllArgs {
 
 /// Runs the uninstall. `data_dir_given`: the folder came from `--data-dir`,
 /// so it is never deleted.
-pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool) -> ExitCode {
+pub async fn run(
+    args: &UninstallAllArgs,
+    data_dir: &Path,
+    data_dir_given: bool,
+) -> Result<ExitCode, Failure> {
     let mut terminal = Terminal;
     // Before the question: the daemon would answer `uninstall_not_supported`
     // only after the user typed yes.
     if !runs_here(Platform::current()) {
-        return own_failure(codes::UNINSTALL_NOT_SUPPORTED, None).report();
+        return Err(own_failure(codes::UNINSTALL_NOT_SUPPORTED, None));
     }
     let deletable = !data_dir_given;
     let plan = strings::uninstall_all_plan(data_dir, deletable, deletable && args.delete_data);
     eprint!("{plan}");
     // Read before `until_ctrl_c` takes Ctrl+C over: here it still ends the
     // process at once, before anything changed.
-    if let Err(failure) = confirm(args, &mut terminal) {
-        return failure.report();
-    }
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+    confirm(args, &mut terminal)?;
+    let client = connect(data_dir).await?;
     // Windows: the CLI runs on the machine marsad runs on (ADR 0018).
     let started = if cfg!(windows) {
         strings::UNINSTALL_ALL_STARTED_WINDOWS
@@ -108,17 +107,17 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
             if !refused_at_once(&err) {
                 eprintln!("{}", strings::UNINSTALL_ALL_RESULT_UNKNOWN);
             }
-            return failure(&err, data_dir, None).report();
+            return Err(failure(&err, data_dir, None));
         }
         None => {
             let log = data_dir.join("logs").join("marsad.log");
             eprintln!("{}", strings::uninstall_all_ctrl_c(&log));
-            return ExitCode::FAILURE;
+            return Ok(ExitCode::FAILURE);
         }
     };
     print!("{}", render(&report, data_dir));
     if let Some(failure) = error(&report) {
-        return failure.report();
+        return Err(failure);
     }
     let complete = is_complete(&report);
     let mut ok = complete;
@@ -129,7 +128,7 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
     // installed the handler), so every wait races it.
     let Some(end) = until_ctrl_c(wait_for_exit(data_dir)).await else {
         eprintln!("\n{}", strings::UNINSTALL_ALL_STOP_CTRL_C);
-        return ExitCode::FAILURE;
+        return Ok(ExitCode::FAILURE);
     };
     match &end {
         DaemonEnd::Stopped => println!("{}", strings::DAEMON_STOPPED),
@@ -214,11 +213,11 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
         default_dir: default_dir.as_deref(),
     };
     print!("{}", left.render());
-    if ok {
+    Ok(if ok {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
-    }
+    })
 }
 
 /// `answer`, or `None` once the user pressed Ctrl+C. If Ctrl+C cannot be
@@ -259,7 +258,7 @@ enum DaemonEnd {
     /// window or the menu-bar icon.
     Back,
     /// It did not stop in time.
-    NotStopped(ClientFailure),
+    NotStopped(Failure),
 }
 
 /// Waits until the daemon has stopped, then watches [`RESTART_WATCH`] for
@@ -539,7 +538,7 @@ fn own_failure(code: &'static str, path: Option<&Path>) -> Failure {
         ..Details::default()
     };
     Failure {
-        code,
+        code: code.into(),
         message: strings::message(code, &details),
     }
 }
@@ -571,12 +570,12 @@ fn render(report: &UninstallReport, data_dir: &Path) -> String {
 }
 
 /// Why the helper did not run, ready for stderr.
-fn error(report: &UninstallReport) -> Option<ClientFailure> {
+fn error(report: &UninstallReport) -> Option<Failure> {
     let error = report.error.as_ref()?;
     let code = printable(&error.code);
-    Some(ClientFailure {
+    Some(Failure {
         message: strings::message(&code, &Details::default()),
-        code,
+        code: code.into(),
     })
 }
 
