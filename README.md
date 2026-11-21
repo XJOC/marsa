@@ -1,6 +1,6 @@
 # Marsa
 
-![Phase 1: 93%](https://img.shields.io/badge/Phase%201-93%25-brightgreen) ![Phase 2: 7%](https://img.shields.io/badge/Phase%202-7%25-lightgrey)
+![Phase 1: 98%](https://img.shields.io/badge/Phase%201-98%25-brightgreen) ![Phase 2: 15%](https://img.shields.io/badge/Phase%202-15%25-lightgrey)
 
 Marsa (Arabic: مرسى, "harbor") runs your PHP and Node.js projects on your
 computer as `https://<folder>.test` sites. It installs the PHP, Node.js, Composer, and Caddy
