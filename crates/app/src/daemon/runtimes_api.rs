@@ -57,6 +57,7 @@
 
 use marsa_core::codes;
 use std::error::Error;
+use std::num::NonZeroU8;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -87,6 +88,7 @@ use super::api::HttpError;
 use super::client_shims;
 use super::databases;
 use super::http::{self, Rejected as _, global_error};
+use super::one_at_a_time::{OneAtATime, Turn};
 use super::php::{fpm_id, wanted_pools};
 use super::state::Daemon;
 
@@ -103,6 +105,7 @@ pub fn routes() -> Router<Arc<Daemon>> {
 /// also if the install task panics.
 struct Started {
     daemon: Arc<Daemon>,
+    _turn: Turn,
     id: u64,
 }
 
@@ -117,20 +120,12 @@ impl Started {
     /// The same right for an uninstall, which has no id. No lock: one atomic
     /// swap.
     fn claim(daemon: &Arc<Daemon>) -> Option<Self> {
-        let running = &daemon.installs.running;
-        running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()?;
+        let turn = OneAtATime::take(&daemon.installs.running, NonZeroU8::MIN).ok()?;
         Some(Self {
             daemon: Arc::clone(daemon),
+            _turn: turn,
             id: 0,
         })
-    }
-}
-
-impl Drop for Started {
-    fn drop(&mut self) {
-        self.daemon.installs.running.store(false, Ordering::Release);
     }
 }
 
