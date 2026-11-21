@@ -1,5 +1,5 @@
 //! The install side of the daemon: how an install runs, and whether one runs
-//! now. The routes that start it are in `runtimes_api`.
+//! now. The routes that start it are in `install`.
 
 use std::fmt;
 use std::future::Future;

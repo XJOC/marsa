@@ -14,7 +14,6 @@ pub(crate) mod http;
 pub mod one_at_a_time;
 pub mod php;
 pub mod runtimes;
-pub mod runtimes_api;
 pub mod server;
 pub mod services;
 pub mod services_api;
