@@ -89,6 +89,7 @@ use semver::Version;
 use super::api::HttpError;
 use super::client_shims;
 use super::databases;
+use super::http::{self, Rejected as _, global_error};
 use super::php::{fpm_id, wanted_pools};
 use super::sites_api;
 use super::state::Daemon;
@@ -267,11 +268,9 @@ async fn install(
     path: Result<UrlPath<String>, PathRejection>,
     body: Result<Json<InstallRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<InstallAccepted>), HttpError> {
-    let UrlPath(tool) =
-        path.map_err(|err| HttpError::new(err.status(), codes::INVALID_PATH, err.body_text()))?;
+    let UrlPath(tool) = path.map_err(|err| err.reject(codes::INVALID_PATH))?;
     let runtime = runtime(&tool)?;
-    let Json(request) =
-        body.map_err(|err| HttpError::new(err.status(), codes::INVALID_BODY, err.body_text()))?;
+    let Json(request) = body.map_err(|err| err.reject(codes::INVALID_BODY))?;
     let Some(started) = Started::take(&daemon) else {
         return Err(busy());
     };
@@ -521,28 +520,18 @@ async fn set_default(
     path: Result<UrlPath<String>, PathRejection>,
     body: Result<Json<DefaultRequest>, JsonRejection>,
 ) -> Result<Json<DefaultVersion>, HttpError> {
-    let UrlPath(tool) =
-        path.map_err(|err| HttpError::new(err.status(), codes::INVALID_PATH, err.body_text()))?;
+    let UrlPath(tool) = path.map_err(|err| err.reject(codes::INVALID_PATH))?;
     let runtime = runtime(&tool)?;
     let tool = default_tool(runtime).ok_or_else(|| no_default_version(runtime))?;
-    let Json(DefaultRequest { version }) =
-        body.map_err(|err| HttpError::new(err.status(), codes::INVALID_BODY, err.body_text()))?;
+    let Json(DefaultRequest { version }) = body.map_err(|err| err.reject(codes::INVALID_BODY))?;
     // The disk on a blocking thread; the lock is dropped there, before any
     // `.await`.
     let worker = Arc::clone(&daemon);
-    let job = tokio::task::spawn_blocking(move || {
+    let answer = http::blocking("default version", move || {
         let _one = worker.lock_global();
         save_default(&worker.data_dir, tool, version.trim())
-    });
-    let answer = job.await.unwrap_or_else(|err| {
-        tracing::error!(error = %err, "the default version job failed");
-        let message = "the default version job failed";
-        Err(HttpError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            codes::INTERNAL_ERROR,
-            message,
-        ))
-    })?;
+    })
+    .await?;
     tracing::info!(
         runtime = runtime.dir_name(),
         default = %answer.default,
@@ -619,8 +608,7 @@ async fn uninstall(
     State(daemon): State<Arc<Daemon>>,
     path: Result<UrlPath<(String, String)>, PathRejection>,
 ) -> Result<Json<Uninstalled>, HttpError> {
-    let UrlPath((tool, text)) =
-        path.map_err(|err| HttpError::new(err.status(), codes::INVALID_PATH, err.body_text()))?;
+    let UrlPath((tool, text)) = path.map_err(|err| err.reject(codes::INVALID_PATH))?;
     let runtime = runtime(&tool)?;
     let started = Started::claim(&daemon).ok_or_else(busy)?;
     // A task of its own, so a client that hangs up cannot stop it between
@@ -671,7 +659,7 @@ async fn remove_version(
     let caddy = daemon.caddy.running_program(&daemon);
     let server = server_kind.and_then(|kind| daemon.server(kind).running_program(&daemon));
     let worker = Arc::clone(&daemon);
-    let job = tokio::task::spawn_blocking(move || {
+    let (version, retired, cleared) = http::blocking("uninstall", move || {
         // `marsa use` waits, so the version cannot become the default
         // between the check and the rename.
         let _one = worker.lock_global();
@@ -680,15 +668,8 @@ async fn remove_version(
             server: server.as_deref(),
         };
         retire_unused(&worker.data_dir, runtime, text.trim(), running)
-    });
-    let (version, retired, cleared) = job.await.map_err(|err| {
-        tracing::error!(error = %err, "the uninstall job failed");
-        HttpError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            codes::INTERNAL_ERROR,
-            "the uninstall job failed",
-        )
-    })??;
+    })
+    .await?;
     // Moved aside: a start now finds no such version.
     drop(server_turn);
     if let Some(default) = cleared {
@@ -960,17 +941,6 @@ fn no_default_version(runtime: Runtime) -> HttpError {
 fn bad_version(text: &str, err: BadRequest) -> HttpError {
     let message = format!("{text:?}: {err}");
     HttpError::new(StatusCode::BAD_REQUEST, err.code(), message)
-}
-
-/// `global.toml` cannot be read or written: the request was fine, the file or
-/// the disk is not.
-fn global_error(err: &ConfigError) -> HttpError {
-    tracing::warn!(code = err.code(), error = %err, "global.toml");
-    HttpError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        err.code(),
-        err.to_string(),
-    )
 }
 
 #[cfg(test)]
