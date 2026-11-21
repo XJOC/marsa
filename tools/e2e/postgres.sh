@@ -95,6 +95,7 @@ marsa services | tee "$RUNNER_TEMP/services.txt"
 grep -E '^postgres +running' "$RUNNER_TEMP/services.txt" || fail "postgres is not running"
 grep -qF "postgres: 127.0.0.1:$PORT, user root, no password" "$RUNNER_TEMP/services.txt" ||
   fail "no connection line"
+grep -qx "DB_PORT=$PORT" "$RUNNER_TEMP/services.txt" || fail "no DB_PORT line"
 grep -q 'enabled = true' "$DATA/config/global.toml" || fail "the start did not turn it on"
 [ -f "$DATA/databases/postgres/18/PG_VERSION" ] || fail "no cluster in databases/postgres/18"
 

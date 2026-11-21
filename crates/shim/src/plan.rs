@@ -1,13 +1,15 @@
 //! What to run: the real program, an optional script, the user's arguments,
-//! and at most one variable that makes the program trust Marsa's CA. Built
-//! without touching the disk or the environment, so every case is tested
-//! without `exec`.
+//! at most one variable that makes the program trust Marsa's CA, and for a
+//! database client the address of Marsa's server. Built without touching
+//! the disk or the environment, so every case is tested without `exec`.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use marsa_core::caddy::CaddyPaths;
+use marsa_core::databases::ServerKind;
+use marsa_core::databases::clients::Client;
 use marsa_core::php::PhpFiles;
 use marsa_core::recipes::Platform;
 use marsa_core::resolver::Tool;
@@ -30,6 +32,75 @@ pub struct Plan {
     /// [`Plan::new`] leaves it `None`; the caller sets it from
     /// [`TrustVar::decide`].
     pub trust: Option<TrustEnv>,
+    /// Variables the command sets for a database client: those of
+    /// [`server_env`] that the user has not set ([`unset_only`]). Empty from
+    /// [`Plan::new`] and [`Plan::client`].
+    pub server_env: Vec<(&'static str, String)>,
+}
+
+/// The host of every server Marsa runs: they listen on loopback only.
+const SERVER_HOST: &str = "127.0.0.1";
+
+/// The variables that point a client of `server` at Marsa's server on
+/// `port`, read by the client when no argument says otherwise:
+///
+/// - PostgreSQL: `PGHOST`, `PGPORT`, and `PGUSER=root`, the role Marsa
+///   makes for Laravel's default settings. Over TCP: the socket in `run/`
+///   is the superuser's alone.
+/// - MySQL: `MYSQL_HOST` and `MYSQL_TCP_PORT`, so the client uses TCP and
+///   not its default socket in `/tmp`, which is not Marsa's.
+/// - Valkey: none. `valkey-cli` reads no such variable, and goes to
+///   `127.0.0.1:6379` unless its arguments say otherwise.
+pub fn server_env(server: ServerKind, port: u16) -> Vec<(&'static str, String)> {
+    let (host, port_var, user) = match server {
+        ServerKind::Postgres => ("PGHOST", "PGPORT", Some(("PGUSER", "root"))),
+        ServerKind::Mysql => ("MYSQL_HOST", "MYSQL_TCP_PORT", None),
+        ServerKind::Valkey => return Vec::new(),
+    };
+    let mut vars = vec![(host, SERVER_HOST.to_owned()), (port_var, port.to_string())];
+    vars.extend(user.map(|(name, value)| (name, value.to_owned())));
+    vars
+}
+
+/// The variables of `vars` that the user has not set. A variable the user
+/// set, even to an empty value, is never changed: the client then reads the
+/// user's value from the environment it inherits. `is_set` reads the
+/// environment.
+pub fn unset_only(
+    vars: Vec<(&'static str, String)>,
+    is_set: impl Fn(&str) -> bool,
+) -> Vec<(&'static str, String)> {
+    vars.into_iter().filter(|(name, _)| !is_set(name)).collect()
+}
+
+/// The version of `server` that its clients run: the newest installed version
+/// of the `default` line, or of all lines when `default` is not set, as
+/// `marsad` picks the version it starts. No project file counts: one server
+/// serves every project.
+///
+/// # Errors
+///
+/// `shim_server_not_installed` when no version is installed, and
+/// `shim_server_line_not_installed` when none is in the `default` line.
+pub fn server_version(
+    server: ServerKind,
+    default: Option<&str>,
+    installed: &[Version],
+    runtimes: &RuntimesDir,
+) -> Result<Version, ShimError> {
+    if let Some(version) = server.line_version(default, installed) {
+        return Ok(version);
+    }
+    match default {
+        Some(line) if !installed.is_empty() => Err(ShimError::ServerLineNotInstalled {
+            server,
+            line: line.trim().to_owned(),
+        }),
+        _ => Err(ShimError::ServerNotInstalled {
+            server,
+            dir: runtimes.runtime_dir(server.runtime()),
+        }),
+    }
 }
 
 /// Node adds the certificates in this file to its own list.
@@ -195,7 +266,28 @@ impl Plan {
             script,
             args: user_args.into_iter().collect(),
             trust: None,
+            server_env: Vec::new(),
         })
+    }
+
+    /// The plan of a database client: its program in the `version` folder
+    /// of its server, which must come from [`RuntimesDir::installed`], with
+    /// the user's arguments as they are. `redis-cli` runs `valkey-cli`.
+    pub fn client(
+        client: Client,
+        platform: Platform,
+        runtimes: &RuntimesDir,
+        version: &Version,
+        user_args: impl IntoIterator<Item = OsString>,
+    ) -> Self {
+        let version_dir = runtimes.version_dir(client.server.runtime(), version);
+        Self {
+            program: Layout::of(platform).client(&version_dir, client.program),
+            script: None,
+            args: user_args.into_iter().collect(),
+            trust: None,
+            server_env: Vec::new(),
+        }
     }
 
     /// # Errors
@@ -214,16 +306,17 @@ impl Plan {
     }
 
     /// The command to run. The environment is inherited: the depth counter
-    /// goes up by one, and [`Plan::trust`] sets or removes one variable.
-    /// `argv[0]` is the absolute path, so `PHP_BINARY` and `process.execPath`
-    /// point at the real program, and `@php` in Composer scripts uses the
-    /// same PHP.
+    /// goes up by one, [`Plan::trust`] sets or removes one variable, and
+    /// [`Plan::server_env`] adds its variables. `argv[0]` is the absolute
+    /// path, so `PHP_BINARY` and `process.execPath` point at the real
+    /// program, and `@php` in Composer scripts uses the same PHP.
     pub fn command(&self, depth: u32) -> Command {
         let mut command = Command::new(&self.program);
         command
             .args(&self.script)
             .args(&self.args)
-            .env(depth::VAR, depth.saturating_add(1).to_string());
+            .env(depth::VAR, depth.saturating_add(1).to_string())
+            .envs(self.server_env.iter().map(|(name, value)| (name, value)));
         match &self.trust {
             Some(TrustEnv::Set { name, file }) => {
                 command.env(name, file);
@@ -270,6 +363,16 @@ impl Layout {
         }
     }
 
+    /// A database client `program`, in its server's version folder `dir`:
+    /// `bin/` on every system, as in the server's recipe.
+    fn client(self, dir: &Path, program: &str) -> PathBuf {
+        let bin = dir.join("bin");
+        match self {
+            Layout::Unix => bin.join(program),
+            Layout::Windows => bin.join(format!("{program}.exe")),
+        }
+    }
+
     /// The folder of `npm-cli.js` and `npx-cli.js`, in a Node folder `dir`.
     fn npm_bin(self, dir: &Path) -> PathBuf {
         let modules = match self {
@@ -283,6 +386,7 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marsa_core::databases::clients::CLIENTS;
     use std::ffi::OsStr;
     use std::path::Path;
 
@@ -444,7 +548,134 @@ mod tests {
                 let script = recipe_path(Runtime::Node, platform, "8.4.3", program);
                 assert_eq!(plan.script, Some(script), "{platform:?} {name:?}");
             }
+            for client in CLIENTS {
+                let runtimes = RuntimesDir::in_dir(Path::new("/data"));
+                let plan = Plan::client(client, platform, &runtimes, &v("18.7.0"), []);
+                let runtime = client.server.runtime();
+                let want = recipe_path(runtime, platform, "18.7.0", client.program);
+                assert_eq!(plan.program, want, "{platform:?} {}", client.name);
+            }
         }
+    }
+
+    fn client(name: &str) -> Client {
+        Client::from_name(name).expect("a client name")
+    }
+
+    fn client_plan(platform: Platform, name: &str, version: &str, args: &[&str]) -> Plan {
+        let runtimes = RuntimesDir::in_dir(Path::new("/data"));
+        let args = args.iter().map(OsString::from);
+        Plan::client(client(name), platform, &runtimes, &v(version), args)
+    }
+
+    #[test]
+    fn clients_run_their_program_from_the_folder_of_their_server() {
+        for (name, runtime, version, program) in [
+            ("psql", "postgres", "18.7.0", "psql"),
+            ("pg_dump", "postgres", "18.7.0", "pg_dump"),
+            ("pg_restore", "postgres", "17.9.0", "pg_restore"),
+            ("mysql", "mysql", "8.4.13", "mysql"),
+            ("mysqldump", "mysql", "8.4.13", "mysqldump"),
+            ("mysqladmin", "mysql", "8.4.13", "mysqladmin"),
+            ("valkey-cli", "valkey", "8.1.11", "valkey-cli"),
+            ("redis-cli", "valkey", "8.1.11", "valkey-cli"),
+        ] {
+            let dir = Path::new("/data/runtimes").join(runtime).join(version);
+            let plan = client_plan(Platform::DarwinArm64, name, version, &["-c", "a b"]);
+            assert_eq!(plan.program, dir.join("bin").join(program), "{name}");
+            assert_eq!(plan.script, None, "{name}");
+            assert_eq!(plan.args, ["-c", "a b"], "{name}");
+            assert_eq!((plan.trust, plan.server_env), (None, Vec::new()), "{name}");
+            let linux = client_plan(Platform::LinuxX64, name, version, &[]);
+            assert_eq!(linux.program, dir.join("bin").join(program), "{name}");
+            let windows = client_plan(Platform::WindowsX64, name, version, &[]);
+            let exe = dir.join("bin").join(format!("{program}.exe"));
+            assert_eq!(windows.program, exe, "{name}");
+        }
+    }
+
+    #[test]
+    fn each_server_gets_the_variables_its_clients_read() {
+        let postgres = server_env(ServerKind::Postgres, 5433);
+        let want = [
+            ("PGHOST", "127.0.0.1"),
+            ("PGPORT", "5433"),
+            ("PGUSER", "root"),
+        ];
+        assert_eq!(postgres, want.map(|(k, v)| (k, v.to_owned())));
+        let mysql = server_env(ServerKind::Mysql, 3306);
+        let want = [("MYSQL_HOST", "127.0.0.1"), ("MYSQL_TCP_PORT", "3306")];
+        assert_eq!(mysql, want.map(|(k, v)| (k, v.to_owned())));
+        assert!(server_env(ServerKind::Valkey, 6380).is_empty());
+    }
+
+    #[test]
+    fn a_variable_the_user_set_is_never_added() {
+        let all = server_env(ServerKind::Postgres, 5432);
+        let none_set = unset_only(all.clone(), |_| false);
+        assert_eq!(none_set, all);
+        // `PGHOST=db.example psql`: the user's host stays, the rest is added.
+        let host_set = unset_only(all.clone(), |name| name == "PGHOST");
+        let want = [("PGPORT", "5432"), ("PGUSER", "root")];
+        assert_eq!(host_set, want.map(|(k, v)| (k, v.to_owned())));
+        assert!(unset_only(all, |_| true).is_empty());
+    }
+
+    #[test]
+    fn the_command_adds_the_server_variables() {
+        let mut plan = client_plan(Platform::LinuxX64, "psql", "18.7.0", &["-l"]);
+        assert!(extra_vars(&plan.command(0)).is_empty());
+        plan.server_env = unset_only(server_env(ServerKind::Postgres, 5432), |name| {
+            name == "PGUSER"
+        });
+        let command = plan.command(2);
+        assert_eq!(command.get_program(), plan.program.as_os_str());
+        assert!(command.get_args().eq([OsStr::new("-l")]));
+        let want = [
+            (OsStr::new("PGHOST"), Some(OsStr::new("127.0.0.1"))),
+            (OsStr::new("PGPORT"), Some(OsStr::new("5432"))),
+        ];
+        let mut vars = extra_vars(&command);
+        vars.sort();
+        assert_eq!(vars, want);
+    }
+
+    #[test]
+    fn a_client_runs_the_default_line_of_its_server_or_the_newest() {
+        let runtimes = RuntimesDir::in_dir(Path::new("/data"));
+        let installed = [v("17.9.0"), v("18.6.0"), v("18.7.0")];
+        let pick = |kind, default, installed: &[Version]| {
+            server_version(kind, default, installed, &runtimes)
+        };
+        let postgres = ServerKind::Postgres;
+        assert_eq!(pick(postgres, Some("17"), &installed).unwrap(), v("17.9.0"));
+        assert_eq!(
+            pick(postgres, Some(" 18 "), &installed).unwrap(),
+            v("18.7.0")
+        );
+        assert_eq!(pick(postgres, None, &installed).unwrap(), v("18.7.0"));
+
+        match pick(postgres, Some(" 16 "), &installed) {
+            Err(ShimError::ServerLineNotInstalled { server, line }) => {
+                assert_eq!((server, line.as_str()), (postgres, "16"));
+            }
+            other => panic!("not a missing line: {other:?}"),
+        }
+        // Nothing installed: the install is what is missing, whatever the
+        // default says.
+        for default in [None, Some("18")] {
+            match pick(ServerKind::Mysql, default, &[]) {
+                Err(ShimError::ServerNotInstalled { server, dir }) => {
+                    assert_eq!(server, ServerKind::Mysql);
+                    assert_eq!(dir, Path::new("/data/runtimes/mysql"));
+                }
+                other => panic!("not a missing server: {other:?}"),
+            }
+        }
+        let valkey = [v("8.1.11"), v("9.0.0")];
+        let pick_valkey = |default| pick(ServerKind::Valkey, default, &valkey).unwrap();
+        assert_eq!(pick_valkey(Some("8.1")), v("8.1.11"));
+        assert_eq!(pick_valkey(None), v("9.0.0"));
     }
 
     // Only Unix lets an argument hold bytes that are not UTF-8.

@@ -1,16 +1,19 @@
 //! The database servers as managed services (ADR 0023): which servers there
 //! are ([`ServerKind`]), PostgreSQL's folders, the arguments of `initdb` and
 //! `postgres`, how it stops, and the check before a start. MySQL's own
-//! part is in [`mysql`], and Valkey's in [`valkey`].
+//! part is in [`mysql`], and Valkey's in [`valkey`]. Their client programs,
+//! which run through the shim, are in [`clients`].
 //!
 //! Not behind the `full` feature: it only decides, like a Laravel policy. The
 //! daemon reads the files, tests the port, and starts the processes (M6-03c).
+//! The shim reads it too.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use semver::Version;
 
+pub mod clients;
 pub mod mysql;
 pub mod valkey;
 

@@ -50,6 +50,10 @@
 //! in PostgreSQL's turn. A later install of another line never moves a user
 //! to its empty cluster. An uninstall never touches `databases/`: it
 //! removes `runtimes/postgres/<version>/` only.
+//!
+//! A database server's install makes the shims of its clients (`psql`,
+//! `mysqldump`, `redis-cli`) before `done`, and the uninstall of its last
+//! version removes them ([`client_shims`]).
 
 use marsa_core::codes;
 use std::error::Error;
@@ -83,6 +87,7 @@ use marsa_core::types::{
 use semver::Version;
 
 use super::api::HttpError;
+use super::client_shims;
 use super::databases;
 use super::php::{fpm_id, wanted_pools};
 use super::sites_api;
@@ -378,6 +383,9 @@ async fn run(started: Started, runtime: Runtime, body: InstallRequest) {
                 let _ = daemon.rebuild_sites().await;
             }
             if let Some(kind) = ServerKind::of_runtime(runtime) {
+                // Before `done`, so `psql` is in `shims/` when `marsa
+                // install postgres` ends.
+                client_shims::sync(&daemon, kind).await;
                 databases::start_after_install(&daemon, kind, done.version.clone());
             }
             InstallUpdate::Done(InstallDone {
@@ -700,6 +708,10 @@ async fn remove_version(
         Err(err) => tracing::warn!(path = %path.display(), error = %err, "the delete stopped"),
     }
     tracing::info!(runtime = runtime.dir_name(), %version, "uninstalled");
+    // The clients (`psql`) go with the last version of their server.
+    if let Some(kind) = server_kind {
+        client_shims::sync(&daemon, kind).await;
+    }
     // Sites that ran this version now resolve to another one, or to none,
     // and `sites_changed` makes Caddy and php-fpm follow. `rebuild_sites`
     // logs its errors.
