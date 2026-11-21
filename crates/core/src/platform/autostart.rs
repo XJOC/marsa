@@ -140,9 +140,9 @@ impl AutostartError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            AutostartError::InvalidPath { .. } => "autostart_path_invalid",
-            AutostartError::Read { .. } => "autostart_read",
-            AutostartError::Write { .. } => "autostart_write",
+            AutostartError::InvalidPath { .. } => crate::codes::AUTOSTART_PATH_INVALID,
+            AutostartError::Read { .. } => crate::codes::AUTOSTART_READ,
+            AutostartError::Write { .. } => crate::codes::AUTOSTART_WRITE,
         }
     }
 }

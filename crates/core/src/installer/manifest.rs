@@ -256,12 +256,12 @@ impl ManifestError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            ManifestError::TooLarge { .. } => "manifest_too_large",
-            ManifestError::BadSignature => "manifest_bad_signature",
-            ManifestError::Invalid { .. } => "manifest_invalid",
-            ManifestError::SchemaUnsupported { .. } => "manifest_schema_unsupported",
-            ManifestError::Rollback { .. } => "manifest_rollback",
-            ManifestError::NoTrustedKey => "manifest_no_trusted_key",
+            ManifestError::TooLarge { .. } => crate::codes::MANIFEST_TOO_LARGE,
+            ManifestError::BadSignature => crate::codes::MANIFEST_BAD_SIGNATURE,
+            ManifestError::Invalid { .. } => crate::codes::MANIFEST_INVALID,
+            ManifestError::SchemaUnsupported { .. } => crate::codes::MANIFEST_SCHEMA_UNSUPPORTED,
+            ManifestError::Rollback { .. } => crate::codes::MANIFEST_ROLLBACK,
+            ManifestError::NoTrustedKey => crate::codes::MANIFEST_NO_TRUSTED_KEY,
         }
     }
 }

@@ -394,7 +394,7 @@ impl PhpError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            PhpError::PathNotAllowed { .. } => "php_path_not_allowed",
+            PhpError::PathNotAllowed { .. } => crate::codes::PHP_PATH_NOT_ALLOWED,
         }
     }
 }

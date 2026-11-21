@@ -23,8 +23,8 @@ use semver::Version;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 
-use super::facts::Probes;
 use super::init::{self, InitError, Step, ensure_data, run_step};
+use crate::daemon::services::probe::ProcessProbe;
 
 const KIND: ServerKind = ServerKind::Postgres;
 /// How long `initdb` may run. About a second on a laptop (S-12); a slow disk
@@ -176,7 +176,7 @@ pub(super) async fn answers(port: u16) -> bool {
 /// process gets no signal, and `postmaster.pid` stays: the pid may be
 /// another program's now (`orphan::clear` handles our own).
 pub(super) async fn lock_refusal(
-    probes: &dyn Probes,
+    probes: &dyn ProcessProbe,
     stderr: &[&str],
     data: &Path,
     socket: Option<&Path>,
@@ -215,7 +215,7 @@ pub(super) async fn lock_refusal(
 }
 
 /// The program at `pid` now, in words, for a message.
-async fn program_at(probes: &dyn Probes, pid: u32) -> String {
+async fn program_at(probes: &dyn ProcessProbe, pid: u32) -> String {
     match probes.real_identity(pid).await {
         Liveness::Alive { exe, .. } => exe.display().to_string(),
         Liveness::Gone => "nothing (it has ended since)".to_owned(),

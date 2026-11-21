@@ -35,21 +35,19 @@
 //! name goes through systemd-resolved and the `marsa0` link. Ports and
 //! trust have no Linux check yet.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::Duration;
 
 use marsa_core::caddy::CaddyPaths;
 use marsa_core::client::{ClientError, DaemonClient};
 use marsa_core::config::{self, ConfigPaths};
 use marsa_core::doctor::{self, Check, Installed, Pass, Ports, Problem, Skip, Verdict};
+use marsa_core::platform::browser::windows_dir;
 use marsa_core::platform::probe;
-use marsa_core::ports;
-use marsa_core::recipes::Platform;
+use marsa_core::recipes::{Os, Platform};
 use marsa_core::runtimes::{Runtime, RuntimesDir};
-use marsa_core::types::{Health, PortHolder, ServiceState, Site};
+use marsa_core::types::{Health, ServiceState, Site};
 use tokio_util::sync::CancellationToken;
 
 use super::daemon::{ClientFailure, failure};
@@ -57,7 +55,8 @@ use super::setup::port_held;
 use super::sites::printable;
 use super::strings::{self, Details};
 use crate::daemon::caddy::CADDY_ID;
-use crate::daemon::setup_api::{RealRunner, Setup, linux_dns, user_trust};
+use crate::daemon::setup_api::{linux_dns, user_trust};
+use marsa_core::platform::runner::RealRunner;
 
 /// How long the system resolver may take for the `.test` name.
 const DNS_LIMIT: Duration = Duration::from_secs(5);
@@ -131,13 +130,24 @@ pub async fn run(data_dir: &Path) -> ExitCode {
         }
     } else if windows {
         let names = daemon.site_names.as_deref();
-        let block = linux_dns::read_block(&windows_system32().join(r"drivers\etc\hosts"));
+        let block = linux_dns::read_block(
+            &windows_dir(std::env::var_os("SystemRoot"))
+                .join("System32")
+                .join(r"drivers\etc\hosts"),
+        );
         show(Check::Dns, doctor::hosts(block.as_ref(), names));
         let caddy_running = caddy == Some(&ServiceState::Running);
         let caddy = running.then(|| daemon.caddy_pid.filter(|_| caddy_running));
         show(
             Check::Ports,
-            doctor::windows_ports(windows_port_holders(), caddy),
+            doctor::windows_ports(
+                marsa_core::platform::ports::holders(
+                    &RealRunner,
+                    Os::Windows,
+                    &CancellationToken::new(),
+                ),
+                caddy,
+            ),
         );
         show(Check::Trust, windows_trust(data_dir));
     } else {
@@ -240,8 +250,8 @@ fn dns(name: &str, running: bool) -> Verdict {
 /// runs: the verdict needs them only then, and another program's server is
 /// left alone.
 fn ports(name: &str, caddy_running: Option<bool>, secure_site: Option<bool>) -> Ports {
-    let setup = Setup::with(Arc::new(RealRunner), Platform::current(), None, None);
-    let holders = setup.port_holders(&CancellationToken::new());
+    let holders =
+        marsa_core::platform::ports::holders(&RealRunner, Os::Mac, &CancellationToken::new());
     let clear = holders.as_ref().is_some_and(Vec::is_empty) && caddy_running == Some(true);
     let http = clear
         && probe::http_get(80, name, PORT_LIMIT)
@@ -323,68 +333,6 @@ fn windows_roots() -> Result<(Vec<Vec<u8>>, usize), String> {
         .map_err(|err| err.to_string());
     #[cfg(not(windows))]
     Err("not Windows".to_owned())
-}
-
-/// Windows' `System32` folder, from `SystemRoot`, which Windows sets for every
-/// process (task M4-19o).
-fn windows_system32() -> PathBuf {
-    let root =
-        std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
-    root.join("System32")
-}
-
-/// Windows: who listens on 80 and 443, from `netstat -ano`, each named by
-/// `tasklist`. Both run from `System32`, with no shell. `None` if netstat
-/// could not run or listed no listener.
-fn windows_port_holders() -> Option<Vec<PortHolder>> {
-    let system = windows_system32();
-    let netstat = std::process::Command::new(system.join("NETSTAT.EXE"))
-        .arg("-ano")
-        .output()
-        .map_err(|err| tracing::debug!(error = %err, "cannot run netstat"))
-        .ok()
-        .filter(|output| output.status.success())?;
-    let listeners = ports::parse_netstat_windows(&String::from_utf8_lossy(&netstat.stdout));
-    if listeners.is_empty() {
-        return None;
-    }
-    let mut names: BTreeMap<u32, Option<String>> = BTreeMap::new();
-    let mut name_of = |pid: u32| {
-        names
-            .entry(pid)
-            .or_insert_with(|| {
-                let filter = format!("PID eq {pid}");
-                std::process::Command::new(system.join("tasklist.exe"))
-                    .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
-                    .output()
-                    .ok()
-                    .and_then(|out| ports::parse_tasklist(&String::from_utf8_lossy(&out.stdout)))
-            })
-            .clone()
-    };
-    let mut holders = [80, 443]
-        .into_iter()
-        .flat_map(|port| ports::holders(&listeners, port))
-        .map(|listener| {
-            let process = listener.pid.and_then(&mut name_of);
-            let app = process
-                .as_deref()
-                .and_then(ports::known_app)
-                .map(str::to_owned);
-            PortHolder {
-                port: listener.port,
-                address: listener.address.clone(),
-                process,
-                pid: listener.pid,
-                user: None,
-                command: None,
-                app,
-            }
-        })
-        .collect::<Vec<_>>();
-    // One line per program and port: System holds 80 on IPv4 and IPv6.
-    holders.dedup_by_key(|holder| (holder.port, holder.pid));
-    Some(holders)
 }
 
 /// Windows: whether Marsa's CA root is among the roots Windows trusts, read

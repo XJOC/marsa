@@ -27,6 +27,7 @@ use semver::Version;
 
 use super::home::{InstallBar, install_bar};
 use super::sites::{Mark, message, mute, status_line};
+use crate::model::NoticeSource;
 use crate::model::{self, Action, Model, Removal, Route};
 use crate::strings;
 use crate::theme::page::{RUNTIMES_LIST_WIDTH, RUNTIMES_TAG_COLUMN, RUNTIMES_VERSION_COLUMN};
@@ -298,7 +299,7 @@ pub fn build(model: &Model, table: &[Descriptor], chosen: usize) -> RuntimesView
     let Some(shown) = table.get(chosen) else {
         return RuntimesView::Unread;
     };
-    if model.runtimes.is_empty() {
+    if model.session.runtimes.is_empty() {
         return RuntimesView::Unread;
     }
     RuntimesView::Read(Box::new(Read {
@@ -420,10 +421,14 @@ fn uninstall_off(
 }
 
 fn xdebug(model: &Model) -> XdebugView {
-    let lines = model.xdebug.as_ref().map_or_else(Vec::new, |state| {
-        strings::xdebug_lines(state, model.xdebug_pending())
-    });
-    let off = if model.xdebug.is_none() {
+    let lines = model
+        .session
+        .xdebug
+        .as_ref()
+        .map_or_else(Vec::new, |state| {
+            strings::xdebug_lines(state, model.xdebug_pending())
+        });
+    let off = if model.session.xdebug.is_none() {
         Some(strings::XDEBUG_UNREAD)
     } else if model.xdebug_pending().is_some() {
         Some(strings::XDEBUG_BUSY)
@@ -434,7 +439,11 @@ fn xdebug(model: &Model) -> XdebugView {
         on: model.xdebug_on().unwrap_or(false),
         off,
         lines,
-        error: model.xdebug_notice.as_deref().map(strings::error_text),
+        error: model
+            .session
+            .notices
+            .code(NoticeSource::Xdebug)
+            .map(strings::error_text),
     }
 }
 
@@ -457,7 +466,7 @@ fn status(model: &Model) -> Status {
 /// ([`show_install_dialog`]), because Home and a site's page open it too, so
 /// it is not part of [`RuntimesView`].
 pub fn install_dialog_view(model: &Model) -> Option<InstallDialog> {
-    let runtime = model.install_dialog?;
+    let runtime = model.session.install_dialog?;
     Some(dialog(model, &descriptor(runtime)))
 }
 
@@ -467,7 +476,11 @@ fn dialog(model: &Model, d: &Descriptor) -> InstallDialog {
         title: strings::install_dialog_title(d.name),
         body: strings::version_field_hint(d.name, d.example),
         text: model.install_text(d.runtime).to_owned(),
-        error: model.runtimes_notice.as_deref().map(strings::error_text),
+        error: model
+            .session
+            .notices
+            .code(NoticeSource::Runtimes)
+            .map(strings::error_text),
     }
 }
 
@@ -753,6 +766,7 @@ pub fn show_install_dialog(ctx: &Context, dialog: &InstallDialog) -> Vec<Action>
 
 #[cfg(test)]
 mod tests {
+    use crate::model::Effect;
     use std::path::PathBuf;
 
     use eframe::egui::{self, Pos2, pos2};
@@ -960,7 +974,7 @@ mod tests {
         });
         assert!(matches!(
             command,
-            Some(Command::Save(Change::Default { runtime: Runtime::Php, ref version })) if version == "8.3"
+            Effect::Send(Command::Save(Change::Default { runtime: Runtime::Php, ref version })) if version == "8.3"
         ));
         // The button shows the pick until the daemon answers.
         let VersionSection::Default(picker) = read(&model).details.version else {
@@ -1110,7 +1124,7 @@ mod tests {
         assert_eq!(on.lines[1], "Loaded in PHP 8.3.27, 8.4.23.");
         // The switch asks for the other state, and shows it at once.
         let sent = model.apply_action(Action::ToggleXdebug);
-        assert!(matches!(sent, Some(Command::SetXdebug(false))));
+        assert!(matches!(sent, Effect::Send(Command::SetXdebug(false))));
         let asked = xdebug(&model);
         assert!(!asked.on);
         assert_eq!(asked.off, Some(strings::XDEBUG_BUSY));
@@ -1151,13 +1165,13 @@ mod tests {
     fn install_sends_the_job_for_the_text_and_an_empty_field_asks_for_the_newest() {
         let mut model = model();
         model.apply_action(Action::AskInstall(Runtime::Php));
+        let sent = model
+            .apply_action(Action::SubmitInstall(Runtime::Php))
+            .command();
         assert!(
-            model
-                .apply_action(Action::SubmitInstall(Runtime::Php))
-                .is_none()
+            matches!(sent, Some(Command::Install(ref sent)) if *sent == job(Runtime::Php, None))
         );
         assert_eq!(install_dialog_view(&model), None, "the dialog closes");
-        assert_eq!(model.next_install(), Some(job(Runtime::Php, None)));
 
         let mut model = self::model();
         model.apply_action(Action::AskInstall(Runtime::Php));
@@ -1165,8 +1179,12 @@ mod tests {
             runtime: Runtime::Php,
             text: " 8.5 ".into(),
         });
-        model.apply_action(Action::SubmitInstall(Runtime::Php));
-        assert_eq!(model.next_install(), Some(job(Runtime::Php, Some("8.5"))));
+        let sent = model
+            .apply_action(Action::SubmitInstall(Runtime::Php))
+            .command();
+        assert!(
+            matches!(sent, Some(Command::Install(ref sent)) if *sent == job(Runtime::Php, Some("8.5")))
+        );
     }
 
     #[test]
@@ -1178,7 +1196,7 @@ mod tests {
         });
         assert!(command.is_none());
         assert_eq!(
-            model.confirm,
+            model.session.confirm,
             Some(Removal::Uninstall {
                 runtime: Runtime::Php,
                 version: v("8.2.28"),
@@ -1273,7 +1291,7 @@ mod tests {
             "PHP 8.3.27 is in use, so it was not uninstalled."
         );
         // A done uninstall is one sentence.
-        model.uninstall_notice = Some(UninstallNotice::Done {
+        model.session.notices.set_uninstall(UninstallNotice::Done {
             runtime: Runtime::Php,
             version: v("8.2.28"),
         });
@@ -1394,7 +1412,7 @@ mod tests {
         assert_eq!(actions, [Action::Navigate(Route::Runtimes(Runtime::Node))]);
         // The dialog of a new runtime says what to type for it.
         let mut asked = self::model();
-        asked.install_dialog = Some(Runtime::Composer);
+        asked.session.install_dialog = Some(Runtime::Composer);
         let dialog = dialog(&asked, &Descriptor::plain(Runtime::Composer, "python"));
         assert_eq!(dialog.title, "Install a python version");
         assert_eq!(

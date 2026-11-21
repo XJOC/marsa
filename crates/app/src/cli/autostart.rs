@@ -6,6 +6,7 @@
 //! icon (`marsa-tray`), which starts `marsad`. The change takes effect at the
 //! next login.
 
+use marsa_core::codes;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -71,7 +72,10 @@ pub fn autostart_failure(
     login_file: Option<&Path>,
 ) -> ClientFailure {
     let mut failure = failure(err, data_dir, None);
-    if matches!(failure.code.as_str(), "autostart_read" | "autostart_write") {
+    if matches!(
+        failure.code.as_str(),
+        codes::AUTOSTART_READ | codes::AUTOSTART_WRITE
+    ) {
         let details = Details {
             path: login_file,
             ..Details::default()

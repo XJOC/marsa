@@ -6,6 +6,7 @@
 //! The only installed PHP or Node version goes with its default, unless PHP
 //! sites follow that default (task M5-19).
 
+use marsa_core::codes;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -65,8 +66,8 @@ pub fn uninstall_failure(
     failure.message = match (err, failure.code.as_str()) {
         // The client cleaned its text already.
         (ClientError::InUse { in_use, .. }, _) => strings::version_in_use(runtime, in_use),
-        (_, "version_not_installed") => strings::nothing_to_uninstall(runtime, &requested),
-        (_, "invalid_version" | "unsupported_alias" | "version_ambiguous") => {
+        (_, codes::VERSION_NOT_INSTALLED) => strings::nothing_to_uninstall(runtime, &requested),
+        (_, codes::INVALID_VERSION | codes::UNSUPPORTED_ALIAS | codes::VERSION_AMBIGUOUS) => {
             let details = Details {
                 runtime: Some(runtime),
                 requested: Some(&requested),

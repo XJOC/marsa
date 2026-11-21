@@ -130,7 +130,7 @@ pub struct ProgramNotAbsolute(pub PathBuf);
 impl ProgramNotAbsolute {
     /// Stable error name for the UI.
     pub fn code(&self) -> &'static str {
-        "program_not_absolute"
+        crate::codes::PROGRAM_NOT_ABSOLUTE
     }
 }
 

@@ -1,6 +1,7 @@
 //! The installed programs of a server, and the first init of its data
 //! folder, in a temp folder that is renamed into place at the end.
 
+use marsa_core::codes;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -85,8 +86,8 @@ impl InitError {
     /// Stable error name for the UI.
     pub fn code(&self) -> &'static str {
         match self.kind {
-            ServerKind::Postgres => "postgres_init_failed",
-            ServerKind::Mysql => "mysql_init_failed",
+            ServerKind::Postgres => codes::POSTGRES_INIT_FAILED,
+            ServerKind::Mysql => codes::MYSQL_INIT_FAILED,
         }
     }
 

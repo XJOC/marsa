@@ -535,9 +535,9 @@ impl ServiceBusy {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Port { .. } => "service_port_busy",
-            Self::PortUnknown { .. } => "service_port_unknown",
-            Self::DataDir { .. } => "service_data_dir_busy",
+            Self::Port { .. } => crate::codes::SERVICE_PORT_BUSY,
+            Self::PortUnknown { .. } => crate::codes::SERVICE_PORT_UNKNOWN,
+            Self::DataDir { .. } => crate::codes::SERVICE_DATA_DIR_BUSY,
         }
     }
 }

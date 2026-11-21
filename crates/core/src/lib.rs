@@ -5,6 +5,7 @@
 //! behind the `full` feature: `platform`, `installer`, and `client`.
 
 pub mod caddy;
+pub mod codes;
 pub mod config;
 pub mod databases;
 pub mod dns;

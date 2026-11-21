@@ -44,7 +44,31 @@ pub enum Platform {
     Any,
 }
 
+/// The operating system of a [`Platform`], for code that only cares about
+/// which of the three desktop systems it runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    /// macOS, either CPU.
+    Mac,
+    /// Linux, either CPU.
+    Linux,
+    /// Windows.
+    Windows,
+    /// `Platform::Any`: no system in particular.
+    Any,
+}
+
 impl Platform {
+    /// The operating system of this platform.
+    pub fn os(self) -> Os {
+        match self {
+            Platform::DarwinArm64 | Platform::DarwinX64 => Os::Mac,
+            Platform::LinuxX64 | Platform::LinuxArm64 => Os::Linux,
+            Platform::WindowsX64 => Os::Windows,
+            Platform::Any => Os::Any,
+        }
+    }
+
     /// Every platform, in the order of the recipe files.
     pub const ALL: [Platform; 6] = [
         Platform::DarwinArm64,
@@ -315,10 +339,10 @@ impl RecipeError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            RecipeError::Invalid { .. } => "recipe_invalid",
-            RecipeError::UnknownPlatform { .. } => "recipe_unknown_platform",
-            RecipeError::BadPath { .. } => "recipe_bad_path",
-            RecipeError::BadTemplate { .. } => "recipe_bad_template",
+            RecipeError::Invalid { .. } => crate::codes::RECIPE_INVALID,
+            RecipeError::UnknownPlatform { .. } => crate::codes::RECIPE_UNKNOWN_PLATFORM,
+            RecipeError::BadPath { .. } => crate::codes::RECIPE_BAD_PATH,
+            RecipeError::BadTemplate { .. } => crate::codes::RECIPE_BAD_TEMPLATE,
         }
     }
 }
@@ -644,6 +668,16 @@ fn bad_path(source: &str, path: &str) -> RecipeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_platform_knows_its_operating_system() {
+        assert_eq!(Platform::DarwinArm64.os(), Os::Mac);
+        assert_eq!(Platform::DarwinX64.os(), Os::Mac);
+        assert_eq!(Platform::LinuxX64.os(), Os::Linux);
+        assert_eq!(Platform::LinuxArm64.os(), Os::Linux);
+        assert_eq!(Platform::WindowsX64.os(), Os::Windows);
+        assert_eq!(Platform::Any.os(), Os::Any);
+    }
 
     /// The five platforms Marsa builds for (all but `any`).
     const CONCRETE: [Platform; 5] = [

@@ -33,6 +33,7 @@
 //! On macOS and Windows `used` is `false`, and the sync answers 409
 //! `hosts_not_used`; so does Linux where the block is not this folder's.
 
+use marsa_core::codes;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -41,11 +42,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use marsa_core::dns;
 use marsa_core::helper::HelperOp;
+use marsa_core::recipes::Os;
 use marsa_core::types::{HostsStatus, SetupReport, SetupSkip};
 
 use super::super::api::HttpError;
 use super::super::state::Daemon;
-use super::{Flow, Running, Setup, is_linux, linux_dns, names_of};
+use super::{Flow, Running, Setup, linux_dns, names_of};
 
 /// The routes on `setup`, merged into setup's own.
 pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
@@ -66,7 +68,10 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
 }
 
 async fn status(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<HostsStatus>, HttpError> {
-    if !setup.platform().is_some_and(is_linux) {
+    if !setup
+        .platform()
+        .is_some_and(|platform| platform.os() == Os::Linux)
+    {
         return Ok(Json(HostsStatus::default()));
     }
     let names = site_names(&daemon).await?;
@@ -80,7 +85,7 @@ async fn status(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<HostsStat
 async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport>, HttpError> {
     let platform = setup
         .platform()
-        .filter(|platform| is_linux(*platform))
+        .filter(|platform| platform.os() == Os::Linux)
         .ok_or_else(not_used)?;
     let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
     let names = site_names(&daemon).await?;
@@ -102,7 +107,7 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
         if !dns::hosts_names_fit(&names) {
             let skipped = SetupSkip {
                 op: linux_dns::HOSTS_SYNC.to_owned(),
-                code: linux_dns::HOSTS_TOO_MANY_NAMES.to_owned(),
+                code: codes::HOSTS_TOO_MANY_NAMES.to_owned(),
             };
             report.skipped.push(skipped);
             return Ok(report);
@@ -139,12 +144,16 @@ fn read_status(daemon: &Daemon, setup: &Setup, names: &[String]) -> HostsStatus 
 
 fn not_used() -> HttpError {
     let message = "this system does not put .test names in the hosts file";
-    HttpError::new(StatusCode::CONFLICT, "hosts_not_used", message)
+    HttpError::new(StatusCode::CONFLICT, codes::HOSTS_NOT_USED, message)
 }
 
 fn internal_error() -> HttpError {
     let message = "the hosts job failed";
-    HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+    HttpError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        codes::INTERNAL_ERROR,
+        message,
+    )
 }
 
 #[cfg(test)]
@@ -165,7 +174,7 @@ mod tests {
     use tempfile::TempDir;
     use tower::ServiceExt as _;
 
-    use super::super::tests::{
+    use super::super::test_support::{
         Fake, Systemd, UBUNTU_2204_SERVER, answer_for, exit, linux_fake_on, make_helper,
     };
     use super::*;

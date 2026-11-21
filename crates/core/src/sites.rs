@@ -137,9 +137,9 @@ impl SkipReason {
     /// Stable name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            SkipReason::NameInvalid => "site_name_invalid",
-            SkipReason::PathNotUtf8 => "site_path_not_utf8",
-            SkipReason::NameTaken { .. } => "site_name_taken",
+            SkipReason::NameInvalid => crate::codes::SITE_NAME_INVALID,
+            SkipReason::PathNotUtf8 => crate::codes::SITE_PATH_NOT_UTF8,
+            SkipReason::NameTaken { .. } => crate::codes::SITE_NAME_TAKEN,
         }
     }
 }
@@ -179,10 +179,10 @@ impl SiteError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            SiteError::NameInvalid { .. } => "site_name_invalid",
-            SiteError::ReadDir { .. } => "site_read_dir",
-            SiteError::NotAFolder { .. } => "site_not_a_folder",
-            SiteError::PathNotUtf8 { .. } => "site_path_not_utf8",
+            SiteError::NameInvalid { .. } => crate::codes::SITE_NAME_INVALID,
+            SiteError::ReadDir { .. } => crate::codes::SITE_READ_DIR,
+            SiteError::NotAFolder { .. } => crate::codes::SITE_NOT_A_FOLDER,
+            SiteError::PathNotUtf8 { .. } => crate::codes::SITE_PATH_NOT_UTF8,
         }
     }
 }

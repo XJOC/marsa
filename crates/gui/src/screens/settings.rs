@@ -111,7 +111,7 @@ pub fn view(model: &Model) -> SettingsView<'_> {
         setup: setup(model, Platform::current()),
         about: About {
             version: model::APP_VERSION,
-            daemon: strings::daemon_hint(&model.connection),
+            daemon: strings::daemon_hint(&model.session.connection),
             folder: &model.data_dir,
             home: model.home.as_deref(),
         },
@@ -122,33 +122,33 @@ fn autostart(model: &Model) -> AutostartRow {
     let off = if !model.is_connected() {
         Some(strings::NEEDS_DAEMON_HINT)
     } else {
-        match model.autostart {
+        match model.session.autostart {
             Autostart::Unknown => Some(strings::AUTOSTART_READING),
             Autostart::Unsupported => Some(strings::AUTOSTART_UNSUPPORTED),
             Autostart::Off | Autostart::On | Autostart::Stale => None,
         }
     };
     AutostartRow {
-        on: model.autostart == Autostart::On,
+        on: model.session.autostart == Autostart::On,
         off,
-        hint: strings::autostart_note(model.autostart).unwrap_or(strings::AUTOSTART_HINT),
+        hint: strings::autostart_note(model.session.autostart).unwrap_or(strings::AUTOSTART_HINT),
     }
 }
 
 fn setup(model: &Model, platform: Option<Platform>) -> SetupGroup {
-    let running = model.setup == Setup::Running;
+    let running = model.session.setup == Setup::Running;
     let (mut names, mut names_hint) = (
         check(model, &NAMES_OPS),
         strings::TEST_NAMES_HINT.to_owned(),
     );
     // Linux on the hosts way: the daemon reads the hosts file, so the window
     // knows without a setup run.
-    if model.hosts.used {
-        if model.hosts.missing.is_empty() {
+    if model.session.hosts.used {
+        if model.session.hosts.missing.is_empty() {
             names = Check::Done;
         } else {
             names = Check::Failed;
-            names_hint = strings::hosts_waiting(&model.hosts.missing);
+            names_hint = strings::hosts_waiting(&model.session.hosts.missing);
         }
     }
     let run_off = if !model.is_connected() {
@@ -158,7 +158,7 @@ fn setup(model: &Model, platform: Option<Platform>) -> SetupGroup {
     } else {
         None
     };
-    let (report, failed) = match &model.setup {
+    let (report, failed) = match &model.session.setup {
         Setup::Finished(report) => (strings::setup_lines(report), None),
         Setup::Failed(code) => (Vec::new(), Some(strings::error_text(code))),
         Setup::Idle | Setup::Running => (Vec::new(), None),
@@ -178,7 +178,7 @@ fn setup(model: &Model, platform: Option<Platform>) -> SetupGroup {
 /// How the last setup of this session did the step of one of `ops`: the
 /// newest result of the report, else whether it left the step out.
 fn check(model: &Model, ops: &[&str]) -> Check {
-    let Setup::Finished(report) = &model.setup else {
+    let Setup::Finished(report) = &model.session.setup else {
         return Check::NotChecked;
     };
     let ours = |op: &str| ops.contains(&op);
@@ -339,6 +339,7 @@ fn check_value(ui: &mut Ui, theme: &Theme, check: Check) {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::Effect;
     use std::path::PathBuf;
 
     use eframe::egui::{self, Rect};
@@ -408,7 +409,7 @@ mod tests {
         // No daemon: the row says so.
         let down = Model::default();
         assert_eq!(view(&down).about.daemon, strings::DAEMON_NOT_CONNECTED);
-        assert_eq!(down.connection, Connection::Connecting);
+        assert_eq!(down.session.connection, Connection::Connecting);
     }
 
     #[test]
@@ -439,7 +440,7 @@ mod tests {
         }
         // Without the daemon nothing can change.
         let mut down = Model::default();
-        down.autostart = Autostart::On;
+        down.session.autostart = Autostart::On;
         assert_eq!(login(&down).off, Some(strings::NEEDS_DAEMON_HINT));
     }
 
@@ -459,7 +460,7 @@ mod tests {
             Setup::Running,
             Setup::Failed("setup_cancelled".into()),
         ] {
-            model.setup = setup;
+            model.session.setup = setup;
             let group = view(&model).setup;
             assert_eq!(
                 (group.cert, group.names),
@@ -467,7 +468,7 @@ mod tests {
             );
         }
         // A report that holds neither step is no answer either.
-        model.setup = Setup::Finished(report(Vec::new(), &[]));
+        model.session.setup = Setup::Finished(report(Vec::new(), &[]));
         let group = view(&model).setup;
         assert_eq!(
             (group.cert, group.names),
@@ -479,7 +480,7 @@ mod tests {
     #[test]
     fn a_setup_report_of_this_session_says_each_step_by_its_own_result() {
         let mut model = connected();
-        model.setup = Setup::Finished(report(
+        model.session.setup = Setup::Finished(report(
             vec![
                 result("resolver_install", OpStatus::Done),
                 result("pf_install", OpStatus::Done),
@@ -491,7 +492,7 @@ mod tests {
         assert_eq!((group.cert, group.names), (Check::Done, Check::Done));
 
         // The step that failed, and the one the helper left out.
-        model.setup = Setup::Finished(report(
+        model.session.setup = Setup::Finished(report(
             vec![result("resolver_install", OpStatus::Failed)],
             &["trust_install"],
         ));
@@ -499,7 +500,7 @@ mod tests {
         assert_eq!((group.cert, group.names), (Check::Skipped, Check::Failed));
         // The other systems name their steps differently; the newest result
         // of a step wins (Linux runs a second request).
-        model.setup = Setup::Finished(report(
+        model.session.setup = Setup::Finished(report(
             vec![
                 result("hosts_sync", OpStatus::Failed),
                 result("hosts_sync", OpStatus::Done),
@@ -711,7 +712,7 @@ mod tests {
         model.update(Update::Autostart(Autostart::Off));
         let command = model.apply_action(Action::ToggleAutostart);
         assert!(
-            matches!(command, Some(Command::SetAutostart(true))),
+            matches!(command, Effect::Send(Command::SetAutostart(true))),
             "{command:?}"
         );
         assert!(view(&model).general.autostart.on);
@@ -792,9 +793,10 @@ mod tests {
             click(&model, strings::OPEN_FOLDER),
             [Action::OpenDataFolder]
         );
-        // The model has nothing to do for it: `App` opens the folder.
+        // The model only says which folder: `App` opens it.
         let mut model = connected();
-        assert!(model.apply_action(Action::OpenDataFolder).is_none());
+        let effect = model.apply_action(Action::OpenDataFolder);
+        assert!(matches!(effect, Effect::OpenFolder(folder) if folder == model.data_dir));
     }
 
     #[test]

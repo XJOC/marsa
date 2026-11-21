@@ -56,8 +56,8 @@ impl OpenError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            OpenError::NoOpener { .. } => "open_no_program",
-            OpenError::Spawn { .. } | OpenError::Failed { .. } => "open_failed",
+            OpenError::NoOpener { .. } => crate::codes::OPEN_NO_PROGRAM,
+            OpenError::Spawn { .. } | OpenError::Failed { .. } => crate::codes::OPEN_FAILED,
         }
     }
 }
@@ -142,8 +142,7 @@ pub fn opener(url: &str) -> Result<Opener, OpenError> {
 
 /// The Windows folder from `SystemRoot`, if that is an absolute path, else
 /// `C:\Windows`.
-#[cfg(windows)]
-fn windows_dir(system_root: Option<OsString>) -> PathBuf {
+pub fn windows_dir(system_root: Option<OsString>) -> PathBuf {
     system_root
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())

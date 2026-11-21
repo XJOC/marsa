@@ -42,18 +42,11 @@ use std::io;
 use std::path::Path;
 
 use crate::ops::program;
-use crate::ops::trust::{self, TRUST_CERT_INVALID, TRUST_DELETE, TRUST_READ, TRUST_WRITE};
-use crate::response::{OpResult, Outcome};
+use crate::ops::trust;
+use crate::response::OpResult;
+use crate::response::code::{TRUST_CERT_INVALID, TRUST_DELETE, TRUST_READ, TRUST_WRITE};
+use crate::response::code::{TRUST_STORE_UPDATE_FAILED, TRUST_TOOL_MISSING};
 use crate::system::{RunOutput, System};
-
-/// This system has neither family's tool with its folder. An install
-/// changed nothing; a removal may have deleted a file of Marsa's, but
-/// nothing could rebuild the store.
-pub const TRUST_TOOL_MISSING: &str = "trust_tool_missing";
-/// The store's tool failed, in an install or a removal. Not the codes of
-/// the macOS op (`trust_add_failed`, `trust_remove_failed`): the UI explains
-/// those with macOS steps (a dialog, Keychain Access).
-pub const TRUST_STORE_UPDATE_FAILED: &str = "trust_store_update_failed";
 
 /// Where a family keeps local roots, and the tool that rebuilds its store.
 struct Store {
@@ -111,7 +104,7 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
         Ok(Some(old)) if old == trust::sha256_hex(&der) => {
             let updated = update(store, system);
             if program::succeeded(&updated) {
-                return result(INSTALL, Outcome::Unchanged);
+                return OpResult::unchanged(INSTALL);
             }
             let message = format!(
                 "{} {}; {} stays, and running setup again tries again",
@@ -131,7 +124,7 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
     }
     let updated = update(store, system);
     if program::succeeded(&updated) {
-        return result(INSTALL, Outcome::Done);
+        return OpResult::done(INSTALL);
     }
     // The tool may have stopped half way. Without the file, one more run
     // puts the store back without any certificate of Marsa's.
@@ -168,7 +161,7 @@ pub fn remove(system: &impl System) -> OpResult {
         Ok(None) => {
             let updated = update(store, system);
             if program::succeeded(&updated) {
-                return result(REMOVE, Outcome::Unchanged);
+                return OpResult::unchanged(REMOVE);
             }
             let message = format!(
                 "{} {}; run it again to make sure no certificate of Marsa's is in the store",
@@ -178,7 +171,7 @@ pub fn remove(system: &impl System) -> OpResult {
             OpResult::failed(REMOVE, TRUST_STORE_UPDATE_FAILED, message)
         }
         Ok(Some(_)) => match remove_steps(REMOVE, store, system) {
-            Ok(()) => result(REMOVE, Outcome::Done),
+            Ok(()) => OpResult::done(REMOVE),
             Err(failed) => failed,
         },
         Err(failed) => failed,
@@ -211,7 +204,7 @@ fn remove_without_tool(system: &impl System) -> OpResult {
         deleted.push(file);
     }
     if deleted.is_empty() {
-        return result(REMOVE, Outcome::Unchanged);
+        return OpResult::unchanged(REMOVE);
     }
     let message = format!(
         "{} was deleted, but this system has no tool to rebuild its store, which may keep \
@@ -284,10 +277,6 @@ fn remove_steps(op: &'static str, store: &Store, system: &impl System) -> Result
     Ok(())
 }
 
-fn result(op: &'static str, outcome: Outcome) -> OpResult {
-    OpResult { op, outcome }
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
@@ -298,9 +287,11 @@ mod tests {
 
     use super::*;
     use crate::ops::apply;
+    use crate::ops::testing::code_of;
     use crate::os::Os;
     use crate::request::Request;
-    use crate::system::{FakeSystem, RunOutput};
+    use crate::response::Outcome;
+    use crate::system::{FakeSystem, Hooked, RunHook, RunOutput};
 
     /// A throwaway self-signed CA, in the clean form the helper writes. Its
     /// key was deleted at once and never entered the repository.
@@ -321,59 +312,31 @@ mod tests {
 
     /// One family in a test: its tool, its file, and a fake system that has
     /// the tool, which succeeds unless a test scripts it.
-    struct Family {
+    type Family = Hooked<Tool>;
+
+    struct Tool {
         tool: &'static str,
         args: &'static [&'static str],
         file: &'static str,
-        fake: FakeSystem,
         /// For each run of the tool: whether the file was there.
         seen: RefCell<Vec<bool>>,
         /// That many runs of the tool fail first.
         failing_runs: Cell<u32>,
     }
 
-    impl System for Family {
-        fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>> {
-            self.fake.read(path, max)
-        }
-
-        fn exists(&self, path: &Path) -> bool {
-            self.fake.exists(path)
-        }
-
-        fn is_link(&self, path: &Path) -> bool {
-            self.fake.is_link(path)
-        }
-
-        fn is_root_only_dir(&self, dir: &Path) -> bool {
-            self.fake.is_root_only_dir(dir)
-        }
-
-        fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-            self.fake.write_atomic(path, bytes, mode)
-        }
-
-        fn remove(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove(path)
-        }
-
-        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove_empty_dir(path)
-        }
-
-        fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
-            self.seen.borrow_mut().push(self.stored().is_some());
-            if self.failing_runs.get() > 0 {
-                self.failing_runs.set(self.failing_runs.get() - 1);
-                let args = args.iter().map(|arg| (*arg).to_owned()).collect();
-                self.fake.log.borrow_mut().push((program.to_owned(), args));
+    impl RunHook for Tool {
+        fn run(
+            family: &Family,
+            _program: &'static str,
+            _args: &[&str],
+            scripted: io::Result<RunOutput>,
+        ) -> io::Result<RunOutput> {
+            family.seen.borrow_mut().push(family.stored().is_some());
+            if family.failing_runs.get() > 0 {
+                family.failing_runs.set(family.failing_runs.get() - 1);
                 return Ok(exit(1));
             }
-            self.fake.run(program, args)
-        }
-
-        fn current_exe(&self) -> io::Result<PathBuf> {
-            self.fake.current_exe()
+            scripted
         }
     }
 
@@ -394,14 +357,14 @@ mod tests {
         put(&fake, DEBIAN_TOOL, b"");
         put(&fake, DEBIAN_FOLDER, b"");
         fake.defaults.insert(DEBIAN_TOOL, exit(0));
-        Family {
+        let tool = Tool {
             tool: DEBIAN_TOOL,
             args: &["--fresh"],
             file: DEBIAN_FILE,
-            fake,
             seen: RefCell::default(),
             failing_runs: Cell::new(0),
-        }
+        };
+        Hooked::with_hook(fake, tool)
     }
 
     fn fedora() -> Family {
@@ -409,14 +372,14 @@ mod tests {
         put(&fake, FEDORA_TOOL, b"");
         put(&fake, ANCHORS, b"");
         fake.defaults.insert(FEDORA_TOOL, exit(0));
-        Family {
+        let tool = Tool {
             tool: FEDORA_TOOL,
             args: &[],
             file: FEDORA_FILE,
-            fake,
             seen: RefCell::default(),
             failing_runs: Cell::new(0),
-        }
+        };
+        Hooked::with_hook(fake, tool)
     }
 
     fn families() -> [Family; 2] {
@@ -457,14 +420,6 @@ mod tests {
         trust::to_pem(&der)
     }
 
-    fn code_of(result: &OpResult) -> &'static str {
-        match result.outcome {
-            Outcome::Failed { code, .. } => code,
-            Outcome::Done => "done",
-            Outcome::Unchanged => "unchanged",
-        }
-    }
-
     fn message_of(result: &OpResult) -> &str {
         match &result.outcome {
             Outcome::Failed { message, .. } => message,
@@ -483,7 +438,7 @@ mod tests {
     #[test]
     fn install_writes_the_clean_file_and_runs_the_tool() {
         for family in families() {
-            assert_eq!(install(TEST_CA, &family), result(INSTALL, Outcome::Done));
+            assert_eq!(install(TEST_CA, &family), OpResult::done(INSTALL));
             // The fixture is in the clean form already: 64 columns, LF.
             assert_eq!(family.stored(), Some((TEST_CA.as_bytes().to_vec(), 0o644)));
             assert_eq!(family.runs(), 1, "{}", family.tool);
@@ -497,7 +452,7 @@ mod tests {
     fn install_writes_its_own_copy_not_the_request_text() {
         let family = debian();
         let padded = format!("\n\n  {}\r\n\t", TEST_CA.replace('\n', "\r\n"));
-        assert_eq!(install(&padded, &family), result(INSTALL, Outcome::Done));
+        assert_eq!(install(&padded, &family), OpResult::done(INSTALL));
         assert_eq!(family.stored(), Some((TEST_CA.as_bytes().to_vec(), 0o644)));
     }
 
@@ -506,10 +461,7 @@ mod tests {
         for mut family in families().map(|family| family.with_file(TEST_CA.as_bytes())) {
             // Any write fails here, so `unchanged` also shows none was tried.
             family.fake.fail_writes.insert(PathBuf::from(family.file));
-            assert_eq!(
-                install(TEST_CA, &family),
-                result(INSTALL, Outcome::Unchanged)
-            );
+            assert_eq!(install(TEST_CA, &family), OpResult::unchanged(INSTALL));
             assert_eq!(
                 family.stored(),
                 Some((TEST_CA.as_bytes().to_vec(), OLD_MODE))
@@ -546,7 +498,7 @@ mod tests {
     #[test]
     fn install_over_another_certificate_writes_over_it() {
         for family in families().map(|family| family.with_file(&other_ca())) {
-            assert_eq!(install(TEST_CA, &family), result(INSTALL, Outcome::Done));
+            assert_eq!(install(TEST_CA, &family), OpResult::done(INSTALL));
             assert_eq!(family.stored(), Some((TEST_CA.as_bytes().to_vec(), 0o644)));
             assert_eq!(family.runs(), 1);
             assert_eq!(family.seen(), [true]);
@@ -597,7 +549,7 @@ mod tests {
                      {FEDORA_TOOL} with {ANCHORS}"
                 )
             );
-            assert_eq!(remove(&fake), result(REMOVE, Outcome::Unchanged));
+            assert_eq!(remove(&fake), OpResult::unchanged(REMOVE));
             assert!(fake.log.borrow().is_empty());
             let files = fake.files.borrow();
             let tools = [Path::new(FEDORA_TOOL), Path::new(DEBIAN_TOOL)];
@@ -656,7 +608,7 @@ mod tests {
         let family = debian();
         put(&family.fake, FEDORA_TOOL, b"");
         put(&family.fake, ANCHORS, b"");
-        assert_eq!(install(TEST_CA, &family), result(INSTALL, Outcome::Done));
+        assert_eq!(install(TEST_CA, &family), OpResult::done(INSTALL));
         assert!(family.stored().is_some());
         assert_eq!(family.runs(), 1);
         let files = family.fake.files.borrow();
@@ -783,7 +735,7 @@ mod tests {
     #[test]
     fn remove_without_a_file_is_unchanged() {
         for family in families() {
-            assert_eq!(remove(&family), result(REMOVE, Outcome::Unchanged));
+            assert_eq!(remove(&family), OpResult::unchanged(REMOVE));
             assert_eq!(family.runs(), 1);
             assert_eq!(family.seen(), [false]);
         }
@@ -811,7 +763,7 @@ mod tests {
         // Any one certificate there is Marsa's: the name is its own.
         for content in [TEST_CA.as_bytes().to_vec(), other_ca()] {
             for family in families().map(|family| family.with_file(&content)) {
-                assert_eq!(remove(&family), result(REMOVE, Outcome::Done));
+                assert_eq!(remove(&family), OpResult::done(REMOVE));
                 assert_eq!(family.stored(), None);
                 assert_eq!(family.runs(), 1);
                 assert_eq!(family.seen(), [false]);
@@ -862,10 +814,7 @@ mod tests {
         let raw = json!({ "version": 1, "ops": ops }).to_string();
         let request = Request::from_arg(OsStr::new(&raw)).unwrap();
         for family in families() {
-            let expected = [
-                result(INSTALL, Outcome::Done),
-                result(REMOVE, Outcome::Done),
-            ];
+            let expected = [OpResult::done(INSTALL), OpResult::done(REMOVE)];
             assert_eq!(apply(&request, Os::Linux, &family), expected);
             assert_eq!(family.stored(), None);
             assert_eq!(family.runs(), 2);

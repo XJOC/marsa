@@ -27,13 +27,13 @@ pub struct Output {
 }
 
 /// Draws the whole window. `picking`: a folder dialog is open.
-pub fn show(ui: &mut Ui, model: &mut Model, picking: bool) -> Output {
+pub fn show(ui: &mut Ui, model: &Model, picking: bool) -> Output {
     show_at(ui, model, picking, Instant::now())
 }
 
 /// [`show`] at the time `now`: the notice bar closes a success by the clock,
 /// so a test moves the clock by hand.
-pub fn show_at(ui: &mut Ui, model: &mut Model, picking: bool, now: Instant) -> Output {
+pub fn show_at(ui: &mut Ui, model: &Model, picking: bool, now: Instant) -> Output {
     let theme = Theme::of(ui.ctx());
     let mut out = Output::default();
     let narrow = sidebar::is_narrow(theme, ui.max_rect().width());
@@ -84,7 +84,7 @@ pub fn show_at(ui: &mut Ui, model: &mut Model, picking: bool, now: Instant) -> O
 
 /// The screen of the route, in the main area. Every screen returns what the
 /// user did as actions.
-fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
+fn screen(ui: &mut Ui, model: &Model, picking: bool, out: &mut Output) {
     let item = Item::of(&model.route);
     match item {
         // First run replaces Home until the first site can open.
@@ -161,6 +161,7 @@ mod tests {
     use marsa_core::types::{Health, Site, SiteKind, SiteList};
 
     use super::*;
+    use crate::model::NoticeSource;
     use crate::model::Update;
     use crate::strings;
     use crate::widgets::harness::Harness;
@@ -193,7 +194,7 @@ mod tests {
         let mut model = model_with_shop();
         model.route = route;
         Harness::new(egui::Theme::Light).accessibility(|ui| {
-            show(ui, &mut model, false);
+            show(ui, &model, false);
         })
     }
 
@@ -222,17 +223,17 @@ mod tests {
         }));
         model.apply_action(Action::AskInstall(marsa_core::runtimes::Runtime::Php));
         assert_eq!(
-            model.install_dialog,
+            model.session.install_dialog,
             Some(marsa_core::runtimes::Runtime::Php)
         );
         let harness = Harness::new(egui::Theme::Light);
         for _ in 0..20 {
             harness.run(|ui| {
-                show(ui, &mut model, false);
+                show(ui, &model, false);
             });
         }
         harness.accessibility(|ui| {
-            show(ui, &mut model, false);
+            show(ui, &model, false);
         })
     }
 
@@ -287,7 +288,10 @@ mod tests {
         ] {
             let mut model = model_with_shop();
             model.route = route.clone();
-            model.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
+            model
+                .session
+                .notices
+                .set_sites(SitesNotice::Unlinked("shop".into()));
             let tree = tree_of(&mut model);
             assert!(tree.node_with_text(&text).is_some(), "{route:?}");
         }
@@ -299,7 +303,10 @@ mod tests {
     #[test]
     fn a_failed_call_is_an_error_notice_that_stays_and_closes_with_its_button() {
         let mut model = model_with_shop();
-        model.notice = Some("service_busy".into());
+        model
+            .session
+            .notices
+            .set_code(NoticeSource::Call, "service_busy".into());
         let tree = tree_of(&mut model);
         let error = strings::error_text("service_busy");
         let bar = tree.node_with_text(&error).expect("the bar");

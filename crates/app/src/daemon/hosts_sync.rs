@@ -21,6 +21,7 @@
 //! names with the user's next command or `marsa setup` instead (task
 //! M4-18k). macOS needs no names: its DNS covers every `.test` name.
 
+use marsa_core::codes;
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::Path;
@@ -106,7 +107,7 @@ impl HostsSync {
         if !dns::hosts_names_fit(&names) {
             // More names than one request takes: a new try gives the same.
             self.failed(
-                "hosts_too_many_names",
+                codes::HOSTS_TOO_MANY_NAMES,
                 "more sites than the hosts file can hold",
                 false,
             );

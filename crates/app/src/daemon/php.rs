@@ -33,6 +33,7 @@
 pub mod cgi;
 pub mod orphan;
 
+use marsa_core::codes;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -47,16 +48,16 @@ use marsa_core::recipes::{self, Platform};
 use marsa_core::runtimes::{Runtime, RuntimesDir, RuntimesError};
 use marsa_core::services::{ServiceSpec, StopMethod};
 use marsa_core::sites::{Site, SiteKind};
-use marsa_core::types::{Event, LogStream, ServiceState, ServiceStatus};
+use marsa_core::types::ServiceStatus;
 use semver::Version;
-use tokio::sync::broadcast;
 use tracing::{info, warn};
 
-use self::orphan::{Blocked, FpmProcesses, Orphans, PidFile, SystemFpm};
+use self::orphan::{Blocked, Orphans, PidFile};
 use super::caddy::orphan::Ladder;
 use super::caddy::{RESTART, STOP_GRACE};
+use super::services::probe::{ProcessProbe, SystemProbe};
 use super::state::Daemon;
-use super::supervisor::{ServiceRuntime, Supervisor, lock, now_ms};
+use super::supervisor::{ServiceRuntime, Supervisor, lock};
 
 /// The TCP fallback of PHP `major.minor` is `19000 + major * 10 + minor`:
 /// 19084 for PHP 8.4.
@@ -200,7 +201,7 @@ fn pool_with(
     let conf = fpm_conf(&listen, &files).map_err(php_skip)?;
     let ini = php_ini(platform, &files).map_err(php_skip)?;
     let program = fpm_program(data_dir, platform, version).ok_or_else(|| Skip {
-        code: "php_fpm_unavailable",
+        code: codes::PHP_FPM_UNAVAILABLE,
         reason: format!("Marsa has no php-fpm for {platform}"),
     })?;
     let dial = match listen {
@@ -278,7 +279,7 @@ fn write_ini(platform: Platform, files: &PhpFiles) -> Result<(), Skip> {
     match write_if_changed(&files.ini_file, &text) {
         Ok(_) => Ok(()),
         Err(err) => Err(Skip {
-            code: "php_config_write",
+            code: codes::PHP_CONFIG_WRITE,
             reason: format!("cannot write {}: {err}", files.ini_file.display()),
         }),
     }
@@ -289,7 +290,7 @@ fn write_ini(platform: Platform, files: &PhpFiles) -> Result<(), Skip> {
 fn write_pool(pool: &Pool) -> Result<(), Skip> {
     if !pool.spec.program.is_file() {
         return Err(Skip {
-            code: "php_fpm_not_installed",
+            code: codes::PHP_FPM_NOT_INSTALLED,
             reason: format!("no PHP program at {}", pool.spec.program.display()),
         });
     }
@@ -297,7 +298,7 @@ fn write_pool(pool: &Pool) -> Result<(), Skip> {
     let cannot = |path: &Path| {
         let path = path.to_path_buf();
         move |err: io::Error| Skip {
-            code: "php_config_write",
+            code: codes::PHP_CONFIG_WRITE,
             reason: format!("cannot write {}: {err}", path.display()),
         }
     };
@@ -468,7 +469,7 @@ pub struct PhpManager {
     /// `process::FPM_ORPHAN_RECOVERY`. Only tests change it.
     recovery: bool,
     /// Who runs under a pid, and signals, for the orphan check.
-    processes: Arc<dyn FpmProcesses>,
+    processes: Arc<dyn ProcessProbe>,
     /// How long SIGTERM and SIGKILL to an orphan master wait (ADR 0009).
     ladder: Ladder,
     /// The same for the workers it left.
@@ -483,7 +484,7 @@ impl PhpManager {
             running: BTreeMap::new(),
             warned: false,
             recovery: process::FPM_ORPHAN_RECOVERY,
-            processes: Arc::new(SystemFpm),
+            processes: Arc::new(SystemProbe),
             ladder: Ladder::default(),
             worker_ladder: Ladder::default(),
         }
@@ -563,8 +564,8 @@ impl PhpManager {
         if let Err(blocked) = self.clear_orphan(daemon, pool, &pid_file).await {
             warn!(service = %id, code = blocked.code, reason = %blocked.reason, "php-fpm was not started");
             let text = format!("marsad: php-fpm was not started: {}.", blocked.reason);
-            note(&runtime, &daemon.events, &text);
-            set_failed(&runtime, &daemon.events, blocked.code);
+            lock(&runtime).note(&daemon.events, &text);
+            lock(&runtime).set_failed(&daemon.events, blocked.code);
             return false;
         }
         // Before the spawn, so the watcher cannot miss the first `running`.
@@ -590,7 +591,7 @@ impl PhpManager {
             }
             Err(err) => {
                 warn!(service = %id, code = err.code(), %err, "cannot start php-fpm");
-                set_failed(&runtime, &daemon.events, err.code());
+                lock(&runtime).set_failed(&daemon.events, err.code());
                 false
             }
         }
@@ -622,7 +623,7 @@ impl PhpManager {
         let found = orphans.inspect().await?;
         let runtime = daemon.pools.runtime(pool.files.minor);
         // Only right before a signal: a stale file alone stops nothing.
-        let note_stop = || note(&runtime, &daemon.events, orphan::STOPPING_ORPHAN);
+        let note_stop = || lock(&runtime).note(&daemon.events, orphan::STOPPING_ORPHAN);
         orphans.reap(found, &note_stop).await
     }
 }
@@ -639,29 +640,6 @@ async fn stop_pool(daemon: &Daemon, minor: PhpMinor) {
     {
         warn!(php = %minor, %err, "the php-fpm task failed");
     }
-}
-
-/// Adds a line from the daemon to a pool's recent lines, so `marsa logs
-/// php-fpm-<minor>` shows why the pool did not start.
-fn note(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, text: &str) {
-    let mut runtime = lock(runtime);
-    let line = runtime.logs.push(LogStream::Stderr, text, now_ms());
-    // Under the lock, like the supervisor, so events come in `seq` order.
-    let _ = events.send(Event::Log(line));
-}
-
-/// Sets `Failed { code }` and tells every reader. Only while no task runs
-/// the pool: the supervisor owns the status then.
-fn set_failed(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, code: &str) {
-    let mut runtime = lock(runtime);
-    let status = &mut runtime.status;
-    status.state = ServiceState::Failed {
-        code: code.to_owned(),
-    };
-    status.pid = None;
-    status.since_ms = Some(now_ms());
-    // An error only means that nobody listens right now.
-    let _ = events.send(Event::ServiceChanged(status.clone()));
 }
 
 /// Where the system's own roots come from, for [`write_ca_bundle`].

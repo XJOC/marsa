@@ -78,15 +78,16 @@ pub fn view(model: &Model) -> ServicesView<'_> {
     if !model.is_connected() {
         return ServicesView::Offline;
     }
-    if model.services.is_empty() {
+    if model.session.services.is_empty() {
         return ServicesView::Empty;
     }
     let rows: Vec<_> = model
+        .session
         .services
         .iter()
         .map(|service| row(model, service))
         .collect();
-    let pools = model.services.iter().any(|s| model::is_pool(&s.id));
+    let pools = model.session.services.iter().any(|s| model::is_pool(&s.id));
     ServicesView::Rows { rows, pools }
 }
 

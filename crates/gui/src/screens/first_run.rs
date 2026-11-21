@@ -65,7 +65,7 @@ pub struct Primary {
 
 /// Decides what the panel says. Pure: the same model gives the same view.
 pub fn view(model: &Model) -> FirstRunView {
-    let rows = &model.runtimes;
+    let rows = &model.session.runtimes;
     let (php, caddy) = (
         model::runtime_missing(rows, Runtime::Php),
         model::runtime_missing(rows, Runtime::Caddy),
@@ -74,7 +74,7 @@ pub fn view(model: &Model) -> FirstRunView {
     let done = [
         !php && !caddy,
         setup_done(model),
-        !model.sites.sites.is_empty(),
+        !model.session.sites.sites.is_empty(),
     ];
     // The first step not done; the last when all are.
     let current = done.iter().position(|done| !done).unwrap_or(done.len() - 1);
@@ -117,7 +117,7 @@ pub fn view(model: &Model) -> FirstRunView {
             action: Action::StartFirstRun,
             disabled: None,
         },
-        1 if model.setup == Setup::Running => Primary {
+        1 if model.session.setup == Setup::Running => Primary {
             label: strings::SETTING_UP,
             action: Action::RunSetup,
             disabled: Some(strings::setup_running(platform)),
@@ -144,9 +144,9 @@ pub fn view(model: &Model) -> FirstRunView {
 /// Setup ran without a failure in this window, or the hosts block (Linux)
 /// shows that an earlier one did.
 fn setup_done(model: &Model) -> bool {
-    match &model.setup {
+    match &model.session.setup {
         Setup::Finished(report) => !strings::setup_lines(report).iter().any(|line| line.problem),
-        Setup::Idle | Setup::Running | Setup::Failed(_) => model.hosts.used,
+        Setup::Idle | Setup::Running | Setup::Failed(_) => model.session.hosts.used,
     }
 }
 
@@ -173,7 +173,7 @@ fn install_detail(model: &Model, done: bool) -> Detail {
 
 /// The wait for the password, or what setup said when it did not finish.
 fn setup_detail(model: &Model, platform: Option<Platform>) -> Detail {
-    match &model.setup {
+    match &model.session.setup {
         Setup::Running => Detail::Lines(vec![ReportLine {
             text: strings::setup_running(platform).to_owned(),
             problem: false,
@@ -188,9 +188,9 @@ fn setup_detail(model: &Model, platform: Option<Platform>) -> Detail {
 
 /// What the last park or link said, while there is no site.
 fn site_detail(model: &Model) -> Detail {
-    match &model.sites_notice {
+    match &model.session.notices.sites() {
         Some(SitesNotice::Failed(code)) => problem(strings::error_text(code)),
-        Some(SitesNotice::Parked(folder)) if model.sites.sites.is_empty() => {
+        Some(SitesNotice::Parked(folder)) if model.session.sites.sites.is_empty() => {
             Detail::Lines(vec![ReportLine {
                 text: strings::parked(folder, model.home.as_deref()),
                 problem: false,
@@ -286,6 +286,7 @@ fn buttons(ui: &mut Ui, theme: &Theme, view: &FirstRunView, actions: &mut Vec<Ac
 
 #[cfg(test)]
 mod tests {
+    use crate::bridge::Command;
     use std::path::{Path, PathBuf};
 
     use eframe::egui::{self, Pos2, pos2};
@@ -354,8 +355,10 @@ mod tests {
 
     /// The PHP job accepted, and `done` of `total` bytes of it downloaded.
     fn downloading(model: &mut Model, done: u64, total: u64) {
-        assert!(model.apply_action(Action::StartFirstRun).is_none());
-        let sent = model.next_install().expect("the first job");
+        let Some(Command::Install(sent)) = model.apply_action(Action::StartFirstRun).command()
+        else {
+            panic!("the first job goes out");
+        };
         model.update(Update::InstallAccepted { job: sent, id: 1 });
         let selected = InstallEvent::Selected {
             runtime: Runtime::Php,
@@ -426,13 +429,15 @@ mod tests {
     #[test]
     fn a_failed_install_says_why_and_offers_the_button_again() {
         let mut model = fresh();
-        assert!(model.apply_action(Action::StartFirstRun).is_none());
-        let sent = model.next_install().expect("the first job");
+        let Some(Command::Install(sent)) = model.apply_action(Action::StartFirstRun).command()
+        else {
+            panic!("the first job goes out");
+        };
         model.update(Update::InstallRefused {
             job: sent,
             code: "install_busy".into(),
         });
-        assert_eq!(model.first_run, Some(FirstRun::Offer));
+        assert_eq!(model.session.first_run, Some(FirstRun::Offer));
         let view = view(&model);
         let Detail::Lines(lines) = &view.steps[0].detail else {
             panic!("the failure shows: {:?}", view.steps[0].detail);

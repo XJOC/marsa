@@ -11,13 +11,11 @@
 //! macOS, the `exe` link on Linux). Anything that is not ours
 //! is never signalled, and another Marsa's Caddy does not even get `/stop`.
 
+use marsa_core::codes;
 use std::error::Error as _;
-use std::fmt;
-use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use marsa_core::caddy::{CaddyInput, SERVER_ID};
@@ -28,13 +26,12 @@ use marsa_core::platform::process::{self, Signal};
 use tracing::{debug, info, warn};
 
 use super::Admin;
+use crate::daemon::services::probe::ProcessProbe;
 
-/// Another program holds a port Caddy needs.
-pub const PORT_IN_USE: &str = "port_in_use";
 /// Our old Caddy holds the ports and could not be stopped.
-pub const ORPHAN_STUCK: &str = "caddy_orphan_stuck";
+pub const ORPHAN_STUCK: &str = codes::CADDY_ORPHAN_STUCK;
 /// Another Marsa's Caddy (another data folder or user) holds our admin port.
-pub const OTHER_MARSA: &str = "caddy_other_marsa";
+pub const OTHER_MARSA: &str = codes::CADDY_OTHER_MARSA;
 
 /// How often a wait checks the ports again.
 const POLL: Duration = Duration::from_millis(50);
@@ -49,38 +46,6 @@ const TAG_BODY_MAX: usize = 16 * 1024 * 1024;
 /// The same for [`Admin::answers_as`]: our tag is on the `admin` object, a
 /// few hundred bytes.
 const ADMIN_BODY_MAX: usize = 64 * 1024;
-
-/// A boxed future, so [`Processes`] works as `dyn Processes`.
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
-/// Who runs under a pid, and signals. [`SystemProcesses`] asks the OS; a test
-/// records the signals instead.
-pub trait Processes: fmt::Debug + Send + Sync {
-    /// The start path and start time.
-    fn identity(&self, pid: u32) -> BoxFuture<'_, Liveness>;
-    /// The file the process really runs.
-    fn executable(&self, pid: u32) -> BoxFuture<'_, Option<PathBuf>>;
-    /// Sends `signal` to `pid`. The caller checked the pid right before.
-    fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>>;
-}
-
-/// The real OS: `marsa_core::platform::process`.
-#[derive(Debug)]
-pub struct SystemProcesses;
-
-impl Processes for SystemProcesses {
-    fn identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
-        Box::pin(process::identity(pid))
-    }
-
-    fn executable(&self, pid: u32) -> BoxFuture<'_, Option<PathBuf>> {
-        Box::pin(process::executable(pid))
-    }
-
-    fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
-        Box::pin(process::send_signal(pid, signal))
-    }
-}
 
 /// How long each step of a reap waits for the orphan to let go of the ports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +70,7 @@ impl Default for Ladder {
 /// Why Caddy must not start, or why our orphan is still there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Blocked {
-    /// [`PORT_IN_USE`], [`ORPHAN_STUCK`], or [`OTHER_MARSA`].
+    /// [`codes::PORT_IN_USE`], [`ORPHAN_STUCK`], or [`OTHER_MARSA`].
     pub code: &'static str,
     pub reason: String,
 }
@@ -166,7 +131,7 @@ impl PidFile {
     /// pid comes from our own `Child`.
     pub(super) async fn record(
         &self,
-        processes: &dyn Processes,
+        processes: &dyn ProcessProbe,
         pid: u32,
         running: &(dyn Fn() -> bool + Send + Sync),
     ) {
@@ -226,7 +191,7 @@ impl PidFile {
 
     /// The file against what the system says now (`ps` on macOS, `/proc`
     /// on Linux).
-    async fn check(&self, record: &PidRecord, processes: &dyn Processes) -> PidfileState {
+    async fn check(&self, record: &PidRecord, processes: &dyn ProcessProbe) -> PidfileState {
         let now = processes.identity(record.pid).await;
         orphan::classify_pidfile(record, &self.accepted, &now)
     }
@@ -259,7 +224,7 @@ impl Found {
 /// The check for one start or stop.
 pub(super) struct Orphans<'a> {
     pub pid_file: &'a PidFile,
-    pub processes: &'a dyn Processes,
+    pub processes: &'a dyn ProcessProbe,
     pub admin: &'a Admin,
     /// The ports the next Caddy needs: on Linux after setup, 80 and 443.
     pub input: CaddyInput,
@@ -324,7 +289,7 @@ impl Orphans<'_> {
             // Includes a frozen process on our admin port that no pid file
             // names: nothing says it is ours, so it is someone else's port.
             Action::Conflict { reason } => Err(Blocked::new(
-                PORT_IN_USE,
+                codes::PORT_IN_USE,
                 with_owners(reason, &found.inspection),
             )),
             Action::OtherMarsa => {
@@ -417,7 +382,7 @@ impl Orphans<'_> {
                     let code = if unsure || tagged {
                         ORPHAN_STUCK
                     } else {
-                        PORT_IN_USE
+                        codes::PORT_IN_USE
                     };
                     let why = if unsure {
                         "cannot be verified as our Caddy"
@@ -634,6 +599,7 @@ fn failed(err: &reqwest::Error) -> Probe {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod tests {
     use super::*;
+    use crate::daemon::services::probe::BoxFuture;
     use std::collections::VecDeque;
     use std::io::{Read as _, Write as _};
     use std::sync::{Arc, Mutex};
@@ -671,7 +637,7 @@ mod tests {
         }
     }
 
-    impl Processes for Fake {
+    impl ProcessProbe for Fake {
         fn identity(&self, _pid: u32) -> BoxFuture<'_, Liveness> {
             let next = self.identities.lock().unwrap().pop_front();
             Box::pin(async move { next.unwrap_or(Liveness::Unknown) })
@@ -879,7 +845,7 @@ mod tests {
         let fake = Fake::new([ours(), ours(), other]);
 
         let result = run(&setup, &fake).await;
-        assert_eq!(result.unwrap_err().code, PORT_IN_USE);
+        assert_eq!(result.unwrap_err().code, codes::PORT_IN_USE);
         assert_eq!(fake.signals(), [(4242, Signal::Term)], "no SIGKILL");
     }
 
@@ -916,7 +882,7 @@ mod tests {
         let fake = Fake::new([later]);
 
         let blocked = run(&setup, &fake).await.unwrap_err();
-        assert_eq!(blocked.code, PORT_IN_USE);
+        assert_eq!(blocked.code, codes::PORT_IN_USE);
         assert!(
             blocked.reason.contains("site port is held by"),
             "{blocked:?}"

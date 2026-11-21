@@ -152,6 +152,21 @@ fn handle(op: &Op, os: Os, system: &impl System) -> OpResult {
     }
 }
 
+/// Helpers the tests of several ops share.
+#[cfg(test)]
+mod testing {
+    use crate::response::{OpResult, Outcome};
+
+    /// The failure code of `result`, or `done` or `unchanged`.
+    pub(super) fn code_of(result: &OpResult) -> &'static str {
+        match result.outcome {
+            Outcome::Failed { code, .. } => code,
+            Outcome::Done => "done",
+            Outcome::Unchanged => "unchanged",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
@@ -159,9 +174,9 @@ mod tests {
 
     use serde_json::{Value, json};
 
+    use super::testing::code_of;
     use super::*;
     use crate::request::Request;
-    use crate::response::Outcome;
     use crate::system::{FakeSystem, RunOutput};
 
     /// The op name and the failure code of each result, or `done` or
@@ -171,12 +186,7 @@ mod tests {
         let request = Request::from_arg(OsStr::new(&raw)).unwrap();
         let fake = FakeSystem::default();
         let results = apply(&request, os, &fake);
-        let code = |r: &OpResult| match r.outcome {
-            Outcome::Failed { code, .. } => code,
-            Outcome::Done => "done",
-            Outcome::Unchanged => "unchanged",
-        };
-        results.iter().map(|r| (r.op, code(r))).collect()
+        results.iter().map(|r| (r.op, code_of(r))).collect()
     }
 
     fn every_op() -> Value {
@@ -221,7 +231,7 @@ mod tests {
         ]);
         let linux = [
             ("resolver_install", code::OP_NOT_SUPPORTED),
-            ("resolved_install", resolved::RESOLVED_NOT_RUNNING),
+            ("resolved_install", code::RESOLVED_NOT_RUNNING),
             ("trust_remove", "unchanged"),
         ];
         assert_eq!(codes(ops.clone(), Os::Linux), linux);
@@ -277,13 +287,8 @@ mod tests {
     fn uninstall_all(fake: &FakeSystem, os: Os) -> Vec<(&'static str, &'static str)> {
         let raw = json!({ "version": 1, "ops": [{ "op": "uninstall_all" }] }).to_string();
         let request = Request::from_arg(OsStr::new(&raw)).unwrap();
-        let code = |r: &OpResult| match r.outcome {
-            Outcome::Failed { code, .. } => code,
-            Outcome::Done => "done",
-            Outcome::Unchanged => "unchanged",
-        };
         let results = apply(&request, os, fake);
-        results.iter().map(|r| (r.op, code(r))).collect()
+        results.iter().map(|r| (r.op, code_of(r))).collect()
     }
 
     #[test]

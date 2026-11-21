@@ -31,35 +31,12 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::response::code::{
+    PF_DELETE, PF_FLUSH_FAILED, PF_HELPER_UNREADABLE, PF_LOAD_FAILED, PF_NOT_INSTALLED,
+    PF_RULES_MISSING, PF_TOKEN_MISSING, PF_WRITE,
+};
 use crate::response::{OpResult, Outcome};
 use crate::system::{RunOutput, System};
-
-/// Writing a file of the redirect failed, or a folder of the redirect is one
-/// that not only root can change, so nothing was written.
-pub const PF_WRITE: &str = "pf_write";
-/// The running helper could not be found or read, so it was not copied for
-/// the boot job, and nothing was written: its path is not
-/// known, the file is gone or larger than 64 MiB, or the read was refused.
-/// A refused read is what the folder protection of macOS gives: root cannot
-/// read the user's Desktop, Documents, and Downloads folders until the user
-/// allows it (Privacy & Security). Only then does the message say to run
-/// Marsa from its own folder,
-/// `~/Library/Application Support/dev.marsa.Marsa/bin`.
-pub const PF_HELPER_UNREADABLE: &str = "pf_helper_unreadable";
-/// Deleting a file of the redirect failed.
-pub const PF_DELETE: &str = "pf_delete";
-/// `pfctl -f` did not load the rules file into the anchor, or it was not
-/// asked to: the rules file is a link, or its folder is one that not only
-/// root can change.
-pub const PF_LOAD_FAILED: &str = "pf_load_failed";
-/// `pfctl -E` printed no reference token.
-pub const PF_TOKEN_MISSING: &str = "pf_token_missing";
-/// After the load, the anchor does not show the four rules.
-pub const PF_RULES_MISSING: &str = "pf_rules_missing";
-/// `pfctl -F all` on the anchor failed, so nothing else was removed.
-pub const PF_FLUSH_FAILED: &str = "pf_flush_failed";
-/// `pf-load` found no rules file: `pf_install` has not run.
-pub const PF_NOT_INSTALLED: &str = "pf_not_installed";
 
 /// The op name in the result of `marsa-helper pf-load`.
 pub const LOAD: &str = "pf_load";
@@ -440,11 +417,11 @@ fn finish(op: &'static str, outcome: Result<Outcome, Failure>) -> OpResult {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     use super::*;
-    use crate::system::FakeSystem;
+    use crate::ops::testing::code_of;
+    use crate::system::{FakeSystem, Hooked, RunHook};
 
     // Literal copies of the constants, so a changed path or flag fails here.
     const PF: &str = "/sbin/pfctl";
@@ -474,12 +451,10 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
     /// the rules can vanish between two checks and `-E` can print a new token
     /// each time. Without one, the fake's own output is used. Every call is in
     /// `fake.log`.
-    struct Mac {
-        fake: FakeSystem,
+    type Mac = Hooked<Answers>;
+
+    struct Answers {
         answers: RefCell<Vec<(Vec<String>, RunOutput)>>,
-        /// Paths `write_atomic` wrote: a link there is a file now, as the
-        /// rename of the real one replaces the link itself.
-        written: RefCell<BTreeSet<PathBuf>>,
     }
 
     impl Mac {
@@ -490,40 +465,18 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         }
     }
 
-    impl System for Mac {
-        fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>> {
-            self.fake.read(path, max)
-        }
-        fn exists(&self, path: &Path) -> bool {
-            self.fake.exists(path)
-        }
-        fn is_link(&self, path: &Path) -> bool {
-            self.fake.is_link(path) && !self.written.borrow().contains(path)
-        }
-        fn is_root_only_dir(&self, dir: &Path) -> bool {
-            self.fake.is_root_only_dir(dir)
-        }
-        fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-            self.fake.write_atomic(path, bytes, mode)?;
-            self.written.borrow_mut().insert(path.to_path_buf());
-            Ok(())
-        }
-        fn remove(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove(path)
-        }
-        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove_empty_dir(path)
-        }
-        fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
-            let result = self.fake.run(program, args);
-            let mut answers = self.answers.borrow_mut();
+    impl RunHook for Answers {
+        fn run(
+            mac: &Mac,
+            _program: &'static str,
+            args: &[&str],
+            scripted: io::Result<RunOutput>,
+        ) -> io::Result<RunOutput> {
+            let mut answers = mac.answers.borrow_mut();
             match answers.iter().position(|(expected, _)| expected == args) {
                 Some(i) => Ok(answers.remove(i).1),
-                None => result,
+                None => scripted,
             }
-        }
-        fn current_exe(&self) -> io::Result<PathBuf> {
-            self.fake.current_exe()
         }
     }
 
@@ -548,11 +501,12 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         fake.files
             .borrow_mut()
             .insert(exe, (HELPER.to_vec(), 0o755));
-        let mac = Mac {
+        let mac = Hooked::with_hook(
             fake,
-            answers: RefCell::default(),
-            written: RefCell::default(),
-        };
+            Answers {
+                answers: RefCell::default(),
+            },
+        );
         for listing in listings {
             mac.answer(&SHOW_ARGS, listing);
         }
@@ -629,17 +583,6 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         Some((format!("{token}\n").into_bytes(), 0o600))
     }
 
-    fn result(op: &'static str, outcome: Outcome) -> OpResult {
-        OpResult { op, outcome }
-    }
-
-    fn code_of(result: &OpResult) -> &'static str {
-        match result.outcome {
-            Outcome::Failed { code, .. } => code,
-            Outcome::Done | Outcome::Unchanged => "ok",
-        }
-    }
-
     /// Runs the boot job. Each wait is logged as `sleep <seconds>`.
     fn boot_logged(mac: &Mac) -> OpResult {
         boot(mac, |wait| {
@@ -668,7 +611,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
     #[test]
     fn install_writes_the_files_then_loads_the_rules() {
         let mac = fresh(&[LISTED]);
-        assert_eq!(install(18080, 18443, &mac), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18080, 18443, &mac), OpResult::done(INSTALL));
         assert_eq!(
             commands(&mac),
             [pf(&LOAD_ARGS), pf(&["-E"]), pf(&SHOW_ARGS)]
@@ -710,7 +653,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         for path in [RULES, COPY, PLIST, TOKEN] {
             mac.fake.fail_writes.insert(PathBuf::from(path));
         }
-        let expected = result(INSTALL, Outcome::Unchanged);
+        let expected = OpResult::unchanged(INSTALL);
         assert_eq!(install(18080, 18443, &mac), expected);
         assert_eq!(commands(&mac), [pf(&SHOW_ARGS)]);
         assert_eq!(file(&mac, TOKEN), token_file(OLD));
@@ -719,7 +662,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
     #[test]
     fn install_loads_again_when_the_anchor_is_empty() {
         let mac = installed(&["", LISTED]);
-        assert_eq!(install(18080, 18443, &mac), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18080, 18443, &mac), OpResult::done(INSTALL));
         // The old reference goes only after the new one is saved.
         let expected = [
             pf(&SHOW_ARGS),
@@ -742,7 +685,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
             .files
             .borrow_mut()
             .insert(PathBuf::from(TOKEN), token);
-        assert_eq!(install(18080, 18443, &mac), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18080, 18443, &mac), OpResult::done(INSTALL));
         let expected = [pf(&SHOW_ARGS), pf(&LOAD_ARGS), pf(&["-E"]), pf(&SHOW_ARGS)];
         assert_eq!(commands(&mac), expected);
     }
@@ -752,7 +695,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
     fn install_loads_again_without_a_token() {
         let mac = installed(&[LISTED]);
         mac.fake.files.borrow_mut().remove(Path::new(TOKEN));
-        assert_eq!(install(18080, 18443, &mac), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18080, 18443, &mac), OpResult::done(INSTALL));
         assert_eq!(
             commands(&mac),
             [pf(&LOAD_ARGS), pf(&["-E"]), pf(&SHOW_ARGS)]
@@ -762,7 +705,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
     #[test]
     fn install_with_another_port_rewrites_the_rules() {
         let mac = installed(&[LISTED]);
-        assert_eq!(install(18081, 18443, &mac), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18081, 18443, &mac), OpResult::done(INSTALL));
         let expected = [
             pf(&LOAD_ARGS),
             pf(&["-E"]),
@@ -900,7 +843,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
     #[test]
     fn remove_stops_the_job_flushes_gives_back_the_token_and_deletes_the_files() {
         let mac = installed(&[]);
-        assert_eq!(remove(&mac), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&mac), OpResult::done(REMOVE));
         let expected = [bootout(), pf(&FLUSH_ARGS), pf(&["-X", OLD])];
         assert_eq!(commands(&mac), expected);
         // Only the running helper is left.
@@ -912,14 +855,14 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
     fn remove_without_a_token_file_does_not_run_x() {
         let mac = installed(&[]);
         mac.fake.files.borrow_mut().remove(Path::new(TOKEN));
-        assert_eq!(remove(&mac), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&mac), OpResult::done(REMOVE));
         assert_eq!(commands(&mac), [bootout(), pf(&FLUSH_ARGS)]);
     }
 
     #[test]
     fn remove_of_nothing_is_unchanged() {
         let mac = fresh(&[]);
-        assert_eq!(remove(&mac), result(REMOVE, Outcome::Unchanged));
+        assert_eq!(remove(&mac), OpResult::unchanged(REMOVE));
         assert_eq!(commands(&mac), [pf(&SHOW_ARGS)]);
     }
 
@@ -929,7 +872,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         let mut unknown = fresh(&[]);
         unknown.fake.script(PF, &SHOW_ARGS, ran(1, "", ""));
         for mac in [fresh(&[LISTED]), unknown] {
-            assert_eq!(remove(&mac), result(REMOVE, Outcome::Done));
+            assert_eq!(remove(&mac), OpResult::done(REMOVE));
             let expected = [pf(&SHOW_ARGS), bootout(), pf(&FLUSH_ARGS)];
             assert_eq!(commands(&mac), expected);
         }
@@ -982,7 +925,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
     fn the_boot_job_loads_again_when_the_rules_vanish() {
         let mac = installed(&[LISTED, "", LISTED, LISTED]);
         mac.answer(&["-E"], &format!("Token : {ONCE}\n"));
-        assert_eq!(boot_logged(&mac), result(LOAD, Outcome::Done));
+        assert_eq!(boot_logged(&mac), OpResult::done(LOAD));
         let sleep = |seconds: &str| vec!["sleep".to_owned(), seconds.to_owned()];
         let expected = [
             pf(&LOAD_ARGS),
@@ -1038,14 +981,14 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
     fn a_token_through_a_link_is_never_given_back() {
         let mut mac = installed(&[LISTED]);
         mac.fake.links.insert(PathBuf::from(TOKEN));
-        assert_eq!(install(18080, 18443, &mac), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18080, 18443, &mac), OpResult::done(INSTALL));
         let expected = [pf(&LOAD_ARGS), pf(&["-E"]), pf(&SHOW_ARGS)];
         assert_eq!(commands(&mac), expected);
         assert_eq!(file(&mac, TOKEN), token_file(NEW));
 
         let mut mac = installed(&[]);
         mac.fake.links.insert(PathBuf::from(TOKEN));
-        assert_eq!(remove(&mac), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&mac), OpResult::done(REMOVE));
         assert_eq!(commands(&mac), [bootout(), pf(&FLUSH_ARGS)]);
         assert_eq!(file(&mac, TOKEN), None);
     }
@@ -1059,7 +1002,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         for path in FILES {
             mac.fake.links.insert(PathBuf::from(path));
         }
-        assert_eq!(install(18080, 18443, &mac), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18080, 18443, &mac), OpResult::done(INSTALL));
         // A link is never the same, so pf is not even asked before the load.
         let expected = [pf(&LOAD_ARGS), pf(&["-E"]), pf(&SHOW_ARGS)];
         assert_eq!(commands(&mac), expected);
@@ -1107,7 +1050,7 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
 
         let mut mac = installed(&[]);
         mac.fake.open_dirs.insert(marsa);
-        assert_eq!(remove(&mac), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&mac), OpResult::done(REMOVE));
         assert_eq!(commands(&mac), [bootout(), pf(&FLUSH_ARGS)]);
     }
 

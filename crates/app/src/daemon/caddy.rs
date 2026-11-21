@@ -24,6 +24,7 @@
 
 pub mod orphan;
 
+use marsa_core::codes;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -39,13 +40,16 @@ use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceState, 
 use reqwest::redirect;
 use serde_json::Value;
 use tokio::sync::broadcast::{self, error::RecvError};
-use tokio::task::{AbortHandle, JoinError, JoinHandle};
+use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use self::orphan::{Blocked, Ladder, Orphans, PidFile, Processes, SystemProcesses};
+use self::orphan::{Blocked, Ladder, Orphans, PidFile};
+use super::services::actions::{Busy, take_turn};
+use super::services::probe::{ProcessProbe, SystemProbe};
+use super::services::runtime::AbortOnDrop;
 use super::state::Daemon;
-use super::supervisor::{ServiceHandle, ServiceRuntime, Supervisor, lock, now_ms};
+use super::supervisor::{ServiceHandle, ServiceRuntime, Supervisor, lock};
 
 /// The service id: the key in `Daemon::procs`, the `{id}` in the routes, and
 /// the log file `logs/caddy.log`.
@@ -133,9 +137,9 @@ impl ActionError {
     /// `marsa install caddy` as the fix; its text keeps the exact reason.
     pub fn code(&self) -> &'static str {
         match self {
-            ActionError::NoCaddy(_) | ActionError::NotInstalled(_) => "caddy_not_installed",
-            ActionError::Busy => "service_busy",
-            ActionError::ConfigWrite(_) => "caddy_config_write",
+            ActionError::NoCaddy(_) | ActionError::NotInstalled(_) => codes::CADDY_NOT_INSTALLED,
+            ActionError::Busy => codes::SERVICE_BUSY,
+            ActionError::ConfigWrite(_) => codes::CADDY_CONFIG_WRITE,
             ActionError::ProgramNotAbsolute(err) => err.code(),
         }
     }
@@ -173,7 +177,7 @@ pub struct CaddyManager {
     pub ready_limit: Duration,
     /// Who runs under a pid, and signals, for the orphan check. Tests put a
     /// recorder here.
-    pub processes: Arc<dyn Processes>,
+    pub processes: Arc<dyn ProcessProbe>,
     /// How long each step of an orphan's stop waits.
     pub ladder: Ladder,
     /// The program of the last start, so an uninstall never deletes the
@@ -239,10 +243,10 @@ impl LoadError {
     pub fn code(&self) -> &'static str {
         match self {
             LoadError::Config(err) => err.code(),
-            LoadError::Write(_) => "caddy_config_write",
-            LoadError::PortInUse { .. } => orphan::PORT_IN_USE,
-            LoadError::Rejected { .. } => "caddy_config_rejected",
-            LoadError::Unreachable(_) => "caddy_admin_unreachable",
+            LoadError::Write(_) => codes::CADDY_CONFIG_WRITE,
+            LoadError::PortInUse { .. } => codes::PORT_IN_USE,
+            LoadError::Rejected { .. } => codes::CADDY_CONFIG_REJECTED,
+            LoadError::Unreachable(_) => codes::CADDY_ADMIN_UNREACHABLE,
         }
     }
 }
@@ -279,7 +283,7 @@ impl CaddyManager {
             input: CaddyInput::default(),
             low_ports: || false,
             ready_limit: READY_LIMIT,
-            processes: Arc::new(SystemProcesses),
+            processes: Arc::new(SystemProbe),
             ladder: Ladder::default(),
             started: Mutex::default(),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(CADDY_ID))),
@@ -328,7 +332,7 @@ impl CaddyManager {
             Err(LoadError::Unreachable(_)) if !daemon.proc_alive(CADDY_ID) => Ok(Applied::Written),
             Err(err) => {
                 let text = format!("marsad: The new config was not loaded: {err}.");
-                note(&self.runtime, &daemon.events, &text);
+                lock(&self.runtime).note(&daemon.events, &text);
                 Err(err)
             }
         }
@@ -447,17 +451,11 @@ impl CaddyManager {
         action: ServiceAction,
         wait: Duration,
     ) -> Result<ServiceStatus, ActionError> {
-        let busy = match Arc::clone(&self.busy).try_lock_owned() {
-            Ok(busy) => busy,
-            Err(_) => {
-                info!(%action, "another action on caddy runs; waiting for it");
-                let turn = tokio::time::timeout(wait, Arc::clone(&self.busy).lock_owned());
-                tokio::select! {
-                    () = daemon.shutdown.cancelled() => return Err(ActionError::Busy),
-                    turn = turn => turn.map_err(|_| ActionError::Busy)?,
-                }
-            }
-        };
+        let busy = take_turn(&self.busy, &daemon.shutdown, wait, || {
+            info!(%action, "another action on caddy runs; waiting for it");
+        })
+        .await
+        .map_err(|Busy| ActionError::Busy)?;
         // Also when the turn came at the same moment as the shutdown.
         if daemon.shutdown.is_cancelled() {
             info!(%action, "the daemon is stopping; the caddy action does not run");
@@ -499,12 +497,12 @@ impl CaddyManager {
         let spec = match self.spec_to_run() {
             Ok(spec) if spec.program.is_file() => spec,
             Ok(spec) => {
-                self.fail("caddy_not_installed", &daemon.events);
+                self.fail(codes::CADDY_NOT_INSTALLED, &daemon.events);
                 return Err(ActionError::NotInstalled(spec.program));
             }
             Err(err) => {
                 warn!(code = err.code(), %err, "no caddy to run");
-                self.fail("caddy_not_installed", &daemon.events);
+                self.fail(codes::CADDY_NOT_INSTALLED, &daemon.events);
                 return Err(ActionError::NoCaddy(err));
             }
         };
@@ -512,7 +510,7 @@ impl CaddyManager {
         let tag = match self.instance_tag() {
             Ok(tag) => tag,
             Err(err) => {
-                self.fail("caddy_config_write", &daemon.events);
+                self.fail(codes::CADDY_CONFIG_WRITE, &daemon.events);
                 return Err(ActionError::ConfigWrite(err));
             }
         };
@@ -522,7 +520,7 @@ impl CaddyManager {
             let orphans = self.orphans(&pid_file, admin, &tag);
             if let Some(found) = orphans.inspect().await {
                 if found.is_reap() {
-                    note(&self.runtime, &daemon.events, STOPPING_ORPHAN);
+                    lock(&self.runtime).note(&daemon.events, STOPPING_ORPHAN);
                 }
                 if let Err(blocked) = orphans.clear_for_start(found).await {
                     self.blocked("Caddy was not started", &blocked, &daemon.events);
@@ -536,13 +534,13 @@ impl CaddyManager {
         let config = match self.config(&tag) {
             Ok(config) => config,
             Err(err) => {
-                self.fail("caddy_config_write", &daemon.events);
+                self.fail(codes::CADDY_CONFIG_WRITE, &daemon.events);
                 let err = io::Error::new(io::ErrorKind::InvalidData, err);
                 return Err(ActionError::ConfigWrite(err));
             }
         };
         if let Err(err) = write_config(&self.paths.config_file, &config).await {
-            self.fail("caddy_config_write", &daemon.events);
+            self.fail(codes::CADDY_CONFIG_WRITE, &daemon.events);
             return Err(ActionError::ConfigWrite(err));
         }
         // Before the process starts, so the watcher cannot miss its first line.
@@ -598,7 +596,7 @@ impl CaddyManager {
                 self.stop(daemon, admin).await;
                 // A port conflict found at the same moment says more: keep it.
                 if self.status().state == ServiceState::Stopped {
-                    self.fail("caddy_start_timeout", &daemon.events);
+                    self.fail(codes::CADDY_START_TIMEOUT, &daemon.events);
                 }
             }
         }
@@ -696,7 +694,7 @@ impl CaddyManager {
         if !found.is_reap() {
             return true;
         }
-        note(&self.runtime, &daemon.events, STOPPING_ORPHAN);
+        lock(&self.runtime).note(&daemon.events, STOPPING_ORPHAN);
         match orphans.reap(found).await {
             Ok(()) => true,
             Err(blocked) => {
@@ -732,14 +730,14 @@ impl CaddyManager {
     fn blocked(&self, what: &str, blocked: &Blocked, events: &broadcast::Sender<Event>) {
         warn!(code = blocked.code, reason = %blocked.reason, "{what}");
         let text = format!("marsad: {what}: {}.", blocked.reason);
-        note(&self.runtime, events, &text);
+        lock(&self.runtime).note(events, &text);
         self.fail(blocked.code, events);
     }
 
     /// Sets `Failed { code }`. Only while no task runs: the supervisor owns
     /// the status then.
     fn fail(&self, code: &str, events: &broadcast::Sender<Event>) {
-        set_failed(&self.runtime, events, code);
+        lock(&self.runtime).set_failed(events, code);
     }
 }
 
@@ -909,7 +907,7 @@ struct Watcher {
     events: broadcast::Sender<Event>,
     /// `run/caddy.pid`: written after each spawn, removed after the exit.
     pid_file: PidFile,
-    processes: Arc<dyn Processes>,
+    processes: Arc<dyn ProcessProbe>,
 }
 
 impl Watcher {
@@ -945,7 +943,7 @@ impl Watcher {
         pid_file.remove();
         if conflict {
             // After the supervisor's last change, so this one stays.
-            set_failed(&runtime, &events, "port_in_use");
+            lock(&runtime).set_failed(&events, codes::PORT_IN_USE);
         }
     }
 }
@@ -957,7 +955,7 @@ async fn watch(
     first_seq: u64,
     runtime: &Mutex<ServiceRuntime>,
     pid_file: &PidFile,
-    processes: &dyn Processes,
+    processes: &dyn ProcessProbe,
 ) {
     let mut recorded = None;
     loop {
@@ -1007,43 +1005,6 @@ fn report(result: Result<(), JoinError>) {
     if let Err(err) = result {
         warn!(%err, "the caddy supervisor task failed");
     }
-}
-
-/// Aborts a task when this guard goes: a wrapper task that `stop_procs`
-/// aborts takes the task it waits for along.
-pub(super) struct AbortOnDrop(pub(super) AbortHandle);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-/// Adds a line from the daemon to a service's recent lines, so `marsa logs
-/// caddy` (or `postgres`) shows why it did not start.
-pub(super) fn note(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, text: &str) {
-    let mut runtime = lock(runtime);
-    let line = runtime.logs.push(LogStream::Stderr, text, now_ms());
-    // Under the lock, like the supervisor, so events come in `seq` order.
-    let _ = events.send(Event::Log(line));
-}
-
-/// Sets `Failed { code }` and tells every reader, under the lock like the
-/// supervisor, so events come in the order of the changes.
-pub(super) fn set_failed(
-    runtime: &Mutex<ServiceRuntime>,
-    events: &broadcast::Sender<Event>,
-    code: &str,
-) {
-    let mut runtime = lock(runtime);
-    let status = &mut runtime.status;
-    status.state = ServiceState::Failed {
-        code: code.to_owned(),
-    };
-    status.pid = None;
-    status.since_ms = Some(now_ms());
-    // An error only means that nobody listens right now.
-    let _ = events.send(Event::ServiceChanged(status.clone()));
 }
 
 /// Puts this data folder's `tag` as the `@id` of the `admin` object.

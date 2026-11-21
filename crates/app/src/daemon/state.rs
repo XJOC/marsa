@@ -3,6 +3,7 @@
 //! The locks here are `std::sync` locks: they are taken for short reads and
 //! writes and never held across `.await` (`clippy::await_holding_lock`).
 
+use marsa_core::codes;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard};
@@ -207,7 +208,7 @@ impl Daemon {
             let message = "the sites job failed";
             Err(HttpError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
+                codes::INTERNAL_ERROR,
                 message,
             ))
         })

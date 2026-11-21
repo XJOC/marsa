@@ -175,7 +175,7 @@ fn nav(model: &Model, item: Item, current: Item, folded: bool) -> NavItem<'stati
         None => NavItem::plain(Icon::Settings, item.label()),
     };
     let shown = shown.selected(item == current).folded(folded);
-    let sites = model.sites.sites.len();
+    let sites = model.session.sites.sites.len();
     if item == Item::Sites && sites > 0 {
         return shown.count(u32::try_from(sites).unwrap_or(u32::MAX), false);
     }

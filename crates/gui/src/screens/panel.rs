@@ -16,6 +16,7 @@ use eframe::egui::{Align2, Key, Label, Margin, Rect, RichText, ScrollArea, Ui, v
 
 use super::home::{self, DefaultPhp};
 use super::sites::{Mark, mute, status_line};
+use crate::model::NoticeSource;
 use crate::model::{Action, Connection, MAIN_RUNTIME, Model};
 use crate::panel::{MAX_SITES, PanelExit};
 use crate::shell::sidebar;
@@ -134,7 +135,7 @@ pub fn view(model: &Model) -> PanelView {
 }
 
 fn sites(model: &Model) -> SitesView {
-    let all = &model.sites.sites;
+    let all = &model.session.sites.sites;
     let rows = all
         .iter()
         .take(MAX_SITES)
@@ -156,7 +157,7 @@ fn sites(model: &Model) -> SitesView {
 }
 
 fn xdebug(model: &Model) -> XdebugLine {
-    let off = if model.xdebug.is_none() {
+    let off = if model.session.xdebug.is_none() {
         Some(strings::XDEBUG_UNREAD)
     } else if model.xdebug_pending().is_some() {
         Some(strings::XDEBUG_BUSY)
@@ -166,7 +167,11 @@ fn xdebug(model: &Model) -> XdebugLine {
     XdebugLine {
         on: model.xdebug_on().unwrap_or(false),
         off,
-        error: model.xdebug_notice.as_deref().map(strings::error_text),
+        error: model
+            .session
+            .notices
+            .code(NoticeSource::Xdebug)
+            .map(strings::error_text),
     }
 }
 
@@ -176,7 +181,7 @@ fn power(model: &Model) -> Power {
         exit: PanelExit::StopMarsa,
         off,
     };
-    match &model.connection {
+    match &model.session.connection {
         Connection::Running(_) => stop(None),
         Connection::Connecting | Connection::Reconnecting => {
             stop(Some(strings::PANEL_NOT_CONNECTED))
@@ -400,6 +405,7 @@ fn footer(ui: &mut Ui, theme: &Theme, power: &Power, actions: &mut Vec<PanelActi
 
 #[cfg(test)]
 mod tests {
+    use crate::model::Effect;
     use std::path::PathBuf;
 
     use eframe::egui::{self, Pos2};
@@ -598,13 +604,13 @@ mod tests {
         let none = view(&working(1, &[]));
         assert!(none.php.is_none());
         let mut model = working(1, &["8.4.27"]);
-        model.xdebug = None;
+        model.session.xdebug = None;
         let unread = view(&model).xdebug.expect("a line");
         assert_eq!(unread.off, Some(strings::XDEBUG_UNREAD));
         let mut model = working(1, &["8.4.27"]);
         assert!(matches!(
             model.apply_action(Action::ToggleXdebug),
-            Some(crate::bridge::Command::SetXdebug(true))
+            Effect::Send(crate::bridge::Command::SetXdebug(true))
         ));
         let busy = view(&model).xdebug.expect("a line");
         assert_eq!((busy.on, busy.off), (true, Some(strings::XDEBUG_BUSY)));

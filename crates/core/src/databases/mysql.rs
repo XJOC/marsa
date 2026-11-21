@@ -89,7 +89,7 @@ pub struct UnwritablePath(pub PathBuf);
 impl UnwritablePath {
     /// Stable error name for the UI.
     pub fn code(&self) -> &'static str {
-        "mysql_path_unsupported"
+        crate::codes::MYSQL_PATH_UNSUPPORTED
     }
 }
 
@@ -298,7 +298,7 @@ mod tests {
         assert!(my_cnf(&at("/Users/o'brien"), base, 3306, None).is_ok());
         for root in ["/a\"b", "/a\nb", "/a\tb"] {
             let err = my_cnf(&at(root), base, 3306, None).unwrap_err();
-            assert_eq!(err.code(), "mysql_path_unsupported");
+            assert_eq!(err.code(), crate::codes::MYSQL_PATH_UNSUPPORTED);
         }
     }
 

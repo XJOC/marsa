@@ -100,7 +100,7 @@ pub struct UnknownAction(pub String);
 impl UnknownAction {
     /// Stable error name for the UI.
     pub fn code(&self) -> &'static str {
-        "unknown_action"
+        crate::codes::UNKNOWN_ACTION
     }
 }
 
@@ -333,9 +333,9 @@ impl VersionInUse {
         let nothing_else =
             self.default.is_none() && self.sites.is_empty() && !self.caddy && !self.server;
         if nothing_else && !self.sites_left_without_php.is_empty() {
-            "sites_lose_php"
+            crate::codes::SITES_LOSE_PHP
         } else {
-            "version_in_use"
+            crate::codes::VERSION_IN_USE
         }
     }
 

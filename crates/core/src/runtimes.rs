@@ -201,7 +201,7 @@ impl RuntimesError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            RuntimesError::Read { .. } => "runtimes_read",
+            RuntimesError::Read { .. } => crate::codes::RUNTIMES_READ,
         }
     }
 }

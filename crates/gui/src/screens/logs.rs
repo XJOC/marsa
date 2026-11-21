@@ -133,6 +133,7 @@ pub fn view<'a>(model: &'a Model, source: &LogSource) -> LogsView<'a> {
     // Caddy's log first: the window always reads it, so it is there while
     // the daemon's list is not (a connection that dropped keeps the log).
     let others = model
+        .session
         .services
         .iter()
         .map(|service| service.id.as_str())

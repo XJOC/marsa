@@ -23,6 +23,7 @@
 //! (`postmaster.pid`) never authorizes a signal, and that file is never
 //! deleted here.
 
+use marsa_core::codes;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -33,13 +34,13 @@ use marsa_core::platform::process::{self, Signal};
 use marsa_core::services::{StopAction, StopMethod};
 use tracing::{debug, info, warn};
 
-use super::facts::Probes;
+use crate::daemon::services::probe::ProcessProbe;
 
 /// Our old server could not be stopped: nothing was started.
 pub(super) fn stuck_code(kind: ServerKind) -> &'static str {
     match kind {
-        ServerKind::Postgres => "postgres_orphan_stuck",
-        ServerKind::Mysql => "mysql_orphan_stuck",
+        ServerKind::Postgres => codes::POSTGRES_ORPHAN_STUCK,
+        ServerKind::Mysql => codes::MYSQL_ORPHAN_STUCK,
     }
 }
 
@@ -62,7 +63,7 @@ pub(super) fn pid_path(kind: ServerKind, data_dir: &Path) -> PathBuf {
 /// again.
 pub(super) async fn record(
     kind: ServerKind,
-    probes: &dyn Probes,
+    probes: &dyn ProcessProbe,
     data_dir: &Path,
     servers: &[PathBuf],
     pid: u32,
@@ -135,7 +136,7 @@ pub(super) enum Cleared {
 /// signalled then.
 pub(super) async fn clear(
     kind: ServerKind,
-    probes: &dyn Probes,
+    probes: &dyn ProcessProbe,
     data_dir: &Path,
     servers: &[PathBuf],
     ladder: &StopMethod,
@@ -213,7 +214,7 @@ pub(super) async fn clear(
 
 /// The file against what the system says now: the file the process really
 /// runs, and its start time.
-async fn check(probes: &dyn Probes, record: &PidRecord, servers: &[PathBuf]) -> PidfileState {
+async fn check(probes: &dyn ProcessProbe, record: &PidRecord, servers: &[PathBuf]) -> PidfileState {
     let now = probes.real_identity(record.pid).await;
     classify_pidfile(record, servers, &now)
 }
@@ -221,7 +222,7 @@ async fn check(probes: &dyn Probes, record: &PidRecord, servers: &[PathBuf]) -> 
 /// Polls until the process is not our server any more, at most `limit`. An
 /// answer that cannot be told waits on: it may be a `ps` that failed once.
 async fn gone(
-    probes: &dyn Probes,
+    probes: &dyn ProcessProbe,
     record: &PidRecord,
     servers: &[PathBuf],
     limit: Duration,

@@ -170,13 +170,13 @@ pub fn view(model: &Model) -> HomeView {
 }
 
 fn status(model: &Model) -> StatusView {
-    match &model.connection {
+    match &model.session.connection {
         Connection::Connecting | Connection::Reconnecting => {
             plain(Health::Busy, strings::HOME_CONNECTING)
         }
         Connection::ShuttingDown => plain(Health::Busy, strings::HOME_STOPPING),
         Connection::Failed(_) => {
-            let explanation = strings::status_line(&model.connection);
+            let explanation = strings::status_line(&model.session.connection);
             plain(Health::Error, (strings::HOME_DAEMON_DOWN, &explanation))
         }
         Connection::Running(_) => running(model),
@@ -208,11 +208,12 @@ fn running(model: &Model) -> StatusView {
         progress,
     };
     if dns == Dns::Missing {
-        let mut explanation = strings::hosts_waiting(&model.hosts.missing);
-        if let HostsSync::Failed(code) = &model.hosts_sync {
+        let mut explanation = strings::hosts_waiting(&model.session.hosts.missing);
+        if let HostsSync::Failed(code) = &model.session.hosts_sync {
             explanation = format!("{explanation} {}", strings::error_text(code));
         }
-        let busy = model.hosts_sync == HostsSync::Running || model.setup == Setup::Running;
+        let busy =
+            model.session.hosts_sync == HostsSync::Running || model.session.setup == Setup::Running;
         let fix = Fix {
             label: strings::ADD_TO_HOSTS.to_owned(),
             action: Action::SyncHosts,
@@ -263,7 +264,7 @@ fn running(model: &Model) -> StatusView {
         }
         Php::Ready(_) => {}
     }
-    let sites = model.sites.sites.len();
+    let sites = model.session.sites.sites.len();
     if sites == 0 {
         let explanation = strings::home_no_sites(php.minor());
         return plain(Health::Ok, (strings::HOME_NO_SITES, &explanation));
@@ -274,7 +275,10 @@ fn running(model: &Model) -> StatusView {
 
 /// The hosts file is the one DNS state the window reads.
 fn dns(model: &Model) -> Dns {
-    match (model.hosts.used, model.hosts.missing.is_empty()) {
+    match (
+        model.session.hosts.used,
+        model.session.hosts.missing.is_empty(),
+    ) {
         (false, _) => Dns::NotChecked,
         (true, true) => Dns::Working,
         (true, false) => Dns::Missing,
@@ -283,11 +287,13 @@ fn dns(model: &Model) -> Dns {
 
 fn caddy(model: &Model) -> Caddy {
     let service = model
+        .session
         .services
         .iter()
         .find(|service| service.id == WEB_SERVER)
         .map(|service| &service.state);
     let installed = model
+        .session
         .runtimes
         .iter()
         .find(|row| row.runtime == Runtime::Caddy)
@@ -306,7 +312,7 @@ fn caddy(model: &Model) -> Caddy {
 /// PHP is broken when a pool failed, or when no version is installed. A pool
 /// that is not in the table starts with the first site that needs it.
 fn php(model: &Model) -> Php {
-    let failed = model.services.iter().find_map(|service| {
+    let failed = model.session.services.iter().find_map(|service| {
         let ServiceState::Failed { code } = &service.state else {
             return None;
         };
@@ -320,7 +326,11 @@ fn php(model: &Model) -> Php {
     if let Some(failed) = failed {
         return failed;
     }
-    let read = model.runtimes.iter().any(|row| row.runtime == Runtime::Php);
+    let read = model
+        .session
+        .runtimes
+        .iter()
+        .any(|row| row.runtime == Runtime::Php);
     if read && model.php_versions().is_empty() {
         return Php::NotInstalled;
     }
@@ -365,7 +375,7 @@ fn request_path(model: &Model, dns: Dns, caddy: &Caddy, php: &Php) -> Vec<PathPi
             },
         ),
     ];
-    if let Some(site) = model.sites.sites.first() {
+    if let Some(site) = model.session.sites.sites.first() {
         path.push(pill(site.host(), StepState::Unreached));
     }
     path
@@ -455,6 +465,7 @@ pub(super) fn php_choices(model: &Model) -> Vec<PhpChoice> {
 
 fn sites(model: &Model) -> SitesView {
     let rows = model
+        .session
         .sites
         .sites
         .iter()
@@ -470,7 +481,7 @@ fn sites(model: &Model) -> SitesView {
         })
         .collect();
     SitesView {
-        total: model.sites.sites.len(),
+        total: model.session.sites.sites.len(),
         rows,
     }
 }
@@ -625,6 +636,7 @@ fn sites_section(ui: &mut Ui, theme: &Theme, sites: &SitesView, actions: &mut Ve
 
 #[cfg(test)]
 mod tests {
+    use crate::bridge::Command;
     use std::path::PathBuf;
 
     use eframe::egui::{self, Pos2, pos2};
@@ -855,8 +867,11 @@ mod tests {
         assert_eq!(labels(&status), ["Install Caddy"]);
         assert!(status.progress.is_none());
 
-        assert!(model.apply_action(status.fixes[0].action.clone()).is_none());
-        let job = model.next_install().expect("the fix queued the job");
+        let Some(Command::Install(job)) =
+            model.apply_action(status.fixes[0].action.clone()).command()
+        else {
+            panic!("the fix sends the job");
+        };
         assert_eq!(job.runtime, Runtime::Caddy);
         let status = view(&model).status;
         assert_eq!(status.fixes[0].disabled, Some(strings::INSTALL_BUSY_HINT));
@@ -923,7 +938,7 @@ mod tests {
         assert_eq!(home.status.sentence, strings::HOME_DAEMON_DOWN);
         assert_eq!(
             home.status.explanation,
-            strings::status_line(&model.connection)
+            strings::status_line(&model.session.connection)
         );
         assert!(home.status.path.is_empty() && home.status.fixes.is_empty());
 
@@ -946,7 +961,7 @@ mod tests {
     fn home_lists_the_first_four_sites_with_their_php() {
         let names = ["a", "b", "c", "d", "e", "f"];
         let mut model = working(&names);
-        let mut list = model.sites.clone();
+        let mut list = model.session.sites.clone();
         list.sites[1].php = None;
         list.sites[2].php = Some("8.3.27".parse().expect("a version"));
         model.update(Update::Sites(list));
@@ -1064,7 +1079,7 @@ mod tests {
         assert_eq!(click(&model, &install), [install_php()]);
         // The action opens the install dialog of PHP, where the user is.
         assert!(model.apply_action(install_php()).is_none());
-        assert_eq!(model.install_dialog, Some(Runtime::Php));
+        assert_eq!(model.session.install_dialog, Some(Runtime::Php));
         assert_eq!(model.route, Route::Home);
     }
 

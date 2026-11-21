@@ -496,7 +496,7 @@ mod tests {
         fill(&mut model, plan);
         assert!(model.is_connected());
         assert_eq!(model.route, Route::Sites);
-        assert_eq!(model.services.len(), 2);
+        assert_eq!(model.session.services.len(), 2);
         let shown = view(&model, false);
         let List::Rows(rows) = &shown.list else {
             panic!("rows");

@@ -96,13 +96,13 @@ impl ExtractError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            ExtractError::UnsafePath(..) => "extract_unsafe_path",
-            ExtractError::UnsafeLink(..) => "extract_unsafe_link",
-            ExtractError::UnsupportedEntry(..) => "extract_unsupported_entry",
-            ExtractError::Duplicate(..) => "extract_duplicate",
-            ExtractError::TooLarge(..) => "extract_too_large",
-            ExtractError::Corrupt(..) => "extract_corrupt",
-            ExtractError::Io(..) => "extract_io",
+            ExtractError::UnsafePath(..) => crate::codes::EXTRACT_UNSAFE_PATH,
+            ExtractError::UnsafeLink(..) => crate::codes::EXTRACT_UNSAFE_LINK,
+            ExtractError::UnsupportedEntry(..) => crate::codes::EXTRACT_UNSUPPORTED_ENTRY,
+            ExtractError::Duplicate(..) => crate::codes::EXTRACT_DUPLICATE,
+            ExtractError::TooLarge(..) => crate::codes::EXTRACT_TOO_LARGE,
+            ExtractError::Corrupt(..) => crate::codes::EXTRACT_CORRUPT,
+            ExtractError::Io(..) => crate::codes::EXTRACT_IO,
         }
     }
 }

@@ -181,11 +181,11 @@ impl ResolveError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            ResolveError::NoVersion { .. } => "no_version",
-            ResolveError::NotInstalled { .. } => "not_installed",
-            ResolveError::NoMatchingVersion { .. } => "no_matching_version",
-            ResolveError::InvalidVersion { .. } => "invalid_version",
-            ResolveError::UnsupportedAlias { .. } => "unsupported_alias",
+            ResolveError::NoVersion { .. } => crate::codes::NO_VERSION,
+            ResolveError::NotInstalled { .. } => crate::codes::NOT_INSTALLED,
+            ResolveError::NoMatchingVersion { .. } => crate::codes::NO_MATCHING_VERSION,
+            ResolveError::InvalidVersion { .. } => crate::codes::INVALID_VERSION,
+            ResolveError::UnsupportedAlias { .. } => crate::codes::UNSUPPORTED_ALIAS,
             ResolveError::Unsupported { .. } => "unsupported",
             ResolveError::Io { .. } => "io",
         }
@@ -325,8 +325,8 @@ impl BadRequest {
     /// The same stable names as [`ResolveError::code`].
     pub fn code(&self) -> &'static str {
         match self {
-            BadRequest::Alias => "unsupported_alias",
-            BadRequest::Invalid => "invalid_version",
+            BadRequest::Alias => crate::codes::UNSUPPORTED_ALIAS,
+            BadRequest::Invalid => crate::codes::INVALID_VERSION,
         }
     }
 }

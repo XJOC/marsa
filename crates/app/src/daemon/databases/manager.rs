@@ -1,6 +1,7 @@
 //! [`ServerManager`]: starts and stops one database server under the
 //! supervisor, one action at a time.
 
+use marsa_core::codes;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -24,11 +25,13 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use super::facts::{Probes, SystemProbes, start_facts};
+use super::facts::start_facts;
 use super::init::{InitError, installed_servers};
 use super::settings::{any_installed, read_settings, save_enabled};
 use super::{mysql, orphan, postgres};
-use crate::daemon::caddy::{AbortOnDrop, note, set_failed};
+use crate::daemon::services::actions::{Busy, take_turn};
+use crate::daemon::services::probe::{ProcessProbe, SystemProbe};
+use crate::daemon::services::runtime::AbortOnDrop;
 use crate::daemon::state::Daemon;
 use crate::daemon::supervisor::{EXITED, ServiceHandle, ServiceRuntime, Supervisor, lock};
 
@@ -69,16 +72,16 @@ impl ActionError {
     /// Stable error name for the UI.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Unsupported(ServerKind::Postgres) => "postgres_unsupported_platform",
-            Self::Unsupported(ServerKind::Mysql) => "mysql_unsupported_platform",
+            Self::Unsupported(ServerKind::Postgres) => codes::POSTGRES_UNSUPPORTED_PLATFORM,
+            Self::Unsupported(ServerKind::Mysql) => codes::MYSQL_UNSUPPORTED_PLATFORM,
             Self::Config(err) => err.code(),
-            Self::NotInstalled(ServerKind::Postgres, _) => "postgres_not_installed",
-            Self::NotInstalled(ServerKind::Mysql, _) => "mysql_not_installed",
+            Self::NotInstalled(ServerKind::Postgres, _) => codes::POSTGRES_NOT_INSTALLED,
+            Self::NotInstalled(ServerKind::Mysql, _) => codes::MYSQL_NOT_INSTALLED,
             Self::Init(err) => err.code(),
             Self::InUse(busy) => busy.code(),
-            Self::Busy => "service_busy",
+            Self::Busy => codes::SERVICE_BUSY,
             Self::ProgramNotAbsolute(err) => err.code(),
-            Self::Internal => "internal_error",
+            Self::Internal => codes::INTERNAL_ERROR,
             Self::OrphanStuck(kind, _) => orphan::stuck_code(*kind),
             Self::Path(err) => err.code(),
         }
@@ -112,7 +115,7 @@ impl fmt::Display for ActionError {
 pub struct ServerManager {
     kind: ServerKind,
     /// Who runs under a pid and who holds a port. Tests put a fake here.
-    pub(super) probes: Arc<dyn Probes>,
+    pub(super) probes: Arc<dyn ProcessProbe>,
     /// How long a start waits for the server to take connections.
     ready_limit: Duration,
     /// The system whose programs run: [`Platform::current`].
@@ -146,7 +149,7 @@ impl ServerManager {
     pub fn new(kind: ServerKind) -> Self {
         Self {
             kind,
-            probes: Arc::new(SystemProbes),
+            probes: Arc::new(SystemProbe),
             ready_limit: READY_LIMIT,
             platform: Platform::current(),
             orphan_ladder: kind.stop(),
@@ -325,17 +328,11 @@ impl ServerManager {
         save: Option<&Arc<Daemon>>,
     ) -> Result<ServiceStatus, ActionError> {
         let waiting = (action == ServiceAction::Stop).then(|| self.stop_waits());
-        let busy = match Arc::clone(&self.busy).try_lock_owned() {
-            Ok(busy) => busy,
-            Err(_) => {
-                info!(%action, server = self.kind.id(), "another action runs; waiting for it");
-                let turn = tokio::time::timeout(wait, Arc::clone(&self.busy).lock_owned());
-                tokio::select! {
-                    () = daemon.shutdown.cancelled() => return Err(ActionError::Busy),
-                    turn = turn => turn.map_err(|_| ActionError::Busy)?,
-                }
-            }
-        };
+        let busy = take_turn(&self.busy, &daemon.shutdown, wait, || {
+            info!(%action, server = self.kind.id(), "another action runs; waiting for it");
+        })
+        .await
+        .map_err(|Busy| ActionError::Busy)?;
         // This stop has its turn: starts after it in line run.
         drop(waiting);
         // Also when the turn came at the same moment as the shutdown.
@@ -432,8 +429,8 @@ impl ServerManager {
                 self.ready_limit.as_secs()
             );
             let code = match self.kind {
-                ServerKind::Postgres => "postgres_start_timeout",
-                ServerKind::Mysql => "mysql_start_timeout",
+                ServerKind::Postgres => codes::POSTGRES_START_TIMEOUT,
+                ServerKind::Mysql => codes::MYSQL_START_TIMEOUT,
             };
             self.fail(&daemon.events, code, &reason);
         }
@@ -517,7 +514,7 @@ impl ServerManager {
         match cleared.await {
             Ok(orphan::Cleared::Stopped { pid, signal }) => {
                 let text = orphan::stopped_line(kind, pid, signal);
-                note(&self.runtime, &daemon.events, &text);
+                lock(&self.runtime).note(&daemon.events, &text);
             }
             Ok(orphan::Cleared::Nothing | orphan::Cleared::Forgotten) => {}
             Err(orphan::Stuck(reason)) => return Err(ActionError::OrphanStuck(kind, reason)),
@@ -582,7 +579,7 @@ impl ServerManager {
                 "marsad: PostgreSQL gets no Unix socket in {folder}: {why}. So it takes TCP \
                  connections only, and its superuser postgres cannot connect."
             );
-            note(&self.runtime, &daemon.events, &text);
+            lock(&self.runtime).note(&daemon.events, &text);
         }
         Ok(Prepared {
             spec: postgres::spec(programs.postgres, &dirs, port),
@@ -631,7 +628,7 @@ impl ServerManager {
                 "marsad: MySQL gets no Unix socket in {folder}: {why}. So it takes TCP \
                  connections only, and root@localhost cannot connect."
             );
-            note(&self.runtime, &daemon.events, &text);
+            lock(&self.runtime).note(&daemon.events, &text);
         }
         Ok(Prepared {
             spec: mysql::spec(mysqld, &dirs),
@@ -817,12 +814,12 @@ impl ServerManager {
         match cleared.await {
             Ok(orphan::Cleared::Stopped { pid, signal }) => {
                 let text = orphan::stopped_line(kind, pid, signal);
-                note(&self.runtime, &daemon.events, &text);
+                lock(&self.runtime).note(&daemon.events, &text);
             }
             Ok(orphan::Cleared::Nothing | orphan::Cleared::Forgotten) => {}
             Err(orphan::Stuck(reason)) => {
                 warn!(%reason, server = kind.id(), "our old server did not stop");
-                note(&self.runtime, &daemon.events, &format!("marsad: {reason}."));
+                lock(&self.runtime).note(&daemon.events, &format!("marsad: {reason}."));
             }
         }
     }
@@ -832,7 +829,7 @@ impl ServerManager {
     pub(super) fn fail(&self, events: &broadcast::Sender<Event>, code: &str, reason: &str) {
         warn!(code, %reason, server = self.kind.id(), "it was not started");
         let text = format!("marsad: {} was not started: {reason}.", self.kind.name());
-        note(&self.runtime, events, &text);
-        set_failed(&self.runtime, events, code);
+        lock(&self.runtime).note(events, &text);
+        lock(&self.runtime).set_failed(events, code);
     }
 }

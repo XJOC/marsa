@@ -16,6 +16,7 @@
 //! `marsa services` (task M4-18i): a port that another program holds is a
 //! failed service, and `marsa services start dns` tries again.
 
+use marsa_core::codes;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
@@ -65,13 +66,6 @@ pub fn serves_test_names(platform: Option<Platform>) -> bool {
 
 /// The id of the DNS server in `GET /v1/services` (task M4-18i).
 pub const DNS_ID: &str = "dns";
-/// Another program holds the DNS port, so `.test` names that come there get
-/// its answers, not ours. `marsa logs dns` names it where it can.
-pub const DNS_PORT_IN_USE: &str = "dns_port_in_use";
-/// The server did not start for another reason; `marsa logs dns` says why.
-pub const DNS_START_FAILED: &str = "dns_start_failed";
-/// The user stopped the server. A setup code only: the service is `stopped`.
-pub const DNS_NOT_RUNNING: &str = "dns_not_running";
 /// How long a stop waits for both sockets to close.
 pub const STOP_LIMIT: Duration = Duration::from_secs(2);
 
@@ -127,14 +121,14 @@ impl DnsService {
     }
 
     /// Why `.test` names sent to the DNS port get no answer from us: the
-    /// failure code, or [`DNS_NOT_RUNNING`]. `None` while the server runs,
+    /// failure code, or [`codes::DNS_NOT_RUNNING`]. `None` while the server runs,
     /// and where it is not used.
     pub fn not_serving(&self) -> Option<String> {
         self.addr?;
         match &lock(&self.runtime).status.state {
             ServiceState::Running => None,
             ServiceState::Failed { code } => Some(code.clone()),
-            _ => Some(DNS_NOT_RUNNING.to_owned()),
+            _ => Some(codes::DNS_NOT_RUNNING.to_owned()),
         }
     }
 
@@ -186,9 +180,9 @@ impl DnsService {
                     .downcast_ref::<BindError>()
                     .filter(|bind| bind.source.kind() == io::ErrorKind::AddrInUse);
                 let code = if held.is_some() {
-                    DNS_PORT_IN_USE
+                    codes::DNS_PORT_IN_USE
                 } else {
-                    DNS_START_FAILED
+                    codes::DNS_START_FAILED
                 };
                 tracing::warn!(
                     %addr,
@@ -752,10 +746,13 @@ mod tests {
 
         let run = service.run(&events, &shutdown, ServiceAction::Start);
         let status = tokio::time::timeout(LIMIT, run).await.expect("at once");
-        assert_eq!(status.state, failed(DNS_PORT_IN_USE));
+        assert_eq!(status.state, failed(codes::DNS_PORT_IN_USE));
         assert_eq!(status.pid, None);
         assert_eq!(service.status(), Some(status.clone()));
-        assert_eq!(service.not_serving().as_deref(), Some(DNS_PORT_IN_USE));
+        assert_eq!(
+            service.not_serving().as_deref(),
+            Some(codes::DNS_PORT_IN_USE)
+        );
         let line = format!("cannot bind UDP {addr}");
         assert!(
             texts(&service)[0].starts_with(&line),
@@ -769,7 +766,10 @@ mod tests {
                 states.push(status.state);
             }
         }
-        assert_eq!(states, [ServiceState::Starting, failed(DNS_PORT_IN_USE)]);
+        assert_eq!(
+            states,
+            [ServiceState::Starting, failed(codes::DNS_PORT_IN_USE)]
+        );
 
         drop((udp, tcp));
         let status = service.run(&events, &shutdown, ServiceAction::Start).await;
@@ -781,7 +781,10 @@ mod tests {
 
         let status = service.run(&events, &shutdown, ServiceAction::Stop).await;
         assert_eq!(status.state, ServiceState::Stopped);
-        assert_eq!(service.not_serving().as_deref(), Some(DNS_NOT_RUNNING));
+        assert_eq!(
+            service.not_serving().as_deref(),
+            Some(codes::DNS_NOT_RUNNING)
+        );
         let status = service
             .run(&events, &shutdown, ServiceAction::Restart)
             .await;
@@ -797,7 +800,7 @@ mod tests {
         let addr = tcp.local_addr().unwrap();
         let service = DnsService::new(Some(addr));
         let status = service.run(&events, &shutdown, ServiceAction::Start).await;
-        assert_eq!(status.state, failed(DNS_PORT_IN_USE));
+        assert_eq!(status.state, failed(codes::DNS_PORT_IN_USE));
         assert!(texts(&service)[0].starts_with(&format!("cannot bind TCP {addr}")));
         std::net::UdpSocket::bind(addr).expect("the UDP socket was closed");
     }
@@ -831,7 +834,7 @@ mod tests {
         let any = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
         let service = DnsService::new(Some(any));
         let status = service.run(&events, &shutdown, ServiceAction::Start).await;
-        assert_eq!(status.state, failed(DNS_START_FAILED));
+        assert_eq!(status.state, failed(codes::DNS_START_FAILED));
 
         let none = DnsService::new(None);
         assert!(!none.listed());

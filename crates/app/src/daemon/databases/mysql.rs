@@ -135,8 +135,8 @@ mod tests {
 
     use super::*;
     use crate::daemon::databases::ActionError;
-    use crate::daemon::databases::facts::Probes;
     use crate::daemon::databases::tests::{FakeProbes, alive, free_port, probes};
+    use crate::daemon::services::probe::ProcessProbe;
     use crate::daemon::state::Daemon;
 
     const FAKE: &str = "MARSA_FAKE_MYSQLD";
@@ -233,7 +233,7 @@ mod tests {
         config::save_global(&ConfigPaths::in_dir(&data).global, &global).unwrap();
         let probes = Arc::new(probes);
         let mut daemon = Daemon::new(data.clone());
-        daemon.mysql.probes = Arc::clone(&probes) as Arc<dyn Probes>;
+        daemon.mysql.probes = Arc::clone(&probes) as Arc<dyn ProcessProbe>;
         My {
             dir,
             daemon: Arc::new(daemon),

@@ -60,47 +60,13 @@ use std::time::Duration;
 
 use crate::ops::marked::{self, Current, MARKER};
 use crate::ops::program;
-use crate::response::{OpResult, Outcome};
+use crate::response::code::{
+    RESOLVED_CHECK_FAILED, RESOLVED_DELETE, RESOLVED_FOREIGN, RESOLVED_NOT_RUNNING, RESOLVED_READ,
+    RESOLVED_RESTART_FAILED, RESOLVED_STOPPED, RESOLVED_SYSTEMD_UNKNOWN, RESOLVED_TOOL_MISSING,
+    RESOLVED_UNIT_FAILED, RESOLVED_USE_HOSTS, RESOLVED_WRITE,
+};
+use crate::response::{OpResult, unreadable_message};
 use crate::system::{RunOutput, System};
-
-/// A file at [`UNIT_FILE`] that Marsa did not write, so it was left as it
-/// is.
-pub const RESOLVED_FOREIGN: &str = "resolved_foreign";
-/// [`UNIT_FILE`] or [`DROP_IN`] cannot be read, so it was left as it is.
-pub const RESOLVED_READ: &str = "resolved_read";
-/// systemd-resolved does not run, or `systemctl` cannot tell. Nothing was
-/// changed.
-pub const RESOLVED_NOT_RUNNING: &str = "resolved_not_running";
-/// There is no `ip` program (iproute2) at the usual paths. Nothing was
-/// changed.
-pub const RESOLVED_TOOL_MISSING: &str = "resolved_tool_missing";
-/// Writing [`UNIT_FILE`] failed.
-pub const RESOLVED_WRITE: &str = "resolved_write";
-/// `systemctl` could not load, enable, start, or stop Marsa's unit. After
-/// an install, the unit is gone again.
-pub const RESOLVED_UNIT_FAILED: &str = "resolved_unit_failed";
-/// `marsa0` does not send `.test` names, and only them, to Marsa's server.
-/// The unit is gone again.
-pub const RESOLVED_CHECK_FAILED: &str = "resolved_check_failed";
-/// The restart that drops [`DROP_IN`] failed, or `systemctl` cannot tell
-/// whether systemd-resolved runs. The message says that the old process
-/// may still use Marsa's server.
-pub const RESOLVED_RESTART_FAILED: &str = "resolved_restart_failed";
-/// systemd-resolved does not run after the restart that drops [`DROP_IN`],
-/// and did not start again: no name resolves until it runs.
-pub const RESOLVED_STOPPED: &str = "resolved_stopped";
-/// Deleting [`UNIT_FILE`] or [`DROP_IN`] failed.
-pub const RESOLVED_DELETE: &str = "resolved_delete";
-/// The version of systemd cannot be read, so Marsa makes no link. Nothing
-/// was changed but the removal of an old drop-in (and of an earlier unit).
-pub const RESOLVED_SYSTEMD_UNKNOWN: &str = "resolved_systemd_unknown";
-/// systemd is older than 250 and systemd-networkd runs (or `systemctl`
-/// cannot tell): that resolved counts a link networkd calls "initialized"
-/// as managed and clears what was set on it (ADR 0014, finding 30), so
-/// Marsa makes no link. The daemon writes `/etc/hosts` lines instead
-/// (`hosts_sync`). Nothing was changed but the removal of an
-/// old drop-in (and of an earlier unit).
-pub const RESOLVED_USE_HOSTS: &str = "resolved_use_hosts";
 
 /// Marsa's unit. `enable` links it into `multi-user.target`, so it runs at
 /// every boot.
@@ -197,7 +163,7 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
             return OpResult::failed(INSTALL, RESOLVED_FOREIGN, message);
         }
         Current::Unreadable(kind) => {
-            return OpResult::failed(INSTALL, RESOLVED_READ, unreadable(UNIT_FILE, kind));
+            return OpResult::failed(INSTALL, RESOLVED_READ, unreadable_message(UNIT_FILE, kind));
         }
         Current::Ours(bytes) => Some(bytes),
         Current::Missing => None,
@@ -211,30 +177,9 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
         let message = format!("{reason}, {nothing_else}");
         return OpResult::failed(INSTALL, RESOLVED_NOT_RUNNING, message);
     }
-    let version = match systemd_version(system) {
-        Ok(version) if version >= FIRST_SYSTEMD => version,
-        // Before 250 the race needs systemd-networkd (finding 30): without
-        // it running, the link is safe there too.
-        Ok(version) if version >= LINK_BEFORE_250 && !networkd_may_run(system) => version,
-        other => {
-            let (code, reason) = match other {
-                Ok(version) if version < LINK_BEFORE_250 => (
-                    RESOLVED_USE_HOSTS,
-                    format!(
-                        "systemd {version} is older than {LINK_BEFORE_250}, where Marsa's link \
-                         is not tested, and .test names go into /etc/hosts here instead"
-                    ),
-                ),
-                Ok(version) => (
-                    RESOLVED_USE_HOSTS,
-                    format!(
-                        "systemd {version} is older than {FIRST_SYSTEMD} and systemd-networkd \
-                         may run: its resolved can drop the settings of Marsa's link, and .test \
-                         names go into /etc/hosts here instead"
-                    ),
-                ),
-                Err(reason) => (RESOLVED_SYSTEMD_UNKNOWN, reason),
-            };
+    let version = match link_allowed(system) {
+        Ok(version) => version,
+        Err((code, reason)) => {
             // A unit of an earlier install would meet that race at every
             // boot, so it goes.
             let message = if current.is_some() {
@@ -263,12 +208,11 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
         && check(system, port).is_ok()
         && program::succeeded(&system.run(SYSTEMCTL, &IS_ENABLED))
     {
-        let outcome = if dropped {
-            Outcome::Done
+        return if dropped {
+            OpResult::done(INSTALL)
         } else {
-            Outcome::Unchanged
+            OpResult::unchanged(INSTALL)
         };
-        return result(INSTALL, outcome);
     }
     if !in_place
         && let Err(err) = system.write_atomic(Path::new(UNIT_FILE), content.as_bytes(), MODE)
@@ -282,7 +226,7 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
             wait_for_link(system, port).map_err(|reason| (RESOLVED_CHECK_FAILED, reason))
         });
     let Err((code, reason)) = checked else {
-        return result(INSTALL, Outcome::Done);
+        return OpResult::done(INSTALL);
     };
     // The unit goes, also one that was there before this call: a unit that
     // does not work must not run again at the next boot.
@@ -293,13 +237,40 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
     OpResult::failed(INSTALL, code, format!("{reason}; {cleanup}"))
 }
 
+/// The systemd version if Marsa's link may be used on it, or the code and the
+/// reason why not.
+fn link_allowed(system: &impl System) -> Result<u32, (&'static str, String)> {
+    match systemd_version(system) {
+        Ok(version) if version >= FIRST_SYSTEMD => Ok(version),
+        // Before 250 the race needs systemd-networkd (finding 30): without
+        // it running, the link is safe there too.
+        Ok(version) if version >= LINK_BEFORE_250 && !networkd_may_run(system) => Ok(version),
+        Ok(version) if version < LINK_BEFORE_250 => Err((
+            RESOLVED_USE_HOSTS,
+            format!(
+                "systemd {version} is older than {LINK_BEFORE_250}, where Marsa's link \
+                 is not tested, and .test names go into /etc/hosts here instead"
+            ),
+        )),
+        Ok(version) => Err((
+            RESOLVED_USE_HOSTS,
+            format!(
+                "systemd {version} is older than {FIRST_SYSTEMD} and systemd-networkd \
+                 may run: its resolved can drop the settings of Marsa's link, and .test \
+                 names go into /etc/hosts here instead"
+            ),
+        )),
+        Err(reason) => Err((RESOLVED_SYSTEMD_UNKNOWN, reason)),
+    }
+}
+
 /// `resolved_remove`: takes out Marsa's unit and the old drop-in, each only
 /// if Marsa wrote it. Both are tried; the first failure is the result.
 /// Nothing of Marsa's there is `unchanged`.
 pub fn remove(system: &impl System) -> OpResult {
     let taken = match marked::current(system, Path::new(UNIT_FILE)) {
         Current::Missing | Current::Foreign => Ok(false),
-        Current::Unreadable(kind) => Err((RESOLVED_READ, unreadable(UNIT_FILE, kind))),
+        Current::Unreadable(kind) => Err((RESOLVED_READ, unreadable_message(UNIT_FILE, kind))),
         Current::Ours(_) => take_out(system).map(|()| true),
     };
     let dropped = drop_old(system);
@@ -307,8 +278,8 @@ pub fn remove(system: &impl System) -> OpResult {
         (Err((code, message)), _) | (_, Err((code, message))) => {
             OpResult::failed(REMOVE, code, message)
         }
-        (Ok(false), Ok(false)) => result(REMOVE, Outcome::Unchanged),
-        (Ok(_), Ok(_)) => result(REMOVE, Outcome::Done),
+        (Ok(false), Ok(false)) => OpResult::unchanged(REMOVE),
+        (Ok(_), Ok(_)) => OpResult::done(REMOVE),
     }
 }
 
@@ -581,7 +552,9 @@ fn is_key(text: &str) -> bool {
 fn drop_old(system: &impl System) -> Result<bool, (&'static str, String)> {
     match marked::current(system, Path::new(DROP_IN)) {
         Current::Missing | Current::Foreign => return Ok(false),
-        Current::Unreadable(kind) => return Err((RESOLVED_READ, unreadable(DROP_IN, kind))),
+        Current::Unreadable(kind) => {
+            return Err((RESOLVED_READ, unreadable_message(DROP_IN, kind)));
+        }
         Current::Ours(_) => {}
     }
     if let Err(err) = system.remove(Path::new(DROP_IN)) {
@@ -675,15 +648,6 @@ fn settle(system: &impl System, restarted: Result<(), String>) -> Restarted {
     }
 }
 
-/// The message for a file at `path` that cannot be read.
-fn unreadable(path: &str, kind: io::ErrorKind) -> String {
-    format!("cannot read {path}: {kind}, so it was left as it is")
-}
-
-fn result(op: &'static str, outcome: Outcome) -> OpResult {
-    OpResult { op, outcome }
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
@@ -694,9 +658,11 @@ mod tests {
 
     use super::*;
     use crate::ops::apply;
+    use crate::ops::testing::code_of;
     use crate::os::Os;
     use crate::request::Request;
-    use crate::system::FakeSystem;
+    use crate::response::Outcome;
+    use crate::system::{FakeSystem, Hooked, RunHook};
 
     const ACTIVE: &str = "/usr/bin/systemctl is-active --quiet systemd-resolved.service";
     const RESET: &str = "/usr/bin/systemctl reset-failed systemd-resolved.service";
@@ -760,8 +726,9 @@ mod tests {
 
     /// A Linux with systemd-resolved and `ip`, whose systemd runs Marsa's
     /// unit as written. Files and the log are in `fake`.
-    struct Linux {
-        fake: FakeSystem,
+    type Linux = Hooked<Machine>;
+
+    struct Machine {
         active: Cell<bool>,
         /// `systemctl is-active` exits with this instead, as on a bus error.
         active_code: Option<i32>,
@@ -807,8 +774,7 @@ mod tests {
 
     impl Linux {
         fn new() -> Self {
-            let linux = Self {
-                fake: FakeSystem::default(),
+            let machine = Machine {
                 active: Cell::new(true),
                 active_code: None,
                 no_systemctl: false,
@@ -833,6 +799,7 @@ mod tests {
                 wipe_after: Cell::new(None),
                 strict_dot: false,
             };
+            let linux = Hooked::with_hook(FakeSystem::default(), machine);
             linux.put("/usr/sbin/ip", b"");
             linux
         }
@@ -1130,57 +1097,18 @@ mod tests {
         })
     }
 
-    impl System for Linux {
-        fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>> {
-            self.fake.read(path, max)
-        }
-
-        fn exists(&self, path: &Path) -> bool {
-            self.fake.exists(path)
-        }
-
-        fn is_link(&self, path: &Path) -> bool {
-            self.fake.is_link(path)
-        }
-
-        fn is_root_only_dir(&self, dir: &Path) -> bool {
-            self.fake.is_root_only_dir(dir)
-        }
-
-        fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-            self.fake.write_atomic(path, bytes, mode)
-        }
-
-        fn remove(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove(path)
-        }
-
-        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove_empty_dir(path)
-        }
-
-        fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
-            let strings = args.iter().map(|arg| (*arg).to_owned()).collect();
-            self.fake
-                .log
-                .borrow_mut()
-                .push((program.to_owned(), strings));
+    impl RunHook for Machine {
+        fn run(
+            linux: &Linux,
+            program: &'static str,
+            args: &[&str],
+            _scripted: io::Result<RunOutput>,
+        ) -> io::Result<RunOutput> {
             match program {
-                "/usr/bin/systemctl" => self.systemctl(&args.join(" ")),
-                "/usr/bin/resolvectl" if args == ["status", "marsa0"] => self.status(),
+                "/usr/bin/systemctl" => linux.systemctl(&args.join(" ")),
+                "/usr/bin/resolvectl" if args == ["status", "marsa0"] => linux.status(),
                 _ => panic!("unexpected command: {program} {args:?}"),
             }
-        }
-
-        fn current_exe(&self) -> io::Result<PathBuf> {
-            self.fake.current_exe()
-        }
-    }
-
-    fn code_of(result: &OpResult) -> &'static str {
-        match &result.outcome {
-            Outcome::Failed { code, .. } => code,
-            other => panic!("not a failure: {other:?}"),
         }
     }
 
@@ -1196,7 +1124,7 @@ mod tests {
     #[test]
     fn install_writes_starts_and_checks_the_unit() {
         let linux = Linux::new();
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &linux), OpResult::done(INSTALL));
         assert_eq!(linux.unit_file(), Some((ours(18053), 0o644)));
         assert_eq!(
             linux.commands(),
@@ -1288,7 +1216,7 @@ mod tests {
         linux.version_line = "systemd 249 (249.11-0ubuntu3.12)";
         linux.networkd_active = "inactive\ninactive\ninactive\n";
         linux.networkd_enabled = "disabled\nmasked\ndisabled\n";
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &linux), OpResult::done(INSTALL));
         let (bytes, _) = linux.unit_file().unwrap();
         assert_eq!(bytes, unit("/usr/sbin/ip", 18053, true).into_bytes());
         assert_eq!(
@@ -1369,11 +1297,7 @@ mod tests {
         ] {
             let linux = Linux::new();
             linux.wipe_after.set(Some(line));
-            assert_eq!(
-                install(18053, &linux),
-                result(INSTALL, Outcome::Done),
-                "{line}"
-            );
+            assert_eq!(install(18053, &linux), OpResult::done(INSTALL), "{line}");
             let link = linux.link.borrow().clone().unwrap();
             assert!(!link.exposed(), "{line}");
             assert_eq!(link.domains, ["~test"], "{line}");
@@ -1416,11 +1340,7 @@ mod tests {
         ] {
             let mut linux = Linux::new();
             linux.version_line = line;
-            assert_eq!(
-                install(18053, &linux),
-                result(INSTALL, Outcome::Done),
-                "{line}"
-            );
+            assert_eq!(install(18053, &linux), OpResult::done(INSTALL), "{line}");
             let (bytes, _) = linux.unit_file().unwrap();
             let text = String::from_utf8(bytes).unwrap();
             assert_eq!(
@@ -1446,7 +1366,7 @@ mod tests {
             .borrow_mut()
             .remove(Path::new("/usr/sbin/ip"));
         linux.put("/bin/ip", b"");
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &linux), OpResult::done(INSTALL));
         let (bytes, _) = linux.unit_file().unwrap();
         assert_eq!(bytes, unit("/bin/ip", 18053, false).into_bytes());
     }
@@ -1476,7 +1396,7 @@ mod tests {
         let mut linux = Linux::with_unit(&ours(18053));
         // Any write fails here, so `unchanged` also shows that none was tried.
         linux.fake.fail_writes.insert(PathBuf::from(UNIT_FILE));
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Unchanged));
+        assert_eq!(install(18053, &linux), OpResult::unchanged(INSTALL));
         assert_eq!(linux.unit_file(), Some((ours(18053), OLD_MODE)));
         assert_eq!(
             linux.commands(),
@@ -1490,7 +1410,7 @@ mod tests {
     fn install_over_our_unit_without_its_link_starts_it_again() {
         let linux = Linux::with_unit(&ours(18053));
         *linux.link.borrow_mut() = None;
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &linux), OpResult::done(INSTALL));
         assert_eq!(linux.unit_file(), Some((ours(18053), OLD_MODE)));
         assert_eq!(
             linux.commands(),
@@ -1506,7 +1426,7 @@ mod tests {
     fn install_over_our_disabled_unit_enables_it() {
         let linux = Linux::with_unit(&ours(18053));
         linux.enabled.set(false);
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &linux), OpResult::done(INSTALL));
         assert!(linux.enabled.get());
         assert_eq!(
             linux.commands(),
@@ -1530,7 +1450,7 @@ mod tests {
     fn a_global_dns_over_tls_is_turned_off_on_the_link() {
         let mut linux = Linux::new();
         linux.strict_dot = true;
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &linux), OpResult::done(INSTALL));
         let base = String::from_utf8(ours(18053)).unwrap();
         let without = base.replace("ExecStart=-/usr/bin/resolvectl dnsovertls marsa0 no\n", "");
         assert_ne!(without, base);
@@ -1547,7 +1467,7 @@ mod tests {
     #[test]
     fn install_rewrites_our_unit_with_another_port() {
         let linux = Linux::with_unit(&ours(18054));
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &linux), OpResult::done(INSTALL));
         assert_eq!(linux.unit_file(), Some((ours(18053), 0o644)));
         assert_eq!(linux.server().as_deref(), Some("127.0.0.1:18053"));
         assert_eq!(
@@ -1684,7 +1604,7 @@ mod tests {
     fn a_link_that_needs_a_moment_is_checked_again() {
         let linux = Linux::new();
         linux.none_for.set(2);
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &linux), OpResult::done(INSTALL));
         assert_eq!(
             linux.commands(),
             [
@@ -1762,7 +1682,7 @@ mod tests {
     #[test]
     fn the_unit_never_routes_other_names_to_the_port() {
         let linux = Linux::new();
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &linux), OpResult::done(INSTALL));
         assert!(!linux.exposed.get());
         let base = String::from_utf8(ours(18053)).unwrap();
         let dns = "ExecStart=/usr/bin/resolvectl dns marsa0 127.0.0.1:18053\n";
@@ -1837,7 +1757,7 @@ mod tests {
     fn the_status_of_systemd_262_is_read_whole() {
         let mut linux = Linux::new();
         linux.fedora = true;
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &linux), OpResult::done(INSTALL));
     }
 
     // --- the old global drop-in --------------------------------------------
@@ -1845,7 +1765,7 @@ mod tests {
     #[test]
     fn install_takes_out_the_old_drop_in_first() {
         let linux = Linux::new().with_drop_in();
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &linux), OpResult::done(INSTALL));
         assert_eq!(linux.file(DROP_IN), None);
         assert!(!linux.drop_in_loaded.get());
         assert_eq!(
@@ -1861,7 +1781,7 @@ mod tests {
     #[test]
     fn install_over_a_working_unit_and_the_drop_in_is_done() {
         let linux = Linux::with_unit(&ours(18053)).with_drop_in();
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &linux), OpResult::done(INSTALL));
         assert_eq!(linux.file(DROP_IN), None);
         assert_eq!(
             linux.commands(),
@@ -1881,8 +1801,8 @@ mod tests {
     fn a_foreign_drop_in_is_left_alone() {
         let linux = Linux::new();
         linux.put(DROP_IN, FOREIGN_DROP_IN);
-        assert_eq!(install(18053, &linux), result(INSTALL, Outcome::Done));
-        assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
+        assert_eq!(install(18053, &linux), OpResult::done(INSTALL));
+        assert_eq!(remove(&linux), OpResult::done(REMOVE));
         assert_eq!(
             linux.file(DROP_IN),
             Some((FOREIGN_DROP_IN.to_vec(), OLD_MODE))
@@ -1930,7 +1850,7 @@ mod tests {
     fn a_failed_restart_after_the_delete_is_mended_by_a_start() {
         let linux = Linux::new().with_drop_in();
         linux.failing_restarts.set(1);
-        assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&linux), OpResult::done(REMOVE));
         assert_eq!(
             linux.commands(),
             [ACTIVE, RESET, RESTARTED, ACTIVE, RESET, STARTED, ACTIVE]
@@ -1977,7 +1897,7 @@ mod tests {
     fn remove_does_not_start_a_resolved_that_does_not_run() {
         let linux = Linux::new().with_drop_in();
         linux.active.set(false);
-        assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&linux), OpResult::done(REMOVE));
         assert_eq!(linux.file(DROP_IN), None);
         assert_eq!(linux.commands(), [ACTIVE]);
         assert!(!linux.active.get());
@@ -2010,7 +1930,7 @@ mod tests {
         foreign_drop_in.put(DROP_IN, FOREIGN_DROP_IN);
         for linux in [Linux::new(), Linux::with_unit(FOREIGN), foreign_drop_in] {
             let before = (linux.unit_file(), linux.file(DROP_IN));
-            assert_eq!(remove(&linux), result(REMOVE, Outcome::Unchanged));
+            assert_eq!(remove(&linux), OpResult::unchanged(REMOVE));
             assert_eq!((linux.unit_file(), linux.file(DROP_IN)), before);
             assert!(linux.commands().is_empty());
         }
@@ -2021,7 +1941,7 @@ mod tests {
         // Also with another port: the marker makes it ours, not the content.
         for port in [18053, 18054] {
             let linux = Linux::with_unit(&ours(port));
-            assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
+            assert_eq!(remove(&linux), OpResult::done(REMOVE));
             assert_eq!(linux.unit_file(), None);
             assert_eq!(linux.commands(), [DISABLED, RELOAD, RESET_UNIT]);
             assert!(!linux.enabled.get() && linux.server().is_none());
@@ -2032,7 +1952,7 @@ mod tests {
     #[test]
     fn remove_takes_out_the_unit_and_the_drop_in() {
         let linux = Linux::with_unit(&ours(18053)).with_drop_in();
-        assert_eq!(remove(&linux), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&linux), OpResult::done(REMOVE));
         assert_eq!((linux.unit_file(), linux.file(DROP_IN)), (None, None));
         assert_eq!(
             linux.commands(),
@@ -2137,10 +2057,7 @@ mod tests {
         let raw = json!({ "version": 1, "ops": ops }).to_string();
         let request = Request::from_arg(OsStr::new(&raw)).unwrap();
         let linux = Linux::new();
-        let expected = [
-            result(INSTALL, Outcome::Done),
-            result(REMOVE, Outcome::Done),
-        ];
+        let expected = [OpResult::done(INSTALL), OpResult::done(REMOVE)];
         assert_eq!(apply(&request, Os::Linux, &linux), expected);
         assert_eq!(linux.unit_file(), None);
 

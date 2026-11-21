@@ -93,14 +93,14 @@ impl ClientError {
     /// it is the daemon's own code, such as `service_not_found`.
     pub fn code(&self) -> &str {
         match self {
-            ClientError::NotRunning => "daemon_not_running",
-            ClientError::StartFailed { .. } => "daemon_start_failed",
-            ClientError::StopFailed { .. } => "daemon_stop_failed",
-            ClientError::Unreachable { .. } => "daemon_unreachable",
-            ClientError::ApiTooNew { .. } => "daemon_api_too_new",
-            ClientError::BadResponse { .. } => "daemon_bad_response",
-            ClientError::InvalidId { .. } => "invalid_id",
-            ClientError::PathNotUtf8 { .. } => "site_path_not_utf8",
+            ClientError::NotRunning => crate::codes::DAEMON_NOT_RUNNING,
+            ClientError::StartFailed { .. } => crate::codes::DAEMON_START_FAILED,
+            ClientError::StopFailed { .. } => crate::codes::DAEMON_STOP_FAILED,
+            ClientError::Unreachable { .. } => crate::codes::DAEMON_UNREACHABLE,
+            ClientError::ApiTooNew { .. } => crate::codes::DAEMON_API_TOO_NEW,
+            ClientError::BadResponse { .. } => crate::codes::DAEMON_BAD_RESPONSE,
+            ClientError::InvalidId { .. } => crate::codes::INVALID_ID,
+            ClientError::PathNotUtf8 { .. } => crate::codes::SITE_PATH_NOT_UTF8,
             ClientError::Api { code, .. } => code,
             ClientError::InUse { in_use, .. } => in_use.code(),
             ClientError::DaemonFile(err) => err.code(),
@@ -134,7 +134,7 @@ impl ClientError {
         if let Some(in_use) = &body.in_use
             && matches!(
                 body.error.code.as_str(),
-                "version_in_use" | "sites_lose_php"
+                crate::codes::VERSION_IN_USE | crate::codes::SITES_LOSE_PHP
             )
         {
             let names = |names: &[String]| -> Vec<String> {

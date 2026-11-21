@@ -5,6 +5,7 @@
 //! `CancellationToken` is cancelled. Like Supervisor running `queue:work` for
 //! Laravel, but inside the daemon.
 
+use marsa_core::codes;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -252,7 +253,7 @@ async fn supervise(spec: ServiceSpec, shared: Shared, cancel: CancellationToken)
             },
             Err(err) => {
                 warn!(service = %spec.id, %err, "cannot start");
-                "spawn_failed"
+                codes::SPAWN_FAILED
             }
         };
         let failed = ServiceState::Failed { code: code.into() };

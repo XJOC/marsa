@@ -12,6 +12,7 @@ pub mod hosts_sync;
 pub mod php;
 pub mod runtimes_api;
 pub mod server;
+pub mod services;
 pub mod services_api;
 pub mod setup_api;
 pub mod sites_api;

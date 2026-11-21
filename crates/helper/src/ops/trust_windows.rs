@@ -34,11 +34,12 @@ use std::path::{Path, PathBuf};
 use sha1::{Digest, Sha1};
 
 use super::program;
-use super::trust::{
+use super::trust::{parse_pem, to_pem};
+use crate::response::OpResult;
+use crate::response::code::{
     TRUST_ADD_FAILED, TRUST_CERT_INVALID, TRUST_DELETE, TRUST_READ, TRUST_REMOVE_FAILED,
-    TRUST_WRITE, parse_pem, to_pem,
+    TRUST_WRITE,
 };
-use crate::response::{OpResult, Outcome};
 use crate::system::{RunOutput, System};
 
 const CERTUTIL: &str = "certutil.exe";
@@ -83,7 +84,7 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
     };
     match stored_thumbprint(INSTALL, &path, system) {
         Ok(Some(old)) if old == thumbprint => match in_store(INSTALL, &thumbprint, system) {
-            Ok(true) => return result(INSTALL, Outcome::Unchanged),
+            Ok(true) => return OpResult::unchanged(INSTALL),
             // Removed by hand since: added again below.
             Ok(false) => {}
             Err(failed) => return failed,
@@ -98,7 +99,7 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
             // (see the module doc), and the store stays as it is.
             Ok(true) => {
                 return match write_file(&path, &der, system) {
-                    Ok(()) => result(INSTALL, Outcome::Unchanged),
+                    Ok(()) => OpResult::unchanged(INSTALL),
                     Err(failed) => failed,
                 };
             }
@@ -122,7 +123,7 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
     // `-addstore` exits with 0 when the certificate is already there too, so
     // the store itself is the check.
     match in_store(INSTALL, &thumbprint, system) {
-        Ok(true) => result(INSTALL, Outcome::Done),
+        Ok(true) => OpResult::done(INSTALL),
         Ok(false) => {
             // Nothing of it is trusted, so the record goes too.
             let _ = remove_steps(INSTALL, &path, &thumbprint, system);
@@ -143,17 +144,13 @@ pub fn remove(system: &impl System) -> OpResult {
         Err(failed) => return failed,
     };
     match stored_thumbprint(REMOVE, &path, system) {
-        Ok(None) => result(REMOVE, Outcome::Unchanged),
+        Ok(None) => OpResult::unchanged(REMOVE),
         Ok(Some(thumbprint)) => match remove_steps(REMOVE, &path, &thumbprint, system) {
-            Ok(()) => result(REMOVE, Outcome::Done),
+            Ok(()) => OpResult::done(REMOVE),
             Err(failed) => failed,
         },
         Err(failed) => failed,
     }
-}
-
-fn result(op: &'static str, outcome: Outcome) -> OpResult {
-    OpResult { op, outcome }
 }
 
 fn ca_path(
@@ -304,9 +301,11 @@ mod tests {
 
     use super::*;
     use crate::ops;
+    use crate::ops::testing::code_of as status;
     use crate::os::Os;
     use crate::request::Request;
-    use crate::system::FakeSystem;
+    use crate::response::Outcome;
+    use crate::system::{FakeSystem, Hooked, RunHook};
 
     const INSTALL_DIR: &str = r"C:\Program Files\Marsa";
     const SYSTEM_DIR: &str = r"C:\Windows\System32";
@@ -337,8 +336,9 @@ mod tests {
     /// A Windows machine whose Root store `certutil` changes: files and the
     /// call log come from a [`FakeSystem`], and `run_system_tool` acts like
     /// `certutil` on a store of thumbprints.
-    struct Machine {
-        fake: FakeSystem,
+    type Machine = Hooked<Certutil>;
+
+    struct Certutil {
         /// The thumbprints in the Root store.
         store: RefCell<BTreeSet<String>>,
         /// `-addstore` puts the certificate of its file there, and
@@ -358,12 +358,12 @@ mod tests {
 
     impl Machine {
         fn new(present: bool) -> Self {
-            let machine = Self {
-                fake: FakeSystem {
-                    install_dir: Some(PathBuf::from(INSTALL_DIR)),
-                    system_dir: Some(PathBuf::from(SYSTEM_DIR)),
-                    ..FakeSystem::default()
-                },
+            let fake = FakeSystem {
+                install_dir: Some(PathBuf::from(INSTALL_DIR)),
+                system_dir: Some(PathBuf::from(SYSTEM_DIR)),
+                ..FakeSystem::default()
+            };
+            let certutil = Certutil {
                 store: RefCell::default(),
                 add_works: true,
                 delete_works: true,
@@ -372,6 +372,7 @@ mod tests {
                 query_code: None,
                 queries_before_failing: Cell::new(0),
             };
+            let machine = Hooked::with_hook(fake, certutil);
             if present {
                 machine.store.borrow_mut().insert(thumbprint());
             }
@@ -447,76 +448,20 @@ mod tests {
         })
     }
 
-    impl System for Machine {
-        fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>> {
-            self.fake.read(path, max)
-        }
-
-        fn exists(&self, path: &Path) -> bool {
-            self.fake.exists(path)
-        }
-
-        fn is_link(&self, path: &Path) -> bool {
-            self.fake.is_link(path)
-        }
-
-        fn is_root_only_dir(&self, dir: &Path) -> bool {
-            self.fake.is_root_only_dir(dir)
-        }
-
-        fn is_read_only(&self, path: &Path) -> bool {
-            self.fake.is_read_only(path)
-        }
-
-        fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-            self.fake.write_atomic(path, bytes, mode)
-        }
-
-        fn remove(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove(path)
-        }
-
-        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove_empty_dir(path)
-        }
-
-        fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
-            self.fake.run(program, args)
-        }
-
-        fn current_exe(&self) -> io::Result<PathBuf> {
-            self.fake.current_exe()
-        }
-
-        fn system_dir(&self) -> io::Result<PathBuf> {
-            self.fake.system_dir()
-        }
-
-        fn install_dir(&self) -> io::Result<PathBuf> {
-            self.fake.install_dir()
-        }
-
-        fn run_system_tool(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
-            let logged = args.iter().map(|arg| (*arg).to_owned()).collect();
-            self.fake
-                .log
-                .borrow_mut()
-                .push((program.to_owned(), logged));
+    impl RunHook for Certutil {
+        fn run_system_tool(
+            machine: &Machine,
+            program: &'static str,
+            args: &[&str],
+            _scripted: io::Result<RunOutput>,
+        ) -> io::Result<RunOutput> {
             assert_eq!(program, CERTUTIL);
             match args {
-                ["-store", STORE, id] => self.query(id),
-                ["-addstore", STORE, file] => self.add(file),
-                ["-delstore", STORE, id] => self.delete(id),
+                ["-store", STORE, id] => machine.query(id),
+                ["-addstore", STORE, file] => machine.add(file),
+                ["-delstore", STORE, id] => machine.delete(id),
                 other => panic!("unexpected certutil call: {other:?}"),
             }
-        }
-    }
-
-    fn status(result: &OpResult) -> &'static str {
-        match result.outcome {
-            Outcome::Done => "done",
-            Outcome::Unchanged => "unchanged",
-            Outcome::Failed { code, .. } => code,
         }
     }
 

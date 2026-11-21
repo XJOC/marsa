@@ -54,6 +54,7 @@
 //! One request at a time, shared with setup ([`Setup`]): 409
 //! `uninstall_running` or `setup_running`.
 
+use marsa_core::codes;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,7 +65,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use marsa_core::caddy::CaddyPaths;
 use marsa_core::helper::{HelperOp, OpResult};
-use marsa_core::recipes::Platform;
+use marsa_core::recipes::{Os, Platform};
 use marsa_core::types::{OpStatus, UninstallReport};
 use tokio_util::sync::CancellationToken;
 
@@ -72,8 +73,7 @@ use super::api::HttpError;
 use super::autostart_api::Autostart;
 use super::hosts_sync;
 use super::setup_api::{
-    CHECK_LIMIT, Flow, PIPE_GRACE, PROMPT_LIMIT, Running, Setup, is_linux, is_macos, is_windows,
-    linux_dns, nss, user_trust,
+    CHECK_LIMIT, Flow, PIPE_GRACE, PROMPT_LIMIT, Running, Setup, linux_dns, nss, user_trust,
 };
 use super::state::Daemon;
 
@@ -104,12 +104,12 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
 async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallReport>, HttpError> {
     let platform = setup
         .platform()
-        .filter(|platform| is_macos(*platform) || is_linux(*platform) || is_windows(*platform))
+        .filter(|platform| platform.os() != Os::Any)
         .ok_or_else(|| {
             let message = "the uninstall runs on macOS, Linux, and Windows only";
             HttpError::new(
                 StatusCode::NOT_IMPLEMENTED,
-                "uninstall_not_supported",
+                codes::UNINSTALL_NOT_SUPPORTED,
                 message,
             )
         })?;
@@ -154,7 +154,11 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallR
     job.await.map(Json).map_err(|err| {
         tracing::error!(error = %err, "the uninstall job failed");
         let message = "the uninstall job failed";
-        HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+        HttpError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            codes::INTERNAL_ERROR,
+            message,
+        )
     })
 }
 
@@ -169,7 +173,7 @@ pub fn run(
     stop: &CancellationToken,
 ) -> UninstallReport {
     let mut report = UninstallReport::default();
-    if is_windows(platform) {
+    if platform.os() == Os::Windows {
         return run_windows(setup, data_dir, autostart, stop);
     }
     match setup.launch(
@@ -185,7 +189,7 @@ pub fn run(
             return report;
         }
     }
-    if is_linux(platform) {
+    if platform.os() == Os::Linux {
         after_the_helper_on_linux(&mut report, setup, data_dir, autostart, stop);
     } else {
         report.results.push(untrust_for_user(setup, data_dir, stop));
@@ -218,7 +222,7 @@ fn after_the_helper_on_linux(
         None => {
             tracing::warn!("the home folder is not known, so the NSS databases cannot be found");
             let message = "the home folder of the current user is not known";
-            user_trust::failed(nss::NSS_REMOVE, nss::NSS_REMOVE_FAILED, message)
+            user_trust::failed(nss::NSS_REMOVE, codes::NSS_REMOVE_FAILED, message)
         }
     });
     if let Some(result) = remove_login_file_if_any(autostart) {
@@ -275,7 +279,7 @@ fn run_windows(
 /// The login file, unless this system has none (`autostart_unsupported`).
 fn remove_login_file_if_any(autostart: &Autostart) -> Option<OpResult> {
     let result = remove_login_file(autostart);
-    (result.code.as_deref() != Some("autostart_unsupported")).then_some(result)
+    (result.code.as_deref() != Some(codes::AUTOSTART_UNSUPPORTED)).then_some(result)
 }
 
 /// The current user's trust in Marsa's CA (ADR 0015), from the record in
@@ -292,7 +296,7 @@ fn untrust_for_user(setup: &Setup, data_dir: &Path, stop: &CancellationToken) ->
                            keychain cannot be found";
             user_trust::failed(
                 user_trust::TRUST_REMOVE,
-                user_trust::TRUST_REMOVE_FAILED,
+                codes::TRUST_REMOVE_FAILED,
                 message,
             )
         }
@@ -322,8 +326,10 @@ fn remove_login_file(autostart: &Autostart) -> OpResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::daemon::setup_api::test_support::set_mode;
+    use crate::daemon::setup_api::test_support::{Fake, make_helper, ok, script_error};
     use crate::daemon::setup_api::windows::{Install, Service};
-    use std::ffi::OsString;
     use std::fs;
     use std::io;
     use std::path::PathBuf;
@@ -358,31 +364,13 @@ mod tests {
     /// The removals of `uninstall_all` on macOS (`ops/mod.rs` of the helper).
     const REMOVALS: [&str; 3] = ["pf_remove", "resolver_remove", "trust_remove"];
 
-    type Answer = Box<dyn Fn(&'static str, &[String]) -> io::Result<RunOutput> + Send + Sync>;
-
-    /// Records every call and answers by program and arguments. Runs
-    /// nothing: no `osascript`, no `security`, no helper.
-    struct Fake {
-        calls: Mutex<Vec<(&'static str, Vec<String>, Duration)>>,
-        answer: Answer,
-    }
-
     impl Fake {
-        fn new(
-            answer: impl Fn(&'static str, &[String]) -> io::Result<RunOutput> + Send + Sync + 'static,
-        ) -> Arc<Self> {
-            Arc::new(Self {
-                calls: Mutex::default(),
-                answer: Box::new(answer),
-            })
-        }
-
         /// The helper answers `osascript()`; `security` finds the test CA
         /// trusted and in the keychain, and removes both.
         fn with_helper(
             osascript: impl Fn() -> io::Result<RunOutput> + Send + Sync + 'static,
         ) -> Arc<Self> {
-            Self::new(move |program, args| match program {
+            Self::answering(move |program, args| match program {
                 OSASCRIPT => osascript(),
                 SECURITY => security(args),
                 other => panic!("unexpected program {other}"),
@@ -396,36 +384,15 @@ mod tests {
 
         /// A helper that must never be asked.
         fn no_prompt() -> Arc<Self> {
-            Self::new(|program, args| panic!("{program} {args:?} ran"))
+            Self::answering(|program, args| panic!("{program} {args:?} ran"))
         }
 
-        fn programs(&self) -> Vec<&'static str> {
+        fn recorded(&self) -> Vec<(&'static str, Vec<String>, Duration)> {
             let calls = self.calls.lock().unwrap();
-            calls.iter().map(|(program, _, _)| *program).collect()
-        }
-
-        fn calls(&self) -> Vec<(&'static str, Vec<String>, Duration)> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    impl Runner for Fake {
-        fn run(
-            &self,
-            program: &'static str,
-            args: &[OsString],
-            limit: Duration,
-            _stop: &CancellationToken,
-        ) -> io::Result<RunOutput> {
-            let args: Vec<String> = args
+            calls
                 .iter()
-                .map(|arg| arg.to_str().unwrap().to_owned())
-                .collect();
-            self.calls
-                .lock()
-                .unwrap()
-                .push((program, args.clone(), limit));
-            (self.answer)(program, &args)
+                .map(|call| (call.program, call.args.clone(), call.limit))
+                .collect()
         }
     }
 
@@ -439,23 +406,6 @@ mod tests {
             )),
             _ => ok(""),
         }
-    }
-
-    fn ok(stdout: &str) -> io::Result<RunOutput> {
-        Ok(RunOutput {
-            code: Some(0),
-            stdout: stdout.as_bytes().to_vec(),
-            stderr: Vec::new(),
-        })
-    }
-
-    /// What `osascript` gives when the script failed.
-    fn script_error(stderr: &str) -> io::Result<RunOutput> {
-        Ok(RunOutput {
-            code: Some(1),
-            stdout: Vec::new(),
-            stderr: stderr.as_bytes().to_vec(),
-        })
     }
 
     /// The helper's answer: one done result per op.
@@ -574,21 +524,6 @@ mod tests {
         }
     }
 
-    fn make_helper(path: &Path) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, "").unwrap();
-        #[cfg(unix)]
-        for path in [path, path.parent().unwrap()] {
-            set_mode(path, 0o755);
-        }
-    }
-
-    #[cfg(unix)]
-    fn set_mode(path: &Path, mode: u32) {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
-    }
-
     /// The routes behind the real auth layer, on one daemon. Both routes
     /// share one [`Setup`], as in `api::router`.
     struct App {
@@ -683,7 +618,7 @@ mod tests {
 
         // One admin prompt, with the constant script of ADR 0012 and the
         // one request; then the user's trust, from the record.
-        let calls = fake.calls();
+        let calls = fake.recorded();
         assert_eq!(fake.programs(), [OSASCRIPT, SECURITY, SECURITY, SECURITY]);
         let (_, args, limit) = &calls[0];
         let helper = dir.helper();
@@ -811,7 +746,7 @@ mod tests {
                 report.results
             );
             // The one prompt ran that helper.
-            let calls = fake.calls();
+            let calls = fake.recorded();
             assert_eq!(calls[0].0, OSASCRIPT, "{folder}");
             assert_eq!(calls[0].1[6], helper.to_str().unwrap(), "{folder}");
             assert!(!dir.login_file().exists() && !dir.record().exists());
@@ -934,7 +869,7 @@ mod tests {
     /// Linux: `pkexec` answers `pkexec()`, and `certutil` lists the test
     /// CA's row in each database and deletes it.
     fn linux_fake(pkexec: impl Fn() -> io::Result<RunOutput> + Send + Sync + 'static) -> Arc<Fake> {
-        Fake::new(move |program, args| match program {
+        Fake::answering(move |program, args| match program {
             setup_api::pkexec::PKEXEC => pkexec(),
             nss::CERTUTIL if args[2] == "-L" => ok(&format!("{NICKNAME}     C,,\n")),
             nss::CERTUTIL => ok(""),
@@ -985,7 +920,7 @@ mod tests {
         let files = user_trust::TrustFiles::in_dir(&dir.data());
         assert!(!nss::record_path(&files).exists());
 
-        let calls = fake.calls();
+        let calls = fake.recorded();
         let (program, args, limit) = &calls[0];
         assert_eq!(*program, setup_api::pkexec::PKEXEC);
         let helper = dir.helper();
@@ -1072,7 +1007,7 @@ mod tests {
             { "op": "trust_remove", "status": "done" },
         ] })
         .to_string();
-        let fake = Fake::new(move |program, args| match program {
+        let fake = Fake::answering(move |program, args| match program {
             setup_api::pkexec::PKEXEC => Ok(RunOutput {
                 code: Some(1),
                 stdout: failed.clone().into_bytes(),
@@ -1262,7 +1197,7 @@ mod tests {
         let (go_on, answers) = mpsc::channel::<()>();
         let answers = Mutex::new(answers);
         // Setup runs `netstat` first, then the prompt.
-        let fake = Fake::new(move |program, _| match program {
+        let fake = Fake::answering(move |program, _| match program {
             "/usr/sbin/netstat" => ok(""),
             OSASCRIPT => {
                 started.send(()).unwrap();
@@ -1297,7 +1232,7 @@ mod tests {
             { "op": "trust_remove", "status": "unchanged" },
         ] })
         .to_string();
-        let fake = Fake::new(move |program, args| match program {
+        let fake = Fake::answering(move |program, args| match program {
             OSASCRIPT => script_error(&format!("7:83: execution error: {helper_answer} (1)\n")),
             SECURITY if args[0] == "find-certificate" => security(args),
             SECURITY if args[0] == "remove-trusted-cert" => {
@@ -1398,7 +1333,7 @@ mod tests {
         let dir = Dir::new();
         let fake = Fake::all_done();
         dir.run(&dir.setup(&fake));
-        let calls = fake.calls();
+        let calls = fake.recorded();
         let programs = u32::try_from(calls.len()).unwrap();
         let limits: Duration = calls.iter().map(|(_, _, limit)| *limit).sum();
         assert_eq!(limits + PIPE_GRACE * programs, SLOWEST_UNINSTALL_ALL);

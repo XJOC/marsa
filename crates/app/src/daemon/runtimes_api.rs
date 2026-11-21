@@ -51,6 +51,7 @@
 //! to its empty cluster. An uninstall never touches `databases/`: it
 //! removes `runtimes/postgres/<version>/` only.
 
+use marsa_core::codes;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
@@ -258,10 +259,10 @@ async fn install(
     body: Result<Json<InstallRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<InstallAccepted>), HttpError> {
     let UrlPath(tool) =
-        path.map_err(|err| HttpError::new(err.status(), "invalid_path", err.body_text()))?;
+        path.map_err(|err| HttpError::new(err.status(), codes::INVALID_PATH, err.body_text()))?;
     let runtime = runtime(&tool)?;
     let Json(request) =
-        body.map_err(|err| HttpError::new(err.status(), "invalid_body", err.body_text()))?;
+        body.map_err(|err| HttpError::new(err.status(), codes::INVALID_BODY, err.body_text()))?;
     let Some(started) = Started::take(&daemon) else {
         return Err(busy());
     };
@@ -284,7 +285,7 @@ async fn install(
             daemon.publish(Event::Install(InstallProgress {
                 id,
                 update: InstallUpdate::Failed(InstallFailure {
-                    code: "install_crashed".to_owned(),
+                    code: codes::INSTALL_CRASHED.to_owned(),
                     message: "the install task panicked".to_owned(),
                     ..InstallFailure::default()
                 }),
@@ -307,7 +308,7 @@ fn runtime(tool: &str) -> Result<Runtime, HttpError> {
         .ok_or_else(|| {
             let names: Vec<&str> = Runtime::ALL.iter().map(|r| r.dir_name()).collect();
             let message = format!("no tool named {tool:?}; use one of: {}", names.join(", "));
-            HttpError::new(StatusCode::NOT_FOUND, "unknown_tool", message)
+            HttpError::new(StatusCode::NOT_FOUND, codes::UNKNOWN_TOOL, message)
         })
 }
 
@@ -509,11 +510,11 @@ async fn set_default(
     body: Result<Json<DefaultRequest>, JsonRejection>,
 ) -> Result<Json<DefaultVersion>, HttpError> {
     let UrlPath(tool) =
-        path.map_err(|err| HttpError::new(err.status(), "invalid_path", err.body_text()))?;
+        path.map_err(|err| HttpError::new(err.status(), codes::INVALID_PATH, err.body_text()))?;
     let runtime = runtime(&tool)?;
     let tool = default_tool(runtime).ok_or_else(|| no_default_version(runtime))?;
     let Json(DefaultRequest { version }) =
-        body.map_err(|err| HttpError::new(err.status(), "invalid_body", err.body_text()))?;
+        body.map_err(|err| HttpError::new(err.status(), codes::INVALID_BODY, err.body_text()))?;
     // The disk on a blocking thread; the lock is dropped there, before any
     // `.await`.
     let worker = Arc::clone(&daemon);
@@ -526,7 +527,7 @@ async fn set_default(
         let message = "the default version job failed";
         Err(HttpError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
+            codes::INTERNAL_ERROR,
             message,
         ))
     })?;
@@ -582,7 +583,7 @@ fn save_default(data_dir: &Path, tool: Tool, text: &str) -> Result<DefaultVersio
             );
             return Err(HttpError::new(
                 StatusCode::CONFLICT,
-                "version_not_installed",
+                codes::VERSION_NOT_INSTALLED,
                 message,
             ));
         }
@@ -607,7 +608,7 @@ async fn uninstall(
     path: Result<UrlPath<(String, String)>, PathRejection>,
 ) -> Result<Json<Uninstalled>, HttpError> {
     let UrlPath((tool, text)) =
-        path.map_err(|err| HttpError::new(err.status(), "invalid_path", err.body_text()))?;
+        path.map_err(|err| HttpError::new(err.status(), codes::INVALID_PATH, err.body_text()))?;
     let runtime = runtime(&tool)?;
     let started = Started::claim(&daemon).ok_or_else(busy)?;
     // A task of its own, so a client that hangs up cannot stop it between
@@ -618,7 +619,7 @@ async fn uninstall(
         let message = "the uninstall task failed";
         Err(HttpError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
+            codes::INTERNAL_ERROR,
             message,
         ))
     })
@@ -648,7 +649,7 @@ async fn remove_version(
                 );
                 return Err(HttpError::new(
                     StatusCode::CONFLICT,
-                    "service_busy",
+                    codes::SERVICE_BUSY,
                     message,
                 ));
             }
@@ -672,7 +673,7 @@ async fn remove_version(
         tracing::error!(error = %err, "the uninstall job failed");
         HttpError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
+            codes::INTERNAL_ERROR,
             "the uninstall job failed",
         )
     })??;
@@ -735,13 +736,17 @@ fn retire_unused(
                 runtime.dir_name()
             );
             let status = StatusCode::NOT_FOUND;
-            return Err(HttpError::new(status, "version_not_installed", message));
+            return Err(HttpError::new(
+                status,
+                codes::VERSION_NOT_INSTALLED,
+                message,
+            ));
         }
         ref many => {
             let many: Vec<String> = many.iter().map(ToString::to_string).collect();
             let message = format!("{text:?} matches {}; name one", many.join(", "));
             let status = StatusCode::CONFLICT;
-            return Err(HttpError::new(status, "version_ambiguous", message));
+            return Err(HttpError::new(status, codes::VERSION_AMBIGUOUS, message));
         }
     };
     let paths = ConfigPaths::in_dir(data_dir);
@@ -924,7 +929,7 @@ fn no_default_version(runtime: Runtime) -> HttpError {
         "{} has no default version; the newest installed one is used",
         runtime.dir_name()
     );
-    HttpError::new(StatusCode::BAD_REQUEST, "no_default_version", message)
+    HttpError::new(StatusCode::BAD_REQUEST, codes::NO_DEFAULT_VERSION, message)
 }
 
 /// The same code and status as `PATCH /v1/sites/{name}` gives for this text.
