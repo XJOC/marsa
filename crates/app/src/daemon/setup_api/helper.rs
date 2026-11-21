@@ -9,9 +9,6 @@
 use super::Flow;
 use super::Setup;
 use super::failure;
-use super::is_linux;
-use super::is_macos;
-use super::is_windows;
 use super::osascript::OSASCRIPT;
 use super::osascript::osascript_args;
 use super::osascript::read_answer_for;
@@ -25,6 +22,7 @@ use marsa_core::helper::HelperOp;
 use marsa_core::helper::HelperRequest;
 use marsa_core::helper::HelperResponse;
 use marsa_core::helper::OpResult;
+use marsa_core::recipes::Os;
 use marsa_core::recipes::Platform;
 use marsa_core::types::ApiError;
 use std::fs;
@@ -234,7 +232,7 @@ impl Setup {
         let helper = self.helper.as_deref().ok_or_else(missing)?;
         // First: it reads nothing, and the advice to move Marsa comes before
         // any word about the file itself.
-        let protected = (flow == Flow::Setup && is_macos(platform))
+        let protected = (flow == Flow::Setup && platform.os() == Os::Mac)
             .then(|| protected_folder(helper, self.home.as_deref()))
             .flatten();
         if let Some(folder) = protected {
@@ -255,7 +253,7 @@ impl Setup {
         // folder is writable by this user only, and the user runs what they
         // choose anyway (ADR 0018); a folder elsewhere (under `C:\`, say)
         // may let any user of the PC change the program behind the prompt.
-        if is_windows(platform)
+        if platform.os() == Os::Windows
             && !self
                 .home
                 .as_deref()
@@ -323,13 +321,13 @@ impl Setup {
         // Windows: the service trusts only the CA named at its install, so it
         // is installed for the CA this request trusts, if any.
         let ca_sha256 = ops.iter().find_map(|op| match op {
-            HelperOp::TrustInstall { pem } if is_windows(platform) => {
+            HelperOp::TrustInstall { pem } if platform.os() == Os::Windows => {
                 marsa_core::helper::certificate_sha256(pem)
             }
             _ => None,
         });
         let request = serde_json::to_string(&HelperRequest::new(ops)).map_err(cannot_write)?;
-        let results = if is_windows(platform) {
+        let results = if platform.os() == Os::Windows {
             let Some(service) = self.windows.as_deref() else {
                 tracing::error!("no helper service on this system");
                 return Err(failure(
@@ -338,7 +336,7 @@ impl Setup {
                 ));
             };
             windows::launch(flow, service, helper, &request, ca_sha256.as_deref(), stop)?
-        } else if is_linux(platform) {
+        } else if platform.os() == Os::Linux {
             tracing::info!(helper = %helper.display(), "asking for admin rights to run marsa-helper");
             let args = pkexec::args(helper, &request);
             let answer = self.runner.run(pkexec::PKEXEC, &args, PROMPT_LIMIT, stop);

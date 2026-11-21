@@ -66,19 +66,19 @@ pub(super) const NOT_TRUSTED: &str = "Cert Verify Result: CSSMERR_TP_NOT_TRUSTED
 
 /// One call the fake runner got.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Call {
-    pub(super) program: &'static str,
-    pub(super) args: Vec<String>,
-    pub(super) limit: Duration,
+pub(in crate::daemon) struct Call {
+    pub(in crate::daemon) program: &'static str,
+    pub(in crate::daemon) args: Vec<String>,
+    pub(in crate::daemon) limit: Duration,
 }
 
-pub(super) type Answer =
+pub(in crate::daemon) type Answer =
     Box<dyn Fn(&'static str, &[String]) -> io::Result<RunOutput> + Send + Sync>;
 
 /// Records every call and answers by program and arguments. Runs
 /// nothing.
-pub(super) struct Fake {
-    pub(super) calls: Mutex<Vec<Call>>,
+pub(in crate::daemon) struct Fake {
+    pub(in crate::daemon) calls: Mutex<Vec<Call>>,
     pub(super) answer: Answer,
 }
 
@@ -91,7 +91,7 @@ impl Fake {
     }
 
     /// Answers by program and arguments.
-    pub(super) fn answering(
+    pub(in crate::daemon) fn answering(
         answer: impl Fn(&'static str, &[String]) -> io::Result<RunOutput> + Send + Sync + 'static,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -128,7 +128,7 @@ impl Fake {
             .collect()
     }
 
-    pub(super) fn programs(&self) -> Vec<&'static str> {
+    pub(in crate::daemon) fn programs(&self) -> Vec<&'static str> {
         self.calls().iter().map(|call| call.program).collect()
     }
 
@@ -188,7 +188,7 @@ pub(super) fn security_untrusted(args: &[String]) -> io::Result<RunOutput> {
     }
 }
 
-pub(super) fn ok(stdout: &str) -> io::Result<RunOutput> {
+pub(in crate::daemon) fn ok(stdout: &str) -> io::Result<RunOutput> {
     Ok(RunOutput {
         code: Some(0),
         stdout: stdout.as_bytes().to_vec(),
@@ -206,7 +206,7 @@ pub(super) fn exit(code: i32, stderr: &str) -> io::Result<RunOutput> {
 }
 
 /// What `osascript` gives when the script failed: exit 1 and `stderr`.
-pub(super) fn script_error(stderr: &str) -> io::Result<RunOutput> {
+pub(in crate::daemon) fn script_error(stderr: &str) -> io::Result<RunOutput> {
     exit(1, stderr)
 }
 
@@ -386,7 +386,7 @@ impl StartCaddy for FakeCaddy {
 }
 
 #[cfg(unix)]
-pub(super) fn set_mode(path: &Path, mode: u32) {
+pub(in crate::daemon) fn set_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 }
@@ -423,7 +423,7 @@ pub(super) fn done(op: &str) -> OpResult {
 
 /// A helper file at `path`, with the modes of an install, and its
 /// folder.
-pub(super) fn make_helper(path: &Path) {
+pub(in crate::daemon) fn make_helper(path: &Path) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, "").unwrap();
     #[cfg(unix)]
