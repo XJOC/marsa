@@ -12,7 +12,7 @@ use marsa_core::databases::mysql::{MysqlDirs, decide_mysql_start, my_cnf, mysqld
 use marsa_core::databases::valkey::{ValkeyDirs, valkey_conf};
 use marsa_core::databases::{
     PostgresDirs, ServerKind, ServiceBusy, StartDecision, StartFacts, UnwritablePath, decide_start,
-    postmaster_pid, socket_for,
+    postmaster_pid, refuses_elevation, socket_for,
 };
 use marsa_core::platform::process;
 use marsa_core::recipes::Platform;
@@ -44,9 +44,11 @@ const READY_POLL: Duration = Duration::from_millis(100);
 /// status `Failed` with the same code, and says why in its recent lines.
 #[derive(Debug)]
 pub enum ActionError {
-    /// Marsa runs this server on macOS and Linux only for now (Windows is
-    /// task M6-07).
+    /// Marsa has no build of this server for this system.
     Unsupported(ServerKind),
+    /// Windows: `marsad` runs with an administrator's token, which the
+    /// server refuses (PostgreSQL). Nothing was started.
+    Elevated(ServerKind),
     /// `global.toml` cannot be read.
     Config(ConfigError),
     /// No installed version fits the `default` of its table.
@@ -75,6 +77,7 @@ impl ActionError {
             Self::Unsupported(ServerKind::Postgres) => codes::POSTGRES_UNSUPPORTED_PLATFORM,
             Self::Unsupported(ServerKind::Mysql) => codes::MYSQL_UNSUPPORTED_PLATFORM,
             Self::Unsupported(ServerKind::Valkey) => codes::VALKEY_UNSUPPORTED_PLATFORM,
+            Self::Elevated(_) => codes::SERVICE_ELEVATED,
             Self::Config(err) => err.code(),
             Self::NotInstalled(ServerKind::Postgres, _) => codes::POSTGRES_NOT_INSTALLED,
             Self::NotInstalled(ServerKind::Mysql, _) => codes::MYSQL_NOT_INSTALLED,
@@ -94,8 +97,14 @@ impl fmt::Display for ActionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unsupported(kind) => {
-                write!(f, "Marsa runs {} on macOS and Linux only", kind.name())
+                write!(f, "Marsa has no {} for this system", kind.name())
             }
+            Self::Elevated(kind) => write!(
+                f,
+                "marsad runs with administrator rights, and {} refuses to run with them; run \
+                 Marsa without administrator rights",
+                kind.name()
+            ),
             Self::Config(err) => err.fmt(f),
             Self::NotInstalled(_, reason) => f.write_str(reason),
             Self::Init(err) => err.fmt(f),
@@ -126,6 +135,10 @@ pub struct ServerManager {
     /// before a start ([`orphan::clear`]): [`ServerKind::stop`], then
     /// SIGKILL.
     pub(super) orphan_ladder: StopMethod,
+    /// Whether `marsad` runs with an administrator's token, asked at each
+    /// start ([`refuses_elevation`]): `platform::is_elevated`. Tests put an
+    /// answer here, never the runner's own.
+    pub(super) elevated: fn() -> bool,
     /// The program of the last start, so an uninstall never deletes the
     /// version that runs. Use [`ServerManager::running_program`].
     started: Mutex<Option<PathBuf>>,
@@ -155,6 +168,7 @@ impl ServerManager {
             ready_limit: READY_LIMIT,
             platform: Platform::current(),
             orphan_ladder: kind.stop(),
+            elevated: marsa_core::platform::is_elevated,
             started: Mutex::default(),
             recorded: Mutex::default(),
             starting: Mutex::default(),
@@ -506,6 +520,11 @@ impl ServerManager {
         let kind = self.kind;
         let settings = read_settings(kind, &daemon.data_dir)?;
         let (platform, version, server) = self.installed(&daemon.data_dir, &settings)?;
+        // Before the first init too: its single-user `postgres` refuses the
+        // token as the server does.
+        if refuses_elevation(kind, (self.elevated)()) {
+            return Err(ActionError::Elevated(kind));
+        }
         let port = settings.port.unwrap_or(kind.default_port());
         let servers = installed_servers(kind, &daemon.data_dir, platform);
         let ladder = &self.orphan_ladder;

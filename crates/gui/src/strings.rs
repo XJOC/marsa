@@ -2069,7 +2069,7 @@ fn error_message(code: &str) -> Option<&'static str> {
             "The path of Marsa's data folder has a character that MySQL's settings file cannot hold."
         }
         "mysql_start_timeout" => "MySQL started but took no connections in time.",
-        "mysql_unsupported_platform" => "Marsa runs MySQL on macOS and Linux only for now.",
+        "mysql_unsupported_platform" => "Marsa has no MySQL for this system.",
         "valkey_init_failed" => "Marsa could not make Valkey's data folder or settings file.",
         "valkey_not_installed" => "Valkey of the version set in global.toml is not installed.",
         "valkey_orphan_stuck" => "An old Valkey of this Marsa still runs and did not stop.",
@@ -2077,7 +2077,7 @@ fn error_message(code: &str) -> Option<&'static str> {
             "The path of Marsa's data folder has a character that Valkey's settings file cannot hold."
         }
         "valkey_start_timeout" => "Valkey started but did not answer in time.",
-        "valkey_unsupported_platform" => "Marsa runs Valkey on macOS and Linux only for now.",
+        "valkey_unsupported_platform" => "Marsa has no Valkey for this system.",
         "nss_remove_failed" => {
             "Marsa's certificate authority is still in a browser certificate database. Run \"marsa uninstall --all\" again."
         }
@@ -2093,10 +2093,13 @@ fn error_message(code: &str) -> Option<&'static str> {
         }
         "postgres_orphan_stuck" => "An old PostgreSQL of this Marsa still runs and did not stop.",
         "postgres_start_timeout" => "PostgreSQL started but took no connections in time.",
-        "postgres_unsupported_platform" => "Marsa runs PostgreSQL on macOS and Linux only for now.",
+        "postgres_unsupported_platform" => "Marsa has no PostgreSQL for this system.",
         "resolver_delete" => "macOS did not let Marsa delete /etc/resolver/test.",
         "service_data_dir_busy" => {
             "Another server already runs on this service's data folder, so Marsa started no second one."
+        }
+        "service_elevated" => {
+            "This server does not run with administrator rights, and Marsa runs with them. Run Marsa without administrator rights."
         }
         "service_port_busy" => {
             "Another program uses the port this service needs. Quit it, or set another port in global.toml."

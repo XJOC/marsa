@@ -184,9 +184,12 @@ async fn server_action(
 fn server_error(err: &databases::ActionError) -> HttpError {
     use databases::ActionError as E;
     let status = match err {
-        E::Unsupported(_) | E::NotInstalled(..) | E::InUse(_) | E::Busy | E::OrphanStuck(..) => {
-            StatusCode::CONFLICT
-        }
+        E::Unsupported(_)
+        | E::Elevated(_)
+        | E::NotInstalled(..)
+        | E::InUse(_)
+        | E::Busy
+        | E::OrphanStuck(..) => StatusCode::CONFLICT,
         E::Config(_) | E::Init(_) | E::ProgramNotAbsolute(_) | E::Internal | E::Path(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
         }

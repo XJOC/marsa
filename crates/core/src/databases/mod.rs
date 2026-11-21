@@ -600,6 +600,16 @@ pub fn decide_start(facts: &StartFacts) -> StartDecision {
     }
 }
 
+/// Whether a start of `kind` is refused, before anything runs, because the
+/// daemon runs with an administrator's token (`elevated`, from
+/// `platform::is_elevated`, which is `false` off Windows). PostgreSQL only:
+/// `postgres.exe` refuses that token, and a start through `pg_ctl start`,
+/// which drops the rights, would leave a server that the supervisor does not
+/// own (ADR 0023, section 7). MySQL and Valkey run either way.
+pub fn refuses_elevation(kind: ServerKind, elevated: bool) -> bool {
+    elevated && kind == ServerKind::Postgres
+}
+
 /// [`PortCheck`] from the daemon's two looks at the port. Busy if either
 /// says so; [`PortCheck::Unknown`], which refuses too, if the bind worked
 /// and the look failed:
@@ -973,6 +983,16 @@ mod tests {
         for port_check in checks {
             assert_eq!(decide(&port_check, Server { pid: 7 }), data_dir_busy);
         }
+    }
+
+    #[test]
+    fn only_postgres_refuses_an_elevated_daemon() {
+        for kind in ServerKind::ALL {
+            assert!(!refuses_elevation(kind, false), "{kind:?}");
+        }
+        assert!(refuses_elevation(ServerKind::Postgres, true));
+        assert!(!refuses_elevation(ServerKind::Mysql, true));
+        assert!(!refuses_elevation(ServerKind::Valkey, true));
     }
 
     #[test]

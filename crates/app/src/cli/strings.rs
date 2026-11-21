@@ -340,6 +340,13 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             "Marsa could not check which program uses the port {service} needs, so it did not \
              start it. Try again; run \"marsa logs {id}\" for details."
         ),
+        // Windows: `postgres.exe` refuses an administrator's token.
+        "service_elevated" => format!(
+            "{service_first} does not run with administrator rights, and the Marsa daemon runs \
+             with them, so it was not started. Run Marsa without administrator rights: run \
+             \"marsa daemon stop\", then \"marsa daemon start\" from a terminal that is not \
+             \"Run as administrator\"."
+        ),
         "postgres_not_installed" => "PostgreSQL of the version set in global.toml is not \
              installed. Run \"marsa install postgres\", then try again."
             .into(),
@@ -355,7 +362,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              process in your system's process list only if it is PostgreSQL, then try again."
             .into(),
         "postgres_unsupported_platform" => {
-            "Marsa runs PostgreSQL on macOS and Linux only for now.".into()
+            "Marsa has no PostgreSQL for this system.".into()
         }
         // MySQL (task M6-05), the same way.
         "mysql_not_installed" => "MySQL of the version set in global.toml is not installed. \
@@ -372,7 +379,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              another program. Run \"marsa logs mysql\" to see its pid; quit that process in \
              your system's process list only if it is mysqld, then try again."
             .into(),
-        "mysql_unsupported_platform" => "Marsa runs MySQL on macOS and Linux only for now.".into(),
+        "mysql_unsupported_platform" => "Marsa has no MySQL for this system.".into(),
         "mysql_path_unsupported" => "The path of Marsa's data folder has a double quote or a \
              control character, which MySQL's settings file cannot hold, so MySQL was not \
              started. Run \"marsa logs mysql\" to see the path."
@@ -392,9 +399,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              another program. Run \"marsa logs valkey\" to see its pid; quit that process in \
              your system's process list only if it is valkey-server, then try again."
             .into(),
-        "valkey_unsupported_platform" => {
-            "Marsa runs Valkey on macOS and Linux only for now.".into()
-        }
+        "valkey_unsupported_platform" => "Marsa has no Valkey for this system.".into(),
         "valkey_path_unsupported" => "The path of Marsa's data folder has a double quote or a \
              control character, which Valkey's settings file cannot hold, so Valkey was not \
              started. Run \"marsa logs valkey\" to see the path."
@@ -2264,6 +2269,14 @@ mod tests {
         let busy = message("service_data_dir_busy", &postgres);
         assert!(busy.starts_with("Another PostgreSQL server"), "{busy}");
         assert!(message("postgres_not_installed", &postgres).contains("marsa install postgres"));
+        // Windows: the daemon runs elevated.
+        let elevated = message("service_elevated", &postgres);
+        assert!(
+            elevated.starts_with("PostgreSQL does not run with administrator rights"),
+            "{elevated}"
+        );
+        assert!(elevated.contains("Run Marsa without administrator rights"));
+        assert!(elevated.contains("\"marsa daemon stop\""), "{elevated}");
     }
 
     /// The Valkey refusals name it, its table, and what to do: Homebrew's

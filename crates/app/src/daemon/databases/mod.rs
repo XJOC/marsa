@@ -695,6 +695,26 @@ mod tests {
             }
         }
 
+        /// Windows, `marsad` with an administrator's token: no PostgreSQL
+        /// program runs, not even the first init, and the status says why.
+        /// The answer is the test's, never the runner's own.
+        #[tokio::test]
+        async fn an_elevated_daemon_starts_no_postgres() {
+            let mut pg = pg("serve", probes(Liveness::Gone, None));
+            let daemon = Arc::get_mut(&mut pg.daemon).expect("one owner");
+            daemon.postgres.elevated = || true;
+            let err = pg.act(ServiceAction::Start).await.unwrap_err();
+            assert_eq!(err.code(), "service_elevated");
+            assert!(err.to_string().contains("administrator rights"), "{err}");
+            let status = pg.daemon.postgres.status();
+            assert_eq!(status.state, failed("service_elevated"));
+            let said = pg.texts().last().cloned().unwrap_or_default();
+            assert!(said.contains("refuses to run with them"), "{said}");
+            assert_eq!(pg.calls(), Vec::<String>::new());
+            assert!(!pg.dirs.data.exists());
+            assert!(pg.probes.signals.lock().unwrap().is_empty());
+        }
+
         #[tokio::test]
         async fn a_busy_port_starts_nothing_and_makes_no_cluster() {
             // Homebrew's PostgreSQL on `127.0.0.1:<port>`.

@@ -159,6 +159,7 @@ pub const RESOLVER_WRITE: &str = "resolver_write";
 pub const RUNTIMES_READ: &str = "runtimes_read";
 pub const SERVICE_BUSY: &str = "service_busy";
 pub const SERVICE_DATA_DIR_BUSY: &str = "service_data_dir_busy";
+pub const SERVICE_ELEVATED: &str = "service_elevated";
 pub const SERVICE_MANAGED_BY_SITES: &str = "service_managed_by_sites";
 pub const SERVICE_NOT_FOUND: &str = "service_not_found";
 pub const SERVICE_PORT_BUSY: &str = "service_port_busy";
@@ -408,6 +409,7 @@ pub const ALL: &[&str] = &[
     RUNTIMES_READ,
     SERVICE_BUSY,
     SERVICE_DATA_DIR_BUSY,
+    SERVICE_ELEVATED,
     SERVICE_MANAGED_BY_SITES,
     SERVICE_NOT_FOUND,
     SERVICE_PORT_BUSY,

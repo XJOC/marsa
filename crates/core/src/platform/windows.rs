@@ -16,6 +16,8 @@
 //!   public for the `marsa` crate.
 //! - [`root_certificates`]: the roots Windows trusts, for PHP's CA bundle
 //!   (task M4-19n).
+//! - [`is_elevated`] and [`process_is_elevated`]: whether a process runs
+//!   with an administrator's token, which `postgres.exe` refuses.
 //!
 //! The only `unsafe` code of `marsa-core` is in this module and its
 //! `helper_pipe` (AGENTS.md section 6). The blocks are short, and every
@@ -27,7 +29,7 @@ use std::ffi::OsStr;
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::ExitStatusExt;
 use std::path::Path;
 use std::process::ExitStatus;
@@ -39,7 +41,9 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_CANCELLED, LocalFree, RPC_E_CHANGED_MODE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
+};
 use windows_sys::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
 };
@@ -50,8 +54,8 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateProcessW, DETACHED_PROCESS, GetCurrentProcess, GetExitCodeProcess,
-    OpenProcessToken, PROCESS_INFORMATION, STARTF_FORCEOFFFEEDBACK, STARTUPINFOW,
-    WaitForSingleObject,
+    OpenProcess, OpenProcessToken, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    STARTF_FORCEOFFFEEDBACK, STARTUPINFOW, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::{
     SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
@@ -305,6 +309,75 @@ pub fn current_user_sid() -> io::Result<String> {
         LocalFree(text.cast());
         Ok(sid)
     }
+}
+
+/// Whether this process runs with an elevated token: started with "Run as
+/// administrator", or by an administrator while UAC is off. `postgres.exe`
+/// refuses to run then (ADR 0023, section 7). Read only.
+///
+/// # Errors
+///
+/// The Win32 error.
+pub fn is_elevated() -> io::Result<bool> {
+    // SAFETY: the pseudo handle of this process (the value -1, which
+    // `borrow_raw` allows) is valid for as long as the process runs, and
+    // needs no close.
+    let process = unsafe { BorrowedHandle::borrow_raw(GetCurrentProcess()) };
+    token_elevated(process)
+}
+
+/// [`is_elevated`] for the process `pid`: `marsad`, for `marsa doctor`.
+/// Read only: the process is opened for `PROCESS_QUERY_LIMITED_INFORMATION`
+/// alone, and closed after.
+///
+/// # Errors
+///
+/// The Win32 error, for example access denied for another user's process.
+pub fn process_is_elevated(pid: u32) -> io::Result<bool> {
+    // SAFETY: `OpenProcess` takes plain values. The handle is checked for
+    // null (its failure value) and owned at once, so it is closed on every
+    // path.
+    let process = unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        OwnedHandle::from_raw_handle(handle)
+    };
+    token_elevated(process.as_handle())
+}
+
+/// Whether the token of `process` is elevated (`TokenElevation`).
+fn token_elevated(process: BorrowedHandle<'_>) -> io::Result<bool> {
+    let mut token = null_mut();
+    // SAFETY: `process` is an open process handle for the whole call (a
+    // `BorrowedHandle` is), with at least the query right that
+    // `OpenProcessToken` needs; `token` is a valid out pointer. The token is
+    // checked, then owned, so it is closed on every path.
+    let token = unsafe {
+        if OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, &mut token) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        OwnedHandle::from_raw_handle(token)
+    };
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut used = 0;
+    // SAFETY: `TokenElevation` fills a `TOKEN_ELEVATION`, which `elevation`
+    // is, and the size passed is its own; `elevation`, `used`, and the open
+    // token live through the call.
+    let read = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevation,
+            (&raw mut elevation).cast(),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut used,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(elevation.TokenIsElevated != 0)
 }
 
 /// What a program run through the UAC prompt gave.
@@ -1241,6 +1314,19 @@ mod tests {
             sid.bytes()
                 .all(|b| b.is_ascii_digit() || b == b'S' || b == b'-')
         );
+    }
+
+    /// Read only. The runner's account is an administrator with UAC off, so
+    /// there every process is elevated, as `postgres.exe` found in S-12.
+    #[test]
+    fn a_process_reads_the_same_elevation_by_its_token_and_by_its_pid() {
+        let own = is_elevated().unwrap();
+        assert_eq!(process_is_elevated(std::process::id()).unwrap(), own);
+        if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            assert!(own, "the runner's processes run elevated");
+        }
+        // Pid 0 is the idle process, which no program may open.
+        assert!(process_is_elevated(0).is_err());
     }
 
     /// Read only. GitHub's Windows images install the runtime, so there it

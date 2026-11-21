@@ -289,6 +289,18 @@ mod tests {
         assert!(log.contains("fake got SHUTDOWN SAVE"), "{log}");
     }
 
+    /// Only PostgreSQL refuses an administrator's token: an elevated
+    /// `marsad` runs Valkey.
+    #[tokio::test]
+    async fn an_elevated_daemon_still_starts_valkey() {
+        let mut vk = vk(probes(Liveness::Gone, None));
+        let daemon = Arc::get_mut(&mut vk.daemon).expect("one owner");
+        daemon.valkey.elevated = || true;
+        let status = vk.act(ServiceAction::Start).await.unwrap();
+        assert_eq!(status.state, ServiceState::Running);
+        vk.act(ServiceAction::Stop).await.unwrap();
+    }
+
     /// Homebrew's Redis on the port: nothing starts, nothing is written, and
     /// nothing is stopped.
     #[tokio::test]
