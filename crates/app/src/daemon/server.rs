@@ -148,7 +148,7 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     // The first site list, so the first client gets it at once. A broken
     // sites.toml is logged; the routes report it again with its code.
     if let Err(err) = daemon.rebuild_sites().await {
-        tracing::warn!(code = err.code, error = %err.message, "cannot build the site list");
+        tracing::warn!(code = err.code(), error = %err, "cannot build the site list");
     }
     // From here on, PHP pools and Caddy's config follow the sites.
     let sync = sites_sync::start(&daemon);

@@ -88,7 +88,6 @@ use super::client_shims;
 use super::databases;
 use super::http::{self, Rejected as _, global_error};
 use super::php::{fpm_id, wanted_pools};
-use super::sites_api;
 use super::state::Daemon;
 
 /// The routes, for `api::router` to merge before its fallbacks.
@@ -758,7 +757,7 @@ fn uninstall_error(err: &UninstallError) -> HttpError {
 /// a Node proxy runs no PHP. Builds the site list as the daemon does, so it
 /// reads the disk.
 fn sites_running(data_dir: &Path, sites: &SitesConfig, version: &Version) -> Vec<String> {
-    let list = sites_api::build(data_dir, sites);
+    let list = super::sites::build(data_dir, sites);
     list.sites
         .into_iter()
         .filter(|site| matches!(site.kind, SiteKind::Laravel | SiteKind::Php))

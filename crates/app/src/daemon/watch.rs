@@ -321,7 +321,7 @@ impl Task {
                 // `rebuild_sites` logs its own errors.
                 match result {
                     Ok(list) => tracing::debug!(count, sites = list.sites.len(), "site list rebuilt"),
-                    Err(err) => tracing::debug!(count, code = err.code, "no site list"),
+                    Err(err) => tracing::debug!(count, code = err.code(), "no site list"),
                 }
                 true
             }
