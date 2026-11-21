@@ -21,6 +21,7 @@ pub mod uninstall;
 pub mod uninstall_all;
 pub mod xdebug;
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -61,10 +62,11 @@ impl From<Tool> for Runtime {
 }
 
 /// Why a command failed, ready to print: the text from [`strings`] and the
-/// stable code.
+/// stable code. The code is owned when the daemon sent it: it may be one this
+/// build does not know, and the line still shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
-    pub code: &'static str,
+    pub code: Cow<'static, str>,
     pub message: String,
 }
 
@@ -95,7 +97,7 @@ pub fn data_dir(data_dir: Option<PathBuf>) -> Result<PathBuf, Failure> {
         None => config::app_data_dir().map_err(|err| {
             tracing::debug!(error = %err, "no app data dir");
             Failure {
-                code: err.code(),
+                code: err.code().into(),
                 message: strings::message(err.code(), &strings::Details::default()),
             }
         }),
