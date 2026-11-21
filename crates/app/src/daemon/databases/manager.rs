@@ -335,10 +335,6 @@ impl ServerManager {
         .map_err(|Busy| ActionError::Busy)?;
         // This stop has its turn: starts after it in line run.
         drop(waiting);
-        // Also when the turn came at the same moment as the shutdown.
-        if daemon.shutdown.is_cancelled() {
-            return Err(ActionError::Busy);
-        }
         let outcome = self.act(daemon, action, &busy).await?;
         let enabled = match (action, outcome) {
             (ServiceAction::Stop, _) => Some(false),

@@ -269,11 +269,6 @@ impl CaddyManager {
         })
         .await
         .map_err(|Busy| ActionError::Busy)?;
-        // Also when the turn came at the same moment as the shutdown.
-        if daemon.shutdown.is_cancelled() {
-            info!(%action, "the daemon is stopping; the caddy action does not run");
-            return Err(ActionError::Busy);
-        }
         self.act(daemon, action, busy).await
     }
 
