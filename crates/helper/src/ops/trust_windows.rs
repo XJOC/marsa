@@ -304,6 +304,7 @@ mod tests {
 
     use super::*;
     use crate::ops;
+    use crate::ops::testing::code_of as status;
     use crate::os::Os;
     use crate::request::Request;
     use crate::system::{FakeSystem, Hooked, RunHook};
@@ -450,7 +451,7 @@ mod tests {
     }
 
     impl RunHook for Certutil {
-        fn run(
+        fn run_system_tool(
             machine: &Machine,
             program: &'static str,
             args: &[&str],
@@ -463,14 +464,6 @@ mod tests {
                 ["-delstore", STORE, id] => machine.delete(id),
                 other => panic!("unexpected certutil call: {other:?}"),
             }
-        }
-    }
-
-    fn status(result: &OpResult) -> &'static str {
-        match result.outcome {
-            Outcome::Done => "done",
-            Outcome::Unchanged => "unchanged",
-            Outcome::Failed { code, .. } => code,
         }
     }
 

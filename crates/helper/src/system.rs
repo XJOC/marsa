@@ -577,14 +577,30 @@ mod fake {
             program: &'static str,
             args: &[&str],
             scripted: io::Result<RunOutput>,
-        ) -> io::Result<RunOutput>;
+        ) -> io::Result<RunOutput> {
+            let _ = (system, program, args);
+            scripted
+        }
+
+        /// Like [`RunHook::run`] for `run_system_tool`. Kept apart so a test
+        /// fails if an op runs a program through the wrong one. Without an
+        /// override it is `Unsupported`, as on a real Unix system.
+        fn run_system_tool(
+            system: &Hooked<Self>,
+            program: &'static str,
+            args: &[&str],
+            scripted: io::Result<RunOutput>,
+        ) -> io::Result<RunOutput> {
+            let _ = (system, program, args, scripted);
+            Err(super::only_windows())
+        }
     }
 
     /// A [`FakeSystem`] plus the state and the `run` behavior of one test
     /// machine. `Deref` gives the tests the machine's own fields.
     pub struct Hooked<H> {
         pub fake: FakeSystem,
-        pub hook: H,
+        hook: H,
     }
 
     impl<H> Hooked<H> {
@@ -658,7 +674,8 @@ mod fake {
         }
 
         fn run_system_tool(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
-            self.run(program, args)
+            let scripted = self.fake.run(program, args);
+            H::run_system_tool(self, program, args, scripted)
         }
 
         fn pause(&self, duration: Duration) {
@@ -698,8 +715,8 @@ mod fake {
         }
 
         fn is_link(&self, path: &Path) -> bool {
-            self.dangling.contains(path)
-                || (self.links.contains(path) && !self.written.borrow().contains(path))
+            (self.dangling.contains(path) || self.links.contains(path))
+                && !self.written.borrow().contains(path)
         }
 
         fn is_read_only(&self, path: &Path) -> bool {
