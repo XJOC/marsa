@@ -13,3 +13,17 @@
 #      Same file (sha512 65c30a10...ab0b71).
 # Fedora's `sources` file lists only 0.3.111, so it could not be compared.
 2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b  libaio-0.3.113.tar.gz
+
+# numactl 2.0.19 (LGPL 2.1 for libnuma, GPL 2 for the tools), for libnuma.so.1.
+# This is Debian's orig tarball: the same bytes as GitHub's tag archive
+# (https://github.com/numactl/numactl/archive/refs/tags/v2.0.19.tar.gz). It has
+# no Makefile.in or libtool files, so build.sh runs autoreconf. Fingerprint checked
+# on 2026-11-21: Checksums-Sha256 for numactl_2.0.19.orig.tar.gz (218333 bytes)
+# in the PGP-signed numactl_2.0.19-1.dsc
+# (https://deb.debian.org/debian/pool/main/n/numactl/). Same sha256; I also
+# downloaded the file from both places and got that hash twice.
+# Not used: the GitHub release asset numactl-2.0.19.tar.gz (a `make dist` file
+# with a ready configure, sha256 f2672a03...). Nobody publishes a checksum for
+# it, so it could not be compared. Its non-generated files are identical to
+# this tarball (checked with diff).
+8b84ffdebfa0d730fb2fc71bb7ec96bb2d38bf76fb67246fde416a68e04125e4  numactl_2.0.19.orig.tar.gz

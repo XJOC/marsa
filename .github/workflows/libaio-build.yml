@@ -1,19 +1,21 @@
 name: libaio-build
 
-# Builds libaio.so.1 from the upstream source for Marsa's MySQL (ADR 0023).
-# Ubuntu 24.04 no longer installs libaio1, and Oracle's mysqld needs
-# libaio.so.1, so Marsa ships its own copy in the MySQL runtime's lib/private/.
+# Builds libaio.so.1 and libnuma.so.1 from the upstream sources for Marsa's
+# MySQL (ADR 0023). Ubuntu 24.04 no longer installs libaio1, and Oracle's
+# mysqld needs libaio.so.1 and libnuma.so.1 (its archive bundles OpenSSL,
+# protobuf and ICU, but not these two), so Marsa ships its own copies in the
+# MySQL runtime's lib/private/.
 #
-# The library is built inside an almalinux:8 container (glibc 2.28, the same
-# floor as the MySQL linux-glibc2.28 archives), so it runs on every glibc
-# distribution from 2.28 on. tools/libaio-build/build.sh fails if the result
+# The libraries are built inside an almalinux:8 container (glibc 2.28, the same
+# floor as the MySQL linux-glibc2.28 archives), so they run on every glibc
+# distribution from 2.28 on. tools/libaio-build/build.sh fails if a result
 # needs a newer glibc.
 #
 # - push to task/M6-05c-*: build only; the files are workflow artifacts (14 days).
 # - workflow_dispatch: the same; with `release` on (main only), also a DRAFT,
-#   pre-release GitHub Release libaio-<version>-r<revision> with libaio.so.1 for
-#   linux-x64 and linux-arm64, the libaio source (LGPL 2.1 asks us to ship it),
-#   COPYING, and sha256sums.txt. The owner reads the draft and publishes it; then
+#   pre-release GitHub Release libaio-<version>-r<revision> with libaio.so.1 and
+#   libnuma.so.1 for linux-x64 and linux-arm64, the libaio and numactl sources
+#   (LGPL 2.1 asks us to ship them), COPYING, COPYING.numactl, and sha256sums.txt. The owner reads the draft and publishes it; then
 #   `cargo xtask manifest build` on the owner's Mac reads it (recipes/pins.toml).
 #   The minisign key never enters CI.
 
@@ -29,8 +31,12 @@ on:
         description: "libaio version, in full (its sha256 must be in tools/libaio-build/downloads.sha256)"
         type: string
         default: "0.3.113"
+      numactl_version:
+        description: "numactl version, in full (its sha256 must be in tools/libaio-build/downloads.sha256)"
+        type: string
+        default: "2.0.19"
       revision:
-        description: "Build number for this libaio version: 1, then 2 for a rebuild"
+        description: "Build number for this libaio and numactl pair: 1, then 2 for a rebuild"
         type: string
         default: "1"
       release:
@@ -48,6 +54,7 @@ concurrency:
 
 env:
   LIBAIO_VERSION: ${{ inputs.libaio_version || '0.3.113' }}
+  NUMACTL_VERSION: ${{ inputs.numactl_version || '2.0.19' }}
   REVISION: ${{ inputs.revision || '1' }}
   # glibc 2.28 and gcc 8 from AlmaLinux 8. A tag, not a digest: the image gets
   # security fixes, glibc stays 2.28, and build.sh checks the glibc symbols.
@@ -84,7 +91,8 @@ jobs:
         run: |
           [[ "$LIBAIO_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "libaio_version must look like 0.3.113"; exit 1; }
           [[ "$REVISION" =~ ^[1-9][0-9]*$ ]] || { echo "revision must be a number from 1"; exit 1; }
-          echo "libaio $LIBAIO_VERSION r$REVISION for $PLATFORM on $ImageOS $ImageVersion"
+          [[ "$NUMACTL_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "numactl_version must look like 2.0.19"; exit 1; }
+          echo "libaio $LIBAIO_VERSION, numactl $NUMACTL_VERSION, r$REVISION for $PLATFORM on $ImageOS $ImageVersion"
           # Outside the checkout. (The runner context is not allowed in job env.)
           echo "OUT=$RUNNER_TEMP/libaio-build/out" >> "$GITHUB_ENV"
           echo "DIST=$RUNNER_TEMP/libaio-build/dist" >> "$GITHUB_ENV"
@@ -92,23 +100,25 @@ jobs:
       # Only the build script folder goes into the container, read-only. No
       # token, no checkout, no other file of the repository. The container
       # gets the network to download the pinned source and install gcc.
-      - name: Build libaio in ${{ env.BUILD_IMAGE }}
+      - name: Build libaio and libnuma in ${{ env.BUILD_IMAGE }}
         run: |
           mkdir -p "$OUT"
           docker run --rm \
             --volume "$GITHUB_WORKSPACE/tools/libaio-build:/work/libaio-build:ro" \
             --volume "$OUT:/out" \
             --env LIBAIO_VERSION \
+            --env NUMACTL_VERSION \
             --env "EXPECT_ARCH=$ARCH" \
             "$BUILD_IMAGE" \
-            bash -c 'dnf install -y -q gcc make binutils file tar gzip && bash /work/libaio-build/build.sh /out' |
+            bash -c 'dnf install -y -q gcc make binutils file tar gzip autoconf automake libtool && bash /work/libaio-build/build.sh /out' |
             tee "$RUNNER_TEMP/libaio-build.log"
 
-      # The library as it ships, on the runner (Ubuntu 24.04, newer glibc, our
-      # copy and not the system's): it must load and set up a kernel AIO context.
+      # The libraries as they ship, on the runner (Ubuntu 24.04, newer glibc, our
+      # copies and not the system's): libaio must load and set up a kernel AIO
+      # context; libnuma must load and answer numa_available().
       - name: Smoke test
         run: |
-          python3 -I - "$OUT/libaio.so.1" <<'PY'
+          python3 -I - "$OUT/libaio.so.1" "$OUT/libnuma.so.1" <<'PY'
           import ctypes
           import sys
 
@@ -125,6 +135,13 @@ jobs:
           if rc != 0:
               raise SystemExit("io_destroy returned %d" % rc)
           print("io_setup and io_destroy work")
+
+          # numa_available() is -1 on a machine without NUMA (a runner): only
+          # the call has to work, not the value.
+          numa = ctypes.CDLL(sys.argv[2])
+          numa.numa_available.argtypes = []
+          numa.numa_available.restype = ctypes.c_int
+          print("numa_available() returned %d" % numa.numa_available())
           PY
 
       # The names of the release assets.
@@ -132,16 +149,19 @@ jobs:
         run: |
           mkdir -p "$DIST"
           cp "$OUT/libaio.so.1" "$DIST/libaio-$LIBAIO_VERSION-$PLATFORM.so.1"
-          cp "$OUT/libaio-$LIBAIO_VERSION.tar.gz" "$OUT/COPYING" "$OUT/BUILD-INFO.txt" "$DIST/"
+          cp "$OUT/libnuma.so.1" "$DIST/libnuma-$NUMACTL_VERSION-$PLATFORM.so.1"
+          cp "$OUT/libaio-$LIBAIO_VERSION.tar.gz" "$OUT/numactl_$NUMACTL_VERSION.orig.tar.gz" \
+            "$OUT/COPYING" "$OUT/COPYING.numactl" "$OUT/BUILD-INFO.txt" "$DIST/"
           cd "$DIST"
           sha256sum "libaio-$LIBAIO_VERSION-$PLATFORM.so.1" > "libaio-$LIBAIO_VERSION-$PLATFORM.so.1.sha256"
+          sha256sum "libnuma-$NUMACTL_VERSION-$PLATFORM.so.1" > "libnuma-$NUMACTL_VERSION-$PLATFORM.so.1.sha256"
           ls -l
 
       - name: Job summary
         if: always()
         run: |
           {
-            echo "## $PLATFORM: libaio $LIBAIO_VERSION r$REVISION"
+            echo "## $PLATFORM: libaio $LIBAIO_VERSION, numactl $NUMACTL_VERSION, r$REVISION"
             echo
             if [ -f "$RUNNER_TEMP/libaio-build.log" ]; then echo '```'; cat "$RUNNER_TEMP/libaio-build.log"; echo '```'; fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -190,16 +210,17 @@ jobs:
           mkdir -p dist
           for platform in linux-x64 linux-arm64; do
             dir="artifacts/libaio-$platform"
-            so="libaio-$LIBAIO_VERSION-$platform.so.1"
-            [ -f "$dir/$so" ] || { echo "missing $dir/$so"; exit 1; }
-            (cd "$dir" && sha256sum -c "$so.sha256")
-            cp "$dir/$so" dist/
+            for so in "libaio-$LIBAIO_VERSION-$platform.so.1" "libnuma-$NUMACTL_VERSION-$platform.so.1"; do
+              [ -f "$dir/$so" ] || { echo "missing $dir/$so"; exit 1; }
+              (cd "$dir" && sha256sum -c "$so.sha256")
+              cp "$dir/$so" dist/
+            done
           done
-          # Both jobs downloaded the same pinned source: the copies must be identical.
-          tarball="libaio-$LIBAIO_VERSION.tar.gz"
-          cmp "artifacts/libaio-linux-x64/$tarball" "artifacts/libaio-linux-arm64/$tarball"
-          cmp artifacts/libaio-linux-x64/COPYING artifacts/libaio-linux-arm64/COPYING
-          cp "artifacts/libaio-linux-x64/$tarball" artifacts/libaio-linux-x64/COPYING dist/
+          # Both jobs downloaded the same pinned sources: the copies must be identical.
+          for f in "libaio-$LIBAIO_VERSION.tar.gz" "numactl_$NUMACTL_VERSION.orig.tar.gz" COPYING COPYING.numactl; do
+            cmp "artifacts/libaio-linux-x64/$f" "artifacts/libaio-linux-arm64/$f"
+            cp "artifacts/libaio-linux-x64/$f" dist/
+          done
           cd dist
           sha256sum -- * | sort -k2 > ../sha256sums.txt
           mv ../sha256sums.txt .
@@ -209,27 +230,34 @@ jobs:
         run: |
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           tarball="libaio-$LIBAIO_VERSION.tar.gz"
+          numa_tarball="numactl_$NUMACTL_VERSION.orig.tar.gz"
           {
-            echo "libaio $LIBAIO_VERSION for Marsa, build $REVISION (ADR 0023). Not a Marsa app release."
+            echo "libaio $LIBAIO_VERSION and libnuma (numactl $NUMACTL_VERSION) for Marsa, build $REVISION (ADR 0023). Not a Marsa app release."
             echo
-            echo "libaio.so.1 for linux-x64 and linux-arm64, built from the unmodified upstream source in an"
-            echo "almalinux:8 container (glibc 2.28), so it runs on glibc 2.28 or newer. Marsa puts it in the"
-            echo "MySQL runtime's lib/private/, because Ubuntu 24.04 no longer installs libaio1. Built from commit"
+            echo "libaio.so.1 and libnuma.so.1 for linux-x64 and linux-arm64, built from the unmodified upstream"
+            echo "sources in an almalinux:8 container (glibc 2.28), so they run on glibc 2.28 or newer. Marsa puts"
+            echo "them in the MySQL runtime's lib/private/, because Ubuntu 24.04 no longer installs libaio1 and"
+            echo "Oracle's mysqld also needs libnuma.so.1, which its archive does not bundle. Built from commit"
             echo "$GITHUB_SHA in $run_url."
             echo
             echo '```'
             cat dist/sha256sums.txt
             echo '```'
             echo
-            echo "## libaio (LGPL 2.1)"
+            echo "## libaio and libnuma (LGPL 2.1)"
             echo
             echo "libaio is covered by the GNU Lesser General Public License, version 2.1 (\`COPYING\`, attached)."
+            echo "libnuma, the library part of numactl, is covered by the same license (\`COPYING.numactl\`,"
+            echo "attached). The numactl command-line tools are GPL 2; this release does not contain them."
             echo
-            echo "- Its complete source, the exact file this build compiled, is attached: \`$tarball\`"
+            echo "- libaio's complete source, the exact file this build compiled, is attached: \`$tarball\`"
             echo "  (sha256 \`$(sha256sum "dist/$tarball" | cut -d' ' -f1)\`). It is the release asset from"
             echo "  <https://codeberg.org/jmoyer/libaio>."
-            echo "- To rebuild libaio with a change: the exact build is .github/workflows/libaio-build.yml and"
-            echo "  tools/libaio-build/ at commit $GITHUB_SHA of this repository. Change the source, put its"
+            echo "- numactl's complete source, the exact file this build compiled, is attached: \`$numa_tarball\`"
+            echo "  (sha256 \`$(sha256sum "dist/$numa_tarball" | cut -d' ' -f1)\`). It is Debian's orig tarball,"
+            echo "  the same file as the GitHub tag archive of <https://github.com/numactl/numactl>."
+            echo "- To rebuild either library with a change: the exact build is .github/workflows/libaio-build.yml"
+            echo "  and tools/libaio-build/ at commit $GITHUB_SHA of this repository. Change the source, put its"
             echo "  sha256 in downloads.sha256, and run build.sh in an almalinux:8 container."
           } > notes.md
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
