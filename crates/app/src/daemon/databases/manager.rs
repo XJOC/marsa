@@ -40,6 +40,10 @@ use crate::daemon::supervisor::{EXITED, ServiceHandle, ServiceRuntime, Superviso
 /// measured 50 to 690 ms. The postmaster answers before it recovers its data
 /// after a crash, so a long recovery does not count against this.
 const READY_LIMIT: Duration = Duration::from_secs(15);
+/// MySQL's: its InnoDB start can take 20 s or more on a slow disk, after a
+/// forced kill (Windows, where the servers end with `marsad`) or on a first
+/// start after an install. The server is still starting then, not failing.
+const MYSQL_READY_LIMIT: Duration = Duration::from_secs(60);
 const READY_POLL: Duration = Duration::from_millis(100);
 
 /// Why an action on a server failed. A start that fails also sets the
@@ -167,7 +171,10 @@ impl ServerManager {
         Self {
             kind,
             probes: Arc::new(SystemProbe),
-            ready_limit: READY_LIMIT,
+            ready_limit: match kind {
+                ServerKind::Mysql => MYSQL_READY_LIMIT,
+                ServerKind::Postgres | ServerKind::Valkey => READY_LIMIT,
+            },
             platform: Platform::current(),
             orphan_ladder: kind.stop(),
             elevated: marsa_core::platform::is_elevated,
