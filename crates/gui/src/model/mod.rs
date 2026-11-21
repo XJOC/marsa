@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use marsa_core::helper::OpStatus;
 use marsa_core::resolver;
 use marsa_core::runtimes::Runtime;
-use marsa_core::sites;
 use marsa_core::types::{
     Event, Health, HostsStatus, InstallEvent, InstallFailure, InstallProgress, InstallUpdate,
     LogLine, RuntimeList, ServiceAction, ServiceState, ServiceStatus, SetupReport, Site, SiteList,
@@ -19,10 +18,18 @@ use marsa_core::types::{
 use semver::Version;
 
 mod logs;
+mod runtimes;
 mod session;
+mod sites;
 
 pub use logs::{LOG_SERVICE, LogRow, LogSource, MAX_LOG_LINES, ServiceLog};
+pub use runtimes::{
+    Change, Choice, MAIN_RUNTIME, PoolKind, RuntimeRow, has_default, is_pool, pool_of,
+    runtime_missing, version_text,
+};
 pub use session::{Connection, Overall, Session};
+use sites::SITE_IS_PARKED;
+pub use sites::{LinkForm, Pick, SitesNotice, folder_path, url};
 
 use crate::bridge::Command;
 pub use crate::logline::{HiddenLevels, LogLevel};
@@ -37,21 +44,12 @@ pub const DNS_SERVER: &str = "dns";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The PHP line the first-run panel installs.
 pub const FIRST_PHP: &str = "8.4";
-/// The runtime the Runtimes screen opens on: the main one.
-pub const MAIN_RUNTIME: Runtime = Runtime::Php;
-/// The start of the id of each PHP pool: php-fpm on macOS and Linux
-/// (`php-fpm-8.4`), php-cgi on Windows (`php-cgi-8.4`, ADR 0016). The daemon
-/// starts and stops the pools with the sites, and refuses actions on them.
-const POOLS: [(&str, PoolKind); 2] = [("php-fpm-", PoolKind::Fpm), ("php-cgi-", PoolKind::Cgi)];
 /// The most installs kept for the Runtimes section. The daemon runs one at a
 /// time, so a few are plenty.
 const MAX_INSTALLS: usize = 4;
 /// The window's own code: the daemon stopped before an install ended, as
 /// `marsa install` says it.
 pub const INSTALL_INTERRUPTED: &str = "install_interrupted";
-/// The daemon's answer to unlinking a site that comes from a parked folder.
-const SITE_IS_PARKED: &str = "site_is_parked";
-
 /// What the bridge sends to the window.
 #[derive(Debug)]
 pub enum Update {
@@ -155,84 +153,6 @@ pub enum HostsSync {
     /// Sent; the daemon may wait up to 5 minutes for the password prompt.
     Running,
     /// The names did not go in: the code of why.
-    Failed(String),
-}
-
-/// One runtime in the Runtimes section.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeRow {
-    pub runtime: Runtime,
-    /// Oldest first.
-    pub installed: Vec<Version>,
-    /// As saved in `global.toml` (`8.4`). Always `None` for Composer and
-    /// Caddy.
-    pub default: Option<String>,
-}
-
-/// One entry of a PHP or Node list.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Choice {
-    /// A site with no setting of its own: its version file, its
-    /// `composer.json`, or the default picks the version. Sites only.
-    Auto,
-    /// This installed version.
-    Version(Version),
-}
-
-/// A setting the window changes through the daemon.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Change {
-    /// `PUT /v1/runtimes/{tool}/default` with this text (`8.4`).
-    Default { runtime: Runtime, version: String },
-    /// `PATCH /v1/sites/{name}` with this PHP text. `None` clears the site's
-    /// own setting.
-    SitePhp { site: String, php: Option<String> },
-}
-
-impl Change {
-    fn setting(&self) -> Setting<'_> {
-        match self {
-            Change::Default { runtime, .. } => Setting::Default(*runtime),
-            Change::SitePhp { site, .. } => Setting::SitePhp(site),
-        }
-    }
-}
-
-/// Which setting a [`Change`] is about. Borrows the site name, so finding
-/// the pending change of a row copies nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Setting<'a> {
-    Default(Runtime),
-    SitePhp(&'a str),
-}
-
-/// A change sent to the daemon and not answered yet, with the entry its
-/// list shows meanwhile. A refusal shows the daemon's value again.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Pending {
-    change: Change,
-    shown: Choice,
-}
-
-/// The line under the sites buttons: what the last sites action did.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SitesNotice {
-    /// The daemon accepted this folder to park.
-    Parked(PathBuf),
-    /// The daemon linked `folder` as the site `name`.
-    Linked { name: String, folder: PathBuf },
-    /// The daemon unlinked this site.
-    Unlinked(String),
-    /// The daemon forgot this parked folder.
-    Forgot(PathBuf),
-    /// The daemon refused to unlink `site`: it comes from a parked folder.
-    /// `folder` is that folder when the list names it, so the window can
-    /// offer to forget it instead.
-    SiteIsParked {
-        site: String,
-        folder: Option<PathBuf>,
-    },
-    /// A sites action failed. A client error code.
     Failed(String),
 }
 
@@ -446,21 +366,6 @@ pub enum Setup {
     Finished(SetupReport),
     /// It did not run. A client error code.
     Failed(String),
-}
-
-/// The form under the sites buttons once a folder to link was picked.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinkForm {
-    pub folder: PathBuf,
-    /// The site name the user types. Made from the folder's name at first.
-    pub name: String,
-}
-
-/// What a folder dialog was opened for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pick {
-    Park,
-    Link,
 }
 
 /// The screen the main area shows (code.md, Router). The window's own
@@ -722,281 +627,6 @@ impl Model {
             }
             Update::Event(event) => apply(self, event),
         }
-    }
-
-    /// The installed PHP versions, oldest first.
-    pub fn php_versions(&self) -> &[Version] {
-        self.row(Runtime::Php)
-            .map_or(&[], |row| row.installed.as_slice())
-    }
-
-    /// The entry a site's PHP list shows: the one the user just picked, the
-    /// version of the site's own setting, or [`Choice::Auto`].
-    pub fn site_choice(&self, site: &Site) -> Choice {
-        if let Some(shown) = self.pending_choice(Setting::SitePhp(&site.name)) {
-            return shown.clone();
-        }
-        match (&site.php_source, &site.php) {
-            (Some(Source::ProjectSetting), Some(version)) => Choice::Version(version.clone()),
-            _ => Choice::Auto,
-        }
-    }
-
-    /// The user picked `choice` in the PHP list of the site `name`. Returns
-    /// the change to send, or `None` if it is the entry shown already. The
-    /// list shows `choice` until the daemon answers.
-    pub fn choose_site_php(&mut self, name: &str, choice: Choice) -> Option<Change> {
-        let site = self
-            .session
-            .sites
-            .sites
-            .iter()
-            .find(|site| site.name == name)?;
-        if self.site_choice(site) == choice {
-            return None;
-        }
-        let php = match &choice {
-            Choice::Auto => None,
-            Choice::Version(version) => {
-                Some(version_text(Runtime::Php, version, self.php_versions()))
-            }
-        };
-        let change = Change::SitePhp {
-            site: name.to_owned(),
-            php,
-        };
-        // The notice was about the last action.
-        self.session.sites_notice = None;
-        self.session.pending.push(Pending {
-            change: change.clone(),
-            shown: choice,
-        });
-        Some(change)
-    }
-
-    /// The installed version the default of `runtime` picks now, or the one
-    /// the user just picked. `None` when there is no default, or it matches
-    /// no installed version.
-    pub fn default_choice(&self, runtime: Runtime) -> Option<Version> {
-        if let Some(Choice::Version(version)) = self.pending_choice(Setting::Default(runtime)) {
-            return Some(version.clone());
-        }
-        let row = self.row(runtime)?;
-        let text = row.default.as_deref()?;
-        resolver::best_match(text, &row.installed).ok().flatten()
-    }
-
-    /// The user picked `version` as the default of `runtime`. Returns the
-    /// change to send, or `None` if it is the default already.
-    pub fn choose_default(&mut self, runtime: Runtime, version: Version) -> Option<Change> {
-        if !has_default(runtime) || self.default_choice(runtime).as_ref() == Some(&version) {
-            return None;
-        }
-        let installed = self.row(runtime).map_or(&[][..], |row| &row.installed);
-        let change = Change::Default {
-            runtime,
-            version: version_text(runtime, &version, installed),
-        };
-        self.session.runtimes_notice = None;
-        self.session.pending.push(Pending {
-            change: change.clone(),
-            shown: Choice::Version(version),
-        });
-        Some(change)
-    }
-
-    fn row(&self, runtime: Runtime) -> Option<&RuntimeRow> {
-        self.session
-            .runtimes
-            .iter()
-            .find(|row| row.runtime == runtime)
-    }
-
-    /// The installed versions of `runtime`, oldest first. Empty until the
-    /// daemon says.
-    pub fn installed(&self, runtime: Runtime) -> &[Version] {
-        self.row(runtime)
-            .map_or(&[], |row| row.installed.as_slice())
-    }
-
-    /// The runtime the Runtimes screen shows: the one of its route, else the
-    /// one it showed last, else the main one.
-    pub fn chosen_runtime(&self) -> Runtime {
-        match &self.route {
-            Route::Runtimes(runtime) => *runtime,
-            _ => self.runtime_chosen.unwrap_or(MAIN_RUNTIME),
-        }
-    }
-
-    /// The sites that run `version` of `runtime` now, by name, in the order
-    /// of the list: the version the daemon says, or the one the user just
-    /// picked for the site. Only PHP has a version per site in the list
-    /// (`Site::php`), so any other runtime has none.
-    pub fn sites_running(&self, runtime: Runtime, version: &Version) -> Vec<&str> {
-        if runtime != Runtime::Php {
-            return Vec::new();
-        }
-        let runs = |site: &Site| match self.site_choice(site) {
-            Choice::Version(own) => own == *version,
-            Choice::Auto => site.php.as_ref() == Some(version),
-        };
-        let sites = &self.session.sites.sites;
-        sites
-            .iter()
-            .filter(|site| runs(site))
-            .map(|site| site.name.as_str())
-            .collect()
-    }
-
-    /// How many sites run a PHP version of `line` (`8.4`): what a pool of that
-    /// line serves. A line that is not `major.minor` has none.
-    pub fn sites_on_line(&self, line: &str) -> usize {
-        let Some((major, minor)) = line.split_once('.') else {
-            return 0;
-        };
-        let (Ok(major), Ok(minor)) = (major.parse::<u64>(), minor.parse::<u64>()) else {
-            return 0;
-        };
-        self.session
-            .sites
-            .sites
-            .iter()
-            .filter_map(|site| site.php.as_ref())
-            .filter(|php| php.major == major && php.minor == minor)
-            .count()
-    }
-
-    /// The sites whose own setting picks `version` of `runtime`: the ones the
-    /// daemon refuses to uninstall it for (`version_in_use`). PHP only, as
-    /// [`Model::sites_running`].
-    pub fn sites_set_to(&self, runtime: Runtime, version: &Version) -> Vec<&str> {
-        if runtime != Runtime::Php {
-            return Vec::new();
-        }
-        let sites = &self.session.sites.sites;
-        sites
-            .iter()
-            .filter(|site| self.site_choice(site) == Choice::Version(version.clone()))
-            .map(|site| site.name.as_str())
-            .collect()
-    }
-
-    /// What the newest unanswered change of `setting` shows, if any.
-    fn pending_choice(&self, setting: Setting<'_>) -> Option<&Choice> {
-        // Newest first: the user may pick again before the first answer.
-        self.session
-            .pending
-            .iter()
-            .rev()
-            .find(|pending| pending.change.setting() == setting)
-            .map(|pending| &pending.shown)
-    }
-
-    /// The daemon answered `change`: its list shows the daemon's value again.
-    fn settle(&mut self, change: &Change) {
-        if let Some(index) = self
-            .session
-            .pending
-            .iter()
-            .position(|p| p.change == *change)
-        {
-            self.session.pending.remove(index);
-        }
-    }
-
-    /// Versions that are not semver are left out: the daemon lists only
-    /// folders named by a version. Opens or closes the first-run panel.
-    fn set_runtimes(&mut self, list: RuntimeList) {
-        self.session.runtimes = list
-            .runtimes
-            .into_iter()
-            .map(|runtime| {
-                let mut installed: Vec<Version> = runtime
-                    .installed
-                    .iter()
-                    .filter_map(|text| text.parse().ok())
-                    .collect();
-                installed.sort();
-                RuntimeRow {
-                    runtime: runtime.runtime,
-                    installed,
-                    default: runtime.default,
-                }
-            })
-            .collect();
-        let needed = first_run_needed(&self.session.runtimes);
-        match self.session.first_run {
-            None if needed && !self.first_run_closed => {
-                self.session.first_run = Some(FirstRun::Offer)
-            }
-            // PHP or Caddy came some other way (`marsa install`).
-            Some(FirstRun::Offer) if !needed => self.session.first_run = None,
-            _ => {}
-        }
-    }
-
-    // -- Sites: park and link with the folder dialog --
-
-    /// The user picked `folder` to park. Returns the folder to send, or
-    /// `None` if it is not an absolute path; the notice line then says why.
-    /// Clears the last notice either way: it was about the last action.
-    pub fn park_request(&mut self, folder: &Path) -> Option<PathBuf> {
-        match folder_path(folder) {
-            Ok(path) => {
-                self.session.sites_notice = None;
-                Some(path)
-            }
-            Err(code) => {
-                self.session.sites_notice = Some(SitesNotice::Failed(code.to_owned()));
-                None
-            }
-        }
-    }
-
-    /// The user picked `folder` to link: the form opens, with a site name
-    /// made from the folder's name when one can be made (`My_App` gives
-    /// `my-app`), as `marsa link` does.
-    pub fn pick_link_folder(&mut self, folder: &Path) {
-        match folder_path(folder) {
-            Ok(folder) => {
-                let name = folder
-                    .file_name()
-                    .and_then(sites::name_from_folder)
-                    .unwrap_or_default();
-                self.session.sites_notice = None;
-                self.link = Some(LinkForm { folder, name });
-                // The form is drawn on Sites; the first-run panel has none.
-                self.route = Route::Sites;
-            }
-            Err(code) => self.session.sites_notice = Some(SitesNotice::Failed(code.to_owned())),
-        }
-    }
-
-    /// The site name and folder of the link form, to send. `None` when the
-    /// name is not valid: the notice line says why, and no request is sent
-    /// (the daemon would answer `site_name_invalid` too).
-    pub fn link_request(&mut self) -> Option<(String, PathBuf)> {
-        let form = self.link.as_ref()?;
-        let name = form.name.trim();
-        if let Err(err) = sites::validate_name(name) {
-            self.session.sites_notice = Some(SitesNotice::Failed(err.code().to_owned()));
-            return None;
-        }
-        let request = (name.to_owned(), form.folder.clone());
-        self.session.sites_notice = None;
-        Some(request)
-    }
-
-    /// The site the link form would replace: one with the same name and
-    /// another folder. The daemon links the new folder in its place.
-    pub fn link_replaces(&self) -> Option<&Site> {
-        let form = self.link.as_ref()?;
-        let name = form.name.trim();
-        self.session
-            .sites
-            .sites
-            .iter()
-            .find(|site| site.name == name && site.root != form.folder)
     }
 
     // -- Runtimes: installs --
@@ -1483,62 +1113,6 @@ impl Model {
         }
     }
 
-    /// The parked folder whose scan gives `site`: the folder holds the
-    /// site's folder, and the site is named after it, as the daemon names
-    /// the sites of a parked folder. `None` for a linked site, which Unlink
-    /// removes; the daemon has the last word (`site_is_parked`).
-    pub fn parked_folder(&self, site: &Site) -> Option<&Path> {
-        let named = site.root.file_name().and_then(sites::name_from_folder);
-        if named.as_deref() != Some(site.name.as_str()) {
-            return None;
-        }
-        let parent = site.root.parent()?;
-        self.session
-            .sites
-            .parked
-            .iter()
-            .find(|dir| dir.as_path() == parent)
-            .map(PathBuf::as_path)
-    }
-
-    /// The parked folder that holds the folder of the site `name`, after the
-    /// daemon said it comes from one.
-    fn holder(&self, name: &str) -> Option<&Path> {
-        let site = self
-            .session
-            .sites
-            .sites
-            .iter()
-            .find(|site| site.name == name)?;
-        let parent = site.root.parent()?;
-        self.session
-            .sites
-            .parked
-            .iter()
-            .find(|dir| dir.as_path() == parent)
-            .map(PathBuf::as_path)
-    }
-
-    /// How many sites the parked folder `folder` gives now.
-    pub fn sites_in(&self, folder: &Path) -> usize {
-        self.session
-            .sites
-            .sites
-            .iter()
-            .filter(|site| self.parked_folder(site) == Some(folder))
-            .count()
-    }
-
-    /// The folder of the site `name`, if it is in the list.
-    pub fn site_root(&self, name: &str) -> Option<&Path> {
-        self.session
-            .sites
-            .sites
-            .iter()
-            .find(|site| site.name == name)
-            .map(|site| site.root.as_path())
-    }
-
     // -- Xdebug --
 
     /// Whether the Xdebug box shows a tick: the state asked for until the
@@ -1723,23 +1297,6 @@ impl Model {
             | Action::PickFolder(_) => None,
         }
     }
-
-    /// The address of the site `name`, for the browser.
-    pub fn site_url(&self, name: &str) -> Option<String> {
-        self.session
-            .sites
-            .sites
-            .iter()
-            .find(|site| site.name == name)
-            .map(url)
-    }
-
-    /// The daemon sends the sites sorted by name already; sorting here keeps
-    /// the table right even if a daemon does not.
-    fn set_sites(&mut self, mut list: SiteList) {
-        list.sites.sort_by(|a, b| a.name.cmp(&b.name));
-        self.session.sites = list;
-    }
 }
 
 /// Why "Add to /etc/hosts" did not put the names in: the code of the
@@ -1811,13 +1368,6 @@ pub fn first_run_needed(rows: &[RuntimeRow]) -> bool {
         && (runtime_missing(rows, Runtime::Php) || runtime_missing(rows, Runtime::Caddy))
 }
 
-/// Whether `runtime` has no installed version in the list `rows`.
-pub fn runtime_missing(rows: &[RuntimeRow], runtime: Runtime) -> bool {
-    rows.iter()
-        .find(|row| row.runtime == runtime)
-        .is_none_or(|row| row.installed.is_empty())
-}
-
 /// The version to ask for from a version field: `None` (the newest stable
 /// version) when it is empty, else the text without the spaces around it.
 ///
@@ -1840,75 +1390,6 @@ fn failure(code: String) -> InstallFailure {
     InstallFailure {
         code,
         ..InstallFailure::default()
-    }
-}
-
-/// The program a PHP pool runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PoolKind {
-    /// php-fpm: macOS and Linux.
-    Fpm,
-    /// php-cgi: Windows.
-    Cgi,
-}
-
-/// Whether the service `id` is a PHP pool, which starts and stops with the
-/// sites that need it.
-pub fn is_pool(id: &str) -> bool {
-    pool_of(id).is_some()
-}
-
-/// The program and the PHP line (`8.4`) of the pool `id` names, if it names
-/// one: `php-fpm-8.4`.
-pub fn pool_of(id: &str) -> Option<(PoolKind, &str)> {
-    POOLS
-        .iter()
-        .find_map(|(prefix, kind)| id.strip_prefix(prefix).map(|line| (*kind, line)))
-}
-
-/// The address of a site in the browser: `https://shop.test`, or
-/// `http://shop.test` when HTTPS is off.
-pub fn url(site: &Site) -> String {
-    let scheme = if site.secure { "https" } else { "http" };
-    format!("{scheme}://{}", site.host())
-}
-
-/// A picked folder as the daemon wants it: absolute, with `.` parts,
-/// doubled separators, and a trailing separator removed, as `marsa park`
-/// does.
-///
-/// # Errors
-///
-/// `site_path_relative` for a relative or empty path. The daemon would
-/// answer the same, so no request is sent.
-pub fn folder_path(folder: &Path) -> Result<PathBuf, &'static str> {
-    if !folder.is_absolute() {
-        return Err("site_path_relative");
-    }
-    // Not `canonicalize`: it reads the disk, follows links, and gives `\\?\`
-    // paths on Windows.
-    Ok(folder.components().collect())
-}
-
-/// Whether `runtime` has a default version. Composer and Caddy have none: the
-/// newest installed version is used, and so has any runtime core adds later,
-/// until it is listed here (the `matches!` is false for it, so it builds).
-pub fn has_default(runtime: Runtime) -> bool {
-    matches!(runtime, Runtime::Php | Runtime::Node)
-}
-
-/// The text to save for `chosen`: its line (`8.4` for PHP, `22` for Node)
-/// when the line picks `chosen` now, so later patch releases follow, as with
-/// `marsa use 8.4` and the default set by the first install. Otherwise the
-/// full version, so an older patch release stays the one used.
-pub fn version_text(runtime: Runtime, chosen: &Version, installed: &[Version]) -> String {
-    let line = match runtime {
-        Runtime::Node => chosen.major.to_string(),
-        _ => format!("{}.{}", chosen.major, chosen.minor),
-    };
-    match resolver::best_match(&line, installed) {
-        Ok(Some(best)) if best == *chosen => line,
-        _ => chosen.to_string(),
     }
 }
 
