@@ -101,8 +101,8 @@ fn row<'a>(model: &Model, service: &'a ServiceStatus) -> ServiceRow<'a> {
     };
     ServiceRow {
         id: &service.id,
-        name: strings::service_name(&service.id),
-        description: strings::service_description(&service.id, state == PillState::Waiting, sites),
+        name: model::service_name(&service.id),
+        description: model::service_description(&service.id, state == PillState::Waiting, sites),
         state,
         failure,
         pid: service.pid,
@@ -513,10 +513,10 @@ mod tests {
         }));
         let view = super::view(&model);
         assert_eq!(rows(&view)[3].description, "Runs PHP 8.4 for 1 site.");
-        assert_eq!(strings::service_name("php-cgi-8.4"), "PHP-CGI 8.4");
-        assert_eq!(strings::service_name("dns"), "DNS");
+        assert_eq!(model::service_name("php-cgi-8.4"), "PHP-CGI 8.4");
+        assert_eq!(model::service_name("dns"), "DNS");
         assert_eq!(
-            strings::service_description("dns", false, 0),
+            model::service_description("dns", false, 0),
             "Finds every .test site on this computer."
         );
     }
@@ -740,7 +740,7 @@ mod tests {
         for id in ["caddy", "dns", "php-fpm-8.4", "php-cgi-8.4", "mailpit"] {
             for waiting in [false, true] {
                 for sites in [0, 1, 25] {
-                    texts.push(strings::service_description(id, waiting, sites));
+                    texts.push(model::service_description(id, waiting, sites));
                 }
             }
         }

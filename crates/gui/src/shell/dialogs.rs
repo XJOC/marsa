@@ -19,7 +19,6 @@ use eframe::egui::Context;
 
 use crate::model::{Action, Model, Removal};
 use crate::screens::runtimes;
-use crate::strings;
 use crate::widgets::{Answer, ConfirmDialog};
 
 /// What a confirmation says.
@@ -42,21 +41,15 @@ pub fn confirm_view(model: &Model) -> Option<ConfirmView> {
     let removal = model.session.confirm.as_ref()?;
     let home = model.home.as_deref();
     let (id, body) = match removal {
-        Removal::Unlink { site } => (
-            "unlink",
-            strings::confirm_text(removal, model.site_root(site), 0, home),
-        ),
-        Removal::Forget { folder } => (
-            "forget",
-            strings::confirm_text(removal, None, model.sites_in(folder), home),
-        ),
-        Removal::Uninstall { .. } => ("uninstall", strings::confirm_text(removal, None, 0, home)),
+        Removal::Unlink { site } => ("unlink", removal.text(model.site_root(site), 0, home)),
+        Removal::Forget { folder } => ("forget", removal.text(None, model.sites_in(folder), home)),
+        Removal::Uninstall { .. } => ("uninstall", removal.text(None, 0, home)),
     };
     Some(ConfirmView {
         id,
-        title: strings::confirm_title(removal, home),
+        title: removal.title(home),
         body,
-        confirm: strings::removal_button(removal),
+        confirm: removal.button(),
     })
 }
 
@@ -180,7 +173,7 @@ mod tests {
         assert_eq!(view.confirm, "Unlink");
         // The folder is under the home folder: `~/…`, with the separator of
         // the system.
-        let shown = strings::home_path(&abs("/home/Code/shop"), model.home.as_deref());
+        let shown = crate::strings::home_path(&abs("/home/Code/shop"), model.home.as_deref());
         assert!(shown.starts_with('~'), "{shown}");
         assert!(
             view.body

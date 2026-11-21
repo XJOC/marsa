@@ -156,7 +156,7 @@ pub fn show(ui: &mut Ui, model: &Model, narrow: bool) -> Vec<Action> {
             actions.push(Action::Navigate(Item::Settings.route()));
         }
         let overall = model.overall();
-        let (title, caption) = strings::overall_text(overall);
+        let (title, caption) = overall.text();
         let status = StatusDot::new(health(overall), title, caption)
             .width(ui.available_width())
             .folded(folded);
@@ -362,7 +362,7 @@ mod tests {
         let harness = Harness::new(egui::Theme::Light);
         let mut model = connected();
         model.route = Route::Settings;
-        let (title, caption) = strings::overall_text(Overall::NoSites);
+        let (title, caption) = Overall::NoSites.text();
         let status = format!("{title}, {caption}");
         assert_eq!(
             click(&harness, &model, false, &status),
@@ -404,7 +404,7 @@ mod tests {
         model.update(Update::Failed("daemon_start_failed".into()));
         assert_eq!(health(model.overall()), Health::Error);
         assert_eq!(
-            strings::overall_text(model.overall()),
+            model.overall().text(),
             ("Sites not opening", "Marsa is not running")
         );
         assert_eq!(health(connected().overall()), Health::Ok);

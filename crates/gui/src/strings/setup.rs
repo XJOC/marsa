@@ -3,9 +3,7 @@
 use marsa_core::recipes::Platform;
 use marsa_core::types::{OpStatus, PortHolder, SetupReport};
 
-use crate::model::{Appearance, Autostart, Connection};
-use crate::screens::settings::Check;
-use crate::widgets::Stage;
+use crate::prefs::Appearance;
 
 use super::*;
 
@@ -40,14 +38,14 @@ pub const fn first_run_install_title(php: bool, caddy: bool) -> &'static str {
 
 /// What a screen reader says for a step card: "Step 2: Set up HTTPS, to do
 /// now".
-pub fn step_label(number: u8, title: &str, stage: Stage) -> String {
-    let word = match stage {
-        Stage::Done => "done",
-        Stage::Current => "to do now",
-        Stage::Next => "comes next",
-    };
+pub fn step_label(number: u8, title: &str, word: &str) -> String {
     format!("Step {number}: {title}, {word}")
 }
+
+/// The words of a step's stage, for a screen reader.
+pub const STAGE_DONE: &str = "done";
+pub const STAGE_CURRENT: &str = "to do now";
+pub const STAGE_NEXT: &str = "comes next";
 pub const NOT_NOW: &str = "Not now";
 pub const CLOSE: &str = "Close";
 
@@ -128,14 +126,10 @@ pub const TEST_NAMES: &str = ".test addresses";
 pub const TEST_NAMES_HINT: &str = "Marsa knows this only from a setup run in this window.";
 
 /// How a check of the Setup group stands, by its word.
-pub const fn check_word(check: Check) -> &'static str {
-    match check {
-        Check::Done => "Done",
-        Check::Failed => "Failed",
-        Check::Skipped => "Skipped",
-        Check::NotChecked => "Not checked",
-    }
-}
+pub const CHECK_DONE: &str = "Done";
+pub const CHECK_FAILED: &str = "Failed";
+pub const CHECK_SKIPPED: &str = "Skipped";
+pub const CHECK_NOT_CHECKED: &str = "Not checked";
 
 pub const APP_VERSION: &str = "Marsa version";
 pub const DAEMON_VERSION: &str = "Daemon version";
@@ -146,25 +140,17 @@ pub const BRIDGE_FAILED: &str = "bridge_failed";
 
 /// Under the Marsa version in Settings: the daemon's version while
 /// connected.
-pub fn daemon_hint(connection: &Connection) -> String {
-    match connection {
-        Connection::Running(health) => format!("{DAEMON_VERSION} {}", health.app_version),
-        _ => DAEMON_NOT_CONNECTED.to_owned(),
+pub fn daemon_hint(version: Option<&str>) -> String {
+    match version {
+        Some(version) => format!("{DAEMON_VERSION} {version}"),
+        None => DAEMON_NOT_CONNECTED.to_owned(),
     }
 }
 
-/// The line next to "Start at login", for the states the box alone cannot
-/// show.
-pub fn autostart_note(state: Autostart) -> Option<&'static str> {
-    match state {
-        Autostart::Stale => Some(
-            "The login file starts Marsa from another folder, or it was changed. Turn this on \
-             to fix it.",
-        ),
-        Autostart::Unsupported => Some(AUTOSTART_UNSUPPORTED),
-        Autostart::Unknown | Autostart::Off | Autostart::On => None,
-    }
-}
+/// The line next to "Start at login" when the login file is there but starts
+/// another program.
+pub const AUTOSTART_STALE: &str = "The login file starts Marsa from another folder, or it was changed. Turn this on \
+     to fix it.";
 
 /// What setup does, and the prompt it may bring, on this system.
 pub fn setup_explanation(platform: Option<Platform>) -> &'static str {

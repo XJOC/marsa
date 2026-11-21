@@ -664,7 +664,7 @@ mod tests {
         fill(&mut model, Demo::FirstRun1);
         assert!(model.needs_first_run());
         assert!(model.installing());
-        let words = crate::strings::install_status(model.install_view().expect("an install"));
+        let words = model.install_view().expect("an install").status();
         assert!(words.starts_with("Downloading PHP 8.4.27"), "{words}");
     }
 
@@ -725,7 +725,7 @@ mod tests {
         assert_eq!(model.session.install_dialog, None);
         let mut installing = Model::default();
         fill(&mut installing, Demo::RuntimesInstalling);
-        let words = crate::strings::install_status(installing.install_view().expect("an install"));
+        let words = installing.install_view().expect("an install").status();
         assert!(words.starts_with("Downloading PHP 8.5.0"), "{words}");
         let mut asking = Model::default();
         fill(&mut asking, Demo::RuntimesInstall);

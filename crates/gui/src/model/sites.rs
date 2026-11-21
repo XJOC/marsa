@@ -42,6 +42,16 @@ pub enum Pick {
     Link,
 }
 
+impl Pick {
+    /// The title of the folder dialog.
+    pub const fn title(self) -> &'static str {
+        match self {
+            Pick::Park => strings::PICK_PARK_TITLE,
+            Pick::Link => strings::PICK_LINK_TITLE,
+        }
+    }
+}
+
 /// The address of a site in the browser: `https://shop.test`, or
 /// `http://shop.test` when HTTPS is off.
 pub fn url(site: &Site) -> String {
