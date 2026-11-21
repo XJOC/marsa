@@ -299,9 +299,11 @@ fn forget(kind: ServerKind, data_dir: &Path) {
 
 /// The one of `programs`, the server program of each installed version, that
 /// our old server runs, which an earlier `marsad` left running and
-/// `run/<id>.pid` names. `None` when there is no record, or its pid is not
-/// that server now: gone, another program, or it cannot be told. Only reads:
-/// nothing is signalled, and the record stays.
+/// `run/<id>.pid` names, for an uninstall. Also when the system cannot tell
+/// who runs the pid now: that may still be our server, and once its version
+/// is gone no record could name it. `None` when there is no record, its pid
+/// is gone or runs another program now, or the record names no installed
+/// program. Only reads: nothing is signalled, and the record stays.
 pub(super) async fn orphan_program(
     kind: ServerKind,
     probes: &dyn ProcessProbe,
@@ -315,8 +317,11 @@ pub(super) async fn orphan_program(
     let servers = accepted(programs.iter().cloned());
     let state = check(probes, &record, &servers).await;
     debug!(pid = record.pid, %state, server = kind.id(), "checked the pid record");
-    if !matches!(state, PidfileState::Ours { .. }) {
-        return None;
+    match state {
+        PidfileState::Ours { .. } | PidfileState::Unknown { .. } => {}
+        PidfileState::Missing | PidfileState::Stale { .. } | PidfileState::Mismatch { .. } => {
+            return None;
+        }
     }
     // The record holds the path with links resolved: the program it is a
     // form of, which lies in its version's folder.

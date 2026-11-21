@@ -188,10 +188,11 @@ impl ServerManager {
     }
 
     /// [`Self::running_program`], or else the installed program that our
-    /// old server runs, which a crashed `marsad` left running
-    /// (`orphan::orphan_program`), for an uninstall. Removing that
-    /// version would make its record name no installed server, so the next
-    /// start would drop the record and could never stop it.
+    /// old server runs, which a crashed `marsad` left running, or may run
+    /// when the system cannot tell (`orphan::orphan_program`), for an
+    /// uninstall. Removing that version would make its record name no
+    /// installed server, so the next start would drop the record and could
+    /// never stop it.
     pub async fn program_in_use(&self, daemon: &Daemon) -> Option<PathBuf> {
         if let Some(program) = self.running_program(daemon) {
             return Some(program);

@@ -1239,6 +1239,40 @@ mod tests {
             assert!(signals(&pg).is_empty());
         }
 
+        /// A record whose pid the system cannot tell may still name our old
+        /// server: an uninstall keeps the version of the record's program,
+        /// so the record can name it at the next start. Another version can
+        /// go, and so can that one once the pid runs another program.
+        #[tokio::test]
+        async fn a_record_that_cannot_be_told_keeps_its_version() {
+            let pg = pg("serve", probes(Liveness::Unknown, None));
+            let v17 = installed_postgres_of(&pg, "17.12.0");
+            fs::create_dir_all(v17.parent().unwrap()).unwrap();
+            fs::write(&v17, "").unwrap();
+            let record = PidRecord {
+                pid: 4242,
+                exe: v17.clone(),
+                started: StartTime::Ticks(1),
+            };
+            let path = orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir);
+            process::write_pid_file(&path, &record).unwrap();
+
+            let (status, body) = uninstall_version(&pg, "18.7.0").await;
+            assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+            let (status, body) = uninstall_version(&pg, "17.12.0").await;
+            let body: marsa_core::types::ErrorBody = serde_json::from_slice(&body).unwrap();
+            assert_eq!((status, body.error.code.as_str()), (409, "version_in_use"));
+            assert!(body.in_use.unwrap().server);
+            assert!(v17.is_file());
+            assert_eq!(recorded(&pg), Some(record));
+
+            *pg.probes.now.lock().unwrap() = alive(Path::new("/bin/sleep"));
+            let (status, body) = uninstall_version(&pg, "17.12.0").await;
+            assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+            assert!(!v17.exists());
+            assert!(signals(&pg).is_empty());
+        }
+
         /// The first install writes `[postgres]` and starts it; a stop asked
         /// while it waits for its turn drops that start.
         #[tokio::test]
