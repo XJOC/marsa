@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::api;
 use super::auth::AuthConfig;
-use super::autostart_api::Autostart;
+use super::autostart::Autostart;
 use super::caddy;
 use super::client_shims::ClientShims;
 use super::databases;

@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::api::HttpError;
-use super::autostart_api::Autostart;
+use super::autostart::Autostart;
 use super::caddy::CaddyManager;
 use super::client_shims::ClientShims;
 use super::databases::ServerManager;

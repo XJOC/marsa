@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod autostart;
 pub mod autostart_api;
 pub mod caddy;
 pub mod client_shims;
