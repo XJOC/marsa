@@ -1,5 +1,4 @@
-//! The services and logs routes. Task M3-07; the php-fpm pools since M4-23;
-//! PostgreSQL since M6-03.
+//! The services and logs routes: Caddy, the php-fpm pools, and PostgreSQL.
 //!
 //! | Route | Answer |
 //! | --- | --- |
@@ -9,14 +8,14 @@
 //! | `GET /v1/logs/{id}?follow=true` | SSE: the recent lines, then new ones |
 //!
 //! The services are `caddy`, `dns` on macOS and Linux (the daemon's own DNS
-//! server, task M4-18i), and each php-fpm pool started in this run
+//! server), and each php-fpm pool started in this run
 //! (`php-fpm-8.4`). The sites sync starts and stops the pools, so an action
 //! on a pool is `409 service_managed_by_sites`.
 //!
 //! An action on Caddy that finds another one running waits for it, up to
 //! [`ACTION_WAIT`], then runs; a wait that runs out is still
-//! `409 service_busy`. The usual one is the start of Caddy with the daemon
-//! (task M5-16): `marsa services stop caddy` starts the daemon itself, and
+//! `409 service_busy`. The usual one is the start of Caddy with the daemon:
+//! `marsa services stop caddy` starts the daemon itself, and
 //! its stop then runs after that start instead of failing.
 //!
 //! The database servers (`postgres`) have the same actions. A start or

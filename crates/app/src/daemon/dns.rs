@@ -1,10 +1,10 @@
-//! The DNS server for `.test` (architecture.md section 5). Task M4-12.
+//! The DNS server for `.test` (architecture.md section 5).
 //!
 //! macOS sends every `.test` name here through `/etc/resolver/test`, and
 //! systemd-resolved does the same on Linux (`marsa_core::dns`). The server
 //! answers `127.0.0.1` for `test.` and every name under it, and refuses
 //! every other name: it is not a resolver and never asks another server.
-//! `AAAA` gets no address (task M5-17): Caddy listens on `127.0.0.1` only
+//! `AAAA` gets no address: Caddy listens on `127.0.0.1` only
 //! (architecture.md section 10), so `::1` sent clients that try IPv6 first
 //! to a port where nothing listens. Windows finds sites in the hosts file,
 //! so the daemon does not start it there.
@@ -13,7 +13,7 @@
 //! this file only decides what to answer.
 //!
 //! [`DnsService`] makes the server a service of the daemon, `dns` in
-//! `marsa services` (task M4-18i): a port that another program holds is a
+//! `marsa services`: a port that another program holds is a
 //! failed service, and `marsa services start dns` tries again.
 
 use marsa_core::codes;
@@ -64,12 +64,12 @@ pub fn serves_test_names(platform: Option<Platform>) -> bool {
     )
 }
 
-/// The id of the DNS server in `GET /v1/services` (task M4-18i).
+/// The id of the DNS server in `GET /v1/services`.
 pub const DNS_ID: &str = "dns";
 /// How long a stop waits for both sockets to close.
 pub const STOP_LIMIT: Duration = Duration::from_secs(2);
 
-/// The DNS server as a service of the daemon (task M4-18i): its state and
+/// The DNS server as a service of the daemon: its state and
 /// recent lines for `GET /v1/services` and `marsa logs dns`, and the server
 /// itself while it runs. A port that another program holds is a failed
 /// service with a code, not only a line in the daemon's log: that program
@@ -648,7 +648,7 @@ mod tests {
                 ok,
                 vec!["api.shop.test. 1 127.0.0.1"],
             ),
-            // No `::1`: nothing of Marsa's listens on IPv6 (task M5-17).
+            // No `::1`: nothing of Marsa's listens on IPv6.
             ("api.shop.test.", RecordType::AAAA, ok, vec![]),
             (
                 "SHOP.TEST.",

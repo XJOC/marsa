@@ -31,7 +31,7 @@ use crate::resolver::Tool;
 
 /// A program that has its own folder under `runtimes/`. Serialized as its
 /// folder name (`php`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Runtime {
     Php,
@@ -39,13 +39,13 @@ pub enum Runtime {
     /// `composer.phar`. Its versions do not follow PHP's, and one copy serves
     /// every PHP version.
     Composer,
-    /// The web server `marsad` runs (task M2-10). Not a shim tool: nothing
+    /// The web server `marsad` runs. Not a shim tool: nothing
     /// in a project picks its version.
     Caddy,
-    /// PostgreSQL (task M6-01). Installed like the others; it is a service,
+    /// PostgreSQL. Installed like the others; it is a service,
     /// not a shim tool.
     Postgres,
-    /// MySQL 8.4 (task M6-05), Oracle's build as it is. A service, like
+    /// MySQL 8.4, Oracle's build as it is. A service, like
     /// PostgreSQL.
     Mysql,
     /// Valkey 8.1, the key-value server Laravel's cache and queue use as
@@ -120,7 +120,7 @@ impl RuntimesDir {
         self.runtime_dir(runtime).join(version.to_string())
     }
 
-    /// `runtimes/.tmp/`: the installer's private work folder (task M2-05). It
+    /// `runtimes/.tmp/`: the installer's private work folder. It
     /// is on the same volume as the version folders, so the final `rename`
     /// is atomic.
     pub fn tmp_dir(&self) -> PathBuf {
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn parse_skips_names_that_are_not_full_versions() {
-        // `del-<hex>` is a version folder an uninstall moved aside (M5-07).
+        // `del-<hex>` is a version folder an uninstall moved aside.
         let names = [
             "8.4.3",
             "8.4",

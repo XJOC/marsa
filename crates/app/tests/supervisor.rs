@@ -420,7 +420,7 @@ async fn the_postgres_ladder_ends_in_a_kill_after_each_wait() {
 
 /// The daemon's shutdown gives each process the time its own stop method
 /// needs, even past the limit it was given: `marsad` gives its processes
-/// 10 s, and PostgreSQL's ladder takes 20 s. Before task M6-03 the shutdown
+/// 10 s, and PostgreSQL's ladder takes 20 s. Before the shutdown
 /// aborted the task at its limit, so SIGQUIT never came.
 #[cfg(unix)]
 #[tokio::test]

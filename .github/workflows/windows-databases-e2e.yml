@@ -1,8 +1,8 @@
 name: windows-databases-e2e
 
 # MySQL, PostgreSQL, and Valkey as services of marsad on Windows, with real
-# servers, run by a plain local user that is only in Users (ADR 0023, task
-# M6-07): the first init, the start as a direct child of marsad, a clean stop
+# servers, run by a plain local user that is only in Users (ADR 0023): the
+# first init, the start as a direct child of marsad, a clean stop
 # by each server's own way (mysqladmin shutdown, pg_ctl stop -m fast,
 # SHUTDOWN SAVE) with no recovery at the next start, Valkey's Cygwin paths in
 # a folder with spaces, marsad ended by force with the servers ending in its
@@ -24,20 +24,6 @@ on:
         required: true
         default: "44939163554"
   pull_request:
-    paths:
-      - "crates/app/src/daemon/databases/**"
-      - "crates/app/src/daemon/supervisor.rs"
-      - "crates/core/src/databases/**"
-      - "crates/core/src/services.rs"
-      - "crates/core/src/platform/windows.rs"
-      - "crates/core/src/platform.rs"
-      - "recipes/mysql.toml"
-      - "recipes/postgres.toml"
-      - "recipes/valkey.toml"
-      - "tools/e2e/windows-databases.ps1"
-      - ".github/workflows/windows-databases-e2e.yml"
-  push:
-    branches: ["task/M6-07-*"]
     paths:
       - "crates/app/src/daemon/databases/**"
       - "crates/app/src/daemon/supervisor.rs"

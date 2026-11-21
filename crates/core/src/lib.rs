@@ -15,6 +15,7 @@ pub mod helper;
 pub mod orphan;
 pub mod php;
 pub mod ports;
+pub mod ps;
 pub mod recipes;
 pub mod resolver;
 pub mod runtimes;

@@ -24,7 +24,7 @@ use extract::ExtractError;
 use fetch::{Fetch, FetchError, HttpFetch};
 use manifest::{Manifest, ManifestError};
 
-/// Where the signed manifest is published (task M2-08). Its signature is the
+/// Where the signed manifest is published. Its signature is the
 /// same URL with `.minisig` added.
 pub const MANIFEST_URL: &str =
     "https://github.com/XJOC/marsa/releases/download/runtimes-manifest/manifest.json";

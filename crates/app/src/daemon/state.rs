@@ -1,4 +1,4 @@
-//! `AppState` and `Daemon` (architecture.md section 5). Task M3-06.
+//! `AppState` and `Daemon` (architecture.md section 5).
 //!
 //! The locks here are `std::sync` locks: they are taken for short reads and
 //! writes and never held across `.await` (`clippy::await_holding_lock`).
@@ -77,21 +77,21 @@ pub struct Daemon {
     pub mysql: ServerManager,
     /// Valkey, the same way.
     pub valkey: ServerManager,
-    /// The DNS server for `.test` (task M4-18i). Not listed here;
+    /// The DNS server for `.test`. Not listed here;
     /// `server::run` sets [`DnsService::for_daemon`].
     pub dns: DnsService,
-    /// The status and recent lines of each php-fpm pool (task M4-23). The
+    /// The status and recent lines of each php-fpm pool. The
     /// sites sync starts and stops the pools.
     pub pools: Pools,
-    /// Asks the sites sync task for a pass, and waits for it (task M5-11).
+    /// Asks the sites sync task for a pass, and waits for it.
     /// The task alone runs passes and owns the pools.
     pub pass_requests: PassRequests,
-    /// The runtime installer, and whether an install runs (task M3-12).
+    /// The runtime installer, and whether an install runs.
     pub installs: Installs,
     /// The shims of the database clients, made and removed with their
     /// server's versions.
     pub client_shims: ClientShims,
-    /// Where the login file that starts the tray icon goes (task M5-03).
+    /// Where the login file that starts the tray icon goes.
     /// [`Autostart::unset`] here, so tests never reach the user's real
     /// folders; `server::run` sets [`Autostart::this_user`].
     pub autostart: Autostart,
@@ -146,7 +146,7 @@ impl Daemon {
         state.sites.clone()
     }
 
-    /// Changes `sites.toml` and builds the site list again (task M4-10b).
+    /// Changes `sites.toml` and builds the site list again.
     ///
     /// On a blocking thread, one job at a time: reads the file, lets `edit`
     /// change it, writes it back atomically if `edit` returns `true`, builds
@@ -223,8 +223,7 @@ impl Daemon {
         })
     }
 
-    /// The parked folders of the last build, for the folder watcher (task
-    /// M4-10d). It reports a change only when the list changes.
+    /// The parked folders of the last build, for the folder watcher. It reports a change only when the list changes.
     pub fn watch_parked(&self) -> watch::Receiver<Vec<PathBuf>> {
         self.parked.subscribe()
     }
@@ -280,7 +279,7 @@ impl Daemon {
     /// for the tasks, at most `limit` in total, or the longest
     /// [`ServiceHandle::stop_limit`] if that is longer: the processes stop
     /// side by side, and each gets the time its own stop method needs.
-    /// PostgreSQL's SIGINT and SIGQUIT take up to 20 s (task M6-03). Tasks
+    /// PostgreSQL's SIGINT and SIGQUIT take up to 20 s. Tasks
     /// still running then are aborted, which drops their `Child`.
     pub async fn stop_procs(&self, limit: Duration) {
         let procs = std::mem::take(&mut *self.lock_procs());
@@ -391,7 +390,7 @@ mod tests {
         assert!(cancel.is_cancelled());
     }
 
-    /// `server::run` sweeps `procs` again after its tasks end (task M5-16): a
+    /// `server::run` sweeps `procs` again after its tasks end: a
     /// process added after the first sweep is told to stop by `add_proc`,
     /// and the second sweep waits until it has.
     #[tokio::test]

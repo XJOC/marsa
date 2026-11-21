@@ -1,7 +1,7 @@
 //! `marsa sites`, `marsa park`, `marsa link`, `marsa secure`, and
-//! `marsa unsecure`: the sites the daemon serves. Task M4-10c. Then `marsa
+//! `marsa unsecure`: the sites the daemon serves. Then `marsa
 //! unlink`, `marsa forget`, `marsa isolate`, `marsa unisolate`, and `marsa
-//! open` (task M5-09).
+//! open`.
 //!
 //! Each command is one call to `marsad` (the routes in
 //! `daemon/sites_api.rs`), started if needed. A folder the user names is made
@@ -22,9 +22,11 @@ use marsa_core::runtimes::Runtime;
 use marsa_core::sites;
 use marsa_core::types::{HostsStatus, SetupReport, Site, SiteList, SitePatch};
 
-use super::daemon::{ClientFailure, connect, failure};
+use super::Failure;
+use super::daemon::{connect, failure};
 use super::setup;
 use super::strings::{self, Details};
+use super::text::printable;
 
 /// The sites commands. `bin/marsa.rs` flattens them into the top level, so
 /// each is a command of its own: `marsa park`, not `marsa sites park`.
@@ -40,7 +42,7 @@ pub enum SitesCommand {
     },
     /// Serve one folder as a site.
     Link {
-        /// The site name, as in https://<name>.test. Default: made from the
+        /// The site name, as in `https://<name>.test`. Default: made from the
         /// folder name.
         name: Option<String>,
         /// The folder. Default: the current folder.
@@ -113,7 +115,7 @@ impl Action {
     pub fn new(
         command: &SitesCommand,
         cwd: impl FnOnce() -> io::Result<PathBuf>,
-    ) -> Result<Self, ClientFailure> {
+    ) -> Result<Self, Failure> {
         Ok(match command {
             SitesCommand::Sites => Action::List,
             SitesCommand::Park { dir } => Action::Park {
@@ -193,7 +195,7 @@ impl Action {
         &self,
         list: &SiteList,
         open: impl FnOnce(&str) -> Result<(), OpenError>,
-    ) -> Result<String, ClientFailure> {
+    ) -> Result<String, Failure> {
         let Action::Open { name } = self else {
             return Ok(self.render(list));
         };
@@ -262,7 +264,7 @@ impl Action {
     /// The text and code the user sees for `err`. A site code names the site
     /// and the folder of this action, and a `config_*` code names
     /// `sites.toml`, the file the daemon could not use.
-    pub fn failure(&self, err: &ClientError, data_dir: &Path) -> ClientFailure {
+    pub fn failure(&self, err: &ClientError, data_dir: &Path) -> Failure {
         self.failure_with(err, data_dir, None)
     }
 
@@ -270,12 +272,7 @@ impl Action {
     /// `site_is_parked` then names the parked folder of the site, and
     /// `folder_not_parked` the parked folders. A version code of `marsa
     /// isolate` names the version.
-    pub fn failure_with(
-        &self,
-        err: &ClientError,
-        data_dir: &Path,
-        list: Option<&SiteList>,
-    ) -> ClientFailure {
+    fn failure_with(&self, err: &ClientError, data_dir: &Path, list: Option<&SiteList>) -> Failure {
         let mut failure = failure(err, data_dir, None);
         let (site, folder) = match self {
             Action::List => (None, None),
@@ -297,7 +294,7 @@ impl Action {
             .zip(site)
             .and_then(|(list, name)| parked_folder(list, name));
         let sites_toml = ConfigPaths::in_dir(data_dir).sites;
-        let path = match failure.code.as_str() {
+        let path = match &*failure.code {
             codes::CONFIG_READ | codes::CONFIG_INVALID | codes::CONFIG_WRITE => {
                 Some(sites_toml.as_path())
             }
@@ -328,26 +325,20 @@ fn parked_folder(list: &SiteList, name: &str) -> Option<PathBuf> {
 
 /// Starts the daemon if needed, sends the command, and prints the answer.
 /// Exit code 1 if the arguments or the call fail.
-pub async fn run(command: &SitesCommand, data_dir: &Path) -> ExitCode {
-    let action = match Action::new(command, std::env::current_dir) {
-        Ok(action) => action,
-        Err(failure) => return failure.report(),
-    };
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+pub async fn run(command: &SitesCommand, data_dir: &Path) -> Result<ExitCode, Failure> {
+    let action = Action::new(command, std::env::current_dir)?;
+    let client = connect(data_dir).await?;
     match action.send(&client).await {
         Ok(list) => match action.finish(&list, open_url) {
             Ok(text) => {
                 print!("{text}");
-                if action.adds_sites() {
+                Ok(if action.adds_sites() {
                     add_to_hosts(&client, data_dir).await
                 } else {
                     ExitCode::SUCCESS
-                }
+                })
             }
-            Err(failure) => failure.report(),
+            Err(failure) => Err(failure),
         },
         Err(err) => {
             // These answers name no folder; the site list does.
@@ -355,12 +346,12 @@ pub async fn run(command: &SitesCommand, data_dir: &Path) -> ExitCode {
                 codes::SITE_IS_PARKED | codes::FOLDER_NOT_PARKED => client.sites().await.ok(),
                 _ => None,
             };
-            action.failure_with(&err, data_dir, list.as_ref()).report()
+            Err(action.failure_with(&err, data_dir, list.as_ref()))
         }
     }
 }
 
-/// After `park` and `link` (task M4-18k2): where `marsa setup` put this
+/// After `park` and `link`: where `marsa setup` put this
 /// data folder's names in the hosts file, the sites the file lacks go in
 /// now, behind the password prompt. The user's own command asks for it; the
 /// daemon never does by itself. Before the first setup nothing happens:
@@ -396,7 +387,7 @@ async fn add_to_hosts(client: &DaemonClient, data_dir: &Path) -> ExitCode {
 
 /// From the answer of `GET /v1/hosts`: the line before the sync, or `None`
 /// for no sync. `Err` is a warning for stderr: the check failed.
-fn hosts_to_add(status: Result<HostsStatus, ClientFailure>) -> Result<Option<String>, String> {
+fn hosts_to_add(status: Result<HostsStatus, Failure>) -> Result<Option<String>, String> {
     match status {
         // A daemon of an older build, with no such route.
         Err(failure) if failure.code == codes::NOT_FOUND => Ok(None),
@@ -418,7 +409,7 @@ struct Added {
     ok: bool,
 }
 
-fn hosts_added(answer: Result<SetupReport, ClientFailure>, data_dir: &Path) -> Added {
+fn hosts_added(answer: Result<SetupReport, Failure>, data_dir: &Path) -> Added {
     let report = match answer {
         Err(failure) => {
             return Added {
@@ -468,7 +459,7 @@ fn hosts_added(answer: Result<SetupReport, ClientFailure>, data_dir: &Path) -> A
 pub fn folder(
     dir: Option<&Path>,
     cwd: impl FnOnce() -> io::Result<PathBuf>,
-) -> Result<PathBuf, ClientFailure> {
+) -> Result<PathBuf, Failure> {
     let dir = dir.unwrap_or(Path::new(""));
     if dir.is_absolute() {
         return Ok(dir.components().collect());
@@ -483,7 +474,7 @@ pub fn folder(
 /// `dir` against `cwd`, without reading the disk. `.` parts and doubled
 /// separators go; `..` stays, because only the disk knows where it leads
 /// through a link.
-pub fn absolute_in(dir: &Path, cwd: &Path) -> PathBuf {
+fn absolute_in(dir: &Path, cwd: &Path) -> PathBuf {
     cwd.join(dir).components().collect()
 }
 
@@ -494,7 +485,7 @@ pub fn absolute_in(dir: &Path, cwd: &Path) -> PathBuf {
 ///
 /// `site_name_invalid`, with a hint to pass a name when it came from the
 /// folder.
-pub fn link_name(name: Option<&str>, folder: &Path) -> Result<String, ClientFailure> {
+fn link_name(name: Option<&str>, folder: &Path) -> Result<String, Failure> {
     if let Some(name) = name {
         return checked(name);
     }
@@ -514,7 +505,7 @@ pub fn link_name(name: Option<&str>, folder: &Path) -> Result<String, ClientFail
 
 /// `name` if it is a valid site name. No site has any other name, so the
 /// daemon need not be asked.
-fn checked(name: &str) -> Result<String, ClientFailure> {
+fn checked(name: &str) -> Result<String, Failure> {
     match sites::validate_name(name) {
         Ok(()) => Ok(name.to_owned()),
         Err(err) => {
@@ -529,9 +520,9 @@ fn checked(name: &str) -> Result<String, ClientFailure> {
 }
 
 /// A failure found before any call.
-fn local(code: &str, details: &Details<'_>) -> ClientFailure {
-    ClientFailure {
-        code: code.to_owned(),
+fn local(code: &str, details: &Details<'_>) -> Failure {
+    Failure {
+        code: code.to_owned().into(),
         message: strings::message(code, details),
     }
 }
@@ -603,12 +594,6 @@ fn table(sites: &[Site]) -> String {
 /// A path, safe to print.
 fn shown(path: &Path) -> String {
     printable(&path.to_string_lossy())
-}
-
-/// Text from the daemon or a folder name, safe to print: no control
-/// characters, which could move the cursor.
-pub(super) fn printable(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control()).collect()
 }
 
 #[cfg(test)]
@@ -790,7 +775,7 @@ mod tests {
     fn a_name_that_is_not_valid_is_refused_before_any_call() {
         let err = link_name(Some("Shop"), &base()).unwrap_err();
         assert_eq!(
-            (err.code.as_str(), err.message.as_str()),
+            (&*err.code, err.message.as_str()),
             (
                 "site_name_invalid",
                 "\"Shop\" is not a valid site name. Use 1 to 63 of a-z, 0-9, and -, with no - \
@@ -965,7 +950,7 @@ mod tests {
         );
     }
 
-    // M5-09: `unlink`, `forget`, `isolate`, `unisolate`, and `open`.
+    // `unlink`, `forget`, `isolate`, `unisolate`, and `open`.
 
     #[test]
     fn the_new_commands_parse_their_arguments() {
@@ -1223,14 +1208,14 @@ mod tests {
         );
     }
 
-    fn client_failure(code: &str) -> ClientFailure {
-        ClientFailure {
-            code: code.to_owned(),
+    fn client_failure(code: &str) -> Failure {
+        Failure {
+            code: code.to_owned().into(),
             message: "x".to_owned(),
         }
     }
 
-    /// Task M4-18k2: whether `park` and `link` sync, from `GET /v1/hosts`.
+    /// Whether `park` and `link` sync, from `GET /v1/hosts`.
     #[test]
     fn park_and_link_sync_only_names_the_block_lacks() {
         let used = |missing: &[&str]| HostsStatus {
@@ -1247,7 +1232,7 @@ mod tests {
         assert!(warning.ends_with("[internal_error]"), "{warning}");
     }
 
-    /// Task M4-18k2: what `park` and `link` print after the sync, and
+    /// What `park` and `link` print after the sync, and
     /// whether the names went in.
     #[test]
     fn park_and_link_say_when_the_names_did_not_go_in() {

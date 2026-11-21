@@ -1,11 +1,11 @@
-//! The runtimes routes. Task M3-12.
+//! The runtimes routes.
 //!
 //! | Route | Answer |
 //! | --- | --- |
 //! | `GET /v1/runtimes` | `RuntimeList`: the installed versions and the default of each runtime |
 //! | `POST /v1/runtimes/{tool}/install` | 202 `InstallAccepted`, then `install` events on `/v1/events` |
-//! | `PUT /v1/runtimes/{tool}/default` | `DefaultVersion`: the new default of PHP or Node (task M5-01) |
-//! | `DELETE /v1/runtimes/{tool}/{version}` | `Uninstalled`: the version whose folder is gone (task M5-07) |
+//! | `PUT /v1/runtimes/{tool}/default` | `DefaultVersion`: the new default of PHP or Node |
+//! | `DELETE /v1/runtimes/{tool}/{version}` | `Uninstalled`: the version whose folder is gone |
 //!
 //! The daemon runs the installer (`marsa_core::installer::install`) in a task
 //! of its own and sends each `InstallEvent` on the event bus. The last event
@@ -38,13 +38,13 @@
 //!
 //! The default of the only installed PHP or Node version has no other
 //! version to pick, so it does not keep the version: it is cleared from
-//! `global.toml` with the uninstall (task M5-19). The Laravel and PHP sites
+//! `global.toml` with the uninstall. The Laravel and PHP sites
 //! that run the last PHP would have no PHP after it, whatever picked it for
 //! them (the default, a version file, `composer.json`), so they still keep
 //! it: 409 `sites_lose_php`, with their names. That holds with no default
-//! too (task M5-22).
+//! too.
 //!
-//! PostgreSQL (task M6-03): after an install, `databases::after_install`
+//! PostgreSQL: after an install, `databases::after_install`
 //! sets `[postgres] default` (the first install also turns it on and starts
 //! it: ADR 0023, the install is the user's request), in the background and
 //! in PostgreSQL's turn. A later install of another line never moves a user
@@ -109,7 +109,7 @@ pub type InstallFuture<'a> =
 /// Runs one install. The daemon uses [`ProductionInstall`]. Tests put a fake
 /// in `Daemon::installs.runner`, as `tests/services.rs` puts a fake Caddy in
 /// `Daemon::caddy.spec`: the real installer needs the network and the
-/// manifest key, and neither can be swapped (task M2-05).
+/// manifest key, and neither can be swapped.
 pub trait RunInstall: Send + Sync {
     fn run<'a>(
         &'a self,
@@ -157,7 +157,7 @@ impl Installs {
         }
     }
 
-    /// Whether an install, or an uninstall (task M5-07), runs now.
+    /// Whether an install, or an uninstall, runs now.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
@@ -355,7 +355,7 @@ async fn run(started: Started, runtime: Runtime, body: InstallRequest) {
         Ok(done) => {
             tracing::info!(id, version = %done.version, already = done.already, "install done");
             // The first PHP or Node becomes the default, so a site or a
-            // folder with no version file works at once (task M4-22).
+            // folder with no version file works at once.
             let worker = Arc::clone(&daemon);
             let version = done.version.clone();
             let job = tokio::task::spawn_blocking(move || {
@@ -378,7 +378,7 @@ async fn run(started: Started, runtime: Runtime, body: InstallRequest) {
                 Err(err) => tracing::warn!(id, error = %err, "cannot set the default version"),
             }
             // Before `done`, so a client that reads it lists the sites with
-            // their new PHP (task M4-10d). `rebuild_sites` logs its errors.
+            // their new PHP. `rebuild_sites` logs its errors.
             if runtime == Runtime::Php {
                 let _ = daemon.rebuild_sites().await;
             }
@@ -552,7 +552,7 @@ async fn set_default(
     // For the window's runtimes list, also when the CLI made the change.
     daemon.publish(Event::DefaultChanged(answer.clone()));
     // The sites that follow the default now get the new PHP, and
-    // `sites_changed` makes Caddy and php-fpm follow (task M4-11). Before
+    // `sites_changed` makes Caddy and php-fpm follow. Before
     // the answer, so a client that reads it then lists the new versions.
     // Node is in no site yet; then the list stays the same and nothing is
     // sent. `rebuild_sites` logs its errors; the default is saved either way.
@@ -725,7 +725,7 @@ async fn remove_version(
 
 /// Picks the installed version `text` names, checks that nothing uses it,
 /// and moves its folder aside. Also returns the default it cleared, if any:
-/// the default of the only installed version goes with it (task M5-19). A
+/// the default of the only installed version goes with it. A
 /// refusal changes nothing on disk. `running` has the programs that run
 /// now. The caller holds [`Daemon::lock_global`].
 fn retire_unused(
@@ -783,7 +783,7 @@ fn retire_unused(
     // The default of the only installed version has no other version to
     // pick, so it goes with this one. The PHP sites that run this last PHP
     // would have none after it, so they keep the version instead, whether
-    // the default picks it or not (task M5-22).
+    // the default picks it or not.
     let last = installed.len() == 1;
     let clear = match default_tool(runtime) {
         Some(tool) if last => used.default.take().map(|default| (tool, default)),

@@ -24,7 +24,7 @@ use marsa_core::types::LogStream;
 
 use super::sites::message;
 use crate::logline::{self, LogLevel};
-use crate::model::{Action, LOG_SERVICE, LogRow, LogSource, Model, Route};
+use crate::model::{self, Action, LOG_SERVICE, LogRow, LogSource, Model, Route};
 use crate::strings;
 use crate::theme::{Direction, Section, Theme, UNIT};
 use crate::widgets::log_entry::width_for;
@@ -151,7 +151,7 @@ pub fn view<'a>(model: &'a Model, source: &LogSource) -> LogsView<'a> {
         .iter()
         .map(|id| SourceView {
             source: LogSource::of(id),
-            name: strings::service_name(id),
+            name: model::service_name(id),
         })
         .collect();
     LogsView {
@@ -171,7 +171,7 @@ fn body<'a>(model: &'a Model, source: &LogSource) -> Body<'a> {
     let rows = model.log_rows(source.id());
     if rows.is_empty() {
         return if model.is_connected() {
-            Body::Empty(strings::service_name(source.id()))
+            Body::Empty(model::service_name(source.id()))
         } else {
             Body::Offline
         };

@@ -1,6 +1,6 @@
 //! `marsa`: the command-line client. Every command that changes state, and
-//! every command that reads it, is a call to `marsad` (task M3-12 moved
-//! `marsa install` there).
+//! every command that reads it, is a call to `marsad`, `marsa install`
+//! included.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -86,8 +86,8 @@ enum Command {
     Xdebug(XdebugArgs),
 }
 
-/// `marsa uninstall`: one installed version (`<TOOL> <VERSION>`, task M5-07),
-/// or Marsa itself (`--all`, task M5-13). Exactly one of the two: `--all`
+/// `marsa uninstall`: one installed version (`<TOOL> <VERSION>`),
+/// or Marsa itself (`--all`). Exactly one of the two: `--all`
 /// is required unless a tool is given, and refused with one. `--yes` and
 /// `--delete-data` belong to `--all`.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -129,7 +129,8 @@ async fn main() -> ExitCode {
         Ok(dir) => dir,
         Err(failure) => return failure.report(),
     };
-    match &cli.command {
+    // The one place a command's failure is printed.
+    let result = match &cli.command {
         Command::Install(args) => install::run(args, &data_dir).await,
         Command::Runtimes(args) => runtimes::run(args, &data_dir).await,
         Command::Use(args) => default_version::run(args, &data_dir).await,
@@ -154,7 +155,8 @@ async fn main() -> ExitCode {
         Command::Autostart(args) => autostart::run(args, &data_dir).await,
         Command::Doctor => doctor::run(&data_dir).await,
         Command::Xdebug(args) => xdebug::run(args, &data_dir).await,
-    }
+    };
+    result.unwrap_or_else(|failure| failure.report())
 }
 
 #[cfg(test)]
@@ -453,7 +455,7 @@ mod tests {
 
     #[test]
     fn uninstall_takes_a_version_or_all_but_not_both() {
-        // `--all`, with its own flags: task M5-13.
+        // `--all`, with its own flags.
         for (args, yes, delete_data) in [
             (&["uninstall", "--all"][..], false, false),
             (&["uninstall", "--all", "--yes"], true, false),
@@ -481,7 +483,7 @@ mod tests {
                 other => panic!("not uninstall: {other:?}"),
             }
         }
-        // A tool and a version: task M5-07, with its own arguments.
+        // A tool and a version, with its own arguments.
         for (args, tool, version) in [
             (&["uninstall", "php", "8.4"][..], Tool::Php, "8.4"),
             (&["uninstall", "node", "22.11.0"], Tool::Node, "22.11.0"),

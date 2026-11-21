@@ -1,5 +1,5 @@
 //! `marsa daemon start|stop|status`, and what every command that talks to
-//! `marsad` shares: [`connect`] and [`ClientFailure`]. Task M3-09.
+//! `marsad` shares: [`connect`] and [`failure`].
 //!
 //! The calls are in `marsa_core::client`; this file prints their result.
 //! Nothing here prints the token: only the port and the PID leave the client.
@@ -14,7 +14,13 @@ use marsa_core::client::{self, ClientError, DaemonClient};
 use marsa_core::platform::daemon_file::daemon_file_path;
 use marsa_core::runtimes::RuntimesDir;
 
+use super::Failure;
 use super::strings::{self, Details};
+use super::text::clipped;
+
+/// The longest daemon version shown. `status` does not check the version, so
+/// the daemon may be another build, and its text may be long.
+const VERSION_MAX: usize = 64;
 
 /// The commands of `marsa daemon`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::Subcommand)]
@@ -29,36 +35,31 @@ pub enum DaemonCommand {
 
 /// Runs `command`: the result on stdout, an error on stderr. Exit code 0 also
 /// when `stop` or `status` finds no daemon.
-pub async fn run(command: DaemonCommand, data_dir: &Path) -> ExitCode {
-    let result = match command {
+pub async fn run(command: DaemonCommand, data_dir: &Path) -> Result<ExitCode, Failure> {
+    let text = match command {
         DaemonCommand::Start => start(data_dir).await,
         DaemonCommand::Stop => stop(data_dir).await,
         DaemonCommand::Status => status(data_dir).await,
-    };
-    match result {
-        Ok(text) => {
-            println!("{text}");
-            ExitCode::SUCCESS
-        }
-        Err(failure) => failure.report(),
-    }
+    }?;
+    println!("{text}");
+    Ok(ExitCode::SUCCESS)
 }
 
-async fn start(data_dir: &Path) -> Result<String, ClientFailure> {
+async fn start(data_dir: &Path) -> Result<String, Failure> {
     let client = connect(data_dir).await?;
     let health = client
         .health()
         .await
         .map_err(|err| failure(&err, data_dir, None))?;
     Ok(strings::daemon_running(
-        &clean(&health.app_version),
+        &clipped(&health.app_version, VERSION_MAX),
         health.pid,
         client.port(),
     ))
 }
 
 /// `POST /v1/shutdown`, then waits until the daemon has exited.
-async fn stop(data_dir: &Path) -> Result<String, ClientFailure> {
+async fn stop(data_dir: &Path) -> Result<String, Failure> {
     match client::stop_daemon(data_dir).await {
         Ok(true) => Ok(strings::DAEMON_STOPPED.to_owned()),
         Ok(false) => Ok(strings::DAEMON_NOT_RUNNING.to_owned()),
@@ -68,7 +69,7 @@ async fn stop(data_dir: &Path) -> Result<String, ClientFailure> {
 
 /// `GET /v1/health` on the daemon that holds the lock, if one does. A daemon
 /// that is starting or stopping may show as not running.
-async fn status(data_dir: &Path) -> Result<String, ClientFailure> {
+async fn status(data_dir: &Path) -> Result<String, Failure> {
     let health = async {
         let client = DaemonClient::connect(data_dir)?;
         let health = client.health().await?;
@@ -76,7 +77,7 @@ async fn status(data_dir: &Path) -> Result<String, ClientFailure> {
     };
     match health.await {
         Ok((port, health)) => Ok(strings::daemon_running(
-            &clean(&health.app_version),
+            &clipped(&health.app_version, VERSION_MAX),
             health.pid,
             port,
         )),
@@ -85,39 +86,19 @@ async fn status(data_dir: &Path) -> Result<String, ClientFailure> {
     }
 }
 
-/// The daemon's version, safe to print: without control characters, which
-/// could move the cursor, and short. `status` does not check the version, so
-/// the daemon may be another build.
-fn clean(version: &str) -> String {
-    version
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(64)
-        .collect()
-}
-
 /// [`client::ensure_running`]: a client for a daemon of this build, started
 /// if needed with `marsad` from the folder of this program.
 ///
 /// # Errors
 ///
-/// The [`ClientFailure`] of the [`ClientError`], ready to print.
-pub async fn connect(data_dir: &Path) -> Result<DaemonClient, ClientFailure> {
+/// The [`Failure`] of the [`ClientError`], ready to print.
+pub async fn connect(data_dir: &Path) -> Result<DaemonClient, Failure> {
     client::ensure_running(data_dir)
         .await
         .map_err(|err| failure(&err, data_dir, None))
 }
 
-/// Why a command that talks to the daemon failed, ready to print. Like
-/// [`super::Failure`], but the code is owned: the daemon may send one this
-/// build does not know, and the line still shows it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClientFailure {
-    pub code: String,
-    pub message: String,
-}
-
-impl ClientFailure {
+impl Failure {
     /// The text from [`strings`] for `code`. `service` is the service id the
     /// command is about, if any.
     pub fn new(code: &str, data_dir: &Path, service: Option<&str>) -> Self {
@@ -128,27 +109,15 @@ impl ClientFailure {
             ..Details::default()
         };
         Self {
-            code: code.to_owned(),
+            code: code.to_owned().into(),
             message: strings::message(code, &details),
         }
-    }
-
-    /// The same form as [`super::Failure::line`]: `marsa: <message> [<code>]`.
-    pub fn line(&self) -> String {
-        format!("marsa: {} [{}]", self.message, self.code)
-    }
-
-    /// Prints [`ClientFailure::line`] to stderr and gives the exit code of a
-    /// failed command.
-    pub fn report(&self) -> ExitCode {
-        eprintln!("{}", self.line());
-        ExitCode::FAILURE
     }
 }
 
 /// The text and code the user sees for `err`. Its `Display` text, with each
 /// cause, goes to the log only (`MARSA_LOG=debug`).
-pub fn failure(err: &ClientError, data_dir: &Path, service: Option<&str>) -> ClientFailure {
+pub fn failure(err: &ClientError, data_dir: &Path, service: Option<&str>) -> Failure {
     let mut log = err.to_string();
     let mut cause = err.source();
     while let Some(current) = cause {
@@ -157,7 +126,26 @@ pub fn failure(err: &ClientError, data_dir: &Path, service: Option<&str>) -> Cli
         cause = current.source();
     }
     tracing::debug!(code = err.code(), error = %log, "the daemon call failed");
-    ClientFailure::new(err.code(), data_dir, service)
+    Failure::new(err.code(), data_dir, service)
+}
+
+/// [`failure`] for a command whose answers with one of `codes` name `path`:
+/// the file the daemon could not use.
+pub fn failure_naming(
+    err: &ClientError,
+    data_dir: &Path,
+    codes: &[&str],
+    path: Option<&Path>,
+) -> Failure {
+    let mut failure = failure(err, data_dir, None);
+    if codes.contains(&failure.code.as_ref()) {
+        let details = Details {
+            path,
+            ..Details::default()
+        };
+        failure.message = strings::message(&failure.code, &details);
+    }
+    failure
 }
 
 /// The file a message names, for the codes that name one.
@@ -183,7 +171,7 @@ mod tests {
     #[test]
     fn a_start_failure_names_the_daemon_log() {
         let data = Path::new("/data");
-        let failure = ClientFailure::new("daemon_start_failed", data, None);
+        let failure = Failure::new("daemon_start_failed", data, None);
         let log = data.join("logs").join("marsad.log");
         assert!(
             failure.message.ends_with(&log.display().to_string()),
@@ -195,7 +183,7 @@ mod tests {
     #[test]
     fn no_caddy_names_its_folder_and_the_install_command() {
         let data = Path::new("/data");
-        let failure = ClientFailure::new("caddy_not_installed", data, Some("caddy"));
+        let failure = Failure::new("caddy_not_installed", data, Some("caddy"));
         let caddy = data.join("runtimes").join("caddy");
         assert_eq!(
             failure.line(),
@@ -209,7 +197,7 @@ mod tests {
 
     #[test]
     fn an_unknown_daemon_code_keeps_its_code() {
-        let failure = ClientFailure::new("newer_daemon_code", Path::new("/data"), None);
+        let failure = Failure::new("newer_daemon_code", Path::new("/data"), None);
         assert_eq!(
             failure.line(),
             "marsa: Something went wrong. Run again with MARSA_LOG=debug for details. \
@@ -230,12 +218,5 @@ mod tests {
             "marsa: There is no service named \"php\". Run \"marsa services\" to see them. \
              [service_not_found]"
         );
-    }
-
-    #[test]
-    fn a_version_from_the_daemon_is_cleaned() {
-        assert_eq!(clean("0.1.0"), "0.1.0");
-        assert_eq!(clean("0.1\n\u{1b}[2J.0"), "0.1[2J.0");
-        assert_eq!(clean(&"9".repeat(100)).len(), 64);
     }
 }

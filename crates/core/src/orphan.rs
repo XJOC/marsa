@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::caddy::Dial;
+use crate::ps::{StartTime, started_order};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PidfileState {
@@ -202,9 +203,9 @@ pub struct PidRecord {
     /// after the spawn. On macOS `ps` shows `argv[0]`, which a process sets
     /// itself, so the daemon checks the real executable before each signal.
     pub exe: PathBuf,
-    /// The start time as the OS reported it, compared as text. Without it a
-    /// reused pid that runs the same program would pass (ADR 0009, R5e).
-    pub started: String,
+    /// The start time as the OS reported it. Without it a reused pid that
+    /// runs the same program would pass (ADR 0009, R5e).
+    pub started: StartTime,
 }
 
 /// What the OS says about a pid right now.
@@ -213,7 +214,7 @@ pub enum Liveness {
     /// No such process, or a zombie.
     Gone,
     /// `exe` is the path it was started with (`argv[0]` on macOS).
-    Alive { exe: PathBuf, started: String },
+    Alive { exe: PathBuf, started: StartTime },
     /// The OS cannot tell: no permission, a failed tool, or an OS where this
     /// is not supported. Never ours.
     Unknown,
@@ -236,85 +237,22 @@ pub fn classify_pidfile(record: &PidRecord, accepted: &[PathBuf], now: &Liveness
         return PidfileState::Mismatch { pid, found };
     }
     if *started != record.started {
-        let found = format!("{found} (started {started:?}, not {:?})", record.started);
+        let found = format!(
+            "{found} (started {:?}, not {:?})",
+            started.to_string(),
+            record.started.to_string()
+        );
         return PidfileState::Mismatch { pid, found };
     }
     PidfileState::Ours { pid }
 }
 
 /// One child of a process, as the process table lists it: its pid and its
-/// start time, in the form [`Liveness::Alive`] gives.
+/// start time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildProcess {
     pub pid: u32,
-    pub started: String,
-}
-
-/// Compares two start times in the form [`Liveness::Alive`] gives: `lstart`
-/// text (`Wed Nov 4 03:31:27 2026`, macOS, always in UTC) or clock ticks
-/// since boot (Linux). `None` when they are not both of one form: then
-/// nothing can be said, and the caller fails closed.
-pub fn started_order(a: &str, b: &str) -> Option<Ordering> {
-    if let (Ok(a), Ok(b)) = (a.parse::<u64>(), b.parse::<u64>()) {
-        return Some(a.cmp(&b));
-    }
-    Some(lstart_key(a)?.cmp(&lstart_key(b)?))
-}
-
-/// `Www Mmm d HH:MM:SS YYYY` as `[year, month, day, hour, minute, second]`,
-/// which sorts in the order of time.
-fn lstart_key(text: &str) -> Option<[u32; 6]> {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let words: Vec<&str> = text.split_whitespace().collect();
-    let [_weekday, month, day, clock, year] = words.as_slice() else {
-        return None;
-    };
-    let month = MONTHS.iter().position(|name| name == month)?;
-    let month = u32::try_from(month).ok()? + 1;
-    let mut clock = clock.split(':').map(str::parse::<u32>);
-    let (Some(Ok(hour)), Some(Ok(minute)), Some(Ok(second)), None) =
-        (clock.next(), clock.next(), clock.next(), clock.next())
-    else {
-        return None;
-    };
-    Some([
-        year.parse().ok()?,
-        month,
-        day.parse().ok()?,
-        hour,
-        minute,
-        second,
-    ])
-}
-
-/// `lstart` text (`Wed Nov 4 03:31:27 2026`, macOS, read with `TZ=UTC0`) as
-/// seconds since 1970-01-01 UTC, so two start times can be told apart by a
-/// margin (task M5-21). `None` for any other form, Linux clock ticks
-/// included, and for a field out of range.
-pub fn lstart_seconds(text: &str) -> Option<i64> {
-    let [year, month, day, hour, minute, second] = lstart_key(text)?;
-    // 60: a leap second.
-    if !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
-        return None;
-    }
-    let days = days_from_civil(i64::from(year), month, day);
-    Some(days * 86_400 + i64::from(hour * 3_600 + minute * 60 + second))
-}
-
-/// Days from 1970-01-01 to `year-month-day` in the Gregorian calendar, by
-/// Howard Hinnant's `days_from_civil`. `month` is 1 to 12.
-fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    // Years start in March here, so a leap day is the last day of its year.
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year.div_euclid(400);
-    let year_of_era = year.rem_euclid(400);
-    let month_from_march = i64::from((month + 9) % 12);
-    let day_of_year = (153 * month_from_march + 2) / 5 + i64::from(day) - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    // 719 468 days from 0000-03-01 to 1970-01-01.
-    era * 146_097 + day_of_era - 719_468
+    pub started: StartTime,
 }
 
 /// Whether `now`, what the OS says about `pid`, shows a worker of the php-fpm
@@ -337,13 +275,13 @@ pub fn worker_of(
     if pid == master.pid || *exe != master.exe || !accepted.contains(exe) {
         return None;
     }
-    if started_order(started, &master.started)? == Ordering::Less {
+    if started_order(*started, master.started)? == Ordering::Less {
         return None;
     }
     Some(PidRecord {
         pid,
         exe: exe.clone(),
-        started: started.clone(),
+        started: *started,
     })
 }
 
@@ -377,70 +315,6 @@ pub fn classify_admin_replies(ours: bool, shared: bool) -> AdminState {
         (false, true) => AdminState::OtherMarsa,
         (false, false) => AdminState::Foreign,
     }
-}
-
-/// Reads one line of `ps -o stat=,lstart=,comm=` run with `LC_ALL=C` and
-/// `TZ=UTC0` (macOS): the state, five words of start time, then the start
-/// path (`argv[0]`), which may hold spaces.
-/// Text in any other shape is `Unknown`.
-pub fn parse_ps_line(text: &str) -> Liveness {
-    let mut rest = text.trim();
-    let mut words = Vec::with_capacity(6);
-    for _ in 0..6 {
-        let Some(end) = rest.find(char::is_whitespace) else {
-            return Liveness::Unknown;
-        };
-        words.push(&rest[..end]);
-        rest = rest[end..].trim_start();
-    }
-    if words[0].starts_with('Z') {
-        return Liveness::Gone;
-    }
-    // One line only, and an absolute path.
-    if !rest.starts_with('/') || rest.contains('\n') {
-        return Liveness::Unknown;
-    }
-    Liveness::Alive {
-        exe: PathBuf::from(rest),
-        started: words[1..].join(" "),
-    }
-}
-
-/// Reads one line of `ps -o stat=,lstart=` run with `LC_ALL=C` and `TZ=UTC0`
-/// (macOS): the state letter and the start time, with single spaces as in
-/// [`parse_ps_line`]. For a process whose `argv[0]` is no path, such as
-/// php-fpm. Text in any other shape is `None`.
-pub fn parse_ps_start(text: &str) -> Option<(char, String)> {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    let [state, started @ ..] = words.as_slice() else {
-        return None;
-    };
-    if started.len() != 5 {
-        return None;
-    }
-    Some((state.chars().next()?, started.join(" ")))
-}
-
-/// Reads `ps -axo pid=,ppid=,lstart=` output run with `LC_ALL=C` and
-/// `TZ=UTC0` (macOS): the children of `ppid`, each with its start time in the
-/// form of [`parse_ps_start`]. A line in another shape is skipped: a process
-/// that cannot be read is never signalled.
-pub fn parse_ps_children(text: &str, ppid: u32) -> Vec<ChildProcess> {
-    text.lines()
-        .filter_map(|line| {
-            let words: Vec<&str> = line.split_whitespace().collect();
-            let [pid, parent, started @ ..] = words.as_slice() else {
-                return None;
-            };
-            if started.len() != 5 || parent.parse::<u32>().ok()? != ppid {
-                return None;
-            }
-            Some(ChildProcess {
-                pid: pid.parse().ok()?,
-                started: started.join(" "),
-            })
-        })
-        .collect()
 }
 
 /// What `/proc/<pid>/stat` says (Linux): the state letter, the parent, and
@@ -966,20 +840,25 @@ garbage
     // The checks that feed `decide`.
 
     const CADDY: &str = "/data/bin/caddy";
-    const STARTED: &str = "Wed Nov  4 03:31:27 2026";
+    /// `Wed Nov 4 03:31:27 2026`.
+    const STARTED: StartTime = StartTime::Utc(1_793_763_087);
+
+    fn at(text: &str) -> StartTime {
+        text.parse().expect("a start time")
+    }
 
     fn record() -> PidRecord {
         PidRecord {
             pid: 7,
             exe: PathBuf::from(CADDY),
-            started: STARTED.to_owned(),
+            started: STARTED,
         }
     }
 
-    fn alive(exe: &str, started: &str) -> Liveness {
+    fn alive(exe: &str, started: StartTime) -> Liveness {
         Liveness::Alive {
             exe: PathBuf::from(exe),
-            started: started.to_owned(),
+            started,
         }
     }
 
@@ -1004,7 +883,7 @@ garbage
 
     #[test]
     fn r5e_the_same_program_started_at_another_time_is_a_mismatch() {
-        let state = classify(&alive(CADDY, "Wed Nov  4 03:31:28 2026"));
+        let state = classify(&alive(CADDY, at("Wed Nov  4 03:31:28 2026")));
         assert!(
             matches!(state, PidfileState::Mismatch { pid: 7, .. }),
             "{state}"
@@ -1110,53 +989,6 @@ garbage
     }
 
     #[test]
-    fn ps_lines_give_the_path_with_spaces_and_the_start_time() {
-        let line = "SN   Wed Nov  4 03:31:27 2026     /Users/o/Library/Application Support/marsa/bin/caddy\n";
-        // The start time comes back with single spaces.
-        assert_eq!(
-            parse_ps_line(line),
-            alive(
-                "/Users/o/Library/Application Support/marsa/bin/caddy",
-                "Wed Nov 4 03:31:27 2026"
-            )
-        );
-        assert_eq!(
-            parse_ps_line("Z    Wed Nov  4 03:31:27 2026 /x\n"),
-            Liveness::Gone
-        );
-        for bad in [
-            "",
-            "S Wed Nov 4",
-            "S Wed Nov  4 03:31:27 2026 caddy",
-            "S a b c d e /x\n/y",
-        ] {
-            assert_eq!(parse_ps_line(bad), Liveness::Unknown, "{bad:?}");
-        }
-    }
-
-    #[test]
-    fn ps_start_lines_give_the_state_and_the_start_time() {
-        let started = "Wed Nov 4 03:31:27 2026".to_owned();
-        let line = "Ss   Wed Nov  4 03:31:27 2026\n";
-        assert_eq!(parse_ps_start(line), Some(('S', started.clone())));
-        // The same form as `parse_ps_line`, so both compare alike.
-        let full = parse_ps_line("Ss   Wed Nov  4 03:31:27 2026 /x\n");
-        assert_eq!(full, alive("/x", &started));
-        assert_eq!(
-            parse_ps_start("Z Wed Nov 4 03:31:27 2026"),
-            Some(('Z', started))
-        );
-        for bad in [
-            "",
-            "S Wed Nov 4",
-            "S Wed Nov 4 03:31:27 2026 /x",
-            "S a b c d e\nS",
-        ] {
-            assert_eq!(parse_ps_start(bad), None, "{bad:?}");
-        }
-    }
-
-    #[test]
     fn proc_stat_gives_the_state_parent_and_start_ticks_after_the_name() {
         // A name with spaces and `)` in it, as a program may choose.
         let stat = "4242 (cad dy) x) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 9 0 \
@@ -1172,123 +1004,25 @@ garbage
     }
 
     #[test]
-    fn ps_child_lines_give_the_children_of_one_parent() {
-        let table = "    1     0 Thu Jan  1 00:00:06 1970\n\
-                     4242     1 Wed Nov  4 03:31:27 2026\n\
-                     4301  4242 Wed Nov  4 03:31:27 2026\n\
-                     4302  4242 Wed Nov  4 03:31:28 2026\n\
-                     4303  4242 Wed Nov  4 03:31\n\
-                     x     4242 Wed Nov  4 03:31:28 2026\n\
-                     4304  4300 Wed Nov  4 03:31:28 2026\n";
-        let child = |pid, started: &str| ChildProcess {
-            pid,
-            started: started.to_owned(),
-        };
-        assert_eq!(
-            parse_ps_children(table, 4242),
-            [
-                child(4301, "Wed Nov 4 03:31:27 2026"),
-                child(4302, "Wed Nov 4 03:31:28 2026"),
-            ]
-        );
-        assert_eq!(
-            parse_ps_children(table, 1),
-            [child(4242, "Wed Nov 4 03:31:27 2026")]
-        );
-        assert!(parse_ps_children(table, 9999).is_empty());
-        assert!(parse_ps_children("", 1).is_empty());
-    }
-
-    #[test]
-    fn start_times_compare_as_times_in_both_forms() {
-        use Ordering::{Equal, Greater, Less};
-        let order = started_order;
-        // `lstart` text, with single or double spaces.
-        let t = "Wed Nov 4 03:31:27 2026";
-        assert_eq!(order(t, "Wed Nov  4 03:31:27 2026"), Some(Equal));
-        assert_eq!(order(t, "Wed Nov 4 03:31:28 2026"), Some(Less));
-        assert_eq!(order(t, "Wed Nov 4 03:30:59 2026"), Some(Greater));
-        assert_eq!(order(t, "Thu Nov 5 00:00:00 2026"), Some(Less));
-        assert_eq!(order(t, "Sat Oct 31 23:59:59 2026"), Some(Greater));
-        assert_eq!(order(t, "Thu Dec 4 03:31:27 2025"), Some(Greater));
-        // The weekday is not compared: `ps` derives it from the date.
-        assert_eq!(order(t, "Mon Nov 4 03:31:27 2026"), Some(Equal));
-        // Clock ticks since boot (Linux).
-        assert_eq!(order("987654", "987654"), Some(Equal));
-        assert_eq!(order("987654", "987655"), Some(Less));
-        assert_eq!(order("1000000", "987655"), Some(Greater));
-        // Mixed or broken forms say nothing.
-        for (a, b) in [
-            (t, "987654"),
-            (t, ""),
-            (t, "Wed Nov 4 03:31 2026"),
-            (t, "Wed Foo 4 03:31:27 2026"),
-            (t, "Wed Nov 4 03:31:27:00 2026"),
-            ("", ""),
-        ] {
-            assert_eq!(order(a, b), None, "{a:?} {b:?}");
-            assert_eq!(order(b, a), None, "{b:?} {a:?}");
-        }
-    }
-
-    #[test]
-    fn lstart_text_reads_as_seconds_since_1970() {
-        // The values `date -u -j -f "%Y-%m-%d %H:%M:%S" <time> +%s` gives.
-        assert_eq!(lstart_seconds("Thu Jan  1 00:00:00 1970"), Some(0));
-        assert_eq!(lstart_seconds("Thu Jan 1 00:00:06 1970"), Some(6));
-        assert_eq!(
-            lstart_seconds("Wed Nov  4 03:31:27 2026"),
-            Some(1_793_763_087)
-        );
-        assert_eq!(
-            lstart_seconds("Sat Nov 14 13:28:04 2026"),
-            Some(1_794_662_884)
-        );
-        // Across a leap day: one second apart.
-        assert_eq!(
-            lstart_seconds("Tue Feb 29 23:59:59 2028"),
-            Some(1_835_481_599)
-        );
-        assert_eq!(
-            lstart_seconds("Wed Mar  1 00:00:00 2028"),
-            Some(1_835_481_600)
-        );
-        // Other forms, and fields out of range, say nothing.
-        for bad in [
-            "",
-            "987654",
-            "Wed Nov 4 03:31 2026",
-            "Wed Foo 4 03:31:27 2026",
-            "Wed Nov 0 03:31:27 2026",
-            "Wed Nov 32 03:31:27 2026",
-            "Wed Nov 4 24:00:00 2026",
-            "Wed Nov 4 03:60:00 2026",
-            "Wed Nov 4 03:31:61 2026",
-        ] {
-            assert_eq!(lstart_seconds(bad), None, "{bad:?}");
-        }
-    }
-
-    #[test]
     fn a_worker_runs_the_masters_executable_and_started_no_earlier() {
         let master = PidRecord {
             pid: 4242,
             exe: PathBuf::from("/data/runtimes/php/8.4.3/bin/php-fpm"),
-            started: "Wed Nov 4 03:31:27 2026".to_owned(),
+            started: at("Wed Nov 4 03:31:27 2026"),
         };
         let accepted = [
             master.exe.clone(),
             PathBuf::from("/data/runtimes/php/8.3.1/bin/php-fpm"),
         ];
         let fpm = "/data/runtimes/php/8.4.3/bin/php-fpm";
-        let same = "Wed Nov 4 03:31:27 2026";
-        let later = "Wed Nov 4 03:31:28 2026";
+        let same = at("Wed Nov 4 03:31:27 2026");
+        let later = at("Wed Nov 4 03:31:28 2026");
         for started in [same, later] {
             let now = alive(fpm, started);
             let want = PidRecord {
                 pid: 4301,
                 exe: master.exe.clone(),
-                started: started.to_owned(),
+                started,
             };
             assert_eq!(worker_of(&master, &accepted, 4301, &now), Some(want));
         }
@@ -1304,10 +1038,12 @@ garbage
             ),
             (
                 "earlier than the master",
-                alive(fpm, "Wed Nov 4 03:31:26 2026"),
+                alive(fpm, at("Wed Nov 4 03:31:26 2026")),
             ),
-            ("a start time of another form", alive(fpm, "987654")),
-            ("a start time that cannot be read", alive(fpm, "")),
+            (
+                "a start time of another form",
+                alive(fpm, StartTime::Ticks(987_654)),
+            ),
             ("gone", Liveness::Gone),
             ("unknown", Liveness::Unknown),
         ];

@@ -328,6 +328,18 @@ pub enum StepState {
     NotChecked,
 }
 
+impl StepState {
+    /// The word a screen reader says for the step.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Working => strings::STEP_WORKING,
+            Self::Broken => strings::STEP_BROKEN,
+            Self::Unreached => strings::STEP_UNREACHED,
+            Self::NotChecked => strings::STEP_NOT_CHECKED,
+        }
+    }
+}
+
 /// How a step of the path is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StepLook {
@@ -459,7 +471,7 @@ impl Widget for RequestPath<'_> {
                 vec2(width, height),
             );
             let item = ui.interact(pill, group.id.with(index), Sense::hover());
-            let name = strings::path_step_label(step.label, step.state);
+            let name = strings::path_step_label(step.label, step.state.word());
             item.widget_info(|| WidgetInfo::labeled(Role::ListItem, true, &name));
             if !ui.is_rect_visible(pill) {
                 continue;
@@ -517,6 +529,18 @@ pub enum PillState {
 }
 
 impl PillState {
+    /// The word of the pill, for the eye and for a screen reader.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Running => strings::PILL_RUNNING,
+            Self::Waiting => strings::PILL_WAITING,
+            Self::Stopped => strings::PILL_STOPPED,
+            Self::Starting => strings::PILL_STARTING,
+            Self::Stopping => strings::PILL_STOPPING,
+            Self::Failed => strings::PILL_FAILED,
+        }
+    }
+
     pub const ALL: [Self; 6] = [
         Self::Running,
         Self::Waiting,
@@ -599,7 +623,7 @@ impl Widget for StatePill {
     fn ui(self, ui: &mut Ui) -> Response {
         let theme = Theme::of(ui.ctx());
         let direction = Direction::CURRENT;
-        let word = strings::pill_state_word(self.state);
+        let word = self.state.word();
         let token = TextToken {
             size: theme.text.body_sm.size,
             face: Face::Medium,
@@ -771,7 +795,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            STEPS.map(|step| strings::path_step_label(step.label, step.state)),
+            STEPS.map(|step| strings::path_step_label(step.label, step.state.word())),
             [
                 "DNS, working",
                 "Caddy, not working",
@@ -786,7 +810,7 @@ mod tests {
         let group = tree.node_with_label(strings::REQUEST_PATH).expect("group");
         assert_eq!(group.role(), egui::Role::List);
         for step in STEPS {
-            let name = strings::path_step_label(step.label, step.state);
+            let name = strings::path_step_label(step.label, step.state.word());
             let item = tree.node_with_label(&name).expect("a step");
             assert_eq!(item.role(), egui::Role::ListItem);
         }
@@ -898,7 +922,7 @@ mod tests {
 
     #[test]
     fn the_words_of_the_pill_states_are_in_strings() {
-        let words = PillState::ALL.map(strings::pill_state_word);
+        let words = PillState::ALL.map(PillState::word);
         assert_eq!(
             words,
             [

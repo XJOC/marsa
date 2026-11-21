@@ -50,7 +50,7 @@ pub struct CaddyManager {
     /// How long each step of an orphan's stop waits.
     pub ladder: Ladder,
     /// The program of the last start, so an uninstall never deletes the
-    /// Caddy that runs (task M5-07). Use [`CaddyManager::running_program`].
+    /// Caddy that runs. Use [`CaddyManager::running_program`].
     pub started: Mutex<Option<PathBuf>>,
     /// The status and recent lines. Kept across runs, so `seq` never goes
     /// back and the lines of a failed run stay readable.
@@ -157,7 +157,7 @@ impl CaddyManager {
     /// moves a running Caddy to 80 and 443, with no restart.
     ///
     /// The orphan check looks at these ports and at those of `input`
-    /// ([`CaddyManager::orphans`]): an orphan may have started before setup.
+    /// (`CaddyManager::orphans`): an orphan may have started before setup.
     pub fn ports(&self) -> CaddyInput {
         if (self.low_ports)() {
             self.input.on_low_ports()
@@ -168,7 +168,7 @@ impl CaddyManager {
 
     /// Sends the config of the latest sites and pools again, for a change
     /// that is not in them: the ports, after setup on Linux let Caddy bind 80
-    /// and 443 (task M4-18e). See [`CaddyManager::apply`].
+    /// and 443. See [`CaddyManager::apply`].
     ///
     /// # Errors
     ///
@@ -193,7 +193,7 @@ impl CaddyManager {
 
     /// Whether there is a Caddy to run: the check `start` makes first, here
     /// without marking the status failed. Setup asks it before it starts
-    /// Caddy to make the CA (task M5-15).
+    /// Caddy to make the CA.
     pub fn installed(&self) -> bool {
         self.spec_to_run().is_ok_and(|spec| spec.program.is_file())
     }
@@ -246,8 +246,8 @@ impl CaddyManager {
 
     /// [`CaddyManager::run`], but an action that finds another one running
     /// waits up to `wait` for it to end, then runs. Waits end in the order
-    /// they began. So a `stop` sent while the daemon starts Caddy (task
-    /// M5-16) stops Caddy once that start has ended, if it ends within
+    /// they began. So a `stop` sent while the daemon starts Caddy
+    /// stops Caddy once that start has ended, if it ends within
     /// `wait`; otherwise the answer is still `service_busy`.
     ///
     /// Once the daemon begins to stop, nothing runs: the shutdown stops

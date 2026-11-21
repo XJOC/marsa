@@ -14,9 +14,9 @@
 //! file check and prompt ([`Flow`] gives each its own error codes), and the
 //! same flag.
 //!
-//! Each job has its own file: [`ca`] (the root certificate), [`ports`] (who
-//! holds 80 and 443), [`helper`] and [`osascript`] (the administrator
-//! prompt), [`steps`] (what each system runs), [`runner`] (every program
+//! Each job has its own file: `ca` (the root certificate), `ports` (who
+//! holds 80 and 443), `helper` and `osascript` (the administrator
+//! prompt), `steps` (what each system runs), `runner` (every program
 //! goes through it).
 
 mod ca;
@@ -72,7 +72,7 @@ pub use marsa_core::platform::runner::{RealRunner, RunOutput, Runner};
 /// The longest a setup takes, when every step runs to its limit: Caddy's
 /// start and its CA root at [`CA_WAIT`], `netstat`, [`MAX_PS`] `ps` calls,
 /// and `security verify-cert` at [`CHECK_LIMIT`] each, `osascript` and
-/// `security add-trusted-cert` at [`PROMPT_LIMIT`] each, and [`PIPE_GRACE`]
+/// `security add-trusted-cert` at `PROMPT_LIMIT` each, and [`PIPE_GRACE`]
 /// after each of these programs. Linux stays under it: up to four
 /// `systemctl` checks, two `pkexec` prompts when the helper chooses the
 /// hosts file ([`linux_dns`]), and the NSS step at [`nss::NSS_BUDGET`]. A client has to wait longer:
@@ -86,7 +86,7 @@ pub const SLOWEST_SETUP: Duration = Duration::from_secs(
 );
 
 /// The routes on `setup`, for `api::router` to merge before its fallbacks:
-/// `POST /v1/setup`, and the hosts routes of [`hosts`] (task M4-18k2).
+/// `POST /v1/setup`, and the hosts routes of [`hosts`].
 /// The uninstall route gets the same [`Setup`], so the two never run at once.
 pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
     let hosts = hosts::routes(Arc::clone(&setup));
@@ -102,7 +102,7 @@ pub fn routes_with(setup: Setup) -> Router<Arc<Daemon>> {
     routes(Arc::new(setup))
 }
 
-/// Which request runs the helper: the setup, or the uninstall of task M5-13.
+/// Which request runs the helper: the setup, or the uninstall of.
 /// Each has its own error codes, `setup_*` and `uninstall_*`, and its
 /// messages name its own command. It also names the request that runs now,
 /// for the 409 of the other one.
@@ -575,7 +575,7 @@ fn skip(op: &str, code: &str) -> SetupSkip {
 
 /// Leaves `op`, the DNS step, out: the daemon's DNS server does not answer,
 /// so `.test` names would go to a port that no one, or another program,
-/// answers on (task M4-18i).
+/// answers on.
 fn dns_skipped(report: &mut SetupReport, op: &str, code: &str) {
     tracing::warn!(
         op,

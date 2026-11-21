@@ -1,5 +1,5 @@
 //! `marsa doctor`: checks what Marsa needs, one line each, and says how to
-//! fix what is wrong. Task M5-12.
+//! fix what is wrong.
 //!
 //! | Check | ✗ when |
 //! | --- | --- |
@@ -30,12 +30,12 @@
 //! `127.0.0.1:443` takes a connection. Nothing listens on 80 or 443 then, so
 //! only the `pf` redirect (ADR 0008) can answer there.
 //!
-//! On Linux the `.test` check follows the way setup took (ADR 0014, task
-//! M4-18k3). Where this data folder's setup wrote Marsa's block in
-//! `/etc/hosts` (the marker `<data>/hosts-block`), each site needs its line
-//! there; a random name never resolves on that way. Elsewhere the random
-//! name goes through systemd-resolved and the `marsa0` link. Ports and
-//! trust have no Linux check yet.
+//! On Linux the `.test` check follows the way setup took (ADR 0014).
+//! Where this data folder's setup wrote Marsa's block in `/etc/hosts` (the
+//! marker `<data>/hosts-block`), each site needs its line there; a random name
+//! never resolves on that way. Elsewhere the random name goes through
+//! systemd-resolved and the `marsa0` link. Ports and trust have no Linux check
+//! yet.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -53,10 +53,11 @@ use marsa_core::runtimes::{Runtime, RuntimesDir};
 use marsa_core::types::{Health, ServiceState, Site};
 use tokio_util::sync::CancellationToken;
 
-use super::daemon::{ClientFailure, failure};
+use super::Failure;
+use super::daemon::failure;
 use super::setup::port_held;
-use super::sites::printable;
 use super::strings::{self, Details};
+use super::text::{clipped, printable};
 use marsa_core::caddy::CADDY_ID;
 use marsa_core::platform::runner::RealRunner;
 use marsa_core::platform::{linux_dns, trust};
@@ -84,7 +85,7 @@ struct FromDaemon {
 }
 
 /// Runs the checks in order and prints each line as soon as it is known.
-pub async fn run(data_dir: &Path) -> ExitCode {
+pub async fn run(data_dir: &Path) -> Result<ExitCode, Failure> {
     let platform = Platform::current();
     let macos = matches!(platform, Some(Platform::DarwinArm64 | Platform::DarwinX64));
     let linux = matches!(platform, Some(Platform::LinuxX64 | Platform::LinuxArm64));
@@ -176,18 +177,18 @@ pub async fn run(data_dir: &Path) -> ExitCode {
     }
     show(Check::Path, path(data_dir));
     show(Check::Log, log(data_dir));
-    if failed {
+    Ok(if failed {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
-    }
+    })
 }
 
 /// Asks a running daemon, never one this starts: its health, Caddy's
 /// state, and whether a site is secure.
 async fn ask_daemon(data_dir: &Path) -> FromDaemon {
     let down = |err: ClientError| FromDaemon {
-        health: Err(failure(&err, data_dir, None).code),
+        health: Err(failure(&err, data_dir, None).code.into_owned()),
         caddy: None,
         caddy_pid: None,
         secure_site: None,
@@ -463,7 +464,7 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
         }
         Problem::DaemonError { code } => (
             strings::doctor_daemon_error(&printable(code)),
-            ClientFailure::new(code, data_dir, None).message,
+            Failure::new(code, data_dir, None).message,
         ),
         Problem::NotInstalled { php, caddy } => strings::doctor_not_installed(*php, *caddy),
         Problem::RuntimesUnreadable { code } => (
@@ -488,7 +489,7 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
         ),
         Problem::CaddyFailed { code } => (
             strings::doctor_caddy_failed(&printable(code)),
-            ClientFailure::new(code, data_dir, Some(CADDY_ID)).message,
+            Failure::new(code, data_dir, Some(CADDY_ID)).message,
         ),
         Problem::DnsNoAnswer => pair(strings::DOCTOR_DNS_NO_ANSWER, strings::DOCTOR_DNS_SETUP),
         Problem::LinkNoAnswer => pair(strings::DOCTOR_DNS_NO_ANSWER, strings::DOCTOR_LINK_SETUP),
@@ -570,7 +571,7 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
         ),
         Problem::LogError { line } => {
             let log = log_path(data_dir);
-            let line: String = printable(line).chars().take(MAX_LINE).collect();
+            let line: String = clipped(line, MAX_LINE);
             (
                 strings::doctor_log_error(&log, &line),
                 strings::doctor_read_log(&log),
@@ -621,7 +622,7 @@ mod tests {
         );
     }
 
-    /// Linux (task M4-18k3): the hosts way and the `marsa0` link.
+    /// Linux: the hosts way and the `marsa0` link.
     #[test]
     fn linux_says_how_its_names_resolve_and_how_to_fix_them() {
         let pass = render(Check::Dns, &Verdict::Pass(Pass::Hosts), &data(), false);
@@ -753,7 +754,7 @@ mod tests {
         });
         let unix = render(Check::Path, &missing, &data(), false);
         // Every interactive zsh reads ~/.zshrc; a terminal that is not a
-        // login shell never reads ~/.zprofile (task M5-18).
+        // login shell never reads ~/.zprofile.
         assert!(
             unix.contains("~/.zshrc") && !unix.contains(".zprofile"),
             "{unix}"
@@ -831,7 +832,7 @@ mod tests {
         );
     }
 
-    /// Windows (task M4-19o): the hosts, ports, and trust lines speak of
+    /// Windows: the hosts, ports, and trust lines speak of
     /// Windows, not of /etc/hosts, pf, or the Mac's dialog.
     #[test]
     fn windows_system_lines_name_windows_fixes() {

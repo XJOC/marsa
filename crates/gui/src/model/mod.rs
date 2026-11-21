@@ -27,13 +27,13 @@ mod setup;
 mod sites;
 
 use installs::Install;
-pub use installs::{INSTALL_INTERRUPTED, InstallJob, InstallStep, InstallView, install_version};
+pub use installs::{InstallJob, InstallStep, InstallView, install_version};
 pub use logs::{LOG_SERVICE, LogRow, LogSource, MAX_LOG_LINES, ServiceLog};
 pub use notices::{NoticeSource, Notices};
 pub use removals::{Removal, UninstallNotice};
 pub use runtimes::{
     Change, Choice, MAIN_RUNTIME, PoolKind, RuntimeRow, has_default, is_pool, pool_of,
-    runtime_missing, version_text,
+    runtime_missing, service_description, service_name, version_text,
 };
 pub use session::{Connection, Overall, Session};
 use setup::not_added;
@@ -44,6 +44,7 @@ pub use sites::{LinkForm, Pick, SitesNotice, folder_path, url};
 use crate::bridge::Command;
 pub use crate::logline::{HiddenLevels, LogLevel};
 pub use crate::prefs::Appearance;
+use crate::strings::{self, ReportLine};
 pub use crate::tray::menu::Autostart;
 
 /// The service that serves every site: no site opens while it is down.
@@ -316,13 +317,11 @@ pub struct Model {
     /// Open after a folder to link was picked. Kept across sessions: it is
     /// the user's typing, not daemon state.
     pub link: Option<LinkForm>,
-    /// The version typed in the install dialog of each runtime, by the
-    /// runtime's folder name (`Runtime` is neither `Hash` nor `Ord`, and the
-    /// folder name is its stable key). A runtime with no entry has an empty
-    /// field: the newest stable version. A map, not an array in
-    /// [`Runtime::ALL`] order, so a runtime that core adds needs nothing
-    /// here. Kept across sessions.
-    install_input: BTreeMap<&'static str, String>,
+    /// The version typed in the install dialog of each runtime. A runtime
+    /// with no entry has an empty field: the newest stable version. A map,
+    /// not an array in [`Runtime::ALL`] order, so a runtime that core adds
+    /// needs nothing here. Kept across sessions.
+    install_input: BTreeMap<Runtime, String>,
     /// The runtime the Runtimes screen showed last, so the sidebar's item
     /// opens it again. Kept across sessions.
     runtime_chosen: Option<Runtime>,

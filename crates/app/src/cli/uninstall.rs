@@ -1,10 +1,10 @@
 //! `marsa uninstall <tool> <version>`: deletes an installed version, through
-//! `DELETE /v1/runtimes/{tool}/{version}`. Task M5-07.
+//! `DELETE /v1/runtimes/{tool}/{version}`.
 //!
 //! The daemon refuses a version in use: the default, a site's own setting,
 //! or the running Caddy. Its answer says which, and this command prints it.
 //! The only installed PHP or Node version goes with its default, unless PHP
-//! sites follow that default (task M5-19).
+//! sites follow that default.
 
 use marsa_core::codes;
 use std::path::Path;
@@ -14,10 +14,11 @@ use marsa_core::client::ClientError;
 use marsa_core::databases::ServerKind;
 use marsa_core::runtimes::Runtime;
 
+use super::Failure;
 use super::Tool;
-use super::daemon::{ClientFailure, connect, failure};
-use super::sites::printable;
+use super::daemon::{connect, failure};
 use super::strings::{self, Details};
+use super::text::printable;
 
 /// The arguments of `marsa uninstall`.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -32,38 +33,35 @@ pub struct UninstallArgs {
 
 /// Starts the daemon if needed and uninstalls: one line on stdout, or the
 /// failure on stderr with exit code 1.
-pub async fn run(args: &UninstallArgs, data_dir: &Path) -> ExitCode {
+pub async fn run(args: &UninstallArgs, data_dir: &Path) -> Result<ExitCode, Failure> {
     let runtime = Runtime::from(args.tool);
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+    let client = connect(data_dir).await?;
     match client.uninstall(runtime, args.version.trim()).await {
         Ok(done) => {
             println!(
                 "{}",
                 strings::uninstalled(runtime, &printable(&done.version))
             );
-            ExitCode::SUCCESS
+            Ok(ExitCode::SUCCESS)
         }
-        Err(err) => uninstall_failure(&err, runtime, &args.version, data_dir).report(),
+        Err(err) => Err(uninstall_failure(&err, runtime, &args.version, data_dir)),
     }
 }
 
 /// The text and code the user sees for `err`. A refusal names what uses the
 /// version, and a version code names the program and the version asked for.
-pub fn uninstall_failure(
+fn uninstall_failure(
     err: &ClientError,
     runtime: Runtime,
     version: &str,
     data_dir: &Path,
-) -> ClientFailure {
+) -> Failure {
     // `service_busy`: an action on the database server runs, and a start
     // may pick the version.
     let service = ServerKind::of_runtime(runtime).map(ServerKind::id);
     let mut failure = failure(err, data_dir, service);
     let requested = printable(version.trim());
-    failure.message = match (err, failure.code.as_str()) {
+    failure.message = match (err, &*failure.code) {
         // The client cleaned its text already.
         (ClientError::InUse { in_use, .. }, _) => strings::version_in_use(runtime, in_use),
         (_, codes::VERSION_NOT_INSTALLED) => strings::nothing_to_uninstall(runtime, &requested),
@@ -131,7 +129,7 @@ mod tests {
              it: stop it first with \"marsa services stop postgres\". Its databases stay either \
              way. [version_in_use]"
         );
-        // M5-19: the only PHP, with sites that would have no PHP after it.
+        // The only PHP, with sites that would have no PHP after it.
         let last = in_use(VersionInUse {
             version: "8.3.12".into(),
             sites_left_without_php: vec!["blog".into(), "shop".into()],

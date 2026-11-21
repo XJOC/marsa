@@ -1,4 +1,4 @@
-//! `marsa doctor` (task M5-12): eight read-only checks, each with a verdict
+//! `marsa doctor`: eight read-only checks, each with a verdict
 //! and, when it fails, a fix. Facts in, verdicts out.
 //!
 //! The command gathers the facts: the daemon's answers, files in the data
@@ -27,8 +27,7 @@ pub enum Check {
     VcRuntime,
     /// Linux only: `/usr/bin/xz`, which unpacks MySQL's `tar.xz`.
     Xz,
-    /// Windows only: the roots PHP's curl trusts, from Windows' store
-    /// (task M4-19n).
+    /// Windows only: the roots PHP's curl trusts, from Windows' store.
     SystemRoots,
     Caddy,
     Dns,
@@ -131,7 +130,7 @@ pub enum Problem {
         addresses: Vec<IpAddr>,
     },
     /// Linux on the hosts way: the sites whose names are not in Marsa's
-    /// block yet, sorted (task M4-18k3).
+    /// block yet, sorted.
     HostsMissing {
         names: Vec<String>,
     },
@@ -196,7 +195,7 @@ pub enum Skip {
     NeedsDaemon,
     NeedsCaddy,
     CaddyNotInstalled,
-    /// No CA yet: Caddy makes it when it first starts (task M5-15).
+    /// No CA yet: Caddy makes it when it first starts.
     NoCa,
     /// Windows: no CA bundle for PHP yet; marsad writes it when it starts.
     NoBundle,
@@ -411,7 +410,7 @@ pub fn caddy(daemon_running: bool, state: Option<&ServiceState>, installed: bool
 
 /// `answer`: what the system resolver gave a random `.test` name, `None` if
 /// it gave nothing in time. `marsad`'s DNS server answers `127.0.0.1`, and
-/// no address for `AAAA` (task M5-17); `::1` still counts as ours, as older
+/// no address for `AAAA`; `::1` still counts as ours, as older
 /// builds answered it. Without the daemon nothing answers, which is no fault
 /// of the setup; but a foreign answer is one.
 pub fn dns(daemon_running: bool, answer: Option<&[IpAddr]>) -> Verdict {
@@ -442,7 +441,7 @@ pub fn link(daemon_running: bool, answer: Option<&[IpAddr]>) -> Verdict {
     }
 }
 
-/// Linux on the hosts way (ADR 0014, task M4-18k3): `block`, the names in
+/// Linux on the hosts way (ADR 0014): `block`, the names in
 /// Marsa's block of the hosts file (`None`: no block); `sites`, the host
 /// names of the sites (`None`: the daemon gave no list). Every site needs
 /// its line; a name in the block that is no site does no harm.
@@ -495,10 +494,10 @@ pub fn ports(facts: Ports) -> Verdict {
     }
 }
 
-/// Windows: Caddy listens on 80 and 443 itself (task M4-19c), so a holder
+/// Windows: Caddy listens on 80 and 443 itself, so a holder
 /// fails only when it is not Caddy: IIS, or `System` (PID 4) for another
 /// HTTP.sys server. `caddy`: `None` when the daemon does not run,
-/// `Some(None)` when Caddy does not, else Caddy's PID (task M4-19o).
+/// `Some(None)` when Caddy does not, else Caddy's PID.
 pub fn windows_ports(holders: Option<Vec<PortHolder>>, caddy: Option<Option<u32>>) -> Verdict {
     let Some(holders) = holders else {
         return Verdict::Skip(Skip::NotChecked);
@@ -1127,7 +1126,7 @@ mod tests {
         assert_eq!(daemon_elevation(None), None);
     }
 
-    /// Task M4-18k3: the hosts way on Linux.
+    /// The hosts way on Linux.
     #[test]
     fn every_site_needs_its_line_in_the_hosts_file() {
         let set = |names: &[&str]| -> BTreeSet<String> {
@@ -1159,7 +1158,7 @@ mod tests {
         assert_eq!(hosts(Some(&block), None), Verdict::Skip(Skip::NeedsDaemon));
     }
 
-    /// Task M4-18k3: the `marsa0` link on Linux has its own fix, and is
+    /// The `marsa0` link on Linux has its own fix, and is
     /// otherwise the probe of macOS.
     #[test]
     fn the_link_gives_its_own_fix() {

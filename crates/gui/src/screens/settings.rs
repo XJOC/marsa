@@ -42,6 +42,18 @@ pub enum Check {
     NotChecked,
 }
 
+impl Check {
+    /// How the check stands, by its word.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Check::Done => strings::CHECK_DONE,
+            Check::Failed => strings::CHECK_FAILED,
+            Check::Skipped => strings::CHECK_SKIPPED,
+            Check::NotChecked => strings::CHECK_NOT_CHECKED,
+        }
+    }
+}
+
 /// What Settings says.
 #[derive(Debug, PartialEq)]
 pub struct SettingsView<'a> {
@@ -111,7 +123,7 @@ pub fn view(model: &Model) -> SettingsView<'_> {
         setup: setup(model, Platform::current()),
         about: About {
             version: model::APP_VERSION,
-            daemon: strings::daemon_hint(&model.session.connection),
+            daemon: strings::daemon_hint(model.session.connection.daemon_version()),
             folder: &model.data_dir,
             home: model.home.as_deref(),
         },
@@ -131,7 +143,11 @@ fn autostart(model: &Model) -> AutostartRow {
     AutostartRow {
         on: model.session.autostart == Autostart::On,
         off,
-        hint: strings::autostart_note(model.session.autostart).unwrap_or(strings::AUTOSTART_HINT),
+        hint: model
+            .session
+            .autostart
+            .note()
+            .unwrap_or(strings::AUTOSTART_HINT),
     }
 }
 
@@ -333,7 +349,7 @@ fn check_value(ui: &mut Ui, theme: &Theme, check: Check) {
         Check::NotChecked => (Icon::Dash, theme.color.mute),
     };
     // From the end: the word, then the icon before it.
-    value(ui, theme, strings::check_word(check));
+    value(ui, theme, check.word());
     ui.add(Glyph::new(icon).size(theme.size.icon_inline).color(color));
 }
 
@@ -425,13 +441,13 @@ mod tests {
                 Autostart::Stale,
                 false,
                 None,
-                strings::autostart_note(Autostart::Stale).expect("a note"),
+                Autostart::Stale.note().expect("a note"),
             ),
             (
                 Autostart::Unsupported,
                 false,
                 Some(strings::AUTOSTART_UNSUPPORTED),
-                strings::autostart_note(Autostart::Unsupported).expect("a note"),
+                Autostart::Unsupported.note().expect("a note"),
             ),
         ] {
             model.update(Update::Autostart(state));
@@ -657,14 +673,8 @@ mod tests {
         // Language is a fixed value: no control to change it.
         assert!(tree.node_with_label(strings::LANGUAGE).is_none());
         // Nothing is claimed before setup ran.
-        assert!(
-            tree.node_with_text(strings::check_word(Check::NotChecked))
-                .is_some()
-        );
-        assert!(
-            tree.node_with_text(strings::check_word(Check::Done))
-                .is_none()
-        );
+        assert!(tree.node_with_text(Check::NotChecked.word()).is_some());
+        assert!(tree.node_with_text(Check::Done.word()).is_none());
     }
 
     #[test]
@@ -770,14 +780,8 @@ mod tests {
             assert!(tree.node_with_text(&line.text).is_some(), "{}", line.text);
         }
         // The steps read by their own result.
-        assert!(
-            tree.node_with_text(strings::check_word(Check::Done))
-                .is_some()
-        );
-        assert!(
-            tree.node_with_text(strings::check_word(Check::Failed))
-                .is_some()
-        );
+        assert!(tree.node_with_text(Check::Done.word()).is_some());
+        assert!(tree.node_with_text(Check::Failed.word()).is_some());
         model.update(Update::SetupFailed("setup_not_supported".into()));
         let tree = start(&model);
         assert!(

@@ -1,6 +1,6 @@
 # End to end on Windows: MySQL, PostgreSQL, and Valkey as services of
 # marsad, with real servers, run by a plain local user that is only in the
-# group Users, as spike S-12b did (ADR 0023). Task M6-07.
+# group Users, as spike S-12b did (ADR 0023).
 #
 # None of the three is in the signed manifest yet, so the script puts each
 # where `marsa install` would: MySQL from Oracle's CDN, checked against its

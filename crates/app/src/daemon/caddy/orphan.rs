@@ -1,6 +1,5 @@
-//! Finds and stops a Caddy that a crashed `marsad` left running (ADR 0009).
-//! Task M3-11, and on Linux task M4-18m (ADR 0025). Off on Windows:
-//! `CADDY_ORPHAN_RECOVERY`.
+//! Finds and stops a Caddy that a crashed `marsad` left running (ADR 0009),
+//! and on Linux (ADR 0025). Off on Windows: `CADDY_ORPHAN_RECOVERY`.
 //!
 //! The manager inspects three things: `run/caddy.pid`; the admin port's answer
 //! to `GET /id/marsa-instance-<id>` (this data folder's tag), then to
@@ -23,6 +22,7 @@ use marsa_core::orphan::{
     self, Action, AdminState, Inspection, Liveness, PidRecord, PidfileState, PortState, Strategy,
 };
 use marsa_core::platform::process::{self, Signal};
+use marsa_core::ps::StartTime;
 use tracing::{debug, info, warn};
 
 use super::admin::Admin;
@@ -36,8 +36,8 @@ pub const OTHER_MARSA: &str = codes::CADDY_OTHER_MARSA;
 /// How often a wait checks the ports again.
 const POLL: Duration = Duration::from_millis(50);
 
-/// How long [`PidFile::record`] looks again at a Caddy just spawned that
-/// does not run Caddy yet, every [`POLL`].
+/// How long `PidFile::record` looks again at a Caddy just spawned that
+/// does not run Caddy yet, every `POLL`.
 pub const RECORD_LIMIT: Duration = Duration::from_secs(5);
 
 /// The largest answer to `GET /id/...` that is read. The server's config grows
@@ -123,7 +123,7 @@ impl PidFile {
     /// the `exe` link names the daemon (as for php-fpm,
     /// `php::orphan::Recorded::NotYet`). So while the pid runs the daemon's
     /// own executable, or cannot be told, it looks again every [`POLL`] for
-    /// up to [`RECORD_LIMIT`] (task M4-18m). A change of the start time
+    /// up to [`RECORD_LIMIT`]. A change of the start time
     /// means the pid changed hands: then it is never written. `running`
     /// says whether the supervisor still runs this pid: once it reaped the
     /// child, the pid may be anyone's, also between two looks that could
@@ -140,12 +140,12 @@ impl PidFile {
         }
         let own = own_executable();
         let until = tokio::time::Instant::now() + RECORD_LIMIT;
-        let mut first: Option<String> = None;
+        let mut first: Option<StartTime> = None;
         loop {
             let now = processes.identity(pid).await;
             let not_yet = match &now {
                 Liveness::Alive { exe, started } => {
-                    if first.get_or_insert_with(|| started.clone()) != started {
+                    if *first.get_or_insert(*started) != *started {
                         warn!(pid, "caddy.pid not written: the pid changed hands");
                         return;
                     }
@@ -157,7 +157,7 @@ impl PidFile {
                         let record = PidRecord {
                             pid,
                             exe: exe.clone(),
-                            started: started.clone(),
+                            started: *started,
                         };
                         match process::write_pid_file(&self.path, &record) {
                             Ok(()) => debug!(pid, "caddy.pid written"),
@@ -229,7 +229,7 @@ pub(super) struct Orphans<'a> {
     /// The ports the next Caddy needs: on Linux after setup, 80 and 443.
     pub input: CaddyInput,
     /// The other ports an orphan may hold: the high ports of the config
-    /// when the next Caddy takes 80 and 443 (Linux, task M4-18m). An orphan
+    /// when the next Caddy takes 80 and 443 (Linux). An orphan
     /// may have started before setup. `None` when they are the same.
     pub other: Option<CaddyInput>,
     pub ladder: Ladder,
@@ -605,7 +605,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     const PROGRAM: &str = "/data/bin/caddy";
-    const STARTED: &str = "Wed Nov 4 03:31:27 2026";
+    const STARTED: StartTime = StartTime::Utc(1_793_763_087); // Wed Nov 4 03:31:27 2026
+    /// A second after `STARTED`.
+    const LATER: StartTime = StartTime::Utc(1_793_763_088);
     const TAG: &str = "marsa-instance-0123456789abcdef0123456789abcdef";
 
     /// Gives the identities in order, then `Unknown`, and the executable
@@ -667,7 +669,7 @@ mod tests {
     fn ours() -> Liveness {
         Liveness::Alive {
             exe: PathBuf::from(PROGRAM),
-            started: STARTED.into(),
+            started: STARTED,
         }
     }
 
@@ -701,11 +703,11 @@ mod tests {
             let record = PidRecord {
                 pid: 4242,
                 exe: exe.clone(),
-                started: STARTED.into(),
+                started: STARTED,
             };
             let fake = Fake::new([Liveness::Alive {
                 exe,
-                started: STARTED.into(),
+                started: STARTED,
             }]);
             let state = pid_file.check(&record, &fake).await;
             assert_eq!(state == PidfileState::Ours { pid: 4242 }, ours, "{state:?}");
@@ -717,11 +719,11 @@ mod tests {
     fn not_exec_yet() -> Liveness {
         Liveness::Alive {
             exe: std::env::current_exe().unwrap(),
-            started: STARTED.into(),
+            started: STARTED,
         }
     }
 
-    /// Task M4-18m: the first looks see the daemon's own executable, or
+    /// The first looks see the daemon's own executable, or
     /// cannot tell; the file is written once the pid runs our Caddy. Only
     /// this test reaches the retry: in `tests/caddy_orphan.rs` the fake
     /// Caddy is the test binary, which is also the daemon there.
@@ -736,7 +738,7 @@ mod tests {
         assert_eq!(written.started, STARTED);
     }
 
-    /// Task M4-18m: the look stops, and nothing is written, at a change of
+    /// The look stops, and nothing is written, at a change of
     /// the start time, at another program, and after the limit.
     #[tokio::test(start_paused = true)]
     async fn the_pid_file_is_never_written_for_another_process() {
@@ -744,11 +746,11 @@ mod tests {
         let pid_file = PidFile::new(dir.path(), &[PathBuf::from(PROGRAM)]);
         let later = Liveness::Alive {
             exe: PathBuf::from(PROGRAM),
-            started: "Wed Nov 4 03:31:28 2026".into(),
+            started: LATER,
         };
         let sleep = Liveness::Alive {
             exe: PathBuf::from("/bin/sleep"),
-            started: STARTED.into(),
+            started: STARTED,
         };
         let cases = [
             vec![not_exec_yet(), later],
@@ -781,7 +783,7 @@ mod tests {
         let record = PidRecord {
             pid: 4242,
             exe: PathBuf::from(PROGRAM),
-            started: STARTED.into(),
+            started: STARTED,
         };
         process::write_pid_file(&pid_file.path, &record).unwrap();
         let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -838,7 +840,7 @@ mod tests {
         let (setup, _held) = setup();
         let other = Liveness::Alive {
             exe: PathBuf::from("/bin/sleep"),
-            started: STARTED.into(),
+            started: STARTED,
         };
         // Ours at the inspection and before SIGTERM; another program by the
         // time SIGKILL would go.
@@ -877,7 +879,7 @@ mod tests {
         let (setup, _held) = setup();
         let later = Liveness::Alive {
             exe: PathBuf::from(PROGRAM),
-            started: "Wed Nov 4 03:31:28 2026".into(),
+            started: LATER,
         };
         let fake = Fake::new([later]);
 
@@ -947,7 +949,7 @@ mod tests {
         (port, seen)
     }
 
-    /// Task M4-18m: with 80 and 443 (Linux after setup), an orphan may
+    /// With 80 and 443 (Linux after setup), an orphan may
     /// still hold the high ports of before setup. Free means free in both.
     #[tokio::test]
     async fn the_ports_of_before_setup_count_too() {

@@ -132,7 +132,7 @@ fn sites(model: &Model) -> Option<Bar> {
 fn install(model: &Model) -> Option<Bar> {
     use crate::model::InstallStep;
     let view = model.install_result()?;
-    let text = strings::install_status(view);
+    let text = view.status();
     Some(match view.step {
         InstallStep::Failed(_) => Bar::error(NoticeSource::Install, text),
         _ => Bar::success(NoticeSource::Install, text),
@@ -142,7 +142,7 @@ fn install(model: &Model) -> Option<Bar> {
 /// The last uninstall, in one sentence. A refusal does not list what uses the
 /// version: the Runtimes screen says it beside the version's menu.
 fn uninstall(model: &Model) -> Option<Bar> {
-    let line = strings::uninstall_notice(model.session.notices.uninstall()?);
+    let line = model.session.notices.uninstall()?.line();
     Some(if line.problem {
         Bar::error(NoticeSource::Uninstall, line.text)
     } else {
@@ -635,7 +635,7 @@ mod tests {
     /// The codes `strings::error_text` has a sentence for, read from its
     /// source: a code is a quoted name before `|` or `=>` in `error_message`.
     fn error_codes() -> Vec<String> {
-        let source = include_str!("../strings.rs");
+        let source = include_str!("../strings/errors.rs");
         let start = source
             .find("fn error_message(code: &str)")
             .expect("the table of error texts");
@@ -729,7 +729,7 @@ mod tests {
             {
                 bars.push((
                     format!("install {code}"),
-                    Bar::error(NoticeSource::Install, strings::install_status(&view)),
+                    Bar::error(NoticeSource::Install, view.status()),
                 ));
             }
         }
@@ -757,7 +757,7 @@ mod tests {
                 code: "uninstall_failed".into(),
             },
         ] {
-            let line = strings::uninstall_notice(&notice);
+            let line = notice.line();
             let bar = if line.problem {
                 Bar::error(NoticeSource::Uninstall, line.text)
             } else {
