@@ -682,6 +682,7 @@ mod tests {
         path
     }
 
+    #[cfg(unix)]
     const XZ_LAYOUT: Layout<'static> = Layout {
         format: ArchiveFormat::TarXz,
         strip_components: 1,
