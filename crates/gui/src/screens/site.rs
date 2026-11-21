@@ -113,7 +113,13 @@ pub enum Unlink<'a> {
 /// Decides what the page of the site `name` says. Pure: the same model gives
 /// the same view.
 pub fn view<'a>(model: &'a Model, name: &'a str) -> SiteView<'a> {
-    let Some(site) = model.sites.sites.iter().find(|site| site.name == name) else {
+    let Some(site) = model
+        .session
+        .sites
+        .sites
+        .iter()
+        .find(|site| site.name == name)
+    else {
         return SiteView::Missing(Missing {
             name,
             offline: !model.is_connected(),
@@ -607,7 +613,7 @@ mod tests {
     fn a_site_is_added_as_part_of_its_parked_folder_or_as_a_linked_folder() {
         let mut model = model();
         assert_eq!(found(&view(&model, "shop")).facts.added_as, AddedAs::Linked);
-        model.sites.parked = vec![abs("/code")];
+        model.session.sites.parked = vec![abs("/code")];
         let parked = abs("/code");
         assert_eq!(
             found(&view(&model, "shop")).facts.added_as,
@@ -637,7 +643,7 @@ mod tests {
             found(&view_).removing.as_deref(),
             Some("Unlinking shop.test…")
         );
-        model.sites.parked = vec![abs("/code")];
+        model.session.sites.parked = vec![abs("/code")];
         model.update(Update::NotRemoved {
             removal: Removal::Unlink {
                 site: "shop".into(),
@@ -817,7 +823,7 @@ mod tests {
                 .apply_action(Action::AskInstall(Runtime::Php))
                 .is_none()
         );
-        assert_eq!(model.install_dialog, Some(Runtime::Php));
+        assert_eq!(model.session.install_dialog, Some(Runtime::Php));
         assert_eq!(model.route, Route::Site("shop".into()));
         // While an install runs, the plus is off with its reason.
         let mut busy = self::model();
@@ -877,7 +883,7 @@ mod tests {
         let commands = sent(&mut model, strings::UNLINK_THIS_SITE);
         assert!(commands.is_empty(), "{commands:?}");
         assert_eq!(
-            model.confirm,
+            model.session.confirm,
             Some(Removal::Unlink {
                 site: "shop".into()
             })
@@ -892,7 +898,7 @@ mod tests {
     #[test]
     fn a_site_from_a_parked_folder_cannot_be_unlinked_and_offers_to_forget_its_folder() {
         let mut model = model();
-        model.sites.parked = vec![abs("/code")];
+        model.session.sites.parked = vec![abs("/code")];
         model.home = Some(abs("/code"));
         // The button is off: a click returns nothing.
         assert!(click(&model, strings::UNLINK_THIS_SITE).is_empty());
@@ -908,7 +914,7 @@ mod tests {
             [Action::AskForget(abs("/code"))]
         );
         // While a removal runs, the offer waits too.
-        model.sites.parked.clear();
+        model.session.sites.parked.clear();
         assert!(model.ask_removal(Removal::Unlink {
             site: "shop".into()
         }));
@@ -926,7 +932,7 @@ mod tests {
         assert!(tree.node_with_label(&offer).is_none());
         assert!(tree.node_with_text(&reason).is_none());
         // The same site, once its folder is parked: both are there.
-        model.sites.parked = vec![abs("/code")];
+        model.session.sites.parked = vec![abs("/code")];
         let (_, tree) = start(&model, "shop");
         assert!(tree.node_with_label(&offer).is_some());
         assert!(tree.node_with_text(&reason).is_some());
@@ -941,7 +947,7 @@ mod tests {
         shop.docroot = shop.root.join("public");
         with_sites(&mut model, vec![shop.clone()]);
         model.home = Some(home.clone());
-        model.sites.parked = vec![home.join("Code")];
+        model.session.sites.parked = vec![home.join("Code")];
         let (_, tree) = start(&model, "shop");
         let tilde = |path: &Path| strings::home_path(path, Some(&home));
         for path in [shop.root.clone(), shop.docroot.clone(), home.join("Code")] {

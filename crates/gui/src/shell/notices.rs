@@ -82,7 +82,7 @@ pub fn current(model: &Model) -> Option<Bar> {
 
 /// A call to the daemon failed: the code of the error.
 fn call(model: &Model) -> Option<Bar> {
-    let code = model.notice.as_deref()?;
+    let code = model.session.notice.as_deref()?;
     Some(Bar::error(NoticeSource::Call, strings::error_text(code)))
 }
 
@@ -96,7 +96,7 @@ fn sites(model: &Model) -> Option<Bar> {
         return None;
     }
     let (source, home) = (NoticeSource::Sites, model.home.as_deref());
-    Some(match model.sites_notice.as_ref()? {
+    Some(match model.session.sites_notice.as_ref()? {
         SitesNotice::Failed(code) => Bar::error(source, strings::error_text(code)),
         SitesNotice::Parked(folder) => Bar::success(source, strings::parked(folder, home)),
         SitesNotice::Linked { name, folder } => {
@@ -142,7 +142,7 @@ fn install(model: &Model) -> Option<Bar> {
 /// The last uninstall, in one sentence. A refusal does not list what uses the
 /// version: the Runtimes screen says it beside the version's menu.
 fn uninstall(model: &Model) -> Option<Bar> {
-    let line = strings::uninstall_notice(model.uninstall_notice.as_ref()?);
+    let line = strings::uninstall_notice(model.session.uninstall_notice.as_ref()?);
     Some(if line.problem {
         Bar::error(NoticeSource::Uninstall, line.text)
     } else {
@@ -154,10 +154,10 @@ fn uninstall(model: &Model) -> Option<Bar> {
 /// accepted. While the install dialog is open the error is its field's, under
 /// the field.
 fn runtimes(model: &Model) -> Option<Bar> {
-    if model.install_dialog.is_some() {
+    if model.session.install_dialog.is_some() {
         return None;
     }
-    let code = model.runtimes_notice.as_deref()?;
+    let code = model.session.runtimes_notice.as_deref()?;
     Some(Bar::error(
         NoticeSource::Runtimes,
         strings::error_text(code),
@@ -166,7 +166,7 @@ fn runtimes(model: &Model) -> Option<Bar> {
 
 /// Start at login could not be read or changed.
 fn autostart(model: &Model) -> Option<Bar> {
-    let code = model.settings_notice.as_deref()?;
+    let code = model.session.settings_notice.as_deref()?;
     Some(Bar::error(
         NoticeSource::Autostart,
         strings::error_text(code),
@@ -301,12 +301,12 @@ mod tests {
     #[test]
     fn each_result_the_lines_had_is_a_notice_with_the_same_words() {
         let mut model = connected();
-        model.notice = Some("service_busy".into());
+        model.session.notice = Some("service_busy".into());
         assert_eq!(
             says(&model),
             Some((NoticeKind::Error, strings::error_text("service_busy")))
         );
-        model.notice = None;
+        model.session.notice = None;
 
         let folder = PathBuf::from("/code");
         for (notice, kind, text) in [
@@ -339,14 +339,14 @@ mod tests {
                 strings::error_text("site_name_invalid"),
             ),
         ] {
-            model.sites_notice = Some(notice);
+            model.session.sites_notice = Some(notice);
             assert_eq!(says(&model), Some((kind, text)));
             assert_eq!(current(&model).and_then(|bar| bar.fix), None);
         }
-        model.sites_notice = None;
+        model.session.sites_notice = None;
 
         let version: Version = "8.3.27".parse().expect("a version");
-        model.uninstall_notice = Some(UninstallNotice::Done {
+        model.session.uninstall_notice = Some(UninstallNotice::Done {
             runtime: Runtime::Php,
             version: version.clone(),
         });
@@ -354,7 +354,7 @@ mod tests {
             says(&model),
             Some((NoticeKind::Success, "Uninstalled PHP 8.3.27.".to_owned()))
         );
-        model.uninstall_notice = Some(UninstallNotice::Failed {
+        model.session.uninstall_notice = Some(UninstallNotice::Failed {
             runtime: Runtime::Php,
             version,
             code: "uninstall_failed".into(),
@@ -362,9 +362,9 @@ mod tests {
         let (kind, text) = says(&model).expect("a notice");
         assert_eq!(kind, NoticeKind::Error);
         assert!(text.starts_with("Cannot uninstall PHP 8.3.27"), "{text}");
-        model.uninstall_notice = None;
+        model.session.uninstall_notice = None;
 
-        model.runtimes_notice = Some("runtimes_read".into());
+        model.session.runtimes_notice = Some("runtimes_read".into());
         assert_eq!(
             says(&model),
             Some((NoticeKind::Error, strings::error_text("runtimes_read")))
@@ -377,13 +377,13 @@ mod tests {
                 default: Some("8.4".into()),
             }],
         }));
-        model.runtimes_notice = Some("invalid_version".into());
-        model.install_dialog = Some(Runtime::Php);
+        model.session.runtimes_notice = Some("invalid_version".into());
+        model.session.install_dialog = Some(Runtime::Php);
         assert_eq!(says(&model), None);
-        model.install_dialog = None;
-        model.runtimes_notice = None;
+        model.session.install_dialog = None;
+        model.session.runtimes_notice = None;
 
-        model.settings_notice = Some("autostart_write".into());
+        model.session.settings_notice = Some("autostart_write".into());
         assert_eq!(
             says(&model),
             Some((NoticeKind::Error, strings::error_text("autostart_write")))
@@ -394,7 +394,7 @@ mod tests {
     fn a_refused_unlink_offers_to_forget_the_folder_and_the_offer_waits_for_a_busy_daemon() {
         let mut model = connected();
         let folder = PathBuf::from("/code");
-        model.sites_notice = Some(SitesNotice::SiteIsParked {
+        model.session.sites_notice = Some(SitesNotice::SiteIsParked {
             site: "shop".into(),
             folder: Some(folder.clone()),
         });
@@ -418,7 +418,7 @@ mod tests {
         model.apply_action(Action::AskForget(folder.clone()));
         assert!(model.confirm_removal().is_some());
         // Confirming cleared the old result: the refusal comes after it.
-        model.sites_notice = Some(SitesNotice::SiteIsParked {
+        model.session.sites_notice = Some(SitesNotice::SiteIsParked {
             site: "shop".into(),
             folder: Some(folder.clone()),
         });
@@ -429,7 +429,7 @@ mod tests {
         );
 
         // Without the folder there is nothing to offer.
-        model.sites_notice = Some(SitesNotice::SiteIsParked {
+        model.session.sites_notice = Some(SitesNotice::SiteIsParked {
             site: "shop".into(),
             folder: None,
         });
@@ -466,7 +466,7 @@ mod tests {
         );
         // Other results are not the step's.
         model.route = Route::Home;
-        model.notice = Some("service_busy".into());
+        model.session.notice = Some("service_busy".into());
         assert_eq!(current(&model).map(|b| b.source), Some(NoticeSource::Call));
     }
 
@@ -500,7 +500,7 @@ mod tests {
         let mut model = connected();
         model.home = Some(abs("/Users/omar"));
         let folder = abs("/Users/omar/Code");
-        model.sites_notice = Some(SitesNotice::SiteIsParked {
+        model.session.sites_notice = Some(SitesNotice::SiteIsParked {
             site: "shop".into(),
             folder: Some(folder.clone()),
         });
@@ -526,7 +526,7 @@ mod tests {
         let mut model = connected();
         model.home = Some(abs("/Users/omar"));
         let folder = abs("/Users/omar/Code/clients/acme/projects");
-        model.sites_notice = Some(SitesNotice::SiteIsParked {
+        model.session.sites_notice = Some(SitesNotice::SiteIsParked {
             site: "shop".into(),
             folder: Some(folder.clone()),
         });
@@ -607,7 +607,7 @@ mod tests {
         notices
             .into_iter()
             .map(|notice| {
-                model.sites_notice = Some(notice.clone());
+                model.session.sites_notice = Some(notice.clone());
                 let bar = current(&model).expect("a notice");
                 (format!("{notice:?}"), bar)
             })
@@ -802,15 +802,15 @@ mod tests {
     fn an_error_comes_before_a_success_and_a_closed_one_lets_the_next_show() {
         let mut model = connected();
         let source = |model: &Model| current(model).map(|bar| bar.source);
-        model.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
-        model.uninstall_notice = Some(UninstallNotice::Done {
+        model.session.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
+        model.session.uninstall_notice = Some(UninstallNotice::Done {
             runtime: Runtime::Php,
             version: "8.3.27".parse().expect("a version"),
         });
         // Two successes: the sites one first; the other waits behind it.
         assert_eq!(source(&model), Some(NoticeSource::Sites));
         // An error that comes meanwhile takes the bar: a success waits.
-        model.notice = Some("service_busy".into());
+        model.session.notice = Some("service_busy".into());
         assert_eq!(source(&model), Some(NoticeSource::Call));
         // Closing the error brings the success back, with its result intact.
         model.apply_action(Action::DismissNotice(NoticeSource::Call));
@@ -828,7 +828,7 @@ mod tests {
         let mut clock = Clock::default();
         assert_eq!(clock.look(current(&model).as_ref(), start), Look::Nothing);
 
-        model.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
+        model.session.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
         let wanted = current(&model);
         assert_eq!(
             clock.look(wanted.as_ref(), start),
@@ -849,7 +849,7 @@ mod tests {
         );
 
         // An error is still there after an hour, and has no end to wait for.
-        model.sites_notice = Some(SitesNotice::Failed("site_name_invalid".into()));
+        model.session.sites_notice = Some(SitesNotice::Failed("site_name_invalid".into()));
         let wanted = current(&model);
         let later = start + seconds(10);
         assert_eq!(
@@ -867,8 +867,8 @@ mod tests {
         let start = Instant::now();
         let mut model = connected();
         let mut clock = Clock::default();
-        model.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
-        model.uninstall_notice = Some(UninstallNotice::Done {
+        model.session.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
+        model.session.uninstall_notice = Some(UninstallNotice::Done {
             runtime: Runtime::Php,
             version: "8.3.27".parse().expect("a version"),
         });
@@ -894,7 +894,7 @@ mod tests {
             }
         );
         // An error replaces a success on screen, with no time to run out.
-        model.notice = Some("service_busy".into());
+        model.session.notice = Some("service_busy".into());
         let error = current(&model);
         assert_eq!(
             clock.look(error.as_ref(), start + seconds(9)),
@@ -917,7 +917,7 @@ mod tests {
     fn the_shell_draws_the_bar_and_a_success_closes_it_by_the_clock() {
         let start = Instant::now();
         let mut model = connected();
-        model.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
+        model.session.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
         let harness = Harness::new(egui::Theme::Light);
         let text = strings::unlinked("shop");
         // Drawn, with no action asked yet.
@@ -936,7 +936,7 @@ mod tests {
         for action in actions {
             model.apply_action(action);
         }
-        assert!(model.sites_notice.is_none());
+        assert!(model.session.sites_notice.is_none());
         let actions = frames(&model, &harness, start + seconds(5));
         assert!(actions.is_empty());
     }
@@ -946,7 +946,7 @@ mod tests {
         let start = Instant::now();
         let mut model = connected();
         let folder = PathBuf::from("/code");
-        model.sites_notice = Some(SitesNotice::SiteIsParked {
+        model.session.sites_notice = Some(SitesNotice::SiteIsParked {
             site: "shop".into(),
             folder: Some(folder.clone()),
         });

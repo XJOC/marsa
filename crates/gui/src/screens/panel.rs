@@ -134,7 +134,7 @@ pub fn view(model: &Model) -> PanelView {
 }
 
 fn sites(model: &Model) -> SitesView {
-    let all = &model.sites.sites;
+    let all = &model.session.sites.sites;
     let rows = all
         .iter()
         .take(MAX_SITES)
@@ -156,7 +156,7 @@ fn sites(model: &Model) -> SitesView {
 }
 
 fn xdebug(model: &Model) -> XdebugLine {
-    let off = if model.xdebug.is_none() {
+    let off = if model.session.xdebug.is_none() {
         Some(strings::XDEBUG_UNREAD)
     } else if model.xdebug_pending().is_some() {
         Some(strings::XDEBUG_BUSY)
@@ -166,7 +166,11 @@ fn xdebug(model: &Model) -> XdebugLine {
     XdebugLine {
         on: model.xdebug_on().unwrap_or(false),
         off,
-        error: model.xdebug_notice.as_deref().map(strings::error_text),
+        error: model
+            .session
+            .xdebug_notice
+            .as_deref()
+            .map(strings::error_text),
     }
 }
 
@@ -176,7 +180,7 @@ fn power(model: &Model) -> Power {
         exit: PanelExit::StopMarsa,
         off,
     };
-    match &model.connection {
+    match &model.session.connection {
         Connection::Running(_) => stop(None),
         Connection::Connecting | Connection::Reconnecting => {
             stop(Some(strings::PANEL_NOT_CONNECTED))
@@ -598,7 +602,7 @@ mod tests {
         let none = view(&working(1, &[]));
         assert!(none.php.is_none());
         let mut model = working(1, &["8.4.27"]);
-        model.xdebug = None;
+        model.session.xdebug = None;
         let unread = view(&model).xdebug.expect("a line");
         assert_eq!(unread.off, Some(strings::XDEBUG_UNREAD));
         let mut model = working(1, &["8.4.27"]);

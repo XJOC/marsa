@@ -184,7 +184,7 @@ pub fn fill(model: &mut Model, demo: Demo) {
         sites_extras(model);
     }
     if demo == Demo::SiteParked {
-        model.sites.parked = vec![PathBuf::from("/demo/Code")];
+        model.session.sites.parked = vec![PathBuf::from("/demo/Code")];
     }
     if matches!(
         demo,
@@ -348,12 +348,12 @@ fn dialogs_and_notices(model: &mut Model, demo: Demo) {
             });
         }
         Demo::NoticeSuccess => {
-            model.sites_notice = Some(SitesNotice::Unlinked("old-blog".into()));
+            model.session.sites_notice = Some(SitesNotice::Unlinked("old-blog".into()));
         }
         Demo::NoticeError => {
             let folder = PathBuf::from("/demo/Code");
-            model.sites.parked = vec![folder.clone()];
-            model.sites_notice = Some(SitesNotice::SiteIsParked {
+            model.session.sites.parked = vec![folder.clone()];
+            model.session.sites_notice = Some(SitesNotice::SiteIsParked {
                 site: "shop".into(),
                 folder: Some(folder),
             });
@@ -425,11 +425,11 @@ fn runtimes_screen(model: &mut Model, demo: Demo) {
 
 /// The parts of Sites the plain demo leaves out.
 fn sites_extras(model: &mut Model) {
-    model.sites.parked = vec![
+    model.session.sites.parked = vec![
         PathBuf::from("/demo/Code"),
         PathBuf::from("/demo/Work/acme"),
     ];
-    model.sites.skipped = vec![
+    model.session.sites.skipped = vec![
         SkippedFolder {
             path: PathBuf::from("/demo/Code/My Old Site"),
             code: "site_name_invalid".into(),
@@ -439,7 +439,7 @@ fn sites_extras(model: &mut Model) {
             code: "site_name_taken".into(),
         },
     ];
-    model.sites_notice = Some(SitesNotice::Unlinked("old-blog".into()));
+    model.session.sites_notice = Some(SitesNotice::Unlinked("old-blog".into()));
     model.link = Some(LinkForm {
         folder: PathBuf::from("/demo/Work/blog"),
         name: "blog".into(),
@@ -616,13 +616,13 @@ mod tests {
         assert_eq!(parse("many-sites"), Some(Demo::ManySites));
         let mut model = Model::default();
         fill(&mut model, Demo::ManySites);
-        assert_eq!(model.sites.sites.len(), 12);
+        assert_eq!(model.session.sites.sites.len(), 12);
         assert_eq!(model.php_versions().len(), 4);
         // The panel's switch is read, and nothing starts a daemon.
-        assert!(model.xdebug.is_some());
+        assert!(model.session.xdebug.is_some());
         let mut plain = Model::default();
         fill(&mut plain, Demo::Ok);
-        assert_eq!(plain.sites.sites.len(), 6);
+        assert_eq!(plain.session.sites.sites.len(), 6);
     }
 
     #[test]
@@ -668,7 +668,7 @@ mod tests {
         fill(&mut model, Demo::FirstRun2);
         assert!(model.needs_first_run());
         assert!(!model.installing());
-        assert!(model.sites.sites.is_empty());
+        assert!(model.session.sites.sites.is_empty());
         assert_eq!(model.php_versions().len(), 1);
     }
 
@@ -677,19 +677,19 @@ mod tests {
         let mut model = Model::default();
         fill(&mut model, Demo::SitesSearch);
         assert_eq!(model.sites_search, "li");
-        assert_eq!(model.sites.sites.len(), 6);
+        assert_eq!(model.session.sites.sites.len(), 6);
         let mut model = Model::default();
         fill(&mut model, Demo::SitesEmpty);
-        assert!(model.sites.sites.is_empty() && model.is_connected());
+        assert!(model.session.sites.sites.is_empty() && model.is_connected());
     }
 
     #[test]
     fn the_extras_demo_opens_the_link_form_and_lists_the_folders() {
         let mut model = Model::default();
         fill(&mut model, Demo::SitesExtras);
-        assert!(model.link.is_some() && model.sites_notice.is_some());
-        assert_eq!(model.sites.parked.len(), 2);
-        assert_eq!(model.sites.skipped.len(), 2);
+        assert!(model.link.is_some() && model.session.sites_notice.is_some());
+        assert_eq!(model.session.sites.parked.len(), 2);
+        assert_eq!(model.session.sites.skipped.len(), 2);
     }
 
     #[test]
@@ -698,6 +698,7 @@ mod tests {
         fill(&mut model, Demo::SiteParked);
         let by_name = |name: &str| {
             model
+                .session
                 .sites
                 .sites
                 .iter()
@@ -713,16 +714,16 @@ mod tests {
     fn the_runtimes_demos_list_four_runtimes_read_xdebug_and_start_no_daemon() {
         let mut model = Model::default();
         fill(&mut model, Demo::Runtimes);
-        assert_eq!(model.runtimes.len(), 4);
-        assert!(model.xdebug.is_some() && !model.installing());
-        assert_eq!(model.install_dialog, None);
+        assert_eq!(model.session.runtimes.len(), 4);
+        assert!(model.session.xdebug.is_some() && !model.installing());
+        assert_eq!(model.session.install_dialog, None);
         let mut installing = Model::default();
         fill(&mut installing, Demo::RuntimesInstalling);
         let words = crate::strings::install_status(installing.install_view().expect("an install"));
         assert!(words.starts_with("Downloading PHP 8.5.0"), "{words}");
         let mut asking = Model::default();
         fill(&mut asking, Demo::RuntimesInstall);
-        assert_eq!(asking.install_dialog, Some(Runtime::Php));
+        assert_eq!(asking.session.install_dialog, Some(Runtime::Php));
     }
 
     #[test]
@@ -882,9 +883,9 @@ mod tests {
             fill(&mut model, demo);
             assert!(model.is_connected());
             assert_eq!(model.home.as_deref(), Some(std::path::Path::new("/demo")));
-            assert_eq!(model.sites.sites.len(), 6);
+            assert_eq!(model.session.sites.sites.len(), 6);
             assert_eq!(model.php_versions().len(), 2);
-            assert_eq!(model.services.len(), 2);
+            assert_eq!(model.session.services.len(), 2);
         }
     }
 }

@@ -5,7 +5,6 @@
 //! [`Action`] when the user presses something.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::mem;
 use std::path::{Path, PathBuf};
 
 use marsa_core::helper::OpStatus;
@@ -662,32 +661,21 @@ pub enum Overall {
     Working,
 }
 
+/// What the daemon told this window, and what the window is doing about it.
+/// A new connection starts from [`Session::default`], so a field added here
+/// is forgotten on reconnect without a list to keep in step.
 #[derive(Debug, Default)]
-pub struct Model {
+pub struct Session {
     pub connection: Connection,
     /// Sorted by id.
     pub services: Vec<ServiceStatus>,
     /// The log of each service that has written one, by the service's id.
     logs: BTreeMap<String, ServiceLog>,
-    /// The levels the user turned off in the Logs filters. Kept across
-    /// sessions: it is the user's choice, not daemon state.
-    pub log_hidden: HiddenLevels,
-    /// The text of the Logs filter field. Kept across sessions.
-    pub log_filter: String,
-    /// Follow is off: the Logs screen stays where the user scrolled. Kept
-    /// across sessions; `false`, which is what [`Default`] gives, follows.
-    pub log_paused: bool,
     /// The last error that did not break the connection, as a code.
     pub notice: Option<String>,
     /// Sites sorted by name, the parked folders, and the skipped folders.
     pub sites: SiteList,
     pub sites_notice: Option<SitesNotice>,
-    /// The text of the Sites search field. Kept across sessions: it is the
-    /// user's typing, not daemon state.
-    pub sites_search: String,
-    /// Open after a folder to link was picked. Kept across sessions: it is
-    /// the user's typing, not daemon state.
-    pub link: Option<LinkForm>,
     /// As the daemon lists them.
     pub runtimes: Vec<RuntimeRow>,
     /// The last runtimes read, default change, or version field failed. A
@@ -695,36 +683,15 @@ pub struct Model {
     pub runtimes_notice: Option<String>,
     /// Oldest first.
     pending: Vec<Pending>,
-    /// The version typed in the install dialog of each runtime, by the
-    /// runtime's folder name (`Runtime` is neither `Hash` nor `Ord`, and the
-    /// folder name is its stable key). A runtime with no entry has an empty
-    /// field: the newest stable version. A map, not an array in
-    /// [`Runtime::ALL`] order, so a runtime that core adds needs nothing
-    /// here. Kept across sessions.
-    install_input: BTreeMap<&'static str, String>,
     /// The runtime whose install dialog is open.
     pub install_dialog: Option<Runtime>,
-    /// The runtime the Runtimes screen showed last, so the sidebar's item
-    /// opens it again. Kept across sessions.
-    runtime_chosen: Option<Runtime>,
-    /// Oldest first, at most [`MAX_INSTALLS`].
-    installs: Vec<Install>,
     /// The window's jobs not sent yet, in order.
     queue: VecDeque<InstallJob>,
     pub first_run: Option<FirstRun>,
-    /// The user closed the first-run panel: it stays closed while this
-    /// window is open.
-    first_run_closed: bool,
     pub setup: Setup,
     pub autostart: Autostart,
     /// The last autostart read or change failed. A client error code.
     pub settings_notice: Option<String>,
-    /// The data folder this window and its daemon use. Shown, never changed.
-    pub data_dir: PathBuf,
-    /// The user's home folder, read once at start. Display only: a folder
-    /// under it is shown as `~/…` (`strings::home_path`), and no program ever
-    /// gets the shortened text.
-    pub home: Option<PathBuf>,
     /// The removal the confirmation dialog asks about.
     pub confirm: Option<Removal>,
     /// The removal sent and not answered yet. One at a time.
@@ -739,6 +706,49 @@ pub struct Model {
     /// Linux: the sites the hosts file lacks.
     pub hosts: HostsStatus,
     pub hosts_sync: HostsSync,
+}
+
+/// The window's state: the daemon's session, and what belongs to the window
+/// itself and survives a reconnect.
+#[derive(Debug, Default)]
+pub struct Model {
+    pub session: Session,
+    /// The levels the user turned off in the Logs filters. Kept across
+    /// sessions: it is the user's choice, not daemon state.
+    pub log_hidden: HiddenLevels,
+    /// The text of the Logs filter field. Kept across sessions.
+    pub log_filter: String,
+    /// Follow is off: the Logs screen stays where the user scrolled. Kept
+    /// across sessions; `false`, which is what [`Default`] gives, follows.
+    pub log_paused: bool,
+    /// The text of the Sites search field. Kept across sessions: it is the
+    /// user's typing, not daemon state.
+    pub sites_search: String,
+    /// Open after a folder to link was picked. Kept across sessions: it is
+    /// the user's typing, not daemon state.
+    pub link: Option<LinkForm>,
+    /// The version typed in the install dialog of each runtime, by the
+    /// runtime's folder name (`Runtime` is neither `Hash` nor `Ord`, and the
+    /// folder name is its stable key). A runtime with no entry has an empty
+    /// field: the newest stable version. A map, not an array in
+    /// [`Runtime::ALL`] order, so a runtime that core adds needs nothing
+    /// here. Kept across sessions.
+    install_input: BTreeMap<&'static str, String>,
+    /// The runtime the Runtimes screen showed last, so the sidebar's item
+    /// opens it again. Kept across sessions.
+    runtime_chosen: Option<Runtime>,
+    /// Oldest first, at most [`MAX_INSTALLS`]. Only ended installs with no id
+    /// survive a reconnect: what the user saw last stays on screen.
+    installs: Vec<Install>,
+    /// The user closed the first-run panel: it stays closed while this
+    /// window is open.
+    first_run_closed: bool,
+    /// The data folder this window and its daemon use. Shown, never changed.
+    pub data_dir: PathBuf,
+    /// The user's home folder, read once at start. Display only: a folder
+    /// under it is shown as `~/…` (`strings::home_path`), and no program ever
+    /// gets the shortened text.
+    pub home: Option<PathBuf>,
     /// The screen the main area shows.
     pub route: Route,
     /// The user folded the sidebar to its icons. A narrow window folds it
@@ -762,26 +772,9 @@ impl Model {
         match update {
             Update::Connected(health) => {
                 self.forget_installs();
-                *self = Model {
+                self.session = Session {
                     connection: Connection::Running(health),
-                    link: self.link.take(),
-                    sites_search: mem::take(&mut self.sites_search),
-                    log_hidden: self.log_hidden,
-                    log_filter: mem::take(&mut self.log_filter),
-                    log_paused: self.log_paused,
-                    install_input: mem::take(&mut self.install_input),
-                    runtime_chosen: self.runtime_chosen,
-                    // Only ended installs with no id are left: what the user
-                    // saw last stays on screen.
-                    installs: mem::take(&mut self.installs),
-                    first_run_closed: self.first_run_closed,
-                    data_dir: mem::take(&mut self.data_dir),
-                    home: self.home.take(),
-                    // Where the user is, not daemon state.
-                    route: mem::take(&mut self.route),
-                    sidebar_folded: self.sidebar_folded,
-                    appearance: self.appearance,
-                    ..Model::default()
+                    ..Session::default()
                 };
             }
             Update::Reconnecting => self.disconnect(Connection::Reconnecting),
@@ -790,14 +783,15 @@ impl Model {
                 services.sort_by(|a, b| a.id.cmp(&b.id));
                 // The log of a service the daemon no longer lists goes with
                 // it: a log never outlives its source.
-                self.logs
+                self.session
+                    .logs
                     .retain(|id, _| services.iter().any(|service| service.id == *id));
-                self.services = services;
+                self.session.services = services;
             }
             Update::Log(lines) => lines.into_iter().for_each(|line| self.push_log(line)),
-            Update::Notice(code) => self.notice = Some(code),
+            Update::Notice(code) => self.session.notice = Some(code),
             Update::Sites(list) => self.set_sites(list),
-            Update::Parked(path) => self.sites_notice = Some(SitesNotice::Parked(path)),
+            Update::Parked(path) => self.session.sites_notice = Some(SitesNotice::Parked(path)),
             Update::Linked { name, folder } => {
                 // The user may have picked another folder since.
                 let same = self
@@ -807,35 +801,39 @@ impl Model {
                 if same {
                     self.link = None;
                 }
-                self.sites_notice = Some(SitesNotice::Linked { name, folder });
+                self.session.sites_notice = Some(SitesNotice::Linked { name, folder });
             }
-            Update::SitesFailed(code) => self.sites_notice = Some(SitesNotice::Failed(code)),
+            Update::SitesFailed(code) => {
+                self.session.sites_notice = Some(SitesNotice::Failed(code))
+            }
             Update::Runtimes(list) => self.set_runtimes(list),
-            Update::RuntimesFailed(code) => self.runtimes_notice = Some(code),
+            Update::RuntimesFailed(code) => self.session.runtimes_notice = Some(code),
             Update::Saved(change) => self.settle(&change),
             Update::NotSaved { change, code } => {
                 self.settle(&change);
                 match change {
-                    Change::Default { .. } => self.runtimes_notice = Some(code),
-                    Change::SitePhp { .. } => self.sites_notice = Some(SitesNotice::Failed(code)),
+                    Change::Default { .. } => self.session.runtimes_notice = Some(code),
+                    Change::SitePhp { .. } => {
+                        self.session.sites_notice = Some(SitesNotice::Failed(code))
+                    }
                 }
             }
             Update::InstallAccepted { job, id } => self.accepted(&job, id),
             Update::InstallRefused { job, code } => self.refused(&job, code),
-            Update::SetupDone(report) => self.setup = Setup::Finished(report),
-            Update::Hosts(status) => self.hosts = status,
+            Update::SetupDone(report) => self.session.setup = Setup::Finished(report),
+            Update::Hosts(status) => self.session.hosts = status,
             Update::HostsSynced(report) => {
-                self.hosts_sync = match not_added(&report) {
+                self.session.hosts_sync = match not_added(&report) {
                     Some(code) => HostsSync::Failed(code),
                     None => HostsSync::Idle,
                 };
             }
-            Update::HostsSyncFailed(code) => self.hosts_sync = HostsSync::Failed(code),
-            Update::SetupFailed(code) => self.setup = Setup::Failed(code),
-            Update::Autostart(state) => self.autostart = state,
+            Update::HostsSyncFailed(code) => self.session.hosts_sync = HostsSync::Failed(code),
+            Update::SetupFailed(code) => self.session.setup = Setup::Failed(code),
+            Update::Autostart(state) => self.session.autostart = state,
             Update::AutostartFailed(code) => {
-                self.autostart = Autostart::Unknown;
-                self.settings_notice = Some(code);
+                self.session.autostart = Autostart::Unknown;
+                self.session.settings_notice = Some(code);
             }
             Update::Removed(removal) => self.removed(removal),
             Update::NotRemoved {
@@ -843,14 +841,14 @@ impl Model {
                 code,
                 in_use,
             } => self.not_removed(removal, code, in_use),
-            Update::Xdebug(state) => self.xdebug = Some(state),
-            Update::XdebugFailed(code) => self.xdebug_notice = Some(code),
+            Update::Xdebug(state) => self.session.xdebug = Some(state),
+            Update::XdebugFailed(code) => self.session.xdebug_notice = Some(code),
             Update::XdebugAnswered(answer) => {
-                self.xdebug_pending = None;
+                self.session.xdebug_pending = None;
                 match answer {
-                    Ok(state) => self.xdebug = Some(state),
+                    Ok(state) => self.session.xdebug = Some(state),
                     // The bridge reads the state again.
-                    Err(code) => self.xdebug_notice = Some(code),
+                    Err(code) => self.session.xdebug_notice = Some(code),
                 }
             }
             Update::Event(event) => apply(self, event),
@@ -879,7 +877,12 @@ impl Model {
     /// the change to send, or `None` if it is the entry shown already. The
     /// list shows `choice` until the daemon answers.
     pub fn choose_site_php(&mut self, name: &str, choice: Choice) -> Option<Change> {
-        let site = self.sites.sites.iter().find(|site| site.name == name)?;
+        let site = self
+            .session
+            .sites
+            .sites
+            .iter()
+            .find(|site| site.name == name)?;
         if self.site_choice(site) == choice {
             return None;
         }
@@ -894,8 +897,8 @@ impl Model {
             php,
         };
         // The notice was about the last action.
-        self.sites_notice = None;
-        self.pending.push(Pending {
+        self.session.sites_notice = None;
+        self.session.pending.push(Pending {
             change: change.clone(),
             shown: choice,
         });
@@ -925,8 +928,8 @@ impl Model {
             runtime,
             version: version_text(runtime, &version, installed),
         };
-        self.runtimes_notice = None;
-        self.pending.push(Pending {
+        self.session.runtimes_notice = None;
+        self.session.pending.push(Pending {
             change: change.clone(),
             shown: Choice::Version(version),
         });
@@ -934,7 +937,10 @@ impl Model {
     }
 
     fn row(&self, runtime: Runtime) -> Option<&RuntimeRow> {
-        self.runtimes.iter().find(|row| row.runtime == runtime)
+        self.session
+            .runtimes
+            .iter()
+            .find(|row| row.runtime == runtime)
     }
 
     /// The installed versions of `runtime`, oldest first. Empty until the
@@ -965,7 +971,7 @@ impl Model {
             Choice::Version(own) => own == *version,
             Choice::Auto => site.php.as_ref() == Some(version),
         };
-        let sites = &self.sites.sites;
+        let sites = &self.session.sites.sites;
         sites
             .iter()
             .filter(|site| runs(site))
@@ -982,7 +988,8 @@ impl Model {
         let (Ok(major), Ok(minor)) = (major.parse::<u64>(), minor.parse::<u64>()) else {
             return 0;
         };
-        self.sites
+        self.session
+            .sites
             .sites
             .iter()
             .filter_map(|site| site.php.as_ref())
@@ -997,7 +1004,7 @@ impl Model {
         if runtime != Runtime::Php {
             return Vec::new();
         }
-        let sites = &self.sites.sites;
+        let sites = &self.session.sites.sites;
         sites
             .iter()
             .filter(|site| self.site_choice(site) == Choice::Version(version.clone()))
@@ -1008,7 +1015,8 @@ impl Model {
     /// What the newest unanswered change of `setting` shows, if any.
     fn pending_choice(&self, setting: Setting<'_>) -> Option<&Choice> {
         // Newest first: the user may pick again before the first answer.
-        self.pending
+        self.session
+            .pending
             .iter()
             .rev()
             .find(|pending| pending.change.setting() == setting)
@@ -1017,15 +1025,20 @@ impl Model {
 
     /// The daemon answered `change`: its list shows the daemon's value again.
     fn settle(&mut self, change: &Change) {
-        if let Some(index) = self.pending.iter().position(|p| p.change == *change) {
-            self.pending.remove(index);
+        if let Some(index) = self
+            .session
+            .pending
+            .iter()
+            .position(|p| p.change == *change)
+        {
+            self.session.pending.remove(index);
         }
     }
 
     /// Versions that are not semver are left out: the daemon lists only
     /// folders named by a version. Opens or closes the first-run panel.
     fn set_runtimes(&mut self, list: RuntimeList) {
-        self.runtimes = list
+        self.session.runtimes = list
             .runtimes
             .into_iter()
             .map(|runtime| {
@@ -1042,11 +1055,13 @@ impl Model {
                 }
             })
             .collect();
-        let needed = first_run_needed(&self.runtimes);
-        match self.first_run {
-            None if needed && !self.first_run_closed => self.first_run = Some(FirstRun::Offer),
+        let needed = first_run_needed(&self.session.runtimes);
+        match self.session.first_run {
+            None if needed && !self.first_run_closed => {
+                self.session.first_run = Some(FirstRun::Offer)
+            }
             // PHP or Caddy came some other way (`marsa install`).
-            Some(FirstRun::Offer) if !needed => self.first_run = None,
+            Some(FirstRun::Offer) if !needed => self.session.first_run = None,
             _ => {}
         }
     }
@@ -1059,11 +1074,11 @@ impl Model {
     pub fn park_request(&mut self, folder: &Path) -> Option<PathBuf> {
         match folder_path(folder) {
             Ok(path) => {
-                self.sites_notice = None;
+                self.session.sites_notice = None;
                 Some(path)
             }
             Err(code) => {
-                self.sites_notice = Some(SitesNotice::Failed(code.to_owned()));
+                self.session.sites_notice = Some(SitesNotice::Failed(code.to_owned()));
                 None
             }
         }
@@ -1079,12 +1094,12 @@ impl Model {
                     .file_name()
                     .and_then(sites::name_from_folder)
                     .unwrap_or_default();
-                self.sites_notice = None;
+                self.session.sites_notice = None;
                 self.link = Some(LinkForm { folder, name });
                 // The form is drawn on Sites; the first-run panel has none.
                 self.route = Route::Sites;
             }
-            Err(code) => self.sites_notice = Some(SitesNotice::Failed(code.to_owned())),
+            Err(code) => self.session.sites_notice = Some(SitesNotice::Failed(code.to_owned())),
         }
     }
 
@@ -1095,11 +1110,11 @@ impl Model {
         let form = self.link.as_ref()?;
         let name = form.name.trim();
         if let Err(err) = sites::validate_name(name) {
-            self.sites_notice = Some(SitesNotice::Failed(err.code().to_owned()));
+            self.session.sites_notice = Some(SitesNotice::Failed(err.code().to_owned()));
             return None;
         }
         let request = (name.to_owned(), form.folder.clone());
-        self.sites_notice = None;
+        self.session.sites_notice = None;
         Some(request)
     }
 
@@ -1108,7 +1123,8 @@ impl Model {
     pub fn link_replaces(&self) -> Option<&Site> {
         let form = self.link.as_ref()?;
         let name = form.name.trim();
-        self.sites
+        self.session
+            .sites
             .sites
             .iter()
             .find(|site| site.name == name && site.root != form.folder)
@@ -1141,7 +1157,7 @@ impl Model {
     /// Whether a job of this window waits or runs. The install buttons wait
     /// for it: the daemon runs one install at a time.
     pub fn installing(&self) -> bool {
-        !self.queue.is_empty() || self.installs.iter().any(Install::runs_for_us)
+        !self.session.queue.is_empty() || self.installs.iter().any(Install::runs_for_us)
     }
 
     /// The user pressed Install for `runtime`: queues the version in its
@@ -1156,12 +1172,12 @@ impl Model {
                 if queued {
                     // The text is used, and the dialog has done its work.
                     self.install_input.remove(runtime.dir_name());
-                    self.install_dialog = None;
+                    self.session.install_dialog = None;
                 }
                 queued
             }
             Err(code) => {
-                self.runtimes_notice = Some(code.to_owned());
+                self.session.runtimes_notice = Some(code.to_owned());
                 false
             }
         }
@@ -1197,16 +1213,16 @@ impl Model {
             return false;
         }
         // The notice was about the last action.
-        self.runtimes_notice = None;
-        self.install_dialog = Some(runtime);
+        self.session.runtimes_notice = None;
+        self.session.install_dialog = Some(runtime);
         true
     }
 
     /// "Cancel" or Escape in the install dialog. The typed text stays for the
     /// next time.
     pub fn close_install(&mut self) {
-        self.install_dialog = None;
-        self.runtimes_notice = None;
+        self.session.install_dialog = None;
+        self.session.runtimes_notice = None;
     }
 
     /// Queues `job`, as the Install button does once its field is right.
@@ -1215,8 +1231,8 @@ impl Model {
         if !self.is_connected() || self.installing() {
             return false;
         }
-        self.runtimes_notice = None;
-        self.queue.push_back(job);
+        self.session.runtimes_notice = None;
+        self.session.queue.push_back(job);
         true
     }
 
@@ -1231,7 +1247,7 @@ impl Model {
         {
             return None;
         }
-        let job = self.queue.pop_front()?;
+        let job = self.session.queue.pop_front()?;
         self.push_install(Install {
             id: None,
             ours: true,
@@ -1332,14 +1348,14 @@ impl Model {
     /// user sees why, and starts again.
     fn our_install_ended(&mut self, success: bool) {
         if !success {
-            self.queue.clear();
+            self.session.queue.clear();
         }
-        if self.first_run == Some(FirstRun::Installing) && self.queue.is_empty() {
-            self.first_run = if success {
+        if self.session.first_run == Some(FirstRun::Installing) && self.session.queue.is_empty() {
+            self.session.first_run = if success {
                 Some(FirstRun::Setup)
             } else {
                 // The new runtimes list closes it if PHP or Caddy came.
-                first_run_needed(&self.runtimes).then_some(FirstRun::Offer)
+                first_run_needed(&self.session.runtimes).then_some(FirstRun::Offer)
             };
         }
     }
@@ -1348,7 +1364,7 @@ impl Model {
     /// interrupted, and no id is kept, since a new daemon counts from 1
     /// again. Only the install shown stays.
     fn forget_installs(&mut self) {
-        self.queue.clear();
+        self.session.queue.clear();
         let shown = self
             .installs
             .iter()
@@ -1372,21 +1388,22 @@ impl Model {
     /// "Install PHP 8.4 and Caddy": the jobs of what is missing, PHP first.
     /// `false` if the panel does not offer it now.
     pub fn start_first_run(&mut self) -> bool {
-        let offered = first_run_needed(&self.runtimes) && !self.first_run_closed;
+        let offered = first_run_needed(&self.session.runtimes) && !self.first_run_closed;
         if !offered || !self.is_connected() || self.installing() {
             return false;
         }
-        self.runtimes_notice = None;
+        self.session.runtimes_notice = None;
         let jobs = [
             (Runtime::Php, Some(FIRST_PHP.to_owned())),
             (Runtime::Caddy, None),
         ];
         let missing = jobs
             .into_iter()
-            .filter(|(runtime, _)| runtime_missing(&self.runtimes, *runtime));
-        self.queue
+            .filter(|(runtime, _)| runtime_missing(&self.session.runtimes, *runtime));
+        self.session
+            .queue
             .extend(missing.map(|(runtime, version)| InstallJob { runtime, version }));
-        self.first_run = Some(FirstRun::Installing);
+        self.session.first_run = Some(FirstRun::Installing);
         true
     }
 
@@ -1398,8 +1415,8 @@ impl Model {
     pub fn needs_first_run(&self) -> bool {
         self.is_connected()
             && !self.first_run_closed
-            && !self.runtimes.is_empty()
-            && (first_run_needed(&self.runtimes) || self.sites.sites.is_empty())
+            && !self.session.runtimes.is_empty()
+            && (first_run_needed(&self.session.runtimes) || self.session.sites.sites.is_empty())
     }
 
     /// Whether the first-run panel is what the main area shows: Home, while
@@ -1410,28 +1427,29 @@ impl Model {
 
     /// "Not now" or "Close" in the first-run panel.
     pub fn close_first_run(&mut self) {
-        self.first_run = None;
+        self.session.first_run = None;
         self.first_run_closed = true;
     }
 
     /// "Add to /etc/hosts". `false` while it or a setup runs, with no
     /// daemon, or with nothing to add.
     pub fn start_hosts_sync(&mut self) -> bool {
-        let nothing = !self.hosts.used || self.hosts.missing.is_empty();
-        let busy = self.hosts_sync == HostsSync::Running || self.setup == Setup::Running;
+        let nothing = !self.session.hosts.used || self.session.hosts.missing.is_empty();
+        let busy =
+            self.session.hosts_sync == HostsSync::Running || self.session.setup == Setup::Running;
         if !self.is_connected() || nothing || busy {
             return false;
         }
-        self.hosts_sync = HostsSync::Running;
+        self.session.hosts_sync = HostsSync::Running;
         true
     }
 
     /// "Run setup". `false` while one runs, or with no daemon.
     pub fn start_setup(&mut self) -> bool {
-        if !self.is_connected() || self.setup == Setup::Running {
+        if !self.is_connected() || self.session.setup == Setup::Running {
             return false;
         }
-        self.setup = Setup::Running;
+        self.session.setup = Setup::Running;
         true
     }
 
@@ -1442,17 +1460,17 @@ impl Model {
         if !self.is_connected() {
             return None;
         }
-        let enabled = match self.autostart {
+        let enabled = match self.session.autostart {
             Autostart::On => false,
             Autostart::Off | Autostart::Stale => true,
             Autostart::Unknown | Autostart::Unsupported => return None,
         };
-        self.autostart = if enabled {
+        self.session.autostart = if enabled {
             Autostart::On
         } else {
             Autostart::Off
         };
-        self.settings_notice = None;
+        self.session.settings_notice = None;
         Some(enabled)
     }
 
@@ -1461,7 +1479,7 @@ impl Model {
     /// Whether a removal can be asked for now: connected, and no other
     /// removal waits for its answer.
     pub fn can_remove(&self) -> bool {
-        self.is_connected() && self.removing.is_none()
+        self.is_connected() && self.session.removing.is_none()
     }
 
     /// [`Model::can_remove`], and no job of this window installs: the daemon
@@ -1472,13 +1490,13 @@ impl Model {
 
     /// The removal sent and not answered yet.
     pub fn removing(&self) -> Option<&Removal> {
-        self.removing.as_ref()
+        self.session.removing.as_ref()
     }
 
     /// Whether an uninstall waits for its answer. The install buttons wait
     /// for it.
     pub fn uninstalling(&self) -> bool {
-        matches!(self.removing, Some(Removal::Uninstall { .. }))
+        matches!(self.session.removing, Some(Removal::Uninstall { .. }))
     }
 
     fn may_remove(&self, removal: &Removal) -> bool {
@@ -1494,40 +1512,40 @@ impl Model {
         if !self.may_remove(&removal) {
             return false;
         }
-        self.confirm = Some(removal);
+        self.session.confirm = Some(removal);
         true
     }
 
     /// "Cancel", Escape, or a click beside the confirmation.
     pub fn cancel_removal(&mut self) {
-        self.confirm = None;
+        self.session.confirm = None;
     }
 
     /// The user confirmed: the removal to send, or `None` if it cannot be
     /// sent now. The last notice of its section goes: it was about the last
     /// action.
     pub fn confirm_removal(&mut self) -> Option<Removal> {
-        let removal = self.confirm.take()?;
+        let removal = self.session.confirm.take()?;
         if !self.may_remove(&removal) {
             return None;
         }
         match removal {
             Removal::Uninstall { .. } => {
-                self.uninstall_notice = None;
-                self.runtimes_notice = None;
+                self.session.uninstall_notice = None;
+                self.session.runtimes_notice = None;
             }
-            Removal::Unlink { .. } | Removal::Forget { .. } => self.sites_notice = None,
+            Removal::Unlink { .. } | Removal::Forget { .. } => self.session.sites_notice = None,
         }
-        self.removing = Some(removal.clone());
+        self.session.removing = Some(removal.clone());
         Some(removal)
     }
 
     /// Whether `removal` is the one waiting for its answer, which is then no
     /// longer waited for. An answer from a lost session finds none.
     fn settle_removal(&mut self, removal: &Removal) -> bool {
-        let ours = self.removing.as_ref() == Some(removal);
+        let ours = self.session.removing.as_ref() == Some(removal);
         if ours {
-            self.removing = None;
+            self.session.removing = None;
         }
         ours
     }
@@ -1541,7 +1559,12 @@ impl Model {
                 // The bridge reads the list again; until it comes, the
                 // version is gone from the table already. The last version
                 // took the default that picked it, as in the daemon.
-                if let Some(row) = self.runtimes.iter_mut().find(|r| r.runtime == runtime) {
+                if let Some(row) = self
+                    .session
+                    .runtimes
+                    .iter_mut()
+                    .find(|r| r.runtime == runtime)
+                {
                     let picks = |text: &str| resolver::best_match(text, &row.installed);
                     let picked = row.default.as_deref().and_then(|t| picks(t).ok().flatten());
                     row.installed.retain(|installed| *installed != version);
@@ -1549,7 +1572,7 @@ impl Model {
                         row.default = None;
                     }
                 }
-                self.uninstall_notice = Some(UninstallNotice::Done { runtime, version });
+                self.session.uninstall_notice = Some(UninstallNotice::Done { runtime, version });
             }
             // The new list comes as `sites_changed`.
             Removal::Unlink { site } => {
@@ -1558,9 +1581,11 @@ impl Model {
                 if self.route == Route::Site(site.clone()) {
                     self.route = Route::Sites;
                 }
-                self.sites_notice = Some(SitesNotice::Unlinked(site));
+                self.session.sites_notice = Some(SitesNotice::Unlinked(site));
             }
-            Removal::Forget { folder } => self.sites_notice = Some(SitesNotice::Forgot(folder)),
+            Removal::Forget { folder } => {
+                self.session.sites_notice = Some(SitesNotice::Forgot(folder))
+            }
         }
     }
 
@@ -1570,7 +1595,7 @@ impl Model {
         }
         match removal {
             Removal::Uninstall { runtime, version } => {
-                self.uninstall_notice = Some(match in_use {
+                self.session.uninstall_notice = Some(match in_use {
                     Some(in_use) => UninstallNotice::InUse { runtime, in_use },
                     None => UninstallNotice::Failed {
                         runtime,
@@ -1581,10 +1606,10 @@ impl Model {
             }
             Removal::Unlink { site } if code == SITE_IS_PARKED => {
                 let folder = self.holder(&site).map(Path::to_path_buf);
-                self.sites_notice = Some(SitesNotice::SiteIsParked { site, folder });
+                self.session.sites_notice = Some(SitesNotice::SiteIsParked { site, folder });
             }
             Removal::Unlink { .. } | Removal::Forget { .. } => {
-                self.sites_notice = Some(SitesNotice::Failed(code));
+                self.session.sites_notice = Some(SitesNotice::Failed(code));
             }
         }
     }
@@ -1599,7 +1624,8 @@ impl Model {
             return None;
         }
         let parent = site.root.parent()?;
-        self.sites
+        self.session
+            .sites
             .parked
             .iter()
             .find(|dir| dir.as_path() == parent)
@@ -1609,9 +1635,15 @@ impl Model {
     /// The parked folder that holds the folder of the site `name`, after the
     /// daemon said it comes from one.
     fn holder(&self, name: &str) -> Option<&Path> {
-        let site = self.sites.sites.iter().find(|site| site.name == name)?;
+        let site = self
+            .session
+            .sites
+            .sites
+            .iter()
+            .find(|site| site.name == name)?;
         let parent = site.root.parent()?;
-        self.sites
+        self.session
+            .sites
             .parked
             .iter()
             .find(|dir| dir.as_path() == parent)
@@ -1620,7 +1652,8 @@ impl Model {
 
     /// How many sites the parked folder `folder` gives now.
     pub fn sites_in(&self, folder: &Path) -> usize {
-        self.sites
+        self.session
+            .sites
             .sites
             .iter()
             .filter(|site| self.parked_folder(site) == Some(folder))
@@ -1629,7 +1662,8 @@ impl Model {
 
     /// The folder of the site `name`, if it is in the list.
     pub fn site_root(&self, name: &str) -> Option<&Path> {
-        self.sites
+        self.session
+            .sites
             .sites
             .iter()
             .find(|site| site.name == name)
@@ -1641,26 +1675,27 @@ impl Model {
     /// Whether the Xdebug box shows a tick: the state asked for until the
     /// daemon answers, else the daemon's. `None` until it is read.
     pub fn xdebug_on(&self) -> Option<bool> {
-        self.xdebug_pending
-            .or_else(|| self.xdebug.as_ref().map(|state| state.enabled))
+        self.session
+            .xdebug_pending
+            .or_else(|| self.session.xdebug.as_ref().map(|state| state.enabled))
     }
 
     /// The state the box asked for, while the daemon writes every `php.ini`
     /// and starts the pools again.
     pub fn xdebug_pending(&self) -> Option<bool> {
-        self.xdebug_pending
+        self.session.xdebug_pending
     }
 
     /// The Xdebug box was clicked. Returns the state to ask for, or `None`
     /// while the state is unknown or a change runs. The box shows the new
     /// state until the daemon answers.
     pub fn toggle_xdebug(&mut self) -> Option<bool> {
-        if !self.is_connected() || self.xdebug_pending.is_some() {
+        if !self.is_connected() || self.session.xdebug_pending.is_some() {
             return None;
         }
-        let enabled = !self.xdebug.as_ref()?.enabled;
-        self.xdebug_pending = Some(enabled);
-        self.xdebug_notice = None;
+        let enabled = !self.session.xdebug.as_ref()?.enabled;
+        self.session.xdebug_pending = Some(enabled);
+        self.session.xdebug_notice = None;
         Some(enabled)
     }
 
@@ -1668,21 +1703,21 @@ impl Model {
     /// not come back, and the next result may show.
     pub fn dismiss_notice(&mut self, source: NoticeSource) {
         match source {
-            NoticeSource::Call => self.notice = None,
-            NoticeSource::Sites => self.sites_notice = None,
+            NoticeSource::Call => self.session.notice = None,
+            NoticeSource::Sites => self.session.sites_notice = None,
             NoticeSource::Install => {
                 if let Some(index) = self.install_slot() {
                     self.installs[index].noticed = true;
                 }
             }
-            NoticeSource::Uninstall => self.uninstall_notice = None,
-            NoticeSource::Runtimes => self.runtimes_notice = None,
-            NoticeSource::Autostart => self.settings_notice = None,
+            NoticeSource::Uninstall => self.session.uninstall_notice = None,
+            NoticeSource::Runtimes => self.session.runtimes_notice = None,
+            NoticeSource::Autostart => self.session.settings_notice = None,
         }
     }
 
     pub fn is_connected(&self) -> bool {
-        matches!(self.connection, Connection::Running(_))
+        matches!(self.session.connection, Connection::Running(_))
     }
 
     /// Applies what the user did. Returns the command to send to the
@@ -1714,7 +1749,7 @@ impl Model {
             }
             Action::Service { service, action } => {
                 // The notice was about the last action.
-                self.notice = None;
+                self.session.notice = None;
                 Some(Command::Service { service, action })
             }
             Action::SetDefault { runtime, version } => {
@@ -1747,7 +1782,7 @@ impl Model {
             }
             Action::SetSecure { site, secure } => {
                 // The notice was about the last action.
-                self.sites_notice = None;
+                self.session.sites_notice = None;
                 Some(Command::Secure { site, secure })
             }
             Action::AskUnlink(site) => {
@@ -1786,7 +1821,7 @@ impl Model {
             Action::SetInstallVersion { runtime, text } => {
                 self.set_install_text(runtime, text);
                 // The line under the field was about the last text.
-                self.runtimes_notice = None;
+                self.session.runtimes_notice = None;
                 None
             }
             Action::SubmitInstall(runtime) => {
@@ -1826,7 +1861,8 @@ impl Model {
 
     /// The address of the site `name`, for the browser.
     pub fn site_url(&self, name: &str) -> Option<String> {
-        self.sites
+        self.session
+            .sites
             .sites
             .iter()
             .find(|site| site.name == name)
@@ -1836,13 +1872,14 @@ impl Model {
     /// How Marsa works as a whole: the daemon, then the sites, then the web
     /// server that serves them.
     pub fn overall(&self) -> Overall {
-        match &self.connection {
+        match &self.session.connection {
             Connection::Connecting | Connection::Reconnecting => Overall::Connecting,
             Connection::ShuttingDown => Overall::Stopping,
             Connection::Failed(_) => Overall::DaemonDown,
-            Connection::Running(_) if self.sites.sites.is_empty() => Overall::NoSites,
+            Connection::Running(_) if self.session.sites.sites.is_empty() => Overall::NoSites,
             Connection::Running(_) => {
                 let web = self
+                    .session
                     .services
                     .iter()
                     .find(|service| service.id == WEB_SERVER);
@@ -1858,38 +1895,38 @@ impl Model {
     /// The tables show live state only, so they go. The log stays: it may
     /// tell why the daemon stopped.
     fn disconnect(&mut self, connection: Connection) {
-        self.connection = connection;
-        self.services.clear();
-        self.sites = SiteList::default();
-        self.runtimes.clear();
+        self.session.connection = connection;
+        self.session.services.clear();
+        self.session.sites = SiteList::default();
+        self.session.runtimes.clear();
         // No answer comes from a lost session.
-        self.pending.clear();
+        self.session.pending.clear();
         self.forget_installs();
-        self.first_run = None;
+        self.session.first_run = None;
         // Its buttons are gone with the session.
-        self.install_dialog = None;
-        if self.setup == Setup::Running {
-            self.setup = Setup::Idle;
+        self.session.install_dialog = None;
+        if self.session.setup == Setup::Running {
+            self.session.setup = Setup::Idle;
         }
-        self.autostart = Autostart::Unknown;
+        self.session.autostart = Autostart::Unknown;
         // No answer comes from a lost session, and its buttons are gone.
-        self.confirm = None;
-        self.removing = None;
-        self.xdebug = None;
-        self.xdebug_pending = None;
+        self.session.confirm = None;
+        self.session.removing = None;
+        self.session.xdebug = None;
+        self.session.xdebug_pending = None;
     }
 
     /// The daemon sends the sites sorted by name already; sorting here keeps
     /// the table right even if a daemon does not.
     fn set_sites(&mut self, mut list: SiteList) {
         list.sites.sort_by(|a, b| a.name.cmp(&b.name));
-        self.sites = list;
+        self.session.sites = list;
     }
 
     /// Adds a line to the log of its service, unless the window has it
     /// already (the recent lines and the live ones overlap).
     fn push_log(&mut self, line: LogLine) {
-        let log = self.logs.entry(line.service).or_default();
+        let log = self.session.logs.entry(line.service).or_default();
         if log.last_seq.is_some_and(|last| line.seq <= last) {
             return;
         }
@@ -1911,7 +1948,7 @@ impl Model {
     /// has written none.
     pub fn log_rows(&self, id: &str) -> &VecDeque<LogRow> {
         static NONE: VecDeque<LogRow> = VecDeque::new();
-        self.logs.get(id).map_or(&NONE, |log| &log.rows)
+        self.session.logs.get(id).map_or(&NONE, |log| &log.rows)
     }
 }
 
@@ -1944,13 +1981,17 @@ pub fn apply(model: &mut Model, event: Event) {
             // A new run of a service may get a new log buffer whose `seq`
             // starts again at 0, so the old `seq` must not hide it.
             if status.state == ServiceState::Starting
-                && let Some(log) = model.logs.get_mut(&status.id)
+                && let Some(log) = model.session.logs.get_mut(&status.id)
             {
                 log.last_seq = None;
             }
-            match model.services.binary_search_by(|s| s.id.cmp(&status.id)) {
-                Ok(index) => model.services[index] = status,
-                Err(index) => model.services.insert(index, status),
+            match model
+                .session
+                .services
+                .binary_search_by(|s| s.id.cmp(&status.id))
+            {
+                Ok(index) => model.session.services[index] = status,
+                Err(index) => model.session.services.insert(index, status),
             }
         }
         Event::Log(line) => model.push_log(line),
@@ -1959,6 +2000,7 @@ pub fn apply(model: &mut Model, event: Event) {
         Event::SitesChanged(list) => model.set_sites(list),
         Event::DefaultChanged(default) => {
             let row = model
+                .session
                 .runtimes
                 .iter_mut()
                 .find(|r| r.runtime == default.runtime);
@@ -1967,7 +2009,7 @@ pub fn apply(model: &mut Model, event: Event) {
             }
         }
         // From this window or from `marsa setup`: the same report.
-        Event::SetupFinished(report) => model.setup = Setup::Finished(report),
+        Event::SetupFinished(report) => model.session.setup = Setup::Finished(report),
         Event::ShuttingDown => model.disconnect(Connection::ShuttingDown),
     }
 }
@@ -2169,7 +2211,13 @@ mod tests {
     }
 
     fn names(model: &Model) -> Vec<&str> {
-        model.sites.sites.iter().map(|s| s.name.as_str()).collect()
+        model
+            .session
+            .sites
+            .sites
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect()
     }
 
     /// An absolute path on this system, from Unix-style parts. `cfg!`
@@ -2216,7 +2264,7 @@ mod tests {
             ),
             "{command:?}"
         );
-        assert_eq!(model.notice, None);
+        assert_eq!(model.session.notice, None);
     }
 
     #[test]
@@ -2256,14 +2304,14 @@ mod tests {
         let command = model.apply_action(Action::SyncHosts);
         assert!(matches!(command, Some(Command::SyncHosts)), "{command:?}");
         assert!(model.apply_action(Action::SyncHosts).is_none(), "it runs");
-        assert_eq!(model.hosts_sync, HostsSync::Running);
+        assert_eq!(model.session.hosts_sync, HostsSync::Running);
     }
 
     #[test]
     fn the_first_run_actions_install_set_up_and_close() {
         let mut model = with_runtimes(&[], &[]);
         assert!(model.apply_action(Action::StartFirstRun).is_none());
-        assert_eq!(model.first_run, Some(FirstRun::Installing));
+        assert_eq!(model.session.first_run, Some(FirstRun::Installing));
         assert_eq!(
             model.next_install(),
             Some(job(Runtime::Php, Some(FIRST_PHP)))
@@ -2271,7 +2319,7 @@ mod tests {
 
         let command = model.apply_action(Action::RunSetup);
         assert!(matches!(command, Some(Command::Setup)), "{command:?}");
-        assert_eq!(model.setup, Setup::Running);
+        assert_eq!(model.session.setup, Setup::Running);
         assert!(
             model.apply_action(Action::RunSetup).is_none(),
             "one at a time"
@@ -2280,7 +2328,7 @@ mod tests {
         // The folder dialog is `App`'s: the model keeps out of it.
         assert!(model.apply_action(Action::PickFolder(Pick::Park)).is_none());
         assert!(model.apply_action(Action::CloseFirstRun).is_none());
-        assert!(model.first_run.is_none() && !model.needs_first_run());
+        assert!(model.session.first_run.is_none() && !model.needs_first_run());
     }
 
     #[test]
@@ -2313,7 +2361,7 @@ mod tests {
     fn open_site_changes_nothing_and_the_address_comes_from_the_model() {
         let mut model = connected();
         model.update(Update::Sites(site_list(&["shop"])));
-        model.sites.sites[0].secure = false;
+        model.session.sites.sites[0].secure = false;
         assert!(
             model
                 .apply_action(Action::OpenSite("shop".into()))
@@ -2321,7 +2369,7 @@ mod tests {
         );
         assert_eq!(model.route, Route::Home);
         assert_eq!(model.site_url("shop").as_deref(), Some("http://shop.test"));
-        model.sites.sites[0].secure = true;
+        model.session.sites.sites[0].secure = true;
         assert_eq!(model.site_url("shop").as_deref(), Some("https://shop.test"));
         assert_eq!(model.site_url("gone"), None);
     }
@@ -2381,7 +2429,7 @@ mod tests {
         assert!(matches!(command, Some(Command::Save(_))), "{command:?}");
         assert!(model.apply_action(pick).is_none(), "the same entry again");
 
-        model.sites_notice = Some(SitesNotice::Unlinked("old".into()));
+        model.session.sites_notice = Some(SitesNotice::Unlinked("old".into()));
         let secure = Action::SetSecure {
             site: "shop".into(),
             secure: false,
@@ -2392,7 +2440,7 @@ mod tests {
             "{command:?}"
         );
         assert!(
-            model.sites_notice.is_none(),
+            model.session.sites_notice.is_none(),
             "the notice was about the last action"
         );
 
@@ -2402,7 +2450,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            model.confirm,
+            model.session.confirm,
             Some(Removal::Unlink {
                 site: "shop".into()
             })
@@ -2414,7 +2462,7 @@ mod tests {
                 .apply_action(Action::AskForget(folder.clone()))
                 .is_none()
         );
-        assert_eq!(model.confirm, Some(Removal::Forget { folder }));
+        assert_eq!(model.session.confirm, Some(Removal::Forget { folder }));
     }
 
     #[test]
@@ -2422,7 +2470,7 @@ mod tests {
         let mut model = with_parked();
         model.apply_action(Action::AskUnlink("api".into()));
         assert!(model.apply_action(Action::CancelRemoval).is_none());
-        assert!(model.confirm.is_none() && model.removing().is_none());
+        assert!(model.session.confirm.is_none() && model.removing().is_none());
         // Nothing waits: the answer sends nothing.
         assert!(model.apply_action(Action::ConfirmRemoval).is_none());
 
@@ -2430,7 +2478,7 @@ mod tests {
         let sent = model.apply_action(Action::ConfirmRemoval);
         assert!(matches!(sent, Some(Command::Remove(ref r)) if *r == forget("/code")));
         assert_eq!(model.removing(), Some(&forget("/code")));
-        assert!(model.confirm.is_none());
+        assert!(model.session.confirm.is_none());
     }
 
     #[test]
@@ -2451,7 +2499,7 @@ mod tests {
             down.apply_action(Action::AskUnlink("shop".into()))
                 .is_none()
         );
-        assert!(down.confirm.is_none());
+        assert!(down.session.confirm.is_none());
     }
 
     #[test]
@@ -2467,9 +2515,12 @@ mod tests {
         // A name that is not valid sends nothing and says why.
         model.apply_action(Action::SetLinkName("My Blog".into()));
         assert!(model.apply_action(Action::SubmitLink).is_none());
-        assert!(matches!(model.sites_notice, Some(SitesNotice::Failed(_))));
+        assert!(matches!(
+            model.session.sites_notice,
+            Some(SitesNotice::Failed(_))
+        ));
         model.apply_action(Action::DismissNotice(NoticeSource::Sites));
-        assert!(model.sites_notice.is_none());
+        assert!(model.session.sites_notice.is_none());
 
         model.apply_action(Action::SetLinkName("blog".into()));
         let command = model.apply_action(Action::SubmitLink);
@@ -2531,7 +2582,7 @@ mod tests {
             status("caddy", ServiceState::Running),
             status("php", ServiceState::Stopped),
         ];
-        assert_eq!(model.services, expected);
+        assert_eq!(model.session.services, expected);
     }
 
     #[test]
@@ -2673,10 +2724,10 @@ mod tests {
         let mut model = connected();
         apply(&mut model, changed("caddy", ServiceState::Running));
         apply(&mut model, Event::ShuttingDown);
-        assert_eq!(model.connection, Connection::ShuttingDown);
-        assert!(model.services.is_empty());
+        assert_eq!(model.session.connection, Connection::ShuttingDown);
+        assert!(model.session.services.is_empty());
         assert_eq!(
-            crate::strings::status_line(&model.connection),
+            crate::strings::status_line(&model.session.connection),
             "Daemon: shutting down"
         );
     }
@@ -2687,12 +2738,12 @@ mod tests {
         apply(&mut model, line("caddy", 3));
         model.update(Update::Notice("service_not_found".into()));
         model.update(Update::Reconnecting);
-        assert_eq!(model.connection, Connection::Reconnecting);
+        assert_eq!(model.session.connection, Connection::Reconnecting);
         assert_eq!(texts(&model, "caddy"), ["line 3"]);
 
         model.update(Update::Connected(health()));
         assert!(model.is_connected());
-        assert!(model.log_rows("caddy").is_empty() && model.notice.is_none());
+        assert!(model.log_rows("caddy").is_empty() && model.session.notice.is_none());
         // The restarted daemon counts from 0 again.
         apply(&mut model, line("caddy", 0));
         assert_eq!(texts(&model, "caddy"), ["line 0"]);
@@ -2730,7 +2781,7 @@ mod tests {
             code: "site_name_invalid".into(),
         });
         apply(&mut model, Event::SitesChanged(next.clone()));
-        assert_eq!(model.sites, next);
+        assert_eq!(model.session.sites, next);
     }
 
     #[test]
@@ -2754,7 +2805,7 @@ mod tests {
         model.update(Update::Sites(site_list(&["shop"])));
         model.pick_link_folder(&absolute("/work/api"));
         model.update(Update::Reconnecting);
-        assert!(model.sites.sites.is_empty() && model.sites.parked.is_empty());
+        assert!(model.session.sites.sites.is_empty() && model.session.sites.parked.is_empty());
 
         model.update(Update::Connected(health()));
         let form = model.link.as_ref().unwrap();
@@ -2762,7 +2813,7 @@ mod tests {
             (form.folder.clone(), form.name.as_str()),
             (absolute("/work/api"), "api")
         );
-        assert!(model.sites_notice.is_none());
+        assert!(model.session.sites_notice.is_none());
     }
 
     #[test]
@@ -2787,17 +2838,17 @@ mod tests {
         let mut model = connected();
         assert_eq!(model.park_request(Path::new("code")), None);
         let failed = SitesNotice::Failed("site_path_relative".into());
-        assert_eq!(model.sites_notice, Some(failed.clone()));
+        assert_eq!(model.session.sites_notice, Some(failed.clone()));
         model.pick_link_folder(Path::new("code"));
         assert!(model.link.is_none());
-        assert_eq!(model.sites_notice, Some(failed));
+        assert_eq!(model.session.sites_notice, Some(failed));
 
         let picked = format!("{}/", absolute("/code").display());
         assert_eq!(
             model.park_request(Path::new(&picked)),
             Some(absolute("/code"))
         );
-        assert!(model.sites_notice.is_none());
+        assert!(model.session.sites_notice.is_none());
     }
 
     #[test]
@@ -2805,7 +2856,7 @@ mod tests {
         let mut model = connected();
         model.update(Update::Parked(absolute("/code")));
         let parked = SitesNotice::Parked(absolute("/code"));
-        assert_eq!(model.sites_notice, Some(parked));
+        assert_eq!(model.session.sites_notice, Some(parked));
     }
 
     #[test]
@@ -2815,7 +2866,7 @@ mod tests {
         model.update(Update::SitesFailed("site_not_found".into()));
         assert_eq!(names(&model), ["shop"]);
         let failed = SitesNotice::Failed("site_not_found".into());
-        assert_eq!(model.sites_notice, Some(failed));
+        assert_eq!(model.session.sites_notice, Some(failed));
     }
 
     // -- The PHP and Node lists --
@@ -2869,7 +2920,13 @@ mod tests {
     }
 
     fn site_named<'a>(model: &'a Model, name: &str) -> &'a Site {
-        model.sites.sites.iter().find(|s| s.name == name).unwrap()
+        model
+            .session
+            .sites
+            .sites
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap()
     }
 
     fn choice(model: &Model, name: &str) -> Choice {
@@ -2901,7 +2958,7 @@ mod tests {
             (&[], None),
         )));
         assert_eq!(model.default_choice(Runtime::Php), None);
-        assert_eq!(model.runtimes[0].default.as_deref(), Some("8.2"));
+        assert_eq!(model.session.runtimes[0].default.as_deref(), Some("8.2"));
     }
 
     #[test]
@@ -2919,7 +2976,7 @@ mod tests {
         apply(&mut model, default_changed(Runtime::Php, "8.3", "8.3.27"));
         model.update(Update::Saved(want));
         assert_eq!(model.default_choice(Runtime::Php), Some(v("8.3.27")));
-        assert_eq!(model.runtimes[0].default.as_deref(), Some("8.3"));
+        assert_eq!(model.session.runtimes[0].default.as_deref(), Some("8.3"));
 
         // The default already, and a runtime with no default: nothing to send.
         assert_eq!(model.choose_default(Runtime::Php, v("8.3.27")), None);
@@ -2949,12 +3006,12 @@ mod tests {
         model.update(Update::NotSaved { change, code });
         assert_eq!(model.default_choice(Runtime::Php), Some(v("8.4.23")));
         assert_eq!(
-            model.runtimes_notice.as_deref(),
+            model.session.runtimes_notice.as_deref(),
             Some("version_not_installed")
         );
         // The next pick clears the notice.
         model.choose_default(Runtime::Php, v("8.3.27"));
-        assert!(model.runtimes_notice.is_none());
+        assert!(model.session.runtimes_notice.is_none());
     }
 
     #[test]
@@ -3050,7 +3107,7 @@ mod tests {
         });
         assert_eq!(choice(&model, "shop"), Choice::Auto);
         let failed = SitesNotice::Failed("config_write".into());
-        assert_eq!(model.sites_notice, Some(failed));
+        assert_eq!(model.session.sites_notice, Some(failed));
     }
 
     #[test]
@@ -3087,7 +3144,7 @@ mod tests {
         let mut model = with_php(vec![shop.clone()]);
         model.choose_site_php("shop", Choice::Version(v("8.3.27")));
         model.update(Update::Reconnecting);
-        assert!(model.runtimes.is_empty() && model.php_versions().is_empty());
+        assert!(model.session.runtimes.is_empty() && model.php_versions().is_empty());
         // The pick was not saved: the old value shows with the new session.
         model.update(Update::Connected(health()));
         model.update(Update::Sites(SiteList {
@@ -3096,7 +3153,10 @@ mod tests {
         }));
         assert_eq!(choice(&model, "shop"), Choice::Auto);
         model.update(Update::RuntimesFailed("runtimes_read".into()));
-        assert_eq!(model.runtimes_notice.as_deref(), Some("runtimes_read"));
+        assert_eq!(
+            model.session.runtimes_notice.as_deref(),
+            Some("runtimes_read")
+        );
     }
 
     // -- Pools (ADR 0016) --
@@ -3299,12 +3359,15 @@ mod tests {
         let mut model = with_runtimes(&[], &[]);
         model.set_install_text(Runtime::Node, "lts/*".into());
         assert!(!model.request_install(Runtime::Node));
-        assert_eq!(model.runtimes_notice.as_deref(), Some("unsupported_alias"));
+        assert_eq!(
+            model.session.runtimes_notice.as_deref(),
+            Some("unsupported_alias")
+        );
         assert_eq!(model.next_install(), None);
         // An empty field asks for the newest version.
         model.set_install_text(Runtime::Node, String::new());
         assert!(model.request_install(Runtime::Node));
-        assert!(model.runtimes_notice.is_none());
+        assert!(model.session.runtimes_notice.is_none());
         assert_eq!(model.next_install(), Some(job(Runtime::Node, None)));
     }
 
@@ -3337,7 +3400,7 @@ mod tests {
         // Caddy is not sent after PHP failed; the offer is back.
         assert_eq!(model.next_install(), None);
         assert!(!model.installing());
-        assert_eq!(model.first_run, Some(FirstRun::Offer));
+        assert_eq!(model.session.first_run, Some(FirstRun::Offer));
     }
 
     #[test]
@@ -3366,7 +3429,7 @@ mod tests {
         apply(&mut model, Event::ShuttingDown);
         let interrupted = InstallStep::Failed(failure(INSTALL_INTERRUPTED.into()));
         assert_eq!(step(&model), interrupted);
-        assert!(!model.installing() && model.first_run.is_none());
+        assert!(!model.installing() && model.session.first_run.is_none());
 
         // A new daemon counts from 1 again: its install 1 is a new one.
         model.update(Update::Connected(health()));
@@ -3390,22 +3453,27 @@ mod tests {
 
     #[test]
     fn the_first_run_panel_shows_with_no_php_or_no_caddy() {
-        assert!(with_runtimes(&[], &[]).first_run == Some(FirstRun::Offer));
+        assert!(with_runtimes(&[], &[]).session.first_run == Some(FirstRun::Offer));
         // Either one missing is enough: no site opens without both.
-        assert!(with_runtimes(&["8.4.23"], &[]).first_run == Some(FirstRun::Offer));
-        assert!(with_runtimes(&[], &["2.11.7"]).first_run == Some(FirstRun::Offer));
-        assert!(with_runtimes(&["8.4.23"], &["2.11.7"]).first_run.is_none());
+        assert!(with_runtimes(&["8.4.23"], &[]).session.first_run == Some(FirstRun::Offer));
+        assert!(with_runtimes(&[], &["2.11.7"]).session.first_run == Some(FirstRun::Offer));
+        assert!(
+            with_runtimes(&["8.4.23"], &["2.11.7"])
+                .session
+                .first_run
+                .is_none()
+        );
         // Not before the list is read.
-        assert!(connected().first_run.is_none());
+        assert!(connected().session.first_run.is_none());
         assert!(!first_run_needed(&[]));
 
         // PHP installed from a terminal: Caddy is still missing. Then Caddy
         // closes the offer.
         let mut model = with_runtimes(&[], &[]);
         model.update(Update::Runtimes(list(&["8.4.23"], &[])));
-        assert_eq!(model.first_run, Some(FirstRun::Offer));
+        assert_eq!(model.session.first_run, Some(FirstRun::Offer));
         model.update(Update::Runtimes(list(&["8.4.23"], &["2.11.7"])));
-        assert!(model.first_run.is_none());
+        assert!(model.session.first_run.is_none());
     }
 
     #[test]
@@ -3429,7 +3497,7 @@ mod tests {
         });
         apply(&mut model, done(1, Runtime::Php, "8.4.23"));
         assert_eq!(model.next_install(), None, "Caddy is there: no second job");
-        assert_eq!(model.first_run, Some(FirstRun::Setup));
+        assert_eq!(model.session.first_run, Some(FirstRun::Setup));
         // Nothing to install: nothing to start.
         assert!(!with_runtimes(&["8.4.23"], &["2.11.7"]).start_first_run());
     }
@@ -3471,7 +3539,7 @@ mod tests {
         let mut model = with_runtimes(&[], &[]);
         assert!(model.start_first_run());
         assert!(!model.start_first_run(), "once");
-        assert_eq!(model.first_run, Some(FirstRun::Installing));
+        assert_eq!(model.session.first_run, Some(FirstRun::Installing));
 
         let php = model.next_install().unwrap();
         assert_eq!(php, job(Runtime::Php, Some(FIRST_PHP)));
@@ -3479,15 +3547,15 @@ mod tests {
         apply(&mut model, done(1, Runtime::Php, "8.4.23"));
         // The bridge reads the list again after each install.
         model.update(Update::Runtimes(list(&["8.4.23"], &[])));
-        assert_eq!(model.first_run, Some(FirstRun::Installing));
+        assert_eq!(model.session.first_run, Some(FirstRun::Installing));
 
         let caddy = model.next_install().unwrap();
         assert_eq!(caddy, job(Runtime::Caddy, None));
         model.update(Update::InstallAccepted { job: caddy, id: 2 });
         apply(&mut model, done(2, Runtime::Caddy, "2.11.7"));
-        assert_eq!(model.first_run, Some(FirstRun::Setup));
+        assert_eq!(model.session.first_run, Some(FirstRun::Setup));
         model.update(Update::Runtimes(list(&["8.4.23"], &["2.11.7"])));
-        assert_eq!(model.first_run, Some(FirstRun::Setup));
+        assert_eq!(model.session.first_run, Some(FirstRun::Setup));
         assert_eq!(model.next_install(), None);
     }
 
@@ -3503,7 +3571,7 @@ mod tests {
         model.update(Update::InstallAccepted { job: caddy, id: 2 });
         apply(&mut model, failed(2, "download_failed"));
         // PHP is there and Caddy is not: the panel offers the install again.
-        assert_eq!(model.first_run, Some(FirstRun::Offer));
+        assert_eq!(model.session.first_run, Some(FirstRun::Offer));
         assert_eq!(
             step(&model),
             InstallStep::Failed(failure("download_failed".into()))
@@ -3515,11 +3583,11 @@ mod tests {
         let mut model = with_runtimes(&[], &[]);
         model.close_first_run();
         model.update(Update::Runtimes(list(&[], &[])));
-        assert!(model.first_run.is_none());
+        assert!(model.session.first_run.is_none());
         model.update(Update::Reconnecting);
         model.update(Update::Connected(health()));
         model.update(Update::Runtimes(list(&[], &[])));
-        assert!(model.first_run.is_none());
+        assert!(model.session.first_run.is_none());
         assert!(!model.start_first_run());
     }
 
@@ -3554,9 +3622,9 @@ mod tests {
             used: true,
             missing: vec!["shop.test".into()],
         }));
-        model.setup = Setup::Running;
+        model.session.setup = Setup::Running;
         assert!(!model.start_hosts_sync(), "during a setup");
-        model.setup = Setup::Idle;
+        model.session.setup = Setup::Idle;
         assert!(model.start_hosts_sync());
         assert!(!model.start_hosts_sync(), "one at a time");
 
@@ -3585,7 +3653,7 @@ mod tests {
                 ..SetupReport::default()
             };
         model.update(Update::HostsSynced(report(None, None, None)));
-        assert_eq!(model.hosts_sync, HostsSync::Idle);
+        assert_eq!(model.session.hosts_sync, HostsSync::Idle);
         for (report, code) in [
             (
                 report(Some("setup_cancelled"), None, None),
@@ -3601,14 +3669,17 @@ mod tests {
             ),
         ] {
             model.update(Update::HostsSynced(report));
-            assert_eq!(model.hosts_sync, HostsSync::Failed(code.into()));
+            assert_eq!(model.session.hosts_sync, HostsSync::Failed(code.into()));
         }
         model.update(Update::HostsSyncFailed("setup_running".into()));
-        assert_eq!(model.hosts_sync, HostsSync::Failed("setup_running".into()));
+        assert_eq!(
+            model.session.hosts_sync,
+            HostsSync::Failed("setup_running".into())
+        );
         // A new session starts clean.
         model.update(Update::Connected(health()));
-        assert_eq!(model.hosts, HostsStatus::default());
-        assert_eq!(model.hosts_sync, HostsSync::Idle);
+        assert_eq!(model.session.hosts, HostsStatus::default());
+        assert_eq!(model.session.hosts_sync, HostsSync::Idle);
     }
 
     #[test]
@@ -3621,20 +3692,26 @@ mod tests {
         // The event and the answer carry the same report.
         apply(&mut model, Event::SetupFinished(report("ca_not_ready")));
         model.update(Update::SetupDone(report("ca_not_ready")));
-        assert_eq!(model.setup, Setup::Finished(report("ca_not_ready")));
+        assert_eq!(model.session.setup, Setup::Finished(report("ca_not_ready")));
         assert!(model.start_setup(), "again");
         model.update(Update::SetupFailed("setup_not_supported".into()));
-        assert_eq!(model.setup, Setup::Failed("setup_not_supported".into()));
+        assert_eq!(
+            model.session.setup,
+            Setup::Failed("setup_not_supported".into())
+        );
     }
 
     #[test]
     fn a_setup_from_a_terminal_shows_and_a_lost_one_ends() {
         let mut model = connected();
         apply(&mut model, Event::SetupFinished(report("ca_unreadable")));
-        assert_eq!(model.setup, Setup::Finished(report("ca_unreadable")));
+        assert_eq!(
+            model.session.setup,
+            Setup::Finished(report("ca_unreadable"))
+        );
         assert!(model.start_setup());
         model.update(Update::Reconnecting);
-        assert_eq!(model.setup, Setup::Idle);
+        assert_eq!(model.session.setup, Setup::Idle);
     }
 
     // -- Settings --
@@ -3642,7 +3719,7 @@ mod tests {
     #[test]
     fn start_at_login_follows_each_state() {
         let mut model = connected();
-        assert_eq!(model.autostart, Autostart::Unknown);
+        assert_eq!(model.session.autostart, Autostart::Unknown);
         assert_eq!(model.toggle_autostart(), None);
         for (state, want, shown) in [
             (Autostart::Off, Some(true), Autostart::On),
@@ -3653,19 +3730,25 @@ mod tests {
         ] {
             model.update(Update::Autostart(state));
             assert_eq!(model.toggle_autostart(), want, "{state:?}");
-            assert_eq!(model.autostart, shown, "{state:?}");
+            assert_eq!(model.session.autostart, shown, "{state:?}");
         }
         model.update(Update::AutostartFailed("autostart_write".into()));
-        assert_eq!(model.autostart, Autostart::Unknown);
-        assert_eq!(model.settings_notice.as_deref(), Some("autostart_write"));
+        assert_eq!(model.session.autostart, Autostart::Unknown);
+        assert_eq!(
+            model.session.settings_notice.as_deref(),
+            Some("autostart_write")
+        );
         // The bridge reads it again; the notice stays until the next click.
         model.update(Update::Autostart(Autostart::Off));
-        assert_eq!(model.settings_notice.as_deref(), Some("autostart_write"));
+        assert_eq!(
+            model.session.settings_notice.as_deref(),
+            Some("autostart_write")
+        );
         model.toggle_autostart();
-        assert!(model.settings_notice.is_none());
+        assert!(model.session.settings_notice.is_none());
 
         model.update(Update::Reconnecting);
-        assert_eq!(model.autostart, Autostart::Unknown);
+        assert_eq!(model.session.autostart, Autostart::Unknown);
         assert_eq!(model.toggle_autostart(), None);
     }
 
@@ -3702,16 +3785,16 @@ mod tests {
         model.pick_link_folder(&absolute("/work/متجر"));
         assert_eq!(model.link_request(), None);
         let invalid = SitesNotice::Failed("site_name_invalid".into());
-        assert_eq!(model.sites_notice, Some(invalid.clone()));
+        assert_eq!(model.session.sites_notice, Some(invalid.clone()));
         for name in ["Shop", "-shop", "shop-", "my shop", &"a".repeat(64)] {
             model.link.as_mut().unwrap().name = name.to_owned();
             assert_eq!(model.link_request(), None, "{name}");
-            assert_eq!(model.sites_notice, Some(invalid.clone()));
+            assert_eq!(model.session.sites_notice, Some(invalid.clone()));
         }
         model.link.as_mut().unwrap().name = " shop ".into();
         let want = ("shop".to_owned(), absolute("/work/متجر"));
         assert_eq!(model.link_request(), Some(want));
-        assert!(model.sites_notice.is_none());
+        assert!(model.session.sites_notice.is_none());
     }
 
     #[test]
@@ -3733,7 +3816,7 @@ mod tests {
         });
         assert!(model.link.is_none());
         assert_eq!(
-            model.sites_notice,
+            model.session.sites_notice,
             Some(SitesNotice::Linked { name, folder })
         );
     }
@@ -3803,17 +3886,17 @@ mod tests {
         assert!(!model.ask_removal(unlink("api")), "no daemon");
         let mut model = with_parked();
         assert!(model.ask_removal(forget("/code")));
-        assert_eq!(model.confirm, Some(forget("/code")));
+        assert_eq!(model.session.confirm, Some(forget("/code")));
         model.cancel_removal();
-        assert!(model.confirm.is_none());
+        assert!(model.session.confirm.is_none());
         assert_eq!(model.confirm_removal(), None, "nothing to confirm");
 
         // An older notice goes once the user confirms.
         model.update(Update::SitesFailed("site_not_found".into()));
         assert!(model.ask_removal(unlink("api")));
-        assert!(model.sites_notice.is_some());
+        assert!(model.session.sites_notice.is_some());
         assert_eq!(model.confirm_removal(), Some(unlink("api")));
-        assert!(model.confirm.is_none() && model.sites_notice.is_none());
+        assert!(model.session.confirm.is_none() && model.session.sites_notice.is_none());
         assert_eq!(model.removing(), Some(&unlink("api")));
         // One at a time.
         assert!(!model.can_remove());
@@ -3821,7 +3904,7 @@ mod tests {
 
         model.update(Update::Removed(unlink("api")));
         let unlinked = SitesNotice::Unlinked("api".into());
-        assert_eq!(model.sites_notice, Some(unlinked));
+        assert_eq!(model.session.sites_notice, Some(unlinked));
         assert!(model.removing().is_none() && model.can_remove());
     }
 
@@ -3830,7 +3913,7 @@ mod tests {
         let mut model = with_parked();
         model.apply_action(Action::Navigate(Route::Site("api".into())));
         model.apply_action(Action::AskUnlink("api".into()));
-        assert_eq!(model.confirm, Some(unlink("api")));
+        assert_eq!(model.session.confirm, Some(unlink("api")));
         assert!(model.confirm_removal().is_some());
         // Waiting for the answer: the page is still there.
         assert_eq!(model.route, Route::Site("api".into()));
@@ -3838,7 +3921,7 @@ mod tests {
         // The line about it shows on Sites.
         assert_eq!(model.route, Route::Sites);
         assert_eq!(
-            model.sites_notice,
+            model.session.sites_notice,
             Some(SitesNotice::Unlinked("api".into()))
         );
 
@@ -3880,7 +3963,7 @@ mod tests {
     fn the_install_dialog_keeps_a_field_for_each_runtime_and_closes_when_the_job_is_queued() {
         let mut model = with_runtimes(&["8.3.27"], &["2.11.7"]);
         assert!(model.open_install(Runtime::Php));
-        assert_eq!(model.install_dialog, Some(Runtime::Php));
+        assert_eq!(model.session.install_dialog, Some(Runtime::Php));
         // Typing is the model's, per runtime; an empty field is no entry.
         model.apply_action(Action::SetInstallVersion {
             runtime: Runtime::Php,
@@ -3899,7 +3982,7 @@ mod tests {
                 .apply_action(Action::SubmitInstall(Runtime::Php))
                 .is_none()
         );
-        assert_eq!(model.install_dialog, None);
+        assert_eq!(model.session.install_dialog, None);
         assert_eq!(model.install_text(Runtime::Php), "");
         assert_eq!(model.install_text(Runtime::Node), "22", "the others stay");
         assert_eq!(model.next_install(), Some(job(Runtime::Php, Some("8.4"))));
@@ -3911,18 +3994,21 @@ mod tests {
         model.apply_action(Action::AskInstall(Runtime::Node));
         model.set_install_text(Runtime::Node, "lts/*".into());
         model.apply_action(Action::SubmitInstall(Runtime::Node));
-        assert_eq!(model.install_dialog, Some(Runtime::Node));
-        assert_eq!(model.runtimes_notice.as_deref(), Some("unsupported_alias"));
+        assert_eq!(model.session.install_dialog, Some(Runtime::Node));
+        assert_eq!(
+            model.session.runtimes_notice.as_deref(),
+            Some("unsupported_alias")
+        );
         assert_eq!(model.next_install(), None);
         // The error was about the old text.
         model.apply_action(Action::SetInstallVersion {
             runtime: Runtime::Node,
             text: "22".into(),
         });
-        assert_eq!(model.runtimes_notice, None);
+        assert_eq!(model.session.runtimes_notice, None);
         // Cancel closes it and keeps what was typed.
         model.apply_action(Action::CancelInstall);
-        assert_eq!(model.install_dialog, None);
+        assert_eq!(model.session.install_dialog, None);
         assert_eq!(model.install_text(Runtime::Node), "22");
     }
 
@@ -3937,7 +4023,7 @@ mod tests {
         idle.update(Update::Removed(sent));
         assert!(idle.open_install(Runtime::Php));
         idle.update(Update::Reconnecting);
-        assert_eq!(idle.install_dialog, None);
+        assert_eq!(idle.session.install_dialog, None);
         assert!(!Model::default().open_install(Runtime::Php), "no daemon");
     }
 
@@ -3983,16 +4069,19 @@ mod tests {
             runtime: Runtime::Php,
             version: v("8.3.27"),
         };
-        assert_eq!(model.uninstall_notice, Some(uninstalled));
+        assert_eq!(model.session.uninstall_notice, Some(uninstalled));
 
         // The last PHP: the list read again after it opens the first-run
         // panel, since no site can open without PHP.
         let sent = send(&mut model, uninstall(Runtime::Php, "8.4.23"));
         model.update(Update::Removed(sent));
         assert!(model.php_versions().is_empty());
-        assert!(model.first_run.is_none(), "not before the list is read");
+        assert!(
+            model.session.first_run.is_none(),
+            "not before the list is read"
+        );
         model.update(Update::Runtimes(list(&[], &["2.11.7"])));
-        assert_eq!(model.first_run, Some(FirstRun::Offer));
+        assert_eq!(model.session.first_run, Some(FirstRun::Offer));
     }
 
     #[test]
@@ -4032,19 +4121,19 @@ mod tests {
             runtime: Runtime::Php,
             in_use,
         };
-        assert_eq!(model.uninstall_notice, Some(notice));
+        assert_eq!(model.session.uninstall_notice, Some(notice));
         assert_eq!(model.php_versions().len(), 2, "nothing changed");
 
         // The next confirmation clears it; another failure keeps its code.
         let sent = send(&mut model, uninstall(Runtime::Php, "8.3.27"));
-        assert!(model.uninstall_notice.is_none());
+        assert!(model.session.uninstall_notice.is_none());
         model.update(not_removed(sent, "uninstall_io"));
         let failed = UninstallNotice::Failed {
             runtime: Runtime::Php,
             version: v("8.3.27"),
             code: "uninstall_io".into(),
         };
-        assert_eq!(model.uninstall_notice, Some(failed));
+        assert_eq!(model.session.uninstall_notice, Some(failed));
     }
 
     #[test]
@@ -4077,12 +4166,12 @@ mod tests {
             site: "shop".into(),
             folder: Some(PathBuf::from("/code")),
         };
-        assert_eq!(model.sites_notice, Some(refused));
+        assert_eq!(model.session.sites_notice, Some(refused));
 
         let sent = send(&mut model, forget("/code"));
         model.update(Update::Removed(sent));
         let forgot = SitesNotice::Forgot(PathBuf::from("/code"));
-        assert_eq!(model.sites_notice, Some(forgot));
+        assert_eq!(model.session.sites_notice, Some(forgot));
 
         // A site the list does not have: no folder to offer.
         let sent = send(&mut model, unlink("gone"));
@@ -4091,7 +4180,7 @@ mod tests {
             site: "gone".into(),
             folder: None,
         };
-        assert_eq!(model.sites_notice, Some(refused));
+        assert_eq!(model.session.sites_notice, Some(refused));
     }
 
     #[test]
@@ -4107,7 +4196,7 @@ mod tests {
             let sent = send(&mut model, removal);
             model.update(not_removed(sent, code));
             let failed = SitesNotice::Failed(code.into());
-            assert_eq!(model.sites_notice, Some(failed), "{code}");
+            assert_eq!(model.session.sites_notice, Some(failed), "{code}");
             assert!(model.can_remove(), "{code}");
             assert_eq!(names(&model), ["api", "blog", "shop"], "{code}");
         }
@@ -4118,7 +4207,7 @@ mod tests {
         let mut model = with_parked();
         assert!(model.ask_removal(forget("/code")));
         model.update(Update::Reconnecting);
-        assert!(model.confirm.is_none());
+        assert!(model.session.confirm.is_none());
         assert_eq!(model.confirm_removal(), None);
 
         model.update(Update::Connected(health()));
@@ -4127,7 +4216,7 @@ mod tests {
         assert!(model.removing().is_none());
         model.update(Update::Connected(health()));
         model.update(Update::Removed(sent));
-        assert!(model.sites_notice.is_none());
+        assert!(model.session.sites_notice.is_none());
     }
 
     // -- Xdebug --
@@ -4161,23 +4250,32 @@ mod tests {
         assert_eq!(model.xdebug_on(), Some(true));
         model.update(Update::XdebugAnswered(Ok(xdebug(true))));
         assert_eq!(model.xdebug_pending(), None);
-        assert_eq!(model.xdebug, Some(xdebug(true)));
+        assert_eq!(model.session.xdebug, Some(xdebug(true)));
 
         assert_eq!(model.toggle_xdebug(), Some(false));
         let code = "xdebug_interrupted".to_owned();
         model.update(Update::XdebugAnswered(Err(code)));
-        assert_eq!(model.xdebug_notice.as_deref(), Some("xdebug_interrupted"));
+        assert_eq!(
+            model.session.xdebug_notice.as_deref(),
+            Some("xdebug_interrupted")
+        );
         // The bridge reads it again; until then the last state shows.
         assert_eq!(model.xdebug_on(), Some(true));
         assert_eq!(model.toggle_xdebug(), Some(false));
-        assert!(model.xdebug_notice.is_none(), "the next click clears it");
+        assert!(
+            model.session.xdebug_notice.is_none(),
+            "the next click clears it"
+        );
 
         model.update(Update::Reconnecting);
         assert_eq!(model.xdebug_on(), None);
         assert_eq!(model.toggle_xdebug(), None);
         model.update(Update::Connected(health()));
         model.update(Update::XdebugFailed("config_invalid".into()));
-        assert_eq!(model.xdebug_notice.as_deref(), Some("config_invalid"));
+        assert_eq!(
+            model.session.xdebug_notice.as_deref(),
+            Some("config_invalid")
+        );
         assert_eq!(model.toggle_xdebug(), None);
     }
 }

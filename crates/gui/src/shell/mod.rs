@@ -222,7 +222,7 @@ mod tests {
         }));
         model.apply_action(Action::AskInstall(marsa_core::runtimes::Runtime::Php));
         assert_eq!(
-            model.install_dialog,
+            model.session.install_dialog,
             Some(marsa_core::runtimes::Runtime::Php)
         );
         let harness = Harness::new(egui::Theme::Light);
@@ -287,7 +287,7 @@ mod tests {
         ] {
             let mut model = model_with_shop();
             model.route = route.clone();
-            model.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
+            model.session.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
             let tree = tree_of(&mut model);
             assert!(tree.node_with_text(&text).is_some(), "{route:?}");
         }
@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn a_failed_call_is_an_error_notice_that_stays_and_closes_with_its_button() {
         let mut model = model_with_shop();
-        model.notice = Some("service_busy".into());
+        model.session.notice = Some("service_busy".into());
         let tree = tree_of(&mut model);
         let error = strings::error_text("service_busy");
         let bar = tree.node_with_text(&error).expect("the bar");
