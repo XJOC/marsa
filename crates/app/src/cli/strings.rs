@@ -2,8 +2,8 @@
 //! section 9), so a second language can be added later without a rewrite.
 //!
 //! Errors: [`message`] maps an error `code()` to a sentence. The error's own
-//! `Display` text goes to the log only. To add a code, add one arm to
-//! `known` and the code to the list in the tests.
+//! `Display` text goes to the log only. To add a code, add it to
+//! `marsa_core::codes` and one arm to `known`: a test fails until both exist.
 
 use std::path::Path;
 
@@ -923,6 +923,42 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              setting is saved: Marsa applies it when it starts again."
             .into(),
 
+        // Caddy's own configuration, the PHP settings, and the version
+        // lookup of a folder (the codes of `marsa_core::codes`).
+        "caddy_admin_unreachable" => {
+            "Marsa cannot reach Caddy's admin port. Run \"marsa services status caddy\".".into()
+        }
+        "caddy_config_rejected" => {
+            "Caddy refused the new configuration. Run \"marsa logs caddy\" to see why.".into()
+        }
+        "caddy_path_not_utf8" => {
+            "A path Caddy needs is not valid UTF-8, so Marsa cannot give it to Caddy.".into()
+        }
+        "caddy_recipe_invalid" => "The Caddy recipe is not valid. Update Marsa.".into(),
+        "caddy_unsupported_platform" => "Caddy has no build for this system.".into(),
+        "daemon_already_running" => "The Marsa daemon is already running.".into(),
+        "no_matching_version" => format!(
+            "No installed {name} version matches {}.",
+            d.requested.unwrap_or("that request")
+        ),
+        "no_version" => format!(
+            "No {name} version is set for this folder. Run \"marsa runtimes\" to see the installed ones."
+        ),
+        "not_installed" => format!(
+            "{name} {} is not installed. Run \"marsa runtimes\" to see the installed ones.",
+            d.requested.unwrap_or("this version")
+        ),
+        "php_config_write" => {
+            "Marsa cannot write the PHP configuration. Check the data folder's permissions.".into()
+        }
+        "php_fpm_not_installed" => {
+            "This PHP version has no php-fpm, so a site cannot use it.".into()
+        }
+        "php_fpm_unavailable" => {
+            "php-fpm is not available for this PHP version. Run \"marsa logs php\" for details."
+                .into()
+        }
+        "php_path_not_allowed" => "That PHP path is not allowed.".into(),
         _ => return None,
     };
     Some(text)
@@ -2014,252 +2050,12 @@ pub fn doctor_read_log(log: &Path) -> String {
 mod tests {
     use super::*;
 
-    /// Every code a `marsa` command can meet. Core has no public list of its
-    /// codes, so this one is kept by hand from the `code()` functions of
-    /// `InstallError` (which reach `marsa install` in `failed` events),
-    /// `ManifestError`, `FetchError`, `ExtractError`, `BadRequest`,
-    /// `RecipeError`, `RuntimesError`, and `config::app_data_dir`.
-    const CODES: &[&str] = &[
-        "install_unsupported_platform",
-        "install_os_too_old",
-        "install_busy",
-        "install_no_such_version",
-        "install_manifest_mismatch",
-        "install_unsafe_name",
-        "install_check_failed",
-        "install_missing_vc_runtime",
-        "install_serial_corrupt",
-        "install_io",
-        // `marsa install` itself: the daemon stopped during the install.
-        "install_interrupted",
-        // The daemon: the install task panicked.
-        "install_crashed",
-        "manifest_too_large",
-        "manifest_bad_signature",
-        "manifest_invalid",
-        "manifest_schema_unsupported",
-        "manifest_rollback",
-        "manifest_no_trusted_key",
-        "download_insecure_url",
-        "download_http_status",
-        "download_failed",
-        "download_size_mismatch",
-        "checksum_mismatch",
-        "download_too_large",
-        "download_io",
-        "extract_unsafe_path",
-        "extract_unsafe_link",
-        "extract_unsupported_entry",
-        "extract_duplicate",
-        "extract_too_large",
-        "extract_corrupt",
-        "extract_io",
-        "unsupported_alias",
-        "invalid_version",
-        // `PUT /v1/runtimes/{tool}/default` (task M5-01).
-        "version_not_installed",
-        "no_default_version",
-        // `DELETE /v1/runtimes/{tool}/{version}` (tasks M5-07 and M5-19).
-        "version_in_use",
-        "sites_lose_php",
-        "version_ambiguous",
-        "uninstall_io",
-        "recipe_invalid",
-        "recipe_unknown_platform",
-        "recipe_bad_path",
-        "recipe_bad_template",
-        "runtimes_read",
-        "config_no_home",
-        // `ClientError::code()` and `DaemonFileError::code()`.
-        "daemon_not_running",
-        "daemon_start_failed",
-        "daemon_stop_failed",
-        "daemon_unreachable",
-        "daemon_api_too_new",
-        "daemon_bad_response",
-        "invalid_id",
-        "daemon_file_missing",
-        "daemon_file_invalid",
-        "daemon_file_insecure",
-        "daemon_file_write",
-        "random_unavailable",
-        // The daemon's codes, passed on by `ClientError::Api` or found in
-        // `ServiceState::Failed`: `services_api`, `caddy`, `php`, `supervisor`,
-        // `runtimes_api`, `api`, and `auth` in `crates/app/src/daemon/`, and
-        // `ProgramNotAbsolute` in core.
-        "service_not_found",
-        "unknown_action",
-        "service_busy",
-        "caddy_not_installed",
-        "caddy_config_write",
-        "caddy_start_timeout",
-        "port_in_use",
-        "dns_port_in_use",
-        "dns_start_failed",
-        "dns_not_running",
-        "caddy_orphan_stuck",
-        "caddy_other_marsa",
-        "service_port_busy",
-        "service_data_dir_busy",
-        "service_port_unknown",
-        "postgres_not_installed",
-        "postgres_init_failed",
-        "postgres_start_timeout",
-        "postgres_unsupported_platform",
-        "postgres_orphan_stuck",
-        "service_managed_by_sites",
-        "php_fpm_orphan_stuck",
-        "exited",
-        "spawn_failed",
-        "program_not_absolute",
-        "invalid_path",
-        "invalid_query",
-        "unknown_tool",
-        "invalid_body",
-        "not_found",
-        "method_not_allowed",
-        "unauthorized",
-        "origin_rejected",
-        "host_rejected",
-        "internal_error",
-        // The sites routes (task M4-10b), `SiteError`, `SkipReason`, and
-        // `ConfigError`; `site_path_not_utf8` is a `ClientError` too.
-        "site_not_found",
-        "site_name_invalid",
-        "site_name_taken",
-        "site_not_a_folder",
-        "site_path_relative",
-        "site_path_not_utf8",
-        "site_read_dir",
-        "config_read",
-        "config_invalid",
-        "config_write",
-        // `marsa park` and `marsa link` themselves.
-        "no_current_dir",
-        // M5-09: the unlink and forget routes, and `OpenError` in core.
-        "site_is_parked",
-        "folder_not_parked",
-        "open_no_program",
-        "open_failed",
-        // The setup route (task M4-13): its errors, the codes of its skipped
-        // steps, and the failure codes of `marsa-helper` for the setup ops.
-        // `caddy_not_installed`, above, is a skip code too (task M5-15).
-        "setup_running",
-        "setup_not_supported",
-        "setup_cancelled",
-        "setup_timed_out",
-        "setup_interrupted",
-        "setup_not_authorized",
-        "setup_helper_missing",
-        "setup_helper_unsafe",
-        "setup_helper_protected_folder",
-        "setup_prompt_failed",
-        "setup_helper_failed",
-        "setup_helper_rejected",
-        "redirect_port_held",
-        "ports_not_checked",
-        "ca_not_ready",
-        "ca_unreadable",
-        "caddy_not_started",
-        "op_not_implemented",
-        "op_not_supported",
-        "resolver_foreign",
-        "resolver_read",
-        "resolver_write",
-        "setup_helper_not_the_service",
-        "setup_helper_install_failed",
-        "setup_helper_install_running",
-        "setup_helper_pipe_failed",
-        "setup_helper_busy",
-        "setup_helper_no_answer",
-        "trust_cert_invalid",
-        "trust_read",
-        "trust_write",
-        "trust_add_failed",
-        "trust_remove_failed",
-        "pf_write",
-        "pf_load_failed",
-        "pf_helper_unreadable",
-        // Linux setup (task M4-18): the codes of `marsa-helper`.
-        "resolved_foreign",
-        "resolved_read",
-        "resolved_write",
-        "resolved_delete",
-        "resolved_not_running",
-        "resolved_restart_failed",
-        "resolved_check_failed",
-        "resolved_tool_missing",
-        "resolved_unit_failed",
-        "resolved_use_hosts",
-        "resolved_systemd_unknown",
-        "hosts_read",
-        "hosts_write",
-        "hosts_block_broken",
-        "hosts_not_used",
-        "hosts_sites_unknown",
-        "hosts_too_many_names",
-        "setup_hosts_not_written",
-        "setup_hosts_not_removed",
-        "setup_pkexec_missing",
-        "setup_caddy_ports_failed",
-        "resolved_stopped",
-        "ports_foreign",
-        "ports_read",
-        "ports_write",
-        "ports_delete",
-        "ports_apply_failed",
-        "ports_restore_failed",
-        "trust_tool_missing",
-        "nss_tool_missing",
-        "nss_add_failed",
-        "nss_remove_failed",
-        "nss_db_refused",
-        "trust_store_update_failed",
-        // The uninstall route (task M5-13), the removal codes of
-        // `marsa-helper`, and `marsa uninstall --all` itself.
-        "uninstall_running",
-        "uninstall_not_supported",
-        "uninstall_cancelled",
-        "uninstall_timed_out",
-        "uninstall_interrupted",
-        "uninstall_not_authorized",
-        "uninstall_pkexec_missing",
-        "uninstall_helper_missing",
-        "uninstall_helper_unsafe",
-        "uninstall_prompt_failed",
-        "uninstall_helper_failed",
-        "uninstall_helper_rejected",
-        "uninstall_all_needs_yes",
-        "uninstall_all_not_confirmed",
-        "uninstall_all_data_dir_not_default",
-        "uninstall_all_data_dir_unsafe",
-        "uninstall_all_data_delete_failed",
-        "uninstall_all_daemon_restarted",
-        "uninstall_all_data_dir_in_use",
-        "uninstall_helper_partial",
-        "uninstall_helper_running",
-        "uninstall_all_data_dir_back",
-        "trust_record_unusable",
-        "pf_flush_failed",
-        "pf_delete",
-        "resolver_delete",
-        "trust_delete",
-        // The autostart route (task M5-03) and `AutostartError` in core.
-        "autostart_unsupported",
-        "tray_not_found",
-        "autostart_path_invalid",
-        "autostart_no_home",
-        "autostart_read",
-        "autostart_write",
-        // The Xdebug route (task M5-11). Its other codes (`config_*`,
-        // `runtimes_read`, `invalid_body`, `internal_error`) are above.
-        "xdebug_interrupted",
-    ];
+    use marsa_core::codes::ALL;
 
     #[test]
     fn every_code_has_a_message() {
         let empty = Details::default();
-        for code in CODES {
+        for code in ALL {
             let text = known(code, &empty).unwrap_or_else(|| panic!("no message for {code}"));
             assert!(!text.is_empty(), "{code}");
             assert!(!text.contains('{'), "{code}: {text}");
@@ -2341,7 +2137,7 @@ mod tests {
                 | ClientError::DaemonFile(_) => {}
             }
             let code = err.code();
-            assert!(CODES.contains(&code), "{code} is missing from CODES");
+            assert!(ALL.contains(&code), "{code} is missing from codes::ALL");
             assert!(known(code, &Details::default()).is_some(), "{code}");
         }
     }
