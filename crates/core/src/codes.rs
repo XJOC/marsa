@@ -2,7 +2,7 @@
 //! window), in one place. A client keeps a text for each code of [`ALL`], and
 //! a test in each client fails when a code has none. To add a code: add the
 //! constant here and to [`ALL`], use the constant where the code is made, and
-//! add a text to `cli/strings.rs` and to `gui/strings.rs`.
+//! add a text to `cli/strings/errors.rs` and to `gui/strings/errors.rs`.
 
 pub const AUTOSTART_NO_HOME: &str = "autostart_no_home";
 pub const AUTOSTART_PATH_INVALID: &str = "autostart_path_invalid";
