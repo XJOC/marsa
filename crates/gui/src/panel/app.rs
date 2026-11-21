@@ -105,10 +105,12 @@ pub fn start_size() -> Vec2 {
 /// Xdebug is read (the last list of the bridge's first answer that the panel
 /// draws).
 pub fn is_ready(model: &Model) -> bool {
-    match &model.connection {
+    match &model.session.connection {
         Connection::Failed(_) | Connection::ShuttingDown => true,
         Connection::Connecting | Connection::Reconnecting => false,
-        Connection::Running(_) => model.xdebug.is_some() || model.xdebug_notice.is_some(),
+        Connection::Running(_) => {
+            model.session.xdebug.is_some() || model.session.xdebug_notice.is_some()
+        }
     }
 }
 

@@ -694,9 +694,10 @@ mod tests {
 
     use super::*;
     use crate::ops::apply;
+    use crate::ops::testing::code_of;
     use crate::os::Os;
     use crate::request::Request;
-    use crate::system::FakeSystem;
+    use crate::system::{FakeSystem, Hooked, RunHook};
 
     const ACTIVE: &str = "/usr/bin/systemctl is-active --quiet systemd-resolved.service";
     const RESET: &str = "/usr/bin/systemctl reset-failed systemd-resolved.service";
@@ -760,8 +761,9 @@ mod tests {
 
     /// A Linux with systemd-resolved and `ip`, whose systemd runs Marsa's
     /// unit as written. Files and the log are in `fake`.
-    struct Linux {
-        fake: FakeSystem,
+    type Linux = Hooked<Machine>;
+
+    struct Machine {
         active: Cell<bool>,
         /// `systemctl is-active` exits with this instead, as on a bus error.
         active_code: Option<i32>,
@@ -807,8 +809,7 @@ mod tests {
 
     impl Linux {
         fn new() -> Self {
-            let linux = Self {
-                fake: FakeSystem::default(),
+            let machine = Machine {
                 active: Cell::new(true),
                 active_code: None,
                 no_systemctl: false,
@@ -833,6 +834,7 @@ mod tests {
                 wipe_after: Cell::new(None),
                 strict_dot: false,
             };
+            let linux = Hooked::with_hook(FakeSystem::default(), machine);
             linux.put("/usr/sbin/ip", b"");
             linux
         }
@@ -1130,57 +1132,18 @@ mod tests {
         })
     }
 
-    impl System for Linux {
-        fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>> {
-            self.fake.read(path, max)
-        }
-
-        fn exists(&self, path: &Path) -> bool {
-            self.fake.exists(path)
-        }
-
-        fn is_link(&self, path: &Path) -> bool {
-            self.fake.is_link(path)
-        }
-
-        fn is_root_only_dir(&self, dir: &Path) -> bool {
-            self.fake.is_root_only_dir(dir)
-        }
-
-        fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-            self.fake.write_atomic(path, bytes, mode)
-        }
-
-        fn remove(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove(path)
-        }
-
-        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove_empty_dir(path)
-        }
-
-        fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
-            let strings = args.iter().map(|arg| (*arg).to_owned()).collect();
-            self.fake
-                .log
-                .borrow_mut()
-                .push((program.to_owned(), strings));
+    impl RunHook for Machine {
+        fn run(
+            linux: &Linux,
+            program: &'static str,
+            args: &[&str],
+            _scripted: io::Result<RunOutput>,
+        ) -> io::Result<RunOutput> {
             match program {
-                "/usr/bin/systemctl" => self.systemctl(&args.join(" ")),
-                "/usr/bin/resolvectl" if args == ["status", "marsa0"] => self.status(),
+                "/usr/bin/systemctl" => linux.systemctl(&args.join(" ")),
+                "/usr/bin/resolvectl" if args == ["status", "marsa0"] => linux.status(),
                 _ => panic!("unexpected command: {program} {args:?}"),
             }
-        }
-
-        fn current_exe(&self) -> io::Result<PathBuf> {
-            self.fake.current_exe()
-        }
-    }
-
-    fn code_of(result: &OpResult) -> &'static str {
-        match &result.outcome {
-            Outcome::Failed { code, .. } => code,
-            other => panic!("not a failure: {other:?}"),
         }
     }
 

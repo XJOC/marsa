@@ -440,11 +440,11 @@ fn finish(op: &'static str, outcome: Result<Outcome, Failure>) -> OpResult {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     use super::*;
-    use crate::system::FakeSystem;
+    use crate::ops::testing::code_of;
+    use crate::system::{FakeSystem, Hooked, RunHook};
 
     // Literal copies of the constants, so a changed path or flag fails here.
     const PF: &str = "/sbin/pfctl";
@@ -474,12 +474,10 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
     /// the rules can vanish between two checks and `-E` can print a new token
     /// each time. Without one, the fake's own output is used. Every call is in
     /// `fake.log`.
-    struct Mac {
-        fake: FakeSystem,
+    type Mac = Hooked<Answers>;
+
+    struct Answers {
         answers: RefCell<Vec<(Vec<String>, RunOutput)>>,
-        /// Paths `write_atomic` wrote: a link there is a file now, as the
-        /// rename of the real one replaces the link itself.
-        written: RefCell<BTreeSet<PathBuf>>,
     }
 
     impl Mac {
@@ -490,40 +488,18 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         }
     }
 
-    impl System for Mac {
-        fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>> {
-            self.fake.read(path, max)
-        }
-        fn exists(&self, path: &Path) -> bool {
-            self.fake.exists(path)
-        }
-        fn is_link(&self, path: &Path) -> bool {
-            self.fake.is_link(path) && !self.written.borrow().contains(path)
-        }
-        fn is_root_only_dir(&self, dir: &Path) -> bool {
-            self.fake.is_root_only_dir(dir)
-        }
-        fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-            self.fake.write_atomic(path, bytes, mode)?;
-            self.written.borrow_mut().insert(path.to_path_buf());
-            Ok(())
-        }
-        fn remove(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove(path)
-        }
-        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove_empty_dir(path)
-        }
-        fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
-            let result = self.fake.run(program, args);
-            let mut answers = self.answers.borrow_mut();
+    impl RunHook for Answers {
+        fn run(
+            mac: &Mac,
+            _program: &'static str,
+            args: &[&str],
+            scripted: io::Result<RunOutput>,
+        ) -> io::Result<RunOutput> {
+            let mut answers = mac.answers.borrow_mut();
             match answers.iter().position(|(expected, _)| expected == args) {
                 Some(i) => Ok(answers.remove(i).1),
-                None => result,
+                None => scripted,
             }
-        }
-        fn current_exe(&self) -> io::Result<PathBuf> {
-            self.fake.current_exe()
         }
     }
 
@@ -548,11 +524,12 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
         fake.files
             .borrow_mut()
             .insert(exe, (HELPER.to_vec(), 0o755));
-        let mac = Mac {
+        let mac = Hooked::with_hook(
             fake,
-            answers: RefCell::default(),
-            written: RefCell::default(),
-        };
+            Answers {
+                answers: RefCell::default(),
+            },
+        );
         for listing in listings {
             mac.answer(&SHOW_ARGS, listing);
         }
@@ -631,13 +608,6 @@ rdr pass on lo0 inet6 proto tcp from any to ::1 port = 443 -> ::1 port 18443
 
     fn result(op: &'static str, outcome: Outcome) -> OpResult {
         OpResult { op, outcome }
-    }
-
-    fn code_of(result: &OpResult) -> &'static str {
-        match result.outcome {
-            Outcome::Failed { code, .. } => code,
-            Outcome::Done | Outcome::Unchanged => "ok",
-        }
     }
 
     /// Runs the boot job. Each wait is logged as `sleep <seconds>`.

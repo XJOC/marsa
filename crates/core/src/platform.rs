@@ -9,6 +9,7 @@ pub mod daemon_file;
 pub mod low_ports;
 pub mod probe;
 pub mod process;
+pub mod runner;
 pub mod signals;
 pub mod spawn;
 #[cfg(windows)]

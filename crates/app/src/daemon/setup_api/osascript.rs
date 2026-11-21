@@ -10,8 +10,8 @@ use super::helper::MAX_ANSWER;
 use super::helper::braces;
 use super::helper::parse_answer;
 use super::helper::results_of;
-use super::runner::RunOutput;
 use marsa_core::helper::OpResult;
+use marsa_core::platform::runner::RunOutput;
 use marsa_core::types::ApiError;
 use std::ffi::OsString;
 use std::io;
@@ -220,7 +220,7 @@ mod tests {
     use super::super::helper::op_name;
     use super::super::helper::results_match;
     use super::super::ports::NETSTAT;
-    use super::super::runner::RunOutput;
+    use marsa_core::platform::runner::RunOutput;
 
     use super::super::steps::UNINSTALL_ALL;
     use super::super::test_support::*;
