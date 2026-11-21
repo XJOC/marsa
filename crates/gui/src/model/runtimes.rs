@@ -96,6 +96,41 @@ pub fn pool_of(id: &str) -> Option<(PoolKind, &str)> {
         .find_map(|(prefix, kind)| id.strip_prefix(prefix).map(|line| (*kind, line)))
 }
 
+/// What a service is called: `caddy` is Caddy, `php-fpm-8.4` is PHP-FPM 8.4.
+/// A service this window does not know shows under its id.
+pub fn service_name(id: &str) -> String {
+    if id == WEB_SERVER {
+        return strings::SERVICE_CADDY.to_owned();
+    }
+    if id == DNS_SERVER {
+        return strings::SERVICE_DNS.to_owned();
+    }
+    match pool_of(id) {
+        Some((PoolKind::Fpm, line)) => strings::service_php_fpm(line),
+        Some((PoolKind::Cgi, line)) => strings::service_php_cgi(line),
+        None => id.to_owned(),
+    }
+}
+
+/// What a service does, in one line under its name. `waiting`: a pool that
+/// no site needs now. `sites`: how many sites run the PHP line of a pool.
+pub fn service_description(id: &str, waiting: bool, sites: usize) -> String {
+    if id == WEB_SERVER {
+        return strings::DESCRIPTION_CADDY.to_owned();
+    }
+    if id == DNS_SERVER {
+        return strings::DESCRIPTION_DNS.to_owned();
+    }
+    let Some((_, line)) = pool_of(id) else {
+        return strings::DESCRIPTION_OTHER.to_owned();
+    };
+    if waiting {
+        strings::DESCRIPTION_POOL_WAITING.to_owned()
+    } else {
+        strings::description_pool(line, sites)
+    }
+}
+
 /// Whether `runtime` has a default version. Composer and Caddy have none: the
 /// newest installed version is used, and so has any runtime core adds later,
 /// until it is listed here (the `matches!` is false for it, so it builds).

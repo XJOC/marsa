@@ -2,8 +2,7 @@
 
 use marsa_core::types::ServiceAction;
 
-use crate::model::{DNS_SERVER, LogLevel, PoolKind, WEB_SERVER, pool_of};
-use crate::widgets::PillState;
+use crate::logline::LogLevel;
 
 use super::*;
 
@@ -69,39 +68,32 @@ pub fn log_source_menu(name: &str) -> String {
     format!("{name}…")
 }
 
-/// What a service is called: `caddy` is Caddy, `php-fpm-8.4` is PHP-FPM 8.4.
-/// A service this window does not know shows under its id.
-pub fn service_name(id: &str) -> String {
-    if id == WEB_SERVER {
-        return "Caddy".to_owned();
-    }
-    if id == DNS_SERVER {
-        return "DNS".to_owned();
-    }
-    match pool_of(id) {
-        Some((PoolKind::Fpm, line)) => format!("PHP-FPM {line}"),
-        Some((PoolKind::Cgi, line)) => format!("PHP-CGI {line}"),
-        None => id.to_owned(),
-    }
+/// What a service is called: Caddy, DNS, or a PHP pool by its line.
+pub const SERVICE_CADDY: &str = "Caddy";
+pub const SERVICE_DNS: &str = "DNS";
+
+pub fn service_php_fpm(line: &str) -> String {
+    format!("PHP-FPM {line}")
 }
 
-/// What a service does, in one line under its name. `waiting`: a pool that
-/// no site needs now. `sites`: how many sites run the PHP line of a pool.
-pub fn service_description(id: &str, waiting: bool, sites: usize) -> String {
-    if id == WEB_SERVER {
-        return "The web server for every .test site.".to_owned();
-    }
-    if id == DNS_SERVER {
-        return "Finds every .test site on this computer.".to_owned();
-    }
-    let Some((_, line)) = pool_of(id) else {
-        return "A program Marsa runs for your sites.".to_owned();
-    };
-    match (waiting, sites) {
-        (true, _) => "No site needs it now. It starts when one does.".to_owned(),
-        (false, 0) => format!("Runs PHP {line} for your sites."),
-        (false, 1) => format!("Runs PHP {line} for 1 site."),
-        (false, n) => format!("Runs PHP {line} for {n} sites."),
+pub fn service_php_cgi(line: &str) -> String {
+    format!("PHP-CGI {line}")
+}
+
+/// What a service does, in one line under its name.
+pub const DESCRIPTION_CADDY: &str = "The web server for every .test site.";
+pub const DESCRIPTION_DNS: &str = "Finds every .test site on this computer.";
+/// A service this window does not know.
+pub const DESCRIPTION_OTHER: &str = "A program Marsa runs for your sites.";
+/// A pool that no site needs now.
+pub const DESCRIPTION_POOL_WAITING: &str = "No site needs it now. It starts when one does.";
+
+/// A pool that runs: `sites` is how many sites run its PHP `line`.
+pub fn description_pool(line: &str, sites: usize) -> String {
+    match sites {
+        0 => format!("Runs PHP {line} for your sites."),
+        1 => format!("Runs PHP {line} for 1 site."),
+        n => format!("Runs PHP {line} for {n} sites."),
     }
 }
 
@@ -128,14 +120,10 @@ pub fn action_text(action: ServiceAction) -> &'static str {
     }
 }
 
-/// The word of a service's state pill (components.md, Status).
-pub const fn pill_state_word(state: PillState) -> &'static str {
-    match state {
-        PillState::Running => "Running",
-        PillState::Waiting => "Waiting",
-        PillState::Stopped => "Stopped",
-        PillState::Starting => "Starting",
-        PillState::Stopping => "Stopping",
-        PillState::Failed => "Failed",
-    }
-}
+/// The words of a service's state pill (components.md, Status).
+pub const PILL_RUNNING: &str = "Running";
+pub const PILL_WAITING: &str = "Waiting";
+pub const PILL_STOPPED: &str = "Stopped";
+pub const PILL_STARTING: &str = "Starting";
+pub const PILL_STOPPING: &str = "Stopping";
+pub const PILL_FAILED: &str = "Failed";

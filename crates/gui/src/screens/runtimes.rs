@@ -35,7 +35,7 @@ use crate::theme::{Direction, Face, Section, TextToken, Theme};
 use crate::widgets::table::{empty_state_with, padded_card};
 use crate::widgets::{
     Answer, Button, ConfirmDialog, Field, Icon, ListItem, Menu, MenuItem, Progress, RowHeight,
-    Switch, Table, TableColumn, VersionPick, VersionPicker,
+    Switch, Table, TableColumn, VersionPick, VersionPicker, runtime_monogram,
 };
 
 /// What the screen knows about one runtime, in one place. The list and the
@@ -84,14 +84,13 @@ impl Kind {
     }
 }
 
-/// The kind of the runtime in the folder `folder`. The Phase 2 engines are
-/// named now, so they stay out of the list when core adds them; any other
-/// name, known or not, is listed: a new language is the likeliest.
-pub fn kind_for(folder: &str) -> Kind {
-    match folder {
-        "composer" | "caddy" => Kind::Tool,
-        "postgres" | "mysql" | "valkey" => Kind::Engine,
-        _ => Kind::Language,
+/// The kind of `runtime`. The Phase 2 engines stay out of the list; a new
+/// variant is a compile error here until it is placed.
+pub fn kind_for(runtime: Runtime) -> Kind {
+    match runtime {
+        Runtime::Php | Runtime::Node => Kind::Language,
+        Runtime::Composer | Runtime::Caddy => Kind::Tool,
+        Runtime::Postgres | Runtime::Mysql | Runtime::Valkey => Kind::Engine,
     }
 }
 
@@ -103,22 +102,21 @@ pub enum Extra {
 }
 
 impl Descriptor {
-    /// What any runtime is until it asks for more: the name core gives it
-    /// (its folder `folder`, as `strings::runtime_name_for` has it), a kind
-    /// from [`kind_for`], the first two letters of that name on its tile, the
-    /// Runtimes colors, no default, no site counts, and no extra section.
-    pub fn plain(runtime: Runtime, folder: &'static str) -> Self {
-        let name = strings::runtime_name_for(folder);
+    /// What any runtime is until it asks for more: the name and the letters
+    /// of its tile that `strings` and `widgets` give it, a kind from
+    /// [`kind_for`], the Runtimes colors, no default, no site counts, and no
+    /// extra section.
+    pub fn plain(runtime: Runtime) -> Self {
         Self {
             runtime,
-            kind: kind_for(folder),
-            name,
-            monogram: strings::monogram_for(folder, name),
+            kind: kind_for(runtime),
+            name: strings::runtime_name(runtime),
+            monogram: runtime_monogram(runtime).to_owned(),
             section: Section::Runtimes,
             default: false,
             sites: false,
             extras: &[],
-            example: strings::example_version_for(folder),
+            example: strings::example_version(runtime),
         }
     }
 }
@@ -127,7 +125,7 @@ impl Descriptor {
 pub fn descriptor(runtime: Runtime) -> Descriptor {
     let plain = Descriptor {
         default: model::has_default(runtime),
-        ..Descriptor::plain(runtime, runtime.dir_name())
+        ..Descriptor::plain(runtime)
     };
     match runtime {
         Runtime::Php => Descriptor {
@@ -456,7 +454,7 @@ fn status(model: &Model) -> Status {
     Status {
         progress,
         removing: match model.removing() {
-            Some(removal @ Removal::Uninstall { .. }) => Some(strings::removing(removal)),
+            Some(removal @ Removal::Uninstall { .. }) => Some(removal.progress()),
             _ => None,
         },
     }
@@ -873,7 +871,7 @@ mod tests {
         let listed: Vec<Runtime> = descriptors().iter().map(|d| d.runtime).collect();
         let want: Vec<Runtime> = Runtime::ALL
             .into_iter()
-            .filter(|r| kind_for(r.dir_name()).listed())
+            .filter(|r| kind_for(*r).listed())
             .collect();
         assert_eq!(listed, want);
         // The engines belong under Databases and Services.
@@ -1319,27 +1317,36 @@ mod tests {
                 ("Caddy", Kind::Tool),
             ]
         );
-        // The engines are named before core has them: they are not listed.
-        for folder in ["postgres", "mysql", "valkey"] {
-            let engine = Descriptor::plain(Runtime::Caddy, folder);
-            assert_eq!(engine.kind, Kind::Engine, "{folder}");
+        // The engines are not listed.
+        for runtime in [Runtime::Postgres, Runtime::Mysql, Runtime::Valkey] {
+            let engine = Descriptor::plain(runtime);
+            assert_eq!(engine.kind, Kind::Engine, "{runtime:?}");
             assert!(!engine.kind.listed());
         }
-        // A name nobody knows is shown, as a language.
-        let unknown = Descriptor::plain(Runtime::Caddy, "python");
-        assert_eq!(unknown.kind, Kind::Language);
         let all = [
             descriptor(Runtime::Php),
-            Descriptor::plain(Runtime::Caddy, "postgres"),
-            Descriptor::plain(Runtime::Caddy, "python"),
-            Descriptor::plain(Runtime::Caddy, "mysql"),
-            Descriptor::plain(Runtime::Caddy, "valkey"),
+            Descriptor::plain(Runtime::Postgres),
+            fake(Runtime::Composer, "python", "Py"),
+            Descriptor::plain(Runtime::Mysql),
+            Descriptor::plain(Runtime::Valkey),
         ];
         let shown: Vec<&str> = listed(all).iter().map(|d| d.name).collect();
         assert_eq!(shown, ["PHP", "python"]);
     }
 
     // -- a runtime core does not have yet --
+
+    /// A descriptor for a runtime that core does not have yet: `runtime`
+    /// only stands in for its key, so the fakes have versions to show.
+    fn fake(runtime: Runtime, name: &'static str, monogram: &str) -> Descriptor {
+        Descriptor {
+            kind: Kind::Language,
+            name,
+            monogram: monogram.to_owned(),
+            example: "1.0",
+            ..Descriptor::plain(runtime)
+        }
+    }
 
     /// a runtime that core adds later (Python, Go)
     /// is in the list, with its details and its install dialog, and no line
@@ -1349,10 +1356,10 @@ mod tests {
     #[test]
     fn a_runtime_core_adds_later_is_listed_and_detailed_with_no_screen_code() {
         let mut table = descriptors();
-        table.push(Descriptor::plain(Runtime::Composer, "python"));
+        table.push(fake(Runtime::Composer, "python", "Py"));
         table.push(Descriptor {
             default: true,
-            ..Descriptor::plain(Runtime::Node, "go")
+            ..fake(Runtime::Node, "go", "Go")
         });
         let model = model();
 
@@ -1413,7 +1420,7 @@ mod tests {
         // The dialog of a new runtime says what to type for it.
         let mut asked = self::model();
         asked.session.install_dialog = Some(Runtime::Composer);
-        let dialog = dialog(&asked, &Descriptor::plain(Runtime::Composer, "python"));
+        let dialog = dialog(&asked, &fake(Runtime::Composer, "python", "Py"));
         assert_eq!(dialog.title, "Install a python version");
         assert_eq!(
             dialog.body,
