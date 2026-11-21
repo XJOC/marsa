@@ -229,6 +229,19 @@ pub trait OracleCheck {
     fn signature(&self, signature: &Path, file: &Path) -> Result<()>;
     /// The MD5 of `file`.
     fn md5(&self, file: &Path) -> Result<[u8; 16]>;
+    /// The name of the first entry of the tar archive `file`, as it is
+    /// written there (`mysql-8.4.13-.../bin/mysqld`).
+    fn first_entry(&self, file: &Path) -> Result<String>;
+}
+
+/// The top folder of a MySQL archive called `name`: the name without its
+/// `.tar.gz` or `.tar.xz`. Oracle's signature does not bind the archive to
+/// its name, so a hijacked CDN could serve an older signed archive under a
+/// new name: its top folder would still say the old version.
+fn top_folder_of(name: &str) -> Result<&str> {
+    name.strip_suffix(".tar.gz")
+        .or_else(|| name.strip_suffix(".tar.xz"))
+        .with_context(|| format!("{name} is not a .tar.gz or .tar.xz archive"))
 }
 
 /// A file whose proof passed: what the manifest records.
@@ -248,7 +261,9 @@ pub struct Checked {
 /// 3. the archive is downloaded to `work` and hashed on the way;
 /// 4. the signature is good and by the pinned key, then its MD5 matches,
 ///    then its sha256 is still the one hashed on the way, so all three are
-///    of the same bytes.
+///    of the same bytes;
+/// 5. the archive's top folder is the one its file name gives, so a signed
+///    archive of another version is not accepted under this version's name.
 ///
 /// The archive and its `.asc` are deleted after, whatever the result: they
 /// are 80 to 834 MB.
@@ -314,6 +329,14 @@ pub async fn check_oracle(
             now == file.sha256,
             "{} changed on disk during its checks",
             path.display()
+        );
+        let name = url.rsplit_once('/').map_or(url, |(_, name)| name);
+        let want = top_folder_of(name)?;
+        let first = check.first_entry(&path)?;
+        let top = first.split('/').next().unwrap_or_default();
+        ensure!(
+            top == want,
+            "the archive's first entry is in {top:?}, not in {want:?}, the folder its name gives"
         );
         Ok(Checked {
             url: file.url,
@@ -1355,6 +1378,8 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
     struct StubOracle {
         signature_ok: bool,
         md5: [u8; 16],
+        /// What `tar -tf` would list first.
+        first_entry: String,
         /// The `.asc` and archive bytes it was asked about.
         seen: std::sync::Mutex<Vec<(Vec<u8>, Vec<u8>)>>,
     }
@@ -1364,6 +1389,7 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             Self {
                 signature_ok,
                 md5,
+                first_entry: format!("{}/bin/mysqld", MYSQL_NAME.trim_end_matches(".tar.xz")),
                 seen: std::sync::Mutex::default(),
             }
         }
@@ -1379,6 +1405,10 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
 
         fn md5(&self, _file: &Path) -> Result<[u8; 16]> {
             Ok(self.md5)
+        }
+
+        fn first_entry(&self, _file: &Path) -> Result<String> {
+            Ok(self.first_entry.clone())
         }
     }
 
@@ -1456,6 +1486,50 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             assert!(format!("{err:#}").contains(expected), "{err:#}");
             assert!(!fetch.requests().iter().any(|url| url == MYSQL));
             assert!(oracle.seen.lock().expect("lock").is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn oracle_archive_of_another_version_under_this_name_is_refused() {
+        for entry in [
+            "mysql-8.4.11-linux-glibc2.28-x86_64-minimal/bin/mysqld",
+            "mysql-8.4.13-linux-glibc2.28-x86_64-minimal-extra/",
+            "/bin/mysqld",
+            "",
+        ] {
+            let mut oracle = StubOracle::new(true, MD5);
+            oracle.first_entry = entry.to_owned();
+            let work = tempfile::tempdir().expect("tempdir");
+            let err = check_oracle(&oracle_fetch(), MYSQL, work.path(), &oracle)
+                .await
+                .expect_err("another folder");
+            assert!(
+                format!("{err:#}").contains("the archive's first entry"),
+                "{entry}: {err:#}"
+            );
+            assert!(empty(work.path()), "deleted after a refusal too");
+        }
+        // The top folder alone, as a `tar -tf` lists a folder first.
+        let mut oracle = StubOracle::new(true, MD5);
+        oracle.first_entry = format!("{}/", MYSQL_NAME.trim_end_matches(".tar.xz"));
+        let work = tempfile::tempdir().expect("tempdir");
+        check_oracle(&oracle_fetch(), MYSQL, work.path(), &oracle)
+            .await
+            .expect("the folder itself");
+    }
+
+    #[test]
+    fn the_top_folder_comes_from_a_tar_name_only() {
+        assert_eq!(
+            top_folder_of("mysql-8.4.13-macos15-arm64.tar.gz").unwrap(),
+            "mysql-8.4.13-macos15-arm64"
+        );
+        assert_eq!(
+            top_folder_of("mysql-8.4.13-x.tar.xz").unwrap(),
+            "mysql-8.4.13-x"
+        );
+        for name in ["mysql-8.4.13-winx64.zip", "mysql.tar", ".tar.xz.exe"] {
+            assert!(top_folder_of(name).is_err(), "{name}");
         }
     }
 
