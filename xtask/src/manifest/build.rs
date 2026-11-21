@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 
 use super::pins::{Pins, RUNTIMES};
-use super::upstream::{Algorithm, Layout, Source, SumFile, hex, parse_hex, sum_file_for};
+use super::upstream::{
+    Algorithm, Layout, MYSQL_FOLDERS, Source, SumFile, hex, parse_hex, sum_file_for,
+};
 
 /// The JSON that `marsa_core::installer::manifest` reads (M2-02). Field
 /// order is the output order, and maps are `BTreeMap`, so the same inputs
@@ -135,21 +137,28 @@ enum Proof {
     /// source, of the recipe's own URL. PostgreSQL.
     TheseusSha256,
     /// Oracle's GPG signature `<archive>.asc` by the pinned key, and its
-    /// `<archive>.md5`, both, of the recipe's own URL on `cdn.mysql.com`
-    /// ([`check_oracle`]). MySQL: task M6-05 gives `Runtime::Mysql` this
-    /// proof; until then `cargo xtask manifest check-mysql` runs it.
+    /// `<archive>.md5`, both ([`check_oracle`]). The MySQL archive of the
+    /// recipe's own URL, or the same file name in Oracle's other folder
+    /// (`archives/`, for a version that is not current any more).
     OracleSignature,
+    /// The `sha256sums.txt` of one of our own `libaio-<v>-r<n>` releases,
+    /// which MySQL's recipe names for `libaio.so.1` and `libnuma.so.1`. No
+    /// upstream signs them: the trust is in our build and in the owner's
+    /// signature on the manifest.
+    OurLibaio,
 }
 
 impl Proof {
-    /// An exhaustive `match`, so each new runtime has to choose.
-    fn of(runtime: Runtime) -> Proof {
+    /// An exhaustive `match`, so each new runtime has to choose. MySQL's
+    /// `archive` is Oracle's; its other files are our own builds.
+    fn of(runtime: Runtime, artifact: &str) -> Proof {
         match runtime {
             Runtime::Php | Runtime::Node | Runtime::Composer | Runtime::Caddy => {
                 Proof::SumIfPublished
             }
             Runtime::Postgres => Proof::TheseusSha256,
-            Runtime::Mysql => Proof::OracleSignature,
+            Runtime::Mysql if artifact == "archive" => Proof::OracleSignature,
+            Runtime::Mysql => Proof::OurLibaio,
         }
     }
 
@@ -191,7 +200,7 @@ impl Proof {
             ),
             // Another signed Oracle archive, such as an older MySQL with
             // known holes, would pass the signature check too.
-            (Proof::OracleSignature, _) if template != Some(url) => bail!(
+            (Proof::OracleSignature, _) if !is_recipes_archive(url, template) => bail!(
                 "it is not the recipe's URL {}, and only that Oracle archive is accepted",
                 template.unwrap_or("(none)")
             ),
@@ -206,6 +215,23 @@ impl Proof {
                 "only an Oracle MySQL 8.4 archive on cdn.mysql.com, with its `.md5` and its \
                  signature `.asc`, is accepted"
             ),
+            // A file of another release, or of another architecture, would
+            // carry its own matching sum: so the file is the recipe's.
+            (Proof::OurLibaio, _) if template != Some(url) => bail!(
+                "it is not the recipe's URL {}, and only that file of our libaio release is \
+                 accepted",
+                template.unwrap_or("(none)")
+            ),
+            (Proof::OurLibaio, Some(sums))
+                if sums.source == Source::OurLibaio
+                    && sums.layout == Layout::List
+                    && sums.algorithm == Algorithm::Sha256 =>
+            {
+                Ok(())
+            }
+            (Proof::OurLibaio, _) => bail!(
+                "only a file of our own libaio release, with its `sha256sums.txt`, is accepted"
+            ),
         }
     }
 
@@ -216,9 +242,28 @@ impl Proof {
     fn keeps_file(self) -> bool {
         match self {
             Proof::SumIfPublished => true,
-            Proof::TheseusSha256 | Proof::OracleSignature => false,
+            Proof::TheseusSha256 | Proof::OracleSignature | Proof::OurLibaio => false,
         }
     }
+}
+
+/// Whether `url` is the recipe's own archive `template`, or the file of the
+/// same name in another folder of Oracle's (a version that is not current
+/// any more moves from `Downloads/` to `archives/`). The name carries the
+/// version and the platform, so this never accepts another archive.
+fn is_recipes_archive(url: &str, template: Option<&str>) -> bool {
+    let Some(template) = template else {
+        return false;
+    };
+    if url == template {
+        return true;
+    }
+    let (Some((dir, name)), Some((template_dir, template_name))) =
+        (url.rsplit_once('/'), template.rsplit_once('/'))
+    else {
+        return false;
+    };
+    name == template_name && MYSQL_FOLDERS.contains(&dir) && MYSQL_FOLDERS.contains(&template_dir)
 }
 
 /// The programs behind Oracle's proof: `oracle::System` in the build, a
@@ -229,6 +274,19 @@ pub trait OracleCheck {
     fn signature(&self, signature: &Path, file: &Path) -> Result<()>;
     /// The MD5 of `file`.
     fn md5(&self, file: &Path) -> Result<[u8; 16]>;
+    /// The name of the first entry of the tar archive `file`, as it is
+    /// written there (`mysql-8.4.13-.../bin/mysqld`).
+    fn first_entry(&self, file: &Path) -> Result<String>;
+}
+
+/// The top folder of a MySQL archive called `name`: the name without its
+/// `.tar.gz` or `.tar.xz`. Oracle's signature does not bind the archive to
+/// its name, so a hijacked CDN could serve an older signed archive under a
+/// new name: its top folder would still say the old version.
+fn top_folder_of(name: &str) -> Result<&str> {
+    name.strip_suffix(".tar.gz")
+        .or_else(|| name.strip_suffix(".tar.xz"))
+        .with_context(|| format!("{name} is not a .tar.gz or .tar.xz archive"))
 }
 
 /// A file whose proof passed: what the manifest records.
@@ -248,7 +306,9 @@ pub struct Checked {
 /// 3. the archive is downloaded to `work` and hashed on the way;
 /// 4. the signature is good and by the pinned key, then its MD5 matches,
 ///    then its sha256 is still the one hashed on the way, so all three are
-///    of the same bytes.
+///    of the same bytes;
+/// 5. the archive's top folder is the one its file name gives, so a signed
+///    archive of another version is not accepted under this version's name.
 ///
 /// The archive and its `.asc` are deleted after, whatever the result: they
 /// are 80 to 834 MB.
@@ -263,6 +323,9 @@ pub async fn check_oracle(
     check: &impl OracleCheck,
 ) -> Result<Checked> {
     let sums = sum_file_for(url);
+    // Any file of Oracle's two folders passes here: this function does not
+    // know the recipe's URL. `build` checks the URL against the recipe's
+    // before it calls this; the `check-mysql` command is for trying one file.
     Proof::OracleSignature
         .allows(url, Some(url), sums.as_ref())
         .with_context(|| url.to_owned())?;
@@ -315,6 +378,14 @@ pub async fn check_oracle(
             "{} changed on disk during its checks",
             path.display()
         );
+        let name = url.rsplit_once('/').map_or(url, |(_, name)| name);
+        let want = top_folder_of(name)?;
+        let first = check.first_entry(&path)?;
+        let top = first.split('/').next().unwrap_or_default();
+        ensure!(
+            top == want,
+            "the archive's first entry is in {top:?}, not in {want:?}, the folder its name gives"
+        );
         Ok(Checked {
             url: file.url,
             sha256: file.sha256,
@@ -351,7 +422,7 @@ pub async fn build(
     fetch: &impl Fetch,
     pins: &Pins,
     cache: &Path,
-    inspect: &impl Inspect,
+    inspect: &(impl Inspect + OracleCheck),
 ) -> Result<Built> {
     let mut manifest = ManifestJson {
         schema: SCHEMA_VERSION,
@@ -367,6 +438,13 @@ pub async fn build(
         for version in pins.versions(runtime) {
             let mut platforms = BTreeMap::new();
             for (platform, platform_recipe) in recipe.platforms() {
+                if let Some(reason) = pins.skip_reason(runtime, version, platform) {
+                    rows.push(format!(
+                        "{} {version} {platform}: skipped ({reason})",
+                        runtime.dir_name()
+                    ));
+                    continue;
+                }
                 let mut sources = Vec::new();
                 for artifact in platform_recipe.artifacts() {
                     let target = Target {
@@ -382,20 +460,29 @@ pub async fn build(
                     );
                     let urls = pins.urls(runtime, version, platform, &artifact.name)?;
                     let template = recipe.artifact_url(platform, &artifact.name, version);
-                    let proof = Proof::of(runtime);
+                    let proof = Proof::of(runtime, &artifact.name);
                     for url in &urls {
                         let sums = sum_file_for(url);
                         proof
                             .allows(url, template.as_deref(), sums.as_ref())
                             .with_context(|| format!("{what}: {url}"))?;
                     }
-                    // Its files only `check_oracle` proves; task M6-05 calls
-                    // it here. Until then, refused before the download.
-                    ensure!(
-                        proof != Proof::OracleSignature,
-                        "{what}: the build loop does not run Oracle's proof yet"
-                    );
-                    let file = if proof.keeps_file() {
+                    let file = if proof == Proof::OracleSignature {
+                        // One URL: Oracle's proof has no mirror.
+                        let [url] = urls.as_slice() else {
+                            bail!("{what}: an Oracle archive has one URL, not {}", urls.len());
+                        };
+                        let work = cache.join("oracle-work");
+                        let checked = check_oracle(fetch, url, &work, inspect)
+                            .await
+                            .with_context(|| what.clone())?;
+                        Ok(Downloaded {
+                            path: None,
+                            url: checked.url,
+                            sha256: checked.sha256,
+                            size: checked.size,
+                        })
+                    } else if proof.keeps_file() {
                         let dir = cache
                             .join(runtime.dir_name())
                             .join(version.to_string())
@@ -414,6 +501,11 @@ pub async fn build(
                         .allows(&file.url, template.as_deref(), sums.as_ref())
                         .with_context(|| format!("{what}: {}", file.url))?;
                     match sums {
+                        // `check_oracle` compared the MD5 and checked the
+                        // signature on the bytes it hashed.
+                        Some(_) if proof == Proof::OracleSignature => {
+                            notes.push("Oracle signature and md5 verified");
+                        }
                         Some(sums) => {
                             let sum_url = &sums.url;
                             if !sum_files.contains_key(sum_url) {
@@ -440,8 +532,7 @@ pub async fn build(
                                 }
                                 // `Proof::allows` refused it before the
                                 // download, except for `OracleSignature`,
-                                // whose files only `check_oracle` proves
-                                // (task M6-05 calls it here).
+                                // whose files only `check_oracle` proves.
                                 Algorithm::Md5 => {
                                     bail!("{what}: an MD5 is never accepted alone")
                                 }
@@ -766,6 +857,21 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
     #[derive(Default)]
     struct Stub(std::sync::Mutex<Vec<String>>);
 
+    /// No Oracle archive is in these pins: any call is a bug of the test.
+    impl OracleCheck for Stub {
+        fn signature(&self, _signature: &Path, _file: &Path) -> Result<()> {
+            bail!("an Oracle check was not expected")
+        }
+
+        fn md5(&self, _file: &Path) -> Result<[u8; 16]> {
+            bail!("an Oracle check was not expected")
+        }
+
+        fn first_entry(&self, _file: &Path) -> Result<String> {
+            bail!("an Oracle check was not expected")
+        }
+    }
+
     impl Inspect for Stub {
         fn php_build(&self, target: &Target<'_>, _file: &Path) -> Result<Vec<String>> {
             let name = format!("{} {}", target.platform, target.artifact.name);
@@ -824,6 +930,292 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             fetch = fetch.with(&url, Reply::Chunks(vec![text.into_bytes()]));
         }
         fetch
+    }
+
+    /// The pins of [`PINS`] plus MySQL: 8.4.13 where Oracle has it, and
+    /// 8.4.11 for the Intel Mac only, from Oracle's `archives/` folder.
+    fn mysql_pins() -> String {
+        let skip = |version: &str, platform: &str| {
+            format!(
+                "[[skip]]\nruntime = \"mysql\"\nversion = \"{version}\"\nplatform = \"{platform}\"\n\
+                 reason = \"no build\"\n"
+            )
+        };
+        format!(
+            "{PINS}[mysql]\nversions = [\"8.4.13\", \"8.4.11\"]\n{}{}{}{}{}{}\
+             [[override]]\nruntime = \"mysql\"\nversion = \"8.4.11\"\nplatform = \"darwin-x64\"\n\
+             artifact = \"archive\"\nurls = [\"https://cdn.mysql.com/archives/mysql-8.4/\
+             mysql-8.4.11-macos15-x86_64.tar.gz\"]\n",
+            skip("8.4.13", "darwin-x64"),
+            skip("8.4.13", "windows-x64"),
+            skip("8.4.11", "darwin-arm64"),
+            skip("8.4.11", "linux-x64"),
+            skip("8.4.11", "linux-arm64"),
+            skip("8.4.11", "windows-x64"),
+        )
+    }
+
+    /// Oracle's checks for the fake archives of [`fetcher`], whose body is
+    /// their own URL; the first entry is the top folder their name gives.
+    struct OracleOk;
+
+    impl OracleCheck for OracleOk {
+        fn signature(&self, _signature: &Path, _file: &Path) -> Result<()> {
+            Ok(())
+        }
+
+        fn md5(&self, _file: &Path) -> Result<[u8; 16]> {
+            // The `.md5` that `fetcher` writes for an MD5 sum file.
+            Ok([0; 16])
+        }
+
+        fn first_entry(&self, file: &Path) -> Result<String> {
+            let url = fs::read_to_string(file)?;
+            let name = url.rsplit_once('/').map_or(url.as_str(), |(_, name)| name);
+            Ok(format!("{}/bin/mysqld", top_folder_of(name)?))
+        }
+    }
+
+    struct MysqlStub;
+
+    impl Inspect for MysqlStub {
+        fn php_build(&self, _target: &Target<'_>, _file: &Path) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+    }
+
+    impl OracleCheck for MysqlStub {
+        fn signature(&self, signature: &Path, file: &Path) -> Result<()> {
+            OracleOk.signature(signature, file)
+        }
+
+        fn md5(&self, file: &Path) -> Result<[u8; 16]> {
+            OracleOk.md5(file)
+        }
+
+        fn first_entry(&self, file: &Path) -> Result<String> {
+            OracleOk.first_entry(file)
+        }
+    }
+
+    /// `fetcher`, and the `.asc` of every Oracle archive.
+    fn mysql_fetcher(pins: &Pins) -> MemoryFetch {
+        let mut fetch = fetcher(pins, None);
+        for version in pins.versions(Runtime::Mysql) {
+            let recipe = recipes::builtin(Runtime::Mysql).expect("recipe");
+            for (platform, _) in recipe.platforms() {
+                let urls = pins
+                    .urls(Runtime::Mysql, version, platform, "archive")
+                    .expect("urls");
+                fetch = fetch.with(
+                    &format!("{}.asc", urls[0]),
+                    Reply::Chunks(vec![b"signature".to_vec()]),
+                );
+            }
+        }
+        fetch
+    }
+
+    #[tokio::test]
+    async fn mysql_is_built_with_oracles_proof_and_our_own_libraries() {
+        let pins = Pins::parse(&mysql_pins()).expect("pins");
+        let fetch = mysql_fetcher(&pins);
+        let cache = tempfile::tempdir().expect("tempdir");
+        let built = build(&fetch, &pins, cache.path(), &MysqlStub)
+            .await
+            .expect("build");
+        let value = serde_json::to_value(&built.manifest).expect("json");
+        let releases = value["runtimes"]["mysql"].as_array().expect("mysql");
+        let platforms = |version: &str| -> Vec<(String, Vec<String>)> {
+            let release = releases
+                .iter()
+                .find(|release| release["version"] == version)
+                .expect("release");
+            release["platforms"]
+                .as_object()
+                .expect("platforms")
+                .iter()
+                .map(|(platform, files)| {
+                    let names = files
+                        .as_array()
+                        .expect("files")
+                        .iter()
+                        .map(|file| file["name"].as_str().expect("name").to_owned())
+                        .collect();
+                    (platform.clone(), names)
+                })
+                .collect()
+        };
+        let linux = vec!["archive".to_owned(), "libaio".into(), "libnuma".into()];
+        assert_eq!(
+            platforms("8.4.13"),
+            [
+                ("darwin-arm64".to_owned(), vec!["archive".to_owned()]),
+                ("linux-arm64".to_owned(), linux.clone()),
+                ("linux-x64".to_owned(), linux),
+            ]
+        );
+        assert_eq!(
+            platforms("8.4.11"),
+            [("darwin-x64".to_owned(), vec!["archive".to_owned()])]
+        );
+        let intel = &releases[1]["platforms"]["darwin-x64"][0];
+        assert_eq!(
+            intel["urls"][0],
+            "https://cdn.mysql.com/archives/mysql-8.4/mysql-8.4.11-macos15-x86_64.tar.gz"
+        );
+        let rows = built.rows.join("\n");
+        assert!(rows.contains("Oracle signature and md5 verified"), "{rows}");
+        assert!(rows.contains("upstream sha256 matches"), "{rows}");
+        // Nothing of MySQL stays on disk: archives are hashed or deleted.
+        assert!(!cache.path().join("mysql").exists());
+        assert!(empty(&cache.path().join("oracle-work")));
+        check_json(to_json(&built.manifest).expect("json").as_bytes()).expect("valid manifest");
+    }
+
+    #[tokio::test]
+    async fn a_bad_oracle_check_or_library_sum_stops_the_mysql_build() {
+        let pins = Pins::parse(&mysql_pins()).expect("pins");
+        // A wrong top folder.
+        struct WrongFolder;
+        impl Inspect for WrongFolder {
+            fn php_build(&self, _t: &Target<'_>, _f: &Path) -> Result<Vec<String>> {
+                Ok(vec![])
+            }
+        }
+        impl OracleCheck for WrongFolder {
+            fn signature(&self, _s: &Path, _f: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn md5(&self, _f: &Path) -> Result<[u8; 16]> {
+                Ok([0; 16])
+            }
+            fn first_entry(&self, _f: &Path) -> Result<String> {
+                Ok("mysql-8.4.9-other/bin/mysqld".to_owned())
+            }
+        }
+        let cache = tempfile::tempdir().expect("tempdir");
+        let err = build(&mysql_fetcher(&pins), &pins, cache.path(), &WrongFolder)
+            .await
+            .err()
+            .expect("wrong folder");
+        assert!(format!("{err:#}").contains("first entry"), "{err:#}");
+
+        // A libaio file that its release's sha256sums.txt does not list as
+        // it is.
+        let fetch = {
+            let mut fetch = fetcher(&pins, Some("libaio-0.3.113-linux-x64.so.1"));
+            for version in pins.versions(Runtime::Mysql) {
+                let recipe = recipes::builtin(Runtime::Mysql).expect("recipe");
+                for (platform, _) in recipe.platforms() {
+                    let urls = pins
+                        .urls(Runtime::Mysql, version, platform, "archive")
+                        .expect("urls");
+                    fetch = fetch.with(
+                        &format!("{}.asc", urls[0]),
+                        Reply::Chunks(vec![b"signature".to_vec()]),
+                    );
+                }
+            }
+            fetch
+        };
+        let cache = tempfile::tempdir().expect("tempdir");
+        let err = build(&fetch, &pins, cache.path(), &MysqlStub)
+            .await
+            .err()
+            .expect("bad libaio sum");
+        assert!(format!("{err:#}").contains("libaio"), "{err:#}");
+    }
+
+    #[test]
+    fn each_mysql_file_has_its_own_proof() {
+        assert_eq!(Proof::of(Runtime::Mysql, "archive"), Proof::OracleSignature);
+        for name in ["libaio", "libnuma"] {
+            assert_eq!(Proof::of(Runtime::Mysql, name), Proof::OurLibaio);
+        }
+        let release = "https://github.com/XJOC/marsa/releases/download/libaio-0.3.113-r1/\
+                       libaio-0.3.113-linux-x64.so.1";
+        let sums = sum_file_for(release);
+        Proof::OurLibaio
+            .allows(release, Some(release), sums.as_ref())
+            .expect("our release");
+        // Not our release, an Oracle archive, or no sum file.
+        for url in [
+            "https://github.com/someone/else/releases/download/libaio-0.3.113-r1/libaio.so.1",
+            MYSQL,
+            "https://example.org/libaio.so.1",
+        ] {
+            let sums = sum_file_for(url);
+            assert!(
+                Proof::OurLibaio
+                    .allows(url, Some(url), sums.as_ref())
+                    .is_err(),
+                "{url}"
+            );
+        }
+        // Another file of our own releases: the other architecture, the other
+        // library, or an older release.
+        for other in [
+            "https://github.com/XJOC/marsa/releases/download/libaio-0.3.113-r1/libaio-0.3.113-linux-arm64.so.1",
+            "https://github.com/XJOC/marsa/releases/download/libaio-0.3.113-r1/libnuma-2.0.19-linux-x64.so.1",
+            "https://github.com/XJOC/marsa/releases/download/libaio-0.3.100-r1/libaio-0.3.100-linux-x64.so.1",
+        ] {
+            let sums = sum_file_for(other);
+            let err = Proof::OurLibaio
+                .allows(other, Some(release), sums.as_ref())
+                .expect_err("not the recipe's file");
+            assert!(err.to_string().contains("only that file"), "{err}");
+        }
+        assert!(!Proof::OurLibaio.keeps_file());
+    }
+
+    /// An Oracle file has one URL: a second one is a mirror that its
+    /// proof does not cover.
+    #[tokio::test]
+    async fn an_oracle_file_with_a_mirror_stops_the_build() {
+        let text = format!(
+            "{}\n[[override]]\nruntime = \"mysql\"\nversion = \"8.4.13\"\nplatform = \"darwin-arm64\"\n\
+             artifact = \"archive\"\nurls = [\"https://cdn.mysql.com/Downloads/MySQL-8.4/\
+             mysql-8.4.13-macos15-arm64.tar.gz\", \"https://cdn.mysql.com/archives/mysql-8.4/\
+             mysql-8.4.13-macos15-arm64.tar.gz\"]\n",
+            mysql_pins()
+        );
+        let pins = Pins::parse(&text).expect("pins");
+        let cache = tempfile::tempdir().expect("tempdir");
+        let err = build(&mysql_fetcher(&pins), &pins, cache.path(), &MysqlStub)
+            .await
+            .err()
+            .expect("a mirror");
+        assert!(format!("{err:#}").contains("has one URL, not 2"), "{err:#}");
+    }
+
+    #[test]
+    fn an_oracle_archive_may_come_from_the_archives_folder_by_its_own_name() {
+        let template =
+            "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.11-macos15-x86_64.tar.gz";
+        let archived =
+            "https://cdn.mysql.com/archives/mysql-8.4/mysql-8.4.11-macos15-x86_64.tar.gz";
+        assert!(is_recipes_archive(template, Some(template)));
+        assert!(is_recipes_archive(archived, Some(template)));
+        for (url, template) in [
+            // Another file name: another version or platform.
+            (
+                "https://cdn.mysql.com/archives/mysql-8.4/mysql-8.4.9-macos15-x86_64.tar.gz",
+                Some(template),
+            ),
+            // Another host or folder with the same name.
+            (
+                "https://example.org/archives/mysql-8.4/mysql-8.4.11-macos15-x86_64.tar.gz",
+                Some(template),
+            ),
+            (
+                "https://cdn.mysql.com/archives/mysql-8.0/mysql-8.4.11-macos15-x86_64.tar.gz",
+                Some(template),
+            ),
+            (archived, None),
+        ] {
+            assert!(!is_recipes_archive(url, template), "{url}");
+        }
     }
 
     #[tokio::test]
@@ -1355,6 +1747,8 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
     struct StubOracle {
         signature_ok: bool,
         md5: [u8; 16],
+        /// What `tar -tf` would list first.
+        first_entry: String,
         /// The `.asc` and archive bytes it was asked about.
         seen: std::sync::Mutex<Vec<(Vec<u8>, Vec<u8>)>>,
     }
@@ -1364,6 +1758,7 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             Self {
                 signature_ok,
                 md5,
+                first_entry: format!("{}/bin/mysqld", MYSQL_NAME.trim_end_matches(".tar.xz")),
                 seen: std::sync::Mutex::default(),
             }
         }
@@ -1379,6 +1774,10 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
 
         fn md5(&self, _file: &Path) -> Result<[u8; 16]> {
             Ok(self.md5)
+        }
+
+        fn first_entry(&self, _file: &Path) -> Result<String> {
+            Ok(self.first_entry.clone())
         }
     }
 
@@ -1456,6 +1855,50 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             assert!(format!("{err:#}").contains(expected), "{err:#}");
             assert!(!fetch.requests().iter().any(|url| url == MYSQL));
             assert!(oracle.seen.lock().expect("lock").is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn oracle_archive_of_another_version_under_this_name_is_refused() {
+        for entry in [
+            "mysql-8.4.11-linux-glibc2.28-x86_64-minimal/bin/mysqld",
+            "mysql-8.4.13-linux-glibc2.28-x86_64-minimal-extra/",
+            "/bin/mysqld",
+            "",
+        ] {
+            let mut oracle = StubOracle::new(true, MD5);
+            oracle.first_entry = entry.to_owned();
+            let work = tempfile::tempdir().expect("tempdir");
+            let err = check_oracle(&oracle_fetch(), MYSQL, work.path(), &oracle)
+                .await
+                .expect_err("another folder");
+            assert!(
+                format!("{err:#}").contains("the archive's first entry"),
+                "{entry}: {err:#}"
+            );
+            assert!(empty(work.path()), "deleted after a refusal too");
+        }
+        // The top folder alone, as a `tar -tf` lists a folder first.
+        let mut oracle = StubOracle::new(true, MD5);
+        oracle.first_entry = format!("{}/", MYSQL_NAME.trim_end_matches(".tar.xz"));
+        let work = tempfile::tempdir().expect("tempdir");
+        check_oracle(&oracle_fetch(), MYSQL, work.path(), &oracle)
+            .await
+            .expect("the folder itself");
+    }
+
+    #[test]
+    fn the_top_folder_comes_from_a_tar_name_only() {
+        assert_eq!(
+            top_folder_of("mysql-8.4.13-macos15-arm64.tar.gz").unwrap(),
+            "mysql-8.4.13-macos15-arm64"
+        );
+        assert_eq!(
+            top_folder_of("mysql-8.4.13-x.tar.xz").unwrap(),
+            "mysql-8.4.13-x"
+        );
+        for name in ["mysql-8.4.13-winx64.zip", "mysql.tar", ".tar.xz.exe"] {
+            assert!(top_folder_of(name).is_err(), "{name}");
         }
     }
 

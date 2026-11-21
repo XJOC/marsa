@@ -327,11 +327,73 @@ impl OracleCheck for System {
     fn md5(&self, file: &Path) -> Result<[u8; 16]> {
         md5_of(file)
     }
+
+    fn first_entry(&self, file: &Path) -> Result<String> {
+        first_tar_entry(Path::new(TAR_PATH), file)
+    }
+}
+
+/// macOS's own `tar` (bsdtar), which reads `.tar.gz` and `.tar.xz`. Never
+/// searched in `PATH`.
+const TAR_PATH: &str = "/usr/bin/tar";
+
+/// The first line of `tar -tf <file>`, read without listing the rest: the
+/// full archives have tens of thousands of entries.
+fn first_tar_entry(tar: &Path, file: &Path) -> Result<String> {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let mut child = Command::new(tar)
+        .arg("-tf")
+        .arg(file)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("cannot run {}", tar.display()))?;
+    let stdout = child.stdout.take().context("tar has no output")?;
+    let mut line = String::new();
+    let read = BufReader::new(stdout).read_line(&mut line);
+    // Not waiting for the end of the listing.
+    let _ = child.kill();
+    let _ = child.wait();
+    let read = read.with_context(|| format!("cannot read the listing of {}", file.display()))?;
+    ensure!(read > 0, "{} lists no entry", file.display());
+    Ok(line.trim_end_matches(['\n', '\r']).to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The first entry that the system's `tar` lists, from a real archive.
+    #[cfg(unix)]
+    #[test]
+    fn the_first_tar_entry_is_read_from_a_real_archive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let top = dir.path().join("mysql-8.4.13-x");
+        fs::create_dir_all(top.join("bin")).expect("dirs");
+        fs::write(top.join("bin/mysqld"), b"x").expect("file");
+        let archive = dir.path().join("a.tar.gz");
+        let made = Command::new(TAR_PATH)
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(dir.path())
+            .arg("mysql-8.4.13-x")
+            .status()
+            .expect("tar runs");
+        assert!(made.success());
+        let first = first_tar_entry(Path::new(TAR_PATH), &archive).expect("listing");
+        assert_eq!(first.split('/').next(), Some("mysql-8.4.13-x"), "{first}");
+
+        let empty = dir.path().join("empty.tar");
+        fs::write(&empty, vec![0_u8; 1024]).expect("empty tar");
+        assert!(first_tar_entry(Path::new(TAR_PATH), &empty).is_err());
+        assert!(first_tar_entry(Path::new(TAR_PATH), &dir.path().join("none")).is_err());
+        assert!(first_tar_entry(&dir.path().join("no-tar"), &archive).is_err());
+    }
 
     // Real `gpg --status-fd 1 --verify` output (GnuPG 2.5.20, 2026-11-19).
     // Oracle's signature on mysql-8.4.13-linux-glibc2.28-x86_64-minimal.tar.xz

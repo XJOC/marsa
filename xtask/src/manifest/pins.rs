@@ -31,6 +31,8 @@ struct RawPins {
     mysql: RawList,
     #[serde(default, rename = "override")]
     overrides: Vec<RawOverride>,
+    #[serde(default, rename = "skip")]
+    skips: Vec<RawSkip>,
 }
 
 #[derive(Default, Deserialize)]
@@ -49,6 +51,18 @@ struct RawOverride {
     urls: Vec<String>,
 }
 
+/// A version that has no build for a platform, so `build` leaves it out.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSkip {
+    runtime: String,
+    version: String,
+    platform: String,
+    /// Why, for the next reader of `pins.toml`. Required: a skipped platform
+    /// is a promise that `marsa install` will not offer it.
+    reason: String,
+}
+
 /// Which file an override replaces: runtime folder name, version, platform,
 /// artifact name.
 type OverrideKey = (&'static str, Version, Platform, String);
@@ -61,6 +75,8 @@ pub struct Pins {
     pub spc_line: String,
     versions: BTreeMap<&'static str, Vec<Version>>,
     overrides: BTreeMap<OverrideKey, Vec<String>>,
+    /// The reason of each `[[skip]]`.
+    skips: BTreeMap<(&'static str, Version, Platform), String>,
 }
 
 impl Pins {
@@ -125,12 +141,70 @@ impl Pins {
                 "{what}: listed twice"
             );
         }
+        let mut skips = BTreeMap::new();
+        for skip in raw.skips {
+            let what = format!("skip {} {} {}", skip.runtime, skip.version, skip.platform);
+            let runtime = runtime_named(&skip.runtime).with_context(|| what.clone())?;
+            let version = Version::parse(&skip.version)
+                .with_context(|| format!("{what}: version is not semver"))?;
+            ensure!(
+                versions[runtime.dir_name()].contains(&version),
+                "{what}: {version} is not in [{}].versions",
+                runtime.dir_name()
+            );
+            let platform = Platform::from_str(&skip.platform).with_context(|| what.clone())?;
+            ensure!(
+                recipes::builtin(runtime)?.platform(platform).is_some(),
+                "{what}: the {} recipe has no such platform",
+                runtime.dir_name()
+            );
+            ensure!(!skip.reason.trim().is_empty(), "{what}: reason is empty");
+            ensure!(
+                !overrides.keys().any(|(r, v, p, _)| *r == runtime.dir_name()
+                    && *v == version
+                    && *p == platform),
+                "{what}: it has an override too"
+            );
+            ensure!(
+                skips
+                    .insert((runtime.dir_name(), version, platform), skip.reason)
+                    .is_none(),
+                "{what}: listed twice"
+            );
+        }
+        // A version with no platform left would be published with no file.
+        for runtime in RUNTIMES {
+            let recipe = recipes::builtin(runtime)?;
+            for version in &versions[runtime.dir_name()] {
+                ensure!(
+                    recipe.platforms().any(|(platform, _)| {
+                        !skips.contains_key(&(runtime.dir_name(), version.clone(), platform))
+                    }),
+                    "{} {version}: every platform is skipped",
+                    runtime.dir_name()
+                );
+            }
+        }
         Ok(Pins {
             serial: raw.serial,
             spc_line: raw.spc_line,
             versions,
             overrides,
+            skips,
         })
+    }
+
+    /// Why `build` leaves this version out for `platform` (`[[skip]]` in
+    /// `pins.toml`), or `None` when it builds it.
+    pub fn skip_reason(
+        &self,
+        runtime: Runtime,
+        version: &Version,
+        platform: Platform,
+    ) -> Option<&str> {
+        self.skips
+            .get(&(runtime.dir_name(), version.clone(), platform))
+            .map(String::as_str)
     }
 
     /// The pinned versions of `runtime`, in file order.
@@ -340,6 +414,86 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
 
     fn error(text: &str) -> String {
         format!("{:#}", Pins::parse(text).expect_err("must be refused"))
+    }
+
+    /// `FULL` with MySQL 8.4.13, and the `[[skip]]` text given.
+    fn with_mysql(skips: &str) -> String {
+        format!("{FULL}[mysql]\nversions = [\"8.4.13\"]\n{skips}")
+    }
+
+    fn skip(version: &str, platform: &str, reason: &str) -> String {
+        format!(
+            "[[skip]]\nruntime = \"mysql\"\nversion = \"{version}\"\n\
+             platform = \"{platform}\"\nreason = \"{reason}\"\n"
+        )
+    }
+
+    #[test]
+    fn a_skipped_platform_is_left_out_of_that_version_only() {
+        let pins = Pins::parse(&with_mysql(&skip("8.4.13", "darwin-x64", "no Intel build")))
+            .expect("valid pins");
+        let version = v("8.4.13");
+        assert_eq!(
+            pins.skip_reason(Runtime::Mysql, &version, Platform::DarwinX64),
+            Some("no Intel build")
+        );
+        let none = |runtime, version: &Version, platform| {
+            pins.skip_reason(runtime, version, platform).is_none()
+        };
+        assert!(none(Runtime::Mysql, &version, Platform::DarwinArm64));
+        assert!(none(Runtime::Mysql, &v("8.4.11"), Platform::DarwinX64));
+        assert!(none(Runtime::Postgres, &v("18.7.0"), Platform::DarwinX64));
+        // No skip at all is the default.
+        let pins = Pins::parse(&with_mysql("")).expect("valid pins");
+        assert!(
+            pins.skip_reason(Runtime::Mysql, &version, Platform::DarwinX64)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_bad_skip_is_refused() {
+        let every_platform = [
+            "darwin-arm64",
+            "darwin-x64",
+            "linux-x64",
+            "linux-arm64",
+            "windows-x64",
+        ]
+        .iter()
+        .map(|platform| skip("8.4.13", platform, "x"))
+        .collect::<String>();
+        let override_too = format!(
+            "{}[[override]]\nruntime = \"mysql\"\nversion = \"8.4.13\"\nplatform = \"darwin-x64\"\n\
+             artifact = \"archive\"\nurls = [\"https://cdn.mysql.com/archives/mysql-8.4/x.tar.gz\"]\n",
+            skip("8.4.13", "darwin-x64", "x")
+        );
+        let cases = [
+            (
+                skip("8.4.9", "darwin-x64", "x"),
+                "8.4.9 is not in [mysql].versions",
+            ),
+            (skip("8.4.13", "darwin-arm32", "x"), "unknown platform"),
+            (skip("8.4.13", "darwin-x64", "  "), "reason is empty"),
+            (
+                format!(
+                    "{}{}",
+                    skip("8.4.13", "darwin-x64", "x"),
+                    skip("8.4.13", "darwin-x64", "y")
+                ),
+                "listed twice",
+            ),
+            (every_platform, "every platform is skipped"),
+            (override_too, "it has an override too"),
+        ];
+        for (skips, expected) in cases {
+            let text = error(&with_mysql(&skips));
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+        // A skip needs its reason field at all.
+        let no_reason =
+            "[[skip]]\nruntime = \"mysql\"\nversion = \"8.4.13\"\nplatform = \"darwin-x64\"\n";
+        assert!(error(&with_mysql(no_reason)).contains("missing field `reason`"));
     }
 
     #[test]
