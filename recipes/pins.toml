@@ -101,7 +101,8 @@ urls = ["https://cdn.mysql.com/archives/mysql-8.4/mysql-8.4.11-macos15-x86_64.ta
 # of the GitHub Release libaio-0.3.113-r1, made by .github/workflows/
 # libaio-build.yml (run it with release = true). The workflow makes it a
 # DRAFT: those URLs answer only after it is published. A rebuild is a new
-# release (r2): an override per file here, or a new URL in the recipe.
+# release (r2): new URLs in the recipe (`build` accepts only the recipe's own
+# file for these two).
 
 # PHP 8.4.27 for macOS and Linux: the archives of the GitHub Release
 # php-8.4.27-r2, made by .github/workflows/php-build.yml (run it with

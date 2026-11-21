@@ -215,6 +215,13 @@ impl Proof {
                 "only an Oracle MySQL 8.4 archive on cdn.mysql.com, with its `.md5` and its \
                  signature `.asc`, is accepted"
             ),
+            // A file of another release, or of another architecture, would
+            // carry its own matching sum: so the file is the recipe's.
+            (Proof::OurLibaio, _) if template != Some(url) => bail!(
+                "it is not the recipe's URL {}, and only that file of our libaio release is \
+                 accepted",
+                template.unwrap_or("(none)")
+            ),
             (Proof::OurLibaio, Some(sums))
                 if sums.source == Source::OurLibaio
                     && sums.layout == Layout::List
@@ -316,6 +323,9 @@ pub async fn check_oracle(
     check: &impl OracleCheck,
 ) -> Result<Checked> {
     let sums = sum_file_for(url);
+    // Any file of Oracle's two folders passes here: this function does not
+    // know the recipe's URL. `build` checks the URL against the recipe's
+    // before it calls this; the `check-mysql` command is for trying one file.
     Proof::OracleSignature
         .allows(url, Some(url), sums.as_ref())
         .with_context(|| url.to_owned())?;
@@ -428,7 +438,11 @@ pub async fn build(
         for version in pins.versions(runtime) {
             let mut platforms = BTreeMap::new();
             for (platform, platform_recipe) in recipe.platforms() {
-                if pins.skips(runtime, version, platform) {
+                if let Some(reason) = pins.skip_reason(runtime, version, platform) {
+                    rows.push(format!(
+                        "{} {version} {platform}: skipped ({reason})",
+                        runtime.dir_name()
+                    ));
                     continue;
                 }
                 let mut sources = Vec::new();
@@ -518,8 +532,7 @@ pub async fn build(
                                 }
                                 // `Proof::allows` refused it before the
                                 // download, except for `OracleSignature`,
-                                // whose files only `check_oracle` proves
-                                // (task M6-05 calls it here).
+                                // whose files only `check_oracle` proves.
                                 Algorithm::Md5 => {
                                     bail!("{what}: an MD5 is never accepted alone")
                                 }
@@ -1140,7 +1153,40 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
                 "{url}"
             );
         }
+        // Another file of our own releases: the other architecture, the other
+        // library, or an older release.
+        for other in [
+            "https://github.com/XJOC/marsa/releases/download/libaio-0.3.113-r1/libaio-0.3.113-linux-arm64.so.1",
+            "https://github.com/XJOC/marsa/releases/download/libaio-0.3.113-r1/libnuma-2.0.19-linux-x64.so.1",
+            "https://github.com/XJOC/marsa/releases/download/libaio-0.3.100-r1/libaio-0.3.100-linux-x64.so.1",
+        ] {
+            let sums = sum_file_for(other);
+            let err = Proof::OurLibaio
+                .allows(other, Some(release), sums.as_ref())
+                .expect_err("not the recipe's file");
+            assert!(err.to_string().contains("only that file"), "{err}");
+        }
         assert!(!Proof::OurLibaio.keeps_file());
+    }
+
+    /// An Oracle file has one URL: a second one is a mirror that its
+    /// proof does not cover.
+    #[tokio::test]
+    async fn an_oracle_file_with_a_mirror_stops_the_build() {
+        let text = format!(
+            "{}\n[[override]]\nruntime = \"mysql\"\nversion = \"8.4.13\"\nplatform = \"darwin-arm64\"\n\
+             artifact = \"archive\"\nurls = [\"https://cdn.mysql.com/Downloads/MySQL-8.4/\
+             mysql-8.4.13-macos15-arm64.tar.gz\", \"https://cdn.mysql.com/archives/mysql-8.4/\
+             mysql-8.4.13-macos15-arm64.tar.gz\"]\n",
+            mysql_pins()
+        );
+        let pins = Pins::parse(&text).expect("pins");
+        let cache = tempfile::tempdir().expect("tempdir");
+        let err = build(&mysql_fetcher(&pins), &pins, cache.path(), &MysqlStub)
+            .await
+            .err()
+            .expect("a mirror");
+        assert!(format!("{err:#}").contains("has one URL, not 2"), "{err:#}");
     }
 
     #[test]

@@ -75,7 +75,8 @@ pub struct Pins {
     pub spc_line: String,
     versions: BTreeMap<&'static str, Vec<Version>>,
     overrides: BTreeMap<OverrideKey, Vec<String>>,
-    skips: BTreeSet<(&'static str, Version, Platform)>,
+    /// The reason of each `[[skip]]`.
+    skips: BTreeMap<(&'static str, Version, Platform), String>,
 }
 
 impl Pins {
@@ -140,7 +141,7 @@ impl Pins {
                 "{what}: listed twice"
             );
         }
-        let mut skips = BTreeSet::new();
+        let mut skips = BTreeMap::new();
         for skip in raw.skips {
             let what = format!("skip {} {} {}", skip.runtime, skip.version, skip.platform);
             let runtime = runtime_named(&skip.runtime).with_context(|| what.clone())?;
@@ -165,7 +166,9 @@ impl Pins {
                 "{what}: it has an override too"
             );
             ensure!(
-                skips.insert((runtime.dir_name(), version, platform)),
+                skips
+                    .insert((runtime.dir_name(), version, platform), skip.reason)
+                    .is_none(),
                 "{what}: listed twice"
             );
         }
@@ -175,7 +178,7 @@ impl Pins {
             for version in &versions[runtime.dir_name()] {
                 ensure!(
                     recipe.platforms().any(|(platform, _)| {
-                        !skips.contains(&(runtime.dir_name(), version.clone(), platform))
+                        !skips.contains_key(&(runtime.dir_name(), version.clone(), platform))
                     }),
                     "{} {version}: every platform is skipped",
                     runtime.dir_name()
@@ -191,11 +194,17 @@ impl Pins {
         })
     }
 
-    /// Whether `build` leaves this version out for `platform`: it has no
-    /// build there (`[[skip]]` in `pins.toml`).
-    pub fn skips(&self, runtime: Runtime, version: &Version, platform: Platform) -> bool {
+    /// Why `build` leaves this version out for `platform` (`[[skip]]` in
+    /// `pins.toml`), or `None` when it builds it.
+    pub fn skip_reason(
+        &self,
+        runtime: Runtime,
+        version: &Version,
+        platform: Platform,
+    ) -> Option<&str> {
         self.skips
-            .contains(&(runtime.dir_name(), version.clone(), platform))
+            .get(&(runtime.dir_name(), version.clone(), platform))
+            .map(String::as_str)
     }
 
     /// The pinned versions of `runtime`, in file order.
@@ -424,13 +433,22 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
         let pins = Pins::parse(&with_mysql(&skip("8.4.13", "darwin-x64", "no Intel build")))
             .expect("valid pins");
         let version = v("8.4.13");
-        assert!(pins.skips(Runtime::Mysql, &version, Platform::DarwinX64));
-        assert!(!pins.skips(Runtime::Mysql, &version, Platform::DarwinArm64));
-        assert!(!pins.skips(Runtime::Mysql, &v("8.4.11"), Platform::DarwinX64));
-        assert!(!pins.skips(Runtime::Postgres, &v("18.7.0"), Platform::DarwinX64));
+        assert_eq!(
+            pins.skip_reason(Runtime::Mysql, &version, Platform::DarwinX64),
+            Some("no Intel build")
+        );
+        let none = |runtime, version: &Version, platform| {
+            pins.skip_reason(runtime, version, platform).is_none()
+        };
+        assert!(none(Runtime::Mysql, &version, Platform::DarwinArm64));
+        assert!(none(Runtime::Mysql, &v("8.4.11"), Platform::DarwinX64));
+        assert!(none(Runtime::Postgres, &v("18.7.0"), Platform::DarwinX64));
         // No skip at all is the default.
         let pins = Pins::parse(&with_mysql("")).expect("valid pins");
-        assert!(!pins.skips(Runtime::Mysql, &version, Platform::DarwinX64));
+        assert!(
+            pins.skip_reason(Runtime::Mysql, &version, Platform::DarwinX64)
+                .is_none()
+        );
     }
 
     #[test]
