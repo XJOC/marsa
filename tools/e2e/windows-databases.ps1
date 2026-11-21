@@ -324,6 +324,13 @@ try {
     $Bin = Join-Path $Base 'bin'
     New-Item -ItemType Directory -Force -Path $Bin, (Join-Path $Data 'config') | Out-Null
     $script:WorkDir = $Base
+    # Start-Process -Credential hands this script's environment on, with the
+    # runner's TEMP, which the plain user cannot open (mysqld stats it at
+    # its start). A user's own logon has its own.
+    $userTemp = Join-Path $Base 'temp'
+    New-Item -ItemType Directory -Force -Path $userTemp | Out-Null
+    $env:TEMP = $userTemp
+    $env:TMP = $userTemp
     # The user cannot read the runner's workspace: marsa and marsad go next
     # to each other in the user's folder, as an install puts them.
     foreach ($program in 'marsa.exe', 'marsad.exe') {
