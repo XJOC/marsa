@@ -9,7 +9,7 @@ use semver::Version;
 use super::InstallError;
 use super::manifest::{ArtifactSource, Manifest, Release};
 use crate::platform::probe;
-use crate::recipes::{Artifact, Platform, PlatformRecipe, parse_os_version};
+use crate::recipes::{ArchiveFormat, Artifact, Platform, PlatformRecipe, parse_os_version};
 use crate::resolver;
 use crate::runtimes::Runtime;
 
@@ -77,6 +77,29 @@ pub fn check_minimum(
                 found: format!("{label} {have}"),
             });
         }
+    }
+    Ok(())
+}
+
+/// Refuses an install whose files come as `tar.xz` when the system has no xz
+/// to unpack them. Before any download, so 80 MB are not fetched for nothing.
+///
+/// # Errors
+///
+/// `install_xz_missing`.
+pub fn check_xz(
+    runtime: Runtime,
+    entry: &PlatformRecipe,
+    xz_available: bool,
+) -> Result<(), InstallError> {
+    let needs_xz = entry
+        .artifacts()
+        .iter()
+        .any(|artifact| artifact.format == ArchiveFormat::TarXz);
+    if needs_xz && !xz_available {
+        return Err(InstallError::XzMissing {
+            what: runtime.dir_name().to_owned(),
+        });
     }
     Ok(())
 }
@@ -381,6 +404,25 @@ mod tests {
         let none = entry_with("");
         let mac = none.platform(Platform::DarwinArm64).expect("mac");
         assert!(check(mac, &os(Some("10.0"), None)).is_ok());
+    }
+
+    #[test]
+    fn a_tar_xz_recipe_needs_xz_before_any_download() {
+        let text = "name = \"mysql\"\n[platform.linux-x64]\n\
+                    programs = { mysqld = \"bin/mysqld\" }\n\
+                    [[platform.linux-x64.artifact]]\nname = \"a\"\n\
+                    url = \"https://example.test/x\"\nformat = \"tar.xz\"\n";
+        let xz = recipes::parse("mysql.toml", text).expect("test recipe is valid");
+        let entry = xz.platform(Platform::LinuxX64).expect("linux");
+        let err = check_xz(Runtime::Mysql, entry, false).expect_err("no xz");
+        assert_eq!(err.code(), "install_xz_missing");
+        assert!(err.to_string().contains("/usr/bin/xz"), "{err}");
+        assert!(check_xz(Runtime::Mysql, entry, true).is_ok());
+
+        // A recipe of `tar.gz` files never asks for xz.
+        let gz = entry_with("");
+        let mac = gz.platform(Platform::DarwinArm64).expect("mac");
+        assert!(check_xz(Runtime::Postgres, mac, false).is_ok());
     }
 
     #[test]

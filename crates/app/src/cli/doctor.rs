@@ -102,6 +102,13 @@ pub async fn run(data_dir: &Path) -> ExitCode {
         .is_ok_and(|found| !found.is_empty());
     show(Check::Runtimes, doctor::runtimes(&installed));
     // The official PHP for Windows needs Microsoft's runtime (ADR 0019).
+    // MySQL comes as `tar.xz`, which Linux unpacks with the system's xz.
+    if linux {
+        show(
+            Check::Xz,
+            doctor::xz(marsa_core::installer::extract::xz_available()),
+        );
+    }
     if windows {
         show(Check::VcRuntime, doctor::vc_runtime(vc_runtime_version()));
         // PHP trusts the bundle marsad builds from Windows' store.
@@ -384,6 +391,7 @@ fn passed(pass: &Pass, data_dir: &Path, windows: bool) -> String {
             strings::doctor_runtimes_ok(&printable(default), &version.to_string())
         }
         Pass::VcRuntime { version } => strings::doctor_vc_runtime_ok(&printable(version)),
+        Pass::Xz => strings::DOCTOR_XZ_OK.to_owned(),
         Pass::SystemRoots {
             count,
             left_out,
@@ -494,6 +502,7 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
             strings::DOCTOR_TRUST_SETUP_WINDOWS,
         ),
         Problem::CaUntrusted => pair(strings::DOCTOR_UNTRUSTED, strings::DOCTOR_TRUST_SETUP),
+        Problem::XzMissing => pair(strings::DOCTOR_XZ_MISSING, strings::DOCTOR_XZ_INSTALL),
         Problem::VcRuntimeMissing => pair(strings::DOCTOR_VC_MISSING, strings::DOCTOR_VC_INSTALL),
         Problem::VcRuntimeOld { found } => (
             strings::doctor_vc_old(&printable(found)),
@@ -886,6 +895,17 @@ mod tests {
             assert!(text.starts_with("✗") && text.contains(part), "{text}");
             assert!(text.contains("Fix:"), "{text}");
         }
+    }
+
+    #[test]
+    fn the_xz_lines_name_the_program_and_the_package() {
+        let data = data();
+        let pass = render(Check::Xz, &Verdict::Pass(Pass::Xz), &data, false);
+        assert!(pass.contains("/usr/bin/xz"), "{pass}");
+        let text = render(Check::Xz, &Verdict::Fail(Problem::XzMissing), &data, false);
+        assert!(text.contains("MySQL"), "{text}");
+        assert!(text.contains("xz-utils"), "{text}");
+        assert!(text.contains("Fix:"), "{text}");
     }
 
     /// Windows: the runtime's lines, with Microsoft's link in the fix.

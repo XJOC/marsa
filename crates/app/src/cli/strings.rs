@@ -103,6 +103,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             }
             None => format!("The new {name} failed its test run, so it was not installed."),
         },
+        "install_xz_missing" => format!(
+            "{name} comes as a .tar.xz archive, and this system has no /usr/bin/xz. \
+             Install the package xz-utils (Debian, Ubuntu) or xz (Fedora, Arch), then try \
+             again. Nothing was installed."
+        ),
         "install_missing_vc_runtime" => format!(
             "{name} needs the Microsoft Visual C++ Redistributable: \
              https://aka.ms/vs/17/release/vc_redist.x64.exe"
@@ -1812,6 +1817,7 @@ pub fn doctor_skip(check: Check, skip: Skip) -> String {
     let check = match check {
         Check::Daemon => "marsad",
         Check::Runtimes => "PHP and Caddy",
+        Check::Xz => "xz",
         Check::VcRuntime => "The Microsoft Visual C++ runtime",
         Check::SystemRoots => "PHP's CA bundle",
         Check::Caddy => "Caddy",
@@ -1836,6 +1842,15 @@ pub fn doctor_skip(check: Check, skip: Skip) -> String {
     };
     format!("- {check}: not checked. {reason}")
 }
+
+/// Linux: the program that unpacks MySQL's `tar.xz`.
+pub const DOCTOR_XZ_OK: &str = "/usr/bin/xz is installed (MySQL needs it to unpack).";
+
+pub const DOCTOR_XZ_MISSING: &str = "/usr/bin/xz is not installed. MySQL comes as a .tar.xz \
+     archive, so Marsa cannot install it without xz.";
+
+pub const DOCTOR_XZ_INSTALL: &str = "Install the package xz-utils (Debian, Ubuntu) or xz \
+     (Fedora, Arch), then run \"marsa doctor\" again.";
 
 /// Windows: Microsoft's runtime that the official PHP needs (ADR 0019).
 pub fn doctor_vc_runtime_ok(version: &str) -> String {

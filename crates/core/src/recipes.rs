@@ -144,6 +144,10 @@ pub struct UnknownPlatform(pub String);
 pub enum ArchiveFormat {
     #[serde(rename = "tar.gz")]
     TarGz,
+    /// Unpacked through the system's `/usr/bin/xz`, which Linux has and
+    /// the macOS and Windows recipes never name ([`crate::installer::extract`]).
+    #[serde(rename = "tar.xz")]
+    TarXz,
     #[serde(rename = "zip")]
     Zip,
     /// One file, saved as is under [`Artifact::file_name`].

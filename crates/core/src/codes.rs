@@ -75,6 +75,7 @@ pub const INSTALL_OS_TOO_OLD: &str = "install_os_too_old";
 pub const INSTALL_SERIAL_CORRUPT: &str = "install_serial_corrupt";
 pub const INSTALL_UNSAFE_NAME: &str = "install_unsafe_name";
 pub const INSTALL_UNSUPPORTED_PLATFORM: &str = "install_unsupported_platform";
+pub const INSTALL_XZ_MISSING: &str = "install_xz_missing";
 pub const INTERNAL_ERROR: &str = "internal_error";
 pub const INVALID_BODY: &str = "invalid_body";
 pub const INVALID_ID: &str = "invalid_id";
@@ -317,6 +318,7 @@ pub const ALL: &[&str] = &[
     INSTALL_SERIAL_CORRUPT,
     INSTALL_UNSAFE_NAME,
     INSTALL_UNSUPPORTED_PLATFORM,
+    INSTALL_XZ_MISSING,
     INTERNAL_ERROR,
     INVALID_BODY,
     INVALID_ID,
