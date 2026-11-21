@@ -21,11 +21,12 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use super::facts::{Probes, SystemProbes, start_facts};
+use super::facts::start_facts;
 use super::init::{InitError, installed_servers};
 use super::settings::{any_installed, read_settings, save_enabled};
 use super::{orphan, postgres};
 use crate::daemon::caddy::{AbortOnDrop, note, set_failed};
+use crate::daemon::services::probe::{ProcessProbe, SystemProbe};
 use crate::daemon::state::Daemon;
 use crate::daemon::supervisor::{EXITED, ServiceHandle, ServiceRuntime, Supervisor, lock};
 
@@ -103,7 +104,7 @@ impl fmt::Display for ActionError {
 pub struct ServerManager {
     kind: ServerKind,
     /// Who runs under a pid and who holds a port. Tests put a fake here.
-    pub(super) probes: Arc<dyn Probes>,
+    pub(super) probes: Arc<dyn ProcessProbe>,
     /// How long a start waits for the server to take connections.
     ready_limit: Duration,
     /// The system whose programs run: [`Platform::current`].
@@ -137,7 +138,7 @@ impl ServerManager {
     pub fn new(kind: ServerKind) -> Self {
         Self {
             kind,
-            probes: Arc::new(SystemProbes),
+            probes: Arc::new(SystemProbe),
             ready_limit: READY_LIMIT,
             platform: Platform::current(),
             orphan_ladder: kind.stop(),

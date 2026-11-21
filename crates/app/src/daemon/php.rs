@@ -53,9 +53,10 @@ use semver::Version;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
-use self::orphan::{Blocked, FpmProcesses, Orphans, PidFile, SystemFpm};
+use self::orphan::{Blocked, Orphans, PidFile};
 use super::caddy::orphan::Ladder;
 use super::caddy::{RESTART, STOP_GRACE};
+use super::services::probe::{ProcessProbe, SystemProbe};
 use super::state::Daemon;
 use super::supervisor::{ServiceRuntime, Supervisor, lock, now_ms};
 
@@ -469,7 +470,7 @@ pub struct PhpManager {
     /// `process::FPM_ORPHAN_RECOVERY`. Only tests change it.
     recovery: bool,
     /// Who runs under a pid, and signals, for the orphan check.
-    processes: Arc<dyn FpmProcesses>,
+    processes: Arc<dyn ProcessProbe>,
     /// How long SIGTERM and SIGKILL to an orphan master wait (ADR 0009).
     ladder: Ladder,
     /// The same for the workers it left.
@@ -484,7 +485,7 @@ impl PhpManager {
             running: BTreeMap::new(),
             warned: false,
             recovery: process::FPM_ORPHAN_RECOVERY,
-            processes: Arc::new(SystemFpm),
+            processes: Arc::new(SystemProbe),
             ladder: Ladder::default(),
             worker_ladder: Ladder::default(),
         }
