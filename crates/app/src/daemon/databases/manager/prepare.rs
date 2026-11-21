@@ -66,13 +66,26 @@ impl ServerManager {
         let servers = installed_servers(kind, &daemon.data_dir, platform);
         let ladder = &self.orphan_ladder;
         let probes = &*self.probes;
-        let cleared = orphan::clear(kind, probes, &daemon.data_dir, &servers, ladder, port);
+        let looks = orphan::START_LOOKS;
+        let cleared = orphan::clear(
+            kind,
+            probes,
+            &daemon.data_dir,
+            &servers,
+            ladder,
+            port,
+            looks,
+        );
         match cleared.await {
             Ok(orphan::Cleared::Stopped { pid, signal }) => {
                 let text = orphan::stopped_line(kind, pid, signal);
                 lock(&self.runtime).note(&daemon.events, &text);
             }
-            Ok(orphan::Cleared::Nothing | orphan::Cleared::Forgotten) => {}
+            Ok(
+                orphan::Cleared::Nothing
+                | orphan::Cleared::Forgotten
+                | orphan::Cleared::Unknown { .. },
+            ) => {}
             Err(orphan::Stuck(reason)) => return Err(ActionError::OrphanStuck(kind, reason)),
         }
         let chosen = Chosen {

@@ -96,6 +96,9 @@ mod tests {
         pub(super) signals: Mutex<Vec<(u32, Signal)>>,
         /// After the first signal, the orphans cannot be told any more.
         unknown_after_signal: Mutex<bool>,
+        /// The first looks at an orphan that cannot be told, as a `ps` or
+        /// `lsof` that fails.
+        unknown_looks: Mutex<u32>,
     }
 
     /// `owner` listens on the port, or nobody.
@@ -108,6 +111,7 @@ mod tests {
             orphans: Mutex::default(),
             signals: Mutex::default(),
             unknown_after_signal: Mutex::default(),
+            unknown_looks: Mutex::default(),
         }
     }
 
@@ -122,8 +126,15 @@ mod tests {
                 .find(|(p, _)| *p == pid)
                 .cloned();
             let now = self.now.lock().unwrap().clone();
-            let unknown = *self.unknown_after_signal.lock().unwrap()
+            let mut unknown = *self.unknown_after_signal.lock().unwrap()
                 && !self.signals.lock().unwrap().is_empty();
+            if orphan.is_some() {
+                let mut looks = self.unknown_looks.lock().unwrap();
+                if *looks > 0 {
+                    *looks -= 1;
+                    unknown = true;
+                }
+            }
             Box::pin(async move {
                 let Some((_, exe)) = orphan else {
                     return now;
@@ -1583,6 +1594,82 @@ mod tests {
             assert_eq!(signals(&pg), [(orphan.id(), Signal::Int)]);
             assert_eq!(recorded(&pg), None);
             assert_eq!(pg.count("server"), 0);
+        }
+
+        /// A stop that cannot tell who runs the pid of the record looks
+        /// again, three looks in all, then goes on with no signal: the
+        /// answer is `stopped`, the server is off, the record stays, and
+        /// the recent lines say why.
+        #[tokio::test]
+        async fn a_stop_that_cannot_tell_looks_again_then_says_so() {
+            let pg = pg("serve", probes(Liveness::Unknown, None));
+            let record = PidRecord {
+                pid: 4242,
+                exe: installed_postgres(&pg),
+                started: StartTime::Ticks(1),
+            };
+            let path = orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir);
+            process::write_pid_file(&path, &record).unwrap();
+            assert!(enabled(&pg));
+
+            let stop = spawn_saved(&pg, ServiceAction::Stop);
+            let status = stop.await.unwrap().unwrap();
+            assert_eq!(status.state, ServiceState::Stopped);
+            assert!(!enabled(&pg));
+            let asked = pg.probes.asked.lock().unwrap().clone();
+            assert_eq!(asked, [4242, 4242, 4242]);
+            assert!(signals(&pg).is_empty());
+            assert_eq!(recorded(&pg), Some(record));
+            let last = pg.texts().pop().unwrap();
+            assert!(last.contains("names pid 4242"), "{last}");
+            assert!(last.contains("cannot tell whether it is still"), "{last}");
+        }
+
+        /// A first look at a stop that cannot tell is made again: the second
+        /// one tells our orphan, which gets SIGINT.
+        #[tokio::test]
+        async fn a_second_look_at_a_stop_finds_our_orphan() {
+            let pg = pg("serve", probes(Liveness::Gone, None));
+            let mut orphan = orphan_server(&pg, "serve");
+            listening(pg.port).await;
+            record_orphan(&pg, orphan.id(), None).await;
+            *pg.probes.unknown_looks.lock().unwrap() = 1;
+
+            let status = pg.act(ServiceAction::Stop).await.unwrap();
+            assert_eq!(status.state, ServiceState::Stopped);
+            assert!(orphan.0.wait().unwrap().success(), "it ended at SIGINT");
+            assert_eq!(signals(&pg), [(orphan.id(), Signal::Int)]);
+            assert_eq!(recorded(&pg), None);
+            let texts = pg.texts();
+            assert!(
+                !texts.iter().any(|t| t.contains("cannot tell")),
+                "{texts:?}"
+            );
+        }
+
+        /// Our orphan that cannot be told after SIGINT gets nothing more,
+        /// and the stop still ends as one: the answer is `stopped`, the
+        /// server is off, and only a line says that it did not stop.
+        #[tokio::test]
+        async fn a_stuck_orphan_at_a_stop_leaves_it_stopped_and_off_with_a_line() {
+            let mut pg = pg("serve", probes(Liveness::Gone, None));
+            let short = Duration::from_millis(300);
+            Arc::get_mut(&mut pg.daemon).unwrap().postgres.orphan_ladder =
+                StopMethod::signals([(Signal::Int, short), (Signal::Quit, short)]);
+            let mut orphan = orphan_server(&pg, "deaf");
+            listening(pg.port).await;
+            record_orphan(&pg, orphan.id(), None).await;
+            *pg.probes.unknown_after_signal.lock().unwrap() = true;
+
+            let stop = spawn_saved(&pg, ServiceAction::Stop);
+            let status = stop.await.unwrap().unwrap();
+            assert_eq!(status.state, ServiceState::Stopped);
+            assert!(!enabled(&pg));
+            assert_eq!(signals(&pg), [(orphan.id(), Signal::Int)]);
+            assert!(orphan.0.try_wait().unwrap().is_none(), "deaf to SIGINT");
+            let last = pg.texts().pop().unwrap();
+            assert!(last.contains("did not stop"), "{last}");
+            assert!(last.contains("gets no SIGQUIT"), "{last}");
         }
 
         /// The same program at the same pid, started at another time, is not

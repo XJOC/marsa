@@ -426,9 +426,11 @@ impl ServerManager {
 
     /// Stops the task by the spec (for PostgreSQL SIGINT, then SIGQUIT),
     /// then a kill. When this daemon runs none, our old server that an
-    /// earlier `marsad` left running is stopped instead ([`orphan::clear`]).
-    /// If that one cannot be stopped, the recent lines say why; the next
-    /// start refuses then. Any other server is never touched.
+    /// earlier `marsad` left running is stopped instead ([`orphan::clear`]),
+    /// with a few looks when the system cannot tell who runs its pid. If it
+    /// cannot be stopped or told, the recent lines say why, and the stop
+    /// still ends as one: the next start refuses while it holds the port.
+    /// Any other server is never touched.
     async fn stop(&self, daemon: &Daemon) {
         let kind = self.kind;
         // `None`: nothing runs, or a shutdown took the handle and stops it.
@@ -451,13 +453,26 @@ impl ServerManager {
         let servers = installed_servers(kind, &daemon.data_dir, platform);
         let ladder = &self.orphan_ladder;
         let probes = &*self.probes;
-        let cleared = orphan::clear(kind, probes, &daemon.data_dir, &servers, ladder, port);
+        let looks = orphan::STOP_LOOKS;
+        let cleared = orphan::clear(
+            kind,
+            probes,
+            &daemon.data_dir,
+            &servers,
+            ladder,
+            port,
+            looks,
+        );
         match cleared.await {
             Ok(orphan::Cleared::Stopped { pid, signal }) => {
                 let text = orphan::stopped_line(kind, pid, signal);
                 lock(&self.runtime).note(&daemon.events, &text);
             }
             Ok(orphan::Cleared::Nothing | orphan::Cleared::Forgotten) => {}
+            Ok(orphan::Cleared::Unknown { pid }) => {
+                let text = orphan::unknown_line(kind, pid);
+                lock(&self.runtime).note(&daemon.events, &text);
+            }
             Err(orphan::Stuck(reason)) => {
                 warn!(%reason, server = kind.id(), "our old server did not stop");
                 lock(&self.runtime).note(&daemon.events, &format!("marsad: {reason}."));

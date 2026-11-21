@@ -317,11 +317,25 @@ pub(super) async fn orphan_program(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Stuck(pub(super) String);
 
+/// How many times a start looks at the pid of the record. It goes on to its
+/// own checks after a look that cannot tell: our server would still hold
+/// the port and its own pid file, which refuse it.
+pub(super) const START_LOOKS: u32 = 1;
+/// How many times a stop looks, when the system cannot tell who runs the
+/// pid, before it goes on without a signal: a `ps` or `lsof` may fail once,
+/// and a stop has no later check to fall back on.
+pub(super) const STOP_LOOKS: u32 = 3;
+/// How long between two of those looks.
+const LOOK_AGAIN: Duration = Duration::from_millis(250);
+
 /// What [`clear`] did, for the recent lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Cleared {
-    /// No file, or one that cannot be told: nothing was signalled.
+    /// No file: nothing was signalled.
     Nothing,
+    /// The system could not tell whether the pid of the file is our old
+    /// server, at any look: nothing was signalled, and the file stays.
+    Unknown { pid: u32 },
     /// The file named a process that is gone or another program's now: only
     /// the file was deleted.
     Forgotten,
@@ -332,7 +346,8 @@ pub(super) enum Cleared {
 
 /// Finds the server that `run/<id>.pid` names, and stops it when it is
 /// ours, by `ladder` ([`ServerKind::stop`]) and a final SIGKILL, then waits
-/// for `port`.
+/// for `port`. A first look that cannot tell is made again, up to `looks`
+/// looks in all ([`START_LOOKS`], [`STOP_LOOKS`]).
 ///
 /// # Errors
 ///
@@ -346,6 +361,7 @@ pub(super) async fn clear(
     servers: &[PathBuf],
     ladder: &StopMethod,
     port: u16,
+    looks: u32,
 ) -> Result<Cleared, Stuck> {
     if !process::DATABASE_ORPHAN_RECOVERY {
         return Ok(Cleared::Nothing);
@@ -354,7 +370,19 @@ pub(super) async fn clear(
         return Ok(Cleared::Nothing);
     };
     let pid = record.pid;
-    let state = check(probes, &record, servers).await;
+    let mut state = check(probes, &record, servers).await;
+    for _ in 1..looks {
+        if !matches!(state, PidfileState::Unknown { .. }) {
+            break;
+        }
+        debug!(
+            pid,
+            server = kind.id(),
+            "cannot tell who runs the pid yet; looking again"
+        );
+        tokio::time::sleep(LOOK_AGAIN).await;
+        state = check(probes, &record, servers).await;
+    }
     info!(pid, %state, server = kind.id(), "checked the pid record");
     match state {
         PidfileState::Missing | PidfileState::Stale { .. } | PidfileState::Mismatch { .. } => {
@@ -368,7 +396,7 @@ pub(super) async fn clear(
                 server = kind.id(),
                 "cannot tell whether the pid record names our old server; no signal"
             );
-            return Ok(Cleared::Nothing);
+            return Ok(Cleared::Unknown { pid });
         }
         PidfileState::Ours { .. } => {}
     }
@@ -483,6 +511,18 @@ pub(super) fn stopped_line(kind: ServerKind, pid: u32, signal: Option<Signal>) -
     format!(
         "marsad: stopped the {} (pid {pid}) that an earlier marsad left running; {how}.",
         kind.name()
+    )
+}
+
+/// The line for `marsa logs <id>` after a stop whose [`clear`] could not
+/// tell who runs the pid of the record ([`Cleared::Unknown`]).
+pub(super) fn unknown_line(kind: ServerKind, pid: u32) -> String {
+    format!(
+        "marsad: run/{id}.pid names pid {pid}, and the system cannot tell whether it is still \
+         the {name} that an earlier marsad left running, so it got no signal; if that {name} \
+         still runs, the next start says what holds its port.",
+        id = kind.id(),
+        name = kind.name()
     )
 }
 
