@@ -11,9 +11,12 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use marsa_core::databases::ServerKind;
-use marsa_core::databases::valkey::{ValkeyDirs, command, is_pong, valkey_args, valkey_stop};
+use marsa_core::databases::valkey::{
+    ValkeyDirs, command, is_pong, valkey_args, valkey_env, valkey_stop,
+};
+use marsa_core::databases::{ServerKind, UnwritablePath};
 use marsa_core::platform::daemon_file::create_private_dir;
+use marsa_core::recipes::Os;
 use marsa_core::services::{RestartPolicy, ServiceSpec};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -25,22 +28,35 @@ const PRIVATE: u32 = 0o600;
 
 /// How the supervisor runs Valkey: `valkey-server run/valkey.conf`, stopped
 /// with `SHUTDOWN SAVE` on its port, then SIGTERM, then a kill
-/// ([`valkey_stop`]). Valkey logs to stdout (`logfile ""`), which the
-/// supervisor keeps in `logs/valkey.log`.
+/// ([`valkey_stop`]); Windows has no SIGTERM, so there the kill follows the
+/// request. Valkey logs to stdout (`logfile ""`), which the supervisor keeps
+/// in `logs/valkey.log`. On Windows the path and the environment are for
+/// the Cygwin build ([`valkey_args`], [`valkey_env`]), and the supervisor
+/// follows the process it started, whose pid is the one Windows knows.
 ///
 /// Never restarted after it exits, as PostgreSQL and MySQL: a refusal at its
 /// start would only come again, and the status must keep the run's own
 /// exit.
-pub(super) fn spec(program: PathBuf, dirs: &ValkeyDirs, port: u16) -> ServiceSpec {
-    ServiceSpec {
+///
+/// # Errors
+///
+/// [`UnwritablePath`] on Windows for a config path that Cygwin's form
+/// cannot hold.
+pub(super) fn spec(
+    program: PathBuf,
+    dirs: &ValkeyDirs,
+    port: u16,
+    os: Os,
+) -> Result<ServiceSpec, UnwritablePath> {
+    Ok(ServiceSpec {
         id: KIND.id().to_owned(),
         program,
-        args: valkey_args(&dirs.config()),
-        env: std::collections::BTreeMap::new(),
+        args: valkey_args(&dirs.config(), os)?,
+        env: valkey_env(os).into_iter().collect(),
         cwd: None,
         restart: RestartPolicy::Never,
         stop: valkey_stop(port),
-    }
+    })
 }
 
 /// Writes `text`, Marsa's `valkey.conf`, to `run/valkey.conf`, owner-only,
@@ -245,6 +261,13 @@ mod tests {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
+    /// The system the tests run on, as the manager sees it.
+    fn os() -> Os {
+        marsa_core::recipes::Platform::current()
+            .expect("a known system")
+            .os()
+    }
+
     #[tokio::test]
     async fn a_start_writes_its_config_and_a_stop_sends_shutdown_save() {
         let vk = vk(probes(Liveness::Gone, None));
@@ -256,7 +279,7 @@ mod tests {
         assert_eq!(vk.calls(), [format!("server {}", config.display())]);
         assert_eq!(
             fs::read_to_string(&config).unwrap(),
-            valkey_conf(&vk.dirs, vk.port).unwrap()
+            valkey_conf(&vk.dirs, vk.port, os()).unwrap()
         );
         assert_eq!(mode(&config), 0o600);
         assert_eq!(mode(&vk.dirs.data), 0o700);
@@ -287,6 +310,18 @@ mod tests {
         assert_eq!(vk.recorded(), None, "the end of the run deletes it");
         let log = fs::read_to_string(vk.daemon.data_dir.join("logs/valkey.log")).unwrap();
         assert!(log.contains("fake got SHUTDOWN SAVE"), "{log}");
+    }
+
+    /// Only PostgreSQL refuses an administrator's token: an elevated
+    /// `marsad` runs Valkey.
+    #[tokio::test]
+    async fn an_elevated_daemon_still_starts_valkey() {
+        let mut vk = vk(probes(Liveness::Gone, None));
+        let daemon = Arc::get_mut(&mut vk.daemon).expect("one owner");
+        daemon.valkey.elevated = || true;
+        let status = vk.act(ServiceAction::Start).await.unwrap();
+        assert_eq!(status.state, ServiceState::Running);
+        vk.act(ServiceAction::Stop).await.unwrap();
     }
 
     /// Homebrew's Redis on the port: nothing starts, nothing is written, and
@@ -365,7 +400,7 @@ mod tests {
         fs::create_dir_all(&vk.dirs.run).unwrap();
         fs::create_dir_all(&vk.dirs.data).unwrap();
         let conf = vk.dir.path().join("old.conf");
-        fs::write(&conf, valkey_conf(&vk.dirs, vk.port).unwrap()).unwrap();
+        fs::write(&conf, valkey_conf(&vk.dirs, vk.port, os()).unwrap()).unwrap();
         let log = fs::File::create(vk.dir.path().join("orphan.log")).unwrap();
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -425,7 +460,7 @@ mod tests {
     fn valkey_runs_with_its_config_file_and_stops_with_shutdown_save() {
         let dirs = ValkeyDirs::new(Path::new("/m"));
         let program = PathBuf::from("/m/runtimes/valkey/8.1.11/bin/valkey-server");
-        let spec = spec(program.clone(), &dirs, 6380);
+        let spec = spec(program.clone(), &dirs, 6380, Os::Mac).unwrap();
         assert_eq!(spec.id, "valkey");
         assert_eq!(spec.program, program);
         assert_eq!(spec.args, ["/m/run/valkey.conf"]);

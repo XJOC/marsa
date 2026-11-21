@@ -1,15 +1,18 @@
 //! The supervisor against a fake service. The fake is this test binary: it
 //! runs itself again with `MARSA_FAKE_SERVICE` set, so no external program is
 //! needed and the tests are the same on macOS, Linux, and Windows, except the
-//! stop-method tests.
+//! signal tests.
 //!
 //! `#[cfg(unix)]` on those tests and their helpers: they send SIGINT and
 //! SIGQUIT and record the signals the fake gets, and only Unix has signals.
 //! Windows stops a service with a kill, which the other tests cover. The
 //! tests of a stop request over TCP (Valkey's `SHUTDOWN SAVE`) are Unix
-//! only too: the step after the request is SIGTERM.
+//! only too: the step after the request is SIGTERM. The tests of a stop
+//! program (Windows' way to stop MySQL and PostgreSQL) run everywhere: the
+//! program is this test binary too.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use marsa::daemon::supervisor::{ServiceHandle, Supervisor};
@@ -19,6 +22,13 @@ use tempfile::TempDir;
 use tokio::sync::broadcast;
 
 const FAKE: &str = "MARSA_FAKE_SERVICE";
+/// The folder the `watch` fake watches for the file `stop`.
+const FAKE_DIR: &str = "MARSA_FAKE_DIR";
+/// Arguments of the fake stop program ([`fake_stop_program`]). The test
+/// harness reads each as a filter that matches no test.
+const STOP_ARG: &str = "marsa-fake-stop=";
+const REFUSE_ARG: &str = "marsa-fake-refuse";
+const HANG_ARG: &str = "marsa-fake-hang=";
 /// The port of the fake TCP server.
 #[cfg(unix)]
 const FAKE_PORT: &str = "MARSA_FAKE_PORT";
@@ -72,7 +82,49 @@ fn fake_service() {
         "kv" | "kv-mute" | "kv-refuse" => tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(serve_one_request(&mode)),
+        // Exits when the file `stop` appears in `MARSA_FAKE_DIR`, as a server
+        // that its stop program asked to stop. Nothing else ends it but a
+        // kill, on every system; after two minutes it ends by itself, so a
+        // failed test leaves nothing behind for long.
+        "watch" => {
+            let dir = PathBuf::from(std::env::var(FAKE_DIR).expect("the test sets the folder"));
+            println!("fake ready");
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while Instant::now() < deadline {
+                if dir.join("stop").exists() {
+                    println!("fake got the stop file");
+                    std::process::exit(0);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         other => panic!("unknown fake mode {other}"),
+    }
+}
+
+/// Not a check: the fake stop program's entry point. In a normal test run it
+/// has none of its arguments and returns at once.
+///
+/// - `marsa-fake-stop=<folder>`: says so, then writes `<folder>/stop`, which
+///   ends the `watch` fake, and exits 0, as `pg_ctl stop` does.
+/// - `marsa-fake-refuse`: says why it cannot, and exits 1, as `mysqladmin`
+///   does when `root` has a password.
+/// - `marsa-fake-hang=<folder>`: writes its pid to `<folder>/hang.pid`, and
+///   never ends by itself (two minutes at most).
+#[test]
+fn fake_stop_program() {
+    let args: Vec<String> = std::env::args().collect();
+    let value = |prefix: &str| args.iter().find_map(|arg| arg.strip_prefix(prefix));
+    if let Some(dir) = value(STOP_ARG) {
+        println!("fake stop asked");
+        std::fs::write(Path::new(dir).join("stop"), "").expect("the stop file");
+    } else if args.iter().any(|arg| arg == REFUSE_ARG) {
+        eprintln!("fake stop: Access denied for user 'root'@'127.0.0.1'");
+        std::process::exit(1);
+    } else if let Some(dir) = value(HANG_ARG) {
+        let pid = std::process::id().to_string();
+        std::fs::write(Path::new(dir).join("hang.pid"), pid).expect("the pid file");
+        std::thread::sleep(Duration::from_secs(120));
     }
 }
 
@@ -303,8 +355,8 @@ fn fake_texts(events: &[Event]) -> Vec<String> {
         .collect()
 }
 
-/// Waits until the fake has its signal handlers.
-#[cfg(unix)]
+/// Waits until the fake says it is ready: for the signal fakes, once they
+/// have their handlers.
 async fn ready(handle: &ServiceHandle) {
     let ready = async {
         while !handle.recent_logs().iter().any(|l| l.text == "fake ready") {
@@ -516,5 +568,195 @@ fn a_request_adds_its_limits_to_the_stop_limit() {
     use marsa::daemon::supervisor::{STOP_MARGIN, stop_limit};
     let stop = shutdown_save(6379, Duration::from_secs(10));
     let want = Duration::from_secs(10 + 4) + GRACE + STOP_MARGIN;
+    assert_eq!(stop_limit(&stop), want);
+}
+
+/// The fake stop program with `arg` as one step of `wait`, then a kill: the
+/// shape of Windows' stop of MySQL and PostgreSQL.
+fn stop_program(arg: &str, wait: Duration) -> StopMethod {
+    let program = std::env::current_exe().expect("the test binary has a path");
+    stop_program_at(program, arg, wait)
+}
+
+fn stop_program_at(program: PathBuf, arg: &str, wait: Duration) -> StopMethod {
+    use marsa_core::services::{StopAction, StopCommand, StopStep};
+    let args = ["fake_stop_program", "--exact", "--nocapture", arg];
+    let command = StopCommand {
+        program,
+        args: args.map(String::from).to_vec(),
+        name: "fake stop",
+        on_failure: "The fake refused.",
+    };
+    StopMethod {
+        steps: vec![StopStep {
+            action: StopAction::Run(command),
+            wait,
+        }],
+    }
+}
+
+/// A stop program that is not an absolute path is refused before anything
+/// runs: Windows would search the working folder and `PATH` for a bare name.
+#[test]
+fn a_relative_stop_program_is_refused_before_the_start() {
+    let relative = stop_program_at(PathBuf::from("mysqladmin.exe"), "x", WAIT);
+    let (tx, _rx) = broadcast::channel(8);
+    let logs = tempfile::tempdir().expect("a temp folder");
+    let err = Supervisor::spawn(
+        spec("hold", RestartPolicy::Never, relative),
+        tx,
+        logs.path(),
+    )
+    .map(|_| ())
+    .expect_err("a relative stop program");
+    assert_eq!(err.code(), "program_not_absolute");
+}
+
+/// What a stop by a program left: every line of the service, how long the
+/// stop took, the fake's folder, and the logs folder.
+struct Stopped {
+    texts: Vec<String>,
+    elapsed: Duration,
+    dir: TempDir,
+    logs: TempDir,
+}
+
+impl Stopped {
+    fn has(&self, text: &str) -> bool {
+        self.texts.iter().any(|line| line == text)
+    }
+
+    fn starting_with(&self, text: &str) -> Option<&String> {
+        self.texts.iter().find(|line| line.starts_with(text))
+    }
+}
+
+/// Starts the `watch` fake in a new folder, stopped by the method that
+/// `stop` makes for that folder, then stops it.
+async fn stop_watch(stop: impl FnOnce(&Path) -> StopMethod) -> Stopped {
+    let dir = tempfile::tempdir().expect("a temp folder");
+    let fake = spec("watch", RestartPolicy::Never, stop(dir.path()));
+    let mut vars = fake.env.clone();
+    vars.insert(FAKE_DIR.to_owned(), dir.path().display().to_string());
+    let (mut handle, mut rx, logs) = start_spec(ServiceSpec { env: vars, ..fake });
+    ready(&handle).await;
+    let started = Instant::now();
+    handle.cancel.cancel();
+    let events = finish(&mut handle, &mut rx).await;
+    let elapsed = started.elapsed();
+    let changes = states(&events);
+    assert_eq!(
+        changes[2..],
+        [ServiceState::Stopping, ServiceState::Stopped]
+    );
+    assert_eq!(handle.status().pid, None);
+    let texts = events
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::Log(line) => Some(line.text),
+            _ => None,
+        })
+        .collect();
+    Stopped {
+        texts,
+        elapsed,
+        dir,
+        logs,
+    }
+}
+
+/// The program asks, the server exits, and the stop ends there: no kill,
+/// no wait, no line of a failure.
+#[tokio::test]
+async fn a_stop_program_that_asks_ends_the_stop() {
+    let wait = Duration::from_secs(10);
+    let stop = |dir: &Path| stop_program(&format!("{STOP_ARG}{}", dir.display()), wait);
+    let stopped = stop_watch(stop).await;
+    assert!(stopped.elapsed < wait, "{:?}", stopped.elapsed);
+    for line in [
+        "marsad: asking watch to stop with fake stop",
+        "fake stop asked",
+        "fake got the stop file",
+    ] {
+        assert!(stopped.has(line), "{line}: {:?}", stopped.texts);
+    }
+    let failed = stopped.starting_with("marsad: fake stop failed");
+    assert_eq!(failed, None, "{:?}", stopped.texts);
+    assert_eq!(stopped.starting_with("marsad: watch still runs"), None);
+}
+
+/// A program that fails says why in the log, and the server still gets the
+/// whole wait: the kill comes after it, not before.
+#[tokio::test]
+async fn a_failing_stop_program_leads_to_the_kill_only_after_the_wait() {
+    // Long enough for the program to start and refuse within the wait.
+    let wait = Duration::from_secs(3);
+    let stopped = stop_watch(|_| stop_program(REFUSE_ARG, wait)).await;
+    let elapsed = stopped.elapsed;
+    assert!(elapsed >= wait, "killed too early: {elapsed:?}");
+    assert!(elapsed < wait + Duration::from_secs(3), "{elapsed:?}");
+    let refused = "fake stop: Access denied for user 'root'@'127.0.0.1'";
+    assert!(stopped.has(refused), "{:?}", stopped.texts);
+    let failed = stopped
+        .starting_with("marsad: fake stop failed (")
+        .unwrap_or_else(|| panic!("no failure line: {:?}", stopped.texts));
+    assert!(failed.ends_with("). The fake refused."), "{failed}");
+    assert!(stopped.has("marsad: watch still runs 3 s after fake stop"));
+    assert!(!stopped.has("fake got the stop file"));
+    // The log file says it too.
+    let log = std::fs::read_to_string(stopped.logs.path().join("watch.log")).unwrap();
+    assert!(log.contains(failed.as_str()), "{log}");
+    assert!(log.contains(refused), "{log}");
+}
+
+/// A program that never ends is ended with its step.
+#[tokio::test]
+async fn a_stop_program_that_hangs_is_ended_with_its_step() {
+    let wait = Duration::from_secs(3);
+    let stop = |dir: &Path| stop_program(&format!("{HANG_ARG}{}", dir.display()), wait);
+    let stopped = stop_watch(stop).await;
+    let elapsed = stopped.elapsed;
+    assert!(elapsed >= wait, "killed too early: {elapsed:?}");
+    assert!(elapsed < wait + Duration::from_secs(3), "{elapsed:?}");
+    assert!(stopped.has("marsad: watch still runs 3 s after fake stop"));
+    let pid = std::fs::read_to_string(stopped.dir.path().join("hang.pid")).unwrap();
+    // Only macOS and Linux tell whether a pid still runs.
+    #[cfg(unix)]
+    {
+        use marsa_core::orphan::Liveness;
+        use marsa_core::platform::process::identity;
+        let pid: u32 = pid.parse().unwrap();
+        let gone = async {
+            while identity(pid).await != Liveness::Gone {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), gone)
+            .await
+            .expect("the stop program was ended");
+    }
+    #[cfg(not(unix))]
+    assert!(!pid.is_empty());
+}
+
+/// A program that cannot start asked nothing: the next step, here the kill,
+/// comes at once.
+#[tokio::test]
+async fn a_stop_program_that_cannot_start_skips_its_wait() {
+    let wait = Duration::from_secs(10);
+    let stop = |dir: &Path| stop_program_at(dir.join("no-such-program"), "x", wait);
+    let stopped = stop_watch(stop).await;
+    assert!(stopped.elapsed < wait, "{:?}", stopped.elapsed);
+    let line = stopped.starting_with("marsad: fake stop could not be started: ");
+    assert!(line.is_some(), "{:?}", stopped.texts);
+}
+
+/// The daemon's shutdown gives a stop program its wait and its grace.
+#[test]
+fn a_stop_program_adds_its_grace_to_the_stop_limit() {
+    use marsa::daemon::supervisor::{STOP_MARGIN, stop_limit};
+    use marsa_core::services::STOP_COMMAND_GRACE;
+    let stop = stop_program(REFUSE_ARG, Duration::from_secs(30));
+    let want = Duration::from_secs(30) + STOP_COMMAND_GRACE + STOP_MARGIN;
     assert_eq!(stop_limit(&stop), want);
 }

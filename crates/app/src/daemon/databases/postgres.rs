@@ -13,12 +13,12 @@ use std::time::Duration;
 
 use marsa_core::databases::{
     LockConflict, PG_HBA_CONF, PostgresDirs, ROOT_ROLE_SQL, ServerKind, ServiceBusy, initdb_args,
-    postgres_args, postgres_stop, postmaster_pid, single_user_args, startup_lock_conflict,
+    postgres_args, postmaster_pid, single_user_args, startup_lock_conflict,
 };
 use marsa_core::orphan::Liveness;
 use marsa_core::platform::process;
-use marsa_core::recipes::Platform;
-use marsa_core::services::{RestartPolicy, ServiceSpec};
+use marsa_core::recipes::{Os, Platform};
+use marsa_core::services::{RestartPolicy, ServiceSpec, StopMethod};
 use semver::Version;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
@@ -45,6 +45,8 @@ pub(super) const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f];
 pub(super) struct Programs {
     pub postgres: PathBuf,
     pub initdb: PathBuf,
+    /// The stop on Windows ([`marsa_core::databases::postgres_windows_stop`]).
+    pub pg_ctl: PathBuf,
 }
 
 /// Where the recipe puts the programs of the installed PostgreSQL `version`:
@@ -54,21 +56,28 @@ pub(super) fn programs(data_dir: &Path, platform: Platform, version: &Version) -
     Some(Programs {
         postgres: init::server(KIND, data_dir, platform, version)?,
         initdb: init::program(KIND, data_dir, platform, version, "initdb")?,
+        pg_ctl: init::program(KIND, data_dir, platform, version, "pg_ctl")?,
     })
 }
 
 /// How the supervisor runs PostgreSQL: `postgres` with [`postgres_args`],
-/// so on `127.0.0.1:<port>` only and with its socket in `run/`, stopped with
-/// SIGINT, then SIGQUIT, never SIGTERM ([`postgres_stop`]). PostgreSQL logs
-/// to stderr, which the supervisor keeps in `logs/postgres.log`, as for
-/// every service.
+/// so on `127.0.0.1:<port>` only and with its socket in `run/`, stopped by
+/// `stop`: on macOS and Linux SIGINT, then SIGQUIT, never SIGTERM
+/// ([`marsa_core::databases::postgres_stop`]); on Windows `pg_ctl stop -m fast`
+/// ([`marsa_core::databases::postgres_windows_stop`]). PostgreSQL logs to stderr, which the
+/// supervisor keeps in `logs/postgres.log`, as for every service.
 ///
 /// Never restarted after it exits, unlike Caddy. A refusal at its start
 /// (another server on the folder, the port, or the socket) would only come
 /// again, the status must keep the run's own exit, and after a crash of the
 /// postmaster its backends may still hold the shared memory, so a restart
 /// fails too. PostgreSQL restarts its own crashed backends itself.
-pub(super) fn spec(program: PathBuf, dirs: &PostgresDirs, port: u16) -> ServiceSpec {
+pub(super) fn spec(
+    program: PathBuf,
+    dirs: &PostgresDirs,
+    port: u16,
+    stop: StopMethod,
+) -> ServiceSpec {
     ServiceSpec {
         id: KIND.id().to_owned(),
         program,
@@ -76,7 +85,7 @@ pub(super) fn spec(program: PathBuf, dirs: &PostgresDirs, port: u16) -> ServiceS
         env: std::collections::BTreeMap::new(),
         cwd: None,
         restart: RestartPolicy::Never,
-        stop: postgres_stop(),
+        stop,
     }
 }
 
@@ -84,7 +93,7 @@ pub(super) fn spec(program: PathBuf, dirs: &PostgresDirs, port: u16) -> ServiceS
 /// ([`ensure_data`]), and returns whether it made one. The steps, in the
 /// temp folder:
 ///
-/// 1. `initdb` with [`initdb_args`];
+/// 1. `initdb` with [`initdb_args`] for `os`;
 /// 2. [`PG_HBA_CONF`] over initdb's `pg_hba.conf`;
 /// 3. `postgres --single` with [`ROOT_ROLE_SQL`] on stdin.
 ///
@@ -94,21 +103,27 @@ pub(super) fn spec(program: PathBuf, dirs: &PostgresDirs, port: u16) -> ServiceS
 pub(super) async fn ensure_cluster(
     programs: &Programs,
     dirs: &PostgresDirs,
+    os: Os,
 ) -> Result<bool, InitError> {
     ensure_data(KIND, &dirs.data, async |temp: &Path| {
-        init_in(programs, dirs, temp).await
+        init_in(programs, dirs, temp, os).await
     })
     .await
 }
 
 /// Steps 1 to 3 of [`ensure_cluster`] in `temp`.
-async fn init_in(programs: &Programs, dirs: &PostgresDirs, temp: &Path) -> Result<(), InitError> {
+async fn init_in(
+    programs: &Programs,
+    dirs: &PostgresDirs,
+    temp: &Path,
+    os: Os,
+) -> Result<(), InitError> {
     let in_temp = PostgresDirs {
         data: temp.to_path_buf(),
         sockets: dirs.sockets.clone(),
     };
     let mut initdb = Command::new(&programs.initdb);
-    initdb.args(initdb_args(&in_temp));
+    initdb.args(initdb_args(&in_temp, os));
     let step = |what, input, limit| Step {
         kind: KIND,
         what,

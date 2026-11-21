@@ -9,13 +9,14 @@ use marsa_core::codes;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use marsa_core::platform::process;
 use marsa_core::services::{
-    LogBuffer, ProgramNotAbsolute, ServiceSpec, StopAction, StopMethod, TcpRequest, restart_delay,
+    LogBuffer, ProgramNotAbsolute, STOP_COMMAND_GRACE, ServiceSpec, StopAction, StopCommand,
+    StopMethod, TcpRequest, restart_delay,
 };
 use marsa_core::types::{Event, LogLine, LogStream, ServiceState, ServiceStatus};
 use std::net::Ipv4Addr;
@@ -47,7 +48,7 @@ pub const LOG_FILE_LIMIT: u64 = 10 * 1024 * 1024;
 /// What a stop needs besides the waits of its method and the limits of its
 /// requests: a `/bin/kill` per step (milliseconds, but up to 2 s each if one
 /// hangs: 4 s for the two of PostgreSQL), the kill, and up to `DRAIN_WAIT`
-/// (1 s) for the last lines.
+/// (1 s) for the last lines, of the server and of a stop program.
 pub const STOP_MARGIN: Duration = Duration::from_secs(5);
 
 /// The most a shutdown waits for one process, whatever its stop method says,
@@ -156,6 +157,17 @@ impl Supervisor {
         if !spec.program.is_absolute() {
             return Err(ProgramNotAbsolute(spec.program));
         }
+        // A stop program is looked up like the server: never in `PATH` or
+        // the working folder, which Windows would search for a bare name.
+        let relative = spec.stop.steps.iter().find_map(|step| match &step.action {
+            StopAction::Run(command) if !command.program.is_absolute() => {
+                Some(command.program.clone())
+            }
+            _ => None,
+        });
+        if let Some(program) = relative {
+            return Err(ProgramNotAbsolute(program));
+        }
         lock(&runtime).status = status(&spec.id, ServiceState::Starting, None, 0);
         let shared = Shared {
             id: spec.id.clone(),
@@ -210,6 +222,12 @@ impl Shared {
         // Under the lock, so events come in `seq` order.
         let _ = self.events.send(Event::Log(line.clone()));
         line
+    }
+
+    /// A line of the daemon's own, in the recent lines and the log file.
+    fn note(&self, text: &str) {
+        let line = self.record(LogStream::Stderr, text);
+        self.write_log(&line.text);
     }
 
     /// Appends one line to the log file. A short synchronous write, like the
@@ -301,7 +319,7 @@ async fn run(
         }
         () = cancel.cancelled() => {
             shared.set_state(ServiceState::Stopping, pid, restarts);
-            stop(&mut child, spec).await;
+            stop(&mut child, spec, shared).await;
             info!(service = %spec.id, "stopped");
             Exit::Stopped
         }
@@ -318,9 +336,9 @@ async fn run(
 
 /// Follows `spec.stop`: each step asks the process to stop, then waits up to
 /// its limit for the exit. A step whose asking fails goes on to the next at
-/// once. After the last step, a kill. Windows sends no signals, so there a
-/// signal step is skipped.
-async fn stop(child: &mut Child, spec: &ServiceSpec) {
+/// once. After the last step, a kill (`TerminateProcess` on Windows).
+/// Windows sends no signals, so there a signal step is skipped.
+async fn stop(child: &mut Child, spec: &ServiceSpec, shared: &Shared) {
     // A `Send` step goes to the port that was fixed at the spawn. Another
     // program could take it in the instant between our child's start and its
     // bind; the check before the start and the readiness probe make that
@@ -342,14 +360,12 @@ async fn stop(child: &mut Child, spec: &ServiceSpec) {
                 }
             },
             StopAction::Send(request) => ask(child, request, step.wait, &spec.id).await,
+            StopAction::Run(command) => run_command(child, command, step.wait, shared).await,
         };
         match stopped {
             Asked::Yes(true) => return,
             Asked::Yes(false) => {
-                let name = match &step.action {
-                    StopAction::Signal(signal) => signal.name(),
-                    StopAction::Send(request) => request.name,
-                };
+                let name = step.action.name();
                 warn!(service = %spec.id, wait = ?step.wait, "still running after {name}");
             }
             Asked::No => {}
@@ -421,6 +437,106 @@ async fn refusal(stream: &mut TcpStream) -> String {
         }
         _ => std::future::pending().await,
     }
+}
+
+/// Runs `command` ([`StopCommand`]) and waits up to `wait`, from its start,
+/// for the server's exit. What the program prints goes to the service's log,
+/// and so do the daemon's own lines about it, so `marsa logs <id>` says why
+/// a server was ended. Once the server has exited, the program gets
+/// [`STOP_COMMAND_GRACE`] for its last lines; one that still runs then, or
+/// at the end of the wait, is killed (`kill_on_drop`).
+async fn run_command(
+    child: &mut Child,
+    command: &StopCommand,
+    wait: Duration,
+    shared: &Shared,
+) -> Asked {
+    let name = command.name;
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut cmd = Command::new(&command.program);
+    cmd.args(&command.args)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // Not the daemon's environment: `MYSQL_PWD`, `PGPASSWORD` and the like
+    // would reach a program that is only asked to stop a server. The one
+    // variable a Windows program needs to start is `SystemRoot`; on the
+    // other systems (tests with a fake program) `PATH`.
+    let kept = if cfg!(windows) { "SystemRoot" } else { "PATH" };
+    if let Some(value) = std::env::var_os(kept) {
+        cmd.env(kept, value);
+    }
+    process::hide_console_window(&mut cmd);
+    shared.note(&format!("marsad: asking {} to stop with {name}", shared.id));
+    let mut program = match cmd.spawn() {
+        Ok(program) => program,
+        Err(err) => {
+            warn!(service = %shared.id, %err, "{name} could not be started");
+            shared.note(&format!("marsad: {name} could not be started: {err}"));
+            return Asked::No;
+        }
+    };
+    let readers = [
+        program
+            .stdout
+            .take()
+            .map(|pipe| read_lines(pipe, LogStream::Stdout, shared)),
+        program
+            .stderr
+            .take()
+            .map(|pipe| read_lines(pipe, LogStream::Stderr, shared)),
+    ];
+    let mut ended = false;
+    let exited = loop {
+        tokio::select! {
+            status = program.wait(), if !ended => {
+                ended = true;
+                report(command, shared, &status);
+            }
+            _ = child.wait() => break true,
+            () = tokio::time::sleep_until(deadline) => break false,
+        }
+    };
+    if exited
+        && !ended
+        && let Ok(status) = tokio::time::timeout(STOP_COMMAND_GRACE, program.wait()).await
+    {
+        report(command, shared, &status);
+    }
+    if !exited {
+        let secs = wait.as_secs_f32();
+        shared.note(&format!(
+            "marsad: {} still runs {secs} s after {name}",
+            shared.id
+        ));
+    }
+    // Killed here if it still runs; its pipes close with it.
+    drop(program);
+    let drained = async {
+        for reader in readers.into_iter().flatten() {
+            let _ = reader.await;
+        }
+    };
+    let _ = tokio::time::timeout(DRAIN_WAIT, drained).await;
+    Asked::Yes(exited)
+}
+
+/// A line when the stop program ended with an error, or could not be waited
+/// for. Nothing when it ended well.
+fn report(command: &StopCommand, shared: &Shared, ended: &io::Result<ExitStatus>) {
+    let name = command.name;
+    let why = match ended {
+        Ok(status) if status.success() => return,
+        Ok(status) => status.to_string(),
+        Err(err) => err.to_string(),
+    };
+    warn!(service = %shared.id, %why, "{name} failed");
+    shared.note(&format!(
+        "marsad: {name} failed ({why}). {}",
+        command.on_failure
+    ));
 }
 
 fn command(spec: &ServiceSpec) -> Command {

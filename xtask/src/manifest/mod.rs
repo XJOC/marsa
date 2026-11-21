@@ -72,8 +72,8 @@ impl build::OracleCheck for Smoke<'_> {
         self.oracle.md5(file)
     }
 
-    fn first_entry(&self, file: &Path) -> Result<String> {
-        self.oracle.first_entry(file)
+    fn first_entry(&self, file: &Path, kind: build::ArchiveKind) -> Result<String> {
+        self.oracle.first_entry(file, kind)
     }
 }
 

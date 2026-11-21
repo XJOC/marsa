@@ -5,7 +5,7 @@
 //! | --- | --- |
 //! | `marsad` answers `/v1/health` | it does not |
 //! | PHP and Caddy are installed, with a default PHP | one is missing |
-//! | the Microsoft Visual C++ runtime PHP needs (Windows, ADR 0019) | Windows reports none, or one older than 14.44 |
+//! | the Microsoft Visual C++ runtime PHP, MySQL, and PostgreSQL need (Windows, ADR 0019) | Windows reports none, or one older than 14.44 |
 //! | Caddy runs | it does not |
 //! | `doctor-<hex>.test` resolves to `127.0.0.1` (macOS, and Linux on the `marsa0` link) | it does not, or to another address |
 //! | every site has its line in Marsa's block of `/etc/hosts` (Linux on the hosts way) | one has none, or the block is gone |
@@ -16,7 +16,9 @@
 //!
 //! A line starts with ✓, ✗ (with a `Fix:` line under it), or `-` for a check
 //! that did not run: not on this system yet, or it needs `marsad` or Caddy
-//! first. Exit code 1 if a check failed.
+//! first. Exit code 1 if a check failed. A `!` line (with its `Fix:`) warns
+//! and fails nothing: on Windows, a `marsad` that runs with administrator
+//! rights, which PostgreSQL refuses.
 //!
 //! Read-only: it never starts `marsad` (`DaemonClient::connect`, not
 //! `ensure_running`), never asks for admin rights, and writes no file.
@@ -42,7 +44,8 @@ use std::time::Duration;
 use marsa_core::caddy::CaddyPaths;
 use marsa_core::client::{ClientError, DaemonClient};
 use marsa_core::config::{self, ConfigPaths};
-use marsa_core::doctor::{self, Check, Installed, Pass, Ports, Problem, Skip, Verdict};
+use marsa_core::databases::ServerKind;
+use marsa_core::doctor::{self, Check, Installed, Pass, Ports, Problem, Skip, Verdict, Warning};
 use marsa_core::platform::browser::windows_dir;
 use marsa_core::platform::probe;
 use marsa_core::recipes::{Os, Platform};
@@ -96,6 +99,13 @@ pub async fn run(data_dir: &Path) -> Result<ExitCode, Failure> {
     let daemon = ask_daemon(data_dir).await;
     let running = daemon.health.is_ok();
     show(Check::Daemon, doctor::daemon(daemon.health.clone()));
+    // Windows: an elevated daemon runs, but PostgreSQL refuses to.
+    if let Ok((health, _)) = &daemon.health {
+        let elevated = marsa_core::platform::process_is_elevated(health.pid);
+        if let Some(warning) = doctor::daemon_elevation(elevated) {
+            println!("{}", render_warning(warning));
+        }
+    }
     let installed = installed(data_dir);
     let caddy_installed = installed
         .caddy
@@ -111,7 +121,9 @@ pub async fn run(data_dir: &Path) -> Result<ExitCode, Failure> {
         );
     }
     if windows {
-        show(Check::VcRuntime, doctor::vc_runtime(vc_runtime_version()));
+        let servers = vc_servers(data_dir);
+        let verdict = doctor::vc_runtime(vc_runtime_version(), servers);
+        show(Check::VcRuntime, verdict);
         // PHP trusts the bundle marsad builds from Windows' store.
         show(
             Check::SystemRoots,
@@ -361,6 +373,21 @@ fn windows_trust(data_dir: &Path) -> Verdict {
     doctor::trust(root.is_some(), trusted)
 }
 
+/// The installed database servers that need the Visual C++ runtime as PHP
+/// does: Oracle's MySQL and theseus' PostgreSQL are MSVC builds that bring
+/// none (S-12). Valkey is a Cygwin build and needs none.
+fn vc_servers(data_dir: &Path) -> Vec<String> {
+    let runtimes = RuntimesDir::in_dir(data_dir);
+    [ServerKind::Mysql, ServerKind::Postgres]
+        .into_iter()
+        .filter(|kind| {
+            let versions = runtimes.installed(kind.runtime());
+            versions.is_ok_and(|versions| !versions.is_empty())
+        })
+        .map(|kind| kind.name().to_owned())
+        .collect()
+}
+
 /// The Visual C++ runtime that Windows reports; none elsewhere.
 fn vc_runtime_version() -> Option<(u32, u32, u32)> {
     // `#[cfg]` outside `platform`: the registry is Windows'.
@@ -380,6 +407,16 @@ pub fn render(check: Check, verdict: &Verdict, data_dir: &Path, windows: bool) -
             strings::doctor_fail(&text, &fix)
         }
         Verdict::Skip(skip) => strings::doctor_skip(check, *skip),
+    }
+}
+
+/// The line of a warning, with its fix.
+fn render_warning(warning: Warning) -> String {
+    match warning {
+        Warning::DaemonElevated => strings::doctor_warn(
+            strings::DOCTOR_DAEMON_ELEVATED,
+            strings::DOCTOR_RESTART_UNELEVATED,
+        ),
     }
 }
 
@@ -504,9 +541,12 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
         ),
         Problem::CaUntrusted => pair(strings::DOCTOR_UNTRUSTED, strings::DOCTOR_TRUST_SETUP),
         Problem::XzMissing => pair(strings::DOCTOR_XZ_MISSING, strings::DOCTOR_XZ_INSTALL),
-        Problem::VcRuntimeMissing => pair(strings::DOCTOR_VC_MISSING, strings::DOCTOR_VC_INSTALL),
-        Problem::VcRuntimeOld { found } => (
-            strings::doctor_vc_old(&printable(found)),
+        Problem::VcRuntimeMissing { servers } => (
+            strings::doctor_vc_missing(servers),
+            strings::DOCTOR_VC_INSTALL.to_owned(),
+        ),
+        Problem::VcRuntimeOld { found, servers } => (
+            strings::doctor_vc_old(&printable(found), servers),
             strings::DOCTOR_VC_INSTALL.to_owned(),
         ),
         Problem::SystemRootsUnreadable { error } => (
@@ -919,9 +959,12 @@ mod tests {
         let text = render(Check::VcRuntime, &pass, &data, true);
         assert!(text.contains("14.44.35211"), "{text}");
         for problem in [
-            Problem::VcRuntimeMissing,
+            Problem::VcRuntimeMissing {
+                servers: Vec::new(),
+            },
             Problem::VcRuntimeOld {
                 found: "14.29.30133".to_owned(),
+                servers: Vec::new(),
             },
         ] {
             let text = render(Check::VcRuntime, &Verdict::Fail(problem), &data, true);
@@ -930,6 +973,49 @@ mod tests {
                 "{text}"
             );
             assert!(text.contains("Fix:"), "{text}");
+            assert!(!text.contains("MySQL"), "{text}");
         }
+    }
+
+    /// MySQL and PostgreSQL need the runtime too: the line names those
+    /// that are installed.
+    #[test]
+    fn the_vc_runtime_lines_name_the_installed_servers_that_need_it() {
+        let data = data();
+        let names = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect();
+        let missing = |servers| Problem::VcRuntimeMissing { servers };
+        let line = |problem| render(Check::VcRuntime, &Verdict::Fail(problem), &data, true);
+        let both = line(missing(names(&["MySQL", "PostgreSQL"])));
+        let want = "✗ Windows does not report the Microsoft Visual C++ runtime (x64), which PHP \
+                    needs, and MySQL and PostgreSQL need it too.";
+        assert!(both.starts_with(want), "{both}");
+        let one = line(missing(names(&["PostgreSQL"])));
+        assert!(one.contains("needs, and PostgreSQL needs it too."), "{one}");
+        let old = line(Problem::VcRuntimeOld {
+            found: "14.29.30133".to_owned(),
+            servers: names(&["MySQL"]),
+        });
+        let want = "PHP needs 14.44 or newer, and MySQL needs it too.";
+        assert!(old.contains(want), "{old}");
+    }
+
+    /// Windows: the warning for an elevated daemon says what to do, and is
+    /// no failure.
+    #[test]
+    fn an_elevated_daemon_has_a_warning_line_with_its_fix() {
+        let text = render_warning(Warning::DaemonElevated);
+        assert!(
+            text.starts_with("! marsad runs with administrator rights."),
+            "{text}"
+        );
+        assert!(
+            text.contains("PostgreSQL refuses to run with them"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n  Fix: Run Marsa without administrator rights"),
+            "{text}"
+        );
+        assert!(!text.contains('✗'), "{text}");
     }
 }

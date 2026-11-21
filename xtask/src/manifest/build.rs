@@ -308,19 +308,35 @@ pub trait OracleCheck {
     fn signature(&self, signature: &Path, file: &Path) -> Result<()>;
     /// The MD5 of `file`.
     fn md5(&self, file: &Path) -> Result<[u8; 16]>;
-    /// The name of the first entry of the tar archive `file`, as it is
-    /// written there (`mysql-8.4.13-.../bin/mysqld`).
-    fn first_entry(&self, file: &Path) -> Result<String>;
+    /// The name of the first entry of the archive `file`, of the `kind` its
+    /// name gives, as it is written there (`mysql-8.4.13-.../bin/mysqld`).
+    fn first_entry(&self, file: &Path, kind: ArchiveKind) -> Result<String>;
+}
+
+/// The two kinds of Oracle's MySQL archives: a tar archive (`.tar.gz`,
+/// `.tar.xz`) for macOS and Linux, a `.zip` for Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveKind {
+    Tar,
+    Zip,
 }
 
 /// The top folder of a MySQL archive called `name`: the name without its
-/// `.tar.gz` or `.tar.xz`. Oracle's signature does not bind the archive to
-/// its name, so a hijacked CDN could serve an older signed archive under a
-/// new name: its top folder would still say the old version.
-fn top_folder_of(name: &str) -> Result<&str> {
-    name.strip_suffix(".tar.gz")
-        .or_else(|| name.strip_suffix(".tar.xz"))
-        .with_context(|| format!("{name} is not a .tar.gz or .tar.xz archive"))
+/// `.tar.gz`, `.tar.xz`, or `.zip`, and the kind of archive. Oracle's
+/// signature does not bind the archive to its name, so a hijacked CDN could
+/// serve an older signed archive under a new name: its top folder would
+/// still say the old version.
+fn top_folder_of(name: &str) -> Result<(&str, ArchiveKind)> {
+    let tar = name
+        .strip_suffix(".tar.gz")
+        .or_else(|| name.strip_suffix(".tar.xz"));
+    if let Some(top) = tar {
+        return Ok((top, ArchiveKind::Tar));
+    }
+    let top = name
+        .strip_suffix(".zip")
+        .with_context(|| format!("{name} is not a .tar.gz, .tar.xz, or .zip archive"))?;
+    Ok((top, ArchiveKind::Zip))
 }
 
 /// A file whose proof passed: what the manifest records.
@@ -413,8 +429,8 @@ pub async fn check_oracle(
             path.display()
         );
         let name = url.rsplit_once('/').map_or(url, |(_, name)| name);
-        let want = top_folder_of(name)?;
-        let first = check.first_entry(&path)?;
+        let (want, kind) = top_folder_of(name)?;
+        let first = check.first_entry(&path, kind)?;
         let top = first.split('/').next().unwrap_or_default();
         ensure!(
             top == want,
@@ -901,7 +917,7 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             bail!("an Oracle check was not expected")
         }
 
-        fn first_entry(&self, _file: &Path) -> Result<String> {
+        fn first_entry(&self, _file: &Path, _kind: ArchiveKind) -> Result<String> {
             bail!("an Oracle check was not expected")
         }
     }
@@ -966,8 +982,9 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
         fetch
     }
 
-    /// The pins of [`PINS`] plus MySQL: 8.4.13 where Oracle has it, and
-    /// 8.4.11 for the Intel Mac only, from Oracle's `archives/` folder.
+    /// The pins of [`PINS`] plus MySQL, as `recipes/pins.toml` has it:
+    /// 8.4.13 where Oracle has it, Windows' zip too, and 8.4.11 for the
+    /// Intel Mac only, from Oracle's `archives/` folder.
     fn mysql_pins() -> String {
         let skip = |version: &str, platform: &str| {
             format!(
@@ -976,12 +993,11 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             )
         };
         format!(
-            "{PINS}[mysql]\nversions = [\"8.4.13\", \"8.4.11\"]\n{}{}{}{}{}{}\
+            "{PINS}[mysql]\nversions = [\"8.4.13\", \"8.4.11\"]\n{}{}{}{}{}\
              [[override]]\nruntime = \"mysql\"\nversion = \"8.4.11\"\nplatform = \"darwin-x64\"\n\
              artifact = \"archive\"\nurls = [\"https://cdn.mysql.com/archives/mysql-8.4/\
              mysql-8.4.11-macos15-x86_64.tar.gz\"]\n",
             skip("8.4.13", "darwin-x64"),
-            skip("8.4.13", "windows-x64"),
             skip("8.4.11", "darwin-arm64"),
             skip("8.4.11", "linux-x64"),
             skip("8.4.11", "linux-arm64"),
@@ -1003,10 +1019,12 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             Ok([0; 16])
         }
 
-        fn first_entry(&self, file: &Path) -> Result<String> {
+        fn first_entry(&self, file: &Path, kind: ArchiveKind) -> Result<String> {
             let url = fs::read_to_string(file)?;
             let name = url.rsplit_once('/').map_or(url.as_str(), |(_, name)| name);
-            Ok(format!("{}/bin/mysqld", top_folder_of(name)?))
+            let (top, of_name) = top_folder_of(name)?;
+            ensure!(kind == of_name, "{name} is listed as {kind:?}");
+            Ok(format!("{top}/bin/mysqld"))
         }
     }
 
@@ -1027,8 +1045,8 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             OracleOk.md5(file)
         }
 
-        fn first_entry(&self, file: &Path) -> Result<String> {
-            OracleOk.first_entry(file)
+        fn first_entry(&self, file: &Path, kind: ArchiveKind) -> Result<String> {
+            OracleOk.first_entry(file, kind)
         }
     }
 
@@ -1087,7 +1105,13 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
                 ("darwin-arm64".to_owned(), vec!["archive".to_owned()]),
                 ("linux-arm64".to_owned(), linux.clone()),
                 ("linux-x64".to_owned(), linux),
+                ("windows-x64".to_owned(), vec!["archive".to_owned()]),
             ]
+        );
+        let windows = &releases[0]["platforms"]["windows-x64"][0];
+        assert_eq!(
+            windows["urls"][0],
+            "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.13-winx64.zip"
         );
         assert_eq!(
             platforms("8.4.11"),
@@ -1124,7 +1148,7 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             fn md5(&self, _f: &Path) -> Result<[u8; 16]> {
                 Ok([0; 16])
             }
-            fn first_entry(&self, _f: &Path) -> Result<String> {
+            fn first_entry(&self, _f: &Path, _k: ArchiveKind) -> Result<String> {
                 Ok("mysql-8.4.9-other/bin/mysqld".to_owned())
             }
         }
@@ -1203,13 +1227,10 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
         assert!(!Proof::OurLibaio.keeps_file());
     }
 
-    /// The pins of [`PINS`] plus Valkey 8.1.11 on macOS and Linux, as
+    /// The pins of [`PINS`] plus Valkey 8.1.11 on all five platforms, as
     /// `recipes/pins.toml` has it.
     fn valkey_pins() -> String {
-        format!(
-            "{PINS}[valkey]\nversions = [\"8.1.11\"]\n[[skip]]\nruntime = \"valkey\"\n\
-             version = \"8.1.11\"\nplatform = \"windows-x64\"\nreason = \"M6-07\"\n"
-        )
+        format!("{PINS}[valkey]\nversions = [\"8.1.11\"]\n")
     }
 
     #[tokio::test]
@@ -1235,8 +1256,18 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             .collect();
         assert_eq!(
             platforms,
-            ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]
+            [
+                "darwin-arm64",
+                "darwin-x64",
+                "linux-arm64",
+                "linux-x64",
+                "windows-x64"
+            ]
         );
+        let windows = &release["platforms"]["windows-x64"][0];
+        let zip = "https://github.com/XJOC/marsa/releases/download/valkey-8.1.11-r1/\
+                   valkey-8.1.11-windows-x64.zip";
+        assert_eq!(windows["urls"][0], zip);
         let linux = &release["platforms"]["linux-x64"][0];
         let url = "https://github.com/XJOC/marsa/releases/download/valkey-8.1.11-r1/\
                    valkey-8.1.11-linux-x64.tar.gz";
@@ -1249,12 +1280,10 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             .filter(|row| row.starts_with("valkey 8.1.11 "))
             .collect();
         assert_eq!(rows.len(), 5, "{rows:?}");
-        let skipped = "valkey 8.1.11 windows-x64: skipped (M6-07)";
-        assert!(rows.iter().any(|row| *row == skipped), "{rows:?}");
         let checked = rows
             .iter()
             .filter(|row| row.ends_with("(upstream sha256 matches)"));
-        assert_eq!(checked.count(), 4);
+        assert_eq!(checked.count(), 5);
         // Hashed on the way, never kept.
         assert!(!cache.path().join("valkey").exists());
         check_json(to_json(&built.manifest).expect("json").as_bytes()).expect("valid manifest");
@@ -1954,7 +1983,7 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             Ok(self.md5)
         }
 
-        fn first_entry(&self, _file: &Path) -> Result<String> {
+        fn first_entry(&self, _file: &Path, _kind: ArchiveKind) -> Result<String> {
             Ok(self.first_entry.clone())
         }
     }
@@ -2066,16 +2095,26 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
     }
 
     #[test]
-    fn the_top_folder_comes_from_a_tar_name_only() {
+    fn the_top_folder_comes_from_a_tar_or_zip_name_only() {
         assert_eq!(
             top_folder_of("mysql-8.4.13-macos15-arm64.tar.gz").unwrap(),
-            "mysql-8.4.13-macos15-arm64"
+            ("mysql-8.4.13-macos15-arm64", ArchiveKind::Tar)
         );
         assert_eq!(
             top_folder_of("mysql-8.4.13-x.tar.xz").unwrap(),
-            "mysql-8.4.13-x"
+            ("mysql-8.4.13-x", ArchiveKind::Tar)
         );
-        for name in ["mysql-8.4.13-winx64.zip", "mysql.tar", ".tar.xz.exe"] {
+        // Windows.
+        assert_eq!(
+            top_folder_of("mysql-8.4.13-winx64.zip").unwrap(),
+            ("mysql-8.4.13-winx64", ArchiveKind::Zip)
+        );
+        for name in [
+            "mysql.tar",
+            ".tar.xz.exe",
+            "mysql-8.4.13-winx64.zip.exe",
+            "a.7z",
+        ] {
             assert!(top_folder_of(name).is_err(), "{name}");
         }
     }
