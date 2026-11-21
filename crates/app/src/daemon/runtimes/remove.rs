@@ -77,7 +77,10 @@ async fn remove_version(
         None => None,
     };
     let caddy = daemon.caddy.running_program(&daemon);
-    let server = server_kind.and_then(|kind| daemon.server(kind).running_program(&daemon));
+    let server = match server_kind {
+        Some(kind) => daemon.server(kind).program_in_use(&daemon).await,
+        None => None,
+    };
     let worker = Arc::clone(&daemon);
     let (version, retired, cleared) = http::blocking("uninstall", move || {
         // `marsa use` waits, so the version cannot become the default
@@ -237,7 +240,9 @@ fn retire_unused(
 struct Running<'a> {
     /// The running Caddy's program.
     caddy: Option<&'a Path>,
-    /// The running PostgreSQL's `postgres`.
+    /// The running database server's program, or the one our old server
+    /// runs, which a crashed `marsad` left running
+    /// (`ServerManager::program_in_use`).
     server: Option<&'a Path>,
 }
 

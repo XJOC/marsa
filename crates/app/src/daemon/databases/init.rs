@@ -57,16 +57,26 @@ pub(super) fn installed_servers(
     data_dir: &Path,
     platform: Platform,
 ) -> Vec<PathBuf> {
+    accepted(installed_programs(kind, data_dir, platform))
+}
+
+/// The server program of every installed version of `kind`, as the recipe
+/// puts it under `runtimes/`, links not resolved.
+pub(super) fn installed_programs(
+    kind: ServerKind,
+    data_dir: &Path,
+    platform: Platform,
+) -> Vec<PathBuf> {
     let versions = RuntimesDir::in_dir(data_dir)
         .installed(kind.runtime())
         .unwrap_or_else(|err| {
             warn!(code = err.code(), %err, server = kind.id(), "cannot list the versions");
             Vec::new()
         });
-    let servers = versions
+    versions
         .iter()
-        .filter_map(|version| server(kind, data_dir, platform, version));
-    accepted(servers)
+        .filter_map(|version| server(kind, data_dir, platform, version))
+        .collect()
 }
 
 /// Why the first init of a data folder failed. Nothing is left behind: no

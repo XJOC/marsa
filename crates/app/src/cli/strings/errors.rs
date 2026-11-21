@@ -319,6 +319,13 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "postgres_unsupported_platform" => {
             "Marsa has no PostgreSQL for this system.".into()
         }
+        // After a SIGKILL of the old postmaster, its backends end only once
+        // they see that it is gone.
+        "postgres_shared_memory_busy" => "Processes of an earlier PostgreSQL still use the \
+             shared memory of its data folder, so it did not start. They end by themselves \
+             within a few seconds: wait a moment, then try again. Run \"marsa logs postgres\" \
+             to see why."
+            .into(),
         // MySQL, the same way.
         "mysql_not_installed" => "MySQL of the version set in global.toml is not installed. \
              Run \"marsa install mysql\", then try again."

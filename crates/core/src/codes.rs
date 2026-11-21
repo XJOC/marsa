@@ -131,6 +131,7 @@ pub const PORTS_WRITE: &str = "ports_write";
 pub const POSTGRES_INIT_FAILED: &str = "postgres_init_failed";
 pub const POSTGRES_NOT_INSTALLED: &str = "postgres_not_installed";
 pub const POSTGRES_ORPHAN_STUCK: &str = "postgres_orphan_stuck";
+pub const POSTGRES_SHARED_MEMORY_BUSY: &str = "postgres_shared_memory_busy";
 pub const POSTGRES_START_TIMEOUT: &str = "postgres_start_timeout";
 pub const POSTGRES_UNSUPPORTED_PLATFORM: &str = "postgres_unsupported_platform";
 pub const PROGRAM_NOT_ABSOLUTE: &str = "program_not_absolute";
@@ -381,6 +382,7 @@ pub const ALL: &[&str] = &[
     POSTGRES_INIT_FAILED,
     POSTGRES_NOT_INSTALLED,
     POSTGRES_ORPHAN_STUCK,
+    POSTGRES_SHARED_MEMORY_BUSY,
     POSTGRES_START_TIMEOUT,
     POSTGRES_UNSUPPORTED_PLATFORM,
     PROGRAM_NOT_ABSOLUTE,

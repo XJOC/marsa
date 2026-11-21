@@ -185,7 +185,11 @@ pub(super) async fn answers(port: u16) -> bool {
 ///   start reports it. The pid comes from PostgreSQL's hint, else from
 ///   `postmaster.pid` (read only), and may stay unknown;
 /// - the lock of the socket: `service_port_busy`, the server that uses the
-///   socket of this port.
+///   socket of this port;
+/// - the shared memory of the data folder, still used by processes of an
+///   earlier server (the backends of a postmaster that SIGKILL ended):
+///   `postgres_shared_memory_busy`. They end by themselves, so a later
+///   start works; nothing is signalled, because no record names them.
 ///
 /// Only read once the run has ended: a line never stops a server. That
 /// process gets no signal, and `postmaster.pid` stays: the pid may be
@@ -224,6 +228,16 @@ pub(super) async fn lock_refusal(
             let lock = socket.map(|socket| socket.display().to_string());
             let lock = lock.unwrap_or_default();
             let reason = format!("{busy}: it holds the lock of the socket {lock}, {no_signal}");
+            Some((busy, reason))
+        }
+        // No pid is named, and none is looked for: the backends of a
+        // postmaster that SIGKILL ended have no record of ours.
+        LockConflict::SharedMemory => {
+            let busy = ServiceBusy::SharedMemory;
+            let reason = format!(
+                "{busy}; they end by themselves once they see that their server is gone, so \
+                 start it again in a moment; Marsa sends them no signal"
+            );
             Some((busy, reason))
         }
     }
