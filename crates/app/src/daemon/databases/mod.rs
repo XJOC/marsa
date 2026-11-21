@@ -483,9 +483,13 @@ mod tests {
                 }
                 "socket-locked" => {
                     let socket = format!("{}/.s.PGSQL.{port}", setting("unix_socket_directories="));
+                    // The pid on the first line of the lock, as PostgreSQL
+                    // reads it; 4242 when there is no lock file.
+                    let lock = fs::read_to_string(format!("{socket}.lock")).unwrap_or_default();
+                    let holder = lock.lines().next().unwrap_or("4242").to_owned();
                     eprintln!("{at} FATAL:  lock file \"{socket}.lock\" already exists");
                     eprintln!(
-                        "{at} HINT:  Is another postmaster (PID 4242) using socket file \
+                        "{at} HINT:  Is another postmaster (PID {holder}) using socket file \
                          \"{socket}\"?"
                     );
                     std::process::exit(1);
@@ -1207,6 +1211,11 @@ mod tests {
         /// The fake server in `mode` on `pg.port`, not our child task and not
         /// killed by the daemon. Its own stderr goes to `<dir>/orphan.log`.
         fn orphan_server(pg: &Pg, mode: &str) -> Orphan {
+            orphan_server_on(pg, mode, pg.port)
+        }
+
+        /// [`orphan_server`] on `port`.
+        fn orphan_server_on(pg: &Pg, mode: &str, port: u16) -> Orphan {
             let log = fs::File::create(pg.dir.path().join("orphan.log")).unwrap();
             let child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -1215,7 +1224,7 @@ mod tests {
                     "--nocapture",
                 ])
                 .env(FAKE, mode)
-                .env("MARSA_FAKE_POSTGRES_ARGS", format!("-c port={}", pg.port))
+                .env("MARSA_FAKE_POSTGRES_ARGS", format!("-c port={port}"))
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(log)
@@ -1226,15 +1235,23 @@ mod tests {
 
         /// The installed `postgres` of the fake version.
         fn installed_postgres(pg: &Pg) -> PathBuf {
-            pg.daemon
-                .data_dir
-                .join("runtimes/postgres/18.7.0/bin/postgres")
+            installed_postgres_of(pg, "18.7.0")
+        }
+
+        /// The `postgres` of `version` in the data folder of `pg`.
+        fn installed_postgres_of(pg: &Pg, version: &str) -> PathBuf {
+            let path = format!("runtimes/postgres/{version}/bin/postgres");
+            pg.daemon.data_dir.join(path)
         }
 
         /// `run/postgres.pid` for `pid`, as the daemon writes it, with its
         /// real start time unless `started` says another.
         async fn record_orphan(pg: &Pg, pid: u32, started: Option<StartTime>) {
-            let exe = installed_postgres(pg);
+            record_orphan_as(pg, pid, installed_postgres(pg), started).await;
+        }
+
+        /// [`record_orphan`] for a pid that runs `exe`.
+        async fn record_orphan_as(pg: &Pg, pid: u32, exe: PathBuf, started: Option<StartTime>) {
             pg.probes.orphans.lock().unwrap().push((pid, exe.clone()));
             let until = std::time::Instant::now() + WAIT;
             let real = loop {
@@ -1380,6 +1397,116 @@ mod tests {
             assert_eq!(sent, [Signal::Int, Signal::Quit, Signal::Kill]);
             assert!(pg.texts().iter().any(|t| t.contains("needed SIGKILL")));
             pg.act(ServiceAction::Stop).await.unwrap();
+        }
+
+        /// The orphan of another installed major, PostgreSQL 17, is ours
+        /// too: an update of the default line came between the crash and
+        /// this start. It gets SIGINT, and 18 starts.
+        #[tokio::test]
+        async fn our_orphan_of_another_major_is_stopped() {
+            let pg = pg("serve", probes(Liveness::Gone, None));
+            let v17 = installed_postgres_of(&pg, "17.12.0");
+            fs::create_dir_all(v17.parent().unwrap()).unwrap();
+            fs::write(&v17, "").unwrap();
+            let mut orphan = orphan_server(&pg, "serve");
+            listening(pg.port).await;
+            record_orphan_as(&pg, orphan.id(), v17, None).await;
+
+            let status = pg.act(ServiceAction::Start).await.unwrap();
+            assert_eq!(status.state, ServiceState::Running);
+            assert!(orphan.0.wait().unwrap().success(), "it ended at SIGINT");
+            assert_eq!(signals(&pg), [(orphan.id(), Signal::Int)]);
+            // The default line, 18, runs now.
+            assert_eq!(pg.count("server"), 1);
+            let program = pg.daemon.postgres.running_program(&pg.daemon).unwrap();
+            assert_eq!(program, installed_postgres(&pg));
+            pg.act(ServiceAction::Stop).await.unwrap();
+        }
+
+        /// The orphan holds another port than the one set now (the port
+        /// changed in `global.toml` after the crash): the record still
+        /// names it, so it is stopped, and the new server takes the port
+        /// set now.
+        #[tokio::test]
+        async fn our_orphan_on_another_port_is_stopped() {
+            let pg = pg("serve", probes(Liveness::Gone, None));
+            let old_port = free_port();
+            let mut orphan = orphan_server_on(&pg, "serve", old_port);
+            listening(old_port).await;
+            record_orphan(&pg, orphan.id(), None).await;
+
+            let status = pg.act(ServiceAction::Start).await.unwrap();
+            assert_eq!(status.state, ServiceState::Running);
+            assert!(orphan.0.wait().unwrap().success(), "it ended at SIGINT");
+            assert_eq!(signals(&pg), [(orphan.id(), Signal::Int)]);
+            assert!(postgres::answers(pg.port).await);
+            assert!(!postgres::answers(old_port).await);
+            pg.act(ServiceAction::Stop).await.unwrap();
+        }
+
+        /// A frozen orphan (SIGSTOP) cannot act on SIGINT or SIGQUIT: the
+        /// ladder goes on to SIGKILL, with the check before each signal, and
+        /// the new server starts once the port is free.
+        #[tokio::test]
+        async fn a_frozen_orphan_gets_sigkill() {
+            let mut pg = pg("serve", probes(Liveness::Gone, None));
+            let short = Duration::from_millis(300);
+            Arc::get_mut(&mut pg.daemon).unwrap().postgres.orphan_ladder =
+                StopMethod::signals([(Signal::Int, short), (Signal::Quit, short)]);
+            let mut orphan = orphan_server(&pg, "serve");
+            listening(pg.port).await;
+            record_orphan(&pg, orphan.id(), None).await;
+            // Only to our own fake: the test's child.
+            let frozen = std::process::Command::new("/bin/kill")
+                .args(["-STOP", &orphan.id().to_string()])
+                .status()
+                .unwrap();
+            assert!(frozen.success());
+
+            let status = pg.act(ServiceAction::Start).await.unwrap();
+            assert_eq!(status.state, ServiceState::Running);
+            let gone = orphan.0.wait().unwrap();
+            use std::os::unix::process::ExitStatusExt as _;
+            assert_eq!(gone.signal(), Some(9), "killed: {gone:?}");
+            let sent: Vec<Signal> = signals(&pg).iter().map(|(_, s)| *s).collect();
+            assert_eq!(sent, [Signal::Int, Signal::Quit, Signal::Kill]);
+            // The check before each signal, and the looks after each one.
+            let asked = pg.probes.asked.lock().unwrap().clone();
+            let about_it = asked.iter().filter(|pid| **pid == orphan.id()).count();
+            assert!(about_it >= 4, "{asked:?}");
+            assert!(pg.texts().iter().any(|t| t.contains("needed SIGKILL")));
+            pg.act(ServiceAction::Stop).await.unwrap();
+        }
+
+        /// After a crash, the lock of our socket names a pid that another
+        /// program has now. PostgreSQL refuses to start, the start names
+        /// that program, and it gets no signal: no record names it. The
+        /// lock file stays as it was.
+        #[tokio::test]
+        async fn a_stale_socket_lock_of_another_program_is_left_untouched() {
+            let pg = pg("socket-locked", probes(alive(Path::new(OTHER)), None));
+            let mut other = Orphan(
+                std::process::Command::new("/bin/sleep")
+                    .arg("60")
+                    .spawn()
+                    .unwrap(),
+            );
+            fs::create_dir_all(&pg.dirs.sockets).unwrap();
+            let lock_file = pg.dirs.sockets.join(format!(".s.PGSQL.{}.lock", pg.port));
+            let data = pg.dirs.data.display();
+            let text = format!("{}\n{data}\n1763460000\n{}\n\n", other.id(), pg.port);
+            fs::write(&lock_file, &text).unwrap();
+
+            let err = pg.act(ServiceAction::Start).await.unwrap_err();
+            assert_eq!(err.code(), "service_port_busy");
+            let said = err.to_string();
+            assert!(
+                said.contains(&format!("{OTHER} (pid {})", other.id())),
+                "{said}"
+            );
+            assert!(signals(&pg).is_empty());
+            assert!(other.0.try_wait().unwrap().is_none(), "it still runs");
+            assert_eq!(fs::read_to_string(&lock_file).unwrap(), text);
         }
 
         /// The check comes again before each signal: a pid that cannot be
