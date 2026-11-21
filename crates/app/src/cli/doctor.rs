@@ -50,7 +50,8 @@ use marsa_core::runtimes::{Runtime, RuntimesDir};
 use marsa_core::types::{Health, ServiceState, Site};
 use tokio_util::sync::CancellationToken;
 
-use super::daemon::{ClientFailure, failure};
+use super::Failure;
+use super::daemon::failure;
 use super::setup::port_held;
 use super::sites::printable;
 use super::strings::{self, Details};
@@ -81,7 +82,7 @@ struct FromDaemon {
 }
 
 /// Runs the checks in order and prints each line as soon as it is known.
-pub async fn run(data_dir: &Path) -> ExitCode {
+pub async fn run(data_dir: &Path) -> Result<ExitCode, Failure> {
     let platform = Platform::current();
     let macos = matches!(platform, Some(Platform::DarwinArm64 | Platform::DarwinX64));
     let linux = matches!(platform, Some(Platform::LinuxX64 | Platform::LinuxArm64));
@@ -164,18 +165,18 @@ pub async fn run(data_dir: &Path) -> ExitCode {
     }
     show(Check::Path, path(data_dir));
     show(Check::Log, log(data_dir));
-    if failed {
+    Ok(if failed {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
-    }
+    })
 }
 
 /// Asks a running daemon, never one this starts: its health, Caddy's
 /// state, and whether a site is secure.
 async fn ask_daemon(data_dir: &Path) -> FromDaemon {
     let down = |err: ClientError| FromDaemon {
-        health: Err(failure(&err, data_dir, None).code),
+        health: Err(failure(&err, data_dir, None).code.into_owned()),
         caddy: None,
         caddy_pid: None,
         secure_site: None,
@@ -426,7 +427,7 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
         }
         Problem::DaemonError { code } => (
             strings::doctor_daemon_error(&printable(code)),
-            ClientFailure::new(code, data_dir, None).message,
+            Failure::new(code, data_dir, None).message,
         ),
         Problem::NotInstalled { php, caddy } => strings::doctor_not_installed(*php, *caddy),
         Problem::RuntimesUnreadable { code } => (
@@ -451,7 +452,7 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
         ),
         Problem::CaddyFailed { code } => (
             strings::doctor_caddy_failed(&printable(code)),
-            ClientFailure::new(code, data_dir, Some(CADDY_ID)).message,
+            Failure::new(code, data_dir, Some(CADDY_ID)).message,
         ),
         Problem::DnsNoAnswer => pair(strings::DOCTOR_DNS_NO_ANSWER, strings::DOCTOR_DNS_SETUP),
         Problem::LinkNoAnswer => pair(strings::DOCTOR_DNS_NO_ANSWER, strings::DOCTOR_LINK_SETUP),

@@ -23,28 +23,26 @@ use marsa_core::caddy::CaddyPaths;
 use marsa_core::recipes::Platform;
 use marsa_core::types::{OpStatus, PortHolder, SetupReport};
 
-use super::daemon::{ClientFailure, connect, failure};
+use super::Failure;
+use super::daemon::{connect, failure};
 use super::sites::printable;
 use super::strings::{self, Details};
 use marsa_core::platform::trust::TrustFiles;
 
 /// Starts the daemon if needed, runs the setup, and prints its report.
-pub async fn run(data_dir: &Path) -> ExitCode {
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+pub async fn run(data_dir: &Path) -> Result<ExitCode, Failure> {
+    let client = connect(data_dir).await?;
     if let Some(line) = started(Platform::current()) {
         eprintln!("{line}");
     }
     let report = match client.setup().await {
         Ok(report) => report,
-        Err(err) => return failure(&err, data_dir, None).report(),
+        Err(err) => return Err(failure(&err, data_dir, None)),
     };
     print!("{}", render(&report, data_dir));
     match error(&report) {
-        Some(failure) => failure.report(),
-        None => exit_code(&report),
+        Some(failure) => Err(failure),
+        None => Ok(exit_code(&report)),
     }
 }
 
@@ -131,12 +129,12 @@ pub fn render(report: &SetupReport, data_dir: &Path) -> String {
 
 /// Why the helper did not run, or (Linux) why Caddy did not take ports 80
 /// and 443 after it, ready for stderr.
-pub fn error(report: &SetupReport) -> Option<ClientFailure> {
+pub fn error(report: &SetupReport) -> Option<Failure> {
     let error = report.error.as_ref()?;
     let code = printable(&error.code);
-    Some(ClientFailure {
+    Some(Failure {
         message: strings::message(&code, &Details::default()),
-        code,
+        code: code.into(),
     })
 }
 

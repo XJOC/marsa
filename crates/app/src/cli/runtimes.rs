@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::RuntimeList;
 
+use super::Failure;
 use super::daemon::{connect, failure};
 use super::{Tool, strings};
 
@@ -19,17 +20,14 @@ pub struct RuntimesArgs {
 }
 
 /// Starts the daemon if needed, then prints the installed versions to stdout.
-pub async fn run(args: &RuntimesArgs, data_dir: &Path) -> ExitCode {
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+pub async fn run(args: &RuntimesArgs, data_dir: &Path) -> Result<ExitCode, Failure> {
+    let client = connect(data_dir).await?;
     match client.runtimes().await {
         Ok(list) => {
             print!("{}", render(&list, args.tool));
-            ExitCode::SUCCESS
+            Ok(ExitCode::SUCCESS)
         }
-        Err(err) => failure(&err, data_dir, None).report(),
+        Err(err) => Err(failure(&err, data_dir, None)),
     }
 }
 

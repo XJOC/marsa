@@ -14,8 +14,9 @@ use marsa_core::client::ClientError;
 use marsa_core::databases::ServerKind;
 use marsa_core::runtimes::Runtime;
 
+use super::Failure;
 use super::Tool;
-use super::daemon::{ClientFailure, connect, failure};
+use super::daemon::{connect, failure};
 use super::sites::printable;
 use super::strings::{self, Details};
 
@@ -32,21 +33,18 @@ pub struct UninstallArgs {
 
 /// Starts the daemon if needed and uninstalls: one line on stdout, or the
 /// failure on stderr with exit code 1.
-pub async fn run(args: &UninstallArgs, data_dir: &Path) -> ExitCode {
+pub async fn run(args: &UninstallArgs, data_dir: &Path) -> Result<ExitCode, Failure> {
     let runtime = Runtime::from(args.tool);
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+    let client = connect(data_dir).await?;
     match client.uninstall(runtime, args.version.trim()).await {
         Ok(done) => {
             println!(
                 "{}",
                 strings::uninstalled(runtime, &printable(&done.version))
             );
-            ExitCode::SUCCESS
+            Ok(ExitCode::SUCCESS)
         }
-        Err(err) => uninstall_failure(&err, runtime, &args.version, data_dir).report(),
+        Err(err) => Err(uninstall_failure(&err, runtime, &args.version, data_dir)),
     }
 }
 
@@ -57,13 +55,13 @@ pub fn uninstall_failure(
     runtime: Runtime,
     version: &str,
     data_dir: &Path,
-) -> ClientFailure {
+) -> Failure {
     // `service_busy`: an action on the database server runs, and a start
     // may pick the version.
     let service = ServerKind::of_runtime(runtime).map(ServerKind::id);
     let mut failure = failure(err, data_dir, service);
     let requested = printable(version.trim());
-    failure.message = match (err, failure.code.as_str()) {
+    failure.message = match (err, &*failure.code) {
         // The client cleaned its text already.
         (ClientError::InUse { in_use, .. }, _) => strings::version_in_use(runtime, in_use),
         (_, codes::VERSION_NOT_INSTALLED) => strings::nothing_to_uninstall(runtime, &requested),

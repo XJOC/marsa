@@ -129,7 +129,8 @@ async fn main() -> ExitCode {
         Ok(dir) => dir,
         Err(failure) => return failure.report(),
     };
-    match &cli.command {
+    // The one place a command's failure is printed.
+    let result = match &cli.command {
         Command::Install(args) => install::run(args, &data_dir).await,
         Command::Runtimes(args) => runtimes::run(args, &data_dir).await,
         Command::Use(args) => default_version::run(args, &data_dir).await,
@@ -154,7 +155,8 @@ async fn main() -> ExitCode {
         Command::Autostart(args) => autostart::run(args, &data_dir).await,
         Command::Doctor => doctor::run(&data_dir).await,
         Command::Xdebug(args) => xdebug::run(args, &data_dir).await,
-    }
+    };
+    result.unwrap_or_else(|failure| failure.report())
 }
 
 #[cfg(test)]

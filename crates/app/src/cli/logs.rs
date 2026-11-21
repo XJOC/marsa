@@ -12,6 +12,7 @@ use std::process::ExitCode;
 use marsa_core::client::{DaemonClient, StreamItem};
 use marsa_core::types::LogLine;
 
+use super::Failure;
 use super::daemon::{connect, failure};
 use super::strings;
 
@@ -27,11 +28,8 @@ pub struct LogsArgs {
 }
 
 /// Starts the daemon if needed, then prints the lines.
-pub async fn run(args: &LogsArgs, data_dir: &Path) -> ExitCode {
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+pub async fn run(args: &LogsArgs, data_dir: &Path) -> Result<ExitCode, Failure> {
+    let client = connect(data_dir).await?;
     if args.follow {
         follow(&client, &args.id, data_dir).await
     } else {
@@ -39,10 +37,10 @@ pub async fn run(args: &LogsArgs, data_dir: &Path) -> ExitCode {
     }
 }
 
-async fn recent(client: &DaemonClient, id: &str, data_dir: &Path) -> ExitCode {
+async fn recent(client: &DaemonClient, id: &str, data_dir: &Path) -> Result<ExitCode, Failure> {
     let lines = match client.logs(id).await {
         Ok(lines) => lines,
-        Err(err) => return failure(&err, data_dir, Some(id)).report(),
+        Err(err) => return Err(failure(&err, data_dir, Some(id))),
     };
     if lines.is_empty() {
         eprintln!("{}", strings::no_log_lines(id));
@@ -50,18 +48,18 @@ async fn recent(client: &DaemonClient, id: &str, data_dir: &Path) -> ExitCode {
     let mut out = io::stdout().lock();
     for line in &lines {
         if let Err(err) = print_line(&mut out, line) {
-            return stdout_closed(&err);
+            return Ok(stdout_closed(&err));
         }
     }
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The recent lines, then the new ones, until Ctrl+C or until the daemon
 /// closes the stream. Exit code 0 in both cases, 1 if the stream breaks.
-async fn follow(client: &DaemonClient, id: &str, data_dir: &Path) -> ExitCode {
+async fn follow(client: &DaemonClient, id: &str, data_dir: &Path) -> Result<ExitCode, Failure> {
     let mut stream = match client.follow_logs(id).await {
         Ok(stream) => stream,
-        Err(err) => return failure(&err, data_dir, Some(id)).report(),
+        Err(err) => return Err(failure(&err, data_dir, Some(id))),
     };
     eprintln!("{}", strings::following(id));
     // Made once, before the loop: a Ctrl+C between two lines is not lost.
@@ -80,12 +78,12 @@ async fn follow(client: &DaemonClient, id: &str, data_dir: &Path) -> ExitCode {
         // `EventStream::next` is cancel-safe: a Ctrl+C while it waits loses
         // no line.
         tokio::select! {
-            () = &mut ctrl_c => return ExitCode::SUCCESS,
+            () = &mut ctrl_c => return Ok(ExitCode::SUCCESS),
             item = stream.next() => match item {
                 Some(Ok(StreamItem::Item(line))) => {
                     broken = false;
                     if let Err(err) = print_line(&mut io::stdout().lock(), &line) {
-                        return stdout_closed(&err);
+                        return Ok(stdout_closed(&err));
                     }
                 }
                 Some(Ok(StreamItem::Lagged(count))) => eprintln!("{}", strings::lagged(count)),
@@ -95,10 +93,10 @@ async fn follow(client: &DaemonClient, id: &str, data_dir: &Path) -> ExitCode {
                     broken = true;
                     eprintln!("{}", failure(&err, data_dir, Some(id)).line());
                 }
-                None if broken => return ExitCode::FAILURE,
+                None if broken => return Ok(ExitCode::FAILURE),
                 None => {
                     eprintln!("{}", strings::LOG_ENDED);
-                    return ExitCode::SUCCESS;
+                    return Ok(ExitCode::SUCCESS);
                 }
             },
         }
