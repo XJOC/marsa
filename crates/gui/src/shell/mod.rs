@@ -27,13 +27,13 @@ pub struct Output {
 }
 
 /// Draws the whole window. `picking`: a folder dialog is open.
-pub fn show(ui: &mut Ui, model: &mut Model, picking: bool) -> Output {
+pub fn show(ui: &mut Ui, model: &Model, picking: bool) -> Output {
     show_at(ui, model, picking, Instant::now())
 }
 
 /// [`show`] at the time `now`: the notice bar closes a success by the clock,
 /// so a test moves the clock by hand.
-pub fn show_at(ui: &mut Ui, model: &mut Model, picking: bool, now: Instant) -> Output {
+pub fn show_at(ui: &mut Ui, model: &Model, picking: bool, now: Instant) -> Output {
     let theme = Theme::of(ui.ctx());
     let mut out = Output::default();
     let narrow = sidebar::is_narrow(theme, ui.max_rect().width());
@@ -84,7 +84,7 @@ pub fn show_at(ui: &mut Ui, model: &mut Model, picking: bool, now: Instant) -> O
 
 /// The screen of the route, in the main area. Every screen returns what the
 /// user did as actions.
-fn screen(ui: &mut Ui, model: &mut Model, picking: bool, out: &mut Output) {
+fn screen(ui: &mut Ui, model: &Model, picking: bool, out: &mut Output) {
     let item = Item::of(&model.route);
     match item {
         // First run replaces Home until the first site can open.

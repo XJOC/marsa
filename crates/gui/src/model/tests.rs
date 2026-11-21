@@ -126,7 +126,7 @@ fn a_service_action_clears_the_notice_and_becomes_a_command() {
     assert!(
         matches!(
             &command,
-            Some(Command::Service { service, action: ServiceAction::Restart }) if service == "caddy"
+            Effect::Send(Command::Service { service, action: ServiceAction::Restart }) if service == "caddy"
         ),
         "{command:?}"
     );
@@ -146,7 +146,7 @@ fn the_home_actions_set_the_default_queue_an_install_and_sync_the_hosts() {
         runtime: Runtime::Php,
         version: "8.3".into(),
     };
-    assert!(matches!(&command, Some(Command::Save(change)) if *change == want));
+    assert!(matches!(&command, Effect::Send(Command::Save(change)) if *change == want));
     assert!(model.apply_action(set).is_none(), "the default already");
 
     // A fix queues its install; `App` sends it through `next_install`.
@@ -168,7 +168,10 @@ fn the_home_actions_set_the_default_queue_an_install_and_sync_the_hosts() {
         missing: vec!["shop.test".into()],
     }));
     let command = model.apply_action(Action::SyncHosts);
-    assert!(matches!(command, Some(Command::SyncHosts)), "{command:?}");
+    assert!(
+        matches!(command, Effect::Send(Command::SyncHosts)),
+        "{command:?}"
+    );
     assert!(model.apply_action(Action::SyncHosts).is_none(), "it runs");
     assert_eq!(model.session.hosts_sync, HostsSync::Running);
 }
@@ -184,7 +187,10 @@ fn the_first_run_actions_install_set_up_and_close() {
     );
 
     let command = model.apply_action(Action::RunSetup);
-    assert!(matches!(command, Some(Command::Setup)), "{command:?}");
+    assert!(
+        matches!(command, Effect::Send(Command::Setup)),
+        "{command:?}"
+    );
     assert_eq!(model.session.setup, Setup::Running);
     assert!(
         model.apply_action(Action::RunSetup).is_none(),
@@ -292,7 +298,10 @@ fn the_menu_actions_of_a_site_reach_the_daemon_or_the_confirmation() {
         choice: Choice::Version(v("8.3.27")),
     };
     let command = model.apply_action(pick.clone());
-    assert!(matches!(command, Some(Command::Save(_))), "{command:?}");
+    assert!(
+        matches!(command, Effect::Send(Command::Save(_))),
+        "{command:?}"
+    );
     assert!(model.apply_action(pick).is_none(), "the same entry again");
 
     model
@@ -305,7 +314,7 @@ fn the_menu_actions_of_a_site_reach_the_daemon_or_the_confirmation() {
     };
     let command = model.apply_action(secure);
     assert!(
-        matches!(command, Some(Command::Secure { ref site, secure: false }) if site == "shop"),
+        matches!(command, Effect::Send(Command::Secure { ref site, secure: false }) if site == "shop"),
         "{command:?}"
     );
     assert!(
@@ -345,7 +354,7 @@ fn the_confirmations_answers_send_the_removal_or_drop_it() {
 
     model.apply_action(Action::AskForget(PathBuf::from("/code")));
     let sent = model.apply_action(Action::ConfirmRemoval);
-    assert!(matches!(sent, Some(Command::Remove(ref r)) if *r == forget("/code")));
+    assert!(matches!(sent, Effect::Send(Command::Remove(ref r)) if *r == forget("/code")));
     assert_eq!(model.removing(), Some(&forget("/code")));
     assert!(model.session.confirm.is_none());
 }
@@ -394,7 +403,7 @@ fn the_link_form_actions_edit_send_and_cancel() {
     model.apply_action(Action::SetLinkName("blog".into()));
     let command = model.apply_action(Action::SubmitLink);
     assert!(
-        matches!(command, Some(Command::Link { ref name, .. }) if name == "blog"),
+        matches!(command, Effect::Send(Command::Link { ref name, .. }) if name == "blog"),
         "{command:?}"
     );
     model.apply_action(Action::CancelLink);

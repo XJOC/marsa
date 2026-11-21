@@ -766,6 +766,7 @@ pub fn show_install_dialog(ctx: &Context, dialog: &InstallDialog) -> Vec<Action>
 
 #[cfg(test)]
 mod tests {
+    use crate::model::Effect;
     use std::path::PathBuf;
 
     use eframe::egui::{self, Pos2, pos2};
@@ -973,7 +974,7 @@ mod tests {
         });
         assert!(matches!(
             command,
-            Some(Command::Save(Change::Default { runtime: Runtime::Php, ref version })) if version == "8.3"
+            Effect::Send(Command::Save(Change::Default { runtime: Runtime::Php, ref version })) if version == "8.3"
         ));
         // The button shows the pick until the daemon answers.
         let VersionSection::Default(picker) = read(&model).details.version else {
@@ -1123,7 +1124,7 @@ mod tests {
         assert_eq!(on.lines[1], "Loaded in PHP 8.3.27, 8.4.23.");
         // The switch asks for the other state, and shows it at once.
         let sent = model.apply_action(Action::ToggleXdebug);
-        assert!(matches!(sent, Some(Command::SetXdebug(false))));
+        assert!(matches!(sent, Effect::Send(Command::SetXdebug(false))));
         let asked = xdebug(&model);
         assert!(!asked.on);
         assert_eq!(asked.off, Some(strings::XDEBUG_BUSY));

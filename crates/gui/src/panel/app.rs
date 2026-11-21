@@ -277,7 +277,9 @@ impl PanelApp {
                         self.close(ctx, PanelExit::Closed);
                         continue;
                     }
-                    if let Some(command) = self.model.apply_action(action) {
+                    // The panel has no folder dialog and opens no folder: only
+                    // a command matters here.
+                    if let Some(command) = self.model.apply_action(action).command() {
                         self.bridge.send(command);
                     }
                 }
@@ -435,6 +437,7 @@ impl eframe::App for PanelApp {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::Effect;
     use std::path::Path;
 
     use marsa_core::types::{Health, XdebugState};
@@ -573,7 +576,7 @@ mod tests {
         }));
         // The model is the window's: Xdebug flips there, and asks for a command.
         let command = app.model.apply_action(crate::model::Action::ToggleXdebug);
-        assert!(matches!(command, Some(Command::SetXdebug(true))));
+        assert!(matches!(command, Effect::Send(Command::SetXdebug(true))));
         assert_eq!(app.model.xdebug_on(), Some(true));
     }
 }

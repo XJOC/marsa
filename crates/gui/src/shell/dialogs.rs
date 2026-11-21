@@ -85,6 +85,7 @@ fn show_confirm(ctx: &Context, view: &ConfirmView) -> Vec<Action> {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::Effect;
     use std::path::PathBuf;
 
     use eframe::egui::{self, Key, Role};
@@ -294,7 +295,7 @@ mod tests {
         assert!(
             matches!(
                 command,
-                Some(Command::Remove(Removal::Unlink { ref site })) if site == "shop"
+                Effect::Send(Command::Remove(Removal::Unlink { ref site })) if site == "shop"
             ),
             "{command:?}"
         );

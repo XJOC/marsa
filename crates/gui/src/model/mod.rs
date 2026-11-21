@@ -52,6 +52,42 @@ pub const WEB_SERVER: &str = "caddy";
 pub const DNS_SERVER: &str = "dns";
 /// This build's version, shown in the Settings section.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// What the window does after an [`Action`], beyond changing the model.
+/// [`Model::apply_action`] returns it, so `App` has one place to read it.
+#[derive(Debug)]
+pub enum Effect {
+    /// The model changed, and that is all.
+    None,
+    /// Send a command to the daemon through the bridge.
+    Send(Command),
+    /// Open the site in the browser.
+    OpenSite(String),
+    /// Show a folder in the system's file manager.
+    OpenFolder(PathBuf),
+    /// Open the system's folder dialog.
+    PickFolder(Pick),
+}
+
+impl Effect {
+    /// The command to send, if this is one.
+    pub fn command(self) -> Option<Command> {
+        match self {
+            Self::Send(command) => Some(command),
+            _ => None,
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+impl From<Option<Command>> for Effect {
+    fn from(command: Option<Command>) -> Self {
+        command.map_or(Self::None, Self::Send)
+    }
+}
+
 /// What the bridge sends to the window.
 #[derive(Debug)]
 pub enum Update {
@@ -425,9 +461,48 @@ impl Model {
         }
     }
 
-    /// Applies what the user did. Returns the command to send to the
-    /// daemon, if any.
-    pub fn apply_action(&mut self, action: Action) -> Option<Command> {
+    /// Applies what the user did, and says what the window must do beyond
+    /// the state: send a command, or ask the system. A queued install goes
+    /// out here too, once none of this window runs.
+    pub fn apply_action(&mut self, action: Action) -> Effect {
+        match action {
+            Action::OpenSite(name) => Effect::OpenSite(name),
+            Action::OpenFolder(name) => self
+                .site_root(&name)
+                .map_or(Effect::None, |root| Effect::OpenFolder(root.to_path_buf())),
+            Action::OpenDataFolder => Effect::OpenFolder(self.data_dir.clone()),
+            Action::PickFolder(pick) => Effect::PickFolder(pick),
+            action => self.change(action).or_else(|| self.next_command()).into(),
+        }
+    }
+
+    /// The command the window's next queued job needs, if the daemon is free
+    /// for it. Called after each action and each message from the daemon, so
+    /// a job that waited starts when the one before it ends.
+    pub fn next_command(&mut self) -> Option<Command> {
+        self.next_install().map(Command::Install)
+    }
+
+    /// The folder the user picked in the system's dialog.
+    pub fn picked(&mut self, pick: Pick, folder: &Path) -> Effect {
+        match pick {
+            Pick::Park => self.park_request(folder).map(Command::Park).into(),
+            Pick::Link => {
+                self.pick_link_folder(folder);
+                Effect::None
+            }
+        }
+    }
+
+    /// The window itself failed to do something (the system's opener):
+    /// shown as a call that failed.
+    pub fn report(&mut self, code: &str) {
+        self.session
+            .notices
+            .set_code(NoticeSource::Call, code.to_owned());
+    }
+
+    fn change(&mut self, action: Action) -> Option<Command> {
         match action {
             Action::Navigate(route) => {
                 if let Route::Runtimes(runtime) = &route {
@@ -555,8 +630,7 @@ impl Model {
                 self.appearance = appearance;
                 None
             }
-            // Done by `App`, with the system's opener and dialog: nothing
-            // changes here.
+            // Done by `apply_action`: they only ask the system.
             Action::OpenSite(_)
             | Action::OpenFolder(_)
             | Action::OpenDataFolder

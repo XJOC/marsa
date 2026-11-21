@@ -8,16 +8,15 @@
 //! returns what the user did, and `ui` applies the actions and sends the
 //! commands (code.md, State).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Instant;
 
 use eframe::egui;
 
-use crate::bridge::{self, Command};
-use crate::model::NoticeSource;
-use crate::model::{Action, Connection, Model, Pick, Route, Update};
+use crate::bridge;
+use crate::model::{Action, Connection, Effect, Model, Pick, Route, Update};
 use crate::prefs::{Prefs, WindowSize};
 use crate::{opener, shell, strings, theme};
 
@@ -122,9 +121,24 @@ impl App {
     }
 
     /// Sends the next queued install once none of this window runs.
-    fn send_next_install(&mut self) {
-        if let Some(job) = self.model.next_install() {
-            self.bridge.send(Command::Install(job));
+    fn send_next(&mut self) {
+        if let Some(command) = self.model.next_command() {
+            self.bridge.send(command);
+        }
+    }
+
+    /// Applies what the user did, and does what the model asks of the window.
+    fn run(&mut self, ctx: &egui::Context, action: Action) {
+        match self.model.apply_action(action) {
+            Effect::None => {}
+            Effect::Send(command) => self.bridge.send(command),
+            Effect::OpenSite(name) => open_site(ctx, &self.model, &name),
+            Effect::OpenFolder(folder) => {
+                if let Err(code) = opener::open_folder(&folder) {
+                    self.model.report(code);
+                }
+            }
+            Effect::PickFolder(pick) => self.open_picker(ctx, pick),
         }
     }
 
@@ -212,13 +226,9 @@ impl App {
         let Some(folder) = folder else {
             return;
         };
-        match pick {
-            Pick::Park => {
-                if let Some(path) = self.model.park_request(&folder) {
-                    self.bridge.send(Command::Park(path));
-                }
-            }
-            Pick::Link => self.model.pick_link_folder(&folder),
+        let effect = self.model.picked(pick, &folder);
+        if let Effect::Send(command) = effect {
+            self.bridge.send(command);
         }
     }
 }
@@ -255,7 +265,7 @@ impl eframe::App for App {
         take_updates(&self.bridge, &mut self.model);
         self.take_pick();
         // An install that ended may start the next one.
-        self.send_next_install();
+        self.send_next();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -281,47 +291,10 @@ impl eframe::App for App {
             return;
         }
         let picking = self.picker.is_some();
-        let output = shell::show(ui, &mut self.model, picking);
+        let output = shell::show(ui, &self.model, picking);
         for action in output.actions {
-            // Local actions: the system opens the site, a folder, and the folder
-            // dialog, not a screen (code.md, State).
-            match &action {
-                Action::OpenSite(name) => {
-                    open_site(ui.ctx(), &self.model, name);
-                    continue;
-                }
-                Action::OpenFolder(name) => {
-                    let folder = self.model.site_root(name).map(Path::to_path_buf);
-                    if let Some(Err(code)) = folder.as_deref().map(opener::open_folder) {
-                        self.model
-                            .session
-                            .notices
-                            .set_code(NoticeSource::Call, code.to_owned());
-                    }
-                    continue;
-                }
-                Action::OpenDataFolder => {
-                    if let Err(code) = opener::open_folder(&self.model.data_dir) {
-                        self.model
-                            .session
-                            .notices
-                            .set_code(NoticeSource::Call, code.to_owned());
-                    }
-                    continue;
-                }
-                Action::PickFolder(pick) => {
-                    let ctx = ui.ctx().clone();
-                    self.open_picker(&ctx, *pick);
-                    continue;
-                }
-                _ => {}
-            }
-            if let Some(command) = self.model.apply_action(action) {
-                self.bridge.send(command);
-            }
+            self.run(ui.ctx(), action);
         }
-        // A button may have queued an install.
-        self.send_next_install();
         #[cfg(feature = "measure")]
         if let Some(run) = &mut self.measure {
             run.frame(ui.ctx(), building.elapsed(), frame.info().cpu_usage);
@@ -399,7 +372,7 @@ mod tests {
     }
 
     /// A window with no daemon, whose preferences are in `data_dir`.
-    fn app(ctx: &egui::Context, data_dir: &Path, prefs: Prefs) -> App {
+    fn app(ctx: &egui::Context, data_dir: &std::path::Path, prefs: Prefs) -> App {
         App::new(
             ctx,
             bridge::Handle::detached(),

@@ -747,7 +747,7 @@ mod tests {
         let actions = click(model, label);
         actions
             .into_iter()
-            .filter_map(|action| model.apply_action(action))
+            .filter_map(|action| model.apply_action(action).command())
             .collect()
     }
 

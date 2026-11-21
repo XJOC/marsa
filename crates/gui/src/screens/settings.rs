@@ -339,6 +339,7 @@ fn check_value(ui: &mut Ui, theme: &Theme, check: Check) {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::Effect;
     use std::path::PathBuf;
 
     use eframe::egui::{self, Rect};
@@ -711,7 +712,7 @@ mod tests {
         model.update(Update::Autostart(Autostart::Off));
         let command = model.apply_action(Action::ToggleAutostart);
         assert!(
-            matches!(command, Some(Command::SetAutostart(true))),
+            matches!(command, Effect::Send(Command::SetAutostart(true))),
             "{command:?}"
         );
         assert!(view(&model).general.autostart.on);

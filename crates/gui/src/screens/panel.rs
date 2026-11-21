@@ -405,6 +405,7 @@ fn footer(ui: &mut Ui, theme: &Theme, power: &Power, actions: &mut Vec<PanelActi
 
 #[cfg(test)]
 mod tests {
+    use crate::model::Effect;
     use std::path::PathBuf;
 
     use eframe::egui::{self, Pos2};
@@ -609,7 +610,7 @@ mod tests {
         let mut model = working(1, &["8.4.27"]);
         assert!(matches!(
             model.apply_action(Action::ToggleXdebug),
-            Some(crate::bridge::Command::SetXdebug(true))
+            Effect::Send(crate::bridge::Command::SetXdebug(true))
         ));
         let busy = view(&model).xdebug.expect("a line");
         assert_eq!((busy.on, busy.off), (true, Some(strings::XDEBUG_BUSY)));
