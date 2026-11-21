@@ -238,9 +238,19 @@ done
 step "marsad killed: the next start stops our old valkey-server with SIGTERM, which saves"
 OLD=$(valkey_pid)
 [ "$(cli set marsa-e2e-orphan saved)" = OK ] || fail "SET"
+# marsad writes run/valkey.pid a moment after the server answers. A crash in
+# that moment leaves a server it cannot tell, so wait for the record, as a
+# user who does not kill marsad at the first PONG does.
+for _ in $(seq 1 100); do
+  [ -s "$DATA/run/valkey.pid" ] && break
+  sleep 0.1
+done
 echo "--- run/ before the kill"
 ls -la "$DATA/run"
-tail -n 12 "$DATA/logs/marsad.log"
+[ -s "$DATA/run/valkey.pid" ] || {
+  tail -n 20 "$DATA/logs/marsad.log"
+  fail "marsad wrote no pid record for valkey in 10 s"
+}
 pkill -9 -f "marsad.*--data-dir $DATA"
 sleep 1
 kill -0 "$OLD" || fail "valkey-server died with marsad"
