@@ -53,13 +53,18 @@ pub(super) fn spec(program: PathBuf, dirs: &MysqlDirs) -> ServiceSpec {
 }
 
 /// Writes `text`, Marsa's `my.cnf`, to `run/mysql.cnf`, owner-only, and
-/// makes the folder of `secure_file_priv`, owner-only too, which `mysqld`
-/// needs at its start. Before each start, so a new port or version takes effect.
+/// makes the folder of `secure_file_priv` and the folder that holds the data
+/// folder owner-only too; `mysqld` needs the first at its start. Before each start, so a new port or version takes effect.
 pub(super) async fn write_config(dirs: &MysqlDirs, text: String) -> io::Result<()> {
     let dirs = dirs.clone();
     let job = tokio::task::spawn_blocking(move || {
         create_private_dir(&dirs.run)?;
         create_private_dir(&dirs.files)?;
+        // `mysqld` makes its data folder 0750 with group-readable files: the
+        // folder above it keeps other users out.
+        if let Some(parent) = dirs.data.parent() {
+            create_private_dir(parent)?;
+        }
         marsa_core::fs::write_atomic(&dirs.config(), text.as_bytes(), Some(PRIVATE))
     });
     job.await.map_err(io::Error::other)?

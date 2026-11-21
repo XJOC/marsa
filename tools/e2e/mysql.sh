@@ -221,7 +221,7 @@ done
 
 step "marsad killed: the next start stops our old mysqld with SIGTERM"
 OLD=$(cat "$DATA/run/mysqld.pid")
-pkill -9 -f "marsad.*--data-dir $DATA" || pkill -9 -x marsad
+pkill -9 -f "marsad.*--data-dir $DATA"
 sleep 1
 kill -0 "$OLD" || fail "mysqld died with marsad"
 run marsa services start mysql
