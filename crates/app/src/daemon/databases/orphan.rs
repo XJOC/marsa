@@ -144,7 +144,17 @@ impl RunRecord {
         let runtime = &self.runtime;
         let owns = || lock(runtime).status.pid == Some(pid);
         let probes = &*self.probes;
-        let written = record(self.kind, probes, &self.data_dir, &self.servers, pid, &owns).await;
+        let (data_dir, servers) = (&self.data_dir, &self.servers);
+        let written = record(
+            self.kind,
+            probes,
+            data_dir,
+            servers,
+            pid,
+            &owns,
+            RECORD_LIMIT,
+        )
+        .await;
         // Kept when the start no longer waits for it: `follow` reads it.
         self.recorded.send_replace(written);
         std::future::pending().await
@@ -170,7 +180,7 @@ impl RunRecord {
 
 /// Writes `run/<id>.pid` for the run just spawned at `pid`, once the file it
 /// really runs is one of `servers`. It looks again every [`RECORD_POLL`], up
-/// to [`RECORD_LIMIT`], while the system cannot tell, or while the pid still
+/// to `limit` ([`RECORD_LIMIT`]), while the system cannot tell, or while the pid still
 /// runs the daemon's own executable: on Linux, with glibc's `posix_spawn`,
 /// `spawn` returns before the exec is done ([`own_executable`]). Never
 /// written when the pid changes hands (its start time changes), or when
@@ -183,13 +193,14 @@ async fn record(
     servers: &[PathBuf],
     pid: u32,
     owns: &(dyn Fn() -> bool + Send + Sync),
+    limit: Duration,
 ) -> Recorded {
     if !process::DATABASE_ORPHAN_RECOVERY {
         return Recorded::Never;
     }
     let server = kind.id();
     let own = own_executable();
-    let until = Instant::now() + RECORD_LIMIT;
+    let until = Instant::now() + limit;
     let mut first = None;
     loop {
         let now = probes.real_identity(pid).await;
@@ -568,5 +579,187 @@ mod tests {
         };
         assert_eq!(signal_steps(&ladder), [(Signal::Term, wait)]);
         assert!(signal_steps(&StopMethod { steps: Vec::new() }).is_empty());
+    }
+
+    /// Each way [`record`] ends, against a fake that answers each look from
+    /// a script. Only where the daemon writes records at all
+    /// (`DATABASE_ORPHAN_RECOVERY`): elsewhere `record` writes none.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    mod record {
+        use std::collections::VecDeque;
+        use std::io;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        use marsa_core::ps::StartTime;
+        use tempfile::TempDir;
+
+        use super::*;
+        use crate::daemon::services::probe::BoxFuture;
+
+        const KIND: ServerKind = ServerKind::Postgres;
+        const PID: u32 = 4242;
+        /// Short, so a test of a pid that never runs our server ends soon.
+        const SHORT: Duration = Duration::from_millis(60);
+
+        /// Answers each look from `looks`, then `last` for ever, and notes
+        /// whether the record was on disk at each look. It never signals.
+        #[derive(Debug)]
+        struct Script {
+            looks: Mutex<VecDeque<Liveness>>,
+            last: Liveness,
+            file: PathBuf,
+            seen: Mutex<Vec<bool>>,
+        }
+
+        impl ProcessProbe for Script {
+            fn real_identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
+                assert_eq!(pid, PID);
+                self.seen.lock().unwrap().push(self.file.exists());
+                let next = self.looks.lock().unwrap().pop_front();
+                Box::pin(std::future::ready(next.unwrap_or(self.last.clone())))
+            }
+
+            fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
+                panic!("a record sends no signal: {signal:?} to {pid}");
+            }
+        }
+
+        /// A data folder with its `run/`, and the installed `postgres` in it.
+        fn data() -> (TempDir, PathBuf) {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("run")).unwrap();
+            let server = dir.path().join("runtimes/postgres/18.7.0/bin/postgres");
+            (dir, server)
+        }
+
+        fn script(dir: &TempDir, looks: Vec<Liveness>, last: Liveness) -> Script {
+            Script {
+                looks: Mutex::new(looks.into()),
+                last,
+                file: pid_path(KIND, dir.path()),
+                seen: Mutex::default(),
+            }
+        }
+
+        fn alive(exe: &Path, ticks: u64) -> Liveness {
+            Liveness::Alive {
+                exe: exe.to_path_buf(),
+                started: StartTime::Ticks(ticks),
+            }
+        }
+
+        /// What the pid runs before its exec: the daemon's own executable,
+        /// here the test binary.
+        fn before_exec() -> PathBuf {
+            std::env::current_exe().unwrap()
+        }
+
+        async fn run(
+            dir: &TempDir,
+            fake: &Script,
+            server: &Path,
+            owns: &(dyn Fn() -> bool + Send + Sync),
+            limit: Duration,
+        ) -> Recorded {
+            let servers = [server.to_path_buf()];
+            record(KIND, fake, dir.path(), &servers, PID, owns, limit).await
+        }
+
+        fn written(dir: &TempDir) -> Option<PidRecord> {
+            process::read_pid_file(&pid_path(KIND, dir.path()))
+        }
+
+        /// The start time differs between two looks: the pid changed hands
+        /// after the first one, so the program it runs now is not our spawn.
+        #[tokio::test]
+        async fn a_pid_whose_start_time_changes_is_not_recorded() {
+            let (dir, server) = data();
+            let fake = script(&dir, vec![alive(&before_exec(), 1)], alive(&server, 2));
+            let got = run(&dir, &fake, &server, &|| true, RECORD_LIMIT).await;
+            assert_eq!(got, Recorded::Never);
+            assert_eq!(written(&dir), None);
+            assert_eq!(fake.seen.lock().unwrap().len(), 2);
+        }
+
+        /// The supervisor no longer runs the pid (it reaped the exit): the
+        /// pid may be anyone's, so no record, even of our program.
+        #[tokio::test]
+        async fn a_pid_the_supervisor_no_longer_owns_is_not_recorded() {
+            let (dir, server) = data();
+            let fake = script(&dir, Vec::new(), alive(&server, 1));
+            let got = run(&dir, &fake, &server, &|| false, RECORD_LIMIT).await;
+            assert_eq!(got, Recorded::Never);
+            assert_eq!(written(&dir), None);
+
+            // Owned at the first look, before the exec; not at the second.
+            let fake = script(&dir, vec![alive(&before_exec(), 1)], alive(&server, 1));
+            let looks = AtomicU32::new(0);
+            let owns = || looks.fetch_add(1, Ordering::SeqCst) == 0;
+            let got = run(&dir, &fake, &server, &owns, RECORD_LIMIT).await;
+            assert_eq!(got, Recorded::Never);
+            assert_eq!(written(&dir), None);
+            assert_eq!(looks.load(Ordering::SeqCst), 2);
+        }
+
+        /// A look that cannot tell (a `ps` or `lsof` that failed) is made
+        /// again, and the record is written once the pid is told.
+        #[tokio::test]
+        async fn an_unknown_look_is_made_again_then_recorded() {
+            let (dir, server) = data();
+            let looks = vec![Liveness::Unknown, Liveness::Unknown];
+            let fake = script(&dir, looks, alive(&server, 1));
+            let got = run(&dir, &fake, &server, &|| true, RECORD_LIMIT).await;
+            assert_eq!(got, Recorded::Written(PID));
+            let want = PidRecord {
+                pid: PID,
+                exe: server.clone(),
+                started: StartTime::Ticks(1),
+            };
+            assert_eq!(written(&dir), Some(want));
+            assert_eq!(*fake.seen.lock().unwrap(), [false, false, false]);
+        }
+
+        /// Before its exec the pid runs the daemon's own executable: no
+        /// record while that holds, and one as soon as it runs our server.
+        #[tokio::test]
+        async fn a_pid_before_its_exec_is_recorded_once_it_runs_our_server() {
+            let (dir, server) = data();
+            let looks = vec![alive(&before_exec(), 1), alive(&before_exec(), 1)];
+            let fake = script(&dir, looks, alive(&server, 1));
+            let got = run(&dir, &fake, &server, &|| true, RECORD_LIMIT).await;
+            assert_eq!(got, Recorded::Written(PID));
+            assert_eq!(*fake.seen.lock().unwrap(), [false, false, false]);
+            assert_eq!(written(&dir).map(|record| record.exe), Some(server));
+        }
+
+        /// A pid that never runs our server within the limit, still before
+        /// its exec or never told, gets no record at all.
+        #[tokio::test]
+        async fn a_pid_that_never_runs_our_server_in_time_is_not_recorded() {
+            for last in [alive(&before_exec(), 1), Liveness::Unknown] {
+                let (dir, server) = data();
+                let fake = script(&dir, Vec::new(), last.clone());
+                let begun = Instant::now();
+                let got = run(&dir, &fake, &server, &|| true, SHORT).await;
+                assert_eq!(got, Recorded::Never, "{last:?}");
+                assert_eq!(written(&dir), None, "{last:?}");
+                assert!(fake.seen.lock().unwrap().len() >= 2, "{last:?}");
+                assert!(begun.elapsed() < Duration::from_secs(2), "{last:?}");
+            }
+        }
+
+        /// Another program, or a pid that is gone: no record, and no second
+        /// look.
+        #[tokio::test]
+        async fn another_program_or_a_gone_pid_is_not_recorded() {
+            for last in [alive(Path::new("/bin/sleep"), 1), Liveness::Gone] {
+                let (dir, server) = data();
+                let fake = script(&dir, Vec::new(), last.clone());
+                let got = run(&dir, &fake, &server, &|| true, RECORD_LIMIT).await;
+                assert_eq!(got, Recorded::Never, "{last:?}");
+                assert_eq!(written(&dir), None, "{last:?}");
+                assert_eq!(fake.seen.lock().unwrap().len(), 1, "{last:?}");
+            }
+        }
     }
 }
