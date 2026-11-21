@@ -1,9 +1,5 @@
 //! The menu-bar icon and the menu-bar panel.
 
-use crate::tray::menu::Daemon;
-
-use super::*;
-
 // The menu-bar icon (`marsa-tray`).
 
 /// The tooltip of the icon.
@@ -65,12 +61,7 @@ pub fn panel_more_sites(more: usize) -> String {
 }
 
 /// The first line of the menu: the daemon's state.
-pub fn tray_status(daemon: &Daemon) -> String {
-    match daemon {
-        Daemon::Starting => "Starting Marsa…".to_owned(),
-        Daemon::Running => "Marsa is running".to_owned(),
-        Daemon::Stopping => "Stopping Marsa…".to_owned(),
-        Daemon::Stopped => "Marsa is stopped".to_owned(),
-        Daemon::Failed(code) => error_text(code),
-    }
-}
+pub const TRAY_STATUS_STARTING: &str = "Starting Marsa…";
+pub const TRAY_STATUS_RUNNING: &str = "Marsa is running";
+pub const TRAY_STATUS_STOPPING: &str = "Stopping Marsa…";
+pub const TRAY_STATUS_STOPPED: &str = "Marsa is stopped";

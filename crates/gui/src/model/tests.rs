@@ -2,6 +2,7 @@
 
 use super::installs::failure;
 use super::*;
+use crate::strings::INSTALL_INTERRUPTED;
 use marsa_core::types::LogStream;
 
 fn health() -> Health {
@@ -607,7 +608,7 @@ fn shutting_down_changes_the_status_line() {
     assert_eq!(model.session.connection, Connection::ShuttingDown);
     assert!(model.session.services.is_empty());
     assert_eq!(
-        crate::strings::status_line(&model.session.connection),
+        model.session.connection.status_line(),
         "Daemon: shutting down"
     );
 }
@@ -2178,4 +2179,15 @@ fn the_xdebug_box_follows_each_state() {
         Some("config_invalid")
     );
     assert_eq!(model.toggle_xdebug(), None);
+}
+
+/// The window's texts name the version of [`FIRST_PHP`]; this keeps them the same.
+#[test]
+fn the_first_run_button_names_the_php_it_installs() {
+    use crate::strings::{FIRST_RUN_INSTALL, INSTALL_PHP};
+
+    let line = format!("PHP {FIRST_PHP}");
+    assert_eq!(INSTALL_PHP, format!("Install {line}"));
+    assert!(FIRST_RUN_INSTALL.contains(&line), "{FIRST_RUN_INSTALL}");
+    assert_eq!(FIRST_RUN_INSTALL, format!("Install {line} and Caddy"));
 }

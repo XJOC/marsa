@@ -1,7 +1,5 @@
 //! Home: the status sentence, its fixes, and the request path.
 
-use crate::widgets::StepState;
-
 // Home: the status sentence, its fixes, the default PHP, and the
 // first sites.
 
@@ -94,12 +92,12 @@ pub const REQUEST_PATH: &str = "Where the request stops";
 
 /// What a screen reader says for one step of the request path: "Caddy, not
 /// working". The icon and the weight say it to the eye (R8).
-pub fn path_step_label(label: &str, state: StepState) -> String {
-    let word = match state {
-        StepState::Working => "working",
-        StepState::Broken => "not working",
-        StepState::Unreached => "not reached",
-        StepState::NotChecked => "not checked",
-    };
+pub fn path_step_label(label: &str, word: &str) -> String {
     format!("{label}, {word}")
 }
+
+/// The words of a step of the request path, for a screen reader.
+pub const STEP_WORKING: &str = "working";
+pub const STEP_BROKEN: &str = "not working";
+pub const STEP_UNREACHED: &str = "not reached";
+pub const STEP_NOT_CHECKED: &str = "not checked";

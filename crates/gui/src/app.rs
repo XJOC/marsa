@@ -149,7 +149,7 @@ impl App {
         }
         let (send, folder) = mpsc::channel();
         let ctx = ctx.clone();
-        let title = strings::pick_title(pick);
+        let title = pick.title();
         // rfd runs the dialog on the main thread where the system needs it
         // (macOS), and blocks only this thread until the user is done.
         let spawned = thread::Builder::new()

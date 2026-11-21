@@ -165,7 +165,7 @@ fn install_detail(model: &Model, done: bool) -> Detail {
     match ours {
         Some(view) if model.installing() => Detail::Progress(install_bar(view)),
         Some(view) if !done && matches!(view.step, InstallStep::Failed(_)) => {
-            problem(strings::install_status(view))
+            problem(view.status())
         }
         _ => Detail::None,
     }
@@ -649,7 +649,7 @@ mod tests {
         });
         let mut places = Vec::new();
         for step in &view.steps {
-            let label = strings::step_label(step.number, step.title, step.stage);
+            let label = strings::step_label(step.number, step.title, step.stage.word());
             let node = tree.node_with_label(&label).expect("the step");
             places.push(node.bounds().expect("a place"));
         }

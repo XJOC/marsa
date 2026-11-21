@@ -117,7 +117,7 @@ pub struct Power {
 /// Decides what the panel says. Pure: the same model gives the same view.
 pub fn view(model: &Model) -> PanelView {
     let overall = model.overall();
-    let (title, caption) = strings::overall_text(overall);
+    let (title, caption) = overall.text();
     let connected = model.is_connected();
     PanelView {
         status: StatusLine {
