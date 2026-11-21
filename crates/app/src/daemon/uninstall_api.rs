@@ -69,7 +69,7 @@ use marsa_core::types::{OpStatus, UninstallReport};
 use tokio_util::sync::CancellationToken;
 
 use super::api::HttpError;
-use super::autostart_api::Autostart;
+use super::autostart::Autostart;
 use super::hosts_sync;
 use super::http;
 use super::setup_api::{

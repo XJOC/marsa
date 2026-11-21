@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::api;
 use super::auth::AuthConfig;
-use super::autostart_api::Autostart;
+use super::autostart::Autostart;
 use super::caddy;
 use super::client_shims::ClientShims;
 use super::databases;
@@ -148,7 +148,7 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     // The first site list, so the first client gets it at once. A broken
     // sites.toml is logged; the routes report it again with its code.
     if let Err(err) = daemon.rebuild_sites().await {
-        tracing::warn!(code = err.code, error = %err.message, "cannot build the site list");
+        tracing::warn!(code = err.code(), error = %err, "cannot build the site list");
     }
     // From here on, PHP pools and Caddy's config follow the sites.
     let sync = sites_sync::start(&daemon);

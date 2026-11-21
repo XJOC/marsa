@@ -9,7 +9,7 @@
 
 use std::fmt;
 use std::num::NonZeroU16;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -456,6 +456,16 @@ pub struct SkippedFolder {
     /// folder in a parked folder; `site_read_dir` for a parked folder that
     /// cannot be read; `site_not_a_folder` for a linked folder that is gone.
     pub code: String,
+}
+
+impl SkippedFolder {
+    /// `path` as shown: JSON text must be UTF-8, and the path is only shown.
+    pub fn new(path: &Path, code: &str) -> Self {
+        Self {
+            path: PathBuf::from(path.to_string_lossy().into_owned()),
+            code: code.to_owned(),
+        }
+    }
 }
 
 /// The body of `POST /v1/sites/park`: every sub-folder of `path` becomes a

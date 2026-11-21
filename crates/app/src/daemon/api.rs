@@ -23,7 +23,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use super::auth::{AuthConfig, require_auth};
 use super::state::Daemon;
-use super::{runtimes_api, services_api, sites_api};
+use super::{runtimes, services_api, sites_api};
 
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 
@@ -38,7 +38,7 @@ pub fn router(daemon: Arc<Daemon>, auth: AuthConfig) -> Router {
         // More routes go here, as a `Router<Arc<Daemon>>`. Before the
         // fallbacks, so `method_not_allowed_fallback` covers them too.
         .merge(services_api::routes())
-        .merge(runtimes_api::routes())
+        .merge(runtimes::api::routes())
         .merge(sites_api::routes())
         .merge(super::setup_api::routes(Arc::clone(&setup)))
         .merge(super::uninstall_api::routes(setup))

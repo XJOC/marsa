@@ -39,9 +39,9 @@ use std::collections::BTreeSet;
 use std::env::consts::EXE_SUFFIX;
 use std::fmt;
 use std::fs;
+use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use axum::extract::State;
@@ -55,6 +55,7 @@ use tokio::runtime::Handle;
 use super::api::HttpError;
 use super::hosts_sync;
 use super::http;
+use super::one_at_a_time::{OneAtATime, Turn};
 use super::state::Daemon;
 
 pub use self::ca::{CA_WAIT, CaddyStart, StartCaddy};
@@ -193,11 +194,11 @@ impl Flow {
         }
     }
 
-    /// Its value in [`Setup`]'s flag; `IDLE` is none.
-    fn flag(self) -> u8 {
+    /// Its value in [`Setup`]'s guard.
+    fn flag(self) -> NonZeroU8 {
         match self {
-            Self::Setup => 1,
-            Self::Uninstall => 2,
+            Self::Setup => NonZeroU8::MIN,
+            Self::Uninstall => NonZeroU8::new(2).expect("2 is not zero"),
         }
     }
 
@@ -215,9 +216,6 @@ impl Flow {
         HttpError::new(StatusCode::CONFLICT, code, message)
     }
 }
-
-/// [`Setup`]'s flag when neither request runs.
-const IDLE: u8 = 0;
 
 /// The setup side of the daemon: how programs run, which system this is,
 /// where the helper is, and whether a setup runs now.
@@ -247,8 +245,8 @@ pub struct Setup {
     /// How long setup waits for Caddy and its CA root: [`CA_WAIT`], shorter
     /// in tests.
     ca_wait: Duration,
-    /// [`IDLE`], or the [`Flow::flag`] of the request that runs now.
-    running: AtomicU8,
+    /// Free, or held by the [`Flow`] that runs now.
+    running: Arc<OneAtATime>,
 }
 
 impl Setup {
@@ -284,7 +282,7 @@ impl Setup {
             hosts_file: None,
             nss: false,
             ca_wait: CA_WAIT,
-            running: AtomicU8::new(IDLE),
+            running: Arc::new(OneAtATime::new()),
         }
     }
 
@@ -349,36 +347,29 @@ impl fmt::Debug for Setup {
         f.debug_struct("Setup")
             .field("platform", &self.platform)
             .field("helper", &self.helper)
-            .field("running", &self.running.load(Ordering::Relaxed))
+            .field("running", &self.running.holder())
             .finish_non_exhaustive()
     }
 }
 
 /// The right to run the one setup or uninstall. Dropping it lets the next
 /// one start, also if the request panics.
-pub(super) struct Running(Arc<Setup>);
+pub(super) struct Running {
+    _turn: Turn,
+}
 
 impl Running {
-    /// The right to run `flow`, or the [`Flow`] that runs now. One atomic
-    /// swap, no lock.
+    /// The right to run `flow`, or the [`Flow`] that runs now.
     pub(super) fn take(setup: &Arc<Setup>, flow: Flow) -> Result<Self, Flow> {
-        setup
-            .running
-            .compare_exchange(IDLE, flow.flag(), Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| Self(Arc::clone(setup)))
+        OneAtATime::take(&setup.running, flow.flag())
+            .map(|turn| Self { _turn: turn })
             .map_err(|now| {
-                if now == Flow::Uninstall.flag() {
+                if now == Flow::Uninstall.flag().get() {
                     Flow::Uninstall
                 } else {
                     Flow::Setup
                 }
             })
-    }
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.0.running.store(IDLE, Ordering::Release);
     }
 }
 
@@ -502,7 +493,7 @@ pub(super) async fn host_names(daemon: &Arc<Daemon>) -> Option<Vec<String>> {
             Ok(list) => list,
             Err(err) => {
                 tracing::warn!(
-                    code = err.code,
+                    code = err.code(),
                     "no site list, so no names for the hosts file"
                 );
                 return None;

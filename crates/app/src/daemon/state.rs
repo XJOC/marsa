@@ -3,28 +3,25 @@
 //! The locks here are `std::sync` locks: they are taken for short reads and
 //! writes and never held across `.await` (`clippy::await_holding_lock`).
 
-use marsa_core::codes;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard};
 use std::time::Duration;
 
-use axum::http::StatusCode;
 use marsa_core::config::{self, ConfigError, ConfigPaths, SitesConfig};
 use marsa_core::databases::ServerKind;
 use marsa_core::types::{Event, SiteList};
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
-use super::api::HttpError;
-use super::autostart_api::Autostart;
+use super::autostart::Autostart;
 use super::caddy::CaddyManager;
 use super::client_shims::ClientShims;
 use super::databases::ServerManager;
 use super::dns::DnsService;
 use super::php::Pools;
-use super::runtimes_api::Installs;
-use super::sites_api;
+use super::runtimes::installs::Installs;
+use super::sites::{self, SitesError};
 use super::sites_sync::PassRequests;
 use super::supervisor::ServiceHandle;
 
@@ -155,11 +152,13 @@ impl Daemon {
     ///
     /// # Errors
     ///
-    /// The error of `edit`, or a `config_*` code (500) if `sites.toml` cannot
-    /// be read or written.
-    pub async fn change_sites<F>(self: &Arc<Self>, edit: F) -> Result<SiteList, HttpError>
+    /// The error of `edit`, or a [`SitesError`] if `sites.toml` cannot be read
+    /// or written. `E` is the error type of the caller, which `SitesError`
+    /// converts into.
+    pub async fn change_sites<F, E>(self: &Arc<Self>, edit: F) -> Result<SiteList, E>
     where
-        F: FnOnce(&mut SitesConfig) -> Result<bool, HttpError> + Send + 'static,
+        F: FnOnce(&mut SitesConfig) -> Result<bool, E> + Send + 'static,
+        E: From<SitesError> + Send + 'static,
     {
         self.sites_job(edit, Publish::Always).await
     }
@@ -173,18 +172,15 @@ impl Daemon {
     ///
     /// # Errors
     ///
-    /// A `config_*` code (500) if `sites.toml` cannot be read.
-    pub async fn rebuild_sites(self: &Arc<Self>) -> Result<SiteList, HttpError> {
+    /// A [`SitesError`] if `sites.toml` cannot be read.
+    pub async fn rebuild_sites(self: &Arc<Self>) -> Result<SiteList, SitesError> {
         self.sites_job(|_| Ok(false), Publish::IfChanged).await
     }
 
-    async fn sites_job<F>(
-        self: &Arc<Self>,
-        edit: F,
-        publish: Publish,
-    ) -> Result<SiteList, HttpError>
+    async fn sites_job<F, E>(self: &Arc<Self>, edit: F, publish: Publish) -> Result<SiteList, E>
     where
-        F: FnOnce(&mut SitesConfig) -> Result<bool, HttpError> + Send + 'static,
+        F: FnOnce(&mut SitesConfig) -> Result<bool, E> + Send + 'static,
+        E: From<SitesError> + Send + 'static,
     {
         let daemon = Arc::clone(self);
         let job = tokio::task::spawn_blocking(move || {
@@ -194,11 +190,11 @@ impl Daemon {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             let path = ConfigPaths::in_dir(&daemon.data_dir).sites;
-            let mut sites = config::load_sites(&path).map_err(config_error)?;
+            let mut sites = config::load_sites(&path).map_err(sites_config_error)?;
             if edit(&mut sites)? {
-                config::save_sites(&path, &sites).map_err(config_error)?;
+                config::save_sites(&path, &sites).map_err(sites_config_error)?;
             }
-            let list = sites_api::build(&daemon.data_dir, &sites);
+            let list = sites::build(&daemon.data_dir, &sites);
             // Wakes the folder watcher only when the parked list changes.
             daemon.parked.send_if_modified(|parked| {
                 let changed = *parked != list.parked;
@@ -214,12 +210,7 @@ impl Daemon {
         });
         job.await.unwrap_or_else(|err| {
             tracing::error!(error = %err, "the sites job failed");
-            let message = "the sites job failed";
-            Err(HttpError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                codes::INTERNAL_ERROR,
-                message,
-            ))
+            Err(SitesError::JobFailed.into())
         })
     }
 
@@ -315,13 +306,9 @@ impl Daemon {
 
 /// `sites.toml` cannot be read or written: the request was fine, the file or
 /// the disk is not.
-fn config_error(err: ConfigError) -> HttpError {
+fn sites_config_error<E: From<SitesError>>(err: ConfigError) -> E {
     tracing::warn!(code = err.code(), error = %err, "sites.toml");
-    HttpError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        err.code(),
-        err.to_string(),
-    )
+    SitesError::Config(err).into()
 }
 
 #[cfg(test)]

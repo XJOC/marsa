@@ -412,7 +412,7 @@ mod tests {
         let dir = parked.path().to_path_buf();
         let park = move |sites: &mut marsa_core::config::SitesConfig| {
             sites.parked.push(dir);
-            Ok(true)
+            Ok::<_, crate::daemon::sites::SitesError>(true)
         };
         daemon.change_sites(park).await.unwrap();
         let loaded = next_load(&mut loads).await;
