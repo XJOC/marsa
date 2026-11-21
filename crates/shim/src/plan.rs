@@ -49,8 +49,8 @@ const SERVER_HOST: &str = "127.0.0.1";
 ///   is the superuser's alone.
 /// - MySQL: `MYSQL_HOST` and `MYSQL_TCP_PORT`, so the client uses TCP and
 ///   not its default socket in `/tmp`, which is not Marsa's.
-/// - Valkey: none. `valkey-cli` reads no such variable, and goes to
-///   `127.0.0.1:6379` unless its arguments say otherwise.
+/// - Valkey: none. `valkey-cli` reads no such variable: [`valkey_args`] gives
+///   its port as an argument instead.
 pub fn server_env(server: ServerKind, port: u16) -> Vec<(&'static str, String)> {
     let (host, port_var, user) = match server {
         ServerKind::Postgres => ("PGHOST", "PGPORT", Some(("PGUSER", "root"))),
@@ -60,6 +60,39 @@ pub fn server_env(server: ServerKind, port: u16) -> Vec<(&'static str, String)> 
     let mut vars = vec![(host, SERVER_HOST.to_owned()), (port_var, port.to_string())];
     vars.extend(user.map(|(name, value)| (name, value.to_owned())));
     vars
+}
+
+/// The arguments of `valkey-cli` (and `redis-cli`, which runs it): `-p <port>`
+/// first when Marsa's Valkey is on another port than Valkey's own 6379, and
+/// the user's `args` as they are. Nothing is added when the user already says
+/// where to connect, in any spelling: a port, host, URI, or socket option.
+/// A lookalike value after a command (`SET -h x`) only makes this add nothing,
+/// which is how the client behaved before.
+pub fn valkey_args(port: u16, args: Vec<OsString>) -> Vec<OsString> {
+    if port == ServerKind::Valkey.default_port() || args.iter().any(|arg| names_a_target(arg)) {
+        return args;
+    }
+    let mut all = vec![OsString::from("-p"), OsString::from(port.to_string())];
+    all.extend(args);
+    all
+}
+
+/// Whether `arg` is a `valkey-cli` option that says where to connect:
+/// `-h`, `-p`, `-u`, or `-s` (alone or with their value joined, as in
+/// `-p6380`), and `--host`, `--port`, `--uri`, or `--socket` (alone or as
+/// `--port=6380`).
+fn names_a_target(arg: &OsStr) -> bool {
+    let Some(arg) = arg.to_str() else {
+        // Not UTF-8: not an option of ours. A path or a value.
+        return false;
+    };
+    if let Some(long) = arg.strip_prefix("--") {
+        let name = long.split_once('=').map_or(long, |(name, _)| name);
+        return matches!(name, "host" | "port" | "uri" | "socket");
+    }
+    arg.strip_prefix('-')
+        .and_then(|short| short.chars().next())
+        .is_some_and(|letter| matches!(letter, 'h' | 'p' | 'u' | 's'))
 }
 
 /// The variables of `vars` that the user has not set. A variable the user
@@ -591,6 +624,78 @@ mod tests {
             let windows = client_plan(Platform::WindowsX64, name, version, &[]);
             let exe = dir.join("bin").join(format!("{program}.exe"));
             assert_eq!(windows.program, exe, "{name}");
+        }
+    }
+
+    fn args(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn valkey_cli_gets_the_port_when_it_is_not_6379() {
+        assert_eq!(
+            valkey_args(6380, args(&["ping"])),
+            args(&["-p", "6380", "ping"])
+        );
+        assert_eq!(valkey_args(6380, args(&[])), args(&["-p", "6380"]));
+        // Valkey's own port: nothing is added.
+        assert_eq!(valkey_args(6379, args(&["ping"])), args(&["ping"]));
+        // The user's arguments are never reordered or changed.
+        assert_eq!(
+            valkey_args(6380, args(&["--raw", "-n", "2", "get", "k"])),
+            args(&["-p", "6380", "--raw", "-n", "2", "get", "k"])
+        );
+    }
+
+    #[test]
+    fn valkey_cli_keeps_every_spelling_of_where_to_connect() {
+        for given in [
+            vec!["-p", "6390"],
+            vec!["-p6390"],
+            vec!["-h", "127.0.0.1"],
+            vec!["-h127.0.0.1"],
+            vec!["-u", "redis://127.0.0.1:6390"],
+            vec!["-uredis://127.0.0.1:6390"],
+            vec!["-s", "/tmp/valkey.sock"],
+            vec!["--port", "6390"],
+            vec!["--port=6390"],
+            vec!["--host", "127.0.0.1"],
+            vec!["--host=127.0.0.1"],
+            vec!["--uri", "redis://127.0.0.1:6390"],
+            vec!["--uri=redis://127.0.0.1:6390"],
+            vec!["--socket", "/tmp/valkey.sock"],
+            // After another option, or before the command.
+            vec!["--raw", "-p", "6390", "ping"],
+            vec!["ping", "-p", "6390"],
+        ] {
+            assert_eq!(valkey_args(6380, args(&given)), args(&given), "{given:?}");
+        }
+    }
+
+    #[test]
+    fn other_options_do_not_count_as_a_target() {
+        // `--pass`, `--pipe`, `--user`, `-n`, `-a`, `-x`, and a value that
+        // only looks like one: the port is still added.
+        for given in [
+            vec!["--pass", "secret", "ping"],
+            vec!["--pipe"],
+            vec!["--user", "app", "ping"],
+            vec!["-n", "2", "ping"],
+            vec!["-a", "secret", "ping"],
+            vec!["-x", "set", "k"],
+            vec!["--raw", "get", "host"],
+            vec!["get", "port"],
+        ] {
+            let mut want = args(&["-p", "6380"]);
+            want.extend(args(&given));
+            assert_eq!(valkey_args(6380, args(&given)), want, "{given:?}");
+        }
+        // Not UTF-8 is not an option of ours.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let odd = OsString::from_vec(vec![b'-', b'p', 0xff]);
+            assert!(!names_a_target(&odd));
         }
     }
 

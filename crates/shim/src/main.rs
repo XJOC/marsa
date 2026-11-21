@@ -20,6 +20,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use marsa_core::config::{self, ConfigPaths};
+use marsa_core::databases::ServerKind;
 use marsa_core::databases::clients::Client;
 use marsa_core::recipes::Platform;
 use marsa_core::resolver::{self, Tool};
@@ -101,6 +102,9 @@ fn client_plan(client: Client, args: ArgsOs) -> Result<Plan, ShimError> {
     let port = settings.port.unwrap_or(server.default_port());
     let is_set = |name: &str| env::var_os(name).is_some();
     plan.server_env = plan::unset_only(plan::server_env(server, port), is_set);
+    if server == ServerKind::Valkey {
+        plan.args = plan::valkey_args(port, std::mem::take(&mut plan.args));
+    }
     Ok(plan)
 }
 
