@@ -48,11 +48,11 @@ impl RunOutput {
     }
 }
 
-/// Runs the programs of setup. The daemon uses [`RealRunner`]; tests use a
+/// Runs the programs of setup and doctor. The daemon and the CLI use [`RealRunner`]; tests use a
 /// fake, like `Process::fake()` in Laravel.
 pub trait Runner: Send + Sync {
     /// Runs `program` with `args`, never through a shell, and waits at most
-    /// `limit`. `&'static str`: a constant path in this file, never one from
+    /// `limit`. `&'static str`: a constant path in the caller, never one from
     /// a request.
     ///
     /// # Errors
@@ -101,7 +101,7 @@ impl Runner for RealRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // Not the daemon's working folder. `/` is a Unix path, and setup runs
-        // on macOS and Linux only for now (Windows in task M4-19).
+        // on macOS and Linux only for now (Windows later).
         #[cfg(unix)]
         command.current_dir("/");
         let mut child = command.spawn()?;
