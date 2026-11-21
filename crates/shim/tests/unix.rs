@@ -480,6 +480,39 @@ fn redis_cli_runs_valkey_cli() {
     assert_eq!(stdout(&output), want, "{}", stderr(&output));
 }
 
+/// A Valkey on another port than 6379: `valkey-cli` and `redis-cli` get
+/// `-p <port>` first, unless the user already says where to connect.
+#[test]
+fn valkey_cli_goes_to_the_port_of_global_toml() {
+    let world = World::new();
+    world.write_config("global.toml", "[valkey]\nport = 6380\n");
+    world.install_client("valkey", "8.1.11", "valkey-cli");
+    for name in ["valkey-cli", "redis-cli"] {
+        let output = world.run(name, &["ping"]);
+        let want = format!(
+            "version=8.1.11\narg=-p\narg=6380\narg=ping\n{}",
+            vars_out(&[])
+        );
+        assert_eq!(stdout(&output), want, "{name}: {}", stderr(&output));
+    }
+    // The user's own target is kept.
+    for given in [
+        ["-p", "6390"].as_slice(),
+        ["--port=6390"].as_slice(),
+        ["-p6390"].as_slice(),
+    ] {
+        let output = world.run("valkey-cli", given);
+        let args: String = given.iter().map(|arg| format!("arg={arg}\n")).collect();
+        let want = format!("version=8.1.11\n{args}{}", vars_out(&[]));
+        assert_eq!(stdout(&output), want, "{given:?}: {}", stderr(&output));
+    }
+    // Valkey's own port: nothing is added.
+    world.write_config("global.toml", "[valkey]\nport = 6379\n");
+    let output = world.run("valkey-cli", &["ping"]);
+    let want = format!("version=8.1.11\narg=ping\n{}", vars_out(&[]));
+    assert_eq!(stdout(&output), want, "{}", stderr(&output));
+}
+
 /// `psql` with no PostgreSQL installed: the shim's usual message, which
 /// names the install.
 #[test]
