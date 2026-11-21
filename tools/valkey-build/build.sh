@@ -62,7 +62,7 @@ case "$PLATFORM" in
     ;;
   linux-*)
     command -v apk > /dev/null || { echo "the Linux build runs in an Alpine container (apk not found)" >&2; exit 1; }
-    musl_installed="$(apk info -v musl | head -n 1)"
+    musl_installed="$(apk info -v | grep -E '^musl-[0-9]' | head -n 1)"
     case "$musl_installed" in
       "musl-$MUSL_VERSION-r"*) ;;
       *) echo "this Alpine has $musl_installed, but the pinned musl source is $MUSL_VERSION" >&2; exit 1 ;;
@@ -125,7 +125,7 @@ esac
     linux-*)
       echo "make BUILD_TLS=no MALLOC=libc CFLAGS=-static LDFLAGS=-static valkey-server valkey-cli"
       echo "alpine: $(cat /etc/alpine-release)"
-      echo "musl: $(apk info -v musl | head -n 1) (licence text from musl-$MUSL_VERSION.tar.gz)"
+      echo "musl: $(apk info -v | grep -E '^musl-[0-9]' | head -n 1) (licence text from musl-$MUSL_VERSION.tar.gz)"
       echo "compiler: $(gcc --version | head -n 1)"
       echo "linker: $(ld --version | head -n 1)"
       ;;
