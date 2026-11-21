@@ -40,8 +40,68 @@ versions = ["2.11.8"]
 # without it the build stops.
 versions = ["17.12.0", "18.7.0"]
 
+[mysql]
+# Oracle's MySQL 8.4 LTS (ADR 0023): 8.4.13 is the current release (2026-11-18,
+# `Downloads/`), and 8.4.11 the last one that has an Intel Mac build. Oracle's
+# GPG signature and `.md5` of every archive are both checked by
+# `manifest build`; an MD5 alone is never accepted.
+versions = ["8.4.13", "8.4.11"]
+
+# `build` leaves these out, so the manifest has no file for them and `marsa
+# install mysql` says "no build for this system" instead of failing later.
+[[skip]]
+runtime = "mysql"
+version = "8.4.13"
+platform = "darwin-x64"
+reason = "Oracle has no Intel Mac build after 8.4.11"
+
+[[skip]]
+runtime = "mysql"
+version = "8.4.13"
+platform = "windows-x64"
+reason = "MySQL on Windows is task M6-07"
+
+[[skip]]
+runtime = "mysql"
+version = "8.4.11"
+platform = "darwin-arm64"
+reason = "8.4.13 is the build for this platform"
+
+[[skip]]
+runtime = "mysql"
+version = "8.4.11"
+platform = "linux-x64"
+reason = "8.4.13 is the build for this platform"
+
+[[skip]]
+runtime = "mysql"
+version = "8.4.11"
+platform = "linux-arm64"
+reason = "8.4.13 is the build for this platform"
+
+[[skip]]
+runtime = "mysql"
+version = "8.4.11"
+platform = "windows-x64"
+reason = "MySQL on Windows is task M6-07"
+
 # A URL for one version, platform, and artifact that replaces the recipe
 # template. `urls`: the first is the main one, the rest are mirrors.
+
+# MySQL 8.4.11 for the Intel Mac: Oracle moved it from `Downloads/` to
+# `archives/` when 8.4.13 came out. Its signature and MD5 sit beside it.
+[[override]]
+runtime = "mysql"
+version = "8.4.11"
+platform = "darwin-x64"
+artifact = "archive"
+urls = ["https://cdn.mysql.com/archives/mysql-8.4/mysql-8.4.11-macos15-x86_64.tar.gz"]
+
+# libaio.so.1 and libnuma.so.1 of MySQL on Linux: the recipe names the files
+# of the GitHub Release libaio-0.3.113-r1, made by .github/workflows/
+# libaio-build.yml (run it with release = true). The workflow makes it a
+# DRAFT: those URLs answer only after it is published. A rebuild is a new
+# release (r2): an override per file here, or a new URL in the recipe.
 
 # PHP 8.4.27 for macOS and Linux: the archives of the GitHub Release
 # php-8.4.27-r2, made by .github/workflows/php-build.yml (run it with
