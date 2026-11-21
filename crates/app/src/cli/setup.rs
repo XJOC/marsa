@@ -28,7 +28,7 @@ use marsa_core::types::{OpStatus, PortHolder, SetupReport};
 use super::daemon::{ClientFailure, connect, failure};
 use super::sites::printable;
 use super::strings::{self, Details};
-use crate::daemon::setup_api::user_trust::TrustFiles;
+use marsa_core::platform::trust::TrustFiles;
 
 /// Starts the daemon if needed, runs the setup, and prints its report.
 pub async fn run(data_dir: &Path) -> ExitCode {

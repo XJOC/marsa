@@ -6,6 +6,7 @@
 pub mod autostart;
 pub mod browser;
 pub mod daemon_file;
+pub mod linux_dns;
 pub mod low_ports;
 pub mod ports;
 pub mod probe;
@@ -13,6 +14,7 @@ pub mod process;
 pub mod runner;
 pub mod signals;
 pub mod spawn;
+pub mod trust;
 #[cfg(windows)]
 pub mod windows;
 

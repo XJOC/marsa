@@ -61,9 +61,8 @@ use marsa_core::types::OpStatus;
 use tokio_util::sync::CancellationToken;
 
 use super::{CHECK_LIMIT, PEM_BEGIN, PROMPT_LIMIT, RunOutput, Runner, TRUST_INSTALL, read_ca};
-
-/// The tool, by its absolute path (AGENTS.md section 6).
-pub const SECURITY: &str = "/usr/bin/security";
+use marsa_core::platform::trust::verify_args;
+pub use marsa_core::platform::trust::{SECURITY, TrustFiles, record_path, trusted};
 
 /// The op name of the removal in a report. Not the helper's `trust_remove`:
 /// `uninstall_all` reports that one too, for a trust added as root before
@@ -86,10 +85,6 @@ const NO_TRUST: [&[u8]; 2] = [b"could not be found", b"No Trust Settings were fo
 /// The line before each certificate in the output of `find-certificate -Z`.
 const HASH_LINE: &str = "SHA-256 hash: ";
 pub(super) const PEM_END: &str = "-----END CERTIFICATE-----";
-/// The trust folder under the data folder, and the two files in it.
-const TRUST_DIR: &str = "trust";
-const RECORD: &str = "user-trusted.pem";
-const PENDING: &str = "pending.pem";
 /// `read_ca`'s answer for a file that is not there.
 const NO_FILE: &str = codes::CA_NOT_READY;
 
@@ -99,42 +94,6 @@ pub fn login_keychain(home: &Path) -> PathBuf {
         .iter()
         .fold(home.to_path_buf(), |path, part| path.join(part))
 }
-
-/// `<data>/trust/`: the record of the certificate this user trusted, and
-/// the checked copy `security` gets during setup (see the module notes).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustFiles {
-    dir: PathBuf,
-}
-
-impl TrustFiles {
-    pub fn in_dir(data_dir: &Path) -> Self {
-        Self {
-            dir: data_dir.join(TRUST_DIR),
-        }
-    }
-
-    /// The folder itself: `<data>/trust`.
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    /// `user-trusted.pem`: the certificate this user trusted.
-    pub fn record(&self) -> PathBuf {
-        self.dir.join(RECORD)
-    }
-
-    /// `pending.pem`: the checked certificate, while setup trusts it.
-    pub fn pending(&self) -> PathBuf {
-        self.dir.join(PENDING)
-    }
-}
-
-/// `<data_dir>/trust/user-trusted.pem`: the certificate this user trusted.
-pub fn record_path(data_dir: &Path) -> PathBuf {
-    TrustFiles::in_dir(data_dir).record()
-}
-
 /// `trust_install` for the current user: `unchanged` if the certificate
 /// whose checked text is `pem` is trusted already, `done` once macOS added
 /// the trust behind its dialog, `trust_add_failed`, or
@@ -148,13 +107,13 @@ pub fn install(
     files: &TrustFiles,
     stop: &CancellationToken,
 ) -> OpResult {
-    if let Some(problem) = not_absolute(home, &files.dir) {
+    if let Some(problem) = not_absolute(home, files.dir()) {
         tracing::warn!(problem, "security does not run");
         let message = format!("{problem}, so security did not run");
         return failed(TRUST_INSTALL, codes::TRUST_ADD_FAILED, message);
     }
     let pending = files.pending();
-    if let Err(problem) = private_dir(&files.dir).and_then(|()| write_pending(&pending, pem)) {
+    if let Err(problem) = private_dir(files.dir()).and_then(|()| write_pending(&pending, pem)) {
         tracing::warn!(problem = %problem, "the trust folder cannot be used; security does not run");
         return failed(TRUST_INSTALL, codes::TRUST_RECORD_UNUSABLE, problem);
     }
@@ -218,7 +177,7 @@ pub fn remove(
     files: &TrustFiles,
     stop: &CancellationToken,
 ) -> OpResult {
-    let problem = not_absolute(home, &files.dir).or_else(|| {
+    let problem = not_absolute(home, files.dir()).or_else(|| {
         (!ca_root.is_absolute()).then_some("the path of the CA root certificate is not absolute")
     });
     if let Some(problem) = problem {
@@ -291,7 +250,7 @@ fn source(ca_root: &Path, files: &TrustFiles) -> Result<Option<Source>, OpResult
         failed(TRUST_REMOVE, codes::TRUST_RECORD_UNUSABLE, message)
     };
     let root = read_ca(ca_root);
-    let has_dir = existing_private_dir(&files.dir).map_err(|problem| {
+    let has_dir = existing_private_dir(files.dir()).map_err(|problem| {
         let message = format!("{problem}, so Marsa left the trust as it is");
         failed(TRUST_REMOVE, codes::TRUST_RECORD_UNUSABLE, message)
     })?;
@@ -530,35 +489,6 @@ fn is_trusted(runner: &dyn Runner, file: &Path, stop: &CancellationToken) -> boo
             false
         }
     }
-}
-
-/// For `marsa doctor` (task M5-12): whether the certificate at `ca_root` is
-/// trusted as a root now, by the same `verify-cert` as [`install`]. `None`
-/// when that is not known: the path is not absolute, or `security` could not
-/// run or was stopped by a signal. Changes nothing and shows no dialog.
-pub fn trusted(runner: &dyn Runner, ca_root: &Path, stop: &CancellationToken) -> Option<bool> {
-    if !ca_root.is_absolute() {
-        return None;
-    }
-    match runner.run(SECURITY, &verify_args(ca_root), CHECK_LIMIT, stop) {
-        Ok(output) => output.code.map(|_| output.success()),
-        Err(err) => {
-            tracing::debug!(error = %err, "cannot run security verify-cert");
-            None
-        }
-    }
-}
-
-/// `-L`: no fetch of missing certificates from the net. `-l`: the one
-/// certificate given is a CA, which `verify-cert` refuses otherwise.
-fn verify_args(file: &Path) -> Vec<OsString> {
-    vec![
-        OsString::from("verify-cert"),
-        OsString::from("-c"),
-        file.as_os_str().to_owned(),
-        OsString::from("-L"),
-        OsString::from("-l"),
-    ]
 }
 
 /// No `-d`: the user domain, not the admin one (ADR 0015).
