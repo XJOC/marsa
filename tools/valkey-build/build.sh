@@ -53,12 +53,15 @@ NAME="valkey-$VALKEY_VERSION-$PLATFORM.tar.gz"
 
 fetch_valkey_source "$WORK"
 
+# The server and the client are built by two `make` runs, one after the other.
+# Both targets rebuild src/release.h, so one run with two targets (and `-j`)
+# lets one rewrite the file while the other compiles it, and release.o fails.
 case "$PLATFORM" in
   darwin-*)
     # The binary must run on macOS 12 (Marsa's floor). The default malloc on
     # macOS is already libc; it is explicit so a Makefile change shows up.
     export MACOSX_DEPLOYMENT_TARGET=12.0
-    (cd "$VALKEY_SRC" && make -j"$(ncpu)" BUILD_TLS=no MALLOC=libc valkey-server valkey-cli)
+    (cd "$VALKEY_SRC" && make -j"$(ncpu)" BUILD_TLS=no MALLOC=libc valkey-server && make -j"$(ncpu)" BUILD_TLS=no MALLOC=libc valkey-cli)
     ;;
   linux-*)
     command -v apk > /dev/null || { echo "the Linux build runs in an Alpine container (apk not found)" >&2; exit 1; }
@@ -70,7 +73,7 @@ case "$PLATFORM" in
     # CFLAGS and LDFLAGS both get -static so the dependencies (Lua, hiredis)
     # are compiled and linked the same way. libc malloc keeps the idle server
     # small (3.5 MB in the S-12 measurement) and needs no jemalloc build.
-    (cd "$VALKEY_SRC" && make -j"$(ncpu)" BUILD_TLS=no MALLOC=libc CFLAGS=-static LDFLAGS=-static valkey-server valkey-cli)
+    (cd "$VALKEY_SRC" && make -j"$(ncpu)" BUILD_TLS=no MALLOC=libc CFLAGS=-static LDFLAGS=-static valkey-server && make -j"$(ncpu)" BUILD_TLS=no MALLOC=libc CFLAGS=-static LDFLAGS=-static valkey-cli)
     ;;
 esac
 
