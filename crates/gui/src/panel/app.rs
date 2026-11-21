@@ -21,6 +21,7 @@ use super::PanelExit;
 use super::place::Anchor;
 use crate::app::{open_site, take_updates};
 use crate::bridge;
+use crate::model::NoticeSource;
 use crate::model::{Connection, Model};
 use crate::prefs::Prefs;
 use crate::screens::panel::{self as screen, PanelAction};
@@ -109,7 +110,8 @@ pub fn is_ready(model: &Model) -> bool {
         Connection::Failed(_) | Connection::ShuttingDown => true,
         Connection::Connecting | Connection::Reconnecting => false,
         Connection::Running(_) => {
-            model.session.xdebug.is_some() || model.session.xdebug_notice.is_some()
+            model.session.xdebug.is_some()
+                || model.session.notices.code(NoticeSource::Xdebug).is_some()
         }
     }
 }
@@ -275,7 +277,9 @@ impl PanelApp {
                         self.close(ctx, PanelExit::Closed);
                         continue;
                     }
-                    if let Some(command) = self.model.apply_action(action) {
+                    // The panel has no folder dialog and opens no folder: only
+                    // a command matters here.
+                    if let Some(command) = self.model.apply_action(action).command() {
                         self.bridge.send(command);
                     }
                 }
@@ -433,6 +437,7 @@ impl eframe::App for PanelApp {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::Effect;
     use std::path::Path;
 
     use marsa_core::types::{Health, XdebugState};
@@ -571,7 +576,7 @@ mod tests {
         }));
         // The model is the window's: Xdebug flips there, and asks for a command.
         let command = app.model.apply_action(crate::model::Action::ToggleXdebug);
-        assert!(matches!(command, Some(Command::SetXdebug(true))));
+        assert!(matches!(command, Effect::Send(Command::SetXdebug(true))));
         assert_eq!(app.model.xdebug_on(), Some(true));
     }
 }

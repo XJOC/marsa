@@ -77,7 +77,7 @@ impl Model {
         if !offered || !self.is_connected() || self.installing() {
             return false;
         }
-        self.session.runtimes_notice = None;
+        self.session.notices.clear(NoticeSource::Runtimes);
         let jobs = [
             (Runtime::Php, Some(FIRST_PHP.to_owned())),
             (Runtime::Caddy, None),
@@ -155,7 +155,7 @@ impl Model {
         } else {
             Autostart::Off
         };
-        self.session.settings_notice = None;
+        self.session.notices.clear(NoticeSource::Autostart);
         Some(enabled)
     }
 
@@ -182,7 +182,7 @@ impl Model {
         }
         let enabled = !self.session.xdebug.as_ref()?.enabled;
         self.session.xdebug_pending = Some(enabled);
-        self.session.xdebug_notice = None;
+        self.session.notices.clear(NoticeSource::Xdebug);
         Some(enabled)
     }
 }

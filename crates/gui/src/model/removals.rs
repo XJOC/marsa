@@ -87,10 +87,12 @@ impl Model {
         }
         match removal {
             Removal::Uninstall { .. } => {
-                self.session.uninstall_notice = None;
-                self.session.runtimes_notice = None;
+                self.session.notices.clear(NoticeSource::Uninstall);
+                self.session.notices.clear(NoticeSource::Runtimes);
             }
-            Removal::Unlink { .. } | Removal::Forget { .. } => self.session.sites_notice = None,
+            Removal::Unlink { .. } | Removal::Forget { .. } => {
+                self.session.notices.clear(NoticeSource::Sites)
+            }
         }
         self.session.removing = Some(removal.clone());
         Some(removal)
@@ -128,7 +130,9 @@ impl Model {
                         row.default = None;
                     }
                 }
-                self.session.uninstall_notice = Some(UninstallNotice::Done { runtime, version });
+                self.session
+                    .notices
+                    .set_uninstall(UninstallNotice::Done { runtime, version });
             }
             // The new list comes as `sites_changed`.
             Removal::Unlink { site } => {
@@ -137,10 +141,10 @@ impl Model {
                 if self.route == Route::Site(site.clone()) {
                     self.route = Route::Sites;
                 }
-                self.session.sites_notice = Some(SitesNotice::Unlinked(site));
+                self.session.notices.set_sites(SitesNotice::Unlinked(site));
             }
             Removal::Forget { folder } => {
-                self.session.sites_notice = Some(SitesNotice::Forgot(folder))
+                self.session.notices.set_sites(SitesNotice::Forgot(folder))
             }
         }
     }
@@ -156,7 +160,7 @@ impl Model {
         }
         match removal {
             Removal::Uninstall { runtime, version } => {
-                self.session.uninstall_notice = Some(match in_use {
+                self.session.notices.set_uninstall(match in_use {
                     Some(in_use) => UninstallNotice::InUse { runtime, in_use },
                     None => UninstallNotice::Failed {
                         runtime,
@@ -167,10 +171,12 @@ impl Model {
             }
             Removal::Unlink { site } if code == SITE_IS_PARKED => {
                 let folder = self.holder(&site).map(Path::to_path_buf);
-                self.session.sites_notice = Some(SitesNotice::SiteIsParked { site, folder });
+                self.session
+                    .notices
+                    .set_sites(SitesNotice::SiteIsParked { site, folder });
             }
             Removal::Unlink { .. } | Removal::Forget { .. } => {
-                self.session.sites_notice = Some(SitesNotice::Failed(code));
+                self.session.notices.set_sites(SitesNotice::Failed(code));
             }
         }
     }
