@@ -352,6 +352,26 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "postgres_unsupported_platform" => {
             "Marsa runs PostgreSQL on macOS and Linux only for now.".into()
         }
+        // MySQL (task M6-05), the same way.
+        "mysql_not_installed" => "MySQL of the version set in global.toml is not installed. \
+             Run \"marsa install mysql\", then try again."
+            .into(),
+        "mysql_init_failed" => "Marsa could not make MySQL's data folder. Run \"marsa logs \
+             mysql\" to see why."
+            .into(),
+        "mysql_start_timeout" => "MySQL started but took no connections in time, so it was \
+             stopped. Run \"marsa logs mysql\" to see why."
+            .into(),
+        "mysql_orphan_stuck" => "An old MySQL of this Marsa, left running when the Marsa \
+             daemon stopped, still runs after SIGKILL, or can no longer be told apart from \
+             another program. Run \"marsa logs mysql\" to see its pid; quit that process in \
+             your system's process list only if it is mysqld, then try again."
+            .into(),
+        "mysql_unsupported_platform" => "Marsa runs MySQL on macOS and Linux only for now.".into(),
+        "mysql_path_unsupported" => "The path of Marsa's data folder has a double quote or a \
+             control character, which MySQL's settings file cannot hold, so MySQL was not \
+             started. Run \"marsa logs mysql\" to see the path."
+            .into(),
         "caddy_other_marsa" => format!(
             "The Caddy of another Marsa (another data folder, or another user) uses the ports \
              {service} needs. Stop that Marsa first. Run \"marsa logs {id}\" for details."
@@ -998,6 +1018,7 @@ fn example_version(runtime: Option<Runtime>) -> &'static str {
         Some(Runtime::Composer) => "2.8",
         Some(Runtime::Caddy) => "2.11",
         Some(Runtime::Postgres) => "18",
+        Some(Runtime::Mysql) => "8.4",
         Some(Runtime::Php) | None => "8.4",
     }
 }
@@ -1010,6 +1031,7 @@ pub fn runtime_name(runtime: Runtime) -> &'static str {
         Runtime::Composer => "Composer",
         Runtime::Caddy => "Caddy",
         Runtime::Postgres => "PostgreSQL",
+        Runtime::Mysql => "MySQL",
     }
 }
 
@@ -1018,6 +1040,7 @@ pub fn service_name(id: &str) -> &str {
     match id {
         "caddy" => "Caddy",
         "postgres" => "PostgreSQL",
+        "mysql" => "MySQL",
         other => other,
     }
 }
@@ -1181,6 +1204,16 @@ pub fn state_name(state: &ServiceState) -> &'static str {
         ServiceState::Stopping => "stopping",
         ServiceState::Failed { .. } => "failed",
     }
+}
+
+/// The line under the table while MySQL runs: how a Laravel `.env`
+/// connects to it, over TCP, as `root@127.0.0.1`, which has no
+/// administrative privilege (ADR 0023, "Access").
+pub fn mysql_connection(port: u16) -> String {
+    format!(
+        "mysql: 127.0.0.1:{port}, user root, no password (DB_CONNECTION=mysql, \
+         DB_HOST=127.0.0.1, DB_PORT={port}, DB_USERNAME=root)"
+    )
 }
 
 /// The line under the table while PostgreSQL runs: how a Laravel `.env`
@@ -2350,7 +2383,10 @@ mod tests {
     #[test]
     fn every_runtime_has_its_own_name_and_example() {
         let names: Vec<&str> = Runtime::ALL.into_iter().map(runtime_name).collect();
-        assert_eq!(names, ["PHP", "Node.js", "Composer", "Caddy", "PostgreSQL"]);
+        assert_eq!(
+            names,
+            ["PHP", "Node.js", "Composer", "Caddy", "PostgreSQL", "MySQL"]
+        );
         for runtime in Runtime::ALL {
             let example = example_version(Some(runtime));
             assert!(

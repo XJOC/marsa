@@ -114,6 +114,7 @@ impl RunInstall for FakeInstall {
                 Runtime::Composer => "2.8.4",
                 Runtime::Caddy => "2.11.8",
                 Runtime::Postgres => "18.7.0",
+                Runtime::Mysql => "8.4.13",
             };
             events(InstallEvent::Selected {
                 runtime,
@@ -380,7 +381,8 @@ async fn install_through_the_daemon_prints_progress_and_installs() {
              Node.js     none installed\n\
              Composer    none installed\n\
              Caddy       none installed\n\
-             PostgreSQL  none installed\n",
+             PostgreSQL  none installed\n\
+             MySQL       none installed\n",
             "",
         )
         .await;

@@ -37,8 +37,10 @@ pub enum Tool {
     /// The web server `marsad` runs. Installed like the others, but no shim
     /// runs it.
     Caddy,
-    /// PostgreSQL. Installed like the others; it does not run yet (M6-03).
+    /// PostgreSQL. Installed like the others; `marsad` runs it.
     Postgres,
+    /// MySQL 8.4. Installed like the others; `marsad` runs it.
+    Mysql,
 }
 
 impl From<Tool> for Runtime {
@@ -49,6 +51,7 @@ impl From<Tool> for Runtime {
             Tool::Composer => Runtime::Composer,
             Tool::Caddy => Runtime::Caddy,
             Tool::Postgres => Runtime::Postgres,
+            Tool::Mysql => Runtime::Mysql,
         }
     }
 }

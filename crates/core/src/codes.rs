@@ -88,6 +88,12 @@ pub const MANIFEST_ROLLBACK: &str = "manifest_rollback";
 pub const MANIFEST_SCHEMA_UNSUPPORTED: &str = "manifest_schema_unsupported";
 pub const MANIFEST_TOO_LARGE: &str = "manifest_too_large";
 pub const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
+pub const MYSQL_INIT_FAILED: &str = "mysql_init_failed";
+pub const MYSQL_NOT_INSTALLED: &str = "mysql_not_installed";
+pub const MYSQL_ORPHAN_STUCK: &str = "mysql_orphan_stuck";
+pub const MYSQL_PATH_UNSUPPORTED: &str = "mysql_path_unsupported";
+pub const MYSQL_START_TIMEOUT: &str = "mysql_start_timeout";
+pub const MYSQL_UNSUPPORTED_PLATFORM: &str = "mysql_unsupported_platform";
 pub const NO_CURRENT_DIR: &str = "no_current_dir";
 pub const NO_DEFAULT_VERSION: &str = "no_default_version";
 pub const NO_MATCHING_VERSION: &str = "no_matching_version";
@@ -324,6 +330,12 @@ pub const ALL: &[&str] = &[
     MANIFEST_SCHEMA_UNSUPPORTED,
     MANIFEST_TOO_LARGE,
     METHOD_NOT_ALLOWED,
+    MYSQL_INIT_FAILED,
+    MYSQL_NOT_INSTALLED,
+    MYSQL_ORPHAN_STUCK,
+    MYSQL_PATH_UNSUPPORTED,
+    MYSQL_START_TIMEOUT,
+    MYSQL_UNSUPPORTED_PLATFORM,
     NO_CURRENT_DIR,
     NO_DEFAULT_VERSION,
     NO_MATCHING_VERSION,

@@ -11,6 +11,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use marsa_core::client::ClientError;
+use marsa_core::databases::ServerKind;
 use marsa_core::runtimes::Runtime;
 
 use super::Tool;
@@ -57,9 +58,9 @@ pub fn uninstall_failure(
     version: &str,
     data_dir: &Path,
 ) -> ClientFailure {
-    // `service_busy`: an action on PostgreSQL runs, and a start may pick
-    // the version (task M6-03).
-    let service = (runtime == Runtime::Postgres).then_some("postgres");
+    // `service_busy`: an action on the database server runs, and a start
+    // may pick the version.
+    let service = ServerKind::of_runtime(runtime).map(ServerKind::id);
     let mut failure = failure(err, data_dir, service);
     let requested = printable(version.trim());
     failure.message = match (err, failure.code.as_str()) {

@@ -1,0 +1,49 @@
+# How MySQL 8.4 LTS is laid out on disk (task M6-05, ADR 0023). See php.toml
+# for how a recipe and the signed manifest work together.
+name = "mysql"
+
+# After install: `mysqld --version` prints its own path first, then
+# `  Ver 8.4.13 for macos15 on arm64 (MySQL Community Server - GPL)`. The
+# path is not known here, so the check looks for the version after it.
+[check]
+program = "mysqld"
+args = ["--version"]
+expect_contains = " Ver {version} "
+
+# Oracle's builds, as they are. Every archive has one top folder,
+# `mysql-<version>-<target>/`, with bin/, lib/, share/, and the licenses
+# inside; strip_components = 1 removes it. The binaries need macOS 14 (their
+# `minos`, S-12). Oracle publishes an `.md5` and a GPG `.asc` next to each
+# archive; `cargo xtask manifest build` checks both (M6-02).
+#
+# darwin-x64: Oracle has no Intel build after 8.4.11, which is in
+# cdn.mysql.com/archives/; pins.toml has its URL.
+
+[platform.darwin-arm64]
+min_macos = "14.0"
+programs = { mysqld = "bin/mysqld", mysql = "bin/mysql", mysqladmin = "bin/mysqladmin", mysqldump = "bin/mysqldump" }
+
+[[platform.darwin-arm64.artifact]]
+name = "archive"
+url = "https://cdn.mysql.com/Downloads/MySQL-{major}.{minor}/mysql-{version}-macos15-arm64.tar.gz"
+format = "tar.gz"
+strip_components = 1
+
+[platform.darwin-x64]
+min_macos = "14.0"
+programs = { mysqld = "bin/mysqld", mysql = "bin/mysql", mysqladmin = "bin/mysqladmin", mysqldump = "bin/mysqldump" }
+
+[[platform.darwin-x64.artifact]]
+name = "archive"
+url = "https://cdn.mysql.com/Downloads/MySQL-{major}.{minor}/mysql-{version}-macos15-x86_64.tar.gz"
+format = "tar.gz"
+strip_components = 1
+
+[platform.windows-x64]
+programs = { mysqld = "bin/mysqld.exe", mysql = "bin/mysql.exe", mysqladmin = "bin/mysqladmin.exe", mysqldump = "bin/mysqldump.exe" }
+
+[[platform.windows-x64.artifact]]
+name = "archive"
+url = "https://cdn.mysql.com/Downloads/MySQL-{major}.{minor}/mysql-{version}-winx64.zip"
+format = "zip"
+strip_components = 1

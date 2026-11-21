@@ -8,8 +8,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use marsa_core::config::{ConfigError, ServerSettings};
+use marsa_core::databases::mysql::{
+    MysqlDirs, UnwritablePath, decide_mysql_start, my_cnf, mysqld_pid,
+};
 use marsa_core::databases::{
-    PostgresDirs, ServerKind, ServiceBusy, StartDecision, decide_start, postmaster_pid, socket_for,
+    PostgresDirs, ServerKind, ServiceBusy, StartDecision, StartFacts, decide_start, postmaster_pid,
+    socket_for,
 };
 use marsa_core::platform::process;
 use marsa_core::recipes::Platform;
@@ -24,7 +28,7 @@ use tracing::{info, warn};
 use super::facts::start_facts;
 use super::init::{InitError, installed_servers};
 use super::settings::{any_installed, read_settings, save_enabled};
-use super::{orphan, postgres};
+use super::{mysql, orphan, postgres};
 use crate::daemon::services::actions::{Busy, take_turn};
 use crate::daemon::services::probe::{ProcessProbe, SystemProbe};
 use crate::daemon::services::runtime::AbortOnDrop;
@@ -60,6 +64,8 @@ pub enum ActionError {
     /// Our old server, left by a crashed `marsad`, could not be stopped, or
     /// cannot be told from another program.
     OrphanStuck(ServerKind, String),
+    /// A path of the data folder cannot go in MySQL's `my.cnf`.
+    Path(UnwritablePath),
 }
 
 impl ActionError {
@@ -67,14 +73,17 @@ impl ActionError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Unsupported(ServerKind::Postgres) => codes::POSTGRES_UNSUPPORTED_PLATFORM,
+            Self::Unsupported(ServerKind::Mysql) => codes::MYSQL_UNSUPPORTED_PLATFORM,
             Self::Config(err) => err.code(),
             Self::NotInstalled(ServerKind::Postgres, _) => codes::POSTGRES_NOT_INSTALLED,
+            Self::NotInstalled(ServerKind::Mysql, _) => codes::MYSQL_NOT_INSTALLED,
             Self::Init(err) => err.code(),
             Self::InUse(busy) => busy.code(),
             Self::Busy => codes::SERVICE_BUSY,
             Self::ProgramNotAbsolute(err) => err.code(),
             Self::Internal => codes::INTERNAL_ERROR,
             Self::OrphanStuck(kind, _) => orphan::stuck_code(*kind),
+            Self::Path(err) => err.code(),
         }
     }
 }
@@ -93,6 +102,7 @@ impl fmt::Display for ActionError {
             Self::ProgramNotAbsolute(err) => err.fmt(f),
             Self::Internal => f.write_str("the job that writes enabled to global.toml failed"),
             Self::OrphanStuck(_, reason) => f.write_str(reason),
+            Self::Path(err) => err.fmt(f),
         }
     }
 }
@@ -218,6 +228,8 @@ enum Refusal {
         data: PathBuf,
         socket: Option<PathBuf>,
     },
+    /// Not read: MySQL's own check before the start covers its data folder.
+    None,
 }
 
 enum Ready {
@@ -418,6 +430,7 @@ impl ServerManager {
             );
             let code = match self.kind {
                 ServerKind::Postgres => codes::POSTGRES_START_TIMEOUT,
+                ServerKind::Mysql => codes::MYSQL_START_TIMEOUT,
             };
             self.fail(&daemon.events, code, &reason);
         }
@@ -492,7 +505,7 @@ impl ServerManager {
     async fn prepare(&self, daemon: &Daemon) -> Result<Prepared, ActionError> {
         let kind = self.kind;
         let settings = read_settings(kind, &daemon.data_dir)?;
-        let (platform, version, _) = self.installed(&daemon.data_dir, &settings)?;
+        let (platform, version, server) = self.installed(&daemon.data_dir, &settings)?;
         let port = settings.port.unwrap_or(kind.default_port());
         let servers = installed_servers(kind, &daemon.data_dir, platform);
         let ladder = &self.orphan_ladder;
@@ -511,21 +524,26 @@ impl ServerManager {
                 self.prepare_postgres(daemon, platform, &version, servers, port)
                     .await
             }
+            ServerKind::Mysql => {
+                self.prepare_mysql(daemon, &version, server, servers, port)
+                    .await
+            }
         }
     }
 
     /// The check before the start, from the server's own pid file
-    /// `pid_file`.
+    /// `pid_file`, by `decide`.
     async fn check(
         &self,
         port: u16,
         pid_file: &Path,
         pid_of: fn(&str) -> Option<u32>,
         servers: &[PathBuf],
+        decide: fn(&StartFacts) -> StartDecision,
     ) -> Result<(), ActionError> {
         let facts = start_facts(&*self.probes, port, pid_file, pid_of, servers).await;
         info!(?facts, server = self.kind.id(), "checked before the start");
-        match decide_start(&facts) {
+        match decide(&facts) {
             StartDecision::Refuse(busy) => Err(ActionError::InUse(busy)),
             StartDecision::Start => Ok(()),
         }
@@ -543,7 +561,7 @@ impl ServerManager {
     ) -> Result<Prepared, ActionError> {
         let dirs = PostgresDirs::new(&daemon.data_dir, version.major);
         let pid_file = dirs.data.join("postmaster.pid");
-        self.check(port, &pid_file, postmaster_pid, &servers)
+        self.check(port, &pid_file, postmaster_pid, &servers, decide_start)
             .await?;
         let programs = postgres::programs(&daemon.data_dir, platform, version)
             .ok_or_else(|| self.missing(Some(&self.kind.line(version))))?;
@@ -570,6 +588,52 @@ impl ServerManager {
                 data: dirs.data,
                 socket: socket.ok(),
             },
+            port,
+        })
+    }
+
+    /// [`Self::prepare`] for MySQL: `my.cnf`, the check (a pid that cannot
+    /// be told refuses too: [`decide_mysql_start`]), and the first init
+    /// for a new data folder.
+    async fn prepare_mysql(
+        &self,
+        daemon: &Daemon,
+        version: &Version,
+        mysqld: PathBuf,
+        servers: Vec<PathBuf>,
+        port: u16,
+    ) -> Result<Prepared, ActionError> {
+        let kind = self.kind;
+        let dirs = MysqlDirs::new(&daemon.data_dir, &kind.line(version));
+        let socket = dirs.socket();
+        let basedir = RuntimesDir::in_dir(&daemon.data_dir).version_dir(kind.runtime(), version);
+        let text =
+            my_cnf(&dirs, &basedir, port, socket.as_deref().ok()).map_err(ActionError::Path)?;
+        let pid_file = dirs.pid_file();
+        self.check(port, &pid_file, mysqld_pid, &servers, decide_mysql_start)
+            .await?;
+        mysql::write_config(&dirs, text)
+            .await
+            .map_err(|err| ActionError::Init(InitError::io(kind, "cannot write my.cnf", &err)))?;
+        mysql::ensure_data_dir(&mysqld, &dirs)
+            .await
+            .map_err(ActionError::Init)?;
+        info!(%version, port, "starting mysql");
+        // Without a socket nobody reaches `root@localhost`, the account
+        // with every privilege (ADR 0023, "Access").
+        if let Err(why) = &socket {
+            let folder = dirs.run.display();
+            warn!(%folder, %why, "no Unix socket for mysql: TCP only, no root@localhost");
+            let text = format!(
+                "marsad: MySQL gets no Unix socket in {folder}: {why}. So it takes TCP \
+                 connections only, and root@localhost cannot connect."
+            );
+            lock(&self.runtime).note(&daemon.events, &text);
+        }
+        Ok(Prepared {
+            spec: mysql::spec(mysqld, &dirs),
+            servers,
+            refusal: Refusal::None,
             port,
         })
     }
@@ -690,6 +754,7 @@ impl ServerManager {
     async fn answers(&self, port: u16) -> bool {
         match self.kind {
             ServerKind::Postgres => postgres::answers(port).await,
+            ServerKind::Mysql => mysql::answers(port).await,
         }
     }
 
@@ -714,6 +779,7 @@ impl ServerManager {
                 let socket = socket.as_deref();
                 postgres::lock_refusal(&*self.probes, &stderr, data, socket, port).await
             }
+            Refusal::None => None,
         }
     }
 

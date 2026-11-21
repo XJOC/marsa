@@ -28,6 +28,7 @@
 mod facts;
 mod init;
 mod manager;
+mod mysql;
 mod orphan;
 mod postgres;
 mod settings;
@@ -81,22 +82,22 @@ mod tests {
 
     /// Answers what it was given, and keeps the pids it was asked about.
     #[derive(Debug)]
-    struct FakeProbes {
+    pub(super) struct FakeProbes {
         /// What runs at every pid.
-        now: Mutex<Liveness>,
+        pub(super) now: Mutex<Liveness>,
         lookup: PortLookup,
-        asked: Mutex<Vec<u32>>,
+        pub(super) asked: Mutex<Vec<u32>>,
         /// Real processes that run as these programs: their real start
         /// time and life, with this path. Only they get real signals.
         orphans: Mutex<Vec<(u32, PathBuf)>>,
         /// Every signal asked for, to any pid.
-        signals: Mutex<Vec<(u32, Signal)>>,
+        pub(super) signals: Mutex<Vec<(u32, Signal)>>,
         /// After the first signal, the orphans cannot be told any more.
         unknown_after_signal: Mutex<bool>,
     }
 
     /// `owner` listens on the port, or nobody.
-    fn probes(now: Liveness, owner: Option<&str>) -> FakeProbes {
+    pub(super) fn probes(now: Liveness, owner: Option<&str>) -> FakeProbes {
         let lookup = owner.map_or(PortLookup::Nobody, |owner| PortLookup::Owner(owner.into()));
         FakeProbes {
             now: Mutex::new(now),
@@ -152,7 +153,7 @@ mod tests {
         }
     }
 
-    fn alive(exe: &Path) -> Liveness {
+    pub(super) fn alive(exe: &Path) -> Liveness {
         Liveness::Alive {
             exe: exe.to_path_buf(),
             started: "Wed Nov 18 10:00:00 2026".into(),
@@ -160,7 +161,7 @@ mod tests {
     }
 
     /// A port nothing listens on now.
-    fn free_port() -> u16 {
+    pub(super) fn free_port() -> u16 {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         listener.local_addr().unwrap().port()
     }

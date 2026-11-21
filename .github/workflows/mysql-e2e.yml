@@ -1,0 +1,98 @@
+name: mysql-e2e
+
+# MySQL 8.4 as a service of marsad, with a real server (task M6-05; ADR
+# 0023): the first init, the access rules (root over TCP with no
+# administrative privilege, root@localhost over the socket only), the idle
+# memory, the stop with an idle client, PHP's pdo_mysql, the refusals, the
+# start with marsad, and an orphan. tools/e2e/mysql.sh downloads MySQL and
+# PHP and runs every marsa command with --data-dir in a new folder. No sudo.
+# It is not part of the tests that `cargo nextest` runs.
+
+on:
+  workflow_dispatch:
+  # Every pull request that changes these paths, so a change to the
+  # MySQL code runs this before it merges, and main after it.
+  pull_request:
+    paths:
+      - "crates/app/src/daemon/databases.rs"
+      - "crates/app/src/daemon/databases/**"
+      - "crates/app/src/daemon/services_api.rs"
+      - "crates/app/src/cli/strings.rs"
+      - "crates/app/src/cli/services.rs"
+      - "crates/app/src/daemon/runtimes_api.rs"
+      - "crates/app/src/daemon/supervisor.rs"
+      - "crates/core/src/databases/**"
+      - "crates/core/src/platform/process.rs"
+      - "recipes/mysql.toml"
+      - "tools/e2e/mysql.sh"
+      - ".github/workflows/mysql-e2e.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/app/src/daemon/databases.rs"
+      - "crates/app/src/daemon/databases/**"
+      - "crates/app/src/daemon/services_api.rs"
+      - "crates/app/src/cli/strings.rs"
+      - "crates/app/src/cli/services.rs"
+      - "crates/app/src/daemon/runtimes_api.rs"
+      - "crates/app/src/daemon/supervisor.rs"
+      - "crates/core/src/databases/**"
+      - "crates/core/src/platform/process.rs"
+      - "recipes/mysql.toml"
+      - "tools/e2e/mysql.sh"
+      - ".github/workflows/mysql-e2e.yml"
+
+# Read-only on purpose: the job never writes to the repository.
+permissions:
+  contents: read
+
+# A new run on the same branch cancels the older one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  e2e:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oracle's arm64 build for macOS. Linux comes with .tar.xz.
+        os: [macos-15, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      # The job runs downloaded programs: no token is left in .git.
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Reads the pinned version from rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Build marsa and marsad
+        run: cargo build --release -p marsa
+
+      - name: End to end
+        run: bash tools/e2e/mysql.sh
+
+      # Logs only. `run/daemon.json` holds the daemon token and is never
+      # uploaded.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: mysql-e2e-logs-${{ matrix.os }}
+          path: ${{ runner.temp }}/my-e2e/logs/
+          if-no-files-found: ignore

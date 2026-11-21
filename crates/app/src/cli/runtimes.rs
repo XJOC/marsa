@@ -94,7 +94,8 @@ mod tests {
              Node.js     none installed\n\
              Composer    none installed\n\
              Caddy       none installed\n\
-             PostgreSQL  none installed\n"
+             PostgreSQL  none installed\n\
+             MySQL       none installed\n"
         );
     }
 
@@ -111,7 +112,8 @@ mod tests {
              Node.js     22.11.0\n\
              Composer    none installed\n\
              Caddy       2.11.8\n\
-             PostgreSQL  none installed\n"
+             PostgreSQL  none installed\n\
+             MySQL       none installed\n"
         );
         assert_eq!(render(&found, Some(Tool::Node)), "Node.js     22.11.0\n");
         assert_eq!(render(&found, Some(Tool::Caddy)), "Caddy       2.11.8\n");

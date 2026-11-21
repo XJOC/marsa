@@ -1,5 +1,7 @@
-//! PostgreSQL as a managed service (ADR 0023): its folders, the arguments of
-//! `initdb` and `postgres`, how it stops, and the check before a start.
+//! The database servers as managed services (ADR 0023): which servers there
+//! are ([`ServerKind`]), PostgreSQL's folders, the arguments of `initdb` and
+//! `postgres`, how it stops, and the check before a start. MySQL's own
+//! part is in [`mysql`].
 //!
 //! Not behind the `full` feature: it only decides, like a Laravel policy. The
 //! daemon reads the files, tests the port, and starts the processes (M6-03c).
@@ -8,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use semver::Version;
+
+pub mod mysql;
 
 use crate::config::{GlobalConfig, ServerSettings};
 use crate::orphan::Liveness;
@@ -25,17 +29,19 @@ pub const POSTGRES_PORT: u16 = 5432;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerKind {
     Postgres,
+    Mysql,
 }
 
 impl ServerKind {
     /// Every server, in the order lists show them.
-    pub const ALL: [ServerKind; 1] = [ServerKind::Postgres];
+    pub const ALL: [ServerKind; 2] = [ServerKind::Postgres, ServerKind::Mysql];
 
     /// The service id: the name in `marsa services`, the log file
     /// `logs/<id>.log`, the table in `global.toml`, and `run/<id>.pid`.
     pub fn id(self) -> &'static str {
         match self {
             Self::Postgres => "postgres",
+            Self::Mysql => "mysql",
         }
     }
 
@@ -43,6 +49,7 @@ impl ServerKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::Postgres => "PostgreSQL",
+            Self::Mysql => "MySQL",
         }
     }
 
@@ -60,6 +67,7 @@ impl ServerKind {
     pub fn runtime(self) -> Runtime {
         match self {
             Self::Postgres => Runtime::Postgres,
+            Self::Mysql => Runtime::Mysql,
         }
     }
 
@@ -68,6 +76,7 @@ impl ServerKind {
     pub fn default_port(self) -> u16 {
         match self {
             Self::Postgres => POSTGRES_PORT,
+            Self::Mysql => mysql::MYSQL_PORT,
         }
     }
 
@@ -76,6 +85,7 @@ impl ServerKind {
     pub fn server_program(self) -> &'static str {
         match self {
             Self::Postgres => "postgres",
+            Self::Mysql => "mysqld",
         }
     }
 
@@ -83,6 +93,7 @@ impl ServerKind {
     pub fn stop(self) -> StopMethod {
         match self {
             Self::Postgres => postgres_stop(),
+            Self::Mysql => mysql::mysql_stop(),
         }
     }
 
@@ -90,6 +101,7 @@ impl ServerKind {
     pub fn settings(self, global: &GlobalConfig) -> &ServerSettings {
         match self {
             Self::Postgres => &global.postgres,
+            Self::Mysql => &global.mysql,
         }
     }
 
@@ -97,24 +109,38 @@ impl ServerKind {
     pub fn settings_mut(self, global: &mut GlobalConfig) -> &mut ServerSettings {
         match self {
             Self::Postgres => &mut global.postgres,
+            Self::Mysql => &mut global.mysql,
         }
     }
 
     /// The line `version` belongs to, as `default` names it: the major for
-    /// PostgreSQL (`"18"`). Each line has its own data folder.
+    /// PostgreSQL (`"18"`), the major and minor for MySQL (`"8.4"`, an LTS
+    /// line). Each line has its own data folder.
     pub fn line(self, version: &Version) -> String {
         match self {
             Self::Postgres => version.major.to_string(),
+            Self::Mysql => format!("{}.{}", version.major, version.minor),
         }
     }
 
     /// Whether `version` is in the line `default` names. `None` when
-    /// `default` names no line: for PostgreSQL, not a major number.
+    /// `default` names no line: for PostgreSQL not a major number, for
+    /// MySQL not `<major>.<minor>`.
     pub fn in_line(self, default: &str, version: &Version) -> Option<bool> {
+        let default = default.trim();
         match self {
             Self::Postgres => {
-                let major = default.trim().parse::<u64>().ok()?;
+                let major = default.parse::<u64>().ok()?;
                 Some(version.major == major)
+            }
+            Self::Mysql => {
+                let (major, minor) = default.split_once('.')?;
+                let number = |text: &str| {
+                    let digits = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+                    digits.then(|| text.parse::<u64>().ok()).flatten()
+                };
+                let (major, minor) = (number(major)?, number(minor)?);
+                Some(version.major == major && version.minor == minor)
             }
         }
     }

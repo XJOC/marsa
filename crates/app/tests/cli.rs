@@ -44,7 +44,8 @@ fn runtimes_on_an_empty_data_dir() {
          Node.js     none installed\n\
          Composer    none installed\n\
          Caddy       none installed\n\
-         PostgreSQL  none installed\n",
+         PostgreSQL  none installed\n\
+         MySQL       none installed\n",
         "",
     );
 }
@@ -63,7 +64,8 @@ fn runtimes_lists_installed_versions() {
          Node.js     22.11.0\n\
          Composer    2.8.4\n\
          Caddy       none installed\n\
-         PostgreSQL  none installed\n",
+         PostgreSQL  none installed\n\
+         MySQL       none installed\n",
         "",
     );
     data.expect(&["runtimes", "php"], 0, "PHP         8.3.27, 8.4.23\n", "");

@@ -2059,6 +2059,14 @@ fn error_message(code: &str) -> Option<&'static str> {
             "Cannot find your home folder, so Marsa does not know where to keep its data."
         }
         "no_current_dir" => "Cannot read the current folder.",
+        "mysql_init_failed" => "Marsa could not make MySQL's data folder.",
+        "mysql_not_installed" => "MySQL of the version set in global.toml is not installed.",
+        "mysql_orphan_stuck" => "An old MySQL of this Marsa still runs and did not stop.",
+        "mysql_path_unsupported" => {
+            "The path of Marsa's data folder has a character that MySQL's settings file cannot hold."
+        }
+        "mysql_start_timeout" => "MySQL started but took no connections in time.",
+        "mysql_unsupported_platform" => "Marsa runs MySQL on macOS and Linux only for now.",
         "nss_remove_failed" => {
             "Marsa's certificate authority is still in a browser certificate database. Run \"marsa uninstall --all\" again."
         }
