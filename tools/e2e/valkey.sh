@@ -132,8 +132,9 @@ run marsa services start valkey
 echo "the start took $(($(date +%s) - begun)) s"
 marsa services | tee "$RUNNER_TEMP/services.txt"
 grep -E '^valkey +running' "$RUNNER_TEMP/services.txt" || fail "valkey is not running"
-grep -qF "valkey: 127.0.0.1:$PORT (REDIS_HOST=127.0.0.1, REDIS_PORT=$PORT)" "$RUNNER_TEMP/services.txt" ||
+grep -qF "valkey: 127.0.0.1:$PORT, no password" "$RUNNER_TEMP/services.txt" ||
   fail "no connection line"
+grep -qx "REDIS_PORT=$PORT" "$RUNNER_TEMP/services.txt" || fail "no REDIS_PORT line"
 grep -q 'enabled = true' "$DATA/config/global.toml" || fail "the start did not turn it on"
 [ "$(cli ping)" = PONG ] || fail "PING"
 [ "$(mode "$DATA/run")" = drwx------ ] || fail "run/ is not 0700"

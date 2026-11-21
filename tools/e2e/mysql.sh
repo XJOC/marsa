@@ -131,6 +131,7 @@ marsa services | tee "$RUNNER_TEMP/services.txt"
 grep -E '^mysql +running' "$RUNNER_TEMP/services.txt" || fail "mysql is not running"
 grep -qF "mysql: 127.0.0.1:$PORT, user root, no password" "$RUNNER_TEMP/services.txt" ||
   fail "no connection line"
+grep -qx "DB_PORT=$PORT" "$RUNNER_TEMP/services.txt" || fail "no DB_PORT line"
 grep -q 'enabled = true' "$DATA/config/global.toml" || fail "the start did not turn it on"
 [ -d "$DATA/databases/mysql/8.4/mysql" ] || fail "no data folder in databases/mysql/8.4"
 
