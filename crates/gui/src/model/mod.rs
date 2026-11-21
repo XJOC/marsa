@@ -19,6 +19,7 @@ use semver::Version;
 
 mod installs;
 mod logs;
+mod notices;
 mod removals;
 mod runtimes;
 mod session;
@@ -28,6 +29,7 @@ mod sites;
 use installs::Install;
 pub use installs::{INSTALL_INTERRUPTED, InstallJob, InstallStep, InstallView, install_version};
 pub use logs::{LOG_SERVICE, LogRow, LogSource, MAX_LOG_LINES, ServiceLog};
+pub use notices::{NoticeSource, Notices};
 pub use removals::{Removal, UninstallNotice};
 pub use runtimes::{
     Change, Choice, MAIN_RUNTIME, PoolKind, RuntimeRow, has_default, is_pool, pool_of,
@@ -143,26 +145,6 @@ pub enum Update {
     /// A client error code.
     HostsSyncFailed(String),
     Event(Event),
-}
-
-/// Which of the model's results a notice in the bar tells about. Closing the
-/// notice clears that result ([`Model::dismiss_notice`]), so the bar shows the
-/// next one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NoticeSource {
-    /// A call to the daemon failed ([`Model::notice`]).
-    Call,
-    /// The last sites action ([`Model::sites_notice`]).
-    Sites,
-    /// How the install shown ended ([`Model::install_result`]).
-    Install,
-    /// The last uninstall ([`Model::uninstall_notice`]).
-    Uninstall,
-    /// The runtimes could not be read, or a default not saved
-    /// ([`Model::runtimes_notice`]).
-    Runtimes,
-    /// Start at login failed ([`Model::settings_notice`]).
-    Autostart,
 }
 
 /// The screen the main area shows (code.md, Router). The window's own
@@ -360,9 +342,9 @@ impl Model {
                 self.session.services = services;
             }
             Update::Log(lines) => lines.into_iter().for_each(|line| self.push_log(line)),
-            Update::Notice(code) => self.session.notice = Some(code),
+            Update::Notice(code) => self.session.notices.set_code(NoticeSource::Call, code),
             Update::Sites(list) => self.set_sites(list),
-            Update::Parked(path) => self.session.sites_notice = Some(SitesNotice::Parked(path)),
+            Update::Parked(path) => self.session.notices.set_sites(SitesNotice::Parked(path)),
             Update::Linked { name, folder } => {
                 // The user may have picked another folder since.
                 let same = self
@@ -372,20 +354,24 @@ impl Model {
                 if same {
                     self.link = None;
                 }
-                self.session.sites_notice = Some(SitesNotice::Linked { name, folder });
+                self.session
+                    .notices
+                    .set_sites(SitesNotice::Linked { name, folder });
             }
-            Update::SitesFailed(code) => {
-                self.session.sites_notice = Some(SitesNotice::Failed(code))
-            }
+            Update::SitesFailed(code) => self.session.notices.set_sites(SitesNotice::Failed(code)),
             Update::Runtimes(list) => self.set_runtimes(list),
-            Update::RuntimesFailed(code) => self.session.runtimes_notice = Some(code),
+            Update::RuntimesFailed(code) => {
+                self.session.notices.set_code(NoticeSource::Runtimes, code)
+            }
             Update::Saved(change) => self.settle(&change),
             Update::NotSaved { change, code } => {
                 self.settle(&change);
                 match change {
-                    Change::Default { .. } => self.session.runtimes_notice = Some(code),
+                    Change::Default { .. } => {
+                        self.session.notices.set_code(NoticeSource::Runtimes, code)
+                    }
                     Change::SitePhp { .. } => {
-                        self.session.sites_notice = Some(SitesNotice::Failed(code))
+                        self.session.notices.set_sites(SitesNotice::Failed(code))
                     }
                 }
             }
@@ -404,7 +390,7 @@ impl Model {
             Update::Autostart(state) => self.session.autostart = state,
             Update::AutostartFailed(code) => {
                 self.session.autostart = Autostart::Unknown;
-                self.session.settings_notice = Some(code);
+                self.session.notices.set_code(NoticeSource::Autostart, code);
             }
             Update::Removed(removal) => self.removed(removal),
             Update::NotRemoved {
@@ -413,13 +399,13 @@ impl Model {
                 in_use,
             } => self.not_removed(removal, code, in_use),
             Update::Xdebug(state) => self.session.xdebug = Some(state),
-            Update::XdebugFailed(code) => self.session.xdebug_notice = Some(code),
+            Update::XdebugFailed(code) => self.session.notices.set_code(NoticeSource::Xdebug, code),
             Update::XdebugAnswered(answer) => {
                 self.session.xdebug_pending = None;
                 match answer {
                     Ok(state) => self.session.xdebug = Some(state),
                     // The bridge reads the state again.
-                    Err(code) => self.session.xdebug_notice = Some(code),
+                    Err(code) => self.session.notices.set_code(NoticeSource::Xdebug, code),
                 }
             }
             Update::Event(event) => apply(self, event),
@@ -430,16 +416,12 @@ impl Model {
     /// not come back, and the next result may show.
     pub fn dismiss_notice(&mut self, source: NoticeSource) {
         match source {
-            NoticeSource::Call => self.session.notice = None,
-            NoticeSource::Sites => self.session.sites_notice = None,
             NoticeSource::Install => {
                 if let Some(index) = self.install_slot() {
                     self.installs[index].noticed = true;
                 }
             }
-            NoticeSource::Uninstall => self.session.uninstall_notice = None,
-            NoticeSource::Runtimes => self.session.runtimes_notice = None,
-            NoticeSource::Autostart => self.session.settings_notice = None,
+            source => self.session.notices.clear(source),
         }
     }
 
@@ -472,7 +454,7 @@ impl Model {
             }
             Action::Service { service, action } => {
                 // The notice was about the last action.
-                self.session.notice = None;
+                self.session.notices.clear(NoticeSource::Call);
                 Some(Command::Service { service, action })
             }
             Action::SetDefault { runtime, version } => {
@@ -505,7 +487,7 @@ impl Model {
             }
             Action::SetSecure { site, secure } => {
                 // The notice was about the last action.
-                self.session.sites_notice = None;
+                self.session.notices.clear(NoticeSource::Sites);
                 Some(Command::Secure { site, secure })
             }
             Action::AskUnlink(site) => {
@@ -544,7 +526,7 @@ impl Model {
             Action::SetInstallVersion { runtime, text } => {
                 self.set_install_text(runtime, text);
                 // The line under the field was about the last text.
-                self.session.runtimes_notice = None;
+                self.session.notices.clear(NoticeSource::Runtimes);
                 None
             }
             Action::SubmitInstall(runtime) => {

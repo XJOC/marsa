@@ -188,7 +188,7 @@ fn setup_detail(model: &Model, platform: Option<Platform>) -> Detail {
 
 /// What the last park or link said, while there is no site.
 fn site_detail(model: &Model) -> Detail {
-    match &model.session.sites_notice {
+    match &model.session.notices.sites() {
         Some(SitesNotice::Failed(code)) => problem(strings::error_text(code)),
         Some(SitesNotice::Parked(folder)) if model.session.sites.sites.is_empty() => {
             Detail::Lines(vec![ReportLine {

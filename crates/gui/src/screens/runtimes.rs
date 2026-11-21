@@ -27,6 +27,7 @@ use semver::Version;
 
 use super::home::{InstallBar, install_bar};
 use super::sites::{Mark, message, mute, status_line};
+use crate::model::NoticeSource;
 use crate::model::{self, Action, Model, Removal, Route};
 use crate::strings;
 use crate::theme::page::{RUNTIMES_LIST_WIDTH, RUNTIMES_TAG_COLUMN, RUNTIMES_VERSION_COLUMN};
@@ -440,8 +441,8 @@ fn xdebug(model: &Model) -> XdebugView {
         lines,
         error: model
             .session
-            .xdebug_notice
-            .as_deref()
+            .notices
+            .code(NoticeSource::Xdebug)
             .map(strings::error_text),
     }
 }
@@ -477,8 +478,8 @@ fn dialog(model: &Model, d: &Descriptor) -> InstallDialog {
         text: model.install_text(d.runtime).to_owned(),
         error: model
             .session
-            .runtimes_notice
-            .as_deref()
+            .notices
+            .code(NoticeSource::Runtimes)
             .map(strings::error_text),
     }
 }
@@ -1285,7 +1286,7 @@ mod tests {
             "PHP 8.3.27 is in use, so it was not uninstalled."
         );
         // A done uninstall is one sentence.
-        model.session.uninstall_notice = Some(UninstallNotice::Done {
+        model.session.notices.set_uninstall(UninstallNotice::Done {
             runtime: Runtime::Php,
             version: v("8.2.28"),
         });

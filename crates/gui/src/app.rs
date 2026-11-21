@@ -16,6 +16,7 @@ use std::time::Instant;
 use eframe::egui;
 
 use crate::bridge::{self, Command};
+use crate::model::NoticeSource;
 use crate::model::{Action, Connection, Model, Pick, Route, Update};
 use crate::prefs::{Prefs, WindowSize};
 use crate::{opener, shell, strings, theme};
@@ -292,13 +293,19 @@ impl eframe::App for App {
                 Action::OpenFolder(name) => {
                     let folder = self.model.site_root(name).map(Path::to_path_buf);
                     if let Some(Err(code)) = folder.as_deref().map(opener::open_folder) {
-                        self.model.session.notice = Some(code.to_owned());
+                        self.model
+                            .session
+                            .notices
+                            .set_code(NoticeSource::Call, code.to_owned());
                     }
                     continue;
                 }
                 Action::OpenDataFolder => {
                     if let Err(code) = opener::open_folder(&self.model.data_dir) {
-                        self.model.session.notice = Some(code.to_owned());
+                        self.model
+                            .session
+                            .notices
+                            .set_code(NoticeSource::Call, code.to_owned());
                     }
                     continue;
                 }

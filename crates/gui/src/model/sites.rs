@@ -73,11 +73,13 @@ impl Model {
     pub fn park_request(&mut self, folder: &Path) -> Option<PathBuf> {
         match folder_path(folder) {
             Ok(path) => {
-                self.session.sites_notice = None;
+                self.session.notices.clear(NoticeSource::Sites);
                 Some(path)
             }
             Err(code) => {
-                self.session.sites_notice = Some(SitesNotice::Failed(code.to_owned()));
+                self.session
+                    .notices
+                    .set_sites(SitesNotice::Failed(code.to_owned()));
                 None
             }
         }
@@ -93,12 +95,15 @@ impl Model {
                     .file_name()
                     .and_then(marsa_core::sites::name_from_folder)
                     .unwrap_or_default();
-                self.session.sites_notice = None;
+                self.session.notices.clear(NoticeSource::Sites);
                 self.link = Some(LinkForm { folder, name });
                 // The form is drawn on Sites; the first-run panel has none.
                 self.route = Route::Sites;
             }
-            Err(code) => self.session.sites_notice = Some(SitesNotice::Failed(code.to_owned())),
+            Err(code) => self
+                .session
+                .notices
+                .set_sites(SitesNotice::Failed(code.to_owned())),
         }
     }
 
@@ -109,11 +114,13 @@ impl Model {
         let form = self.link.as_ref()?;
         let name = form.name.trim();
         if let Err(err) = marsa_core::sites::validate_name(name) {
-            self.session.sites_notice = Some(SitesNotice::Failed(err.code().to_owned()));
+            self.session
+                .notices
+                .set_sites(SitesNotice::Failed(err.code().to_owned()));
             return None;
         }
         let request = (name.to_owned(), form.folder.clone());
-        self.session.sites_notice = None;
+        self.session.notices.clear(NoticeSource::Sites);
         Some(request)
     }
 

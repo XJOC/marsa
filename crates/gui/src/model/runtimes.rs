@@ -161,7 +161,7 @@ impl Model {
             php,
         };
         // The notice was about the last action.
-        self.session.sites_notice = None;
+        self.session.notices.clear(NoticeSource::Sites);
         self.session.pending.push(Pending {
             change: change.clone(),
             shown: choice,
@@ -192,7 +192,7 @@ impl Model {
             runtime,
             version: version_text(runtime, &version, installed),
         };
-        self.session.runtimes_notice = None;
+        self.session.notices.clear(NoticeSource::Runtimes);
         self.session.pending.push(Pending {
             change: change.clone(),
             shown: Choice::Version(version),

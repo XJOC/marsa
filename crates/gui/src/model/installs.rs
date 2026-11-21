@@ -220,7 +220,9 @@ impl Model {
                 queued
             }
             Err(code) => {
-                self.session.runtimes_notice = Some(code.to_owned());
+                self.session
+                    .notices
+                    .set_code(NoticeSource::Runtimes, code.to_owned());
                 false
             }
         }
@@ -256,7 +258,7 @@ impl Model {
             return false;
         }
         // The notice was about the last action.
-        self.session.runtimes_notice = None;
+        self.session.notices.clear(NoticeSource::Runtimes);
         self.session.install_dialog = Some(runtime);
         true
     }
@@ -265,7 +267,7 @@ impl Model {
     /// next time.
     pub fn close_install(&mut self) {
         self.session.install_dialog = None;
-        self.session.runtimes_notice = None;
+        self.session.notices.clear(NoticeSource::Runtimes);
     }
 
     /// Queues `job`, as the Install button does once its field is right.
@@ -274,7 +276,7 @@ impl Model {
         if !self.is_connected() || self.installing() {
             return false;
         }
-        self.session.runtimes_notice = None;
+        self.session.notices.clear(NoticeSource::Runtimes);
         self.session.queue.push_back(job);
         true
     }

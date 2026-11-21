@@ -161,6 +161,7 @@ mod tests {
     use marsa_core::types::{Health, Site, SiteKind, SiteList};
 
     use super::*;
+    use crate::model::NoticeSource;
     use crate::model::Update;
     use crate::strings;
     use crate::widgets::harness::Harness;
@@ -287,7 +288,10 @@ mod tests {
         ] {
             let mut model = model_with_shop();
             model.route = route.clone();
-            model.session.sites_notice = Some(SitesNotice::Unlinked("shop".into()));
+            model
+                .session
+                .notices
+                .set_sites(SitesNotice::Unlinked("shop".into()));
             let tree = tree_of(&mut model);
             assert!(tree.node_with_text(&text).is_some(), "{route:?}");
         }
@@ -299,7 +303,10 @@ mod tests {
     #[test]
     fn a_failed_call_is_an_error_notice_that_stays_and_closes_with_its_button() {
         let mut model = model_with_shop();
-        model.session.notice = Some("service_busy".into());
+        model
+            .session
+            .notices
+            .set_code(NoticeSource::Call, "service_busy".into());
         let tree = tree_of(&mut model);
         let error = strings::error_text("service_busy");
         let bar = tree.node_with_text(&error).expect("the bar");

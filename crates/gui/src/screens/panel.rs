@@ -16,6 +16,7 @@ use eframe::egui::{Align2, Key, Label, Margin, Rect, RichText, ScrollArea, Ui, v
 
 use super::home::{self, DefaultPhp};
 use super::sites::{Mark, mute, status_line};
+use crate::model::NoticeSource;
 use crate::model::{Action, Connection, MAIN_RUNTIME, Model};
 use crate::panel::{MAX_SITES, PanelExit};
 use crate::shell::sidebar;
@@ -168,8 +169,8 @@ fn xdebug(model: &Model) -> XdebugLine {
         off,
         error: model
             .session
-            .xdebug_notice
-            .as_deref()
+            .notices
+            .code(NoticeSource::Xdebug)
             .map(strings::error_text),
     }
 }
