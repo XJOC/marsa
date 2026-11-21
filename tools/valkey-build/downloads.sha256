@@ -1,0 +1,38 @@
+# sha256 of every pinned download the Valkey build uses. The scripts refuse a
+# file whose hash differs, or whose name is not listed here. A new Valkey
+# version, a new musl, or a new Cygwin release needs a new line here.
+
+# Valkey 8.1.11 source, the GitHub tag archive.
+# Fingerprint compared on 2026-11-21: the line
+#   hash valkey-8.1.11.tar.gz sha256 db3642df...91133b50 https://github.com/valkey-io/valkey/archive/refs/tags/8.1.11.tar.gz
+# in https://raw.githubusercontent.com/valkey-io/valkey-hashes/main/README
+# (valkey-io's own list of source hashes), against the sha256 of the file
+# downloaded from that URL (3860826 bytes). They are the same.
+db3642dfc2fb24e42313b9e9c1557cf0160acce3bf2cd366ce654ce291133b50  valkey-8.1.11.tar.gz
+
+# musl 1.2.5 source, for its COPYRIGHT file (the Linux archives link musl
+# statically; Alpine 3.22 ships musl 1.2.5, and build.sh checks that).
+# Fingerprint compared on 2026-11-21: the sha512 of the file downloaded from
+# https://musl.libc.org/releases/musl-1.2.5.tar.gz equals the sha512 in Alpine
+# 3.22's APKBUILD for musl
+# (https://gitlab.alpinelinux.org/alpine/aports/-/raw/3.22-stable/main/musl/APKBUILD,
+# 7bb7f783...058c17c). The sha256 below is of that same file.
+a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4  musl-1.2.5.tar.gz
+
+# Cygwin 3.6.12-1 source package, the exact source of the cygwin1.dll that
+# build-cygwin.sh ships. LGPL-3.0+ asks us to offer it with the DLL. It holds
+# newlib-cygwin-3.6.12.tar.bz2 and cygwin.cygport. Fingerprint compared on
+# 2026-11-21: the sha512 of the file downloaded from
+# https://mirrors.kernel.org/sourceware/cygwin/src/release/cygwin/cygwin-3.6.12-1-src.tar.xz
+# (9318356 bytes) equals the `source:` sha512 for cygwin 3.6.12-1 in the
+# mirror's x86_64/setup.ini (9d70312a...4651856f...27889, the list the Cygwin
+# installer itself verifies). The sha256 below is of that same file.
+# The installer takes the current stable Cygwin, so when a new one appears,
+# build-cygwin.sh stops with the new version. Add its source line the same way.
+a7568019f048f95a61243b0ab389357947851a33ec50d7f6e8d8542aaee00150  cygwin-3.6.12-1-src.tar.xz
+
+# The GCC Runtime Library Exception 3.1 (COPYING.RUNTIME), for
+# cyggcc_s-seh-1.dll (libgcc, GPL-3.0 with that exception). The text is the
+# same in GCC 13.4.0 and 14.2.0 (both downloaded from the gcc-mirror/gcc tags
+# on GitHub gave this hash). Cygwin's own source package does not carry it.
+9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74  gcc-COPYING.RUNTIME-3.1

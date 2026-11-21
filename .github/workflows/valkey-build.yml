@@ -1,0 +1,274 @@
+name: valkey-build
+
+# Builds Valkey from the pinned upstream source for Marsa (ADR 0023). valkey.io
+# publishes Linux binaries only, and those need a recent glibc and the system's
+# OpenSSL, so Marsa builds its own:
+#
+# - darwin-arm64, darwin-x64: a normal build, minimum macOS 12.
+# - linux-x64, linux-arm64: static, against musl, in an Alpine 3.22 container,
+#   so one file runs on any Linux.
+# - windows-x64: built with Cygwin; the archive carries cygwin1.dll and
+#   cyggcc_s-seh-1.dll next to the programs.
+#
+# Every archive is unpacked and tested before it can be released
+# (tools/valkey-build/smoke.sh): the linking is what we promise, and a server
+# started on 127.0.0.1 answers PING, SET/GET and EVAL, writes dump.rdb on
+# SHUTDOWN SAVE, and a new start finds the value.
+#
+# - push to task/M6-06a-*: build and test only; the files are workflow
+#   artifacts (14 days).
+# - workflow_dispatch: the same; with `release` on (main only), also a DRAFT,
+#   pre-release GitHub Release valkey-<version>-r<revision> with the five
+#   archives, sha256sums.txt, and the source of the Cygwin DLL (LGPL asks us
+#   to ship it). The owner reads the draft and publishes it; then
+#   `cargo xtask manifest build` on the owner's Mac reads it (recipes/pins.toml).
+#   The minisign key never enters CI.
+
+on:
+  push:
+    branches: ["task/M6-06a-*"]
+    paths:
+      - ".github/workflows/valkey-build.yml"
+      - "tools/valkey-build/**"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Valkey version, in full (its sha256 must be in tools/valkey-build/downloads.sha256)"
+        type: string
+        default: "8.1.11"
+      revision:
+        description: "Build number for this version: 1, then 2 for a rebuild"
+        type: string
+        default: "1"
+      release:
+        description: "Create a DRAFT release valkey-<version>-r<revision> with the archives (main only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# A new push cancels the older run. A manual run is never cancelled.
+concurrency:
+  group: valkey-build-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+env:
+  VALKEY_VERSION: ${{ inputs.version || '8.1.11' }}
+  REVISION: ${{ inputs.revision || '1' }}
+  # A tag, not a digest: the image gets security fixes. Its musl must be the
+  # one downloads.sha256 pins; build.sh checks that.
+  BUILD_IMAGE: "alpine:3.22"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            os: macos-15
+            kind: native
+          - platform: darwin-x64
+            os: macos-15-intel
+            kind: native
+          - platform: linux-x64
+            os: ubuntu-24.04
+            kind: alpine
+            arch: x86_64
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+            kind: alpine
+            arch: aarch64
+          - platform: windows-x64
+            os: windows-2022
+            kind: cygwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Check the inputs
+        run: |
+          [[ "$VALKEY_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must look like 8.1.11"; exit 1; }
+          [[ "$REVISION" =~ ^[1-9][0-9]*$ ]] || { echo "revision must be a number from 1"; exit 1; }
+          echo "Valkey $VALKEY_VERSION, r$REVISION for $PLATFORM on $ImageOS $ImageVersion"
+          # Outside the checkout. (The runner context is not allowed in job env.)
+          echo "OUT=$RUNNER_TEMP/valkey-build/out" >> "$GITHUB_ENV"
+          echo "SMOKE=$RUNNER_TEMP/valkey-build/smoke" >> "$GITHUB_ENV"
+
+      # macOS: the runner's own Xcode tools. No token is passed to the build.
+      - name: Build on macOS
+        if: matrix.kind == 'native'
+        run: bash tools/valkey-build/build.sh "$OUT" 2>&1 | tee "$RUNNER_TEMP/valkey-build.log"
+
+      # Only the build script folder goes into the container, read-only. No
+      # token, no checkout, no other file of the repository. The container
+      # gets the network to download the pinned source and install gcc.
+      - name: Build in ${{ env.BUILD_IMAGE }}
+        if: matrix.kind == 'alpine'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p "$OUT"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE/tools/valkey-build:/work/valkey-build:ro" \
+            --volume "$OUT:/out" \
+            --env VALKEY_VERSION \
+            --env PLATFORM \
+            --env "EXPECT_ARCH=$ARCH" \
+            "$BUILD_IMAGE" \
+            sh -c 'apk add --no-cache bash build-base linux-headers curl tar file coreutils binutils > /dev/null && bash /work/valkey-build/build.sh /out' |
+            tee "$RUNNER_TEMP/valkey-build.log"
+
+      # Cygwin is not put in PATH: the smoke test below must find the DLLs in
+      # the package, as a user's machine would.
+      - name: Install Cygwin
+        if: matrix.kind == 'cygwin'
+        uses: cygwin/cygwin-install-action@v6
+        with:
+          packages: gcc-core make curl tar binutils bzip2 xz zip unzip
+          add-to-path: false
+
+      - name: Build in Cygwin
+        if: matrix.kind == 'cygwin'
+        shell: pwsh
+        run: |
+          $env:CHERE_INVOKING = '1'
+          C:\cygwin\bin\bash.exe -lc 'bash "$(cygpath -u "$GITHUB_WORKSPACE")/tools/valkey-build/build-cygwin.sh" "$(cygpath -u "$OUT")"'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The archive as it ships, unpacked somewhere else, and nothing else.
+      - name: Unpack the archive
+        if: matrix.kind != 'cygwin'
+        run: |
+          mkdir -p "$SMOKE"
+          tar -xzf "$OUT/dist/valkey-$VALKEY_VERSION-$PLATFORM.tar.gz" -C "$SMOKE"
+
+      - name: Unpack the archive (Windows)
+        if: matrix.kind == 'cygwin'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:SMOKE | Out-Null
+          Expand-Archive -Path "$env:OUT\dist\valkey-$env:VALKEY_VERSION-$env:PLATFORM.zip" -DestinationPath $env:SMOKE
+
+      - name: Smoke test
+        run: bash tools/valkey-build/smoke.sh "$SMOKE" "$PLATFORM" 2>&1 | tee "$RUNNER_TEMP/valkey-smoke.log"
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## $PLATFORM: Valkey $VALKEY_VERSION, r$REVISION"
+            echo
+            if [ -f "$RUNNER_TEMP/valkey-smoke.log" ]; then echo '```'; cat "$RUNNER_TEMP/valkey-smoke.log"; echo '```'; fi
+            if [ -f "$OUT/pkg/BUILD-INFO.txt" ]; then echo '```'; cat "$OUT/pkg/BUILD-INFO.txt"; echo '```'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: valkey-${{ matrix.platform }}
+          path: ${{ runner.temp }}/valkey-build/out/dist/
+          retention-days: 14
+          if-no-files-found: error
+
+  release:
+    name: draft release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: valkey-${{ inputs.version }}-r${{ inputs.revision }}
+    steps:
+      - name: Only from main
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "a release is made from main only, not $GITHUB_REF"; exit 1; }
+
+      - name: The tag must be new
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release $TAG exists (maybe as a draft): raise the revision"; exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > /dev/null 2>&1; then
+            echo "tag $TAG exists: raise the revision"; exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: valkey-*
+          path: artifacts
+
+      - name: Check the files and write sha256sums.txt
+        run: |
+          mkdir -p dist
+          for platform in darwin-arm64 darwin-x64 linux-x64 linux-arm64 windows-x64; do
+            ext=tar.gz
+            [ "$platform" = windows-x64 ] && ext=zip
+            name="valkey-$VALKEY_VERSION-$platform.$ext"
+            dir="artifacts/valkey-$platform"
+            [ -f "$dir/$name" ] || { echo "missing $dir/$name"; exit 1; }
+            (cd "$dir" && sha256sum -c "$name.sha256")
+            cp "$dir/$name" dist/
+          done
+          # The Cygwin source must be the one the DLL in the Windows archive
+          # was built from (BUILD-INFO.txt says which).
+          cygwin_version="$(unzip -p "dist/valkey-$VALKEY_VERSION-windows-x64.zip" BUILD-INFO.txt | sed -n 's/^cygwin \([^ ]*\) .*/\1/p')"
+          [[ "$cygwin_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]] || { echo "cannot read the Cygwin version from BUILD-INFO.txt: '$cygwin_version'"; exit 1; }
+          cygwin_src="cygwin-$cygwin_version-src.tar.xz"
+          [ -f "artifacts/valkey-windows-x64/$cygwin_src" ] || { echo "missing $cygwin_src"; ls artifacts/valkey-windows-x64; exit 1; }
+          cp "artifacts/valkey-windows-x64/$cygwin_src" dist/
+          echo "CYGWIN_VERSION=$cygwin_version" >> "$GITHUB_ENV"
+          echo "CYGWIN_SRC=$cygwin_src" >> "$GITHUB_ENV"
+          cd dist
+          sha256sum -- * | sort -k2 > ../sha256sums.txt
+          mv ../sha256sums.txt .
+          cat sha256sums.txt
+
+      - name: Create the draft release
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          {
+            echo "Valkey $VALKEY_VERSION for Marsa, build $REVISION (ADR 0023). Not a Marsa app release."
+            echo
+            echo "One archive per platform: bin/valkey-server, bin/valkey-cli, licenses/, and BUILD-INFO.txt."
+            echo "macOS: minimum macOS 12, linked only to libSystem. Linux: static, against musl, runs on any"
+            echo "distribution. Windows: built with Cygwin; bin/ holds cygwin1.dll and cyggcc_s-seh-1.dll."
+            echo "Built from the unmodified Valkey source, commit $GITHUB_SHA of this repository, in $run_url."
+            echo
+            echo '```'
+            cat dist/sha256sums.txt
+            echo '```'
+            echo
+            echo "## Cygwin (LGPL 3.0 or later) in the Windows archive"
+            echo
+            echo "bin/cygwin1.dll is the Cygwin runtime $CYGWIN_VERSION, covered by the GNU Lesser General Public"
+            echo "License, version 3 or later (licenses/cygwin.LGPL-3.0.txt in the archive). The Cygwin linking"
+            echo "exception (licenses/cygwin.CYGWIN_LICENSE) lets the Valkey programs be used under their own licence."
+            echo "bin/cyggcc_s-seh-1.dll is libgcc, GPL 3 with the GCC Runtime Library Exception 3.1."
+            echo
+            echo "- The complete source of this exact cygwin1.dll is attached: \`$CYGWIN_SRC\`"
+            echo "  (sha256 \`$(sha256sum "dist/$CYGWIN_SRC" | cut -d' ' -f1)\`). It is the file from"
+            echo "  <https://mirrors.kernel.org/sourceware/cygwin/src/release/cygwin/>, the source package of the Cygwin"
+            echo "  distribution; its sha512 is the one in that mirror's setup.ini."
+            echo "- To rebuild the DLL with a change, use that source with Cygwin's own build instructions."
+            echo "  The exact Valkey build is .github/workflows/valkey-build.yml and tools/valkey-build/ at commit"
+            echo "  $GITHUB_SHA of this repository."
+          } > notes.md
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --draft --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "Valkey $VALKEY_VERSION (build $REVISION)" --notes-file notes.md \
+            dist/*
+          echo "Draft release $TAG created. Read it, then publish it on GitHub." >> "$GITHUB_STEP_SUMMARY"
