@@ -4,6 +4,7 @@
 //! The calls are in `marsa_core::client`; this file prints their result.
 //! Nothing here prints the token: only the port and the PID leave the client.
 
+use marsa_core::codes;
 use std::error::Error as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -162,13 +163,15 @@ pub fn failure(err: &ClientError, data_dir: &Path, service: Option<&str>) -> Cli
 /// The file a message names, for the codes that name one.
 fn path_for(code: &str, data_dir: &Path) -> Option<PathBuf> {
     match code {
-        "daemon_start_failed" | "spawn_failed" => Some(data_dir.join("logs").join("marsad.log")),
-        "daemon_file_invalid" | "daemon_file_insecure" | "daemon_file_write" => {
+        codes::DAEMON_START_FAILED | codes::SPAWN_FAILED => {
+            Some(data_dir.join("logs").join("marsad.log"))
+        }
+        codes::DAEMON_FILE_INVALID | codes::DAEMON_FILE_INSECURE | codes::DAEMON_FILE_WRITE => {
             Some(daemon_file_path(&data_dir.join("run")))
         }
-        "caddy_not_installed" => Some(CaddyPaths::in_dir(data_dir).runtime_dir()),
-        "caddy_config_write" => Some(CaddyPaths::in_dir(data_dir).config_file),
-        "runtimes_read" => Some(RuntimesDir::in_dir(data_dir).root().to_path_buf()),
+        codes::CADDY_NOT_INSTALLED => Some(CaddyPaths::in_dir(data_dir).runtime_dir()),
+        codes::CADDY_CONFIG_WRITE => Some(CaddyPaths::in_dir(data_dir).config_file),
+        codes::RUNTIMES_READ => Some(RuntimesDir::in_dir(data_dir).root().to_path_buf()),
         _ => None,
     }
 }

@@ -5,6 +5,7 @@
 //! `global.toml`, and the daemon moves the sites that follow it, with their
 //! Caddy routes and php-fpm pools. The name is Valet's (`valet use php@8.3`).
 
+use marsa_core::codes;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -69,11 +70,13 @@ pub fn use_failure(
     let mut failure = failure(err, data_dir, None);
     let global_toml = ConfigPaths::in_dir(data_dir).global;
     let path = match failure.code.as_str() {
-        "config_read" | "config_invalid" | "config_write" => Some(global_toml.as_path()),
-        "invalid_version"
-        | "unsupported_alias"
-        | "version_not_installed"
-        | "no_default_version" => None,
+        codes::CONFIG_READ | codes::CONFIG_INVALID | codes::CONFIG_WRITE => {
+            Some(global_toml.as_path())
+        }
+        codes::INVALID_VERSION
+        | codes::UNSUPPORTED_ALIAS
+        | codes::VERSION_NOT_INSTALLED
+        | codes::NO_DEFAULT_VERSION => None,
         _ => return failure,
     };
     let requested = printable(version.trim());

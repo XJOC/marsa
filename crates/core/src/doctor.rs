@@ -233,7 +233,10 @@ pub fn daemon(answer: Result<(Health, u16), String>) -> Verdict {
             pid: health.pid,
             port,
         }),
-        Err(code) if code == "daemon_not_running" || code == "daemon_file_missing" => {
+        Err(code)
+            if code == crate::codes::DAEMON_NOT_RUNNING
+                || code == crate::codes::DAEMON_FILE_MISSING =>
+        {
             fail(Problem::DaemonNotRunning)
         }
         Err(code) => fail(Problem::DaemonError { code }),

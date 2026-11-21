@@ -13,6 +13,7 @@
 //!
 //! There is no CORS: a browser never gets a way in.
 
+use marsa_core::codes;
 use std::sync::Arc;
 
 use axum::Json;
@@ -75,19 +76,19 @@ struct Rejection {
 
 const ORIGIN_REJECTED: Rejection = Rejection {
     status: StatusCode::FORBIDDEN,
-    code: "origin_rejected",
+    code: codes::ORIGIN_REJECTED,
     message: "requests with an Origin header are not accepted",
 };
 
 const HOST_REJECTED: Rejection = Rejection {
     status: StatusCode::FORBIDDEN,
-    code: "host_rejected",
+    code: codes::HOST_REJECTED,
     message: "the Host header must be 127.0.0.1 and the daemon's port",
 };
 
 const UNAUTHORIZED: Rejection = Rejection {
     status: StatusCode::UNAUTHORIZED,
-    code: "unauthorized",
+    code: codes::UNAUTHORIZED,
     message: "a valid bearer token is required",
 };
 

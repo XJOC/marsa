@@ -19,6 +19,7 @@
 //! admin rights. It takes effect at the next login. The file itself is
 //! `marsa_core::platform::autostart`.
 
+use marsa_core::codes;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -121,7 +122,7 @@ impl Autostart {
             let message = format!("{} is not there", tray.display());
             return Err(HttpError::new(
                 StatusCode::CONFLICT,
-                "tray_not_found",
+                codes::TRAY_NOT_FOUND,
                 message,
             ));
         }
@@ -154,7 +155,7 @@ impl Autostart {
             let message = "start at login works on macOS and Linux only for now";
             HttpError::new(
                 StatusCode::NOT_IMPLEMENTED,
-                "autostart_unsupported",
+                codes::AUTOSTART_UNSUPPORTED,
                 message,
             )
         })?;
@@ -162,7 +163,7 @@ impl Autostart {
             let message = "the system gives no home folder, so the login file has no place";
             HttpError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "autostart_no_home",
+                codes::AUTOSTART_NO_HOME,
                 message,
             )
         })?;
@@ -184,7 +185,7 @@ async fn set(
     body: Result<Json<AutostartRequest>, JsonRejection>,
 ) -> Result<Json<AutostartState>, HttpError> {
     let Json(AutostartRequest { enabled }) =
-        body.map_err(|err| HttpError::new(err.status(), "invalid_body", err.body_text()))?;
+        body.map_err(|err| HttpError::new(err.status(), codes::INVALID_BODY, err.body_text()))?;
     blocking(daemon, move |autostart| autostart.set(enabled)).await
 }
 
@@ -200,7 +201,7 @@ where
         let message = "the autostart job failed";
         Err(HttpError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
+            codes::INTERNAL_ERROR,
             message,
         ))
     });
@@ -209,7 +210,7 @@ where
 
 fn tray_unknown() -> HttpError {
     let message = "the daemon's own path is not known, so neither is marsa-tray's";
-    HttpError::new(StatusCode::CONFLICT, "tray_not_found", message)
+    HttpError::new(StatusCode::CONFLICT, codes::TRAY_NOT_FOUND, message)
 }
 
 /// The login file or its folder failed. A path the file cannot hold is the

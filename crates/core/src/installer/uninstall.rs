@@ -143,9 +143,9 @@ impl UninstallError {
     /// lock has the install's own code.
     pub fn code(&self) -> &'static str {
         match self {
-            UninstallError::Busy => "install_busy",
-            UninstallError::NotInstalled { .. } => "version_not_installed",
-            UninstallError::Io { .. } => "uninstall_io",
+            UninstallError::Busy => crate::codes::INSTALL_BUSY,
+            UninstallError::NotInstalled { .. } => crate::codes::VERSION_NOT_INSTALLED,
+            UninstallError::Io { .. } => crate::codes::UNINSTALL_IO,
         }
     }
 }

@@ -167,13 +167,13 @@ impl DaemonFileError {
     /// that may be transient, see [`DaemonFileError::Unreadable`].
     pub fn code(&self) -> &'static str {
         match self {
-            DaemonFileError::Missing { .. } => "daemon_file_missing",
+            DaemonFileError::Missing { .. } => crate::codes::DAEMON_FILE_MISSING,
             DaemonFileError::Invalid { .. } | DaemonFileError::Unreadable { .. } => {
-                "daemon_file_invalid"
+                crate::codes::DAEMON_FILE_INVALID
             }
-            DaemonFileError::Insecure { .. } => "daemon_file_insecure",
-            DaemonFileError::Write { .. } => "daemon_file_write",
-            DaemonFileError::RandomUnavailable(_) => "random_unavailable",
+            DaemonFileError::Insecure { .. } => crate::codes::DAEMON_FILE_INSECURE,
+            DaemonFileError::Write { .. } => crate::codes::DAEMON_FILE_WRITE,
+            DaemonFileError::RandomUnavailable(_) => crate::codes::RANDOM_UNAVAILABLE,
         }
     }
 }

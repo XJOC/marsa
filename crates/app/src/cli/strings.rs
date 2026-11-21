@@ -530,6 +530,22 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              setup is not known. Run \"marsa doctor\" to see what is set up, then run \"marsa \
              setup\" again."
             .into(),
+        "setup_helper_partial" => "Marsa's helper could not do everything. Run \"marsa setup\" again; if it repeats, report it with the file logs/marsad.log."
+            .into(),
+        "setup_helper_running" => "A run of Marsa's helper is still going on. Wait for it to end, then run \"marsa setup\" again."
+            .into(),
+        "uninstall_helper_pipe_failed" => "Marsa could not reach its helper service, so nothing was removed. Run \"marsa uninstall --all\" again; if it repeats, report it with the file logs/marsad.log."
+            .into(),
+        "uninstall_helper_install_failed" => "Marsa could not start its helper service, so nothing was removed. Windows' service log and the file logs/marsad.log say why. Run \"marsa uninstall --all\" again."
+            .into(),
+        "uninstall_helper_install_running" => "The install of Marsa's helper service is still running. Wait a few minutes, then run \"marsa uninstall --all\" again."
+            .into(),
+        "uninstall_helper_not_the_service" => "Another program holds the name of Marsa's helper service, so Marsa sent it nothing and nothing was removed. Restart Windows, then run \"marsa uninstall --all\" again."
+            .into(),
+        "uninstall_helper_busy" => "Marsa's helper service is busy with another request. Wait a moment, then run \"marsa uninstall --all\" again."
+            .into(),
+        "uninstall_helper_no_answer" => "Marsa's helper service gave no answer, so the result of the uninstall is not known. Run \"marsa doctor\" to see what is left, then run \"marsa uninstall --all\" again."
+            .into(),
         "redirect_port_held" => "Another program uses port 80 or 443, and the redirect would \
              take its traffic. Stop that program, or turn off its web server, then run \
              \"marsa setup\" again."

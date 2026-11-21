@@ -36,7 +36,7 @@ use std::time::Duration;
 use marsa_core::helper::{OpResult, OpStatus};
 use tokio_util::sync::CancellationToken;
 
-use super::{ApiError, Flow, failure, parse_answer, results_of};
+use super::{ApiError, Flow, Reason, failure, parse_answer, results_of};
 
 /// The longest one request to the service may take: a `trust_install` whose
 /// `certutil` runs to its limit, and the rollback after it, is about eight
@@ -101,7 +101,7 @@ pub fn uninstall(
 ) -> Result<OpResult, ApiError> {
     let flow = Flow::Uninstall;
     interrupted(flow, stop)?;
-    let failed = |message: String| failure(&flow.code("helper_failed"), message);
+    let failed = |message: String| failure(flow.code(Reason::HelperFailed), message);
     match service.uninstall(helper) {
         Install::Exited(0) => Ok(OpResult {
             op: "uninstall_all".to_owned(),
@@ -112,7 +112,7 @@ pub fn uninstall(
         Install::Cancelled => {
             tracing::info!("the UAC prompt was declined");
             Err(failure(
-                &flow.code("cancelled"),
+                flow.code(Reason::Cancelled),
                 "the UAC prompt was declined",
             ))
         }
@@ -121,7 +121,7 @@ pub fn uninstall(
         Install::Exited(code) if code != 2 => {
             tracing::warn!(code, "marsa-helper uninstall did not remove everything");
             Err(failure(
-                &flow.code("helper_partial"),
+                flow.code(Reason::HelperPartial),
                 "the helper could not remove everything",
             ))
         }
@@ -134,7 +134,7 @@ pub fn uninstall(
         Install::StillRunning | Install::TimedOut => {
             tracing::warn!("a run of marsa-helper still goes on; no uninstall now");
             Err(failure(
-                &flow.code("helper_running"),
+                flow.code(Reason::HelperRunning),
                 "a run of the helper still goes on",
             ))
         }
@@ -169,10 +169,10 @@ pub fn launch(
     };
     if flow != Flow::Setup {
         let message = format!("the helper service cannot take the request: {why}");
-        return Err(failure(&flow.code("helper_pipe_failed"), message));
+        return Err(failure(flow.code(Reason::HelperPipeFailed), message));
     }
     interrupted(flow, stop)?;
-    let install_failed = |message: String| failure(&flow.code("helper_install_failed"), message);
+    let install_failed = |message: String| failure(flow.code(Reason::HelperInstallFailed), message);
     tracing::info!(why, "installing the helper service, behind the UAC prompt");
     let sid = service.user_sid().map_err(|reason| {
         tracing::warn!(%reason, "cannot read the SID of this user");
@@ -183,7 +183,7 @@ pub fn launch(
         Install::Cancelled => {
             tracing::info!("the UAC prompt was declined");
             return Err(failure(
-                &flow.code("cancelled"),
+                flow.code(Reason::Cancelled),
                 "the UAC prompt was declined",
             ));
         }
@@ -199,7 +199,7 @@ pub fn launch(
         Install::StillRunning | Install::TimedOut => {
             tracing::warn!("marsa-helper install still runs; no second prompt");
             return Err(failure(
-                &flow.code("helper_install_running"),
+                flow.code(Reason::HelperInstallRunning),
                 "the install of the helper service still runs",
             ));
         }
@@ -228,7 +228,10 @@ pub fn launch(
 /// `setup_interrupted` once the daemon stops.
 fn interrupted(flow: Flow, stop: &CancellationToken) -> Result<(), ApiError> {
     if stop.is_cancelled() {
-        return Err(failure(&flow.code("interrupted"), "the daemon is stopping"));
+        return Err(failure(
+            flow.code(Reason::Interrupted),
+            "the daemon is stopping",
+        ));
     }
     Ok(())
 }
@@ -254,17 +257,20 @@ fn ask(
             return Ok(Asked::Install("the service's pipe refused this user"));
         }
         Err("helper_interrupted") => {
-            return Err(failure(&flow.code("interrupted"), "the daemon is stopping"));
+            return Err(failure(
+                flow.code(Reason::Interrupted),
+                "the daemon is stopping",
+            ));
         }
         Err("helper_not_the_service") => {
             tracing::warn!("another program holds the helper service's pipe name");
             let message = "another program holds the name of the helper service's pipe, so \
                            nothing was sent";
-            return Err(failure(&flow.code("helper_not_the_service"), message));
+            return Err(failure(flow.code(Reason::HelperNotTheService), message));
         }
         Err("helper_busy") => {
             return Err(failure(
-                &flow.code("helper_busy"),
+                flow.code(Reason::HelperBusy),
                 "the helper service stayed busy with other requests",
             ));
         }
@@ -274,7 +280,7 @@ fn ask(
                 "the helper service gave no answer; the request may have run"
             );
             return Err(failure(
-                &flow.code("helper_no_answer"),
+                flow.code(Reason::HelperNoAnswer),
                 "the helper service gave no answer, so the result is not known",
             ));
         }
@@ -283,7 +289,7 @@ fn ask(
         Err(code) => {
             tracing::warn!(code, "the helper service's pipe failed; nothing was sent");
             let message = format!("the helper service's pipe failed: {code}");
-            return Err(failure(&flow.code("helper_pipe_failed"), message));
+            return Err(failure(flow.code(Reason::HelperPipeFailed), message));
         }
     };
     let Some(answer) = parse_answer(json.trim_ascii()) else {
@@ -292,7 +298,7 @@ fn ask(
             "the helper service's answer cannot be read"
         );
         return Err(failure(
-            &flow.code("helper_failed"),
+            flow.code(Reason::HelperFailed),
             "the helper service's answer cannot be read",
         ));
     };

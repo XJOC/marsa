@@ -4,6 +4,7 @@
 //! with it too (task M5-16), and so does PostgreSQL when it is on (task
 //! M6-03).
 
+use marsa_core::codes;
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::future::Future;
@@ -62,7 +63,7 @@ pub struct AlreadyRunning {
 impl AlreadyRunning {
     /// Stable error name.
     pub fn code(&self) -> &'static str {
-        "daemon_already_running"
+        codes::DAEMON_ALREADY_RUNNING
     }
 }
 

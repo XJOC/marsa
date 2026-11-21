@@ -19,6 +19,7 @@ use super::user_trust;
 use super::windows;
 use marsa_core::caddy::CaddyInput;
 use marsa_core::caddy::CaddyPaths;
+use marsa_core::codes;
 use marsa_core::dns;
 use marsa_core::dns::DNS_PORT;
 use marsa_core::dns::LinuxPath;
@@ -41,14 +42,6 @@ const PORTS_INSTALL: &str = "ports_install";
 const RESOLVER_INSTALL: &str = "resolver_install";
 
 pub(super) const UNINSTALL_ALL: &str = "uninstall_all";
-
-/// Linux: the second request of setup, with the hosts way's operations,
-/// did not run (task M4-18k2). The steps before it are done.
-const SETUP_HOSTS_NOT_WRITTEN: &str = "setup_hosts_not_written";
-
-/// Linux: the second request of setup, which takes Marsa's old block out of
-/// the hosts file once the link is made, did not run.
-const SETUP_HOSTS_NOT_REMOVED: &str = "setup_hosts_not_removed";
 
 /// The operations of the hosts way, into `ops`; a `hosts_sync` that cannot
 /// be sent goes into `report` as skipped ([`linux_dns::hosts_ops`]).
@@ -125,7 +118,9 @@ impl Setup {
                     && marsa_core::helper::certificate_sha256(&pem).is_none() =>
             {
                 tracing::warn!("the CA root is not one strict certificate; no trust_install");
-                report.skipped.push(skip(TRUST_INSTALL, "ca_unreadable"));
+                report
+                    .skipped
+                    .push(skip(TRUST_INSTALL, codes::CA_UNREADABLE));
             }
             Ok(pem) => ops.push(HelperOp::TrustInstall { pem }),
             Err(code) => report.skipped.push(skip(TRUST_INSTALL, code)),
@@ -160,10 +155,10 @@ impl Setup {
                 }
                 Some(_) => report
                     .skipped
-                    .push(skip(linux_dns::HOSTS_SYNC, linux_dns::HOSTS_TOO_MANY_NAMES)),
+                    .push(skip(linux_dns::HOSTS_SYNC, codes::HOSTS_TOO_MANY_NAMES)),
                 None => report
                     .skipped
-                    .push(skip(linux_dns::HOSTS_SYNC, linux_dns::HOSTS_SITES_UNKNOWN)),
+                    .push(skip(linux_dns::HOSTS_SYNC, codes::HOSTS_SITES_UNKNOWN)),
             }
         } else if let Some(code) = dns_down {
             dns_skipped(&mut report, RESOLVER_INSTALL, code);
@@ -211,7 +206,7 @@ impl Setup {
     /// still has Marsa's `block`, `hosts_remove` goes in a second request.
     /// Either is a second password prompt of the same `marsa setup`. When
     /// that request does not run, the error says that the steps before it
-    /// are done: [`SETUP_HOSTS_NOT_WRITTEN`] or [`SETUP_HOSTS_NOT_REMOVED`].
+    /// are done: [`codes::SETUP_HOSTS_NOT_WRITTEN`] or [`codes::SETUP_HOSTS_NOT_REMOVED`].
     fn after_the_link(
         &self,
         report: &mut SetupReport,
@@ -245,10 +240,10 @@ impl Setup {
             {
                 return;
             }
-            (ops, SETUP_HOSTS_NOT_WRITTEN)
+            (ops, codes::SETUP_HOSTS_NOT_WRITTEN)
         } else if block && linux_dns::link_made(&report.results) {
             tracing::info!("the link is made; taking Marsa's old block out of the hosts file");
-            (vec![HelperOp::HostsRemove], SETUP_HOSTS_NOT_REMOVED)
+            (vec![HelperOp::HostsRemove], codes::SETUP_HOSTS_NOT_REMOVED)
         } else {
             return;
         };
@@ -256,7 +251,10 @@ impl Setup {
             Ok(results) => report.results.extend(results),
             // The helper may have run: their texts say so.
             Err(error)
-                if matches!(error.code.as_str(), "setup_timed_out" | "setup_interrupted") =>
+                if matches!(
+                    error.code.as_str(),
+                    codes::SETUP_TIMED_OUT | codes::SETUP_INTERRUPTED
+                ) =>
             {
                 report.error = Some(error);
             }
@@ -300,9 +298,13 @@ impl Setup {
                     );
                 }
                 report.port_holders = holders;
-                report.skipped.push(skip(PF_INSTALL, "redirect_port_held"));
+                report
+                    .skipped
+                    .push(skip(PF_INSTALL, codes::REDIRECT_PORT_HELD));
             }
-            None => report.skipped.push(skip(PF_INSTALL, "ports_not_checked")),
+            None => report
+                .skipped
+                .push(skip(PF_INSTALL, codes::PORTS_NOT_CHECKED)),
         }
     }
 
@@ -323,7 +325,7 @@ impl Setup {
                 );
                 let message = "the home folder of the current user is not known, so the \
                                login keychain cannot be found";
-                user_trust::failed(TRUST_INSTALL, user_trust::TRUST_ADD_FAILED, message)
+                user_trust::failed(TRUST_INSTALL, codes::TRUST_ADD_FAILED, message)
             }
         }
     }
@@ -340,7 +342,7 @@ impl Setup {
         let Some(home) = &self.home else {
             tracing::warn!("the home folder is not known, so the NSS databases cannot be found");
             let message = "the home folder of the current user is not known";
-            let failed = user_trust::failed(nss::NSS_INSTALL, nss::NSS_ADD_FAILED, message);
+            let failed = user_trust::failed(nss::NSS_INSTALL, codes::NSS_ADD_FAILED, message);
             report.results.push(failed);
             return;
         };
@@ -374,7 +376,10 @@ impl Setup {
         let helper = self.checked_helper(Flow::Uninstall, Platform::WindowsX64)?;
         let Some(service) = self.windows.as_deref() else {
             tracing::error!("no helper service on this system");
-            return Err(failure("uninstall_helper_failed", "no helper service here"));
+            return Err(failure(
+                codes::UNINSTALL_HELPER_FAILED,
+                "no helper service here",
+            ));
         };
         windows::uninstall(service, helper, stop)
     }

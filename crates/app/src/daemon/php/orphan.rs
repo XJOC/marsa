@@ -97,6 +97,7 @@
 //! Elsewhere no pid file is written, nothing is signalled, and a file left
 //! from before is deleted.
 
+use marsa_core::codes;
 use std::cmp::Ordering;
 use std::fmt;
 use std::io;
@@ -122,7 +123,7 @@ use crate::daemon::supervisor::{ServiceHandle, ServiceRuntime, lock};
 
 /// Our old php-fpm did not stop, or cannot be verified, while its socket or
 /// port stays in use.
-pub const ORPHAN_STUCK: &str = "php_fpm_orphan_stuck";
+pub const ORPHAN_STUCK: &str = codes::PHP_FPM_ORPHAN_STUCK;
 
 /// The line before a stop, in the pool's recent lines.
 pub const STOPPING_ORPHAN: &str = "marsad: Stopping an old php-fpm left by a crashed marsad.";

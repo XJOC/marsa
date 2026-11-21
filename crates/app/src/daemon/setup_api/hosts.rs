@@ -33,6 +33,7 @@
 //! On macOS and Windows `used` is `false`, and the sync answers 409
 //! `hosts_not_used`; so does Linux where the block is not this folder's.
 
+use marsa_core::codes;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -106,7 +107,7 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
         if !dns::hosts_names_fit(&names) {
             let skipped = SetupSkip {
                 op: linux_dns::HOSTS_SYNC.to_owned(),
-                code: linux_dns::HOSTS_TOO_MANY_NAMES.to_owned(),
+                code: codes::HOSTS_TOO_MANY_NAMES.to_owned(),
             };
             report.skipped.push(skipped);
             return Ok(report);
@@ -143,12 +144,16 @@ fn read_status(daemon: &Daemon, setup: &Setup, names: &[String]) -> HostsStatus 
 
 fn not_used() -> HttpError {
     let message = "this system does not put .test names in the hosts file";
-    HttpError::new(StatusCode::CONFLICT, "hosts_not_used", message)
+    HttpError::new(StatusCode::CONFLICT, codes::HOSTS_NOT_USED, message)
 }
 
 fn internal_error() -> HttpError {
     let message = "the hosts job failed";
-    HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+    HttpError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        codes::INTERNAL_ERROR,
+        message,
+    )
 }
 
 #[cfg(test)]

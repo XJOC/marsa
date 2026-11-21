@@ -28,6 +28,7 @@
 //!
 //! Every error, the extractors' own included, is an `ErrorBody`.
 
+use marsa_core::codes;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -55,7 +56,7 @@ use super::state::Daemon;
 use super::supervisor::{ServiceRuntime, lock};
 
 /// The answer to an action on a service that the sites sync starts and stops.
-pub const MANAGED_BY_SITES: &str = "service_managed_by_sites";
+pub const MANAGED_BY_SITES: &str = codes::SERVICE_MANAGED_BY_SITES;
 
 /// How long an action on Caddy waits for another one to end before
 /// `409 service_busy`. Longer than the slowest start, about 19 s: about 10 s
@@ -173,7 +174,7 @@ async fn server_action(
             let message = "the action task of the database server failed";
             Err(HttpError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
+                codes::INTERNAL_ERROR,
                 message,
             ))
         }
@@ -314,7 +315,7 @@ fn service<'a>(daemon: &'a Daemon, id: &str) -> Result<Service<'a>, HttpError> {
     let message = format!("no service named {id:?}");
     Err(HttpError::new(
         StatusCode::NOT_FOUND,
-        "service_not_found",
+        codes::SERVICE_NOT_FOUND,
         message,
     ))
 }
@@ -332,11 +333,19 @@ fn action_error(err: &ActionError) -> HttpError {
 }
 
 fn bad_path(rejection: PathRejection) -> HttpError {
-    HttpError::new(rejection.status(), "invalid_path", rejection.body_text())
+    HttpError::new(
+        rejection.status(),
+        codes::INVALID_PATH,
+        rejection.body_text(),
+    )
 }
 
 fn bad_query(rejection: QueryRejection) -> HttpError {
-    HttpError::new(rejection.status(), "invalid_query", rejection.body_text())
+    HttpError::new(
+        rejection.status(),
+        codes::INVALID_QUERY,
+        rejection.body_text(),
+    )
 }
 
 #[cfg(test)]
@@ -598,7 +607,7 @@ mod tests {
     async fn a_held_dns_port_is_listed_as_failed_and_a_start_tries_again() {
         use crate::daemon::api::router;
         use crate::daemon::auth::AuthConfig;
-        use crate::daemon::dns::{DNS_PORT_IN_USE, held_dns_port};
+        use crate::daemon::dns::held_dns_port;
         use axum::http::Request;
         use marsa_core::platform::daemon_file::{Token, daemon_authority};
         use marsa_core::types::ServiceState;
@@ -630,7 +639,7 @@ mod tests {
             (response.status(), text(response).await)
         };
         let failed = ServiceState::Failed {
-            code: DNS_PORT_IN_USE.into(),
+            code: "dns_port_in_use".into(),
         };
 
         let (status, body) = send("GET", "/v1/services").await;

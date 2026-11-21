@@ -2137,6 +2137,26 @@ fn error_message(code: &str) -> Option<&'static str> {
         "php_fpm_not_installed" => "This PHP version has no php-fpm.",
         "php_fpm_unavailable" => "php-fpm is not available for this PHP version.",
         "php_path_not_allowed" => "That PHP path is not allowed.",
+        "setup_helper_partial" => "Marsa's helper could not do everything. Run setup again.",
+        "setup_helper_running" => {
+            "A run of Marsa's helper is still going on. Wait, then run setup again."
+        }
+        "uninstall_helper_pipe_failed" => {
+            "Marsa could not reach its helper service, so nothing was removed."
+        }
+        "uninstall_helper_install_failed" => {
+            "Marsa could not start its helper service, so nothing was removed."
+        }
+        "uninstall_helper_install_running" => {
+            "The install of Marsa's helper service is still running. Try again in a few minutes."
+        }
+        "uninstall_helper_not_the_service" => {
+            "Another program holds the name of Marsa's helper service. Restart Windows, then try again."
+        }
+        "uninstall_helper_busy" => "Marsa's helper service is busy. Try again in a moment.",
+        "uninstall_helper_no_answer" => {
+            "Marsa's helper service gave no answer, so the result of the uninstall is not known."
+        }
         BRIDGE_FAILED => "The window could not start its background worker.",
         TRAY_WORKER_FAILED => "The menu-bar icon could not start its background worker.",
         WINDOW_START_FAILED => "Cannot start the window (marsa-gui).",

@@ -4,6 +4,7 @@
 //! authorized, an OS error number).
 
 use super::Flow;
+use super::Reason;
 use super::failure;
 use super::helper::MAX_ANSWER;
 use super::helper::braces;
@@ -96,12 +97,12 @@ pub(super) fn read_answer_for(
         if !output.success() && cancelled(&output.stderr) {
             tracing::info!("the admin prompt was cancelled");
             let message = "the admin prompt was cancelled";
-            return Err(failure(&flow.code("cancelled"), message));
+            return Err(failure(flow.code(Reason::Cancelled), message));
         }
         if !output.success() && not_authorized(&output.stderr) {
             tracing::info!("macOS did not give admin rights");
             let message = "macOS did not give admin rights: a wrong password, or no prompt";
-            return Err(failure(&flow.code("not_authorized"), message));
+            return Err(failure(flow.code(Reason::NotAuthorized), message));
         }
         if !output.success()
             && let Some(number) = os_error(&output.stderr)
@@ -115,7 +116,7 @@ pub(super) fn read_answer_for(
                 "macOS could not run the admin prompt (error {number}), so marsa-helper did not \
                  run; running it again is safe"
             );
-            return Err(failure(&flow.code("prompt_failed"), &message));
+            return Err(failure(flow.code(Reason::PromptFailed), &message));
         }
         tracing::warn!(
             exit = ?output.code,
@@ -125,7 +126,7 @@ pub(super) fn read_answer_for(
             "marsa-helper gave no answer Marsa can read"
         );
         return Err(failure(
-            &flow.code("helper_failed"),
+            flow.code(Reason::HelperFailed),
             "the helper's answer cannot be read",
         ));
     };
@@ -144,7 +145,7 @@ pub(super) fn not_finished(flow: Flow, err: &io::Error, program: &str) -> ApiErr
                 "Marsa stopped waiting for {noun} after 5 minutes; some steps may already have \
                  run as root, and running {noun} again is safe"
             );
-            failure(&flow.code("timed_out"), message)
+            failure(flow.code(Reason::TimedOut), message)
         }
         io::ErrorKind::Interrupted => {
             tracing::warn!("the daemon is stopping; Marsa stopped waiting for {noun}");
@@ -152,11 +153,14 @@ pub(super) fn not_finished(flow: Flow, err: &io::Error, program: &str) -> ApiErr
                 "the daemon stopped, so Marsa stopped waiting for {noun}; some steps may \
                  already have run as root, and running {noun} again is safe"
             );
-            failure(&flow.code("interrupted"), message)
+            failure(flow.code(Reason::Interrupted), message)
         }
         _ => {
             tracing::warn!(error = %err, program, "cannot run the program that asks for the password");
-            failure(&flow.code("helper_failed"), format!("cannot run {program}"))
+            failure(
+                flow.code(Reason::HelperFailed),
+                format!("cannot run {program}"),
+            )
         }
     }
 }

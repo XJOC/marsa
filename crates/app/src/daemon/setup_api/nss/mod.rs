@@ -77,6 +77,7 @@ mod certutil;
 mod databases;
 mod record;
 
+use marsa_core::codes;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -98,21 +99,11 @@ use record::{Fingerprint, fingerprint_digits, read_record, write_record};
 
 /// The op name of the step in a report.
 pub const NSS_INSTALL: &str = "nss_install";
-/// `certutil` is not installed: the step is skipped with this code.
-pub const NSS_TOOL_MISSING: &str = "nss_tool_missing";
-/// At least one database did not take the certificate.
-pub const NSS_ADD_FAILED: &str = "nss_add_failed";
-/// A database was left alone: a link, or another user's (often after a
-/// browser or `certutil` ran with `sudo`). No `certutil` failed.
-pub const NSS_DB_REFUSED: &str = "nss_db_refused";
 /// The longest the whole step takes, the pipe grace after each `certutil`
 /// included. Part of `SLOWEST_SETUP` on Linux.
 pub const NSS_BUDGET: Duration = Duration::from_secs(40);
 /// The op name of the removal in an uninstall report.
 pub const NSS_REMOVE: &str = "nss_remove";
-/// A recorded root is still in a database, or `certutil` is not there to
-/// take it out. The record keeps it, so the next uninstall tries again.
-pub const NSS_REMOVE_FAILED: &str = "nss_remove_failed";
 /// The checked certificate for `certutil -i`, in the trust folder.
 const PEM_FILE: &str = "nss.pem";
 
@@ -121,7 +112,7 @@ const PEM_FILE: &str = "nss.pem";
 pub enum Outcome {
     /// The result of `nss_install`.
     Ran(OpResult),
-    /// The step did not run: [`NSS_TOOL_MISSING`].
+    /// The step did not run: [`codes::NSS_TOOL_MISSING`].
     Skipped(&'static str),
 }
 
@@ -137,8 +128,13 @@ pub fn install(
 ) -> Outcome {
     // From the start: the folder scan and the file count too.
     let deadline = Instant::now() + NSS_BUDGET;
-    let failed =
-        |message: String| Outcome::Ran(user_trust::failed(NSS_INSTALL, NSS_ADD_FAILED, message));
+    let failed = |message: String| {
+        Outcome::Ran(user_trust::failed(
+            NSS_INSTALL,
+            codes::NSS_ADD_FAILED,
+            message,
+        ))
+    };
     if !home.is_absolute() || !files.dir().is_absolute() {
         return failed("the home folder or the trust folder is not an absolute path".into());
     }
@@ -204,7 +200,7 @@ pub fn install(
                 tracing::warn!(
                     "{CERTUTIL} is not installed; Chrome and Firefox do not trust Marsa's CA"
                 );
-                return Outcome::Skipped(NSS_TOOL_MISSING);
+                return Outcome::Skipped(codes::NSS_TOOL_MISSING);
             }
             Err(Failure::Other(why)) => {
                 tracing::warn!(%dir, why = %why, "an NSS database did not take Marsa's CA root");
@@ -227,9 +223,9 @@ pub fn install(
         // A database `certutil` failed on is the more useful code: the
         // refused ones are in the message too.
         let code = if failures.is_empty() {
-            NSS_DB_REFUSED
+            codes::NSS_DB_REFUSED
         } else {
-            NSS_ADD_FAILED
+            codes::NSS_ADD_FAILED
         };
         let all: Vec<String> = failures.into_iter().chain(refused).collect();
         let message = format!(
@@ -262,7 +258,8 @@ pub fn remove(
     stop: &CancellationToken,
 ) -> OpResult {
     let deadline = Instant::now() + NSS_BUDGET;
-    let failed = |message: String| user_trust::failed(NSS_REMOVE, NSS_REMOVE_FAILED, message);
+    let failed =
+        |message: String| user_trust::failed(NSS_REMOVE, codes::NSS_REMOVE_FAILED, message);
     if !home.is_absolute() || !files.dir().is_absolute() {
         return failed("the home folder or the trust folder is not an absolute path".into());
     }
@@ -759,7 +756,7 @@ mod tests {
             _ => ok(""),
         });
         let failed = result(home.install(&fake));
-        assert_eq!(failed.code.as_deref(), Some(NSS_ADD_FAILED));
+        assert_eq!(failed.code.as_deref(), Some(codes::NSS_ADD_FAILED));
         assert!(
             failed
                 .message
@@ -858,7 +855,11 @@ mod tests {
             let home = Home::new();
             let fake = chrome_with(&home, rows, &[TEST_CA]);
             let failed = result(home.install(&fake));
-            assert_eq!(failed.code.as_deref(), Some(NSS_ADD_FAILED), "{rows:?}");
+            assert_eq!(
+                failed.code.as_deref(),
+                Some(codes::NSS_ADD_FAILED),
+                "{rows:?}"
+            );
             assert!(failed.message.unwrap().contains("under another nickname"));
             let calls = tails(&fake);
             assert!(calls.iter().all(|args| args[0] == "-L"), "{calls:?}");
@@ -875,7 +876,7 @@ mod tests {
             _ => ok(""),
         });
         let failed = result(home.install(&fake));
-        assert_eq!(failed.code.as_deref(), Some(NSS_ADD_FAILED));
+        assert_eq!(failed.code.as_deref(), Some(codes::NSS_ADD_FAILED));
         assert_eq!(
             tails(&fake).last().unwrap(),
             &["-D", "-n", OURS, "-f", "/dev/null"]
@@ -894,7 +895,7 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, record_path(&home.files())).unwrap();
         let fake = fresh();
         let failed = result(home.install(&fake));
-        assert_eq!(failed.code.as_deref(), Some(NSS_ADD_FAILED));
+        assert_eq!(failed.code.as_deref(), Some(codes::NSS_ADD_FAILED));
         assert!(fake.calls().is_empty());
     }
 
@@ -906,7 +907,7 @@ mod tests {
         fs::write(home.home().join(".pki"), "").unwrap();
         let fake = fresh();
         let refused = result(home.install(&fake));
-        assert_eq!(refused.code.as_deref(), Some(NSS_DB_REFUSED));
+        assert_eq!(refused.code.as_deref(), Some(codes::NSS_DB_REFUSED));
         assert!(refused.message.unwrap().contains(".pki is not a folder"));
         assert!(fake.calls().is_empty());
     }
@@ -915,7 +916,10 @@ mod tests {
     fn no_certutil_skips_the_step() {
         let home = Home::new();
         let fake = Fake::answering(|_, _| Err(io::Error::from(io::ErrorKind::NotFound)));
-        assert_eq!(home.install(&fake), Outcome::Skipped(NSS_TOOL_MISSING));
+        assert_eq!(
+            home.install(&fake),
+            Outcome::Skipped(codes::NSS_TOOL_MISSING)
+        );
         assert_eq!(fake.calls().len(), 1);
         // Nothing was added, so nothing is recorded for the uninstall.
         assert!(!record_path(&home.files()).exists());
@@ -937,7 +941,7 @@ mod tests {
         });
         let failed = result(home.install(&fake));
         assert_eq!(failed.status, OpStatus::Failed);
-        assert_eq!(failed.code.as_deref(), Some(NSS_ADD_FAILED));
+        assert_eq!(failed.code.as_deref(), Some(codes::NSS_ADD_FAILED));
         let message = failed.message.unwrap();
         assert!(message.starts_with("1 NSS database(s)"), "{message}");
         assert!(message.contains(&format!(
@@ -1000,7 +1004,7 @@ mod tests {
         let stop = CancellationToken::new();
         let files = TrustFiles::in_dir(Path::new("/data"));
         let outcome = install(fake.as_ref(), Path::new("home"), TEST_CA, &files, &stop);
-        assert_eq!(result(outcome).code.as_deref(), Some(NSS_ADD_FAILED));
+        assert_eq!(result(outcome).code.as_deref(), Some(codes::NSS_ADD_FAILED));
         assert!(fake.calls().is_empty());
     }
 
@@ -1032,7 +1036,7 @@ mod tests {
 
         let fake = fresh();
         let failed = result(home.install(&fake));
-        assert_eq!(failed.code.as_deref(), Some(NSS_DB_REFUSED));
+        assert_eq!(failed.code.as_deref(), Some(codes::NSS_DB_REFUSED));
         let message = failed.message.unwrap();
         assert!(message.starts_with("4 NSS database(s)"), "{message}");
         assert!(
@@ -1123,7 +1127,7 @@ mod tests {
         home.profile(&[".mozilla", "firefox"], "a.default");
         let missing = Fake::answering(|_, _| Err(io::Error::from(io::ErrorKind::NotFound)));
         let failed = remove_all(&home, &missing);
-        assert_eq!(failed.code.as_deref(), Some(NSS_REMOVE_FAILED));
+        assert_eq!(failed.code.as_deref(), Some(codes::NSS_REMOVE_FAILED));
         assert!(
             failed
                 .message
@@ -1138,7 +1142,7 @@ mod tests {
             _ => exit(255, "SEC_ERROR_TOKEN_NOT_LOGGED_IN"),
         });
         let failed = remove_all(&home, &refused);
-        assert_eq!(failed.code.as_deref(), Some(NSS_REMOVE_FAILED));
+        assert_eq!(failed.code.as_deref(), Some(codes::NSS_REMOVE_FAILED));
         assert_eq!(
             fs::read_to_string(record_path(&home.files())).unwrap(),
             format!("{HASH_OURS}\n")

@@ -21,6 +21,7 @@
 //! folder with the tables of its sites (`forget`). A site from a parked folder
 //! cannot be unlinked alone: `site_is_parked` (409).
 
+use marsa_core::codes;
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -114,7 +115,7 @@ async fn patch_site(
     body: JsonBody<SitePatch>,
 ) -> Answer {
     let UrlPath(name) =
-        path.map_err(|err| HttpError::new(err.status(), "invalid_path", err.body_text()))?;
+        path.map_err(|err| HttpError::new(err.status(), codes::INVALID_PATH, err.body_text()))?;
     update(daemon, name, body).await
 }
 
@@ -157,7 +158,7 @@ async fn unlink_site(
     path: Result<UrlPath<String>, PathRejection>,
 ) -> Answer {
     let UrlPath(name) =
-        path.map_err(|err| HttpError::new(err.status(), "invalid_path", err.body_text()))?;
+        path.map_err(|err| HttpError::new(err.status(), codes::INVALID_PATH, err.body_text()))?;
     unlink(daemon, name).await
 }
 
@@ -365,7 +366,7 @@ fn check_absolute(path: &Path) -> Result<(), HttpError> {
     let message = format!("{} is not an absolute path", path.display());
     Err(HttpError::new(
         StatusCode::BAD_REQUEST,
-        "site_path_relative",
+        codes::SITE_PATH_RELATIVE,
         message,
     ))
 }
@@ -404,7 +405,7 @@ fn site_error(err: &SiteError) -> HttpError {
 
 fn not_found(name: &str) -> HttpError {
     let message = format!("no site named {name:?}");
-    HttpError::new(StatusCode::NOT_FOUND, "site_not_found", message)
+    HttpError::new(StatusCode::NOT_FOUND, codes::SITE_NOT_FOUND, message)
 }
 
 fn site_is_parked(name: &str, dir: &Path) -> HttpError {
@@ -412,16 +413,20 @@ fn site_is_parked(name: &str, dir: &Path) -> HttpError {
         "{name:?} comes from the parked folder {}; forget that folder to remove its sites",
         dir.display()
     );
-    HttpError::new(StatusCode::CONFLICT, "site_is_parked", message)
+    HttpError::new(StatusCode::CONFLICT, codes::SITE_IS_PARKED, message)
 }
 
 fn not_parked(path: &Path) -> HttpError {
     let message = format!("{} is not a parked folder", path.display());
-    HttpError::new(StatusCode::NOT_FOUND, "folder_not_parked", message)
+    HttpError::new(StatusCode::NOT_FOUND, codes::FOLDER_NOT_PARKED, message)
 }
 
 fn bad_body(rejection: JsonRejection) -> HttpError {
-    HttpError::new(rejection.status(), "invalid_body", rejection.body_text())
+    HttpError::new(
+        rejection.status(),
+        codes::INVALID_BODY,
+        rejection.body_text(),
+    )
 }
 
 #[cfg(test)]

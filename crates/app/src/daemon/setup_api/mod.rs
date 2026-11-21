@@ -34,6 +34,7 @@ pub(super) mod test_support;
 pub mod user_trust;
 pub mod windows;
 
+use marsa_core::codes;
 use std::collections::BTreeSet;
 use std::env::consts::EXE_SUFFIX;
 use std::fmt;
@@ -111,14 +112,76 @@ pub enum Flow {
     Uninstall,
 }
 
+/// Why a helper request ended without its result, for [`Flow::code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reason {
+    Cancelled,
+    NotAuthorized,
+    PromptFailed,
+    TimedOut,
+    Interrupted,
+    PkexecMissing,
+    HelperFailed,
+    HelperRejected,
+    HelperMissing,
+    HelperUnsafe,
+    HelperPartial,
+    HelperRunning,
+    HelperPipeFailed,
+    HelperInstallFailed,
+    HelperInstallRunning,
+    HelperNotTheService,
+    HelperBusy,
+    HelperNoAnswer,
+}
+
 impl Flow {
-    /// `setup_<what>` or `uninstall_<what>`.
-    pub fn code(self, what: &str) -> String {
-        let prefix = match self {
-            Self::Setup => "setup",
-            Self::Uninstall => "uninstall",
-        };
-        format!("{prefix}_{what}")
+    /// The code of `reason` in this flow: `setup_*` or `uninstall_*`.
+    pub fn code(self, reason: Reason) -> &'static str {
+        match (self, reason) {
+            (Self::Setup, Reason::Cancelled) => codes::SETUP_CANCELLED,
+            (Self::Uninstall, Reason::Cancelled) => codes::UNINSTALL_CANCELLED,
+            (Self::Setup, Reason::NotAuthorized) => codes::SETUP_NOT_AUTHORIZED,
+            (Self::Uninstall, Reason::NotAuthorized) => codes::UNINSTALL_NOT_AUTHORIZED,
+            (Self::Setup, Reason::PromptFailed) => codes::SETUP_PROMPT_FAILED,
+            (Self::Uninstall, Reason::PromptFailed) => codes::UNINSTALL_PROMPT_FAILED,
+            (Self::Setup, Reason::TimedOut) => codes::SETUP_TIMED_OUT,
+            (Self::Uninstall, Reason::TimedOut) => codes::UNINSTALL_TIMED_OUT,
+            (Self::Setup, Reason::Interrupted) => codes::SETUP_INTERRUPTED,
+            (Self::Uninstall, Reason::Interrupted) => codes::UNINSTALL_INTERRUPTED,
+            (Self::Setup, Reason::PkexecMissing) => codes::SETUP_PKEXEC_MISSING,
+            (Self::Uninstall, Reason::PkexecMissing) => codes::UNINSTALL_PKEXEC_MISSING,
+            (Self::Setup, Reason::HelperFailed) => codes::SETUP_HELPER_FAILED,
+            (Self::Uninstall, Reason::HelperFailed) => codes::UNINSTALL_HELPER_FAILED,
+            (Self::Setup, Reason::HelperRejected) => codes::SETUP_HELPER_REJECTED,
+            (Self::Uninstall, Reason::HelperRejected) => codes::UNINSTALL_HELPER_REJECTED,
+            (Self::Setup, Reason::HelperMissing) => codes::SETUP_HELPER_MISSING,
+            (Self::Uninstall, Reason::HelperMissing) => codes::UNINSTALL_HELPER_MISSING,
+            (Self::Setup, Reason::HelperUnsafe) => codes::SETUP_HELPER_UNSAFE,
+            (Self::Uninstall, Reason::HelperUnsafe) => codes::UNINSTALL_HELPER_UNSAFE,
+            (Self::Setup, Reason::HelperPartial) => codes::SETUP_HELPER_PARTIAL,
+            (Self::Uninstall, Reason::HelperPartial) => codes::UNINSTALL_HELPER_PARTIAL,
+            (Self::Setup, Reason::HelperRunning) => codes::SETUP_HELPER_RUNNING,
+            (Self::Uninstall, Reason::HelperRunning) => codes::UNINSTALL_HELPER_RUNNING,
+            (Self::Setup, Reason::HelperPipeFailed) => codes::SETUP_HELPER_PIPE_FAILED,
+            (Self::Uninstall, Reason::HelperPipeFailed) => codes::UNINSTALL_HELPER_PIPE_FAILED,
+            (Self::Setup, Reason::HelperInstallFailed) => codes::SETUP_HELPER_INSTALL_FAILED,
+            (Self::Uninstall, Reason::HelperInstallFailed) => {
+                codes::UNINSTALL_HELPER_INSTALL_FAILED
+            }
+            (Self::Setup, Reason::HelperInstallRunning) => codes::SETUP_HELPER_INSTALL_RUNNING,
+            (Self::Uninstall, Reason::HelperInstallRunning) => {
+                codes::UNINSTALL_HELPER_INSTALL_RUNNING
+            }
+            (Self::Setup, Reason::HelperNotTheService) => codes::SETUP_HELPER_NOT_THE_SERVICE,
+            (Self::Uninstall, Reason::HelperNotTheService) => {
+                codes::UNINSTALL_HELPER_NOT_THE_SERVICE
+            }
+            (Self::Setup, Reason::HelperBusy) => codes::SETUP_HELPER_BUSY,
+            (Self::Uninstall, Reason::HelperBusy) => codes::UNINSTALL_HELPER_BUSY,
+            (Self::Setup, Reason::HelperNoAnswer) => codes::SETUP_HELPER_NO_ANSWER,
+            (Self::Uninstall, Reason::HelperNoAnswer) => codes::UNINSTALL_HELPER_NO_ANSWER,
+        }
     }
 
     /// The request in an English message: "setup", "the uninstall".
@@ -145,8 +208,8 @@ impl Flow {
         };
         // `HttpError` wants a `&'static str` code.
         let code = match self {
-            Self::Setup => "setup_running",
-            Self::Uninstall => "uninstall_running",
+            Self::Setup => codes::SETUP_RUNNING,
+            Self::Uninstall => codes::UNINSTALL_RUNNING,
         };
         HttpError::new(StatusCode::CONFLICT, code, message)
     }
@@ -324,7 +387,11 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
         .filter(|platform| platform.os() != Os::Any)
         .ok_or_else(|| {
             let message = "setup runs on macOS, Linux, and Windows only";
-            HttpError::new(StatusCode::NOT_IMPLEMENTED, "setup_not_supported", message)
+            HttpError::new(
+                StatusCode::NOT_IMPLEMENTED,
+                codes::SETUP_NOT_SUPPORTED,
+                message,
+            )
         })?;
     let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
     tracing::info!("setup started");
@@ -388,7 +455,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
                     let message = format!("Caddy did not take ports 80 and 443: {}", err.code());
                     report
                         .error
-                        .get_or_insert_with(|| failure("setup_caddy_ports_failed", message));
+                        .get_or_insert_with(|| failure(codes::SETUP_CADDY_PORTS_FAILED, message));
                 }
             }
         }
@@ -423,7 +490,11 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
     let report = job.await.map_err(|err| {
         tracing::error!(error = %err, "the setup job failed");
         let message = "the setup job failed";
-        HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+        HttpError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            codes::INTERNAL_ERROR,
+            message,
+        )
     })?;
     Ok(Json(report))
 }

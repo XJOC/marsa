@@ -32,6 +32,7 @@
 //! shows the password prompt twice only when the two copies of the rule
 //! disagree, or once after the move from the hosts file to the link.
 
+use marsa_core::codes;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -58,13 +59,9 @@ const MAX_HOSTS_BYTES: u64 = 16 * 1024 * 1024;
 pub const RESOLVED_INSTALL: &str = "resolved_install";
 pub const HOSTS_SYNC: &str = "hosts_sync";
 pub const HOSTS_REMOVE: &str = "hosts_remove";
-/// Why `hosts_sync` was left out: no site list.
-pub const HOSTS_SITES_UNKNOWN: &str = "hosts_sites_unknown";
-/// Why `hosts_sync` was left out: more names than the helper takes.
-pub const HOSTS_TOO_MANY_NAMES: &str = "hosts_too_many_names";
 /// The helper's answers to `resolved_install` that mean "use the hosts
 /// file here".
-const HOSTS_ANSWERS: [&str; 2] = ["resolved_use_hosts", "resolved_not_running"];
+const HOSTS_ANSWERS: [&str; 2] = [codes::RESOLVED_USE_HOSTS, codes::RESOLVED_NOT_RUNNING];
 
 /// The facts of [`dns::linux_path`], each read with `systemctl`.
 /// systemd-networkd is asked about only where the answer counts: on
@@ -252,8 +249,8 @@ pub fn names_to_add(hosts_file: Option<&Path>, names: &[String]) -> Vec<String> 
 pub fn hosts_ops(names: Option<&[String]>) -> (Vec<HelperOp>, Option<&'static str>) {
     let mut ops = vec![HelperOp::ResolvedRemove];
     let skipped = match names {
-        None => Some(HOSTS_SITES_UNKNOWN),
-        Some(names) if !dns::hosts_names_fit(names) => Some(HOSTS_TOO_MANY_NAMES),
+        None => Some(codes::HOSTS_SITES_UNKNOWN),
+        Some(names) if !dns::hosts_names_fit(names) => Some(codes::HOSTS_TOO_MANY_NAMES),
         Some(names) => {
             ops.push(HelperOp::HostsSync {
                 names: names.to_vec(),

@@ -7,6 +7,7 @@
 //! one result per operation, in the order sent. No operation left: no prompt.
 
 use super::Flow;
+use super::Reason;
 use super::Setup;
 use super::failure;
 use super::osascript::OSASCRIPT;
@@ -17,6 +18,7 @@ use super::short_code;
 use super::steps::UNINSTALL_ALL;
 use super::steps::inside;
 use super::windows;
+use marsa_core::codes;
 use marsa_core::helper::HELPER_PROTOCOL_VERSION;
 use marsa_core::helper::HelperOp;
 use marsa_core::helper::HelperRequest;
@@ -191,12 +193,12 @@ pub(super) fn results_of(
         let code = short_code(&refused.code);
         tracing::warn!(code = %code, "marsa-helper refused the request of {noun}");
         let message = format!("the helper refused the request: {code}");
-        return Err(failure(&flow.code("helper_rejected"), message));
+        return Err(failure(flow.code(Reason::HelperRejected), message));
     }
     if answer.results.is_empty() {
         tracing::warn!(?exit, "marsa-helper answered with no result");
         return Err(failure(
-            &flow.code("helper_failed"),
+            flow.code(Reason::HelperFailed),
             "the helper gave no result",
         ));
     }
@@ -225,7 +227,7 @@ impl Setup {
         let missing = || {
             tracing::warn!(path = ?self.helper, "marsa-helper is not next to marsad");
             failure(
-                &flow.code("helper_missing"),
+                flow.code(Reason::HelperMissing),
                 "marsa-helper is not next to marsad",
             )
         };
@@ -247,7 +249,7 @@ impl Setup {
                  {INSTALL_BIN}, and run \"marsa setup\" from there",
                 folder.display()
             );
-            return Err(failure("setup_helper_protected_folder", message));
+            return Err(failure(codes::SETUP_HELPER_PROTECTED_FOLDER, message));
         }
         // Windows: no owner check like the one of Unix below. The user's own
         // folder is writable by this user only, and the user runs what they
@@ -265,7 +267,7 @@ impl Setup {
             );
             let message = "marsa-helper is outside your user folder, where another user could \
                            change it";
-            return Err(failure(&flow.code("helper_unsafe"), message));
+            return Err(failure(flow.code(Reason::HelperUnsafe), message));
         }
         match check_helper(helper) {
             Ok(()) => {}
@@ -277,7 +279,7 @@ impl Setup {
                     "marsa-helper could be changed by another user; no admin prompt"
                 );
                 let message = format!("marsa-helper is not safe to run as root: {reason}");
-                return Err(failure(&flow.code("helper_unsafe"), message));
+                return Err(failure(flow.code(Reason::HelperUnsafe), message));
             }
         }
         Ok(helper)
@@ -309,7 +311,7 @@ impl Setup {
         let cannot_write = |err: serde_json::Error| {
             tracing::error!(error = %err, "cannot write the helper request");
             failure(
-                &flow.code("helper_failed"),
+                flow.code(Reason::HelperFailed),
                 "cannot write the helper request",
             )
         };
@@ -331,7 +333,7 @@ impl Setup {
             let Some(service) = self.windows.as_deref() else {
                 tracing::error!("no helper service on this system");
                 return Err(failure(
-                    &flow.code("helper_failed"),
+                    flow.code(Reason::HelperFailed),
                     "no helper service here",
                 ));
             };
@@ -354,7 +356,7 @@ impl Setup {
                 "marsa-helper answered for other operations than it was sent"
             );
             let message = "the helper's results do not match the request";
-            return Err(failure(&flow.code("helper_failed"), message));
+            return Err(failure(flow.code(Reason::HelperFailed), message));
         }
         Ok(results)
     }

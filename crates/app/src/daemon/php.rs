@@ -33,6 +33,7 @@
 pub mod cgi;
 pub mod orphan;
 
+use marsa_core::codes;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -200,7 +201,7 @@ fn pool_with(
     let conf = fpm_conf(&listen, &files).map_err(php_skip)?;
     let ini = php_ini(platform, &files).map_err(php_skip)?;
     let program = fpm_program(data_dir, platform, version).ok_or_else(|| Skip {
-        code: "php_fpm_unavailable",
+        code: codes::PHP_FPM_UNAVAILABLE,
         reason: format!("Marsa has no php-fpm for {platform}"),
     })?;
     let dial = match listen {
@@ -278,7 +279,7 @@ fn write_ini(platform: Platform, files: &PhpFiles) -> Result<(), Skip> {
     match write_if_changed(&files.ini_file, &text) {
         Ok(_) => Ok(()),
         Err(err) => Err(Skip {
-            code: "php_config_write",
+            code: codes::PHP_CONFIG_WRITE,
             reason: format!("cannot write {}: {err}", files.ini_file.display()),
         }),
     }
@@ -289,7 +290,7 @@ fn write_ini(platform: Platform, files: &PhpFiles) -> Result<(), Skip> {
 fn write_pool(pool: &Pool) -> Result<(), Skip> {
     if !pool.spec.program.is_file() {
         return Err(Skip {
-            code: "php_fpm_not_installed",
+            code: codes::PHP_FPM_NOT_INSTALLED,
             reason: format!("no PHP program at {}", pool.spec.program.display()),
         });
     }
@@ -297,7 +298,7 @@ fn write_pool(pool: &Pool) -> Result<(), Skip> {
     let cannot = |path: &Path| {
         let path = path.to_path_buf();
         move |err: io::Error| Skip {
-            code: "php_config_write",
+            code: codes::PHP_CONFIG_WRITE,
             reason: format!("cannot write {}: {err}", path.display()),
         }
     };

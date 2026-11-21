@@ -5,6 +5,7 @@
 //! php-fpm it changed. `php` in the terminal reads the same `php.ini`, so it
 //! follows.
 
+use marsa_core::codes;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -63,7 +64,7 @@ pub fn xdebug_failure(err: &ClientError, data_dir: &Path) -> ClientFailure {
     let mut failure = failure(err, data_dir, None);
     if matches!(
         failure.code.as_str(),
-        "config_read" | "config_invalid" | "config_write"
+        codes::CONFIG_READ | codes::CONFIG_INVALID | codes::CONFIG_WRITE
     ) {
         let global_toml = ConfigPaths::in_dir(data_dir).global;
         let details = Details {

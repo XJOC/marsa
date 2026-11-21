@@ -171,13 +171,15 @@ impl FetchError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            FetchError::InsecureUrl { .. } => "download_insecure_url",
-            FetchError::HttpStatus { .. } => "download_http_status",
-            FetchError::Network { .. } | FetchError::Failed { .. } => "download_failed",
-            FetchError::TooLong { .. } | FetchError::TooShort { .. } => "download_size_mismatch",
-            FetchError::ChecksumMismatch { .. } => "checksum_mismatch",
-            FetchError::TooLarge { .. } => "download_too_large",
-            FetchError::Io { .. } => "download_io",
+            FetchError::InsecureUrl { .. } => crate::codes::DOWNLOAD_INSECURE_URL,
+            FetchError::HttpStatus { .. } => crate::codes::DOWNLOAD_HTTP_STATUS,
+            FetchError::Network { .. } | FetchError::Failed { .. } => crate::codes::DOWNLOAD_FAILED,
+            FetchError::TooLong { .. } | FetchError::TooShort { .. } => {
+                crate::codes::DOWNLOAD_SIZE_MISMATCH
+            }
+            FetchError::ChecksumMismatch { .. } => crate::codes::CHECKSUM_MISMATCH,
+            FetchError::TooLarge { .. } => crate::codes::DOWNLOAD_TOO_LARGE,
+            FetchError::Io { .. } => crate::codes::DOWNLOAD_IO,
         }
     }
 
