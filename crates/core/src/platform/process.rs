@@ -836,17 +836,14 @@ pub fn read_small_file(path: &Path) -> Option<String> {
     Some(text)
 }
 
-/// Whether two looks saw the same file: the same device and inode.
-#[cfg(unix)]
+/// Whether two looks saw the same file: the same device and inode. Always
+/// `true` on Windows, which has no stable file id; the checks of the type
+/// stay.
 fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-    (a.dev(), a.ino()) == (b.dev(), b.ino())
-}
-
-/// Windows: std gives no stable file id; the checks of the type stay.
-#[cfg(not(unix))]
-fn same_file(_a: &fs::Metadata, _b: &fs::Metadata) -> bool {
-    true
+    match (crate::fs::file_id(a), crate::fs::file_id(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
 }
 
 /// Deletes `run/caddy.pid`. No file is not an error.
