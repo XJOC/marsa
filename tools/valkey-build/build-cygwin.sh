@@ -65,7 +65,8 @@ fi
 # -O2: the default -O3 with LTO is much slower to build here.
 (
   cd "$VALKEY_SRC"
-  make -j"$(ncpu)" BUILD_TLS=no OPTIMIZATION=-O2 CFLAGS="-Wno-char-subscripts" valkey-server valkey-cli
+  # One `make` run per program: both rebuild src/release.h (see build.sh).
+  make -j"$(ncpu)" BUILD_TLS=no OPTIMIZATION=-O2 CFLAGS="-Wno-char-subscripts" valkey-server && make -j"$(ncpu)" BUILD_TLS=no OPTIMIZATION=-O2 CFLAGS="-Wno-char-subscripts" valkey-cli
 )
 
 rm -rf "$PKG"
