@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use super::runtimes::Pending;
 use super::*;
 
 /// The status line.
