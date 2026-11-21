@@ -1,14 +1,11 @@
 //! Installs: the jobs the window sends, the queue, and how each install is shown.
 
 use super::*;
+use crate::strings::INSTALL_INTERRUPTED;
 
 /// The most installs kept for the Runtimes section. The daemon runs one at a
 /// time, so a few are plenty.
 const MAX_INSTALLS: usize = 4;
-
-/// The window's own code: the daemon stopped before an install ended, as
-/// `marsa install` says it.
-pub const INSTALL_INTERRUPTED: &str = "install_interrupted";
 
 /// One install the window asks the daemon for:
 /// `POST /v1/runtimes/{tool}/install`.
@@ -30,6 +27,28 @@ pub struct InstallView {
     /// (`8.4.23`).
     pub version: Option<String>,
     pub step: InstallStep,
+}
+
+impl InstallView {
+    /// The text on the progress bar, or the line after an install.
+    pub fn status(&self) -> String {
+        let what = strings::install_subject(self.runtime, self.version.as_deref());
+        match &self.step {
+            InstallStep::Waiting => strings::install_waiting(&what),
+            InstallStep::ListChecked => strings::install_list_checked(&what),
+            InstallStep::Downloading { done, total, .. } => {
+                strings::install_downloading(&what, *done, *total)
+            }
+            InstallStep::Unpacking { .. } => strings::install_unpacking(&what),
+            InstallStep::Checking => strings::install_checking(&what),
+            InstallStep::Finishing => strings::install_finishing(&what),
+            InstallStep::Done { already: false } => strings::install_done(&what),
+            InstallStep::Done { already: true } => strings::install_already(&what),
+            InstallStep::Failed(failure) => {
+                strings::install_cannot(&what, &strings::install_failure(self.runtime, failure))
+            }
+        }
+    }
 }
 
 /// How far an install is.
@@ -214,7 +233,7 @@ impl Model {
                 let queued = self.queue_install(InstallJob { runtime, version });
                 if queued {
                     // The text is used, and the dialog has done its work.
-                    self.install_input.remove(runtime.dir_name());
+                    self.install_input.remove(&runtime);
                     self.session.install_dialog = None;
                 }
                 queued
@@ -231,17 +250,15 @@ impl Model {
     /// What the version field of `runtime`'s install dialog holds. Empty: the
     /// newest stable version.
     pub fn install_text(&self, runtime: Runtime) -> &str {
-        self.install_input
-            .get(runtime.dir_name())
-            .map_or("", String::as_str)
+        self.install_input.get(&runtime).map_or("", String::as_str)
     }
 
     /// The user typed `text` in the version field of `runtime`.
     pub fn set_install_text(&mut self, runtime: Runtime, text: String) {
         if text.is_empty() {
-            self.install_input.remove(runtime.dir_name());
+            self.install_input.remove(&runtime);
         } else {
-            self.install_input.insert(runtime.dir_name(), text);
+            self.install_input.insert(runtime, text);
         }
     }
 
@@ -426,5 +443,192 @@ impl Model {
             install.id = None;
             install.ours = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::strings::{MAX_PRINTED, error_text, install_failure};
+
+    fn view(runtime: Option<Runtime>, version: Option<&str>, step: InstallStep) -> InstallView {
+        InstallView {
+            runtime,
+            version: version.map(str::to_owned),
+            step,
+        }
+    }
+
+    #[test]
+    fn each_install_step_has_its_line() {
+        let php = |step| view(Some(Runtime::Php), Some("8.4.23"), step);
+        let artifact = || "cli".to_owned();
+        let cases = [
+            (
+                view(Some(Runtime::Php), Some("8.4"), InstallStep::Waiting),
+                "Asking the daemon to install PHP 8.4…",
+            ),
+            (
+                view(Some(Runtime::Caddy), None, InstallStep::ListChecked),
+                "Installing Caddy…",
+            ),
+            (
+                php(InstallStep::Downloading {
+                    artifact: artifact(),
+                    done: 12_340_000,
+                    total: 30_100_000,
+                }),
+                "Downloading PHP 8.4.23: 12.3 of 30.1 MB",
+            ),
+            (
+                php(InstallStep::Unpacking {
+                    artifact: artifact(),
+                }),
+                "Unpacking PHP 8.4.23…",
+            ),
+            (php(InstallStep::Checking), "Testing PHP 8.4.23…"),
+            (
+                php(InstallStep::Finishing),
+                "Finishing the install of PHP 8.4.23…",
+            ),
+            (
+                php(InstallStep::Done { already: false }),
+                "Installed PHP 8.4.23.",
+            ),
+            (
+                php(InstallStep::Done { already: true }),
+                "PHP 8.4.23 was already installed.",
+            ),
+            (
+                view(None, None, InstallStep::Checking),
+                "Testing a program…",
+            ),
+        ];
+        for (view, want) in cases {
+            assert_eq!(view.status(), want);
+        }
+    }
+
+    #[test]
+    fn a_failed_install_says_why_with_its_facts() {
+        let failed = |failure| {
+            view(
+                Some(Runtime::Php),
+                Some("8.9"),
+                InstallStep::Failed(failure),
+            )
+        };
+        let no_match = InstallFailure {
+            code: "install_no_such_version".into(),
+            requested: Some("8.9".into()),
+            available: vec!["8.3.27".into(), "8.4.23".into()],
+            ..InstallFailure::default()
+        };
+        assert_eq!(
+            failed(no_match).status(),
+            "Cannot install PHP 8.9. No PHP version matches \"8.9\". Available: 8.3.27, 8.4.23."
+        );
+        let check = InstallFailure {
+            code: "install_check_failed".into(),
+            output: Some(" dyld: missing library \n".into()),
+            ..InstallFailure::default()
+        };
+        assert!(
+            install_failure(Some(Runtime::Php), &check)
+                .ends_with("It printed: dyld: missing library")
+        );
+        let alias = InstallFailure {
+            code: "unsupported_alias".into(),
+            requested: Some("latest".into()),
+            ..InstallFailure::default()
+        };
+        assert_eq!(
+            install_failure(Some(Runtime::Node), &alias),
+            "\"latest\" is not a version number. Write one such as 22."
+        );
+        let platform = InstallFailure {
+            code: "install_unsupported_platform".into(),
+            platform: Some("linux-arm64".into()),
+            ..InstallFailure::default()
+        };
+        assert_eq!(
+            install_failure(Some(Runtime::Caddy), &platform),
+            "Marsa has no Caddy build for linux-arm64."
+        );
+        // An OS that is too old: the facts, in the words of the CLI.
+        let old = InstallFailure {
+            code: "install_os_too_old".into(),
+            os: Some(Box::new(marsa_core::types::OsMismatch {
+                needs: "macOS 15.0".into(),
+                found: "macOS 14.4".into(),
+            })),
+            ..InstallFailure::default()
+        };
+        assert_eq!(
+            install_failure(Some(Runtime::Php), &old),
+            "PHP needs macOS 15.0 or newer, and this system has macOS 14.4. Nothing was \
+             installed."
+        );
+        // Without the facts: the same sentence without them.
+        let old_no_facts = InstallFailure {
+            code: "install_os_too_old".into(),
+            ..InstallFailure::default()
+        };
+        assert_eq!(
+            install_failure(Some(Runtime::Php), &old_no_facts),
+            "PHP needs a newer system than this one. Nothing was installed."
+        );
+        assert_eq!(
+            install_failure(None, &old_no_facts),
+            "the program needs a newer system than this one. Nothing was installed."
+        );
+        assert_eq!(
+            failed(old).status(),
+            "Cannot install PHP 8.9. PHP needs macOS 15.0 or newer, and this system has macOS \
+             14.4. Nothing was installed."
+        );
+        // The general text, for a place with no name to give.
+        assert_eq!(
+            error_text("install_os_too_old"),
+            "This program needs a newer system than this one. Nothing was installed."
+        );
+        // A long list of versions, and a long printout, are cut short.
+        let many = InstallFailure {
+            code: "install_no_such_version".into(),
+            requested: Some("9".into()),
+            available: (1..=7).map(|n| format!("8.{n}.0")).collect(),
+            ..InstallFailure::default()
+        };
+        assert!(
+            install_failure(Some(Runtime::Php), &many)
+                .ends_with("Available: 8.1.0, 8.2.0, 8.3.0, 8.4.0, and 3 more."),
+            "{}",
+            install_failure(Some(Runtime::Php), &many)
+        );
+        let noisy = InstallFailure {
+            code: "install_check_failed".into(),
+            output: Some(format!("\n  {}\nsecond line\n", "x".repeat(200))),
+            ..InstallFailure::default()
+        };
+        let text = install_failure(Some(Runtime::Php), &noisy);
+        assert!(
+            text.ends_with(&format!("{}…", "x".repeat(MAX_PRINTED))),
+            "{text}"
+        );
+        assert!(!text.contains("second line"));
+        // Any other code: its general text; a new one shows its name.
+        let busy = InstallFailure {
+            code: "install_busy".into(),
+            ..InstallFailure::default()
+        };
+        assert_eq!(install_failure(None, &busy), error_text("install_busy"));
+        let new = InstallFailure {
+            code: "install_new".into(),
+            ..InstallFailure::default()
+        };
+        assert_eq!(
+            install_failure(None, &new),
+            "Unexpected error (install_new)."
+        );
     }
 }

@@ -12,6 +12,7 @@ use eframe::egui::{
     Align, Align2, CornerRadius, Painter, Rect, Response, Role, Sense, Ui, Vec2, Widget,
     WidgetInfo, pos2,
 };
+use marsa_core::runtimes::Runtime;
 
 /// The two sizes of a tile.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -162,6 +163,20 @@ pub fn paint_monogram(
     let galley = layout(painter, text, Monogram::token(theme), colors.fg);
     let at = Align2([Align::Center, Align::Center]).align_size_within_rect(galley.size(), rect);
     painter.galley(at.min, galley, colors.fg);
+}
+
+/// The two or three letters on a runtime's tile: a new runtime needs a
+/// monogram, not a new icon (components.md, Section icon tile).
+pub const fn runtime_monogram(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Php => "PHP",
+        Runtime::Node => "JS",
+        Runtime::Composer => "Co",
+        Runtime::Caddy => "Ca",
+        Runtime::Postgres => "Pg",
+        Runtime::Mysql => "My",
+        Runtime::Valkey => "Vk",
+    }
 }
 
 /// The tile of a runtime: its letters in the Runtimes colors, or in the
@@ -317,10 +332,7 @@ mod tests {
             let databases = fill(shapes(Monogram::new("Pg").section(Section::Databases)));
             assert_eq!(databases, Some(theme.section(Section::Databases).tint));
         }
-        let letters: Vec<String> = Runtime::ALL
-            .into_iter()
-            .map(strings::runtime_monogram)
-            .collect();
+        let letters: Vec<&str> = Runtime::ALL.into_iter().map(runtime_monogram).collect();
         assert_eq!(letters, ["PHP", "JS", "Co", "Ca", "Pg", "My", "Vk"]);
         assert!(letters.iter().all(|text| (2..=3).contains(&text.len())));
     }
@@ -384,10 +396,10 @@ mod tests {
         let harness = Harness::new(egui::Theme::Light);
         harness.run(|ui| {
             for runtime in Runtime::ALL {
-                let letters = strings::runtime_monogram(runtime);
+                let letters = runtime_monogram(runtime);
                 let galley = layout(
                     ui.painter(),
-                    &letters,
+                    letters,
                     Monogram::token(&LIGHT),
                     LIGHT.color.ink,
                 );

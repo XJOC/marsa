@@ -35,7 +35,7 @@ use super::step::{Stage, StepCard};
 use super::switch::Switch;
 use super::table::{RowHeight, Table, TableColumn, empty_state};
 use super::tabs::Tabs;
-use super::tile::{Monogram, SectionTile, TileSize};
+use super::tile::{Monogram, SectionTile, TileSize, runtime_monogram};
 use super::version::{PickerSize, Setting, VersionMenu, VersionPick, VersionPicker};
 use crate::strings;
 use crate::theme::{Section, Theme};
@@ -279,7 +279,7 @@ fn icons_page(ui: &mut Ui, theme: &Theme) {
     heading(ui, theme, label::MONOGRAMS);
     row(ui, |ui| {
         for runtime in Runtime::ALL {
-            ui.add(Monogram::new(&strings::runtime_monogram(runtime)));
+            ui.add(Monogram::new(runtime_monogram(runtime)));
         }
         ui.add(Monogram::new("Py"));
         ui.add(Monogram::new("Co").size(TileSize::Nav));
@@ -1104,10 +1104,7 @@ mod tests {
                 Role::ListItem
             );
             for state in PillState::ALL {
-                assert!(
-                    tree.node_with_label(strings::pill_state_word(state))
-                        .is_some()
-                );
+                assert!(tree.node_with_label(state.word()).is_some());
             }
         }
     }

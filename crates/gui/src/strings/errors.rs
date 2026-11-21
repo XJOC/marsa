@@ -1,8 +1,10 @@
 //! The sentence for each error code. A table of data, so it may pass 800 lines.
 
-use crate::model::INSTALL_INTERRUPTED;
-
 use super::*;
+
+/// The window's own code: the daemon stopped before an install ended, as
+/// `marsa install` says it.
+pub const INSTALL_INTERRUPTED: &str = "install_interrupted";
 
 /// The message for an error code, or a general one with the code for a code
 /// this build does not know (a newer daemon may send one).

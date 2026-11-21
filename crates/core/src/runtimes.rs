@@ -31,7 +31,7 @@ use crate::resolver::Tool;
 
 /// A program that has its own folder under `runtimes/`. Serialized as its
 /// folder name (`php`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Runtime {
     Php,

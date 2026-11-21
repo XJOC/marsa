@@ -5,8 +5,6 @@ use marsa_core::sites::TLD;
 use marsa_core::types::{InstallFailure, VersionInUse, XdebugState};
 use semver::Version;
 
-use crate::model::{InstallStep, InstallView, UninstallNotice};
-
 use super::*;
 
 pub const RUNTIMES: &str = "Runtimes";
@@ -152,63 +150,69 @@ pub fn version_field_hint(name: &str, example: &str) -> String {
 
 /// A version to write as an example for `runtime`.
 pub fn example_version(runtime: Runtime) -> &'static str {
-    example_version_for(runtime.dir_name())
-}
-
-/// [`example_version`] by the runtime's folder name. These `match`es are on
-/// the name text, not on `Runtime`, so a runtime that core adds later builds
-/// and shows with the default arm until it gets its own.
-pub fn example_version_for(folder: &str) -> &'static str {
-    match folder {
-        "php" => "8.4",
-        "node" => "22",
-        "composer" => "2.8",
-        "caddy" => "2.11",
-        // The Phase 2 engines, named before core has them: they stay out of
-        // the Runtimes screen, and these are for their own screens and
-        // messages.
-        "postgres" => "18",
-        "mysql" => "8.4",
-        "valkey" => "8.1",
-        // Any runtime added later: a plain number.
-        _ => "1.0",
-    }
-}
-
-/// The text on the progress bar, or the line after an install.
-pub fn install_status(view: &InstallView) -> String {
-    let what = install_subject(view);
-    match &view.step {
-        InstallStep::Waiting => format!("Asking the daemon to install {what}…"),
-        InstallStep::ListChecked => format!("Installing {what}…"),
-        // The archive name is for the log, not the user (design review, D5).
-        InstallStep::Downloading { done, total, .. } => format!(
-            "Downloading {what}: {} of {} MB",
-            megabytes(*done),
-            megabytes(*total)
-        ),
-        InstallStep::Unpacking { .. } => format!("Unpacking {what}…"),
-        InstallStep::Checking => format!("Testing {what}…"),
-        InstallStep::Finishing => format!("Finishing the install of {what}…"),
-        InstallStep::Done { already: false } => format!("Installed {what}."),
-        InstallStep::Done { already: true } => format!("{what} was already installed."),
-        InstallStep::Failed(failure) => {
-            format!(
-                "Cannot install {what}. {}",
-                install_failure(view.runtime, failure)
-            )
-        }
+    match runtime {
+        Runtime::Php => "8.4",
+        Runtime::Node => "22",
+        Runtime::Composer => "2.8",
+        Runtime::Caddy => "2.11",
+        Runtime::Postgres => "18",
+        Runtime::Mysql => "8.4",
+        Runtime::Valkey => "8.1",
     }
 }
 
 /// `PHP 8.4.23`, `PHP 8.4`, `Caddy`, or `a program` for an install from a
 /// terminal before its version is known.
-fn install_subject(view: &InstallView) -> String {
-    match (view.runtime, &view.version) {
+pub fn install_subject(runtime: Option<Runtime>, version: Option<&str>) -> String {
+    match (runtime, version) {
         (Some(runtime), Some(version)) => format!("{} {version}", runtime_name(runtime)),
         (Some(runtime), None) => runtime_name(runtime).to_owned(),
         (None, _) => "a program".to_owned(),
     }
+}
+
+/// The words of the progress bar, or of the line after an install, by the
+/// step. `what` is the [`install_subject`].
+pub fn install_waiting(what: &str) -> String {
+    format!("Asking the daemon to install {what}…")
+}
+
+pub fn install_list_checked(what: &str) -> String {
+    format!("Installing {what}…")
+}
+
+/// The archive name is for the log, not the user (design review, D5).
+pub fn install_downloading(what: &str, done: u64, total: u64) -> String {
+    format!(
+        "Downloading {what}: {} of {} MB",
+        megabytes(done),
+        megabytes(total)
+    )
+}
+
+pub fn install_unpacking(what: &str) -> String {
+    format!("Unpacking {what}…")
+}
+
+pub fn install_checking(what: &str) -> String {
+    format!("Testing {what}…")
+}
+
+pub fn install_finishing(what: &str) -> String {
+    format!("Finishing the install of {what}…")
+}
+
+pub fn install_done(what: &str) -> String {
+    format!("Installed {what}.")
+}
+
+pub fn install_already(what: &str) -> String {
+    format!("{what} was already installed.")
+}
+
+/// `reason` is [`install_failure`].
+pub fn install_cannot(what: &str, reason: &str) -> String {
+    format!("Cannot install {what}. {reason}")
 }
 
 /// Bytes as megabytes with one decimal: `12.3`.
@@ -275,7 +279,7 @@ pub fn install_failure(runtime: Option<Runtime>, failure: &InstallFailure) -> St
 }
 
 /// The most characters of a program's output the install failure shows.
-pub(super) const MAX_PRINTED: usize = 60;
+pub(crate) const MAX_PRINTED: usize = 60;
 /// The most versions "Available:" names.
 const MAX_AVAILABLE: usize = 4;
 
@@ -303,52 +307,14 @@ fn versions_shown(available: &[String]) -> String {
 
 /// The name of a runtime, as the CLI writes it.
 pub fn runtime_name(runtime: Runtime) -> &'static str {
-    runtime_name_for(runtime.dir_name())
-}
-
-/// [`runtime_name`] by the runtime's folder name (`runtimes/<name>`), which
-/// is the one name core gives a runtime. The `match` is on that text, not on
-/// `Runtime`: a runtime that core adds later builds without a change here and
-/// shows under its folder name (`python`) until it gets a nicer one
-///.
-pub fn runtime_name_for(folder: &'static str) -> &'static str {
-    match folder {
-        "php" => "PHP",
-        "node" => "Node.js",
-        "composer" => "Composer",
-        "caddy" => "Caddy",
-        // The Phase 2 engines, named before core has them.
-        "postgres" => "PostgreSQL",
-        "mysql" => "MySQL",
-        "valkey" => "Valkey",
-        // Any runtime added later: core's own name.
-        other => other,
-    }
-}
-
-/// The two or three letters on a runtime's tile: a new language needs a
-/// monogram, not a new icon (components.md, Section icon tile).
-pub fn runtime_monogram(runtime: Runtime) -> String {
-    monogram_for(runtime.dir_name(), runtime_name(runtime))
-}
-
-/// [`runtime_monogram`] by the folder name and the name shown. Three letters
-/// for PHP, "JS" for Node.js, "Pg", "My", and "Vk" for the Phase 2 engines;
-/// every other runtime gets the first two letters of its name ("Co", "Ca",
-/// "Py" for Python), so a new one needs no entry.
-pub fn monogram_for(folder: &str, name: &str) -> String {
-    match folder {
-        "php" => "PHP".to_owned(),
-        "node" => "JS".to_owned(),
-        "postgres" => "Pg".to_owned(),
-        "mysql" => "My".to_owned(),
-        "valkey" => "Vk".to_owned(),
-        _ => {
-            let mut letters = name.chars();
-            let first = letters.next().into_iter().flat_map(char::to_uppercase);
-            let second = letters.next().into_iter().flat_map(char::to_lowercase);
-            first.chain(second).collect()
-        }
+    match runtime {
+        Runtime::Php => "PHP",
+        Runtime::Node => "Node.js",
+        Runtime::Composer => "Composer",
+        Runtime::Caddy => "Caddy",
+        Runtime::Postgres => "PostgreSQL",
+        Runtime::Mysql => "MySQL",
+        Runtime::Valkey => "Valkey",
     }
 }
 
@@ -361,64 +327,28 @@ pub fn install_another_label(runtime: &str) -> String {
     format!("Install another {runtime} version")
 }
 
-/// The lines under the Runtimes table about the last uninstall. A refusal
-/// for `version_in_use` or `sites_lose_php` names each thing that uses the
-/// version, and what to do about it.
-pub fn uninstall_lines(notice: &UninstallNotice) -> Vec<ReportLine> {
-    let problem = |text: String| ReportLine {
-        text,
-        problem: true,
-    };
-    match notice {
-        UninstallNotice::Done { runtime, version } => vec![ReportLine {
-            text: uninstalled(*runtime, version),
-            problem: false,
-        }],
-        UninstallNotice::Failed {
-            runtime,
-            version,
-            code,
-        } => vec![problem(uninstall_failed(*runtime, version, code))],
-        UninstallNotice::InUse { runtime, in_use } => {
-            let mut lines = vec![problem(format!(
-                "{} {} is in use, so it was not uninstalled:",
-                runtime_name(*runtime),
-                in_use.version
-            ))];
-            lines.extend(in_use_reasons(*runtime, in_use).into_iter().map(problem));
-            lines
-        }
-    }
+/// The first line of a refusal to uninstall a version that is in use, when
+/// [`in_use_reasons`] follow it.
+pub fn uninstall_in_use_with_reasons(runtime: Runtime, version: &str) -> String {
+    format!(
+        "{} {version} is in use, so it was not uninstalled:",
+        runtime_name(runtime)
+    )
 }
 
-/// The notice about the last uninstall: one sentence. A refusal for a version
-/// that is in use does not list what uses it: the Runtimes screen says that
-/// beside the version's menu ([`uninstall_lines`] has the whole list).
-pub fn uninstall_notice(notice: &UninstallNotice) -> ReportLine {
-    let (text, problem) = match notice {
-        UninstallNotice::Done { runtime, version } => (uninstalled(*runtime, version), false),
-        UninstallNotice::Failed {
-            runtime,
-            version,
-            code,
-        } => (uninstall_failed(*runtime, version, code), true),
-        UninstallNotice::InUse { runtime, in_use } => (
-            format!(
-                "{} {} is in use, so it was not uninstalled.",
-                runtime_name(*runtime),
-                in_use.version
-            ),
-            true,
-        ),
-    };
-    ReportLine { text, problem }
+/// The one sentence of that refusal, when nothing follows it.
+pub fn uninstall_in_use(runtime: Runtime, version: &str) -> String {
+    format!(
+        "{} {version} is in use, so it was not uninstalled.",
+        runtime_name(runtime)
+    )
 }
 
-fn uninstalled(runtime: Runtime, version: &Version) -> String {
+pub fn uninstalled(runtime: Runtime, version: &Version) -> String {
     format!("Uninstalled {} {version}.", runtime_name(runtime))
 }
 
-fn uninstall_failed(runtime: Runtime, version: &Version, code: &str) -> String {
+pub fn uninstall_failed(runtime: Runtime, version: &Version, code: &str) -> String {
     format!(
         "Cannot uninstall {} {version}. {}",
         runtime_name(runtime),
@@ -427,7 +357,7 @@ fn uninstall_failed(runtime: Runtime, version: &Version, code: &str) -> String {
 }
 
 /// One line for each thing that uses the version, with what to do first.
-fn in_use_reasons(runtime: Runtime, in_use: &VersionInUse) -> Vec<String> {
+pub fn in_use_reasons(runtime: Runtime, in_use: &VersionInUse) -> Vec<String> {
     let name = runtime_name(runtime);
     let mut reasons = Vec::new();
     if let Some(default) = &in_use.default {
