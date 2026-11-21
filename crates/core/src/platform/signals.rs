@@ -1,4 +1,4 @@
-//! Waiting for a stop signal: Ctrl+C everywhere, SIGTERM on macOS and Linux. Task M3-06.
+//! Waiting for a stop signal: Ctrl+C everywhere, SIGTERM on macOS and Linux.
 //!
 //! Windows has no SIGTERM: `POST /v1/shutdown` is the normal way to stop the
 //! daemon there (architecture.md section 6).

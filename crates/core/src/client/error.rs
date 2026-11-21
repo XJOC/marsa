@@ -1,4 +1,4 @@
-//! Why a call to the daemon failed. Task M3-08.
+//! Why a call to the daemon failed.
 
 use std::error::Error as StdError;
 use std::io;
@@ -72,8 +72,8 @@ pub enum ClientError {
         message: String,
     },
 
-    /// The daemon's 409 `version_in_use` (task M5-07) or
-    /// `sites_lose_php` (task M5-19) from `DELETE
+    /// The daemon's 409 `version_in_use` or
+    /// `sites_lose_php` from `DELETE
     /// /v1/runtimes/{tool}/{version}`, with what uses the version. Its text
     /// went through [`daemon_text`]. Boxed, so every `Result<_,
     /// ClientError>` stays small.

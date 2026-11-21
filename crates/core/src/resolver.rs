@@ -278,7 +278,7 @@ fn pick(
 /// The highest of `candidates` that `value` asks for, by the rules `resolve`
 /// uses for a version file: `8.4` is the newest `8.4.x` (never `8.9`), and a
 /// pre-release is picked only when written in full (`8.5.0-rc1`). So `8.4`
-/// means the same in `.php-version` and in `marsa install` (task M2-05).
+/// means the same in `.php-version` and in `marsa install`.
 ///
 /// `Ok(None)` when no candidate matches.
 ///

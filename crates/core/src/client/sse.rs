@@ -1,5 +1,5 @@
 //! Server-sent events: the format of `GET /v1/events` and
-//! `GET /v1/logs/{id}?follow=true`. Task M3-08.
+//! `GET /v1/logs/{id}?follow=true`.
 //!
 //! [`SseParser`] is pure: it takes bytes in chunks cut anywhere, even inside
 //! a line or a UTF-8 character, and gives back the `data` of each complete
@@ -25,7 +25,7 @@ use super::ClientError;
 const MAX_EVENT: usize = 8 * 1024 * 1024;
 const MIB: usize = 1024 * 1024;
 /// A stream with no byte for this long is dead: three times the daemon's
-/// 15 s keep-alive (task M3-06).
+/// 15 s keep-alive.
 const STREAM_IDLE: Duration = Duration::from_secs(45);
 
 /// What the parser found, in stream order.
@@ -137,7 +137,7 @@ impl SseParser {
     }
 }
 
-/// The count in a `lagged <n>` comment (task M3-06). A missing or unreadable
+/// The count in a `lagged <n>` comment. A missing or unreadable
 /// count gives 0, so a lag is never lost. Any other comment gives `None`.
 fn lagged(comment: &[u8]) -> Option<u64> {
     let comment = comment.strip_prefix(b" ").unwrap_or(comment);

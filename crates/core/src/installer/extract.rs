@@ -535,7 +535,7 @@ fn file_mode(archive_mode: u32) -> u32 {
     }
 }
 
-// Mode bits and links exist on Unix only (task M2-03, rules 7 and 8). The
+// Mode bits and links exist on Unix only. The
 // helpers sit here, not in `platform`, because nothing else needs them.
 #[cfg(unix)]
 fn set_mode(file: &File, mode: u32) -> io::Result<()> {

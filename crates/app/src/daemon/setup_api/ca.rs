@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 const MAX_CA_BYTES: u64 = 16 * 1024;
 
 /// How long setup waits for Caddy to start and make its CA root, when there
-/// is no root yet (task M5-15). Caddy's own start waits up to 5 s for its
+/// is no root yet. Caddy's own start waits up to 5 s for its
 /// admin API, and up to about 10 s more to stop an old Caddy of a crashed
 /// daemon first (ADR 0009); making the root then takes well under a second.
 pub const CA_WAIT: Duration = Duration::from_secs(30);
@@ -69,7 +69,7 @@ const O_NONBLOCK: i32 = 0o4000;
 const O_NONBLOCK: i32 = 0;
 
 /// Starts Caddy for setup when its CA root does not exist yet: Caddy makes
-/// the CA when it loads its config (task M5-15). The daemon uses its own
+/// the CA when it loads its config. The daemon uses its own
 /// Caddy ([`DaemonCaddy`]); tests use a fake, as for [`Runner`].
 pub trait StartCaddy: Send + Sync {
     /// Makes Caddy run if it is installed, and waits at most `limit` for
@@ -116,7 +116,7 @@ impl StartCaddy for DaemonCaddy {
                     // timeout below bounds the loop. A start waits up to
                     // Caddy's ready limit for its admin API, so none begins
                     // with less left, where the timeout would cut that wait
-                    // short (task M5-22). Only that wait is covered: an
+                    // short. Only that wait is covered: an
                     // orphan to stop first can still make a start longer.
                     Err(ActionError::Busy) => {
                         let next = tokio::time::Instant::now() + CA_POLL;
@@ -287,10 +287,9 @@ fn pem_problem(pem: &str) -> Option<&'static str> {
 impl Setup {
     /// The text of Caddy's root certificate at `path`, as [`read_ca`] gives
     /// it. A whole root that is there is read at once. With no root yet, or
-    /// one that may be half written (empty, or no END line yet; task M5-22),
+    /// one that may be half written (empty, or no END line yet),
     /// `starter` starts Caddy if it does not run, and setup waits for the
-    /// root up to `ca_wait`: Caddy makes it when it loads its config (task
-    /// M5-15).
+    /// root up to `ca_wait`: Caddy makes it when it loads its config.
     ///
     /// # Errors
     ///
@@ -385,7 +384,7 @@ mod tests {
     #[cfg(unix)]
     use tokio_util::sync::CancellationToken;
 
-    /// Task M5-15: a new user runs setup before any site. Setup starts
+    /// A new user runs setup before any site. Setup starts
     /// Caddy, which makes its CA root a moment later, waits for it, and
     /// trusts it.
     #[test]
@@ -489,7 +488,7 @@ mod tests {
         assert_eq!(report.results[2], done("trust_install"));
     }
 
-    /// Task M5-15b: a root that is there but half written is waited for,
+    /// A root that is there but half written is waited for,
     /// and the whole certificate is the one trusted.
     #[test]
     fn a_half_written_root_is_waited_for() {
@@ -524,7 +523,7 @@ mod tests {
         assert_eq!(report.skipped, [skip("trust_install", "ca_unreadable")]);
     }
 
-    /// Task M5-22: a root with no END line at the first look may be half
+    /// A root with no END line at the first look may be half
     /// written too, so it is waited for, never trusted as it is. So is an
     /// empty file or a part of the BEGIN line.
     #[test]
@@ -548,7 +547,7 @@ mod tests {
         }
     }
 
-    /// Task M5-22: Caddy did not start, and half a root is there. The one
+    /// Caddy did not start, and half a root is there. The one
     /// more look does not trust it, and does not wait for the rest.
     #[test]
     fn a_half_root_after_a_failed_start_is_ca_unreadable() {
@@ -567,7 +566,7 @@ mod tests {
         assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
     }
 
-    /// Task M5-15b: Caddy's start and the wait for its root share one
+    /// Caddy's start and the wait for its root share one
     /// limit. A start that takes most of it leaves only the rest to wait.
     #[test]
     fn the_start_and_the_wait_share_one_limit() {
@@ -745,10 +744,10 @@ mod tests {
         daemon.stop_procs(Duration::from_secs(5)).await;
     }
 
-    /// Task M5-15b: another start of Caddy runs when setup asks for one.
+    /// Another start of Caddy runs when setup asks for one.
     /// Setup asks again once it has ended, so its own start runs too, and
     /// the busy answer is not taken for a running Caddy while Caddy's ready
-    /// limit still fits in the time left (task M5-22).
+    /// limit still fits in the time left.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_busy_caddy_is_asked_again_once_the_other_action_ends() {
@@ -817,7 +816,7 @@ mod tests {
             .unwrap()
     }
 
-    /// Task M5-22: another action holds Caddy, and less than Caddy's ready
+    /// Another action holds Caddy, and less than Caddy's ready
     /// limit would be left for a start after it. Setup asks no more, so no
     /// start is cut off half way, and waits for a root the other action may
     /// make.
@@ -840,7 +839,7 @@ mod tests {
         daemon.stop_procs(Duration::from_secs(5)).await;
     }
 
-    /// Task M5-22: the daemon stops while setup asks a busy Caddy again.
+    /// The daemon stops while setup asks a busy Caddy again.
     /// The retry ends at once, without a start of its own.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]

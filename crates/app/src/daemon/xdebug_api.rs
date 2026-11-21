@@ -1,4 +1,4 @@
-//! Xdebug on or off, for every installed PHP. Task M5-11.
+//! Xdebug on or off, for every installed PHP.
 //!
 //! | Route | Answer |
 //! | --- | --- |

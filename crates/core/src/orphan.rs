@@ -291,7 +291,7 @@ fn lstart_key(text: &str) -> Option<[u32; 6]> {
 
 /// `lstart` text (`Wed Nov 4 03:31:27 2026`, macOS, read with `TZ=UTC0`) as
 /// seconds since 1970-01-01 UTC, so two start times can be told apart by a
-/// margin (task M5-21). `None` for any other form, Linux clock ticks
+/// margin. `None` for any other form, Linux clock ticks
 /// included, and for a field out of range.
 pub fn lstart_seconds(text: &str) -> Option<i64> {
     let [year, month, day, hour, minute, second] = lstart_key(text)?;

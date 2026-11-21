@@ -1,4 +1,4 @@
-//! The one task that keeps PHP and Caddy in line with the sites. Task M4-11.
+//! The one task that keeps PHP and Caddy in line with the sites.
 //!
 //! It runs a pass at start-up, after the first site list. Then it runs one
 //! after each `sites_changed`, each time Caddy starts again, and after each
@@ -9,7 +9,7 @@
 //!    line ([`PhpManager::sync`]).
 //! 2. Caddy: the config of the sites and pools ([`CaddyManager::apply`]).
 //! 3. The CA bundle for PHP, once Caddy has made its CA. Caddy makes it
-//!    when it first loads a config, with or without sites (task M5-15).
+//!    when it first loads a config, with or without sites.
 //! 4. PHP again if the bundle just appeared: `php.ini` then points to it, so
 //!    those pools restart.
 //!
@@ -22,8 +22,7 @@
 //! owns the [`PhpManager`], so it alone starts and stops the pools. It stops
 //! with the daemon's shutdown token.
 //!
-//! A route that changed a setting the pass reads (`PUT /v1/php/xdebug`, task
-//! M5-11) asks for a pass through [`PassRequests`] and waits for it, like a
+//! A route that changed a setting the pass reads (`PUT /v1/php/xdebug`) asks for a pass through [`PassRequests`] and waits for it, like a
 //! job pushed on the worker's queue with a reply slot. A request is answered
 //! after a pass that started after it, so that pass saw the change.
 //!

@@ -28,7 +28,7 @@ pub(super) const SETUP_MAY_HAVE_RUN: &str = "Some steps may already have run wit
 /// When setup had no step to report.
 pub const SETUP_NOTHING: &str = "Nothing to set up.";
 /// Why setup skipped the trust when no Caddy is installed to make the
-/// certificate authority (task M5-15). The general text of the code is for
+/// certificate authority. The general text of the code is for
 /// `marsa services start caddy`.
 pub const SETUP_CADDY_NOT_INSTALLED: &str = "Caddy is not installed, so Marsa's certificate \
      authority does not exist yet. Run \"marsa install caddy\", then run \"marsa setup\" again.";
@@ -45,7 +45,7 @@ pub(super) const HOSTS_FILE: &str = if cfg!(windows) {
 const HOSTS_LISTED: usize = 5;
 
 /// Before the prompt of `marsa park` and `marsa link`, on stderr: the sites
-/// that go into the hosts file (task M4-18k2).
+/// that go into the hosts file.
 pub fn hosts_adding(missing: &[String]) -> String {
     let mut names = missing
         .iter()
@@ -111,9 +111,9 @@ pub fn setup_step(op: &str) -> String {
         "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
         "resolved_install" => "Send .test names to Marsa".to_owned(),
         "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
-        // Chrome and Firefox on Linux (task M4-18g).
+        // Chrome and Firefox on Linux.
         "nss_install" => "Trust Marsa's certificates in Chrome and Firefox".to_owned(),
-        // The hosts way on Linux (task M4-18k).
+        // The hosts way on Linux.
         "resolved_remove" => "Take out Marsa's link for .test names".to_owned(),
         "hosts_sync" => format!("Put the sites' .test names in {HOSTS_FILE}"),
         "hosts_remove" => format!("Take Marsa's names out of {HOSTS_FILE}"),
@@ -277,8 +277,8 @@ pub fn data_kept_ctrl_c(path: &Path) -> String {
     format!("Kept the data folder {}.", path.display())
 }
 
-/// Setup's text for `trust_record_unusable`: the trust folder `dir` (task
-/// M5-13) could not be used. The uninstall's text is in `known`.
+/// Setup's text for `trust_record_unusable`: the trust folder `dir`
+/// could not be used. The uninstall's text is in `known`.
 pub fn setup_trust_dir_unusable(dir: &Path) -> String {
     format!(
         "Marsa cannot use its folder {} for the trusted certificate: it must be your own \

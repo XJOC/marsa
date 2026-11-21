@@ -1,5 +1,5 @@
 //! Starting `marsad` in the background from the CLI or the window
-//! (architecture.md section 5, "Lifecycle"). Task M3-08.
+//! (architecture.md section 5, "Lifecycle").
 //!
 //! The daemon outlives the program that starts it: it shares no pipe and no
 //! terminal with it, it gets no console window, and nobody blocks on it.
@@ -17,8 +17,7 @@ type Started = std::process::Child;
 #[cfg(windows)]
 type Started = super::windows::DetachedProcess;
 
-/// `marsad`'s exit code when another daemon already holds `run/daemon.lock`
-/// (task M3-06).
+/// `marsad`'s exit code when another daemon already holds `run/daemon.lock`.
 pub const EXIT_ALREADY_RUNNING: i32 = 3;
 
 /// `marsad` in the folder of the running program (`marsa` or `marsa-gui`),

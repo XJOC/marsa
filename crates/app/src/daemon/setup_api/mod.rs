@@ -86,7 +86,7 @@ pub const SLOWEST_SETUP: Duration = Duration::from_secs(
 );
 
 /// The routes on `setup`, for `api::router` to merge before its fallbacks:
-/// `POST /v1/setup`, and the hosts routes of [`hosts`] (task M4-18k2).
+/// `POST /v1/setup`, and the hosts routes of [`hosts`].
 /// The uninstall route gets the same [`Setup`], so the two never run at once.
 pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
     let hosts = hosts::routes(Arc::clone(&setup));
@@ -102,7 +102,7 @@ pub fn routes_with(setup: Setup) -> Router<Arc<Daemon>> {
     routes(Arc::new(setup))
 }
 
-/// Which request runs the helper: the setup, or the uninstall of task M5-13.
+/// Which request runs the helper: the setup, or the uninstall of.
 /// Each has its own error codes, `setup_*` and `uninstall_*`, and its
 /// messages name its own command. It also names the request that runs now,
 /// for the 409 of the other one.
@@ -575,7 +575,7 @@ fn skip(op: &str, code: &str) -> SetupSkip {
 
 /// Leaves `op`, the DNS step, out: the daemon's DNS server does not answer,
 /// so `.test` names would go to a port that no one, or another program,
-/// answers on (task M4-18i).
+/// answers on.
 fn dns_skipped(report: &mut SetupReport, op: &str, code: &str) {
     tracing::warn!(
         op,

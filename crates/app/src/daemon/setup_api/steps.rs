@@ -78,7 +78,7 @@ impl Setup {
     /// the host names of the sites, sorted, for the hosts file on Linux;
     /// `None` if the site list is not known. `dns_down`: why the daemon's
     /// DNS server does not answer (`DnsService::not_serving`); the DNS
-    /// operation is then skipped with that code (task M4-18i).
+    /// operation is then skipped with that code.
     #[expect(
         clippy::too_many_arguments,
         reason = "the inputs of one setup; a struct would only rename them"
@@ -197,7 +197,7 @@ impl Setup {
         report
     }
 
-    /// Linux, after a request with `resolved_install` (task M4-18k2), and
+    /// Linux, after a request with `resolved_install`, and
     /// only if the helper answered it. The helper is the judge of the way:
     /// if it chose the hosts file ([`linux_dns::helper_chose_hosts`]),
     /// `resolved_install` moves from the results to the skipped steps with
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)]);
         assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, SECURITY, SECURITY]);
         // `security` gets the checked copy of Caddy's root in the trust
-        // folder, not `root.crt` again (task M5-13); it is the record now.
+        // folder, not `root.crt` again; it is the record now.
         let checked = dir.dir.path().join("trust").join("pending.pem");
         assert_ne!(checked, dir.ca_root());
         let ca_root = checked.to_str().unwrap();
@@ -759,7 +759,7 @@ mod tests {
         })
     }
 
-    /// Task M4-18g: after the helper, the CA root goes into the user's NSS
+    /// After the helper, the CA root goes into the user's NSS
     /// databases, as the user, with the checked text.
     #[test]
     fn linux_adds_the_ca_to_the_nss_databases_after_the_helper() {
@@ -846,7 +846,7 @@ mod tests {
         assert_eq!(report.results.len(), 3);
     }
 
-    /// Task M4-18i: with the DNS port held by another program, the link
+    /// With the DNS port held by another program, the link
     /// would send `.test` names to it. The other steps still go.
     #[test]
     fn linux_without_the_dns_server_skips_the_link() {
@@ -920,7 +920,7 @@ mod tests {
         assert!(!low_ports_set(&report));
     }
 
-    /// No CA root and no Caddy to make one (task M5-15): the names and the
+    /// No CA root and no Caddy to make one: the names and the
     /// ports still go to the helper.
     #[test]
     fn linux_without_a_ca_still_sets_up_names_and_ports() {
@@ -998,7 +998,7 @@ mod tests {
 
     /// systemd older than 250 with systemd-networkd, or no
     /// systemd-resolved at all: the names of the sites go into the hosts
-    /// file, and a link of an earlier setup goes (task M4-18k).
+    /// file, and a link of an earlier setup goes.
     #[test]
     fn linux_without_a_safe_link_puts_the_sites_in_the_hosts_file() {
         for system in [UBUNTU_2204_SERVER, DEBIAN_12] {
@@ -1179,7 +1179,7 @@ mod tests {
         assert!(low_ports_set(&report));
     }
 
-    /// The helper is the judge (task M4-18k2): where marsad expected the
+    /// The helper is the judge: where marsad expected the
     /// link but the helper chose the hosts file, `resolved_install` becomes
     /// a skipped step with the helper's code, and the operations of the
     /// hosts way go to the helper in a second request. With a block there,

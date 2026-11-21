@@ -19,7 +19,7 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
 /// The exit code when another daemon already runs on the same data folder.
-/// The client reads it from the same constant (task M3-08).
+/// The client reads it from the same constant.
 const EXIT_ALREADY_RUNNING: u8 = {
     let code = marsa_core::platform::spawn::EXIT_ALREADY_RUNNING;
     assert!(code > 0 && code < 256, "an exit code fits in a byte");
@@ -90,7 +90,7 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
     let file = LogFile::open(&path, LOG_FILE_LIMIT)
         .with_context(|| format!("cannot open {}", path.display()))?;
     // hickory logs two `info` lines for every DNS query, so every `.test`
-    // lookup of a browser would fill the log (task M4-12).
+    // lookup of a browser would fill the log.
     let filter = EnvFilter::try_from_env("MARSA_LOG")
         .unwrap_or_else(|_| EnvFilter::new("info,hickory_server=warn"));
     let to_file = tracing_subscriber::fmt::layer()

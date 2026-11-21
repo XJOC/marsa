@@ -74,8 +74,7 @@ pub fn doctor_vc_old(found: &str) -> String {
 pub const DOCTOR_VC_INSTALL: &str = "Install the latest Microsoft Visual C++ Redistributable \
      (x64) from https://aka.ms/vs/17/release/vc_redist.x64.exe, then run \"marsa doctor\" again.";
 
-/// Windows: PHP's CA bundle against the roots Windows trusts (task M4-19n,
-/// ADR 0020).
+/// Windows: PHP's CA bundle against the roots Windows trusts (ADR 0020).
 pub fn doctor_system_roots_ok(count: usize, left_out: usize, marsa: bool, age_days: u64) -> String {
     let written = match age_days {
         0 => "today".to_owned(),
@@ -126,13 +125,13 @@ pub fn doctor_runtimes_ok(default: &str, version: &str) -> String {
 
 pub const DOCTOR_CADDY_OK: &str = "Caddy is running.";
 pub const DOCTOR_DNS_OK: &str = ".test names resolve to 127.0.0.1.";
-/// Linux on the `marsa0` link (task M4-18k3).
+/// Linux on the `marsa0` link.
 pub const DOCTOR_LINK_SETUP: &str = "Run \"marsa setup\": it sends .test names to Marsa through \
      systemd-resolved. If they still do not resolve, \"resolvectl status marsa0\" shows whether \
      systemd-resolved sends .test names to Marsa.";
-/// Linux on the hosts way (task M4-18k3).
+/// Linux on the hosts way.
 pub const DOCTOR_HOSTS_OK: &str = "Every site has its line in /etc/hosts.";
-/// Windows (task M4-19o): the hosts file is Windows' own, and marsad adds the
+/// Windows: the hosts file is Windows' own, and marsad adds the
 /// names through the helper service with no prompt.
 pub const DOCTOR_HOSTS_OK_WINDOWS: &str = "Every site has its line in the hosts file.";
 pub const DOCTOR_HOSTS_SYNC_WINDOWS: &str = "marsad adds new sites through Marsa's helper service \
