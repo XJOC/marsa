@@ -11,6 +11,7 @@ pub mod databases;
 pub mod dns;
 pub mod hosts_sync;
 pub(crate) mod http;
+pub mod one_at_a_time;
 pub mod php;
 pub mod runtimes;
 pub mod runtimes_api;
