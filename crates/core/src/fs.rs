@@ -132,6 +132,21 @@ pub fn rename_retry(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+/// `bytes` random bytes from the OS random source, as lowercase hex (two
+/// characters each): for the names of temp files and folders.
+///
+/// # Errors
+///
+/// The OS random source failed.
+// `getrandom` is behind `full`; the shim needs no random names.
+#[cfg(feature = "full")]
+pub fn random_hex(bytes: usize) -> io::Result<String> {
+    let mut buffer = vec![0u8; bytes];
+    getrandom::fill(&mut buffer)
+        .map_err(|err| io::Error::other(format!("no random bytes: {err}")))?;
+    Ok(buffer.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// `ERROR_ACCESS_DENIED` (5), `ERROR_SHARING_VIOLATION` (32), or
 /// `ERROR_LOCK_VIOLATION` (33).
 fn is_held_on_windows(err: &io::Error) -> bool {
@@ -145,6 +160,18 @@ fn is_held_on_windows(err: &io::Error) -> bool {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(feature = "full")]
+    #[test]
+    fn random_names_are_lowercase_hex_and_differ() {
+        let (one, two) = (random_hex(8).unwrap(), random_hex(8).unwrap());
+        assert_eq!(one.len(), 16);
+        assert!(
+            one.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+        assert_ne!(one, two);
+    }
 
     #[test]
     fn writes_a_new_file_and_makes_its_folder() {

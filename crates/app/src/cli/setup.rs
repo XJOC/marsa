@@ -25,8 +25,8 @@ use marsa_core::types::{OpStatus, PortHolder, SetupReport};
 
 use super::Failure;
 use super::daemon::{connect, failure};
-use super::sites::printable;
 use super::strings::{self, Details};
+use super::text::printable;
 use marsa_core::platform::trust::TrustFiles;
 
 /// Starts the daemon if needed, runs the setup, and prints its report.

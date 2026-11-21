@@ -692,8 +692,8 @@ pub async fn port_lookup(port: u16) -> PortLookup {
     lsof_lookup(&[&port, "-sTCP:LISTEN"]).await
 }
 
-/// Who has UDP `port` open, as `name(pid)`, for messages only (task
-/// The DNS port). `None` when nobody has it, the look fails, or this
+/// Who has UDP `port` open, as `name(pid)`, for messages only (the DNS port).
+/// `None` when nobody has it, the look fails, or this
 /// system has no look: only macOS asks `lsof`.
 pub async fn udp_port_owner(port: u16) -> Option<String> {
     #[cfg(target_os = "macos")]

@@ -17,8 +17,8 @@ use marsa_core::runtimes::Runtime;
 use super::Failure;
 use super::Tool;
 use super::daemon::{connect, failure};
-use super::sites::printable;
 use super::strings::{self, Details};
+use super::text::printable;
 
 /// The arguments of `marsa uninstall`.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -50,7 +50,7 @@ pub async fn run(args: &UninstallArgs, data_dir: &Path) -> Result<ExitCode, Fail
 
 /// The text and code the user sees for `err`. A refusal names what uses the
 /// version, and a version code names the program and the version asked for.
-pub fn uninstall_failure(
+fn uninstall_failure(
     err: &ClientError,
     runtime: Runtime,
     version: &str,

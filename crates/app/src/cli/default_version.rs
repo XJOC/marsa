@@ -17,8 +17,8 @@ use marsa_core::types::DefaultVersion;
 use super::Failure;
 use super::Tool;
 use super::daemon::{connect, failure};
-use super::sites::printable;
 use super::strings::{self, Details};
+use super::text::printable;
 
 /// The arguments of `marsa use`.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -59,7 +59,7 @@ pub fn render(runtime: Runtime, answer: &DefaultVersion) -> String {
 /// The text and code the user sees for `err`. A version code names the
 /// program and the version asked for, and a `config_*` code names
 /// `global.toml`, the file the daemon could not use.
-pub fn use_failure(err: &ClientError, runtime: Runtime, version: &str, data_dir: &Path) -> Failure {
+fn use_failure(err: &ClientError, runtime: Runtime, version: &str, data_dir: &Path) -> Failure {
     let mut failure = failure(err, data_dir, None);
     let global_toml = ConfigPaths::in_dir(data_dir).global;
     let path = match &*failure.code {
