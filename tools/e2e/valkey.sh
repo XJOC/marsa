@@ -153,8 +153,13 @@ echo "valkey-server rss: $(rss_mb "$PID") MB"
 [ "$(rss_mb "$PID")" -lt 10 ] || fail "too much memory"
 
 step "access (ADR 0023): no file writes, no DEBUG, no modules over TCP"
-denied 'protected config' config set dir "$RUNNER_TEMP"
-denied 'protected config' config set dbfilename pwn.php
+# No CONFIG SET at all (an ACL rule): `bind` and `protected-mode` are not
+# protected configs, so they would let a local user open the server to the
+# network.
+denied 'NOPERM' config set dir "$RUNNER_TEMP"
+denied 'NOPERM' config set dbfilename pwn.php
+denied 'NOPERM' config set bind 0.0.0.0
+denied 'NOPERM' config set protected-mode no
 denied 'DEBUG command not allowed' debug sleep 0
 denied 'MODULE command not allowed' module load "$RUNNER_TEMP/pwn.so"
 [ "$(cli config get dir | tail -n 1)" = "$DATA/databases/valkey" ] || fail "dir changed"

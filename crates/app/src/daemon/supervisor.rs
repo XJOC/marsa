@@ -321,6 +321,10 @@ async fn run(
 /// once. After the last step, a kill. Windows sends no signals, so there a
 /// signal step is skipped.
 async fn stop(child: &mut Child, spec: &ServiceSpec) {
+    // A `Send` step goes to the port that was fixed at the spawn. Another
+    // program could take it in the instant between our child's start and its
+    // bind; the check before the start and the readiness probe make that
+    // narrow, and only the fixed request of the stop could reach it.
     for step in &spec.stop.steps {
         // `None` once the exit is collected: the pid may be another
         // process's by then.
@@ -381,7 +385,7 @@ async fn ask(child: &mut Child, request: &TcpRequest, wait: Duration, id: &str) 
     tokio::select! {
         exited = tokio::time::timeout(wait, child.wait()) => Asked::Yes(exited.is_ok()),
         reply = refusal(&mut stream) => {
-            warn!(service = %id, %reply, "{name} was refused");
+            warn!(service = %id, ?reply, "{name} was refused");
             Asked::No
         }
     }

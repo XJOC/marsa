@@ -17,3 +17,4 @@ logfile ""
 enable-protected-configs no
 enable-debug-command no
 enable-module-command no
+user default on nopass ~* &* +@all -config|set

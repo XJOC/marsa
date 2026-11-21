@@ -65,6 +65,12 @@ impl ValkeyDirs {
 ///   `enable-module-command no`, written out though they are the defaults:
 ///   any local user can connect, and `CONFIG SET dir` with `dbfilename`
 ///   would let them write a file as the owner (ADR 0023, "Access").
+/// - `user default ... -config|set`: no `CONFIG SET` at all. The protected
+///   configs cover `dir` and `dbfilename` only; `bind`, `port`, and
+///   `protected-mode` stay open to any local client, and `CONFIG SET bind
+///   0.0.0.0` would put the owner's server on the network. `CONFIG GET`
+///   still works. The default user keeps every other command, with no
+///   password, as Laravel's default settings expect.
 /// - `daemonize no` and `logfile ""`: the supervisor owns the process and
 ///   keeps its output in `logs/valkey.log`. No `pidfile`: the daemon writes
 ///   its own record of the pid.
@@ -91,6 +97,7 @@ logfile \"\"
 enable-protected-configs no
 enable-debug-command no
 enable-module-command no
+user default on nopass ~* &* +@all -config|set
 ",
         data = quoted_path(&dirs.data, UnwritablePath::Valkey)?,
     ))
