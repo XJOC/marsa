@@ -506,14 +506,16 @@ fn sync_dir(_dir: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
-pub use fake::FakeSystem;
+pub use fake::{FakeSystem, Hooked, RunHook};
 
 #[cfg(test)]
 mod fake {
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::io;
+    use std::ops::{Deref, DerefMut};
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use super::{RunOutput, System, too_large};
 
@@ -557,6 +559,111 @@ mod fake {
         pub system_dir: Option<PathBuf>,
         /// What `install_dir` returns, like `system_dir`.
         pub install_dir: Option<PathBuf>,
+        /// Paths `write_atomic` wrote: a link there is a file now, as the
+        /// rename of the real one replaces the link itself.
+        pub written: RefCell<BTreeSet<PathBuf>>,
+    }
+
+    /// Changes what a program run does, for a test that needs a machine that
+    /// reacts (a `certutil` that changes a store, a `sysctl` that changes a
+    /// value file). Implemented once per test machine, so none of them
+    /// forwards the other methods of [`System`] by hand.
+    pub trait RunHook: Sized {
+        /// Called after the fake logged the call. `scripted` is what the
+        /// fake alone would return. `system` is the whole machine, so the
+        /// hook can read and change its files.
+        fn run(
+            system: &Hooked<Self>,
+            program: &'static str,
+            args: &[&str],
+            scripted: io::Result<RunOutput>,
+        ) -> io::Result<RunOutput>;
+    }
+
+    /// A [`FakeSystem`] plus the state and the `run` behavior of one test
+    /// machine. `Deref` gives the tests the machine's own fields.
+    pub struct Hooked<H> {
+        pub fake: FakeSystem,
+        pub hook: H,
+    }
+
+    impl<H> Hooked<H> {
+        pub fn with_hook(fake: FakeSystem, hook: H) -> Self {
+            Self { fake, hook }
+        }
+    }
+
+    impl<H> Deref for Hooked<H> {
+        type Target = H;
+
+        fn deref(&self) -> &H {
+            &self.hook
+        }
+    }
+
+    impl<H> DerefMut for Hooked<H> {
+        fn deref_mut(&mut self) -> &mut H {
+            &mut self.hook
+        }
+    }
+
+    impl<H: RunHook> System for Hooked<H> {
+        fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>> {
+            self.fake.read(path, max)
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            self.fake.exists(path)
+        }
+
+        fn is_link(&self, path: &Path) -> bool {
+            self.fake.is_link(path)
+        }
+
+        fn is_root_only_dir(&self, dir: &Path) -> bool {
+            self.fake.is_root_only_dir(dir)
+        }
+
+        fn is_read_only(&self, path: &Path) -> bool {
+            self.fake.is_read_only(path)
+        }
+
+        fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+            self.fake.write_atomic(path, bytes, mode)
+        }
+
+        fn remove(&self, path: &Path) -> io::Result<()> {
+            self.fake.remove(path)
+        }
+
+        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
+            self.fake.remove_empty_dir(path)
+        }
+
+        fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
+            let scripted = self.fake.run(program, args);
+            H::run(self, program, args, scripted)
+        }
+
+        fn current_exe(&self) -> io::Result<PathBuf> {
+            self.fake.current_exe()
+        }
+
+        fn system_dir(&self) -> io::Result<PathBuf> {
+            self.fake.system_dir()
+        }
+
+        fn install_dir(&self) -> io::Result<PathBuf> {
+            self.fake.install_dir()
+        }
+
+        fn run_system_tool(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
+            self.run(program, args)
+        }
+
+        fn pause(&self, duration: Duration) {
+            self.fake.pause(duration);
+        }
     }
 
     impl FakeSystem {
@@ -591,7 +698,8 @@ mod fake {
         }
 
         fn is_link(&self, path: &Path) -> bool {
-            self.dangling.contains(path) || self.links.contains(path)
+            self.dangling.contains(path)
+                || (self.links.contains(path) && !self.written.borrow().contains(path))
         }
 
         fn is_read_only(&self, path: &Path) -> bool {
@@ -608,6 +716,7 @@ mod fake {
             }
             let entry = (bytes.to_vec(), mode);
             self.files.borrow_mut().insert(path.to_path_buf(), entry);
+            self.written.borrow_mut().insert(path.to_path_buf());
             if let Some(dir) = path.parent() {
                 self.dirs.borrow_mut().insert(dir.to_path_buf());
             }
