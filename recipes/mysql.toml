@@ -28,6 +28,12 @@ expect_contains = " Ver {version} "
 # install the first), so Marsa's own builds of both (.github/workflows/
 # libaio-build.yml, LGPL-2.1, with their source in the same release) are saved
 # in lib/private/ too. Oracle publishes no arm64 `-minimal` build either.
+#
+# Windows: the `winx64.zip`, with `.pdb` files (281 MB, 1.26 GB unpacked,
+# S-12). Its programs are signed by Oracle and need the Microsoft Visual C++
+# runtime, which the install reports when it is missing and `marsa doctor`
+# checks (ADR 0019). `manifest build` checks the zip's first entry as for the
+# tar archives, with /usr/bin/unzip.
 
 [platform.darwin-arm64]
 min_macos = "14.0"

@@ -150,12 +150,16 @@ pub enum Problem {
     /// installed.
     XzMissing,
     /// Windows: no Microsoft Visual C++ runtime (x64), so the official PHP
-    /// does not start.
-    VcRuntimeMissing,
+    /// does not start, nor do the installed `servers` that need it too
+    /// (MySQL, PostgreSQL).
+    VcRuntimeMissing {
+        servers: Vec<String>,
+    },
     /// Windows: a runtime older than [`VC_RUNTIME_MIN`]: PHP 8.4 and 8.5
-    /// need a newer one.
+    /// need a newer one, and the installed `servers` need one too.
     VcRuntimeOld {
         found: String,
+        servers: Vec<String>,
     },
     /// Windows: Marsa cannot read the roots Windows trusts, so PHP trusts
     /// only Marsa's CA, and its HTTPS calls to the internet fail.
@@ -199,6 +203,23 @@ pub enum Skip {
     /// The check could not get its facts (`netstat` or `security` failed,
     /// the daemon gave no answer). The log says why.
     NotChecked,
+}
+
+/// Something that works now but will cause trouble: a line with `!` and a
+/// fix, which does not fail `marsa doctor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Warning {
+    /// Windows: `marsad` runs with an administrator's token. PostgreSQL
+    /// refuses to start then (ADR 0023, section 7), and every program it
+    /// starts gets those rights.
+    DaemonElevated,
+}
+
+/// Windows: the warning for a `marsad` that runs elevated. `elevated` is
+/// what Windows says of the daemon's process; `None` when it cannot say, or
+/// on macOS and Linux: then no line.
+pub fn daemon_elevation(elevated: Option<bool>) -> Option<Warning> {
+    (elevated == Some(true)).then_some(Warning::DaemonElevated)
 }
 
 /// The facts of the runtimes check, read from the data folder. An error is
@@ -311,16 +332,19 @@ pub fn xz(available: bool) -> Verdict {
 }
 
 /// Windows: the Visual C++ runtime that Windows reports, `(major, minor,
-/// build)`, or `None` when it reports none.
-pub fn vc_runtime(found: Option<(u32, u32, u32)>) -> Verdict {
+/// build)`, or `None` when it reports none. `servers`: the names of the
+/// installed database servers that need it as PHP does (MySQL and
+/// PostgreSQL), for the failure's line.
+pub fn vc_runtime(found: Option<(u32, u32, u32)>, servers: Vec<String>) -> Verdict {
     match found {
-        None => Verdict::Fail(Problem::VcRuntimeMissing),
+        None => Verdict::Fail(Problem::VcRuntimeMissing { servers }),
         Some((major, minor, build)) => {
             let version = format!("{major}.{minor}.{build}");
             if (major, minor) >= VC_RUNTIME_MIN {
                 Verdict::Pass(Pass::VcRuntime { version })
             } else {
-                Verdict::Fail(Problem::VcRuntimeOld { found: version })
+                let found = version;
+                Verdict::Fail(Problem::VcRuntimeOld { found, servers })
             }
         }
     }
@@ -1048,15 +1072,20 @@ mod tests {
 
     #[test]
     fn the_vc_runtime_must_be_there_and_new_enough() {
-        assert_eq!(vc_runtime(None), Verdict::Fail(Problem::VcRuntimeMissing));
+        let none = Verdict::Fail(Problem::VcRuntimeMissing {
+            servers: Vec::new(),
+        });
+        assert_eq!(vc_runtime(None, Vec::new()), none);
         let old = Verdict::Fail(Problem::VcRuntimeOld {
             found: "14.29.30133".to_owned(),
+            servers: Vec::new(),
         });
-        assert_eq!(vc_runtime(Some((14, 29, 30133))), old);
+        assert_eq!(vc_runtime(Some((14, 29, 30133)), Vec::new()), old);
         let just_below = Verdict::Fail(Problem::VcRuntimeOld {
             found: "14.43.99".to_owned(),
+            servers: Vec::new(),
         });
-        assert_eq!(vc_runtime(Some((14, 43, 99))), just_below);
+        assert_eq!(vc_runtime(Some((14, 43, 99)), Vec::new()), just_below);
         for (found, shown) in [
             ((14, 44, 0), "14.44.0"),
             ((14, 44, 35211), "14.44.35211"),
@@ -1065,8 +1094,36 @@ mod tests {
             let pass = Verdict::Pass(Pass::VcRuntime {
                 version: shown.to_owned(),
             });
-            assert_eq!(vc_runtime(Some(found)), pass);
+            assert_eq!(vc_runtime(Some(found), Vec::new()), pass);
         }
+    }
+
+    /// The installed servers that need the runtime go with the failure.
+    #[test]
+    fn a_missing_vc_runtime_names_the_servers_that_need_it() {
+        let servers = vec!["MySQL".to_owned(), "PostgreSQL".to_owned()];
+        let missing = Verdict::Fail(Problem::VcRuntimeMissing {
+            servers: servers.clone(),
+        });
+        assert_eq!(vc_runtime(None, servers.clone()), missing);
+        let old = Verdict::Fail(Problem::VcRuntimeOld {
+            found: "14.29.30133".to_owned(),
+            servers: servers.clone(),
+        });
+        assert_eq!(vc_runtime(Some((14, 29, 30133)), servers.clone()), old);
+        let pass = Verdict::Pass(Pass::VcRuntime {
+            version: "14.44.1".to_owned(),
+        });
+        assert_eq!(vc_runtime(Some((14, 44, 1)), servers), pass);
+    }
+
+    /// Only a daemon that Windows says runs elevated gets the warning.
+    #[test]
+    fn an_elevated_daemon_gets_a_warning() {
+        let warning = daemon_elevation(Some(true));
+        assert_eq!(warning, Some(Warning::DaemonElevated));
+        assert_eq!(daemon_elevation(Some(false)), None);
+        assert_eq!(daemon_elevation(None), None);
     }
 
     /// The hosts way on Linux.

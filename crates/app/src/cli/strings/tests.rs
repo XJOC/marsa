@@ -113,6 +113,14 @@ fn postgres_messages_name_it_and_what_to_do() {
     let busy = message("service_data_dir_busy", &postgres);
     assert!(busy.starts_with("Another PostgreSQL server"), "{busy}");
     assert!(message("postgres_not_installed", &postgres).contains("marsa install postgres"));
+    // Windows: the daemon runs elevated.
+    let elevated = message("service_elevated", &postgres);
+    assert!(
+        elevated.starts_with("PostgreSQL does not run with administrator rights"),
+        "{elevated}"
+    );
+    assert!(elevated.contains("Run Marsa without administrator rights"));
+    assert!(elevated.contains("\"marsa daemon stop\""), "{elevated}");
 }
 
 /// The Valkey refusals name it, its table, and what to do: Homebrew's

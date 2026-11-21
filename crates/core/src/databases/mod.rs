@@ -21,8 +21,9 @@ use crate::config::{GlobalConfig, ServerSettings};
 use crate::orphan::Liveness;
 use crate::php::MAX_SOCKET_PATH;
 use crate::ports::PortLookup;
+use crate::recipes::Os;
 use crate::runtimes::Runtime;
-use crate::services::{Signal, StopMethod};
+use crate::services::{Signal, StopAction, StopCommand, StopMethod, StopStep};
 
 /// PostgreSQL's port when `[postgres] port` is not set in `global.toml`. The
 /// daemon never moves to another port: the project's `.env` names it.
@@ -217,14 +218,23 @@ impl PostgresDirs {
 ///   workflow, on Ubuntu 24.04 and macOS 15 and 26). Those
 ///   answers come from each OS's tables, so the workflow checks that
 ///   Arabic words with diacritics split the same on each. A cluster made
-///   before this keeps `C`: nothing makes a cluster again. Windows has no
-///   `C.UTF-8`, so its locale is chosen separately.
-pub fn initdb_args(dirs: &PostgresDirs) -> Vec<String> {
+///   before this keeps `C`: nothing makes a cluster again.
+/// - Windows: no `--lc-ctype`, so `C` there too. Its C library has no
+///   `C.UTF-8`, and the one name it has for a UTF-8 category (`.UTF-8`)
+///   depends on the user's language; S-12 tested `--locale=C` alone. So
+///   `pg_trgm` finds no similarity between two Arabic words on Windows; the
+///   builtin provider above still sorts and changes case the same as on the
+///   other systems.
+pub fn initdb_args(dirs: &PostgresDirs, os: Os) -> Vec<String> {
     let user = ["-U", "postgres", "-A", "trust", "-E", "UTF8", "--locale=C"];
-    let ctype = ["--lc-ctype=C.UTF-8"];
+    let ctype: &[&str] = if os == Os::Windows {
+        &[]
+    } else {
+        &["--lc-ctype=C.UTF-8"]
+    };
     let builtin = ["--locale-provider=builtin", "--builtin-locale=C.UTF-8"];
     let mut args = vec!["-D".to_owned(), arg_path(&dirs.data)];
-    let all = user.into_iter().chain(ctype).chain(builtin);
+    let all = user.into_iter().chain(ctype.iter().copied()).chain(builtin);
     args.extend(all.map(str::to_owned));
     args
 }
@@ -392,6 +402,49 @@ pub fn postgres_stop() -> StopMethod {
         (Signal::Int, Duration::from_secs(10)),
         (Signal::Quit, Duration::from_secs(10)),
     ])
+}
+
+/// How the supervisor stops PostgreSQL on Windows, which has no signals
+/// (ADR 0023, section 6): `pg_ctl stop -m fast` on the cluster in `data`,
+/// PostgreSQL's own program, which sends the same fast shutdown as SIGINT
+/// through PostgreSQL's signal pipe and waits up to 10 s for it (`-w -t
+/// 10`). Then a kill (`TerminateProcess`), after which PostgreSQL recovers
+/// its data at its next start (0.36 s in S-12). With a client connected the
+/// fast shutdown took under a second there.
+pub fn postgres_windows_stop(pg_ctl: &Path, data: &Path) -> StopMethod {
+    let args = [
+        "stop",
+        "-D",
+        &arg_path(data),
+        "-m",
+        "fast",
+        "-w",
+        "-t",
+        "10",
+    ];
+    let command = StopCommand {
+        program: pg_ctl.to_path_buf(),
+        args: args.map(str::to_owned).to_vec(),
+        name: "pg_ctl stop",
+        on_failure: "If PostgreSQL still runs 10 s after the stop began, it is ended, and it \
+                     recovers its data at its next start.",
+    };
+    StopMethod {
+        steps: vec![StopStep {
+            action: StopAction::Run(command),
+            wait: Duration::from_secs(10),
+        }],
+    }
+}
+
+/// How the supervisor stops PostgreSQL on `os`: [`postgres_stop`], or on
+/// Windows [`postgres_windows_stop`] with `pg_ctl` on `data`.
+pub fn postgres_stop_on(os: Os, pg_ctl: &Path, data: &Path) -> StopMethod {
+    if os == Os::Windows {
+        postgres_windows_stop(pg_ctl, data)
+    } else {
+        postgres_stop()
+    }
 }
 
 /// The pid on the first line of `postmaster.pid`, or `None` for junk: `0`, or
@@ -600,6 +653,16 @@ pub fn decide_start(facts: &StartFacts) -> StartDecision {
     }
 }
 
+/// Whether a start of `kind` is refused, before anything runs, because the
+/// daemon runs with an administrator's token (`elevated`, from
+/// `platform::is_elevated`, which is `false` off Windows). PostgreSQL only:
+/// `postgres.exe` refuses that token, and a start through `pg_ctl start`,
+/// which drops the rights, would leave a server that the supervisor does not
+/// own (ADR 0023, section 7). MySQL and Valkey run either way.
+pub fn refuses_elevation(kind: ServerKind, elevated: bool) -> bool {
+    elevated && kind == ServerKind::Postgres
+}
+
 /// [`PortCheck`] from the daemon's two looks at the port. Busy if either
 /// says so; [`PortCheck::Unknown`], which refuses too, if the bind worked
 /// and the look failed:
@@ -641,8 +704,8 @@ pub fn classify_postmaster(pid: u32, now: &Liveness, servers: &[PathBuf]) -> Pid
 }
 
 /// A path that a server's settings file cannot hold: one with a double quote
-/// or a control character, or not UTF-8. Its own error, since no start can
-/// go on.
+/// or a control character, or not UTF-8, and for Valkey on Windows one that
+/// is not on a drive. Its own error, since no start can go on.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UnwritablePath {
     #[error(
@@ -655,6 +718,13 @@ pub enum UnwritablePath {
         .0.display()
     )]
     Valkey(PathBuf),
+    /// Valkey on Windows reads paths in Cygwin's form, which is made from a
+    /// drive letter (`/cygdrive/c/...`).
+    #[error(
+        "{} cannot be given to Valkey on Windows: it is not a full path on a drive such as C:",
+        .0.display()
+    )]
+    ValkeyNoDrive(PathBuf),
 }
 
 impl UnwritablePath {
@@ -662,7 +732,7 @@ impl UnwritablePath {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Mysql(_) => crate::codes::MYSQL_PATH_UNSUPPORTED,
-            Self::Valkey(_) => crate::codes::VALKEY_PATH_UNSUPPORTED,
+            Self::Valkey(_) | Self::ValkeyNoDrive(_) => crate::codes::VALKEY_PATH_UNSUPPORTED,
         }
     }
 }
@@ -698,7 +768,6 @@ fn arg_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::{StopAction, StopStep};
 
     fn dirs(data: &str, sockets: &str) -> PostgresDirs {
         let (data, sockets) = (data.into(), sockets.into());
@@ -721,10 +790,50 @@ mod tests {
 
     #[test]
     fn initdb_makes_a_trust_cluster_with_the_builtin_locale() {
-        let args = initdb_args(&dirs("/m/databases/postgres/18", "/m/run"));
+        let dirs = dirs("/m/databases/postgres/18", "/m/run");
         let want = "-D /m/databases/postgres/18 -U postgres -A trust -E UTF8 --locale=C \
                     --lc-ctype=C.UTF-8 --locale-provider=builtin --builtin-locale=C.UTF-8";
-        assert_eq!(args, words(want));
+        assert_eq!(initdb_args(&dirs, Os::Mac), words(want));
+        assert_eq!(initdb_args(&dirs, Os::Linux), words(want));
+        // Windows' C library has no `C.UTF-8`: `C` there.
+        let windows = "-D /m/databases/postgres/18 -U postgres -A trust -E UTF8 --locale=C \
+                       --locale-provider=builtin --builtin-locale=C.UTF-8";
+        assert_eq!(initdb_args(&dirs, Os::Windows), words(windows));
+    }
+
+    /// Windows: `pg_ctl stop -m fast` on the cluster, by its absolute path
+    /// with fixed arguments, then the kill after 10 s.
+    #[test]
+    fn on_windows_pg_ctl_stops_it_fast_then_a_kill_after_10_s() {
+        let pg_ctl = Path::new(r"C:\m\runtimes\postgres\18.7.0\bin\pg_ctl.exe");
+        let data = Path::new(r"C:\Users\John Smith\m\databases\postgres\18");
+        let stop = postgres_windows_stop(pg_ctl, data);
+        assert_eq!(postgres_stop_on(Os::Windows, pg_ctl, data), stop);
+        let [step] = stop.steps.as_slice() else {
+            panic!("one step: {stop:?}");
+        };
+        assert_eq!(step.wait, Duration::from_secs(10));
+        let StopAction::Run(command) = &step.action else {
+            panic!("a stop program: {step:?}");
+        };
+        assert_eq!(command.program, pg_ctl);
+        // The folder with a space is one argument: no shell reads them.
+        let args = [
+            "stop",
+            "-D",
+            r"C:\Users\John Smith\m\databases\postgres\18",
+            "-m",
+            "fast",
+            "-w",
+            "-t",
+            "10",
+        ];
+        assert_eq!(command.args, args);
+        assert_eq!(command.name, "pg_ctl stop");
+        // macOS and Linux keep their signals.
+        for os in [Os::Mac, Os::Linux] {
+            assert_eq!(postgres_stop_on(os, pg_ctl, data), postgres_stop());
+        }
     }
 
     #[test]
@@ -813,8 +922,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == owner_only));
     }
 
-    /// Unix paths: an absolute path on Windows needs a drive, and PostgreSQL
-    /// on Windows is.
+    /// Unix paths: an absolute path on Windows needs a drive.
     #[cfg(unix)]
     mod unix_sockets {
         use super::*;
@@ -909,7 +1017,9 @@ mod tests {
         let steps = postgres_stop().steps;
         let signal = |step: &StopStep| match step.action {
             StopAction::Signal(signal) => (signal, step.wait.as_secs()),
-            StopAction::Send(_) => panic!("PostgreSQL is stopped by signals only"),
+            StopAction::Send(_) | StopAction::Run(_) => {
+                panic!("on macOS and Linux PostgreSQL is stopped by signals only")
+            }
         };
         let signals: Vec<_> = steps.iter().map(signal).collect();
         assert_eq!(signals, [(Signal::Int, 10), (Signal::Quit, 10)]);
@@ -971,6 +1081,16 @@ mod tests {
         for port_check in checks {
             assert_eq!(decide(&port_check, Server { pid: 7 }), data_dir_busy);
         }
+    }
+
+    #[test]
+    fn only_postgres_refuses_an_elevated_daemon() {
+        for kind in ServerKind::ALL {
+            assert!(!refuses_elevation(kind, false), "{kind:?}");
+        }
+        assert!(refuses_elevation(ServerKind::Postgres, true));
+        assert!(!refuses_elevation(ServerKind::Mysql, true));
+        assert!(!refuses_elevation(ServerKind::Valkey, true));
     }
 
     #[test]

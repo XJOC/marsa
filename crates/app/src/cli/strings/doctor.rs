@@ -19,6 +19,21 @@ pub fn doctor_fail(text: &str, fix: &str) -> String {
     format!("✗ {text}\n  Fix: {fix}")
 }
 
+/// A warning, which does not fail `marsa doctor`, with its fix on the next
+/// line.
+pub fn doctor_warn(text: &str, fix: &str) -> String {
+    format!("! {text}\n  Fix: {fix}")
+}
+
+/// Windows: `marsad` runs with an administrator's token (ADR 0023, section
+/// 7).
+pub const DOCTOR_DAEMON_ELEVATED: &str = "marsad runs with administrator rights. PostgreSQL \
+     refuses to run with them, so it does not start, and every program Marsa starts gets them.";
+
+pub const DOCTOR_RESTART_UNELEVATED: &str = "Run Marsa without administrator rights: run \
+     \"marsa daemon stop\", then \"marsa daemon start\" from a terminal that is not \"Run as \
+     administrator\".";
+
 /// A check that did not run, and why.
 pub fn doctor_skip(check: Check, skip: Skip) -> String {
     let check = match check {
@@ -64,11 +79,31 @@ pub fn doctor_vc_runtime_ok(version: &str) -> String {
     format!("The Microsoft Visual C++ runtime {version} is installed.")
 }
 
-pub const DOCTOR_VC_MISSING: &str = "Windows does not report the Microsoft Visual C++ runtime \
-     (x64), which PHP needs.";
+/// `servers`: the installed database servers that need the runtime too
+/// (MySQL, PostgreSQL).
+pub fn doctor_vc_missing(servers: &[String]) -> String {
+    format!(
+        "Windows does not report the Microsoft Visual C++ runtime (x64), which PHP needs{}.",
+        vc_servers(servers)
+    )
+}
 
-pub fn doctor_vc_old(found: &str) -> String {
-    format!("The Microsoft Visual C++ runtime {found} is too old: PHP needs 14.44 or newer.")
+pub fn doctor_vc_old(found: &str, servers: &[String]) -> String {
+    format!(
+        "The Microsoft Visual C++ runtime {found} is too old: PHP needs 14.44 or newer{}.",
+        vc_servers(servers)
+    )
+}
+
+/// `, and MySQL and PostgreSQL need it too`, or nothing.
+fn vc_servers(servers: &[String]) -> String {
+    let names = match servers {
+        [] => return String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    let verb = if servers.len() == 1 { "needs" } else { "need" };
+    format!(", and {names} {verb} it too")
 }
 
 pub const DOCTOR_VC_INSTALL: &str = "Install the latest Microsoft Visual C++ Redistributable \

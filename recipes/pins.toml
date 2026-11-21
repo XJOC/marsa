@@ -57,12 +57,6 @@ reason = "Oracle has no Intel Mac build after 8.4.11"
 
 [[skip]]
 runtime = "mysql"
-version = "8.4.13"
-platform = "windows-x64"
-reason = "MySQL on Windows is task M6-07"
-
-[[skip]]
-runtime = "mysql"
 version = "8.4.11"
 platform = "darwin-arm64"
 reason = "8.4.13 is the build for this platform"
@@ -83,7 +77,7 @@ reason = "8.4.13 is the build for this platform"
 runtime = "mysql"
 version = "8.4.11"
 platform = "windows-x64"
-reason = "MySQL on Windows is task M6-07"
+reason = "8.4.13 is the build for this platform"
 
 [valkey]
 # Valkey 8.1 (ADR 0023): our own build of 8.1.11, the version ADR 0023 tested, in
@@ -93,12 +87,6 @@ reason = "MySQL on Windows is task M6-07"
 # against that release's sha256sums.txt and accepts only the file the recipe
 # names, so a rebuild (r2) changes the recipe's URL, not this file.
 versions = ["8.1.11"]
-
-[[skip]]
-runtime = "valkey"
-version = "8.1.11"
-platform = "windows-x64"
-reason = "Valkey on Windows is task M6-07"
 
 # A URL for one version, platform, and artifact that replaces the recipe
 # template. `urls`: the first is the main one, the rest are mirrors.

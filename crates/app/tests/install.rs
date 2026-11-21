@@ -1003,11 +1003,7 @@ async fn the_first_postgres_install_turns_it_on_and_starts_it() {
     let state = tokio::time::timeout(Duration::from_secs(30), started)
         .await
         .expect("a start after the install");
-    let code = if cfg!(windows) {
-        "postgres_unsupported_platform"
-    } else {
-        "postgres_not_installed"
-    };
+    let code = "postgres_not_installed";
     assert_eq!(state, ServiceState::Failed { code: code.into() });
     let settings = config::load_global(&paths.global)
         .expect("global.toml")

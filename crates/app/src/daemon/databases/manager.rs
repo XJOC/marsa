@@ -8,14 +8,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use marsa_core::config::{ConfigError, ServerSettings};
-use marsa_core::databases::mysql::{MysqlDirs, decide_mysql_start, my_cnf, mysqld_pid};
+use marsa_core::databases::mysql::{
+    MysqlDirs, decide_mysql_start, my_cnf, mysql_stop, mysql_windows_stop, mysqld_pid,
+};
 use marsa_core::databases::valkey::{ValkeyDirs, valkey_conf};
 use marsa_core::databases::{
     PostgresDirs, ServerKind, ServiceBusy, StartDecision, StartFacts, UnwritablePath, decide_start,
-    postmaster_pid, socket_for,
+    postgres_stop_on, postmaster_pid, refuses_elevation, socket_for,
 };
 use marsa_core::platform::process;
-use marsa_core::recipes::Platform;
+use marsa_core::recipes::{Os, Platform};
 use marsa_core::runtimes::RuntimesDir;
 use marsa_core::services::{ProgramNotAbsolute, ServiceSpec, StopMethod};
 use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceState, ServiceStatus};
@@ -25,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::facts::{port_facts, start_facts};
-use super::init::{InitError, installed_servers};
+use super::init::{self, InitError, installed_servers};
 use super::settings::{any_installed, read_settings, save_enabled};
 use super::{mysql, orphan, postgres, valkey};
 use crate::daemon::services::actions::{Busy, take_turn};
@@ -38,14 +40,21 @@ use crate::daemon::supervisor::{EXITED, ServiceHandle, ServiceRuntime, Superviso
 /// measured 50 to 690 ms. The postmaster answers before it recovers its data
 /// after a crash, so a long recovery does not count against this.
 const READY_LIMIT: Duration = Duration::from_secs(15);
+/// MySQL's: its InnoDB start can take 20 s or more on a slow disk, after a
+/// forced kill (Windows, where the servers end with `marsad`) or on a first
+/// start after an install. The server is still starting then, not failing.
+const MYSQL_READY_LIMIT: Duration = Duration::from_secs(60);
 const READY_POLL: Duration = Duration::from_millis(100);
 
 /// Why an action on a server failed. A start that fails also sets the
 /// status `Failed` with the same code, and says why in its recent lines.
 #[derive(Debug)]
 pub enum ActionError {
-    /// Marsa runs this server on macOS and Linux only for now (Windows comes later).
+    /// Marsa has no build of this server for this system.
     Unsupported(ServerKind),
+    /// Windows: `marsad` runs with an administrator's token, which the
+    /// server refuses (PostgreSQL). Nothing was started.
+    Elevated(ServerKind),
     /// `global.toml` cannot be read.
     Config(ConfigError),
     /// No installed version fits the `default` of its table.
@@ -74,6 +83,7 @@ impl ActionError {
             Self::Unsupported(ServerKind::Postgres) => codes::POSTGRES_UNSUPPORTED_PLATFORM,
             Self::Unsupported(ServerKind::Mysql) => codes::MYSQL_UNSUPPORTED_PLATFORM,
             Self::Unsupported(ServerKind::Valkey) => codes::VALKEY_UNSUPPORTED_PLATFORM,
+            Self::Elevated(_) => codes::SERVICE_ELEVATED,
             Self::Config(err) => err.code(),
             Self::NotInstalled(ServerKind::Postgres, _) => codes::POSTGRES_NOT_INSTALLED,
             Self::NotInstalled(ServerKind::Mysql, _) => codes::MYSQL_NOT_INSTALLED,
@@ -93,8 +103,14 @@ impl fmt::Display for ActionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unsupported(kind) => {
-                write!(f, "Marsa runs {} on macOS and Linux only", kind.name())
+                write!(f, "Marsa has no {} for this system", kind.name())
             }
+            Self::Elevated(kind) => write!(
+                f,
+                "marsad runs with administrator rights, and {} refuses to run with them; run \
+                 Marsa without administrator rights",
+                kind.name()
+            ),
             Self::Config(err) => err.fmt(f),
             Self::NotInstalled(_, reason) => f.write_str(reason),
             Self::Init(err) => err.fmt(f),
@@ -125,6 +141,10 @@ pub struct ServerManager {
     /// before a start ([`orphan::clear`]): [`ServerKind::stop`], then
     /// SIGKILL.
     pub(super) orphan_ladder: StopMethod,
+    /// Whether `marsad` runs with an administrator's token, asked at each
+    /// start ([`refuses_elevation`]): `platform::is_elevated`. Tests put an
+    /// answer here, never the runner's own.
+    pub(super) elevated: fn() -> bool,
     /// The program of the last start, so an uninstall never deletes the
     /// version that runs. Use [`ServerManager::running_program`].
     started: Mutex<Option<PathBuf>>,
@@ -151,9 +171,13 @@ impl ServerManager {
         Self {
             kind,
             probes: Arc::new(SystemProbe),
-            ready_limit: READY_LIMIT,
+            ready_limit: match kind {
+                ServerKind::Mysql => MYSQL_READY_LIMIT,
+                ServerKind::Postgres | ServerKind::Valkey => READY_LIMIT,
+            },
             platform: Platform::current(),
             orphan_ladder: kind.stop(),
+            elevated: marsa_core::platform::is_elevated,
             started: Mutex::default(),
             recorded: Mutex::default(),
             starting: Mutex::default(),
@@ -208,6 +232,18 @@ enum Run {
     Over,
     /// It took no connections in time: the caller stops it.
     TimedOut { port: u16 },
+}
+
+/// The version a start picked, and what goes with it, for the part of
+/// [`ServerManager::prepare`] of each server.
+struct Chosen {
+    platform: Platform,
+    version: Version,
+    /// The server program of `version`.
+    server: PathBuf,
+    /// The server program of each installed version, for `run/<id>.pid`.
+    servers: Vec<PathBuf>,
+    port: u16,
 }
 
 /// What a start runs, after the check before it and the first init.
@@ -505,6 +541,11 @@ impl ServerManager {
         let kind = self.kind;
         let settings = read_settings(kind, &daemon.data_dir)?;
         let (platform, version, server) = self.installed(&daemon.data_dir, &settings)?;
+        // Before the first init too: its single-user `postgres` refuses the
+        // token as the server does.
+        if refuses_elevation(kind, (self.elevated)()) {
+            return Err(ActionError::Elevated(kind));
+        }
         let port = settings.port.unwrap_or(kind.default_port());
         let servers = installed_servers(kind, &daemon.data_dir, platform);
         let ladder = &self.orphan_ladder;
@@ -518,19 +559,17 @@ impl ServerManager {
             Ok(orphan::Cleared::Nothing | orphan::Cleared::Forgotten) => {}
             Err(orphan::Stuck(reason)) => return Err(ActionError::OrphanStuck(kind, reason)),
         }
+        let chosen = Chosen {
+            platform,
+            version,
+            server,
+            servers,
+            port,
+        };
         match kind {
-            ServerKind::Postgres => {
-                self.prepare_postgres(daemon, platform, &version, servers, port)
-                    .await
-            }
-            ServerKind::Mysql => {
-                self.prepare_mysql(daemon, &version, server, servers, port)
-                    .await
-            }
-            ServerKind::Valkey => {
-                self.prepare_valkey(daemon, &version, server, servers, port)
-                    .await
-            }
+            ServerKind::Postgres => self.prepare_postgres(daemon, chosen).await,
+            ServerKind::Mysql => self.prepare_mysql(daemon, chosen).await,
+            ServerKind::Valkey => self.prepare_valkey(daemon, chosen).await,
         }
     }
 
@@ -542,7 +581,7 @@ impl ServerManager {
         pid_file: &Path,
         pid_of: fn(&str) -> Option<u32>,
         servers: &[PathBuf],
-        decide: fn(&StartFacts) -> StartDecision,
+        decide: impl Fn(&StartFacts) -> StartDecision,
     ) -> Result<(), ActionError> {
         let facts = start_facts(&*self.probes, port, pid_file, pid_of, servers).await;
         self.decide(&facts, decide)
@@ -552,7 +591,7 @@ impl ServerManager {
     fn decide(
         &self,
         facts: &StartFacts,
-        decide: fn(&StartFacts) -> StartDecision,
+        decide: impl Fn(&StartFacts) -> StartDecision,
     ) -> Result<(), ActionError> {
         info!(?facts, server = self.kind.id(), "checked before the start");
         match decide(facts) {
@@ -566,18 +605,23 @@ impl ServerManager {
     async fn prepare_postgres(
         &self,
         daemon: &Daemon,
-        platform: Platform,
-        version: &Version,
-        servers: Vec<PathBuf>,
-        port: u16,
+        chosen: Chosen,
     ) -> Result<Prepared, ActionError> {
+        let Chosen {
+            platform,
+            version,
+            servers,
+            port,
+            ..
+        } = chosen;
+        let os = platform.os();
         let dirs = PostgresDirs::new(&daemon.data_dir, version.major);
         let pid_file = dirs.data.join("postmaster.pid");
         self.check(port, &pid_file, postmaster_pid, &servers, decide_start)
             .await?;
-        let programs = postgres::programs(&daemon.data_dir, platform, version)
-            .ok_or_else(|| self.missing(Some(&self.kind.line(version))))?;
-        postgres::ensure_cluster(&programs, &dirs)
+        let programs = postgres::programs(&daemon.data_dir, platform, &version)
+            .ok_or_else(|| self.missing(Some(&self.kind.line(&version))))?;
+        postgres::ensure_cluster(&programs, &dirs, os)
             .await
             .map_err(ActionError::Init)?;
         info!(%version, port, "starting postgres");
@@ -593,8 +637,9 @@ impl ServerManager {
             );
             lock(&self.runtime).note(&daemon.events, &text);
         }
+        let stop = postgres_stop_on(os, &programs.pg_ctl, &dirs.data);
         Ok(Prepared {
-            spec: postgres::spec(programs.postgres, &dirs, port),
+            spec: postgres::spec(programs.postgres, &dirs, port, stop),
             servers,
             refusal: Refusal::Postgres {
                 data: dirs.data,
@@ -604,36 +649,54 @@ impl ServerManager {
         })
     }
 
-    /// [`Self::prepare`] for MySQL: `my.cnf`, the check (a pid that cannot
-    /// be told refuses too: [`decide_mysql_start`]), and the first init
-    /// for a new data folder.
+    /// [`Self::prepare`] for MySQL: `my.cnf`, the check (on macOS and Linux
+    /// a pid that cannot be told refuses too: [`decide_mysql_start`]), and
+    /// the first init for a new data folder.
+    ///
+    /// On Windows MySQL gets no socket: there `socket` names a named pipe,
+    /// which Marsa leaves off, because any local user could open it as
+    /// `root@localhost`. It stops with `mysqladmin shutdown` there.
     async fn prepare_mysql(
         &self,
         daemon: &Daemon,
-        version: &Version,
-        mysqld: PathBuf,
-        servers: Vec<PathBuf>,
-        port: u16,
+        chosen: Chosen,
     ) -> Result<Prepared, ActionError> {
+        let Chosen {
+            platform,
+            version,
+            server: mysqld,
+            servers,
+            port,
+        } = chosen;
         let kind = self.kind;
-        let dirs = MysqlDirs::new(&daemon.data_dir, &kind.line(version));
-        let socket = dirs.socket();
-        let basedir = RuntimesDir::in_dir(&daemon.data_dir).version_dir(kind.runtime(), version);
-        let text =
-            my_cnf(&dirs, &basedir, port, socket.as_deref().ok()).map_err(ActionError::Path)?;
+        let os = platform.os();
+        let dirs = MysqlDirs::new(&daemon.data_dir, &kind.line(&version));
+        let socket = (os != Os::Windows).then(|| dirs.socket());
+        let socket_path = socket.as_ref().and_then(|socket| socket.as_deref().ok());
+        let basedir = RuntimesDir::in_dir(&daemon.data_dir).version_dir(kind.runtime(), &version);
+        let text = my_cnf(&dirs, &basedir, port, socket_path).map_err(ActionError::Path)?;
+        let stop = if os == Os::Windows {
+            let mysqladmin =
+                init::program(kind, &daemon.data_dir, platform, &version, "mysqladmin")
+                    .ok_or_else(|| self.missing(Some(&kind.line(&version))))?;
+            mysql_windows_stop(&mysqladmin, port)
+        } else {
+            mysql_stop()
+        };
         let pid_file = dirs.pid_file();
-        self.check(port, &pid_file, mysqld_pid, &servers, decide_mysql_start)
+        let decide = |facts: &StartFacts| decide_mysql_start(facts, os);
+        self.check(port, &pid_file, mysqld_pid, &servers, decide)
             .await?;
         mysql::write_config(&dirs, text)
             .await
             .map_err(|err| ActionError::Init(InitError::io(kind, "cannot write my.cnf", &err)))?;
-        mysql::ensure_data_dir(&mysqld, &dirs)
+        mysql::ensure_data_dir(&mysqld, &dirs, os)
             .await
             .map_err(ActionError::Init)?;
         info!(%version, port, "starting mysql");
         // Without a socket nobody reaches `root@localhost`, the account
         // with every privilege (ADR 0023, "Access").
-        if let Err(why) = &socket {
+        if let Some(Err(why)) = &socket {
             let folder = dirs.run.display();
             warn!(%folder, %why, "no Unix socket for mysql: TCP only, no root@localhost");
             let text = format!(
@@ -643,7 +706,7 @@ impl ServerManager {
             lock(&self.runtime).note(&daemon.events, &text);
         }
         Ok(Prepared {
-            spec: mysql::spec(mysqld, &dirs),
+            spec: mysql::spec(mysqld, &dirs, os, stop),
             servers,
             refusal: Refusal::None,
             port,
@@ -659,14 +722,20 @@ impl ServerManager {
     async fn prepare_valkey(
         &self,
         daemon: &Daemon,
-        version: &Version,
-        server: PathBuf,
-        servers: Vec<PathBuf>,
-        port: u16,
+        chosen: Chosen,
     ) -> Result<Prepared, ActionError> {
+        let Chosen {
+            platform,
+            version,
+            server,
+            servers,
+            port,
+        } = chosen;
         let kind = self.kind;
+        let os = platform.os();
         let dirs = ValkeyDirs::new(&daemon.data_dir);
-        let text = valkey_conf(&dirs, port).map_err(ActionError::Path)?;
+        let text = valkey_conf(&dirs, port, os).map_err(ActionError::Path)?;
+        let spec = valkey::spec(server, &dirs, port, os).map_err(ActionError::Path)?;
         let facts = port_facts(&*self.probes, port).await;
         self.decide(&facts, decide_start)?;
         valkey::write_config(&dirs, text).await.map_err(|err| {
@@ -674,7 +743,7 @@ impl ServerManager {
         })?;
         info!(%version, port, "starting valkey");
         Ok(Prepared {
-            spec: valkey::spec(server, &dirs, port),
+            spec,
             servers,
             refusal: Refusal::None,
             port,
@@ -690,7 +759,7 @@ impl ServerManager {
     ) -> Result<(Platform, Version, PathBuf), ActionError> {
         let kind = self.kind;
         let platform = match self.platform {
-            Some(platform) if !matches!(platform, Platform::WindowsX64 | Platform::Any) => platform,
+            Some(platform) if platform != Platform::Any => platform,
             _ => return Err(ActionError::Unsupported(kind)),
         };
         let line = settings.default.as_deref();
