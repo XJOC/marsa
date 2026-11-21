@@ -1,15 +1,17 @@
 //! The install side of the daemon: how an install runs, and whether one runs
-//! now. The routes that start it are in `runtimes_api`.
+//! now. The routes that start it are in `install`.
 
 use std::fmt;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use marsa_core::installer::{self, InstallEnv, InstallError, InstalledVersion};
 use marsa_core::types::InstallEvent;
+
+use super::super::one_at_a_time::OneAtATime;
 
 /// What [`RunInstall::run`] returns.
 pub type InstallFuture<'a> =
@@ -52,7 +54,8 @@ pub struct Installs {
     /// Runs each install: [`ProductionInstall`], unless a test put a fake
     /// here before the daemon went into its `Arc`.
     pub runner: Arc<dyn RunInstall>,
-    pub(crate) running: AtomicBool,
+    /// Free, or held by the install or the uninstall that runs now.
+    pub(crate) running: Arc<OneAtATime>,
     pub(crate) last_id: AtomicU64,
 }
 
@@ -61,14 +64,14 @@ impl Installs {
     pub fn new() -> Self {
         Self {
             runner: Arc::new(ProductionInstall),
-            running: AtomicBool::new(false),
+            running: Arc::new(OneAtATime::new()),
             last_id: AtomicU64::new(0),
         }
     }
 
     /// Whether an install, or an uninstall, runs now.
     pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::Acquire)
+        self.running.is_running()
     }
 }
 
