@@ -157,7 +157,7 @@ mod tests {
     pub(super) fn alive(exe: &Path) -> Liveness {
         Liveness::Alive {
             exe: exe.to_path_buf(),
-            started: "Wed Nov 18 10:00:00 2026".into(),
+            started: "Wed Nov 18 10:00:00 2026".parse().expect("a start time"),
         }
     }
 
@@ -406,6 +406,7 @@ mod tests {
 
         use marsa_core::config::GlobalConfig;
         use marsa_core::orphan::PidRecord;
+        use marsa_core::ps::StartTime;
         use tempfile::TempDir;
         use tokio::task::JoinHandle;
 
@@ -1174,7 +1175,7 @@ mod tests {
 
         /// `run/postgres.pid` for `pid`, as the daemon writes it, with its
         /// real start time unless `started` says another.
-        async fn record_orphan(pg: &Pg, pid: u32, started: Option<&str>) {
+        async fn record_orphan(pg: &Pg, pid: u32, started: Option<StartTime>) {
             let exe = installed_postgres(pg);
             pg.probes.orphans.lock().unwrap().push((pid, exe.clone()));
             let until = std::time::Instant::now() + WAIT;
@@ -1185,7 +1186,7 @@ mod tests {
                 assert!(std::time::Instant::now() < until, "the orphan runs");
                 tokio::time::sleep(Duration::from_millis(20)).await;
             };
-            let started = started.map_or(real, str::to_owned);
+            let started = started.unwrap_or(real);
             let record = PidRecord { pid, exe, started };
             process::write_pid_file(
                 &orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir),
@@ -1343,7 +1344,7 @@ mod tests {
             let pg = pg("serve", probes(Liveness::Gone, None));
             let mut orphan = orphan_server(&pg, "serve");
             listening(pg.port).await;
-            record_orphan(&pg, orphan.id(), Some("Thu Jan  1 00:00:00 1970")).await;
+            record_orphan(&pg, orphan.id(), Some(StartTime::Utc(0))).await;
 
             let err = pg.act(ServiceAction::Start).await.unwrap_err();
             assert_eq!(err.code(), "service_port_busy");
@@ -1360,7 +1361,7 @@ mod tests {
             let record = PidRecord {
                 pid: 4242,
                 exe: installed_postgres(&pg),
-                started: "x".into(),
+                started: StartTime::Ticks(1),
             };
             let path = orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir);
             process::write_pid_file(&path, &record).unwrap();
@@ -1380,7 +1381,7 @@ mod tests {
                 let record = PidRecord {
                     pid: 4242,
                     exe: installed_postgres(&pg),
-                    started: "x".into(),
+                    started: StartTime::Ticks(1),
                 };
                 let path = orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir);
                 process::write_pid_file(&path, &record).unwrap();

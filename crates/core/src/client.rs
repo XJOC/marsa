@@ -38,7 +38,6 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 
-use crate::orphan::lstart_seconds;
 use crate::platform::daemon_file::{
     DaemonFile, DaemonFileError, daemon_authority, daemon_lock_path, read_daemon_file,
 };
@@ -897,8 +896,7 @@ where
 /// that check, each new daemon would seem older than the login too, and be
 /// replaced again at every call until the clock caught up.
 fn outlived_login(times: &LoginTimes, now: SystemTime) -> bool {
-    let (Some(started), Some(login)) =
-        (lstart_seconds(&times.started), lstart_seconds(&times.login))
+    let (Some(started), Some(login)) = (times.started.utc_seconds(), times.login.utc_seconds())
     else {
         return false;
     };
@@ -1099,6 +1097,7 @@ mod tests {
 
     use super::*;
     use crate::platform::daemon_file::{Token, remove_daemon_file, write_daemon_file};
+    use crate::ps::StartTime;
 
     /// PostgreSQL's first start runs `initdb`, so its actions get longer.
     #[test]
@@ -1156,16 +1155,20 @@ mod tests {
     /// A login on 2026-11-14 (UTC).
     const LOGIN: &str = "Sat Nov 14 13:28:04 2026";
 
+    fn at(text: &str) -> StartTime {
+        text.parse().expect("a start time")
+    }
+
     fn times(started: &str, login: &str) -> LoginTimes {
         LoginTimes {
-            started: started.to_owned(),
-            login: login.to_owned(),
+            started: at(started),
+            login: at(login),
         }
     }
 
     /// `seconds` after the login.
     fn after_login(seconds: u64) -> SystemTime {
-        let login = lstart_seconds(LOGIN).unwrap();
+        let login = at(LOGIN).utc_seconds().unwrap();
         UNIX_EPOCH + Duration::from_secs(u64::try_from(login).unwrap() + seconds)
     }
 
@@ -1205,21 +1208,19 @@ mod tests {
     fn unknown_times_keep_the_daemon() {
         let now = after_login(3_600);
         let old = "Wed Nov 11 10:12:30 2026";
-        for (started, login) in [
-            ("", LOGIN),
-            (old, ""),
-            // Linux clock ticks, which are no time of day.
-            ("987654", LOGIN),
-            (old, "Sat Nov 14 13:28 2026"),
-        ] {
-            assert!(
-                !outlived_login(&times(started, login), now),
-                "{started:?} {login:?}"
-            );
+        // Text that is no time cannot reach here: it does not parse.
+        for bad in ["", "Sat Nov 14 13:28 2026"] {
+            assert!(bad.parse::<StartTime>().is_err(), "{bad:?}");
+        }
+        // Linux clock ticks, which are no time of day.
+        let ticks = StartTime::Ticks(987_654);
+        for (started, login) in [(ticks, at(LOGIN)), (at(old), ticks)] {
+            let times = LoginTimes { started, login };
+            assert!(!outlived_login(&times, now), "{times:?}");
         }
         // The clock was set back since the login: it seems to come later.
         let before_login = UNIX_EPOCH
-            + Duration::from_secs(u64::try_from(lstart_seconds(LOGIN).unwrap() - 60).unwrap());
+            + Duration::from_secs(u64::try_from(at(LOGIN).utc_seconds().unwrap() - 60).unwrap());
         assert!(!outlived_login(&times(old, LOGIN), before_login));
         assert!(!outlived_login(&times(old, LOGIN), UNIX_EPOCH));
         // Within the margin it still counts.

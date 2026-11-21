@@ -22,6 +22,7 @@ use marsa_core::orphan::{
     self, Action, AdminState, Inspection, Liveness, PidRecord, PidfileState, PortState, Strategy,
 };
 use marsa_core::platform::process::{self, Signal};
+use marsa_core::ps::StartTime;
 use tracing::{debug, info, warn};
 
 use super::admin::Admin;
@@ -139,12 +140,12 @@ impl PidFile {
         }
         let own = own_executable();
         let until = tokio::time::Instant::now() + RECORD_LIMIT;
-        let mut first: Option<String> = None;
+        let mut first: Option<StartTime> = None;
         loop {
             let now = processes.identity(pid).await;
             let not_yet = match &now {
                 Liveness::Alive { exe, started } => {
-                    if first.get_or_insert_with(|| started.clone()) != started {
+                    if *first.get_or_insert(*started) != *started {
                         warn!(pid, "caddy.pid not written: the pid changed hands");
                         return;
                     }
@@ -156,7 +157,7 @@ impl PidFile {
                         let record = PidRecord {
                             pid,
                             exe: exe.clone(),
-                            started: started.clone(),
+                            started: *started,
                         };
                         match process::write_pid_file(&self.path, &record) {
                             Ok(()) => debug!(pid, "caddy.pid written"),
@@ -604,7 +605,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     const PROGRAM: &str = "/data/bin/caddy";
-    const STARTED: &str = "Wed Nov 4 03:31:27 2026";
+    const STARTED: StartTime = StartTime::Utc(1_793_763_087); // Wed Nov 4 03:31:27 2026
+    /// A second after `STARTED`.
+    const LATER: StartTime = StartTime::Utc(1_793_763_088);
     const TAG: &str = "marsa-instance-0123456789abcdef0123456789abcdef";
 
     /// Gives the identities in order, then `Unknown`, and the executable
@@ -666,7 +669,7 @@ mod tests {
     fn ours() -> Liveness {
         Liveness::Alive {
             exe: PathBuf::from(PROGRAM),
-            started: STARTED.into(),
+            started: STARTED,
         }
     }
 
@@ -700,11 +703,11 @@ mod tests {
             let record = PidRecord {
                 pid: 4242,
                 exe: exe.clone(),
-                started: STARTED.into(),
+                started: STARTED,
             };
             let fake = Fake::new([Liveness::Alive {
                 exe,
-                started: STARTED.into(),
+                started: STARTED,
             }]);
             let state = pid_file.check(&record, &fake).await;
             assert_eq!(state == PidfileState::Ours { pid: 4242 }, ours, "{state:?}");
@@ -716,7 +719,7 @@ mod tests {
     fn not_exec_yet() -> Liveness {
         Liveness::Alive {
             exe: std::env::current_exe().unwrap(),
-            started: STARTED.into(),
+            started: STARTED,
         }
     }
 
@@ -743,11 +746,11 @@ mod tests {
         let pid_file = PidFile::new(dir.path(), &[PathBuf::from(PROGRAM)]);
         let later = Liveness::Alive {
             exe: PathBuf::from(PROGRAM),
-            started: "Wed Nov 4 03:31:28 2026".into(),
+            started: LATER,
         };
         let sleep = Liveness::Alive {
             exe: PathBuf::from("/bin/sleep"),
-            started: STARTED.into(),
+            started: STARTED,
         };
         let cases = [
             vec![not_exec_yet(), later],
@@ -780,7 +783,7 @@ mod tests {
         let record = PidRecord {
             pid: 4242,
             exe: PathBuf::from(PROGRAM),
-            started: STARTED.into(),
+            started: STARTED,
         };
         process::write_pid_file(&pid_file.path, &record).unwrap();
         let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -837,7 +840,7 @@ mod tests {
         let (setup, _held) = setup();
         let other = Liveness::Alive {
             exe: PathBuf::from("/bin/sleep"),
-            started: STARTED.into(),
+            started: STARTED,
         };
         // Ours at the inspection and before SIGTERM; another program by the
         // time SIGKILL would go.
@@ -876,7 +879,7 @@ mod tests {
         let (setup, _held) = setup();
         let later = Liveness::Alive {
             exe: PathBuf::from(PROGRAM),
-            started: "Wed Nov 4 03:31:28 2026".into(),
+            started: LATER,
         };
         let fake = Fake::new([later]);
 

@@ -117,7 +117,9 @@ fn process(runner: &dyn Runner, pid: u32, stop: &CancellationToken) -> Option<Pr
     let pid_text = pid.to_string();
     let args = ["-p", pid_text.as_str(), "-o", "user=,comm="].map(OsString::from);
     match runner.run(PS, &args, CHECK_LIMIT, stop) {
-        Ok(output) if output.success() => ports::parse_ps(&String::from_utf8_lossy(&output.stdout)),
+        Ok(output) if output.success() => {
+            crate::ps::parse_ps(&String::from_utf8_lossy(&output.stdout))
+        }
         Ok(_) => None,
         Err(err) => {
             tracing::debug!(pid, error = %err, "cannot run ps");
