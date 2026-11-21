@@ -138,7 +138,9 @@ function CheckServer([string]$Name, [int]$Port) {
     $found = @(Ours $Name)
     if ($found.Count -lt 1) { Fail "no $Name runs" }
     # PostgreSQL's backends are postgres.exe too; the postmaster listens.
-    $listening = @($found | Where-Object { (Listeners $_.ProcessId).Count -gt 0 })
+    # MySQL runs as one process (`--no-monitor`).
+    if ($Name -eq 'mysqld.exe' -and $found.Count -ne 1) { Fail "$($found.Count) mysqld.exe processes run" }
+    $listening = @($found | Where-Object { @(Listeners $_.ProcessId).Count -gt 0 })
     if ($listening.Count -ne 1) { Fail "$($listening.Count) $Name processes listen" }
     $server = $listening[0]
     $owner = Owner $server.ProcessId

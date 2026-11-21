@@ -25,6 +25,14 @@ const STOP_WAIT: Duration = Duration::from_secs(30);
 /// `logs/mysql.log`, as on macOS and Linux.
 const CONSOLE: &str = "--console";
 
+/// Windows: without it the `mysqld.exe` that the supervisor starts starts a
+/// second one as the server and stays as its monitor (for `RESTART`), as
+/// the windows-databases-e2e workflow saw. Then the process the supervisor
+/// owns is not the server: a kill after the stop's wait would leave the
+/// server running, and `mysqld.pid` would name another pid. With it, a
+/// `RESTART` only stops the server, as `SHUTDOWN` does.
+const NO_MONITOR: &str = "--no-monitor";
+
 /// The files of one MySQL line (`8.4`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MysqlDirs {
@@ -228,11 +236,12 @@ pub fn mysql_init_args(config: &Path, init_sql: &Path, data: &Path, os: Os) -> V
 }
 
 /// The arguments of the server: `--defaults-file`, which has it all, and on
-/// Windows `--console`, so the log reaches the supervisor.
+/// Windows `--console`, so the log reaches the supervisor, and
+/// `--no-monitor`, so the process it starts is the server.
 pub fn mysqld_args(config: &Path, os: Os) -> Vec<String> {
     let mut args = vec![format!("--defaults-file={}", config.display())];
     if os == Os::Windows {
-        args.push(CONSOLE.to_owned());
+        args.extend([CONSOLE, NO_MONITOR].map(str::to_owned));
     }
     args
 }
@@ -451,7 +460,11 @@ mod tests {
         let server = ["--defaults-file=/m/run/mysql.cnf"];
         assert_eq!(mysqld_args(config, Os::Mac), server);
         assert_eq!(mysqld_args(config, Os::Linux), server);
-        let windows = ["--defaults-file=/m/run/mysql.cnf", "--console"];
+        let windows = [
+            "--defaults-file=/m/run/mysql.cnf",
+            "--console",
+            "--no-monitor",
+        ];
         assert_eq!(mysqld_args(config, Os::Windows), windows);
     }
 
