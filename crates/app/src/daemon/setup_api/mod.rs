@@ -26,11 +26,11 @@ pub mod linux_dns;
 pub mod nss;
 mod osascript;
 pub mod pkexec;
-mod ports;
+pub mod ports;
 mod runner;
 mod steps;
 #[cfg(test)]
-mod test_support;
+pub(super) mod test_support;
 pub mod user_trust;
 pub mod windows;
 
@@ -47,7 +47,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
-use marsa_core::recipes::Platform;
+use marsa_core::recipes::{Os, Platform};
 use marsa_core::types::{ApiError, Event, SetupReport, SetupSkip, Site, SiteList};
 use tokio::runtime::Handle;
 
@@ -321,7 +321,7 @@ impl Drop for Running {
 async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport>, HttpError> {
     let platform = setup
         .platform
-        .filter(|platform| is_macos(*platform) || is_linux(*platform) || is_windows(*platform))
+        .filter(|platform| platform.os() != Os::Any)
         .ok_or_else(|| {
             let message = "setup runs on macOS, Linux, and Windows only";
             HttpError::new(StatusCode::NOT_IMPLEMENTED, "setup_not_supported", message)
@@ -330,7 +330,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
     tracing::info!("setup started");
     // The hosts file on Linux and Windows needs them; elsewhere the list is
     // not read.
-    let names = if is_linux(platform) || is_windows(platform) {
+    let names = if platform.os() == Os::Linux || platform.os() == Os::Windows {
         host_names(&daemon).await
     } else {
         Some(Vec::new())
@@ -371,7 +371,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
         // if the client went away.
         // Not while the daemon stops: the runtime may be going away, and
         // Caddy reads its file when it starts again.
-        if is_linux(platform) && low_ports_set(&report) && !daemon.shutdown.is_cancelled() {
+        if platform.os() == Os::Linux && low_ports_set(&report) && !daemon.shutdown.is_cancelled() {
             match runtime.block_on(daemon.caddy.reapply(&daemon)) {
                 Ok(applied) => {
                     tracing::info!(?applied, "caddy config sent again with ports 80 and 443")
@@ -396,7 +396,8 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
         // daemon sends the sites' names after each pass from now on
         // (`hosts_sync`), and a pass now covers a site added during the UAC
         // prompt. Not while the daemon stops.
-        if is_windows(platform) && report.error.is_none() && !daemon.shutdown.is_cancelled() {
+        if platform.os() == Os::Windows && report.error.is_none() && !daemon.shutdown.is_cancelled()
+        {
             let marker = daemon.data_dir.join(hosts_sync::MARKER);
             match fs::write(&marker, "") {
                 Ok(()) => {
@@ -477,14 +478,6 @@ fn home_dir() -> Option<PathBuf> {
     home
 }
 
-pub(super) fn is_macos(platform: Platform) -> bool {
-    matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64)
-}
-
-pub(super) fn is_windows(platform: Platform) -> bool {
-    platform == Platform::WindowsX64
-}
-
 /// The daemon's helper service on Windows; no other system has one.
 fn default_windows_service() -> Option<Arc<dyn windows::Service>> {
     // `RealService` is Windows only: its calls are Win32.
@@ -492,10 +485,6 @@ fn default_windows_service() -> Option<Arc<dyn windows::Service>> {
     return Some(Arc::new(windows::RealService::default()));
     #[cfg(not(windows))]
     None
-}
-
-pub(super) fn is_linux(platform: Platform) -> bool {
-    matches!(platform, Platform::LinuxX64 | Platform::LinuxArm64)
 }
 
 /// A code from the helper, safe for a log line and a message.
