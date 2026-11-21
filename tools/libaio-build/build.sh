@@ -87,6 +87,13 @@ check_so() {
     esac
   done <<< "$needed"
 
+  # An operation that gcc did not inline would be an undefined symbol that
+  # only libatomic provides.
+  if readelf -W --dyn-syms "$so" | grep -E ' UND .*__atomic_' >&2; then
+    echo "$want_soname needs a __atomic_ function that no library of ours provides" >&2
+    exit 1
+  fi
+
   echo "--- $want_soname: ldd"
   ldd "$so" || true
 
@@ -178,7 +185,13 @@ grep -q '`libnuma` is under the GNU Lesser General Public License, v2.1' "$WORK/
   cd "$WORK/numa"
   [ "$(tr -d '\n' < VERSION)" = "$NUMACTL_VERSION" ] || { echo "the numactl source is not version $NUMACTL_VERSION" >&2; exit 1; }
   autoreconf --install --symlink --force
-  CFLAGS="-O2 -fomit-frame-pointer" ./configure --disable-static
+  # configure.ac asks for -latomic whenever __atomic_fetch_and_1 is not in libc,
+  # which links libatomic.so.1 on aarch64 even though gcc inlines the
+  # operations. Marsa ships no libatomic, so the library is told it needs
+  # none; check_so then refuses a result that still has an undefined
+  # __atomic_ symbol.
+  ac_cv_search___atomic_fetch_and_1="none required" \
+    CFLAGS="-O2 -fomit-frame-pointer" ./configure --disable-static
   make libnuma.la
 )
 
