@@ -16,6 +16,11 @@ use marsa_core::runtimes::RuntimesDir;
 
 use super::Failure;
 use super::strings::{self, Details};
+use super::text::clipped;
+
+/// The longest daemon version shown. `status` does not check the version, so
+/// the daemon may be another build, and its text may be long.
+const VERSION_MAX: usize = 64;
 
 /// The commands of `marsa daemon`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::Subcommand)]
@@ -47,7 +52,7 @@ async fn start(data_dir: &Path) -> Result<String, Failure> {
         .await
         .map_err(|err| failure(&err, data_dir, None))?;
     Ok(strings::daemon_running(
-        &clean(&health.app_version),
+        &clipped(&health.app_version, VERSION_MAX),
         health.pid,
         client.port(),
     ))
@@ -72,24 +77,13 @@ async fn status(data_dir: &Path) -> Result<String, Failure> {
     };
     match health.await {
         Ok((port, health)) => Ok(strings::daemon_running(
-            &clean(&health.app_version),
+            &clipped(&health.app_version, VERSION_MAX),
             health.pid,
             port,
         )),
         Err(ClientError::NotRunning) => Ok(strings::DAEMON_NOT_RUNNING.to_owned()),
         Err(err) => Err(failure(&err, data_dir, None)),
     }
-}
-
-/// The daemon's version, safe to print: without control characters, which
-/// could move the cursor, and short. `status` does not check the version, so
-/// the daemon may be another build.
-fn clean(version: &str) -> String {
-    version
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(64)
-        .collect()
 }
 
 /// [`client::ensure_running`]: a client for a daemon of this build, started
@@ -224,12 +218,5 @@ mod tests {
             "marsa: There is no service named \"php\". Run \"marsa services\" to see them. \
              [service_not_found]"
         );
-    }
-
-    #[test]
-    fn a_version_from_the_daemon_is_cleaned() {
-        assert_eq!(clean("0.1.0"), "0.1.0");
-        assert_eq!(clean("0.1\n\u{1b}[2J.0"), "0.1[2J.0");
-        assert_eq!(clean(&"9".repeat(100)).len(), 64);
     }
 }

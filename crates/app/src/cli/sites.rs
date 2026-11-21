@@ -26,6 +26,7 @@ use super::Failure;
 use super::daemon::{connect, failure};
 use super::setup;
 use super::strings::{self, Details};
+use super::text::printable;
 
 /// The sites commands. `bin/marsa.rs` flattens them into the top level, so
 /// each is a command of its own: `marsa park`, not `marsa sites park`.
@@ -271,12 +272,7 @@ impl Action {
     /// `site_is_parked` then names the parked folder of the site, and
     /// `folder_not_parked` the parked folders. A version code of `marsa
     /// isolate` names the version.
-    pub fn failure_with(
-        &self,
-        err: &ClientError,
-        data_dir: &Path,
-        list: Option<&SiteList>,
-    ) -> Failure {
+    fn failure_with(&self, err: &ClientError, data_dir: &Path, list: Option<&SiteList>) -> Failure {
         let mut failure = failure(err, data_dir, None);
         let (site, folder) = match self {
             Action::List => (None, None),
@@ -478,7 +474,7 @@ pub fn folder(
 /// `dir` against `cwd`, without reading the disk. `.` parts and doubled
 /// separators go; `..` stays, because only the disk knows where it leads
 /// through a link.
-pub fn absolute_in(dir: &Path, cwd: &Path) -> PathBuf {
+fn absolute_in(dir: &Path, cwd: &Path) -> PathBuf {
     cwd.join(dir).components().collect()
 }
 
@@ -489,7 +485,7 @@ pub fn absolute_in(dir: &Path, cwd: &Path) -> PathBuf {
 ///
 /// `site_name_invalid`, with a hint to pass a name when it came from the
 /// folder.
-pub fn link_name(name: Option<&str>, folder: &Path) -> Result<String, Failure> {
+fn link_name(name: Option<&str>, folder: &Path) -> Result<String, Failure> {
     if let Some(name) = name {
         return checked(name);
     }
@@ -598,12 +594,6 @@ fn table(sites: &[Site]) -> String {
 /// A path, safe to print.
 fn shown(path: &Path) -> String {
     printable(&path.to_string_lossy())
-}
-
-/// Text from the daemon or a folder name, safe to print: no control
-/// characters, which could move the cursor.
-pub(super) fn printable(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control()).collect()
 }
 
 #[cfg(test)]
