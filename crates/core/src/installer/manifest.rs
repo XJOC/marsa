@@ -899,6 +899,26 @@ mod tests {
         assert!(reason.starts_with("caddy 2.11.8 darwin-arm64"), "{reason}");
     }
 
+    #[test]
+    fn mysql_releases_are_read_under_their_own_key() {
+        let doc = r#"{"schema": 1, "serial": 1, "runtimes": {"mysql": [{"version": "8.4.13",
+            "platforms": {"darwin-arm64": [{"name": "archive",
+            "urls": ["https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.13-macos15-arm64.tar.gz"],
+            "sha256": "2e17f6527a6c92f5713ba16e5dfd1b55869ab5e98de46677e994fed5536316ba",
+            "size": 10}]}}]}}"#;
+        let manifest = parse_verified(doc.as_bytes(), None).expect("mysql release");
+        let [mysql] = manifest.releases(Runtime::Mysql) else {
+            panic!("one mysql release expected");
+        };
+        assert_eq!(mysql.version(), &Version::new(8, 4, 13));
+        assert!(manifest.releases(Runtime::Postgres).is_empty());
+        assert!(manifest.releases(Runtime::Caddy).is_empty());
+
+        let http = doc.replace("https://cdn", "http://cdn");
+        let reason = reason(parse_verified(http.as_bytes(), None));
+        assert!(reason.starts_with("mysql 8.4.13 darwin-arm64"), "{reason}");
+    }
+
     /// Content rules on JSON whose signature is taken as checked, one composer
     /// file at a time. The signed fixtures above cover the same path end to end.
     #[test]
