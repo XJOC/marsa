@@ -18,6 +18,16 @@ expect_contains = " Ver {version} "
 #
 # darwin-x64: Oracle has no Intel build after 8.4.11, which is in
 # cdn.mysql.com/archives/; pins.toml has its URL.
+#
+# Linux: the full `linux-glibc2.28` archives, as `.tar.xz` (unpacked with
+# /usr/bin/xz, see installer::extract). Not the `-minimal` x64 one: its mysqld
+# needs the system's libprotobuf-lite and about 60 abseil libraries, which
+# Ubuntu does not have, while the full archive carries them (OpenSSL too) in
+# lib/private/. mysqld finds that folder by its RUNPATH `$ORIGIN/../lib/private`.
+# The full archive has no libaio.so.1 and no libnuma.so.1 (Ubuntu 24.04 does not
+# install the first), so Marsa's own builds of both (.github/workflows/
+# libaio-build.yml, LGPL-2.1, with their source in the same release) are saved
+# in lib/private/ too. Oracle publishes no arm64 `-minimal` build either.
 
 [platform.darwin-arm64]
 min_macos = "14.0"
@@ -38,6 +48,54 @@ name = "archive"
 url = "https://cdn.mysql.com/Downloads/MySQL-{major}.{minor}/mysql-{version}-macos15-x86_64.tar.gz"
 format = "tar.gz"
 strip_components = 1
+
+[platform.linux-x64]
+min_glibc = "2.28"
+programs = { mysqld = "bin/mysqld", mysql = "bin/mysql", mysqladmin = "bin/mysqladmin", mysqldump = "bin/mysqldump" }
+
+[[platform.linux-x64.artifact]]
+name = "archive"
+url = "https://cdn.mysql.com/Downloads/MySQL-{major}.{minor}/mysql-{version}-linux-glibc2.28-x86_64.tar.xz"
+format = "tar.xz"
+strip_components = 1
+
+[[platform.linux-x64.artifact]]
+name = "libaio"
+url = "https://github.com/XJOC/marsa/releases/download/libaio-0.3.113-r1/libaio-0.3.113-linux-x64.so.1"
+format = "raw"
+file_name = "libaio.so.1"
+into = "lib/private"
+
+[[platform.linux-x64.artifact]]
+name = "libnuma"
+url = "https://github.com/XJOC/marsa/releases/download/libaio-0.3.113-r1/libnuma-2.0.19-linux-x64.so.1"
+format = "raw"
+file_name = "libnuma.so.1"
+into = "lib/private"
+
+[platform.linux-arm64]
+min_glibc = "2.28"
+programs = { mysqld = "bin/mysqld", mysql = "bin/mysql", mysqladmin = "bin/mysqladmin", mysqldump = "bin/mysqldump" }
+
+[[platform.linux-arm64.artifact]]
+name = "archive"
+url = "https://cdn.mysql.com/Downloads/MySQL-{major}.{minor}/mysql-{version}-linux-glibc2.28-aarch64.tar.xz"
+format = "tar.xz"
+strip_components = 1
+
+[[platform.linux-arm64.artifact]]
+name = "libaio"
+url = "https://github.com/XJOC/marsa/releases/download/libaio-0.3.113-r1/libaio-0.3.113-linux-arm64.so.1"
+format = "raw"
+file_name = "libaio.so.1"
+into = "lib/private"
+
+[[platform.linux-arm64.artifact]]
+name = "libnuma"
+url = "https://github.com/XJOC/marsa/releases/download/libaio-0.3.113-r1/libnuma-2.0.19-linux-arm64.so.1"
+format = "raw"
+file_name = "libnuma.so.1"
+into = "lib/private"
 
 [platform.windows-x64]
 programs = { mysqld = "bin/mysqld.exe", mysql = "bin/mysql.exe", mysqladmin = "bin/mysqladmin.exe", mysqldump = "bin/mysqldump.exe" }

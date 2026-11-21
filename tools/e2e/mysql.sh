@@ -24,8 +24,14 @@ RUNNER_TEMP=${RUNNER_TEMP:?the runner sets RUNNER_TEMP}
 DATA=$RUNNER_TEMP/my-e2e
 # Another port only for a run on a machine whose 3306 is taken.
 PORT=${MYSQL_E2E_PORT:-3306}
+# The libraries that Oracle's archive does not carry on Linux, as
+# .github/workflows/libaio-build.yml builds them (versions as in recipes/mysql.toml).
+LIBAIO_VERSION=0.3.113
+NUMACTL_VERSION=2.0.19
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) NAME=mysql-$VERSION-macos15-arm64.tar.gz ;;
+  Linux-x86_64) NAME=mysql-$VERSION-linux-glibc2.28-x86_64.tar.xz ;;
+  Linux-aarch64) NAME=mysql-$VERSION-linux-glibc2.28-aarch64.tar.xz ;;
   *) echo "no MySQL build in this script for $(uname -sm)" >&2; exit 2 ;;
 esac
 MY=$DATA/runtimes/mysql/$VERSION
@@ -87,7 +93,32 @@ run curl -fsSL -o "$RUNNER_TEMP/$NAME.md5" "$URL.md5"
 want=$(awk '{print $1}' "$RUNNER_TEMP/$NAME.md5")
 got=$(openssl md5 -r "$RUNNER_TEMP/$NAME" | awk '{print $1}')
 [ "$want" = "$got" ] || fail "md5 $got, expected $want"
-tar -xzf "$RUNNER_TEMP/$NAME" -C "$MY" --strip-components 1
+# xz-utils is on a runner; Marsa itself uses /usr/bin/xz the same way.
+case "$NAME" in
+  *.tar.xz) tar -xJf "$RUNNER_TEMP/$NAME" -C "$MY" --strip-components 1 ;;
+  *) tar -xzf "$RUNNER_TEMP/$NAME" -C "$MY" --strip-components 1 ;;
+esac
+rm -f "$RUNNER_TEMP/$NAME"
+
+if [ "$(uname -s)" = Linux ]; then
+  step "libaio.so.1 and libnuma.so.1: built in almalinux:8 as libaio-build does, saved in lib/private"
+  mkdir -p "$RUNNER_TEMP/libs"
+  run docker run --rm \
+    --volume "$REPO/tools/libaio-build:/work/libaio-build:ro" \
+    --volume "$RUNNER_TEMP/libs:/out" \
+    --env LIBAIO_VERSION="$LIBAIO_VERSION" --env NUMACTL_VERSION="$NUMACTL_VERSION" \
+    almalinux:8 \
+    bash -c 'dnf install -y -q gcc make binutils file tar gzip autoconf automake libtool && bash /work/libaio-build/build.sh /out'
+  cp "$RUNNER_TEMP/libs/libaio.so.1" "$RUNNER_TEMP/libs/libnuma.so.1" "$MY/lib/private/"
+  # Every library mysqld needs is found, and libaio and libnuma are ours, not
+  # the system's (a RUNPATH comes before the system's folders).
+  ldd "$MY/bin/mysqld" | tee "$RUNNER_TEMP/ldd.txt"
+  ! grep -q 'not found' "$RUNNER_TEMP/ldd.txt" || fail "mysqld has a library that it cannot find"
+  for lib in libaio.so.1 libnuma.so.1; do
+    grep -E "^[[:space:]]*$lib => $MY/bin/\.\./lib/private/$lib " "$RUNNER_TEMP/ldd.txt" ||
+      fail "$lib is not the one in lib/private"
+  done
+fi
 "$MY/bin/mysqld" --version | tee "$RUNNER_TEMP/version.txt"
 grep -qF " Ver $VERSION " "$RUNNER_TEMP/version.txt" || fail "mysqld --version"
 printf '[mysql]\ndefault = "8.4"\nport = %s\n' "$PORT" >"$DATA/config/global.toml"
