@@ -59,6 +59,22 @@ pub fn workspace_root() -> Result<PathBuf> {
 struct Smoke<'a> {
     spc_line: &'a str,
     work: PathBuf,
+    /// Oracle's checks for the MySQL archives.
+    oracle: oracle::System,
+}
+
+impl build::OracleCheck for Smoke<'_> {
+    fn signature(&self, signature: &Path, file: &Path) -> Result<()> {
+        self.oracle.signature(signature, file)
+    }
+
+    fn md5(&self, file: &Path) -> Result<[u8; 16]> {
+        self.oracle.md5(file)
+    }
+
+    fn first_entry(&self, file: &Path) -> Result<String> {
+        self.oracle.first_entry(file)
+    }
 }
 
 impl Inspect for Smoke<'_> {
@@ -184,6 +200,10 @@ pub fn run_build(options: BuildOptions) -> Result<()> {
     let smoke = Smoke {
         spc_line: &pins.spc_line,
         work: options.out.join("work"),
+        oracle: oracle::System {
+            home: options.out.join("work").join("gnupg"),
+            root: workspace_root()?,
+        },
     };
     let built = runtime.block_on(build::build(&fetch, &pins, &cache, &smoke))?;
     let json = build::to_json(&built.manifest)?;
