@@ -34,6 +34,7 @@ use marsa_core::platform::autostart::{
 use marsa_core::types::{AutostartRequest, AutostartState};
 
 use super::api::HttpError;
+use super::http::{self, Rejected as _};
 use super::state::Daemon;
 
 /// The routes, for `api::router` to merge before its fallbacks.
@@ -177,35 +178,19 @@ impl Autostart {
 }
 
 async fn current(State(daemon): State<Arc<Daemon>>) -> Result<Json<AutostartState>, HttpError> {
-    blocking(daemon, Autostart::state).await
+    http::blocking("autostart", move || Autostart::state(&daemon.autostart))
+        .await
+        .map(Json)
 }
 
 async fn set(
     State(daemon): State<Arc<Daemon>>,
     body: Result<Json<AutostartRequest>, JsonRejection>,
 ) -> Result<Json<AutostartState>, HttpError> {
-    let Json(AutostartRequest { enabled }) =
-        body.map_err(|err| HttpError::new(err.status(), codes::INVALID_BODY, err.body_text()))?;
-    blocking(daemon, move |autostart| autostart.set(enabled)).await
-}
-
-/// Runs `job` on a blocking thread: it touches the disk, and takes a
-/// `std::sync` lock that must not be held across `.await`.
-async fn blocking<F>(daemon: Arc<Daemon>, job: F) -> Result<Json<AutostartState>, HttpError>
-where
-    F: FnOnce(&Autostart) -> Result<AutostartState, HttpError> + Send + 'static,
-{
-    let job = tokio::task::spawn_blocking(move || job(&daemon.autostart));
-    let answer = job.await.unwrap_or_else(|err| {
-        tracing::error!(error = %err, "the autostart job failed");
-        let message = "the autostart job failed";
-        Err(HttpError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            codes::INTERNAL_ERROR,
-            message,
-        ))
-    });
-    answer.map(Json)
+    let Json(AutostartRequest { enabled }) = body.map_err(|err| err.reject(codes::INVALID_BODY))?;
+    http::blocking("autostart", move || daemon.autostart.set(enabled))
+        .await
+        .map(Json)
 }
 
 fn tray_unknown() -> HttpError {

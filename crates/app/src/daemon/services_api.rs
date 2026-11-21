@@ -51,6 +51,7 @@ use super::api::HttpError;
 use super::caddy::{ActionError, CADDY_ID, CaddyManager};
 use super::databases::{self, ServerManager};
 use super::dns::{DNS_ID, DnsService};
+use super::http::Rejected as _;
 use super::state::Daemon;
 use super::supervisor::{ServiceRuntime, lock};
 
@@ -335,19 +336,11 @@ fn action_error(err: &ActionError) -> HttpError {
 }
 
 fn bad_path(rejection: PathRejection) -> HttpError {
-    HttpError::new(
-        rejection.status(),
-        codes::INVALID_PATH,
-        rejection.body_text(),
-    )
+    rejection.reject(codes::INVALID_PATH)
 }
 
 fn bad_query(rejection: QueryRejection) -> HttpError {
-    HttpError::new(
-        rejection.status(),
-        codes::INVALID_QUERY,
-        rejection.body_text(),
-    )
+    rejection.reject(codes::INVALID_QUERY)
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ pub mod client_shims;
 pub mod databases;
 pub mod dns;
 pub mod hosts_sync;
+pub(crate) mod http;
 pub mod php;
 pub mod runtimes_api;
 pub mod server;
