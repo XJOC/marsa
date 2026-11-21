@@ -239,7 +239,7 @@ fn parked_index(parked: &[PathBuf], path: &Path) -> Option<usize> {
     })
 }
 
-/// The folder of the parked site `name`, found as [`build`] finds it: the
+/// The folder of the parked site `name`, found as [`super::sites::build`] finds it: the
 /// first parked folder that has it wins.
 fn parked_root(sites_toml: &SitesConfig, name: &str) -> Option<PathBuf> {
     parked_site(sites_toml, name).map(|(_, root)| root)
