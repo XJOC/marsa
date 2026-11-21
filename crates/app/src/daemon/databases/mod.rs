@@ -1100,8 +1100,15 @@ mod tests {
             }
         }
 
-        /// `DELETE /v1/runtimes/postgres/18.7.0` through the routes.
+        /// `DELETE /v1/runtimes/postgres/18.7.0` through the routes, refused.
         async fn uninstall(pg: &Pg) -> (u16, marsa_core::types::ErrorBody) {
+            let (status, body) = uninstall_version(pg, "18.7.0").await;
+            (status, serde_json::from_slice(&body).unwrap())
+        }
+
+        /// `DELETE /v1/runtimes/postgres/<version>` through the routes: the
+        /// status and the body.
+        async fn uninstall_version(pg: &Pg, version: &str) -> (u16, Vec<u8>) {
             use crate::daemon::api::router;
             use crate::daemon::auth::AuthConfig;
             use axum::body::{Body, to_bytes};
@@ -1118,7 +1125,7 @@ mod tests {
             );
             let request = Request::builder()
                 .method("DELETE")
-                .uri("/v1/runtimes/postgres/18.7.0")
+                .uri(format!("/v1/runtimes/postgres/{version}"))
                 .header("host", daemon_authority(PORT))
                 .header("authorization", &bearer)
                 .body(Body::empty())
@@ -1126,7 +1133,7 @@ mod tests {
             let response = app.oneshot(request).await.unwrap();
             let status = response.status().as_u16();
             let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
-            (status, serde_json::from_slice(&body).unwrap())
+            (status, body.to_vec())
         }
 
         /// The running version, or one a start may pick, cannot be
@@ -1151,6 +1158,40 @@ mod tests {
             assert!(body.in_use.unwrap().server);
             assert!(pg.daemon.data_dir.join("runtimes/postgres/18.7.0").is_dir());
             pg.act(ServiceAction::Stop).await.unwrap();
+        }
+
+        /// Our old server, which a crashed `marsad` left running and its
+        /// record names, runs 18.7.0: that version cannot be uninstalled,
+        /// and the record stays, so a start can still stop it. Another
+        /// version can go, and so can 18.7.0 once the pid of the record is
+        /// gone.
+        #[tokio::test]
+        async fn the_version_our_orphan_runs_cannot_be_uninstalled() {
+            let pg = pg("serve", probes(Liveness::Gone, None));
+            let v17 = installed_postgres_of(&pg, "17.12.0");
+            fs::create_dir_all(v17.parent().unwrap()).unwrap();
+            fs::write(&v17, "").unwrap();
+            let orphan = orphan_server(&pg, "serve");
+            listening(pg.port).await;
+            record_orphan(&pg, orphan.id(), None).await;
+            let version_dir = pg.daemon.data_dir.join("runtimes/postgres/18.7.0");
+
+            let (status, body) = uninstall(&pg).await;
+            assert_eq!((status, body.error.code.as_str()), (409, "version_in_use"));
+            assert!(body.in_use.unwrap().server);
+            assert!(version_dir.is_dir());
+            assert_eq!(recorded(&pg).map(|r| r.pid), Some(orphan.id()));
+            assert!(signals(&pg).is_empty());
+
+            let (status, body) = uninstall_version(&pg, "17.12.0").await;
+            assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+            assert!(!v17.exists());
+
+            drop(orphan);
+            let (status, body) = uninstall_version(&pg, "18.7.0").await;
+            assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+            assert!(!version_dir.exists());
+            assert!(signals(&pg).is_empty());
         }
 
         /// The first install writes `[postgres]` and starts it; a stop asked

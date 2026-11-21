@@ -42,7 +42,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::daemon::php::orphan::own_executable;
+use crate::daemon::php::orphan::{accepted, own_executable};
 use crate::daemon::services::probe::ProcessProbe;
 use crate::daemon::services::runtime::AbortOnDrop;
 use crate::daemon::supervisor::{ServiceRuntime, lock};
@@ -284,6 +284,33 @@ fn forget(kind: ServerKind, data_dir: &Path) {
     if let Err(err) = process::remove_pid_file(&pid_path(kind, data_dir)) {
         warn!(%err, server = kind.id(), "cannot delete the pid record");
     }
+}
+
+/// The one of `programs`, the server program of each installed version, that
+/// our old server runs, which an earlier `marsad` left running and
+/// `run/<id>.pid` names. `None` when there is no record, or its pid is not
+/// that server now: gone, another program, or it cannot be told. Only reads:
+/// nothing is signalled, and the record stays.
+pub(super) async fn orphan_program(
+    kind: ServerKind,
+    probes: &dyn ProcessProbe,
+    data_dir: &Path,
+    programs: &[PathBuf],
+) -> Option<PathBuf> {
+    if !process::DATABASE_ORPHAN_RECOVERY {
+        return None;
+    }
+    let record = process::read_pid_file(&pid_path(kind, data_dir))?;
+    let servers = accepted(programs.iter().cloned());
+    let state = check(probes, &record, &servers).await;
+    debug!(pid = record.pid, %state, server = kind.id(), "checked the pid record");
+    if !matches!(state, PidfileState::Ours { .. }) {
+        return None;
+    }
+    // The record holds the path with links resolved: the program it is a
+    // form of, which lies in its version's folder.
+    let runs = |program: &&PathBuf| accepted([(*program).clone()]).contains(&record.exe);
+    programs.iter().find(runs).cloned()
 }
 
 /// Why the start cannot go on.

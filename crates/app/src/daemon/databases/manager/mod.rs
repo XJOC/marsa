@@ -25,7 +25,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use super::init::installed_servers;
+use super::init::{installed_programs, installed_servers};
 use super::orphan;
 use super::settings::{any_installed, read_settings, save_enabled};
 use crate::daemon::services::actions::{Busy, take_turn};
@@ -185,6 +185,20 @@ impl ServerManager {
             return None;
         }
         lock(&self.started).clone()
+    }
+
+    /// [`Self::running_program`], or else the installed program that our
+    /// old server runs, which a crashed `marsad` left running
+    /// ([`orphan::orphan_program`]), for an uninstall. Removing that
+    /// version would make its record name no installed server, so the next
+    /// start would drop the record and could never stop it.
+    pub async fn program_in_use(&self, daemon: &Daemon) -> Option<PathBuf> {
+        if let Some(program) = self.running_program(daemon) {
+            return Some(program);
+        }
+        let platform = self.platform?;
+        let programs = installed_programs(self.kind, &daemon.data_dir, platform);
+        orphan::orphan_program(self.kind, &*self.probes, &daemon.data_dir, &programs).await
     }
 
     /// Runs `action` and returns the status after it. An action that finds
