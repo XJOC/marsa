@@ -314,9 +314,10 @@ fn printable_name(text: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-// Every test here reads a Unix process.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
+    // Every test here reads a Unix process.
+    #[cfg(unix)]
     use super::*;
     #[cfg(target_os = "macos")]
     use std::fs;

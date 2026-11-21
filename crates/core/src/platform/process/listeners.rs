@@ -243,9 +243,10 @@ pub async fn port_lookup(_port: u16) -> PortLookup {
     PortLookup::NotChecked
 }
 
-// Every test here reads a Unix process.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
+    // Every test here reads a Unix process.
+    #[cfg(unix)]
     use super::*;
 
     /// lsof runs on macOS only. The listener is this test's own.
