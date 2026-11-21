@@ -1,0 +1,116 @@
+name: windows-databases-e2e
+
+# MySQL, PostgreSQL, and Valkey as services of marsad on Windows, with real
+# servers, run by a plain local user that is only in Users (ADR 0023, task
+# M6-07): the first init, the start as a direct child of marsad, a clean stop
+# by each server's own way (mysqladmin shutdown, pg_ctl stop -m fast,
+# SHUTDOWN SAVE) with no recovery at the next start, Valkey's Cygwin paths in
+# a folder with spaces, marsad ended by force with the servers ending in its
+# Job Object and their data recovered at the next start, and an elevated
+# marsad that starts no PostgreSQL. tools/e2e/windows-databases.ps1 creates
+# the user and runs every marsa command with --data-dir. It is not part of
+# the tests that `cargo nextest` runs.
+#
+# Valkey's Windows archive is the artifact of a valkey-build run, until the
+# release valkey-<version>-r<revision> is published: a draft's files cannot
+# be downloaded without a token. Artifacts last 14 days; without one the
+# script skips Valkey and says so in a notice.
+
+on:
+  workflow_dispatch:
+    inputs:
+      valkey_run:
+        description: "The id of a valkey-build run whose artifact valkey-windows-x64 holds the Windows archive"
+        required: true
+        default: "44939163554"
+  pull_request:
+    paths:
+      - "crates/app/src/daemon/databases/**"
+      - "crates/app/src/daemon/supervisor.rs"
+      - "crates/core/src/databases/**"
+      - "crates/core/src/services.rs"
+      - "crates/core/src/platform/windows.rs"
+      - "crates/core/src/platform.rs"
+      - "recipes/mysql.toml"
+      - "recipes/postgres.toml"
+      - "recipes/valkey.toml"
+      - "tools/e2e/windows-databases.ps1"
+      - ".github/workflows/windows-databases-e2e.yml"
+  push:
+    branches: ["task/M6-07-*"]
+    paths:
+      - "crates/app/src/daemon/databases/**"
+      - "crates/app/src/daemon/supervisor.rs"
+      - "crates/core/src/databases/**"
+      - "crates/core/src/services.rs"
+      - "crates/core/src/platform/windows.rs"
+      - "crates/core/src/platform.rs"
+      - "recipes/mysql.toml"
+      - "recipes/postgres.toml"
+      - "recipes/valkey.toml"
+      - "tools/e2e/windows-databases.ps1"
+      - ".github/workflows/windows-databases-e2e.yml"
+
+# Read-only on purpose: the job never writes to the repository. `actions:
+# read` lets it download the artifact of another run.
+permissions:
+  contents: read
+  actions: read
+
+# A new run on the same branch cancels the older one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e:
+    name: windows-2025
+    # Pinned, not windows-latest: the run is evidence for one system.
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      # The job runs downloaded programs: no token is left in .git.
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Reads the pinned version from rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-databases-e2e
+
+      - name: Build marsa and marsad
+        run: cargo build --release -p marsa
+
+      # A missing or expired artifact is no failure: the script then skips
+      # Valkey and says so.
+      - name: Valkey's Windows archive from a valkey-build run
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: valkey-windows-x64
+          run-id: ${{ inputs.valkey_run || '44939163554' }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/valkey-artifact
+
+      - name: End to end
+        shell: pwsh
+        timeout-minutes: 40
+        env:
+          VALKEY_ZIP: ${{ runner.temp }}\valkey-artifact\valkey-8.1.11-windows-x64.zip
+        run: ./tools/e2e/windows-databases.ps1
+
+      # Logs only, copied there by the script after a failure.
+      # `run\daemon.json` holds the daemon token and is never uploaded.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: windows-databases-e2e-logs
+          path: ${{ runner.temp }}/marsa-db-logs
+          if-no-files-found: ignore
