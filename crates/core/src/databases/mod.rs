@@ -1146,7 +1146,7 @@ mod tests {
         ];
         let alive = |exe: &str| Liveness::Alive {
             exe: exe.into(),
-            started: "Wed Nov 18 10:00:00 2026".into(),
+            started: "Wed Nov 18 10:00:00 2026".parse().unwrap(),
         };
         let classify = |now: &Liveness| classify_postmaster(4242, now, &servers);
         let pid = 4242;

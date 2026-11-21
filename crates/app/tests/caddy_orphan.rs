@@ -39,6 +39,7 @@ use marsa::daemon::state::Daemon;
 use marsa_core::caddy::{CaddyInput, SERVER_ID};
 use marsa_core::orphan::{Liveness, PidRecord};
 use marsa_core::platform::process::{self, Signal, read_pid_file, write_pid_file};
+use marsa_core::ps::StartTime;
 use marsa_core::services::{ServiceSpec, StopMethod};
 use marsa_core::types::{ServiceAction, ServiceState, ServiceStatus};
 use serde_json::{Value, json};
@@ -287,7 +288,7 @@ async fn alive(record: &PidRecord) -> bool {
     let now = process::identity(record.pid).await;
     now == Liveness::Alive {
         exe: record.exe.clone(),
-        started: record.started.clone(),
+        started: record.started,
     }
 }
 
@@ -501,11 +502,11 @@ async fn a_pid_file_with_another_start_time_is_never_signalled() {
     };
     let accepted = [program(), std::fs::canonicalize(program()).unwrap()];
     assert!(accepted.contains(&exe), "{exe:?}: only the time may differ");
-    assert_ne!(started, "Thu Jan 1 00:00:00 1970");
+    assert_ne!(started, StartTime::Utc(0));
     let record = PidRecord {
         pid: idle.pid(),
         exe,
-        started: "Thu Jan 1 00:00:00 1970".into(),
+        started: StartTime::Utc(0),
     };
     write_pid_file(&pid_path(dir.path()), &record).unwrap();
     let _held = TcpListener::bind((Ipv4Addr::LOCALHOST, ports.http)).unwrap();
@@ -575,7 +576,7 @@ async fn a_dead_pid_is_never_signalled() {
     let record = PidRecord {
         pid: gone.id(),
         exe: program(),
-        started: "Wed Nov 4 03:31:27 2026".into(),
+        started: StartTime::Utc(1_793_763_087),
     };
     write_pid_file(&pid_path(dir.path()), &record).unwrap();
 
@@ -785,7 +786,7 @@ async fn stop_with_no_caddy_running_touches_nothing_else() {
     let record = PidRecord {
         pid: gone.id(),
         exe: program(),
-        started: "Wed Nov 4 03:31:27 2026".into(),
+        started: StartTime::Utc(1_793_763_087),
     };
     write_pid_file(&pid_path(dir.path()), &record).unwrap();
     let _held = TcpListener::bind((Ipv4Addr::LOCALHOST, ports.http)).unwrap();

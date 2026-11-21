@@ -108,6 +108,7 @@ use marsa_core::caddy::Dial;
 use marsa_core::orphan::{self, Liveness, PidRecord, PidfileState};
 use marsa_core::php::PhpMinor;
 use marsa_core::platform::process::{self, Signal};
+use marsa_core::ps::{StartTime, started_order};
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::{Runtime, RuntimesDir};
 use marsa_core::types::{Event, ServiceState};
@@ -234,11 +235,11 @@ impl PidFile {
         processes: &dyn ProcessProbe,
         pid: u32,
         program: &Path,
-        started: Option<&str>,
+        started: Option<StartTime>,
     ) -> Recorded {
         let now = processes.real_identity(pid).await;
         let (exe, now_started) = match &now {
-            Liveness::Alive { exe, started } => (exe.clone(), started.clone()),
+            Liveness::Alive { exe, started } => (exe.clone(), *started),
             // It exited at once; the supervisor reports why.
             Liveness::Gone => {
                 debug!(pid, "php-fpm exited before its pid file was written");
@@ -684,7 +685,7 @@ impl Orphans<'_> {
             }
             // By the listed start time first, which is cheap. Times that
             // cannot be compared say nothing.
-            let order = orphan::started_order(&child.started, &record.started);
+            let order = started_order(child.started, record.started);
             let now = match order {
                 Some(Ordering::Less) => continue,
                 Some(_) => self.processes.real_identity(child.pid).await,
@@ -1040,7 +1041,7 @@ struct Spawn {
     pid: u32,
     /// Its start time, once a look read it: a later look that shows another
     /// one means that the pid changed hands.
-    started: Option<String>,
+    started: Option<StartTime>,
     file: FileState,
 }
 
@@ -1099,7 +1100,7 @@ impl Recording {
         let FileState::Looking { until, .. } = spawn.file else {
             return;
         };
-        let (pid, then) = (spawn.pid, spawn.started.as_deref());
+        let (pid, then) = (spawn.pid, spawn.started);
         let found = self
             .pid_file
             .record(&*self.processes, pid, &self.program, then);
@@ -1111,7 +1112,7 @@ impl Recording {
             Recorded::Never => FileState::Never,
             Recorded::NotYet(now) => {
                 if let Liveness::Alive { started, .. } = &now {
-                    spawn.started.get_or_insert_with(|| started.clone());
+                    spawn.started.get_or_insert(*started);
                 }
                 let at = tokio::time::Instant::now();
                 if at < until {
@@ -1175,10 +1176,11 @@ mod tests {
     use crate::daemon::state::Daemon;
 
     const PROGRAM: &str = "/data/runtimes/php/8.4.3/bin/php-fpm";
-    const STARTED: &str = "Wed Nov 4 03:31:27 2026";
+    /// `Wed Nov 4 03:31:27 2026`.
+    const STARTED: StartTime = StartTime::Utc(1_793_763_087);
     /// A second before and after `STARTED`.
-    const EARLIER: &str = "Wed Nov 4 03:31:26 2026";
-    const LATER: &str = "Wed Nov 4 03:31:28 2026";
+    const EARLIER: StartTime = StartTime::Utc(1_793_763_086);
+    const LATER: StartTime = StartTime::Utc(1_793_763_088);
     /// The pid the pid file names.
     const MASTER: u32 = 4242;
     const PHP84: PhpMinor = PhpMinor { major: 8, minor: 4 };
@@ -1203,7 +1205,7 @@ mod tests {
         now: VecDeque<Liveness>,
         /// The start time the process table lists for it: the first `Alive`
         /// of `now`, unless set.
-        listed: String,
+        listed: Option<StartTime>,
         /// What the OS says after a signal, as the death of the process
         /// would. `None`: the signal changes nothing.
         after_term: Option<Liveness>,
@@ -1217,18 +1219,18 @@ mod tests {
     fn proc(now: impl IntoIterator<Item = Liveness>) -> Proc {
         let now: VecDeque<Liveness> = now.into_iter().collect();
         let listed = now.iter().find_map(|state| match state {
-            Liveness::Alive { started, .. } => Some(started.clone()),
+            Liveness::Alive { started, .. } => Some(*started),
             _ => None,
         });
         Proc {
             now,
-            listed: listed.unwrap_or_default(),
+            listed,
             ..Proc::default()
         }
     }
 
     /// A child of the master that runs `exe`, started at `started`.
-    fn child(exe: &str, started: &str) -> Proc {
+    fn child(exe: &str, started: StartTime) -> Proc {
         Proc {
             ppid: MASTER,
             ..proc([alive(exe, started)])
@@ -1245,7 +1247,7 @@ mod tests {
 
     /// A worker of the master: its program, started at `started`, ends on
     /// SIGTERM.
-    fn worker(started: &str) -> Proc {
+    fn worker(started: StartTime) -> Proc {
         Proc {
             after_term: Some(Liveness::Gone),
             ..child(PROGRAM, started)
@@ -1360,7 +1362,8 @@ mod tests {
                     .filter(|(_, proc)| proc.ppid == ppid && !proc.late)
                     .map(|(pid, proc)| ChildProcess {
                         pid: *pid,
-                        started: proc.listed.clone(),
+                        // No time at all compares with nothing.
+                        started: proc.listed.unwrap_or(StartTime::Ticks(0)),
                     })
                     .collect()
             });
@@ -1409,10 +1412,10 @@ mod tests {
         }
     }
 
-    fn alive(exe: &str, started: &str) -> Liveness {
+    fn alive(exe: &str, started: StartTime) -> Liveness {
         Liveness::Alive {
             exe: PathBuf::from(exe),
-            started: started.into(),
+            started,
         }
     }
 
@@ -1432,7 +1435,7 @@ mod tests {
         let record = PidRecord {
             pid: 4242,
             exe: PathBuf::from(PROGRAM),
-            started: STARTED.into(),
+            started: STARTED,
         };
         process::write_pid_file(&pid_file.path, &record).unwrap();
         (dir, pid_file)
@@ -1608,7 +1611,7 @@ mod tests {
             (
                 "an identity that cannot be read",
                 Proc {
-                    listed: STARTED.into(),
+                    listed: Some(STARTED),
                     ppid: MASTER,
                     ..proc([Liveness::Unknown])
                 },
@@ -1983,7 +1986,7 @@ mod tests {
     #[tokio::test]
     async fn a_child_of_pid_1_that_is_not_the_masters_worker_gets_no_signal() {
         // A second after `LATER`.
-        const LATEST: &str = "Wed Nov 4 03:31:29 2026";
+        const LATEST: StartTime = StartTime::Utc(1_793_763_089);
         // What the process table lists, and what the OS says right after.
         let cases = [
             (
@@ -2009,7 +2012,7 @@ mod tests {
             let (held, listen) = held_port();
             let decoy = Proc {
                 ppid: 1,
-                listed: listed.into(),
+                listed: Some(listed),
                 ..proc([now])
             };
             // It holds the port, so only the checks of its executable and
@@ -2037,7 +2040,7 @@ mod tests {
         // be the worker. No signal, and the file stays.
         let unknown = || Proc {
             ppid: 1,
-            listed: LATER.into(),
+            listed: Some(LATER),
             ..proc([Liveness::Unknown])
         };
         let (_dir, pid_file) = pid_file_of_ours();
@@ -2098,7 +2101,7 @@ mod tests {
             let record = PidRecord {
                 pid: MASTER,
                 exe: program.clone(),
-                started: STARTED.into(),
+                started: STARTED,
             };
             process::write_pid_file(&pid_file.path, &record).unwrap();
         };
@@ -2128,7 +2131,7 @@ mod tests {
             after_term: Some(Liveness::Gone),
             ..proc([Liveness::Alive {
                 exe: program.clone(),
-                started: LATER.into(),
+                started: LATER,
             }])
         };
         let fake = Fake::new([Liveness::Gone])
@@ -2146,7 +2149,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pid_file_that_names_no_orphan_of_ours_gets_no_signal() {
-        let later = "Wed Nov 4 03:31:28 2026";
+        let later = LATER;
         let cases = [
             // Another program, our start time.
             alive("/bin/sleep", STARTED),
@@ -2257,10 +2260,10 @@ mod tests {
 
     /// What the `exe` link of a child names on Linux until its exec is done:
     /// the daemon's own executable, here this test binary.
-    fn execing(started: &str) -> Liveness {
+    fn execing(started: StartTime) -> Liveness {
         Liveness::Alive {
             exe: std::env::current_exe().unwrap(),
-            started: started.into(),
+            started,
         }
     }
 
@@ -2281,7 +2284,7 @@ mod tests {
                 .path
                 .ends_with(Path::new("run").join(format!("{}.pid", fpm_id(PHP84))))
         );
-        async fn look(pid_file: &PidFile, fake: Fake, started: Option<&str>) -> Recorded {
+        async fn look(pid_file: &PidFile, fake: Fake, started: Option<StartTime>) -> Recorded {
             pid_file
                 .record(&fake, MASTER, Path::new(PROGRAM), started)
                 .await
@@ -2307,7 +2310,7 @@ mod tests {
         let listed_later = Fake::default().with(
             MASTER,
             Proc {
-                listed: LATER.into(),
+                listed: Some(LATER),
                 ..spawned([ours()])
             },
         );
@@ -2325,7 +2328,7 @@ mod tests {
         let want = PidRecord {
             pid: MASTER,
             exe: PathBuf::from(PROGRAM),
-            started: STARTED.into(),
+            started: STARTED,
         };
         let found = look(&pid_file, child(ours()), Some(STARTED)).await;
         assert_eq!(found, Recorded::Written(want.clone()));
@@ -2416,7 +2419,7 @@ mod tests {
         let want = PidRecord {
             pid: MASTER,
             exe: PathBuf::from(PROGRAM),
-            started: STARTED.into(),
+            started: STARTED,
         };
         assert_eq!(process::read_pid_file(&pid_file.path), Some(want));
         assert_eq!(fake.looks(), 3);
@@ -3094,7 +3097,7 @@ mod tests {
             let record = PidRecord {
                 pid: idle.pid(),
                 exe,
-                started: "Thu Jan 1 00:00:00 1970".into(),
+                started: StartTime::Utc(0),
             };
             assert!(check_recording(dir.path(), &record).await.is_empty());
             assert!(idle.alive());
@@ -3137,7 +3140,7 @@ mod tests {
             let record = PidRecord {
                 pid: gone.id(),
                 exe: std::fs::canonicalize(&program).unwrap(),
-                started: STARTED.into(),
+                started: STARTED,
             };
             assert!(check_recording(dir.path(), &record).await.is_empty());
         }

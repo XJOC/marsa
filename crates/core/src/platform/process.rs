@@ -21,6 +21,7 @@ use tokio::process::Command;
 use crate::caddy::Dial;
 use crate::orphan::{ChildProcess, Liveness, PidRecord, is_instance_id};
 use crate::ports::PortLookup;
+use crate::ps::{ProcessRow, StartTime};
 
 /// Whether the daemon writes `run/caddy.pid` after each start of Caddy, and
 /// looks for an orphan Caddy before it starts one: macOS (ADR 0009) and
@@ -129,7 +130,7 @@ pub async fn identity(pid: u32) -> Liveness {
         .env("TZ", "UTC0");
     match run_tool(ps).await {
         Some(out) if out.status.success() => {
-            crate::orphan::parse_ps_line(&String::from_utf8_lossy(&out.stdout))
+            crate::ps::parse_ps_line(&String::from_utf8_lossy(&out.stdout))
         }
         // `ps` prints nothing and fails for a pid with no process.
         Some(out) if out.stdout.is_empty() => Liveness::Gone,
@@ -166,7 +167,7 @@ fn proc_identity(dir: &Path) -> Liveness {
         }
         Ok(Liveness::Alive {
             exe,
-            started: started.to_string(),
+            started: StartTime::Ticks(started),
         })
     };
     match read() {
@@ -233,7 +234,7 @@ pub async fn real_identity(_pid: u32) -> Liveness {
 /// The start time of `pid` from `/bin/ps`, in the form [`identity`] gives.
 /// `Err(Gone)` for no process or a zombie, `Err(Unknown)` when `ps` fails.
 #[cfg(target_os = "macos")]
-async fn start_time(pid: u32) -> Result<String, Liveness> {
+async fn start_time(pid: u32) -> Result<StartTime, Liveness> {
     if pid == 0 {
         return Err(Liveness::Unknown);
     }
@@ -243,7 +244,7 @@ async fn start_time(pid: u32) -> Result<String, Liveness> {
         .env("TZ", "UTC0");
     match run_tool(ps).await {
         Some(out) if out.status.success() => {
-            match crate::orphan::parse_ps_start(&String::from_utf8_lossy(&out.stdout)) {
+            match crate::ps::parse_ps_start(&String::from_utf8_lossy(&out.stdout)) {
                 Some(('Z', _)) => Err(Liveness::Gone),
                 Some((_, started)) => Ok(started),
                 None => Err(Liveness::Unknown),
@@ -305,7 +306,7 @@ pub async fn children(ppid: u32) -> Option<Vec<ChildProcess>> {
         return None;
     }
     let table = String::from_utf8_lossy(&out.stdout);
-    Some(crate::orphan::parse_ps_children(&table, ppid))
+    Some(crate::ps::parse_ps_children(&table, ppid))
 }
 
 /// The children of `ppid` now, from `/proc` with `std` only: a list, never a
@@ -330,7 +331,7 @@ pub async fn children(ppid: u32) -> Option<Vec<ChildProcess>> {
         if stat.ppid == ppid && !matches!(stat.state, 'Z' | 'X') {
             children.push(ChildProcess {
                 pid,
-                started: stat.started.to_string(),
+                started: StartTime::Ticks(stat.started),
             });
         }
     }
@@ -351,69 +352,28 @@ const LOGINWINDOW: &str = "/System/Library/CoreServices/loginwindow.app/Contents
 /// `killall Dock` starts a new one within the same session.
 const DOCK: &str = "/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock";
 
-/// One line of `ps -axo pid=,uid=,lstart=,comm=` run with `LC_ALL=C` and
-/// `TZ=UTC0` (macOS).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProcessRow {
-    pub pid: u32,
-    /// The effective user id.
-    pub uid: u32,
-    /// The start time, in the form [`identity`] gives.
-    pub started: String,
-    /// The `comm` column: `argv[0]`, which the process chose. A label, never
-    /// proof of the program it runs.
-    pub command: PathBuf,
-}
-
-/// Reads `ps -axo pid=,uid=,lstart=,comm=` output: the pid, the uid, five
-/// words of start time, then `argv[0]`, which may hold spaces. A line in
-/// another shape is skipped.
-pub fn parse_process_table(text: &str) -> Vec<ProcessRow> {
-    text.lines().filter_map(parse_process_row).collect()
-}
-
-fn parse_process_row(line: &str) -> Option<ProcessRow> {
-    let mut rest = line.trim();
-    let mut words = [""; 7];
-    for word in &mut words {
-        let end = rest.find(char::is_whitespace)?;
-        *word = &rest[..end];
-        rest = rest[end..].trim_start();
-    }
-    let [pid, uid, started @ ..] = words;
-    let started = started.join(" ");
-    // A time that cannot be compared is of no use here.
-    crate::orphan::lstart_seconds(&started)?;
-    Some(ProcessRow {
-        pid: pid.parse().ok()?,
-        uid: uid.parse().ok()?,
-        started,
-        command: PathBuf::from(rest),
-    })
-}
-
 /// When the GUI login session of `uid` started (task M5-21): the start of
 /// its `loginwindow`, or of its Dock when it has none, the latest if there
 /// are several. `None` when `uid` has no GUI session in `table`, as for a
 /// login over SSH only.
-pub fn login_session_start(table: &[ProcessRow], uid: u32) -> Option<&str> {
+pub fn login_session_start(table: &[ProcessRow], uid: u32) -> Option<StartTime> {
     [LOGINWINDOW, DOCK].into_iter().find_map(|program| {
         table
             .iter()
             .filter(|row| row.uid == uid && row.command.as_path() == Path::new(program))
-            .max_by_key(|row| crate::orphan::lstart_seconds(&row.started))
-            .map(|row| row.started.as_str())
+            .max_by_key(|row| row.started.utc_seconds())
+            .map(|row| row.started)
     })
 }
 
 /// When a daemon started, and when the current GUI login session of its user
-/// did (task M5-21). Both in the form [`identity`] gives, in UTC.
+/// did (task M5-21). Both in UTC.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginTimes {
     /// When the daemon started.
-    pub started: String,
+    pub started: StartTime,
     /// When the login session started.
-    pub login: String,
+    pub login: StartTime,
 }
 
 /// The [`LoginTimes`] of the `marsad` at `pid`, from `table`. `own` is the
@@ -428,8 +388,8 @@ pub fn login_times(table: &[ProcessRow], pid: u32, own: u32) -> Option<LoginTime
         return None;
     }
     Some(LoginTimes {
-        started: daemon.started.clone(),
-        login: login_session_start(table, uid)?.to_owned(),
+        started: daemon.started,
+        login: login_session_start(table, uid)?,
     })
 }
 
@@ -458,7 +418,9 @@ async fn process_table() -> Option<Vec<ProcessRow>> {
     if !out.status.success() {
         return None;
     }
-    Some(parse_process_table(&String::from_utf8_lossy(&out.stdout)))
+    Some(crate::ps::parse_process_table(&String::from_utf8_lossy(
+        &out.stdout,
+    )))
 }
 
 /// The process that started this one, for the log only (task M5-21).
@@ -876,6 +838,10 @@ pub fn hide_console_window(cmd: &mut Command) {
 mod tests {
     use super::*;
 
+    fn at(text: &str) -> StartTime {
+        text.parse().expect("a start time")
+    }
+
     const SIGNALS: [Signal; 4] = [Signal::Term, Signal::Int, Signal::Quit, Signal::Kill];
 
     // Only Unix sends signals.
@@ -986,7 +952,7 @@ mod tests {
         else {
             panic!("no identity for {pid}");
         };
-        assert!(!started.is_empty());
+        assert!(!started.to_string().is_empty());
         // The same answer again: the start time is stable.
         let again = identity(pid).await;
         assert_eq!(again, Liveness::Alive { exe, started });
@@ -1016,7 +982,7 @@ mod tests {
             let dir = folder(STAT);
             let want = Liveness::Alive {
                 exe: EXE.into(),
-                started: "98765".into(),
+                started: StartTime::Ticks(98_765),
             };
             assert_eq!(proc_identity(dir.path()), want);
         }
@@ -1080,7 +1046,7 @@ mod tests {
         else {
             panic!("no identity for {pid}");
         };
-        assert!(!started.is_empty());
+        assert!(!started.to_string().is_empty());
         // `identity` and `real_identity` give the same start time.
         if let Liveness::Alive { started: same, .. } = identity(pid).await {
             assert_eq!(same, started);
@@ -1164,7 +1130,7 @@ x       501 Sat Nov 14 13:31:00 2026     /bin/zsh
 
     #[test]
     fn process_table_lines_give_pid_uid_start_and_command() {
-        let table = parse_process_table(TABLE);
+        let table = crate::ps::parse_process_table(TABLE);
         let row = |pid| table.iter().find(|row| row.pid == pid).cloned();
         // A command with spaces is kept whole.
         assert_eq!(
@@ -1172,7 +1138,7 @@ x       501 Sat Nov 14 13:31:00 2026     /bin/zsh
             Some(ProcessRow {
                 pid: 5793,
                 uid: 501,
-                started: "Wed Nov 11 10:12:30 2026".into(),
+                started: at("Wed Nov 11 10:12:30 2026"),
                 command: PathBuf::from(
                     "/Users/me/Library/Application Support/dev.marsa.Marsa/bin/marsad"
                 ),
@@ -1187,31 +1153,31 @@ x       501 Sat Nov 14 13:31:00 2026     /bin/zsh
             assert_eq!(row(skipped), None, "{skipped}");
         }
         assert_eq!(table.len(), 19, "{table:#?}");
-        assert!(parse_process_table("").is_empty());
+        assert!(crate::ps::parse_process_table("").is_empty());
     }
 
     #[test]
     fn the_login_session_starts_with_the_users_loginwindow_else_its_dock() {
-        let table = parse_process_table(TABLE);
+        let table = crate::ps::parse_process_table(TABLE);
         // This user's own loginwindow: not root's at the login screen, not a
         // process that calls itself loginwindow, and not the Dock.
         assert_eq!(
             login_session_start(&table, 501),
-            Some("Sat Nov 14 13:28:04 2026")
+            Some(at("Sat Nov 14 13:28:04 2026"))
         );
         assert_eq!(
             login_session_start(&table, 0),
-            Some("Wed Nov 11 05:52:40 2026")
+            Some(at("Wed Nov 11 05:52:40 2026"))
         );
         // No loginwindow of its own: the Dock, never `com.apple.dock.extra`.
         assert_eq!(
             login_session_start(&table, 502),
-            Some("Sat Nov 14 14:00:00 2026")
+            Some(at("Sat Nov 14 14:00:00 2026"))
         );
         // Two of them: the latest.
         assert_eq!(
             login_session_start(&table, 503),
-            Some("Sat Nov 14 14:06:00 2026")
+            Some(at("Sat Nov 14 14:06:00 2026"))
         );
         // No GUI session, as over SSH.
         assert_eq!(login_session_start(&table, 504), None);
@@ -1221,10 +1187,10 @@ x       501 Sat Nov 14 13:31:00 2026     /bin/zsh
 
     #[test]
     fn login_times_are_read_for_a_marsad_of_the_asking_user_only() {
-        let table = parse_process_table(TABLE);
+        let table = crate::ps::parse_process_table(TABLE);
         let times = |started: &str, login: &str| LoginTimes {
-            started: started.into(),
-            login: login.into(),
+            started: at(started),
+            login: at(login),
         };
         // The incident: a daemon from the session before.
         assert_eq!(
@@ -1300,7 +1266,7 @@ x       501 Sat Nov 14 13:31:00 2026     /bin/zsh
         // told. With one, the child started in it.
         if let Some(times) = read_login_times(pid).await {
             assert_eq!(times.started, want.started);
-            let order = crate::orphan::started_order(&times.login, &times.started);
+            let order = crate::ps::started_order(times.login, times.started);
             assert_ne!(order, Some(std::cmp::Ordering::Greater), "{times:?}");
         }
         child.kill().unwrap();
@@ -1415,7 +1381,7 @@ x       501 Sat Nov 14 13:31:00 2026     /bin/zsh
         let record = PidRecord {
             pid: 42,
             exe: PathBuf::from("/data/bin/caddy"),
-            started: "Wed Nov  4 03:31:27 2026".into(),
+            started: at("Wed Nov  4 03:31:27 2026"),
         };
         write_pid_file(&path, &record).unwrap();
         fs::write(dir.path().join("run").join(".caddy.pid.tmp"), "half").unwrap();
@@ -1453,7 +1419,7 @@ x       501 Sat Nov 14 13:31:00 2026     /bin/zsh
         let record = PidRecord {
             pid: 42,
             exe: PathBuf::from("/data/bin/caddy"),
-            started: "Wed Nov  4 03:31:27 2026".into(),
+            started: at("Wed Nov  4 03:31:27 2026"),
         };
         write_pid_file(&real, &record).unwrap();
         let to_real = dir.path().join("to-real.pid");
