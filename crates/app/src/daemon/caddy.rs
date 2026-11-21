@@ -51,9 +51,7 @@ use super::services::runtime::AbortOnDrop;
 use super::state::Daemon;
 use super::supervisor::{ServiceHandle, ServiceRuntime, Supervisor, lock};
 
-/// The service id: the key in `Daemon::procs`, the `{id}` in the routes, and
-/// the log file `logs/caddy.log`.
-pub const CADDY_ID: &str = "caddy";
+pub use marsa_core::caddy::CADDY_ID;
 
 /// How long `start` waits for the admin API by default.
 const READY_LIMIT: Duration = Duration::from_secs(5);
