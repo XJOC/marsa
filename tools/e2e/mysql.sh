@@ -111,9 +111,14 @@ listeners | tee "$RUNNER_TEMP/listeners.txt"
 step "memory when idle: under 250 MB"
 PID=$(cat "$DATA/run/mysqld.pid")
 # The first seconds after the start hold the pages of InnoDB's start; macOS
-# gives them back within a few seconds (254 MB, then 91 MB).
+# gives them back within a few seconds (254 MB, then 91 MB), a runner a bit
+# later. So the limit is checked until it holds, for at most a minute.
 sleep 10
-echo "mysqld rss: $(rss_mb "$PID") MB"
+for _ in $(seq 1 10); do
+  echo "mysqld rss: $(rss_mb "$PID") MB"
+  [ "$(rss_mb "$PID")" -lt 250 ] && break
+  sleep 5
+done
 [ "$(rss_mb "$PID")" -lt 250 ] || fail "too much memory"
 
 step "access (ADR 0023): root over TCP has no administrative privilege"
