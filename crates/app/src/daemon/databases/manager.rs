@@ -8,12 +8,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use marsa_core::config::{ConfigError, ServerSettings};
-use marsa_core::databases::mysql::{
-    MysqlDirs, UnwritablePath, decide_mysql_start, my_cnf, mysqld_pid,
-};
+use marsa_core::databases::mysql::{MysqlDirs, decide_mysql_start, my_cnf, mysqld_pid};
+use marsa_core::databases::valkey::{ValkeyDirs, valkey_conf};
 use marsa_core::databases::{
-    PostgresDirs, ServerKind, ServiceBusy, StartDecision, StartFacts, decide_start, postmaster_pid,
-    socket_for,
+    PostgresDirs, ServerKind, ServiceBusy, StartDecision, StartFacts, UnwritablePath, decide_start,
+    postmaster_pid, socket_for,
 };
 use marsa_core::platform::process;
 use marsa_core::recipes::Platform;
@@ -25,10 +24,10 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use super::facts::start_facts;
+use super::facts::{port_facts, start_facts};
 use super::init::{InitError, installed_servers};
 use super::settings::{any_installed, read_settings, save_enabled};
-use super::{mysql, orphan, postgres};
+use super::{mysql, orphan, postgres, valkey};
 use crate::daemon::services::actions::{Busy, take_turn};
 use crate::daemon::services::probe::{ProcessProbe, SystemProbe};
 use crate::daemon::services::runtime::AbortOnDrop;
@@ -64,7 +63,8 @@ pub enum ActionError {
     /// Our old server, left by a crashed `marsad`, could not be stopped, or
     /// cannot be told from another program.
     OrphanStuck(ServerKind, String),
-    /// A path of the data folder cannot go in MySQL's `my.cnf`.
+    /// A path of the data folder cannot go in MySQL's `my.cnf` or Valkey's
+    /// `valkey.conf`.
     Path(UnwritablePath),
 }
 
@@ -74,9 +74,11 @@ impl ActionError {
         match self {
             Self::Unsupported(ServerKind::Postgres) => codes::POSTGRES_UNSUPPORTED_PLATFORM,
             Self::Unsupported(ServerKind::Mysql) => codes::MYSQL_UNSUPPORTED_PLATFORM,
+            Self::Unsupported(ServerKind::Valkey) => codes::VALKEY_UNSUPPORTED_PLATFORM,
             Self::Config(err) => err.code(),
             Self::NotInstalled(ServerKind::Postgres, _) => codes::POSTGRES_NOT_INSTALLED,
             Self::NotInstalled(ServerKind::Mysql, _) => codes::MYSQL_NOT_INSTALLED,
+            Self::NotInstalled(ServerKind::Valkey, _) => codes::VALKEY_NOT_INSTALLED,
             Self::Init(err) => err.code(),
             Self::InUse(busy) => busy.code(),
             Self::Busy => codes::SERVICE_BUSY,
@@ -228,7 +230,8 @@ enum Refusal {
         data: PathBuf,
         socket: Option<PathBuf>,
     },
-    /// Not read: MySQL's own check before the start covers its data folder.
+    /// Not read: MySQL's own check before the start covers its data
+    /// folder, and Valkey takes no lock on its own.
     None,
 }
 
@@ -427,6 +430,7 @@ impl ServerManager {
             let code = match self.kind {
                 ServerKind::Postgres => codes::POSTGRES_START_TIMEOUT,
                 ServerKind::Mysql => codes::MYSQL_START_TIMEOUT,
+                ServerKind::Valkey => codes::VALKEY_START_TIMEOUT,
             };
             self.fail(&daemon.events, code, &reason);
         }
@@ -524,6 +528,10 @@ impl ServerManager {
                 self.prepare_mysql(daemon, &version, server, servers, port)
                     .await
             }
+            ServerKind::Valkey => {
+                self.prepare_valkey(daemon, &version, server, servers, port)
+                    .await
+            }
         }
     }
 
@@ -538,8 +546,17 @@ impl ServerManager {
         decide: fn(&StartFacts) -> StartDecision,
     ) -> Result<(), ActionError> {
         let facts = start_facts(&*self.probes, port, pid_file, pid_of, servers).await;
+        self.decide(&facts, decide)
+    }
+
+    /// `decide` on `facts`, the facts before the start.
+    fn decide(
+        &self,
+        facts: &StartFacts,
+        decide: fn(&StartFacts) -> StartDecision,
+    ) -> Result<(), ActionError> {
         info!(?facts, server = self.kind.id(), "checked before the start");
-        match decide(&facts) {
+        match decide(facts) {
             StartDecision::Refuse(busy) => Err(ActionError::InUse(busy)),
             StartDecision::Start => Ok(()),
         }
@@ -628,6 +645,37 @@ impl ServerManager {
         }
         Ok(Prepared {
             spec: mysql::spec(mysqld, &dirs),
+            servers,
+            refusal: Refusal::None,
+            port,
+        })
+    }
+
+    /// [`Self::prepare`] for Valkey: `valkey.conf`, and the check of its
+    /// port. Valkey has no pid file of its own and no lock on its data
+    /// folder, so the port is the whole check, after our own record of its
+    /// pid ([`orphan::clear`]). A program that holds the port, Homebrew's
+    /// Redis or Herd's, refuses the start with its name. No first init:
+    /// Valkey starts on an empty folder.
+    async fn prepare_valkey(
+        &self,
+        daemon: &Daemon,
+        version: &Version,
+        server: PathBuf,
+        servers: Vec<PathBuf>,
+        port: u16,
+    ) -> Result<Prepared, ActionError> {
+        let kind = self.kind;
+        let dirs = ValkeyDirs::new(&daemon.data_dir);
+        let text = valkey_conf(&dirs, port).map_err(ActionError::Path)?;
+        let facts = port_facts(&*self.probes, port).await;
+        self.decide(&facts, decide_start)?;
+        valkey::write_config(&dirs, text).await.map_err(|err| {
+            ActionError::Init(InitError::io(kind, "cannot write valkey.conf", &err))
+        })?;
+        info!(%version, port, "starting valkey");
+        Ok(Prepared {
+            spec: valkey::spec(server, &dirs, port),
             servers,
             refusal: Refusal::None,
             port,
@@ -751,6 +799,7 @@ impl ServerManager {
         match self.kind {
             ServerKind::Postgres => postgres::answers(port).await,
             ServerKind::Mysql => mysql::answers(port).await,
+            ServerKind::Valkey => valkey::answers(port).await,
         }
     }
 

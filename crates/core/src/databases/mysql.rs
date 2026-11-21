@@ -4,7 +4,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::{NoSocket, PidFileCheck, ServiceBusy, StartDecision, StartFacts, decide_start};
+use super::{
+    NoSocket, PidFileCheck, ServiceBusy, StartDecision, StartFacts, UnwritablePath, decide_start,
+    odd, quoted_path,
+};
 use crate::php::MAX_SOCKET_PATH;
 use crate::services::{Signal, StopMethod};
 
@@ -77,38 +80,9 @@ impl MysqlDirs {
     }
 }
 
-/// A path that `my.cnf` cannot hold: one with a double quote or a control
-/// character, or not UTF-8. Its own error, since no start can go on.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "{} cannot be written to my.cnf: it has a double quote or a control character",
-    .0.display()
-)]
-pub struct UnwritablePath(pub PathBuf);
-
-impl UnwritablePath {
-    /// Stable error name for the UI.
-    pub fn code(&self) -> &'static str {
-        crate::codes::MYSQL_PATH_UNSUPPORTED
-    }
-}
-
-/// Whether `text` has a character that a double-quoted value of `my.cnf`
-/// cannot hold: a double quote, or a control character (a line break would
-/// start a new setting).
-fn odd(text: &str) -> bool {
-    text.contains(|c: char| c == '"' || c.is_control())
-}
-
-/// `path` as a value of `my.cnf`: in double quotes, so a `#` is not a
-/// comment and spaces at its ends stay, with `\` written `\\` (MySQL reads
-/// escapes in option values).
+/// `path` as a value of `my.cnf` ([`quoted_path`]).
 fn cnf_path(path: &Path) -> Result<String, UnwritablePath> {
-    let text = path
-        .to_str()
-        .filter(|text| !odd(text))
-        .ok_or_else(|| UnwritablePath(path.to_path_buf()))?;
-    Ok(format!("\"{}\"", text.replace('\\', "\\\\")))
+    quoted_path(path, UnwritablePath::Mysql)
 }
 
 /// Marsa's `my.cnf` for `mysqld --defaults-file`, written before each

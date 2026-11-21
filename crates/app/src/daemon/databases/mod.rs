@@ -1,6 +1,6 @@
 //! The database servers of `marsad` (ADR 0023), on macOS and Linux:
-//! PostgreSQL. `marsa_core::databases` decides; this module runs the
-//! programs.
+//! PostgreSQL, MySQL, and Valkey. `marsa_core::databases` decides; this
+//! module runs the programs.
 //!
 //! The first start of a line makes its data folder ([`init::ensure_data`]):
 //! for PostgreSQL its cluster in `databases/postgres/<major>/`
@@ -32,6 +32,7 @@ mod mysql;
 mod orphan;
 mod postgres;
 mod settings;
+mod valkey;
 
 pub use init::InitError;
 pub use manager::{ActionError, ServerManager};
@@ -89,7 +90,7 @@ mod tests {
         pub(super) asked: Mutex<Vec<u32>>,
         /// Real processes that run as these programs: their real start
         /// time and life, with this path. Only they get real signals.
-        orphans: Mutex<Vec<(u32, PathBuf)>>,
+        pub(super) orphans: Mutex<Vec<(u32, PathBuf)>>,
         /// Every signal asked for, to any pid.
         pub(super) signals: Mutex<Vec<(u32, Signal)>>,
         /// After the first signal, the orphans cannot be told any more.
@@ -398,7 +399,7 @@ mod tests {
     /// at `bin/postgres` with a fake `initdb` next to it: macOS and Linux
     /// only, the systems of this task.
     #[cfg(unix)]
-    mod server {
+    pub(super) mod server {
         use super::*;
         use std::fs;
         use std::os::unix::fs::PermissionsExt as _;
@@ -1127,7 +1128,9 @@ mod tests {
 
         /// A fake server left running, as by a crashed `marsad`. Killed when
         /// dropped, so a failed assert leaves no process behind.
-        struct Orphan(std::process::Child);
+        pub(in crate::daemon::databases) struct Orphan(
+            pub(in crate::daemon::databases) std::process::Child,
+        );
 
         impl Orphan {
             fn id(&self) -> u32 {
@@ -1191,7 +1194,8 @@ mod tests {
             .unwrap();
         }
 
-        async fn listening(port: u16) {
+        /// Waits until something listens on `port`.
+        pub(in crate::daemon::databases) async fn listening(port: u16) {
             let wait = async {
                 while tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
                     .await

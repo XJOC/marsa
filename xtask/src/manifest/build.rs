@@ -53,6 +53,9 @@ pub struct RuntimesJson {
     /// Left out while empty, so a manifest without MySQL stays as it was.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mysql: Vec<ReleaseJson>,
+    /// Left out while empty, as MySQL.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub valkey: Vec<ReleaseJson>,
 }
 
 impl RuntimesJson {
@@ -64,6 +67,7 @@ impl RuntimesJson {
             Runtime::Caddy => &self.caddy,
             Runtime::Postgres => &self.postgres,
             Runtime::Mysql => &self.mysql,
+            Runtime::Valkey => &self.valkey,
         }
     }
 
@@ -75,6 +79,7 @@ impl RuntimesJson {
             Runtime::Caddy => &mut self.caddy,
             Runtime::Postgres => &mut self.postgres,
             Runtime::Mysql => &mut self.mysql,
+            Runtime::Valkey => &mut self.valkey,
         }
     }
 }
@@ -146,11 +151,18 @@ enum Proof {
     /// upstream signs them: the trust is in our build and in the owner's
     /// signature on the manifest.
     OurLibaio,
+    /// The `sha256sums.txt` of one of our own `valkey-<v>-r<n>` releases
+    /// (ADR 0023, section 3): the archive the Valkey recipe names, and no
+    /// other. The build workflow checked the source tarball against
+    /// `valkey-io/valkey-hashes`; the trust is in that build and in the
+    /// owner's signature on the manifest.
+    OurValkey,
 }
 
 impl Proof {
     /// An exhaustive `match`, so each new runtime has to choose. MySQL's
-    /// `archive` is Oracle's; its other files are our own builds.
+    /// `archive` is Oracle's; its other files are our own builds. Valkey is
+    /// our own build.
     fn of(runtime: Runtime, artifact: &str) -> Proof {
         match runtime {
             Runtime::Php | Runtime::Node | Runtime::Composer | Runtime::Caddy => {
@@ -159,6 +171,7 @@ impl Proof {
             Runtime::Postgres => Proof::TheseusSha256,
             Runtime::Mysql if artifact == "archive" => Proof::OracleSignature,
             Runtime::Mysql => Proof::OurLibaio,
+            Runtime::Valkey => Proof::OurValkey,
         }
     }
 
@@ -232,6 +245,25 @@ impl Proof {
             (Proof::OurLibaio, _) => bail!(
                 "only a file of our own libaio release, with its `sha256sums.txt`, is accepted"
             ),
+            // An override could name another of our Valkey archives, of
+            // another version, revision, or platform, with its own matching
+            // sum: so the file is the recipe's. A rebuild changes the recipe.
+            (Proof::OurValkey, _) if template != Some(url) => bail!(
+                "it is not the recipe's URL {}, and only that archive of our Valkey release is \
+                 accepted",
+                template.unwrap_or("(none)")
+            ),
+            (Proof::OurValkey, Some(sums))
+                if sums.source == Source::OurValkey
+                    && sums.layout == Layout::List
+                    && sums.algorithm == Algorithm::Sha256 =>
+            {
+                Ok(())
+            }
+            (Proof::OurValkey, _) => bail!(
+                "only an archive of our own Valkey release, with its `sha256sums.txt`, is \
+                 accepted"
+            ),
         }
     }
 
@@ -242,7 +274,9 @@ impl Proof {
     fn keeps_file(self) -> bool {
         match self {
             Proof::SumIfPublished => true,
-            Proof::TheseusSha256 | Proof::OracleSignature | Proof::OurLibaio => false,
+            Proof::TheseusSha256 | Proof::OracleSignature | Proof::OurLibaio | Proof::OurValkey => {
+                false
+            }
         }
     }
 }
@@ -1167,6 +1201,150 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.4.23-nts-Win3
             assert!(err.to_string().contains("only that file"), "{err}");
         }
         assert!(!Proof::OurLibaio.keeps_file());
+    }
+
+    /// The pins of [`PINS`] plus Valkey 8.1.11 on macOS and Linux, as
+    /// `recipes/pins.toml` has it.
+    fn valkey_pins() -> String {
+        format!(
+            "{PINS}[valkey]\nversions = [\"8.1.11\"]\n[[skip]]\nruntime = \"valkey\"\n\
+             version = \"8.1.11\"\nplatform = \"windows-x64\"\nreason = \"M6-07\"\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn valkey_is_built_with_the_sums_of_our_own_release() {
+        let pins = Pins::parse(&valkey_pins()).expect("pins");
+        let cache = tempfile::tempdir().expect("tempdir");
+        let built = build(&fetcher(&pins, None), &pins, cache.path(), &Stub::default())
+            .await
+            .expect("build");
+        let value = serde_json::to_value(&built.manifest).expect("json");
+        let [release] = value["runtimes"]["valkey"]
+            .as_array()
+            .expect("valkey")
+            .as_slice()
+        else {
+            panic!("one valkey release expected");
+        };
+        assert_eq!(release["version"], "8.1.11");
+        let platforms: Vec<&String> = release["platforms"]
+            .as_object()
+            .expect("platforms")
+            .keys()
+            .collect();
+        assert_eq!(
+            platforms,
+            ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]
+        );
+        let linux = &release["platforms"]["linux-x64"][0];
+        let url = "https://github.com/XJOC/marsa/releases/download/valkey-8.1.11-r1/\
+                   valkey-8.1.11-linux-x64.tar.gz";
+        assert_eq!(linux["name"], "archive");
+        assert_eq!(linux["urls"][0], url);
+        assert_eq!(linux["sha256"], sha(url.as_bytes()));
+        let rows: Vec<&String> = built
+            .rows
+            .iter()
+            .filter(|row| row.starts_with("valkey 8.1.11 "))
+            .collect();
+        assert_eq!(rows.len(), 5, "{rows:?}");
+        let skipped = "valkey 8.1.11 windows-x64: skipped (M6-07)";
+        assert!(rows.iter().any(|row| *row == skipped), "{rows:?}");
+        let checked = rows
+            .iter()
+            .filter(|row| row.ends_with("(upstream sha256 matches)"));
+        assert_eq!(checked.count(), 4);
+        // Hashed on the way, never kept.
+        assert!(!cache.path().join("valkey").exists());
+        check_json(to_json(&built.manifest).expect("json").as_bytes()).expect("valid manifest");
+
+        // An archive that its release's sha256sums.txt does not list as it is.
+        let bad = fetcher(&pins, Some("valkey-8.1.11-darwin-arm64.tar.gz"));
+        let cache = tempfile::tempdir().expect("tempdir");
+        let err = build(&bad, &pins, cache.path(), &Stub::default())
+            .await
+            .err()
+            .expect("a bad sum");
+        assert!(
+            format!("{err:#}").contains("valkey 8.1.11 darwin-arm64"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn valkey_needs_the_recipes_archive_of_our_release() {
+        assert_eq!(Proof::of(Runtime::Valkey, "archive"), Proof::OurValkey);
+        let recipe = recipes::builtin(Runtime::Valkey).expect("recipe");
+        let version = Version::new(8, 1, 11);
+        let template = recipe
+            .artifact_url(Platform::LinuxX64, "archive", &version)
+            .expect("linux-x64");
+        let sums = sum_file_for(&template);
+        Proof::OurValkey
+            .allows(&template, Some(&template), sums.as_ref())
+            .expect("our release");
+        // Not our release (a fork), an Oracle archive, theseus, libaio, or no
+        // sum file at all.
+        for url in [
+            "https://github.com/XJOC/marsa-fork/releases/download/valkey-8.1.11-r1/\
+             valkey-8.1.11-linux-x64.tar.gz",
+            MYSQL,
+            "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.7.0/\
+             postgresql-18.7.0-x86_64-unknown-linux-gnu.tar.gz",
+            "https://github.com/XJOC/marsa/releases/download/libaio-0.3.113-r1/\
+             libaio-0.3.113-linux-x64.so.1",
+            "https://example.org/valkey-8.1.11-linux-x64.tar.gz",
+        ] {
+            let sums = sum_file_for(url);
+            let err = Proof::OurValkey
+                .allows(url, Some(url), sums.as_ref())
+                .expect_err(url);
+            assert!(err.to_string().contains("our own Valkey release"), "{err}");
+        }
+        // Another archive of our own releases: another platform, another
+        // version, or another revision, each with its own matching sum.
+        for other in [
+            "https://github.com/XJOC/marsa/releases/download/valkey-8.1.11-r1/\
+             valkey-8.1.11-linux-arm64.tar.gz",
+            "https://github.com/XJOC/marsa/releases/download/valkey-8.1.10-r1/\
+             valkey-8.1.10-linux-x64.tar.gz",
+            "https://github.com/XJOC/marsa/releases/download/valkey-8.1.11-r2/\
+             valkey-8.1.11-linux-x64.tar.gz",
+        ] {
+            let sums = sum_file_for(other);
+            let err = Proof::OurValkey
+                .allows(other, Some(&template), sums.as_ref())
+                .expect_err("not the recipe's file");
+            assert!(err.to_string().contains("only that archive"), "{err}");
+        }
+        assert!(!Proof::OurValkey.keeps_file());
+    }
+
+    /// An override that names another archive of our releases stops the
+    /// build before any download of Valkey: darwin-arm64 is its first
+    /// platform.
+    #[tokio::test]
+    async fn a_valkey_override_stops_the_build() {
+        let text = format!(
+            "{}[[override]]\nruntime = \"valkey\"\nversion = \"8.1.11\"\nplatform = \"darwin-arm64\"\n\
+             artifact = \"archive\"\nurls = [\"https://github.com/XJOC/marsa/releases/download/\
+             valkey-8.1.11-r2/valkey-8.1.11-darwin-arm64.tar.gz\"]\n",
+            valkey_pins()
+        );
+        let pins = Pins::parse(&text).expect("pins");
+        let fetch = fetcher(&pins, None);
+        let cache = tempfile::tempdir().expect("tempdir");
+        let err = build(&fetch, &pins, cache.path(), &Stub::default())
+            .await
+            .err()
+            .expect("an override");
+        assert!(format!("{err:#}").contains("only that archive"), "{err:#}");
+        let fetched = fetch.requests();
+        assert!(
+            !fetched.iter().any(|url| url.contains("valkey")),
+            "{fetched:?}"
+        );
     }
 
     /// An Oracle file has one URL: a second one is a mirror that its

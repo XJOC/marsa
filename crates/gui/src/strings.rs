@@ -2070,6 +2070,14 @@ fn error_message(code: &str) -> Option<&'static str> {
         }
         "mysql_start_timeout" => "MySQL started but took no connections in time.",
         "mysql_unsupported_platform" => "Marsa runs MySQL on macOS and Linux only for now.",
+        "valkey_init_failed" => "Marsa could not make Valkey's data folder or settings file.",
+        "valkey_not_installed" => "Valkey of the version set in global.toml is not installed.",
+        "valkey_orphan_stuck" => "An old Valkey of this Marsa still runs and did not stop.",
+        "valkey_path_unsupported" => {
+            "The path of Marsa's data folder has a character that Valkey's settings file cannot hold."
+        }
+        "valkey_start_timeout" => "Valkey started but did not answer in time.",
+        "valkey_unsupported_platform" => "Marsa runs Valkey on macOS and Linux only for now.",
         "nss_remove_failed" => {
             "Marsa's certificate authority is still in a browser certificate database. Run \"marsa uninstall --all\" again."
         }

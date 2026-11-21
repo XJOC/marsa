@@ -70,7 +70,10 @@ const SERVICE_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 /// runs `initdb` (up to 120 s) and single-user mode (up to 60 s), waits up
 /// to 15 s for the server, and stops one that never answered (23 s): about
 /// 279 s in all. MySQL (`mysql`) takes less: its first init (up to 120 s)
-/// is one step, and its stop is SIGTERM, then a kill after 30 s.
+/// is one step, and its stop is SIGTERM, then a kill after 30 s. Valkey
+/// (`valkey`) has no init, but its stop (`SHUTDOWN SAVE`, then SIGTERM) may
+/// take 29 s, twice in a restart whose start never answered: more than the
+/// 60 s of the other services.
 const SERVER_ACTION_TIMEOUT: Duration = Duration::from_secs(300);
 /// For `DELETE /v1/runtimes/{tool}/{version}`: a Node.js folder holds
 /// thousands of files, and a virus scanner may slow their delete.
@@ -696,7 +699,7 @@ pub async fn ensure_running_with(
 /// How long the client waits for an action on the service `id`.
 fn action_timeout(id: &str) -> Duration {
     match id {
-        "postgres" | "mysql" => SERVER_ACTION_TIMEOUT,
+        "postgres" | "mysql" | "valkey" => SERVER_ACTION_TIMEOUT,
         _ => SERVICE_ACTION_TIMEOUT,
     }
 }
@@ -1111,6 +1114,14 @@ mod tests {
         // Waiting 30, stopping 35, lsof 8, init 120, ready 15, stop 35.
         let worst = Duration::from_secs(30 + 35 + 8 + 120 + 15 + 35);
         assert!(action_timeout("mysql") > worst);
+        // Waiting 30, stopping 29 (the request, SIGTERM, and the margin),
+        // lsof 8, ready 15, stop 29.
+        let worst = Duration::from_secs(30 + 29 + 8 + 15 + 29);
+        assert!(action_timeout("valkey") > worst);
+        assert!(
+            SERVICE_ACTION_TIMEOUT < worst,
+            "valkey needs the longer one"
+        );
     }
 
     #[test]

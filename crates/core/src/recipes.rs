@@ -366,6 +366,7 @@ pub fn builtin(runtime: Runtime) -> Result<&'static Recipe, RecipeError> {
     static CADDY: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
     static POSTGRES: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
     static MYSQL: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
+    static VALKEY: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
 
     let (cell, file, text) = match runtime {
         Runtime::Php => (&PHP, "php.toml", include_str!("../../../recipes/php.toml")),
@@ -393,6 +394,11 @@ pub fn builtin(runtime: Runtime) -> Result<&'static Recipe, RecipeError> {
             &MYSQL,
             "mysql.toml",
             include_str!("../../../recipes/mysql.toml"),
+        ),
+        Runtime::Valkey => (
+            &VALKEY,
+            "valkey.toml",
+            include_str!("../../../recipes/valkey.toml"),
         ),
     };
     cell.get_or_init(|| {
@@ -862,6 +868,59 @@ into = "bin"
             check.expected_prefix(&version).as_deref(),
             Some("postgres (PostgreSQL) 17.12")
         );
+    }
+
+    /// Our own builds on all five platforms, from one release per build,
+    /// with no top folder, and macOS 12 as the floor (ADR 0023, section 4).
+    #[test]
+    fn valkey_is_our_release_archive_with_its_two_programs_at_bin() {
+        let recipe = builtin(Runtime::Valkey).expect("built-in recipe is valid");
+        let listed: Vec<Platform> = recipe.platforms().map(|(p, _)| p).collect();
+        assert_eq!(listed, CONCRETE);
+        let version = v("8.1.11");
+        let dir = Path::new("v");
+        for platform in CONCRETE {
+            let entry = recipe.platform(platform).expect("platform listed");
+            let [artifact] = entry.artifacts() else {
+                panic!("one artifact expected on {platform}");
+            };
+            assert_eq!(artifact.name, "archive");
+            assert_eq!(artifact.strip_components, 0, "{platform}");
+            assert_eq!(artifact.into_dir(dir), dir, "{platform}");
+            let (format, extension, exe) = if platform == Platform::WindowsX64 {
+                (ArchiveFormat::Zip, "zip", ".exe")
+            } else {
+                (ArchiveFormat::TarGz, "tar.gz", "")
+            };
+            assert_eq!(artifact.format, format, "{platform}");
+            let url = recipe.artifact_url(platform, "archive", &version);
+            let want = format!(
+                "https://github.com/XJOC/marsa/releases/download/valkey-8.1.11-r1/\
+                 valkey-8.1.11-{platform}.{extension}"
+            );
+            assert_eq!(url.as_deref(), Some(want.as_str()));
+            let names: Vec<&str> = entry.program_names().collect();
+            assert_eq!(names, ["valkey-cli", "valkey-server"], "no redis-cli");
+            for name in names {
+                assert_eq!(
+                    entry.program_path(dir, name),
+                    Some(dir.join("bin").join(format!("{name}{exe}"))),
+                    "{platform} {name}"
+                );
+            }
+            let floor = matches!(platform, Platform::DarwinArm64 | Platform::DarwinX64);
+            assert_eq!(entry.min_macos(), floor.then_some("12.0"), "{platform}");
+            assert_eq!(entry.min_glibc(), None, "{platform}: static");
+        }
+        // `valkey-server --version` prints `Valkey server v=8.1.11 sha=...`.
+        let check = recipe.check().expect("a check");
+        assert_eq!(check.program, "valkey-server");
+        assert_eq!(check.args, ["--version"]);
+        let prefix = check.expected_prefix(&version).unwrap();
+        assert_eq!(prefix, "Valkey server v=8.1.11 ");
+        let output = "Valkey server v=8.1.11 sha=00000000:0 malloc=libc bits=64 build=1\n";
+        assert!(output.starts_with(&prefix));
+        assert!(!"Valkey server v=8.1.110 sha=0".starts_with(&prefix));
     }
 
     #[test]

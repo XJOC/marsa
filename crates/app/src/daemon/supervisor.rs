@@ -15,10 +15,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use marsa_core::platform::process;
 use marsa_core::services::{
-    LogBuffer, ProgramNotAbsolute, ServiceSpec, StopAction, StopMethod, restart_delay,
+    LogBuffer, ProgramNotAbsolute, ServiceSpec, StopAction, StopMethod, TcpRequest, restart_delay,
 };
 use marsa_core::types::{Event, LogLine, LogStream, ServiceState, ServiceStatus};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
+use std::net::Ipv4Addr;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt as _, BufReader};
+use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::sync::broadcast;
 use tokio::task::{JoinError, JoinHandle};
@@ -42,9 +44,10 @@ pub const EXITED: &str = "exited";
 /// The size at which a log file moves to `<name>.1`: 10 MiB.
 pub const LOG_FILE_LIMIT: u64 = 10 * 1024 * 1024;
 
-/// What a stop needs besides the waits of its method: a `/bin/kill` per
-/// step (milliseconds, but up to 2 s each if one hangs: 4 s for the two of
-/// PostgreSQL), the kill, and up to [`DRAIN_WAIT`] (1 s) for the last lines.
+/// What a stop needs besides the waits of its method and the limits of its
+/// requests: a `/bin/kill` per step (milliseconds, but up to 2 s each if one
+/// hangs: 4 s for the two of PostgreSQL), the kill, and up to [`DRAIN_WAIT`]
+/// (1 s) for the last lines.
 pub const STOP_MARGIN: Duration = Duration::from_secs(5);
 
 /// The most a shutdown waits for one process, whatever its stop method says,
@@ -314,31 +317,109 @@ async fn run(
 }
 
 /// Follows `spec.stop`: each step asks the process to stop, then waits up to
-/// its limit for the exit. After the last step, a kill. Windows sends no
-/// signals, so there it kills at once.
+/// its limit for the exit. A step whose asking fails goes on to the next at
+/// once. After the last step, a kill. Windows sends no signals, so there a
+/// signal step is skipped.
 async fn stop(child: &mut Child, spec: &ServiceSpec) {
+    // A `Send` step goes to the port that was fixed at the spawn. Another
+    // program could take it in the instant between our child's start and its
+    // bind; the check before the start and the readiness probe make that
+    // narrow, and only the fixed request of the stop could reach it.
     for step in &spec.stop.steps {
         // `None` once the exit is collected: the pid may be another
         // process's by then.
         let Some(pid) = child.id() else {
             break;
         };
-        let StopAction::Signal(signal) = step.action;
-        match process::send_signal(pid, signal).await {
-            Ok(()) => {
-                if tokio::time::timeout(step.wait, child.wait()).await.is_ok() {
-                    return;
+        let stopped = match &step.action {
+            StopAction::Signal(signal) => match process::send_signal(pid, *signal).await {
+                Ok(()) => Asked::Yes(tokio::time::timeout(step.wait, child.wait()).await.is_ok()),
+                // Windows: no signals. The next step comes, then the kill.
+                Err(err) if err.kind() == io::ErrorKind::Unsupported => Asked::No,
+                Err(err) => {
+                    warn!(service = %spec.id, %err, "{} failed", signal.name());
+                    Asked::No
                 }
-                let name = signal.name();
+            },
+            StopAction::Send(request) => ask(child, request, step.wait, &spec.id).await,
+        };
+        match stopped {
+            Asked::Yes(true) => return,
+            Asked::Yes(false) => {
+                let name = match &step.action {
+                    StopAction::Signal(signal) => signal.name(),
+                    StopAction::Send(request) => request.name,
+                };
                 warn!(service = %spec.id, wait = ?step.wait, "still running after {name}");
             }
-            // Windows: no signals. The kill comes next, as before.
-            Err(err) if err.kind() == io::ErrorKind::Unsupported => {}
-            Err(err) => warn!(service = %spec.id, %err, "{} failed", signal.name()),
+            Asked::No => {}
         }
     }
     if let Err(err) = child.kill().await {
         warn!(service = %spec.id, %err, "cannot kill the process");
+    }
+}
+
+/// Whether a step reached the process, and if so whether it exited within
+/// the step's wait.
+enum Asked {
+    Yes(bool),
+    No,
+}
+
+/// Sends `request` ([`send_request`]), then waits up to `wait` for the
+/// exit. A reply ends the wait early: the server refused (Valkey answers
+/// `-ERR Errors trying to SHUTDOWN` when it cannot save), so the next step
+/// need not wait for an exit that will not come. A closed connection is the
+/// server on its way out, and the wait goes on. The connection stays open
+/// until the step ends, so the server reads the request to its end.
+async fn ask(child: &mut Child, request: &TcpRequest, wait: Duration, id: &str) -> Asked {
+    let name = request.name;
+    let mut stream = match send_request(request).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            warn!(service = %id, %err, port = request.port, "{name} could not be sent");
+            return Asked::No;
+        }
+    };
+    tokio::select! {
+        exited = tokio::time::timeout(wait, child.wait()) => Asked::Yes(exited.is_ok()),
+        reply = refusal(&mut stream) => {
+            warn!(service = %id, ?reply, "{name} was refused");
+            Asked::No
+        }
+    }
+}
+
+/// Connects to `127.0.0.1:<port>` and writes the request's bytes, each
+/// within the request's limit. Only loopback: [`TcpRequest`] has no host.
+async fn send_request(request: &TcpRequest) -> io::Result<TcpStream> {
+    let limit = request.limit;
+    let timed_out = |what: &str| {
+        let text = format!("the {what} took longer than {} ms", limit.as_millis());
+        io::Error::new(io::ErrorKind::TimedOut, text)
+    };
+    let address = (Ipv4Addr::LOCALHOST, request.port);
+    let mut stream = tokio::time::timeout(limit, TcpStream::connect(address))
+        .await
+        .map_err(|_| timed_out("connect"))??;
+    tokio::time::timeout(limit, stream.write_all(&request.bytes))
+        .await
+        .map_err(|_| timed_out("write"))??;
+    Ok(stream)
+}
+
+/// The first bytes the server sends back, as text, for the log. Never ends
+/// when the server closes the connection or it breaks: that is the server
+/// stopping, and the caller waits for its exit instead.
+async fn refusal(stream: &mut TcpStream) -> String {
+    let mut reply = [0_u8; 256];
+    match stream.read(&mut reply).await {
+        Ok(read) if read > 0 => {
+            let text = String::from_utf8_lossy(&reply[..read]);
+            text.trim_end().to_owned()
+        }
+        _ => std::future::pending().await,
     }
 }
 

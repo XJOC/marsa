@@ -1,5 +1,6 @@
 //! What the system says before a start: who holds the port, and who runs
-//! at the pid of the server's own pid file (`postmaster.pid`).
+//! at the pid of the server's own pid file (`postmaster.pid`), for a server
+//! that has one.
 
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -28,17 +29,24 @@ pub(super) async fn start_facts(
     pid_of: fn(&str) -> Option<u32>,
     servers: &[PathBuf],
 ) -> StartFacts {
-    // The listener closes at once.
-    let bound = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok();
-    let lookup = probes.port_lookup(port).await;
+    let facts = port_facts(probes, port).await;
     let text = process::read_small_file(pid_file);
     let pid_file = match text.as_deref().and_then(pid_of) {
         None => PidFileCheck::NoPid,
         Some(pid) => classify_postmaster(pid, &probes.real_identity(pid).await, servers),
     };
+    StartFacts { pid_file, ..facts }
+}
+
+/// [`start_facts`] for a server with no pid file of its own (Valkey): the
+/// port only, and [`PidFileCheck::NoPid`].
+pub(super) async fn port_facts(probes: &dyn ProcessProbe, port: u16) -> StartFacts {
+    // The listener closes at once.
+    let bound = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok();
+    let lookup = probes.port_lookup(port).await;
     StartFacts {
         port,
         port_check: port_check(bound, lookup),
-        pid_file,
+        pid_file: PidFileCheck::NoPid,
     }
 }

@@ -241,7 +241,11 @@ pub fn list(data_dir: &Path) -> Result<RuntimeList, RuntimesError> {
             let default = match runtime {
                 Runtime::Php => global.php.default.clone(),
                 Runtime::Node => global.node.default.clone(),
-                Runtime::Composer | Runtime::Caddy | Runtime::Postgres | Runtime::Mysql => None,
+                Runtime::Composer
+                | Runtime::Caddy
+                | Runtime::Postgres
+                | Runtime::Mysql
+                | Runtime::Valkey => None,
             };
             Ok(RuntimeVersions {
                 runtime,
@@ -867,7 +871,11 @@ fn in_use(
     let setting: fn(&SiteSettings) -> Option<&String> = match runtime {
         Runtime::Php => |site| site.php.as_ref(),
         Runtime::Node => |site| site.node.as_ref(),
-        Runtime::Composer | Runtime::Caddy | Runtime::Postgres | Runtime::Mysql => |_| None,
+        Runtime::Composer
+        | Runtime::Caddy
+        | Runtime::Postgres
+        | Runtime::Mysql
+        | Runtime::Valkey => |_| None,
     };
     let default = default_tool(runtime).and_then(|tool| match tool {
         Tool::Php => global.php.default.as_ref(),
@@ -912,7 +920,11 @@ fn default_tool(runtime: Runtime) -> Option<Tool> {
     match runtime {
         Runtime::Php => Some(Tool::Php),
         Runtime::Node => Some(Tool::Node),
-        Runtime::Composer | Runtime::Caddy | Runtime::Postgres | Runtime::Mysql => None,
+        Runtime::Composer
+        | Runtime::Caddy
+        | Runtime::Postgres
+        | Runtime::Mysql
+        | Runtime::Valkey => None,
     }
 }
 
@@ -1094,6 +1106,8 @@ mod tests {
             ("composer", Runtime::Composer),
             ("caddy", Runtime::Caddy),
             ("postgres", Runtime::Postgres),
+            ("mysql", Runtime::Mysql),
+            ("valkey", Runtime::Valkey),
         ] {
             assert_eq!(super::runtime(tool).unwrap(), runtime);
         }
@@ -1130,6 +1144,7 @@ mod tests {
             (Runtime::Caddy, "2.11.7".to_owned(), None),
             (Runtime::Postgres, String::new(), None),
             (Runtime::Mysql, String::new(), None),
+            (Runtime::Valkey, String::new(), None),
         ];
         assert_eq!(shown(list(tmp.path()).unwrap()), want);
 
@@ -1138,7 +1153,7 @@ mod tests {
         global.php.default = Some("8.4".into());
         global.node.default = Some("22".into());
         config::save_global(&ConfigPaths::in_dir(tmp.path()).global, &global).unwrap();
-        let [php, node, composer, caddy, postgres, mysql] = want;
+        let [php, node, composer, caddy, postgres, mysql, valkey] = want;
         let want = [
             (php.0, php.1, Some("8.4".to_owned())),
             (node.0, node.1, Some("22".to_owned())),
@@ -1146,6 +1161,7 @@ mod tests {
             caddy,
             postgres,
             mysql,
+            valkey,
         ];
         assert_eq!(shown(list(tmp.path()).unwrap()), want);
 

@@ -123,6 +123,7 @@ pub fn render(services: &[ServiceStatus], data_dir: &Path) -> String {
         let line = match kind {
             ServerKind::Postgres => strings::postgres_connection(port),
             ServerKind::Mysql => strings::mysql_connection(port),
+            ServerKind::Valkey => strings::valkey_connection(port),
         };
         text.push_str(&line);
         text.push('\n');
@@ -236,6 +237,26 @@ mod tests {
         assert!(render(&running, data.path()).contains("127.0.0.1:5433, user root"));
         let stopped = [status("postgres", ServiceState::Stopped, None, 0)];
         assert!(!render(&stopped, data.path()).contains("user root"));
+    }
+
+    /// While Valkey runs, the table says how Laravel's Redis cache and
+    /// queue reach it, on the port of `global.toml`.
+    #[test]
+    fn a_running_valkey_shows_how_to_connect() {
+        let data = tempfile::tempdir().unwrap();
+        let running = [status("valkey", ServiceState::Running, Some(7), 0)];
+        let text = render(&running, data.path());
+        assert!(
+            text.ends_with("valkey: 127.0.0.1:6379 (REDIS_HOST=127.0.0.1, REDIS_PORT=6379)\n"),
+            "{text}"
+        );
+        std::fs::create_dir_all(data.path().join("config")).unwrap();
+        let global = ConfigPaths::in_dir(data.path()).global;
+        std::fs::write(&global, "[valkey]\nport = 6380\n").unwrap();
+        let text = render(&running, data.path());
+        assert!(text.contains("127.0.0.1:6380 (REDIS_HOST=127.0.0.1, REDIS_PORT=6380)"));
+        let stopped = [status("valkey", ServiceState::Stopped, None, 0)];
+        assert!(!render(&stopped, data.path()).contains("REDIS_PORT"));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use serde::Deserialize;
 use super::upstream::is_segment;
 
 /// The runtimes in manifest order.
-pub const RUNTIMES: [Runtime; 6] = Runtime::ALL;
+pub const RUNTIMES: [Runtime; 7] = Runtime::ALL;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +29,9 @@ struct RawPins {
     /// Optional until the first MySQL is published.
     #[serde(default)]
     mysql: RawList,
+    /// Optional until the first Valkey is published, as MySQL.
+    #[serde(default)]
+    valkey: RawList,
     #[serde(default, rename = "override")]
     overrides: Vec<RawOverride>,
     #[serde(default, rename = "skip")]
@@ -103,6 +106,7 @@ impl Pins {
                 Runtime::Caddy => &mut raw.caddy,
                 Runtime::Postgres => &mut raw.postgres,
                 Runtime::Mysql => &mut raw.mysql,
+                Runtime::Valkey => &mut raw.valkey,
             };
             let list = std::mem::take(&mut list.versions);
             versions.insert(runtime.dir_name(), versions_of(runtime, list)?);
@@ -607,6 +611,47 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
                         Source::Theseus,
                         Layout::Single,
                         format!("{template}.sha256")
+                    )
+                );
+            }
+        }
+    }
+
+    /// Valkey is the archive of our release that the recipe names, with no
+    /// override, and the `sha256sums.txt` of that release beside it. Windows
+    /// is skipped, with its reason.
+    #[test]
+    fn repository_valkey_urls_are_our_release_assets() {
+        use super::super::upstream::{Layout, Source, VALKEY_RELEASES, sum_file_for};
+
+        let pins = Pins::parse(include_str!("../../../recipes/pins.toml")).expect("valid pins");
+        assert_eq!(pins.versions(Runtime::Valkey), &[v("8.1.11")]);
+        let recipe = recipes::builtin(Runtime::Valkey).expect("valkey recipe");
+        for version in pins.versions(Runtime::Valkey) {
+            for (platform, _) in recipe.platforms() {
+                if platform == Platform::WindowsX64 {
+                    let reason = pins.skip_reason(Runtime::Valkey, version, platform);
+                    assert_eq!(reason, Some("Valkey on Windows is task M6-07"));
+                    continue;
+                }
+                assert_eq!(pins.skip_reason(Runtime::Valkey, version, platform), None);
+                let template = recipe
+                    .artifact_url(platform, "archive", version)
+                    .unwrap_or_else(|| panic!("{version} has no {platform} archive"));
+                let urls = pins
+                    .urls(Runtime::Valkey, version, platform, "archive")
+                    .expect("urls");
+                assert_eq!(urls, std::slice::from_ref(&template), "no override");
+                let want =
+                    format!("{VALKEY_RELEASES}{version}-r1/valkey-{version}-{platform}.tar.gz");
+                assert_eq!(template, want);
+                let sums = sum_file_for(&template).expect("our release has sums");
+                assert_eq!(
+                    (sums.source, sums.layout, sums.url),
+                    (
+                        Source::OurValkey,
+                        Layout::List,
+                        format!("{VALKEY_RELEASES}{version}-r1/sha256sums.txt")
                     )
                 );
             }

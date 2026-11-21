@@ -37,8 +37,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Install a version of PHP, Node.js, Composer, Caddy, PostgreSQL, or
-    /// MySQL.
+    /// Install a version of PHP, Node.js, Composer, Caddy, PostgreSQL,
+    /// MySQL, or Valkey.
     Install(InstallArgs),
     /// List the installed versions.
     Runtimes(RuntimesArgs),

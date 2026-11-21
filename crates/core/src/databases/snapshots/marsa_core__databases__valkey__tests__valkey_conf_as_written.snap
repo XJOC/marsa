@@ -1,0 +1,20 @@
+---
+source: crates/core/src/databases/valkey.rs
+expression: "valkey_conf(&dirs, 6379).unwrap()"
+---
+# Written by Marsa before each start of Valkey (ADR 0023). A change here is
+# lost at the next start.
+bind 127.0.0.1
+protected-mode yes
+port 6379
+dir "/m/databases/valkey"
+save ""
+appendonly no
+shutdown-on-sigterm save
+shutdown-on-sigint save
+daemonize no
+logfile ""
+enable-protected-configs no
+enable-debug-command no
+enable-module-command no
+user default on nopass ~* &* +@all -config|set

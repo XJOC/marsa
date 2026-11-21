@@ -1,0 +1,87 @@
+name: valkey-e2e
+
+# Valkey 8.1 as a service of marsad, with a real server (ADR 0023): the
+# start on 127.0.0.1 only, the idle memory, the access rules
+# (CONFIG SET dir and dbfilename, DEBUG, and MODULE LOAD refused over TCP),
+# phpredis, SHUTDOWN SAVE at the stop and the data at the next start, the
+# refusals, the start with marsad, and an orphan stopped with SIGTERM.
+# tools/e2e/valkey.sh unpacks the archive given and runs every marsa command
+# with --data-dir in a new folder. No sudo. It is not part of the tests that
+# `cargo nextest` runs.
+#
+# Run by hand only until the release valkey-<version>-r<revision> of
+# valkey-build.yml is published: a draft's files cannot be downloaded
+# without a token. Then this workflow gets the pull_request and push paths
+# of mysql-e2e.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      archive:
+        description: "The Valkey archive: an https URL, with {platform} for darwin-arm64, darwin-x64, linux-x64, or linux-arm64. Its folder must hold sha256sums.txt."
+        required: true
+        default: "https://github.com/XJOC/marsa/releases/download/valkey-8.1.11-r1/valkey-8.1.11-{platform}.tar.gz"
+      version:
+        description: "The Valkey version in the archive"
+        required: true
+        default: "8.1.11"
+
+# Read-only on purpose: the job never writes to the repository.
+permissions:
+  contents: read
+
+# A new run on the same branch cancels the older one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  e2e:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Our macOS builds (arm64 and Intel, macOS 12 and later) and our
+        # static musl builds for Linux (x64 and arm64).
+        os: [macos-15, macos-15-intel, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      # The job runs downloaded programs: no token is left in .git.
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Reads the pinned version from rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Build marsa and marsad
+        run: cargo build --release -p marsa
+
+      # The inputs reach the script as variables, never inside its text.
+      - name: End to end
+        env:
+          VALKEY_ARCHIVE: ${{ inputs.archive }}
+          VALKEY_VERSION: ${{ inputs.version }}
+        run: bash tools/e2e/valkey.sh
+
+      # Logs only. `run/daemon.json` holds the daemon token and is never
+      # uploaded.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: valkey-e2e-logs-${{ matrix.os }}
+          path: ${{ runner.temp }}/vk-e2e/logs/
+          if-no-files-found: ignore
