@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
+use crate::config::SitesConfig;
 use crate::resolver::{Resolution, Source};
+use crate::types::{SiteList, SkippedFolder};
 
 /// The top-level domain of every site: `shop` is served at `https://shop.test`.
 pub const TLD: &str = "test";
@@ -389,6 +391,53 @@ pub fn merge(linked: Vec<Found>, parked: Vec<Scan>) -> Scan {
     merged
 }
 
+/// The site list for `sites_toml`: the linked sites and the parked scans
+/// joined by [`merge`], each with its settings, and the folders that did not
+/// become a site.
+///
+/// Pure: the caller reads the disk. `linked` and `scans` are what it found,
+/// and `skipped` the folders it could not read. `php` picks the PHP version
+/// of a site from the version its `[sites.<name>]` table asks for, if any.
+pub fn list(
+    sites_toml: &SitesConfig,
+    linked: Vec<Found>,
+    scans: Vec<Scan>,
+    mut skipped: Vec<SkippedFolder>,
+    mut php: impl FnMut(&Found, Option<&str>) -> Option<Resolution>,
+) -> SiteList {
+    let merged = merge(linked, scans);
+    // A parked folder with its own table is found twice under one name. That
+    // is one site, not a clash.
+    let itself =
+        |s: &Skipped| matches!(&s.reason, SkipReason::NameTaken { by, .. } if *by == s.path);
+    let others = merged.skipped.iter().filter(|s| !itself(s));
+    skipped.extend(others.map(|s| SkippedFolder::new(&s.path, s.reason.code())));
+
+    let site = |found: Found| -> Site {
+        let own = sites_toml
+            .sites
+            .get(&found.name)
+            .filter(|table| table.root == found.root);
+        // The shim's rule (`site_for`: the nearest table at or above the
+        // folder), so a terminal in the root runs the same PHP. The site's own
+        // table first, for two names on one folder.
+        let setting = own.or_else(|| sites_toml.site_for(&found.root).map(|(_, table)| table));
+        let setting = setting.and_then(|table| table.php.as_deref());
+        let php = php(&found, setting);
+        let proxy = own.and_then(|table| table.proxy);
+        let mut site = found.into_site(php, own.is_none_or(|table| table.secure));
+        if let Some(port) = proxy {
+            site.kind = SiteKind::NodeProxy { port };
+        }
+        site
+    };
+    SiteList {
+        parked: sites_toml.parked.clone(),
+        sites: merged.found.into_iter().map(site).collect(),
+        skipped,
+    }
+}
+
 /// `Option<Version>` as `"8.4.1"` or `null` in JSON. `semver` is built
 /// without its `serde` feature, and the shim must stay small.
 mod optional_version {
@@ -429,6 +478,123 @@ mod tests {
 
     fn names(scan: &Scan) -> Vec<&str> {
         scan.found.iter().map(|f| f.name.as_str()).collect()
+    }
+
+    fn found(name: &str, root: &str) -> Found {
+        Found {
+            name: name.to_owned(),
+            root: PathBuf::from(root),
+            detected: Detected {
+                kind: SiteKind::Php,
+                docroot: PathBuf::from(root),
+            },
+        }
+    }
+
+    fn table(root: &str) -> crate::config::SiteSettings {
+        crate::config::SiteSettings {
+            root: PathBuf::from(root),
+            php: None,
+            node: None,
+            secure: true,
+            proxy: None,
+        }
+    }
+
+    fn picked(version: &str) -> Resolution {
+        Resolution {
+            tool: crate::resolver::Tool::Php,
+            version: Version::parse(version).expect("a version"),
+            source: Source::GlobalDefault,
+        }
+    }
+
+    #[test]
+    fn the_list_gives_each_site_its_table_and_a_proxy_port() {
+        let mut toml = SitesConfig::default();
+        let mut shop = table("/work/shop");
+        shop.secure = false;
+        shop.php = Some("8.3".to_owned());
+        let mut app = table("/work/app");
+        app.proxy = Some(5173);
+        toml.sites.insert("shop".to_owned(), shop);
+        toml.sites.insert("app".to_owned(), app);
+        let linked = vec![found("shop", "/work/shop"), found("app", "/work/app")];
+        let mut asked = Vec::new();
+        let list = list(&toml, linked, Vec::new(), Vec::new(), |found, setting| {
+            asked.push((found.name.clone(), setting.map(str::to_owned)));
+            Some(picked("8.3.1"))
+        });
+        // Sorted by name, with the version setting of each table handed on.
+        assert_eq!(
+            asked,
+            [
+                ("app".to_owned(), None),
+                ("shop".to_owned(), Some("8.3".to_owned()))
+            ]
+        );
+        let [app, shop] = list.sites.as_slice() else {
+            panic!("two sites: {:?}", list.sites);
+        };
+        assert_eq!(app.kind, SiteKind::NodeProxy { port: 5173 });
+        assert!(app.secure);
+        assert!(!shop.secure);
+        assert_eq!(shop.php, Some(Version::new(8, 3, 1)));
+    }
+
+    #[test]
+    fn a_site_in_a_parked_folder_with_its_own_table_is_one_site_not_a_clash() {
+        let mut toml = SitesConfig::default();
+        toml.parked.push(PathBuf::from("/work"));
+        toml.sites.insert("shop".to_owned(), table("/work/shop"));
+        let scan = Scan {
+            found: vec![found("shop", "/work/shop"), found("blog", "/work/blog")],
+            skipped: Vec::new(),
+        };
+        let taken = Scan {
+            found: vec![found("blog", "/other/blog")],
+            skipped: Vec::new(),
+        };
+        let before = vec![SkippedFolder::new(Path::new("/gone"), "site_not_a_folder")];
+        let list = list(
+            &toml,
+            vec![found("shop", "/work/shop")],
+            vec![scan, taken],
+            before.clone(),
+            |_, _| None,
+        );
+        assert_eq!(list.parked, [PathBuf::from("/work")]);
+        let names: Vec<&str> = list.sites.iter().map(|site| site.name.as_str()).collect();
+        assert_eq!(names, ["blog", "shop"]);
+        // The folder that could not be read comes first, then the real clash;
+        // the parked copy of the linked `shop` is no clash.
+        assert_eq!(
+            list.skipped,
+            [
+                before[0].clone(),
+                SkippedFolder::new(Path::new("/other/blog"), "site_name_taken"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_site_without_a_table_uses_the_nearest_table_above_it_and_is_secure() {
+        let mut toml = SitesConfig::default();
+        let mut parent = table("/work");
+        parent.php = Some("8.2".to_owned());
+        toml.sites.insert("work".to_owned(), parent);
+        let scan = Scan {
+            found: vec![found("shop", "/work/shop")],
+            skipped: Vec::new(),
+        };
+        let mut seen = None;
+        let list = list(&toml, Vec::new(), vec![scan], Vec::new(), |_, setting| {
+            seen = setting.map(str::to_owned);
+            None
+        });
+        assert_eq!(seen.as_deref(), Some("8.2"));
+        assert!(list.sites[0].secure);
+        assert_eq!(list.sites[0].php, None);
     }
 
     #[test]

@@ -502,7 +502,7 @@ pub(super) async fn host_names(daemon: &Arc<Daemon>) -> Option<Vec<String>> {
             Ok(list) => list,
             Err(err) => {
                 tracing::warn!(
-                    code = err.code,
+                    code = err.code(),
                     "no site list, so no names for the hosts file"
                 );
                 return None;

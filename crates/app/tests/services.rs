@@ -567,7 +567,7 @@ async fn park_shop(app: &App) -> TempDir {
     let dir = parked.path().to_path_buf();
     let park = move |sites: &mut SitesConfig| {
         sites.parked.push(dir);
-        Ok(true)
+        Ok::<_, marsa::daemon::sites::SitesError>(true)
     };
     app.daemon
         .change_sites(park)
