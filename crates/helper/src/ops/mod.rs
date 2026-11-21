@@ -231,7 +231,7 @@ mod tests {
         ]);
         let linux = [
             ("resolver_install", code::OP_NOT_SUPPORTED),
-            ("resolved_install", resolved::RESOLVED_NOT_RUNNING),
+            ("resolved_install", code::RESOLVED_NOT_RUNNING),
             ("trust_remove", "unchanged"),
         ];
         assert_eq!(codes(ops.clone(), Os::Linux), linux);
