@@ -1,0 +1,239 @@
+name: libaio-build
+
+# Builds libaio.so.1 from the upstream source for Marsa's MySQL (ADR 0023).
+# Ubuntu 24.04 no longer installs libaio1, and Oracle's mysqld needs
+# libaio.so.1, so Marsa ships its own copy in the MySQL runtime's lib/private/.
+#
+# The library is built inside an almalinux:8 container (glibc 2.28, the same
+# floor as the MySQL linux-glibc2.28 archives), so it runs on every glibc
+# distribution from 2.28 on. tools/libaio-build/build.sh fails if the result
+# needs a newer glibc.
+#
+# - push to task/M6-05c-*: build only; the files are workflow artifacts (14 days).
+# - workflow_dispatch: the same; with `release` on (main only), also a DRAFT,
+#   pre-release GitHub Release libaio-<version>-r<revision> with libaio.so.1 for
+#   linux-x64 and linux-arm64, the libaio source (LGPL 2.1 asks us to ship it),
+#   COPYING, and sha256sums.txt. The owner reads the draft and publishes it; then
+#   `cargo xtask manifest build` on the owner's Mac reads it (recipes/pins.toml).
+#   The minisign key never enters CI.
+
+on:
+  push:
+    branches: ["task/M6-05c-*"]
+    paths:
+      - ".github/workflows/libaio-build.yml"
+      - "tools/libaio-build/**"
+  workflow_dispatch:
+    inputs:
+      libaio_version:
+        description: "libaio version, in full (its sha256 must be in tools/libaio-build/downloads.sha256)"
+        type: string
+        default: "0.3.113"
+      revision:
+        description: "Build number for this libaio version: 1, then 2 for a rebuild"
+        type: string
+        default: "1"
+      release:
+        description: "Create a DRAFT release libaio-<version>-r<revision> with the libraries (main only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# A new push cancels the older run. A manual run is never cancelled.
+concurrency:
+  group: libaio-build-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+env:
+  LIBAIO_VERSION: ${{ inputs.libaio_version || '0.3.113' }}
+  REVISION: ${{ inputs.revision || '1' }}
+  # glibc 2.28 and gcc 8 from AlmaLinux 8. A tag, not a digest: the image gets
+  # security fixes, glibc stays 2.28, and build.sh checks the glibc symbols.
+  BUILD_IMAGE: "almalinux:8"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-24.04
+            arch: x86_64
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Check the inputs
+        run: |
+          [[ "$LIBAIO_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "libaio_version must look like 0.3.113"; exit 1; }
+          [[ "$REVISION" =~ ^[1-9][0-9]*$ ]] || { echo "revision must be a number from 1"; exit 1; }
+          echo "libaio $LIBAIO_VERSION r$REVISION for $PLATFORM on $ImageOS $ImageVersion"
+          # Outside the checkout. (The runner context is not allowed in job env.)
+          echo "OUT=$RUNNER_TEMP/libaio-build/out" >> "$GITHUB_ENV"
+          echo "DIST=$RUNNER_TEMP/libaio-build/dist" >> "$GITHUB_ENV"
+
+      # Only the build script folder goes into the container, read-only. No
+      # token, no checkout, no other file of the repository. The container
+      # gets the network to download the pinned source and install gcc.
+      - name: Build libaio in ${{ env.BUILD_IMAGE }}
+        run: |
+          mkdir -p "$OUT"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE/tools/libaio-build:/work/libaio-build:ro" \
+            --volume "$OUT:/out" \
+            --env LIBAIO_VERSION \
+            --env "EXPECT_ARCH=$ARCH" \
+            "$BUILD_IMAGE" \
+            bash -c 'dnf install -y -q gcc make binutils file tar gzip && bash /work/libaio-build/build.sh /out' |
+            tee "$RUNNER_TEMP/libaio-build.log"
+
+      # The library as it ships, on the runner (Ubuntu 24.04, newer glibc, our
+      # copy and not the system's): it must load and set up a kernel AIO context.
+      - name: Smoke test
+        run: |
+          python3 -I - "$OUT/libaio.so.1" <<'PY'
+          import ctypes
+          import sys
+
+          lib = ctypes.CDLL(sys.argv[1])
+          lib.io_setup.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+          lib.io_setup.restype = ctypes.c_int
+          lib.io_destroy.argtypes = [ctypes.c_void_p]
+          lib.io_destroy.restype = ctypes.c_int
+          ctx = ctypes.c_void_p(0)
+          rc = lib.io_setup(8, ctypes.byref(ctx))
+          if rc != 0:
+              raise SystemExit("io_setup returned %d" % rc)
+          rc = lib.io_destroy(ctx)
+          if rc != 0:
+              raise SystemExit("io_destroy returned %d" % rc)
+          print("io_setup and io_destroy work")
+          PY
+
+      # The names of the release assets.
+      - name: Name the files
+        run: |
+          mkdir -p "$DIST"
+          cp "$OUT/libaio.so.1" "$DIST/libaio-$LIBAIO_VERSION-$PLATFORM.so.1"
+          cp "$OUT/libaio-$LIBAIO_VERSION.tar.gz" "$OUT/COPYING" "$OUT/BUILD-INFO.txt" "$DIST/"
+          cd "$DIST"
+          sha256sum "libaio-$LIBAIO_VERSION-$PLATFORM.so.1" > "libaio-$LIBAIO_VERSION-$PLATFORM.so.1.sha256"
+          ls -l
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## $PLATFORM: libaio $LIBAIO_VERSION r$REVISION"
+            echo
+            if [ -f "$RUNNER_TEMP/libaio-build.log" ]; then echo '```'; cat "$RUNNER_TEMP/libaio-build.log"; echo '```'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the library
+        uses: actions/upload-artifact@v4
+        with:
+          name: libaio-${{ matrix.platform }}
+          path: ${{ runner.temp }}/libaio-build/dist/
+          retention-days: 14
+          if-no-files-found: error
+
+  release:
+    name: draft release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: libaio-${{ inputs.libaio_version }}-r${{ inputs.revision }}
+    steps:
+      - name: Only from main
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "a release is made from main only, not $GITHUB_REF"; exit 1; }
+
+      - name: The tag must be new
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release $TAG exists (maybe as a draft): raise the revision"; exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > /dev/null 2>&1; then
+            echo "tag $TAG exists: raise the revision"; exit 1
+          fi
+
+      # One folder per platform: the source tarball and COPYING have the same
+      # name in both, so the folders are not merged.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: libaio-*
+          path: artifacts
+
+      - name: Check the files and write sha256sums.txt
+        run: |
+          mkdir -p dist
+          for platform in linux-x64 linux-arm64; do
+            dir="artifacts/libaio-$platform"
+            so="libaio-$LIBAIO_VERSION-$platform.so.1"
+            [ -f "$dir/$so" ] || { echo "missing $dir/$so"; exit 1; }
+            (cd "$dir" && sha256sum -c "$so.sha256")
+            cp "$dir/$so" dist/
+          done
+          # Both jobs downloaded the same pinned source: the copies must be identical.
+          tarball="libaio-$LIBAIO_VERSION.tar.gz"
+          cmp "artifacts/libaio-linux-x64/$tarball" "artifacts/libaio-linux-arm64/$tarball"
+          cmp artifacts/libaio-linux-x64/COPYING artifacts/libaio-linux-arm64/COPYING
+          cp "artifacts/libaio-linux-x64/$tarball" artifacts/libaio-linux-x64/COPYING dist/
+          cd dist
+          sha256sum -- * | sort -k2 > ../sha256sums.txt
+          mv ../sha256sums.txt .
+          cat sha256sums.txt
+
+      - name: Create the draft release
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          tarball="libaio-$LIBAIO_VERSION.tar.gz"
+          {
+            echo "libaio $LIBAIO_VERSION for Marsa, build $REVISION (ADR 0023). Not a Marsa app release."
+            echo
+            echo "libaio.so.1 for linux-x64 and linux-arm64, built from the unmodified upstream source in an"
+            echo "almalinux:8 container (glibc 2.28), so it runs on glibc 2.28 or newer. Marsa puts it in the"
+            echo "MySQL runtime's lib/private/, because Ubuntu 24.04 no longer installs libaio1. Built from commit"
+            echo "$GITHUB_SHA in $run_url."
+            echo
+            echo '```'
+            cat dist/sha256sums.txt
+            echo '```'
+            echo
+            echo "## libaio (LGPL 2.1)"
+            echo
+            echo "libaio is covered by the GNU Lesser General Public License, version 2.1 (\`COPYING\`, attached)."
+            echo
+            echo "- Its complete source, the exact file this build compiled, is attached: \`$tarball\`"
+            echo "  (sha256 \`$(sha256sum "dist/$tarball" | cut -d' ' -f1)\`). It is the release asset from"
+            echo "  <https://codeberg.org/jmoyer/libaio>."
+            echo "- To rebuild libaio with a change: the exact build is .github/workflows/libaio-build.yml and"
+            echo "  tools/libaio-build/ at commit $GITHUB_SHA of this repository. Change the source, put its"
+            echo "  sha256 in downloads.sha256, and run build.sh in an almalinux:8 container."
+          } > notes.md
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --draft --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "libaio $LIBAIO_VERSION (build $REVISION)" --notes-file notes.md \
+            dist/*
+          echo "Draft release $TAG created. Read it, then publish it on GitHub." >> "$GITHUB_STEP_SUMMARY"

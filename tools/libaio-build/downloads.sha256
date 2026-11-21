@@ -1,0 +1,15 @@
+# sha256 of every pinned download the libaio build uses. build.sh refuses a
+# file whose hash differs, or whose name is not listed here. A new libaio
+# version needs a new line here.
+
+# libaio 0.3.113, the release asset the upstream maintainer publishes on
+# Codeberg (https://codeberg.org/jmoyer/libaio/releases; pagure.io, the old
+# home, is a read-only snapshot without tarballs since 2026). Fingerprint
+# checked on 2026-11-21 against two independent published sources:
+#   1. Debian: Checksums-Sha256 for libaio_0.3.113.orig.tar.gz (49980 bytes) in
+#      the PGP-signed libaio_0.3.113-4.dsc and libaio_0.3.113-10.dsc
+#      (https://deb.debian.org/debian/pool/main/liba/libaio/). Same sha256.
+#   2. Upstream: libaio-0.3.113.tar.gz.sha512sum next to the asset on Codeberg.
+#      Same file (sha512 65c30a10...ab0b71).
+# Fedora's `sources` file lists only 0.3.111, so it could not be compared.
+2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b  libaio-0.3.113.tar.gz
