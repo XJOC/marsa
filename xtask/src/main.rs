@@ -19,7 +19,10 @@ fn cli() -> Command {
         .arg_required_else_help(true)
         .subcommand(
             Command::new("dev-shims")
-                .about("Build marsa-shim and link php, node, npm, npx, composer for manual testing")
+                .about(
+                    "Build marsa-shim and link php, node, npm, npx, composer, and the database \
+                     clients for manual testing",
+                )
                 .arg(
                     Arg::new("data-dir")
                         .long("data-dir")
