@@ -219,7 +219,7 @@ mod tests {
     use super::super::helper::MAX_ANSWER;
     use super::super::helper::op_name;
     use super::super::helper::results_match;
-    use super::super::ports::NETSTAT;
+    use marsa_core::platform::ports::NETSTAT;
     use marsa_core::platform::runner::RunOutput;
 
     use super::super::steps::UNINSTALL_ALL;

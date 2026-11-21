@@ -2,7 +2,6 @@
 
 use super::helper::op_name;
 use super::osascript::OSASCRIPT;
-use super::ports::{NETSTAT, PS};
 use super::user_trust::SECURITY;
 use super::*;
 use crate::daemon::auth::{AuthConfig, require_auth};
@@ -20,6 +19,7 @@ use marsa_core::helper::HelperRequest;
 use marsa_core::helper::HelperResponse;
 use marsa_core::helper::OpResult;
 use marsa_core::platform::daemon_file::{Token, daemon_authority};
+use marsa_core::platform::ports::{NETSTAT, PS};
 use marsa_core::recipes::Platform;
 use marsa_core::types::SetupReport;
 use marsa_core::types::{ErrorBody, OpStatus};
