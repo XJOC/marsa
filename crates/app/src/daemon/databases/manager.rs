@@ -25,6 +25,7 @@ use super::facts::start_facts;
 use super::init::{InitError, installed_servers};
 use super::settings::{any_installed, read_settings, save_enabled};
 use super::{orphan, postgres};
+use crate::daemon::services::actions::{Busy, take_turn};
 use crate::daemon::services::probe::{ProcessProbe, SystemProbe};
 use crate::daemon::services::runtime::AbortOnDrop;
 use crate::daemon::state::Daemon;
@@ -315,17 +316,11 @@ impl ServerManager {
         save: Option<&Arc<Daemon>>,
     ) -> Result<ServiceStatus, ActionError> {
         let waiting = (action == ServiceAction::Stop).then(|| self.stop_waits());
-        let busy = match Arc::clone(&self.busy).try_lock_owned() {
-            Ok(busy) => busy,
-            Err(_) => {
-                info!(%action, server = self.kind.id(), "another action runs; waiting for it");
-                let turn = tokio::time::timeout(wait, Arc::clone(&self.busy).lock_owned());
-                tokio::select! {
-                    () = daemon.shutdown.cancelled() => return Err(ActionError::Busy),
-                    turn = turn => turn.map_err(|_| ActionError::Busy)?,
-                }
-            }
-        };
+        let busy = take_turn(&self.busy, &daemon.shutdown, wait, || {
+            info!(%action, server = self.kind.id(), "another action runs; waiting for it");
+        })
+        .await
+        .map_err(|Busy| ActionError::Busy)?;
         // This stop has its turn: starts after it in line run.
         drop(waiting);
         // Also when the turn came at the same moment as the shutdown.

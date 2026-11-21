@@ -45,6 +45,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use self::orphan::{Blocked, Ladder, Orphans, PidFile};
+use super::services::actions::{Busy, take_turn};
 use super::services::probe::{ProcessProbe, SystemProbe};
 use super::services::runtime::AbortOnDrop;
 use super::state::Daemon;
@@ -450,17 +451,11 @@ impl CaddyManager {
         action: ServiceAction,
         wait: Duration,
     ) -> Result<ServiceStatus, ActionError> {
-        let busy = match Arc::clone(&self.busy).try_lock_owned() {
-            Ok(busy) => busy,
-            Err(_) => {
-                info!(%action, "another action on caddy runs; waiting for it");
-                let turn = tokio::time::timeout(wait, Arc::clone(&self.busy).lock_owned());
-                tokio::select! {
-                    () = daemon.shutdown.cancelled() => return Err(ActionError::Busy),
-                    turn = turn => turn.map_err(|_| ActionError::Busy)?,
-                }
-            }
-        };
+        let busy = take_turn(&self.busy, &daemon.shutdown, wait, || {
+            info!(%action, "another action on caddy runs; waiting for it");
+        })
+        .await
+        .map_err(|Busy| ActionError::Busy)?;
         // Also when the turn came at the same moment as the shutdown.
         if daemon.shutdown.is_cancelled() {
             info!(%action, "the daemon is stopping; the caddy action does not run");
