@@ -35,9 +35,9 @@
 use marsa_core::codes;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::fs::{self, File};
-use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::io;
+use std::path::Path;
 
 use marsa_core::dns::{self, LinuxFacts, NETWORKD_UNITS};
 use marsa_core::helper::{HelperOp, OpResult, OpStatus};
@@ -46,15 +46,11 @@ use marsa_core::types::HostsStatus;
 use tokio_util::sync::CancellationToken;
 
 use super::{CHECK_LIMIT, Runner};
+pub use marsa_core::platform::linux_dns::{HOSTS_FILE, marker, read_block};
 
 /// `systemctl`, at the path of Debian, Ubuntu, and Fedora. `marsad` never
 /// searches `PATH`.
 pub const SYSTEMCTL: &str = "/usr/bin/systemctl";
-/// The hosts file. Never from a request.
-pub const HOSTS_FILE: &str = "/etc/hosts";
-/// The most of the hosts file that is read: the helper's own limit. A
-/// larger file counts as one with no block, as the helper leaves it alone.
-const MAX_HOSTS_BYTES: u64 = 16 * 1024 * 1024;
 
 pub const RESOLVED_INSTALL: &str = "resolved_install";
 pub const HOSTS_SYNC: &str = "hosts_sync";
@@ -139,42 +135,6 @@ fn output(runner: &dyn Runner, args: &[&str], stop: &CancellationToken) -> Optio
     }
 }
 
-/// The names in Marsa's block of the hosts file at `path`, or `None`: no
-/// file, no block, markers that do not pair up, or a file that cannot be
-/// read or is larger than the helper reads.
-pub fn read_block(path: &Path) -> Option<BTreeSet<String>> {
-    let read = || -> io::Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        File::open(path)?
-            .take(MAX_HOSTS_BYTES + 1)
-            .read_to_end(&mut bytes)?;
-        Ok(bytes)
-    };
-    match read() {
-        Ok(bytes) if bytes.len() as u64 > MAX_HOSTS_BYTES => {
-            tracing::warn!(path = %path.display(), "the hosts file is larger than Marsa reads");
-            None
-        }
-        Ok(bytes) => dns::hosts_block_names(&String::from_utf8_lossy(&bytes)),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
-        Err(err) => {
-            tracing::warn!(path = %path.display(), error = %err, "cannot read the hosts file");
-            None
-        }
-    }
-}
-
-/// The file in the data folder that says this folder's setup took the
-/// hosts way: `<data>/hosts-block` (review of #132). Setup writes it after
-/// a `hosts_sync` that is done, and takes it out once the link is made.
-/// Only its presence counts. A data folder whose setup never wrote the
-/// block, such as a test's or a scratch one, never syncs the hosts file
-/// from `marsa park` or `marsa link`, so it never asks for the password.
-pub fn marker(data_dir: &Path) -> PathBuf {
-    data_dir.join(HOSTS_MARKER)
-}
-
-const HOSTS_MARKER: &str = "hosts-block";
 const MARKER_TEXT: &str = "marsa setup put .test names in /etc/hosts for this data folder\n";
 
 /// Records the way setup took, from its `results`: the marker after a
@@ -290,6 +250,7 @@ pub fn helper_chose_hosts(results: &[OpResult]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use marsa_core::platform::linux_dns::MAX_HOSTS_BYTES;
     use std::fs;
 
     use tempfile::TempDir;

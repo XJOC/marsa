@@ -46,7 +46,7 @@ use super::Failure;
 use super::daemon::{ClientFailure, connect, failure};
 use super::sites::printable;
 use super::strings::{self, Details};
-use crate::daemon::setup_api::user_trust;
+use marsa_core::platform::trust;
 
 /// How long a stopped daemon is watched for a restart. The Marsa window
 /// tries to start one every second.
@@ -547,7 +547,7 @@ fn own_failure(code: &'static str, path: Option<&Path>) -> Failure {
 /// One line per step: done, already done, or failed and why. A record the
 /// daemon could not use is named by its path in the data folder.
 fn render(report: &UninstallReport, data_dir: &Path) -> String {
-    let record = user_trust::record_path(data_dir);
+    let record = trust::record_path(data_dir);
     let mut text = String::new();
     for result in &report.results {
         let step = strings::uninstall_all_step(&printable(&result.op));
@@ -984,7 +984,7 @@ mod tests {
             "Remove the trust in Marsa's certificates for all users: already done."
         );
         // The record is named, and the user may delete it.
-        let record = user_trust::record_path(data);
+        let record = trust::record_path(data);
         assert!(
             lines[3].starts_with("Remove the trust in Marsa's certificates for you: failed.")
                 && lines[3].contains(&record.display().to_string())
