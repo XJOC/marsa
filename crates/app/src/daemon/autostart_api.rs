@@ -1,4 +1,4 @@
-//! Start the tray icon at login, or not. Task M5-03.
+//! Start the tray icon at login, or not.
 //!
 //! | Route | Answer |
 //! | --- | --- |
@@ -7,7 +7,7 @@
 //!
 //! | Error | When |
 //! | --- | --- |
-//! | 501 `autostart_unsupported` | Windows, for now (task M4-19) |
+//! | 501 `autostart_unsupported` | Windows, for now |
 //! | 409 `tray_not_found` | `marsa-tray` is not next to `marsad` (enable); its path is not known (any) |
 //! | 409 `autostart_path_invalid` | the login file cannot hold the `marsa-tray` path (enable) |
 //! | 500 `autostart_no_home` | the system gives no home folder |
@@ -135,7 +135,7 @@ impl Autostart {
         })
     }
 
-    /// Deletes the login file for `marsa uninstall --all` (task M5-13):
+    /// Deletes the login file for `marsa uninstall --all`:
     /// `true` if there was one, `false` if not. Blocking.
     pub(super) fn remove_for_uninstall(&self) -> Result<bool, HttpError> {
         let (kind, dir) = self.target()?;

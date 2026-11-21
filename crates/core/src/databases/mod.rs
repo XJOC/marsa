@@ -5,7 +5,7 @@
 //! which run through the shim, are in [`clients`].
 //!
 //! Not behind the `full` feature: it only decides, like a Laravel policy. The
-//! daemon reads the files, tests the port, and starts the processes (M6-03c).
+//! daemon reads the files, tests the port, and starts the processes.
 //! The shim reads it too.
 
 use std::path::{Path, PathBuf};
@@ -214,11 +214,11 @@ impl PostgresDirs {
 ///   text search parser and `pg_trgm` ask the C library which characters
 ///   are letters: under `C` none outside ASCII, so the similarity of two
 ///   Arabic words was 0, and 0.57 with `C.UTF-8` (the postgres-e2e
-///   workflow, task M6-03, on Ubuntu 24.04 and macOS 15 and 26). Those
+///   workflow, on Ubuntu 24.04 and macOS 15 and 26). Those
 ///   answers come from each OS's tables, so the workflow checks that
 ///   Arabic words with diacritics split the same on each. A cluster made
 ///   before this keeps `C`: nothing makes a cluster again. Windows has no
-///   `C.UTF-8`: task M6-07 chooses there.
+///   `C.UTF-8`, so its locale is chosen separately.
 pub fn initdb_args(dirs: &PostgresDirs) -> Vec<String> {
     let user = ["-U", "postgres", "-A", "trust", "-E", "UTF8", "--locale=C"];
     let ctype = ["--lc-ctype=C.UTF-8"];
@@ -564,13 +564,13 @@ impl ServiceBusy {
 /// The check before a start (ADR 0023, section 7):
 ///
 /// 1. The pid file names a running server: `service_data_dir_busy`, even if
-///    it holds the port too, because that is the exact reason. M6-04 later
-///    recovers it when it is our own orphan.
+///    it holds the port too, because that is the exact reason. A later
+///    change recovers it when it is our own orphan.
 /// 2. Another program holds the port: `service_port_busy`. Or who holds it
 ///    could not be checked: `service_port_unknown`.
 /// 3. Otherwise start. PostgreSQL checks its pid file again: it starts over a
 ///    stale one, but refuses while the pid is alive and runs as the same
-///    user, even as another program ([`PidFileCheck::Other`]; M6-04).
+///    user, even as another program ([`PidFileCheck::Other`]).
 ///
 /// [`PidFileCheck::Unknown`] starts too, for PostgreSQL only: a second
 /// postmaster cannot run on the folder, because PostgreSQL's
@@ -578,7 +578,7 @@ impl ServiceBusy {
 /// shared memory check refuses while backends of a dead postmaster still
 /// run. MySQL has no such quick refusal and needs its own rule.
 pub fn decide_start(facts: &StartFacts) -> StartDecision {
-    // Every case is listed, so a new one (M6-04's own orphan) needs a decision.
+    // Every case is listed, so a new one (such as our own orphan) needs a decision.
     match facts.pid_file {
         PidFileCheck::Server { pid } => {
             let pid = Some(pid);
@@ -814,7 +814,7 @@ mod tests {
     }
 
     /// Unix paths: an absolute path on Windows needs a drive, and PostgreSQL
-    /// on Windows is task M6-07.
+    /// on Windows is.
     #[cfg(unix)]
     mod unix_sockets {
         use super::*;
@@ -1146,7 +1146,7 @@ mod tests {
         ];
         let alive = |exe: &str| Liveness::Alive {
             exe: exe.into(),
-            started: "Wed Nov 18 10:00:00 2026".into(),
+            started: "Wed Nov 18 10:00:00 2026".parse().unwrap(),
         };
         let classify = |now: &Liveness| classify_postmaster(4242, now, &servers);
         let pid = 4242;

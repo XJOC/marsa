@@ -96,7 +96,7 @@ impl Platform {
     /// `install_unsupported_platform`).
     pub fn current() -> Option<Platform> {
         // `cfg!` outside `platform` on purpose: that module sits behind `full`,
-        // and recipes do not (task M2-01). This only reads the build target.
+        // and recipes do not. This only reads the build target.
         if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
             Some(Platform::DarwinArm64)
         } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {

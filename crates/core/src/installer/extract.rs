@@ -16,7 +16,7 @@ use crate::recipes::{ArchiveFormat, Artifact};
 
 /// The program that unpacks `tar.xz`: an absolute path, so nothing is looked
 /// up in `PATH` (it is a system tool, not one of ours). No library: its
-/// output goes to the same tar reader and the same [`Sink::entry`] as a
+/// output goes to the same tar reader and the same `Sink::entry` as a
 /// `tar.gz`.
 pub const XZ_PROGRAM: &str = "/usr/bin/xz";
 
@@ -535,7 +535,7 @@ fn file_mode(archive_mode: u32) -> u32 {
     }
 }
 
-// Mode bits and links exist on Unix only (task M2-03, rules 7 and 8). The
+// Mode bits and links exist on Unix only. The
 // helpers sit here, not in `platform`, because nothing else needs them.
 #[cfg(unix)]
 fn set_mode(file: &File, mode: u32) -> io::Result<()> {

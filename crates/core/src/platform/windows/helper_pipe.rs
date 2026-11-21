@@ -1,4 +1,4 @@
-//! The client end of the Windows helper service (ADR 0018, task M4-19g1).
+//! The client end of the Windows helper service (ADR 0018).
 //!
 //! The service `MarsaHelper` runs as LocalSystem and serves one request per
 //! connection on `\\.\pipe\marsa-helper`: a 4-byte little-endian length,

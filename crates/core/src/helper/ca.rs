@@ -1,5 +1,5 @@
 //! The SHA-256 of Marsa's CA certificate, as the Windows helper service
-//! computes it (ADR 0018, task M4-19g1b).
+//! computes it (ADR 0018).
 //!
 //! The service trusts only the certificate whose hash was given to its
 //! `install`, so `marsad` must compute the same hash from the same PEM. The

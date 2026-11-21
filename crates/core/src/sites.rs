@@ -44,7 +44,7 @@ pub struct Site {
     /// none matches what the site asks for.
     #[serde(with = "optional_version")]
     pub php: Option<Version>,
-    /// Where `php` came from (task M5-02), so the UI can say why it was
+    /// Where `php` came from, so the UI can say why it was
     /// picked: the site's own setting, a version file, `composer.json`, or
     /// the global default. `None` exactly when `php` is `None`. Missing in
     /// JSON from an older daemon reads as `None`.

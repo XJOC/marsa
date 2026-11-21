@@ -1,5 +1,5 @@
 //! Linux: which way `.test` names go, as `marsad` reads it as a user, and
-//! the helper operations of setup for it (ADR 0014, task M4-18k).
+//! the helper operations of setup for it (ADR 0014).
 //!
 //! | Way ([`dns::linux_path`]) | Setup's request | A second request, only if needed |
 //! | --- | --- | --- |
@@ -24,7 +24,7 @@
 //! systemd-networkd. All three run as the user. The hosts file is read
 //! only, and every user may read it. Nothing here asks for the password.
 //!
-//! `marsa-helper` stays the judge (manager decision, task M4-18k2). If it
+//! `marsa-helper` stays the judge (manager decision). If it
 //! answers `resolved_use_hosts` or `resolved_not_running` to
 //! `resolved_install` ([`helper_chose_hosts`]), setup logs the difference,
 //! lists `resolved_install` as skipped with that code, and sends the

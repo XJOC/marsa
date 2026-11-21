@@ -1,6 +1,5 @@
 //! The parked folder watcher (architecture.md section 5, "File watcher").
-//! Task M4-10d.
-//!
+//! //!
 //! A new folder in a parked folder becomes a site without another command,
 //! as in Valet: `composer create-project laravel/laravel shop` in a parked
 //! `~/Code` is enough for `https://shop.test`.
@@ -40,7 +39,7 @@ pub const MAX_WAIT: Duration = Duration::from_secs(2);
 /// After a rebuild that followed folder events, the list is built again this
 /// long later, then again after the next delay. A `git clone` or a copy makes
 /// the folder first and fills it later, so its first build may see an empty
-/// folder and call it a static site (task M4-24). A rebuild that finds no
+/// folder and call it a static site. A rebuild that finds no
 /// change publishes nothing.
 pub const RECHECKS: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(25)];
 

@@ -1,4 +1,4 @@
-//! The sites routes. Task M4-10b.
+//! The sites routes.
 //!
 //! | Route | Body | Answer |
 //! | --- | --- | --- |
@@ -17,7 +17,7 @@
 //! its folder as `root`, so its settings are kept. From then on it counts as
 //! linked.
 //!
-//! `DELETE` (task M5-09) removes a linked site's table (`unlink`), or a parked
+//! `DELETE` removes a linked site's table (`unlink`), or a parked
 //! folder with the tables of its sites (`forget`). A site from a parked folder
 //! cannot be unlinked alone: `site_is_parked` (409).
 
@@ -843,7 +843,7 @@ mod tests {
         assert_eq!(source(&list, "shop"), (None, None));
     }
 
-    // M5-09: `DELETE /v1/sites/{name}` and `DELETE /v1/sites/park`.
+    // `DELETE /v1/sites/{name}` and `DELETE /v1/sites/park`.
 
     fn link_body(name: &str, path: &Path) -> Value {
         json!({ "name": name, "path": path })

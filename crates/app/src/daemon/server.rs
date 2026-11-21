@@ -1,8 +1,7 @@
-//! Start-up and shutdown: lock file, bind, `run/daemon.json`, serve. Task M3-06.
-//! The DNS server for `.test` starts and stops with it (task M4-12), and so
-//! does the parked folder watcher (task M4-10d). An installed Caddy starts
-//! with it too (task M5-16), and so does PostgreSQL when it is on (task
-//! M6-03).
+//! Start-up and shutdown: lock file, bind, `run/daemon.json`, serve.
+//! The DNS server for `.test` starts and stops with it, and so
+//! does the parked folder watcher. An installed Caddy starts
+//! with it too, and so does PostgreSQL when it is on.
 
 use marsa_core::codes;
 use std::fmt;
@@ -40,7 +39,7 @@ use super::watch;
 /// How long shutdown waits for the managed processes to stop, at least. A
 /// process whose stop method takes longer gets that time
 /// (`ServiceHandle::stop_limit`): PostgreSQL's SIGINT and SIGQUIT take up to
-/// 20 s, and a kill at 10 s would skip the SIGQUIT (task M6-03).
+/// 20 s, and a kill at 10 s would skip the SIGQUIT.
 const PROCS_LIMIT: Duration = Duration::from_secs(10);
 /// How long shutdown then waits for open connections to finish.
 const DRAIN_LIMIT: Duration = Duration::from_secs(5);
@@ -88,7 +87,7 @@ impl std::error::Error for AlreadyRunning {}
 pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     let run_dir = data_dir.join("run");
     let lock = lock_instance(&run_dir).await?;
-    // Who started this daemon, for the log only (task M5-21): a daemon left
+    // Who started this daemon, for the log only: a daemon left
     // from an earlier login session is easier to trace. Asked now, while
     // that process still waits for this one to answer, and alongside the
     // rest of the start-up. It never stops the start.
@@ -98,7 +97,7 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     if let Err(err) = daemon_file::remove_daemon_file(&run_dir) {
         tracing::warn!(code = err.code(), error = %err, "cannot delete an old daemon.json");
     }
-    // What an uninstall that stopped half way left (task M5-07). Before the
+    // What an uninstall that stopped half way left. Before the
     // API serves, so no new uninstall runs meanwhile.
     let runtimes = RuntimesDir::in_dir(&data_dir);
     if let Err(err) = tokio::task::spawn_blocking(move || clean_retired(&runtimes)).await {
@@ -139,12 +138,11 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     let auth = AuthConfig::new(Arc::new(file.token), port);
 
     let mut daemon = Daemon::new(data_dir);
-    // The user's own folder for the login file, only in the real daemon
-    // (task M5-03).
+    // The user's own folder for the login file, only in the real daemon.
     daemon.autostart = Autostart::this_user();
-    // The real system's answer, only in the real daemon (task M4-18d).
+    // The real system's answer, only in the real daemon.
     daemon.caddy.low_ports = low_ports::low_ports_allowed;
-    // The DNS server on macOS and Linux (task M4-18i).
+    // The DNS server on macOS and Linux.
     daemon.dns = dns::DnsService::for_daemon();
     let daemon = Arc::new(daemon);
     // The first site list, so the first client gets it at once. A broken
@@ -152,9 +150,9 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     if let Err(err) = daemon.rebuild_sites().await {
         tracing::warn!(code = err.code, error = %err.message, "cannot build the site list");
     }
-    // From here on, PHP pools and Caddy's config follow the sites (task M4-11).
+    // From here on, PHP pools and Caddy's config follow the sites.
     let sync = sites_sync::start(&daemon);
-    // An installed Caddy starts in the background (task M5-16). After the
+    // An installed Caddy starts in the background. After the
     // sync task subscribed, so Caddy's `Running` asks it for a pass. A
     // failure is only a warning and Caddy's status: the daemon runs on.
     let launch = caddy::start_at_launch(&daemon);

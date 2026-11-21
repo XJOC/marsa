@@ -11,7 +11,7 @@
 //!    with a `name:pid` column. [`parse_netstat`] keeps the `LISTEN` rows, and
 //!    [`holders`] picks the rows that take loopback connections on one port.
 //! 2. `/bin/ps -p <pid> -o user=,comm=` gives the user and the program of one
-//!    PID. [`parse_ps`] reads it, and [`known_app`] guesses the app (Herd,
+//!    PID. [`crate::ps::parse_ps`] reads it, and [`known_app`] guesses the app (Herd,
 //!    Docker, ...) for the message.
 //!
 //! The output of `netstat` is not a stable interface, so the parser is
@@ -20,7 +20,7 @@
 //! Windows (`netstat -ano`) come later.
 //!
 //! Not behind the `full` feature: pure text parsing, no I/O. The daemon runs
-//! the two commands (task M4-14b).
+//! the two commands.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -108,8 +108,8 @@ pub fn parse_netstat(text: &str) -> Vec<Listener> {
 
 /// The listeners that take connections to `127.0.0.1:<port>` or
 /// `[::1]:<port>`, in netstat's order. These are the addresses that the `pf`
-/// redirect of ADR 0008 captures. `*.test` resolves to `127.0.0.1` only
-/// (task M5-17); `::1` stays here because pf redirects it too.
+/// redirect of ADR 0008 captures. `*.test` resolves to `127.0.0.1` only;
+/// `::1` stays here because pf redirects it too.
 ///
 /// - **Loopback:** `127.0.0.1` or `::1` (also written `::ffff:127.0.0.1`).
 /// - **Wildcard:** `*` (netstat's form), `0.0.0.0`, or `::`. A wildcard socket
@@ -131,7 +131,7 @@ pub fn holders(listeners: &[Listener], port: u16) -> Vec<&Listener> {
 }
 
 /// Reads the output of Windows' `netstat -ano`: the listening TCP sockets,
-/// each with its PID (task M4-19o). A row is `TCP <local> <foreign> <state>
+/// each with its PID. A row is `TCP <local> <foreign> <state>
 /// <pid>`, and it is a listener when its foreign address is `0.0.0.0:0` or
 /// `[::]:0`: the state column is in the language of Windows (`LISTENING`,
 /// `ABHÖREN`), the addresses are not. The brackets of an IPv6 address go:
@@ -173,26 +173,6 @@ pub fn parse_tasklist(text: &str) -> Option<String> {
         .find(|line| line.starts_with('"'))?;
     let name = line.strip_prefix('"')?.split('"').next()?;
     (!name.is_empty()).then(|| name.to_owned())
-}
-
-/// Reads the output of `/bin/ps -p <pid> -o user=,comm=`: the user, then the
-/// command after the first run of whitespace. The command can contain spaces
-/// (`nginx: worker process`). Only the first line that is not empty is read,
-/// and whitespace and `\r` around it are cut.
-///
-/// `None` if the text is empty (the process has ended: `ps` then prints
-/// nothing on stdout) or if a line has a user but no command.
-pub fn parse_ps(text: &str) -> Option<ProcessInfo> {
-    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
-    let (user, command) = line.split_once(char::is_whitespace)?;
-    let command = command.trim();
-    if command.is_empty() {
-        return None;
-    }
-    Some(ProcessInfo {
-        user: user.to_string(),
-        command: command.to_string(),
-    })
 }
 
 /// Guesses the app that a holder belongs to, for the message
@@ -366,6 +346,7 @@ fn takes_loopback(address: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ps::parse_ps;
 
     /// Real output of `netstat -anv -p tcp` on the owner's Mac (macOS 26.5,
     /// Herd running), cut to a few rows. Remote and LAN addresses are
@@ -591,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_ps_reads_the_real_output() {
+    fn the_real_ps_output_gives_the_user_and_the_command() {
         assert_eq!(
             parse_ps(PS_DNSMASQ),
             Some(ProcessInfo {
@@ -617,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_ps_reads_one_line_or_nothing() {
+    fn one_ps_line_gives_a_process_or_nothing() {
         let dnsmasq = Some(ProcessInfo {
             user: "nobody".to_string(),
             command: "/usr/sbin/dnsmasq".to_string(),
@@ -685,7 +666,7 @@ mod tests {
     }
 
     /// `netstat -ano` on Windows Server 2025, with IIS stopped and Caddy on
-    /// 127.0.0.1 (task M4-19o), cut.
+    /// 127.0.0.1, cut.
     const NETSTAT_WINDOWS: &str = "\r
 Active Connections\r
 \r

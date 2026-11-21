@@ -1,19 +1,19 @@
 //! macOS: trust of Marsa's CA root for the current user, by `marsad` itself
-//! and without root (ADR 0015, task M4-26).
+//! and without root (ADR 0015).
 //!
 //! `security add-trusted-cert` changes trust settings, and macOS wants the
 //! user to approve that in its own dialog. Behind `osascript ... with
 //! administrator privileges` (ADR 0012) no dialog can open, so the root step
-//! of ADR 0011 failed on macOS 26 with `trust_add_failed` (task M4-17). Here
+//! of ADR 0011 failed on macOS 26 with `trust_add_failed`. Here
 //! the daemon, as the user, runs the same tool against the user's login
 //! keychain: the dialog opens, and only this user trusts a CA whose private
 //! key sits in this user's folder. Safari and Chrome read the user's trust
-//! settings; Firefox has its own store (task M4-16).
+//! settings; Firefox has its own store.
 //!
 //! Every program runs through [`Runner`]: nothing here reads a keychain
 //! itself, and the tests run no `security` at all.
 //!
-//! **The trust folder** (task M5-13): `<data>/trust/` ([`TrustFiles`]), mode
+//! **The trust folder**: `<data>/trust/` ([`TrustFiles`]), mode
 //! 0700, a real folder (not a link) owned by this user; one that is open to
 //! others is closed first, and any other one is refused with
 //! `trust_record_unusable`. Setup writes the text `read_ca` checked to
@@ -36,7 +36,7 @@
 //!   there already is fine) and sets the user's trust, behind the dialog.
 //!   Five minutes, like the admin prompt.
 //! - For the uninstall, [`remove`], from the record, or from Caddy's current
-//!   `root.crt` when there is none (a setup before task M5-13): first
+//!   `root.crt` when there is none (a setup before): first
 //!   `security find-certificate -a -Z -p -c "Marsa Local CA" <login
 //!   keychain>` lists Marsa's certificates with their SHA-256. A record is
 //!   used only if its certificate is in that list or is `root.crt` itself:
@@ -66,7 +66,7 @@ pub use marsa_core::platform::trust::{SECURITY, TrustFiles, record_path, trusted
 
 /// The op name of the removal in a report. Not the helper's `trust_remove`:
 /// `uninstall_all` reports that one too, for a trust added as root before
-/// ADR 0015, in the same report (task M5-13).
+/// ADR 0015, in the same report.
 pub const TRUST_REMOVE: &str = "user_trust_remove";
 /// The common name of Marsa's root certificate: `CA_NAME` in
 /// `marsa_core::caddy`. A test checks that the two agree.
@@ -796,7 +796,7 @@ mod tests {
         use marsa_core::caddy::{CaddyInput, PhpPools, sites_config};
         use marsa_core::sites::{Site, SiteKind};
 
-        // Every config names the CA (task M5-15); this one with a site.
+        // Every config names the CA; this one with a site.
         let site = Site {
             name: "shop".into(),
             root: PathBuf::from("/code/shop"),
@@ -1148,7 +1148,7 @@ mod tests {
     #[test]
     fn a_record_that_cannot_be_read_is_unusable_and_stays() {
         let fake = Fake::answering(|program, args| panic!("{program} {args:?} ran"));
-        // Half a certificate, with no END line, is not one either (M5-22).
+        // Half a certificate, with no END line, is not one either.
         let half = &TEST_CA[..TEST_CA.len() / 2];
         for (ca, record) in [
             (Some(TEST_CA), "garbage"),

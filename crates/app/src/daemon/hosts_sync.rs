@@ -1,5 +1,5 @@
 //! Windows: the names of the sites in the hosts file, after each sites
-//! pass (ADR 0018, task M4-19g2).
+//! pass (ADR 0018).
 //!
 //! The hosts file has no wildcards, so each site's `<name>.test` needs its
 //! own line. The helper service writes Marsa's block of the file; the daemon
@@ -18,8 +18,7 @@
 //!
 //! Windows only: on Linux each write of `/etc/hosts` is a password prompt,
 //! and no prompt may show that the user did not cause. Linux updates the
-//! names with the user's next command or `marsa setup` instead (task
-//! M4-18k). macOS needs no names: its DNS covers every `.test` name.
+//! names with the user's next command or `marsa setup` instead. macOS needs no names: its DNS covers every `.test` name.
 
 use marsa_core::codes;
 use std::collections::BTreeSet;

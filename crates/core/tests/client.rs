@@ -1,7 +1,7 @@
 //! The daemon client against a fake daemon: an axum server on `127.0.0.1:0`
 //! that holds `run/daemon.lock` and has a `run/daemon.json` in a temp folder,
-//! like `marsad` (task M3-08). No network beyond loopback. Starting the real
-//! `marsad` is tested in M3-09.
+//! like `marsad`. No network beyond loopback. Starting the real
+//! `marsad` is tested in `crates/app/tests/daemon.rs`.
 
 #![cfg(feature = "full")]
 
@@ -650,7 +650,7 @@ async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
         sites: vec!["blog".into()],
         ..VersionInUse::default()
     };
-    // M5-19: the only PHP, with sites that would have no PHP after it.
+    // The only PHP, with sites that would have no PHP after it.
     let left = VersionInUse {
         version: "8.2.30".into(),
         sites_left_without_php: vec!["shop\u{1b}[2J".into()],
@@ -765,7 +765,7 @@ async fn an_id_cannot_reach_another_route() {
 }
 
 // ---------------------------------------------------------------------------
-// Sites (task M4-10c)
+// Sites
 
 /// A list with one site, so each answer can be told apart by `parked`.
 fn site_list(parked: &str) -> SiteList {
@@ -925,7 +925,7 @@ async fn a_site_name_cannot_reach_another_route() {
     assert_eq!(fake.seen().len(), 1);
 }
 
-// M5-09: `unlink` and `forget`.
+// `unlink` and `forget`.
 
 #[tokio::test]
 async fn unlink_and_forget_send_delete() {
@@ -1042,7 +1042,7 @@ async fn a_path_that_is_not_utf8_is_refused_before_any_request() {
 }
 
 // ---------------------------------------------------------------------------
-// Setup (task M4-13)
+// Setup
 
 #[tokio::test]
 async fn setup_posts_and_reads_the_report() {
@@ -1102,7 +1102,7 @@ async fn setup_posts_and_reads_the_report() {
 }
 
 // ---------------------------------------------------------------------------
-// Start at login (task M5-03)
+// Start at login
 
 #[tokio::test]
 async fn autostart_reads_and_puts_and_keeps_the_daemons_code() {
@@ -1171,7 +1171,7 @@ async fn autostart_reads_and_puts_and_keeps_the_daemons_code() {
 }
 
 // ---------------------------------------------------------------------------
-// Xdebug (task M5-11)
+// Xdebug
 
 #[tokio::test]
 async fn xdebug_reads_and_puts() {
@@ -1498,7 +1498,7 @@ async fn no_daemon_and_no_marsad_is_a_start_failure() {
 
 // ---------------------------------------------------------------------------
 // Starting marsad. The stand-in `marsad` is a shell script, so these run on
-// macOS and Linux only; M3-09 tests the real binary on all three systems.
+// macOS and Linux only; the app's own tests run the real binary on all three systems.
 
 /// The new daemon takes the lock, then writes its file later. Meanwhile the
 /// file of a crashed daemon still points at a program on its old port, which
@@ -1540,7 +1540,7 @@ async fn marsad_that_stops_early_fails_at_once_and_names_its_log() {
         "{shown}"
     );
     // At once means before the start wait runs out, not a fixed time: a new
-    // script can take seconds to start on a busy machine (task M4-20).
+    // script can take seconds to start on a busy machine.
     assert!(started.elapsed() < marsa_core::client::START_WAIT);
 }
 

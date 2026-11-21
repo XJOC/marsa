@@ -44,8 +44,7 @@ const READY_POLL: Duration = Duration::from_millis(100);
 /// status `Failed` with the same code, and says why in its recent lines.
 #[derive(Debug)]
 pub enum ActionError {
-    /// Marsa runs this server on macOS and Linux only for now (Windows is
-    /// task M6-07).
+    /// Marsa runs this server on macOS and Linux only for now (Windows comes later).
     Unsupported(ServerKind),
     /// `global.toml` cannot be read.
     Config(ConfigError),
@@ -284,7 +283,7 @@ impl ServerManager {
     /// `stop` on a stopped one change nothing. Once the daemon begins to
     /// stop, nothing runs: the shutdown stops the server itself.
     ///
-    /// A `stop` does not wait for a start ([`Self::stop_waits`]): it drops
+    /// A `stop` does not wait for a start (`Self::stop_waits`): it drops
     /// the start that runs (with the daemon, of the API, or after an
     /// install), and every start that would come before it in line, then
     /// stops what a dropped start spawned.

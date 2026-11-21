@@ -1,20 +1,20 @@
 //! Pure function: the settings become a Caddy JSON config.
 //!
 //! This module only builds data. It does not start Caddy and does not call
-//! its admin API; the daemon does that (task M3-07), like a Blade view that
+//! its admin API; the daemon does that, like a Blade view that
 //! returns text and leaves the sending to a controller.
 //!
-//! In M3 there are no sites yet (they come in M4), so the config has one
-//! server that answers a fixed text. That proves Caddy runs and listens where
-//! we expect. It also has Marsa's CA in Caddy's `pki` app, so Caddy makes the
-//! CA when it starts, before any site exists (task M5-15).
+//! With no sites, the config has one server that answers a fixed text. That
+//! proves Caddy runs and listens where we expect. It also has Marsa's CA in
+//! Caddy's `pki` app, so Caddy makes the CA when it starts, before any site
+//! exists.
 //!
-//! [`sites_config`] adds the sites (M4): PHP through php-fpm or php-cgi,
+//! [`sites_config`] adds the sites: PHP through php-fpm or php-cgi,
 //! static files, and Node proxies, with HTTPS from Caddy's own CA.
 //!
 //! Every address in the config is `127.0.0.1` (architecture.md section 10).
 //! Caddy runs without admin rights on high ports; the helper redirects ports
-//! 80 and 443 to them later (ADR 0008).
+//! 80 and 443 to them (ADR 0008).
 //!
 //! This module is not behind the `full` feature: it is pure data, with no
 //! tokio.
@@ -56,7 +56,7 @@ pub const LOW_HTTPS_PORT: u16 = 443;
 pub const SERVER_ID: &str = "marsa-srv";
 
 /// What the `marsa` server answers a host that is not a site. `marsa doctor`
-/// looks for it behind port 80 (task M5-12).
+/// looks for it behind port 80.
 pub const GREETING: &str = "Marsa is running. No sites yet.";
 
 /// The name of Caddy's program in its recipe (`recipes/caddy.toml`).
@@ -182,7 +182,7 @@ impl CaddyPaths {
 
     /// The CA bundle for PHP: `caddy/ca-bundle.pem`, with the text of
     /// [`ca_bundle_text`]. `curl.cainfo` and `openssl.cafile` in `php.ini`
-    /// point to it. The daemon writes it (task M4-11).
+    /// point to it. The daemon writes it.
     pub fn ca_bundle(&self) -> PathBuf {
         self.home.join("ca-bundle.pem")
     }
@@ -216,7 +216,7 @@ pub fn caddy_env(paths: &CaddyPaths) -> BTreeMap<String, String> {
 /// - Linux: `/etc/ssl/certs/ca-certificates.crt` (Debian, Ubuntu, Arch), then
 ///   `/etc/pki/tls/certs/ca-bundle.crt` (Fedora, RHEL).
 /// - Windows: none. Its trust store is not a PEM file: `marsad` exports it
-///   with [`pem_certificates`] instead (task M4-19n).
+///   with [`pem_certificates`] instead.
 /// - [`Platform::Any`]: none. It is not a system.
 pub fn system_ca_bundles(platform: Platform) -> Vec<&'static Path> {
     let paths: &[&'static str] = match platform {
@@ -232,8 +232,7 @@ pub fn system_ca_bundles(platform: Platform) -> Vec<&'static Path> {
 
 /// `ders`, each a certificate in DER, as PEM text: one `CERTIFICATE` block
 /// each, standard base64 in lines of 64 characters, LF line endings. The
-/// system part of [`ca_bundle_text`] on Windows, whose trust store gives DER
-/// (task M4-19n).
+/// system part of [`ca_bundle_text`] on Windows, whose trust store gives DER.
 pub fn pem_certificates(ders: &[Vec<u8>]) -> String {
     let mut text = String::new();
     for der in ders {
@@ -293,7 +292,7 @@ pub fn ca_bundle_text(system_pem: &str, marsa_root_pem: &str) -> String {
     text
 }
 
-/// What the config is built from. For now only the ports; M4 adds the sites.
+/// What the config is built from: the ports. The sites go to [`sites_config`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaddyInput {
     pub admin_port: u16,
@@ -329,7 +328,7 @@ impl CaddyInput {
 ///
 /// The `pki` app holds Marsa's CA even with no site, so Caddy makes the CA
 /// (`root.crt` at [`CaddyPaths::ca_root`]) as soon as it loads this config,
-/// and `marsa setup` can trust it before the first secure site (task M5-15).
+/// and `marsa setup` can trust it before the first secure site.
 /// Caddy does not add the CA to the system trust store (`install_trust`):
 /// setup does that.
 pub fn caddy_config(input: &CaddyInput) -> Value {
@@ -354,7 +353,7 @@ pub fn caddy_config(input: &CaddyInput) -> Value {
                                 "body": GREETING,
                             }],
                         }],
-                        // No sites and no certificates yet (M4).
+                        // No sites and no certificates here: `sites_config` adds them.
                         "automatic_https": { "disable": true },
                     },
                 },
@@ -1146,7 +1145,7 @@ mod tests {
 
     /// Every config has Marsa's CA, also with no site or with no secure
     /// site, so Caddy makes the CA when it starts and `marsa setup` can
-    /// trust it at once (task M5-15). Caddy never trusts it itself. Without a
+    /// trust it at once. Caddy never trusts it itself. Without a
     /// secure site there is still nothing to issue: no `tls` app and no
     /// HTTPS server.
     #[test]

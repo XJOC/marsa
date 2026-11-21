@@ -1,5 +1,5 @@
-//! Windows: runs the helper's ops through the helper service (ADR 0018,
-//! task M4-19g2). The macOS and Linux twins are the `osascript` line of ADR
+//! Windows: runs the helper's ops through the helper service (ADR 0018).
+//! The macOS and Linux twins are the `osascript` line of ADR
 //! 0012 and [`pkexec`](super::pkexec).
 //!
 //! On Windows the helper is the LocalSystem service `MarsaHelper`, which
@@ -62,7 +62,7 @@ pub enum Install {
 }
 
 /// The Windows calls of setup, behind a trait so that the tests run on
-/// every system. [`RealService`] is the daemon's.
+/// every system. `RealService` is the daemon's.
 pub trait Service: Send + Sync {
     /// The SID of the user `marsad` runs as.
     fn user_sid(&self) -> Result<String, String>;
@@ -81,7 +81,7 @@ pub trait Service: Send + Sync {
 
 /// `marsa uninstall --all` on Windows: `marsa-helper uninstall` behind the
 /// UAC prompt, which takes out everything `install` and the service put on
-/// the machine (task M4-19j). The prompt gives back only the exit code: 0
+/// the machine. The prompt gives back only the exit code: 0
 /// is one `uninstall_all` result, `done` (also when there was nothing left
 /// to remove: the code cannot say more).
 ///

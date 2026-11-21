@@ -150,8 +150,8 @@ pub enum Event {
     /// rebuild that found a different list.
     SitesChanged(SiteList),
     /// The default version of PHP or Node, after `PUT
-    /// /v1/runtimes/{tool}/default` saved it or the first install set it
-    /// (task M5-02). A changed site list follows as `sites_changed`.
+    /// /v1/runtimes/{tool}/default` saved it or the first install set it.
+    /// A changed site list follows as `sites_changed`.
     DefaultChanged(DefaultVersion),
     /// The end of a `POST /v1/setup`, with the same report as its answer.
     SetupFinished(SetupReport),
@@ -173,8 +173,8 @@ pub struct ApiError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorBody {
     pub error: ApiError,
-    /// What uses a version, with the codes `version_in_use` (task M5-07) and
-    /// `sites_lose_php` (task M5-19) only.
+    /// What uses a version, with the codes `version_in_use` and
+    /// `sites_lose_php` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_use: Option<VersionInUse>,
 }
@@ -191,7 +191,7 @@ impl ErrorBody {
     }
 }
 
-/// The progress of one runtime install (task M2-05). The daemon sends each
+/// The progress of one runtime install. The daemon sends each
 /// one on `/v1/events` inside [`InstallUpdate::Running`], and `marsa install`
 /// prints it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,7 +235,7 @@ pub struct RuntimeVersions {
     pub installed: Vec<String>,
     /// The default of PHP or Node as saved in `global.toml` (`8.4`), and
     /// left out of the JSON when there is none. Always `None` for Composer
-    /// and Caddy: the newest installed version is used (task M5-02).
+    /// and Caddy: the newest installed version is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
 }
@@ -260,7 +260,7 @@ pub struct InstallRequest {
     pub force: bool,
 }
 
-/// The body of `PUT /v1/runtimes/{tool}/default` (task M5-01), for PHP and
+/// The body of `PUT /v1/runtimes/{tool}/default`, for PHP and
 /// Node only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefaultRequest {
@@ -282,7 +282,7 @@ pub struct DefaultVersion {
     pub version: String,
 }
 
-/// The answer to `DELETE /v1/runtimes/{tool}/{version}` (task M5-07): the
+/// The answer to `DELETE /v1/runtimes/{tool}/{version}`: the
 /// version whose folder is gone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Uninstalled {
@@ -300,8 +300,7 @@ pub struct VersionInUse {
     pub version: String,
     /// The default in `global.toml` (`8.3`), when it picks this version now
     /// and another version of the tool is installed. The default of the only
-    /// installed version does not keep it: the uninstall clears that default
-    /// (task M5-19).
+    /// installed version does not keep it: the uninstall clears that default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     /// The sites whose own setting in `sites.toml` picks this version now, by
@@ -311,15 +310,14 @@ pub struct VersionInUse {
     /// The Laravel and PHP sites that run this version now and would have no
     /// PHP after the uninstall, by name, whatever picked it for them (the
     /// default, a version file, `composer.json`). Set only when this is the
-    /// only installed PHP, whether a default picks it or not (task M5-22). A
-    /// site already in `sites` is not named again (task M5-19).
+    /// only installed PHP, whether a default picks it or not. A
+    /// site already in `sites` is not named again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sites_left_without_php: Vec<String>,
     /// Caddy runs from this version now.
     #[serde(default)]
     pub caddy: bool,
-    /// A database server runs from this version now: PostgreSQL (task
-    /// M6-03).
+    /// A database server runs from this version now: PostgreSQL.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub server: bool,
 }
@@ -461,7 +459,7 @@ pub struct SkippedFolder {
 }
 
 /// The body of `POST /v1/sites/park`: every sub-folder of `path` becomes a
-/// site. Also the body of `DELETE /v1/sites/park` (task M5-09): `path` is no
+/// site. Also the body of `DELETE /v1/sites/park`: `path` is no
 /// longer parked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParkRequest {
@@ -513,15 +511,14 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
-/// The answer to `POST /v1/setup`, and the data of `setup_finished` (task
-/// M4-13).
+/// The answer to `POST /v1/setup`, and the data of `setup_finished`.
 ///
 /// Setup sends one request to `marsa-helper`, behind the admin prompt. On
 /// macOS the daemon then asks the user to approve the trust in Marsa's
 /// certificate authority for this user, in the dialog macOS shows (ADR
 /// 0015). An operation it cannot do safely is left out of that request and
 /// listed in `skipped`; the others still run. On Linux a second request may
-/// follow, behind a second prompt (task M4-18k2): the operations of the
+/// follow, behind a second prompt: the operations of the
 /// hosts file when the helper refused the `marsa0` link, or `hosts_remove`
 /// once the link is made.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -531,7 +528,7 @@ pub struct SetupReport {
     /// current user (ADR 0015). Empty if nothing ran: no operation was left,
     /// or `error` says why. On Linux the results of a second request follow
     /// those of the first, then the daemon's own `nss_install`: the CA root
-    /// in the user's NSS databases, for Chrome and Firefox (task M4-18g).
+    /// in the user's NSS databases, for Chrome and Firefox.
     #[serde(default)]
     pub results: Vec<OpResult>,
     /// The operations left out of the request, and why.
@@ -556,7 +553,7 @@ pub struct SetupReport {
     pub error: Option<ApiError>,
 }
 
-/// The answer to `GET /v1/hosts` (task M4-18k2): whether this system puts
+/// The answer to `GET /v1/hosts`: whether this system puts
 /// `.test` names in its hosts file, and which sites Marsa's block there
 /// lacks. `POST /v1/hosts/sync` adds them, behind the password prompt.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -611,7 +608,7 @@ pub struct PortHolder {
     pub app: Option<String>,
 }
 
-/// `GET /v1/autostart`, and the answer to `PUT /v1/autostart` (task M5-03):
+/// `GET /v1/autostart`, and the answer to `PUT /v1/autostart`:
 /// whether the tray icon starts at login. At most one of the two is `true`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutostartState {
@@ -676,7 +673,7 @@ mod autostart_tests {
     }
 }
 
-/// The answer to `POST /v1/uninstall` (task M5-13): what `marsa uninstall
+/// The answer to `POST /v1/uninstall`: what `marsa uninstall
 /// --all` removed from the system.
 ///
 /// One admin prompt runs the helper's `uninstall_all`. Only if the helper
@@ -761,7 +758,7 @@ mod uninstall_tests {
     }
 }
 
-/// `GET /v1/php/xdebug`, and the answer to `PUT /v1/php/xdebug` (task M5-11):
+/// `GET /v1/php/xdebug`, and the answer to `PUT /v1/php/xdebug`:
 /// whether the `php.ini` files Marsa writes load Xdebug, and for which PHP.
 ///
 /// Each PHP line (`8.4`) has one `php.ini`, so each list has at most one
@@ -1107,7 +1104,7 @@ mod tests {
             ..VersionInUse::default()
         };
         assert_eq!(running.code(), "version_in_use");
-        // M6-03: PostgreSQL runs from it. Written only when true, so an
+        // PostgreSQL runs from it. Written only when true, so an
         // older client reads the same JSON as before.
         let server = VersionInUse {
             version: "18.7.0".into(),
@@ -1122,7 +1119,7 @@ mod tests {
         );
         let no_server = serde_json::to_value(VersionInUse::default()).unwrap();
         assert!(no_server.get("server").is_none(), "{no_server}");
-        // An answer from before M5-19 reads with no such sites.
+        // An answer from an older daemon reads with no such sites.
         let old: VersionInUse =
             serde_json::from_value(json!({ "version": "8.3.12", "default": "8.3" })).unwrap();
         assert!(old.sites_left_without_php.is_empty() && old.any());

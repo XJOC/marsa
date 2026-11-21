@@ -1,5 +1,5 @@
 //! `marsa autostart` and `marsa autostart on|off`: start Marsa at login, or
-//! not, through `GET` and `PUT /v1/autostart`. Task M5-03.
+//! not, through `GET` and `PUT /v1/autostart`.
 //!
 //! The daemon writes or deletes one file in the user's folders: a
 //! LaunchAgent on macOS, an XDG Autostart entry on Linux. It starts the tray

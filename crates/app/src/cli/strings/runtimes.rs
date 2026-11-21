@@ -66,7 +66,7 @@ pub fn default_set(runtime: Runtime, default: &str, version: &str) -> String {
     }
 }
 
-// `marsa uninstall` (task M5-07).
+// `marsa uninstall`.
 
 /// `Uninstalled PHP 8.3.12.`
 pub fn uninstalled(runtime: Runtime, version: &str) -> String {

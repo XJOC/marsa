@@ -359,7 +359,7 @@ fn every_runtime_has_its_own_name_and_example() {
     );
 }
 
-/// Task M4-18k2: the line before the prompt of `park` and `link`, and
+/// The line before the prompt of `park` and `link`, and
 /// the one when the names did not go in. Not on Windows, whose hosts
 /// file has another path in the text.
 #[cfg(not(windows))]
