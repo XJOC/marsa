@@ -73,8 +73,9 @@ impl Signal {
 ///   ([`crate::databases::postgres_stop`]). Never SIGTERM.
 /// - Valkey: `SHUTDOWN SAVE` over its own protocol, then SIGTERM, then a
 ///   kill ([`crate::databases::valkey::valkey_stop`]).
-/// - Later, on Windows (M6-07): a stop command such as
-///   `pg_ctl stop -m fast`, then a kill.
+/// - MySQL and PostgreSQL on Windows, which has no signals: the server's own
+///   stop program (`mysqladmin shutdown`, `pg_ctl stop -m fast`), then a
+///   kill ([`StopAction::Run`]).
 ///
 /// So each new way to ask is one more [`StopAction`] variant, and the steps,
 /// their limits, and the final kill stay as they are.
@@ -100,18 +101,60 @@ pub enum StopAction {
     /// A request to the server's own port, for a server that saves its data
     /// only when its protocol asks it to stop (Valkey's `SHUTDOWN SAVE`).
     Send(TcpRequest),
+    /// A program of the server's own that asks it to stop: how MySQL and
+    /// PostgreSQL stop cleanly on Windows, which has no signals (ADR 0023,
+    /// section 6).
+    Run(StopCommand),
 }
 
 impl StopAction {
-    /// How long the asking itself may take, before the step's wait: nothing
+    /// How long the asking itself may take, beyond the step's wait: nothing
     /// for a signal (the supervisor's margin covers `/bin/kill`), the connect
-    /// and the write for a [`TcpRequest`].
+    /// and the write for a [`TcpRequest`], and [`STOP_COMMAND_GRACE`] for a
+    /// [`StopCommand`], whose wait starts with the program.
     pub fn limit(&self) -> Duration {
         match self {
             Self::Signal(_) => Duration::ZERO,
             Self::Send(request) => request.limit.saturating_mul(2),
+            Self::Run(_) => STOP_COMMAND_GRACE,
         }
     }
+
+    /// The step's name in logs, such as `SIGTERM` or `mysqladmin shutdown`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Signal(signal) => signal.name(),
+            Self::Send(request) => request.name,
+            Self::Run(command) => command.name,
+        }
+    }
+}
+
+/// How long the supervisor waits, once the server has exited, for a
+/// [`StopCommand`] that still runs to end, so its last lines reach the log.
+/// `pg_ctl stop -w` looks for the server's exit ten times a second.
+pub const STOP_COMMAND_GRACE: Duration = Duration::from_secs(2);
+
+/// A program that asks a server to stop, with fixed arguments made by code,
+/// never from input. Absolute: `marsad` never searches `PATH`. Run directly,
+/// never through a shell.
+///
+/// The supervisor runs it with no window and no input, keeps what it prints
+/// as lines of the service's log, and waits up to the step's wait, counted
+/// from the program's start, for the server's exit. The program's own end
+/// does not end that wait: one that failed may have asked all the same, and
+/// one that cannot ask (`mysqladmin` when `root` has a password) only costs
+/// the wait. A program that cannot start skips the step, as a failed signal
+/// does. One that still runs when the step ends is ended with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopCommand {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    /// Its name in logs, such as `mysqladmin shutdown`.
+    pub name: &'static str,
+    /// What the log says after the program failed: the likely cause, and
+    /// what follows for the server.
+    pub on_failure: &'static str,
 }
 
 /// Bytes the supervisor writes to `127.0.0.1:<port>` over TCP to ask a
@@ -317,6 +360,28 @@ mod tests {
             },
         );
         assert_eq!(stop.total_wait(), 19_000 * MS);
+    }
+
+    /// A stop program's wait starts with it; after the server's exit it may
+    /// still need a moment for its last lines.
+    #[test]
+    fn a_stop_program_adds_only_its_grace_to_its_wait() {
+        let run = StopAction::Run(StopCommand {
+            program: PathBuf::from("/m/runtimes/x/bin/stop"),
+            args: vec!["now".to_owned()],
+            name: "stop now",
+            on_failure: "",
+        });
+        assert_eq!(run.limit(), STOP_COMMAND_GRACE);
+        assert_eq!(run.name(), "stop now");
+        assert_eq!(StopAction::Signal(Signal::Int).name(), "SIGINT");
+        let stop = StopMethod {
+            steps: vec![StopStep {
+                action: run,
+                wait: 30_000 * MS,
+            }],
+        };
+        assert_eq!(stop.total_wait(), 30_000 * MS + STOP_COMMAND_GRACE);
     }
 
     #[test]
