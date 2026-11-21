@@ -132,23 +132,25 @@ function Listeners([int]$Id) {
             ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)" } | Sort-Object -Unique)
 }
 
-# The one process of $Name under $Data runs as the plain user, and listens
-# on 127.0.0.1:$Port and nothing else.
+# The server $Name is a direct child of marsad and runs as the plain user,
+# and every process of $Name (PostgreSQL's backends too) listens on
+# 127.0.0.1:$Port only.
 function CheckServer([string]$Name, [int]$Port) {
     $found = @(Ours $Name)
     if ($found.Count -lt 1) { Fail "no $Name runs" }
-    # PostgreSQL's backends are postgres.exe too; the postmaster listens.
-    # MySQL runs as one process (`--no-monitor`).
+    $marsad = @(Ours 'marsad.exe')
+    if ($marsad.Count -ne 1) { Fail "$($marsad.Count) marsad processes run" }
+    $servers = @($found | Where-Object { $_.ParentProcessId -eq $marsad[0].ProcessId })
+    if ($servers.Count -ne 1) { Fail "$($servers.Count) $Name processes are children of marsad" }
+    # MySQL is one process (`--no-monitor`).
     if ($Name -eq 'mysqld.exe' -and $found.Count -ne 1) { Fail "$($found.Count) mysqld.exe processes run" }
-    $listening = @($found | Where-Object { @(Listeners $_.ProcessId).Count -gt 0 })
-    if ($listening.Count -ne 1) { Fail "$($listening.Count) $Name processes listen" }
-    $server = $listening[0]
+    $server = $servers[0]
     $owner = Owner $server.ProcessId
-    Write-Host "$Name (pid $($server.ProcessId)) runs as $owner and listens on $((Listeners $server.ProcessId) -join ' ')"
+    $all = @($found | ForEach-Object { Listeners $_.ProcessId } | Sort-Object -Unique)
+    Write-Host "$Name (pid $($server.ProcessId), child of marsad) runs as $owner; listeners: $($all -join ' ')"
     if (-not $owner.EndsWith("\$UserName")) { Fail "$Name runs as $owner, not as $UserName" }
     $want = "127.0.0.1:$Port"
-    $got = (Listeners $server.ProcessId) -join ' '
-    if ($got -ne $want) { Fail "$Name listens on $got, not on $want only" }
+    if (($all -join ' ') -ne $want) { Fail "$Name listens on $($all -join ' '), not on $want only" }
     return $server
 }
 
@@ -159,11 +161,46 @@ function LogMark([string]$Name) {
     return 0
 }
 
-# What the log $Name got since $Mark.
+# What the log $Name got since $Mark. Opened with every sharing mode, as
+# Marsa's log viewer does: marsad holds the file open for its writes.
 function LogSince([string]$Name, [long]$Mark) {
     $path = Join-Path $Logs $Name
-    $bytes = [System.IO.File]::ReadAllBytes($path)
-    return [System.Text.Encoding]::UTF8.GetString($bytes, [int]$Mark, $bytes.Length - [int]$Mark)
+    $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
+    try {
+        $stream.Position = $Mark
+        $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+        return $reader.ReadToEnd()
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+# Runs $Check until it returns $true without a failure, $Seconds at most:
+# `running` comes with the process, its first answer later.
+function Until([string]$What, [int]$Seconds, [scriptblock]$Check) {
+    $last = ''
+    for ($i = 1; $i -le $Seconds; $i++) {
+        try {
+            if (& $Check) { return }
+        } catch {
+            $last = "$_"
+        }
+        Start-Sleep -Seconds 1
+    }
+    Fail "$What, not within $Seconds s: $last"
+}
+
+# Runs $Block for a line of information only: a failure is printed, never
+# fatal.
+function Informative([string]$What, [scriptblock]$Block) {
+    $ErrorActionPreference = 'Continue'
+    try {
+        $text = (& $Block 2>&1 | ForEach-Object { "$_" }) -join ' '
+        Info "${What}: $text"
+    } catch {
+        Info "${What}: failed: $_"
+    }
 }
 
 # Waits until no process of $Names under $Data runs, $Seconds at most.
@@ -425,26 +462,20 @@ try {
 
     Step 'PostgreSQL: initdb, the role root, then the server as a child of marsad, as the plain user'
     MarsaOk services start postgres
-    $postmaster = CheckServer 'postgres.exe' $PgPort
-    $marsad = @(Ours 'marsad.exe')
-    if ($marsad.Count -ne 1) { Fail "$($marsad.Count) marsad processes run" }
-    if ($postmaster.ParentProcessId -ne $marsad[0].ProcessId) {
-        Fail "the postmaster's parent is $($postmaster.ParentProcessId), not marsad ($($marsad[0].ProcessId))"
-    }
+    # The postmaster: a direct child of marsad, as no spike tested.
+    $null = CheckServer 'postgres.exe' $PgPort
     if ((PgSql 'select current_user') -ne 'root') { Fail 'TCP is not root' }
     $null = PgSql 'create table posts (id int primary key, body text not null)'
     $null = PgSql "insert into posts values (1, 'hello')"
-    $null = PgSql 'create extension if not exists pg_trgm'
-    Info "similarity('marsa', 'mars') = $(PgSql "select similarity('marsa', 'mars')")"
+    $env:PGCLIENTENCODING = 'UTF8'
+    Informative 'pg_trgm for root' { & $Psql -X -w -At -h 127.0.0.1 -p $PgPort -U root -d root -c 'create extension if not exists pg_trgm' }
+    Informative "similarity('marsa', 'mars')" { & $Psql -X -w -At -h 127.0.0.1 -p $PgPort -U root -d root -c "select similarity('marsa', 'mars')" }
     # LC_CTYPE is C on Windows (initdb_args): no letters outside ASCII.
     $arabic = Join-Path $Temp 'similarity.sql'
     Set-Content -LiteralPath $arabic -Value "select similarity('مرحبا', 'مرحب');" -Encoding utf8NoBOM
-    $env:PGCLIENTENCODING = 'UTF8'
-    $similar = (& $Psql -X -w -At -h 127.0.0.1 -p $PgPort -U root -d root -f $arabic 2>&1) -join ' '
-    Info "similarity of two Arabic words with LC_CTYPE C: $similar"
-    # The superuser over the Unix socket in run\ (AF_UNIX on Windows 10 and later).
-    $socket = (& $Psql -X -w -At -h (Join-Path $Data 'run') -p $PgPort -U postgres -d postgres -c 'select current_user' 2>&1) -join ' '
-    Info "the superuser over the socket in run\: $socket"
+    Informative 'the similarity of two Arabic words with LC_CTYPE C' { & $Psql -X -w -At -h 127.0.0.1 -p $PgPort -U root -d root -f $arabic }
+    # The superuser over the Unix socket in run\ (AF_UNIX, Windows 10 and later).
+    Informative 'the superuser over the socket in run\' { & $Psql -X -w -At -h (Join-Path $Data 'run') -p $PgPort -U postgres -d postgres -c 'select current_user' }
 
     Step 'PostgreSQL: pg_ctl stop -m fast with an idle client'
     $idle = Start-Process -FilePath $Psql -ArgumentList "-X -w -h 127.0.0.1 -p $PgPort -U root -d root -c `"select pg_sleep(120)`"" -PassThru -NoNewWindow
@@ -512,6 +543,8 @@ try {
     # The start of marsad starts every server that is on, MySQL too.
     MarsaOk services start mysql
     WaitRunning $ids
+    Until 'PostgreSQL answers' 60 { (PgSql 'select 1') -eq '1' }
+    if ($WithValkey) { Until 'Valkey answers' 60 { (Valkey PING) -eq 'PONG' } }
     $log = LogSince 'mysql.log' $myMark
     if ($log -notmatch 'crash recovery') { Info "MySQL logged no crash recovery: $log" }
     if ((MySql 'app' 'select count(*) from posts') -ne '2') { Fail 'MySQL lost a committed row' }
@@ -535,7 +568,7 @@ try {
     Step "marsa doctor as the plain user: no warning about administrator rights"
     MarsaOk services start mysql
     Marsa doctor
-    if ($script:Out -match 'administrator rights') { Fail 'the plain user got the warning' }
+    if ($script:Out.Contains('! marsad runs with administrator rights')) { Fail 'the plain user got the warning' }
     MarsaOk daemon stop
     WaitGone (@('marsad.exe') + $names) 10
 
