@@ -194,7 +194,9 @@ kill -TERM "$OUTSIDE"
 wait "$OUTSIDE" || true
 
 step "another program holds the port: refused, with its name"
-python3 -c "import socket, time; s = socket.socket(); s.bind(('127.0.0.1', $PORT)); s.listen(); time.sleep(300)" &
+# SO_REUSEADDR, as every server sets: the sockets that the steps before left in
+# TIME_WAIT on this port would make a bind without it fail.
+python3 -c "import socket, time; s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1', $PORT)); s.listen(); time.sleep(300)" &
 HOLDER=$!
 sleep 1
 refused 'service_port_busy' marsa services start mysql

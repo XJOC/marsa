@@ -83,6 +83,7 @@ pub(super) async fn run<F: Fetch>(
         (None, None) => plan::OsVersions::default(),
     };
     plan::check_minimum(runtime, programs, &found)?;
+    plan::check_xz(runtime, programs, extract::xz_available())?;
     let runtimes = RuntimesDir::in_dir(&env.app_data_dir);
 
     // Shared with every blocking task, so it is freed only after the last

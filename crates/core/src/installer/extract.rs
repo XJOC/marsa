@@ -1,4 +1,4 @@
-//! Unpacks a verified file (`tar.gz`, `zip`, or `raw`) into a temp folder by
+//! Unpacks a verified file (`tar.gz`, `tar.xz`, `zip`, or `raw`) into a temp folder by
 //! the recipe's rules (`strip_components`, `into`). Refuses entries that would
 //! write outside the folder, unsafe links, and archives over the size limits.
 //!
@@ -8,10 +8,24 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 
 use flate2::read::GzDecoder;
 
 use crate::recipes::{ArchiveFormat, Artifact};
+
+/// The program that unpacks `tar.xz`: an absolute path, so nothing is looked
+/// up in `PATH` (it is a system tool, not one of ours). No library: its
+/// output goes to the same tar reader and the same [`Sink::entry`] as a
+/// `tar.gz`.
+pub const XZ_PROGRAM: &str = "/usr/bin/xz";
+
+/// Whether [`XZ_PROGRAM`] is there, for the install to say so before it
+/// downloads 80 MB, and for `marsa doctor`.
+#[must_use]
+pub fn xz_available() -> bool {
+    Path::new(XZ_PROGRAM).is_file()
+}
 
 /// Longer entry names are refused before anything else is done with them.
 const MAX_NAME_BYTES: usize = 4096;
@@ -122,6 +136,17 @@ pub fn extract(
     dest_root: &Path,
     limits: &Limits,
 ) -> Result<ExtractReport, ExtractError> {
+    extract_with(Path::new(XZ_PROGRAM), archive, layout, dest_root, limits)
+}
+
+/// [`extract`] with the program for `tar.xz` given, so a test needs no xz.
+fn extract_with(
+    xz: &Path,
+    archive: &Path,
+    layout: &Layout<'_>,
+    dest_root: &Path,
+    limits: &Limits,
+) -> Result<ExtractReport, ExtractError> {
     let into = match layout.into {
         "" => Vec::new(),
         into => relative_parts(into).ok_or_else(|| ExtractError::UnsafePath(short(into)))?,
@@ -155,6 +180,7 @@ pub fn extract(
             }
             result?;
         }
+        ArchiveFormat::TarXz => xz_entries(xz, archive, limits, &mut sink)?,
         ArchiveFormat::Zip => {
             let mut zip = zip::ZipArchive::new(reader).map_err(corrupt(""))?;
             if zip.len() as u64 > limits.max_entries {
@@ -191,6 +217,67 @@ pub fn extract(
         }
     }
     Ok(sink.report)
+}
+
+/// Runs `xz -dc <archive>` and reads the tar from its output. The program,
+/// its arguments, and an empty environment are fixed: `XZ_OPT` and
+/// `XZ_DEFAULTS` change what xz does. Its output is capped like a `tar.gz`'s.
+fn xz_entries(
+    xz: &Path,
+    archive: &Path,
+    limits: &Limits,
+    sink: &mut Sink<'_>,
+) -> Result<(), ExtractError> {
+    let mut child = Command::new(xz)
+        .args(["-dc", "--"])
+        .arg(archive)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(io_err(xz))?;
+    let stdout = child.stdout.take().expect("stdout was piped above");
+    let left = limits.max_entries.saturating_mul(METADATA_BYTES_PER_ENTRY);
+    let mut tar = tar::Archive::new(Capped {
+        inner: stdout,
+        left: limits.max_total_bytes.saturating_add(left),
+        hit: false,
+    });
+    let result = tar_entries(&mut tar, sink);
+    let mut capped = tar.into_inner();
+    if capped.hit {
+        stop(&mut child);
+        return Err(ExtractError::TooLarge(sink.last.clone()));
+    }
+    if let Err(err) = result {
+        stop(&mut child);
+        return Err(err);
+    }
+    // The tar ends before the xz stream does. Reading the rest lets xz finish
+    // and say whether the stream was whole.
+    if let Err(err) = io::copy(&mut capped, &mut io::sink()) {
+        stop(&mut child);
+        return Err(if capped.hit {
+            ExtractError::TooLarge(sink.last.clone())
+        } else {
+            ExtractError::Corrupt(sink.last.clone(), err)
+        });
+    }
+    let status = child.wait().map_err(io_err(xz))?;
+    if !status.success() {
+        return Err(ExtractError::Corrupt(
+            sink.last.clone(),
+            io::Error::other(format!("xz ended with {status}")),
+        ));
+    }
+    Ok(())
+}
+
+/// Ends a child that is not needed any more, and reaps it.
+fn stop(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn tar_entries<R: Read>(
@@ -581,6 +668,149 @@ mod tests {
 
     fn code(bytes: &[u8], layout: &Layout) -> &'static str {
         refused(bytes, layout, &Limits::default())
+    }
+
+    /// A program that takes xz's arguments (`-dc -- <file>`) and writes the
+    /// file gunzipped, so the pipe, the caps, and the exit code are tested
+    /// without xz. Returns its path.
+    #[cfg(unix)]
+    fn fake_xz(dir: &Path, script_body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake-xz");
+        fs::write(&path, format!("#!/bin/sh\n{script_body}\n")).expect("script");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    #[cfg(unix)]
+    const XZ_LAYOUT: Layout<'static> = Layout {
+        format: ArchiveFormat::TarXz,
+        strip_components: 1,
+        ..TAR
+    };
+
+    #[cfg(unix)]
+    fn unpack_xz(
+        xz: &Path,
+        tmp: &Path,
+        bytes: &[u8],
+        limits: &Limits,
+    ) -> Result<ExtractReport, ExtractError> {
+        let archive = tmp.join("archive");
+        fs::write(&archive, bytes).expect("write archive");
+        fs::create_dir_all(tmp.join("out")).expect("out");
+        extract_with(xz, &archive, &XZ_LAYOUT, &tmp.join("out"), limits)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tar_xz_goes_through_the_same_entry_rules_as_tar_gz() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let xz = fake_xz(tmp.path(), "exec /usr/bin/gzip -dc \"$@\"");
+        let bytes = targz(&[
+            ("mysql-8.4.13/", EntryType::Directory, 0o755, b""),
+            ("mysql-8.4.13/bin/mysqld", EntryType::Regular, 0o755, b"#!x"),
+            ("mysql-8.4.13/share/a.txt", EntryType::Regular, 0o600, b"a"),
+        ]);
+        let work = tempfile::tempdir().expect("work");
+        let report = unpack_xz(&xz, work.path(), &bytes, &Limits::default()).expect("unpack");
+        assert_eq!(report.files, 2);
+        let out = work.path().join("out");
+        assert_eq!(fs::read(out.join("bin/mysqld")).expect("mysqld"), b"#!x");
+        assert_eq!(mode(&out.join("bin/mysqld")), 0o755);
+        assert_eq!(mode(&out.join("share/a.txt")), 0o644);
+
+        // The same refusals as for a tar.gz: an entry out of the folder, a
+        // link out of it.
+        for (entries, code) in [
+            (
+                vec![("top/../../evil", EntryType::Regular, 0o644, &b"x"[..])],
+                "extract_unsafe_path",
+            ),
+            (
+                vec![("top/l", EntryType::Symlink, 0o777, &b"../../etc"[..])],
+                "extract_unsafe_link",
+            ),
+        ] {
+            let work = tempfile::tempdir().expect("work");
+            let err = unpack_xz(&xz, work.path(), &targz(&entries), &Limits::default())
+                .expect_err("must be refused");
+            assert_eq!(err.code(), code, "{err}");
+            assert_eq!(
+                fs::read_dir(work.path().join("out")).expect("out").count(),
+                0
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tar_xz_is_capped_and_a_failed_xz_is_a_damaged_archive() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let xz = fake_xz(tmp.path(), "exec /usr/bin/gzip -dc \"$@\"");
+        let big = vec![7_u8; 100_000];
+        let bytes = targz(&[("top/big", EntryType::Regular, 0o644, &big)]);
+        let work = tempfile::tempdir().expect("work");
+        let limits = Limits {
+            max_total_bytes: 1000,
+            max_entries: 10,
+        };
+        let err = unpack_xz(&xz, work.path(), &bytes, &limits).expect_err("over the cap");
+        assert_eq!(err.code(), "extract_too_large", "{err}");
+
+        // xz ends with an error after a whole tar: the stream was cut.
+        let failing = fake_xz(tmp.path(), "/usr/bin/gzip -dc \"$@\" || exit 1\nexit 3");
+        let ok = targz(&[("top/f", EntryType::Regular, 0o644, b"x")]);
+        let work = tempfile::tempdir().expect("work");
+        let err = unpack_xz(&failing, work.path(), &ok, &Limits::default()).expect_err("exit 3");
+        assert_eq!(err.code(), "extract_corrupt", "{err}");
+
+        // No xz at the path: a disk error naming the program, nothing written.
+        let work = tempfile::tempdir().expect("work");
+        let err = unpack_xz(
+            &tmp.path().join("none"),
+            work.path(),
+            &ok,
+            &Limits::default(),
+        )
+        .expect_err("no program");
+        assert_eq!(err.code(), "extract_io", "{err}");
+    }
+
+    /// With the real xz, which every Linux runner has.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_real_tar_xz_unpacks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tar_path = tmp.path().join("a.tar");
+        let mut builder = tar::Builder::new(File::create(&tar_path).expect("tar file"));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(3);
+        header.set_mode(0o755);
+        builder
+            .append_data(&mut header, "top/bin/mysqld", &b"abc"[..])
+            .expect("append");
+        builder.finish().expect("finish");
+        let status = Command::new(XZ_PROGRAM)
+            .arg("-k")
+            .arg(&tar_path)
+            .status()
+            .expect("xz runs");
+        assert!(status.success());
+        let archive = tmp.path().join("a.tar.xz");
+        fs::create_dir_all(tmp.path().join("out")).expect("out");
+        let report = extract(
+            &archive,
+            &XZ_LAYOUT,
+            &tmp.path().join("out"),
+            &Limits::default(),
+        )
+        .expect("unpack");
+        assert_eq!(report.files, 1);
+        assert_eq!(
+            fs::read(tmp.path().join("out/bin/mysqld")).expect("file"),
+            b"abc"
+        );
     }
 
     #[cfg(unix)]

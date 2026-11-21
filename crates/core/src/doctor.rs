@@ -25,6 +25,8 @@ pub enum Check {
     Runtimes,
     /// Windows only: the Microsoft Visual C++ runtime PHP needs (ADR 0019).
     VcRuntime,
+    /// Linux only: `/usr/bin/xz`, which unpacks MySQL's `tar.xz`.
+    Xz,
     /// Windows only: the roots PHP's curl trusts, from Windows' store
     /// (task M4-19n).
     SystemRoots,
@@ -65,6 +67,8 @@ pub enum Pass {
     VcRuntime {
         version: String,
     },
+    /// Linux: `/usr/bin/xz` is there.
+    Xz,
     /// PHP's CA bundle holds every root Windows trusts for HTTPS now:
     /// `count` of them, with `left_out` others of the store left out, and
     /// Marsa's CA when `marsa`; the bundle was written `age_days` ago.
@@ -143,6 +147,9 @@ pub enum Problem {
         ports: Vec<u16>,
     },
     CaUntrusted,
+    /// Linux: no `/usr/bin/xz`, so MySQL, which comes as `tar.xz`, cannot be
+    /// installed.
+    XzMissing,
     /// Windows: no Microsoft Visual C++ runtime (x64), so the official PHP
     /// does not start.
     VcRuntimeMissing,
@@ -292,6 +299,16 @@ pub fn system_roots(facts: RootsFacts) -> Verdict {
         marsa,
         age_days,
     })
+}
+
+/// Linux: whether `/usr/bin/xz` is there.
+#[must_use]
+pub fn xz(available: bool) -> Verdict {
+    if available {
+        Verdict::Pass(Pass::Xz)
+    } else {
+        Verdict::Fail(Problem::XzMissing)
+    }
 }
 
 /// Windows: the Visual C++ runtime that Windows reports, `(major, minor,
@@ -1022,6 +1039,12 @@ mod tests {
             windows_ports(None, Some(Some(5244))),
             Verdict::Skip(Skip::NotChecked)
         );
+    }
+
+    #[test]
+    fn xz_must_be_there() {
+        assert_eq!(xz(true), Verdict::Pass(Pass::Xz));
+        assert_eq!(xz(false), Verdict::Fail(Problem::XzMissing));
     }
 
     #[test]

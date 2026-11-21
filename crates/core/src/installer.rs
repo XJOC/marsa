@@ -204,6 +204,13 @@ pub enum InstallError {
     )]
     MissingVcRuntime,
 
+    /// The files come as `tar.xz`, and `/usr/bin/xz` is not there.
+    #[error(
+        "{what} comes as a .tar.xz archive, and {} is not there: install xz-utils (or xz)",
+        extract::XZ_PROGRAM
+    )]
+    XzMissing { what: String },
+
     /// `runtimes/.manifest-serial` is not a number. It is never read as
     /// "no serial", which would turn the rollback check off.
     #[error(
@@ -250,6 +257,7 @@ impl InstallError {
             InstallError::UnsafeName { .. } => crate::codes::INSTALL_UNSAFE_NAME,
             InstallError::CheckFailed { .. } => crate::codes::INSTALL_CHECK_FAILED,
             InstallError::MissingVcRuntime => crate::codes::INSTALL_MISSING_VC_RUNTIME,
+            InstallError::XzMissing { .. } => crate::codes::INSTALL_XZ_MISSING,
             InstallError::SerialCorrupt { .. } => crate::codes::INSTALL_SERIAL_CORRUPT,
             InstallError::Io { .. } => crate::codes::INSTALL_IO,
             InstallError::Manifest(err) => err.code(),
@@ -340,6 +348,12 @@ mod tests {
                 "install_check_failed",
             ),
             (InstallError::MissingVcRuntime, "install_missing_vc_runtime"),
+            (
+                InstallError::XzMissing {
+                    what: "mysql".into(),
+                },
+                "install_xz_missing",
+            ),
             (
                 InstallError::Io {
                     path: PathBuf::from("x"),

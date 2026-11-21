@@ -1727,6 +1727,9 @@ fn error_message(code: &str) -> Option<&'static str> {
             "The version list has a file name Marsa refuses. Nothing was installed. Report it."
         }
         "install_check_failed" => "The new program failed its test run, so it was not installed.",
+        "install_xz_missing" => {
+            "This install needs /usr/bin/xz. Install the package xz-utils (or xz), then try again."
+        }
         "install_missing_vc_runtime" => {
             "This program needs the Microsoft Visual C++ Redistributable: \
              https://aka.ms/vs/17/release/vc_redist.x64.exe"
@@ -2514,6 +2517,9 @@ mod tests {
                 exit_code: None,
             },
             InstallError::MissingVcRuntime,
+            InstallError::XzMissing {
+                what: "mysql".into(),
+            },
             InstallError::SerialCorrupt {
                 path: PathBuf::from("s"),
             },
