@@ -314,7 +314,8 @@ fn printable_name(text: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-#[cfg(test)]
+// Every test here reads a Unix process.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     #[cfg(target_os = "macos")]

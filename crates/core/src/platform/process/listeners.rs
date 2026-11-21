@@ -243,7 +243,8 @@ pub async fn port_lookup(_port: u16) -> PortLookup {
     PortLookup::NotChecked
 }
 
-#[cfg(test)]
+// Every test here reads a Unix process.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
