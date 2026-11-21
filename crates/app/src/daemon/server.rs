@@ -30,6 +30,7 @@ use super::api;
 use super::auth::AuthConfig;
 use super::autostart_api::Autostart;
 use super::caddy;
+use super::client_shims::ClientShims;
 use super::databases;
 use super::dns;
 use super::sites_sync;
@@ -102,6 +103,14 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     let runtimes = RuntimesDir::in_dir(&data_dir);
     if let Err(err) = tokio::task::spawn_blocking(move || clean_retired(&runtimes)).await {
         tracing::warn!(error = %err, "the cleanup of unfinished uninstalls failed");
+    }
+    // An update of Marsa replaced `bin/marsa-shim` and linked only its own
+    // names again, so the clients of the installed servers (`psql`) still
+    // run the old build: they are made again. Before the API serves, so no
+    // install or uninstall syncs meanwhile.
+    let shims = ClientShims::new(&data_dir);
+    if let Err(err) = tokio::task::spawn_blocking(move || shims.sync_all()).await {
+        tracing::warn!(error = %err, "the check of the client shims failed");
     }
     // Before `daemon.json` exists, so a client that found the daemon can
     // already stop it with a signal.

@@ -30,6 +30,7 @@ use marsa::daemon::php::fpm_id;
 use marsa::daemon::runtimes_api::{InstallFuture, RunInstall};
 use marsa::daemon::state::Daemon;
 use marsa_core::config::{self, ConfigPaths};
+use marsa_core::databases::clients::SHIM_MARK;
 use marsa_core::installer::{InstallError, InstallRequest, InstalledVersion};
 use marsa_core::php::PhpMinor;
 use marsa_core::platform::daemon_file::{
@@ -1016,6 +1017,62 @@ async fn the_first_postgres_install_turns_it_on_and_starts_it() {
         (settings.default.as_deref(), settings.enabled),
         (Some("18"), true)
     );
+}
+
+/// A server's install puts its clients in `shims/` before `done`, as
+/// copies of `bin/marsa-shim`, and the uninstall of its last version takes
+/// them away. Another server's clients never appear.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_install_adds_its_client_shims_and_its_uninstall_removes_them() {
+    let served = Served::start(FakeInstall::default()).await;
+    let bin = served.path().join("bin");
+    fs::create_dir_all(&bin).expect("the bin folder");
+    let program = format!("marsa-shim{}", std::env::consts::EXE_SUFFIX);
+    let shim = format!("a fake shim\n{SHIM_MARK}php\n");
+    fs::write(bin.join(program), &shim).expect("a fake marsa-shim");
+    let shims = served.path().join("shims");
+    let client = |name: &str| shims.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+
+    let mut events = served.daemon.events.subscribe();
+    let accepted: InstallAccepted = served
+        .json(
+            "POST",
+            "/v1/runtimes/valkey/install",
+            Some("{}"),
+            StatusCode::ACCEPTED,
+        )
+        .await;
+    match last_update(&mut events, accepted.id).await {
+        InstallUpdate::Done(done) => assert_eq!(done.version, "8.1.11"),
+        other => panic!("not done: {other:?}"),
+    }
+    for name in ["valkey-cli", "redis-cli"] {
+        let text = fs::read_to_string(client(name)).expect("a client shim");
+        assert_eq!(text, shim, "{name}");
+    }
+    for name in ["psql", "mysql", "mysqldump"] {
+        assert!(!client(name).exists(), "{name}");
+    }
+
+    // The install starts Valkey too; the fake has no server program, so
+    // the start fails. The uninstall waits for it to end.
+    let tried = async {
+        while served.daemon.valkey.status().state == ServiceState::Stopped {
+            tokio::time::sleep(POLL).await;
+        }
+    };
+    tokio::time::timeout(WAIT, tried)
+        .await
+        .expect("a start after the install");
+    let gone: Uninstalled = served
+        .json("DELETE", "/v1/runtimes/valkey/8.1.11", None, StatusCode::OK)
+        .await;
+    assert_eq!(gone.version, "8.1.11");
+    let left: Vec<_> = fs::read_dir(&shims)
+        .expect("the shims folder")
+        .map(|entry| entry.expect("an entry").file_name())
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
