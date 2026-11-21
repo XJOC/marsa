@@ -13,7 +13,6 @@ use super::dns_skipped;
 use super::failure;
 use super::linux_dns;
 use super::nss;
-use super::ports::port_holders;
 use super::skip;
 use super::user_trust;
 use super::windows;
@@ -26,6 +25,7 @@ use marsa_core::dns::LinuxPath;
 use marsa_core::helper::HelperOp;
 use marsa_core::helper::OpResult;
 use marsa_core::helper::OpStatus;
+use marsa_core::platform::ports;
 use marsa_core::recipes::Os;
 use marsa_core::recipes::Platform;
 use marsa_core::types::ApiError;
@@ -282,7 +282,7 @@ impl Setup {
         report: &mut SetupReport,
         stop: &CancellationToken,
     ) {
-        match port_holders(self.runner(), stop) {
+        match ports::holders(self.runner(), Os::Mac, stop) {
             Some(holders) if holders.is_empty() => ops.push(HelperOp::PfInstall {
                 http_port: caddy.http_port,
                 https_port: caddy.https_port,
@@ -391,7 +391,7 @@ mod tests {
     use super::super::helper::INSTALL_BIN;
     use super::super::osascript::OSASCRIPT;
 
-    use super::super::ports::NETSTAT;
+    use marsa_core::platform::ports::NETSTAT;
     use marsa_core::platform::runner::PIPE_GRACE;
 
     use marsa_core::platform::runner::RunOutput;

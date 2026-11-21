@@ -100,6 +100,12 @@ impl Runner for RealRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Windows tools (`netstat`, `tasklist`) need `SystemRoot`, which
+        // Windows sets for every process; nothing else is passed on.
+        #[cfg(windows)]
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", root);
+        }
         // Not the daemon's working folder. `/` is a Unix path, and setup runs
         // on macOS and Linux only for now (Windows later).
         #[cfg(unix)]
