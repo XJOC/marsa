@@ -40,6 +40,7 @@ use marsa_core::types::{
 };
 
 use super::api::HttpError;
+use super::http::Rejected as _;
 use super::state::Daemon;
 
 type JsonBody<T> = Result<Json<T>, JsonRejection>;
@@ -114,8 +115,7 @@ async fn patch_site(
     path: Result<UrlPath<String>, PathRejection>,
     body: JsonBody<SitePatch>,
 ) -> Answer {
-    let UrlPath(name) =
-        path.map_err(|err| HttpError::new(err.status(), codes::INVALID_PATH, err.body_text()))?;
+    let UrlPath(name) = path.map_err(|err| err.reject(codes::INVALID_PATH))?;
     update(daemon, name, body).await
 }
 
@@ -157,8 +157,7 @@ async fn unlink_site(
     daemon: State<Arc<Daemon>>,
     path: Result<UrlPath<String>, PathRejection>,
 ) -> Answer {
-    let UrlPath(name) =
-        path.map_err(|err| HttpError::new(err.status(), codes::INVALID_PATH, err.body_text()))?;
+    let UrlPath(name) = path.map_err(|err| err.reject(codes::INVALID_PATH))?;
     unlink(daemon, name).await
 }
 
@@ -422,11 +421,7 @@ fn not_parked(path: &Path) -> HttpError {
 }
 
 fn bad_body(rejection: JsonRejection) -> HttpError {
-    HttpError::new(
-        rejection.status(),
-        codes::INVALID_BODY,
-        rejection.body_text(),
-    )
+    rejection.reject(codes::INVALID_BODY)
 }
 
 #[cfg(test)]
