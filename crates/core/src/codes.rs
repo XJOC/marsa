@@ -165,9 +165,11 @@ pub const SETUP_HELPER_INSTALL_RUNNING: &str = "setup_helper_install_running";
 pub const SETUP_HELPER_MISSING: &str = "setup_helper_missing";
 pub const SETUP_HELPER_NO_ANSWER: &str = "setup_helper_no_answer";
 pub const SETUP_HELPER_NOT_THE_SERVICE: &str = "setup_helper_not_the_service";
+pub const SETUP_HELPER_PARTIAL: &str = "setup_helper_partial";
 pub const SETUP_HELPER_PIPE_FAILED: &str = "setup_helper_pipe_failed";
 pub const SETUP_HELPER_PROTECTED_FOLDER: &str = "setup_helper_protected_folder";
 pub const SETUP_HELPER_REJECTED: &str = "setup_helper_rejected";
+pub const SETUP_HELPER_RUNNING: &str = "setup_helper_running";
 pub const SETUP_HELPER_UNSAFE: &str = "setup_helper_unsafe";
 pub const SETUP_HOSTS_NOT_REMOVED: &str = "setup_hosts_not_removed";
 pub const SETUP_HOSTS_NOT_WRITTEN: &str = "setup_hosts_not_written";
@@ -208,9 +210,15 @@ pub const UNINSTALL_ALL_DATA_DIR_UNSAFE: &str = "uninstall_all_data_dir_unsafe";
 pub const UNINSTALL_ALL_NEEDS_YES: &str = "uninstall_all_needs_yes";
 pub const UNINSTALL_ALL_NOT_CONFIRMED: &str = "uninstall_all_not_confirmed";
 pub const UNINSTALL_CANCELLED: &str = "uninstall_cancelled";
+pub const UNINSTALL_HELPER_BUSY: &str = "uninstall_helper_busy";
 pub const UNINSTALL_HELPER_FAILED: &str = "uninstall_helper_failed";
+pub const UNINSTALL_HELPER_INSTALL_FAILED: &str = "uninstall_helper_install_failed";
+pub const UNINSTALL_HELPER_INSTALL_RUNNING: &str = "uninstall_helper_install_running";
 pub const UNINSTALL_HELPER_MISSING: &str = "uninstall_helper_missing";
+pub const UNINSTALL_HELPER_NO_ANSWER: &str = "uninstall_helper_no_answer";
+pub const UNINSTALL_HELPER_NOT_THE_SERVICE: &str = "uninstall_helper_not_the_service";
 pub const UNINSTALL_HELPER_PARTIAL: &str = "uninstall_helper_partial";
+pub const UNINSTALL_HELPER_PIPE_FAILED: &str = "uninstall_helper_pipe_failed";
 pub const UNINSTALL_HELPER_REJECTED: &str = "uninstall_helper_rejected";
 pub const UNINSTALL_HELPER_RUNNING: &str = "uninstall_helper_running";
 pub const UNINSTALL_HELPER_UNSAFE: &str = "uninstall_helper_unsafe";
@@ -237,13 +245,13 @@ pub const ALL: &[&str] = &[
     AUTOSTART_READ,
     AUTOSTART_UNSUPPORTED,
     AUTOSTART_WRITE,
-    CA_NOT_READY,
+    crate::codes::CA_NOT_READY,
     CA_UNREADABLE,
     CADDY_ADMIN_UNREACHABLE,
     CADDY_CONFIG_REJECTED,
     CADDY_CONFIG_WRITE,
-    CADDY_NOT_INSTALLED,
-    CADDY_NOT_STARTED,
+    crate::codes::CADDY_NOT_INSTALLED,
+    crate::codes::CADDY_NOT_STARTED,
     CADDY_ORPHAN_STUCK,
     CADDY_OTHER_MARSA,
     CADDY_PATH_NOT_UTF8,
@@ -266,9 +274,9 @@ pub const ALL: &[&str] = &[
     DAEMON_START_FAILED,
     DAEMON_STOP_FAILED,
     DAEMON_UNREACHABLE,
-    DNS_NOT_RUNNING,
-    DNS_PORT_IN_USE,
-    DNS_START_FAILED,
+    crate::codes::DNS_NOT_RUNNING,
+    crate::codes::DNS_PORT_IN_USE,
+    crate::codes::DNS_START_FAILED,
     DOWNLOAD_FAILED,
     DOWNLOAD_HTTP_STATUS,
     DOWNLOAD_INSECURE_URL,
@@ -288,8 +296,8 @@ pub const ALL: &[&str] = &[
     HOSTS_BLOCK_BROKEN,
     HOSTS_NOT_USED,
     HOSTS_READ,
-    HOSTS_SITES_UNKNOWN,
-    HOSTS_TOO_MANY_NAMES,
+    crate::codes::HOSTS_SITES_UNKNOWN,
+    crate::codes::HOSTS_TOO_MANY_NAMES,
     HOSTS_WRITE,
     INSTALL_BUSY,
     INSTALL_CHECK_FAILED,
@@ -322,10 +330,10 @@ pub const ALL: &[&str] = &[
     NO_VERSION,
     NOT_FOUND,
     NOT_INSTALLED,
-    NSS_ADD_FAILED,
-    NSS_DB_REFUSED,
-    NSS_REMOVE_FAILED,
-    NSS_TOOL_MISSING,
+    crate::codes::NSS_ADD_FAILED,
+    crate::codes::NSS_DB_REFUSED,
+    crate::codes::NSS_REMOVE_FAILED,
+    crate::codes::NSS_TOOL_MISSING,
     OP_NOT_IMPLEMENTED,
     OP_NOT_SUPPORTED,
     OPEN_FAILED,
@@ -341,7 +349,7 @@ pub const ALL: &[&str] = &[
     PHP_FPM_ORPHAN_STUCK,
     PHP_FPM_UNAVAILABLE,
     PHP_PATH_NOT_ALLOWED,
-    PORT_IN_USE,
+    crate::codes::PORT_IN_USE,
     PORTS_APPLY_FAILED,
     PORTS_DELETE,
     PORTS_FOREIGN,
@@ -393,12 +401,14 @@ pub const ALL: &[&str] = &[
     SETUP_HELPER_MISSING,
     SETUP_HELPER_NO_ANSWER,
     SETUP_HELPER_NOT_THE_SERVICE,
+    SETUP_HELPER_PARTIAL,
     SETUP_HELPER_PIPE_FAILED,
     SETUP_HELPER_PROTECTED_FOLDER,
     SETUP_HELPER_REJECTED,
+    SETUP_HELPER_RUNNING,
     SETUP_HELPER_UNSAFE,
-    SETUP_HOSTS_NOT_REMOVED,
-    SETUP_HOSTS_NOT_WRITTEN,
+    crate::codes::SETUP_HOSTS_NOT_REMOVED,
+    crate::codes::SETUP_HOSTS_NOT_WRITTEN,
     SETUP_INTERRUPTED,
     SETUP_NOT_AUTHORIZED,
     SETUP_NOT_SUPPORTED,
@@ -417,12 +427,12 @@ pub const ALL: &[&str] = &[
     SITES_LOSE_PHP,
     SPAWN_FAILED,
     TRAY_NOT_FOUND,
-    TRUST_ADD_FAILED,
+    crate::codes::TRUST_ADD_FAILED,
     TRUST_CERT_INVALID,
     TRUST_DELETE,
     TRUST_READ,
-    TRUST_RECORD_UNUSABLE,
-    TRUST_REMOVE_FAILED,
+    crate::codes::TRUST_RECORD_UNUSABLE,
+    crate::codes::TRUST_REMOVE_FAILED,
     TRUST_STORE_UPDATE_FAILED,
     TRUST_TOOL_MISSING,
     TRUST_WRITE,
@@ -436,9 +446,15 @@ pub const ALL: &[&str] = &[
     UNINSTALL_ALL_NEEDS_YES,
     UNINSTALL_ALL_NOT_CONFIRMED,
     UNINSTALL_CANCELLED,
+    UNINSTALL_HELPER_BUSY,
     UNINSTALL_HELPER_FAILED,
+    UNINSTALL_HELPER_INSTALL_FAILED,
+    UNINSTALL_HELPER_INSTALL_RUNNING,
     UNINSTALL_HELPER_MISSING,
+    UNINSTALL_HELPER_NO_ANSWER,
+    UNINSTALL_HELPER_NOT_THE_SERVICE,
     UNINSTALL_HELPER_PARTIAL,
+    UNINSTALL_HELPER_PIPE_FAILED,
     UNINSTALL_HELPER_REJECTED,
     UNINSTALL_HELPER_RUNNING,
     UNINSTALL_HELPER_UNSAFE,

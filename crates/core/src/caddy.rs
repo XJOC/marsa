@@ -439,10 +439,10 @@ impl CaddyError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            CaddyError::PathNotUtf8 { .. } => "caddy_path_not_utf8",
-            CaddyError::NotInstalled { .. } => "caddy_not_installed",
-            CaddyError::UnsupportedPlatform => "caddy_unsupported_platform",
-            CaddyError::RecipeInvalid { .. } => "caddy_recipe_invalid",
+            CaddyError::PathNotUtf8 { .. } => crate::codes::CADDY_PATH_NOT_UTF8,
+            CaddyError::NotInstalled { .. } => crate::codes::CADDY_NOT_INSTALLED,
+            CaddyError::UnsupportedPlatform => crate::codes::CADDY_UNSUPPORTED_PLATFORM,
+            CaddyError::RecipeInvalid { .. } => crate::codes::CADDY_RECIPE_INVALID,
         }
     }
 }

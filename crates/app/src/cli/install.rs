@@ -4,6 +4,7 @@
 //!
 //! The daemon runs the installer; this file only prints what it reports.
 
+use marsa_core::codes;
 use std::io::IsTerminal as _;
 use std::path::Path;
 use std::process::ExitCode;
@@ -75,7 +76,7 @@ pub async fn run(args: &InstallArgs, data_dir: &Path) -> ExitCode {
         }
         End::Failed(failed) => install_failure(&failed, runtime).report(),
         End::Broken(err) => failure(&err, data_dir, None).report(),
-        End::Interrupted => ClientFailure::new("install_interrupted", data_dir, None).report(),
+        End::Interrupted => ClientFailure::new(codes::INSTALL_INTERRUPTED, data_dir, None).report(),
     }
 }
 

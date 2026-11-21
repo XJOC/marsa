@@ -11,6 +11,7 @@ use super::Setup;
 use super::user_trust;
 use crate::daemon::caddy::ActionError;
 use crate::daemon::state::Daemon;
+use marsa_core::codes;
 use marsa_core::types::ServiceAction;
 use marsa_core::types::ServiceState;
 use std::fmt;
@@ -66,18 +67,6 @@ const O_NONBLOCK: i32 = 0o4000;
     ))
 ))]
 const O_NONBLOCK: i32 = 0;
-
-/// [`read_ca`]'s code when the CA root is not there.
-const CA_NOT_READY: &str = "ca_not_ready";
-
-/// Why the trust was skipped when there is no CA root and no Caddy to make
-/// one. The code of `marsa services start caddy` for the same cause, which
-/// the CLI and the window already know.
-const CADDY_NOT_INSTALLED: &str = "caddy_not_installed";
-
-/// Why the trust was skipped when Caddy did not start, so there is no CA
-/// root (task M5-15b). Caddy's status and its recent lines say why.
-const CADDY_NOT_STARTED: &str = "caddy_not_started";
 
 /// Starts Caddy for setup when its CA root does not exist yet: Caddy makes
 /// the CA when it loads its config (task M5-15). The daemon uses its own
@@ -163,7 +152,9 @@ impl StartCaddy for DaemonCaddy {
                     CaddyStart::Failed("Caddy stopped".to_owned())
                 }
             },
-            Some(Ok(Err(err))) if err.code() == CADDY_NOT_INSTALLED => CaddyStart::NotInstalled,
+            Some(Ok(Err(err))) if err.code() == codes::CADDY_NOT_INSTALLED => {
+                CaddyStart::NotInstalled
+            }
             Some(Ok(Err(err))) => CaddyStart::Failed(err.code().to_owned()),
         }
     }
@@ -211,14 +202,14 @@ enum CaProblem {
 /// `ca_unreadable`. An unusable file goes to the log with its reason.
 fn ca_code(path: &Path, problem: CaProblem) -> &'static str {
     match problem {
-        CaProblem::Missing => CA_NOT_READY,
+        CaProblem::Missing => codes::CA_NOT_READY,
         CaProblem::Partial => ca_code(
             path,
             CaProblem::Unusable(format!("no {} line", user_trust::PEM_END)),
         ),
         CaProblem::Unusable(reason) => {
             tracing::warn!(path = %path.display(), %reason, "cannot use the CA root certificate");
-            "ca_unreadable"
+            codes::CA_UNREADABLE
         }
     }
 }
@@ -332,7 +323,7 @@ impl Setup {
             CaddyStart::NotInstalled if partial => Err(ca_code(path, CaProblem::Partial)),
             CaddyStart::NotInstalled => {
                 tracing::warn!("no CA root, and no Caddy to make one: install Caddy first");
-                Err(CADDY_NOT_INSTALLED)
+                Err(codes::CADDY_NOT_INSTALLED)
             }
             CaddyStart::Failed(reason) => {
                 tracing::warn!(%reason, "Caddy did not start; marsa logs caddy says why");
@@ -340,7 +331,7 @@ impl Setup {
                 // that failed on a port may still have made it.
                 match load_ca(path) {
                     Ok(pem) => Ok(pem),
-                    Err(CaProblem::Missing) => Err(CADDY_NOT_STARTED),
+                    Err(CaProblem::Missing) => Err(codes::CADDY_NOT_STARTED),
                     Err(problem) => Err(ca_code(path, problem)),
                 }
             }

@@ -321,10 +321,10 @@ impl RecipeError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            RecipeError::Invalid { .. } => "recipe_invalid",
-            RecipeError::UnknownPlatform { .. } => "recipe_unknown_platform",
-            RecipeError::BadPath { .. } => "recipe_bad_path",
-            RecipeError::BadTemplate { .. } => "recipe_bad_template",
+            RecipeError::Invalid { .. } => crate::codes::RECIPE_INVALID,
+            RecipeError::UnknownPlatform { .. } => crate::codes::RECIPE_UNKNOWN_PLATFORM,
+            RecipeError::BadPath { .. } => crate::codes::RECIPE_BAD_PATH,
+            RecipeError::BadTemplate { .. } => crate::codes::RECIPE_BAD_TEMPLATE,
         }
     }
 }

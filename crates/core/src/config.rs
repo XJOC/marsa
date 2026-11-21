@@ -194,10 +194,10 @@ impl ConfigError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            ConfigError::Read { .. } => "config_read",
-            ConfigError::Invalid { .. } => "config_invalid",
-            ConfigError::Write { .. } => "config_write",
-            ConfigError::NoHome => "config_no_home",
+            ConfigError::Read { .. } => crate::codes::CONFIG_READ,
+            ConfigError::Invalid { .. } => crate::codes::CONFIG_INVALID,
+            ConfigError::Write { .. } => crate::codes::CONFIG_WRITE,
+            ConfigError::NoHome => crate::codes::CONFIG_NO_HOME,
         }
     }
 }

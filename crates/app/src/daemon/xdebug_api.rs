@@ -26,6 +26,7 @@
 //! php-cgi reads the same `php.ini` (ADR 0016), so the switch works the
 //! same there for a PHP that has the file.
 
+use marsa_core::codes;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -56,7 +57,7 @@ async fn set(
     body: Result<Json<XdebugRequest>, JsonRejection>,
 ) -> Result<Json<XdebugState>, HttpError> {
     let Json(XdebugRequest { enabled }) =
-        body.map_err(|err| HttpError::new(err.status(), "invalid_body", err.body_text()))?;
+        body.map_err(|err| HttpError::new(err.status(), codes::INVALID_BODY, err.body_text()))?;
     // The save and the request in a task of their own: a client that hangs
     // up drops this handler, and must not leave the setting saved but not
     // applied. The pass itself runs in the sync task.
@@ -85,7 +86,7 @@ fn pass_not_run() -> HttpError {
     let message = "the daemon stopped before every php.ini was written; the setting is saved";
     HttpError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
-        "xdebug_interrupted",
+        codes::XDEBUG_INTERRUPTED,
         message,
     )
 }
@@ -153,7 +154,11 @@ where
 fn job_failed(err: &tokio::task::JoinError) -> HttpError {
     tracing::error!(error = %err, "the Xdebug job failed");
     let message = "the Xdebug job failed";
-    HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+    HttpError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        codes::INTERNAL_ERROR,
+        message,
+    )
 }
 
 /// `global.toml` cannot be read or written: the request was fine, the file or

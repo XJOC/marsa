@@ -24,6 +24,7 @@
 
 pub mod orphan;
 
+use marsa_core::codes;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -133,9 +134,9 @@ impl ActionError {
     /// `marsa install caddy` as the fix; its text keeps the exact reason.
     pub fn code(&self) -> &'static str {
         match self {
-            ActionError::NoCaddy(_) | ActionError::NotInstalled(_) => "caddy_not_installed",
-            ActionError::Busy => "service_busy",
-            ActionError::ConfigWrite(_) => "caddy_config_write",
+            ActionError::NoCaddy(_) | ActionError::NotInstalled(_) => codes::CADDY_NOT_INSTALLED,
+            ActionError::Busy => codes::SERVICE_BUSY,
+            ActionError::ConfigWrite(_) => codes::CADDY_CONFIG_WRITE,
             ActionError::ProgramNotAbsolute(err) => err.code(),
         }
     }
@@ -239,10 +240,10 @@ impl LoadError {
     pub fn code(&self) -> &'static str {
         match self {
             LoadError::Config(err) => err.code(),
-            LoadError::Write(_) => "caddy_config_write",
-            LoadError::PortInUse { .. } => orphan::PORT_IN_USE,
-            LoadError::Rejected { .. } => "caddy_config_rejected",
-            LoadError::Unreachable(_) => "caddy_admin_unreachable",
+            LoadError::Write(_) => codes::CADDY_CONFIG_WRITE,
+            LoadError::PortInUse { .. } => codes::PORT_IN_USE,
+            LoadError::Rejected { .. } => codes::CADDY_CONFIG_REJECTED,
+            LoadError::Unreachable(_) => codes::CADDY_ADMIN_UNREACHABLE,
         }
     }
 }
@@ -499,12 +500,12 @@ impl CaddyManager {
         let spec = match self.spec_to_run() {
             Ok(spec) if spec.program.is_file() => spec,
             Ok(spec) => {
-                self.fail("caddy_not_installed", &daemon.events);
+                self.fail(codes::CADDY_NOT_INSTALLED, &daemon.events);
                 return Err(ActionError::NotInstalled(spec.program));
             }
             Err(err) => {
                 warn!(code = err.code(), %err, "no caddy to run");
-                self.fail("caddy_not_installed", &daemon.events);
+                self.fail(codes::CADDY_NOT_INSTALLED, &daemon.events);
                 return Err(ActionError::NoCaddy(err));
             }
         };
@@ -512,7 +513,7 @@ impl CaddyManager {
         let tag = match self.instance_tag() {
             Ok(tag) => tag,
             Err(err) => {
-                self.fail("caddy_config_write", &daemon.events);
+                self.fail(codes::CADDY_CONFIG_WRITE, &daemon.events);
                 return Err(ActionError::ConfigWrite(err));
             }
         };
@@ -536,13 +537,13 @@ impl CaddyManager {
         let config = match self.config(&tag) {
             Ok(config) => config,
             Err(err) => {
-                self.fail("caddy_config_write", &daemon.events);
+                self.fail(codes::CADDY_CONFIG_WRITE, &daemon.events);
                 let err = io::Error::new(io::ErrorKind::InvalidData, err);
                 return Err(ActionError::ConfigWrite(err));
             }
         };
         if let Err(err) = write_config(&self.paths.config_file, &config).await {
-            self.fail("caddy_config_write", &daemon.events);
+            self.fail(codes::CADDY_CONFIG_WRITE, &daemon.events);
             return Err(ActionError::ConfigWrite(err));
         }
         // Before the process starts, so the watcher cannot miss its first line.
@@ -598,7 +599,7 @@ impl CaddyManager {
                 self.stop(daemon, admin).await;
                 // A port conflict found at the same moment says more: keep it.
                 if self.status().state == ServiceState::Stopped {
-                    self.fail("caddy_start_timeout", &daemon.events);
+                    self.fail(codes::CADDY_START_TIMEOUT, &daemon.events);
                 }
             }
         }
@@ -945,7 +946,7 @@ impl Watcher {
         pid_file.remove();
         if conflict {
             // After the supervisor's last change, so this one stays.
-            set_failed(&runtime, &events, "port_in_use");
+            set_failed(&runtime, &events, codes::PORT_IN_USE);
         }
     }
 }

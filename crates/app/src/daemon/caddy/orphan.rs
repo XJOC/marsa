@@ -11,6 +11,7 @@
 //! macOS, the `exe` link on Linux). Anything that is not ours
 //! is never signalled, and another Marsa's Caddy does not even get `/stop`.
 
+use marsa_core::codes;
 use std::error::Error as _;
 use std::fmt;
 use std::future::Future;
@@ -29,12 +30,10 @@ use tracing::{debug, info, warn};
 
 use super::Admin;
 
-/// Another program holds a port Caddy needs.
-pub const PORT_IN_USE: &str = "port_in_use";
 /// Our old Caddy holds the ports and could not be stopped.
-pub const ORPHAN_STUCK: &str = "caddy_orphan_stuck";
+pub const ORPHAN_STUCK: &str = codes::CADDY_ORPHAN_STUCK;
 /// Another Marsa's Caddy (another data folder or user) holds our admin port.
-pub const OTHER_MARSA: &str = "caddy_other_marsa";
+pub const OTHER_MARSA: &str = codes::CADDY_OTHER_MARSA;
 
 /// How often a wait checks the ports again.
 const POLL: Duration = Duration::from_millis(50);
@@ -105,7 +104,7 @@ impl Default for Ladder {
 /// Why Caddy must not start, or why our orphan is still there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Blocked {
-    /// [`PORT_IN_USE`], [`ORPHAN_STUCK`], or [`OTHER_MARSA`].
+    /// [`codes::PORT_IN_USE`], [`ORPHAN_STUCK`], or [`OTHER_MARSA`].
     pub code: &'static str,
     pub reason: String,
 }
@@ -324,7 +323,7 @@ impl Orphans<'_> {
             // Includes a frozen process on our admin port that no pid file
             // names: nothing says it is ours, so it is someone else's port.
             Action::Conflict { reason } => Err(Blocked::new(
-                PORT_IN_USE,
+                codes::PORT_IN_USE,
                 with_owners(reason, &found.inspection),
             )),
             Action::OtherMarsa => {
@@ -417,7 +416,7 @@ impl Orphans<'_> {
                     let code = if unsure || tagged {
                         ORPHAN_STUCK
                     } else {
-                        PORT_IN_USE
+                        codes::PORT_IN_USE
                     };
                     let why = if unsure {
                         "cannot be verified as our Caddy"
@@ -879,7 +878,7 @@ mod tests {
         let fake = Fake::new([ours(), ours(), other]);
 
         let result = run(&setup, &fake).await;
-        assert_eq!(result.unwrap_err().code, PORT_IN_USE);
+        assert_eq!(result.unwrap_err().code, codes::PORT_IN_USE);
         assert_eq!(fake.signals(), [(4242, Signal::Term)], "no SIGKILL");
     }
 
@@ -916,7 +915,7 @@ mod tests {
         let fake = Fake::new([later]);
 
         let blocked = run(&setup, &fake).await.unwrap_err();
-        assert_eq!(blocked.code, PORT_IN_USE);
+        assert_eq!(blocked.code, codes::PORT_IN_USE);
         assert!(
             blocked.reason.contains("site port is held by"),
             "{blocked:?}"

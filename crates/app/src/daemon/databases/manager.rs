@@ -1,6 +1,7 @@
 //! [`ServerManager`]: starts and stops one database server under the
 //! supervisor, one action at a time.
 
+use marsa_core::codes;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -63,14 +64,14 @@ impl ActionError {
     /// Stable error name for the UI.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Unsupported(ServerKind::Postgres) => "postgres_unsupported_platform",
+            Self::Unsupported(ServerKind::Postgres) => codes::POSTGRES_UNSUPPORTED_PLATFORM,
             Self::Config(err) => err.code(),
-            Self::NotInstalled(ServerKind::Postgres, _) => "postgres_not_installed",
+            Self::NotInstalled(ServerKind::Postgres, _) => codes::POSTGRES_NOT_INSTALLED,
             Self::Init(err) => err.code(),
             Self::InUse(busy) => busy.code(),
-            Self::Busy => "service_busy",
+            Self::Busy => codes::SERVICE_BUSY,
             Self::ProgramNotAbsolute(err) => err.code(),
-            Self::Internal => "internal_error",
+            Self::Internal => codes::INTERNAL_ERROR,
             Self::OrphanStuck(kind, _) => orphan::stuck_code(*kind),
         }
     }
@@ -420,7 +421,7 @@ impl ServerManager {
                 self.ready_limit.as_secs()
             );
             let code = match self.kind {
-                ServerKind::Postgres => "postgres_start_timeout",
+                ServerKind::Postgres => codes::POSTGRES_START_TIMEOUT,
             };
             self.fail(&daemon.events, code, &reason);
         }

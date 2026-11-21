@@ -49,6 +49,7 @@
 //!
 //! No message quotes what `security` printed: only the exit code.
 
+use marsa_core::codes;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -63,17 +64,6 @@ use super::{CHECK_LIMIT, PEM_BEGIN, PROMPT_LIMIT, RunOutput, Runner, TRUST_INSTA
 
 /// The tool, by its absolute path (AGENTS.md section 6).
 pub const SECURITY: &str = "/usr/bin/security";
-/// `security add-trusted-cert` did not add the user's trust: the dialog was
-/// refused or cancelled, could not open (no desktop session), or the tool
-/// failed or timed out. The same code as the helper's, so the CLI text fits.
-pub const TRUST_ADD_FAILED: &str = "trust_add_failed";
-/// `security` could not take the trust away or delete the certificate.
-pub const TRUST_REMOVE_FAILED: &str = "trust_remove_failed";
-/// The trust folder, or the record in it, cannot be used: a link, another
-/// user's, not one certificate of at most 16 KiB, or a certificate that is
-/// neither Marsa's in the login keychain nor Caddy's root. The message names
-/// the path; the user may delete the file by hand.
-pub const TRUST_RECORD_UNUSABLE: &str = "trust_record_unusable";
 
 /// The op name of the removal in a report. Not the helper's `trust_remove`:
 /// `uninstall_all` reports that one too, for a trust added as root before
@@ -101,7 +91,7 @@ const TRUST_DIR: &str = "trust";
 const RECORD: &str = "user-trusted.pem";
 const PENDING: &str = "pending.pem";
 /// `read_ca`'s answer for a file that is not there.
-const NO_FILE: &str = "ca_not_ready";
+const NO_FILE: &str = codes::CA_NOT_READY;
 
 /// The login keychain of the user whose home folder is `home`.
 pub fn login_keychain(home: &Path) -> PathBuf {
@@ -161,12 +151,12 @@ pub fn install(
     if let Some(problem) = not_absolute(home, &files.dir) {
         tracing::warn!(problem, "security does not run");
         let message = format!("{problem}, so security did not run");
-        return failed(TRUST_INSTALL, TRUST_ADD_FAILED, message);
+        return failed(TRUST_INSTALL, codes::TRUST_ADD_FAILED, message);
     }
     let pending = files.pending();
     if let Err(problem) = private_dir(&files.dir).and_then(|()| write_pending(&pending, pem)) {
         tracing::warn!(problem = %problem, "the trust folder cannot be used; security does not run");
-        return failed(TRUST_INSTALL, TRUST_RECORD_UNUSABLE, problem);
+        return failed(TRUST_INSTALL, codes::TRUST_RECORD_UNUSABLE, problem);
     }
     let trusted = if is_trusted(runner, &pending, stop) {
         tracing::info!("Marsa's CA root is already trusted for the current user");
@@ -208,7 +198,7 @@ fn add(
          Run \"marsa setup\" in Terminal on the Mac's desktop and approve the dialog; if \
          Marsa was started over SSH, run \"marsa daemon stop\" first"
     );
-    Err(failed(TRUST_INSTALL, TRUST_ADD_FAILED, message))
+    Err(failed(TRUST_INSTALL, codes::TRUST_ADD_FAILED, message))
 }
 
 /// `trust_remove` for the current user, for the uninstall: takes the user's
@@ -234,7 +224,7 @@ pub fn remove(
     if let Some(problem) = problem {
         tracing::warn!(problem, "security does not run");
         let message = format!("{problem}, so security did not run");
-        return failed(TRUST_REMOVE, TRUST_REMOVE_FAILED, message);
+        return failed(TRUST_REMOVE, codes::TRUST_REMOVE_FAILED, message);
     }
     let record = files.record();
     let source = match source(ca_root, files) {
@@ -263,7 +253,7 @@ pub fn remove(
              root certificate, so Marsa left its trust as it is",
             record.display()
         );
-        return failed(TRUST_REMOVE, TRUST_RECORD_UNUSABLE, message);
+        return failed(TRUST_REMOVE, codes::TRUST_RECORD_UNUSABLE, message);
     }
     let removed = untrust_and_delete(runner, &keychain, &source.file, hash, stop);
     if source.recorded && removed.status != OpStatus::Failed {
@@ -298,12 +288,12 @@ fn source(ca_root: &Path, files: &TrustFiles) -> Result<Option<Source>, OpResult
             "{} {reason}, so Marsa left the trust as it is",
             record.display()
         );
-        failed(TRUST_REMOVE, TRUST_RECORD_UNUSABLE, message)
+        failed(TRUST_REMOVE, codes::TRUST_RECORD_UNUSABLE, message)
     };
     let root = read_ca(ca_root);
     let has_dir = existing_private_dir(&files.dir).map_err(|problem| {
         let message = format!("{problem}, so Marsa left the trust as it is");
-        failed(TRUST_REMOVE, TRUST_RECORD_UNUSABLE, message)
+        failed(TRUST_REMOVE, codes::TRUST_RECORD_UNUSABLE, message)
     })?;
     let recorded = if has_dir {
         read_ca(&record)
@@ -338,7 +328,7 @@ fn source(ca_root: &Path, files: &TrustFiles) -> Result<Option<Source>, OpResult
         Err(_) => {
             tracing::warn!("the CA root certificate cannot be used; security does not run");
             let message = "the CA root certificate cannot be used, so security did not run";
-            Err(failed(TRUST_REMOVE, TRUST_REMOVE_FAILED, message))
+            Err(failed(TRUST_REMOVE, codes::TRUST_REMOVE_FAILED, message))
         }
     }
 }
@@ -636,7 +626,7 @@ fn command_failed(
     let how = failure_text(result, limit);
     tracing::warn!(command, outcome = %how, "security could not remove the user's trust");
     let message = format!("security {command} {how}");
-    failed(op, TRUST_REMOVE_FAILED, message)
+    failed(op, codes::TRUST_REMOVE_FAILED, message)
 }
 
 /// How a command ended, when it did not end well. `limit` is the time it
@@ -958,10 +948,18 @@ mod tests {
         for (name, home, files) in cases {
             let added = install(&*fake, &home, TEST_CA, files, &stop);
             assert_eq!(added.status, OpStatus::Failed, "{name}");
-            assert_eq!(added.code.as_deref(), Some(TRUST_ADD_FAILED), "{name}");
+            assert_eq!(
+                added.code.as_deref(),
+                Some(codes::TRUST_ADD_FAILED),
+                "{name}"
+            );
             let removed = remove(&*fake, &home, &data.ca_root(), files, &stop);
             assert_eq!(removed.op, TRUST_REMOVE, "{name}");
-            assert_eq!(removed.code.as_deref(), Some(TRUST_REMOVE_FAILED), "{name}");
+            assert_eq!(
+                removed.code.as_deref(),
+                Some(codes::TRUST_REMOVE_FAILED),
+                "{name}"
+            );
             for result in [added, removed] {
                 let message = result.message.unwrap();
                 assert!(
@@ -971,7 +969,7 @@ mod tests {
             }
         }
         let removed = remove(&*fake, &home(), Path::new("root.crt"), &data.files(), &stop);
-        assert_eq!(removed.code.as_deref(), Some(TRUST_REMOVE_FAILED));
+        assert_eq!(removed.code.as_deref(), Some(codes::TRUST_REMOVE_FAILED));
         assert!(fake.calls().is_empty());
         // Nothing was written or deleted either.
         assert_eq!(data.recorded().as_deref(), Some(TEST_CA));
@@ -1031,7 +1029,10 @@ mod tests {
             _ => exit(1, "refused"),
         });
         let data = Data::new(Some(TEST_CA), None);
-        assert_eq!(data.install(&fake).code.as_deref(), Some(TRUST_ADD_FAILED));
+        assert_eq!(
+            data.install(&fake).code.as_deref(),
+            Some(codes::TRUST_ADD_FAILED)
+        );
         assert_eq!(data.recorded(), None);
         assert!(data.trust_names().is_empty());
 
@@ -1072,7 +1073,7 @@ mod tests {
         let data = Data::new(Some(TEST_CA), None);
         fs::write(data.trust_dir(), "a file").unwrap();
         for found in [data.install(&fake), data.remove(&fake)] {
-            assert_eq!(found.code.as_deref(), Some(TRUST_RECORD_UNUSABLE));
+            assert_eq!(found.code.as_deref(), Some(codes::TRUST_RECORD_UNUSABLE));
             let message = found.message.unwrap();
             assert!(message.contains(&path_text(&data.trust_dir())), "{message}");
         }
@@ -1085,7 +1086,7 @@ mod tests {
             fs::write(target.join("user-trusted.pem"), TEST_CA).unwrap();
             std::os::unix::fs::symlink(&target, data.trust_dir()).unwrap();
             for found in [data.install(&fake), data.remove(&fake)] {
-                assert_eq!(found.code.as_deref(), Some(TRUST_RECORD_UNUSABLE));
+                assert_eq!(found.code.as_deref(), Some(codes::TRUST_RECORD_UNUSABLE));
             }
             let names: Vec<_> = fs::read_dir(&target).unwrap().collect();
             assert_eq!(names.len(), 1);
@@ -1204,7 +1205,7 @@ mod tests {
             let refused = data.remove(&fake);
             assert_eq!(
                 refused.code.as_deref(),
-                Some(TRUST_RECORD_UNUSABLE),
+                Some(codes::TRUST_RECORD_UNUSABLE),
                 "{ca:?}"
             );
             let message = refused.message.unwrap();
@@ -1226,7 +1227,7 @@ mod tests {
         ] {
             let data = Data::new(ca, Some(record));
             let refused = data.remove(&fake);
-            assert_eq!(refused.code.as_deref(), Some(TRUST_RECORD_UNUSABLE));
+            assert_eq!(refused.code.as_deref(), Some(codes::TRUST_RECORD_UNUSABLE));
             let message = refused.message.unwrap();
             assert!(message.contains(&path_text(&data.record())), "{message}");
             assert_eq!(data.recorded().as_deref(), Some(record));
@@ -1235,12 +1236,12 @@ mod tests {
         let data = Data::new(Some(TEST_CA), None);
         fs::create_dir_all(data.record()).unwrap();
         let refused = data.remove(&fake);
-        assert_eq!(refused.code.as_deref(), Some(TRUST_RECORD_UNUSABLE));
+        assert_eq!(refused.code.as_deref(), Some(codes::TRUST_RECORD_UNUSABLE));
         assert!(data.record().is_dir());
         // A root.crt that is not a certificate, and no record.
         let data = Data::new(Some("garbage"), None);
         let refused = data.remove(&fake);
-        assert_eq!(refused.code.as_deref(), Some(TRUST_REMOVE_FAILED));
+        assert_eq!(refused.code.as_deref(), Some(codes::TRUST_REMOVE_FAILED));
     }
 
     #[test]
@@ -1338,7 +1339,7 @@ mod tests {
         for (name, message, answer, calls) in cases {
             let data = Data::new(Some(TEST_CA), Some(TEST_CA));
             let fake = Fake::answering(move |_, args| answer(args));
-            let want = failed(TRUST_REMOVE, TRUST_REMOVE_FAILED, message);
+            let want = failed(TRUST_REMOVE, codes::TRUST_REMOVE_FAILED, message);
             assert_eq!(data.remove(&fake), want, "{name}");
             assert_eq!(security_calls(&fake).len(), calls, "{name}");
             // The record stays for the next try.

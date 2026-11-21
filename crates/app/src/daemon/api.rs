@@ -3,6 +3,7 @@
 //! Every route, the fallbacks included, sits behind `require_auth` (task
 //! M3-03). Handlers reach the daemon through `State<Arc<Daemon>>`.
 
+use marsa_core::codes;
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -114,14 +115,14 @@ async fn events(State(daemon): State<Arc<Daemon>>) -> impl IntoResponse {
 
 async fn not_found(uri: Uri) -> HttpError {
     let message = format!("no route for {}", uri.path());
-    HttpError::new(StatusCode::NOT_FOUND, "not_found", message)
+    HttpError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND, message)
 }
 
 async fn method_not_allowed() -> HttpError {
     let message = "the route does not accept this method";
     HttpError::new(
         StatusCode::METHOD_NOT_ALLOWED,
-        "method_not_allowed",
+        codes::METHOD_NOT_ALLOWED,
         message,
     )
 }

@@ -28,6 +28,7 @@
 //!
 //! Exit code 1 if anything did not happen as asked.
 
+use marsa_core::codes;
 use std::collections::hash_map::RandomState;
 use std::fs;
 use std::hash::{BuildHasher, Hasher};
@@ -78,7 +79,7 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
     // Before the question: the daemon would answer `uninstall_not_supported`
     // only after the user typed yes.
     if !runs_here(Platform::current()) {
-        return own_failure("uninstall_not_supported", None).report();
+        return own_failure(codes::UNINSTALL_NOT_SUPPORTED, None).report();
     }
     let deletable = !data_dir_given;
     let plan = strings::uninstall_all_plan(data_dir, deletable, deletable && args.delete_data);
@@ -193,7 +194,7 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
         }
         DataFolder::NotOurs => {
             if args.delete_data {
-                let code = "uninstall_all_data_dir_not_default";
+                let code = codes::UNINSTALL_ALL_DATA_DIR_NOT_DEFAULT;
                 eprintln!("{}", own_failure(code, Some(data_dir)).line());
                 ok = false;
             }
@@ -332,11 +333,11 @@ fn confirm(args: &UninstallAllArgs, terminal: &mut impl Ask) -> Result<(), Failu
         return Ok(());
     }
     if !terminal.is_terminal() {
-        return Err(own_failure("uninstall_all_needs_yes", None));
+        return Err(own_failure(codes::UNINSTALL_ALL_NEEDS_YES, None));
     }
     match terminal.ask(strings::UNINSTALL_ALL_CONFIRM) {
         Some(answer) if answer.trim().eq_ignore_ascii_case("yes") => Ok(()),
-        _ => Err(own_failure("uninstall_all_not_confirmed", None)),
+        _ => Err(own_failure(codes::UNINSTALL_ALL_NOT_CONFIRMED, None)),
     }
 }
 
@@ -445,7 +446,7 @@ fn is_yes(answer: &str) -> bool {
 fn delete_when_stopped(data_dir: &Path) -> Result<(), Failure> {
     if client::is_daemon_running(data_dir) {
         return Err(own_failure(
-            "uninstall_all_daemon_restarted",
+            codes::UNINSTALL_ALL_DAEMON_RESTARTED,
             Some(data_dir),
         ));
     }
@@ -453,7 +454,10 @@ fn delete_when_stopped(data_dir: &Path) -> Result<(), Failure> {
     // this marsa may run from the data folder (`<data>\bin`). The CLI runs
     // on the machine marsad runs on.
     if cfg!(windows) && programs_dir().is_some_and(|dir| inside(&dir, data_dir)) {
-        return Err(own_failure("uninstall_all_data_dir_in_use", Some(data_dir)));
+        return Err(own_failure(
+            codes::UNINSTALL_ALL_DATA_DIR_IN_USE,
+            Some(data_dir),
+        ));
     }
     let home = std::env::home_dir();
     delete_data_dir(data_dir, home.as_deref()).map(|_| ())
@@ -476,7 +480,7 @@ fn delete_when_stopped(data_dir: &Path) -> Result<(), Failure> {
 /// `uninstall_all_data_delete_failed` if the rename or the deletion failed,
 /// and `uninstall_all_data_dir_back` if `dir` was made again meanwhile.
 fn delete_data_dir(dir: &Path, home: Option<&Path>) -> Result<bool, Failure> {
-    let unsafe_dir = || own_failure("uninstall_all_data_dir_unsafe", Some(dir));
+    let unsafe_dir = || own_failure(codes::UNINSTALL_ALL_DATA_DIR_UNSAFE, Some(dir));
     let holds_home = home.is_some_and(|home| home.starts_with(dir));
     let name = dir.file_name().filter(|_| dir.parent().is_some());
     let Some(name) = name.filter(|_| dir.is_absolute() && !holds_home) else {
@@ -487,7 +491,10 @@ fn delete_data_dir(dir: &Path, home: Option<&Path>) -> Result<bool, Failure> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(err) => {
             tracing::debug!(error = %err, path = %dir.display(), "cannot check the data folder");
-            return Err(own_failure("uninstall_all_data_delete_failed", Some(dir)));
+            return Err(own_failure(
+                codes::UNINSTALL_ALL_DATA_DELETE_FAILED,
+                Some(dir),
+            ));
         }
     };
     if !meta.file_type().is_dir() {
@@ -498,14 +505,17 @@ fn delete_data_dir(dir: &Path, home: Option<&Path>) -> Result<bool, Failure> {
     let doomed = dir.with_file_name(doomed);
     if let Err(err) = fs::rename(dir, &doomed) {
         tracing::debug!(error = %err, path = %dir.display(), "cannot rename the data folder");
-        return Err(own_failure("uninstall_all_data_delete_failed", Some(dir)));
+        return Err(own_failure(
+            codes::UNINSTALL_ALL_DATA_DELETE_FAILED,
+            Some(dir),
+        ));
     }
     fs::remove_dir_all(&doomed).map_err(|err| {
         tracing::debug!(error = %err, path = %doomed.display(), "cannot delete the data folder");
-        own_failure("uninstall_all_data_delete_failed", Some(&doomed))
+        own_failure(codes::UNINSTALL_ALL_DATA_DELETE_FAILED, Some(&doomed))
     })?;
     if fs::symlink_metadata(dir).is_ok() {
-        return Err(own_failure("uninstall_all_data_dir_back", Some(dir)));
+        return Err(own_failure(codes::UNINSTALL_ALL_DATA_DIR_BACK, Some(dir)));
     }
     Ok(true)
 }
@@ -547,7 +557,7 @@ fn render(report: &UninstallReport, data_dir: &Path) -> String {
             OpStatus::Failed => {
                 let code = printable(result.code.as_deref().unwrap_or_default());
                 let details = Details {
-                    path: (code == user_trust::TRUST_RECORD_UNUSABLE).then_some(record.as_path()),
+                    path: (code == codes::TRUST_RECORD_UNUSABLE).then_some(record.as_path()),
                     ..Details::default()
                 };
                 let reason = strings::message(&code, &details);

@@ -17,6 +17,7 @@
 //! `caddy_not_installed` before Caddy is installed, is not a failure: its
 //! line says what to do.
 
+use marsa_core::codes;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -27,7 +28,7 @@ use marsa_core::types::{OpStatus, PortHolder, SetupReport};
 use super::daemon::{ClientFailure, connect, failure};
 use super::sites::printable;
 use super::strings::{self, Details};
-use crate::daemon::setup_api::user_trust::{self, TrustFiles};
+use crate::daemon::setup_api::user_trust::TrustFiles;
 
 /// Starts the daemon if needed, runs the setup, and prints its report.
 pub async fn run(data_dir: &Path) -> ExitCode {
@@ -93,7 +94,7 @@ pub fn render(report: &SetupReport, data_dir: &Path) -> String {
             OpStatus::Failed => {
                 let code = printable(result.code.as_deref().unwrap_or_default());
                 // The uninstall's text for this code is about its record.
-                let reason = if code == user_trust::TRUST_RECORD_UNUSABLE {
+                let reason = if code == codes::TRUST_RECORD_UNUSABLE {
                     strings::setup_trust_dir_unusable(TrustFiles::in_dir(data_dir).dir())
                 } else {
                     strings::message(&code, &Details::default())
@@ -111,13 +112,13 @@ pub fn render(report: &SetupReport, data_dir: &Path) -> String {
             ..Details::default()
         };
         // The general text of this code is for `marsa services start caddy`.
-        let reason = if code == "caddy_not_installed" {
+        let reason = if code == codes::CADDY_NOT_INSTALLED {
             strings::SETUP_CADDY_NOT_INSTALLED.to_owned()
         } else {
             strings::message(&code, &details)
         };
         push(strings::setup_skipped(&step, &reason, &code));
-        if code == "redirect_port_held" {
+        if code == codes::REDIRECT_PORT_HELD {
             for holder in &report.port_holders {
                 push(port_held(holder));
             }

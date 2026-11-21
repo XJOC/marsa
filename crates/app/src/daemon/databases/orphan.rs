@@ -23,6 +23,7 @@
 //! (`postmaster.pid`) never authorizes a signal, and that file is never
 //! deleted here.
 
+use marsa_core::codes;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -38,7 +39,7 @@ use super::facts::Probes;
 /// Our old server could not be stopped: nothing was started.
 pub(super) fn stuck_code(kind: ServerKind) -> &'static str {
     match kind {
-        ServerKind::Postgres => "postgres_orphan_stuck",
+        ServerKind::Postgres => codes::POSTGRES_ORPHAN_STUCK,
     }
 }
 

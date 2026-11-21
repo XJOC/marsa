@@ -9,6 +9,7 @@
 //! daemon keeps absolute paths only, and `canonicalize` would give `\\?\`
 //! paths on Windows, which must not reach Caddy.
 
+use marsa_core::codes;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -201,7 +202,7 @@ impl Action {
                 site: Some(name.as_str()),
                 ..Details::default()
             };
-            return Err(local("site_not_found", &details));
+            return Err(local(codes::SITE_NOT_FOUND, &details));
         };
         let url = url(site);
         open(&url).map_err(|err| {
@@ -297,10 +298,12 @@ impl Action {
             .and_then(|(list, name)| parked_folder(list, name));
         let sites_toml = ConfigPaths::in_dir(data_dir).sites;
         let path = match failure.code.as_str() {
-            "config_read" | "config_invalid" | "config_write" => Some(sites_toml.as_path()),
-            "site_is_parked" => holder.as_deref(),
-            code if code.starts_with("site_") || code == "folder_not_parked" => folder,
-            "invalid_version" | "unsupported_alias" if requested.is_some() => None,
+            codes::CONFIG_READ | codes::CONFIG_INVALID | codes::CONFIG_WRITE => {
+                Some(sites_toml.as_path())
+            }
+            codes::SITE_IS_PARKED => holder.as_deref(),
+            code if code.starts_with("site_") || code == codes::FOLDER_NOT_PARKED => folder,
+            codes::INVALID_VERSION | codes::UNSUPPORTED_ALIAS if requested.is_some() => None,
             _ => return failure,
         };
         let details = Details {
@@ -349,7 +352,7 @@ pub async fn run(command: &SitesCommand, data_dir: &Path) -> ExitCode {
         Err(err) => {
             // These answers name no folder; the site list does.
             let list = match err.code() {
-                "site_is_parked" | "folder_not_parked" => client.sites().await.ok(),
+                codes::SITE_IS_PARKED | codes::FOLDER_NOT_PARKED => client.sites().await.ok(),
                 _ => None,
             };
             action.failure_with(&err, data_dir, list.as_ref()).report()
@@ -396,7 +399,7 @@ async fn add_to_hosts(client: &DaemonClient, data_dir: &Path) -> ExitCode {
 fn hosts_to_add(status: Result<HostsStatus, ClientFailure>) -> Result<Option<String>, String> {
     match status {
         // A daemon of an older build, with no such route.
-        Err(failure) if failure.code == "not_found" => Ok(None),
+        Err(failure) if failure.code == codes::NOT_FOUND => Ok(None),
         Err(failure) => Err(strings::hosts_not_checked(&failure.code)),
         Ok(status) if !status.used || status.missing.is_empty() => Ok(None),
         Ok(status) => {
@@ -472,7 +475,7 @@ pub fn folder(
     }
     let cwd = cwd().map_err(|err| {
         tracing::debug!(error = %err, "cannot read the current folder");
-        local("no_current_dir", &Details::default())
+        local(codes::NO_CURRENT_DIR, &Details::default())
     })?;
     Ok(absolute_in(dir, &cwd))
 }
@@ -503,7 +506,7 @@ pub fn link_name(name: Option<&str>, folder: &Path) -> Result<String, ClientFail
             site: Some(&named),
             ..Details::default()
         };
-        let mut failure = local("site_name_invalid", &details);
+        let mut failure = local(codes::SITE_NAME_INVALID, &details);
         failure.message = format!("{} {}", failure.message, strings::PASS_A_NAME);
         failure
     })

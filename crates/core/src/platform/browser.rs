@@ -56,8 +56,8 @@ impl OpenError {
     /// Stable error name for the UI. Never changes once released.
     pub fn code(&self) -> &'static str {
         match self {
-            OpenError::NoOpener { .. } => "open_no_program",
-            OpenError::Spawn { .. } | OpenError::Failed { .. } => "open_failed",
+            OpenError::NoOpener { .. } => crate::codes::OPEN_NO_PROGRAM,
+            OpenError::Spawn { .. } | OpenError::Failed { .. } => crate::codes::OPEN_FAILED,
         }
     }
 }

@@ -54,6 +54,7 @@
 //! One request at a time, shared with setup ([`Setup`]): 409
 //! `uninstall_running` or `setup_running`.
 
+use marsa_core::codes;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -108,7 +109,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallR
             let message = "the uninstall runs on macOS, Linux, and Windows only";
             HttpError::new(
                 StatusCode::NOT_IMPLEMENTED,
-                "uninstall_not_supported",
+                codes::UNINSTALL_NOT_SUPPORTED,
                 message,
             )
         })?;
@@ -153,7 +154,11 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallR
     job.await.map(Json).map_err(|err| {
         tracing::error!(error = %err, "the uninstall job failed");
         let message = "the uninstall job failed";
-        HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+        HttpError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            codes::INTERNAL_ERROR,
+            message,
+        )
     })
 }
 
@@ -217,7 +222,7 @@ fn after_the_helper_on_linux(
         None => {
             tracing::warn!("the home folder is not known, so the NSS databases cannot be found");
             let message = "the home folder of the current user is not known";
-            user_trust::failed(nss::NSS_REMOVE, nss::NSS_REMOVE_FAILED, message)
+            user_trust::failed(nss::NSS_REMOVE, codes::NSS_REMOVE_FAILED, message)
         }
     });
     if let Some(result) = remove_login_file_if_any(autostart) {
@@ -274,7 +279,7 @@ fn run_windows(
 /// The login file, unless this system has none (`autostart_unsupported`).
 fn remove_login_file_if_any(autostart: &Autostart) -> Option<OpResult> {
     let result = remove_login_file(autostart);
-    (result.code.as_deref() != Some("autostart_unsupported")).then_some(result)
+    (result.code.as_deref() != Some(codes::AUTOSTART_UNSUPPORTED)).then_some(result)
 }
 
 /// The current user's trust in Marsa's CA (ADR 0015), from the record in
@@ -291,7 +296,7 @@ fn untrust_for_user(setup: &Setup, data_dir: &Path, stop: &CancellationToken) ->
                            keychain cannot be found";
             user_trust::failed(
                 user_trust::TRUST_REMOVE,
-                user_trust::TRUST_REMOVE_FAILED,
+                codes::TRUST_REMOVE_FAILED,
                 message,
             )
         }

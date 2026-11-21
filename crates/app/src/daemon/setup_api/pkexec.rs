@@ -40,7 +40,7 @@ use std::path::Path;
 use marsa_core::helper::OpResult;
 use marsa_core::types::ApiError;
 
-use super::{Flow, MAX_ANSWER, RunOutput, failure, not_finished, parse_answer, results_of};
+use super::{Flow, MAX_ANSWER, Reason, RunOutput, failure, not_finished, parse_answer, results_of};
 
 /// `pkexec` itself, from polkit. An absolute path: `marsad` never searches
 /// `PATH`.
@@ -74,7 +74,7 @@ pub fn read_answer(flow: Flow, output: io::Result<RunOutput>) -> Result<Vec<OpRe
             tracing::warn!("no /usr/bin/pkexec on this system");
             let message = "pkexec is not installed: install the package pkexec (Debian, \
                            Ubuntu), polkit (Fedora), or policykit-1 (older systems)";
-            return failure(&flow.code("pkexec_missing"), message);
+            return failure(flow.code(Reason::PkexecMissing), message);
         }
         not_finished(flow, &err, "pkexec")
     })?;
@@ -87,14 +87,17 @@ pub fn read_answer(flow: Flow, output: io::Result<RunOutput>) -> Result<Vec<OpRe
         return Err(match output.code {
             Some(DISMISSED) => {
                 tracing::info!("the password dialog was dismissed");
-                failure(&flow.code("cancelled"), "the password dialog was dismissed")
+                failure(
+                    flow.code(Reason::Cancelled),
+                    "the password dialog was dismissed",
+                )
             }
             Some(NOT_AUTHORIZED) => {
                 // Also when pkexec could not run the helper at all (a file
                 // removed after the check), which the code cannot tell.
                 tracing::info!("pkexec did not give admin rights, or could not run the helper");
                 failure(
-                    &flow.code("not_authorized"),
+                    flow.code(Reason::NotAuthorized),
                     "Linux did not give admin rights: a wrong password, no password dialog \
                      (as over SSH), or a policy that refused",
                 )
@@ -107,7 +110,7 @@ pub fn read_answer(flow: Flow, output: io::Result<RunOutput>) -> Result<Vec<OpRe
                     "marsa-helper gave no answer Marsa can read"
                 );
                 failure(
-                    &flow.code("helper_failed"),
+                    flow.code(Reason::HelperFailed),
                     "the helper's answer cannot be read",
                 )
             }
