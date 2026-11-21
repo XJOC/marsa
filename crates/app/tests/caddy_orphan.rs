@@ -34,7 +34,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use marsa::daemon::caddy::caddy_spec_for;
-use marsa::daemon::caddy::orphan::{BoxFuture, Processes};
+use marsa::daemon::services::probe::{BoxFuture, ProcessProbe};
 use marsa::daemon::state::Daemon;
 use marsa_core::caddy::{CaddyInput, SERVER_ID};
 use marsa_core::orphan::{Liveness, PidRecord};
@@ -207,7 +207,7 @@ impl Recorder {
     }
 }
 
-impl Processes for Recorder {
+impl ProcessProbe for Recorder {
     fn identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
         Box::pin(process::identity(pid))
     }
@@ -230,7 +230,7 @@ impl Processes for Recorder {
 }
 
 /// A daemon on `data` whose Caddy is this binary in fake mode `mode`.
-fn daemon_on(data: &Path, mode: &str, ports: Ports, processes: Arc<dyn Processes>) -> Daemon {
+fn daemon_on(data: &Path, mode: &str, ports: Ports, processes: Arc<dyn ProcessProbe>) -> Daemon {
     let mut daemon = Daemon::new(data.to_path_buf());
     let caddy = &mut daemon.caddy;
     caddy.input = CaddyInput {

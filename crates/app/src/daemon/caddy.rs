@@ -44,7 +44,8 @@ use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use self::orphan::{Blocked, Ladder, Orphans, PidFile, Processes, SystemProcesses};
+use self::orphan::{Blocked, Ladder, Orphans, PidFile};
+use super::services::probe::{ProcessProbe, SystemProbe};
 use super::state::Daemon;
 use super::supervisor::{ServiceHandle, ServiceRuntime, Supervisor, lock, now_ms};
 
@@ -174,7 +175,7 @@ pub struct CaddyManager {
     pub ready_limit: Duration,
     /// Who runs under a pid, and signals, for the orphan check. Tests put a
     /// recorder here.
-    pub processes: Arc<dyn Processes>,
+    pub processes: Arc<dyn ProcessProbe>,
     /// How long each step of an orphan's stop waits.
     pub ladder: Ladder,
     /// The program of the last start, so an uninstall never deletes the
@@ -280,7 +281,7 @@ impl CaddyManager {
             input: CaddyInput::default(),
             low_ports: || false,
             ready_limit: READY_LIMIT,
-            processes: Arc::new(SystemProcesses),
+            processes: Arc::new(SystemProbe),
             ladder: Ladder::default(),
             started: Mutex::default(),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(CADDY_ID))),
@@ -910,7 +911,7 @@ struct Watcher {
     events: broadcast::Sender<Event>,
     /// `run/caddy.pid`: written after each spawn, removed after the exit.
     pid_file: PidFile,
-    processes: Arc<dyn Processes>,
+    processes: Arc<dyn ProcessProbe>,
 }
 
 impl Watcher {
@@ -958,7 +959,7 @@ async fn watch(
     first_seq: u64,
     runtime: &Mutex<ServiceRuntime>,
     pid_file: &PidFile,
-    processes: &dyn Processes,
+    processes: &dyn ProcessProbe,
 ) {
     let mut recorded = None;
     loop {
