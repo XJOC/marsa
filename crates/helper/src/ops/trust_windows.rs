@@ -34,11 +34,12 @@ use std::path::{Path, PathBuf};
 use sha1::{Digest, Sha1};
 
 use super::program;
-use super::trust::{
+use super::trust::{parse_pem, to_pem};
+use crate::response::OpResult;
+use crate::response::code::{
     TRUST_ADD_FAILED, TRUST_CERT_INVALID, TRUST_DELETE, TRUST_READ, TRUST_REMOVE_FAILED,
-    TRUST_WRITE, parse_pem, to_pem,
+    TRUST_WRITE,
 };
-use crate::response::{OpResult, Outcome};
 use crate::system::{RunOutput, System};
 
 const CERTUTIL: &str = "certutil.exe";
@@ -83,7 +84,7 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
     };
     match stored_thumbprint(INSTALL, &path, system) {
         Ok(Some(old)) if old == thumbprint => match in_store(INSTALL, &thumbprint, system) {
-            Ok(true) => return result(INSTALL, Outcome::Unchanged),
+            Ok(true) => return OpResult::unchanged(INSTALL),
             // Removed by hand since: added again below.
             Ok(false) => {}
             Err(failed) => return failed,
@@ -98,7 +99,7 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
             // (see the module doc), and the store stays as it is.
             Ok(true) => {
                 return match write_file(&path, &der, system) {
-                    Ok(()) => result(INSTALL, Outcome::Unchanged),
+                    Ok(()) => OpResult::unchanged(INSTALL),
                     Err(failed) => failed,
                 };
             }
@@ -122,7 +123,7 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
     // `-addstore` exits with 0 when the certificate is already there too, so
     // the store itself is the check.
     match in_store(INSTALL, &thumbprint, system) {
-        Ok(true) => result(INSTALL, Outcome::Done),
+        Ok(true) => OpResult::done(INSTALL),
         Ok(false) => {
             // Nothing of it is trusted, so the record goes too.
             let _ = remove_steps(INSTALL, &path, &thumbprint, system);
@@ -143,17 +144,13 @@ pub fn remove(system: &impl System) -> OpResult {
         Err(failed) => return failed,
     };
     match stored_thumbprint(REMOVE, &path, system) {
-        Ok(None) => result(REMOVE, Outcome::Unchanged),
+        Ok(None) => OpResult::unchanged(REMOVE),
         Ok(Some(thumbprint)) => match remove_steps(REMOVE, &path, &thumbprint, system) {
-            Ok(()) => result(REMOVE, Outcome::Done),
+            Ok(()) => OpResult::done(REMOVE),
             Err(failed) => failed,
         },
         Err(failed) => failed,
     }
-}
-
-fn result(op: &'static str, outcome: Outcome) -> OpResult {
-    OpResult { op, outcome }
 }
 
 fn ca_path(
@@ -307,6 +304,7 @@ mod tests {
     use crate::ops::testing::code_of as status;
     use crate::os::Os;
     use crate::request::Request;
+    use crate::response::Outcome;
     use crate::system::{FakeSystem, Hooked, RunHook};
 
     const INSTALL_DIR: &str = r"C:\Program Files\Marsa";

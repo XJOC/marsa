@@ -54,9 +54,9 @@ use super::daemon::{ClientFailure, failure};
 use super::setup::port_held;
 use super::sites::printable;
 use super::strings::{self, Details};
-use crate::daemon::caddy::CADDY_ID;
-use crate::daemon::setup_api::{linux_dns, user_trust};
+use marsa_core::caddy::CADDY_ID;
 use marsa_core::platform::runner::RealRunner;
+use marsa_core::platform::{linux_dns, trust};
 
 /// How long the system resolver may take for the `.test` name.
 const DNS_LIMIT: Duration = Duration::from_secs(5);
@@ -273,7 +273,7 @@ fn trust(data_dir: &Path) -> Verdict {
     };
     let exists = ca_root.is_file();
     let trusted = exists
-        .then(|| user_trust::trusted(&RealRunner, &ca_root, &CancellationToken::new()))
+        .then(|| trust::trusted(&RealRunner, &ca_root, &CancellationToken::new()))
         .flatten();
     doctor::trust(exists, trusted)
 }

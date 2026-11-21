@@ -41,9 +41,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// The service id: the key in `Daemon::procs`, the `{id}` in the routes, and
-/// the log file `logs/caddy.log`.
-pub const CADDY_ID: &str = "caddy";
+pub use marsa_core::caddy::CADDY_ID;
 
 /// How Caddy and each php-fpm pool restart after a failure: up to 3 times,
 /// after 0.5 s, then twice as long each time, at most 5 s.

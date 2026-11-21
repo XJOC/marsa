@@ -15,7 +15,6 @@
 //! No external command runs here: only [`System::read`], `write_atomic`, and
 //! `remove`.
 
-use std::io;
 use std::path::Path;
 
 use super::marked::{self, Current, MARKER};
@@ -39,7 +38,9 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
             let message = format!("{PATH} was not written by Marsa, so it was left as it is");
             return OpResult::failed(INSTALL, code::RESOLVER_FOREIGN, message);
         }
-        Current::Unreadable(kind) => return unreadable(INSTALL, kind),
+        Current::Unreadable(kind) => {
+            return OpResult::unreadable(INSTALL, code::RESOLVER_READ, PATH, kind);
+        }
         Current::Ours(bytes) if bytes == content.as_bytes() => Outcome::Unchanged,
         Current::Missing | Current::Ours(_) => {
             if let Err(err) = system.write_atomic(Path::new(PATH), content.as_bytes(), MODE) {
@@ -60,7 +61,9 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
 pub fn remove(system: &impl System) -> OpResult {
     let outcome = match marked::current(system, Path::new(PATH)) {
         Current::Missing | Current::Foreign => Outcome::Unchanged,
-        Current::Unreadable(kind) => return unreadable(REMOVE, kind),
+        Current::Unreadable(kind) => {
+            return OpResult::unreadable(REMOVE, code::RESOLVER_READ, PATH, kind);
+        }
         Current::Ours(_) => {
             if let Err(err) = system.remove(Path::new(PATH)) {
                 let message = format!("cannot delete {PATH}: {}", err.kind());
@@ -78,11 +81,6 @@ pub fn remove(system: &impl System) -> OpResult {
 /// LF only, with a final newline.
 fn content(port: u16) -> String {
     format!("{MARKER}\nnameserver 127.0.0.1\nport {port}\n")
-}
-
-fn unreadable(op: &'static str, kind: io::ErrorKind) -> OpResult {
-    let message = format!("cannot read {PATH}: {kind}, so it was left as it is");
-    OpResult::failed(op, code::RESOLVER_READ, message)
 }
 
 #[cfg(test)]
@@ -132,10 +130,6 @@ mod tests {
         files.get(Path::new(PATH)).cloned()
     }
 
-    fn result(op: &'static str, outcome: Outcome) -> OpResult {
-        OpResult { op, outcome }
-    }
-
     fn foreign() -> OpResult {
         let message = format!("{PATH} was not written by Marsa, so it was left as it is");
         OpResult::failed(INSTALL, code::RESOLVER_FOREIGN, message)
@@ -150,7 +144,7 @@ mod tests {
     #[test]
     fn install_writes_a_missing_file() {
         let fake = FakeSystem::default();
-        assert_eq!(install(18053, &fake), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &fake), OpResult::done(INSTALL));
         assert_eq!(file(&fake), Some((ours(18053), 0o644)));
     }
 
@@ -169,7 +163,7 @@ mod tests {
     #[test]
     fn remove_of_a_missing_file_is_unchanged() {
         let fake = FakeSystem::default();
-        assert_eq!(remove(&fake), result(REMOVE, Outcome::Unchanged));
+        assert_eq!(remove(&fake), OpResult::unchanged(REMOVE));
         assert_eq!(file(&fake), None);
     }
 
@@ -178,28 +172,28 @@ mod tests {
         let mut fake = fake_with(&ours(18053));
         // Any write fails here, so `unchanged` also shows that none was tried.
         fake.fail_writes.insert(PathBuf::from(PATH));
-        assert_eq!(install(18053, &fake), result(INSTALL, Outcome::Unchanged));
+        assert_eq!(install(18053, &fake), OpResult::unchanged(INSTALL));
         assert_eq!(file(&fake), Some((ours(18053), OLD_MODE)));
     }
 
     #[test]
     fn remove_deletes_our_same_file() {
         let fake = fake_with(&ours(18053));
-        assert_eq!(remove(&fake), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&fake), OpResult::done(REMOVE));
         assert_eq!(file(&fake), None);
     }
 
     #[test]
     fn install_rewrites_our_file_with_another_port() {
         let fake = fake_with(&ours(18054));
-        assert_eq!(install(18053, &fake), result(INSTALL, Outcome::Done));
+        assert_eq!(install(18053, &fake), OpResult::done(INSTALL));
         assert_eq!(file(&fake), Some((ours(18053), MODE)));
     }
 
     #[test]
     fn remove_deletes_our_file_with_another_port() {
         let fake = fake_with(&ours(18054));
-        assert_eq!(remove(&fake), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&fake), OpResult::done(REMOVE));
         assert_eq!(file(&fake), None);
     }
 
@@ -214,7 +208,7 @@ mod tests {
     #[test]
     fn remove_keeps_a_foreign_file() {
         let fake = fake_with(HERD);
-        assert_eq!(remove(&fake), result(REMOVE, Outcome::Unchanged));
+        assert_eq!(remove(&fake), OpResult::unchanged(REMOVE));
         assert_eq!(file(&fake), Some((HERD.to_vec(), OLD_MODE)));
     }
 
@@ -225,7 +219,7 @@ mod tests {
             { "op": "resolver_install", "port": 18053 },
             { "op": "resolver_remove" },
         ]);
-        let expected = [foreign(), result(REMOVE, Outcome::Unchanged)];
+        let expected = [foreign(), OpResult::unchanged(REMOVE)];
         assert_eq!(apply_ops(ops, &fake), expected);
         assert_eq!(file(&fake), Some((HERD.to_vec(), OLD_MODE)));
     }
@@ -243,11 +237,11 @@ mod tests {
     fn remove_keeps_a_file_over_4_kib() {
         let large = ours_padded(4097);
         let fake = fake_with(&large);
-        assert_eq!(remove(&fake), result(REMOVE, Outcome::Unchanged));
+        assert_eq!(remove(&fake), OpResult::unchanged(REMOVE));
         assert_eq!(file(&fake), Some((large, OLD_MODE)));
         // Exactly 4 KiB is still read, so this one is ours.
         let fake = fake_with(&ours_padded(4096));
-        assert_eq!(remove(&fake), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&fake), OpResult::done(REMOVE));
         assert_eq!(file(&fake), None);
     }
 
@@ -258,7 +252,7 @@ mod tests {
         let mut fake = FakeSystem::default();
         fake.dangling.insert(PathBuf::from(PATH));
         assert_eq!(install(18053, &fake), foreign());
-        assert_eq!(remove(&fake), result(REMOVE, Outcome::Unchanged));
+        assert_eq!(remove(&fake), OpResult::unchanged(REMOVE));
         assert_eq!(file(&fake), None);
         assert!(fake.exists(Path::new(PATH)));
     }
@@ -271,7 +265,7 @@ mod tests {
             let mut fake = fake_with(&ours(18054));
             fake.links.insert(PathBuf::from(PATH));
             assert_eq!(install(port, &fake), foreign(), "{port}");
-            assert_eq!(remove(&fake), result(REMOVE, Outcome::Unchanged));
+            assert_eq!(remove(&fake), OpResult::unchanged(REMOVE));
             assert_eq!(file(&fake), Some((ours(18054), OLD_MODE)));
         }
     }
@@ -304,16 +298,12 @@ mod tests {
         ];
         for text in near {
             let fake = fake_with(text.as_bytes());
-            assert_eq!(
-                remove(&fake),
-                result(REMOVE, Outcome::Unchanged),
-                "{text:?}"
-            );
+            assert_eq!(remove(&fake), OpResult::unchanged(REMOVE), "{text:?}");
             assert_eq!(file(&fake), Some((text.into_bytes(), OLD_MODE)));
         }
         // The marker alone, with no newline, is still the first line.
         let fake = fake_with(MARKER.as_bytes());
-        assert_eq!(remove(&fake), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&fake), OpResult::done(REMOVE));
     }
 
     #[test]
@@ -327,7 +317,7 @@ mod tests {
         let message = format!("cannot write {PATH}: permission denied");
         let expected = [
             OpResult::failed(INSTALL, code::RESOLVER_WRITE, message),
-            result(REMOVE, Outcome::Done),
+            OpResult::done(REMOVE),
         ];
         assert_eq!(apply_ops(ops, &fake), expected);
         assert_eq!(file(&fake), None);

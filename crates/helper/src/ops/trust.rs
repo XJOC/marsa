@@ -18,29 +18,12 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use crate::response::{OpResult, Outcome};
+use crate::response::OpResult;
+use crate::response::code::{
+    TRUST_ADD_FAILED, TRUST_CERT_INVALID, TRUST_DELETE, TRUST_READ, TRUST_REMOVE_FAILED,
+    TRUST_WRITE,
+};
 use crate::system::{RunOutput, System};
-
-/// The request's `pem` is not exactly one certificate. On Windows also: its
-/// SHA-1 has no letter, which `certutil` would read as an index.
-pub const TRUST_CERT_INVALID: &str = "trust_cert_invalid";
-/// Marsa's file ([`CA_PATH`] on macOS) is a link, is in a folder that not
-/// only root can change, or cannot be read as one certificate, so it was
-/// left as it is and no command ran.
-pub const TRUST_READ: &str = "trust_read";
-/// Writing Marsa's file failed.
-pub const TRUST_WRITE: &str = "trust_write";
-/// `security add-trusted-cert` (macOS) or `certutil -addstore` (Windows)
-/// failed or timed out. The helper then ran the steps of `trust_remove`. If
-/// they failed too, the file stays so a later `trust_remove` can finish, and
-/// until then `trust_install` with the same certificate answers `unchanged`:
-/// run `trust_remove` before a retry.
-pub const TRUST_ADD_FAILED: &str = "trust_add_failed";
-/// `security` or `certutil` could not remove the trust or the certificate.
-/// The file stays, so a retry still knows the hash.
-pub const TRUST_REMOVE_FAILED: &str = "trust_remove_failed";
-/// Deleting Marsa's file failed.
-pub const TRUST_DELETE: &str = "trust_delete";
 
 /// Marsa's copy of the CA root it trusts, in a folder only root can write.
 const CA_PATH: &str = "/Library/Application Support/Marsa/ca-root.pem";
@@ -94,7 +77,7 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
     };
     let hash = sha256_hex(&der);
     match stored_hash(INSTALL, system) {
-        Ok(Some(old)) if old == hash => return result(INSTALL, Outcome::Unchanged),
+        Ok(Some(old)) if old == hash => return OpResult::unchanged(INSTALL),
         Ok(Some(old)) => {
             if let Err(failed) = remove_steps(INSTALL, &old, system) {
                 return failed;
@@ -109,7 +92,7 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
     }
     let added = system.run(SECURITY, &ADD);
     if exited_with(&added, 0) {
-        return result(INSTALL, Outcome::Done);
+        return OpResult::done(INSTALL);
     }
     // `add-trusted-cert` can stop half way: after it added the certificate,
     // or even the trust, and then failed or timed out. The steps of
@@ -123,17 +106,13 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
 /// then its file. Without the file, nothing of Marsa's is trusted.
 pub fn remove(system: &impl System) -> OpResult {
     match stored_hash(REMOVE, system) {
-        Ok(None) => result(REMOVE, Outcome::Unchanged),
+        Ok(None) => OpResult::unchanged(REMOVE),
         Ok(Some(hash)) => match remove_steps(REMOVE, &hash, system) {
-            Ok(()) => result(REMOVE, Outcome::Done),
+            Ok(()) => OpResult::done(REMOVE),
             Err(failed) => failed,
         },
         Err(failed) => failed,
     }
-}
-
-fn result(op: &'static str, outcome: Outcome) -> OpResult {
-    OpResult { op, outcome }
 }
 
 /// The SHA-256 of the certificate at [`CA_PATH`], or `None` if nothing is
@@ -397,6 +376,7 @@ mod tests {
     use crate::ops::apply;
     use crate::os::Os;
     use crate::request::Request;
+    use crate::response::Outcome;
     use crate::system::FakeSystem;
 
     /// A throwaway self-signed CA made once with `openssl req -x509`. Its key
@@ -496,7 +476,7 @@ mod tests {
     #[test]
     fn install_writes_the_file_then_trusts_it() {
         let fake = fake();
-        assert_eq!(install(TEST_CA, &fake), result(INSTALL, Outcome::Done));
+        assert_eq!(install(TEST_CA, &fake), OpResult::done(INSTALL));
         assert_eq!(commands(&fake), [add()]);
         // `openssl` writes the clean form too, so the copy equals the input.
         assert_eq!(file(&fake), test_ca(MODE));
@@ -654,7 +634,7 @@ mod tests {
         let crlf = TEST_CA.replace('\n', "\r\n");
         let mut fake = fake_with(crlf.as_bytes());
         fake.fail_writes.insert(PathBuf::from(CA_PATH));
-        assert_eq!(install(TEST_CA, &fake), result(INSTALL, Outcome::Unchanged));
+        assert_eq!(install(TEST_CA, &fake), OpResult::unchanged(INSTALL));
         assert!(commands(&fake).is_empty());
         assert_eq!(file(&fake), Some((crlf.into_bytes(), OLD_MODE)));
     }
@@ -664,7 +644,7 @@ mod tests {
         let (other, other_hash) = other_ca();
         assert_ne!(other_hash, HASH);
         let fake = fake_with(&other);
-        assert_eq!(install(TEST_CA, &fake), result(INSTALL, Outcome::Done));
+        assert_eq!(install(TEST_CA, &fake), OpResult::done(INSTALL));
         let expected = [untrust(), delete(&other_hash), add()];
         assert_eq!(commands(&fake), expected);
         assert_eq!(file(&fake), test_ca(MODE));
@@ -685,7 +665,7 @@ mod tests {
     #[test]
     fn remove_deletes_by_the_hash_then_the_file() {
         let fake = fake_with(TEST_CA.as_bytes());
-        assert_eq!(remove(&fake), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&fake), OpResult::done(REMOVE));
         assert_eq!(commands(&fake), [untrust(), delete(HASH)]);
         assert_eq!(file(&fake), None);
     }
@@ -693,7 +673,7 @@ mod tests {
     #[test]
     fn remove_without_the_file_is_unchanged() {
         let fake = fake();
-        assert_eq!(remove(&fake), result(REMOVE, Outcome::Unchanged));
+        assert_eq!(remove(&fake), OpResult::unchanged(REMOVE));
         assert!(commands(&fake).is_empty());
     }
 
@@ -708,7 +688,7 @@ mod tests {
     fn remove_goes_on_when_the_trust_and_the_certificate_are_gone() {
         let mut fake = fake_with(TEST_CA.as_bytes());
         script_gone(&mut fake);
-        assert_eq!(remove(&fake), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&fake), OpResult::done(REMOVE));
         assert_eq!(commands(&fake), [untrust(), delete(HASH)]);
         assert_eq!(file(&fake), None);
     }
@@ -782,7 +762,7 @@ mod tests {
         assert_eq!(file(&fake), None);
         // So a retry runs `add-trusted-cert` again.
         fake.outputs.clear();
-        assert_eq!(install(TEST_CA, &fake), result(INSTALL, Outcome::Done));
+        assert_eq!(install(TEST_CA, &fake), OpResult::done(INSTALL));
     }
 
     /// The cleanup cannot remove the trust, so the file keeps the hash for a
@@ -796,7 +776,7 @@ mod tests {
         assert_eq!(commands(&fake), [add(), untrust()]);
         assert_eq!(file(&fake), test_ca(MODE));
         fake.outputs.clear();
-        assert_eq!(remove(&fake), result(REMOVE, Outcome::Done));
+        assert_eq!(remove(&fake), OpResult::done(REMOVE));
         assert_eq!(file(&fake), None);
     }
 
@@ -898,10 +878,7 @@ mod tests {
         let request = Request::from_arg(OsStr::new(&raw)).unwrap();
         let fake = fake();
         let results = apply(&request, Os::Macos, &fake);
-        let expected = [
-            result(INSTALL, Outcome::Done),
-            result(REMOVE, Outcome::Done),
-        ];
+        let expected = [OpResult::done(INSTALL), OpResult::done(REMOVE)];
         assert_eq!(results, expected);
         assert_eq!(commands(&fake), [add(), untrust(), delete(HASH)]);
         assert_eq!(file(&fake), None);
