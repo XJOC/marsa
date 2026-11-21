@@ -2053,6 +2053,90 @@ fn error_message(code: &str) -> Option<&'static str> {
             "macOS did not load the redirect of ports 80 and 443. Run setup again; if it \
              repeats, report it."
         }
+        // Codes the window shows only through a general error (the
+        // command line has fuller texts for them).
+        "config_no_home" => {
+            "Cannot find your home folder, so Marsa does not know where to keep its data."
+        }
+        "no_current_dir" => "Cannot read the current folder.",
+        "nss_remove_failed" => {
+            "Marsa's certificate authority is still in a browser certificate database. Run \"marsa uninstall --all\" again."
+        }
+        "pf_delete" | "pf_flush_failed" => {
+            "macOS did not let Marsa remove the redirect of ports 80 and 443."
+        }
+        "pf_helper_unreadable" => {
+            "The admin part of Marsa cannot read marsa-helper. Move Marsa out of Desktop, Documents, and Downloads."
+        }
+        "postgres_init_failed" => "Marsa could not make PostgreSQL's data folder.",
+        "postgres_not_installed" => {
+            "PostgreSQL of the version set in global.toml is not installed."
+        }
+        "postgres_orphan_stuck" => "An old PostgreSQL of this Marsa still runs and did not stop.",
+        "postgres_start_timeout" => "PostgreSQL started but took no connections in time.",
+        "postgres_unsupported_platform" => "Marsa runs PostgreSQL on macOS and Linux only for now.",
+        "resolver_delete" => "macOS did not let Marsa delete /etc/resolver/test.",
+        "service_data_dir_busy" => {
+            "Another server already runs on this service's data folder, so Marsa started no second one."
+        }
+        "service_port_busy" => {
+            "Another program uses the port this service needs. Quit it, or set another port in global.toml."
+        }
+        "service_port_unknown" => {
+            "Marsa could not check which program uses the port this service needs, so it did not start it."
+        }
+        "setup_helper_protected_folder" => {
+            "marsa-helper is inside Desktop, Documents, or Downloads, where macOS keeps root out. Move Marsa, then run setup again."
+        }
+        "trust_delete" => "Marsa could not delete its copy of its certificate authority.",
+        "trust_remove_failed" => {
+            "Windows did not remove Marsa's certificate authority from the trusted root certificates."
+        }
+        "uninstall_all_daemon_restarted"
+        | "uninstall_all_data_dir_back"
+        | "uninstall_all_data_dir_in_use"
+        | "uninstall_all_data_dir_not_default"
+        | "uninstall_all_data_dir_unsafe"
+        | "uninstall_all_data_delete_failed" => {
+            "Marsa could not delete its data folder. Delete it yourself."
+        }
+        "uninstall_all_needs_yes" | "uninstall_all_not_confirmed" => {
+            "The uninstall was not confirmed, so nothing was removed."
+        }
+        "uninstall_cancelled" => "The prompt was cancelled, so nothing was removed.",
+        "uninstall_helper_failed" | "uninstall_helper_rejected" => {
+            "marsa-helper could not do the uninstall, so nothing was removed."
+        }
+        "uninstall_helper_missing" => "The marsa-helper program is not next to marsad.",
+        "uninstall_helper_partial" => {
+            "Marsa's helper could not remove everything. Run \"marsa uninstall --all\" again."
+        }
+        "uninstall_helper_running" => "A run of Marsa's helper is still going on. Try again later.",
+        "uninstall_helper_unsafe" => {
+            "Another user could change marsa-helper, so Marsa did not run it."
+        }
+        "uninstall_interrupted" | "uninstall_timed_out" => {
+            "Marsa stopped waiting for the uninstall. It may have run: check, then run it again."
+        }
+        "uninstall_not_authorized" => "The system did not give Marsa admin rights.",
+        "uninstall_not_supported" => "The uninstall works on macOS, Linux, and Windows only.",
+        "uninstall_pkexec_missing" => {
+            "pkexec is not installed, so Marsa cannot ask for the password."
+        }
+        "uninstall_prompt_failed" => "The system could not show the administrator prompt.",
+        "caddy_admin_unreachable" => "Marsa cannot reach Caddy's admin port.",
+        "caddy_config_rejected" => "Caddy refused the new configuration.",
+        "caddy_path_not_utf8" => "A path Caddy needs is not valid UTF-8.",
+        "caddy_recipe_invalid" => "The Caddy recipe is not valid.",
+        "caddy_unsupported_platform" => "Caddy has no build for this system.",
+        "daemon_already_running" => "The daemon is already running.",
+        "no_matching_version" => "No installed version matches that request.",
+        "no_version" => "No version is set for this folder.",
+        "not_installed" => "That version is not installed.",
+        "php_config_write" => "Cannot write the PHP configuration.",
+        "php_fpm_not_installed" => "This PHP version has no php-fpm.",
+        "php_fpm_unavailable" => "php-fpm is not available for this PHP version.",
+        "php_path_not_allowed" => "That PHP path is not allowed.",
         BRIDGE_FAILED => "The window could not start its background worker.",
         TRAY_WORKER_FAILED => "The menu-bar icon could not start its background worker.",
         WINDOW_START_FAILED => "Cannot start the window (marsa-gui).",
@@ -2130,81 +2214,10 @@ mod tests {
         }
     }
 
+    /// Every code a client can meet has its own sentence, not the general one.
     #[test]
-    fn known_daemon_codes_have_a_message() {
-        // Auth, routes, services and Caddy, the
-        // orphan check, sites, php-fpm pools, the
-        // default version, and the runtimes list.
-        for code in [
-            "unauthorized",
-            "origin_rejected",
-            "host_rejected",
-            "not_found",
-            "method_not_allowed",
-            "invalid_path",
-            "invalid_query",
-            "service_not_found",
-            "unknown_action",
-            "service_busy",
-            "caddy_not_installed",
-            "caddy_config_write",
-            "caddy_start_timeout",
-            "port_in_use",
-            "caddy_orphan_stuck",
-            "caddy_other_marsa",
-            "service_managed_by_sites",
-            "php_fpm_orphan_stuck",
-            "exited",
-            "dns_port_in_use",
-            "dns_start_failed",
-            "dns_not_running",
-            "spawn_failed",
-            "program_not_absolute",
-            "invalid_body",
-            "internal_error",
-            // Sites and the settings files.
-            "site_not_found",
-            "site_name_invalid",
-            "site_name_taken",
-            "site_not_a_folder",
-            "site_path_relative",
-            "site_path_not_utf8",
-            "site_read_dir",
-            // Unlink and forget.
-            "site_is_parked",
-            "folder_not_parked",
-            // Uninstall a version.
-            "version_in_use",
-            "sites_lose_php",
-            "version_ambiguous",
-            "uninstall_io",
-            "install_busy",
-            // Xdebug.
-            "xdebug_interrupted",
-            // Setup during `marsa uninstall --all`, and its trust folder.
-            "uninstall_running",
-            "trust_record_unusable",
-            "config_read",
-            "config_invalid",
-            "config_write",
-            // The default version and the PHP lists.
-            "version_not_installed",
-            "no_default_version",
-            "invalid_version",
-            "unsupported_alias",
-            "unknown_tool",
-            "runtimes_read",
-            // Autostart, shown by the tray.
-            "tray_not_found",
-            "autostart_path_invalid",
-            "autostart_unsupported",
-            "autostart_no_home",
-            "autostart_read",
-            "autostart_write",
-            BRIDGE_FAILED,
-            TRAY_WORKER_FAILED,
-            WINDOW_START_FAILED,
-        ] {
+    fn every_code_has_a_message() {
+        for code in marsa_core::codes::ALL {
             assert!(error_message(code).is_some(), "no message for {code}");
         }
     }
