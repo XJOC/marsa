@@ -64,7 +64,7 @@ pub fn render(switch: Option<Switch>, state: AutostartState) -> &'static str {
 
 /// The text and code the user sees for `err`. `autostart_read` and
 /// `autostart_write` name `login_file`.
-pub fn autostart_failure(err: &ClientError, data_dir: &Path, login_file: Option<&Path>) -> Failure {
+fn autostart_failure(err: &ClientError, data_dir: &Path, login_file: Option<&Path>) -> Failure {
     failure_naming(
         err,
         data_dir,

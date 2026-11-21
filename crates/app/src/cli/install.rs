@@ -19,6 +19,7 @@ use super::Tool;
 use super::daemon::{connect, failure};
 use super::progress::Progress;
 use super::strings::{self, Details};
+use super::text::printable_multiline;
 
 /// The arguments of `marsa install`.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -146,7 +147,7 @@ impl Follow {
 }
 
 async fn print_result(done: &InstallDone, client: &DaemonClient) {
-    let version = printable(&done.version);
+    let version = printable_multiline(&done.version);
     if done.already {
         println!("{}", strings::already_installed(done.runtime, &version));
     } else {
@@ -167,10 +168,10 @@ async fn print_result(done: &InstallDone, client: &DaemonClient) {
 
 /// The text and code the user sees for a `failed` install event. The
 /// daemon's English `message` goes to the log only.
-pub fn install_failure(failed: &InstallFailure, runtime: Runtime) -> Failure {
+fn install_failure(failed: &InstallFailure, runtime: Runtime) -> Failure {
     tracing::debug!(code = %failed.code, error = %failed.message, "install failed");
-    let code = printable(&failed.code);
-    let text = |value: &Option<String>| value.as_deref().map(printable);
+    let code = printable_multiline(&failed.code);
+    let text = |value: &Option<String>| value.as_deref().map(printable_multiline);
     let (requested, platform, url, cause, output) = (
         text(&failed.requested),
         text(&failed.platform),
@@ -180,10 +181,14 @@ pub fn install_failure(failed: &InstallFailure, runtime: Runtime) -> Failure {
     );
     let os = failed.os.as_deref();
     let (needs, found) = (
-        os.map(|os| printable(&os.needs)),
-        os.map(|os| printable(&os.found)),
+        os.map(|os| printable_multiline(&os.needs)),
+        os.map(|os| printable_multiline(&os.found)),
     );
-    let available: Vec<String> = failed.available.iter().map(|v| printable(v)).collect();
+    let available: Vec<String> = failed
+        .available
+        .iter()
+        .map(|v| printable_multiline(v))
+        .collect();
     let details = Details {
         runtime: Some(runtime),
         requested: requested.as_deref(),
@@ -202,14 +207,6 @@ pub fn install_failure(failed: &InstallFailure, runtime: Runtime) -> Failure {
         message: strings::message(&code, &details),
         code: code.into(),
     }
-}
-
-/// Text from the daemon, safe to print: no control characters but line
-/// breaks and tabs, so it cannot move the cursor or recolor the terminal.
-fn printable(text: &str) -> String {
-    text.chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .collect()
 }
 
 #[cfg(test)]
