@@ -1011,6 +1011,35 @@ mod tests {
         assert_eq!(line_version(None, &[]), None);
     }
 
+    /// Valkey's line is `<major>.<minor>`, as MySQL's, so `default = "8.1"`
+    /// stays on 8.1 when 9.1 is installed too.
+    #[test]
+    fn valkey_is_its_own_server_on_6379_with_a_major_minor_line() {
+        let kind = ServerKind::Valkey;
+        assert_eq!(ServerKind::from_id("valkey"), Some(kind));
+        assert_eq!(ServerKind::of_runtime(Runtime::Valkey), Some(kind));
+        assert_eq!((kind.name(), kind.runtime()), ("Valkey", Runtime::Valkey));
+        assert_eq!(kind.default_port(), 6379);
+        assert_eq!(kind.server_program(), "valkey-server");
+        let mut global = GlobalConfig::default();
+        kind.settings_mut(&mut global).port = Some(6380);
+        assert_eq!(global.valkey.port, Some(6380));
+        assert_eq!(kind.settings(&global).port, Some(6380));
+        let versions: Vec<Version> = ["8.1.11", "8.1.9", "9.1.0"]
+            .iter()
+            .map(|text| Version::parse(text).unwrap())
+            .collect();
+        assert_eq!(kind.line(&versions[0]), "8.1");
+        let pick = |default| kind.line_version(default, &versions).map(|v| v.to_string());
+        assert_eq!(pick(Some("8.1")).as_deref(), Some("8.1.11"));
+        assert_eq!(pick(None).as_deref(), Some("9.1.0"));
+        for default in ["8", "8.1.11", "8.x", "", "+8.1"] {
+            assert_eq!(pick(Some(default)), None, "{default}");
+        }
+        // As an orphan or after a refused request: SIGTERM only.
+        assert_eq!(kind.stop(), valkey::valkey_signals());
+    }
+
     /// The two lines PostgreSQL 18 prints when another process holds a lock
     /// file, with the default `log_line_prefix`.
     #[test]

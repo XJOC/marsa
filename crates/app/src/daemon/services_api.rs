@@ -601,6 +601,22 @@ mod tests {
         assert!(!config::load_global(&global).unwrap().postgres.enabled);
         let (status, body) = send("POST", "/v1/services/postgres/kill").await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // Valkey the same way, with its own codes.
+        std::fs::create_dir_all(data.join("runtimes/valkey/8.1.11")).unwrap();
+        assert_eq!(ids().await, ["caddy", "postgres", "valkey"]);
+        let (status, body) = send("POST", "/v1/services/valkey/start").await;
+        let error: ErrorBody = serde_json::from_str(&body).unwrap();
+        let code = if cfg!(windows) {
+            "valkey_unsupported_platform"
+        } else {
+            "valkey_not_installed"
+        };
+        assert_eq!(
+            (status, error.error.code.as_str()),
+            (StatusCode::CONFLICT, code)
+        );
+        assert!(!config::load_global(&global).unwrap().valkey.enabled);
     }
 
     #[tokio::test]
