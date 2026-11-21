@@ -204,7 +204,7 @@ mod tests {
     use crate::ops::apply;
     use crate::os::Os;
     use crate::request::Request;
-    use crate::system::{FakeSystem, RunOutput};
+    use crate::system::{FakeSystem, Hooked, RunHook, RunOutput};
 
     // Written out again, not taken from the constants above: a test must
     // fail if one of those changes.
@@ -228,8 +228,9 @@ mod tests {
 
     /// A Linux whose `sysctl` changes the value file, as the real one does.
     /// Everything else goes straight to the [`FakeSystem`] inside.
-    struct Linux {
-        fake: FakeSystem,
+    type Linux = Hooked<Machine>;
+
+    struct Machine {
         /// What the value file holds after `sysctl -p <our file>`.
         after_load: &'static str,
         /// The value in another file of `/etc/sysctl.d`, if one sets the key.
@@ -244,12 +245,12 @@ mod tests {
         fn new(first: u32) -> Self {
             let mut fake = FakeSystem::default();
             fake.defaults.insert(PROGRAM, exit(0));
-            let linux = Self {
-                fake,
+            let machine = Machine {
                 after_load: "80\n",
                 other_file: None,
                 load_sets_then_fails: false,
             };
+            let linux = Hooked::with_hook(fake, machine);
             linux.set(PROC, format!("{first}\n").as_bytes());
             linux
         }
@@ -287,57 +288,30 @@ mod tests {
         }
     }
 
-    impl System for Linux {
-        fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>> {
-            self.fake.read(path, max)
-        }
-
-        fn exists(&self, path: &Path) -> bool {
-            self.fake.exists(path)
-        }
-
-        fn is_link(&self, path: &Path) -> bool {
-            self.fake.is_link(path)
-        }
-
-        fn is_root_only_dir(&self, dir: &Path) -> bool {
-            self.fake.is_root_only_dir(dir)
-        }
-
-        fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-            self.fake.write_atomic(path, bytes, mode)
-        }
-
-        fn remove(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove(path)
-        }
-
-        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove_empty_dir(path)
-        }
-
-        fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
-            let output = self.fake.run(program, args)?;
+    impl RunHook for Machine {
+        fn run(
+            linux: &Linux,
+            _program: &'static str,
+            args: &[&str],
+            scripted: io::Result<RunOutput>,
+        ) -> io::Result<RunOutput> {
+            let output = scripted?;
             let loads = matches!(args, ["-p", CONF]);
-            if output.code != Some(0) && !(loads && self.load_sets_then_fails) {
+            if output.code != Some(0) && !(loads && linux.load_sets_then_fails) {
                 return Ok(output);
             }
             let value = match args {
                 // Both load the file at Marsa's path only while it is there.
-                ["-p", CONF] if self.file().is_some() => Some(self.after_load.to_owned()),
-                [..] if args == RELOAD && self.file().is_some() => Some("80\n".to_owned()),
-                [..] if args == RELOAD => self.other_file.map(|value| format!("{value}\n")),
+                ["-p", CONF] if linux.file().is_some() => Some(linux.after_load.to_owned()),
+                [..] if args == RELOAD && linux.file().is_some() => Some("80\n".to_owned()),
+                [..] if args == RELOAD => linux.other_file.map(|value| format!("{value}\n")),
                 ["-w", RESET] => Some("1024\n".to_owned()),
                 _ => None,
             };
             if let Some(value) = value {
-                self.set(PROC, value.as_bytes());
+                linux.set(PROC, value.as_bytes());
             }
             Ok(output)
-        }
-
-        fn current_exe(&self) -> io::Result<PathBuf> {
-            self.fake.current_exe()
         }
     }
 

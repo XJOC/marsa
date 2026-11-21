@@ -298,9 +298,10 @@ mod tests {
 
     use super::*;
     use crate::ops::apply;
+    use crate::ops::testing::code_of;
     use crate::os::Os;
     use crate::request::Request;
-    use crate::system::{FakeSystem, RunOutput};
+    use crate::system::{FakeSystem, Hooked, RunHook, RunOutput};
 
     /// A throwaway self-signed CA, in the clean form the helper writes. Its
     /// key was deleted at once and never entered the repository.
@@ -321,59 +322,31 @@ mod tests {
 
     /// One family in a test: its tool, its file, and a fake system that has
     /// the tool, which succeeds unless a test scripts it.
-    struct Family {
+    type Family = Hooked<Tool>;
+
+    struct Tool {
         tool: &'static str,
         args: &'static [&'static str],
         file: &'static str,
-        fake: FakeSystem,
         /// For each run of the tool: whether the file was there.
         seen: RefCell<Vec<bool>>,
         /// That many runs of the tool fail first.
         failing_runs: Cell<u32>,
     }
 
-    impl System for Family {
-        fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>> {
-            self.fake.read(path, max)
-        }
-
-        fn exists(&self, path: &Path) -> bool {
-            self.fake.exists(path)
-        }
-
-        fn is_link(&self, path: &Path) -> bool {
-            self.fake.is_link(path)
-        }
-
-        fn is_root_only_dir(&self, dir: &Path) -> bool {
-            self.fake.is_root_only_dir(dir)
-        }
-
-        fn write_atomic(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-            self.fake.write_atomic(path, bytes, mode)
-        }
-
-        fn remove(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove(path)
-        }
-
-        fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
-            self.fake.remove_empty_dir(path)
-        }
-
-        fn run(&self, program: &'static str, args: &[&str]) -> io::Result<RunOutput> {
-            self.seen.borrow_mut().push(self.stored().is_some());
-            if self.failing_runs.get() > 0 {
-                self.failing_runs.set(self.failing_runs.get() - 1);
-                let args = args.iter().map(|arg| (*arg).to_owned()).collect();
-                self.fake.log.borrow_mut().push((program.to_owned(), args));
+    impl RunHook for Tool {
+        fn run(
+            family: &Family,
+            _program: &'static str,
+            _args: &[&str],
+            scripted: io::Result<RunOutput>,
+        ) -> io::Result<RunOutput> {
+            family.seen.borrow_mut().push(family.stored().is_some());
+            if family.failing_runs.get() > 0 {
+                family.failing_runs.set(family.failing_runs.get() - 1);
                 return Ok(exit(1));
             }
-            self.fake.run(program, args)
-        }
-
-        fn current_exe(&self) -> io::Result<PathBuf> {
-            self.fake.current_exe()
+            scripted
         }
     }
 
@@ -394,14 +367,14 @@ mod tests {
         put(&fake, DEBIAN_TOOL, b"");
         put(&fake, DEBIAN_FOLDER, b"");
         fake.defaults.insert(DEBIAN_TOOL, exit(0));
-        Family {
+        let tool = Tool {
             tool: DEBIAN_TOOL,
             args: &["--fresh"],
             file: DEBIAN_FILE,
-            fake,
             seen: RefCell::default(),
             failing_runs: Cell::new(0),
-        }
+        };
+        Hooked::with_hook(fake, tool)
     }
 
     fn fedora() -> Family {
@@ -409,14 +382,14 @@ mod tests {
         put(&fake, FEDORA_TOOL, b"");
         put(&fake, ANCHORS, b"");
         fake.defaults.insert(FEDORA_TOOL, exit(0));
-        Family {
+        let tool = Tool {
             tool: FEDORA_TOOL,
             args: &[],
             file: FEDORA_FILE,
-            fake,
             seen: RefCell::default(),
             failing_runs: Cell::new(0),
-        }
+        };
+        Hooked::with_hook(fake, tool)
     }
 
     fn families() -> [Family; 2] {
@@ -455,14 +428,6 @@ mod tests {
         let mut der = trust::parse_pem(TEST_CA).unwrap();
         *der.last_mut().unwrap() ^= 1;
         trust::to_pem(&der)
-    }
-
-    fn code_of(result: &OpResult) -> &'static str {
-        match result.outcome {
-            Outcome::Failed { code, .. } => code,
-            Outcome::Done => "done",
-            Outcome::Unchanged => "unchanged",
-        }
     }
 
     fn message_of(result: &OpResult) -> &str {
