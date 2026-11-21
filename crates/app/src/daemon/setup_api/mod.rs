@@ -54,6 +54,7 @@ use tokio::runtime::Handle;
 
 use super::api::HttpError;
 use super::hosts_sync;
+use super::http;
 use super::state::Daemon;
 
 pub use self::ca::{CA_WAIT, CaddyStart, StartCaddy};
@@ -404,7 +405,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
     };
     let dns_down = daemon.dns.not_serving();
     let runtime = Handle::current();
-    let job = tokio::task::spawn_blocking(move || {
+    let report = http::blocking("setup", move || {
         // Moved in, so the next setup waits for this one to end even if the
         // client goes away.
         let _running = running;
@@ -485,17 +486,9 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
         // Here, not in the handler: the event goes out even if the client
         // went away.
         daemon.publish(Event::SetupFinished(report.clone()));
-        report
-    });
-    let report = job.await.map_err(|err| {
-        tracing::error!(error = %err, "the setup job failed");
-        let message = "the setup job failed";
-        HttpError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            codes::INTERNAL_ERROR,
-            message,
-        )
-    })?;
+        Ok(report)
+    })
+    .await?;
     Ok(Json(report))
 }
 

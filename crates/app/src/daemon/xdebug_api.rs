@@ -34,11 +34,12 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
-use marsa_core::config::{self, ConfigError, ConfigPaths};
+use marsa_core::config::{self, ConfigPaths};
 use marsa_core::recipes::Platform;
 use marsa_core::types::{XdebugRequest, XdebugState};
 
 use super::api::HttpError;
+use super::http::{self, Rejected as _, global_error};
 use super::php;
 use super::sites_sync::PassNotRun;
 use super::state::Daemon;
@@ -49,22 +50,24 @@ pub fn routes() -> Router<Arc<Daemon>> {
 }
 
 async fn current(State(daemon): State<Arc<Daemon>>) -> Result<Json<XdebugState>, HttpError> {
-    blocking(&daemon, state).await.map(Json)
+    http::blocking("Xdebug", move || state(&daemon))
+        .await
+        .map(Json)
 }
 
 async fn set(
     State(daemon): State<Arc<Daemon>>,
     body: Result<Json<XdebugRequest>, JsonRejection>,
 ) -> Result<Json<XdebugState>, HttpError> {
-    let Json(XdebugRequest { enabled }) =
-        body.map_err(|err| HttpError::new(err.status(), codes::INVALID_BODY, err.body_text()))?;
+    let Json(XdebugRequest { enabled }) = body.map_err(|err| err.reject(codes::INVALID_BODY))?;
     // The save and the request in a task of their own: a client that hangs
     // up drops this handler, and must not leave the setting saved but not
     // applied. The pass itself runs in the sync task.
     let job = tokio::spawn({
         let daemon = Arc::clone(&daemon);
         async move {
-            blocking(&daemon, move |daemon| save(daemon, enabled)).await?;
+            let worker = Arc::clone(&daemon);
+            http::blocking("Xdebug", move || save(&worker, enabled)).await?;
             // Also when nothing changed: the pass then repairs a `php.ini`
             // that is missing or old.
             daemon
@@ -74,8 +77,11 @@ async fn set(
                 .map_err(|PassNotRun| pass_not_run())
         }
     });
-    job.await.unwrap_or_else(|err| Err(job_failed(&err)))?;
-    blocking(&daemon, state).await.map(Json)
+    job.await
+        .unwrap_or_else(|err| Err(http::job_failed("Xdebug", &err)))?;
+    http::blocking("Xdebug", move || state(&daemon))
+        .await
+        .map(Json)
 }
 
 /// The daemon stops (or its sync task does not run), so no pass applied the
@@ -137,39 +143,6 @@ fn state(daemon: &Daemon) -> Result<XdebugState, HttpError> {
         }
     }
     Ok(state)
-}
-
-/// Runs `job` on a blocking thread: it touches the disk, and may take a
-/// `std::sync` lock that must not be held across `.await`.
-async fn blocking<T, F>(daemon: &Arc<Daemon>, job: F) -> Result<T, HttpError>
-where
-    T: Send + 'static,
-    F: FnOnce(&Daemon) -> Result<T, HttpError> + Send + 'static,
-{
-    let daemon = Arc::clone(daemon);
-    let job = tokio::task::spawn_blocking(move || job(&daemon));
-    job.await.unwrap_or_else(|err| Err(job_failed(&err)))
-}
-
-fn job_failed(err: &tokio::task::JoinError) -> HttpError {
-    tracing::error!(error = %err, "the Xdebug job failed");
-    let message = "the Xdebug job failed";
-    HttpError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        codes::INTERNAL_ERROR,
-        message,
-    )
-}
-
-/// `global.toml` cannot be read or written: the request was fine, the file or
-/// the disk is not.
-fn global_error(err: &ConfigError) -> HttpError {
-    tracing::warn!(code = err.code(), error = %err, "global.toml");
-    HttpError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        err.code(),
-        err.to_string(),
-    )
 }
 
 #[cfg(test)]

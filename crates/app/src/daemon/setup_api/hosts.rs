@@ -45,6 +45,7 @@ use marsa_core::recipes::Os;
 use marsa_core::types::{HostsStatus, SetupReport, SetupSkip};
 
 use super::super::api::HttpError;
+use super::super::http;
 use super::super::state::Daemon;
 use super::{Flow, Running, Setup, linux_dns, names_of};
 
@@ -74,11 +75,9 @@ async fn status(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<HostsStat
         return Ok(Json(HostsStatus::default()));
     }
     let names = site_names(&daemon).await?;
-    let job = tokio::task::spawn_blocking(move || read_status(&daemon, &setup, &names));
-    job.await.map(Json).map_err(|err| {
-        tracing::error!(error = %err, "the hosts job failed");
-        internal_error()
-    })
+    http::blocking("hosts", move || Ok(read_status(&daemon, &setup, &names)))
+        .await
+        .map(Json)
 }
 
 async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport>, HttpError> {
@@ -88,7 +87,7 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
         .ok_or_else(not_used)?;
     let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
     let names = site_names(&daemon).await?;
-    let job = tokio::task::spawn_blocking(move || {
+    let report = http::blocking("hosts", move || {
         // Moved in, so a setup waits for this sync to end even if the client
         // goes away.
         let _running = running;
@@ -118,11 +117,8 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
             Err(error) => report.error = Some(error),
         }
         Ok(report)
-    });
-    let report = job.await.map_err(|err| {
-        tracing::error!(error = %err, "the hosts job failed");
-        internal_error()
-    })??;
+    })
+    .await?;
     Ok(Json(report))
 }
 
@@ -144,15 +140,6 @@ fn read_status(daemon: &Daemon, setup: &Setup, names: &[String]) -> HostsStatus 
 fn not_used() -> HttpError {
     let message = "this system does not put .test names in the hosts file";
     HttpError::new(StatusCode::CONFLICT, codes::HOSTS_NOT_USED, message)
-}
-
-fn internal_error() -> HttpError {
-    let message = "the hosts job failed";
-    HttpError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        codes::INTERNAL_ERROR,
-        message,
-    )
 }
 
 #[cfg(test)]

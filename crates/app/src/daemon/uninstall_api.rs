@@ -71,6 +71,7 @@ use tokio_util::sync::CancellationToken;
 use super::api::HttpError;
 use super::autostart_api::Autostart;
 use super::hosts_sync;
+use super::http;
 use super::setup_api::{
     CHECK_LIMIT, Flow, PIPE_GRACE, PROMPT_LIMIT, Running, Setup, linux_dns, nss, user_trust,
 };
@@ -114,7 +115,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallR
         })?;
     let running = Running::take(&setup, Flow::Uninstall).map_err(Flow::busy)?;
     tracing::info!("uninstall started");
-    let job = tokio::task::spawn_blocking(move || {
+    http::blocking("uninstall", move || {
         // Moved in, so no setup starts until this one ended, even if the
         // client went away.
         let _running = running;
@@ -148,17 +149,10 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallR
             tracing::info!("Marsa was uninstalled; the daemon stops");
             daemon.shutdown.cancel();
         }
-        report
-    });
-    job.await.map(Json).map_err(|err| {
-        tracing::error!(error = %err, "the uninstall job failed");
-        let message = "the uninstall job failed";
-        HttpError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            codes::INTERNAL_ERROR,
-            message,
-        )
+        Ok(report)
     })
+    .await
+    .map(Json)
 }
 
 /// The uninstall itself. Blocking: it runs programs and deletes files. The
