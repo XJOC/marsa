@@ -342,7 +342,7 @@ impl Setup {
 #[cfg(test)]
 mod tests {
     use super::super::osascript::OSASCRIPT;
-    use super::super::ports::NETSTAT;
+    use marsa_core::platform::ports::NETSTAT;
 
     use super::super::test_support::*;
     use super::super::user_trust::SECURITY;

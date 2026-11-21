@@ -26,7 +26,8 @@ pub mod linux_dns;
 pub mod nss;
 mod osascript;
 pub mod pkexec;
-pub mod ports;
+#[cfg(test)]
+mod ports;
 mod steps;
 #[cfg(test)]
 pub(super) mod test_support;
@@ -62,9 +63,9 @@ pub(super) use self::helper::PROMPT_LIMIT;
 use self::helper::current_uid;
 use self::helper::{MAX_ANSWER, parse_answer, results_of};
 use self::osascript::not_finished;
-pub(super) use self::ports::CHECK_LIMIT;
-use self::ports::MAX_PS;
 use self::steps::{TRUST_INSTALL, low_ports_set};
+pub(super) use marsa_core::platform::ports::CHECK_LIMIT;
+use marsa_core::platform::ports::MAX_PS;
 pub(super) use marsa_core::platform::runner::PIPE_GRACE;
 pub use marsa_core::platform::runner::{RealRunner, RunOutput, Runner};
 
@@ -596,12 +597,12 @@ mod tests {
     use super::ca::CA_WAIT;
     use super::ca::CaddyStart;
     use super::osascript::OSASCRIPT;
-    use super::ports::CHECK_LIMIT;
-    use super::ports::MAX_PS;
-    use super::ports::NETSTAT;
     use super::test_support::*;
     use super::user_trust::SECURITY;
     use super::*;
+    use marsa_core::platform::ports::CHECK_LIMIT;
+    use marsa_core::platform::ports::MAX_PS;
+    use marsa_core::platform::ports::NETSTAT;
     use marsa_core::platform::runner::PIPE_GRACE;
 
     use crate::daemon::state::Daemon;

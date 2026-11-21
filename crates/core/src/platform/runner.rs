@@ -69,8 +69,9 @@ pub trait Runner: Send + Sync {
     ) -> io::Result<RunOutput>;
 }
 
-/// `std::process::Command`, with an empty environment except [`SAFE_PATH`],
-/// no stdin, and the working folder `/`.
+/// `std::process::Command`, with an empty environment except [`SAFE_PATH`]
+/// (on Windows: the Windows folder variables and the temp folder), no stdin,
+/// and the working folder `/` (on Windows: `System32`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RealRunner;
 
@@ -100,8 +101,26 @@ impl Runner for RealRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // Not the daemon's working folder. `/` is a Unix path, and setup runs
-        // on macOS and Linux only for now (Windows later).
+        // Windows tools (`netstat`, `tasklist`) need the Windows folder
+        // variables (`tasklist` talks to WMI) and a temp folder. The `PATH`
+        // is the Windows folders only, never the daemon's own.
+        #[cfg(windows)]
+        {
+            let windows = super::browser::windows_dir(std::env::var_os("SystemRoot"));
+            let system = windows.join("System32");
+            command
+                .env("SystemRoot", &windows)
+                .env("windir", &windows)
+                .env("PATH", &system)
+                .current_dir(&system);
+            for name in ["TEMP", "TMP"] {
+                if let Some(value) = std::env::var_os(name) {
+                    command.env(name, value);
+                }
+            }
+        }
+        // Not the daemon's working folder. `/` is a Unix path; Windows is
+        // set above.
         #[cfg(unix)]
         command.current_dir("/");
         let mut child = command.spawn()?;

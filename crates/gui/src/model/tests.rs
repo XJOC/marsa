@@ -1,5 +1,6 @@
 //! Tests of the model: the messages from the bridge and the user's actions, with no window.
 
+use super::installs::failure;
 use super::*;
 use marsa_core::types::LogStream;
 
