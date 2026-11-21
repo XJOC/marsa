@@ -25,7 +25,7 @@ use marsa_core::orphan::{
 use marsa_core::platform::process::{self, Signal};
 use tracing::{debug, info, warn};
 
-use super::Admin;
+use super::admin::Admin;
 use crate::daemon::services::probe::ProcessProbe;
 
 /// Our old Caddy holds the ports and could not be stopped.
