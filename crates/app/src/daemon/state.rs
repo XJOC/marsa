@@ -23,7 +23,7 @@ use super::client_shims::ClientShims;
 use super::databases::ServerManager;
 use super::dns::DnsService;
 use super::php::Pools;
-use super::runtimes_api::Installs;
+use super::runtimes::installs::Installs;
 use super::sites_api;
 use super::sites_sync::PassRequests;
 use super::supervisor::ServiceHandle;
