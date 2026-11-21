@@ -6,6 +6,7 @@ name: mysql-e2e
 # memory, the stop with an idle client, PHP's pdo_mysql, the refusals, the
 # start with marsad, and an orphan. tools/e2e/mysql.sh downloads MySQL and
 # PHP and runs every marsa command with --data-dir in a new folder. No sudo.
+# On Linux it also builds libaio.so.1 and libnuma.so.1 with tools/libaio-build.
 # It is not part of the tests that `cargo nextest` runs.
 
 on:
@@ -25,6 +26,7 @@ on:
       - "crates/core/src/platform/process.rs"
       - "recipes/mysql.toml"
       - "tools/e2e/mysql.sh"
+      - "tools/libaio-build/**"
       - ".github/workflows/mysql-e2e.yml"
   push:
     branches: [main]
@@ -40,6 +42,7 @@ on:
       - "crates/core/src/platform/process.rs"
       - "recipes/mysql.toml"
       - "tools/e2e/mysql.sh"
+      - "tools/libaio-build/**"
       - ".github/workflows/mysql-e2e.yml"
 
 # Read-only on purpose: the job never writes to the repository.
@@ -64,8 +67,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Oracle's arm64 build for macOS. Linux comes with .tar.xz.
-        os: [macos-15, macos-latest]
+        # Oracle's arm64 build for macOS, and its glibc 2.28 builds for Linux
+        # (x64 and arm64). Neither Ubuntu runner is set up with libaio1 for
+        # this: the job saves our own libaio.so.1 and libnuma.so.1 in
+        # lib/private, as the install does.
+        os: [macos-15, macos-latest, ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
