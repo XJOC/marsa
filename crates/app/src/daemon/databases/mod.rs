@@ -55,7 +55,6 @@ mod tests {
     use marsa_core::orphan::Liveness;
     use marsa_core::platform::process::{self, Signal};
     use marsa_core::ports::PortLookup;
-    use marsa_core::ps::StartTime;
     use marsa_core::recipes::Platform;
     use marsa_core::runtimes::{Runtime, RuntimesDir};
     use marsa_core::services::RestartPolicy;
@@ -407,6 +406,7 @@ mod tests {
 
         use marsa_core::config::GlobalConfig;
         use marsa_core::orphan::PidRecord;
+        use marsa_core::ps::StartTime;
         use tempfile::TempDir;
         use tokio::task::JoinHandle;
 
