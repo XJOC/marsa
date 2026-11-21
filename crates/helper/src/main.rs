@@ -272,7 +272,7 @@ mod tests {
         let (out, code, fake) = helper(&[OsStr::new("pf-load")], Os::Macos);
         assert_eq!(code, 1);
         assert_eq!(out["results"][0]["op"], "pf_load");
-        assert_eq!(out["results"][0]["code"], pf::PF_NOT_INSTALLED);
+        assert_eq!(out["results"][0]["code"], code::PF_NOT_INSTALLED);
         assert!(fake.log.borrow().is_empty());
     }
 
@@ -301,7 +301,7 @@ mod tests {
         let out: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(
             (code, &out["results"][0]["code"]),
-            (1, &json!(pf::PF_LOAD_FAILED))
+            (1, &json!(code::PF_LOAD_FAILED))
         );
         assert_eq!(waits.into_inner(), [10, 30]);
         assert_eq!(fake.log.borrow().len(), 3);
