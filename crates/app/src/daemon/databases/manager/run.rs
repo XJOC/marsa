@@ -2,16 +2,16 @@
 //! for its first answer, and how a run that ended by itself is read.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use marsa_core::databases::{ServerKind, ServiceBusy};
 use marsa_core::services::ServiceSpec;
 use marsa_core::types::LogStream;
-use tracing::warn;
+use tokio::sync::watch;
 
-use super::super::{mysql, orphan, postgres, valkey};
+use super::super::orphan::{Recorded, RunRecord};
+use super::super::{mysql, postgres, valkey};
 use super::{ActionError, ServerManager};
-use crate::daemon::services::runtime::AbortOnDrop;
 use crate::daemon::state::Daemon;
 use crate::daemon::supervisor::{ServiceHandle, Supervisor, lock};
 
@@ -37,78 +37,62 @@ pub(super) enum Ready {
 }
 
 impl ServerManager {
-    /// Spawns the server under the supervisor, and registers its task in
-    /// `Daemon::procs`.
-    pub(super) fn spawn(&self, daemon: &Daemon, spec: ServiceSpec) -> Result<(), ActionError> {
+    /// Spawns the server under the supervisor, and registers the task of
+    /// the run in `Daemon::procs`. That task writes `run/<id>.pid` as soon as
+    /// the process runs one of `servers` ([`RunRecord`]), and gives what the
+    /// record came to through the receiver this returns.
+    pub(super) fn spawn(
+        &self,
+        daemon: &Daemon,
+        spec: ServiceSpec,
+        servers: Vec<PathBuf>,
+    ) -> Result<watch::Receiver<Recorded>, ActionError> {
         let logs_dir = daemon.data_dir.join("logs");
         let program = spec.program.clone();
         let runtime = Arc::clone(&self.runtime);
+        let events = daemon.events.subscribe();
         let handle = Supervisor::spawn_on(spec, daemon.events.clone(), &logs_dir, runtime)
             .map_err(|err| {
                 self.fail(&daemon.events, err.code(), &err.to_string());
                 ActionError::ProgramNotAbsolute(err)
             })?;
         *lock(&self.started) = Some(program);
-        // This run's own record, set once `wait_ready` writes it.
-        let recorded = Arc::new(Mutex::new(None));
-        *lock(&self.recorded) = Arc::clone(&recorded);
-        // The run's end deletes its `run/<id>.pid`, whatever ended it: a
-        // stop, a shutdown, or the server itself. A server is never
-        // restarted, so the run is the task.
         let ServiceHandle {
             cancel,
             task,
             runtime,
             stop_limit,
         } = handle;
-        let data_dir = daemon.data_dir.clone();
-        let kind = self.kind;
-        let task = tokio::spawn(async move {
-            // `stop_procs` aborts this task after its time limit; the abort
-            // reaches the supervisor too, so its `Child` is dropped.
-            let _abort = AbortOnDrop(task.abort_handle());
-            if let Err(err) = task.await {
-                warn!(%err, server = kind.id(), "the server task failed");
-            }
-            if let Some(pid) = *lock(&recorded) {
-                orphan::forget_run(kind, &data_dir, pid);
-            }
-        });
+        let (recorded, recording) = watch::channel(Recorded::Pending);
+        let run = RunRecord {
+            kind: self.kind,
+            probes: Arc::clone(&self.probes),
+            data_dir: daemon.data_dir.clone(),
+            servers,
+            runtime: Arc::clone(&runtime),
+            events,
+            recorded,
+        };
         let handle = ServiceHandle {
             cancel,
-            task,
+            task: tokio::spawn(run.follow(task)),
             runtime,
             stop_limit,
         };
         // A handle this replaces belongs to a run that has ended.
         daemon.add_proc(self.kind.id(), handle);
-        Ok(())
+        Ok(recording)
     }
 
     /// Asks `127.0.0.1:<port>` ([`Self::answers`]) until our server answers,
     /// its run ends, or the limit. The check before the start found the port
     /// free, so what answers is our server.
-    /// Its pid goes to `run/<id>.pid` as soon as it runs one of `servers`.
-    pub(super) async fn wait_ready(
-        &self,
-        daemon: &Daemon,
-        port: u16,
-        servers: &[PathBuf],
-    ) -> Ready {
-        let mut recorded = false;
+    pub(super) async fn wait_ready(&self, daemon: &Daemon, port: u16) -> Ready {
         let kind = self.kind;
         let poll = async {
             loop {
                 if !daemon.proc_alive(kind.id()) {
                     return Ready::Ended;
-                }
-                if !recorded && let Some(pid) = self.status().pid {
-                    let probes = &*self.probes;
-                    recorded = orphan::record(kind, probes, &daemon.data_dir, servers, pid).await;
-                    if recorded {
-                        let slot = Arc::clone(&lock(&self.recorded));
-                        *lock(&slot) = Some(pid);
-                    }
                 }
                 if self.answers(port).await {
                     return Ready::Yes;

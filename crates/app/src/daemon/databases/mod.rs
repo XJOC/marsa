@@ -418,9 +418,12 @@ mod tests {
         const WAIT: Duration = Duration::from_secs(30);
         /// The program the pid of the lock file runs now.
         const OTHER: &str = "/Applications/Other.app/Contents/MacOS/Other";
+        /// How long the fake in `late` mode waits before it listens.
+        const LATE: Duration = Duration::from_secs(5);
 
         /// Not a check: the fake server's entry point. In a normal test run
-        /// the variable is unset and this returns at once.
+        /// the variable is unset and this returns at once. Its first line
+        /// is `fake pid <pid>` in every mode (`Pg::run_pids`).
         ///
         /// - `serve` listens on the `port=` of its arguments, answers an
         ///   `SSLRequest` with `N`, prints each stop signal, ignores
@@ -437,11 +440,14 @@ mod tests {
         /// - `mute` listens and never answers, so a start waits for it.
         /// - `deaf` serves, and ignores SIGINT and SIGQUIT too: only SIGKILL
         ///   ends it.
+        /// - `late` waits [`LATE`] before it serves, as a server with a
+        ///   long recovery.
         #[test]
         fn fake_postgres() {
             let Ok(mode) = std::env::var(FAKE) else {
                 return;
             };
+            eprintln!("fake pid {}", std::process::id());
             let args = std::env::var("MARSA_FAKE_POSTGRES_ARGS").unwrap();
             let setting = |name: &str| {
                 let found = args.split(' ').find_map(|arg| arg.strip_prefix(name));
@@ -485,6 +491,7 @@ mod tests {
                     std::process::exit(1);
                 }
                 "noisy" => data_dir(),
+                "late" => std::thread::sleep(LATE),
                 _ => {}
             }
             let serve = async {
@@ -616,6 +623,26 @@ mod tests {
             fn texts(&self) -> Vec<String> {
                 let lines = self.daemon.postgres.recent_logs();
                 lines.into_iter().map(|line| line.text).collect()
+            }
+
+            /// The pid of each run of the fake so far, from its first line.
+            fn run_pids(&self) -> Vec<u32> {
+                let texts = self.texts();
+                let pids = texts
+                    .iter()
+                    .filter_map(|text| text.strip_prefix("fake pid "));
+                pids.map(|pid| pid.parse().unwrap()).collect()
+            }
+
+            /// The pids the probes were asked about that are not a run of
+            /// the fake: those a check or the lines of a run named.
+            fn asked_besides_runs(&self) -> Vec<u32> {
+                let runs = self.run_pids();
+                let asked = self.probes.asked.lock().unwrap().clone();
+                asked
+                    .into_iter()
+                    .filter(|pid| !runs.contains(pid))
+                    .collect()
             }
 
             /// Waits until the fake prints `text`.
@@ -819,11 +846,15 @@ mod tests {
             assert_eq!(state, failed("service_data_dir_busy"));
             let last = pg.texts().pop().unwrap();
             assert!(last.contains("named no pid"), "{last}");
-            assert!(pg.probes.asked.lock().unwrap().is_empty());
+            // Only the run itself was looked at, for its record.
+            assert_eq!(pg.asked_besides_runs(), Vec::<u32>::new());
         }
 
         /// A shutdown stops the run during its start: its lines are not
-        /// read, even with PostgreSQL's refusal among them.
+        /// read, even with PostgreSQL's refusal among them. So the pid of its
+        /// hint, 4242, is never looked at, and the start does not fail with
+        /// `service_data_dir_busy`. The run itself may be looked at, for its
+        /// record, whenever that comes.
         #[tokio::test]
         async fn a_run_that_a_shutdown_stopped_is_not_read() {
             let pg = pg("locked-hang", probes(alive(Path::new(OTHER)), None));
@@ -844,7 +875,13 @@ mod tests {
             pg.daemon.stop_procs(WAIT).await;
             let status = start.await.unwrap().unwrap();
             assert_eq!(status.state, ServiceState::Stopped);
-            assert!(pg.probes.asked.lock().unwrap().is_empty());
+            assert_eq!(pg.run_pids().len(), 1);
+            assert_eq!(pg.asked_besides_runs(), Vec::<u32>::new());
+            let texts = pg.texts();
+            assert!(
+                !texts.iter().any(|text| text.contains("pid 4242")),
+                "{texts:?}"
+            );
         }
 
         /// Another server holds the lock of our socket for this port.
@@ -1287,6 +1324,29 @@ mod tests {
             assert_eq!(Some(new.pid), status.pid);
             assert_eq!(new.exe, installed_postgres(&pg));
             pg.act(ServiceAction::Stop).await.unwrap();
+            assert_eq!(recorded(&pg), None, "the end of the run deletes it");
+        }
+
+        /// The record does not wait for the server's first answer: a server
+        /// that answers only after a long time is recorded at once, so a
+        /// `marsad` that dies before the answer (here: its start is dropped,
+        /// and nothing cleans up) leaves the server recorded.
+        #[tokio::test]
+        async fn a_server_is_recorded_before_its_first_answer() {
+            let pg = pg("late", probes(Liveness::Gone, None));
+            *pg.probes.now.lock().unwrap() = alive(&installed_postgres(&pg));
+            let start = spawn_saved(&pg, ServiceAction::Start);
+            until("the pid", || pg.daemon.postgres.status().pid.is_some()).await;
+            start.abort();
+            assert!(start.await.unwrap_err().is_cancelled());
+            let pid = pg.daemon.postgres.status().pid.unwrap();
+            until("the record", || recorded(&pg).is_some_and(|r| r.pid == pid)).await;
+            assert!(!postgres::answers(pg.port).await, "it has not answered yet");
+            assert!(!pg.texts().iter().any(|text| text == "fake ready"));
+            let record = recorded(&pg).unwrap();
+            assert_eq!(record.exe, installed_postgres(&pg));
+            assert!(pg.daemon.proc_alive(ServerKind::Postgres.id()));
+            pg.daemon.stop_procs(WAIT).await;
             assert_eq!(recorded(&pg), None, "the end of the run deletes it");
         }
 

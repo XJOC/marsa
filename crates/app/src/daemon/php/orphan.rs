@@ -207,7 +207,7 @@ pub const RECORD_LIMIT: Duration = Duration::from_secs(5);
 
 /// The daemon's own executable, in each spelling: what the `exe` link of a
 /// child names until its exec is done ([`Recorded::NotYet`]).
-fn own_executable() -> Vec<PathBuf> {
+pub(crate) fn own_executable() -> Vec<PathBuf> {
     accepted(std::env::current_exe().ok())
 }
 

@@ -4,8 +4,10 @@
 //! the servers with the daemon (ADR 0017).
 //!
 //! `run/<id>.pid` (`run/postgres.pid`) holds the pid, the file it really
-//! runs, and its start time, written as soon as the spawned process runs our
-//! server program, and deleted when that run ends. Before each start, and at a stop when this
+//! runs, and its start time. The task of the run writes it as soon as the
+//! supervisor says the pid and the process runs our server program
+//! ([`RunRecord`]), however long the server takes to answer, and deletes it
+//! when that run ends. Before each start, and at a stop when this
 //! daemon runs no server, the file is read and the process at that pid is
 //! checked again ([`marsa_core::orphan::classify_pidfile`]):
 //!
@@ -24,17 +26,26 @@
 //! deleted here.
 
 use marsa_core::codes;
+use std::convert::Infallible;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use marsa_core::databases::ServerKind;
 use marsa_core::orphan::{Liveness, PidRecord, PidfileState, classify_pidfile};
 use marsa_core::platform::process::{self, Signal};
 use marsa_core::services::{StopAction, StopMethod};
+use marsa_core::types::Event;
+use tokio::sync::broadcast::{self, error::RecvError};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::daemon::php::orphan::own_executable;
 use crate::daemon::services::probe::ProcessProbe;
+use crate::daemon::services::runtime::AbortOnDrop;
+use crate::daemon::supervisor::{ServiceRuntime, lock};
 
 /// Our old server could not be stopped: nothing was started.
 pub(super) fn stuck_code(kind: ServerKind) -> &'static str {
@@ -57,39 +68,190 @@ pub(super) fn pid_path(kind: ServerKind, data_dir: &Path) -> PathBuf {
     data_dir.join("run").join(format!("{}.pid", kind.id()))
 }
 
-/// Writes `run/<id>.pid` for our server at `pid`, only when the file it
-/// really runs is one of `servers`. `false` when it was not written: right
-/// after the spawn the process may not run the server yet (before its
-/// `exec`), or the system could not tell this time, so the caller asks
-/// again.
-pub(super) async fn record(
+/// How long the record of a run looks again at a pid that does not run our
+/// server yet, or that the system cannot tell this time ([`record`]).
+const RECORD_LIMIT: Duration = Duration::from_secs(5);
+/// How often it looks again. Short: Valkey takes connections a few
+/// milliseconds after its exec, and until the record is written a crash of
+/// `marsad` leaves the server unrecorded.
+const RECORD_POLL: Duration = Duration::from_millis(5);
+/// How long a start waits for the record of its run ([`settled`]): the
+/// looks of [`RECORD_LIMIT`], and one more, which on macOS runs `ps`, `lsof`
+/// and `ps` again, each for up to 2 s.
+const SETTLE_LIMIT: Duration = Duration::from_secs(12);
+
+/// Whether `run/<id>.pid` names a run, for the start that waits for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Recorded {
+    /// The pid is not known yet, or the look goes on.
+    Pending,
+    /// The file names this pid.
+    Written(u32),
+    /// Not written: the system has no recovery, the pid does not run one of
+    /// our server programs, the run ended first, or the file cannot be
+    /// written.
+    Never,
+}
+
+/// One run of a server, from its spawn to its end, for `run/<id>.pid`. Its
+/// [`RunRecord::follow`] is the task of the run in `Daemon::procs`, so the
+/// record does not wait for the server's first answer, and no start that a
+/// stop drops can skip it.
+pub(super) struct RunRecord {
+    pub(super) kind: ServerKind,
+    pub(super) probes: Arc<dyn ProcessProbe>,
+    pub(super) data_dir: PathBuf,
+    /// The server program of each installed version.
+    pub(super) servers: Vec<PathBuf>,
+    /// The status the supervisor keeps, with the pid of the run.
+    pub(super) runtime: Arc<Mutex<ServiceRuntime>>,
+    /// The event bus, subscribed before the spawn, so the supervisor's word
+    /// on the pid is not missed.
+    pub(super) events: broadcast::Receiver<Event>,
+    /// What the record came to, for [`settled`].
+    pub(super) recorded: watch::Sender<Recorded>,
+}
+
+impl RunRecord {
+    /// Waits for the supervisor's task, and meanwhile writes the record as
+    /// soon as the supervisor says the pid it spawned ([`record`]). Once the
+    /// run has ended, deletes the record it wrote, whatever ended it: a
+    /// stop, a shutdown, or the server itself. A server is never restarted,
+    /// so the run is the task.
+    pub(super) async fn follow(mut self, mut supervisor: JoinHandle<()>) {
+        // `stop_procs` aborts this task after its time limit; the abort
+        // reaches the supervisor too, so its `Child` is dropped.
+        let _abort = AbortOnDrop(supervisor.abort_handle());
+        let kind = self.kind;
+        tokio::select! {
+            ended = &mut supervisor => {
+                if let Err(err) = ended {
+                    warn!(%err, server = kind.id(), "the server task failed");
+                }
+            }
+            never = self.record_spawn() => match never {},
+        }
+        let recorded = *self.recorded.borrow();
+        if let Recorded::Written(pid) = recorded {
+            forget_run(kind, &self.data_dir, pid);
+        }
+    }
+
+    /// Writes the record of the spawn, then waits for ever: the run's end
+    /// drops it.
+    async fn record_spawn(&mut self) -> Infallible {
+        let pid = self.spawned_pid().await;
+        let runtime = &self.runtime;
+        let owns = || lock(runtime).status.pid == Some(pid);
+        let probes = &*self.probes;
+        let written = record(self.kind, probes, &self.data_dir, &self.servers, pid, &owns).await;
+        // Kept when the start no longer waits for it: `follow` reads it.
+        self.recorded.send_replace(written);
+        std::future::pending().await
+    }
+
+    /// The pid the supervisor spawned, from the first status of this
+    /// server with one.
+    async fn spawned_pid(&mut self) -> u32 {
+        loop {
+            let status = match self.events.recv().await {
+                Ok(Event::ServiceChanged(status)) if status.id == self.kind.id() => status,
+                Ok(_) => continue,
+                // Too far behind: the status now has the pid while it runs.
+                Err(RecvError::Lagged(_)) => lock(&self.runtime).status.clone(),
+                Err(RecvError::Closed) => return std::future::pending().await,
+            };
+            if let Some(pid) = status.pid {
+                return pid;
+            }
+        }
+    }
+}
+
+/// Writes `run/<id>.pid` for the run just spawned at `pid`, once the file it
+/// really runs is one of `servers`. It looks again every [`RECORD_POLL`], up
+/// to [`RECORD_LIMIT`], while the system cannot tell, or while the pid still
+/// runs the daemon's own executable: on Linux, with glibc's `posix_spawn`,
+/// `spawn` returns before the exec is done ([`own_executable`]). Never
+/// written when the pid changes hands (its start time changes), or when
+/// `owns` says the supervisor no longer runs it: once reaped, the pid may be
+/// anyone's.
+async fn record(
     kind: ServerKind,
     probes: &dyn ProcessProbe,
     data_dir: &Path,
     servers: &[PathBuf],
     pid: u32,
-) -> bool {
+    owns: &(dyn Fn() -> bool + Send + Sync),
+) -> Recorded {
     if !process::DATABASE_ORPHAN_RECOVERY {
-        return true;
+        return Recorded::Never;
     }
-    match probes.real_identity(pid).await {
-        Liveness::Alive { exe, started } if servers.contains(&exe) => {
-            let record = PidRecord { pid, exe, started };
-            match process::write_pid_file(&pid_path(kind, data_dir), &record) {
-                Ok(()) => debug!(pid, server = kind.id(), "the pid record is written"),
-                Err(err) => warn!(%err, server = kind.id(), "cannot write the pid record"),
+    let server = kind.id();
+    let own = own_executable();
+    let until = Instant::now() + RECORD_LIMIT;
+    let mut first = None;
+    loop {
+        let now = probes.real_identity(pid).await;
+        let again = match &now {
+            Liveness::Alive { exe, started } => {
+                if *first.get_or_insert(*started) != *started {
+                    warn!(
+                        pid,
+                        server, "the pid record is not written: the pid changed hands"
+                    );
+                    return Recorded::Never;
+                }
+                if !owns() {
+                    debug!(pid, server, "it ended before its pid record was written");
+                    return Recorded::Never;
+                }
+                if servers.contains(exe) {
+                    let record = PidRecord {
+                        pid,
+                        exe: exe.clone(),
+                        started: *started,
+                    };
+                    return match process::write_pid_file(&pid_path(kind, data_dir), &record) {
+                        Ok(()) => {
+                            debug!(pid, server, "the pid record is written");
+                            Recorded::Written(pid)
+                        }
+                        Err(err) => {
+                            warn!(%err, server, "cannot write the pid record");
+                            Recorded::Never
+                        }
+                    };
+                }
+                own.contains(exe)
             }
-            true
-        }
-        other => {
-            debug!(
+            Liveness::Gone => {
+                debug!(pid, server, "it ended before its pid record was written");
+                return Recorded::Never;
+            }
+            // A `ps` or `lsof` that failed once.
+            Liveness::Unknown => true,
+        };
+        if !again || Instant::now() >= until {
+            warn!(
                 pid,
-                ?other,
-                server = kind.id(),
-                "the pid record is not written yet"
+                ?now,
+                server,
+                "the pid record is not written: not our server"
             );
-            false
+            return Recorded::Never;
         }
+        tokio::time::sleep(RECORD_POLL).await;
+    }
+}
+
+/// What the record of a run came to, once it is known, for at most
+/// [`SETTLE_LIMIT`]. A run that ended before its record says `Never`.
+pub(super) async fn settled(mut recorded: watch::Receiver<Recorded>) -> Recorded {
+    let known = recorded.wait_for(|recorded| *recorded != Recorded::Pending);
+    match tokio::time::timeout(SETTLE_LIMIT, known).await {
+        Ok(Ok(recorded)) => *recorded,
+        Ok(Err(_)) | Err(_) => Recorded::Never,
     }
 }
 

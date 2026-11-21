@@ -69,9 +69,6 @@ pub struct ServerManager {
     /// The program of the last start, so an uninstall never deletes the
     /// version that runs. Use [`ServerManager::running_program`].
     started: Mutex<Option<PathBuf>>,
-    /// The pid the run that started last wrote to `run/<id>.pid`, so its
-    /// end deletes only its own record.
-    recorded: Mutex<Arc<Mutex<Option<u32>>>>,
     /// The status and recent lines, kept across runs, so `seq` never goes
     /// back and the lines of a failed run stay readable.
     runtime: Arc<Mutex<ServiceRuntime>>,
@@ -100,7 +97,6 @@ impl ServerManager {
             orphan_ladder: kind.stop(),
             elevated: marsa_core::platform::is_elevated,
             started: Mutex::default(),
-            recorded: Mutex::default(),
             starting: Mutex::default(),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(kind.id()))),
             busy: Arc::default(),
@@ -373,13 +369,15 @@ impl ServerManager {
         } = prepared;
         // This run's lines come after the ones there now.
         let first_seq = self.recent_logs().last().map_or(0, |line| line.seq + 1);
-        self.spawn(daemon, spec)?;
-        match self.wait_ready(daemon, port, &servers).await {
+        let recorded = self.spawn(daemon, spec, servers)?;
+        match self.wait_ready(daemon, port).await {
             Ready::Yes => {
                 let server = self.kind.id();
                 info!(port, server, "it takes connections");
-                let slot = Arc::clone(&lock(&self.recorded));
-                if process::DATABASE_ORPHAN_RECOVERY && lock(&slot).is_none() {
+                // The record comes first, so a crash of `marsad` once a
+                // start said "running" leaves the server recorded.
+                let settled = orphan::settled(recorded).await;
+                if process::DATABASE_ORPHAN_RECOVERY && settled == orphan::Recorded::Never {
                     warn!(
                         server,
                         "it runs, but not as an installed server the system could tell, so its \
