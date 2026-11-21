@@ -88,6 +88,7 @@ impl InitError {
         match self.kind {
             ServerKind::Postgres => codes::POSTGRES_INIT_FAILED,
             ServerKind::Mysql => codes::MYSQL_INIT_FAILED,
+            ServerKind::Valkey => codes::VALKEY_INIT_FAILED,
         }
     }
 

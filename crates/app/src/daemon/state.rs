@@ -74,6 +74,8 @@ pub struct Daemon {
     pub postgres: ServerManager,
     /// MySQL, the same way.
     pub mysql: ServerManager,
+    /// Valkey, the same way.
+    pub valkey: ServerManager,
     /// The DNS server for `.test` (task M4-18i). Not listed here;
     /// `server::run` sets [`DnsService::for_daemon`].
     pub dns: DnsService,
@@ -105,6 +107,7 @@ impl Daemon {
             caddy: CaddyManager::new(&data_dir),
             postgres: ServerManager::new(ServerKind::Postgres),
             mysql: ServerManager::new(ServerKind::Mysql),
+            valkey: ServerManager::new(ServerKind::Valkey),
             dns: DnsService::new(None),
             pools: Pools::default(),
             pass_requests: PassRequests::default(),
@@ -126,6 +129,7 @@ impl Daemon {
         match kind {
             ServerKind::Postgres => &self.postgres,
             ServerKind::Mysql => &self.mysql,
+            ServerKind::Valkey => &self.valkey,
         }
     }
 

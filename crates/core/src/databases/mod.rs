@@ -1,7 +1,7 @@
 //! The database servers as managed services (ADR 0023): which servers there
 //! are ([`ServerKind`]), PostgreSQL's folders, the arguments of `initdb` and
 //! `postgres`, how it stops, and the check before a start. MySQL's own
-//! part is in [`mysql`].
+//! part is in [`mysql`], and Valkey's in [`valkey`].
 //!
 //! Not behind the `full` feature: it only decides, like a Laravel policy. The
 //! daemon reads the files, tests the port, and starts the processes (M6-03c).
@@ -12,6 +12,7 @@ use std::time::Duration;
 use semver::Version;
 
 pub mod mysql;
+pub mod valkey;
 
 use crate::config::{GlobalConfig, ServerSettings};
 use crate::orphan::Liveness;
@@ -30,11 +31,13 @@ pub const POSTGRES_PORT: u16 = 5432;
 pub enum ServerKind {
     Postgres,
     Mysql,
+    /// The key-value server of Laravel's Redis cache and queue.
+    Valkey,
 }
 
 impl ServerKind {
     /// Every server, in the order lists show them.
-    pub const ALL: [ServerKind; 2] = [ServerKind::Postgres, ServerKind::Mysql];
+    pub const ALL: [ServerKind; 3] = [ServerKind::Postgres, ServerKind::Mysql, ServerKind::Valkey];
 
     /// The service id: the name in `marsa services`, the log file
     /// `logs/<id>.log`, the table in `global.toml`, and `run/<id>.pid`.
@@ -42,6 +45,7 @@ impl ServerKind {
         match self {
             Self::Postgres => "postgres",
             Self::Mysql => "mysql",
+            Self::Valkey => "valkey",
         }
     }
 
@@ -50,6 +54,7 @@ impl ServerKind {
         match self {
             Self::Postgres => "PostgreSQL",
             Self::Mysql => "MySQL",
+            Self::Valkey => "Valkey",
         }
     }
 
@@ -68,6 +73,7 @@ impl ServerKind {
         match self {
             Self::Postgres => Runtime::Postgres,
             Self::Mysql => Runtime::Mysql,
+            Self::Valkey => Runtime::Valkey,
         }
     }
 
@@ -77,6 +83,7 @@ impl ServerKind {
         match self {
             Self::Postgres => POSTGRES_PORT,
             Self::Mysql => mysql::MYSQL_PORT,
+            Self::Valkey => valkey::VALKEY_PORT,
         }
     }
 
@@ -86,14 +93,20 @@ impl ServerKind {
         match self {
             Self::Postgres => "postgres",
             Self::Mysql => "mysqld",
+            Self::Valkey => "valkey-server",
         }
     }
 
-    /// How the supervisor stops it, before a final kill.
+    /// The signals that stop it, before a final kill: how the supervisor
+    /// stops it, and how our own orphan is stopped. Valkey gets
+    /// `SHUTDOWN SAVE` on its port first from the supervisor
+    /// ([`valkey::valkey_stop`]), but never as an orphan: a port does not
+    /// prove which process listens (ADR 0023, section 8).
     pub fn stop(self) -> StopMethod {
         match self {
             Self::Postgres => postgres_stop(),
             Self::Mysql => mysql::mysql_stop(),
+            Self::Valkey => valkey::valkey_signals(),
         }
     }
 
@@ -102,6 +115,7 @@ impl ServerKind {
         match self {
             Self::Postgres => &global.postgres,
             Self::Mysql => &global.mysql,
+            Self::Valkey => &global.valkey,
         }
     }
 
@@ -110,22 +124,24 @@ impl ServerKind {
         match self {
             Self::Postgres => &mut global.postgres,
             Self::Mysql => &mut global.mysql,
+            Self::Valkey => &mut global.valkey,
         }
     }
 
     /// The line `version` belongs to, as `default` names it: the major for
     /// PostgreSQL (`"18"`), the major and minor for MySQL (`"8.4"`, an LTS
-    /// line). Each line has its own data folder.
+    /// line) and Valkey (`"8.1"`). Each MySQL and PostgreSQL line has its own
+    /// data folder.
     pub fn line(self, version: &Version) -> String {
         match self {
             Self::Postgres => version.major.to_string(),
-            Self::Mysql => format!("{}.{}", version.major, version.minor),
+            Self::Mysql | Self::Valkey => format!("{}.{}", version.major, version.minor),
         }
     }
 
     /// Whether `version` is in the line `default` names. `None` when
     /// `default` names no line: for PostgreSQL not a major number, for
-    /// MySQL not `<major>.<minor>`.
+    /// MySQL and Valkey not `<major>.<minor>`.
     pub fn in_line(self, default: &str, version: &Version) -> Option<bool> {
         let default = default.trim();
         match self {
@@ -133,7 +149,7 @@ impl ServerKind {
                 let major = default.parse::<u64>().ok()?;
                 Some(version.major == major)
             }
-            Self::Mysql => {
+            Self::Mysql | Self::Valkey => {
                 let (major, minor) = default.split_once('.')?;
                 let number = |text: &str| {
                     let digits = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
@@ -619,6 +635,55 @@ pub fn classify_postmaster(pid: u32, now: &Liveness, servers: &[PathBuf]) -> Pid
         Liveness::Alive { exe, .. } if servers.contains(exe) => PidFileCheck::Server { pid },
         Liveness::Alive { .. } => PidFileCheck::Other { pid },
     }
+}
+
+/// A path that a server's settings file cannot hold: one with a double quote
+/// or a control character, or not UTF-8. Its own error, since no start can
+/// go on.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum UnwritablePath {
+    #[error(
+        "{} cannot be written to my.cnf: it has a double quote or a control character",
+        .0.display()
+    )]
+    Mysql(PathBuf),
+    #[error(
+        "{} cannot be written to valkey.conf: it has a double quote or a control character",
+        .0.display()
+    )]
+    Valkey(PathBuf),
+}
+
+impl UnwritablePath {
+    /// Stable error name for the UI.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Mysql(_) => crate::codes::MYSQL_PATH_UNSUPPORTED,
+            Self::Valkey(_) => crate::codes::VALKEY_PATH_UNSUPPORTED,
+        }
+    }
+}
+
+/// Whether `text` has a character that a double-quoted value of `my.cnf` or
+/// `valkey.conf` cannot hold: a double quote, or a control character (a line
+/// break would start a new setting).
+fn odd(text: &str) -> bool {
+    text.contains(|c: char| c == '"' || c.is_control())
+}
+
+/// `path` as a value of `my.cnf` or `valkey.conf`: in double quotes, so a `#`
+/// is not a comment and spaces stay part of it, with `\` written `\\` (both
+/// read escapes in a quoted value). `refuse` makes the error of the file's
+/// server.
+fn quoted_path(
+    path: &Path,
+    refuse: fn(PathBuf) -> UnwritablePath,
+) -> Result<String, UnwritablePath> {
+    let text = path
+        .to_str()
+        .filter(|text| !odd(text))
+        .ok_or_else(|| refuse(path.to_path_buf()))?;
+    Ok(format!("\"{}\"", text.replace('\\', "\\\\")))
 }
 
 /// `path` as one argument. `to_string_lossy` as in `caddy_spec`: the app data

@@ -41,6 +41,7 @@ pub(super) fn stuck_code(kind: ServerKind) -> &'static str {
     match kind {
         ServerKind::Postgres => codes::POSTGRES_ORPHAN_STUCK,
         ServerKind::Mysql => codes::MYSQL_ORPHAN_STUCK,
+        ServerKind::Valkey => codes::VALKEY_ORPHAN_STUCK,
     }
 }
 

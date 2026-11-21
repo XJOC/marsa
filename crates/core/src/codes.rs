@@ -240,6 +240,12 @@ pub const UNINSTALL_TIMED_OUT: &str = "uninstall_timed_out";
 pub const UNKNOWN_ACTION: &str = "unknown_action";
 pub const UNKNOWN_TOOL: &str = "unknown_tool";
 pub const UNSUPPORTED_ALIAS: &str = "unsupported_alias";
+pub const VALKEY_INIT_FAILED: &str = "valkey_init_failed";
+pub const VALKEY_NOT_INSTALLED: &str = "valkey_not_installed";
+pub const VALKEY_ORPHAN_STUCK: &str = "valkey_orphan_stuck";
+pub const VALKEY_PATH_UNSUPPORTED: &str = "valkey_path_unsupported";
+pub const VALKEY_START_TIMEOUT: &str = "valkey_start_timeout";
+pub const VALKEY_UNSUPPORTED_PLATFORM: &str = "valkey_unsupported_platform";
 pub const VERSION_AMBIGUOUS: &str = "version_ambiguous";
 pub const VERSION_IN_USE: &str = "version_in_use";
 pub const VERSION_NOT_INSTALLED: &str = "version_not_installed";
@@ -483,6 +489,12 @@ pub const ALL: &[&str] = &[
     UNKNOWN_ACTION,
     UNKNOWN_TOOL,
     UNSUPPORTED_ALIAS,
+    VALKEY_INIT_FAILED,
+    VALKEY_NOT_INSTALLED,
+    VALKEY_ORPHAN_STUCK,
+    VALKEY_PATH_UNSUPPORTED,
+    VALKEY_START_TIMEOUT,
+    VALKEY_UNSUPPORTED_PLATFORM,
     VERSION_AMBIGUOUS,
     VERSION_IN_USE,
     VERSION_NOT_INSTALLED,

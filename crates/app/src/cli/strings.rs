@@ -377,6 +377,28 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              control character, which MySQL's settings file cannot hold, so MySQL was not \
              started. Run \"marsa logs mysql\" to see the path."
             .into(),
+        // Valkey (task M6-06), the same way.
+        "valkey_not_installed" => "Valkey of the version set in global.toml is not installed. \
+             Run \"marsa install valkey\", then try again."
+            .into(),
+        "valkey_init_failed" => "Marsa could not make Valkey's data folder or write its \
+             settings file. Run \"marsa logs valkey\" to see why."
+            .into(),
+        "valkey_start_timeout" => "Valkey started but did not answer PING in time, so it was \
+             stopped. Run \"marsa logs valkey\" to see why."
+            .into(),
+        "valkey_orphan_stuck" => "An old Valkey of this Marsa, left running when the Marsa \
+             daemon stopped, still runs after SIGKILL, or can no longer be told apart from \
+             another program. Run \"marsa logs valkey\" to see its pid; quit that process in \
+             your system's process list only if it is valkey-server, then try again."
+            .into(),
+        "valkey_unsupported_platform" => {
+            "Marsa runs Valkey on macOS and Linux only for now.".into()
+        }
+        "valkey_path_unsupported" => "The path of Marsa's data folder has a double quote or a \
+             control character, which Valkey's settings file cannot hold, so Valkey was not \
+             started. Run \"marsa logs valkey\" to see the path."
+            .into(),
         "caddy_other_marsa" => format!(
             "The Caddy of another Marsa (another data folder, or another user) uses the ports \
              {service} needs. Stop that Marsa first. Run \"marsa logs {id}\" for details."
@@ -1222,6 +1244,12 @@ pub fn mysql_connection(port: u16) -> String {
         "mysql: 127.0.0.1:{port}, user root, no password (DB_CONNECTION=mysql, \
          DB_HOST=127.0.0.1, DB_PORT={port}, DB_USERNAME=root)"
     )
+}
+
+/// The line under the table while Valkey runs: how Laravel's Redis cache
+/// and queue reach it. No user and no password.
+pub fn valkey_connection(port: u16) -> String {
+    format!("valkey: 127.0.0.1:{port} (REDIS_HOST=127.0.0.1, REDIS_PORT={port})")
 }
 
 /// The line under the table while PostgreSQL runs: how a Laravel `.env`
@@ -2225,6 +2253,33 @@ mod tests {
         let busy = message("service_data_dir_busy", &postgres);
         assert!(busy.starts_with("Another PostgreSQL server"), "{busy}");
         assert!(message("postgres_not_installed", &postgres).contains("marsa install postgres"));
+    }
+
+    /// The Valkey refusals name it, its table, and what to do: Homebrew's
+    /// Redis or Herd on 6379 is the usual one.
+    #[test]
+    fn valkey_messages_name_it_and_what_to_do() {
+        let valkey = Details {
+            service: Some("valkey"),
+            ..Details::default()
+        };
+        assert_eq!(
+            message("service_port_busy", &valkey),
+            "Another program uses the port Valkey needs, and Marsa stops nothing. Quit it, \
+             or set another port in global.toml ([valkey] port), then try again. Run \
+             \"marsa logs valkey\" to see which program."
+        );
+        assert!(message("valkey_not_installed", &valkey).contains("marsa install valkey"));
+        for code in [
+            "valkey_init_failed",
+            "valkey_start_timeout",
+            "valkey_orphan_stuck",
+            "valkey_path_unsupported",
+        ] {
+            let text = message(code, &valkey);
+            assert!(text.contains("marsa logs valkey"), "{code}: {text}");
+        }
+        assert_eq!(service_name("valkey"), "Valkey");
     }
 
     #[test]

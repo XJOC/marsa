@@ -3,7 +3,7 @@
 //! Two files live in `<app data dir>/config/` (architecture.md section 7):
 //!
 //! - `global.toml`: the default PHP and Node versions, Xdebug on or off, and
-//!   the PostgreSQL server,
+//!   the database servers,
 //! - `sites.toml`: the settings of each site.
 //!
 //! The functions take the file path as input, so tests use temp folders. Only
@@ -35,6 +35,8 @@ pub struct GlobalConfig {
     pub postgres: ServerSettings,
     #[serde(skip_serializing_if = "is_default")]
     pub mysql: ServerSettings,
+    #[serde(skip_serializing_if = "is_default")]
+    pub valkey: ServerSettings,
 }
 
 /// The `[php]` or `[node]` table in `global.toml`. One table per tool leaves
@@ -53,19 +55,20 @@ pub struct ToolDefaults {
 }
 
 /// A database server's table in `global.toml`: `[postgres]` (task M6-03),
-/// `[mysql]` (task M6-05), later `[valkey]` (ADR 0023).
+/// `[mysql]` (task M6-05), and `[valkey]` (task M6-06), ADR 0023.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerSettings {
     /// The line that runs, as the user wrote it: `"18"` for PostgreSQL,
-    /// `"8.4"` for MySQL.
+    /// `"8.4"` for MySQL, `"8.1"` for Valkey.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     /// The server starts with `marsad`. `marsa services stop` turns it off.
     #[serde(skip_serializing_if = "is_false")]
     pub enabled: bool,
     /// `None` is the server's own port: [`crate::databases::POSTGRES_PORT`],
-    /// [`crate::databases::mysql::MYSQL_PORT`]. From 1 to 65535, like the server
+    /// [`crate::databases::mysql::MYSQL_PORT`],
+    /// [`crate::databases::valkey::VALKEY_PORT`]. From 1 to 65535, like the server
     /// accepts. Never `0`: a bind test on port 0 always succeeds, so the
     /// check before a start would miss a busy port.
     #[serde(
@@ -478,6 +481,7 @@ mod tests {
             },
             postgres: ServerSettings::default(),
             mysql: ServerSettings::default(),
+            valkey: ServerSettings::default(),
         }
     }
 
@@ -575,6 +579,30 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), text);
         let err = parse_global("[mysql]\nport = 0\n", Path::new("global.toml")).unwrap_err();
         assert_eq!(err.code(), "config_invalid");
+    }
+
+    #[test]
+    fn valkey_table_comes_after_mysql_and_round_trips() {
+        let text = format!(
+            "{HEADER}\n[mysql]\nenabled = true\n\n[valkey]\ndefault = \"8.1\"\nenabled = true\n\
+             port = 6380\n"
+        );
+        let config = parse_global(&text, Path::new("global.toml")).unwrap();
+        let want = ServerSettings {
+            default: Some("8.1".to_owned()),
+            enabled: true,
+            port: Some(6380),
+        };
+        assert_eq!(config.valkey, want);
+        assert!(config.mysql.enabled);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("global.toml");
+        save_global(&path, &config).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        for bad in ["[valkey]\nport = 0\n", "[valkey]\nbind = \"0.0.0.0\"\n"] {
+            let err = parse_global(bad, Path::new("global.toml")).unwrap_err();
+            assert_eq!(err.code(), "config_invalid", "{bad}");
+        }
     }
 
     #[test]
