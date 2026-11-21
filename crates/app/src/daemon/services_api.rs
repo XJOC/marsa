@@ -592,14 +592,9 @@ mod tests {
         // A start without its program: refused, and still off.
         let (status, body) = send("POST", "/v1/services/postgres/start").await;
         let error: ErrorBody = serde_json::from_str(&body).unwrap();
-        let code = if cfg!(windows) {
-            "postgres_unsupported_platform"
-        } else {
-            "postgres_not_installed"
-        };
         assert_eq!(
             (status, error.error.code.as_str()),
-            (StatusCode::CONFLICT, code)
+            (StatusCode::CONFLICT, "postgres_not_installed")
         );
         assert!(!config::load_global(&global).unwrap().postgres.enabled);
         let (status, body) = send("POST", "/v1/services/postgres/kill").await;
@@ -610,14 +605,9 @@ mod tests {
         assert_eq!(ids().await, ["caddy", "postgres", "valkey"]);
         let (status, body) = send("POST", "/v1/services/valkey/start").await;
         let error: ErrorBody = serde_json::from_str(&body).unwrap();
-        let code = if cfg!(windows) {
-            "valkey_unsupported_platform"
-        } else {
-            "valkey_not_installed"
-        };
         assert_eq!(
             (status, error.error.code.as_str()),
-            (StatusCode::CONFLICT, code)
+            (StatusCode::CONFLICT, "valkey_not_installed")
         );
         assert!(!config::load_global(&global).unwrap().valkey.enabled);
     }

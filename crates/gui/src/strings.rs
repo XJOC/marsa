@@ -2074,7 +2074,7 @@ fn error_message(code: &str) -> Option<&'static str> {
         "valkey_not_installed" => "Valkey of the version set in global.toml is not installed.",
         "valkey_orphan_stuck" => "An old Valkey of this Marsa still runs and did not stop.",
         "valkey_path_unsupported" => {
-            "The path of Marsa's data folder has a character that Valkey's settings file cannot hold."
+            "The path of Marsa's data folder has a character that Valkey's settings file cannot hold, or is not on a drive such as C:."
         }
         "valkey_start_timeout" => "Valkey started but did not answer in time.",
         "valkey_unsupported_platform" => "Marsa has no Valkey for this system.",

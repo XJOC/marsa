@@ -4,7 +4,7 @@
 //! The first start of a line makes its data folder in
 //! `databases/mysql/<line>/` ([`ensure_data_dir`]): `mysqld
 //! --initialize-insecure`, which makes `root@localhost` with no password,
-//! and in the same run `root@127.0.0.1` for TCP ([`ROOT_TCP_SQL`]).
+//! and in the same run `root@127.0.0.1` for TCP ([`root_tcp_sql`]).
 
 use std::io;
 use std::net::Ipv4Addr;
@@ -13,10 +13,11 @@ use std::time::Duration;
 
 use marsa_core::databases::ServerKind;
 use marsa_core::databases::mysql::{
-    MysqlDirs, ROOT_TCP_SQL, is_handshake, mysql_init_args, mysql_stop, mysqld_args,
+    MysqlDirs, is_handshake, mysql_init_args, mysqld_args, root_tcp_sql,
 };
 use marsa_core::platform::daemon_file::create_private_dir;
-use marsa_core::services::{RestartPolicy, ServiceSpec};
+use marsa_core::recipes::Os;
+use marsa_core::services::{RestartPolicy, ServiceSpec, StopMethod};
 use tokio::io::AsyncReadExt as _;
 use tokio::process::Command;
 
@@ -33,22 +34,23 @@ const CONNECT_LIMIT: Duration = Duration::from_millis(500);
 /// Owner-only: `my.cnf` names the socket that reaches `root@localhost`.
 const PRIVATE: u32 = 0o600;
 
-/// How the supervisor runs MySQL: `mysqld --defaults-file=run/mysql.cnf`,
-/// stopped with SIGTERM, then a kill after 30 s ([`mysql_stop`]). MySQL logs
-/// to stderr (its `my.cnf` sets no `log-error`), which the supervisor keeps
-/// in `logs/mysql.log`.
+/// How the supervisor runs MySQL: `mysqld --defaults-file=run/mysql.cnf`
+/// ([`mysqld_args`] on `os`), stopped by `stop`: SIGTERM on macOS and Linux
+/// (`mysql_stop`), `mysqladmin shutdown` on Windows (`mysql_windows_stop`),
+/// then a kill after 30 s. MySQL logs to stderr (its `my.cnf` sets no
+/// `log-error`), which the supervisor keeps in `logs/mysql.log`.
 ///
 /// Never restarted after it exits, as PostgreSQL: a refusal at its start
 /// would only come again, and the status must keep the run's own exit.
-pub(super) fn spec(program: PathBuf, dirs: &MysqlDirs) -> ServiceSpec {
+pub(super) fn spec(program: PathBuf, dirs: &MysqlDirs, os: Os, stop: StopMethod) -> ServiceSpec {
     ServiceSpec {
         id: KIND.id().to_owned(),
         program,
-        args: mysqld_args(&dirs.config()),
+        args: mysqld_args(&dirs.config(), os),
         env: std::collections::BTreeMap::new(),
         cwd: None,
         restart: RestartPolicy::Never,
-        stop: mysql_stop(),
+        stop,
     }
 }
 
@@ -72,21 +74,25 @@ pub(super) async fn write_config(dirs: &MysqlDirs, text: String) -> io::Result<(
 
 /// Makes the data folder in `dirs.data` if nothing is there yet
 /// ([`ensure_data`]), and returns whether it made one: `mysqld` with
-/// [`mysql_init_args`] into the temp folder, with [`ROOT_TCP_SQL`] in
-/// `run/mysql-init.sql` for that run only. `run/mysql.cnf` is written
+/// [`mysql_init_args`] into the temp folder, with [`root_tcp_sql`] of `os`
+/// in `run/mysql-init.sql` for that run only. `run/mysql.cnf` is written
 /// first ([`write_config`]).
 ///
 /// # Errors
 ///
 /// `mysql_init_failed`, with the end of the output.
-pub(super) async fn ensure_data_dir(mysqld: &Path, dirs: &MysqlDirs) -> Result<bool, InitError> {
+pub(super) async fn ensure_data_dir(
+    mysqld: &Path,
+    dirs: &MysqlDirs,
+    os: Os,
+) -> Result<bool, InitError> {
     ensure_data(KIND, &dirs.data, async |temp: &Path| {
         let sql = dirs.init_sql();
-        let text = ROOT_TCP_SQL.as_bytes();
-        marsa_core::fs::write_atomic(&sql, text, Some(PRIVATE))
+        let text = root_tcp_sql(os);
+        marsa_core::fs::write_atomic(&sql, text.as_bytes(), Some(PRIVATE))
             .map_err(|err| InitError::io(KIND, "cannot write the init SQL", &err))?;
         let mut init = Command::new(mysqld);
-        init.args(mysql_init_args(&dirs.config(), &sql, temp));
+        init.args(mysql_init_args(&dirs.config(), &sql, temp, os));
         let step = Step {
             kind: KIND,
             what: "mysqld --initialize-insecure",
@@ -137,6 +143,8 @@ mod tests {
     use marsa_core::orphan::Liveness;
     use marsa_core::types::{ServiceAction, ServiceState, ServiceStatus};
     use tempfile::TempDir;
+
+    use marsa_core::databases::mysql::{ROOT_TCP_SQL, mysql_stop};
 
     use super::*;
     use crate::daemon::databases::ActionError;
@@ -375,7 +383,7 @@ mod tests {
     fn mysql_runs_with_its_defaults_file_and_stops_with_sigterm() {
         let dirs = MysqlDirs::new(Path::new("/m"), "8.4");
         let program = PathBuf::from("/m/runtimes/mysql/8.4.13/bin/mysqld");
-        let spec = spec(program.clone(), &dirs);
+        let spec = spec(program.clone(), &dirs, Os::Mac, mysql_stop());
         assert_eq!(spec.id, "mysql");
         assert_eq!(spec.program, program);
         assert_eq!(spec.args, ["--defaults-file=/m/run/mysql.cnf"]);

@@ -1,5 +1,6 @@
 //! MySQL 8.4 as a managed service (ADR 0023): its folders, its `my.cnf`,
-//! the first init, and its own rule for the check before a start.
+//! the first init, how it stops, and its own rule for the check before a
+//! start.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,10 +10,20 @@ use super::{
     odd, quoted_path,
 };
 use crate::php::MAX_SOCKET_PATH;
-use crate::services::{Signal, StopMethod};
+use crate::recipes::Os;
+use crate::services::{Signal, StopAction, StopCommand, StopMethod, StopStep};
 
 /// MySQL's port when `[mysql] port` is not set in `global.toml`.
 pub const MYSQL_PORT: u16 = 3306;
+
+/// How long MySQL has to exit after it was asked to stop, before a kill
+/// (ADR 0023, section 6).
+const STOP_WAIT: Duration = Duration::from_secs(30);
+
+/// Windows: without it `mysqld` writes its log to `<host>.err` in the data
+/// folder; with it, to stderr, which the supervisor keeps in
+/// `logs/mysql.log`, as on macOS and Linux.
+const CONSOLE: &str = "--console";
 
 /// The files of one MySQL line (`8.4`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,29 +189,95 @@ CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, CREATE RO
 ALTER ROUTINE, EVENT, TRIGGER ON sys.* FROM 'root'@'127.0.0.1';
 ";
 
+/// Windows only, after [`ROOT_TCP_SQL`] at the first init: SHUTDOWN for
+/// `root@127.0.0.1`, so that `mysqladmin shutdown` over TCP stops MySQL
+/// cleanly ([`mysql_windows_stop`]). Windows has no signals, and there no
+/// socket reaches `root@localhost`: Marsa opens no named pipe or shared
+/// memory, which any local user could open. SHUTDOWN only stops the server:
+/// no file, no command, no account, so a local user still cannot run
+/// anything as the owner (ADR 0023, "Access").
+pub const ROOT_TCP_WINDOWS_SQL: &str = "GRANT SHUTDOWN ON *.* TO 'root'@'127.0.0.1';\n";
+
+/// The SQL of the first init on `os`: [`ROOT_TCP_SQL`], and on Windows
+/// [`ROOT_TCP_WINDOWS_SQL`] after it.
+pub fn root_tcp_sql(os: Os) -> String {
+    let mut sql = ROOT_TCP_SQL.to_owned();
+    if os == Os::Windows {
+        sql.push_str(ROOT_TCP_WINDOWS_SQL);
+    }
+    sql
+}
+
 /// The arguments of the first init, in the empty folder `data`:
 /// `--defaults-file` first, as `mysqld` requires, then
 /// `--initialize-insecure` (`root@localhost` with no password), then
-/// [`ROOT_TCP_SQL`] from `init_sql`, then the temp folder over the
-/// `datadir` of `my.cnf`.
-pub fn mysql_init_args(config: &Path, init_sql: &Path, data: &Path) -> Vec<String> {
-    vec![
+/// [`root_tcp_sql`] from `init_sql`, then the temp folder over the
+/// `datadir` of `my.cnf`. On Windows `--console` last, so the init's errors
+/// reach its output.
+pub fn mysql_init_args(config: &Path, init_sql: &Path, data: &Path, os: Os) -> Vec<String> {
+    let mut args = vec![
         format!("--defaults-file={}", config.display()),
         "--initialize-insecure".to_owned(),
         format!("--init-file={}", init_sql.display()),
         format!("--datadir={}", data.display()),
-    ]
+    ];
+    if os == Os::Windows {
+        args.push(CONSOLE.to_owned());
+    }
+    args
 }
 
-/// The arguments of the server: only `--defaults-file`, which has it all.
-pub fn mysqld_args(config: &Path) -> Vec<String> {
-    vec![format!("--defaults-file={}", config.display())]
+/// The arguments of the server: `--defaults-file`, which has it all, and on
+/// Windows `--console`, so the log reaches the supervisor.
+pub fn mysqld_args(config: &Path, os: Os) -> Vec<String> {
+    let mut args = vec![format!("--defaults-file={}", config.display())];
+    if os == Os::Windows {
+        args.push(CONSOLE.to_owned());
+    }
+    args
 }
 
 /// SIGTERM, then a kill after 30 s (ADR 0023). SIGTERM ends the sessions
 /// and exits in 1 to 3.4 s with a client connected (S-12).
 pub fn mysql_stop() -> StopMethod {
-    StopMethod::signals([(Signal::Term, Duration::from_secs(30))])
+    StopMethod::signals([(Signal::Term, STOP_WAIT)])
+}
+
+/// How the supervisor stops MySQL on Windows, which has no signals (ADR
+/// 0023, section 6): `mysqladmin shutdown` as `root@127.0.0.1` on `port`,
+/// up to 30 s for the exit, counted from its start, then a kill
+/// (`TerminateProcess`), after which MySQL recovers its data at its next
+/// start (1.2 to 1.7 s in S-12).
+///
+/// - `--no-defaults` first, as `mysqladmin` requires: no option file of the
+///   user's (`C:\my.ini`, `.mylogin.cnf`) changes where or how it connects.
+/// - `--protocol=TCP --host=127.0.0.1`: the only way in on Windows, where it
+///   reaches `root@127.0.0.1` ([`ROOT_TCP_WINDOWS_SQL`] gives it SHUTDOWN).
+///   Over TCP `mysqladmin` does not wait for the server's pid file to go,
+///   so the supervisor waits for the exit itself.
+pub fn mysql_windows_stop(mysqladmin: &Path, port: u16) -> StopMethod {
+    let args = [
+        "--no-defaults".to_owned(),
+        "--protocol=TCP".to_owned(),
+        "--host=127.0.0.1".to_owned(),
+        format!("--port={port}"),
+        "--user=root".to_owned(),
+        "shutdown".to_owned(),
+    ];
+    let command = StopCommand {
+        program: mysqladmin.to_path_buf(),
+        args: args.to_vec(),
+        name: "mysqladmin shutdown",
+        on_failure: "mysqladmin logs in as root@127.0.0.1 with no password, so if root has a \
+                     password now, it cannot. Then MySQL is ended after 30 s, and it recovers \
+                     its data at its next start.",
+    };
+    StopMethod {
+        steps: vec![StopStep {
+            action: StopAction::Run(command),
+            wait: STOP_WAIT,
+        }],
+    }
 }
 
 /// The pid in `mysqld.pid`: the whole file, digits only, or `None` for junk.
@@ -213,13 +290,21 @@ pub fn mysqld_pid(text: &str) -> Option<u32> {
     u32::try_from(pid).ok().filter(|&pid| pid != 0)
 }
 
-/// The check before a start of MySQL: [`decide_start`], and a pid that the
-/// OS cannot tell refuses too. A second `mysqld` on the same data folder
-/// waits about 100 s for the InnoDB lock before it fails (S-12), so only a
-/// pid known to be dead or another program's lets it start.
-pub fn decide_mysql_start(facts: &StartFacts) -> StartDecision {
+/// The check before a start of MySQL on `os`: [`decide_start`], and on
+/// macOS and Linux a pid that the OS cannot tell refuses too. A second
+/// `mysqld` on the same data folder waits about 100 s for the InnoDB lock
+/// before it fails (S-12), so only a pid known to be dead or another
+/// program's lets it start.
+///
+/// Windows cannot tell any pid to Marsa yet (`process::real_identity`), and
+/// there a `mysqld.pid` that names a dead pid is the usual case: the Job
+/// Object ends `mysqld` with a crashed `marsad`, before it deletes its file
+/// (ADR 0017). So there an unknown pid starts, as for PostgreSQL. A
+/// `mysqld` started by hand on the same folder then makes the new one fail
+/// at the InnoDB lock (about 14 s on Windows, S-12) instead of at once.
+pub fn decide_mysql_start(facts: &StartFacts, os: Os) -> StartDecision {
     match facts.pid_file {
-        PidFileCheck::Unknown { pid } => {
+        PidFileCheck::Unknown { pid } if os != Os::Windows => {
             StartDecision::Refuse(ServiceBusy::DataDir { pid: Some(pid) })
         }
         _ => decide_start(facts),
@@ -344,21 +429,30 @@ mod tests {
     #[test]
     fn the_defaults_file_comes_first() {
         let config = Path::new("/m/run/mysql.cnf");
-        let init = mysql_init_args(
-            config,
-            Path::new("/m/run/mysql-init.sql"),
-            Path::new("/m/databases/mysql/.8.4.init-1"),
-        );
-        assert_eq!(
-            init,
-            [
-                "--defaults-file=/m/run/mysql.cnf",
-                "--initialize-insecure",
-                "--init-file=/m/run/mysql-init.sql",
-                "--datadir=/m/databases/mysql/.8.4.init-1",
-            ]
-        );
-        assert_eq!(mysqld_args(config), ["--defaults-file=/m/run/mysql.cnf"]);
+        let init = |os| {
+            mysql_init_args(
+                config,
+                Path::new("/m/run/mysql-init.sql"),
+                Path::new("/m/databases/mysql/.8.4.init-1"),
+                os,
+            )
+        };
+        let unix = [
+            "--defaults-file=/m/run/mysql.cnf",
+            "--initialize-insecure",
+            "--init-file=/m/run/mysql-init.sql",
+            "--datadir=/m/databases/mysql/.8.4.init-1",
+        ];
+        assert_eq!(init(Os::Mac), unix);
+        assert_eq!(init(Os::Linux), unix);
+        let mut windows = unix.to_vec();
+        windows.push("--console");
+        assert_eq!(init(Os::Windows), windows);
+        let server = ["--defaults-file=/m/run/mysql.cnf"];
+        assert_eq!(mysqld_args(config, Os::Mac), server);
+        assert_eq!(mysqld_args(config, Os::Linux), server);
+        let windows = ["--defaults-file=/m/run/mysql.cnf", "--console"];
+        assert_eq!(mysqld_args(config, Os::Windows), windows);
     }
 
     #[test]
@@ -369,6 +463,41 @@ mod tests {
             stop,
             StopMethod::signals([(Signal::Term, Duration::from_secs(30))])
         );
+    }
+
+    /// Windows: `mysqladmin shutdown` by its absolute path, with fixed
+    /// arguments and no option file, then the kill after 30 s.
+    #[test]
+    fn on_windows_mysqladmin_shuts_it_down_over_tcp_then_a_kill_after_30_s() {
+        let mysqladmin = Path::new(r"C:\m\runtimes\mysql\8.4.13\bin\mysqladmin.exe");
+        let stop = mysql_windows_stop(mysqladmin, 3307);
+        let [step] = stop.steps.as_slice() else {
+            panic!("one step: {stop:?}");
+        };
+        assert_eq!(step.wait, Duration::from_secs(30));
+        let StopAction::Run(command) = &step.action else {
+            panic!("a stop program: {step:?}");
+        };
+        assert_eq!(command.program, mysqladmin);
+        let args = "--no-defaults --protocol=TCP --host=127.0.0.1 --port=3307 --user=root shutdown";
+        assert_eq!(command.args, args.split(' ').collect::<Vec<_>>());
+        assert_eq!(command.name, "mysqladmin shutdown");
+        // The log line says why a password stops it, and what follows.
+        assert!(command.on_failure.contains("password"), "{command:?}");
+        assert!(command.on_failure.contains("30 s"), "{command:?}");
+    }
+
+    /// Only Windows gives root over TCP SHUTDOWN, its one way to a clean
+    /// stop; the rest of the access rules stay as they are.
+    #[test]
+    fn only_windows_gives_root_on_tcp_shutdown() {
+        assert_eq!(root_tcp_sql(Os::Mac), ROOT_TCP_SQL);
+        assert_eq!(root_tcp_sql(Os::Linux), ROOT_TCP_SQL);
+        let windows = root_tcp_sql(Os::Windows);
+        let added = windows.strip_prefix(ROOT_TCP_SQL).unwrap();
+        assert_eq!(added, "GRANT SHUTDOWN ON *.* TO 'root'@'127.0.0.1';\n");
+        assert!(!windows.contains("FILE"));
+        assert!(!windows.contains("SUPER"));
     }
 
     #[test]
@@ -388,21 +517,24 @@ mod tests {
             pid_file,
         };
         let busy = StartDecision::Refuse(ServiceBusy::DataDir { pid: Some(7) });
-        assert_eq!(
-            decide_mysql_start(&facts(PidFileCheck::Unknown { pid: 7 })),
-            busy
-        );
-        assert_eq!(
-            decide_mysql_start(&facts(PidFileCheck::Server { pid: 7 })),
-            busy
-        );
-        for free in [
-            PidFileCheck::NoPid,
-            PidFileCheck::Dead { pid: 7 },
-            PidFileCheck::Other { pid: 7 },
-        ] {
-            assert_eq!(decide_mysql_start(&facts(free)), StartDecision::Start);
+        for os in [Os::Mac, Os::Linux, Os::Windows] {
+            let server = facts(PidFileCheck::Server { pid: 7 });
+            assert_eq!(decide_mysql_start(&server, os), busy);
+            for free in [
+                PidFileCheck::NoPid,
+                PidFileCheck::Dead { pid: 7 },
+                PidFileCheck::Other { pid: 7 },
+            ] {
+                assert_eq!(decide_mysql_start(&facts(free), os), StartDecision::Start);
+            }
         }
+        let unknown = facts(PidFileCheck::Unknown { pid: 7 });
+        assert_eq!(decide_mysql_start(&unknown, Os::Mac), busy);
+        assert_eq!(decide_mysql_start(&unknown, Os::Linux), busy);
+        // Windows tells no pid, and the file of a run the Job Object ended
+        // must not keep MySQL from its next start.
+        let start = decide_mysql_start(&unknown, Os::Windows);
+        assert_eq!(start, StartDecision::Start);
     }
 
     #[test]

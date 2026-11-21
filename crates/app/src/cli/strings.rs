@@ -401,8 +401,9 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             .into(),
         "valkey_unsupported_platform" => "Marsa has no Valkey for this system.".into(),
         "valkey_path_unsupported" => "The path of Marsa's data folder has a double quote or a \
-             control character, which Valkey's settings file cannot hold, so Valkey was not \
-             started. Run \"marsa logs valkey\" to see the path."
+             control character, which Valkey's settings file cannot hold, or on Windows it is \
+             not on a drive such as C:, so Valkey was not started. Run \"marsa logs valkey\" \
+             to see the path."
             .into(),
         "caddy_other_marsa" => format!(
             "The Caddy of another Marsa (another data folder, or another user) uses the ports \

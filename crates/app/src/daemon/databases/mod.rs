@@ -1,6 +1,6 @@
-//! The database servers of `marsad` (ADR 0023), on macOS and Linux:
-//! PostgreSQL, MySQL, and Valkey. `marsa_core::databases` decides; this
-//! module runs the programs.
+//! The database servers of `marsad` (ADR 0023), on macOS, Linux, and
+//! Windows: PostgreSQL, MySQL, and Valkey. `marsa_core::databases` decides;
+//! this module runs the programs.
 //!
 //! The first start of a line makes its data folder ([`init::ensure_data`]):
 //! for PostgreSQL its cluster in `databases/postgres/<major>/`
@@ -76,6 +76,7 @@ mod tests {
         super::postgres::{Programs, SSL_REQUEST, ensure_cluster},
         crate::daemon::supervisor::lock,
         marsa_core::databases::{PG_HBA_CONF, ROOT_ROLE_SQL, initdb_args, single_user_args},
+        marsa_core::recipes::Os,
         marsa_core::services::StopMethod,
         marsa_core::types::{ServiceAction, ServiceStatus},
         tokio::io::AsyncWriteExt as _,
@@ -386,7 +387,7 @@ mod tests {
     fn postgres_runs_on_loopback_and_stops_with_sigint_then_sigquit() {
         let dirs = PostgresDirs::new(Path::new("/m"), 18);
         let program = PathBuf::from("/m/runtimes/postgres/18.7.0/bin/postgres");
-        let spec = postgres_spec(program.clone(), &dirs, 5433);
+        let spec = postgres_spec(program.clone(), &dirs, 5433, postgres_stop());
         assert_eq!(spec.id, ServerKind::Postgres.id());
         assert_eq!(spec.program, program);
         assert_eq!(spec.args, postgres_args(&dirs, 5433));
@@ -1597,7 +1598,7 @@ mod tests {
     }
 
     /// Shell scripts stand in for `initdb` and `postgres`: macOS and Linux
-    /// only, the systems of this task (Windows is task M6-07).
+    /// only. The Windows arguments are tested in `marsa_core::databases`.
     #[cfg(unix)]
     mod init {
         use super::*;
@@ -1643,6 +1644,7 @@ mod tests {
             let programs = Programs {
                 postgres: bin.join("postgres"),
                 initdb: bin.join("initdb"),
+                pg_ctl: bin.join("pg_ctl"),
             };
             let dirs = PostgresDirs::new(&dir.path().join("app"), 18);
             Fakes {
@@ -1672,7 +1674,10 @@ mod tests {
         #[tokio::test]
         async fn the_first_init_runs_initdb_then_makes_root_then_moves_the_folder() {
             let fakes = fakes("LOG:  database system is shut down", 0);
-            assert_eq!(ensure_cluster(&fakes.programs, &fakes.dirs).await, Ok(true));
+            assert_eq!(
+                ensure_cluster(&fakes.programs, &fakes.dirs, Os::Linux).await,
+                Ok(true)
+            );
 
             let calls = fakes.read("calls.log");
             let calls: Vec<_> = calls.lines().collect();
@@ -1690,7 +1695,7 @@ mod tests {
             };
             assert_eq!(
                 initdb,
-                format!("initdb {}", initdb_args(&in_temp).join(" "))
+                format!("initdb {}", initdb_args(&in_temp, Os::Linux).join(" "))
             );
             let want = format!("postgres {}", single_user_args(Path::new(temp)).join(" "));
             assert_eq!(single, want);
@@ -1706,7 +1711,7 @@ mod tests {
 
             // The next start makes nothing.
             assert_eq!(
-                ensure_cluster(&fakes.programs, &fakes.dirs).await,
+                ensure_cluster(&fakes.programs, &fakes.dirs, Os::Linux).await,
                 Ok(false)
             );
             assert_eq!(fakes.read("calls.log").lines().count(), 2);
@@ -1727,7 +1732,7 @@ mod tests {
                 }
                 let before = fs::symlink_metadata(data).unwrap();
                 assert_eq!(
-                    ensure_cluster(&fakes.programs, &fakes.dirs).await,
+                    ensure_cluster(&fakes.programs, &fakes.dirs, Os::Linux).await,
                     Ok(false)
                 );
                 let after = fs::symlink_metadata(data).unwrap();
@@ -1751,7 +1756,7 @@ mod tests {
                 ("FATAL:  could not open file", 1),
             ] {
                 let fakes = fakes(print, exit);
-                let err = ensure_cluster(&fakes.programs, &fakes.dirs)
+                let err = ensure_cluster(&fakes.programs, &fakes.dirs, Os::Linux)
                     .await
                     .unwrap_err();
                 assert_eq!(err.code(), "postgres_init_failed");
@@ -1767,7 +1772,7 @@ mod tests {
             let fakes = fakes("", 0);
             let script = "#!/bin/sh\necho 'initdb: error: cannot be run as root' >&2\nexit 1\n";
             fs::write(&fakes.programs.initdb, script).unwrap();
-            let err = ensure_cluster(&fakes.programs, &fakes.dirs)
+            let err = ensure_cluster(&fakes.programs, &fakes.dirs, Os::Linux)
                 .await
                 .unwrap_err();
             assert!(err.reason.contains("initdb failed"), "{err}");
@@ -1783,7 +1788,10 @@ mod tests {
             for name in [".18.init-dead", ".17.init-dead"] {
                 fs::create_dir_all(parent.join(name).join("base")).unwrap();
             }
-            assert_eq!(ensure_cluster(&fakes.programs, &fakes.dirs).await, Ok(true));
+            assert_eq!(
+                ensure_cluster(&fakes.programs, &fakes.dirs, Os::Linux).await,
+                Ok(true)
+            );
             assert_eq!(fakes.listing(), [".17.init-dead", "18"]);
         }
     }
