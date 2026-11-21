@@ -1,5 +1,4 @@
-//! `POST /v1/uninstall`: take Marsa out of the system (macOS: task M5-13;
-//! Windows: task M4-19g2).
+//! `POST /v1/uninstall`: take Marsa out of the system.
 //!
 //! | Route | Answer |
 //! | --- | --- |
@@ -12,7 +11,7 @@
 //!    the request before any prompt (`uninstall_helper_missing`,
 //!    `uninstall_helper_unsafe`). A helper inside `~/Desktop`, `~/Documents`,
 //!    or `~/Downloads` runs: root can run it from there, and `uninstall_all`
-//!    does not read the binary, which is what fails there (task M4-17).
+//!    does not read the binary, which is what fails there.
 //! 2. **Helper:** `uninstall_all` behind the one admin prompt of ADR 0012:
 //!    the `pf` redirect and its boot job, `/etc/resolver/test`, a trust
 //!    added as root before ADR 0015, then `/Library/Application
@@ -23,7 +22,7 @@
 //!    the trusted certificate (ADR 0015), used only if it is Marsa's
 //!    certificate in the login keychain or Caddy's root; otherwise
 //!    `trust_record_unusable`. macOS may show its dialog.
-//! 4. **Login file:** the file of task M5-03 that starts the tray icon.
+//! 4. **Login file:** the file of that starts the tray icon.
 //! 5. **Answer, then stop:** once the helper ran, the daemon cancels its own
 //!    shutdown token. The server's graceful stop lets this answer finish, as
 //!    for `POST /v1/shutdown`, then stops Caddy, the PHP pools, and the DNS
@@ -35,7 +34,7 @@
 //! `logs/marsad.log` holds the whole report even if the CLI stopped waiting
 //! (Ctrl+C). The data folder is the CLI's question, never the daemon's.
 //!
-//! On Windows (ADR 0018, task M4-19g2) the steps are fewer: the preflight,
+//! On Windows (ADR 0018) the steps are fewer: the preflight,
 //! then the marker of [`hosts_sync`] goes, so that no sites pass writes
 //! the hosts block back, then `marsa-helper uninstall` behind the UAC
 //! prompt (the hosts lines, the CA in the machine's Root store, the helper
@@ -303,7 +302,7 @@ fn untrust_for_user(setup: &Setup, data_dir: &Path, stop: &CancellationToken) ->
     }
 }
 
-/// The login file of task M5-03: `done` if it was there, `unchanged` if
+/// The login file of: `done` if it was there, `unchanged` if
 /// not, or failed with the code of the autostart route.
 fn remove_login_file(autostart: &Autostart) -> OpResult {
     let (status, code, message) = match autostart.remove_for_uninstall() {

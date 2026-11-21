@@ -4,9 +4,9 @@
 //! install test stops earlier, at the install lock. `tests/install.rs` runs
 //! whole installs through the daemon, with a fake installer.
 //!
-//! The daemon tests (task M3-09) run the real `marsa` and `marsad`: `marsa`
+//! The daemon tests run the real `marsa` and `marsad`: `marsa`
 //! starts the `marsad` next to it in `target/debug/`, as it does for a user.
-//! `marsa runtimes` and `marsa install` are daemon calls too (task M3-12).
+//! `marsa runtimes` and `marsa install` are daemon calls too.
 //! No fixed sleeps: each wait polls with a generous limit.
 
 use std::fs::{self, File, OpenOptions};
@@ -259,7 +259,7 @@ impl DaemonDir {
 
     /// `marsa services`, compared with `want` without the `dns` row and its
     /// failure line, and with each run of spaces as one. The DNS server binds
-    /// the fixed port 18053 on macOS and Linux (task M4-18i): it runs, or
+    /// the fixed port 18053 on macOS and Linux: it runs, or
     /// fails when another daemon on this machine holds the port, and its row
     /// changes the column widths.
     fn expect_services(&self, want: &str) {
@@ -451,7 +451,7 @@ fn a_followed_log_ends_when_the_daemon_stops() {
 }
 
 /// `marsa unlink`, `forget`, `isolate`, and `unisolate` through the real
-/// daemon (task M5-09). `marsa open` would start a browser here, so its tests
+/// daemon. `marsa open` would start a browser here, so its tests
 /// are in `cli/sites.rs`, with a stand-in for the browser.
 #[test]
 fn sites_are_isolated_unlinked_and_forgotten() {
@@ -467,7 +467,7 @@ fn sites_are_isolated_unlinked_and_forgotten() {
     let out = data.marsa(&["park", code_arg]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     // A data folder whose setup never wrote the hosts file: `park` and
-    // `link` never touch it, and never ask for a password (task M4-18k2).
+    // `link` never touch it, and never ask for a password.
     assert_eq!(text(&out.stderr), "");
     let linked = format!("Linked {} as https://api.test.\n", api.display());
     data.expect(&["link", "api", "--path", api_arg], 0, &linked, "");
@@ -527,7 +527,7 @@ fn sites_are_isolated_unlinked_and_forgotten() {
     );
 }
 
-/// Task M5-11, through the real `marsa` and `marsad`. On every system: the
+/// Through the real `marsa` and `marsad`. On every system: the
 /// daemon writes `php.ini` for php-fpm and for php-cgi (Windows) alike.
 #[test]
 fn xdebug_on_and_off_change_the_php_ini_before_marsa_returns() {

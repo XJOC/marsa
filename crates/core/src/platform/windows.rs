@@ -14,8 +14,7 @@
 //! - [`current_user_sid`], [`run_elevated`], and [`helper_pipe`]: what
 //!   `marsad` needs to install and use the helper service (ADR 0018),
 //!   public for the `marsa` crate.
-//! - [`root_certificates`]: the roots Windows trusts, for PHP's CA bundle
-//!   (task M4-19n).
+//! - [`root_certificates`]: the roots Windows trusts, for PHP's CA bundle.
 //!
 //! The only `unsafe` code of `marsa-core` is in this module and its
 //! `helper_pipe` (AGENTS.md section 6). The blocks are short, and every
@@ -479,8 +478,7 @@ fn vc_runtime_in(
     Some((read("Major")?, read("Minor")?, read("Bld")?))
 }
 
-/// The roots in Windows' stores, for PHP's CA bundle (task M4-19n, ADR
-/// 0020).
+/// The roots in Windows' stores, for PHP's CA bundle (ADR 0020).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Roots {
     /// The DER of each root that Windows trusts for HTTPS servers now.
@@ -772,7 +770,7 @@ mod tests {
     }
 
     /// Every Windows has roots for HTTPS, and each is a certificate the
-    /// strict parser takes once it is PEM (task M4-19n).
+    /// strict parser takes once it is PEM.
     #[test]
     fn the_root_store_gives_certificates() {
         let roots = root_certificates().expect("read the ROOT store");

@@ -1,5 +1,5 @@
 //! `run/daemon.json` and the daemon token (architecture.md section 5,
-//! "Security"). Task M3-03.
+//! "Security").
 //!
 //! The daemon writes the file once it knows its port. The CLI and the window
 //! read it to find the port and the bearer token. The token is a secret: it has

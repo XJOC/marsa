@@ -1,4 +1,4 @@
-//! Orphan Caddy recovery (task M3-11, ADR 0009; Linux: task M4-18m, ADR
+//! Orphan Caddy recovery (ADR 0009; on Linux, ADR
 //! 0025). This test binary plays every
 //! part, run again with `MARSA_ORPHAN_FAKE` set:
 //!

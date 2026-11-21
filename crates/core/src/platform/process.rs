@@ -2,7 +2,7 @@
 //! what the daemon needs to find an orphan Caddy or php-fpm (ADR 0009): who
 //! runs under a pid, its real executable, who listens on a port, signals, the
 //! pid files in `run/`, and the data folder's instance id. Also what a client
-//! needs to tell a daemon left from an earlier login session (task M5-21),
+//! needs to tell a daemon left from an earlier login session,
 //! and the parent process that `marsad` logs at start-up.
 //!
 //! The `#[cfg]` for these lives here, so the supervisor has none. Every tool
@@ -25,7 +25,7 @@ use crate::ps::{ProcessRow, StartTime};
 
 /// Whether the daemon writes `run/caddy.pid` after each start of Caddy, and
 /// looks for an orphan Caddy before it starts one: macOS (ADR 0009) and
-/// Linux (ADR 0025, task M4-18m). On Windows a Job Object stops Caddy with
+/// Linux (ADR 0025). On Windows a Job Object stops Caddy with
 /// the daemon (ADR 0017).
 pub const CADDY_ORPHAN_RECOVERY: bool = cfg!(any(target_os = "macos", target_os = "linux"));
 
@@ -176,7 +176,7 @@ fn proc_identity(dir: &Path) -> Liveness {
 }
 
 /// What a failed read in `dir` says. A process that is reaped during a read
-/// may fail it with another error than "not found" (task M4-25c): `stat`
+/// may fail it with another error than "not found": `stat`
 /// opened before the reap and read after gives ESRCH, and the `exe` link
 /// found before it gives EACCES (ENOENT on newer kernels). So such an error
 /// is `Gone` once `dir` itself is not found any more: only where a new
@@ -290,7 +290,7 @@ pub async fn executable(_pid: u32) -> Option<PathBuf> {
 
 /// The children of `ppid` now, each with its start time in the form
 /// [`identity`] gives. For the workers of a php-fpm master that died from
-/// SIGKILL (task M4-25): a list, never a proof. The caller checks each pid
+/// SIGKILL: a list, never a proof. The caller checks each pid
 /// with [`real_identity`] before it acts. macOS asks `/bin/ps` for the whole
 /// process table once, with `LC_ALL=C` and `TZ=UTC0` as [`identity`] does,
 /// so the times compare. `None` when the table cannot be read: then nothing
@@ -352,7 +352,7 @@ const LOGINWINDOW: &str = "/System/Library/CoreServices/loginwindow.app/Contents
 /// `killall Dock` starts a new one within the same session.
 const DOCK: &str = "/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock";
 
-/// When the GUI login session of `uid` started (task M5-21): the start of
+/// When the GUI login session of `uid` started: the start of
 /// its `loginwindow`, or of its Dock when it has none, the latest if there
 /// are several. `None` when `uid` has no GUI session in `table`, as for a
 /// login over SSH only.
@@ -367,7 +367,7 @@ pub fn login_session_start(table: &[ProcessRow], uid: u32) -> Option<StartTime> 
 }
 
 /// When a daemon started, and when the current GUI login session of its user
-/// did (task M5-21). Both in UTC.
+/// did. Both in UTC.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginTimes {
     /// When the daemon started.
@@ -393,7 +393,7 @@ pub fn login_times(table: &[ProcessRow], pid: u32, own: u32) -> Option<LoginTime
     })
 }
 
-/// The [`LoginTimes`] of the daemon at `pid` now (task M5-21). macOS reads
+/// The [`LoginTimes`] of the daemon at `pid` now. macOS reads
 /// the process table once with `/bin/ps`, with `LC_ALL=C` and `TZ=UTC0` as
 /// [`identity`] does, so the times compare. `None` when it cannot be told.
 #[cfg(target_os = "macos")]
@@ -423,7 +423,7 @@ async fn process_table() -> Option<Vec<ProcessRow>> {
     )))
 }
 
-/// The process that started this one, for the log only (task M5-21).
+/// The process that started this one, for the log only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParentProcess {
     pub pid: u32,
@@ -492,7 +492,7 @@ fn printable_name(text: &str) -> Option<String> {
 /// bound to that path, or a TCP listener on `127.0.0.1:<port>`. A child that
 /// inherited the listener from its parent holds it too. It says who holds a
 /// listener there, not who inherited it from whom: a filter for the workers
-/// of a php-fpm (task M4-25), never a proof alone. The caller checks each
+/// of a php-fpm, never a proof alone. The caller checks each
 /// pid with [`real_identity`] too. macOS asks `/usr/sbin/lsof` once, and in
 /// the same run for the files of this process: if `lsof` does not describe
 /// this process, or a signal ended it, its answer proves nothing. `None`
@@ -654,8 +654,8 @@ pub async fn port_lookup(port: u16) -> PortLookup {
     lsof_lookup(&[&port, "-sTCP:LISTEN"]).await
 }
 
-/// Who has UDP `port` open, as `name(pid)`, for messages only (task
-/// M4-18i: the DNS port). `None` when nobody has it, the look fails, or this
+/// Who has UDP `port` open, as `name(pid)`, for messages only (the DNS port).
+/// `None` when nobody has it, the look fails, or this
 /// system has no look: only macOS asks `lsof`.
 pub async fn udp_port_owner(port: u16) -> Option<String> {
     #[cfg(target_os = "macos")]
@@ -777,7 +777,7 @@ pub fn read_pid_file(path: &Path) -> Option<PidRecord> {
 /// `None` if it is missing, a link, not a regular file, longer than 4096
 /// bytes, or not UTF-8, and on Unix if the file opened is not the one
 /// checked (its device and inode). For a server's own pid file, such as
-/// PostgreSQL's `postmaster.pid` (task M6-03).
+/// PostgreSQL's `postmaster.pid`.
 pub fn read_small_file(path: &Path) -> Option<String> {
     let before = fs::symlink_metadata(path).ok()?;
     if !before.is_file() {
@@ -961,7 +961,7 @@ mod tests {
         assert_eq!(identity(pid).await, Liveness::Gone);
     }
 
-    /// `proc_identity` on a fake `/proc/<pid>` folder (task M4-25c).
+    /// `proc_identity` on a fake `/proc/<pid>` folder.
     #[cfg(target_os = "linux")]
     mod proc_folder {
         use super::*;

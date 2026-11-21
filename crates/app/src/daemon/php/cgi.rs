@@ -1,5 +1,4 @@
-//! php-cgi for the sites on Windows, which has no php-fpm (ADR 0016). Task
-//! M4-19b.
+//! php-cgi for the sites on Windows, which has no php-fpm (ADR 0016).
 //!
 //! Each PHP line gets one php-cgi on `127.0.0.1:<fallback port>` that keeps
 //! its own workers (`PHP_FCGI_CHILDREN`) and replaces each one after its
@@ -40,7 +39,7 @@ pub fn pool_for(
 }
 
 /// [`pool_for`] with `files` as they are, so `php.ini` loads the Xdebug they
-/// name (task M5-11).
+/// name.
 ///
 /// # Errors
 ///

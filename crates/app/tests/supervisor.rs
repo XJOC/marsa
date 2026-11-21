@@ -1,7 +1,7 @@
 //! The supervisor against a fake service. The fake is this test binary: it
 //! runs itself again with `MARSA_FAKE_SERVICE` set, so no external program is
 //! needed and the tests are the same on macOS, Linux, and Windows, except the
-//! stop-method tests (task M6-03).
+//! stop-method tests.
 //!
 //! `#[cfg(unix)]` on those tests and their helpers: they send SIGINT and
 //! SIGQUIT and record the signals the fake gets, and only Unix has signals.
@@ -368,7 +368,7 @@ async fn the_postgres_ladder_ends_in_a_kill_after_each_wait() {
 
 /// The daemon's shutdown gives each process the time its own stop method
 /// needs, even past the limit it was given: `marsad` gives its processes
-/// 10 s, and PostgreSQL's ladder takes 20 s. Before task M6-03 the shutdown
+/// 10 s, and PostgreSQL's ladder takes 20 s. Before the shutdown
 /// aborted the task at its limit, so SIGQUIT never came.
 #[cfg(unix)]
 #[tokio::test]

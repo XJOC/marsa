@@ -25,7 +25,7 @@ use crate::runtimes::Runtime;
 /// The public key that signs the real manifest: the base64 line (the second
 /// line) of the owner's minisign public key file.
 ///
-/// The owner created the key pair on 2026-11-10 (task M2-08). Key id
+/// The owner created the key pair on 2026-11-10. Key id
 /// `0136668A6B96BDEE`. If this were `None`, [`Manifest::verify_embedded`]
 /// would fail with `manifest_no_trusted_key`, so nothing could be installed.
 ///
@@ -376,14 +376,14 @@ struct RawRuntimes {
     node: Vec<RawRelease>,
     #[serde(default)]
     composer: Vec<RawRelease>,
-    /// Added in M2-10 within schema 1: older builds ignore it, and a manifest
+    /// Added within schema 1: older builds ignore it, and a manifest
     /// without it has no Caddy.
     #[serde(default)]
     caddy: Vec<RawRelease>,
-    /// Added in M6-01 within schema 1, like Caddy.
+    /// Added within schema 1, like Caddy.
     #[serde(default)]
     postgres: Vec<RawRelease>,
-    /// Added in M6-05 within schema 1, like Caddy.
+    /// Added within schema 1, like Caddy.
     #[serde(default)]
     mysql: Vec<RawRelease>,
     /// Added within schema 1, like Caddy: an older build ignores it.

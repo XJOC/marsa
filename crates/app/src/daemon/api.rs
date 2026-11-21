@@ -1,7 +1,6 @@
-//! The router, and the health, shutdown, and events routes. Task M3-06.
+//! The router, and the health, shutdown, and events routes.
 //!
-//! Every route, the fallbacks included, sits behind `require_auth` (task
-//! M3-03). Handlers reach the daemon through `State<Arc<Daemon>>`.
+//! Every route, the fallbacks included, sits behind `require_auth`. Handlers reach the daemon through `State<Arc<Daemon>>`.
 
 use marsa_core::codes;
 use std::convert::Infallible;
@@ -61,7 +60,7 @@ pub struct HttpError {
     pub code: &'static str,
     /// English, for logs.
     pub message: String,
-    /// The facts of `version_in_use` (task M5-07). Boxed, so every
+    /// The facts of `version_in_use`. Boxed, so every
     /// `Result<_, HttpError>` stays small.
     pub in_use: Option<Box<VersionInUse>>,
 }

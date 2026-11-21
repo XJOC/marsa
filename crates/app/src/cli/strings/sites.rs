@@ -61,7 +61,7 @@ pub fn unsecured(url: &str) -> String {
     format!("{url} is served over plain HTTP.")
 }
 
-// M5-09: `marsa unlink`, `forget`, `isolate`, `unisolate`, and `open`.
+// `marsa unlink`, `forget`, `isolate`, `unisolate`, and `open`.
 
 /// `marsa unlink`.
 pub fn unlinked(name: &str) -> String {

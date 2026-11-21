@@ -1,6 +1,5 @@
 //! Start the tray icon at login (architecture.md section 5, "Lifecycle").
-//! Task M5-03.
-//!
+//! //!
 //! One file in the user's own folders: no system service, no admin rights,
 //! and no `launchctl`. The file takes effect at the next login.
 //!
@@ -8,9 +7,9 @@
 //! | --- | --- |
 //! | macOS | `~/Library/LaunchAgents/dev.marsa.Marsa.tray.plist`: a LaunchAgent with `RunAtLoad`, for the graphical session only (`LimitLoadToSessionType` `Aqua`), and without `KeepAlive`, so a tray icon the user quit stays quit. |
 //! | Linux | `dev.marsa.Marsa.tray.desktop` in `$XDG_CONFIG_HOME/autostart` (usually `~/.config/autostart`), the XDG Autostart folder. The icon needs a graphical session, so `systemd --user` does not fit. |
-//! | Windows | Not yet: the `HKCU\...\Run` key needs `windows-sys` and `unsafe` (task M4-19). |
+//! | Windows | Not yet: the `HKCU\...\Run` key needs `windows-sys` and `unsafe`. |
 //!
-//! What starts is `marsa-tray` (task M5-04), from the folder of `marsad`. The
+//! What starts is `marsa-tray`, from the folder of `marsad`. The
 //! tray starts `marsad`, as the window does.
 //!
 //! The text of each file comes from pure functions ([`render_plist`] and

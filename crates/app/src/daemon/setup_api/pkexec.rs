@@ -1,5 +1,4 @@
-//! Linux: runs `marsa-helper` as root through `pkexec` (ADR 0014, task
-//! M4-18e). The macOS twin is the `osascript` line of ADR 0012.
+//! Linux: runs `marsa-helper` as root through `pkexec` (ADR 0014). The macOS twin is the `osascript` line of ADR 0012.
 //!
 //! `pkexec` asks the desktop's polkit agent for the user's password, then
 //! runs the program as root. The program, `apply`, and the request go as an
@@ -31,7 +30,7 @@
 //!
 //! No `/usr/bin/pkexec` at all is `setup_pkexec_missing`.
 //!
-//! The codes are setup's; the uninstall (task M5-13) gets `uninstall_*`.
+//! The codes are setup's; the uninstall gets `uninstall_*`.
 
 use std::ffi::OsString;
 use std::io;
@@ -226,7 +225,7 @@ mod tests {
         );
     }
 
-    /// The uninstall (task M5-13) gets its own codes.
+    /// The uninstall gets its own codes.
     #[test]
     fn the_uninstall_gets_its_own_codes() {
         let cases = [

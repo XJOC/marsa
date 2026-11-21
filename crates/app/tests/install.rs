@@ -1,7 +1,6 @@
-//! `marsa install` and `marsa runtimes` through the daemon (task M3-12),
-//! `marsa use` with its route, `PUT /v1/runtimes/{tool}/default` (task M5-01),
-//! and `marsa uninstall` with `DELETE /v1/runtimes/{tool}/{version}` (task
-//! M5-07).
+//! `marsa install` and `marsa runtimes` through the daemon,
+//! `marsa use` with its route, `PUT /v1/runtimes/{tool}/default`,
+//! and `marsa uninstall` with `DELETE /v1/runtimes/{tool}/{version}`.
 //!
 //! The real `marsa` binary talks to the real router, auth layer, and runtimes
 //! routes, served in this process on `127.0.0.1` for a temp data folder, with
@@ -10,7 +9,7 @@
 //!
 //! Only the installer is a fake (`Daemon::installs.runner`). The real one
 //! needs the published manifest, signed with the key built into the binary,
-//! over https; tests cannot swap any of them, on purpose (task M2-05). The
+//! over https; tests cannot swap any of them, on purpose. The
 //! core installer's own tests cover the signed manifest, the checksums, and
 //! the atomic move. No network beyond loopback.
 
@@ -656,7 +655,7 @@ async fn bad_install_requests_get_their_codes() {
 }
 
 // ---------------------------------------------------------------------------
-// The default version (task M5-01)
+// The default version
 
 /// The next `sites_changed` on the bus; other events are skipped.
 async fn next_sites(events: &mut broadcast::Receiver<Event>) -> SiteList {
@@ -920,7 +919,7 @@ async fn a_refused_default_leaves_global_toml_as_it_was() {
 }
 
 // ---------------------------------------------------------------------------
-// Uninstall (task M5-07)
+// Uninstall
 
 /// Registers a task as the running service `id`, as the supervisor does.
 /// `on_stop` runs when the daemon stops it.
@@ -972,7 +971,7 @@ async fn uninstall_deletes_a_version_nothing_uses() {
 }
 
 /// The first PostgreSQL install makes its line the default, turns it on,
-/// and starts it in the background (task M6-03). The fake installs no
+/// and starts it in the background. The fake installs no
 /// program, so that start fails, and says so in the status: the install
 /// stays done.
 #[tokio::test(flavor = "multi_thread")]
@@ -1149,7 +1148,7 @@ async fn a_version_in_use_is_refused_and_nothing_changes() {
 }
 
 // ---------------------------------------------------------------------------
-// The default of the last version (task M5-19)
+// The default of the last version
 
 /// The first line of every file Marsa writes.
 const HEADER: &str = "# Managed by Marsa. Comments in this file are not kept.\n";
@@ -1451,7 +1450,7 @@ async fn the_last_php_stays_while_sites_run_it() {
     assert_eq!(entries(&served, Runtime::Php), ["8.3.12"]);
 }
 
-/// Task M5-22: the last PHP is not the default (there is none), yet a site
+/// The last PHP is not the default (there is none), yet a site
 /// runs it through a version file. It keeps the version too. Once no PHP
 /// site runs it, it goes.
 #[tokio::test(flavor = "multi_thread")]

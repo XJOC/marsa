@@ -1,6 +1,5 @@
 //! `GET /v1/hosts` and `POST /v1/hosts/sync`: Linux puts `.test` names in
-//! the hosts file where the `marsa0` link cannot be used (ADR 0014, task
-//! M4-18k2).
+//! the hosts file where the `marsa0` link cannot be used (ADR 0014).
 //!
 //! | Route | Answer |
 //! | --- | --- |
@@ -11,7 +10,7 @@
 //! root writes it. **Only a command of the user calls the sync**: `marsa
 //! park`, `marsa link`, or a click in the window. The daemon never calls it
 //! by itself, so no password prompt shows that the user did not cause
-//! (manager decision, task M4-18k2). A site that the folder watcher finds
+//! (manager decision). A site that the folder watcher finds
 //! waits in `missing` until then, and `marsa doctor` and the window say so.
 //!
 //! The hosts file counts as used only where **this data folder's setup**

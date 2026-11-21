@@ -1,4 +1,4 @@
-//! The services and logs routes against a fake Caddy (task M3-07). The fake is
+//! The services and logs routes against a fake Caddy. The fake is
 //! this test binary, run again with `MARSA_FAKE_SERVICE` set, as in
 //! `tests/supervisor.rs`. In `serve` mode it reads the `caddy.json` the daemon
 //! wrote, and answers `GET /config/`, `GET /id/<tag>` for the `@id` of the
@@ -7,7 +7,7 @@
 //! `127.0.0.1`, and no real Caddy is needed.
 //!
 //! The router runs in this process (`oneshot`), with the real auth layer.
-//! The start of Caddy with the daemon (task M5-16) runs on the same daemon,
+//! The start of Caddy with the daemon runs on the same daemon,
 //! with no request.
 
 use std::collections::BTreeMap;
@@ -519,7 +519,7 @@ async fn a_caddy_whose_admin_api_never_answers_times_out() {
     app.wait_for_line("fake deaf").await;
 }
 
-// Caddy starts with the daemon (task M5-16): what `server::run` does at
+// Caddy starts with the daemon: what `server::run` does at
 // start-up, with no request.
 
 /// Polls until Caddy's task is in `procs`: the start spawned it, and waits
@@ -646,7 +646,7 @@ async fn a_failed_start_with_the_daemon_names_why_and_the_api_serves_on() {
     assert_eq!(again.state, failed("port_in_use"));
 }
 
-/// Task M5-16b: a start by hand while the daemon starts Caddy waits for that
+/// A start by hand while the daemon starts Caddy waits for that
 /// start, then finds Caddy running. No second Caddy.
 #[tokio::test]
 async fn a_start_by_hand_during_the_start_with_the_daemon_waits_for_it() {
@@ -671,7 +671,7 @@ async fn a_start_by_hand_during_the_start_with_the_daemon_waits_for_it() {
     app.daemon.stop_procs(WAIT).await;
 }
 
-/// Task M5-16b: `marsa services stop caddy` starts the daemon, which starts
+/// `marsa services stop caddy` starts the daemon, which starts
 /// Caddy. The stop waits for that start, then stops Caddy: it is not lost.
 #[tokio::test]
 async fn a_stop_during_the_start_with_the_daemon_waits_and_stops_caddy() {
@@ -852,7 +852,7 @@ async fn caddy_that_starts_after_the_first_pass_starts_on_the_sites() {
     app.daemon.stop_procs(WAIT).await;
 }
 
-// Task M5-16b: only our tag makes a Caddy ours. `GET /config/` answers on
+// Only our tag makes a Caddy ours. `GET /config/` answers on
 // any Caddy.
 
 /// Our process answers `GET /config/` and `POST /stop`, but not our tag:
