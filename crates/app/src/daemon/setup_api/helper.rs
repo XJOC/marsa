@@ -46,8 +46,7 @@ pub(super) const MAX_ANSWER: usize = 64 * 1024;
 /// The folders under the home folder that macOS keeps other users, root
 /// included, out of until the user allows it (the folder protection of
 /// Privacy & Security). Root could not read a helper there to copy it for
-/// the boot job: `pf_write` in task M4-17, `pf_helper_unreadable` since
-/// task M4-27.
+/// the boot job: `pf_write` first, then `pf_helper_unreadable`.
 const PROTECTED_FOLDERS: [&str; 3] = ["Desktop", "Documents", "Downloads"];
 
 /// Where an install puts the programs, for the message that says to move
@@ -293,7 +292,7 @@ impl Setup {
     /// macOS; by the path alone, before any look at the file).
     ///
     /// The uninstall skips the folder check: root runs a helper from those
-    /// folders through `osascript` (task M4-17: `resolver_install` worked
+    /// folders through `osascript` (`resolver_install` works
     /// from `~/Desktop`), and only the boot job's copy of the binary, which
     /// `pf_install` reads, fails there. `uninstall_all` reads no binary, so
     /// moving Marsa first would only be in the user's way.

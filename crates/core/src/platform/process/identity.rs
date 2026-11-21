@@ -81,7 +81,7 @@ fn proc_identity(dir: &Path) -> Liveness {
 }
 
 /// What a failed read in `dir` says. A process that is reaped during a read
-/// may fail it with another error than "not found" (task M4-25c): `stat`
+/// may fail it with another error than "not found": `stat`
 /// opened before the reap and read after gives ESRCH, and the `exe` link
 /// found before it gives EACCES (ENOENT on newer kernels). So such an error
 /// is `Gone` once `dir` itself is not found any more: only where a new
@@ -195,7 +195,7 @@ pub async fn executable(_pid: u32) -> Option<PathBuf> {
 
 /// The children of `ppid` now, each with its start time in the form
 /// [`identity`] gives. For the workers of a php-fpm master that died from
-/// SIGKILL (task M4-25): a list, never a proof. The caller checks each pid
+/// SIGKILL: a list, never a proof. The caller checks each pid
 /// with [`real_identity`] before it acts. macOS asks `/bin/ps` for the whole
 /// process table once, with `LC_ALL=C` and `TZ=UTC0` as [`identity`] does,
 /// so the times compare. `None` when the table cannot be read: then nothing
@@ -249,7 +249,7 @@ pub async fn children(_ppid: u32) -> Option<Vec<ChildProcess>> {
     None
 }
 
-/// The process that started this one, for the log only (task M5-21).
+/// The process that started this one, for the log only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParentProcess {
     pub pid: u32,
@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(identity(pid).await, Liveness::Gone);
     }
 
-    /// `proc_identity` on a fake `/proc/<pid>` folder (task M4-25c).
+    /// `proc_identity` on a fake `/proc/<pid>` folder.
     #[cfg(target_os = "linux")]
     mod proc_folder {
         use super::*;

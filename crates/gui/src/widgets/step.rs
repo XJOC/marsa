@@ -27,6 +27,17 @@ pub enum Stage {
     Next,
 }
 
+impl Stage {
+    /// The word a screen reader says for the stage.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Done => strings::STAGE_DONE,
+            Self::Current => strings::STAGE_CURRENT,
+            Self::Next => strings::STAGE_NEXT,
+        }
+    }
+}
+
 /// What a card is made of at one stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Look {
@@ -125,7 +136,7 @@ impl<'a> StepCard<'a> {
             })
             .inner
         });
-        let name = strings::step_label(self.number, self.title, self.stage);
+        let name = strings::step_label(self.number, self.title, self.stage.word());
         shown
             .response
             .widget_info(|| WidgetInfo::labeled(Role::ListItem, true, &name));

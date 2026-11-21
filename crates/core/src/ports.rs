@@ -20,7 +20,7 @@
 //! Windows (`netstat -ano`) come later.
 //!
 //! Not behind the `full` feature: pure text parsing, no I/O. The daemon runs
-//! the two commands (task M4-14b).
+//! the two commands.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -108,8 +108,8 @@ pub fn parse_netstat(text: &str) -> Vec<Listener> {
 
 /// The listeners that take connections to `127.0.0.1:<port>` or
 /// `[::1]:<port>`, in netstat's order. These are the addresses that the `pf`
-/// redirect of ADR 0008 captures. `*.test` resolves to `127.0.0.1` only
-/// (task M5-17); `::1` stays here because pf redirects it too.
+/// redirect of ADR 0008 captures. `*.test` resolves to `127.0.0.1` only;
+/// `::1` stays here because pf redirects it too.
 ///
 /// - **Loopback:** `127.0.0.1` or `::1` (also written `::ffff:127.0.0.1`).
 /// - **Wildcard:** `*` (netstat's form), `0.0.0.0`, or `::`. A wildcard socket
@@ -131,7 +131,7 @@ pub fn holders(listeners: &[Listener], port: u16) -> Vec<&Listener> {
 }
 
 /// Reads the output of Windows' `netstat -ano`: the listening TCP sockets,
-/// each with its PID (task M4-19o). A row is `TCP <local> <foreign> <state>
+/// each with its PID. A row is `TCP <local> <foreign> <state>
 /// <pid>`, and it is a listener when its foreign address is `0.0.0.0:0` or
 /// `[::]:0`: the state column is in the language of Windows (`LISTENING`,
 /// `ABHÖREN`), the addresses are not. The brackets of an IPv6 address go:
@@ -666,7 +666,7 @@ mod tests {
     }
 
     /// `netstat -ano` on Windows Server 2025, with IIS stopped and Caddy on
-    /// 127.0.0.1 (task M4-19o), cut.
+    /// 127.0.0.1, cut.
     const NETSTAT_WINDOWS: &str = "\r
 Active Connections\r
 \r

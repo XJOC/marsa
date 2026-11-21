@@ -1,6 +1,5 @@
 //! Start the tray icon at login (architecture.md section 5, "Lifecycle").
-//! Task M5-03.
-//!
+//! //!
 //! One file in the user's own folders: no system service, no admin rights,
 //! and no `launchctl`. The file takes effect at the next login.
 //!
@@ -8,13 +7,13 @@
 //! | --- | --- |
 //! | macOS | `~/Library/LaunchAgents/dev.marsa.Marsa.tray.plist`: a LaunchAgent with `RunAtLoad`, for the graphical session only (`LimitLoadToSessionType` `Aqua`), and without `KeepAlive`, so a tray icon the user quit stays quit. |
 //! | Linux | `dev.marsa.Marsa.tray.desktop` in `$XDG_CONFIG_HOME/autostart` (usually `~/.config/autostart`), the XDG Autostart folder. The icon needs a graphical session, so `systemd --user` does not fit. |
-//! | Windows | Not yet: the `HKCU\...\Run` key needs `windows-sys` and `unsafe` (task M4-19). |
+//! | Windows | Not yet: the `HKCU\...\Run` key needs `windows-sys` and `unsafe`. |
 //!
-//! What starts is `marsa-tray` (task M5-04), from the folder of `marsad`. The
+//! What starts is `marsa-tray`, from the folder of `marsad`. The
 //! tray starts `marsad`, as the window does.
 //!
 //! The text of each file comes from pure functions ([`render_plist`] and
-//! [`render_desktop`]). [`write`], [`remove`], and [`read`] take the folder
+//! [`render_desktop`]). [`write()`], [`remove`], and [`read`] take the folder
 //! as an argument: the daemon passes the user's folder ([`user_dir`]), and
 //! tests pass a temp folder. Only `marsad` calls `write` and `remove`: only
 //! the daemon changes state (AGENTS.md section 6).
@@ -106,11 +105,11 @@ impl AutostartKind {
 pub enum AutostartFile {
     /// No file: Marsa does not start at login.
     Absent,
-    /// The file [`write`] makes for this `marsa-tray`.
+    /// The file [`write()`] makes for this `marsa-tray`.
     Current,
     /// A file this Marsa would not write: it starts a `marsa-tray` at another
     /// path (the app moved), or it was changed (by an older Marsa, by the
-    /// user, or by the desktop's settings). [`write`] replaces it.
+    /// user, or by the desktop's settings). [`write()`] replaces it.
     Stale,
 }
 
@@ -215,7 +214,7 @@ pub fn render_desktop(tray: &Path) -> Result<String, AutostartError> {
     ))
 }
 
-/// Whether `dir` holds the login file, and whether it is the one [`write`]
+/// Whether `dir` holds the login file, and whether it is the one [`write()`]
 /// makes for `tray`. A missing `dir` means no file.
 ///
 /// # Errors

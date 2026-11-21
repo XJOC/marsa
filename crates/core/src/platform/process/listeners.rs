@@ -30,7 +30,7 @@ const LOOKUP_LIMIT: Duration = Duration::from_secs(8);
 /// bound to that path, or a TCP listener on `127.0.0.1:<port>`. A child that
 /// inherited the listener from its parent holds it too. It says who holds a
 /// listener there, not who inherited it from whom: a filter for the workers
-/// of a php-fpm (task M4-25), never a proof alone. The caller checks each
+/// of a php-fpm, never a proof alone. The caller checks each
 /// pid with [`super::real_identity`] too. macOS asks `/usr/sbin/lsof` once, and in
 /// the same run for the files of this process: if `lsof` does not describe
 /// this process, or a signal ended it, its answer proves nothing. `None`
@@ -192,8 +192,8 @@ pub async fn port_lookup(port: u16) -> PortLookup {
     lsof_lookup(&[&port, "-sTCP:LISTEN"]).await
 }
 
-/// Who has UDP `port` open, as `name(pid)`, for messages only (task
-/// M4-18i: the DNS port). `None` when nobody has it, the look fails, or this
+/// Who has UDP `port` open, as `name(pid)`, for messages only (the DNS port).
+/// `None` when nobody has it, the look fails, or this
 /// system has no look: only macOS asks `lsof`.
 pub async fn udp_port_owner(port: u16) -> Option<String> {
     #[cfg(target_os = "macos")]

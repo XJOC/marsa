@@ -78,7 +78,7 @@ pub use step::{Stage, StepCard};
 pub use switch::Switch;
 pub use table::{LineTone, RowHeight, Table, TableColumn, TableOutput};
 pub use tabs::Tabs;
-pub use tile::{Monogram, SectionTile, TileSize};
+pub use tile::{Monogram, SectionTile, TileSize, runtime_monogram};
 pub use version::{PickerSize, Setting, VersionMenu, VersionPick, VersionPicker};
 
 /// How a pointer touches a control now: the states of components.md that

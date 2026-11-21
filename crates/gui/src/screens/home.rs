@@ -176,7 +176,7 @@ fn status(model: &Model) -> StatusView {
         }
         Connection::ShuttingDown => plain(Health::Busy, strings::HOME_STOPPING),
         Connection::Failed(_) => {
-            let explanation = strings::status_line(&model.session.connection);
+            let explanation = model.session.connection.status_line();
             plain(Health::Error, (strings::HOME_DAEMON_DOWN, &explanation))
         }
         Connection::Running(_) => running(model),
@@ -415,7 +415,7 @@ fn install_fix(
     let progress = view.filter(|_| busy).map(install_bar);
     let failed = view
         .filter(|view| matches!(view.step, InstallStep::Failed(_)))
-        .map(strings::install_status);
+        .map(InstallView::status);
     let fix = Fix {
         label: label.to_owned(),
         action: Action::Install(job),
@@ -428,7 +428,7 @@ fn install_fix(
 /// The words and the share of an install. Also the first-run panel's.
 pub(super) fn install_bar(view: &InstallView) -> InstallBar {
     InstallBar {
-        words: strings::install_status(view),
+        words: view.status(),
         fraction: match view.step {
             InstallStep::Waiting | InstallStep::ListChecked => None,
             _ => Some(view.step.fraction()),
@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(home.status.sentence, strings::HOME_DAEMON_DOWN);
         assert_eq!(
             home.status.explanation,
-            strings::status_line(&model.session.connection)
+            model.session.connection.status_line()
         );
         assert!(home.status.path.is_empty() && home.status.fixes.is_empty());
 

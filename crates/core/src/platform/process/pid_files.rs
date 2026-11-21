@@ -66,7 +66,7 @@ pub fn read_pid_file(path: &Path) -> Option<PidRecord> {
 /// `None` if it is missing, a link, not a regular file, longer than 4096
 /// bytes, or not UTF-8, and on Unix if the file opened is not the one
 /// checked (its device and inode). For a server's own pid file, such as
-/// PostgreSQL's `postmaster.pid` (task M6-03).
+/// PostgreSQL's `postmaster.pid`.
 pub fn read_small_file(path: &Path) -> Option<String> {
     let before = fs::symlink_metadata(path).ok()?;
     if !before.is_file() {

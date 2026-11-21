@@ -1,11 +1,9 @@
 //! `marsa setup`: the first setup (macOS, Linux, and Windows). macOS may ask for an
 //! administrator password, and may then ask the user to approve trusting
 //! Marsa's certificate authority for this user. Linux asks for the password
-//! once, or twice when the `.test` names need a second request (task
-//! M4-18k2). Task M4-13, task M4-26 for the trust, and task M4-18e for
-//! Linux.
+//! once, or twice when the `.test` names need a second request.
 //!
-//! One call to `marsad` (`POST /v1/setup`, in `daemon/setup_api.rs`),
+//! One call to `marsad` (`POST /v1/setup`, in `daemon/setup_api/`),
 //! started if needed. On macOS the daemon checks ports 80 and 443, asks for
 //! the administrator password and runs `marsa-helper`, then trusts the
 //! certificate authority for the user behind the dialog macOS shows. On
@@ -25,28 +23,26 @@ use marsa_core::caddy::CaddyPaths;
 use marsa_core::recipes::Platform;
 use marsa_core::types::{OpStatus, PortHolder, SetupReport};
 
-use super::daemon::{ClientFailure, connect, failure};
-use super::sites::printable;
+use super::Failure;
+use super::daemon::{connect, failure};
 use super::strings::{self, Details};
+use super::text::printable;
 use marsa_core::platform::trust::TrustFiles;
 
 /// Starts the daemon if needed, runs the setup, and prints its report.
-pub async fn run(data_dir: &Path) -> ExitCode {
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+pub async fn run(data_dir: &Path) -> Result<ExitCode, Failure> {
+    let client = connect(data_dir).await?;
     if let Some(line) = started(Platform::current()) {
         eprintln!("{line}");
     }
     let report = match client.setup().await {
         Ok(report) => report,
-        Err(err) => return failure(&err, data_dir, None).report(),
+        Err(err) => return Err(failure(&err, data_dir, None)),
     };
     print!("{}", render(&report, data_dir));
     match error(&report) {
-        Some(failure) => failure.report(),
-        None => exit_code(&report),
+        Some(failure) => Err(failure),
+        None => Ok(exit_code(&report)),
     }
 }
 
@@ -66,7 +62,7 @@ pub(super) fn exit_code(report: &SetupReport) -> ExitCode {
 
 /// The line before the call, which may wait for the admin prompt. Only on
 /// the systems where the daemon runs setup (the platform check of
-/// `daemon/setup_api.rs`); the CLI and the daemon run on the same machine.
+/// `daemon/setup_api/`); the CLI and the daemon run on the same machine.
 /// Elsewhere the daemon answers `setup_not_supported` at once, and a
 /// prompt line first would be wrong.
 fn started(platform: Option<Platform>) -> Option<&'static str> {
@@ -133,12 +129,12 @@ pub fn render(report: &SetupReport, data_dir: &Path) -> String {
 
 /// Why the helper did not run, or (Linux) why Caddy did not take ports 80
 /// and 443 after it, ready for stderr.
-pub fn error(report: &SetupReport) -> Option<ClientFailure> {
+pub fn error(report: &SetupReport) -> Option<Failure> {
     let error = report.error.as_ref()?;
     let code = printable(&error.code);
-    Some(ClientFailure {
+    Some(Failure {
         message: strings::message(&code, &Details::default()),
-        code,
+        code: code.into(),
     })
 }
 
@@ -222,7 +218,7 @@ mod tests {
         assert!(error(&report).is_none());
     }
 
-    /// The hosts way on Linux (task M4-18k): the output names the file, and
+    /// The hosts way on Linux: the output names the file, and
     /// a link the helper refused is a skipped step that says why. Not on
     /// Windows, whose hosts file has another path in the text.
     #[cfg(not(windows))]
@@ -246,7 +242,7 @@ mod tests {
         );
     }
 
-    /// Linux: the NSS step of Chrome and Firefox (task M4-18g), done, or
+    /// Linux: the NSS step of Chrome and Firefox, done, or
     /// skipped without `certutil` with the package to install.
     #[test]
     fn the_nss_step_names_the_browsers_and_the_package() {
@@ -271,7 +267,7 @@ mod tests {
         );
     }
 
-    /// Linux: a second request that did not run (task M4-18k2). The steps
+    /// Linux: a second request that did not run. The steps
     /// above it stand, and the error says so.
     #[test]
     fn a_second_request_that_did_not_run_says_the_steps_above_are_done() {
@@ -336,7 +332,7 @@ mod tests {
         assert!(text.ends_with("[ca_not_ready]\n"), "{text}");
     }
 
-    /// Task M5-15b: Caddy did not start. The reason is in its recent lines,
+    /// Caddy did not start. The reason is in its recent lines,
     /// which `marsa logs caddy` shows.
     #[test]
     fn a_caddy_that_did_not_start_says_to_look_at_its_logs() {
@@ -352,7 +348,7 @@ mod tests {
         );
     }
 
-    /// Task M5-15: no Caddy, so no CA. The line says to install Caddy, then
+    /// No Caddy, so no CA. The line says to install Caddy, then
     /// to run setup again, and names no path.
     #[test]
     fn no_caddy_says_to_install_it_then_to_run_setup_again() {

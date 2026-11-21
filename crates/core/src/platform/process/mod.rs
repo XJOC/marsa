@@ -2,7 +2,7 @@
 //! what the daemon needs to find an orphan Caddy or php-fpm (ADR 0009): who
 //! runs under a pid, its real executable, who listens on a port, signals, the
 //! pid files in `run/`, and the data folder's instance id. Also what a client
-//! needs to tell a daemon left from an earlier login session (task M5-21),
+//! needs to tell a daemon left from an earlier login session,
 //! and the parent process that `marsad` logs at start-up.
 //!
 //! The `#[cfg]` for these lives here, so the supervisor has none. Every tool
@@ -34,7 +34,7 @@ pub use signals::send_signal;
 
 /// Whether the daemon writes `run/caddy.pid` after each start of Caddy, and
 /// looks for an orphan Caddy before it starts one: macOS (ADR 0009) and
-/// Linux (ADR 0025, task M4-18m). On Windows a Job Object stops Caddy with
+/// Linux (ADR 0025). On Windows a Job Object stops Caddy with
 /// the daemon (ADR 0017).
 pub const CADDY_ORPHAN_RECOVERY: bool = cfg!(any(target_os = "macos", target_os = "linux"));
 

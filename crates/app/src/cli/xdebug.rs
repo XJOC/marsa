@@ -1,5 +1,5 @@
 //! `marsa xdebug` and `marsa xdebug on|off`: load Xdebug in every installed
-//! PHP, or in none, through `GET` and `PUT /v1/php/xdebug`. Task M5-11.
+//! PHP, or in none, through `GET` and `PUT /v1/php/xdebug`.
 //!
 //! The daemon saves the setting, writes each `php.ini`, and restarts the
 //! php-fpm it changed. `php` in the terminal reads the same `php.ini`, so it
@@ -13,9 +13,10 @@ use marsa_core::client::ClientError;
 use marsa_core::config::ConfigPaths;
 use marsa_core::types::XdebugState;
 
+use super::Failure;
 use super::autostart::Switch;
-use super::daemon::{ClientFailure, connect, failure};
-use super::strings::{self, Details};
+use super::daemon::{connect, failure_naming};
+use super::strings;
 
 /// The arguments of `marsa xdebug`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::Args)]
@@ -27,11 +28,8 @@ pub struct XdebugArgs {
 
 /// Starts the daemon if needed, then reads or changes the setting: one line
 /// on stdout, or the failure on stderr with exit code 1.
-pub async fn run(args: &XdebugArgs, data_dir: &Path) -> ExitCode {
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+pub async fn run(args: &XdebugArgs, data_dir: &Path) -> Result<ExitCode, Failure> {
+    let client = connect(data_dir).await?;
     let answer = match args.switch {
         None => client.xdebug().await,
         Some(switch) => client.set_xdebug(switch == Switch::On).await,
@@ -39,9 +37,9 @@ pub async fn run(args: &XdebugArgs, data_dir: &Path) -> ExitCode {
     match answer {
         Ok(state) => {
             println!("{}", render(args.switch, &state));
-            ExitCode::SUCCESS
+            Ok(ExitCode::SUCCESS)
         }
-        Err(err) => xdebug_failure(&err, data_dir).report(),
+        Err(err) => Err(xdebug_failure(&err, data_dir)),
     }
 }
 
@@ -60,20 +58,18 @@ pub fn render(switch: Option<Switch>, state: &XdebugState) -> String {
 
 /// The text and code the user sees for `err`. A `config_*` code names
 /// `global.toml`, the file the daemon could not use.
-pub fn xdebug_failure(err: &ClientError, data_dir: &Path) -> ClientFailure {
-    let mut failure = failure(err, data_dir, None);
-    if matches!(
-        failure.code.as_str(),
-        codes::CONFIG_READ | codes::CONFIG_INVALID | codes::CONFIG_WRITE
-    ) {
-        let global_toml = ConfigPaths::in_dir(data_dir).global;
-        let details = Details {
-            path: Some(&global_toml),
-            ..Details::default()
-        };
-        failure.message = strings::message(&failure.code, &details);
-    }
-    failure
+fn xdebug_failure(err: &ClientError, data_dir: &Path) -> Failure {
+    let global_toml = ConfigPaths::in_dir(data_dir).global;
+    failure_naming(
+        err,
+        data_dir,
+        &[
+            codes::CONFIG_READ,
+            codes::CONFIG_INVALID,
+            codes::CONFIG_WRITE,
+        ],
+        Some(&global_toml),
+    )
 }
 
 #[cfg(test)]

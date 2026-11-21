@@ -1,5 +1,5 @@
 //! `marsa autostart` and `marsa autostart on|off`: start Marsa at login, or
-//! not, through `GET` and `PUT /v1/autostart`. Task M5-03.
+//! not, through `GET` and `PUT /v1/autostart`.
 //!
 //! The daemon writes or deletes one file in the user's folders: a
 //! LaunchAgent on macOS, an XDG Autostart entry on Linux. It starts the tray
@@ -14,8 +14,9 @@ use marsa_core::client::ClientError;
 use marsa_core::platform::autostart::{AutostartKind, user_dir};
 use marsa_core::types::AutostartState;
 
-use super::daemon::{ClientFailure, connect, failure};
-use super::strings::{self, Details};
+use super::Failure;
+use super::daemon::{connect, failure_naming};
+use super::strings;
 
 /// The arguments of `marsa autostart`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::Args)]
@@ -34,11 +35,8 @@ pub enum Switch {
 
 /// Starts the daemon if needed, then reads or changes the setting: one line
 /// on stdout, or the failure on stderr with exit code 1.
-pub async fn run(args: &AutostartArgs, data_dir: &Path) -> ExitCode {
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+pub async fn run(args: &AutostartArgs, data_dir: &Path) -> Result<ExitCode, Failure> {
+    let client = connect(data_dir).await?;
     let answer = match args.switch {
         None => client.autostart().await,
         Some(switch) => client.set_autostart(switch == Switch::On).await,
@@ -46,9 +44,9 @@ pub async fn run(args: &AutostartArgs, data_dir: &Path) -> ExitCode {
     match answer {
         Ok(state) => {
             println!("{}", render(args.switch, state));
-            ExitCode::SUCCESS
+            Ok(ExitCode::SUCCESS)
         }
-        Err(err) => autostart_failure(&err, data_dir, login_file().as_deref()).report(),
+        Err(err) => Err(autostart_failure(&err, data_dir, login_file().as_deref())),
     }
 }
 
@@ -66,23 +64,13 @@ pub fn render(switch: Option<Switch>, state: AutostartState) -> &'static str {
 
 /// The text and code the user sees for `err`. `autostart_read` and
 /// `autostart_write` name `login_file`.
-pub fn autostart_failure(
-    err: &ClientError,
-    data_dir: &Path,
-    login_file: Option<&Path>,
-) -> ClientFailure {
-    let mut failure = failure(err, data_dir, None);
-    if matches!(
-        failure.code.as_str(),
-        codes::AUTOSTART_READ | codes::AUTOSTART_WRITE
-    ) {
-        let details = Details {
-            path: login_file,
-            ..Details::default()
-        };
-        failure.message = strings::message(&failure.code, &details);
-    }
-    failure
+fn autostart_failure(err: &ClientError, data_dir: &Path, login_file: Option<&Path>) -> Failure {
+    failure_naming(
+        err,
+        data_dir,
+        &[codes::AUTOSTART_READ, codes::AUTOSTART_WRITE],
+        login_file,
+    )
 }
 
 /// The login file the daemon uses, for messages only. The CLI and the daemon

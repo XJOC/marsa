@@ -1,4 +1,4 @@
-//! php-fpm pools for the sites, one per PHP line. Task M4-11.
+//! php-fpm pools for the sites, one per PHP line.
 //!
 //! For each `major.minor` line that a Laravel or PHP site needs, the daemon
 //! writes `php/<minor>/php.ini` and `php/<minor>/php-fpm.conf` (the text
@@ -20,12 +20,12 @@
 //! trusts the certificates of the other `.test` sites and of the internet:
 //! the system's roots ([`SystemRoots`]), then Marsa's.
 //!
-//! Every other installed line gets its `php.ini` too (task M5-11): `php` in
+//! Every other installed line gets its `php.ini` too: `php` in
 //! the terminal reads it through the shim's `PHPRC`. While `[php] xdebug` is
 //! on in `global.toml`, each `php.ini` loads `ext/xdebug.so` of its PHP, and
 //! a pool restarts when its `php.ini` changes, like for any other change.
 //!
-//! Each pool is a service like Caddy (task M4-23): [`Pools`] keeps its
+//! Each pool is a service like Caddy: [`Pools`] keeps its
 //! status and recent lines for `GET /v1/services` and `GET /v1/logs`, and
 //! [`orphan`] stops a php-fpm that a crashed daemon left on the pool's
 //! socket before the pool starts (ADR 0009).
@@ -648,7 +648,7 @@ pub enum SystemRoots {
     /// The first of these files that exists (macOS, Linux).
     Files(Vec<PathBuf>),
     /// Windows' `ROOT` store, read again for each bundle, so a root added to
-    /// Windows reaches PHP too. Windows has no bundle file (task M4-19n).
+    /// Windows reaches PHP too. Windows has no bundle file.
     WindowsStore,
 }
 

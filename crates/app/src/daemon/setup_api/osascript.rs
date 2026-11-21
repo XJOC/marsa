@@ -63,7 +63,7 @@ pub(super) fn read_answer(output: io::Result<RunOutput>) -> Result<Vec<OpResult>
 /// - A wrong password, or a prompt that cannot show (over SSH), is error
 ///   -60005 or -60007 of the Authorization Services.
 /// - Any other negative error number (`-10810`, `-1743`, ...) is
-///   `osascript` failing before the helper ran (task M5-20), for example
+///   `osascript` failing before the helper ran, for example
 ///   when the daemon runs where macOS's prompt cannot reach it: a sandbox it
 ///   inherited from the program that started it, or a locked or other
 ///   user's session. `<flow>_prompt_failed`, with the number.
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn an_os_error_before_the_helper_is_prompt_failed_with_its_number() {
         // What osascript prints when macOS cannot run the prompt for the
-        // daemon (task M5-20), and other negative errors of the same kind.
+        // daemon, and other negative errors of the same kind.
         let cases = [
             (
                 "0:194: execution error: An error of type -10810 has occurred. (-10810)\n",

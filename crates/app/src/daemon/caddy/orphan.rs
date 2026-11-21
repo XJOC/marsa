@@ -1,6 +1,5 @@
-//! Finds and stops a Caddy that a crashed `marsad` left running (ADR 0009).
-//! Task M3-11, and on Linux task M4-18m (ADR 0025). Off on Windows:
-//! `CADDY_ORPHAN_RECOVERY`.
+//! Finds and stops a Caddy that a crashed `marsad` left running (ADR 0009),
+//! and on Linux (ADR 0025). Off on Windows: `CADDY_ORPHAN_RECOVERY`.
 //!
 //! The manager inspects three things: `run/caddy.pid`; the admin port's answer
 //! to `GET /id/marsa-instance-<id>` (this data folder's tag), then to
@@ -37,8 +36,8 @@ pub const OTHER_MARSA: &str = codes::CADDY_OTHER_MARSA;
 /// How often a wait checks the ports again.
 const POLL: Duration = Duration::from_millis(50);
 
-/// How long [`PidFile::record`] looks again at a Caddy just spawned that
-/// does not run Caddy yet, every [`POLL`].
+/// How long `PidFile::record` looks again at a Caddy just spawned that
+/// does not run Caddy yet, every `POLL`.
 pub const RECORD_LIMIT: Duration = Duration::from_secs(5);
 
 /// The largest answer to `GET /id/...` that is read. The server's config grows
@@ -124,7 +123,7 @@ impl PidFile {
     /// the `exe` link names the daemon (as for php-fpm,
     /// `php::orphan::Recorded::NotYet`). So while the pid runs the daemon's
     /// own executable, or cannot be told, it looks again every [`POLL`] for
-    /// up to [`RECORD_LIMIT`] (task M4-18m). A change of the start time
+    /// up to [`RECORD_LIMIT`]. A change of the start time
     /// means the pid changed hands: then it is never written. `running`
     /// says whether the supervisor still runs this pid: once it reaped the
     /// child, the pid may be anyone's, also between two looks that could
@@ -230,7 +229,7 @@ pub(super) struct Orphans<'a> {
     /// The ports the next Caddy needs: on Linux after setup, 80 and 443.
     pub input: CaddyInput,
     /// The other ports an orphan may hold: the high ports of the config
-    /// when the next Caddy takes 80 and 443 (Linux, task M4-18m). An orphan
+    /// when the next Caddy takes 80 and 443 (Linux). An orphan
     /// may have started before setup. `None` when they are the same.
     pub other: Option<CaddyInput>,
     pub ladder: Ladder,
@@ -724,7 +723,7 @@ mod tests {
         }
     }
 
-    /// Task M4-18m: the first looks see the daemon's own executable, or
+    /// The first looks see the daemon's own executable, or
     /// cannot tell; the file is written once the pid runs our Caddy. Only
     /// this test reaches the retry: in `tests/caddy_orphan.rs` the fake
     /// Caddy is the test binary, which is also the daemon there.
@@ -739,7 +738,7 @@ mod tests {
         assert_eq!(written.started, STARTED);
     }
 
-    /// Task M4-18m: the look stops, and nothing is written, at a change of
+    /// The look stops, and nothing is written, at a change of
     /// the start time, at another program, and after the limit.
     #[tokio::test(start_paused = true)]
     async fn the_pid_file_is_never_written_for_another_process() {
@@ -950,7 +949,7 @@ mod tests {
         (port, seen)
     }
 
-    /// Task M4-18m: with 80 and 443 (Linux after setup), an orphan may
+    /// With 80 and 443 (Linux after setup), an orphan may
     /// still hold the high ports of before setup. Free means free in both.
     #[tokio::test]
     async fn the_ports_of_before_setup_count_too() {

@@ -1,5 +1,5 @@
 //! `marsa services`: the table of the services the daemon manages, and
-//! `marsa services start|stop|restart <id>`. Task M3-09.
+//! `marsa services start|stop|restart <id>`.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -9,7 +9,8 @@ use marsa_core::config::{self, ConfigPaths};
 use marsa_core::databases::ServerKind;
 use marsa_core::types::{ServiceAction, ServiceState, ServiceStatus};
 
-use super::daemon::{ClientFailure, connect, failure};
+use super::Failure;
+use super::daemon::{connect, failure};
 use super::strings;
 
 /// The arguments of `marsa services`. Without a command: the table.
@@ -53,49 +54,50 @@ impl ServicesCommand {
 /// Starts the daemon if needed, then prints the table, or runs the action and
 /// prints the new state. Exit code 1 if the action fails, or if a start or
 /// restart leaves the service failed.
-pub async fn run(args: &ServicesArgs, data_dir: &Path) -> ExitCode {
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+pub async fn run(args: &ServicesArgs, data_dir: &Path) -> Result<ExitCode, Failure> {
+    let client = connect(data_dir).await?;
     match &args.command {
         None => list(&client, data_dir).await,
         Some(command) => act(&client, command, data_dir).await,
     }
 }
 
-async fn list(client: &DaemonClient, data_dir: &Path) -> ExitCode {
+async fn list(client: &DaemonClient, data_dir: &Path) -> Result<ExitCode, Failure> {
     match client.services().await {
         Ok(services) => {
             print!("{}", render(&services, data_dir));
-            ExitCode::SUCCESS
+            Ok(ExitCode::SUCCESS)
         }
-        Err(err) => failure(&err, data_dir, None).report(),
+        Err(err) => Err(failure(&err, data_dir, None)),
     }
 }
 
-async fn act(client: &DaemonClient, command: &ServicesCommand, data_dir: &Path) -> ExitCode {
+async fn act(
+    client: &DaemonClient,
+    command: &ServicesCommand,
+    data_dir: &Path,
+) -> Result<ExitCode, Failure> {
     let (action, id) = command.action();
     let status = match client.service_action(id, action).await {
         Ok(status) => status,
-        Err(err) => return failure(&err, data_dir, Some(id)).report(),
+        Err(err) => return Err(failure(&err, data_dir, Some(id))),
     };
     // After a stop the service is not running, which is what was asked; a
     // failure from before is shown under the table.
     let failed = match (&status.state, action) {
         (ServiceState::Failed { code }, ServiceAction::Start | ServiceAction::Restart) => {
-            Some(ClientFailure::new(code, data_dir, Some(&status.id)))
+            Some(Failure::new(code, data_dir, Some(&status.id)))
         }
         _ => None,
     };
     match failed {
         Some(failure) => {
             print!("{}", table(std::slice::from_ref(&status)));
-            failure.report()
+            Err(failure)
         }
         None => {
             print!("{}", render(std::slice::from_ref(&status), data_dir));
-            ExitCode::SUCCESS
+            Ok(ExitCode::SUCCESS)
         }
     }
 }
@@ -110,7 +112,7 @@ pub fn render(services: &[ServiceStatus], data_dir: &Path) -> String {
     let mut text = table(services);
     for status in services {
         if let ServiceState::Failed { code } = &status.state {
-            let failure = ClientFailure::new(code, data_dir, Some(&status.id));
+            let failure = Failure::new(code, data_dir, Some(&status.id));
             text.push_str(&strings::service_failed(
                 &status.id,
                 &failure.message,

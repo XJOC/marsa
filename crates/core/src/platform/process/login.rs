@@ -19,7 +19,7 @@ const LOGINWINDOW: &str = "/System/Library/CoreServices/loginwindow.app/Contents
 /// `killall Dock` starts a new one within the same session.
 const DOCK: &str = "/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock";
 
-/// When the GUI login session of `uid` started (task M5-21): the start of
+/// When the GUI login session of `uid` started: the start of
 /// its `loginwindow`, or of its Dock when it has none, the latest if there
 /// are several. `None` when `uid` has no GUI session in `table`, as for a
 /// login over SSH only.
@@ -34,7 +34,7 @@ pub fn login_session_start(table: &[ProcessRow], uid: u32) -> Option<StartTime> 
 }
 
 /// When a daemon started, and when the current GUI login session of its user
-/// did (task M5-21). Both in UTC.
+/// did. Both in UTC.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginTimes {
     /// When the daemon started.
@@ -60,7 +60,7 @@ pub fn login_times(table: &[ProcessRow], pid: u32, own: u32) -> Option<LoginTime
     })
 }
 
-/// The [`LoginTimes`] of the daemon at `pid` now (task M5-21). macOS reads
+/// The [`LoginTimes`] of the daemon at `pid` now. macOS reads
 /// the process table once with `/bin/ps`, with `LC_ALL=C` and `TZ=UTC0` as
 /// [`super::identity`] does, so the times compare. `None` when it cannot be told.
 #[cfg(target_os = "macos")]

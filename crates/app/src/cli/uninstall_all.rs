@@ -29,23 +29,21 @@
 //! Exit code 1 if anything did not happen as asked.
 
 use marsa_core::codes;
-use std::collections::hash_map::RandomState;
 use std::fs;
-use std::hash::{BuildHasher, Hasher};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use marsa_core::client::{self, ClientError};
+use marsa_core::client::{self, ClientError, DaemonClient};
 use marsa_core::config;
 use marsa_core::recipes::Platform;
 use marsa_core::types::{OpStatus, UninstallReport};
 
 use super::Failure;
-use super::daemon::{ClientFailure, connect, failure};
-use super::sites::printable;
+use super::daemon::{connect, failure};
 use super::strings::{self, Details};
+use super::text::printable;
 use marsa_core::platform::trust;
 
 /// How long a stopped daemon is watched for a restart. The Marsa window
@@ -55,7 +53,7 @@ const RESTART_WATCH: Duration = Duration::from_secs(3);
 const RESTART_POLL: Duration = Duration::from_millis(100);
 
 /// The arguments of `marsa uninstall --all`. `bin/marsa.rs` flattens them
-/// into `marsa uninstall`, next to the `<TOOL> <VERSION>` of task M5-07, and
+/// into `marsa uninstall`, next to the `<TOOL> <VERSION>` of, and
 /// requires either `--all` or a tool, never both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::Args)]
 pub struct UninstallAllArgs {
@@ -73,26 +71,73 @@ pub struct UninstallAllArgs {
 }
 
 /// Runs the uninstall. `data_dir_given`: the folder came from `--data-dir`,
-/// so it is never deleted.
-pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool) -> ExitCode {
+/// so it is never deleted. One function for each step; the exit code is 1
+/// when any step went wrong.
+pub async fn run(
+    args: &UninstallAllArgs,
+    data_dir: &Path,
+    data_dir_given: bool,
+) -> Result<ExitCode, Failure> {
     let mut terminal = Terminal;
+    plan_and_confirm(args, data_dir, data_dir_given, &mut terminal)?;
+    let client = connect(data_dir).await?;
+    let Some(report) = uninstall_through_daemon(&client, data_dir).await? else {
+        return Ok(ExitCode::FAILURE);
+    };
+    let complete = show_report(&report, data_dir)?;
+    // From here on Ctrl+C is this process's to handle (`until_ctrl_c`
+    // installed the handler), so every wait races it.
+    let Some(stopped) = wait_for_daemon(data_dir).await else {
+        return Ok(ExitCode::FAILURE);
+    };
+    let mut ok = complete && stopped;
+    let (folder, kept_as_asked) = choose_data_folder(
+        args,
+        data_dir,
+        DataFolderFacts {
+            data_dir_given,
+            complete,
+            stopped,
+            is_terminal: terminal.is_terminal(),
+        },
+    )
+    .await;
+    ok &= kept_as_asked;
+    let (deleted, done) = apply_data_folder(folder, args, data_dir);
+    ok &= done;
+    print_leftovers(data_dir, folder, deleted);
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// Checks this system has an uninstall, says what will happen, and asks.
+fn plan_and_confirm(
+    args: &UninstallAllArgs,
+    data_dir: &Path,
+    data_dir_given: bool,
+    terminal: &mut impl Ask,
+) -> Result<(), Failure> {
     // Before the question: the daemon would answer `uninstall_not_supported`
     // only after the user typed yes.
     if !runs_here(Platform::current()) {
-        return own_failure(codes::UNINSTALL_NOT_SUPPORTED, None).report();
+        return Err(own_failure(codes::UNINSTALL_NOT_SUPPORTED, None));
     }
     let deletable = !data_dir_given;
     let plan = strings::uninstall_all_plan(data_dir, deletable, deletable && args.delete_data);
     eprint!("{plan}");
     // Read before `until_ctrl_c` takes Ctrl+C over: here it still ends the
     // process at once, before anything changed.
-    if let Err(failure) = confirm(args, &mut terminal) {
-        return failure.report();
-    }
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+    confirm(args, terminal)
+}
+
+/// Asks the daemon to uninstall. `None`: the user pressed Ctrl+C meanwhile.
+async fn uninstall_through_daemon(
+    client: &DaemonClient,
+    data_dir: &Path,
+) -> Result<Option<UninstallReport>, Failure> {
     // Windows: the CLI runs on the machine marsad runs on (ADR 0018).
     let started = if cfg!(windows) {
         strings::UNINSTALL_ALL_STARTED_WINDOWS
@@ -102,59 +147,86 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
         strings::UNINSTALL_ALL_STARTED
     };
     eprintln!("{started}");
-    let report = match until_ctrl_c(client.uninstall_all()).await {
-        Some(Ok(report)) => report,
+    match until_ctrl_c(client.uninstall_all()).await {
+        Some(Ok(report)) => Ok(Some(report)),
         Some(Err(err)) => {
             if !refused_at_once(&err) {
                 eprintln!("{}", strings::UNINSTALL_ALL_RESULT_UNKNOWN);
             }
-            return failure(&err, data_dir, None).report();
+            Err(failure(&err, data_dir, None))
         }
         None => {
             let log = data_dir.join("logs").join("marsad.log");
             eprintln!("{}", strings::uninstall_all_ctrl_c(&log));
-            return ExitCode::FAILURE;
+            Ok(None)
         }
-    };
-    print!("{}", render(&report, data_dir));
-    if let Some(failure) = error(&report) {
-        return failure.report();
     }
-    let complete = is_complete(&report);
-    let mut ok = complete;
+}
+
+/// Prints the report. `Ok(true)`: every step is done. An error of the helper
+/// that did not run comes back as the failure.
+fn show_report(report: &UninstallReport, data_dir: &Path) -> Result<bool, Failure> {
+    print!("{}", render(report, data_dir));
+    if let Some(failure) = error(report) {
+        return Err(failure);
+    }
+    let complete = is_complete(report);
     if !complete {
         println!("{}", strings::UNINSTALL_ALL_INCOMPLETE);
     }
-    // From here on Ctrl+C is this process's to handle (`until_ctrl_c`
-    // installed the handler), so every wait races it.
+    Ok(complete)
+}
+
+/// Waits for the daemon to exit and says how it ended. `Some(true)`: it
+/// stopped, and none started again. `None`: the user pressed Ctrl+C.
+async fn wait_for_daemon(data_dir: &Path) -> Option<bool> {
     let Some(end) = until_ctrl_c(wait_for_exit(data_dir)).await else {
         eprintln!("\n{}", strings::UNINSTALL_ALL_STOP_CTRL_C);
-        return ExitCode::FAILURE;
+        return None;
     };
     match &end {
         DaemonEnd::Stopped => println!("{}", strings::DAEMON_STOPPED),
         DaemonEnd::Back => eprintln!("{}", strings::UNINSTALL_ALL_DAEMON_BACK),
         DaemonEnd::NotStopped(failure) => eprintln!("{}", failure.line()),
     }
-    let stopped = end == DaemonEnd::Stopped;
-    ok &= stopped;
+    Some(end == DaemonEnd::Stopped)
+}
+
+/// What decides the fate of the data folder.
+#[derive(Clone, Copy)]
+struct DataFolderFacts {
+    data_dir_given: bool,
+    complete: bool,
+    stopped: bool,
+    is_terminal: bool,
+}
+
+/// What to do with the data folder, asking the user when the flags and the
+/// facts leave it open. The `bool`: `false` when the user asked for
+/// `--delete-data` and the folder stays.
+async fn choose_data_folder(
+    args: &UninstallAllArgs,
+    data_dir: &Path,
+    facts: DataFolderFacts,
+) -> (DataFolder, bool) {
     let decided = data_folder(
         args,
-        data_dir_given,
-        complete,
-        stopped,
-        terminal.is_terminal(),
+        facts.data_dir_given,
+        facts.complete,
+        facts.stopped,
+        facts.is_terminal,
     );
     // Windows: a program that runs can be neither deleted nor moved, and
     // this marsa may run from the data folder (`<data>\bin`): where the
     // folder would be deleted or asked about, a note instead. The CLI runs
     // on the machine marsad runs on.
     let in_use = cfg!(windows) && programs_dir().is_some_and(|dir| inside(&dir, data_dir));
+    let mut kept_as_asked = true;
     let decided = match decided {
         None | Some(DataFolder::Delete) if in_use => {
             println!("{}", strings::data_dir_in_use(data_dir));
             // Asked for with --delete-data, and not done.
-            ok &= !args.delete_data;
+            kept_as_asked = !args.delete_data;
             Some(DataFolder::Keep)
         }
         other => other,
@@ -171,36 +243,45 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
             }
         },
     };
-    let deleted = match folder {
+    (folder, kept_as_asked)
+}
+
+/// Deletes the data folder, or says why it stays. Returns whether it was
+/// deleted, and whether nothing went wrong.
+fn apply_data_folder(folder: DataFolder, args: &UninstallAllArgs, data_dir: &Path) -> (bool, bool) {
+    match folder {
         DataFolder::Delete => match delete_when_stopped(data_dir) {
             Ok(()) => {
                 println!("{}", strings::data_deleted(data_dir));
-                true
+                (true, true)
             }
             Err(failure) => {
                 eprintln!("{}", failure.line());
-                ok = false;
-                false
+                (false, false)
             }
         },
-        DataFolder::Keep => false,
+        DataFolder::Keep => (false, true),
         DataFolder::KeepForRetry => {
             println!("{}", strings::data_kept_for_retry(data_dir));
-            false
+            (false, true)
         }
         DataFolder::KeepDaemonRuns => {
             println!("{}", strings::data_kept_daemon_runs(data_dir));
-            false
+            (false, true)
         }
         DataFolder::NotOurs => {
             if args.delete_data {
                 let code = codes::UNINSTALL_ALL_DATA_DIR_NOT_DEFAULT;
                 eprintln!("{}", own_failure(code, Some(data_dir)).line());
-                ok = false;
+                return (false, false);
             }
-            false
+            (false, true)
         }
-    };
+    }
+}
+
+/// The last lines: what the user may still remove by hand.
+fn print_leftovers(data_dir: &Path, folder: DataFolder, deleted: bool) {
     let programs = programs_dir();
     let default_dir = config::app_data_dir().ok();
     let left = Leftovers {
@@ -214,11 +295,6 @@ pub async fn run(args: &UninstallAllArgs, data_dir: &Path, data_dir_given: bool)
         default_dir: default_dir.as_deref(),
     };
     print!("{}", left.render());
-    if ok {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
 }
 
 /// `answer`, or `None` once the user pressed Ctrl+C. If Ctrl+C cannot be
@@ -259,7 +335,7 @@ enum DaemonEnd {
     /// window or the menu-bar icon.
     Back,
     /// It did not stop in time.
-    NotStopped(ClientFailure),
+    NotStopped(Failure),
 }
 
 /// Waits until the daemon has stopped, then watches [`RESTART_WATCH`] for
@@ -500,8 +576,18 @@ fn delete_data_dir(dir: &Path, home: Option<&Path>) -> Result<bool, Failure> {
     if !meta.file_type().is_dir() {
         return Err(unsafe_dir());
     }
+    let suffix = match marsa_core::fs::random_hex(8) {
+        Ok(suffix) => suffix,
+        Err(err) => {
+            tracing::debug!(error = %err, "no random name for the data folder");
+            return Err(own_failure(
+                codes::UNINSTALL_ALL_DATA_DELETE_FAILED,
+                Some(dir),
+            ));
+        }
+    };
     let mut doomed = name.to_os_string();
-    doomed.push(format!(".deleting-{}", random_hex()));
+    doomed.push(format!(".deleting-{suffix}"));
     let doomed = dir.with_file_name(doomed);
     if let Err(err) = fs::rename(dir, &doomed) {
         tracing::debug!(error = %err, path = %dir.display(), "cannot rename the data folder");
@@ -520,18 +606,6 @@ fn delete_data_dir(dir: &Path, home: Option<&Path>) -> Result<bool, Failure> {
     Ok(true)
 }
 
-/// 16 hex digits nobody can guess: std's `RandomState` is seeded from the
-/// system's random source. The process and the time make two calls differ
-/// for sure.
-fn random_hex() -> String {
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u32(std::process::id());
-    if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
-        hasher.write_u128(now.as_nanos());
-    }
-    format!("{:016x}", hasher.finish())
-}
-
 /// A failure of this command, with its text from [`strings`].
 fn own_failure(code: &'static str, path: Option<&Path>) -> Failure {
     let details = Details {
@@ -539,7 +613,7 @@ fn own_failure(code: &'static str, path: Option<&Path>) -> Failure {
         ..Details::default()
     };
     Failure {
-        code,
+        code: code.into(),
         message: strings::message(code, &details),
     }
 }
@@ -571,12 +645,12 @@ fn render(report: &UninstallReport, data_dir: &Path) -> String {
 }
 
 /// Why the helper did not run, ready for stderr.
-fn error(report: &UninstallReport) -> Option<ClientFailure> {
+fn error(report: &UninstallReport) -> Option<Failure> {
     let error = report.error.as_ref()?;
     let code = printable(&error.code);
-    Some(ClientFailure {
+    Some(Failure {
         message: strings::message(&code, &Details::default()),
-        code,
+        code: code.into(),
     })
 }
 
@@ -872,19 +946,6 @@ mod tests {
         assert!(outside.join("index.php").is_file());
         // Nothing there: fine.
         assert_eq!(delete_data_dir(&data, None), Ok(false));
-    }
-
-    #[test]
-    fn the_name_of_the_renamed_folder_is_a_random_sibling() {
-        let dir = Path::new("/Users/dev/Library/Application Support/dev.marsa.Marsa");
-        let (one, two) = (random_hex(), random_hex());
-        assert_eq!(one.len(), 16);
-        assert!(one.bytes().all(|byte| byte.is_ascii_hexdigit()), "{one}");
-        assert_ne!(one, two);
-        let mut doomed = dir.file_name().unwrap().to_os_string();
-        doomed.push(format!(".deleting-{one}"));
-        let doomed = dir.with_file_name(doomed);
-        assert_eq!(doomed.parent(), dir.parent());
     }
 
     #[test]

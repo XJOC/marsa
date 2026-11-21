@@ -1,4 +1,4 @@
-//! Why a call to the daemon failed. Task M3-08.
+//! Why a call to the daemon failed.
 
 use std::error::Error as StdError;
 use std::io;
@@ -14,7 +14,7 @@ const MAX_DAEMON_TEXT: usize = 200;
 /// that the UI maps to a message. No message holds the token: the token lives
 /// only in the `Authorization` header, and response bodies are never quoted
 /// except the `ErrorBody` the daemon wrote for us, cleaned by
-/// [`daemon_text`].
+/// `daemon_text`.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     /// No daemon holds `run/daemon.lock`, there is no `run/daemon.json`, or
@@ -64,7 +64,7 @@ pub enum ClientError {
     PathNotUtf8 { path: PathBuf },
 
     /// The daemon answered with an `ErrorBody`. `code` is passed on as sent,
-    /// after [`daemon_text`].
+    /// after `daemon_text`.
     #[error("the daemon answered {status} {code}: {message}")]
     Api {
         status: u16,
@@ -72,10 +72,10 @@ pub enum ClientError {
         message: String,
     },
 
-    /// The daemon's 409 `version_in_use` (task M5-07) or
-    /// `sites_lose_php` (task M5-19) from `DELETE
+    /// The daemon's 409 `version_in_use` or
+    /// `sites_lose_php` from `DELETE
     /// /v1/runtimes/{tool}/{version}`, with what uses the version. Its text
-    /// went through [`daemon_text`]. Boxed, so every `Result<_,
+    /// went through `daemon_text`. Boxed, so every `Result<_,
     /// ClientError>` stays small.
     #[error("the daemon answered 409 {}: {message}", .in_use.code())]
     InUse {

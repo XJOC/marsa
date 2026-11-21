@@ -2,13 +2,13 @@
 //! PostgreSQL, MySQL, and Valkey. `marsa_core::databases` decides; this
 //! module runs the programs.
 //!
-//! The first start of a line makes its data folder ([`init::ensure_data`]):
+//! The first start of a line makes its data folder (`init::ensure_data`):
 //! for PostgreSQL its cluster in `databases/postgres/<major>/`
-//! ([`postgres::ensure_cluster`]). All of it happens in a temp folder next to
+//! (`postgres::ensure_cluster`). All of it happens in a temp folder next to
 //! the target, which is renamed into place at the end, so a data folder that
 //! is half made is never taken for a ready one.
 //!
-//! Before each start, [`facts::start_facts`] reads the port and the
+//! Before each start, `facts::start_facts` reads the port and the
 //! server's own pid file (`postmaster.pid`) from the system for
 //! `decide_start`. It only reads: nothing here signals a process or deletes
 //! that file.
@@ -351,7 +351,7 @@ mod tests {
         assert!(names.all(|name| name == "postgres"));
     }
 
-    /// A broken `global.toml` (task M6-03 review): without PostgreSQL it
+    /// A broken `global.toml` without PostgreSQL it
     /// leaves PostgreSQL's status and lines alone; with one, the status
     /// says why it did not start.
     #[tokio::test]
@@ -1578,7 +1578,7 @@ mod tests {
     }
 
     /// Shell scripts stand in for `initdb` and `postgres`: macOS and Linux
-    /// only, the systems of this task (Windows is task M6-07).
+    /// only, the systems of this task (Windows is).
     #[cfg(unix)]
     mod init {
         use super::*;

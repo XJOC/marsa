@@ -14,10 +14,12 @@ use marsa_core::recipes::Platform;
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{Event, InstallDone, InstallFailure, InstallUpdate};
 
+use super::Failure;
 use super::Tool;
-use super::daemon::{ClientFailure, connect, failure};
+use super::daemon::{connect, failure};
 use super::progress::Progress;
 use super::strings::{self, Details};
+use super::text::printable_multiline;
 
 /// The arguments of `marsa install`.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -38,23 +40,20 @@ pub struct InstallArgs {
 /// Starts the daemon if needed and installs through it, with progress on
 /// stderr and the result on stdout. Exit code 0 also when the version was
 /// already installed, 1 for any failure.
-pub async fn run(args: &InstallArgs, data_dir: &Path) -> ExitCode {
+pub async fn run(args: &InstallArgs, data_dir: &Path) -> Result<ExitCode, Failure> {
     let runtime = Runtime::from(args.tool);
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+    let client = connect(data_dir).await?;
     // Subscribed before the request, so no event of this install is missed.
     let mut stream = match client.events().await {
         Ok(stream) => stream,
-        Err(err) => return failure(&err, data_dir, None).report(),
+        Err(err) => return Err(failure(&err, data_dir, None)),
     };
     let accepted = match client
         .install(runtime, args.version.as_deref(), args.force)
         .await
     {
         Ok(accepted) => accepted,
-        Err(err) => return failure(&err, data_dir, None).report(),
+        Err(err) => return Err(failure(&err, data_dir, None)),
     };
 
     let platform = Platform::current().map_or_else(|| "this system".to_owned(), |p| p.to_string());
@@ -72,11 +71,11 @@ pub async fn run(args: &InstallArgs, data_dir: &Path) -> ExitCode {
     match end {
         End::Done(done) => {
             print_result(&done, &client).await;
-            ExitCode::SUCCESS
+            Ok(ExitCode::SUCCESS)
         }
-        End::Failed(failed) => install_failure(&failed, runtime).report(),
-        End::Broken(err) => failure(&err, data_dir, None).report(),
-        End::Interrupted => ClientFailure::new(codes::INSTALL_INTERRUPTED, data_dir, None).report(),
+        End::Failed(failed) => Err(install_failure(&failed, runtime)),
+        End::Broken(err) => Err(failure(&err, data_dir, None)),
+        End::Interrupted => Err(Failure::new(codes::INSTALL_INTERRUPTED, data_dir, None)),
     }
 }
 
@@ -148,7 +147,7 @@ impl Follow {
 }
 
 async fn print_result(done: &InstallDone, client: &DaemonClient) {
-    let version = printable(&done.version);
+    let version = printable_multiline(&done.version);
     if done.already {
         println!("{}", strings::already_installed(done.runtime, &version));
     } else {
@@ -169,10 +168,10 @@ async fn print_result(done: &InstallDone, client: &DaemonClient) {
 
 /// The text and code the user sees for a `failed` install event. The
 /// daemon's English `message` goes to the log only.
-pub fn install_failure(failed: &InstallFailure, runtime: Runtime) -> ClientFailure {
+fn install_failure(failed: &InstallFailure, runtime: Runtime) -> Failure {
     tracing::debug!(code = %failed.code, error = %failed.message, "install failed");
-    let code = printable(&failed.code);
-    let text = |value: &Option<String>| value.as_deref().map(printable);
+    let code = printable_multiline(&failed.code);
+    let text = |value: &Option<String>| value.as_deref().map(printable_multiline);
     let (requested, platform, url, cause, output) = (
         text(&failed.requested),
         text(&failed.platform),
@@ -182,10 +181,14 @@ pub fn install_failure(failed: &InstallFailure, runtime: Runtime) -> ClientFailu
     );
     let os = failed.os.as_deref();
     let (needs, found) = (
-        os.map(|os| printable(&os.needs)),
-        os.map(|os| printable(&os.found)),
+        os.map(|os| printable_multiline(&os.needs)),
+        os.map(|os| printable_multiline(&os.found)),
     );
-    let available: Vec<String> = failed.available.iter().map(|v| printable(v)).collect();
+    let available: Vec<String> = failed
+        .available
+        .iter()
+        .map(|v| printable_multiline(v))
+        .collect();
     let details = Details {
         runtime: Some(runtime),
         requested: requested.as_deref(),
@@ -200,18 +203,10 @@ pub fn install_failure(failed: &InstallFailure, runtime: Runtime) -> ClientFailu
         service: None,
         site: None,
     };
-    ClientFailure {
+    Failure {
         message: strings::message(&code, &details),
-        code,
+        code: code.into(),
     }
-}
-
-/// Text from the daemon, safe to print: no control characters but line
-/// breaks and tabs, so it cannot move the cursor or recolor the terminal.
-fn printable(text: &str) -> String {
-    text.chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .collect()
 }
 
 #[cfg(test)]

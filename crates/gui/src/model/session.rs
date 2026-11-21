@@ -16,6 +16,27 @@ pub enum Connection {
     Failed(String),
 }
 
+impl Connection {
+    /// The line that says how the window and the daemon are connected.
+    pub fn status_line(&self) -> String {
+        match self {
+            Connection::Connecting => strings::CONNECTING.to_owned(),
+            Connection::Reconnecting => strings::RECONNECTING.to_owned(),
+            Connection::Running(health) => strings::daemon_running(&health.app_version, health.pid),
+            Connection::ShuttingDown => strings::DAEMON_SHUTTING_DOWN.to_owned(),
+            Connection::Failed(code) => strings::connection_failed(code),
+        }
+    }
+
+    /// The version of the daemon while connected.
+    pub fn daemon_version(&self) -> Option<&str> {
+        match self {
+            Connection::Running(health) => Some(&health.app_version),
+            _ => None,
+        }
+    }
+}
+
 /// How Marsa works as a whole, as far as the window can tell: the status at
 /// the bottom of the sidebar (principles 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +55,22 @@ pub enum Overall {
     WebServerDown,
     /// The daemon and the web server run.
     Working,
+}
+
+impl Overall {
+    /// The status at the bottom of the sidebar: a title and a caption, short
+    /// enough for its width.
+    pub const fn text(self) -> (&'static str, &'static str) {
+        match self {
+            Overall::Connecting => strings::OVERALL_CONNECTING,
+            Overall::Stopping => strings::OVERALL_STOPPING,
+            Overall::DaemonDown => strings::OVERALL_DAEMON_DOWN,
+            Overall::NoSites => strings::OVERALL_NO_SITES,
+            Overall::Starting => strings::OVERALL_STARTING,
+            Overall::WebServerDown => strings::OVERALL_WEB_SERVER_DOWN,
+            Overall::Working => strings::OVERALL_WORKING,
+        }
+    }
 }
 
 /// What the daemon told this window, and what the window is doing about it.

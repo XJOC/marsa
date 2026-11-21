@@ -1,5 +1,5 @@
 //! `marsa use <tool> <version>`: makes an installed PHP or Node version the
-//! default, through `PUT /v1/runtimes/{tool}/default`. Task M5-01.
+//! default, through `PUT /v1/runtimes/{tool}/default`.
 //!
 //! Every folder with no version of its own runs the default: the shims read
 //! `global.toml`, and the daemon moves the sites that follow it, with their
@@ -14,10 +14,11 @@ use marsa_core::config::ConfigPaths;
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::DefaultVersion;
 
+use super::Failure;
 use super::Tool;
-use super::daemon::{ClientFailure, connect, failure};
-use super::sites::printable;
+use super::daemon::{connect, failure};
 use super::strings::{self, Details};
+use super::text::printable;
 
 /// The arguments of `marsa use`.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -34,18 +35,15 @@ pub struct UseArgs {
 
 /// Starts the daemon if needed and sets the default: one line on stdout, or
 /// the failure on stderr with exit code 1.
-pub async fn run(args: &UseArgs, data_dir: &Path) -> ExitCode {
+pub async fn run(args: &UseArgs, data_dir: &Path) -> Result<ExitCode, Failure> {
     let runtime = Runtime::from(args.tool);
-    let client = match connect(data_dir).await {
-        Ok(client) => client,
-        Err(failure) => return failure.report(),
-    };
+    let client = connect(data_dir).await?;
     match client.set_default(runtime, &args.version).await {
         Ok(answer) => {
             println!("{}", render(runtime, &answer));
-            ExitCode::SUCCESS
+            Ok(ExitCode::SUCCESS)
         }
-        Err(err) => use_failure(&err, runtime, &args.version, data_dir).report(),
+        Err(err) => Err(use_failure(&err, runtime, &args.version, data_dir)),
     }
 }
 
@@ -61,15 +59,10 @@ pub fn render(runtime: Runtime, answer: &DefaultVersion) -> String {
 /// The text and code the user sees for `err`. A version code names the
 /// program and the version asked for, and a `config_*` code names
 /// `global.toml`, the file the daemon could not use.
-pub fn use_failure(
-    err: &ClientError,
-    runtime: Runtime,
-    version: &str,
-    data_dir: &Path,
-) -> ClientFailure {
+fn use_failure(err: &ClientError, runtime: Runtime, version: &str, data_dir: &Path) -> Failure {
     let mut failure = failure(err, data_dir, None);
     let global_toml = ConfigPaths::in_dir(data_dir).global;
-    let path = match failure.code.as_str() {
+    let path = match &*failure.code {
         codes::CONFIG_READ | codes::CONFIG_INVALID | codes::CONFIG_WRITE => {
             Some(global_toml.as_path())
         }

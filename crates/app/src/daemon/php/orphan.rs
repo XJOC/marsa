@@ -1,5 +1,5 @@
-//! Finds and stops a php-fpm that a crashed `marsad` left running. Task
-//! M4-23, with the rules of ADR 0009 that `caddy::orphan` follows for Caddy.
+//! Finds and stops a php-fpm that a crashed `marsad` left running,
+//! with the rules of ADR 0009 that `caddy::orphan` follows for Caddy.
 //!
 //! After a SIGKILL of the daemon, php-fpm lives on and keeps its socket, so
 //! the next php-fpm of the same PHP line fails ("Another FPM instance seems
@@ -22,8 +22,8 @@
 //!   free.
 //! - php-fpm's workers end with a master that stops on SIGTERM. A master
 //!   that only dies from SIGKILL cannot end them, and macOS has no
-//!   parent-death signal, so they live on under pid 1 and keep the socket
-//!   (task M4-25). So, right before the master's SIGKILL, its direct
+//!   parent-death signal, so they live on under pid 1 and keep the socket.
+//!   So, right before the master's SIGKILL, its direct
 //!   children are listed (`ps`), and the ones that run the master's very
 //!   executable and started no earlier than it are remembered
 //!   ([`orphan::worker_of`]). If they cannot be listed, the master gets no
@@ -202,7 +202,7 @@ pub enum Recorded {
 }
 
 /// How long the watcher looks again at a php-fpm just spawned whose pid
-/// file is not written yet ([`Recorded::NotYet`]), every [`POLL`].
+/// file is not written yet ([`Recorded::NotYet`]), every `POLL`.
 pub const RECORD_LIMIT: Duration = Duration::from_secs(5);
 
 /// The daemon's own executable, in each spelling: what the `exe` link of a
@@ -362,7 +362,7 @@ pub struct Orphans<'a> {
     /// Where the pool listens.
     pub listen: &'a Dial,
     /// `term` and `kill` for the master. `kill` is also how long the socket
-    /// or port may take to be let go at the end ([`Orphans::wait_free`]).
+    /// or port may take to be let go at the end (`Orphans::wait_free`).
     /// Caddy's `stop` step does not apply: php-fpm has no admin API.
     pub ladder: Ladder,
     /// `term` and `kill` for the workers the master left.
@@ -1237,7 +1237,7 @@ mod tests {
         }
     }
 
-    /// The master M4-25 is about: it ignores SIGTERM and dies from SIGKILL.
+    /// A master that ignores SIGTERM and dies from SIGKILL.
     fn stubborn_master() -> Proc {
         Proc {
             after_kill: Some(Liveness::Gone),

@@ -1,5 +1,5 @@
 //! Typed client for the daemon API, used by the CLI and the window
-//! (architecture.md section 6). Task M3-08.
+//! (architecture.md section 6).
 //!
 //! [`ensure_running`] finds the daemon, starts `marsad` if needed, and checks
 //! its version. Every call then goes to `http://127.0.0.1:<port>` with the
@@ -63,7 +63,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// another action on the service, then runs this one; a restart that stops
 /// an old Caddy first takes about 23 s. About 43 s in all.
 const SERVICE_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
-/// The same for PostgreSQL (`postgres`, task M6-03). The daemon waits up to
+/// The same for PostgreSQL (`postgres`). The daemon waits up to
 /// 30 s for another action, a restart stops it first (SIGINT and SIGQUIT,
 /// up to about 23 s), and a first start reads the port (lsof, up to 8 s),
 /// runs `initdb` (up to 120 s) and single-user mode (up to 60 s), waits up
@@ -82,7 +82,7 @@ const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// the user 5 minutes at the admin prompt and 5 more at the trust dialog
 /// (macOS), each check (`netstat`, `ps` for at most 8 processes, `security
 /// verify-cert`) up to 10 seconds, and Caddy 30 seconds to start and make
-/// its CA when there is none yet. A test in the daemon's `setup_api.rs`
+/// its CA when there is none yet. A test in the daemon's `setup_api/`
 /// holds this above the sum of the daemon's own limits.
 ///
 /// On Windows the slowest setup is longer: a request to the helper service,
@@ -108,13 +108,13 @@ pub const UNINSTALL_ALL_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 /// How long a new daemon has to answer. The wait ends as soon as it does, so
 /// this only bounds a real failure. macOS checks a program the first time it
 /// runs after an install or an update: about 2 s when the machine is idle,
-/// more under load, so 5 s was too tight (task M4-20).
+/// more under load, so 5 s was too tight.
 pub const START_WAIT: Duration = Duration::from_secs(15);
 /// How long an old daemon has to stop. `marsad` lets go of its lock after
 /// these steps (`server::run`), at most:
 ///
 /// - its processes: 25 s while PostgreSQL runs (SIGINT and SIGQUIT, 10 s
-///   each, and a 5 s margin for the kill; task M6-03), 10 s otherwise;
+///   each, and a 5 s margin for the kill), 10 s otherwise;
 /// - its open connections: 5 s;
 /// - the parked folder watcher, the sites sync, the starts of Caddy and of
 ///   PostgreSQL with the daemon, and the DNS server: 2 s each, 10 s.
@@ -125,7 +125,7 @@ pub const START_WAIT: Duration = Duration::from_secs(15);
 /// steps above. So 45 s.
 const STOP_WAIT: Duration = Duration::from_secs(45);
 /// How much earlier than the login session a daemon may have started and
-/// still count as of that session, in seconds (task M5-21). `ps` gives times
+/// still count as of that session, in seconds. `ps` gives times
 /// to the second. On the Mac measured for this task the login items, which
 /// start a daemon at login, started about 10 s after `loginwindow` and about
 /// 2 s before the Dock (read only when there is no `loginwindow`). A daemon
@@ -307,14 +307,13 @@ impl DaemonClient {
         self.call_with(Method::PUT, &path, &body).await
     }
 
-    /// `DELETE /v1/runtimes/{tool}/{version}` (task M5-07): deletes the
+    /// `DELETE /v1/runtimes/{tool}/{version}`: deletes the
     /// installed version that `version` names: `8.3.12`, or `8.3` when one
     /// installed version matches it. A php-fpm pool that runs it is stopped
     /// first. Returns once the folder is gone and the site list is built
     /// again; a changed list also comes on [`DaemonClient::events`] as
     /// `Event::SitesChanged`. A refusal changes nothing. The only installed
-    /// PHP or Node version goes with its default in `global.toml` (task
-    /// M5-19).
+    /// PHP or Node version goes with its default in `global.toml`.
     ///
     /// # Errors
     ///
@@ -445,7 +444,7 @@ impl DaemonClient {
             .await
     }
 
-    /// `GET /v1/hosts` (task M4-18k2): whether this system puts `.test`
+    /// `GET /v1/hosts`: whether this system puts `.test`
     /// names in its hosts file, and which sites are not there yet. Shows no
     /// prompt.
     pub async fn hosts(&self) -> Result<HostsStatus, ClientError> {
@@ -453,7 +452,7 @@ impl DaemonClient {
             .await
     }
 
-    /// `POST /v1/hosts/sync` (task M4-18k2): the names of every site go into
+    /// `POST /v1/hosts/sync`: the names of every site go into
     /// Marsa's block in the hosts file, behind the password prompt, if any
     /// is missing; with none missing, nothing runs. Only for a command of
     /// the user: never call it from a background task. Waits up to
@@ -470,7 +469,7 @@ impl DaemonClient {
             .await
     }
 
-    /// `POST /v1/uninstall` (task M5-13): one admin prompt for the helper's
+    /// `POST /v1/uninstall`: one admin prompt for the helper's
     /// removals, then the user's trust and the login file. Waits until it
     /// ends, up to 40 minutes ([`UNINSTALL_ALL_TIMEOUT`]). When
     /// [`UninstallReport::stopping`] is `true` the daemon stops right after
@@ -487,8 +486,7 @@ impl DaemonClient {
             .await
     }
 
-    /// `GET /v1/autostart`: whether the tray icon starts at login (task
-    /// M5-03).
+    /// `GET /v1/autostart`: whether the tray icon starts at login.
     ///
     /// # Errors
     ///
@@ -512,8 +510,7 @@ impl DaemonClient {
             .await
     }
 
-    /// `GET /v1/php/xdebug`: whether PHP loads Xdebug, and which versions
-    /// (task M5-11).
+    /// `GET /v1/php/xdebug`: whether PHP loads Xdebug, and which versions.
     ///
     /// # Errors
     ///
@@ -666,7 +663,7 @@ impl DaemonClient {
 ///    the lock, then step 2. If another client has replaced it meanwhile, the
 ///    new daemon is used.
 /// 5. On macOS, a daemon that started before the user's current GUI login
-///    session (task M5-21): replaced as in step 4. It outlived a logout, and
+///    session: replaced as in step 4. It outlived a logout, and
 ///    macOS shows no admin prompt for a process of a session that ended.
 ///    When either start time is unknown, the daemon is kept.
 ///
@@ -682,8 +679,8 @@ pub async fn ensure_running(data_dir: &Path) -> Result<DaemonClient, ClientError
     ensure(data_dir, marsad_path, read_login_times).await
 }
 
-/// [`ensure_running`] with the `marsad` program given. Public so the M3-09
-/// tests can pass `env!("CARGO_BIN_EXE_marsad")`.
+/// [`ensure_running`] with the `marsad` program given. Public so the
+/// daemon tests can pass `env!("CARGO_BIN_EXE_marsad")`.
 ///
 /// # Errors
 ///
@@ -742,7 +739,7 @@ pub async fn stop_daemon(data_dir: &Path) -> Result<bool, ClientError> {
 /// Whether a daemon holds `<data_dir>/run/daemon.lock` now: one runs, or is
 /// starting or stopping. Sends nothing and starts nothing. `marsa uninstall
 /// --all` uses it to see whether the Marsa window or the menu-bar icon
-/// started a daemon again (task M5-13).
+/// started a daemon again.
 pub fn is_daemon_running(data_dir: &Path) -> bool {
     lock_is_held(&daemon_lock_path(&run_dir(data_dir)))
 }
@@ -782,7 +779,7 @@ enum Probe {
 enum Replace {
     /// It is older than this build: its version.
     Older(String),
-    /// It started before the user's current GUI login session (task M5-21).
+    /// It started before the user's current GUI login session.
     OutlivedLogin(LoginTimes),
 }
 
@@ -893,7 +890,7 @@ where
 }
 
 /// Whether a daemon started before the current login session, more than
-/// [`LOGIN_MARGIN_SECS`] before it: then it outlived a logout (task M5-21).
+/// [`LOGIN_MARGIN_SECS`] before it: then it outlived a logout.
 /// `false` when a time cannot be read, or when the login seems to come after
 /// `now`: the clock was set back since, so the times say nothing. Without
 /// that check, each new daemon would seem older than the login too, and be
@@ -1153,7 +1150,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // A daemon left from an earlier login session (task M5-21)
+    // A daemon left from an earlier login session
 
     /// A login on 2026-11-14 (UTC).
     const LOGIN: &str = "Sat Nov 14 13:28:04 2026";
