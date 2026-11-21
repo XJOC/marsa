@@ -201,7 +201,7 @@ pub enum Recorded {
 }
 
 /// How long the watcher looks again at a php-fpm just spawned whose pid
-/// file is not written yet ([`Recorded::NotYet`]), every [`POLL`].
+/// file is not written yet ([`Recorded::NotYet`]), every `POLL`.
 pub const RECORD_LIMIT: Duration = Duration::from_secs(5);
 
 /// The daemon's own executable, in each spelling: what the `exe` link of a
@@ -361,7 +361,7 @@ pub struct Orphans<'a> {
     /// Where the pool listens.
     pub listen: &'a Dial,
     /// `term` and `kill` for the master. `kill` is also how long the socket
-    /// or port may take to be let go at the end ([`Orphans::wait_free`]).
+    /// or port may take to be let go at the end (`Orphans::wait_free`).
     /// Caddy's `stop` step does not apply: php-fpm has no admin API.
     pub ladder: Ladder,
     /// `term` and `kill` for the workers the master left.

@@ -89,11 +89,11 @@ impl Launch {
 /// The path of `marsa services start caddy`, with the orphan check (ADR 0009)
 /// and one action at a time. Its turn is taken here, before the task and
 /// before the API serves, so a request always comes after it: it waits for
-/// the start ([`CaddyManager::run_waiting`]) and never starts a second Caddy.
+/// the start (`CaddyManager::run_waiting`) and never starts a second Caddy.
 /// The API serves meanwhile.
 ///
 /// The config is the latest that the sites sync gave
-/// [`CaddyManager::apply`]: `start` and `apply` take turns on `pushing`, so a
+/// `CaddyManager::apply`: `start` and `apply` take turns on `pushing`, so a
 /// pass that comes after the start sends its config with `POST /load`. Caddy's
 /// `Running` also asks for a pass.
 ///

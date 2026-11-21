@@ -49,7 +49,7 @@ pub fn resolve(name: &str, limit: Duration) -> io::Result<Vec<IpAddr>> {
 }
 
 /// Sends `GET /` with `Host: <host>` to `127.0.0.1:<port>` and returns the
-/// start of the answer: at most [`MAX_ANSWER`] bytes, read until the server
+/// start of the answer: at most `MAX_ANSWER` bytes, read until the server
 /// closes or `limit` has passed. `host` is a name Marsa made, never user text.
 ///
 /// # Errors

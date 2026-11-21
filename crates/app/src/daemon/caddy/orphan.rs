@@ -35,8 +35,8 @@ pub const OTHER_MARSA: &str = codes::CADDY_OTHER_MARSA;
 /// How often a wait checks the ports again.
 const POLL: Duration = Duration::from_millis(50);
 
-/// How long [`PidFile::record`] looks again at a Caddy just spawned that
-/// does not run Caddy yet, every [`POLL`].
+/// How long `PidFile::record` looks again at a Caddy just spawned that
+/// does not run Caddy yet, every `POLL`.
 pub const RECORD_LIMIT: Duration = Duration::from_secs(5);
 
 /// The largest answer to `GET /id/...` that is read. The server's config grows

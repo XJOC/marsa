@@ -283,7 +283,7 @@ impl ServerManager {
     /// `stop` on a stopped one change nothing. Once the daemon begins to
     /// stop, nothing runs: the shutdown stops the server itself.
     ///
-    /// A `stop` does not wait for a start ([`Self::stop_waits`]): it drops
+    /// A `stop` does not wait for a start (`Self::stop_waits`): it drops
     /// the start that runs (with the daemon, of the API, or after an
     /// install), and every start that would come before it in line, then
     /// stops what a dropped start spawned.

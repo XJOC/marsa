@@ -46,7 +46,7 @@ pub const LOG_FILE_LIMIT: u64 = 10 * 1024 * 1024;
 
 /// What a stop needs besides the waits of its method and the limits of its
 /// requests: a `/bin/kill` per step (milliseconds, but up to 2 s each if one
-/// hangs: 4 s for the two of PostgreSQL), the kill, and up to [`DRAIN_WAIT`]
+/// hangs: 4 s for the two of PostgreSQL), the kill, and up to `DRAIN_WAIT`
 /// (1 s) for the last lines.
 pub const STOP_MARGIN: Duration = Duration::from_secs(5);
 

@@ -69,7 +69,7 @@ pub trait Runner: Send + Sync {
     ) -> io::Result<RunOutput>;
 }
 
-/// `std::process::Command`, with an empty environment except [`SAFE_PATH`]
+/// `std::process::Command`, with an empty environment except `SAFE_PATH`
 /// (on Windows: the Windows folder variables and the temp folder), no stdin,
 /// and the working folder `/` (on Windows: `System32`).
 #[derive(Debug, Clone, Copy, Default)]
