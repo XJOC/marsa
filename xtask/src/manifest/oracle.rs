@@ -16,7 +16,7 @@ use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::build::OracleCheck;
+use super::build::{ArchiveKind, OracleCheck};
 use super::upstream::parse_hex_bytes;
 
 /// The primary fingerprint of Oracle's MySQL release key, "MySQL Release
@@ -328,14 +328,59 @@ impl OracleCheck for System {
         md5_of(file)
     }
 
-    fn first_entry(&self, file: &Path) -> Result<String> {
-        first_tar_entry(Path::new(TAR_PATH), file)
+    fn first_entry(&self, file: &Path, kind: ArchiveKind) -> Result<String> {
+        match kind {
+            ArchiveKind::Tar => first_tar_entry(Path::new(TAR_PATH), file),
+            ArchiveKind::Zip => first_zip_entry(Path::new(UNZIP_PATH), file),
+        }
     }
 }
 
 /// macOS's own `tar` (bsdtar), which reads `.tar.gz` and `.tar.xz`. Never
 /// searched in `PATH`.
 const TAR_PATH: &str = "/usr/bin/tar";
+
+/// macOS's own `unzip`, for Windows' `.zip`. Never searched in `PATH`.
+const UNZIP_PATH: &str = "/usr/bin/unzip";
+
+/// The first line of `unzip -Z1 <file>`, which lists one entry name per
+/// line. Unlike a tar listing, it reads only the zip's central directory, so
+/// the rest of the listing (a few hundred names) is read too, and the exit
+/// code must be 0: `unzip` prints `Empty zipfile.` there for a zip with no
+/// entry, and exits with 1. No environment, so `UNZIP` and `ZIPINFO` options
+/// of the caller do not apply.
+fn first_zip_entry(unzip: &Path, file: &Path) -> Result<String> {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let mut child = Command::new(unzip)
+        .arg("-Z1")
+        .arg(file)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("cannot run {}", unzip.display()))?;
+    let stdout = child.stdout.take().context("unzip has no output")?;
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    let read = reader.read_line(&mut line);
+    let rest = std::io::copy(&mut reader, &mut std::io::sink());
+    let status = child
+        .wait()
+        .with_context(|| format!("cannot wait for {}", unzip.display()))?;
+    let read = read.with_context(|| format!("cannot read the listing of {}", file.display()))?;
+    rest.with_context(|| format!("cannot read the listing of {}", file.display()))?;
+    ensure!(
+        status.success(),
+        "{} -Z1 {} failed ({status})",
+        unzip.display(),
+        file.display()
+    );
+    ensure!(read > 0, "{} lists no entry", file.display());
+    Ok(line.trim_end_matches(['\n', '\r']).to_owned())
+}
 
 /// The first line of `tar -tf <file>`, read without listing the rest: the
 /// full archives have tens of thousands of entries.
@@ -393,6 +438,45 @@ mod tests {
         assert!(first_tar_entry(Path::new(TAR_PATH), &empty).is_err());
         assert!(first_tar_entry(Path::new(TAR_PATH), &dir.path().join("none")).is_err());
         assert!(first_tar_entry(&dir.path().join("no-tar"), &archive).is_err());
+    }
+
+    /// The first entry that the system's `unzip` lists, from a real zip as
+    /// Oracle makes it for Windows: one top folder.
+    #[cfg(unix)]
+    #[test]
+    fn the_first_zip_entry_is_read_from_a_real_archive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let top = dir.path().join("mysql-8.4.13-winx64");
+        fs::create_dir_all(top.join("bin")).expect("dirs");
+        fs::write(top.join("bin/mysqld.exe"), b"x").expect("file");
+        let archive = dir.path().join("a.zip");
+        let made = Command::new("/usr/bin/zip")
+            .arg("-q")
+            .arg("-r")
+            .arg(&archive)
+            .arg("mysql-8.4.13-winx64")
+            .current_dir(dir.path())
+            .status()
+            .expect("zip runs");
+        assert!(made.success());
+        let unzip = Path::new(UNZIP_PATH);
+        let first = first_zip_entry(unzip, &archive).expect("listing");
+        assert_eq!(
+            first.split('/').next(),
+            Some("mysql-8.4.13-winx64"),
+            "{first}"
+        );
+
+        // A zip with no entry: `unzip` says so on stdout, and exits with 1.
+        let empty = dir.path().join("empty.zip");
+        let end_of_directory = [b"PK\x05\x06".as_slice(), &[0_u8; 18]].concat();
+        fs::write(&empty, end_of_directory).expect("empty zip");
+        assert!(first_zip_entry(unzip, &empty).is_err());
+        let junk = dir.path().join("junk.zip");
+        fs::write(&junk, b"not a zip").expect("junk");
+        assert!(first_zip_entry(unzip, &junk).is_err());
+        assert!(first_zip_entry(unzip, &dir.path().join("none")).is_err());
+        assert!(first_zip_entry(&dir.path().join("no-unzip"), &archive).is_err());
     }
 
     // Real `gpg --status-fd 1 --verify` output (GnuPG 2.5.20, 2026-11-19).

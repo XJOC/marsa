@@ -618,8 +618,8 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
     }
 
     /// Valkey is the archive of our release that the recipe names, with no
-    /// override, and the `sha256sums.txt` of that release beside it. Windows
-    /// is skipped, with its reason.
+    /// override, and the `sha256sums.txt` of that release beside it, on all
+    /// five platforms: a `.zip` for Windows.
     #[test]
     fn repository_valkey_urls_are_our_release_assets() {
         use super::super::upstream::{Layout, Source, VALKEY_RELEASES, sum_file_for};
@@ -628,12 +628,8 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
         assert_eq!(pins.versions(Runtime::Valkey), &[v("8.1.11")]);
         let recipe = recipes::builtin(Runtime::Valkey).expect("valkey recipe");
         for version in pins.versions(Runtime::Valkey) {
+            assert_eq!(recipe.platforms().count(), 5);
             for (platform, _) in recipe.platforms() {
-                if platform == Platform::WindowsX64 {
-                    let reason = pins.skip_reason(Runtime::Valkey, version, platform);
-                    assert_eq!(reason, Some("Valkey on Windows is task M6-07"));
-                    continue;
-                }
                 assert_eq!(pins.skip_reason(Runtime::Valkey, version, platform), None);
                 let template = recipe
                     .artifact_url(platform, "archive", version)
@@ -642,8 +638,13 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
                     .urls(Runtime::Valkey, version, platform, "archive")
                     .expect("urls");
                 assert_eq!(urls, std::slice::from_ref(&template), "no override");
+                let format = if platform == Platform::WindowsX64 {
+                    "zip"
+                } else {
+                    "tar.gz"
+                };
                 let want =
-                    format!("{VALKEY_RELEASES}{version}-r1/valkey-{version}-{platform}.tar.gz");
+                    format!("{VALKEY_RELEASES}{version}-r1/valkey-{version}-{platform}.{format}");
                 assert_eq!(template, want);
                 let sums = sum_file_for(&template).expect("our release has sums");
                 assert_eq!(
