@@ -167,11 +167,15 @@ pub(super) async fn clear(
         }
         PidfileState::Ours { .. } => {}
     }
+    // Signals only. A request to the server's port (Valkey's `SHUTDOWN
+    // SAVE`) would reach whatever listens there, which the check of the pid
+    // does not prove is this process (ADR 0023, section 8).
     let signals = ladder
         .steps
         .iter()
-        .map(|step| match step.action {
-            StopAction::Signal(signal) => (signal, step.wait),
+        .filter_map(|step| match step.action {
+            StopAction::Signal(signal) => Some((signal, step.wait)),
+            StopAction::Send(_) => None,
         })
         .chain([(Signal::Kill, KILL_WAIT)]);
     // The last signal sent, for the line that says how it stopped.

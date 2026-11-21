@@ -841,6 +841,7 @@ mod tests {
         let steps = postgres_stop().steps;
         let signal = |step: &StopStep| match step.action {
             StopAction::Signal(signal) => (signal, step.wait.as_secs()),
+            StopAction::Send(_) => panic!("PostgreSQL is stopped by signals only"),
         };
         let signals: Vec<_> = steps.iter().map(signal).collect();
         assert_eq!(signals, [(Signal::Int, 10), (Signal::Quit, 10)]);

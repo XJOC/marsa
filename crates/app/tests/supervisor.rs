@@ -5,7 +5,9 @@
 //!
 //! `#[cfg(unix)]` on those tests and their helpers: they send SIGINT and
 //! SIGQUIT and record the signals the fake gets, and only Unix has signals.
-//! Windows stops a service with a kill, which the other tests cover.
+//! Windows stops a service with a kill, which the other tests cover. The
+//! tests of a stop request over TCP (Valkey's `SHUTDOWN SAVE`) are Unix
+//! only too: the step after the request is SIGTERM.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -17,6 +19,9 @@ use tempfile::TempDir;
 use tokio::sync::broadcast;
 
 const FAKE: &str = "MARSA_FAKE_SERVICE";
+/// The port of the fake TCP server.
+#[cfg(unix)]
+const FAKE_PORT: &str = "MARSA_FAKE_PORT";
 /// Generous: a test binary can start slowly on a busy CI machine.
 const WAIT: Duration = Duration::from_secs(30);
 const GRACE: Duration = Duration::from_millis(500);
@@ -59,8 +64,49 @@ fn fake_service() {
         "pg" | "deaf" => tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(print_signals(mode == "pg")),
+        // A server on the port in `MARSA_FAKE_PORT` that prints the bytes of
+        // the first request it gets. `kv` then exits, as Valkey does at
+        // `SHUTDOWN SAVE`; `kv-mute` never answers or closes; `kv-refuse`
+        // answers with Valkey's error. The last two exit at SIGTERM.
+        #[cfg(unix)]
+        "kv" | "kv-mute" | "kv-refuse" => tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(serve_one_request(&mode)),
         other => panic!("unknown fake mode {other}"),
     }
+}
+
+#[cfg(unix)]
+async fn serve_one_request(mode: &str) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::signal::unix::{SignalKind, signal};
+    let port = std::env::var(FAKE_PORT).expect("the test sets the port");
+    let port: u16 = port.parse().expect("a port number");
+    let mut term = signal(SignalKind::terminate()).expect("a signal handler");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .expect("the port is free");
+    println!("fake ready");
+    let (mut stream, _) = listener.accept().await.expect("a client");
+    // Everything the client sends until it pauses: one request.
+    let mut got = Vec::new();
+    let mut chunk = [0_u8; 64];
+    let pause = Duration::from_millis(300);
+    while let Ok(Ok(read @ 1..)) = tokio::time::timeout(pause, stream.read(&mut chunk)).await {
+        got.extend_from_slice(&chunk[..read]);
+    }
+    println!("fake got {:?}", String::from_utf8_lossy(&got));
+    match mode {
+        "kv" => std::process::exit(0),
+        "kv-refuse" => {
+            let refused = b"-ERR Errors trying to SHUTDOWN. Check logs.\r\n";
+            stream.write_all(refused).await.expect("the reply");
+        }
+        _ => {}
+    }
+    term.recv().await;
+    println!("fake got SIGTERM");
+    std::process::exit(0);
 }
 
 #[cfg(unix)]
@@ -96,7 +142,12 @@ fn start(mode: &str, restart: RestartPolicy) -> Started {
 }
 
 fn start_with(mode: &str, restart: RestartPolicy, stop: StopMethod) -> Started {
-    let spec = ServiceSpec {
+    start_spec(spec(mode, restart, stop))
+}
+
+/// The fake in `mode`, run by the supervisor.
+fn spec(mode: &str, restart: RestartPolicy, stop: StopMethod) -> ServiceSpec {
+    ServiceSpec {
         id: mode.into(),
         program: std::env::current_exe().expect("the test binary has a path"),
         // Runs only the entry point, under libtest and under nextest alike.
@@ -107,7 +158,10 @@ fn start_with(mode: &str, restart: RestartPolicy, stop: StopMethod) -> Started {
         cwd: None,
         restart,
         stop,
-    };
+    }
+}
+
+fn start_spec(spec: ServiceSpec) -> Started {
     let (tx, rx) = broadcast::channel(1024);
     let logs = tempfile::tempdir().expect("a temp folder");
     let handle = Supervisor::spawn(spec, tx, logs.path()).expect("the program is absolute");
@@ -341,4 +395,126 @@ async fn a_daemon_shutdown_waits_for_the_whole_ladder() {
     // The supervisor ended the stop itself: an aborted task says nothing.
     let changes = states(&events);
     assert_eq!(changes.last(), Some(&ServiceState::Stopped), "{changes:?}");
+}
+
+/// A port nothing listens on now.
+#[cfg(unix)]
+fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a port");
+    listener.local_addr().expect("its address").port()
+}
+
+/// Valkey's ladder (ADR 0023), with `wait` after the request: `SHUTDOWN
+/// SAVE` to `port`, then SIGTERM, then a kill.
+#[cfg(unix)]
+fn shutdown_save(port: u16, wait: Duration) -> StopMethod {
+    use marsa_core::services::{Signal, StopAction, StopStep, TcpRequest};
+    let request = TcpRequest {
+        port,
+        bytes: SHUTDOWN_SAVE.to_vec(),
+        name: "SHUTDOWN SAVE",
+        limit: Duration::from_secs(2),
+    };
+    let mut stop = StopMethod::signals([(Signal::Term, GRACE)]);
+    let send = StopStep {
+        action: StopAction::Send(request),
+        wait,
+    };
+    stop.steps.insert(0, send);
+    stop
+}
+
+/// `SHUTDOWN SAVE` in RESP, as Valkey reads it.
+#[cfg(unix)]
+const SHUTDOWN_SAVE: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$4\r\nSAVE\r\n";
+
+/// The line the fake prints for the request it got.
+#[cfg(unix)]
+fn got_shutdown_save() -> String {
+    format!("fake got {:?}", String::from_utf8_lossy(SHUTDOWN_SAVE))
+}
+
+/// Starts the fake TCP server in `mode` on a free port, stopped with
+/// `SHUTDOWN SAVE` and `wait`, then stops it. Gives its events and how long
+/// the stop took.
+#[cfg(unix)]
+async fn stop_kv(mode: &str, wait: Duration) -> (Vec<Event>, Duration) {
+    let port = free_port();
+    let fake = spec(mode, RestartPolicy::Never, shutdown_save(port, wait));
+    let mut vars = fake.env.clone();
+    vars.insert(FAKE_PORT.to_owned(), port.to_string());
+    let (mut handle, mut rx, _logs) = start_spec(ServiceSpec { env: vars, ..fake });
+    ready(&handle).await;
+    let started = Instant::now();
+    handle.cancel.cancel();
+    let events = finish(&mut handle, &mut rx).await;
+    let elapsed = started.elapsed();
+    let changes = states(&events);
+    assert_eq!(
+        changes[2..],
+        [ServiceState::Stopping, ServiceState::Stopped]
+    );
+    (events, elapsed)
+}
+
+/// The server gets exactly `SHUTDOWN SAVE` in RESP, and its exit ends the
+/// stop: no SIGTERM.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stop_request_reaches_the_port_and_ends_the_stop() {
+    // Long, so a stop that needed the SIGTERM would fail the time check.
+    let wait = Duration::from_secs(10);
+    let (events, elapsed) = stop_kv("kv", wait).await;
+    assert!(elapsed < wait, "the request did not stop it: {elapsed:?}");
+    let want = ["fake ready".to_owned(), got_shutdown_save()];
+    assert_eq!(fake_texts(&events), want);
+}
+
+/// A server that takes the request but neither exits nor closes gets
+/// SIGTERM after the request's wait, not before.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_server_that_never_closes_gets_sigterm_after_the_wait() {
+    let (events, elapsed) = stop_kv("kv-mute", GRACE).await;
+    assert!(elapsed >= GRACE, "SIGTERM came too early: {elapsed:?}");
+    assert!(elapsed < GRACE + Duration::from_secs(3), "{elapsed:?}");
+    let sigterm = "fake got SIGTERM".to_owned();
+    let want = ["fake ready".to_owned(), got_shutdown_save(), sigterm];
+    assert_eq!(fake_texts(&events), want);
+}
+
+/// A reply is a refusal: SIGTERM comes at once, without the wait.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_refused_request_goes_on_to_sigterm_at_once() {
+    let wait = Duration::from_secs(10);
+    let (events, elapsed) = stop_kv("kv-refuse", wait).await;
+    assert!(elapsed < wait, "it waited after the refusal: {elapsed:?}");
+    let sigterm = "fake got SIGTERM".to_owned();
+    let want = ["fake ready".to_owned(), got_shutdown_save(), sigterm];
+    assert_eq!(fake_texts(&events), want);
+}
+
+/// Nothing listens on the port: SIGTERM comes at once.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_request_nobody_takes_goes_on_to_sigterm_at_once() {
+    let wait = Duration::from_secs(10);
+    let (events, elapsed) = stop_fake("pg", shutdown_save(free_port(), wait)).await;
+    assert!(
+        elapsed < wait,
+        "it waited after a failed connect: {elapsed:?}"
+    );
+    // `pg` ignores SIGTERM: the kill after it ends it.
+    assert_eq!(fake_texts(&events), ["fake ready", "fake got SIGTERM"]);
+}
+
+/// The daemon's shutdown gives the request its connect and its write too.
+#[cfg(unix)]
+#[test]
+fn a_request_adds_its_limits_to_the_stop_limit() {
+    use marsa::daemon::supervisor::{STOP_MARGIN, stop_limit};
+    let stop = shutdown_save(6379, Duration::from_secs(10));
+    let want = Duration::from_secs(10 + 4) + GRACE + STOP_MARGIN;
+    assert_eq!(stop_limit(&stop), want);
 }

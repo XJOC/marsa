@@ -71,10 +71,10 @@ impl Signal {
 /// - Caddy and php-fpm: SIGTERM, then a kill ([`StopMethod::term`]).
 /// - PostgreSQL on macOS and Linux: SIGINT, then SIGQUIT, then a kill
 ///   ([`crate::databases::postgres_stop`]). Never SIGTERM.
+/// - Valkey: `SHUTDOWN SAVE` over its own protocol, then SIGTERM, then a
+///   kill ([`crate::databases::valkey::valkey_stop`]).
 /// - Later, on Windows (M6-07): a stop command such as
 ///   `pg_ctl stop -m fast`, then a kill.
-/// - Later, Valkey (M6-06): `SHUTDOWN SAVE` over its protocol, then SIGTERM,
-///   then a kill.
 ///
 /// So each new way to ask is one more [`StopAction`] variant, and the steps,
 /// their limits, and the final kill stay as they are.
@@ -91,11 +91,48 @@ pub struct StopStep {
     pub wait: Duration,
 }
 
-/// How one step asks the process to stop.
+/// How one step asks the process to stop. When the asking fails, the step
+/// is skipped, with no wait.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopAction {
     /// Windows sends no signals: there the step is skipped, with no wait.
     Signal(Signal),
+    /// A request to the server's own port, for a server that saves its data
+    /// only when its protocol asks it to stop (Valkey's `SHUTDOWN SAVE`).
+    Send(TcpRequest),
+}
+
+impl StopAction {
+    /// How long the asking itself may take, before the step's wait: nothing
+    /// for a signal (the supervisor's margin covers `/bin/kill`), the connect
+    /// and the write for a [`TcpRequest`].
+    pub fn limit(&self) -> Duration {
+        match self {
+            Self::Signal(_) => Duration::ZERO,
+            Self::Send(request) => request.limit.saturating_mul(2),
+        }
+    }
+}
+
+/// Bytes the supervisor writes to `127.0.0.1:<port>` over TCP to ask a
+/// server to stop. The host is not a field: the daemon talks to loopback
+/// only. No shell and no client program: the supervisor writes the bytes
+/// itself.
+///
+/// A server that takes the request closes the connection and exits, with no
+/// reply. Any reply is a refusal (Valkey: `-ERR Errors trying to SHUTDOWN`),
+/// and the next step comes at once, as it does when nothing listens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpRequest {
+    /// The server's port on `127.0.0.1`.
+    pub port: u16,
+    /// Written as they are. Made by code from fixed words, never from
+    /// input.
+    pub bytes: Vec<u8>,
+    /// The request's name in logs, such as `SHUTDOWN SAVE`.
+    pub name: &'static str,
+    /// For the connect, and again for the write.
+    pub limit: Duration,
 }
 
 impl StopMethod {
@@ -115,9 +152,13 @@ impl StopMethod {
         }
     }
 
-    /// The longest the steps wait before the kill: all their limits added up.
+    /// The longest the steps take before the kill: all their waits and the
+    /// limits of their requests ([`StopAction::limit`]) added up.
     pub fn total_wait(&self) -> Duration {
-        let add = |total: Duration, step: &StopStep| total.saturating_add(step.wait);
+        let add = |total: Duration, step: &StopStep| {
+            let step_time = step.wait.saturating_add(step.action.limit());
+            total.saturating_add(step_time)
+        };
         self.steps.iter().fold(Duration::ZERO, add)
     }
 }
@@ -252,6 +293,30 @@ mod tests {
         assert_eq!(StopMethod::signals([]).total_wait(), Duration::ZERO);
         let endless = StopMethod::signals([(Signal::Int, Duration::MAX), (Signal::Quit, MS)]);
         assert_eq!(endless.total_wait(), Duration::MAX);
+    }
+
+    /// A request may take its connect and its write before its wait, so
+    /// the shutdown gives the whole stop that much more.
+    #[test]
+    fn a_request_counts_its_connect_and_its_write() {
+        let request = TcpRequest {
+            port: 6379,
+            bytes: b"x".to_vec(),
+            name: "X",
+            limit: 2000 * MS,
+        };
+        let send = StopAction::Send(request);
+        assert_eq!(send.limit(), 4000 * MS);
+        assert_eq!(StopAction::Signal(Signal::Term).limit(), Duration::ZERO);
+        let mut stop = StopMethod::term(5000 * MS);
+        stop.steps.insert(
+            0,
+            StopStep {
+                action: send,
+                wait: 10_000 * MS,
+            },
+        );
+        assert_eq!(stop.total_wait(), 19_000 * MS);
     }
 
     #[test]
