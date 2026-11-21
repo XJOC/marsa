@@ -16,6 +16,7 @@ default = ["full"]
 # here too: only the `installer` module uses them (task M2-01).
 full = [
   "dep:tokio",
+  "dep:tokio-util",
   "dep:reqwest",
   "dep:notify",
   "dep:minisign-verify",
@@ -31,6 +32,7 @@ full = [
 [dependencies]
 # Optional, so `full` can switch them on with `dep:` and the shim can leave them out.
 tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 minisign-verify = { workspace = true, optional = true }

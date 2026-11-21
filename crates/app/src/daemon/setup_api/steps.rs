@@ -392,9 +392,9 @@ mod tests {
     use super::super::osascript::OSASCRIPT;
 
     use super::super::ports::NETSTAT;
-    use super::super::runner::PIPE_GRACE;
+    use marsa_core::platform::runner::PIPE_GRACE;
 
-    use super::super::runner::RunOutput;
+    use marsa_core::platform::runner::RunOutput;
 
     use super::super::test_support::*;
     use super::super::user_trust::SECURITY;

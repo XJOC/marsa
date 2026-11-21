@@ -27,7 +27,6 @@ pub mod nss;
 mod osascript;
 pub mod pkexec;
 pub mod ports;
-mod runner;
 mod steps;
 #[cfg(test)]
 pub(super) mod test_support;
@@ -65,9 +64,9 @@ use self::helper::{MAX_ANSWER, parse_answer, results_of};
 use self::osascript::not_finished;
 pub(super) use self::ports::CHECK_LIMIT;
 use self::ports::MAX_PS;
-pub(super) use self::runner::PIPE_GRACE;
-pub use self::runner::{RealRunner, RunOutput, Runner};
 use self::steps::{TRUST_INSTALL, low_ports_set};
+pub(super) use marsa_core::platform::runner::PIPE_GRACE;
+pub use marsa_core::platform::runner::{RealRunner, RunOutput, Runner};
 
 /// The longest a setup takes, when every step runs to its limit: Caddy's
 /// start and its CA root at [`CA_WAIT`], `netstat`, [`MAX_PS`] `ps` calls,
@@ -600,10 +599,10 @@ mod tests {
     use super::ports::CHECK_LIMIT;
     use super::ports::MAX_PS;
     use super::ports::NETSTAT;
-    use super::runner::PIPE_GRACE;
     use super::test_support::*;
     use super::user_trust::SECURITY;
     use super::*;
+    use marsa_core::platform::runner::PIPE_GRACE;
 
     use crate::daemon::state::Daemon;
 

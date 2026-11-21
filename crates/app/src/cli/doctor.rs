@@ -57,7 +57,8 @@ use super::sites::printable;
 use super::strings::{self, Details};
 use crate::daemon::caddy::CADDY_ID;
 use crate::daemon::setup_api::ports::port_holders;
-use crate::daemon::setup_api::{RealRunner, linux_dns, user_trust};
+use crate::daemon::setup_api::{linux_dns, user_trust};
+use marsa_core::platform::runner::RealRunner;
 
 /// How long the system resolver may take for the `.test` name.
 const DNS_LIMIT: Duration = Duration::from_secs(5);

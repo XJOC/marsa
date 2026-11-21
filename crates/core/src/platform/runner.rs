@@ -20,18 +20,18 @@ use tokio_util::sync::CancellationToken;
 
 /// The most read from each pipe of a program. The rest is read and dropped,
 /// so the program never waits on a full pipe.
-pub(super) const MAX_OUTPUT: u64 = 4 * 1024 * 1024;
+pub const MAX_OUTPUT: u64 = 4 * 1024 * 1024;
 
 /// The only `PATH` a program sees. Every program here is an absolute path, so
 /// this only keeps the daemon's own `PATH` away from them.
 const SAFE_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 /// How often [`RealRunner`] checks whether the program has finished.
-pub(super) const POLL: Duration = Duration::from_millis(10);
+const POLL: Duration = Duration::from_millis(10);
 
 /// How long the pipes may stay open after the program ended. Its output is
 /// read all along, so only the last bytes are left by then.
-pub(in crate::daemon) const PIPE_GRACE: Duration = Duration::from_secs(2);
+pub const PIPE_GRACE: Duration = Duration::from_secs(2);
 
 /// What a program printed, and how it ended.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -43,16 +43,16 @@ pub struct RunOutput {
 }
 
 impl RunOutput {
-    pub(super) fn success(&self) -> bool {
+    pub fn success(&self) -> bool {
         self.code == Some(0)
     }
 }
 
-/// Runs the programs of setup. The daemon uses [`RealRunner`]; tests use a
+/// Runs the programs of setup and doctor. The daemon and the CLI use [`RealRunner`]; tests use a
 /// fake, like `Process::fake()` in Laravel.
 pub trait Runner: Send + Sync {
     /// Runs `program` with `args`, never through a shell, and waits at most
-    /// `limit`. `&'static str`: a constant path in this file, never one from
+    /// `limit`. `&'static str`: a constant path in the caller, never one from
     /// a request.
     ///
     /// # Errors
@@ -101,7 +101,7 @@ impl Runner for RealRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // Not the daemon's working folder. `/` is a Unix path, and setup runs
-        // on macOS and Linux only for now (Windows in task M4-19).
+        // on macOS and Linux only for now (Windows later).
         #[cfg(unix)]
         command.current_dir("/");
         let mut child = command.spawn()?;
@@ -111,11 +111,7 @@ impl Runner for RealRunner {
 
 /// Waits for `child` at most `limit`, or until `stop`, and collects its
 /// output. On any error the child is killed and reaped before this returns.
-pub(super) fn finish(
-    child: &mut Child,
-    limit: Duration,
-    stop: &CancellationToken,
-) -> io::Result<RunOutput> {
+fn finish(child: &mut Child, limit: Duration, stop: &CancellationToken) -> io::Result<RunOutput> {
     let result = collect(child, Instant::now() + limit, stop);
     if result.is_err() {
         // Best effort: the first error is the one to report.
@@ -133,7 +129,7 @@ pub(super) fn finish(
 /// Then the wait goes on until it ends, within its own limits, and its
 /// answer is used: reporting a timeout would hide what it did (review of
 /// #120).
-pub(super) fn collect(
+fn collect(
     child: &mut Child,
     deadline: Instant,
     stop: &CancellationToken,
@@ -217,7 +213,7 @@ fn receive(output: &Receiver<io::Result<Vec<u8>>>, deadline: Instant) -> io::Res
     }
 }
 
-pub(super) fn timed_out() -> io::Error {
+fn timed_out() -> io::Error {
     let reason = "the program did not finish in time";
     io::Error::new(io::ErrorKind::TimedOut, reason)
 }

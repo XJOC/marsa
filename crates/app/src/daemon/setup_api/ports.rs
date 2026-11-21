@@ -5,8 +5,8 @@
 //! `pf_install`: the redirect would take that program's traffic without a
 //! word. `marsa doctor` asks the same.
 
-use super::runner::MAX_OUTPUT;
-use super::runner::Runner;
+use marsa_core::platform::runner::MAX_OUTPUT;
+use marsa_core::platform::runner::Runner;
 use marsa_core::ports;
 use marsa_core::ports::Listener;
 use marsa_core::ports::ProcessInfo;
@@ -125,13 +125,13 @@ pub(super) fn process(
 #[cfg(test)]
 mod tests {
     use super::super::osascript::OSASCRIPT;
-    use super::super::runner::MAX_OUTPUT;
+    use marsa_core::platform::runner::MAX_OUTPUT;
 
-    use super::super::runner::RunOutput;
     use super::super::test_support::*;
     use super::super::user_trust::SECURITY;
     use super::super::*;
     use super::*;
+    use marsa_core::platform::runner::RunOutput;
 
     use marsa_core::types::PortHolder;
 
