@@ -55,7 +55,7 @@ const RESTART_WATCH: Duration = Duration::from_secs(3);
 const RESTART_POLL: Duration = Duration::from_millis(100);
 
 /// The arguments of `marsa uninstall --all`. `bin/marsa.rs` flattens them
-/// into `marsa uninstall`, next to the `<TOOL> <VERSION>` of task M5-07, and
+/// into `marsa uninstall`, next to the `<TOOL> <VERSION>` of, and
 /// requires either `--all` or a tool, never both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::Args)]
 pub struct UninstallAllArgs {

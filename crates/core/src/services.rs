@@ -73,7 +73,7 @@ impl Signal {
 ///   ([`crate::databases::postgres_stop`]). Never SIGTERM.
 /// - Valkey: `SHUTDOWN SAVE` over its own protocol, then SIGTERM, then a
 ///   kill ([`crate::databases::valkey::valkey_stop`]).
-/// - Later, on Windows (M6-07): a stop command such as
+/// - Later, on Windows: a stop command such as
 ///   `pg_ctl stop -m fast`, then a kill.
 ///
 /// So each new way to ask is one more [`StopAction`] variant, and the steps,

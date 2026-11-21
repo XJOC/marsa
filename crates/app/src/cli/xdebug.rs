@@ -1,5 +1,5 @@
 //! `marsa xdebug` and `marsa xdebug on|off`: load Xdebug in every installed
-//! PHP, or in none, through `GET` and `PUT /v1/php/xdebug`. Task M5-11.
+//! PHP, or in none, through `GET` and `PUT /v1/php/xdebug`.
 //!
 //! The daemon saves the setting, writes each `php.ini`, and restarts the
 //! php-fpm it changed. `php` in the terminal reads the same `php.ini`, so it

@@ -1,7 +1,7 @@
 //! `marsa sites`, `marsa park`, `marsa link`, `marsa secure`, and
-//! `marsa unsecure`: the sites the daemon serves. Task M4-10c. Then `marsa
+//! `marsa unsecure`: the sites the daemon serves. Then `marsa
 //! unlink`, `marsa forget`, `marsa isolate`, `marsa unisolate`, and `marsa
-//! open` (task M5-09).
+//! open`.
 //!
 //! Each command is one call to `marsad` (the routes in
 //! `daemon/sites_api.rs`), started if needed. A folder the user names is made
@@ -360,7 +360,7 @@ pub async fn run(command: &SitesCommand, data_dir: &Path) -> ExitCode {
     }
 }
 
-/// After `park` and `link` (task M4-18k2): where `marsa setup` put this
+/// After `park` and `link`: where `marsa setup` put this
 /// data folder's names in the hosts file, the sites the file lacks go in
 /// now, behind the password prompt. The user's own command asks for it; the
 /// daemon never does by itself. Before the first setup nothing happens:
@@ -965,7 +965,7 @@ mod tests {
         );
     }
 
-    // M5-09: `unlink`, `forget`, `isolate`, `unisolate`, and `open`.
+    // `unlink`, `forget`, `isolate`, `unisolate`, and `open`.
 
     #[test]
     fn the_new_commands_parse_their_arguments() {
@@ -1230,7 +1230,7 @@ mod tests {
         }
     }
 
-    /// Task M4-18k2: whether `park` and `link` sync, from `GET /v1/hosts`.
+    /// Whether `park` and `link` sync, from `GET /v1/hosts`.
     #[test]
     fn park_and_link_sync_only_names_the_block_lacks() {
         let used = |missing: &[&str]| HostsStatus {
@@ -1247,7 +1247,7 @@ mod tests {
         assert!(warning.ends_with("[internal_error]"), "{warning}");
     }
 
-    /// Task M4-18k2: what `park` and `link` print after the sync, and
+    /// What `park` and `link` print after the sync, and
     /// whether the names went in.
     #[test]
     fn park_and_link_say_when_the_names_did_not_go_in() {

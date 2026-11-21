@@ -1,5 +1,5 @@
 //! `marsa use <tool> <version>`: makes an installed PHP or Node version the
-//! default, through `PUT /v1/runtimes/{tool}/default`. Task M5-01.
+//! default, through `PUT /v1/runtimes/{tool}/default`.
 //!
 //! Every folder with no version of its own runs the default: the shims read
 //! `global.toml`, and the daemon moves the sites that follow it, with their

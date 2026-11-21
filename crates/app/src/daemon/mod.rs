@@ -1,6 +1,5 @@
 //! The daemon: API server, auth, process supervisor, and Caddy manager
-//! (architecture.md section 5). One file per M3 task, so the tasks can run in
-//! parallel (task M3-01).
+//! (architecture.md section 5). One file per job.
 
 pub mod api;
 pub mod auth;

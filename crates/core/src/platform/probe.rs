@@ -1,4 +1,4 @@
-//! The system reads of `marsa doctor` (task M5-12). Each is small, read-only,
+//! The system reads of `marsa doctor`. Each is small, read-only,
 //! and bounded in time; `crate::doctor` judges what they return.
 //!
 //! Every socket goes to `127.0.0.1`, and at most one plain `GET /` is sent.

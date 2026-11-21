@@ -1,4 +1,4 @@
-//! Opening a URL in the user's browser, for `marsa open` (task M5-09).
+//! Opening a URL in the user's browser, for `marsa open`.
 //!
 //! The system's own opener does it, found by its absolute path and run with
 //! the URL as its one argument, never through a shell:

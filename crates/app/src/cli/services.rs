@@ -1,5 +1,5 @@
 //! `marsa services`: the table of the services the daemon manages, and
-//! `marsa services start|stop|restart <id>`. Task M3-09.
+//! `marsa services start|stop|restart <id>`.
 
 use std::path::Path;
 use std::process::ExitCode;

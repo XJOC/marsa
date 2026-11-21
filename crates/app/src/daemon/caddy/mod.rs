@@ -1,4 +1,4 @@
-//! Starts Caddy through the supervisor and talks to its admin API. Task M3-07.
+//! Starts Caddy through the supervisor and talks to its admin API.
 //!
 //! `marsa_core::caddy` builds the config as data. This module writes it to
 //! `caddy/caddy.json`, runs the newest installed Caddy
@@ -17,10 +17,10 @@
 //! The config is always `sites_config` of the sites and PHP pools that the
 //! sync task (`sites_sync`) last gave [`CaddyManager::apply`]. While Caddy
 //! runs, each change goes to its admin API (`POST /load`), so Caddy changes
-//! without a restart (task M4-11). The ports stay the same: no new listener.
+//! without a restart. The ports stay the same: no new listener.
 //!
 //! When `marsad` starts, [`start_at_launch`] starts an installed Caddy in the
-//! background, through the same start (task M5-16).
+//! background, through the same start.
 
 pub mod orphan;
 

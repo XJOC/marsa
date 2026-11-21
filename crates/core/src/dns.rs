@@ -13,7 +13,7 @@
 //! helper, so it does not need to know the system. The strategy only returns
 //! data.
 //!
-//! Linux has a second way (ADR 0014, task M4-18k): where systemd-resolved
+//! Linux has a second way (ADR 0014): where systemd-resolved
 //! does not run, or where its systemd is older than 250 and
 //! systemd-networkd may run, the `marsa0` link cannot be used, and each
 //! site gets a hosts file line, as on Windows. [`linux_path`] picks the way

@@ -1,5 +1,5 @@
 //! Runs the real `marsad` on a temp data folder and tests its API from outside
-//! (architecture.md section 11). Task M3-06.
+//! (architecture.md section 11).
 //!
 //! No fixed sleeps: each wait polls with a generous limit, so slow CI machines
 //! pass and a broken daemon fails with its log.
@@ -167,7 +167,7 @@ async fn health_needs_the_token_and_gives_the_version() {
 }
 
 /// What an uninstall left when its delete stopped half way goes before the
-/// daemon serves (task M5-07); the versions stay.
+/// daemon serves; the versions stay.
 #[tokio::test]
 async fn the_start_deletes_unfinished_uninstalls() {
     let dir = TempDir::new().expect("temp data folder");
@@ -224,7 +224,7 @@ async fn the_start_renews_the_client_shims_of_an_older_build() {
     );
 }
 
-/// The start looks for a Caddy to start (task M5-16). None is installed
+/// The start looks for a Caddy to start. None is installed
 /// here: the log says so, and Caddy stays `stopped`, not `failed`. With a
 /// Caddy installed it would take Marsa's own ports, so `tests/services.rs`
 /// tests that start on free ports, in process.

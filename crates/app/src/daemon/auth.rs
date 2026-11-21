@@ -1,5 +1,5 @@
 //! The checks on every request to `marsad`, before any route (architecture.md
-//! section 5, "Security"). Task M3-03 (sensitive).
+//! section 5, "Security").
 //!
 //! In this order:
 //!

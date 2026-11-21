@@ -188,7 +188,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             example_version(d.runtime)
         ),
 
-        // `marsa use`: `PUT /v1/runtimes/{tool}/default` (task M5-01).
+        // `marsa use`: `PUT /v1/runtimes/{tool}/default`.
         "version_not_installed" => match (d.runtime, d.requested) {
             (Some(runtime), Some(version)) => format!(
                 "{name} {version} is not installed. Run \"marsa install {} {version}\", then \
@@ -205,11 +205,11 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         ),
 
         // `marsa uninstall`: `DELETE /v1/runtimes/{tool}/{version}` (task
-        // M5-07). `version_in_use` has its facts in `version_in_use()`.
+        // `version_in_use` has its facts in `version_in_use()`.
         "version_in_use" => "This version is in use: it is a default, a site is set to it, \
              or Caddy runs from it. Nothing was uninstalled."
             .into(),
-        // M5-19, M5-22: the only PHP, and sites run it.
+        // The only PHP, and sites run it.
         "sites_lose_php" => "This is the only PHP version installed, and sites run it: they \
              would have no PHP. Install another PHP version and make it the default first. \
              Nothing was uninstalled."
@@ -296,7 +296,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             "A port {service} needs is used by another program. Run \"marsa logs {id}\" to \
              see which one."
         ),
-        // The DNS server for .test (task M4-18i): a service, and a reason
+        // The DNS server for .test: a service, and a reason
         // setup skips its DNS step.
         "dns_port_in_use" => "Another program holds port 18053, where Marsa answers .test \
              names, so it may answer them instead. Run \"marsa logs dns\" to see which one \
@@ -325,7 +325,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              {id}\" to see its process and stop it. Then run \"marsa services restart caddy\" \
              to try again; it briefly interrupts every site."
         ),
-        // PostgreSQL (task M6-03): `databases::ActionError` and
+        // PostgreSQL: `databases::ActionError` and
         // `ServiceBusy` in core. Marsa never stops the other program.
         "service_port_busy" => format!(
             "Another program uses the port {service} needs, and Marsa stops nothing. Quit it, or \
@@ -357,7 +357,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "postgres_unsupported_platform" => {
             "Marsa runs PostgreSQL on macOS and Linux only for now.".into()
         }
-        // MySQL (task M6-05), the same way.
+        // MySQL, the same way.
         "mysql_not_installed" => "MySQL of the version set in global.toml is not installed. \
              Run \"marsa install mysql\", then try again."
             .into(),
@@ -452,7 +452,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "no_current_dir" => "Cannot read the current folder; it may have been deleted. Go to \
              another folder, or pass a full path."
             .into(),
-        // M5-09: `marsa unlink`, `marsa forget`, and `marsa open`.
+        // `marsa unlink`, `marsa forget`, and `marsa open`.
         "site_is_parked" => match d.path {
             Some(dir) => format!(
                 "\"{site}\" comes from the parked folder {0}, so it cannot be unlinked alone. \
@@ -494,7 +494,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         ),
         "config_write" => format!("Cannot write {}. {DISK}", shown("the settings file")),
 
-        // `marsa setup`: the setup route (task M4-13), its skipped steps, and
+        // `marsa setup`: the setup route, its skipped steps, and
         // the failure codes of `marsa-helper`.
         "setup_running" => "Another setup is running. Wait for it to end, then try again.".into(),
         "setup_not_supported" => "\"marsa setup\" works on macOS, Linux, and Windows only.".into(),
@@ -552,7 +552,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "setup_helper_rejected" => "marsa-helper refused the setup request, so nothing was \
              changed. This is a bug in Marsa: report it with the file logs/marsad.log."
             .into(),
-        // Windows: the helper service behind its pipe (ADR 0018, task M4-19g2).
+        // Windows: the helper service behind its pipe (ADR 0018).
         "setup_helper_not_the_service" => "Another program holds the name of Marsa's helper \
              service, so Marsa sent it nothing and nothing was changed. Restart Windows, then \
              run \"marsa setup\" again; if it repeats, report it with the file \
@@ -678,7 +678,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              authority. Run the command again; if it repeats, remove \"Marsa Local CA\" in \
              Keychain Access and report it."
             .into(),
-        // The Linux ops of `marsa-helper` (tasks M4-18b, M4-18c, M4-18h).
+        // The Linux ops of `marsa-helper`.
         "resolved_foreign" => "/etc/systemd/system/marsa-dns-link.service belongs to another \
              tool, so Marsa left it as it is. Move that file away, then run \"marsa setup\" \
              again."
@@ -688,12 +688,12 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              the old /etc/systemd/resolved.conf.d/marsa.conf). Run the command again; if it \
              repeats, report it."
             .into(),
-        // Setup then puts the names in /etc/hosts (task M4-18k2).
+        // Setup then puts the names in /etc/hosts.
         "resolved_not_running" => "systemd-resolved does not run on this system, so Marsa \
              did not make its link for .test names: they go into /etc/hosts instead."
             .into(),
         // Linux before systemd 250 with systemd-networkd, or without
-        // systemd-resolved (task M4-18k), and Windows (task M4-19).
+        // systemd-resolved, and Windows.
         "hosts_not_used" => "Marsa has no lines in the hosts file for this data folder: this \
              system sends .test names to Marsa without it, or \"marsa setup\" has not run yet."
             .into(),
@@ -723,7 +723,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              administrator password. Install the package pkexec (Debian, Ubuntu), polkit \
              (Fedora), or policykit-1 (older systems), then run \"marsa setup\" again."
             .into(),
-        // Linux, the second request of setup (task M4-18k2).
+        // Linux, the second request of setup.
         "setup_hosts_not_written" => format!(
             "The steps above are done, but the second password prompt did not go through, so \
              the sites' .test names are not in {HOSTS_FILE} yet and the sites do not open. Run \
@@ -794,7 +794,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              ca-certificates package, then run the command again. Systems whose tool reads \
              another folder (Arch, openSUSE) are not supported yet."
             .into(),
-        // Chrome and Firefox on Linux (task M4-18g).
+        // Chrome and Firefox on Linux.
         "nss_tool_missing" => "certutil is not installed, so Chrome and Firefox do not trust \
              Marsa's sites yet (curl and other programs do). Install libnss3-tools (Debian, \
              Ubuntu) or nss-tools (Fedora), then run \"marsa setup\" again."
@@ -836,7 +836,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              Then run \"marsa setup\" again."
             .into(),
 
-        // `marsa uninstall --all` (task M5-13): the uninstall route, and the
+        // `marsa uninstall --all`: the uninstall route, and the
         // command's own questions and the data folder.
         "uninstall_running" => {
             "An uninstall is running. Wait for it to end, then try again.".into()
@@ -957,7 +957,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             shown("it")
         ),
 
-        // `marsa autostart`: the autostart route (task M5-03).
+        // `marsa autostart`: the autostart route.
         "autostart_unsupported" => {
             "Starting Marsa at login works on macOS and Linux only for now.".into()
         }
@@ -981,7 +981,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
             shown("the login file")
         ),
 
-        // The Xdebug route (task M5-11).
+        // The Xdebug route.
         "xdebug_interrupted" => "The Marsa daemon stopped before the change reached PHP. The \
              setting is saved: Marsa applies it when it starts again."
             .into(),
@@ -1134,7 +1134,7 @@ pub fn default_set(runtime: Runtime, default: &str, version: &str) -> String {
     }
 }
 
-// `marsa uninstall` (task M5-07).
+// `marsa uninstall`.
 
 /// `Uninstalled PHP 8.3.12.`
 pub fn uninstalled(runtime: Runtime, version: &str) -> String {
@@ -1358,7 +1358,7 @@ pub fn unsecured(url: &str) -> String {
     format!("{url} is served over plain HTTP.")
 }
 
-// M5-09: `marsa unlink`, `forget`, `isolate`, `unisolate`, and `open`.
+// `marsa unlink`, `forget`, `isolate`, `unisolate`, and `open`.
 
 /// `marsa unlink`.
 pub fn unlinked(name: &str) -> String {
@@ -1430,7 +1430,7 @@ const SETUP_MAY_HAVE_RUN: &str = "Some steps may already have run with admin rig
 /// When setup had no step to report.
 pub const SETUP_NOTHING: &str = "Nothing to set up.";
 /// Why setup skipped the trust when no Caddy is installed to make the
-/// certificate authority (task M5-15). The general text of the code is for
+/// certificate authority. The general text of the code is for
 /// `marsa services start caddy`.
 pub const SETUP_CADDY_NOT_INSTALLED: &str = "Caddy is not installed, so Marsa's certificate \
      authority does not exist yet. Run \"marsa install caddy\", then run \"marsa setup\" again.";
@@ -1447,7 +1447,7 @@ const HOSTS_FILE: &str = if cfg!(windows) {
 const HOSTS_LISTED: usize = 5;
 
 /// Before the prompt of `marsa park` and `marsa link`, on stderr: the sites
-/// that go into the hosts file (task M4-18k2).
+/// that go into the hosts file.
 pub fn hosts_adding(missing: &[String]) -> String {
     let mut names = missing
         .iter()
@@ -1513,9 +1513,9 @@ pub fn setup_step(op: &str) -> String {
         "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
         "resolved_install" => "Send .test names to Marsa".to_owned(),
         "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
-        // Chrome and Firefox on Linux (task M4-18g).
+        // Chrome and Firefox on Linux.
         "nss_install" => "Trust Marsa's certificates in Chrome and Firefox".to_owned(),
-        // The hosts way on Linux (task M4-18k).
+        // The hosts way on Linux.
         "resolved_remove" => "Take out Marsa's link for .test names".to_owned(),
         "hosts_sync" => format!("Put the sites' .test names in {HOSTS_FILE}"),
         "hosts_remove" => format!("Take Marsa's names out of {HOSTS_FILE}"),
@@ -1679,8 +1679,8 @@ pub fn data_kept_ctrl_c(path: &Path) -> String {
     format!("Kept the data folder {}.", path.display())
 }
 
-/// Setup's text for `trust_record_unusable`: the trust folder `dir` (task
-/// M5-13) could not be used. The uninstall's text is in `known`.
+/// Setup's text for `trust_record_unusable`: the trust folder `dir`
+/// could not be used. The uninstall's text is in `known`.
 pub fn setup_trust_dir_unusable(dir: &Path) -> String {
     format!(
         "Marsa cannot use its folder {} for the trusted certificate: it must be your own \
@@ -1909,8 +1909,7 @@ pub fn doctor_vc_old(found: &str) -> String {
 pub const DOCTOR_VC_INSTALL: &str = "Install the latest Microsoft Visual C++ Redistributable \
      (x64) from https://aka.ms/vs/17/release/vc_redist.x64.exe, then run \"marsa doctor\" again.";
 
-/// Windows: PHP's CA bundle against the roots Windows trusts (task M4-19n,
-/// ADR 0020).
+/// Windows: PHP's CA bundle against the roots Windows trusts (ADR 0020).
 pub fn doctor_system_roots_ok(count: usize, left_out: usize, marsa: bool, age_days: u64) -> String {
     let written = match age_days {
         0 => "today".to_owned(),
@@ -1961,13 +1960,13 @@ pub fn doctor_runtimes_ok(default: &str, version: &str) -> String {
 
 pub const DOCTOR_CADDY_OK: &str = "Caddy is running.";
 pub const DOCTOR_DNS_OK: &str = ".test names resolve to 127.0.0.1.";
-/// Linux on the `marsa0` link (task M4-18k3).
+/// Linux on the `marsa0` link.
 pub const DOCTOR_LINK_SETUP: &str = "Run \"marsa setup\": it sends .test names to Marsa through \
      systemd-resolved. If they still do not resolve, \"resolvectl status marsa0\" shows whether \
      systemd-resolved sends .test names to Marsa.";
-/// Linux on the hosts way (task M4-18k3).
+/// Linux on the hosts way.
 pub const DOCTOR_HOSTS_OK: &str = "Every site has its line in /etc/hosts.";
-/// Windows (task M4-19o): the hosts file is Windows' own, and marsad adds the
+/// Windows: the hosts file is Windows' own, and marsad adds the
 /// names through the helper service with no prompt.
 pub const DOCTOR_HOSTS_OK_WINDOWS: &str = "Every site has its line in the hosts file.";
 pub const DOCTOR_HOSTS_SYNC_WINDOWS: &str = "marsad adds new sites through Marsa's helper service \
@@ -2510,7 +2509,7 @@ mod tests {
         );
     }
 
-    /// Task M4-18k2: the line before the prompt of `park` and `link`, and
+    /// The line before the prompt of `park` and `link`, and
     /// the one when the names did not go in. Not on Windows, whose hosts
     /// file has another path in the text.
     #[cfg(not(windows))]

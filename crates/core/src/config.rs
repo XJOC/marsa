@@ -23,7 +23,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 const HEADER: &str = "# Managed by Marsa. Comments in this file are not kept.\n";
 
 /// `global.toml`. A table with nothing set is not written, so clearing the
-/// last key of `[php]` or `[node]` removes the table (task M5-19).
+/// last key of `[php]` or `[node]` removes the table.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GlobalConfig {
@@ -47,7 +47,7 @@ pub struct ToolDefaults {
     /// The version as the user wrote it. The resolver checks it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
-    /// `[php]` only: every `php.ini` Marsa writes loads Xdebug (task M5-11).
+    /// `[php]` only: every `php.ini` Marsa writes loads Xdebug.
     /// The default is `false`, so the file only says `xdebug = true`, and a
     /// file from before this key reads as off.
     #[serde(skip_serializing_if = "is_false")]
@@ -963,7 +963,7 @@ mod tests {
         assert_eq!(paths.sites, base.join("config").join("sites.toml"));
     }
 
-    /// A `sites.toml` as M1-05 wrote it: no `parked`, `secure`, or `proxy`.
+    /// A `sites.toml` from the first release: no `parked`, `secure`, or `proxy`.
     fn old_sites_text() -> String {
         format!(
             "{HEADER}\n\

@@ -1,4 +1,4 @@
-//! Deletes an installed version safely (task M5-07), in two steps:
+//! Deletes an installed version safely, in two steps:
 //!
 //! 1. [`retire`] takes the install lock, so no install runs meanwhile, and
 //!    renames `runtimes/<runtime>/<version>` to `runtimes/<runtime>/del-<8

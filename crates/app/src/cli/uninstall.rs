@@ -1,10 +1,10 @@
 //! `marsa uninstall <tool> <version>`: deletes an installed version, through
-//! `DELETE /v1/runtimes/{tool}/{version}`. Task M5-07.
+//! `DELETE /v1/runtimes/{tool}/{version}`.
 //!
 //! The daemon refuses a version in use: the default, a site's own setting,
 //! or the running Caddy. Its answer says which, and this command prints it.
 //! The only installed PHP or Node version goes with its default, unless PHP
-//! sites follow that default (task M5-19).
+//! sites follow that default.
 
 use marsa_core::codes;
 use std::path::Path;
@@ -131,7 +131,7 @@ mod tests {
              it: stop it first with \"marsa services stop postgres\". Its databases stay either \
              way. [version_in_use]"
         );
-        // M5-19: the only PHP, with sites that would have no PHP after it.
+        // The only PHP, with sites that would have no PHP after it.
         let last = in_use(VersionInUse {
             version: "8.3.12".into(),
             sites_left_without_php: vec!["blog".into(), "shop".into()],

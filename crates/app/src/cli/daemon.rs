@@ -1,5 +1,5 @@
 //! `marsa daemon start|stop|status`, and what every command that talks to
-//! `marsad` shares: [`connect`] and [`ClientFailure`]. Task M3-09.
+//! `marsad` shares: [`connect`] and [`ClientFailure`].
 //!
 //! The calls are in `marsa_core::client`; this file prints their result.
 //! Nothing here prints the token: only the port and the PID leave the client.

@@ -1,5 +1,5 @@
 //! `marsa logs <id> [-f]`: the recent output of a service, and with `-f` its
-//! new lines as they come, until Ctrl+C. Task M3-09.
+//! new lines as they come, until Ctrl+C.
 //!
 //! Each line goes to stdout as the service printed it, like `tail`. Notes
 //! (no lines yet, skipped lines, the end of the log) go to stderr, so a pipe

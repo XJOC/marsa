@@ -351,7 +351,7 @@ mod tests {
         assert!(names.all(|name| name == "postgres"));
     }
 
-    /// A broken `global.toml` (task M6-03 review): without PostgreSQL it
+    /// A broken `global.toml` without PostgreSQL it
     /// leaves PostgreSQL's status and lines alone; with one, the status
     /// says why it did not start.
     #[tokio::test]
@@ -1577,7 +1577,7 @@ mod tests {
     }
 
     /// Shell scripts stand in for `initdb` and `postgres`: macOS and Linux
-    /// only, the systems of this task (Windows is task M6-07).
+    /// only, the systems of this task (Windows is).
     #[cfg(unix)]
     mod init {
         use super::*;
