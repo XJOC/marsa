@@ -899,7 +899,7 @@ pub(crate) mod tests {
         /// all, and no float other than zero: egui sizes are `f32`. The tests
         /// at the end of a file are not checked.
         Drawing,
-        /// `strings.rs`: no color word and no `f32`; its other floats are
+        /// `strings/`: no color word and no `f32`; its other floats are
         /// unit conversions.
         Strings,
         /// The widgets: they name the color type, so only a color made by
@@ -929,12 +929,10 @@ pub(crate) mod tests {
                 include_str!("../main.rs").to_owned(),
                 Rules::Drawing,
             ),
-            (
-                "strings.rs".to_owned(),
-                include_str!("../strings.rs").to_owned(),
-                Rules::Strings,
-            ),
         ];
+        for (name, source) in folder_sources("strings", 9) {
+            files.push((format!("strings/{name}"), source, Rules::Strings));
+        }
         // Every file of `widgets/`, `screens/`, `shell/`, and `panel/`, so a
         // new one is checked at once.
         for (folder, least) in [("widgets", 9), ("screens", 7), ("shell", 2), ("panel", 2)] {

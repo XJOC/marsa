@@ -635,7 +635,7 @@ mod tests {
     /// The codes `strings::error_text` has a sentence for, read from its
     /// source: a code is a quoted name before `|` or `=>` in `error_message`.
     fn error_codes() -> Vec<String> {
-        let source = include_str!("../strings.rs");
+        let source = include_str!("../strings/errors.rs");
         let start = source
             .find("fn error_message(code: &str)")
             .expect("the table of error texts");
