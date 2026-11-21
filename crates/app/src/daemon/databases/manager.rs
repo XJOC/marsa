@@ -25,8 +25,8 @@ use super::facts::start_facts;
 use super::init::{InitError, installed_servers};
 use super::settings::{any_installed, read_settings, save_enabled};
 use super::{orphan, postgres};
-use crate::daemon::caddy::{AbortOnDrop, note, set_failed};
 use crate::daemon::services::probe::{ProcessProbe, SystemProbe};
+use crate::daemon::services::runtime::AbortOnDrop;
 use crate::daemon::state::Daemon;
 use crate::daemon::supervisor::{EXITED, ServiceHandle, ServiceRuntime, Supervisor, lock};
 
@@ -506,7 +506,7 @@ impl ServerManager {
         match cleared.await {
             Ok(orphan::Cleared::Stopped { pid, signal }) => {
                 let text = orphan::stopped_line(kind, pid, signal);
-                note(&self.runtime, &daemon.events, &text);
+                lock(&self.runtime).note(&daemon.events, &text);
             }
             Ok(orphan::Cleared::Nothing | orphan::Cleared::Forgotten) => {}
             Err(orphan::Stuck(reason)) => return Err(ActionError::OrphanStuck(kind, reason)),
@@ -566,7 +566,7 @@ impl ServerManager {
                 "marsad: PostgreSQL gets no Unix socket in {folder}: {why}. So it takes TCP \
                  connections only, and its superuser postgres cannot connect."
             );
-            note(&self.runtime, &daemon.events, &text);
+            lock(&self.runtime).note(&daemon.events, &text);
         }
         Ok(Prepared {
             spec: postgres::spec(programs.postgres, &dirs, port),
@@ -753,12 +753,12 @@ impl ServerManager {
         match cleared.await {
             Ok(orphan::Cleared::Stopped { pid, signal }) => {
                 let text = orphan::stopped_line(kind, pid, signal);
-                note(&self.runtime, &daemon.events, &text);
+                lock(&self.runtime).note(&daemon.events, &text);
             }
             Ok(orphan::Cleared::Nothing | orphan::Cleared::Forgotten) => {}
             Err(orphan::Stuck(reason)) => {
                 warn!(%reason, server = kind.id(), "our old server did not stop");
-                note(&self.runtime, &daemon.events, &format!("marsad: {reason}."));
+                lock(&self.runtime).note(&daemon.events, &format!("marsad: {reason}."));
             }
         }
     }
@@ -768,7 +768,7 @@ impl ServerManager {
     pub(super) fn fail(&self, events: &broadcast::Sender<Event>, code: &str, reason: &str) {
         warn!(code, %reason, server = self.kind.id(), "it was not started");
         let text = format!("marsad: {} was not started: {reason}.", self.kind.name());
-        note(&self.runtime, events, &text);
-        set_failed(&self.runtime, events, code);
+        lock(&self.runtime).note(events, &text);
+        lock(&self.runtime).set_failed(events, code);
     }
 }

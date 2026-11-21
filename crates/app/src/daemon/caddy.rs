@@ -40,14 +40,15 @@ use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceState, 
 use reqwest::redirect;
 use serde_json::Value;
 use tokio::sync::broadcast::{self, error::RecvError};
-use tokio::task::{AbortHandle, JoinError, JoinHandle};
+use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use self::orphan::{Blocked, Ladder, Orphans, PidFile};
 use super::services::probe::{ProcessProbe, SystemProbe};
+use super::services::runtime::AbortOnDrop;
 use super::state::Daemon;
-use super::supervisor::{ServiceHandle, ServiceRuntime, Supervisor, lock, now_ms};
+use super::supervisor::{ServiceHandle, ServiceRuntime, Supervisor, lock};
 
 /// The service id: the key in `Daemon::procs`, the `{id}` in the routes, and
 /// the log file `logs/caddy.log`.
@@ -330,7 +331,7 @@ impl CaddyManager {
             Err(LoadError::Unreachable(_)) if !daemon.proc_alive(CADDY_ID) => Ok(Applied::Written),
             Err(err) => {
                 let text = format!("marsad: The new config was not loaded: {err}.");
-                note(&self.runtime, &daemon.events, &text);
+                lock(&self.runtime).note(&daemon.events, &text);
                 Err(err)
             }
         }
@@ -524,7 +525,7 @@ impl CaddyManager {
             let orphans = self.orphans(&pid_file, admin, &tag);
             if let Some(found) = orphans.inspect().await {
                 if found.is_reap() {
-                    note(&self.runtime, &daemon.events, STOPPING_ORPHAN);
+                    lock(&self.runtime).note(&daemon.events, STOPPING_ORPHAN);
                 }
                 if let Err(blocked) = orphans.clear_for_start(found).await {
                     self.blocked("Caddy was not started", &blocked, &daemon.events);
@@ -698,7 +699,7 @@ impl CaddyManager {
         if !found.is_reap() {
             return true;
         }
-        note(&self.runtime, &daemon.events, STOPPING_ORPHAN);
+        lock(&self.runtime).note(&daemon.events, STOPPING_ORPHAN);
         match orphans.reap(found).await {
             Ok(()) => true,
             Err(blocked) => {
@@ -734,14 +735,14 @@ impl CaddyManager {
     fn blocked(&self, what: &str, blocked: &Blocked, events: &broadcast::Sender<Event>) {
         warn!(code = blocked.code, reason = %blocked.reason, "{what}");
         let text = format!("marsad: {what}: {}.", blocked.reason);
-        note(&self.runtime, events, &text);
+        lock(&self.runtime).note(events, &text);
         self.fail(blocked.code, events);
     }
 
     /// Sets `Failed { code }`. Only while no task runs: the supervisor owns
     /// the status then.
     fn fail(&self, code: &str, events: &broadcast::Sender<Event>) {
-        set_failed(&self.runtime, events, code);
+        lock(&self.runtime).set_failed(events, code);
     }
 }
 
@@ -947,7 +948,7 @@ impl Watcher {
         pid_file.remove();
         if conflict {
             // After the supervisor's last change, so this one stays.
-            set_failed(&runtime, &events, codes::PORT_IN_USE);
+            lock(&runtime).set_failed(&events, codes::PORT_IN_USE);
         }
     }
 }
@@ -1009,43 +1010,6 @@ fn report(result: Result<(), JoinError>) {
     if let Err(err) = result {
         warn!(%err, "the caddy supervisor task failed");
     }
-}
-
-/// Aborts a task when this guard goes: a wrapper task that `stop_procs`
-/// aborts takes the task it waits for along.
-pub(super) struct AbortOnDrop(pub(super) AbortHandle);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-/// Adds a line from the daemon to a service's recent lines, so `marsa logs
-/// caddy` (or `postgres`) shows why it did not start.
-pub(super) fn note(runtime: &Mutex<ServiceRuntime>, events: &broadcast::Sender<Event>, text: &str) {
-    let mut runtime = lock(runtime);
-    let line = runtime.logs.push(LogStream::Stderr, text, now_ms());
-    // Under the lock, like the supervisor, so events come in `seq` order.
-    let _ = events.send(Event::Log(line));
-}
-
-/// Sets `Failed { code }` and tells every reader, under the lock like the
-/// supervisor, so events come in the order of the changes.
-pub(super) fn set_failed(
-    runtime: &Mutex<ServiceRuntime>,
-    events: &broadcast::Sender<Event>,
-    code: &str,
-) {
-    let mut runtime = lock(runtime);
-    let status = &mut runtime.status;
-    status.state = ServiceState::Failed {
-        code: code.to_owned(),
-    };
-    status.pid = None;
-    status.since_ms = Some(now_ms());
-    // An error only means that nobody listens right now.
-    let _ = events.send(Event::ServiceChanged(status.clone()));
 }
 
 /// Puts this data folder's `tag` as the `@id` of the `admin` object.

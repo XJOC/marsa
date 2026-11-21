@@ -112,12 +112,13 @@ use marsa_core::recipes::Platform;
 use marsa_core::runtimes::{Runtime, RuntimesDir};
 use marsa_core::types::{Event, ServiceState};
 use tokio::sync::broadcast::{self, error::RecvError};
-use tokio::task::{AbortHandle, JoinHandle};
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use super::{fpm_id, fpm_program};
 use crate::daemon::caddy::orphan::Ladder;
 use crate::daemon::services::probe::ProcessProbe;
+use crate::daemon::services::runtime::AbortOnDrop;
 use crate::daemon::supervisor::{ServiceHandle, ServiceRuntime, lock};
 
 /// Our old php-fpm did not stop, or cannot be verified, while its socket or
@@ -1153,14 +1154,6 @@ impl Recording {
 fn report(id: &str, result: Result<(), tokio::task::JoinError>) {
     if let Err(err) = result {
         warn!(service = %id, %err, "the php-fpm supervisor task failed");
-    }
-}
-
-struct AbortOnDrop(AbortHandle);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }
 
