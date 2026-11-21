@@ -30,15 +30,15 @@ use windows_sys::Win32::System::Threading::DETACHED_PROCESS;
 use windows_sys::core::BOOL;
 
 use crate::error::ShimError;
-use crate::name::ShimName;
+use crate::name::Role;
 
 /// The tool, from the program file that runs (`shims\php.exe`): `argv[0]` is
 /// whatever the caller wrote (`php`, `PHP`, or another word), and Windows
 /// shims are copies, not links. `argv[0]` only when Windows cannot say.
-pub fn own_name(argv0: &OsStr) -> Option<ShimName> {
+pub fn own_name(argv0: &OsStr) -> Option<Role> {
     match env::current_exe() {
-        Ok(path) => ShimName::from_exe_path(&path),
-        Err(_) => ShimName::from_exe_path(Path::new(argv0)),
+        Ok(path) => Role::from_exe_path(&path),
+        Err(_) => Role::from_exe_path(Path::new(argv0)),
     }
 }
 

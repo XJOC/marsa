@@ -1,9 +1,11 @@
-//! `marsa-shim`: runs the real program at the version the project asks for.
+//! `marsa-shim`: runs the real program at the version the project asks for,
+//! or a database client at the version its server runs.
 //!
-//! It is installed under many names (`php`, `node`, `npm`, `npx`, `composer`)
-//! and learns its job from its own file name. It never talks to the
-//! daemon, never uses tokio, and never searches `PATH`: it always runs an
-//! absolute path inside `runtimes/`.
+//! It is installed under many names (`php`, `node`, `npm`, `npx`, `composer`,
+//! and the clients `marsad` adds with a server: `psql`, `mysql`, ...) and
+//! learns its job from its own file name. It never talks to the daemon,
+//! never uses tokio, and never searches `PATH`: it always runs an absolute
+//! path inside `runtimes/`.
 
 mod depth;
 mod error;
@@ -12,19 +14,20 @@ mod plan;
 mod sys;
 
 use std::convert::Infallible;
-use std::env;
+use std::env::{self, ArgsOs};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
 use marsa_core::config::{self, ConfigPaths};
+use marsa_core::databases::clients::Client;
 use marsa_core::recipes::Platform;
 use marsa_core::resolver::{self, Tool};
 use marsa_core::runtimes::{Runtime, RuntimesDir};
 use semver::Version;
 
 use crate::error::ShimError;
-use crate::name::ShimName;
+use crate::name::{Role, ShimName};
 use crate::plan::{Inherited, Plan, TrustEnv, TrustVar};
 
 fn main() -> ExitCode {
@@ -47,8 +50,17 @@ fn run() -> Result<Infallible, ShimError> {
     // `args_os`, not `args`: arguments may not be UTF-8, and `args` panics on them.
     let mut args = env::args_os();
     let argv0 = args.next().unwrap_or_default();
-    let name = sys::own_name(&argv0).ok_or(ShimError::UnknownName { name: argv0 })?;
+    let role = sys::own_name(&argv0).ok_or(ShimError::UnknownName { name: argv0 })?;
+    let plan = match role {
+        Role::Tool(name) => tool_plan(name, args)?,
+        Role::Client(client) => client_plan(client, args)?,
+    };
+    Err(sys::exec(plan.command(depth)))
+}
 
+/// `php`, `node`, `npm`, `npx`, or `composer`, at the version the current
+/// folder asks for.
+fn tool_plan(name: ShimName, args: ArgsOs) -> Result<Plan, ShimError> {
     // The physical path: symlinks resolved, letter case as on disk. `$PWD` is
     // not read.
     let cwd = env::current_dir().map_err(ShimError::NoCwd)?;
@@ -67,7 +79,29 @@ fn run() -> Result<Infallible, ShimError> {
     let mut plan = Plan::new(name, platform, &runtimes, &version, composer.as_ref(), args)?;
     plan.check()?;
     plan.trust = trust_env(TrustVar::for_shim(name, &data_dir, &version));
-    Err(sys::exec(plan.command(depth)))
+    Ok(plan)
+}
+
+/// A database client at the version its server runs, pointed at that server
+/// on the port of `global.toml` through the variables the user has not set.
+/// A broken `global.toml` stops here, as for the tools.
+fn client_plan(client: Client, args: ArgsOs) -> Result<Plan, ShimError> {
+    let server = client.server;
+    let data_dir = config::app_data_dir()?;
+    let global = config::load_global(&ConfigPaths::in_dir(&data_dir).global)?;
+    let settings = server.settings(&global);
+    let runtimes = RuntimesDir::in_dir(&data_dir);
+    let installed = runtimes.installed(server.runtime())?;
+    let default = settings.default.as_deref();
+    let version = plan::server_version(server, default, &installed, &runtimes)?;
+
+    let platform = Platform::current().ok_or(ShimError::UnsupportedPlatform)?;
+    let mut plan = Plan::client(client, platform, &runtimes, &version, args);
+    plan.check()?;
+    let port = settings.port.unwrap_or(server.default_port());
+    let is_set = |name: &str| env::var_os(name).is_some();
+    plan.server_env = plan::unset_only(plan::server_env(server, port), is_set);
+    Ok(plan)
 }
 
 /// Reads the environment and the disk for [`TrustVar::decide`]. The file is

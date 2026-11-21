@@ -3,7 +3,7 @@ name = "marsa-shim"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Runs php, node, npm, npx, and composer at the version a project asks for"
+description = "Runs php, node, npm, npx, and composer at the version a project asks for, and the database clients at the version their server runs"
 
 [dependencies]
 # No default features: the shim must never pull tokio or reqwest
