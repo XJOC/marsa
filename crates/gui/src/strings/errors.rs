@@ -502,6 +502,9 @@ pub(super) fn error_message(code: &str) -> Option<&'static str> {
             "PostgreSQL of the version set in global.toml is not installed."
         }
         "postgres_orphan_stuck" => "An old PostgreSQL of this Marsa still runs and did not stop.",
+        "postgres_shared_memory_busy" => {
+            "Processes of an earlier PostgreSQL still use its memory. Wait a moment, then start it again."
+        }
         "postgres_start_timeout" => "PostgreSQL started but took no connections in time.",
         "postgres_unsupported_platform" => "Marsa has no PostgreSQL for this system.",
         "resolver_delete" => "macOS did not let Marsa delete /etc/resolver/test.",

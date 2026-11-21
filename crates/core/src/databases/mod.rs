@@ -473,11 +473,16 @@ pub enum LockConflict {
     /// The lock of its socket, `<socket>.lock`: another server uses the
     /// socket of this port.
     Socket { pid: Option<u32> },
+    /// The shared memory block that `postmaster.pid` names: processes of an
+    /// earlier server on the data folder still use it. After a SIGKILL of
+    /// the postmaster, its backends end only once they see that it is gone.
+    SharedMemory,
 }
 
 /// PostgreSQL's own refusal to start because a live process holds one of
-/// its lock files, from `lines`: the stderr lines, oldest first, of a run
-/// that ended by itself before it took connections.
+/// its lock files, or the shared memory of an earlier server on its data
+/// folder, from `lines`: the stderr lines, oldest first, of a run that
+/// ended by itself before it took connections.
 ///
 /// The guard against text that a client wrote is that timing, not the
 /// match: PostgreSQL takes its lock files before it accepts any connection,
@@ -495,7 +500,9 @@ pub enum LockConflict {
 /// - the pid only from the very next line, PostgreSQL's hint for that
 ///   error: `HINT:  Is another postmaster (PID <n>) running in data
 ///   directory "..."?` or `... using socket file "..."?`, or `postgres`
-///   for a single-user server.
+///   for a single-user server;
+/// - `FATAL:  pre-existing shared memory block (key <n>, ID <n>) is still
+///   in use`, both numbers digits only.
 ///
 /// A line that starts with a tab is the rest of the line before it (a
 /// value with a line break in it), never one of these.
@@ -508,6 +515,9 @@ pub fn startup_lock_conflict(lines: &[&str], socket: Option<&Path>) -> Option<Lo
     for (index, line) in lines.iter().enumerate() {
         if line.starts_with('\t') {
             continue;
+        }
+        if is_shared_memory_refusal(line) {
+            return Some(LockConflict::SharedMemory);
         }
         let next = lines.get(index + 1).copied();
         let hint = next.filter(|next| !next.starts_with('\t'));
@@ -524,6 +534,23 @@ pub fn startup_lock_conflict(lines: &[&str], socket: Option<&Path>) -> Option<Lo
         }
     }
     None
+}
+
+/// Whether `line` ends with PostgreSQL's refusal to start while processes
+/// of an earlier server still use the shared memory block of its data
+/// folder: `FATAL:  pre-existing shared memory block (key <n>, ID <n>) is
+/// still in use`, both numbers digits only.
+fn is_shared_memory_refusal(line: &str) -> bool {
+    let Some((_, rest)) = line.rsplit_once("FATAL:  pre-existing shared memory block (key ") else {
+        return false;
+    };
+    let Some(numbers) = rest.strip_suffix(") is still in use") else {
+        return false;
+    };
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    numbers
+        .split_once(", ID ")
+        .is_some_and(|(key, id)| digits(key) && digits(id))
 }
 
 /// The pid in `HINT:  Is another postmaster (PID <n>) <then>...`.
@@ -601,6 +628,12 @@ pub enum ServiceBusy {
         .pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default()
     )]
     DataDir { pid: Option<u32> },
+    /// PostgreSQL: processes of an earlier server on the data folder still
+    /// use its shared memory ([`LockConflict::SharedMemory`]). Usually the
+    /// backends of a postmaster that SIGKILL ended: they end by themselves
+    /// soon, so a start a moment later works.
+    #[error("processes of an earlier PostgreSQL still use the shared memory of its data folder")]
+    SharedMemory,
 }
 
 impl ServiceBusy {
@@ -610,6 +643,7 @@ impl ServiceBusy {
             Self::Port { .. } => crate::codes::SERVICE_PORT_BUSY,
             Self::PortUnknown { .. } => crate::codes::SERVICE_PORT_UNKNOWN,
             Self::DataDir { .. } => crate::codes::SERVICE_DATA_DIR_BUSY,
+            Self::SharedMemory => crate::codes::POSTGRES_SHARED_MEMORY_BUSY,
         }
     }
 }
@@ -1196,6 +1230,38 @@ mod tests {
         // A hint of the other kind gives no pid.
         let lines = [socket_fatal, &data_hint];
         assert_eq!(conflict(&lines), Some(LockConflict::Socket { pid: None }));
+    }
+
+    /// After a SIGKILL of the postmaster, its backends may still use the
+    /// shared memory block that `postmaster.pid` names: PostgreSQL 18 then
+    /// refuses with this line and its hint. Only the whole line counts.
+    #[test]
+    fn a_shared_memory_refusal_is_read_from_the_start() {
+        let at = "2026-11-18 10:00:00.123 UTC [5150]";
+        let fatal = format!(
+            "{at} FATAL:  pre-existing shared memory block (key 5432001, ID 65536) is still in use"
+        );
+        let hint = format!(
+            "{at} HINT:  Terminate any old server processes associated with data directory \"/m/d\"."
+        );
+        let lines = [fatal.as_str(), &hint];
+        let found = startup_lock_conflict(&lines, None);
+        assert_eq!(found, Some(LockConflict::SharedMemory));
+        assert_eq!(
+            ServiceBusy::SharedMemory.code(),
+            "postgres_shared_memory_busy"
+        );
+        for other in [
+            "FATAL:  pre-existing shared memory block (key 5432001, ID 65536) is still in use!",
+            "FATAL:  pre-existing shared memory block (key x, ID 65536) is still in use",
+            "FATAL:  pre-existing shared memory block (key 5432001, ID ) is still in use",
+            "FATAL:  pre-existing shared memory block (key 5432001) is still in use",
+            "ERROR:  pre-existing shared memory block (key 1, ID 2) is still in use",
+            "\tFATAL:  pre-existing shared memory block (key 1, ID 2) is still in use",
+            &hint,
+        ] {
+            assert_eq!(startup_lock_conflict(&[other], None), None, "{other}");
+        }
     }
 
     /// Lines like those that a client can make a running server log. The

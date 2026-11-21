@@ -113,6 +113,13 @@ fn postgres_messages_name_it_and_what_to_do() {
     let busy = message("service_data_dir_busy", &postgres);
     assert!(busy.starts_with("Another PostgreSQL server"), "{busy}");
     assert!(message("postgres_not_installed", &postgres).contains("marsa install postgres"));
+    // The backends of a postmaster that SIGKILL ended: wait, then again.
+    let memory = message("postgres_shared_memory_busy", &postgres);
+    assert!(
+        memory.starts_with("Processes of an earlier PostgreSQL"),
+        "{memory}"
+    );
+    assert!(memory.contains("wait a moment, then try again"), "{memory}");
     // Windows: the daemon runs elevated.
     let elevated = message("service_elevated", &postgres);
     assert!(

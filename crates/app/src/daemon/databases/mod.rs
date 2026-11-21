@@ -453,6 +453,8 @@ mod tests {
         ///   ends it.
         /// - `late` waits [`LATE`] before it serves, as a server with a
         ///   long recovery.
+        /// - `shm-busy` prints PostgreSQL's refusal while backends of an
+        ///   earlier postmaster use its shared memory, and exits 1.
         #[test]
         fn fake_postgres() {
             let Ok(mode) = std::env::var(FAKE) else {
@@ -502,6 +504,17 @@ mod tests {
                     eprintln!(
                         "{at} HINT:  Is another postmaster (PID {holder}) using socket file \
                          \"{socket}\"?"
+                    );
+                    std::process::exit(1);
+                }
+                "shm-busy" => {
+                    eprintln!(
+                        "{at} FATAL:  pre-existing shared memory block (key 5432001, ID 65536) \
+                         is still in use"
+                    );
+                    eprintln!(
+                        "{at} HINT:  Terminate any old server processes associated with data \
+                         directory \"/m\"."
                     );
                     std::process::exit(1);
                 }
@@ -897,6 +910,27 @@ mod tests {
                 !texts.iter().any(|text| text.contains("pid 4242")),
                 "{texts:?}"
             );
+        }
+
+        /// After a SIGKILL of our old postmaster, its backends still use the
+        /// shared memory of the data folder, and PostgreSQL refuses: the
+        /// start fails with its own code and says to start again in a
+        /// moment. Nothing is signalled or looked at, and no restart comes.
+        #[tokio::test]
+        async fn a_shared_memory_refusal_says_to_start_again() {
+            let pg = pg("shm-busy", probes(alive(Path::new(OTHER)), None));
+            let err = pg.act(ServiceAction::Start).await.unwrap_err();
+            let code = "postgres_shared_memory_busy";
+            assert_eq!(err.code(), code);
+            assert!(err.to_string().contains("shared memory"), "{err}");
+            assert_eq!(pg.daemon.postgres.status().state, failed(code));
+            let last = pg.texts().pop().unwrap();
+            assert!(last.contains("start it again in a moment"), "{last}");
+            assert!(last.contains("Marsa sends them no signal"), "{last}");
+            assert!(signals(&pg).is_empty());
+            assert_eq!(pg.asked_besides_runs(), Vec::<u32>::new());
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            assert_eq!(pg.count("server"), 1);
         }
 
         /// Another server holds the lock of our socket for this port.
