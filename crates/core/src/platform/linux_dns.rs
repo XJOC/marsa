@@ -1,4 +1,4 @@
-//! Linux and Windows: reading the hosts file and the marker that says a data
+//! Linux: reading the hosts file and the marker that says a data
 //! folder's setup took the hosts way. The daemon writes both through the
 //! helper; the CLI only reads them.
 

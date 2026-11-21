@@ -17,7 +17,7 @@ const RECORD: &str = "user-trusted.pem";
 const PENDING: &str = "pending.pem";
 
 /// `<data>/trust/`: the record of the certificate this user trusted, and
-/// the checked copy `security` gets during setup (see `daemon::setup_api::user_trust`).
+/// the checked copy `security` gets during setup (see the daemon's setup).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustFiles {
     dir: PathBuf,
@@ -51,7 +51,7 @@ pub fn record_path(data_dir: &Path) -> PathBuf {
     TrustFiles::in_dir(data_dir).record()
 }
 
-/// For `marsa doctor` whether the certificate at `ca_root` is
+/// For `marsa doctor`: whether the certificate at `ca_root` is
 /// trusted as a root now, by the same `verify-cert` as the install. `None`
 /// when that is not known: the path is not absolute, or `security` could not
 /// run or was stopped by a signal. Changes nothing and shows no dialog.
