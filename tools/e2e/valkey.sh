@@ -238,6 +238,9 @@ done
 step "marsad killed: the next start stops our old valkey-server with SIGTERM, which saves"
 OLD=$(valkey_pid)
 [ "$(cli set marsa-e2e-orphan saved)" = OK ] || fail "SET"
+echo "--- run/ before the kill"
+ls -la "$DATA/run"
+tail -n 12 "$DATA/logs/marsad.log"
 pkill -9 -f "marsad.*--data-dir $DATA"
 sleep 1
 kill -0 "$OLD" || fail "valkey-server died with marsad"
