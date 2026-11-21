@@ -11,11 +11,9 @@ use super::Setup;
 use super::ca::StartCaddy;
 use super::dns_skipped;
 use super::failure;
-use super::is_linux;
-use super::is_macos;
-use super::is_windows;
 use super::linux_dns;
 use super::nss;
+use super::ports::port_holders;
 use super::skip;
 use super::user_trust;
 use super::windows;
@@ -27,6 +25,7 @@ use marsa_core::dns::LinuxPath;
 use marsa_core::helper::HelperOp;
 use marsa_core::helper::OpResult;
 use marsa_core::helper::OpStatus;
+use marsa_core::recipes::Os;
 use marsa_core::recipes::Platform;
 use marsa_core::types::ApiError;
 use marsa_core::types::SetupReport;
@@ -109,10 +108,10 @@ impl Setup {
         let mut trust_for_user = None;
         let mut nss_pem = None;
         match self.ca(&ca_root, starter, stop) {
-            Ok(pem) if is_macos(platform) => trust_for_user = Some(pem),
+            Ok(pem) if platform.os() == Os::Mac => trust_for_user = Some(pem),
             // Linux: the system store through the helper, then the user's
             // NSS databases as the user (ADR 0014).
-            Ok(pem) if is_linux(platform) => {
+            Ok(pem) if platform.os() == Os::Linux => {
                 if self.nss {
                     nss_pem = Some(pem.clone());
                 }
@@ -122,7 +121,7 @@ impl Setup {
             // 0018). A root the helper's strict parser refuses has none, and
             // every setup would ask UAC in vain.
             Ok(pem)
-                if is_windows(platform)
+                if platform.os() == Os::Windows
                     && marsa_core::helper::certificate_sha256(&pem).is_none() =>
             {
                 tracing::warn!("the CA root is not one strict certificate; no trust_install");
@@ -132,7 +131,7 @@ impl Setup {
             Err(code) => report.skipped.push(skip(TRUST_INSTALL, code)),
         }
         let mut linux = None;
-        if is_linux(platform) {
+        if platform.os() == Os::Linux {
             let path = dns::linux_path(linux_dns::facts(self.runner.as_ref(), stop));
             let block = self
                 .hosts_file
@@ -150,7 +149,7 @@ impl Setup {
                 (LinuxPath::Hosts, _) => push_hosts_ops(&mut ops, &mut report, names),
             }
             linux = Some((path, block));
-        } else if is_windows(platform) {
+        } else if platform.os() == Os::Windows {
             // Windows: the hosts block with the names of the sites now, so
             // that a setup again does not empty it (ADR 0018).
             match names {
@@ -171,9 +170,9 @@ impl Setup {
         } else if let Some(dns) = dns::strategy_for(platform) {
             ops.push(dns.setup_op());
         }
-        if is_linux(platform) {
+        if platform.os() == Os::Linux {
             ops.push(HelperOp::PortsInstall);
-        } else if !is_windows(platform) {
+        } else if platform.os() != Os::Windows {
             self.pf_op(caddy, &mut ops, &mut report, stop);
         }
         // Windows: Caddy binds ports 80 and 443 itself (ADR 0018), so
@@ -285,7 +284,7 @@ impl Setup {
         report: &mut SetupReport,
         stop: &CancellationToken,
     ) {
-        match self.port_holders(stop) {
+        match port_holders(self.runner(), stop) {
             Some(holders) if holders.is_empty() => ops.push(HelperOp::PfInstall {
                 http_port: caddy.http_port,
                 https_port: caddy.https_port,

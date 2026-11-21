@@ -50,8 +50,8 @@
 //! No message quotes what `security` printed: only the exit code.
 
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -459,9 +459,10 @@ fn close_to_others(_dir: &Path, _meta: &fs::Metadata) -> Result<(), &'static str
     Ok(())
 }
 
-/// Writes `pem` to `pending` for `security`: see [`write_atomic`].
+/// Writes `pem` to `pending` for `security`, mode 0600: a whole file or
+/// none ([`marsa_core::fs::write_atomic`]).
 pub(super) fn write_pending(pending: &Path, pem: &str) -> Result<(), String> {
-    write_atomic(pending, pem.as_bytes())
+    marsa_core::fs::write_atomic(pending, pem.as_bytes(), Some(0o600))
         .map_err(|err| format!("cannot write {}: {}", pending.display(), err.kind()))
 }
 
@@ -489,52 +490,6 @@ pub(super) fn discard(pending: &Path) {
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
         Err(err) => tracing::warn!(path = %pending.display(), error = %err, "cannot delete it"),
     }
-}
-
-/// Writes `bytes` to a temp file in the folder of `path`, mode 0600, then
-/// renames it over `path`: a reader finds the old file or the new one, never
-/// half of one.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
-        let reason = "the path has no folder or no file name";
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
-    };
-    let mut temp = OsString::from(".");
-    temp.push(name);
-    temp.push(".tmp");
-    let temp = dir.join(temp);
-    // `write_new` closes the file before the rename.
-    let written = write_new(&temp, bytes).and_then(|()| fs::rename(&temp, path));
-    if written.is_err() {
-        // Best effort: the first error is the one to report.
-        let _ = fs::remove_file(&temp);
-    }
-    written
-}
-
-/// Writes a new file, never through one that is there: a temp file left by
-/// a crash, or a link put in its place, is deleted first. One setup runs at
-/// a time, so no other writer shares the name.
-fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = match create_new(path) {
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-            fs::remove_file(path)?;
-            create_new(path)?
-        }
-        other => other?,
-    };
-    file.write_all(bytes)?;
-    file.sync_all()
-}
-
-fn create_new(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    // `#[cfg]` outside `platform`: the Unix mode of the new file. Windows
-    // gives it the ACL of the user's own data folder.
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)
 }
 
 /// Deletes the record after the removal succeeded. A failure is logged: the

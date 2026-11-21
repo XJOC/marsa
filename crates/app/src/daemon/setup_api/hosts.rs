@@ -41,11 +41,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use marsa_core::dns;
 use marsa_core::helper::HelperOp;
+use marsa_core::recipes::Os;
 use marsa_core::types::{HostsStatus, SetupReport, SetupSkip};
 
 use super::super::api::HttpError;
 use super::super::state::Daemon;
-use super::{Flow, Running, Setup, is_linux, linux_dns, names_of};
+use super::{Flow, Running, Setup, linux_dns, names_of};
 
 /// The routes on `setup`, merged into setup's own.
 pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
@@ -66,7 +67,10 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
 }
 
 async fn status(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<HostsStatus>, HttpError> {
-    if !setup.platform().is_some_and(is_linux) {
+    if !setup
+        .platform()
+        .is_some_and(|platform| platform.os() == Os::Linux)
+    {
         return Ok(Json(HostsStatus::default()));
     }
     let names = site_names(&daemon).await?;
@@ -80,7 +84,7 @@ async fn status(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<HostsStat
 async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport>, HttpError> {
     let platform = setup
         .platform()
-        .filter(|platform| is_linux(*platform))
+        .filter(|platform| platform.os() == Os::Linux)
         .ok_or_else(not_used)?;
     let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
     let names = site_names(&daemon).await?;

@@ -38,7 +38,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::Duration;
 
 use marsa_core::caddy::CaddyPaths;
@@ -57,7 +56,8 @@ use super::setup::port_held;
 use super::sites::printable;
 use super::strings::{self, Details};
 use crate::daemon::caddy::CADDY_ID;
-use crate::daemon::setup_api::{RealRunner, Setup, linux_dns, user_trust};
+use crate::daemon::setup_api::ports::port_holders;
+use crate::daemon::setup_api::{RealRunner, linux_dns, user_trust};
 
 /// How long the system resolver may take for the `.test` name.
 const DNS_LIMIT: Duration = Duration::from_secs(5);
@@ -240,8 +240,7 @@ fn dns(name: &str, running: bool) -> Verdict {
 /// runs: the verdict needs them only then, and another program's server is
 /// left alone.
 fn ports(name: &str, caddy_running: Option<bool>, secure_site: Option<bool>) -> Ports {
-    let setup = Setup::with(Arc::new(RealRunner), Platform::current(), None, None);
-    let holders = setup.port_holders(&CancellationToken::new());
+    let holders = port_holders(&RealRunner, &CancellationToken::new());
     let clear = holders.as_ref().is_some_and(Vec::is_empty) && caddy_running == Some(true);
     let http = clear
         && probe::http_get(80, name, PORT_LIMIT)
