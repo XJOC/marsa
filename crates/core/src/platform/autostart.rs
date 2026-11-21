@@ -13,7 +13,7 @@
 //! tray starts `marsad`, as the window does.
 //!
 //! The text of each file comes from pure functions ([`render_plist`] and
-//! [`render_desktop`]). [`write`], [`remove`], and [`read`] take the folder
+//! [`render_desktop`]). [`write()`], [`remove`], and [`read`] take the folder
 //! as an argument: the daemon passes the user's folder ([`user_dir`]), and
 //! tests pass a temp folder. Only `marsad` calls `write` and `remove`: only
 //! the daemon changes state (AGENTS.md section 6).
@@ -105,11 +105,11 @@ impl AutostartKind {
 pub enum AutostartFile {
     /// No file: Marsa does not start at login.
     Absent,
-    /// The file [`write`] makes for this `marsa-tray`.
+    /// The file [`write()`] makes for this `marsa-tray`.
     Current,
     /// A file this Marsa would not write: it starts a `marsa-tray` at another
     /// path (the app moved), or it was changed (by an older Marsa, by the
-    /// user, or by the desktop's settings). [`write`] replaces it.
+    /// user, or by the desktop's settings). [`write()`] replaces it.
     Stale,
 }
 
@@ -214,7 +214,7 @@ pub fn render_desktop(tray: &Path) -> Result<String, AutostartError> {
     ))
 }
 
-/// Whether `dir` holds the login file, and whether it is the one [`write`]
+/// Whether `dir` holds the login file, and whether it is the one [`write()`]
 /// makes for `tray`. A missing `dir` means no file.
 ///
 /// # Errors

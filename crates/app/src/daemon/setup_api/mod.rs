@@ -14,9 +14,9 @@
 //! file check and prompt ([`Flow`] gives each its own error codes), and the
 //! same flag.
 //!
-//! Each job has its own file: [`ca`] (the root certificate), [`ports`] (who
-//! holds 80 and 443), [`helper`] and [`osascript`] (the administrator
-//! prompt), [`steps`] (what each system runs), [`runner`] (every program
+//! Each job has its own file: `ca` (the root certificate), `ports` (who
+//! holds 80 and 443), `helper` and `osascript` (the administrator
+//! prompt), `steps` (what each system runs), `runner` (every program
 //! goes through it).
 
 mod ca;
@@ -72,7 +72,7 @@ pub use marsa_core::platform::runner::{RealRunner, RunOutput, Runner};
 /// The longest a setup takes, when every step runs to its limit: Caddy's
 /// start and its CA root at [`CA_WAIT`], `netstat`, [`MAX_PS`] `ps` calls,
 /// and `security verify-cert` at [`CHECK_LIMIT`] each, `osascript` and
-/// `security add-trusted-cert` at [`PROMPT_LIMIT`] each, and [`PIPE_GRACE`]
+/// `security add-trusted-cert` at `PROMPT_LIMIT` each, and [`PIPE_GRACE`]
 /// after each of these programs. Linux stays under it: up to four
 /// `systemctl` checks, two `pkexec` prompts when the helper chooses the
 /// hosts file ([`linux_dns`]), and the NSS step at [`nss::NSS_BUDGET`]. A client has to wait longer:

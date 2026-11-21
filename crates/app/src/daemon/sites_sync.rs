@@ -112,7 +112,7 @@ pub fn start(daemon: &Arc<Daemon>) -> SitesSync {
 
 impl SitesSync {
     /// Waits for the task to end after the shutdown token, at most
-    /// [`STOP_LIMIT`], then aborts it.
+    /// `STOP_LIMIT`, then aborts it.
     pub async fn stop(self) {
         let abort = self.task.abort_handle();
         match tokio::time::timeout(STOP_LIMIT, self.task).await {

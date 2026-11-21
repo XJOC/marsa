@@ -70,7 +70,7 @@ const O_NONBLOCK: i32 = 0;
 
 /// Starts Caddy for setup when its CA root does not exist yet: Caddy makes
 /// the CA when it loads its config. The daemon uses its own
-/// Caddy ([`DaemonCaddy`]); tests use a fake, as for [`Runner`].
+/// Caddy (`DaemonCaddy`); tests use a fake, as for `Runner`.
 pub trait StartCaddy: Send + Sync {
     /// Makes Caddy run if it is installed, and waits at most `limit` for
     /// that, or until `stop`. Blocking: setup runs on a blocking thread.

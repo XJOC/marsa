@@ -16,7 +16,7 @@ use crate::recipes::{ArchiveFormat, Artifact};
 
 /// The program that unpacks `tar.xz`: an absolute path, so nothing is looked
 /// up in `PATH` (it is a system tool, not one of ours). No library: its
-/// output goes to the same tar reader and the same [`Sink::entry`] as a
+/// output goes to the same tar reader and the same `Sink::entry` as a
 /// `tar.gz`.
 pub const XZ_PROGRAM: &str = "/usr/bin/xz";
 

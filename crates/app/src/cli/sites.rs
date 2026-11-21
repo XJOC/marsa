@@ -42,7 +42,7 @@ pub enum SitesCommand {
     },
     /// Serve one folder as a site.
     Link {
-        /// The site name, as in https://<name>.test. Default: made from the
+        /// The site name, as in `https://<name>.test`. Default: made from the
         /// folder name.
         name: Option<String>,
         /// The folder. Default: the current folder.

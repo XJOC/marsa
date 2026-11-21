@@ -136,7 +136,7 @@ pub(super) fn first_install(
 }
 
 /// After an install of `version` of `kind`, in the background: takes the
-/// server's turn, writes its table ([`first_install`]), and starts it in
+/// server's turn, writes its table (`first_install`), and starts it in
 /// that same turn when it says so. A stop asked meanwhile waits for the turn
 /// and drops the start ([`ServerManager::run_waiting`]); a daemon that stops
 /// starts nothing. A failure is only logged, or sets the status: the install

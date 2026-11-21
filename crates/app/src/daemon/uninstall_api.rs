@@ -81,7 +81,7 @@ const AUTOSTART_REMOVE: &str = "autostart_remove";
 
 /// The longest an uninstall takes, when every program runs to its limit:
 /// `osascript`, then `security remove-trusted-cert` and `delete-certificate`
-/// at [`PROMPT_LIMIT`] each (both may show a dialog), `find-certificate` at
+/// at `PROMPT_LIMIT` each (both may show a dialog), `find-certificate` at
 /// [`CHECK_LIMIT`], and [`PIPE_GRACE`] after each of these four. Linux, with
 /// one `pkexec` prompt and the NSS step, stays under it. A client
 /// has to wait longer: `marsa_core::client::UNINSTALL_ALL_TIMEOUT` does, and a
