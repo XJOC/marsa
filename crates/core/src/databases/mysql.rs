@@ -125,8 +125,10 @@ fn cnf_path(path: &Path) -> Result<String, UnwritablePath> {
 /// - `partial_revokes=ON`: `root@127.0.0.1` has its privileges on every
 ///   schema but `mysql` and `sys` ([`ROOT_TCP_SQL`]). Needed from the first
 ///   init on.
-/// - `performance_schema=OFF` and `innodb_buffer_pool_size=64M`: about
-///   180 MB idle instead of about 450 MB (S-12).
+/// - `performance_schema=OFF`, `innodb_buffer_pool_size=64M`, and a small
+///   log buffer and few InnoDB threads: under 250 MB idle on a CI runner,
+///   which does not take pages back as macOS does on a busy Mac, instead
+///   of about 450 MB by default (S-12).
 /// - `disable_log_bin`: no binary log, so the disk does not fill in
 ///   development.
 /// - No `log-error`: the log goes to stderr, which the supervisor keeps in
@@ -160,6 +162,12 @@ host_cache_size=0
 partial_revokes=ON
 performance_schema=OFF
 innodb_buffer_pool_size=64M
+innodb_log_buffer_size=4M
+innodb_buffer_pool_instances=1
+innodb_page_cleaners=1
+innodb_read_io_threads=2
+innodb_write_io_threads=2
+innodb_parallel_read_threads=1
 disable_log_bin
 lc_messages=en_US
 ",
