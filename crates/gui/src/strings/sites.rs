@@ -2,10 +2,10 @@
 
 use std::path::{MAIN_SEPARATOR, Path};
 
+use marsa_core::runtimes::Runtime;
 use marsa_core::sites::TLD;
 use marsa_core::types::{Site, SiteKind};
-
-use crate::model::{Pick, Removal};
+use semver::Version;
 
 use super::*;
 
@@ -179,12 +179,8 @@ pub const FORGET_HINT: &str =
 pub const REMOVE_BUSY_HINT: &str = "Wait for the removal that runs to end.";
 
 /// The title of a folder dialog.
-pub fn pick_title(pick: Pick) -> &'static str {
-    match pick {
-        Pick::Park => "Choose a folder of projects to park",
-        Pick::Link => "Choose a project folder to link",
-    }
-}
+pub const PICK_PARK_TITLE: &str = "Choose a folder of projects to park";
+pub const PICK_LINK_TITLE: &str = "Choose a project folder to link";
 
 /// The first line of the link form: the folder as the window shows it
 /// (`~/Work/blog`, with the full path in a tooltip).
@@ -323,75 +319,71 @@ pub fn unlink_parked_hint(folder: &Path) -> String {
     )
 }
 
-/// The title of the confirmation: the exact question. A folder under `home`
-/// shows as `~/…` ([`home_path`]).
-pub fn confirm_title(removal: &Removal, home: Option<&Path>) -> String {
-    match removal {
-        Removal::Uninstall { runtime, version } => {
-            format!("Uninstall {} {version}?", runtime_name(*runtime))
-        }
-        Removal::Unlink { site } => format!("Unlink {site}.{TLD}?"),
-        Removal::Forget { folder } => format!("Forget {}?", home_path(folder, home)),
-    }
+/// The title of the confirmation of an uninstall: the exact question.
+pub fn uninstall_title(runtime: Runtime, version: &Version) -> String {
+    format!("Uninstall {} {version}?", runtime_name(runtime))
 }
 
-/// What the confirmed removal does, and what stays. `site_root`: the folder
-/// of the site to unlink; `sites`: how many sites the folder to forget gives
-/// now; a folder under `home` shows as `~/…`.
-pub fn confirm_text(
-    removal: &Removal,
-    site_root: Option<&Path>,
-    sites: usize,
-    home: Option<&Path>,
-) -> String {
-    match removal {
-        Removal::Uninstall { runtime, .. } => format!(
-            "Its files are deleted from Marsa's data folder. Marsa refuses if the default, a \
-             site, or Caddy uses it. You can install {} again later.",
-            runtime_name(*runtime)
-        ),
-        Removal::Unlink { .. } => {
-            let kept = site_root.map_or_else(
-                || "Its folder and files stay.".to_owned(),
-                |root| format!("The folder {} and its files stay.", home_path(root, home)),
-            );
-            format!(
-                "Marsa stops serving this site, and its own settings (PHP version, HTTPS) are \
-                 removed. {kept}"
-            )
-        }
-        Removal::Forget { .. } => {
-            let served = match sites {
-                0 => "Marsa stops watching this folder.".to_owned(),
-                1 => "Marsa stops serving its site, and the site's own settings are removed."
-                    .to_owned(),
-                n => format!(
-                    "Marsa stops serving its {n} sites, and their own settings are removed."
-                ),
-            };
-            format!("{served} The folder and its files stay.")
-        }
-    }
+/// The title of the confirmation of an unlink.
+pub fn unlink_title(site: &str) -> String {
+    format!("Unlink {site}.{TLD}?")
 }
 
-/// The button that confirms.
-pub fn removal_button(removal: &Removal) -> &'static str {
-    match removal {
-        Removal::Uninstall { .. } => "Uninstall",
-        Removal::Unlink { .. } => "Unlink",
-        Removal::Forget { .. } => "Forget",
-    }
+/// The title of the confirmation of a forget. A folder under `home` shows as
+/// `~/…` ([`home_path`]).
+pub fn forget_title(folder: &Path, home: Option<&Path>) -> String {
+    format!("Forget {}?", home_path(folder, home))
 }
+
+/// What the confirmed uninstall does, and what stays.
+pub fn uninstall_text(runtime: Runtime) -> String {
+    format!(
+        "Its files are deleted from Marsa's data folder. Marsa refuses if the default, a \
+         site, or Caddy uses it. You can install {} again later.",
+        runtime_name(runtime)
+    )
+}
+
+/// What the confirmed unlink does, and what stays. `site_root`: the folder of
+/// the site to unlink; a folder under `home` shows as `~/…`.
+pub fn unlink_text(site_root: Option<&Path>, home: Option<&Path>) -> String {
+    let kept = site_root.map_or_else(
+        || "Its folder and files stay.".to_owned(),
+        |root| format!("The folder {} and its files stay.", home_path(root, home)),
+    );
+    format!(
+        "Marsa stops serving this site, and its own settings (PHP version, HTTPS) are \
+         removed. {kept}"
+    )
+}
+
+/// What the confirmed forget does, and what stays. `sites`: how many sites the
+/// folder gives now.
+pub fn forget_text(sites: usize) -> String {
+    let served = match sites {
+        0 => "Marsa stops watching this folder.".to_owned(),
+        1 => "Marsa stops serving its site, and the site's own settings are removed.".to_owned(),
+        n => format!("Marsa stops serving its {n} sites, and their own settings are removed."),
+    };
+    format!("{served} The folder and its files stay.")
+}
+
+/// The buttons that confirm.
+pub const UNINSTALL_CONFIRM: &str = "Uninstall";
+pub const UNLINK_CONFIRM: &str = "Unlink";
+pub const FORGET_CONFIRM: &str = "Forget";
 
 /// While the daemon removes it.
-pub fn removing(removal: &Removal) -> String {
-    match removal {
-        Removal::Uninstall { runtime, version } => {
-            format!("Uninstalling {} {version}…", runtime_name(*runtime))
-        }
-        Removal::Unlink { site } => format!("Unlinking {site}.{TLD}…"),
-        Removal::Forget { folder } => format!("Forgetting {}…", folder.display()),
-    }
+pub fn uninstalling(runtime: Runtime, version: &Version) -> String {
+    format!("Uninstalling {} {version}…", runtime_name(runtime))
+}
+
+pub fn unlinking(site: &str) -> String {
+    format!("Unlinking {site}.{TLD}…")
+}
+
+pub fn forgetting(folder: &Path) -> String {
+    format!("Forgetting {}…", folder.display())
 }
 
 /// Why a folder did not become a site, by its `SkippedFolder::code`. Shorter

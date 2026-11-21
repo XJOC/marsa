@@ -230,7 +230,7 @@ pub fn view(model: &Model, picking: bool) -> SitesView<'_> {
 pub(super) fn removing_line(model: &Model) -> Option<String> {
     match model.removing() {
         Some(removal @ (Removal::Unlink { .. } | Removal::Forget { .. })) => {
-            Some(strings::removing(removal))
+            Some(removal.progress())
         }
         _ => None,
     }

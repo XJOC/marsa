@@ -26,6 +26,19 @@ pub enum Daemon {
     Failed(String),
 }
 
+impl Daemon {
+    /// The first line of the menu: the daemon's state.
+    pub fn status(&self) -> String {
+        match self {
+            Daemon::Starting => strings::TRAY_STATUS_STARTING.to_owned(),
+            Daemon::Running => strings::TRAY_STATUS_RUNNING.to_owned(),
+            Daemon::Stopping => strings::TRAY_STATUS_STOPPING.to_owned(),
+            Daemon::Stopped => strings::TRAY_STATUS_STOPPED.to_owned(),
+            Daemon::Failed(code) => strings::error_text(code),
+        }
+    }
+}
+
 /// Whether the icon starts at login, as the daemon last said.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Autostart {
@@ -39,6 +52,18 @@ pub enum Autostart {
     Stale,
     /// The daemon does not support it on this system (Windows for now).
     Unsupported,
+}
+
+impl Autostart {
+    /// The line next to "Start at login", for the states the box alone cannot
+    /// show.
+    pub const fn note(self) -> Option<&'static str> {
+        match self {
+            Autostart::Stale => Some(strings::AUTOSTART_STALE),
+            Autostart::Unsupported => Some(strings::AUTOSTART_UNSUPPORTED),
+            Autostart::Unknown | Autostart::Off | Autostart::On => None,
+        }
+    }
 }
 
 impl From<AutostartState> for Autostart {
@@ -343,7 +368,7 @@ pub fn layout(state: &State) -> Layout {
         Daemon::Stopped | Daemon::Failed(_) => Item::text(strings::TRAY_START, true),
     };
     Layout {
-        status: Item::text(strings::tray_status(&state.daemon), false),
+        status: Item::text(state.daemon.status(), false),
         notice: state
             .notice
             .as_deref()
@@ -362,6 +387,32 @@ pub fn layout(state: &State) -> Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tray_status_line() {
+        assert_eq!(Daemon::Starting.status(), "Starting Marsa…");
+        assert_eq!(Daemon::Running.status(), "Marsa is running");
+        assert_eq!(Daemon::Stopping.status(), "Stopping Marsa…");
+        assert_eq!(Daemon::Stopped.status(), "Marsa is stopped");
+        assert_eq!(
+            Daemon::Failed("daemon_start_failed".into()).status(),
+            "Cannot start the daemon (marsad)."
+        );
+        assert_eq!(
+            Daemon::Failed("new_code".into()).status(),
+            "Unexpected error (new_code)."
+        );
+    }
+
+    #[test]
+    fn only_a_stale_or_unsupported_login_has_a_note() {
+        for state in [Autostart::Stale, Autostart::Unsupported] {
+            assert!(state.note().is_some(), "{state:?}");
+        }
+        for state in [Autostart::Unknown, Autostart::Off, Autostart::On] {
+            assert!(state.note().is_none(), "{state:?}");
+        }
+    }
 
     fn v(text: &str) -> Version {
         text.parse().unwrap()

@@ -5,17 +5,10 @@ use marsa_core::client::ClientError;
 use marsa_core::platform::daemon_file::DaemonFileError;
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::Runtime;
-use marsa_core::types::{
-    InstallFailure, OpStatus, PortHolder, SetupReport, SiteKind, VersionInUse, XdebugState,
-};
+use marsa_core::types::{OpStatus, PortHolder, SetupReport, SiteKind, VersionInUse, XdebugState};
 use semver::Version;
 
-use crate::model::{
-    Autostart, Connection, INSTALL_INTERRUPTED, InstallStep, InstallView, Pick, Removal,
-    UninstallNotice,
-};
 use crate::theme::Section;
-use crate::tray::menu::Daemon;
 
 use super::*;
 
@@ -138,22 +131,6 @@ fn every_autostart_error_code_has_a_message() {
 }
 
 #[test]
-fn the_tray_status_line() {
-    assert_eq!(tray_status(&Daemon::Starting), "Starting Marsa…");
-    assert_eq!(tray_status(&Daemon::Running), "Marsa is running");
-    assert_eq!(tray_status(&Daemon::Stopping), "Stopping Marsa…");
-    assert_eq!(tray_status(&Daemon::Stopped), "Marsa is stopped");
-    assert_eq!(
-        tray_status(&Daemon::Failed("daemon_start_failed".into())),
-        "Cannot start the daemon (marsad)."
-    );
-    assert_eq!(
-        tray_status(&Daemon::Failed("new_code".into())),
-        "Unexpected error (new_code)."
-    );
-}
-
-#[test]
 fn an_unknown_code_is_shown_with_its_name() {
     assert_eq!(error_text("new_code"), "Unexpected error (new_code).");
 }
@@ -188,7 +165,7 @@ fn a_skipped_folder_says_why() {
     assert_eq!(skip_reason("site_new"), "Unexpected error (site_new).");
 }
 
-fn v(text: &str) -> Version {
+pub(crate) fn v(text: &str) -> Version {
     text.parse().unwrap()
 }
 
@@ -202,7 +179,7 @@ fn the_kind_column() {
 }
 
 /// An absolute path from Unix-style parts (a Windows path needs a drive).
-fn full(unix: &str) -> PathBuf {
+pub(crate) fn full(unix: &str) -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
     } else {
@@ -211,7 +188,7 @@ fn full(unix: &str) -> PathBuf {
 }
 
 /// `~` and the parts after it, with the separator of the system.
-fn tilde(parts: &[&str]) -> String {
+pub(crate) fn tilde(parts: &[&str]) -> String {
     let mut text = String::from("~");
     for part in parts {
         text.push(MAIN_SEPARATOR);
@@ -469,194 +446,6 @@ fn every_install_and_setup_code_has_a_message() {
     }
 }
 
-fn view(runtime: Option<Runtime>, version: Option<&str>, step: InstallStep) -> InstallView {
-    InstallView {
-        runtime,
-        version: version.map(str::to_owned),
-        step,
-    }
-}
-
-#[test]
-fn each_install_step_has_its_line() {
-    let php = |step| view(Some(Runtime::Php), Some("8.4.23"), step);
-    let artifact = || "cli".to_owned();
-    let cases = [
-        (
-            view(Some(Runtime::Php), Some("8.4"), InstallStep::Waiting),
-            "Asking the daemon to install PHP 8.4…",
-        ),
-        (
-            view(Some(Runtime::Caddy), None, InstallStep::ListChecked),
-            "Installing Caddy…",
-        ),
-        (
-            php(InstallStep::Downloading {
-                artifact: artifact(),
-                done: 12_340_000,
-                total: 30_100_000,
-            }),
-            "Downloading PHP 8.4.23: 12.3 of 30.1 MB",
-        ),
-        (
-            php(InstallStep::Unpacking {
-                artifact: artifact(),
-            }),
-            "Unpacking PHP 8.4.23…",
-        ),
-        (php(InstallStep::Checking), "Testing PHP 8.4.23…"),
-        (
-            php(InstallStep::Finishing),
-            "Finishing the install of PHP 8.4.23…",
-        ),
-        (
-            php(InstallStep::Done { already: false }),
-            "Installed PHP 8.4.23.",
-        ),
-        (
-            php(InstallStep::Done { already: true }),
-            "PHP 8.4.23 was already installed.",
-        ),
-        (
-            view(None, None, InstallStep::Checking),
-            "Testing a program…",
-        ),
-    ];
-    for (view, want) in cases {
-        assert_eq!(install_status(&view), want);
-    }
-}
-
-#[test]
-fn a_failed_install_says_why_with_its_facts() {
-    let failed = |failure| {
-        view(
-            Some(Runtime::Php),
-            Some("8.9"),
-            InstallStep::Failed(failure),
-        )
-    };
-    let no_match = InstallFailure {
-        code: "install_no_such_version".into(),
-        requested: Some("8.9".into()),
-        available: vec!["8.3.27".into(), "8.4.23".into()],
-        ..InstallFailure::default()
-    };
-    assert_eq!(
-        install_status(&failed(no_match)),
-        "Cannot install PHP 8.9. No PHP version matches \"8.9\". Available: 8.3.27, 8.4.23."
-    );
-    let check = InstallFailure {
-        code: "install_check_failed".into(),
-        output: Some(" dyld: missing library \n".into()),
-        ..InstallFailure::default()
-    };
-    assert!(
-        install_failure(Some(Runtime::Php), &check).ends_with("It printed: dyld: missing library")
-    );
-    let alias = InstallFailure {
-        code: "unsupported_alias".into(),
-        requested: Some("latest".into()),
-        ..InstallFailure::default()
-    };
-    assert_eq!(
-        install_failure(Some(Runtime::Node), &alias),
-        "\"latest\" is not a version number. Write one such as 22."
-    );
-    let platform = InstallFailure {
-        code: "install_unsupported_platform".into(),
-        platform: Some("linux-arm64".into()),
-        ..InstallFailure::default()
-    };
-    assert_eq!(
-        install_failure(Some(Runtime::Caddy), &platform),
-        "Marsa has no Caddy build for linux-arm64."
-    );
-    // An OS that is too old: the facts, in the words of the CLI.
-    let old = InstallFailure {
-        code: "install_os_too_old".into(),
-        os: Some(Box::new(marsa_core::types::OsMismatch {
-            needs: "macOS 15.0".into(),
-            found: "macOS 14.4".into(),
-        })),
-        ..InstallFailure::default()
-    };
-    assert_eq!(
-        install_failure(Some(Runtime::Php), &old),
-        "PHP needs macOS 15.0 or newer, and this system has macOS 14.4. Nothing was \
-         installed."
-    );
-    // Without the facts: the same sentence without them.
-    let old_no_facts = InstallFailure {
-        code: "install_os_too_old".into(),
-        ..InstallFailure::default()
-    };
-    assert_eq!(
-        install_failure(Some(Runtime::Php), &old_no_facts),
-        "PHP needs a newer system than this one. Nothing was installed."
-    );
-    assert_eq!(
-        install_failure(None, &old_no_facts),
-        "the program needs a newer system than this one. Nothing was installed."
-    );
-    assert_eq!(
-        install_status(&failed(old)),
-        "Cannot install PHP 8.9. PHP needs macOS 15.0 or newer, and this system has macOS \
-         14.4. Nothing was installed."
-    );
-    // The general text, for a place with no name to give.
-    assert_eq!(
-        error_text("install_os_too_old"),
-        "This program needs a newer system than this one. Nothing was installed."
-    );
-    // A long list of versions, and a long printout, are cut short.
-    let many = InstallFailure {
-        code: "install_no_such_version".into(),
-        requested: Some("9".into()),
-        available: (1..=7).map(|n| format!("8.{n}.0")).collect(),
-        ..InstallFailure::default()
-    };
-    assert!(
-        install_failure(Some(Runtime::Php), &many)
-            .ends_with("Available: 8.1.0, 8.2.0, 8.3.0, 8.4.0, and 3 more."),
-        "{}",
-        install_failure(Some(Runtime::Php), &many)
-    );
-    let noisy = InstallFailure {
-        code: "install_check_failed".into(),
-        output: Some(format!("\n  {}\nsecond line\n", "x".repeat(200))),
-        ..InstallFailure::default()
-    };
-    let text = install_failure(Some(Runtime::Php), &noisy);
-    assert!(
-        text.ends_with(&format!("{}…", "x".repeat(MAX_PRINTED))),
-        "{text}"
-    );
-    assert!(!text.contains("second line"));
-    // Any other code: its general text; a new one shows its name.
-    let busy = InstallFailure {
-        code: "install_busy".into(),
-        ..InstallFailure::default()
-    };
-    assert_eq!(install_failure(None, &busy), error_text("install_busy"));
-    let new = InstallFailure {
-        code: "install_new".into(),
-        ..InstallFailure::default()
-    };
-    assert_eq!(
-        install_failure(None, &new),
-        "Unexpected error (install_new)."
-    );
-}
-
-#[test]
-fn the_first_run_button_names_the_php_it_installs() {
-    let line = format!("PHP {}", crate::model::FIRST_PHP);
-    assert_eq!(INSTALL_PHP, format!("Install {line}"));
-    assert!(FIRST_RUN_INSTALL.contains(&line), "{FIRST_RUN_INSTALL}");
-    assert_eq!(FIRST_RUN_INSTALL, format!("Install {line} and Caddy"));
-}
-
 /// ADR 0018: on Windows the prompt is UAC, the first time only.
 #[test]
 fn setup_on_windows_names_the_uac_prompt() {
@@ -743,7 +532,7 @@ fn result(op: &str, status: OpStatus, code: Option<&str>) -> OpResult {
     }
 }
 
-fn texts(lines: &[ReportLine]) -> Vec<(&str, bool)> {
+pub(crate) fn texts(lines: &[ReportLine]) -> Vec<(&str, bool)> {
     lines
         .iter()
         .map(|line| (line.text.as_str(), line.problem))
@@ -854,210 +643,12 @@ fn a_setup_that_did_not_run_says_why() {
 
 #[test]
 fn the_settings_lines() {
-    let health = marsa_core::types::Health {
-        app_version: "0.3.0".into(),
-        api_version: 1,
-        pid: 77,
-    };
     // The PID is for the log, not for a person.
-    assert_eq!(
-        daemon_hint(&Connection::Running(health)),
-        "Daemon version 0.3.0"
-    );
-    assert_eq!(
-        daemon_hint(&Connection::Reconnecting),
-        "Daemon not connected"
-    );
-    for state in [Autostart::Stale, Autostart::Unsupported] {
-        assert!(autostart_note(state).is_some(), "{state:?}");
-    }
-    for state in [Autostart::Unknown, Autostart::Off, Autostart::On] {
-        assert!(autostart_note(state).is_none(), "{state:?}");
-    }
+    assert_eq!(daemon_hint(Some("0.3.0")), "Daemon version 0.3.0");
+    assert_eq!(daemon_hint(None), "Daemon not connected");
 }
 
 // -- Uninstall, unlink, forget, and Xdebug --
-
-fn in_use(default: Option<&str>, sites: &[&str], caddy: bool) -> UninstallNotice {
-    UninstallNotice::InUse {
-        runtime: Runtime::Php,
-        in_use: VersionInUse {
-            version: "8.3.27".into(),
-            default: default.map(str::to_owned),
-            sites: sites.iter().map(|site| (*site).to_owned()).collect(),
-            caddy,
-            ..VersionInUse::default()
-        },
-    }
-}
-
-/// The bar says an uninstall in one sentence; the list of what uses the
-/// version stays in [`uninstall_lines`].
-#[test]
-fn the_uninstall_notice_is_one_sentence() {
-    let notice = uninstall_notice(&in_use(Some("8.3"), &["shop", "blog"], true));
-    assert_eq!(
-        (notice.text.as_str(), notice.problem),
-        ("PHP 8.3.27 is in use, so it was not uninstalled.", true)
-    );
-    let version: Version = "8.2.28".parse().expect("a version");
-    let done = uninstall_notice(&UninstallNotice::Done {
-        runtime: Runtime::Php,
-        version: version.clone(),
-    });
-    assert_eq!(
-        (done.text.as_str(), done.problem),
-        ("Uninstalled PHP 8.2.28.", false)
-    );
-    let failed = uninstall_notice(&UninstallNotice::Failed {
-        runtime: Runtime::Php,
-        version,
-        code: "uninstall_failed".into(),
-    });
-    assert!(failed.problem && failed.text.starts_with("Cannot uninstall PHP 8.2.28. "));
-}
-
-#[test]
-fn a_version_in_use_names_what_uses_it() {
-    let title = ("PHP 8.3.27 is in use, so it was not uninstalled:", true);
-    let lines = uninstall_lines(&in_use(Some("8.3"), &["shop"], false));
-    assert_eq!(
-        texts(&lines),
-        [
-            title,
-            (
-                "It is the default PHP (set to 8.3). Pick another default above first.",
-                true
-            ),
-            (
-                "The site shop.test is set to it. Pick another PHP version for it first.",
-                true
-            ),
-        ]
-    );
-    let lines = uninstall_lines(&in_use(None, &["shop", "blog"], false));
-    assert_eq!(
-        texts(&lines)[1],
-        (
-            "The sites shop.test, blog.test are set to it. Pick another PHP version for \
-             them first.",
-            true
-        )
-    );
-    let caddy = UninstallNotice::InUse {
-        runtime: Runtime::Caddy,
-        in_use: VersionInUse {
-            version: "2.11.7".into(),
-            caddy: true,
-            ..VersionInUse::default()
-        },
-    };
-    assert_eq!(
-        texts(&uninstall_lines(&caddy)),
-        [
-            ("Caddy 2.11.7 is in use, so it was not uninstalled:", true),
-            (
-                "Caddy is running from it. Stop Caddy under Services first.",
-                true
-            ),
-        ]
-    );
-    // No fact at all: the general text.
-    let lines = uninstall_lines(&in_use(None, &[], false));
-    let general = error_text("version_in_use");
-    assert_eq!(texts(&lines), [title, (general.as_str(), true)]);
-
-    // The only PHP, with sites that would have no PHP after it.
-    let mut last = in_use(None, &[], false);
-    let one = "The site blog.test would have no PHP: PHP 8.3.27 is the only PHP installed. \
-               Install another PHP version and pick it as the default above first.";
-    let many = "The sites blog.test, shop.test would have no PHP: PHP 8.3.27 is the only PHP \
-                installed. Install another PHP version and pick it as the default above \
-                first.";
-    for (sites, want) in [(&["blog"][..], one), (&["blog", "shop"][..], many)] {
-        if let UninstallNotice::InUse { in_use, .. } = &mut last {
-            in_use.sites_left_without_php = sites.iter().map(|site| (*site).to_owned()).collect();
-        }
-        assert_eq!(texts(&uninstall_lines(&last)), [title, (want, true)]);
-    }
-}
-
-#[test]
-fn an_uninstall_says_how_it_ended() {
-    let version: Version = v("8.3.27");
-    let done = UninstallNotice::Done {
-        runtime: Runtime::Node,
-        version: version.clone(),
-    };
-    assert_eq!(
-        texts(&uninstall_lines(&done)),
-        [("Uninstalled Node.js 8.3.27.", false)]
-    );
-    let failed = UninstallNotice::Failed {
-        runtime: Runtime::Php,
-        version,
-        code: "uninstall_io".into(),
-    };
-    let want = format!(
-        "Cannot uninstall PHP 8.3.27. {}",
-        error_text("uninstall_io")
-    );
-    assert_eq!(texts(&uninstall_lines(&failed)), [(want.as_str(), true)]);
-}
-
-#[test]
-fn each_removal_has_its_confirmation() {
-    let uninstall = Removal::Uninstall {
-        runtime: Runtime::Php,
-        version: v("8.3.27"),
-    };
-    let unlink = Removal::Unlink { site: "api".into() };
-    let forget = Removal::Forget {
-        folder: PathBuf::from("/code"),
-    };
-    assert_eq!(confirm_title(&uninstall, None), "Uninstall PHP 8.3.27?");
-    assert_eq!(confirm_title(&unlink, None), "Unlink api.test?");
-    assert_eq!(confirm_title(&forget, None), "Forget /code?");
-    assert_eq!(
-        [&uninstall, &unlink, &forget].map(removal_button),
-        ["Uninstall", "Unlink", "Forget"]
-    );
-    assert_eq!(removing(&uninstall), "Uninstalling PHP 8.3.27…");
-    assert_eq!(removing(&unlink), "Unlinking api.test…");
-    assert_eq!(removing(&forget), "Forgetting /code…");
-
-    let text = confirm_text(&unlink, Some(Path::new("/work/api")), 0, None);
-    assert!(
-        text.ends_with("The folder /work/api and its files stay."),
-        "{text}"
-    );
-    assert!(confirm_text(&unlink, None, 0, None).ends_with("Its folder and files stay."));
-    // Under the home folder, a folder shows as `~/…`, in the title too.
-    let (work, api, code_dir) = (full("/work"), full("/work/api"), full("/work/code"));
-    let home = Some(work.as_path());
-    let shown = home_path(&api, home);
-    assert_eq!(shown, tilde(&["api"]));
-    let text = confirm_text(&unlink, Some(&api), 0, home);
-    assert!(
-        text.ends_with(&format!("The folder {shown} and its files stay.")),
-        "{text}"
-    );
-    let code = Removal::Forget { folder: code_dir };
-    assert_eq!(
-        confirm_title(&code, home),
-        format!("Forget {}?", tilde(&["code"]))
-    );
-    for (sites, start) in [
-        (0, "Marsa stops watching this folder."),
-        (1, "Marsa stops serving its site,"),
-        (3, "Marsa stops serving its 3 sites,"),
-    ] {
-        let text = confirm_text(&forget, None, sites, None);
-        assert!(text.starts_with(start), "{text}");
-        assert!(text.ends_with("The folder and its files stay."), "{text}");
-    }
-    assert!(confirm_text(&uninstall, None, 0, None).contains("install PHP again"));
-}
 
 #[test]
 fn the_unlink_and_forget_lines() {
@@ -1175,7 +766,7 @@ fn the_link_lines() {
         hint.starts_with("A version such as 22: the newest Node.js"),
         "{hint}"
     );
-    assert_ne!(pick_title(Pick::Park), pick_title(Pick::Link));
+    assert_ne!(PICK_PARK_TITLE, PICK_LINK_TITLE);
 }
 
 /// the line over "Add to /etc/hosts".
@@ -1194,43 +785,28 @@ fn the_hosts_line_names_the_waiting_sites() {
     );
 }
 
-/// a runtime that core adds later (Python, Go) shows with no
-/// entry here: core's name for it and two letters of it.
+/// Every runtime has its own name and an example version: the `match`es
+/// are exhaustive, so a new runtime does not build until it has both.
 #[test]
-fn a_runtime_core_adds_later_needs_no_entry_for_its_name_letters_and_example() {
-    for (folder, letters) in [("python", "Py"), ("go", "Go"), ("ruby", "Ru")] {
-        let name = runtime_name_for(folder);
-        assert_eq!(name, folder, "core's own name");
-        assert_eq!(monogram_for(folder, name), letters);
-        assert_eq!(example_version_for(folder), "1.0");
+fn every_runtime_has_its_name_and_example() {
+    let mut names: Vec<&str> = Runtime::ALL.into_iter().map(runtime_name).collect();
+    assert!(names.iter().all(|name| !name.is_empty()));
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), Runtime::ALL.len(), "two runtimes share a name");
+    for runtime in Runtime::ALL {
+        let example = example_version(runtime);
+        assert!(
+            example.starts_with(|c: char| c.is_ascii_digit()),
+            "{runtime:?}"
+        );
     }
-    // The nicer names are entries, not the rule.
-    assert_eq!(runtime_name_for("node"), "Node.js");
-    assert_eq!(monogram_for("php", "PHP"), "PHP");
-    assert_eq!(monogram_for("x", ""), "", "an empty name has no letters");
+    assert_eq!(runtime_name(Runtime::Node), "Node.js");
 }
 
 /// the words of the widgets' tiles and badges.
 #[test]
-fn every_runtime_has_a_short_monogram_and_every_section_a_name() {
-    let mut monograms = Vec::new();
-    for runtime in Runtime::ALL {
-        let letters = runtime_monogram(runtime);
-        assert!((2..=3).contains(&letters.len()), "{runtime:?}: {letters}");
-        monograms.push(letters);
-    }
-    monograms.sort_unstable();
-    monograms.dedup();
-    assert_eq!(
-        monograms.len(),
-        Runtime::ALL.len(),
-        "two runtimes share letters"
-    );
-    assert_eq!(runtime_monogram(Runtime::Php), "PHP");
-    assert_eq!(runtime_monogram(Runtime::Node), "JS");
-    assert_eq!(runtime_monogram(Runtime::Composer), "Co");
-    assert_eq!(runtime_monogram(Runtime::Caddy), "Ca");
-
+fn every_section_has_a_name() {
     let mut names: Vec<&str> = Section::ALL.iter().map(|s| section_name(*s)).collect();
     assert!(names.iter().all(|name| !name.is_empty()));
     names.sort_unstable();
@@ -1240,19 +816,16 @@ fn every_runtime_has_a_short_monogram_and_every_section_a_name() {
     assert_eq!(section_name(Section::Services), SERVICES);
 }
 
-/// The Phase 2 engines have their own entries before core has them: they
-/// stay out of the Runtimes screen (`Kind::Engine`), and these words are
-/// for their future screens and messages.
+/// The Phase 2 engines are named for their future screens and messages.
 #[test]
-fn the_phase_two_engines_have_their_name_example_and_monogram() {
-    for (folder, name, example, monogram) in [
-        ("postgres", "PostgreSQL", "18", "Pg"),
-        ("mysql", "MySQL", "8.4", "My"),
-        ("valkey", "Valkey", "8.1", "Vk"),
+fn the_phase_two_engines_have_their_name_and_example() {
+    for (runtime, name, example) in [
+        (Runtime::Postgres, "PostgreSQL", "18"),
+        (Runtime::Mysql, "MySQL", "8.4"),
+        (Runtime::Valkey, "Valkey", "8.1"),
     ] {
-        assert_eq!(runtime_name_for(folder), name, "{folder}");
-        assert_eq!(example_version_for(folder), example, "{folder}");
-        assert_eq!(monogram_for(folder, name), monogram, "{folder}");
+        assert_eq!(runtime_name(runtime), name, "{runtime:?}");
+        assert_eq!(example_version(runtime), example, "{runtime:?}");
     }
 }
 
