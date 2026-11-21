@@ -157,6 +157,17 @@ impl Supervisor {
         if !spec.program.is_absolute() {
             return Err(ProgramNotAbsolute(spec.program));
         }
+        // A stop program is looked up like the server: never in `PATH` or
+        // the working folder, which Windows would search for a bare name.
+        let relative = spec.stop.steps.iter().find_map(|step| match &step.action {
+            StopAction::Run(command) if !command.program.is_absolute() => {
+                Some(command.program.clone())
+            }
+            _ => None,
+        });
+        if let Some(program) = relative {
+            return Err(ProgramNotAbsolute(program));
+        }
         lock(&runtime).status = status(&spec.id, ServiceState::Starting, None, 0);
         let shared = Shared {
             id: spec.id.clone(),
@@ -444,10 +455,19 @@ async fn run_command(
     let deadline = tokio::time::Instant::now() + wait;
     let mut cmd = Command::new(&command.program);
     cmd.args(&command.args)
+        .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Not the daemon's environment: `MYSQL_PWD`, `PGPASSWORD` and the like
+    // would reach a program that is only asked to stop a server. The one
+    // variable a Windows program needs to start is `SystemRoot`; on the
+    // other systems (tests with a fake program) `PATH`.
+    let kept = if cfg!(windows) { "SystemRoot" } else { "PATH" };
+    if let Some(value) = std::env::var_os(kept) {
+        cmd.env(kept, value);
+    }
     process::hide_console_window(&mut cmd);
     shared.note(&format!("marsad: asking {} to stop with {name}", shared.id));
     let mut program = match cmd.spawn() {

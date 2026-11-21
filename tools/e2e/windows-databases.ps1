@@ -21,8 +21,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-if ($env:CI -ne 'true' -or $env:GITHUB_ACTIONS -ne 'true') {
-    [Console]::Error.WriteLine('This script creates a local user and changes who may log on. It runs only on a GitHub runner (CI=true).')
+# Three variables the runner sets: a developer can set the first two by hand,
+# and this script creates a local user.
+if ($env:CI -ne 'true' -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
+    [Console]::Error.WriteLine('This script creates a local user and changes who may log on. It runs only on a GitHub-hosted runner.')
     exit 2
 }
 

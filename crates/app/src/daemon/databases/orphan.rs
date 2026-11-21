@@ -93,6 +93,21 @@ pub(super) async fn record(
     }
 }
 
+/// The steps of `ladder` that are signals, with their waits. A request to the
+/// server's port and a stop program are left out: they find the server by its
+/// port or its data folder, which does not prove that the process of the pid
+/// record is the one that holds them.
+fn signal_steps(ladder: &StopMethod) -> Vec<(Signal, Duration)> {
+    ladder
+        .steps
+        .iter()
+        .filter_map(|step| match step.action {
+            StopAction::Signal(signal) => Some((signal, step.wait)),
+            StopAction::Send(_) | StopAction::Run(_) => None,
+        })
+        .collect()
+}
+
 /// Deletes `run/<id>.pid` when it names `pid`, a run that has ended. A
 /// record of another pid (a newer run, or one that could not be told) stays.
 pub(super) fn forget_run(kind: ServerKind, data_dir: &Path, pid: u32) {
@@ -172,13 +187,8 @@ pub(super) async fn clear(
     // SAVE`), or a stop program that finds the server by its port or its
     // data folder, would reach whatever is there, which the check of the pid
     // does not prove is this process (ADR 0023, section 8).
-    let signals = ladder
-        .steps
-        .iter()
-        .filter_map(|step| match step.action {
-            StopAction::Signal(signal) => Some((signal, step.wait)),
-            StopAction::Send(_) | StopAction::Run(_) => None,
-        })
+    let signals = signal_steps(ladder)
+        .into_iter()
         .chain([(Signal::Kill, KILL_WAIT)]);
     // The last signal sent, for the line that says how it stopped.
     let mut sent = None;
@@ -285,4 +295,49 @@ pub(super) fn stopped_line(kind: ServerKind, pid: u32, signal: Option<Signal>) -
         "marsad: stopped the {} (pid {pid}) that an earlier marsad left running; {how}.",
         kind.name()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use marsa_core::services::{StopCommand, StopStep, TcpRequest};
+
+    use super::*;
+
+    /// An orphan is stopped by signals only: neither a request to the port
+    /// nor a stop program, which would reach whatever holds the port or the
+    /// data folder, goes in its ladder.
+    #[test]
+    fn an_orphans_ladder_has_signals_only() {
+        let wait = Duration::from_secs(3);
+        let ladder = StopMethod {
+            steps: vec![
+                StopStep {
+                    action: StopAction::Send(TcpRequest {
+                        port: 6379,
+                        bytes: b"x".to_vec(),
+                        name: "request",
+                        limit: Duration::from_secs(1),
+                    }),
+                    wait,
+                },
+                StopStep {
+                    action: StopAction::Run(StopCommand {
+                        program: PathBuf::from("/bin/stop"),
+                        args: Vec::new(),
+                        name: "stop program",
+                        on_failure: "",
+                    }),
+                    wait,
+                },
+                StopStep {
+                    action: StopAction::Signal(Signal::Term),
+                    wait,
+                },
+            ],
+        };
+        assert_eq!(signal_steps(&ladder), [(Signal::Term, wait)]);
+        assert!(signal_steps(&StopMethod { steps: Vec::new() }).is_empty());
+    }
 }

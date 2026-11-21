@@ -595,6 +595,23 @@ fn stop_program_at(program: PathBuf, arg: &str, wait: Duration) -> StopMethod {
     }
 }
 
+/// A stop program that is not an absolute path is refused before anything
+/// runs: Windows would search the working folder and `PATH` for a bare name.
+#[test]
+fn a_relative_stop_program_is_refused_before_the_start() {
+    let relative = stop_program_at(PathBuf::from("mysqladmin.exe"), "x", WAIT);
+    let (tx, _rx) = broadcast::channel(8);
+    let logs = tempfile::tempdir().expect("a temp folder");
+    let err = Supervisor::spawn(
+        spec("hold", RestartPolicy::Never, relative),
+        tx,
+        logs.path(),
+    )
+    .map(|_| ())
+    .expect_err("a relative stop program");
+    assert_eq!(err.code(), "program_not_absolute");
+}
+
 /// What a stop by a program left: every line of the service, how long the
 /// stop took, the fake's folder, and the logs folder.
 struct Stopped {
