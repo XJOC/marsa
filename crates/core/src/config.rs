@@ -54,8 +54,8 @@ pub struct ToolDefaults {
     pub xdebug: bool,
 }
 
-/// A database server's table in `global.toml`: `[postgres]` (task M6-03),
-/// `[mysql]` (task M6-05), and `[valkey]` (task M6-06), ADR 0023.
+/// A database server's table in `global.toml`: `[postgres]`, `[mysql]`, and
+/// `[valkey]` (ADR 0023).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerSettings {

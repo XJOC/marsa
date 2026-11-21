@@ -16,8 +16,8 @@ use crate::services::{Signal, StopAction, StopMethod, StopStep, TcpRequest};
 pub const VALKEY_PORT: u16 = 6379;
 
 /// How long Valkey has to exit after `SHUTDOWN SAVE`, and again after
-/// SIGTERM (ADR 0023, section 6). S-12 measured 32 to 252 ms for a
-/// shutdown; a large `dump.rdb` takes longer to write.
+/// SIGTERM (ADR 0023, section 6). A shutdown took 32 to 252 ms in the
+/// measures of ADR 0023; a large `dump.rdb` takes longer to write.
 const STOP_WAIT: Duration = Duration::from_secs(10);
 
 /// For the connect, and again for the write, of `SHUTDOWN SAVE`.

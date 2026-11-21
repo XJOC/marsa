@@ -86,7 +86,7 @@ platform = "windows-x64"
 reason = "MySQL on Windows is task M6-07"
 
 [valkey]
-# Valkey 8.1 (ADR 0023): our own build of 8.1.11, the version S-12 tested, in
+# Valkey 8.1 (ADR 0023): our own build of 8.1.11, the version ADR 0023 tested, in
 # the GitHub Release valkey-8.1.11-r1 that .github/workflows/valkey-build.yml
 # makes (run it with release = true). The workflow makes it a DRAFT: its URLs
 # answer only after it is published. `manifest build` checks each archive

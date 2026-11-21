@@ -1,5 +1,5 @@
-# How Valkey 8.1 is laid out on disk (task M6-06, ADR 0023). See php.toml for
-# how a recipe and the signed manifest work together.
+# How Valkey 8.1 is laid out on disk (ADR 0023). See php.toml for how a recipe
+# and the signed manifest work together.
 name = "valkey"
 
 # After install: `valkey-server --version` prints
@@ -20,8 +20,8 @@ expect_prefix = "Valkey server v={version} "
 # - macOS: built with MACOSX_DEPLOYMENT_TARGET=12.0, linked to libSystem only.
 # - Linux: static against musl, so no glibc floor.
 # - Windows: built with Cygwin; bin/ also holds cygwin1.dll and
-#   cyggcc_s-seh-1.dll, and the release holds the Cygwin source. Marsa runs
-#   Valkey on Windows from task M6-07 on; pins.toml skips it until then.
+#   cyggcc_s-seh-1.dll, and the release holds the Cygwin source. Marsa does
+#   not run Valkey on Windows yet, so pins.toml skips it.
 #
 # The URL is the first build (r1). A rebuild (r2) changes it here, not in
 # pins.toml: `cargo xtask manifest build` accepts only the recipe's own file

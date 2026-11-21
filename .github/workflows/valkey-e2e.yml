@@ -1,7 +1,7 @@
 name: valkey-e2e
 
-# Valkey 8.1 as a service of marsad, with a real server (task M6-06; ADR
-# 0023): the start on 127.0.0.1 only, the idle memory, the access rules
+# Valkey 8.1 as a service of marsad, with a real server (ADR 0023): the
+# start on 127.0.0.1 only, the idle memory, the access rules
 # (CONFIG SET dir and dbfilename, DEBUG, and MODULE LOAD refused over TCP),
 # phpredis, SHUTDOWN SAVE at the stop and the data at the next start, the
 # refusals, the start with marsad, and an orphan stopped with SIGTERM.

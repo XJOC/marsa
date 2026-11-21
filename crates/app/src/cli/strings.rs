@@ -377,7 +377,7 @@ fn known(code: &str, d: &Details<'_>) -> Option<String> {
              control character, which MySQL's settings file cannot hold, so MySQL was not \
              started. Run \"marsa logs mysql\" to see the path."
             .into(),
-        // Valkey (task M6-06), the same way.
+        // Valkey, the same way.
         "valkey_not_installed" => "Valkey of the version set in global.toml is not installed. \
              Run \"marsa install valkey\", then try again."
             .into(),

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End to end: Valkey 8.1 as a service of marsad, with a real server (task
-# M6-06; ADR 0023). On a GitHub runner.
+# End to end: Valkey 8.1 as a service of marsad, with a real server (ADR
+# 0023). On a GitHub runner.
 #
 # Valkey is not in the signed manifest yet, and its release is a draft until
 # the owner publishes it, so the archive comes from VALKEY_ARCHIVE: a local
@@ -178,12 +178,12 @@ $r->set("marsa-e2e-php", "phpredis");
 echo $r->get("marsa-e2e-php"), "\n";
 ' | grep -qx phpredis || fail "phpredis"
 
-# TODO(M6-06): Laravel, as the task file asks: a new Laravel project with
-# CACHE_STORE=redis and QUEUE_CONNECTION=redis, `php artisan` cache and queue
-# commands once with phpredis (REDIS_CLIENT=phpredis, the default) and once
-# with predis (composer require predis/predis, REDIS_CLIENT=predis), then a
-# stop and a start, and the cached value is still there. Needs Composer and
-# Packagist on the runner (spike S-12 had a 39-check suite for predis).
+# TODO (Laravel): a new Laravel project with CACHE_STORE=redis and
+# QUEUE_CONNECTION=redis, `php artisan` cache and queue commands once with
+# phpredis (REDIS_CLIENT=phpredis, the default) and once with predis
+# (composer require predis/predis, REDIS_CLIENT=predis), then a stop and a
+# start, and the cached value is still there. Needs Composer and Packagist on
+# the runner (the spike behind ADR 0023 had a 39-check suite for predis).
 
 step "the running version cannot be uninstalled"
 refused 'in use' marsa uninstall valkey "$VERSION"

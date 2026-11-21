@@ -619,7 +619,7 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
 
     /// Valkey is the archive of our release that the recipe names, with no
     /// override, and the `sha256sums.txt` of that release beside it. Windows
-    /// waits for task M6-07.
+    /// is skipped, with its reason.
     #[test]
     fn repository_valkey_urls_are_our_release_assets() {
         use super::super::upstream::{Layout, Source, VALKEY_RELEASES, sum_file_for};

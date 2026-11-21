@@ -386,7 +386,7 @@ struct RawRuntimes {
     /// Added in M6-05 within schema 1, like Caddy.
     #[serde(default)]
     mysql: Vec<RawRelease>,
-    /// Added in M6-06 within schema 1, like Caddy.
+    /// Added within schema 1, like Caddy: an older build ignores it.
     #[serde(default)]
     valkey: Vec<RawRelease>,
 }
