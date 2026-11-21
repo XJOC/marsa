@@ -99,7 +99,6 @@
 
 use marsa_core::codes;
 use std::cmp::Ordering;
-use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -922,7 +921,7 @@ async fn socket_free(path: &Path) -> bool {
     match tokio::time::timeout(CONNECT_LIMIT, connect).await {
         Ok(Err(err)) => matches!(
             err.kind(),
-            io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
         ),
         Ok(Ok(_)) | Err(_) => false,
     }
@@ -1168,9 +1167,10 @@ impl Drop for AbortOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::services::probe::{BoxFuture, SystemProbe};
+    use crate::daemon::services::probe::BoxFuture;
     use marsa_core::orphan::ChildProcess;
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    use std::io;
 
     use semver::Version;
     use tokio_util::sync::CancellationToken;
@@ -2671,6 +2671,7 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     mod real {
         use super::*;
+        use crate::daemon::services::probe::SystemProbe;
         use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
         use std::process::{Child, Command, ExitStatus, Stdio};
 
