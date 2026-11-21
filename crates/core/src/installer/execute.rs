@@ -682,12 +682,10 @@ pub(super) fn rename(from: &Path, to: &Path) -> Result<(), InstallError> {
 
 /// 8 hex characters from the OS random source, for temp names.
 pub(super) fn random_hex() -> Result<String, InstallError> {
-    let mut bytes = [0u8; 4];
-    getrandom::fill(&mut bytes).map_err(|err| InstallError::Io {
+    crate::fs::random_hex(4).map_err(|source| InstallError::Io {
         path: PathBuf::new(),
-        source: io::Error::other(format!("no random bytes: {err}")),
-    })?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+        source,
+    })
 }
 
 /// Deletes a folder and all in it. A failure is only logged.

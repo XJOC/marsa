@@ -9,6 +9,7 @@ use marsa_core::types::RuntimeList;
 
 use super::Failure;
 use super::daemon::{connect, failure};
+use super::text::printable;
 use super::{Tool, strings};
 
 /// The arguments of `marsa runtimes`.
@@ -51,7 +52,7 @@ pub fn render(list: &RuntimeList, tool: Option<Tool>) -> String {
             // From the daemon: no control characters on the terminal.
             versions
                 .iter()
-                .map(|v| v.chars().filter(|c| !c.is_control()).collect::<String>())
+                .map(|v| printable(v))
                 .collect::<Vec<_>>()
                 .join(", ")
         };

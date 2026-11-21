@@ -17,6 +17,7 @@ pub mod services;
 pub mod setup;
 pub mod sites;
 pub mod strings;
+pub mod text;
 pub mod uninstall;
 pub mod uninstall_all;
 pub mod xdebug;

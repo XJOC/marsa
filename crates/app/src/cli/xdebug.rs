@@ -58,7 +58,7 @@ pub fn render(switch: Option<Switch>, state: &XdebugState) -> String {
 
 /// The text and code the user sees for `err`. A `config_*` code names
 /// `global.toml`, the file the daemon could not use.
-pub fn xdebug_failure(err: &ClientError, data_dir: &Path) -> Failure {
+fn xdebug_failure(err: &ClientError, data_dir: &Path) -> Failure {
     let global_toml = ConfigPaths::in_dir(data_dir).global;
     failure_naming(
         err,

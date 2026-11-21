@@ -53,8 +53,8 @@ use tokio_util::sync::CancellationToken;
 use super::Failure;
 use super::daemon::failure;
 use super::setup::port_held;
-use super::sites::printable;
 use super::strings::{self, Details};
+use super::text::{clipped, printable};
 use marsa_core::caddy::CADDY_ID;
 use marsa_core::platform::runner::RealRunner;
 use marsa_core::platform::{linux_dns, trust};
@@ -531,7 +531,7 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
         ),
         Problem::LogError { line } => {
             let log = log_path(data_dir);
-            let line: String = printable(line).chars().take(MAX_LINE).collect();
+            let line: String = clipped(line, MAX_LINE);
             (
                 strings::doctor_log_error(&log, &line),
                 strings::doctor_read_log(&log),
