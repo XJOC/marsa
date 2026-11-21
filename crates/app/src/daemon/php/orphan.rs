@@ -99,7 +99,6 @@
 
 use marsa_core::codes;
 use std::cmp::Ordering;
-use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -107,7 +106,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use marsa_core::caddy::Dial;
-use marsa_core::orphan::{self, ChildProcess, Liveness, PidRecord, PidfileState};
+use marsa_core::orphan::{self, Liveness, PidRecord, PidfileState};
 use marsa_core::php::PhpMinor;
 use marsa_core::platform::process::{self, Signal};
 use marsa_core::recipes::Platform;
@@ -118,7 +117,8 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{debug, info, warn};
 
 use super::{fpm_id, fpm_program};
-use crate::daemon::caddy::orphan::{BoxFuture, Ladder};
+use crate::daemon::caddy::orphan::Ladder;
+use crate::daemon::services::probe::ProcessProbe;
 use crate::daemon::supervisor::{ServiceHandle, ServiceRuntime, lock};
 
 /// Our old php-fpm did not stop, or cannot be verified, while its socket or
@@ -132,7 +132,7 @@ pub const STOPPING_ORPHAN: &str = "marsad: Stopping an old php-fpm left by a cra
 const POLL: Duration = Duration::from_millis(50);
 
 /// Pid 1 (`launchd` on macOS), which adopts a process whose parent died.
-/// Only the tests' fake OS uses it: the code asks [`FpmProcesses::adopters`].
+/// Only the tests' fake OS uses it: the code asks [`ProcessProbe::adopters`].
 #[cfg(test)]
 const INIT: u32 = 1;
 
@@ -140,51 +140,6 @@ const INIT: u32 = 1;
 // Only the Unix socket probe uses it, and Unix sockets exist on Unix only.
 #[cfg(unix)]
 const CONNECT_LIMIT: Duration = Duration::from_millis(500);
-
-/// Who runs under a pid, and signals. [`SystemFpm`] asks the OS; a test
-/// records the signals instead.
-pub trait FpmProcesses: fmt::Debug + Send + Sync {
-    /// The file the process really runs, and its start time.
-    fn identity(&self, pid: u32) -> BoxFuture<'_, Liveness>;
-    /// The children of `ppid` now, each with its start time: a list, never
-    /// a proof. `None` when they cannot be listed: then none is signalled.
-    fn children(&self, ppid: u32) -> BoxFuture<'_, Option<Vec<ChildProcess>>>;
-    /// The processes that hold the listener at `listen` open now, an
-    /// inherited one too: a list, never a proof alone. `None` when they
-    /// cannot be listed: then no child of pid 1 is signalled.
-    fn listener_holders<'a>(&'a self, listen: &'a Dial) -> BoxFuture<'a, Option<Vec<u32>>>;
-    /// Who may have adopted the children of an earlier daemon
-    /// ([`process::adopters`]): a list to search, never a proof.
-    fn adopters(&self) -> BoxFuture<'_, Vec<u32>>;
-    /// Sends `signal` to `pid`. The caller checked the pid right before.
-    fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>>;
-}
-
-/// The real OS: `marsa_core::platform::process`.
-#[derive(Debug)]
-pub struct SystemFpm;
-
-impl FpmProcesses for SystemFpm {
-    fn identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
-        Box::pin(process::real_identity(pid))
-    }
-
-    fn children(&self, ppid: u32) -> BoxFuture<'_, Option<Vec<ChildProcess>>> {
-        Box::pin(process::children(ppid))
-    }
-
-    fn listener_holders<'a>(&'a self, listen: &'a Dial) -> BoxFuture<'a, Option<Vec<u32>>> {
-        Box::pin(process::listener_holders(listen))
-    }
-
-    fn adopters(&self) -> BoxFuture<'_, Vec<u32>> {
-        Box::pin(process::adopters())
-    }
-
-    fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
-        Box::pin(process::send_signal(pid, signal))
-    }
-}
 
 /// Why a pool must not start.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,12 +231,12 @@ impl PidFile {
     /// now has changed hands, and is never written.
     pub async fn record(
         &self,
-        processes: &dyn FpmProcesses,
+        processes: &dyn ProcessProbe,
         pid: u32,
         program: &Path,
         started: Option<&str>,
     ) -> Recorded {
-        let now = processes.identity(pid).await;
+        let now = processes.real_identity(pid).await;
         let (exe, now_started) = match &now {
             Liveness::Alive { exe, started } => (exe.clone(), started.clone()),
             // It exited at once; the supervisor reports why.
@@ -399,7 +354,7 @@ struct Reap<'h> {
 /// The check before one pool starts.
 pub struct Orphans<'a> {
     pub pid_file: &'a PidFile,
-    pub processes: &'a dyn FpmProcesses,
+    pub processes: &'a dyn ProcessProbe,
     /// Every php-fpm of this data folder that may still run
     /// ([`installed_programs`]). Nothing else is ever signalled.
     pub accepted: &'a [PathBuf],
@@ -656,7 +611,7 @@ impl Orphans<'_> {
     }
 
     /// The workers of the master `record` names that pid 1 adopted: the
-    /// children of pid 1 (each of [`FpmProcesses::adopters`]) that hold a
+    /// children of pid 1 (each of [`ProcessProbe::adopters`]) that hold a
     /// listener at this pool's socket path or port and pass
     /// [`orphan::worker_of`]. The listener is a filter, not a proof: the
     /// list shows who holds a listener at that path or port, not
@@ -732,7 +687,7 @@ impl Orphans<'_> {
             let order = orphan::started_order(&child.started, &record.started);
             let now = match order {
                 Some(Ordering::Less) => continue,
-                Some(_) => self.processes.identity(child.pid).await,
+                Some(_) => self.processes.real_identity(child.pid).await,
                 None => Liveness::Unknown,
             };
             // The listed process exited, and its pid changed hands since.
@@ -863,7 +818,7 @@ impl Orphans<'_> {
 
     /// What the OS says about `record` now: the master's, or a worker's.
     async fn check(&self, record: &PidRecord) -> PidfileState {
-        let now = self.processes.identity(record.pid).await;
+        let now = self.processes.real_identity(record.pid).await;
         orphan::classify_pidfile(record, self.accepted, &now)
     }
 
@@ -989,7 +944,7 @@ pub fn watch(
     lines: broadcast::Receiver<Event>,
     pid_file: PidFile,
     program: PathBuf,
-    processes: Arc<dyn FpmProcesses>,
+    processes: Arc<dyn ProcessProbe>,
 ) -> ServiceHandle {
     let ServiceHandle {
         cancel,
@@ -1073,7 +1028,7 @@ impl Watcher {
 struct Recording {
     pid_file: PidFile,
     program: PathBuf,
-    processes: Arc<dyn FpmProcesses>,
+    processes: Arc<dyn ProcessProbe>,
     /// The last spawn, until it exits.
     spawn: Option<Spawn>,
 }
@@ -1213,6 +1168,8 @@ impl Drop for AbortOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::services::probe::{BoxFuture, SystemProbe};
+    use marsa_core::orphan::ChildProcess;
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
     use semver::Version;
@@ -1384,8 +1341,8 @@ mod tests {
         }
     }
 
-    impl FpmProcesses for Fake {
-        fn identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
+    impl ProcessProbe for Fake {
+        fn real_identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
             *self.looks.lock().unwrap() += 1;
             let mut procs = self.procs.lock().unwrap();
             let next = match procs.get_mut(&pid) {
@@ -1539,7 +1496,7 @@ mod tests {
     }
 
     /// A manager that checks for orphans with `processes`, on any system.
-    fn manager_with(data: &Path, processes: Arc<dyn FpmProcesses>) -> PhpManager {
+    fn manager_with(data: &Path, processes: Arc<dyn ProcessProbe>) -> PhpManager {
         let mut php = PhpManager::new(data, Some(Platform::LinuxX64));
         php.recovery = true;
         php.processes = processes;
@@ -2818,8 +2775,8 @@ mod tests {
             }
         }
 
-        impl FpmProcesses for Recorder {
-            fn identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
+        impl ProcessProbe for Recorder {
+            fn real_identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
                 Box::pin(process::real_identity(pid))
             }
 
@@ -2925,7 +2882,7 @@ mod tests {
             pool
         }
 
-        fn manager(data: &Path, processes: Arc<dyn FpmProcesses>) -> PhpManager {
+        fn manager(data: &Path, processes: Arc<dyn ProcessProbe>) -> PhpManager {
             let mut php = PhpManager::new(data, Some(platform()));
             php.recovery = true;
             php.processes = processes;
@@ -3064,7 +3021,9 @@ mod tests {
             })
             .await;
             let pid_file = PidFile::new(data, PHP84);
-            let recorded = pid_file.record(&SystemFpm, orphan.pid(), &old, None).await;
+            let recorded = pid_file
+                .record(&SystemProbe, orphan.pid(), &old, None)
+                .await;
             assert!(matches!(recorded, Recorded::Written(_)), "{recorded:?}");
             let record = process::read_pid_file(&pid_file.path).expect("the orphan's file");
             assert_eq!(record.pid, orphan.pid());
@@ -3241,7 +3200,7 @@ mod tests {
             }
             let pid_file = PidFile::new(data, PHP84);
             let recorded = pid_file
-                .record(&SystemFpm, master.pid(), &program, None)
+                .record(&SystemProbe, master.pid(), &program, None)
                 .await;
             assert!(matches!(recorded, Recorded::Written(_)), "{recorded:?}");
 
@@ -3315,7 +3274,7 @@ mod tests {
             wait_until("a worker listens", async || !listen_free(&pool.dial).await).await;
             let pid_file = PidFile::new(data, PHP84);
             let recorded = pid_file
-                .record(&SystemFpm, master.pid(), &program, None)
+                .record(&SystemProbe, master.pid(), &program, None)
                 .await;
             assert!(matches!(recorded, Recorded::Written(_)), "{recorded:?}");
 

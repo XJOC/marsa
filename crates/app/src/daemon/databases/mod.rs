@@ -59,12 +59,12 @@ mod tests {
     use marsa_core::types::ServiceState;
     use semver::Version;
 
-    use super::facts::{Probes, start_facts};
+    use super::facts::start_facts;
     use super::init::installed_servers;
     use super::postgres::{programs, spec as postgres_spec};
     use super::settings::{after_install, first_install};
     use crate::daemon::caddy::Launched;
-    use crate::daemon::caddy::orphan::BoxFuture;
+    use crate::daemon::services::probe::{BoxFuture, ProcessProbe};
     use crate::daemon::state::Daemon;
 
     // Only the `server` and `init` modules below use these, and they run
@@ -108,7 +108,7 @@ mod tests {
         }
     }
 
-    impl Probes for FakeProbes {
+    impl ProcessProbe for FakeProbes {
         fn real_identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
             self.asked.lock().unwrap().push(pid);
             let orphan = self
@@ -568,7 +568,7 @@ mod tests {
             set_postgres(&data, Some("18"), true, port);
             let probes = Arc::new(probes);
             let mut daemon = Daemon::new(data.clone());
-            daemon.postgres.probes = Arc::clone(&probes) as Arc<dyn Probes>;
+            daemon.postgres.probes = Arc::clone(&probes) as Arc<dyn ProcessProbe>;
             Pg {
                 dir,
                 daemon: Arc::new(daemon),
