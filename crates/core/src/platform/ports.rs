@@ -125,6 +125,7 @@ fn process(runner: &dyn Runner, pid: u32, stop: &CancellationToken) -> Option<Pr
         }
     }
 }
+
 /// Who listens on 80 and 443 on `os`, or `None` if that cannot be known (the
 /// command failed, printed more than [`MAX_OUTPUT`], or listed no listening
 /// socket at all: the daemon's own API socket always listens, so an empty
