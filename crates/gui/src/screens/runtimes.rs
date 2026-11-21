@@ -298,7 +298,7 @@ pub fn build(model: &Model, table: &[Descriptor], chosen: usize) -> RuntimesView
     let Some(shown) = table.get(chosen) else {
         return RuntimesView::Unread;
     };
-    if model.runtimes.is_empty() {
+    if model.session.runtimes.is_empty() {
         return RuntimesView::Unread;
     }
     RuntimesView::Read(Box::new(Read {
@@ -420,10 +420,14 @@ fn uninstall_off(
 }
 
 fn xdebug(model: &Model) -> XdebugView {
-    let lines = model.xdebug.as_ref().map_or_else(Vec::new, |state| {
-        strings::xdebug_lines(state, model.xdebug_pending())
-    });
-    let off = if model.xdebug.is_none() {
+    let lines = model
+        .session
+        .xdebug
+        .as_ref()
+        .map_or_else(Vec::new, |state| {
+            strings::xdebug_lines(state, model.xdebug_pending())
+        });
+    let off = if model.session.xdebug.is_none() {
         Some(strings::XDEBUG_UNREAD)
     } else if model.xdebug_pending().is_some() {
         Some(strings::XDEBUG_BUSY)
@@ -434,7 +438,11 @@ fn xdebug(model: &Model) -> XdebugView {
         on: model.xdebug_on().unwrap_or(false),
         off,
         lines,
-        error: model.xdebug_notice.as_deref().map(strings::error_text),
+        error: model
+            .session
+            .xdebug_notice
+            .as_deref()
+            .map(strings::error_text),
     }
 }
 
@@ -457,7 +465,7 @@ fn status(model: &Model) -> Status {
 /// ([`show_install_dialog`]), because Home and a site's page open it too, so
 /// it is not part of [`RuntimesView`].
 pub fn install_dialog_view(model: &Model) -> Option<InstallDialog> {
-    let runtime = model.install_dialog?;
+    let runtime = model.session.install_dialog?;
     Some(dialog(model, &descriptor(runtime)))
 }
 
@@ -467,7 +475,11 @@ fn dialog(model: &Model, d: &Descriptor) -> InstallDialog {
         title: strings::install_dialog_title(d.name),
         body: strings::version_field_hint(d.name, d.example),
         text: model.install_text(d.runtime).to_owned(),
-        error: model.runtimes_notice.as_deref().map(strings::error_text),
+        error: model
+            .session
+            .runtimes_notice
+            .as_deref()
+            .map(strings::error_text),
     }
 }
 
@@ -1178,7 +1190,7 @@ mod tests {
         });
         assert!(command.is_none());
         assert_eq!(
-            model.confirm,
+            model.session.confirm,
             Some(Removal::Uninstall {
                 runtime: Runtime::Php,
                 version: v("8.2.28"),
@@ -1273,7 +1285,7 @@ mod tests {
             "PHP 8.3.27 is in use, so it was not uninstalled."
         );
         // A done uninstall is one sentence.
-        model.uninstall_notice = Some(UninstallNotice::Done {
+        model.session.uninstall_notice = Some(UninstallNotice::Done {
             runtime: Runtime::Php,
             version: v("8.2.28"),
         });
@@ -1394,7 +1406,7 @@ mod tests {
         assert_eq!(actions, [Action::Navigate(Route::Runtimes(Runtime::Node))]);
         // The dialog of a new runtime says what to type for it.
         let mut asked = self::model();
-        asked.install_dialog = Some(Runtime::Composer);
+        asked.session.install_dialog = Some(Runtime::Composer);
         let dialog = dialog(&asked, &Descriptor::plain(Runtime::Composer, "python"));
         assert_eq!(dialog.title, "Install a python version");
         assert_eq!(

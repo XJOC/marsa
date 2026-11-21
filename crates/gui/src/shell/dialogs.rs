@@ -39,7 +39,7 @@ pub struct ConfirmView {
 /// Decides what the confirmation of the model's pending removal says, if
 /// there is one. Pure: the same model gives the same view.
 pub fn confirm_view(model: &Model) -> Option<ConfirmView> {
-    let removal = model.confirm.as_ref()?;
+    let removal = model.session.confirm.as_ref()?;
     let home = model.home.as_deref();
     let (id, body) = match removal {
         Removal::Unlink { site } => (
@@ -287,7 +287,7 @@ mod tests {
         for action in press(&harness, &model, Key::Escape) {
             assert!(model.apply_action(action).is_none());
         }
-        assert!(model.confirm.is_none(), "cancelled");
+        assert!(model.session.confirm.is_none(), "cancelled");
 
         asked(&mut model, Action::AskUnlink("shop".into()));
         let command = model.apply_action(Action::ConfirmRemoval);

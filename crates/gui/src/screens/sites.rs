@@ -218,11 +218,11 @@ pub fn view(model: &Model, picking: bool) -> SitesView<'_> {
         list,
         model: ReadFrom(model),
         php,
-        parked: &model.sites.parked,
+        parked: &model.session.sites.parked,
         home: model.home.as_deref(),
         forget_off: (model.is_connected() && !model.can_remove())
             .then_some(strings::REMOVE_BUSY_HINT),
-        skipped: &model.sites.skipped,
+        skipped: &model.session.sites.skipped,
     }
 }
 
@@ -250,7 +250,7 @@ fn list(model: &Model) -> List<'_> {
     if !model.is_connected() {
         return List::Offline;
     }
-    let all = &model.sites.sites;
+    let all = &model.session.sites.sites;
     if all.is_empty() {
         return List::Empty;
     }
@@ -290,7 +290,7 @@ impl<'a> SitesView<'a> {
             return None;
         };
         let model = self.model.0;
-        let site = model.sites.sites.get(matches.site(n)?)?;
+        let site = model.session.sites.sites.get(matches.site(n)?)?;
         #[cfg(test)]
         BUILT.with(|built| built.set(built.get() + 1));
         Some(SiteRow {
@@ -365,16 +365,17 @@ fn link(model: &Model) -> Option<LinkView<'_>> {
 }
 
 fn hosts(model: &Model) -> Option<HostsView> {
-    let failed = match &model.hosts_sync {
+    let failed = match &model.session.hosts_sync {
         HostsSync::Failed(code) => Some(strings::error_text(code)),
         HostsSync::Idle | HostsSync::Running => None,
     };
-    let waiting = (model.hosts.used && !model.hosts.missing.is_empty())
-        .then(|| strings::hosts_waiting(&model.hosts.missing));
+    let waiting = (model.session.hosts.used && !model.session.hosts.missing.is_empty())
+        .then(|| strings::hosts_waiting(&model.session.hosts.missing));
     if waiting.is_none() && failed.is_none() {
         return None;
     }
-    let busy = model.hosts_sync == HostsSync::Running || model.setup == Setup::Running;
+    let busy =
+        model.session.hosts_sync == HostsSync::Running || model.session.setup == Setup::Running;
     Some(HostsView {
         waiting,
         off: busy.then_some(strings::HOSTS_ADDING),
@@ -1131,7 +1132,7 @@ mod tests {
     #[test]
     fn while_a_removal_runs_the_screen_says_so_and_forget_waits() {
         let mut model = model(&["shop", "wiki"]);
-        model.sites.parked = vec![PathBuf::from("/code")];
+        model.session.sites.parked = vec![PathBuf::from("/code")];
         let view_ = view(&model, false);
         assert_eq!(view_.removing, None);
         assert_eq!(view_.forget_off, None);
@@ -1168,7 +1169,7 @@ mod tests {
             used: true,
             missing: Vec::new(),
         }));
-        model.hosts_sync = HostsSync::Failed("hosts_failed".into());
+        model.session.hosts_sync = HostsSync::Failed("hosts_failed".into());
         let hosts = view(&model, false).hosts.expect("a line");
         assert_eq!(hosts.waiting, None);
         assert_eq!(hosts.failed, Some(strings::error_text("hosts_failed")));
@@ -1467,8 +1468,8 @@ mod tests {
     #[test]
     fn the_parked_folders_forget_and_the_skipped_ones_say_why() {
         let mut model = model(&["shop"]);
-        model.sites.parked = vec![PathBuf::from("/code"), PathBuf::from("/work")];
-        model.sites.skipped = vec![SkippedFolder {
+        model.session.sites.parked = vec![PathBuf::from("/code"), PathBuf::from("/work")];
+        model.session.sites.skipped = vec![SkippedFolder {
             path: PathBuf::from("/code/My Site"),
             code: "site_name_invalid".into(),
         }];
@@ -1597,8 +1598,8 @@ mod tests {
         let home = abs("/Users/omar");
         let mut model = model(&["shop"]);
         model.home = Some(home.clone());
-        model.sites.parked = vec![home.join("Code"), abs("/srv/www")];
-        model.sites.skipped = vec![SkippedFolder {
+        model.session.sites.parked = vec![home.join("Code"), abs("/srv/www")];
+        model.session.sites.skipped = vec![SkippedFolder {
             path: home.join("Code").join("My Site"),
             code: "site_name_invalid".into(),
         }];
@@ -1638,7 +1639,7 @@ mod tests {
     #[test]
     fn the_forget_buttons_are_30_high_and_sit_inside_rows_of_at_least_46() {
         let mut model = model(&["shop"]);
-        model.sites.parked = vec![PathBuf::from("/code"), PathBuf::from("/work")];
+        model.session.sites.parked = vec![PathBuf::from("/code"), PathBuf::from("/work")];
         let (_, tree) = start(&model);
         let mut buttons: Vec<_> = tree
             .nodes_with_label(strings::FORGET_BUTTON)

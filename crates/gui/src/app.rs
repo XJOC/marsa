@@ -292,13 +292,13 @@ impl eframe::App for App {
                 Action::OpenFolder(name) => {
                     let folder = self.model.site_root(name).map(Path::to_path_buf);
                     if let Some(Err(code)) = folder.as_deref().map(opener::open_folder) {
-                        self.model.notice = Some(code.to_owned());
+                        self.model.session.notice = Some(code.to_owned());
                     }
                     continue;
                 }
                 Action::OpenDataFolder => {
                     if let Err(code) = opener::open_folder(&self.model.data_dir) {
-                        self.model.notice = Some(code.to_owned());
+                        self.model.session.notice = Some(code.to_owned());
                     }
                     continue;
                 }
@@ -341,7 +341,7 @@ pub(crate) fn take_updates(bridge: &bridge::Handle, model: &mut Model) {
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
                 let failed = Connection::Failed(strings::BRIDGE_FAILED.to_owned());
-                if model.connection != failed {
+                if model.session.connection != failed {
                     model.update(Update::Failed(strings::BRIDGE_FAILED.to_owned()));
                 }
                 break;
@@ -417,12 +417,12 @@ mod tests {
         };
         let measured = app(&ctx, dir.path(), Prefs::default()).measuring(plan);
         assert!(measured.model.is_connected());
-        assert_eq!(measured.model.sites.sites.len(), 12);
+        assert_eq!(measured.model.session.sites.sites.len(), 12);
         assert_eq!(measured.model.route, Route::Sites);
         assert!(measured.measure.is_some());
         // Not measuring: no sites, and no count.
         let plain = app(&ctx, dir.path(), Prefs::default());
-        assert!(plain.measure.is_none() && plain.model.sites.sites.is_empty());
+        assert!(plain.measure.is_none() && plain.model.session.sites.sites.is_empty());
     }
 
     #[test]
