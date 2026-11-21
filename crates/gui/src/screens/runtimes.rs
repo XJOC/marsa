@@ -1165,13 +1165,13 @@ mod tests {
     fn install_sends_the_job_for_the_text_and_an_empty_field_asks_for_the_newest() {
         let mut model = model();
         model.apply_action(Action::AskInstall(Runtime::Php));
+        let sent = model
+            .apply_action(Action::SubmitInstall(Runtime::Php))
+            .command();
         assert!(
-            model
-                .apply_action(Action::SubmitInstall(Runtime::Php))
-                .is_none()
+            matches!(sent, Some(Command::Install(ref sent)) if *sent == job(Runtime::Php, None))
         );
         assert_eq!(install_dialog_view(&model), None, "the dialog closes");
-        assert_eq!(model.next_install(), Some(job(Runtime::Php, None)));
 
         let mut model = self::model();
         model.apply_action(Action::AskInstall(Runtime::Php));
@@ -1179,8 +1179,12 @@ mod tests {
             runtime: Runtime::Php,
             text: " 8.5 ".into(),
         });
-        model.apply_action(Action::SubmitInstall(Runtime::Php));
-        assert_eq!(model.next_install(), Some(job(Runtime::Php, Some("8.5"))));
+        let sent = model
+            .apply_action(Action::SubmitInstall(Runtime::Php))
+            .command();
+        assert!(
+            matches!(sent, Some(Command::Install(ref sent)) if *sent == job(Runtime::Php, Some("8.5")))
+        );
     }
 
     #[test]

@@ -636,6 +636,7 @@ fn sites_section(ui: &mut Ui, theme: &Theme, sites: &SitesView, actions: &mut Ve
 
 #[cfg(test)]
 mod tests {
+    use crate::bridge::Command;
     use std::path::PathBuf;
 
     use eframe::egui::{self, Pos2, pos2};
@@ -866,8 +867,11 @@ mod tests {
         assert_eq!(labels(&status), ["Install Caddy"]);
         assert!(status.progress.is_none());
 
-        assert!(model.apply_action(status.fixes[0].action.clone()).is_none());
-        let job = model.next_install().expect("the fix queued the job");
+        let Some(Command::Install(job)) =
+            model.apply_action(status.fixes[0].action.clone()).command()
+        else {
+            panic!("the fix sends the job");
+        };
         assert_eq!(job.runtime, Runtime::Caddy);
         let status = view(&model).status;
         assert_eq!(status.fixes[0].disabled, Some(strings::INSTALL_BUSY_HINT));

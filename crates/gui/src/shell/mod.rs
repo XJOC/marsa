@@ -194,7 +194,7 @@ mod tests {
         let mut model = model_with_shop();
         model.route = route;
         Harness::new(egui::Theme::Light).accessibility(|ui| {
-            show(ui, &mut model, false);
+            show(ui, &model, false);
         })
     }
 
@@ -229,11 +229,11 @@ mod tests {
         let harness = Harness::new(egui::Theme::Light);
         for _ in 0..20 {
             harness.run(|ui| {
-                show(ui, &mut model, false);
+                show(ui, &model, false);
             });
         }
         harness.accessibility(|ui| {
-            show(ui, &mut model, false);
+            show(ui, &model, false);
         })
     }
 

@@ -149,14 +149,14 @@ fn the_home_actions_set_the_default_queue_an_install_and_sync_the_hosts() {
     assert!(matches!(&command, Effect::Send(Command::Save(change)) if *change == want));
     assert!(model.apply_action(set).is_none(), "the default already");
 
-    // A fix queues its install; `App` sends it through `next_install`.
+    // A fix queues its install, and the effect sends it at once.
     let job = InstallJob {
         runtime: Runtime::Caddy,
         version: None,
     };
-    assert!(model.apply_action(Action::Install(job.clone())).is_none());
+    let sent = model.apply_action(Action::Install(job.clone())).command();
+    assert!(matches!(sent, Some(Command::Install(ref sent)) if *sent == job));
     assert!(model.installing());
-    assert_eq!(model.next_install(), Some(job.clone()));
     // One at a time: a second fix waits for the first to end.
     assert!(!model.queue_install(job));
     assert_eq!(model.next_install(), None);
@@ -179,11 +179,10 @@ fn the_home_actions_set_the_default_queue_an_install_and_sync_the_hosts() {
 #[test]
 fn the_first_run_actions_install_set_up_and_close() {
     let mut model = with_runtimes(&[], &[]);
-    assert!(model.apply_action(Action::StartFirstRun).is_none());
+    let sent = model.apply_action(Action::StartFirstRun).command();
     assert_eq!(model.session.first_run, Some(FirstRun::Installing));
-    assert_eq!(
-        model.next_install(),
-        Some(job(Runtime::Php, Some(FIRST_PHP)))
+    assert!(
+        matches!(sent, Some(Command::Install(ref sent)) if *sent == job(Runtime::Php, Some(FIRST_PHP)))
     );
 
     let command = model.apply_action(Action::RunSetup);
@@ -197,8 +196,11 @@ fn the_first_run_actions_install_set_up_and_close() {
         "one at a time"
     );
 
-    // The folder dialog is `App`'s: the model keeps out of it.
-    assert!(model.apply_action(Action::PickFolder(Pick::Park)).is_none());
+    // The folder dialog is `App`'s: the model only asks for it.
+    assert!(matches!(
+        model.apply_action(Action::PickFolder(Pick::Park)),
+        Effect::PickFolder(Pick::Park)
+    ));
     assert!(model.apply_action(Action::CloseFirstRun).is_none());
     assert!(model.session.first_run.is_none() && !model.needs_first_run());
 }
@@ -234,11 +236,11 @@ fn open_site_changes_nothing_and_the_address_comes_from_the_model() {
     let mut model = connected();
     model.update(Update::Sites(site_list(&["shop"])));
     model.session.sites.sites[0].secure = false;
-    assert!(
-        model
-            .apply_action(Action::OpenSite("shop".into()))
-            .is_none()
-    );
+    // The window opens the browser: the model only says so.
+    assert!(matches!(
+        model.apply_action(Action::OpenSite("shop".into())),
+        Effect::OpenSite(name) if name == "shop"
+    ));
     assert_eq!(model.route, Route::Home);
     assert_eq!(model.site_url("shop").as_deref(), Some("http://shop.test"));
     model.session.sites.sites[0].secure = true;
@@ -1868,16 +1870,16 @@ fn the_install_dialog_keeps_a_field_for_each_runtime_and_closes_when_the_job_is_
     assert_eq!(model.install_text(Runtime::Php), " 8.4 ");
     assert_eq!(model.install_text(Runtime::Node), "22");
     assert_eq!(model.install_text(Runtime::Caddy), "");
-    // Install: the job waits in the queue, the dialog and the text go.
+    // Install: the job goes out, the dialog and the text go.
+    let sent = model
+        .apply_action(Action::SubmitInstall(Runtime::Php))
+        .command();
     assert!(
-        model
-            .apply_action(Action::SubmitInstall(Runtime::Php))
-            .is_none()
+        matches!(sent, Some(Command::Install(ref sent)) if *sent == job(Runtime::Php, Some("8.4")))
     );
     assert_eq!(model.session.install_dialog, None);
     assert_eq!(model.install_text(Runtime::Php), "");
     assert_eq!(model.install_text(Runtime::Node), "22", "the others stay");
-    assert_eq!(model.next_install(), Some(job(Runtime::Php, Some("8.4"))));
 }
 
 #[test]

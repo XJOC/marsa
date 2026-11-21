@@ -709,13 +709,13 @@ mod tests {
             click(&model, "https://shop.test"),
             [Action::OpenSite("shop".into())]
         );
-        // The model does nothing with either: `App` opens them.
+        // The model only names what to open: `App` opens it, and sends nothing.
         let mut model = model;
         for action in [
             Action::OpenFolder("shop".into()),
             Action::OpenSite("shop".into()),
         ] {
-            assert!(model.apply_action(action).is_none());
+            assert!(model.apply_action(action).command().is_none());
         }
     }
 

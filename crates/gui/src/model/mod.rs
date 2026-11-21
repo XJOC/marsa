@@ -226,7 +226,7 @@ pub enum Action {
     /// default of `runtime`.
     SetDefault { runtime: Runtime, version: Version },
     /// A fix that installs a program (Home: "Install Caddy"). Queued like a
-    /// press of Install; `App` sends it.
+    /// press of Install; `Model::apply_action` sends it.
     Install(InstallJob),
     /// The fix "Add to /etc/hosts" (Linux).
     SyncHosts,
@@ -536,13 +536,13 @@ impl Model {
                 self.choose_default(runtime, version).map(Command::Save)
             }
             Action::Install(job) => {
-                // The job waits in the queue: `App` sends it (`next_install`).
+                // The job joins the queue; `apply_action` sends it when the daemon is free.
                 self.queue_install(job);
                 None
             }
             Action::SyncHosts => self.start_hosts_sync().then_some(Command::SyncHosts),
             Action::StartFirstRun => {
-                // The jobs wait in the queue: `App` sends them.
+                // The jobs join the queue; the first goes out now, the rest as each ends.
                 self.start_first_run();
                 None
             }
@@ -605,7 +605,7 @@ impl Model {
                 None
             }
             Action::SubmitInstall(runtime) => {
-                // The job waits in the queue: `App` sends it (`next_install`).
+                // The job joins the queue; `apply_action` sends it when the daemon is free.
                 self.request_install(runtime);
                 None
             }
