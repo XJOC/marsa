@@ -1024,6 +1024,7 @@ fn example_version(runtime: Option<Runtime>) -> &'static str {
         Some(Runtime::Caddy) => "2.11",
         Some(Runtime::Postgres) => "18",
         Some(Runtime::Mysql) => "8.4",
+        Some(Runtime::Valkey) => "8.1",
         Some(Runtime::Php) | None => "8.4",
     }
 }
@@ -1037,6 +1038,7 @@ pub fn runtime_name(runtime: Runtime) -> &'static str {
         Runtime::Caddy => "Caddy",
         Runtime::Postgres => "PostgreSQL",
         Runtime::Mysql => "MySQL",
+        Runtime::Valkey => "Valkey",
     }
 }
 
@@ -1046,6 +1048,7 @@ pub fn service_name(id: &str) -> &str {
         "caddy" => "Caddy",
         "postgres" => "PostgreSQL",
         "mysql" => "MySQL",
+        "valkey" => "Valkey",
         other => other,
     }
 }
@@ -2400,7 +2403,15 @@ mod tests {
         let names: Vec<&str> = Runtime::ALL.into_iter().map(runtime_name).collect();
         assert_eq!(
             names,
-            ["PHP", "Node.js", "Composer", "Caddy", "PostgreSQL", "MySQL"]
+            [
+                "PHP",
+                "Node.js",
+                "Composer",
+                "Caddy",
+                "PostgreSQL",
+                "MySQL",
+                "Valkey"
+            ]
         );
         for runtime in Runtime::ALL {
             let example = example_version(Some(runtime));

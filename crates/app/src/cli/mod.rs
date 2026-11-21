@@ -41,6 +41,9 @@ pub enum Tool {
     Postgres,
     /// MySQL 8.4. Installed like the others; `marsad` runs it.
     Mysql,
+    /// Valkey 8.1, for Laravel's Redis cache and queue. Installed like the
+    /// others; `marsad` runs it.
+    Valkey,
 }
 
 impl From<Tool> for Runtime {
@@ -52,6 +55,7 @@ impl From<Tool> for Runtime {
             Tool::Caddy => Runtime::Caddy,
             Tool::Postgres => Runtime::Postgres,
             Tool::Mysql => Runtime::Mysql,
+            Tool::Valkey => Runtime::Valkey,
         }
     }
 }

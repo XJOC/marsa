@@ -9,7 +9,8 @@
 //! ├── composer/2.8.4/composer.phar
 //! ├── caddy/2.11.8/caddy
 //! ├── postgres/18.7.0/bin/postgres
-//! └── mysql/8.4.13/bin/mysqld
+//! ├── mysql/8.4.13/bin/mysqld
+//! └── valkey/8.1.11/bin/valkey-server
 //! ```
 //!
 //! The list of installed versions is the folder names that are valid
@@ -47,17 +48,21 @@ pub enum Runtime {
     /// MySQL 8.4 (task M6-05), Oracle's build as it is. A service, like
     /// PostgreSQL.
     Mysql,
+    /// Valkey 8.1, the key-value server Laravel's cache and queue use as
+    /// Redis. Our own build (ADR 0023). A service, like PostgreSQL.
+    Valkey,
 }
 
 impl Runtime {
     /// Every runtime, in the order lists show them.
-    pub const ALL: [Runtime; 6] = [
+    pub const ALL: [Runtime; 7] = [
         Runtime::Php,
         Runtime::Node,
         Runtime::Composer,
         Runtime::Caddy,
         Runtime::Postgres,
         Runtime::Mysql,
+        Runtime::Valkey,
     ];
 
     /// The folder name under `runtimes/`.
@@ -69,6 +74,7 @@ impl Runtime {
             Runtime::Caddy => "caddy",
             Runtime::Postgres => "postgres",
             Runtime::Mysql => "mysql",
+            Runtime::Valkey => "valkey",
         }
     }
 }
@@ -282,7 +288,9 @@ mod tests {
         let names: Vec<&str> = Runtime::ALL.iter().map(|r| r.dir_name()).collect();
         assert_eq!(
             names,
-            ["php", "node", "composer", "caddy", "postgres", "mysql"]
+            [
+                "php", "node", "composer", "caddy", "postgres", "mysql", "valkey"
+            ]
         );
     }
 

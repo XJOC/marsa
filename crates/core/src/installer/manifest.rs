@@ -78,6 +78,7 @@ pub struct Manifest {
     caddy: Vec<Release>,
     postgres: Vec<Release>,
     mysql: Vec<Release>,
+    valkey: Vec<Release>,
 }
 
 /// One version of a runtime and its files for each platform.
@@ -159,6 +160,7 @@ impl Manifest {
             Runtime::Caddy => &self.caddy,
             Runtime::Postgres => &self.postgres,
             Runtime::Mysql => &self.mysql,
+            Runtime::Valkey => &self.valkey,
         }
     }
 
@@ -342,6 +344,7 @@ fn parse_verified(json: &[u8], last_seen: Option<u64>) -> Result<Manifest, Manif
         caddy: releases("caddy", raw.runtimes.caddy)?,
         postgres: releases("postgres", raw.runtimes.postgres)?,
         mysql: releases("mysql", raw.runtimes.mysql)?,
+        valkey: releases("valkey", raw.runtimes.valkey)?,
     })
 }
 
@@ -383,6 +386,9 @@ struct RawRuntimes {
     /// Added in M6-05 within schema 1, like Caddy.
     #[serde(default)]
     mysql: Vec<RawRelease>,
+    /// Added in M6-06 within schema 1, like Caddy.
+    #[serde(default)]
+    valkey: Vec<RawRelease>,
 }
 
 #[derive(Deserialize)]
@@ -917,6 +923,26 @@ mod tests {
         let http = doc.replace("https://cdn", "http://cdn");
         let reason = reason(parse_verified(http.as_bytes(), None));
         assert!(reason.starts_with("mysql 8.4.13 darwin-arm64"), "{reason}");
+    }
+
+    #[test]
+    fn valkey_releases_are_read_under_their_own_key() {
+        let doc = r#"{"schema": 1, "serial": 1, "runtimes": {"valkey": [{"version": "8.1.11",
+            "platforms": {"linux-x64": [{"name": "archive",
+            "urls": ["https://github.com/XJOC/marsa/releases/download/valkey-8.1.11-r1/valkey-8.1.11-linux-x64.tar.gz"],
+            "sha256": "2e17f6527a6c92f5713ba16e5dfd1b55869ab5e98de46677e994fed5536316ba",
+            "size": 10}]}}]}}"#;
+        let manifest = parse_verified(doc.as_bytes(), None).expect("valkey release");
+        let [valkey] = manifest.releases(Runtime::Valkey) else {
+            panic!("one valkey release expected");
+        };
+        assert_eq!(valkey.version(), &Version::new(8, 1, 11));
+        assert!(manifest.releases(Runtime::Mysql).is_empty());
+        assert!(manifest.releases(Runtime::Postgres).is_empty());
+
+        let http = doc.replace("https://github", "http://github");
+        let reason = reason(parse_verified(http.as_bytes(), None));
+        assert!(reason.starts_with("valkey 8.1.11 linux-x64"), "{reason}");
     }
 
     /// Content rules on JSON whose signature is taken as checked, one composer
