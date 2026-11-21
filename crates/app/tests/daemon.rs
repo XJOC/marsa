@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use marsa_core::databases::clients::SHIM_MARK;
 use marsa_core::platform::daemon_file::{daemon_authority, daemon_file_path, read_daemon_file};
 use marsa_core::types::{API_VERSION, ErrorBody, Event, Health, ServiceState, ServiceStatus};
 use reqwest::StatusCode;
@@ -181,6 +182,46 @@ async fn the_start_deletes_unfinished_uninstalls() {
         .map(|entry| entry.expect("an entry").file_name())
         .collect();
     assert_eq!(names, ["8.3.12"]);
+}
+
+/// After an update of Marsa, `bin/marsa-shim` is a new build and the client
+/// shims hold the old one: the start makes them again, before it serves.
+/// The user's own file of a client name stays, and nothing is made for a
+/// server with no version.
+#[tokio::test]
+async fn the_start_renews_the_client_shims_of_an_older_build() {
+    let dir = TempDir::new().expect("temp data folder");
+    let exe = std::env::consts::EXE_SUFFIX;
+    let (bin, shims) = (dir.path().join("bin"), dir.path().join("shims"));
+    let valkey = dir.path().join("runtimes").join("valkey").join("8.1.11");
+    for folder in [&bin, &shims, &valkey] {
+        fs::create_dir_all(folder).expect("a folder");
+    }
+    let build = |version: &str| format!("marsa-shim {version}\n{SHIM_MARK}php\n");
+    fs::write(bin.join(format!("marsa-shim{exe}")), build("v2")).expect("the new shim");
+    let client = |name: &str| shims.join(format!("{name}{exe}"));
+    fs::write(client("valkey-cli"), build("v1")).expect("an older client shim");
+    fs::write(client("redis-cli"), "the user's own\n").expect("the user's file");
+
+    let marsad = Marsad::start_in(dir).await;
+    let read = |name: &str| fs::read_to_string(client(name)).expect("a client shim");
+    assert_eq!(read("valkey-cli"), build("v2"), "{}", marsad.log());
+    assert_eq!(read("redis-cli"), "the user's own\n");
+    let mut names: Vec<String> = fs::read_dir(&shims)
+        .expect("the shims folder")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [format!("redis-cli{exe}"), format!("valkey-cli{exe}")]
+    );
 }
 
 /// The start looks for a Caddy to start (task M5-16). None is installed

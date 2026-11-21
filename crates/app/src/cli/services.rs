@@ -101,12 +101,24 @@ async fn act(client: &DaemonClient, command: &ServicesCommand, data_dir: &Path) 
 }
 
 /// The table, then one line per failed service that says why it failed,
-/// and how to connect to each database server while it runs.
+/// then, after a blank line each, how to connect to each database server
+/// while it runs: lines to copy into a Laravel project's settings.
 pub fn render(services: &[ServiceStatus], data_dir: &Path) -> String {
     if services.is_empty() {
         return format!("{}\n", strings::NO_SERVICES);
     }
     let mut text = table(services);
+    for status in services {
+        if let ServiceState::Failed { code } = &status.state {
+            let failure = ClientFailure::new(code, data_dir, Some(&status.id));
+            text.push_str(&strings::service_failed(
+                &status.id,
+                &failure.message,
+                &failure.code,
+            ));
+            text.push('\n');
+        }
+    }
     let global = config::load_global(&ConfigPaths::in_dir(data_dir).global).ok();
     for kind in ServerKind::ALL {
         let running = services
@@ -120,24 +132,14 @@ pub fn render(services: &[ServiceStatus], data_dir: &Path) -> String {
             .as_ref()
             .and_then(|global| kind.settings(global).port);
         let port = port.unwrap_or(kind.default_port());
-        let line = match kind {
+        let lines = match kind {
             ServerKind::Postgres => strings::postgres_connection(port),
             ServerKind::Mysql => strings::mysql_connection(port),
             ServerKind::Valkey => strings::valkey_connection(port),
         };
-        text.push_str(&line);
         text.push('\n');
-    }
-    for status in services {
-        if let ServiceState::Failed { code } = &status.state {
-            let failure = ClientFailure::new(code, data_dir, Some(&status.id));
-            text.push_str(&strings::service_failed(
-                &status.id,
-                &failure.message,
-                &failure.code,
-            ));
-            text.push('\n');
-        }
+        text.push_str(&lines);
+        text.push('\n');
     }
     text
 }
@@ -218,25 +220,50 @@ mod tests {
     }
 
     /// While PostgreSQL runs, the table says how Laravel connects, on the
-    /// port of `global.toml`.
+    /// port of `global.toml`: five lines to copy as they are.
     #[test]
     fn a_running_postgres_shows_how_to_connect() {
         let data = tempfile::tempdir().unwrap();
         let running = [status("postgres", ServiceState::Running, Some(7), 0)];
-        let text = render(&running, data.path());
-        assert!(
-            text.ends_with(
-                "postgres: 127.0.0.1:5432, user root, no password (DB_CONNECTION=pgsql, \
-                 DB_HOST=127.0.0.1, DB_PORT=5432, DB_USERNAME=root)\n"
-            ),
-            "{text}"
+        assert_eq!(
+            render(&running, data.path()),
+            "SERVICE   STATE    PID  RESTARTS\n\
+             postgres  running  7    0\n\
+             \n\
+             postgres: 127.0.0.1:5432, user root, no password. For a Laravel .env:\n\
+             DB_CONNECTION=pgsql\n\
+             DB_HOST=127.0.0.1\n\
+             DB_PORT=5432\n\
+             DB_USERNAME=root\n\
+             DB_PASSWORD=\n"
         );
         std::fs::create_dir_all(data.path().join("config")).unwrap();
         let global = ConfigPaths::in_dir(data.path()).global;
         std::fs::write(&global, "[postgres]\nport = 5433\n").unwrap();
-        assert!(render(&running, data.path()).contains("127.0.0.1:5433, user root"));
+        let text = render(&running, data.path());
+        assert!(text.contains("127.0.0.1:5433, user root"), "{text}");
+        assert!(text.contains("\nDB_PORT=5433\n"), "{text}");
         let stopped = [status("postgres", ServiceState::Stopped, None, 0)];
-        assert!(!render(&stopped, data.path()).contains("user root"));
+        assert!(!render(&stopped, data.path()).contains("DB_"));
+    }
+
+    /// `marsa services start mysql` prints the five lines too.
+    #[test]
+    fn a_running_mysql_shows_how_to_connect() {
+        let data = tempfile::tempdir().unwrap();
+        let running = [status("mysql", ServiceState::Running, Some(7), 0)];
+        let text = render(&running, data.path());
+        assert!(
+            text.ends_with(
+                "\n\nmysql: 127.0.0.1:3306, user root, no password. For a Laravel .env:\n\
+                 DB_CONNECTION=mysql\n\
+                 DB_HOST=127.0.0.1\n\
+                 DB_PORT=3306\n\
+                 DB_USERNAME=root\n\
+                 DB_PASSWORD=\n"
+            ),
+            "{text}"
+        );
     }
 
     /// While Valkey runs, the table says how Laravel's Redis cache and
@@ -247,16 +274,45 @@ mod tests {
         let running = [status("valkey", ServiceState::Running, Some(7), 0)];
         let text = render(&running, data.path());
         assert!(
-            text.ends_with("valkey: 127.0.0.1:6379 (REDIS_HOST=127.0.0.1, REDIS_PORT=6379)\n"),
+            text.ends_with(
+                "\n\nvalkey: 127.0.0.1:6379, no password. For a Laravel .env:\n\
+                 REDIS_HOST=127.0.0.1\n\
+                 REDIS_PORT=6379\n"
+            ),
             "{text}"
         );
         std::fs::create_dir_all(data.path().join("config")).unwrap();
         let global = ConfigPaths::in_dir(data.path()).global;
         std::fs::write(&global, "[valkey]\nport = 6380\n").unwrap();
         let text = render(&running, data.path());
-        assert!(text.contains("127.0.0.1:6380 (REDIS_HOST=127.0.0.1, REDIS_PORT=6380)"));
+        assert!(
+            text.contains("valkey: 127.0.0.1:6380, no password"),
+            "{text}"
+        );
+        assert!(text.ends_with("\nREDIS_PORT=6380\n"), "{text}");
         let stopped = [status("valkey", ServiceState::Stopped, None, 0)];
         assert!(!render(&stopped, data.path()).contains("REDIS_PORT"));
+    }
+
+    /// A failure stays under its row, and each running server's lines come
+    /// after it, in the order of the servers.
+    #[test]
+    fn failures_come_first_then_each_server_in_its_own_block() {
+        let data = tempfile::tempdir().unwrap();
+        let failed = ServiceState::Failed {
+            code: "port_in_use".into(),
+        };
+        let services = [
+            status("caddy", failed, None, 3),
+            status("valkey", ServiceState::Running, Some(8), 0),
+            status("postgres", ServiceState::Running, Some(7), 0),
+        ];
+        let text = render(&services, data.path());
+        let blocks: Vec<&str> = text.split("\n\n").collect();
+        assert_eq!(blocks.len(), 3, "{text}");
+        assert!(blocks[0].ends_with("[port_in_use]"), "{text}");
+        assert!(blocks[1].starts_with("postgres: "), "{text}");
+        assert!(blocks[2].starts_with("valkey: "), "{text}");
     }
 
     #[test]

@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use super::api::HttpError;
 use super::autostart_api::Autostart;
 use super::caddy::CaddyManager;
+use super::client_shims::ClientShims;
 use super::databases::ServerManager;
 use super::dns::DnsService;
 use super::php::Pools;
@@ -87,6 +88,9 @@ pub struct Daemon {
     pub pass_requests: PassRequests,
     /// The runtime installer, and whether an install runs (task M3-12).
     pub installs: Installs,
+    /// The shims of the database clients, made and removed with their
+    /// server's versions.
+    pub client_shims: ClientShims,
     /// Where the login file that starts the tray icon goes (task M5-03).
     /// [`Autostart::unset`] here, so tests never reach the user's real
     /// folders; `server::run` sets [`Autostart::this_user`].
@@ -111,6 +115,7 @@ impl Daemon {
             dns: DnsService::new(None),
             pools: Pools::default(),
             pass_requests: PassRequests::default(),
+            client_shims: ClientShims::new(&data_dir),
             data_dir,
             state: Arc::default(),
             events: broadcast::channel(EVENT_CAPACITY).0,

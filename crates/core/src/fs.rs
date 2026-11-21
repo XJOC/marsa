@@ -85,6 +85,21 @@ pub fn create_new(path: &Path, mode: Option<u32>) -> io::Result<File> {
     options.open(path)
 }
 
+/// The device and inode of a file, so two looks can tell whether they saw
+/// the same file, or two names are hard links to one file.
+// `#[cfg(unix)]` outside `platform`: std gives a stable file id on Unix only.
+#[cfg(unix)]
+pub fn file_id(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    Some((meta.dev(), meta.ino()))
+}
+
+/// Windows: std gives no stable file id, so the caller decides otherwise.
+#[cfg(not(unix))]
+pub fn file_id(_meta: &fs::Metadata) -> Option<(u64, u64)> {
+    None
+}
+
 /// Flushes the entries of `dir` (a rename into it) to disk.
 // `#[cfg(unix)]` outside `platform`: a folder's entries are flushed by
 // opening the folder, which only Unix allows. NTFS logs them itself.
@@ -188,6 +203,27 @@ mod tests {
         write_atomic(&target, b"x", None).unwrap_err();
         assert!(!temp_path(&target).exists());
         assert!(target.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_has_the_id_of_its_file_and_a_copy_has_its_own() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, "x").unwrap();
+        fs::hard_link(&file, dir.path().join("link")).unwrap();
+        fs::copy(&file, dir.path().join("copy")).unwrap();
+        let id = |name: &str| file_id(&fs::metadata(dir.path().join(name)).unwrap());
+        assert!(id("file").is_some());
+        assert_eq!(id("link"), id("file"));
+        assert_ne!(id("copy"), id("file"));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn windows_has_no_file_id() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(file_id(&fs::metadata(dir.path()).unwrap()), None);
     }
 
     #[test]

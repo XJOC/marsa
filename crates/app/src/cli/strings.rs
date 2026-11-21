@@ -1236,28 +1236,39 @@ pub fn state_name(state: &ServiceState) -> &'static str {
     }
 }
 
-/// The line under the table while MySQL runs: how a Laravel `.env`
+/// The lines under the table while MySQL runs: how a Laravel `.env`
 /// connects to it, over TCP, as `root@127.0.0.1`, which has no
 /// administrative privilege (ADR 0023, "Access").
 pub fn mysql_connection(port: u16) -> String {
+    sql_connection("mysql", "mysql", port)
+}
+
+/// The lines under the table while Valkey runs: how Laravel's Redis cache
+/// and queue reach it. No user and no password.
+pub fn valkey_connection(port: u16) -> String {
     format!(
-        "mysql: 127.0.0.1:{port}, user root, no password (DB_CONNECTION=mysql, \
-         DB_HOST=127.0.0.1, DB_PORT={port}, DB_USERNAME=root)"
+        "valkey: 127.0.0.1:{port}, no password. For a Laravel .env:\n\
+         REDIS_HOST=127.0.0.1\n\
+         REDIS_PORT={port}"
     )
 }
 
-/// The line under the table while Valkey runs: how Laravel's Redis cache
-/// and queue reach it. No user and no password.
-pub fn valkey_connection(port: u16) -> String {
-    format!("valkey: 127.0.0.1:{port} (REDIS_HOST=127.0.0.1, REDIS_PORT={port})")
-}
-
-/// The line under the table while PostgreSQL runs: how a Laravel `.env`
+/// The lines under the table while PostgreSQL runs: how a Laravel `.env`
 /// connects to it. `root` is not a superuser (ADR 0023, "Access").
 pub fn postgres_connection(port: u16) -> String {
+    sql_connection("postgres", "pgsql", port)
+}
+
+/// A summary line, then the five lines of a Laravel `.env`, each ready to
+/// copy as it is. `driver` is Laravel's `DB_CONNECTION`.
+fn sql_connection(id: &str, driver: &str, port: u16) -> String {
     format!(
-        "postgres: 127.0.0.1:{port}, user root, no password (DB_CONNECTION=pgsql, \
-         DB_HOST=127.0.0.1, DB_PORT={port}, DB_USERNAME=root)"
+        "{id}: 127.0.0.1:{port}, user root, no password. For a Laravel .env:\n\
+         DB_CONNECTION={driver}\n\
+         DB_HOST=127.0.0.1\n\
+         DB_PORT={port}\n\
+         DB_USERNAME=root\n\
+         DB_PASSWORD="
     )
 }
 

@@ -12,8 +12,12 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use marsa_core::config;
+use marsa_core::databases::clients::CLIENTS;
 
-/// The names `marsa-shim` answers to (architecture.md section 7).
+/// The names `marsa-shim` answers to (architecture.md section 7). The
+/// database clients (`psql`, ...) come from [`CLIENTS`]: in a release
+/// `marsad` links them only once their server is installed, and it removes
+/// these links at its start while the server is not.
 const SHIM_NAMES: [&str; 5] = ["php", "node", "npm", "npx", "composer"];
 /// One folder per tool under `runtimes/`; versions go inside by hand.
 const RUNTIME_DIRS: [&str; 3] = ["php", "node", "composer"];
@@ -35,12 +39,18 @@ impl Step {
     }
 }
 
-/// The steps for a data folder: `shims/`, the five links, then `runtimes/*`.
+/// The steps for a data folder: `shims/`, the five links, the links of the
+/// database clients, then `runtimes/*`.
 fn plan(data_dir: &Path) -> Vec<Step> {
     let shims = data_dir.join("shims");
     let runtimes = data_dir.join("runtimes");
     let mut steps = vec![Step::Dir(shims.clone())];
     steps.extend(SHIM_NAMES.iter().map(|name| Step::Link(shims.join(name))));
+    steps.extend(
+        CLIENTS
+            .iter()
+            .map(|client| Step::Link(shims.join(client.name))),
+    );
     steps.extend(
         RUNTIME_DIRS
             .iter()
@@ -183,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_has_shims_dir_then_five_links_then_runtime_dirs() {
+    fn plan_has_shims_dir_then_the_links_then_runtime_dirs() {
         let data = Path::new("data");
         let dir = |path: &str| Step::Dir(data.join(path));
         let link = |path: &str| Step::Link(data.join(path));
@@ -194,11 +204,37 @@ mod tests {
             link("shims/npm"),
             link("shims/npx"),
             link("shims/composer"),
+            link("shims/psql"),
+            link("shims/pg_dump"),
+            link("shims/pg_restore"),
+            link("shims/mysql"),
+            link("shims/mysqldump"),
+            link("shims/mysqladmin"),
+            link("shims/valkey-cli"),
+            link("shims/redis-cli"),
             dir("runtimes/php"),
             dir("runtimes/node"),
             dir("runtimes/composer"),
         ];
         assert_eq!(plan(data), expected);
+    }
+
+    /// The database clients run through the same shim, so `psql` can be
+    /// tried by hand too.
+    #[test]
+    fn the_database_clients_link_to_the_shim() {
+        let tmp = tempdir().expect("tempdir");
+        let shim = fake_shim(tmp.path(), "shim v1");
+        apply_all(tmp.path(), &shim).expect("apply");
+        for client in CLIENTS {
+            let link = tmp.path().join("shims").join(client.name);
+            let text = fs::read_to_string(&link).expect("read link");
+            assert_eq!(text, "shim v1", "{}", client.name);
+        }
+        // The server programs are never shims.
+        for server in ["postgres", "mysqld", "valkey-server"] {
+            assert!(!tmp.path().join("shims").join(server).exists(), "{server}");
+        }
     }
 
     #[test]
