@@ -72,25 +72,25 @@ pub mod code {
     pub const PF_FLUSH_FAILED: &str = "pf_flush_failed";
     /// `pf-load` found no rules file: `pf_install` has not run.
     pub const PF_NOT_INSTALLED: &str = "pf_not_installed";
-    /// A file at [`FILE`] that Marsa did not write, so it was left as it is.
+    /// A file at `FILE` that Marsa did not write, so it was left as it is.
     pub const PORTS_FOREIGN: &str = "ports_foreign";
-    /// [`FILE`] cannot be read, or `ports_install` cannot read the current
+    /// `FILE` cannot be read, or `ports_install` cannot read the current
     /// value. Nothing was changed.
     pub const PORTS_READ: &str = "ports_read";
-    /// Writing [`FILE`] failed.
+    /// Writing `FILE` failed.
     pub const PORTS_WRITE: &str = "ports_write";
     /// `sysctl -p` failed, or port 80 is still not allowed after it. Marsa's
     /// file is removed again, so it cannot take effect at a later boot.
     pub const PORTS_APPLY_FAILED: &str = "ports_apply_failed";
-    /// Deleting [`FILE`] failed. Nothing was changed.
+    /// Deleting `FILE` failed. Nothing was changed.
     pub const PORTS_DELETE: &str = "ports_delete";
-    /// [`FILE`] is deleted, but the value could not be set back to the default.
+    /// `FILE` is deleted, but the value could not be set back to the default.
     /// It stays as it is until the next boot.
     pub const PORTS_RESTORE_FAILED: &str = "ports_restore_failed";
-    /// A file at [`UNIT_FILE`] that Marsa did not write, so it was left as it
+    /// A file at `UNIT_FILE` that Marsa did not write, so it was left as it
     /// is.
     pub const RESOLVED_FOREIGN: &str = "resolved_foreign";
-    /// [`UNIT_FILE`] or [`DROP_IN`] cannot be read, so it was left as it is.
+    /// `UNIT_FILE` or `DROP_IN` cannot be read, so it was left as it is.
     pub const RESOLVED_READ: &str = "resolved_read";
     /// systemd-resolved does not run, or `systemctl` cannot tell. Nothing was
     /// changed.
@@ -98,7 +98,7 @@ pub mod code {
     /// There is no `ip` program (iproute2) at the usual paths. Nothing was
     /// changed.
     pub const RESOLVED_TOOL_MISSING: &str = "resolved_tool_missing";
-    /// Writing [`UNIT_FILE`] failed.
+    /// Writing `UNIT_FILE` failed.
     pub const RESOLVED_WRITE: &str = "resolved_write";
     /// `systemctl` could not load, enable, start, or stop Marsa's unit. After
     /// an install, the unit is gone again.
@@ -106,14 +106,14 @@ pub mod code {
     /// `marsa0` does not send `.test` names, and only them, to Marsa's server.
     /// The unit is gone again.
     pub const RESOLVED_CHECK_FAILED: &str = "resolved_check_failed";
-    /// The restart that drops [`DROP_IN`] failed, or `systemctl` cannot tell
+    /// The restart that drops `DROP_IN` failed, or `systemctl` cannot tell
     /// whether systemd-resolved runs. The message says that the old process
     /// may still use Marsa's server.
     pub const RESOLVED_RESTART_FAILED: &str = "resolved_restart_failed";
-    /// systemd-resolved does not run after the restart that drops [`DROP_IN`],
+    /// systemd-resolved does not run after the restart that drops `DROP_IN`,
     /// and did not start again: no name resolves until it runs.
     pub const RESOLVED_STOPPED: &str = "resolved_stopped";
-    /// Deleting [`UNIT_FILE`] or [`DROP_IN`] failed.
+    /// Deleting `UNIT_FILE` or `DROP_IN` failed.
     pub const RESOLVED_DELETE: &str = "resolved_delete";
     /// The version of systemd cannot be read, so Marsa makes no link. Nothing
     /// was changed but the removal of an old drop-in (and of an earlier unit).
@@ -128,7 +128,7 @@ pub mod code {
     /// The request's `pem` is not exactly one certificate. On Windows also: its
     /// SHA-1 has no letter, which `certutil` would read as an index.
     pub const TRUST_CERT_INVALID: &str = "trust_cert_invalid";
-    /// Marsa's file ([`CA_PATH`] on macOS) is a link, is in a folder that not
+    /// Marsa's file (`CA_PATH` on macOS) is a link, is in a folder that not
     /// only root can change, or cannot be read as one certificate, so it was
     /// left as it is and no command ran.
     pub const TRUST_READ: &str = "trust_read";

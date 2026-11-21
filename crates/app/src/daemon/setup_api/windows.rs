@@ -62,7 +62,7 @@ pub enum Install {
 }
 
 /// The Windows calls of setup, behind a trait so that the tests run on
-/// every system. [`RealService`] is the daemon's.
+/// every system. `RealService` is the daemon's.
 pub trait Service: Send + Sync {
     /// The SID of the user `marsad` runs as.
     fn user_sid(&self) -> Result<String, String>;

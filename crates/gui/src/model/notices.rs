@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use super::{SitesNotice, UninstallNotice};
 
 /// Which of the model's results a notice in the bar tells about. Closing the
-/// notice clears that result ([`Model::dismiss_notice`]), so the bar shows the
+/// notice clears that result (`Model::dismiss_notice`), so the bar shows the
 /// next one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NoticeSource {
@@ -15,7 +15,7 @@ pub enum NoticeSource {
     Call,
     /// The last sites action ([`SitesNotice`]).
     Sites,
-    /// How the install shown ended ([`Model::install_result`]). Not stored
+    /// How the install shown ended (`Model::install_result`). Not stored
     /// here: the installs hold it.
     Install,
     /// The last uninstall ([`UninstallNotice`]).

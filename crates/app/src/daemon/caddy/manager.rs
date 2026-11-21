@@ -157,7 +157,7 @@ impl CaddyManager {
     /// moves a running Caddy to 80 and 443, with no restart.
     ///
     /// The orphan check looks at these ports and at those of `input`
-    /// ([`CaddyManager::orphans`]): an orphan may have started before setup.
+    /// (`CaddyManager::orphans`): an orphan may have started before setup.
     pub fn ports(&self) -> CaddyInput {
         if (self.low_ports)() {
             self.input.on_low_ports()
