@@ -401,7 +401,7 @@ mod tests {
     use super::super::*;
     use super::*;
 
-    use crate::daemon::hosts_sync;
+    use crate::daemon::sites::hosts_sync;
     use crate::daemon::state::Daemon;
 
     use axum::http::StatusCode;

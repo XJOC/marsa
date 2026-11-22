@@ -53,9 +53,9 @@ use marsa_core::types::{ApiError, Event, SetupReport, SetupSkip, Site, SiteList}
 use tokio::runtime::Handle;
 
 use super::api::HttpError;
-use super::hosts_sync;
 use super::http;
 use super::one_at_a_time::{OneAtATime, Turn};
+use super::sites::hosts_sync;
 use super::state::Daemon;
 
 pub use self::ca::{CA_WAIT, CaddyStart, StartCaddy};

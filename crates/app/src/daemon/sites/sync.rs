@@ -26,7 +26,7 @@
 //! job pushed on the worker's queue with a reply slot. A request is answered
 //! after a pass that started after it, so that pass saw the change.
 //!
-//! [`CaddyManager::apply`]: super::services::caddy::CaddyManager::apply
+//! [`CaddyManager::apply`]: crate::daemon::services::caddy::CaddyManager::apply
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -42,9 +42,9 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use super::hosts_sync::HostsSync;
-use super::services::caddy::CADDY_ID;
-use super::services::php::{PhpManager, SystemRoots, write_ca_bundle};
-use super::state::Daemon;
+use crate::daemon::services::caddy::CADDY_ID;
+use crate::daemon::services::php::{PhpManager, SystemRoots, write_ca_bundle};
+use crate::daemon::state::Daemon;
 
 /// How long a pass waits after the first event, so a burst of changes (a
 /// parked folder with many sites, a few patches in a row) makes one pass.

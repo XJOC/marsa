@@ -25,7 +25,7 @@ use axum::{Json, Router};
 use marsa::daemon::api::router;
 use marsa::daemon::auth::AuthConfig;
 use marsa::daemon::services::caddy::{Applied, Launched, caddy_spec_for, start_at_launch};
-use marsa::daemon::sites_sync;
+use marsa::daemon::sites;
 use marsa::daemon::state::Daemon;
 use marsa_core::caddy::{PhpPools, SERVER_ID};
 use marsa_core::config::SitesConfig;
@@ -817,7 +817,7 @@ async fn caddy_that_starts_before_the_first_pass_gets_the_sites_through_load() {
     assert_eq!(status.state, ServiceState::Running);
     assert_eq!(first_host(&admin_config(app.admin_port).await), None);
 
-    let sync = sites_sync::start(&app.daemon);
+    let sync = sites::sync::start(&app.daemon);
     let started = Instant::now();
     let config = loop {
         let config = admin_config(app.admin_port).await;

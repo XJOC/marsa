@@ -33,7 +33,7 @@ use marsa_core::helper::{
 use marsa_core::sites::Site;
 use tokio::time::Instant;
 
-use super::state::Daemon;
+use crate::daemon::state::Daemon;
 
 /// The file `marsa setup` writes in the data folder once the helper service
 /// took its request on Windows.

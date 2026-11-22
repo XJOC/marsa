@@ -22,8 +22,8 @@ use super::services::databases::client_shims::ClientShims;
 use super::services::dns::DnsService;
 use super::services::php::Pools;
 use super::services::supervisor::ServiceHandle;
+use super::sites::sync::PassRequests;
 use super::sites::{self, SitesError};
-use super::sites_sync::PassRequests;
 
 /// How many events the bus keeps for a slow reader. A reader that falls
 /// further behind loses the oldest ones (`Lagged`).

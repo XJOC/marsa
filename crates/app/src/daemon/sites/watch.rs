@@ -29,7 +29,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::state::Daemon;
+use crate::daemon::state::Daemon;
 
 /// How long the parked folders must stay quiet before the rebuild.
 pub const SETTLE: Duration = Duration::from_millis(300);
