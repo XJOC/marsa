@@ -100,12 +100,12 @@ windows-service = "0.8"
 # bzip2, zstd, lzma, aes, or zopfli: the archives we read do not use them.
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
-# Architecture rule: a lock is never held across `.await`, and `unwrap()` is
-# banned outside tests (AGENTS.md section 6).
-[workspace.lints.rust]
 # `pub` only what other modules use (AGENTS.md section 6, "Clarity").
+[workspace.lints.rust]
 unreachable_pub = "warn"
 
+# Architecture rule: a lock is never held across `.await`, and `unwrap()` is
+# banned outside tests (AGENTS.md section 6).
 [workspace.lints.clippy]
 await_holding_lock = "deny"
 unwrap_used = "deny"
