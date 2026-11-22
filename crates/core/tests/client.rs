@@ -5,6 +5,7 @@
 
 #![cfg(feature = "full")]
 
+use marsa_core::data_dir::DataDir;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -63,7 +64,7 @@ struct DaemonLock(Arc<Mutex<Option<File>>>);
 
 impl DaemonLock {
     fn take(data_dir: &Path) -> Self {
-        let run = data_dir.join("run");
+        let run = DataDir::new(data_dir).run();
         fs::create_dir_all(&run).expect("the run folder");
         let file = OpenOptions::new()
             .create(true)
@@ -174,7 +175,7 @@ fn write_file(data_dir: &Path, port: u16) -> String {
         token,
         app_version: VERSION.to_owned(),
     };
-    write_daemon_file(&data_dir.join("run"), &file).expect("write the daemon file");
+    write_daemon_file(&DataDir::new(data_dir).run(), &file).expect("write the daemon file");
     hex
 }
 
@@ -222,7 +223,7 @@ fn serve_shutdown(
 ) -> (Router, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
-    let stop = stop.map(|(data_dir, lock)| (data_dir.join("run"), lock.clone()));
+    let stop = stop.map(|(data_dir, lock)| (DataDir::new(data_dir).run(), lock.clone()));
     let router = router.route(
         "/v1/shutdown",
         post(move || {
@@ -1300,7 +1301,7 @@ fn a_broken_file_keeps_its_code() {
     let dir = TempDir::new().unwrap();
     let _lock = DaemonLock::take(dir.path());
     write_file(dir.path(), 1);
-    let path = daemon_file_path(&dir.path().join("run"));
+    let path = daemon_file_path(&DataDir::new(dir.path()).run());
     fs::write(&path, "not json").unwrap();
     let err = DaemonClient::connect(dir.path()).unwrap_err();
     assert_eq!(err.code(), "daemon_file_invalid", "{err:?}");
@@ -1366,7 +1367,7 @@ async fn a_daemon_with_a_newer_api_is_refused_and_left_running() {
             .unwrap_err();
         assert_eq!(err.code(), "daemon_api_too_new", "{err:?}");
         assert_eq!(shutdowns.load(Ordering::SeqCst), 0);
-        assert!(daemon_file_path(&fake.data_dir().join("run")).exists());
+        assert!(daemon_file_path(&DataDir::new(fake.data_dir()).run()).exists());
         fake.assert_no_token(&err);
     }
 }
@@ -1388,7 +1389,7 @@ async fn an_older_daemon_is_stopped_then_replaced() {
     assert_eq!(err.code(), "daemon_start_failed", "{err:?}");
     assert!(err.to_string().contains("cannot run"), "{err}");
     assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
-    assert!(!daemon_file_path(&temp.path().join("run")).exists());
+    assert!(!daemon_file_path(&DataDir::new(temp.path()).run()).exists());
     fake.assert_no_token(&err);
 }
 

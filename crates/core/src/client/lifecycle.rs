@@ -1,6 +1,7 @@
 //! The daemon's life as the client sees it: find it, start it, replace an
 //! older one, stop it (architecture.md section 6).
 
+use crate::data_dir::DataDir;
 use std::cmp::Ordering;
 use std::fs::{File, TryLockError};
 use std::future::Future;
@@ -313,7 +314,7 @@ async fn start(
 ) -> Result<DaemonClient, ClientError> {
     let run = run_dir(data_dir);
     let lock = daemon_lock_path(&run);
-    let log = data_dir.join("logs").join("marsad.log");
+    let log = DataDir::new(data_dir).marsad_log();
     // A file left by a crash stays until the new daemon replaces it. Its
     // daemon is gone, so it must not be contacted.
     let stale = read_daemon_file(&run)

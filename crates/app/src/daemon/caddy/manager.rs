@@ -10,6 +10,7 @@ use crate::daemon::state::Daemon;
 use crate::daemon::supervisor::{ServiceHandle, ServiceRuntime, Supervisor, lock};
 use marsa_core::caddy::{CaddyError, CaddyInput, CaddyPaths, PhpPools, sites_config};
 use marsa_core::codes;
+use marsa_core::data_dir::DataDir;
 use marsa_core::orphan::instance_tag;
 use marsa_core::platform::process;
 use marsa_core::services::ServiceSpec;
@@ -358,7 +359,7 @@ impl CaddyManager {
             id: CADDY_ID.to_owned(),
             ..spec
         };
-        let logs_dir = daemon.data_dir.join("logs");
+        let logs_dir = DataDir::new(&daemon.data_dir).logs();
         let runtime = Arc::clone(&self.runtime);
         *lock(&self.started) = Some(spec.program.clone());
         let handle = Supervisor::spawn_on(spec, daemon.events.clone(), &logs_dir, runtime)

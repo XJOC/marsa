@@ -11,6 +11,7 @@
 //!
 //! This module is not behind the `full` feature: the shim reads both files.
 
+use crate::data_dir::DataDir;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -147,7 +148,7 @@ pub struct ConfigPaths {
 impl ConfigPaths {
     /// `<app_data_dir>/config/global.toml` and `<app_data_dir>/config/sites.toml`.
     pub fn in_dir(app_data_dir: &Path) -> Self {
-        let dir = app_data_dir.join("config");
+        let dir = DataDir::new(app_data_dir).config();
         Self {
             global: dir.join("global.toml"),
             sites: dir.join("sites.toml"),

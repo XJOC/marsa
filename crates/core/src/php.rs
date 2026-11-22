@@ -30,6 +30,7 @@
 //!
 //! This module is not behind the `full` feature: it reads and writes nothing.
 
+use crate::data_dir::DataDir;
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -162,16 +163,18 @@ impl PhpFiles {
     pub fn new(app_data_dir: &Path, version: &Version) -> Self {
         let minor = PhpMinor::from(version);
         let config_dir = app_data_dir.join("php").join(minor.to_string());
-        let log_dir = app_data_dir.join("logs");
+        let log_dir = DataDir::new(app_data_dir).logs();
         let php_dir = RuntimesDir::in_dir(app_data_dir).version_dir(Runtime::Php, version);
         Self {
             minor,
             fpm_conf_file: config_dir.join("php-fpm.conf"),
             ini_file: config_dir.join("php.ini"),
-            socket: app_data_dir.join("run").join(format!("php-{minor}.sock")),
+            socket: DataDir::new(app_data_dir)
+                .run()
+                .join(format!("php-{minor}.sock")),
             fpm_log: log_dir.join(format!("php-{minor}-fpm.log")),
             error_log: log_dir.join(format!("php-{minor}-errors.log")),
-            shims_dir: app_data_dir.join("shims"),
+            shims_dir: DataDir::new(app_data_dir).shims(),
             ca_bundle: None,
             ext_dir: php_dir.join("ext"),
             xdebug: None,
@@ -523,15 +526,15 @@ mod tests {
         let data = Path::new("data");
         let files = PhpFiles::new(data, &v("8.4.3"));
         let config = data.join("php").join("8.4");
-        let php_dir = data.join("runtimes").join("php").join("8.4.3");
+        let php_dir = DataDir::new(data).runtimes().join("php").join("8.4.3");
         let expected = PhpFiles {
             minor: MINOR,
             fpm_conf_file: config.join("php-fpm.conf"),
             ini_file: config.join("php.ini"),
-            socket: data.join("run").join("php-8.4.sock"),
-            fpm_log: data.join("logs").join("php-8.4-fpm.log"),
-            error_log: data.join("logs").join("php-8.4-errors.log"),
-            shims_dir: data.join("shims"),
+            socket: DataDir::new(data).run().join("php-8.4.sock"),
+            fpm_log: DataDir::new(data).logs().join("php-8.4-fpm.log"),
+            error_log: DataDir::new(data).logs().join("php-8.4-errors.log"),
+            shims_dir: DataDir::new(data).shims(),
             ca_bundle: None,
             ext_dir: php_dir.join("ext"),
             xdebug: None,

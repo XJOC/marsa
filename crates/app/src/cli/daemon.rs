@@ -5,6 +5,7 @@
 //! Nothing here prints the token: only the port and the PID leave the client.
 
 use marsa_core::codes;
+use marsa_core::data_dir::DataDir;
 use std::error::Error as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -152,10 +153,10 @@ pub fn failure_naming(
 fn path_for(code: &str, data_dir: &Path) -> Option<PathBuf> {
     match code {
         codes::DAEMON_START_FAILED | codes::SPAWN_FAILED => {
-            Some(data_dir.join("logs").join("marsad.log"))
+            Some(DataDir::new(data_dir).marsad_log())
         }
         codes::DAEMON_FILE_INVALID | codes::DAEMON_FILE_INSECURE | codes::DAEMON_FILE_WRITE => {
-            Some(daemon_file_path(&data_dir.join("run")))
+            Some(daemon_file_path(&DataDir::new(data_dir).run()))
         }
         codes::CADDY_NOT_INSTALLED => Some(CaddyPaths::in_dir(data_dir).runtime_dir()),
         codes::CADDY_CONFIG_WRITE => Some(CaddyPaths::in_dir(data_dir).config_file),
@@ -172,7 +173,7 @@ mod tests {
     fn a_start_failure_names_the_daemon_log() {
         let data = Path::new("/data");
         let failure = Failure::new("daemon_start_failed", data, None);
-        let log = data.join("logs").join("marsad.log");
+        let log = DataDir::new(data).marsad_log();
         assert!(
             failure.message.ends_with(&log.display().to_string()),
             "{}",
@@ -184,7 +185,7 @@ mod tests {
     fn no_caddy_names_its_folder_and_the_install_command() {
         let data = Path::new("/data");
         let failure = Failure::new("caddy_not_installed", data, Some("caddy"));
-        let caddy = data.join("runtimes").join("caddy");
+        let caddy = DataDir::new(data).runtimes().join("caddy");
         assert_eq!(
             failure.line(),
             format!(

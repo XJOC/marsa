@@ -2,6 +2,7 @@
 //! the first init, how it stops, and its own rule for the check before a
 //! start.
 
+use crate::data_dir::DataDir;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -54,7 +55,7 @@ impl MysqlDirs {
         Self {
             data: mysql.join(line),
             files: mysql.join("files"),
-            run: app_data_dir.join("run"),
+            run: DataDir::new(app_data_dir).run(),
         }
     }
 

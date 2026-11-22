@@ -273,6 +273,7 @@ pub(super) fn bad_version(text: &str, err: BadRequest) -> HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marsa_core::data_dir::DataDir;
 
     #[test]
     fn an_unknown_tool_is_refused_with_every_known_name() {
@@ -317,7 +318,7 @@ mod tests {
             "caddy/2.11.7",
             ".tmp",
         ] {
-            std::fs::create_dir_all(tmp.path().join("runtimes").join(dir)).unwrap();
+            std::fs::create_dir_all(DataDir::new(tmp.path()).runtimes().join(dir)).unwrap();
         }
         let shown = |got: RuntimeList| -> Vec<_> {
             let row = |r: RuntimeVersions| (r.runtime, r.installed.join(","), r.default);
@@ -364,7 +365,7 @@ mod tests {
     fn an_unreadable_folder_is_runtimes_read() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
-        let php = tmp.path().join("runtimes").join("php");
+        let php = DataDir::new(tmp.path()).runtimes().join("php");
         std::fs::create_dir_all(&php).unwrap();
         std::fs::set_permissions(&php, std::fs::Permissions::from_mode(0o000)).unwrap();
         let result = list(tmp.path());

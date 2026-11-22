@@ -181,6 +181,7 @@ fn table(services: &[ServiceStatus]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marsa_core::data_dir::DataDir;
 
     fn status(id: &str, state: ServiceState, pid: Option<u32>, restarts: u32) -> ServiceStatus {
         ServiceStatus {
@@ -239,7 +240,7 @@ mod tests {
              DB_USERNAME=root\n\
              DB_PASSWORD=\n"
         );
-        std::fs::create_dir_all(data.path().join("config")).unwrap();
+        std::fs::create_dir_all(DataDir::new(data.path()).config()).unwrap();
         let global = ConfigPaths::in_dir(data.path()).global;
         std::fs::write(&global, "[postgres]\nport = 5433\n").unwrap();
         let text = render(&running, data.path());
@@ -283,7 +284,7 @@ mod tests {
             ),
             "{text}"
         );
-        std::fs::create_dir_all(data.path().join("config")).unwrap();
+        std::fs::create_dir_all(DataDir::new(data.path()).config()).unwrap();
         let global = ConfigPaths::in_dir(data.path()).global;
         std::fs::write(&global, "[valkey]\nport = 6380\n").unwrap();
         let text = render(&running, data.path());

@@ -13,6 +13,7 @@ use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
 use marsa_core::caddy::CaddyInput;
 use marsa_core::caddy::CaddyPaths;
+use marsa_core::data_dir::DataDir;
 use marsa_core::dns::NETWORKD_UNITS;
 use marsa_core::helper::HelperOp;
 use marsa_core::helper::HelperRequest;
@@ -258,12 +259,12 @@ impl Dir {
             fs::create_dir_all(root.parent().unwrap()).unwrap();
             fs::write(&root, TEST_CA).unwrap();
         }
-        let helper = dir.path().join("bin").join("marsa-helper");
+        let helper = DataDir::new(dir.path()).bin().join("marsa-helper");
         fs::create_dir_all(helper.parent().unwrap()).unwrap();
         fs::write(&helper, "").unwrap();
         // As cargo and an install leave them, whatever the umask.
         #[cfg(unix)]
-        for path in [&helper, &dir.path().join("bin")] {
+        for path in [&helper, &DataDir::new(dir.path()).bin()] {
             set_mode(path, 0o755);
         }
         Self {
@@ -286,7 +287,7 @@ impl Dir {
     }
 
     pub(super) fn helper(&self) -> PathBuf {
-        self.dir.path().join("bin").join("marsa-helper")
+        DataDir::new(self.dir.path()).bin().join("marsa-helper")
     }
 
     pub(super) fn home(&self) -> PathBuf {

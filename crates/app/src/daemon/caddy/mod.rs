@@ -130,6 +130,7 @@ impl fmt::Display for ActionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marsa_core::data_dir::DataDir;
     use std::env::consts::EXE_SUFFIX;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -163,7 +164,7 @@ mod tests {
     #[test]
     fn caddy_spec_runs_the_newest_caddy_with_the_config() {
         let dir = tempfile::tempdir().unwrap();
-        let caddy = dir.path().join("runtimes").join("caddy");
+        let caddy = DataDir::new(dir.path()).runtimes().join("caddy");
         for version in ["2.11.8", "2.11.10", "2.11.9"] {
             std::fs::create_dir_all(caddy.join(version)).unwrap();
         }

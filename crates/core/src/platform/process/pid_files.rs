@@ -112,6 +112,7 @@ pub fn remove_pid_file(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_dir::DataDir;
     use std::path::PathBuf;
 
     use super::super::at;
@@ -163,7 +164,7 @@ mod tests {
     #[test]
     fn the_pid_file_round_trips_and_replaces_a_stale_temp_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("run").join("caddy.pid");
+        let path = DataDir::new(dir.path()).run().join("caddy.pid");
         assert_eq!(read_pid_file(&path), None);
         let record = PidRecord {
             pid: 42,
@@ -171,10 +172,14 @@ mod tests {
             started: at("Wed Nov  4 03:31:27 2026"),
         };
         write_pid_file(&path, &record).unwrap();
-        fs::write(dir.path().join("run").join(".caddy.pid.tmp"), "half").unwrap();
+        fs::write(
+            DataDir::new(dir.path()).run().join(".caddy.pid.tmp"),
+            "half",
+        )
+        .unwrap();
         write_pid_file(&path, &record).unwrap();
         assert_eq!(read_pid_file(&path), Some(record));
-        let names: Vec<_> = fs::read_dir(dir.path().join("run"))
+        let names: Vec<_> = fs::read_dir(DataDir::new(dir.path()).run())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();

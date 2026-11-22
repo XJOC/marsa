@@ -323,6 +323,7 @@ mod tests {
     use crate::daemon::setup_api::test_support::set_mode;
     use crate::daemon::setup_api::test_support::{Fake, make_helper, ok, script_error};
     use crate::daemon::setup_api::windows::{Install, Service};
+    use marsa_core::data_dir::DataDir;
     use std::fs;
     use std::io;
     use std::path::PathBuf;
@@ -454,11 +455,11 @@ mod tests {
         }
 
         fn helper(&self) -> PathBuf {
-            self.dir.path().join("bin").join("marsa-helper")
+            DataDir::new(self.dir.path()).bin().join("marsa-helper")
         }
 
         fn tray(&self) -> PathBuf {
-            self.dir.path().join("bin").join("marsa-tray")
+            DataDir::new(self.dir.path()).bin().join("marsa-tray")
         }
 
         fn home(&self) -> PathBuf {

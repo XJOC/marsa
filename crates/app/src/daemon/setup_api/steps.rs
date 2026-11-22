@@ -162,8 +162,8 @@ impl Setup {
             }
         } else if let Some(code) = dns_down {
             dns_skipped(&mut report, RESOLVER_INSTALL, code);
-        } else if let Some(dns) = dns::strategy_for(platform) {
-            ops.push(dns.setup_op());
+        } else if let Some(op) = dns::setup_op(platform) {
+            ops.push(op);
         }
         if platform.os() == Os::Linux {
             ops.push(HelperOp::PortsInstall);

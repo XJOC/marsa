@@ -21,6 +21,7 @@
 //! makes none), is the user's: it is never replaced or deleted, and the log
 //! says that it runs instead of Marsa's client.
 
+use marsa_core::data_dir::DataDir;
 use std::fs as stdfs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -86,8 +87,8 @@ impl ClientShims {
     pub fn new(data_dir: &Path) -> Self {
         let program = format!("marsa-shim{}", std::env::consts::EXE_SUFFIX);
         Self {
-            dir: data_dir.join("shims"),
-            shim: data_dir.join("bin").join(program),
+            dir: DataDir::new(data_dir).shims(),
+            shim: DataDir::new(data_dir).bin().join(program),
             runtimes: RuntimesDir::in_dir(data_dir),
             lock: Mutex::default(),
         }
@@ -339,7 +340,7 @@ mod tests {
         /// Replaces `bin/marsa-shim` as `install.sh` does: a new file
         /// renamed over the old one.
         fn new_shim(&self, text: &str) {
-            let bin = self.dir.path().join("bin");
+            let bin = DataDir::new(self.dir.path()).bin();
             stdfs::create_dir_all(&bin).unwrap();
             let new = bin.join("marsa-shim.new");
             stdfs::write(&new, shim_bytes(text)).unwrap();

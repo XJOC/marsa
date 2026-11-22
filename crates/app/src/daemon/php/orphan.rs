@@ -98,6 +98,7 @@
 //! from before is deleted.
 
 use marsa_core::codes;
+use marsa_core::data_dir::DataDir;
 use std::cmp::Ordering;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -221,7 +222,7 @@ impl PidFile {
     pub fn new(data_dir: &Path, minor: PhpMinor) -> Self {
         let name = format!("{}.pid", fpm_id(minor));
         Self {
-            path: data_dir.join("run").join(name),
+            path: DataDir::new(data_dir).run().join(name),
         }
     }
 
@@ -2621,7 +2622,7 @@ mod tests {
             programs.push(program);
         }
         // Not a version: never a program.
-        let other = dir.path().join("runtimes").join("php").join("8.4");
+        let other = DataDir::new(dir.path()).runtimes().join("php").join("8.4");
         std::fs::create_dir_all(other.join("bin")).unwrap();
 
         let found = installed_programs(dir.path(), platform);

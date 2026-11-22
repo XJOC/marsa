@@ -407,6 +407,7 @@ impl Run {
 mod tests {
     use super::*;
     use crate::screens::sites::{List, view};
+    use marsa_core::data_dir::DataDir;
 
     fn plan(sites: usize) -> Plan {
         Plan {
@@ -454,7 +455,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         assert!(is_empty(dir.path()));
         assert!(is_empty(&dir.path().join("not-there-yet")));
-        std::fs::create_dir(dir.path().join("run")).expect("a folder");
+        std::fs::create_dir(DataDir::new(dir.path()).run()).expect("a folder");
         assert!(
             !is_empty(dir.path()),
             "a folder Marsa used has things in it"
@@ -480,7 +481,7 @@ mod tests {
             Err(MeasureError::Unreadable(_))
         ));
         // A folder with anything in it is refused, so a real one never is used.
-        std::fs::create_dir(dir.path().join("config")).expect("a folder");
+        std::fs::create_dir(DataDir::new(dir.path()).config()).expect("a folder");
         let refused = check(Some("sites=500"), dir.path()).expect_err("a refusal");
         assert!(matches!(refused, MeasureError::NotEmpty(_)));
         assert!(

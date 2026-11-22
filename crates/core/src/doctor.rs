@@ -494,15 +494,28 @@ pub fn ports(facts: Ports) -> Verdict {
     }
 }
 
+/// What the doctor knows about Caddy on Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaddyState {
+    /// The daemon does not run, so Caddy is not known.
+    DaemonDown,
+    /// The daemon runs and Caddy does not.
+    Stopped,
+    /// Caddy runs, with this PID.
+    Running(u32),
+}
+
 /// Windows: Caddy listens on 80 and 443 itself, so a holder
 /// fails only when it is not Caddy: IIS, or `System` (PID 4) for another
-/// HTTP.sys server. `caddy`: `None` when the daemon does not run,
-/// `Some(None)` when Caddy does not, else Caddy's PID.
-pub fn windows_ports(holders: Option<Vec<PortHolder>>, caddy: Option<Option<u32>>) -> Verdict {
+/// HTTP.sys server.
+pub fn windows_ports(holders: Option<Vec<PortHolder>>, caddy: CaddyState) -> Verdict {
     let Some(holders) = holders else {
         return Verdict::Skip(Skip::NotChecked);
     };
-    let caddy_pid = caddy.flatten();
+    let caddy_pid = match caddy {
+        CaddyState::Running(pid) => Some(pid),
+        CaddyState::DaemonDown | CaddyState::Stopped => None,
+    };
     let (caddys, others): (Vec<PortHolder>, Vec<PortHolder>) = holders
         .into_iter()
         .partition(|holder| caddy_pid.is_some() && holder.pid == caddy_pid);
@@ -510,13 +523,13 @@ pub fn windows_ports(holders: Option<Vec<PortHolder>>, caddy: Option<Option<u32>
         return fail(Problem::PortsHeld { holders: others });
     }
     match caddy {
-        None => Verdict::Skip(Skip::NeedsDaemon),
-        Some(None) => Verdict::Skip(Skip::NeedsCaddy),
+        CaddyState::DaemonDown => Verdict::Skip(Skip::NeedsDaemon),
+        CaddyState::Stopped => Verdict::Skip(Skip::NeedsCaddy),
         // Port 80 always: Caddy answers there for every site, secure or not.
-        Some(Some(_)) if caddys.iter().any(|holder| holder.port == 80) => {
+        CaddyState::Running(_) if caddys.iter().any(|holder| holder.port == 80) => {
             Verdict::Pass(Pass::Ports)
         }
-        Some(Some(_)) => fail(Problem::PortsNotRouted { ports: vec![80] }),
+        CaddyState::Running(_) => fail(Problem::PortsNotRouted { ports: vec![80] }),
     }
 }
 
@@ -558,18 +571,28 @@ pub fn path(
     }
 }
 
-/// `tail`: the end of `logs/marsad.log`, `Ok(None)` if there is no log, an
-/// error if it could not be read.
-pub fn log(tail: Result<Option<&str>, ()>) -> Verdict {
+/// The end of `logs/marsad.log`, as far as it could be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogTail<'a> {
+    /// There is no log.
+    Missing,
+    /// The log could not be read.
+    Unreadable,
+    /// The last lines of the log.
+    Text(&'a str),
+}
+
+/// The verdict on the end of the daemon log.
+pub fn log(tail: LogTail<'_>) -> Verdict {
     match tail {
-        Ok(Some(text)) => match last_error(text) {
+        LogTail::Text(text) => match last_error(text) {
             Some(line) => fail(Problem::LogError {
                 line: line.to_owned(),
             }),
             None => Verdict::Pass(Pass::Log),
         },
-        Ok(None) => Verdict::Skip(Skip::NoLog),
-        Err(()) => Verdict::Skip(Skip::NotChecked),
+        LogTail::Missing => Verdict::Skip(Skip::NoLog),
+        LogTail::Unreadable => Verdict::Skip(Skip::NotChecked),
     }
 }
 
@@ -934,12 +957,15 @@ mod tests {
             })
         );
         assert_eq!(log_verdict(&restarted), Verdict::Pass(Pass::Log));
-        assert_eq!(super::log(Ok(None)), Verdict::Skip(Skip::NoLog));
-        assert_eq!(super::log(Err(())), Verdict::Skip(Skip::NotChecked));
+        assert_eq!(super::log(LogTail::Missing), Verdict::Skip(Skip::NoLog));
+        assert_eq!(
+            super::log(LogTail::Unreadable),
+            Verdict::Skip(Skip::NotChecked)
+        );
     }
 
     fn log_verdict(text: &str) -> Verdict {
-        super::log(Ok(Some(text)))
+        super::log(LogTail::Text(text))
     }
 
     #[test]
@@ -1028,38 +1054,41 @@ mod tests {
         };
         let caddy = vec![held(80, 5244, "caddy.exe"), held(443, 5244, "caddy.exe")];
         assert_eq!(
-            windows_ports(Some(caddy.clone()), Some(Some(5244))),
+            windows_ports(Some(caddy.clone()), CaddyState::Running(5244)),
             Verdict::Pass(Pass::Ports)
         );
         let mut with_iis = caddy.clone();
         with_iis.push(held(80, 4, "System"));
         assert_eq!(
-            windows_ports(Some(with_iis), Some(Some(5244))),
+            windows_ports(Some(with_iis), CaddyState::Running(5244)),
             Verdict::Fail(Problem::PortsHeld {
                 holders: vec![held(80, 4, "System")]
             })
         );
         // Caddy stopped: its old PID means nothing, and IIS still fails.
         assert_eq!(
-            windows_ports(Some(vec![held(80, 4, "System")]), Some(None)),
+            windows_ports(Some(vec![held(80, 4, "System")]), CaddyState::Stopped),
             Verdict::Fail(Problem::PortsHeld {
                 holders: vec![held(80, 4, "System")]
             })
         );
         assert_eq!(
-            windows_ports(Some(Vec::new()), Some(None)),
+            windows_ports(Some(Vec::new()), CaddyState::Stopped),
             Verdict::Skip(Skip::NeedsCaddy)
         );
         assert_eq!(
-            windows_ports(Some(Vec::new()), None),
+            windows_ports(Some(Vec::new()), CaddyState::DaemonDown),
             Verdict::Skip(Skip::NeedsDaemon)
         );
         assert_eq!(
-            windows_ports(Some(vec![held(443, 5244, "caddy.exe")]), Some(Some(5244))),
+            windows_ports(
+                Some(vec![held(443, 5244, "caddy.exe")]),
+                CaddyState::Running(5244)
+            ),
             Verdict::Fail(Problem::PortsNotRouted { ports: vec![80] })
         );
         assert_eq!(
-            windows_ports(None, Some(Some(5244))),
+            windows_ports(None, CaddyState::Running(5244)),
             Verdict::Skip(Skip::NotChecked)
         );
     }

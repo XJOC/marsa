@@ -29,6 +29,7 @@
 //! Exit code 1 if anything did not happen as asked.
 
 use marsa_core::codes;
+use marsa_core::data_dir::DataDir;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -156,7 +157,7 @@ async fn uninstall_through_daemon(
             Err(failure(&err, data_dir, None))
         }
         None => {
-            let log = data_dir.join("logs").join("marsad.log");
+            let log = DataDir::new(data_dir).marsad_log();
             eprintln!("{}", strings::uninstall_all_ctrl_c(&log));
             Ok(None)
         }
@@ -932,8 +933,8 @@ mod tests {
     fn the_data_folder_is_renamed_then_deleted_and_its_links_are_not_followed() {
         let tmp = TempDir::new().unwrap();
         let data = tmp.path().join("dev.marsa.Marsa");
-        fs::create_dir_all(data.join("runtimes").join("php")).unwrap();
-        fs::write(data.join("runtimes").join("php").join("x"), "x").unwrap();
+        fs::create_dir_all(DataDir::new(&data).runtimes().join("php")).unwrap();
+        fs::write(DataDir::new(&data).runtimes().join("php").join("x"), "x").unwrap();
         let outside = tmp.path().join("code");
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("index.php"), "<?php").unwrap();

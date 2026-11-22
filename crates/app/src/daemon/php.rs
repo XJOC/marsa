@@ -34,6 +34,7 @@ pub mod cgi;
 pub mod orphan;
 
 use marsa_core::codes;
+use marsa_core::data_dir::DataDir;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -570,7 +571,7 @@ impl PhpManager {
         }
         // Before the spawn, so the watcher cannot miss the first `running`.
         let lines = daemon.events.subscribe();
-        let logs_dir = daemon.data_dir.join("logs");
+        let logs_dir = DataDir::new(&daemon.data_dir).logs();
         let spec = pool.spec.clone();
         let events = daemon.events.clone();
         match Supervisor::spawn_on(spec, events, &logs_dir, Arc::clone(&runtime)) {
@@ -803,7 +804,7 @@ mod tests {
     fn fpm_program_comes_from_the_recipe() {
         let data = Path::new("/data");
         let version = v("8.4.3");
-        let dir = data.join("runtimes").join("php").join("8.4.3");
+        let dir = DataDir::new(data).runtimes().join("php").join("8.4.3");
         for platform in [Platform::DarwinArm64, Platform::LinuxX64] {
             let program = fpm_program(data, platform, &version);
             assert_eq!(program, Some(dir.join("bin").join("php-fpm")));

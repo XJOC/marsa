@@ -4,6 +4,7 @@
 //! No fixed sleeps: each wait polls with a generous limit, so slow CI machines
 //! pass and a broken daemon fails with its log.
 
+use marsa_core::data_dir::DataDir;
 use std::fs::{self, File};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -70,11 +71,11 @@ impl Marsad {
     }
 
     fn run_dir(&self) -> PathBuf {
-        self.dir.path().join("run")
+        DataDir::new(self.dir.path()).run()
     }
 
     fn log(&self) -> String {
-        let path = self.dir.path().join("logs").join("marsad.log");
+        let path = DataDir::new(self.dir.path()).marsad_log();
         fs::read_to_string(path).unwrap_or_default()
     }
 
@@ -171,12 +172,12 @@ async fn health_needs_the_token_and_gives_the_version() {
 #[tokio::test]
 async fn the_start_deletes_unfinished_uninstalls() {
     let dir = TempDir::new().expect("temp data folder");
-    let php = dir.path().join("runtimes").join("php");
+    let php = DataDir::new(dir.path()).runtimes().join("php");
     for folder in ["del-0a1b2c3d/bin", "8.3.12/bin"] {
         fs::create_dir_all(php.join(folder)).expect("a folder");
     }
     let marsad = Marsad::start_in(dir).await;
-    let php = marsad.dir.path().join("runtimes").join("php");
+    let php = DataDir::new(marsad.dir.path()).runtimes().join("php");
     let names: Vec<_> = fs::read_dir(&php)
         .expect("runtimes/php")
         .map(|entry| entry.expect("an entry").file_name())
@@ -192,8 +193,14 @@ async fn the_start_deletes_unfinished_uninstalls() {
 async fn the_start_renews_the_client_shims_of_an_older_build() {
     let dir = TempDir::new().expect("temp data folder");
     let exe = std::env::consts::EXE_SUFFIX;
-    let (bin, shims) = (dir.path().join("bin"), dir.path().join("shims"));
-    let valkey = dir.path().join("runtimes").join("valkey").join("8.1.11");
+    let (bin, shims) = (
+        DataDir::new(dir.path()).bin(),
+        DataDir::new(dir.path()).shims(),
+    );
+    let valkey = DataDir::new(dir.path())
+        .runtimes()
+        .join("valkey")
+        .join("8.1.11");
     for folder in [&bin, &shims, &valkey] {
         fs::create_dir_all(folder).expect("a folder");
     }

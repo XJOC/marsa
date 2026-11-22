@@ -332,6 +332,7 @@ fn check_private(_path: &Path, _metadata: &fs::Metadata) -> Result<(), DaemonFil
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_dir::DataDir;
     use tempfile::TempDir;
 
     const KNOWN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -412,7 +413,7 @@ mod tests {
     #[test]
     fn write_then_read_gives_the_same_file() {
         let dir = TempDir::new().unwrap();
-        let run = dir.path().join("run");
+        let run = DataDir::new(dir.path()).run();
         let file = sample();
         write_daemon_file(&run, &file).unwrap();
 
@@ -487,7 +488,7 @@ mod tests {
     #[test]
     fn write_into_a_file_instead_of_a_folder_fails() {
         let dir = TempDir::new().unwrap();
-        let run = dir.path().join("run");
+        let run = DataDir::new(dir.path()).run();
         fs::write(&run, "").unwrap();
         let err = write_daemon_file(&run, &sample()).unwrap_err();
         assert_eq!(err.code(), "daemon_file_write");
@@ -503,7 +504,7 @@ mod tests {
     #[test]
     fn unix_file_is_0600_in_a_0700_folder() {
         let dir = TempDir::new().unwrap();
-        let run = dir.path().join("run");
+        let run = DataDir::new(dir.path()).run();
         write_daemon_file(&run, &sample()).unwrap();
         assert_eq!(mode(&daemon_file_path(&run)), 0o600);
         assert_eq!(mode(&run), 0o700);
@@ -519,7 +520,7 @@ mod tests {
     #[test]
     fn unix_existing_open_folder_is_closed() {
         let dir = TempDir::new().unwrap();
-        let run = dir.path().join("run");
+        let run = DataDir::new(dir.path()).run();
         fs::create_dir(&run).unwrap();
         set_mode(&run, 0o755);
         write_daemon_file(&run, &sample()).unwrap();
