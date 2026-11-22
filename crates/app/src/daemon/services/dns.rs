@@ -35,7 +35,6 @@ use hickory_server::proto::rr::rdata::{A, SOA};
 use hickory_server::proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::MessageResponseBuilder;
-use marsa_core::dns::DNS_PORT;
 use marsa_core::platform::process;
 use marsa_core::recipes::Platform;
 use marsa_core::types::{Event, LogLine, LogStream, ServiceAction, ServiceState, ServiceStatus};
@@ -97,11 +96,12 @@ impl DnsService {
         }
     }
 
-    /// The daemon's: `127.0.0.1:DNS_PORT` on the systems that send `.test`
-    /// names to it, no service elsewhere.
-    pub fn for_daemon() -> Self {
+    /// The daemon's: `127.0.0.1:port` on the systems that send `.test`
+    /// names to it, no service elsewhere. `port` is [`marsa_core::dns::DNS_PORT`] except in
+    /// tests.
+    pub fn for_daemon(port: u16) -> Self {
         let used = serves_test_names(Platform::current());
-        Self::new(used.then(|| SocketAddr::from((Ipv4Addr::LOCALHOST, DNS_PORT))))
+        Self::new(used.then(|| SocketAddr::from((Ipv4Addr::LOCALHOST, port))))
     }
 
     /// Whether `GET /v1/services` lists it.
