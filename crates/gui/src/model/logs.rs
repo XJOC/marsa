@@ -2,14 +2,10 @@
 
 use std::collections::VecDeque;
 
-use marsa_core::types::{LogLine, LogStream};
+use marsa_core::types::{LogLine, LogStream, ServiceId};
 
 use super::Model;
 use crate::logline::{self, LogLevel};
-
-/// The service whose log the Logs screen opens on, and the one the window
-/// always reads (the other logs are the services the daemon lists).
-pub const LOG_SERVICE: &str = "caddy";
 
 /// The most log lines kept for each service. The oldest go first.
 pub const MAX_LOG_LINES: usize = 5000;
@@ -38,31 +34,33 @@ pub struct ServiceLog {
     pub(super) last_seq: Option<u64>,
 }
 
-/// The log the Logs screen shows: one service's, by its id.
+/// The log the Logs screen shows: one service's, by its id. The screen
+/// opens on Caddy's, the one the window always reads (the other logs are the
+/// services the daemon lists).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum LogSource {
     #[default]
     Caddy,
     /// Any other service the daemon lists, such as `php-fpm-8.4`. Made with
     /// [`LogSource::of`], so Caddy is never written twice.
-    Service(String),
+    Service(ServiceId),
 }
 
 impl LogSource {
     /// The source of the service `id`.
-    pub fn of(id: &str) -> Self {
-        if id == LOG_SERVICE {
+    pub fn of(id: ServiceId) -> Self {
+        if id == ServiceId::Caddy {
             Self::Caddy
         } else {
-            Self::Service(id.to_owned())
+            Self::Service(id)
         }
     }
 
     /// The id of the service whose log this is.
-    pub fn id(&self) -> &str {
+    pub fn id(&self) -> ServiceId {
         match self {
-            Self::Caddy => LOG_SERVICE,
-            Self::Service(id) => id,
+            Self::Caddy => ServiceId::Caddy,
+            Self::Service(id) => *id,
         }
     }
 }
@@ -91,8 +89,8 @@ impl Model {
 
     /// The lines of the log of the service `id`, oldest first. Empty when it
     /// has written none.
-    pub fn log_rows(&self, id: &str) -> &VecDeque<LogRow> {
+    pub fn log_rows(&self, id: ServiceId) -> &VecDeque<LogRow> {
         static NONE: VecDeque<LogRow> = VecDeque::new();
-        self.session.logs.get(id).map_or(&NONE, |log| &log.rows)
+        self.session.logs.get(&id).map_or(&NONE, |log| &log.rows)
     }
 }

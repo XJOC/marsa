@@ -13,12 +13,12 @@ use std::time::Duration;
 use eframe::egui;
 use marsa_core::client::{self, ClientError, DaemonClient, StreamItem};
 use marsa_core::types::{
-    Event, HostsStatus, InstallProgress, InstallUpdate, ServiceAction, ServiceStatus, SiteList,
-    SitePatch,
+    Event, HostsStatus, InstallProgress, InstallUpdate, ServiceAction, ServiceId, ServiceStatus,
+    SiteList, SitePatch,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::model::{Autostart, Change, InstallJob, LOG_SERVICE, Removal, Update};
+use crate::model::{Autostart, Change, InstallJob, Removal, Update};
 use crate::strings;
 
 /// The wait before the next attempt to connect.
@@ -31,7 +31,7 @@ const AUTOSTART_UNSUPPORTED: &str = "autostart_unsupported";
 pub enum Command {
     /// A service button.
     Service {
-        service: String,
+        service: ServiceId,
         action: ServiceAction,
     },
     /// "Park a folder…": every sub-folder of this absolute folder becomes a
@@ -339,7 +339,7 @@ async fn refresh(client: &DaemonClient, window: &Window) -> bool {
     let xdebug = xdebug(client).await;
     let mut logs = Vec::with_capacity(log_ids.len());
     for id in &log_ids {
-        logs.push(match client.logs(id).await {
+        logs.push(match client.logs(&id.to_string()).await {
             Ok(lines) => Update::Log(lines),
             Err(err) => notice("cannot read the log", &err),
         });
@@ -355,15 +355,12 @@ async fn refresh(client: &DaemonClient, window: &Window) -> bool {
 }
 
 /// The ids whose logs are read: Caddy, then each other service listed.
-fn log_ids(table: &[ServiceStatus]) -> Vec<String> {
+fn log_ids(table: &[ServiceStatus]) -> Vec<ServiceId> {
     let others = table
         .iter()
-        .map(|service| service.id.as_str())
-        .filter(|id| *id != LOG_SERVICE);
-    std::iter::once(LOG_SERVICE)
-        .chain(others)
-        .map(str::to_owned)
-        .collect()
+        .map(|service| service.id)
+        .filter(|id| *id != ServiceId::Caddy);
+    std::iter::once(ServiceId::Caddy).chain(others).collect()
 }
 
 /// Reads the daemon's checks on their own task: they take seconds (the
@@ -453,7 +450,7 @@ fn run_command(
     tokio::spawn(async move {
         let update = match command {
             Command::Service { service, action } => {
-                let result = client.service_action(&service, action).await;
+                let result = client.service_action(&service.to_string(), action).await;
                 result
                     .err()
                     .map(|err| notice(&format!("cannot {action} {service}"), &err))
@@ -670,9 +667,9 @@ mod tests {
 
     use super::*;
 
-    fn service(id: &str) -> ServiceStatus {
+    fn service(id: ServiceId) -> ServiceStatus {
         ServiceStatus {
-            id: id.into(),
+            id,
             state: ServiceState::Running,
             pid: None,
             restarts: 0,
@@ -683,14 +680,27 @@ mod tests {
     #[test]
     fn the_logs_read_are_caddys_and_each_other_service_listed_once() {
         let table = [
-            service("caddy"),
-            service("php-fpm-8.3"),
-            service("php-fpm-8.4"),
+            service(ServiceId::Caddy),
+            service("php-fpm-8.3".parse::<ServiceId>().unwrap()),
+            service("php-fpm-8.4".parse::<ServiceId>().unwrap()),
         ];
-        assert_eq!(log_ids(&table), ["caddy", "php-fpm-8.3", "php-fpm-8.4"]);
+        assert_eq!(
+            log_ids(&table),
+            [
+                ServiceId::Caddy,
+                "php-fpm-8.3".parse::<ServiceId>().unwrap(),
+                "php-fpm-8.4".parse::<ServiceId>().unwrap()
+            ]
+        );
         // Caddy is read even when the table has none, or could not be read.
-        assert_eq!(log_ids(&[service("php-fpm-8.4")]), ["caddy", "php-fpm-8.4"]);
-        assert_eq!(log_ids(&[]), ["caddy"]);
+        assert_eq!(
+            log_ids(&[service("php-fpm-8.4".parse::<ServiceId>().unwrap())]),
+            [
+                ServiceId::Caddy,
+                "php-fpm-8.4".parse::<ServiceId>().unwrap()
+            ]
+        );
+        assert_eq!(log_ids(&[]), [ServiceId::Caddy]);
     }
 
     /// The menu-bar panel looks; it never starts a daemon. In an empty data

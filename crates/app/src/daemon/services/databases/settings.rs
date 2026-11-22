@@ -8,7 +8,7 @@ use std::time::Duration;
 use marsa_core::config::{self, ConfigError, ConfigPaths, ServerSettings};
 use marsa_core::databases::ServerKind;
 use marsa_core::runtimes::RuntimesDir;
-use marsa_core::types::{ServiceAction, ServiceState};
+use marsa_core::types::{ServiceAction, ServiceId, ServiceState};
 use semver::Version;
 use tracing::{info, warn};
 
@@ -234,28 +234,28 @@ pub fn start_at_launch(daemon: &Arc<Daemon>, kind: ServerKind) -> Launch {
                 code = err.code(),
                 server, "it is not installed; it does not start with the daemon"
             );
-            return Launch::ended(server, Launched::NotInstalled);
+            return Launch::ended(ServiceId::Database(kind), Launched::NotInstalled);
         }
         Err(err) => {
             manager.fail(&daemon.events, err.code(), &err.to_string());
-            return Launch::ended(server, Launched::Failed(err.code()));
+            return Launch::ended(ServiceId::Database(kind), Launched::Failed(err.code()));
         }
     };
     if !settings.enabled {
         info!(server, "it is off; it does not start with the daemon");
-        return Launch::ended(server, Launched::Off);
+        return Launch::ended(ServiceId::Database(kind), Launched::Off);
     }
     // First, so a missing version does not mark the status failed.
     if let Err(err) = manager.installed(&daemon.data_dir, &settings) {
         warn!(code = err.code(), %err, server, "it is on, but does not start with the daemon");
-        return Launch::ended(server, Launched::NotInstalled);
+        return Launch::ended(ServiceId::Database(kind), Launched::NotInstalled);
     }
     let Ok(busy) = Arc::clone(&manager.busy).try_lock_owned() else {
         info!(
             server,
             "another action runs; it decides instead of the start with the daemon"
         );
-        return Launch::ended(server, Launched::Busy);
+        return Launch::ended(ServiceId::Database(kind), Launched::Busy);
     };
     info!(server, "starting it with the daemon");
     let daemon = Arc::clone(daemon);
@@ -267,7 +267,7 @@ pub fn start_at_launch(daemon: &Arc<Daemon>, kind: ServerKind) -> Launch {
             launched = launch(&daemon, daemon.server(kind), busy) => launched,
         }
     });
-    Launch::running(server, task)
+    Launch::running(ServiceId::Database(kind), task)
 }
 
 /// Whether any version of `kind` is installed. A folder that cannot be read

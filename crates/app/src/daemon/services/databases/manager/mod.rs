@@ -20,7 +20,7 @@ use marsa_core::databases::ServerKind;
 use marsa_core::platform::process;
 use marsa_core::recipes::Platform;
 use marsa_core::services::StopMethod;
-use marsa_core::types::{Event, LogLine, ServiceAction, ServiceState, ServiceStatus};
+use marsa_core::types::{Event, LogLine, ServiceAction, ServiceId, ServiceState, ServiceStatus};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -98,7 +98,7 @@ impl ServerManager {
             elevated: marsa_core::platform::is_elevated,
             started: Mutex::default(),
             starting: Mutex::default(),
-            runtime: Arc::new(Mutex::new(ServiceRuntime::new(kind.id()))),
+            runtime: Arc::new(Mutex::new(ServiceRuntime::new(ServiceId::Database(kind)))),
             busy: Arc::default(),
         }
     }
@@ -181,7 +181,7 @@ impl ServerManager {
     /// The program the server runs from now, or `None` while it does not
     /// run.
     pub fn running_program(&self, daemon: &Daemon) -> Option<PathBuf> {
-        if !daemon.proc_alive(self.kind.id()) {
+        if !daemon.proc_alive(ServiceId::Database(self.kind)) {
             return None;
         }
         lock(&self.started).clone()
@@ -364,7 +364,7 @@ impl ServerManager {
     async fn start(&self, daemon: &Daemon) -> Result<Run, ActionError> {
         // Our own supervisor runs it already. It holds the port and its pid
         // file, so the check before a start would call it busy.
-        if daemon.proc_alive(self.kind.id()) {
+        if daemon.proc_alive(ServiceId::Database(self.kind)) {
             return Ok(Run::Over);
         }
         // No task runs from here on, so these writes cannot race the
@@ -435,7 +435,7 @@ impl ServerManager {
     async fn stop(&self, daemon: &Daemon) {
         let kind = self.kind;
         // `None`: nothing runs, or a shutdown took the handle and stops it.
-        if let Some(handle) = daemon.take_proc(kind.id()) {
+        if let Some(handle) = daemon.take_proc(ServiceId::Database(kind)) {
             if let Err(err) = handle.stop().await {
                 warn!(%err, server = kind.id(), "the server task failed");
             }

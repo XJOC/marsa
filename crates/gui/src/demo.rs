@@ -15,13 +15,12 @@ use marsa_core::helper::{OpName, OpResult, OpStatus};
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
     Event, Health, InstallEvent, InstallProgress, InstallUpdate, LogLine, LogStream, RuntimeList,
-    RuntimeVersions, ServiceState, ServiceStatus, SetupReport, Site, SiteKind, SiteList,
+    RuntimeVersions, ServiceId, ServiceState, ServiceStatus, SetupReport, Site, SiteKind, SiteList,
     SkippedFolder, Source, XdebugState,
 };
 
 use crate::model::{
-    Action, Autostart, InstallJob, LinkForm, LogLevel, Model, Removal, SitesNotice, Update,
-    WEB_SERVER, apply,
+    Action, Autostart, InstallJob, LinkForm, LogLevel, Model, Removal, SitesNotice, Update, apply,
 };
 
 /// The variable that names the state.
@@ -143,7 +142,7 @@ pub fn fill(model: &mut Model, demo: Demo) {
     if demo == Demo::FirstRun2 {
         model.update(Update::Runtimes(runtimes(&["8.4.27"])));
         model.update(Update::Services(vec![service(
-            WEB_SERVER,
+            "caddy",
             ServiceState::Running,
         )]));
         model.update(Update::Sites(SiteList::default()));
@@ -161,7 +160,7 @@ pub fn fill(model: &mut Model, demo: Demo) {
         ServiceState::Running
     };
     model.update(Update::Services(vec![
-        service(WEB_SERVER, caddy),
+        service("caddy", caddy),
         service("php-fpm-8.4", ServiceState::Running),
     ]));
     let list = match demo {
@@ -212,12 +211,12 @@ pub fn fill(model: &mut Model, demo: Demo) {
 /// them: one JSON object a line).
 fn logs_screen(model: &mut Model, demo: Demo) {
     model.update(Update::Services(vec![
-        service(WEB_SERVER, ServiceState::Running),
+        service("caddy", ServiceState::Running),
         service("php-fpm-8.3", ServiceState::Stopped),
         service("php-fpm-8.4", ServiceState::Running),
     ]));
     let line = |service: &str, seq: u64, text: String| LogLine {
-        service: service.into(),
+        service: id(service),
         seq,
         at_ms: 0,
         stream: LogStream::Stderr,
@@ -227,7 +226,7 @@ fn logs_screen(model: &mut Model, demo: Demo) {
         let text = format!(
             r#"{{"level":"{level}","ts":1763476328.{seq},"logger":"http.log.access","msg":"{msg}"}}"#
         );
-        line(WEB_SERVER, seq as u64, text)
+        line("caddy", seq as u64, text)
     });
     model.update(Update::Log(caddy.collect()));
     let pool = POOL_LOG.iter().enumerate().map(|(seq, (level, msg))| {
@@ -246,7 +245,7 @@ fn logs_screen(model: &mut Model, demo: Demo) {
         // line, wider than the window.
         let text = r#"[18-Nov-2026 14:30:09] WARNING: [pool www] child 4261 said into stderr: "NOTICE: PHP message: PHP Warning:  Undefined array key \"price\" in /demo/Code/shop/app/Http/Controllers/CartController.php on line 128""#.to_owned();
         model.update(Update::Log(vec![LogLine {
-            service: "php-fpm-8.4".into(),
+            service: id("php-fpm-8.4"),
             seq: POOL_LOG.len() as u64,
             at_ms: 0,
             stream: LogStream::Stderr,
@@ -308,7 +307,7 @@ const POOL_LOG: [(&str, &str); 4] = [
 /// pool of PHP 8.4 running, the one of 8.3 waiting for a site, and the one
 /// of 8.2 failed, with a long reason and a log to show.
 fn services_screen(model: &mut Model) {
-    let mut caddy = service(WEB_SERVER, ServiceState::Running);
+    let mut caddy = service("caddy", ServiceState::Running);
     caddy.pid = Some(4242);
     let mut running = service("php-fpm-8.4", ServiceState::Running);
     running.pid = Some(4251);
@@ -325,7 +324,7 @@ fn services_screen(model: &mut Model) {
     ]));
     // The failed pool wrote a line before it stopped, so its row can open it.
     model.update(Update::Log(vec![LogLine {
-        service: "php-fpm-8.2".into(),
+        service: id("php-fpm-8.2"),
         seq: 0,
         at_ms: 0,
         stream: LogStream::Stderr,
@@ -513,9 +512,14 @@ fn runtimes(php: &[&str]) -> RuntimeList {
     }
 }
 
-fn service(id: &str, state: ServiceState) -> ServiceStatus {
+/// The service of a demo id, which is always one.
+fn id(text: &str) -> ServiceId {
+    text.parse().expect("a demo service id")
+}
+
+fn service(text: &str, state: ServiceState) -> ServiceStatus {
     ServiceStatus {
-        id: id.into(),
+        id: id(text),
         pid: None,
         state,
         restarts: 0,
@@ -809,7 +813,7 @@ mod tests {
             .count();
         assert_eq!(errors, 1);
         // The pool's log is php-fpm's: the levels come from its own words.
-        let pool = view(&model, &LogSource::of("php-fpm-8.4"));
+        let pool = view(&model, &LogSource::of(id("php-fpm-8.4")));
         let Body::Lines(pool) = &pool.body else {
             panic!("lines");
         };
@@ -830,7 +834,7 @@ mod tests {
         // The long line is wider than the window can hold at 1120.
         let mut long = Model::default();
         fill(&mut long, Demo::LogsLong);
-        let long_view = view(&long, &LogSource::of("php-fpm-8.4"));
+        let long_view = view(&long, &LogSource::of(id("php-fpm-8.4")));
         let Body::Lines(long_lines) = &long_view.body else {
             panic!("lines");
         };

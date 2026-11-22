@@ -1,7 +1,7 @@
 //! Starting Caddy (and a database server) in the background when the daemon starts.
 
-use super::CADDY_ID;
 use crate::daemon::state::Daemon;
+use marsa_core::types::ServiceId;
 use marsa_core::types::{ServiceAction, ServiceState, ServiceStatus};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +36,7 @@ pub enum Launched {
 #[derive(Debug)]
 pub struct Launch {
     /// The service id, for the logs.
-    service: &'static str,
+    service: ServiceId,
     state: LaunchState,
 }
 
@@ -49,13 +49,13 @@ enum LaunchState {
 
 impl Launch {
     /// A start decided before any task.
-    pub(in crate::daemon) fn ended(service: &'static str, launched: Launched) -> Self {
+    pub(in crate::daemon) fn ended(service: ServiceId, launched: Launched) -> Self {
         let state = LaunchState::Ended(launched);
         Self { service, state }
     }
 
     /// A start that runs in `task`.
-    pub(in crate::daemon) fn running(service: &'static str, task: JoinHandle<Launched>) -> Self {
+    pub(in crate::daemon) fn running(service: ServiceId, task: JoinHandle<Launched>) -> Self {
         let state = LaunchState::Running(task);
         Self { service, state }
     }
@@ -108,11 +108,11 @@ pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
     // First, so a missing Caddy does not mark Caddy's status failed.
     if !caddy.installed() {
         info!("no caddy is installed; it does not start with the daemon");
-        return Launch::ended(CADDY_ID, Launched::NotInstalled);
+        return Launch::ended(ServiceId::Caddy, Launched::NotInstalled);
     }
     let Ok(busy) = Arc::clone(&caddy.busy).try_lock_owned() else {
         info!("another action on caddy runs; it decides instead of the start with the daemon");
-        return Launch::ended(CADDY_ID, Launched::Busy);
+        return Launch::ended(ServiceId::Caddy, Launched::Busy);
     };
     info!("starting caddy with the daemon");
     let daemon = Arc::clone(daemon);
@@ -125,7 +125,7 @@ pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
             launched = launch(&daemon, busy) => launched,
         }
     });
-    Launch::running(CADDY_ID, task)
+    Launch::running(ServiceId::Caddy, task)
 }
 
 async fn launch(daemon: &Daemon, busy: tokio::sync::OwnedMutexGuard<()>) -> Launched {

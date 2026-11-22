@@ -28,6 +28,7 @@
 //! Every error, the extractors' own included, is an `ErrorBody`.
 
 use marsa_core::codes;
+use marsa_core::types::ServiceId;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -47,9 +48,9 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::{Stream, StreamExt as _};
 
-use super::caddy::{ActionError, CADDY_ID, CaddyManager};
+use super::caddy::{ActionError, CaddyManager};
 use super::databases::{self, ServerManager};
-use super::dns::{DNS_ID, DnsService};
+use super::dns::DnsService;
 use super::supervisor::{ServiceRuntime, lock};
 use crate::daemon::http::Rejected as _;
 use crate::daemon::http::routes::HttpError;
@@ -110,7 +111,7 @@ async fn service_action(
     path: Result<Path<(String, String)>, PathRejection>,
 ) -> Result<Json<ServiceStatus>, HttpError> {
     let Path((id, action)) = path.map_err(bad_path)?;
-    let service = service(&daemon, &id)?;
+    let (id, service) = service(&daemon, &id)?;
     let action: ServiceAction = action.parse().map_err(|err: UnknownAction| {
         HttpError::new(StatusCode::BAD_REQUEST, err.code(), err.to_string())
     })?;
@@ -154,8 +155,8 @@ async fn server_action(
     kind: ServerKind,
     action: ServiceAction,
 ) -> Result<ServiceStatus, HttpError> {
-    let service = kind.id();
-    tracing::info!(service, %action, "service action");
+    let service = ServiceId::Database(kind);
+    tracing::info!(%service, %action, "service action");
     let worker = Arc::clone(daemon);
     let task = tokio::spawn(async move {
         let server = worker.server(kind);
@@ -166,11 +167,11 @@ async fn server_action(
     match task.await {
         Ok(Ok(status)) => Ok(status),
         Ok(Err(err)) => {
-            tracing::warn!(service, %action, code = err.code(), error = %err, "service action failed");
+            tracing::warn!(%service, %action, code = err.code(), error = %err, "service action failed");
             Err(server_error(&err))
         }
         Err(err) => {
-            tracing::error!(service, error = %err, "the action task failed");
+            tracing::error!(%service, error = %err, "the action task failed");
             let message = "the action task of the database server failed";
             Err(HttpError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -209,7 +210,7 @@ async fn logs(
     query: Result<Query<LogsQuery>, QueryRejection>,
 ) -> Result<Response, HttpError> {
     let Path(id) = path.map_err(bad_path)?;
-    let service = service(&daemon, &id)?;
+    let (id, service) = service(&daemon, &id)?;
     let Query(query) = query.map_err(bad_query)?;
     if !query.follow {
         return Ok(Json(service.recent_logs()).into_response());
@@ -241,7 +242,7 @@ fn sse(
 /// `n` lost events. The stream ends at `shutting_down`, so the server can
 /// stop.
 fn follow(
-    id: String,
+    id: ServiceId,
     recent: Vec<LogLine>,
     receiver: broadcast::Receiver<Event>,
     closing: bool,
@@ -301,26 +302,22 @@ impl Service<'_> {
     }
 }
 
-/// Service `id`: Caddy, PostgreSQL, or a php-fpm pool started in this run.
-fn service<'a>(daemon: &'a Daemon, id: &str) -> Result<Service<'a>, HttpError> {
-    if id == CADDY_ID {
-        return Ok(Service::Caddy(&daemon.caddy));
-    }
-    if let Some(kind) = ServerKind::from_id(id) {
-        return Ok(Service::Server(daemon.server(kind)));
-    }
-    if id == DNS_ID && daemon.dns.listed() {
-        return Ok(Service::Dns(&daemon.dns));
-    }
-    if let Some(runtime) = daemon.pools.find(id) {
-        return Ok(Service::Pool(runtime));
-    }
-    let message = format!("no service named {id:?}");
-    Err(HttpError::new(
-        StatusCode::NOT_FOUND,
-        codes::SERVICE_NOT_FOUND,
-        message,
-    ))
+/// Service `id`: Caddy, a database server, the DNS server, or a php-fpm
+/// pool started in this run.
+fn service<'a>(daemon: &'a Daemon, id: &str) -> Result<(ServiceId, Service<'a>), HttpError> {
+    let found = id.parse().ok().and_then(|parsed| {
+        let service = match parsed {
+            ServiceId::Caddy => Some(Service::Caddy(&daemon.caddy)),
+            ServiceId::Database(kind) => Some(Service::Server(daemon.server(kind))),
+            ServiceId::Dns => daemon.dns.listed().then_some(Service::Dns(&daemon.dns)),
+            ServiceId::Pool(..) => daemon.pools.find(parsed).map(Service::Pool),
+        };
+        service.map(|service| (parsed, service))
+    });
+    found.ok_or_else(|| {
+        let message = format!("no service named {id:?}");
+        HttpError::new(StatusCode::NOT_FOUND, codes::SERVICE_NOT_FOUND, message)
+    })
 }
 
 fn action_error(err: &ActionError) -> HttpError {
@@ -349,9 +346,9 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use marsa_core::types::LogStream;
 
-    fn line(service: &str, seq: u64) -> LogLine {
+    fn line(service: ServiceId, seq: u64) -> LogLine {
         LogLine {
-            service: service.into(),
+            service,
             seq,
             at_ms: 0,
             stream: LogStream::Stdout,
@@ -373,35 +370,54 @@ mod tests {
         let (sender, receiver) = broadcast::channel(16);
         // Lines 1 and 2 were published after the subscription and before the
         // copy, so they are in both.
-        let recent = vec![line("caddy", 0), line("caddy", 1), line("caddy", 2)];
+        let recent = vec![
+            line(ServiceId::Caddy, 0),
+            line(ServiceId::Caddy, 1),
+            line(ServiceId::Caddy, 2),
+        ];
         for event in [
-            Event::Log(line("caddy", 1)),
-            Event::Log(line("caddy", 2)),
-            Event::Log(line("php", 3)),
-            Event::Log(line("caddy", 3)),
+            Event::Log(line(ServiceId::Caddy, 1)),
+            Event::Log(line(ServiceId::Caddy, 2)),
+            Event::Log(line(ServiceId::Dns, 3)),
+            Event::Log(line(ServiceId::Caddy, 3)),
             Event::ShuttingDown,
-            Event::Log(line("caddy", 4)),
+            Event::Log(line(ServiceId::Caddy, 4)),
         ] {
             sender.send(event).unwrap();
         }
-        let stream = follow("caddy".into(), recent, receiver, false);
+        let stream = follow(ServiceId::Caddy, recent, receiver, false);
         let got = text(sse(stream, KEEP_ALIVE)).await;
-        let want: String = (0..=3).map(|seq| data(&line("caddy", seq))).collect();
+        let want: String = (0..=3)
+            .map(|seq| data(&line(ServiceId::Caddy, seq)))
+            .collect();
         assert_eq!(got, want);
     }
 
     #[tokio::test]
     async fn follow_during_shutdown_sends_the_recent_lines_and_ends() {
         let (sender, receiver) = broadcast::channel(4);
-        let stream = follow("caddy".into(), vec![line("caddy", 7)], receiver, true);
-        assert_eq!(text(sse(stream, KEEP_ALIVE)).await, data(&line("caddy", 7)));
+        let stream = follow(
+            ServiceId::Caddy,
+            vec![line(ServiceId::Caddy, 7)],
+            receiver,
+            true,
+        );
+        assert_eq!(
+            text(sse(stream, KEEP_ALIVE)).await,
+            data(&line(ServiceId::Caddy, 7))
+        );
         drop(sender);
     }
 
     #[tokio::test]
     async fn a_quiet_follow_stream_sends_keep_alive_comments() {
         let (sender, receiver) = broadcast::channel(4);
-        let stream = follow("caddy".into(), vec![line("caddy", 0)], receiver, false);
+        let stream = follow(
+            ServiceId::Caddy,
+            vec![line(ServiceId::Caddy, 0)],
+            receiver,
+            false,
+        );
         let body = sse(stream, Duration::from_millis(20)).into_body();
         let mut chunks = Body::into_data_stream(body);
         let mut got = String::new();
@@ -413,7 +429,10 @@ mod tests {
                 .unwrap();
             got.push_str(std::str::from_utf8(&chunk).unwrap());
         }
-        assert!(got.starts_with(&data(&line("caddy", 0))), "{got:?}");
+        assert!(
+            got.starts_with(&data(&line(ServiceId::Caddy, 0))),
+            "{got:?}"
+        );
         // The route uses the same helper with this interval.
         assert_eq!(KEEP_ALIVE, Duration::from_secs(15));
         drop(sender);
@@ -459,8 +478,8 @@ mod tests {
         let (status, body) = send("GET", "/v1/services").await;
         assert_eq!(status, StatusCode::OK);
         let list: Vec<ServiceStatus> = serde_json::from_str(&body).unwrap();
-        let ids: Vec<_> = list.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["caddy", pool.as_str()]);
+        let ids: Vec<_> = list.iter().map(|s| s.id).collect();
+        assert_eq!(ids, [ServiceId::Caddy, pool]);
         assert_eq!(list[1].state, ServiceState::Running);
         assert_eq!(list[1].pid, Some(4242));
 
@@ -566,7 +585,7 @@ mod tests {
         };
 
         // Not installed: not listed, but known.
-        assert_eq!(ids().await, ["caddy"]);
+        assert_eq!(ids().await, [ServiceId::Caddy]);
         let (status, body) = send("GET", "/v1/logs/postgres").await;
         assert_eq!((status, body.as_str()), (StatusCode::OK, "[]"));
 
@@ -579,7 +598,10 @@ mod tests {
 
         // Installed (an empty version folder): listed, stopped.
         std::fs::create_dir_all(data.join("runtimes/postgres/18.7.0")).unwrap();
-        assert_eq!(ids().await, ["caddy", "postgres"]);
+        assert_eq!(
+            ids().await,
+            [ServiceId::Caddy, ServiceId::Database(ServerKind::Postgres)]
+        );
 
         // A start without its program: refused, and still off.
         let (status, body) = send("POST", "/v1/services/postgres/start").await;
@@ -594,7 +616,14 @@ mod tests {
 
         // Valkey the same way, with its own codes.
         std::fs::create_dir_all(data.join("runtimes/valkey/8.1.11")).unwrap();
-        assert_eq!(ids().await, ["caddy", "postgres", "valkey"]);
+        assert_eq!(
+            ids().await,
+            [
+                ServiceId::Caddy,
+                ServiceId::Database(ServerKind::Postgres),
+                ServiceId::Database(ServerKind::Valkey)
+            ]
+        );
         let (status, body) = send("POST", "/v1/services/valkey/start").await;
         let error: ErrorBody = serde_json::from_str(&body).unwrap();
         assert_eq!(
@@ -646,8 +675,8 @@ mod tests {
         let (status, body) = send("GET", "/v1/services").await;
         assert_eq!(status, StatusCode::OK);
         let list: Vec<ServiceStatus> = serde_json::from_str(&body).unwrap();
-        let ids: Vec<_> = list.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["caddy", DNS_ID]);
+        let ids: Vec<_> = list.iter().map(|s| s.id).collect();
+        assert_eq!(ids, [ServiceId::Caddy, ServiceId::Dns]);
         assert_eq!(list[1].state, failed);
         let (status, body) = send("GET", "/v1/logs/dns").await;
         assert_eq!(status, StatusCode::OK);
@@ -672,7 +701,7 @@ mod tests {
     async fn no_dns_service_where_it_is_not_used() {
         let daemon = Arc::new(Daemon::new(std::path::PathBuf::new()));
         let Json(list) = services(State(daemon.clone())).await;
-        assert!(list.iter().all(|s| s.id != DNS_ID));
-        assert!(service(&daemon, DNS_ID).is_err());
+        assert!(list.iter().all(|s| s.id != ServiceId::Dns));
+        assert!(service(&daemon, "dns").is_err());
     }
 }

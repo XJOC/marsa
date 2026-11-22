@@ -6,6 +6,7 @@
 //! file of its own and takes no lock on the folder, so the check before a
 //! start is the port and our own record of its pid (`run/valkey.pid`).
 
+use marsa_core::types::ServiceId;
 use std::io;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -49,7 +50,7 @@ pub(super) fn spec(
     os: Os,
 ) -> Result<ServiceSpec, UnwritablePath> {
     Ok(ServiceSpec {
-        id: KIND.id().to_owned(),
+        id: ServiceId::Database(KIND),
         program,
         args: valkey_args(&dirs.config(), os)?,
         env: valkey_env(os).into_iter().collect(),
@@ -461,7 +462,7 @@ mod tests {
         let dirs = ValkeyDirs::new(Path::new("/m"));
         let program = PathBuf::from("/m/runtimes/valkey/8.1.11/bin/valkey-server");
         let spec = spec(program.clone(), &dirs, 6380, Os::Mac).unwrap();
-        assert_eq!(spec.id, "valkey");
+        assert_eq!(spec.id, ServiceId::Database(ServerKind::Valkey));
         assert_eq!(spec.program, program);
         assert_eq!(spec.args, ["/m/run/valkey.conf"]);
         assert_eq!(spec.stop, valkey_stop(6380));

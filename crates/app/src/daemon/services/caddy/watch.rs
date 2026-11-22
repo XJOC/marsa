@@ -1,11 +1,11 @@
 //! Watches one run of Caddy: the pid file, and a port that is taken.
 
-use super::CADDY_ID;
 use super::orphan::PidFile;
 use crate::daemon::services::probe::ProcessProbe;
 use crate::daemon::services::runtime::AbortOnDrop;
 use crate::daemon::services::supervisor::{ServiceRuntime, lock};
 use marsa_core::codes;
+use marsa_core::types::ServiceId;
 use marsa_core::types::{Event, LogLine, LogStream, ServiceState};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast::{self, error::RecvError};
@@ -88,8 +88,10 @@ async fn watch(
     let mut recorded = None;
     loop {
         let status = match lines.recv().await {
-            Ok(Event::Log(line)) if line.service == CADDY_ID && is_port_conflict(&line) => return,
-            Ok(Event::ServiceChanged(status)) if status.id == CADDY_ID => status,
+            Ok(Event::Log(line)) if line.service == ServiceId::Caddy && is_port_conflict(&line) => {
+                return;
+            }
+            Ok(Event::ServiceChanged(status)) if status.id == ServiceId::Caddy => status,
             Ok(_) => continue,
             // Too far behind: the skipped lines are still in the buffer, and
             // the status is current.

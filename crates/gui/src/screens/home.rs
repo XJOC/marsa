@@ -16,12 +16,12 @@
 
 use eframe::egui::Ui;
 use marsa_core::runtimes::Runtime;
-use marsa_core::types::{ServiceAction, ServiceState};
+use marsa_core::types::{ServiceAction, ServiceId, ServiceState};
 use semver::Version;
 
 use crate::model::{
     self, Action, Connection, FIRST_PHP, HostsSync, InstallJob, InstallStep, InstallView,
-    LogSource, Model, Route, Setup, WEB_SERVER,
+    LogSource, Model, Route, Setup,
 };
 use crate::strings;
 use crate::theme::Theme;
@@ -290,7 +290,7 @@ fn caddy(model: &Model) -> Caddy {
         .session
         .services
         .iter()
-        .find(|service| service.id == WEB_SERVER)
+        .find(|service| service.id == ServiceId::Caddy)
         .map(|service| &service.state);
     let installed = model
         .session
@@ -316,10 +316,11 @@ fn php(model: &Model) -> Php {
         let ServiceState::Failed { code } = &service.state else {
             return None;
         };
-        // `php-fpm-8.3`, or `php-cgi-8.3` on Windows: the line is the end.
-        let minor = service.id.rsplit('-').next()?;
-        model::is_pool(&service.id).then(|| Php::Failed {
-            minor: minor.to_owned(),
+        let ServiceId::Pool(_, minor) = service.id else {
+            return None;
+        };
+        Some(Php::Failed {
+            minor: minor.to_string(),
             code: code.clone(),
         })
     });
@@ -386,7 +387,7 @@ fn caddy_fixes() -> Vec<Fix> {
     let start = Fix {
         label: strings::START_CADDY.to_owned(),
         action: Action::Service {
-            service: WEB_SERVER.to_owned(),
+            service: ServiceId::Caddy,
             action: ServiceAction::Start,
         },
         danger: true,
@@ -652,9 +653,9 @@ mod tests {
         }
     }
 
-    fn service(id: &str, state: ServiceState) -> ServiceStatus {
+    fn service(id: ServiceId, state: ServiceState) -> ServiceStatus {
         ServiceStatus {
-            id: id.into(),
+            id,
             pid: None,
             state,
             restarts: 0,
@@ -679,7 +680,7 @@ mod tests {
     fn model(caddy: ServiceState, sites: &[&str]) -> Model {
         let mut model = connected();
         model.update(Update::Runtimes(runtimes(&["8.4.27"], &["2.11.7"])));
-        model.update(Update::Services(vec![service(WEB_SERVER, caddy)]));
+        model.update(Update::Services(vec![service(ServiceId::Caddy, caddy)]));
         let sites = sites
             .iter()
             .map(|name| site(name, Some("8.4.27")))
@@ -735,7 +736,7 @@ mod tests {
         );
         assert_eq!(labels(&status), ["Start Caddy", "Show log"]);
         let start = Action::Service {
-            service: "caddy".into(),
+            service: ServiceId::Caddy,
             action: ServiceAction::Start,
         };
         assert_eq!(status.fixes[0].action, start);
@@ -874,8 +875,8 @@ mod tests {
             code: "service_failed".into(),
         };
         model.update(Update::Services(vec![
-            service(WEB_SERVER, ServiceState::Running),
-            service("php-fpm-8.3", failed),
+            service(ServiceId::Caddy, ServiceState::Running),
+            service("php-fpm-8.3".parse::<ServiceId>().unwrap(), failed),
         ]));
         let status = view(&model).status;
         assert_eq!(
@@ -892,12 +893,18 @@ mod tests {
         };
         apply(
             &mut model,
-            marsa_core::types::Event::ServiceChanged(service("php-fpm-8.3", ServiceState::Stopped)),
+            marsa_core::types::Event::ServiceChanged(service(
+                "php-fpm-8.3".parse::<ServiceId>().unwrap(),
+                ServiceState::Stopped,
+            )),
         );
         assert_eq!(view(&model).status.health, Health::Ok);
         apply(
             &mut model,
-            marsa_core::types::Event::ServiceChanged(service("php-cgi-8.3", failed)),
+            marsa_core::types::Event::ServiceChanged(service(
+                "php-cgi-8.3".parse::<ServiceId>().unwrap(),
+                failed,
+            )),
         );
         assert_eq!(states(&view(&model).status)[2].0, "PHP 8.3");
     }

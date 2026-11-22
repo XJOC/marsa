@@ -36,12 +36,11 @@ pub use self::manager::{Applied, CaddyManager};
 use marsa_core::caddy::{CaddyError, CaddyPaths, caddy_env};
 use marsa_core::codes;
 use marsa_core::services::{ProgramNotAbsolute, RestartPolicy, ServiceSpec, StopMethod};
+use marsa_core::types::ServiceId;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
-
-pub use marsa_core::caddy::CADDY_ID;
 
 /// How Caddy and each php-fpm pool restart after a failure: up to 3 times,
 /// after 0.5 s, then twice as long each time, at most 5 s.
@@ -68,7 +67,7 @@ pub fn caddy_spec(paths: &CaddyPaths) -> Result<ServiceSpec, CaddyError> {
 /// [`caddy_spec`] with `program` as Caddy. Tests run a fake this way.
 pub fn caddy_spec_for(paths: &CaddyPaths, program: PathBuf) -> ServiceSpec {
     ServiceSpec {
-        id: CADDY_ID.to_owned(),
+        id: ServiceId::Caddy,
         program,
         // `to_string_lossy` as in `caddy_env`: the app data dir comes from the
         // OS and is valid Unicode in practice.
@@ -153,7 +152,7 @@ mod tests {
 
     fn line(stream: LogStream, text: &str) -> LogLine {
         LogLine {
-            service: CADDY_ID.into(),
+            service: ServiceId::Caddy,
             seq: 0,
             at_ms: 0,
             stream,
@@ -178,7 +177,7 @@ mod tests {
         let config = config.to_str().unwrap();
         assert_eq!(spec.args, ["run", "--config", config]);
         assert_eq!(spec.env, caddy_env(&paths));
-        assert_eq!(spec.id, CADDY_ID);
+        assert_eq!(spec.id, ServiceId::Caddy);
         assert_eq!(spec.cwd, None);
         let restart = RestartPolicy::OnFailure {
             max_retries: 3,
@@ -377,9 +376,9 @@ mod tests {
             let cancel = cancel.clone();
             async move { cancel.cancelled().await }
         });
-        let runtime = Arc::new(Mutex::new(ServiceRuntime::new(CADDY_ID)));
+        let runtime = Arc::new(Mutex::new(ServiceRuntime::new(ServiceId::Caddy)));
         daemon.add_proc(
-            CADDY_ID,
+            ServiceId::Caddy,
             ServiceHandle {
                 cancel,
                 task,

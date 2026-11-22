@@ -112,7 +112,7 @@ use marsa_core::platform::process::{self, Signal};
 use marsa_core::ps::{StartTime, started_order};
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::{Runtime, RuntimesDir};
-use marsa_core::types::{Event, ServiceState};
+use marsa_core::types::{Event, ServiceId, ServiceState};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -989,11 +989,11 @@ impl Watcher {
             runtime,
             mut file,
         } = self;
-        let id = lock(&runtime).status.id.clone();
+        let id = lock(&runtime).status.id;
         loop {
             let status = tokio::select! {
                 result = &mut supervisor => {
-                    report(&id, result);
+                    report(id, result);
                     break;
                 }
                 event = lines.recv() => match event {
@@ -1003,7 +1003,7 @@ impl Watcher {
                     Err(RecvError::Lagged(_)) => lock(&runtime).status.clone(),
                     // The daemon is gone: wait for the process alone.
                     Err(RecvError::Closed) => {
-                        report(&id, (&mut supervisor).await);
+                        report(id, (&mut supervisor).await);
                         break;
                     }
                 },
@@ -1153,7 +1153,7 @@ impl Recording {
     }
 }
 
-fn report(id: &str, result: Result<(), tokio::task::JoinError>) {
+fn report(id: ServiceId, result: Result<(), tokio::task::JoinError>) {
     if let Err(err) = result {
         warn!(service = %id, %err, "the php-fpm supervisor task failed");
     }
@@ -2204,7 +2204,7 @@ mod tests {
         let pool = bare_pool(dir.path(), listen, "/never/run/php-fpm", &[]);
 
         assert!(!php.start_pool(&daemon, &pool).await);
-        let runtime = daemon.pools.find(&fpm_id(PHP84)).expect("listed");
+        let runtime = daemon.pools.find(fpm_id(PHP84)).expect("listed");
         let (status, lines) = {
             let runtime = lock(&runtime);
             (runtime.status.clone(), runtime.logs.recent())
@@ -2217,7 +2217,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.text.starts_with(note)), "{lines:?}");
         assert!(fake.signals().is_empty());
         assert!(pid_file.path.exists(), "kept for the next try");
-        assert!(!daemon.proc_alive(&fpm_id(PHP84)));
+        assert!(!daemon.proc_alive(fpm_id(PHP84)));
     }
 
     // Runs `/bin/sleep` as the pool, which Windows does not have.
@@ -2232,11 +2232,11 @@ mod tests {
         let pool = bare_pool(dir.path(), listen, "/bin/sleep", &["30"]);
 
         assert!(php.start_pool(&daemon, &pool).await);
-        assert!(daemon.proc_alive(&fpm_id(PHP84)));
+        assert!(daemon.proc_alive(fpm_id(PHP84)));
         assert!(!pid_file.path.exists(), "forgotten");
         assert!(fake.signals().is_empty());
         super::super::stop_pool(&daemon, PHP84).await;
-        assert!(!daemon.proc_alive(&fpm_id(PHP84)));
+        assert!(!daemon.proc_alive(fpm_id(PHP84)));
     }
 
     #[tokio::test]
@@ -2345,7 +2345,7 @@ mod tests {
         let handle = ServiceHandle {
             cancel,
             task: tokio::spawn(async move { stopped.cancelled().await }),
-            runtime: Arc::new(Mutex::new(ServiceRuntime::new(&fpm_id(PHP84)))),
+            runtime: Arc::new(Mutex::new(ServiceRuntime::new(fpm_id(PHP84)))),
             stop_limit: Duration::ZERO,
         };
         let program = PathBuf::from(PROGRAM);
@@ -2915,7 +2915,10 @@ mod tests {
             if php.start_pool(daemon, pool).await {
                 return;
             }
-            let (status, lines) = match daemon.pools.find("php-fpm-8.4") {
+            let (status, lines) = match daemon
+                .pools
+                .find("php-fpm-8.4".parse::<ServiceId>().unwrap())
+            {
                 Some(runtime) => {
                     let runtime = lock(&runtime);
                     let lines: Vec<String> =
@@ -2983,7 +2986,7 @@ mod tests {
             })
             .await;
             let second = read().expect("a record");
-            let runtime = daemon.pools.find(&fpm_id(PHP84)).expect("listed");
+            let runtime = daemon.pools.find(fpm_id(PHP84)).expect("listed");
             let status = lock(&runtime).status.clone();
             assert_eq!((status.pid, status.restarts), (Some(second.pid), 1));
 
@@ -3030,7 +3033,7 @@ mod tests {
             // Only SIGTERM, only to the orphan, which it ended.
             assert_eq!(recorder.signals(), [(orphan.pid(), Signal::Term)]);
             assert_eq!(orphan.wait().signal(), Some(15));
-            let runtime = daemon.pools.find(&fpm_id(PHP84)).expect("listed");
+            let runtime = daemon.pools.find(fpm_id(PHP84)).expect("listed");
             let lines = lock(&runtime).logs.recent();
             assert!(lines.iter().any(|line| line.text == STOPPING_ORPHAN));
 
@@ -3213,7 +3216,10 @@ mod tests {
             for pid in &workers {
                 assert_eq!(process::real_identity(*pid).await, Liveness::Gone, "{pid}");
             }
-            let runtime = daemon.pools.find("php-fpm-8.4").expect("listed");
+            let runtime = daemon
+                .pools
+                .find("php-fpm-8.4".parse::<ServiceId>().unwrap())
+                .expect("listed");
             let lines = lock(&runtime).logs.recent();
             assert!(lines.iter().any(|line| line.text == STOPPING_ORPHAN));
 
@@ -3300,7 +3306,10 @@ mod tests {
                 panic!("the php-fpm that is not on the socket was stopped");
             };
             assert!(accepted([program.clone()]).contains(&exe), "{exe:?}");
-            let runtime = daemon.pools.find("php-fpm-8.4").expect("listed");
+            let runtime = daemon
+                .pools
+                .find("php-fpm-8.4".parse::<ServiceId>().unwrap())
+                .expect("listed");
             let lines = lock(&runtime).logs.recent();
             assert!(lines.iter().any(|line| line.text == STOPPING_ORPHAN));
 

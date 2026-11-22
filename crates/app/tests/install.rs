@@ -14,6 +14,7 @@
 //! the atomic move. No network beyond loopback.
 
 use marsa_core::data_dir::DataDir;
+use marsa_core::types::ServiceId;
 use std::fs::{self, File, OpenOptions};
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -923,7 +924,7 @@ async fn a_refused_default_leaves_global_toml_as_it_was() {
 
 /// Registers a task as the running service `id`, as the supervisor does.
 /// `on_stop` runs when the daemon stops it.
-fn pretend_runs(served: &Served, id: &str, on_stop: impl FnOnce() + Send + 'static) {
+fn pretend_runs(served: &Served, id: ServiceId, on_stop: impl FnOnce() + Send + 'static) {
     use marsa::daemon::services::supervisor::{ServiceHandle, ServiceRuntime};
     let cancel = tokio_util::sync::CancellationToken::new();
     let stopped = cancel.clone();
@@ -1107,7 +1108,7 @@ async fn a_version_in_use_is_refused_and_nothing_changes() {
     let program =
         RuntimesDir::in_dir(served.path()).version_dir(caddy, &"2.11.7".parse().expect("v"));
     *served.daemon.caddy.started.lock().expect("lock") = Some(program.join("caddy"));
-    pretend_runs(&served, "caddy", || {});
+    pretend_runs(&served, ServiceId::Caddy, || {});
     let files = || [&paths.global, &paths.sites].map(|path| fs::read(path).expect("a file"));
     let before = files();
 
@@ -1523,7 +1524,7 @@ async fn the_pool_of_the_version_stops_before_the_delete_and_the_sites_follow() 
     );
     // When the pool stops, the folder moved aside is still whole.
     let whole = Arc::new(AtomicBool::new(false));
-    pretend_runs(&served, &pool83, {
+    pretend_runs(&served, pool83, {
         let whole = whole.clone();
         move || {
             let mut names = fs::read_dir(&php).expect("php").flatten();
@@ -1532,15 +1533,15 @@ async fn the_pool_of_the_version_stops_before_the_delete_and_the_sites_follow() 
             whole.store(bin.is_some_and(|bin| bin.is_dir()), Ordering::SeqCst);
         }
     });
-    pretend_runs(&served, &pool84, || {});
+    pretend_runs(&served, pool84, || {});
     let mut events = served.daemon.events.subscribe();
 
     let _: Uninstalled = served
         .json("DELETE", "/v1/runtimes/php/8.3.12", None, StatusCode::OK)
         .await;
     assert!(whole.load(Ordering::SeqCst), "stopped before the delete");
-    assert!(!served.daemon.proc_alive(&pool83));
-    assert!(served.daemon.proc_alive(&pool84), "another line runs on");
+    assert!(!served.daemon.proc_alive(pool83));
+    assert!(served.daemon.proc_alive(pool84), "another line runs on");
     assert_eq!(php_of(&next_sites(&mut events).await, "blog"), None);
     assert_eq!(entries(&served, Runtime::Php), ["8.4.23"]);
 }

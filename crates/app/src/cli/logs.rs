@@ -123,11 +123,12 @@ fn stdout_closed(err: &io::Error) -> ExitCode {
 mod tests {
     use super::*;
     use marsa_core::types::LogStream;
+    use marsa_core::types::ServiceId;
 
     #[test]
     fn a_line_is_its_text_alone() {
         let line = LogLine {
-            service: "caddy".into(),
+            service: ServiceId::Caddy,
             seq: 7,
             at_ms: 1,
             stream: LogStream::Stderr,

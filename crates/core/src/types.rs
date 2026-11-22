@@ -14,10 +14,13 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::databases::ServerKind;
 /// Defined once, in `doctor`, which judges them.
 pub use crate::doctor::{Check as DoctorCheck, Verdict as DoctorVerdict, Warning as DoctorWarning};
 /// Defined once, in `helper`, next to the request they answer.
 pub use crate::helper::{OpName, OpResult, OpStatus};
+use crate::php::PhpMinor;
+use crate::recipes::Os;
 /// Defined once, in `resolver`, which picks the version: `Site::php_source`.
 pub use crate::resolver::Source;
 use crate::runtimes::Runtime;
@@ -56,8 +59,7 @@ pub enum ServiceState {
 /// One managed process, as `GET /v1/services` reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceStatus {
-    /// For example `caddy`.
-    pub id: String,
+    pub id: ServiceId,
     #[serde(flatten)]
     pub state: ServiceState,
     /// The OS process id while the process runs.
@@ -66,6 +68,116 @@ pub struct ServiceStatus {
     pub restarts: u32,
     /// When the process entered its current state.
     pub since_ms: Option<u64>,
+}
+
+/// A service `marsad` runs. On the wire it is its id text: `caddy`, `dns`,
+/// `php-fpm-8.4` (`php-cgi-8.4` on Windows, ADR 0016), `postgres`, `mysql`,
+/// or `valkey`. The id also names the log file `logs/<id>.log` and the pid
+/// file `run/<id>.pid`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ServiceId {
+    /// The web server that serves every site.
+    Caddy,
+    /// The DNS server for `.test` names, inside the daemon (macOS, Linux).
+    Dns,
+    /// The PHP pool of one PHP line, which starts and stops with the sites
+    /// that need it.
+    Pool(PoolKind, PhpMinor),
+    Database(ServerKind),
+}
+
+/// The program a PHP pool runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PoolKind {
+    /// php-fpm: macOS and Linux.
+    Fpm,
+    /// php-cgi: Windows (ADR 0016).
+    Cgi,
+}
+
+impl PoolKind {
+    /// The program name, and the start of the pool's id.
+    pub const fn program(self) -> &'static str {
+        match self {
+            Self::Fpm => "php-fpm",
+            Self::Cgi => "php-cgi",
+        }
+    }
+}
+
+impl ServiceId {
+    /// The pool of `minor` on the system `os`: php-cgi on Windows, php-fpm
+    /// on the others.
+    pub fn pool(os: Os, minor: PhpMinor) -> Self {
+        let kind = match os {
+            Os::Windows => PoolKind::Cgi,
+            Os::Mac | Os::Linux | Os::Any => PoolKind::Fpm,
+        };
+        Self::Pool(kind, minor)
+    }
+
+    /// Whether this is a PHP pool, which the sites start and stop.
+    pub fn is_pool(self) -> bool {
+        matches!(self, Self::Pool(..))
+    }
+}
+
+impl fmt::Display for ServiceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Caddy => f.write_str("caddy"),
+            Self::Dns => f.write_str("dns"),
+            Self::Pool(kind, minor) => write!(f, "{}-{minor}", kind.program()),
+            Self::Database(kind) => f.write_str(kind.id()),
+        }
+    }
+}
+
+/// A service id that names no service of this build.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("no service named {0:?}")]
+pub struct UnknownService(pub String);
+
+impl FromStr for ServiceId {
+    type Err = UnknownService;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let unknown = || UnknownService(text.to_owned());
+        match text {
+            "caddy" => return Ok(Self::Caddy),
+            "dns" => return Ok(Self::Dns),
+            _ => {}
+        }
+        if let Some(kind) = ServerKind::from_id(text) {
+            return Ok(Self::Database(kind));
+        }
+        let (program, line) = text.rsplit_once('-').ok_or_else(unknown)?;
+        let kind = [PoolKind::Fpm, PoolKind::Cgi]
+            .into_iter()
+            .find(|kind| kind.program() == program)
+            .ok_or_else(unknown)?;
+        let minor = PhpMinor::parse(line).ok_or_else(unknown)?;
+        let id = Self::Pool(kind, minor);
+        // One text per id: `php-fpm-08.4` is not `php-fpm-8.4`.
+        if id.to_string() == text {
+            Ok(id)
+        } else {
+            Err(unknown())
+        }
+    }
+}
+
+impl Serialize for ServiceId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ServiceId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 /// The `{action}` in `POST /v1/services/{id}/{action}`.
@@ -130,7 +242,7 @@ pub enum LogStream {
 /// One line of a managed process's output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogLine {
-    pub service: String,
+    pub service: ServiceId,
     /// Grows by one per line of this service, so a client can find gaps.
     pub seq: u64,
     pub at_ms: u64,
@@ -866,7 +978,7 @@ mod tests {
 
     fn running_caddy() -> ServiceStatus {
         ServiceStatus {
-            id: "caddy".into(),
+            id: ServiceId::Caddy,
             state: ServiceState::Running,
             pid: Some(4242),
             restarts: 0,
@@ -904,7 +1016,7 @@ mod tests {
     #[test]
     fn service_status_failed_carries_the_code() {
         let status = ServiceStatus {
-            id: "caddy".into(),
+            id: ServiceId::Caddy,
             state: ServiceState::Failed {
                 code: "port_in_use".into(),
             },
@@ -937,6 +1049,55 @@ mod tests {
         }
     }
 
+    /// The text of each id is the one the daemon sent before the type: the
+    /// JSON, the log file names, and the routes did not change.
+    #[test]
+    fn service_ids_are_their_text_and_nothing_else_parses() {
+        let line = |major, minor| PhpMinor { major, minor };
+        let ids = [
+            (ServiceId::Caddy, "caddy"),
+            (ServiceId::Dns, "dns"),
+            (ServiceId::Pool(PoolKind::Fpm, line(8, 4)), "php-fpm-8.4"),
+            (ServiceId::Pool(PoolKind::Cgi, line(8, 10)), "php-cgi-8.10"),
+            (ServiceId::Database(ServerKind::Postgres), "postgres"),
+            (ServiceId::Database(ServerKind::Mysql), "mysql"),
+            (ServiceId::Database(ServerKind::Valkey), "valkey"),
+        ];
+        for (id, text) in ids {
+            assert_eq!(id.to_string(), text);
+            assert_eq!(text.parse(), Ok(id));
+            assert_eq!(serde_json::to_value(id).unwrap(), json!(text));
+            assert_eq!(
+                serde_json::from_value::<ServiceId>(json!(text)).unwrap(),
+                id
+            );
+        }
+        assert_eq!(
+            ServiceId::pool(Os::Windows, line(8, 4)).to_string(),
+            "php-cgi-8.4"
+        );
+        assert_eq!(
+            ServiceId::pool(Os::Linux, line(8, 4)).to_string(),
+            "php-fpm-8.4"
+        );
+        for text in [
+            "",
+            "Caddy",
+            "php",
+            "php-fpm",
+            "php-fpm-8",
+            "php-fpm-8.",
+            "php-fpm-08.4",
+            "php-fpm-8.4.1",
+            "php-fpm-+8.4",
+            "my-php-fpm-8.4",
+            "mailpit",
+        ] {
+            assert_eq!(text.parse::<ServiceId>(), Err(UnknownService(text.into())));
+        }
+        assert!(serde_json::from_value::<ServiceId>(json!("mailpit")).is_err());
+    }
+
     #[test]
     fn service_action_parses_and_prints_path_segments() {
         for action in [
@@ -962,7 +1123,7 @@ mod tests {
     #[test]
     fn log_line() {
         let line = LogLine {
-            service: "caddy".into(),
+            service: ServiceId::Caddy,
             seq: 12,
             at_ms: 5,
             stream: LogStream::Stderr,
@@ -997,7 +1158,7 @@ mod tests {
         );
         round_trip(
             &Event::Log(LogLine {
-                service: "caddy".into(),
+                service: ServiceId::Caddy,
                 seq: 0,
                 at_ms: 1,
                 stream: LogStream::Stdout,

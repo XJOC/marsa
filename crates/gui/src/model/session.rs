@@ -84,7 +84,7 @@ pub struct Session {
     /// Sorted by id.
     pub services: Vec<ServiceStatus>,
     /// The log of each service that has written one, by the service's id.
-    pub(super) logs: BTreeMap<String, ServiceLog>,
+    pub(super) logs: BTreeMap<ServiceId, ServiceLog>,
     /// Sites sorted by name, the parked folders, and the skipped folders.
     pub sites: SiteList,
     /// As the daemon lists them.
@@ -133,7 +133,7 @@ impl Model {
                     .session
                     .services
                     .iter()
-                    .find(|service| service.id == WEB_SERVER);
+                    .find(|service| service.id == ServiceId::Caddy);
                 match web.map(|service| &service.state) {
                     Some(ServiceState::Running) => Overall::Working,
                     Some(ServiceState::Starting) => Overall::Starting,

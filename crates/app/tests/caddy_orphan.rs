@@ -19,6 +19,7 @@
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
 use marsa_core::data_dir::DataDir;
+use marsa_core::types::ServiceId;
 use std::collections::BTreeMap;
 use std::io::{self, BufRead as _, BufReader, Write as _};
 use std::net::{Ipv4Addr, TcpListener};
@@ -511,7 +512,7 @@ async fn a_pid_file_with_another_start_time_is_never_signalled() {
     assert_eq!(status.state, port_in_use());
     assert!(recorder.signals().is_empty());
     assert!(idle.alive());
-    assert!(!daemon.proc_alive("caddy"));
+    assert!(!daemon.proc_alive(ServiceId::Caddy));
     // Nothing touched: the file stays as it was.
     assert_eq!(read_pid_file(&pid_path(dir.path())), Some(record));
     let notes = notes(&daemon);
@@ -558,7 +559,7 @@ async fn a_process_that_only_claims_our_path_is_never_signalled() {
     assert_eq!(status.state, port_in_use());
     assert!(recorder.signals().is_empty());
     assert!(sleeper.alive());
-    assert!(!daemon.proc_alive("caddy"));
+    assert!(!daemon.proc_alive(ServiceId::Caddy));
 }
 
 #[tokio::test]
@@ -627,7 +628,7 @@ async fn a_foreign_caddy_on_our_admin_port_is_left_alone() {
     assert_eq!(status.state, port_in_use());
     assert!(recorder.signals().is_empty());
     assert_eq!(stops.load(Ordering::SeqCst), 0, "no POST /stop to it");
-    assert!(!daemon.proc_alive("caddy"));
+    assert!(!daemon.proc_alive(ServiceId::Caddy));
     assert_eq!(read_pid_file(&pid_path(dir.path())), Some(record));
     let notes = notes(&daemon);
     assert!(notes.iter().any(|n| n.contains("not ours")), "{notes:?}");
@@ -645,7 +646,7 @@ async fn a_port_held_by_another_program_is_a_conflict() {
     let status = start(&daemon).await;
     assert_eq!(status.state, port_in_use());
     assert!(recorder.signals().is_empty());
-    assert!(!daemon.proc_alive("caddy"));
+    assert!(!daemon.proc_alive(ServiceId::Caddy));
     assert_eq!(read_pid_file(&pid_path(dir.path())), None);
     let notes = notes(&daemon);
     let note = notes.iter().find(|n| n.contains("site port is held by"));
@@ -685,7 +686,7 @@ async fn another_marsas_caddy_gets_no_stop_and_no_signal() {
     assert_eq!(status.state, failed("caddy_other_marsa"));
     assert_eq!(stops.load(Ordering::SeqCst), 0, "no POST /stop to it");
     assert!(recorder.signals().is_empty());
-    assert!(!daemon.proc_alive("caddy"));
+    assert!(!daemon.proc_alive(ServiceId::Caddy));
     assert_eq!(read_pid_file(&pid_path(dir.path())), Some(record));
     let notes = notes(&daemon);
     assert!(
@@ -766,7 +767,10 @@ async fn stop_with_no_caddy_running_stops_our_own_orphan() {
     assert!(!alive(&orphan).await, "the orphan is gone");
     assert!(recorder.signals().is_empty(), "POST /stop was enough");
     assert_eq!(read_pid_file(&pid_path(dir.path())), None);
-    assert!(!daemon.proc_alive("caddy"), "a stop starts nothing");
+    assert!(
+        !daemon.proc_alive(ServiceId::Caddy),
+        "a stop starts nothing"
+    );
 }
 
 #[tokio::test]

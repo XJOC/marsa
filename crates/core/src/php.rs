@@ -99,6 +99,21 @@ impl From<&Version> for PhpMinor {
     }
 }
 
+impl PhpMinor {
+    /// `8.4`: two numbers, and nothing else.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (major, minor) = text.split_once('.')?;
+        let number = |part: &str| {
+            let digits = !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+            digits.then(|| part.parse().ok()).flatten()
+        };
+        Some(Self {
+            major: number(major)?,
+            minor: number(minor)?,
+        })
+    }
+}
+
 impl fmt::Display for PhpMinor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}", self.major, self.minor)

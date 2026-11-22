@@ -20,11 +20,11 @@
 use std::collections::VecDeque;
 
 use eframe::egui::{ScrollArea, Ui, Vec2, vec2};
-use marsa_core::types::LogStream;
+use marsa_core::types::{LogStream, ServiceId};
 
 use super::lines::message;
 use crate::logline::{self, LogLevel};
-use crate::model::{self, Action, LOG_SERVICE, LogRow, LogSource, Model, Route};
+use crate::model::{self, Action, LogRow, LogSource, Model, Route};
 use crate::strings;
 use crate::theme::{Direction, Section, Theme, UNIT};
 use crate::widgets::log_entry::width_for;
@@ -136,9 +136,9 @@ pub fn view<'a>(model: &'a Model, source: &LogSource) -> LogsView<'a> {
         .session
         .services
         .iter()
-        .map(|service| service.id.as_str())
-        .filter(|id| *id != LOG_SERVICE);
-    let mut ids: Vec<&str> = std::iter::once(LOG_SERVICE).chain(others).collect();
+        .map(|service| service.id)
+        .filter(|id| *id != ServiceId::Caddy);
+    let mut ids: Vec<ServiceId> = std::iter::once(ServiceId::Caddy).chain(others).collect();
     // The log the user is on stays pickable if its service went away.
     if !ids.contains(&source.id()) {
         ids.push(source.id());
@@ -150,8 +150,8 @@ pub fn view<'a>(model: &'a Model, source: &LogSource) -> LogsView<'a> {
     let sources = ids
         .iter()
         .map(|id| SourceView {
-            source: LogSource::of(id),
-            name: model::service_name(id),
+            source: LogSource::of(*id),
+            name: model::service_name(*id),
         })
         .collect();
     LogsView {
@@ -388,9 +388,9 @@ mod tests {
     const WARN: &str = r#"{"level":"warn","msg":"certificate for docs.test is not requested"}"#;
     const ERROR: &str = r#"{"level":"error","msg":"dial tcp 127.0.0.1:9000: connection refused"}"#;
 
-    fn service(id: &str) -> ServiceStatus {
+    fn service(id: ServiceId) -> ServiceStatus {
         ServiceStatus {
-            id: id.into(),
+            id,
             state: ServiceState::Running,
             pid: None,
             restarts: 0,
@@ -398,9 +398,9 @@ mod tests {
         }
     }
 
-    fn line(service: &str, seq: u64, text: &str) -> LogLine {
+    fn line(service: ServiceId, seq: u64, text: &str) -> LogLine {
         LogLine {
-            service: service.into(),
+            service,
             seq,
             at_ms: 0,
             stream: LogStream::Stderr,
@@ -414,7 +414,7 @@ mod tests {
         let lines = texts
             .iter()
             .enumerate()
-            .map(|(seq, text)| line("caddy", seq as u64, text))
+            .map(|(seq, text)| line(ServiceId::Caddy, seq as u64, text))
             .collect();
         model.update(Update::Log(lines));
         model
@@ -450,18 +450,21 @@ mod tests {
     fn every_service_has_its_log_and_the_one_on_show_is_marked() {
         let mut model = with_lines(&[INFO]);
         model.update(Update::Services(vec![
-            service("caddy"),
-            service("php-fpm-8.3"),
-            service("php-fpm-8.4"),
+            service(ServiceId::Caddy),
+            service("php-fpm-8.3".parse::<ServiceId>().unwrap()),
+            service("php-fpm-8.4".parse::<ServiceId>().unwrap()),
         ]));
-        let view = view(&model, &LogSource::of("php-fpm-8.4"));
+        let view = view(
+            &model,
+            &LogSource::of("php-fpm-8.4".parse::<ServiceId>().unwrap()),
+        );
         let names: Vec<_> = view.sources.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["Caddy", "PHP-FPM 8.3", "PHP-FPM 8.4"]);
         assert_eq!(view.current, 2);
         assert_eq!(view.sources[0].source, LogSource::Caddy);
         assert_eq!(
             view.sources[2].source,
-            LogSource::Service("php-fpm-8.4".into())
+            LogSource::Service("php-fpm-8.4".parse::<ServiceId>().unwrap())
         );
         // The one on show decides the lines: PHP 8.4 wrote none yet.
         assert_eq!(view.body, Body::Empty("PHP-FPM 8.4".into()));
@@ -480,7 +483,10 @@ mod tests {
         assert_eq!((view.sources[0].name.as_str(), view.current), ("Caddy", 0));
         assert_eq!(lines(&view).len(), 1);
         // A pool that is gone: its name, and nothing to read.
-        let gone = super::view(&model, &LogSource::of("php-fpm-9.9"));
+        let gone = super::view(
+            &model,
+            &LogSource::of("php-fpm-9.9".parse::<ServiceId>().unwrap()),
+        );
         assert_eq!(gone.sources.len(), 2);
         assert_eq!(gone.current, 1);
         assert_eq!(gone.sources[1].name, "PHP-FPM 9.9");
@@ -671,7 +677,7 @@ mod tests {
         assert!(actions.is_empty(), "{actions:?}");
         // New lines come while following: the newest is in view again.
         let more = (300..320)
-            .map(|n| line("caddy", n, &format!("line {n}")))
+            .map(|n| line(ServiceId::Caddy, n, &format!("line {n}")))
             .collect();
         model.update(Update::Log(more));
         let (_, tree) = settle(&harness, &model, 4);
@@ -823,15 +829,15 @@ mod tests {
         let (_, one) = settle(&Harness::new(egui::Theme::Light), &model, 3);
         assert!(one.node_with_label(strings::LOG_SOURCE).is_none());
         model.update(Update::Services(vec![
-            service("caddy"),
-            service("php-fpm-8.4"),
+            service(ServiceId::Caddy),
+            service("php-fpm-8.4".parse::<ServiceId>().unwrap()),
         ]));
         let (_, two) = settle(&Harness::new(egui::Theme::Light), &model, 3);
         assert!(two.node_with_label(strings::LOG_SOURCE).is_some());
         assert_eq!(
             click(&model, "PHP-FPM 8.4"),
             [Action::Navigate(Route::Logs(LogSource::Service(
-                "php-fpm-8.4".into()
+                "php-fpm-8.4".parse::<ServiceId>().unwrap()
             )))]
         );
         // The one on show is not an action.
@@ -849,11 +855,16 @@ mod tests {
         ];
         let mut model = with_lines(&[INFO]);
         model.update(Update::Services(
-            ids[..4].iter().map(|id| service(id)).collect(),
+            ids[..4]
+                .iter()
+                .map(|id| service(id.parse().unwrap()))
+                .collect(),
         ));
         let (_, four) = settle(&Harness::new(egui::Theme::Light), &model, 3);
         assert!(four.node_with_label(strings::LOG_SOURCE).is_some());
-        model.update(Update::Services(ids.iter().map(|id| service(id)).collect()));
+        model.update(Update::Services(
+            ids.iter().map(|id| service(id.parse().unwrap())).collect(),
+        ));
         let harness = Harness::new(egui::Theme::Light);
         let (_, five) = settle(&harness, &model, 3);
         assert!(five.node_with_label(strings::LOG_SOURCE).is_none());
@@ -896,7 +907,7 @@ mod tests {
         assert_eq!(
             actions,
             [Action::Navigate(Route::Logs(LogSource::Service(
-                "php-fpm-8.3".into()
+                "php-fpm-8.3".parse::<ServiceId>().unwrap()
             )))]
         );
     }
@@ -1087,9 +1098,9 @@ mod tests {
         let mut model = connected();
         let out = LogLine {
             stream: LogStream::Stdout,
-            ..line("caddy", 0, "from stdout")
+            ..line(ServiceId::Caddy, 0, "from stdout")
         };
-        model.update(Update::Log(vec![out, line("caddy", 1, ERROR)]));
+        model.update(Update::Log(vec![out, line(ServiceId::Caddy, 1, ERROR)]));
         let (_, tree) = settle(&Harness::new(egui::Theme::Light), &model, 3);
         // The message has no JSON around it, and starts with its level.
         let label = strings::log_entry_label(

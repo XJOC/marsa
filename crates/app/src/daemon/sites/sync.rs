@@ -28,6 +28,7 @@
 //!
 //! [`CaddyManager::apply`]: crate::daemon::services::caddy::CaddyManager::apply
 
+use marsa_core::types::ServiceId;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -42,7 +43,6 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use super::hosts_sync::HostsSync;
-use crate::daemon::services::caddy::CADDY_ID;
 use crate::daemon::services::php::{PhpManager, SystemRoots, write_ca_bundle};
 use crate::daemon::state::Daemon;
 
@@ -219,7 +219,7 @@ pub fn is_trigger(event: &Event) -> bool {
             matches!(&install.update, InstallUpdate::Done(done) if done.runtime == Runtime::Php)
         }
         Event::ServiceChanged(status) => {
-            status.id == CADDY_ID && status.state == ServiceState::Running
+            status.id == ServiceId::Caddy && status.state == ServiceState::Running
         }
         _ => false,
     }
@@ -310,9 +310,9 @@ mod tests {
 
     use crate::daemon::services::supervisor::{ServiceHandle, ServiceRuntime};
 
-    fn status(id: &str, state: ServiceState) -> Event {
+    fn status(id: ServiceId, state: ServiceState) -> Event {
         Event::ServiceChanged(ServiceStatus {
-            id: id.into(),
+            id,
             state,
             pid: Some(1),
             restarts: 0,
@@ -323,9 +323,15 @@ mod tests {
     #[test]
     fn sites_changes_and_a_caddy_start_ask_for_a_pass() {
         assert!(is_trigger(&Event::SitesChanged(SiteList::default())));
-        assert!(is_trigger(&status("caddy", ServiceState::Running)));
-        assert!(!is_trigger(&status("caddy", ServiceState::Starting)));
-        assert!(!is_trigger(&status("php-fpm-8.4", ServiceState::Running)));
+        assert!(is_trigger(&status(ServiceId::Caddy, ServiceState::Running)));
+        assert!(!is_trigger(&status(
+            ServiceId::Caddy,
+            ServiceState::Starting
+        )));
+        assert!(!is_trigger(&status(
+            "php-fpm-8.4".parse::<ServiceId>().unwrap(),
+            ServiceState::Running
+        )));
         assert!(!is_trigger(&Event::ShuttingDown));
 
         // A new PHP needs its `php.ini`; a new Node needs nothing here.
@@ -366,14 +372,14 @@ mod tests {
             let cancel = cancel.clone();
             async move { cancel.cancelled().await }
         });
-        let runtime = Arc::new(Mutex::new(ServiceRuntime::new(CADDY_ID)));
+        let runtime = Arc::new(Mutex::new(ServiceRuntime::new(ServiceId::Caddy)));
         let handle = ServiceHandle {
             cancel,
             task,
             runtime,
             stop_limit: Duration::ZERO,
         };
-        daemon.add_proc(CADDY_ID, handle);
+        daemon.add_proc(ServiceId::Caddy, handle);
     }
 
     async fn next_load(loads: &mut mpsc::UnboundedReceiver<Value>) -> Value {
