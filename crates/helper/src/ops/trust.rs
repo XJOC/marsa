@@ -68,7 +68,7 @@ const REMOVE: &str = "trust_remove";
 
 /// `trust_install`: trusts the one certificate in `pem` as a root for every
 /// user. A different certificate that Marsa trusted before is removed first.
-pub fn install(pem: &str, system: &impl System) -> OpResult {
+pub(super) fn install(pem: &str, system: &impl System) -> OpResult {
     let der = match parse_pem(pem) {
         Ok(der) => der,
         Err(reason) => {
@@ -104,7 +104,7 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
 
 /// `trust_remove`: removes the trust and the certificate that Marsa trusted,
 /// then its file. Without the file, nothing of Marsa's is trusted.
-pub fn remove(system: &impl System) -> OpResult {
+pub(super) fn remove(system: &impl System) -> OpResult {
     match stored_hash(REMOVE, system) {
         Ok(None) => OpResult::unchanged(REMOVE),
         Ok(Some(hash)) => match remove_steps(REMOVE, &hash, system) {

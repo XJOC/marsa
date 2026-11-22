@@ -11,7 +11,7 @@
 
 mod hosts;
 mod marked;
-pub mod pf;
+pub(crate) mod pf;
 mod ports;
 mod program;
 mod resolved;
@@ -29,7 +29,7 @@ use crate::system::System;
 
 /// One result per op, and one per expanded op for `uninstall_all`. It takes
 /// a [`ValidRequest`], so it cannot run a request that skipped validation.
-pub fn apply(request: &ValidRequest, os: Os, system: &impl System) -> Vec<OpResult> {
+pub(crate) fn apply(request: &ValidRequest, os: Os, system: &impl System) -> Vec<OpResult> {
     let mut results = Vec::with_capacity(request.ops().len());
     for op in request.ops() {
         run(op, os, system, &mut results);
@@ -42,14 +42,14 @@ pub fn apply(request: &ValidRequest, os: Os, system: &impl System) -> Vec<OpResu
 /// with the hash approved at install, before any op runs.
 // Only the Windows service calls it; its tests run on every system.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn certificate_sha256(pem: &str) -> Option<String> {
+pub(crate) fn certificate_sha256(pem: &str) -> Option<String> {
     trust::parse_pem(pem)
         .ok()
         .map(|der| trust::sha256_hex(&der))
 }
 
 /// The result of an op whose handler is not written yet.
-pub fn not_implemented(op: &'static str) -> OpResult {
+pub(crate) fn not_implemented(op: &'static str) -> OpResult {
     let message = format!("{op} is not implemented yet");
     OpResult::failed(op, code::OP_NOT_IMPLEMENTED, message)
 }

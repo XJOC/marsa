@@ -38,8 +38,8 @@ use crate::request::{Request, ValidRequest};
 use crate::response::{OpResult, Outcome, Response, code};
 
 /// The two commands.
-pub const INSTALL: &str = "install";
-pub const UNINSTALL: &str = "uninstall";
+pub(crate) const INSTALL: &str = "install";
+pub(crate) const UNINSTALL: &str = "uninstall";
 
 /// The removals of `uninstall`, through the parser like every request, so
 /// nothing runs unchecked.
@@ -54,13 +54,13 @@ fn removals() -> ValidRequest {
 /// Off Windows there is no service to install.
 // The Windows version is below.
 #[cfg(not(windows))]
-pub fn install(_args: &[std::ffi::OsString]) -> Response {
+pub(crate) fn install(_args: &[std::ffi::OsString]) -> Response {
     not_windows()
 }
 
 // The Windows version is below.
 #[cfg(not(windows))]
-pub fn uninstall() -> Response {
+pub(crate) fn uninstall() -> Response {
     not_windows()
 }
 
@@ -79,7 +79,7 @@ fn done(op: &'static str, outcome: Outcome) -> Response {
 
 /// `install <SID> <hash>`.
 #[cfg(windows)]
-pub fn install(args: &[std::ffi::OsString]) -> Response {
+pub(crate) fn install(args: &[std::ffi::OsString]) -> Response {
     let [sid, hash] = args else {
         return Response::error(code::USAGE, crate::USAGE.to_owned());
     };
@@ -106,7 +106,7 @@ pub fn install(args: &[std::ffi::OsString]) -> Response {
 /// `uninstall`: the service stops, the removals run, then the service and
 /// Marsa's files go.
 #[cfg(windows)]
-pub fn uninstall() -> Response {
+pub(crate) fn uninstall() -> Response {
     use crate::os::Os;
     use crate::system::RealSystem;
 
@@ -204,7 +204,7 @@ mod scm {
         }
     }
 
-    pub fn install(allowed: &Allowed) -> Result<(), String> {
+    pub(super) fn install(allowed: &Allowed) -> Result<(), String> {
         let dir = RealSystem
             .install_dir()
             .map_err(|err| text("cannot find Program Files", err))?;
@@ -270,7 +270,7 @@ mod scm {
 
     /// Stops the service if it is installed, and returns it for
     /// [`remove`] or [`start_again`].
-    pub fn stop_installed() -> Result<Option<Service>, String> {
+    pub(super) fn stop_installed() -> Result<Option<Service>, String> {
         let manager = manager(ServiceManagerAccess::CONNECT)?;
         let rights = ServiceAccess::QUERY_STATUS
             | ServiceAccess::STOP
@@ -284,7 +284,7 @@ mod scm {
     }
 
     /// Deletes the stopped service, then Marsa's files and its folder.
-    pub fn remove(service: Option<Service>) -> Result<Outcome, String> {
+    pub(super) fn remove(service: Option<Service>) -> Result<Outcome, String> {
         let mut outcome = Outcome::Unchanged;
         if let Some(service) = service {
             match service.delete() {
@@ -363,7 +363,7 @@ mod scm {
     /// Starts the service again after a failed step. Best effort: the
     /// failed step is the error. After a failed start of a new program, the
     /// old one is gone already: nothing better can serve.
-    pub fn start_again(service: &Service) {
+    pub(super) fn start_again(service: &Service) {
         let _ = service.start::<&OsStr>(&[]);
     }
 

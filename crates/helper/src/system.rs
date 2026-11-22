@@ -25,7 +25,7 @@ const POLL: Duration = Duration::from_millis(10);
 
 /// The output of a program that finished.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RunOutput {
+pub(crate) struct RunOutput {
     /// `None` if a signal stopped the program.
     pub code: Option<i32>,
     pub stdout: Vec<u8>,
@@ -38,7 +38,7 @@ pub struct RunOutput {
 /// folder that only root can write. The checks below look at the path and
 /// then use it; that is safe only because the user cannot change such a
 /// folder between the two steps.
-pub trait System {
+pub(crate) trait System {
     /// The whole file, or an error if it is larger than `max` bytes or is not
     /// a regular file. A missing file is an error of kind `NotFound`.
     fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>>;
@@ -139,7 +139,7 @@ fn only_windows() -> io::Error {
 }
 
 /// The real disk and processes.
-pub struct RealSystem;
+pub(crate) struct RealSystem;
 
 impl System for RealSystem {
     fn read(&self, path: &Path, max: u64) -> io::Result<Vec<u8>> {
@@ -506,7 +506,7 @@ fn sync_dir(_dir: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
-pub use fake::{FakeSystem, Hooked, RunHook};
+pub(crate) use fake::{FakeSystem, Hooked, RunHook};
 
 #[cfg(test)]
 mod fake {
@@ -520,11 +520,11 @@ mod fake {
     use super::{RunOutput, System, too_large};
 
     /// What `current_exe` returns.
-    pub const EXE: &str = "/fake/marsa-helper";
+    pub(super) const EXE: &str = "/fake/marsa-helper";
 
     /// Files and commands in memory, for tests.
     #[derive(Default)]
-    pub struct FakeSystem {
+    pub(crate) struct FakeSystem {
         /// Path to content and mode.
         pub files: RefCell<BTreeMap<PathBuf, (Vec<u8>, u32)>>,
         /// Every `run` call: the program and its arguments.
@@ -568,7 +568,7 @@ mod fake {
     /// reacts (a `certutil` that changes a store, a `sysctl` that changes a
     /// value file). Implemented once per test machine, so none of them
     /// forwards the other methods of [`System`] by hand.
-    pub trait RunHook: Sized {
+    pub(crate) trait RunHook: Sized {
         /// Called after the fake logged the call. `scripted` is what the
         /// fake alone would return. `system` is the whole machine, so the
         /// hook can read and change its files.
@@ -598,13 +598,13 @@ mod fake {
 
     /// A [`FakeSystem`] plus the state and the `run` behavior of one test
     /// machine. `Deref` gives the tests the machine's own fields.
-    pub struct Hooked<H> {
+    pub(crate) struct Hooked<H> {
         pub fake: FakeSystem,
         hook: H,
     }
 
     impl<H> Hooked<H> {
-        pub fn with_hook(fake: FakeSystem, hook: H) -> Self {
+        pub(crate) fn with_hook(fake: FakeSystem, hook: H) -> Self {
             Self { fake, hook }
         }
     }
@@ -685,7 +685,7 @@ mod fake {
 
     impl FakeSystem {
         /// Scripts the output of `program` run with exactly `args`.
-        pub fn script(&mut self, program: &'static str, args: &[&str], output: RunOutput) {
+        pub(crate) fn script(&mut self, program: &'static str, args: &[&str], output: RunOutput) {
             self.outputs.insert((program, strings(args)), output);
         }
     }
