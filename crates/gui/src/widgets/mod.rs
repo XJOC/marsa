@@ -71,7 +71,7 @@ pub use list_item::ListItem;
 pub use log_entry::{LogEntry, level_color};
 pub use menu::{Item as MenuItem, Menu};
 pub use nav::NavItem;
-pub use notice::{Notice, NoticeBar, NoticeKind, Notices, Progress, Reaction};
+pub use notice::{Notice, NoticeBar, NoticeKind, Progress, Reaction};
 pub use segmented::Segmented;
 pub use setting_rows::{SettingRows, setting_card};
 pub use status::{
