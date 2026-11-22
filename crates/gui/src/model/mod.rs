@@ -11,9 +11,9 @@ use marsa_core::helper::OpStatus;
 use marsa_core::resolver;
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    Event, Health, HostsStatus, InstallEvent, InstallFailure, InstallProgress, InstallUpdate,
-    LogLine, RuntimeList, ServiceAction, ServiceState, ServiceStatus, SetupReport, Site, SiteList,
-    Source, VersionInUse, XdebugState,
+    DoctorReport, Event, Health, HostsStatus, InstallEvent, InstallFailure, InstallProgress,
+    InstallUpdate, LogLine, RuntimeList, ServiceAction, ServiceState, ServiceStatus, SetupReport,
+    Site, SiteList, Source, VersionInUse, XdebugState,
 };
 use semver::Version;
 
@@ -165,6 +165,8 @@ pub enum Update {
         code: String,
         in_use: Option<VersionInUse>,
     },
+    /// The daemon's checks, as read (no event carries them).
+    Doctor(DoctorReport),
     /// Whether PHP loads Xdebug, as read (no event carries it).
     Xdebug(XdebugState),
     /// Reading it failed. A client error code.
@@ -414,6 +416,7 @@ impl Model {
             Update::InstallRefused { job, code } => self.refused(&job, code),
             Update::SetupDone(report) => self.session.setup = Setup::Finished(report),
             Update::Hosts(status) => self.session.hosts = status,
+            Update::Doctor(report) => self.session.doctor = Some(report),
             Update::HostsSynced(report) => {
                 self.session.hosts_sync = match not_added(&report) {
                     Some(code) => HostsSync::Failed(code),

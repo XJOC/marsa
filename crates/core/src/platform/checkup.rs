@@ -26,7 +26,7 @@ use crate::platform::runner::RealRunner;
 use crate::platform::{linux_dns, probe, trust};
 use crate::recipes::{Os, Platform};
 use crate::runtimes::{Runtime, RuntimesDir};
-use crate::types::{Health, ServiceState};
+use crate::types::{DoctorReport, Health, ServiceState};
 
 /// How long the system resolver may take for the `.test` name.
 const DNS_LIMIT: Duration = Duration::from_secs(5);
@@ -59,6 +59,28 @@ pub enum Item {
 
 fn line(out: &mut dyn FnMut(Item), check: Check, verdict: Verdict) {
     out(Item::Line(check, verdict));
+}
+
+/// Gives `report`, from a daemon, to `out` in the order [`run`] would, with
+/// the `PATH` check (the terminal's own, `path`) before the log's.
+pub fn replay(report: DoctorReport, path: Option<Verdict>, out: &mut dyn FnMut(Item)) {
+    let mut path = path;
+    let mut warnings = report.warnings.into_iter();
+    for found in report.lines {
+        if found.check == Check::Log
+            && let Some(path) = path.take()
+        {
+            line(out, Check::Path, path);
+        }
+        let daemon = found.check == Check::Daemon;
+        line(out, found.check, found.verdict);
+        // The elevation warning follows the daemon's own line.
+        if daemon {
+            warnings
+                .by_ref()
+                .for_each(|warning| out(Item::Warning(warning)));
+        }
+    }
 }
 
 /// Runs the checks in order, and gives each result to `out` as soon as it is
@@ -330,4 +352,55 @@ fn vc_runtime_version() -> Option<(u32, u32, u32)> {
     return super::windows::vc_runtime_version();
     #[cfg(not(windows))]
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doctor::{Pass, Skip};
+    use crate::types::DoctorLine;
+
+    fn found(check: Check) -> DoctorLine {
+        DoctorLine {
+            check,
+            verdict: Verdict::Pass(Pass::Caddy),
+        }
+    }
+
+    fn replayed(path: Option<Verdict>) -> Vec<Item> {
+        let report = DoctorReport {
+            lines: vec![found(Check::Daemon), found(Check::Caddy), found(Check::Log)],
+            warnings: vec![Warning::DaemonElevated],
+        };
+        let mut items = Vec::new();
+        replay(report, path, &mut |item| items.push(item));
+        items
+    }
+
+    #[test]
+    fn replay_puts_the_warning_after_the_daemon_and_path_before_the_log() {
+        let path = Verdict::Skip(Skip::NotChecked);
+        let items = replayed(Some(path.clone()));
+        let want = [
+            Item::Line(Check::Daemon, Verdict::Pass(Pass::Caddy)),
+            Item::Warning(Warning::DaemonElevated),
+            Item::Line(Check::Caddy, Verdict::Pass(Pass::Caddy)),
+            Item::Line(Check::Path, path),
+            Item::Line(Check::Log, Verdict::Pass(Pass::Caddy)),
+        ];
+        assert_eq!(items, want);
+    }
+
+    #[test]
+    fn replay_without_a_path_check_leaves_it_out() {
+        let items = replayed(None);
+        let checks: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Line(check, _) => Some(*check),
+                Item::Warning(_) => None,
+            })
+            .collect();
+        assert_eq!(checks, [Check::Daemon, Check::Caddy, Check::Log]);
+    }
 }

@@ -109,6 +109,10 @@ pub struct Session {
     /// Linux: the sites the hosts file lacks.
     pub hosts: HostsStatus,
     pub hosts_sync: HostsSync,
+    /// The daemon's checks (`GET /v1/doctor`), as read when the window
+    /// connected and after each setup. `None` until read, or when the daemon
+    /// gave none.
+    pub doctor: Option<DoctorReport>,
 }
 
 impl Model {

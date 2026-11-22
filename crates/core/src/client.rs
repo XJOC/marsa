@@ -43,10 +43,10 @@ use crate::platform::daemon_file::{
 };
 use crate::runtimes::Runtime;
 use crate::types::{
-    AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, ErrorBody, Event, Health,
-    HostsStatus, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest, RuntimeList,
-    ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, UninstallReport, Uninstalled,
-    XdebugRequest, XdebugState,
+    AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, DoctorReport, ErrorBody,
+    Event, Health, HostsStatus, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest,
+    RuntimeList, ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, UninstallReport,
+    Uninstalled, XdebugRequest, XdebugState,
 };
 use lifecycle::lock_is_held;
 
@@ -453,6 +453,18 @@ impl DaemonClient {
     /// [`UninstallReport::error`].
     pub async fn uninstall_all(&self) -> Result<UninstallReport, ClientError> {
         self.call(Method::POST, &["v1", "uninstall"], UNINSTALL_ALL_TIMEOUT)
+            .await
+    }
+
+    /// `GET /v1/doctor`: the checks of `marsa doctor`, as the daemon runs
+    /// them. Read-only. Without the `PATH` check, which only a terminal can
+    /// make.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `not_found` (404) from a daemon of an older build.
+    pub async fn doctor(&self) -> Result<DoctorReport, ClientError> {
+        self.call(Method::GET, &["v1", "doctor"], REQUEST_TIMEOUT)
             .await
     }
 

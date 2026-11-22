@@ -20,6 +20,11 @@
 //! and fails nothing: on Windows, a `marsad` that runs with administrator
 //! rights, which PostgreSQL refuses.
 //!
+//! When `marsad` runs, it makes the checks itself (`GET /v1/doctor`) and
+//! this file adds the one check only a terminal can make, `PATH`. When it
+//! does not run, or does not answer, the checks are made here, since `marsad`
+//! may be what is wrong.
+//!
 //! Read-only: it never starts `marsad` (`DaemonClient::connect`, not
 //! `ensure_running`), never asks for admin rights, and writes no file.
 //! `marsa_core::doctor` judges the facts; this file gathers them and prints.
@@ -44,7 +49,7 @@ use marsa_core::doctor::{Check, Pass, Problem, Verdict, Warning};
 use marsa_core::platform::checkup::{self, DaemonFacts, Item};
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::RuntimesDir;
-use marsa_core::types::Site;
+use marsa_core::types::{DoctorReport, Site};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -63,25 +68,41 @@ const MAX_LINE: usize = 300;
 /// daemon reads it for `GET /v1/doctor` (`marsa_core::platform::checkup`).
 pub async fn run(data_dir: &Path) -> Result<ExitCode, Failure> {
     let windows = Platform::current() == Some(Platform::WindowsX64);
-    let daemon = ask_daemon(data_dir).await;
     let mut failed = false;
-    checkup::run(
-        data_dir,
-        &daemon,
-        Some(checkup::path(data_dir)),
-        &mut |item| match item {
-            Item::Line(check, verdict) => {
-                failed |= matches!(verdict, Verdict::Fail(_));
-                println!("{}", render(check, &verdict, data_dir, windows));
-            }
-            Item::Warning(warning) => println!("{}", render_warning(warning)),
-        },
-    );
+    let mut print = |item: Item| match item {
+        Item::Line(check, verdict) => {
+            failed |= matches!(verdict, Verdict::Fail(_));
+            println!("{}", render(check, &verdict, data_dir, windows));
+        }
+        Item::Warning(warning) => println!("{}", render_warning(warning)),
+    };
+    let path = Some(checkup::path(data_dir));
+    // The daemon that runs makes the checks itself; with none (or one too old
+    // to know the route), they are made here, since the daemon may be the
+    // very thing that is wrong.
+    match report_from_daemon(data_dir).await {
+        Some(report) => checkup::replay(report, path, &mut print),
+        None => {
+            let daemon = ask_daemon(data_dir).await;
+            checkup::run(data_dir, &daemon, path, &mut print);
+        }
+    }
     Ok(if failed {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// `GET /v1/doctor` of a daemon that runs, never one this starts. `None`
+/// when there is none or it does not answer, with the reason in the log.
+async fn report_from_daemon(data_dir: &Path) -> Option<DoctorReport> {
+    let client = DaemonClient::connect(data_dir).ok()?;
+    client
+        .doctor()
+        .await
+        .map_err(|err| tracing::debug!(code = err.code(), "the daemon gave no doctor report"))
+        .ok()
 }
 
 /// Asks a running daemon, never one this starts: its health, Caddy's
