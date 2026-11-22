@@ -11,14 +11,16 @@
 //! controller; `show` is the Blade template.]
 //!
 //! Nothing here claims what the window cannot know. It learns that the
-//! certificate is trusted and the `.test` names reach Marsa only from a setup
-//! report of this session (or, on Linux, from the hosts file the daemon
-//! reads); before that, and after a setup that did not reach the step, the
-//! row says "Not checked".
+//! certificate is trusted and the `.test` names reach Marsa from a setup
+//! report of this session, else from the daemon's own checks (`marsa doctor`,
+//! `GET /v1/doctor`), and on Linux also from the hosts file the daemon
+//! reads. The row says "Not checked" only while the daemon gave none: it is
+//! not running, or has not answered yet.
 
 use std::path::Path;
 
 use eframe::egui::Ui;
+use marsa_core::doctor::{self, Skip, Verdict};
 use marsa_core::helper::OpStatus;
 use marsa_core::recipes::Platform;
 
@@ -154,7 +156,7 @@ fn autostart(model: &Model) -> AutostartRow {
 fn setup(model: &Model, platform: Option<Platform>) -> SetupGroup {
     let running = model.session.setup == Setup::Running;
     let (mut names, mut names_hint) = (
-        check(model, &NAMES_OPS),
+        check(model, &NAMES_OPS, doctor::Check::Dns),
         strings::TEST_NAMES_HINT.to_owned(),
     );
     // Linux on the hosts way: the daemon reads the hosts file, so the window
@@ -180,7 +182,7 @@ fn setup(model: &Model, platform: Option<Platform>) -> SetupGroup {
         Setup::Idle | Setup::Running => (Vec::new(), None),
     };
     SetupGroup {
-        cert: check(model, &TRUST_OPS),
+        cert: check(model, &TRUST_OPS, doctor::Check::Trust),
         names,
         names_hint,
         explanation: strings::setup_explanation(platform),
@@ -192,10 +194,11 @@ fn setup(model: &Model, platform: Option<Platform>) -> SetupGroup {
 }
 
 /// How the last setup of this session did the step of one of `ops`: the
-/// newest result of the report, else whether it left the step out.
-fn check(model: &Model, ops: &[&str]) -> Check {
+/// newest result of the report, else whether it left the step out. With no
+/// report of this session, what the daemon's check `probe` found.
+fn check(model: &Model, ops: &[&str], probe: doctor::Check) -> Check {
     let Setup::Finished(report) = &model.session.setup else {
-        return Check::NotChecked;
+        return from_daemon(model, probe);
     };
     let ours = |op: &str| ops.contains(&op);
     if let Some(result) = report.results.iter().rev().find(|r| ours(&r.op)) {
@@ -207,7 +210,26 @@ fn check(model: &Model, ops: &[&str]) -> Check {
     if report.skipped.iter().any(|skipped| ours(&skipped.op)) {
         Check::Skipped
     } else {
-        Check::NotChecked
+        from_daemon(model, probe)
+    }
+}
+
+/// What the daemon's check `probe` found, while the daemon runs.
+fn from_daemon(model: &Model, probe: doctor::Check) -> Check {
+    let report = model
+        .session
+        .doctor
+        .as_ref()
+        .filter(|_| model.is_connected());
+    let verdict = report
+        .and_then(|report| report.lines.iter().find(|line| line.check == probe))
+        .map(|line| &line.verdict);
+    match verdict {
+        Some(Verdict::Pass(_)) => Check::Done,
+        Some(Verdict::Fail(_)) => Check::Failed,
+        Some(Verdict::Skip(Skip::NotChecked)) | None => Check::NotChecked,
+        // Not on this system, or it waits for something else first.
+        Some(Verdict::Skip(_)) => Check::Skipped,
     }
 }
 
@@ -486,6 +508,74 @@ mod tests {
             (Check::NotChecked, Check::NotChecked)
         );
         assert_eq!(group.names_hint, strings::TEST_NAMES_HINT);
+    }
+
+    fn daemon_says(lines: Vec<(doctor::Check, Verdict)>) -> marsa_core::types::DoctorReport {
+        marsa_core::types::DoctorReport {
+            lines: lines
+                .into_iter()
+                .map(|(check, verdict)| marsa_core::types::DoctorLine { check, verdict })
+                .collect(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// With no setup this session, the daemon's own checks answer, and
+    /// "Not checked" is left for a daemon that gave none.
+    #[test]
+    fn the_daemons_checks_answer_when_no_setup_ran() {
+        use doctor::{Check as Probe, Pass, Problem};
+        let mut model = connected();
+        model.session.doctor = Some(daemon_says(vec![
+            (Probe::Trust, Verdict::Pass(Pass::Trust)),
+            (Probe::Dns, Verdict::Fail(Problem::DnsNoAnswer)),
+        ]));
+        let group = view(&model).setup;
+        assert_eq!((group.cert, group.names), (Check::Done, Check::Failed));
+
+        model.session.doctor = Some(daemon_says(vec![
+            (Probe::Trust, Verdict::Skip(Skip::NoCa)),
+            (Probe::Dns, Verdict::Skip(Skip::NotOnThisSystem)),
+        ]));
+        let group = view(&model).setup;
+        assert_eq!((group.cert, group.names), (Check::Skipped, Check::Skipped));
+
+        // The daemon could not run the check: that is what "not checked" says.
+        model.session.doctor = Some(daemon_says(vec![(
+            Probe::Trust,
+            Verdict::Skip(Skip::NotChecked),
+        )]));
+        let group = view(&model).setup;
+        assert_eq!(
+            (group.cert, group.names),
+            (Check::NotChecked, Check::NotChecked)
+        );
+
+        // No daemon now: an old answer is not shown.
+        model.session.doctor = Some(daemon_says(vec![(
+            Probe::Trust,
+            Verdict::Pass(Pass::Trust),
+        )]));
+        let mut down = Model::default();
+        down.session.doctor = model.session.doctor.take();
+        assert_eq!(view(&down).setup.cert, Check::NotChecked);
+    }
+
+    /// A setup of this session is newer than the daemon's read before it.
+    #[test]
+    fn a_setup_report_wins_over_the_daemons_checks() {
+        use doctor::{Check as Probe, Pass};
+        let mut model = connected();
+        model.session.doctor = Some(daemon_says(vec![(
+            Probe::Trust,
+            Verdict::Pass(Pass::Trust),
+        )]));
+        model.session.setup =
+            Setup::Finished(report(vec![result("trust_install", OpStatus::Failed)], &[]));
+        assert_eq!(view(&model).setup.cert, Check::Failed);
+        // A report with neither step falls back to the daemon.
+        model.session.setup = Setup::Finished(report(Vec::new(), &[]));
+        assert_eq!(view(&model).setup.cert, Check::Done);
     }
 
     #[test]

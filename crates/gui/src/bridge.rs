@@ -241,6 +241,7 @@ async fn session(
     if !window.send(Update::Connected(health)) || !refresh(&client, window).await {
         return End::Closed;
     }
+    read_doctor(&client, window);
     // A command's task asks here to read the runtimes again, so the read
     // runs in order with the events. This end lives as long as the loop, so
     // `recv` never ends.
@@ -258,13 +259,17 @@ async fn session(
                     );
                     // A new site may lack its hosts line; setup may have
                     // written the block (Linux).
-                    let hosts_changed =
-                        matches!(&event, Event::SitesChanged(_) | Event::SetupFinished(_));
+                    let setup_finished = matches!(&event, Event::SetupFinished(_));
+                    let hosts_changed = setup_finished || matches!(&event, Event::SitesChanged(_));
                     if !window.send(Update::Event(event)) {
                         return End::Closed;
                     }
                     if hosts_changed && !window.send(hosts(&client).await) {
                         return End::Closed;
+                    }
+                    // Setup changes what the checks find.
+                    if setup_finished {
+                        read_doctor(&client, window);
                     }
                     // A new version, and maybe a first default: no event
                     // carries the whole list, so read it again.
@@ -359,6 +364,23 @@ fn log_ids(table: &[ServiceStatus]) -> Vec<String> {
         .chain(others)
         .map(str::to_owned)
         .collect()
+}
+
+/// Reads the daemon's checks on their own task: they take seconds (the
+/// resolver, `netstat`), and nothing else waits for them. A failure is in the
+/// log only; Settings then says "Not checked".
+fn read_doctor(client: &DaemonClient, window: &Window) {
+    let (client, window) = (client.clone(), window.clone());
+    tokio::spawn(async move {
+        match client.doctor().await {
+            Ok(report) => {
+                window.send(Update::Doctor(report));
+            }
+            Err(err) => {
+                tracing::warn!(code = err.code(), error = %err, "cannot read the doctor checks");
+            }
+        }
+    });
 }
 
 /// Whether the hosts file holds this data folder's names (Linux). Reading
