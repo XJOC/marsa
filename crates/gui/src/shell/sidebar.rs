@@ -196,6 +196,7 @@ mod tests {
     use crate::model::Update;
     use crate::theme::LIGHT;
     use crate::widgets::harness::{Harness, Tree};
+    use marsa_core::types::ServiceId;
 
     /// Every item: the groups, then Settings.
     const ALL: [Item; 6] = [
@@ -226,7 +227,7 @@ mod tests {
             };
             model.update(Update::Sites(sites));
             model.update(Update::Services(vec![ServiceStatus {
-                id: crate::model::WEB_SERVER.into(),
+                id: ServiceId::Caddy,
                 state,
                 pid: None,
                 restarts: 0,

@@ -11,6 +11,7 @@
 //! with no request.
 
 use marsa_core::data_dir::DataDir;
+use marsa_core::types::ServiceId;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
@@ -334,8 +335,8 @@ async fn start_shows_running_and_logs_then_stop() {
     // Listed before the first start.
     let caddy = app.caddy().await;
     assert_eq!(
-        (caddy.id.as_str(), caddy.state),
-        ("caddy", ServiceState::Stopped)
+        (caddy.id, caddy.state),
+        (ServiceId::Caddy, ServiceState::Stopped)
     );
 
     let started: ServiceStatus = app
@@ -377,7 +378,7 @@ async fn start_shows_running_and_logs_then_stop() {
         .json("POST", "/v1/services/caddy/stop", StatusCode::OK)
         .await;
     assert_eq!((stopped.state, stopped.pid), (ServiceState::Stopped, None));
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
     // Caddy has exited, so its pid file is gone (ADR 0009).
     assert!(
         !DataDir::new(app.dir.path())
@@ -466,7 +467,7 @@ async fn start_without_caddy_is_409_and_failed() {
         .await;
     assert_eq!(code, "caddy_not_installed");
     assert_eq!(app.caddy().await.state, failed("caddy_not_installed"));
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
 }
 
 /// The newest version folder counts only with its program in it.
@@ -484,7 +485,7 @@ async fn start_with_a_version_folder_but_no_program_is_409_and_failed() {
         .await;
     assert_eq!(code, "caddy_not_installed");
     assert_eq!(app.caddy().await.state, failed("caddy_not_installed"));
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
 }
 
 #[tokio::test]
@@ -496,7 +497,7 @@ async fn a_taken_port_fails_without_a_restart() {
     assert_eq!(status.state, failed("port_in_use"));
     assert_eq!((status.restarts, status.pid), (0, None));
     // The task has ended, so no restart can come later.
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
     let lines: Vec<LogLine> = app.json("GET", "/v1/logs/caddy", StatusCode::OK).await;
     let errors = lines
         .iter()
@@ -518,7 +519,7 @@ async fn a_caddy_whose_admin_api_never_answers_times_out() {
         (failed("caddy_start_timeout"), None)
     );
     // Stopped, not left running.
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
     app.wait_for_line("fake deaf").await;
 }
 
@@ -529,7 +530,7 @@ async fn a_caddy_whose_admin_api_never_answers_times_out() {
 /// for its admin API now.
 async fn until_caddy_runs(app: &App) {
     let started = Instant::now();
-    while !app.daemon.proc_alive("caddy") {
+    while !app.daemon.proc_alive(ServiceId::Caddy) {
         assert!(started.elapsed() < WAIT, "caddy never started");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -620,7 +621,7 @@ async fn no_caddy_installed_starts_nothing_and_fails_nothing() {
     // Stopped, not failed, with no line: nothing was tried.
     let caddy = app.caddy().await;
     assert_eq!((caddy.state, caddy.pid), (ServiceState::Stopped, None));
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
     let lines: Vec<LogLine> = app.json("GET", "/v1/logs/caddy", StatusCode::OK).await;
     assert!(lines.is_empty(), "{lines:?}");
     assert!(!app.dir.path().join("caddy").join("caddy.json").exists());
@@ -644,7 +645,7 @@ async fn a_failed_start_with_the_daemon_names_why_and_the_api_serves_on() {
         .iter()
         .filter(|line| line.text.contains("address already in use"));
     assert_eq!(taken.count(), 1, "{lines:?}");
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
     // The start let go of the busy flag: a start by hand runs.
     let again: ServiceStatus = app
         .json("POST", "/v1/services/caddy/start", StatusCode::OK)
@@ -694,7 +695,7 @@ async fn a_stop_during_the_start_with_the_daemon_waits_and_stops_caddy() {
         panic!("not run: {launched:?}");
     };
     assert_eq!(first.state, ServiceState::Running);
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
     assert_eq!(app.caddy().await.state, ServiceState::Stopped);
     // Our Caddy answered with our tag, so it got `POST /stop`.
     app.wait_for_line("fake stopping").await;
@@ -728,7 +729,7 @@ async fn a_wait_that_runs_out_is_busy() {
         panic!("not run: {launched:?}");
     };
     assert_eq!(status.state, failed("caddy_start_timeout"));
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
     app.wait_for_line("fake deaf").await;
 }
 
@@ -766,7 +767,7 @@ async fn a_request_waiting_at_shutdown_does_not_run() {
 
     // Only the first Caddy ever ran, and the shutdown's sweep stops it.
     app.daemon.stop_procs(WAIT).await;
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
     let lines: Vec<LogLine> = app.json("GET", "/v1/logs/caddy", StatusCode::OK).await;
     let runs = lines.iter().filter(|line| line.text == "fake deaf");
     assert_eq!(runs.count(), 1, "{lines:?}");
@@ -779,7 +780,7 @@ async fn a_shutdown_during_the_start_with_the_daemon_leaves_no_caddy() {
     app.daemon.shutdown.cancel();
     let launched = start_at_launch(&app.daemon).wait(WAIT).await;
     assert_eq!(launched, Some(Launched::ShuttingDown));
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
     assert_eq!(app.caddy().await.state, ServiceState::Stopped);
 
     // A stop while the start waits for a Caddy that never answers.
@@ -795,7 +796,7 @@ async fn a_shutdown_during_the_start_with_the_daemon_leaves_no_caddy() {
     app.daemon.stop_procs(WAIT).await;
     let caddy = app.caddy().await;
     assert_eq!((caddy.state, caddy.pid), (ServiceState::Stopped, None));
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
     assert!(
         !DataDir::new(app.dir.path())
             .run()
@@ -878,7 +879,7 @@ async fn a_caddy_without_our_tag_is_never_ready_and_gets_no_stop() {
         (status.state, status.pid),
         (failed("caddy_start_timeout"), None)
     );
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
     let lines = app.wait_for_line("fake serving").await;
     let stops = lines.iter().filter(|line| line.text == "fake stopping");
     assert_eq!(stops.count(), 0, "{lines:?}");
@@ -929,7 +930,7 @@ async fn another_marsas_caddy_on_our_admin_port_gets_no_config_and_no_stop() {
         "caddy_start_timeout"
     };
     assert_eq!(status.state, failed(code));
-    assert!(!app.daemon.proc_alive("caddy"));
+    assert!(!app.daemon.proc_alive(ServiceId::Caddy));
     // The first sites pass after it only writes the file.
     let applied = app
         .daemon

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use marsa_core::databases::{ServerKind, ServiceBusy};
 use marsa_core::services::ServiceSpec;
-use marsa_core::types::LogStream;
+use marsa_core::types::{LogStream, ServiceId};
 use tokio::sync::watch;
 
 use super::super::orphan::{Recorded, RunRecord};
@@ -81,7 +81,7 @@ impl ServerManager {
             stop_limit,
         };
         // A handle this replaces belongs to a run that has ended.
-        daemon.add_proc(self.kind.id(), handle);
+        daemon.add_proc(ServiceId::Database(self.kind), handle);
         Ok(recording)
     }
 
@@ -92,7 +92,7 @@ impl ServerManager {
         let kind = self.kind;
         let poll = async {
             loop {
-                if !daemon.proc_alive(kind.id()) {
+                if !daemon.proc_alive(ServiceId::Database(kind)) {
                     return Ready::Ended;
                 }
                 if self.answers(port).await {

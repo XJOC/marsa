@@ -12,8 +12,8 @@ use marsa_core::resolver;
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
     DoctorReport, Event, Health, HostsStatus, InstallEvent, InstallFailure, InstallProgress,
-    InstallUpdate, LogLine, RuntimeList, ServiceAction, ServiceState, ServiceStatus, SetupReport,
-    Site, SiteList, Source, VersionInUse, XdebugState,
+    InstallUpdate, LogLine, PoolKind, RuntimeList, ServiceAction, ServiceId, ServiceState,
+    ServiceStatus, SetupReport, Site, SiteList, Source, VersionInUse, XdebugState,
 };
 use semver::Version;
 
@@ -28,12 +28,12 @@ mod sites;
 
 use installs::Install;
 pub use installs::{InstallJob, InstallStep, InstallView, install_version};
-pub use logs::{LOG_SERVICE, LogRow, LogSource, MAX_LOG_LINES, ServiceLog};
+pub use logs::{LogRow, LogSource, MAX_LOG_LINES, ServiceLog};
 pub use notices::{NoticeSource, Notices};
 pub use removals::{Removal, UninstallNotice};
 pub use runtimes::{
-    Change, Choice, MAIN_RUNTIME, PoolKind, RuntimeRow, has_default, is_pool, pool_of,
-    runtime_missing, service_description, service_name, version_text,
+    Change, Choice, MAIN_RUNTIME, RuntimeRow, has_default, runtime_missing, service_description,
+    service_name, version_text,
 };
 pub use session::{Connection, Overall, Session};
 use setup::not_added;
@@ -47,10 +47,6 @@ pub use crate::prefs::Appearance;
 use crate::strings::{self, ReportLine};
 pub use crate::tray::menu::Autostart;
 
-/// The service that serves every site: no site opens while it is down.
-pub const WEB_SERVER: &str = "caddy";
-/// The daemon's DNS server for `.test` names, on macOS and Linux.
-pub const DNS_SERVER: &str = "dns";
 /// This build's version, shown in the Settings section.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// What the window does after an [`Action`], beyond changing the model.
@@ -215,7 +211,7 @@ pub enum Action {
     FoldSidebar,
     /// A service's Start, Stop, or Restart.
     Service {
-        service: String,
+        service: ServiceId,
         action: ServiceAction,
     },
     /// A level filter of the Logs screen: show or hide its lines.
@@ -370,7 +366,9 @@ impl Model {
             Update::Reconnecting => self.disconnect(Connection::Reconnecting),
             Update::Failed(code) => self.disconnect(Connection::Failed(code)),
             Update::Services(mut services) => {
-                services.sort_by(|a, b| a.id.cmp(&b.id));
+                // By the id text, so `php-fpm-8.4` comes between `mysql` and
+                // `postgres`, as in `marsa services`.
+                services.sort_by_cached_key(|service| service.id.to_string());
                 // The log of a service the daemon no longer lists goes with
                 // it: a log never outlives its source.
                 self.session

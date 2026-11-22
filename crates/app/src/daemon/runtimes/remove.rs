@@ -322,7 +322,7 @@ async fn stop_pools(daemon: &Daemon, version: &Version) {
     let sites = daemon.sites().map(|list| list.sites).unwrap_or_default();
     for (minor, picked) in wanted_pools(&sites) {
         if picked == *version
-            && let Some(handle) = daemon.take_proc(&fpm_id(minor))
+            && let Some(handle) = daemon.take_proc(fpm_id(minor))
         {
             tracing::info!(php = %minor, "stopping php-fpm before its uninstall");
             if let Err(err) = handle.stop().await {

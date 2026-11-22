@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use marsa_core::client::DaemonClient;
 use marsa_core::config::{self, ConfigPaths};
 use marsa_core::databases::ServerKind;
-use marsa_core::types::{ServiceAction, ServiceState, ServiceStatus};
+use marsa_core::types::{ServiceAction, ServiceId, ServiceState, ServiceStatus};
 
 use super::Failure;
 use super::daemon::{connect, failure};
@@ -86,7 +86,7 @@ async fn act(
     // failure from before is shown under the table.
     let failed = match (&status.state, action) {
         (ServiceState::Failed { code }, ServiceAction::Start | ServiceAction::Restart) => {
-            Some(Failure::new(code, data_dir, Some(&status.id)))
+            Some(Failure::new(code, data_dir, Some(&status.id.to_string())))
         }
         _ => None,
     };
@@ -112,9 +112,10 @@ pub fn render(services: &[ServiceStatus], data_dir: &Path) -> String {
     let mut text = table(services);
     for status in services {
         if let ServiceState::Failed { code } = &status.state {
-            let failure = Failure::new(code, data_dir, Some(&status.id));
+            let id = status.id.to_string();
+            let failure = Failure::new(code, data_dir, Some(&id));
             text.push_str(&strings::service_failed(
-                &status.id,
+                &id,
                 &failure.message,
                 &failure.code,
             ));
@@ -123,9 +124,9 @@ pub fn render(services: &[ServiceStatus], data_dir: &Path) -> String {
     }
     let global = config::load_global(&ConfigPaths::in_dir(data_dir).global).ok();
     for kind in ServerKind::ALL {
-        let running = services
-            .iter()
-            .any(|status| status.id == kind.id() && status.state == ServiceState::Running);
+        let running = services.iter().any(|status| {
+            status.id == ServiceId::Database(kind) && status.state == ServiceState::Running
+        });
         if !running {
             continue;
         }
@@ -152,7 +153,7 @@ fn table(services: &[ServiceStatus]) -> String {
     let mut rows = vec![strings::SERVICES_HEADER.map(str::to_owned)];
     rows.extend(services.iter().map(|status| {
         [
-            status.id.clone(),
+            status.id.to_string(),
             strings::state_name(&status.state).to_owned(),
             status
                 .pid
@@ -183,9 +184,14 @@ mod tests {
     use super::*;
     use marsa_core::data_dir::DataDir;
 
-    fn status(id: &str, state: ServiceState, pid: Option<u32>, restarts: u32) -> ServiceStatus {
+    fn status(
+        id: ServiceId,
+        state: ServiceState,
+        pid: Option<u32>,
+        restarts: u32,
+    ) -> ServiceStatus {
         ServiceStatus {
-            id: id.into(),
+            id,
             state,
             pid,
             restarts,
@@ -196,14 +202,19 @@ mod tests {
     #[test]
     fn the_table_has_a_column_per_field() {
         let services = [
-            status("caddy", ServiceState::Running, Some(4242), 0),
-            status("php-8.4", ServiceState::Stopped, None, 12),
+            status(ServiceId::Caddy, ServiceState::Running, Some(4242), 0),
+            status(
+                ServiceId::Database(ServerKind::Valkey),
+                ServiceState::Stopped,
+                None,
+                12,
+            ),
         ];
         assert_eq!(
             render(&services, Path::new("/data")),
             "SERVICE  STATE    PID   RESTARTS\n\
              caddy    running  4242  0\n\
-             php-8.4  stopped  -     12\n"
+             valkey   stopped  -     12\n"
         );
     }
 
@@ -212,7 +223,10 @@ mod tests {
         let failed = ServiceState::Failed {
             code: "port_in_use".into(),
         };
-        let text = render(&[status("caddy", failed, None, 3)], Path::new("/data"));
+        let text = render(
+            &[status(ServiceId::Caddy, failed, None, 3)],
+            Path::new("/data"),
+        );
         assert_eq!(
             text,
             "SERVICE  STATE   PID  RESTARTS\n\
@@ -227,7 +241,12 @@ mod tests {
     #[test]
     fn a_running_postgres_shows_how_to_connect() {
         let data = tempfile::tempdir().unwrap();
-        let running = [status("postgres", ServiceState::Running, Some(7), 0)];
+        let running = [status(
+            ServiceId::Database(ServerKind::Postgres),
+            ServiceState::Running,
+            Some(7),
+            0,
+        )];
         assert_eq!(
             render(&running, data.path()),
             "SERVICE   STATE    PID  RESTARTS\n\
@@ -246,7 +265,12 @@ mod tests {
         let text = render(&running, data.path());
         assert!(text.contains("127.0.0.1:5433, user root"), "{text}");
         assert!(text.contains("\nDB_PORT=5433\n"), "{text}");
-        let stopped = [status("postgres", ServiceState::Stopped, None, 0)];
+        let stopped = [status(
+            ServiceId::Database(ServerKind::Postgres),
+            ServiceState::Stopped,
+            None,
+            0,
+        )];
         assert!(!render(&stopped, data.path()).contains("DB_"));
     }
 
@@ -254,7 +278,12 @@ mod tests {
     #[test]
     fn a_running_mysql_shows_how_to_connect() {
         let data = tempfile::tempdir().unwrap();
-        let running = [status("mysql", ServiceState::Running, Some(7), 0)];
+        let running = [status(
+            ServiceId::Database(ServerKind::Mysql),
+            ServiceState::Running,
+            Some(7),
+            0,
+        )];
         let text = render(&running, data.path());
         assert!(
             text.ends_with(
@@ -274,7 +303,12 @@ mod tests {
     #[test]
     fn a_running_valkey_shows_how_to_connect() {
         let data = tempfile::tempdir().unwrap();
-        let running = [status("valkey", ServiceState::Running, Some(7), 0)];
+        let running = [status(
+            ServiceId::Database(ServerKind::Valkey),
+            ServiceState::Running,
+            Some(7),
+            0,
+        )];
         let text = render(&running, data.path());
         assert!(
             text.ends_with(
@@ -293,7 +327,12 @@ mod tests {
             "{text}"
         );
         assert!(text.ends_with("\nREDIS_PORT=6380\n"), "{text}");
-        let stopped = [status("valkey", ServiceState::Stopped, None, 0)];
+        let stopped = [status(
+            ServiceId::Database(ServerKind::Valkey),
+            ServiceState::Stopped,
+            None,
+            0,
+        )];
         assert!(!render(&stopped, data.path()).contains("REDIS_PORT"));
     }
 
@@ -306,9 +345,19 @@ mod tests {
             code: "port_in_use".into(),
         };
         let services = [
-            status("caddy", failed, None, 3),
-            status("valkey", ServiceState::Running, Some(8), 0),
-            status("postgres", ServiceState::Running, Some(7), 0),
+            status(ServiceId::Caddy, failed, None, 3),
+            status(
+                ServiceId::Database(ServerKind::Valkey),
+                ServiceState::Running,
+                Some(8),
+                0,
+            ),
+            status(
+                ServiceId::Database(ServerKind::Postgres),
+                ServiceState::Running,
+                Some(7),
+                0,
+            ),
         ];
         let text = render(&services, data.path());
         let blocks: Vec<&str> = text.split("\n\n").collect();

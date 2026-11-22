@@ -1,4 +1,5 @@
 use super::*;
+use marsa_core::types::ServiceId;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -357,7 +358,7 @@ fn postgres_runs_on_loopback_and_stops_with_sigint_then_sigquit() {
     let dirs = PostgresDirs::new(Path::new("/m"), 18);
     let program = PathBuf::from("/m/runtimes/postgres/18.7.0/bin/postgres");
     let spec = postgres_spec(program.clone(), &dirs, 5433, postgres_stop());
-    assert_eq!(spec.id, ServerKind::Postgres.id());
+    assert_eq!(spec.id, ServiceId::Database(ServerKind::Postgres));
     assert_eq!(spec.program, program);
     assert_eq!(spec.args, postgres_args(&dirs, 5433));
     assert_eq!(spec.stop, postgres_stop());
@@ -815,7 +816,10 @@ pub(super) mod server {
         // Longer than a restart delay would be: none came.
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert_eq!(pg.count("server"), 1);
-        assert!(!pg.daemon.proc_alive(ServerKind::Postgres.id()));
+        assert!(
+            !pg.daemon
+                .proc_alive(ServiceId::Database(ServerKind::Postgres))
+        );
         assert_eq!(pg.daemon.postgres.status().state, failed(busy));
     }
 
@@ -928,7 +932,10 @@ pub(super) mod server {
         tokio::time::sleep(Duration::from_millis(700)).await;
         let status = pg.daemon.postgres.status();
         assert_eq!((status.state, status.pid), (ServiceState::Running, pid));
-        assert!(pg.daemon.proc_alive(ServerKind::Postgres.id()));
+        assert!(
+            pg.daemon
+                .proc_alive(ServiceId::Database(ServerKind::Postgres))
+        );
         // Only about the server itself, for `run/postgres.pid`: the
         // lines named no pid that was looked at.
         let asked = pg.probes.asked.lock().unwrap().clone();
@@ -1033,7 +1040,10 @@ pub(super) mod server {
         assert_eq!(started.state, ServiceState::Stopped);
         assert_eq!(pg.count("server"), 0);
         assert!(!pg.dirs.data.exists());
-        assert!(!pg.daemon.proc_alive(ServerKind::Postgres.id()));
+        assert!(
+            !pg.daemon
+                .proc_alive(ServiceId::Database(ServerKind::Postgres))
+        );
         assert!(!enabled(&pg), "the dropped start wrote nothing");
         assert!(nothing_left(&pg));
     }
@@ -1075,7 +1085,10 @@ pub(super) mod server {
         assert_eq!(status.state, ServiceState::Stopped);
         assert!(pg.texts().iter().any(|text| text == "fake got SIGINT"));
         start.await.unwrap().unwrap();
-        assert!(!pg.daemon.proc_alive(ServerKind::Postgres.id()));
+        assert!(
+            !pg.daemon
+                .proc_alive(ServiceId::Database(ServerKind::Postgres))
+        );
         assert!(!enabled(&pg));
         assert!(nothing_left(&pg));
     }
@@ -1440,7 +1453,10 @@ pub(super) mod server {
         assert!(!pg.texts().iter().any(|text| text == "fake ready"));
         let record = recorded(&pg).unwrap();
         assert_eq!(record.exe, installed_postgres(&pg));
-        assert!(pg.daemon.proc_alive(ServerKind::Postgres.id()));
+        assert!(
+            pg.daemon
+                .proc_alive(ServiceId::Database(ServerKind::Postgres))
+        );
         pg.daemon.stop_procs(WAIT).await;
         assert_eq!(recorded(&pg), None, "the end of the run deletes it");
     }

@@ -381,7 +381,7 @@ fn parse_route(name: &str) -> Option<Route> {
         return (!site.is_empty()).then(|| Route::Site(site.to_owned()));
     }
     if let Some(id) = name.strip_prefix("logs:") {
-        return (!id.is_empty()).then(|| Route::Logs(LogSource::of(id)));
+        return id.parse().ok().map(|id| Route::Logs(LogSource::of(id)));
     }
     if let Some(folder) = name.strip_prefix("runtimes:") {
         let runtime = Runtime::ALL.into_iter().find(|r| r.dir_name() == folder);
@@ -455,6 +455,7 @@ mod tests {
     use eframe::egui::Color32;
 
     use super::*;
+    use marsa_core::types::ServiceId;
 
     #[test]
     fn a_size_and_a_route_are_read_from_their_names() {
@@ -465,7 +466,9 @@ mod tests {
         assert_eq!(parse_route("logs"), Some(Route::Logs(LogSource::Caddy)));
         assert_eq!(
             parse_route("logs:php-fpm-8.4"),
-            Some(Route::Logs(LogSource::Service("php-fpm-8.4".into())))
+            Some(Route::Logs(LogSource::Service(
+                "php-fpm-8.4".parse::<ServiceId>().unwrap()
+            )))
         );
         assert_eq!(
             parse_route("logs:caddy"),

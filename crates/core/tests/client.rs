@@ -6,6 +6,7 @@
 #![cfg(feature = "full")]
 
 use marsa_core::data_dir::DataDir;
+use marsa_core::types::ServiceId;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -241,7 +242,7 @@ fn serve_shutdown(
 
 fn caddy(state: ServiceState) -> ServiceStatus {
     ServiceStatus {
-        id: "caddy".into(),
+        id: ServiceId::Caddy,
         state,
         pid: None,
         restarts: 0,
@@ -251,7 +252,7 @@ fn caddy(state: ServiceState) -> ServiceStatus {
 
 fn log_line(seq: u64, text: &str) -> LogLine {
     LogLine {
-        service: "caddy".into(),
+        service: ServiceId::Caddy,
         seq,
         at_ms: 5,
         stream: LogStream::Stderr,

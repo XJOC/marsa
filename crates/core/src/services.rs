@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::types::{LogLine, LogStream};
+use crate::types::{LogLine, LogStream, ServiceId};
 
 /// Lines kept in memory per service. The full output is in `logs/<id>.log`.
 pub const LOG_LINES: usize = 2000;
@@ -16,9 +16,9 @@ pub const LOG_LINES: usize = 2000;
 /// How to run one managed process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceSpec {
-    /// For example `caddy`. Also the log file name: `logs/<id>.log`, so the
-    /// daemon picks it, never the user.
-    pub id: String,
+    /// Also the log file name: `logs/<id>.log`, so the daemon picks it,
+    /// never the user.
+    pub id: ServiceId,
     /// Absolute: `marsad` never searches `PATH` (architecture.md section 10).
     pub program: PathBuf,
     pub args: Vec<String>,
@@ -253,16 +253,16 @@ pub fn restart_delay(policy: RestartPolicy, attempt: u32) -> Option<Duration> {
 /// The last [`LOG_LINES`] lines of one service, oldest first.
 #[derive(Debug, Clone)]
 pub struct LogBuffer {
-    service: String,
+    service: ServiceId,
     lines: VecDeque<LogLine>,
     /// Never reset, not even by a restart, so a client can find gaps.
     next_seq: u64,
 }
 
 impl LogBuffer {
-    pub fn new(service: impl Into<String>) -> Self {
+    pub fn new(service: ServiceId) -> Self {
         Self {
-            service: service.into(),
+            service,
             lines: VecDeque::new(),
             next_seq: 0,
         }
@@ -272,7 +272,7 @@ impl LogBuffer {
     /// oldest line when full, and returns the stored line.
     pub fn push(&mut self, stream: LogStream, text: &str, at_ms: u64) -> LogLine {
         let line = LogLine {
-            service: self.service.clone(),
+            service: self.service,
             seq: self.next_seq,
             at_ms,
             stream,
@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn log_buffer_keeps_the_last_lines_with_growing_seq() {
-        let mut logs = LogBuffer::new("caddy");
+        let mut logs = LogBuffer::new(ServiceId::Caddy);
         for n in 0..=LOG_LINES {
             logs.push(LogStream::Stdout, &format!("line {n}"), 7);
         }
@@ -400,12 +400,12 @@ mod tests {
         assert_eq!(recent.len(), LOG_LINES);
         assert_eq!((recent[0].seq, recent[0].text.as_str()), (1, "line 1"));
         assert!(recent.windows(2).all(|w| w[1].seq == w[0].seq + 1));
-        assert_eq!(recent[LOG_LINES - 1].service, "caddy");
+        assert_eq!(recent[LOG_LINES - 1].service, ServiceId::Caddy);
     }
 
     #[test]
     fn log_buffer_strips_the_line_ending() {
-        let mut logs = LogBuffer::new("caddy");
+        let mut logs = LogBuffer::new(ServiceId::Caddy);
         let line = logs.push(LogStream::Stderr, "ready\r\n", 5);
         assert_eq!(
             (line.text.as_str(), line.stream, line.at_ms),

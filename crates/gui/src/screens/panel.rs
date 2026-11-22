@@ -416,9 +416,10 @@ mod tests {
 
     use super::*;
     use crate::fixtures::connected;
-    use crate::model::{Update, WEB_SERVER};
+    use crate::model::Update;
     use crate::theme::{DARK, LIGHT};
     use crate::widgets::harness::{Harness, Tree};
+    use marsa_core::types::ServiceId;
 
     /// The panel with all the room it needs.
     fn show(ui: &mut Ui, view: &PanelView, theme: &Theme) -> Vec<PanelAction> {
@@ -440,7 +441,7 @@ mod tests {
 
     fn service(state: ServiceState) -> ServiceStatus {
         ServiceStatus {
-            id: WEB_SERVER.into(),
+            id: ServiceId::Caddy,
             pid: None,
             state,
             restarts: 0,

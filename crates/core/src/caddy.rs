@@ -29,10 +29,6 @@ use crate::recipes::{self, Platform};
 use crate::runtimes::{Runtime, RuntimesDir};
 use crate::sites::{Site, SiteKind};
 
-/// The service id: the key in `Daemon::procs`, the `{id}` in the routes, and
-/// the log file `logs/caddy.log`.
-pub const CADDY_ID: &str = "caddy";
-
 /// The port of Caddy's admin API. It is private to Marsa, not Caddy's default
 /// `2019`, so a Caddy of the user's own never answers for us (ADR 0009).
 pub const ADMIN_PORT: u16 = 18019;

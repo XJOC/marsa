@@ -5,11 +5,6 @@ use super::*;
 /// The runtime the Runtimes screen opens on: the main one.
 pub const MAIN_RUNTIME: Runtime = Runtime::Php;
 
-/// The start of the id of each PHP pool: php-fpm on macOS and Linux
-/// (`php-fpm-8.4`), php-cgi on Windows (`php-cgi-8.4`, ADR 0016). The daemon
-/// starts and stops the pools with the sites, and refuses actions on them.
-const POOLS: [(&str, PoolKind); 2] = [("php-fpm-", PoolKind::Fpm), ("php-cgi-", PoolKind::Cgi)];
-
 /// One runtime in the Runtimes section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeRow {
@@ -73,61 +68,27 @@ pub fn runtime_missing(rows: &[RuntimeRow], runtime: Runtime) -> bool {
         .is_none_or(|row| row.installed.is_empty())
 }
 
-/// The program a PHP pool runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PoolKind {
-    /// php-fpm: macOS and Linux.
-    Fpm,
-    /// php-cgi: Windows.
-    Cgi,
-}
-
-/// Whether the service `id` is a PHP pool, which starts and stops with the
-/// sites that need it.
-pub fn is_pool(id: &str) -> bool {
-    pool_of(id).is_some()
-}
-
-/// The program and the PHP line (`8.4`) of the pool `id` names, if it names
-/// one: `php-fpm-8.4`.
-pub fn pool_of(id: &str) -> Option<(PoolKind, &str)> {
-    POOLS
-        .iter()
-        .find_map(|(prefix, kind)| id.strip_prefix(prefix).map(|line| (*kind, line)))
-}
-
 /// What a service is called: `caddy` is Caddy, `php-fpm-8.4` is PHP-FPM 8.4.
-/// A service this window does not know shows under its id.
-pub fn service_name(id: &str) -> String {
-    if id == WEB_SERVER {
-        return strings::SERVICE_CADDY.to_owned();
-    }
-    if id == DNS_SERVER {
-        return strings::SERVICE_DNS.to_owned();
-    }
-    match pool_of(id) {
-        Some((PoolKind::Fpm, line)) => strings::service_php_fpm(line),
-        Some((PoolKind::Cgi, line)) => strings::service_php_cgi(line),
-        None => id.to_owned(),
+/// A database server shows under its id.
+pub fn service_name(id: ServiceId) -> String {
+    match id {
+        ServiceId::Caddy => strings::SERVICE_CADDY.to_owned(),
+        ServiceId::Dns => strings::SERVICE_DNS.to_owned(),
+        ServiceId::Pool(PoolKind::Fpm, minor) => strings::service_php_fpm(&minor.to_string()),
+        ServiceId::Pool(PoolKind::Cgi, minor) => strings::service_php_cgi(&minor.to_string()),
+        ServiceId::Database(_) => id.to_string(),
     }
 }
 
 /// What a service does, in one line under its name. `waiting`: a pool that
 /// no site needs now. `sites`: how many sites run the PHP line of a pool.
-pub fn service_description(id: &str, waiting: bool, sites: usize) -> String {
-    if id == WEB_SERVER {
-        return strings::DESCRIPTION_CADDY.to_owned();
-    }
-    if id == DNS_SERVER {
-        return strings::DESCRIPTION_DNS.to_owned();
-    }
-    let Some((_, line)) = pool_of(id) else {
-        return strings::DESCRIPTION_OTHER.to_owned();
-    };
-    if waiting {
-        strings::DESCRIPTION_POOL_WAITING.to_owned()
-    } else {
-        strings::description_pool(line, sites)
+pub fn service_description(id: ServiceId, waiting: bool, sites: usize) -> String {
+    match id {
+        ServiceId::Caddy => strings::DESCRIPTION_CADDY.to_owned(),
+        ServiceId::Dns => strings::DESCRIPTION_DNS.to_owned(),
+        ServiceId::Database(_) => strings::DESCRIPTION_OTHER.to_owned(),
+        ServiceId::Pool(..) if waiting => strings::DESCRIPTION_POOL_WAITING.to_owned(),
+        ServiceId::Pool(_, minor) => strings::description_pool(&minor.to_string(), sites),
     }
 }
 

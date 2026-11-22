@@ -12,7 +12,7 @@
 //! did as [`Action`]s (code.md, State).
 
 use eframe::egui::{Role, Ui, WidgetInfo};
-use marsa_core::types::{ServiceAction, ServiceState, ServiceStatus};
+use marsa_core::types::{ServiceAction, ServiceId, ServiceState, ServiceStatus};
 
 use super::lines::{message, mute};
 use crate::model::{self, Action, LogSource, Model, Route};
@@ -31,13 +31,13 @@ const ACTIONS: [ServiceAction; 3] = [
 
 /// What Services says.
 #[derive(Debug, PartialEq)]
-pub enum ServicesView<'a> {
+pub enum ServicesView {
     /// No daemon: there is nothing to list.
     Offline,
     /// The daemon runs and lists no program.
     Empty,
     Rows {
-        rows: Vec<ServiceRow<'a>>,
+        rows: Vec<ServiceRow>,
         /// A PHP pool is among them: a line under the table says why its
         /// buttons are off.
         pools: bool,
@@ -46,9 +46,9 @@ pub enum ServicesView<'a> {
 
 /// One program.
 #[derive(Debug, PartialEq)]
-pub struct ServiceRow<'a> {
+pub struct ServiceRow {
     /// What an action names the program by.
-    pub id: &'a str,
+    pub id: ServiceId,
     pub name: String,
     /// What it does, under its name.
     pub description: String,
@@ -74,7 +74,7 @@ pub enum RowButton {
 }
 
 /// Decides what Services says. Pure: the same model gives the same view.
-pub fn view(model: &Model) -> ServicesView<'_> {
+pub fn view(model: &Model) -> ServicesView {
     if !model.is_connected() {
         return ServicesView::Offline;
     }
@@ -87,22 +87,25 @@ pub fn view(model: &Model) -> ServicesView<'_> {
         .iter()
         .map(|service| row(model, service))
         .collect();
-    let pools = model.session.services.iter().any(|s| model::is_pool(&s.id));
+    let pools = model.session.services.iter().any(|s| s.id.is_pool());
     ServicesView::Rows { rows, pools }
 }
 
-fn row<'a>(model: &Model, service: &'a ServiceStatus) -> ServiceRow<'a> {
-    let pool = model::pool_of(&service.id);
+fn row(model: &Model, service: &ServiceStatus) -> ServiceRow {
+    let pool = match service.id {
+        ServiceId::Pool(_, minor) => Some(minor),
+        _ => None,
+    };
     let state = pill(pool.is_some(), &service.state);
-    let sites = pool.map_or(0, |(_, line)| model.sites_on_line(line));
+    let sites = pool.map_or(0, |minor| model.sites_on_line(&minor.to_string()));
     let failure = match &service.state {
         ServiceState::Failed { code } => Some(strings::error_text(code)),
         _ => None,
     };
     ServiceRow {
-        id: &service.id,
-        name: model::service_name(&service.id),
-        description: model::service_description(&service.id, state == PillState::Waiting, sites),
+        id: service.id,
+        name: model::service_name(service.id),
+        description: model::service_description(service.id, state == PillState::Waiting, sites),
         state,
         failure,
         pid: service.pid,
@@ -117,7 +120,7 @@ fn row<'a>(model: &Model, service: &'a ServiceStatus) -> ServiceRow<'a> {
 fn buttons(model: &Model, service: &ServiceStatus, pool: bool) -> Vec<RowButton> {
     let mut buttons = Vec::new();
     if matches!(service.state, ServiceState::Failed { .. })
-        && !model.log_rows(&service.id).is_empty()
+        && !model.log_rows(service.id).is_empty()
     {
         buttons.push(RowButton::ShowLog);
     }
@@ -146,7 +149,7 @@ fn pill(pool: bool, state: &ServiceState) -> PillState {
 }
 
 /// Draws `view`. Returns what the user did.
-pub fn show(ui: &mut Ui, view: &ServicesView<'_>, theme: &Theme) -> Vec<Action> {
+pub fn show(ui: &mut Ui, view: &ServicesView, theme: &Theme) -> Vec<Action> {
     let mut actions = Vec::new();
     ui.spacing_mut().item_spacing.y = theme.space.section_gap;
     super::header_with_hint(
@@ -170,7 +173,7 @@ pub fn show(ui: &mut Ui, view: &ServicesView<'_>, theme: &Theme) -> Vec<Action> 
     actions
 }
 
-impl ServiceRow<'_> {
+impl ServiceRow {
     /// The second line of the row: why it failed, or what it does.
     fn note(&self) -> &str {
         self.failure.as_deref().unwrap_or(&self.description)
@@ -180,7 +183,7 @@ impl ServiceRow<'_> {
 /// The rows: the name over its line, the state, and the buttons at the end.
 /// The line wraps in at most two lines and is never cut, so a row is as high
 /// as its lines need.
-fn table(ui: &mut Ui, rows: &[ServiceRow<'_>], actions: &mut Vec<Action>) {
+fn table(ui: &mut Ui, rows: &[ServiceRow], actions: &mut Vec<Action>) {
     let columns = [
         TableColumn::fill(strings::COLUMN_SERVICE),
         TableColumn::fixed(strings::COLUMN_STATE, SERVICES_STATE_COLUMN),
@@ -216,7 +219,7 @@ fn table(ui: &mut Ui, rows: &[ServiceRow<'_>], actions: &mut Vec<Action>) {
                     if press(ui, service, *button) {
                         actions.push(match button {
                             RowButton::Service(action) => Action::Service {
-                                service: service.id.to_owned(),
+                                service: service.id,
                                 action: *action,
                             },
                             RowButton::ShowLog => {
@@ -233,7 +236,7 @@ fn table(ui: &mut Ui, rows: &[ServiceRow<'_>], actions: &mut Vec<Action>) {
 /// One button. Whether it was pressed. A screen reader hears which program
 /// it is for ("Restart Caddy"). The ones that act on the program are
 /// secondary; "Show log" is quiet, a way to read more.
-fn press(ui: &mut Ui, service: &ServiceRow<'_>, button: RowButton) -> bool {
+fn press(ui: &mut Ui, service: &ServiceRow, button: RowButton) -> bool {
     let (widget, label) = match button {
         RowButton::Service(action) => (
             Button::secondary(strings::action_text(action)),
@@ -261,10 +264,11 @@ mod tests {
     use crate::model::Update;
     use crate::theme::LIGHT;
     use crate::widgets::harness::{Harness, Tree};
+    use marsa_core::databases::ServerKind;
 
-    fn service(id: &str, state: ServiceState) -> ServiceStatus {
+    fn service(id: ServiceId, state: ServiceState) -> ServiceStatus {
         ServiceStatus {
-            id: id.into(),
+            id,
             pid: (state == ServiceState::Running).then_some(4242),
             state,
             restarts: 0,
@@ -291,7 +295,7 @@ mod tests {
         }
     }
 
-    fn rows<'a, 'b>(view: &'b ServicesView<'a>) -> &'b [ServiceRow<'a>] {
+    fn rows(view: &ServicesView) -> &[ServiceRow] {
         match view {
             ServicesView::Rows { rows, .. } => rows,
             other => panic!("expected rows, got {other:?}"),
@@ -299,17 +303,17 @@ mod tests {
     }
 
     /// The one row of a model with one service.
-    fn only(id: &str, state: ServiceState) -> ServiceRowCopy {
+    fn only(id: ServiceId, state: ServiceState) -> ServiceRowCopy {
         only_with(id, state, false)
     }
 
     /// The one row of a model with one service, whose log has a line if
     /// `logged`.
-    fn only_with(id: &str, state: ServiceState, logged: bool) -> ServiceRowCopy {
+    fn only_with(id: ServiceId, state: ServiceState, logged: bool) -> ServiceRowCopy {
         let mut model = model(vec![service(id, state)]);
         if logged {
             model.update(Update::Log(vec![LogLine {
-                service: id.into(),
+                service: id,
                 seq: 0,
                 at_ms: 0,
                 stream: LogStream::Stderr,
@@ -358,7 +362,7 @@ mod tests {
             (failed, PillState::Failed, vec![Start]),
         ];
         for (state, pill, want) in cases {
-            let row = only("caddy", state.clone());
+            let row = only(ServiceId::Caddy, state.clone());
             assert_eq!(row.state, pill, "{state:?}");
             let want: Vec<_> = want.into_iter().map(RowButton::Service).collect();
             assert_eq!(row.actions, want, "{state:?}");
@@ -375,7 +379,7 @@ mod tests {
     #[test]
     fn a_failed_service_says_why_in_words_from_its_code() {
         let row = only(
-            "caddy",
+            ServiceId::Caddy,
             ServiceState::Failed {
                 code: "port_in_use".into(),
             },
@@ -388,11 +392,11 @@ mod tests {
             ServiceState::Starting,
             ServiceState::Stopping,
         ] {
-            assert_eq!(only("caddy", state).failure, None);
+            assert_eq!(only(ServiceId::Caddy, state).failure, None);
         }
         // A code the window does not know still says something.
         let odd = only(
-            "caddy",
+            ServiceId::Caddy,
             ServiceState::Failed {
                 code: "brand_new".into(),
             },
@@ -403,6 +407,7 @@ mod tests {
     #[test]
     fn a_pool_that_is_stopped_waits_and_a_pool_has_no_action_button() {
         for id in ["php-fpm-8.4", "php-cgi-8.3"] {
+            let id: ServiceId = id.parse().unwrap();
             let running = only(id, ServiceState::Running);
             assert_eq!(running.state, PillState::Running);
             assert_eq!(running.actions, [], "{id}");
@@ -431,11 +436,14 @@ mod tests {
             code: "port_in_use".into(),
         };
         assert_eq!(
-            only_with("caddy", failed.clone(), true).actions,
+            only_with(ServiceId::Caddy, failed.clone(), true).actions,
             [RowButton::ShowLog, RowButton::Service(Start)]
         );
         // No line written: nothing to show.
-        assert_eq!(only("caddy", failed).actions, [RowButton::Service(Start)]);
+        assert_eq!(
+            only(ServiceId::Caddy, failed).actions,
+            [RowButton::Service(Start)]
+        );
         // A program that is fine has no use for it, log or not.
         for state in [
             ServiceState::Running,
@@ -443,17 +451,18 @@ mod tests {
             ServiceState::Starting,
             ServiceState::Stopping,
         ] {
-            let row = only_with("caddy", state.clone(), true);
+            let row = only_with(ServiceId::Caddy, state.clone(), true);
             assert!(!row.actions.contains(&RowButton::ShowLog), "{state:?}");
         }
     }
 
     #[test]
-    fn a_program_the_window_does_not_know_shows_under_its_id_with_a_plain_line() {
-        let model = model(vec![service("mailpit", ServiceState::Running)]);
+    fn a_database_server_shows_under_its_id_with_a_plain_line() {
+        let postgres = ServiceId::Database(ServerKind::Postgres);
+        let model = model(vec![service(postgres, ServiceState::Running)]);
         let view = view(&model);
         let row = &rows(&view)[0];
-        assert_eq!((row.id, row.name.as_str()), ("mailpit", "mailpit"));
+        assert_eq!((row.id, row.name.as_str()), (postgres, "postgres"));
         assert_eq!(row.description, "A program Marsa runs for your sites.");
         // It is not a pool: it has its buttons.
         assert_eq!(row.actions.len(), 2);
@@ -464,10 +473,19 @@ mod tests {
     #[test]
     fn each_program_is_named_and_described_and_a_pool_counts_its_sites() {
         let mut model = model(vec![
-            service("php-fpm-8.4", ServiceState::Running),
-            service("php-fpm-8.3", ServiceState::Stopped),
-            service("php-fpm-8.2", ServiceState::Running),
-            service("caddy", ServiceState::Running),
+            service(
+                "php-fpm-8.4".parse::<ServiceId>().unwrap(),
+                ServiceState::Running,
+            ),
+            service(
+                "php-fpm-8.3".parse::<ServiceId>().unwrap(),
+                ServiceState::Stopped,
+            ),
+            service(
+                "php-fpm-8.2".parse::<ServiceId>().unwrap(),
+                ServiceState::Running,
+            ),
+            service(ServiceId::Caddy, ServiceState::Running),
         ]);
         model.update(Update::Sites(SiteList {
             sites: vec![
@@ -504,10 +522,13 @@ mod tests {
         }));
         let view = super::view(&model);
         assert_eq!(rows(&view)[3].description, "Runs PHP 8.4 for 1 site.");
-        assert_eq!(model::service_name("php-cgi-8.4"), "PHP-CGI 8.4");
-        assert_eq!(model::service_name("dns"), "DNS");
         assert_eq!(
-            model::service_description("dns", false, 0),
+            model::service_name("php-cgi-8.4".parse::<ServiceId>().unwrap()),
+            "PHP-CGI 8.4"
+        );
+        assert_eq!(model::service_name(ServiceId::Dns), "DNS");
+        assert_eq!(
+            model::service_description(ServiceId::Dns, false, 0),
             "Finds every .test site on this computer."
         );
     }
@@ -519,7 +540,7 @@ mod tests {
         let empty = connected();
         assert_eq!(view(&empty), ServicesView::Empty);
         // A window that lost its daemon lists nothing.
-        let mut lost = model(vec![service("caddy", ServiceState::Running)]);
+        let mut lost = model(vec![service(ServiceId::Caddy, ServiceState::Running)]);
         lost.update(Update::Reconnecting);
         assert_eq!(view(&lost), ServicesView::Offline);
     }
@@ -557,8 +578,11 @@ mod tests {
 
     fn two_services() -> Model {
         model(vec![
-            service("caddy", ServiceState::Running),
-            service("php-fpm-8.4", ServiceState::Running),
+            service(ServiceId::Caddy, ServiceState::Running),
+            service(
+                "php-fpm-8.4".parse::<ServiceId>().unwrap(),
+                ServiceState::Running,
+            ),
         ])
     }
 
@@ -590,7 +614,10 @@ mod tests {
         }
         // The line about pools is there while a pool is.
         assert!(tree.node_with_text(strings::SERVICES_POOLS_NOTE).is_some());
-        let (_, caddy_only) = start(&model(vec![service("caddy", ServiceState::Running)]));
+        let (_, caddy_only) = start(&model(vec![service(
+            ServiceId::Caddy,
+            ServiceState::Running,
+        )]));
         assert!(
             caddy_only
                 .node_with_text(strings::SERVICES_POOLS_NOTE)
@@ -604,14 +631,14 @@ mod tests {
         assert_eq!(
             click(&model, "Restart Caddy"),
             [Action::Service {
-                service: "caddy".into(),
+                service: ServiceId::Caddy,
                 action: ServiceAction::Restart,
             }]
         );
         assert_eq!(
             click(&model, "Stop Caddy"),
             [Action::Service {
-                service: "caddy".into(),
+                service: ServiceId::Caddy,
                 action: ServiceAction::Stop,
             }]
         );
@@ -619,14 +646,14 @@ mod tests {
         assert_eq!(
             click(&stopped, "Start Caddy"),
             [Action::Service {
-                service: "caddy".into(),
+                service: ServiceId::Caddy,
                 action: ServiceAction::Start,
             }]
         );
     }
 
     fn model_with_stopped_caddy() -> Model {
-        model(vec![service("caddy", ServiceState::Stopped)])
+        model(vec![service(ServiceId::Caddy, ServiceState::Stopped)])
     }
 
     #[test]
@@ -636,7 +663,7 @@ mod tests {
         assert!(tree.node_with_label("Stop Caddy").is_none());
         assert!(tree.node_with_label("Restart Caddy").is_none());
         // A stopped program has no process.
-        let stopped = only("caddy", ServiceState::Stopped);
+        let stopped = only(ServiceId::Caddy, ServiceState::Stopped);
         assert_eq!(stopped.state, PillState::Stopped);
         assert_eq!(strings::service_pid(4242), "Process 4242");
     }
@@ -644,7 +671,7 @@ mod tests {
     #[test]
     fn a_failed_service_shows_its_reason_in_place_of_its_line() {
         let model = model(vec![service(
-            "caddy",
+            ServiceId::Caddy,
             ServiceState::Failed {
                 code: "port_in_use".into(),
             },
@@ -662,16 +689,16 @@ mod tests {
     #[test]
     fn show_log_opens_the_log_of_that_service_and_is_named_for_it() {
         let mut model = model(vec![
-            service("caddy", ServiceState::Running),
+            service(ServiceId::Caddy, ServiceState::Running),
             service(
-                "php-fpm-8.2",
+                "php-fpm-8.2".parse::<ServiceId>().unwrap(),
                 ServiceState::Failed {
                     code: "spawn_failed".into(),
                 },
             ),
         ]);
         model.update(Update::Log(vec![LogLine {
-            service: "php-fpm-8.2".into(),
+            service: "php-fpm-8.2".parse::<ServiceId>().unwrap(),
             seq: 0,
             at_ms: 0,
             stream: LogStream::Stderr,
@@ -684,7 +711,7 @@ mod tests {
         assert_eq!(
             click(&model, "Show log of PHP-FPM 8.2"),
             [Action::Navigate(Route::Logs(LogSource::Service(
-                "php-fpm-8.2".into()
+                "php-fpm-8.2".parse::<ServiceId>().unwrap()
             )))]
         );
     }
@@ -728,7 +755,8 @@ mod tests {
             "brand_new_code",
         ];
         let mut texts: Vec<String> = codes.iter().map(|code| strings::error_text(code)).collect();
-        for id in ["caddy", "dns", "php-fpm-8.4", "php-cgi-8.4", "mailpit"] {
+        for id in ["caddy", "dns", "php-fpm-8.4", "php-cgi-8.4", "postgres"] {
+            let id = id.parse().unwrap();
             for waiting in [false, true] {
                 for sites in [0, 1, 25] {
                     texts.push(model::service_description(id, waiting, sites));
@@ -736,7 +764,7 @@ mod tests {
             }
         }
         let width = {
-            let model = model(vec![service("caddy", ServiceState::Running)]);
+            let model = model(vec![service(ServiceId::Caddy, ServiceState::Running)]);
             let harness = Harness::new(egui::Theme::Light);
             let mut width = 0.0;
             harness.run(|ui| {
@@ -774,7 +802,10 @@ mod tests {
             code: "exited".into(),
         };
         let measure = |state: ServiceState, width: f32| {
-            let model = model(vec![service("php-fpm-8.4", state)]);
+            let model = model(vec![service(
+                "php-fpm-8.4".parse::<ServiceId>().unwrap(),
+                state,
+            )]);
             let (_, tree) = tree_at(&model, width);
             let reason = match &view(&model) {
                 ServicesView::Rows { rows, .. } => rows[0].failure.clone().expect("a reason"),

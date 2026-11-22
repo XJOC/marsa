@@ -49,6 +49,7 @@ use marsa_core::doctor::{Check, Pass, Problem, Verdict, Warning};
 use marsa_core::platform::checkup::{self, DaemonFacts, Item};
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::RuntimesDir;
+use marsa_core::types::ServiceId;
 use marsa_core::types::{DoctorReport, Site};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -58,7 +59,6 @@ use super::daemon::failure;
 use super::setup::port_held;
 use super::strings::{self, Details};
 use super::text::{clipped, printable};
-use marsa_core::caddy::CADDY_ID;
 
 /// The longest log line shown.
 const MAX_LINE: usize = 300;
@@ -123,8 +123,11 @@ async fn ask_daemon(data_dir: &Path) -> DaemonFacts {
         Ok(health) => health,
         Err(err) => return down(err),
     };
-    let caddy_status = answer(client.services().await, data_dir)
-        .and_then(|services| services.into_iter().find(|service| service.id == CADDY_ID));
+    let caddy_status = answer(client.services().await, data_dir).and_then(|services| {
+        services
+            .into_iter()
+            .find(|service| service.id == ServiceId::Caddy)
+    });
     let caddy_pid = caddy_status.as_ref().and_then(|service| service.pid);
     let caddy = caddy_status.map(|service| service.state);
     let sites = answer(client.sites().await, data_dir);
@@ -243,7 +246,7 @@ fn problem_text(problem: &Problem, data_dir: &Path, windows: bool) -> (String, S
         ),
         Problem::CaddyFailed { code } => (
             strings::doctor_caddy_failed(&printable(code)),
-            Failure::new(code, data_dir, Some(CADDY_ID)).message,
+            Failure::new(code, data_dir, Some(&ServiceId::Caddy.to_string())).message,
         ),
         Problem::DnsNoAnswer => pair(strings::DOCTOR_DNS_NO_ANSWER, strings::DOCTOR_DNS_SETUP),
         Problem::LinkNoAnswer => pair(strings::DOCTOR_DNS_NO_ANSWER, strings::DOCTOR_LINK_SETUP),

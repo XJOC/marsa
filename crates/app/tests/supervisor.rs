@@ -11,6 +11,7 @@
 //! program (Windows' way to stop MySQL and PostgreSQL) run everywhere: the
 //! program is this test binary too.
 
+use marsa_core::types::ServiceId;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -204,7 +205,8 @@ fn start_with(mode: &str, restart: RestartPolicy, stop: StopMethod) -> Started {
 /// The fake in `mode`, run by the supervisor.
 fn spec(mode: &str, restart: RestartPolicy, stop: StopMethod) -> ServiceSpec {
     ServiceSpec {
-        id: mode.into(),
+        // Each test has its own logs folder, so one id serves them all.
+        id: ServiceId::Caddy,
         program: std::env::current_exe().expect("the test binary has a path"),
         // Runs only the entry point, under libtest and under nextest alike.
         args: ["fake_service", "--exact", "--nocapture"]
@@ -274,7 +276,7 @@ async fn output_lines_arrive_in_order_as_events() {
     assert_eq!(states(&events), want);
     assert!(matches!(events.last(), Some(Event::ServiceChanged(_))));
     assert!(handle.recent_logs().iter().any(|l| l.text == "fake 5"));
-    let file = std::fs::read_to_string(logs.path().join("print.log")).unwrap();
+    let file = std::fs::read_to_string(logs.path().join("caddy.log")).unwrap();
     assert!(
         file.contains("fake 5\n") && file.contains("fake err\n"),
         "{file:?}"
@@ -338,7 +340,7 @@ async fn cancel_stops_a_process_that_ignores_sigterm() {
 fn a_relative_program_is_rejected() {
     let (tx, _rx) = broadcast::channel(8);
     let spec = ServiceSpec {
-        id: "caddy".into(),
+        id: ServiceId::Caddy,
         program: "caddy".into(),
         args: Vec::new(),
         env: BTreeMap::new(),
@@ -438,7 +440,7 @@ async fn a_daemon_shutdown_waits_for_the_whole_ladder() {
     ready(&handle).await;
     let data = tempfile::tempdir().expect("a temp folder");
     let daemon = Daemon::new(data.path().to_path_buf());
-    daemon.add_proc("deaf", handle);
+    daemon.add_proc(ServiceId::Caddy, handle);
 
     // Shorter than the ladder, as `marsad`'s 10 s are shorter than 20 s.
     let started = Instant::now();
@@ -671,7 +673,7 @@ async fn a_stop_program_that_asks_ends_the_stop() {
     let stopped = stop_watch(stop).await;
     assert!(stopped.elapsed < wait, "{:?}", stopped.elapsed);
     for line in [
-        "marsad: asking watch to stop with fake stop",
+        "marsad: asking caddy to stop with fake stop",
         "fake stop asked",
         "fake got the stop file",
     ] {
@@ -679,7 +681,7 @@ async fn a_stop_program_that_asks_ends_the_stop() {
     }
     let failed = stopped.starting_with("marsad: fake stop failed");
     assert_eq!(failed, None, "{:?}", stopped.texts);
-    assert_eq!(stopped.starting_with("marsad: watch still runs"), None);
+    assert_eq!(stopped.starting_with("marsad: caddy still runs"), None);
 }
 
 /// A program that fails says why in the log, and the server still gets the
@@ -698,10 +700,10 @@ async fn a_failing_stop_program_leads_to_the_kill_only_after_the_wait() {
         .starting_with("marsad: fake stop failed (")
         .unwrap_or_else(|| panic!("no failure line: {:?}", stopped.texts));
     assert!(failed.ends_with("). The fake refused."), "{failed}");
-    assert!(stopped.has("marsad: watch still runs 3 s after fake stop"));
+    assert!(stopped.has("marsad: caddy still runs 3 s after fake stop"));
     assert!(!stopped.has("fake got the stop file"));
     // The log file says it too.
-    let log = std::fs::read_to_string(stopped.logs.path().join("watch.log")).unwrap();
+    let log = std::fs::read_to_string(stopped.logs.path().join("caddy.log")).unwrap();
     assert!(log.contains(failed.as_str()), "{log}");
     assert!(log.contains(refused), "{log}");
 }
@@ -715,7 +717,7 @@ async fn a_stop_program_that_hangs_is_ended_with_its_step() {
     let elapsed = stopped.elapsed;
     assert!(elapsed >= wait, "killed too early: {elapsed:?}");
     assert!(elapsed < wait + Duration::from_secs(3), "{elapsed:?}");
-    assert!(stopped.has("marsad: watch still runs 3 s after fake stop"));
+    assert!(stopped.has("marsad: caddy still runs 3 s after fake stop"));
     let pid = std::fs::read_to_string(stopped.dir.path().join("hang.pid")).unwrap();
     // Only macOS and Linux tell whether a pid still runs.
     #[cfg(unix)]

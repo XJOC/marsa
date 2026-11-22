@@ -5,6 +5,7 @@
 //! pass and a broken daemon fails with its log.
 
 use marsa_core::data_dir::DataDir;
+use marsa_core::types::ServiceId;
 use std::fs::{self, File};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -258,7 +259,9 @@ async fn the_start_without_caddy_starts_none_and_fails_nothing() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let services: Vec<ServiceStatus> = response.json().await.unwrap();
-    let caddy = services.iter().find(|service| service.id == "caddy");
+    let caddy = services
+        .iter()
+        .find(|service| service.id == ServiceId::Caddy);
     let caddy = caddy.expect("caddy is listed");
     assert_eq!((&caddy.state, caddy.pid), (&ServiceState::Stopped, None));
 }

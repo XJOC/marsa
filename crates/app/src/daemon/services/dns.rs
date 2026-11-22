@@ -17,6 +17,7 @@
 //! failed service, and `marsa services start dns` tries again.
 
 use marsa_core::codes;
+use marsa_core::types::ServiceId;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
@@ -64,8 +65,6 @@ pub fn serves_test_names(platform: Option<Platform>) -> bool {
     )
 }
 
-/// The id of the DNS server in `GET /v1/services`.
-pub const DNS_ID: &str = "dns";
 /// How long a stop waits for both sockets to close.
 pub const STOP_LIMIT: Duration = Duration::from_secs(2);
 
@@ -92,7 +91,7 @@ impl DnsService {
     pub fn new(addr: Option<SocketAddr>) -> Self {
         Self {
             addr,
-            runtime: Arc::new(Mutex::new(ServiceRuntime::new(DNS_ID))),
+            runtime: Arc::new(Mutex::new(ServiceRuntime::new(ServiceId::Dns))),
             server: Mutex::default(),
             turn: tokio::sync::Mutex::default(),
         }

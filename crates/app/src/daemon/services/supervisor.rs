@@ -6,6 +6,7 @@
 //! Laravel, but inside the daemon.
 
 use marsa_core::codes;
+use marsa_core::types::ServiceId;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -64,10 +65,10 @@ pub struct ServiceRuntime {
 
 impl ServiceRuntime {
     /// A service that has not run yet: `Stopped`, with no lines.
-    pub fn new(id: &str) -> Self {
+    pub fn new(id: ServiceId) -> Self {
         Self {
             status: ServiceStatus {
-                id: id.to_owned(),
+                id,
                 state: ServiceState::Stopped,
                 pid: None,
                 restarts: 0,
@@ -137,7 +138,7 @@ impl Supervisor {
         events: broadcast::Sender<Event>,
         logs_dir: &Path,
     ) -> Result<ServiceHandle, ProgramNotAbsolute> {
-        let runtime = Arc::new(Mutex::new(ServiceRuntime::new(&spec.id)));
+        let runtime = Arc::new(Mutex::new(ServiceRuntime::new(spec.id)));
         Self::spawn_on(spec, events, logs_dir, runtime)
     }
 
@@ -168,12 +169,12 @@ impl Supervisor {
         if let Some(program) = relative {
             return Err(ProgramNotAbsolute(program));
         }
-        lock(&runtime).status = status(&spec.id, ServiceState::Starting, None, 0);
+        lock(&runtime).status = status(spec.id, ServiceState::Starting, None, 0);
         let shared = Shared {
-            id: spec.id.clone(),
+            id: spec.id,
             runtime: Arc::clone(&runtime),
             events,
-            log: Arc::new(Mutex::new(open_log(&spec.id, logs_dir))),
+            log: Arc::new(Mutex::new(open_log(spec.id, logs_dir))),
         };
         let stop_limit = stop_limit(&spec.stop);
         let cancel = CancellationToken::new();
@@ -190,7 +191,7 @@ impl Supervisor {
 /// What the task and its two pipe readers share.
 #[derive(Clone)]
 struct Shared {
-    id: String,
+    id: ServiceId,
     runtime: Arc<Mutex<ServiceRuntime>>,
     events: broadcast::Sender<Event>,
     /// `logs/<id>.log`, shared by both readers so one writer moves it to
@@ -208,7 +209,7 @@ struct ServiceLog {
 impl Shared {
     fn set_state(&self, state: ServiceState, pid: Option<u32>, restarts: u32) {
         let mut runtime = lock(&self.runtime);
-        runtime.status = status(&self.id, state, pid, restarts);
+        runtime.status = status(self.id, state, pid, restarts);
         // Sent under the lock, so events come in the order of the changes.
         // An error only means that nobody listens right now.
         let _ = self
@@ -359,7 +360,7 @@ async fn stop(child: &mut Child, spec: &ServiceSpec, shared: &Shared) {
                     Asked::No
                 }
             },
-            StopAction::Send(request) => ask(child, request, step.wait, &spec.id).await,
+            StopAction::Send(request) => ask(child, request, step.wait, spec.id).await,
             StopAction::Run(command) => run_command(child, command, step.wait, shared).await,
         };
         match stopped {
@@ -389,7 +390,7 @@ enum Asked {
 /// need not wait for an exit that will not come. A closed connection is the
 /// server on its way out, and the wait goes on. The connection stays open
 /// until the step ends, so the server reads the request to its end.
-async fn ask(child: &mut Child, request: &TcpRequest, wait: Duration, id: &str) -> Asked {
+async fn ask(child: &mut Child, request: &TcpRequest, wait: Duration, id: ServiceId) -> Asked {
     let name = request.name;
     let mut stream = match send_request(request).await {
         Ok(stream) => stream,
@@ -586,7 +587,7 @@ fn read_lines(
 }
 
 /// Opens `logs_dir/<id>.log`, or warns and gives `None`.
-fn open_log(id: &str, logs_dir: &Path) -> Option<ServiceLog> {
+fn open_log(id: ServiceId, logs_dir: &Path) -> Option<ServiceLog> {
     let path = logs_dir.join(format!("{id}.log"));
     let file = fs::create_dir_all(logs_dir)
         .and_then(|()| LogFile::open(&path, LOG_FILE_LIMIT))
@@ -680,9 +681,9 @@ impl Write for LogFile {
     }
 }
 
-fn status(id: &str, state: ServiceState, pid: Option<u32>, restarts: u32) -> ServiceStatus {
+fn status(id: ServiceId, state: ServiceState, pid: Option<u32>, restarts: u32) -> ServiceStatus {
     ServiceStatus {
-        id: id.to_owned(),
+        id,
         state,
         pid,
         restarts,

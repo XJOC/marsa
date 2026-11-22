@@ -3,7 +3,7 @@
 use super::admin::{Admin, LoadError};
 use super::orphan::{Blocked, Ladder, Orphans, PidFile};
 use super::watch::Watcher;
-use super::{ActionError, CADDY_ID, caddy_spec};
+use super::{ActionError, caddy_spec};
 use crate::daemon::services::actions::{Busy, take_turn};
 use crate::daemon::services::probe::{ProcessProbe, SystemProbe};
 use crate::daemon::services::supervisor::{ServiceHandle, ServiceRuntime, Supervisor, lock};
@@ -15,6 +15,7 @@ use marsa_core::orphan::instance_tag;
 use marsa_core::platform::process;
 use marsa_core::services::ServiceSpec;
 use marsa_core::sites::Site;
+use marsa_core::types::ServiceId;
 use marsa_core::types::{Event, LogLine, ServiceAction, ServiceState, ServiceStatus};
 use serde_json::Value;
 use std::io;
@@ -100,7 +101,7 @@ impl CaddyManager {
             processes: Arc::new(SystemProbe),
             ladder: Ladder::default(),
             started: Mutex::default(),
-            runtime: Arc::new(Mutex::new(ServiceRuntime::new(CADDY_ID))),
+            runtime: Arc::new(Mutex::new(ServiceRuntime::new(ServiceId::Caddy))),
             busy: Arc::default(),
             wanted: Mutex::default(),
             pushing: tokio::sync::Mutex::default(),
@@ -137,13 +138,15 @@ impl CaddyManager {
         write_config(&self.paths.config_file, &config)
             .await
             .map_err(LoadError::Write)?;
-        if !daemon.proc_alive(CADDY_ID) {
+        if !daemon.proc_alive(ServiceId::Caddy) {
             return Ok(Applied::Written);
         }
         match Admin::new(self.input.admin_port).load(&config).await {
             Ok(()) => Ok(Applied::Loaded),
             // Caddy stopped in the meantime: it reads the file when it starts.
-            Err(LoadError::Unreachable(_)) if !daemon.proc_alive(CADDY_ID) => Ok(Applied::Written),
+            Err(LoadError::Unreachable(_)) if !daemon.proc_alive(ServiceId::Caddy) => {
+                Ok(Applied::Written)
+            }
             Err(err) => {
                 let text = format!("marsad: The new config was not loaded: {err}.");
                 lock(&self.runtime).note(&daemon.events, &text);
@@ -213,7 +216,7 @@ impl CaddyManager {
 
     /// The program Caddy runs from now, or `None` while it does not run.
     pub fn running_program(&self, daemon: &Daemon) -> Option<PathBuf> {
-        if !daemon.proc_alive(CADDY_ID) {
+        if !daemon.proc_alive(ServiceId::Caddy) {
             return None;
         }
         lock(&self.started).clone()
@@ -304,7 +307,7 @@ impl CaddyManager {
     }
 
     async fn start(&self, daemon: &Daemon, admin: &Admin) -> Result<(), ActionError> {
-        if daemon.proc_alive(CADDY_ID) {
+        if daemon.proc_alive(ServiceId::Caddy) {
             return Ok(());
         }
         // No task runs from here on, so these writes cannot race the supervisor.
@@ -361,7 +364,7 @@ impl CaddyManager {
         let lines = daemon.events.subscribe();
         let first_seq = self.recent_logs().last().map_or(0, |line| line.seq + 1);
         let spec = ServiceSpec {
-            id: CADDY_ID.to_owned(),
+            id: ServiceId::Caddy,
             ..spec
         };
         let logs_dir = DataDir::new(&daemon.data_dir).logs();
@@ -391,7 +394,7 @@ impl CaddyManager {
         let task = tokio::spawn(watcher.run(task));
         // A handle this replaces belongs to a run that has ended.
         daemon.add_proc(
-            CADDY_ID,
+            ServiceId::Caddy,
             ServiceHandle {
                 cancel,
                 task,
@@ -425,7 +428,7 @@ impl CaddyManager {
     async fn wait_ready(&self, daemon: &Daemon, admin: &Admin, tag: &str) -> Ready {
         let poll = async {
             loop {
-                if !daemon.proc_alive(CADDY_ID) {
+                if !daemon.proc_alive(ServiceId::Caddy) {
                     return Ready::Ended;
                 }
                 if admin.answers_as(tag).await {
@@ -447,7 +450,7 @@ impl CaddyManager {
     /// program on the admin port never gets it. Without it, the task's stop
     /// ends our Caddy.
     async fn stop(&self, daemon: &Daemon, admin: &Admin) -> bool {
-        if !daemon.proc_alive(CADDY_ID) {
+        if !daemon.proc_alive(ServiceId::Caddy) {
             return self.stop_orphan(daemon, admin).await;
         }
         match self.instance_tag() {
@@ -456,7 +459,7 @@ impl CaddyManager {
             Err(err) => warn!(%err, "cannot read the instance id; no /stop"),
         }
         // `None`: a shutdown took the handle and stops it.
-        if let Some(handle) = daemon.take_proc(CADDY_ID)
+        if let Some(handle) = daemon.take_proc(ServiceId::Caddy)
             && let Err(err) = handle.stop().await
         {
             warn!(%err, "the caddy task failed");

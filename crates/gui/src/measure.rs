@@ -22,13 +22,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use marsa_core::php::PhpMinor;
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    Health, LogLine, LogStream, RuntimeList, RuntimeVersions, ServiceState, ServiceStatus, Site,
-    SiteKind, SiteList, Source,
+    Health, LogLine, LogStream, PoolKind, RuntimeList, RuntimeVersions, ServiceId, ServiceState,
+    ServiceStatus, Site, SiteKind, SiteList, Source,
 };
 
-use crate::model::{LogSource, Model, Route, Update, WEB_SERVER};
+use crate::model::{LogSource, Model, Route, Update};
 
 /// The variable that asks for the mode.
 const VAR: &str = "MARSA_GUI_MEASURE";
@@ -149,16 +150,19 @@ pub fn fill(model: &mut Model, plan: Plan) {
             row(Runtime::Caddy, &["2.11.7"], None),
         ],
     }));
-    let running = |id: &str| ServiceStatus {
-        id: id.into(),
+    let running = |id: ServiceId| ServiceStatus {
+        id,
         state: ServiceState::Running,
         pid: Some(1),
         restarts: 0,
         since_ms: None,
     };
     model.update(Update::Services(vec![
-        running(WEB_SERVER),
-        running("php-fpm-8.4"),
+        running(ServiceId::Caddy),
+        running(ServiceId::Pool(
+            PoolKind::Fpm,
+            PhpMinor { major: 8, minor: 4 },
+        )),
     ]));
     model.update(Update::Sites(sites(plan.sites)));
     model.update(Update::Log(caddy_log(plan.logs)));
@@ -189,7 +193,7 @@ fn caddy_log(count: usize) -> Vec<LogLine> {
                 msg.push_str(&format!(" {}", "slow upstream answer ".repeat(20)));
             }
             LogLine {
-                service: WEB_SERVER.to_owned(),
+                service: ServiceId::Caddy,
                 seq: n as u64,
                 at_ms: 0,
                 stream: LogStream::Stderr,
@@ -521,7 +525,7 @@ mod tests {
             },
         );
         assert_eq!(model.route, Route::Logs(LogSource::Caddy));
-        let rows = model.log_rows(WEB_SERVER);
+        let rows = model.log_rows(ServiceId::Caddy);
         assert_eq!(rows.len(), 5000);
         let count = |level| rows.iter().filter(|row| row.level == level).count();
         assert!(count(LogLevel::Error) > 20 && count(LogLevel::Warning) > 200);
@@ -538,7 +542,10 @@ mod tests {
                 ..plan(0)
             },
         );
-        assert_eq!(more.log_rows(WEB_SERVER).len(), crate::model::MAX_LOG_LINES);
+        assert_eq!(
+            more.log_rows(ServiceId::Caddy).len(),
+            crate::model::MAX_LOG_LINES
+        );
     }
 
     #[test]

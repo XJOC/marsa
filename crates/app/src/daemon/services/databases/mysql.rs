@@ -6,6 +6,7 @@
 //! --initialize-insecure`, which makes `root@localhost` with no password,
 //! and in the same run `root@127.0.0.1` for TCP ([`root_tcp_sql`]).
 
+use marsa_core::types::ServiceId;
 use std::io;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -44,7 +45,7 @@ const PRIVATE: u32 = 0o600;
 /// would only come again, and the status must keep the run's own exit.
 pub(super) fn spec(program: PathBuf, dirs: &MysqlDirs, os: Os, stop: StopMethod) -> ServiceSpec {
     ServiceSpec {
-        id: KIND.id().to_owned(),
+        id: ServiceId::Database(KIND),
         program,
         args: mysqld_args(&dirs.config(), os),
         env: std::collections::BTreeMap::new(),
@@ -384,7 +385,7 @@ mod tests {
         let dirs = MysqlDirs::new(Path::new("/m"), "8.4");
         let program = PathBuf::from("/m/runtimes/mysql/8.4.13/bin/mysqld");
         let spec = spec(program.clone(), &dirs, Os::Mac, mysql_stop());
-        assert_eq!(spec.id, "mysql");
+        assert_eq!(spec.id, ServiceId::Database(ServerKind::Mysql));
         assert_eq!(spec.program, program);
         assert_eq!(spec.args, ["--defaults-file=/m/run/mysql.cnf"]);
         assert_eq!(spec.stop, mysql_stop());

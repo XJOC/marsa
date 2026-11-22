@@ -6,6 +6,7 @@
 //! `databases/postgres/<major>/` ([`ensure_cluster`]): `initdb`, then Marsa's
 //! `pg_hba.conf`, then the role `root` in single-user mode.
 
+use marsa_core::types::ServiceId;
 use std::io;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -79,7 +80,7 @@ pub(super) fn spec(
     stop: StopMethod,
 ) -> ServiceSpec {
     ServiceSpec {
-        id: KIND.id().to_owned(),
+        id: ServiceId::Database(KIND),
         program,
         args: postgres_args(dirs, port),
         env: std::collections::BTreeMap::new(),

@@ -4,6 +4,7 @@ use super::installs::failure;
 use super::*;
 use crate::fixtures::connected;
 use crate::strings::INSTALL_INTERRUPTED;
+use marsa_core::php::PhpMinor;
 use marsa_core::types::LogStream;
 
 fn health() -> Health {
@@ -14,9 +15,9 @@ fn health() -> Health {
     }
 }
 
-fn status(id: &str, state: ServiceState) -> ServiceStatus {
+fn status(id: ServiceId, state: ServiceState) -> ServiceStatus {
     ServiceStatus {
-        id: id.into(),
+        id,
         pid: (state == ServiceState::Running).then_some(7),
         state,
         restarts: 0,
@@ -24,13 +25,13 @@ fn status(id: &str, state: ServiceState) -> ServiceStatus {
     }
 }
 
-fn changed(id: &str, state: ServiceState) -> Event {
+fn changed(id: ServiceId, state: ServiceState) -> Event {
     Event::ServiceChanged(status(id, state))
 }
 
-fn log_line(service: &str, seq: u64) -> LogLine {
+fn log_line(service: ServiceId, seq: u64) -> LogLine {
     LogLine {
-        service: service.into(),
+        service,
         seq,
         at_ms: 0,
         stream: LogStream::Stderr,
@@ -38,12 +39,12 @@ fn log_line(service: &str, seq: u64) -> LogLine {
     }
 }
 
-fn line(service: &str, seq: u64) -> Event {
+fn line(service: ServiceId, seq: u64) -> Event {
     Event::Log(log_line(service, seq))
 }
 
 /// The text of each line of the log of `service`.
-fn texts<'a>(model: &'a Model, service: &str) -> Vec<&'a str> {
+fn texts(model: &Model, service: ServiceId) -> Vec<&str> {
     model
         .log_rows(service)
         .iter()
@@ -115,14 +116,14 @@ fn a_service_action_clears_the_notice_and_becomes_a_command() {
     let mut model = connected();
     model.update(Update::Notice("service_busy".into()));
     let action = Action::Service {
-        service: "caddy".into(),
+        service: ServiceId::Caddy,
         action: ServiceAction::Restart,
     };
     let command = model.apply_action(action);
     assert!(
         matches!(
             &command,
-            Effect::Send(Command::Service { service, action: ServiceAction::Restart }) if service == "caddy"
+            Effect::Send(Command::Service { service, action: ServiceAction::Restart }) if *service == ServiceId::Caddy
         ),
         "{command:?}"
     );
@@ -439,8 +440,11 @@ fn overall_says_the_daemon_first_then_the_sites_then_the_web_server() {
         ),
     ] {
         model.update(Update::Services(vec![
-            status("php-fpm-8.4", ServiceState::Running),
-            status(WEB_SERVER, state),
+            status(
+                "php-fpm-8.4".parse::<ServiceId>().unwrap(),
+                ServiceState::Running,
+            ),
+            status(ServiceId::Caddy, state),
         ]));
         assert_eq!(model.overall(), overall);
     }
@@ -451,12 +455,15 @@ fn overall_says_the_daemon_first_then_the_sites_then_the_web_server() {
 #[test]
 fn a_service_event_changes_the_table() {
     let mut model = connected();
-    apply(&mut model, changed("php", ServiceState::Stopped));
-    apply(&mut model, changed("caddy", ServiceState::Starting));
-    apply(&mut model, changed("caddy", ServiceState::Running));
+    apply(&mut model, changed(ServiceId::Dns, ServiceState::Stopped));
+    apply(
+        &mut model,
+        changed(ServiceId::Caddy, ServiceState::Starting),
+    );
+    apply(&mut model, changed(ServiceId::Caddy, ServiceState::Running));
     let expected = [
-        status("caddy", ServiceState::Running),
-        status("php", ServiceState::Stopped),
+        status(ServiceId::Caddy, ServiceState::Running),
+        status(ServiceId::Dns, ServiceState::Stopped),
     ];
     assert_eq!(model.session.services, expected);
 }
@@ -465,9 +472,9 @@ fn a_service_event_changes_the_table() {
 fn the_log_keeps_the_newest_5000_lines() {
     let mut model = connected();
     for seq in 0..6000 {
-        apply(&mut model, line("caddy", seq));
+        apply(&mut model, line(ServiceId::Caddy, seq));
     }
-    let texts = texts(&model, "caddy");
+    let texts = texts(&model, ServiceId::Caddy);
     assert_eq!(texts.len(), MAX_LOG_LINES);
     assert_eq!((texts[0], texts[4999]), ("line 1000", "line 5999"));
 }
@@ -475,45 +482,81 @@ fn the_log_keeps_the_newest_5000_lines() {
 #[test]
 fn a_repeated_or_old_seq_is_ignored() {
     let mut model = connected();
-    model.update(Update::Log(vec![log_line("caddy", 4)]));
+    model.update(Update::Log(vec![log_line(ServiceId::Caddy, 4)]));
     for seq in [4, 3, 5, 5] {
-        apply(&mut model, line("caddy", seq));
+        apply(&mut model, line(ServiceId::Caddy, seq));
     }
-    assert_eq!(texts(&model, "caddy"), ["line 4", "line 5"]);
+    assert_eq!(texts(&model, ServiceId::Caddy), ["line 4", "line 5"]);
 }
 
 #[test]
 fn a_new_run_may_start_its_seq_again() {
     let mut model = connected();
-    apply(&mut model, line("caddy", 9));
-    apply(&mut model, changed("caddy", ServiceState::Starting));
-    apply(&mut model, line("caddy", 0));
-    assert_eq!(texts(&model, "caddy"), ["line 9", "line 0"]);
+    apply(&mut model, line(ServiceId::Caddy, 9));
+    apply(
+        &mut model,
+        changed(ServiceId::Caddy, ServiceState::Starting),
+    );
+    apply(&mut model, line(ServiceId::Caddy, 0));
+    assert_eq!(texts(&model, ServiceId::Caddy), ["line 9", "line 0"]);
 }
 
 #[test]
 fn each_service_has_its_own_log_with_its_own_seq_and_limit() {
     let mut model = connected();
-    apply(&mut model, line("caddy", 5));
-    apply(&mut model, line("php-fpm-8.4", 0));
-    apply(&mut model, line("php-fpm-8.4", 1));
+    apply(&mut model, line(ServiceId::Caddy, 5));
+    apply(
+        &mut model,
+        line("php-fpm-8.4".parse::<ServiceId>().unwrap(), 0),
+    );
+    apply(
+        &mut model,
+        line("php-fpm-8.4".parse::<ServiceId>().unwrap(), 1),
+    );
     // The same seq in another service is another line.
-    apply(&mut model, line("caddy", 5));
-    assert_eq!(texts(&model, "caddy"), ["line 5"]);
-    assert_eq!(texts(&model, "php-fpm-8.4"), ["line 0", "line 1"]);
-    assert!(model.log_rows("php-fpm-8.3").is_empty());
+    apply(&mut model, line(ServiceId::Caddy, 5));
+    assert_eq!(texts(&model, ServiceId::Caddy), ["line 5"]);
+    assert_eq!(
+        texts(&model, "php-fpm-8.4".parse::<ServiceId>().unwrap()),
+        ["line 0", "line 1"]
+    );
+    assert!(
+        model
+            .log_rows("php-fpm-8.3".parse::<ServiceId>().unwrap())
+            .is_empty()
+    );
     // A new run of one service does not let the other repeat a line.
-    apply(&mut model, changed("php-fpm-8.4", ServiceState::Starting));
-    apply(&mut model, line("php-fpm-8.4", 0));
-    apply(&mut model, line("caddy", 5));
-    assert_eq!(texts(&model, "php-fpm-8.4").len(), 3);
-    assert_eq!(texts(&model, "caddy").len(), 1);
+    apply(
+        &mut model,
+        changed(
+            "php-fpm-8.4".parse::<ServiceId>().unwrap(),
+            ServiceState::Starting,
+        ),
+    );
+    apply(
+        &mut model,
+        line("php-fpm-8.4".parse::<ServiceId>().unwrap(), 0),
+    );
+    apply(&mut model, line(ServiceId::Caddy, 5));
+    assert_eq!(
+        texts(&model, "php-fpm-8.4".parse::<ServiceId>().unwrap()).len(),
+        3
+    );
+    assert_eq!(texts(&model, ServiceId::Caddy).len(), 1);
     // Each log is kept to the newest lines, separately.
     for seq in 0..6000 {
-        apply(&mut model, line("php-fpm-8.3", seq));
+        apply(
+            &mut model,
+            line("php-fpm-8.3".parse::<ServiceId>().unwrap(), seq),
+        );
     }
-    assert_eq!(model.log_rows("php-fpm-8.3").len(), MAX_LOG_LINES);
-    assert_eq!(model.log_rows("caddy").len(), 1);
+    assert_eq!(
+        model
+            .log_rows("php-fpm-8.3".parse::<ServiceId>().unwrap())
+            .len(),
+        MAX_LOG_LINES
+    );
+    assert_eq!(model.log_rows(ServiceId::Caddy).len(), 1);
 }
 
 #[test]
@@ -522,50 +565,80 @@ fn a_line_has_its_level_from_its_own_text_and_its_stream() {
     let line = |text: &str, seq| LogLine {
         text: text.to_owned(),
         stream: LogStream::Stdout,
-        ..log_line("caddy", seq)
+        ..log_line(ServiceId::Caddy, seq)
     };
     model.update(Update::Log(vec![
         line(r#"{"level":"error","msg":"boom"}"#, 0),
         line(r#"{"level":"warn","msg":"hm"}"#, 1),
         line("ready", 2),
     ]));
-    let levels: Vec<_> = model.log_rows("caddy").iter().map(|r| r.level).collect();
+    let levels: Vec<_> = model
+        .log_rows(ServiceId::Caddy)
+        .iter()
+        .map(|r| r.level)
+        .collect();
     assert_eq!(levels, [LogLevel::Error, LogLevel::Warning, LogLevel::Info]);
     // The columns are those of the message, not of the JSON around it.
-    let columns: Vec<_> = model.log_rows("caddy").iter().map(|r| r.columns).collect();
+    let columns: Vec<_> = model
+        .log_rows(ServiceId::Caddy)
+        .iter()
+        .map(|r| r.columns)
+        .collect();
     assert_eq!(columns, ["boom".len(), "hm".len(), "ready".len()]);
     // The text stays as the program wrote it.
     assert_eq!(
-        model.log_rows("caddy")[0].text,
+        model.log_rows(ServiceId::Caddy)[0].text,
         r#"{"level":"error","msg":"boom"}"#
     );
-    assert_eq!(model.log_rows("caddy")[0].stream, LogStream::Stdout);
+    assert_eq!(
+        model.log_rows(ServiceId::Caddy)[0].stream,
+        LogStream::Stdout
+    );
 }
 
 #[test]
 fn the_log_of_a_service_the_daemon_stopped_listing_goes_with_it() {
     let mut model = connected();
     model.update(Update::Services(vec![
-        status("caddy", ServiceState::Running),
-        status("php-fpm-8.3", ServiceState::Running),
+        status(ServiceId::Caddy, ServiceState::Running),
+        status(
+            "php-fpm-8.3".parse::<ServiceId>().unwrap(),
+            ServiceState::Running,
+        ),
     ]));
-    apply(&mut model, line("caddy", 0));
-    apply(&mut model, line("php-fpm-8.3", 0));
+    apply(&mut model, line(ServiceId::Caddy, 0));
+    apply(
+        &mut model,
+        line("php-fpm-8.3".parse::<ServiceId>().unwrap(), 0),
+    );
     model.update(Update::Services(vec![status(
-        "caddy",
+        ServiceId::Caddy,
         ServiceState::Running,
     )]));
-    assert_eq!(texts(&model, "caddy"), ["line 0"]);
-    assert!(model.log_rows("php-fpm-8.3").is_empty());
+    assert_eq!(texts(&model, ServiceId::Caddy), ["line 0"]);
+    assert!(
+        model
+            .log_rows("php-fpm-8.3".parse::<ServiceId>().unwrap())
+            .is_empty()
+    );
 }
 
 #[test]
 fn a_log_source_is_a_service_and_caddy_is_never_written_twice() {
-    assert_eq!(LogSource::of("caddy"), LogSource::Caddy);
+    assert_eq!(LogSource::of(ServiceId::Caddy), LogSource::Caddy);
     assert_eq!(LogSource::default(), LogSource::Caddy);
-    let pool = LogSource::of("php-fpm-8.4");
-    assert_eq!(pool, LogSource::Service("php-fpm-8.4".into()));
-    assert_eq!((LogSource::Caddy.id(), pool.id()), ("caddy", "php-fpm-8.4"));
+    let pool = LogSource::of("php-fpm-8.4".parse::<ServiceId>().unwrap());
+    assert_eq!(
+        pool,
+        LogSource::Service("php-fpm-8.4".parse::<ServiceId>().unwrap())
+    );
+    assert_eq!(
+        (LogSource::Caddy.id(), pool.id()),
+        (
+            ServiceId::Caddy,
+            "php-fpm-8.4".parse::<ServiceId>().unwrap()
+        )
+    );
 }
 
 #[test]
@@ -598,7 +671,7 @@ fn the_log_filters_and_follow_are_the_users_and_survive_a_new_session() {
 #[test]
 fn shutting_down_changes_the_status_line() {
     let mut model = connected();
-    apply(&mut model, changed("caddy", ServiceState::Running));
+    apply(&mut model, changed(ServiceId::Caddy, ServiceState::Running));
     apply(&mut model, Event::ShuttingDown);
     assert_eq!(model.session.connection, Connection::ShuttingDown);
     assert!(model.session.services.is_empty());
@@ -611,21 +684,21 @@ fn shutting_down_changes_the_status_line() {
 #[test]
 fn a_new_session_starts_clean_and_a_lost_one_keeps_the_log() {
     let mut model = connected();
-    apply(&mut model, line("caddy", 3));
+    apply(&mut model, line(ServiceId::Caddy, 3));
     model.update(Update::Notice("service_not_found".into()));
     model.update(Update::Reconnecting);
     assert_eq!(model.session.connection, Connection::Reconnecting);
-    assert_eq!(texts(&model, "caddy"), ["line 3"]);
+    assert_eq!(texts(&model, ServiceId::Caddy), ["line 3"]);
 
     model.update(Update::Connected(health()));
     assert!(model.is_connected());
     assert!(
-        model.log_rows("caddy").is_empty()
+        model.log_rows(ServiceId::Caddy).is_empty()
             && model.session.notices.code(NoticeSource::Call).is_none()
     );
     // The restarted daemon counts from 0 again.
-    apply(&mut model, line("caddy", 0));
-    assert_eq!(texts(&model, "caddy"), ["line 0"]);
+    apply(&mut model, line(ServiceId::Caddy, 0));
+    assert_eq!(texts(&model, ServiceId::Caddy), ["line 0"]);
 }
 
 #[test]
@@ -1042,19 +1115,23 @@ fn a_lost_session_drops_the_runtimes_and_the_picks() {
 
 #[test]
 fn php_fpm_and_php_cgi_pools_are_managed_by_the_sites() {
-    assert!(is_pool("php-fpm-8.4"));
-    assert!(is_pool("php-cgi-8.4"));
+    assert!("php-fpm-8.4".parse::<ServiceId>().unwrap().is_pool());
+    assert!("php-cgi-8.4".parse::<ServiceId>().unwrap().is_pool());
     for id in ["caddy", "php", "php-fpm", "my-php-fpm-8.4", "dns"] {
-        assert!(!is_pool(id), "{id}");
+        let pool = id.parse::<ServiceId>().is_ok_and(ServiceId::is_pool);
+        assert!(!pool, "{id}");
     }
 }
 
 #[test]
 fn a_pool_id_gives_its_program_and_its_php_line() {
-    assert_eq!(pool_of("php-fpm-8.4"), Some((PoolKind::Fpm, "8.4")));
-    assert_eq!(pool_of("php-cgi-8.3"), Some((PoolKind::Cgi, "8.3")));
-    for id in ["caddy", "php-fpm", "mailpit", ""] {
-        assert_eq!(pool_of(id), None, "{id}");
+    let line = |major, minor| PhpMinor { major, minor };
+    let fpm = ServiceId::Pool(PoolKind::Fpm, line(8, 4));
+    let cgi = ServiceId::Pool(PoolKind::Cgi, line(8, 3));
+    assert_eq!("php-fpm-8.4".parse(), Ok(fpm));
+    assert_eq!("php-cgi-8.3".parse(), Ok(cgi));
+    for id in ["php-fpm", "mailpit", "", "php-fpm-8", "php-fpm-08.4"] {
+        assert!(id.parse::<ServiceId>().is_err(), "{id}");
     }
 }
 

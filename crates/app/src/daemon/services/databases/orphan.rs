@@ -37,7 +37,7 @@ use marsa_core::databases::ServerKind;
 use marsa_core::orphan::{Liveness, PidRecord, PidfileState, classify_pidfile};
 use marsa_core::platform::process::{self, Signal};
 use marsa_core::services::{StopAction, StopMethod};
-use marsa_core::types::Event;
+use marsa_core::types::{Event, ServiceId};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -168,7 +168,11 @@ impl RunRecord {
     async fn spawned_pid(&mut self) -> u32 {
         loop {
             let status = match self.events.recv().await {
-                Ok(Event::ServiceChanged(status)) if status.id == self.kind.id() => status,
+                Ok(Event::ServiceChanged(status))
+                    if status.id == ServiceId::Database(self.kind) =>
+                {
+                    status
+                }
                 Ok(_) => continue,
                 // Too far behind: the status now has the pid while it runs.
                 Err(RecvError::Lagged(_)) => lock(&self.runtime).status.clone(),

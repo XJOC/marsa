@@ -32,7 +32,7 @@ pub const POSTGRES_PORT: u16 = 5432;
 
 /// A database server that `marsad` runs as a service (ADR 0023). Each has
 /// its own runtime, port, table in `global.toml`, and stop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ServerKind {
     Postgres,
     Mysql,

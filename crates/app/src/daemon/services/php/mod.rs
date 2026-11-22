@@ -35,6 +35,7 @@ pub mod orphan;
 
 use marsa_core::codes;
 use marsa_core::data_dir::DataDir;
+use marsa_core::types::{PoolKind, ServiceId};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -88,11 +89,15 @@ pub fn wanted_pools(sites: &[Site]) -> BTreeMap<PhpMinor, Version> {
 /// The service id of the pool of `minor`: `php-fpm-8.4`, or `php-cgi-8.4` on
 /// Windows, where php-cgi serves PHP (ADR 0016). Also its log file,
 /// `logs/<id>.log`.
-pub fn fpm_id(minor: PhpMinor) -> String {
+pub fn fpm_id(minor: PhpMinor) -> ServiceId {
     // `cfg!` outside `platform`: the id names the program that runs on this
     // system, and the daemon always runs on the system it was built for.
-    let program = if cfg!(windows) { "php-cgi" } else { "php-fpm" };
-    format!("{program}-{minor}")
+    let kind = if cfg!(windows) {
+        PoolKind::Cgi
+    } else {
+        PoolKind::Fpm
+    };
+    ServiceId::Pool(kind, minor)
 }
 
 /// The port php-fpm listens on when the socket path is too long:
@@ -431,7 +436,7 @@ impl Pools {
         let mut pools = lock(&self.0);
         let runtime = pools
             .entry(minor)
-            .or_insert_with(|| Arc::new(Mutex::new(ServiceRuntime::new(&fpm_id(minor)))));
+            .or_insert_with(|| Arc::new(Mutex::new(ServiceRuntime::new(fpm_id(minor)))));
         Arc::clone(runtime)
     }
 
@@ -447,7 +452,7 @@ impl Pools {
 
     /// The runtime of the pool whose service id is `id` (`php-fpm-8.4`), if
     /// it was started in this run.
-    pub fn find(&self, id: &str) -> Option<Arc<Mutex<ServiceRuntime>>> {
+    pub fn find(&self, id: ServiceId) -> Option<Arc<Mutex<ServiceRuntime>>> {
         let pools = lock(&self.0);
         let mut found = pools.iter().filter(|(minor, _)| fpm_id(**minor) == id);
         found.next().map(|(_, runtime)| Arc::clone(runtime))
@@ -524,7 +529,7 @@ impl PhpManager {
         };
 
         let changes = plan_pools(&self.running, &pools, |minor| {
-            daemon.proc_alive(&fpm_id(minor))
+            daemon.proc_alive(fpm_id(minor))
         });
         for minor in &changes.stop {
             stop_pool(daemon, *minor).await;
@@ -585,7 +590,7 @@ impl PhpManager {
                     handle
                 };
                 // `stop_pool` took the handle before, so none is replaced.
-                if let Some(old) = daemon.add_proc(id.clone(), handle) {
+                if let Some(old) = daemon.add_proc(*id, handle) {
                     old.cancel.cancel();
                 }
                 true
@@ -636,7 +641,7 @@ pub fn runs_pools(platform: Platform) -> bool {
 }
 
 async fn stop_pool(daemon: &Daemon, minor: PhpMinor) {
-    if let Some(handle) = daemon.take_proc(&fpm_id(minor))
+    if let Some(handle) = daemon.take_proc(fpm_id(minor))
         && let Err(err) = handle.stop().await
     {
         warn!(php = %minor, %err, "the php-fpm task failed");
@@ -790,7 +795,7 @@ mod tests {
     #[test]
     fn ids_and_fallback_ports_follow_the_php_line() {
         let program = if cfg!(windows) { "php-cgi" } else { "php-fpm" };
-        assert_eq!(fpm_id(PHP84), format!("{program}-8.4"));
+        assert_eq!(fpm_id(PHP84).to_string(), format!("{program}-8.4"));
         assert_eq!(fallback_port(PHP84), 19084);
         assert_eq!(fallback_port(PhpMinor { major: 7, minor: 4 }), 19074);
         let huge = PhpMinor {
@@ -987,7 +992,7 @@ mod tests {
         let sites = [site("shop", SiteKind::Laravel, Some("8.4.3"))];
         let pools = php.sync(&daemon, &sites, None).await;
         assert_eq!(pools, PhpPools::default());
-        assert!(!daemon.proc_alive(&fpm_id(PHP84)));
+        assert!(!daemon.proc_alive(fpm_id(PHP84)));
         assert!(!dir.path().join("php").exists(), "no files written");
     }
 
@@ -1008,7 +1013,7 @@ mod tests {
         let sites = [site("shop", SiteKind::Laravel, Some("8.4.3"))];
         let pools = php.sync(&daemon, &sites, None).await;
         assert_eq!(pools.0, BTreeMap::from([(PHP84, vec![Dial::Tcp(19084)])]));
-        assert!(daemon.proc_alive(&fpm_id(PHP84)));
+        assert!(daemon.proc_alive(fpm_id(PHP84)));
         let config = dir.path().join("php").join("8.4");
         assert!(config.join("php.ini").is_file());
         assert!(!config.join("php-fpm.conf").exists());
@@ -1073,7 +1078,10 @@ mod tests {
         let only_shop = &sites[..1];
         let pools = php.sync(&daemon, only_shop, Some(&bundle)).await;
         assert_eq!(pools.0.keys().copied().collect::<Vec<_>>(), [PHP84]);
-        assert!(!daemon.proc_alive("php-fpm-8.3"), "8.3 stopped");
+        assert!(
+            !daemon.proc_alive("php-fpm-8.3".parse::<ServiceId>().unwrap()),
+            "8.3 stopped"
+        );
         let second84 = wait_for_pid("php-fpm-8.4").await;
         assert_ne!(second84, first84, "8.4 restarted");
         assert_ne!(second84, first83);
@@ -1082,7 +1090,7 @@ mod tests {
         // No PHP site any more.
         let pools = php.sync(&daemon, &[], Some(&bundle)).await;
         assert_eq!(pools, PhpPools::default());
-        assert!(!daemon.proc_alive("php-fpm-8.4"));
+        assert!(!daemon.proc_alive("php-fpm-8.4".parse::<ServiceId>().unwrap()));
         daemon.stop_procs(std::time::Duration::from_secs(5)).await;
     }
 

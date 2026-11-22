@@ -3,6 +3,7 @@
 //! The locks here are `std::sync` locks: they are taken for short reads and
 //! writes and never held across `.await` (`clippy::await_holding_lock`).
 
+use marsa_core::types::ServiceId;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard};
@@ -243,26 +244,26 @@ impl Daemon {
 
     /// Registers a managed process under `id` and gives back the handle it
     /// replaces, if any. During shutdown the process is told to stop at once.
-    pub fn add_proc(&self, id: impl Into<String>, handle: ServiceHandle) -> Option<ServiceHandle> {
+    pub fn add_proc(&self, id: ServiceId, handle: ServiceHandle) -> Option<ServiceHandle> {
         let mut procs = self.lock_procs();
         // Checked under the lock: `stop_procs` empties the map after the token
         // is cancelled, so no process slips in between.
         if self.shutdown.is_cancelled() {
             handle.cancel.cancel();
         }
-        procs.insert(id.into(), handle)
+        procs.insert(id.to_string(), handle)
     }
 
     /// Takes the handle of `id` out, so the caller can stop it.
-    pub fn take_proc(&self, id: &str) -> Option<ServiceHandle> {
-        self.lock_procs().remove(id)
+    pub fn take_proc(&self, id: ServiceId) -> Option<ServiceHandle> {
+        self.lock_procs().remove(&id.to_string())
     }
 
     /// Whether the task of `id` still runs.
-    pub fn proc_alive(&self, id: &str) -> bool {
+    pub fn proc_alive(&self, id: ServiceId) -> bool {
         let procs = self.lock_procs();
         procs
-            .get(id)
+            .get(&id.to_string())
             .is_some_and(|handle| !handle.task.is_finished())
     }
 
@@ -320,7 +321,7 @@ mod tests {
     use tokio::task::JoinHandle;
 
     fn handle(cancel: CancellationToken, task: JoinHandle<()>) -> ServiceHandle {
-        let runtime = Arc::new(Mutex::new(ServiceRuntime::new("test")));
+        let runtime = Arc::new(Mutex::new(ServiceRuntime::new(ServiceId::Caddy)));
         ServiceHandle {
             cancel,
             task,
@@ -346,10 +347,10 @@ mod tests {
     async fn stop_procs_cancels_waits_and_aborts_after_the_limit() {
         let daemon = Daemon::new(PathBuf::new());
         let stopped = Arc::new(AtomicBool::new(false));
-        daemon.add_proc("a-polite", polite(&stopped));
+        daemon.add_proc(ServiceId::Caddy, polite(&stopped));
         let stuck = tokio::spawn(std::future::pending::<()>());
         let stuck_abort = stuck.abort_handle();
-        daemon.add_proc("b-stuck", handle(CancellationToken::new(), stuck));
+        daemon.add_proc(ServiceId::Dns, handle(CancellationToken::new(), stuck));
 
         let started = Instant::now();
         daemon.stop_procs(Duration::from_millis(200)).await;
@@ -373,7 +374,7 @@ mod tests {
         let stopped = Arc::new(AtomicBool::new(false));
         let handle = polite(&stopped);
         let cancel = handle.cancel.clone();
-        assert!(daemon.add_proc("late", handle).is_none());
+        assert!(daemon.add_proc(ServiceId::Caddy, handle).is_none());
         assert!(cancel.is_cancelled());
     }
 
@@ -400,7 +401,7 @@ mod tests {
         });
         assert!(
             daemon
-                .add_proc("late", handle(cancel.clone(), task))
+                .add_proc(ServiceId::Caddy, handle(cancel.clone(), task))
                 .is_none()
         );
         assert!(cancel.is_cancelled());
@@ -414,12 +415,12 @@ mod tests {
     #[tokio::test]
     async fn take_proc_and_proc_alive() {
         let daemon = Daemon::new(PathBuf::new());
-        assert!(!daemon.proc_alive("a"));
+        assert!(!daemon.proc_alive(ServiceId::Caddy));
         let stopped = Arc::new(AtomicBool::new(false));
-        daemon.add_proc("a", polite(&stopped));
-        assert!(daemon.proc_alive("a"));
-        let taken = daemon.take_proc("a").unwrap();
-        assert!(!daemon.proc_alive("a"));
+        daemon.add_proc(ServiceId::Caddy, polite(&stopped));
+        assert!(daemon.proc_alive(ServiceId::Caddy));
+        let taken = daemon.take_proc(ServiceId::Caddy).unwrap();
+        assert!(!daemon.proc_alive(ServiceId::Caddy));
         taken.stop().await.unwrap();
         assert!(stopped.load(Ordering::SeqCst));
     }

@@ -177,6 +177,7 @@ impl Stream for EventStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marsa_core::types::ServiceId;
     use std::path::PathBuf;
 
     use axum::body::{Body, to_bytes};
@@ -190,7 +191,7 @@ mod tests {
 
     fn log(seq: u64) -> Event {
         Event::Log(LogLine {
-            service: "caddy".into(),
+            service: ServiceId::Caddy,
             seq,
             at_ms: 0,
             stream: LogStream::Stdout,
