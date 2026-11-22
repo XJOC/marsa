@@ -1,6 +1,10 @@
 //! The site list, and the error of a change to it.
 
+pub mod api;
 mod build;
+pub mod hosts_sync;
+pub mod sync;
+pub mod watch;
 
 use std::error::Error;
 use std::fmt;

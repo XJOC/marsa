@@ -70,11 +70,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::api::HttpError;
 use super::autostart::Autostart;
-use super::hosts_sync;
 use super::http;
 use super::setup_api::{
     CHECK_LIMIT, Flow, PIPE_GRACE, PROMPT_LIMIT, Running, Setup, linux_dns, nss, user_trust,
 };
+use super::sites::hosts_sync;
 use super::state::Daemon;
 
 /// The op name of the login file step in the report.

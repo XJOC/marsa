@@ -36,10 +36,10 @@ use marsa_core::resolver;
 use marsa_core::sites::{self, SiteError};
 use marsa_core::types::{LinkRequest, ParkRequest, SiteList, SitePatch};
 
-use super::api::HttpError;
-use super::http::Rejected as _;
-use super::sites::SitesError;
-use super::state::Daemon;
+use super::SitesError;
+use crate::daemon::api::HttpError;
+use crate::daemon::http::Rejected as _;
+use crate::daemon::state::Daemon;
 
 type JsonBody<T> = Result<Json<T>, JsonRejection>;
 type Answer = Result<Json<SiteList>, HttpError>;
@@ -239,7 +239,7 @@ fn parked_index(parked: &[PathBuf], path: &Path) -> Option<usize> {
     })
 }
 
-/// The folder of the parked site `name`, found as [`super::sites::build`] finds it: the
+/// The folder of the parked site `name`, found as [`super::build`] finds it: the
 /// first parked folder that has it wins.
 fn parked_root(sites_toml: &SitesConfig, name: &str) -> Option<PathBuf> {
     parked_site(sites_toml, name).map(|(_, root)| root)

@@ -41,7 +41,7 @@ use marsa_core::types::{XdebugRequest, XdebugState};
 use super::api::HttpError;
 use super::http::{self, Rejected as _, global_error};
 use super::services::php;
-use super::sites_sync::PassNotRun;
+use super::sites::sync::PassNotRun;
 use super::state::Daemon;
 
 /// The routes, for `api::router` to merge before its fallbacks.
@@ -159,7 +159,7 @@ mod tests {
     use serde_json::{Value, json};
     use tempfile::TempDir;
 
-    use crate::daemon::sites_sync::{self, SitesSync};
+    use crate::daemon::sites::sync::{self as sites_sync, SitesSync};
     use crate::daemon::test_router::TestRouter;
 
     /// The real router and auth layer, and the real sites sync task, on a

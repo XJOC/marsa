@@ -33,9 +33,8 @@ use super::services::caddy;
 use super::services::databases;
 use super::services::databases::client_shims::ClientShims;
 use super::services::dns;
-use super::sites_sync;
+use super::sites;
 use super::state::Daemon;
-use super::watch;
 
 /// How long shutdown waits for the managed processes to stop, at least. A
 /// process whose stop method takes longer gets that time
@@ -152,7 +151,7 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
         tracing::warn!(code = err.code(), error = %err, "cannot build the site list");
     }
     // From here on, PHP pools and Caddy's config follow the sites.
-    let sync = sites_sync::start(&daemon);
+    let sync = sites::sync::start(&daemon);
     // An installed Caddy starts in the background. After the
     // sync task subscribed, so Caddy's `Running` asks it for a pass. A
     // failure is only a warning and Caddy's status: the daemon runs on.
@@ -165,7 +164,7 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
         .collect();
     // After the first build, so it starts from its parked folders. It stops
     // when `daemon.shutdown` is cancelled.
-    let watcher = watch::start(&daemon);
+    let watcher = sites::watch::start(&daemon);
     // After the API listener. It stops when `daemon.shutdown` is cancelled. A
     // port in use is a failed `dns` service: the daemon runs on without it.
     daemon
