@@ -350,29 +350,23 @@ mod tests {
     use std::fs;
     use std::time::Duration;
 
-    use axum::body::{Body, to_bytes};
-    use axum::extract::Request;
+    use axum::body::Body;
+
     use axum::response::Response;
     use marsa_core::config::{self, ConfigPaths, GlobalConfig};
-    use marsa_core::platform::daemon_file::{Token, daemon_authority};
+
     use marsa_core::runtimes::{Runtime, RuntimesDir};
     use marsa_core::types::{ErrorBody, Event, Site, SiteKind, SkippedFolder, Source};
     use serde_json::{Value, json};
     use tempfile::TempDir;
     use tokio_stream::StreamExt as _;
-    use tower::ServiceExt as _;
 
-    use crate::daemon::api::router;
-    use crate::daemon::auth::AuthConfig;
-
-    /// The daemon port in the `Host` header. No socket is bound for it.
-    const PORT: u16 = 51236;
+    use crate::daemon::test_router::TestRouter;
 
     /// The real router and auth layer on a temp data folder.
     struct App {
         daemon: Arc<Daemon>,
-        router: Router,
-        bearer: String,
+        router: TestRouter,
         dir: TempDir,
     }
 
@@ -387,14 +381,10 @@ mod tests {
         }
 
         fn on(dir: TempDir) -> Self {
-            let token = Token::generate().unwrap();
-            let bearer = token.bearer_header();
             let daemon = Arc::new(Daemon::new(dir.path().to_path_buf()));
-            let router = router(daemon.clone(), AuthConfig::new(Arc::new(token), PORT));
             Self {
+                router: TestRouter::new(daemon.clone()),
                 daemon,
-                router,
-                bearer,
                 dir,
             }
         }
@@ -429,20 +419,7 @@ mod tests {
         }
 
         async fn send(&self, method: &str, uri: &str, body: Option<Value>) -> Response {
-            let mut request = Request::builder()
-                .method(method)
-                .uri(uri)
-                .header("host", daemon_authority(PORT))
-                .header("authorization", &self.bearer);
-            if body.is_some() {
-                request = request.header("content-type", "application/json");
-            }
-            let body = body.map_or_else(Body::empty, |json| Body::from(json.to_string()));
-            self.router
-                .clone()
-                .oneshot(request.body(body).unwrap())
-                .await
-                .unwrap()
+            self.router.send(method, uri, body).await
         }
 
         async fn answer(
@@ -451,10 +428,7 @@ mod tests {
             uri: &str,
             body: Option<Value>,
         ) -> (StatusCode, Value) {
-            let response = self.send(method, uri, body).await;
-            let status = response.status();
-            let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
-            (status, serde_json::from_slice(&bytes).unwrap())
+            self.router.answer(method, uri, body).await
         }
 
         async fn list(&self, method: &str, uri: &str, body: Option<Value>) -> SiteList {
@@ -956,15 +930,13 @@ mod tests {
             assert_eq!(got, (status, want.to_owned()), "{body}");
         }
         // A body that is not JSON.
-        let request = Request::builder()
-            .method("DELETE")
-            .uri("/v1/sites/park")
-            .header("host", daemon_authority(PORT))
-            .header("authorization", &app.bearer)
+        let request = app
+            .router
+            .authorized("DELETE", "/v1/sites/park")
             .header("content-type", "text/plain")
             .body(Body::from("x"))
             .unwrap();
-        let response = app.router.clone().oneshot(request).await.unwrap();
+        let response = app.router.call(request).await;
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 
         assert_eq!(fs::read_to_string(app.sites_toml()).unwrap(), before);

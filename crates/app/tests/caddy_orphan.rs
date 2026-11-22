@@ -46,6 +46,9 @@ use marsa_core::types::{ServiceAction, ServiceState, ServiceStatus};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+mod common;
+use common::{failed, free_port};
+
 const FAKE: &str = "MARSA_ORPHAN_FAKE";
 /// Where the fake Caddy finds `caddy.json`.
 const CONFIG: &str = "MARSA_ORPHAN_CONFIG";
@@ -176,12 +179,6 @@ impl Ports {
     }
 }
 
-/// A port that was free a moment ago, on `127.0.0.1`.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a free port");
-    listener.local_addr().expect("an address").port()
-}
-
 /// Records each signal. Only `sending` passes it on to the OS.
 #[derive(Debug)]
 struct Recorder {
@@ -301,10 +298,6 @@ fn notes(daemon: &Daemon) -> Vec<String> {
 
 fn port_in_use() -> ServiceState {
     failed("port_in_use")
-}
-
-fn failed(code: &str) -> ServiceState {
-    ServiceState::Failed { code: code.into() }
 }
 
 /// Kills an orphan this test made, once it is checked to still be that one.

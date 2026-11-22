@@ -12,7 +12,7 @@
 
 use marsa_core::data_dir::DataDir;
 use std::collections::BTreeMap;
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,9 @@ use serde::de::DeserializeOwned;
 use tempfile::TempDir;
 use tokio_stream::StreamExt as _;
 use tower::ServiceExt as _;
+
+mod common;
+use common::{failed, free_port};
 
 const FAKE: &str = "MARSA_FAKE_SERVICE";
 /// Where the fake finds `caddy.json`.
@@ -264,12 +267,6 @@ impl App {
     }
 }
 
-/// A port that was free a moment ago, on `127.0.0.1`.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a free port");
-    listener.local_addr().expect("an address").port()
-}
-
 /// Reads the `data:` lines of an SSE body.
 struct Follow {
     body: BodyDataStream,
@@ -323,10 +320,6 @@ impl Follow {
             self.pending.drain(..end + 2);
         }
     }
-}
-
-fn failed(code: &str) -> ServiceState {
-    ServiceState::Failed { code: code.into() }
 }
 
 /// Each `seq` once, in order: no line came twice through the follow stream.

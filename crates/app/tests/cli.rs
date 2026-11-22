@@ -21,6 +21,9 @@ use marsa_core::caddy::CaddyPaths;
 use marsa_core::platform::daemon_file::{DaemonFile, read_daemon_file};
 use tempfile::TempDir;
 
+mod common;
+use common::text;
+
 fn marsa(data_dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_marsa"))
         .arg("--data-dir")
@@ -29,10 +32,6 @@ fn marsa(data_dir: &Path, args: &[&str]) -> Output {
         .env_remove("MARSA_LOG")
         .output()
         .expect("run marsa")
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).replace("\r\n", "\n")
 }
 
 #[test]

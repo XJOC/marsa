@@ -64,28 +64,20 @@ mod tests {
     use axum::http::StatusCode;
     use marsa_core::platform::autostart::{self, AutostartKind};
 
-    use axum::body::{Body, to_bytes};
-    use axum::extract::Request;
-    use marsa_core::platform::daemon_file::{Token, daemon_authority};
     use serde_json::{Value, json};
     use tempfile::TempDir;
-    use tower::ServiceExt as _;
 
-    use crate::daemon::api::router;
-    use crate::daemon::auth::AuthConfig;
+    use crate::daemon::test_router::TestRouter;
 
     use AutostartKind::{LaunchAgent, XdgAutostart};
 
-    /// The daemon port in the `Host` header. No socket is bound for it.
-    const PORT: u16 = 51237;
     const KINDS: [AutostartKind; 2] = [LaunchAgent, XdgAutostart];
 
     /// The real router and auth layer, with the login folder and
     /// `marsa-tray` in a temp folder: `<tmp>/bin/marsa-tray` (made only if
     /// `tray` is true) and `<tmp>/login` (not made: the route makes it).
     struct App {
-        router: Router,
-        bearer: String,
+        router: TestRouter,
         dir: TempDir,
     }
 
@@ -106,14 +98,10 @@ mod tests {
         }
 
         fn with(dir: TempDir, autostart: Autostart) -> Self {
-            let token = Token::generate().unwrap();
-            let bearer = token.bearer_header();
             let mut daemon = Daemon::new(dir.path().join("data"));
             daemon.autostart = autostart;
-            let router = router(Arc::new(daemon), AuthConfig::new(Arc::new(token), PORT));
             Self {
-                router,
-                bearer,
+                router: TestRouter::new(Arc::new(daemon)),
                 dir,
             }
         }
@@ -127,24 +115,7 @@ mod tests {
         }
 
         async fn send(&self, method: &str, body: Option<Value>) -> (StatusCode, Value) {
-            let mut request = Request::builder()
-                .method(method)
-                .uri("/v1/autostart")
-                .header("host", daemon_authority(PORT))
-                .header("authorization", &self.bearer);
-            if body.is_some() {
-                request = request.header("content-type", "application/json");
-            }
-            let body = body.map_or_else(Body::empty, |json| Body::from(json.to_string()));
-            let response = self
-                .router
-                .clone()
-                .oneshot(request.body(body).unwrap())
-                .await
-                .unwrap();
-            let status = response.status();
-            let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
-            (status, serde_json::from_slice(&bytes).unwrap())
+            self.router.answer(method, "/v1/autostart", body).await
         }
 
         async fn get(&self) -> (StatusCode, Value) {

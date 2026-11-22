@@ -513,10 +513,7 @@ into = "bin"
             let mut sources = Vec::new();
             for (name, bytes) in files {
                 let url = url(self.runtime, version, name);
-                let sha: String = Sha256::digest(bytes)
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect();
+                let sha = crate::hex::encode(&Sha256::digest(bytes));
                 sources.push(format!(
                     r#"{{"name": "{name}", "urls": ["{url}"], "sha256": "{sha}", "size": {}}}"#,
                     bytes.len()

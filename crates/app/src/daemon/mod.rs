@@ -24,6 +24,8 @@ pub mod sites_api;
 pub mod sites_sync;
 pub mod state;
 pub mod supervisor;
+#[cfg(test)]
+pub(crate) mod test_router;
 pub mod uninstall_api;
 pub mod watch;
 pub mod xdebug_api;
