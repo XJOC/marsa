@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use semver::Version;
 
 use super::InstallError;
-use super::execute::{lock, random_hex, rename};
+use super::fs::{lock, random_hex, rename};
 use crate::runtimes::{Runtime, RuntimesDir};
 
 /// A version folder moved aside to `runtimes/<runtime>/del-<8 hex>`. It holds
