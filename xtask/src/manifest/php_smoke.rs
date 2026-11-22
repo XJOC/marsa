@@ -19,17 +19,17 @@ use super::build::Target;
 
 /// Good PHP 8.4 builds export 1,034 to 1,036 `zend_*` symbols, PHP 8.3
 /// builds about 980; static musl and broken builds none (S-03, S-10, M5-08).
-pub const MIN_ZEND_SYMBOLS: usize = 900;
+pub(super) const MIN_ZEND_SYMBOLS: usize = 900;
 
 /// Linux builds target glibc 2.17 (ADR 0012).
-pub const MAX_GLIBC: (u32, u32) = (2, 17);
+pub(super) const MAX_GLIBC: (u32, u32) = (2, 17);
 
 /// The shared extension list, built into xtask.
 const EXTENSIONS_FILE: &str = include_str!("../../../recipes/php-extensions.txt");
 
 /// How an extension is built (the first column of `php-extensions.txt`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
+pub(super) enum Kind {
     /// Always built in; spc has no name for it.
     Builtin,
     /// Built into `php` and `php-fpm`.
@@ -40,7 +40,7 @@ pub enum Kind {
 
 /// One line of `php-extensions.txt`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Extension {
+pub(super) struct Extension {
     pub kind: Kind,
     /// The spc name; `None` for [`Kind::Builtin`].
     pub spc: Option<String>,
@@ -52,7 +52,7 @@ pub struct Extension {
 
 impl Extension {
     /// Whether PHP `version` has this module.
-    pub fn applies_to(&self, version: &Version) -> bool {
+    pub(super) fn applies_to(&self, version: &Version) -> bool {
         self.since
             .is_none_or(|since| (version.major, version.minor) >= since)
     }
@@ -60,7 +60,7 @@ impl Extension {
 
 impl Extension {
     /// Where the archive keeps a shared extension: `ext/<spc name>.so`.
-    pub fn archive_path(&self, root: &Path) -> Option<PathBuf> {
+    pub(super) fn archive_path(&self, root: &Path) -> Option<PathBuf> {
         let spc = self.spc.as_deref().filter(|_| self.kind == Kind::Shared)?;
         Some(root.join("ext").join(format!("{spc}.so")))
     }
@@ -68,7 +68,7 @@ impl Extension {
 
 /// Parses `php-extensions.txt`: `<kind> <spc name> <module name>` per line,
 /// `#` comments, blank lines. Refuses unknown kinds and repeated names.
-pub fn parse_extensions(text: &str) -> Result<Vec<Extension>> {
+pub(super) fn parse_extensions(text: &str) -> Result<Vec<Extension>> {
     let mut list = Vec::new();
     let (mut spc_seen, mut module_seen) = (BTreeSet::new(), BTreeSet::new());
     for (number, line) in text.lines().enumerate() {
@@ -139,20 +139,20 @@ pub fn parse_extensions(text: &str) -> Result<Vec<Extension>> {
 }
 
 /// The list in `recipes/php-extensions.txt`.
-pub fn extensions() -> Result<Vec<Extension>> {
+pub(super) fn extensions() -> Result<Vec<Extension>> {
     parse_extensions(EXTENSIONS_FILE).context("recipes/php-extensions.txt")
 }
 
 /// The object file format of a PHP build, which decides how `nm` is run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Binary {
+pub(super) enum Binary {
     MachO,
     Elf,
 }
 
 impl Binary {
     /// macOS builds are Mach-O, Linux builds ELF. `None` for Windows.
-    pub fn of(platform: Platform) -> Option<Binary> {
+    pub(super) fn of(platform: Platform) -> Option<Binary> {
         match platform {
             Platform::DarwinArm64 | Platform::DarwinX64 => Some(Binary::MachO),
             Platform::LinuxX64 | Platform::LinuxArm64 => Some(Binary::Elf),
@@ -171,7 +171,7 @@ impl Binary {
 }
 
 /// Exported `zend_*` symbols in `nm` output. Mach-O names start with `_`.
-pub fn count_zend_symbols(nm_output: &str, binary: Binary) -> usize {
+pub(super) fn count_zend_symbols(nm_output: &str, binary: Binary) -> usize {
     let prefix = match binary {
         Binary::MachO => "_zend_",
         Binary::Elf => "zend_",
@@ -183,7 +183,7 @@ pub fn count_zend_symbols(nm_output: &str, binary: Binary) -> usize {
         .count()
 }
 
-pub fn check_zend_symbols(count: usize) -> Result<()> {
+pub(super) fn check_zend_symbols(count: usize) -> Result<()> {
     ensure!(
         count >= MIN_ZEND_SYMBOLS,
         "exports too few zend symbols: {count}, at least {MIN_ZEND_SYMBOLS} needed to load xdebug.so"
@@ -193,7 +193,7 @@ pub fn check_zend_symbols(count: usize) -> Result<()> {
 
 /// The newest `GLIBC_x.y` version named in `nm -D --undefined-only` output
 /// (`memcpy@GLIBC_2.14`). `None` if no line names one.
-pub fn newest_glibc(nm_output: &str) -> Option<(u32, u32)> {
+pub(super) fn newest_glibc(nm_output: &str) -> Option<(u32, u32)> {
     nm_output
         .split("GLIBC_")
         .skip(1)
@@ -212,7 +212,7 @@ pub fn newest_glibc(nm_output: &str) -> Option<(u32, u32)> {
 /// the pinned line: `Built by static-php-cli 2.8.6` matches `2.8`. spc adds
 /// that line to PHP 8.4 and later only, so PHP 8.3 may lack it; the archive's
 /// `BUILD-INFO.txt` is checked for every version ([`check_build_info`]).
-pub fn check_version_output(output: &str, version: &Version, spc_line: &str) -> Result<()> {
+pub(super) fn check_version_output(output: &str, version: &Version, spc_line: &str) -> Result<()> {
     ensure!(
         output.contains(&format!("PHP {version} ")),
         "php -v does not say PHP {version}"
@@ -231,7 +231,7 @@ pub fn check_version_output(output: &str, version: &Version, spc_line: &str) -> 
 
 /// `BUILD-INFO.txt` (written by tools/php-build/package.sh) must have a
 /// `static-php-cli <version>` line on the pinned line.
-pub fn check_build_info(text: &str, spc_line: &str) -> Result<()> {
+pub(super) fn check_build_info(text: &str, spc_line: &str) -> Result<()> {
     let built = text
         .lines()
         .find_map(|line| line.trim_end_matches('\r').strip_prefix("static-php-cli "))
@@ -248,7 +248,7 @@ fn on_spc_line(built: &str, spc_line: &str) -> Result<()> {
 }
 
 /// The names listed under `[<section>]` in `php -m` output, lowercase.
-pub fn modules(output: &str, section: &str) -> Vec<String> {
+pub(super) fn modules(output: &str, section: &str) -> Vec<String> {
     let header = format!("[{section}]");
     output
         .lines()
@@ -264,7 +264,7 @@ pub fn modules(output: &str, section: &str) -> Vec<String> {
 /// `php -n -m` against the list: the builtin and static modules that are
 /// missing, and the modules that are not in the list. `cgi-fcgi`, which
 /// `php-fpm -m` adds, is not counted.
-pub fn compare_modules(
+pub(super) fn compare_modules(
     list: &[Extension],
     version: &Version,
     output: &str,
@@ -294,7 +294,7 @@ pub fn compare_modules(
 /// no glibc newer than [`MAX_GLIBC`]. Only when this machine can run the
 /// build: `php -v`, `php -m` against the list, and loading every shared
 /// extension, for `php` and for `php-fpm`.
-pub fn check_archive(
+pub(super) fn check_archive(
     archive: &Path,
     target: &Target<'_>,
     spc_line: &str,

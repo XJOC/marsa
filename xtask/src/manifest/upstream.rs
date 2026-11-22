@@ -8,37 +8,37 @@ use anyhow::{Context, Result, bail, ensure};
 /// Where our own PHP builds are published: one GitHub Release per build,
 /// `php-<version>-r<revision>`, made by `.github/workflows/php-build.yml`
 /// with a `sha256sums.txt` beside the archives (ADR 0012).
-pub const PHP_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/php-";
+pub(super) const PHP_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/php-";
 
 /// Caddy's official releases (ADR 0008): tag `v<version>`, with
 /// `caddy_<version>_checksums.txt` (sha512) beside the archives.
-pub const CADDY_RELEASES: &str = "https://github.com/caddyserver/caddy/releases/download/v";
+pub(super) const CADDY_RELEASES: &str = "https://github.com/caddyserver/caddy/releases/download/v";
 
 /// The PostgreSQL builds of theseus-rs (ADR 0023): tag `<version>`, with
 /// `<file>.sha256` beside every archive.
-pub const THESEUS_RELEASES: &str =
+pub(super) const THESEUS_RELEASES: &str =
     "https://github.com/theseus-rs/postgresql-binaries/releases/download/";
 
 /// Our Valkey builds (ADR 0023, task M6-06): one GitHub Release per build,
 /// `valkey-<version>-r<revision>`, with a `sha256sums.txt`, as for PHP.
-pub const VALKEY_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/valkey-";
+pub(super) const VALKEY_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/valkey-";
 
 /// Our `libaio.so.1` builds for MySQL on Linux (ADR 0023, task M6-05):
 /// `libaio-<version>-r<revision>`, with a `sha256sums.txt`.
-pub const LIBAIO_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/libaio-";
+pub(super) const LIBAIO_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/libaio-";
 
 /// The folders of Oracle's MySQL 8.4 archives (ADR 0023): the current
 /// releases, and the older ones. No tag: the file name has the version.
 /// Beside each file are `<file>.md5` and `<file>.asc`, Oracle's GPG
 /// signature.
-pub const MYSQL_FOLDERS: [&str; 2] = [
+pub(super) const MYSQL_FOLDERS: [&str; 2] = [
     "https://cdn.mysql.com/Downloads/MySQL-8.4",
     "https://cdn.mysql.com/archives/mysql-8.4",
 ];
 
 /// The hash in a sum file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Algorithm {
+pub(super) enum Algorithm {
     Sha256,
     Sha512,
     /// Oracle's `.md5` for MySQL. Never enough alone (ADR 0023, section 3):
@@ -48,7 +48,7 @@ pub enum Algorithm {
 
 impl Algorithm {
     /// `sha256`, `sha512`, or `md5`, for messages.
-    pub fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Algorithm::Sha256 => "sha256",
             Algorithm::Sha512 => "sha512",
@@ -68,7 +68,7 @@ impl Algorithm {
 
 /// How a sum file lists its hashes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Layout {
+pub(super) enum Layout {
     /// Lines for many files; [`find_sum`] picks the line of ours.
     List,
     /// One line, for our file only; [`single_sum`] reads it.
@@ -77,7 +77,7 @@ pub enum Layout {
 
 /// Who publishes a sum file, so `build` can ask for one source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Source {
+pub(super) enum Source {
     /// Our PHP builds, [`PHP_RELEASES`].
     OurPhp,
     Node,
@@ -96,7 +96,7 @@ pub enum Source {
 
 /// Where the upstream hash of one file is published.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SumFile {
+pub(super) struct SumFile {
     /// The URL of the sum file.
     pub url: String,
     /// The name the file has in it.
@@ -108,7 +108,7 @@ pub struct SumFile {
 
 impl SumFile {
     /// The hash of [`SumFile::name`] in `text`, the body of [`SumFile::url`].
-    pub fn find(&self, text: &str) -> Result<Vec<u8>> {
+    pub(super) fn find(&self, text: &str) -> Result<Vec<u8>> {
         match self.layout {
             Layout::List => find_sum(text, &self.name, self.algorithm),
             Layout::Single => single_sum(text, &self.name, self.algorithm),
@@ -123,7 +123,7 @@ impl SumFile {
 /// none), then the file name, where the tag and the name are each one
 /// [`is_segment`]. So `\\`, `%`, `?`, `#`, and `..` cannot point the URL
 /// somewhere else.
-pub fn sum_file_for(url: &str) -> Option<SumFile> {
+pub(super) fn sum_file_for(url: &str) -> Option<SumFile> {
     use Algorithm::{Md5, Sha256, Sha512};
     use Layout::{List, Single};
 
@@ -187,7 +187,7 @@ pub fn sum_file_for(url: &str) -> Option<SumFile> {
 
 /// One plain part of a URL path: only `[A-Za-z0-9._+-]`, and not empty,
 /// `.`, or `..`.
-pub fn is_segment(part: &str) -> bool {
+pub(super) fn is_segment(part: &str) -> bool {
     !matches!(part, "" | "." | "..")
         && part
             .bytes()
@@ -207,7 +207,7 @@ fn excerpt(text: &str) -> String {
 /// lowercase hex of the length of `algorithm`, and `name` exactly. The line
 /// ends with `\n`, `\r\n`, or nothing. Anything else is refused: an empty
 /// file, a second line (even an empty one), a lone `\r`, or another name.
-pub fn single_sum(text: &str, name: &str, algorithm: Algorithm) -> Result<Vec<u8>> {
+pub(super) fn single_sum(text: &str, name: &str, algorithm: Algorithm) -> Result<Vec<u8>> {
     let line = match text.strip_suffix('\n') {
         Some(line) => line.strip_suffix('\r').unwrap_or(line),
         None => text,
@@ -239,7 +239,7 @@ pub fn single_sum(text: &str, name: &str, algorithm: Algorithm) -> Result<Vec<u8
 /// spaces, and `*` before the name for binary mode (`sha256sum.txt` on
 /// windows.php.net). `\r\n` endings are fine. The hex must have the length
 /// of `algorithm`.
-pub fn find_sum(text: &str, name: &str, algorithm: Algorithm) -> Result<Vec<u8>> {
+pub(super) fn find_sum(text: &str, name: &str, algorithm: Algorithm) -> Result<Vec<u8>> {
     for line in text.lines().map(|l| l.trim_end_matches('\r')) {
         let Some((hex, file)) = line.split_once(' ') else {
             continue;
@@ -255,12 +255,12 @@ pub fn find_sum(text: &str, name: &str, algorithm: Algorithm) -> Result<Vec<u8>>
 }
 
 /// 64 lowercase hex characters to bytes.
-pub fn parse_hex(text: &str) -> Option<[u8; 32]> {
+pub(super) fn parse_hex(text: &str) -> Option<[u8; 32]> {
     parse_hex_bytes(text, 32)?.try_into().ok()
 }
 
 /// `2 * len` lowercase hex characters to `len` bytes.
-pub fn parse_hex_bytes(text: &str, len: usize) -> Option<Vec<u8>> {
+pub(super) fn parse_hex_bytes(text: &str, len: usize) -> Option<Vec<u8>> {
     if text.len() != len * 2 || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return None;
     }
@@ -270,7 +270,7 @@ pub fn parse_hex_bytes(text: &str, len: usize) -> Option<Vec<u8>> {
 }
 
 /// Bytes to lowercase hex, two characters per byte.
-pub fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
