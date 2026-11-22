@@ -198,7 +198,9 @@ impl Daemon {
 
     /// The manager of the database server `kind`, before the daemon is
     /// shared: the tests set its probes and its stops.
-    #[cfg(test)]
+    // `#[cfg]` outside `platform`: the tests that use it run fake servers,
+    // which are shell scripts, so they run on Unix only.
+    #[cfg(all(test, unix))]
     pub(crate) fn server_mut(&mut self, kind: ServerKind) -> &mut ServerManager {
         match kind {
             ServerKind::Postgres => &mut self.postgres,
@@ -209,7 +211,8 @@ impl Daemon {
 
     /// What `read` gives of the handle of `id`, for the tests that read its
     /// pid or its stop limit.
-    #[cfg(test)]
+    // `#[cfg]` outside `platform`: as `server_mut`, for Unix-only tests.
+    #[cfg(all(test, unix))]
     pub(crate) fn with_proc<R>(
         &self,
         id: ServiceId,
