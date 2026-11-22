@@ -87,6 +87,17 @@ pub fn hide_console_window(cmd: &mut Command) {
     let _ = cmd;
 }
 
+/// The one variable of `marsad`'s environment that `cmd` keeps after
+/// `env_clear`: `SystemRoot`, which a Windows program needs to start, or
+/// `PATH` on the other systems (for the tests' fake programs). Nothing else,
+/// so `MYSQL_PWD`, `PGPASSWORD`, and the like never reach it.
+pub fn keep_start_variable(cmd: &mut Command) {
+    let kept = if cfg!(windows) { "SystemRoot" } else { "PATH" };
+    if let Some(value) = std::env::var_os(kept) {
+        cmd.env(kept, value);
+    }
+}
+
 // Helpers of the tests in the submodules.
 
 #[cfg(test)]

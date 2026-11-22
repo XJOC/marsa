@@ -452,7 +452,10 @@ mod tests {
         let token = Token::generate().unwrap();
         let bearer = token.bearer_header();
         let daemon = Arc::new(Daemon::new(std::path::PathBuf::new()));
-        let runtime = daemon.pools().runtime(PhpMinor { major: 8, minor: 4 });
+        let php84 = PhpMinor { major: 8, minor: 4 };
+        let runtime = daemon
+            .pools()
+            .runtime(crate::daemon::services::php::fpm_id(php84), php84);
         // `php-fpm-8.4`, or `php-cgi-8.4` on Windows.
         let pool = crate::daemon::services::php::fpm_id(PhpMinor { major: 8, minor: 4 });
         let other = crate::daemon::services::php::fpm_id(PhpMinor { major: 8, minor: 3 });
