@@ -47,6 +47,9 @@ use tempfile::TempDir;
 use tokio::sync::{Semaphore, broadcast};
 use tower::ServiceExt as _;
 
+mod common;
+use common::text;
+
 /// Generous: a binary can start slowly on a busy CI machine.
 const WAIT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(20);
@@ -317,10 +320,6 @@ impl Drop for Served {
     fn drop(&mut self) {
         self.server.abort();
     }
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).replace("\r\n", "\n")
 }
 
 #[track_caller]

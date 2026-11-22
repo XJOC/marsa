@@ -151,29 +151,23 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use axum::body::{Body, to_bytes};
-    use axum::extract::Request;
+    use axum::body::Body;
+
     use marsa_core::php::PhpFiles;
-    use marsa_core::platform::daemon_file::{Token, daemon_authority};
+
     use semver::Version;
     use serde_json::{Value, json};
     use tempfile::TempDir;
-    use tower::ServiceExt as _;
 
-    use crate::daemon::api::router;
-    use crate::daemon::auth::AuthConfig;
     use crate::daemon::sites_sync::{self, SitesSync};
-
-    /// The daemon port in the `Host` header. No socket is bound for it.
-    const PORT: u16 = 51238;
+    use crate::daemon::test_router::TestRouter;
 
     /// The real router and auth layer, and the real sites sync task, on a
     /// temp data folder with three PHP versions and no site: 8.3.1 without
     /// Xdebug, and 8.4.1 and 8.4.3 with `ext/xdebug.so`. Caddy does not run,
     /// so a pass only writes files.
     struct App {
-        router: Router,
-        bearer: String,
+        router: TestRouter,
         daemon: Arc<Daemon>,
         sync: Option<SitesSync>,
         dir: TempDir,
@@ -189,14 +183,10 @@ mod tests {
                     fs::write(files.xdebug_so(), "").unwrap();
                 }
             }
-            let token = Token::generate().unwrap();
-            let bearer = token.bearer_header();
             let daemon = Arc::new(Daemon::new(dir.path().to_path_buf()));
             let sync = Some(sites_sync::start(&daemon));
-            let router = router(Arc::clone(&daemon), AuthConfig::new(Arc::new(token), PORT));
             Self {
-                router,
-                bearer,
+                router: TestRouter::new(Arc::clone(&daemon)),
                 daemon,
                 sync,
                 dir,
@@ -216,18 +206,7 @@ mod tests {
 
         /// The status and the JSON body of one request with the token.
         async fn send(&self, method: &str, body: Option<Value>) -> (StatusCode, Value) {
-            let request = Request::builder()
-                .method(method)
-                .uri("/v1/php/xdebug")
-                .header("host", daemon_authority(PORT))
-                .header("authorization", &self.bearer)
-                .header("content-type", "application/json");
-            let body = body.map_or(Body::empty(), |json| Body::from(json.to_string()));
-            let response = self.router.clone().oneshot(request.body(body).unwrap());
-            let response = response.await.unwrap();
-            let status = response.status();
-            let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
-            (status, serde_json::from_slice(&bytes).unwrap())
+            self.router.answer(method, "/v1/php/xdebug", body).await
         }
 
         fn global_toml(&self) -> PathBuf {
@@ -339,14 +318,13 @@ mod tests {
     #[tokio::test]
     async fn a_request_without_the_token_is_refused() {
         let mut app = App::new();
-        let request = Request::builder()
-            .method("PUT")
-            .uri("/v1/php/xdebug")
-            .header("host", daemon_authority(PORT))
+        let request = app
+            .router
+            .builder("PUT", "/v1/php/xdebug")
             .header("content-type", "application/json")
             .body(Body::from(json!({ "enabled": true }).to_string()))
             .unwrap();
-        let response = app.router.clone().oneshot(request).await.unwrap();
+        let response = app.router.call(request).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(!app.global_toml().exists());
         app.stop().await;

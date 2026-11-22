@@ -21,6 +21,10 @@ use marsa_core::types::{Event, LogLine, LogStream, ServiceState};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
 
+mod common;
+#[cfg(unix)]
+use common::free_port;
+
 const FAKE: &str = "MARSA_FAKE_SERVICE";
 /// The folder the `watch` fake watches for the file `stop`.
 const FAKE_DIR: &str = "MARSA_FAKE_DIR";
@@ -447,13 +451,6 @@ async fn a_daemon_shutdown_waits_for_the_whole_ladder() {
     // The supervisor ended the stop itself: an aborted task says nothing.
     let changes = states(&events);
     assert_eq!(changes.last(), Some(&ServiceState::Stopped), "{changes:?}");
-}
-
-/// A port nothing listens on now.
-#[cfg(unix)]
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a port");
-    listener.local_addr().expect("its address").port()
 }
 
 /// Valkey's ladder (ADR 0023), with `wait` after the request: `SHUTDOWN

@@ -334,27 +334,21 @@ mod tests {
     use super::*;
     use std::fs;
 
-    use axum::body::Body;
-    use axum::extract::Request;
     use axum::http::StatusCode;
     use marsa_core::config::{self, ConfigPaths, SitesConfig};
-    use marsa_core::platform::daemon_file::{Token, daemon_authority};
+
     use marsa_core::types::{Event, SiteList};
     use notify::event::{AccessKind, CreateKind, DataChange, RemoveKind, RenameMode};
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::sync::broadcast;
-    use tower::ServiceExt as _;
 
-    use crate::daemon::api::router;
-    use crate::daemon::auth::AuthConfig;
+    use crate::daemon::test_router::TestRouter;
 
     /// Generous: slow CI machines, and macOS FSEvents sends events in
     /// batches. Each wait ends as soon as its condition holds.
     const WAIT: Duration = Duration::from_secs(20);
     const POLL: Duration = Duration::from_millis(20);
-    /// The daemon port in the `Host` header. No socket is bound for it.
-    const PORT: u16 = 51237;
 
     /// A daemon on `<tmp>/data` and an empty folder `<tmp>/code` to park.
     fn daemon() -> (TempDir, Arc<Daemon>, PathBuf) {
@@ -410,18 +404,10 @@ mod tests {
     async fn a_new_folder_in_a_folder_parked_through_the_api_becomes_a_site() {
         let (_dir, daemon, code) = daemon();
         let watcher = start(&daemon).expect("a watcher");
-        let token = Token::generate().unwrap();
-        let bearer = token.bearer_header();
-        let router = router(daemon.clone(), AuthConfig::new(Arc::new(token), PORT));
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/sites/park")
-            .header("host", daemon_authority(PORT))
-            .header("authorization", bearer)
-            .header("content-type", "application/json")
-            .body(Body::from(json!({ "path": code }).to_string()))
-            .unwrap();
-        let response = router.oneshot(request).await.unwrap();
+        let router = TestRouter::new(daemon.clone());
+        let response = router
+            .send("POST", "/v1/sites/park", Some(json!({ "path": code })))
+            .await;
         assert_eq!(response.status(), StatusCode::OK);
         first_rebuild(&watcher).await;
         let mut events = daemon.events.subscribe();
