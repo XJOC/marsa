@@ -1,5 +1,6 @@
 //! The install side of the daemon: how an install runs, and whether one runs
-//! now. The routes that start it are in `install`.
+//! now. The routes that start it are in `install`; removing a runtime
+//! (`remove`) takes the same guard.
 
 use std::fmt;
 use std::future::Future;

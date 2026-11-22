@@ -7,8 +7,9 @@
 //!   and `/bin/ps` names each process.
 //! - Windows: `netstat -ano` lists them and `tasklist` names each process.
 //!
-//! A holder, or a check that fails (`None`), means no `pf_install`: the
-//! redirect would take that program's traffic without a word. The text
+//! A holder, or a check that fails (`None`), is a reason to stop and say so:
+//! on macOS the redirect would take that program's traffic without a word
+//! (no `pf_install`), and on Windows `marsa doctor` reports the holder. The text
 //! parsing is pure and lives in [`marsa_core::ports`](crate::ports).
 
 use crate::platform::browser::windows_dir;

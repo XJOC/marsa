@@ -720,7 +720,7 @@ mod tests {
             "caddy_other_marsa",
             "php_fpm_orphan_stuck",
             "exited",
-            "dns_port_in_use",
+            marsa_core::codes::DNS_PORT_IN_USE,
             "dns_start_failed",
             "spawn_failed",
             "program_not_absolute",

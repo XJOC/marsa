@@ -862,13 +862,13 @@ mod tests {
             Platform::LinuxX64,
             dir.caddy.as_ref(),
             Some(&[]),
-            Some("dns_port_in_use"),
+            Some(codes::DNS_PORT_IN_USE),
             &stop,
         );
         assert_eq!(requests(&fake), [vec![trust(), HelperOp::PortsInstall]]);
         assert_eq!(
             report.skipped,
-            [skip("resolved_install", "dns_port_in_use")]
+            [skip("resolved_install", codes::DNS_PORT_IN_USE)]
         );
         assert_eq!(report.error, None);
     }
