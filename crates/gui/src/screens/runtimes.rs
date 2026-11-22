@@ -760,28 +760,19 @@ mod tests {
 
     use eframe::egui::{self, Pos2, pos2};
     use marsa_core::types::{
-        Event, Health as DaemonHealth, InstallDone, InstallEvent, InstallProgress, InstallUpdate,
-        RuntimeList, RuntimeVersions, Site, SiteKind, SiteList, Source, VersionInUse, XdebugState,
+        Event, InstallDone, InstallEvent, InstallProgress, InstallUpdate, RuntimeList,
+        RuntimeVersions, Site, SiteKind, SiteList, Source, VersionInUse, XdebugState,
     };
 
     use super::*;
     use crate::bridge::Command;
+    use crate::fixtures::connected;
     use crate::model::{Change, InstallJob, UninstallNotice, Update, apply};
     use crate::theme::LIGHT;
     use crate::widgets::harness::{Harness, Tree};
 
     fn v(text: &str) -> Version {
         text.parse().expect("a version")
-    }
-
-    fn connected() -> Model {
-        let mut model = Model::default();
-        model.update(Update::Connected(DaemonHealth {
-            app_version: "0.0.0".into(),
-            api_version: 1,
-            pid: 7,
-        }));
-        model
     }
 
     fn site(name: &str, php: &str, source: Source) -> Site {

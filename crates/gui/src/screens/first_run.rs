@@ -291,24 +291,15 @@ mod tests {
     use eframe::egui::{self, Pos2, pos2};
     use marsa_core::helper::{OpResult, OpStatus};
     use marsa_core::types::{
-        Event, Health, HostsStatus, InstallEvent, InstallProgress, InstallUpdate, RuntimeList,
+        Event, HostsStatus, InstallEvent, InstallProgress, InstallUpdate, RuntimeList,
         RuntimeVersions, SetupReport, Site, SiteKind, SiteList,
     };
 
     use super::*;
+    use crate::fixtures::connected;
     use crate::model::{FirstRun, Update, apply};
     use crate::theme::LIGHT;
     use crate::widgets::harness::{Harness, Tree};
-
-    fn connected() -> Model {
-        let mut model = Model::default();
-        model.update(Update::Connected(Health {
-            app_version: "0.0.0".into(),
-            api_version: 1,
-            pid: 7,
-        }));
-        model
-    }
 
     fn runtimes(php: &[&str], caddy: &[&str]) -> RuntimeList {
         let row = |runtime, installed: &[&str]| RuntimeVersions {

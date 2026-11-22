@@ -444,17 +444,8 @@ mod tests {
 
     use super::*;
     use crate::bridge::Command;
+    use crate::fixtures::connected;
     use crate::model::Update;
-
-    fn connected() -> Model {
-        let mut model = Model::default();
-        model.update(Update::Connected(Health {
-            app_version: "0.0.0".into(),
-            api_version: 1,
-            pid: 7,
-        }));
-        model
-    }
 
     #[test]
     fn the_panel_waits_for_the_daemon_and_is_ready_once_it_has_answered_or_is_gone() {

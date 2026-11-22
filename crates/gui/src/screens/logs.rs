@@ -376,9 +376,10 @@ mod tests {
         self, Event, Modifiers, MouseWheelSource, MouseWheelUnit, Pos2, RawInput, Rect, Shape,
         TouchPhase, pos2,
     };
-    use marsa_core::types::{Health as DaemonHealth, LogLine, ServiceState, ServiceStatus};
+    use marsa_core::types::{LogLine, ServiceState, ServiceStatus};
 
     use super::*;
+    use crate::fixtures::connected;
     use crate::model::Update;
     use crate::theme::{DARK, LIGHT};
     use crate::widgets::harness::{Harness, Tree};
@@ -386,16 +387,6 @@ mod tests {
     const INFO: &str = r#"{"level":"info","msg":"serving shop.test"}"#;
     const WARN: &str = r#"{"level":"warn","msg":"certificate for docs.test is not requested"}"#;
     const ERROR: &str = r#"{"level":"error","msg":"dial tcp 127.0.0.1:9000: connection refused"}"#;
-
-    fn connected() -> Model {
-        let mut model = Model::default();
-        model.update(Update::Connected(DaemonHealth {
-            app_version: "0.0.0".into(),
-            api_version: 1,
-            pid: 7,
-        }));
-        model
-    }
 
     fn service(id: &str) -> ServiceStatus {
         ServiceStatus {
