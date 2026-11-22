@@ -4,9 +4,11 @@
 //! One submodule per step. [`install`] runs them in order. The recipes they
 //! read live in [`crate::recipes`].
 
+mod check;
 pub mod execute;
 pub mod extract;
 pub mod fetch;
+mod fs;
 pub mod manifest;
 pub mod plan;
 pub mod uninstall;

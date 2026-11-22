@@ -10,19 +10,17 @@
 //! blocking task owns the lock and the work folder. So the lock is freed only
 //! after the last write, even when the future is gone.
 
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
 
 use semver::Version;
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
 
+use super::check::{CHECK_TIMEOUT, run_check};
 use super::extract::{self, Layout, Limits};
 use super::fetch::{self, Expected, Fetch};
+use super::fs::{io_error, lock, move_into_place, random_hex, remove_tree, rename, sync_tree};
 use super::manifest::{MAX_MANIFEST_SIZE, Manifest, ManifestError};
 use super::plan::{self, ArtifactStep};
 use super::{InstallEnv, InstallError, InstallRequest, InstalledVersion};
@@ -34,31 +32,6 @@ use crate::types::InstallEvent;
 const MAX_SIGNATURE_SIZE: u64 = 4096;
 /// At most one `Downloading` event per this many bytes.
 const PROGRESS_STEP: u64 = 256 * 1024;
-const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
-/// The most of each output stream of the check that is read.
-const CHECK_OUTPUT_MAX: u64 = 64 * 1024;
-/// The most characters of the check's output put in an error.
-const CHECK_OUTPUT_SHOWN: usize = 500;
-/// `STATUS_DLL_NOT_FOUND`, the exit code of a Windows program that misses a
-/// DLL. For PHP and Node that is the Visual C++ runtime. Never a Unix code.
-const STATUS_DLL_NOT_FOUND: i32 = 0xC000_0135_u32.cast_signed();
-/// `STATUS_ENTRYPOINT_NOT_FOUND`: the DLL is there but lacks a function, as
-/// a Visual C++ runtime older than the program's build tools does (ADR
-/// 0019: PHP 8.4 needs 14.44 or later). A Windows too old for the program
-/// gives it too; Marsa supports none, so the runtime is the likely cause.
-const STATUS_ENTRYPOINT_NOT_FOUND: i32 = 0xC000_0139_u32.cast_signed();
-/// Variables that would change how the check program starts or which
-/// libraries it loads. The rest of the environment stays: Windows programs
-/// need `SystemRoot`.
-const CHECK_ENV_REMOVED: [&str; 7] = [
-    "PHPRC",
-    "PHP_INI_SCAN_DIR",
-    "NODE_OPTIONS",
-    "LD_LIBRARY_PATH",
-    "LD_PRELOAD",
-    "DYLD_LIBRARY_PATH",
-    "DYLD_INSERT_LIBRARIES",
-];
 pub(super) async fn run<F: Fetch>(
     req: &InstallRequest<'_>,
     env: &InstallEnv<F>,
@@ -199,70 +172,6 @@ async fn blocking<T: Send + 'static>(
             path: path.to_path_buf(),
             source: io::Error::other(format!("a disk task stopped: {err}")),
         })?
-}
-
-/// Creates `runtimes/.tmp/` (user-only) and takes the install lock in it.
-/// The lock is freed when the returned file is dropped.
-pub(super) fn lock(runtimes: &RuntimesDir) -> Result<File, InstallError> {
-    make_private_dir(runtimes.root(), &runtimes.tmp_dir())?;
-    let path = runtimes.lock_path();
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(io_error(&path))?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(TryLockError::WouldBlock) => Err(InstallError::Busy),
-        Err(TryLockError::Error(err)) => Err(io_error(&path)(err)),
-    }
-}
-
-/// `tmp` holds files that were checked but not yet unpacked, so only the user
-/// may write in it. A link or a file in its place is refused.
-fn make_private_dir(root: &Path, tmp: &Path) -> Result<(), InstallError> {
-    fs::create_dir_all(root).map_err(io_error(root))?;
-    let mut builder = fs::DirBuilder::new();
-    private_mode(&mut builder);
-    match builder.create(tmp) {
-        Ok(()) => {}
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(err) => return Err(io_error(tmp)(err)),
-    }
-    let meta = fs::symlink_metadata(tmp).map_err(io_error(tmp))?;
-    if !meta.is_dir() {
-        return Err(io_error(tmp)(io::Error::other("not a folder")));
-    }
-    make_private(tmp, &meta).map_err(io_error(tmp))
-}
-
-// `#[cfg(unix)]` outside `platform`: one std permission call each, like the
-// file modes in `extract`. On Windows the app data dir is already private to
-// the user.
-#[cfg(unix)]
-fn private_mode(builder: &mut fs::DirBuilder) {
-    use std::os::unix::fs::DirBuilderExt;
-    builder.mode(0o700);
-}
-
-#[cfg(not(unix))]
-fn private_mode(_builder: &mut fs::DirBuilder) {}
-
-/// A folder made earlier, or by another program, may be open to others.
-#[cfg(unix)]
-fn make_private(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    if meta.permissions().mode() & 0o777 == 0o700 {
-        return Ok(());
-    }
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-}
-
-#[cfg(not(unix))]
-fn make_private(_path: &Path, _meta: &fs::Metadata) -> io::Result<()> {
-    Ok(())
 }
 
 /// Empties `runtimes/.tmp/` but for the lock: what an install that was cut
@@ -487,265 +396,15 @@ async fn download_and_extract<F: Fetch>(
     Ok(())
 }
 
-/// Runs the recipe's check program from `root` by its full path: no `PATH`
-/// search, no shell. It must exit with success, and its output must start
-/// with the expected text.
-async fn run_check(
-    check: &Check,
-    programs: &PlatformRecipe,
-    root: &Path,
-    version: &Version,
-    timeout: Duration,
-) -> Result<(), InstallError> {
-    let failed = |output: String, exit_code| InstallError::CheckFailed { output, exit_code };
-    // The recipe parser checks that the program is in `programs`.
-    let program = programs
-        .program_path(root, &check.program)
-        .ok_or_else(|| failed(format!("no program {:?}", check.program), None))?;
-    // The app data dir is absolute, so `Command` never searches `PATH`.
-    debug_assert!(program.is_absolute(), "{}", program.display());
-    let mut command = Command::new(&program);
-    command.args(&check.args);
-    clean_check_env(&mut command);
-
-    let (status, stdout, stderr) = match run_capped(command, timeout).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(err)) => {
-            return Err(failed(
-                format!("cannot run {}: {err}", program.display()),
-                None,
-            ));
-        }
-        Err(_) => {
-            return Err(failed(
-                format!("no answer after {} ms", timeout.as_millis()),
-                None,
-            ));
-        }
-    };
-
-    if matches!(
-        status.code(),
-        Some(STATUS_DLL_NOT_FOUND | STATUS_ENTRYPOINT_NOT_FOUND)
-    ) {
-        return Err(InstallError::MissingVcRuntime);
-    }
-    let stdout = String::from_utf8_lossy(&stdout);
-    if status.success() && shows_version(&stdout, check, version) {
-        return Ok(());
-    }
-    let text = format!("{stdout}{}", String::from_utf8_lossy(&stderr));
-    Err(failed(
-        text.chars().take(CHECK_OUTPUT_SHOWN).collect(),
-        status.code(),
-    ))
-}
-
-/// Whether `stdout` shows `version` as `check` expects it: at its start
-/// ([`version_matches`]), or after its start, at any place where the
-/// expected text is followed by no digit.
-fn shows_version(stdout: &str, check: &Check, version: &Version) -> bool {
-    if let Some(prefix) = check.expected_prefix(version) {
-        return version_matches(stdout, &prefix);
-    }
-    check.expected_contains(version).is_some_and(|text| {
-        stdout
-            .match_indices(text.as_str())
-            .any(|(at, _)| version_matches(&stdout[at..], &text))
-    })
-}
-
-/// Whether `stdout` starts with `prefix` and the version ends there: the
-/// next character is not a digit. So an expected `17.1` never accepts a
-/// program that prints `17.12`, whatever the recipe's prefix ends with.
-fn version_matches(stdout: &str, prefix: &str) -> bool {
-    stdout
-        .strip_prefix(prefix)
-        .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_digit()))
-}
-
-fn clean_check_env(command: &mut Command) {
-    for name in CHECK_ENV_REMOVED {
-        command.env_remove(name);
-    }
-}
-
-type CheckOutput = (std::process::ExitStatus, Vec<u8>, Vec<u8>);
-
-/// Runs `command` with no input, reads at most [`CHECK_OUTPUT_MAX`] bytes of
-/// each output, and waits at most `timeout`. On a timeout the future is
-/// dropped, and `kill_on_drop` stops the child.
-async fn run_capped(
-    mut command: Command,
-    timeout: Duration,
-) -> Result<io::Result<CheckOutput>, tokio::time::error::Elapsed> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let output = async {
-        let mut child = command.spawn()?;
-        let (stdout, stderr) = tokio::join!(
-            read_capped(child.stdout.take()),
-            read_capped(child.stderr.take())
-        );
-        let status = child.wait().await?;
-        Ok((status, stdout?, stderr?))
-    };
-    tokio::time::timeout(timeout, output).await
-}
-
-/// Reads at most [`CHECK_OUTPUT_MAX`] bytes, then closes the pipe: a program
-/// that keeps writing then gets a broken pipe and stops.
-async fn read_capped(pipe: Option<impl AsyncRead + Unpin>) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    if let Some(pipe) = pipe {
-        pipe.take(CHECK_OUTPUT_MAX).read_to_end(&mut bytes).await?;
-    }
-    Ok(bytes)
-}
-
-/// Flushes every file under `root` to disk before the rename makes it
-/// visible: a power cut must not leave empty programs in a version folder
-/// that looks installed.
-fn sync_tree(root: &Path) -> Result<(), InstallError> {
-    let mut dirs = vec![root.to_path_buf()];
-    while let Some(dir) = dirs.pop() {
-        for entry in fs::read_dir(&dir).map_err(io_error(&dir))? {
-            let entry = entry.map_err(io_error(&dir))?;
-            let path = entry.path();
-            let kind = entry.file_type().map_err(io_error(&path))?;
-            if kind.is_dir() {
-                dirs.push(path);
-            } else if kind.is_file() {
-                sync_path(&path).map_err(io_error(&path))?;
-            }
-        }
-        crate::fs::sync_dir(&dir).map_err(io_error(&dir))?;
-    }
-    Ok(())
-}
-
-fn sync_path(path: &Path) -> io::Result<()> {
-    // Windows flushes only through a handle with write access.
-    OpenOptions::new()
-        .read(true)
-        .write(cfg!(windows))
-        .open(path)?
-        .sync_all()
-}
-
-/// Renames `root` to `target`. If `target` exists (`force`), it is first
-/// moved to `old` and deleted after; if the second rename fails, it is put
-/// back. Blocking: called from a blocking task, so it never stops between
-/// the two renames.
-fn move_into_place(root: &Path, target: &Path, old: &Path) -> Result<(), InstallError> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(io_error(parent))?;
-    }
-    let moved = match fs::symlink_metadata(target) {
-        Ok(_) => {
-            rename(target, old)?;
-            true
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => false,
-        Err(err) => return Err(io_error(target)(err)),
-    };
-    if let Err(err) = rename(root, target) {
-        if moved && let Err(back) = rename(old, target) {
-            // `clean_tmp` tries again at the next install.
-            tracing::error!(
-                from = %old.display(),
-                to = %target.display(),
-                error = %back,
-                "cannot put the old version back"
-            );
-        }
-        return Err(err);
-    }
-    if let Some(parent) = target.parent() {
-        crate::fs::sync_dir(parent).map_err(io_error(parent))?;
-    }
-    if moved {
-        // On Windows a running program cannot be deleted: then the old folder
-        // stays in `.tmp/` until the next install cleans it.
-        remove_tree(old);
-    }
-    Ok(())
-}
-
-/// [`crate::fs::rename_retry`] with the error as an [`InstallError`].
-pub(super) fn rename(from: &Path, to: &Path) -> Result<(), InstallError> {
-    crate::fs::rename_retry(from, to).map_err(io_error(from))
-}
-
-/// 8 hex characters from the OS random source, for temp names.
-pub(super) fn random_hex() -> Result<String, InstallError> {
-    crate::fs::random_hex(4).map_err(|source| InstallError::Io {
-        path: PathBuf::new(),
-        source,
-    })
-}
-
-/// Deletes a folder and all in it. A failure is only logged.
-fn remove_tree(path: &Path) {
-    match fs::remove_dir_all(path) {
-        Ok(()) => {}
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => {
-            tracing::warn!(path = %path.display(), error = %err, "cannot delete a temp folder");
-        }
-    }
-}
-
-fn io_error(path: &Path) -> impl FnOnce(io::Error) -> InstallError + '_ {
-    move |source| InstallError::Io {
-        path: path.to_path_buf(),
-        source,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use tokio::process::Command;
+
+    use super::super::check::{CHECK_ENV_REMOVED, CHECK_OUTPUT_SHOWN, clean_check_env, run_capped};
     use super::*;
 
-    #[test]
-    fn the_version_ends_where_the_prefix_does() {
-        let pg = "postgres (PostgreSQL) 17.1";
-        assert!(version_matches("postgres (PostgreSQL) 17.1\n", pg));
-        assert!(version_matches("postgres (PostgreSQL) 17.1", pg));
-        assert!(!version_matches("postgres (PostgreSQL) 17.12\n", pg));
-        assert!(!version_matches("postgres (PostgreSQL) 17.10", pg));
-        assert!(!version_matches("postgres (PostgreSQL) 16.1\n", pg));
-        assert!(version_matches("PHP 8.4.1 (cli)", "PHP 8.4.1 "));
-        assert!(!version_matches("PHP 8.4.12 (cli)", "PHP 8.4.1"));
-        assert!(version_matches("v22.11.0\r\n", "v22.11.0"));
-    }
-
-    /// `mysqld --version` prints its own path first.
-    #[test]
-    fn a_version_inside_the_output_ends_where_the_text_does() {
-        let text = "name = \"mysql\"\n[check]\nprogram = \"mysqld\"\nargs = [\"--version\"]\n\
-                    expect_contains = \" Ver {version}\"\n[platform.darwin-arm64]\n\
-                    programs = { mysqld = \"bin/mysqld\" }\n[[platform.darwin-arm64.artifact]]\n\
-                    name = \"a\"\nurl = \"https://example.test/a.tar.gz\"\nformat = \"tar.gz\"\n";
-        let recipe = recipes::parse("mysql.toml", text).unwrap();
-        let check = recipe.check().unwrap();
-        let version = Version::new(8, 4, 1);
-        let shows = |stdout: &str| shows_version(stdout, check, &version);
-        let path = "/Users/a/Library/Application Support/dev.marsa.Marsa/runtimes/mysql/8.4.1";
-        assert!(shows(&format!(
-            "{path}/bin/mysqld  Ver 8.4.1 for macos15 on arm64 (MySQL Community Server - GPL)\n"
-        )));
-        assert!(!shows(&format!(
-            "{path}/bin/mysqld  Ver 8.4.13 for macos15 on arm64\n"
-        )));
-        // Any place counts: a path with ` Ver 8.4.13` in it is passed over.
-        assert!(shows("/x Ver 8.4.13/mysqld  Ver 8.4.1 for linux\n"));
-        assert!(!shows("mysqld  Ver 8.4.10 for linux\n"));
-        assert!(!shows(""));
-    }
     use crate::installer::Trust;
     use crate::installer::fetch::testing::{MemoryFetch, Reply};
     use crate::installer::install;
@@ -1480,12 +1139,6 @@ into = "bin"
             .expect("runs");
         assert!(status.success());
         assert_eq!(stdout, b"[]");
-    }
-
-    #[test]
-    fn the_missing_dll_code_is_the_windows_status() {
-        assert_eq!(STATUS_DLL_NOT_FOUND, -1_073_741_515);
-        assert_eq!(STATUS_ENTRYPOINT_NOT_FOUND, -1_073_741_511);
     }
 
     #[test]
