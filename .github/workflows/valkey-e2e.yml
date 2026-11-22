@@ -77,7 +77,7 @@ jobs:
           VALKEY_VERSION: ${{ inputs.version }}
           # The pid record of the server and the checks of the orphan: what
           # a failed run needs in logs/marsad.log.
-          MARSA_LOG: info,marsa::daemon::databases=debug
+          MARSA_LOG: info,marsa::daemon::services::databases=debug
         run: bash tools/e2e/valkey.sh
 
       # Logs only. `run/daemon.json` holds the daemon token and is never
