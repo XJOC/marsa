@@ -398,10 +398,14 @@ async fn download_and_extract<F: Fetch>(
 
 #[cfg(test)]
 mod tests {
+    // Only the Unix tests run a fake check program.
+    #[cfg(unix)]
     use std::time::Duration;
 
+    #[cfg(unix)]
     use tokio::process::Command;
 
+    #[cfg(unix)]
     use super::super::check::{CHECK_ENV_REMOVED, CHECK_OUTPUT_SHOWN, clean_check_env, run_capped};
     use super::*;
 
