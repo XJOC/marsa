@@ -112,7 +112,7 @@ fn build_shim(root: &Path) -> Result<PathBuf> {
     Ok(exe)
 }
 
-pub fn run(data_dir: Option<PathBuf>, dry_run: bool) -> Result<()> {
+pub(crate) fn run(data_dir: Option<PathBuf>, dry_run: bool) -> Result<()> {
     // `cfg!` is a plain bool, so this file compiles everywhere with no `#[cfg]`.
     if cfg!(windows) {
         bail!("dev-shims is not supported on Windows yet (M1-07)");

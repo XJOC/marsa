@@ -80,11 +80,13 @@ impl std::error::Error for AlreadyRunning {}
 /// stopped, the DNS server stopped, `run/daemon.json` deleted, the lock
 /// released.
 ///
+/// The DNS server answers on `127.0.0.1:dns_port`.
+///
 /// # Errors
 ///
 /// [`AlreadyRunning`] if another daemon holds the lock. Any other error if the
 /// lock, the port, or `run/daemon.json` cannot be set up.
-pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
+pub async fn run(data_dir: PathBuf, dns_port: u16) -> anyhow::Result<()> {
     let run_dir = DataDir::new(&data_dir).run();
     let lock = lock_instance(&run_dir).await?;
     // Who started this daemon, for the log only: a daemon left
@@ -143,7 +145,7 @@ pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
     // The real system's answer, only in the real daemon.
     daemon.caddy_mut().low_ports = low_ports::low_ports_allowed;
     // The DNS server on macOS and Linux.
-    daemon.set_dns(dns::DnsService::for_daemon());
+    daemon.set_dns(dns::DnsService::for_daemon(dns_port));
     let daemon = Arc::new(daemon);
     // The first site list, so the first client gets it at once. A broken
     // sites.toml is logged; the routes report it again with its code.

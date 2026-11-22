@@ -71,7 +71,7 @@ const LABEL: &str = "S:(ML;;NWNR;;;ME)";
 ///
 /// The Win32 error, or `InvalidData` for a path that does not fit (it never
 /// should).
-pub fn system_dir() -> io::Result<PathBuf> {
+pub(crate) fn system_dir() -> io::Result<PathBuf> {
     let mut buffer = [0u16; MAX_PATH + 1];
     // SAFETY: `buffer` is a valid, writable array, and the length passed is
     // its own length in UTF-16 units, so the call cannot write past it.
@@ -95,7 +95,7 @@ pub fn system_dir() -> io::Result<PathBuf> {
 /// # Errors
 ///
 /// The `HRESULT` of `SHGetKnownFolderPath`.
-pub fn program_files() -> io::Result<PathBuf> {
+pub(crate) fn program_files() -> io::Result<PathBuf> {
     let mut path = null_mut();
     // SAFETY: `FOLDERID_ProgramFiles` is a static GUID, the token is null
     // (the current user), and `path` is a valid out pointer. The caller frees
@@ -129,7 +129,7 @@ pub fn program_files() -> io::Result<PathBuf> {
 
 /// The service's end of the named pipe (ADR 0018): one instance, byte mode,
 /// local clients only, and a DACL for LocalSystem and one user.
-pub struct PipeServer {
+pub(crate) struct PipeServer {
     handle: OwnedHandle,
 }
 
@@ -147,7 +147,7 @@ impl PipeServer {
     ///
     /// `InvalidInput` for a SID with anything but digits, `S`, and `-` in it
     /// (it goes into the SDDL text). Otherwise the Win32 error.
-    pub fn create(name: &str, user_sid: &str) -> io::Result<Self> {
+    pub(crate) fn create(name: &str, user_sid: &str) -> io::Result<Self> {
         Self::create_with(
             name,
             user_sid,
@@ -221,7 +221,7 @@ impl PipeServer {
     /// closed it before the call. Until a disconnect, every later call would
     /// fail the same way and no client could open the pipe; this disconnects
     /// it, so the next call waits for the next client.
-    pub fn accept(&self) -> io::Result<()> {
+    pub(crate) fn accept(&self) -> io::Result<()> {
         // SAFETY: the handle is the open pipe this struct owns; no
         // OVERLAPPED, so the call blocks until a client connects.
         if unsafe { ConnectNamedPipe(self.raw(), null_mut()) } != 0 {
@@ -244,7 +244,7 @@ impl PipeServer {
     /// # Errors
     ///
     /// `InvalidData` for a longer message, or the read error.
-    pub fn read_message(&self, max: usize) -> io::Result<Vec<u8>> {
+    pub(crate) fn read_message(&self, max: usize) -> io::Result<Vec<u8>> {
         let mut pipe = self.file();
         let mut len = [0u8; 4];
         pipe.read_exact(&mut len)?;
@@ -267,7 +267,7 @@ impl PipeServer {
     /// # Errors
     ///
     /// The write error.
-    pub fn write_message(&self, bytes: &[u8]) -> io::Result<()> {
+    pub(crate) fn write_message(&self, bytes: &[u8]) -> io::Result<()> {
         let len = u32::try_from(bytes.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too large"))?;
         let mut pipe = self.file();
@@ -287,7 +287,7 @@ impl PipeServer {
     /// # Errors
     ///
     /// The Win32 error: then the client is treated as unknown.
-    pub fn client_sid(&self) -> io::Result<String> {
+    pub(crate) fn client_sid(&self) -> io::Result<String> {
         // SAFETY: the handle is the open pipe this struct owns. Between the
         // two calls this thread acts as the client, and nothing else runs on
         // it. If `RevertToSelf` failed, the thread would keep the client's
@@ -305,7 +305,7 @@ impl PipeServer {
     }
 
     /// Drops the client, so the next [`PipeServer::accept`] can run.
-    pub fn disconnect(&self) {
+    pub(crate) fn disconnect(&self) {
         // SAFETY: the handle is the open pipe this struct owns.
         unsafe { DisconnectNamedPipe(self.raw()) };
     }
@@ -398,7 +398,7 @@ fn token_user_sid(token: &OwnedHandle) -> io::Result<String> {
 /// # Errors
 ///
 /// The Win32 error of a SID that Windows cannot read.
-pub fn is_user_account(sid: &str) -> io::Result<Option<bool>> {
+pub(crate) fn is_user_account(sid: &str) -> io::Result<Option<bool>> {
     let text = wide(sid);
     let mut binary: PSID = null_mut();
     // SAFETY: `text` is NUL-terminated and `binary` is a valid out pointer.
@@ -447,7 +447,7 @@ fn security_descriptor(user_sid: &str) -> String {
 ///
 /// `InvalidInput` for anything but a plain folder; otherwise the I/O or
 /// Win32 error.
-pub fn private_dir(dir: &Path) -> io::Result<()> {
+pub(crate) fn private_dir(dir: &Path) -> io::Result<()> {
     match fs::create_dir(dir) {
         Ok(()) => {}
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
@@ -523,7 +523,7 @@ pub fn private_dir(dir: &Path) -> io::Result<()> {
 
 /// Waits up to `limit` for the process `pid` to end. A process that has
 /// ended, or that cannot be opened, is not waited for.
-pub fn wait_for_exit(pid: u32, limit: Duration) {
+pub(crate) fn wait_for_exit(pid: u32, limit: Duration) {
     // SAFETY: no pointer; the handle is checked, then owned.
     let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     if handle.is_null() {

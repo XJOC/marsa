@@ -35,6 +35,11 @@ struct Args {
     /// and the shim could use different folders.
     #[arg(long, value_name = "PATH")]
     data_dir: Option<PathBuf>,
+    /// The `.test` DNS server's port, for tests: daemons that run side by
+    /// side must not fight over one port. Hidden, because the resolver
+    /// file sends `.test` names to the default port only.
+    #[arg(long, value_name = "PORT", default_value_t = marsa_core::dns::DNS_PORT, hide = true)]
+    dns_port: u16,
 }
 
 #[tokio::main]
@@ -54,7 +59,7 @@ async fn main() -> ExitCode {
     if let Err(err) = marsa_core::platform::bind_children_to_daemon() {
         tracing::warn!(error = %err, "cannot tie child processes to the daemon; they would outlive a crash");
     }
-    match server::run(data_dir).await {
+    match server::run(data_dir, args.dns_port).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => match err.downcast_ref::<AlreadyRunning>() {
             Some(running) => {

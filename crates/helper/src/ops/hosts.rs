@@ -54,7 +54,7 @@ const REMOVE: &str = "hosts_remove";
 
 /// `hosts_sync`: the block holds exactly `names`, sorted. An empty list
 /// leaves an empty block (written only if it was not there yet).
-pub fn sync(names: &[String], os: Os, system: &impl System) -> OpResult {
+pub(super) fn sync(names: &[String], os: Os, system: &impl System) -> OpResult {
     // The request parser already allows `<label>.test` only. Checked again
     // here, because this text goes into a system file as it is: a line break
     // in a name would add a line of the caller's choice.
@@ -67,7 +67,7 @@ pub fn sync(names: &[String], os: Os, system: &impl System) -> OpResult {
 
 /// `hosts_remove`: takes Marsa's block out. No block, or no hosts file, is
 /// `unchanged`.
-pub fn remove(os: Os, system: &impl System) -> OpResult {
+pub(super) fn remove(os: Os, system: &impl System) -> OpResult {
     apply(REMOVE, None, os, system)
 }
 

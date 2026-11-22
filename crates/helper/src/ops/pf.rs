@@ -39,9 +39,9 @@ use crate::response::{OpResult, Outcome};
 use crate::system::{RunOutput, System};
 
 /// The op name in the result of `marsa-helper pf-load`.
-pub const LOAD: &str = "pf_load";
+pub(crate) const LOAD: &str = "pf_load";
 /// The helper's command line argument for the boot job.
-pub const COMMAND: &str = "pf-load";
+pub(crate) const COMMAND: &str = "pf-load";
 const INSTALL: &str = "pf_install";
 const REMOVE: &str = "pf_remove";
 
@@ -82,13 +82,13 @@ struct Failure {
 }
 
 /// `pf_install`: redirect port 80 to `http_port` and 443 to `https_port`.
-pub fn install(http_port: u16, https_port: u16, system: &impl System) -> OpResult {
+pub(crate) fn install(http_port: u16, https_port: u16, system: &impl System) -> OpResult {
     finish(INSTALL, install_files(http_port, https_port, system))
 }
 
 /// `pf_remove`: stop the boot job, flush the anchor, give back the reference,
 /// and delete the files.
-pub fn remove(system: &impl System) -> OpResult {
+pub(crate) fn remove(system: &impl System) -> OpResult {
     finish(REMOVE, remove_all(system))
 }
 
@@ -96,7 +96,7 @@ pub fn remove(system: &impl System) -> OpResult {
 /// again after each wait in [`RECHECKS`] and loads them again if they are gone,
 /// because `com.apple.pfctl` may load `/etc/pf.conf` after it. `sleep` is
 /// `std::thread::sleep` in `main` and a no-op in tests.
-pub fn boot(system: &impl System, sleep: impl Fn(Duration)) -> OpResult {
+pub(crate) fn boot(system: &impl System, sleep: impl Fn(Duration)) -> OpResult {
     if !system.exists(Path::new(RULES)) {
         let message = format!("{RULES} is missing: pf_install has not run");
         return OpResult::failed(LOAD, PF_NOT_INSTALLED, message);

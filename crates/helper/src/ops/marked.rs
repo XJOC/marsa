@@ -13,14 +13,14 @@ use std::path::Path;
 use crate::system::System;
 
 /// The first line of every config file the helper writes.
-pub const MARKER: &str = "# Managed by Marsa. Do not edit.";
+pub(super) const MARKER: &str = "# Managed by Marsa. Do not edit.";
 /// The largest file read. Marsa's files are far smaller, so a larger one
 /// counts as foreign.
 const MAX_BYTES: u64 = 4 * 1024;
 
 /// What is at a path now.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Current {
+pub(super) enum Current {
     Missing,
     /// Marsa's file, with its content.
     Ours(Vec<u8>),
@@ -34,7 +34,7 @@ pub enum Current {
 }
 
 /// Reads `path` and says whose file it is.
-pub fn current(system: &impl System, path: &Path) -> Current {
+pub(super) fn current(system: &impl System, path: &Path) -> Current {
     // First: `read` follows a link, so a link to a file with the marker
     // would read as Marsa's, and the op would replace or delete the link.
     if system.is_link(path) {
