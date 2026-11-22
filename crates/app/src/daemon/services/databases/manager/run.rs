@@ -13,8 +13,8 @@ use tokio::sync::watch;
 use super::super::orphan::{Recorded, RunRecord};
 use super::super::{mysql, postgres, valkey};
 use super::{ActionError, ServerManager};
+use crate::daemon::services::supervisor::{ServiceHandle, Supervisor, lock};
 use crate::daemon::state::Daemon;
-use crate::daemon::supervisor::{ServiceHandle, Supervisor, lock};
 
 /// How a run that ended before it took connections says that a lock file
 /// is held.

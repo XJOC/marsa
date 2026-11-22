@@ -19,7 +19,7 @@ use marsa_core::services::{ServiceSpec, StopMethod};
 use semver::Version;
 
 use super::{Pool, Skip, fallback_port, fpm_id};
-use crate::daemon::caddy::{RESTART, STOP_GRACE};
+use crate::daemon::services::caddy::{RESTART, STOP_GRACE};
 
 /// The php-cgi pool of the installed PHP `version` under `data_dir`. Pure:
 /// nothing is read or written. `php.ini` points to `ca_bundle` when it is

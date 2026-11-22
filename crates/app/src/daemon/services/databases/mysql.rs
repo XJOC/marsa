@@ -147,8 +147,8 @@ mod tests {
     use marsa_core::databases::mysql::{ROOT_TCP_SQL, mysql_stop};
 
     use super::*;
-    use crate::daemon::databases::ActionError;
-    use crate::daemon::databases::tests::{FakeProbes, alive, free_port, probes};
+    use crate::daemon::services::databases::ActionError;
+    use crate::daemon::services::databases::tests::{FakeProbes, alive, free_port, probes};
     use crate::daemon::services::probe::ProcessProbe;
     use crate::daemon::state::Daemon;
 
@@ -230,7 +230,7 @@ mod tests {
              cp \"$sql\" \"$dir/init.sql\"; echo '[System] [Server] init end' >&2; exit 0; fi\n\
              echo \"server $*\" >> '{calls}'\n\
              {FAKE}='{mode}' MARSA_FAKE_MYSQLD_CNF=\"$cnf\" exec '{exe}' \
-             daemon::databases::mysql::tests::fake_mysqld --exact --nocapture\n"
+             daemon::services::databases::mysql::tests::fake_mysqld --exact --nocapture\n"
         );
         fs::write(&mysqld, script).unwrap();
         fs::set_permissions(&mysqld, fs::Permissions::from_mode(0o755)).unwrap();

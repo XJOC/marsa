@@ -118,10 +118,10 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use super::{fpm_id, fpm_program};
-use crate::daemon::caddy::orphan::Ladder;
+use crate::daemon::services::caddy::orphan::Ladder;
 use crate::daemon::services::probe::ProcessProbe;
 use crate::daemon::services::runtime::AbortOnDrop;
-use crate::daemon::supervisor::{ServiceHandle, ServiceRuntime, lock};
+use crate::daemon::services::supervisor::{ServiceHandle, ServiceRuntime, lock};
 
 /// Our old php-fpm did not stop, or cannot be verified, while its socket or
 /// port stays in use.
@@ -2689,7 +2689,7 @@ mod tests {
         /// Set for a fake on a leash (`Bystander::leashed`): it ends when its
         /// stdin does, in any mode.
         const LEASH: &str = "MARSA_FPM_LEASH";
-        const FAKE_TEST: &str = "daemon::php::orphan::tests::real::fake_php_fpm";
+        const FAKE_TEST: &str = "daemon::services::php::orphan::tests::real::fake_php_fpm";
         const FAKE_LIFE: Duration = Duration::from_secs(120);
         /// Generous: a test binary can start slowly on a busy CI machine.
         const WAIT: Duration = Duration::from_secs(30);

@@ -4,7 +4,7 @@ use super::CADDY_ID;
 use super::orphan::PidFile;
 use crate::daemon::services::probe::ProcessProbe;
 use crate::daemon::services::runtime::AbortOnDrop;
-use crate::daemon::supervisor::{ServiceRuntime, lock};
+use crate::daemon::services::supervisor::{ServiceRuntime, lock};
 use marsa_core::codes;
 use marsa_core::types::{Event, LogLine, LogStream, ServiceState};
 use std::sync::{Arc, Mutex};

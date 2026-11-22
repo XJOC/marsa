@@ -43,10 +43,10 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::daemon::php::orphan::{accepted, own_executable};
+use crate::daemon::services::php::orphan::{accepted, own_executable};
 use crate::daemon::services::probe::ProcessProbe;
 use crate::daemon::services::runtime::AbortOnDrop;
-use crate::daemon::supervisor::{ServiceRuntime, lock};
+use crate::daemon::services::supervisor::{ServiceRuntime, lock};
 
 /// Our old server could not be stopped: nothing was started.
 pub(super) fn stuck_code(kind: ServerKind) -> &'static str {

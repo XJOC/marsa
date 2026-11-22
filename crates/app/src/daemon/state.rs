@@ -15,15 +15,15 @@ use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::autostart::Autostart;
-use super::caddy::CaddyManager;
-use super::client_shims::ClientShims;
-use super::databases::ServerManager;
-use super::dns::DnsService;
-use super::php::Pools;
 use super::runtimes::installs::Installs;
+use super::services::caddy::CaddyManager;
+use super::services::databases::ServerManager;
+use super::services::databases::client_shims::ClientShims;
+use super::services::dns::DnsService;
+use super::services::php::Pools;
+use super::services::supervisor::ServiceHandle;
 use super::sites::{self, SitesError};
 use super::sites_sync::PassRequests;
-use super::supervisor::ServiceHandle;
 
 /// How many events the bus keeps for a slow reader. A reader that falls
 /// further behind loses the oldest ones (`Lagged`).
@@ -314,7 +314,7 @@ fn sites_config_error<E: From<SitesError>>(err: ConfigError) -> E {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::supervisor::ServiceRuntime;
+    use crate::daemon::services::supervisor::ServiceRuntime;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
     use tokio::task::JoinHandle;

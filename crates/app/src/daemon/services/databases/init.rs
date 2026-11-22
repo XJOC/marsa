@@ -17,7 +17,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use crate::daemon::php::orphan::accepted;
+use crate::daemon::services::php::orphan::accepted;
 
 /// The last lines of a failed step's output kept in its error.
 const ERROR_LINES: usize = 10;

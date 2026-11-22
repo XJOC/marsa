@@ -5,7 +5,7 @@ use marsa_core::types::{Event, LogStream, ServiceState};
 use tokio::sync::broadcast;
 use tokio::task::AbortHandle;
 
-use crate::daemon::supervisor::{ServiceRuntime, now_ms};
+use crate::daemon::services::supervisor::{ServiceRuntime, now_ms};
 
 /// Aborts a task when this guard goes: a wrapper task that `stop_procs`
 /// aborts takes the task it waits for along.

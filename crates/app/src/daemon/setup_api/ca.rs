@@ -9,7 +9,7 @@
 
 use super::Setup;
 use super::user_trust;
-use crate::daemon::caddy::ActionError;
+use crate::daemon::services::caddy::ActionError;
 use crate::daemon::state::Daemon;
 use marsa_core::codes;
 use marsa_core::types::ServiceAction;
@@ -349,7 +349,7 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
-    use crate::daemon::caddy::ActionError;
+    use crate::daemon::services::caddy::ActionError;
     use crate::daemon::state::Daemon;
 
     use axum::http::StatusCode;
@@ -684,7 +684,7 @@ mod tests {
     /// `caddy_start_timeout` after `ready`.
     #[cfg(unix)]
     fn sleeping_caddy(dir: &Dir, ready: Duration) -> Arc<Daemon> {
-        use crate::daemon::caddy::caddy_spec_for;
+        use crate::daemon::services::caddy::caddy_spec_for;
         use marsa_core::services::{ServiceSpec, StopMethod};
 
         let mut daemon = Daemon::new(dir.dir.path().to_path_buf());

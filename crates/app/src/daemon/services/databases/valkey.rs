@@ -110,13 +110,13 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::daemon::databases::ActionError;
-    use crate::daemon::databases::orphan;
-    use crate::daemon::databases::tests::server::{Orphan, listening};
-    use crate::daemon::databases::tests::{FakeProbes, alive, free_port, probes};
+    use crate::daemon::services::databases::ActionError;
+    use crate::daemon::services::databases::orphan;
+    use crate::daemon::services::databases::tests::server::{Orphan, listening};
+    use crate::daemon::services::databases::tests::{FakeProbes, alive, free_port, probes};
     use crate::daemon::services::probe::ProcessProbe;
+    use crate::daemon::services::supervisor::STOP_MARGIN;
     use crate::daemon::state::Daemon;
-    use crate::daemon::supervisor::STOP_MARGIN;
 
     const FAKE: &str = "MARSA_FAKE_VALKEY";
     const FAKE_CONF: &str = "MARSA_FAKE_VALKEY_CONF";
@@ -196,7 +196,7 @@ mod tests {
         let script = format!(
             "#!/bin/sh\necho \"server $*\" >> '{calls}'\n\
              {FAKE}=serve {FAKE_CONF}=\"$1\" exec '{exe}' \
-             daemon::databases::valkey::tests::fake_valkey --exact --nocapture\n"
+             daemon::services::databases::valkey::tests::fake_valkey --exact --nocapture\n"
         );
         fs::write(&server, script).unwrap();
         fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
@@ -404,7 +404,7 @@ mod tests {
         let log = fs::File::create(vk.dir.path().join("orphan.log")).unwrap();
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
-                "daemon::databases::valkey::tests::fake_valkey",
+                "daemon::services::databases::valkey::tests::fake_valkey",
                 "--exact",
                 "--nocapture",
             ])

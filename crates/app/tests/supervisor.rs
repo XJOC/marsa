@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use marsa::daemon::supervisor::{ServiceHandle, Supervisor};
+use marsa::daemon::services::supervisor::{ServiceHandle, Supervisor};
 use marsa_core::services::{RestartPolicy, ServiceSpec, StopMethod};
 use marsa_core::types::{Event, LogLine, LogStream, ServiceState};
 use tempfile::TempDir;
@@ -429,8 +429,8 @@ async fn the_postgres_ladder_ends_in_a_kill_after_each_wait() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_daemon_shutdown_waits_for_the_whole_ladder() {
+    use marsa::daemon::services::supervisor::STOP_MARGIN;
     use marsa::daemon::state::Daemon;
-    use marsa::daemon::supervisor::STOP_MARGIN;
 
     let ladder = postgres_ladder(GRACE);
     let (handle, mut rx, _logs) = start_with("deaf", RestartPolicy::Never, ladder);
@@ -562,7 +562,7 @@ async fn a_request_nobody_takes_goes_on_to_sigterm_at_once() {
 #[cfg(unix)]
 #[test]
 fn a_request_adds_its_limits_to_the_stop_limit() {
-    use marsa::daemon::supervisor::{STOP_MARGIN, stop_limit};
+    use marsa::daemon::services::supervisor::{STOP_MARGIN, stop_limit};
     let stop = shutdown_save(6379, Duration::from_secs(10));
     let want = Duration::from_secs(10 + 4) + GRACE + STOP_MARGIN;
     assert_eq!(stop_limit(&stop), want);
@@ -751,7 +751,7 @@ async fn a_stop_program_that_cannot_start_skips_its_wait() {
 /// The daemon's shutdown gives a stop program its wait and its grace.
 #[test]
 fn a_stop_program_adds_its_grace_to_the_stop_limit() {
-    use marsa::daemon::supervisor::{STOP_MARGIN, stop_limit};
+    use marsa::daemon::services::supervisor::{STOP_MARGIN, stop_limit};
     use marsa_core::services::STOP_COMMAND_GRACE;
     let stop = stop_program(REFUSE_ARG, Duration::from_secs(30));
     let want = Duration::from_secs(30) + STOP_COMMAND_GRACE + STOP_MARGIN;

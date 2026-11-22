@@ -24,8 +24,8 @@ use super::super::settings::read_settings;
 use super::super::{mysql, orphan, postgres, valkey};
 use super::run::Refusal;
 use super::{ActionError, ServerManager};
+use crate::daemon::services::supervisor::lock;
 use crate::daemon::state::Daemon;
-use crate::daemon::supervisor::lock;
 
 /// The version a start picked, and what goes with it, for the part of
 /// [`ServerManager::prepare`] of each server.
@@ -281,7 +281,7 @@ impl ServerManager {
 
     /// The server program to run for `settings`: the newest installed
     /// version of the `default` line, or of all lines when it is not set.
-    pub(in crate::daemon::databases) fn installed(
+    pub(in crate::daemon::services::databases) fn installed(
         &self,
         data_dir: &Path,
         settings: &ServerSettings,

@@ -26,7 +26,7 @@
 //! job pushed on the worker's queue with a reply slot. A request is answered
 //! after a pass that started after it, so that pass saw the change.
 //!
-//! [`CaddyManager::apply`]: super::caddy::CaddyManager::apply
+//! [`CaddyManager::apply`]: super::services::caddy::CaddyManager::apply
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -41,9 +41,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use super::caddy::CADDY_ID;
 use super::hosts_sync::HostsSync;
-use super::php::{PhpManager, SystemRoots, write_ca_bundle};
+use super::services::caddy::CADDY_ID;
+use super::services::php::{PhpManager, SystemRoots, write_ca_bundle};
 use super::state::Daemon;
 
 /// How long a pass waits after the first event, so a burst of changes (a
@@ -308,7 +308,7 @@ mod tests {
     use serde_json::Value;
     use tokio_util::sync::CancellationToken;
 
-    use crate::daemon::supervisor::{ServiceHandle, ServiceRuntime};
+    use crate::daemon::services::supervisor::{ServiceHandle, ServiceRuntime};
 
     fn status(id: &str, state: ServiceState) -> Event {
         Event::ServiceChanged(ServiceStatus {

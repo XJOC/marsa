@@ -34,7 +34,7 @@ use marsa_core::platform::probe;
 use marsa_core::runtimes::RuntimesDir;
 use tracing::{debug, info, warn};
 
-use super::state::Daemon;
+use crate::daemon::state::Daemon;
 
 /// A bigger file is not a shim (a release build is about 1 MB), so it is
 /// never read whole.

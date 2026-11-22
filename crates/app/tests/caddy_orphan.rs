@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use marsa::daemon::caddy::caddy_spec_for;
+use marsa::daemon::services::caddy::caddy_spec_for;
 use marsa::daemon::services::probe::{BoxFuture, ProcessProbe};
 use marsa::daemon::state::Daemon;
 use marsa_core::caddy::{CaddyInput, SERVER_ID};
