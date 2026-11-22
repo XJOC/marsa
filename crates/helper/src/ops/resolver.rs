@@ -30,7 +30,7 @@ const INSTALL: &str = "resolver_install";
 const REMOVE: &str = "resolver_remove";
 
 /// `resolver_install`: names under `.test` go to `127.0.0.1:<port>`.
-pub fn install(port: u16, system: &impl System) -> OpResult {
+pub(super) fn install(port: u16, system: &impl System) -> OpResult {
     let content = content(port);
     let outcome = match marked::current(system, Path::new(PATH)) {
         Current::Foreign => {
@@ -58,7 +58,7 @@ pub fn install(port: u16, system: &impl System) -> OpResult {
 
 /// `resolver_remove`: deletes the file if Marsa wrote it. A missing or
 /// foreign file is `unchanged`: nothing of Marsa's is there to remove.
-pub fn remove(system: &impl System) -> OpResult {
+pub(super) fn remove(system: &impl System) -> OpResult {
     let outcome = match marked::current(system, Path::new(PATH)) {
         Current::Missing | Current::Foreign => Outcome::Unchanged,
         Current::Unreadable(kind) => {

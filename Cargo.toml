@@ -102,6 +102,10 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 # Architecture rule: a lock is never held across `.await`, and `unwrap()` is
 # banned outside tests (AGENTS.md section 6).
+[workspace.lints.rust]
+# `pub` only what other modules use (AGENTS.md section 6, "Clarity").
+unreachable_pub = "warn"
+
 [workspace.lints.clippy]
 await_holding_lock = "deny"
 unwrap_used = "deny"

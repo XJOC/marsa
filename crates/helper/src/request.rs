@@ -17,9 +17,9 @@ use serde_json::error::Category;
 use crate::response::code;
 
 /// The protocol version of requests and responses.
-pub const VERSION: u32 = 1;
+pub(crate) const VERSION: u32 = 1;
 /// The largest `apply` argument, in bytes. Checked before parsing.
-pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_OPS: usize = 16;
 const MAX_NAMES: usize = 1000;
 const MAX_PEM_BYTES: usize = 16 * 1024;
@@ -30,7 +30,7 @@ const MIN_PORT: u16 = 1024;
 /// `{"version": 1, "ops": [...]}`, before validation.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Request {
+pub(crate) struct Request {
     version: u32,
     ops: Vec<Op>,
 }
@@ -38,11 +38,11 @@ pub struct Request {
 /// A request that passed every check. The field is private, so only this
 /// module can build one.
 #[derive(Debug)]
-pub struct ValidRequest(Request);
+pub(crate) struct ValidRequest(Request);
 
 impl ValidRequest {
     /// The ops, in the order of the request.
-    pub fn ops(&self) -> &[Op] {
+    pub(crate) fn ops(&self) -> &[Op] {
         &self.0.ops
     }
 }
@@ -55,7 +55,7 @@ impl ValidRequest {
 /// with `deny_unknown_fields`.
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Op {
+pub(crate) enum Op {
     /// Trusts a CA root certificate, sent as PEM text. The text, not a path:
     /// root must never open a path the caller chose (a symlink, a FIFO, a
     /// network share). The trust op parses the PEM.
@@ -95,7 +95,7 @@ pub enum Op {
 
 impl Op {
     /// The op's name as written in the request and in its result.
-    pub fn name(&self) -> &'static str {
+    pub(crate) fn name(&self) -> &'static str {
         match self {
             Op::TrustInstall { .. } => "trust_install",
             Op::TrustRemove {} => "trust_remove",
@@ -117,7 +117,7 @@ impl Op {
 /// Why a request was rejected. Every case has the code `request_invalid`. The
 /// message names the field and the reason, and never quotes the request.
 #[derive(Debug, thiserror::Error)]
-pub enum RequestError {
+pub(crate) enum RequestError {
     #[error("the request is larger than {MAX_REQUEST_BYTES} bytes")]
     TooLarge,
 
@@ -138,7 +138,7 @@ pub enum RequestError {
 
 impl RequestError {
     /// Stable error name for `marsad`. Never changes once released.
-    pub fn code(&self) -> &'static str {
+    pub(crate) fn code(&self) -> &'static str {
         code::REQUEST_INVALID
     }
 }
@@ -151,7 +151,7 @@ impl Request {
     /// # Errors
     ///
     /// `request_invalid` for anything outside the closed list or the limits.
-    pub fn from_arg(raw: &OsStr) -> Result<ValidRequest, RequestError> {
+    pub(crate) fn from_arg(raw: &OsStr) -> Result<ValidRequest, RequestError> {
         if raw.len() > MAX_REQUEST_BYTES {
             return Err(RequestError::TooLarge);
         }

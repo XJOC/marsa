@@ -57,7 +57,7 @@ const INSTALL: &str = "ports_install";
 const REMOVE: &str = "ports_remove";
 
 /// `ports_install`: a normal process may bind port 80 and up.
-pub fn install(system: &impl System) -> OpResult {
+pub(super) fn install(system: &impl System) -> OpResult {
     let content = content();
     let ours = match marked::current(system, Path::new(FILE)) {
         Current::Missing => None,
@@ -123,7 +123,7 @@ pub fn install(system: &impl System) -> OpResult {
 
 /// `ports_remove`: deletes Marsa's file and puts the kernel's value back.
 /// Without the file, nothing here is Marsa's: the value is not touched.
-pub fn remove(system: &impl System) -> OpResult {
+pub(super) fn remove(system: &impl System) -> OpResult {
     match marked::current(system, Path::new(FILE)) {
         Current::Missing | Current::Foreign => return OpResult::unchanged(REMOVE),
         Current::Unreadable(kind) => return OpResult::unreadable(REMOVE, PORTS_READ, FILE, kind),

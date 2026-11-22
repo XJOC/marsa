@@ -85,7 +85,7 @@ const REMOVE: &str = "trust_remove";
 /// `trust_install`: every program that uses the system store trusts the one
 /// certificate in `pem`. A different certificate that Marsa trusted before
 /// is removed first.
-pub fn install(pem: &str, system: &impl System) -> OpResult {
+pub(super) fn install(pem: &str, system: &impl System) -> OpResult {
     let der = match trust::parse_pem(pem) {
         Ok(der) => der,
         Err(reason) => {
@@ -153,7 +153,7 @@ pub fn install(pem: &str, system: &impl System) -> OpResult {
 /// Without the file the tool still runs, so a removal whose run failed is
 /// finished now. On a system with neither tool, a file of Marsa's at either
 /// path still goes: it must not come back when the tool does.
-pub fn remove(system: &impl System) -> OpResult {
+pub(super) fn remove(system: &impl System) -> OpResult {
     let Some(store) = store(system) else {
         return remove_without_tool(system);
     };

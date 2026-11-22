@@ -11,4 +11,4 @@ pub(crate) use unix::{exec, own_name};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{exec, own_name};
+pub(crate) use windows::{exec, own_name};

@@ -8,7 +8,7 @@
 /// One of the three OSes Marsa supports. Ops take it as a value, so tests can
 /// run the macOS, Linux, and Windows paths on any machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Os {
+pub(crate) enum Os {
     Macos,
     Linux,
     Windows,
@@ -17,7 +17,7 @@ pub enum Os {
 impl Os {
     /// The OS this binary was built for. Any other Unix counts as Linux:
     /// Marsa ships for three OSes only.
-    pub fn current() -> Self {
+    pub(crate) fn current() -> Self {
         if cfg!(target_os = "macos") {
             Self::Macos
         } else if cfg!(target_os = "windows") {
@@ -28,7 +28,7 @@ impl Os {
     }
 
     /// The name used in messages.
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Macos => "macos",
             Self::Linux => "linux",

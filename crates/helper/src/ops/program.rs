@@ -10,7 +10,7 @@ use std::io;
 use crate::system::RunOutput;
 
 /// The program ran and exited with code 0.
-pub fn succeeded(result: &io::Result<RunOutput>) -> bool {
+pub(super) fn succeeded(result: &io::Result<RunOutput>) -> bool {
     matches!(result, Ok(output) if output.code == Some(0))
 }
 
@@ -18,7 +18,7 @@ pub fn succeeded(result: &io::Result<RunOutput>) -> bool {
 /// is enough for `marsad`, and the owner can run the same command by hand.
 /// The same texts as the private `failure_text` of `trust` (macOS). A
 /// negative code is a Windows `HRESULT`, in hex as Windows prints it.
-pub fn failure(result: &io::Result<RunOutput>) -> String {
+pub(super) fn failure(result: &io::Result<RunOutput>) -> String {
     match result {
         Ok(RunOutput {
             code: Some(code), ..
