@@ -95,6 +95,14 @@ struct Fake {
 }
 
 impl Fake {
+    /// Every request seen so far, as "METHOD target".
+    fn targets(&self) -> Vec<String> {
+        self.seen()
+            .into_iter()
+            .map(|seen| format!("{} {}", seen.method, seen.target))
+            .collect()
+    }
+
     /// A fake daemon in a new temp folder.
     async fn start(router: Router) -> Self {
         let temp = TempDir::new().expect("a temp folder");
@@ -488,11 +496,7 @@ async fn services_and_logs_are_read() {
     let followed = collect(client.follow_logs("caddy").await.unwrap()).await;
     assert_eq!(followed, items(&lines));
 
-    let targets: Vec<String> = fake
-        .seen()
-        .into_iter()
-        .map(|seen| format!("{} {}", seen.method, seen.target))
-        .collect();
+    let targets = fake.targets();
     assert_eq!(
         targets,
         [
@@ -566,11 +570,7 @@ async fn runtimes_and_install_are_called() {
             },
         ]
     );
-    let targets: Vec<String> = fake
-        .seen()
-        .into_iter()
-        .map(|seen| format!("{} {}", seen.method, seen.target))
-        .collect();
+    let targets = fake.targets();
     assert_eq!(
         targets,
         [
@@ -629,11 +629,7 @@ async fn set_default_puts_the_version_and_keeps_the_daemons_code() {
         *bodies.lock().unwrap(),
         [serde_json::json!({ "version": "8.3" })]
     );
-    let targets: Vec<String> = fake
-        .seen()
-        .into_iter()
-        .map(|seen| format!("{} {}", seen.method, seen.target))
-        .collect();
+    let targets = fake.targets();
     assert_eq!(
         targets,
         [
@@ -707,11 +703,7 @@ async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
         panic!("{err:?}");
     };
     assert_eq!(got.sites_left_without_php, ["shop[2J"]);
-    let targets: Vec<String> = fake
-        .seen()
-        .into_iter()
-        .map(|seen| format!("{} {}", seen.method, seen.target))
-        .collect();
+    let targets = fake.targets();
     assert_eq!(
         targets,
         [
@@ -855,11 +847,7 @@ async fn sites_park_link_and_update_site_are_called() {
         serde_json::json!({ "php": null, "secure": false, "proxy": null }),
     ];
     assert_eq!(*bodies.lock().unwrap(), want);
-    let targets: Vec<String> = fake
-        .seen()
-        .into_iter()
-        .map(|seen| format!("{} {}", seen.method, seen.target))
-        .collect();
+    let targets = fake.targets();
     assert_eq!(
         targets,
         [
@@ -969,11 +957,7 @@ async fn unlink_and_forget_send_delete() {
     let json = serde_json::to_string(&ParkRequest { path: folder }).unwrap();
     let none = (false, String::new());
     assert_eq!(*bodies.lock().unwrap(), [none.clone(), none, (true, json)]);
-    let targets: Vec<String> = fake
-        .seen()
-        .into_iter()
-        .map(|seen| format!("{} {}", seen.method, seen.target))
-        .collect();
+    let targets = fake.targets();
     assert_eq!(
         targets,
         [
@@ -1089,11 +1073,7 @@ async fn setup_posts_and_reads_the_report() {
     );
     fake.assert_no_token(&err);
 
-    let targets: Vec<String> = fake
-        .seen()
-        .into_iter()
-        .map(|seen| format!("{} {}", seen.method, seen.target))
-        .collect();
+    let targets = fake.targets();
     assert_eq!(targets, ["POST /v1/setup", "POST /v1/setup"]);
     let bearer = format!("Bearer {}", fake.token);
     for seen in fake.seen() {
@@ -1156,11 +1136,7 @@ async fn autostart_reads_and_puts_and_keeps_the_daemons_code() {
             serde_json::json!({ "enabled": true }),
         ]
     );
-    let targets: Vec<String> = fake
-        .seen()
-        .into_iter()
-        .map(|seen| format!("{} {}", seen.method, seen.target))
-        .collect();
+    let targets = fake.targets();
     assert_eq!(
         targets,
         [
@@ -1199,11 +1175,7 @@ async fn xdebug_reads_and_puts() {
 
     let sent = serde_json::json!({ "enabled": true });
     assert_eq!(*bodies.lock().unwrap(), [sent]);
-    let targets: Vec<String> = fake
-        .seen()
-        .into_iter()
-        .map(|seen| format!("{} {}", seen.method, seen.target))
-        .collect();
+    let targets = fake.targets();
     assert_eq!(targets, ["GET /v1/php/xdebug", "PUT /v1/php/xdebug"]);
 }
 
