@@ -31,6 +31,7 @@ pub struct AuthConfig {
     token: Arc<Token>,
     /// `127.0.0.1:<port>`, built once.
     host: String,
+    port: u16,
 }
 
 impl AuthConfig {
@@ -39,7 +40,13 @@ impl AuthConfig {
         Self {
             token,
             host: daemon_authority(port),
+            port,
         }
+    }
+
+    /// The port the daemon listens on.
+    pub fn port(&self) -> u16 {
+        self.port
     }
 }
 

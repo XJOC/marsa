@@ -3,6 +3,7 @@
 
 pub mod autostart;
 pub mod browser;
+pub mod checkup;
 pub mod daemon_file;
 pub mod linux_dns;
 pub mod low_ports;

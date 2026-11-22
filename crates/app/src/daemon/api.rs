@@ -43,6 +43,7 @@ pub fn router(daemon: Arc<Daemon>, auth: AuthConfig) -> Router {
         .merge(super::setup_api::routes(Arc::clone(&setup)))
         .merge(super::uninstall_api::routes(setup))
         .merge(super::autostart_api::routes())
+        .merge(super::doctor_api::routes(auth.port()))
         .merge(super::xdebug_api::routes())
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
@@ -85,11 +86,16 @@ impl IntoResponse for HttpError {
 }
 
 async fn health() -> Json<Health> {
-    Json(Health {
+    Json(current_health())
+}
+
+/// What `GET /v1/health` says.
+pub(super) fn current_health() -> Health {
+    Health {
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
         api_version: API_VERSION,
         pid: std::process::id(),
-    })
+    }
 }
 
 /// Answers first; the server task does the shutdown.
