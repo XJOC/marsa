@@ -56,8 +56,8 @@ use marsa_core::types::{ApiError, Event, SetupReport, SetupSkip, Site, SiteList}
 use tokio::runtime::Handle;
 
 use self::one_at_a_time::{OneAtATime, Turn};
-use super::api::HttpError;
 use super::http;
+use super::http::routes::HttpError;
 use super::sites::hosts_sync;
 use super::state::Daemon;
 

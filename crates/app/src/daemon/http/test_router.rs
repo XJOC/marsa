@@ -12,9 +12,9 @@ use marsa_core::platform::daemon_file::{Token, daemon_authority};
 use serde_json::Value;
 use tower::ServiceExt as _;
 
-use super::api::router;
 use super::auth::AuthConfig;
-use super::state::Daemon;
+use super::routes::router;
+use crate::daemon::state::Daemon;
 
 /// The daemon port in the `Host` header. No socket is bound for it.
 const PORT: u16 = 51236;

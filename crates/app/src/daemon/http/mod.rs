@@ -2,13 +2,19 @@
 //! turning a failure into an [`HttpError`]. One definition of each, so the
 //! codes, the statuses, and the texts of these answers cannot drift apart.
 
+pub mod auth;
+pub mod routes;
+pub mod server;
+#[cfg(test)]
+pub(crate) mod test_router;
+
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::http::StatusCode;
 use marsa_core::codes;
 use marsa_core::config::ConfigError;
 use tokio::task::JoinError;
 
-use super::api::HttpError;
+use self::routes::HttpError;
 
 /// Runs `job` on a blocking thread, for work that touches the disk or takes a
 /// `std::sync` lock that must not be held across `.await`. `what` names the

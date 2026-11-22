@@ -37,8 +37,8 @@ use marsa_core::sites::{self, SiteError};
 use marsa_core::types::{LinkRequest, ParkRequest, SiteList, SitePatch};
 
 use super::SitesError;
-use crate::daemon::api::HttpError;
 use crate::daemon::http::Rejected as _;
+use crate::daemon::http::routes::HttpError;
 use crate::daemon::state::Daemon;
 
 type JsonBody<T> = Result<Json<T>, JsonRejection>;
@@ -361,7 +361,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio_stream::StreamExt as _;
 
-    use crate::daemon::test_router::TestRouter;
+    use crate::daemon::http::test_router::TestRouter;
 
     /// The real router and auth layer on a temp data folder.
     struct App {

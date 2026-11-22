@@ -24,8 +24,8 @@ use marsa_core::types::{
 };
 
 use super::api::{default_tool, defaults_mut, runtime};
-use crate::daemon::api::HttpError;
 use crate::daemon::http::Rejected as _;
+use crate::daemon::http::routes::HttpError;
 use crate::daemon::services::databases;
 use crate::daemon::services::databases::client_shims;
 use crate::daemon::setup::one_at_a_time::{OneAtATime, Turn};

@@ -44,8 +44,8 @@ use marsa_core::helper::HelperOp;
 use marsa_core::recipes::Os;
 use marsa_core::types::{HostsStatus, SetupReport, SetupSkip};
 
-use super::super::api::HttpError;
 use super::super::http;
+use super::super::http::routes::HttpError;
 use super::super::state::Daemon;
 use super::{Flow, Running, Setup, linux_dns, names_of};
 
@@ -165,7 +165,7 @@ mod tests {
         Fake, Systemd, UBUNTU_2204_SERVER, answer_for, exit, linux_fake_on, make_helper,
     };
     use super::*;
-    use crate::daemon::auth::{AuthConfig, require_auth};
+    use crate::daemon::http::auth::{AuthConfig, require_auth};
 
     const PORT: u16 = 49_321;
 

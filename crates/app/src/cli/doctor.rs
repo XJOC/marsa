@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn the_daemon_logs_the_start_line_doctor_looks_for() {
-        let server = include_str!("../daemon/server.rs");
+        let server = include_str!("../daemon/http/server.rs");
         let message = format!("\"{}\");", doctor::STARTED);
         assert!(server.contains(&message), "{message}");
     }

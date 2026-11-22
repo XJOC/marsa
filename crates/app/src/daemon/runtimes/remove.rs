@@ -18,7 +18,7 @@ use semver::Version;
 
 use super::api::{bad_version, default_tool, defaults_mut, runtime};
 use super::install::{Started, busy};
-use crate::daemon::api::HttpError;
+use crate::daemon::http::routes::HttpError;
 use crate::daemon::http::{self, Rejected as _, global_error};
 use crate::daemon::services::databases::client_shims;
 use crate::daemon::services::php::{fpm_id, wanted_pools};

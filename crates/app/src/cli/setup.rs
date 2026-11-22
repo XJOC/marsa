@@ -3,7 +3,7 @@
 //! Marsa's certificate authority for this user. Linux asks for the password
 //! once, or twice when the `.test` names need a second request.
 //!
-//! One call to `marsad` (`POST /v1/setup`, in `daemon/setup_api/`),
+//! One call to `marsad` (`POST /v1/setup`, in `daemon/setup/`),
 //! started if needed. On macOS the daemon checks ports 80 and 443, asks for
 //! the administrator password and runs `marsa-helper`, then trusts the
 //! certificate authority for the user behind the dialog macOS shows. On
@@ -62,7 +62,7 @@ pub(super) fn exit_code(report: &SetupReport) -> ExitCode {
 
 /// The line before the call, which may wait for the admin prompt. Only on
 /// the systems where the daemon runs setup (the platform check of
-/// `daemon/setup_api/`); the CLI and the daemon run on the same machine.
+/// `daemon/setup/`); the CLI and the daemon run on the same machine.
 /// Elsewhere the daemon answers `setup_not_supported` at once, and a
 /// prompt line first would be wrong.
 fn started(platform: Option<Platform>) -> Option<&'static str> {
