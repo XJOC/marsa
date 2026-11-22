@@ -24,6 +24,9 @@ pub mod measure;
 pub mod model;
 // The menu-bar panel's window mode, `marsa-gui --panel`.
 pub mod panel;
+// The review aids (demo, screenshot, gallery, measurement), behind the
+// `cfg`s that keep them out of a shipped binary.
+pub(crate) mod review;
 // The system's opener of a folder: only `app` runs it.
 pub(crate) mod opener;
 // The window's own preferences, in `config/gui.toml`.
