@@ -12,7 +12,7 @@ use eframe::egui::{
 use super::badge::{count_look, count_text};
 use super::icons::Icon;
 use super::tile::{TileSize, paint_section};
-use super::{Look, layout, paint_focus_ring, quiet_fill, slot};
+use super::{Look, layout, paint_focus_ring, quiet_fill, slot, spot};
 use crate::strings;
 use crate::theme::{Direction, Face, Section, TextToken, Theme};
 
@@ -140,8 +140,8 @@ impl Widget for NavItem<'_> {
                 let galley = layout(painter, self.label, token, text_color);
                 let offset = inset + theme.size.nav_tile + theme.space.group_gap_max;
                 let x = slot(direction, rect, offset, galley.size().x);
-                let spot = Rect::from_min_size(pos2(x, rect.top()), vec2(galley.size().x, side));
-                let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), spot);
+                let area = spot(x, rect.top(), galley.size().x, side);
+                let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), area);
                 painter.galley(at.min, galley, text_color);
                 if let (Some((count, fresh)), Mark::Section(section)) = (self.count, self.mark) {
                     let shown = count_look(theme, section, fresh);
@@ -152,8 +152,8 @@ impl Widget for NavItem<'_> {
                     let galley = layout(painter, &count_text(count), token, shown.color);
                     let width = galley.size().x;
                     let x = slot(direction, rect, rect.width() - inset - width, width);
-                    let spot = Rect::from_min_size(pos2(x, rect.top()), vec2(width, side));
-                    let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), spot);
+                    let area = spot(x, rect.top(), width, side);
+                    let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), area);
                     painter.galley(at.min, galley, shown.color);
                 }
             }

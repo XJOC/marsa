@@ -8,12 +8,12 @@
 //! that it was submitted.
 
 use eframe::egui::{
-    Align, Align2, Color32, CornerRadius, Frame, Id, Margin, Rect, Response, RichText, Role, Sense,
-    Shape, Stroke, StrokeKind, TextEdit, Ui, Widget, pos2, vec2,
+    Align, Align2, Color32, CornerRadius, Frame, Id, Margin, Response, RichText, Role, Sense,
+    Shape, Stroke, StrokeKind, TextEdit, Ui, Widget, vec2,
 };
 
 use super::icons::{Glyph, Icon};
-use super::{Look, layout, paint_focus_ring, slot};
+use super::{Look, layout, paint_focus_ring, slot, spot};
 use crate::theme::{Direction, Theme};
 
 /// The border and the fill of a field.
@@ -162,8 +162,7 @@ impl<'a> Field<'a> {
         let icon_width = if self.search { icon + gap } else { 0.0 };
         let edit_width = (inner.width() - icon_width - hint_width).max(0.0);
         let edit_x = slot(direction, inner, icon_width, edit_width);
-        let edit_rect =
-            Rect::from_min_size(pos2(edit_x, rect.top()), vec2(edit_width, rect.height()));
+        let edit_rect = spot(edit_x, rect.top(), edit_width, rect.height());
 
         let enabled = ui.is_enabled();
         let mut text_edit = TextEdit::singleline(self.text);
@@ -203,7 +202,7 @@ impl<'a> Field<'a> {
         );
         if self.search {
             let x = slot(direction, inner, 0.0, icon);
-            let spot = Rect::from_min_size(pos2(x, rect.top()), vec2(icon, rect.height()));
+            let spot = spot(x, rect.top(), icon, rect.height());
             Icon::Search.paint(painter, theme, spot, paint.quiet);
         }
         if let Some(galley) = key_hint {
@@ -213,8 +212,7 @@ impl<'a> Field<'a> {
                 inner.width() - galley.size().x,
                 galley.size().x,
             );
-            let spot =
-                Rect::from_min_size(pos2(x, rect.top()), vec2(galley.size().x, rect.height()));
+            let spot = spot(x, rect.top(), galley.size().x, rect.height());
             let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), spot);
             painter.galley(at.min, galley, paint.quiet);
         }
@@ -272,6 +270,7 @@ mod tests {
     use crate::theme::tests::{TEXT, UI, contrast};
     use crate::theme::{DARK, LIGHT};
     use crate::widgets::harness::Harness;
+    use eframe::egui::Rect;
 
     #[test]
     fn a_field_is_surface_with_a_control_border_and_an_error_border_when_wrong() {

@@ -12,11 +12,11 @@ use std::sync::Arc;
 use eframe::egui::text::Galley;
 use eframe::egui::{
     Align2, Color32, CornerRadius, Rect, Response, Role, Sense, Stroke, StrokeKind, Ui, Widget,
-    WidgetInfo, pos2, vec2,
+    WidgetInfo, vec2,
 };
 
 use super::icons::Icon;
-use super::{Look, Touch, layout, paint_focus_ring, quiet_fill, slot, touched};
+use super::{Look, Touch, layout, paint_focus_ring, quiet_fill, slot, spot, touched};
 use crate::theme::{Direction, Face, TextToken, Theme};
 
 /// What kind of button this is.
@@ -320,12 +320,12 @@ impl<'a> Button<'a> {
             if let Some(icon) = self.icon {
                 let x = slot(direction, content, 0.0, icon_width);
                 // The icon centres itself in a slot as high as the button.
-                let spot = Rect::from_min_size(pos2(x, rect.top()), vec2(icon_width, height));
+                let spot = spot(x, rect.top(), icon_width, height);
                 icon.paint(painter, theme, spot, paint.text);
             }
             if let Some(galley) = galley {
                 let x = slot(direction, content, icon_width + between, text_width);
-                let spot = Rect::from_min_size(pos2(x, rect.top()), vec2(text_width, height));
+                let spot = spot(x, rect.top(), text_width, height);
                 let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), spot);
                 painter.galley(at.min, galley, paint.text);
             }

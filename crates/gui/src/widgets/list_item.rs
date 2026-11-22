@@ -7,12 +7,12 @@
 
 use eframe::egui::text::{LayoutJob, TextWrapping};
 use eframe::egui::{
-    Align2, Color32, CornerRadius, Rect, Response, Role, Sense, Stroke, StrokeKind, Ui, Vec2,
-    Widget, WidgetInfo, pos2, vec2,
+    Align2, Color32, CornerRadius, Response, Role, Sense, Stroke, StrokeKind, Ui, Vec2, Widget,
+    WidgetInfo, vec2,
 };
 
 use super::tile::{TileSize, paint_monogram};
-use super::{Look, paint_focus_ring, quiet_fill, slot};
+use super::{Look, paint_focus_ring, quiet_fill, slot, spot};
 use crate::theme::{Direction, Face, Section, TextToken, Theme};
 
 /// What a list item is painted with.
@@ -106,8 +106,8 @@ impl Widget for ListItem<'_> {
             let pad = theme.space.s3;
             let side = TileSize::Header.side(theme);
             let tile_x = slot(direction, rect, pad, side);
-            let spot = Rect::from_min_size(pos2(tile_x, rect.top()), vec2(side, height));
-            let tile = Align2::LEFT_CENTER.align_size_within_rect(Vec2::splat(side), spot);
+            let area = spot(tile_x, rect.top(), side, height);
+            let tile = Align2::LEFT_CENTER.align_size_within_rect(Vec2::splat(side), area);
             paint_monogram(
                 painter,
                 theme,
@@ -141,8 +141,8 @@ impl Widget for ListItem<'_> {
                 first.size().y + second.size().y,
             );
             let text_x = slot(direction, rect, pad + side + pad, block.x);
-            let spot = Rect::from_min_size(pos2(text_x, rect.top()), vec2(block.x, height));
-            let top = Align2::LEFT_CENTER.align_size_within_rect(block, spot).min;
+            let area = spot(text_x, rect.top(), block.x, height);
+            let top = Align2::LEFT_CENTER.align_size_within_rect(block, area).min;
             let below = top + vec2(0.0, first.size().y);
             painter.galley(top, first, theme.color.ink);
             painter.galley(below, second, theme.color.mute);

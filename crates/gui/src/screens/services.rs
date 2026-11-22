@@ -14,7 +14,7 @@
 use eframe::egui::{Role, Ui, WidgetInfo};
 use marsa_core::types::{ServiceAction, ServiceState, ServiceStatus};
 
-use super::sites::{message, mute};
+use super::lines::{message, mute};
 use crate::model::{self, Action, LogSource, Model, Route};
 use crate::strings;
 use crate::theme::page::{SERVICES_ACTIONS_COLUMN, SERVICES_STATE_COLUMN};

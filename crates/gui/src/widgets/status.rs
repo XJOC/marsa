@@ -8,11 +8,11 @@
 
 use eframe::egui::{
     Align2, Color32, CornerRadius, Frame, InnerResponse, Label, Margin, Painter, Rect, Response,
-    RichText, Role, Sense, Stroke, StrokeKind, Ui, Vec2, Widget, WidgetInfo, pos2, vec2,
+    RichText, Role, Sense, Stroke, StrokeKind, Ui, Vec2, Widget, WidgetInfo, vec2,
 };
 
 use super::icons::Icon;
-use super::{Look, layout, paint_focus_ring, quiet_fill, slot, whole};
+use super::{Look, layout, paint_focus_ring, quiet_fill, slot, spot, whole};
 use crate::strings;
 use crate::theme::{Direction, Face, TextToken, Theme};
 
@@ -172,7 +172,7 @@ impl Widget for StatusDot<'_> {
             let inner = rect.shrink2(vec2(inset, pad));
             let spot = |offset: f32, width: f32| {
                 let x = slot(direction, inner, offset, width);
-                Rect::from_min_size(pos2(x, inner.top()), vec2(width, inner.height()))
+                spot(x, inner.top(), width, inner.height())
             };
             let circle_rect = if self.folded {
                 Rect::from_center_size(rect.center(), Vec2::splat(circle))
@@ -466,9 +466,11 @@ impl Widget for RequestPath<'_> {
         group.widget_info(|| WidgetInfo::labeled(Role::List, true, label));
         for (index, (step, galley)) in self.steps.iter().zip(galleys).enumerate() {
             let (offset, width) = slots.pills[index];
-            let pill = Rect::from_min_size(
-                pos2(slot(direction, rect, offset, width), rect.top()),
-                vec2(width, height),
+            let pill = spot(
+                slot(direction, rect, offset, width),
+                rect.top(),
+                width,
+                height,
             );
             let item = ui.interact(pill, group.id.with(index), Sense::hover());
             let name = strings::path_step_label(step.label, step.state.word());
@@ -487,22 +489,20 @@ impl Widget for RequestPath<'_> {
                 StrokeKind::Inside,
             );
             let inner = pill.shrink2(vec2(theme.space.s3, 0.0));
-            let icon_spot = Rect::from_min_size(
-                pos2(slot(direction, inner, 0.0, icon), pill.top()),
-                vec2(icon, height),
-            );
+            let icon_spot = spot(slot(direction, inner, 0.0, icon), pill.top(), icon, height);
             look.icon.paint(painter, theme, icon_spot, look.color);
             let text_x = slot(direction, inner, icon + gap, galley.size().x);
-            let text_spot =
-                Rect::from_min_size(pos2(text_x, pill.top()), vec2(galley.size().x, height));
+            let text_spot = spot(text_x, pill.top(), galley.size().x, height);
             let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), text_spot);
             painter.galley(at.min, galley, look.color);
         }
         let painter = ui.painter();
         for offset in &slots.arrows {
-            let spot = Rect::from_min_size(
-                pos2(slot(direction, rect, *offset, icon), rect.top()),
-                vec2(icon, height),
+            let spot = spot(
+                slot(direction, rect, *offset, icon),
+                rect.top(),
+                icon,
+                height,
             );
             Icon::Arrow.paint(painter, theme, spot, theme.color.mute);
         }
@@ -639,7 +639,7 @@ impl Widget for StatePill {
             let painter = ui.painter();
             let spot = |offset: f32, width: f32| {
                 let x = slot(direction, rect, offset, width);
-                Rect::from_min_size(pos2(x, rect.top()), vec2(width, height))
+                spot(x, rect.top(), width, height)
             };
             let ring =
                 Align2::LEFT_CENTER.align_size_within_rect(Vec2::splat(circle), spot(0.0, circle));

@@ -15,13 +15,12 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui::os::OperatingSystem;
-use eframe::egui::{
-    Id, Key, KeyboardShortcut, Label, Modifiers, Response, RichText, Role, Ui, WidgetInfo, vec2,
-};
+use eframe::egui::{Id, Key, KeyboardShortcut, Modifiers, Response, Role, Ui, WidgetInfo, vec2};
 use marsa_core::types::{Site, SkippedFolder, Source};
 
 use crate::model::{Action, Choice, HostsSync, Model, Pick, Removal, Route, Setup};
 use crate::screens::home::{PhpChoice, php_choices};
+use crate::screens::lines::{Mark, message, mute, path, status_line};
 use crate::strings;
 use crate::theme::page::{
     NAME_FIELD_WIDTH, SITES_CONNECTION_COLUMN, SITES_FOLDER_ROWS, SITES_FORGET_COLUMN,
@@ -30,7 +29,7 @@ use crate::theme::page::{
 use crate::theme::{Section, Theme};
 use crate::widgets::table::{empty_state_button, padded_card};
 use crate::widgets::{
-    Button, Field, Glyph, Icon, Menu, MenuItem, NoticeKind, RowHeight, Setting, Table, TableColumn,
+    Button, Field, Glyph, Icon, Menu, MenuItem, RowHeight, Setting, Table, TableColumn, Text,
     VersionMenu,
 };
 
@@ -470,57 +469,6 @@ fn search(ui: &mut Ui, theme: &Theme, view: &SitesView<'_>, actions: &mut Vec<Ac
     }
 }
 
-/// A sentence in a card, in place of a table.
-pub(super) fn message(ui: &mut Ui, theme: &Theme, text: &str) {
-    padded_card(ui, |ui| {
-        ui.vertical_centered(|ui| {
-            let text = RichText::new(text)
-                .font(theme.text.body.font_id())
-                .color(theme.color.ink2);
-            ui.add(Label::new(text).selectable(false));
-        });
-    });
-}
-
-/// A line of `caption` text in `mute`.
-pub(super) fn mute(ui: &mut Ui, theme: &Theme, text: &str) {
-    let text = RichText::new(text)
-        .font(theme.text.caption.font_id())
-        .color(theme.color.mute);
-    ui.add(Label::new(text).selectable(false));
-}
-
-/// How a line of status says what kind it is, besides its words (R8).
-#[derive(Clone, Copy)]
-pub(super) enum Mark {
-    Error,
-    /// Amber (tokens.md, Color: states).
-    Warning,
-}
-
-/// An icon and a sentence that wraps, then whatever `add` puts after them.
-pub(super) fn status_line(
-    ui: &mut Ui,
-    theme: &Theme,
-    mark: Mark,
-    text: &str,
-    add: impl FnOnce(&mut Ui),
-) {
-    let (icon, color) = match mark {
-        Mark::Error => crate::widgets::notice::mark(theme, NoticeKind::Error),
-        Mark::Warning => (Icon::Alert, theme.section(Section::Dumps).fg),
-    };
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = theme.space.s2;
-        ui.add(Glyph::new(icon).size(theme.size.icon_inline).color(color));
-        let words = RichText::new(text)
-            .font(theme.text.body_sm.font_id())
-            .color(theme.color.ink);
-        ui.add(Label::new(words).selectable(false));
-        add(ui);
-    });
-}
-
 /// Linux on the hosts way: the sites the hosts file lacks, with the button
 /// that adds them. The click is the only way the window asks for the
 /// password for this.
@@ -558,10 +506,8 @@ fn link_form(
         // The folder shows as `~/…` under the home folder; the tooltip and a
         // screen reader have the whole path.
         let full = link.folder.display().to_string();
-        let title = RichText::new(strings::link_folder(&strings::home_path(link.folder, home)))
-            .font(theme.text.body_sm.font_id())
-            .color(theme.color.ink);
-        let title = ui.add(Label::new(title).selectable(false));
+        let shown = strings::link_folder(&strings::home_path(link.folder, home));
+        let title = ui.add(Text::new(&shown, theme.text.body_sm, theme.color.ink));
         let spoken = strings::link_folder(&full);
         title.widget_info(|| WidgetInfo::labeled(Role::Label, true, &spoken));
         title.on_hover_text(full);
@@ -681,10 +627,7 @@ fn connection(ui: &mut Ui, theme: &Theme, https: bool) {
         (Icon::LockOpen, strings::HTTP, theme.color.mute)
     };
     ui.add(Glyph::new(icon).size(theme.size.icon_inline).color(color));
-    let text = RichText::new(word)
-        .font(theme.text.body_sm.font_id())
-        .color(color);
-    ui.add(Label::new(text).selectable(false));
+    ui.add(Text::new(word, theme.text.body_sm, color));
 }
 
 /// A list of folders under the table: a heading, and a card of dense rows
@@ -772,27 +715,11 @@ fn skipped(ui: &mut Ui, theme: &Theme, folders_skipped: &[SkippedFolder], home: 
             row.cell(|ui| path(ui, theme, &folder.path, home));
             row.cell(|ui| {
                 let reason = strings::skip_reason(&folder.code);
-                let text = RichText::new(&reason)
-                    .font(theme.text.body_sm.font_id())
-                    .color(theme.color.ink2);
-                ui.add(Label::new(text).truncate().selectable(false))
+                ui.add(Text::small(theme, &reason).truncate())
                     .on_hover_text(&reason);
             });
         },
     );
-}
-
-/// A folder's path in the mono face, as `~/…` under the home folder, cut
-/// short at the end of the column. The tooltip has the full path.
-pub(super) fn path(ui: &mut Ui, theme: &Theme, folder: &Path, home: Option<&Path>) {
-    let shown = strings::home_path(folder, home);
-    let text = RichText::new(&shown)
-        .font(theme.text.mono_sm.font_id())
-        .color(theme.color.ink);
-    let response = ui.add(Label::new(text).truncate().selectable(false));
-    // Shortened for the eye, or cut short by the column: the whole path is
-    // one hover away.
-    response.on_hover_text(folder.display().to_string());
 }
 
 #[cfg(test)]

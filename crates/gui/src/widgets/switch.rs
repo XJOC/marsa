@@ -7,11 +7,10 @@
 //! that into an action, and the model's answer is what the next frame draws.
 
 use eframe::egui::{
-    Align, Align2, Color32, CornerRadius, Rect, Response, Role, Sense, Ui, Widget, WidgetInfo,
-    pos2, vec2,
+    Align, Align2, Color32, CornerRadius, Response, Role, Sense, Ui, Widget, WidgetInfo, vec2,
 };
 
-use super::{Look, Touch, layout, paint_focus_ring, slot, touched};
+use super::{Look, Touch, layout, paint_focus_ring, slot, spot, touched};
 use crate::theme::{Direction, Theme};
 
 /// The track and the knob in one state.
@@ -120,7 +119,7 @@ impl<'a> Switch<'a> {
             let paint = colors(theme, self.on, look.touch);
             let painter = ui.painter();
             let x = slot(direction, rect, 0.0, track_size.x);
-            let track_slot = Rect::from_min_size(pos2(x, rect.top()), vec2(track_size.x, height));
+            let track_slot = spot(x, rect.top(), track_size.x, height);
             let track = Align2::LEFT_CENTER.align_size_within_rect(track_size, track_slot);
             painter.rect_filled(track, CornerRadius::same(theme.radius.full), paint.track);
             // The knob sits at the end of the track when on, at the start
@@ -142,8 +141,7 @@ impl<'a> Switch<'a> {
                     track_size.x + theme.space.s3,
                     galley.size().x,
                 );
-                let text_slot =
-                    Rect::from_min_size(pos2(x, rect.top()), vec2(galley.size().x, height));
+                let text_slot = spot(x, rect.top(), galley.size().x, height);
                 let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), text_slot);
                 painter.galley(at.min, galley, theme.color.ink);
             }

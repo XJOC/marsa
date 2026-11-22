@@ -10,11 +10,11 @@
 //! costs what a screenful does (R16).
 
 use eframe::egui::{
-    Align2, Color32, CornerRadius, Painter, Rect, Response, Role, Sense, Ui, Widget, WidgetInfo,
-    pos2, vec2,
+    Align2, Color32, CornerRadius, Painter, Response, Role, Sense, Ui, Widget, WidgetInfo, vec2,
 };
 
 use super::slot;
+use super::spot;
 use crate::logline::LogLevel;
 use crate::strings;
 use crate::theme::{Direction, Theme};
@@ -142,9 +142,11 @@ impl Widget for LogEntry<'_> {
                 Color32::PLACEHOLDER,
             );
             let spot = |offset: f32, width: f32| {
-                Rect::from_min_size(
-                    pos2(slot(direction, rect, pad + offset, width), rect.top()),
-                    vec2(width, rect.height()),
+                spot(
+                    slot(direction, rect, pad + offset, width),
+                    rect.top(),
+                    width,
+                    rect.height(),
                 )
             };
             let at = Align2::LEFT_CENTER.align_size_within_rect(level.size(), spot(0.0, column));

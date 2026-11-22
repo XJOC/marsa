@@ -6,14 +6,14 @@
 
 use eframe::egui::{
     Align2, Color32, CornerRadius, InnerResponse, Label, Painter, Popup, Pos2, Rect, Response,
-    RichText, Role, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, Widget, WidgetInfo, pos2, vec2,
+    RichText, Role, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, Widget, WidgetInfo, vec2,
 };
 
 use super::icons::Icon;
 use super::keys::roving_keys;
 use super::menu;
 use super::{
-    Look, Touch, group_button, layout, paint_focus_ring, quiet_fill, slot, tab_stop, touched,
+    Look, Touch, group_button, layout, paint_focus_ring, quiet_fill, slot, spot, tab_stop, touched,
     with_disabled_reason,
 };
 use crate::theme::{Direction, Face, TextToken, Theme, UNIT, VersionText};
@@ -325,7 +325,7 @@ impl<'a, T: Copy + PartialEq> VersionPicker<'a, T> {
             .map(|(cell, width)| {
                 let x = slot(direction, rect, cell.offset, *width);
                 let y = rect.top() + cell.row as f32 * (button.y + gap);
-                Rect::from_min_size(pos2(x, y), vec2(*width, button.y))
+                spot(x, y, *width, button.y)
             })
             .collect();
         // One Tab stop for the group of versions: the version that has the
@@ -638,12 +638,12 @@ impl<'a, T: Copy + PartialEq> VersionMenu<'a, T> {
                 StrokeKind::Inside,
             );
             let x = slot(direction, rect, start, galley.size().x);
-            let spot = Rect::from_min_size(pos2(x, rect.top()), vec2(galley.size().x, height));
-            let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), spot);
+            let area = spot(x, rect.top(), galley.size().x, height);
+            let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), area);
             painter.galley(at.min, galley, theme.color.ink);
             let x = slot(direction, rect, width - end - chevron, chevron);
-            let spot = Rect::from_min_size(pos2(x, rect.top()), vec2(chevron, height));
-            Icon::ChevronDown.paint(painter, theme, spot, theme.color.mute);
+            let area = spot(x, rect.top(), chevron, height);
+            Icon::ChevronDown.paint(painter, theme, area, theme.color.mute);
             if look.focused {
                 paint_focus_ring(painter, theme, rect, theme.radius.md);
             }
@@ -709,6 +709,7 @@ mod tests {
     use crate::theme::{DARK, LIGHT};
     use crate::widgets::Button;
     use crate::widgets::harness::{Harness, over};
+    use eframe::egui::pos2;
 
     const PHP: [(u8, &str); 3] = [(83, "8.3"), (84, "8.4"), (85, "8.5")];
     const THEMES: [(&str, &Theme, egui::Theme); 2] = [

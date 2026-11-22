@@ -17,7 +17,7 @@ use eframe::egui::{
 };
 
 use super::table::card;
-use super::{layout, slot};
+use super::{layout, slot, spot};
 use crate::theme::page::SETTINGS_TEXT_MIN;
 use crate::theme::{Direction, Theme};
 
@@ -58,7 +58,7 @@ impl SettingRows<'_> {
         let width = ui.available_width();
         let inner = (width - side - side).max(0.0);
         let top = ui.cursor().top();
-        let row = Rect::from_min_size(pos2(ui.cursor().left() + side, top), vec2(inner, least));
+        let row = spot(ui.cursor().left() + side, top, inner, least);
 
         // The control, at the end of the row. It may take what the text
         // leaves: at least `SETTINGS_TEXT_MIN`.

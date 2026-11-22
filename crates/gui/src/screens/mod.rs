@@ -5,6 +5,7 @@
 
 pub mod first_run;
 pub mod home;
+pub mod lines;
 pub mod logs;
 pub mod panel;
 pub mod runtimes;
@@ -14,10 +15,10 @@ pub mod site;
 pub mod sites;
 
 use eframe::egui::text::{LayoutJob, TextFormat};
-use eframe::egui::{Label, RichText, Ui, vec2};
+use eframe::egui::{Label, Ui, vec2};
 
 use crate::theme::{Direction, Section, TextToken, Theme};
-use crate::widgets::{SectionTile, TileSize};
+use crate::widgets::{SectionTile, Text, TileSize};
 
 /// A heading of a section, with a hint in `caption` after it. One line of
 /// text, so the two sizes share a baseline.
@@ -34,6 +35,23 @@ pub fn heading(ui: &mut Ui, theme: &Theme, title: &str, hint: Option<&str>) {
         job.append(hint, lead, format(theme.text.caption, theme.color.mute));
     }
     ui.add(Label::new(job).selectable(false));
+}
+
+/// A section's heading and what sits at the end of its line: one line as
+/// high as a control, so the heading does not move when the button comes and
+/// goes. `at_end` adds from the end, the primary action first.
+pub fn section_header(
+    ui: &mut Ui,
+    theme: &Theme,
+    title: &str,
+    hint: Option<&str>,
+    at_end: impl FnOnce(&mut Ui),
+) {
+    let line = vec2(ui.available_width(), theme.size.control);
+    ui.allocate_ui_with_layout(line, Direction::CURRENT.row(), |ui| {
+        heading(ui, theme, title, hint);
+        ui.with_layout(Direction::CURRENT.row_from_end(), at_end);
+    });
 }
 
 /// The header of a screen (layout.md, Shell): the tile of its section, the
@@ -68,15 +86,9 @@ pub fn header_with_hint(
                 .size(TileSize::Header)
                 .decorative(),
         );
-        let text = RichText::new(title)
-            .font(theme.text.title.font_id())
-            .color(theme.color.ink);
-        ui.add(Label::new(text).selectable(false));
+        ui.add(Text::new(title, theme.text.title, theme.color.ink));
         if let Some(hint) = hint {
-            let text = RichText::new(hint)
-                .font(theme.text.body_sm.font_id())
-                .color(theme.color.mute);
-            ui.add(Label::new(text).truncate().selectable(false));
+            ui.add(Text::new(hint, theme.text.body_sm, theme.color.mute).truncate());
         }
         ui.with_layout(Direction::CURRENT.row_from_end(), actions);
     });

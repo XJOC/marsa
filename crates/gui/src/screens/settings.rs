@@ -18,16 +18,16 @@
 
 use std::path::Path;
 
-use eframe::egui::{Label, RichText, Ui};
+use eframe::egui::Ui;
 use marsa_core::helper::OpStatus;
 use marsa_core::recipes::Platform;
 
-use super::sites::{Mark, mute, status_line};
+use super::lines::{Mark, mute, status_line};
 use crate::model::{self, Action, Appearance, Autostart, Model, Setup};
 use crate::strings::{self, ReportLine};
 use crate::theme::page::SETTINGS_WIDTH;
 use crate::theme::{Section, Theme};
-use crate::widgets::{Button, Glyph, Icon, Segmented, Switch, setting_card};
+use crate::widgets::{Button, Glyph, Icon, Segmented, Switch, Text, setting_card};
 
 /// What the window knows of one step of setup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,10 +218,11 @@ pub fn show(ui: &mut Ui, view: &SettingsView<'_>, theme: &Theme) -> Vec<Action> 
     // The column keeps its width in a wide window, at the start, and takes
     // the whole window when that is narrower.
     ui.set_max_width(ui.available_width().min(SETTINGS_WIDTH));
-    let title = RichText::new(strings::SETTINGS)
-        .font(theme.text.title.font_id())
-        .color(theme.color.ink);
-    ui.add(Label::new(title).selectable(false));
+    ui.add(Text::new(
+        strings::SETTINGS,
+        theme.text.title,
+        theme.color.ink,
+    ));
     group(ui, theme, strings::SETTINGS_GENERAL, |ui| {
         general(ui, theme, &view.general, &mut actions);
     });
@@ -238,10 +239,7 @@ pub fn show(ui: &mut Ui, view: &SettingsView<'_>, theme: &Theme) -> Vec<Action> 
 fn group(ui: &mut Ui, theme: &Theme, title: &str, add: impl FnOnce(&mut Ui)) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = theme.space.group_gap;
-        let heading = RichText::new(title)
-            .font(theme.text.heading.font_id())
-            .color(theme.color.ink);
-        ui.add(Label::new(heading).selectable(false));
+        ui.add(Text::new(title, theme.text.heading, theme.color.ink));
         add(ui);
     });
 }
@@ -326,7 +324,7 @@ fn about(ui: &mut Ui, theme: &Theme, about: &About<'_>, actions: &mut Vec<Action
                 if ui.add(Button::secondary(strings::OPEN_FOLDER)).clicked() {
                     actions.push(Action::OpenDataFolder);
                 }
-                super::sites::path(ui, theme, about.folder, about.home);
+                super::lines::path(ui, theme, about.folder, about.home);
             },
         );
     });
@@ -334,10 +332,7 @@ fn about(ui: &mut Ui, theme: &Theme, about: &About<'_>, actions: &mut Vec<Action
 
 /// A value at the end of a row: the words in `ink2`.
 fn value(ui: &mut Ui, theme: &Theme, text: &str) {
-    let text = RichText::new(text)
-        .font(theme.text.body_sm.font_id())
-        .color(theme.color.ink2);
-    ui.add(Label::new(text).selectable(false));
+    ui.add(Text::small(theme, text));
 }
 
 /// How a step stands: an icon, a color, and the word, never the color alone.

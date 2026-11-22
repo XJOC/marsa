@@ -12,11 +12,11 @@
 
 use eframe::egui::{
     Align2, Color32, CornerRadius, Rect, Response, Role, Sense, Stroke, StrokeKind, Ui, Widget,
-    WidgetInfo, pos2, vec2,
+    WidgetInfo, vec2,
 };
 
 use super::icons::Icon;
-use super::{Look, Touch, layout, paint_focus_ring, slot, touched};
+use super::{Look, Touch, layout, paint_focus_ring, slot, spot, touched};
 use crate::theme::{Direction, Theme};
 
 /// What a chip is made of in one state, before it is drawn.
@@ -147,15 +147,16 @@ impl Widget for Chip<'_> {
             let stroke = Stroke::new(theme.size.border, paint.border);
             painter.rect_stroke(rect, corner, stroke, StrokeKind::Inside);
             let inside = Rect::from_center_size(rect.center(), vec2(content, height));
-            let spot = |width: f32| {
+            let mark_spot = |width: f32| {
                 let x = slot(direction, inside, 0.0, width);
-                Rect::from_min_size(pos2(x, rect.top()), vec2(width, height))
+                spot(x, rect.top(), width, height)
             };
             match self.mark {
                 Mark::Nothing => {}
                 Mark::Square(color) => {
                     let size = vec2(theme.size.dot, theme.size.dot);
-                    let square = Align2::CENTER_CENTER.align_size_within_rect(size, spot(size.x));
+                    let square =
+                        Align2::CENTER_CENTER.align_size_within_rect(size, mark_spot(size.x));
                     let corner = CornerRadius::same(theme.radius.chip_dot);
                     if self.on {
                         painter.rect_filled(square, corner, color);
@@ -166,12 +167,12 @@ impl Widget for Chip<'_> {
                 }
                 Mark::Check => {
                     if self.on {
-                        Icon::Check.paint(painter, theme, spot(mark_width), paint.text);
+                        Icon::Check.paint(painter, theme, mark_spot(mark_width), paint.text);
                     }
                 }
             }
             let x = slot(direction, inside, before, galley.size().x);
-            let text_spot = Rect::from_min_size(pos2(x, rect.top()), vec2(galley.size().x, height));
+            let text_spot = spot(x, rect.top(), galley.size().x, height);
             let at = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), text_spot);
             painter.galley(at.min, galley, paint.text);
             if look.focused {

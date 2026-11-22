@@ -14,7 +14,7 @@
 //! whether `.test` resolves, so the DNS step shows as not checked and Home
 //! never claims it works.
 
-use eframe::egui::{Label, RichText, Ui, vec2};
+use eframe::egui::Ui;
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{ServiceAction, ServiceState};
 use semver::Version;
@@ -24,12 +24,12 @@ use crate::model::{
     LogSource, Model, Route, Setup, WEB_SERVER,
 };
 use crate::strings;
+use crate::theme::Theme;
 use crate::theme::page::{HOME_OPEN_COLUMN, HOME_PHP_COLUMN};
-use crate::theme::{Direction, Theme};
 use crate::widgets::table::empty_state;
 use crate::widgets::{
     Button, Health, PathStep, Progress, RequestPath, RowHeight, StatusSentence, StepState, Table,
-    TableColumn, VersionPick, VersionPicker,
+    TableColumn, Text, VersionPick, VersionPicker,
 };
 
 /// How many sites Home lists.
@@ -547,10 +547,7 @@ fn default_php_section(ui: &mut Ui, theme: &Theme, php: &DefaultPhp, actions: &m
         let hint = strings::DEFAULT_RUNTIME_HINT;
         super::heading(ui, theme, strings::DEFAULT_PHP, Some(hint));
         if php.choices.is_empty() {
-            let text = RichText::new(strings::NO_PHP_YET)
-                .font(theme.text.body_sm.font_id())
-                .color(theme.color.ink2);
-            ui.add(Label::new(text).selectable(false));
+            ui.add(Text::small(theme, strings::NO_PHP_YET));
         }
         let versions: Vec<(usize, &str)> = php
             .choices
@@ -583,17 +580,13 @@ fn sites_section(ui: &mut Ui, theme: &Theme, sites: &SitesView, actions: &mut Ve
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = theme.space.group_gap_max;
         // The heading and the link share one line as high as a control.
-        let line = vec2(ui.available_width(), theme.size.control);
-        ui.allocate_ui_with_layout(line, Direction::CURRENT.row(), |ui| {
-            super::heading(ui, theme, strings::SITES, None);
-            ui.with_layout(Direction::CURRENT.row_from_end(), |ui| {
-                if sites.total > 0 {
-                    let all = strings::all_sites(sites.total);
-                    if ui.add(Button::quiet(&all)).clicked() {
-                        actions.push(Action::Navigate(Route::Sites));
-                    }
+        super::section_header(ui, theme, strings::SITES, None, |ui| {
+            if sites.total > 0 {
+                let all = strings::all_sites(sites.total);
+                if ui.add(Button::quiet(&all)).clicked() {
+                    actions.push(Action::Navigate(Route::Sites));
                 }
-            });
+            }
         });
         if sites.rows.is_empty() {
             if empty_state(ui, strings::HOME_SITES_EMPTY, strings::ADD_SITE) {
@@ -610,16 +603,10 @@ fn sites_section(ui: &mut Ui, theme: &Theme, sites: &SitesView, actions: &mut Ve
         let shown = table.show(ui, sites.rows.len(), |row| {
             let site = &sites.rows[row.index()];
             row.cell(|ui| {
-                let name = RichText::new(&site.name)
-                    .font(theme.text.body_strong.font_id())
-                    .color(theme.color.ink);
-                ui.add(Label::new(name).truncate().selectable(false));
+                ui.add(Text::new(&site.name, theme.text.body_strong, theme.color.ink).truncate());
             });
             row.cell(|ui| {
-                let php = RichText::new(&site.php)
-                    .font(theme.text.caption.font_id())
-                    .color(theme.color.mute);
-                ui.add(Label::new(php).selectable(false));
+                ui.add(Text::caption(theme, &site.php));
             });
             row.cell(|ui| {
                 if ui.add(Button::secondary(strings::OPEN).in_row()).clicked() {

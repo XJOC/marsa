@@ -13,7 +13,7 @@ use eframe::egui::{
     Widget, WidgetInfo, pos2, vec2,
 };
 
-use super::{Look, Switch, layout, paint_focus_ring, quiet_fill, slot, with_disabled_reason};
+use super::{Look, Switch, layout, paint_focus_ring, quiet_fill, slot, spot, with_disabled_reason};
 use crate::theme::{Direction, Theme};
 
 /// The frame of the panel: `surface`, a 1 px `line` border, and the corner
@@ -110,9 +110,7 @@ impl Widget for SiteRow<'_> {
                 painter.rect_filled(rect, corner, fill);
             }
             let (pad, gap) = (theme.space.s3, theme.space.s3);
-            let line = |x: f32, width: f32| {
-                Rect::from_min_size(pos2(x, rect.top()), vec2(width, rect.height()))
-            };
+            let line = |x: f32, width: f32| spot(x, rect.top(), width, rect.height());
             // The key, centered in its column.
             let key = layout(painter, self.key, theme.text.mono_sm, theme.color.mute);
             let column = line(

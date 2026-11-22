@@ -6,12 +6,11 @@
 //! a table row draws its rows with [`row`] too.
 
 use eframe::egui::{
-    Align2, Color32, CornerRadius, Popup, Rect, RectAlign, Response, Role, Sense, Ui, WidgetInfo,
-    pos2, vec2,
+    Align2, Color32, CornerRadius, Popup, RectAlign, Response, Role, Sense, Ui, WidgetInfo, vec2,
 };
 
 use super::icons::Icon;
-use super::{Look, layout, paint_focus_ring, quiet_fill, slot, with_disabled_reason};
+use super::{Look, layout, paint_focus_ring, quiet_fill, slot, spot, with_disabled_reason};
 use crate::theme::{Direction, Face, TextToken, Theme};
 
 /// How a row marks the setting that is on.
@@ -92,7 +91,7 @@ pub fn row(ui: &mut Ui, theme: &Theme, spec: &RowSpec<'_>, width: f32) -> Respon
         }
         let row = |offset: f32, width: f32| {
             let x = slot(direction, rect, offset, width);
-            Rect::from_min_size(pos2(x, rect.top()), vec2(width, size.y))
+            spot(x, rect.top(), width, size.y)
         };
         let text_at = match spec.mark {
             Mark::None => pad,
@@ -273,6 +272,7 @@ mod tests {
     use crate::theme::tests::{TEXT, contrast};
     use crate::theme::{DARK, LIGHT};
     use crate::widgets::harness::{Harness, Tree, over};
+    use eframe::egui::pos2;
 
     const ITEMS: [Item<'static, u8>; 3] = [
         Item::new(1, "Switch to HTTP"),
