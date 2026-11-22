@@ -6,6 +6,7 @@
 //! No environment variable overrides it: the shim never reads one, so the
 //! programs and the shim always share one folder.
 
+use marsa_core::data_dir::DataDir;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
@@ -219,7 +220,7 @@ pub fn init_logging() {
 ///
 /// `run/` or the lock file cannot be created or opened.
 pub fn window_lock(data_dir: &Path) -> io::Result<Option<File>> {
-    let run = data_dir.join("run");
+    let run = DataDir::new(data_dir).run();
     fs::create_dir_all(&run)?;
     let file = OpenOptions::new()
         .write(true)
@@ -414,7 +415,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = window_lock(dir.path()).unwrap();
         assert!(first.is_some(), "the first window takes the lock");
-        assert!(dir.path().join("run").join(WINDOW_LOCK).is_file());
+        assert!(DataDir::new(dir.path()).run().join(WINDOW_LOCK).is_file());
         assert!(
             window_lock(dir.path()).unwrap().is_none(),
             "a second window finds it taken"

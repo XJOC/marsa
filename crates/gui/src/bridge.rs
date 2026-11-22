@@ -643,6 +643,7 @@ fn log_sites(what: &str, list: &SiteList) {
 
 #[cfg(test)]
 mod tests {
+    use marsa_core::data_dir::DataDir;
     use marsa_core::types::ServiceState;
 
     use super::*;
@@ -686,6 +687,6 @@ mod tests {
             "{update:?}"
         );
         // Nothing was written where a daemon would put its files.
-        assert!(!dir.path().join("run").join("daemon.json").exists());
+        assert!(!DataDir::new(dir.path()).run().join("daemon.json").exists());
     }
 }

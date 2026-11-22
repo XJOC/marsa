@@ -1,6 +1,7 @@
 //! One run of a database server under the supervisor: its spawn, the wait
 //! for its first answer, and how a run that ended by itself is read.
 
+use marsa_core::data_dir::DataDir;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -47,7 +48,7 @@ impl ServerManager {
         spec: ServiceSpec,
         servers: Vec<PathBuf>,
     ) -> Result<watch::Receiver<Recorded>, ActionError> {
-        let logs_dir = daemon.data_dir.join("logs");
+        let logs_dir = DataDir::new(&daemon.data_dir).logs();
         let program = spec.program.clone();
         let runtime = Arc::clone(&self.runtime);
         let events = daemon.events.subscribe();

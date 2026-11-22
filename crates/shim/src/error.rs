@@ -167,6 +167,7 @@ fn names_hint() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marsa_core::data_dir::DataDir;
     use marsa_core::resolver::Source;
 
     fn io_error() -> io::Error {
@@ -295,7 +296,7 @@ mod tests {
         assert!(hint.starts_with(SHIM_MARK), "{hint}");
 
         let composer = ShimError::ComposerNotInstalled {
-            dir: data.join("runtimes").join("composer"),
+            dir: DataDir::new(data).runtimes().join("composer"),
         };
         assert_eq!(
             composer.hint(Some(data)).as_deref(),

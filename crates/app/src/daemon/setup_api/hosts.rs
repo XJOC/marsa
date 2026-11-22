@@ -144,6 +144,7 @@ fn not_used() -> HttpError {
 
 #[cfg(test)]
 mod tests {
+    use marsa_core::data_dir::DataDir;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::PoisonError;
@@ -178,7 +179,7 @@ mod tests {
     impl Place {
         fn new(names: &[&str], hosts: &str) -> Self {
             let dir = TempDir::new().unwrap();
-            make_helper(&dir.path().join("bin").join("marsa-helper"));
+            make_helper(&DataDir::new(dir.path()).bin().join("marsa-helper"));
             fs::write(dir.path().join("hosts"), hosts).unwrap();
             let daemon = Arc::new(Daemon::new(dir.path().to_path_buf()));
             let sites = names.iter().map(|name| site(name)).collect();
@@ -199,7 +200,7 @@ mod tests {
             Setup::with(
                 fake.clone(),
                 Some(platform),
-                Some(self.dir.path().join("bin").join("marsa-helper")),
+                Some(DataDir::new(self.dir.path()).bin().join("marsa-helper")),
                 Some(self.dir.path().join("home")),
             )
             .with_hosts_file(self.hosts())

@@ -37,6 +37,7 @@
 //! systemd-resolved and the `marsa0` link. Ports and trust have no Linux check
 //! yet.
 
+use marsa_core::data_dir::DataDir;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -45,7 +46,9 @@ use marsa_core::caddy::CaddyPaths;
 use marsa_core::client::{ClientError, DaemonClient};
 use marsa_core::config::{self, ConfigPaths};
 use marsa_core::databases::ServerKind;
-use marsa_core::doctor::{self, Check, Installed, Pass, Ports, Problem, Skip, Verdict, Warning};
+use marsa_core::doctor::{
+    self, CaddyState, Check, Installed, LogTail, Pass, Ports, Problem, Skip, Verdict, Warning,
+};
 use marsa_core::platform::browser::windows_dir;
 use marsa_core::platform::probe;
 use marsa_core::recipes::{Os, Platform};
@@ -157,7 +160,11 @@ pub async fn run(data_dir: &Path) -> Result<ExitCode, Failure> {
         );
         show(Check::Dns, doctor::hosts(block.as_ref(), names));
         let caddy_running = caddy == Some(&ServiceState::Running);
-        let caddy = running.then(|| daemon.caddy_pid.filter(|_| caddy_running));
+        let caddy = match (running, daemon.caddy_pid.filter(|_| caddy_running)) {
+            (false, _) => CaddyState::DaemonDown,
+            (true, Some(pid)) => CaddyState::Running(pid),
+            (true, None) => CaddyState::Stopped,
+        };
         show(
             Check::Ports,
             doctor::windows_ports(
@@ -310,17 +317,21 @@ fn path(data_dir: &Path) -> Verdict {
 fn log(data_dir: &Path) -> Verdict {
     let tail = probe::read_tail(&log_path(data_dir), LOG_TAIL)
         .map_err(|err| tracing::debug!(error = %err, "cannot read the daemon log"));
-    doctor::log(tail.as_ref().map(Option::as_deref).map_err(|_| ()))
+    doctor::log(match &tail {
+        Ok(Some(text)) => LogTail::Text(text),
+        Ok(None) => LogTail::Missing,
+        Err(()) => LogTail::Unreadable,
+    })
 }
 
 /// The folder of the shims, absolute: `PATH` holds absolute folders.
 fn shims_dir(data_dir: &Path) -> PathBuf {
-    let shims = data_dir.join("shims");
+    let shims = DataDir::new(data_dir).shims();
     std::path::absolute(&shims).unwrap_or(shims)
 }
 
 fn log_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("logs").join("marsad.log")
+    DataDir::new(data_dir).marsad_log()
 }
 
 /// The roots Windows trusts now, read as marsad reads them, and PHP's CA

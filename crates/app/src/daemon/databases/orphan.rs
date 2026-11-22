@@ -26,6 +26,7 @@
 //! deleted here.
 
 use marsa_core::codes;
+use marsa_core::data_dir::DataDir;
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -65,7 +66,9 @@ const KILL_WAIT: Duration = Duration::from_secs(5);
 
 /// `run/<id>.pid` of `data_dir`.
 pub(super) fn pid_path(kind: ServerKind, data_dir: &Path) -> PathBuf {
-    data_dir.join("run").join(format!("{}.pid", kind.id()))
+    DataDir::new(data_dir)
+        .run()
+        .join(format!("{}.pid", kind.id()))
 }
 
 /// How long the record of a run looks again at a pid that does not run our
@@ -632,7 +635,7 @@ mod tests {
         /// A data folder with its `run/`, and the installed `postgres` in it.
         fn data() -> (TempDir, PathBuf) {
             let dir = tempfile::tempdir().unwrap();
-            std::fs::create_dir_all(dir.path().join("run")).unwrap();
+            std::fs::create_dir_all(DataDir::new(dir.path()).run()).unwrap();
             let server = dir.path().join("runtimes/postgres/18.7.0/bin/postgres");
             (dir, server)
         }

@@ -600,6 +600,7 @@ fn shown(path: &Path) -> String {
 mod tests {
     use super::*;
     use clap::Parser as _;
+    use marsa_core::data_dir::DataDir;
     use marsa_core::helper::OpResult;
     use marsa_core::types::{ApiError, SetupSkip, SiteKind, SkippedFolder};
 
@@ -932,7 +933,7 @@ mod tests {
             )
         );
         let failure = Action::List.failure(&api("config_invalid"), &data);
-        let sites_toml = data.join("config").join("sites.toml");
+        let sites_toml = DataDir::new(&data).config().join("sites.toml");
         assert!(
             failure
                 .message

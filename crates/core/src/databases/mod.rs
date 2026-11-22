@@ -8,6 +8,7 @@
 //! daemon reads the files, tests the port, and starts the processes.
 //! The shim reads it too.
 
+use crate::data_dir::DataDir;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -194,7 +195,7 @@ impl PostgresDirs {
         let databases = app_data_dir.join("databases").join("postgres");
         Self {
             data: databases.join(major.to_string()),
-            sockets: app_data_dir.join("run"),
+            sockets: DataDir::new(app_data_dir).run(),
         }
     }
 }
@@ -818,7 +819,7 @@ mod tests {
         let pg18 = PostgresDirs::new(Path::new("/marsa"), 18);
         let databases = Path::new("/marsa").join("databases").join("postgres");
         assert_eq!(pg18.data, databases.join("18"));
-        assert_eq!(pg18.sockets, Path::new("/marsa").join("run"));
+        assert_eq!(pg18.sockets, DataDir::new("/marsa").run());
         assert_ne!(PostgresDirs::new(Path::new("/marsa"), 17).data, pg18.data);
     }
 

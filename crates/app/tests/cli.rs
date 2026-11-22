@@ -9,6 +9,7 @@
 //! `marsa runtimes` and `marsa install` are daemon calls too.
 //! No fixed sleeps: each wait polls with a generous limit.
 
+use marsa_core::data_dir::DataDir;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -54,7 +55,7 @@ fn runtimes_on_an_empty_data_dir() {
 #[test]
 fn runtimes_lists_installed_versions() {
     let data = DaemonDir::new();
-    let runtimes = data.path().join("runtimes");
+    let runtimes = DataDir::new(data.path()).runtimes();
     for dir in ["php/8.4.23", "php/8.3.27", "node/22.11.0", "composer/2.8.4"] {
         fs::create_dir_all(runtimes.join(dir)).expect("mkdir");
     }
@@ -78,7 +79,7 @@ fn runtimes_lists_installed_versions() {
 #[test]
 fn install_fails_with_its_code_when_another_install_runs() {
     let data = DaemonDir::new();
-    let lock_dir = data.path().join("runtimes").join(".tmp");
+    let lock_dir = DataDir::new(data.path()).runtimes().join(".tmp");
     fs::create_dir_all(&lock_dir).expect("mkdir");
     let lock = OpenOptions::new()
         .read(true)
@@ -97,7 +98,7 @@ fn install_fails_with_its_code_when_another_install_runs() {
          [install_busy]\n",
     );
     drop(lock);
-    assert!(!data.path().join("runtimes").join("php").exists());
+    assert!(!DataDir::new(data.path()).runtimes().join("php").exists());
 }
 
 #[test]
@@ -233,12 +234,12 @@ impl DaemonDir {
     }
 
     fn daemon_file(&self) -> DaemonFile {
-        read_daemon_file(&self.path().join("run"))
+        read_daemon_file(&DataDir::new(self.path()).run())
             .unwrap_or_else(|err| panic!("no daemon.json ({err}); log:\n{}", self.log()))
     }
 
     fn log(&self) -> String {
-        let path = self.path().join("logs").join("marsad.log");
+        let path = DataDir::new(self.path()).marsad_log();
         fs::read_to_string(path).unwrap_or_default()
     }
 
@@ -374,7 +375,7 @@ fn daemon_start_status_services_and_stop() {
     // Neither `status` nor `stop` starts the daemon.
     data.expect(&["daemon", "status"], 0, NOT_RUNNING, "");
     data.expect(&["daemon", "stop"], 0, NOT_RUNNING, "");
-    assert!(!data.path().join("run").join("daemon.json").exists());
+    assert!(!DataDir::new(data.path()).run().join("daemon.json").exists());
 
     let out = data.marsa(&["daemon", "start"]);
     assert!(

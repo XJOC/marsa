@@ -18,6 +18,7 @@
 // Windows a Job Object stops Caddy with the daemon (ADR 0017).
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
+use marsa_core::data_dir::DataDir;
 use std::collections::BTreeMap;
 use std::io::{self, BufRead as _, BufReader, Write as _};
 use std::net::{Ipv4Addr, TcpListener};
@@ -267,7 +268,7 @@ async fn start(daemon: &Daemon) -> ServiceStatus {
 }
 
 fn pid_path(data: &Path) -> PathBuf {
-    data.join("run").join("caddy.pid")
+    DataDir::new(data).run().join("caddy.pid")
 }
 
 async fn wait_for_pid_file(data: &Path, pid: u32) -> PidRecord {

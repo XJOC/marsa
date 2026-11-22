@@ -57,6 +57,7 @@ async fn set(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marsa_core::data_dir::DataDir;
     use std::fs;
     use std::path::PathBuf;
 
@@ -91,7 +92,7 @@ mod tests {
     impl App {
         fn new(kind: AutostartKind, tray: bool) -> Self {
             let dir = TempDir::new().unwrap();
-            let bin = dir.path().join("bin");
+            let bin = DataDir::new(dir.path()).bin();
             fs::create_dir_all(&bin).unwrap();
             if tray {
                 fs::write(bin.join("marsa-tray"), "").unwrap();
@@ -118,7 +119,7 @@ mod tests {
         }
 
         fn tray(&self) -> PathBuf {
-            self.dir.path().join("bin").join("marsa-tray")
+            DataDir::new(self.dir.path()).bin().join("marsa-tray")
         }
 
         fn login(&self) -> PathBuf {

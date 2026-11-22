@@ -19,6 +19,7 @@
 //!
 //! This module is not behind the `full` feature: the shim reads it.
 
+use crate::data_dir::DataDir;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -98,7 +99,7 @@ impl RuntimesDir {
     /// `<app_data_dir>/runtimes`.
     pub fn in_dir(app_data_dir: &Path) -> Self {
         Self {
-            root: app_data_dir.join("runtimes"),
+            root: DataDir::new(app_data_dir).runtimes(),
         }
     }
 
@@ -236,14 +237,14 @@ mod tests {
     fn paths_follow_the_disk_layout() {
         let data = Path::new("data");
         let runtimes = RuntimesDir::in_dir(data);
-        assert_eq!(runtimes.root(), data.join("runtimes"));
+        assert_eq!(runtimes.root(), DataDir::new(data).runtimes());
         assert_eq!(
             runtimes.runtime_dir(Runtime::Composer),
-            data.join("runtimes").join("composer")
+            DataDir::new(data).runtimes().join("composer")
         );
         assert_eq!(
             runtimes.version_dir(Runtime::Node, &v("22.11.0")),
-            data.join("runtimes").join("node").join("22.11.0")
+            DataDir::new(data).runtimes().join("node").join("22.11.0")
         );
     }
 
@@ -299,7 +300,7 @@ mod tests {
         let data = TempDir::new().expect("create temp dir");
         let runtimes = RuntimesDir::in_dir(data.path());
         let caddy = runtimes.runtime_dir(Runtime::Caddy);
-        assert_eq!(caddy, data.path().join("runtimes").join("caddy"));
+        assert_eq!(caddy, DataDir::new(data.path()).runtimes().join("caddy"));
         for name in ["2.11.7", "2.11.8", "latest"] {
             fs::create_dir_all(caddy.join(name)).expect("create version dir");
         }

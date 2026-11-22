@@ -7,6 +7,7 @@
 pub mod caddy;
 pub mod codes;
 pub mod config;
+pub mod data_dir;
 pub mod databases;
 pub mod dns;
 pub mod doctor;

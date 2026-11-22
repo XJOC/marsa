@@ -27,6 +27,7 @@ pub use lifecycle::{
 };
 pub use sse::{EventStream, StreamItem};
 
+use crate::data_dir::DataDir;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -640,7 +641,7 @@ fn utf8_path(path: &Path) -> Result<PathBuf, ClientError> {
 }
 
 pub(super) fn run_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("run")
+    DataDir::new(data_dir).run()
 }
 
 #[cfg(test)]

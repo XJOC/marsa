@@ -27,6 +27,7 @@
 //! used to hold would open the window out of sight, so the system places it
 //! every time, and a saved size costs nothing to restore.
 
+use marsa_core::data_dir::DataDir;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -113,7 +114,7 @@ pub struct Prefs {
 impl Prefs {
     /// `<data folder>/config/gui.toml`.
     pub fn path(data_dir: &Path) -> PathBuf {
-        data_dir.join("config").join(FILE)
+        DataDir::new(data_dir).config().join(FILE)
     }
 
     /// Reads the file. A missing file is the first run; a file that cannot

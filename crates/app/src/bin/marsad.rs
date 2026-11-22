@@ -5,6 +5,7 @@
 //! `marsad`: the daemon. It is the only process that changes state; the CLI and
 //! the window are its clients.
 
+use marsa_core::data_dir::DataDir;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -84,7 +85,7 @@ fn data_dir(flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 /// the level (default `info`). Past 10 MiB the file moves to `marsad.log.1`:
 /// any web page can make the daemon log rejected requests without end.
 fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
-    let logs = data_dir.join("logs");
+    let logs = DataDir::new(data_dir).logs();
     fs::create_dir_all(&logs).with_context(|| format!("cannot create {}", logs.display()))?;
     let path = logs.join("marsad.log");
     let file = LogFile::open(&path, LOG_FILE_LIMIT)

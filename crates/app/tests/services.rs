@@ -10,6 +10,7 @@
 //! The start of Caddy with the daemon runs on the same daemon,
 //! with no request.
 
+use marsa_core::data_dir::DataDir;
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, TcpListener};
 use std::sync::{Arc, Mutex};
@@ -385,7 +386,12 @@ async fn start_shows_running_and_logs_then_stop() {
     assert_eq!((stopped.state, stopped.pid), (ServiceState::Stopped, None));
     assert!(!app.daemon.proc_alive("caddy"));
     // Caddy has exited, so its pid file is gone (ADR 0009).
-    assert!(!app.dir.path().join("run").join("caddy.pid").exists());
+    assert!(
+        !DataDir::new(app.dir.path())
+            .run()
+            .join("caddy.pid")
+            .exists()
+    );
     // A second stop changes nothing.
     let again: ServiceStatus = app
         .json("POST", "/v1/services/caddy/stop", StatusCode::OK)
@@ -394,7 +400,8 @@ async fn start_shows_running_and_logs_then_stop() {
 
     // The lines stay readable after the stop, and are in `logs/caddy.log`.
     app.wait_for_line("fake stopping").await;
-    let file = std::fs::read_to_string(app.dir.path().join("logs").join("caddy.log")).unwrap();
+    let file =
+        std::fs::read_to_string(DataDir::new(app.dir.path()).logs().join("caddy.log")).unwrap();
     assert!(file.contains("fake serving\n"), "{file:?}");
     assert!(file.contains("fake request /hello\n"), "{file:?}");
 
@@ -473,7 +480,10 @@ async fn start_without_caddy_is_409_and_failed() {
 #[tokio::test]
 async fn start_with_a_version_folder_but_no_program_is_409_and_failed() {
     let app = App::new(None);
-    let version = app.dir.path().join("runtimes").join("caddy").join("2.11.8");
+    let version = DataDir::new(app.dir.path())
+        .runtimes()
+        .join("caddy")
+        .join("2.11.8");
     std::fs::create_dir_all(&version).expect("a version folder");
 
     let code = app
@@ -606,7 +616,10 @@ async fn no_caddy_installed_starts_nothing_and_fails_nothing() {
     let launched = start_at_launch(&app.daemon).wait(WAIT).await;
     assert_eq!(launched, Some(Launched::NotInstalled));
     // A version folder without its program is no Caddy either.
-    let version = app.dir.path().join("runtimes").join("caddy").join("2.11.8");
+    let version = DataDir::new(app.dir.path())
+        .runtimes()
+        .join("caddy")
+        .join("2.11.8");
     std::fs::create_dir_all(&version).unwrap();
     let launched = start_at_launch(&app.daemon).wait(WAIT).await;
     assert_eq!(launched, Some(Launched::NotInstalled));
@@ -790,7 +803,12 @@ async fn a_shutdown_during_the_start_with_the_daemon_leaves_no_caddy() {
     let caddy = app.caddy().await;
     assert_eq!((caddy.state, caddy.pid), (ServiceState::Stopped, None));
     assert!(!app.daemon.proc_alive("caddy"));
-    assert!(!app.dir.path().join("run").join("caddy.pid").exists());
+    assert!(
+        !DataDir::new(app.dir.path())
+            .run()
+            .join("caddy.pid")
+            .exists()
+    );
 }
 
 /// Caddy runs before the first sites pass: it starts without the sites, and

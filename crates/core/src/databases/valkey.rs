@@ -10,6 +10,7 @@
 //! Cygwin pid, so Marsa gives it no pid file and the supervisor follows the
 //! process it started.
 
+use crate::data_dir::DataDir;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -46,7 +47,7 @@ impl ValkeyDirs {
     pub fn new(app_data_dir: &Path) -> Self {
         Self {
             data: app_data_dir.join("databases").join("valkey"),
-            run: app_data_dir.join("run"),
+            run: DataDir::new(app_data_dir).run(),
         }
     }
 
@@ -235,10 +236,7 @@ mod tests {
     fn the_data_folder_is_shared_by_versions_and_the_config_is_in_run() {
         let dirs = ValkeyDirs::new(Path::new("/m"));
         assert_eq!(dirs.data, Path::new("/m").join("databases").join("valkey"));
-        assert_eq!(
-            dirs.config(),
-            Path::new("/m").join("run").join("valkey.conf")
-        );
+        assert_eq!(dirs.config(), DataDir::new("/m").run().join("valkey.conf"));
     }
 
     #[cfg(unix)]

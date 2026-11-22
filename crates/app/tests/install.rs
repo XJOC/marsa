@@ -13,6 +13,7 @@
 //! core installer's own tests cover the signed manifest, the checksums, and
 //! the atomic move. No network beyond loopback.
 
+use marsa_core::data_dir::DataDir;
 use std::fs::{self, File, OpenOptions};
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -176,7 +177,7 @@ struct Served {
 impl Served {
     async fn start(fake: FakeInstall) -> Self {
         let dir = TempDir::new().expect("a temp data folder");
-        let run = dir.path().join("run");
+        let run = DataDir::new(dir.path()).run();
         fs::create_dir_all(&run).expect("the run folder");
         let lock = OpenOptions::new()
             .create(true)

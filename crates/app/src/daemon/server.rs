@@ -4,6 +4,7 @@
 //! with it too, and so does PostgreSQL when it is on.
 
 use marsa_core::codes;
+use marsa_core::data_dir::DataDir;
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::future::Future;
@@ -85,7 +86,7 @@ impl std::error::Error for AlreadyRunning {}
 /// [`AlreadyRunning`] if another daemon holds the lock. Any other error if the
 /// lock, the port, or `run/daemon.json` cannot be set up.
 pub async fn run(data_dir: PathBuf) -> anyhow::Result<()> {
-    let run_dir = data_dir.join("run");
+    let run_dir = DataDir::new(&data_dir).run();
     let lock = lock_instance(&run_dir).await?;
     // Who started this daemon, for the log only: a daemon left
     // from an earlier login session is easier to trace. Asked now, while

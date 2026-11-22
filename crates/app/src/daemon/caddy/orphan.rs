@@ -11,6 +11,7 @@
 //! is never signalled, and another Marsa's Caddy does not even get `/stop`.
 
 use marsa_core::codes;
+use marsa_core::data_dir::DataDir;
 use std::error::Error as _;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
@@ -113,7 +114,7 @@ impl PidFile {
             }
         }
         Self {
-            path: data_dir.join("run").join("caddy.pid"),
+            path: DataDir::new(data_dir).run().join("caddy.pid"),
             accepted,
         }
     }

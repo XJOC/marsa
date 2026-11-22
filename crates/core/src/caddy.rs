@@ -668,6 +668,7 @@ fn utf8(path: &Path) -> Result<&str, CaddyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_dir::DataDir;
     use crate::resolver::Source;
     use semver::Version;
 
@@ -741,7 +742,7 @@ mod tests {
 
         assert_eq!(
             paths.runtime_dir(),
-            dir.path().join("runtimes").join("caddy")
+            DataDir::new(dir.path()).runtimes().join("caddy")
         );
         assert_eq!(paths.home, dir.path().join("caddy"));
         assert_eq!(
@@ -754,7 +755,8 @@ mod tests {
     /// `join` so the separators match on every system.
     fn caddy_in(data: &Path, version: &str) -> PathBuf {
         let program = format!("caddy{}", std::env::consts::EXE_SUFFIX);
-        data.join("runtimes")
+        DataDir::new(data)
+            .runtimes()
             .join("caddy")
             .join(version)
             .join(program)
@@ -764,7 +766,7 @@ mod tests {
     /// `program` reads only the folder names.
     fn install_caddy(data: &Path, versions: &[&str]) {
         for version in versions {
-            let dir = data.join("runtimes").join("caddy").join(version);
+            let dir = DataDir::new(data).runtimes().join("caddy").join(version);
             std::fs::create_dir_all(dir).expect("create a version folder");
         }
     }
@@ -774,7 +776,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("create a temp dir");
         let paths = CaddyPaths::in_dir(dir.path());
         let missing = CaddyError::NotInstalled {
-            dir: dir.path().join("runtimes").join("caddy"),
+            dir: DataDir::new(dir.path()).runtimes().join("caddy"),
         };
 
         // No `runtimes/` at all.
@@ -793,7 +795,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("create a temp dir");
         let paths = CaddyPaths::in_dir(dir.path());
         // A file where the folder should be: listing it fails.
-        std::fs::create_dir_all(dir.path().join("runtimes")).expect("create runtimes");
+        std::fs::create_dir_all(DataDir::new(dir.path()).runtimes()).expect("create runtimes");
         std::fs::write(paths.runtime_dir(), "").expect("write a file");
 
         let err = paths.program().expect_err("nothing can be listed");
