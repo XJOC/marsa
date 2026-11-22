@@ -38,7 +38,7 @@ use marsa_core::config::{self, ConfigPaths};
 use marsa_core::recipes::Platform;
 use marsa_core::types::{XdebugRequest, XdebugState};
 
-use crate::daemon::api::HttpError;
+use crate::daemon::http::routes::HttpError;
 use crate::daemon::http::{self, Rejected as _, global_error};
 use crate::daemon::services::php;
 use crate::daemon::sites::sync::PassNotRun;
@@ -159,8 +159,8 @@ mod tests {
     use serde_json::{Value, json};
     use tempfile::TempDir;
 
+    use crate::daemon::http::test_router::TestRouter;
     use crate::daemon::sites::sync::{self as sites_sync, SitesSync};
-    use crate::daemon::test_router::TestRouter;
 
     /// The real router and auth layer, and the real sites sync task, on a
     /// temp data folder with three PHP versions and no site: 8.3.1 without

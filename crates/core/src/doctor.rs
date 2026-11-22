@@ -603,7 +603,7 @@ pub fn log(tail: LogTail<'_>) -> Verdict {
     }
 }
 
-/// The message `marsad` logs at `info` when it starts (`daemon/server.rs`;
+/// The message `marsad` logs at `info` when it starts (`daemon/http/server.rs`;
 /// a test of `marsa doctor` holds the two together). An error before the
 /// last one is from an earlier run.
 pub const STARTED: &str = "marsad started";

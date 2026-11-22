@@ -343,7 +343,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::broadcast;
 
-    use crate::daemon::test_router::TestRouter;
+    use crate::daemon::http::test_router::TestRouter;
 
     /// Generous: slow CI machines, and macOS FSEvents sends events in
     /// batches. Each wait ends as soon as its condition holds.

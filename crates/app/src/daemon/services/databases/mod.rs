@@ -1155,8 +1155,8 @@ mod tests {
         /// `DELETE /v1/runtimes/postgres/<version>` through the routes: the
         /// status and the body.
         async fn uninstall_version(pg: &Pg, version: &str) -> (u16, Vec<u8>) {
-            use crate::daemon::api::router;
-            use crate::daemon::auth::AuthConfig;
+            use crate::daemon::http::auth::AuthConfig;
+            use crate::daemon::http::routes::router;
             use axum::body::{Body, to_bytes};
             use axum::http::Request;
             use marsa_core::platform::daemon_file::{Token, daemon_authority};

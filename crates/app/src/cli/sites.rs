@@ -4,7 +4,7 @@
 //! open`.
 //!
 //! Each command is one call to `marsad` (the routes in
-//! `daemon/sites_api.rs`), started if needed. A folder the user names is made
+//! `daemon/sites/api.rs`), started if needed. A folder the user names is made
 //! absolute here, against the current folder, without reading the disk: the
 //! daemon keeps absolute paths only, and `canonicalize` would give `\\?\`
 //! paths on Windows, which must not reach Caddy.

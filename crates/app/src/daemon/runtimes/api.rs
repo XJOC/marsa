@@ -71,7 +71,7 @@ use marsa_core::types::{DefaultRequest, DefaultVersion, Event, RuntimeList, Runt
 
 use super::install::install;
 use super::remove::uninstall;
-use crate::daemon::api::HttpError;
+use crate::daemon::http::routes::HttpError;
 use crate::daemon::http::{self, Rejected as _, global_error};
 use crate::daemon::state::Daemon;
 

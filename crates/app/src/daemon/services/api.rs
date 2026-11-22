@@ -51,8 +51,8 @@ use super::caddy::{ActionError, CADDY_ID, CaddyManager};
 use super::databases::{self, ServerManager};
 use super::dns::{DNS_ID, DnsService};
 use super::supervisor::{ServiceRuntime, lock};
-use crate::daemon::api::HttpError;
 use crate::daemon::http::Rejected as _;
+use crate::daemon::http::routes::HttpError;
 use crate::daemon::state::Daemon;
 
 /// The answer to an action on a service that the sites sync starts and stops.
@@ -421,8 +421,8 @@ mod tests {
 
     #[tokio::test]
     async fn pools_are_listed_after_caddy_with_their_logs_and_no_actions() {
-        use crate::daemon::api::router;
-        use crate::daemon::auth::AuthConfig;
+        use crate::daemon::http::auth::AuthConfig;
+        use crate::daemon::http::routes::router;
         use axum::http::Request;
         use marsa_core::php::PhpMinor;
         use marsa_core::platform::daemon_file::{Token, daemon_authority};
@@ -522,8 +522,8 @@ mod tests {
     /// and its logs, and a stop turns it off in `global.toml`.
     #[tokio::test]
     async fn postgres_is_listed_when_installed_and_a_stop_turns_it_off() {
-        use crate::daemon::api::router;
-        use crate::daemon::auth::AuthConfig;
+        use crate::daemon::http::auth::AuthConfig;
+        use crate::daemon::http::routes::router;
         use axum::http::Request;
         use marsa_core::config::{self, ConfigPaths, GlobalConfig, ServerSettings};
         use marsa_core::platform::daemon_file::{Token, daemon_authority};
@@ -606,8 +606,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_held_dns_port_is_listed_as_failed_and_a_start_tries_again() {
-        use crate::daemon::api::router;
-        use crate::daemon::auth::AuthConfig;
+        use crate::daemon::http::auth::AuthConfig;
+        use crate::daemon::http::routes::router;
         use crate::daemon::services::dns::held_dns_port;
         use axum::http::Request;
         use marsa_core::platform::daemon_file::{Token, daemon_authority};

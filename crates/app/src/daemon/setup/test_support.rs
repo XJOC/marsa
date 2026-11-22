@@ -4,7 +4,7 @@ use super::helper::op_name;
 use super::osascript::OSASCRIPT;
 use super::user_trust::SECURITY;
 use super::*;
-use crate::daemon::auth::{AuthConfig, require_auth};
+use crate::daemon::http::auth::{AuthConfig, require_auth};
 use crate::daemon::state::Daemon;
 use axum::Router;
 use axum::body::{Body, to_bytes};

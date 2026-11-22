@@ -26,15 +26,15 @@ use marsa_core::types::{Event, ServiceAction};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use super::api;
 use super::auth::AuthConfig;
-use super::autostart::Autostart;
-use super::services::caddy;
-use super::services::databases;
-use super::services::databases::client_shims::ClientShims;
-use super::services::dns;
-use super::sites;
-use super::state::Daemon;
+use super::routes as api;
+use crate::daemon::autostart::Autostart;
+use crate::daemon::services::caddy;
+use crate::daemon::services::databases;
+use crate::daemon::services::databases::client_shims::ClientShims;
+use crate::daemon::services::dns;
+use crate::daemon::sites;
+use crate::daemon::state::Daemon;
 
 /// How long shutdown waits for the managed processes to stop, at least. A
 /// process whose stop method takes longer gets that time

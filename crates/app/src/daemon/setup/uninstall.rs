@@ -72,8 +72,8 @@ use super::http;
 use super::{
     CHECK_LIMIT, Flow, PIPE_GRACE, PROMPT_LIMIT, Running, Setup, linux_dns, nss, user_trust,
 };
-use crate::daemon::api::HttpError;
 use crate::daemon::autostart::Autostart;
+use crate::daemon::http::routes::HttpError;
 use crate::daemon::sites::hosts_sync;
 use crate::daemon::state::Daemon;
 
@@ -340,7 +340,7 @@ mod tests {
     use tempfile::TempDir;
     use tower::ServiceExt as _;
 
-    use crate::daemon::auth::{AuthConfig, require_auth};
+    use crate::daemon::http::auth::{AuthConfig, require_auth};
     use crate::daemon::setup::{self as setup_api, RunOutput, Runner, linux_dns, nss};
 
     /// The daemon port in the `Host` header. No socket is bound for it.

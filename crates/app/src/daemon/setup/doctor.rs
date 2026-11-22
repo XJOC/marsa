@@ -21,8 +21,8 @@ use axum::{Json, Router};
 use marsa_core::platform::checkup::{self, DaemonFacts, Item};
 use marsa_core::types::{DoctorLine, DoctorReport, Site};
 
-use crate::daemon::api::{HttpError, current_health};
 use crate::daemon::http;
+use crate::daemon::http::routes::{HttpError, current_health};
 use crate::daemon::state::Daemon;
 
 /// Gathers the report from the daemon's own facts. A function pointer so a
@@ -95,8 +95,8 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt as _;
 
-    use crate::daemon::api::router;
-    use crate::daemon::auth::{AuthConfig, require_auth};
+    use crate::daemon::http::auth::{AuthConfig, require_auth};
+    use crate::daemon::http::routes::router;
 
     /// The daemon port in the `Host` header. No socket is bound for it.
     const PORT: u16 = 51239;

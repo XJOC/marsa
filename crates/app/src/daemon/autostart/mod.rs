@@ -13,7 +13,7 @@ use marsa_core::platform::autostart::{
 };
 use marsa_core::types::AutostartState;
 
-use super::api::HttpError;
+use super::http::routes::HttpError;
 
 /// Where the login file goes and what it starts. It lives in
 /// `Daemon::autostart`. `Daemon::new` gives [`Autostart::unset`], so no test

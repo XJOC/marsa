@@ -29,7 +29,7 @@ use axum::{Json, Router};
 use marsa_core::types::{AutostartRequest, AutostartState};
 
 use super::Autostart;
-use crate::daemon::api::HttpError;
+use crate::daemon::http::routes::HttpError;
 use crate::daemon::http::{self, Rejected as _};
 use crate::daemon::state::Daemon;
 
@@ -67,7 +67,7 @@ mod tests {
     use serde_json::{Value, json};
     use tempfile::TempDir;
 
-    use crate::daemon::test_router::TestRouter;
+    use crate::daemon::http::test_router::TestRouter;
 
     use AutostartKind::{LaunchAgent, XdgAutostart};
 

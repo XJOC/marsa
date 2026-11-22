@@ -22,15 +22,15 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use super::auth::{AuthConfig, require_auth};
-use super::state::Daemon;
-use super::{runtimes, services, sites};
+use crate::daemon::state::Daemon;
+use crate::daemon::{runtimes, services, sites};
 
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 
 /// The whole API.
 pub fn router(daemon: Arc<Daemon>, auth: AuthConfig) -> Router {
     // One for setup and the uninstall, so the two never run at once.
-    let setup = Arc::new(super::setup::Setup::new());
+    let setup = Arc::new(crate::daemon::setup::Setup::new());
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/shutdown", post(shutdown))
@@ -40,11 +40,11 @@ pub fn router(daemon: Arc<Daemon>, auth: AuthConfig) -> Router {
         .merge(services::api::routes())
         .merge(runtimes::api::routes())
         .merge(sites::api::routes())
-        .merge(super::setup::routes(Arc::clone(&setup)))
-        .merge(super::setup::uninstall::routes(setup))
-        .merge(super::autostart::api::routes())
-        .merge(super::setup::doctor::routes(auth.port()))
-        .merge(super::runtimes::xdebug::routes())
+        .merge(crate::daemon::setup::routes(Arc::clone(&setup)))
+        .merge(crate::daemon::setup::uninstall::routes(setup))
+        .merge(crate::daemon::autostart::api::routes())
+        .merge(crate::daemon::setup::doctor::routes(auth.port()))
+        .merge(crate::daemon::runtimes::xdebug::routes())
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
         .with_state(daemon)
@@ -90,7 +90,7 @@ async fn health() -> Json<Health> {
 }
 
 /// What `GET /v1/health` says.
-pub(super) fn current_health() -> Health {
+pub(in crate::daemon) fn current_health() -> Health {
     Health {
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
         api_version: API_VERSION,
