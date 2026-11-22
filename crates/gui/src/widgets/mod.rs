@@ -32,6 +32,7 @@ pub mod field;
 #[cfg(debug_assertions)]
 pub mod gallery;
 pub mod icons;
+pub mod keys;
 pub mod list_item;
 pub mod log_entry;
 pub mod menu;

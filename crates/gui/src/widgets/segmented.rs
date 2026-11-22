@@ -9,11 +9,12 @@
 //! chose, like the other widgets: the screen turns that into an action.
 
 use eframe::egui::{
-    Align2, Color32, CornerRadius, EventFilter, InnerResponse, Key, Rect, Response, Role, Sense,
-    Stroke, StrokeKind, Ui, Widget, WidgetInfo, pos2, vec2,
+    Align2, Color32, CornerRadius, InnerResponse, Rect, Response, Role, Sense, Stroke, StrokeKind,
+    Ui, Widget, WidgetInfo, pos2, vec2,
 };
 
-use super::{Look, Touch, group_button, layout, paint_focus_ring, tab_stop, touched};
+use super::keys::roving_keys;
+use super::{Look, Touch, group_button, layout, paint_focus_ring, slot, tab_stop, touched};
 use crate::theme::{Direction, Face, TextToken, Theme};
 
 /// The most and the fewest options a control has (components.md).
@@ -160,13 +161,16 @@ impl<'a, T: Copy + PartialEq> Segmented<'a, T> {
         group.widget_info(|| WidgetInfo::labeled(Role::RadioGroup, enabled, label));
 
         let mut chosen = None;
-        let mut x = rect.left() + inset;
+        let direction = Direction::CURRENT;
+        let mut offset = inset;
         let mut spots = Vec::new();
         for width in &widths {
-            let spot =
-                Rect::from_min_size(pos2(x, rect.top() + inset), vec2(*width, option_height));
-            spots.push(spot);
-            x += width + inset;
+            let x = slot(direction, rect, offset, *width);
+            spots.push(Rect::from_min_size(
+                pos2(x, rect.top() + inset),
+                vec2(*width, option_height),
+            ));
+            offset += width + inset;
         }
         // One Tab stop for the whole control: the option that has the focus,
         // or else the chosen one.
@@ -189,42 +193,11 @@ impl<'a, T: Copy + PartialEq> Segmented<'a, T> {
             response
                 .widget_info(|| WidgetInfo::selected(Role::RadioButton, enabled, selected, label));
         }
-        // A radio group: the arrow keys choose the next or the previous
-        // option and move the focus with the choice. The focused option asks
-        // egui to leave the horizontal arrows to it.
-        if let Some(at) = responses.iter().position(Response::has_focus) {
-            ui.memory_mut(|memory| {
-                memory.set_focus_lock_filter(
-                    responses[at].id,
-                    EventFilter {
-                        horizontal_arrows: true,
-                        ..EventFilter::default()
-                    },
-                );
-            });
-            let step = ui.input(|input| {
-                // "Forward" is to the right in a left-to-right language.
-                let right = input.key_pressed(Key::ArrowRight);
-                let left = input.key_pressed(Key::ArrowLeft);
-                match (right, left) {
-                    (true, false) => Some(Direction::CURRENT.forward()),
-                    (false, true) => Some(-Direction::CURRENT.forward()),
-                    _ => None,
-                }
-            });
-            let target = step.and_then(|step| {
-                if step > 0.0 {
-                    (at + 1 < responses.len()).then_some(at + 1)
-                } else {
-                    at.checked_sub(1)
-                }
-            });
-            if let Some(target) = target {
-                responses[target].request_focus();
-                if self.options[target].0 != self.selected {
-                    chosen = Some(self.options[target].0);
-                }
-            }
+        // A radio group: the keys choose the option the focus moves to.
+        if let Some(target) = roving_keys(ui, direction, &responses)
+            && self.options[target].0 != self.selected
+        {
+            chosen = Some(self.options[target].0);
         }
 
         if ui.is_rect_visible(rect) {
@@ -286,7 +259,7 @@ impl<T: Copy + PartialEq> Widget for Segmented<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use eframe::egui;
+    use eframe::egui::{self, Key};
 
     use super::*;
     use crate::theme::tests::{TEXT, contrast};
@@ -500,6 +473,39 @@ mod tests {
         frame(&harness, None, Mode::Dark);
         assert_eq!(
             frame(&harness, Some(Key::ArrowLeft), Mode::Dark),
+            Some(Mode::Light)
+        );
+    }
+
+    #[test]
+    fn home_and_end_and_the_vertical_arrows_choose_like_the_other_groups() {
+        let harness = Harness::new(egui::Theme::Light);
+        let frame = |harness: &Harness, key: Option<Key>, selected: Mode| {
+            let mut chosen = None;
+            let draw = |ui: &mut Ui| {
+                show(ui, selected, &mut chosen);
+            };
+            match key {
+                Some(key) => harness.key(key, draw),
+                None => harness.run(draw),
+            }
+            chosen
+        };
+        frame(&harness, None, Mode::System);
+        frame(&harness, Some(Key::Tab), Mode::System);
+        frame(&harness, None, Mode::System);
+        assert_eq!(
+            frame(&harness, Some(Key::End), Mode::System),
+            Some(Mode::Dark)
+        );
+        frame(&harness, None, Mode::Dark);
+        assert_eq!(
+            frame(&harness, Some(Key::Home), Mode::Dark),
+            Some(Mode::System)
+        );
+        frame(&harness, None, Mode::System);
+        assert_eq!(
+            frame(&harness, Some(Key::ArrowDown), Mode::System),
             Some(Mode::Light)
         );
     }
