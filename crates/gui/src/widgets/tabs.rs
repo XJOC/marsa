@@ -14,10 +14,11 @@
 //! like the other widgets: the screen keeps the choice.
 
 use eframe::egui::{
-    Align2, Color32, CornerRadius, EventFilter, InnerResponse, Key, Rect, Response, Role, Sense,
-    Ui, Widget, WidgetInfo, pos2, vec2,
+    Align2, Color32, CornerRadius, InnerResponse, Rect, Response, Role, Sense, Ui, Widget,
+    WidgetInfo, pos2, vec2,
 };
 
+use super::keys::roving_keys;
 use super::{Look, Touch, group_button, layout, paint_focus_ring, quiet_fill, slot, tab_stop};
 use crate::theme::{Direction, Face, TextToken, Theme};
 
@@ -133,43 +134,11 @@ impl<'a, T: Copy + PartialEq> Tabs<'a, T> {
             let (selected, text) = (is_chosen, *text);
             response.widget_info(|| WidgetInfo::selected(Role::Tab, enabled, selected, text));
         }
-        // The arrow keys choose the next or the previous tab and move the
-        // focus with the choice. The focused tab asks egui to leave the
-        // horizontal arrows to it.
-        if let Some(at) = responses.iter().position(Response::has_focus) {
-            ui.memory_mut(|memory| {
-                memory.set_focus_lock_filter(
-                    responses[at].id,
-                    EventFilter {
-                        horizontal_arrows: true,
-                        ..EventFilter::default()
-                    },
-                );
-            });
-            let step = ui.input(|input| {
-                // "Forward" is to the right in a left-to-right language.
-                match (
-                    input.key_pressed(Key::ArrowRight),
-                    input.key_pressed(Key::ArrowLeft),
-                ) {
-                    (true, false) => Some(Direction::CURRENT.forward()),
-                    (false, true) => Some(-Direction::CURRENT.forward()),
-                    _ => None,
-                }
-            });
-            let target = step.and_then(|step| {
-                if step > 0.0 {
-                    (at + 1 < responses.len()).then_some(at + 1)
-                } else {
-                    at.checked_sub(1)
-                }
-            });
-            if let Some(target) = target {
-                responses[target].request_focus();
-                if self.tabs[target].0 != self.selected {
-                    chosen = Some(self.tabs[target].0);
-                }
-            }
+        // The keys choose the tab the focus moves to.
+        if let Some(target) = roving_keys(ui, direction, &responses)
+            && self.tabs[target].0 != self.selected
+        {
+            chosen = Some(self.tabs[target].0);
         }
 
         if ui.is_rect_visible(rect) {
@@ -239,7 +208,7 @@ impl<T: Copy + PartialEq> Widget for Tabs<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use eframe::egui;
+    use eframe::egui::{self, Key};
 
     use super::*;
     use crate::theme::tests::{TEXT, contrast};
@@ -468,5 +437,38 @@ mod tests {
         };
         assert_eq!(ring(Look::focused()), 1);
         assert_eq!(ring(Look::rest()), 0);
+    }
+
+    #[test]
+    fn home_and_end_and_the_vertical_arrows_choose_like_the_other_groups() {
+        let harness = Harness::new(egui::Theme::Light);
+        let frame = |harness: &Harness, key: Option<Key>, selected: Tab| {
+            let mut chosen = None;
+            let draw = |ui: &mut Ui| {
+                show(ui, selected, &mut chosen);
+            };
+            match key {
+                Some(key) => harness.key(key, draw),
+                None => harness.run(draw),
+            }
+            chosen
+        };
+        frame(&harness, None, Tab::Overview);
+        frame(&harness, Some(Key::Tab), Tab::Overview);
+        frame(&harness, None, Tab::Overview);
+        assert_eq!(
+            frame(&harness, Some(Key::End), Tab::Overview),
+            Some(Tab::Logs)
+        );
+        frame(&harness, None, Tab::Logs);
+        assert_eq!(
+            frame(&harness, Some(Key::Home), Tab::Logs),
+            Some(Tab::Overview)
+        );
+        frame(&harness, None, Tab::Overview);
+        assert_eq!(
+            frame(&harness, Some(Key::ArrowDown), Tab::Overview),
+            Some(Tab::Logs)
+        );
     }
 }
