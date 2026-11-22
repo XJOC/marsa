@@ -6,14 +6,12 @@
 //! seconds; an error stays until the user closes it. A sentence too long for
 //! one line wraps, and the bar grows with it, so no message is cut.
 //!
-//! [`Notices`] is the queue with that timing. It takes the time from the
-//! caller, so a test moves the clock by hand and a screen passes
-//! `Instant::now()`. [`NoticeBar`] draws one notice, [`show_bar`] puts it at
+//! The window keeps its results in the model and decides which one shows
+//! (`shell::notices`). [`NoticeBar`] draws one notice, [`show_bar`] puts it at
 //! the bottom of the main area, and [`Progress`] is the bar of a long task,
 //! filled with `accent`.
 
-use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use eframe::egui::{
     Align2, Area, Color32, Context, Frame, Id, Margin, Order, Pos2, Rect, Response, Role, Sense,
@@ -102,107 +100,9 @@ impl Notice {
     }
 }
 
-#[derive(Clone, Debug)]
-struct Entry {
-    notice: Notice,
-    /// When it came on screen; `None` while it waits behind another.
-    shown_at: Option<Instant>,
-}
-
-/// The notices waiting to be shown, and the one on screen: the first.
-///
-/// A notice on screen is replaced only by an error that comes while a success
-/// is showing. Any other notice waits for the one before it to close, and its
-/// time starts when it comes on screen.
-#[derive(Clone, Debug, Default)]
-pub struct Notices {
-    queue: VecDeque<Entry>,
-}
-
-impl Notices {
-    pub fn push(&mut self, notice: Notice, now: Instant) {
-        let shown = Entry {
-            shown_at: Some(now),
-            notice,
-        };
-        match self.queue.front() {
-            None => self.queue.push_back(shown),
-            Some(front)
-                if shown.notice.kind == NoticeKind::Error
-                    && front.notice.kind == NoticeKind::Success =>
-            {
-                self.queue.pop_front();
-                self.queue.push_front(shown);
-            }
-            Some(_) => self.queue.push_back(Entry {
-                shown_at: None,
-                ..shown
-            }),
-        }
-    }
-
-    /// The notice on screen.
-    pub fn current(&self) -> Option<&Notice> {
-        self.queue.front().map(|entry| &entry.notice)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
-    /// How many notices there are, on screen and waiting.
-    pub fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    /// Closes the notice on screen, and brings the next one.
-    pub fn close(&mut self, now: Instant) {
-        self.queue.pop_front();
-        self.bring_next(now);
-    }
-
-    /// Closes a success that has been showing for 4 seconds. Returns how
-    /// long until the notice on screen needs a look again, so the window can
-    /// ask for one repaint then and stay idle until it: `None` for an error
-    /// or when there is no notice.
-    pub fn tick(&mut self, now: Instant) -> Option<Duration> {
-        loop {
-            let front = self.queue.front()?;
-            let (lifetime, shown_at) = (front.notice.kind.lifetime()?, front.shown_at?);
-            let shown_for = now.saturating_duration_since(shown_at);
-            if shown_for < lifetime {
-                return Some(lifetime - shown_for);
-            }
-            self.close(now);
-        }
-    }
-
-    fn bring_next(&mut self, now: Instant) {
-        if let Some(front) = self.queue.front_mut() {
-            front.shown_at.get_or_insert(now);
-        }
-    }
-
-    /// Draws the notice on screen at the bottom of `main_area`, and closes it
-    /// when a success has run out or the user pressed a button. `Some` when
-    /// the user did: [`Reaction::Action`] is the notice's action, which the
-    /// screen carries out.
-    pub fn show(&mut self, ctx: &Context, main_area: Rect, now: Instant) -> Option<Reaction> {
-        if let Some(wait) = self.tick(now) {
-            ctx.request_repaint_after(wait);
-        }
-        let notice = self.current()?.clone();
-        let reaction = show_bar(ctx, main_area, &notice);
-        if reaction.is_some() {
-            self.close(now);
-        }
-        reaction
-    }
-}
-
 /// Draws `notice` over the bottom of `main_area`, in its middle, and returns
 /// what the user pressed. A window whose notices live in its own state (the
-/// shell) draws the one it holds with this; [`Notices`] uses it too.
+/// shell) draws the one it holds with this.
 pub fn show_bar(ctx: &Context, main_area: Rect, notice: &Notice) -> Option<Reaction> {
     let theme = Theme::of(ctx);
     let anchor = main_area.center_bottom() - vec2(0.0, theme.space.s4);
@@ -512,96 +412,11 @@ mod tests {
         ("dark", &DARK, egui::Theme::Dark),
     ];
 
-    fn seconds(count: u64) -> Duration {
-        Duration::from_secs(count)
-    }
-
     #[test]
-    fn a_success_closes_after_four_seconds_and_an_error_stays() {
-        let start = Instant::now();
-        let mut notices = Notices::default();
-        notices.push(Notice::success("Unlinked shop."), start);
-        assert_eq!(
-            notices.current().map(|n| n.text.as_str()),
-            Some("Unlinked shop.")
-        );
-        // Still there just before the four seconds are over.
-        assert!(notices.tick(start + seconds(3)).is_some());
-        assert!(
-            notices
-                .tick(start + SUCCESS_LIFETIME - Duration::from_millis(1))
-                .is_some()
-        );
-        assert_eq!(notices.len(), 1);
-        // Closed when they are.
-        assert_eq!(notices.tick(start + SUCCESS_LIFETIME), None);
-        assert!(notices.is_empty());
-        assert_eq!(SUCCESS_LIFETIME, seconds(4));
-
-        // An error is still there after an hour, and closes only when told.
-        notices.push(Notice::error("Caddy stopped."), start);
-        assert_eq!(notices.tick(start + seconds(3600)), None);
-        assert_eq!(notices.current().map(|n| n.kind), Some(NoticeKind::Error));
-        notices.close(start + seconds(3601));
-        assert!(notices.is_empty());
-        assert_eq!(NoticeKind::Success.lifetime(), Some(seconds(4)));
+    fn only_a_success_has_a_lifetime_and_it_is_four_seconds() {
+        assert_eq!(SUCCESS_LIFETIME, Duration::from_secs(4));
+        assert_eq!(NoticeKind::Success.lifetime(), Some(SUCCESS_LIFETIME));
         assert_eq!(NoticeKind::Error.lifetime(), None);
-    }
-
-    #[test]
-    fn tick_says_how_long_until_the_next_look_so_the_window_can_stay_idle() {
-        let start = Instant::now();
-        let mut notices = Notices::default();
-        assert_eq!(notices.tick(start), None, "nothing to wait for");
-        notices.push(Notice::success("Done."), start);
-        assert_eq!(notices.tick(start), Some(seconds(4)));
-        assert_eq!(notices.tick(start + seconds(1)), Some(seconds(3)));
-        notices.push(Notice::error("Failed."), start + seconds(1));
-        assert_eq!(
-            notices.tick(start + seconds(2)),
-            None,
-            "an error needs no look"
-        );
-    }
-
-    #[test]
-    fn a_notice_that_waits_starts_its_four_seconds_when_it_comes_on_screen() {
-        let start = Instant::now();
-        let mut notices = Notices::default();
-        notices.push(Notice::error("Caddy stopped."), start);
-        notices.push(Notice::success("Started Caddy."), start + seconds(1));
-        assert_eq!(notices.len(), 2);
-        // The error is on screen, whatever the success's own time would be.
-        assert_eq!(notices.tick(start + seconds(60)), None);
-        assert_eq!(notices.current().map(|n| n.kind), Some(NoticeKind::Error));
-        // The error closes: the success shows, and its four seconds start now.
-        let closed = start + seconds(70);
-        notices.close(closed);
-        assert_eq!(notices.current().map(|n| n.kind), Some(NoticeKind::Success));
-        assert_eq!(notices.tick(closed + seconds(3)), Some(seconds(1)));
-        assert_eq!(notices.tick(closed + seconds(4)), None);
-        assert!(notices.is_empty());
-    }
-
-    #[test]
-    fn an_error_takes_the_place_of_a_success_and_a_success_never_takes_the_place_of_anything() {
-        let start = Instant::now();
-        let mut notices = Notices::default();
-        notices.push(Notice::success("Unlinked shop."), start);
-        notices.push(Notice::error("Caddy stopped."), start + seconds(1));
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices.current().map(|n| n.kind), Some(NoticeKind::Error));
-        // A second success waits behind the first.
-        let mut notices = Notices::default();
-        notices.push(Notice::success("One."), start);
-        notices.push(Notice::success("Two."), start + seconds(1));
-        assert_eq!(notices.current().map(|n| n.text.as_str()), Some("One."));
-        assert_eq!(
-            notices.tick(start + seconds(4)),
-            Some(seconds(4)),
-            "Two starts now"
-        );
-        assert_eq!(notices.current().map(|n| n.text.as_str()), Some("Two."));
     }
 
     /// The node of a notice bar, and its action and close buttons.
@@ -694,21 +509,26 @@ mod tests {
         }
     }
 
-    /// One frame of `notices` shown over a main area, with a click at `at`
-    /// if there is one. What the user did.
+    /// One frame of the bar over a main area, with a click at `at` if there
+    /// is one. What the user did; a notice the user answered is gone.
     fn show(
         harness: &Harness,
-        notices: &mut Notices,
+        notice: &mut Option<Notice>,
         area: Rect,
-        now: Instant,
         at: Option<egui::Pos2>,
     ) -> Option<Reaction> {
         let mut reaction = None;
+        let mut draw = |ui: &mut egui::Ui| {
+            if let Some(shown) = notice.as_ref() {
+                reaction = show_bar(ui.ctx(), area, shown).or(reaction);
+            }
+        };
         match at {
-            Some(at) => harness.click(at, |ui| {
-                reaction = notices.show(ui.ctx(), area, now).or(reaction)
-            }),
-            None => harness.run(|ui| reaction = notices.show(ui.ctx(), area, now)),
+            Some(at) => harness.click(at, &mut draw),
+            None => harness.run(&mut draw),
+        }
+        if reaction.is_some() {
+            *notice = None;
         }
         reaction
     }
@@ -725,15 +545,13 @@ mod tests {
             ("Close", Notice::error("Caddy stopped."), Reaction::Closed),
         ] {
             let harness = Harness::new(egui::Theme::Light);
-            let start = Instant::now();
-            let mut notices = Notices::default();
-            notices.push(notice, start);
+            let mut notices = Some(notice);
             // The first frames size the bar and fade it in.
             for _ in 0..20 {
-                show(&harness, &mut notices, area, start, None);
+                show(&harness, &mut notices, area, None);
             }
             let tree = harness.accessibility(|ui| {
-                notices.show(ui.ctx(), area, start);
+                show_bar(ui.ctx(), area, notices.as_ref().expect("a notice"));
             });
             let bounds = tree
                 .node_with_label(label)
@@ -743,9 +561,9 @@ mod tests {
                 ((bounds.x0 + bounds.x1) / 2.0) as f32,
                 ((bounds.y0 + bounds.y1) / 2.0) as f32,
             );
-            let reaction = show(&harness, &mut notices, area, start, Some(at));
+            let reaction = show(&harness, &mut notices, area, Some(at));
             assert_eq!(reaction, Some(expected), "{label}");
-            assert!(notices.is_empty(), "{label} closes the notice");
+            assert!(notices.is_none(), "{label} closes the notice");
         }
     }
 
@@ -754,14 +572,12 @@ mod tests {
         let harness = Harness::new(egui::Theme::Light);
         let theme = &LIGHT;
         let area = Rect::from_min_size(pos2(224.0, 0.0), egui::vec2(896.0, 720.0));
-        let start = Instant::now();
-        let mut notices = Notices::default();
-        notices.push(Notice::success("Unlinked shop."), start);
+        let mut notices = Some(Notice::success("Unlinked shop."));
         for _ in 0..20 {
-            show(&harness, &mut notices, area, start, None);
+            show(&harness, &mut notices, area, None);
         }
         let tree = harness.accessibility(|ui| {
-            notices.show(ui.ctx(), area, start);
+            show_bar(ui.ctx(), area, notices.as_ref().expect("a notice"));
         });
         let bar = tree
             .node_with_label("Unlinked shop.")
@@ -797,17 +613,12 @@ mod tests {
                     other sites.";
         let area = Rect::from_min_size(pos2(224.0, 0.0), egui::vec2(896.0, 720.0));
         let harness = Harness::new(egui::Theme::Light);
-        let start = Instant::now();
-        let mut notices = Notices::default();
-        notices.push(
-            Notice::error(long).with_action("Forget /Users/someone/Code…"),
-            start,
-        );
+        let mut notices = Some(Notice::error(long).with_action("Forget /Users/someone/Code…"));
         for _ in 0..20 {
-            show(&harness, &mut notices, area, start, None);
+            show(&harness, &mut notices, area, None);
         }
         let tree = harness.accessibility(|ui| {
-            notices.show(ui.ctx(), area, start);
+            show_bar(ui.ctx(), area, notices.as_ref().expect("a notice"));
         });
         let bar = rect_of(&tree, long);
         // Not cut: the whole sentence is the bar's name, on more than one line.
@@ -831,7 +642,7 @@ mod tests {
         // And they still work.
         let at = rect_of(&tree, "Close").center();
         assert_eq!(
-            show(&harness, &mut notices, area, start, Some(at)),
+            show(&harness, &mut notices, area, Some(at)),
             Some(Reaction::Closed)
         );
     }
@@ -840,47 +651,27 @@ mod tests {
     fn an_action_that_is_off_says_why_and_does_nothing() {
         let area = Rect::from_min_size(pos2(224.0, 0.0), egui::vec2(896.0, 720.0));
         let harness = Harness::new(egui::Theme::Light);
-        let start = Instant::now();
-        let mut notices = Notices::default();
         let notice = Notice::error("shop.test cannot be unlinked alone.")
             .with_action("Forget /code…")
             .with_action_off(Some("Another removal runs."));
         assert_eq!(notice.action_off.as_deref(), Some("Another removal runs."));
-        notices.push(notice, start);
+        let mut notices = Some(notice);
         for _ in 0..20 {
-            show(&harness, &mut notices, area, start, None);
+            show(&harness, &mut notices, area, None);
         }
         let tree = harness.accessibility(|ui| {
-            notices.show(ui.ctx(), area, start);
+            show_bar(ui.ctx(), area, notices.as_ref().expect("a notice"));
         });
         let button = tree.node_with_label("Forget /code…").expect("the action");
         assert!(button.is_disabled(), "drawn off");
         let at = rect_of(&tree, "Forget /code…").center();
-        assert_eq!(show(&harness, &mut notices, area, start, Some(at)), None);
-        assert!(!notices.is_empty(), "the notice stays");
+        assert_eq!(show(&harness, &mut notices, area, Some(at)), None);
+        assert!(notices.is_some(), "the notice stays");
         // With no reason the action is on.
         let on = Notice::error("x")
             .with_action("Forget")
             .with_action_off(None);
         assert_eq!(on.action_off, None);
-    }
-
-    #[test]
-    fn the_bar_goes_away_when_a_success_has_run_out() {
-        let harness = Harness::new(egui::Theme::Light);
-        let area = Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
-        let start = Instant::now();
-        let mut notices = Notices::default();
-        notices.push(Notice::success("Unlinked shop."), start);
-        for _ in 0..20 {
-            show(&harness, &mut notices, area, start + seconds(1), None);
-        }
-        assert!(!notices.is_empty());
-        assert_eq!(
-            show(&harness, &mut notices, area, start + seconds(5), None),
-            None
-        );
-        assert!(notices.is_empty(), "closed by the clock alone");
     }
 
     #[test]

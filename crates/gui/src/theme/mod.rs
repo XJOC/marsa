@@ -986,28 +986,37 @@ pub(crate) mod tests {
         assert!(found.is_empty(), "literals outside theme: {found:#?}");
     }
 
-    /// The name and the text of each file of `src/<folder>`, by name; at
-    /// least `least` of them.
+    /// The name and the text of each file of `src/<folder>` and of the
+    /// folders under it, by name (`gallery/mod.rs` for one below); at least
+    /// `least` of them.
     fn folder_sources(folder: &str, least: usize) -> Vec<(String, String)> {
+        fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, String)>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .expect("a source folder")
+                .map(|entry| entry.expect("a directory entry"))
+                .collect();
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            for entry in entries {
+                let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
+                if entry.path().is_dir() {
+                    walk(&entry.path(), &format!("{name}/"), out);
+                } else {
+                    let source = std::fs::read_to_string(entry.path()).expect("a source file");
+                    out.push((name, source));
+                }
+            }
+        }
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join(folder);
-        let mut names: Vec<_> = std::fs::read_dir(&path)
-            .expect("a source folder")
-            .map(|entry| entry.expect("a directory entry").file_name())
-            .collect();
-        names.sort();
+        let mut files = Vec::new();
+        walk(&path, "", &mut files);
         assert!(
-            names.len() >= least,
-            "the {folder} folder is missing files: {names:?}"
+            files.len() >= least,
+            "the {folder} folder is missing files: {:?}",
+            files.iter().map(|(name, _)| name).collect::<Vec<_>>()
         );
-        names
-            .into_iter()
-            .map(|name| {
-                let source = std::fs::read_to_string(path.join(&name)).expect("a source file");
-                (name.to_string_lossy().into_owned(), source)
-            })
-            .collect()
+        files
     }
 
     /// `source` up to its `#[cfg(test)]` module.

@@ -18,6 +18,7 @@ use eframe::egui;
 use crate::bridge;
 use crate::model::{Action, Connection, Effect, Model, Pick, Route, Update};
 use crate::prefs::{Prefs, WindowSize};
+use crate::review::ReviewAids;
 use crate::{opener, shell, strings, theme};
 
 pub struct App {
@@ -34,20 +35,9 @@ pub struct App {
     picker: Option<Picker>,
     /// Set until the first frame, to log the time it took.
     started: Option<Instant>,
-    /// The measurement `MARSA_GUI_MEASURE` asks for (see `measure`).
-    // Only with the `measure` feature, off by default: a shipped binary has
-    // no measurement mode.
-    #[cfg(feature = "measure")]
-    measure: Option<crate::measure::Run>,
-    /// The picture of the window that `MARSA_GUI_SCREENSHOT` asks for.
-    // Debug builds only: a design-review aid (see `screenshot`).
-    #[cfg(debug_assertions)]
-    screenshot: Option<crate::screenshot::Screenshot>,
-    /// `MARSA_GUI_GALLERY=1`: the window shows the widget gallery instead of
-    /// the screens.
-    // Debug builds only: a design-review aid (see `widgets::gallery`).
-    #[cfg(debug_assertions)]
-    gallery: bool,
+    /// The demo, the screenshot, the gallery, and the measurement: none of
+    /// them is in a shipped binary (see `review`).
+    aids: ReviewAids,
 }
 
 /// A folder dialog that is open on its own thread, so the window keeps
@@ -77,12 +67,8 @@ impl App {
         model.appearance = prefs.appearance;
         // Once: the window shows a folder under it as `~/…`.
         model.home = std::env::home_dir();
-        // Debug builds only: fixed data for the design review (see `demo`).
-        #[cfg(debug_assertions)]
-        if let Some(demo) = crate::demo::requested() {
-            crate::demo::fill(&mut model, demo);
-        }
-        model.route = first_route();
+        ReviewAids::fill_demo(&mut model);
+        model.route = ReviewAids::route().unwrap_or(Route::Home);
         Self {
             model,
             bridge,
@@ -91,14 +77,7 @@ impl App {
             window: None,
             picker: None,
             started: Some(started),
-            #[cfg(feature = "measure")]
-            measure: None,
-            // Debug builds only: a design-review aid (see `screenshot`).
-            #[cfg(debug_assertions)]
-            screenshot: crate::screenshot::Screenshot::start(ctx),
-            // Debug builds only: a design-review aid (see `widgets::gallery`).
-            #[cfg(debug_assertions)]
-            gallery: crate::widgets::gallery::requested(),
+            aids: ReviewAids::new(ctx),
         }
     }
 
@@ -115,8 +94,7 @@ impl App {
     #[cfg(feature = "measure")]
     #[must_use]
     pub fn measuring(mut self, plan: crate::measure::Plan) -> Self {
-        crate::measure::fill(&mut self.model, plan);
-        self.measure = Some(crate::measure::Run::new(plan));
+        self.aids.measuring(&mut self.model, plan);
         self
     }
 
@@ -234,21 +212,8 @@ impl App {
 }
 
 impl eframe::App for App {
-    // Debug builds only: the design review's click (see `screenshot`); and
-    // the `measure` feature: the wheel of its scroll (see `measure`).
-    #[cfg(any(debug_assertions, feature = "measure"))]
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        #[cfg(debug_assertions)]
-        if let Some(screenshot) = &mut self.screenshot {
-            screenshot.inject(raw_input);
-        }
-        #[cfg(feature = "measure")]
-        if let Some(run) = &mut self.measure {
-            run.inject(raw_input);
-        }
-        // Neither is on in a shipped binary: nothing to inject.
-        #[cfg(not(any(debug_assertions, feature = "measure")))]
-        let _ = raw_input;
+        self.aids.inject(raw_input);
     }
 
     /// The window closes: its size goes to `gui.toml` (once, and only when
@@ -272,22 +237,11 @@ impl eframe::App for App {
         if let Some(started) = self.started.take() {
             let ms = started.elapsed().as_millis();
             tracing::debug!(ms, "first frame");
-            #[cfg(feature = "measure")]
-            if let Some(run) = &mut self.measure {
-                run.first_frame(ms);
-            }
+            self.aids.first_frame(ms);
         }
         // What building the window takes, for the measurement mode.
-        #[cfg(feature = "measure")]
-        let building = std::time::Instant::now();
-        // Debug builds only: the widget gallery replaces the screens.
-        #[cfg(debug_assertions)]
-        if self.gallery {
-            crate::widgets::gallery::show(ui);
-            if let Some(screenshot) = &mut self.screenshot {
-                // The gallery needs no daemon: it is ready at once.
-                screenshot.frame(ui.ctx(), true);
-            }
+        let building = Instant::now();
+        if self.aids.show_gallery(ui) {
             return;
         }
         let picking = self.picker.is_some();
@@ -295,20 +249,12 @@ impl eframe::App for App {
         for action in output.actions {
             self.run(ui.ctx(), action);
         }
-        #[cfg(feature = "measure")]
-        if let Some(run) = &mut self.measure {
-            run.frame(ui.ctx(), building.elapsed(), frame.info().cpu_usage);
-        }
-        // `frame` is the measurement mode's: nothing else reads it.
-        #[cfg(not(feature = "measure"))]
-        let _ = frame;
+        let cpu = frame.info().cpu_usage;
+        let connected = self.model.is_connected();
+        self.aids
+            .frame_done(ui.ctx(), connected, building.elapsed(), cpu);
         self.follow_appearance(ui.ctx());
         self.note_window(ui.ctx());
-        // Debug builds only: a design-review aid (see `screenshot`).
-        #[cfg(debug_assertions)]
-        if let Some(screenshot) = &mut self.screenshot {
-            screenshot.frame(ui.ctx(), self.model.is_connected());
-        }
     }
 }
 
@@ -337,25 +283,11 @@ pub(crate) fn open_site(ctx: &egui::Context, model: &Model, name: &str) {
     let Some(url) = model.site_url(name) else {
         return;
     };
-    // Debug builds only: the design review's demo has made-up sites, and
-    // none of them is a page to open in a real browser.
-    #[cfg(debug_assertions)]
-    if crate::demo::requested().is_some() {
+    if ReviewAids::is_demo() {
         tracing::info!(%url, "demo: a site would open in the browser");
         return;
     }
     ctx.open_url(egui::OpenUrl::new_tab(url));
-}
-
-/// The screen the window opens on: Home.
-fn first_route() -> Route {
-    // Debug builds only: `MARSA_GUI_ROUTE` opens another screen for the
-    // design-review pictures (see `screenshot`).
-    #[cfg(debug_assertions)]
-    if let Some(route) = crate::screenshot::route() {
-        return route;
-    }
-    Route::Home
 }
 
 #[cfg(test)]
@@ -399,10 +331,10 @@ mod tests {
         assert!(measured.model.is_connected());
         assert_eq!(measured.model.session.sites.sites.len(), 12);
         assert_eq!(measured.model.route, Route::Sites);
-        assert!(measured.measure.is_some());
+        assert!(measured.aids.measure().is_some());
         // Not measuring: no sites, and no count.
         let plain = app(&ctx, dir.path(), Prefs::default());
-        assert!(plain.measure.is_none() && plain.model.session.sites.sites.is_empty());
+        assert!(plain.aids.measure().is_none() && plain.model.session.sites.sites.is_empty());
     }
 
     #[test]
