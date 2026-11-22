@@ -3,16 +3,16 @@
 //! moved here without a change in behavior; each screen's own
 //! task redesigns it.
 
-pub mod first_run;
-pub mod home;
-pub mod lines;
-pub mod logs;
-pub mod panel;
-pub mod runtimes;
-pub mod services;
-pub mod settings;
-pub mod site;
-pub mod sites;
+pub(crate) mod first_run;
+pub(crate) mod home;
+pub(crate) mod lines;
+pub(crate) mod logs;
+pub(crate) mod panel;
+pub(crate) mod runtimes;
+pub(crate) mod services;
+pub(crate) mod settings;
+pub(crate) mod site;
+pub(crate) mod sites;
 
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{Label, Ui, vec2};
@@ -22,7 +22,7 @@ use crate::widgets::{SectionTile, Text, TileSize};
 
 /// A heading of a section, with a hint in `caption` after it. One line of
 /// text, so the two sizes share a baseline.
-pub fn heading(ui: &mut Ui, theme: &Theme, title: &str, hint: Option<&str>) {
+pub(crate) fn heading(ui: &mut Ui, theme: &Theme, title: &str, hint: Option<&str>) {
     let format = |token: TextToken, color| TextFormat {
         font_id: token.font_id(),
         color,
@@ -40,7 +40,7 @@ pub fn heading(ui: &mut Ui, theme: &Theme, title: &str, hint: Option<&str>) {
 /// A section's heading and what sits at the end of its line: one line as
 /// high as a control, so the heading does not move when the button comes and
 /// goes. `at_end` adds from the end, the primary action first.
-pub fn section_header(
+pub(crate) fn section_header(
     ui: &mut Ui,
     theme: &Theme,
     title: &str,
@@ -57,7 +57,7 @@ pub fn section_header(
 /// The header of a screen (layout.md, Shell): the tile of its section, the
 /// title, then the actions pushed to the end. `actions` adds them from the
 /// end: the primary button first, then the search field before it.
-pub fn header(
+pub(crate) fn header(
     ui: &mut Ui,
     theme: &Theme,
     section: Section,
@@ -69,7 +69,7 @@ pub fn header(
 
 /// [`header`] with a hint in `caption` after the title: what the screen is
 /// for ("Programs Marsa runs for your sites").
-pub fn header_with_hint(
+pub(crate) fn header_with_hint(
     ui: &mut Ui,
     theme: &Theme,
     section: Section,

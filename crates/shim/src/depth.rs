@@ -6,14 +6,14 @@ use std::ffi::OsStr;
 use crate::error::ShimError;
 
 /// The environment variable that counts the shims in the current chain.
-pub const VAR: &str = "MARSA_SHIM_DEPTH";
+pub(crate) const VAR: &str = "MARSA_SHIM_DEPTH";
 
 /// Real chains are short: `npm run dev` → vite → `php artisan` → `composer` →
 /// `php` is about five steps.
-pub const LIMIT: u32 = 16;
+pub(crate) const LIMIT: u32 = 16;
 
 /// Reads the variable. Missing or not a number counts as 0.
-pub fn parse(value: Option<&OsStr>) -> u32 {
+pub(crate) fn parse(value: Option<&OsStr>) -> u32 {
     value
         .and_then(OsStr::to_str)
         .and_then(|text| text.trim().parse().ok())
@@ -23,7 +23,7 @@ pub fn parse(value: Option<&OsStr>) -> u32 {
 /// # Errors
 ///
 /// `shim_loop` once `depth` reaches [`LIMIT`].
-pub fn check(depth: u32) -> Result<(), ShimError> {
+pub(crate) fn check(depth: u32) -> Result<(), ShimError> {
     if depth >= LIMIT {
         Err(ShimError::Loop { depth })
     } else {

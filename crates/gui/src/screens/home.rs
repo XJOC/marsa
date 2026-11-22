@@ -37,7 +37,7 @@ const HOME_SITES: usize = 4;
 
 /// What Home says.
 #[derive(Debug, PartialEq)]
-pub struct HomeView {
+pub(crate) struct HomeView {
     pub status: StatusView,
     /// `None` while there is no daemon to ask.
     pub default_php: Option<DefaultPhp>,
@@ -46,7 +46,7 @@ pub struct HomeView {
 
 /// The status sentence, and what sits under it when something is broken.
 #[derive(Debug, PartialEq)]
-pub struct StatusView {
+pub(crate) struct StatusView {
     pub health: Health,
     pub sentence: String,
     pub explanation: String,
@@ -60,14 +60,14 @@ pub struct StatusView {
 
 /// One step of the request path.
 #[derive(Debug, PartialEq)]
-pub struct PathPill {
+pub(crate) struct PathPill {
     pub label: String,
     pub state: StepState,
 }
 
 /// A button of the error card.
 #[derive(Debug, PartialEq)]
-pub struct Fix {
+pub(crate) struct Fix {
     pub label: String,
     pub action: Action,
     /// The fix is the red button; the rest are secondary.
@@ -78,7 +78,7 @@ pub struct Fix {
 
 /// The words and the share of the install that runs.
 #[derive(Debug, PartialEq)]
-pub struct InstallBar {
+pub(crate) struct InstallBar {
     pub words: String,
     /// `None` until the daemon reports something to measure.
     pub fraction: Option<f32>,
@@ -86,7 +86,7 @@ pub struct InstallBar {
 
 /// The large version picker of the main runtime.
 #[derive(Debug, PartialEq)]
-pub struct DefaultPhp {
+pub(crate) struct DefaultPhp {
     /// The installed versions, oldest first.
     pub choices: Vec<PhpChoice>,
     /// The index of the version the default picks now.
@@ -96,7 +96,7 @@ pub struct DefaultPhp {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct PhpChoice {
+pub(crate) struct PhpChoice {
     pub version: Version,
     /// `8.4` for the newest patch of a line, the whole version for an older
     /// one: the text the daemon would save.
@@ -105,14 +105,14 @@ pub struct PhpChoice {
 
 /// The first sites.
 #[derive(Debug, PartialEq)]
-pub struct SitesView {
+pub(crate) struct SitesView {
     /// How many sites there are in all.
     pub total: usize,
     pub rows: Vec<SiteRow>,
 }
 
 #[derive(Debug, PartialEq)]
-pub struct SiteRow {
+pub(crate) struct SiteRow {
     pub name: String,
     /// `PHP 8.4`, or a dash for a site with no PHP.
     pub php: String,
@@ -160,7 +160,7 @@ impl Php {
 }
 
 /// Decides what Home says. Pure: the same model gives the same view.
-pub fn view(model: &Model) -> HomeView {
+pub(crate) fn view(model: &Model) -> HomeView {
     let connected = model.is_connected();
     HomeView {
         status: status(model),
@@ -488,7 +488,7 @@ fn sites(model: &Model) -> SitesView {
 }
 
 /// Draws `view`. Returns what the user did.
-pub fn show(ui: &mut Ui, view: &HomeView, theme: &Theme) -> Vec<Action> {
+pub(crate) fn show(ui: &mut Ui, view: &HomeView, theme: &Theme) -> Vec<Action> {
     let mut actions = Vec::new();
     ui.spacing_mut().item_spacing.y = theme.space.section_gap;
     status_card(ui, theme, &view.status, &mut actions);

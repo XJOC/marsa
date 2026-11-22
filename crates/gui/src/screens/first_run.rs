@@ -28,7 +28,7 @@ use crate::widgets::{Button, Progress, Stage, StepCard, Text};
 
 /// What the panel says.
 #[derive(Debug, PartialEq)]
-pub struct FirstRunView {
+pub(crate) struct FirstRunView {
     pub steps: [StepView; 3],
     /// The button of the step to do now.
     pub primary: Primary,
@@ -37,7 +37,7 @@ pub struct FirstRunView {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct StepView {
+pub(crate) struct StepView {
     pub number: u8,
     pub title: &'static str,
     pub body: &'static str,
@@ -47,7 +47,7 @@ pub struct StepView {
 
 /// What a step shows under its explanation.
 #[derive(Debug, PartialEq)]
-pub enum Detail {
+pub(crate) enum Detail {
     None,
     /// An install that runs.
     Progress(InstallBar),
@@ -56,7 +56,7 @@ pub enum Detail {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Primary {
+pub(crate) struct Primary {
     pub label: &'static str,
     pub action: Action,
     /// Why it cannot be pressed now: its step runs.
@@ -64,7 +64,7 @@ pub struct Primary {
 }
 
 /// Decides what the panel says. Pure: the same model gives the same view.
-pub fn view(model: &Model) -> FirstRunView {
+pub(crate) fn view(model: &Model) -> FirstRunView {
     let rows = &model.session.runtimes;
     let (php, caddy) = (
         model::runtime_missing(rows, Runtime::Php),
@@ -201,7 +201,7 @@ fn site_detail(model: &Model) -> Detail {
 }
 
 /// Draws `view`, centered in a column. Returns what the user did.
-pub fn show(ui: &mut Ui, view: &FirstRunView, theme: &Theme) -> Vec<Action> {
+pub(crate) fn show(ui: &mut Ui, view: &FirstRunView, theme: &Theme) -> Vec<Action> {
     let mut actions = Vec::new();
     ui.add_space(theme.space.s8);
     let width = ui.available_width().min(FIRST_RUN_WIDTH);

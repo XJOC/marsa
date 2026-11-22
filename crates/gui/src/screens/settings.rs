@@ -33,7 +33,7 @@ use crate::widgets::{Button, Glyph, Icon, Segmented, Switch, Text, setting_card}
 
 /// What the window knows of one step of setup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Check {
+pub(crate) enum Check {
     /// The last setup of this session did it, or it was already done.
     Done,
     /// The last setup of this session tried and failed.
@@ -46,7 +46,7 @@ pub enum Check {
 
 impl Check {
     /// How the check stands, by its word.
-    pub const fn word(self) -> &'static str {
+    pub(crate) const fn word(self) -> &'static str {
         match self {
             Check::Done => strings::CHECK_DONE,
             Check::Failed => strings::CHECK_FAILED,
@@ -58,21 +58,21 @@ impl Check {
 
 /// What Settings says.
 #[derive(Debug, PartialEq)]
-pub struct SettingsView<'a> {
+pub(crate) struct SettingsView<'a> {
     pub general: General,
     pub setup: SetupGroup,
     pub about: About<'a>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct General {
+pub(crate) struct General {
     pub autostart: AutostartRow,
     pub appearance: Appearance,
 }
 
 /// The Start at login switch.
 #[derive(Debug, PartialEq, Eq)]
-pub struct AutostartRow {
+pub(crate) struct AutostartRow {
     pub on: bool,
     /// Why the switch cannot be pressed now.
     pub off: Option<&'static str>,
@@ -82,7 +82,7 @@ pub struct AutostartRow {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct SetupGroup {
+pub(crate) struct SetupGroup {
     pub cert: Check,
     pub names: Check,
     /// What the `.test` row says under its name.
@@ -100,7 +100,7 @@ pub struct SetupGroup {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct About<'a> {
+pub(crate) struct About<'a> {
     pub version: &'static str,
     /// Under the version: the daemon's version, or that there is no daemon.
     pub daemon: String,
@@ -120,7 +120,7 @@ const NAMES_OPS: [OpName; 3] = [
 ];
 
 /// Decides what Settings says. Pure: the same model gives the same view.
-pub fn view(model: &Model) -> SettingsView<'_> {
+pub(crate) fn view(model: &Model) -> SettingsView<'_> {
     SettingsView {
         general: General {
             autostart: autostart(model),
@@ -238,7 +238,7 @@ fn from_daemon(model: &Model, probe: doctor::Check) -> Check {
 }
 
 /// Draws `view`. Returns what the user did.
-pub fn show(ui: &mut Ui, view: &SettingsView<'_>, theme: &Theme) -> Vec<Action> {
+pub(crate) fn show(ui: &mut Ui, view: &SettingsView<'_>, theme: &Theme) -> Vec<Action> {
     let mut actions = Vec::new();
     ui.spacing_mut().item_spacing.y = theme.space.section_gap;
     // The column keeps its width in a wide window, at the start, and takes

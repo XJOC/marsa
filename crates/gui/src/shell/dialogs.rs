@@ -23,7 +23,7 @@ use crate::widgets::{Answer, ConfirmDialog};
 
 /// What a confirmation says.
 #[derive(Debug, PartialEq, Eq)]
-pub struct ConfirmView {
+pub(crate) struct ConfirmView {
     /// Tells one kind of removal from another: the dialog takes the focus
     /// again when a different one replaces it.
     pub id: &'static str,
@@ -37,7 +37,7 @@ pub struct ConfirmView {
 
 /// Decides what the confirmation of the model's pending removal says, if
 /// there is one. Pure: the same model gives the same view.
-pub fn confirm_view(model: &Model) -> Option<ConfirmView> {
+pub(crate) fn confirm_view(model: &Model) -> Option<ConfirmView> {
     let removal = model.session.confirm.as_ref()?;
     let home = model.home.as_deref();
     let (id, body) = match removal {
@@ -55,7 +55,7 @@ pub fn confirm_view(model: &Model) -> Option<ConfirmView> {
 
 /// Draws the dialog the model asks for: the confirmation of a removal, else
 /// the install dialog. One dialog at a time. Returns what the user did.
-pub fn show(ctx: &Context, model: &Model) -> Vec<Action> {
+pub(crate) fn show(ctx: &Context, model: &Model) -> Vec<Action> {
     if let Some(view) = confirm_view(model) {
         return show_confirm(ctx, &view);
     }

@@ -31,7 +31,7 @@ const ACTIONS: [ServiceAction; 3] = [
 
 /// What Services says.
 #[derive(Debug, PartialEq)]
-pub enum ServicesView {
+pub(crate) enum ServicesView {
     /// No daemon: there is nothing to list.
     Offline,
     /// The daemon runs and lists no program.
@@ -46,7 +46,7 @@ pub enum ServicesView {
 
 /// One program.
 #[derive(Debug, PartialEq)]
-pub struct ServiceRow {
+pub(crate) struct ServiceRow {
     /// What an action names the program by.
     pub id: ServiceId,
     pub name: String,
@@ -66,7 +66,7 @@ pub struct ServiceRow {
 
 /// A button of a row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RowButton {
+pub(crate) enum RowButton {
     /// Start, Restart, or Stop.
     Service(ServiceAction),
     /// A service that failed and wrote a log: the Logs screen opens on it.
@@ -74,7 +74,7 @@ pub enum RowButton {
 }
 
 /// Decides what Services says. Pure: the same model gives the same view.
-pub fn view(model: &Model) -> ServicesView {
+pub(crate) fn view(model: &Model) -> ServicesView {
     if !model.is_connected() {
         return ServicesView::Offline;
     }
@@ -149,7 +149,7 @@ fn pill(pool: bool, state: &ServiceState) -> PillState {
 }
 
 /// Draws `view`. Returns what the user did.
-pub fn show(ui: &mut Ui, view: &ServicesView, theme: &Theme) -> Vec<Action> {
+pub(crate) fn show(ui: &mut Ui, view: &ServicesView, theme: &Theme) -> Vec<Action> {
     let mut actions = Vec::new();
     ui.spacing_mut().item_spacing.y = theme.space.section_gap;
     super::header_with_hint(

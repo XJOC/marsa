@@ -37,7 +37,7 @@ const SEGMENTS: usize = 4;
 
 /// What Logs says.
 #[derive(Debug, PartialEq)]
-pub struct LogsView<'a> {
+pub(crate) struct LogsView<'a> {
     /// The log of each service the daemon lists, and the one on show.
     pub sources: Vec<SourceView>,
     /// The index in [`LogsView::sources`] of the log on show.
@@ -53,14 +53,14 @@ pub struct LogsView<'a> {
 
 /// One log the user may pick.
 #[derive(Debug, PartialEq, Eq)]
-pub struct SourceView {
+pub(crate) struct SourceView {
     pub source: LogSource,
     pub name: String,
 }
 
 /// A level chip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LevelChip {
+pub(crate) struct LevelChip {
     pub level: LogLevel,
     /// Its lines show.
     pub on: bool,
@@ -68,7 +68,7 @@ pub struct LevelChip {
 
 /// The list, or what stands in its place.
 #[derive(Debug, PartialEq)]
-pub enum Body<'a> {
+pub(crate) enum Body<'a> {
     /// No daemon, and nothing kept of this log.
     Offline,
     /// The program has written nothing yet: its name.
@@ -80,7 +80,7 @@ pub enum Body<'a> {
 
 /// The lines the filters let through, oldest first.
 #[derive(Debug, PartialEq)]
-pub struct Lines<'a> {
+pub(crate) struct Lines<'a> {
     rows: &'a VecDeque<LogRow>,
     shown: Shown,
 }
@@ -94,19 +94,19 @@ enum Shown {
 }
 
 impl<'a> Lines<'a> {
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         match &self.shown {
             Shown::All(count) => *count,
             Shown::Some(indexes) => indexes.len(),
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// The most columns of the mono face any line that shows takes.
-    pub fn widest(&self) -> usize {
+    pub(crate) fn widest(&self) -> usize {
         let columns = |row: &LogRow| row.columns;
         match &self.shown {
             Shown::All(_) => self.rows.iter().map(columns).max().unwrap_or(0),
@@ -119,7 +119,7 @@ impl<'a> Lines<'a> {
     }
 
     /// The `n`th line that shows. `n` is below [`Lines::len`].
-    pub fn get(&self, n: usize) -> &'a LogRow {
+    pub(crate) fn get(&self, n: usize) -> &'a LogRow {
         match &self.shown {
             Shown::All(_) => &self.rows[n],
             Shown::Some(indexes) => &self.rows[indexes[n]],
@@ -129,7 +129,7 @@ impl<'a> Lines<'a> {
 
 /// Decides what Logs says about the log of `source`. Pure: the same model
 /// gives the same view.
-pub fn view<'a>(model: &'a Model, source: &LogSource) -> LogsView<'a> {
+pub(crate) fn view<'a>(model: &'a Model, source: &LogSource) -> LogsView<'a> {
     // Caddy's log first: the window always reads it, so it is there while
     // the daemon's list is not (a connection that dropped keeps the log).
     let others = model
@@ -208,7 +208,7 @@ fn holds(text: &str, search: &str) -> bool {
 }
 
 /// Draws `view`. Returns what the user did.
-pub fn show(ui: &mut Ui, view: &LogsView<'_>, theme: &Theme) -> Vec<Action> {
+pub(crate) fn show(ui: &mut Ui, view: &LogsView<'_>, theme: &Theme) -> Vec<Action> {
     let mut actions = Vec::new();
     ui.spacing_mut().item_spacing.y = theme.space.section_gap;
     super::header(ui, theme, Section::Logs, strings::LOGS, |ui| {

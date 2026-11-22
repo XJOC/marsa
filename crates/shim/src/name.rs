@@ -10,7 +10,7 @@ use marsa_core::runtimes::Runtime;
 /// The shim's role, from its name: a tool whose version the project picks,
 /// or a database server's client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
+pub(crate) enum Role {
     Tool(ShimName),
     /// `psql`, `mysqldump`, `redis-cli`, ...: the version is the one the
     /// server runs, never a project's.
@@ -26,7 +26,7 @@ impl Role {
         all(windows, not(test)),
         expect(dead_code, reason = "Windows reads its own program path instead")
     )]
-    pub fn from_argv0(argv0: &OsStr) -> Option<Self> {
+    pub(crate) fn from_argv0(argv0: &OsStr) -> Option<Self> {
         Self::from_name(Path::new(argv0).file_name()?.to_str()?)
     }
 
@@ -38,7 +38,7 @@ impl Role {
         all(unix, not(test)),
         expect(dead_code, reason = "only `sys/windows.rs` reads a program path")
     )]
-    pub fn from_exe_path(path: &Path) -> Option<Self> {
+    pub(crate) fn from_exe_path(path: &Path) -> Option<Self> {
         let exe = path
             .extension()
             .is_none_or(|extension| extension.eq_ignore_ascii_case("exe"));
@@ -64,7 +64,7 @@ impl Role {
 
 /// A name the shim answers to whose version the project picks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShimName {
+pub(crate) enum ShimName {
     Php,
     Node,
     /// Runs through `node`, with npm's own `npm-cli.js`.
@@ -77,7 +77,7 @@ pub enum ShimName {
 
 impl ShimName {
     /// The names, in the order the shim's hint lists them.
-    pub const ALL: [ShimName; 5] = [
+    pub(crate) const ALL: [ShimName; 5] = [
         ShimName::Php,
         ShimName::Node,
         ShimName::Npm,
@@ -86,7 +86,7 @@ impl ShimName {
     ];
 
     /// The name a link has.
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             ShimName::Php => "php",
             ShimName::Node => "node",
@@ -97,7 +97,7 @@ impl ShimName {
     }
 
     /// The tool whose version is picked.
-    pub fn tool(self) -> Tool {
+    pub(crate) fn tool(self) -> Tool {
         match self {
             ShimName::Php | ShimName::Composer => Tool::Php,
             ShimName::Node | ShimName::Npm | ShimName::Npx => Tool::Node,
@@ -106,7 +106,7 @@ impl ShimName {
 
     /// The folder under `runtimes/` that holds the real program: `php` for
     /// `composer`, `node` for `npm` and `npx`.
-    pub fn runtime(self) -> Runtime {
+    pub(crate) fn runtime(self) -> Runtime {
         self.tool().into()
     }
 }

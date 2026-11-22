@@ -8,7 +8,7 @@ use crate::name::Role;
 
 /// The tool, from `argv[0]`. Not `current_exe()`: on Linux it follows
 /// symlinks and gives `marsa-shim`.
-pub fn own_name(argv0: &OsStr) -> Option<Role> {
+pub(crate) fn own_name(argv0: &OsStr) -> Option<Role> {
     Role::from_argv0(argv0)
 }
 
@@ -17,7 +17,7 @@ pub fn own_name(argv0: &OsStr) -> Option<Role> {
 /// pass through untouched.
 ///
 /// It returns only if `exec` failed, so the return type is the error itself.
-pub fn exec(mut command: Command) -> ShimError {
+pub(crate) fn exec(mut command: Command) -> ShimError {
     let source = command.exec();
     ShimError::Exec {
         path: PathBuf::from(command.get_program()),

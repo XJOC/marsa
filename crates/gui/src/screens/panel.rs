@@ -47,7 +47,7 @@ const DIGITS: [Key; MAX_SITES] = [
 
 /// What the user did in the panel.
 #[derive(Debug, PartialEq)]
-pub enum PanelAction {
+pub(crate) enum PanelAction {
     /// What the window does too: [`Action::OpenSite`], [`Action::SetDefault`],
     /// and [`Action::ToggleXdebug`]. `PanelApp` applies it like the window.
     Do(Action),
@@ -57,7 +57,7 @@ pub enum PanelAction {
 
 /// What the panel says.
 #[derive(Debug, PartialEq)]
-pub struct PanelView {
+pub(crate) struct PanelView {
     pub status: StatusLine,
     /// `None` while there is no daemon to ask.
     pub sites: Option<SitesView>,
@@ -71,7 +71,7 @@ pub struct PanelView {
 
 /// The status dot with its word: the sidebar's status, in the same words.
 #[derive(Debug, PartialEq)]
-pub struct StatusLine {
+pub(crate) struct StatusLine {
     pub health: Health,
     pub title: &'static str,
     pub caption: &'static str,
@@ -79,7 +79,7 @@ pub struct StatusLine {
 
 /// The sites, at most [`MAX_SITES`].
 #[derive(Debug, PartialEq)]
-pub struct SitesView {
+pub(crate) struct SitesView {
     /// In the order of the window's list; the first has the key 1.
     pub rows: Vec<SiteLine>,
     /// How many sites there are past the ninth.
@@ -87,7 +87,7 @@ pub struct SitesView {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct SiteLine {
+pub(crate) struct SiteLine {
     /// 1 to 9: the key that opens it.
     pub key: usize,
     pub name: String,
@@ -98,7 +98,7 @@ pub struct SiteLine {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct XdebugLine {
+pub(crate) struct XdebugLine {
     pub on: bool,
     /// Why the switch cannot be pressed now.
     pub off: Option<&'static str>,
@@ -108,7 +108,7 @@ pub struct XdebugLine {
 
 /// The first link of the footer.
 #[derive(Debug, PartialEq)]
-pub struct Power {
+pub(crate) struct Power {
     pub label: &'static str,
     /// What the click asks of the tray.
     pub exit: PanelExit,
@@ -117,7 +117,7 @@ pub struct Power {
 }
 
 /// Decides what the panel says. Pure: the same model gives the same view.
-pub fn view(model: &Model) -> PanelView {
+pub(crate) fn view(model: &Model) -> PanelView {
     let overall = model.overall();
     let (title, caption) = overall.text();
     let connected = model.is_connected();
@@ -201,7 +201,11 @@ fn power(model: &Model) -> Power {
 
 /// What the keys do: Esc closes the panel, and 1 to 9 open the site with that
 /// key. A key with a modifier is the system's.
-pub fn keys(view: &PanelView, pressed: impl Fn(Key) -> bool, plain: bool) -> Vec<PanelAction> {
+pub(crate) fn keys(
+    view: &PanelView,
+    pressed: impl Fn(Key) -> bool,
+    plain: bool,
+) -> Vec<PanelAction> {
     let mut actions = Vec::new();
     if pressed(Key::Escape) {
         actions.push(PanelAction::Exit(PanelExit::Closed));
@@ -221,7 +225,12 @@ pub fn keys(view: &PanelView, pressed: impl Fn(Key) -> bool, plain: bool) -> Vec
 /// Draws `view` in a window that is at most `limit` high: when the panel
 /// needs more, the sites and the controls scroll between the header and the
 /// footer, which stay. Returns what the user did.
-pub fn show_limited(ui: &mut Ui, view: &PanelView, theme: &Theme, limit: f32) -> Vec<PanelAction> {
+pub(crate) fn show_limited(
+    ui: &mut Ui,
+    view: &PanelView,
+    theme: &Theme,
+    limit: f32,
+) -> Vec<PanelAction> {
     let mut actions =
         ui.input(|input| keys(view, |key| input.key_pressed(key), !input.modifiers.any()));
     frame(ui, |ui| {
