@@ -38,11 +38,11 @@ use marsa_core::config::{self, ConfigPaths};
 use marsa_core::recipes::Platform;
 use marsa_core::types::{XdebugRequest, XdebugState};
 
-use super::api::HttpError;
-use super::http::{self, Rejected as _, global_error};
-use super::services::php;
-use super::sites::sync::PassNotRun;
-use super::state::Daemon;
+use crate::daemon::api::HttpError;
+use crate::daemon::http::{self, Rejected as _, global_error};
+use crate::daemon::services::php;
+use crate::daemon::sites::sync::PassNotRun;
+use crate::daemon::state::Daemon;
 
 /// The routes, for `api::router` to merge before its fallbacks.
 pub fn routes() -> Router<Arc<Daemon>> {

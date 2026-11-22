@@ -44,7 +44,7 @@ pub fn router(daemon: Arc<Daemon>, auth: AuthConfig) -> Router {
         .merge(super::uninstall_api::routes(setup))
         .merge(super::autostart_api::routes())
         .merge(super::doctor_api::routes(auth.port()))
-        .merge(super::xdebug_api::routes())
+        .merge(super::runtimes::xdebug::routes())
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
         .with_state(daemon)
