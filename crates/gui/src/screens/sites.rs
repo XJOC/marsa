@@ -728,11 +728,11 @@ mod tests {
 
     use eframe::egui::{self, Event, Pos2, RawInput, pos2, vec2};
     use marsa_core::runtimes::Runtime;
-    use marsa_core::types::{HostsStatus, RuntimeList, RuntimeVersions, SiteList};
+    use marsa_core::types::{HostsStatus, RuntimeList, RuntimeVersions, SiteKind, SiteList};
     use semver::Version;
 
     use super::*;
-    use crate::fixtures::{abs, connected, site};
+    use crate::fixtures::{abs, connected};
     use crate::model::{Update, apply};
     use crate::theme::LIGHT;
     use crate::widgets::harness::{Harness, Tree};
@@ -773,6 +773,19 @@ mod tests {
             ..SiteList::default()
         }));
         model
+    }
+
+    fn site(name: &str, php: Option<&str>, source: Option<Source>) -> Site {
+        let root = PathBuf::from("/code").join(name);
+        Site {
+            name: name.into(),
+            docroot: root.join("public"),
+            root,
+            kind: SiteKind::Laravel,
+            php: php.map(v),
+            php_source: source,
+            secure: true,
+        }
     }
 
     fn with_sites(model: &mut Model, sites: Vec<Site>) {
