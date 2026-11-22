@@ -2206,7 +2206,7 @@ mod tests {
         let pool = bare_pool(dir.path(), listen, "/never/run/php-fpm", &[]);
 
         assert!(!php.start_pool(&daemon, &pool).await);
-        let runtime = daemon.pools().find(fpm_id(PHP84)).expect("listed");
+        let runtime = daemon.pools().find(pool.spec.id).expect("listed");
         let (status, lines) = {
             let runtime = lock(&runtime);
             (runtime.status.clone(), runtime.logs.recent())
@@ -2219,7 +2219,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.text.starts_with(note)), "{lines:?}");
         assert!(fake.signals().is_empty());
         assert!(pid_file.path.exists(), "kept for the next try");
-        assert!(!daemon.proc_alive(fpm_id(PHP84)));
+        assert!(!daemon.proc_alive(pool.spec.id));
     }
 
     // Runs `/bin/sleep` as the pool, which Windows does not have.
