@@ -225,7 +225,7 @@ pub fn failure(err: &InstallError, requested: Option<&str>) -> InstallFailure {
                 failure.path = Some(path.clone());
             }
         }
-        InstallError::Extract(ExtractError::Io(path, _))
+        InstallError::Extract(ExtractError::Io { path, .. })
         | InstallError::Runtimes(RuntimesError::Read { path, .. }) => {
             failure.path = Some(path.clone());
         }

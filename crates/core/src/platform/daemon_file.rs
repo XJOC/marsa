@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 const FILE_NAME: &str = "daemon.json";
 /// The real file is under 200 bytes. A longer one is not ours.
 const MAX_LEN: usize = 64 * 1024;
+#[cfg(test)]
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 /// The daemon's bearer token: 32 random bytes, sent as 64 lowercase hex
@@ -69,12 +70,7 @@ impl Token {
     }
 
     fn hex_string(&self) -> String {
-        let mut out = String::with_capacity(64);
-        for byte in self.0 {
-            out.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-            out.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
-        }
-        out
+        crate::hex::encode(&self.0)
     }
 
     /// Reads 64 lowercase hex characters, the form `hex_string` writes.

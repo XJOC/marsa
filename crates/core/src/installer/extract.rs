@@ -102,8 +102,12 @@ pub enum ExtractError {
     TooLarge(String),
     #[error("archive is damaged near entry {0:?}")]
     Corrupt(String, #[source] io::Error),
-    #[error("cannot write {0:?}")]
-    Io(PathBuf, #[source] io::Error),
+    #[error("cannot write {path:?}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 }
 
 impl ExtractError {
@@ -116,7 +120,7 @@ impl ExtractError {
             ExtractError::Duplicate(..) => crate::codes::EXTRACT_DUPLICATE,
             ExtractError::TooLarge(..) => crate::codes::EXTRACT_TOO_LARGE,
             ExtractError::Corrupt(..) => crate::codes::EXTRACT_CORRUPT,
-            ExtractError::Io(..) => crate::codes::EXTRACT_IO,
+            ExtractError::Io { .. } => crate::codes::EXTRACT_IO,
         }
     }
 }
@@ -559,7 +563,10 @@ fn symlink(_target: &str, _path: &Path) -> io::Result<()> {
 }
 
 fn io_err(path: &Path) -> impl FnOnce(io::Error) -> ExtractError + '_ {
-    move |e| ExtractError::Io(path.to_path_buf(), e)
+    move |source| ExtractError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 /// For errors while reading the archive. `E` is `io::Error` or `ZipError`.

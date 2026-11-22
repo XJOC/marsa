@@ -21,15 +21,13 @@ use super::check::{CHECK_TIMEOUT, run_check};
 use super::extract::{self, Layout, Limits};
 use super::fetch::{self, Expected, Fetch};
 use super::fs::{io_error, lock, move_into_place, random_hex, remove_tree, rename, sync_tree};
-use super::manifest::{MAX_MANIFEST_SIZE, Manifest, ManifestError};
+use super::manifest::{MAX_MANIFEST_SIZE, MAX_SIGNATURE_SIZE, Manifest, ManifestError};
 use super::plan::{self, ArtifactStep};
 use super::{InstallEnv, InstallError, InstallRequest, InstalledVersion};
 use crate::recipes::{Check, PlatformRecipe};
 use crate::runtimes::{Runtime, RuntimesDir};
 use crate::types::InstallEvent;
 
-/// A `.minisig` file is about 300 bytes.
-const MAX_SIGNATURE_SIZE: u64 = 4096;
 /// At most one `Downloading` event per this many bytes.
 const PROGRESS_STEP: u64 = 256 * 1024;
 pub(super) async fn run<F: Fetch>(
@@ -140,6 +138,11 @@ pub(super) async fn run<F: Fetch>(
     })
 }
 
+/// The signature size limit, as the fetch wants it.
+fn signature_limit() -> u64 {
+    u64::try_from(MAX_SIGNATURE_SIZE).expect("4096 fits in u64")
+}
+
 /// Downloads and unpacks every file into the work folder, then runs the check.
 async fn fill<F: Fetch>(
     env: &InstallEnv<F>,
@@ -247,7 +250,7 @@ async fn verified_manifest<F: Fetch>(
 ) -> Result<Manifest, InstallError> {
     let json = fetch::fetch_bytes(&env.fetch, &env.manifest_url, MAX_MANIFEST_SIZE as u64).await?;
     let sig_url = format!("{}.minisig", env.manifest_url);
-    let sig = fetch::fetch_bytes(&env.fetch, &sig_url, MAX_SIGNATURE_SIZE).await?;
+    let sig = fetch::fetch_bytes(&env.fetch, &sig_url, signature_limit()).await?;
     let sig = String::from_utf8(sig).map_err(|_| ManifestError::BadSignature)?;
 
     let serial_path = runtimes.manifest_serial_path();

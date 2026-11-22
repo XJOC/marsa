@@ -144,7 +144,7 @@ pub fn random_hex(bytes: usize) -> io::Result<String> {
     let mut buffer = vec![0u8; bytes];
     getrandom::fill(&mut buffer)
         .map_err(|err| io::Error::other(format!("no random bytes: {err}")))?;
-    Ok(buffer.iter().map(|byte| format!("{byte:02x}")).collect())
+    Ok(crate::hex::encode(&buffer))
 }
 
 /// `ERROR_ACCESS_DENIED` (5), `ERROR_SHARING_VIOLATION` (32), or

@@ -361,8 +361,8 @@ async fn download_one(
     if actual != expected.sha256 {
         return Err(FetchError::ChecksumMismatch {
             url: shown.to_owned(),
-            expected: hex(&expected.sha256),
-            actual: hex(&actual),
+            expected: crate::hex::encode(&expected.sha256),
+            actual: crate::hex::encode(&actual),
         });
     }
     // `sync_all` can take a while: tokio runs it on its blocking threads. The
@@ -643,16 +643,6 @@ fn io_error(path: &Path, source: io::Error) -> FetchError {
         path: path.to_path_buf(),
         source,
     }
-}
-
-fn hex(bytes: &[u8; 32]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(64);
-    for byte in bytes {
-        // Writing to a `String` cannot fail.
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 /// An in-memory [`Fetch`] for tests here and in later tasks. It opens no
