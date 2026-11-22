@@ -6,7 +6,7 @@
 # Raise by one for every publish. `build` refuses a serial that is not greater
 # than the published one. The owner signs with the trusted comment
 # "marsa runtimes manifest serial=<serial>".
-serial = 2
+serial = 3
 
 # static-php-cli line (ADR 0010): `php -v` must say "Built by static-php-cli 2.8.x".
 # The exact spc release (2.8.5), zig (0.17.1) and Xdebug (3.5.3) of our PHP
