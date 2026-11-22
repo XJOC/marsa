@@ -18,6 +18,9 @@ use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use tempfile::TempDir;
 
+mod common;
+use common::free_port;
+
 /// For starting and for a second daemon to give up.
 const LIMIT: Duration = Duration::from_secs(20);
 const POLL: Duration = Duration::from_millis(20);
@@ -113,6 +116,11 @@ fn command(dir: &TempDir) -> Command {
     command
         .arg("--data-dir")
         .arg(dir.path())
+        // Its own port: with the fixed one, a daemon of another test may
+        // hold it, and the line that names the holder comes late, on any
+        // event stream.
+        .arg("--dns-port")
+        .arg(free_port().to_string())
         .stdin(Stdio::null())
         .env("MARSA_LOG", "debug");
     command
