@@ -28,10 +28,10 @@ use axum::routing::get;
 use axum::{Json, Router};
 use marsa_core::types::{AutostartRequest, AutostartState};
 
-use super::api::HttpError;
-use super::autostart::Autostart;
-use super::http::{self, Rejected as _};
-use super::state::Daemon;
+use super::Autostart;
+use crate::daemon::api::HttpError;
+use crate::daemon::http::{self, Rejected as _};
+use crate::daemon::state::Daemon;
 
 /// The routes, for `api::router` to merge before its fallbacks.
 pub fn routes() -> Router<Arc<Daemon>> {

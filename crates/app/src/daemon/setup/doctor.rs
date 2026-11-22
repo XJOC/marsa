@@ -21,9 +21,9 @@ use axum::{Json, Router};
 use marsa_core::platform::checkup::{self, DaemonFacts, Item};
 use marsa_core::types::{DoctorLine, DoctorReport, Site};
 
-use super::api::{HttpError, current_health};
-use super::http;
-use super::state::Daemon;
+use crate::daemon::api::{HttpError, current_health};
+use crate::daemon::http;
+use crate::daemon::state::Daemon;
 
 /// Gathers the report from the daemon's own facts. A function pointer so a
 /// test can answer without asking the system.

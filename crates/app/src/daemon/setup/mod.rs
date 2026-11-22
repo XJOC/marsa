@@ -20,10 +20,12 @@
 //! goes through it).
 
 mod ca;
+pub mod doctor;
 mod helper;
 pub mod hosts;
 pub mod linux_dns;
 pub mod nss;
+pub mod one_at_a_time;
 mod osascript;
 pub mod pkexec;
 #[cfg(test)]
@@ -31,6 +33,7 @@ mod ports;
 mod steps;
 #[cfg(test)]
 pub(super) mod test_support;
+pub mod uninstall;
 pub mod user_trust;
 pub mod windows;
 
@@ -52,9 +55,9 @@ use marsa_core::recipes::{Os, Platform};
 use marsa_core::types::{ApiError, Event, SetupReport, SetupSkip, Site, SiteList};
 use tokio::runtime::Handle;
 
+use self::one_at_a_time::{OneAtATime, Turn};
 use super::api::HttpError;
 use super::http;
-use super::one_at_a_time::{OneAtATime, Turn};
 use super::sites::hosts_sync;
 use super::state::Daemon;
 

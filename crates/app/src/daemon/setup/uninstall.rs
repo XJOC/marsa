@@ -68,14 +68,14 @@ use marsa_core::recipes::{Os, Platform};
 use marsa_core::types::{OpStatus, UninstallReport};
 use tokio_util::sync::CancellationToken;
 
-use super::api::HttpError;
-use super::autostart::Autostart;
 use super::http;
-use super::setup_api::{
+use super::{
     CHECK_LIMIT, Flow, PIPE_GRACE, PROMPT_LIMIT, Running, Setup, linux_dns, nss, user_trust,
 };
-use super::sites::hosts_sync;
-use super::state::Daemon;
+use crate::daemon::api::HttpError;
+use crate::daemon::autostart::Autostart;
+use crate::daemon::sites::hosts_sync;
+use crate::daemon::state::Daemon;
 
 /// The op name of the login file step in the report.
 const AUTOSTART_REMOVE: &str = "autostart_remove";
@@ -320,9 +320,9 @@ fn remove_login_file(autostart: &Autostart) -> OpResult {
 mod tests {
     use super::*;
     #[cfg(unix)]
-    use crate::daemon::setup_api::test_support::set_mode;
-    use crate::daemon::setup_api::test_support::{Fake, make_helper, ok, script_error};
-    use crate::daemon::setup_api::windows::{Install, Service};
+    use crate::daemon::setup::test_support::set_mode;
+    use crate::daemon::setup::test_support::{Fake, make_helper, ok, script_error};
+    use crate::daemon::setup::windows::{Install, Service};
     use marsa_core::data_dir::DataDir;
     use std::fs;
     use std::io;
@@ -341,14 +341,14 @@ mod tests {
     use tower::ServiceExt as _;
 
     use crate::daemon::auth::{AuthConfig, require_auth};
-    use crate::daemon::setup_api::{self, RunOutput, Runner, linux_dns, nss};
+    use crate::daemon::setup::{self as setup_api, RunOutput, Runner, linux_dns, nss};
 
     /// The daemon port in the `Host` header. No socket is bound for it.
     const PORT: u16 = 51237;
     const OSASCRIPT: &str = "/usr/bin/osascript";
     const SECURITY: &str = "/usr/bin/security";
-    const TEST_CA: &str = include_str!("../../../../fixtures/helper/test-ca.pem");
-    const REJECTED: &str = include_str!("../../../../fixtures/helper/responses/rejected.json");
+    const TEST_CA: &str = include_str!("../../../../../fixtures/helper/test-ca.pem");
+    const REJECTED: &str = include_str!("../../../../../fixtures/helper/responses/rejected.json");
     /// `openssl x509 -in test-ca.pem -outform der | shasum -a 256`, as in
     /// `user_trust.rs`.
     const HASH: &str = "29E433200254DFCE602212438E9D64E306B672DB9BC4642A7620CEBCC0FD8057";
@@ -1307,7 +1307,7 @@ mod tests {
         );
         // Windows: the helper's run after the UAC prompt, to its limit. The
         // prompt itself has none.
-        let windows = crate::daemon::setup_api::windows::INSTALL_LIMIT;
+        let windows = crate::daemon::setup::windows::INSTALL_LIMIT;
         assert!(
             UNINSTALL_ALL_TIMEOUT >= windows + margin,
             "the client waits {UNINSTALL_ALL_TIMEOUT:?}, and a Windows uninstall may take \

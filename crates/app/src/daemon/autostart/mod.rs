@@ -5,6 +5,8 @@ use marsa_core::codes;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+pub mod api;
+
 use axum::http::StatusCode;
 use marsa_core::platform::autostart::{
     self, AutostartError, AutostartFile, AutostartKind, tray_path,
