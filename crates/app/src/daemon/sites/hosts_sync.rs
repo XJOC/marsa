@@ -75,7 +75,7 @@ impl HostsSync {
         {
             use marsa_core::platform::windows::helper_pipe;
             let names = daemon.sites().map(|list| names_of(&list.sites));
-            self.sync_with(&daemon.data_dir, names, |request| async move {
+            self.sync_with(daemon.data_dir(), names, |request| async move {
                 helper_pipe::send(request.as_bytes(), LIMIT)
                     .await
                     .map_err(|err| err.code())
