@@ -49,7 +49,7 @@ async fn report(
 ) -> Result<Json<DoctorReport>, HttpError> {
     let facts = facts(&daemon, port);
     // The checks run programs and sockets: off the async threads.
-    http::blocking("doctor", move || Ok(gather(&daemon.data_dir, &facts)))
+    http::blocking("doctor", move || Ok(gather(daemon.data_dir(), &facts)))
         .await
         .map(Json)
 }
@@ -57,7 +57,7 @@ async fn report(
 /// What the daemon knows of itself, the way a client would learn it from
 /// `/v1/health`, `/v1/services`, and `/v1/sites`.
 fn facts(daemon: &Daemon, port: u16) -> DaemonFacts {
-    let caddy = daemon.caddy.status();
+    let caddy = daemon.caddy().status();
     let sites = daemon.sites();
     DaemonFacts {
         health: Ok((current_health(), port)),

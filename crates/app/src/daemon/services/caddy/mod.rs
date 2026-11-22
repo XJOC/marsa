@@ -406,16 +406,16 @@ mod tests {
         let mut daemon = Daemon::new(dir.path().to_path_buf());
         // Nothing listens there: a call would fail.
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        daemon.caddy.input.admin_port = free.local_addr().unwrap().port();
+        daemon.caddy_mut().input.admin_port = free.local_addr().unwrap().port();
         drop(free);
         let sites = vec![shop(dir.path().join("shop"))];
         let applied = daemon
-            .caddy
+            .caddy()
             .apply(&daemon, sites, PhpPools::default())
             .await;
         assert_eq!(applied.unwrap(), Applied::Written);
 
-        let text = std::fs::read_to_string(&daemon.caddy.paths.config_file).unwrap();
+        let text = std::fs::read_to_string(&daemon.caddy().paths.config_file).unwrap();
         let written: Value = serde_json::from_str(&text).unwrap();
         let hosts = &written["apps"]["http"]["servers"]["marsa-tls"]["routes"][0]["match"][0];
         assert_eq!(hosts["host"][0], "shop.test");
@@ -428,17 +428,17 @@ mod tests {
         let (port, mut loads) = fake_admin(StatusCode::OK, "").await;
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = Daemon::new(dir.path().to_path_buf());
-        daemon.caddy.input.admin_port = port;
+        daemon.caddy_mut().input.admin_port = port;
         pretend_caddy_runs(&daemon);
 
         let sites = vec![shop(dir.path().join("shop"))];
         let applied = daemon
-            .caddy
+            .caddy()
             .apply(&daemon, sites, PhpPools::default())
             .await;
         assert_eq!(applied.unwrap(), Applied::Loaded);
         let loaded = loads.recv().await.unwrap();
-        let text = std::fs::read_to_string(&daemon.caddy.paths.config_file).unwrap();
+        let text = std::fs::read_to_string(&daemon.caddy().paths.config_file).unwrap();
         let written: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(loaded, written, "the file and Caddy have the same config");
         daemon.stop_procs(Duration::from_secs(5)).await;
@@ -449,19 +449,19 @@ mod tests {
         let (port, mut loads) = fake_admin(StatusCode::BAD_REQUEST, T9).await;
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = Daemon::new(dir.path().to_path_buf());
-        daemon.caddy.input.admin_port = port;
+        daemon.caddy_mut().input.admin_port = port;
         pretend_caddy_runs(&daemon);
 
         let sites = vec![shop(dir.path().join("shop"))];
         let err = daemon
-            .caddy
+            .caddy()
             .apply(&daemon, sites, PhpPools::default())
             .await
             .unwrap_err();
         assert!(loads.recv().await.is_some());
         assert_eq!(err.code(), "port_in_use");
         assert!(err.to_string().contains("127.0.0.1:18443"), "{err}");
-        let last = daemon.caddy.recent_logs().pop().unwrap();
+        let last = daemon.caddy().recent_logs().pop().unwrap();
         assert!(
             last.text
                 .starts_with("marsad: The new config was not loaded"),

@@ -174,7 +174,7 @@ impl App {
         let mut daemon = Daemon::new(dir.path().to_path_buf());
         let admin_port = free_port();
         if let Some(mode) = fake {
-            let caddy = &mut daemon.caddy;
+            let caddy = daemon.caddy_mut();
             caddy.input.admin_port = admin_port;
             // Free ports, so the orphan check before a start never meets a
             // Caddy that runs on this machine on Marsa's own ports.
@@ -400,7 +400,7 @@ async fn start_shows_running_and_logs_then_stop() {
     assert!(file.contains("fake request /hello\n"), "{file:?}");
 
     // `shutting_down` ends the follow stream.
-    app.daemon.shutdown.cancel();
+    app.daemon.shutdown().cancel();
     app.daemon.publish(Event::ShuttingDown);
     follow.end().await;
     assert_in_order(&follow.lines);
@@ -711,7 +711,7 @@ async fn a_wait_that_runs_out_is_busy() {
 
     let wait = Duration::from_millis(300);
     let began = Instant::now();
-    let caddy = &app.daemon.caddy;
+    let caddy = &app.daemon.caddy();
     let err = caddy
         .run_waiting(&app.daemon, ServiceAction::Stop, wait)
         .await
@@ -746,7 +746,7 @@ async fn a_request_waiting_at_shutdown_does_not_run() {
     let queued = tokio::spawn({
         let daemon = Arc::clone(&app.daemon);
         async move {
-            let caddy = &daemon.caddy;
+            let caddy = &daemon.caddy();
             caddy.run_waiting(&daemon, ServiceAction::Start, WAIT).await
         }
     });
@@ -754,12 +754,12 @@ async fn a_request_waiting_at_shutdown_does_not_run() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!queued.is_finished());
 
-    app.daemon.shutdown.cancel();
+    app.daemon.shutdown().cancel();
     assert_eq!(launch.wait(WAIT).await, Some(Launched::ShuttingDown));
     let answer = tokio::time::timeout(WAIT, queued).await.expect("no hang");
     assert_eq!(answer.unwrap().unwrap_err().code(), "service_busy");
     // Free now, but the daemon stops.
-    let caddy = &app.daemon.caddy;
+    let caddy = &app.daemon.caddy();
     let late = caddy
         .run_waiting(&app.daemon, ServiceAction::Restart, WAIT)
         .await;
@@ -777,7 +777,7 @@ async fn a_request_waiting_at_shutdown_does_not_run() {
 async fn a_shutdown_during_the_start_with_the_daemon_leaves_no_caddy() {
     // A daemon that already stops starts nothing.
     let app = App::new(Some("serve"));
-    app.daemon.shutdown.cancel();
+    app.daemon.shutdown().cancel();
     let launched = start_at_launch(&app.daemon).wait(WAIT).await;
     assert_eq!(launched, Some(Launched::ShuttingDown));
     assert!(!app.daemon.proc_alive(ServiceId::Caddy));
@@ -788,7 +788,7 @@ async fn a_shutdown_during_the_start_with_the_daemon_leaves_no_caddy() {
     let launch = start_at_launch(&app.daemon);
     until_caddy_runs(&app).await;
     let stopping = Instant::now();
-    app.daemon.shutdown.cancel();
+    app.daemon.shutdown().cancel();
     assert_eq!(launch.wait(WAIT).await, Some(Launched::ShuttingDown));
     // It did not wait for its 30 s limit.
     assert!(stopping.elapsed() < WAIT / 2);
@@ -831,7 +831,7 @@ async fn caddy_that_starts_before_the_first_pass_gets_the_sites_through_load() {
     assert_eq!(first_host(&config), Some("shop.test"));
     assert_eq!(config, written_config(&app));
 
-    app.daemon.shutdown.cancel();
+    app.daemon.shutdown().cancel();
     sync.stop().await;
     app.daemon.stop_procs(WAIT).await;
 }
@@ -847,7 +847,7 @@ async fn caddy_that_starts_after_the_first_pass_starts_on_the_sites() {
     let sites = app.daemon.sites().unwrap().sites;
     let applied = app
         .daemon
-        .caddy
+        .caddy()
         .apply(&app.daemon, sites, PhpPools::default())
         .await;
     assert_eq!(applied.unwrap(), Applied::Written);
@@ -934,7 +934,7 @@ async fn another_marsas_caddy_on_our_admin_port_gets_no_config_and_no_stop() {
     // The first sites pass after it only writes the file.
     let applied = app
         .daemon
-        .caddy
+        .caddy()
         .apply(&app.daemon, Vec::new(), PhpPools::default())
         .await;
     assert_eq!(applied.unwrap(), Applied::Written);

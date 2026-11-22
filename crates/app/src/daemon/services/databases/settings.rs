@@ -25,7 +25,7 @@ pub(super) async fn save_enabled(
     let worker = Arc::clone(daemon);
     let job = tokio::task::spawn_blocking(move || {
         let _one = worker.lock_global();
-        set_enabled(kind, &worker.data_dir, enabled)
+        set_enabled(kind, worker.data_dir(), enabled)
     });
     let server = kind.id();
     match job.await {
@@ -149,7 +149,7 @@ pub fn start_after_install(daemon: &Arc<Daemon>, kind: ServerKind, version: Vers
         let turn = tokio::time::timeout(START_WAIT, Arc::clone(&manager.busy).lock_owned());
         let turn = tokio::select! {
             biased;
-            () = daemon.shutdown.cancelled() => return,
+            () = daemon.shutdown().cancelled() => return,
             turn = turn => turn,
         };
         let Ok(turn) = turn else {
@@ -162,13 +162,18 @@ pub fn start_after_install(daemon: &Arc<Daemon>, kind: ServerKind, version: Vers
             let _one = worker.lock_global();
             // A list that cannot be read changes nothing: it could hide
             // another line.
-            let versions = RuntimesDir::in_dir(&worker.data_dir)
+            let versions = RuntimesDir::in_dir(worker.data_dir())
                 .installed(kind.runtime())
                 .map_err(|err| {
                     warn!(code = err.code(), %err, server, "cannot list the versions");
                 })
                 .ok()?;
-            Some(first_install(kind, &worker.data_dir, &installed, &versions))
+            Some(first_install(
+                kind,
+                worker.data_dir(),
+                &installed,
+                &versions,
+            ))
         });
         match job.await {
             Ok(Some(Ok(true))) => info!(%version, server, "the first install: on, and starting it"),
@@ -185,7 +190,7 @@ pub fn start_after_install(daemon: &Arc<Daemon>, kind: ServerKind, version: Vers
         let start = manager.act(&daemon, ServiceAction::Start, &turn);
         let started = tokio::select! {
             biased;
-            () = daemon.shutdown.cancelled() => return,
+            () = daemon.shutdown().cancelled() => return,
             started = start => started,
         };
         drop(turn);
@@ -225,11 +230,11 @@ pub(super) fn read_settings(
 pub fn start_at_launch(daemon: &Arc<Daemon>, kind: ServerKind) -> Launch {
     let manager = daemon.server(kind);
     let server = kind.id();
-    let settings = match read_settings(kind, &daemon.data_dir) {
+    let settings = match read_settings(kind, daemon.data_dir()) {
         Ok(settings) => settings,
         // Without the server, a broken `global.toml` is none of its
         // business: its status and lines stay as they are.
-        Err(err) if !any_installed(kind, &daemon.data_dir) => {
+        Err(err) if !any_installed(kind, daemon.data_dir()) => {
             info!(
                 code = err.code(),
                 server, "it is not installed; it does not start with the daemon"
@@ -237,7 +242,7 @@ pub fn start_at_launch(daemon: &Arc<Daemon>, kind: ServerKind) -> Launch {
             return Launch::ended(ServiceId::Database(kind), Launched::NotInstalled);
         }
         Err(err) => {
-            manager.fail(&daemon.events, err.code(), &err.to_string());
+            manager.fail(daemon.events(), err.code(), &err.to_string());
             return Launch::ended(ServiceId::Database(kind), Launched::Failed(err.code()));
         }
     };
@@ -246,7 +251,7 @@ pub fn start_at_launch(daemon: &Arc<Daemon>, kind: ServerKind) -> Launch {
         return Launch::ended(ServiceId::Database(kind), Launched::Off);
     }
     // First, so a missing version does not mark the status failed.
-    if let Err(err) = manager.installed(&daemon.data_dir, &settings) {
+    if let Err(err) = manager.installed(daemon.data_dir(), &settings) {
         warn!(code = err.code(), %err, server, "it is on, but does not start with the daemon");
         return Launch::ended(ServiceId::Database(kind), Launched::NotInstalled);
     }
@@ -263,7 +268,7 @@ pub fn start_at_launch(daemon: &Arc<Daemon>, kind: ServerKind) -> Launch {
         tokio::select! {
             // A daemon that already stops starts nothing.
             biased;
-            () = daemon.shutdown.cancelled() => Launched::ShuttingDown,
+            () = daemon.shutdown().cancelled() => Launched::ShuttingDown,
             launched = launch(&daemon, daemon.server(kind), busy) => launched,
         }
     });

@@ -141,11 +141,11 @@ pub async fn run(data_dir: PathBuf, dns_port: u16) -> anyhow::Result<()> {
 
     let mut daemon = Daemon::new(data_dir);
     // The user's own folder for the login file, only in the real daemon.
-    daemon.autostart = Autostart::this_user();
+    daemon.set_autostart(Autostart::this_user());
     // The real system's answer, only in the real daemon.
-    daemon.caddy.low_ports = low_ports::low_ports_allowed;
+    daemon.caddy_mut().low_ports = low_ports::low_ports_allowed;
     // The DNS server on macOS and Linux.
-    daemon.dns = dns::DnsService::for_daemon(dns_port);
+    daemon.set_dns(dns::DnsService::for_daemon(dns_port));
     let daemon = Arc::new(daemon);
     // The first site list, so the first client gets it at once. A broken
     // sites.toml is logged; the routes report it again with its code.
@@ -170,8 +170,8 @@ pub async fn run(data_dir: PathBuf, dns_port: u16) -> anyhow::Result<()> {
     // After the API listener. It stops when `daemon.shutdown` is cancelled. A
     // port in use is a failed `dns` service: the daemon runs on without it.
     daemon
-        .dns
-        .run(&daemon.events, &daemon.shutdown, ServiceAction::Start)
+        .dns()
+        .run(daemon.events(), daemon.shutdown(), ServiceAction::Start)
         .await;
     let app = api::router(daemon.clone(), auth);
     let result = serve(listener, app, Arc::clone(&daemon), signal).await;
@@ -189,7 +189,7 @@ pub async fn run(data_dir: PathBuf, dns_port: u16) -> anyhow::Result<()> {
     // waits for it. The map is empty otherwise, and this returns at once.
     daemon.stop_procs(PROCS_LIMIT).await;
     // Before the lock goes, so the next daemon finds the DNS port free.
-    daemon.dns.shutdown(dns::STOP_LIMIT).await;
+    daemon.dns().shutdown(dns::STOP_LIMIT).await;
 
     // The file goes before the lock, so a daemon that takes the lock next
     // never finds our file.
@@ -247,8 +247,8 @@ async fn serve(
         let stopped = stopped.clone();
         async move {
             tokio::select! {
-                () = daemon.shutdown.cancelled() => {}
-                () = signal => daemon.shutdown.cancel(),
+                () = daemon.shutdown().cancelled() => {}
+                () = signal => daemon.shutdown().cancel(),
             }
             // `/v1/events` streams end after this event, so their
             // connections can close.

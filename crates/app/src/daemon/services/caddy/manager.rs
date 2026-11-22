@@ -149,7 +149,7 @@ impl CaddyManager {
             }
             Err(err) => {
                 let text = format!("marsad: The new config was not loaded: {err}.");
-                lock(&self.runtime).note(&daemon.events, &text);
+                lock(&self.runtime).note(daemon.events(), &text);
                 Err(err)
             }
         }
@@ -268,12 +268,12 @@ impl CaddyManager {
         action: ServiceAction,
         wait: Duration,
     ) -> Result<ServiceStatus, ActionError> {
-        let busy = take_turn(&self.busy, &daemon.shutdown, wait, || {
+        let busy = take_turn(&self.busy, daemon.shutdown(), wait, || {
             info!(%action, "another action on caddy runs; waiting for it");
         })
         .await
         .map_err(|Busy| {
-            if daemon.shutdown.is_cancelled() {
+            if daemon.shutdown().is_cancelled() {
                 info!(%action, "the daemon is stopping; the caddy action does not run");
             }
             ActionError::Busy
@@ -314,12 +314,12 @@ impl CaddyManager {
         let spec = match self.spec_to_run() {
             Ok(spec) if spec.program.is_file() => spec,
             Ok(spec) => {
-                self.fail(codes::CADDY_NOT_INSTALLED, &daemon.events);
+                self.fail(codes::CADDY_NOT_INSTALLED, daemon.events());
                 return Err(ActionError::NotInstalled(spec.program));
             }
             Err(err) => {
                 warn!(code = err.code(), %err, "no caddy to run");
-                self.fail(codes::CADDY_NOT_INSTALLED, &daemon.events);
+                self.fail(codes::CADDY_NOT_INSTALLED, daemon.events());
                 return Err(ActionError::NoCaddy(err));
             }
         };
@@ -327,20 +327,20 @@ impl CaddyManager {
         let tag = match self.instance_tag() {
             Ok(tag) => tag,
             Err(err) => {
-                self.fail(codes::CADDY_CONFIG_WRITE, &daemon.events);
+                self.fail(codes::CADDY_CONFIG_WRITE, daemon.events());
                 return Err(ActionError::ConfigWrite(err));
             }
         };
         // ADR 0009: stop our own orphan; touch nothing that is not ours.
-        let pid_file = PidFile::new(&daemon.data_dir, &self.our_programs(&spec.program));
+        let pid_file = PidFile::new(daemon.data_dir(), &self.our_programs(&spec.program));
         {
             let orphans = self.orphans(&pid_file, admin, &tag);
             if let Some(found) = orphans.inspect().await {
                 if found.is_reap() {
-                    lock(&self.runtime).note(&daemon.events, STOPPING_ORPHAN);
+                    lock(&self.runtime).note(daemon.events(), STOPPING_ORPHAN);
                 }
                 if let Err(blocked) = orphans.clear_for_start(found).await {
-                    self.blocked("Caddy was not started", &blocked, &daemon.events);
+                    self.blocked("Caddy was not started", &blocked, daemon.events());
                     return Ok(());
                 }
             }
@@ -351,28 +351,28 @@ impl CaddyManager {
         let config = match self.config(&tag) {
             Ok(config) => config,
             Err(err) => {
-                self.fail(codes::CADDY_CONFIG_WRITE, &daemon.events);
+                self.fail(codes::CADDY_CONFIG_WRITE, daemon.events());
                 let err = io::Error::new(io::ErrorKind::InvalidData, err);
                 return Err(ActionError::ConfigWrite(err));
             }
         };
         if let Err(err) = write_config(&self.paths.config_file, &config).await {
-            self.fail(codes::CADDY_CONFIG_WRITE, &daemon.events);
+            self.fail(codes::CADDY_CONFIG_WRITE, daemon.events());
             return Err(ActionError::ConfigWrite(err));
         }
         // Before the process starts, so the watcher cannot miss its first line.
-        let lines = daemon.events.subscribe();
+        let lines = daemon.events().subscribe();
         let first_seq = self.recent_logs().last().map_or(0, |line| line.seq + 1);
         let spec = ServiceSpec {
             id: ServiceId::Caddy,
             ..spec
         };
-        let logs_dir = DataDir::new(&daemon.data_dir).logs();
+        let logs_dir = DataDir::new(daemon.data_dir()).logs();
         let runtime = Arc::clone(&self.runtime);
         *lock(&self.started) = Some(spec.program.clone());
-        let handle = Supervisor::spawn_on(spec, daemon.events.clone(), &logs_dir, runtime)
+        let handle = Supervisor::spawn_on(spec, daemon.events().clone(), &logs_dir, runtime)
             .map_err(|err| {
-                self.fail(err.code(), &daemon.events);
+                self.fail(err.code(), daemon.events());
                 ActionError::ProgramNotAbsolute(err)
             })?;
 
@@ -387,7 +387,7 @@ impl CaddyManager {
             first_seq,
             cancel: cancel.clone(),
             runtime: Arc::clone(&runtime),
-            events: daemon.events.clone(),
+            events: daemon.events().clone(),
             pid_file,
             processes: Arc::clone(&self.processes),
         };
@@ -413,7 +413,7 @@ impl CaddyManager {
                 self.stop(daemon, admin).await;
                 // A port conflict found at the same moment says more: keep it.
                 if self.status().state == ServiceState::Stopped {
-                    self.fail(codes::CADDY_START_TIMEOUT, &daemon.events);
+                    self.fail(codes::CADDY_START_TIMEOUT, daemon.events());
                 }
             }
         }
@@ -503,7 +503,7 @@ impl CaddyManager {
                 return true;
             }
         };
-        let pid_file = PidFile::new(&daemon.data_dir, &self.our_programs(&program));
+        let pid_file = PidFile::new(daemon.data_dir(), &self.our_programs(&program));
         let orphans = self.orphans(&pid_file, admin, &tag);
         let Some(found) = orphans.inspect().await else {
             return true;
@@ -511,11 +511,11 @@ impl CaddyManager {
         if !found.is_reap() {
             return true;
         }
-        lock(&self.runtime).note(&daemon.events, STOPPING_ORPHAN);
+        lock(&self.runtime).note(daemon.events(), STOPPING_ORPHAN);
         match orphans.reap(found).await {
             Ok(()) => true,
             Err(blocked) => {
-                self.blocked("The old Caddy was not stopped", &blocked, &daemon.events);
+                self.blocked("The old Caddy was not stopped", &blocked, daemon.events());
                 false
             }
         }

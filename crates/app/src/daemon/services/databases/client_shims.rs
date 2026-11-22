@@ -192,7 +192,7 @@ impl ClientShims {
 /// and the next start of `marsad` tries again.
 pub async fn sync(daemon: &Arc<Daemon>, kind: ServerKind) {
     let worker = Arc::clone(daemon);
-    let job = tokio::task::spawn_blocking(move || worker.client_shims.sync(kind));
+    let job = tokio::task::spawn_blocking(move || worker.client_shims().sync(kind));
     if let Err(err) = job.await {
         warn!(server = kind.id(), error = %err, "the client shims job failed");
     }

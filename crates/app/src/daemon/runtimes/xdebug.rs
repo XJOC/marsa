@@ -71,7 +71,7 @@ async fn set(
             // Also when nothing changed: the pass then repairs a `php.ini`
             // that is missing or old.
             daemon
-                .pass_requests
+                .pass_requests()
                 .run_pass()
                 .await
                 .map_err(|PassNotRun| pass_not_run())
@@ -101,7 +101,7 @@ fn pass_not_run() -> HttpError {
 /// `global.toml` and writes the file.
 fn save(daemon: &Daemon, enabled: bool) -> Result<(), HttpError> {
     let _one = daemon.lock_global();
-    let path = ConfigPaths::in_dir(&daemon.data_dir).global;
+    let path = ConfigPaths::in_dir(daemon.data_dir()).global;
     let mut global = config::load_global(&path).map_err(|err| global_error(&err))?;
     if global.php.xdebug != enabled {
         global.php.xdebug = enabled;
@@ -115,7 +115,7 @@ fn save(daemon: &Daemon, enabled: bool) -> Result<(), HttpError> {
 /// the sync pass decides it ([`php::line_versions`], [`php::line_files`]).
 /// Blocking: it reads `global.toml` and the folder of the PHP versions.
 fn state(daemon: &Daemon) -> Result<XdebugState, HttpError> {
-    let data_dir = &daemon.data_dir;
+    let data_dir = &daemon.data_dir();
     let enabled = php::xdebug_enabled(data_dir).map_err(|err| global_error(&err))?;
     let sites = daemon.sites().map(|list| list.sites).unwrap_or_default();
     let lines = php::line_versions(data_dir, &php::wanted_pools(&sites)).map_err(|err| {
@@ -195,7 +195,7 @@ mod tests {
 
         /// The daemon's shutdown: the sync task ends.
         async fn stop(&mut self) {
-            self.daemon.shutdown.cancel();
+            self.daemon.shutdown().cancel();
             if let Some(sync) = self.sync.take() {
                 sync.stop().await;
             }

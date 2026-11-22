@@ -67,7 +67,7 @@ pub fn start(daemon: &Arc<Daemon>) -> Option<ParkedWatcher> {
         }
     };
     // A child, so `stop` does not cancel the daemon's own token.
-    let cancel = daemon.shutdown.child_token();
+    let cancel = daemon.shutdown().child_token();
     let rebuilds = Arc::new(AtomicUsize::new(0));
     let task = tokio::spawn(run(Task {
         daemon: Arc::clone(daemon),
@@ -366,7 +366,7 @@ mod tests {
             parked,
             ..SitesConfig::default()
         };
-        config::save_sites(&ConfigPaths::in_dir(&daemon.data_dir).sites, &sites).unwrap();
+        config::save_sites(&ConfigPaths::in_dir(daemon.data_dir()).sites, &sites).unwrap();
         daemon.rebuild_sites().await.unwrap();
     }
 
@@ -410,7 +410,7 @@ mod tests {
             .await;
         assert_eq!(response.status(), StatusCode::OK);
         first_rebuild(&watcher).await;
-        let mut events = daemon.events.subscribe();
+        let mut events = daemon.events().subscribe();
 
         // No other request: only an event of the watcher can show it.
         fs::create_dir(code.join("shop")).unwrap();
@@ -432,7 +432,7 @@ mod tests {
         let watcher = start(&daemon).expect("a watcher");
         first_rebuild(&watcher).await;
         let before = watcher.rebuilds();
-        let mut events = daemon.events.subscribe();
+        let mut events = daemon.events().subscribe();
 
         let app = code.join("app");
         fs::create_dir(&app).unwrap();
@@ -453,7 +453,7 @@ mod tests {
         let (_dir, daemon, code) = daemon();
         park_on_disk(&daemon, vec![code]).await;
         let watcher = start(&daemon).expect("a watcher");
-        daemon.shutdown.cancel();
+        daemon.shutdown().cancel();
         tokio::time::timeout(WAIT, watcher.task)
             .await
             .expect("the task ends in time")
@@ -501,7 +501,7 @@ mod tests {
         park_on_disk(&daemon, vec![parked.clone()]).await;
         let watcher = start(&daemon).expect("a watcher on this system");
         first_rebuild(&watcher).await;
-        let mut events = daemon.events.subscribe();
+        let mut events = daemon.events().subscribe();
 
         let app = parked.join("app");
         fs::create_dir(&app).unwrap();

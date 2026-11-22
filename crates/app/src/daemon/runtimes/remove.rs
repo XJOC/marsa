@@ -76,7 +76,7 @@ async fn remove_version(
         },
         None => None,
     };
-    let caddy = daemon.caddy.running_program(&daemon);
+    let caddy = daemon.caddy().running_program(&daemon);
     let server = match server_kind {
         Some(kind) => daemon.server(kind).program_in_use(&daemon).await,
         None => None,
@@ -90,7 +90,7 @@ async fn remove_version(
             caddy: caddy.as_deref(),
             server: server.as_deref(),
         };
-        retire_unused(&worker.data_dir, runtime, text.trim(), running)
+        retire_unused(worker.data_dir(), runtime, text.trim(), running)
     })
     .await?;
     // Moved aside: a start now finds no such version.

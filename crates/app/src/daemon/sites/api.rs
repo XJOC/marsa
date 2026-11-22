@@ -615,7 +615,7 @@ mod tests {
             ..SitesConfig::default()
         };
         config::save_sites(&app.sites_toml(), &sites_toml).unwrap();
-        let mut events = app.daemon.events.subscribe();
+        let mut events = app.daemon.events().subscribe();
 
         let first = app.daemon.rebuild_sites().await.unwrap();
         assert_eq!(first.sites.len(), 2);
@@ -754,7 +754,7 @@ mod tests {
         // A linked `shop` hides the parked one.
         app.list("POST", "/v1/sites/link", Some(link_body("shop", &api)))
             .await;
-        let mut events = app.daemon.events.subscribe();
+        let mut events = app.daemon.events().subscribe();
 
         let list = app.list("DELETE", "/v1/sites/api", None).await;
         assert!(list.sites.iter().all(|site| site.name != "api"), "{list:?}");
@@ -787,7 +787,7 @@ mod tests {
         let body = json!({ "secure": false });
         app.list("PATCH", "/v1/sites/shop", Some(body)).await;
         let before = fs::read_to_string(app.sites_toml()).unwrap();
-        let mut events = app.daemon.events.subscribe();
+        let mut events = app.daemon.events().subscribe();
 
         let conflict = (StatusCode::CONFLICT, "site_is_parked".to_owned());
         for name in ["blog", "shop"] {
@@ -850,7 +850,7 @@ mod tests {
         // Linked by hand under another name: it stays.
         let admin = link_body("admin", &code.join("blog"));
         app.list("POST", "/v1/sites/link", Some(admin)).await;
-        let mut events = app.daemon.events.subscribe();
+        let mut events = app.daemon.events().subscribe();
 
         let body = json!({ "path": code });
         let list = app.list("DELETE", "/v1/sites/park", Some(body)).await;
@@ -907,7 +907,7 @@ mod tests {
         let code = app.code();
         app.park(&code).await;
         let before = fs::read_to_string(app.sites_toml()).unwrap();
-        let mut events = app.daemon.events.subscribe();
+        let mut events = app.daemon.events().subscribe();
 
         let (bad, missing) = (StatusCode::BAD_REQUEST, StatusCode::NOT_FOUND);
         for (body, status, want) in [

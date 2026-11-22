@@ -232,7 +232,7 @@ impl ProcessProbe for Recorder {
 /// A daemon on `data` whose Caddy is this binary in fake mode `mode`.
 fn daemon_on(data: &Path, mode: &str, ports: Ports, processes: Arc<dyn ProcessProbe>) -> Daemon {
     let mut daemon = Daemon::new(data.to_path_buf());
-    let caddy = &mut daemon.caddy;
+    let caddy = daemon.caddy_mut();
     caddy.input = CaddyInput {
         admin_port: ports.admin,
         http_port: ports.http,
@@ -261,7 +261,7 @@ fn program() -> PathBuf {
 }
 
 async fn start(daemon: &Daemon) -> ServiceStatus {
-    let status = daemon.caddy.run(daemon, ServiceAction::Start).await;
+    let status = daemon.caddy().run(daemon, ServiceAction::Start).await;
     status.expect("the start runs")
 }
 
@@ -293,7 +293,11 @@ async fn alive(record: &PidRecord) -> bool {
 
 /// The lines the daemon added to Caddy's log.
 fn notes(daemon: &Daemon) -> Vec<String> {
-    let lines = daemon.caddy.recent_logs().into_iter().map(|line| line.text);
+    let lines = daemon
+        .caddy()
+        .recent_logs()
+        .into_iter()
+        .map(|line| line.text);
     lines.filter(|text| text.starts_with("marsad: ")).collect()
 }
 
@@ -414,7 +418,7 @@ async fn an_orphan_of_a_killed_daemon_stops_on_post_stop_and_is_replaced() {
         status.state,
         ServiceState::Running,
         "{:?}",
-        daemon.caddy.recent_logs()
+        daemon.caddy().recent_logs()
     );
     let pid = status.pid.unwrap();
     assert_ne!(pid, orphan.pid);
@@ -445,7 +449,7 @@ async fn an_orphan_that_ignores_post_stop_gets_sigterm_after_its_check() {
         status.state,
         ServiceState::Running,
         "{:?}",
-        daemon.caddy.recent_logs()
+        daemon.caddy().recent_logs()
     );
     // `POST /stop` had its 2 s first.
     assert!(started.elapsed() >= Duration::from_secs(2));
@@ -702,7 +706,7 @@ async fn another_marsas_caddy_gets_no_stop_and_no_signal() {
     assert!(notes.iter().any(|n| n.contains(&named)), "{notes:?}");
 
     // A stop leaves it alone too.
-    let status = daemon.caddy.run(&daemon, ServiceAction::Stop).await;
+    let status = daemon.caddy().run(&daemon, ServiceAction::Stop).await;
     assert_eq!(status.unwrap().state, failed("caddy_other_marsa"));
     assert_eq!(stops.load(Ordering::SeqCst), 0);
     assert!(recorder.signals().is_empty());
@@ -762,7 +766,7 @@ async fn stop_with_no_caddy_running_stops_our_own_orphan() {
 
     let recorder = Arc::new(Recorder::sending());
     let daemon = daemon_on(dir.path(), "serve", ports, recorder.clone());
-    let status = daemon.caddy.run(&daemon, ServiceAction::Stop).await;
+    let status = daemon.caddy().run(&daemon, ServiceAction::Stop).await;
     assert_eq!(status.unwrap().state, ServiceState::Stopped);
     assert!(!alive(&orphan).await, "the orphan is gone");
     assert!(recorder.signals().is_empty(), "POST /stop was enough");
@@ -791,7 +795,7 @@ async fn stop_with_no_caddy_running_touches_nothing_else() {
 
     let recorder = Arc::new(Recorder::recording());
     let daemon = daemon_on(dir.path(), "serve", ports, recorder.clone());
-    let status = daemon.caddy.run(&daemon, ServiceAction::Stop).await;
+    let status = daemon.caddy().run(&daemon, ServiceAction::Stop).await;
     assert_eq!(status.unwrap().state, ServiceState::Stopped);
     assert!(recorder.signals().is_empty());
     assert_eq!(read_pid_file(&pid_path(dir.path())), Some(record));

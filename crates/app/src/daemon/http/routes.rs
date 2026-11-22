@@ -101,7 +101,7 @@ pub(in crate::daemon) fn current_health() -> Health {
 /// Answers first; the server task does the shutdown.
 async fn shutdown(State(daemon): State<Arc<Daemon>>) -> StatusCode {
     tracing::info!("shutdown requested over the API");
-    daemon.shutdown.cancel();
+    daemon.shutdown().cancel();
     StatusCode::ACCEPTED
 }
 
@@ -109,8 +109,8 @@ async fn events(State(daemon): State<Arc<Daemon>>) -> impl IntoResponse {
     // Subscribe first, then check the token. `shutting_down` is published
     // after the token is cancelled, so this reader either receives it or
     // sees the token cancelled here.
-    let receiver = daemon.events.subscribe();
-    let stream = if daemon.shutdown.is_cancelled() {
+    let receiver = daemon.events().subscribe();
+    let stream = if daemon.shutdown().is_cancelled() {
         EventStream::Closing
     } else {
         EventStream::Live(BroadcastStream::new(receiver))
@@ -250,12 +250,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
         let error: ErrorBody = serde_json::from_str(&text(response).await).unwrap();
         assert_eq!(error.error.code, "method_not_allowed");
-        assert!(!daemon.shutdown.is_cancelled());
+        assert!(!daemon.shutdown().is_cancelled());
 
         let response = send("POST", "/v1/shutdown").await.unwrap();
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         assert_eq!(text(response).await, "");
-        assert!(daemon.shutdown.is_cancelled());
+        assert!(daemon.shutdown().is_cancelled());
 
         let response = send("GET", "/v1/events").await.unwrap();
         assert_eq!(response.headers()["content-type"], "text/event-stream");

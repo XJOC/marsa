@@ -1491,14 +1491,14 @@ mod tests {
             .to_string();
             let fake = linux_fake(move || ok(&answer));
             let mut daemon = Daemon::new(dir.dir.path().to_path_buf());
-            daemon.caddy.low_ports = || true;
+            daemon.caddy_mut().low_ports = || true;
             let daemon = Arc::new(daemon);
             let app = App::new(
                 Arc::clone(&daemon),
                 linux_setup(&fake, dir.helper(), dir.home()),
             );
             assert_eq!(app.post().await.0, StatusCode::OK, "{status}");
-            let written = fs::read_to_string(&daemon.caddy.paths.config_file)
+            let written = fs::read_to_string(&daemon.caddy().paths.config_file)
                 .ok()
                 .map(|text| serde_json::from_str::<Value>(&text).unwrap());
             let http_port = written.and_then(|config| config["apps"]["http"]["http_port"].as_u64());
@@ -1561,10 +1561,10 @@ mod tests {
         let fake = Fake::scripted(netstat_free(), move || ok(&answer));
         let mut daemon = Daemon::new(dir.dir.path().to_path_buf());
         // The ports come from the daemon's Caddy settings.
-        daemon.caddy.input.http_port = 28080;
-        daemon.caddy.input.https_port = 28443;
+        daemon.caddy_mut().input.http_port = 28080;
+        daemon.caddy_mut().input.https_port = 28443;
         let daemon = Arc::new(daemon);
-        let mut events = daemon.events.subscribe();
+        let mut events = daemon.events().subscribe();
         let app = App::new(daemon.clone(), dir.setup(&fake));
 
         let (status, json) = app.post().await;

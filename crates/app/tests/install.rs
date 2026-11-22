@@ -14,6 +14,7 @@
 //! the atomic move. No network beyond loopback.
 
 use marsa_core::data_dir::DataDir;
+use marsa_core::databases::ServerKind;
 use marsa_core::types::ServiceId;
 use std::fs::{self, File, OpenOptions};
 use std::net::Ipv4Addr;
@@ -197,7 +198,7 @@ impl Served {
         let port = listener.local_addr().expect("an address").port();
         let fake = Arc::new(fake);
         let mut daemon = Daemon::new(dir.path().to_path_buf());
-        daemon.installs.runner = fake.clone();
+        daemon.installs_mut().runner = fake.clone();
         let daemon = Arc::new(daemon);
 
         let file = DaemonFile {
@@ -310,7 +311,7 @@ impl Served {
     /// Waits until an install runs, or none does.
     async fn wait_running(&self, running: bool) {
         let started = Instant::now();
-        while self.daemon.installs.is_running() != running {
+        while self.daemon.installs().is_running() != running {
             assert!(started.elapsed() < WAIT, "an install still runs: {running}");
             tokio::time::sleep(POLL).await;
         }
@@ -481,7 +482,7 @@ async fn a_failed_install_prints_the_text_of_its_code_and_its_facts() {
              [install_no_such_version]\n",
         )
         .await;
-    assert!(!served.daemon.installs.is_running());
+    assert!(!served.daemon.installs().is_running());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -524,7 +525,7 @@ async fn a_second_install_while_one_runs_is_409_install_busy() {
     served.wait_running(false).await;
 
     // Free again: the next one is accepted, with the next id.
-    let mut events = served.daemon.events.subscribe();
+    let mut events = served.daemon.events().subscribe();
     let accepted: InstallAccepted = served
         .json(
             "POST",
@@ -546,7 +547,7 @@ async fn a_second_install_while_one_runs_is_409_install_busy() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_install_ends_when_the_daemon_stops() {
     let served = Served::start(FakeInstall::gated()).await;
-    let mut events = served.daemon.events.subscribe();
+    let mut events = served.daemon.events().subscribe();
     let install = served
         .command(&["install", "php"])
         .spawn()
@@ -557,7 +558,7 @@ async fn an_install_ends_when_the_daemon_stops() {
     })
     .await;
     // What `server::serve` does on a stop request.
-    served.daemon.shutdown.cancel();
+    served.daemon.shutdown().cancel();
     served.daemon.publish(Event::ShuttingDown);
     served.wait_running(false).await;
 
@@ -636,10 +637,10 @@ async fn bad_install_requests_get_their_codes() {
         assert_eq!(got, code, "{method} {path} {body:?}");
     }
     assert!(served.fake.asked().is_empty());
-    assert!(!served.daemon.installs.is_running());
+    assert!(!served.daemon.installs().is_running());
 
     // `{}` is a whole request: the newest version, without force.
-    let mut events = served.daemon.events.subscribe();
+    let mut events = served.daemon.events().subscribe();
     let accepted: InstallAccepted = served
         .json(
             "POST",
@@ -708,7 +709,7 @@ async fn use_makes_a_version_the_default_and_the_sites_follow() {
         .await;
     assert_eq!(php_of(&list, "blog"), None, "no default yet");
     let global_toml = ConfigPaths::in_dir(served.path()).global;
-    let mut events = served.daemon.events.subscribe();
+    let mut events = served.daemon.events().subscribe();
 
     served
         .expect(
@@ -787,7 +788,7 @@ async fn a_refused_default_leaves_global_toml_as_it_was() {
     let body = Some(r#"{ "version": "8.3" }"#);
     let _: DefaultVersion = served.json("PUT", php, body, StatusCode::OK).await;
     let before = fs::read(&global_toml).expect("global.toml");
-    let mut events = served.daemon.events.subscribe();
+    let mut events = served.daemon.events().subscribe();
     let (bad, conflict) = (StatusCode::BAD_REQUEST, StatusCode::CONFLICT);
     for (method, path, body, status, want) in [
         (
@@ -978,7 +979,7 @@ async fn uninstall_deletes_a_version_nothing_uses() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_first_postgres_install_turns_it_on_and_starts_it() {
     let served = Served::start(FakeInstall::default()).await;
-    let mut events = served.daemon.events.subscribe();
+    let mut events = served.daemon.events().subscribe();
     let accepted: InstallAccepted = served
         .json(
             "POST",
@@ -994,7 +995,7 @@ async fn the_first_postgres_install_turns_it_on_and_starts_it() {
     let paths = ConfigPaths::in_dir(served.path());
     let started = async {
         loop {
-            let state = served.daemon.postgres.status().state;
+            let state = served.daemon.server(ServerKind::Postgres).status().state;
             if state != ServiceState::Stopped {
                 return state;
             }
@@ -1029,7 +1030,7 @@ async fn a_server_install_adds_its_client_shims_and_its_uninstall_removes_them()
     let shims = served.path().join("shims");
     let client = |name: &str| shims.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
 
-    let mut events = served.daemon.events.subscribe();
+    let mut events = served.daemon.events().subscribe();
     let accepted: InstallAccepted = served
         .json(
             "POST",
@@ -1053,7 +1054,7 @@ async fn a_server_install_adds_its_client_shims_and_its_uninstall_removes_them()
     // The install starts Valkey too; the fake has no server program, so
     // the start fails. The uninstall waits for it to end.
     let tried = async {
-        while served.daemon.valkey.status().state == ServiceState::Stopped {
+        while served.daemon.server(ServerKind::Valkey).status().state == ServiceState::Stopped {
             tokio::time::sleep(POLL).await;
         }
     };
@@ -1107,7 +1108,7 @@ async fn a_version_in_use_is_refused_and_nothing_changes() {
     // Caddy 2.11.7 runs, though 2.11.8 is newer: it started before.
     let program =
         RuntimesDir::in_dir(served.path()).version_dir(caddy, &"2.11.7".parse().expect("v"));
-    *served.daemon.caddy.started.lock().expect("lock") = Some(program.join("caddy"));
+    *served.daemon.caddy().started.lock().expect("lock") = Some(program.join("caddy"));
     pretend_runs(&served, ServiceId::Caddy, || {});
     let files = || [&paths.global, &paths.sites].map(|path| fs::read(path).expect("a file"));
     let before = files();
@@ -1372,7 +1373,7 @@ async fn the_last_php_goes_with_its_default_when_no_site_needs_it() {
     // A static site gets a PHP version too, but runs none.
     let list = park_sites(&served, &[("docs", &[])]).await;
     assert_eq!(php_of(&list, "docs").as_deref(), Some("8.3.12"));
-    let mut events = served.daemon.events.subscribe();
+    let mut events = served.daemon.events().subscribe();
 
     let done: Uninstalled = served
         .json("DELETE", "/v1/runtimes/php/8.3.12", None, StatusCode::OK)
@@ -1534,7 +1535,7 @@ async fn the_pool_of_the_version_stops_before_the_delete_and_the_sites_follow() 
         }
     });
     pretend_runs(&served, pool84, || {});
-    let mut events = served.daemon.events.subscribe();
+    let mut events = served.daemon.events().subscribe();
 
     let _: Uninstalled = served
         .json("DELETE", "/v1/runtimes/php/8.3.12", None, StatusCode::OK)

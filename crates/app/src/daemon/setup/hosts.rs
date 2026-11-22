@@ -113,7 +113,7 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
         }
         tracing::info!(missing = ?status.missing, "adding sites to the hosts file");
         let ops = vec![HelperOp::HostsSync { names }];
-        match setup.launch(Flow::Setup, ops, platform, &daemon.shutdown) {
+        match setup.launch(Flow::Setup, ops, platform, daemon.shutdown()) {
             Ok(results) => report.results = results,
             Err(error) => report.error = Some(error),
         }
@@ -135,7 +135,7 @@ async fn site_names(daemon: &Arc<Daemon>) -> Result<Vec<String>, HttpError> {
 
 /// [`linux_dns::status`] for `names`. Blocking: it reads the hosts file.
 fn read_status(daemon: &Daemon, setup: &Setup, names: &[String]) -> HostsStatus {
-    linux_dns::status(&daemon.data_dir, setup.hosts_file(), names)
+    linux_dns::status(daemon.data_dir(), setup.hosts_file(), names)
 }
 
 fn not_used() -> HttpError {
@@ -190,7 +190,7 @@ mod tests {
                 skipped: Vec::new(),
             };
             daemon
-                .state
+                .state()
                 .write()
                 .unwrap_or_else(PoisonError::into_inner)
                 .sites = Some(list);
