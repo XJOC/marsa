@@ -4,3 +4,4 @@ pub mod api;
 pub mod install;
 pub mod installs;
 pub mod remove;
+pub mod xdebug;

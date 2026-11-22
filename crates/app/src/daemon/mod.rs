@@ -17,4 +17,3 @@ pub mod state;
 #[cfg(test)]
 pub(crate) mod test_router;
 pub mod uninstall_api;
-pub mod xdebug_api;
