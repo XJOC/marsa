@@ -9,6 +9,7 @@ pub mod caddy;
 pub mod client_shims;
 pub mod databases;
 pub mod dns;
+pub mod doctor_api;
 pub mod hosts_sync;
 pub(crate) mod http;
 pub mod one_at_a_time;

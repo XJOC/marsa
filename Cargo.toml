@@ -49,7 +49,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 # to build against. Without `wayland`: it only ties the dialog to the window
 # on Wayland, with more unsafe code; the dialog works without it.
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
-semver = "1"
+semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 # No extra features: `Value` reads two keys from `composer.json` and
 # `package.json` (task M1-04), and typed structs read the manifest (M2-02).

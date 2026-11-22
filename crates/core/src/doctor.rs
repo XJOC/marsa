@@ -13,13 +13,15 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 use semver::Version;
+use serde::{Deserialize, Serialize};
 
 use crate::caddy::GREETING;
 use crate::resolver::best_match;
 use crate::types::{Health, PortHolder, ServiceState};
 
 /// The checks, in the order `marsa doctor` runs and prints them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Check {
     Daemon,
     Runtimes,
@@ -38,7 +40,8 @@ pub enum Check {
 }
 
 /// What one check found.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Verdict {
     /// ✓
     Pass(Pass),
@@ -49,7 +52,8 @@ pub enum Verdict {
 }
 
 /// A check that passed, with what its line shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Pass {
     Daemon {
         version: String,
@@ -88,7 +92,8 @@ pub enum Pass {
 }
 
 /// What is wrong. The CLI shows each with its fix.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Problem {
     DaemonNotRunning,
     /// The daemon could not be asked: the code of the client error.
@@ -187,7 +192,8 @@ pub enum Problem {
 }
 
 /// Why a check did not run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Skip {
     /// Marsa has no such check on this system yet: ports and trust on
     /// Linux.
@@ -207,7 +213,8 @@ pub enum Skip {
 
 /// Something that works now but will cause trouble: a line with `!` and a
 /// fix, which does not fail `marsa doctor`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Warning {
     /// Windows: `marsad` runs with an administrator's token. PostgreSQL
     /// refuses to start then (ADR 0023, section 7), and every program it

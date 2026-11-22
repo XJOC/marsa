@@ -14,6 +14,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// Defined once, in `doctor`, which judges them.
+pub use crate::doctor::{Check as DoctorCheck, Verdict as DoctorVerdict, Warning as DoctorWarning};
 /// Defined once, in `helper`, next to the request they answer.
 pub use crate::helper::{OpResult, OpStatus};
 /// Defined once, in `resolver`, which picks the version: `Site::php_source`.
@@ -629,6 +631,24 @@ pub struct AutostartState {
     /// may not start Marsa. `PUT` with `enabled: true` writes it again.
     #[serde(default)]
     pub stale: bool,
+}
+
+/// `GET /v1/doctor`: the checks of `marsa doctor`, as the daemon sees them.
+/// The `PATH` check is not here: it judges a terminal's `PATH`, which only
+/// the CLI has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoctorReport {
+    /// In the order `marsa doctor` prints them.
+    pub lines: Vec<DoctorLine>,
+    /// Things that work now but will cause trouble; they fail nothing.
+    pub warnings: Vec<DoctorWarning>,
+}
+
+/// One check and what it found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoctorLine {
+    pub check: DoctorCheck,
+    pub verdict: DoctorVerdict,
 }
 
 /// The body of `PUT /v1/autostart`.
