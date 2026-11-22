@@ -16,7 +16,7 @@ use crate::name::ShimName;
 /// Errors from `resolver`, `config`, and `runtimes` are wrapped as they are,
 /// and [`ShimError::code`] gives their own code.
 #[derive(Debug, thiserror::Error)]
-pub enum ShimError {
+pub(crate) enum ShimError {
     #[error("unknown command name {name:?}")]
     UnknownName { name: OsString },
 
@@ -70,7 +70,7 @@ pub enum ShimError {
 
 impl ShimError {
     /// Stable error name. Never changes once released.
-    pub fn code(&self) -> &'static str {
+    pub(crate) fn code(&self) -> &'static str {
         match self {
             ShimError::UnknownName { .. } => "shim_unknown_name",
             ShimError::NoCwd(_) => "shim_no_cwd",
@@ -89,7 +89,7 @@ impl ShimError {
 
     /// Shell convention: 127 means there is nothing to run, 126 means the
     /// program was found but cannot run.
-    pub fn exit_code(&self) -> u8 {
+    pub(crate) fn exit_code(&self) -> u8 {
         match self {
             ShimError::Loop { .. } | ShimError::Exec { .. } | ShimError::UnsupportedPlatform => 126,
             _ => 127,
@@ -97,7 +97,7 @@ impl ShimError {
     }
 
     /// The text after `marsa: `: the message, each underlying cause, and the code.
-    pub fn line(&self) -> String {
+    pub(crate) fn line(&self) -> String {
         let mut line = self.to_string();
         let mut cause = self.source();
         while let Some(err) = cause {
@@ -110,7 +110,7 @@ impl ShimError {
 
     /// A next step, only for errors that have a clear one. All hint texts live
     /// here (AGENTS.md section 9). `data_dir` is `None` if it is unknown.
-    pub fn hint(&self, data_dir: Option<&Path>) -> Option<String> {
+    pub(crate) fn hint(&self, data_dir: Option<&Path>) -> Option<String> {
         let program = |tool: &Tool| Runtime::from(*tool).dir_name();
         match self {
             ShimError::UnknownName { .. } => Some(names_hint()),

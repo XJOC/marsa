@@ -33,7 +33,7 @@ const FAILED: &str = "open_failed";
 /// `open_no_program` when the system has no opener, `open_failed` for a
 /// folder that is not an absolute path (a name that starts with `-` would
 /// pass for an option).
-pub fn folder_opener(folder: &Path) -> Result<Opener, &'static str> {
+pub(crate) fn folder_opener(folder: &Path) -> Result<Opener, &'static str> {
     if !folder.is_absolute() {
         return Err(FAILED);
     }
@@ -53,7 +53,7 @@ pub fn folder_opener(folder: &Path) -> Result<Opener, &'static str> {
 ///
 /// The code of why it did not start: see [`folder_opener`], and
 /// `open_failed` when the program cannot be run.
-pub fn open_folder(folder: &Path) -> Result<(), &'static str> {
+pub(crate) fn open_folder(folder: &Path) -> Result<(), &'static str> {
     start(folder_opener(folder)?)
 }
 
@@ -62,7 +62,7 @@ pub fn open_folder(folder: &Path) -> Result<(), &'static str> {
 /// `https` address with no space in it (an argument that starts with `-` would
 /// pass for an option, and `file:` would open a file), `open_no_program` when
 /// the system has no opener.
-pub fn url_opener(url: &str) -> Result<Opener, &'static str> {
+pub(crate) fn url_opener(url: &str) -> Result<Opener, &'static str> {
     let web = url.starts_with("https://") || url.starts_with("http://");
     if !web || url.chars().any(char::is_whitespace) {
         return Err(FAILED);
@@ -76,7 +76,7 @@ pub fn url_opener(url: &str) -> Result<Opener, &'static str> {
 /// # Errors
 ///
 /// As [`url_opener`], and `open_failed` when the program cannot be run.
-pub fn open_url(url: &str) -> Result<(), &'static str> {
+pub(crate) fn open_url(url: &str) -> Result<(), &'static str> {
     start(url_opener(url)?)
 }
 

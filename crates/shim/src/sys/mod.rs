@@ -6,7 +6,7 @@
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{exec, own_name};
+pub(crate) use unix::{exec, own_name};
 
 #[cfg(windows)]
 mod windows;

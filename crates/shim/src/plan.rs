@@ -21,7 +21,7 @@ use crate::error::ShimError;
 use crate::name::ShimName;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Plan {
+pub(crate) struct Plan {
     /// Always absolute, so starting it never searches `PATH`.
     pub program: PathBuf,
     /// Passed to `program` before the user's arguments: `npm-cli.js`,
@@ -51,7 +51,7 @@ const SERVER_HOST: &str = "127.0.0.1";
 ///   not its default socket in `/tmp`, which is not Marsa's.
 /// - Valkey: none. `valkey-cli` reads no such variable: [`valkey_args`] gives
 ///   its port as an argument instead.
-pub fn server_env(server: ServerKind, port: u16) -> Vec<(&'static str, String)> {
+pub(crate) fn server_env(server: ServerKind, port: u16) -> Vec<(&'static str, String)> {
     let (host, port_var, user) = match server {
         ServerKind::Postgres => ("PGHOST", "PGPORT", Some(("PGUSER", "root"))),
         ServerKind::Mysql => ("MYSQL_HOST", "MYSQL_TCP_PORT", None),
@@ -68,7 +68,7 @@ pub fn server_env(server: ServerKind, port: u16) -> Vec<(&'static str, String)> 
 /// where to connect, in any spelling: a port, host, URI, or socket option.
 /// A lookalike value after a command (`SET -h x`) only makes this add nothing,
 /// which is how the client behaved before.
-pub fn valkey_args(port: u16, args: Vec<OsString>) -> Vec<OsString> {
+pub(crate) fn valkey_args(port: u16, args: Vec<OsString>) -> Vec<OsString> {
     if port == ServerKind::Valkey.default_port() || args.iter().any(|arg| names_a_target(arg)) {
         return args;
     }
@@ -99,7 +99,7 @@ fn names_a_target(arg: &OsStr) -> bool {
 /// set, even to an empty value, is never changed: the client then reads the
 /// user's value from the environment it inherits. `is_set` reads the
 /// environment.
-pub fn unset_only(
+pub(crate) fn unset_only(
     vars: Vec<(&'static str, String)>,
     is_set: impl Fn(&str) -> bool,
 ) -> Vec<(&'static str, String)> {
@@ -115,7 +115,7 @@ pub fn unset_only(
 ///
 /// `shim_server_not_installed` when no version is installed, and
 /// `shim_server_line_not_installed` when none is in the `default` line.
-pub fn server_version(
+pub(crate) fn server_version(
     server: ServerKind,
     default: Option<&str>,
     installed: &[Version],
@@ -137,15 +137,15 @@ pub fn server_version(
 }
 
 /// Node adds the certificates in this file to its own list.
-pub const NODE_EXTRA_CA_CERTS: &str = "NODE_EXTRA_CA_CERTS";
+pub(crate) const NODE_EXTRA_CA_CERTS: &str = "NODE_EXTRA_CA_CERTS";
 
 /// PHP reads its `php.ini` from this path.
-pub const PHPRC: &str = "PHPRC";
+pub(crate) const PHPRC: &str = "PHPRC";
 
 /// A variable that makes the real program trust Marsa's CA, so a call from
 /// the terminal to a `.test` site passes TLS (architecture.md section 10).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustVar {
+pub(crate) struct TrustVar {
     /// [`NODE_EXTRA_CA_CERTS`] or [`PHPRC`].
     pub name: &'static str,
     /// The file the variable names. It may not exist yet.
@@ -158,7 +158,7 @@ pub struct TrustVar {
 
 /// Where the value that the shim inherited for a [`TrustVar`] came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Inherited {
+pub(crate) enum Inherited {
     /// The variable is not in the environment.
     Unset,
     /// The user set it, maybe to an empty value. It is never touched.
@@ -170,7 +170,7 @@ pub enum Inherited {
 
 /// What the command does with the variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TrustEnv {
+pub(crate) enum TrustEnv {
     /// Sets `name` to `file`.
     Set { name: &'static str, file: PathBuf },
     /// Removes `name`, so the program does not read the file of another PHP
@@ -190,7 +190,7 @@ impl TrustVar {
     ///
     /// `version` is the version that runs; only a PHP version is used. Nothing
     /// is read from the disk.
-    pub fn for_shim(name: ShimName, data_dir: &Path, version: &Version) -> Self {
+    pub(crate) fn for_shim(name: ShimName, data_dir: &Path, version: &Version) -> Self {
         match name.tool() {
             Tool::Node => Self {
                 name: NODE_EXTRA_CA_CERTS,
@@ -216,7 +216,7 @@ impl TrustVar {
     /// compares whole path parts and never resolves links, so `/data/phpx` is
     /// not inside `/data/php`. Any other value, an empty one too, is the
     /// user's.
-    pub fn inherited(&self, value: Option<&OsStr>) -> Inherited {
+    pub(crate) fn inherited(&self, value: Option<&OsStr>) -> Inherited {
         let marsa = |value: &OsStr| {
             self.marsa_dir
                 .as_deref()
@@ -241,7 +241,7 @@ impl TrustVar {
     ///
     /// Pure, so every case is tested: the caller reads the environment and
     /// the disk.
-    pub fn decide(self, inherited: Inherited, file_exists: bool) -> Option<TrustEnv> {
+    pub(crate) fn decide(self, inherited: Inherited, file_exists: bool) -> Option<TrustEnv> {
         match (inherited, file_exists) {
             (Inherited::User, _) | (Inherited::Unset, false) => None,
             (Inherited::Unset | Inherited::Marsa, true) => Some(TrustEnv::Set {
@@ -271,7 +271,7 @@ impl Plan {
     /// # Errors
     ///
     /// `shim_composer_not_installed` for `composer` when `composer` is `None`.
-    pub fn new(
+    pub(crate) fn new(
         name: ShimName,
         platform: Platform,
         runtimes: &RuntimesDir,
@@ -306,7 +306,7 @@ impl Plan {
     /// The plan of a database client: its program in the `version` folder
     /// of its server, which must come from [`RuntimesDir::installed`], with
     /// the user's arguments as they are. `redis-cli` runs `valkey-cli`.
-    pub fn client(
+    pub(crate) fn client(
         client: Client,
         platform: Platform,
         runtimes: &RuntimesDir,
@@ -328,7 +328,7 @@ impl Plan {
     /// `shim_program_missing` if the program or the script is not a file. The
     /// version folder exists, so this is a broken install, not a missing
     /// version.
-    pub fn check(&self) -> Result<(), ShimError> {
+    pub(crate) fn check(&self) -> Result<(), ShimError> {
         let missing = std::iter::once(&self.program)
             .chain(&self.script)
             .find(|path| !path.is_file());
@@ -343,7 +343,7 @@ impl Plan {
     /// [`Plan::server_env`] adds its variables. `argv[0]` is the absolute
     /// path, so `PHP_BINARY` and `process.execPath` point at the real
     /// program, and `@php` in Composer scripts uses the same PHP.
-    pub fn command(&self, depth: u32) -> Command {
+    pub(crate) fn command(&self, depth: u32) -> Command {
         let mut command = Command::new(&self.program);
         command
             .args(&self.script)

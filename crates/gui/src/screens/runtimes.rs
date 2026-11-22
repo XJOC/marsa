@@ -44,7 +44,7 @@ use crate::widgets::{
 /// version, site counts, or an extra section has an entry in [`descriptor`].
 /// [Laravel: a config array the view loops over.]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Descriptor {
+pub(crate) struct Descriptor {
     /// The key of the runtime in the model and in the daemon's commands.
     pub runtime: Runtime,
     /// What it is: only languages and tools are listed here.
@@ -67,7 +67,7 @@ pub struct Descriptor {
 
 /// What a runtime is. The Runtimes screen lists languages and tools.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
+pub(crate) enum Kind {
     /// A language Marsa runs your code with: PHP, Node.js, later Python, Go.
     Language,
     /// A program that serves or builds: Composer, Caddy.
@@ -79,14 +79,14 @@ pub enum Kind {
 
 impl Kind {
     /// Whether the Runtimes screen lists it.
-    pub const fn listed(self) -> bool {
+    pub(crate) const fn listed(self) -> bool {
         matches!(self, Self::Language | Self::Tool)
     }
 }
 
 /// The kind of `runtime`. The Phase 2 engines stay out of the list; a new
 /// variant is a compile error here until it is placed.
-pub fn kind_for(runtime: Runtime) -> Kind {
+pub(crate) fn kind_for(runtime: Runtime) -> Kind {
     match runtime {
         Runtime::Php | Runtime::Node => Kind::Language,
         Runtime::Composer | Runtime::Caddy => Kind::Tool,
@@ -96,7 +96,7 @@ pub fn kind_for(runtime: Runtime) -> Kind {
 
 /// A section of a runtime's details that only some runtimes have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Extra {
+pub(crate) enum Extra {
     /// The Xdebug switch (PHP).
     Xdebug,
 }
@@ -106,7 +106,7 @@ impl Descriptor {
     /// of its tile that `strings` and `widgets` give it, a kind from
     /// [`kind_for`], the Runtimes colors, no default, no site counts, and no
     /// extra section.
-    pub fn plain(runtime: Runtime) -> Self {
+    pub(crate) fn plain(runtime: Runtime) -> Self {
         Self {
             runtime,
             kind: kind_for(runtime),
@@ -122,7 +122,7 @@ impl Descriptor {
 }
 
 /// The descriptor of `runtime`: the plain one, with what the runtime has more.
-pub fn descriptor(runtime: Runtime) -> Descriptor {
+pub(crate) fn descriptor(runtime: Runtime) -> Descriptor {
     let plain = Descriptor {
         default: model::has_default(runtime),
         ..Descriptor::plain(runtime)
@@ -141,18 +141,18 @@ pub fn descriptor(runtime: Runtime) -> Descriptor {
 
 /// The runtimes of [`Runtime::ALL`], in its order, that the screen lists:
 /// the languages and the tools.
-pub fn descriptors() -> Vec<Descriptor> {
+pub(crate) fn descriptors() -> Vec<Descriptor> {
     listed(Runtime::ALL.into_iter().map(descriptor))
 }
 
 /// `all` without the engines.
-pub fn listed(all: impl IntoIterator<Item = Descriptor>) -> Vec<Descriptor> {
+pub(crate) fn listed(all: impl IntoIterator<Item = Descriptor>) -> Vec<Descriptor> {
     all.into_iter().filter(|d| d.kind.listed()).collect()
 }
 
 /// What the screen says.
 #[derive(Debug, PartialEq)]
-pub enum RuntimesView {
+pub(crate) enum RuntimesView {
     /// The runtimes were not read: no daemon, or no answer yet.
     Unread,
     /// Boxed: a screen is much larger than a message.
@@ -161,7 +161,7 @@ pub enum RuntimesView {
 
 /// The screen once the daemon has listed the runtimes.
 #[derive(Debug, PartialEq)]
-pub struct Read {
+pub(crate) struct Read {
     /// One for each descriptor, in order.
     pub entries: Vec<Entry>,
     /// The index of the chosen entry.
@@ -172,7 +172,7 @@ pub struct Read {
 
 /// One runtime in the list.
 #[derive(Debug, PartialEq)]
-pub struct Entry {
+pub(crate) struct Entry {
     pub runtime: Runtime,
     pub name: &'static str,
     pub monogram: String,
@@ -183,7 +183,7 @@ pub struct Entry {
 
 /// The chosen runtime.
 #[derive(Debug, PartialEq)]
-pub struct Details {
+pub(crate) struct Details {
     pub runtime: Runtime,
     pub name: &'static str,
     pub version: VersionSection,
@@ -199,7 +199,7 @@ pub struct Details {
 
 /// The part above the Installed table.
 #[derive(Debug, PartialEq)]
-pub enum VersionSection {
+pub(crate) enum VersionSection {
     /// Nothing is installed: there is nothing to pick.
     Empty,
     /// The large version buttons: the default.
@@ -209,7 +209,7 @@ pub enum VersionSection {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct DefaultPicker {
+pub(crate) struct DefaultPicker {
     /// "Default PHP": the heading, and the name of the group for a screen
     /// reader.
     pub heading: String,
@@ -222,7 +222,7 @@ pub struct DefaultPicker {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct VersionChoice {
+pub(crate) struct VersionChoice {
     pub version: Version,
     /// `8.4` for the newest patch of a line, the whole version for an older
     /// one: the text the daemon would save.
@@ -231,7 +231,7 @@ pub struct VersionChoice {
 
 /// One installed version in the table.
 #[derive(Debug, PartialEq)]
-pub struct VersionRow {
+pub(crate) struct VersionRow {
     pub version: Version,
     /// The whole version: `8.4.27`.
     pub text: String,
@@ -249,7 +249,7 @@ pub struct VersionRow {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct XdebugView {
+pub(crate) struct XdebugView {
     pub on: bool,
     /// Why the switch cannot be pressed now.
     pub off: Option<&'static str>,
@@ -261,7 +261,7 @@ pub struct XdebugView {
 /// What an install that runs and an uninstall that waits say, above the
 /// sections. How they end is a notice in the shell's bar (`shell::notices`).
 #[derive(Debug, PartialEq)]
-pub struct Status {
+pub(crate) struct Status {
     /// An install runs.
     pub progress: Option<InstallBar>,
     /// "Uninstalling PHP 8.4.27…", while the daemon removes it.
@@ -269,7 +269,7 @@ pub struct Status {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct InstallDialog {
+pub(crate) struct InstallDialog {
     pub runtime: Runtime,
     pub title: String,
     /// What to type: a version such as 8.4, or nothing.
@@ -281,7 +281,7 @@ pub struct InstallDialog {
 }
 
 /// Decides what Runtimes says. Pure: the same model gives the same view.
-pub fn view(model: &Model) -> RuntimesView {
+pub(crate) fn view(model: &Model) -> RuntimesView {
     let table = descriptors();
     let chosen = table
         .iter()
@@ -292,7 +292,7 @@ pub fn view(model: &Model) -> RuntimesView {
 
 /// [`view`] over the descriptors `table`, with the entry `chosen` shown.
 /// The tests give it a runtime the daemon does not have yet.
-pub fn build(model: &Model, table: &[Descriptor], chosen: usize) -> RuntimesView {
+pub(crate) fn build(model: &Model, table: &[Descriptor], chosen: usize) -> RuntimesView {
     let chosen = chosen.min(table.len().saturating_sub(1));
     let Some(shown) = table.get(chosen) else {
         return RuntimesView::Unread;
@@ -463,7 +463,7 @@ fn status(model: &Model) -> Status {
 /// The install dialog, when it is open. The shell draws it over any screen
 /// ([`show_install_dialog`]), because Home and a site's page open it too, so
 /// it is not part of [`RuntimesView`].
-pub fn install_dialog_view(model: &Model) -> Option<InstallDialog> {
+pub(crate) fn install_dialog_view(model: &Model) -> Option<InstallDialog> {
     let runtime = model.session.install_dialog?;
     Some(dialog(model, &descriptor(runtime)))
 }
@@ -483,7 +483,7 @@ fn dialog(model: &Model, d: &Descriptor) -> InstallDialog {
 }
 
 /// Draws `view`. Returns what the user did.
-pub fn show(ui: &mut Ui, view: &RuntimesView, theme: &Theme) -> Vec<Action> {
+pub(crate) fn show(ui: &mut Ui, view: &RuntimesView, theme: &Theme) -> Vec<Action> {
     let mut actions = Vec::new();
     ui.spacing_mut().item_spacing.y = theme.space.section_gap;
     super::header(ui, theme, Section::Runtimes, strings::RUNTIMES, |_| {});
@@ -713,7 +713,7 @@ fn xdebug_card(ui: &mut Ui, theme: &Theme, x: &XdebugView, actions: &mut Vec<Act
 /// The install dialog over the window: a version field and Install. Enter in
 /// the field installs; Escape and Cancel close the dialog. The shell draws it
 /// after the screen, so it covers any screen.
-pub fn show_install_dialog(ctx: &Context, dialog: &InstallDialog) -> Vec<Action> {
+pub(crate) fn show_install_dialog(ctx: &Context, dialog: &InstallDialog) -> Vec<Action> {
     let mut actions = Vec::new();
     let id = Id::unique(("install_version", dialog.runtime.dir_name()));
     let mut text = dialog.text.clone();

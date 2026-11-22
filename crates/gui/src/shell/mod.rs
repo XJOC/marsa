@@ -4,9 +4,9 @@
 //! everything. [Laravel: the
 //! layout file; the `match` in `screen` is `routes/web.php`.]
 
-pub mod dialogs;
-pub mod notices;
-pub mod sidebar;
+pub(crate) mod dialogs;
+pub(crate) mod notices;
+pub(crate) mod sidebar;
 
 use std::hash::Hash;
 use std::time::Instant;
@@ -21,19 +21,19 @@ use sidebar::Item;
 
 /// What the user did in one frame.
 #[derive(Debug, Default)]
-pub struct Output {
+pub(crate) struct Output {
     /// For [`Model::apply_action`].
     pub actions: Vec<Action>,
 }
 
 /// Draws the whole window. `picking`: a folder dialog is open.
-pub fn show(ui: &mut Ui, model: &Model, picking: bool) -> Output {
+pub(crate) fn show(ui: &mut Ui, model: &Model, picking: bool) -> Output {
     show_at(ui, model, picking, Instant::now())
 }
 
 /// [`show`] at the time `now`: the notice bar closes a success by the clock,
 /// so a test moves the clock by hand.
-pub fn show_at(ui: &mut Ui, model: &Model, picking: bool, now: Instant) -> Output {
+pub(crate) fn show_at(ui: &mut Ui, model: &Model, picking: bool, now: Instant) -> Output {
     let theme = Theme::of(ui.ctx());
     let mut out = Output::default();
     let narrow = sidebar::is_narrow(theme, ui.max_rect().width());

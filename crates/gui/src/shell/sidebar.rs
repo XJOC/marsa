@@ -12,7 +12,7 @@ use crate::widgets::{Button, Health, Icon, NavItem, StatusDot};
 
 /// An item of the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Item {
+pub(crate) enum Item {
     Home,
     Sites,
     Logs,
@@ -23,7 +23,7 @@ pub enum Item {
 }
 
 /// The items above the status, in their groups, in order.
-pub const GROUPS: [&[Item]; 4] = [
+pub(crate) const GROUPS: [&[Item]; 4] = [
     &[Item::Home],
     &[Item::Sites],
     &[Item::Logs],
@@ -34,7 +34,7 @@ impl Item {
     /// The route a click on the item opens. The Runtimes item opens the main
     /// runtime here; a click opens the one the screen showed last
     /// ([`Model::chosen_runtime`], see [`Item::route_in`]).
-    pub fn route(self) -> Route {
+    pub(crate) fn route(self) -> Route {
         match self {
             Self::Home => Route::Home,
             Self::Sites => Route::Sites,
@@ -47,7 +47,7 @@ impl Item {
 
     /// [`Item::route`] for a window that remembers where it was: the Runtimes
     /// item opens the runtime the user chose last.
-    pub fn route_in(self, model: &Model) -> Route {
+    pub(crate) fn route_in(self, model: &Model) -> Route {
         match self {
             Self::Runtimes => Route::Runtimes(model.chosen_runtime()),
             _ => self.route(),
@@ -55,7 +55,7 @@ impl Item {
     }
 
     /// The item a route belongs to: a site's page is under Sites.
-    pub fn of(route: &Route) -> Self {
+    pub(crate) fn of(route: &Route) -> Self {
         match route {
             Route::Home => Self::Home,
             Route::Sites | Route::Site(_) => Self::Sites,
@@ -67,7 +67,7 @@ impl Item {
     }
 
     /// The section whose tile the item shows. Settings has a plain icon.
-    pub const fn section(self) -> Option<Section> {
+    pub(crate) const fn section(self) -> Option<Section> {
         match self {
             Self::Home => Some(Section::Home),
             Self::Sites => Some(Section::Sites),
@@ -78,7 +78,7 @@ impl Item {
         }
     }
 
-    pub const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self.section() {
             Some(section) => strings::section_name(section),
             None => strings::SETTINGS,
@@ -87,12 +87,12 @@ impl Item {
 }
 
 /// A window narrower than this folds the sidebar, whatever the user chose.
-pub fn is_narrow(theme: &Theme, window_width: f32) -> bool {
+pub(crate) fn is_narrow(theme: &Theme, window_width: f32) -> bool {
     window_width < theme.size.sidebar_fold_below
 }
 
 /// The mark of the status at the bottom: an error when no site opens.
-pub const fn health(overall: Overall) -> Health {
+pub(crate) const fn health(overall: Overall) -> Health {
     match overall {
         Overall::Connecting | Overall::Stopping | Overall::Starting => Health::Busy,
         Overall::DaemonDown | Overall::WebServerDown => Health::Error,
@@ -102,7 +102,7 @@ pub const fn health(overall: Overall) -> Health {
 
 /// Draws the sidebar inside its panel. `narrow`: the window is too narrow
 /// for labels. Returns what the user did.
-pub fn show(ui: &mut Ui, model: &Model, narrow: bool) -> Vec<Action> {
+pub(crate) fn show(ui: &mut Ui, model: &Model, narrow: bool) -> Vec<Action> {
     let theme = Theme::of(ui.ctx());
     let folded = narrow || model.sidebar_folded;
     let current = Item::of(&model.route);

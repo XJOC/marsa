@@ -22,7 +22,7 @@ use crate::widgets::notice::{Notice, NoticeKind, Reaction, show_bar};
 
 /// What the bar shows, and what it does for the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Bar {
+pub(crate) struct Bar {
     /// The result of the model that it tells about: closing it clears that.
     pub source: NoticeSource,
     pub notice: Notice,
@@ -61,7 +61,7 @@ impl Bar {
 
 /// Decides what the bar shows now: the first error, else the first success,
 /// of the results the model holds. Pure: the same model gives the same bar.
-pub fn current(model: &Model) -> Option<Bar> {
+pub(crate) fn current(model: &Model) -> Option<Bar> {
     let mut bars: Vec<Bar> = [
         call(model),
         sites(model),
@@ -175,7 +175,7 @@ fn autostart(model: &Model) -> Option<Bar> {
 
 /// What the clock says about the notice on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Look {
+pub(crate) enum Look {
     /// No notice.
     Nothing,
     /// The notice stays. A success has this long to go; an error has no end.
@@ -187,7 +187,7 @@ pub enum Look {
 /// How long the notice on screen has been there. It takes the time from the
 /// caller, so a test moves the clock by hand.
 #[derive(Clone, Debug, Default)]
-pub struct Clock {
+pub(crate) struct Clock {
     /// The notice, and when it came on screen.
     shown: Option<(Bar, Instant)>,
 }
@@ -196,7 +196,7 @@ impl Clock {
     /// Looks at the notice the model wants on screen at `now`. A different
     /// notice starts its own time: the next one after a close does not
     /// inherit the one before it.
-    pub fn look(&mut self, wanted: Option<&Bar>, now: Instant) -> Look {
+    pub(crate) fn look(&mut self, wanted: Option<&Bar>, now: Instant) -> Look {
         let Some(wanted) = wanted else {
             self.shown = None;
             return Look::Nothing;
@@ -225,7 +225,7 @@ impl Clock {
 /// Draws the bar over the bottom of `main_area` and returns what the user
 /// did: close it, or press its action. A success that has run out closes
 /// itself, and the window asks for one repaint when the next one will.
-pub fn show(ctx: &Context, main_area: Rect, model: &Model, now: Instant) -> Vec<Action> {
+pub(crate) fn show(ctx: &Context, main_area: Rect, model: &Model, now: Instant) -> Vec<Action> {
     let bar = current(model);
     let look = ctx.data_mut(|data| {
         data.get_temp_mut_or_default::<Clock>(Id::unique("notice_clock"))

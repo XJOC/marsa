@@ -272,12 +272,12 @@ pub(crate) mod harness {
     use crate::theme;
 
     /// One egui context with the window's fonts and styles.
-    pub struct Harness {
+    pub(crate) struct Harness {
         pub ctx: Context,
     }
 
     impl Harness {
-        pub fn new(theme: egui::Theme) -> Self {
+        pub(crate) fn new(theme: egui::Theme) -> Self {
             let ctx = Context::default();
             theme::style::apply(&ctx);
             ctx.set_theme(theme);
@@ -286,7 +286,7 @@ pub(crate) mod harness {
         }
 
         /// One frame with this input; the output's accessibility tree.
-        pub fn frame(&self, input: RawInput, add: impl FnMut(&mut Ui)) -> Tree {
+        pub(crate) fn frame(&self, input: RawInput, add: impl FnMut(&mut Ui)) -> Tree {
             let mut output = self.ctx.run_ui(input, add);
             let nodes = output
                 .platform_output
@@ -299,7 +299,7 @@ pub(crate) mod harness {
         }
 
         /// The shapes one frame paints, in order.
-        pub fn shapes(&self, add: impl FnMut(&mut Ui)) -> Vec<egui::Shape> {
+        pub(crate) fn shapes(&self, add: impl FnMut(&mut Ui)) -> Vec<egui::Shape> {
             let output = self.ctx.run_ui(RawInput::default(), add);
             let shapes = output
                 .shapes
@@ -313,7 +313,7 @@ pub(crate) mod harness {
         /// The shapes one frame paints with the clip rect each is drawn in,
         /// for a frame of `input`: a shape that sticks out of its clip rect
         /// is cut on screen.
-        pub fn clipped_shapes(
+        pub(crate) fn clipped_shapes(
             &self,
             input: RawInput,
             add: impl FnMut(&mut Ui),
@@ -329,17 +329,17 @@ pub(crate) mod harness {
         }
 
         /// One frame with no input.
-        pub fn run(&self, add: impl FnMut(&mut Ui)) {
+        pub(crate) fn run(&self, add: impl FnMut(&mut Ui)) {
             self.frame(RawInput::default(), add);
         }
 
         /// One frame, then the tree it described.
-        pub fn accessibility(&self, add: impl FnMut(&mut Ui)) -> Tree {
+        pub(crate) fn accessibility(&self, add: impl FnMut(&mut Ui)) -> Tree {
             self.frame(RawInput::default(), add)
         }
 
         /// A frame where the pointer moves to `pos`.
-        pub fn hover(&self, pos: Pos2, add: impl FnMut(&mut Ui)) {
+        pub(crate) fn hover(&self, pos: Pos2, add: impl FnMut(&mut Ui)) {
             let input = RawInput {
                 events: vec![Event::PointerMoved(pos)],
                 ..RawInput::default()
@@ -349,7 +349,7 @@ pub(crate) mod harness {
 
         /// A frame where the primary button goes down at `pos`, and one
         /// where it goes up: the click.
-        pub fn click(&self, pos: Pos2, mut add: impl FnMut(&mut Ui)) {
+        pub(crate) fn click(&self, pos: Pos2, mut add: impl FnMut(&mut Ui)) {
             let button = |pressed| Event::PointerButton {
                 pos,
                 button: PointerButton::Primary,
@@ -369,12 +369,17 @@ pub(crate) mod harness {
         }
 
         /// A frame with the key pressed once.
-        pub fn key(&self, key: egui::Key, add: impl FnMut(&mut Ui)) {
+        pub(crate) fn key(&self, key: egui::Key, add: impl FnMut(&mut Ui)) {
             self.key_with(key, Modifiers::NONE, add);
         }
 
         /// A frame with the key pressed once while `modifiers` are held.
-        pub fn key_with(&self, key: egui::Key, modifiers: Modifiers, add: impl FnMut(&mut Ui)) {
+        pub(crate) fn key_with(
+            &self,
+            key: egui::Key,
+            modifiers: Modifiers,
+            add: impl FnMut(&mut Ui),
+        ) {
             let input = RawInput {
                 events: vec![Event::Key {
                     key,
@@ -390,22 +395,22 @@ pub(crate) mod harness {
     }
 
     /// The nodes of one frame's accessibility tree.
-    pub struct Tree {
+    pub(crate) struct Tree {
         nodes: Vec<accesskit::Node>,
     }
 
     impl Tree {
         /// The first node that has this role.
-        pub fn node_with_role(&self, role: accesskit::Role) -> Option<&accesskit::Node> {
+        pub(crate) fn node_with_role(&self, role: accesskit::Role) -> Option<&accesskit::Node> {
             self.nodes.iter().find(|node| node.role() == role)
         }
 
-        pub fn node_with_label(&self, label: &str) -> Option<&accesskit::Node> {
+        pub(crate) fn node_with_label(&self, label: &str) -> Option<&accesskit::Node> {
             self.nodes.iter().find(|node| node.label() == Some(label))
         }
 
         /// Every node named `label`, in the order of the tree.
-        pub fn nodes_with_label(&self, label: &str) -> Vec<&accesskit::Node> {
+        pub(crate) fn nodes_with_label(&self, label: &str) -> Vec<&accesskit::Node> {
             self.nodes
                 .iter()
                 .filter(|node| node.label() == Some(label))
@@ -414,7 +419,7 @@ pub(crate) mod harness {
 
         /// The names and values that start with `prefix`, in the order of the
         /// tree (egui gives a text label its words as a value).
-        pub fn labels_starting_with(&self, prefix: &str) -> Vec<&str> {
+        pub(crate) fn labels_starting_with(&self, prefix: &str) -> Vec<&str> {
             self.nodes
                 .iter()
                 .filter_map(|node| node.label().or_else(|| node.value()))
@@ -424,7 +429,7 @@ pub(crate) mod harness {
 
         /// A node named `text`, or showing it as its value: egui gives a
         /// text label its words as a value, not a name.
-        pub fn node_with_text(&self, text: &str) -> Option<&accesskit::Node> {
+        pub(crate) fn node_with_text(&self, text: &str) -> Option<&accesskit::Node> {
             self.nodes
                 .iter()
                 .find(|node| node.label() == Some(text) || node.value() == Some(text))
@@ -433,7 +438,7 @@ pub(crate) mod harness {
 
     /// `fill` painted over an opaque `page`: what the eye sees under a
     /// fill that is partly see-through.
-    pub fn over(fill: Color32, page: Color32) -> Color32 {
+    pub(crate) fn over(fill: Color32, page: Color32) -> Color32 {
         let behind = |page: u8| {
             let kept = u16::from(255 - fill.a());
             (u16::from(page) * kept + 127) / 255

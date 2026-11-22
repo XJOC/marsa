@@ -35,39 +35,46 @@ const PAGE_VAR: &str = "MARSA_GUI_GALLERY_PAGE";
 
 /// What the reviewer reads: not product text.
 mod label {
-    pub const TITLE: &str = "Marsa widgets";
-    pub const ICONS: &str = "Icons";
-    pub const TILES: &str = "Section tiles: 26, 32, and the folded dot";
-    pub const MONOGRAMS: &str = "Runtime monograms";
-    pub const COUNTS: &str = "Sidebar counts: new, then seen";
-    pub const ROW_BADGES: &str = "Row badges: rest, hover, pressed, focus";
-    pub const BUTTONS: &str = "Buttons";
-    pub const SWITCH: &str = "Switch";
-    pub const SEGMENTED: &str = "Segmented control: rest, rest, focus, disabled";
-    pub const STATUS_DOT: &str = "Status dot with word: each health, then hover and focus";
-    pub const STATUS_SENTENCE: &str = "Status sentence: ok, and error with the path and the fixes";
-    pub const PATHS: &str = "Request path: the broken step at each place, and one not reached";
-    pub const PILLS: &str = "State pills";
-    pub const PICKER: &str =
+    pub(super) const TITLE: &str = "Marsa widgets";
+    pub(super) const ICONS: &str = "Icons";
+    pub(super) const TILES: &str = "Section tiles: 26, 32, and the folded dot";
+    pub(super) const MONOGRAMS: &str = "Runtime monograms";
+    pub(super) const COUNTS: &str = "Sidebar counts: new, then seen";
+    pub(super) const ROW_BADGES: &str = "Row badges: rest, hover, pressed, focus";
+    pub(super) const BUTTONS: &str = "Buttons";
+    pub(super) const SWITCH: &str = "Switch";
+    pub(super) const SEGMENTED: &str = "Segmented control: rest, rest, focus, disabled";
+    pub(super) const STATUS_DOT: &str = "Status dot with word: each health, then hover and focus";
+    pub(super) const STATUS_SENTENCE: &str =
+        "Status sentence: ok, and error with the path and the fixes";
+    pub(super) const PATHS: &str =
+        "Request path: the broken step at each place, and one not reached";
+    pub(super) const PILLS: &str = "State pills";
+    pub(super) const PICKER: &str =
         "Version picker: rest (PHP and Node), then hover, pressed, and focus on one button";
-    pub const PICKER_MORE: &str = "Version picker: medium (menu-bar panel), and disabled";
-    pub const MENU: &str = "Version menu: rest, hover, focus, disabled, and the menu open";
-    pub const VERSIONS_LIVE: &str =
+    pub(super) const PICKER_MORE: &str = "Version picker: medium (menu-bar panel), and disabled";
+    pub(super) const MENU: &str = "Version menu: rest, hover, focus, disabled, and the menu open";
+    pub(super) const VERSIONS_LIVE: &str =
         "Live: Tab (one stop, then the +), the arrows, Home, End, Enter, and Space";
-    pub const TABLE: &str = "Table: two-line rows, the second selected, hover a row to see it";
-    pub const TABLE_DENSE: &str = "Dense table (32): click a row to select it";
-    pub const EMPTY: &str = "Empty state";
-    pub const TABS: &str = "Tabs (the site page): click or use the arrows; only Overview ships now";
-    pub const FACTS: &str = "Facts card (the site page): a label column, then each value";
-    pub const DIALOG: &str = "Dialog over the scrim: destructive (Cancel has the focus), and calm";
-    pub const NOTICES: &str = "Notices: a success (closes in 4 s), and an error (stays)";
-    pub const PROGRESS: &str = "Progress: with a share, and with none yet";
-    pub const STEPS: &str = "Step cards (first run): done, to do now with its progress, and next";
-    pub const DIALOG_LIVE: &str = "Live: open the dialog (Esc cancels), or show a notice";
-    pub const FIELDS: &str = "Fields";
-    pub const LIVE: &str = "Live: click, type, and Tab through these";
-    pub const DISABLED_NOTE: &str = "Disabled is drawn at 55% opacity. Hover it for the reason: ";
-    pub const STATES: [&str; 5] = ["Rest", "Hover", "Pressed", "Focus", "Disabled"];
+    pub(super) const TABLE: &str =
+        "Table: two-line rows, the second selected, hover a row to see it";
+    pub(super) const TABLE_DENSE: &str = "Dense table (32): click a row to select it";
+    pub(super) const EMPTY: &str = "Empty state";
+    pub(super) const TABS: &str =
+        "Tabs (the site page): click or use the arrows; only Overview ships now";
+    pub(super) const FACTS: &str = "Facts card (the site page): a label column, then each value";
+    pub(super) const DIALOG: &str =
+        "Dialog over the scrim: destructive (Cancel has the focus), and calm";
+    pub(super) const NOTICES: &str = "Notices: a success (closes in 4 s), and an error (stays)";
+    pub(super) const PROGRESS: &str = "Progress: with a share, and with none yet";
+    pub(super) const STEPS: &str =
+        "Step cards (first run): done, to do now with its progress, and next";
+    pub(super) const DIALOG_LIVE: &str = "Live: open the dialog (Esc cancels), or show a notice";
+    pub(super) const FIELDS: &str = "Fields";
+    pub(super) const LIVE: &str = "Live: click, type, and Tab through these";
+    pub(super) const DISABLED_NOTE: &str =
+        "Disabled is drawn at 55% opacity. Hover it for the reason: ";
+    pub(super) const STATES: [&str; 5] = ["Rest", "Hover", "Pressed", "Focus", "Disabled"];
 }
 
 /// The reason a disabled widget gives.

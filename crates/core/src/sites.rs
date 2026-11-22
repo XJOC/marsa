@@ -444,11 +444,16 @@ mod optional_version {
     use semver::Version;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub fn serialize<S: Serializer>(value: &Option<Version>, s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(
+        value: &Option<Version>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
         value.as_ref().map(Version::to_string).serialize(s)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Version>, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Version>, D::Error> {
         Option::<String>::deserialize(d)?
             .map(|text| Version::parse(&text).map_err(serde::de::Error::custom))
             .transpose()

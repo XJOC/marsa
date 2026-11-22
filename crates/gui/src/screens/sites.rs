@@ -35,7 +35,7 @@ use crate::widgets::{
 
 /// What Sites says.
 #[derive(Debug, PartialEq)]
-pub struct SitesView<'a> {
+pub(crate) struct SitesView<'a> {
     /// The text of the search field, as typed.
     pub search: &'a str,
     /// Why "Add site…" cannot be pressed now.
@@ -81,7 +81,7 @@ impl std::fmt::Debug for ReadFrom<'_> {
 
 /// The table, or what stands in its place.
 #[derive(Debug, PartialEq)]
-pub enum List<'a> {
+pub(crate) enum List<'a> {
     /// No daemon: there is nothing to list.
     Offline,
     /// No site at all: one sentence and the button that adds one.
@@ -95,7 +95,7 @@ pub enum List<'a> {
 
 /// Which of the model's sites the search lets through, in order.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Matches {
+pub(crate) struct Matches {
     /// Their indexes in the model's list; none while the search is empty
     /// and every site shows.
     found: Option<Vec<usize>>,
@@ -103,7 +103,7 @@ pub struct Matches {
 }
 
 impl Matches {
-    pub const fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.count
     }
 
@@ -117,7 +117,7 @@ impl Matches {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct SiteRow<'a> {
+pub(crate) struct SiteRow<'a> {
     pub name: &'a str,
     pub root: &'a Path,
     pub php: PhpCell<'a>,
@@ -127,7 +127,7 @@ pub struct SiteRow<'a> {
 
 /// The version menu of a row.
 #[derive(Debug, PartialEq)]
-pub struct PhpCell<'a> {
+pub(crate) struct PhpCell<'a> {
     /// What the button shows: `8.4`, or a dash for a site with no PHP.
     pub shown: String,
     /// The index (in [`SitesView::php`]) of the version in force, if it is
@@ -143,7 +143,7 @@ pub struct PhpCell<'a> {
 /// Why a site has the PHP version its row shows (components.md, Version
 /// menu): where `Site::php_source` says it came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Reason<'a> {
+pub(crate) enum Reason<'a> {
     /// The site's own setting, saved by Marsa.
     Site,
     /// `.php-version` or `composer.json`: the file's path.
@@ -162,7 +162,7 @@ pub enum Reason<'a> {
 impl Reason<'_> {
     /// The sentence after the heading of a site's page: the version
     /// `shown` and why the site has it (components.md, Version menu).
-    pub fn hint(&self, shown: &str) -> String {
+    pub(crate) fn hint(&self, shown: &str) -> String {
         match self {
             Self::Site => strings::php_hint_site(shown),
             Self::File(path) => strings::php_hint_file(shown, path),
@@ -173,7 +173,7 @@ impl Reason<'_> {
         }
     }
 
-    pub fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         match self {
             Self::Site => strings::REASON_SITE.to_owned(),
             Self::File(path) => strings::reason_file(path),
@@ -186,7 +186,7 @@ impl Reason<'_> {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct LinkView<'a> {
+pub(crate) struct LinkView<'a> {
     pub folder: &'a Path,
     pub name: &'a str,
     /// The site the name would replace, if the name is taken.
@@ -194,7 +194,7 @@ pub struct LinkView<'a> {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct HostsView {
+pub(crate) struct HostsView {
     /// The sentence that names the sites the hosts file lacks.
     pub waiting: Option<String>,
     /// Why "Add to /etc/hosts" cannot be pressed now.
@@ -205,7 +205,7 @@ pub struct HostsView {
 
 /// Decides what Sites says. Pure: the same model gives the same view.
 /// `picking`: a folder dialog is open.
-pub fn view(model: &Model, picking: bool) -> SitesView<'_> {
+pub(crate) fn view(model: &Model, picking: bool) -> SitesView<'_> {
     let php = php_choices(model);
     let list = list(model);
     SitesView {
@@ -284,7 +284,7 @@ fn matches(name: &str, search: &str) -> bool {
 impl<'a> SitesView<'a> {
     /// The `n`th row of the table, built now. `None` past the last one, and
     /// when the screen has no table.
-    pub fn row(&self, n: usize) -> Option<SiteRow<'a>> {
+    pub(crate) fn row(&self, n: usize) -> Option<SiteRow<'a>> {
         let List::Rows(matches) = &self.list else {
             return None;
         };
@@ -391,7 +391,7 @@ fn search_id() -> Id {
 const SEARCH_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::K);
 
 /// Draws `view`. Returns what the user did.
-pub fn show(ui: &mut Ui, view: &SitesView<'_>, theme: &Theme) -> Vec<Action> {
+pub(crate) fn show(ui: &mut Ui, view: &SitesView<'_>, theme: &Theme) -> Vec<Action> {
     let mut actions = Vec::new();
     ui.spacing_mut().item_spacing.y = theme.space.section_gap;
     let tools = matches!(view.list, List::Rows(_) | List::NoMatch(_));

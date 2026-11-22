@@ -34,7 +34,7 @@ use crate::widgets::{
 
 /// What the page says.
 #[derive(Debug, PartialEq)]
-pub enum SiteView<'a> {
+pub(crate) enum SiteView<'a> {
     /// No site has this name: it was unlinked meanwhile (from the CLI, or
     /// from another window), or the window has no daemon to ask.
     Missing(Missing<'a>),
@@ -43,7 +43,7 @@ pub enum SiteView<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Missing<'a> {
+pub(crate) struct Missing<'a> {
     pub name: &'a str,
     /// The window has no daemon: the list is empty because it is not asked.
     pub offline: bool,
@@ -51,7 +51,7 @@ pub struct Missing<'a> {
 
 /// The page of a site that is in the list.
 #[derive(Debug, PartialEq)]
-pub struct Found<'a> {
+pub(crate) struct Found<'a> {
     pub name: &'a str,
     /// What the browser opens: `https://shop.test`.
     pub url: String,
@@ -69,7 +69,7 @@ pub struct Found<'a> {
 
 /// The large version picker of the site.
 #[derive(Debug, PartialEq)]
-pub struct PhpView<'a> {
+pub(crate) struct PhpView<'a> {
     /// The installed versions, oldest first.
     pub choices: Vec<PhpChoice>,
     /// The index of the version in force, if it is installed.
@@ -84,7 +84,7 @@ pub struct PhpView<'a> {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Facts<'a> {
+pub(crate) struct Facts<'a> {
     /// Served over HTTPS.
     pub https: bool,
     pub root: &'a Path,
@@ -97,7 +97,7 @@ pub struct Facts<'a> {
 
 /// How the site came to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AddedAs<'a> {
+pub(crate) enum AddedAs<'a> {
     /// A sub-folder of this parked folder.
     Parked(&'a Path),
     Linked,
@@ -105,7 +105,7 @@ pub enum AddedAs<'a> {
 
 /// Whether the page can unlink the site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Unlink<'a> {
+pub(crate) enum Unlink<'a> {
     Allowed,
     /// Another removal runs.
     Busy,
@@ -115,7 +115,7 @@ pub enum Unlink<'a> {
 
 /// Decides what the page of the site `name` says. Pure: the same model gives
 /// the same view.
-pub fn view<'a>(model: &'a Model, name: &'a str) -> SiteView<'a> {
+pub(crate) fn view<'a>(model: &'a Model, name: &'a str) -> SiteView<'a> {
     let Some(site) = model
         .session
         .sites
@@ -177,7 +177,7 @@ fn facts<'a>(model: &'a Model, site: &'a Site) -> Facts<'a> {
 }
 
 /// Draws `view`. Returns what the user did.
-pub fn show(ui: &mut Ui, view: &SiteView<'_>, theme: &Theme) -> Vec<Action> {
+pub(crate) fn show(ui: &mut Ui, view: &SiteView<'_>, theme: &Theme) -> Vec<Action> {
     let mut actions = Vec::new();
     ui.spacing_mut().item_spacing.y = theme.space.section_gap;
     // The way back: an arrow and "Sites", as the mockup has it.
