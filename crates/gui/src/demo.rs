@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use marsa_core::helper::{OpResult, OpStatus};
+use marsa_core::helper::{OpName, OpResult, OpStatus};
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
     Event, Health, InstallEvent, InstallProgress, InstallUpdate, LogLine, LogStream, RuntimeList,
@@ -371,17 +371,17 @@ fn settings_screen(model: &mut Model, demo: Demo) {
     model.update(Update::Autostart(Autostart::On));
     model.data_dir = PathBuf::from("/demo/Library/Application Support/Marsa");
     if demo == Demo::SettingsSetup {
-        let done = |op: &str, status| OpResult {
-            op: op.into(),
+        let done = |op, status| OpResult {
+            op,
             status,
             code: None,
             message: None,
         };
         model.update(Update::SetupDone(SetupReport {
             results: vec![
-                done("resolver_install", OpStatus::Done),
-                done("pf_install", OpStatus::Done),
-                done("trust_install", OpStatus::Unchanged),
+                done(OpName::ResolverInstall, OpStatus::Done),
+                done(OpName::PfInstall, OpStatus::Done),
+                done(OpName::TrustInstall, OpStatus::Unchanged),
             ],
             ..SetupReport::default()
         }));

@@ -78,6 +78,7 @@ mod databases;
 mod record;
 
 use marsa_core::codes;
+use marsa_core::types::OpName;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -97,13 +98,9 @@ use databases::{Database, databases, make_dir};
 pub(crate) use record::record_path;
 use record::{Fingerprint, fingerprint_digits, read_record, write_record};
 
-/// The op name of the step in a report.
-pub const NSS_INSTALL: &str = "nss_install";
 /// The longest the whole step takes, the pipe grace after each `certutil`
 /// included. Part of `SLOWEST_SETUP` on Linux.
 pub const NSS_BUDGET: Duration = Duration::from_secs(40);
-/// The op name of the removal in an uninstall report.
-pub const NSS_REMOVE: &str = "nss_remove";
 /// The checked certificate for `certutil -i`, in the trust folder.
 const PEM_FILE: &str = "nss.pem";
 
@@ -130,7 +127,7 @@ pub fn install(
     let deadline = Instant::now() + NSS_BUDGET;
     let failed = |message: String| {
         Outcome::Ran(user_trust::failed(
-            NSS_INSTALL,
+            OpName::NssInstall,
             codes::NSS_ADD_FAILED,
             message,
         ))
@@ -233,14 +230,14 @@ pub fn install(
             all.len(),
             all.join("; ")
         );
-        return Outcome::Ran(user_trust::failed(NSS_INSTALL, code, message));
+        return Outcome::Ran(user_trust::failed(OpName::NssInstall, code, message));
     }
     let status = if changed > 0 {
         OpStatus::Done
     } else {
         OpStatus::Unchanged
     };
-    Outcome::Ran(user_trust::result(NSS_INSTALL, status))
+    Outcome::Ran(user_trust::result(OpName::NssInstall, status))
 }
 
 /// `nss_remove`, for the uninstall: deletes each root in this data folder's
@@ -259,7 +256,7 @@ pub fn remove(
 ) -> OpResult {
     let deadline = Instant::now() + NSS_BUDGET;
     let failed =
-        |message: String| user_trust::failed(NSS_REMOVE, codes::NSS_REMOVE_FAILED, message);
+        |message: String| user_trust::failed(OpName::NssRemove, codes::NSS_REMOVE_FAILED, message);
     if !home.is_absolute() || !files.dir().is_absolute() {
         return failed("the home folder or the trust folder is not an absolute path".into());
     }
@@ -268,7 +265,7 @@ pub fn remove(
         Err(problem) => return failed(problem),
     };
     if recorded.is_empty() {
-        return user_trust::result(NSS_REMOVE, OpStatus::Unchanged);
+        return user_trust::result(OpName::NssRemove, OpStatus::Unchanged);
     }
     let found = databases(home);
     for why in &found.refused {
@@ -337,7 +334,7 @@ pub fn remove(
     } else {
         OpStatus::Unchanged
     };
-    user_trust::result(NSS_REMOVE, status)
+    user_trust::result(OpName::NssRemove, status)
 }
 
 /// This data folder's certificate.
@@ -651,10 +648,7 @@ mod tests {
         let firefox = home.profile(&[".config", "mozilla", "firefox"], "abc.default-release");
         let fake = fresh();
         let done = result(home.install(&fake));
-        assert_eq!(
-            (done.op.as_str(), done.status),
-            (NSS_INSTALL, OpStatus::Done)
-        );
+        assert_eq!((done.op, done.status), (OpName::NssInstall, OpStatus::Done));
 
         let chrome = home.chrome();
         let file = home.files().dir().join(PEM_FILE);
@@ -1077,8 +1071,8 @@ mod tests {
         let fake = fresh();
         let unchanged = remove_all(&home, &fake);
         assert_eq!(
-            (unchanged.op.as_str(), unchanged.status),
-            (NSS_REMOVE, OpStatus::Unchanged)
+            (unchanged.op, unchanged.status),
+            (OpName::NssRemove, OpStatus::Unchanged)
         );
         assert!(fake.calls().is_empty());
     }
@@ -1097,10 +1091,7 @@ mod tests {
             _ => ok(""),
         });
         let done = remove_all(&home, &fake);
-        assert_eq!(
-            (done.op.as_str(), done.status),
-            (NSS_REMOVE, OpStatus::Done)
-        );
+        assert_eq!((done.op, done.status), (OpName::NssRemove, OpStatus::Done));
         // Chrome's folder is not there: only the profile is read.
         assert!(!home.chrome().exists());
         assert_eq!(

@@ -33,7 +33,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use marsa_core::helper::{OpResult, OpStatus};
+use marsa_core::helper::{OpName, OpResult, OpStatus};
 use tokio_util::sync::CancellationToken;
 
 use super::{ApiError, Flow, Reason, failure, parse_answer, results_of};
@@ -104,7 +104,7 @@ pub fn uninstall(
     let failed = |message: String| failure(flow.code(Reason::HelperFailed), message);
     match service.uninstall(helper) {
         Install::Exited(0) => Ok(OpResult {
-            op: "uninstall_all".to_owned(),
+            op: OpName::UninstallAll,
             status: OpStatus::Done,
             code: None,
             message: None,

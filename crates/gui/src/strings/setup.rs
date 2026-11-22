@@ -1,7 +1,7 @@
 //! The first-run panel, setup, and Settings.
 
 use marsa_core::recipes::Platform;
-use marsa_core::types::{OpStatus, PortHolder, SetupReport};
+use marsa_core::types::{OpName, OpStatus, PortHolder, SetupReport};
 
 use crate::prefs::Appearance;
 
@@ -233,7 +233,7 @@ pub fn setup_lines(report: &SetupReport) -> Vec<ReportLine> {
     let mut lines = Vec::new();
     let mut push = |text: String, problem: bool| lines.push(ReportLine { text, problem });
     for result in &report.results {
-        let step = setup_step(&result.op);
+        let step = setup_step(result.op);
         match result.status {
             OpStatus::Done => push(format!("{step}: done."), false),
             OpStatus::Unchanged => push(format!("{step}: already done."), false),
@@ -244,7 +244,7 @@ pub fn setup_lines(report: &SetupReport) -> Vec<ReportLine> {
         }
     }
     for skipped in &report.skipped {
-        let step = setup_step(&skipped.op);
+        let step = setup_step(skipped.op);
         let reason = if skipped.code == "caddy_not_installed" {
             SETUP_CADDY_NOT_INSTALLED.to_owned()
         } else {
@@ -265,22 +265,21 @@ pub fn setup_lines(report: &SetupReport) -> Vec<ReportLine> {
     lines
 }
 
-/// A helper operation, as a step of setup. An operation this build does not
-/// know shows its own name.
-pub(super) fn setup_step(op: &str) -> String {
+/// A step of setup. A step that is not part of setup shows its own name.
+pub(super) fn setup_step(op: OpName) -> String {
     match op {
-        "trust_install" => "Trust Marsa's HTTPS certificates".to_owned(),
-        "resolver_install" => "Send .test names to Marsa".to_owned(),
-        "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
-        "resolved_install" => "Send .test names to Marsa".to_owned(),
-        "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
+        OpName::TrustInstall => "Trust Marsa's HTTPS certificates".to_owned(),
+        OpName::ResolverInstall => "Send .test names to Marsa".to_owned(),
+        OpName::PfInstall => "Route ports 80 and 443 to Marsa".to_owned(),
+        OpName::ResolvedInstall => "Send .test names to Marsa".to_owned(),
+        OpName::PortsInstall => "Let Caddy use ports 80 and 443".to_owned(),
         // Chrome and Firefox on Linux.
-        "nss_install" => "Trust Marsa's certificates in Chrome and Firefox".to_owned(),
+        OpName::NssInstall => "Trust Marsa's certificates in Chrome and Firefox".to_owned(),
         // The hosts way on Linux.
-        "resolved_remove" => "Take out Marsa's link for .test names".to_owned(),
-        "hosts_sync" => "Put the sites' .test names in the hosts file".to_owned(),
-        "hosts_remove" => "Take Marsa's names out of the hosts file".to_owned(),
-        other => other.to_owned(),
+        OpName::ResolvedRemove => "Take out Marsa's link for .test names".to_owned(),
+        OpName::HostsSync => "Put the sites' .test names in the hosts file".to_owned(),
+        OpName::HostsRemove => "Take Marsa's names out of the hosts file".to_owned(),
+        other => other.as_str().to_owned(),
     }
 }
 

@@ -289,7 +289,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use eframe::egui::{self, Pos2, pos2};
-    use marsa_core::helper::{OpResult, OpStatus};
+    use marsa_core::helper::{OpName, OpResult, OpStatus};
     use marsa_core::types::{
         Event, HostsStatus, InstallEvent, InstallProgress, InstallUpdate, RuntimeList,
         RuntimeVersions, SetupReport, Site, SiteKind, SiteList,
@@ -326,11 +326,11 @@ mod tests {
         model
     }
 
-    fn report(op: &str, status: OpStatus) -> SetupReport {
+    fn report(op: OpName, status: OpStatus) -> SetupReport {
         let failed = status == OpStatus::Failed;
         SetupReport {
             results: vec![OpResult {
-                op: op.into(),
+                op,
                 status,
                 code: failed.then(|| "resolver_foreign".to_owned()),
                 message: None,
@@ -469,7 +469,7 @@ mod tests {
 
         // A failed step: its reason shows, and the step stays to do.
         model.update(Update::SetupDone(report(
-            "resolver_install",
+            OpName::ResolverInstall,
             OpStatus::Failed,
         )));
         let view = super::view(&model);
@@ -491,7 +491,7 @@ mod tests {
 
         // Done: the last step is the one to do, and the report is not shown.
         model.update(Update::SetupDone(report(
-            "resolver_install",
+            OpName::ResolverInstall,
             OpStatus::Done,
         )));
         let view = super::view(&model);
@@ -516,7 +516,7 @@ mod tests {
     fn the_last_step_parks_a_folder_or_links_one() {
         let mut model = installed();
         model.update(Update::SetupDone(report(
-            "resolver_install",
+            OpName::ResolverInstall,
             OpStatus::Done,
         )));
         let view = view(&model);
@@ -601,7 +601,7 @@ mod tests {
             [Action::CloseFirstRun]
         );
         model.update(Update::SetupDone(report(
-            "resolver_install",
+            OpName::ResolverInstall,
             OpStatus::Done,
         )));
         let view = view(&model);

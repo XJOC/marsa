@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use marsa_core::types::OpName;
+
 use super::*;
 
 // `marsa setup`.
@@ -102,22 +104,22 @@ pub fn hosts_not_added_after(code: &str) -> String {
     )
 }
 
-/// A helper operation, as a step of `marsa setup`. An operation this build
-/// does not know shows its own name.
-pub fn setup_step(op: &str) -> String {
+/// A step of `marsa setup`. A step that is not part of setup shows its own
+/// name.
+pub fn setup_step(op: OpName) -> String {
     match op {
-        "trust_install" => "Trust Marsa's HTTPS certificates".to_owned(),
-        "resolver_install" => "Send .test names to Marsa".to_owned(),
-        "pf_install" => "Route ports 80 and 443 to Marsa".to_owned(),
-        "resolved_install" => "Send .test names to Marsa".to_owned(),
-        "ports_install" => "Let Caddy use ports 80 and 443".to_owned(),
+        OpName::TrustInstall => "Trust Marsa's HTTPS certificates".to_owned(),
+        OpName::ResolverInstall => "Send .test names to Marsa".to_owned(),
+        OpName::PfInstall => "Route ports 80 and 443 to Marsa".to_owned(),
+        OpName::ResolvedInstall => "Send .test names to Marsa".to_owned(),
+        OpName::PortsInstall => "Let Caddy use ports 80 and 443".to_owned(),
         // Chrome and Firefox on Linux.
-        "nss_install" => "Trust Marsa's certificates in Chrome and Firefox".to_owned(),
+        OpName::NssInstall => "Trust Marsa's certificates in Chrome and Firefox".to_owned(),
         // The hosts way on Linux.
-        "resolved_remove" => "Take out Marsa's link for .test names".to_owned(),
-        "hosts_sync" => format!("Put the sites' .test names in {HOSTS_FILE}"),
-        "hosts_remove" => format!("Take Marsa's names out of {HOSTS_FILE}"),
-        other => other.to_owned(),
+        OpName::ResolvedRemove => "Take out Marsa's link for .test names".to_owned(),
+        OpName::HostsSync => format!("Put the sites' .test names in {HOSTS_FILE}"),
+        OpName::HostsRemove => format!("Take Marsa's names out of {HOSTS_FILE}"),
+        other => other.as_str().to_owned(),
     }
 }
 
@@ -296,26 +298,26 @@ pub fn uninstall_all_ctrl_c(log: &Path) -> String {
     )
 }
 
-/// A step of `marsa uninstall --all`. A step this build does not know shows
-/// its own name.
-pub fn uninstall_all_step(op: &str) -> String {
+/// A step of `marsa uninstall --all`. A step that is not part of the
+/// uninstall shows its own name.
+pub fn uninstall_all_step(op: OpName) -> String {
     match op {
-        "pf_remove" => "Remove the redirect of ports 80 and 443".to_owned(),
-        "resolver_remove" => "Stop sending .test names to Marsa".to_owned(),
-        "trust_remove" => "Remove the trust in Marsa's certificates for all users".to_owned(),
-        "user_trust_remove" => "Remove the trust in Marsa's certificates for you".to_owned(),
+        OpName::PfRemove => "Remove the redirect of ports 80 and 443".to_owned(),
+        OpName::ResolverRemove => "Stop sending .test names to Marsa".to_owned(),
+        OpName::TrustRemove => "Remove the trust in Marsa's certificates for all users".to_owned(),
+        OpName::UserTrustRemove => "Remove the trust in Marsa's certificates for you".to_owned(),
         // Linux.
-        "ports_remove" => "Stop letting Caddy use ports 80 and 443".to_owned(),
-        "resolved_remove" | "hosts_remove" => setup_step(op),
-        "nss_remove" => {
+        OpName::PortsRemove => "Stop letting Caddy use ports 80 and 443".to_owned(),
+        OpName::ResolvedRemove | OpName::HostsRemove => setup_step(op),
+        OpName::NssRemove => {
             "Remove the trust in Marsa's certificates from Chrome and Firefox".to_owned()
         }
-        "autostart_remove" => "Stop starting Marsa at login".to_owned(),
-        "uninstall_all" => {
+        OpName::AutostartRemove => "Stop starting Marsa at login".to_owned(),
+        OpName::UninstallAll => {
             "Remove Marsa's hosts lines, its certificate authority, and its helper service"
                 .to_owned()
         }
-        other => other.to_owned(),
+        other => other.as_str().to_owned(),
     }
 }
 

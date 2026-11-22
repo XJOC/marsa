@@ -33,6 +33,7 @@
 //! `hosts_not_used`; so does Linux where the block is not this folder's.
 
 use marsa_core::codes;
+use marsa_core::types::OpName;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -104,7 +105,7 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
         // either, after a password for nothing.
         if !dns::hosts_names_fit(&names) {
             let skipped = SetupSkip {
-                op: linux_dns::HOSTS_SYNC.to_owned(),
+                op: OpName::HostsSync.to_owned(),
                 code: codes::HOSTS_TOO_MANY_NAMES.to_owned(),
             };
             report.skipped.push(skipped);
@@ -373,7 +374,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{json}");
         let report: SetupReport = serde_json::from_value(json).unwrap();
         assert_eq!(report.results.len(), 1);
-        assert_eq!(report.results[0].op, "hosts_sync");
+        assert_eq!(report.results[0].op, OpName::HostsSync);
         assert_eq!(report.error, None);
         assert_eq!(fake.programs(), ["/usr/bin/pkexec"]);
         let names = ["blog.test", "gone.test", "shop.test"]

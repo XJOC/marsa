@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use marsa_core::dns;
 use marsa_core::helper::{
-    HELPER_PROTOCOL_VERSION, HelperOp, HelperRequest, HelperResponse, OpStatus,
+    HELPER_PROTOCOL_VERSION, HelperOp, HelperRequest, HelperResponse, OpName, OpStatus,
 };
 use marsa_core::sites::Site;
 use tokio::time::Instant;
@@ -172,7 +172,7 @@ pub fn outcome(answer: &[u8]) -> Result<(), (String, String)> {
         return Err((refused.code, refused.message));
     }
     match answer.results.as_slice() {
-        [result] if result.op == "hosts_sync" => match result.status {
+        [result] if result.op == OpName::HostsSync => match result.status {
             OpStatus::Done | OpStatus::Unchanged => Ok(()),
             OpStatus::Failed => Err((
                 result

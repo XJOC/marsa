@@ -1,6 +1,5 @@
 //! Fakes and fixtures shared by the tests of `setup_api` and its children.
 
-use super::helper::op_name;
 use super::osascript::OSASCRIPT;
 use super::user_trust::SECURITY;
 use super::*;
@@ -22,6 +21,7 @@ use marsa_core::helper::OpResult;
 use marsa_core::platform::daemon_file::{Token, daemon_authority};
 use marsa_core::platform::ports::{NETSTAT, PS};
 use marsa_core::recipes::Platform;
+use marsa_core::types::OpName;
 use marsa_core::types::SetupReport;
 use marsa_core::types::{ErrorBody, OpStatus};
 use serde_json::{Value, json};
@@ -226,7 +226,7 @@ pub(super) fn netstat_free() -> &'static str {
 }
 
 /// One done result per op, as the helper prints it.
-pub(super) fn all_done(ops: &[&str]) -> String {
+pub(super) fn all_done(ops: &[OpName]) -> String {
     let results: Vec<Value> = ops
         .iter()
         .map(|op| json!({ "op": op, "status": "done" }))
@@ -413,9 +413,9 @@ pub(super) fn error_code(report: &SetupReport) -> Option<&str> {
     report.error.as_ref().map(|error| error.code.as_str())
 }
 
-pub(super) fn done(op: &str) -> OpResult {
+pub(super) fn done(op: OpName) -> OpResult {
     OpResult {
-        op: op.into(),
+        op,
         status: OpStatus::Done,
         code: None,
         message: None,
@@ -576,13 +576,13 @@ pub(super) fn linux_fake_on(
 /// `(op, code)` pairs of `failed`.
 pub(super) fn answer_for(
     request: &HelperRequest,
-    failed: &[(&str, &str)],
+    failed: &[(OpName, &str)],
 ) -> io::Result<RunOutput> {
     let results: Vec<Value> = request
         .ops
         .iter()
         .map(|op| {
-            let op = op_name(op).unwrap();
+            let op = op.name();
             match failed.iter().find(|(name, _)| *name == op) {
                 Some((_, code)) => json!({ "op": op, "status": "failed", "code": code,
                                            "message": "x" }),

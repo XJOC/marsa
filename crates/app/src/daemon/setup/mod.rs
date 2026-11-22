@@ -52,7 +52,7 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use marsa_core::recipes::{Os, Platform};
-use marsa_core::types::{ApiError, Event, SetupReport, SetupSkip, Site, SiteList};
+use marsa_core::types::{ApiError, Event, OpName, SetupReport, SetupSkip, Site, SiteList};
 use tokio::runtime::Handle;
 
 use self::one_at_a_time::{OneAtATime, Turn};
@@ -68,7 +68,7 @@ pub(super) use self::helper::PROMPT_LIMIT;
 use self::helper::current_uid;
 use self::helper::{MAX_ANSWER, parse_answer, results_of};
 use self::osascript::not_finished;
-use self::steps::{TRUST_INSTALL, low_ports_set};
+use self::steps::low_ports_set;
 pub(super) use marsa_core::platform::ports::CHECK_LIMIT;
 use marsa_core::platform::ports::MAX_PS;
 pub(super) use marsa_core::platform::runner::PIPE_GRACE;
@@ -553,9 +553,9 @@ fn short_code(code: &str) -> String {
         .collect()
 }
 
-fn skip(op: &str, code: &str) -> SetupSkip {
+fn skip(op: OpName, code: &str) -> SetupSkip {
     SetupSkip {
-        op: op.to_owned(),
+        op,
         code: code.to_owned(),
     }
 }
@@ -563,9 +563,9 @@ fn skip(op: &str, code: &str) -> SetupSkip {
 /// Leaves `op`, the DNS step, out: the daemon's DNS server does not answer,
 /// so `.test` names would go to a port that no one, or another program,
 /// answers on.
-fn dns_skipped(report: &mut SetupReport, op: &str, code: &str) {
+fn dns_skipped(report: &mut SetupReport, op: OpName, code: &str) {
     tracing::warn!(
-        op,
+        %op,
         code,
         "the DNS server for .test does not run; no DNS setup"
     );
@@ -633,7 +633,7 @@ mod tests {
         // the flow fails here until it is in `SLOWEST_SETUP`, which then has
         // to fit the client's wait above.
         let dir = Dir::new(false).with_caddy(CaddyStart::Started, Some(Duration::ZERO));
-        let answer = all_done(&["resolver_install", "pf_install"]);
+        let answer = all_done(&[OpName::ResolverInstall, OpName::PfInstall]);
         let fake = Fake::scripted(netstat_free(), move || ok(&answer));
         let report = dir.run(&fake);
         assert_eq!(report.results.len(), 3);
@@ -700,7 +700,7 @@ mod tests {
     #[tokio::test]
     async fn a_request_without_the_token_with_an_origin_or_another_host_runs_nothing() {
         let dir = Dir::new(true);
-        let answer = all_done(&["resolver_install", "pf_install"]);
+        let answer = all_done(&[OpName::ResolverInstall, OpName::PfInstall]);
         let fake = Fake::scripted(netstat_free(), move || ok(&answer));
         let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
         let app = App::new(daemon, dir.setup(&fake));

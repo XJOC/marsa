@@ -89,6 +89,110 @@ pub enum HelperOp {
     UninstallAll,
 }
 
+impl HelperOp {
+    /// The name of this operation: its `op` tag in JSON, and the `op` of its
+    /// result.
+    pub fn name(&self) -> OpName {
+        match self {
+            Self::TrustInstall { .. } => OpName::TrustInstall,
+            Self::TrustRemove => OpName::TrustRemove,
+            Self::ResolverInstall { .. } => OpName::ResolverInstall,
+            Self::ResolverRemove => OpName::ResolverRemove,
+            Self::PfInstall { .. } => OpName::PfInstall,
+            Self::PfRemove => OpName::PfRemove,
+            Self::ResolvedInstall { .. } => OpName::ResolvedInstall,
+            Self::ResolvedRemove => OpName::ResolvedRemove,
+            Self::PortsInstall => OpName::PortsInstall,
+            Self::PortsRemove => OpName::PortsRemove,
+            Self::HostsSync { .. } => OpName::HostsSync,
+            Self::HostsRemove => OpName::HostsRemove,
+            Self::UninstallAll => OpName::UninstallAll,
+        }
+    }
+}
+
+/// The name of a step in a setup or uninstall report: a helper operation,
+/// or one of the daemon's own steps, which have no [`HelperOp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpName {
+    TrustInstall,
+    TrustRemove,
+    ResolverInstall,
+    ResolverRemove,
+    PfInstall,
+    PfRemove,
+    ResolvedInstall,
+    ResolvedRemove,
+    PortsInstall,
+    PortsRemove,
+    HostsSync,
+    HostsRemove,
+    UninstallAll,
+    /// The daemon's own: the CA root out of the current user's trust
+    /// (macOS, ADR 0015). Not the helper's `trust_remove`, which the same
+    /// uninstall reports too, for a trust added as root before that ADR.
+    UserTrustRemove,
+    /// The daemon's own: the CA root in, or out of, the user's NSS
+    /// databases, for Chrome and Firefox (Linux).
+    NssInstall,
+    NssRemove,
+    /// The daemon's own: no more start at login.
+    AutostartRemove,
+}
+
+impl OpName {
+    /// Every name, for the tests that check the JSON text.
+    pub const ALL: [Self; 17] = [
+        Self::TrustInstall,
+        Self::TrustRemove,
+        Self::ResolverInstall,
+        Self::ResolverRemove,
+        Self::PfInstall,
+        Self::PfRemove,
+        Self::ResolvedInstall,
+        Self::ResolvedRemove,
+        Self::PortsInstall,
+        Self::PortsRemove,
+        Self::HostsSync,
+        Self::HostsRemove,
+        Self::UninstallAll,
+        Self::UserTrustRemove,
+        Self::NssInstall,
+        Self::NssRemove,
+        Self::AutostartRemove,
+    ];
+
+    /// The JSON text, for logs and for a message that shows the name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TrustInstall => "trust_install",
+            Self::TrustRemove => "trust_remove",
+            Self::ResolverInstall => "resolver_install",
+            Self::ResolverRemove => "resolver_remove",
+            Self::PfInstall => "pf_install",
+            Self::PfRemove => "pf_remove",
+            Self::ResolvedInstall => "resolved_install",
+            Self::ResolvedRemove => "resolved_remove",
+            Self::PortsInstall => "ports_install",
+            Self::PortsRemove => "ports_remove",
+            Self::HostsSync => "hosts_sync",
+            Self::HostsRemove => "hosts_remove",
+            Self::UninstallAll => "uninstall_all",
+            Self::UserTrustRemove => "user_trust_remove",
+            Self::NssInstall => "nss_install",
+            Self::NssRemove => "nss_remove",
+            Self::AutostartRemove => "autostart_remove",
+        }
+    }
+}
+
+impl std::fmt::Display for OpName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// What the helper prints on stdout.
 ///
 /// A request that runs has `results`, one per operation. A rejected request
@@ -106,9 +210,9 @@ pub struct HelperResponse {
 /// The result of one operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpResult {
-    /// The operation name, for example `resolver_install`. `uninstall_all`
+    /// The operation, for example `resolver_install`. `uninstall_all`
     /// reports one result per operation it ran.
-    pub op: String,
+    pub op: OpName,
     pub status: OpStatus,
     /// Set when `status` is `failed`: a stable name such as
     /// `resolver_foreign`.
@@ -208,6 +312,43 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn op_names_are_their_json_text() {
+        for name in OpName::ALL {
+            let json = serde_json::to_value(name).expect("serialize");
+            assert_eq!(json, serde_json::json!(name.as_str()));
+            let back: OpName = serde_json::from_value(json).expect("parse");
+            assert_eq!(back, name);
+        }
+    }
+
+    /// `name` gives the `op` tag that serde writes, for every operation.
+    #[test]
+    fn helper_op_names_are_their_tags() {
+        let ops = [
+            HelperOp::TrustInstall { pem: String::new() },
+            HelperOp::TrustRemove,
+            HelperOp::ResolverInstall { port: 1053 },
+            HelperOp::ResolverRemove,
+            HelperOp::PfInstall {
+                http_port: 18080,
+                https_port: 18443,
+            },
+            HelperOp::PfRemove,
+            HelperOp::ResolvedInstall { port: 1053 },
+            HelperOp::ResolvedRemove,
+            HelperOp::PortsInstall,
+            HelperOp::PortsRemove,
+            HelperOp::HostsSync { names: Vec::new() },
+            HelperOp::HostsRemove,
+            HelperOp::UninstallAll,
+        ];
+        for op in ops {
+            let json = serde_json::to_value(&op).expect("serialize");
+            assert_eq!(json["op"], serde_json::json!(op.name().as_str()), "{op:?}");
+        }
     }
 
     #[test]

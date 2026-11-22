@@ -391,7 +391,7 @@ mod tests {
     fn no_ca_yet_starts_caddy_waits_for_the_root_and_trusts_it() {
         let after = Duration::from_millis(300);
         let dir = Dir::new(false).with_caddy(CaddyStart::Started, Some(after));
-        let answer = all_done(&["resolver_install", "pf_install"]);
+        let answer = all_done(&[OpName::ResolverInstall, OpName::PfInstall]);
         let fake = Fake::scripted(netstat_free(), move || ok(&answer));
         let began = Instant::now();
         let report = dir.run(&fake);
@@ -400,9 +400,9 @@ mod tests {
         assert_eq!(dir.caddy.limits(), [CA_WAIT]);
         assert!(report.skipped.is_empty(), "{:?}", report.skipped);
         let want = [
-            done("resolver_install"),
-            done("pf_install"),
-            done("trust_install"),
+            done(OpName::ResolverInstall),
+            done(OpName::PfInstall),
+            done(OpName::TrustInstall),
         ];
         assert_eq!(report.results, want);
         assert_eq!(report.error, None);
@@ -415,14 +415,14 @@ mod tests {
     #[test]
     fn a_ca_already_there_starts_no_caddy() {
         let dir = Dir::new(true).with_caddy(CaddyStart::Started, None);
-        let answer = all_done(&["resolver_install", "pf_install"]);
+        let answer = all_done(&[OpName::ResolverInstall, OpName::PfInstall]);
         let fake = Fake::scripted(netstat_free(), move || ok(&answer));
         let report = dir.run(&fake);
 
         assert!(dir.caddy.limits().is_empty());
         assert!(report.skipped.is_empty(), "{:?}", report.skipped);
         assert_eq!(report.results.len(), 3);
-        assert_eq!(report.results[2], done("trust_install"));
+        assert_eq!(report.results[2], done(OpName::TrustInstall));
     }
 
     /// Caddy started, but no root came in time: `ca_not_ready`, after the
@@ -441,7 +441,7 @@ mod tests {
             "{took:?}"
         );
         assert_eq!(dir.caddy.limits(), [dir.ca_wait]);
-        assert_eq!(report.skipped, [skip("trust_install", "ca_not_ready")]);
+        assert_eq!(report.skipped, [skip(OpName::TrustInstall, "ca_not_ready")]);
         assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)]);
         assert_eq!(report.results, results(DONE));
         assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
@@ -459,7 +459,7 @@ mod tests {
 
         assert!(began.elapsed() < Duration::from_secs(5));
         assert_eq!(dir.caddy.limits(), [CA_WAIT]);
-        let skipped = [skip("trust_install", "caddy_not_installed")];
+        let skipped = [skip(OpName::TrustInstall, "caddy_not_installed")];
         assert_eq!(report.skipped, skipped);
         assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)]);
         assert_eq!(report.results, results(DONE));
@@ -478,14 +478,17 @@ mod tests {
         let began = Instant::now();
         let report = dir.run(&fake);
         assert!(began.elapsed() < Duration::from_secs(5));
-        assert_eq!(report.skipped, [skip("trust_install", "caddy_not_started")]);
+        assert_eq!(
+            report.skipped,
+            [skip(OpName::TrustInstall, "caddy_not_started")]
+        );
 
         let dir = Dir::new(false).with_caddy(failed, Some(Duration::ZERO));
-        let answer = all_done(&["resolver_install", "pf_install"]);
+        let answer = all_done(&[OpName::ResolverInstall, OpName::PfInstall]);
         let fake = Fake::scripted(netstat_free(), move || ok(&answer));
         let report = dir.run(&fake);
         assert!(report.skipped.is_empty(), "{:?}", report.skipped);
-        assert_eq!(report.results[2], done("trust_install"));
+        assert_eq!(report.results[2], done(OpName::TrustInstall));
     }
 
     /// A root that is there but half written is waited for,
@@ -499,12 +502,12 @@ mod tests {
             ..FakeCaddy::new(CaddyStart::Started, ca)
         };
         let dir = dir.with_fake(fake_caddy);
-        let answer = all_done(&["resolver_install", "pf_install"]);
+        let answer = all_done(&[OpName::ResolverInstall, OpName::PfInstall]);
         let fake = Fake::scripted(netstat_free(), move || ok(&answer));
         let report = dir.run(&fake);
 
         assert!(report.skipped.is_empty(), "{:?}", report.skipped);
-        assert_eq!(report.results[2], done("trust_install"));
+        assert_eq!(report.results[2], done(OpName::TrustInstall));
         let record = user_trust::TrustFiles::in_dir(dir.dir.path()).record();
         assert_eq!(fs::read_to_string(record).unwrap(), TEST_CA);
 
@@ -520,7 +523,10 @@ mod tests {
         let began = Instant::now();
         let report = dir.run(&fake);
         assert!(began.elapsed() >= dir.ca_wait, "{:?}", began.elapsed());
-        assert_eq!(report.skipped, [skip("trust_install", "ca_unreadable")]);
+        assert_eq!(
+            report.skipped,
+            [skip(OpName::TrustInstall, "ca_unreadable")]
+        );
     }
 
     /// A root with no END line at the first look may be half
@@ -535,13 +541,13 @@ mod tests {
             fs::write(&root, part).unwrap();
             let ca = Some((root, Duration::from_millis(300)));
             let dir = dir.with_fake(FakeCaddy::new(CaddyStart::Started, ca));
-            let answer = all_done(&["resolver_install", "pf_install"]);
+            let answer = all_done(&[OpName::ResolverInstall, OpName::PfInstall]);
             let fake = Fake::scripted(netstat_free(), move || ok(&answer));
             let report = dir.run(&fake);
 
             assert_eq!(dir.caddy.limits(), [CA_WAIT], "{part:?}");
             assert!(report.skipped.is_empty(), "{part:?} {:?}", report.skipped);
-            assert_eq!(report.results[2], done("trust_install"), "{part:?}");
+            assert_eq!(report.results[2], done(OpName::TrustInstall), "{part:?}");
             let record = user_trust::TrustFiles::in_dir(dir.dir.path()).record();
             assert_eq!(fs::read_to_string(record).unwrap(), TEST_CA, "{part:?}");
         }
@@ -562,7 +568,10 @@ mod tests {
         let report = dir.run(&fake);
 
         assert!(began.elapsed() < Duration::from_secs(5));
-        assert_eq!(report.skipped, [skip("trust_install", "ca_unreadable")]);
+        assert_eq!(
+            report.skipped,
+            [skip(OpName::TrustInstall, "ca_unreadable")]
+        );
         assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
     }
 
@@ -585,7 +594,7 @@ mod tests {
         assert!(took >= dir.ca_wait, "{took:?}");
         // Two limits one after the other would be 1.9 s.
         assert!(took < Duration::from_millis(1500), "{took:?}");
-        assert_eq!(report.skipped, [skip("trust_install", "ca_not_ready")]);
+        assert_eq!(report.skipped, [skip(OpName::TrustInstall, "ca_not_ready")]);
     }
 
     #[test]
@@ -623,12 +632,12 @@ mod tests {
             assert_eq!(read_ca(&root), Err("ca_unreadable"), "{name}");
 
             // Only the trust step is skipped: DNS and pf still go.
-            let answer = all_done(&["resolver_install", "pf_install"]);
+            let answer = all_done(&[OpName::ResolverInstall, OpName::PfInstall]);
             let fake = Fake::scripted(netstat_free(), move || ok(&answer));
             let report = dir.run(&fake);
             assert_eq!(
                 report.skipped,
-                [skip("trust_install", "ca_unreadable")],
+                [skip(OpName::TrustInstall, "ca_unreadable")],
                 "{name}"
             );
             assert_eq!(fake.request().ops, [resolver(), pf(18080, 18443)], "{name}");
@@ -674,7 +683,7 @@ mod tests {
         let (status, json) = app.post().await;
         assert_eq!(status, StatusCode::OK, "{json}");
         let report: SetupReport = serde_json::from_value(json).unwrap();
-        let skipped = [skip("trust_install", "caddy_not_installed")];
+        let skipped = [skip(OpName::TrustInstall, "caddy_not_installed")];
         assert_eq!(report.skipped, skipped);
         assert_eq!(daemon.caddy.status().state, ServiceState::Stopped);
     }
@@ -735,7 +744,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{json}");
         assert!(began.elapsed() < CA_WAIT, "{:?}", began.elapsed());
         let report: SetupReport = serde_json::from_value(json).unwrap();
-        let skipped = [skip("trust_install", "caddy_not_started")];
+        let skipped = [skip(OpName::TrustInstall, "caddy_not_started")];
         assert_eq!(report.skipped, skipped);
         let failed = ServiceState::Failed {
             code: "caddy_start_timeout".into(),
@@ -771,7 +780,7 @@ mod tests {
         let report: SetupReport = serde_json::from_value(json).unwrap();
         // Busy taken for a running Caddy would wait for a root, then say
         // `ca_not_ready`.
-        let skipped = [skip("trust_install", "caddy_not_started")];
+        let skipped = [skip(OpName::TrustInstall, "caddy_not_started")];
         assert_eq!(report.skipped, skipped);
         let first = first.await.unwrap().unwrap();
         let last = daemon.caddy.status();

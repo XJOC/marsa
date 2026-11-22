@@ -217,12 +217,10 @@ const EXCERPT_CHARS: usize = 300;
 #[cfg(test)]
 mod tests {
     use super::super::helper::MAX_ANSWER;
-    use super::super::helper::op_name;
     use super::super::helper::results_match;
     use marsa_core::platform::ports::NETSTAT;
     use marsa_core::platform::runner::RunOutput;
 
-    use super::super::steps::UNINSTALL_ALL;
     use super::super::test_support::*;
 
     use super::super::*;
@@ -454,7 +452,7 @@ mod tests {
         assert_eq!(
             results,
             [OpResult {
-                op: "resolver_install".into(),
+                op: OpName::ResolverInstall,
                 status: OpStatus::Failed,
                 code: Some("resolver_write".into()),
                 message: Some("cannot write (x) } \"q\" é".into()),
@@ -466,10 +464,14 @@ mod tests {
     fn results_for_other_operations_are_setup_helper_failed() {
         // No CA: the request is resolver_install, then pf_install.
         let answers = [
-            all_done(&["resolver_install"]),
-            all_done(&["pf_install", "resolver_install"]),
-            all_done(&["resolver_install", "pf_install", "trust_install"]),
-            all_done(&["resolver_install", "trust_install"]),
+            all_done(&[OpName::ResolverInstall]),
+            all_done(&[OpName::PfInstall, OpName::ResolverInstall]),
+            all_done(&[
+                OpName::ResolverInstall,
+                OpName::PfInstall,
+                OpName::TrustInstall,
+            ]),
+            all_done(&[OpName::ResolverInstall, OpName::TrustInstall]),
         ];
         for answer in answers {
             let dir = Dir::new(false);
@@ -480,20 +482,20 @@ mod tests {
             assert!(report.results.is_empty(), "{answer}");
         }
         // `uninstall_all` gives one result per removal, so it is not checked.
-        let names = [UNINSTALL_ALL.to_owned()];
+        let names = [OpName::UninstallAll];
         assert!(results_match(
             &names,
-            &results(&all_done(&["pf_remove", "resolver_remove"]))
+            &results(&all_done(&[OpName::PfRemove, OpName::ResolverRemove]))
         ));
         let ops = [trust(), resolver(), pf(1, 2), HelperOp::UninstallAll];
-        let names: Vec<String> = ops.iter().map(|op| op_name(op).unwrap()).collect();
+        let names: Vec<OpName> = ops.iter().map(HelperOp::name).collect();
         assert_eq!(
             names,
             [
-                "trust_install",
-                "resolver_install",
-                "pf_install",
-                "uninstall_all"
+                OpName::TrustInstall,
+                OpName::ResolverInstall,
+                OpName::PfInstall,
+                OpName::UninstallAll
             ]
         );
     }

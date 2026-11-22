@@ -50,6 +50,7 @@
 //! No message quotes what `security` printed: only the exit code.
 
 use marsa_core::codes;
+use marsa_core::types::OpName;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -60,14 +61,10 @@ use marsa_core::helper::OpResult;
 use marsa_core::types::OpStatus;
 use tokio_util::sync::CancellationToken;
 
-use super::{CHECK_LIMIT, PEM_BEGIN, PROMPT_LIMIT, RunOutput, Runner, TRUST_INSTALL, read_ca};
+use super::{CHECK_LIMIT, PEM_BEGIN, PROMPT_LIMIT, RunOutput, Runner, read_ca};
 use marsa_core::platform::trust::verify_args;
 pub use marsa_core::platform::trust::{SECURITY, TrustFiles, record_path, trusted};
 
-/// The op name of the removal in a report. Not the helper's `trust_remove`:
-/// `uninstall_all` reports that one too, for a trust added as root before
-/// ADR 0015, in the same report.
-pub const TRUST_REMOVE: &str = "user_trust_remove";
 /// The common name of Marsa's root certificate: `CA_NAME` in
 /// `marsa_core::caddy`. A test checks that the two agree.
 const CA_NAME: &str = "Marsa Local CA";
@@ -110,12 +107,12 @@ pub fn install(
     if let Some(problem) = not_absolute(home, files.dir()) {
         tracing::warn!(problem, "security does not run");
         let message = format!("{problem}, so security did not run");
-        return failed(TRUST_INSTALL, codes::TRUST_ADD_FAILED, message);
+        return failed(OpName::TrustInstall, codes::TRUST_ADD_FAILED, message);
     }
     let pending = files.pending();
     if let Err(problem) = private_dir(files.dir()).and_then(|()| write_pending(&pending, pem)) {
         tracing::warn!(problem = %problem, "the trust folder cannot be used; security does not run");
-        return failed(TRUST_INSTALL, codes::TRUST_RECORD_UNUSABLE, problem);
+        return failed(OpName::TrustInstall, codes::TRUST_RECORD_UNUSABLE, problem);
     }
     let trusted = if is_trusted(runner, &pending, stop) {
         tracing::info!("Marsa's CA root is already trusted for the current user");
@@ -127,7 +124,7 @@ pub fn install(
     match trusted {
         Ok(status) => {
             keep_record(&pending, &files.record());
-            result(TRUST_INSTALL, status)
+            result(OpName::TrustInstall, status)
         }
         Err(failure) => {
             discard(&pending);
@@ -157,7 +154,11 @@ fn add(
          Run \"marsa setup\" in Terminal on the Mac's desktop and approve the dialog; if \
          Marsa was started over SSH, run \"marsa daemon stop\" first"
     );
-    Err(failed(TRUST_INSTALL, codes::TRUST_ADD_FAILED, message))
+    Err(failed(
+        OpName::TrustInstall,
+        codes::TRUST_ADD_FAILED,
+        message,
+    ))
 }
 
 /// `trust_remove` for the current user, for the uninstall: takes the user's
@@ -183,14 +184,14 @@ pub fn remove(
     if let Some(problem) = problem {
         tracing::warn!(problem, "security does not run");
         let message = format!("{problem}, so security did not run");
-        return failed(TRUST_REMOVE, codes::TRUST_REMOVE_FAILED, message);
+        return failed(OpName::UserTrustRemove, codes::TRUST_REMOVE_FAILED, message);
     }
     let record = files.record();
     let source = match source(ca_root, files) {
         Ok(Some(source)) => source,
         Ok(None) => {
             tracing::info!("no record and no CA root certificate: no user trust to remove");
-            return result(TRUST_REMOVE, OpStatus::Unchanged);
+            return result(OpName::UserTrustRemove, OpStatus::Unchanged);
         }
         Err(failure) => return failure,
     };
@@ -199,7 +200,14 @@ pub fn remove(
     let listed = runner.run(SECURITY, &find_args(&keychain), CHECK_LIMIT, stop);
     let hash = match &listed {
         Ok(output) if output.success() => hash_of(&output.stdout, &source.pem),
-        _ => return command_failed(TRUST_REMOVE, "find-certificate", &listed, CHECK_LIMIT),
+        _ => {
+            return command_failed(
+                OpName::UserTrustRemove,
+                "find-certificate",
+                &listed,
+                CHECK_LIMIT,
+            );
+        }
     };
     if source.recorded && hash.is_none() && !source.is_root {
         tracing::warn!(
@@ -212,7 +220,11 @@ pub fn remove(
              root certificate, so Marsa left its trust as it is",
             record.display()
         );
-        return failed(TRUST_REMOVE, codes::TRUST_RECORD_UNUSABLE, message);
+        return failed(
+            OpName::UserTrustRemove,
+            codes::TRUST_RECORD_UNUSABLE,
+            message,
+        );
     }
     let removed = untrust_and_delete(runner, &keychain, &source.file, hash, stop);
     if source.recorded && removed.status != OpStatus::Failed {
@@ -247,12 +259,20 @@ fn source(ca_root: &Path, files: &TrustFiles) -> Result<Option<Source>, OpResult
             "{} {reason}, so Marsa left the trust as it is",
             record.display()
         );
-        failed(TRUST_REMOVE, codes::TRUST_RECORD_UNUSABLE, message)
+        failed(
+            OpName::UserTrustRemove,
+            codes::TRUST_RECORD_UNUSABLE,
+            message,
+        )
     };
     let root = read_ca(ca_root);
     let has_dir = existing_private_dir(files.dir()).map_err(|problem| {
         let message = format!("{problem}, so Marsa left the trust as it is");
-        failed(TRUST_REMOVE, codes::TRUST_RECORD_UNUSABLE, message)
+        failed(
+            OpName::UserTrustRemove,
+            codes::TRUST_RECORD_UNUSABLE,
+            message,
+        )
     })?;
     let recorded = if has_dir {
         read_ca(&record)
@@ -287,7 +307,11 @@ fn source(ca_root: &Path, files: &TrustFiles) -> Result<Option<Source>, OpResult
         Err(_) => {
             tracing::warn!("the CA root certificate cannot be used; security does not run");
             let message = "the CA root certificate cannot be used, so security did not run";
-            Err(failed(TRUST_REMOVE, codes::TRUST_REMOVE_FAILED, message))
+            Err(failed(
+                OpName::UserTrustRemove,
+                codes::TRUST_REMOVE_FAILED,
+                message,
+            ))
         }
     }
 }
@@ -310,7 +334,7 @@ fn untrust_and_delete(
         Ok(output) if output.code.is_some() && no_trust(&output.stderr) => false,
         _ => {
             let command = "remove-trusted-cert";
-            return command_failed(TRUST_REMOVE, command, &untrust, PROMPT_LIMIT);
+            return command_failed(OpName::UserTrustRemove, command, &untrust, PROMPT_LIMIT);
         }
     };
     let Some(hash) = hash else {
@@ -319,13 +343,18 @@ fn untrust_and_delete(
         } else {
             OpStatus::Unchanged
         };
-        return result(TRUST_REMOVE, outcome);
+        return result(OpName::UserTrustRemove, outcome);
     };
     let deleted = runner.run(SECURITY, &delete_args(&hash, keychain), PROMPT_LIMIT, stop);
     if succeeded(&deleted) {
-        result(TRUST_REMOVE, OpStatus::Done)
+        result(OpName::UserTrustRemove, OpStatus::Done)
     } else {
-        command_failed(TRUST_REMOVE, "delete-certificate", &deleted, PROMPT_LIMIT)
+        command_failed(
+            OpName::UserTrustRemove,
+            "delete-certificate",
+            &deleted,
+            PROMPT_LIMIT,
+        )
     }
 }
 
@@ -456,18 +485,18 @@ fn forget_record(record: &Path) {
 }
 
 /// A failed op, with its code and an English message for the logs.
-pub(crate) fn failed(op: &str, code: &str, message: impl Into<String>) -> OpResult {
+pub(crate) fn failed(op: OpName, code: &str, message: impl Into<String>) -> OpResult {
     OpResult {
-        op: op.to_owned(),
+        op,
         status: OpStatus::Failed,
         code: Some(code.to_owned()),
         message: Some(message.into()),
     }
 }
 
-pub(super) fn result(op: &str, status: OpStatus) -> OpResult {
+pub(super) fn result(op: OpName, status: OpStatus) -> OpResult {
     OpResult {
-        op: op.to_owned(),
+        op,
         status,
         code: None,
         message: None,
@@ -548,7 +577,7 @@ fn no_trust(stderr: &[u8]) -> bool {
 
 /// `limit`: how long `command` was given, for the message of a timeout.
 fn command_failed(
-    op: &str,
+    op: OpName,
     command: &str,
     result: &io::Result<RunOutput>,
     limit: Duration,
@@ -884,7 +913,7 @@ mod tests {
                 "{name}"
             );
             let removed = remove(&*fake, &home, &data.ca_root(), files, &stop);
-            assert_eq!(removed.op, TRUST_REMOVE, "{name}");
+            assert_eq!(removed.op, OpName::UserTrustRemove, "{name}");
             assert_eq!(
                 removed.code.as_deref(),
                 Some(codes::TRUST_REMOVE_FAILED),
@@ -920,7 +949,7 @@ mod tests {
             // Caddy's file holds another certificate now: what `security`
             // gets, and what the record keeps, is the text setup checked.
             let data = Data::new(Some(&other_pem()), None);
-            assert_eq!(data.install(&fake), result(TRUST_INSTALL, status));
+            assert_eq!(data.install(&fake), result(OpName::TrustInstall, status));
             assert_eq!(data.recorded().as_deref(), Some(TEST_CA), "{status:?}");
             let pending = path_text(&data.pending());
             let calls = security_calls(&fake);
@@ -1052,7 +1081,10 @@ mod tests {
             "find-certificate" => ok(&text),
             _ => ok(""),
         });
-        assert_eq!(data.remove(&fake), result(TRUST_REMOVE, OpStatus::Done));
+        assert_eq!(
+            data.remove(&fake),
+            result(OpName::UserTrustRemove, OpStatus::Done)
+        );
         // Built like the code builds it: on Windows, where these tests also
         // run, `join` puts `\\` between the parts.
         let keychain = path_text(&login_keychain(&home()));
@@ -1084,7 +1116,10 @@ mod tests {
     fn without_a_record_remove_uses_caddys_root() {
         let data = Data::new(Some(TEST_CA), None);
         let fake = Fake::answering(|_, args| marsa_in_keychain(args));
-        assert_eq!(data.remove(&fake), result(TRUST_REMOVE, OpStatus::Done));
+        assert_eq!(
+            data.remove(&fake),
+            result(OpName::UserTrustRemove, OpStatus::Done)
+        );
         let ca_root = path_text(&data.ca_root());
         assert_eq!(
             security_calls(&fake)[1],
@@ -1103,7 +1138,10 @@ mod tests {
             "find-certificate" => ok(&text),
             _ => ok(""),
         });
-        assert_eq!(data.remove(&fake), result(TRUST_REMOVE, OpStatus::Done));
+        assert_eq!(
+            data.remove(&fake),
+            result(OpName::UserTrustRemove, OpStatus::Done)
+        );
         let calls = security_calls(&fake);
         assert_eq!(calls[1][1], path_text(&data.record()));
         assert_eq!(calls[2][2], OTHER_HASH);
@@ -1116,7 +1154,10 @@ mod tests {
             "find-certificate" => ok(""),
             _ => ok(""),
         });
-        assert_eq!(data.remove(&fake), result(TRUST_REMOVE, OpStatus::Done));
+        assert_eq!(
+            data.remove(&fake),
+            result(OpName::UserTrustRemove, OpStatus::Done)
+        );
         assert_eq!(security_calls(&fake).len(), 2);
         assert_eq!(data.recorded(), None);
     }
@@ -1193,7 +1234,7 @@ mod tests {
             let data = Data::new(Some(TEST_CA), None);
             assert_eq!(
                 data.remove(&fake),
-                result(TRUST_REMOVE, OpStatus::Unchanged),
+                result(OpName::UserTrustRemove, OpStatus::Unchanged),
                 "{stderr}"
             );
             assert_eq!(security_calls(&fake).len(), 2, "{stderr}");
@@ -1203,7 +1244,7 @@ mod tests {
         let fake = Fake::answering(|program, args| panic!("{program} {args:?} ran"));
         assert_eq!(
             data.remove(&fake),
-            result(TRUST_REMOVE, OpStatus::Unchanged)
+            result(OpName::UserTrustRemove, OpStatus::Unchanged)
         );
     }
 
@@ -1269,7 +1310,7 @@ mod tests {
         for (name, message, answer, calls) in cases {
             let data = Data::new(Some(TEST_CA), Some(TEST_CA));
             let fake = Fake::answering(move |_, args| answer(args));
-            let want = failed(TRUST_REMOVE, codes::TRUST_REMOVE_FAILED, message);
+            let want = failed(OpName::UserTrustRemove, codes::TRUST_REMOVE_FAILED, message);
             assert_eq!(data.remove(&fake), want, "{name}");
             assert_eq!(security_calls(&fake).len(), calls, "{name}");
             // The record stays for the next try.

@@ -83,7 +83,7 @@ pub fn render(report: &SetupReport, data_dir: &Path) -> String {
         text.push('\n');
     };
     for result in &report.results {
-        let step = strings::setup_step(&printable(&result.op));
+        let step = strings::setup_step(result.op);
         push(match result.status {
             OpStatus::Done => strings::setup_done(&step),
             OpStatus::Unchanged => strings::setup_unchanged(&step),
@@ -101,7 +101,7 @@ pub fn render(report: &SetupReport, data_dir: &Path) -> String {
     }
     let ca_root = CaddyPaths::in_dir(data_dir).ca_root();
     for skipped in &report.skipped {
-        let step = strings::setup_step(&printable(&skipped.op));
+        let step = strings::setup_step(skipped.op);
         let code = printable(&skipped.code);
         let details = Details {
             path: Some(&ca_root),
@@ -153,24 +153,24 @@ pub(super) fn port_held(holder: &PortHolder) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marsa_core::types::{ApiError, OpResult, SetupSkip};
+    use marsa_core::types::{ApiError, OpName, OpResult, SetupSkip};
 
     fn data() -> std::path::PathBuf {
         std::env::temp_dir().join("marsa-cli-setup")
     }
 
-    fn result(op: &str, status: OpStatus, code: Option<&str>) -> OpResult {
+    fn result(op: OpName, status: OpStatus, code: Option<&str>) -> OpResult {
         OpResult {
-            op: op.into(),
+            op,
             status,
             code: code.map(str::to_owned),
             message: code.map(|_| "x".to_owned()),
         }
     }
 
-    fn skip(op: &str, code: &str) -> SetupSkip {
+    fn skip(op: OpName, code: &str) -> SetupSkip {
         SetupSkip {
-            op: op.into(),
+            op,
             code: code.into(),
         }
     }
@@ -179,10 +179,10 @@ mod tests {
     fn a_report_shows_each_step_and_the_port_holders() {
         let report = SetupReport {
             results: vec![
-                result("resolver_install", OpStatus::Done, None),
-                result("trust_install", OpStatus::Unchanged, None),
+                result(OpName::ResolverInstall, OpStatus::Done, None),
+                result(OpName::TrustInstall, OpStatus::Unchanged, None),
             ],
-            skipped: vec![skip("pf_install", "redirect_port_held")],
+            skipped: vec![skip(OpName::PfInstall, "redirect_port_held")],
             port_holders: vec![
                 PortHolder {
                     port: 80,
@@ -226,10 +226,10 @@ mod tests {
     fn the_hosts_way_names_the_file() {
         let report = SetupReport {
             results: vec![
-                result("resolved_remove", OpStatus::Unchanged, None),
-                result("hosts_sync", OpStatus::Done, None),
+                result(OpName::ResolvedRemove, OpStatus::Unchanged, None),
+                result(OpName::HostsSync, OpStatus::Done, None),
             ],
-            skipped: vec![skip("resolved_install", "resolved_not_running")],
+            skipped: vec![skip(OpName::ResolvedInstall, "resolved_not_running")],
             ..SetupReport::default()
         };
         assert_eq!(
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn the_nss_step_names_the_browsers_and_the_package() {
         let done = SetupReport {
-            results: vec![result("nss_install", OpStatus::Done, None)],
+            results: vec![result(OpName::NssInstall, OpStatus::Done, None)],
             ..SetupReport::default()
         };
         assert_eq!(
@@ -255,7 +255,7 @@ mod tests {
             "Trust Marsa's certificates in Chrome and Firefox: done.\n"
         );
         let skipped = SetupReport {
-            skipped: vec![skip("nss_install", "nss_tool_missing")],
+            skipped: vec![skip(OpName::NssInstall, "nss_tool_missing")],
             ..SetupReport::default()
         };
         assert_eq!(
@@ -273,10 +273,10 @@ mod tests {
     fn a_second_request_that_did_not_run_says_the_steps_above_are_done() {
         let report = SetupReport {
             results: vec![
-                result("trust_install", OpStatus::Done, None),
-                result("ports_install", OpStatus::Done, None),
+                result(OpName::TrustInstall, OpStatus::Done, None),
+                result(OpName::PortsInstall, OpStatus::Done, None),
             ],
-            skipped: vec![skip("resolved_install", "resolved_use_hosts")],
+            skipped: vec![skip(OpName::ResolvedInstall, "resolved_use_hosts")],
             error: Some(ApiError {
                 code: "setup_hosts_not_written".into(),
                 message: "x".into(),
@@ -303,11 +303,11 @@ mod tests {
     fn a_failed_step_and_no_ca_say_why() {
         let report = SetupReport {
             results: vec![result(
-                "resolver_install",
+                OpName::ResolverInstall,
                 OpStatus::Failed,
                 Some("resolver_foreign"),
             )],
-            skipped: vec![skip("trust_install", "ca_not_ready")],
+            skipped: vec![skip(OpName::TrustInstall, "ca_not_ready")],
             ..SetupReport::default()
         };
         let text = render(&report, &data());
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn a_caddy_that_did_not_start_says_to_look_at_its_logs() {
         let report = SetupReport {
-            skipped: vec![skip("trust_install", "caddy_not_started")],
+            skipped: vec![skip(OpName::TrustInstall, "caddy_not_started")],
             ..SetupReport::default()
         };
         assert_eq!(
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn no_caddy_says_to_install_it_then_to_run_setup_again() {
         let report = SetupReport {
-            skipped: vec![skip("trust_install", "caddy_not_installed")],
+            skipped: vec![skip(OpName::TrustInstall, "caddy_not_installed")],
             ..SetupReport::default()
         };
         assert_eq!(
@@ -368,7 +368,7 @@ mod tests {
     fn an_unusable_trust_folder_names_it_and_says_to_run_setup_again() {
         let report = SetupReport {
             results: vec![result(
-                "trust_install",
+                OpName::TrustInstall,
                 OpStatus::Failed,
                 Some("trust_record_unusable"),
             )],
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn a_cancelled_prompt_is_an_error_line() {
         let report = SetupReport {
-            skipped: vec![skip("trust_install", "ca_not_ready")],
+            skipped: vec![skip(OpName::TrustInstall, "ca_not_ready")],
             error: Some(ApiError {
                 code: "setup_cancelled".into(),
                 message: "x".into(),
@@ -452,8 +452,10 @@ mod tests {
 
     #[test]
     fn text_from_the_daemon_has_no_control_characters() {
+        // The op name is a closed list now; the code is still free text.
+        let code = Some("x\u{1b}[2J new\ncode");
         let report = SetupReport {
-            results: vec![result("x\u{1b}[2J", OpStatus::Failed, Some("new\ncode"))],
+            results: vec![result(OpName::TrustInstall, OpStatus::Failed, code)],
             ..SetupReport::default()
         };
         let text = render(&report, &data());
