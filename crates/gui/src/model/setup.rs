@@ -58,7 +58,7 @@ pub(super) fn not_added(report: &SetupReport) -> Option<String> {
             result
                 .code
                 .clone()
-                .unwrap_or_else(|| "hosts_sync".to_owned())
+                .unwrap_or_else(|| OpName::HostsSync.as_str().to_owned())
         })
 }
 

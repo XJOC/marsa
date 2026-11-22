@@ -29,19 +29,9 @@ use marsa_core::platform::ports;
 use marsa_core::recipes::Os;
 use marsa_core::recipes::Platform;
 use marsa_core::types::ApiError;
-use marsa_core::types::SetupReport;
+use marsa_core::types::{OpName, SetupReport};
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
-
-pub(super) const TRUST_INSTALL: &str = "trust_install";
-
-const PF_INSTALL: &str = "pf_install";
-
-const PORTS_INSTALL: &str = "ports_install";
-
-const RESOLVER_INSTALL: &str = "resolver_install";
-
-pub(super) const UNINSTALL_ALL: &str = "uninstall_all";
 
 /// The operations of the hosts way, into `ops`; a `hosts_sync` that cannot
 /// be sent goes into `report` as skipped ([`linux_dns::hosts_ops`]).
@@ -49,14 +39,15 @@ fn push_hosts_ops(ops: &mut Vec<HelperOp>, report: &mut SetupReport, names: Opti
     let (hosts, skipped) = linux_dns::hosts_ops(names);
     ops.extend(hosts);
     if let Some(code) = skipped {
-        report.skipped.push(skip(linux_dns::HOSTS_SYNC, code));
+        report.skipped.push(skip(OpName::HostsSync, code));
     }
 }
 
 /// Whether the helper's `ports_install` is done, now or before.
 pub(super) fn low_ports_set(report: &SetupReport) -> bool {
     report.results.iter().any(|result| {
-        result.op == PORTS_INSTALL && matches!(result.status, OpStatus::Done | OpStatus::Unchanged)
+        result.op == OpName::PortsInstall
+            && matches!(result.status, OpStatus::Done | OpStatus::Unchanged)
     })
 }
 
@@ -120,10 +111,10 @@ impl Setup {
                 tracing::warn!("the CA root is not one strict certificate; no trust_install");
                 report
                     .skipped
-                    .push(skip(TRUST_INSTALL, codes::CA_UNREADABLE));
+                    .push(skip(OpName::TrustInstall, codes::CA_UNREADABLE));
             }
             Ok(pem) => ops.push(HelperOp::TrustInstall { pem }),
-            Err(code) => report.skipped.push(skip(TRUST_INSTALL, code)),
+            Err(code) => report.skipped.push(skip(OpName::TrustInstall, code)),
         }
         let mut linux = None;
         if platform.os() == Os::Linux {
@@ -136,7 +127,7 @@ impl Setup {
             tracing::info!(?path, block, "the way of .test names here");
             match (path, dns_down) {
                 (LinuxPath::Link, Some(code)) => {
-                    dns_skipped(&mut report, linux_dns::RESOLVED_INSTALL, code);
+                    dns_skipped(&mut report, OpName::ResolvedInstall, code);
                 }
                 (LinuxPath::Link, None) => {
                     ops.push(HelperOp::ResolvedInstall { port: DNS_PORT });
@@ -155,13 +146,13 @@ impl Setup {
                 }
                 Some(_) => report
                     .skipped
-                    .push(skip(linux_dns::HOSTS_SYNC, codes::HOSTS_TOO_MANY_NAMES)),
+                    .push(skip(OpName::HostsSync, codes::HOSTS_TOO_MANY_NAMES)),
                 None => report
                     .skipped
-                    .push(skip(linux_dns::HOSTS_SYNC, codes::HOSTS_SITES_UNKNOWN)),
+                    .push(skip(OpName::HostsSync, codes::HOSTS_SITES_UNKNOWN)),
             }
         } else if let Some(code) = dns_down {
-            dns_skipped(&mut report, RESOLVER_INSTALL, code);
+            dns_skipped(&mut report, OpName::ResolverInstall, code);
         } else if let Some(op) = dns::setup_op(platform) {
             ops.push(op);
         }
@@ -226,10 +217,8 @@ impl Setup {
             );
             report
                 .results
-                .retain(|result| result.op != linux_dns::RESOLVED_INSTALL);
-            report
-                .skipped
-                .push(skip(linux_dns::RESOLVED_INSTALL, &code));
+                .retain(|result| result.op != OpName::ResolvedInstall);
+            report.skipped.push(skip(OpName::ResolvedInstall, &code));
             let mut ops = Vec::new();
             push_hosts_ops(&mut ops, report, names);
             // No names to write, no prompt: after `resolved_use_hosts` the
@@ -300,11 +289,11 @@ impl Setup {
                 report.port_holders = holders;
                 report
                     .skipped
-                    .push(skip(PF_INSTALL, codes::REDIRECT_PORT_HELD));
+                    .push(skip(OpName::PfInstall, codes::REDIRECT_PORT_HELD));
             }
             None => report
                 .skipped
-                .push(skip(PF_INSTALL, codes::PORTS_NOT_CHECKED)),
+                .push(skip(OpName::PfInstall, codes::PORTS_NOT_CHECKED)),
         }
     }
 
@@ -325,7 +314,7 @@ impl Setup {
                 );
                 let message = "the home folder of the current user is not known, so the \
                                login keychain cannot be found";
-                user_trust::failed(TRUST_INSTALL, codes::TRUST_ADD_FAILED, message)
+                user_trust::failed(OpName::TrustInstall, codes::TRUST_ADD_FAILED, message)
             }
         }
     }
@@ -342,14 +331,14 @@ impl Setup {
         let Some(home) = &self.home else {
             tracing::warn!("the home folder is not known, so the NSS databases cannot be found");
             let message = "the home folder of the current user is not known";
-            let failed = user_trust::failed(nss::NSS_INSTALL, codes::NSS_ADD_FAILED, message);
+            let failed = user_trust::failed(OpName::NssInstall, codes::NSS_ADD_FAILED, message);
             report.results.push(failed);
             return;
         };
         let files = user_trust::TrustFiles::in_dir(data_dir);
         match nss::install(self.runner.as_ref(), home, pem, &files, stop) {
             nss::Outcome::Ran(result) => report.results.push(result),
-            nss::Outcome::Skipped(code) => report.skipped.push(skip(nss::NSS_INSTALL, code)),
+            nss::Outcome::Skipped(code) => report.skipped.push(skip(OpName::NssInstall, code)),
         }
     }
 
@@ -432,7 +421,7 @@ mod tests {
     #[test]
     fn the_user_trust_commands_are_pinned_and_come_after_the_helper() {
         let dir = Dir::new(true);
-        let answer = all_done(&["resolver_install", "pf_install"]);
+        let answer = all_done(&[OpName::ResolverInstall, OpName::PfInstall]);
         let fake = Fake::scripted(netstat_free(), move || ok(&answer));
         let report = dir.run(&fake);
 
@@ -479,9 +468,9 @@ mod tests {
         assert_eq!(
             report.results,
             [
-                done("resolver_install"),
-                done("pf_install"),
-                done("trust_install")
+                done(OpName::ResolverInstall),
+                done(OpName::PfInstall),
+                done(OpName::TrustInstall)
             ]
         );
         assert!(report.skipped.is_empty());
@@ -491,7 +480,7 @@ mod tests {
     #[test]
     fn a_ca_the_user_trusts_already_is_unchanged_and_nothing_is_added() {
         let dir = Dir::new(true);
-        let answer = all_done(&["resolver_install", "pf_install"]);
+        let answer = all_done(&[OpName::ResolverInstall, OpName::PfInstall]);
         let fake = Fake::answering(move |program, args| match program {
             NETSTAT => ok(netstat_free()),
             OSASCRIPT => ok(&answer),
@@ -502,7 +491,7 @@ mod tests {
 
         assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, SECURITY]);
         let trust = report.results.last().unwrap();
-        assert_eq!(trust.op, "trust_install");
+        assert_eq!(trust.op, OpName::TrustInstall);
         assert_eq!(trust.status, OpStatus::Unchanged);
         assert_eq!(report.results.len(), 3);
         assert_eq!(report.error, None);
@@ -551,7 +540,7 @@ mod tests {
             assert_eq!(report.results.len(), 3, "{name}");
             assert_eq!(report.results[..2], results(DONE)[..], "{name}");
             let trust = &report.results[2];
-            assert_eq!(trust.op, "trust_install", "{name}");
+            assert_eq!(trust.op, OpName::TrustInstall, "{name}");
             assert_eq!(trust.status, OpStatus::Failed, "{name}");
             assert_eq!(trust.code.as_deref(), Some("trust_add_failed"), "{name}");
             let message = trust.message.as_deref().unwrap().to_ascii_lowercase();
@@ -575,7 +564,7 @@ mod tests {
     #[test]
     fn no_home_folder_is_trust_add_failed_after_the_helper() {
         let dir = Dir::new(true);
-        let answer = all_done(&["resolver_install", "pf_install"]);
+        let answer = all_done(&[OpName::ResolverInstall, OpName::PfInstall]);
         let fake = Fake::scripted(netstat_free(), move || ok(&answer));
         let setup = Setup::with(
             fake.clone(),
@@ -597,7 +586,7 @@ mod tests {
         assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT]);
         assert_eq!(report.results.len(), 3);
         let trust = &report.results[2];
-        assert_eq!(trust.op, "trust_install");
+        assert_eq!(trust.op, OpName::TrustInstall);
         assert_eq!(trust.code.as_deref(), Some("trust_add_failed"));
         assert_eq!(report.error, None);
     }
@@ -705,7 +694,11 @@ mod tests {
         let dir = Dir::new(true);
         let helper = dir.home().join("Desktop").join("marsa-helper");
         make_helper(&helper);
-        let answer = all_done(&["trust_install", "resolved_install", "ports_install"]);
+        let answer = all_done(&[
+            OpName::TrustInstall,
+            OpName::ResolvedInstall,
+            OpName::PortsInstall,
+        ]);
         let fake = linux_fake(move || ok(&answer));
         let report = run_linux(&linux_setup(&fake, helper.clone(), dir.home()), &dir);
 
@@ -737,10 +730,14 @@ mod tests {
             HelperOp::PortsInstall,
         ];
         assert_eq!(fake.pkexec_request(), HelperRequest::new(ops.to_vec()));
-        let names: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+        let names: Vec<_> = report.results.iter().map(|r| r.op).collect();
         assert_eq!(
             names,
-            ["trust_install", "resolved_install", "ports_install"]
+            [
+                OpName::TrustInstall,
+                OpName::ResolvedInstall,
+                OpName::PortsInstall
+            ]
         );
         assert_eq!((report.error, report.skipped), (None, Vec::new()));
     }
@@ -766,7 +763,11 @@ mod tests {
         let dir = Dir::new(true);
         make_helper(&dir.helper());
         fs::create_dir_all(dir.home()).unwrap();
-        let answer = all_done(&["trust_install", "resolved_install", "ports_install"]);
+        let answer = all_done(&[
+            OpName::TrustInstall,
+            OpName::ResolvedInstall,
+            OpName::PortsInstall,
+        ]);
         let fake = nss_fake(
             move || ok(&answer),
             |args| match args[2].as_str() {
@@ -787,14 +788,14 @@ mod tests {
         let add = fake.calls().last().unwrap().args.clone();
         assert_eq!(add[2], "-A");
         assert!(add.last().unwrap().ends_with("nss.pem"), "{add:?}");
-        let names: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+        let names: Vec<_> = report.results.iter().map(|r| r.op).collect();
         assert_eq!(
             names,
             [
-                "trust_install",
-                "resolved_install",
-                "ports_install",
-                "nss_install"
+                OpName::TrustInstall,
+                OpName::ResolvedInstall,
+                OpName::PortsInstall,
+                OpName::NssInstall
             ]
         );
         assert_eq!(report.results[3].status, OpStatus::Done);
@@ -806,7 +807,11 @@ mod tests {
     fn nss_without_a_home_folder_is_a_failed_step() {
         let dir = Dir::new(true);
         make_helper(&dir.helper());
-        let answer = all_done(&["trust_install", "resolved_install", "ports_install"]);
+        let answer = all_done(&[
+            OpName::TrustInstall,
+            OpName::ResolvedInstall,
+            OpName::PortsInstall,
+        ]);
         let fake = nss_fake(move || ok(&answer), |_| panic!("certutil ran"));
         let setup = Setup::with(
             fake.clone(),
@@ -817,7 +822,7 @@ mod tests {
         .with_nss();
         let report = run_linux(&setup, &dir);
         let last = report.results.last().unwrap();
-        assert_eq!(last.op, "nss_install");
+        assert_eq!(last.op, OpName::NssInstall);
         assert_eq!(last.code.as_deref(), Some("nss_add_failed"));
         assert_eq!(report.error, None);
     }
@@ -834,7 +839,11 @@ mod tests {
         let report = run_linux(&setup, &dir);
         assert_eq!(error_code(&report), Some("setup_cancelled"));
 
-        let answer = all_done(&["trust_install", "resolved_install", "ports_install"]);
+        let answer = all_done(&[
+            OpName::TrustInstall,
+            OpName::ResolvedInstall,
+            OpName::PortsInstall,
+        ]);
         let fake = nss_fake(
             move || ok(&answer),
             |_| Err(io::Error::from(io::ErrorKind::NotFound)),
@@ -842,7 +851,10 @@ mod tests {
         let setup = linux_setup(&fake, dir.helper(), dir.home()).with_nss();
         let report = run_linux(&setup, &dir);
         assert_eq!(report.error, None);
-        assert_eq!(report.skipped, [skip("nss_install", "nss_tool_missing")]);
+        assert_eq!(
+            report.skipped,
+            [skip(OpName::NssInstall, "nss_tool_missing")]
+        );
         assert_eq!(report.results.len(), 3);
     }
 
@@ -852,7 +864,7 @@ mod tests {
     fn linux_without_the_dns_server_skips_the_link() {
         let dir = Dir::new(true);
         make_helper(&dir.helper());
-        let answer = all_done(&["trust_install", "ports_install"]);
+        let answer = all_done(&[OpName::TrustInstall, OpName::PortsInstall]);
         let fake = linux_fake(move || ok(&answer));
         let setup = linux_setup(&fake, dir.helper(), dir.home());
         let stop = CancellationToken::new();
@@ -868,7 +880,7 @@ mod tests {
         assert_eq!(requests(&fake), [vec![trust(), HelperOp::PortsInstall]]);
         assert_eq!(
             report.skipped,
-            [skip("resolved_install", codes::DNS_PORT_IN_USE)]
+            [skip(OpName::ResolvedInstall, codes::DNS_PORT_IN_USE)]
         );
         assert_eq!(report.error, None);
     }
@@ -899,7 +911,7 @@ mod tests {
         assert!(
             report
                 .skipped
-                .contains(&skip("resolver_install", "dns_not_running")),
+                .contains(&skip(OpName::ResolverInstall, "dns_not_running")),
             "{report:?}"
         );
     }
@@ -909,7 +921,11 @@ mod tests {
     #[test]
     fn linux_results_for_other_operations_are_setup_helper_failed() {
         let dir = Dir::new(true);
-        let answer = all_done(&["ports_install", "trust_install", "resolved_install"]);
+        let answer = all_done(&[
+            OpName::PortsInstall,
+            OpName::TrustInstall,
+            OpName::ResolvedInstall,
+        ]);
         let fake = linux_fake(move || ok(&answer));
         let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
         assert_eq!(
@@ -925,7 +941,7 @@ mod tests {
     #[test]
     fn linux_without_a_ca_still_sets_up_names_and_ports() {
         let dir = Dir::new(false);
-        let answer = all_done(&["resolved_install", "ports_install"]);
+        let answer = all_done(&[OpName::ResolvedInstall, OpName::PortsInstall]);
         let fake = linux_fake(move || ok(&answer));
         let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
         let ops = vec![
@@ -935,7 +951,7 @@ mod tests {
         assert_eq!(fake.pkexec_request(), HelperRequest::new(ops));
         assert_eq!(
             report.skipped,
-            [skip("trust_install", "caddy_not_installed")]
+            [skip(OpName::TrustInstall, "caddy_not_installed")]
         );
         assert_eq!(report.error, None);
     }
@@ -1011,14 +1027,14 @@ mod tests {
                 hosts_sync(&["blog.test", "shop.test"]),
             ];
             assert_eq!(fake.pkexec_request(), linux_request(dns), "{system:?}");
-            let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+            let steps: Vec<_> = report.results.iter().map(|r| r.op).collect();
             assert_eq!(
                 steps,
                 [
-                    "trust_install",
-                    "resolved_remove",
-                    "hosts_sync",
-                    "ports_install"
+                    OpName::TrustInstall,
+                    OpName::ResolvedRemove,
+                    OpName::HostsSync,
+                    OpName::PortsInstall
                 ]
             );
             assert_eq!((report.error, report.skipped), (None, Vec::new()));
@@ -1113,14 +1129,14 @@ mod tests {
             );
             // The link is made: `marsa park` no longer syncs the hosts file.
             assert!(!linux_dns::marker(dir.dir.path()).is_file());
-            let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+            let steps: Vec<_> = report.results.iter().map(|r| r.op).collect();
             assert_eq!(
                 steps,
                 [
-                    "trust_install",
-                    "resolved_install",
-                    "ports_install",
-                    "hosts_remove"
+                    OpName::TrustInstall,
+                    OpName::ResolvedInstall,
+                    OpName::PortsInstall,
+                    OpName::HostsRemove
                 ]
             );
             assert_eq!(report.error, None);
@@ -1150,7 +1166,7 @@ mod tests {
             let dir = Dir::new(true);
             let hosts = hosts_with_block(&dir);
             let fake = linux_fake_on(UBUNTU_2404, move |request| {
-                answer_for(&request, &[("resolved_install", code)])
+                answer_for(&request, &[(OpName::ResolvedInstall, code)])
             });
             let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts);
             let report = run_linux_with(&setup, &dir, &["shop.test"]);
@@ -1190,7 +1206,7 @@ mod tests {
             let dir = Dir::new(true);
             let hosts = hosts_with_block(&dir);
             let fake = linux_fake_on(UBUNTU_2404, move |request| {
-                answer_for(&request, &[("resolved_install", code)])
+                answer_for(&request, &[(OpName::ResolvedInstall, code)])
             });
             let setup = linux_setup(&fake, dir.helper(), dir.home()).with_hosts_file(hosts);
             let report = run_linux_with(&setup, &dir, &["shop.test"]);
@@ -1198,17 +1214,17 @@ mod tests {
             let first = linux_request(vec![HelperOp::ResolvedInstall { port: 18053 }]).ops;
             let second = vec![HelperOp::ResolvedRemove, hosts_sync(&["shop.test"])];
             assert_eq!(requests(&fake), [first, second], "{code}");
-            let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
+            let steps: Vec<_> = report.results.iter().map(|r| r.op).collect();
             assert_eq!(
                 steps,
                 [
-                    "trust_install",
-                    "ports_install",
-                    "resolved_remove",
-                    "hosts_sync"
+                    OpName::TrustInstall,
+                    OpName::PortsInstall,
+                    OpName::ResolvedRemove,
+                    OpName::HostsSync
                 ]
             );
-            assert_eq!(report.skipped, [skip("resolved_install", code)]);
+            assert_eq!(report.skipped, [skip(OpName::ResolvedInstall, code)]);
             assert_eq!(report.error, None);
             assert!(low_ports_set(&report));
         }
@@ -1226,17 +1242,17 @@ mod tests {
                     "Error executing command as another user: Request dismissed",
                 )
             } else {
-                answer_for(&request, &[("resolved_install", "resolved_use_hosts")])
+                answer_for(&request, &[(OpName::ResolvedInstall, "resolved_use_hosts")])
             }
         });
         let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
         assert_eq!(error_code(&report), Some("setup_hosts_not_written"));
         assert_eq!(
             report.skipped,
-            [skip("resolved_install", "resolved_use_hosts")]
+            [skip(OpName::ResolvedInstall, "resolved_use_hosts")]
         );
-        let steps: Vec<_> = report.results.iter().map(|r| r.op.as_str()).collect();
-        assert_eq!(steps, ["trust_install", "ports_install"]);
+        let steps: Vec<_> = report.results.iter().map(|r| r.op).collect();
+        assert_eq!(steps, [OpName::TrustInstall, OpName::PortsInstall]);
     }
 
     /// A first request that failed as a whole: no second one.
@@ -1257,7 +1273,7 @@ mod tests {
     fn a_failed_hosts_sync_is_a_failed_step() {
         let dir = Dir::new(true);
         let fake = linux_fake_on(UBUNTU_2204_SERVER, |request| {
-            answer_for(&request, &[("hosts_sync", "hosts_block_broken")])
+            answer_for(&request, &[(OpName::HostsSync, "hosts_block_broken")])
         });
         let report = run_linux(&linux_setup(&fake, dir.helper(), dir.home()), &dir);
         assert_eq!(fake.pkexec_calls(), 1);
@@ -1296,7 +1312,7 @@ mod tests {
                 linux_request(vec![HelperOp::ResolvedRemove]),
                 "{code}"
             );
-            assert_eq!(report.skipped, [skip("hosts_sync", code)]);
+            assert_eq!(report.skipped, [skip(OpName::HostsSync, code)]);
             assert_eq!(report.error, None);
         }
     }
@@ -1362,7 +1378,7 @@ mod tests {
     fn no_second_prompt_without_names_to_write() {
         let dir = Dir::new(true);
         let fake = linux_fake_on(UBUNTU_2404, |request| {
-            answer_for(&request, &[("resolved_install", "resolved_use_hosts")])
+            answer_for(&request, &[(OpName::ResolvedInstall, "resolved_use_hosts")])
         });
         let setup = linux_setup(&fake, dir.helper(), dir.home());
         let stop = CancellationToken::new();
@@ -1379,8 +1395,8 @@ mod tests {
         assert_eq!(
             report.skipped,
             [
-                skip("resolved_install", "resolved_use_hosts"),
-                skip("hosts_sync", "hosts_sites_unknown")
+                skip(OpName::ResolvedInstall, "resolved_use_hosts"),
+                skip(OpName::HostsSync, "hosts_sites_unknown")
             ]
         );
         assert_eq!(report.error, None);
@@ -1395,7 +1411,7 @@ mod tests {
             if request.ops.len() == 2 {
                 Err(io::Error::from(io::ErrorKind::TimedOut))
             } else {
-                answer_for(&request, &[("resolved_install", "resolved_use_hosts")])
+                answer_for(&request, &[(OpName::ResolvedInstall, "resolved_use_hosts")])
             }
         });
         let report = run_linux_with(
@@ -1413,7 +1429,7 @@ mod tests {
     fn the_slowest_linux_setup_fits_in_slowest_setup() {
         let dir = Dir::new(true);
         let fake = linux_fake_on(UBUNTU_2204_DESKTOP, |request| {
-            answer_for(&request, &[("resolved_install", "resolved_use_hosts")])
+            answer_for(&request, &[(OpName::ResolvedInstall, "resolved_use_hosts")])
         });
         run_linux_with(
             &linux_setup(&fake, dir.helper(), dir.home()),
@@ -1442,7 +1458,7 @@ mod tests {
     fn low_ports_are_set_when_ports_install_is_done_or_unchanged() {
         let report = |status| SetupReport {
             results: vec![OpResult {
-                op: "ports_install".into(),
+                op: OpName::PortsInstall,
                 status,
                 code: None,
                 message: None,
@@ -1454,7 +1470,7 @@ mod tests {
         assert!(!low_ports_set(&report(OpStatus::Failed)));
         assert!(!low_ports_set(&SetupReport::default()));
         let other = SetupReport {
-            results: vec![done("resolved_install")],
+            results: vec![done(OpName::ResolvedInstall)],
             ..SetupReport::default()
         };
         assert!(!low_ports_set(&other));
@@ -1494,7 +1510,11 @@ mod tests {
     #[tokio::test]
     async fn on_linux_a_request_without_the_token_with_an_origin_or_another_host_runs_nothing() {
         let dir = Dir::new(true);
-        let answer = all_done(&["trust_install", "resolved_install", "ports_install"]);
+        let answer = all_done(&[
+            OpName::TrustInstall,
+            OpName::ResolvedInstall,
+            OpName::PortsInstall,
+        ]);
         let fake = linux_fake(move || ok(&answer));
         let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
         let app = App::new(daemon, linux_setup(&fake, dir.helper(), dir.home()));
@@ -1537,7 +1557,7 @@ mod tests {
     #[tokio::test]
     async fn the_whole_setup_over_http() {
         let dir = Dir::new(true);
-        let answer = all_done(&["resolver_install", "pf_install"]);
+        let answer = all_done(&[OpName::ResolverInstall, OpName::PfInstall]);
         let fake = Fake::scripted(netstat_free(), move || ok(&answer));
         let mut daemon = Daemon::new(dir.dir.path().to_path_buf());
         // The ports come from the daemon's Caddy settings.
@@ -1552,9 +1572,9 @@ mod tests {
         let report: SetupReport = serde_json::from_value(json).unwrap();
         let want = SetupReport {
             results: vec![
-                done("resolver_install"),
-                done("pf_install"),
-                done("trust_install"),
+                done(OpName::ResolverInstall),
+                done(OpName::PfInstall),
+                done(OpName::TrustInstall),
             ],
             ..SetupReport::default()
         };

@@ -625,7 +625,7 @@ fn render(report: &UninstallReport, data_dir: &Path) -> String {
     let record = trust::record_path(data_dir);
     let mut text = String::new();
     for result in &report.results {
-        let step = strings::uninstall_all_step(&printable(&result.op));
+        let step = strings::uninstall_all_step(result.op);
         let line = match result.status {
             OpStatus::Done => strings::setup_done(&step),
             OpStatus::Unchanged => strings::setup_unchanged(&step),
@@ -720,7 +720,7 @@ impl Leftovers<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marsa_core::types::{ApiError, OpResult};
+    use marsa_core::types::{ApiError, OpName, OpResult};
     use tempfile::TempDir;
 
     /// Scripted answers, and the questions asked.
@@ -759,9 +759,9 @@ mod tests {
         }
     }
 
-    fn result(op: &str, status: OpStatus, code: Option<&str>) -> OpResult {
+    fn result(op: OpName, status: OpStatus, code: Option<&str>) -> OpResult {
         OpResult {
-            op: op.into(),
+            op,
             status,
             code: code.map(str::to_owned),
             message: code.map(|_| "x".to_owned()),
@@ -1022,15 +1022,15 @@ mod tests {
     fn each_step_has_a_line_and_a_failure_says_why() {
         let report = UninstallReport {
             results: vec![
-                result("pf_remove", OpStatus::Done, None),
-                result("resolver_remove", OpStatus::Unchanged, None),
-                result("trust_remove", OpStatus::Unchanged, None),
+                result(OpName::PfRemove, OpStatus::Done, None),
+                result(OpName::ResolverRemove, OpStatus::Unchanged, None),
+                result(OpName::TrustRemove, OpStatus::Unchanged, None),
                 result(
-                    "user_trust_remove",
+                    OpName::UserTrustRemove,
                     OpStatus::Failed,
                     Some("trust_record_unusable"),
                 ),
-                result("autostart_remove", OpStatus::Done, None),
+                result(OpName::AutostartRemove, OpStatus::Done, None),
             ],
             error: None,
             stopping: true,
@@ -1060,7 +1060,7 @@ mod tests {
         assert!(error(&report).is_none());
 
         let all_done = UninstallReport {
-            results: vec![result("pf_remove", OpStatus::Done, None)],
+            results: vec![result(OpName::PfRemove, OpStatus::Done, None)],
             error: None,
             stopping: true,
         };

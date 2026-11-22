@@ -1475,7 +1475,7 @@ fn a_closed_first_run_stays_closed() {
 fn report(code: &str) -> SetupReport {
     SetupReport {
         skipped: vec![SetupSkip {
-            op: "trust_install".into(),
+            op: OpName::TrustInstall,
             code: code.into(),
         }],
         ..SetupReport::default()
@@ -1510,7 +1510,7 @@ fn the_hosts_button_runs_only_with_names_to_add() {
     let report = |error: Option<&str>, skipped: Option<&str>, failed: Option<&str>| SetupReport {
         results: failed
             .map(|code| OpResult {
-                op: "hosts_sync".into(),
+                op: OpName::HostsSync,
                 status: OpStatus::Failed,
                 code: Some(code.into()),
                 message: None,
@@ -1519,7 +1519,7 @@ fn the_hosts_button_runs_only_with_names_to_add() {
             .collect(),
         skipped: skipped
             .map(|code| SetupSkip {
-                op: "hosts_sync".into(),
+                op: OpName::HostsSync,
                 code: code.into(),
             })
             .into_iter()

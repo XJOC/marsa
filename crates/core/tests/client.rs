@@ -28,9 +28,10 @@ use marsa_core::platform::daemon_file::{
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
     API_VERSION, AutostartState, DefaultVersion, ErrorBody, Event, Health, InstallAccepted,
-    InstallRequest, LinkRequest, LogLine, LogStream, OpResult, OpStatus, ParkRequest, RuntimeList,
-    RuntimeVersions, ServiceAction, ServiceState, ServiceStatus, SetupReport, SetupSkip, Site,
-    SiteKind, SiteList, SitePatch, SkippedFolder, Source, Uninstalled, VersionInUse, XdebugState,
+    InstallRequest, LinkRequest, LogLine, LogStream, OpName, OpResult, OpStatus, ParkRequest,
+    RuntimeList, RuntimeVersions, ServiceAction, ServiceState, ServiceStatus, SetupReport,
+    SetupSkip, Site, SiteKind, SiteList, SitePatch, SkippedFolder, Source, Uninstalled,
+    VersionInUse, XdebugState,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1033,13 +1034,13 @@ async fn a_path_that_is_not_utf8_is_refused_before_any_request() {
 async fn setup_posts_and_reads_the_report() {
     let report = SetupReport {
         results: vec![OpResult {
-            op: "resolver_install".into(),
+            op: OpName::ResolverInstall,
             status: OpStatus::Done,
             code: None,
             message: None,
         }],
         skipped: vec![SetupSkip {
-            op: "trust_install".into(),
+            op: OpName::TrustInstall,
             code: "ca_not_ready".into(),
         }],
         ..SetupReport::default()

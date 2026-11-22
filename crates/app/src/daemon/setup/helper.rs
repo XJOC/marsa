@@ -15,7 +15,6 @@ use super::osascript::osascript_args;
 use super::osascript::read_answer_for;
 use super::pkexec;
 use super::short_code;
-use super::steps::UNINSTALL_ALL;
 use super::steps::inside;
 use super::windows;
 use marsa_core::codes;
@@ -27,6 +26,7 @@ use marsa_core::helper::OpResult;
 use marsa_core::recipes::Os;
 use marsa_core::recipes::Platform;
 use marsa_core::types::ApiError;
+use marsa_core::types::OpName;
 use std::fs;
 #[cfg(unix)]
 use std::fs::File;
@@ -160,24 +160,15 @@ pub(super) fn current_uid() -> io::Result<u32> {
     Ok(File::from(OwnedFd::from(reader)).metadata()?.uid())
 }
 
-/// The name of `op` in the helper's results: its `op` tag in JSON.
-pub(super) fn op_name(op: &HelperOp) -> Result<String, serde_json::Error> {
-    let value = serde_json::to_value(op)?;
-    match value.get("op").and_then(serde_json::Value::as_str) {
-        Some(name) => Ok(name.to_owned()),
-        None => Err(serde::de::Error::custom("an operation without its name")),
-    }
-}
-
 /// Whether the helper answered for exactly the operations sent, in order.
 /// `uninstall_all` gives one result per removal it runs, so a request with
 /// it is not checked; setup never sends it, and the uninstall sends it alone.
-pub(super) fn results_match(names: &[String], results: &[OpResult]) -> bool {
-    names.iter().any(|name| name == UNINSTALL_ALL)
+pub(super) fn results_match(names: &[OpName], results: &[OpResult]) -> bool {
+    names.contains(&OpName::UninstallAll)
         || names
             .iter()
-            .map(String::as_str)
-            .eq(results.iter().map(|result| result.op.as_str()))
+            .copied()
+            .eq(results.iter().map(|result| result.op))
 }
 
 /// The results in the helper's `answer`, or why there are none, with the
@@ -314,11 +305,7 @@ impl Setup {
                 "cannot write the helper request",
             )
         };
-        let names = ops
-            .iter()
-            .map(op_name)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(cannot_write)?;
+        let names: Vec<OpName> = ops.iter().map(HelperOp::name).collect();
         // Windows: the service trusts only the CA named at its install, so it
         // is installed for the CA this request trusts, if any.
         let ca_sha256 = ops.iter().find_map(|op| match op {
@@ -351,7 +338,7 @@ impl Setup {
         if !results_match(&names, &results) {
             tracing::warn!(
                 sent = ?names,
-                got = ?results.iter().map(|result| short_code(&result.op)).collect::<Vec<_>>(),
+                got = ?results.iter().map(|result| result.op).collect::<Vec<_>>(),
                 "marsa-helper answered for other operations than it was sent"
             );
             let message = "the helper's results do not match the request";

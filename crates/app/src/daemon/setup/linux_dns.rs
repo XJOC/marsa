@@ -33,6 +33,7 @@
 //! disagree, or once after the move from the hosts file to the link.
 
 use marsa_core::codes;
+use marsa_core::types::OpName;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
@@ -52,9 +53,6 @@ pub use marsa_core::platform::linux_dns::{HOSTS_FILE, marker, read_block};
 /// searches `PATH`.
 pub const SYSTEMCTL: &str = "/usr/bin/systemctl";
 
-pub const RESOLVED_INSTALL: &str = "resolved_install";
-pub const HOSTS_SYNC: &str = "hosts_sync";
-pub const HOSTS_REMOVE: &str = "hosts_remove";
 /// The helper's answers to `resolved_install` that mean "use the hosts
 /// file here".
 const HOSTS_ANSWERS: [&str; 2] = [codes::RESOLVED_USE_HOSTS, codes::RESOLVED_NOT_RUNNING];
@@ -143,7 +141,8 @@ const MARKER_TEXT: &str = "marsa setup put .test names in /etc/hosts for this da
 /// the hosts file to the next `marsa setup`.
 pub fn record_way(data_dir: &Path, results: &[OpResult]) {
     let synced = results.iter().any(|result| {
-        result.op == HOSTS_SYNC && matches!(result.status, OpStatus::Done | OpStatus::Unchanged)
+        result.op == OpName::HostsSync
+            && matches!(result.status, OpStatus::Done | OpStatus::Unchanged)
     });
     let path = marker(data_dir);
     let outcome = if synced {
@@ -227,7 +226,7 @@ pub fn hosts_ops(names: Option<&[String]>) -> (Vec<HelperOp>, Option<&'static st
 /// Whether the helper made the `marsa0` link, now or before.
 pub fn link_made(results: &[OpResult]) -> bool {
     results.iter().any(|result| {
-        result.op == RESOLVED_INSTALL
+        result.op == OpName::ResolvedInstall
             && matches!(result.status, OpStatus::Done | OpStatus::Unchanged)
     })
 }
@@ -238,7 +237,7 @@ pub fn link_made(results: &[OpResult]) -> bool {
 pub fn helper_chose_hosts(results: &[OpResult]) -> Option<String> {
     results
         .iter()
-        .filter(|result| result.op == RESOLVED_INSTALL && result.status == OpStatus::Failed)
+        .filter(|result| result.op == OpName::ResolvedInstall && result.status == OpStatus::Failed)
         .find_map(|result| {
             result
                 .code
@@ -257,9 +256,9 @@ mod tests {
 
     use super::*;
 
-    fn result(op: &str, status: OpStatus) -> OpResult {
+    fn result(op: OpName, status: OpStatus) -> OpResult {
         OpResult {
-            op: op.to_owned(),
+            op,
             status,
             code: None,
             message: None,
@@ -273,18 +272,27 @@ mod tests {
     fn the_marker_follows_the_way_setup_took() {
         let dir = TempDir::new().unwrap();
         let marked = || marker(dir.path()).is_file();
-        record_way(dir.path(), &[result("hosts_sync", OpStatus::Failed)]);
+        record_way(dir.path(), &[result(OpName::HostsSync, OpStatus::Failed)]);
         assert!(!marked());
-        record_way(dir.path(), &[result("hosts_sync", OpStatus::Unchanged)]);
+        record_way(
+            dir.path(),
+            &[result(OpName::HostsSync, OpStatus::Unchanged)],
+        );
         assert!(marked());
-        record_way(dir.path(), &[result("resolved_install", OpStatus::Failed)]);
+        record_way(
+            dir.path(),
+            &[result(OpName::ResolvedInstall, OpStatus::Failed)],
+        );
         assert!(marked());
-        record_way(dir.path(), &[result("resolved_install", OpStatus::Done)]);
+        record_way(
+            dir.path(),
+            &[result(OpName::ResolvedInstall, OpStatus::Done)],
+        );
         assert!(!marked());
         // Gone already: no error.
         record_way(
             dir.path(),
-            &[result("resolved_install", OpStatus::Unchanged)],
+            &[result(OpName::ResolvedInstall, OpStatus::Unchanged)],
         );
         assert!(!marked());
     }

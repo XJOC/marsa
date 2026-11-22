@@ -20,7 +20,7 @@ use marsa_core::helper::OpStatus;
 use marsa_core::platform::{OpenError, open_url};
 use marsa_core::runtimes::Runtime;
 use marsa_core::sites;
-use marsa_core::types::{HostsStatus, SetupReport, Site, SiteList, SitePatch};
+use marsa_core::types::{HostsStatus, OpName, SetupReport, Site, SiteList, SitePatch};
 
 use super::Failure;
 use super::daemon::{connect, failure};
@@ -431,7 +431,7 @@ fn hosts_added(answer: Result<SetupReport, Failure>, data_dir: &Path) -> Added {
         .results
         .iter()
         .find(|result| result.status == OpStatus::Failed)
-        .map(|result| printable(result.code.as_deref().unwrap_or("hosts_sync")));
+        .map(|result| printable(result.code.as_deref().unwrap_or(OpName::HostsSync.as_str())));
     let reason = report
         .error
         .as_ref()
@@ -1239,7 +1239,7 @@ mod tests {
     fn park_and_link_say_when_the_names_did_not_go_in() {
         let data = Path::new("/data");
         let result = |status, code: Option<&str>| OpResult {
-            op: "hosts_sync".to_owned(),
+            op: OpName::HostsSync,
             status,
             code: code.map(str::to_owned),
             message: code.map(|_| "x".to_owned()),
@@ -1276,7 +1276,7 @@ mod tests {
         not_added(hosts_added(Ok(cancelled), data), "setup_cancelled");
         let skipped = SetupReport {
             skipped: vec![SetupSkip {
-                op: "hosts_sync".to_owned(),
+                op: OpName::HostsSync,
                 code: "hosts_too_many_names".to_owned(),
             }],
             ..SetupReport::default()

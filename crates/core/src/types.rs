@@ -17,7 +17,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// Defined once, in `doctor`, which judges them.
 pub use crate::doctor::{Check as DoctorCheck, Verdict as DoctorVerdict, Warning as DoctorWarning};
 /// Defined once, in `helper`, next to the request they answer.
-pub use crate::helper::{OpResult, OpStatus};
+pub use crate::helper::{OpName, OpResult, OpStatus};
 /// Defined once, in `resolver`, which picks the version: `Site::php_source`.
 pub use crate::resolver::Source;
 use crate::runtimes::Runtime;
@@ -585,8 +585,8 @@ pub struct HostsStatus {
 /// An operation setup left out of the helper request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupSkip {
-    /// The helper operation, for example `pf_install`.
-    pub op: String,
+    /// The operation, for example `pf_install`.
+    pub op: OpName,
     /// Why: `redirect_port_held` and `ports_not_checked` for `pf_install`,
     /// `ca_not_ready`, `ca_unreadable`, `caddy_not_installed`, and
     /// `caddy_not_started` for `trust_install`; on Linux
@@ -749,7 +749,7 @@ mod uninstall_tests {
     fn an_uninstall_report_and_a_cancelled_one() {
         let report = UninstallReport {
             results: vec![OpResult {
-                op: "user_trust_remove".into(),
+                op: OpName::UserTrustRemove,
                 status: OpStatus::Unchanged,
                 code: None,
                 message: None,
@@ -1318,13 +1318,13 @@ mod tests {
     fn a_setup_report_in_a_setup_finished_event() {
         let report = SetupReport {
             results: vec![OpResult {
-                op: "resolver_install".into(),
+                op: OpName::ResolverInstall,
                 status: OpStatus::Done,
                 code: None,
                 message: None,
             }],
             skipped: vec![SetupSkip {
-                op: "pf_install".into(),
+                op: OpName::PfInstall,
                 code: "redirect_port_held".into(),
             }],
             port_holders: vec![PortHolder {

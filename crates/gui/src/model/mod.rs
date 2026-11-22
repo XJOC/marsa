@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use marsa_core::helper::OpStatus;
+use marsa_core::helper::{OpName, OpStatus};
 use marsa_core::resolver;
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{

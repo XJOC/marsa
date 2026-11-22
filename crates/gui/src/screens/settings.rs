@@ -21,7 +21,7 @@ use std::path::Path;
 
 use eframe::egui::Ui;
 use marsa_core::doctor::{self, Skip, Verdict};
-use marsa_core::helper::OpStatus;
+use marsa_core::helper::{OpName, OpStatus};
 use marsa_core::recipes::Platform;
 
 use super::lines::{Mark, mute, status_line};
@@ -112,8 +112,12 @@ pub struct About<'a> {
 
 /// The helper operations that trust Marsa's certificates, and those that make
 /// `.test` names reach Marsa, by the names the reports use.
-const TRUST_OPS: [&str; 1] = ["trust_install"];
-const NAMES_OPS: [&str; 3] = ["resolver_install", "resolved_install", "hosts_sync"];
+const TRUST_OPS: [OpName; 1] = [OpName::TrustInstall];
+const NAMES_OPS: [OpName; 3] = [
+    OpName::ResolverInstall,
+    OpName::ResolvedInstall,
+    OpName::HostsSync,
+];
 
 /// Decides what Settings says. Pure: the same model gives the same view.
 pub fn view(model: &Model) -> SettingsView<'_> {
@@ -196,18 +200,18 @@ fn setup(model: &Model, platform: Option<Platform>) -> SetupGroup {
 /// How the last setup of this session did the step of one of `ops`: the
 /// newest result of the report, else whether it left the step out. With no
 /// report of this session, what the daemon's check `probe` found.
-fn check(model: &Model, ops: &[&str], probe: doctor::Check) -> Check {
+fn check(model: &Model, ops: &[OpName], probe: doctor::Check) -> Check {
     let Setup::Finished(report) = &model.session.setup else {
         return from_daemon(model, probe);
     };
-    let ours = |op: &str| ops.contains(&op);
-    if let Some(result) = report.results.iter().rev().find(|r| ours(&r.op)) {
+    let ours = |op: OpName| ops.contains(&op);
+    if let Some(result) = report.results.iter().rev().find(|r| ours(r.op)) {
         return match result.status {
             OpStatus::Done | OpStatus::Unchanged => Check::Done,
             OpStatus::Failed => Check::Failed,
         };
     }
-    if report.skipped.iter().any(|skipped| ours(&skipped.op)) {
+    if report.skipped.iter().any(|skipped| ours(skipped.op)) {
         Check::Skipped
     } else {
         from_daemon(model, probe)
@@ -396,22 +400,22 @@ mod tests {
         model
     }
 
-    fn result(op: &str, status: OpStatus) -> OpResult {
+    fn result(op: OpName, status: OpStatus) -> OpResult {
         OpResult {
-            op: op.into(),
+            op,
             status,
             code: (status == OpStatus::Failed).then(|| "resolver_foreign".to_owned()),
             message: None,
         }
     }
 
-    fn report(results: Vec<OpResult>, skipped: &[&str]) -> SetupReport {
+    fn report(results: Vec<OpResult>, skipped: &[OpName]) -> SetupReport {
         SetupReport {
             results,
             skipped: skipped
                 .iter()
                 .map(|op| SetupSkip {
-                    op: (*op).into(),
+                    op: *op,
                     code: "redirect_port_held".into(),
                 })
                 .collect(),
@@ -560,8 +564,10 @@ mod tests {
             Probe::Trust,
             Verdict::Pass(Pass::Trust),
         )]));
-        model.session.setup =
-            Setup::Finished(report(vec![result("trust_install", OpStatus::Failed)], &[]));
+        model.session.setup = Setup::Finished(report(
+            vec![result(OpName::TrustInstall, OpStatus::Failed)],
+            &[],
+        ));
         assert_eq!(view(&model).setup.cert, Check::Failed);
         // A report with neither step falls back to the daemon.
         model.session.setup = Setup::Finished(report(Vec::new(), &[]));
@@ -573,9 +579,9 @@ mod tests {
         let mut model = connected_at_home();
         model.session.setup = Setup::Finished(report(
             vec![
-                result("resolver_install", OpStatus::Done),
-                result("pf_install", OpStatus::Done),
-                result("trust_install", OpStatus::Unchanged),
+                result(OpName::ResolverInstall, OpStatus::Done),
+                result(OpName::PfInstall, OpStatus::Done),
+                result(OpName::TrustInstall, OpStatus::Unchanged),
             ],
             &[],
         ));
@@ -584,8 +590,8 @@ mod tests {
 
         // The step that failed, and the one the helper left out.
         model.session.setup = Setup::Finished(report(
-            vec![result("resolver_install", OpStatus::Failed)],
-            &["trust_install"],
+            vec![result(OpName::ResolverInstall, OpStatus::Failed)],
+            &[OpName::TrustInstall],
         ));
         let group = view(&model).setup;
         assert_eq!((group.cert, group.names), (Check::Skipped, Check::Failed));
@@ -593,9 +599,9 @@ mod tests {
         // of a step wins (Linux runs a second request).
         model.session.setup = Setup::Finished(report(
             vec![
-                result("hosts_sync", OpStatus::Failed),
-                result("hosts_sync", OpStatus::Done),
-                result("trust_install", OpStatus::Done),
+                result(OpName::HostsSync, OpStatus::Failed),
+                result(OpName::HostsSync, OpStatus::Done),
+                result(OpName::TrustInstall, OpStatus::Done),
             ],
             &[],
         ));
@@ -644,7 +650,7 @@ mod tests {
             Some(strings::setup_running(Platform::current()))
         );
 
-        let done = report(vec![result("trust_install", OpStatus::Done)], &[]);
+        let done = report(vec![result(OpName::TrustInstall, OpStatus::Done)], &[]);
         model.update(Update::SetupDone(done.clone()));
         let group = view(&model).setup;
         assert_eq!(group.report, strings::setup_lines(&done));
@@ -844,8 +850,8 @@ mod tests {
         let mut model = connected_at_home();
         let done = report(
             vec![
-                result("trust_install", OpStatus::Done),
-                result("resolver_install", OpStatus::Failed),
+                result(OpName::TrustInstall, OpStatus::Done),
+                result(OpName::ResolverInstall, OpStatus::Failed),
             ],
             &[],
         );

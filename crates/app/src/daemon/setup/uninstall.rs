@@ -54,6 +54,7 @@
 //! `uninstall_running` or `setup_running`.
 
 use marsa_core::codes;
+use marsa_core::types::OpName;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,9 +77,6 @@ use crate::daemon::autostart::Autostart;
 use crate::daemon::http::routes::HttpError;
 use crate::daemon::sites::hosts_sync;
 use crate::daemon::state::Daemon;
-
-/// The op name of the login file step in the report.
-const AUTOSTART_REMOVE: &str = "autostart_remove";
 
 /// The longest an uninstall takes, when every program runs to its limit:
 /// `osascript`, then `security remove-trusted-cert` and `delete-certificate`
@@ -201,7 +199,7 @@ fn after_the_helper_on_linux(
     stop: &CancellationToken,
 ) {
     let hosts_gone = report.results.iter().any(|result| {
-        result.op == linux_dns::HOSTS_REMOVE
+        result.op == OpName::HostsRemove
             && matches!(result.status, OpStatus::Done | OpStatus::Unchanged)
     });
     // The block is gone, so no sites pass may write it back. A failed
@@ -215,7 +213,7 @@ fn after_the_helper_on_linux(
         None => {
             tracing::warn!("the home folder is not known, so the NSS databases cannot be found");
             let message = "the home folder of the current user is not known";
-            user_trust::failed(nss::NSS_REMOVE, codes::NSS_REMOVE_FAILED, message)
+            user_trust::failed(OpName::NssRemove, codes::NSS_REMOVE_FAILED, message)
         }
     });
     if let Some(result) = remove_login_file_if_any(autostart) {
@@ -287,11 +285,7 @@ fn untrust_for_user(setup: &Setup, data_dir: &Path, stop: &CancellationToken) ->
             tracing::warn!("the home folder is not known, so the login keychain cannot be found");
             let message = "the home folder of the current user is not known, so the login \
                            keychain cannot be found";
-            user_trust::failed(
-                user_trust::TRUST_REMOVE,
-                codes::TRUST_REMOVE_FAILED,
-                message,
-            )
+            user_trust::failed(OpName::UserTrustRemove, codes::TRUST_REMOVE_FAILED, message)
         }
     }
 }
@@ -309,7 +303,7 @@ fn remove_login_file(autostart: &Autostart) -> OpResult {
         ),
     };
     OpResult {
-        op: AUTOSTART_REMOVE.to_owned(),
+        op: OpName::AutostartRemove.to_owned(),
         status,
         code,
         message,
@@ -356,7 +350,11 @@ mod tests {
     const SCRIPT: &str = "do shell script (quoted form of item 1 of argv) & \" apply \" & \
                           (quoted form of item 2 of argv) with administrator privileges";
     /// The removals of `uninstall_all` on macOS (`ops/mod.rs` of the helper).
-    const REMOVALS: [&str; 3] = ["pf_remove", "resolver_remove", "trust_remove"];
+    const REMOVALS: [OpName; 3] = [
+        OpName::PfRemove,
+        OpName::ResolverRemove,
+        OpName::TrustRemove,
+    ];
 
     impl Fake {
         /// The helper answers `osascript()`; `security` finds the test CA
@@ -403,7 +401,7 @@ mod tests {
     }
 
     /// The helper's answer: one done result per op.
-    fn answer(ops: &[&str]) -> String {
+    fn answer(ops: &[OpName]) -> String {
         let results: Vec<Value> = ops
             .iter()
             .map(|op| json!({ "op": op, "status": "done" }))
@@ -411,9 +409,9 @@ mod tests {
         json!({ "version": 1, "results": results }).to_string()
     }
 
-    fn result(op: &str, status: OpStatus) -> OpResult {
+    fn result(op: OpName, status: OpStatus) -> OpResult {
         OpResult {
-            op: op.to_owned(),
+            op,
             status,
             code: None,
             message: None,
@@ -593,11 +591,11 @@ mod tests {
         let report = app.uninstall().await;
         let want = UninstallReport {
             results: vec![
-                result("pf_remove", OpStatus::Done),
-                result("resolver_remove", OpStatus::Done),
-                result("trust_remove", OpStatus::Done),
-                result("user_trust_remove", OpStatus::Done),
-                result("autostart_remove", OpStatus::Done),
+                result(OpName::PfRemove, OpStatus::Done),
+                result(OpName::ResolverRemove, OpStatus::Done),
+                result(OpName::TrustRemove, OpStatus::Done),
+                result(OpName::UserTrustRemove, OpStatus::Done),
+                result(OpName::AutostartRemove, OpStatus::Done),
             ],
             error: None,
             stopping: true,
@@ -851,11 +849,11 @@ mod tests {
     }
 
     /// The removals of `uninstall_all` on Linux (`ops/mod.rs` of the helper).
-    const LINUX_REMOVALS: [&str; 4] = [
-        "ports_remove",
-        "resolved_remove",
-        "hosts_remove",
-        "trust_remove",
+    const LINUX_REMOVALS: [OpName; 4] = [
+        OpName::PortsRemove,
+        OpName::ResolvedRemove,
+        OpName::HostsRemove,
+        OpName::TrustRemove,
     ];
     /// The NSS nickname of the test CA: the first 16 digits of [`HASH`].
     const NICKNAME: &str = "Marsa Local CA 29e433200254dfce";
@@ -904,10 +902,10 @@ mod tests {
         let report = app.uninstall().await;
         let mut want: Vec<_> = LINUX_REMOVALS
             .iter()
-            .map(|op| result(op, OpStatus::Done))
+            .map(|op| result(*op, OpStatus::Done))
             .collect();
-        want.push(result("nss_remove", OpStatus::Done));
-        want.push(result("autostart_remove", OpStatus::Done));
+        want.push(result(OpName::NssRemove, OpStatus::Done));
+        want.push(result(OpName::AutostartRemove, OpStatus::Done));
         assert_eq!(report.results, want);
         assert!(report.stopping && app.stopping());
         assert!(!linux_dns::marker(&dir.data()).exists());
@@ -1021,7 +1019,7 @@ mod tests {
         let nss = report
             .results
             .iter()
-            .find(|r| r.op == "nss_remove")
+            .find(|r| r.op == OpName::NssRemove)
             .unwrap();
         assert_eq!(nss.code.as_deref(), Some("nss_remove_failed"));
         let files = user_trust::TrustFiles::in_dir(&dir.data());
@@ -1196,7 +1194,7 @@ mod tests {
             OSASCRIPT => {
                 started.send(()).unwrap();
                 answers.lock().unwrap().recv().unwrap();
-                ok(&answer(&["resolver_install"]))
+                ok(&answer(&[OpName::ResolverInstall]))
             }
             other => panic!("unexpected program {other}"),
         });
@@ -1248,21 +1246,21 @@ mod tests {
         let codes: Vec<_> = report
             .results
             .iter()
-            .map(|result| (result.op.as_str(), result.status, result.code.as_deref()))
+            .map(|result| (result.op, result.status, result.code.as_deref()))
             .collect();
         assert_eq!(
             codes,
             [
-                ("pf_remove", OpStatus::Failed, Some("pf_flush_failed")),
-                ("resolver_remove", OpStatus::Unchanged, None),
-                ("trust_remove", OpStatus::Unchanged, None),
+                (OpName::PfRemove, OpStatus::Failed, Some("pf_flush_failed")),
+                (OpName::ResolverRemove, OpStatus::Unchanged, None),
+                (OpName::TrustRemove, OpStatus::Unchanged, None),
                 (
-                    "user_trust_remove",
+                    OpName::UserTrustRemove,
                     OpStatus::Failed,
                     Some("trust_remove_failed")
                 ),
                 (
-                    "autostart_remove",
+                    OpName::AutostartRemove,
                     OpStatus::Failed,
                     Some("autostart_write")
                 ),
@@ -1285,7 +1283,7 @@ mod tests {
         );
         let report = dir.run(&setup);
         let trust = &report.results[3];
-        assert_eq!(trust.op, "user_trust_remove");
+        assert_eq!(trust.op, OpName::UserTrustRemove);
         assert_eq!(trust.code.as_deref(), Some("trust_remove_failed"));
         assert_eq!(fake.programs(), [OSASCRIPT]);
         assert!(report.stopping);

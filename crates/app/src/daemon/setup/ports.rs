@@ -21,7 +21,7 @@ mod tests {
     #[test]
     fn herd_on_80_and_443_means_no_pf_install() {
         let dir = Dir::new(true);
-        let answer = all_done(&["resolver_install"]);
+        let answer = all_done(&[OpName::ResolverInstall]);
         let fake = Fake::scripted(NETSTAT_HERD, move || ok(&answer));
         let report = dir.run(&fake);
 
@@ -36,11 +36,14 @@ mod tests {
             app: Some("Herd".into()),
         };
         assert_eq!(report.port_holders, [nginx(80), nginx(443)]);
-        assert_eq!(report.skipped, [skip("pf_install", "redirect_port_held")]);
+        assert_eq!(
+            report.skipped,
+            [skip(OpName::PfInstall, "redirect_port_held")]
+        );
         assert_eq!(fake.request().ops, [resolver()]);
         assert_eq!(
             report.results,
-            [done("resolver_install"), done("trust_install")]
+            [done(OpName::ResolverInstall), done(OpName::TrustInstall)]
         );
         assert_eq!(report.error, None);
 
@@ -66,7 +69,7 @@ mod tests {
             text.push_str(free);
             text.push('\n');
         }
-        let run = |text: String, done: &[&str]| {
+        let run = |text: String, done: &[OpName]| {
             let dir = Dir::new(true);
             let answer = all_done(done);
             let fake = Fake::answering(move |program, args| match program {
@@ -78,7 +81,7 @@ mod tests {
             let report = dir.run(&fake);
             (report, fake.request().ops, fake.programs())
         };
-        let all = ["resolver_install", "pf_install"];
+        let all = [OpName::ResolverInstall, OpName::PfInstall];
         let (report, ops, _) = run(text.clone(), &all);
         assert!(report.skipped.is_empty(), "{:?}", report.skipped);
         assert_eq!(ops, [resolver(), pf(18080, 18443)]);
@@ -88,7 +91,10 @@ mod tests {
         // holder could sit in the part that was not read.
         text.push_str(&" ".repeat(MAX_OUTPUT as usize - text.len()));
         let (report, ops, programs) = run(text, &all[..1]);
-        assert_eq!(report.skipped, [skip("pf_install", "ports_not_checked")]);
+        assert_eq!(
+            report.skipped,
+            [skip(OpName::PfInstall, "ports_not_checked")]
+        );
         assert_eq!(ops, [resolver()]);
         assert_eq!(programs, [NETSTAT, OSASCRIPT, SECURITY, SECURITY]);
         assert_eq!(report.error, None);
@@ -103,7 +109,7 @@ mod tests {
         ];
         for netstat in outputs {
             let dir = Dir::new(true);
-            let answer = all_done(&["resolver_install"]);
+            let answer = all_done(&[OpName::ResolverInstall]);
             let fake = Fake::answering(move |program, args| match program {
                 NETSTAT => netstat(),
                 OSASCRIPT => ok(&answer),
@@ -111,7 +117,10 @@ mod tests {
                 other => panic!("unexpected program {other}"),
             });
             let report = dir.run(&fake);
-            assert_eq!(report.skipped, [skip("pf_install", "ports_not_checked")]);
+            assert_eq!(
+                report.skipped,
+                [skip(OpName::PfInstall, "ports_not_checked")]
+            );
             assert_eq!(fake.request().ops, [resolver()]);
             assert_eq!(fake.programs(), [NETSTAT, OSASCRIPT, SECURITY, SECURITY]);
             assert_eq!(report.error, None);

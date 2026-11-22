@@ -5,7 +5,9 @@ use marsa_core::client::ClientError;
 use marsa_core::platform::daemon_file::DaemonFileError;
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::Runtime;
-use marsa_core::types::{OpStatus, PortHolder, SetupReport, SiteKind, VersionInUse, XdebugState};
+use marsa_core::types::{
+    OpName, OpStatus, PortHolder, SetupReport, SiteKind, VersionInUse, XdebugState,
+};
 use semver::Version;
 
 use crate::theme::Section;
@@ -519,19 +521,22 @@ fn setup_on_linux_names_the_cost_of_the_low_ports() {
         assert!(setup_running(Some(platform)).contains("desktop"));
     }
     assert_eq!(
-        setup_step("ports_install"),
+        setup_step(OpName::PortsInstall),
         "Let Caddy use ports 80 and 443"
     );
-    assert_eq!(setup_step("resolved_install"), "Send .test names to Marsa");
     assert_eq!(
-        setup_step("hosts_sync"),
+        setup_step(OpName::ResolvedInstall),
+        "Send .test names to Marsa"
+    );
+    assert_eq!(
+        setup_step(OpName::HostsSync),
         "Put the sites' .test names in the hosts file"
     );
 }
 
-fn result(op: &str, status: OpStatus, code: Option<&str>) -> OpResult {
+fn result(op: OpName, status: OpStatus, code: Option<&str>) -> OpResult {
     OpResult {
-        op: op.into(),
+        op,
         status,
         code: code.map(str::to_owned),
         message: None,
@@ -549,13 +554,13 @@ pub(crate) fn texts(lines: &[ReportLine]) -> Vec<(&str, bool)> {
 fn a_setup_report_has_one_line_per_step() {
     let report = SetupReport {
         results: vec![
-            result("resolver_install", OpStatus::Done, None),
-            result("trust_install", OpStatus::Unchanged, None),
-            result("pf_install", OpStatus::Failed, Some("pf_load_failed")),
-            result("new_op", OpStatus::Done, None),
+            result(OpName::ResolverInstall, OpStatus::Done, None),
+            result(OpName::TrustInstall, OpStatus::Unchanged, None),
+            result(OpName::PfInstall, OpStatus::Failed, Some("pf_load_failed")),
+            result(OpName::UninstallAll, OpStatus::Done, None),
         ],
         skipped: vec![SetupSkip {
-            op: "pf_install".into(),
+            op: OpName::PfInstall,
             code: "redirect_port_held".into(),
         }],
         port_holders: vec![
@@ -595,7 +600,7 @@ fn a_setup_report_has_one_line_per_step() {
             ("Send .test names to Marsa: done.", false),
             ("Trust Marsa's HTTPS certificates: already done.", false),
             (failed.as_str(), true),
-            ("new_op: done.", false),
+            ("uninstall_all: done.", false),
             (skipped.as_str(), false),
             ("Port 80 is used by nginx-arm64 (PID 15464, Herd).", false),
             ("Port 443 is used by an unknown program.", false),
@@ -608,7 +613,7 @@ fn a_setup_report_has_one_line_per_step() {
 fn a_skipped_trust_says_how_to_get_the_ca() {
     let skipped = |code: &str| SetupReport {
         skipped: vec![SetupSkip {
-            op: "trust_install".into(),
+            op: OpName::TrustInstall,
             code: code.into(),
         }],
         ..SetupReport::default()
