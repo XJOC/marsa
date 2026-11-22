@@ -12,6 +12,7 @@ pub mod dns;
 pub mod doctor;
 pub mod fs;
 pub mod helper;
+pub mod hex;
 pub mod orphan;
 pub mod php;
 pub mod ports;

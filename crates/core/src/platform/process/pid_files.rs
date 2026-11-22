@@ -49,7 +49,7 @@ pub fn instance_id(path: &Path) -> io::Result<String> {
     }
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|err| io::Error::other(err.to_string()))?;
-    let id: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let id = crate::hex::encode(&bytes);
     crate::fs::write_atomic(path, format!("{id}\n").as_bytes(), Some(0o600))?;
     Ok(id)
 }

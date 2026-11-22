@@ -59,7 +59,7 @@ pub const MAX_ARTIFACT_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 pub const SCHEMA_VERSION: u64 = 1;
 
 /// A `.minisig` file is about 300 bytes. A larger one is refused unread.
-const MAX_SIGNATURE_SIZE: usize = 4096;
+pub(super) const MAX_SIGNATURE_SIZE: usize = 4096;
 
 /// Legacy signatures sign the raw bytes instead of their BLAKE2b hash. The
 /// `minisign` tool has not made them by default for years, so a legacy
