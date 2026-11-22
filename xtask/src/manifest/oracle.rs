@@ -22,13 +22,13 @@ use super::upstream::parse_hex_bytes;
 /// The primary fingerprint of Oracle's MySQL release key, "MySQL Release
 /// Engineering <mysql-build@oss.oracle.com>". A signature by any other key
 /// is refused. A key file with a new fingerprint needs the owner.
-pub const ORACLE_FINGERPRINT: &str = "BCA43417C3B485DD128EC6D4B7B3B788A8D3785C";
+pub(super) const ORACLE_FINGERPRINT: &str = "BCA43417C3B485DD128EC6D4B7B3B788A8D3785C";
 
 /// Oracle's key file, from the workspace root: a copy of
 /// `https://repo.mysql.com/RPM-GPG-KEY-mysql-2025`. It expires on
 /// 2027-10-23; Oracle's renewed file with the same fingerprint replaces it
 /// in a reviewed change.
-pub const ORACLE_KEY_FILE: &str = "recipes/keys/mysql-2025.asc";
+pub(super) const ORACLE_KEY_FILE: &str = "recipes/keys/mysql-2025.asc";
 
 /// Where `gpg` may be. Never searched in `PATH`.
 const GPG_PATHS: [&str; 3] = [
@@ -45,7 +45,7 @@ const MD5_PATH: &str = "/sbin/md5";
 /// # Errors
 ///
 /// When none is there: the check is never skipped.
-pub fn find_gpg() -> Result<PathBuf> {
+pub(super) fn find_gpg() -> Result<PathBuf> {
     find_gpg_in(&GPG_PATHS)
 }
 
@@ -73,7 +73,7 @@ fn find_gpg_in(paths: &[&str]) -> Result<PathBuf> {
 ///
 /// gpg cannot run or read the key file, or [`check_status`] refuses its
 /// answer, or gpg failed after all.
-pub fn verify(
+pub(super) fn verify(
     gpg: &Path,
     key_file: &Path,
     signature: &Path,
@@ -174,7 +174,7 @@ fn stderr_of(out: &Output) -> String {
 /// # Errors
 ///
 /// Why the lines do not prove a good signature by that key.
-pub fn check_status(text: &str, fingerprint: &str) -> Result<()> {
+pub(super) fn check_status(text: &str, fingerprint: &str) -> Result<()> {
     let lines: Vec<(&str, Vec<&str>)> = text
         .lines()
         .filter_map(|line| line.trim_end_matches('\r').strip_prefix("[GNUPG:] "))
@@ -254,7 +254,7 @@ pub fn check_status(text: &str, fingerprint: &str) -> Result<()> {
 /// # Errors
 ///
 /// No such program (not a Mac), or it failed, or its answer is not an MD5.
-pub fn md5_of(file: &Path) -> Result<[u8; 16]> {
+pub(super) fn md5_of(file: &Path) -> Result<[u8; 16]> {
     ensure!(
         Path::new(MD5_PATH).is_file(),
         "no {MD5_PATH}: the MySQL check runs on macOS only"
@@ -274,7 +274,7 @@ pub fn md5_of(file: &Path) -> Result<[u8; 16]> {
 }
 
 /// `md5 -q`'s answer: 32 lowercase hex characters and a line end.
-pub fn parse_md5_output(text: &str) -> Option<[u8; 16]> {
+pub(super) fn parse_md5_output(text: &str) -> Option<[u8; 16]> {
     let line = text.strip_suffix('\n').unwrap_or(text);
     parse_hex_bytes(line, 16)?.try_into().ok()
 }
@@ -303,7 +303,7 @@ fn make_private_dir(dir: &Path) -> Result<()> {
 }
 
 /// The real programs: `gpg` with Oracle's key file, and `/sbin/md5`.
-pub struct System {
+pub(super) struct System {
     /// The workspace root, for [`ORACLE_KEY_FILE`].
     pub root: PathBuf,
     /// gpg's home for each check.

@@ -35,16 +35,16 @@ use crate::response::{Response, code};
 use crate::system::System;
 
 /// The pipe's name. The client in `marsa_core` uses the same.
-pub const PIPE_NAME: &str = r"\\.\pipe\marsa-helper";
+pub(crate) const PIPE_NAME: &str = r"\\.\pipe\marsa-helper";
 /// The service's name in the SCM.
-pub const SERVICE_NAME: &str = "MarsaHelper";
+pub(crate) const SERVICE_NAME: &str = "MarsaHelper";
 /// The service's first argument.
-pub const COMMAND: &str = "service";
+pub(crate) const COMMAND: &str = "service";
 
 /// Who may use the service, and which CA certificate it may trust: the two
 /// values the administrator approved at install.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Allowed {
+pub(crate) struct Allowed {
     /// The installing user's SID (`S-1-5-21-...`, or `S-1-12-1-...` for a
     /// Microsoft Entra ID account), in the form Windows prints.
     pub user_sid: String,
@@ -60,7 +60,7 @@ impl Allowed {
     ///
     /// Why an argument is refused. Strict, so nothing can be smuggled into
     /// the service's command line or the pipe's security descriptor.
-    pub fn parse(user_sid: &OsStr, ca_sha256: &OsStr) -> Result<Self, String> {
+    pub(crate) fn parse(user_sid: &OsStr, ca_sha256: &OsStr) -> Result<Self, String> {
         let user_sid = user_sid
             .to_str()
             .filter(|sid| is_user_sid(sid))
@@ -111,7 +111,7 @@ fn is_u32_text(text: &str) -> bool {
 
 /// The answer to one message from the pipe. `client_sid` is who sent it, as
 /// Windows reports it; `None` if Windows could not tell.
-pub fn answer(
+pub(crate) fn answer(
     message: &[u8],
     client_sid: Option<&str>,
     allowed: &Allowed,
@@ -143,7 +143,7 @@ pub fn answer(
 
 /// `marsa-helper service ...` off Windows: a usage error.
 #[cfg(not(windows))]
-pub fn run(_args: &[std::ffi::OsString]) -> Response {
+pub(crate) fn run(_args: &[std::ffi::OsString]) -> Response {
     let reason = "the helper service runs on Windows only";
     Response::error(code::OP_NOT_SUPPORTED, reason.to_owned())
 }
@@ -152,7 +152,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> Response {
 /// calls `scm::service_main`. Returns only when the service has stopped, or
 /// at once if the SCM did not start this process.
 #[cfg(windows)]
-pub fn run(args: &[std::ffi::OsString]) -> Response {
+pub(crate) fn run(args: &[std::ffi::OsString]) -> Response {
     match args {
         [sid, hash] => match Allowed::parse(sid, hash) {
             Ok(_) => match scm::start() {
@@ -199,7 +199,7 @@ mod scm {
 
     /// Connects this process to the SCM. Fails at once if the SCM did not
     /// start it, for example when a user runs `marsa-helper service`.
-    pub fn start() -> Result<(), String> {
+    pub(super) fn start() -> Result<(), String> {
         service_dispatcher::start(SERVICE_NAME, ffi_service_main)
             .map_err(|err| format!("not started by the service manager: {err}"))
     }

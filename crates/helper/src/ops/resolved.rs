@@ -144,7 +144,7 @@ const REMOVE: &str = "resolved_remove";
 
 /// `resolved_install`: names under `.test`, and only them, go to
 /// `127.0.0.1:<port>`.
-pub fn install(port: u16, system: &impl System) -> OpResult {
+pub(super) fn install(port: u16, system: &impl System) -> OpResult {
     // The global drop-in first, whatever else fails: while it is there,
     // every name reaches the port.
     let dropped = match drop_old(system) {
@@ -267,7 +267,7 @@ fn link_allowed(system: &impl System) -> Result<u32, (&'static str, String)> {
 /// `resolved_remove`: takes out Marsa's unit and the old drop-in, each only
 /// if Marsa wrote it. Both are tried; the first failure is the result.
 /// Nothing of Marsa's there is `unchanged`.
-pub fn remove(system: &impl System) -> OpResult {
+pub(super) fn remove(system: &impl System) -> OpResult {
     let taken = match marked::current(system, Path::new(UNIT_FILE)) {
         Current::Missing | Current::Foreign => Ok(false),
         Current::Unreadable(kind) => Err((RESOLVED_READ, unreadable_message(UNIT_FILE, kind))),

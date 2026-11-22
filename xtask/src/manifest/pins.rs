@@ -14,7 +14,7 @@ use serde::Deserialize;
 use super::upstream::is_segment;
 
 /// The runtimes in manifest order.
-pub const RUNTIMES: [Runtime; 7] = Runtime::ALL;
+pub(super) const RUNTIMES: [Runtime; 7] = Runtime::ALL;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,7 +72,7 @@ type OverrideKey = (&'static str, Version, Platform, String);
 
 /// A checked `pins.toml`.
 #[derive(Debug)]
-pub struct Pins {
+pub(super) struct Pins {
     pub serial: u64,
     /// For example `2.8`: `php -v` must say `Built by static-php-cli 2.8.x`.
     pub spc_line: String,
@@ -83,7 +83,7 @@ pub struct Pins {
 }
 
 impl Pins {
-    pub fn parse(text: &str) -> Result<Pins> {
+    pub(super) fn parse(text: &str) -> Result<Pins> {
         let mut raw: RawPins = toml::from_str(text).context("pins.toml is not valid")?;
         ensure!(
             raw.serial >= MIN_SERIAL,
@@ -200,7 +200,7 @@ impl Pins {
 
     /// Why `build` leaves this version out for `platform` (`[[skip]]` in
     /// `pins.toml`), or `None` when it builds it.
-    pub fn skip_reason(
+    pub(super) fn skip_reason(
         &self,
         runtime: Runtime,
         version: &Version,
@@ -212,7 +212,7 @@ impl Pins {
     }
 
     /// The pinned versions of `runtime`, in file order.
-    pub fn versions(&self, runtime: Runtime) -> &[Version] {
+    pub(super) fn versions(&self, runtime: Runtime) -> &[Version] {
         self.versions
             .get(runtime.dir_name())
             .map_or(&[], Vec::as_slice)
@@ -222,7 +222,7 @@ impl Pins {
     /// template. A Windows PHP release moves from `releases/` to
     /// `releases/archives/` when a newer one comes out, so the template gets
     /// the archive folder as a mirror.
-    pub fn urls(
+    pub(super) fn urls(
         &self,
         runtime: Runtime,
         version: &Version,

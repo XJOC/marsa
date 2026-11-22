@@ -32,14 +32,14 @@ use super::upstream::{
 /// order is the output order, and maps are `BTreeMap`, so the same inputs
 /// give the same bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManifestJson {
+pub(super) struct ManifestJson {
     pub schema: u64,
     pub serial: u64,
     pub runtimes: RuntimesJson,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct RuntimesJson {
+pub(super) struct RuntimesJson {
     #[serde(default)]
     pub php: Vec<ReleaseJson>,
     #[serde(default)]
@@ -59,7 +59,7 @@ pub struct RuntimesJson {
 }
 
 impl RuntimesJson {
-    pub fn get(&self, runtime: Runtime) -> &Vec<ReleaseJson> {
+    pub(super) fn get(&self, runtime: Runtime) -> &Vec<ReleaseJson> {
         match runtime {
             Runtime::Php => &self.php,
             Runtime::Node => &self.node,
@@ -85,13 +85,13 @@ impl RuntimesJson {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReleaseJson {
+pub(super) struct ReleaseJson {
     pub version: String,
     pub platforms: BTreeMap<String, Vec<SourceJson>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceJson {
+pub(super) struct SourceJson {
     pub name: String,
     pub urls: Vec<String>,
     /// 64 lowercase hex characters.
@@ -100,12 +100,12 @@ pub struct SourceJson {
 }
 
 /// The manifest as written to disk: pretty JSON and a final newline.
-pub fn to_json(manifest: &ManifestJson) -> Result<String> {
+pub(super) fn to_json(manifest: &ManifestJson) -> Result<String> {
     Ok(serde_json::to_string_pretty(manifest)? + "\n")
 }
 
 /// One file being built, for the checks and for messages.
-pub struct Target<'a> {
+pub(super) struct Target<'a> {
     pub version: &'a Version,
     pub platform: Platform,
     pub recipe: &'a PlatformRecipe,
@@ -113,14 +113,14 @@ pub struct Target<'a> {
 }
 
 /// Checks that need real programs. Tests pass a stub.
-pub trait Inspect {
+pub(super) trait Inspect {
     /// Checks one of our static-php-cli PHP archives (macOS or Linux).
     /// Returns warnings.
     fn php_build(&self, target: &Target<'_>, file: &Path) -> Result<Vec<String>>;
 }
 
 /// Platforms where PHP is our own static-php-cli build (ADR 0012).
-pub fn is_spc_platform(platform: Platform) -> bool {
+pub(super) fn is_spc_platform(platform: Platform) -> bool {
     matches!(
         platform,
         Platform::DarwinArm64 | Platform::DarwinX64 | Platform::LinuxX64 | Platform::LinuxArm64
@@ -302,7 +302,7 @@ fn is_recipes_archive(url: &str, template: Option<&str>) -> bool {
 
 /// The programs behind Oracle's proof: `oracle::System` in the build, a
 /// stub in tests.
-pub trait OracleCheck {
+pub(super) trait OracleCheck {
     /// Checks that `signature`, the `.asc`, is Oracle's good signature on
     /// `file`, by the pinned key.
     fn signature(&self, signature: &Path, file: &Path) -> Result<()>;
@@ -316,7 +316,7 @@ pub trait OracleCheck {
 /// The two kinds of Oracle's MySQL archives: a tar archive (`.tar.gz`,
 /// `.tar.xz`) for macOS and Linux, a `.zip` for Windows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArchiveKind {
+pub(super) enum ArchiveKind {
     Tar,
     Zip,
 }
@@ -341,7 +341,7 @@ fn top_folder_of(name: &str) -> Result<(&str, ArchiveKind)> {
 
 /// A file whose proof passed: what the manifest records.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Checked {
+pub(super) struct Checked {
     pub url: String,
     pub sha256: [u8; 32],
     pub size: u64,
@@ -366,7 +366,7 @@ pub struct Checked {
 /// # Errors
 ///
 /// The first step that fails, with the URL.
-pub async fn check_oracle(
+pub(super) async fn check_oracle(
     fetch: &impl Fetch,
     url: &str,
     work: &Path,
@@ -448,14 +448,14 @@ pub async fn check_oracle(
 }
 
 /// The result: the manifest, one line per file for the report, and warnings.
-pub struct Built {
+pub(super) struct Built {
     pub manifest: ManifestJson,
     pub rows: Vec<String>,
     pub warnings: Vec<String>,
 }
 
 /// The new serial must be greater than the published one.
-pub fn check_serial(serial: u64, published: Option<u64>) -> Result<()> {
+pub(super) fn check_serial(serial: u64, published: Option<u64>) -> Result<()> {
     match published {
         Some(old) => ensure!(
             serial > old,
@@ -468,7 +468,7 @@ pub fn check_serial(serial: u64, published: Option<u64>) -> Result<()> {
 
 /// Builds the manifest. The files that a later check reads are saved under
 /// `cache` (see `Proof::keeps_file`); the others are only hashed.
-pub async fn build(
+pub(super) async fn build(
     fetch: &impl Fetch,
     pins: &Pins,
     cache: &Path,

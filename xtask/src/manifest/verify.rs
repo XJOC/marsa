@@ -24,7 +24,7 @@ use super::upstream::parse_hex;
 
 /// The rules of `marsa_core::installer::manifest`, on JSON whose signature
 /// is not checked here. `build` runs it before writing; `verify` always.
-pub fn check_json(bytes: &[u8]) -> Result<ManifestJson> {
+pub(super) fn check_json(bytes: &[u8]) -> Result<ManifestJson> {
     ensure!(
         bytes.len() <= MAX_MANIFEST_SIZE,
         "{} bytes, more than the limit of {MAX_MANIFEST_SIZE}",
@@ -94,7 +94,7 @@ fn is_https_url(url: &str) -> bool {
 }
 
 /// Serial, then one line per runtime: its versions and their platforms.
-pub fn summary(manifest: &ManifestJson) -> String {
+pub(super) fn summary(manifest: &ManifestJson) -> String {
     let mut text = format!("serial {}\n", manifest.serial);
     for runtime in RUNTIMES {
         let releases = manifest.runtimes.get(runtime);
@@ -116,7 +116,7 @@ pub fn summary(manifest: &ManifestJson) -> String {
 }
 
 /// The trusted comment the owner signs with.
-pub fn trusted_comment(serial: u64) -> String {
+pub(super) fn trusted_comment(serial: u64) -> String {
     format!("{TRUSTED_COMMENT_PREFIX} serial={serial}")
 }
 
@@ -127,7 +127,7 @@ fn trusted_comment_of(minisig: &str) -> Option<&str> {
         .find_map(|l| l.trim_end_matches('\r').strip_prefix("trusted comment: "))
 }
 
-pub fn run(manifest_path: &Path, sig_path: Option<PathBuf>) -> Result<()> {
+pub(crate) fn run(manifest_path: &Path, sig_path: Option<PathBuf>) -> Result<()> {
     let bytes = fs::read(manifest_path)
         .with_context(|| format!("cannot read {}", manifest_path.display()))?;
     let local = check_json(&bytes).context("the JSON breaks a manifest rule")?;

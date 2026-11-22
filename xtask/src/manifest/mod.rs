@@ -22,7 +22,7 @@ use marsa_core::runtimes::Runtime;
 use semver::Version;
 use serde::Deserialize;
 
-pub use verify::run as verify;
+pub(crate) use verify::run as verify;
 
 use build::{Inspect, Target};
 use pins::Pins;
@@ -32,7 +32,7 @@ const PUBLISHED_URL: &str =
     "https://github.com/XJOC/marsa/releases/download/runtimes-manifest/manifest.json";
 
 /// Where `build` gets the serial of the manifest published now.
-pub enum Previous {
+pub(crate) enum Previous {
     /// Download [`PUBLISHED_URL`]; HTTP 404 means nothing is published yet.
     Download,
     /// Read this local `manifest.json`.
@@ -41,14 +41,14 @@ pub enum Previous {
     Serial(u64),
 }
 
-pub struct BuildOptions {
+pub(crate) struct BuildOptions {
     pub pins: PathBuf,
     pub out: PathBuf,
     pub previous: Previous,
 }
 
 /// The workspace root: the parent of `xtask/`.
-pub fn workspace_root() -> Result<PathBuf> {
+pub(crate) fn workspace_root() -> Result<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .map(Path::to_path_buf)
@@ -90,7 +90,7 @@ impl Inspect for Smoke<'_> {
 /// `cargo xtask manifest check-php`: the checks of `build` on one local PHP
 /// archive, without the manifest. The build workflow runs it on each archive
 /// it makes, on the runner that made it.
-pub fn run_check_php(
+pub(crate) fn run_check_php(
     archive: &Path,
     platform: Platform,
     version: &Version,
@@ -132,7 +132,7 @@ pub fn run_check_php(
 /// M6-05): its `.md5` and `.asc`, the GPG signature by the pinned key, and
 /// the MD5. Prints the size and sha256 the manifest would record. Keeps
 /// nothing: the archive is deleted after.
-pub fn run_check_mysql(url: &str) -> Result<()> {
+pub(crate) fn run_check_mysql(url: &str) -> Result<()> {
     let root = workspace_root()?;
     let work = root.join("target").join("check-mysql");
     let system = oracle::System {
@@ -152,7 +152,7 @@ pub fn run_check_mysql(url: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn run_build(options: BuildOptions) -> Result<()> {
+pub(crate) fn run_build(options: BuildOptions) -> Result<()> {
     let text = fs::read_to_string(&options.pins)
         .with_context(|| format!("cannot read {}", options.pins.display()))?;
     let pins = Pins::parse(&text).with_context(|| options.pins.display().to_string())?;
