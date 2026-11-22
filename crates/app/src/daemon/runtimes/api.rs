@@ -87,7 +87,7 @@ pub fn routes() -> Router<Arc<Daemon>> {
 async fn runtimes(State(daemon): State<Arc<Daemon>>) -> Result<Json<RuntimeList>, HttpError> {
     // A small folder read per runtime and one small file; not worth a
     // blocking thread.
-    list(&daemon.data_dir).map(Json).map_err(|err| {
+    list(daemon.data_dir()).map(Json).map_err(|err| {
         tracing::warn!(code = err.code(), error = %err, "cannot list runtimes");
         HttpError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -159,7 +159,7 @@ async fn set_default(
     let worker = Arc::clone(&daemon);
     let answer = http::blocking("default version", move || {
         let _one = worker.lock_global();
-        save_default(&worker.data_dir, tool, version.trim())
+        save_default(worker.data_dir(), tool, version.trim())
     })
     .await?;
     tracing::info!(

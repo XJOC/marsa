@@ -5,7 +5,7 @@
 
 use marsa_core::types::ServiceId;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard};
 use std::time::Duration;
 
@@ -56,43 +56,43 @@ enum Publish {
 #[derive(Debug)]
 pub struct Daemon {
     /// The data folder (`--data-dir`), absolute.
-    pub data_dir: PathBuf,
-    pub state: Arc<RwLock<AppState>>,
-    /// Every event, for `GET /v1/events`. Use [`Daemon::publish`].
-    pub events: broadcast::Sender<Event>,
-    /// The task of each managed process, by id. Use [`Daemon::add_proc`] and
+    data_dir: PathBuf,
+    state: Arc<RwLock<AppState>>,
+    /// Every event, for `GET /v1/events`. [`Daemon::publish`] sends one.
+    events: broadcast::Sender<Event>,
+    /// The task of each managed process, by id: [`Daemon::add_proc`] and
     /// [`Daemon::take_proc`]. A task that has ended may stay until the next
     /// start replaces it.
-    pub procs: Mutex<BTreeMap<String, ServiceHandle>>,
+    procs: Mutex<BTreeMap<String, ServiceHandle>>,
     /// Cancelled once, when the daemon starts to stop.
-    pub shutdown: CancellationToken,
+    shutdown: CancellationToken,
     /// Caddy: how it runs, its status, and its recent lines.
-    pub caddy: CaddyManager,
-    /// PostgreSQL: its status, its recent lines, and its actions. Use
-    /// [`Daemon::server`] for any database server.
-    pub postgres: ServerManager,
+    caddy: CaddyManager,
+    /// PostgreSQL: its status, its recent lines, and its actions.
+    /// [`Daemon::server`] gives any database server.
+    postgres: ServerManager,
     /// MySQL, the same way.
-    pub mysql: ServerManager,
+    mysql: ServerManager,
     /// Valkey, the same way.
-    pub valkey: ServerManager,
+    valkey: ServerManager,
     /// The DNS server for `.test`. Not listed here;
     /// `server::run` sets [`DnsService::for_daemon`].
-    pub dns: DnsService,
+    dns: DnsService,
     /// The status and recent lines of each php-fpm pool. The
     /// sites sync starts and stops the pools.
-    pub pools: Pools,
+    pools: Pools,
     /// Asks the sites sync task for a pass, and waits for it.
     /// The task alone runs passes and owns the pools.
-    pub pass_requests: PassRequests,
+    pass_requests: PassRequests,
     /// The runtime installer, and whether an install runs.
-    pub installs: Installs,
+    installs: Installs,
     /// The shims of the database clients, made and removed with their
     /// server's versions.
-    pub client_shims: ClientShims,
+    client_shims: ClientShims,
     /// Where the login file that starts the tray icon goes.
     /// [`Autostart::unset`] here, so tests never reach the user's real
     /// folders; `server::run` sets [`Autostart::this_user`].
-    pub autostart: Autostart,
+    autostart: Autostart,
     /// Held for the whole of each sites job, from reading `sites.toml` to
     /// publishing the list, so no change is lost and the events keep order.
     sites_lock: Mutex<()>,
@@ -125,6 +125,97 @@ impl Daemon {
             global_lock: Mutex::default(),
             parked: watch::Sender::new(Vec::new()),
         }
+    }
+
+    /// The data folder (`--data-dir`), absolute.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    pub fn state(&self) -> &Arc<RwLock<AppState>> {
+        &self.state
+    }
+
+    /// The event bus: subscribe to it, or hand it to a process task.
+    pub fn events(&self) -> &broadcast::Sender<Event> {
+        &self.events
+    }
+
+    /// Cancelled once, when the daemon starts to stop.
+    pub fn shutdown(&self) -> &CancellationToken {
+        &self.shutdown
+    }
+
+    pub fn caddy(&self) -> &CaddyManager {
+        &self.caddy
+    }
+
+    /// Caddy's settings, before the daemon is shared: the real daemon and
+    /// the tests set its probes and ports.
+    pub fn caddy_mut(&mut self) -> &mut CaddyManager {
+        &mut self.caddy
+    }
+
+    pub fn dns(&self) -> &DnsService {
+        &self.dns
+    }
+
+    /// The DNS server, before the daemon is shared.
+    pub fn set_dns(&mut self, dns: DnsService) {
+        self.dns = dns;
+    }
+
+    pub fn pools(&self) -> &Pools {
+        &self.pools
+    }
+
+    pub fn pass_requests(&self) -> &PassRequests {
+        &self.pass_requests
+    }
+
+    pub fn installs(&self) -> &Installs {
+        &self.installs
+    }
+
+    /// The installer, before the daemon is shared: a test puts a fake
+    /// runner in it.
+    pub fn installs_mut(&mut self) -> &mut Installs {
+        &mut self.installs
+    }
+
+    pub fn client_shims(&self) -> &ClientShims {
+        &self.client_shims
+    }
+
+    pub fn autostart(&self) -> &Autostart {
+        &self.autostart
+    }
+
+    /// Where the login file goes, before the daemon is shared.
+    pub fn set_autostart(&mut self, autostart: Autostart) {
+        self.autostart = autostart;
+    }
+
+    /// The manager of the database server `kind`, before the daemon is
+    /// shared: the tests set its probes and its stops.
+    #[cfg(test)]
+    pub(crate) fn server_mut(&mut self, kind: ServerKind) -> &mut ServerManager {
+        match kind {
+            ServerKind::Postgres => &mut self.postgres,
+            ServerKind::Mysql => &mut self.mysql,
+            ServerKind::Valkey => &mut self.valkey,
+        }
+    }
+
+    /// What `read` gives of the handle of `id`, for the tests that read its
+    /// pid or its stop limit.
+    #[cfg(test)]
+    pub(crate) fn with_proc<R>(
+        &self,
+        id: ServiceId,
+        read: impl FnOnce(&ServiceHandle) -> R,
+    ) -> Option<R> {
+        self.lock_procs().get(&id.to_string()).map(read)
     }
 
     /// The manager of the database server `kind`.

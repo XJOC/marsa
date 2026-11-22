@@ -101,7 +101,7 @@ pub(super) struct DaemonCaddy {
 
 impl StartCaddy for DaemonCaddy {
     fn start(&self, limit: Duration, stop: &CancellationToken) -> CaddyStart {
-        let caddy = &self.daemon.caddy;
+        let caddy = &self.daemon.caddy();
         // First, so a missing Caddy does not mark Caddy's status failed.
         if !caddy.installed() {
             return CaddyStart::NotInstalled;
@@ -685,7 +685,7 @@ mod tests {
         let report: SetupReport = serde_json::from_value(json).unwrap();
         let skipped = [skip(OpName::TrustInstall, "caddy_not_installed")];
         assert_eq!(report.skipped, skipped);
-        assert_eq!(daemon.caddy.status().state, ServiceState::Stopped);
+        assert_eq!(daemon.caddy().status().state, ServiceState::Stopped);
     }
 
     /// A daemon on `dir` whose Caddy is `/bin/sleep` on free ports: it
@@ -702,7 +702,7 @@ mod tests {
             .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
             .collect();
         let port = |index: usize| free[index].local_addr().unwrap().port();
-        let caddy = &mut daemon.caddy;
+        let caddy = daemon.caddy_mut();
         caddy.input = CaddyInput {
             admin_port: port(0),
             http_port: port(1),
@@ -749,7 +749,7 @@ mod tests {
         let failed = ServiceState::Failed {
             code: "caddy_start_timeout".into(),
         };
-        assert_eq!(daemon.caddy.status().state, failed);
+        assert_eq!(daemon.caddy().status().state, failed);
         daemon.stop_procs(Duration::from_secs(5)).await;
     }
 
@@ -765,10 +765,10 @@ mod tests {
         let daemon = sleeping_caddy(&dir, Duration::from_millis(500));
         let first = tokio::spawn({
             let daemon = Arc::clone(&daemon);
-            async move { daemon.caddy.run(&daemon, ServiceAction::Start).await }
+            async move { daemon.caddy().run(&daemon, ServiceAction::Start).await }
         });
         // Spawned: the first start holds the busy flag until it ends.
-        while daemon.caddy.status().state == ServiceState::Stopped {
+        while daemon.caddy().status().state == ServiceState::Stopped {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let mut setup = with_the_daemons_caddy(&dir, &fake);
@@ -783,7 +783,7 @@ mod tests {
         let skipped = [skip(OpName::TrustInstall, "caddy_not_started")];
         assert_eq!(report.skipped, skipped);
         let first = first.await.unwrap().unwrap();
-        let last = daemon.caddy.status();
+        let last = daemon.caddy().status();
         assert_eq!(last.state, first.state);
         // A second start, after the first one ended.
         assert!(last.since_ms > first.since_ms, "{first:?} {last:?}");
@@ -799,9 +799,9 @@ mod tests {
     ) -> tokio::task::JoinHandle<Result<marsa_core::types::ServiceStatus, ActionError>> {
         let first = tokio::spawn({
             let daemon = Arc::clone(daemon);
-            async move { daemon.caddy.run(&daemon, ServiceAction::Start).await }
+            async move { daemon.caddy().run(&daemon, ServiceAction::Start).await }
         });
-        while daemon.caddy.status().state == ServiceState::Stopped {
+        while daemon.caddy().status().state == ServiceState::Stopped {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         first
@@ -844,7 +844,7 @@ mod tests {
 
         let first = first.await.unwrap().unwrap();
         // Only the first start ran.
-        assert_eq!(daemon.caddy.status(), first);
+        assert_eq!(daemon.caddy().status(), first);
         daemon.stop_procs(Duration::from_secs(5)).await;
     }
 
@@ -874,7 +874,7 @@ mod tests {
         );
 
         let first = first.await.unwrap().unwrap();
-        assert_eq!(daemon.caddy.status(), first);
+        assert_eq!(daemon.caddy().status(), first);
         daemon.stop_procs(Duration::from_secs(5)).await;
     }
 }

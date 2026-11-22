@@ -43,14 +43,14 @@ impl Started {
     /// `None` while another install or an uninstall runs.
     pub(super) fn take(daemon: &Arc<Daemon>) -> Option<Self> {
         let mut started = Self::claim(daemon)?;
-        started.id = daemon.installs.last_id.fetch_add(1, Ordering::Relaxed) + 1;
+        started.id = daemon.installs().last_id.fetch_add(1, Ordering::Relaxed) + 1;
         Some(started)
     }
 
     /// The same right for an uninstall, which has no id. No lock: one atomic
     /// swap.
     pub(super) fn claim(daemon: &Arc<Daemon>) -> Option<Self> {
-        let turn = OneAtATime::take(&daemon.installs.running, NonZeroU8::MIN).ok()?;
+        let turn = OneAtATime::take(&daemon.installs().running, NonZeroU8::MIN).ok()?;
         Some(Self {
             daemon: Arc::clone(daemon),
             _turn: turn,
@@ -125,8 +125,8 @@ async fn run(started: Started, runtime: Runtime, body: InstallRequest) {
         }
     };
     let result = tokio::select! {
-        result = daemon.installs.runner.run(&daemon.data_dir, request, &mut events) => result,
-        () = daemon.shutdown.cancelled() => {
+        result = daemon.installs().runner.run(daemon.data_dir(), request, &mut events) => result,
+        () = daemon.shutdown().cancelled() => {
             tracing::info!(id, "install stopped: the daemon is stopping");
             return;
         }
@@ -143,7 +143,7 @@ async fn run(started: Started, runtime: Runtime, body: InstallRequest) {
             let version = done.version.clone();
             let job = tokio::task::spawn_blocking(move || {
                 let _one = worker.lock_global();
-                first_default(&worker.data_dir, runtime, &version)
+                first_default(worker.data_dir(), runtime, &version)
             });
             match job.await {
                 Ok(Ok(Some(line))) => {

@@ -100,9 +100,9 @@ pub struct SitesSync {
 /// Starts the task. It reads the events from now on, so no change after the
 /// first site list is missed. It ends when `daemon.shutdown` is cancelled.
 pub fn start(daemon: &Arc<Daemon>) -> SitesSync {
-    let events = daemon.events.subscribe();
+    let events = daemon.events().subscribe();
     let (sender, requests) = mpsc::channel(REQUESTS);
-    if daemon.pass_requests.0.set(sender).is_err() {
+    if daemon.pass_requests().0.set(sender).is_err() {
         warn!("the sites sync task started twice; pass requests go to the first");
     }
     SitesSync {
@@ -136,7 +136,7 @@ async fn run(
     mut requests: mpsc::Receiver<Reply>,
 ) {
     let platform = Platform::current();
-    let mut php = PhpManager::new(&daemon.data_dir, platform);
+    let mut php = PhpManager::new(daemon.data_dir(), platform);
     let mut hosts = HostsSync::new();
     let system = SystemRoots::of(platform);
     // Windows' roots change without an event (automatic root update, group
@@ -146,7 +146,7 @@ async fn run(
         tokio::time::interval_at(tokio::time::Instant::now() + ROOTS_REFRESH, ROOTS_REFRESH);
     // After a sleep, one read, not one per missed hour.
     roots_due.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let shutdown = daemon.shutdown.clone();
+    let shutdown = daemon.shutdown().clone();
     // The requests the coming pass answers. A return drops them unanswered,
     // and with them `requests`, so each waiting route gets `PassNotRun`.
     let mut replies = Vec::new();
@@ -191,7 +191,7 @@ async fn run(
                 },
                 _ = roots_due.tick(), if refresh_roots => tokio::select! {
                     () = shutdown.cancelled() => return,
-                    _ = write_bundle(&daemon.caddy.paths, &system) => {}
+                    _ = write_bundle(&daemon.caddy().paths, &system) => {}
                 },
             }
         }
@@ -253,13 +253,13 @@ fn skip_waiting(events: &mut broadcast::Receiver<Event>) {
 /// One pass: PHP, Caddy, the CA bundle, then PHP again if the bundle is new.
 async fn pass(daemon: &Daemon, php: &mut PhpManager, system: &SystemRoots) {
     let sites = daemon.sites().map(|list| list.sites).unwrap_or_default();
-    let bundle = daemon.caddy.paths.ca_bundle();
+    let bundle = daemon.caddy().paths.ca_bundle();
     let had_bundle = tokio::fs::try_exists(&bundle).await.unwrap_or(false);
     let ca = had_bundle.then_some(bundle.as_path());
     let pools = php.sync(daemon, &sites, ca).await;
     apply_caddy(daemon, &sites, pools.clone()).await;
 
-    if !write_bundle(&daemon.caddy.paths, system).await || had_bundle {
+    if !write_bundle(&daemon.caddy().paths, system).await || had_bundle {
         return;
     }
     let again = php.sync(daemon, &sites, Some(&bundle)).await;
@@ -271,7 +271,7 @@ async fn pass(daemon: &Daemon, php: &mut PhpManager, system: &SystemRoots) {
 }
 
 async fn apply_caddy(daemon: &Daemon, sites: &[Site], pools: PhpPools) {
-    match daemon.caddy.apply(daemon, sites.to_vec(), pools).await {
+    match daemon.caddy().apply(daemon, sites.to_vec(), pools).await {
         Ok(applied) => debug!(?applied, sites = sites.len(), "caddy config applied"),
         Err(err) => warn!(code = err.code(), error = %err, "the new Caddy config was not applied"),
     }
@@ -399,7 +399,7 @@ mod tests {
         fs::write(parked.path().join("shop").join("index.html"), "hi").unwrap();
 
         let mut daemon = Daemon::new(data.path().to_path_buf());
-        daemon.caddy.input.admin_port = port;
+        daemon.caddy_mut().input.admin_port = port;
         let daemon = Arc::new(daemon);
         daemon.rebuild_sites().await.unwrap();
         pretend_caddy_runs(&daemon);
@@ -426,10 +426,10 @@ mod tests {
         assert_eq!(tls["routes"][0]["match"][0]["host"][0], "shop.test");
         assert_eq!(tls["listen"][0], "127.0.0.1:18443");
         // The file holds what Caddy got, for its next start.
-        let text = fs::read_to_string(&daemon.caddy.paths.config_file).unwrap();
+        let text = fs::read_to_string(&daemon.caddy().paths.config_file).unwrap();
         assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), loaded);
 
-        daemon.shutdown.cancel();
+        daemon.shutdown().cancel();
         sync.stop().await;
         daemon.stop_procs(Duration::from_secs(5)).await;
     }
@@ -474,7 +474,7 @@ mod tests {
         let (port, loads) = held_admin().await;
         let data = tempfile::tempdir().unwrap();
         let mut daemon = Daemon::new(data.path().to_path_buf());
-        daemon.caddy.input.admin_port = port;
+        daemon.caddy_mut().input.admin_port = port;
         let daemon = Arc::new(daemon);
         pretend_caddy_runs(&daemon);
         let sync = start(&daemon);
@@ -483,7 +483,7 @@ mod tests {
 
     /// Waits until `count` requests are in the task's queue.
     async fn queued(daemon: &Daemon, count: usize) {
-        let requests = daemon.pass_requests.0.get().expect("the task started");
+        let requests = daemon.pass_requests().0.get().expect("the task started");
         for _ in 0..200 {
             if requests.max_capacity() - requests.capacity() == count {
                 return;
@@ -497,7 +497,7 @@ mod tests {
     /// the setting.
     fn ask(daemon: &Arc<Daemon>) -> JoinHandle<Result<(), PassNotRun>> {
         let daemon = Arc::clone(daemon);
-        tokio::spawn(async move { daemon.pass_requests.run_pass().await })
+        tokio::spawn(async move { daemon.pass_requests().run_pass().await })
     }
 
     #[tokio::test]
@@ -522,7 +522,7 @@ mod tests {
         let third = tokio::time::timeout(DEBOUNCE * 2, loads.recv()).await;
         assert!(third.is_err(), "a third pass ran");
 
-        daemon.shutdown.cancel();
+        daemon.shutdown().cancel();
         sync.stop().await;
         daemon.stop_procs(Duration::from_secs(5)).await;
     }
@@ -532,19 +532,19 @@ mod tests {
         // No sync task: nothing could answer.
         let dir = tempfile::tempdir().unwrap();
         let alone = Daemon::new(dir.path().to_path_buf());
-        assert_eq!(alone.pass_requests.run_pass().await, Err(PassNotRun));
+        assert_eq!(alone.pass_requests().run_pass().await, Err(PassNotRun));
 
         let (daemon, sync, mut loads, _data) = held_daemon().await;
         let first = next_held(&mut loads).await;
         let waiting = ask(&daemon);
         queued(&daemon, 1).await;
 
-        daemon.shutdown.cancel();
+        daemon.shutdown().cancel();
         let answer = tokio::time::timeout(Duration::from_secs(5), waiting).await;
         assert_eq!(answer.expect("no hang").unwrap(), Err(PassNotRun));
         sync.stop().await;
         // After the task ended, a new request fails at once.
-        assert_eq!(daemon.pass_requests.run_pass().await, Err(PassNotRun));
+        assert_eq!(daemon.pass_requests().run_pass().await, Err(PassNotRun));
         drop(first);
         daemon.stop_procs(Duration::from_secs(5)).await;
     }

@@ -119,10 +119,10 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallR
         let _running = running;
         let report = run(
             &setup,
-            &daemon.data_dir,
-            &daemon.autostart,
+            daemon.data_dir(),
+            daemon.autostart(),
             platform,
-            &daemon.shutdown,
+            daemon.shutdown(),
         );
         // The whole report goes to `logs/marsad.log`: a CLI stopped with
         // Ctrl+C sends the user there.
@@ -145,7 +145,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallR
             // went away. The server stops its processes first, then lets
             // open requests finish, so this answer still goes out.
             tracing::info!("Marsa was uninstalled; the daemon stops");
-            daemon.shutdown.cancel();
+            daemon.shutdown().cancel();
         }
         Ok(report)
     })
@@ -488,11 +488,11 @@ mod tests {
 
         fn daemon(&self) -> Arc<Daemon> {
             let mut daemon = Daemon::new(self.data());
-            daemon.autostart = Autostart::with(
+            daemon.set_autostart(Autostart::with(
                 Some(AutostartKind::LaunchAgent),
                 Some(self.login()),
                 Some(self.tray()),
-            );
+            ));
             Arc::new(daemon)
         }
 
@@ -503,7 +503,7 @@ mod tests {
             run(
                 setup,
                 &self.data(),
-                &daemon.autostart,
+                daemon.autostart(),
                 Platform::DarwinArm64,
                 &stop,
             )
@@ -578,7 +578,7 @@ mod tests {
         }
 
         fn stopping(&self) -> bool {
-            self.daemon.shutdown.is_cancelled()
+            self.daemon.shutdown().is_cancelled()
         }
     }
 
@@ -1078,7 +1078,7 @@ mod tests {
         )
         .with_windows(service.clone());
         let mut daemon = Daemon::new(dir.data());
-        daemon.autostart = Autostart::with(None, None, None);
+        daemon.set_autostart(Autostart::with(None, None, None));
         (App::with_daemon(setup, Arc::new(daemon)), service)
     }
 

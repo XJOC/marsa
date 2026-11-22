@@ -198,8 +198,8 @@ impl ServerManager {
             return Some(program);
         }
         let platform = self.platform?;
-        let programs = installed_programs(self.kind, &daemon.data_dir, platform);
-        orphan::orphan_program(self.kind, &*self.probes, &daemon.data_dir, &programs).await
+        let programs = installed_programs(self.kind, daemon.data_dir(), platform);
+        orphan::orphan_program(self.kind, &*self.probes, daemon.data_dir(), &programs).await
     }
 
     /// Runs `action` and returns the status after it. An action that finds
@@ -255,7 +255,7 @@ impl ServerManager {
         save: Option<&Arc<Daemon>>,
     ) -> Result<ServiceStatus, ActionError> {
         let waiting = (action == ServiceAction::Stop).then(|| self.stop_waits());
-        let busy = take_turn(&self.busy, &daemon.shutdown, wait, || {
+        let busy = take_turn(&self.busy, daemon.shutdown(), wait, || {
             info!(%action, server = self.kind.id(), "another action runs; waiting for it");
         })
         .await
@@ -339,7 +339,7 @@ impl ServerManager {
                 info!(server = self.kind.id(), "a stop dropped the start");
                 return Ok(Outcome::Dropped);
             }
-            () = daemon.shutdown.cancelled() => return Err(ActionError::Busy),
+            () = daemon.shutdown().cancelled() => return Err(ActionError::Busy),
             run = self.start(daemon) => run?,
         };
         drop(clear);
@@ -356,7 +356,7 @@ impl ServerManager {
                 ServerKind::Mysql => codes::MYSQL_START_TIMEOUT,
                 ServerKind::Valkey => codes::VALKEY_START_TIMEOUT,
             };
-            self.fail(&daemon.events, code, &reason);
+            self.fail(daemon.events(), code, &reason);
         }
         Ok(Outcome::Done)
     }
@@ -372,7 +372,7 @@ impl ServerManager {
         let prepared = match self.prepare(daemon).await {
             Ok(prepared) => prepared,
             Err(err) => {
-                self.fail(&daemon.events, err.code(), &err.to_string());
+                self.fail(daemon.events(), err.code(), &err.to_string());
                 return Err(err);
             }
         };
@@ -411,7 +411,7 @@ impl ServerManager {
                 if state == exited
                     && let Some((busy, reason)) = self.lock_refusal(first_seq, &refusal, port).await
                 {
-                    self.fail(&daemon.events, busy.code(), &reason);
+                    self.fail(daemon.events(), busy.code(), &reason);
                     return Err(ActionError::InUse(busy));
                 }
                 warn!(
@@ -441,24 +441,24 @@ impl ServerManager {
             }
             return;
         }
-        if daemon.shutdown.is_cancelled() {
+        if daemon.shutdown().is_cancelled() {
             return;
         }
         let Some(platform) = self.platform else {
             return;
         };
-        let port = read_settings(kind, &daemon.data_dir)
+        let port = read_settings(kind, daemon.data_dir())
             .ok()
             .and_then(|settings| settings.port)
             .unwrap_or(kind.default_port());
-        let servers = installed_servers(kind, &daemon.data_dir, platform);
+        let servers = installed_servers(kind, daemon.data_dir(), platform);
         let ladder = &self.orphan_ladder;
         let probes = &*self.probes;
         let looks = orphan::STOP_LOOKS;
         let cleared = orphan::clear(
             kind,
             probes,
-            &daemon.data_dir,
+            daemon.data_dir(),
             &servers,
             ladder,
             port,
@@ -467,16 +467,16 @@ impl ServerManager {
         match cleared.await {
             Ok(orphan::Cleared::Stopped { pid, signal }) => {
                 let text = orphan::stopped_line(kind, pid, signal);
-                lock(&self.runtime).note(&daemon.events, &text);
+                lock(&self.runtime).note(daemon.events(), &text);
             }
             Ok(orphan::Cleared::Nothing | orphan::Cleared::Forgotten) => {}
             Ok(orphan::Cleared::Unknown { pid }) => {
                 let text = orphan::unknown_line(kind, pid);
-                lock(&self.runtime).note(&daemon.events, &text);
+                lock(&self.runtime).note(daemon.events(), &text);
             }
             Err(orphan::Stuck(reason)) => {
                 warn!(%reason, server = kind.id(), "our old server did not stop");
-                lock(&self.runtime).note(&daemon.events, &format!("marsad: {reason}."));
+                lock(&self.runtime).note(daemon.events(), &format!("marsad: {reason}."));
             }
         }
     }

@@ -247,7 +247,7 @@ mod tests {
         config::save_global(&ConfigPaths::in_dir(&data).global, &global).unwrap();
         let probes = Arc::new(probes);
         let mut daemon = Daemon::new(data.clone());
-        daemon.mysql.probes = Arc::clone(&probes) as Arc<dyn ProcessProbe>;
+        daemon.server_mut(ServerKind::Mysql).probes = Arc::clone(&probes) as Arc<dyn ProcessProbe>;
         My {
             dir,
             daemon: Arc::new(daemon),
@@ -260,7 +260,7 @@ mod tests {
 
     impl My {
         async fn act(&self, action: ServiceAction) -> Result<ServiceStatus, ActionError> {
-            let mysql = &self.daemon.mysql;
+            let mysql = &self.daemon.server(ServerKind::Mysql);
             mysql.run_waiting(&self.daemon, action, WAIT).await
         }
 
@@ -273,7 +273,7 @@ mod tests {
         }
 
         fn texts(&self) -> Vec<String> {
-            let lines = self.daemon.mysql.recent_logs();
+            let lines = self.daemon.server(ServerKind::Mysql).recent_logs();
             lines.into_iter().map(|line| line.text).collect()
         }
     }
@@ -298,7 +298,11 @@ mod tests {
         assert!(cnf.contains(&format!("\nport={}\n", my.port)), "{cnf}");
         let mode = fs::metadata(my.dirs.config()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
-        let program = my.daemon.mysql.running_program(&my.daemon).unwrap();
+        let program = my
+            .daemon
+            .server(ServerKind::Mysql)
+            .running_program(&my.daemon)
+            .unwrap();
         assert_eq!(program, my.mysqld);
         // A restart makes no second data folder.
         let status = my.act(ServiceAction::Restart).await.unwrap();
@@ -311,7 +315,7 @@ mod tests {
         let texts = my.texts();
         assert_eq!(texts.iter().filter(|t| *t == "fake got SIGTERM").count(), 2);
         assert!(texts.iter().any(|t| t.ends_with("Shutdown complete")));
-        let log = fs::read_to_string(my.daemon.data_dir.join("logs/mysql.log")).unwrap();
+        let log = fs::read_to_string(my.daemon.data_dir().join("logs/mysql.log")).unwrap();
         assert!(log.contains("fake got SIGTERM"), "{log}");
     }
 
@@ -363,7 +367,7 @@ mod tests {
         let failed = ServiceState::Failed {
             code: "service_port_busy".into(),
         };
-        assert_eq!(my.daemon.mysql.status().state, failed);
+        assert_eq!(my.daemon.server(ServerKind::Mysql).status().state, failed);
         assert!(my.calls().is_empty());
         assert!(!my.dirs.data.exists());
     }

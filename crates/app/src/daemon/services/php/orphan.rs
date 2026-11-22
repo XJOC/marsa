@@ -2107,7 +2107,7 @@ mod tests {
             process::write_pid_file(&pid_file.path, &record).unwrap();
         };
         let noted = |daemon: &Daemon| {
-            let lines = lock(&daemon.pools.runtime(PHP84)).logs.recent();
+            let lines = lock(&daemon.pools().runtime(PHP84)).logs.recent();
             lines.iter().filter(|l| l.text == STOPPING_ORPHAN).count()
         };
 
@@ -2204,7 +2204,7 @@ mod tests {
         let pool = bare_pool(dir.path(), listen, "/never/run/php-fpm", &[]);
 
         assert!(!php.start_pool(&daemon, &pool).await);
-        let runtime = daemon.pools.find(fpm_id(PHP84)).expect("listed");
+        let runtime = daemon.pools().find(fpm_id(PHP84)).expect("listed");
         let (status, lines) = {
             let runtime = lock(&runtime);
             (runtime.status.clone(), runtime.logs.recent())
@@ -2916,7 +2916,7 @@ mod tests {
                 return;
             }
             let (status, lines) = match daemon
-                .pools
+                .pools()
                 .find("php-fpm-8.4".parse::<ServiceId>().unwrap())
             {
                 Some(runtime) => {
@@ -2986,7 +2986,7 @@ mod tests {
             })
             .await;
             let second = read().expect("a record");
-            let runtime = daemon.pools.find(fpm_id(PHP84)).expect("listed");
+            let runtime = daemon.pools().find(fpm_id(PHP84)).expect("listed");
             let status = lock(&runtime).status.clone();
             assert_eq!((status.pid, status.restarts), (Some(second.pid), 1));
 
@@ -3033,7 +3033,7 @@ mod tests {
             // Only SIGTERM, only to the orphan, which it ended.
             assert_eq!(recorder.signals(), [(orphan.pid(), Signal::Term)]);
             assert_eq!(orphan.wait().signal(), Some(15));
-            let runtime = daemon.pools.find(fpm_id(PHP84)).expect("listed");
+            let runtime = daemon.pools().find(fpm_id(PHP84)).expect("listed");
             let lines = lock(&runtime).logs.recent();
             assert!(lines.iter().any(|line| line.text == STOPPING_ORPHAN));
 
@@ -3217,7 +3217,7 @@ mod tests {
                 assert_eq!(process::real_identity(*pid).await, Liveness::Gone, "{pid}");
             }
             let runtime = daemon
-                .pools
+                .pools()
                 .find("php-fpm-8.4".parse::<ServiceId>().unwrap())
                 .expect("listed");
             let lines = lock(&runtime).logs.recent();
@@ -3307,7 +3307,7 @@ mod tests {
             };
             assert!(accepted([program.clone()]).contains(&exe), "{exe:?}");
             let runtime = daemon
-                .pools
+                .pools()
                 .find("php-fpm-8.4".parse::<ServiceId>().unwrap())
                 .expect("listed");
             let lines = lock(&runtime).logs.recent();

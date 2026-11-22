@@ -397,13 +397,13 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
     } else {
         Some(Vec::new())
     };
-    let dns_down = daemon.dns.not_serving();
+    let dns_down = daemon.dns().not_serving();
     let runtime = Handle::current();
     let report = http::blocking("setup", move || {
         // Moved in, so the next setup waits for this one to end even if the
         // client goes away.
         let _running = running;
-        let caddy = daemon.caddy.input;
+        let caddy = daemon.caddy().input;
         let starter: Arc<dyn StartCaddy> = match &setup.caddy {
             Some(fake) => Arc::clone(fake),
             None => Arc::new(DaemonCaddy {
@@ -412,13 +412,13 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
             }),
         };
         let mut report = setup.run(
-            &daemon.data_dir,
+            daemon.data_dir(),
             caddy,
             platform,
             starter.as_ref(),
             names.as_deref(),
             dns_down.as_deref(),
-            &daemon.shutdown,
+            daemon.shutdown(),
         );
         tracing::info!(
             results = report.results.len(),
@@ -433,8 +433,9 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
         // if the client went away.
         // Not while the daemon stops: the runtime may be going away, and
         // Caddy reads its file when it starts again.
-        if platform.os() == Os::Linux && low_ports_set(&report) && !daemon.shutdown.is_cancelled() {
-            match runtime.block_on(daemon.caddy.reapply(&daemon)) {
+        if platform.os() == Os::Linux && low_ports_set(&report) && !daemon.shutdown().is_cancelled()
+        {
+            match runtime.block_on(daemon.caddy().reapply(&daemon)) {
                 Ok(applied) => {
                     tracing::info!(?applied, "caddy config sent again with ports 80 and 443")
                 }
@@ -458,16 +459,18 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
         // daemon sends the sites' names after each pass from now on
         // (`hosts_sync`), and a pass now covers a site added during the UAC
         // prompt. Not while the daemon stops.
-        if platform.os() == Os::Windows && report.error.is_none() && !daemon.shutdown.is_cancelled()
+        if platform.os() == Os::Windows
+            && report.error.is_none()
+            && !daemon.shutdown().is_cancelled()
         {
-            let marker = daemon.data_dir.join(hosts_sync::MARKER);
+            let marker = daemon.data_dir().join(hosts_sync::MARKER);
             match fs::write(&marker, "") {
                 Ok(()) => {
                     let daemon = Arc::clone(&daemon);
                     runtime.spawn(async move {
                         // Not run: the sync task stopped, and the next
                         // daemon's first pass sends the names.
-                        let _ = daemon.pass_requests.run_pass().await;
+                        let _ = daemon.pass_requests().run_pass().await;
                     });
                 }
                 Err(err) => tracing::warn!(

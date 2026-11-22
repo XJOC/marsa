@@ -48,13 +48,13 @@ impl ServerManager {
         spec: ServiceSpec,
         servers: Vec<PathBuf>,
     ) -> Result<watch::Receiver<Recorded>, ActionError> {
-        let logs_dir = DataDir::new(&daemon.data_dir).logs();
+        let logs_dir = DataDir::new(daemon.data_dir()).logs();
         let program = spec.program.clone();
         let runtime = Arc::clone(&self.runtime);
-        let events = daemon.events.subscribe();
-        let handle = Supervisor::spawn_on(spec, daemon.events.clone(), &logs_dir, runtime)
+        let events = daemon.events().subscribe();
+        let handle = Supervisor::spawn_on(spec, daemon.events().clone(), &logs_dir, runtime)
             .map_err(|err| {
-                self.fail(&daemon.events, err.code(), &err.to_string());
+                self.fail(daemon.events(), err.code(), &err.to_string());
                 ActionError::ProgramNotAbsolute(err)
             })?;
         *lock(&self.started) = Some(program);
@@ -68,7 +68,7 @@ impl ServerManager {
         let run = RunRecord {
             kind: self.kind,
             probes: Arc::clone(&self.probes),
-            data_dir: daemon.data_dir.clone(),
+            data_dir: daemon.data_dir().to_path_buf(),
             servers,
             runtime: Arc::clone(&runtime),
             events,

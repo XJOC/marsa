@@ -91,18 +91,18 @@ pub fn routes() -> Router<Arc<Daemon>> {
 }
 
 async fn services(State(daemon): State<Arc<Daemon>>) -> Json<Vec<ServiceStatus>> {
-    let mut services = vec![daemon.caddy.status()];
-    services.extend(daemon.dns.status());
+    let mut services = vec![daemon.caddy().status()];
+    services.extend(daemon.dns().status());
     for kind in ServerKind::ALL {
         // It reads `runtimes/<runtime>/`.
         let worker = Arc::clone(&daemon);
         let listed =
-            tokio::task::spawn_blocking(move || worker.server(kind).listed(&worker.data_dir));
+            tokio::task::spawn_blocking(move || worker.server(kind).listed(worker.data_dir()));
         if listed.await.unwrap_or(true) {
             services.push(daemon.server(kind).status());
         }
     }
-    services.extend(daemon.pools.statuses());
+    services.extend(daemon.pools().statuses());
     Json(services)
 }
 
@@ -123,7 +123,7 @@ async fn service_action(
     if let Service::Dns(dns) = service {
         tracing::info!(service = %id, %action, "service action");
         return Ok(Json(
-            dns.run(&daemon.events, &daemon.shutdown, action).await,
+            dns.run(daemon.events(), daemon.shutdown(), action).await,
         ));
     }
     let Service::Caddy(caddy) = service else {
@@ -217,10 +217,10 @@ async fn logs(
     }
     // Subscribe first, then copy the recent lines: a line printed in between
     // is then in both (and skipped by `seq`), never in neither.
-    let receiver = daemon.events.subscribe();
+    let receiver = daemon.events().subscribe();
     // Checked after subscribing, as in `/v1/events`: `shutting_down` comes
     // after the token is cancelled.
-    let closing = daemon.shutdown.is_cancelled();
+    let closing = daemon.shutdown().is_cancelled();
     let recent = service.recent_logs();
     let stream = follow(id, recent, receiver, closing);
     Ok(sse(stream, KEEP_ALIVE))
@@ -307,10 +307,10 @@ impl Service<'_> {
 fn service<'a>(daemon: &'a Daemon, id: &str) -> Result<(ServiceId, Service<'a>), HttpError> {
     let found = id.parse().ok().and_then(|parsed| {
         let service = match parsed {
-            ServiceId::Caddy => Some(Service::Caddy(&daemon.caddy)),
+            ServiceId::Caddy => Some(Service::Caddy(daemon.caddy())),
             ServiceId::Database(kind) => Some(Service::Server(daemon.server(kind))),
-            ServiceId::Dns => daemon.dns.listed().then_some(Service::Dns(&daemon.dns)),
-            ServiceId::Pool(..) => daemon.pools.find(parsed).map(Service::Pool),
+            ServiceId::Dns => daemon.dns().listed().then_some(Service::Dns(daemon.dns())),
+            ServiceId::Pool(..) => daemon.pools().find(parsed).map(Service::Pool),
         };
         service.map(|service| (parsed, service))
     });
@@ -452,7 +452,7 @@ mod tests {
         let token = Token::generate().unwrap();
         let bearer = token.bearer_header();
         let daemon = Arc::new(Daemon::new(std::path::PathBuf::new()));
-        let runtime = daemon.pools.runtime(PhpMinor { major: 8, minor: 4 });
+        let runtime = daemon.pools().runtime(PhpMinor { major: 8, minor: 4 });
         // `php-fpm-8.4`, or `php-cgi-8.4` on Windows.
         let pool = crate::daemon::services::php::fpm_id(PhpMinor { major: 8, minor: 4 });
         let other = crate::daemon::services::php::fpm_id(PhpMinor { major: 8, minor: 3 });
@@ -488,7 +488,7 @@ mod tests {
         let lines: Vec<LogLine> = serde_json::from_str(&body).unwrap();
         assert_eq!(lines, std::slice::from_ref(&ready));
         // Follow during a shutdown: the recent lines, then the end.
-        daemon.shutdown.cancel();
+        daemon.shutdown().cancel();
         let (status, body) = send("GET", &format!("/v1/logs/{pool}?follow=true")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, data(&ready));
@@ -650,11 +650,11 @@ mod tests {
         // in a reserved TCP range, and the last start would fail on it.
         let held = held_dns_port().await;
         let mut daemon = Daemon::new(std::path::PathBuf::new());
-        daemon.dns = DnsService::new(Some(held.0.local_addr().unwrap()));
+        daemon.set_dns(DnsService::new(Some(held.0.local_addr().unwrap())));
         let daemon = Arc::new(daemon);
         daemon
-            .dns
-            .run(&daemon.events, &daemon.shutdown, ServiceAction::Start)
+            .dns()
+            .run(daemon.events(), daemon.shutdown(), ServiceAction::Start)
             .await;
         let app = router(daemon.clone(), AuthConfig::new(Arc::new(token), PORT));
         let send = async |method: &str, path: &str| {
@@ -694,7 +694,7 @@ mod tests {
         // The server's own line says why, if it did not start.
         let (_, lines) = send("GET", "/v1/logs/dns").await;
         assert_eq!(after.state, ServiceState::Running, "{lines}");
-        daemon.dns.shutdown(Duration::from_secs(5)).await;
+        daemon.dns().shutdown(Duration::from_secs(5)).await;
     }
 
     #[tokio::test]

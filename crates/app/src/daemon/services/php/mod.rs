@@ -565,20 +565,20 @@ impl PhpManager {
     /// if it cannot start: its status then says why.
     async fn start_pool(&self, daemon: &Daemon, pool: &Pool) -> bool {
         let id = &pool.spec.id;
-        let runtime = daemon.pools.runtime(pool.files.minor);
-        let pid_file = PidFile::new(&daemon.data_dir, pool.files.minor);
+        let runtime = daemon.pools().runtime(pool.files.minor);
+        let pid_file = PidFile::new(daemon.data_dir(), pool.files.minor);
         if let Err(blocked) = self.clear_orphan(daemon, pool, &pid_file).await {
             warn!(service = %id, code = blocked.code, reason = %blocked.reason, "php-fpm was not started");
             let text = format!("marsad: php-fpm was not started: {}.", blocked.reason);
-            lock(&runtime).note(&daemon.events, &text);
-            lock(&runtime).set_failed(&daemon.events, blocked.code);
+            lock(&runtime).note(daemon.events(), &text);
+            lock(&runtime).set_failed(daemon.events(), blocked.code);
             return false;
         }
         // Before the spawn, so the watcher cannot miss the first `running`.
-        let lines = daemon.events.subscribe();
-        let logs_dir = DataDir::new(&daemon.data_dir).logs();
+        let lines = daemon.events().subscribe();
+        let logs_dir = DataDir::new(daemon.data_dir()).logs();
         let spec = pool.spec.clone();
-        let events = daemon.events.clone();
+        let events = daemon.events().clone();
         match Supervisor::spawn_on(spec, events, &logs_dir, Arc::clone(&runtime)) {
             Ok(handle) => {
                 info!(service = %id, program = %pool.spec.program.display(), "php-fpm started");
@@ -597,7 +597,7 @@ impl PhpManager {
             }
             Err(err) => {
                 warn!(service = %id, code = err.code(), %err, "cannot start php-fpm");
-                lock(&runtime).set_failed(&daemon.events, err.code());
+                lock(&runtime).set_failed(daemon.events(), err.code());
                 false
             }
         }
@@ -627,9 +627,9 @@ impl PhpManager {
         };
         // The master, or the workers it left behind.
         let found = orphans.inspect().await?;
-        let runtime = daemon.pools.runtime(pool.files.minor);
+        let runtime = daemon.pools().runtime(pool.files.minor);
         // Only right before a signal: a stale file alone stops nothing.
-        let note_stop = || lock(&runtime).note(&daemon.events, orphan::STOPPING_ORPHAN);
+        let note_stop = || lock(&runtime).note(daemon.events(), orphan::STOPPING_ORPHAN);
         orphans.reap(found, &note_stop).await
     }
 }
@@ -1037,8 +1037,10 @@ mod tests {
             fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
         }
         let pid = |id: &str| {
-            let procs = daemon.procs.lock().unwrap();
-            procs[id].runtime.lock().unwrap().status.pid
+            let read = |handle: &crate::daemon::services::supervisor::ServiceHandle| {
+                handle.runtime.lock().unwrap().status.pid
+            };
+            daemon.with_proc(id.parse().unwrap(), read).unwrap()
         };
         let wait_for_pid = async |id: &str| {
             for _ in 0..100 {
@@ -1201,12 +1203,10 @@ mod tests {
         }
         let pid = async |id: &str, not: Option<u32>| {
             for _ in 0..100 {
-                let pid = daemon.procs.lock().unwrap()[id]
-                    .runtime
-                    .lock()
-                    .unwrap()
-                    .status
-                    .pid;
+                let read = |handle: &crate::daemon::services::supervisor::ServiceHandle| {
+                    handle.runtime.lock().unwrap().status.pid
+                };
+                let pid = daemon.with_proc(id.parse().unwrap(), read).unwrap();
                 if pid.is_some() && pid != not {
                     return pid;
                 }

@@ -213,7 +213,7 @@ mod tests {
         config::save_global(&ConfigPaths::in_dir(&data).global, &global).unwrap();
         let probes = Arc::new(probes);
         let mut daemon = Daemon::new(data.clone());
-        daemon.valkey.probes = Arc::clone(&probes) as Arc<dyn ProcessProbe>;
+        daemon.server_mut(ServerKind::Valkey).probes = Arc::clone(&probes) as Arc<dyn ProcessProbe>;
         Vk {
             dir,
             daemon: Arc::new(daemon),
@@ -230,7 +230,7 @@ mod tests {
 
     impl Vk {
         async fn act(&self, action: ServiceAction) -> Result<ServiceStatus, ActionError> {
-            let valkey = &self.daemon.valkey;
+            let valkey = &self.daemon.server(ServerKind::Valkey);
             valkey.run_waiting(&self.daemon, action, WAIT).await
         }
 
@@ -243,7 +243,7 @@ mod tests {
         }
 
         fn texts(&self) -> Vec<String> {
-            let lines = self.daemon.valkey.recent_logs();
+            let lines = self.daemon.server(ServerKind::Valkey).recent_logs();
             lines.into_iter().map(|line| line.text).collect()
         }
 
@@ -253,7 +253,7 @@ mod tests {
 
         /// What `run/valkey.pid` names now.
         fn recorded(&self) -> Option<PidRecord> {
-            let path = orphan::pid_path(KIND, &self.daemon.data_dir);
+            let path = orphan::pid_path(KIND, self.daemon.data_dir());
             process::read_pid_file(&path)
         }
     }
@@ -285,10 +285,17 @@ mod tests {
         assert_eq!(mode(&config), 0o600);
         assert_eq!(mode(&vk.dirs.data), 0o700);
         assert!(answers(vk.port).await);
-        let program = vk.daemon.valkey.running_program(&vk.daemon).unwrap();
+        let program = vk
+            .daemon
+            .server(ServerKind::Valkey)
+            .running_program(&vk.daemon)
+            .unwrap();
         assert_eq!(program, vk.server);
         // A shutdown gives it the time of its whole stop.
-        let limit = vk.daemon.procs.lock().unwrap()[KIND.id()].stop_limit;
+        let limit = vk
+            .daemon
+            .with_proc(ServiceId::Database(KIND), |handle| handle.stop_limit)
+            .unwrap();
         assert_eq!(limit, valkey_stop(vk.port).total_wait() + STOP_MARGIN);
         let recorded = vk.recorded().expect("its pid is recorded");
         assert_eq!(Some(recorded.pid), status.pid);
@@ -309,7 +316,7 @@ mod tests {
             "REDIS0011"
         );
         assert_eq!(vk.recorded(), None, "the end of the run deletes it");
-        let log = fs::read_to_string(vk.daemon.data_dir.join("logs/valkey.log")).unwrap();
+        let log = fs::read_to_string(vk.daemon.data_dir().join("logs/valkey.log")).unwrap();
         assert!(log.contains("fake got SHUTDOWN SAVE"), "{log}");
     }
 
@@ -319,7 +326,7 @@ mod tests {
     async fn an_elevated_daemon_still_starts_valkey() {
         let mut vk = vk(probes(Liveness::Gone, None));
         let daemon = Arc::get_mut(&mut vk.daemon).expect("one owner");
-        daemon.valkey.elevated = || true;
+        daemon.server_mut(ServerKind::Valkey).elevated = || true;
         let status = vk.act(ServiceAction::Start).await.unwrap();
         assert_eq!(status.state, ServiceState::Running);
         vk.act(ServiceAction::Stop).await.unwrap();
@@ -336,7 +343,7 @@ mod tests {
         let failed = ServiceState::Failed {
             code: "service_port_busy".into(),
         };
-        assert_eq!(vk.daemon.valkey.status().state, failed);
+        assert_eq!(vk.daemon.server(ServerKind::Valkey).status().state, failed);
         assert!(vk.calls().is_empty());
         assert!(!vk.dirs.data.exists());
         assert!(!vk.dirs.config().exists());
@@ -362,7 +369,7 @@ mod tests {
         let failed = ServiceState::Failed {
             code: "valkey_path_unsupported".into(),
         };
-        assert_eq!(vk.daemon.valkey.status().state, failed);
+        assert_eq!(vk.daemon.server(ServerKind::Valkey).status().state, failed);
         assert!(vk.calls().is_empty());
         assert!(!vk.dirs.config().exists());
     }
@@ -435,7 +442,7 @@ mod tests {
             exe: vk.server.clone(),
             started,
         };
-        process::write_pid_file(&orphan::pid_path(KIND, &vk.daemon.data_dir), &record).unwrap();
+        process::write_pid_file(&orphan::pid_path(KIND, vk.daemon.data_dir()), &record).unwrap();
         // The new server runs as our installed `valkey-server`.
         *vk.probes.now.lock().unwrap() = alive(&vk.server);
 

@@ -104,7 +104,7 @@ impl Launch {
 /// start was stopping after a time-out was told to stop before that `.await`.
 /// `kill_on_drop` is the last guard, as for every Caddy.
 pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
-    let caddy = &daemon.caddy;
+    let caddy = &daemon.caddy();
     // First, so a missing Caddy does not mark Caddy's status failed.
     if !caddy.installed() {
         info!("no caddy is installed; it does not start with the daemon");
@@ -121,7 +121,7 @@ pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
             // A daemon that already stops starts nothing. Dropping the start
             // lets go of its turn.
             biased;
-            () = daemon.shutdown.cancelled() => Launched::ShuttingDown,
+            () = daemon.shutdown().cancelled() => Launched::ShuttingDown,
             launched = launch(&daemon, busy) => launched,
         }
     });
@@ -129,7 +129,7 @@ pub fn start_at_launch(daemon: &Arc<Daemon>) -> Launch {
 }
 
 async fn launch(daemon: &Daemon, busy: tokio::sync::OwnedMutexGuard<()>) -> Launched {
-    let caddy = &daemon.caddy;
+    let caddy = &daemon.caddy();
     match caddy.act(daemon, ServiceAction::Start, busy).await {
         Ok(status) => {
             match &status.state {

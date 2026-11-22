@@ -39,7 +39,7 @@ pub fn routes() -> Router<Arc<Daemon>> {
 }
 
 async fn current(State(daemon): State<Arc<Daemon>>) -> Result<Json<AutostartState>, HttpError> {
-    http::blocking("autostart", move || Autostart::state(&daemon.autostart))
+    http::blocking("autostart", move || Autostart::state(daemon.autostart()))
         .await
         .map(Json)
 }
@@ -49,7 +49,7 @@ async fn set(
     body: Result<Json<AutostartRequest>, JsonRejection>,
 ) -> Result<Json<AutostartState>, HttpError> {
     let Json(AutostartRequest { enabled }) = body.map_err(|err| err.reject(codes::INVALID_BODY))?;
-    http::blocking("autostart", move || daemon.autostart.set(enabled))
+    http::blocking("autostart", move || daemon.autostart().set(enabled))
         .await
         .map(Json)
 }
@@ -94,12 +94,15 @@ mod tests {
                 Some(dir.path().join("login")),
                 Some(bin.join("marsa-tray")),
             );
-            Self::with(dir, autostart)
+            Self::with(dir, Some(autostart))
         }
 
-        fn with(dir: TempDir, autostart: Autostart) -> Self {
+        /// `None`: the login folder a new daemon has.
+        fn with(dir: TempDir, autostart: Option<Autostart>) -> Self {
             let mut daemon = Daemon::new(dir.path().join("data"));
-            daemon.autostart = autostart;
+            if let Some(autostart) = autostart {
+                daemon.set_autostart(autostart);
+            }
             Self {
                 router: TestRouter::new(Arc::new(daemon)),
                 dir,
@@ -215,7 +218,7 @@ mod tests {
         // The daemon's own path not known.
         let dir = TempDir::new().unwrap();
         let login = Some(dir.path().join("login"));
-        let app = App::with(dir, Autostart::with(Some(LaunchAgent), login, None));
+        let app = App::with(dir, Some(Autostart::with(Some(LaunchAgent), login, None)));
         for answer in [app.get().await, app.put(true).await] {
             assert_eq!(code(&answer), (StatusCode::CONFLICT, "tray_not_found"));
         }
@@ -228,7 +231,7 @@ mod tests {
         let login = Some(dir.path().join("login"));
         let tray = Some(dir.path().join("marsa-tray"));
         fs::write(dir.path().join("marsa-tray"), "").unwrap();
-        let app = App::with(dir, Autostart::with(None, login, tray));
+        let app = App::with(dir, Some(Autostart::with(None, login, tray)));
         for answer in [app.get().await, app.put(true).await, app.put(false).await] {
             assert_eq!(
                 code(&answer),
@@ -240,10 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_new_daemon_never_reaches_the_users_folders() {
-        let app = App::with(
-            TempDir::new().unwrap(),
-            Daemon::new(PathBuf::new()).autostart,
-        );
+        let app = App::with(TempDir::new().unwrap(), None);
         let expected = match AutostartKind::current() {
             Some(_) => (StatusCode::INTERNAL_SERVER_ERROR, "autostart_no_home"),
             None => (StatusCode::NOT_IMPLEMENTED, "autostart_unsupported"),
@@ -265,7 +265,7 @@ mod tests {
             Some(login.clone()),
             Some(bin.join("marsa-tray")),
         );
-        let app = App::with(dir, autostart);
+        let app = App::with(dir, Some(autostart));
         let refused = app.put(true).await;
         assert_eq!(
             code(&refused),

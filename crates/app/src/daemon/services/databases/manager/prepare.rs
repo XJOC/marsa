@@ -55,22 +55,22 @@ impl ServerManager {
     /// so a busy port makes no data folder.
     pub(super) async fn prepare(&self, daemon: &Daemon) -> Result<Prepared, ActionError> {
         let kind = self.kind;
-        let settings = read_settings(kind, &daemon.data_dir)?;
-        let (platform, version, server) = self.installed(&daemon.data_dir, &settings)?;
+        let settings = read_settings(kind, daemon.data_dir())?;
+        let (platform, version, server) = self.installed(daemon.data_dir(), &settings)?;
         // Before the first init too: its single-user `postgres` refuses the
         // token as the server does.
         if refuses_elevation(kind, (self.elevated)()) {
             return Err(ActionError::Elevated(kind));
         }
         let port = settings.port.unwrap_or(kind.default_port());
-        let servers = installed_servers(kind, &daemon.data_dir, platform);
+        let servers = installed_servers(kind, daemon.data_dir(), platform);
         let ladder = &self.orphan_ladder;
         let probes = &*self.probes;
         let looks = orphan::START_LOOKS;
         let cleared = orphan::clear(
             kind,
             probes,
-            &daemon.data_dir,
+            daemon.data_dir(),
             &servers,
             ladder,
             port,
@@ -79,7 +79,7 @@ impl ServerManager {
         match cleared.await {
             Ok(orphan::Cleared::Stopped { pid, signal }) => {
                 let text = orphan::stopped_line(kind, pid, signal);
-                lock(&self.runtime).note(&daemon.events, &text);
+                lock(&self.runtime).note(daemon.events(), &text);
             }
             Ok(
                 orphan::Cleared::Nothing
@@ -144,11 +144,11 @@ impl ServerManager {
             ..
         } = chosen;
         let os = platform.os();
-        let dirs = PostgresDirs::new(&daemon.data_dir, version.major);
+        let dirs = PostgresDirs::new(daemon.data_dir(), version.major);
         let pid_file = dirs.data.join("postmaster.pid");
         self.check(port, &pid_file, postmaster_pid, &servers, decide_start)
             .await?;
-        let programs = postgres::programs(&daemon.data_dir, platform, &version)
+        let programs = postgres::programs(daemon.data_dir(), platform, &version)
             .ok_or_else(|| self.missing(Some(&self.kind.line(&version))))?;
         postgres::ensure_cluster(&programs, &dirs, os)
             .await
@@ -164,7 +164,7 @@ impl ServerManager {
                 "marsad: PostgreSQL gets no Unix socket in {folder}: {why}. So it takes TCP \
                  connections only, and its superuser postgres cannot connect."
             );
-            lock(&self.runtime).note(&daemon.events, &text);
+            lock(&self.runtime).note(daemon.events(), &text);
         }
         let stop = postgres_stop_on(os, &programs.pg_ctl, &dirs.data);
         Ok(Prepared {
@@ -199,14 +199,14 @@ impl ServerManager {
         } = chosen;
         let kind = self.kind;
         let os = platform.os();
-        let dirs = MysqlDirs::new(&daemon.data_dir, &kind.line(&version));
+        let dirs = MysqlDirs::new(daemon.data_dir(), &kind.line(&version));
         let socket = (os != Os::Windows).then(|| dirs.socket());
         let socket_path = socket.as_ref().and_then(|socket| socket.as_deref().ok());
-        let basedir = RuntimesDir::in_dir(&daemon.data_dir).version_dir(kind.runtime(), &version);
+        let basedir = RuntimesDir::in_dir(daemon.data_dir()).version_dir(kind.runtime(), &version);
         let text = my_cnf(&dirs, &basedir, port, socket_path).map_err(ActionError::Path)?;
         let stop = if os == Os::Windows {
             let mysqladmin =
-                init::program(kind, &daemon.data_dir, platform, &version, "mysqladmin")
+                init::program(kind, daemon.data_dir(), platform, &version, "mysqladmin")
                     .ok_or_else(|| self.missing(Some(&kind.line(&version))))?;
             mysql_windows_stop(&mysqladmin, port)
         } else {
@@ -232,7 +232,7 @@ impl ServerManager {
                 "marsad: MySQL gets no Unix socket in {folder}: {why}. So it takes TCP \
                  connections only, and root@localhost cannot connect."
             );
-            lock(&self.runtime).note(&daemon.events, &text);
+            lock(&self.runtime).note(daemon.events(), &text);
         }
         Ok(Prepared {
             spec: mysql::spec(mysqld, &dirs, os, stop),
@@ -262,7 +262,7 @@ impl ServerManager {
         } = chosen;
         let kind = self.kind;
         let os = platform.os();
-        let dirs = ValkeyDirs::new(&daemon.data_dir);
+        let dirs = ValkeyDirs::new(daemon.data_dir());
         let text = valkey_conf(&dirs, port, os).map_err(ActionError::Path)?;
         let spec = valkey::spec(server, &dirs, port, os).map_err(ActionError::Path)?;
         let facts = port_facts(&*self.probes, port).await;

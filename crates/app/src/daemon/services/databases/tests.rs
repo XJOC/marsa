@@ -336,8 +336,11 @@ async fn a_broken_global_toml_fails_postgres_only_when_one_is_installed() {
         .wait(Duration::from_secs(5))
         .await;
     assert_eq!(launched, Some(Launched::NotInstalled));
-    assert_eq!(daemon.postgres.status().state, ServiceState::Stopped);
-    assert!(daemon.postgres.recent_logs().is_empty());
+    assert_eq!(
+        daemon.server(ServerKind::Postgres).status().state,
+        ServiceState::Stopped
+    );
+    assert!(daemon.server(ServerKind::Postgres).recent_logs().is_empty());
 
     let version =
         RuntimesDir::in_dir(dir.path()).version_dir(Runtime::Postgres, &Version::new(18, 7, 0));
@@ -349,8 +352,8 @@ async fn a_broken_global_toml_fails_postgres_only_when_one_is_installed() {
     let failed = ServiceState::Failed {
         code: "config_invalid".into(),
     };
-    assert_eq!(daemon.postgres.status().state, failed);
-    assert_eq!(daemon.postgres.recent_logs().len(), 1);
+    assert_eq!(daemon.server(ServerKind::Postgres).status().state, failed);
+    assert_eq!(daemon.server(ServerKind::Postgres).recent_logs().len(), 1);
 }
 
 #[test]
@@ -566,7 +569,8 @@ pub(super) mod server {
         set_postgres(&data, Some("18"), true, port);
         let probes = Arc::new(probes);
         let mut daemon = Daemon::new(data.clone());
-        daemon.postgres.probes = Arc::clone(&probes) as Arc<dyn ProcessProbe>;
+        daemon.server_mut(ServerKind::Postgres).probes =
+            Arc::clone(&probes) as Arc<dyn ProcessProbe>;
         Pg {
             dir,
             daemon: Arc::new(daemon),
@@ -590,7 +594,7 @@ pub(super) mod server {
 
     impl Pg {
         async fn act(&self, action: ServiceAction) -> Result<ServiceStatus, ActionError> {
-            let postgres = &self.daemon.postgres;
+            let postgres = &self.daemon.server(ServerKind::Postgres);
             postgres.run_waiting(&self.daemon, action, WAIT).await
         }
 
@@ -608,7 +612,7 @@ pub(super) mod server {
         }
 
         fn texts(&self) -> Vec<String> {
-            let lines = self.daemon.postgres.recent_logs();
+            let lines = self.daemon.server(ServerKind::Postgres).recent_logs();
             lines.into_iter().map(|line| line.text).collect()
         }
 
@@ -659,10 +663,18 @@ pub(super) mod server {
         // program.
         let address = (Ipv4Addr::LOCALHOST, pg.port);
         tokio::net::TcpStream::connect(address).await.unwrap();
-        let program = pg.daemon.postgres.running_program(&pg.daemon).unwrap();
+        let program = pg
+            .daemon
+            .server(ServerKind::Postgres)
+            .running_program(&pg.daemon)
+            .unwrap();
         assert!(program.ends_with("18.7.0/bin/postgres"), "{program:?}");
         // A shutdown gives it the time of its whole ladder.
-        let limit = pg.daemon.procs.lock().unwrap()[ServerKind::Postgres.id()].stop_limit;
+        let postgres = ServiceId::Database(ServerKind::Postgres);
+        let limit = pg
+            .daemon
+            .with_proc(postgres, |handle| handle.stop_limit)
+            .unwrap();
         assert_eq!(limit, postgres_stop().total_wait() + STOP_MARGIN);
 
         // A start while it runs changes nothing; a restart makes no
@@ -676,7 +688,12 @@ pub(super) mod server {
         pg.wait_for("fake ready").await;
         let status = pg.act(ServiceAction::Stop).await.unwrap();
         assert_eq!(status.state, ServiceState::Stopped);
-        assert_eq!(pg.daemon.postgres.running_program(&pg.daemon), None);
+        assert_eq!(
+            pg.daemon
+                .server(ServerKind::Postgres)
+                .running_program(&pg.daemon),
+            None
+        );
         let texts = pg.texts();
         assert_eq!(texts.iter().filter(|t| *t == "fake got SIGINT").count(), 2);
         assert!(!texts.iter().any(|text| text == "fake got SIGTERM"));
@@ -685,7 +702,7 @@ pub(super) mod server {
                 .iter()
                 .any(|text| text.contains("TCP connections only"))
         );
-        let log = fs::read_to_string(pg.daemon.data_dir.join("logs/postgres.log")).unwrap();
+        let log = fs::read_to_string(pg.daemon.data_dir().join("logs/postgres.log")).unwrap();
         assert!(log.contains("fake got SIGINT"), "{log}");
     }
 
@@ -718,11 +735,11 @@ pub(super) mod server {
     async fn an_elevated_daemon_starts_no_postgres() {
         let mut pg = pg("serve", probes(Liveness::Gone, None));
         let daemon = Arc::get_mut(&mut pg.daemon).expect("one owner");
-        daemon.postgres.elevated = || true;
+        daemon.server_mut(ServerKind::Postgres).elevated = || true;
         let err = pg.act(ServiceAction::Start).await.unwrap_err();
         assert_eq!(err.code(), "service_elevated");
         assert!(err.to_string().contains("administrator rights"), "{err}");
-        let status = pg.daemon.postgres.status();
+        let status = pg.daemon.server(ServerKind::Postgres).status();
         assert_eq!(status.state, failed("service_elevated"));
         let said = pg.texts().last().cloned().unwrap_or_default();
         assert!(said.contains("refuses to run with them"), "{said}");
@@ -738,7 +755,7 @@ pub(super) mod server {
         let held = TcpListener::bind((Ipv4Addr::LOCALHOST, pg.port)).unwrap();
         let err = pg.act(ServiceAction::Start).await.unwrap_err();
         assert_eq!(err.code(), "service_port_busy");
-        let status = pg.daemon.postgres.status();
+        let status = pg.daemon.server(ServerKind::Postgres).status();
         assert_eq!(status.state, failed("service_port_busy"));
         let why = format!("port {} is in use by another program", pg.port);
         assert!(
@@ -777,7 +794,7 @@ pub(super) mod server {
     async fn our_server_on_the_data_folder_refuses_at_once() {
         let pg = pg("serve", probes(Liveness::Gone, None));
         // Our own PostgreSQL 18.7.0 runs at the pid of the file.
-        let data = &pg.daemon.data_dir;
+        let data = &pg.daemon.data_dir();
         let platform = Platform::current().unwrap();
         let ours = programs(data, platform, &Version::new(18, 7, 0)).unwrap();
         *pg.probes.now.lock().unwrap() = alive(&ours.postgres);
@@ -785,7 +802,7 @@ pub(super) mod server {
         let err = pg.act(ServiceAction::Start).await.unwrap_err();
         assert_eq!(err.code(), "service_data_dir_busy");
         assert!(err.to_string().contains("pid 4242"), "{err}");
-        let state = pg.daemon.postgres.status().state;
+        let state = pg.daemon.server(ServerKind::Postgres).status().state;
         assert_eq!(state, failed("service_data_dir_busy"));
         assert_eq!(pg.calls(), Vec::<String>::new());
         assert_eq!(fs::read_to_string(file).unwrap(), POSTMASTER_PID);
@@ -802,7 +819,10 @@ pub(super) mod server {
         let busy = "service_data_dir_busy";
         assert_eq!(err.code(), busy);
         assert!(err.to_string().contains("pid 4242"), "{err}");
-        assert_eq!(pg.daemon.postgres.status().state, failed(busy));
+        assert_eq!(
+            pg.daemon.server(ServerKind::Postgres).status().state,
+            failed(busy)
+        );
         let last = pg.texts().pop().unwrap();
         assert!(last.contains("pid 4242"), "{last}");
         assert!(last.contains(OTHER), "{last}");
@@ -820,7 +840,10 @@ pub(super) mod server {
             !pg.daemon
                 .proc_alive(ServiceId::Database(ServerKind::Postgres))
         );
-        assert_eq!(pg.daemon.postgres.status().state, failed(busy));
+        assert_eq!(
+            pg.daemon.server(ServerKind::Postgres).status().state,
+            failed(busy)
+        );
     }
 
     /// No hint and no `postmaster.pid`: still the data folder, with the
@@ -832,7 +855,7 @@ pub(super) mod server {
         assert_eq!(err.code(), "service_data_dir_busy");
         let text = err.to_string();
         assert_eq!(text, "the data folder is in use by a running server");
-        let state = pg.daemon.postgres.status().state;
+        let state = pg.daemon.server(ServerKind::Postgres).status().state;
         assert_eq!(state, failed("service_data_dir_busy"));
         let last = pg.texts().pop().unwrap();
         assert!(last.contains("named no pid"), "{last}");
@@ -850,7 +873,7 @@ pub(super) mod server {
         let pg = pg("locked-hang", probes(alive(Path::new(OTHER)), None));
         let daemon = Arc::clone(&pg.daemon);
         let start = tokio::spawn(async move {
-            let postgres = &daemon.postgres;
+            let postgres = &daemon.server(ServerKind::Postgres);
             postgres
                 .run_waiting(&daemon, ServiceAction::Start, WAIT)
                 .await
@@ -885,7 +908,10 @@ pub(super) mod server {
         let code = "postgres_shared_memory_busy";
         assert_eq!(err.code(), code);
         assert!(err.to_string().contains("shared memory"), "{err}");
-        assert_eq!(pg.daemon.postgres.status().state, failed(code));
+        assert_eq!(
+            pg.daemon.server(ServerKind::Postgres).status().state,
+            failed(code)
+        );
         let last = pg.texts().pop().unwrap();
         assert!(last.contains("start it again in a moment"), "{last}");
         assert!(last.contains("Marsa sends them no signal"), "{last}");
@@ -904,7 +930,7 @@ pub(super) mod server {
         let text = err.to_string();
         assert!(text.contains(&format!("port {}", pg.port)), "{text}");
         assert!(text.contains(&format!("{OTHER} (pid 4242)")), "{text}");
-        let state = pg.daemon.postgres.status().state;
+        let state = pg.daemon.server(ServerKind::Postgres).status().state;
         assert_eq!(state, failed("service_port_busy"));
         let last = pg.texts().pop().unwrap();
         assert!(last.contains(".s.PGSQL."), "{last}");
@@ -930,7 +956,7 @@ pub(super) mod server {
         };
         tokio::time::timeout(WAIT, printed).await.unwrap();
         tokio::time::sleep(Duration::from_millis(700)).await;
-        let status = pg.daemon.postgres.status();
+        let status = pg.daemon.server(ServerKind::Postgres).status();
         assert_eq!((status.state, status.pid), (ServiceState::Running, pid));
         assert!(
             pg.daemon
@@ -948,14 +974,14 @@ pub(super) mod server {
 
     /// `[postgres] enabled` now.
     fn enabled(pg: &Pg) -> bool {
-        let global = config::load_global(&ConfigPaths::in_dir(&pg.daemon.data_dir).global);
+        let global = config::load_global(&ConfigPaths::in_dir(pg.daemon.data_dir()).global);
         global.unwrap().postgres.enabled
     }
 
     /// The fake's `initdb` sleeps, as a slow first init.
     fn slow_init(pg: &Pg) {
         let platform = Platform::current().unwrap();
-        let programs = programs(&pg.daemon.data_dir, platform, &Version::new(18, 7, 0));
+        let programs = programs(pg.daemon.data_dir(), platform, &Version::new(18, 7, 0));
         let calls = pg.dir.path().join("calls.log").display().to_string();
         let slow = format!("#!/bin/sh\necho initdb >> '{calls}'\nexec sleep 60\n");
         fs::write(programs.unwrap().initdb, slow).unwrap();
@@ -968,7 +994,7 @@ pub(super) mod server {
     ) -> JoinHandle<Result<ServiceStatus, ActionError>> {
         let daemon = Arc::clone(&pg.daemon);
         tokio::spawn(async move {
-            let postgres = &daemon.postgres;
+            let postgres = &daemon.server(ServerKind::Postgres);
             postgres.run_and_save(&daemon, action, WAIT).await
         })
     }
@@ -984,7 +1010,7 @@ pub(super) mod server {
 
     /// No start left behind: no token, no stop counted.
     fn nothing_left(pg: &Pg) -> bool {
-        let starting = lock(&pg.daemon.postgres.starting);
+        let starting = lock(&pg.daemon.server(ServerKind::Postgres).starting);
         starting.token.is_none() && starting.stops_waiting == 0
     }
 
@@ -992,7 +1018,7 @@ pub(super) mod server {
     #[tokio::test]
     async fn a_start_turns_it_on_and_a_stop_off() {
         let pg = pg("serve", probes(Liveness::Gone, None));
-        set_postgres(&pg.daemon.data_dir, Some("18"), false, pg.port);
+        set_postgres(pg.daemon.data_dir(), Some("18"), false, pg.port);
         let status = spawn_saved(&pg, ServiceAction::Start)
             .await
             .unwrap()
@@ -1021,7 +1047,7 @@ pub(super) mod server {
     #[tokio::test]
     async fn a_stop_drops_a_start_that_runs() {
         let pg = pg("serve", probes(Liveness::Gone, None));
-        set_postgres(&pg.daemon.data_dir, Some("18"), false, pg.port);
+        set_postgres(pg.daemon.data_dir(), Some("18"), false, pg.port);
         slow_init(&pg);
         let start = spawn_saved(&pg, ServiceAction::Start);
         until("initdb", || pg.count("initdb") > 0).await;
@@ -1053,12 +1079,12 @@ pub(super) mod server {
     #[tokio::test]
     async fn a_shutdown_drops_a_start_of_the_api() {
         let pg = pg("serve", probes(Liveness::Gone, None));
-        set_postgres(&pg.daemon.data_dir, Some("18"), false, pg.port);
+        set_postgres(pg.daemon.data_dir(), Some("18"), false, pg.port);
         slow_init(&pg);
         let start = spawn_saved(&pg, ServiceAction::Start);
         until("initdb", || pg.count("initdb") > 0).await;
         let begun = std::time::Instant::now();
-        pg.daemon.shutdown.cancel();
+        pg.daemon.shutdown().cancel();
         let err = start.await.unwrap().unwrap_err();
         assert_eq!(err.code(), "service_busy");
         assert!(
@@ -1099,12 +1125,14 @@ pub(super) mod server {
     async fn a_stop_drops_the_starts_before_it_in_line() {
         let pg = pg("serve", probes(Liveness::Gone, None));
         for first in [ServiceAction::Start, ServiceAction::Restart] {
-            let held = Arc::clone(&pg.daemon.postgres.busy).lock_owned().await;
+            let held = Arc::clone(&pg.daemon.server(ServerKind::Postgres).busy)
+                .lock_owned()
+                .await;
             let start = spawn_saved(&pg, first);
             tokio::time::sleep(Duration::from_millis(100)).await;
             let stop = spawn_saved(&pg, ServiceAction::Stop);
             until("the stop in line", || {
-                lock(&pg.daemon.postgres.starting).stops_waiting == 1
+                lock(&pg.daemon.server(ServerKind::Postgres).starting).stops_waiting == 1
             })
             .await;
             drop(held);
@@ -1157,7 +1185,7 @@ pub(super) mod server {
     #[tokio::test]
     async fn a_running_or_starting_postgres_keeps_its_version() {
         let pg = pg("serve", probes(Liveness::Gone, None));
-        let version_dir = pg.daemon.data_dir.join("runtimes/postgres/18.7.0");
+        let version_dir = pg.daemon.data_dir().join("runtimes/postgres/18.7.0");
         slow_init(&pg);
         let start = spawn_saved(&pg, ServiceAction::Start);
         until("initdb", || pg.count("initdb") > 0).await;
@@ -1172,7 +1200,12 @@ pub(super) mod server {
         let (status, body) = uninstall(&pg).await;
         assert_eq!((status, body.error.code.as_str()), (409, "version_in_use"));
         assert!(body.in_use.unwrap().server);
-        assert!(pg.daemon.data_dir.join("runtimes/postgres/18.7.0").is_dir());
+        assert!(
+            pg.daemon
+                .data_dir()
+                .join("runtimes/postgres/18.7.0")
+                .is_dir()
+        );
         pg.act(ServiceAction::Stop).await.unwrap();
     }
 
@@ -1190,7 +1223,7 @@ pub(super) mod server {
         let orphan = orphan_server(&pg, "serve");
         listening(pg.port).await;
         record_orphan(&pg, orphan.id(), None).await;
-        let version_dir = pg.daemon.data_dir.join("runtimes/postgres/18.7.0");
+        let version_dir = pg.daemon.data_dir().join("runtimes/postgres/18.7.0");
 
         let (status, body) = uninstall(&pg).await;
         assert_eq!((status, body.error.code.as_str()), (409, "version_in_use"));
@@ -1225,7 +1258,7 @@ pub(super) mod server {
             exe: v17.clone(),
             started: StartTime::Ticks(1),
         };
-        let path = orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir);
+        let path = orphan::pid_path(ServerKind::Postgres, pg.daemon.data_dir());
         process::write_pid_file(&path, &record).unwrap();
 
         let (status, body) = uninstall_version(&pg, "18.7.0").await;
@@ -1249,11 +1282,11 @@ pub(super) mod server {
     #[tokio::test]
     async fn the_first_install_starts_it_unless_a_stop_comes_first() {
         let pg = pg("serve", probes(Liveness::Gone, None));
-        set_postgres(&pg.daemon.data_dir, None, false, pg.port);
-        let global = ConfigPaths::in_dir(&pg.daemon.data_dir).global;
+        set_postgres(pg.daemon.data_dir(), None, false, pg.port);
+        let global = ConfigPaths::in_dir(pg.daemon.data_dir()).global;
         start_after_install(&pg.daemon, ServerKind::Postgres, Version::new(18, 7, 0));
         until("running", || {
-            pg.daemon.postgres.status().state == ServiceState::Running
+            pg.daemon.server(ServerKind::Postgres).status().state == ServiceState::Running
         })
         .await;
         let settings = config::load_global(&global).unwrap().postgres;
@@ -1265,13 +1298,15 @@ pub(super) mod server {
         pg.act(ServiceAction::Stop).await.unwrap();
 
         // Again from no default: a stop waits in line first.
-        set_postgres(&pg.daemon.data_dir, None, false, pg.port);
-        let held = Arc::clone(&pg.daemon.postgres.busy).lock_owned().await;
+        set_postgres(pg.daemon.data_dir(), None, false, pg.port);
+        let held = Arc::clone(&pg.daemon.server(ServerKind::Postgres).busy)
+            .lock_owned()
+            .await;
         start_after_install(&pg.daemon, ServerKind::Postgres, Version::new(18, 7, 0));
         tokio::time::sleep(Duration::from_millis(100)).await;
         let stop = spawn_saved(&pg, ServiceAction::Stop);
         until("the stop in line", || {
-            lock(&pg.daemon.postgres.starting).stops_waiting == 1
+            lock(&pg.daemon.server(ServerKind::Postgres).starting).stops_waiting == 1
         })
         .await;
         drop(held);
@@ -1332,7 +1367,7 @@ pub(super) mod server {
     /// The `postgres` of `version` in the data folder of `pg`.
     fn installed_postgres_of(pg: &Pg, version: &str) -> PathBuf {
         let path = format!("runtimes/postgres/{version}/bin/postgres");
-        pg.daemon.data_dir.join(path)
+        pg.daemon.data_dir().join(path)
     }
 
     /// `run/postgres.pid` for `pid`, as the daemon writes it, with its
@@ -1355,7 +1390,7 @@ pub(super) mod server {
         let started = started.unwrap_or(real);
         let record = PidRecord { pid, exe, started };
         process::write_pid_file(
-            &orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir),
+            &orphan::pid_path(ServerKind::Postgres, pg.daemon.data_dir()),
             &record,
         )
         .unwrap();
@@ -1386,7 +1421,10 @@ pub(super) mod server {
 
     /// What `run/postgres.pid` names now.
     fn recorded(pg: &Pg) -> Option<PidRecord> {
-        process::read_pid_file(&orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir))
+        process::read_pid_file(&orphan::pid_path(
+            ServerKind::Postgres,
+            pg.daemon.data_dir(),
+        ))
     }
 
     /// A `marsad` that died left our server running: the next start
@@ -1444,10 +1482,17 @@ pub(super) mod server {
         let pg = pg("late", probes(Liveness::Gone, None));
         *pg.probes.now.lock().unwrap() = alive(&installed_postgres(&pg));
         let start = spawn_saved(&pg, ServiceAction::Start);
-        until("the pid", || pg.daemon.postgres.status().pid.is_some()).await;
+        until("the pid", || {
+            pg.daemon
+                .server(ServerKind::Postgres)
+                .status()
+                .pid
+                .is_some()
+        })
+        .await;
         start.abort();
         assert!(start.await.unwrap_err().is_cancelled());
-        let pid = pg.daemon.postgres.status().pid.unwrap();
+        let pid = pg.daemon.server(ServerKind::Postgres).status().pid.unwrap();
         until("the record", || recorded(&pg).is_some_and(|r| r.pid == pid)).await;
         assert!(!postgres::answers(pg.port).await, "it has not answered yet");
         assert!(!pg.texts().iter().any(|text| text == "fake ready"));
@@ -1477,8 +1522,10 @@ pub(super) mod server {
     async fn a_deaf_orphan_gets_sigint_then_sigquit_then_sigkill() {
         let mut pg = pg("serve", probes(Liveness::Gone, None));
         let short = Duration::from_millis(300);
-        Arc::get_mut(&mut pg.daemon).unwrap().postgres.orphan_ladder =
-            StopMethod::signals([(Signal::Int, short), (Signal::Quit, short)]);
+        Arc::get_mut(&mut pg.daemon)
+            .unwrap()
+            .server_mut(ServerKind::Postgres)
+            .orphan_ladder = StopMethod::signals([(Signal::Int, short), (Signal::Quit, short)]);
         let mut orphan = orphan_server(&pg, "deaf");
         listening(pg.port).await;
         record_orphan(&pg, orphan.id(), None).await;
@@ -1512,7 +1559,11 @@ pub(super) mod server {
         assert_eq!(signals(&pg), [(orphan.id(), Signal::Int)]);
         // The default line, 18, runs now.
         assert_eq!(pg.count("server"), 1);
-        let program = pg.daemon.postgres.running_program(&pg.daemon).unwrap();
+        let program = pg
+            .daemon
+            .server(ServerKind::Postgres)
+            .running_program(&pg.daemon)
+            .unwrap();
         assert_eq!(program, installed_postgres(&pg));
         pg.act(ServiceAction::Stop).await.unwrap();
     }
@@ -1545,8 +1596,10 @@ pub(super) mod server {
     async fn a_frozen_orphan_gets_sigkill() {
         let mut pg = pg("serve", probes(Liveness::Gone, None));
         let short = Duration::from_millis(300);
-        Arc::get_mut(&mut pg.daemon).unwrap().postgres.orphan_ladder =
-            StopMethod::signals([(Signal::Int, short), (Signal::Quit, short)]);
+        Arc::get_mut(&mut pg.daemon)
+            .unwrap()
+            .server_mut(ServerKind::Postgres)
+            .orphan_ladder = StopMethod::signals([(Signal::Int, short), (Signal::Quit, short)]);
         let mut orphan = orphan_server(&pg, "serve");
         listening(pg.port).await;
         record_orphan(&pg, orphan.id(), None).await;
@@ -1609,8 +1662,10 @@ pub(super) mod server {
     async fn each_signal_needs_its_own_check() {
         let mut pg = pg("serve", probes(Liveness::Gone, None));
         let short = Duration::from_millis(300);
-        Arc::get_mut(&mut pg.daemon).unwrap().postgres.orphan_ladder =
-            StopMethod::signals([(Signal::Int, short), (Signal::Quit, short)]);
+        Arc::get_mut(&mut pg.daemon)
+            .unwrap()
+            .server_mut(ServerKind::Postgres)
+            .orphan_ladder = StopMethod::signals([(Signal::Int, short), (Signal::Quit, short)]);
         let orphan = orphan_server(&pg, "deaf");
         listening(pg.port).await;
         record_orphan(&pg, orphan.id(), None).await;
@@ -1650,7 +1705,7 @@ pub(super) mod server {
             exe: installed_postgres(&pg),
             started: StartTime::Ticks(1),
         };
-        let path = orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir);
+        let path = orphan::pid_path(ServerKind::Postgres, pg.daemon.data_dir());
         process::write_pid_file(&path, &record).unwrap();
         assert!(enabled(&pg));
 
@@ -1696,8 +1751,10 @@ pub(super) mod server {
     async fn a_stuck_orphan_at_a_stop_leaves_it_stopped_and_off_with_a_line() {
         let mut pg = pg("serve", probes(Liveness::Gone, None));
         let short = Duration::from_millis(300);
-        Arc::get_mut(&mut pg.daemon).unwrap().postgres.orphan_ladder =
-            StopMethod::signals([(Signal::Int, short), (Signal::Quit, short)]);
+        Arc::get_mut(&mut pg.daemon)
+            .unwrap()
+            .server_mut(ServerKind::Postgres)
+            .orphan_ladder = StopMethod::signals([(Signal::Int, short), (Signal::Quit, short)]);
         let mut orphan = orphan_server(&pg, "deaf");
         listening(pg.port).await;
         record_orphan(&pg, orphan.id(), None).await;
@@ -1741,7 +1798,7 @@ pub(super) mod server {
             exe: installed_postgres(&pg),
             started: StartTime::Ticks(1),
         };
-        let path = orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir);
+        let path = orphan::pid_path(ServerKind::Postgres, pg.daemon.data_dir());
         process::write_pid_file(&path, &record).unwrap();
         let status = pg.act(ServiceAction::Start).await.unwrap();
         assert_eq!(status.state, ServiceState::Running);
@@ -1761,7 +1818,7 @@ pub(super) mod server {
                 exe: installed_postgres(&pg),
                 started: StartTime::Ticks(1),
             };
-            let path = orphan::pid_path(ServerKind::Postgres, &pg.daemon.data_dir);
+            let path = orphan::pid_path(ServerKind::Postgres, pg.daemon.data_dir());
             process::write_pid_file(&path, &record).unwrap();
             let status = pg.act(ServiceAction::Start).await.unwrap();
             assert_eq!(status.state, ServiceState::Running);
@@ -1783,7 +1840,7 @@ pub(super) mod server {
         assert_eq!(status.state, ServiceState::Running);
         pg.daemon.stop_procs(WAIT).await;
 
-        let data = &pg.daemon.data_dir;
+        let data = &pg.daemon.data_dir();
         set_postgres(data, Some("18"), false, pg.port);
         let launched = start_at_launch(&pg.daemon, ServerKind::Postgres)
             .wait(WAIT)
@@ -1795,7 +1852,10 @@ pub(super) mod server {
             .wait(WAIT)
             .await;
         assert_eq!(launched, Some(Launched::NotInstalled));
-        assert_eq!(pg.daemon.postgres.status().state, ServiceState::Stopped);
+        assert_eq!(
+            pg.daemon.server(ServerKind::Postgres).status().state,
+            ServiceState::Stopped
+        );
         assert_eq!(pg.count("server"), 1);
 
         // A failed start: the status says why, and the daemon runs on.
@@ -1805,7 +1865,7 @@ pub(super) mod server {
             .wait(WAIT)
             .await;
         assert_eq!(launched, Some(Launched::Failed("service_port_busy")));
-        let state = pg.daemon.postgres.status().state;
+        let state = pg.daemon.server(ServerKind::Postgres).status().state;
         assert_eq!(state, failed("service_port_busy"));
     }
 }
