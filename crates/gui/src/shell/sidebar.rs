@@ -187,13 +187,12 @@ mod tests {
     use std::path::PathBuf;
 
     use eframe::egui::{self, Pos2, pos2};
-    use marsa_core::types::{
-        Event, Health as DaemonHealth, ServiceState, ServiceStatus, Site, SiteKind, SiteList,
-    };
+    use marsa_core::types::{Event, ServiceState, ServiceStatus, Site, SiteKind, SiteList};
 
     use marsa_core::runtimes::Runtime;
 
     use super::*;
+    use crate::fixtures::connected;
     use crate::model::Update;
     use crate::theme::LIGHT;
     use crate::widgets::harness::{Harness, Tree};
@@ -207,16 +206,6 @@ mod tests {
         Item::Services,
         Item::Settings,
     ];
-
-    fn connected() -> Model {
-        let mut model = Model::default();
-        model.update(Update::Connected(DaemonHealth {
-            app_version: "0.0.0".into(),
-            api_version: 1,
-            pid: 7,
-        }));
-        model
-    }
 
     /// A model whose `overall()` is `overall`.
     fn model_in(overall: Overall) -> Model {

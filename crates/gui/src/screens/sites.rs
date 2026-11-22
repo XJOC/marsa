@@ -728,38 +728,17 @@ mod tests {
 
     use eframe::egui::{self, Event, Pos2, RawInput, pos2, vec2};
     use marsa_core::runtimes::Runtime;
-    use marsa_core::types::{
-        Health as DaemonHealth, HostsStatus, RuntimeList, RuntimeVersions, SiteKind, SiteList,
-    };
+    use marsa_core::types::{HostsStatus, RuntimeList, RuntimeVersions, SiteKind, SiteList};
     use semver::Version;
 
     use super::*;
+    use crate::fixtures::{abs, connected};
     use crate::model::{Update, apply};
     use crate::theme::LIGHT;
     use crate::widgets::harness::{Harness, Tree};
 
-    fn connected() -> Model {
-        let mut model = Model::default();
-        model.update(Update::Connected(DaemonHealth {
-            app_version: "0.0.0".into(),
-            api_version: 1,
-            pid: 7,
-        }));
-        model
-    }
-
     fn v(text: &str) -> Version {
         text.parse().expect("a version")
-    }
-
-    /// An absolute path on this system, from Unix-style parts (a Windows
-    /// path needs a drive to be absolute).
-    fn abs(unix: &str) -> PathBuf {
-        if cfg!(windows) {
-            PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
-        } else {
-            PathBuf::from(unix)
-        }
     }
 
     /// `~` and the parts after it, with the separator of the system.
@@ -768,19 +747,6 @@ mod tests {
         parts
             .iter()
             .fold(String::from("~"), |text, part| format!("{text}{sep}{part}"))
-    }
-
-    fn site(name: &str, php: Option<&str>, source: Option<Source>) -> Site {
-        let root = PathBuf::from("/code").join(name);
-        Site {
-            name: name.into(),
-            docroot: root.join("public"),
-            root,
-            kind: SiteKind::Laravel,
-            php: php.map(v),
-            php_source: source,
-            secure: true,
-        }
     }
 
     fn runtimes(php: &[&str]) -> RuntimeList {
@@ -807,6 +773,19 @@ mod tests {
             ..SiteList::default()
         }));
         model
+    }
+
+    fn site(name: &str, php: Option<&str>, source: Option<Source>) -> Site {
+        let root = PathBuf::from("/code").join(name);
+        Site {
+            name: name.into(),
+            docroot: root.join("public"),
+            root,
+            kind: SiteKind::Laravel,
+            php: php.map(v),
+            php_source: source,
+            secure: true,
+        }
     }
 
     fn with_sites(model: &mut Model, sites: Vec<Site>) {

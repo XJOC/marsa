@@ -373,28 +373,18 @@ fn check_value(ui: &mut Ui, theme: &Theme, check: Check) {
 #[cfg(test)]
 mod tests {
     use crate::model::Effect;
-    use std::path::PathBuf;
 
     use eframe::egui::{self, Rect};
     use marsa_core::types::{Health, HostsStatus, OpResult, SetupReport, SetupSkip};
 
     use super::*;
     use crate::bridge::Command;
+    use crate::fixtures::abs;
     use crate::model::{Connection, Update};
     use crate::theme::LIGHT;
     use crate::widgets::harness::{Harness, Tree};
 
-    /// An absolute path on any system: a drive on Windows, where a path that
-    /// starts with `/` is not absolute and `~` is never used.
-    fn abs(unix: &str) -> PathBuf {
-        if cfg!(windows) {
-            PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
-        } else {
-            PathBuf::from(unix)
-        }
-    }
-
-    fn connected() -> Model {
+    fn connected_at_home() -> Model {
         let mut model = Model::default();
         model.update(Update::Connected(Health {
             app_version: "0.3.1".into(),
@@ -433,7 +423,7 @@ mod tests {
 
     #[test]
     fn the_about_group_has_the_version_the_daemon_and_the_data_folder() {
-        let model = connected();
+        let model = connected_at_home();
         let about = view(&model).about;
         assert_eq!(about.version, model::APP_VERSION);
         assert_eq!(about.daemon, "Daemon version 0.3.1");
@@ -447,7 +437,7 @@ mod tests {
 
     #[test]
     fn start_at_login_follows_the_daemons_state_and_says_why_it_is_off() {
-        let mut model = connected();
+        let mut model = connected_at_home();
         let login = |model: &Model| view(model).general.autostart;
         // Not read yet.
         assert_eq!(login(&model).off, Some(strings::AUTOSTART_READING));
@@ -479,7 +469,7 @@ mod tests {
 
     #[test]
     fn the_appearance_is_the_models() {
-        let mut model = connected();
+        let mut model = connected_at_home();
         assert_eq!(view(&model).general.appearance, Appearance::System);
         model.apply_action(Action::SetAppearance(Appearance::Dark));
         assert_eq!(view(&model).general.appearance, Appearance::Dark);
@@ -487,7 +477,7 @@ mod tests {
 
     #[test]
     fn the_window_claims_nothing_before_a_setup_ran() {
-        let mut model = connected();
+        let mut model = connected_at_home();
         for setup in [
             Setup::Idle,
             Setup::Running,
@@ -525,7 +515,7 @@ mod tests {
     #[test]
     fn the_daemons_checks_answer_when_no_setup_ran() {
         use doctor::{Check as Probe, Pass, Problem};
-        let mut model = connected();
+        let mut model = connected_at_home();
         model.session.doctor = Some(daemon_says(vec![
             (Probe::Trust, Verdict::Pass(Pass::Trust)),
             (Probe::Dns, Verdict::Fail(Problem::DnsNoAnswer)),
@@ -565,7 +555,7 @@ mod tests {
     #[test]
     fn a_setup_report_wins_over_the_daemons_checks() {
         use doctor::{Check as Probe, Pass};
-        let mut model = connected();
+        let mut model = connected_at_home();
         model.session.doctor = Some(daemon_says(vec![(
             Probe::Trust,
             Verdict::Pass(Pass::Trust),
@@ -580,7 +570,7 @@ mod tests {
 
     #[test]
     fn a_setup_report_of_this_session_says_each_step_by_its_own_result() {
-        let mut model = connected();
+        let mut model = connected_at_home();
         model.session.setup = Setup::Finished(report(
             vec![
                 result("resolver_install", OpStatus::Done),
@@ -615,7 +605,7 @@ mod tests {
 
     #[test]
     fn on_linux_the_hosts_file_tells_the_names_without_a_setup_run() {
-        let mut model = connected();
+        let mut model = connected_at_home();
         model.update(Update::Hosts(HostsStatus {
             used: true,
             missing: Vec::new(),
@@ -637,7 +627,7 @@ mod tests {
 
     #[test]
     fn run_setup_keeps_its_explanation_its_wait_and_its_report() {
-        let mut model = connected();
+        let mut model = connected_at_home();
         let group = view(&model).setup;
         assert_eq!(
             group.explanation,
@@ -723,7 +713,7 @@ mod tests {
 
     #[test]
     fn the_screen_has_a_title_three_groups_and_every_row() {
-        let mut model = connected();
+        let mut model = connected_at_home();
         model.update(Update::Autostart(Autostart::Off));
         let tree = start(&model);
         for words in [
@@ -764,7 +754,7 @@ mod tests {
 
     #[test]
     fn the_data_folder_shows_as_tilde_and_its_full_path_is_one_hover_away() {
-        let model = connected();
+        let model = connected_at_home();
         let tree = start(&model);
         let shown = strings::home_path(&model.data_dir, model.home.as_deref());
         assert!(shown.starts_with('~'), "{shown}");
@@ -778,7 +768,7 @@ mod tests {
 
     #[test]
     fn the_switch_and_its_name_flip_start_at_login_and_a_switch_that_is_off_does_not() {
-        let mut model = connected();
+        let mut model = connected_at_home();
         model.update(Update::Autostart(Autostart::Off));
         assert_eq!(
             click(&model, strings::AUTOSTART),
@@ -795,7 +785,7 @@ mod tests {
         assert_eq!(click_at(&model, at), [Action::ToggleAutostart]);
 
         // Not read yet: nothing to flip.
-        let mut model = connected();
+        let mut model = connected_at_home();
         assert!(click(&model, strings::AUTOSTART).is_empty());
         model.update(Update::Autostart(Autostart::Unsupported));
         assert!(click(&model, strings::AUTOSTART).is_empty());
@@ -803,7 +793,7 @@ mod tests {
 
     #[test]
     fn the_switch_action_reaches_the_daemon_and_the_switch_shows_the_new_state_at_once() {
-        let mut model = connected();
+        let mut model = connected_at_home();
         model.update(Update::Autostart(Autostart::Off));
         let command = model.apply_action(Action::ToggleAutostart);
         assert!(
@@ -815,7 +805,7 @@ mod tests {
 
     #[test]
     fn an_option_of_the_appearance_control_is_an_action_and_the_chosen_one_is_not() {
-        let model = connected();
+        let model = connected_at_home();
         assert_eq!(
             click(&model, "Dark"),
             [Action::SetAppearance(Appearance::Dark)]
@@ -829,7 +819,7 @@ mod tests {
 
     #[test]
     fn run_setup_is_an_action_and_off_while_it_runs_or_with_no_daemon() {
-        let mut model = connected();
+        let mut model = connected_at_home();
         assert_eq!(click(&model, strings::RUN_SETUP), [Action::RunSetup]);
         model.start_setup();
         assert!(click(&model, strings::RUN_SETUP).is_empty());
@@ -851,7 +841,7 @@ mod tests {
 
     #[test]
     fn a_report_shows_a_line_a_step_and_a_failure_with_its_mark() {
-        let mut model = connected();
+        let mut model = connected_at_home();
         let done = report(
             vec![
                 result("trust_install", OpStatus::Done),
@@ -877,20 +867,20 @@ mod tests {
 
     #[test]
     fn open_folder_is_a_local_action_for_the_data_folder() {
-        let model = connected();
+        let model = connected_at_home();
         assert_eq!(
             click(&model, strings::OPEN_FOLDER),
             [Action::OpenDataFolder]
         );
         // The model only says which folder: `App` opens it.
-        let mut model = connected();
+        let mut model = connected_at_home();
         let effect = model.apply_action(Action::OpenDataFolder);
         assert!(matches!(effect, Effect::OpenFolder(folder) if folder == model.data_dir));
     }
 
     #[test]
     fn the_rows_fit_the_smallest_window() {
-        let model = connected();
+        let model = connected_at_home();
         let harness = Harness::new(egui::Theme::Light);
         let min = crate::theme::SIZE.window_min;
         // The main area of the smallest window: the folded sidebar and the
