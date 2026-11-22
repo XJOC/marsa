@@ -401,55 +401,20 @@ fn unlink(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Action
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use eframe::egui::{self, Pos2, pos2};
-    use marsa_core::types::{
-        Health as DaemonHealth, RuntimeList, RuntimeVersions, SiteKind, SiteList, Source,
-    };
+    use marsa_core::types::{RuntimeList, RuntimeVersions, SiteKind, SiteList, Source};
     use semver::Version;
 
     use super::*;
     use crate::bridge::Command;
+    use crate::fixtures::{abs, connected, site};
     use crate::model::{Change, Removal, Update};
     use crate::theme::LIGHT;
     use crate::widgets::harness::{Harness, Tree};
 
-    fn connected() -> Model {
-        let mut model = Model::default();
-        model.update(Update::Connected(DaemonHealth {
-            app_version: "0.0.0".into(),
-            api_version: 1,
-            pid: 7,
-        }));
-        model
-    }
-
     fn v(text: &str) -> Version {
         text.parse().expect("a version")
-    }
-
-    /// An absolute path on this system, from Unix-style parts (a Windows
-    /// path needs a drive to be absolute).
-    fn abs(unix: &str) -> PathBuf {
-        if cfg!(windows) {
-            PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
-        } else {
-            PathBuf::from(unix)
-        }
-    }
-
-    fn site(name: &str, php: Option<&str>, source: Option<Source>) -> Site {
-        let root = abs("/code").join(name);
-        Site {
-            name: name.into(),
-            docroot: root.join("public"),
-            root,
-            kind: SiteKind::Laravel,
-            php: php.map(v),
-            php_source: source,
-            secure: true,
-        }
     }
 
     fn with_sites(model: &mut Model, sites: Vec<Site>) {

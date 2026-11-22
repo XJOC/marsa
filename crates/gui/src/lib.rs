@@ -13,6 +13,9 @@ pub mod bridge;
 // build reads no extra environment variable.
 #[cfg(debug_assertions)]
 pub mod demo;
+// Test data shared by the screens' tests.
+#[cfg(test)]
+pub(crate) mod fixtures;
 // What a line of a program's output says: its level and its message.
 pub mod logline;
 // The measurement mode: made-up data and a frame count, for a release build

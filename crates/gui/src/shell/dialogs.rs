@@ -88,18 +88,9 @@ mod tests {
 
     use super::*;
     use crate::bridge::Command;
+    use crate::fixtures::abs;
     use crate::model::Update;
     use crate::widgets::harness::{Harness, Tree};
-
-    /// An absolute path on any system: a drive on Windows, where a path that
-    /// starts with `/` is not absolute and `~` is never used.
-    fn abs(unix: &str) -> PathBuf {
-        if cfg!(windows) {
-            PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
-        } else {
-            PathBuf::from(unix)
-        }
-    }
 
     /// A window with one linked site `shop`, a parked folder `/code` with a
     /// site `api` in it, and PHP 8.3.27 installed, under the home folder

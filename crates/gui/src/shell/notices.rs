@@ -263,25 +263,16 @@ mod tests {
 
     use eframe::egui;
     use marsa_core::runtimes::Runtime;
+    use marsa_core::types::SiteList;
     use marsa_core::types::{Event, InstallDone, InstallProgress, InstallUpdate};
-    use marsa_core::types::{Health, SiteList};
     use semver::Version;
 
     use super::*;
+    use crate::fixtures::{abs, connected};
     use crate::model::{InstallJob, Route, UninstallNotice, Update, apply};
     use crate::theme::LIGHT;
     use crate::widgets::NoticeBar;
     use crate::widgets::harness::Harness;
-
-    fn connected() -> Model {
-        let mut model = Model::default();
-        model.update(Update::Connected(Health {
-            app_version: "0.0.0".into(),
-            api_version: 1,
-            pid: 7,
-        }));
-        model
-    }
 
     fn seconds(count: u64) -> Duration {
         Duration::from_secs(count)
@@ -486,16 +477,6 @@ mod tests {
             .notices
             .set_code(NoticeSource::Call, "service_busy".into());
         assert_eq!(current(&model).map(|b| b.source), Some(NoticeSource::Call));
-    }
-
-    /// An absolute path on any system: a drive on Windows, where a path that
-    /// starts with `/` is not absolute and `~` is never used.
-    fn abs(unix: &str) -> PathBuf {
-        if cfg!(windows) {
-            PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
-        } else {
-            PathBuf::from(unix)
-        }
     }
 
     /// How many lines each notice takes in a bar of the widest size (a

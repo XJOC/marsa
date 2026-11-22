@@ -410,11 +410,12 @@ mod tests {
     use eframe::egui::{self, Pos2};
     use marsa_core::runtimes::Runtime;
     use marsa_core::types::{
-        Health as DaemonHealth, RuntimeList, RuntimeVersions, ServiceState, ServiceStatus, Site,
-        SiteKind, SiteList, XdebugState,
+        RuntimeList, RuntimeVersions, ServiceState, ServiceStatus, Site, SiteKind, SiteList,
+        XdebugState,
     };
 
     use super::*;
+    use crate::fixtures::connected;
     use crate::model::{Update, WEB_SERVER};
     use crate::theme::{DARK, LIGHT};
     use crate::widgets::harness::{Harness, Tree};
@@ -422,16 +423,6 @@ mod tests {
     /// The panel with all the room it needs.
     fn show(ui: &mut Ui, view: &PanelView, theme: &Theme) -> Vec<PanelAction> {
         show_limited(ui, view, theme, f32::INFINITY)
-    }
-
-    fn connected() -> Model {
-        let mut model = Model::default();
-        model.update(Update::Connected(DaemonHealth {
-            app_version: "0.0.0".into(),
-            api_version: 1,
-            pid: 7,
-        }));
-        model
     }
 
     fn site(name: &str, php: Option<&str>) -> Site {

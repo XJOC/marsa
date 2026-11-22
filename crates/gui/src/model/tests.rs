@@ -2,6 +2,7 @@
 
 use super::installs::failure;
 use super::*;
+use crate::fixtures::connected;
 use crate::strings::INSTALL_INTERRUPTED;
 use marsa_core::types::LogStream;
 
@@ -11,12 +12,6 @@ fn health() -> Health {
         api_version: 1,
         pid: 4242,
     }
-}
-
-fn connected() -> Model {
-    let mut model = Model::default();
-    model.update(Update::Connected(health()));
-    model
 }
 
 fn status(id: &str, state: ServiceState) -> ServiceStatus {

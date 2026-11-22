@@ -254,22 +254,13 @@ mod tests {
     use std::path::PathBuf;
 
     use eframe::egui::{self, Pos2, pos2};
-    use marsa_core::types::{Health as DaemonHealth, LogLine, LogStream, Site, SiteKind, SiteList};
+    use marsa_core::types::{LogLine, LogStream, Site, SiteKind, SiteList};
 
     use super::*;
+    use crate::fixtures::connected;
     use crate::model::Update;
     use crate::theme::LIGHT;
     use crate::widgets::harness::{Harness, Tree};
-
-    fn connected() -> Model {
-        let mut model = Model::default();
-        model.update(Update::Connected(DaemonHealth {
-            app_version: "0.0.0".into(),
-            api_version: 1,
-            pid: 7,
-        }));
-        model
-    }
 
     fn service(id: &str, state: ServiceState) -> ServiceStatus {
         ServiceStatus {
