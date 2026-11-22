@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use marsa_core::installer::{self, InstallEnv, InstallError, InstalledVersion};
 use marsa_core::types::InstallEvent;
 
-use super::super::one_at_a_time::OneAtATime;
+use crate::daemon::setup::one_at_a_time::OneAtATime;
 
 /// What [`RunInstall::run`] returns.
 pub type InstallFuture<'a> =
