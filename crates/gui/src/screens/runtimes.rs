@@ -21,21 +21,21 @@
 //! network: an install is a job in the model's queue, and the daemon's
 //! refusals come back as notices in the shell's bar.
 
-use eframe::egui::{Context, Id, Key, Label, RichText, Ui, vec2};
+use eframe::egui::{Context, Id, Key, Ui};
 use marsa_core::runtimes::Runtime;
 use semver::Version;
 
 use super::home::{InstallBar, install_bar};
-use super::sites::{Mark, message, mute, status_line};
+use super::lines::{Mark, message, mute, status_line};
 use crate::model::NoticeSource;
 use crate::model::{self, Action, Model, Removal, Route};
 use crate::strings;
 use crate::theme::page::{RUNTIMES_LIST_WIDTH, RUNTIMES_TAG_COLUMN, RUNTIMES_VERSION_COLUMN};
-use crate::theme::{Direction, Face, Section, TextToken, Theme};
+use crate::theme::{Face, Section, TextToken, Theme};
 use crate::widgets::table::{empty_state_with, padded_card};
 use crate::widgets::{
     Answer, Button, ConfirmDialog, Field, Icon, ListItem, Menu, MenuItem, Progress, RowHeight,
-    Switch, Table, TableColumn, VersionPick, VersionPicker, runtime_monogram,
+    Switch, Table, TableColumn, Text, VersionPick, VersionPicker, runtime_monogram,
 };
 
 /// What the screen knows about one runtime, in one place. The list and the
@@ -603,23 +603,19 @@ fn installed(ui: &mut Ui, theme: &Theme, details: &Details, actions: &mut Vec<Ac
         ui.spacing_mut().item_spacing.y = theme.space.group_gap_max;
         let off = details.install_off;
         // The heading and the button share one line as high as a control.
-        let line = vec2(ui.available_width(), theme.size.control);
-        ui.allocate_ui_with_layout(line, Direction::CURRENT.row(), |ui| {
-            super::heading(ui, theme, strings::INSTALLED, None);
+        super::section_header(ui, theme, strings::INSTALLED, None, |ui| {
             if details.rows.is_empty() {
                 return;
             }
-            ui.with_layout(Direction::CURRENT.row_from_end(), |ui| {
-                let button = Button::secondary(strings::INSTALL_A_VERSION)
-                    .disabled_if(off.is_some(), off.unwrap_or_default());
-                let response = ui.add(button);
-                if response.clicked() {
-                    actions.push(Action::AskInstall(details.runtime));
-                }
-                if off.is_none() {
-                    response.on_hover_text(strings::INSTALL_HINT);
-                }
-            });
+            let button = Button::secondary(strings::INSTALL_A_VERSION)
+                .disabled_if(off.is_some(), off.unwrap_or_default());
+            let response = ui.add(button);
+            if response.clicked() {
+                actions.push(Action::AskInstall(details.runtime));
+            }
+            if off.is_none() {
+                response.on_hover_text(strings::INSTALL_HINT);
+            }
         });
         if details.rows.is_empty() {
             let sentence = strings::no_runtime_installed(details.name);
@@ -658,17 +654,15 @@ fn versions_table(ui: &mut Ui, theme: &Theme, details: &Details, actions: &mut V
     table.show(ui, details.rows.len(), |row| {
         let version = &details.rows[row.index()];
         row.cell(|ui| {
-            let text = RichText::new(&version.text)
-                .font(theme.text.body_strong.font_id())
-                .color(theme.color.ink);
-            ui.add(Label::new(text).selectable(false));
+            ui.add(Text::new(
+                &version.text,
+                theme.text.body_strong,
+                theme.color.ink,
+            ));
         });
         if let Some(used) = &version.used {
             row.cell(|ui| {
-                let text = RichText::new(used)
-                    .font(theme.text.body_sm.font_id())
-                    .color(theme.color.ink2);
-                ui.add(Label::new(text).truncate().selectable(false))
+                ui.add(Text::small(theme, used).truncate())
                     .on_hover_text(used);
             });
         }
@@ -678,10 +672,7 @@ fn versions_table(ui: &mut Ui, theme: &Theme, details: &Details, actions: &mut V
                     size: theme.text.caption.size,
                     face: Face::Medium,
                 };
-                let text = RichText::new(tag)
-                    .font(token.font_id())
-                    .color(theme.color.accent);
-                ui.add(Label::new(text).selectable(false));
+                ui.add(Text::new(tag, token, theme.color.accent));
             }
         });
         row.cell(|ui| {

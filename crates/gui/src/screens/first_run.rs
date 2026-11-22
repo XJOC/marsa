@@ -15,7 +15,7 @@
 //! the hosts block for setup (the window cannot read whether setup ran in an
 //! earlier session), the site list for the last.
 
-use eframe::egui::{Label, RichText, Ui, vec2};
+use eframe::egui::{Ui, vec2};
 use marsa_core::recipes::Platform;
 use marsa_core::runtimes::Runtime;
 
@@ -24,7 +24,7 @@ use crate::model::{self, Action, InstallStep, Model, Pick, Setup, SitesNotice};
 use crate::strings::{self, ReportLine};
 use crate::theme::page::FIRST_RUN_WIDTH;
 use crate::theme::{Direction, Theme};
-use crate::widgets::{Button, Progress, Stage, StepCard};
+use crate::widgets::{Button, Progress, Stage, StepCard, Text};
 
 /// What the panel says.
 #[derive(Debug, PartialEq)]
@@ -227,14 +227,16 @@ pub fn show(ui: &mut Ui, view: &FirstRunView, theme: &Theme) -> Vec<Action> {
 fn welcome(ui: &mut Ui, theme: &Theme) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = theme.space.s1;
-        let title = RichText::new(strings::FIRST_RUN_WELCOME)
-            .font(theme.text.display.font_id())
-            .color(theme.color.ink);
-        ui.add(Label::new(title).selectable(false));
-        let intro = RichText::new(strings::FIRST_RUN_INTRO)
-            .font(theme.text.body.font_id())
-            .color(theme.color.ink2);
-        ui.add(Label::new(intro).selectable(false));
+        ui.add(Text::new(
+            strings::FIRST_RUN_WELCOME,
+            theme.text.display,
+            theme.color.ink,
+        ));
+        ui.add(Text::new(
+            strings::FIRST_RUN_INTRO,
+            theme.text.body,
+            theme.color.ink2,
+        ));
     });
 }
 
@@ -252,10 +254,7 @@ fn detail(ui: &mut Ui, theme: &Theme, detail: &Detail) {
                 } else {
                     theme.color.ink2
                 };
-                let text = RichText::new(&line.text)
-                    .font(theme.text.body_sm.font_id())
-                    .color(color);
-                ui.add(Label::new(text).selectable(false));
+                ui.add(Text::new(&line.text, theme.text.body_sm, color));
             }
         }
     }

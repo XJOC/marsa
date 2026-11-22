@@ -9,12 +9,12 @@
 //! chose, like the other widgets: the screen turns that into an action.
 
 use eframe::egui::{
-    Align2, Color32, CornerRadius, InnerResponse, Rect, Response, Role, Sense, Stroke, StrokeKind,
-    Ui, Widget, WidgetInfo, pos2, vec2,
+    Align2, Color32, CornerRadius, InnerResponse, Response, Role, Sense, Stroke, StrokeKind, Ui,
+    Widget, WidgetInfo, vec2,
 };
 
 use super::keys::roving_keys;
-use super::{Look, Touch, group_button, layout, paint_focus_ring, slot, tab_stop, touched};
+use super::{Look, Touch, group_button, layout, paint_focus_ring, slot, spot, tab_stop, touched};
 use crate::theme::{Direction, Face, TextToken, Theme};
 
 /// The most and the fewest options a control has (components.md).
@@ -166,10 +166,7 @@ impl<'a, T: Copy + PartialEq> Segmented<'a, T> {
         let mut spots = Vec::new();
         for width in &widths {
             let x = slot(direction, rect, offset, *width);
-            spots.push(Rect::from_min_size(
-                pos2(x, rect.top() + inset),
-                vec2(*width, option_height),
-            ));
+            spots.push(spot(x, rect.top() + inset, *width, option_height));
             offset += width + inset;
         }
         // One Tab stop for the whole control: the option that has the focus,
@@ -265,6 +262,7 @@ mod tests {
     use crate::theme::tests::{TEXT, contrast};
     use crate::theme::{DARK, LIGHT};
     use crate::widgets::harness::Harness;
+    use eframe::egui::{Rect, pos2};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Mode {

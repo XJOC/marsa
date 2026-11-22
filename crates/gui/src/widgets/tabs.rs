@@ -19,7 +19,9 @@ use eframe::egui::{
 };
 
 use super::keys::roving_keys;
-use super::{Look, Touch, group_button, layout, paint_focus_ring, quiet_fill, slot, tab_stop};
+use super::{
+    Look, Touch, group_button, layout, paint_focus_ring, quiet_fill, slot, spot, tab_stop,
+};
 use crate::theme::{Direction, Face, TextToken, Theme};
 
 /// What a tab is made of in one state.
@@ -108,10 +110,7 @@ impl<'a, T: Copy + PartialEq> Tabs<'a, T> {
         let mut spots = Vec::with_capacity(widths.len());
         for width in &widths {
             let x = slot(direction, rect, offset, *width);
-            spots.push(Rect::from_min_size(
-                pos2(x, rect.top()),
-                vec2(*width, height),
-            ));
+            spots.push(spot(x, rect.top(), *width, height));
             offset += width + theme.space.s1;
         }
 

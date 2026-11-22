@@ -28,6 +28,7 @@ use super::field::Field;
 use super::icons::{Glyph, Icon};
 use super::notice::{Notice, NoticeBar, Notices, Progress};
 use super::segmented::Segmented;
+use super::spot;
 use super::status::{
     Health, PathStep, PillState, RequestPath, StatePill, StatusDot, StatusSentence, StepState,
 };
@@ -535,9 +536,11 @@ fn dialogs_page(ui: &mut Ui, theme: &Theme) {
     );
     let card = Rect::from_min_size(at, vec2(theme.size.dialog_width, height));
     unlink().show_card(&mut ui.new_child(UiBuilder::new().max_rect(card)));
-    let calm = Rect::from_min_size(
-        pos2(card.right() + theme.space.s6, at.y),
-        vec2(theme.size.dialog_width, height),
+    let calm = spot(
+        card.right() + theme.space.s6,
+        at.y,
+        theme.size.dialog_width,
+        height,
     );
     let dialog = ConfirmDialog::new(
         "gallery_install",

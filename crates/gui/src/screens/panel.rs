@@ -12,10 +12,10 @@
 //! Xdebug flips. The footer asks the tray, by the way the panel exits
 //! ([`PanelExit`]).
 
-use eframe::egui::{Align2, Key, Label, Margin, Rect, RichText, ScrollArea, Ui, vec2};
+use eframe::egui::{Align2, Key, Margin, Rect, ScrollArea, Ui, vec2};
 
 use super::home::{self, DefaultPhp};
-use super::sites::{Mark, mute, status_line};
+use super::lines::{Mark, mute, status_line};
 use crate::model::NoticeSource;
 use crate::model::{Action, Connection, MAIN_RUNTIME, Model};
 use crate::panel::{MAX_SITES, PanelExit};
@@ -25,7 +25,9 @@ use crate::theme::{Direction, Theme, UNIT};
 use crate::widgets::panel::{
     FooterLink, SiteRow, SwitchRow, divider, footer_divider, footer_link_height, frame,
 };
-use crate::widgets::{Button, Health, PickerSize, StatusDot, VersionPick, VersionPicker, whole};
+use crate::widgets::{
+    Button, Health, PickerSize, StatusDot, Text, VersionPick, VersionPicker, whole,
+};
 
 /// How many version buttons stand in a row of the panel.
 const VERSION_COLUMNS: usize = 4;
@@ -332,10 +334,7 @@ fn controls_section(ui: &mut Ui, theme: &Theme, view: &PanelView, actions: &mut 
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = theme.space.group_gap_max;
             if let Some(php) = &view.php {
-                let label = RichText::new(strings::DEFAULT_PHP)
-                    .font(theme.text.body_sm.font_id())
-                    .color(theme.color.ink2);
-                ui.add(Label::new(label).selectable(false));
+                ui.add(Text::small(theme, strings::DEFAULT_PHP));
                 default_php(ui, php, actions);
             }
             if let Some(xdebug) = &view.xdebug {

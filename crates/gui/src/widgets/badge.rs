@@ -8,11 +8,11 @@
 
 use eframe::egui::{
     Color32, CornerRadius, Painter, Pos2, Rect, Response, Role, Sense, Stroke, StrokeKind, Ui,
-    Vec2, Widget, WidgetInfo, pos2, vec2,
+    Vec2, Widget, WidgetInfo, vec2,
 };
 
 use super::icons::Icon;
-use super::{Look, Touch, layout, paint_focus_ring, slot};
+use super::{Look, Touch, layout, paint_focus_ring, slot, spot};
 use crate::strings;
 use crate::theme::{Direction, Face, Section, TextToken, Theme};
 
@@ -201,10 +201,10 @@ impl Widget for RowBadge<'_> {
             }
             let inner = rect.shrink2(vec2(pad, 0.0));
             let x = slot(direction, inner, 0.0, icon);
-            let icon_spot = Rect::from_min_size(pos2(x, rect.top()), vec2(icon, size.y));
+            let icon_spot = spot(x, rect.top(), icon, size.y);
             Icon::of(self.section).paint(painter, theme, icon_spot, color);
             let x = slot(direction, inner, icon + gap, galley.size().x);
-            let spot = Rect::from_min_size(pos2(x, rect.top()), vec2(galley.size().x, size.y));
+            let spot = spot(x, rect.top(), galley.size().x, size.y);
             let at = eframe::egui::Align2::LEFT_CENTER.align_size_within_rect(galley.size(), spot);
             painter.galley(at.min, galley, color);
             if look.focused {

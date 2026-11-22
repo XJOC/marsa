@@ -22,7 +22,7 @@ use std::collections::VecDeque;
 use eframe::egui::{ScrollArea, Ui, Vec2, vec2};
 use marsa_core::types::LogStream;
 
-use super::sites::message;
+use super::lines::message;
 use crate::logline::{self, LogLevel};
 use crate::model::{self, Action, LOG_SERVICE, LogRow, LogSource, Model, Route};
 use crate::strings;

@@ -21,7 +21,7 @@ use eframe::egui::{
 };
 
 use super::icons::{Glyph, Icon};
-use super::{Button, layout, slot, whole};
+use super::{Button, layout, slot, spot, whole};
 use crate::strings;
 use crate::theme::{Direction, PERCENT, TextToken, Theme, UNIT};
 
@@ -354,7 +354,7 @@ impl<'a> NoticeBar<'a> {
             // `size` at `offset` from the start, level with the first line.
             let centered = |size: Vec2, offset: f32| {
                 let x = slot(direction, rect, offset, size.x);
-                let line = Rect::from_min_size(pos2(x, rect.top()), vec2(size.x, zone));
+                let line = spot(x, rect.top(), size.x, zone);
                 Align2::LEFT_CENTER.align_size_within_rect(size, line)
             };
             ui.put(
@@ -410,7 +410,7 @@ impl<'a> NoticeBar<'a> {
 pub fn fill_rect(direction: Direction, track: Rect, fraction: f32) -> Rect {
     let width = track.width() * share(fraction);
     let x = slot(direction, track, 0.0, width);
-    Rect::from_min_size(pos2(x, track.top()), vec2(width, track.height()))
+    spot(x, track.top(), width, track.height())
 }
 
 /// `fraction` kept between nothing and a whole; not-a-number is nothing.
@@ -460,26 +460,20 @@ impl Widget for Progress<'_> {
             let painter = ui.painter();
             let line = |offset: f32, size: f32| {
                 let x = slot(direction, rect, offset, size);
-                Rect::from_min_size(pos2(x, rect.top()), vec2(size, galley.size().y))
+                spot(x, rect.top(), size, galley.size().y)
             };
             match self.fraction {
                 Some(fraction) => {
                     let words = line(0.0, galley.size().x);
                     painter.galley(words.min, galley, theme.color.ink2);
-                    let track = Rect::from_min_size(
-                        pos2(rect.left(), rect.bottom() - bar),
-                        vec2(width, bar),
-                    );
+                    let track = spot(rect.left(), rect.bottom() - bar, width, bar);
                     let corner = theme.radius.full;
                     painter.rect_filled(track, corner, theme.color.selected);
                     let fill = fill_rect(direction, track, fraction);
                     painter.rect_filled(fill, corner, theme.color.accent);
                 }
                 None => {
-                    let spot = Rect::from_min_size(
-                        pos2(slot(direction, rect, 0.0, icon), rect.top()),
-                        vec2(icon, height),
-                    );
+                    let spot = spot(slot(direction, rect, 0.0, icon), rect.top(), icon, height);
                     Icon::Spinner.paint(painter, theme, spot, theme.color.accent);
                     let words = line(icon + gap, galley.size().x);
                     let at = Align2::LEFT_CENTER.align_size_within_rect(

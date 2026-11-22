@@ -46,6 +46,7 @@ pub mod step;
 pub mod switch;
 pub mod table;
 pub mod tabs;
+pub mod text;
 pub mod tile;
 pub mod version;
 
@@ -54,6 +55,7 @@ use std::sync::Arc;
 use eframe::egui::text::Galley;
 use eframe::egui::{
     Color32, CornerRadius, Id, Painter, Rect, Response, Sense, Stroke, StrokeKind, Ui, accesskit,
+    pos2, vec2,
 };
 
 use crate::theme::{Direction, TextToken, Theme};
@@ -79,6 +81,7 @@ pub use step::{Stage, StepCard};
 pub use switch::Switch;
 pub use table::{LineTone, RowHeight, Table, TableColumn, TableOutput};
 pub use tabs::Tabs;
+pub use text::Text;
 pub use tile::{Monogram, SectionTile, TileSize, runtime_monogram};
 pub use version::{PickerSize, Setting, VersionMenu, VersionPick, VersionPicker};
 
@@ -193,6 +196,12 @@ pub fn paint_focus_ring(painter: &Painter, theme: &Theme, rect: Rect, radius: u8
         Stroke::new(theme.focus.width, theme.color.accent),
         StrokeKind::Outside,
     );
+}
+
+/// A box `width` by `height` whose top-left corner is at `x` and `top`: the
+/// cell a widget lays out one part in.
+pub fn spot(x: f32, top: f32, width: f32, height: f32) -> Rect {
+    Rect::from_min_size(pos2(x, top), vec2(width, height))
 }
 
 /// The x of the left edge of an item `width` wide that sits `offset` from

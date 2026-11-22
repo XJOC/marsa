@@ -17,17 +17,20 @@
 
 use std::path::Path;
 
-use eframe::egui::{CursorIcon, Label, RichText, Sense, Ui, vec2};
+use eframe::egui::{CursorIcon, Sense, Ui, vec2};
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::Site;
 
+use super::lines;
 use super::sites::{self, Reason};
 use crate::model::{Action, Choice, Model, Route};
 use crate::screens::home::{PhpChoice, php_choices};
 use crate::strings;
 use crate::theme::page::SITE_FACT_LABEL;
 use crate::theme::{Direction, Theme};
-use crate::widgets::{Button, Icon, QuietTone, Switch, VersionPick, VersionPicker, fact_card};
+use crate::widgets::{
+    Button, Icon, QuietTone, Switch, Text, VersionPick, VersionPicker, fact_card,
+};
 
 /// What the page says.
 #[derive(Debug, PartialEq)]
@@ -191,7 +194,7 @@ pub fn show(ui: &mut Ui, view: &SiteView<'_>, theme: &Theme) -> Vec<Action> {
             } else {
                 strings::site_missing(missing.name)
             };
-            sites::message(ui, theme, &text);
+            lines::message(ui, theme, &text);
         }
         SiteView::Found(page) => found(ui, theme, page, &mut actions),
     }
@@ -201,7 +204,7 @@ pub fn show(ui: &mut Ui, view: &SiteView<'_>, theme: &Theme) -> Vec<Action> {
 fn found(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Action>) {
     header(ui, theme, page, actions);
     if let Some(text) = &page.removing {
-        sites::mute(ui, theme, text);
+        lines::mute(ui, theme, text);
     }
     php_section(ui, theme, page, actions);
     facts_card(ui, theme, page, actions);
@@ -214,16 +217,11 @@ fn header(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Action
         ui.spacing_mut().item_spacing.x = theme.space.s3;
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = theme.space.s1;
-            let name = RichText::new(page.name)
-                .font(theme.text.display.font_id())
-                .color(theme.color.ink);
-            ui.add(Label::new(name).selectable(false));
+            ui.add(Text::new(page.name, theme.text.display, theme.color.ink));
             // The address is a link for the pointer; the keyboard has "Open
             // in browser" (`Sense::CLICK` takes no Tab stop).
-            let url = RichText::new(&page.url)
-                .font(theme.text.body.font_id())
-                .color(theme.color.accent);
-            let link = ui.add(Label::new(url).selectable(false).sense(Sense::CLICK));
+            let link = ui
+                .add(Text::new(&page.url, theme.text.body, theme.color.accent).sense(Sense::CLICK));
             if link.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 actions.push(Action::OpenSite(page.name.to_owned()));
             }
@@ -266,10 +264,11 @@ fn php_section(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<A
                 // The link has padding of its own after the dot, so the dot
                 // gets some before it.
                 ui.add_space(theme.space.s2);
-                let dot = RichText::new(strings::HINT_SEPARATOR)
-                    .font(theme.text.body_strong.font_id())
-                    .color(theme.color.ink2);
-                ui.add(Label::new(dot).selectable(false));
+                ui.add(Text::new(
+                    strings::HINT_SEPARATOR,
+                    theme.text.body_strong,
+                    theme.color.ink2,
+                ));
                 if ui.add(Button::quiet(strings::USE_SITE_FILES)).clicked() {
                     actions.push(Action::SitePhp {
                         site: page.name.to_owned(),
@@ -320,11 +319,11 @@ fn facts_card(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Ac
             }
         });
         rows.row(strings::FACT_FOLDER, |ui| {
-            sites::path(ui, theme, facts.root, page.home);
+            lines::path(ui, theme, facts.root, page.home);
         });
         if let Some(docroot) = facts.docroot {
             rows.row(strings::FACT_DOCROOT, |ui| {
-                sites::path(ui, theme, docroot, page.home);
+                lines::path(ui, theme, docroot, page.home);
             });
         }
         rows.row(strings::FACT_KIND, |ui| {
@@ -345,10 +344,7 @@ fn facts_card(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Ac
 }
 
 fn text(ui: &mut Ui, theme: &Theme, text: &str) -> eframe::egui::Response {
-    let text = RichText::new(text)
-        .font(theme.text.body.font_id())
-        .color(theme.color.ink);
-    ui.add(Label::new(text).selectable(false))
+    ui.add(Text::body(theme, text))
 }
 
 /// "Unlink this site…", a quiet button at the end that opens the
@@ -386,7 +382,7 @@ fn unlink(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Action
             // The words line up with the text of the button above, which has
             // its own padding.
             ui.add_space(theme.space.s3);
-            sites::mute(ui, theme, &strings::site_from_parked(&shown));
+            lines::mute(ui, theme, &strings::site_from_parked(&shown));
             let label = strings::forget_folder_shown(&shown);
             let button = Button::secondary(&label).disabled_if(
                 page.forget_off.is_some(),
