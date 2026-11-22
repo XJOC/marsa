@@ -18,8 +18,9 @@ use marsa_core::recipes::Platform;
 use marsa_core::services::{ServiceSpec, StopMethod};
 use semver::Version;
 
-use super::{Pool, Skip, fallback_port, fpm_id};
+use super::{Pool, Skip, fallback_port};
 use crate::daemon::services::caddy::{RESTART, STOP_GRACE};
+use marsa_core::types::{PoolKind, ServiceId};
 
 /// The php-cgi pool of the installed PHP `version` under `data_dir`. Pure:
 /// nothing is read or written. `php.ini` points to `ca_bundle` when it is
@@ -53,7 +54,7 @@ pub fn pool_with(files: PhpFiles) -> Result<Pool, Skip> {
     let port = fallback_port(files.minor);
     let plan = cgi_pool(&files, port).map_err(php_error)?;
     let spec = ServiceSpec {
-        id: fpm_id(files.minor),
+        id: ServiceId::Pool(PoolKind::Cgi, files.minor),
         program: plan.program,
         args: plan.args,
         env: plan.env,
@@ -89,7 +90,7 @@ mod tests {
         let files = PhpFiles::new(&data, &version);
         assert_eq!(pool.dial, Dial::Tcp(19084));
         assert!(pool.fpm_conf.is_empty(), "php-cgi has no config file");
-        assert_eq!(pool.spec.id, fpm_id(files.minor));
+        assert_eq!(pool.spec.id.to_string(), "php-cgi-8.4");
         assert_eq!(pool.spec.program, files.php_cgi);
         let ini = files.ini_file.to_str().unwrap();
         assert_eq!(pool.spec.args, ["-b", "127.0.0.1:19084", "-c", ini]);

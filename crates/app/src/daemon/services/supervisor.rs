@@ -461,14 +461,9 @@ async fn run_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    // Not the daemon's environment: `MYSQL_PWD`, `PGPASSWORD` and the like
-    // would reach a program that is only asked to stop a server. The one
-    // variable a Windows program needs to start is `SystemRoot`; on the
-    // other systems (tests with a fake program) `PATH`.
-    let kept = if cfg!(windows) { "SystemRoot" } else { "PATH" };
-    if let Some(value) = std::env::var_os(kept) {
-        cmd.env(kept, value);
-    }
+    // Not the daemon's environment: the program is only asked to stop a
+    // server.
+    process::keep_start_variable(&mut cmd);
     process::hide_console_window(&mut cmd);
     shared.note(&format!("marsad: asking {} to stop with {name}", shared.id));
     let mut program = match cmd.spawn() {

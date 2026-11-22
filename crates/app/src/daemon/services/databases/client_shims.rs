@@ -177,7 +177,7 @@ impl ClientShims {
     /// a program.
     fn put(&self, path: &Path) -> io::Result<()> {
         let temp = beside(path, ".", "tmp");
-        link_or_copy(&self.shim, &temp)?;
+        fs::link_or_copy(&self.shim, &temp)?;
         let placed = replace(&temp, path);
         if placed.is_err() {
             // Best effort: the move already failed, and that is the error.
@@ -255,25 +255,10 @@ fn has_mark(bytes: &[u8]) -> bool {
     bytes.windows(mark.len()).any(|window| window == mark)
 }
 
-/// `dst` as `src`: a hard link on macOS and Linux, as `install.sh` makes the
-/// shims, and a copy where a link fails (another volume). A copy on
-/// Windows, where a shim is never a link (architecture.md section 7).
-fn link_or_copy(src: &Path, dst: &Path) -> io::Result<()> {
-    // `cfg!` outside `platform`: the one difference between the systems
-    // here, std only, as in the install scripts.
-    if !cfg!(windows) && stdfs::hard_link(src, dst).is_ok() {
-        return Ok(());
-    }
-    stdfs::copy(src, dst).map(drop)
-}
-
-/// Moves `from` to `to`, over an older shim at `to`. Unix replaces it in one
-/// step. Windows cannot write over the file of a running program, but can
-/// rename it, so the old one is moved aside first (architecture.md section
-/// 10).
+/// Moves `from` to `to`, over an older shim at `to`, which is moved aside
+/// first where the system needs it ([`fs::needs_rename_aside`]).
 fn replace(from: &Path, to: &Path) -> io::Result<()> {
-    // `cfg!` outside `platform`: one known Windows behavior, std only.
-    if cfg!(windows) && stdfs::symlink_metadata(to).is_ok() {
+    if fs::needs_rename_aside(to) {
         retire(to)?;
     }
     fs::rename_retry(from, to)

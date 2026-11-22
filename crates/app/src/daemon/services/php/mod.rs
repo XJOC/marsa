@@ -46,7 +46,7 @@ use marsa_core::caddy::{CaddyPaths, Dial, PhpPools, ca_bundle_text, system_ca_bu
 use marsa_core::config::{self, ConfigError, ConfigPaths};
 use marsa_core::php::{Listen, PhpError, PhpFiles, PhpMinor, fpm_conf, fpm_listen, php_ini};
 use marsa_core::platform::process;
-use marsa_core::recipes::{self, Platform};
+use marsa_core::recipes::{self, Os, Platform};
 use marsa_core::runtimes::{Runtime, RuntimesDir, RuntimesError};
 use marsa_core::services::{ServiceSpec, StopMethod};
 use marsa_core::sites::{Site, SiteKind};
@@ -86,18 +86,14 @@ pub fn wanted_pools(sites: &[Site]) -> BTreeMap<PhpMinor, Version> {
     wanted
 }
 
-/// The service id of the pool of `minor`: `php-fpm-8.4`, or `php-cgi-8.4` on
-/// Windows, where php-cgi serves PHP (ADR 0016). Also its log file,
-/// `logs/<id>.log`.
+/// The service id of the pool of `minor` on the system this daemon runs on:
+/// `php-fpm-8.4`, or `php-cgi-8.4` on Windows, where php-cgi serves PHP (ADR
+/// 0016). Also its log file, `logs/<id>.log`. A pool's spec names its own
+/// program instead ([`fpm_spec`], `cgi::pool_with`), so a test of another
+/// system's pool gets that system's id.
 pub fn fpm_id(minor: PhpMinor) -> ServiceId {
-    // `cfg!` outside `platform`: the id names the program that runs on this
-    // system, and the daemon always runs on the system it was built for.
-    let kind = if cfg!(windows) {
-        PoolKind::Cgi
-    } else {
-        PoolKind::Fpm
-    };
-    ServiceId::Pool(kind, minor)
+    let os = Platform::current().map_or(Os::Any, Platform::os);
+    ServiceId::pool(os, minor)
 }
 
 /// The port php-fpm listens on when the socket path is too long:
@@ -134,7 +130,7 @@ pub fn fpm_spec(program: PathBuf, files: &PhpFiles) -> ServiceSpec {
     // OS and is valid Unicode in practice.
     let path = |path: &Path| path.to_string_lossy().into_owned();
     ServiceSpec {
-        id: fpm_id(files.minor),
+        id: ServiceId::Pool(PoolKind::Fpm, files.minor),
         program,
         args: vec![
             "--nodaemonize".to_owned(),
@@ -431,12 +427,13 @@ pub fn plan_pools<P: PartialEq>(
 pub struct Pools(Mutex<BTreeMap<PhpMinor, Arc<Mutex<ServiceRuntime>>>>);
 
 impl Pools {
-    /// The runtime of the pool of `minor`, made on first use.
-    pub fn runtime(&self, minor: PhpMinor) -> Arc<Mutex<ServiceRuntime>> {
+    /// The runtime of the pool `id` (`php-fpm-8.4`), made on first use. One
+    /// per PHP line.
+    pub fn runtime(&self, id: ServiceId, minor: PhpMinor) -> Arc<Mutex<ServiceRuntime>> {
         let mut pools = lock(&self.0);
         let runtime = pools
             .entry(minor)
-            .or_insert_with(|| Arc::new(Mutex::new(ServiceRuntime::new(fpm_id(minor)))));
+            .or_insert_with(|| Arc::new(Mutex::new(ServiceRuntime::new(id))));
         Arc::clone(runtime)
     }
 
@@ -453,9 +450,12 @@ impl Pools {
     /// The runtime of the pool whose service id is `id` (`php-fpm-8.4`), if
     /// it was started in this run.
     pub fn find(&self, id: ServiceId) -> Option<Arc<Mutex<ServiceRuntime>>> {
-        let pools = lock(&self.0);
-        let mut found = pools.iter().filter(|(minor, _)| fpm_id(**minor) == id);
-        found.next().map(|(_, runtime)| Arc::clone(runtime))
+        let ServiceId::Pool(_, minor) = id else {
+            return None;
+        };
+        let runtime = lock(&self.0).get(&minor).cloned()?;
+        let same = lock(&runtime).status.id == id;
+        same.then_some(runtime)
     }
 }
 
@@ -529,10 +529,10 @@ impl PhpManager {
         };
 
         let changes = plan_pools(&self.running, &pools, |minor| {
-            daemon.proc_alive(fpm_id(minor))
+            daemon.proc_alive(self.id(minor))
         });
         for minor in &changes.stop {
-            stop_pool(daemon, *minor).await;
+            stop_pool(daemon, self.id(*minor)).await;
             self.running.remove(minor);
             info!(php = %minor, "php-fpm stopped: no site needs it");
         }
@@ -541,7 +541,7 @@ impl PhpManager {
                 continue;
             };
             // The run before, if any: changed, or ended.
-            stop_pool(daemon, *minor).await;
+            stop_pool(daemon, self.id(*minor)).await;
             if self.start_pool(daemon, pool).await {
                 self.running.insert(*minor, pool.clone());
             } else {
@@ -561,11 +561,17 @@ impl PhpManager {
         )
     }
 
+    /// The service id of the pool of `minor` on this manager's system:
+    /// php-cgi on Windows, php-fpm elsewhere.
+    fn id(&self, minor: PhpMinor) -> ServiceId {
+        ServiceId::pool(self.platform.map_or(Os::Any, Platform::os), minor)
+    }
+
     /// Starts the pool under the supervisor, after the orphan check. `false`
     /// if it cannot start: its status then says why.
     async fn start_pool(&self, daemon: &Daemon, pool: &Pool) -> bool {
         let id = &pool.spec.id;
-        let runtime = daemon.pools().runtime(pool.files.minor);
+        let runtime = daemon.pools().runtime(pool.spec.id, pool.files.minor);
         let pid_file = PidFile::new(daemon.data_dir(), pool.files.minor);
         if let Err(blocked) = self.clear_orphan(daemon, pool, &pid_file).await {
             warn!(service = %id, code = blocked.code, reason = %blocked.reason, "php-fpm was not started");
@@ -627,7 +633,7 @@ impl PhpManager {
         };
         // The master, or the workers it left behind.
         let found = orphans.inspect().await?;
-        let runtime = daemon.pools().runtime(pool.files.minor);
+        let runtime = daemon.pools().runtime(pool.spec.id, pool.files.minor);
         // Only right before a signal: a stale file alone stops nothing.
         let note_stop = || lock(&runtime).note(daemon.events(), orphan::STOPPING_ORPHAN);
         orphans.reap(found, &note_stop).await
@@ -640,11 +646,11 @@ pub fn runs_pools(platform: Platform) -> bool {
     platform != Platform::Any
 }
 
-async fn stop_pool(daemon: &Daemon, minor: PhpMinor) {
-    if let Some(handle) = daemon.take_proc(fpm_id(minor))
+async fn stop_pool(daemon: &Daemon, id: ServiceId) {
+    if let Some(handle) = daemon.take_proc(id)
         && let Err(err) = handle.stop().await
     {
-        warn!(php = %minor, %err, "the php-fpm task failed");
+        warn!(service = %id, %err, "the php-fpm task failed");
     }
 }
 
@@ -794,7 +800,12 @@ mod tests {
 
     #[test]
     fn ids_and_fallback_ports_follow_the_php_line() {
-        let program = if cfg!(windows) { "php-cgi" } else { "php-fpm" };
+        let os = Platform::current().map_or(Os::Any, Platform::os);
+        let program = if os == Os::Windows {
+            "php-cgi"
+        } else {
+            "php-fpm"
+        };
         assert_eq!(fpm_id(PHP84).to_string(), format!("{program}-8.4"));
         assert_eq!(fallback_port(PHP84), 19084);
         assert_eq!(fallback_port(PhpMinor { major: 7, minor: 4 }), 19074);
@@ -823,7 +834,8 @@ mod tests {
         let program = PathBuf::from("/data/runtimes/php/8.4.3/bin/php-fpm");
         let spec = fpm_spec(program.clone(), &files);
 
-        assert_eq!(spec.id, fpm_id(PHP84));
+        // php-fpm's id on every system the test runs on.
+        assert_eq!(spec.id.to_string(), "php-fpm-8.4");
         assert_eq!(spec.program, program);
         let conf = files.fpm_conf_file.to_str().unwrap();
         let ini = files.ini_file.to_str().unwrap();
@@ -966,6 +978,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = CaddyPaths::in_dir(dir.path());
         let before = write_ca_bundle(&paths, &SystemRoots::WindowsStore).unwrap();
+        // `cfg!`: this reads the real certificate store, which only Windows
+        // has, so the answer depends on the machine the test runs on.
         assert_eq!(before, cfg!(windows));
         if cfg!(windows) {
             let text = fs::read_to_string(paths.ca_bundle()).unwrap();
@@ -1013,7 +1027,8 @@ mod tests {
         let sites = [site("shop", SiteKind::Laravel, Some("8.4.3"))];
         let pools = php.sync(&daemon, &sites, None).await;
         assert_eq!(pools.0, BTreeMap::from([(PHP84, vec![Dial::Tcp(19084)])]));
-        assert!(daemon.proc_alive(fpm_id(PHP84)));
+        // Windows' id on any machine: the manager is for Windows.
+        assert!(daemon.proc_alive(ServiceId::pool(Os::Windows, PHP84)));
         let config = dir.path().join("php").join("8.4");
         assert!(config.join("php.ini").is_file());
         assert!(!config.join("php-fpm.conf").exists());

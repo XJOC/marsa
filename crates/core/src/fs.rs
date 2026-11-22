@@ -147,6 +147,27 @@ pub fn random_hex(bytes: usize) -> io::Result<String> {
     Ok(crate::hex::encode(&buffer))
 }
 
+/// `dst` as `src`: a hard link on macOS and Linux, as `install.sh` makes the
+/// shims, and a copy where a link fails (another volume). A copy on
+/// Windows, where a program file is never a link (architecture.md section 7).
+pub fn link_or_copy(src: &Path, dst: &Path) -> io::Result<()> {
+    // `cfg!` outside `platform`: the one difference between the systems
+    // here, std only, as in the install scripts.
+    if !cfg!(windows) && fs::hard_link(src, dst).is_ok() {
+        return Ok(());
+    }
+    fs::copy(src, dst).map(drop)
+}
+
+/// Whether the file at `path` has to be renamed aside before another file
+/// takes its name. Windows cannot write over the file of a running program,
+/// but can rename it (architecture.md section 10); Unix replaces it in one
+/// step.
+pub fn needs_rename_aside(path: &Path) -> bool {
+    // `cfg!` outside `platform`: one known Windows behavior, std only.
+    cfg!(windows) && fs::symlink_metadata(path).is_ok()
+}
+
 /// `ERROR_ACCESS_DENIED` (5), `ERROR_SHARING_VIOLATION` (32), or
 /// `ERROR_LOCK_VIOLATION` (33).
 fn is_held_on_windows(err: &io::Error) -> bool {
@@ -230,6 +251,20 @@ mod tests {
         write_atomic(&target, b"x", None).unwrap_err();
         assert!(!temp_path(&target).exists());
         assert!(target.is_dir());
+    }
+
+    /// Only an existing file on Windows is moved aside; a missing one never
+    /// is.
+    #[test]
+    fn only_windows_renames_an_existing_file_aside() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("shim");
+        assert!(!needs_rename_aside(&file));
+        fs::write(&file, "x").unwrap();
+        assert_eq!(needs_rename_aside(&file), cfg!(windows));
+        let copy = dir.path().join("copy");
+        link_or_copy(&file, &copy).unwrap();
+        assert_eq!(fs::read(&copy).unwrap(), b"x");
     }
 
     #[cfg(unix)]

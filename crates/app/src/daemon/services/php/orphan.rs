@@ -2107,7 +2107,9 @@ mod tests {
             process::write_pid_file(&pid_file.path, &record).unwrap();
         };
         let noted = |daemon: &Daemon| {
-            let lines = lock(&daemon.pools().runtime(PHP84)).logs.recent();
+            let lines = lock(&daemon.pools().runtime(fpm_id(PHP84), PHP84))
+                .logs
+                .recent();
             lines.iter().filter(|l| l.text == STOPPING_ORPHAN).count()
         };
 
@@ -2204,7 +2206,7 @@ mod tests {
         let pool = bare_pool(dir.path(), listen, "/never/run/php-fpm", &[]);
 
         assert!(!php.start_pool(&daemon, &pool).await);
-        let runtime = daemon.pools().find(fpm_id(PHP84)).expect("listed");
+        let runtime = daemon.pools().find(pool.spec.id).expect("listed");
         let (status, lines) = {
             let runtime = lock(&runtime);
             (runtime.status.clone(), runtime.logs.recent())
@@ -2217,7 +2219,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.text.starts_with(note)), "{lines:?}");
         assert!(fake.signals().is_empty());
         assert!(pid_file.path.exists(), "kept for the next try");
-        assert!(!daemon.proc_alive(fpm_id(PHP84)));
+        assert!(!daemon.proc_alive(pool.spec.id));
     }
 
     // Runs `/bin/sleep` as the pool, which Windows does not have.
@@ -2235,7 +2237,7 @@ mod tests {
         assert!(daemon.proc_alive(fpm_id(PHP84)));
         assert!(!pid_file.path.exists(), "forgotten");
         assert!(fake.signals().is_empty());
-        super::super::stop_pool(&daemon, PHP84).await;
+        super::super::stop_pool(&daemon, fpm_id(PHP84)).await;
         assert!(!daemon.proc_alive(fpm_id(PHP84)));
     }
 
@@ -2990,7 +2992,7 @@ mod tests {
             let status = lock(&runtime).status.clone();
             assert_eq!((status.pid, status.restarts), (Some(second.pid), 1));
 
-            stop_pool(&daemon, PHP84).await;
+            stop_pool(&daemon, fpm_id(PHP84)).await;
             assert_eq!(read(), None);
             assert!(recorder.signals().is_empty());
         }
@@ -3054,7 +3056,7 @@ mod tests {
             assert!(accepted([new]).contains(&record.exe), "{record:?}");
 
             // A clean stop deletes it.
-            stop_pool(&daemon, PHP84).await;
+            stop_pool(&daemon, fpm_id(PHP84)).await;
             assert!(!pid_file.path.exists());
             assert_eq!(lock(&runtime).status.state, ServiceState::Stopped);
         }
@@ -3236,7 +3238,7 @@ mod tests {
                 process::read_pid_file(&pid_file.path).is_some_and(|r| r.pid == pid)
             })
             .await;
-            stop_pool(&daemon, PHP84).await;
+            stop_pool(&daemon, fpm_id(PHP84)).await;
             assert!(!pid_file.path.exists());
             assert_eq!(lock(&runtime).status.state, ServiceState::Stopped);
         }
@@ -3326,7 +3328,7 @@ mod tests {
                 process::read_pid_file(&pid_file.path).is_some_and(|r| r.pid == pid)
             })
             .await;
-            stop_pool(&daemon, PHP84).await;
+            stop_pool(&daemon, fpm_id(PHP84)).await;
             assert!(!pid_file.path.exists());
 
             // Off the leash, the other one ends by itself: no process is left.
