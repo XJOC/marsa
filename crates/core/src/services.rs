@@ -2,7 +2,7 @@
 //! recent output.
 //!
 //! Pure data and functions, so this module needs no `full` feature. The
-//! daemon's supervisor (`marsa::daemon::supervisor`) runs the process.
+//! daemon's supervisor (`marsa::daemon::services::supervisor`) runs the process.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;

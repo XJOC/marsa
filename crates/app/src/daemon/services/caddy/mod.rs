@@ -148,8 +148,8 @@ mod tests {
     use super::admin::load_error;
     use super::manager::{tag_config, write_config};
     use super::watch::is_port_conflict;
+    use crate::daemon::services::supervisor::{ServiceHandle, ServiceRuntime};
     use crate::daemon::state::Daemon;
-    use crate::daemon::supervisor::{ServiceHandle, ServiceRuntime};
 
     fn line(stream: LogStream, text: &str) -> LogLine {
         LogLine {

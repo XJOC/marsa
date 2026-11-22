@@ -56,9 +56,9 @@ use tracing::{info, warn};
 use self::orphan::{Blocked, Orphans, PidFile};
 use super::caddy::orphan::Ladder;
 use super::caddy::{RESTART, STOP_GRACE};
-use super::services::probe::{ProcessProbe, SystemProbe};
-use super::state::Daemon;
+use super::probe::{ProcessProbe, SystemProbe};
 use super::supervisor::{ServiceRuntime, Supervisor, lock};
+use crate::daemon::state::Daemon;
 
 /// The TCP fallback of PHP `major.minor` is `19000 + major * 10 + minor`:
 /// 19084 for PHP 8.4.

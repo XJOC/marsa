@@ -13,7 +13,7 @@ use semver::Version;
 use tracing::{info, warn};
 
 use super::manager::{ActionError, ServerManager};
-use crate::daemon::caddy::{Launch, Launched};
+use crate::daemon::services::caddy::{Launch, Launched};
 use crate::daemon::state::Daemon;
 
 /// [`set_enabled`] on a blocking thread, under `Daemon::lock_global`.

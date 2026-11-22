@@ -30,8 +30,8 @@ use super::orphan;
 use super::settings::{any_installed, read_settings, save_enabled};
 use crate::daemon::services::actions::{Busy, take_turn};
 use crate::daemon::services::probe::{ProcessProbe, SystemProbe};
+use crate::daemon::services::supervisor::{EXITED, ServiceRuntime, lock};
 use crate::daemon::state::Daemon;
-use crate::daemon::supervisor::{EXITED, ServiceRuntime, lock};
 use prepare::Prepared;
 use run::Ready;
 

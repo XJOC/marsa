@@ -26,8 +26,8 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use marsa::daemon::api::router;
 use marsa::daemon::auth::AuthConfig;
-use marsa::daemon::php::fpm_id;
 use marsa::daemon::runtimes::installs::{InstallFuture, RunInstall};
+use marsa::daemon::services::php::fpm_id;
 use marsa::daemon::state::Daemon;
 use marsa_core::config::{self, ConfigPaths};
 use marsa_core::databases::clients::SHIM_MARK;
@@ -924,7 +924,7 @@ async fn a_refused_default_leaves_global_toml_as_it_was() {
 /// Registers a task as the running service `id`, as the supervisor does.
 /// `on_stop` runs when the daemon stops it.
 fn pretend_runs(served: &Served, id: &str, on_stop: impl FnOnce() + Send + 'static) {
-    use marsa::daemon::supervisor::{ServiceHandle, ServiceRuntime};
+    use marsa::daemon::services::supervisor::{ServiceHandle, ServiceRuntime};
     let cancel = tokio_util::sync::CancellationToken::new();
     let stopped = cancel.clone();
     let task = tokio::spawn(async move {

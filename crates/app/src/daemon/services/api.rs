@@ -47,13 +47,13 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::{Stream, StreamExt as _};
 
-use super::api::HttpError;
 use super::caddy::{ActionError, CADDY_ID, CaddyManager};
 use super::databases::{self, ServerManager};
 use super::dns::{DNS_ID, DnsService};
-use super::http::Rejected as _;
-use super::state::Daemon;
 use super::supervisor::{ServiceRuntime, lock};
+use crate::daemon::api::HttpError;
+use crate::daemon::http::Rejected as _;
+use crate::daemon::state::Daemon;
 
 /// The answer to an action on a service that the sites sync starts and stops.
 pub const MANAGED_BY_SITES: &str = codes::SERVICE_MANAGED_BY_SITES;
@@ -435,8 +435,8 @@ mod tests {
         let daemon = Arc::new(Daemon::new(std::path::PathBuf::new()));
         let runtime = daemon.pools.runtime(PhpMinor { major: 8, minor: 4 });
         // `php-fpm-8.4`, or `php-cgi-8.4` on Windows.
-        let pool = crate::daemon::php::fpm_id(PhpMinor { major: 8, minor: 4 });
-        let other = crate::daemon::php::fpm_id(PhpMinor { major: 8, minor: 3 });
+        let pool = crate::daemon::services::php::fpm_id(PhpMinor { major: 8, minor: 4 });
+        let other = crate::daemon::services::php::fpm_id(PhpMinor { major: 8, minor: 3 });
         let ready = {
             let mut runtime = lock(&runtime);
             runtime.status.state = ServiceState::Running;
@@ -608,7 +608,7 @@ mod tests {
     async fn a_held_dns_port_is_listed_as_failed_and_a_start_tries_again() {
         use crate::daemon::api::router;
         use crate::daemon::auth::AuthConfig;
-        use crate::daemon::dns::held_dns_port;
+        use crate::daemon::services::dns::held_dns_port;
         use axum::http::Request;
         use marsa_core::platform::daemon_file::{Token, daemon_authority};
         use marsa_core::types::ServiceState;

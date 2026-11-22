@@ -25,6 +25,7 @@
 //! starts with the daemon). A failure leaves the daemon running and the
 //! status `failed`.
 
+pub mod client_shims;
 mod facts;
 mod init;
 mod manager;
@@ -65,7 +66,7 @@ mod tests {
     use super::init::installed_servers;
     use super::postgres::{programs, spec as postgres_spec};
     use super::settings::{after_install, first_install};
-    use crate::daemon::caddy::Launched;
+    use crate::daemon::services::caddy::Launched;
     use crate::daemon::services::probe::{BoxFuture, ProcessProbe};
     use crate::daemon::state::Daemon;
 
@@ -74,7 +75,7 @@ mod tests {
     #[cfg(unix)]
     use {
         super::postgres::{Programs, SSL_REQUEST, ensure_cluster},
-        crate::daemon::supervisor::lock,
+        crate::daemon::services::supervisor::lock,
         marsa_core::databases::{PG_HBA_CONF, ROOT_ROLE_SQL, initdb_args, single_user_args},
         marsa_core::recipes::Os,
         marsa_core::services::StopMethod,
@@ -422,7 +423,7 @@ mod tests {
         use tempfile::TempDir;
         use tokio::task::JoinHandle;
 
-        use crate::daemon::supervisor::STOP_MARGIN;
+        use crate::daemon::services::supervisor::STOP_MARGIN;
 
         const FAKE: &str = "MARSA_FAKE_POSTGRES";
         /// Generous: a test binary can start slowly on a busy CI machine.
@@ -597,7 +598,7 @@ mod tests {
                 "#!/bin/sh\nif [ \"$1\" = --single ]; then cat > /dev/null; \
                  echo single >> '{calls}'; exit 0; fi\necho \"server $*\" >> '{calls}'\n\
                  {FAKE}='{mode}' MARSA_FAKE_POSTGRES_ARGS=\"$*\" exec '{exe}' \
-                 daemon::databases::tests::server::fake_postgres --exact --nocapture\n"
+                 daemon::services::databases::tests::server::fake_postgres --exact --nocapture\n"
             );
             for (path, script) in [(&programs.initdb, initdb), (&programs.postgres, postgres)] {
                 fs::write(path, script).unwrap();
@@ -1311,8 +1312,8 @@ mod tests {
 
         /// A fake server left running, as by a crashed `marsad`. Killed when
         /// dropped, so a failed assert leaves no process behind.
-        pub(in crate::daemon::databases) struct Orphan(
-            pub(in crate::daemon::databases) std::process::Child,
+        pub(in crate::daemon::services::databases) struct Orphan(
+            pub(in crate::daemon::services::databases) std::process::Child,
         );
 
         impl Orphan {
@@ -1339,7 +1340,7 @@ mod tests {
             let log = fs::File::create(pg.dir.path().join("orphan.log")).unwrap();
             let child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
-                    "daemon::databases::tests::server::fake_postgres",
+                    "daemon::services::databases::tests::server::fake_postgres",
                     "--exact",
                     "--nocapture",
                 ])
@@ -1391,7 +1392,7 @@ mod tests {
         }
 
         /// Waits until something listens on `port`.
-        pub(in crate::daemon::databases) async fn listening(port: u16) {
+        pub(in crate::daemon::services::databases) async fn listening(port: u16) {
             let wait = async {
                 while tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
                     .await

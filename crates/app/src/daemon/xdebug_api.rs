@@ -40,7 +40,7 @@ use marsa_core::types::{XdebugRequest, XdebugState};
 
 use super::api::HttpError;
 use super::http::{self, Rejected as _, global_error};
-use super::php;
+use super::services::php;
 use super::sites_sync::PassNotRun;
 use super::state::Daemon;
 

@@ -24,7 +24,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use marsa::daemon::api::router;
 use marsa::daemon::auth::AuthConfig;
-use marsa::daemon::caddy::{Applied, Launched, caddy_spec_for, start_at_launch};
+use marsa::daemon::services::caddy::{Applied, Launched, caddy_spec_for, start_at_launch};
 use marsa::daemon::sites_sync;
 use marsa::daemon::state::Daemon;
 use marsa_core::caddy::{PhpPools, SERVER_ID};

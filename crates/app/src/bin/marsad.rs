@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use anyhow::Context as _;
 use clap::Parser;
 use marsa::daemon::server::{self, AlreadyRunning};
-use marsa::daemon::supervisor::{LOG_FILE_LIMIT, LogFile};
+use marsa::daemon::services::supervisor::{LOG_FILE_LIMIT, LogFile};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
