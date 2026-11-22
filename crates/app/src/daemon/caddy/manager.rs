@@ -269,7 +269,12 @@ impl CaddyManager {
             info!(%action, "another action on caddy runs; waiting for it");
         })
         .await
-        .map_err(|Busy| ActionError::Busy)?;
+        .map_err(|Busy| {
+            if daemon.shutdown.is_cancelled() {
+                info!(%action, "the daemon is stopping; the caddy action does not run");
+            }
+            ActionError::Busy
+        })?;
         self.act(daemon, action, busy).await
     }
 

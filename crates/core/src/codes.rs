@@ -16,7 +16,9 @@ pub const CADDY_CONFIG_REJECTED: &str = "caddy_config_rejected";
 pub const CADDY_CONFIG_WRITE: &str = "caddy_config_write";
 pub const CADDY_NOT_INSTALLED: &str = "caddy_not_installed";
 pub const CADDY_NOT_STARTED: &str = "caddy_not_started";
+/// An old Caddy of a crashed daemon holds the ports, and it could not be stopped safely.
 pub const CADDY_ORPHAN_STUCK: &str = "caddy_orphan_stuck";
+/// Another Marsa's Caddy (another data folder) uses the ports Caddy needs.
 pub const CADDY_OTHER_MARSA: &str = "caddy_other_marsa";
 pub const CADDY_PATH_NOT_UTF8: &str = "caddy_path_not_utf8";
 pub const CADDY_RECIPE_INVALID: &str = "caddy_recipe_invalid";
@@ -38,8 +40,11 @@ pub const DAEMON_NOT_RUNNING: &str = "daemon_not_running";
 pub const DAEMON_START_FAILED: &str = "daemon_start_failed";
 pub const DAEMON_STOP_FAILED: &str = "daemon_stop_failed";
 pub const DAEMON_UNREACHABLE: &str = "daemon_unreachable";
+/// The `.test` DNS server is not running, and no failure was recorded.
 pub const DNS_NOT_RUNNING: &str = "dns_not_running";
+/// Another program holds the port where Marsa answers `.test` names.
 pub const DNS_PORT_IN_USE: &str = "dns_port_in_use";
+/// The `.test` DNS server could not start, and the port was not the reason.
 pub const DNS_START_FAILED: &str = "dns_start_failed";
 pub const DOWNLOAD_FAILED: &str = "download_failed";
 pub const DOWNLOAD_HTTP_STATUS: &str = "download_http_status";
@@ -101,9 +106,13 @@ pub const NO_MATCHING_VERSION: &str = "no_matching_version";
 pub const NO_VERSION: &str = "no_version";
 pub const NOT_FOUND: &str = "not_found";
 pub const NOT_INSTALLED: &str = "not_installed";
+/// A Chrome or Firefox certificate database did not take Marsa's CA.
 pub const NSS_ADD_FAILED: &str = "nss_add_failed";
+/// A browser certificate database is a link or another user's, so Marsa does not touch it.
 pub const NSS_DB_REFUSED: &str = "nss_db_refused";
+/// Marsa's CA could not be removed from a browser certificate database.
 pub const NSS_REMOVE_FAILED: &str = "nss_remove_failed";
+/// `certutil` is missing, so Chrome and Firefox on Linux cannot be set up.
 pub const NSS_TOOL_MISSING: &str = "nss_tool_missing";
 pub const OP_NOT_IMPLEMENTED: &str = "op_not_implemented";
 pub const OP_NOT_SUPPORTED: &str = "op_not_supported";
@@ -120,6 +129,7 @@ pub const PHP_FPM_NOT_INSTALLED: &str = "php_fpm_not_installed";
 pub const PHP_FPM_ORPHAN_STUCK: &str = "php_fpm_orphan_stuck";
 pub const PHP_FPM_UNAVAILABLE: &str = "php_fpm_unavailable";
 pub const PHP_PATH_NOT_ALLOWED: &str = "php_path_not_allowed";
+/// Another program holds a port Caddy needs.
 pub const PORT_IN_USE: &str = "port_in_use";
 pub const PORTS_APPLY_FAILED: &str = "ports_apply_failed";
 pub const PORTS_DELETE: &str = "ports_delete";
@@ -260,13 +270,13 @@ pub const ALL: &[&str] = &[
     AUTOSTART_READ,
     AUTOSTART_UNSUPPORTED,
     AUTOSTART_WRITE,
-    crate::codes::CA_NOT_READY,
+    CA_NOT_READY,
     CA_UNREADABLE,
     CADDY_ADMIN_UNREACHABLE,
     CADDY_CONFIG_REJECTED,
     CADDY_CONFIG_WRITE,
-    crate::codes::CADDY_NOT_INSTALLED,
-    crate::codes::CADDY_NOT_STARTED,
+    CADDY_NOT_INSTALLED,
+    CADDY_NOT_STARTED,
     CADDY_ORPHAN_STUCK,
     CADDY_OTHER_MARSA,
     CADDY_PATH_NOT_UTF8,
@@ -289,9 +299,9 @@ pub const ALL: &[&str] = &[
     DAEMON_START_FAILED,
     DAEMON_STOP_FAILED,
     DAEMON_UNREACHABLE,
-    crate::codes::DNS_NOT_RUNNING,
-    crate::codes::DNS_PORT_IN_USE,
-    crate::codes::DNS_START_FAILED,
+    DNS_NOT_RUNNING,
+    DNS_PORT_IN_USE,
+    DNS_START_FAILED,
     DOWNLOAD_FAILED,
     DOWNLOAD_HTTP_STATUS,
     DOWNLOAD_INSECURE_URL,
@@ -311,8 +321,8 @@ pub const ALL: &[&str] = &[
     HOSTS_BLOCK_BROKEN,
     HOSTS_NOT_USED,
     HOSTS_READ,
-    crate::codes::HOSTS_SITES_UNKNOWN,
-    crate::codes::HOSTS_TOO_MANY_NAMES,
+    HOSTS_SITES_UNKNOWN,
+    HOSTS_TOO_MANY_NAMES,
     HOSTS_WRITE,
     INSTALL_BUSY,
     INSTALL_CHECK_FAILED,
@@ -352,10 +362,10 @@ pub const ALL: &[&str] = &[
     NO_VERSION,
     NOT_FOUND,
     NOT_INSTALLED,
-    crate::codes::NSS_ADD_FAILED,
-    crate::codes::NSS_DB_REFUSED,
-    crate::codes::NSS_REMOVE_FAILED,
-    crate::codes::NSS_TOOL_MISSING,
+    NSS_ADD_FAILED,
+    NSS_DB_REFUSED,
+    NSS_REMOVE_FAILED,
+    NSS_TOOL_MISSING,
     OP_NOT_IMPLEMENTED,
     OP_NOT_SUPPORTED,
     OPEN_FAILED,
@@ -371,7 +381,7 @@ pub const ALL: &[&str] = &[
     PHP_FPM_ORPHAN_STUCK,
     PHP_FPM_UNAVAILABLE,
     PHP_PATH_NOT_ALLOWED,
-    crate::codes::PORT_IN_USE,
+    PORT_IN_USE,
     PORTS_APPLY_FAILED,
     PORTS_DELETE,
     PORTS_FOREIGN,
@@ -431,8 +441,8 @@ pub const ALL: &[&str] = &[
     SETUP_HELPER_REJECTED,
     SETUP_HELPER_RUNNING,
     SETUP_HELPER_UNSAFE,
-    crate::codes::SETUP_HOSTS_NOT_REMOVED,
-    crate::codes::SETUP_HOSTS_NOT_WRITTEN,
+    SETUP_HOSTS_NOT_REMOVED,
+    SETUP_HOSTS_NOT_WRITTEN,
     SETUP_INTERRUPTED,
     SETUP_NOT_AUTHORIZED,
     SETUP_NOT_SUPPORTED,
@@ -451,12 +461,12 @@ pub const ALL: &[&str] = &[
     SITES_LOSE_PHP,
     SPAWN_FAILED,
     TRAY_NOT_FOUND,
-    crate::codes::TRUST_ADD_FAILED,
+    TRUST_ADD_FAILED,
     TRUST_CERT_INVALID,
     TRUST_DELETE,
     TRUST_READ,
-    crate::codes::TRUST_RECORD_UNUSABLE,
-    crate::codes::TRUST_REMOVE_FAILED,
+    TRUST_RECORD_UNUSABLE,
+    TRUST_REMOVE_FAILED,
     TRUST_STORE_UPDATE_FAILED,
     TRUST_TOOL_MISSING,
     TRUST_WRITE,

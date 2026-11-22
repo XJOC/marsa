@@ -75,7 +75,13 @@ fn every_client_error_code_has_a_message() {
 /// Every code a client can meet has its own sentence, not the general one.
 #[test]
 fn every_code_has_a_message() {
-    for code in marsa_core::codes::ALL {
+    // The three codes only the window makes are not in `codes::ALL`.
+    let window_only = [
+        super::BRIDGE_FAILED,
+        super::TRAY_WORKER_FAILED,
+        super::WINDOW_START_FAILED,
+    ];
+    for code in marsa_core::codes::ALL.iter().chain(&window_only) {
         assert!(error_message(code).is_some(), "no message for {code}");
     }
 }

@@ -1,5 +1,6 @@
 //! A guard that lets one job run at a time: the setup and the uninstall share
-//! one, and the installs have their own.
+//! one, and the installs have their own (a runtime's removal takes the
+//! installs' guard).
 //!
 //! One atomic, no lock. The value says who holds the guard: `0` is nobody,
 //! and a [`NonZeroU8`] flag names the holder, so the caller can tell a second

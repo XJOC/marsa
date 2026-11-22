@@ -129,7 +129,7 @@ impl Admin {
 
 /// What Caddy says, in lower case, when it cannot listen on an address of a
 /// new config: Go's texts on macOS and Linux (ADR 0008, finding 11), and the
-/// two English Windows texts (see [`PORT_IN_USE`]).
+/// two English Windows texts (the texts of `PORT_IN_USE` in `watch.rs`).
 const LOAD_PORT_ERRORS: [&str; 4] = [
     "bind: address already in use",
     "bind: permission denied",

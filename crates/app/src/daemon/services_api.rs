@@ -640,7 +640,7 @@ mod tests {
             (response.status(), text(response).await)
         };
         let failed = ServiceState::Failed {
-            code: "dns_port_in_use".into(),
+            code: codes::DNS_PORT_IN_USE.into(),
         };
 
         let (status, body) = send("GET", "/v1/services").await;
