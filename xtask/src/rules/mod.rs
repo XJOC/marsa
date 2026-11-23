@@ -27,7 +27,6 @@ const LONG_FILES: &[(&str, &str)] = &[
         "to split by job",
     ),
     ("crates/core/src/types.rs", "to split by domain"),
-    ("xtask/src/manifest/build.rs", "to split by job"),
 ];
 
 /// One broken rule.
