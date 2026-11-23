@@ -44,7 +44,7 @@ use crate::daemon::services::php;
 use crate::daemon::sites::sync::PassNotRun;
 use crate::daemon::state::Daemon;
 
-/// The routes, for `api::router` to merge before its fallbacks.
+/// The routes, for `http::routes::router` to merge before its fallbacks.
 pub fn routes() -> Router<Arc<Daemon>> {
     Router::new().route("/v1/php/xdebug", get(current).put(set))
 }

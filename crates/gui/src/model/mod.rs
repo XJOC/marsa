@@ -233,8 +233,8 @@ pub enum Action {
     /// ([`Model::site_url`]) to the system, never a screen (code.md, State).
     OpenSite(String),
     /// "Open folder" on a site's page: the system's file manager shows the
-    /// site's folder. A local action like [`Action::OpenSite`]: `App` finds
-    /// the folder ([`Model::site_root`]) and starts the system's opener.
+    /// site's folder. A local action like [`Action::OpenSite`]: the model finds
+    /// the folder ([`Model::site_root`]), and `App` starts the system's opener.
     OpenFolder(String),
     /// The first-run button that installs what is missing.
     StartFirstRun,
@@ -272,7 +272,7 @@ pub enum Action {
     /// The text typed in the install dialog's version field.
     SetInstallVersion { runtime: Runtime, text: String },
     /// "Install" in the dialog (or Enter): queues the version in the field,
-    /// or says why it is wrong. `App` sends the job.
+    /// or says why it is wrong. `apply_action` returns the job to send.
     SubmitInstall(Runtime),
     /// "Cancel" or Escape in the install dialog.
     CancelInstall,

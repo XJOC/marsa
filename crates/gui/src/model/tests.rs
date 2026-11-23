@@ -468,6 +468,30 @@ fn a_service_event_changes_the_table() {
     assert_eq!(model.session.services, expected);
 }
 
+/// The table is in the order of the id text, as `marsa services` prints it:
+/// a pool comes between `mysql` and `postgres`, which the order of the
+/// `ServiceId` variants would not give.
+#[test]
+fn the_services_are_in_the_order_of_their_id_text() {
+    let mut model = connected();
+    let ids = ["valkey", "postgres", "php-fpm-8.4", "mysql", "dns", "caddy"];
+    model.update(Update::Services(
+        ids.iter()
+            .map(|id| status(id.parse().unwrap(), ServiceState::Stopped))
+            .collect(),
+    ));
+    let order: Vec<String> = model
+        .session
+        .services
+        .iter()
+        .map(|service| service.id.to_string())
+        .collect();
+    assert_eq!(
+        order,
+        ["caddy", "dns", "mysql", "php-fpm-8.4", "postgres", "valkey"]
+    );
+}
+
 #[test]
 fn the_log_keeps_the_newest_5000_lines() {
     let mut model = connected();

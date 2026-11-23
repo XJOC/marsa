@@ -11,7 +11,7 @@
 //!
 //! One setup at a time: a second request gets 409 `setup_running`, and one
 //! during an uninstall gets 409 `uninstall_running`. `POST /v1/uninstall`
-//! (`uninstall_api.rs`) shares [`Setup`]: the same runner, the same helper
+//! (`uninstall.rs`) shares [`Setup`]: the same runner, the same helper
 //! file check and prompt ([`Flow`] gives each its own error codes), and the
 //! same flag.
 //!
@@ -99,7 +99,7 @@ pub const SLOWEST_SETUP: Duration = Duration::from_secs(
         + (4 + MAX_PS as u64) * PIPE_GRACE.as_secs(),
 );
 
-/// The routes on `setup`, for `api::router` to merge before its fallbacks:
+/// The routes on `setup`, for `http::routes::router` to merge before its fallbacks:
 /// `POST /v1/jobs/setup`, its old waiting form `POST /v1/setup`, and the
 /// hosts routes of [`hosts`].
 /// The uninstall route gets the same [`Setup`], so the two never run at once.

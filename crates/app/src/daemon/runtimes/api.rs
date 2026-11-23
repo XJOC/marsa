@@ -75,7 +75,7 @@ use crate::daemon::http::routes::HttpError;
 use crate::daemon::http::{self, Rejected as _, global_error};
 use crate::daemon::state::Daemon;
 
-/// The routes, for `api::router` to merge before its fallbacks.
+/// The routes, for `http::routes::router` to merge before its fallbacks.
 pub fn routes() -> Router<Arc<Daemon>> {
     Router::new()
         .route("/v1/runtimes", get(runtimes))

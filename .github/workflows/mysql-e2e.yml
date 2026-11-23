@@ -15,15 +15,14 @@ on:
   # MySQL code runs this before it merges, and main after it.
   pull_request:
     paths:
-      - "crates/app/src/daemon/databases.rs"
-      - "crates/app/src/daemon/databases/**"
-      - "crates/app/src/daemon/services_api.rs"
+      - "crates/app/src/daemon/services/databases/**"
+      - "crates/app/src/daemon/services/api.rs"
       - "crates/app/src/cli/strings/**"
       - "crates/app/src/cli/services.rs"
-      - "crates/app/src/daemon/runtimes_api.rs"
-      - "crates/app/src/daemon/supervisor.rs"
+      - "crates/app/src/daemon/runtimes/api.rs"
+      - "crates/app/src/daemon/services/supervisor.rs"
       - "crates/core/src/databases/**"
-      - "crates/core/src/platform/process.rs"
+      - "crates/core/src/platform/process/**"
       - "recipes/mysql.toml"
       - "tools/e2e/mysql.sh"
       - "tools/libaio-build/**"
@@ -31,15 +30,14 @@ on:
   push:
     branches: [main]
     paths:
-      - "crates/app/src/daemon/databases.rs"
-      - "crates/app/src/daemon/databases/**"
-      - "crates/app/src/daemon/services_api.rs"
+      - "crates/app/src/daemon/services/databases/**"
+      - "crates/app/src/daemon/services/api.rs"
       - "crates/app/src/cli/strings/**"
       - "crates/app/src/cli/services.rs"
-      - "crates/app/src/daemon/runtimes_api.rs"
-      - "crates/app/src/daemon/supervisor.rs"
+      - "crates/app/src/daemon/runtimes/api.rs"
+      - "crates/app/src/daemon/services/supervisor.rs"
       - "crates/core/src/databases/**"
-      - "crates/core/src/platform/process.rs"
+      - "crates/core/src/platform/process/**"
       - "recipes/mysql.toml"
       - "tools/e2e/mysql.sh"
       - "tools/libaio-build/**"

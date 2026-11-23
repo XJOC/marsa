@@ -5,7 +5,7 @@
 //!    given. Without a terminal to ask on, and without `--yes`, it stops
 //!    there: nothing has changed, and no daemon has started.
 //! 2. One call to `marsad` (`POST /v1/uninstall`, in
-//!    `daemon/uninstall_api.rs`), started if needed. The daemon asks for the
+//!    `daemon/setup/uninstall.rs`), started if needed. The daemon asks for the
 //!    admin password once (macOS: osascript, Linux: pkexec, Windows: UAC) and
 //!    runs `marsa-helper`, then takes the user's trust away and deletes the
 //!    login file. This prints one line
@@ -389,7 +389,7 @@ impl Ask for Terminal {
     }
 }
 
-/// The systems the daemon runs the uninstall on (`daemon/uninstall_api.rs`).
+/// The systems the daemon runs the uninstall on (`daemon/setup/uninstall.rs`).
 fn runs_here(platform: Option<Platform>) -> bool {
     matches!(
         platform,

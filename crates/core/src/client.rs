@@ -81,7 +81,7 @@ const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// the user 5 minutes at the admin prompt and 5 more at the trust dialog
 /// (macOS), each check (`netstat`, `ps` for at most 8 processes, `security
 /// verify-cert`) up to 10 seconds, and Caddy 30 seconds to start and make
-/// its CA when there is none yet. A test in the daemon's `setup_api/`
+/// its CA when there is none yet. A test in the daemon's `setup/`
 /// holds this above the sum of the daemon's own limits.
 ///
 /// On Windows the slowest setup is longer: a request to the helper service,
@@ -90,7 +90,7 @@ const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 /// For `POST /v1/hosts/sync`: longer than the daemon's slowest sync, 5
 /// minutes at the password prompt and 2 seconds for the helper's pipes. A
-/// test in the daemon's `setup_api/hosts.rs` holds this above the sum of
+/// test in the daemon's `setup/hosts.rs` holds this above the sum of
 /// the daemon's own limits.
 pub const HOSTS_SYNC_TIMEOUT: Duration = Duration::from_secs(6 * 60);
 /// For `POST /v1/uninstall`: longer than the daemon's slowest uninstall,
@@ -98,7 +98,7 @@ pub const HOSTS_SYNC_TIMEOUT: Duration = Duration::from_secs(6 * 60);
 /// user has 5 minutes at the admin prompt, then up to 5 at each of the two
 /// dialogs macOS may show to take the user's trust away and to delete the
 /// certificate; the keychain listing gets 10 seconds. A test in the daemon's
-/// `uninstall_api.rs` holds this above the sum of the daemon's own limits.
+/// `setup/uninstall.rs` holds this above the sum of the daemon's own limits.
 ///
 /// On Windows the slowest uninstall is the helper's run after the UAC
 /// prompt, up to 15 minutes, and the prompt has no limit of its own: 40

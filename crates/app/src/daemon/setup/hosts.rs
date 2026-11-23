@@ -105,7 +105,7 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
         // either, after a password for nothing.
         if !dns::hosts_names_fit(&names) {
             let skipped = SetupSkip {
-                op: OpName::HostsSync.to_owned(),
+                op: OpName::HostsSync,
                 code: codes::HOSTS_TOO_MANY_NAMES.to_owned(),
             };
             report.skipped.push(skipped);
