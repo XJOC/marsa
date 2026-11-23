@@ -88,6 +88,13 @@ reason = "8.4.13 is the build for this platform"
 # names, so a rebuild (r2) changes the recipe's URL, not this file.
 versions = ["8.1.11"]
 
+[mailpit]
+# Mailpit 1.34.0, the mail catcher, from its official GitHub Release v1.34.0.
+# It has no sum file: `manifest build` compares each archive with the sha256
+# digest GitHub's release API reports for it, and accepts only the recipe's
+# own file.
+versions = ["1.34.0"]
+
 # A URL for one version, platform, and artifact that replaces the recipe
 # template. `urls`: the first is the main one, the rest are mirrors.
 

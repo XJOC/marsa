@@ -48,6 +48,12 @@ pub(super) enum Proof {
     /// `valkey-io/valkey-hashes`; the trust is in that build and in the
     /// owner's signature on the manifest.
     OurValkey,
+    /// The sha256 `digest` GitHub's API reports for the asset of a Mailpit
+    /// release ([`Layout::GithubDigest`]): the archive the recipe names, and no
+    /// other. Mailpit publishes no sum file and no attestation, so this proves
+    /// only that the download is whole; the trust is in the owner's signature
+    /// on the manifest, as for theseus-rs.
+    MailpitDigest,
 }
 
 impl Proof {
@@ -63,6 +69,7 @@ impl Proof {
             Runtime::Mysql if artifact == "archive" => Proof::OracleSignature,
             Runtime::Mysql => Proof::OurLibaio,
             Runtime::Valkey => Proof::OurValkey,
+            Runtime::Mailpit => Proof::MailpitDigest,
         }
     }
 
@@ -160,6 +167,23 @@ impl Proof {
                 "only an archive of our own Valkey release, with its `sha256sums.txt`, is \
                  accepted"
             ),
+            // An override could name another Mailpit archive, of another
+            // version or platform, with its own matching digest.
+            (Proof::MailpitDigest, _) if template != Some(url) => bail!(
+                "it is not the recipe's URL {}, and only that Mailpit archive is accepted",
+                template.unwrap_or("(none)")
+            ),
+            (Proof::MailpitDigest, Some(sums))
+                if sums.source == Source::Mailpit
+                    && sums.layout == Layout::GithubDigest
+                    && sums.algorithm == Algorithm::Sha256 =>
+            {
+                Ok(())
+            }
+            (Proof::MailpitDigest, _) => bail!(
+                "only a Mailpit release archive, with the sha256 digest of GitHub's release \
+                 API, is accepted"
+            ),
         }
     }
 
@@ -170,9 +194,11 @@ impl Proof {
     pub(super) fn keeps_file(self) -> bool {
         match self {
             Proof::SumIfPublished => true,
-            Proof::TheseusSha256 | Proof::OracleSignature | Proof::OurLibaio | Proof::OurValkey => {
-                false
-            }
+            Proof::TheseusSha256
+            | Proof::OracleSignature
+            | Proof::OurLibaio
+            | Proof::OurValkey
+            | Proof::MailpitDigest => false,
         }
     }
 }

@@ -176,6 +176,7 @@ pub const fn runtime_monogram(runtime: Runtime) -> &'static str {
         Runtime::Postgres => "Pg",
         Runtime::Mysql => "My",
         Runtime::Valkey => "Vk",
+        Runtime::Mailpit => "Mp",
     }
 }
 
@@ -333,7 +334,7 @@ mod tests {
             assert_eq!(databases, Some(theme.section(Section::Databases).tint));
         }
         let letters: Vec<&str> = Runtime::ALL.into_iter().map(runtime_monogram).collect();
-        assert_eq!(letters, ["PHP", "JS", "Co", "Ca", "Pg", "My", "Vk"]);
+        assert_eq!(letters, ["PHP", "JS", "Co", "Ca", "Pg", "My", "Vk", "Mp"]);
         assert!(letters.iter().all(|text| (2..=3).contains(&text.len())));
     }
 

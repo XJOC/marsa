@@ -126,7 +126,8 @@ pub fn list(data_dir: &Path) -> Result<RuntimeList, RuntimesError> {
                 | Runtime::Caddy
                 | Runtime::Postgres
                 | Runtime::Mysql
-                | Runtime::Valkey => None,
+                | Runtime::Valkey
+                | Runtime::Mailpit => None,
             };
             Ok(RuntimeVersions {
                 runtime,
@@ -249,7 +250,8 @@ pub(super) fn default_tool(runtime: Runtime) -> Option<Tool> {
         | Runtime::Caddy
         | Runtime::Postgres
         | Runtime::Mysql
-        | Runtime::Valkey => None,
+        | Runtime::Valkey
+        | Runtime::Mailpit => None,
     }
 }
 
@@ -300,6 +302,7 @@ mod tests {
             ("postgres", Runtime::Postgres),
             ("mysql", Runtime::Mysql),
             ("valkey", Runtime::Valkey),
+            ("mailpit", Runtime::Mailpit),
         ] {
             assert_eq!(super::runtime(tool).unwrap(), runtime);
         }
@@ -337,6 +340,7 @@ mod tests {
             (Runtime::Postgres, String::new(), None),
             (Runtime::Mysql, String::new(), None),
             (Runtime::Valkey, String::new(), None),
+            (Runtime::Mailpit, String::new(), None),
         ];
         assert_eq!(shown(list(tmp.path()).unwrap()), want);
 
@@ -345,7 +349,7 @@ mod tests {
         global.php.default = Some("8.4".into());
         global.node.default = Some("22".into());
         config::save_global(&ConfigPaths::in_dir(tmp.path()).global, &global).unwrap();
-        let [php, node, composer, caddy, postgres, mysql, valkey] = want;
+        let [php, node, composer, caddy, postgres, mysql, valkey, mailpit] = want;
         let want = [
             (php.0, php.1, Some("8.4".to_owned())),
             (node.0, node.1, Some("22".to_owned())),
@@ -354,6 +358,7 @@ mod tests {
             postgres,
             mysql,
             valkey,
+            mailpit,
         ];
         assert_eq!(shown(list(tmp.path()).unwrap()), want);
 

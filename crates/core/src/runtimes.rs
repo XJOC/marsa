@@ -10,7 +10,8 @@
 //! ├── caddy/2.11.8/caddy
 //! ├── postgres/18.7.0/bin/postgres
 //! ├── mysql/8.4.13/bin/mysqld
-//! └── valkey/8.1.11/bin/valkey-server
+//! ├── valkey/8.1.11/bin/valkey-server
+//! └── mailpit/1.34.0/mailpit
 //! ```
 //!
 //! The list of installed versions is the folder names that are valid
@@ -52,11 +53,14 @@ pub enum Runtime {
     /// Valkey 8.1, the key-value server Laravel's cache and queue use as
     /// Redis. Our own build (ADR 0023). A service, like PostgreSQL.
     Valkey,
+    /// Mailpit, the mail catcher: an SMTP server that keeps every mail a
+    /// project sends, so none leaves the computer. A service, like Valkey.
+    Mailpit,
 }
 
 impl Runtime {
     /// Every runtime, in the order lists show them.
-    pub const ALL: [Runtime; 7] = [
+    pub const ALL: [Runtime; 8] = [
         Runtime::Php,
         Runtime::Node,
         Runtime::Composer,
@@ -64,6 +68,7 @@ impl Runtime {
         Runtime::Postgres,
         Runtime::Mysql,
         Runtime::Valkey,
+        Runtime::Mailpit,
     ];
 
     /// The folder name under `runtimes/`.
@@ -76,6 +81,7 @@ impl Runtime {
             Runtime::Postgres => "postgres",
             Runtime::Mysql => "mysql",
             Runtime::Valkey => "valkey",
+            Runtime::Mailpit => "mailpit",
         }
     }
 }
@@ -290,7 +296,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "php", "node", "composer", "caddy", "postgres", "mysql", "valkey"
+                "php", "node", "composer", "caddy", "postgres", "mysql", "valkey", "mailpit"
             ]
         );
     }
