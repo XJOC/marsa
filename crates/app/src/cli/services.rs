@@ -78,7 +78,7 @@ async fn act(
     data_dir: &Path,
 ) -> Result<ExitCode, Failure> {
     let (action, id) = command.action();
-    let status = match client.service_action(id, action).await {
+    let status = match client.run_service_action(id, action).await {
         Ok(status) => status,
         Err(err) => return Err(failure(&err, data_dir, Some(id))),
     };

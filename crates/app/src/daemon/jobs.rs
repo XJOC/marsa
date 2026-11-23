@@ -23,7 +23,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use marsa_core::codes;
 use marsa_core::types::{
-    ApiError, JobAccepted, JobEvent, JobKind, JobList, JobOutcome, JobStep, JobUpdate,
+    JobAccepted, JobEvent, JobFailure, JobKind, JobList, JobOutcome, JobStep, JobUpdate,
 };
 use serde::Serialize;
 use tokio::sync::oneshot;
@@ -131,9 +131,10 @@ where
             .unwrap_or_else(|err| Err(http::job_failed(what, &err)));
         let update = match &result {
             Ok(done) => JobUpdate::Done(outcome(done.clone())),
-            Err(err) => JobUpdate::Failed(ApiError {
+            Err(err) => JobUpdate::Failed(JobFailure {
                 code: err.code.to_owned(),
                 message: err.message.clone(),
+                http_status: Some(err.status.as_u16()),
             }),
         };
         daemon.publish_job(event(update));

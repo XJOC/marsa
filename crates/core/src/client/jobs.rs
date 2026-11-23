@@ -13,7 +13,8 @@ use reqwest::Method;
 use super::{ClientError, DaemonClient, REQUEST_TIMEOUT, StreamItem};
 use crate::codes;
 use crate::types::{
-    ErrorBody, Event, JobAccepted, JobEvent, JobOutcome, JobUpdate, SetupReport, UninstallReport,
+    ErrorBody, Event, JobAccepted, JobEvent, JobOutcome, JobUpdate, ServiceAction, ServiceStatus,
+    SetupReport, UninstallReport,
 };
 
 /// How many times in a row the stream may break, or lag, with no event
@@ -90,6 +91,34 @@ impl DaemonClient {
         }
     }
 
+    /// `POST /v1/jobs/services/{id}/{action}`, then follows the job until
+    /// it ends: the status of the service after the action. A start of a
+    /// database server may run for minutes (`initdb`).
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `service_not_found` (404) and
+    /// `unknown_action` (400) at once, `service_managed_by_sites` (409) for a
+    /// php-fpm pool, and the codes of the action itself (`service_busy`,
+    /// `postgres_not_installed`, ...) when the job ends. `daemon_unreachable`
+    /// if the daemon stopped before the job ended.
+    pub async fn run_service_action(
+        &self,
+        id: &str,
+        action: ServiceAction,
+    ) -> Result<ServiceStatus, ClientError> {
+        match self
+            .run_job(
+                &["v1", "jobs", "services", id, action.as_str()],
+                codes::DAEMON_UNREACHABLE,
+            )
+            .await?
+        {
+            JobOutcome::ServiceAction(status) => Ok(status),
+            _ => Err(wrong_outcome()),
+        }
+    }
+
     /// `GET /v1/jobs/{id}`: the last event of a running job, or of one of
     /// the last sixteen that ended. `not_found` (404) for any other.
     pub async fn job(&self, id: u64) -> Result<JobEvent, ClientError> {
@@ -106,6 +135,8 @@ impl DaemonClient {
         segments: &[&str],
         lost: &'static str,
     ) -> Result<JobOutcome, ClientError> {
+        // An id that cannot be a path segment is refused before any request.
+        self.url(segments)?;
         // Open before the start, so no event of this job is missed.
         let mut stream = self.events().await?;
         let accepted: JobAccepted = self.call(Method::POST, segments, REQUEST_TIMEOUT).await?;
@@ -166,12 +197,12 @@ fn ended(event: JobEvent) -> Option<Result<JobOutcome, ClientError>> {
     match event.update {
         JobUpdate::Running { .. } => None,
         JobUpdate::Done(outcome) => Some(Ok(outcome)),
-        JobUpdate::Failed(error) => {
-            let body = ErrorBody {
-                error,
-                in_use: None,
-            };
-            Some(Err(ClientError::api(500, &body)))
+        JobUpdate::Failed(failure) => {
+            let body = ErrorBody::new(failure.code, failure.message);
+            Some(Err(ClientError::api(
+                failure.http_status.unwrap_or(500),
+                &body,
+            )))
         }
     }
 }

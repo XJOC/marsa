@@ -34,6 +34,11 @@ impl TestRouter {
         }
     }
 
+    /// The `Authorization` header value of the right token.
+    pub(crate) fn bearer(&self) -> &str {
+        &self.bearer
+    }
+
     /// A request with the right `Host` and no token.
     pub(crate) fn builder(&self, method: &str, uri: &str) -> request::Builder {
         Request::builder()

@@ -488,6 +488,7 @@ pub enum JobKind {
     Setup,
     Uninstall,
     HostsSync,
+    ServiceAction,
     /// A kind a newer daemon knows. An older client still follows the job to
     /// its end by id.
     #[serde(other)]
@@ -513,6 +514,7 @@ pub enum JobOutcome {
     Setup(SetupReport),
     Uninstall(UninstallReport),
     HostsSync(SetupReport),
+    ServiceAction(ServiceStatus),
 }
 
 /// The `status` of a [`JobEvent`]. The last one of a job is `done` or
@@ -526,7 +528,19 @@ pub enum JobUpdate {
     },
     Done(JobOutcome),
     /// What the old waiting route answers as an error body.
-    Failed(ApiError),
+    Failed(JobFailure),
+}
+
+/// Why a job failed: the error body the old waiting route answers, and its
+/// HTTP status (the key `status` is the tag of [`JobUpdate`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobFailure {
+    pub code: String,
+    pub message: String,
+    /// The status of the old route's answer. Absent from a daemon that does
+    /// not send it: the client then reads 500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
 }
 
 /// `Event::Job`, and the answer of `GET /v1/jobs/{id}`: what job `id` did
@@ -535,7 +549,7 @@ pub enum JobUpdate {
 /// ```json
 /// { "id": 4, "kind": "setup", "status": "running", "step": "started" }
 /// { "id": 4, "kind": "setup", "status": "done", "result": "setup", "data": { "results": [] } }
-/// { "id": 4, "kind": "setup", "status": "failed", "code": "internal_error", "message": "..." }
+/// { "id": 4, "kind": "setup", "status": "failed", "code": "internal_error", "message": "...", "http_status": 500 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobEvent {
@@ -1438,16 +1452,30 @@ mod tests {
             }),
         );
         round_trip(
-            &event(JobUpdate::Failed(ApiError {
+            &event(JobUpdate::Failed(JobFailure {
                 code: "internal_error".into(),
                 message: "the setup job failed".into(),
+                http_status: Some(500),
             })),
             json!({
                 "type": "job",
                 "data": {
                     "id": 4, "kind": "setup", "status": "failed",
                     "code": "internal_error", "message": "the setup job failed",
+                    "http_status": 500,
                 },
+            }),
+        );
+        // A daemon that sends no status: the field is absent, not `null`.
+        round_trip(
+            &event(JobUpdate::Failed(JobFailure {
+                code: "x".into(),
+                message: "y".into(),
+                http_status: None,
+            })),
+            json!({
+                "type": "job",
+                "data": { "id": 4, "kind": "setup", "status": "failed", "code": "x", "message": "y" },
             }),
         );
         round_trip(
@@ -1478,6 +1506,50 @@ mod tests {
                 },
             }),
         );
+        round_trip(
+            &Event::Job(JobEvent {
+                id: 7,
+                kind: JobKind::ServiceAction,
+                update: JobUpdate::Failed(JobFailure {
+                    code: "service_busy".into(),
+                    message: "another action runs".into(),
+                    http_status: Some(409),
+                }),
+            }),
+            json!({
+                "type": "job",
+                "data": {
+                    "id": 7, "kind": "service_action", "status": "failed",
+                    "code": "service_busy", "message": "another action runs",
+                    "http_status": 409,
+                },
+            }),
+        );
+        round_trip(
+            &JobEvent {
+                id: 8,
+                kind: JobKind::ServiceAction,
+                update: JobUpdate::Done(JobOutcome::ServiceAction(ServiceStatus {
+                    id: ServiceId::Caddy,
+                    state: ServiceState::Running,
+                    pid: Some(1),
+                    restarts: 0,
+                    since_ms: None,
+                })),
+            },
+            json!({
+                "id": 8, "kind": "service_action", "status": "done", "result": "service_action",
+                "data": {
+                    "id": "caddy", "state": "running", "pid": 1, "restarts": 0, "since_ms": null,
+                },
+            }),
+        );
+        // A reader that knows only `code` and `message` (an `ApiError`) still
+        // reads a failure that carries a status.
+        let old: ApiError =
+            serde_json::from_value(json!({ "code": "x", "message": "y", "http_status": 409 }))
+                .unwrap();
+        assert_eq!((old.code.as_str(), old.message.as_str()), ("x", "y"));
         let running = JobEvent {
             id: 1,
             kind: JobKind::Setup,

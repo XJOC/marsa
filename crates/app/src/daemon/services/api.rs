@@ -3,7 +3,8 @@
 //! | Route | Answer |
 //! | --- | --- |
 //! | `GET /v1/services` | `Vec<ServiceStatus>`: Caddy, `dns`, PostgreSQL when installed, then each pool |
-//! | `POST /v1/services/{id}/{action}` | `ServiceStatus` after the action |
+//! | `POST /v1/jobs/services/{id}/{action}` | `202 JobAccepted`; the end is a `job` event with the `ServiceStatus` after the action, or its failure |
+//! | `POST /v1/services/{id}/{action}` | The same job, answered with the `ServiceStatus` when it ends (clients before ADR 0026) |
 //! | `GET /v1/logs/{id}` | `Vec<LogLine>`, the recent lines |
 //! | `GET /v1/logs/{id}?follow=true` | SSE: the recent lines, then new ones |
 //!
@@ -41,7 +42,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use marsa_core::databases::ServerKind;
-use marsa_core::types::{Event, LogLine, ServiceAction, ServiceStatus, UnknownAction};
+use marsa_core::types::{
+    Event, JobAccepted, JobKind, JobOutcome, LogLine, ServiceAction, ServiceStatus, UnknownAction,
+};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -54,6 +57,7 @@ use super::dns::DnsService;
 use super::supervisor::{ServiceRuntime, lock};
 use crate::daemon::http::Rejected as _;
 use crate::daemon::http::routes::HttpError;
+use crate::daemon::jobs;
 use crate::daemon::state::Daemon;
 
 /// The answer to an action on a service that the sites sync starts and stops.
@@ -65,8 +69,8 @@ pub const MANAGED_BY_SITES: &str = codes::SERVICE_MANAGED_BY_SITES;
 /// 5 s, SIGKILL and 2 s), 5 s for the admin API, then up to 4 s to stop a
 /// Caddy that never answered. The action that waited runs after: a restart
 /// is a stop (up to 4 s) and such a start, about 23 s. So one request takes
-/// up to about 43 s, and the client gives an action 60 s
-/// (`marsa_core::client`).
+/// up to about 43 s. Clients before ADR 0026 wait 60 s for it, which
+/// `old_clients_wait_longer_than_the_slowest_action` holds.
 pub const ACTION_WAIT: Duration = Duration::from_secs(20);
 
 /// How long an action on a database server waits for another one to end
@@ -86,6 +90,7 @@ const KEEP_ALIVE: Duration = Duration::from_secs(15);
 pub fn routes() -> Router<Arc<Daemon>> {
     Router::new()
         .route("/v1/services", get(services))
+        .route("/v1/jobs/services/{id}/{action}", post(service_job))
         .route("/v1/services/{id}/{action}", post(service_action))
         .route("/v1/logs/{id}", get(logs))
 }
@@ -106,79 +111,99 @@ async fn services(State(daemon): State<Arc<Daemon>>) -> Json<Vec<ServiceStatus>>
     Json(services)
 }
 
+/// The old waiting route of an action (API v1 keeps it, ADR 0026): the same
+/// job, answered with the status when it ends.
 async fn service_action(
     State(daemon): State<Arc<Daemon>>,
     path: Result<Path<(String, String)>, PathRejection>,
 ) -> Result<Json<ServiceStatus>, HttpError> {
+    let action = check(&daemon, path)?;
+    let (_, ended) = start(&daemon, action);
+    jobs::answer(ended, "service action").await
+}
+
+/// `POST /v1/jobs/services/{id}/{action}`: `202` and the job's id once the
+/// service and the action are known; the end is the job's `done` with the
+/// status, or its `failed` with the action's own code.
+async fn service_job(
+    State(daemon): State<Arc<Daemon>>,
+    path: Result<Path<(String, String)>, PathRejection>,
+) -> Result<(StatusCode, Json<JobAccepted>), HttpError> {
+    let action = check(&daemon, path)?;
+    Ok(jobs::accepted(start(&daemon, action)))
+}
+
+/// A request that names a service that takes the action.
+struct Checked {
+    /// As the path gave it.
+    id: String,
+    action: ServiceAction,
+}
+
+/// The refusals that need no wait: no such service (404), no such action
+/// (400), and a php-fpm pool, which starts and stops with its sites (409).
+fn check(
+    daemon: &Daemon,
+    path: Result<Path<(String, String)>, PathRejection>,
+) -> Result<Checked, HttpError> {
     let Path((id, action)) = path.map_err(bad_path)?;
-    let (id, service) = service(&daemon, &id)?;
+    let (service_id, service) = service(daemon, &id)?;
     let action: ServiceAction = action.parse().map_err(|err: UnknownAction| {
         HttpError::new(StatusCode::BAD_REQUEST, err.code(), err.to_string())
     })?;
-    if let Service::Server(server) = service {
-        return server_action(&daemon, server.kind(), action)
-            .await
-            .map(Json);
+    if let Service::Pool(_) = service {
+        return Err(managed_by_sites(service_id));
     }
-    if let Service::Dns(dns) = service {
-        tracing::info!(service = %id, %action, "service action");
-        return Ok(Json(
-            dns.run(daemon.events(), daemon.shutdown(), action).await,
-        ));
-    }
-    let Service::Caddy(caddy) = service else {
-        let message = format!(
-            "{id} starts and stops with the sites that need its PHP version; it has no \
-             actions of its own"
-        );
-        return Err(HttpError::new(
-            StatusCode::CONFLICT,
-            MANAGED_BY_SITES,
-            message,
-        ));
-    };
-    tracing::info!(service = %id, %action, "service action");
-    match caddy.run_waiting(&daemon, action, ACTION_WAIT).await {
-        Ok(status) => Ok(Json(status)),
-        Err(err) => {
-            tracing::warn!(service = %id, %action, code = err.code(), error = %err, "service action failed");
-            Err(action_error(&err))
-        }
-    }
+    Ok(Checked { id, action })
 }
 
-/// `action` on the database server `kind`, then `enabled` in its table as
-/// it leaves it (`ServerManager::run_and_save`). In a task of its own, so a
-/// client that hangs up cannot stop it between the action and the write.
-async fn server_action(
-    daemon: &Arc<Daemon>,
-    kind: ServerKind,
-    action: ServiceAction,
+/// The 409 for a php-fpm pool.
+fn managed_by_sites(id: ServiceId) -> HttpError {
+    let message = format!(
+        "{id} starts and stops with the sites that need its PHP version; it has no actions of \
+         its own"
+    );
+    HttpError::new(StatusCode::CONFLICT, MANAGED_BY_SITES, message)
+}
+
+fn start(daemon: &Arc<Daemon>, checked: Checked) -> (u64, jobs::Ended<ServiceStatus>) {
+    jobs::start(
+        daemon,
+        JobKind::ServiceAction,
+        "service action",
+        JobOutcome::ServiceAction,
+        run(Arc::clone(daemon), checked),
+        |_, _| {},
+    )
+}
+
+/// The action itself, in the job's own task: a client that hangs up cannot
+/// stop it, for a database server between the action and the write of
+/// `enabled` either.
+async fn run(
+    daemon: Arc<Daemon>,
+    Checked { id, action }: Checked,
 ) -> Result<ServiceStatus, HttpError> {
-    let service = ServiceId::Database(kind);
-    tracing::info!(%service, %action, "service action");
-    let worker = Arc::clone(daemon);
-    let task = tokio::spawn(async move {
-        let server = worker.server(kind);
-        server
-            .run_and_save(&worker, action, SERVER_ACTION_WAIT)
+    let (id, service) = service(&daemon, &id)?;
+    tracing::info!(service = %id, %action, "service action");
+    match service {
+        Service::Server(server) => server
+            .run_and_save(&daemon, action, SERVER_ACTION_WAIT)
             .await
-    });
-    match task.await {
-        Ok(Ok(status)) => Ok(status),
-        Ok(Err(err)) => {
-            tracing::warn!(%service, %action, code = err.code(), error = %err, "service action failed");
-            Err(server_error(&err))
-        }
-        Err(err) => {
-            tracing::error!(%service, error = %err, "the action task failed");
-            let message = "the action task of the database server failed";
-            Err(HttpError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                codes::INTERNAL_ERROR,
-                message,
-            ))
-        }
+            .map_err(|err| {
+                tracing::warn!(service = %id, %action, code = err.code(), error = %err, "service action failed");
+                server_error(&err)
+            }),
+        Service::Dns(dns) => Ok(dns.run(daemon.events(), daemon.shutdown(), action).await),
+        Service::Caddy(caddy) => caddy
+            .run_waiting(&daemon, action, ACTION_WAIT)
+            .await
+            .map_err(|err| {
+                tracing::warn!(service = %id, %action, code = err.code(), error = %err, "service action failed");
+                action_error(&err)
+            }),
+        // Refused by `check`.
+        Service::Pool(_) => Err(managed_by_sites(id)),
     }
 }
 
@@ -529,13 +554,24 @@ mod tests {
             ),
             ("GET", format!("/v1/logs/{other}"), 404, "service_not_found"),
         ];
+        // The job routes refuse the same requests at once, with no job.
+        let mut all = Vec::new();
         for (method, path, want, code) in cases {
+            if method == "POST" {
+                let job = path.replacen("/v1/services/", "/v1/jobs/services/", 1);
+                all.push((method, job, want, code));
+            }
+            all.push((method, path, want, code));
+        }
+        for (method, path, want, code) in all {
             let request = format!("{method} {path}");
             let (status, body) = send(method, &path).await;
             assert_eq!(status.as_u16(), want, "{request}: {body}");
             let error: ErrorBody = serde_json::from_str(&body).unwrap();
             assert_eq!(error.error.code, code, "{request}");
         }
+        // Refused before any job: the first id is still free.
+        assert_eq!(daemon.jobs().get(1), None);
         // The actions changed nothing.
         assert_eq!(lock(&runtime).status.state, ServiceState::Running);
     }
@@ -614,6 +650,23 @@ mod tests {
             (StatusCode::CONFLICT, "postgres_not_installed")
         );
         assert!(!config::load_global(&global).unwrap().postgres.enabled);
+        // The job route: `202` at once, and the refusal of the action is the
+        // job's `failed`, with the status the old route answered.
+        let mut events = daemon.events().subscribe();
+        let (status, body) = send("POST", "/v1/jobs/services/postgres/start").await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let accepted: marsa_core::types::JobAccepted = serde_json::from_str(&body).unwrap();
+        let last = loop {
+            match events.recv().await.unwrap() {
+                Event::Job(event) if event.is_last() && event.id == accepted.id => break event,
+                _ => {}
+            }
+        };
+        let marsa_core::types::JobUpdate::Failed(failure) = last.update else {
+            panic!("not failed: {last:?}");
+        };
+        assert_eq!(failure.code, "postgres_not_installed");
+        assert_eq!(failure.http_status, Some(409));
         let (status, body) = send("POST", "/v1/services/postgres/kill").await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
@@ -698,6 +751,68 @@ mod tests {
         let (_, lines) = send("GET", "/v1/logs/dns").await;
         assert_eq!(after.state, ServiceState::Running, "{lines}");
         daemon.dns().shutdown(Duration::from_secs(5)).await;
+    }
+
+    /// A job route is behind the same auth layer as every other route: no
+    /// token, a wrong token, an `Origin`, and another `Host` all refuse
+    /// before any job exists.
+    #[tokio::test]
+    async fn the_job_route_needs_the_token_and_refuses_an_origin() {
+        use crate::daemon::http::test_router::TestRouter;
+        use marsa_core::platform::daemon_file::{Token, daemon_authority};
+
+        let daemon = Arc::new(Daemon::new(std::path::PathBuf::new()));
+        let app = TestRouter::new(Arc::clone(&daemon));
+        let uri = "/v1/jobs/services/caddy/start";
+        let wrong = Token::generate().unwrap().bearer_header();
+        let request = app.builder("POST", uri).body(Body::empty()).unwrap();
+        assert_eq!(app.call(request).await.status(), StatusCode::UNAUTHORIZED);
+        let request = app
+            .builder("POST", uri)
+            .header("authorization", &wrong)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.call(request).await.status(), StatusCode::UNAUTHORIZED);
+        let request = app
+            .authorized("POST", uri)
+            .header("origin", "http://evil.test")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.call(request).await.status(), StatusCode::FORBIDDEN);
+        // Another port in `Host`: the builder's own `Host` is replaced.
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("host", daemon_authority(1))
+            .header("authorization", app.bearer())
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.call(request).await.status(), StatusCode::FORBIDDEN);
+        assert_eq!(daemon.jobs().get(1), None);
+    }
+
+    /// Clients before ADR 0026 wait 60 s for an action on Caddy and 300 s
+    /// for one on a database server (their old timeouts); the daemon's own
+    /// limits must stay under that, so an old client still gets its answer.
+    #[test]
+    fn old_clients_wait_longer_than_the_slowest_action() {
+        const OLD_ACTION_WAIT: u64 = 60;
+        const OLD_SERVER_WAIT: u64 = 300;
+        // Waiting 20 for another action, then a restart that stops an old
+        // Caddy first: about 23.
+        assert!(OLD_ACTION_WAIT > ACTION_WAIT.as_secs() + 23);
+        // PostgreSQL: waiting 30, stopping 23, then lsof 8, initdb 120,
+        // single-user 60, ready 15, and the stop of a server that never
+        // answered, 23.
+        assert!(OLD_SERVER_WAIT > SERVER_ACTION_WAIT.as_secs() + 23 + 8 + 120 + 60 + 15 + 23);
+        // MySQL: waiting 30, stopping 35, lsof 8, init 120, ready 15, stop 35.
+        assert!(OLD_SERVER_WAIT > SERVER_ACTION_WAIT.as_secs() + 35 + 8 + 120 + 15 + 35);
+        // Valkey: waiting 30, stopping 29 (the request, SIGTERM, and the
+        // margin), lsof 8, ready 15, stop 29. More than the 60 s of the
+        // other services, so it needs the longer wait.
+        let valkey = SERVER_ACTION_WAIT.as_secs() + 29 + 8 + 15 + 29;
+        assert!(OLD_SERVER_WAIT > valkey);
+        assert!(OLD_ACTION_WAIT < valkey);
     }
 
     #[tokio::test]

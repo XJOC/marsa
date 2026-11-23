@@ -46,8 +46,7 @@ use crate::runtimes::Runtime;
 use crate::types::{
     AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, DoctorReport, ErrorBody,
     Event, Health, HostsStatus, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest,
-    RuntimeList, ServiceAction, ServiceStatus, SiteList, SitePatch, Uninstalled, XdebugRequest,
-    XdebugState,
+    RuntimeList, ServiceStatus, SiteList, SitePatch, Uninstalled, XdebugRequest, XdebugState,
 };
 use lifecycle::lock_is_held;
 
@@ -58,21 +57,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// For one call that is not a stream, and for the start of a stream.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// For `POST /v1/services/{id}/{action}`. The daemon waits up to 20 s for
-/// another action on the service, then runs this one; a restart that stops
-/// an old Caddy first takes about 23 s. About 43 s in all.
-const SERVICE_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
-/// The same for PostgreSQL (`postgres`). The daemon waits up to
-/// 30 s for another action, a restart stops it first (SIGINT and SIGQUIT,
-/// up to about 23 s), and a first start reads the port (lsof, up to 8 s),
-/// runs `initdb` (up to 120 s) and single-user mode (up to 60 s), waits up
-/// to 15 s for the server, and stops one that never answered (23 s): about
-/// 279 s in all. MySQL (`mysql`) takes less: its first init (up to 120 s)
-/// is one step, and its stop is SIGTERM, then a kill after 30 s. Valkey
-/// (`valkey`) has no init, but its stop (`SHUTDOWN SAVE`, then SIGTERM) may
-/// take 29 s, twice in a restart whose start never answered: more than the
-/// 60 s of the other services.
-const SERVER_ACTION_TIMEOUT: Duration = Duration::from_secs(300);
 /// For `DELETE /v1/runtimes/{tool}/{version}`: a Node.js folder holds
 /// thousands of files, and a virus scanner may slow their delete.
 const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -194,16 +178,6 @@ impl DaemonClient {
     pub async fn services(&self) -> Result<Vec<ServiceStatus>, ClientError> {
         self.call(Method::GET, &["v1", "services"], REQUEST_TIMEOUT)
             .await
-    }
-
-    /// `POST /v1/services/{id}/{action}`. The status after the action.
-    pub async fn service_action(
-        &self,
-        id: &str,
-        action: ServiceAction,
-    ) -> Result<ServiceStatus, ClientError> {
-        let path = ["v1", "services", id, action.as_str()];
-        self.call(Method::POST, &path, action_timeout(id)).await
     }
 
     /// `GET /v1/logs/{id}`: the recent lines.
@@ -582,14 +556,6 @@ impl DaemonClient {
     }
 }
 
-/// How long the client waits for an action on the service `id`.
-fn action_timeout(id: &str) -> Duration {
-    match id {
-        "postgres" | "mysql" | "valkey" => SERVER_ACTION_TIMEOUT,
-        _ => SERVICE_ACTION_TIMEOUT,
-    }
-}
-
 /// `path` as it goes into a JSON body. JSON text is UTF-8, so a path that is
 /// not fails here, with its own code, before any request.
 fn utf8_path(path: &Path) -> Result<PathBuf, ClientError> {
@@ -603,31 +569,4 @@ fn utf8_path(path: &Path) -> Result<PathBuf, ClientError> {
 
 pub(super) fn run_dir(data_dir: &Path) -> PathBuf {
     DataDir::new(data_dir).run()
-}
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-
-    /// PostgreSQL's first start runs `initdb`, so its actions get longer.
-    #[test]
-    fn a_postgres_action_waits_longer_than_its_worst_case() {
-        assert_eq!(action_timeout("caddy"), SERVICE_ACTION_TIMEOUT);
-        // Waiting 30, stopping 23, then lsof 8, initdb 120, single-user 60,
-        // ready 15, and the stop of a server that never answered, 23.
-        let worst = Duration::from_secs(30 + 23 + 8 + 120 + 60 + 15 + 23);
-        assert!(action_timeout("postgres") > worst);
-        // Waiting 30, stopping 35, lsof 8, init 120, ready 15, stop 35.
-        let worst = Duration::from_secs(30 + 35 + 8 + 120 + 15 + 35);
-        assert!(action_timeout("mysql") > worst);
-        // Waiting 30, stopping 29 (the request, SIGTERM, and the margin),
-        // lsof 8, ready 15, stop 29.
-        let worst = Duration::from_secs(30 + 29 + 8 + 15 + 29);
-        assert!(action_timeout("valkey") > worst);
-        assert!(
-            SERVICE_ACTION_TIMEOUT < worst,
-            "valkey needs the longer one"
-        );
-    }
 }
