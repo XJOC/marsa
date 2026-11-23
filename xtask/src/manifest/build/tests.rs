@@ -578,7 +578,7 @@ async fn builds_the_expected_json_twice_the_same() {
     assert!(cache.path().join("php").is_dir());
     assert!(!cache.path().join("postgres").exists());
 
-    // The local checks (the same rules as M2-02) accept it.
+    // The local checks (the same rules as the installer) accept it.
     let checked = check_json(json.as_bytes()).expect("valid manifest");
     assert_eq!(checked, first.manifest);
 

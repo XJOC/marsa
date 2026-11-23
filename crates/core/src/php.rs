@@ -368,7 +368,7 @@ pub struct CgiPool {
 ///
 /// `PHP_FCGI_CHILDREN` makes php-cgi start that many workers and restart
 /// each one after `PHP_FCGI_MAX_REQUESTS` requests. No request fails at that
-/// moment, unlike with separate php-cgi processes behind Caddy (spike S-11).
+/// moment, unlike with separate php-cgi processes behind Caddy (measured on Windows).
 ///
 /// # Errors
 ///

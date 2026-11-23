@@ -1353,7 +1353,7 @@ fn the_output_of_resolvectl_status() {
             .map(|word| (*word).to_owned())
             .collect::<Vec<_>>()
     };
-    // systemd 249 (Ubuntu 22.04), from spike S-02b.
+    // systemd 249 (Ubuntu 22.04), as read on that system.
     let ubuntu = read(
         "Link 5 (marsa0)\nCurrent Scopes: DNS\n     Protocols: -DefaultRoute +LLMNR -mDNS \
              -DNSOverTLS DNSSEC=no/unsupported\n   DNS Servers: 127.0.0.1:18053\n    DNS \

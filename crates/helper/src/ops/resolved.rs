@@ -22,8 +22,8 @@
 //! `marsa0`. Those versions of resolved bind a link's DNS socket to the
 //! link while it connects, unless they know the server's address as a link
 //! address, so the packets to `127.0.0.1` left through the dummy link and
-//! were lost: the first `.test` lookup took 21 s on Ubuntu 22.04 (spike
-//! S-02c). With the route, the kernel delivers them locally: 0.01 s. From
+//! were lost: the first `.test` lookup took 21 s on Ubuntu 22.04 (measured).
+//! With the route, the kernel delivers them locally: 0.01 s. From
 //! 253 on, resolved makes an exception for localhost, so the unit changes
 //! no routing there. `marsad` still listens on `127.0.0.1` only, and `lo`
 //! keeps its own route.
@@ -603,7 +603,7 @@ fn running(system: &impl System) -> Result<bool, String> {
 
 /// Restarts systemd-resolved, so it reads its files again. A failed state is
 /// cleared first: many restarts in a few seconds hit the unit's start limit,
-/// and then systemd refuses the next one (spike S-02, Fedora).
+/// and then systemd refuses the next one (seen on Fedora).
 fn restart(system: &impl System) -> Result<(), String> {
     let _ = system.run(SYSTEMCTL, &RESET_FAILED);
     let restarted = system.run(SYSTEMCTL, &RESTART);

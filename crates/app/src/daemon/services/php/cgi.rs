@@ -7,7 +7,7 @@
 //! has no config file of its own, so the pool's `fpm_conf` is empty.
 //!
 //! When the supervisor stops php-cgi (a kill on Windows), its workers end
-//! with it: php-cgi keeps them in a Job Object of its own (spike S-11). And
+//! with it: php-cgi keeps them in a Job Object of its own. And
 //! the daemon's own Job Object ends all of them if the daemon dies (ADR 0017).
 
 use std::path::Path;

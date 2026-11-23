@@ -215,7 +215,7 @@ mod tests {
                   listening on 127.0.0.1:18080: listen tcp 127.0.0.1:18080: bind: address already in use";
         let windows = "listen tcp 127.0.0.1:18080: bind: Only one usage of each socket \
                        address (protocol/network address/port) is normally permitted.";
-        // Port 80 on a Windows machine where IIS runs (spike S-11).
+        // Port 80 on a Windows machine where IIS runs.
         let held_alone = "listening on 127.0.0.1:80: listen tcp 127.0.0.1:80: bind: An attempt \
                           was made to access a socket in a way forbidden by its access permissions.";
         assert!(is_port_conflict(&line(LogStream::Stderr, go)));
@@ -318,7 +318,7 @@ mod tests {
             panic!("not port_in_use");
         };
         assert_eq!(address.as_deref(), Some("[::1]:443"));
-        // Windows, with IIS on port 80 (spike S-11).
+        // Windows, with IIS on port 80.
         let held_alone = "{\"error\":\"loading config: loading new config: http app module: start: \
                           listening on 127.0.0.1:80: listen tcp 127.0.0.1:80: bind: An attempt was \
                           made to access a socket in a way forbidden by its access permissions.\"}";

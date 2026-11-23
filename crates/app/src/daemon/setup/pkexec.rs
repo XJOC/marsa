@@ -2,8 +2,8 @@
 //!
 //! `pkexec` asks the desktop's polkit agent for the user's password, then
 //! runs the program as root. The program, `apply`, and the request go as an
-//! argument list: there is no shell anywhere, so nothing is quoted (spike
-//! S-02: a request with quotes, `$`, and backticks, and one of 64 KiB, arrive
+//! argument list: there is no shell anywhere, so nothing is quoted (tested:
+//! a request with quotes, `$`, and backticks, and one of 64 KiB, arrive
 //! unchanged).
 //!
 //! `--disable-internal-agent` (polkit 0.102 and later): with no polkit agent,

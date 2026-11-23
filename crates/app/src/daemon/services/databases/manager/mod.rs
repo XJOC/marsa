@@ -35,7 +35,7 @@ use crate::daemon::state::Daemon;
 use prepare::Prepared;
 use run::Ready;
 
-/// How long a start waits for the server to take connections. S-12
+/// How long a start waits for the server to take connections. A test
 /// measured 50 to 690 ms. The postmaster answers before it recovers its data
 /// after a crash, so a long recovery does not count against this.
 const READY_LIMIT: Duration = Duration::from_secs(15);
