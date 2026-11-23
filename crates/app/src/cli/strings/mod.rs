@@ -7,6 +7,7 @@
 
 mod doctor;
 mod errors;
+mod mail;
 mod runtimes;
 mod services;
 mod setup;
@@ -17,6 +18,7 @@ mod tests;
 
 pub use doctor::*;
 use errors::*;
+pub use mail::*;
 pub use runtimes::*;
 pub use services::*;
 pub use setup::*;

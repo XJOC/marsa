@@ -21,9 +21,41 @@ pub fn clipped(text: &str, most: usize) -> String {
         .collect()
 }
 
+/// `rows` as a table: each column as wide as its widest cell, and two
+/// spaces apart, with no space at a line's end. The first row is usually
+/// the titles.
+pub fn columns<const N: usize>(rows: &[[String; N]]) -> String {
+    let mut widths = [0; N];
+    for row in rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.chars().count());
+        }
+    }
+    let mut text = String::new();
+    for row in rows {
+        let mut line = String::new();
+        for (cell, width) in row.iter().zip(widths) {
+            line.push_str(&format!("{cell:<width$}  "));
+        }
+        text.push_str(line.trim_end());
+        text.push('\n');
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn columns_line_up_and_lines_end_without_spaces() {
+        let rows = [
+            ["ID".to_owned(), "NAME".to_owned()],
+            ["1".to_owned(), "a".to_owned()],
+            ["100".to_owned(), String::new()],
+        ];
+        assert_eq!(columns(&rows), "ID   NAME\n1    a\n100\n");
+    }
 
     #[test]
     fn control_characters_are_dropped() {
