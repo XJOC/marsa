@@ -3,7 +3,8 @@ use std::fs;
 use marsa_core::installer::fetch::testing::{MemoryFetch, Reply};
 use sha2::{Digest, Sha256, Sha512};
 
-use super::super::upstream::SumFile;
+use super::super::attest;
+use super::super::upstream::{Layout, SumFile};
 use super::super::verify::check_json;
 use super::*;
 
@@ -55,6 +56,21 @@ impl Inspect for Stub {
         }
         Ok(vec![])
     }
+
+    fn attestation(&self, file: &Path, version: &Version) -> Result<String> {
+        fake_attestation(file, version)
+    }
+}
+
+/// What `gh attestation verify` would print for one of the fake archives of
+/// [`fetcher`], whose body is their own URL: the real capture, made to name
+/// that archive and its sha256.
+fn fake_attestation(file: &Path, version: &Version) -> Result<String> {
+    let body = fs::read(file)?;
+    let url = String::from_utf8(body.clone())?;
+    let name = url.rsplit_once('/').map_or(url.as_str(), |(_, name)| name);
+    let sha256: [u8; 32] = Sha256::digest(&body).into();
+    Ok(attest::testing::sample(name, &sha256, version))
 }
 
 fn sha(body: &[u8]) -> String {
@@ -75,7 +91,7 @@ fn upstream(algorithm: Algorithm, body: &[u8]) -> String {
 /// that agree, except for the file named in `bad`.
 fn fetcher(pins: &Pins, bad: Option<&str>) -> MemoryFetch {
     let mut fetch = MemoryFetch::new();
-    let mut sums: BTreeMap<String, String> = BTreeMap::new();
+    let mut sums: BTreeMap<String, (Layout, Vec<(String, String)>)> = BTreeMap::new();
     for runtime in RUNTIMES {
         let recipe = recipes::builtin(runtime).expect("recipe");
         for version in pins.versions(runtime) {
@@ -92,16 +108,28 @@ fn fetcher(pins: &Pins, bad: Option<&str>) -> MemoryFetch {
                         } else {
                             upstream(sum.algorithm, &body)
                         };
-                        sums.entry(sum.url)
-                            .or_default()
-                            .push_str(&format!("{hash}  {}\r\n", sum.name));
+                        let entry = sums.entry(sum.url).or_insert((sum.layout, Vec::new()));
+                        entry.1.push((hash, sum.name));
                     }
                     fetch = fetch.with(url, Reply::Chunks(vec![body]));
                 }
             }
         }
     }
-    for (url, text) in sums {
+    for (url, (layout, entries)) in sums {
+        let text = match layout {
+            Layout::GithubDigest => {
+                let assets: Vec<_> = entries
+                    .iter()
+                    .map(|(hash, name)| serde_json::json!({"name": name, "digest": format!("sha256:{hash}")}))
+                    .collect();
+                serde_json::json!({ "assets": assets }).to_string()
+            }
+            Layout::List | Layout::Single => entries
+                .iter()
+                .map(|(hash, name)| format!("{hash}  {name}\r\n"))
+                .collect(),
+        };
         fetch = fetch.with(&url, Reply::Chunks(vec![text.into_bytes()]));
     }
     fetch
@@ -158,6 +186,10 @@ struct MysqlStub;
 impl Inspect for MysqlStub {
     fn php_build(&self, _target: &Target<'_>, _file: &Path) -> Result<Vec<String>> {
         Ok(vec![])
+    }
+
+    fn attestation(&self, file: &Path, version: &Version) -> Result<String> {
+        fake_attestation(file, version)
     }
 }
 
@@ -264,6 +296,9 @@ async fn a_bad_oracle_check_or_library_sum_stops_the_mysql_build() {
     impl Inspect for WrongFolder {
         fn php_build(&self, _t: &Target<'_>, _f: &Path) -> Result<Vec<String>> {
             Ok(vec![])
+        }
+        fn attestation(&self, file: &Path, version: &Version) -> Result<String> {
+            fake_attestation(file, version)
         }
     }
     impl OracleCheck for WrongFolder {
@@ -546,6 +581,91 @@ async fn a_valkey_override_stops_the_build() {
     );
 }
 
+/// The pins of [`PINS`] plus Mailpit 1.34.0 on all five platforms, as
+/// `recipes/pins.toml` has it.
+fn mailpit_pins() -> String {
+    format!("{PINS}[mailpit]\nversions = [\"1.34.0\"]\n")
+}
+
+#[tokio::test]
+async fn mailpit_is_built_with_the_digests_of_its_release() {
+    let pins = Pins::parse(&mailpit_pins()).expect("pins");
+    let fetch = fetcher(&pins, None);
+    let cache = tempfile::tempdir().expect("tempdir");
+    let built = build(&fetch, &pins, cache.path(), &Stub::default())
+        .await
+        .expect("build");
+    let value = serde_json::to_value(&built.manifest).expect("json");
+    let [release] = value["runtimes"]["mailpit"]
+        .as_array()
+        .expect("mailpit")
+        .as_slice()
+    else {
+        panic!("one mailpit release expected");
+    };
+    assert_eq!(release["version"], "1.34.0");
+    let linux = &release["platforms"]["linux-x64"][0];
+    let url = "https://github.com/axllent/mailpit/releases/download/v1.34.0/\
+                   mailpit-linux-amd64.tar.gz";
+    assert_eq!(linux["urls"][0], url);
+    assert_eq!(linux["sha256"], sha(url.as_bytes()));
+    let rows = built
+        .rows
+        .iter()
+        .filter(|row| row.starts_with("mailpit 1.34.0 "));
+    let checked = rows.filter(|row| row.ends_with("(upstream sha256 matches)"));
+    assert_eq!(checked.count(), 5);
+    // One release JSON for the five archives.
+    let api = "https://api.github.com/repos/axllent/mailpit/releases/tags/v1.34.0";
+    let asked = fetch
+        .requests()
+        .into_iter()
+        .filter(|url| url == api)
+        .count();
+    assert_eq!(asked, 1);
+    assert!(!cache.path().join("mailpit").exists());
+    check_json(to_json(&built.manifest).expect("json").as_bytes()).expect("valid manifest");
+
+    // An archive whose digest in the release JSON is another file's.
+    let bad = fetcher(&pins, Some("mailpit-darwin-arm64.tar.gz"));
+    let cache = tempfile::tempdir().expect("tempdir");
+    let err = build(&bad, &pins, cache.path(), &Stub::default())
+        .await
+        .err()
+        .expect("a bad digest");
+    let err = format!("{err:#}");
+    assert!(err.contains("mailpit 1.34.0 darwin-arm64"), "{err}");
+    assert!(err.contains("sha256 is"), "{err}");
+}
+
+/// An override that names another Mailpit archive (32-bit ARM, with its own
+/// matching digest) stops the build before any download of Mailpit.
+#[tokio::test]
+async fn a_mailpit_override_stops_the_build() {
+    let text = format!(
+        "{}[[override]]\nruntime = \"mailpit\"\nversion = \"1.34.0\"\nplatform = \"darwin-arm64\"\n\
+             artifact = \"archive\"\nurls = [\"https://github.com/axllent/mailpit/releases/download/\
+             v1.34.0/mailpit-linux-arm.tar.gz\"]\n",
+        mailpit_pins()
+    );
+    let pins = Pins::parse(&text).expect("pins");
+    let fetch = fetcher(&pins, None);
+    let cache = tempfile::tempdir().expect("tempdir");
+    let err = build(&fetch, &pins, cache.path(), &Stub::default())
+        .await
+        .err()
+        .expect("an override");
+    assert!(
+        format!("{err:#}").contains("only that Mailpit archive"),
+        "{err:#}"
+    );
+    let fetched = fetch.requests();
+    assert!(
+        !fetched.iter().any(|url| url.contains("mailpit")),
+        "{fetched:?}"
+    );
+}
+
 /// An Oracle file has one URL: a second one is a mirror that its
 /// proof does not cover.
 #[tokio::test]
@@ -682,7 +802,8 @@ async fn builds_the_expected_json_twice_the_same() {
         caddy_row.ends_with("(upstream sha512 matches)"),
         "{caddy_row}"
     );
-    // PostgreSQL: the theseus archive, our sha256, checked with its .sha256.
+    // PostgreSQL: the theseus archive, our sha256, checked with its .sha256
+    // and its GitHub attestation.
     let postgres = &value["runtimes"]["postgres"][0];
     assert_eq!(postgres["version"], "18.7.0");
     assert_eq!(postgres["platforms"].as_object().map(|o| o.len()), Some(5));
@@ -697,7 +818,10 @@ async fn builds_the_expected_json_twice_the_same() {
         .collect();
     assert_eq!(postgres_rows.len(), 5);
     for row in postgres_rows {
-        assert!(row.ends_with("(upstream sha256 matches)"), "{row}");
+        assert!(
+            row.ends_with("(upstream sha256 matches; GitHub attestation verified)"),
+            "{row}"
+        );
     }
 
     // The PHP checks ran for each macOS and Linux archive, every run.
@@ -844,6 +968,138 @@ async fn postgres_needs_the_theseus_sum() {
         let asked = fetch.requests();
         assert!(!asked.iter().any(|u| u.starts_with(url)), "{asked:?}");
     }
+}
+
+/// The stub that answers for `gh`, and counts what it was asked about: the
+/// body of each archive (its URL, in these tests).
+struct Attest<F> {
+    answer: F,
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl<F: Fn(&Path, &Version) -> Result<String>> Attest<F> {
+    fn new(answer: F) -> Self {
+        Self {
+            answer,
+            asked: std::sync::Mutex::default(),
+        }
+    }
+}
+
+impl<F: Fn(&Path, &Version) -> Result<String>> Inspect for Attest<F> {
+    fn php_build(&self, _t: &Target<'_>, _f: &Path) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+    fn attestation(&self, file: &Path, version: &Version) -> Result<String> {
+        self.asked
+            .lock()
+            .expect("lock")
+            .push(fs::read_to_string(file)?);
+        (self.answer)(file, version)
+    }
+}
+
+impl<F> OracleCheck for Attest<F> {
+    fn signature(&self, _s: &Path, _f: &Path) -> Result<()> {
+        bail!("no Oracle check expected")
+    }
+    fn md5(&self, _f: &Path) -> Result<[u8; 16]> {
+        bail!("no Oracle check expected")
+    }
+    fn first_entry(&self, _f: &Path, _k: ArchiveKind) -> Result<String> {
+        bail!("no Oracle check expected")
+    }
+}
+
+/// `build` over [`PINS`] with `stub`, and `bad` as the one archive whose
+/// `.sha256` does not match. Returns the cache folder too: its
+/// `theseus-work` must be empty after.
+async fn build_with(
+    stub: &(impl Inspect + OracleCheck),
+    bad: Option<&str>,
+) -> (Result<Built>, tempfile::TempDir) {
+    let pins = Pins::parse(PINS).expect("pins");
+    let cache = tempfile::tempdir().expect("tempdir");
+    let built = build(&fetcher(&pins, bad), &pins, cache.path(), stub).await;
+    (built, cache)
+}
+
+fn archive_is_gone(cache: &tempfile::TempDir) -> bool {
+    !cache.path().join("theseus-work").join("archive").exists()
+}
+
+#[tokio::test]
+async fn postgres_archives_are_attested_and_deleted_after() {
+    let stub = Attest::new(fake_attestation);
+    let (built, cache) = build_with(&stub, None).await;
+    let built = built.expect("built");
+    let attested = built
+        .rows
+        .iter()
+        .filter(|row| row.ends_with("GitHub attestation verified)"))
+        .count();
+    assert_eq!(attested, 5, "{:?}", built.rows);
+    assert_eq!(stub.asked.lock().expect("lock").len(), 5);
+    // Nothing of the 60 MB archives stays in the cache.
+    assert!(archive_is_gone(&cache), "the archive is kept");
+}
+
+#[tokio::test]
+async fn a_postgres_attestation_that_does_not_fit_stops_the_build() {
+    type Case = (
+        &'static str,
+        &'static str,
+        fn(&Path, &Version) -> Result<String>,
+    );
+    let cases: [Case; 5] = [
+        ("no attestation", "has no verified attestation", |_, _| {
+            Ok("[]".to_owned())
+        }),
+        ("gh is not signed in", "HTTP 401", |_, _| {
+            bail!("`gh attestation verify` refused it (exit status: 1): HTTP 401")
+        }),
+        ("not JSON", "not JSON", |_, _| Ok("verified".to_owned())),
+        ("another digest", "does not name", |file, version| {
+            let text = fake_attestation(file, version)?;
+            Ok(text.replace(&hex(&Sha256::digest(fs::read(file)?)), &"0".repeat(64)))
+        }),
+        (
+            "another repository",
+            "its repository is",
+            |file, version| {
+                Ok(fake_attestation(file, version)?
+                    .replace("theseus-rs/postgresql-binaries", "evil/postgresql-binaries"))
+            },
+        ),
+    ];
+    for (what, reason, answer) in cases {
+        let (built, cache) = build_with(&Attest::new(answer), None).await;
+        let message = format!(
+            "{:#}",
+            built.err().unwrap_or_else(|| panic!("{what}: built"))
+        );
+        assert!(message.starts_with("postgres 18.7.0 "), "{what}: {message}");
+        assert!(message.contains("GitHub attestation"), "{what}: {message}");
+        assert!(message.contains(reason), "{what}: {message}");
+        assert!(archive_is_gone(&cache), "{what}: the archive is kept");
+    }
+}
+
+/// The sum is checked first: a file that does not match its `.sha256` never
+/// reaches `gh`.
+#[tokio::test]
+async fn an_archive_with_a_bad_sum_is_never_given_to_gh() {
+    let bad = "postgresql-18.7.0-x86_64-pc-windows-msvc.zip";
+    let stub = Attest::new(fake_attestation);
+    let (built, cache) = build_with(&stub, Some(bad)).await;
+    let err = built.err().expect("a bad sum");
+    assert!(format!("{err:#}").contains(".sha256 says"), "{err:#}");
+    assert!(archive_is_gone(&cache));
+    let asked = stub.asked.lock().expect("lock");
+    assert!(!asked.iter().any(|url| url.ends_with(bad)), "{asked:?}");
+    // The archives before it were attested, so this is not an empty list
+    // that passes by chance.
+    assert!(!asked.is_empty(), "{asked:?}");
 }
 
 /// An MD5 is never enough for any runtime, and the build asks for
@@ -1321,4 +1577,45 @@ async fn oracle_proof_takes_oracle_archives_only() {
         "{err}"
     );
     assert!(!Proof::OracleSignature.keeps_file());
+}
+
+#[tokio::test]
+async fn check_attested_takes_theseus_archives_only_and_keeps_nothing() {
+    let url = "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.7.0/postgresql-18.7.0-x86_64-unknown-linux-gnu.tar.gz";
+    let fetch = MemoryFetch::new().with(url, Reply::Chunks(vec![url.as_bytes().to_vec()]));
+    let work = tempfile::tempdir().expect("tempdir");
+    let checked = check_attested(&fetch, url, work.path(), &Stub::default())
+        .await
+        .expect("attested");
+    assert_eq!(checked.sha256.as_slice(), Sha256::digest(url).as_slice());
+    assert!(!work.path().join("archive").exists());
+
+    for refused in [
+        "https://example.org/18.7.0/postgresql-18.7.0.tar.gz",
+        "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.13.tar.gz",
+        "https://github.com/theseus-rs/postgresql-binaries/releases/download/latest/a.tar.gz",
+    ] {
+        let err = check_attested(&fetch, refused, work.path(), &Stub::default())
+            .await
+            .expect_err("refused");
+        assert!(!fetch.requests().iter().any(|u| u == refused), "{err:#}");
+    }
+}
+
+#[tokio::test]
+async fn check_attested_refuses_an_attestation_that_does_not_fit() {
+    let url = "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.7.0/postgresql-18.7.0-x86_64-unknown-linux-gnu.tar.gz";
+    let fetch = MemoryFetch::new().with(url, Reply::Chunks(vec![url.as_bytes().to_vec()]));
+    let work = tempfile::tempdir().expect("tempdir");
+    for answer in [
+        (|_: &Path, _: &Version| Ok("[]".to_owned())) as fn(&Path, &Version) -> Result<String>,
+        |_, _| bail!("HTTP 401"),
+        |file, version| Ok(fake_attestation(file, version)?.replace("github-hosted", "self-hosted")),
+    ] {
+        let err = check_attested(&fetch, url, work.path(), &Attest::new(answer))
+            .await
+            .expect_err("refused");
+        assert!(format!("{err:#}").contains("GitHub attestation"), "{err:#}");
+        assert!(!work.path().join("archive").exists(), "the archive is kept");
+    }
 }

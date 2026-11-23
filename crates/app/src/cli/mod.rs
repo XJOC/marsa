@@ -46,8 +46,7 @@ pub enum Tool {
     /// Valkey 8.1, for Laravel's Redis cache and queue. Installed like the
     /// others; `marsad` runs it.
     Valkey,
-    /// Mailpit, the mail catcher. Installed like the others; `marsad` runs
-    /// it.
+    /// Mailpit, the mail catcher. Installed like the others.
     Mailpit,
 }
 

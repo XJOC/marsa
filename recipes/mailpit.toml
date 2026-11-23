@@ -4,7 +4,7 @@
 name = "mailpit"
 
 # After install: `mailpit version --no-release-check` prints
-# `<its own path> v1.34.0 compiled with go1.25.4 on darwin/arm64`. The path
+# `<its own path> v1.34.0 compiled with go1.27.4 on darwin/arm64`. The path
 # comes first, so the check looks inside the line. `--no-release-check` keeps
 # it off the network: without it, Mailpit asks GitHub for its latest release.
 [check]
@@ -18,9 +18,10 @@ expect_contains = " v{version} compiled with "
 # and no attestation: `cargo xtask manifest build` compares each archive with
 # the sha256 `digest` GitHub's API reports for that release asset.
 
-# Go 1.25, which builds Mailpit, runs on macOS 12 or later.
+# Mailpit is built with the newest Go: the v1.34.0 binaries say `minos 13.0`
+# in their Mach-O header, so they need macOS 13 or later.
 [platform.darwin-arm64]
-min_macos = "12.0"
+min_macos = "13.0"
 programs = { mailpit = "mailpit" }
 
 [[platform.darwin-arm64.artifact]]
@@ -29,7 +30,7 @@ url = "https://github.com/axllent/mailpit/releases/download/v{version}/mailpit-d
 format = "tar.gz"
 
 [platform.darwin-x64]
-min_macos = "12.0"
+min_macos = "13.0"
 programs = { mailpit = "mailpit" }
 
 [[platform.darwin-x64.artifact]]

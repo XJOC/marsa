@@ -10,7 +10,7 @@
 //! [`Descriptor::plain`] is all a runtime needs that core adds later (Python,
 //! Go): the list comes from [`Runtime::ALL`], so a new variant shows up with
 //! its name, two letters, and an install button, with no change here. A
-//! database or cache server (an [`Kind::Engine`]: Postgres, MySQL, Valkey) is
+//! server `marsad` runs (an [`Kind::Engine`]: Postgres, MySQL, Valkey, Mailpit) is
 //! left out of the list until the screens for them exist; they are named in
 //! [`kind_for`], so they stay out when core adds them.
 //!
@@ -72,8 +72,8 @@ pub(crate) enum Kind {
     Language,
     /// A program that serves or builds: Composer, Caddy.
     Tool,
-    /// A database or cache server (Postgres, MySQL, Valkey). It belongs
-    /// under Databases and Services, so it is not listed here.
+    /// A server `marsad` runs (Postgres, MySQL, Valkey, the mail catcher
+    /// Mailpit). It belongs under Services, so it is not listed here.
     Engine,
 }
 
