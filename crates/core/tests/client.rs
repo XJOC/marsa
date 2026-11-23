@@ -1315,10 +1315,60 @@ async fn an_event_that_cannot_be_read_does_not_break_the_follow() {
         .route(
             "/v1/jobs/setup",
             post(|| async { (StatusCode::ACCEPTED, Json(JobAccepted { id: 1 })) }),
+        )
+        .route(
+            "/v1/jobs/{id}",
+            get(|| async {
+                let body = ErrorBody::new("not_found", "no such job");
+                (StatusCode::NOT_FOUND, Json(body))
+            }),
         );
     let fake = Fake::start(router).await;
     assert_eq!(fake.client().run_setup().await.unwrap(), setup_report());
-    assert_eq!(fake.targets(), ["GET /v1/events", "POST /v1/jobs/setup"]);
+    // The stream went on; the job was asked once for the unreadable event
+    // (the fake knows no such job: the answer is not an end).
+    assert_eq!(
+        fake.targets(),
+        ["GET /v1/events", "POST /v1/jobs/setup", "GET /v1/jobs/1"]
+    );
+}
+
+/// The end of the job in a shape this client cannot read, and the state of
+/// the job unreadable too: the wait ends with an error, not never. If the
+/// state is readable, it is the end.
+#[tokio::test]
+async fn an_unreadable_end_is_asked_for_and_never_waited_for() {
+    let unreadable = format!(
+        "data: {}\n\n",
+        serde_json::json!({ "type": "job", "data": { "id": 1, "kind": "setup", "status": "done",
+            "result": "from_a_newer_daemon", "data": {} } }),
+    );
+    let events = {
+        let body = unreadable.clone();
+        get(move || {
+            let body = body.clone();
+            async move { sse_response(body) }
+        })
+    };
+    let accepted = post(|| async { (StatusCode::ACCEPTED, Json(JobAccepted { id: 1 })) });
+    // The state is readable: the job is done.
+    let router = Router::new()
+        .route("/v1/events", events.clone())
+        .route("/v1/jobs/setup", accepted.clone())
+        .route("/v1/jobs/{id}", get(|| async { Json(job_done(1)) }));
+    let fake = Fake::start(router).await;
+    assert_eq!(fake.client().run_setup().await.unwrap(), setup_report());
+    // The state is as unreadable as the event: an error.
+    let newer = serde_json::json!({
+        "id": 1, "kind": "setup", "status": "done", "result": "from_a_newer_daemon", "data": {}
+    });
+    let router = Router::new()
+        .route("/v1/events", events)
+        .route("/v1/jobs/setup", accepted)
+        .route("/v1/jobs/{id}", get(move || async move { Json(newer) }));
+    let fake = Fake::start(router).await;
+    let err = fake.client().run_setup().await.unwrap_err();
+    assert_eq!(err.code(), "daemon_bad_response");
 }
 
 /// The job is still running when the stream is open again: the client goes

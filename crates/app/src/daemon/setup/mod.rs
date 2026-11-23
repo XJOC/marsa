@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn old_clients_wait_longer_than_the_slowest_setup() {
         // What clients before ADR 0026 wait for `POST /v1/setup`.
-        const SETUP_TIMEOUT: Duration = Duration::from_secs(40 * 60);
+        const OLD_SETUP_WAIT: Duration = Duration::from_secs(40 * 60);
 
         // 12 min 10 s of limits, 30 s of them for Caddy and its CA root, and
         // 2 s of grace after each of 12 programs.
@@ -643,15 +643,15 @@ mod tests {
         // program.
         let margin = Duration::from_secs(30);
         assert!(
-            SETUP_TIMEOUT >= SLOWEST_SETUP + margin,
-            "an old client waits {SETUP_TIMEOUT:?}, and a setup may take {SLOWEST_SETUP:?}"
+            OLD_SETUP_WAIT >= SLOWEST_SETUP + margin,
+            "an old client waits {OLD_SETUP_WAIT:?}, and a setup may take {SLOWEST_SETUP:?}"
         );
         // Windows: the CA, a request, the install after the UAC prompt, and
         // the request again, each to its limit. The prompt itself has none.
         let windows = CA_WAIT + 2 * windows::SEND_LIMIT + windows::INSTALL_LIMIT;
         assert!(
-            SETUP_TIMEOUT >= windows + margin,
-            "an old client waits {SETUP_TIMEOUT:?}, and a Windows setup may take {windows:?}"
+            OLD_SETUP_WAIT >= windows + margin,
+            "an old client waits {OLD_SETUP_WAIT:?}, and a Windows setup may take {windows:?}"
         );
 
         // The sum holds every step a setup waits for. A full run with no CA

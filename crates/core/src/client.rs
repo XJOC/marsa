@@ -399,6 +399,8 @@ impl DaemonClient {
         segments: &[&str],
         limit: Duration,
     ) -> Result<T, ClientError> {
+        // A long operation is a job, not a long request (ADR 0026).
+        debug_assert!(limit <= REQUEST_TIMEOUT, "a request waits at most 30 s");
         let request = self.http.request(method, self.url(segments)?);
         self.answer(request.timeout(limit)).await
     }
@@ -530,6 +532,7 @@ mod tests {
             include_str!("client.rs"),
             include_str!("client/jobs.rs"),
             include_str!("client/lifecycle.rs"),
+            include_str!("client/sse.rs"),
         ];
         let known = BTreeSet::from(["CONNECT_TIMEOUT", "HEALTH_TIMEOUT", "REQUEST_TIMEOUT"]);
         for source in sources {

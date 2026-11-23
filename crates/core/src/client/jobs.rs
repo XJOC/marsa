@@ -202,9 +202,20 @@ impl DaemonClient {
                 // The daemon is stopping, and the job stops with it.
                 Some(Ok(StreamItem::Item(Event::ShuttingDown))) => return Err(lost_job(lost)),
                 Some(Ok(StreamItem::Item(_))) => resyncs = 0,
-                // An event this client cannot read (a newer daemon's other
-                // job, say): the stream goes on.
-                Some(Err(ClientError::BadResponse { .. })) => {}
+                // An event this client cannot read: a newer daemon's other
+                // job, or the end of this one in a shape it does not know.
+                // Ask for the job: if its own state cannot be read either,
+                // the wait ends with that error, not never.
+                Some(Err(ClientError::BadResponse { .. })) => match self.job(id).await {
+                    Ok(event) => {
+                        if let Some(end) = ended(event) {
+                            return end;
+                        }
+                    }
+                    Err(err @ ClientError::BadResponse { .. }) => return Err(err),
+                    // Any other answer: the stream still tells.
+                    Err(_) => {}
+                },
                 // Lost events may include the end; a broken connection ends
                 // the stream. Either way: open it again, then ask.
                 Some(Ok(StreamItem::Lagged(_)) | Err(_)) | None => {
