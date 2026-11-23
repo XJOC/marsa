@@ -162,7 +162,12 @@ pub(crate) fn run_check_mysql(url: &str) -> Result<()> {
 /// sha256 the manifest would record. Keeps nothing: the archive is deleted
 /// after.
 pub(crate) fn run_check_postgres(url: &str) -> Result<()> {
-    let work = workspace_root()?.join("target").join("check-postgres");
+    // One folder for each archive, so several checks can run at once.
+    let name = url.rsplit_once('/').map_or(url, |(_, name)| name);
+    let work = workspace_root()?
+        .join("target")
+        .join("check-postgres")
+        .join(name);
     let runtime = tokio::runtime::Runtime::new().context("cannot start tokio")?;
     let fetch = HttpFetch::new()?;
     let checked = runtime.block_on(build::check_attested(&fetch, url, &work, &Attestation))?;
