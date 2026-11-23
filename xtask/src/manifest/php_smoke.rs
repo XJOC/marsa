@@ -18,7 +18,7 @@ use semver::Version;
 use super::build::Target;
 
 /// Good PHP 8.4 builds export 1,034 to 1,036 `zend_*` symbols, PHP 8.3
-/// builds about 980; static musl and broken builds none (S-03, S-10, M5-08).
+/// builds about 980; static musl and broken builds none.
 pub(super) const MIN_ZEND_SYMBOLS: usize = 900;
 
 /// Linux builds target glibc 2.17 (ADR 0012).
@@ -446,7 +446,7 @@ fn run(program: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Result<String> {
 mod tests {
     use super::*;
 
-    // Real output of the S-10 build (PHP 8.4.27, macOS arm64, run 3).
+    // Real output of our own PHP build (PHP 8.4.27, macOS arm64, run 3).
     const PHP_M: &str = include_str!("fixtures/php-m.txt");
     const PHP_FPM_M: &str = include_str!("fixtures/php-fpm-m.txt");
     const PHP_XDEBUG_M: &str = include_str!("fixtures/php-xdebug-m.txt");

@@ -567,7 +567,7 @@ mod tests {
     }
 
     /// Read only. The runner's account is an administrator with UAC off, so
-    /// there every process is elevated, as `postgres.exe` found in S-12.
+    /// there every process is elevated, as a test with `postgres.exe` found.
     #[test]
     fn a_process_reads_the_same_elevation_by_its_token_and_by_its_pid() {
         let own = is_elevated().unwrap();

@@ -1,4 +1,4 @@
-//! Oracle's proof for a MySQL archive (ADR 0023, section 3; task M6-02):
+//! Oracle's proof for a MySQL archive (ADR 0023, section 3):
 //! its GPG signature, by the key whose primary fingerprint is pinned here,
 //! and its MD5. Both, never one.
 //!

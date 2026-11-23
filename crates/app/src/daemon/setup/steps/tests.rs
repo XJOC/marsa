@@ -579,7 +579,7 @@ fn linux_without_a_ca_still_sets_up_names_and_ports() {
     assert_eq!(report.error, None);
 }
 
-/// `pkexec`'s own exit codes, with no answer of the helper (spike S-02).
+/// `pkexec`'s own exit codes, with no answer of the helper (seen in a test on Linux).
 #[test]
 fn a_dismissed_or_refused_password_dialog_on_linux() {
     for (code, expected) in [(126, "setup_cancelled"), (127, "setup_not_authorized")] {

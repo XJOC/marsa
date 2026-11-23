@@ -222,7 +222,7 @@ impl PostgresDirs {
 ///   before this keeps `C`: nothing makes a cluster again.
 /// - Windows: no `--lc-ctype`, so `C` there too. Its C library has no
 ///   `C.UTF-8`, and the one name it has for a UTF-8 category (`.UTF-8`)
-///   depends on the user's language; S-12 tested `--locale=C` alone. So
+///   depends on the user's language; only `--locale=C` was tested there. So
 ///   `pg_trgm` finds no similarity between two Arabic words on Windows; the
 ///   builtin provider above still sorts and changes case the same as on the
 ///   other systems.
@@ -410,7 +410,7 @@ pub fn postgres_stop() -> StopMethod {
 /// PostgreSQL's own program, which sends the same fast shutdown as SIGINT
 /// through PostgreSQL's signal pipe and waits up to 10 s for it (`-w -t
 /// 10`). Then a kill (`TerminateProcess`), after which PostgreSQL recovers
-/// its data at its next start (0.36 s in S-12). With a client connected the
+/// its data at its next start (0.36 s, measured). With a client connected the
 /// fast shutdown took under a second there.
 pub fn postgres_windows_stop(pg_ctl: &Path, data: &Path) -> StopMethod {
     let args = [

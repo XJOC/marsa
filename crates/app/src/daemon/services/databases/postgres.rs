@@ -28,7 +28,7 @@ use super::init::{self, InitError, Step, ensure_data, run_step};
 use crate::daemon::services::probe::ProcessProbe;
 
 const KIND: ServerKind = ServerKind::Postgres;
-/// How long `initdb` may run. About a second on a laptop (S-12); a slow disk
+/// How long `initdb` may run. About a second on a laptop (measured); a slow disk
 /// or a busy CI machine needs more.
 const INITDB_LIMIT: Duration = Duration::from_secs(120);
 /// How long the single-user `postgres` that makes `root` may run.

@@ -66,6 +66,14 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all --check
 
+      # The rules of AGENTS.md section 6 that a script can check: file size,
+      # task IDs in comments, the reason of each #[allow], the CLI's imports,
+      # and the paths in workflow filters. One system is enough: the files
+      # are the same on all three.
+      - name: cargo xtask check-rules
+        if: runner.os == 'Linux'
+        run: cargo xtask check-rules
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 

@@ -4,6 +4,7 @@
 
 mod dev_shims;
 mod manifest;
+mod rules;
 
 use std::path::PathBuf;
 
@@ -17,6 +18,10 @@ fn cli() -> Command {
         .about("Repository tasks for the Marsa workspace")
         .subcommand_required(true)
         .arg_required_else_help(true)
+        .subcommand(Command::new("check-rules").about(
+            "Check the rules of AGENTS.md section 6 that a script can check: file size, task \
+             IDs in comments, the reason of each #[allow], the CLI's imports, and workflow paths",
+        ))
         .subcommand(
             Command::new("dev-shims")
                 .about(
@@ -196,6 +201,7 @@ fn main() -> Result<()> {
             args.get_flag("dry-run"),
         ),
         Some(("manifest", args)) => manifest_command(args),
+        Some(("check-rules", _)) => rules::run(),
         // `subcommand_required` makes clap reject anything else before we get here.
         _ => Ok(()),
     }

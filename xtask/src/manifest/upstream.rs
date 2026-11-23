@@ -19,11 +19,11 @@ pub(super) const CADDY_RELEASES: &str = "https://github.com/caddyserver/caddy/re
 pub(super) const THESEUS_RELEASES: &str =
     "https://github.com/theseus-rs/postgresql-binaries/releases/download/";
 
-/// Our Valkey builds (ADR 0023, task M6-06): one GitHub Release per build,
+/// Our Valkey builds (ADR 0023): one GitHub Release per build,
 /// `valkey-<version>-r<revision>`, with a `sha256sums.txt`, as for PHP.
 pub(super) const VALKEY_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/valkey-";
 
-/// Our `libaio.so.1` builds for MySQL on Linux (ADR 0023, task M6-05):
+/// Our `libaio.so.1` builds for MySQL on Linux (ADR 0023):
 /// `libaio-<version>-r<revision>`, with a `sha256sums.txt`.
 pub(super) const LIBAIO_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/libaio-";
 
@@ -167,8 +167,8 @@ pub(super) fn sum_file_for(url: &str) -> Option<SumFile> {
         // theseus-rs is a third party, and it serves this `.sha256` from the
         // same place as the archive, so the sum proves only that the download
         // is whole. The trust comes from the owner's signature on the manifest
-        // that pins this hash (ADR 0023, section 3). M6-09 adds the check of
-        // the GitHub artifact attestations.
+        // that pins this hash (ADR 0023, section 3). A check of the GitHub
+        // artifact attestations is planned, not built.
         sum(format!("{url}.sha256"), Sha256, Single, Source::Theseus)
     } else if tag(VALKEY_RELEASES).is_some() {
         let sums = format!("{dir}/sha256sums.txt");
