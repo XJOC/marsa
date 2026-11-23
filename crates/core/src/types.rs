@@ -486,6 +486,7 @@ pub struct JobAccepted {
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
     Setup,
+    Uninstall,
     /// A kind a newer daemon knows. An older client still follows the job to
     /// its end by id.
     #[serde(other)]
@@ -509,6 +510,7 @@ pub enum JobStep {
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
 pub enum JobOutcome {
     Setup(SetupReport),
+    Uninstall(UninstallReport),
 }
 
 /// The `status` of a [`JobEvent`]. The last one of a job is `done` or
@@ -1443,6 +1445,20 @@ mod tests {
                 "data": {
                     "id": 4, "kind": "setup", "status": "failed",
                     "code": "internal_error", "message": "the setup job failed",
+                },
+            }),
+        );
+        round_trip(
+            &Event::Job(JobEvent {
+                id: 5,
+                kind: JobKind::Uninstall,
+                update: JobUpdate::Done(JobOutcome::Uninstall(UninstallReport::default())),
+            }),
+            json!({
+                "type": "job",
+                "data": {
+                    "id": 5, "kind": "uninstall", "status": "done", "result": "uninstall",
+                    "data": { "results": [], "stopping": false },
                 },
             }),
         );

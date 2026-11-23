@@ -32,8 +32,8 @@ use marsa_core::types::{
     InstallAccepted, InstallRequest, JobAccepted, JobEvent, JobKind, JobOutcome, JobStep,
     JobUpdate, LinkRequest, LogLine, LogStream, OpName, OpResult, OpStatus, ParkRequest,
     RuntimeList, RuntimeVersions, ServiceAction, ServiceState, ServiceStatus, SetupReport,
-    SetupSkip, Site, SiteKind, SiteList, SitePatch, SkippedFolder, Source, Uninstalled,
-    VersionInUse, XdebugState,
+    SetupSkip, Site, SiteKind, SiteList, SitePatch, SkippedFolder, Source, UninstallReport,
+    Uninstalled, VersionInUse, XdebugState,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1118,6 +1118,40 @@ async fn run_setup_opens_the_stream_then_starts_the_job_and_follows_it() {
         assert_eq!(seen.authorization.as_deref(), Some(bearer.as_str()));
         assert!(!seen.origin);
     }
+}
+
+#[tokio::test]
+async fn run_uninstall_all_follows_its_job_to_the_report() {
+    let report = UninstallReport {
+        stopping: true,
+        ..UninstallReport::default()
+    };
+    let done = Event::Job(job(
+        1,
+        JobUpdate::Done(JobOutcome::Uninstall(report.clone())),
+    ));
+    let router = job_router(vec![vec![done]], None).route(
+        "/v1/jobs/uninstall",
+        post(|| async { (StatusCode::ACCEPTED, Json(JobAccepted { id: 1 })) }),
+    );
+    let fake = Fake::start(router).await;
+    assert_eq!(fake.client().run_uninstall_all().await.unwrap(), report);
+    assert_eq!(
+        fake.targets(),
+        ["GET /v1/events", "POST /v1/jobs/uninstall"]
+    );
+}
+
+/// A job that ends with another kind's result is not what was asked for.
+#[tokio::test]
+async fn a_job_that_ends_with_another_kinds_result_is_a_bad_response() {
+    let router = job_router(vec![vec![Event::Job(job_done(1))]], None).route(
+        "/v1/jobs/uninstall",
+        post(|| async { (StatusCode::ACCEPTED, Json(JobAccepted { id: 1 })) }),
+    );
+    let fake = Fake::start(router).await;
+    let err = fake.client().run_uninstall_all().await.unwrap_err();
+    assert_eq!(err.code(), "daemon_bad_response");
 }
 
 #[tokio::test]

@@ -54,18 +54,17 @@ use axum::routing::post;
 use axum::{Json, Router};
 use marsa_core::recipes::{Os, Platform};
 use marsa_core::types::{
-    ApiError, Event, JobAccepted, JobEvent, JobKind, JobOutcome, JobStep, JobUpdate, SetupReport,
-    Site, SiteList,
+    ApiError, Event, JobAccepted, JobKind, JobOutcome, SetupReport, Site, SiteList,
 };
 // The test modules of this folder reach these through `super::*`.
 #[cfg(test)]
 use marsa_core::types::OpName;
 use tokio::runtime::Handle;
-use tokio::sync::oneshot;
 
 use self::one_at_a_time::{OneAtATime, Turn};
 use super::http;
 use super::http::routes::HttpError;
+use super::jobs;
 use super::sites::hosts_sync;
 use super::state::Daemon;
 use marsa_core::setup::skip;
@@ -109,7 +108,7 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
     let job = move |State(daemon): State<Arc<Daemon>>| {
         let setup = Arc::clone(&for_job);
         async move {
-            let (id, _) = begin(daemon, setup).await?;
+            let (id, _) = begin(&daemon, setup)?;
             Ok::<_, HttpError>((StatusCode::ACCEPTED, Json(JobAccepted { id })))
         }
     };
@@ -118,7 +117,7 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
     let wait = move |State(daemon): State<Arc<Daemon>>| {
         let setup = Arc::clone(&setup);
         async move {
-            let (_, ended) = begin(daemon, setup).await?;
+            let (_, ended) = begin(&daemon, setup)?;
             let report = ended.await.map_err(|_| job_gone())??;
             Ok::<_, HttpError>(Json(report))
         }
@@ -413,13 +412,12 @@ impl Running {
     }
 }
 
-/// What the old waiting route answers, sent after the job's last event.
-type Ended = oneshot::Receiver<Result<SetupReport, HttpError>>;
-
 /// Starts the setup job: checks the system, takes the one-at-a-time flag,
-/// and answers the job's id at once. The work runs in its own task, so a
-/// client that goes away loses nothing.
-async fn begin(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<(u64, Ended), HttpError> {
+/// and answers the job's id at once ([`jobs::start`]).
+fn begin(
+    daemon: &Arc<Daemon>,
+    setup: Arc<Setup>,
+) -> Result<(u64, jobs::Ended<SetupReport>), HttpError> {
     let platform = setup
         .platform
         .filter(|platform| platform.os() != Os::Any)
@@ -432,35 +430,15 @@ async fn begin(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<(u64, Ended), H
             )
         })?;
     let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
-    let id = daemon.jobs().next_id();
-    let event = move |update| JobEvent {
-        id,
-        kind: JobKind::Setup,
-        update,
-    };
-    daemon.publish_job(event(JobUpdate::Running {
-        step: JobStep::Started,
-    }));
-    let (send, ended) = oneshot::channel();
-    tokio::spawn(async move {
-        let work = tokio::spawn(run(Arc::clone(&daemon), setup, platform, running));
-        let result = work
-            .await
-            .unwrap_or_else(|err| Err(http::job_failed("setup", &err)));
-        // The flag is free by now: the work held it. A client that reads the
-        // last event can start the next setup at once.
-        let update = match &result {
-            Ok(report) => JobUpdate::Done(JobOutcome::Setup(report.clone())),
-            Err(err) => JobUpdate::Failed(ApiError {
-                code: err.code.to_owned(),
-                message: err.message.clone(),
-            }),
-        };
-        daemon.publish_job(event(update));
-        // Nobody waits when the job came from `POST /v1/jobs/setup`.
-        let _ = send.send(result);
-    });
-    Ok((id, ended))
+    let work = run(Arc::clone(daemon), setup, platform, running);
+    Ok(jobs::start(
+        daemon,
+        JobKind::Setup,
+        "setup",
+        JobOutcome::Setup,
+        work,
+        |_, _| {},
+    ))
 }
 
 async fn run(

@@ -148,7 +148,7 @@ async fn uninstall_through_daemon(
         strings::UNINSTALL_ALL_STARTED
     };
     eprintln!("{started}");
-    match until_ctrl_c(client.uninstall_all()).await {
+    match until_ctrl_c(client.run_uninstall_all()).await {
         Some(Ok(report)) => Ok(Some(report)),
         Some(Err(err)) => {
             if !refused_at_once(&err) {

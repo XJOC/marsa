@@ -12,7 +12,9 @@ use reqwest::Method;
 
 use super::{ClientError, DaemonClient, REQUEST_TIMEOUT, StreamItem};
 use crate::codes;
-use crate::types::{ErrorBody, Event, JobAccepted, JobEvent, JobOutcome, JobUpdate, SetupReport};
+use crate::types::{
+    ErrorBody, Event, JobAccepted, JobEvent, JobOutcome, JobUpdate, SetupReport, UninstallReport,
+};
 
 /// How many times in a row the stream may break, or lag, with no event
 /// between, before the client gives up.
@@ -33,10 +35,36 @@ impl DaemonClient {
     /// cancelled prompt is not an error: it is in [`SetupReport::error`].
     /// `setup_interrupted` if the daemon stopped before the job ended.
     pub async fn run_setup(&self) -> Result<SetupReport, ClientError> {
-        let JobOutcome::Setup(report) = self
+        match self
             .run_job(&["v1", "jobs", "setup"], codes::SETUP_INTERRUPTED)
-            .await?;
-        Ok(report)
+            .await?
+        {
+            JobOutcome::Setup(report) => Ok(report),
+            _ => Err(wrong_outcome()),
+        }
+    }
+
+    /// `POST /v1/jobs/uninstall`, then follows the job until it ends: one
+    /// admin prompt for the helper's removals, then the user's trust and the
+    /// login file. When [`UninstallReport::stopping`] is `true` the daemon
+    /// stops right after the job's last event: [`stop_daemon`] waits until
+    /// it has.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `uninstall_running` or `setup_running` (409)
+    /// while one of them runs, and `uninstall_not_supported` (501) on a
+    /// system Marsa has no uninstall for. A cancelled prompt is not an
+    /// error: it is in [`UninstallReport::error`]. `uninstall_interrupted`
+    /// if the daemon stopped before the job's end reached this client.
+    pub async fn run_uninstall_all(&self) -> Result<UninstallReport, ClientError> {
+        match self
+            .run_job(&["v1", "jobs", "uninstall"], codes::UNINSTALL_INTERRUPTED)
+            .await?
+        {
+            JobOutcome::Uninstall(report) => Ok(report),
+            _ => Err(wrong_outcome()),
+        }
     }
 
     /// `GET /v1/jobs/{id}`: the last event of a running job, or of one of
@@ -123,6 +151,12 @@ fn ended(event: JobEvent) -> Option<Result<JobOutcome, ClientError>> {
             Some(Err(ClientError::api(500, &body)))
         }
     }
+}
+
+/// A job that ends with the outcome of another kind: not a daemon of this
+/// API.
+fn wrong_outcome() -> ClientError {
+    ClientError::bad_response("the job ended with the result of another kind of job")
 }
 
 fn lost_job(code: &'static str) -> ClientError {
