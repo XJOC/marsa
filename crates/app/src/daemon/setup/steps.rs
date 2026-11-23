@@ -350,6 +350,7 @@ mod tests {
     use marsa_core::types::Event;
     use marsa_core::types::OpStatus;
     use marsa_core::types::SetupReport;
+    use marsa_core::types::{JobAccepted, JobEvent, JobOutcome, JobUpdate};
     use serde_json::{Value, json};
     use std::fs;
     use std::io;
@@ -1527,7 +1528,54 @@ mod tests {
             fake.request(),
             HelperRequest::new(vec![resolver(), pf(28080, 28443)])
         );
-        assert_eq!(events.try_recv().unwrap(), Event::SetupFinished(want));
+        // The job's own events come around the old one (ADR 0026).
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::Job(JobEvent {
+                update: JobUpdate::Running { .. },
+                ..
+            })
+        ));
+        assert_eq!(
+            events.try_recv().unwrap(),
+            Event::SetupFinished(want.clone())
+        );
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::Job(JobEvent { update: JobUpdate::Done(JobOutcome::Setup(done)), .. }) if done == want
+        ));
+    }
+
+    /// `POST /v1/jobs/setup` answers `202` and the id before the work ends;
+    /// the table then holds the end, and the id is not reused.
+    #[tokio::test]
+    async fn the_job_route_answers_at_once_and_the_table_keeps_the_end() {
+        let dir = Dir::new(true);
+        let answer = all_done(&[OpName::ResolverInstall, OpName::PfInstall]);
+        let fake = Fake::scripted(netstat_free(), move || ok(&answer));
+        let daemon = Arc::new(Daemon::new(dir.dir.path().to_path_buf()));
+        let mut events = daemon.events().subscribe();
+        let app = App::new(daemon.clone(), dir.setup(&fake));
+
+        let (status, json) = app.post_job().await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{json}");
+        let accepted: JobAccepted = serde_json::from_value(json).unwrap();
+        // The last event, as the stream sends it, and as the table keeps it.
+        let last = loop {
+            match events.recv().await.unwrap() {
+                Event::Job(event) if event.is_last() => break event,
+                _ => {}
+            }
+        };
+        assert_eq!(last.id, accepted.id);
+        assert!(matches!(last.update, JobUpdate::Done(_)), "{last:?}");
+        assert_eq!(daemon.jobs().get(accepted.id), Some(last));
+        assert!(daemon.jobs().running().is_empty());
+        // The next setup is a new job, and may start at once.
+        let (status, json) = app.post_job().await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{json}");
+        let second: JobAccepted = serde_json::from_value(json).unwrap();
+        assert_ne!(second.id, accepted.id);
     }
 
     /// A Windows helper service that is not installed until `install`, and

@@ -487,7 +487,7 @@ fn run_command(
             }
             Command::Save(change) => Some(save(&client, change).await),
             Command::Install(job) => Some(install(&client, job).await),
-            Command::Setup => Some(match client.setup().await {
+            Command::Setup => Some(match client.run_setup().await {
                 Ok(report) => {
                     let error = report.error.as_ref().map(|error| error.code.as_str());
                     tracing::info!(error, "setup finished");

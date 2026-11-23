@@ -675,6 +675,9 @@ pub fn apply(model: &mut Model, event: Event) {
         }
         // From this window or from `marsa setup`: the same report.
         Event::SetupFinished(report) => model.session.setup = Setup::Finished(report),
+        // The bridge follows the jobs it starts (`client::run_setup`); the
+        // model learns each end from `setup_finished` and the like.
+        Event::Job(_) => {}
         Event::ShuttingDown => model.disconnect(Connection::ShuttingDown),
     }
 }

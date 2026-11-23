@@ -11,11 +11,12 @@ use std::time::Duration;
 
 use marsa_core::config::{self, ConfigError, ConfigPaths, SitesConfig};
 use marsa_core::databases::ServerKind;
-use marsa_core::types::{Event, SiteList};
+use marsa_core::types::{Event, JobEvent, SiteList};
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::autostart::Autostart;
+use super::jobs::Jobs;
 use super::runtimes::installs::Installs;
 use super::services::caddy::CaddyManager;
 use super::services::databases::ServerManager;
@@ -86,6 +87,8 @@ pub struct Daemon {
     pass_requests: PassRequests,
     /// The runtime installer, and whether an install runs.
     installs: Installs,
+    /// The id counter of every job, and the last event of each (ADR 0026).
+    jobs: Jobs,
     /// The shims of the database clients, made and removed with their
     /// server's versions.
     client_shims: ClientShims,
@@ -120,6 +123,7 @@ impl Daemon {
             procs: Mutex::default(),
             shutdown: CancellationToken::new(),
             installs: Installs::new(),
+            jobs: Jobs::default(),
             autostart: Autostart::unset(),
             sites_lock: Mutex::default(),
             global_lock: Mutex::default(),
@@ -171,6 +175,10 @@ impl Daemon {
 
     pub fn pass_requests(&self) -> &PassRequests {
         &self.pass_requests
+    }
+
+    pub fn jobs(&self) -> &Jobs {
+        &self.jobs
     }
 
     pub fn installs(&self) -> &Installs {
@@ -334,6 +342,14 @@ impl Daemon {
     pub fn publish(&self, event: Event) {
         // The only error is "no reader right now", which is fine.
         let _ = self.events.send(event);
+    }
+
+    /// Keeps `event` as the last of its job, then sends it to every
+    /// `/v1/events` reader. The table first: a client that sees the event
+    /// and asks `GET /v1/jobs/{id}` finds it there.
+    pub fn publish_job(&self, event: JobEvent) {
+        self.jobs.record(&event);
+        self.publish(Event::Job(event));
     }
 
     /// Registers a managed process under `id` and gives back the handle it

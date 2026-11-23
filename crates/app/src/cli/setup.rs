@@ -35,7 +35,7 @@ pub async fn run(data_dir: &Path) -> Result<ExitCode, Failure> {
     if let Some(line) = started(Platform::current()) {
         eprintln!("{line}");
     }
-    let report = match client.setup().await {
+    let report = match client.run_setup().await {
         Ok(report) => report,
         Err(err) => return Err(failure(&err, data_dir, None)),
     };

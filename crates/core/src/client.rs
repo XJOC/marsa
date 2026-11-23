@@ -18,6 +18,7 @@
 //! and no error message holds the token.
 
 mod error;
+mod jobs;
 mod lifecycle;
 mod sse;
 
@@ -393,24 +394,6 @@ impl DaemonClient {
             path: utf8_path(path)?,
         };
         self.call_with(Method::DELETE, &["v1", "sites", "park"], &body)
-            .await
-    }
-
-    /// `POST /v1/setup`: the first setup. On macOS the user is asked twice:
-    /// for an administrator password, then to approve the trust in Marsa's
-    /// certificate authority for this user. On Windows UAC may ask once.
-    /// Waits until it ends, up to 40 minutes ([`SETUP_TIMEOUT`]): the user
-    /// may take a while at each prompt. The
-    /// same report also comes on [`DaemonClient::events`] as
-    /// `Event::SetupFinished`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`ClientError`]; `setup_running` (409) while another setup runs,
-    /// and `setup_not_supported` (501) on a system Marsa has no setup for. A
-    /// cancelled prompt is not an error: it is in [`SetupReport::error`].
-    pub async fn setup(&self) -> Result<SetupReport, ClientError> {
-        self.call(Method::POST, &["v1", "setup"], SETUP_TIMEOUT)
             .await
     }
 

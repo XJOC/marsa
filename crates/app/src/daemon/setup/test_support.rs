@@ -451,9 +451,18 @@ impl App {
     }
 
     pub(super) async fn post(&self) -> (StatusCode, Value) {
+        self.call("POST", "/v1/setup").await
+    }
+
+    /// `POST /v1/jobs/setup`: the answer comes before the work ends.
+    pub(super) async fn post_job(&self) -> (StatusCode, Value) {
+        self.call("POST", "/v1/jobs/setup").await
+    }
+
+    pub(super) async fn call(&self, method: &str, uri: &str) -> (StatusCode, Value) {
         let request = Request::builder()
-            .method("POST")
-            .uri("/v1/setup")
+            .method(method)
+            .uri(uri)
             .header("host", daemon_authority(PORT))
             .header("authorization", &self.bearer)
             .body(Body::empty())

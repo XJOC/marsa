@@ -5,7 +5,6 @@ use std::error::Error;
 use std::num::NonZeroU8;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
@@ -43,7 +42,7 @@ impl Started {
     /// `None` while another install or an uninstall runs.
     pub(super) fn take(daemon: &Arc<Daemon>) -> Option<Self> {
         let mut started = Self::claim(daemon)?;
-        started.id = daemon.installs().last_id.fetch_add(1, Ordering::Relaxed) + 1;
+        started.id = daemon.jobs().next_id();
         Some(started)
     }
 

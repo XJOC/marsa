@@ -52,11 +52,15 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use marsa_core::recipes::{Os, Platform};
-use marsa_core::types::{ApiError, Event, SetupReport, Site, SiteList};
+use marsa_core::types::{
+    ApiError, Event, JobAccepted, JobEvent, JobKind, JobOutcome, JobStep, JobUpdate, SetupReport,
+    Site, SiteList,
+};
 // The test modules of this folder reach these through `super::*`.
 #[cfg(test)]
 use marsa_core::types::OpName;
 use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 
 use self::one_at_a_time::{OneAtATime, Turn};
 use super::http;
@@ -95,15 +99,43 @@ pub const SLOWEST_SETUP: Duration = Duration::from_secs(
 );
 
 /// The routes on `setup`, for `api::router` to merge before its fallbacks:
-/// `POST /v1/setup`, and the hosts routes of [`hosts`].
+/// `POST /v1/jobs/setup`, its old waiting form `POST /v1/setup`, and the
+/// hosts routes of [`hosts`].
 /// The uninstall route gets the same [`Setup`], so the two never run at once.
 pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
     let hosts = hosts::routes(Arc::clone(&setup));
-    let handler = move |State(daemon): State<Arc<Daemon>>| {
-        let setup = Arc::clone(&setup);
-        async move { start(daemon, setup).await }
+    let for_job = Arc::clone(&setup);
+    let job = move |State(daemon): State<Arc<Daemon>>| {
+        let setup = Arc::clone(&for_job);
+        async move {
+            let (id, _) = begin(daemon, setup).await?;
+            Ok::<_, HttpError>((StatusCode::ACCEPTED, Json(JobAccepted { id })))
+        }
     };
-    Router::new().route("/v1/setup", post(handler)).merge(hosts)
+    // The old route (API v1 keeps it, ADR 0026): the same job, and the
+    // answer waits for its end inside the daemon.
+    let wait = move |State(daemon): State<Arc<Daemon>>| {
+        let setup = Arc::clone(&setup);
+        async move {
+            let (_, ended) = begin(daemon, setup).await?;
+            let report = ended.await.map_err(|_| job_gone())??;
+            Ok::<_, HttpError>(Json(report))
+        }
+    };
+    Router::new()
+        .route("/v1/jobs/setup", post(job))
+        .route("/v1/setup", post(wait))
+        .merge(hosts)
+}
+
+/// The answer when the task of a job ended without a result: it cannot
+/// happen unless the daemon's runtime is going away.
+fn job_gone() -> HttpError {
+    HttpError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        codes::INTERNAL_ERROR,
+        "the setup job did not end",
+    )
 }
 
 /// The routes with the given [`Setup`]: tests pass a fake [`Runner`].
@@ -380,7 +412,13 @@ impl Running {
     }
 }
 
-async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport>, HttpError> {
+/// What the old waiting route answers, sent after the job's last event.
+type Ended = oneshot::Receiver<Result<SetupReport, HttpError>>;
+
+/// Starts the setup job: checks the system, takes the one-at-a-time flag,
+/// and answers the job's id at once. The work runs in its own task, so a
+/// client that goes away loses nothing.
+async fn begin(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<(u64, Ended), HttpError> {
     let platform = setup
         .platform
         .filter(|platform| platform.os() != Os::Any)
@@ -393,6 +431,43 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
             )
         })?;
     let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
+    let id = daemon.jobs().next_id();
+    let event = move |update| JobEvent {
+        id,
+        kind: JobKind::Setup,
+        update,
+    };
+    daemon.publish_job(event(JobUpdate::Running {
+        step: JobStep::Started,
+    }));
+    let (send, ended) = oneshot::channel();
+    tokio::spawn(async move {
+        let work = tokio::spawn(run(Arc::clone(&daemon), setup, platform, running));
+        let result = work
+            .await
+            .unwrap_or_else(|err| Err(http::job_failed("setup", &err)));
+        // The flag is free by now: the work held it. A client that reads the
+        // last event can start the next setup at once.
+        let update = match &result {
+            Ok(report) => JobUpdate::Done(JobOutcome::Setup(report.clone())),
+            Err(err) => JobUpdate::Failed(ApiError {
+                code: err.code.to_owned(),
+                message: err.message.clone(),
+            }),
+        };
+        daemon.publish_job(event(update));
+        // Nobody waits when the job came from `POST /v1/jobs/setup`.
+        let _ = send.send(result);
+    });
+    Ok((id, ended))
+}
+
+async fn run(
+    daemon: Arc<Daemon>,
+    setup: Arc<Setup>,
+    platform: Platform,
+    running: Running,
+) -> Result<SetupReport, HttpError> {
     tracing::info!("setup started");
     // The hosts file on Linux and Windows needs them; elsewhere the list is
     // not read.
@@ -490,7 +565,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
         Ok(report)
     })
     .await?;
-    Ok(Json(report))
+    Ok(report)
 }
 
 /// The host names of the daemon's sites, sorted, each once, from the list
