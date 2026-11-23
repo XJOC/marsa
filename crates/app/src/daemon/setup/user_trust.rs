@@ -413,7 +413,7 @@ fn existing_private_dir(dir: &Path) -> Result<bool, String> {
 /// On Unix: the folder belongs to this user, and is set to mode 0700 if
 /// others may open it.
 // `#[cfg]` outside `platform`: Unix owners and modes, as in
-// `setup_api::helper::check_owners`. The Windows twin is below.
+// `setup::helper::check_owners`. The Windows twin is below.
 #[cfg(unix)]
 fn close_to_others(dir: &Path, meta: &fs::Metadata) -> Result<(), &'static str> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};

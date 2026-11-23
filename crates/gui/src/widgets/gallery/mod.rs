@@ -9,7 +9,7 @@
 //!
 //! The states are forced with `looks(...)`, because a still picture has no
 //! pointer. The labels below are for the designer who reads this page: they
-//! are not texts of the product, so they stay out of `strings.rs`.
+//! are not texts of the product, so they stay out of `strings/`.
 
 use std::time::Instant;
 
@@ -20,7 +20,6 @@ use super::dialog::Answer;
 use super::notice::Notice;
 use crate::theme::Theme;
 
-/// Set to `1` to show the gallery.
 mod controls;
 mod dialogs;
 mod tables;
@@ -29,6 +28,7 @@ mod tables;
 const PHP_VERSIONS: [(usize, &str); 3] = [(0, "8.3"), (1, "8.4"), (2, "8.5")];
 const NODE_VERSIONS: [(usize, &str); 2] = [(0, "22"), (1, "20")];
 
+/// Set to `1` to show the gallery.
 const GALLERY_VAR: &str = "MARSA_GUI_GALLERY";
 /// The page to open first, counting from 1.
 const PAGE_VAR: &str = "MARSA_GUI_GALLERY_PAGE";

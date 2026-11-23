@@ -1,4 +1,4 @@
-//! Fakes and fixtures shared by the tests of `setup_api` and its children.
+//! Fakes and fixtures shared by the tests of `setup` and its children.
 
 use super::osascript::OSASCRIPT;
 use super::user_trust::SECURITY;

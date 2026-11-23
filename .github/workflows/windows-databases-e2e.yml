@@ -25,11 +25,11 @@ on:
         default: "44939163554"
   pull_request:
     paths:
-      - "crates/app/src/daemon/databases/**"
-      - "crates/app/src/daemon/supervisor.rs"
+      - "crates/app/src/daemon/services/databases/**"
+      - "crates/app/src/daemon/services/supervisor.rs"
       - "crates/core/src/databases/**"
       - "crates/core/src/services.rs"
-      - "crates/core/src/platform/windows.rs"
+      - "crates/core/src/platform/windows/**"
       - "crates/core/src/platform.rs"
       - "recipes/mysql.toml"
       - "recipes/postgres.toml"

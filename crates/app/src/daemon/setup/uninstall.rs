@@ -94,7 +94,7 @@ pub const SLOWEST_UNINSTALL_ALL: Duration = Duration::from_secs(
 );
 
 /// The routes on `setup`, the same one the setup routes get, for
-/// `api::router` to merge before its fallbacks: `POST /v1/jobs/uninstall`,
+/// `http::routes::router` to merge before its fallbacks: `POST /v1/jobs/uninstall`,
 /// and its old waiting form `POST /v1/uninstall` (ADR 0026).
 pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
     let for_job = Arc::clone(&setup);
@@ -343,7 +343,7 @@ fn remove_login_file(autostart: &Autostart) -> OpResult {
         ),
     };
     OpResult {
-        op: OpName::AutostartRemove.to_owned(),
+        op: OpName::AutostartRemove,
         status,
         code,
         message,
@@ -558,7 +558,7 @@ mod tests {
     }
 
     /// The routes behind the real auth layer, on one daemon. Both routes
-    /// share one [`Setup`], as in `api::router`.
+    /// share one [`Setup`], as in `http::routes::router`.
     struct App {
         router: Router,
         bearer: String,

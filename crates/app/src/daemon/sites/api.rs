@@ -44,7 +44,7 @@ use crate::daemon::state::Daemon;
 type JsonBody<T> = Result<Json<T>, JsonRejection>;
 type Answer = Result<Json<SiteList>, HttpError>;
 
-/// The routes, for `api::router` to merge before its fallbacks.
+/// The routes, for `http::routes::router` to merge before its fallbacks.
 pub fn routes() -> Router<Arc<Daemon>> {
     // `park` and `link` are valid site names, and a fixed path wins over
     // `{name}`, so the two fixed paths take `PATCH` and `DELETE` too. A

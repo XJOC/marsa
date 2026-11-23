@@ -3,8 +3,8 @@
 //! that make sense in that state.
 //!
 //! The screen is generic over what the daemon lists: Caddy, each PHP pool,
-//! and any program a later release adds. Only [`strings::service_name`] and
-//! [`strings::service_description`] know a program by name, and a program
+//! and any program a later release adds. Only [`model::service_name`] and
+//! [`model::service_description`] know a program by name, and a program
 //! they do not know shows under its id with a plain line. Like Home and
 //! Sites it is two functions. [`view`] reads the [`Model`] and decides what
 //! the screen says: pure, so the tests assert it without a window. [`show`]

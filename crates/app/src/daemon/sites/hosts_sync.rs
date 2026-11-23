@@ -4,7 +4,7 @@
 //! The hosts file has no wildcards, so each site's `<name>.test` needs its
 //! own line. The helper service writes Marsa's block of the file; the daemon
 //! sends it the names through the pipe, with no prompt, after each pass of
-//! [`sites_sync`](super::sites_sync) and after the routes it answers.
+//! [`sync`](super::sync) and after the routes it answers.
 //!
 //! - Only for a data folder whose `marsa setup` ran on Windows: setup writes
 //!   [`MARKER`] there. A daemon of the tests, or one with a scratch
