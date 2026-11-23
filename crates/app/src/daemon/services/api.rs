@@ -762,7 +762,7 @@ mod tests {
 
         let daemon = Arc::new(Daemon::new(std::path::PathBuf::new()));
         let app = TestRouter::new(Arc::clone(&daemon));
-        app.assert_post_refused_without_auth("/v1/jobs/services/caddy/start")
+        app.assert_refused_without_auth("POST", "/v1/jobs/services/caddy/start")
             .await;
         assert_eq!(daemon.jobs().get(1), None);
     }

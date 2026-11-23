@@ -131,8 +131,8 @@ impl DaemonClient {
 
     /// `GET /v1/health`, with a 5 second limit.
     pub async fn health(&self) -> Result<Health, ClientError> {
-        self.call(Method::GET, &["v1", "health"], HEALTH_TIMEOUT)
-            .await
+        let request = self.http.get(self.url(&["v1", "health"])?);
+        self.answer(request.timeout(HEALTH_TIMEOUT)).await
     }
 
     /// `POST /v1/shutdown`. Returns once the daemon accepted; it stops soon
@@ -145,14 +145,12 @@ impl DaemonClient {
 
     /// `GET /v1/services`.
     pub async fn services(&self) -> Result<Vec<ServiceStatus>, ClientError> {
-        self.call(Method::GET, &["v1", "services"], REQUEST_TIMEOUT)
-            .await
+        self.call(Method::GET, &["v1", "services"]).await
     }
 
     /// `GET /v1/logs/{id}`: the recent lines.
     pub async fn logs(&self, id: &str) -> Result<Vec<LogLine>, ClientError> {
-        self.call(Method::GET, &["v1", "logs", id], REQUEST_TIMEOUT)
-            .await
+        self.call(Method::GET, &["v1", "logs", id]).await
     }
 
     /// `GET /v1/logs/{id}?follow=true`: the recent lines, then new ones as
@@ -170,8 +168,7 @@ impl DaemonClient {
 
     /// `GET /v1/runtimes`: the installed versions of each runtime.
     pub async fn runtimes(&self) -> Result<RuntimeList, ClientError> {
-        self.call(Method::GET, &["v1", "runtimes"], REQUEST_TIMEOUT)
-            .await
+        self.call(Method::GET, &["v1", "runtimes"]).await
     }
 
     /// `POST /v1/runtimes/{tool}/install`. Returns once the daemon has
@@ -224,8 +221,7 @@ impl DaemonClient {
     /// `GET /v1/sites`: every site, sorted by name, and the folders that did
     /// not become one.
     pub async fn sites(&self) -> Result<SiteList, ClientError> {
-        self.call(Method::GET, &["v1", "sites"], REQUEST_TIMEOUT)
-            .await
+        self.call(Method::GET, &["v1", "sites"]).await
     }
 
     /// `POST /v1/sites/park`: every sub-folder of `path` becomes a site. The
@@ -285,8 +281,7 @@ impl DaemonClient {
     /// with no site, and `site_is_parked` (409) for a site from a parked
     /// folder: [`DaemonClient::forget`] removes those.
     pub async fn unlink(&self, name: &str) -> Result<SiteList, ClientError> {
-        self.call(Method::DELETE, &["v1", "sites", name], REQUEST_TIMEOUT)
-            .await
+        self.call(Method::DELETE, &["v1", "sites", name]).await
     }
 
     /// `DELETE /v1/sites/park` with `{"path": ...}`: `path` is no longer
@@ -309,8 +304,7 @@ impl DaemonClient {
     /// names in its hosts file, and which sites are not there yet. Shows no
     /// prompt.
     pub async fn hosts(&self) -> Result<HostsStatus, ClientError> {
-        self.call(Method::GET, &["v1", "hosts"], REQUEST_TIMEOUT)
-            .await
+        self.call(Method::GET, &["v1", "hosts"]).await
     }
 
     /// `GET /v1/doctor`: the checks of `marsa doctor`, as the daemon runs
@@ -321,8 +315,7 @@ impl DaemonClient {
     ///
     /// Any [`ClientError`]; `not_found` (404) from a daemon of an older build.
     pub async fn doctor(&self) -> Result<DoctorReport, ClientError> {
-        self.call(Method::GET, &["v1", "doctor"], REQUEST_TIMEOUT)
-            .await
+        self.call(Method::GET, &["v1", "doctor"]).await
     }
 
     /// `GET /v1/autostart`: whether the tray icon starts at login.
@@ -331,8 +324,7 @@ impl DaemonClient {
     ///
     /// Any [`ClientError`]; `autostart_unsupported` (501) on Windows for now.
     pub async fn autostart(&self) -> Result<AutostartState, ClientError> {
-        self.call(Method::GET, &["v1", "autostart"], REQUEST_TIMEOUT)
-            .await
+        self.call(Method::GET, &["v1", "autostart"]).await
     }
 
     /// `PUT /v1/autostart`: the daemon writes (`true`) or deletes (`false`)
@@ -355,8 +347,7 @@ impl DaemonClient {
     ///
     /// Any [`ClientError`].
     pub async fn xdebug(&self) -> Result<XdebugState, ClientError> {
-        self.call(Method::GET, &["v1", "php", "xdebug"], REQUEST_TIMEOUT)
-            .await
+        self.call(Method::GET, &["v1", "php", "xdebug"]).await
     }
 
     /// `PUT /v1/php/xdebug`: turns Xdebug on or off for every installed PHP.
@@ -392,17 +383,16 @@ impl DaemonClient {
         Ok(url)
     }
 
-    /// A call without a body and with a JSON answer, within `limit`.
+    /// A call without a body and with a JSON answer, within
+    /// `REQUEST_TIMEOUT`: a long operation is a job, not a long request
+    /// (ADR 0026).
     async fn call<T: DeserializeOwned>(
         &self,
         method: Method,
         segments: &[&str],
-        limit: Duration,
     ) -> Result<T, ClientError> {
-        // A long operation is a job, not a long request (ADR 0026).
-        debug_assert!(limit <= REQUEST_TIMEOUT, "a request waits at most 30 s");
         let request = self.http.request(method, self.url(segments)?);
-        self.answer(request.timeout(limit)).await
+        self.answer(request.timeout(REQUEST_TIMEOUT)).await
     }
 
     /// A call with a JSON body and a JSON answer, within `REQUEST_TIMEOUT`.
@@ -527,7 +517,9 @@ mod tests {
         ] {
             assert!(value <= limit, "{name} is {value:?}");
         }
-        // The client's sources name no other timeout.
+        // The client's sources name no other timeout, and every limit they
+        // set is one of these constants: `.timeout(Duration::from_secs(300))`
+        // or `.timeout(wait)` fails here.
         let sources = [
             include_str!("client.rs"),
             include_str!("client/jobs.rs"),
@@ -543,6 +535,22 @@ mod tests {
                     assert!(
                         known.contains(word),
                         "{word}: a timeout the test does not know"
+                    );
+                }
+            }
+            let lines = code
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"));
+            for line in lines {
+                for (at, call) in line.match_indices("timeout(") {
+                    let argument = line[at + call.len()..]
+                        .split([',', ')'])
+                        .next()
+                        .unwrap_or_default()
+                        .trim();
+                    assert!(
+                        known.contains(argument),
+                        "{line}: the limit is not a known constant"
                     );
                 }
             }
