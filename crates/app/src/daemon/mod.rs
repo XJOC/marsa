@@ -3,6 +3,7 @@
 
 pub mod autostart;
 pub mod http;
+pub mod jobs;
 pub mod runtimes;
 pub mod services;
 pub mod setup;

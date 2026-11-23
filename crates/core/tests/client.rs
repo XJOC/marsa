@@ -28,8 +28,9 @@ use marsa_core::platform::daemon_file::{
 };
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    API_VERSION, AutostartState, DefaultVersion, ErrorBody, Event, Health, InstallAccepted,
-    InstallRequest, LinkRequest, LogLine, LogStream, OpName, OpResult, OpStatus, ParkRequest,
+    API_VERSION, ApiError, AutostartState, DefaultVersion, ErrorBody, Event, Health,
+    InstallAccepted, InstallRequest, JobAccepted, JobEvent, JobKind, JobOutcome, JobStep,
+    JobUpdate, LinkRequest, LogLine, LogStream, OpName, OpResult, OpStatus, ParkRequest,
     RuntimeList, RuntimeVersions, ServiceAction, ServiceState, ServiceStatus, SetupReport,
     SetupSkip, Site, SiteKind, SiteList, SitePatch, SkippedFolder, Source, Uninstalled,
     VersionInUse, XdebugState,
@@ -1031,9 +1032,8 @@ async fn a_path_that_is_not_utf8_is_refused_before_any_request() {
 // ---------------------------------------------------------------------------
 // Setup
 
-#[tokio::test]
-async fn setup_posts_and_reads_the_report() {
-    let report = SetupReport {
+fn setup_report() -> SetupReport {
+    SetupReport {
         results: vec![OpResult {
             op: OpName::ResolverInstall,
             status: OpStatus::Done,
@@ -1045,43 +1045,185 @@ async fn setup_posts_and_reads_the_report() {
             code: "ca_not_ready".into(),
         }],
         ..SetupReport::default()
-    };
+    }
+}
+
+fn job(id: u64, update: JobUpdate) -> JobEvent {
+    JobEvent {
+        id,
+        kind: JobKind::Setup,
+        update,
+    }
+}
+
+fn job_running(id: u64) -> JobEvent {
+    job(
+        id,
+        JobUpdate::Running {
+            step: JobStep::Started,
+        },
+    )
+}
+
+fn job_done(id: u64) -> JobEvent {
+    job(id, JobUpdate::Done(JobOutcome::Setup(setup_report())))
+}
+
+/// A fake daemon that accepts `POST /v1/jobs/setup` as job 1, sends
+/// `streams[n]` on the n-th `GET /v1/events` (the last one again after
+/// that), and answers `GET /v1/jobs/1` with `current`.
+fn job_router(streams: Vec<Vec<Event>>, current: Option<JobEvent>) -> Router {
     let calls = Arc::new(AtomicUsize::new(0));
-    let router = Router::new().route(
-        "/v1/setup",
-        post({
-            let report = report.clone();
-            move || {
-                let (report, calls) = (report.clone(), calls.clone());
-                async move {
-                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                        Json(report).into_response()
-                    } else {
-                        let busy = ErrorBody::new("setup_running", "another setup is running");
-                        (StatusCode::CONFLICT, Json(busy)).into_response()
-                    }
+    let streams = Arc::new(streams);
+    let events = get(move || {
+        let n = calls.fetch_add(1, Ordering::SeqCst).min(streams.len() - 1);
+        let body = sse_body(&streams[n]);
+        async move { sse_response(body) }
+    });
+    let current = get(move || {
+        let current = current.clone();
+        async move {
+            match current {
+                Some(event) => Json(event).into_response(),
+                None => {
+                    let body = ErrorBody::new("not_found", "no such job");
+                    (StatusCode::NOT_FOUND, Json(body)).into_response()
                 }
             }
-        }),
-    );
+        }
+    });
+    Router::new()
+        .route("/v1/events", events)
+        .route(
+            "/v1/jobs/setup",
+            post(|| async { (StatusCode::ACCEPTED, Json(JobAccepted { id: 1 })) }),
+        )
+        .route("/v1/jobs/{id}", current)
+}
+
+#[tokio::test]
+async fn run_setup_opens_the_stream_then_starts_the_job_and_follows_it() {
+    // The events of another job, and of other kinds, are not this job's.
+    let events = vec![
+        Event::Job(job_done(9)),
+        Event::Log(log_line(7, "x")),
+        Event::Job(job_running(1)),
+        Event::Job(job_done(1)),
+    ];
+    let fake = Fake::start(job_router(vec![events], None)).await;
+    assert_eq!(fake.client().run_setup().await.unwrap(), setup_report());
+    assert_eq!(fake.targets(), ["GET /v1/events", "POST /v1/jobs/setup"]);
+    let bearer = format!("Bearer {}", fake.token);
+    for seen in fake.seen() {
+        assert_eq!(seen.authorization.as_deref(), Some(bearer.as_str()));
+        assert!(!seen.origin);
+    }
+}
+
+#[tokio::test]
+async fn run_setup_refused_at_the_start_has_the_daemons_code() {
+    let router = Router::new()
+        .route(
+            "/v1/events",
+            get(|| async { sse_response(sse_body::<Event>(&[])) }),
+        )
+        .route(
+            "/v1/jobs/setup",
+            post(|| async {
+                let busy = ErrorBody::new("setup_running", "another setup is running");
+                (StatusCode::CONFLICT, Json(busy))
+            }),
+        );
     let fake = Fake::start(router).await;
-    let client = fake.client();
-    assert_eq!(client.setup().await.unwrap(), report);
-    let err = client.setup().await.unwrap_err();
+    let err = fake.client().run_setup().await.unwrap_err();
     assert_eq!(err.code(), "setup_running");
     assert!(
         matches!(err, ClientError::Api { status: 409, .. }),
         "{err:?}"
     );
     fake.assert_no_token(&err);
+}
 
-    let targets = fake.targets();
-    assert_eq!(targets, ["POST /v1/setup", "POST /v1/setup"]);
-    let bearer = format!("Bearer {}", fake.token);
-    for seen in fake.seen() {
-        assert_eq!(seen.authorization.as_deref(), Some(bearer.as_str()));
-        assert!(!seen.origin);
-    }
+#[tokio::test]
+async fn a_failed_job_is_the_error_it_carries() {
+    let failed = job(
+        1,
+        JobUpdate::Failed(ApiError {
+            code: "internal_error".into(),
+            message: "the setup job failed".into(),
+        }),
+    );
+    let fake = Fake::start(job_router(vec![vec![Event::Job(failed)]], None)).await;
+    let err = fake.client().run_setup().await.unwrap_err();
+    assert_eq!(err.code(), "internal_error");
+}
+
+/// The stream ends before the job does: the client opens it again, then asks
+/// for the job, and finds the end there.
+#[tokio::test]
+async fn a_broken_stream_is_followed_by_the_jobs_state() {
+    let fake = Fake::start(job_router(vec![vec![]], Some(job_done(1)))).await;
+    assert_eq!(fake.client().run_setup().await.unwrap(), setup_report());
+    assert_eq!(
+        fake.targets(),
+        [
+            "GET /v1/events",
+            "POST /v1/jobs/setup",
+            "GET /v1/events",
+            "GET /v1/jobs/1"
+        ]
+    );
+}
+
+/// An event this client cannot read is skipped: no new stream, no `GET`.
+#[tokio::test]
+async fn an_event_that_cannot_be_read_does_not_break_the_follow() {
+    let body = format!(
+        "data: {}\n\ndata: {}\n\n",
+        serde_json::json!({ "type": "from_a_newer_daemon", "data": {} }),
+        serde_json::to_string(&Event::Job(job_done(1))).unwrap(),
+    );
+    let router = Router::new()
+        .route("/v1/events", get(move || async move { sse_response(body) }))
+        .route(
+            "/v1/jobs/setup",
+            post(|| async { (StatusCode::ACCEPTED, Json(JobAccepted { id: 1 })) }),
+        );
+    let fake = Fake::start(router).await;
+    assert_eq!(fake.client().run_setup().await.unwrap(), setup_report());
+    assert_eq!(fake.targets(), ["GET /v1/events", "POST /v1/jobs/setup"]);
+}
+
+/// The job is still running when the stream is open again: the client goes
+/// on reading, and the end comes on the new stream.
+#[tokio::test]
+async fn a_job_that_runs_on_is_followed_on_the_new_stream() {
+    let streams = vec![
+        vec![Event::Job(job_running(1))],
+        vec![Event::Job(job_done(1))],
+    ];
+    let fake = Fake::start(job_router(streams, Some(job_running(1)))).await;
+    assert_eq!(fake.client().run_setup().await.unwrap(), setup_report());
+}
+
+/// A daemon that restarted has no such job; one that is stopping ends it.
+#[tokio::test]
+async fn a_job_that_cannot_be_followed_is_setup_interrupted() {
+    let fake = Fake::start(job_router(vec![vec![]], None)).await;
+    let err = fake.client().run_setup().await.unwrap_err();
+    assert_eq!(err.code(), "setup_interrupted");
+
+    let stopping = vec![Event::Job(job_running(1)), Event::ShuttingDown];
+    let fake = Fake::start(job_router(vec![stopping], None)).await;
+    let err = fake.client().run_setup().await.unwrap_err();
+    assert_eq!(err.code(), "setup_interrupted");
+}
+
+#[tokio::test]
+async fn a_stream_that_keeps_breaking_ends_the_wait() {
+    let fake = Fake::start(job_router(vec![vec![]], Some(job_running(1)))).await;
+    let err = fake.client().run_setup().await.unwrap_err();
+    assert_eq!(err.code(), "setup_interrupted");
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,6 +1358,27 @@ async fn a_lag_note_is_its_own_item() {
             StreamItem::Lagged(5),
             StreamItem::Item(Event::ShuttingDown),
         ]
+    );
+}
+
+/// What an older client does with an event a newer daemon sends (the `job`
+/// event, for an older GUI, ADR 0026): `daemon_bad_response` for that item,
+/// and the stream goes on.
+#[tokio::test]
+async fn an_event_of_a_newer_daemon_is_one_bad_item_and_the_stream_goes_on() {
+    let body = format!(
+        "data: {}\n\ndata: {}\n\n",
+        serde_json::json!({ "type": "from_a_newer_daemon", "data": { "id": 1 } }),
+        serde_json::to_string(&Event::ShuttingDown).unwrap(),
+    );
+    let router = Router::new().route("/v1/events", get(move || async move { sse_response(body) }));
+    let fake = Fake::start(router).await;
+    let mut stream = fake.client().events().await.unwrap();
+    let err = stream.next().await.unwrap().unwrap_err();
+    assert_eq!(err.code(), "daemon_bad_response", "{err:?}");
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        StreamItem::Item(Event::ShuttingDown)
     );
 }
 

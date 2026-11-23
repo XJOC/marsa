@@ -7,7 +7,6 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use marsa_core::installer::{self, InstallEnv, InstallError, InstalledVersion};
 use marsa_core::types::InstallEvent;
@@ -57,7 +56,6 @@ pub struct Installs {
     pub runner: Arc<dyn RunInstall>,
     /// Free, or held by the install or the uninstall that runs now.
     pub(crate) running: Arc<OneAtATime>,
-    pub(crate) last_id: AtomicU64,
 }
 
 impl Installs {
@@ -66,7 +64,6 @@ impl Installs {
         Self {
             runner: Arc::new(ProductionInstall),
             running: Arc::new(OneAtATime::new()),
-            last_id: AtomicU64::new(0),
         }
     }
 
@@ -86,7 +83,6 @@ impl fmt::Debug for Installs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Installs")
             .field("running", &self.is_running())
-            .field("last_id", &self.last_id.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }

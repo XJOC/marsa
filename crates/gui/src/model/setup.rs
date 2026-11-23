@@ -27,7 +27,7 @@ pub enum FirstRun {
     Setup,
 }
 
-/// "Run setup" (`POST /v1/setup`).
+/// "Run setup" (`POST /v1/jobs/setup`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Setup {
     #[default]

@@ -42,6 +42,7 @@ pub fn router(daemon: Arc<Daemon>, auth: AuthConfig) -> Router {
         .merge(sites::api::routes())
         .merge(crate::daemon::setup::routes(Arc::clone(&setup)))
         .merge(crate::daemon::setup::uninstall::routes(setup))
+        .merge(crate::daemon::jobs::routes())
         .merge(crate::daemon::autostart::api::routes())
         .merge(crate::daemon::setup::doctor::routes(auth.port()))
         .merge(crate::daemon::runtimes::xdebug::routes())

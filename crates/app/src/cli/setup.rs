@@ -3,8 +3,8 @@
 //! Marsa's certificate authority for this user. Linux asks for the password
 //! once, or twice when the `.test` names need a second request.
 //!
-//! One call to `marsad` (`POST /v1/setup`, in `daemon/setup/`),
-//! started if needed. On macOS the daemon checks ports 80 and 443, asks for
+//! One job on `marsad` (`POST /v1/jobs/setup`, in `daemon/setup/`), followed
+//! to its end, with the daemon started if needed. On macOS the daemon checks ports 80 and 443, asks for
 //! the administrator password and runs `marsa-helper`, then trusts the
 //! certificate authority for the user behind the dialog macOS shows. On
 //! Linux it runs `marsa-helper` through `pkexec`. This prints one line per
@@ -35,7 +35,7 @@ pub async fn run(data_dir: &Path) -> Result<ExitCode, Failure> {
     if let Some(line) = started(Platform::current()) {
         eprintln!("{line}");
     }
-    let report = match client.setup().await {
+    let report = match client.run_setup().await {
         Ok(report) => report,
         Err(err) => return Err(failure(&err, data_dir, None)),
     };
