@@ -413,7 +413,7 @@ mod tests {
         std::fs::create_dir_all(&version_dir).unwrap();
         let daemon = Arc::new(Daemon::new(tmp.path().to_path_buf()));
         let app = TestRouter::new(Arc::clone(&daemon));
-        app.assert_post_refused_without_auth("/v1/jobs/runtimes/node/22.11.0/uninstall")
+        app.assert_refused_without_auth("POST", "/v1/jobs/runtimes/node/22.11.0/uninstall")
             .await;
         assert!(version_dir.is_dir(), "a refusal changes nothing");
         assert_eq!(daemon.jobs().get(1), None);

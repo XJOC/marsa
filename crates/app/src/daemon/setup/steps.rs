@@ -31,7 +31,7 @@ use marsa_core::setup::FollowUp;
 use marsa_core::setup::LocalStep;
 use marsa_core::setup::Plan;
 use marsa_core::types::ApiError;
-use marsa_core::types::{OpName, SetupReport};
+use marsa_core::types::{OpName, SetupReport, SetupSkip};
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 
@@ -65,9 +65,7 @@ fn log_plan(facts: &Facts, plan: &Plan) {
             "the way of .test names here"
         );
     }
-    for left_out in &plan.skips {
-        tracing::warn!(op = %left_out.op, code = %left_out.code, "setup leaves this step out");
-    }
+    log_skips(&plan.skips);
     for holder in &plan.port_holders {
         tracing::warn!(
             port = holder.port,
@@ -76,6 +74,13 @@ fn log_plan(facts: &Facts, plan: &Plan) {
             app = ?holder.app,
             "a program listens on a port the pf redirect would take; no pf_install"
         );
+    }
+}
+
+/// One warning for each step the setup leaves out, of either request.
+fn log_skips(skips: &[SetupSkip]) {
+    for left_out in skips {
+        tracing::warn!(op = %left_out.op, code = %left_out.code, "setup leaves this step out");
     }
 }
 
@@ -210,10 +215,16 @@ impl Setup {
             report.results.retain(|result| result.op != *op);
             report.skipped.push(skip(*op, code));
         }
+        log_skips(&follow_up.skips);
         report.skipped.extend(follow_up.skips);
         if follow_up.ops.is_empty() {
             return;
         }
+        let ops: Vec<OpName> = follow_up.ops.iter().map(HelperOp::name).collect();
+        tracing::info!(
+            ?ops,
+            "a second request to marsa-helper, after the first one's answer"
+        );
         match self.apply(follow_up.ops, platform, stop) {
             Ok(results) => report.results.extend(results),
             // The helper may have run: their texts say so.

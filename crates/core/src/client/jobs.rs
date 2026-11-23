@@ -10,7 +10,7 @@
 
 use reqwest::Method;
 
-use super::{ClientError, DaemonClient, REQUEST_TIMEOUT, StreamItem};
+use super::{ClientError, DaemonClient, StreamItem};
 use crate::codes;
 use crate::runtimes::Runtime;
 use crate::types::{
@@ -172,8 +172,7 @@ impl DaemonClient {
     /// the last sixteen that ended. `not_found` (404) for any other.
     pub async fn job(&self, id: u64) -> Result<JobEvent, ClientError> {
         let id = id.to_string();
-        self.call(Method::GET, &["v1", "jobs", &id], REQUEST_TIMEOUT)
-            .await
+        self.call(Method::GET, &["v1", "jobs", &id]).await
     }
 
     /// Starts the job with `POST` to `segments` and follows it. `lost` is
@@ -188,7 +187,7 @@ impl DaemonClient {
         self.url(segments)?;
         // Open before the start, so no event of this job is missed.
         let mut stream = self.events().await?;
-        let accepted: JobAccepted = self.call(Method::POST, segments, REQUEST_TIMEOUT).await?;
+        let accepted: JobAccepted = self.call(Method::POST, segments).await?;
         let id = accepted.id;
         let mut resyncs = 0;
         loop {

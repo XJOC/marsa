@@ -8,7 +8,9 @@ use axum::body::{Body, to_bytes};
 use axum::extract::Request;
 use axum::http::{StatusCode, request};
 use axum::response::Response;
+use marsa_core::codes;
 use marsa_core::platform::daemon_file::{Token, daemon_authority};
+use marsa_core::types::ErrorBody;
 use serde_json::Value;
 use tower::ServiceExt as _;
 
@@ -63,35 +65,53 @@ impl TestRouter {
         self.call(request.body(body).unwrap()).await
     }
 
-    /// The refusals of the auth layer for `POST uri`: no token, a wrong
-    /// token (401), an `Origin`, and another `Host` (403). Each answer is
-    /// checked here; the caller checks that nothing changed.
-    pub(crate) async fn assert_post_refused_without_auth(&self, uri: &str) {
+    /// The refusals of the auth layer for `method uri`: no token and a wrong
+    /// token (401 `unauthorized`), an `Origin` (403 `origin_rejected`), and
+    /// another port or `localhost` in `Host` (403 `host_rejected`). The
+    /// status and the code of each answer are checked here, so a handler's
+    /// own 401 or 403 cannot pass for the auth layer's; the caller checks
+    /// that nothing changed.
+    pub(crate) async fn assert_refused_without_auth(&self, method: &str, uri: &str) {
         let wrong = Token::generate().unwrap().bearer_header();
-        let other_host = daemon_authority(PORT + 1);
+        let with_host = |host: String| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("host", host)
+                .header("authorization", &self.bearer)
+        };
+        let unauthorized = (StatusCode::UNAUTHORIZED, codes::UNAUTHORIZED);
+        let host_rejected = (StatusCode::FORBIDDEN, codes::HOST_REJECTED);
         let cases = [
-            (self.builder("POST", uri), StatusCode::UNAUTHORIZED),
+            ("no token", self.builder(method, uri), unauthorized),
             (
-                self.builder("POST", uri).header("authorization", &wrong),
-                StatusCode::UNAUTHORIZED,
+                "a wrong token",
+                self.builder(method, uri).header("authorization", &wrong),
+                unauthorized,
             ),
             (
-                self.authorized("POST", uri)
+                "an Origin",
+                self.authorized(method, uri)
                     .header("origin", "http://evil.test"),
-                StatusCode::FORBIDDEN,
+                (StatusCode::FORBIDDEN, codes::ORIGIN_REJECTED),
             ),
             (
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .header("host", other_host)
-                    .header("authorization", &self.bearer),
-                StatusCode::FORBIDDEN,
+                "another port in Host",
+                with_host(daemon_authority(PORT + 1)),
+                host_rejected,
+            ),
+            (
+                "localhost in Host",
+                with_host(format!("localhost:{PORT}")),
+                host_rejected,
             ),
         ];
-        for (request, want) in cases {
+        for (name, request, (status, code)) in cases {
             let response = self.call(request.body(Body::empty()).unwrap()).await;
-            assert_eq!(response.status(), want, "{uri}");
+            assert_eq!(response.status(), status, "{name}: {method} {uri}");
+            let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            let body: ErrorBody = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body.error.code, code, "{name}: {method} {uri}");
         }
     }
 

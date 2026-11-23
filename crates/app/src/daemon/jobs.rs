@@ -198,7 +198,6 @@ async fn one(
 
 #[cfg(test)]
 mod tests {
-    use axum::body::Body;
     use marsa_core::types::{JobKind, JobOutcome, JobStep, JobUpdate, SetupReport};
 
     use super::*;
@@ -264,17 +263,14 @@ mod tests {
         daemon.publish_job(done(1));
         let app = TestRouter::new(daemon);
         for uri in ["/v1/jobs", "/v1/jobs/1"] {
-            let response = app
-                .call(app.builder("GET", uri).body(Body::empty()).unwrap())
-                .await;
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
-            let request = app
-                .authorized("GET", uri)
-                .header("origin", "http://evil.test")
-                .body(Body::empty())
-                .unwrap();
-            let response = app.call(request).await;
-            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+            app.assert_refused_without_auth("GET", uri).await;
+            // The same route with the token answers: the refusals came from
+            // the auth layer.
+            assert_eq!(
+                app.answer("GET", uri, None).await.0,
+                StatusCode::OK,
+                "{uri}"
+            );
         }
     }
 
