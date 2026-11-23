@@ -4,15 +4,16 @@
 //! 1. Prints what will be removed, and asks for `yes` unless `--yes` is
 //!    given. Without a terminal to ask on, and without `--yes`, it stops
 //!    there: nothing has changed, and no daemon has started.
-//! 2. One call to `marsad` (`POST /v1/uninstall`, in
-//!    `daemon/uninstall_api.rs`), started if needed. The daemon asks for the
+//! 2. One job on `marsad` (`POST /v1/jobs/uninstall`, in
+//!    `daemon/setup/uninstall.rs`), followed to its end, with the daemon
+//!    started if needed. The daemon asks for the
 //!    admin password once (macOS: osascript, Linux: pkexec, Windows: UAC) and
 //!    runs `marsa-helper`, then takes the user's trust away and deletes the
 //!    login file. This prints one line
 //!    per step. A cancelled prompt ends the command: nothing was removed.
 //!    Ctrl+C while it waits stops only this command: the uninstall goes on in
 //!    `marsad`, which writes each step to `logs/marsad.log`.
-//! 3. The daemon stops after its answer; this waits until it has, and then
+//! 3. The daemon stops after the job's last event; this waits until it has, and then
 //!    watches a few seconds more: the Marsa window starts a daemon again
 //!    every second, and the menu-bar icon on a click.
 //! 4. Asks on its own whether to delete the data folder, `no` by default.

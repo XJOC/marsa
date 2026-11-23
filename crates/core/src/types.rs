@@ -904,8 +904,8 @@ mod autostart_tests {
     }
 }
 
-/// The answer to `POST /v1/uninstall`: what `marsa uninstall
-/// --all` removed from the system.
+/// What `marsa uninstall --all` removed from the system: the `done` of the
+/// uninstall job, and the answer of the old `POST /v1/uninstall`.
 ///
 /// One admin prompt runs the helper's `uninstall_all`. Only if the helper
 /// ran does the daemon go on: it takes away the current user's trust in

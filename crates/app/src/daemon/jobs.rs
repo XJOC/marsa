@@ -134,8 +134,8 @@ where
             }),
         };
         daemon.publish_job(event(update));
-        // Before the old route's answer, as the uninstall's stop was before
-        // its answer: the answer waits for the server's graceful stop.
+        // Before the old route's answer: the uninstall stops the daemon here,
+        // and the server's graceful stop waits for that answer.
         if let Ok(done) = &result {
             after(&daemon, done);
         }
@@ -143,6 +143,19 @@ where
         let _ = send.send(result);
     });
     (id, ended)
+}
+
+/// What the old waiting route of a job answers: the job's result, or its
+/// error, once its last event is out. `what` names the job if its task is
+/// gone (only when the daemon's runtime is going away).
+pub(super) async fn wait<T>(ended: Ended<T>, what: &str) -> Result<T, HttpError> {
+    ended.await.unwrap_or_else(|_| {
+        Err(HttpError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            codes::INTERNAL_ERROR,
+            format!("the {what} job did not end"),
+        ))
+    })
 }
 
 /// `GET /v1/jobs` and `GET /v1/jobs/{id}`.

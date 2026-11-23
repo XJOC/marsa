@@ -47,8 +47,8 @@ impl DaemonClient {
     /// `POST /v1/jobs/uninstall`, then follows the job until it ends: one
     /// admin prompt for the helper's removals, then the user's trust and the
     /// login file. When [`UninstallReport::stopping`] is `true` the daemon
-    /// stops right after the job's last event: [`stop_daemon`] waits until
-    /// it has.
+    /// stops right after the job's last event: [`stop_daemon`](super::stop_daemon)
+    /// waits until it has.
     ///
     /// # Errors
     ///

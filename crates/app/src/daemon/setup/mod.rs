@@ -10,8 +10,8 @@
 //! | `POST /v1/setup` | The same job, answered with its `SetupReport` when it ends (clients before ADR 0026) |
 //!
 //! One setup at a time: a second request gets 409 `setup_running`, and one
-//! during an uninstall gets 409 `uninstall_running`. `POST /v1/uninstall`
-//! (`uninstall_api.rs`) shares [`Setup`]: the same runner, the same helper
+//! during an uninstall gets 409 `uninstall_running`. The uninstall routes
+//! (`uninstall.rs`) share [`Setup`]: the same runner, the same helper
 //! file check and prompt ([`Flow`] gives each its own error codes), and the
 //! same flag.
 //!
@@ -118,7 +118,7 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
         let setup = Arc::clone(&setup);
         async move {
             let (_, ended) = begin(&daemon, setup)?;
-            let report = ended.await.map_err(|_| job_gone())??;
+            let report = jobs::wait(ended, "setup").await?;
             Ok::<_, HttpError>(Json(report))
         }
     };
@@ -126,16 +126,6 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
         .route("/v1/jobs/setup", post(job))
         .route("/v1/setup", post(wait))
         .merge(hosts)
-}
-
-/// The answer when the task of a job ended without a result: it cannot
-/// happen unless the daemon's runtime is going away.
-fn job_gone() -> HttpError {
-    HttpError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        codes::INTERNAL_ERROR,
-        "the setup job did not end",
-    )
 }
 
 /// The routes with the given [`Setup`]: tests pass a fake [`Runner`].

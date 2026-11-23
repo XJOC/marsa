@@ -109,23 +109,13 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
         let setup = Arc::clone(&setup);
         async move {
             let (_, ended) = begin(&daemon, setup)?;
-            let report = ended.await.map_err(|_| job_gone())??;
+            let report = jobs::wait(ended, "uninstall").await?;
             Ok::<_, HttpError>(Json(report))
         }
     };
     Router::new()
         .route("/v1/jobs/uninstall", post(job))
         .route("/v1/uninstall", post(wait))
-}
-
-/// The answer when the task of a job ended without a result: it cannot
-/// happen unless the daemon's runtime is going away.
-fn job_gone() -> HttpError {
-    HttpError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        codes::INTERNAL_ERROR,
-        "the uninstall job did not end",
-    )
 }
 
 /// Starts the uninstall job: checks the system, takes the one-at-a-time
@@ -372,7 +362,7 @@ mod tests {
     use crate::daemon::setup::test_support::{Fake, make_helper, ok, script_error};
     use crate::daemon::setup::windows::{Install, Service};
     use marsa_core::data_dir::DataDir;
-    use marsa_core::types::{JobAccepted, JobOutcome, JobUpdate};
+    use marsa_core::types::{Event, JobAccepted, JobOutcome, JobUpdate};
     use std::fs;
     use std::io;
     use std::path::PathBuf;
@@ -1258,7 +1248,10 @@ mod tests {
         });
         let app = App::new(&dir, dir.setup(&fake));
         let daemon = Arc::clone(&app.daemon);
-        // What a reader of the stream could find when the stop begins.
+        let mut events = daemon.events().subscribe();
+        // What a reader of the stream, and of the table, could find when the
+        // stop begins: the server sends `shutting_down` after this, on the
+        // same channel.
         let at_the_stop = tokio::spawn({
             let daemon = Arc::clone(&daemon);
             async move {
@@ -1285,7 +1278,15 @@ mod tests {
 
         go_on.send(()).unwrap();
         assert!(at_the_stop.await.unwrap());
-        let last = daemon.jobs().get(accepted.id).unwrap();
+        // `done` is already on the stream when the stop begins.
+        let last = loop {
+            match events.try_recv().unwrap() {
+                Event::Job(event) if event.is_last() => break event,
+                _ => {}
+            }
+        };
+        assert_eq!(last.id, accepted.id);
+        assert_eq!(daemon.jobs().get(accepted.id).as_ref(), Some(&last));
         let JobUpdate::Done(JobOutcome::Uninstall(report)) = last.update else {
             panic!("not done: {last:?}");
         };
@@ -1317,7 +1318,9 @@ mod tests {
         });
         prompt_shown.recv().await.unwrap();
         let busy = (StatusCode::CONFLICT, "setup_running".to_owned());
-        assert_eq!(app.refused("/v1/uninstall").await, busy);
+        for path in ["/v1/uninstall", "/v1/jobs/uninstall"] {
+            assert_eq!(app.refused(path).await, busy, "{path}");
+        }
         go_on.send(()).unwrap();
         assert_eq!(setup.await.unwrap(), StatusCode::OK);
         assert!(dir.login_file().is_file() && !app.stopping());
