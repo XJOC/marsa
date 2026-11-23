@@ -1,0 +1,26 @@
+---
+source: crates/core/src/setup.rs
+expression: plan(&facts)
+---
+Plan {
+    ops: [
+        TrustInstall {
+            pem: "PEM",
+        },
+        ResolvedRemove,
+        PortsInstall,
+    ],
+    skips: [
+        SetupSkip {
+            op: HostsSync,
+            code: "hosts_sites_unknown",
+        },
+    ],
+    port_holders: [],
+    local: [
+        NssInstall {
+            pem: "PEM",
+        },
+        RecordDnsWay,
+    ],
+}

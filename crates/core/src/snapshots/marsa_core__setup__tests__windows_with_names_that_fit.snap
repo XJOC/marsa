@@ -1,0 +1,19 @@
+---
+source: crates/core/src/setup.rs
+expression: windows_plan(&windows())
+---
+Plan {
+    ops: [
+        TrustInstall {
+            pem: "<the fixture PEM>",
+        },
+        HostsSync {
+            names: [
+                "a.test",
+            ],
+        },
+    ],
+    skips: [],
+    port_holders: [],
+    local: [],
+}

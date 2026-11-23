@@ -1,0 +1,22 @@
+---
+source: crates/core/src/setup.rs
+expression: "after_helper(&facts, &results)"
+---
+Some(
+    FollowUp {
+        ops: [],
+        retire: Some(
+            (
+                ResolvedInstall,
+                "resolved_use_hosts",
+            ),
+        ),
+        skips: [
+            SetupSkip {
+                op: HostsSync,
+                code: "hosts_sites_unknown",
+            },
+        ],
+        not_run: "setup_hosts_not_written",
+    },
+)

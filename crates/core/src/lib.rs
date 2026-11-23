@@ -31,3 +31,7 @@ pub mod client;
 pub mod installer;
 #[cfg(feature = "full")]
 pub mod platform;
+// `full` only because the Windows plan asks the helper's certificate parser
+// (`helper::certificate_sha256`), which needs `sha2`. The shim never plans a setup.
+#[cfg(feature = "full")]
+pub mod setup;

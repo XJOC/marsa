@@ -1,0 +1,14 @@
+---
+source: crates/core/src/setup.rs
+expression: "after_helper(&facts, &results)"
+---
+Some(
+    FollowUp {
+        ops: [
+            HostsRemove,
+        ],
+        retire: None,
+        skips: [],
+        not_run: "setup_hosts_not_removed",
+    },
+)

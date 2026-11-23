@@ -563,18 +563,6 @@ fn skip(op: OpName, code: &str) -> SetupSkip {
     }
 }
 
-/// Leaves `op`, the DNS step, out: the daemon's DNS server does not answer,
-/// so `.test` names would go to a port that no one, or another program,
-/// answers on.
-fn dns_skipped(report: &mut SetupReport, op: OpName, code: &str) {
-    tracing::warn!(
-        %op,
-        code,
-        "the DNS server for .test does not run; no DNS setup"
-    );
-    report.skipped.push(skip(op, code));
-}
-
 fn failure(code: &str, message: impl Into<String>) -> ApiError {
     ApiError {
         code: code.to_owned(),

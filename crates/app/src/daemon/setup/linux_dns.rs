@@ -26,13 +26,12 @@
 //!
 //! `marsa-helper` stays the judge (manager decision). If it
 //! answers `resolved_use_hosts` or `resolved_not_running` to
-//! `resolved_install` ([`helper_chose_hosts`]), setup logs the difference,
+//! `resolved_install` (`marsa_core::setup::after_helper`), setup logs the difference,
 //! lists `resolved_install` as skipped with that code, and sends the
 //! operations of the hosts way in a second request. So one `marsa setup`
 //! shows the password prompt twice only when the two copies of the rule
 //! disagree, or once after the move from the hosts file to the link.
 
-use marsa_core::codes;
 use marsa_core::types::OpName;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -41,7 +40,8 @@ use std::io;
 use std::path::Path;
 
 use marsa_core::dns::{self, LinuxFacts, NETWORKD_UNITS};
-use marsa_core::helper::{HelperOp, OpResult, OpStatus};
+use marsa_core::helper::{OpResult, OpStatus};
+use marsa_core::setup::link_made;
 use marsa_core::sites;
 use marsa_core::types::HostsStatus;
 use tokio_util::sync::CancellationToken;
@@ -52,10 +52,6 @@ pub use marsa_core::platform::linux_dns::{HOSTS_FILE, marker, read_block};
 /// `systemctl`, at the path of Debian, Ubuntu, and Fedora. `marsad` never
 /// searches `PATH`.
 pub const SYSTEMCTL: &str = "/usr/bin/systemctl";
-
-/// The helper's answers to `resolved_install` that mean "use the hosts
-/// file here".
-const HOSTS_ANSWERS: [&str; 2] = [codes::RESOLVED_USE_HOSTS, codes::RESOLVED_NOT_RUNNING];
 
 /// The facts of [`dns::linux_path`], each read with `systemctl`.
 /// systemd-networkd is asked about only where the answer counts: on
@@ -200,51 +196,6 @@ pub fn names_to_add(hosts_file: Option<&Path>, names: &[String]) -> Vec<String> 
         .collect();
     all.extend(names.iter().cloned());
     all.into_iter().collect()
-}
-
-/// The operations of the hosts way: `resolved_remove`, then `hosts_sync`
-/// with `names`, the host names of the sites (`None`: not known). The
-/// second value is why `hosts_sync` was left out, if it was.
-pub fn hosts_ops(names: Option<&[String]>) -> (Vec<HelperOp>, Option<&'static str>) {
-    let mut ops = vec![HelperOp::ResolvedRemove];
-    let skipped = match names {
-        None => Some(codes::HOSTS_SITES_UNKNOWN),
-        Some(names) if !dns::hosts_names_fit(names) => Some(codes::HOSTS_TOO_MANY_NAMES),
-        Some(names) => {
-            ops.push(HelperOp::HostsSync {
-                names: names.to_vec(),
-            });
-            None
-        }
-    };
-    if let Some(code) = skipped {
-        tracing::warn!(code, "hosts_sync left out of the request");
-    }
-    (ops, skipped)
-}
-
-/// Whether the helper made the `marsa0` link, now or before.
-pub fn link_made(results: &[OpResult]) -> bool {
-    results.iter().any(|result| {
-        result.op == OpName::ResolvedInstall
-            && matches!(result.status, OpStatus::Done | OpStatus::Unchanged)
-    })
-}
-
-/// The code of a failed `resolved_install` that means the helper chose the
-/// hosts file: `resolved_use_hosts` (its systemd rule) or
-/// `resolved_not_running`.
-pub fn helper_chose_hosts(results: &[OpResult]) -> Option<String> {
-    results
-        .iter()
-        .filter(|result| result.op == OpName::ResolvedInstall && result.status == OpStatus::Failed)
-        .find_map(|result| {
-            result
-                .code
-                .as_deref()
-                .filter(|code| HOSTS_ANSWERS.contains(code))
-                .map(str::to_owned)
-        })
 }
 
 #[cfg(test)]
