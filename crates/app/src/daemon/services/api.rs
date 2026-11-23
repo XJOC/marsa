@@ -69,8 +69,8 @@ pub const MANAGED_BY_SITES: &str = codes::SERVICE_MANAGED_BY_SITES;
 /// 5 s, SIGKILL and 2 s), 5 s for the admin API, then up to 4 s to stop a
 /// Caddy that never answered. The action that waited runs after: a restart
 /// is a stop (up to 4 s) and such a start, about 23 s. So one request takes
-/// up to about 43 s, and the client gives an action 60 s
-/// (`marsa_core::client`).
+/// up to about 43 s. Clients before ADR 0026 wait 60 s for it, which
+/// `old_clients_wait_longer_than_the_slowest_action` holds.
 pub const ACTION_WAIT: Duration = Duration::from_secs(20);
 
 /// How long an action on a database server waits for another one to end
@@ -152,26 +152,27 @@ fn check(
         HttpError::new(StatusCode::BAD_REQUEST, err.code(), err.to_string())
     })?;
     if let Service::Pool(_) = service {
-        let message = format!(
-            "{service_id} starts and stops with the sites that need its PHP version; it has no \
-             actions of its own"
-        );
-        return Err(HttpError::new(
-            StatusCode::CONFLICT,
-            MANAGED_BY_SITES,
-            message,
-        ));
+        return Err(managed_by_sites(service_id));
     }
     Ok(Checked { id, action })
 }
 
-fn start(daemon: &Arc<Daemon>, action: Checked) -> (u64, jobs::Ended<ServiceStatus>) {
+/// The 409 for a php-fpm pool.
+fn managed_by_sites(id: ServiceId) -> HttpError {
+    let message = format!(
+        "{id} starts and stops with the sites that need its PHP version; it has no actions of \
+         its own"
+    );
+    HttpError::new(StatusCode::CONFLICT, MANAGED_BY_SITES, message)
+}
+
+fn start(daemon: &Arc<Daemon>, checked: Checked) -> (u64, jobs::Ended<ServiceStatus>) {
     jobs::start(
         daemon,
         JobKind::ServiceAction,
         "service action",
         JobOutcome::ServiceAction,
-        run(Arc::clone(daemon), action),
+        run(Arc::clone(daemon), checked),
         |_, _| {},
     )
 }
@@ -202,11 +203,7 @@ async fn run(
                 action_error(&err)
             }),
         // Refused by `check`.
-        Service::Pool(_) => Err(HttpError::new(
-            StatusCode::CONFLICT,
-            MANAGED_BY_SITES,
-            format!("{id} has no actions of its own"),
-        )),
+        Service::Pool(_) => Err(managed_by_sites(id)),
     }
 }
 
@@ -573,7 +570,8 @@ mod tests {
             let error: ErrorBody = serde_json::from_str(&body).unwrap();
             assert_eq!(error.error.code, code, "{request}");
         }
-        assert!(daemon.jobs().running().is_empty());
+        // Refused before any job: the first id is still free.
+        assert_eq!(daemon.jobs().get(1), None);
         // The actions changed nothing.
         assert_eq!(lock(&runtime).status.state, ServiceState::Running);
     }
@@ -755,14 +753,25 @@ mod tests {
         daemon.dns().shutdown(Duration::from_secs(5)).await;
     }
 
-    /// A job route is behind the same auth layer as every other route.
+    /// A job route is behind the same auth layer as every other route: no
+    /// token, a wrong token, an `Origin`, and another `Host` all refuse
+    /// before any job exists.
     #[tokio::test]
     async fn the_job_route_needs_the_token_and_refuses_an_origin() {
         use crate::daemon::http::test_router::TestRouter;
+        use marsa_core::platform::daemon_file::{Token, daemon_authority};
 
-        let app = TestRouter::new(Arc::new(Daemon::new(std::path::PathBuf::new())));
+        let daemon = Arc::new(Daemon::new(std::path::PathBuf::new()));
+        let app = TestRouter::new(Arc::clone(&daemon));
         let uri = "/v1/jobs/services/caddy/start";
+        let wrong = Token::generate().unwrap().bearer_header();
         let request = app.builder("POST", uri).body(Body::empty()).unwrap();
+        assert_eq!(app.call(request).await.status(), StatusCode::UNAUTHORIZED);
+        let request = app
+            .builder("POST", uri)
+            .header("authorization", &wrong)
+            .body(Body::empty())
+            .unwrap();
         assert_eq!(app.call(request).await.status(), StatusCode::UNAUTHORIZED);
         let request = app
             .authorized("POST", uri)
@@ -770,6 +779,16 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(app.call(request).await.status(), StatusCode::FORBIDDEN);
+        // Another port in `Host`: the builder's own `Host` is replaced.
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("host", daemon_authority(1))
+            .header("authorization", app.bearer())
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.call(request).await.status(), StatusCode::FORBIDDEN);
+        assert_eq!(daemon.jobs().get(1), None);
     }
 
     /// Clients before ADR 0026 wait 60 s for an action on Caddy and 300 s
@@ -788,6 +807,12 @@ mod tests {
         assert!(OLD_SERVER_WAIT > SERVER_ACTION_WAIT.as_secs() + 23 + 8 + 120 + 60 + 15 + 23);
         // MySQL: waiting 30, stopping 35, lsof 8, init 120, ready 15, stop 35.
         assert!(OLD_SERVER_WAIT > SERVER_ACTION_WAIT.as_secs() + 35 + 8 + 120 + 15 + 35);
+        // Valkey: waiting 30, stopping 29 (the request, SIGTERM, and the
+        // margin), lsof 8, ready 15, stop 29. More than the 60 s of the
+        // other services, so it needs the longer wait.
+        let valkey = SERVER_ACTION_WAIT.as_secs() + 29 + 8 + 15 + 29;
+        assert!(OLD_SERVER_WAIT > valkey);
+        assert!(OLD_ACTION_WAIT < valkey);
     }
 
     #[tokio::test]

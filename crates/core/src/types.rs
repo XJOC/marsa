@@ -1506,6 +1506,50 @@ mod tests {
                 },
             }),
         );
+        round_trip(
+            &Event::Job(JobEvent {
+                id: 7,
+                kind: JobKind::ServiceAction,
+                update: JobUpdate::Failed(JobFailure {
+                    code: "service_busy".into(),
+                    message: "another action runs".into(),
+                    http_status: Some(409),
+                }),
+            }),
+            json!({
+                "type": "job",
+                "data": {
+                    "id": 7, "kind": "service_action", "status": "failed",
+                    "code": "service_busy", "message": "another action runs",
+                    "http_status": 409,
+                },
+            }),
+        );
+        round_trip(
+            &JobEvent {
+                id: 8,
+                kind: JobKind::ServiceAction,
+                update: JobUpdate::Done(JobOutcome::ServiceAction(ServiceStatus {
+                    id: ServiceId::Caddy,
+                    state: ServiceState::Running,
+                    pid: Some(1),
+                    restarts: 0,
+                    since_ms: None,
+                })),
+            },
+            json!({
+                "id": 8, "kind": "service_action", "status": "done", "result": "service_action",
+                "data": {
+                    "id": "caddy", "state": "running", "pid": 1, "restarts": 0, "since_ms": null,
+                },
+            }),
+        );
+        // A reader that knows only `code` and `message` (an `ApiError`) still
+        // reads a failure that carries a status.
+        let old: ApiError =
+            serde_json::from_value(json!({ "code": "x", "message": "y", "http_status": 409 }))
+                .unwrap();
+        assert_eq!((old.code.as_str(), old.message.as_str()), ("x", "y"));
         let running = JobEvent {
             id: 1,
             kind: JobKind::Setup,
