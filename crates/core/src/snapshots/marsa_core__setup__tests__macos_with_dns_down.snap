@@ -12,7 +12,7 @@ Plan {
     skips: [
         SetupSkip {
             op: ResolverInstall,
-            code: "dns_failed",
+            code: "dns_not_running",
         },
     ],
     port_holders: [],

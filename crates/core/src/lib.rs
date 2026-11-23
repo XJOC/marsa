@@ -1,8 +1,9 @@
 //! `marsa-core`: all of Marsa's logic, split into modules.
 //!
 //! This is a functional core: functions take data and return data or a plan.
-//! They do not start processes or open sockets, except in the three modules
-//! behind the `full` feature: `platform`, `installer`, and `client`.
+//! They do not start processes or open sockets, except in the modules behind
+//! the `full` feature: `platform`, `installer`, and `client`. `setup` is behind
+//! `full` too, but it is pure: it needs the helper's certificate parser.
 
 pub mod caddy;
 pub mod codes;

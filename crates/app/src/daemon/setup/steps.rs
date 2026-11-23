@@ -163,10 +163,12 @@ impl Setup {
         stop: &CancellationToken,
     ) -> Facts {
         let needs = setup::needs(platform.os());
-        let ca_root = CaddyPaths::in_dir(data_dir).ca_root();
+        // First, and on its own line: it may start Caddy, and the order of
+        // the other facts must not move before it.
+        let ca = self.ca(&CaddyPaths::in_dir(data_dir).ca_root(), starter, stop);
         Facts {
             platform,
-            ca: self.ca(&ca_root, starter, stop),
+            ca,
             caddy_ports: (caddy.http_port, caddy.https_port),
             port_holders: if needs.port_holders {
                 ports::holders(self.runner(), Os::Mac, stop)

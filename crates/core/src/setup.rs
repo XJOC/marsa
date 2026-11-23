@@ -103,7 +103,8 @@ impl Plan {
     }
 }
 
-fn skip(op: OpName, code: &str) -> SetupSkip {
+/// A step left out of a request, with the code that says why.
+pub fn skip(op: OpName, code: &str) -> SetupSkip {
     SetupSkip {
         op,
         code: code.to_owned(),
@@ -154,7 +155,7 @@ pub fn plan(facts: &Facts) -> Plan {
             Some(code) => plan.skip(OpName::ResolverInstall, code),
             None => plan.ops.extend(dns::setup_op(facts.platform)),
         },
-        Os::Any => unreachable!("returned above"),
+        Os::Any => {}
     }
     match os {
         Os::Linux => plan.ops.push(HelperOp::PortsInstall),
@@ -458,7 +459,7 @@ mod tests {
     #[test]
     fn macos_with_dns_down() {
         let facts = Facts {
-            dns_down: Some("dns_failed".to_owned()),
+            dns_down: Some(codes::DNS_NOT_RUNNING.to_owned()),
             ..mac()
         };
         insta::assert_debug_snapshot!(plan(&facts));
@@ -555,6 +556,8 @@ mod tests {
         let mut plan = plan(facts);
         for op in &mut plan.ops {
             if let HelperOp::TrustInstall { pem } = op {
+                // The service is pinned to this PEM's hash: it must be the CA's.
+                assert_eq!(Ok(&*pem), facts.ca.as_ref());
                 "<the fixture PEM>".clone_into(pem);
             }
         }

@@ -52,7 +52,10 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use marsa_core::recipes::{Os, Platform};
-use marsa_core::types::{ApiError, Event, OpName, SetupReport, SetupSkip, Site, SiteList};
+use marsa_core::types::{ApiError, Event, SetupReport, Site, SiteList};
+// The test modules of this folder reach these through `super::*`.
+#[cfg(test)]
+use marsa_core::types::OpName;
 use tokio::runtime::Handle;
 
 use self::one_at_a_time::{OneAtATime, Turn};
@@ -60,6 +63,7 @@ use super::http;
 use super::http::routes::HttpError;
 use super::sites::hosts_sync;
 use super::state::Daemon;
+use marsa_core::setup::skip;
 
 pub use self::ca::{CA_WAIT, CaddyStart, StartCaddy};
 use self::ca::{DaemonCaddy, PEM_BEGIN, read_ca};
@@ -392,7 +396,7 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupRepor
     tracing::info!("setup started");
     // The hosts file on Linux and Windows needs them; elsewhere the list is
     // not read.
-    let names = if platform.os() == Os::Linux || platform.os() == Os::Windows {
+    let names = if marsa_core::setup::needs(platform.os()).site_names {
         host_names(&daemon).await
     } else {
         Some(Vec::new())
@@ -554,13 +558,6 @@ fn short_code(code: &str) -> String {
         .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
         .take(64)
         .collect()
-}
-
-fn skip(op: OpName, code: &str) -> SetupSkip {
-    SetupSkip {
-        op,
-        code: code.to_owned(),
-    }
 }
 
 fn failure(code: &str, message: impl Into<String>) -> ApiError {
