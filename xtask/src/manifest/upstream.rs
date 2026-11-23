@@ -813,6 +813,11 @@ mod tests {
                 one(&format!(r#"{{"name": "{MAILPIT_NAME}"}}"#)),
                 "no digest",
             ),
+            // What GitHub gives for an asset uploaded before it kept digests.
+            (
+                one(&format!(r#"{{"name": "{MAILPIT_NAME}", "digest": null}}"#)),
+                "null digest",
+            ),
             (named(&format!("sha512:{digest}")), "another algorithm"),
             (named(digest), "no algorithm"),
             (

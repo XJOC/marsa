@@ -3,7 +3,7 @@ use std::fs;
 use marsa_core::installer::fetch::testing::{MemoryFetch, Reply};
 use sha2::{Digest, Sha256, Sha512};
 
-use super::super::upstream::SumFile;
+use super::super::upstream::{Layout, SumFile};
 use super::super::verify::check_json;
 use super::*;
 
@@ -75,7 +75,7 @@ fn upstream(algorithm: Algorithm, body: &[u8]) -> String {
 /// that agree, except for the file named in `bad`.
 fn fetcher(pins: &Pins, bad: Option<&str>) -> MemoryFetch {
     let mut fetch = MemoryFetch::new();
-    let mut sums: BTreeMap<String, String> = BTreeMap::new();
+    let mut sums: BTreeMap<String, (Layout, Vec<(String, String)>)> = BTreeMap::new();
     for runtime in RUNTIMES {
         let recipe = recipes::builtin(runtime).expect("recipe");
         for version in pins.versions(runtime) {
@@ -92,16 +92,28 @@ fn fetcher(pins: &Pins, bad: Option<&str>) -> MemoryFetch {
                         } else {
                             upstream(sum.algorithm, &body)
                         };
-                        sums.entry(sum.url)
-                            .or_default()
-                            .push_str(&format!("{hash}  {}\r\n", sum.name));
+                        let entry = sums.entry(sum.url).or_insert((sum.layout, Vec::new()));
+                        entry.1.push((hash, sum.name));
                     }
                     fetch = fetch.with(url, Reply::Chunks(vec![body]));
                 }
             }
         }
     }
-    for (url, text) in sums {
+    for (url, (layout, entries)) in sums {
+        let text = match layout {
+            Layout::GithubDigest => {
+                let assets: Vec<_> = entries
+                    .iter()
+                    .map(|(hash, name)| serde_json::json!({"name": name, "digest": format!("sha256:{hash}")}))
+                    .collect();
+                serde_json::json!({ "assets": assets }).to_string()
+            }
+            Layout::List | Layout::Single => entries
+                .iter()
+                .map(|(hash, name)| format!("{hash}  {name}\r\n"))
+                .collect(),
+        };
         fetch = fetch.with(&url, Reply::Chunks(vec![text.into_bytes()]));
     }
     fetch
@@ -542,6 +554,91 @@ async fn a_valkey_override_stops_the_build() {
     let fetched = fetch.requests();
     assert!(
         !fetched.iter().any(|url| url.contains("valkey")),
+        "{fetched:?}"
+    );
+}
+
+/// The pins of [`PINS`] plus Mailpit 1.34.0 on all five platforms, as
+/// `recipes/pins.toml` has it.
+fn mailpit_pins() -> String {
+    format!("{PINS}[mailpit]\nversions = [\"1.34.0\"]\n")
+}
+
+#[tokio::test]
+async fn mailpit_is_built_with_the_digests_of_its_release() {
+    let pins = Pins::parse(&mailpit_pins()).expect("pins");
+    let fetch = fetcher(&pins, None);
+    let cache = tempfile::tempdir().expect("tempdir");
+    let built = build(&fetch, &pins, cache.path(), &Stub::default())
+        .await
+        .expect("build");
+    let value = serde_json::to_value(&built.manifest).expect("json");
+    let [release] = value["runtimes"]["mailpit"]
+        .as_array()
+        .expect("mailpit")
+        .as_slice()
+    else {
+        panic!("one mailpit release expected");
+    };
+    assert_eq!(release["version"], "1.34.0");
+    let linux = &release["platforms"]["linux-x64"][0];
+    let url = "https://github.com/axllent/mailpit/releases/download/v1.34.0/\
+                   mailpit-linux-amd64.tar.gz";
+    assert_eq!(linux["urls"][0], url);
+    assert_eq!(linux["sha256"], sha(url.as_bytes()));
+    let rows = built
+        .rows
+        .iter()
+        .filter(|row| row.starts_with("mailpit 1.34.0 "));
+    let checked = rows.filter(|row| row.ends_with("(upstream sha256 matches)"));
+    assert_eq!(checked.count(), 5);
+    // One release JSON for the five archives.
+    let api = "https://api.github.com/repos/axllent/mailpit/releases/tags/v1.34.0";
+    let asked = fetch
+        .requests()
+        .into_iter()
+        .filter(|url| url == api)
+        .count();
+    assert_eq!(asked, 1);
+    assert!(!cache.path().join("mailpit").exists());
+    check_json(to_json(&built.manifest).expect("json").as_bytes()).expect("valid manifest");
+
+    // An archive whose digest in the release JSON is another file's.
+    let bad = fetcher(&pins, Some("mailpit-darwin-arm64.tar.gz"));
+    let cache = tempfile::tempdir().expect("tempdir");
+    let err = build(&bad, &pins, cache.path(), &Stub::default())
+        .await
+        .err()
+        .expect("a bad digest");
+    let err = format!("{err:#}");
+    assert!(err.contains("mailpit 1.34.0 darwin-arm64"), "{err}");
+    assert!(err.contains("sha256 is"), "{err}");
+}
+
+/// An override that names another Mailpit archive (32-bit ARM, with its own
+/// matching digest) stops the build before any download of Mailpit.
+#[tokio::test]
+async fn a_mailpit_override_stops_the_build() {
+    let text = format!(
+        "{}[[override]]\nruntime = \"mailpit\"\nversion = \"1.34.0\"\nplatform = \"darwin-arm64\"\n\
+             artifact = \"archive\"\nurls = [\"https://github.com/axllent/mailpit/releases/download/\
+             v1.34.0/mailpit-linux-arm.tar.gz\"]\n",
+        mailpit_pins()
+    );
+    let pins = Pins::parse(&text).expect("pins");
+    let fetch = fetcher(&pins, None);
+    let cache = tempfile::tempdir().expect("tempdir");
+    let err = build(&fetch, &pins, cache.path(), &Stub::default())
+        .await
+        .err()
+        .expect("an override");
+    assert!(
+        format!("{err:#}").contains("only that Mailpit archive"),
+        "{err:#}"
+    );
+    let fetched = fetch.requests();
+    assert!(
+        !fetched.iter().any(|url| url.contains("mailpit")),
         "{fetched:?}"
     );
 }
