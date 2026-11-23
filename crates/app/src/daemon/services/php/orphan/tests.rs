@@ -11,7 +11,10 @@ use marsa_core::php::PhpMinor;
 use marsa_core::platform::process::{self, Signal};
 use marsa_core::ps::StartTime;
 use marsa_core::recipes::Platform;
-use marsa_core::types::{Event, ServiceId, ServiceState};
+use marsa_core::types::{Event, ServiceState};
+// Only the tests of the systems where php-fpm pools run use it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use marsa_core::types::ServiceId;
 use tokio::sync::broadcast::{self};
 
 use super::super::{fpm_id, fpm_program};
