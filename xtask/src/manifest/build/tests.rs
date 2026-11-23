@@ -1,5 +1,9 @@
-use marsa_core::installer::fetch::testing::{MemoryFetch, Reply};
+use std::fs;
 
+use marsa_core::installer::fetch::testing::{MemoryFetch, Reply};
+use sha2::{Digest, Sha256, Sha512};
+
+use super::super::upstream::SumFile;
 use super::super::verify::check_json;
 use super::*;
 
