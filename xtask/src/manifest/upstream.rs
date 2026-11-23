@@ -167,8 +167,8 @@ pub(super) fn sum_file_for(url: &str) -> Option<SumFile> {
         // theseus-rs is a third party, and it serves this `.sha256` from the
         // same place as the archive, so the sum proves only that the download
         // is whole. The trust comes from the owner's signature on the manifest
-        // that pins this hash (ADR 0023, section 3). A check of the GitHub
-        // artifact attestations is planned, not built.
+        // that pins this hash (ADR 0023, section 3). `manifest build` also
+        // checks the archive's GitHub attestation (`attest`).
         sum(format!("{url}.sha256"), Sha256, Single, Source::Theseus)
     } else if tag(VALKEY_RELEASES).is_some() {
         let sums = format!("{dir}/sha256sums.txt");

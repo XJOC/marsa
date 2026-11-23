@@ -80,7 +80,7 @@ impl build::OracleCheck for Smoke<'_> {
 
 impl Inspect for Smoke<'_> {
     fn attestation(&self, file: &Path, version: &Version) -> Result<String> {
-        attest::run_gh(&attest::find_gh()?, file, version)
+        attest::verify_with_gh(file, version)
     }
 
     fn php_build(&self, target: &Target<'_>, file: &Path) -> Result<Vec<String>> {
@@ -189,7 +189,7 @@ impl Inspect for Attestation {
     }
 
     fn attestation(&self, file: &Path, version: &Version) -> Result<String> {
-        attest::run_gh(&attest::find_gh()?, file, version)
+        attest::verify_with_gh(file, version)
     }
 }
 

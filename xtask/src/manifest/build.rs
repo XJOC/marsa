@@ -469,28 +469,49 @@ pub(super) async fn check_attested(
     let sums = sum_file_for(url)
         .filter(|sums| sums.source == Source::Theseus)
         .with_context(|| format!("{url} is not a theseus-rs release archive"))?;
-    let (dir, name) = url
+    let (dir, _) = url
         .rsplit_once('/')
         .with_context(|| format!("{url} has no file name"))?;
     let version = dir
         .rsplit_once('/')
         .and_then(|(_, tag)| Version::parse(tag).ok())
         .with_context(|| format!("{url} has no version in its folder"))?;
-    fs::create_dir_all(work).with_context(|| format!("cannot create {}", work.display()))?;
-    let path = work.join("archive");
-    let _ = fs::remove_file(&path);
-    let _scratch = RemoveOnDrop(path.clone());
-    let file = temp_download(fetch, &[url.to_owned()], &path).await?;
-    let json = inspect
-        .attestation(&path, &version)
-        .with_context(|| format!("{}: GitHub attestation", sums.name))?;
-    attest::check_result(&json, name, &file.sha256, &version)
-        .with_context(|| format!("{}: GitHub attestation", sums.name))?;
+    let file = scratch_download(fetch, &[url.to_owned()], work).await?;
+    verify_attestation(inspect, &file, &version).with_context(|| sums.name.clone())?;
     Ok(Checked {
         url: file.url,
         sha256: file.sha256,
         size: file.size,
     })
+}
+
+/// Downloads the first URL that answers to `work/archive`, hashing on the
+/// way, for a check that reads the file (`gh` reads one). The file is deleted
+/// when the answer goes out of scope, or at once on an error.
+async fn scratch_download(fetch: &impl Fetch, urls: &[String], work: &Path) -> Result<Downloaded> {
+    fs::create_dir_all(work).with_context(|| format!("cannot create {}", work.display()))?;
+    let path = work.join("archive");
+    // A run that was killed may have left one.
+    let _ = fs::remove_file(&path);
+    let scratch = RemoveOnDrop(path.clone());
+    temp_download(fetch, urls, &path)
+        .await
+        .map(|file| Downloaded {
+            _scratch: Some(scratch),
+            ..file
+        })
+}
+
+/// GitHub's attestation for the archive `file` (`attest`): `gh` verifies it,
+/// then its JSON is read again against the archive's name and the sha256 that
+/// was hashed on the way. The one place that does both, for `build` and
+/// `check-postgres`.
+fn verify_attestation(inspect: &impl Inspect, file: &Downloaded, version: &Version) -> Result<()> {
+    let name = file.url.rsplit_once('/').map_or(&*file.url, |(_, n)| n);
+    let json = inspect
+        .attestation(file.kept()?, version)
+        .context("GitHub attestation")?;
+    attest::check_result(&json, name, &file.sha256, version).context("GitHub attestation")
 }
 
 /// The result: the manifest, one line per file for the report, and warnings.
@@ -513,7 +534,8 @@ pub(super) fn check_serial(serial: u64, published: Option<u64>) -> Result<()> {
 }
 
 /// Builds the manifest. The files that a later check reads are saved under
-/// `cache` (see `Proof::keeps_file`); the others are only hashed.
+/// `cache` (see `Proof::keeps_file`); the others are only hashed, and the
+/// archives of MySQL and PostgreSQL are kept only while they are checked.
 pub(super) async fn build(
     fetch: &impl Fetch,
     pins: &Pins,
@@ -583,19 +605,7 @@ pub(super) async fn build(
                         // `gh attestation verify` reads a file. It is 60 MB:
                         // deleted at the end of this artifact, whatever the
                         // result.
-                        let work = cache.join("theseus-work");
-                        fs::create_dir_all(&work)
-                            .with_context(|| format!("cannot create {}", work.display()))?;
-                        let path = work.join("archive");
-                        let _ = fs::remove_file(&path);
-                        // Dropped with the answer, or with the error.
-                        let scratch = RemoveOnDrop(path.clone());
-                        temp_download(fetch, &urls, &path)
-                            .await
-                            .map(|file| Downloaded {
-                                _scratch: Some(scratch),
-                                ..file
-                            })
+                        scratch_download(fetch, &urls, &cache.join("theseus-work")).await
                     } else if proof.keeps_file() {
                         let dir = cache
                             .join(runtime.dir_name())
@@ -659,15 +669,6 @@ pub(super) async fn build(
                                 hex(&expected)
                             );
                             notes.push(note);
-                            if proof == Proof::TheseusSha256 {
-                                let json = inspect
-                                    .attestation(file.kept()?, version)
-                                    .with_context(|| format!("{what}: GitHub attestation"))?;
-                                let name = file.url.rsplit_once('/').map_or(&*file.url, |(_, n)| n);
-                                attest::check_result(&json, name, &file.sha256, version)
-                                    .with_context(|| format!("{what}: GitHub attestation"))?;
-                                notes.push("GitHub attestation verified");
-                            }
                         }
                         None => {
                             warnings.push(format!(
@@ -676,6 +677,13 @@ pub(super) async fn build(
                             ));
                             notes.push("no upstream sum");
                         }
+                    }
+                    // After the `.sha256`, and for every PostgreSQL archive,
+                    // whatever the match above did.
+                    if proof == Proof::TheseusSha256 {
+                        verify_attestation(inspect, &file, version)
+                            .with_context(|| what.clone())?;
+                        notes.push("GitHub attestation verified");
                     }
                     if runtime == Runtime::Php && is_spc_platform(platform) {
                         let found = inspect

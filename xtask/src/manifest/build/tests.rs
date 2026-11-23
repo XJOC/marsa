@@ -823,41 +823,72 @@ async fn postgres_needs_the_theseus_sum() {
     }
 }
 
-/// A PostgreSQL archive whose attestation does not fit stops the build, and
-/// no sum is written. `answer` is what the stub's `gh` prints.
-async fn postgres_with_attestation(
-    answer: impl Fn(&Path, &Version) -> Result<String> + Send + Sync,
-) -> (Result<Built>, PathBuf) {
-    struct Attest<F>(F);
-    impl<F: Fn(&Path, &Version) -> Result<String> + Send + Sync> Inspect for Attest<F> {
-        fn php_build(&self, _t: &Target<'_>, _f: &Path) -> Result<Vec<String>> {
-            Ok(vec![])
-        }
-        fn attestation(&self, file: &Path, version: &Version) -> Result<String> {
-            (self.0)(file, version)
-        }
-    }
-    impl<F> OracleCheck for Attest<F> {
-        fn signature(&self, _s: &Path, _f: &Path) -> Result<()> {
-            bail!("no Oracle check expected")
-        }
-        fn md5(&self, _f: &Path) -> Result<[u8; 16]> {
-            bail!("no Oracle check expected")
-        }
-        fn first_entry(&self, _f: &Path, _k: ArchiveKind) -> Result<String> {
-            bail!("no Oracle check expected")
+/// The stub that answers for `gh`, and counts what it was asked about: the
+/// body of each archive (its URL, in these tests).
+struct Attest<F> {
+    answer: F,
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl<F: Fn(&Path, &Version) -> Result<String>> Attest<F> {
+    fn new(answer: F) -> Self {
+        Self {
+            answer,
+            asked: std::sync::Mutex::default(),
         }
     }
+}
+
+impl<F: Fn(&Path, &Version) -> Result<String>> Inspect for Attest<F> {
+    fn php_build(&self, _t: &Target<'_>, _f: &Path) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+    fn attestation(&self, file: &Path, version: &Version) -> Result<String> {
+        self.asked
+            .lock()
+            .expect("lock")
+            .push(fs::read_to_string(file)?);
+        (self.answer)(file, version)
+    }
+}
+
+impl<F> OracleCheck for Attest<F> {
+    fn signature(&self, _s: &Path, _f: &Path) -> Result<()> {
+        bail!("no Oracle check expected")
+    }
+    fn md5(&self, _f: &Path) -> Result<[u8; 16]> {
+        bail!("no Oracle check expected")
+    }
+    fn first_entry(&self, _f: &Path, _k: ArchiveKind) -> Result<String> {
+        bail!("no Oracle check expected")
+    }
+}
+
+/// `build` over [`PINS`] with `stub`, and `bad` as the one archive whose
+/// `.sha256` does not match. Returns the cache folder too: its
+/// `theseus-work` must be empty after.
+async fn build_with(
+    stub: &impl OracleCheckInspect,
+    bad: Option<&str>,
+) -> (Result<Built>, tempfile::TempDir) {
     let pins = Pins::parse(PINS).expect("pins");
     let cache = tempfile::tempdir().expect("tempdir");
-    let built = build(&fetcher(&pins, None), &pins, cache.path(), &Attest(answer)).await;
-    // `keep` makes the folder survive, so the caller can look in it.
-    (built, cache.keep())
+    let built = build(&fetcher(&pins, bad), &pins, cache.path(), stub).await;
+    (built, cache)
+}
+
+/// Both traits `build` asks of its stub.
+trait OracleCheckInspect: Inspect + OracleCheck {}
+impl<T: Inspect + OracleCheck> OracleCheckInspect for T {}
+
+fn archive_is_gone(cache: &tempfile::TempDir) -> bool {
+    !cache.path().join("theseus-work").join("archive").exists()
 }
 
 #[tokio::test]
 async fn postgres_archives_are_attested_and_deleted_after() {
-    let (built, cache) = postgres_with_attestation(fake_attestation).await;
+    let stub = Attest::new(fake_attestation);
+    let (built, cache) = build_with(&stub, None).await;
     let built = built.expect("built");
     let attested = built
         .rows
@@ -865,82 +896,67 @@ async fn postgres_archives_are_attested_and_deleted_after() {
         .filter(|row| row.ends_with("GitHub attestation verified)"))
         .count();
     assert_eq!(attested, 5, "{:?}", built.rows);
+    assert_eq!(stub.asked.lock().expect("lock").len(), 5);
     // Nothing of the 60 MB archives stays in the cache.
-    let work = cache.join("theseus-work");
-    assert!(!work.join("archive").exists(), "the archive is kept");
-    fs::remove_dir_all(cache).expect("clean");
+    assert!(archive_is_gone(&cache), "the archive is kept");
 }
 
 #[tokio::test]
 async fn a_postgres_attestation_that_does_not_fit_stops_the_build() {
-    type Change = (&'static str, fn(&Path, &Version) -> Result<String>);
-    let cases: [Change; 5] = [
-        ("no attestation", |_, _| Ok("[]".to_owned())),
-        ("gh is not signed in", |_, _| {
+    type Case = (
+        &'static str,
+        &'static str,
+        fn(&Path, &Version) -> Result<String>,
+    );
+    let cases: [Case; 5] = [
+        ("no attestation", "has no verified attestation", |_, _| {
+            Ok("[]".to_owned())
+        }),
+        ("gh is not signed in", "HTTP 401", |_, _| {
             bail!("`gh attestation verify` refused it (exit status: 1): HTTP 401")
         }),
-        ("not JSON", |_, _| Ok("verified".to_owned())),
-        ("another digest", |file, version| {
+        ("not JSON", "not JSON", |_, _| Ok("verified".to_owned())),
+        ("another digest", "does not name", |file, version| {
             let text = fake_attestation(file, version)?;
             Ok(text.replace(&hex(&Sha256::digest(fs::read(file)?)), &"0".repeat(64)))
         }),
-        ("another repository", |file, version| {
-            Ok(fake_attestation(file, version)?
-                .replace("theseus-rs/postgresql-binaries", "evil/postgresql-binaries"))
-        }),
+        (
+            "another repository",
+            "its repository is",
+            |file, version| {
+                Ok(fake_attestation(file, version)?
+                    .replace("theseus-rs/postgresql-binaries", "evil/postgresql-binaries"))
+            },
+        ),
     ];
-    for (what, answer) in cases {
-        let (built, cache) = postgres_with_attestation(answer).await;
-        let err = built.err().unwrap_or_else(|| panic!("{what}: built"));
-        let message = format!("{err:#}");
+    for (what, reason, answer) in cases {
+        let (built, cache) = build_with(&Attest::new(answer), None).await;
+        let message = format!(
+            "{:#}",
+            built.err().unwrap_or_else(|| panic!("{what}: built"))
+        );
         assert!(message.starts_with("postgres 18.7.0 "), "{what}: {message}");
         assert!(message.contains("GitHub attestation"), "{what}: {message}");
-        assert!(
-            !cache.join("theseus-work").join("archive").exists(),
-            "{what}: the archive is kept"
-        );
-        fs::remove_dir_all(cache).expect("clean");
+        assert!(message.contains(reason), "{what}: {message}");
+        assert!(archive_is_gone(&cache), "{what}: the archive is kept");
     }
-    // The sum is checked first: a file that does not match its `.sha256` never
-    // reaches `gh`.
-    let asked = std::sync::Mutex::new(Vec::new());
-    let pins = Pins::parse(PINS).expect("pins");
-    struct Count<'a>(&'a std::sync::Mutex<Vec<String>>);
-    impl Inspect for Count<'_> {
-        fn php_build(&self, _t: &Target<'_>, _f: &Path) -> Result<Vec<String>> {
-            Ok(vec![])
-        }
-        fn attestation(&self, file: &Path, version: &Version) -> Result<String> {
-            self.0.lock().expect("lock").push(fs::read_to_string(file)?);
-            fake_attestation(file, version)
-        }
-    }
-    impl OracleCheck for Count<'_> {
-        fn signature(&self, _s: &Path, _f: &Path) -> Result<()> {
-            Ok(())
-        }
-        fn md5(&self, _f: &Path) -> Result<[u8; 16]> {
-            Ok([0; 16])
-        }
-        fn first_entry(&self, _f: &Path, _k: ArchiveKind) -> Result<String> {
-            Ok(String::new())
-        }
-    }
-    let bad = "postgresql-18.7.0-aarch64-apple-darwin.tar.gz";
-    let cache = tempfile::tempdir().expect("tempdir");
-    let err = build(
-        &fetcher(&pins, Some(bad)),
-        &pins,
-        cache.path(),
-        &Count(&asked),
-    )
-    .await
-    .err()
-    .expect("a bad sum");
+}
+
+/// The sum is checked first: a file that does not match its `.sha256` never
+/// reaches `gh`.
+#[tokio::test]
+async fn an_archive_with_a_bad_sum_is_never_given_to_gh() {
+    let bad = "postgresql-18.7.0-x86_64-pc-windows-msvc.zip";
+    let stub = Attest::new(fake_attestation);
+    let (built, cache) = build_with(&stub, Some(bad)).await;
+    let err = built.err().expect("a bad sum");
     assert!(format!("{err:#}").contains(".sha256 says"), "{err:#}");
-    // Its siblings were attested; it was not.
-    let asked = asked.lock().expect("lock");
+    assert!(archive_is_gone(&cache));
+    let asked = stub.asked.lock().expect("lock");
     assert!(!asked.iter().any(|url| url.ends_with(bad)), "{asked:?}");
+    // The archives before it were attested, so this is not an empty list
+    // that passes by chance.
+    assert!(!asked.is_empty(), "{asked:?}");
 }
 
 /// An MD5 is never enough for any runtime, and the build asks for
@@ -1440,5 +1456,23 @@ async fn check_attested_takes_theseus_archives_only_and_keeps_nothing() {
             .await
             .expect_err("refused");
         assert!(!fetch.requests().iter().any(|u| u == refused), "{err:#}");
+    }
+}
+
+#[tokio::test]
+async fn check_attested_refuses_an_attestation_that_does_not_fit() {
+    let url = "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.7.0/postgresql-18.7.0-x86_64-unknown-linux-gnu.tar.gz";
+    let fetch = MemoryFetch::new().with(url, Reply::Chunks(vec![url.as_bytes().to_vec()]));
+    let work = tempfile::tempdir().expect("tempdir");
+    for answer in [
+        (|_: &Path, _: &Version| Ok("[]".to_owned())) as fn(&Path, &Version) -> Result<String>,
+        |_, _| bail!("HTTP 401"),
+        |file, version| Ok(fake_attestation(file, version)?.replace("github-hosted", "self-hosted")),
+    ] {
+        let err = check_attested(&fetch, url, work.path(), &Attest::new(answer))
+            .await
+            .expect_err("refused");
+        assert!(format!("{err:#}").contains("GitHub attestation"), "{err:#}");
+        assert!(!work.path().join("archive").exists(), "the archive is kept");
     }
 }

@@ -41,8 +41,13 @@ const GH_PATHS: [&str; 3] = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/
 /// # Errors
 ///
 /// When none is there: the check is never skipped.
-pub(super) fn find_gh() -> Result<PathBuf> {
-    GH_PATHS
+fn find_gh() -> Result<PathBuf> {
+    find_gh_in(&GH_PATHS)
+}
+
+/// The first of `paths` that is a file.
+fn find_gh_in(paths: &[&str]) -> Result<PathBuf> {
+    paths
         .iter()
         .map(PathBuf::from)
         .find(|path| path.is_file())
@@ -50,9 +55,18 @@ pub(super) fn find_gh() -> Result<PathBuf> {
             format!(
                 "no gh program at {}: install the GitHub CLI (`brew install gh`) and run \
                  `gh auth login`. The attestation of a PostgreSQL archive is never skipped",
-                GH_PATHS.join(", ")
+                paths.join(", ")
             )
         })
+}
+
+/// `gh attestation verify` on `file`, with the `gh` of [`find_gh`].
+///
+/// # Errors
+///
+/// No `gh`, or [`run_gh`] fails.
+pub(super) fn verify_with_gh(file: &Path, version: &Version) -> Result<String> {
+    run_gh(&find_gh()?, file, version)
 }
 
 /// The tag the archive of `version` is built at.
@@ -68,7 +82,7 @@ fn tag_ref(version: &Version) -> String {
 /// # Errors
 ///
 /// `gh` cannot run, or it refused the file (with its own message).
-pub(super) fn run_gh(gh: &Path, file: &Path, version: &Version) -> Result<String> {
+fn run_gh(gh: &Path, file: &Path, version: &Version) -> Result<String> {
     let mut cmd = Command::new(gh);
     cmd.args(["attestation", "verify"])
         .arg(file)
@@ -208,8 +222,10 @@ pub(super) mod testing {
     use super::*;
 
     /// A real `gh attestation verify --format json` of
-    /// `postgresql-18.7.0-aarch64-apple-darwin.tar.gz` (the bundle itself cut
-    /// out: only `verificationResult` is read).
+    /// `postgresql-18.7.0-aarch64-apple-darwin.tar.gz`, taken with `--repo`
+    /// alone (its `verifiedIdentity` shows that): the pinned flags only
+    /// narrow what gh accepts, and `check_result` reads the certificate, which
+    /// is the same. The bundle itself is cut out.
     pub(in crate::manifest) const REAL: &str =
         include_str!("fixtures/attestation-postgresql-18.7.0-aarch64-apple-darwin.json");
 
@@ -380,6 +396,136 @@ mod tests {
             .remove("runnerEnvironment");
         let err = refused(&value.to_string());
         assert!(err.contains("has no runner"), "{err}");
+    }
+
+    /// The statement names three files. The archive's name with another
+    /// file's digest is not an attestation of the archive.
+    #[test]
+    fn the_name_and_the_digest_must_be_of_the_same_subject() {
+        let value: Value = serde_json::from_str(REAL).expect("fixture");
+        let subjects = &value[0]["verificationResult"]["statement"]["subject"];
+        let other = subjects[2]["digest"]["sha256"].as_str().expect("digest");
+        let err = format!(
+            "{:#}",
+            check_result(
+                REAL,
+                NAME,
+                &super::super::upstream::parse_hex(other).expect("hex"),
+                &version()
+            )
+            .expect_err("refused")
+        );
+        assert!(err.contains("does not name"), "{err}");
+    }
+
+    /// `gh`'s own `--signer-workflow` match is a prefix match, so these
+    /// near misses are stopped here, by equality.
+    #[test]
+    fn the_signer_and_the_tag_are_compared_exactly() {
+        let cert = "/0/verificationResult/signature/certificate";
+        let signer =
+            "https://github.com/theseus-rs/postgresql-binaries/.github/workflows/build.yml";
+        for san in [
+            format!("{signer}.evil.yml@refs/tags/18.7.0"),
+            format!("{signer}@refs/tags/18.7.0-x"),
+            format!("{signer}@refs/tags/18.7.0.1"),
+            format!("{signer}/@refs/tags/18.7.0"),
+        ] {
+            let json = with(
+                &format!("{cert}/subjectAlternativeName"),
+                san.as_str().into(),
+            );
+            assert!(refused(&json).contains("its signer workflow is"), "{san}");
+        }
+        let json = with(
+            &format!("{cert}/sourceRepositoryRef"),
+            "refs/tags/18.7.0.1".into(),
+        );
+        assert!(refused(&json).contains("its source ref is"));
+    }
+
+    #[test]
+    fn a_field_of_the_wrong_type_is_refused() {
+        let cert = "/0/verificationResult/signature/certificate";
+        for bad in [Value::Null, 7.into(), true.into(), Value::Array(vec![])] {
+            let json = with(&format!("{cert}/runnerEnvironment"), bad);
+            assert!(refused(&json).contains("has no runner"));
+        }
+        let json = with("/0/verificationResult/statement/subject", "x".into());
+        assert!(refused(&json).contains("has no subject"));
+        let json = with(
+            "/0/verificationResult/statement/subject/0/digest/sha256",
+            7.into(),
+        );
+        assert!(refused(&json).contains("does not name"));
+    }
+
+    #[test]
+    fn gh_is_looked_for_by_absolute_path_only() {
+        let message = format!(
+            "{:#}",
+            find_gh_in(&["/nonexistent/one/gh", "/nonexistent/two/gh"]).expect_err("no gh")
+        );
+        assert!(
+            message.contains("/nonexistent/one/gh, /nonexistent/two/gh"),
+            "{message}"
+        );
+        assert!(message.contains("never skipped"), "{message}");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let here = dir.path().join("gh");
+        std::fs::write(&here, "").expect("write");
+        let found = find_gh_in(&["/nonexistent/one/gh", here.to_str().expect("utf-8")])
+            .expect("the second");
+        assert_eq!(found, here);
+    }
+
+    #[cfg(unix)]
+    fn fake_gh(dir: &Path, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("gh");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    /// A `gh` that refuses is an error with its own words; one that prints is
+    /// believed only by `check_result`. The flags are the pinned ones.
+    #[cfg(unix)]
+    #[test]
+    fn a_gh_that_refuses_or_is_missing_is_an_error_never_a_skip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("archive");
+        let refusing = fake_gh(dir.path(), "echo 'HTTP 401: bad credentials' >&2; exit 1");
+        let err = format!(
+            "{:#}",
+            run_gh(&refusing, &file, &version()).expect_err("refused")
+        );
+        assert!(err.contains("refused") && err.contains("HTTP 401"), "{err}");
+
+        let missing = dir.path().join("nothing-here");
+        let err = format!(
+            "{:#}",
+            run_gh(&missing, &file, &version()).expect_err("no program")
+        );
+        assert!(err.contains("cannot run"), "{err}");
+
+        let args = dir.path().join("args");
+        let good = fake_gh(
+            dir.path(),
+            &format!("echo \"$@\" > '{}'; echo '[]'", args.display()),
+        );
+        assert_eq!(run_gh(&good, &file, &version()).expect("printed"), "[]\n");
+        let args = std::fs::read_to_string(&args).expect("args");
+        for flag in [
+            "attestation verify",
+            "--repo theseus-rs/postgresql-binaries",
+            "--signer-workflow theseus-rs/postgresql-binaries/.github/workflows/build.yml",
+            "--source-ref refs/tags/18.7.0",
+            "--deny-self-hosted-runners",
+            "--format json",
+        ] {
+            assert!(args.contains(flag), "{flag}: {args}");
+        }
     }
 
     #[test]
