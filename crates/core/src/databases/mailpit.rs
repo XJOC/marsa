@@ -39,6 +39,10 @@ pub fn mailpit_database(app_data_dir: &Path) -> PathBuf {
 /// The arguments of `mailpit`, for `smtp_port` and the database `database`.
 ///
 /// - Both listeners on `127.0.0.1` only.
+/// - `--allowed-hosts 127.0.0.1`: the web page and API answer only a
+///   loopback `Host` (`127.0.0.1`, `localhost`, `::1`), so a web site whose
+///   name points at 127.0.0.1 (DNS rebinding) cannot read the caught mail,
+///   which can hold password-reset links.
 /// - `--disable-version-check`: no request to GitHub.
 /// - `--smtp-auth-accept-any`: a project's `.env` may set
 ///   `MAIL_USERNAME` and `MAIL_PASSWORD`; Mailpit takes any, or none.
@@ -52,6 +56,8 @@ pub fn mailpit_args(smtp_port: u16, database: &Path) -> Vec<String> {
         format!("127.0.0.1:{smtp_port}"),
         "--listen".to_owned(),
         format!("127.0.0.1:{MAILPIT_UI_PORT}"),
+        "--allowed-hosts".to_owned(),
+        "127.0.0.1".to_owned(),
         "--database".to_owned(),
         arg_path(database),
         "--disable-version-check".to_owned(),
@@ -100,6 +106,8 @@ mod tests {
                 "127.0.0.1:2526",
                 "--listen",
                 "127.0.0.1:8025",
+                "--allowed-hosts",
+                "127.0.0.1",
                 "--database",
                 "/data/mail/mailpit.db",
                 "--disable-version-check",
