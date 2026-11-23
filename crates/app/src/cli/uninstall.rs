@@ -36,7 +36,10 @@ pub struct UninstallArgs {
 pub async fn run(args: &UninstallArgs, data_dir: &Path) -> Result<ExitCode, Failure> {
     let runtime = Runtime::from(args.tool);
     let client = connect(data_dir).await?;
-    match client.uninstall(runtime, args.version.trim()).await {
+    match client
+        .run_runtime_uninstall(runtime, args.version.trim())
+        .await
+    {
         Ok(done) => {
             println!(
                 "{}",

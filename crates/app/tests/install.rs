@@ -1302,6 +1302,65 @@ async fn a_failed_move_writes_the_default_back() {
     assert_eq!(global_text(&served), format!("{HEADER}\n"));
 }
 
+/// `POST /v1/jobs/runtimes/{tool}/{version}/uninstall`: every refusal is the
+/// answer of the `POST` itself (the folder is checked and moved aside before
+/// the job starts), and a version that goes ends with the job's `done`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_uninstall_job_refuses_at_once_and_ends_with_the_version() {
+    use marsa_core::types::{Event, JobAccepted, JobOutcome, JobUpdate};
+
+    let served = Served::start(FakeInstall::default()).await;
+    let node = Runtime::Node;
+    install_dirs(&served, &[(node, "22.11.0"), (node, "24.22.2")]);
+    save_defaults(&served, None, Some("24"));
+    let before = global_text(&served);
+
+    // In use (the default), unknown, and not a version: refused with the
+    // codes and the facts of the old route, and no job.
+    let job = "/v1/jobs/runtimes/node/24.22.2/uninstall";
+    let body: ErrorBody = served.json("POST", job, None, StatusCode::CONFLICT).await;
+    assert_eq!(body.error.code, "version_in_use");
+    assert_eq!(
+        body.in_use.expect("what uses it").default.as_deref(),
+        Some("24")
+    );
+    let missing = "/v1/jobs/runtimes/node/20.1.0/uninstall";
+    let code = served
+        .error("POST", missing, None, StatusCode::NOT_FOUND)
+        .await;
+    assert_eq!(code, "version_not_installed");
+    let nonsense = "/v1/jobs/runtimes/node/not-a-version/uninstall";
+    let code = served
+        .error("POST", nonsense, None, StatusCode::BAD_REQUEST)
+        .await;
+    assert_eq!(code, "invalid_version");
+    assert_eq!(global_text(&served), before);
+    assert_eq!(entries(&served, node), ["22.11.0", "24.22.2"]);
+    assert!(served.daemon.jobs().running().is_empty());
+
+    // The version that nothing uses goes: `202`, then the job's end.
+    let mut events = served.daemon.events().subscribe();
+    let accepted: JobAccepted = served
+        .json(
+            "POST",
+            "/v1/jobs/runtimes/node/22.11.0/uninstall",
+            None,
+            StatusCode::ACCEPTED,
+        )
+        .await;
+    let last = loop {
+        match events.recv().await.expect("an event") {
+            Event::Job(event) if event.id == accepted.id && event.is_last() => break event,
+            _ => {}
+        }
+    };
+    let JobUpdate::Done(JobOutcome::RuntimeUninstall(done)) = last.update else {
+        panic!("not done: {last:?}");
+    };
+    assert_eq!((done.runtime, done.version.as_str()), (node, "22.11.0"));
+    assert_eq!(entries(&served, node), ["24.22.2"]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_default_with_other_versions_or_a_pin_keeps_its_version() {
     let served = Served::start(FakeInstall::default()).await;

@@ -489,6 +489,7 @@ pub enum JobKind {
     Uninstall,
     HostsSync,
     ServiceAction,
+    RuntimeUninstall,
     /// A kind a newer daemon knows. An older client still follows the job to
     /// its end by id.
     #[serde(other)]
@@ -515,6 +516,7 @@ pub enum JobOutcome {
     Uninstall(UninstallReport),
     HostsSync(SetupReport),
     ServiceAction(ServiceStatus),
+    RuntimeUninstall(Uninstalled),
 }
 
 /// The `status` of a [`JobEvent`]. The last one of a job is `done` or
@@ -1550,6 +1552,24 @@ mod tests {
             serde_json::from_value(json!({ "code": "x", "message": "y", "http_status": 409 }))
                 .unwrap();
         assert_eq!((old.code.as_str(), old.message.as_str()), ("x", "y"));
+        round_trip(
+            &Event::Job(JobEvent {
+                id: 9,
+                kind: JobKind::RuntimeUninstall,
+                update: JobUpdate::Done(JobOutcome::RuntimeUninstall(Uninstalled {
+                    runtime: Runtime::Node,
+                    version: "22.11.0".into(),
+                })),
+            }),
+            json!({
+                "type": "job",
+                "data": {
+                    "id": 9, "kind": "runtime_uninstall", "status": "done",
+                    "result": "runtime_uninstall",
+                    "data": { "runtime": "node", "version": "22.11.0" },
+                },
+            }),
+        );
         let running = JobEvent {
             id: 1,
             kind: JobKind::Setup,

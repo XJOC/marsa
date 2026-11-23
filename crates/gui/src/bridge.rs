@@ -587,7 +587,7 @@ async fn install(client: &DaemonClient, job: InstallJob) -> Update {
 async fn remove(client: &DaemonClient, removal: Removal) -> Update {
     let result = match &removal {
         Removal::Uninstall { runtime, version } => client
-            .uninstall(*runtime, &version.to_string())
+            .run_runtime_uninstall(*runtime, &version.to_string())
             .await
             .map(drop),
         Removal::Unlink { site } => client.unlink(site).await.map(drop),
