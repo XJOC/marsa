@@ -48,14 +48,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
-use axum::{Json, Router};
 use marsa_core::recipes::{Os, Platform};
-use marsa_core::types::{
-    ApiError, Event, JobAccepted, JobKind, JobOutcome, SetupReport, Site, SiteList,
-};
+use marsa_core::types::{ApiError, Event, JobKind, JobOutcome, SetupReport, Site, SiteList};
 // The test modules of this folder reach these through `super::*`.
 #[cfg(test)]
 use marsa_core::types::OpName;
@@ -107,10 +105,7 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
     let for_job = Arc::clone(&setup);
     let job = move |State(daemon): State<Arc<Daemon>>| {
         let setup = Arc::clone(&for_job);
-        async move {
-            let (id, _) = begin(&daemon, setup)?;
-            Ok::<_, HttpError>((StatusCode::ACCEPTED, Json(JobAccepted { id })))
-        }
+        async move { Ok::<_, HttpError>(jobs::accepted(begin(&daemon, setup)?)) }
     };
     // The old route (API v1 keeps it, ADR 0026): the same job, and the
     // answer waits for its end inside the daemon.
@@ -118,8 +113,7 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
         let setup = Arc::clone(&setup);
         async move {
             let (_, ended) = begin(&daemon, setup)?;
-            let report = jobs::wait(ended, "setup").await?;
-            Ok::<_, HttpError>(Json(report))
+            jobs::answer(ended, "setup").await
         }
     };
     Router::new()

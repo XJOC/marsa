@@ -770,7 +770,7 @@ pub struct SetupReport {
 
 /// The answer to `GET /v1/hosts`: whether this system puts
 /// `.test` names in its hosts file, and which sites Marsa's block there
-/// lacks. `POST /v1/hosts/sync` adds them, behind the password prompt.
+/// lacks. `POST /v1/jobs/hosts-sync` adds them, behind the password prompt.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostsStatus {
     /// `true` on Linux where this data folder's `marsa setup` put Marsa's

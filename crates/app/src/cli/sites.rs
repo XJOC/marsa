@@ -400,7 +400,7 @@ fn hosts_to_add(status: Result<HostsStatus, Failure>) -> Result<Option<String>, 
     }
 }
 
-/// What `park` and `link` print after `POST /v1/hosts/sync`.
+/// What `park` and `link` print after `POST /v1/jobs/hosts-sync`.
 #[derive(Debug, PartialEq, Eq)]
 struct Added {
     stdout: String,

@@ -78,7 +78,8 @@ impl DaemonClient {
     ///
     /// Any [`ClientError`]; `hosts_not_used` (409) where this system does
     /// not use the hosts file, and `setup_running` or `uninstall_running`
-    /// (409) while one of those runs.
+    /// (409) while one of those runs; `setup_interrupted` if the daemon
+    /// stopped before the job ended.
     pub async fn run_sync_hosts(&self) -> Result<SetupReport, ClientError> {
         match self
             .run_job(&["v1", "jobs", "hosts-sync"], codes::SETUP_INTERRUPTED)

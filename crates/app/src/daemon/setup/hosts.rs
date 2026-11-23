@@ -1,4 +1,5 @@
-//! `GET /v1/hosts` and `POST /v1/hosts/sync`: Linux puts `.test` names in
+//! `GET /v1/hosts` and `POST /v1/jobs/hosts-sync` (with its old waiting form
+//! `POST /v1/hosts/sync`): Linux puts `.test` names in
 //! the hosts file where the `marsa0` link cannot be used (ADR 0014).
 //!
 //! | Route | Answer |
@@ -44,7 +45,7 @@ use axum::{Json, Router};
 use marsa_core::dns;
 use marsa_core::helper::HelperOp;
 use marsa_core::recipes::{Os, Platform};
-use marsa_core::types::{HostsStatus, JobAccepted, JobKind, JobOutcome, SetupReport, SetupSkip};
+use marsa_core::types::{HostsStatus, JobKind, JobOutcome, SetupReport, SetupSkip};
 
 use super::super::http;
 use super::super::http::routes::HttpError;
@@ -66,16 +67,13 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
     let for_job = Arc::clone(&setup);
     let job = move |State(daemon): State<Arc<Daemon>>| {
         let setup = Arc::clone(&for_job);
-        async move {
-            let (id, _) = begin(daemon, setup).await?;
-            Ok::<_, HttpError>((StatusCode::ACCEPTED, Json(JobAccepted { id })))
-        }
+        async move { Ok::<_, HttpError>(jobs::accepted(begin(daemon, setup).await?)) }
     };
     let wait = move |State(daemon): State<Arc<Daemon>>| {
         let setup = Arc::clone(&setup);
         async move {
             let (_, ended) = begin(daemon, setup).await?;
-            Ok::<_, HttpError>(Json(jobs::wait(ended, "hosts sync").await?))
+            jobs::answer(ended, "hosts sync").await
         }
     };
     Router::new()
@@ -500,11 +498,26 @@ mod tests {
     async fn no_missing_site_means_no_prompt() {
         let place = Place::new(&["blog"], BLOCK).marked();
         let fake = no_programs();
-        let (status, json) = place.app(&fake, Platform::LinuxX64).sync().await;
+        let app = place.app(&fake, Platform::LinuxX64);
+        let (status, json) = app.sync().await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(
             serde_json::from_value::<SetupReport>(json).unwrap(),
             SetupReport::default()
+        );
+        // The job route: a job that ends at once with the same empty report.
+        let mut events = place.daemon.events().subscribe();
+        let (status, json) = app.sync_job().await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{json}");
+        let last = loop {
+            match events.recv().await.unwrap() {
+                Event::Job(event) if event.is_last() => break event,
+                _ => {}
+            }
+        };
+        assert_eq!(
+            last.update,
+            JobUpdate::Done(JobOutcome::HostsSync(SetupReport::default()))
         );
         assert!(fake.calls().is_empty());
     }

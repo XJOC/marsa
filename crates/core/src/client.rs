@@ -88,7 +88,7 @@ const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// the install after the UAC prompt, and the request again, up to 35.5
 /// minutes, and the prompt has no limit of its own.
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(40 * 60);
-/// For `POST /v1/hosts/sync`: longer than the daemon's slowest sync, 5
+/// For the old `POST /v1/hosts/sync`, which clients before ADR 0026 call: longer than the daemon's slowest sync, 5
 /// minutes at the password prompt and 2 seconds for the helper's pipes. A
 /// test in the daemon's `setup_api/hosts.rs` holds this above the sum of
 /// the daemon's own limits.
