@@ -23,6 +23,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 
+use super::attest;
 use super::pins::{Pins, RUNTIMES};
 use super::upstream::{
     Algorithm, Layout, MYSQL_FOLDERS, Source, SumFile, hex, parse_hex, sum_file_for,
@@ -117,6 +118,9 @@ pub(super) trait Inspect {
     /// Checks one of our static-php-cli PHP archives (macOS or Linux).
     /// Returns warnings.
     fn php_build(&self, target: &Target<'_>, file: &Path) -> Result<Vec<String>>;
+    /// `gh attestation verify` on one theseus-rs archive, pinned to its
+    /// repository, signer workflow, and tag (`attest`). Returns its JSON.
+    fn attestation(&self, file: &Path, version: &Version) -> Result<String>;
 }
 
 /// Platforms where PHP is our own static-php-cli build (ADR 0012).
@@ -139,7 +143,8 @@ enum Proof {
     /// (windows.php.net lists only sha1 there). PHP, Node, Composer, Caddy.
     SumIfPublished,
     /// The theseus-rs `<archive>.sha256` ([`Layout::Single`]) and no other
-    /// source, of the recipe's own URL. PostgreSQL.
+    /// source, of the recipe's own URL, and GitHub's attestation that the
+    /// archive was built by theseus-rs' workflow (`attest`). PostgreSQL.
     TheseusSha256,
     /// Oracle's GPG signature `<archive>.asc` by the pinned key, and its
     /// `<archive>.md5`, both ([`check_oracle`]). The MySQL archive of the
@@ -270,7 +275,7 @@ impl Proof {
     /// Whether the file is kept in the cache after the build: only when a
     /// later check reads it (PHP, the sha512 of Caddy). A file this proof
     /// checks by its sha256 alone is hashed on the way and never written,
-    /// and a MySQL archive is deleted after its checks.
+    /// and a MySQL or PostgreSQL archive is deleted after its checks.
     fn keeps_file(self) -> bool {
         match self {
             Proof::SumIfPublished => true,
@@ -447,6 +452,47 @@ pub(super) async fn check_oracle(
     checked.with_context(|| url.to_owned())
 }
 
+/// GitHub's attestation for the theseus-rs archive at `url`, as `build` runs
+/// it for PostgreSQL (`attest`): the archive is downloaded to `work` and
+/// hashed on the way, `gh` verifies it, the JSON is read again, and the
+/// archive is deleted. The `.sha256` is not compared here: `build` does.
+///
+/// # Errors
+///
+/// `url` is not a theseus-rs release archive, or the first step that fails.
+pub(super) async fn check_attested(
+    fetch: &impl Fetch,
+    url: &str,
+    work: &Path,
+    inspect: &impl Inspect,
+) -> Result<Checked> {
+    let sums = sum_file_for(url)
+        .filter(|sums| sums.source == Source::Theseus)
+        .with_context(|| format!("{url} is not a theseus-rs release archive"))?;
+    let (dir, name) = url
+        .rsplit_once('/')
+        .with_context(|| format!("{url} has no file name"))?;
+    let version = dir
+        .rsplit_once('/')
+        .and_then(|(_, tag)| Version::parse(tag).ok())
+        .with_context(|| format!("{url} has no version in its folder"))?;
+    fs::create_dir_all(work).with_context(|| format!("cannot create {}", work.display()))?;
+    let path = work.join("archive");
+    let _ = fs::remove_file(&path);
+    let _scratch = RemoveOnDrop(path.clone());
+    let file = temp_download(fetch, &[url.to_owned()], &path).await?;
+    let json = inspect
+        .attestation(&path, &version)
+        .with_context(|| format!("{}: GitHub attestation", sums.name))?;
+    attest::check_result(&json, name, &file.sha256, &version)
+        .with_context(|| format!("{}: GitHub attestation", sums.name))?;
+    Ok(Checked {
+        url: file.url,
+        sha256: file.sha256,
+        size: file.size,
+    })
+}
+
 /// The result: the manifest, one line per file for the report, and warnings.
 pub(super) struct Built {
     pub manifest: ManifestJson,
@@ -531,7 +577,25 @@ pub(super) async fn build(
                             url: checked.url,
                             sha256: checked.sha256,
                             size: checked.size,
+                            _scratch: None,
                         })
+                    } else if proof == Proof::TheseusSha256 {
+                        // `gh attestation verify` reads a file. It is 60 MB:
+                        // deleted at the end of this artifact, whatever the
+                        // result.
+                        let work = cache.join("theseus-work");
+                        fs::create_dir_all(&work)
+                            .with_context(|| format!("cannot create {}", work.display()))?;
+                        let path = work.join("archive");
+                        let _ = fs::remove_file(&path);
+                        // Dropped with the answer, or with the error.
+                        let scratch = RemoveOnDrop(path.clone());
+                        temp_download(fetch, &urls, &path)
+                            .await
+                            .map(|file| Downloaded {
+                                _scratch: Some(scratch),
+                                ..file
+                            })
                     } else if proof.keeps_file() {
                         let dir = cache
                             .join(runtime.dir_name())
@@ -595,6 +659,15 @@ pub(super) async fn build(
                                 hex(&expected)
                             );
                             notes.push(note);
+                            if proof == Proof::TheseusSha256 {
+                                let json = inspect
+                                    .attestation(file.kept()?, version)
+                                    .with_context(|| format!("{what}: GitHub attestation"))?;
+                                let name = file.url.rsplit_once('/').map_or(&*file.url, |(_, n)| n);
+                                attest::check_result(&json, name, &file.sha256, version)
+                                    .with_context(|| format!("{what}: GitHub attestation"))?;
+                                notes.push("GitHub attestation verified");
+                            }
                         }
                         None => {
                             warnings.push(format!(
@@ -639,6 +712,20 @@ pub(super) async fn build(
     })
 }
 
+/// Deletes a file when it goes out of scope: the large archives that are only
+/// checked, never kept.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        if let Err(err) = fs::remove_file(&self.0)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            println!("    warning: cannot delete {}: {err}", self.0.display());
+        }
+    }
+}
+
 /// A downloaded file, and the URL that served it.
 struct Downloaded {
     /// Where it is kept, or `None` when it was only hashed.
@@ -646,6 +733,8 @@ struct Downloaded {
     url: String,
     sha256: [u8; 32],
     size: u64,
+    /// Never read: deletes the file when this goes out of scope.
+    _scratch: Option<RemoveOnDrop>,
 }
 
 impl Downloaded {
@@ -687,6 +776,7 @@ async fn cached_download(
                 url: url.to_owned(),
                 sha256,
                 size,
+                _scratch: None,
             });
         }
     }
@@ -721,6 +811,7 @@ async fn cached_download(
         url,
         sha256,
         size,
+        _scratch: None,
     })
 }
 
@@ -733,6 +824,7 @@ async fn hashed_download(fetch: &impl Fetch, urls: &[String]) -> Result<Download
         url,
         sha256: sink.hasher.finalize().into(),
         size: sink.size,
+        _scratch: None,
     })
 }
 
@@ -758,6 +850,7 @@ async fn temp_download(fetch: &impl Fetch, urls: &[String], path: &Path) -> Resu
         url,
         sha256: hasher.finalize().into(),
         size,
+        _scratch: None,
     })
 }
 
