@@ -85,6 +85,11 @@ impl Model {
             .map(|service| &service.state)
     }
 
+    /// The Mail screen opened: read the list, if there is a daemon to ask.
+    pub(super) fn read_mail(&self) -> Option<Command> {
+        self.is_connected().then_some(Command::ReadMail)
+    }
+
     /// A row of the list was chosen: read its text, which marks it read.
     /// Choosing the mail whose text is shown asks for nothing.
     pub(super) fn choose_mail(&mut self, id: String) -> Option<Command> {
@@ -223,6 +228,24 @@ mod tests {
 
     fn command(effect: Effect) -> Option<Command> {
         effect.command()
+    }
+
+    #[test]
+    fn opening_mail_reads_the_list_and_offline_it_asks_for_nothing() {
+        let mut model = connected();
+        let sent = command(model.apply_action(Action::Navigate(Route::Mail)));
+        assert!(matches!(sent, Some(Command::ReadMail)), "{sent:?}");
+        assert_eq!(model.route, Route::Mail);
+        // Another screen reads nothing.
+        let other = model.apply_action(Action::Navigate(Route::Sites));
+        assert!(other.is_none());
+        let mut offline = Model::default();
+        assert!(
+            offline
+                .apply_action(Action::Navigate(Route::Mail))
+                .is_none()
+        );
+        assert_eq!(offline.route, Route::Mail);
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! The sidebar (layout.md, Shell; components.md, Sidebar): the name and the
 //! fold button, the items in their groups, then the status and Settings at
-//! the bottom. Only the sections that ship appear (rules.md 8): Phase 2 adds
-//! Databases, Mail, Dumps, and Queues to these groups.
+//! the bottom. Only the sections that ship appear (rules.md 8): Mail, while
+//! Mailpit is installed; Phase 2 adds Databases, Dumps, and Queues to these
+//! groups.
 
 use eframe::egui::{Layout, RichText, Ui, vec2};
 
@@ -15,6 +16,8 @@ use crate::widgets::{Button, Health, Icon, NavItem, StatusDot};
 pub(crate) enum Item {
     Home,
     Sites,
+    /// Only while Mailpit is installed ([`Item::shown`]).
+    Mail,
     Logs,
     Runtimes,
     Services,
@@ -26,7 +29,7 @@ pub(crate) enum Item {
 pub(crate) const GROUPS: [&[Item]; 4] = [
     &[Item::Home],
     &[Item::Sites],
-    &[Item::Logs],
+    &[Item::Mail, Item::Logs],
     &[Item::Runtimes, Item::Services],
 ];
 
@@ -38,6 +41,7 @@ impl Item {
         match self {
             Self::Home => Route::Home,
             Self::Sites => Route::Sites,
+            Self::Mail => Route::Mail,
             Self::Logs => Route::Logs(LogSource::default()),
             Self::Runtimes => Route::Runtimes(MAIN_RUNTIME),
             Self::Services => Route::Services,
@@ -59,6 +63,7 @@ impl Item {
         match route {
             Route::Home => Self::Home,
             Route::Sites | Route::Site(_) => Self::Sites,
+            Route::Mail => Self::Mail,
             Route::Logs(_) => Self::Logs,
             Route::Runtimes(_) => Self::Runtimes,
             Route::Services => Self::Services,
@@ -71,10 +76,20 @@ impl Item {
         match self {
             Self::Home => Some(Section::Home),
             Self::Sites => Some(Section::Sites),
+            Self::Mail => Some(Section::Mail),
             Self::Logs => Some(Section::Logs),
             Self::Runtimes => Some(Section::Runtimes),
             Self::Services => Some(Section::Services),
             Self::Settings => None,
+        }
+    }
+
+    /// Whether the sidebar lists the item: Mail only while Mailpit is
+    /// installed, so the window shows only what the user has.
+    pub(crate) fn shown(self, model: &Model) -> bool {
+        match self {
+            Self::Mail => model.has_mailpit(),
+            _ => true,
         }
     }
 
@@ -143,7 +158,7 @@ pub(crate) fn show(ui: &mut Ui, model: &Model, narrow: bool) -> Vec<Action> {
         if index > 0 {
             ui.add_space(theme.space.s3);
         }
-        for &item in *group {
+        for &item in group.iter().filter(|item| item.shown(model)) {
             if ui.add(nav(model, item, current, folded)).clicked() {
                 actions.push(Action::Navigate(item.route_in(model)));
             }
@@ -168,18 +183,22 @@ pub(crate) fn show(ui: &mut Ui, model: &Model, narrow: bool) -> Vec<Action> {
     actions
 }
 
-/// The widget of `item`: Sites counts the sites.
+/// The widget of `item`: Sites counts the sites, and Mail the mail not
+/// opened yet, as new.
 fn nav(model: &Model, item: Item, current: Item, folded: bool) -> NavItem<'static> {
     let shown = match item.section() {
         Some(section) => NavItem::section(section),
         None => NavItem::plain(Icon::Settings, item.label()),
     };
     let shown = shown.selected(item == current).folded(folded);
-    let sites = model.session.sites.sites.len();
-    if item == Item::Sites && sites > 0 {
-        return shown.count(u32::try_from(sites).unwrap_or(u32::MAX), false);
+    let count = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
+    let sites = model.session.sites.sites.len() as u64;
+    let unread = model.session.mail.unread();
+    match item {
+        Item::Sites if sites > 0 => shown.count(count(sites), false),
+        Item::Mail if unread > 0 => shown.count(count(unread), true),
+        _ => shown,
     }
-    shown
 }
 
 #[cfg(test)]
@@ -198,7 +217,8 @@ mod tests {
     use crate::widgets::harness::{Harness, Tree};
     use marsa_core::types::ServiceId;
 
-    /// Every item: the groups, then Settings.
+    /// Every item a window without Mailpit shows: the groups, then
+    /// Settings.
     const ALL: [Item; 6] = [
         Item::Home,
         Item::Sites,
@@ -269,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sidebar_shows_the_phase_one_sections_in_their_order() {
+    fn the_sidebar_shows_the_sections_that_ship_in_their_order() {
         let order: Vec<Item> = GROUPS
             .iter()
             .flat_map(|group| group.iter().copied())
@@ -279,6 +299,7 @@ mod tests {
             [
                 Item::Home,
                 Item::Sites,
+                Item::Mail,
                 Item::Logs,
                 Item::Runtimes,
                 Item::Services
@@ -291,15 +312,70 @@ mod tests {
         for item in ALL {
             assert!(tree.node_with_label(item.label()).is_some(), "{item:?}");
         }
-        for section in [
-            Section::Databases,
-            Section::Mail,
-            Section::Dumps,
-            Section::Queues,
-        ] {
+        for section in [Section::Databases, Section::Dumps, Section::Queues] {
             let name = strings::section_name(section);
             assert!(tree.node_with_label(name).is_none(), "{name} ships later");
         }
+        // No Mailpit, no Mail.
+        let mail = strings::section_name(Section::Mail);
+        assert!(tree.node_with_label(mail).is_none());
+    }
+
+    /// A connected window with Mailpit installed, and these many mails not
+    /// opened yet.
+    fn with_mailpit(unread: u64) -> Model {
+        use marsa_core::types::{MailList, RuntimeList, RuntimeVersions};
+        let mut model = connected();
+        model.update(Update::Runtimes(RuntimeList {
+            runtimes: vec![RuntimeVersions {
+                runtime: Runtime::Mailpit,
+                installed: vec!["1.27.10".into()],
+                default: None,
+            }],
+        }));
+        model.update(Update::Mail(MailList {
+            total: unread + 2,
+            unread,
+            messages: Vec::new(),
+        }));
+        model
+    }
+
+    #[test]
+    fn mail_shows_once_mailpit_is_installed_and_counts_the_new_mail() {
+        let harness = Harness::new(egui::Theme::Light);
+        let mail = strings::section_name(Section::Mail);
+        let model = with_mailpit(3);
+        let tree = harness.accessibility(|ui| {
+            show(ui, &model, false);
+        });
+        let node = tree.node_with_label(mail).expect("the Mail item");
+        assert_eq!(node.description(), Some("3 new mails"));
+        // Between Sites and Logs.
+        let top = |label: &str| {
+            let node = tree.node_with_label(label).expect(label);
+            node.bounds().expect("a place").y0
+        };
+        assert!(top(strings::SITES) < top(mail) && top(mail) < top(strings::LOGS));
+        // Nothing new: no count.
+        let quiet = with_mailpit(0);
+        let tree = harness.accessibility(|ui| {
+            show(ui, &quiet, false);
+        });
+        let node = tree.node_with_label(mail).expect("the Mail item");
+        assert_eq!(node.description(), None);
+        // A click opens Mail, and the screen reads the mail as it opens.
+        let mut model = with_mailpit(3);
+        let actions = click(&harness, &model, false, mail);
+        assert_eq!(actions, [Action::Navigate(Route::Mail)]);
+        for action in actions {
+            let sent = model.apply_action(action).command();
+            assert!(
+                matches!(sent, Some(crate::bridge::Command::ReadMail)),
+                "{sent:?}"
+            );
+        }
+        assert_eq!(Item::of(&model.route), Item::Mail);
     }
 
     #[test]
@@ -327,6 +403,7 @@ mod tests {
             (Route::Sites, Item::Sites),
             (Route::Site("shop".into()), Item::Sites),
             (Route::Logs(LogSource::Caddy), Item::Logs),
+            (Route::Mail, Item::Mail),
             (Route::Runtimes(Runtime::Node), Item::Runtimes),
             (Route::Services, Item::Services),
             (Route::Settings, Item::Settings),
