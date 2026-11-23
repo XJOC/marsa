@@ -28,12 +28,12 @@ use marsa_core::platform::daemon_file::{
 };
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    API_VERSION, ApiError, AutostartState, DefaultVersion, ErrorBody, Event, Health,
-    InstallAccepted, InstallRequest, JobAccepted, JobEvent, JobKind, JobOutcome, JobStep,
-    JobUpdate, LinkRequest, LogLine, LogStream, OpName, OpResult, OpStatus, ParkRequest,
-    RuntimeList, RuntimeVersions, ServiceAction, ServiceState, ServiceStatus, SetupReport,
-    SetupSkip, Site, SiteKind, SiteList, SitePatch, SkippedFolder, Source, UninstallReport,
-    Uninstalled, VersionInUse, XdebugState,
+    API_VERSION, AutostartState, DefaultVersion, ErrorBody, Event, Health, InstallAccepted,
+    InstallRequest, JobAccepted, JobEvent, JobFailure, JobKind, JobOutcome, JobStep, JobUpdate,
+    LinkRequest, LogLine, LogStream, OpName, OpResult, OpStatus, ParkRequest, RuntimeList,
+    RuntimeVersions, ServiceAction, ServiceState, ServiceStatus, SetupReport, SetupSkip, Site,
+    SiteKind, SiteList, SitePatch, SkippedFolder, Source, UninstallReport, Uninstalled,
+    VersionInUse, XdebugState,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -353,17 +353,22 @@ fn debug_shows_the_port_and_never_the_token() {
 
 #[tokio::test]
 async fn an_error_body_becomes_an_api_error_with_the_daemons_code() {
-    let router = Router::new().route(
-        "/v1/services/{id}/{action}",
-        post(|| async {
-            let body = ErrorBody::new("service_not_found", "no service named php");
-            (StatusCode::NOT_FOUND, Json(body))
-        }),
-    );
+    let router = Router::new()
+        .route(
+            "/v1/events",
+            get(|| async { sse_response(sse_body::<Event>(&[])) }),
+        )
+        .route(
+            "/v1/jobs/services/{id}/{action}",
+            post(|| async {
+                let body = ErrorBody::new("service_not_found", "no service named php");
+                (StatusCode::NOT_FOUND, Json(body))
+            }),
+        );
     let fake = Fake::start(router).await;
     let err = fake
         .client()
-        .service_action("php", ServiceAction::Start)
+        .run_service_action("php", ServiceAction::Start)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "service_not_found");
@@ -380,7 +385,7 @@ async fn an_error_body_becomes_an_api_error_with_the_daemons_code() {
         (404, "service_not_found", "no service named php")
     );
     fake.assert_no_token(&err);
-    assert_eq!(fake.seen()[0].target, "/v1/services/php/start");
+    assert_eq!(fake.seen()[1].target, "/v1/jobs/services/php/start");
 }
 
 #[tokio::test]
@@ -470,8 +475,15 @@ async fn services_and_logs_are_read() {
             get(|| async { Json(vec![caddy(ServiceState::Stopped)]) }),
         )
         .route(
-            "/v1/services/{id}/{action}",
-            post(|| async { Json(caddy(ServiceState::Running)) }),
+            "/v1/events",
+            get(|| async {
+                let done = JobUpdate::Done(JobOutcome::ServiceAction(caddy(ServiceState::Running)));
+                sse_response(sse_body(&[Event::Job(job(1, done))]))
+            }),
+        )
+        .route(
+            "/v1/jobs/services/{id}/{action}",
+            post(|| async { (StatusCode::ACCEPTED, Json(JobAccepted { id: 1 })) }),
         )
         .route(
             "/v1/logs/{id}",
@@ -490,7 +502,7 @@ async fn services_and_logs_are_read() {
         vec![caddy(ServiceState::Stopped)]
     );
     let started = client
-        .service_action("caddy", ServiceAction::Restart)
+        .run_service_action("caddy", ServiceAction::Restart)
         .await
         .unwrap();
     assert_eq!(started, caddy(ServiceState::Running));
@@ -504,7 +516,8 @@ async fn services_and_logs_are_read() {
         targets,
         [
             "GET /v1/services",
-            "POST /v1/services/caddy/restart",
+            "GET /v1/events",
+            "POST /v1/jobs/services/caddy/restart",
             "GET /v1/logs/caddy",
             "GET /v1/logs/caddy?follow=true",
         ]
@@ -720,10 +733,15 @@ async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
 #[tokio::test]
 async fn an_id_cannot_reach_another_route() {
     let (router, shutdowns) = serve_shutdown(Router::new(), None);
-    let router = router.route(
-        "/v1/shutdown/{action}",
-        post(|| async { StatusCode::ACCEPTED }),
-    );
+    let router = router
+        .route(
+            "/v1/shutdown/{action}",
+            post(|| async { StatusCode::ACCEPTED }),
+        )
+        .route(
+            "/v1/events",
+            get(|| async { sse_response(sse_body::<Event>(&[])) }),
+        );
     let fake = Fake::start(router).await;
     let client = fake.client();
     for id in [
@@ -732,32 +750,32 @@ async fn an_id_cannot_reach_another_route() {
         "%2e%2e/%2e%2e/shutdown",
         "../../shutdown?a=b",
     ] {
-        let _ = client.service_action(id, ServiceAction::Start).await;
+        let _ = client.run_service_action(id, ServiceAction::Start).await;
         let _ = client.logs(id).await;
     }
     assert_eq!(shutdowns.load(Ordering::SeqCst), 0);
     let seen = fake.seen();
-    assert_eq!(seen.len(), 8, "{seen:?}");
+    assert_eq!(seen.len(), 12, "{seen:?}");
     for request in &seen {
         assert!(!request.target.starts_with("/v1/shutdown"), "{request:?}");
     }
     assert_eq!(
-        seen[2].target,
-        "/v1/services/x%2F..%2F..%2Fshutdown%23/start"
+        seen[4].target,
+        "/v1/jobs/services/x%2F..%2F..%2Fshutdown%23/start"
     );
 
     // The URL rules would drop these segments and shorten the path, so they
     // are refused before any request.
     for id in ["", ".", ".."] {
         let err = client
-            .service_action(id, ServiceAction::Start)
+            .run_service_action(id, ServiceAction::Start)
             .await
             .unwrap_err();
         assert_eq!(err.code(), "invalid_id", "{err:?}");
         let err = client.follow_logs(id).await.unwrap_err();
         assert_eq!(err.code(), "invalid_id", "{err:?}");
     }
-    assert_eq!(fake.seen().len(), 8);
+    assert_eq!(fake.seen().len(), 12);
 }
 
 // ---------------------------------------------------------------------------
@@ -1203,14 +1221,45 @@ async fn run_setup_refused_at_the_start_has_the_daemons_code() {
 async fn a_failed_job_is_the_error_it_carries() {
     let failed = job(
         1,
-        JobUpdate::Failed(ApiError {
+        JobUpdate::Failed(JobFailure {
             code: "internal_error".into(),
             message: "the setup job failed".into(),
+            http_status: None,
         }),
     );
     let fake = Fake::start(job_router(vec![vec![Event::Job(failed)]], None)).await;
     let err = fake.client().run_setup().await.unwrap_err();
     assert_eq!(err.code(), "internal_error");
+    // No status sent: the client reads 500.
+    assert!(
+        matches!(err, ClientError::Api { status: 500, .. }),
+        "{err:?}"
+    );
+
+    // The status the old route would answer is kept (a busy service is 409).
+    let busy = job(
+        1,
+        JobUpdate::Failed(JobFailure {
+            code: "service_busy".into(),
+            message: "another action runs".into(),
+            http_status: Some(409),
+        }),
+    );
+    let router = job_router(vec![vec![Event::Job(busy)]], None).route(
+        "/v1/jobs/services/{id}/{action}",
+        post(|| async { (StatusCode::ACCEPTED, Json(JobAccepted { id: 1 })) }),
+    );
+    let fake = Fake::start(router).await;
+    let err = fake
+        .client()
+        .run_service_action("caddy", ServiceAction::Start)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "service_busy");
+    assert!(
+        matches!(err, ClientError::Api { status: 409, .. }),
+        "{err:?}"
+    );
 }
 
 /// The stream ends before the job does: the client opens it again, then asks

@@ -450,7 +450,9 @@ fn run_command(
     tokio::spawn(async move {
         let update = match command {
             Command::Service { service, action } => {
-                let result = client.service_action(&service.to_string(), action).await;
+                let result = client
+                    .run_service_action(&service.to_string(), action)
+                    .await;
                 result
                     .err()
                     .map(|err| notice(&format!("cannot {action} {service}"), &err))
