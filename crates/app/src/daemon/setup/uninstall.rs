@@ -61,14 +61,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
-use axum::{Json, Router};
 use marsa_core::caddy::CaddyPaths;
 use marsa_core::helper::{HelperOp, OpResult};
 use marsa_core::recipes::{Os, Platform};
-use marsa_core::types::{JobAccepted, JobKind, JobOutcome, OpStatus, UninstallReport};
+use marsa_core::types::{JobKind, JobOutcome, OpStatus, UninstallReport};
 use tokio_util::sync::CancellationToken;
 
 use super::http;
@@ -100,17 +100,13 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
     let for_job = Arc::clone(&setup);
     let job = move |State(daemon): State<Arc<Daemon>>| {
         let setup = Arc::clone(&for_job);
-        async move {
-            let (id, _) = begin(&daemon, setup)?;
-            Ok::<_, HttpError>((StatusCode::ACCEPTED, Json(JobAccepted { id })))
-        }
+        async move { Ok::<_, HttpError>(jobs::accepted(begin(&daemon, setup)?)) }
     };
     let wait = move |State(daemon): State<Arc<Daemon>>| {
         let setup = Arc::clone(&setup);
         async move {
             let (_, ended) = begin(&daemon, setup)?;
-            let report = jobs::wait(ended, "uninstall").await?;
-            Ok::<_, HttpError>(Json(report))
+            jobs::answer(ended, "uninstall").await
         }
     };
     Router::new()

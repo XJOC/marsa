@@ -522,7 +522,7 @@ fn run_command(
                 None
             }
             Command::SyncHosts => {
-                let update = match client.sync_hosts().await {
+                let update = match client.run_sync_hosts().await {
                     Ok(report) => {
                         let error = report.error.as_ref().map(|error| error.code.as_str());
                         tracing::info!(error, "hosts sync finished");

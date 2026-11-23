@@ -1142,6 +1142,27 @@ async fn run_uninstall_all_follows_its_job_to_the_report() {
     );
 }
 
+#[tokio::test]
+async fn run_sync_hosts_follows_its_job_to_the_report() {
+    let done = Event::Job(job(
+        1,
+        JobUpdate::Done(JobOutcome::HostsSync(setup_report())),
+    ));
+    let router = job_router(vec![vec![done]], None).route(
+        "/v1/jobs/hosts-sync",
+        post(|| async { (StatusCode::ACCEPTED, Json(JobAccepted { id: 1 })) }),
+    );
+    let fake = Fake::start(router).await;
+    assert_eq!(
+        fake.client().run_sync_hosts().await.unwrap(),
+        setup_report()
+    );
+    assert_eq!(
+        fake.targets(),
+        ["GET /v1/events", "POST /v1/jobs/hosts-sync"]
+    );
+}
+
 /// A job that ends with another kind's result is not what was asked for.
 #[tokio::test]
 async fn a_job_that_ends_with_another_kinds_result_is_a_bad_response() {

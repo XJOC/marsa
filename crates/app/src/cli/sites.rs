@@ -371,7 +371,7 @@ async fn add_to_hosts(client: &DaemonClient, data_dir: &Path) -> ExitCode {
         Ok(None) => return ExitCode::SUCCESS,
         Ok(Some(line)) => eprintln!("{line}"),
     }
-    let answer = client.sync_hosts().await;
+    let answer = client.run_sync_hosts().await;
     let answer = answer.map_err(|err| failure(&err, data_dir, None));
     let added = hosts_added(answer, data_dir);
     print!("{}", added.stdout);
@@ -400,7 +400,7 @@ fn hosts_to_add(status: Result<HostsStatus, Failure>) -> Result<Option<String>, 
     }
 }
 
-/// What `park` and `link` print after `POST /v1/hosts/sync`.
+/// What `park` and `link` print after `POST /v1/jobs/hosts-sync`.
 #[derive(Debug, PartialEq, Eq)]
 struct Added {
     stdout: String,
