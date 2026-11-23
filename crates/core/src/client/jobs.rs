@@ -67,6 +67,29 @@ impl DaemonClient {
         }
     }
 
+    /// `POST /v1/jobs/hosts-sync`, then follows the job until it ends: the
+    /// names of every site go into Marsa's block in the hosts file, behind
+    /// the password prompt, if any is missing; with none missing, nothing
+    /// runs. Only for a command of the user: never call it from a
+    /// background task. The helper's result, or why it did not run, is in
+    /// the report, as for setup.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `hosts_not_used` (409) where this system does
+    /// not use the hosts file, and `setup_running` or `uninstall_running`
+    /// (409) while one of those runs; `setup_interrupted` if the daemon
+    /// stopped before the job ended.
+    pub async fn run_sync_hosts(&self) -> Result<SetupReport, ClientError> {
+        match self
+            .run_job(&["v1", "jobs", "hosts-sync"], codes::SETUP_INTERRUPTED)
+            .await?
+        {
+            JobOutcome::HostsSync(report) => Ok(report),
+            _ => Err(wrong_outcome()),
+        }
+    }
+
     /// `GET /v1/jobs/{id}`: the last event of a running job, or of one of
     /// the last sixteen that ended. `not_found` (404) for any other.
     pub async fn job(&self, id: u64) -> Result<JobEvent, ClientError> {

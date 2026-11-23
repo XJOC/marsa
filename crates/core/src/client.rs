@@ -46,8 +46,8 @@ use crate::runtimes::Runtime;
 use crate::types::{
     AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, DoctorReport, ErrorBody,
     Event, Health, HostsStatus, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest,
-    RuntimeList, ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, Uninstalled,
-    XdebugRequest, XdebugState,
+    RuntimeList, ServiceAction, ServiceStatus, SiteList, SitePatch, Uninstalled, XdebugRequest,
+    XdebugState,
 };
 use lifecycle::lock_is_held;
 
@@ -88,7 +88,7 @@ const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// the install after the UAC prompt, and the request again, up to 35.5
 /// minutes, and the prompt has no limit of its own.
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(40 * 60);
-/// For `POST /v1/hosts/sync`: longer than the daemon's slowest sync, 5
+/// For the old `POST /v1/hosts/sync`, which clients before ADR 0026 call: longer than the daemon's slowest sync, 5
 /// minutes at the password prompt and 2 seconds for the helper's pipes. A
 /// test in the daemon's `setup/hosts.rs` holds this above the sum of
 /// the daemon's own limits.
@@ -402,23 +402,6 @@ impl DaemonClient {
     /// prompt.
     pub async fn hosts(&self) -> Result<HostsStatus, ClientError> {
         self.call(Method::GET, &["v1", "hosts"], REQUEST_TIMEOUT)
-            .await
-    }
-
-    /// `POST /v1/hosts/sync`: the names of every site go into
-    /// Marsa's block in the hosts file, behind the password prompt, if any
-    /// is missing; with none missing, nothing runs. Only for a command of
-    /// the user: never call it from a background task. Waits up to
-    /// [`HOSTS_SYNC_TIMEOUT`]. The helper's result, or why it did not run,
-    /// is in the report, as for setup.
-    ///
-    /// # Errors
-    ///
-    /// Any [`ClientError`]; `hosts_not_used` (409) where this system does
-    /// not use the hosts file, and `setup_running` or `uninstall_running`
-    /// (409) while one of those runs.
-    pub async fn sync_hosts(&self) -> Result<SetupReport, ClientError> {
-        self.call(Method::POST, &["v1", "hosts", "sync"], HOSTS_SYNC_TIMEOUT)
             .await
     }
 

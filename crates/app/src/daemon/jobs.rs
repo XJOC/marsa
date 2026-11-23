@@ -22,7 +22,10 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use marsa_core::codes;
-use marsa_core::types::{ApiError, JobEvent, JobKind, JobList, JobOutcome, JobStep, JobUpdate};
+use marsa_core::types::{
+    ApiError, JobAccepted, JobEvent, JobKind, JobList, JobOutcome, JobStep, JobUpdate,
+};
+use serde::Serialize;
 use tokio::sync::oneshot;
 
 use super::http;
@@ -145,17 +148,27 @@ where
     (id, ended)
 }
 
+/// The answer of a `POST /v1/jobs/...` route: `202` and the job's id. The
+/// receiver is dropped: nobody waits for the old route's answer.
+pub(super) fn accepted<T>((id, _): (u64, Ended<T>)) -> (StatusCode, Json<JobAccepted>) {
+    (StatusCode::ACCEPTED, Json(JobAccepted { id }))
+}
+
 /// What the old waiting route of a job answers: the job's result, or its
 /// error, once its last event is out. `what` names the job if its task is
 /// gone (only when the daemon's runtime is going away).
-pub(super) async fn wait<T>(ended: Ended<T>, what: &str) -> Result<T, HttpError> {
-    ended.await.unwrap_or_else(|_| {
+pub(super) async fn answer<T: Serialize>(
+    ended: Ended<T>,
+    what: &str,
+) -> Result<Json<T>, HttpError> {
+    let result = ended.await.unwrap_or_else(|_| {
         Err(HttpError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             codes::INTERNAL_ERROR,
             format!("the {what} job did not end"),
         ))
-    })
+    });
+    result.map(Json)
 }
 
 /// `GET /v1/jobs` and `GET /v1/jobs/{id}`.

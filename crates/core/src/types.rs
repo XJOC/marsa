@@ -487,6 +487,7 @@ pub struct JobAccepted {
 pub enum JobKind {
     Setup,
     Uninstall,
+    HostsSync,
     /// A kind a newer daemon knows. An older client still follows the job to
     /// its end by id.
     #[serde(other)]
@@ -511,6 +512,7 @@ pub enum JobStep {
 pub enum JobOutcome {
     Setup(SetupReport),
     Uninstall(UninstallReport),
+    HostsSync(SetupReport),
 }
 
 /// The `status` of a [`JobEvent`]. The last one of a job is `done` or
@@ -768,7 +770,7 @@ pub struct SetupReport {
 
 /// The answer to `GET /v1/hosts`: whether this system puts
 /// `.test` names in its hosts file, and which sites Marsa's block there
-/// lacks. `POST /v1/hosts/sync` adds them, behind the password prompt.
+/// lacks. `POST /v1/jobs/hosts-sync` adds them, behind the password prompt.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostsStatus {
     /// `true` on Linux where this data folder's `marsa setup` put Marsa's
@@ -1459,6 +1461,20 @@ mod tests {
                 "data": {
                     "id": 5, "kind": "uninstall", "status": "done", "result": "uninstall",
                     "data": { "results": [], "stopping": false },
+                },
+            }),
+        );
+        round_trip(
+            &Event::Job(JobEvent {
+                id: 6,
+                kind: JobKind::HostsSync,
+                update: JobUpdate::Done(JobOutcome::HostsSync(SetupReport::default())),
+            }),
+            json!({
+                "type": "job",
+                "data": {
+                    "id": 6, "kind": "hosts_sync", "status": "done", "result": "hosts_sync",
+                    "data": { "results": [], "skipped": [], "port_holders": [] },
                 },
             }),
         );
