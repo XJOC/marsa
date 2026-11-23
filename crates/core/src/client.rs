@@ -45,8 +45,9 @@ use crate::platform::daemon_file::{
 use crate::runtimes::Runtime;
 use crate::types::{
     AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, DoctorReport, ErrorBody,
-    Event, Health, HostsStatus, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest,
-    RuntimeList, ServiceStatus, SiteList, SitePatch, XdebugRequest, XdebugState,
+    Event, Health, HostsStatus, InstallAccepted, InstallRequest, LinkRequest, LogLine, MailList,
+    MailText, ParkRequest, RuntimeList, ServiceStatus, SiteList, SitePatch, XdebugRequest,
+    XdebugState,
 };
 use lifecycle::lock_is_held;
 
@@ -339,6 +340,35 @@ impl DaemonClient {
         let body = AutostartRequest { enabled };
         self.call_with(Method::PUT, &["v1", "autostart"], &body)
             .await
+    }
+
+    /// `GET /v1/mail`: the newest mails Mailpit caught, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `mail_not_running` (409) while Mailpit does not
+    /// run, and `mail_unavailable` (502) when it did not answer.
+    pub async fn mail(&self) -> Result<MailList, ClientError> {
+        self.call(Method::GET, &["v1", "mail"]).await
+    }
+
+    /// `GET /v1/mail/{id}`: one mail's plain text, and Mailpit's page for
+    /// its HTML. Opening it marks it read.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mail`]; `mail_id_invalid` (400) and `mail_not_found` (404).
+    pub async fn mail_text(&self, id: &str) -> Result<MailText, ClientError> {
+        self.call(Method::GET, &["v1", "mail", id]).await
+    }
+
+    /// `DELETE /v1/mail`: deletes every mail Mailpit caught. The list after.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mail`].
+    pub async fn clear_mail(&self) -> Result<MailList, ClientError> {
+        self.call(Method::DELETE, &["v1", "mail"]).await
     }
 
     /// `GET /v1/php/xdebug`: whether PHP loads Xdebug, and which versions.
