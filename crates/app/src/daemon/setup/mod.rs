@@ -87,8 +87,8 @@ pub use marsa_core::platform::runner::{RealRunner, RunOutput, Runner};
 /// after each of these programs. Linux stays under it: up to four
 /// `systemctl` checks, two `pkexec` prompts when the helper chooses the
 /// hosts file ([`linux_dns`]), and the NSS step at [`nss::NSS_BUDGET`]. A client of the old `POST /v1/setup`
-/// route has to wait longer: `marsa_core::client::SETUP_TIMEOUT` does, and a
-/// test holds the two together.
+/// route has to wait longer: it waits 40 minutes, and a test holds the two
+/// together.
 pub const SLOWEST_SETUP: Duration = Duration::from_secs(
     CA_WAIT.as_secs()
         + (2 + MAX_PS as u64) * CHECK_LIMIT.as_secs()
@@ -632,8 +632,9 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn the_client_waits_longer_than_the_slowest_setup() {
-        use marsa_core::client::SETUP_TIMEOUT;
+    fn old_clients_wait_longer_than_the_slowest_setup() {
+        // What clients before ADR 0026 wait for `POST /v1/setup`.
+        const SETUP_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 
         // 12 min 10 s of limits, 30 s of them for Caddy and its CA root, and
         // 2 s of grace after each of 12 programs.
@@ -643,14 +644,14 @@ mod tests {
         let margin = Duration::from_secs(30);
         assert!(
             SETUP_TIMEOUT >= SLOWEST_SETUP + margin,
-            "the client waits {SETUP_TIMEOUT:?}, and a setup may take {SLOWEST_SETUP:?}"
+            "an old client waits {SETUP_TIMEOUT:?}, and a setup may take {SLOWEST_SETUP:?}"
         );
         // Windows: the CA, a request, the install after the UAC prompt, and
         // the request again, each to its limit. The prompt itself has none.
         let windows = CA_WAIT + 2 * windows::SEND_LIMIT + windows::INSTALL_LIMIT;
         assert!(
             SETUP_TIMEOUT >= windows + margin,
-            "the client waits {SETUP_TIMEOUT:?}, and a Windows setup may take {windows:?}"
+            "an old client waits {SETUP_TIMEOUT:?}, and a Windows setup may take {windows:?}"
         );
 
         // The sum holds every step a setup waits for. A full run with no CA

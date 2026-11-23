@@ -57,34 +57,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// For one call that is not a stream, and for the start of a stream.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// For the old `POST /v1/setup`, which clients before ADR 0026 call: longer than the daemon's slowest setup, which is
-/// about 12.5 minutes when every step runs to its limit. The daemon gives
-/// the user 5 minutes at the admin prompt and 5 more at the trust dialog
-/// (macOS), each check (`netstat`, `ps` for at most 8 processes, `security
-/// verify-cert`) up to 10 seconds, and Caddy 30 seconds to start and make
-/// its CA when there is none yet. A test in the daemon's `setup/`
-/// holds this above the sum of the daemon's own limits.
-///
-/// On Windows the slowest setup is longer: a request to the helper service,
-/// the install after the UAC prompt, and the request again, up to 35.5
-/// minutes, and the prompt has no limit of its own.
-pub const SETUP_TIMEOUT: Duration = Duration::from_secs(40 * 60);
-/// For the old `POST /v1/hosts/sync`, which clients before ADR 0026 call: longer than the daemon's slowest sync, 5
-/// minutes at the password prompt and 2 seconds for the helper's pipes. A
-/// test in the daemon's `setup/hosts.rs` holds this above the sum of
-/// the daemon's own limits.
-pub const HOSTS_SYNC_TIMEOUT: Duration = Duration::from_secs(6 * 60);
-/// For `POST /v1/uninstall`: longer than the daemon's slowest uninstall,
-/// about 15 minutes and 20 seconds when every program runs to its limit. The
-/// user has 5 minutes at the admin prompt, then up to 5 at each of the two
-/// dialogs macOS may show to take the user's trust away and to delete the
-/// certificate; the keychain listing gets 10 seconds. A test in the daemon's
-/// `setup/uninstall.rs` holds this above the sum of the daemon's own limits.
-///
-/// On Windows the slowest uninstall is the helper's run after the UAC
-/// prompt, up to 15 minutes, and the prompt has no limit of its own: 40
-/// minutes leaves the user time to find it, as for setup.
-pub const UNINSTALL_ALL_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 /// The largest JSON body read. Log lines are the biggest answer.
 const MAX_BODY: usize = 16 * 1024 * 1024;
 const MIB: usize = 1024 * 1024;
@@ -531,4 +503,46 @@ fn utf8_path(path: &Path) -> Result<PathBuf, ClientError> {
 
 pub(super) fn run_dir(data_dir: &Path) -> PathBuf {
     DataDir::new(data_dir).run()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    /// No request of this client waits more than 30 seconds, except the
+    /// event stream, which watches for silence instead (ADR 0026): a long
+    /// operation is a job, and the client follows it with events. A new
+    /// timeout constant in the client must be named here, and fit.
+    #[test]
+    fn no_request_waits_longer_than_thirty_seconds() {
+        let limit = Duration::from_secs(30);
+        for (name, value) in [
+            ("CONNECT_TIMEOUT", CONNECT_TIMEOUT),
+            ("HEALTH_TIMEOUT", HEALTH_TIMEOUT),
+            ("REQUEST_TIMEOUT", REQUEST_TIMEOUT),
+        ] {
+            assert!(value <= limit, "{name} is {value:?}");
+        }
+        // The client's sources name no other timeout.
+        let sources = [
+            include_str!("client.rs"),
+            include_str!("client/jobs.rs"),
+            include_str!("client/lifecycle.rs"),
+        ];
+        let known = BTreeSet::from(["CONNECT_TIMEOUT", "HEALTH_TIMEOUT", "REQUEST_TIMEOUT"]);
+        for source in sources {
+            // Only the code before the tests.
+            let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+            for word in code.split(|c: char| !(c.is_ascii_uppercase() || c == '_')) {
+                if word.ends_with("_TIMEOUT") {
+                    assert!(
+                        known.contains(word),
+                        "{word}: a timeout the test does not know"
+                    );
+                }
+            }
+        }
+    }
 }
