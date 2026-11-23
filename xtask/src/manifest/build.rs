@@ -7,7 +7,9 @@
 //! upstream sum. An MD5 alone is never accepted.
 //!
 //! The database servers' archives are large (PostgreSQL is about 60 MB a
-//! file, 620 MB a build), so they are hashed on the way and not kept.
+//! file, 620 MB a build), so they are hashed on the way and not kept: the
+//! ones that a program must read (Oracle's signature, GitHub's attestation)
+//! are deleted as soon as it has.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -42,6 +44,9 @@ pub(super) trait Inspect {
     /// Checks one of our static-php-cli PHP archives (macOS or Linux).
     /// Returns warnings.
     fn php_build(&self, target: &Target<'_>, file: &Path) -> Result<Vec<String>>;
+    /// `gh attestation verify` on one theseus-rs archive, pinned to its
+    /// repository, signer workflow, and tag (`attest`). Returns its JSON.
+    fn attestation(&self, file: &Path, version: &Version) -> Result<String>;
 }
 
 /// Platforms where PHP is our own static-php-cli build (ADR 0012).
@@ -72,7 +77,8 @@ pub(super) fn check_serial(serial: u64, published: Option<u64>) -> Result<()> {
 }
 
 /// Builds the manifest. The files that a later check reads are saved under
-/// `cache` (see `Proof::keeps_file`); the others are only hashed.
+/// `cache` (see `Proof::keeps_file`); the others are only hashed, and the
+/// archives of MySQL and PostgreSQL are kept only while they are checked.
 pub(super) async fn build(
     fetch: &impl Fetch,
     pins: &Pins,
@@ -131,12 +137,12 @@ pub(super) async fn build(
                         let checked = check_oracle(fetch, url, &work, inspect)
                             .await
                             .with_context(|| what.clone())?;
-                        Ok(Downloaded {
-                            path: None,
-                            url: checked.url,
-                            sha256: checked.sha256,
-                            size: checked.size,
-                        })
+                        Ok(Downloaded::gone(checked.url, checked.sha256, checked.size))
+                    } else if proof == Proof::TheseusSha256 {
+                        // `gh attestation verify` reads a file. It is 60 MB:
+                        // deleted at the end of this artifact, whatever the
+                        // result.
+                        scratch_download(fetch, &urls, &cache.join("theseus-work")).await
                     } else if proof.keeps_file() {
                         let dir = cache
                             .join(runtime.dir_name())
@@ -208,6 +214,13 @@ pub(super) async fn build(
                             ));
                             notes.push("no upstream sum");
                         }
+                    }
+                    // After the `.sha256`, and for every PostgreSQL archive,
+                    // whatever the match above did.
+                    if proof == Proof::TheseusSha256 {
+                        verify_attestation(inspect, &file, version)
+                            .with_context(|| what.clone())?;
+                        notes.push("GitHub attestation verified");
                     }
                     if runtime == Runtime::Php && is_spc_platform(platform) {
                         let found = inspect

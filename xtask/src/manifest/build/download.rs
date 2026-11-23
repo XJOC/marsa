@@ -19,9 +19,22 @@ pub(super) struct Downloaded {
     pub(super) url: String,
     pub(super) sha256: [u8; 32],
     pub(super) size: u64,
+    /// Never read: deletes the file when this goes out of scope.
+    _scratch: Option<RemoveOnDrop>,
 }
 
 impl Downloaded {
+    /// A file that was checked elsewhere and is not on disk any more.
+    pub(super) fn gone(url: String, sha256: [u8; 32], size: u64) -> Self {
+        Self {
+            path: None,
+            url,
+            sha256,
+            size,
+            _scratch: None,
+        }
+    }
+
     /// The file on disk, for a check that reads it.
     pub(super) fn kept(&self) -> Result<&Path> {
         self.path
@@ -60,6 +73,7 @@ pub(super) async fn cached_download(
                 url: url.to_owned(),
                 sha256,
                 size,
+                _scratch: None,
             });
         }
     }
@@ -94,6 +108,7 @@ pub(super) async fn cached_download(
         url,
         sha256,
         size,
+        _scratch: None,
     })
 }
 
@@ -106,6 +121,7 @@ pub(super) async fn hashed_download(fetch: &impl Fetch, urls: &[String]) -> Resu
         url,
         sha256: sink.hasher.finalize().into(),
         size: sink.size,
+        _scratch: None,
     })
 }
 
@@ -135,7 +151,43 @@ pub(super) async fn temp_download(
         url,
         sha256: hasher.finalize().into(),
         size,
+        _scratch: None,
     })
+}
+
+/// Deletes a file when it goes out of scope: the large archives that are only
+/// checked, never kept.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        if let Err(err) = fs::remove_file(&self.0)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            println!("    warning: cannot delete {}: {err}", self.0.display());
+        }
+    }
+}
+
+/// Downloads the first URL that answers to `work/archive`, hashing on the
+/// way, for a check that reads the file (`gh` reads one). The file is deleted
+/// when the answer goes out of scope, or at once on an error.
+pub(super) async fn scratch_download(
+    fetch: &impl Fetch,
+    urls: &[String],
+    work: &Path,
+) -> Result<Downloaded> {
+    fs::create_dir_all(work).with_context(|| format!("cannot create {}", work.display()))?;
+    let path = work.join("archive");
+    // A run that was killed may have left one.
+    let _ = fs::remove_file(&path);
+    let scratch = RemoveOnDrop(path.clone());
+    temp_download(fetch, urls, &path)
+        .await
+        .map(|file| Downloaded {
+            _scratch: Some(scratch),
+            ..file
+        })
 }
 
 /// Tries `urls` in order, each into a new sink from `sink_for`, and returns

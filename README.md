@@ -1,14 +1,15 @@
 # Marsa
 
-![Phase 1: 98%](https://img.shields.io/badge/Phase%201-98%25-brightgreen) ![Phase 2: 15%](https://img.shields.io/badge/Phase%202-15%25-lightgrey)
+![Phase 1: 98%](https://img.shields.io/badge/Phase%201-98%25-brightgreen) ![Phase 2: 20%](https://img.shields.io/badge/Phase%202-20%25-lightgrey)
 
 Marsa (Arabic: مرسى, "harbor") runs your PHP and Node.js projects on your
 computer as `https://<folder>.test` sites. It installs the PHP, Node.js, Composer, and Caddy
 versions you need, picks the right version for each project, and gives every
-site a trusted HTTPS certificate. It is open source (Apache-2.0) and works
-from the terminal or from its window.
+site a trusted HTTPS certificate. It also installs and runs MySQL, PostgreSQL,
+and Valkey (a Redis-compatible server) for your projects, with no Docker. It is
+open source (Apache-2.0) and works from the terminal or from its window.
 
-**Status: 0.2.0.** macOS is stable. It is tested on Apple Silicon; the Intel
+**Status: 0.3.0.** macOS is stable. It is tested on Apple Silicon; the Intel
 build passes the same automated checks. Linux and Windows are a preview: tested
 end to end on GitHub runners, not yet by a person.
 
@@ -89,6 +90,14 @@ marsa setup                # HTTPS and .test names, once (see below)
 marsa open app             # opens https://app.test, the folder ~/Code/app
 ```
 
+For a database, install the server. It starts at once, and starts again each
+time Marsa starts:
+
+```sh
+marsa install mysql        # or postgres, or valkey
+marsa services             # shows each server and how to connect to it
+```
+
 `marsa setup` runs once. The system asks for your administrator password
 once (on Windows, the admin prompt); macOS then also asks you to approve
 trusting Marsa's certificate authority. Run it in a terminal on your desktop,
@@ -99,9 +108,53 @@ is wrong, and says how to fix it. It changes nothing.
 
 ### The window and the menu-bar icon
 
-`marsa-gui` opens Marsa's window: sites, PHP versions, installs, and settings.
+`marsa-gui` opens Marsa's window: Home, Sites, Runtimes (PHP, Node.js,
+Composer, Caddy, and the database servers), Services, Logs, and Settings.
 `marsa autostart on` starts the menu-bar icon (`marsa-tray`) when you log in.
-Both programs are in `bin/`.
+Click it for a small panel with your sites, your PHP version, Xdebug, and Stop
+and Quit (on Linux, a menu). Both programs are in `bin/`.
+
+## Databases
+
+`marsa install mysql`, `marsa install postgres`, and `marsa install valkey` work
+like `marsa install php`:
+
+| Server | Versions | Default port | Source |
+| --- | --- | --- | --- |
+| MySQL | 8.4 | 3306 | Oracle's builds, checked against Oracle's signature |
+| PostgreSQL | 17 and 18 | 5432 | the [theseus-rs](https://github.com/theseus-rs/postgresql-binaries) builds, checked against their GitHub attestation |
+| Valkey | 8.1 | 6379 | built by Marsa from the Valkey source |
+
+The first server you install starts at once and starts again with Marsa. Each
+listens on `127.0.0.1` only. MySQL and PostgreSQL have a `root` user with no
+password; Valkey has no password. `marsa services` prints the lines to copy
+into a Laravel project's settings file:
+
+```
+mysql: 127.0.0.1:3306, user root, no password. For a Laravel .env:
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_USERNAME=root
+DB_PASSWORD=
+```
+
+Valkey's lines are `REDIS_HOST=127.0.0.1` and `REDIS_PORT=6379`, for
+Laravel's cache and queue. Marsa's PHP has the `redis`, `pdo_mysql`, and
+`pdo_pgsql` extensions.
+
+After you install a server, its command-line programs are in your `PATH` and
+already point to Marsa's server: `mysql`, `mysqldump`, `mysqladmin`, `psql`,
+`pg_dump`, `pg_restore`, `valkey-cli`, and `redis-cli`. Marsa creates them only
+after you install a server, so it never hides a `psql` that you installed
+yourself before.
+
+`marsa services stop mysql` stops a server, and `marsa services start mysql`
+starts it. `marsa uninstall mysql 8.4.13` removes the program and keeps your
+databases (stop the server first). On an Intel Mac, MySQL is 8.4.11: Oracle has
+no newer Intel build. On Linux, MySQL needs `/usr/bin/xz`, and `marsa doctor`
+says if it is missing. On Windows, PostgreSQL refuses to start from an
+administrator account: use your normal user.
 
 ## Which version a project gets
 
@@ -122,7 +175,7 @@ used only once it is installed: `marsa install php 8.3`.
 
 | Command | What it does |
 | --- | --- |
-| `marsa install <tool> [version]` | Install `php`, `node`, `composer`, or `caddy`: `8`, `8.4`, or `8.4.27`. Without a version: the newest. |
+| `marsa install <tool> [version]` | Install `php`, `node`, `composer`, `caddy`, `mysql`, `postgres`, or `valkey`: `8`, `8.4`, or `8.4.27`. Without a version: the newest. |
 | `marsa runtimes [tool]` | List the installed versions and the defaults. |
 | `marsa use <php\|node> <version>` | Make an installed version the default. |
 | `marsa uninstall <tool> <version>` | Delete an installed version. Marsa refuses one that is in use. |
@@ -135,7 +188,7 @@ used only once it is installed: `marsa install php 8.3`.
 | `marsa secure <name>`, `marsa unsecure <name>` | Serve a site over HTTPS (the default), or over plain HTTP. |
 | `marsa isolate <name> <version>`, `marsa unisolate <name>` | Give a site its own PHP version, or remove it. |
 | `marsa xdebug [on\|off]` | Turn Xdebug on or off in every installed PHP. |
-| `marsa services [start\|stop\|restart <id>]` | List the services (Caddy and PHP), or control one. |
+| `marsa services [start\|stop\|restart <id>]` | List the services (Caddy, PHP, and your database servers), or control one. |
 | `marsa logs <id> [-f]` | Show the output of a service, such as `caddy`. |
 | `marsa daemon <start\|stop\|status>` | Control `marsad`, the program that runs in the background. |
 | `marsa autostart [on\|off]` | Start Marsa at login, or not. |
@@ -176,9 +229,9 @@ Marsa out of your `PATH`: on macOS and Linux, delete the line from `~/.zshrc`
 remove Marsa's two folders from your user's environment variables (search for
 "environment variables" in Settings).
 
-This works on macOS and Windows. On Linux it is not available yet: remove
-Marsa's data folder and the `PATH` line by hand. What `marsa setup` changed is
-not undone automatically there.
+This works on macOS, Windows, and Linux (Linux and Windows are a preview). On
+Linux it also removes the certificate authority that `marsa setup` added to
+Chrome and Firefox for this data folder.
 
 ## Verify a download
 
@@ -218,7 +271,7 @@ Marsa is a Rust workspace. Rust 1.99.1 is pinned in `rust-toolchain.toml`;
 
 ```sh
 cargo build --workspace
-cargo run --bin marsa -- --version   # prints: marsa 0.2.0
+cargo run --bin marsa -- --version   # prints: marsa 0.3.0
 ```
 
 The checks that every pull request passes:
@@ -246,9 +299,10 @@ Apache-2.0. See [`LICENSE`](LICENSE).
 
 **مرسى** يشغّل مشاريع PHP وNode.js على جهاز Mac كمواقع `https://<اسم-المجلد>.test`.
 يثبّت إصدارات PHP وNode.js وComposer وCaddy، ويختار لكل مشروع إصداره،
-ويعطي كل موقع شهادة HTTPS موثوقة. يعمل من الطرفية أو من نافذته.
+ويعطي كل موقع شهادة HTTPS موثوقة. ويثبّت MySQL وPostgreSQL وValkey ويشغّلها
+بلا Docker (`marsa install mysql`). يعمل من الطرفية أو من نافذته.
 
-الإصدار 0.2.0: macOS مستقر. Linux وWindows نسخة تجريبية (preview)،
+الإصدار 0.3.0: macOS مستقر. Linux وWindows نسخة تجريبية (preview)،
 اختُبرتا على خوادم GitHub ولم يجرّبهما شخص بعد.
 
 التثبيت على macOS وLinux: `curl -fsSL https://github.com/XJOC/marsa/releases/latest/download/install.sh | sh`
