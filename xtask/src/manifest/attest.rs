@@ -479,6 +479,7 @@ mod tests {
         assert_eq!(found, here);
     }
 
+    // Unix only: the fake `gh` is a shell script with mode bits.
     #[cfg(unix)]
     fn fake_gh(dir: &Path, script: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -490,6 +491,7 @@ mod tests {
 
     /// A `gh` that refuses is an error with its own words; one that prints is
     /// believed only by `check_result`. The flags are the pinned ones.
+    // Unix only: it runs the shell script of `fake_gh`.
     #[cfg(unix)]
     #[test]
     fn a_gh_that_refuses_or_is_missing_is_an_error_never_a_skip() {
@@ -518,6 +520,7 @@ mod tests {
         let args = std::fs::read_to_string(&args).expect("args");
         for flag in [
             "attestation verify",
+            "--hostname github.com",
             "--repo theseus-rs/postgresql-binaries",
             "--signer-workflow theseus-rs/postgresql-binaries/.github/workflows/build.yml",
             "--source-ref refs/tags/18.7.0",

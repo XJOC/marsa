@@ -873,7 +873,7 @@ impl<F> OracleCheck for Attest<F> {
 /// `.sha256` does not match. Returns the cache folder too: its
 /// `theseus-work` must be empty after.
 async fn build_with(
-    stub: &impl OracleCheckInspect,
+    stub: &(impl Inspect + OracleCheck),
     bad: Option<&str>,
 ) -> (Result<Built>, tempfile::TempDir) {
     let pins = Pins::parse(PINS).expect("pins");
@@ -881,10 +881,6 @@ async fn build_with(
     let built = build(&fetcher(&pins, bad), &pins, cache.path(), stub).await;
     (built, cache)
 }
-
-/// Both traits `build` asks of its stub.
-trait OracleCheckInspect: Inspect + OracleCheck {}
-impl<T: Inspect + OracleCheck> OracleCheckInspect for T {}
 
 fn archive_is_gone(cache: &tempfile::TempDir) -> bool {
     !cache.path().join("theseus-work").join("archive").exists()
