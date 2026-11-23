@@ -26,7 +26,6 @@ const LONG_FILES: &[(&str, &str)] = &[
         "crates/app/src/daemon/services/php/orphan.rs",
         "to split by job",
     ),
-    ("crates/core/src/databases/mod.rs", "to split by job"),
 ];
 
 /// One broken rule.
