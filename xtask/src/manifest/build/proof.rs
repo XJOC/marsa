@@ -8,11 +8,14 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 use marsa_core::installer::fetch::{Fetch, fetch_bytes};
 use marsa_core::runtimes::Runtime;
+use semver::Version;
 
+use super::super::attest;
 use super::super::upstream::{
     Algorithm, Layout, MYSQL_FOLDERS, Source, SumFile, hex, sum_file_for,
 };
-use super::download::{hash_file, temp_download};
+use super::Inspect;
+use super::download::{Downloaded, hash_file, scratch_download, temp_download};
 
 /// The upstream proof a file needs before its sha256 goes in the manifest.
 /// The database servers of M6 each need the proof of their own source (ADR
@@ -26,7 +29,8 @@ pub(super) enum Proof {
     /// (windows.php.net lists only sha1 there). PHP, Node, Composer, Caddy.
     SumIfPublished,
     /// The theseus-rs `<archive>.sha256` ([`Layout::Single`]) and no other
-    /// source, of the recipe's own URL. PostgreSQL.
+    /// source, of the recipe's own URL, and GitHub's attestation that the
+    /// archive was built by theseus-rs' workflow (`attest`). PostgreSQL.
     TheseusSha256,
     /// Oracle's GPG signature `<archive>.asc` by the pinned key, and its
     /// `<archive>.md5`, both ([`check_oracle`]). The MySQL archive of the
@@ -186,7 +190,7 @@ impl Proof {
     /// Whether the file is kept in the cache after the build: only when a
     /// later check reads it (PHP, the sha512 of Caddy). A file this proof
     /// checks by its sha256 alone is hashed on the way and never written,
-    /// and a MySQL archive is deleted after its checks.
+    /// and a MySQL or PostgreSQL archive is deleted after its checks.
     pub(super) fn keeps_file(self) -> bool {
         match self {
             Proof::SumIfPublished => true,
@@ -363,4 +367,51 @@ pub(in crate::manifest) async fn check_oracle(
     .await;
     remove();
     checked.with_context(|| url.to_owned())
+}
+
+/// GitHub's attestation for the archive `file` (`attest`): `gh` verifies it,
+/// then its JSON is read again against the archive's name and the sha256 that
+/// was hashed on the way. The one place that does both, for `build` and
+/// `check-postgres`.
+pub(super) fn verify_attestation(
+    inspect: &impl Inspect,
+    file: &Downloaded,
+    version: &Version,
+) -> Result<()> {
+    let name = file.url.rsplit_once('/').map_or(&*file.url, |(_, n)| n);
+    let json = inspect
+        .attestation(file.kept()?, version)
+        .context("GitHub attestation")?;
+    attest::check_result(&json, name, &file.sha256, version).context("GitHub attestation")
+}
+
+/// GitHub's attestation for the theseus-rs archive at `url`, as `build` runs
+/// it for PostgreSQL: the archive is downloaded to `work` and hashed on the
+/// way, [`verify_attestation`] checks it, and the archive is deleted. The
+/// `.sha256` is not compared here: `build` does.
+///
+/// # Errors
+///
+/// `url` is not a theseus-rs release archive, or the first step that fails.
+pub(in crate::manifest) async fn check_attested(
+    fetch: &impl Fetch,
+    url: &str,
+    work: &Path,
+    inspect: &impl Inspect,
+) -> Result<Checked> {
+    let sums = sum_file_for(url)
+        .filter(|sums| sums.source == Source::Theseus)
+        .with_context(|| format!("{url} is not a theseus-rs release archive"))?;
+    let version = url
+        .rsplit_once('/')
+        .and_then(|(dir, _)| dir.rsplit_once('/'))
+        .and_then(|(_, tag)| Version::parse(tag).ok())
+        .with_context(|| format!("{url} has no version in its folder"))?;
+    let file = scratch_download(fetch, &[url.to_owned()], work).await?;
+    verify_attestation(inspect, &file, &version).with_context(|| sums.name.clone())?;
+    Ok(Checked {
+        url: file.url,
+        sha256: file.sha256,
+        size: file.size,
+    })
 }
