@@ -4,7 +4,91 @@ All notable changes to Marsa are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [0.2.0] - Unreleased
+## [0.3.0] - Unreleased
+
+Marsa now installs and runs your database servers, as it does PHP: no Docker,
+no Homebrew. The window has a new design, and the menu-bar icon opens a small
+panel. Linux and Windows stay a preview.
+
+### Added
+
+- **Database servers.** `marsa install mysql`, `marsa install postgres`, and
+  `marsa install valkey`, on macOS, Linux, and Windows.
+  - **MySQL 8.4** (8.4.13; 8.4.11 on an Intel Mac, because Oracle has no newer
+    Intel build), **PostgreSQL 17 and 18**, and **Valkey 8.1** (a
+    Redis-compatible server).
+  - The first server you install starts at once, and starts again each time
+    Marsa starts. `marsa services start <id>` and `marsa services stop <id>`
+    control each one. Each listens on `127.0.0.1` only (ports 3306, 5432, and
+    6379; each is a setting in `global.toml`).
+  - MySQL and PostgreSQL have a `root` user with no password, and Valkey has
+    no password. Their data is in `databases/` in Marsa's data folder, and
+    `marsa uninstall` of a server keeps it.
+  - MySQL runs with a small memory setting. If `marsad` crashes, the next start
+    stops a server that it left running.
+  - `marsa services` prints the lines for a Laravel project's settings file
+    while a server runs: `DB_CONNECTION`, `DB_HOST`, `DB_PORT`, `DB_USERNAME`,
+    and `DB_PASSWORD`, or `REDIS_HOST` and `REDIS_PORT` for Valkey.
+  - Marsa's PHP has `pdo_mysql`, `pdo_pgsql`, and the `redis` extension, so a
+    new Laravel project can use MySQL or PostgreSQL, and Valkey for its cache
+    and queue.
+  - Where each server comes from is checked before Marsa publishes it:
+    Oracle's GPG signature and MD5 for MySQL, GitHub's build attestation and
+    the `.sha256` for PostgreSQL (from the
+    [theseus-rs](https://github.com/theseus-rs/postgresql-binaries) builds),
+    and the sums of Marsa's own build for Valkey. The list is signed with
+    Marsa's key, as before.
+  - After you install a server, its client programs are in your `PATH`:
+    `mysql`, `mysqldump`, `mysqladmin`, `psql`, `pg_dump`, `pg_restore`,
+    `valkey-cli`, and `redis-cli`. They already point to Marsa's server (and
+    never change a variable you set yourself). Marsa makes them only after you
+    install a server, so it does not hide a `psql` from Homebrew.
+  - `marsa install` picks the newest version that has files for your system,
+    and says so when your operating system is too old for a server
+    (`install_os_too_old`).
+- **A new window.** Home, Sites (and the page of one site), Runtimes (one
+  screen for every runtime, databases too), Services (with a log for each),
+  Logs, and Settings, in Marsa's new design. A first-run screen walks you
+  through the first site. The window follows your system's light or dark
+  setting.
+- **A menu-bar panel.** Click the icon: a small panel opens with your sites,
+  your PHP version, Xdebug, Open, Stop, and Quit. Click again to close it. It
+  shows no Dock icon on macOS. On Linux the icon opens a menu with the same
+  items.
+- **Linux.** `marsa setup` also trusts Marsa's certificate authority in Chrome
+  and Firefox (their own certificate stores). `marsa uninstall --all` now runs
+  on Linux and removes only the entries of this data folder. If `marsad`
+  crashes, the next start finds the Caddy and PHP-FPM it left running.
+- **Doctor.** `marsa doctor`, the window's Settings, and the daemon use one
+  list of checks. `marsa doctor` also checks that `/usr/bin/xz`, which MySQL
+  needs on Linux, is there.
+- A DNS port that another program holds shows as a failed `dns` service,
+  with the reason.
+
+### Fixed
+
+- The last PHP stays installed while a site runs it, also when no default is
+  set.
+- The administrator helper on macOS no longer follows a link that stands in
+  the place of a file it works on.
+- `marsa setup` waits until Caddy's certificate file is complete, and does not
+  start Caddy too early.
+- No request from the command line or the window waits more than 30 seconds
+  for the daemon.
+
+### Known limits
+
+- Linux and Windows are a preview: no person has tried them yet. That holds
+  for the database servers too: they are tested end to end on GitHub runners.
+- The window does not browse databases yet. Use `mysql`, `psql`, and
+  `valkey-cli`, or your own client.
+- MySQL has no Intel Mac build after 8.4.11 (Oracle's choice).
+- The macOS programs are signed ad hoc, not notarized by Apple. The Windows
+  programs are not code-signed yet, so SmartScreen may warn.
+- Without `minisign`, the install scripts check only the SHA-256 of the
+  download, not its signature.
+
+## [0.2.0] - 2026-11-18
 
 Linux and Windows join macOS, as a preview: they are tested end to end on
 GitHub runners, from the built programs to an open Laravel page, but no person
