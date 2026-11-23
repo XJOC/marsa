@@ -71,6 +71,9 @@ impl DaemonClient {
                 // The daemon is stopping, and the job stops with it.
                 Some(Ok(StreamItem::Item(Event::ShuttingDown))) => return Err(lost_job(lost)),
                 Some(Ok(StreamItem::Item(_))) => resyncs = 0,
+                // An event this client cannot read (a newer daemon's other
+                // job, say): the stream goes on.
+                Some(Err(ClientError::BadResponse { .. })) => {}
                 // Lost events may include the end; a broken connection ends
                 // the stream. Either way: open it again, then ask.
                 Some(Ok(StreamItem::Lagged(_)) | Err(_)) | None => {
@@ -78,14 +81,26 @@ impl DaemonClient {
                     if resyncs > MAX_RESYNCS {
                         return Err(lost_job(lost));
                     }
-                    stream = self.events().await?;
+                    // No stream: the daemon stopped, or restarted with a new
+                    // token. The job cannot be followed.
+                    stream = match self.events().await {
+                        Ok(stream) => stream,
+                        Err(err) => {
+                            tracing::warn!(
+                                code = err.code(),
+                                "cannot follow the job: no event stream"
+                            );
+                            return Err(lost_job(lost));
+                        }
+                    };
                     match self.job(id).await {
                         Ok(event) => {
                             if let Some(end) = ended(event) {
                                 return end;
                             }
                         }
-                        // The daemon restarted: the table is empty.
+                        // The daemon restarted with the same token: the
+                        // table is empty.
                         Err(ClientError::Api { status: 404, .. }) => return Err(lost_job(lost)),
                         Err(err) => return Err(err),
                     }

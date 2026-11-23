@@ -1177,6 +1177,25 @@ async fn a_broken_stream_is_followed_by_the_jobs_state() {
 
 /// The job is still running when the stream is open again: the client goes
 /// on reading, and the end comes on the new stream.
+/// An event this client cannot read is skipped: no new stream, no `GET`.
+#[tokio::test]
+async fn an_event_that_cannot_be_read_does_not_break_the_follow() {
+    let body = format!(
+        "data: {}\n\ndata: {}\n\n",
+        serde_json::json!({ "type": "from_a_newer_daemon", "data": {} }),
+        serde_json::to_string(&Event::Job(job_done(1))).unwrap(),
+    );
+    let router = Router::new()
+        .route("/v1/events", get(move || async move { sse_response(body) }))
+        .route(
+            "/v1/jobs/setup",
+            post(|| async { (StatusCode::ACCEPTED, Json(JobAccepted { id: 1 })) }),
+        );
+    let fake = Fake::start(router).await;
+    assert_eq!(fake.client().run_setup().await.unwrap(), setup_report());
+    assert_eq!(fake.targets(), ["GET /v1/events", "POST /v1/jobs/setup"]);
+}
+
 #[tokio::test]
 async fn a_job_that_runs_on_is_followed_on_the_new_stream() {
     let streams = vec![

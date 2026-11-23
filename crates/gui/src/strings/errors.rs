@@ -210,7 +210,7 @@ pub(super) fn error_message(code: &str) -> Option<&'static str> {
         | "recipe_unknown_platform"
         | "recipe_bad_path"
         | "recipe_bad_template" => "This build of Marsa has a broken install recipe. Report it.",
-        // Setup (`POST /v1/setup`): why it did not run, the
+        // Setup (`POST /v1/jobs/setup`): why it did not run, the
         // steps it skipped, and the codes of `marsa-helper`.
         "setup_running" => "Another setup is running. Wait for it to end, then try again.",
         // `marsa uninstall --all` runs: setup waits for it.

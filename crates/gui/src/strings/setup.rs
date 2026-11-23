@@ -49,7 +49,7 @@ pub const STAGE_NEXT: &str = "comes next";
 pub const NOT_NOW: &str = "Not now";
 pub const CLOSE: &str = "Close";
 
-// Setup (`POST /v1/setup`), in the first-run panel and in Settings.
+// Setup (`POST /v1/jobs/setup`), in the first-run panel and in Settings.
 
 pub const RUN_SETUP: &str = "Run setup";
 /// Linux on the hosts way: the button under the sites.

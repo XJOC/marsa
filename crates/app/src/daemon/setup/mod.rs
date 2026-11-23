@@ -1,4 +1,4 @@
-//! `POST /v1/setup`: the first setup on macOS and Linux (Windows has its own
+//! `POST /v1/jobs/setup`: the first setup on macOS and Linux (Windows has its own
 //! helper service, [`windows`], ADR 0018). On macOS the user may be asked
 //! twice: for an administrator password (the helper), then to approve the
 //! trust in Marsa's certificate authority for this user. On Linux once, for
@@ -6,7 +6,8 @@
 //!
 //! | Route | Answer |
 //! | --- | --- |
-//! | `POST /v1/setup` | `SetupReport`, also sent as `setup_finished` on `/v1/events` |
+//! | `POST /v1/jobs/setup` | `202 JobAccepted`; the end is a `job` event with the `SetupReport`, which is also sent as `setup_finished` on `/v1/events` |
+//! | `POST /v1/setup` | The same job, answered with its `SetupReport` when it ends (clients before ADR 0026) |
 //!
 //! One setup at a time: a second request gets 409 `setup_running`, and one
 //! during an uninstall gets 409 `uninstall_running`. `POST /v1/uninstall`
@@ -88,9 +89,9 @@ pub use marsa_core::platform::runner::{RealRunner, RunOutput, Runner};
 /// `security add-trusted-cert` at `PROMPT_LIMIT` each, and [`PIPE_GRACE`]
 /// after each of these programs. Linux stays under it: up to four
 /// `systemctl` checks, two `pkexec` prompts when the helper chooses the
-/// hosts file ([`linux_dns`]), and the NSS step at [`nss::NSS_BUDGET`]. A client has to wait longer:
-/// `marsa_core::client::SETUP_TIMEOUT` does, and a test holds the two
-/// together.
+/// hosts file ([`linux_dns`]), and the NSS step at [`nss::NSS_BUDGET`]. A client of the old `POST /v1/setup`
+/// route has to wait longer: `marsa_core::client::SETUP_TIMEOUT` does, and a
+/// test holds the two together.
 pub const SLOWEST_SETUP: Duration = Duration::from_secs(
     CA_WAIT.as_secs()
         + (2 + MAX_PS as u64) * CHECK_LIMIT.as_secs()
@@ -755,7 +756,9 @@ mod tests {
                 StatusCode::NOT_IMPLEMENTED,
                 "setup_not_supported".to_owned(),
             );
-            assert_eq!(app.refused().await, refused, "{platform:?}");
+            for uri in [WAITING_URI, JOB_URI] {
+                assert_eq!(app.refused_at(uri).await, refused, "{platform:?} {uri}");
+            }
         }
         assert!(fake.calls().is_empty());
     }
@@ -811,8 +814,10 @@ mod tests {
             ),
         ];
         for (name, headers, refused) in cases {
-            assert_eq!(app.send(&headers).await, refused, "{name}");
-            assert!(fake.calls().is_empty(), "{name}: {:?}", fake.calls());
+            for uri in [WAITING_URI, JOB_URI] {
+                assert_eq!(app.send_to(uri, &headers).await, refused, "{name} {uri}");
+                assert!(fake.calls().is_empty(), "{name}: {:?}", fake.calls());
+            }
         }
         // The same route with the right headers runs: the refusals above
         // came from the auth layer.

@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::get;
@@ -22,14 +23,16 @@ use axum::{Json, Router};
 use marsa_core::codes;
 use marsa_core::types::{JobEvent, JobList};
 
+use super::http::Rejected as _;
 use super::http::routes::HttpError;
 use super::state::Daemon;
 
 /// How many ended jobs the table keeps.
 const KEEP_ENDED: usize = 16;
 
-/// The id counter for every job, installs included, and the last event of
-/// each job.
+/// The id counter for every job and every install, and the last event of
+/// each job. An install is not in the table: it keeps its own `install`
+/// events.
 #[derive(Debug, Default)]
 pub struct Jobs {
     last_id: AtomicU64,
@@ -97,8 +100,9 @@ async fn list(State(daemon): State<Arc<Daemon>>) -> Json<JobList> {
 
 async fn one(
     State(daemon): State<Arc<Daemon>>,
-    Path(id): Path<String>,
+    path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<JobEvent>, HttpError> {
+    let Path(id) = path.map_err(|err| err.reject(codes::INVALID_PATH))?;
     let not_found = || HttpError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND, "no such job");
     // A name that is not a number is no job.
     let id: u64 = id.parse().map_err(|_| not_found())?;
@@ -107,9 +111,11 @@ async fn one(
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Body;
     use marsa_core::types::{JobKind, JobOutcome, JobStep, JobUpdate, SetupReport};
 
     use super::*;
+    use crate::daemon::http::test_router::TestRouter;
 
     fn event(id: u64, update: JobUpdate) -> JobEvent {
         JobEvent {
@@ -135,39 +141,53 @@ mod tests {
         )
     }
 
-    async fn get(daemon: &Arc<Daemon>, uri: &str) -> (StatusCode, serde_json::Value) {
-        use axum::body::{Body, to_bytes};
-        use axum::http::Request;
-        use tower::ServiceExt as _;
-
-        let router = routes().with_state(Arc::clone(daemon));
-        let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
-        let response = router.oneshot(request).await.unwrap();
-        let status = response.status();
-        let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap())
-    }
-
     #[tokio::test]
     async fn the_routes_list_running_jobs_and_find_one_by_id() {
         let daemon = Arc::new(Daemon::new(std::path::PathBuf::from("data")));
         daemon.publish_job(running(1));
         daemon.publish_job(done(2));
+        let app = TestRouter::new(daemon);
 
-        let (status, json) = get(&daemon, "/v1/jobs").await;
+        let (status, json) = app.answer("GET", "/v1/jobs", None).await;
         assert_eq!(status, StatusCode::OK);
         let list: JobList = serde_json::from_value(json).unwrap();
         assert_eq!(list.jobs, [running(1)]);
 
-        let (status, json) = get(&daemon, "/v1/jobs/2").await;
+        let (status, json) = app.answer("GET", "/v1/jobs/2", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(serde_json::from_value::<JobEvent>(json).unwrap(), done(2));
 
-        // No such job, and not a number: the same answer.
+        // No such job, and not a number: the same answer. A name that is not
+        // even valid UTF-8 once decoded has the same error body.
         for uri in ["/v1/jobs/3", "/v1/jobs/x", "/v1/jobs/-1"] {
-            let (status, json) = get(&daemon, uri).await;
+            let (status, json) = app.answer("GET", uri, None).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
             assert_eq!(json["error"]["code"], "not_found");
+        }
+        let (status, json) = app.answer("GET", "/v1/jobs/%FF", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_path");
+    }
+
+    /// A job's result is for the client that has the token (ADR 0026), and
+    /// only through `Host` of the daemon, with no `Origin`.
+    #[tokio::test]
+    async fn the_routes_need_the_token_and_refuse_an_origin() {
+        let daemon = Arc::new(Daemon::new(std::path::PathBuf::from("data")));
+        daemon.publish_job(done(1));
+        let app = TestRouter::new(daemon);
+        for uri in ["/v1/jobs", "/v1/jobs/1"] {
+            let response = app
+                .call(app.builder("GET", uri).body(Body::empty()).unwrap())
+                .await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            let request = app
+                .authorized("GET", uri)
+                .header("origin", "http://evil.test")
+                .body(Body::empty())
+                .unwrap();
+            let response = app.call(request).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
         }
     }
 

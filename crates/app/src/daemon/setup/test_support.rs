@@ -439,6 +439,11 @@ pub(super) struct App {
     pub(super) bearer: String,
 }
 
+/// The old route, which answers when the setup ends.
+pub(super) const WAITING_URI: &str = "/v1/setup";
+/// The job route, which answers `202` at once.
+pub(super) const JOB_URI: &str = "/v1/jobs/setup";
+
 impl App {
     pub(super) fn new(daemon: Arc<Daemon>, setup: Setup) -> Self {
         let token = Token::generate().unwrap();
@@ -451,12 +456,12 @@ impl App {
     }
 
     pub(super) async fn post(&self) -> (StatusCode, Value) {
-        self.call("POST", "/v1/setup").await
+        self.call("POST", WAITING_URI).await
     }
 
     /// `POST /v1/jobs/setup`: the answer comes before the work ends.
     pub(super) async fn post_job(&self) -> (StatusCode, Value) {
-        self.call("POST", "/v1/jobs/setup").await
+        self.call("POST", JOB_URI).await
     }
 
     pub(super) async fn call(&self, method: &str, uri: &str) -> (StatusCode, Value) {
@@ -474,14 +479,28 @@ impl App {
     }
 
     pub(super) async fn refused(&self) -> (StatusCode, String) {
-        let (status, json) = self.post().await;
+        self.refused_at(WAITING_URI).await
+    }
+
+    /// `POST uri` with the token, expecting an error body.
+    pub(super) async fn refused_at(&self, uri: &str) -> (StatusCode, String) {
+        let (status, json) = self.call("POST", uri).await;
         let error: ErrorBody = serde_json::from_value(json).unwrap();
         (status, error.error.code)
     }
 
     /// `POST /v1/setup` with only `headers`, expecting an error body.
     pub(super) async fn send(&self, headers: &[(&str, &str)]) -> (StatusCode, String) {
-        let mut request = Request::builder().method("POST").uri("/v1/setup");
+        self.send_to(WAITING_URI, headers).await
+    }
+
+    /// `POST uri` with only `headers`, expecting an error body.
+    pub(super) async fn send_to(
+        &self,
+        uri: &str,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String) {
+        let mut request = Request::builder().method("POST").uri(uri);
         for &(name, value) in headers {
             request = request.header(name, value);
         }

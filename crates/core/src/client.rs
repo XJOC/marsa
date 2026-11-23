@@ -76,7 +76,7 @@ const SERVER_ACTION_TIMEOUT: Duration = Duration::from_secs(300);
 /// For `DELETE /v1/runtimes/{tool}/{version}`: a Node.js folder holds
 /// thousands of files, and a virus scanner may slow their delete.
 const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
-/// For `POST /v1/setup`: longer than the daemon's slowest setup, which is
+/// For the old `POST /v1/setup`, which clients before ADR 0026 call: longer than the daemon's slowest setup, which is
 /// about 12.5 minutes when every step runs to its limit. The daemon gives
 /// the user 5 minutes at the admin prompt and 5 more at the trust dialog
 /// (macOS), each check (`netstat`, `ps` for at most 8 processes, `security

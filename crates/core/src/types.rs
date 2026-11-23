@@ -267,7 +267,8 @@ pub enum Event {
     /// /v1/runtimes/{tool}/default` saved it or the first install set it.
     /// A changed site list follows as `sites_changed`.
     DefaultChanged(DefaultVersion),
-    /// The end of a `POST /v1/setup`, with the same report as its answer.
+    /// The end of a setup, with the same report as the job's `done` and as the
+    /// answer of the old `POST /v1/setup`.
     SetupFinished(SetupReport),
     /// A step or the end of a long operation that `POST /v1/jobs/...`
     /// started (ADR 0026).
@@ -485,6 +486,10 @@ pub struct JobAccepted {
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
     Setup,
+    /// A kind a newer daemon knows. An older client still follows the job to
+    /// its end by id.
+    #[serde(other)]
+    Other,
 }
 
 /// A step a job reports while it runs.
@@ -493,6 +498,10 @@ pub enum JobKind {
 pub enum JobStep {
     /// The job was accepted and its work began.
     Started,
+    /// A step a newer daemon names (ADR 0026: later steps such as the admin
+    /// prompt). An older client reads it as "still running".
+    #[serde(other)]
+    Other,
 }
 
 /// What a finished job produced. One variant per [`JobKind`].
@@ -1445,6 +1454,18 @@ mod tests {
             },
         };
         assert!(!running.is_last());
+        // A kind and a step of a newer daemon are read, not refused.
+        let newer: JobEvent = serde_json::from_value(
+            json!({ "id": 2, "kind": "from_the_future", "status": "running", "step": "later" }),
+        )
+        .unwrap();
+        assert_eq!(newer.kind, JobKind::Other);
+        assert_eq!(
+            newer.update,
+            JobUpdate::Running {
+                step: JobStep::Other
+            }
+        );
         round_trip(
             &JobList {
                 jobs: vec![running],
