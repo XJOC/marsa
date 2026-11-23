@@ -2,7 +2,8 @@
 //!
 //! | Route | Answer |
 //! | --- | --- |
-//! | `POST /v1/uninstall` | `UninstallReport`; then the daemon stops |
+//! | `POST /v1/jobs/uninstall` | `202 JobAccepted`; the end is a `job` event with the `UninstallReport`; then the daemon stops |
+//! | `POST /v1/uninstall` | The same job, answered with its `UninstallReport` when it ends (clients before ADR 0026); then the daemon stops |
 //!
 //! The steps, on a blocking thread, in this order:
 //!
@@ -23,9 +24,10 @@
 //!    certificate in the login keychain or Caddy's root; otherwise
 //!    `trust_record_unusable`. macOS may show its dialog.
 //! 4. **Login file:** the file of that starts the tray icon.
-//! 5. **Answer, then stop:** once the helper ran, the daemon cancels its own
-//!    shutdown token. The server's graceful stop lets this answer finish, as
-//!    for `POST /v1/shutdown`, then stops Caddy, the PHP pools, and the DNS
+//! 5. **Answer, then stop:** once the helper ran, and the job's last event
+//!    is out, the daemon cancels its own shutdown token. The server's
+//!    graceful stop lets the old route's answer finish, as for `POST
+//!    /v1/shutdown`, then stops Caddy, the PHP pools, and the DNS
 //!    server. The CLI waits for that.
 //!
 //! A failed step 3 or 4 is a failed result, not an error: the other steps
@@ -66,7 +68,7 @@ use axum::{Json, Router};
 use marsa_core::caddy::CaddyPaths;
 use marsa_core::helper::{HelperOp, OpResult};
 use marsa_core::recipes::{Os, Platform};
-use marsa_core::types::{OpStatus, UninstallReport};
+use marsa_core::types::{JobAccepted, JobKind, JobOutcome, OpStatus, UninstallReport};
 use tokio_util::sync::CancellationToken;
 
 use super::http;
@@ -75,6 +77,7 @@ use super::{
 };
 use crate::daemon::autostart::Autostart;
 use crate::daemon::http::routes::HttpError;
+use crate::daemon::jobs;
 use crate::daemon::sites::hosts_sync;
 use crate::daemon::state::Daemon;
 
@@ -82,24 +85,46 @@ use crate::daemon::state::Daemon;
 /// `osascript`, then `security remove-trusted-cert` and `delete-certificate`
 /// at `PROMPT_LIMIT` each (both may show a dialog), `find-certificate` at
 /// [`CHECK_LIMIT`], and [`PIPE_GRACE`] after each of these four. Linux, with
-/// one `pkexec` prompt and the NSS step, stays under it. A client
-/// has to wait longer: `marsa_core::client::UNINSTALL_ALL_TIMEOUT` does, and a
-/// test holds the two together.
+/// one `pkexec` prompt and the NSS step, stays under it. A client of the old
+/// `POST /v1/uninstall` has to wait longer:
+/// `marsa_core::client::UNINSTALL_ALL_TIMEOUT` does, and a test holds the two
+/// together.
 pub const SLOWEST_UNINSTALL_ALL: Duration = Duration::from_secs(
     3 * PROMPT_LIMIT.as_secs() + CHECK_LIMIT.as_secs() + 4 * PIPE_GRACE.as_secs(),
 );
 
-/// The route on `setup`, the same one the setup route gets, for
-/// `api::router` to merge before its fallbacks.
+/// The routes on `setup`, the same one the setup routes get, for
+/// `api::router` to merge before its fallbacks: `POST /v1/jobs/uninstall`,
+/// and its old waiting form `POST /v1/uninstall` (ADR 0026).
 pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
-    let handler = move |State(daemon): State<Arc<Daemon>>| {
-        let setup = Arc::clone(&setup);
-        async move { start(daemon, setup).await }
+    let for_job = Arc::clone(&setup);
+    let job = move |State(daemon): State<Arc<Daemon>>| {
+        let setup = Arc::clone(&for_job);
+        async move {
+            let (id, _) = begin(&daemon, setup)?;
+            Ok::<_, HttpError>((StatusCode::ACCEPTED, Json(JobAccepted { id })))
+        }
     };
-    Router::new().route("/v1/uninstall", post(handler))
+    let wait = move |State(daemon): State<Arc<Daemon>>| {
+        let setup = Arc::clone(&setup);
+        async move {
+            let (_, ended) = begin(&daemon, setup)?;
+            let report = jobs::wait(ended, "uninstall").await?;
+            Ok::<_, HttpError>(Json(report))
+        }
+    };
+    Router::new()
+        .route("/v1/jobs/uninstall", post(job))
+        .route("/v1/uninstall", post(wait))
 }
 
-async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallReport>, HttpError> {
+/// Starts the uninstall job: checks the system, takes the one-at-a-time
+/// flag, and answers the job's id at once ([`jobs::start`]). Once the last
+/// event is out, a finished helper stops the daemon.
+fn begin(
+    daemon: &Arc<Daemon>,
+    setup: Arc<Setup>,
+) -> Result<(u64, jobs::Ended<UninstallReport>), HttpError> {
     let platform = setup
         .platform()
         .filter(|platform| platform.os() != Os::Any)
@@ -113,6 +138,33 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallR
         })?;
     let running = Running::take(&setup, Flow::Uninstall).map_err(Flow::busy)?;
     tracing::info!("uninstall started");
+    let work = work(Arc::clone(daemon), setup, platform, running);
+    Ok(jobs::start(
+        daemon,
+        JobKind::Uninstall,
+        "uninstall",
+        JobOutcome::Uninstall,
+        work,
+        |daemon, report| {
+            if report.stopping {
+                // After the job's last event, so a reader gets `done` and
+                // then `shutting_down`. The daemon stops even if the client
+                // went away. The server stops its processes first, then lets
+                // open requests finish, so the old route's answer still goes
+                // out.
+                tracing::info!("Marsa was uninstalled; the daemon stops");
+                daemon.shutdown().cancel();
+            }
+        },
+    ))
+}
+
+async fn work(
+    daemon: Arc<Daemon>,
+    setup: Arc<Setup>,
+    platform: Platform,
+    running: Running,
+) -> Result<UninstallReport, HttpError> {
     http::blocking("uninstall", move || {
         // Moved in, so no setup starts until this one ended, even if the
         // client went away.
@@ -140,17 +192,9 @@ async fn start(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<UninstallR
             stopping = report.stopping,
             "uninstall finished"
         );
-        if report.stopping {
-            // Here, not in the handler: the daemon stops even if the client
-            // went away. The server stops its processes first, then lets
-            // open requests finish, so this answer still goes out.
-            tracing::info!("Marsa was uninstalled; the daemon stops");
-            daemon.shutdown().cancel();
-        }
         Ok(report)
     })
     .await
-    .map(Json)
 }
 
 /// The uninstall itself. Blocking: it runs programs and deletes files. The
@@ -318,6 +362,7 @@ mod tests {
     use crate::daemon::setup::test_support::{Fake, make_helper, ok, script_error};
     use crate::daemon::setup::windows::{Install, Service};
     use marsa_core::data_dir::DataDir;
+    use marsa_core::types::{Event, JobAccepted, JobOutcome, JobUpdate};
     use std::fs;
     use std::io;
     use std::path::PathBuf;
@@ -821,11 +866,13 @@ mod tests {
             ),
         ];
         for (name, headers, (status, code)) in cases {
-            let (got, json) = app.send("/v1/uninstall", &headers).await;
-            assert_eq!(got, status, "{name}");
-            assert_eq!(json["error"]["code"], code, "{name}");
-            assert!(fake.programs().is_empty(), "{name}");
-            assert!(dir.untouched() && !app.stopping(), "{name}");
+            for path in ["/v1/uninstall", "/v1/jobs/uninstall"] {
+                let (got, json) = app.send(path, &headers).await;
+                assert_eq!(got, status, "{name} {path}");
+                assert_eq!(json["error"]["code"], code, "{name} {path}");
+                assert!(fake.programs().is_empty(), "{name} {path}");
+                assert!(dir.untouched() && !app.stopping(), "{name} {path}");
+            }
         }
         // The same route with the right headers runs: the refusals above
         // came from the auth layer.
@@ -843,7 +890,9 @@ mod tests {
                 StatusCode::NOT_IMPLEMENTED,
                 "uninstall_not_supported".to_owned(),
             );
-            assert_eq!(app.refused("/v1/uninstall").await, refused, "{platform:?}");
+            for path in ["/v1/uninstall", "/v1/jobs/uninstall"] {
+                assert_eq!(app.refused(path).await, refused, "{platform:?} {path}");
+            }
             assert!(dir.untouched() && !app.stopping());
         }
     }
@@ -1182,6 +1231,68 @@ mod tests {
         );
     }
 
+    /// `POST /v1/jobs/uninstall` answers `202` while the helper still waits at
+    /// its prompt; a second uninstall or setup, on either route, gets 409;
+    /// and the end is in the jobs table before the daemon starts to stop, so
+    /// a reader gets `done` and then `shutting_down` (ADR 0026).
+    #[tokio::test]
+    async fn the_job_route_answers_at_once_and_done_comes_before_the_stop() {
+        let dir = Dir::new();
+        let (started, mut prompt_shown) = tokio::sync::mpsc::unbounded_channel();
+        let (go_on, answers) = mpsc::channel::<()>();
+        let answers = Mutex::new(answers);
+        let fake = Fake::with_helper(move || {
+            started.send(()).unwrap();
+            answers.lock().unwrap().recv().unwrap();
+            ok(&answer(&REMOVALS))
+        });
+        let app = App::new(&dir, dir.setup(&fake));
+        let daemon = Arc::clone(&app.daemon);
+        let mut events = daemon.events().subscribe();
+        // What a reader of the stream, and of the table, could find when the
+        // stop begins: the server sends `shutting_down` after this, on the
+        // same channel.
+        let at_the_stop = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move {
+                daemon.shutdown().cancelled().await;
+                daemon.jobs().running().is_empty()
+            }
+        });
+
+        let (status, json) = app.post("/v1/jobs/uninstall").await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{json}");
+        let accepted: JobAccepted = serde_json::from_value(json).unwrap();
+        prompt_shown.recv().await.unwrap();
+        assert!(!app.stopping());
+        assert_eq!(daemon.jobs().running().len(), 1);
+        let busy = (StatusCode::CONFLICT, "uninstall_running".to_owned());
+        for path in [
+            "/v1/uninstall",
+            "/v1/jobs/uninstall",
+            "/v1/setup",
+            "/v1/jobs/setup",
+        ] {
+            assert_eq!(app.refused(path).await, busy, "{path}");
+        }
+
+        go_on.send(()).unwrap();
+        assert!(at_the_stop.await.unwrap());
+        // `done` is already on the stream when the stop begins.
+        let last = loop {
+            match events.try_recv().unwrap() {
+                Event::Job(event) if event.is_last() => break event,
+                _ => {}
+            }
+        };
+        assert_eq!(last.id, accepted.id);
+        assert_eq!(daemon.jobs().get(accepted.id).as_ref(), Some(&last));
+        let JobUpdate::Done(JobOutcome::Uninstall(report)) = last.update else {
+            panic!("not done: {last:?}");
+        };
+        assert!(report.stopping);
+    }
+
     #[tokio::test]
     async fn an_uninstall_while_a_setup_runs_gets_setup_running() {
         let dir = Dir::new();
@@ -1207,7 +1318,9 @@ mod tests {
         });
         prompt_shown.recv().await.unwrap();
         let busy = (StatusCode::CONFLICT, "setup_running".to_owned());
-        assert_eq!(app.refused("/v1/uninstall").await, busy);
+        for path in ["/v1/uninstall", "/v1/jobs/uninstall"] {
+            assert_eq!(app.refused(path).await, busy, "{path}");
+        }
         go_on.send(()).unwrap();
         assert_eq!(setup.await.unwrap(), StatusCode::OK);
         assert!(dir.login_file().is_file() && !app.stopping());

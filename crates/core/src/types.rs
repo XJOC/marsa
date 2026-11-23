@@ -486,6 +486,7 @@ pub struct JobAccepted {
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
     Setup,
+    Uninstall,
     /// A kind a newer daemon knows. An older client still follows the job to
     /// its end by id.
     #[serde(other)]
@@ -509,6 +510,7 @@ pub enum JobStep {
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
 pub enum JobOutcome {
     Setup(SetupReport),
+    Uninstall(UninstallReport),
 }
 
 /// The `status` of a [`JobEvent`]. The last one of a job is `done` or
@@ -902,8 +904,8 @@ mod autostart_tests {
     }
 }
 
-/// The answer to `POST /v1/uninstall`: what `marsa uninstall
-/// --all` removed from the system.
+/// What `marsa uninstall --all` removed from the system: the `done` of the
+/// uninstall job, and the answer of the old `POST /v1/uninstall`.
 ///
 /// One admin prompt runs the helper's `uninstall_all`. Only if the helper
 /// ran does the daemon go on: it takes away the current user's trust in
@@ -1443,6 +1445,20 @@ mod tests {
                 "data": {
                     "id": 4, "kind": "setup", "status": "failed",
                     "code": "internal_error", "message": "the setup job failed",
+                },
+            }),
+        );
+        round_trip(
+            &Event::Job(JobEvent {
+                id: 5,
+                kind: JobKind::Uninstall,
+                update: JobUpdate::Done(JobOutcome::Uninstall(UninstallReport::default())),
+            }),
+            json!({
+                "type": "job",
+                "data": {
+                    "id": 5, "kind": "uninstall", "status": "done", "result": "uninstall",
+                    "data": { "results": [], "stopping": false },
                 },
             }),
         );

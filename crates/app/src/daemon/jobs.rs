@@ -12,6 +12,7 @@
 //! reports, never the token.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -21,8 +22,10 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use marsa_core::codes;
-use marsa_core::types::{JobEvent, JobList};
+use marsa_core::types::{ApiError, JobEvent, JobKind, JobList, JobOutcome, JobStep, JobUpdate};
+use tokio::sync::oneshot;
 
+use super::http;
 use super::http::Rejected as _;
 use super::http::routes::HttpError;
 use super::state::Daemon;
@@ -83,6 +86,76 @@ impl Jobs {
             .or_else(|| table.ended.iter().find(|event| event.id == id))
             .cloned()
     }
+}
+
+/// What the old waiting route of a job answers, sent after the job's last
+/// event.
+pub(super) type Ended<T> = oneshot::Receiver<Result<T, HttpError>>;
+
+/// Starts a job of `kind`: publishes its first event, runs `work` in its own
+/// task (so a client that goes away loses nothing, and a panic still ends
+/// the job with `failed`), then publishes `done` or `failed`. Answers the
+/// id and the receiver the old waiting route reads.
+///
+/// `work` frees the one-at-a-time flag before it ends, so a client that
+/// reads the last event can start the next job at once. `after` runs once
+/// the last event is out, before the old route has its answer, only if the
+/// job ended well: the uninstall stops the daemon there, so a reader gets `done`
+/// before `shutting_down`. `what` names the job in a panic's answer.
+pub(super) fn start<T, W, A>(
+    daemon: &Arc<Daemon>,
+    kind: JobKind,
+    what: &'static str,
+    outcome: fn(T) -> JobOutcome,
+    work: W,
+    after: A,
+) -> (u64, Ended<T>)
+where
+    T: Clone + Send + 'static,
+    W: Future<Output = Result<T, HttpError>> + Send + 'static,
+    A: FnOnce(&Daemon, &T) + Send + 'static,
+{
+    let id = daemon.jobs().next_id();
+    let event = move |update| JobEvent { id, kind, update };
+    daemon.publish_job(event(JobUpdate::Running {
+        step: JobStep::Started,
+    }));
+    let (send, ended) = oneshot::channel();
+    let daemon = Arc::clone(daemon);
+    tokio::spawn(async move {
+        let result = tokio::spawn(work)
+            .await
+            .unwrap_or_else(|err| Err(http::job_failed(what, &err)));
+        let update = match &result {
+            Ok(done) => JobUpdate::Done(outcome(done.clone())),
+            Err(err) => JobUpdate::Failed(ApiError {
+                code: err.code.to_owned(),
+                message: err.message.clone(),
+            }),
+        };
+        daemon.publish_job(event(update));
+        // Before the old route's answer: the uninstall stops the daemon here,
+        // and the server's graceful stop waits for that answer.
+        if let Ok(done) = &result {
+            after(&daemon, done);
+        }
+        // Nobody waits when the job came from a `/v1/jobs/...` route.
+        let _ = send.send(result);
+    });
+    (id, ended)
+}
+
+/// What the old waiting route of a job answers: the job's result, or its
+/// error, once its last event is out. `what` names the job if its task is
+/// gone (only when the daemon's runtime is going away).
+pub(super) async fn wait<T>(ended: Ended<T>, what: &str) -> Result<T, HttpError> {
+    ended.await.unwrap_or_else(|_| {
+        Err(HttpError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            codes::INTERNAL_ERROR,
+            format!("the {what} job did not end"),
+        ))
+    })
 }
 
 /// `GET /v1/jobs` and `GET /v1/jobs/{id}`.

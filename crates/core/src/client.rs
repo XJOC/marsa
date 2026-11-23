@@ -46,8 +46,8 @@ use crate::runtimes::Runtime;
 use crate::types::{
     AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, DoctorReport, ErrorBody,
     Event, Health, HostsStatus, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest,
-    RuntimeList, ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, UninstallReport,
-    Uninstalled, XdebugRequest, XdebugState,
+    RuntimeList, ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, Uninstalled,
+    XdebugRequest, XdebugState,
 };
 use lifecycle::lock_is_held;
 
@@ -419,23 +419,6 @@ impl DaemonClient {
     /// (409) while one of those runs.
     pub async fn sync_hosts(&self) -> Result<SetupReport, ClientError> {
         self.call(Method::POST, &["v1", "hosts", "sync"], HOSTS_SYNC_TIMEOUT)
-            .await
-    }
-
-    /// `POST /v1/uninstall`: one admin prompt for the helper's
-    /// removals, then the user's trust and the login file. Waits until it
-    /// ends, up to 40 minutes ([`UNINSTALL_ALL_TIMEOUT`]). When
-    /// [`UninstallReport::stopping`] is `true` the daemon stops right after
-    /// this answer: [`stop_daemon`] waits until it has.
-    ///
-    /// # Errors
-    ///
-    /// Any [`ClientError`]; `uninstall_running` or `setup_running` (409)
-    /// while one of them runs, and `uninstall_not_supported` (501) on Linux
-    /// and Windows for now. A cancelled prompt is not an error: it is in
-    /// [`UninstallReport::error`].
-    pub async fn uninstall_all(&self) -> Result<UninstallReport, ClientError> {
-        self.call(Method::POST, &["v1", "uninstall"], UNINSTALL_ALL_TIMEOUT)
             .await
     }
 
