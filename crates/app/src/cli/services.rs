@@ -139,6 +139,7 @@ pub fn render(services: &[ServiceStatus], data_dir: &Path) -> String {
             ServerKind::Postgres => strings::postgres_connection(port),
             ServerKind::Mysql => strings::mysql_connection(port),
             ServerKind::Valkey => strings::valkey_connection(port),
+            ServerKind::Mailpit => strings::mailpit_connection(port),
         };
         text.push('\n');
         text.push_str(&lines);

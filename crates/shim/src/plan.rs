@@ -49,13 +49,14 @@ const SERVER_HOST: &str = "127.0.0.1";
 ///   is the superuser's alone.
 /// - MySQL: `MYSQL_HOST` and `MYSQL_TCP_PORT`, so the client uses TCP and
 ///   not its default socket in `/tmp`, which is not Marsa's.
+/// - Mailpit has no client program; none.
 /// - Valkey: none. `valkey-cli` reads no such variable: [`valkey_args`] gives
 ///   its port as an argument instead.
 pub(crate) fn server_env(server: ServerKind, port: u16) -> Vec<(&'static str, String)> {
     let (host, port_var, user) = match server {
         ServerKind::Postgres => ("PGHOST", "PGPORT", Some(("PGUSER", "root"))),
         ServerKind::Mysql => ("MYSQL_HOST", "MYSQL_TCP_PORT", None),
-        ServerKind::Valkey => return Vec::new(),
+        ServerKind::Valkey | ServerKind::Mailpit => return Vec::new(),
     };
     let mut vars = vec![(host, SERVER_HOST.to_owned()), (port_var, port.to_string())];
     vars.extend(user.map(|(name, value)| (name, value.to_owned())));

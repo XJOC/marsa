@@ -49,6 +49,7 @@ pub(super) fn spec(program: PathBuf, dirs: &MysqlDirs, os: Os, stop: StopMethod)
         program,
         args: mysqld_args(&dirs.config(), os),
         env: std::collections::BTreeMap::new(),
+        env_remove: Vec::new(),
         cwd: None,
         restart: RestartPolicy::Never,
         stop,

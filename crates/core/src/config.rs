@@ -38,6 +38,10 @@ pub struct GlobalConfig {
     pub mysql: ServerSettings,
     #[serde(skip_serializing_if = "is_default")]
     pub valkey: ServerSettings,
+    /// The mail catcher. Its `port` is the SMTP port; the web page's port is
+    /// fixed ([`crate::databases::mailpit::MAILPIT_UI_PORT`]).
+    #[serde(skip_serializing_if = "is_default")]
+    pub mailpit: ServerSettings,
 }
 
 /// The `[php]` or `[node]` table in `global.toml`. One table per tool leaves
@@ -483,6 +487,7 @@ mod tests {
             postgres: ServerSettings::default(),
             mysql: ServerSettings::default(),
             valkey: ServerSettings::default(),
+            mailpit: ServerSettings::default(),
         }
     }
 

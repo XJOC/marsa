@@ -141,6 +141,7 @@ pub fn fpm_spec(program: PathBuf, files: &PhpFiles) -> ServiceSpec {
             path(&files.ini_file),
         ],
         env: BTreeMap::new(),
+        env_remove: Vec::new(),
         cwd: None,
         restart: RESTART,
         stop: StopMethod::term(STOP_GRACE),

@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use marsa_core::config::ServerSettings;
+use marsa_core::databases::mailpit::{MAILPIT_UI_PORT, mailpit_database};
 use marsa_core::databases::mysql::{
     MysqlDirs, decide_mysql_start, my_cnf, mysql_stop, mysql_windows_stop, mysqld_pid,
 };
@@ -21,7 +22,7 @@ use tracing::{info, warn};
 use super::super::facts::{port_facts, start_facts};
 use super::super::init::{self, InitError, installed_servers};
 use super::super::settings::read_settings;
-use super::super::{mysql, orphan, postgres, valkey};
+use super::super::{mailpit, mysql, orphan, postgres, valkey};
 use super::run::Refusal;
 use super::{ActionError, ServerManager};
 use crate::daemon::services::supervisor::lock;
@@ -99,6 +100,7 @@ impl ServerManager {
             ServerKind::Postgres => self.prepare_postgres(daemon, chosen).await,
             ServerKind::Mysql => self.prepare_mysql(daemon, chosen).await,
             ServerKind::Valkey => self.prepare_valkey(daemon, chosen).await,
+            ServerKind::Mailpit => self.prepare_mailpit(daemon, chosen).await,
         }
     }
 
@@ -273,6 +275,41 @@ impl ServerManager {
         info!(%version, port, "starting valkey");
         Ok(Prepared {
             spec,
+            servers,
+            refusal: Refusal::None,
+            port,
+        })
+    }
+
+    /// [`Self::prepare`] for Mailpit: the check of both its ports, SMTP and
+    /// the web page, then its mail folder. Mailpit has no pid file of its own
+    /// and no lock, so the ports are the whole check, after our own record of
+    /// its pid ([`orphan::clear`]). Another mail catcher on either port
+    /// (Herd's, Docker's) refuses the start with its name.
+    async fn prepare_mailpit(
+        &self,
+        daemon: &Daemon,
+        chosen: Chosen,
+    ) -> Result<Prepared, ActionError> {
+        let Chosen {
+            version,
+            server,
+            servers,
+            port,
+            ..
+        } = chosen;
+        let kind = self.kind;
+        for checked in [port, MAILPIT_UI_PORT] {
+            let facts = port_facts(&*self.probes, checked).await;
+            self.decide(&facts, decide_start)?;
+        }
+        let database = mailpit_database(daemon.data_dir());
+        mailpit::make_folder(&database).await.map_err(|err| {
+            ActionError::Init(InitError::io(kind, "cannot make the mail folder", &err))
+        })?;
+        info!(%version, port, "starting mailpit");
+        Ok(Prepared {
+            spec: mailpit::spec(server, port, &database),
             servers,
             refusal: Refusal::None,
             port,

@@ -48,6 +48,20 @@ pub fn valkey_connection(port: u16) -> String {
     )
 }
 
+/// The lines under the table while Mailpit runs: how a Laravel `.env`
+/// sends its mail there, and where to read it. Laravel's own default port
+/// is 2525, so then `MAIL_MAILER=smtp` is enough.
+pub fn mailpit_connection(port: u16) -> String {
+    format!(
+        "mailpit: SMTP on 127.0.0.1:{port}, any user or none. Mail stays on this computer.\n\
+         Read it at http://127.0.0.1:{ui}. For a Laravel .env:\n\
+         MAIL_MAILER=smtp\n\
+         MAIL_HOST=127.0.0.1\n\
+         MAIL_PORT={port}",
+        ui = marsa_core::databases::mailpit::MAILPIT_UI_PORT
+    )
+}
+
 /// The lines under the table while PostgreSQL runs: how a Laravel `.env`
 /// connects to it. `root` is not a superuser (ADR 0023, "Access").
 pub fn postgres_connection(port: u16) -> String {

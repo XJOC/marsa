@@ -99,6 +99,7 @@ impl InitError {
             ServerKind::Postgres => codes::POSTGRES_INIT_FAILED,
             ServerKind::Mysql => codes::MYSQL_INIT_FAILED,
             ServerKind::Valkey => codes::VALKEY_INIT_FAILED,
+            ServerKind::Mailpit => codes::MAILPIT_INIT_FAILED,
         }
     }
 

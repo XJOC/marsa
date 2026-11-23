@@ -84,6 +84,7 @@ pub(super) fn spec(
         program,
         args: postgres_args(dirs, port),
         env: std::collections::BTreeMap::new(),
+        env_remove: Vec::new(),
         cwd: None,
         restart: RestartPolicy::Never,
         stop,

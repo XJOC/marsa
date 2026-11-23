@@ -76,6 +76,7 @@ pub struct Daemon {
     mysql: ServerManager,
     /// Valkey, the same way.
     valkey: ServerManager,
+    mailpit: ServerManager,
     /// The DNS server for `.test`. Not listed here;
     /// `server::run` sets [`DnsService::for_daemon`].
     dns: DnsService,
@@ -113,6 +114,7 @@ impl Daemon {
             postgres: ServerManager::new(ServerKind::Postgres),
             mysql: ServerManager::new(ServerKind::Mysql),
             valkey: ServerManager::new(ServerKind::Valkey),
+            mailpit: ServerManager::new(ServerKind::Mailpit),
             dns: DnsService::new(None),
             pools: Pools::default(),
             pass_requests: PassRequests::default(),
@@ -214,6 +216,7 @@ impl Daemon {
             ServerKind::Postgres => &mut self.postgres,
             ServerKind::Mysql => &mut self.mysql,
             ServerKind::Valkey => &mut self.valkey,
+            ServerKind::Mailpit => &mut self.mailpit,
         }
     }
 
@@ -235,6 +238,7 @@ impl Daemon {
             ServerKind::Postgres => &self.postgres,
             ServerKind::Mysql => &self.mysql,
             ServerKind::Valkey => &self.valkey,
+            ServerKind::Mailpit => &self.mailpit,
         }
     }
 
