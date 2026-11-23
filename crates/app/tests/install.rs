@@ -1,6 +1,6 @@
 //! `marsa install` and `marsa runtimes` through the daemon,
 //! `marsa use` with its route, `PUT /v1/runtimes/{tool}/default`,
-//! and `marsa uninstall` with `DELETE /v1/runtimes/{tool}/{version}`.
+//! and `marsa uninstall` with its job route and `DELETE /v1/runtimes/{tool}/{version}`.
 //!
 //! The real `marsa` binary talks to the real router, auth layer, and runtimes
 //! routes, served in this process on `127.0.0.1` for a temp data folder, with
@@ -1348,12 +1348,16 @@ async fn the_uninstall_job_refuses_at_once_and_ends_with_the_version() {
             StatusCode::ACCEPTED,
         )
         .await;
-    let last = loop {
-        match events.recv().await.expect("an event") {
-            Event::Job(event) if event.id == accepted.id && event.is_last() => break event,
-            _ => {}
+    let last = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match events.recv().await.expect("an event") {
+                Event::Job(event) if event.id == accepted.id && event.is_last() => break event,
+                _ => {}
+            }
         }
-    };
+    })
+    .await
+    .expect("the job ends");
     let JobUpdate::Done(JobOutcome::RuntimeUninstall(done)) = last.update else {
         panic!("not done: {last:?}");
     };

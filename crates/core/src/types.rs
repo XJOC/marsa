@@ -400,8 +400,9 @@ pub struct DefaultVersion {
     pub version: String,
 }
 
-/// The answer to `DELETE /v1/runtimes/{tool}/{version}`: the
-/// version whose folder is gone.
+/// What an uninstall of a runtime version ends with: the version whose
+/// folder is gone. The `done` of the job, and the answer of the old
+/// `DELETE /v1/runtimes/{tool}/{version}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Uninstalled {
     pub runtime: Runtime,
@@ -409,7 +410,7 @@ pub struct Uninstalled {
     pub version: String,
 }
 
-/// Why `DELETE /v1/runtimes/{tool}/{version}` refused a version: the facts
+/// Why an uninstall of a runtime version was refused: the facts
 /// of its 409, with the code [`VersionInUse::code`]. At least one of the
 /// last four is set.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

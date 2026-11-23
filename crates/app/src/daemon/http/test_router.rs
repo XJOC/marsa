@@ -34,11 +34,6 @@ impl TestRouter {
         }
     }
 
-    /// The `Authorization` header value of the right token.
-    pub(crate) fn bearer(&self) -> &str {
-        &self.bearer
-    }
-
     /// A request with the right `Host` and no token.
     pub(crate) fn builder(&self, method: &str, uri: &str) -> request::Builder {
         Request::builder()
@@ -66,6 +61,38 @@ impl TestRouter {
         }
         let body = body.map_or_else(Body::empty, |json| Body::from(json.to_string()));
         self.call(request.body(body).unwrap()).await
+    }
+
+    /// The refusals of the auth layer for `POST uri`: no token, a wrong
+    /// token (401), an `Origin`, and another `Host` (403). Each answer is
+    /// checked here; the caller checks that nothing changed.
+    pub(crate) async fn assert_post_refused_without_auth(&self, uri: &str) {
+        let wrong = Token::generate().unwrap().bearer_header();
+        let other_host = daemon_authority(PORT + 1);
+        let cases = [
+            (self.builder("POST", uri), StatusCode::UNAUTHORIZED),
+            (
+                self.builder("POST", uri).header("authorization", &wrong),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                self.authorized("POST", uri)
+                    .header("origin", "http://evil.test"),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("host", other_host)
+                    .header("authorization", &self.bearer),
+                StatusCode::FORBIDDEN,
+            ),
+        ];
+        for (request, want) in cases {
+            let response = self.call(request.body(Body::empty()).unwrap()).await;
+            assert_eq!(response.status(), want, "{uri}");
+        }
     }
 
     /// The status and the JSON body of `send`.

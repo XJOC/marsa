@@ -1,4 +1,7 @@
-//! `DELETE /v1/runtimes/{tool}/{version}`: the checks, and the uninstall itself.
+//! `POST /v1/jobs/runtimes/{tool}/{version}/uninstall` and its old waiting
+//! form `DELETE /v1/runtimes/{tool}/{version}` (ADR 0026): the checks and the
+//! move aside are the answer of the request, the rest of the uninstall is
+//! the job.
 
 use marsa_core::codes;
 use std::path::Path;
@@ -403,8 +406,6 @@ mod tests {
     #[tokio::test]
     async fn the_job_route_needs_the_token_and_refuses_an_origin() {
         use crate::daemon::http::test_router::TestRouter;
-        use axum::body::Body;
-        use marsa_core::platform::daemon_file::{Token, daemon_authority};
 
         let tmp = tempfile::tempdir().unwrap();
         let version_dir =
@@ -412,30 +413,8 @@ mod tests {
         std::fs::create_dir_all(&version_dir).unwrap();
         let daemon = Arc::new(Daemon::new(tmp.path().to_path_buf()));
         let app = TestRouter::new(Arc::clone(&daemon));
-        let uri = "/v1/jobs/runtimes/node/22.11.0/uninstall";
-        let wrong = Token::generate().unwrap().bearer_header();
-        let request = app.builder("POST", uri).body(Body::empty()).unwrap();
-        assert_eq!(app.call(request).await.status(), StatusCode::UNAUTHORIZED);
-        let request = app
-            .builder("POST", uri)
-            .header("authorization", &wrong)
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(app.call(request).await.status(), StatusCode::UNAUTHORIZED);
-        let request = app
-            .authorized("POST", uri)
-            .header("origin", "http://evil.test")
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(app.call(request).await.status(), StatusCode::FORBIDDEN);
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri(uri)
-            .header("host", daemon_authority(1))
-            .header("authorization", app.bearer())
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(app.call(request).await.status(), StatusCode::FORBIDDEN);
+        app.assert_post_refused_without_auth("/v1/jobs/runtimes/node/22.11.0/uninstall")
+            .await;
         assert!(version_dir.is_dir(), "a refusal changes nothing");
         assert_eq!(daemon.jobs().get(1), None);
     }

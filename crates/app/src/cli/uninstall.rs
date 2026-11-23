@@ -1,5 +1,5 @@
 //! `marsa uninstall <tool> <version>`: deletes an installed version, through
-//! `DELETE /v1/runtimes/{tool}/{version}`.
+//! `POST /v1/jobs/runtimes/{tool}/{version}/uninstall`.
 //!
 //! The daemon refuses a version in use: the default, a site's own setting,
 //! or the running Caddy. Its answer says which, and this command prints it.
