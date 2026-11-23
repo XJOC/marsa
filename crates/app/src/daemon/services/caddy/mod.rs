@@ -77,6 +77,7 @@ pub fn caddy_spec_for(paths: &CaddyPaths, program: PathBuf) -> ServiceSpec {
             paths.config_file.to_string_lossy().into_owned(),
         ],
         env: caddy_env(paths),
+        env_remove: Vec::new(),
         cwd: None,
         restart: RESTART,
         stop: StopMethod::term(STOP_GRACE),

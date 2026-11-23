@@ -1,5 +1,5 @@
 //! The database servers of `marsad` (ADR 0023), on macOS, Linux, and
-//! Windows: PostgreSQL, MySQL, and Valkey. `marsa_core::databases` decides;
+//! Windows: PostgreSQL, MySQL, and Valkey, and the mail catcher Mailpit. `marsa_core::databases` decides;
 //! this module runs the programs.
 //!
 //! The first start of a line makes its data folder (`init::ensure_data`):
@@ -28,6 +28,7 @@
 pub mod client_shims;
 mod facts;
 mod init;
+mod mailpit;
 mod manager;
 mod mysql;
 mod orphan;

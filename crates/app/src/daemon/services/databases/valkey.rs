@@ -54,6 +54,7 @@ pub(super) fn spec(
         program,
         args: valkey_args(&dirs.config(), os)?,
         env: valkey_env(os).into_iter().collect(),
+        env_remove: Vec::new(),
         cwd: None,
         restart: RestartPolicy::Never,
         stop: valkey_stop(port),

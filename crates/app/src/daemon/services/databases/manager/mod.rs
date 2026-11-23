@@ -91,7 +91,7 @@ impl ServerManager {
             probes: Arc::new(SystemProbe),
             ready_limit: match kind {
                 ServerKind::Mysql => MYSQL_READY_LIMIT,
-                ServerKind::Postgres | ServerKind::Valkey => READY_LIMIT,
+                ServerKind::Postgres | ServerKind::Valkey | ServerKind::Mailpit => READY_LIMIT,
             },
             platform: Platform::current(),
             orphan_ladder: kind.stop(),
@@ -355,6 +355,7 @@ impl ServerManager {
                 ServerKind::Postgres => codes::POSTGRES_START_TIMEOUT,
                 ServerKind::Mysql => codes::MYSQL_START_TIMEOUT,
                 ServerKind::Valkey => codes::VALKEY_START_TIMEOUT,
+                ServerKind::Mailpit => codes::MAILPIT_START_TIMEOUT,
             };
             self.fail(daemon.events(), code, &reason);
         }

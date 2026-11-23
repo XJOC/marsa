@@ -24,6 +24,9 @@ pub struct ServiceSpec {
     pub args: Vec<String>,
     /// Added to the daemon's own environment.
     pub env: BTreeMap<String, String>,
+    /// Taken out of the daemon's own environment: names the program would
+    /// read as settings, such as Mailpit's `MP_*`.
+    pub env_remove: Vec<String>,
     /// The working folder. `None` keeps the daemon's.
     pub cwd: Option<PathBuf>,
     pub restart: RestartPolicy,

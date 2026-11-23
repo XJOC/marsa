@@ -136,11 +136,11 @@ fn service_ids_are_their_text_and_nothing_else_parses() {
         "php-fpm-8.4.1",
         "php-fpm-+8.4",
         "my-php-fpm-8.4",
-        "mailpit",
+        "mailhog",
     ] {
         assert_eq!(text.parse::<ServiceId>(), Err(UnknownService(text.into())));
     }
-    assert!(serde_json::from_value::<ServiceId>(json!("mailpit")).is_err());
+    assert!(serde_json::from_value::<ServiceId>(json!("mailhog")).is_err());
 }
 
 #[test]

@@ -54,6 +54,7 @@ pub(super) fn stuck_code(kind: ServerKind) -> &'static str {
         ServerKind::Postgres => codes::POSTGRES_ORPHAN_STUCK,
         ServerKind::Mysql => codes::MYSQL_ORPHAN_STUCK,
         ServerKind::Valkey => codes::VALKEY_ORPHAN_STUCK,
+        ServerKind::Mailpit => codes::MAILPIT_ORPHAN_STUCK,
     }
 }
 

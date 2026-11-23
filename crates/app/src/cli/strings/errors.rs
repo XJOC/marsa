@@ -346,6 +346,22 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
              control character, which MySQL's settings file cannot hold, so MySQL was not \
              started. Run \"marsa logs mysql\" to see the path."
             .into(),
+        // Mailpit, the same way.
+        "mailpit_not_installed" => "Mailpit is not installed. Run \"marsa install mailpit\", \
+             then try again."
+            .into(),
+        "mailpit_init_failed" => "Marsa could not make Mailpit's mail folder. Run \
+             \"marsa logs mailpit\" to see why."
+            .into(),
+        "mailpit_start_timeout" => "Mailpit started but did not greet on its SMTP port in time, \
+             so it was stopped. Run \"marsa logs mailpit\" to see why."
+            .into(),
+        "mailpit_orphan_stuck" => "An old Mailpit of this Marsa, left running when the Marsa \
+             daemon stopped, still runs after SIGKILL, or can no longer be told apart from \
+             another program. Run \"marsa logs mailpit\" to see its pid; quit that process in \
+             your system's process list only if it is mailpit, then try again."
+            .into(),
+        "mailpit_unsupported_platform" => "Marsa has no Mailpit for this system.".into(),
         // Valkey, the same way.
         "valkey_not_installed" => "Valkey of the version set in global.toml is not installed. \
              Run \"marsa install valkey\", then try again."

@@ -58,6 +58,7 @@ pub fn pool_with(files: PhpFiles) -> Result<Pool, Skip> {
         program: plan.program,
         args: plan.args,
         env: plan.env,
+        env_remove: Vec::new(),
         cwd: None,
         // Like Caddy and php-fpm. A worker that reaches its request limit is
         // replaced by php-cgi itself; only the end of php-cgi counts here.

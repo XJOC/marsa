@@ -1154,7 +1154,7 @@ fn a_pool_id_gives_its_program_and_its_php_line() {
     let cgi = ServiceId::Pool(PoolKind::Cgi, line(8, 3));
     assert_eq!("php-fpm-8.4".parse(), Ok(fpm));
     assert_eq!("php-cgi-8.3".parse(), Ok(cgi));
-    for id in ["php-fpm", "mailpit", "", "php-fpm-8", "php-fpm-08.4"] {
+    for id in ["php-fpm", "mailhog", "", "php-fpm-8", "php-fpm-08.4"] {
         assert!(id.parse::<ServiceId>().is_err(), "{id}");
     }
 }

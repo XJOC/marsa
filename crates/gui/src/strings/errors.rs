@@ -480,6 +480,11 @@ pub(super) fn error_message(code: &str) -> Option<&'static str> {
         }
         "mysql_start_timeout" => "MySQL started but took no connections in time.",
         "mysql_unsupported_platform" => "Marsa has no MySQL for this system.",
+        "mailpit_init_failed" => "Marsa could not make Mailpit's mail folder.",
+        "mailpit_not_installed" => "Mailpit is not installed.",
+        "mailpit_orphan_stuck" => "An old Mailpit of this Marsa still runs and did not stop.",
+        "mailpit_start_timeout" => "Mailpit started but did not answer in time.",
+        "mailpit_unsupported_platform" => "Marsa has no Mailpit for this system.",
         "valkey_init_failed" => "Marsa could not make Valkey's data folder or settings file.",
         "valkey_not_installed" => "Valkey of the version set in global.toml is not installed.",
         "valkey_orphan_stuck" => "An old Valkey of this Marsa still runs and did not stop.",
