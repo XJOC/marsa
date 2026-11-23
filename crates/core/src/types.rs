@@ -400,8 +400,9 @@ pub struct DefaultVersion {
     pub version: String,
 }
 
-/// The answer to `DELETE /v1/runtimes/{tool}/{version}`: the
-/// version whose folder is gone.
+/// What an uninstall of a runtime version ends with: the version whose
+/// folder is gone. The `done` of the job, and the answer of the old
+/// `DELETE /v1/runtimes/{tool}/{version}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Uninstalled {
     pub runtime: Runtime,
@@ -409,7 +410,7 @@ pub struct Uninstalled {
     pub version: String,
 }
 
-/// Why `DELETE /v1/runtimes/{tool}/{version}` refused a version: the facts
+/// Why an uninstall of a runtime version was refused: the facts
 /// of its 409, with the code [`VersionInUse::code`]. At least one of the
 /// last four is set.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -489,6 +490,7 @@ pub enum JobKind {
     Uninstall,
     HostsSync,
     ServiceAction,
+    RuntimeUninstall,
     /// A kind a newer daemon knows. An older client still follows the job to
     /// its end by id.
     #[serde(other)]
@@ -515,6 +517,7 @@ pub enum JobOutcome {
     Uninstall(UninstallReport),
     HostsSync(SetupReport),
     ServiceAction(ServiceStatus),
+    RuntimeUninstall(Uninstalled),
 }
 
 /// The `status` of a [`JobEvent`]. The last one of a job is `done` or
@@ -1550,6 +1553,24 @@ mod tests {
             serde_json::from_value(json!({ "code": "x", "message": "y", "http_status": 409 }))
                 .unwrap();
         assert_eq!((old.code.as_str(), old.message.as_str()), ("x", "y"));
+        round_trip(
+            &Event::Job(JobEvent {
+                id: 9,
+                kind: JobKind::RuntimeUninstall,
+                update: JobUpdate::Done(JobOutcome::RuntimeUninstall(Uninstalled {
+                    runtime: Runtime::Node,
+                    version: "22.11.0".into(),
+                })),
+            }),
+            json!({
+                "type": "job",
+                "data": {
+                    "id": 9, "kind": "runtime_uninstall", "status": "done",
+                    "result": "runtime_uninstall",
+                    "data": { "runtime": "node", "version": "22.11.0" },
+                },
+            }),
+        );
         let running = JobEvent {
             id: 1,
             kind: JobKind::Setup,

@@ -17,7 +17,7 @@ use axum::extract::{RawQuery, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use marsa_core::client::{
     ClientError, DaemonClient, EventStream, StreamItem, ensure_running, ensure_running_with,
@@ -669,38 +669,55 @@ async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
         sites_left_without_php: vec!["shop\u{1b}[2J".into()],
         ..VersionInUse::default()
     };
-    let router = Router::new().route(
-        "/v1/runtimes/php/{version}",
-        delete({
-            let in_use = in_use.clone();
-            let left = left.clone();
-            move |axum::extract::Path(version): axum::extract::Path<String>| async move {
-                if version == "8.4.1" {
-                    let done = Uninstalled {
-                        runtime: Runtime::Php,
-                        version,
+    // The job ends with `done` for 8.4.1; the checks refuse the others with
+    // the `POST` itself.
+    let done = Uninstalled {
+        runtime: Runtime::Php,
+        version: "8.4.1".into(),
+    };
+    let ended = Event::Job(job(1, JobUpdate::Done(JobOutcome::RuntimeUninstall(done))));
+    let router = Router::new()
+        .route(
+            "/v1/events",
+            get(move || {
+                let body = sse_body(std::slice::from_ref(&ended));
+                async move { sse_response(body) }
+            }),
+        )
+        .route(
+            "/v1/jobs/runtimes/php/{version}/uninstall",
+            post({
+                let in_use = in_use.clone();
+                let left = left.clone();
+                move |axum::extract::Path(version): axum::extract::Path<String>| async move {
+                    if version == "8.4.1" {
+                        return (StatusCode::ACCEPTED, Json(JobAccepted { id: 1 })).into_response();
+                    }
+                    let (code, in_use) = match version.as_str() {
+                        "8.2" => ("sites_lose_php", left),
+                        _ => ("version_in_use", in_use),
                     };
-                    return Json(done).into_response();
+                    let mut body = ErrorBody::new(code, "php is in use");
+                    body.in_use = Some(in_use);
+                    (StatusCode::CONFLICT, Json(body)).into_response()
                 }
-                let (code, in_use) = match version.as_str() {
-                    "8.2" => ("sites_lose_php", left),
-                    _ => ("version_in_use", in_use),
-                };
-                let mut body = ErrorBody::new(code, "php is in use");
-                body.in_use = Some(in_use);
-                (StatusCode::CONFLICT, Json(body)).into_response()
-            }
-        }),
-    );
+            }),
+        );
     let fake = Fake::start(router).await;
     let client = fake.client();
-    let done = client.uninstall(Runtime::Php, "8.4.1").await.unwrap();
+    let done = client
+        .run_runtime_uninstall(Runtime::Php, "8.4.1")
+        .await
+        .unwrap();
     assert_eq!(
         (done.runtime, done.version.as_str()),
         (Runtime::Php, "8.4.1")
     );
 
-    let err = client.uninstall(Runtime::Php, "8.3").await.unwrap_err();
+    let err = client
+        .run_runtime_uninstall(Runtime::Php, "8.3")
+        .await
+        .unwrap_err();
     assert_eq!(err.code(), "version_in_use");
     let ClientError::InUse { in_use: got, .. } = &err else {
         panic!("{err:?}");
@@ -713,7 +730,10 @@ async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
     assert_eq!(**got, want);
     fake.assert_no_token(&err);
 
-    let err = client.uninstall(Runtime::Php, "8.2").await.unwrap_err();
+    let err = client
+        .run_runtime_uninstall(Runtime::Php, "8.2")
+        .await
+        .unwrap_err();
     assert_eq!(err.code(), "sites_lose_php");
     let ClientError::InUse { in_use: got, .. } = &err else {
         panic!("{err:?}");
@@ -723,9 +743,12 @@ async fn uninstall_deletes_and_an_in_use_refusal_keeps_its_facts() {
     assert_eq!(
         targets,
         [
-            "DELETE /v1/runtimes/php/8.4.1",
-            "DELETE /v1/runtimes/php/8.3",
-            "DELETE /v1/runtimes/php/8.2"
+            "GET /v1/events",
+            "POST /v1/jobs/runtimes/php/8.4.1/uninstall",
+            "GET /v1/events",
+            "POST /v1/jobs/runtimes/php/8.3/uninstall",
+            "GET /v1/events",
+            "POST /v1/jobs/runtimes/php/8.2/uninstall"
         ]
     );
 }

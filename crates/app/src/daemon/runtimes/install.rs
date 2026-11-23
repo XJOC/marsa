@@ -46,8 +46,8 @@ impl Started {
         Some(started)
     }
 
-    /// The same right for an uninstall, which has no id. No lock: one atomic
-    /// swap.
+    /// The same right for an uninstall, which takes its job id from
+    /// `jobs::start`. No lock: one atomic swap.
     pub(super) fn claim(daemon: &Arc<Daemon>) -> Option<Self> {
         let turn = OneAtATime::take(&daemon.installs().running, NonZeroU8::MIN).ok()?;
         Some(Self {

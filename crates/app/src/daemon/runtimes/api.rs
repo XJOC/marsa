@@ -5,7 +5,8 @@
 //! | `GET /v1/runtimes` | `RuntimeList`: the installed versions and the default of each runtime |
 //! | `POST /v1/runtimes/{tool}/install` | 202 `InstallAccepted`, then `install` events on `/v1/events` |
 //! | `PUT /v1/runtimes/{tool}/default` | `DefaultVersion`: the new default of PHP or Node |
-//! | `DELETE /v1/runtimes/{tool}/{version}` | `Uninstalled`: the version whose folder is gone |
+//! | `POST /v1/jobs/runtimes/{tool}/{version}/uninstall` | `202 JobAccepted`; the end is a `job` event with the `Uninstalled` |
+//! | `DELETE /v1/runtimes/{tool}/{version}` | The same job, answered with `Uninstalled` when it ends (clients before ADR 0026) |
 //!
 //! The daemon runs the installer (`marsa_core::installer::install`) in a task
 //! of its own and sends each `InstallEvent` on the event bus. The last event
@@ -70,7 +71,7 @@ use marsa_core::runtimes::{Runtime, RuntimesDir, RuntimesError};
 use marsa_core::types::{DefaultRequest, DefaultVersion, Event, RuntimeList, RuntimeVersions};
 
 use super::install::install;
-use super::remove::uninstall;
+use super::remove::{uninstall, uninstall_job};
 use crate::daemon::http::routes::HttpError;
 use crate::daemon::http::{self, Rejected as _, global_error};
 use crate::daemon::state::Daemon;
@@ -81,6 +82,10 @@ pub fn routes() -> Router<Arc<Daemon>> {
         .route("/v1/runtimes", get(runtimes))
         .route("/v1/runtimes/{tool}/install", post(install))
         .route("/v1/runtimes/{tool}/default", put(set_default))
+        .route(
+            "/v1/jobs/runtimes/{tool}/{version}/uninstall",
+            post(uninstall_job),
+        )
         .route("/v1/runtimes/{tool}/{version}", delete(uninstall))
 }
 

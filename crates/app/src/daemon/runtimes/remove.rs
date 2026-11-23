@@ -1,4 +1,7 @@
-//! `DELETE /v1/runtimes/{tool}/{version}`: the checks, and the uninstall itself.
+//! `POST /v1/jobs/runtimes/{tool}/{version}/uninstall` and its old waiting
+//! form `DELETE /v1/runtimes/{tool}/{version}` (ADR 0026): the checks and the
+//! move aside are the answer of the request, the rest of the uninstall is
+//! the job.
 
 use marsa_core::codes;
 use std::path::Path;
@@ -13,27 +16,61 @@ use marsa_core::databases::ServerKind;
 use marsa_core::installer::uninstall::{self, Retired, UninstallError};
 use marsa_core::resolver::{self, Tool};
 use marsa_core::runtimes::{Runtime, RuntimesDir};
-use marsa_core::types::{SiteKind, Uninstalled, VersionInUse};
+use marsa_core::types::{JobAccepted, JobKind, JobOutcome, SiteKind, Uninstalled, VersionInUse};
 use semver::Version;
 
 use super::api::{bad_version, default_tool, defaults_mut, runtime};
 use super::install::{Started, busy};
 use crate::daemon::http::routes::HttpError;
 use crate::daemon::http::{self, Rejected as _, global_error};
+use crate::daemon::jobs;
 use crate::daemon::services::databases::client_shims;
 use crate::daemon::services::php::{fpm_id, wanted_pools};
 use crate::daemon::state::Daemon;
 
+/// The old waiting route (API v1 keeps it, ADR 0026): the same job, answered
+/// with the version when it ends.
 pub(super) async fn uninstall(
     State(daemon): State<Arc<Daemon>>,
     path: Result<UrlPath<(String, String)>, PathRejection>,
 ) -> Result<Json<Uninstalled>, HttpError> {
+    let (_, ended) = begin(&daemon, path).await?;
+    jobs::answer(ended, "runtime uninstall").await
+}
+
+/// `POST /v1/jobs/runtimes/{tool}/{version}/uninstall`: `202` and the job's
+/// id once the checks passed and the folder is moved aside; every refusal
+/// (`version_in_use` with its facts, `sites_lose_php`, `install_busy`, ...)
+/// is the answer of this request, as for the old route.
+pub(super) async fn uninstall_job(
+    State(daemon): State<Arc<Daemon>>,
+    path: Result<UrlPath<(String, String)>, PathRejection>,
+) -> Result<(StatusCode, Json<JobAccepted>), HttpError> {
+    Ok(jobs::accepted(begin(&daemon, path).await?))
+}
+
+/// The checks and the move aside, then the job for the rest. In a task of
+/// its own, so a client that hangs up cannot stop it between the rename and
+/// the start of the job that deletes the folder.
+async fn begin(
+    daemon: &Arc<Daemon>,
+    path: Result<UrlPath<(String, String)>, PathRejection>,
+) -> Result<(u64, jobs::Ended<Uninstalled>), HttpError> {
     let UrlPath((tool, text)) = path.map_err(|err| err.reject(codes::INVALID_PATH))?;
     let runtime = runtime(&tool)?;
-    let started = Started::claim(&daemon).ok_or_else(busy)?;
-    // A task of its own, so a client that hangs up cannot stop it between
-    // the rename and the delete.
-    let task = tokio::spawn(remove_version(started, runtime, text));
+    let started = Started::claim(daemon).ok_or_else(busy)?;
+    let worker = Arc::clone(daemon);
+    let task = tokio::spawn(async move {
+        let retiring = retire(started, runtime, text).await?;
+        Ok(jobs::start(
+            &worker,
+            JobKind::RuntimeUninstall,
+            "runtime uninstall",
+            JobOutcome::RuntimeUninstall,
+            finish(retiring),
+            |_, _| {},
+        ))
+    });
     task.await.unwrap_or_else(|err| {
         tracing::error!(error = %err, "the uninstall task failed");
         let message = "the uninstall task failed";
@@ -45,13 +82,18 @@ pub(super) async fn uninstall(
     })
 }
 
-/// The uninstall, from the checks to the new site list. `started` keeps
-/// installs out until the end.
-async fn remove_version(
+/// A version moved aside: nothing finds it any more, and the rest of its
+/// uninstall is still to do. `started` keeps installs out until the end.
+struct Retiring {
     started: Started,
     runtime: Runtime,
-    text: String,
-) -> Result<Json<Uninstalled>, HttpError> {
+    version: Version,
+    retired: Retired,
+    server_kind: Option<ServerKind>,
+}
+
+/// The checks, from the install's guard to the move aside.
+async fn retire(started: Started, runtime: Runtime, text: String) -> Result<Retiring, HttpError> {
     let daemon = Arc::clone(&started.daemon);
     // A start in a database server's turn may be about to run a version, and is
     // not in `running_program` yet. Held until the folder is moved aside: a
@@ -99,6 +141,26 @@ async fn remove_version(
         let tool = runtime.dir_name();
         tracing::info!(runtime = tool, %default, "cleared the default of the last version");
     }
+    Ok(Retiring {
+        started,
+        runtime,
+        version,
+        retired,
+        server_kind,
+    })
+}
+
+/// The rest of the uninstall: the pools, the delete, the clients, and the
+/// new site list.
+async fn finish(retiring: Retiring) -> Result<Uninstalled, HttpError> {
+    let Retiring {
+        started,
+        runtime,
+        version,
+        retired,
+        server_kind,
+    } = retiring;
+    let daemon = Arc::clone(&started.daemon);
     // The version is hidden now, so no pool can start with it again.
     if runtime == Runtime::Php {
         stop_pools(&daemon, &version).await;
@@ -120,11 +182,13 @@ async fn remove_version(
     // and `sites_changed` makes Caddy and php-fpm follow. `rebuild_sites`
     // logs its errors.
     let _ = daemon.rebuild_sites().await;
+    // Free before the job's last event, so a client that reads it can
+    // install or uninstall at once.
     drop(started);
-    Ok(Json(Uninstalled {
+    Ok(Uninstalled {
         runtime,
         version: version.to_string(),
-    }))
+    })
 }
 
 /// Picks the installed version `text` names, checks that nothing uses it,
@@ -335,6 +399,25 @@ async fn stop_pools(daemon: &Daemon, version: &Version) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The job route is behind the same auth layer as every other route: no
+    /// token, a wrong token, an `Origin`, and another `Host` all refuse
+    /// before anything is checked or moved.
+    #[tokio::test]
+    async fn the_job_route_needs_the_token_and_refuses_an_origin() {
+        use crate::daemon::http::test_router::TestRouter;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let version_dir =
+            RuntimesDir::in_dir(tmp.path()).version_dir(Runtime::Node, &Version::new(22, 11, 0));
+        std::fs::create_dir_all(&version_dir).unwrap();
+        let daemon = Arc::new(Daemon::new(tmp.path().to_path_buf()));
+        let app = TestRouter::new(Arc::clone(&daemon));
+        app.assert_post_refused_without_auth("/v1/jobs/runtimes/node/22.11.0/uninstall")
+            .await;
+        assert!(version_dir.is_dir(), "a refusal changes nothing");
+        assert_eq!(daemon.jobs().get(1), None);
+    }
 
     /// The PostgreSQL that runs keeps its version; one that does not run
     /// goes, and its cluster in `databases/` stays.

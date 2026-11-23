@@ -759,35 +759,11 @@ mod tests {
     #[tokio::test]
     async fn the_job_route_needs_the_token_and_refuses_an_origin() {
         use crate::daemon::http::test_router::TestRouter;
-        use marsa_core::platform::daemon_file::{Token, daemon_authority};
 
         let daemon = Arc::new(Daemon::new(std::path::PathBuf::new()));
         let app = TestRouter::new(Arc::clone(&daemon));
-        let uri = "/v1/jobs/services/caddy/start";
-        let wrong = Token::generate().unwrap().bearer_header();
-        let request = app.builder("POST", uri).body(Body::empty()).unwrap();
-        assert_eq!(app.call(request).await.status(), StatusCode::UNAUTHORIZED);
-        let request = app
-            .builder("POST", uri)
-            .header("authorization", &wrong)
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(app.call(request).await.status(), StatusCode::UNAUTHORIZED);
-        let request = app
-            .authorized("POST", uri)
-            .header("origin", "http://evil.test")
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(app.call(request).await.status(), StatusCode::FORBIDDEN);
-        // Another port in `Host`: the builder's own `Host` is replaced.
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri(uri)
-            .header("host", daemon_authority(1))
-            .header("authorization", app.bearer())
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(app.call(request).await.status(), StatusCode::FORBIDDEN);
+        app.assert_post_refused_without_auth("/v1/jobs/services/caddy/start")
+            .await;
         assert_eq!(daemon.jobs().get(1), None);
     }
 

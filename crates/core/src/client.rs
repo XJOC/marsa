@@ -46,7 +46,7 @@ use crate::runtimes::Runtime;
 use crate::types::{
     AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, DoctorReport, ErrorBody,
     Event, Health, HostsStatus, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest,
-    RuntimeList, ServiceStatus, SiteList, SitePatch, Uninstalled, XdebugRequest, XdebugState,
+    RuntimeList, ServiceStatus, SiteList, SitePatch, XdebugRequest, XdebugState,
 };
 use lifecycle::lock_is_held;
 
@@ -57,9 +57,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// For one call that is not a stream, and for the start of a stream.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// For `DELETE /v1/runtimes/{tool}/{version}`: a Node.js folder holds
-/// thousands of files, and a virus scanner may slow their delete.
-const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// For the old `POST /v1/setup`, which clients before ADR 0026 call: longer than the daemon's slowest setup, which is
 /// about 12.5 minutes when every step runs to its limit. The daemon gives
 /// the user 5 minutes at the admin prompt and 5 more at the trust dialog
@@ -250,41 +247,6 @@ impl DaemonClient {
             version: version.to_owned(),
         };
         self.call_with(Method::PUT, &path, &body).await
-    }
-
-    /// `DELETE /v1/runtimes/{tool}/{version}`: deletes the
-    /// installed version that `version` names: `8.3.12`, or `8.3` when one
-    /// installed version matches it. A php-fpm pool that runs it is stopped
-    /// first. Returns once the folder is gone and the site list is built
-    /// again; a changed list also comes on [`DaemonClient::events`] as
-    /// `Event::SitesChanged`. A refusal changes nothing. The only installed
-    /// PHP or Node version goes with its default in `global.toml`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`ClientError`], and these codes from the daemon:
-    ///
-    /// - `version_in_use` (409) as [`ClientError::InUse`], with what uses
-    ///   it: the default in `global.toml` while another version is
-    ///   installed, sites set to it in `sites.toml`, or the running Caddy;
-    /// - `sites_lose_php` (409) as [`ClientError::InUse`] too: it is the
-    ///   only PHP installed, and the sites that run it, which would
-    ///   have no PHP after it, are in `sites_left_without_php`;
-    /// - `install_busy` (409) while an install or another uninstall runs;
-    /// - `version_not_installed` (404) when no installed version matches;
-    /// - `version_ambiguous` (409) when more than one does;
-    /// - `invalid_version` or `unsupported_alias` (400) for text that is not
-    ///   a version, and `unknown_tool` (404);
-    /// - `uninstall_io` (500) when the folder cannot be moved aside (on
-    ///   Windows: a program from it still runs);
-    /// - `runtimes_read`, `config_read`, or `config_invalid` (500).
-    pub async fn uninstall(
-        &self,
-        runtime: Runtime,
-        version: &str,
-    ) -> Result<Uninstalled, ClientError> {
-        let path = ["v1", "runtimes", runtime.dir_name(), version];
-        self.call(Method::DELETE, &path, UNINSTALL_TIMEOUT).await
     }
 
     /// `GET /v1/sites`: every site, sorted by name, and the folders that did

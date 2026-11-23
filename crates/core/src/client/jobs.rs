@@ -12,9 +12,10 @@ use reqwest::Method;
 
 use super::{ClientError, DaemonClient, REQUEST_TIMEOUT, StreamItem};
 use crate::codes;
+use crate::runtimes::Runtime;
 use crate::types::{
     ErrorBody, Event, JobAccepted, JobEvent, JobOutcome, JobUpdate, ServiceAction, ServiceStatus,
-    SetupReport, UninstallReport,
+    SetupReport, UninstallReport, Uninstalled,
 };
 
 /// How many times in a row the stream may break, or lag, with no event
@@ -115,6 +116,54 @@ impl DaemonClient {
             .await?
         {
             JobOutcome::ServiceAction(status) => Ok(status),
+            _ => Err(wrong_outcome()),
+        }
+    }
+
+    /// `POST /v1/jobs/runtimes/{tool}/{version}/uninstall`, then follows the
+    /// job until it ends: the version whose folder is gone. The checks and
+    /// the move aside are the answer of the `POST`, so every refusal is an
+    /// error at once.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; the refusals of the checks:
+    /// - `version_in_use` (409) as [`ClientError::InUse`], with what uses the
+    ///   version: the default, sites, the running Caddy or database server;
+    /// - `sites_lose_php` (409) as [`ClientError::InUse`] too: it is the only
+    ///   PHP installed, and the sites that run it, which would have no PHP
+    ///   after it, are in `sites_left_without_php`;
+    /// - `install_busy` (409) while an install or another uninstall runs, and
+    ///   `service_busy` (409) while an action on the database server runs;
+    /// - `version_not_installed` (404) when no installed version matches;
+    /// - `version_ambiguous` (409) when more than one does;
+    /// - `invalid_version` or `unsupported_alias` (400) for text that is not
+    ///   a version, and `unknown_tool` (404);
+    /// - `uninstall_io` (500) when the folder cannot be moved aside (on
+    ///   Windows: a program from it still runs);
+    /// - `runtimes_read`, `config_read`, or `config_invalid` (500);
+    ///
+    /// and `daemon_unreachable` if the daemon stopped before the job ended.
+    pub async fn run_runtime_uninstall(
+        &self,
+        runtime: Runtime,
+        version: &str,
+    ) -> Result<Uninstalled, ClientError> {
+        match self
+            .run_job(
+                &[
+                    "v1",
+                    "jobs",
+                    "runtimes",
+                    runtime.dir_name(),
+                    version,
+                    "uninstall",
+                ],
+                codes::DAEMON_UNREACHABLE,
+            )
+            .await?
+        {
+            JobOutcome::RuntimeUninstall(done) => Ok(done),
             _ => Err(wrong_outcome()),
         }
     }
