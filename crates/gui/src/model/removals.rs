@@ -1,4 +1,5 @@
-//! Removals: uninstall, unlink, and forget, each after a confirmation.
+//! Removals: uninstall, unlink, forget, and deleting the caught mail, each
+//! after a confirmation.
 
 use super::*;
 
@@ -11,6 +12,8 @@ pub enum Removal {
     Unlink { site: String },
     /// `DELETE /v1/sites/park`: a parked folder, as the list names it.
     Forget { folder: PathBuf },
+    /// `DELETE /v1/mail`: every mail Mailpit caught.
+    Mail,
 }
 
 impl Removal {
@@ -21,6 +24,7 @@ impl Removal {
             Removal::Uninstall { runtime, version } => strings::uninstall_title(*runtime, version),
             Removal::Unlink { site } => strings::unlink_title(site),
             Removal::Forget { folder } => strings::forget_title(folder, home),
+            Removal::Mail => strings::DELETE_MAIL_TITLE.to_owned(),
         }
     }
 
@@ -32,6 +36,7 @@ impl Removal {
             Removal::Uninstall { runtime, .. } => strings::uninstall_text(*runtime),
             Removal::Unlink { .. } => strings::unlink_text(site_root, home),
             Removal::Forget { .. } => strings::forget_text(sites),
+            Removal::Mail => strings::DELETE_MAIL_TEXT.to_owned(),
         }
     }
 
@@ -41,6 +46,7 @@ impl Removal {
             Removal::Uninstall { .. } => strings::UNINSTALL_CONFIRM,
             Removal::Unlink { .. } => strings::UNLINK_CONFIRM,
             Removal::Forget { .. } => strings::FORGET_CONFIRM,
+            Removal::Mail => strings::DELETE_MAIL_CONFIRM,
         }
     }
 
@@ -50,6 +56,7 @@ impl Removal {
             Removal::Uninstall { runtime, version } => strings::uninstalling(*runtime, version),
             Removal::Unlink { site } => strings::unlinking(site),
             Removal::Forget { folder } => strings::forgetting(folder),
+            Removal::Mail => strings::DELETING_MAIL.to_owned(),
         }
     }
 }
@@ -155,7 +162,7 @@ impl Model {
     pub(super) fn may_remove(&self, removal: &Removal) -> bool {
         match removal {
             Removal::Uninstall { .. } => self.can_uninstall(),
-            Removal::Unlink { .. } | Removal::Forget { .. } => self.can_remove(),
+            Removal::Unlink { .. } | Removal::Forget { .. } | Removal::Mail => self.can_remove(),
         }
     }
 
@@ -190,6 +197,7 @@ impl Model {
             Removal::Unlink { .. } | Removal::Forget { .. } => {
                 self.session.notices.clear(NoticeSource::Sites)
             }
+            Removal::Mail => self.session.notices.clear(NoticeSource::Call),
         }
         self.session.removing = Some(removal.clone());
         Some(removal)
@@ -243,6 +251,12 @@ impl Model {
             Removal::Forget { folder } => {
                 self.session.notices.set_sites(SitesNotice::Forgot(folder))
             }
+            // The list after the delete follows from the bridge; the screen
+            // shows it, so no notice repeats it.
+            Removal::Mail => {
+                self.session.mail.selected = None;
+                self.session.mail.text = None;
+            }
         }
     }
 
@@ -275,6 +289,7 @@ impl Model {
             Removal::Unlink { .. } | Removal::Forget { .. } => {
                 self.session.notices.set_sites(SitesNotice::Failed(code));
             }
+            Removal::Mail => self.mail_call_failed(code),
         }
     }
 }

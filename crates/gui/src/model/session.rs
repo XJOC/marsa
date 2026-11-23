@@ -113,6 +113,8 @@ pub struct Session {
     /// connected and after each setup. `None` until read, or when the daemon
     /// gave none.
     pub doctor: Option<DoctorReport>,
+    /// The mail Mailpit caught, as last read.
+    pub mail: MailState,
 }
 
 impl Model {
@@ -165,5 +167,6 @@ impl Model {
         self.session.removing = None;
         self.session.xdebug = None;
         self.session.xdebug_pending = None;
+        self.session.mail = MailState::default();
     }
 }
