@@ -24,7 +24,6 @@ use marsa_core::helper::HelperOp;
 use marsa_core::helper::OpResult;
 use marsa_core::helper::OpStatus;
 use marsa_core::platform::ports;
-use marsa_core::recipes::Os;
 use marsa_core::recipes::Platform;
 use marsa_core::setup;
 use marsa_core::setup::Facts;
@@ -171,7 +170,7 @@ impl Setup {
             ca,
             caddy_ports: (caddy.http_port, caddy.https_port),
             port_holders: if needs.port_holders {
-                ports::holders(self.runner(), Os::Mac, stop)
+                ports::holders(self.runner(), platform.os(), stop)
             } else {
                 None
             },

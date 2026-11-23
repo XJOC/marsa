@@ -583,12 +583,14 @@ mod tests {
         }
     }
 
-    /// The client waits longer than the slowest sync: the prompt and the
-    /// helper's pipes. No other program runs.
+    /// A client before ADR 0026 waits 6 minutes for `POST /v1/hosts/sync`,
+    /// longer than the slowest sync: the prompt and the helper's pipes. No
+    /// other program runs.
     #[test]
-    fn the_client_waits_longer_than_the_slowest_sync() {
+    fn old_clients_wait_longer_than_the_slowest_sync() {
+        const OLD_CLIENT_WAIT: std::time::Duration = std::time::Duration::from_secs(6 * 60);
         let slowest = super::super::PROMPT_LIMIT + super::super::PIPE_GRACE;
-        assert!(marsa_core::client::HOSTS_SYNC_TIMEOUT > slowest);
+        assert!(OLD_CLIENT_WAIT > slowest);
     }
 
     /// The rejection paths (AGENTS.md section 5): nothing runs.

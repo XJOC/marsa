@@ -86,9 +86,8 @@ use crate::daemon::state::Daemon;
 /// at `PROMPT_LIMIT` each (both may show a dialog), `find-certificate` at
 /// [`CHECK_LIMIT`], and [`PIPE_GRACE`] after each of these four. Linux, with
 /// one `pkexec` prompt and the NSS step, stays under it. A client of the old
-/// `POST /v1/uninstall` has to wait longer:
-/// `marsa_core::client::UNINSTALL_ALL_TIMEOUT` does, and a test holds the two
-/// together.
+/// `POST /v1/uninstall` has to wait longer: it waits 40 minutes, and a test
+/// holds the two together.
 pub const SLOWEST_UNINSTALL_ALL: Duration = Duration::from_secs(
     3 * PROMPT_LIMIT.as_secs() + CHECK_LIMIT.as_secs() + 4 * PIPE_GRACE.as_secs(),
 );
@@ -1399,8 +1398,9 @@ mod tests {
     }
 
     #[test]
-    fn the_client_waits_longer_than_the_slowest_uninstall() {
-        use marsa_core::client::UNINSTALL_ALL_TIMEOUT;
+    fn old_clients_wait_longer_than_the_slowest_uninstall() {
+        // What clients before ADR 0026 wait for `POST /v1/uninstall`.
+        const OLD_UNINSTALL_WAIT: Duration = Duration::from_secs(40 * 60);
 
         // 15 min 10 s of limits, and 2 s of grace after each of 4 programs.
         assert_eq!(SLOWEST_UNINSTALL_ALL, Duration::from_secs(918));
@@ -1408,16 +1408,16 @@ mod tests {
         // program.
         let margin = Duration::from_secs(30);
         assert!(
-            UNINSTALL_ALL_TIMEOUT >= SLOWEST_UNINSTALL_ALL + margin,
-            "the client waits {UNINSTALL_ALL_TIMEOUT:?}, and an uninstall may take \
+            OLD_UNINSTALL_WAIT >= SLOWEST_UNINSTALL_ALL + margin,
+            "an old client waits {OLD_UNINSTALL_WAIT:?}, and an uninstall may take \
              {SLOWEST_UNINSTALL_ALL:?}"
         );
         // Windows: the helper's run after the UAC prompt, to its limit. The
         // prompt itself has none.
         let windows = crate::daemon::setup::windows::INSTALL_LIMIT;
         assert!(
-            UNINSTALL_ALL_TIMEOUT >= windows + margin,
-            "the client waits {UNINSTALL_ALL_TIMEOUT:?}, and a Windows uninstall may take \
+            OLD_UNINSTALL_WAIT >= windows + margin,
+            "an old client waits {OLD_UNINSTALL_WAIT:?}, and a Windows uninstall may take \
              {windows:?}"
         );
         // Linux: the pkexec prompt, then the NSS step, which keeps its own
