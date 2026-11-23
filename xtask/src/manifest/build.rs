@@ -7,102 +7,29 @@
 //! upstream sum. An MD5 alone is never accepted.
 //!
 //! The database servers' archives are large (PostgreSQL is about 60 MB a
-//! file, 620 MB a build), so they are hashed on the way and not kept.
+//! file, 620 MB a build), so they are hashed on the way and not kept: the
+//! ones that a program must read (Oracle's signature, GitHub's attestation)
+//! are deleted as soon as it has.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
-use marsa_core::installer::fetch::{ChunkSink, Fetch, FetchError, fetch_bytes};
-use marsa_core::installer::manifest::{MAX_ARTIFACT_SIZE, MIN_SERIAL, SCHEMA_VERSION};
+use marsa_core::installer::fetch::{Fetch, fetch_bytes};
+use marsa_core::installer::manifest::{MIN_SERIAL, SCHEMA_VERSION};
 use marsa_core::recipes::{self, Artifact, Platform, PlatformRecipe};
 use marsa_core::runtimes::Runtime;
 use semver::Version;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256, Sha512};
 
 use super::pins::{Pins, RUNTIMES};
-use super::upstream::{
-    Algorithm, Layout, MYSQL_FOLDERS, Source, SumFile, hex, parse_hex, sum_file_for,
-};
+use super::upstream::{Algorithm, hex, sum_file_for};
+mod download;
+mod json;
+mod proof;
 
-/// The JSON that `marsa_core::installer::manifest` reads. Field
-/// order is the output order, and maps are `BTreeMap`, so the same inputs
-/// give the same bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct ManifestJson {
-    pub schema: u64,
-    pub serial: u64,
-    pub runtimes: RuntimesJson,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub(super) struct RuntimesJson {
-    #[serde(default)]
-    pub php: Vec<ReleaseJson>,
-    #[serde(default)]
-    pub node: Vec<ReleaseJson>,
-    #[serde(default)]
-    pub composer: Vec<ReleaseJson>,
-    #[serde(default)]
-    pub caddy: Vec<ReleaseJson>,
-    #[serde(default)]
-    pub postgres: Vec<ReleaseJson>,
-    /// Left out while empty, so a manifest without MySQL stays as it was.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mysql: Vec<ReleaseJson>,
-    /// Left out while empty, as MySQL.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub valkey: Vec<ReleaseJson>,
-}
-
-impl RuntimesJson {
-    pub(super) fn get(&self, runtime: Runtime) -> &Vec<ReleaseJson> {
-        match runtime {
-            Runtime::Php => &self.php,
-            Runtime::Node => &self.node,
-            Runtime::Composer => &self.composer,
-            Runtime::Caddy => &self.caddy,
-            Runtime::Postgres => &self.postgres,
-            Runtime::Mysql => &self.mysql,
-            Runtime::Valkey => &self.valkey,
-        }
-    }
-
-    fn get_mut(&mut self, runtime: Runtime) -> &mut Vec<ReleaseJson> {
-        match runtime {
-            Runtime::Php => &mut self.php,
-            Runtime::Node => &mut self.node,
-            Runtime::Composer => &mut self.composer,
-            Runtime::Caddy => &mut self.caddy,
-            Runtime::Postgres => &mut self.postgres,
-            Runtime::Mysql => &mut self.mysql,
-            Runtime::Valkey => &mut self.valkey,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct ReleaseJson {
-    pub version: String,
-    pub platforms: BTreeMap<String, Vec<SourceJson>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct SourceJson {
-    pub name: String,
-    pub urls: Vec<String>,
-    /// 64 lowercase hex characters.
-    pub sha256: String,
-    pub size: u64,
-}
-
-/// The manifest as written to disk: pretty JSON and a final newline.
-pub(super) fn to_json(manifest: &ManifestJson) -> Result<String> {
-    Ok(serde_json::to_string_pretty(manifest)? + "\n")
-}
+use download::*;
+pub(in crate::manifest) use json::*;
+pub(in crate::manifest) use proof::*;
 
 /// One file being built, for the checks and for messages.
 pub(super) struct Target<'a> {
@@ -117,6 +44,9 @@ pub(super) trait Inspect {
     /// Checks one of our static-php-cli PHP archives (macOS or Linux).
     /// Returns warnings.
     fn php_build(&self, target: &Target<'_>, file: &Path) -> Result<Vec<String>>;
+    /// `gh attestation verify` on one theseus-rs archive, pinned to its
+    /// repository, signer workflow, and tag (`attest`). Returns its JSON.
+    fn attestation(&self, file: &Path, version: &Version) -> Result<String>;
 }
 
 /// Platforms where PHP is our own static-php-cli build (ADR 0012).
@@ -125,326 +55,6 @@ pub(super) fn is_spc_platform(platform: Platform) -> bool {
         platform,
         Platform::DarwinArm64 | Platform::DarwinX64 | Platform::LinuxX64 | Platform::LinuxArm64
     )
-}
-
-/// The upstream proof a file needs before its sha256 goes in the manifest.
-/// The database servers of M6 each need the proof of their own source (ADR
-/// 0023, section 3); without it the build stops. An `Md5` sum is never
-/// accepted alone: only [`Proof::OracleSignature`] takes one, together with
-/// Oracle's GPG signature.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Proof {
-    /// The upstream sum if the source publishes one `build` knows. Without
-    /// one, only a warning: today, Windows PHP in `releases/archives/`
-    /// (windows.php.net lists only sha1 there). PHP, Node, Composer, Caddy.
-    SumIfPublished,
-    /// The theseus-rs `<archive>.sha256` ([`Layout::Single`]) and no other
-    /// source, of the recipe's own URL. PostgreSQL.
-    TheseusSha256,
-    /// Oracle's GPG signature `<archive>.asc` by the pinned key, and its
-    /// `<archive>.md5`, both ([`check_oracle`]). The MySQL archive of the
-    /// recipe's own URL, or the same file name in Oracle's other folder
-    /// (`archives/`, for a version that is not current any more).
-    OracleSignature,
-    /// The `sha256sums.txt` of one of our own `libaio-<v>-r<n>` releases,
-    /// which MySQL's recipe names for `libaio.so.1` and `libnuma.so.1`. No
-    /// upstream signs them: the trust is in our build and in the owner's
-    /// signature on the manifest.
-    OurLibaio,
-    /// The `sha256sums.txt` of one of our own `valkey-<v>-r<n>` releases
-    /// (ADR 0023, section 3): the archive the Valkey recipe names, and no
-    /// other. The build workflow checked the source tarball against
-    /// `valkey-io/valkey-hashes`; the trust is in that build and in the
-    /// owner's signature on the manifest.
-    OurValkey,
-}
-
-impl Proof {
-    /// An exhaustive `match`, so each new runtime has to choose. MySQL's
-    /// `archive` is Oracle's; its other files are our own builds. Valkey is
-    /// our own build.
-    fn of(runtime: Runtime, artifact: &str) -> Proof {
-        match runtime {
-            Runtime::Php | Runtime::Node | Runtime::Composer | Runtime::Caddy => {
-                Proof::SumIfPublished
-            }
-            Runtime::Postgres => Proof::TheseusSha256,
-            Runtime::Mysql if artifact == "archive" => Proof::OracleSignature,
-            Runtime::Mysql => Proof::OurLibaio,
-            Runtime::Valkey => Proof::OurValkey,
-        }
-    }
-
-    /// Whether the file at `url` can give this proof, before anything is
-    /// downloaded. `sums` is the sum file [`sum_file_for`] finds for `url`
-    /// (`None`: no known one), and `template` the recipe's URL for the file.
-    /// The sum is compared after the download.
-    fn allows(self, url: &str, template: Option<&str>, sums: Option<&SumFile>) -> Result<()> {
-        match (self, sums) {
-            (Proof::SumIfPublished | Proof::TheseusSha256, Some(sums))
-                if sums.algorithm == Algorithm::Md5 =>
-            {
-                bail!(
-                    "its only upstream sum is the MD5 {}, and an MD5 is never accepted alone",
-                    sums.url
-                )
-            }
-            (Proof::SumIfPublished, _) => Ok(()),
-            // An override could name another theseus-rs archive, of another
-            // version or target, with its own matching `.sha256`.
-            (Proof::TheseusSha256, _) if template != Some(url) => bail!(
-                "it is not the recipe's URL {}, and only that theseus-rs archive is accepted",
-                template.unwrap_or("(none)")
-            ),
-            (Proof::TheseusSha256, Some(sums))
-                if sums.source == Source::Theseus
-                    && sums.layout == Layout::Single
-                    && sums.algorithm == Algorithm::Sha256 =>
-            {
-                Ok(())
-            }
-            (Proof::TheseusSha256, Some(sums)) => bail!(
-                "its sum would come from {}, but only the theseus-rs `.sha256` is accepted",
-                sums.url
-            ),
-            (Proof::TheseusSha256, None) => bail!(
-                "no upstream sum that `manifest build` knows, and only the theseus-rs \
-                 `.sha256` is accepted"
-            ),
-            // Another signed Oracle archive, such as an older MySQL with
-            // known holes, would pass the signature check too.
-            (Proof::OracleSignature, _) if !is_recipes_archive(url, template) => bail!(
-                "it is not the recipe's URL {}, and only that Oracle archive is accepted",
-                template.unwrap_or("(none)")
-            ),
-            (Proof::OracleSignature, Some(sums))
-                if sums.source == Source::Oracle
-                    && sums.layout == Layout::Single
-                    && sums.algorithm == Algorithm::Md5 =>
-            {
-                Ok(())
-            }
-            (Proof::OracleSignature, _) => bail!(
-                "only an Oracle MySQL 8.4 archive on cdn.mysql.com, with its `.md5` and its \
-                 signature `.asc`, is accepted"
-            ),
-            // A file of another release, or of another architecture, would
-            // carry its own matching sum: so the file is the recipe's.
-            (Proof::OurLibaio, _) if template != Some(url) => bail!(
-                "it is not the recipe's URL {}, and only that file of our libaio release is \
-                 accepted",
-                template.unwrap_or("(none)")
-            ),
-            (Proof::OurLibaio, Some(sums))
-                if sums.source == Source::OurLibaio
-                    && sums.layout == Layout::List
-                    && sums.algorithm == Algorithm::Sha256 =>
-            {
-                Ok(())
-            }
-            (Proof::OurLibaio, _) => bail!(
-                "only a file of our own libaio release, with its `sha256sums.txt`, is accepted"
-            ),
-            // An override could name another of our Valkey archives, of
-            // another version, revision, or platform, with its own matching
-            // sum: so the file is the recipe's. A rebuild changes the recipe.
-            (Proof::OurValkey, _) if template != Some(url) => bail!(
-                "it is not the recipe's URL {}, and only that archive of our Valkey release is \
-                 accepted",
-                template.unwrap_or("(none)")
-            ),
-            (Proof::OurValkey, Some(sums))
-                if sums.source == Source::OurValkey
-                    && sums.layout == Layout::List
-                    && sums.algorithm == Algorithm::Sha256 =>
-            {
-                Ok(())
-            }
-            (Proof::OurValkey, _) => bail!(
-                "only an archive of our own Valkey release, with its `sha256sums.txt`, is \
-                 accepted"
-            ),
-        }
-    }
-
-    /// Whether the file is kept in the cache after the build: only when a
-    /// later check reads it (PHP, the sha512 of Caddy). A file this proof
-    /// checks by its sha256 alone is hashed on the way and never written,
-    /// and a MySQL archive is deleted after its checks.
-    fn keeps_file(self) -> bool {
-        match self {
-            Proof::SumIfPublished => true,
-            Proof::TheseusSha256 | Proof::OracleSignature | Proof::OurLibaio | Proof::OurValkey => {
-                false
-            }
-        }
-    }
-}
-
-/// Whether `url` is the recipe's own archive `template`, or the file of the
-/// same name in another folder of Oracle's (a version that is not current
-/// any more moves from `Downloads/` to `archives/`). The name carries the
-/// version and the platform, so this never accepts another archive.
-fn is_recipes_archive(url: &str, template: Option<&str>) -> bool {
-    let Some(template) = template else {
-        return false;
-    };
-    if url == template {
-        return true;
-    }
-    let (Some((dir, name)), Some((template_dir, template_name))) =
-        (url.rsplit_once('/'), template.rsplit_once('/'))
-    else {
-        return false;
-    };
-    name == template_name && MYSQL_FOLDERS.contains(&dir) && MYSQL_FOLDERS.contains(&template_dir)
-}
-
-/// The programs behind Oracle's proof: `oracle::System` in the build, a
-/// stub in tests.
-pub(super) trait OracleCheck {
-    /// Checks that `signature`, the `.asc`, is Oracle's good signature on
-    /// `file`, by the pinned key.
-    fn signature(&self, signature: &Path, file: &Path) -> Result<()>;
-    /// The MD5 of `file`.
-    fn md5(&self, file: &Path) -> Result<[u8; 16]>;
-    /// The name of the first entry of the archive `file`, of the `kind` its
-    /// name gives, as it is written there (`mysql-8.4.13-.../bin/mysqld`).
-    fn first_entry(&self, file: &Path, kind: ArchiveKind) -> Result<String>;
-}
-
-/// The two kinds of Oracle's MySQL archives: a tar archive (`.tar.gz`,
-/// `.tar.xz`) for macOS and Linux, a `.zip` for Windows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ArchiveKind {
-    Tar,
-    Zip,
-}
-
-/// The top folder of a MySQL archive called `name`: the name without its
-/// `.tar.gz`, `.tar.xz`, or `.zip`, and the kind of archive. Oracle's
-/// signature does not bind the archive to its name, so a hijacked CDN could
-/// serve an older signed archive under a new name: its top folder would
-/// still say the old version.
-fn top_folder_of(name: &str) -> Result<(&str, ArchiveKind)> {
-    let tar = name
-        .strip_suffix(".tar.gz")
-        .or_else(|| name.strip_suffix(".tar.xz"));
-    if let Some(top) = tar {
-        return Ok((top, ArchiveKind::Tar));
-    }
-    let top = name
-        .strip_suffix(".zip")
-        .with_context(|| format!("{name} is not a .tar.gz, .tar.xz, or .zip archive"))?;
-    Ok((top, ArchiveKind::Zip))
-}
-
-/// A file whose proof passed: what the manifest records.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Checked {
-    pub url: String,
-    pub sha256: [u8; 32],
-    pub size: u64,
-}
-
-/// Oracle's whole proof for the MySQL archive at `url`
-/// ([`Proof::OracleSignature`]), with `url` as the recipe's own URL:
-///
-/// 1. `url` is an Oracle MySQL 8.4 archive, checked before any download;
-/// 2. its `.md5` and its signature `.asc` are fetched first, so without
-///    either nothing large is downloaded;
-/// 3. the archive is downloaded to `work` and hashed on the way;
-/// 4. the signature is good and by the pinned key, then its MD5 matches,
-///    then its sha256 is still the one hashed on the way, so all three are
-///    of the same bytes;
-/// 5. the archive's top folder is the one its file name gives, so a signed
-///    archive of another version is not accepted under this version's name.
-///
-/// The archive and its `.asc` are deleted after, whatever the result: they
-/// are 80 to 834 MB.
-///
-/// # Errors
-///
-/// The first step that fails, with the URL.
-pub(super) async fn check_oracle(
-    fetch: &impl Fetch,
-    url: &str,
-    work: &Path,
-    check: &impl OracleCheck,
-) -> Result<Checked> {
-    let sums = sum_file_for(url);
-    // Any file of Oracle's two folders passes here: this function does not
-    // know the recipe's URL. `build` checks the URL against the recipe's
-    // before it calls this; the `check-mysql` command is for trying one file.
-    Proof::OracleSignature
-        .allows(url, Some(url), sums.as_ref())
-        .with_context(|| url.to_owned())?;
-    let sums = sums.with_context(|| format!("{url} has no Oracle `.md5`"))?;
-    let md5_text = fetch_bytes(fetch, &sums.url, 4096)
-        .await
-        .with_context(|| format!("{url}: Oracle's md5"))?;
-    let md5_text =
-        String::from_utf8(md5_text).with_context(|| format!("{} is not text", sums.url))?;
-    let expected = sums.find(&md5_text).with_context(|| sums.url.clone())?;
-    let signature_url = format!("{url}.asc");
-    let signature = fetch_bytes(fetch, &signature_url, 64 * 1024)
-        .await
-        .with_context(|| {
-            format!("{url}: Oracle's signature, without which an MD5 is never accepted")
-        })?;
-
-    fs::create_dir_all(work).with_context(|| format!("cannot create {}", work.display()))?;
-    // Fixed names, so a run that was killed leaves nothing the next one
-    // does not overwrite or delete.
-    let path = work.join("archive");
-    let asc = work.join("archive.asc");
-    let remove = || {
-        for leftover in [&path, &asc] {
-            if let Err(err) = fs::remove_file(leftover)
-                && err.kind() != io::ErrorKind::NotFound
-            {
-                println!("    warning: cannot delete {}: {err}", leftover.display());
-            }
-        }
-    };
-    remove();
-    let checked = async {
-        fs::write(&asc, &signature).with_context(|| format!("cannot write {}", asc.display()))?;
-        let file = temp_download(fetch, &[url.to_owned()], &path).await?;
-        check
-            .signature(&asc, &path)
-            .context("Oracle's signature check failed")?;
-        let md5 = check.md5(&path)?;
-        ensure!(
-            md5.as_slice() == expected.as_slice(),
-            "md5 is {}, but {} says {}",
-            hex(&md5),
-            sums.url,
-            hex(&expected)
-        );
-        let (now, _) = hash_file(&path)?;
-        ensure!(
-            now == file.sha256,
-            "{} changed on disk during its checks",
-            path.display()
-        );
-        let name = url.rsplit_once('/').map_or(url, |(_, name)| name);
-        let (want, kind) = top_folder_of(name)?;
-        let first = check.first_entry(&path, kind)?;
-        let top = first.split('/').next().unwrap_or_default();
-        ensure!(
-            top == want,
-            "the archive's first entry is in {top:?}, not in {want:?}, the folder its name gives"
-        );
-        Ok(Checked {
-            url: file.url,
-            sha256: file.sha256,
-            size: file.size,
-        })
-    }
-    .await;
-    remove();
-    checked.with_context(|| url.to_owned())
 }
 
 /// The result: the manifest, one line per file for the report, and warnings.
@@ -467,7 +77,8 @@ pub(super) fn check_serial(serial: u64, published: Option<u64>) -> Result<()> {
 }
 
 /// Builds the manifest. The files that a later check reads are saved under
-/// `cache` (see `Proof::keeps_file`); the others are only hashed.
+/// `cache` (see `Proof::keeps_file`); the others are only hashed, and the
+/// archives of MySQL and PostgreSQL are kept only while they are checked.
 pub(super) async fn build(
     fetch: &impl Fetch,
     pins: &Pins,
@@ -526,12 +137,12 @@ pub(super) async fn build(
                         let checked = check_oracle(fetch, url, &work, inspect)
                             .await
                             .with_context(|| what.clone())?;
-                        Ok(Downloaded {
-                            path: None,
-                            url: checked.url,
-                            sha256: checked.sha256,
-                            size: checked.size,
-                        })
+                        Ok(Downloaded::gone(checked.url, checked.sha256, checked.size))
+                    } else if proof == Proof::TheseusSha256 {
+                        // `gh attestation verify` reads a file. It is 60 MB:
+                        // deleted at the end of this artifact, whatever the
+                        // result.
+                        scratch_download(fetch, &urls, &cache.join("theseus-work")).await
                     } else if proof.keeps_file() {
                         let dir = cache
                             .join(runtime.dir_name())
@@ -604,6 +215,13 @@ pub(super) async fn build(
                             notes.push("no upstream sum");
                         }
                     }
+                    // After the `.sha256`, and for every PostgreSQL archive,
+                    // whatever the match above did.
+                    if proof == Proof::TheseusSha256 {
+                        verify_attestation(inspect, &file, version)
+                            .with_context(|| what.clone())?;
+                        notes.push("GitHub attestation verified");
+                    }
                     if runtime == Runtime::Php && is_spc_platform(platform) {
                         let found = inspect
                             .php_build(&target, file.kept()?)
@@ -637,242 +255,6 @@ pub(super) async fn build(
         rows,
         warnings,
     })
-}
-
-/// A downloaded file, and the URL that served it.
-struct Downloaded {
-    /// Where it is kept, or `None` when it was only hashed.
-    path: Option<PathBuf>,
-    url: String,
-    sha256: [u8; 32],
-    size: u64,
-}
-
-impl Downloaded {
-    /// The file on disk, for a check that reads it.
-    fn kept(&self) -> Result<&Path> {
-        self.path
-            .as_deref()
-            .with_context(|| format!("{} was hashed on the way and not kept", self.url))
-    }
-}
-
-/// Saves the first URL that answers to `dir/<name>`, with `dir/<name>.sha256`
-/// (`<hex> <url>`) next to it. A cached file is reused only if its sha256
-/// still matches the saved one.
-async fn cached_download(
-    fetch: &impl Fetch,
-    urls: &[String],
-    dir: &Path,
-    name: &str,
-) -> Result<Downloaded> {
-    ensure!(
-        !name.is_empty()
-            && !name.starts_with('.')
-            && name
-                .bytes()
-                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-')),
-        "artifact name {name:?} is not [a-z0-9._-]+"
-    );
-    fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
-    let path = dir.join(name);
-    let record = dir.join(format!("{name}.sha256"));
-
-    if let (Ok(saved), true) = (fs::read_to_string(&record), path.is_file()) {
-        let (saved_hex, url) = saved.trim_end().split_once(' ').unwrap_or_default();
-        let (sha256, size) = hash_file(&path)?;
-        if parse_hex(saved_hex) == Some(sha256) && urls.iter().any(|u| u == url) {
-            return Ok(Downloaded {
-                path: Some(path),
-                url: url.to_owned(),
-                sha256,
-                size,
-            });
-        }
-    }
-
-    let part = dir.join(format!("{name}.part"));
-    let result = first_answer(fetch, urls, |url| {
-        let _ = fs::remove_file(&part);
-        let file =
-            File::create(&part).with_context(|| format!("cannot create {}", part.display()))?;
-        Ok(HashSink::new(url, Some((file, part.clone()))))
-    })
-    .await;
-    let (url, sink) = match result {
-        Ok(found) => found,
-        Err(err) => {
-            let _ = fs::remove_file(&part);
-            return Err(err);
-        }
-    };
-    let HashSink {
-        file, hasher, size, ..
-    } = sink;
-    if let Some((mut file, _)) = file {
-        file.flush()
-            .with_context(|| format!("cannot write {}", part.display()))?;
-    }
-    let sha256: [u8; 32] = hasher.finalize().into();
-    fs::rename(&part, &path).with_context(|| format!("cannot move {}", part.display()))?;
-    fs::write(&record, format!("{} {url}\n", hex(&sha256)))?;
-    Ok(Downloaded {
-        path: Some(path),
-        url,
-        sha256,
-        size,
-    })
-}
-
-/// Hashes the body of the first URL that answers, and keeps nothing: for
-/// large files that only their sha256 proves.
-async fn hashed_download(fetch: &impl Fetch, urls: &[String]) -> Result<Downloaded> {
-    let (url, sink) = first_answer(fetch, urls, |url| Ok(HashSink::new(url, None))).await?;
-    Ok(Downloaded {
-        path: None,
-        url,
-        sha256: sink.hasher.finalize().into(),
-        size: sink.size,
-    })
-}
-
-/// Downloads the first URL that answers to `path`, hashing on the way, for
-/// checks that read the file before the caller deletes it. A URL that fails
-/// leaves a partial file, which the next one overwrites.
-async fn temp_download(fetch: &impl Fetch, urls: &[String], path: &Path) -> Result<Downloaded> {
-    let (url, sink) = first_answer(fetch, urls, |url| {
-        let file =
-            File::create(path).with_context(|| format!("cannot create {}", path.display()))?;
-        Ok(HashSink::new(url, Some((file, path.to_path_buf()))))
-    })
-    .await?;
-    let HashSink {
-        file, hasher, size, ..
-    } = sink;
-    if let Some((mut file, _)) = file {
-        file.flush()
-            .with_context(|| format!("cannot write {}", path.display()))?;
-    }
-    Ok(Downloaded {
-        path: Some(path.to_path_buf()),
-        url,
-        sha256: hasher.finalize().into(),
-        size,
-    })
-}
-
-/// Tries `urls` in order, each into a new sink from `sink_for`, and returns
-/// the first that answers in full, with its sink. An HTTP error status or a
-/// network error tries the next URL; any other error stops.
-async fn first_answer(
-    fetch: &impl Fetch,
-    urls: &[String],
-    mut sink_for: impl FnMut(&str) -> Result<HashSink>,
-) -> Result<(String, HashSink)> {
-    let mut last = None;
-    for url in urls {
-        let mut sink = sink_for(url)?;
-        println!("  downloading {url}");
-        match fetch.get(url, &mut sink).await {
-            Ok(()) => {
-                ensure!(sink.size > 0, "{url} is empty");
-                return Ok((url.clone(), sink));
-            }
-            Err(err @ (FetchError::HttpStatus { .. } | FetchError::Network { .. })) => {
-                println!("    {err}; trying the next URL");
-                last = Some(err);
-            }
-            Err(err) => return Err(err.into()),
-        }
-    }
-    match last {
-        Some(err) => Err(anyhow::Error::from(err).context("no URL worked")),
-        None => bail!("no URL"),
-    }
-}
-
-/// Hashes the body on the way, and writes it to a file when it has one.
-struct HashSink {
-    /// The file, and its path for errors.
-    file: Option<(File, PathBuf)>,
-    url: String,
-    hasher: Sha256,
-    size: u64,
-}
-
-impl HashSink {
-    fn new(url: &str, file: Option<(File, PathBuf)>) -> Self {
-        Self {
-            file,
-            url: url.to_owned(),
-            hasher: Sha256::new(),
-            size: 0,
-        }
-    }
-}
-
-impl ChunkSink for HashSink {
-    fn accept(&mut self, chunk: &[u8]) -> Result<(), FetchError> {
-        self.size = self.size.saturating_add(chunk.len() as u64);
-        if self.size > MAX_ARTIFACT_SIZE {
-            return Err(FetchError::TooLarge {
-                url: self.url.clone(),
-                max: MAX_ARTIFACT_SIZE,
-            });
-        }
-        self.hasher.update(chunk);
-        match &mut self.file {
-            Some((file, path)) => file.write_all(chunk).map_err(|source| FetchError::Io {
-                path: path.clone(),
-                source,
-            }),
-            None => Ok(()),
-        }
-    }
-}
-
-/// The sha256 and size of a file.
-fn hash_file(path: &Path) -> Result<([u8; 32], u64)> {
-    let mut hasher = Sha256::new();
-    let size = read_chunks(path, |chunk| hasher.update(chunk))?;
-    Ok((hasher.finalize().into(), size))
-}
-
-/// The sha512 of a file, for sources that publish only sha512 (Caddy). The
-/// same pass checks that the file still has the `sha256` the manifest will
-/// record, so both hashes are of the same bytes.
-fn sha512_file(path: &Path, sha256: &[u8; 32]) -> Result<[u8; 64]> {
-    let mut sha512 = Sha512::new();
-    let mut check = Sha256::new();
-    read_chunks(path, |chunk| {
-        sha512.update(chunk);
-        check.update(chunk);
-    })?;
-    let now: [u8; 32] = check.finalize().into();
-    ensure!(
-        &now == sha256,
-        "{} changed on disk while the manifest was built",
-        path.display()
-    );
-    Ok(sha512.finalize().into())
-}
-
-/// Gives each chunk of the file to `each`, and returns the size.
-fn read_chunks(path: &Path, mut each: impl FnMut(&[u8])) -> Result<u64> {
-    let mut file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-    let mut buffer = vec![0u8; 1 << 16];
-    let mut size = 0u64;
-    loop {
-        let read = match file.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => read,
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(err) => return Err(err.into()),
-        };
-        each(&buffer[..read]);
-        size += read as u64;
-    }
-    Ok(size)
 }
 
 #[cfg(test)]

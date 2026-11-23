@@ -1,0 +1,115 @@
+[
+  {
+    "attestation": {
+      "bundle_url": "",
+      "initiator": "",
+      "bundle": "(cut out of this fixture)"
+    },
+    "verificationResult": {
+      "mediaType": "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
+      "signature": {
+        "certificate": {
+          "certificateIssuer": "CN=sigstore-intermediate,O=sigstore.dev",
+          "subjectAlternativeName": "https://github.com/theseus-rs/postgresql-binaries/.github/workflows/build.yml@refs/tags/18.7.0",
+          "issuer": "https://token.actions.githubusercontent.com",
+          "githubWorkflowTrigger": "push",
+          "githubWorkflowSHA": "37a2683dfc8293d6a82df271a2edc8a0e78c57cf",
+          "githubWorkflowName": "release",
+          "githubWorkflowRepository": "theseus-rs/postgresql-binaries",
+          "githubWorkflowRef": "refs/tags/18.7.0",
+          "buildSignerURI": "https://github.com/theseus-rs/postgresql-binaries/.github/workflows/build.yml@refs/tags/18.7.0",
+          "buildSignerDigest": "37a2683dfc8293d6a82df271a2edc8a0e78c57cf",
+          "runnerEnvironment": "github-hosted",
+          "sourceRepositoryURI": "https://github.com/theseus-rs/postgresql-binaries",
+          "sourceRepositoryDigest": "37a2683dfc8293d6a82df271a2edc8a0e78c57cf",
+          "sourceRepositoryRef": "refs/tags/18.7.0",
+          "sourceRepositoryIdentifier": "746919647",
+          "sourceRepositoryOwnerURI": "https://github.com/theseus-rs",
+          "sourceRepositoryOwnerIdentifier": "153389132",
+          "buildConfigURI": "https://github.com/theseus-rs/postgresql-binaries/.github/workflows/release.yml@refs/tags/18.7.0",
+          "buildConfigDigest": "37a2683dfc8293d6a82df271a2edc8a0e78c57cf",
+          "buildTrigger": "push",
+          "runInvocationURI": "https://github.com/theseus-rs/postgresql-binaries/actions/runs/43269105625/attempts/1",
+          "sourceRepositoryVisibilityAtSigning": "public"
+        }
+      },
+      "verifiedTimestamps": [
+        {
+          "type": "Tlog",
+          "uri": "https://rekor.sigstore.dev",
+          "timestamp": "2026-11-12T20:32:28+03:00"
+        }
+      ],
+      "verifiedIdentity": {
+        "subjectAlternativeName": {
+          "subjectAlternativeName": "",
+          "regexp": "(?i)^https://github\\.com/theseus-rs/postgresql-binaries/"
+        },
+        "issuer": {
+          "issuer": "",
+          "regexp": ".*"
+        }
+      },
+      "statement": {
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [
+          {
+            "name": "postgresql-18.7.0-aarch64-apple-darwin.tar.gz",
+            "digest": {
+              "sha256": "86456c0ed99d2466524eaa074db6580cf7d748b91042e252c83eaca9a9d216e7"
+            }
+          },
+          {
+            "name": "postgresql-18.7.0-aarch64-apple-darwin.tar.gz.manifest.json",
+            "digest": {
+              "sha256": "e9b8996b594ac55743c21f6e1042cb60dc43b337053aa90df9349551bd4214a2"
+            }
+          },
+          {
+            "name": "postgresql-18.7.0-aarch64-apple-darwin.tar.gz.spdx.json",
+            "digest": {
+              "sha256": "402a7fdf534372faf1e3553c5a3451a166c895b3105f9e3a8b377fbb5bfaaa9d"
+            }
+          }
+        ],
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "predicate": {
+          "buildDefinition": {
+            "buildType": "https://actions.github.io/buildtypes/workflow/v1",
+            "externalParameters": {
+              "workflow": {
+                "path": ".github/workflows/release.yml",
+                "ref": "refs/tags/18.7.0",
+                "repository": "https://github.com/theseus-rs/postgresql-binaries"
+              }
+            },
+            "internalParameters": {
+              "github": {
+                "event_name": "push",
+                "repository_id": "746919647",
+                "repository_owner_id": "153389132",
+                "runner_environment": "github-hosted"
+              }
+            },
+            "resolvedDependencies": [
+              {
+                "digest": {
+                  "gitCommit": "37a2683dfc8293d6a82df271a2edc8a0e78c57cf"
+                },
+                "uri": "git+https://github.com/theseus-rs/postgresql-binaries@refs/tags/18.7.0"
+              }
+            ]
+          },
+          "runDetails": {
+            "builder": {
+              "id": "https://github.com/theseus-rs/postgresql-binaries/.github/workflows/build.yml@refs/tags/18.7.0"
+            },
+            "metadata": {
+              "invocationId": "https://github.com/theseus-rs/postgresql-binaries/actions/runs/43269105625/attempts/1"
+            }
+          }
+        }
+      }
+    }
+  }
+]
