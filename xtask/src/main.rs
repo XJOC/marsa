@@ -121,6 +121,13 @@ fn cli() -> Command {
                         ),
                 )
                 .subcommand(
+                    Command::new("check-postgres")
+                        .about("Check GitHub's attestation of one theseus-rs PostgreSQL archive, and print its sha256")
+                        .arg(Arg::new("url").required(true).help(
+                            "https://github.com/theseus-rs/postgresql-binaries/releases/download/<version>/<file>",
+                        )),
+                )
+                .subcommand(
                     Command::new("verify")
                         .about("Check manifest.json and its signature with the key built into marsa")
                         .arg(
@@ -183,6 +190,12 @@ fn manifest_command(args: &ArgMatches) -> Result<()> {
                 .get_one::<String>("url")
                 .context("clap requires the url")?;
             manifest::run_check_mysql(url)
+        }
+        Some(("check-postgres", args)) => {
+            let url = args
+                .get_one::<String>("url")
+                .context("clap requires the url")?;
+            manifest::run_check_postgres(url)
         }
         Some(("verify", args)) => match args.get_one::<PathBuf>("manifest") {
             Some(path) => manifest::verify(path, args.get_one::<PathBuf>("signature").cloned()),

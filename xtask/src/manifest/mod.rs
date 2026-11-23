@@ -4,6 +4,7 @@
 //! The tool never signs. The owner signs on their own machine with
 //! `minisign`, because the secret key never enters the repository or CI.
 
+mod attest;
 mod build;
 mod oracle;
 mod php_smoke;
@@ -78,6 +79,10 @@ impl build::OracleCheck for Smoke<'_> {
 }
 
 impl Inspect for Smoke<'_> {
+    fn attestation(&self, file: &Path, version: &Version) -> Result<String> {
+        attest::verify_with_gh(file, version)
+    }
+
     fn php_build(&self, target: &Target<'_>, file: &Path) -> Result<Vec<String>> {
         let work = self.work.join(format!(
             "php-{}-{}-{}",
@@ -150,6 +155,42 @@ pub(crate) fn run_check_mysql(url: &str) -> Result<()> {
         oracle::ORACLE_FINGERPRINT
     );
     Ok(())
+}
+
+/// `cargo xtask manifest check-postgres <url>`: GitHub's attestation for one
+/// theseus-rs PostgreSQL archive, as `build` checks it. Prints the size and
+/// sha256 the manifest would record. Keeps nothing: the archive is deleted
+/// after.
+pub(crate) fn run_check_postgres(url: &str) -> Result<()> {
+    // One folder for each archive, so several checks can run at once.
+    let name = url.rsplit_once('/').map_or(url, |(_, name)| name);
+    let work = workspace_root()?
+        .join("target")
+        .join("check-postgres")
+        .join(name);
+    let runtime = tokio::runtime::Runtime::new().context("cannot start tokio")?;
+    let fetch = HttpFetch::new()?;
+    let checked = runtime.block_on(build::check_attested(&fetch, url, &work, &Attestation))?;
+    println!(
+        "{}: {} bytes, sha256 {} (its GitHub attestation by theseus-rs is good)",
+        checked.url,
+        checked.size,
+        upstream::hex(&checked.sha256),
+    );
+    Ok(())
+}
+
+/// Only the `gh` check: for `check-postgres`, which has no PHP to inspect.
+struct Attestation;
+
+impl Inspect for Attestation {
+    fn php_build(&self, _target: &Target<'_>, _file: &Path) -> Result<Vec<String>> {
+        bail!("`check-postgres` has no PHP archive to check")
+    }
+
+    fn attestation(&self, file: &Path, version: &Version) -> Result<String> {
+        attest::verify_with_gh(file, version)
+    }
 }
 
 pub(crate) fn run_build(options: BuildOptions) -> Result<()> {
