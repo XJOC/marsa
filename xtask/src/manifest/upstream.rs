@@ -23,6 +23,14 @@ pub(super) const THESEUS_RELEASES: &str =
 /// `valkey-<version>-r<revision>`, with a `sha256sums.txt`, as for PHP.
 pub(super) const VALKEY_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/valkey-";
 
+/// Mailpit's official releases: tag `v<version>`. They publish no sum file
+/// and no attestation, so the hash to compare with is the sha256 `digest`
+/// GitHub's API reports for each asset of the release ([`MAILPIT_API`]).
+pub(super) const MAILPIT_RELEASES: &str = "https://github.com/axllent/mailpit/releases/download/v";
+
+/// The API page of one Mailpit release: `<this><version>` is its JSON.
+pub(super) const MAILPIT_API: &str = "https://api.github.com/repos/axllent/mailpit/releases/tags/v";
+
 /// Our `libaio.so.1` builds for MySQL on Linux (ADR 0023):
 /// `libaio-<version>-r<revision>`, with a `sha256sums.txt`.
 pub(super) const LIBAIO_RELEASES: &str = "https://github.com/XJOC/marsa/releases/download/libaio-";
@@ -73,6 +81,9 @@ pub(super) enum Layout {
     List,
     /// One line, for our file only; [`single_sum`] reads it.
     Single,
+    /// The JSON of a GitHub release; [`github_digest`] reads the `digest` of
+    /// our file among its `assets`.
+    GithubDigest,
 }
 
 /// Who publishes a sum file, so `build` can ask for one source.
@@ -92,6 +103,8 @@ pub(super) enum Source {
     OurLibaio,
     /// Oracle's MySQL archives, [`MYSQL_FOLDERS`]: an MD5 only.
     Oracle,
+    /// Mailpit's releases, [`MAILPIT_RELEASES`]: the asset digest only.
+    Mailpit,
 }
 
 /// Where the upstream hash of one file is published.
@@ -112,6 +125,7 @@ impl SumFile {
         match self.layout {
             Layout::List => find_sum(text, &self.name, self.algorithm),
             Layout::Single => single_sum(text, &self.name, self.algorithm),
+            Layout::GithubDigest => github_digest(text, &self.name, self.algorithm),
         }
     }
 }
@@ -125,7 +139,7 @@ impl SumFile {
 /// somewhere else.
 pub(super) fn sum_file_for(url: &str) -> Option<SumFile> {
     use Algorithm::{Md5, Sha256, Sha512};
-    use Layout::{List, Single};
+    use Layout::{GithubDigest, List, Single};
 
     let (dir, name) = url.rsplit_once('/')?;
     if !is_segment(name) {
@@ -176,6 +190,14 @@ pub(super) fn sum_file_for(url: &str) -> Option<SumFile> {
     } else if tag(LIBAIO_RELEASES).is_some() {
         let sums = format!("{dir}/sha256sums.txt");
         sum(sums, Sha256, List, Source::OurLibaio)
+    } else if let Some(version) = tag(MAILPIT_RELEASES) {
+        // `.../v<version>/<file>`. GitHub computes this digest when the
+        // asset is uploaded, and serves it from the same place as the file:
+        // it proves only that the download is whole. The trust comes from
+        // the owner's signature on the manifest that pins the hash, as for
+        // theseus-rs.
+        let api = format!("{MAILPIT_API}{version}");
+        sum(api, Sha256, GithubDigest, Source::Mailpit)
     } else if MYSQL_FOLDERS.contains(&dir) {
         // `<hex>  <name>\n`, as `md5sum` writes it. Proves nothing alone:
         // it is served from the same place as the archive.
@@ -252,6 +274,40 @@ pub(super) fn find_sum(text: &str, name: &str, algorithm: Algorithm) -> Result<V
         }
     }
     bail!("{name} is not in the upstream sum file")
+}
+
+/// Reads the hash of `name` from the JSON of a GitHub release: the one entry
+/// of `assets` whose `name` is `name`, and its `digest`, `<algorithm>:<hex>`
+/// as GitHub writes it (`sha256:9f86...`). Refused: text that is not such
+/// JSON, no asset or two of that name, a missing digest, another algorithm,
+/// or a hex of the wrong length or case.
+pub(super) fn github_digest(text: &str, name: &str, algorithm: Algorithm) -> Result<Vec<u8>> {
+    let release: serde_json::Value = serde_json::from_str(text)
+        .with_context(|| format!("the release JSON is not JSON: {}", excerpt(text)))?;
+    let Some(assets) = release.get("assets").and_then(serde_json::Value::as_array) else {
+        bail!("the release JSON has no `assets` list");
+    };
+    let mut named = assets
+        .iter()
+        .filter(|asset| asset.get("name").and_then(serde_json::Value::as_str) == Some(name));
+    let (Some(asset), None) = (named.next(), named.next()) else {
+        bail!("the release JSON does not list {name} exactly once");
+    };
+    let Some(digest) = asset.get("digest").and_then(serde_json::Value::as_str) else {
+        bail!("the release JSON has no digest for {name}");
+    };
+    let Some(hex) = digest
+        .strip_prefix(algorithm.name())
+        .and_then(|rest| rest.strip_prefix(':'))
+    else {
+        bail!(
+            "the digest of {name} is not {}: {}",
+            algorithm.name(),
+            excerpt(digest)
+        );
+    };
+    parse_hex_bytes(hex, algorithm.size())
+        .with_context(|| format!("bad {} for {name}: {}", algorithm.name(), excerpt(hex)))
 }
 
 /// 64 lowercase hex characters to bytes.
@@ -695,6 +751,89 @@ mod tests {
         ] {
             assert_eq!(sum_file_for(&url), None, "{url}");
         }
+    }
+
+    // The JSON of GitHub's API for Mailpit v1.34.0 (2026-11-24), cut down to
+    // the fields `github_digest` and a reader need.
+    const MAILPIT_JSON: &str = include_str!("fixtures/mailpit-v1.34.0-release.json");
+    const MAILPIT_NAME: &str = "mailpit-darwin-arm64.tar.gz";
+
+    #[test]
+    fn mailpit_sum_comes_from_the_release_json() {
+        let url = format!("{MAILPIT_RELEASES}1.34.0/{MAILPIT_NAME}");
+        let sums = sum_file_for(&url).expect("mailpit has a digest");
+        assert_eq!(
+            sums,
+            SumFile {
+                url: format!("{MAILPIT_API}1.34.0"),
+                name: MAILPIT_NAME.to_owned(),
+                algorithm: Algorithm::Sha256,
+                layout: Layout::GithubDigest,
+                source: Source::Mailpit,
+            }
+        );
+        let sha256 = sums.find(MAILPIT_JSON).expect("the real JSON");
+        assert_eq!(
+            hex(&sha256),
+            "32933e0bd17e9738f19ab2eb5ec4d50e183448c9f29ba97e762d418a0f72e854"
+        );
+        // Another repository, a folder below, or a tag with a slash in it.
+        for url in [
+            format!("https://github.com/evil/mailpit/releases/download/v1.34.0/{MAILPIT_NAME}"),
+            format!("{MAILPIT_RELEASES}1.34.0/x/{MAILPIT_NAME}"),
+            format!("{MAILPIT_RELEASES}1.34.0%2F..%2Fv1/{MAILPIT_NAME}"),
+        ] {
+            assert_eq!(sum_file_for(&url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn bad_release_json_is_refused() {
+        let digest = "32933e0bd17e9738f19ab2eb5ec4d50e183448c9f29ba97e762d418a0f72e854";
+        let one = |asset: &str| format!(r#"{{"assets": [{asset}]}}"#);
+        let named = |digest: &str| {
+            one(&format!(
+                r#"{{"name": "{MAILPIT_NAME}", "digest": "{digest}"}}"#
+            ))
+        };
+        let twice = format!(
+            r#"{{"assets": [{{"name": "{MAILPIT_NAME}", "digest": "sha256:{digest}"}},
+                {{"name": "{MAILPIT_NAME}", "digest": "sha256:{digest}"}}]}}"#
+        );
+        for (text, why) in [
+            (String::new(), "empty"),
+            ("not json".to_owned(), "not JSON"),
+            (r#"{"assets": {}}"#.to_owned(), "assets not a list"),
+            (
+                one(r#"{"name": "mailpit-linux-amd64.tar.gz", "digest": "sha256:00"}"#),
+                "no such asset",
+            ),
+            (twice, "listed twice"),
+            (
+                one(&format!(r#"{{"name": "{MAILPIT_NAME}"}}"#)),
+                "no digest",
+            ),
+            (named(&format!("sha512:{digest}")), "another algorithm"),
+            (named(digest), "no algorithm"),
+            (
+                named(&format!("sha256:{}", digest.to_uppercase())),
+                "upper case",
+            ),
+            (named(&format!("sha256:{}", &digest[..62])), "too short"),
+            (named(&format!("sha256 {digest}")), "no colon"),
+        ] {
+            assert!(
+                github_digest(&text, MAILPIT_NAME, Algorithm::Sha256).is_err(),
+                "{why}"
+            );
+        }
+        let good = github_digest(
+            &named(&format!("sha256:{digest}")),
+            MAILPIT_NAME,
+            Algorithm::Sha256,
+        )
+        .expect("good");
+        assert_eq!(hex(&good), digest);
     }
 
     #[test]

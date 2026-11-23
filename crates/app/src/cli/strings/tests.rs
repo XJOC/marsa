@@ -340,7 +340,8 @@ fn every_runtime_has_its_own_name_and_example() {
             "Caddy",
             "PostgreSQL",
             "MySQL",
-            "Valkey"
+            "Valkey",
+            "Mailpit"
         ]
     );
     for runtime in Runtime::ALL {

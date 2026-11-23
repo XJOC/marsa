@@ -79,6 +79,7 @@ pub struct Manifest {
     postgres: Vec<Release>,
     mysql: Vec<Release>,
     valkey: Vec<Release>,
+    mailpit: Vec<Release>,
 }
 
 /// One version of a runtime and its files for each platform.
@@ -161,6 +162,7 @@ impl Manifest {
             Runtime::Postgres => &self.postgres,
             Runtime::Mysql => &self.mysql,
             Runtime::Valkey => &self.valkey,
+            Runtime::Mailpit => &self.mailpit,
         }
     }
 
@@ -345,6 +347,7 @@ fn parse_verified(json: &[u8], last_seen: Option<u64>) -> Result<Manifest, Manif
         postgres: releases("postgres", raw.runtimes.postgres)?,
         mysql: releases("mysql", raw.runtimes.mysql)?,
         valkey: releases("valkey", raw.runtimes.valkey)?,
+        mailpit: releases("mailpit", raw.runtimes.mailpit)?,
     })
 }
 
@@ -389,6 +392,9 @@ struct RawRuntimes {
     /// Added within schema 1, like Caddy: an older build ignores it.
     #[serde(default)]
     valkey: Vec<RawRelease>,
+    /// Added within schema 1, like Caddy: an older build ignores it.
+    #[serde(default)]
+    mailpit: Vec<RawRelease>,
 }
 
 #[derive(Deserialize)]
@@ -943,6 +949,21 @@ mod tests {
         let http = doc.replace("https://github", "http://github");
         let reason = reason(parse_verified(http.as_bytes(), None));
         assert!(reason.starts_with("valkey 8.1.11 linux-x64"), "{reason}");
+    }
+
+    #[test]
+    fn mailpit_releases_are_read_under_their_own_key() {
+        let doc = r#"{"schema": 1, "serial": 1, "runtimes": {"mailpit": [{"version": "1.34.0",
+            "platforms": {"darwin-arm64": [{"name": "archive",
+            "urls": ["https://github.com/axllent/mailpit/releases/download/v1.34.0/mailpit-darwin-arm64.tar.gz"],
+            "sha256": "32933e0bd17e9738f19ab2eb5ec4d50e183448c9f29ba97e762d418a0f72e854",
+            "size": 10481453}]}}]}}"#;
+        let manifest = parse_verified(doc.as_bytes(), None).expect("mailpit release");
+        let [mailpit] = manifest.releases(Runtime::Mailpit) else {
+            panic!("one mailpit release expected");
+        };
+        assert_eq!(mailpit.version(), &Version::new(1, 34, 0));
+        assert!(manifest.releases(Runtime::Valkey).is_empty());
     }
 
     /// Content rules on JSON whose signature is taken as checked, one composer

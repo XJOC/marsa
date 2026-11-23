@@ -1015,6 +1015,7 @@ pub(super) fn example_version(runtime: Option<Runtime>) -> &'static str {
         Some(Runtime::Postgres) => "18",
         Some(Runtime::Mysql) => "8.4",
         Some(Runtime::Valkey) => "8.1",
+        Some(Runtime::Mailpit) => "1.34",
         Some(Runtime::Php) | None => "8.4",
     }
 }

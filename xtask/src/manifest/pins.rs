@@ -14,7 +14,7 @@ use serde::Deserialize;
 use super::upstream::is_segment;
 
 /// The runtimes in manifest order.
-pub(super) const RUNTIMES: [Runtime; 7] = Runtime::ALL;
+pub(super) const RUNTIMES: [Runtime; 8] = Runtime::ALL;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,6 +32,9 @@ struct RawPins {
     /// Optional until the first Valkey is published, as MySQL.
     #[serde(default)]
     valkey: RawList,
+    /// Optional, as MySQL.
+    #[serde(default)]
+    mailpit: RawList,
     #[serde(default, rename = "override")]
     overrides: Vec<RawOverride>,
     #[serde(default, rename = "skip")]
@@ -107,6 +110,7 @@ impl Pins {
                 Runtime::Postgres => &mut raw.postgres,
                 Runtime::Mysql => &mut raw.mysql,
                 Runtime::Valkey => &mut raw.valkey,
+                Runtime::Mailpit => &mut raw.mailpit,
             };
             let list = std::mem::take(&mut list.versions);
             versions.insert(runtime.dir_name(), versions_of(runtime, list)?);
@@ -611,6 +615,43 @@ urls = ["https://windows.php.net/downloads/releases/archives/php-8.3.27-nts-Win3
                         Source::Theseus,
                         Layout::Single,
                         format!("{template}.sha256")
+                    )
+                );
+            }
+        }
+    }
+
+    /// Mailpit is the official archive the recipe names, with no override,
+    /// and the digest of GitHub's release API, on all five platforms.
+    #[test]
+    fn repository_mailpit_urls_are_the_official_release_assets() {
+        use super::super::upstream::{Layout, MAILPIT_API, MAILPIT_RELEASES, Source, sum_file_for};
+
+        let pins = Pins::parse(include_str!("../../../recipes/pins.toml")).expect("valid pins");
+        assert_eq!(pins.versions(Runtime::Mailpit), &[v("1.34.0")]);
+        let recipe = recipes::builtin(Runtime::Mailpit).expect("mailpit recipe");
+        assert_eq!(recipe.platforms().count(), 5);
+        for version in pins.versions(Runtime::Mailpit) {
+            for (platform, _) in recipe.platforms() {
+                assert_eq!(pins.skip_reason(Runtime::Mailpit, version, platform), None);
+                let template = recipe
+                    .artifact_url(platform, "archive", version)
+                    .unwrap_or_else(|| panic!("{version} has no {platform} archive"));
+                let urls = pins
+                    .urls(Runtime::Mailpit, version, platform, "archive")
+                    .expect("urls");
+                assert_eq!(urls, std::slice::from_ref(&template), "no override");
+                assert!(
+                    template.starts_with(&format!("{MAILPIT_RELEASES}{version}/mailpit-")),
+                    "{template}"
+                );
+                let sums = sum_file_for(&template).expect("a digest");
+                assert_eq!(
+                    (sums.source, sums.layout, sums.url),
+                    (
+                        Source::Mailpit,
+                        Layout::GithubDigest,
+                        format!("{MAILPIT_API}{version}")
                     )
                 );
             }

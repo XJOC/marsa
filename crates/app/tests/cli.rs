@@ -46,7 +46,8 @@ fn runtimes_on_an_empty_data_dir() {
          Caddy       none installed\n\
          PostgreSQL  none installed\n\
          MySQL       none installed\n\
-         Valkey      none installed\n",
+         Valkey      none installed\n\
+         Mailpit     none installed\n",
         "",
     );
 }
@@ -67,7 +68,8 @@ fn runtimes_lists_installed_versions() {
          Caddy       none installed\n\
          PostgreSQL  none installed\n\
          MySQL       none installed\n\
-         Valkey      none installed\n",
+         Valkey      none installed\n\
+         Mailpit     none installed\n",
         "",
     );
     data.expect(&["runtimes", "php"], 0, "PHP         8.3.27, 8.4.23\n", "");

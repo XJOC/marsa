@@ -367,6 +367,7 @@ pub fn builtin(runtime: Runtime) -> Result<&'static Recipe, RecipeError> {
     static POSTGRES: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
     static MYSQL: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
     static VALKEY: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
+    static MAILPIT: OnceLock<Result<Recipe, RecipeError>> = OnceLock::new();
 
     let (cell, file, text) = match runtime {
         Runtime::Php => (&PHP, "php.toml", include_str!("../../../recipes/php.toml")),
@@ -399,6 +400,11 @@ pub fn builtin(runtime: Runtime) -> Result<&'static Recipe, RecipeError> {
             &VALKEY,
             "valkey.toml",
             include_str!("../../../recipes/valkey.toml"),
+        ),
+        Runtime::Mailpit => (
+            &MAILPIT,
+            "mailpit.toml",
+            include_str!("../../../recipes/mailpit.toml"),
         ),
     };
     cell.get_or_init(|| {

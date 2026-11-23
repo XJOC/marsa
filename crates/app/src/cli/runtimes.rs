@@ -95,7 +95,8 @@ mod tests {
              Caddy       none installed\n\
              PostgreSQL  none installed\n\
              MySQL       none installed\n\
-             Valkey      none installed\n"
+             Valkey      none installed\n\
+             Mailpit     none installed\n"
         );
     }
 
@@ -114,7 +115,8 @@ mod tests {
              Caddy       2.11.8\n\
              PostgreSQL  none installed\n\
              MySQL       none installed\n\
-             Valkey      none installed\n"
+             Valkey      none installed\n\
+             Mailpit     none installed\n"
         );
         assert_eq!(render(&found, Some(Tool::Node)), "Node.js     22.11.0\n");
         assert_eq!(render(&found, Some(Tool::Caddy)), "Caddy       2.11.8\n");
