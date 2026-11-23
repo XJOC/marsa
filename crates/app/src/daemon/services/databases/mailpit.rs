@@ -111,4 +111,59 @@ mod tests {
         let port = silent.local_addr().expect("address").port();
         assert!(!answers(port).await);
     }
+
+    /// Another mail catcher on the web page's port, or on the SMTP port:
+    /// nothing starts and no mail folder is made. The daemon's test hooks
+    /// run on Unix only.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn either_busy_port_starts_nothing() {
+        use std::sync::Arc;
+
+        use marsa_core::config::{self, ConfigPaths, GlobalConfig, ServerSettings};
+        use marsa_core::databases::mailpit::{MAILPIT_UI_PORT, mailpit_database};
+        use marsa_core::orphan::Liveness;
+        use marsa_core::types::{ServiceAction, ServiceState};
+
+        use crate::daemon::services::databases::tests::{free_port, probes};
+        use crate::daemon::services::probe::ProcessProbe;
+        use crate::daemon::state::Daemon;
+
+        let smtp = free_port();
+        for busy in [MAILPIT_UI_PORT, smtp] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let data = dir.path();
+            let program = data.join("runtimes/mailpit/1.34.0/mailpit");
+            std::fs::create_dir_all(program.parent().expect("a folder")).expect("folder");
+            std::fs::write(&program, "").expect("program");
+            let global = GlobalConfig {
+                mailpit: ServerSettings {
+                    default: None,
+                    enabled: true,
+                    port: Some(smtp),
+                },
+                ..GlobalConfig::default()
+            };
+            config::save_global(&ConfigPaths::in_dir(data).global, &global).expect("save");
+            let mut fake = probes(Liveness::Gone, Some("mailhog(77)"));
+            fake.only_port = Some(busy);
+            let mut daemon = Daemon::new(data.to_path_buf());
+            daemon.server_mut(ServerKind::Mailpit).probes = Arc::new(fake) as Arc<dyn ProcessProbe>;
+            let manager = daemon.server(ServerKind::Mailpit);
+            let wait = Duration::from_secs(30);
+            let err = manager
+                .run_waiting(&daemon, ServiceAction::Start, wait)
+                .await
+                .expect_err("a busy port");
+            assert_eq!(err.code(), "service_port_busy", "port {busy}");
+            assert!(err.to_string().contains(&format!("port {busy}")), "{err}");
+            assert!(err.to_string().contains("mailhog(77)"), "{err}");
+            let failed = ServiceState::Failed {
+                code: "service_port_busy".into(),
+            };
+            assert_eq!(manager.status().state, failed);
+            let folder = mailpit_database(data);
+            assert!(!folder.parent().expect("a folder").exists());
+        }
+    }
 }
