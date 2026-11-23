@@ -1,15 +1,15 @@
-//! What setup does after the checks, on a blocking thread: the operations
-//! for the helper on each system, then the steps `marsad` does itself (the
-//! user's trust on macOS, the NSS databases on Linux), and the Windows
-//! service. On Linux, the way of [`super::linux_dns`] that the user's system
-//! allows: the `marsa0` link, or the hosts file where systemd-resolved does
-//! not run (ADR 0014); the helper stays the judge and setup sends the hosts
-//! operations in a second request if it says so.
+//! What setup does after the checks, on a blocking thread. The daemon
+//! gathers the facts, [`marsa_core::setup::plan`] decides (ADR 0026), and
+//! this file runs the plan: the helper's requests, then the steps `marsad`
+//! does itself (the user's trust on macOS, the NSS databases on Linux), and
+//! the Windows service. On Linux, the way of [`super::linux_dns`] that the
+//! user's system allows: the `marsa0` link, or the hosts file where
+//! systemd-resolved does not run (ADR 0014); the helper stays the judge and
+//! setup sends the hosts operations in a second request if it says so.
 
 use super::Flow;
 use super::Setup;
 use super::ca::StartCaddy;
-use super::dns_skipped;
 use super::failure;
 use super::linux_dns;
 use super::nss;
@@ -20,28 +20,21 @@ use marsa_core::caddy::CaddyInput;
 use marsa_core::caddy::CaddyPaths;
 use marsa_core::codes;
 use marsa_core::dns;
-use marsa_core::dns::DNS_PORT;
-use marsa_core::dns::LinuxPath;
 use marsa_core::helper::HelperOp;
 use marsa_core::helper::OpResult;
 use marsa_core::helper::OpStatus;
 use marsa_core::platform::ports;
 use marsa_core::recipes::Os;
 use marsa_core::recipes::Platform;
+use marsa_core::setup;
+use marsa_core::setup::Facts;
+use marsa_core::setup::FollowUp;
+use marsa_core::setup::LocalStep;
+use marsa_core::setup::Plan;
 use marsa_core::types::ApiError;
 use marsa_core::types::{OpName, SetupReport};
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
-
-/// The operations of the hosts way, into `ops`; a `hosts_sync` that cannot
-/// be sent goes into `report` as skipped ([`linux_dns::hosts_ops`]).
-fn push_hosts_ops(ops: &mut Vec<HelperOp>, report: &mut SetupReport, names: Option<&[String]>) {
-    let (hosts, skipped) = linux_dns::hosts_ops(names);
-    ops.extend(hosts);
-    if let Some(code) = skipped {
-        report.skipped.push(skip(OpName::HostsSync, code));
-    }
-}
 
 /// Whether the helper's `ports_install` is done, now or before.
 pub(super) fn low_ports_set(report: &SetupReport) -> bool {
@@ -63,13 +56,37 @@ pub(super) fn inside(path: &Path, dir: &Path) -> bool {
     })
 }
 
+/// What the plan leaves out and why, for the log. Not the facts as a
+/// whole: they hold the CA text.
+fn log_plan(facts: &Facts, plan: &Plan) {
+    if let Some(linux) = facts.linux_dns {
+        tracing::info!(
+            path = ?dns::linux_path(linux),
+            block = facts.hosts_block,
+            "the way of .test names here"
+        );
+    }
+    for left_out in &plan.skips {
+        tracing::warn!(op = %left_out.op, code = %left_out.code, "setup leaves this step out");
+    }
+    for holder in &plan.port_holders {
+        tracing::warn!(
+            port = holder.port,
+            process = ?holder.process,
+            pid = ?holder.pid,
+            app = ?holder.app,
+            "a program listens on a port the pf redirect would take; no pf_install"
+        );
+    }
+}
+
 impl Setup {
     /// The setup itself. Blocking: it runs programs and reads a file.
     /// `starter` starts Caddy when its CA root is not there yet. `names`:
-    /// the host names of the sites, sorted, for the hosts file on Linux;
-    /// `None` if the site list is not known. `dns_down`: why the daemon's
-    /// DNS server does not answer (`DnsService::not_serving`); the DNS
-    /// operation is then skipped with that code.
+    /// the host names of the sites, sorted, for the hosts file on Linux and
+    /// Windows; `None` if the site list is not known. `dns_down`: why the
+    /// daemon's DNS server does not answer (`DnsService::not_serving`); the
+    /// DNS operation is then skipped with that code.
     #[expect(
         clippy::too_many_arguments,
         reason = "the inputs of one setup; a struct would only rename them"
@@ -84,159 +101,121 @@ impl Setup {
         dns_down: Option<&str>,
         stop: &CancellationToken,
     ) -> SetupReport {
-        let mut report = SetupReport::default();
-        let mut ops = Vec::new();
-        let ca_root = CaddyPaths::in_dir(data_dir).ca_root();
-        // macOS: the user's own trust, after the helper (ADR 0015). Elsewhere
-        // the helper trusts the CA as root (ADR 0011).
-        let mut trust_for_user = None;
-        let mut nss_pem = None;
-        match self.ca(&ca_root, starter, stop) {
-            Ok(pem) if platform.os() == Os::Mac => trust_for_user = Some(pem),
-            // Linux: the system store through the helper, then the user's
-            // NSS databases as the user (ADR 0014).
-            Ok(pem) if platform.os() == Os::Linux => {
-                if self.nss {
-                    nss_pem = Some(pem.clone());
-                }
-                ops.push(HelperOp::TrustInstall { pem });
-            }
-            // Windows: the service is installed for this root's SHA-256 (ADR
-            // 0018). A root the helper's strict parser refuses has none, and
-            // every setup would ask UAC in vain.
-            Ok(pem)
-                if platform.os() == Os::Windows
-                    && marsa_core::helper::certificate_sha256(&pem).is_none() =>
-            {
-                tracing::warn!("the CA root is not one strict certificate; no trust_install");
-                report
-                    .skipped
-                    .push(skip(OpName::TrustInstall, codes::CA_UNREADABLE));
-            }
-            Ok(pem) => ops.push(HelperOp::TrustInstall { pem }),
-            Err(code) => report.skipped.push(skip(OpName::TrustInstall, code)),
-        }
-        let mut linux = None;
-        if platform.os() == Os::Linux {
-            let path = dns::linux_path(linux_dns::facts(self.runner.as_ref(), stop));
-            let block = self
-                .hosts_file
-                .as_deref()
-                .and_then(linux_dns::read_block)
-                .is_some();
-            tracing::info!(?path, block, "the way of .test names here");
-            match (path, dns_down) {
-                (LinuxPath::Link, Some(code)) => {
-                    dns_skipped(&mut report, OpName::ResolvedInstall, code);
-                }
-                (LinuxPath::Link, None) => {
-                    ops.push(HelperOp::ResolvedInstall { port: DNS_PORT });
-                }
-                (LinuxPath::Hosts, _) => push_hosts_ops(&mut ops, &mut report, names),
-            }
-            linux = Some((path, block));
-        } else if platform.os() == Os::Windows {
-            // Windows: the hosts block with the names of the sites now, so
-            // that a setup again does not empty it (ADR 0018).
-            match names {
-                Some(names) if dns::hosts_names_fit(names) => {
-                    ops.push(HelperOp::HostsSync {
-                        names: names.to_vec(),
-                    });
-                }
-                Some(_) => report
-                    .skipped
-                    .push(skip(OpName::HostsSync, codes::HOSTS_TOO_MANY_NAMES)),
-                None => report
-                    .skipped
-                    .push(skip(OpName::HostsSync, codes::HOSTS_SITES_UNKNOWN)),
-            }
-        } else if let Some(code) = dns_down {
-            dns_skipped(&mut report, OpName::ResolverInstall, code);
-        } else if let Some(op) = dns::setup_op(platform) {
-            ops.push(op);
-        }
-        if platform.os() == Os::Linux {
-            ops.push(HelperOp::PortsInstall);
-        } else if platform.os() != Os::Windows {
-            self.pf_op(caddy, &mut ops, &mut report, stop);
-        }
-        // Windows: Caddy binds ports 80 and 443 itself (ADR 0018), so
-        // there is nothing to redirect and nothing to allow.
+        let facts = self.facts(data_dir, caddy, platform, starter, names, dns_down, stop);
+        let plan = setup::plan(&facts);
+        log_plan(&facts, &plan);
+        let Plan {
+            ops,
+            skips,
+            port_holders,
+            local,
+        } = plan;
+        let mut report = SetupReport {
+            skipped: skips,
+            port_holders,
+            ..SetupReport::default()
+        };
         match self.apply(ops, platform, stop) {
             Ok(results) => report.results = results,
             Err(error) => report.error = Some(error),
         }
-        if let Some((LinuxPath::Link, block)) = linux {
-            self.after_the_link(&mut report, block, platform, names, stop);
+        // Linux: a second request, if the helper's answer asks for one.
+        if report.error.is_none()
+            && let Some(follow_up) = setup::after_helper(&facts, &report.results)
+        {
+            self.follow_up(&mut report, follow_up, platform, stop);
         }
-        // Only if the helper ran as asked, or was not needed: a cancelled or
-        // refused admin prompt ends setup with nothing changed in the system,
-        // and no second dialog. Setup may have started Caddy and made its CA
-        // by then: Marsa's own process and data.
-        if let Some(pem) = trust_for_user.filter(|_| report.error.is_none()) {
-            let files = user_trust::TrustFiles::in_dir(data_dir);
-            report.results.push(self.trust_for_user(&pem, &files, stop));
-        }
-        // The same condition as the user trust on macOS.
-        if let Some(pem) = nss_pem.filter(|_| report.error.is_none()) {
-            self.nss_install(&mut report, &pem, data_dir, stop);
-        }
-        if linux.is_some() {
-            linux_dns::record_way(data_dir, &report.results);
+        for step in local {
+            match step {
+                // Only if the helper ran as asked, or was not needed: a
+                // cancelled or refused admin prompt ends setup with nothing
+                // changed in the system, and no second dialog. Setup may have
+                // started Caddy and made its CA by then: Marsa's own process
+                // and data.
+                LocalStep::UserTrust { pem } if report.error.is_none() => {
+                    let files = user_trust::TrustFiles::in_dir(data_dir);
+                    report.results.push(self.trust_for_user(&pem, &files, stop));
+                }
+                LocalStep::NssInstall { pem } if report.error.is_none() => {
+                    self.nss_install(&mut report, &pem, data_dir, stop);
+                }
+                LocalStep::UserTrust { .. } | LocalStep::NssInstall { .. } => {}
+                LocalStep::RecordDnsWay => linux_dns::record_way(data_dir, &report.results),
+            }
         }
         report
     }
 
-    /// Linux, after a request with `resolved_install`, and
-    /// only if the helper answered it. The helper is the judge of the way:
-    /// if it chose the hosts file ([`linux_dns::helper_chose_hosts`]),
-    /// `resolved_install` moves from the results to the skipped steps with
-    /// the helper's code, and the operations of the hosts way go to the
-    /// helper in a second request. If it made the link and the hosts file
-    /// still has Marsa's `block`, `hosts_remove` goes in a second request.
-    /// Either is a second password prompt of the same `marsa setup`. When
-    /// that request does not run, the error says that the steps before it
-    /// are done: [`codes::SETUP_HOSTS_NOT_WRITTEN`] or [`codes::SETUP_HOSTS_NOT_REMOVED`].
-    fn after_the_link(
+    /// The facts [`setup::plan`] needs, as far as [`setup::needs`] asks for
+    /// them on this system. The CA comes first: it may start Caddy.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the inputs of one setup; a struct would only rename them"
+    )]
+    fn facts(
+        &self,
+        data_dir: &Path,
+        caddy: CaddyInput,
+        platform: Platform,
+        starter: &dyn StartCaddy,
+        names: Option<&[String]>,
+        dns_down: Option<&str>,
+        stop: &CancellationToken,
+    ) -> Facts {
+        let needs = setup::needs(platform.os());
+        // First, and on its own line: it may start Caddy, and the order of
+        // the other facts must not move before it.
+        let ca = self.ca(&CaddyPaths::in_dir(data_dir).ca_root(), starter, stop);
+        Facts {
+            platform,
+            ca,
+            caddy_ports: (caddy.http_port, caddy.https_port),
+            port_holders: if needs.port_holders {
+                ports::holders(self.runner(), Os::Mac, stop)
+            } else {
+                None
+            },
+            linux_dns: needs
+                .linux_dns
+                .then(|| linux_dns::facts(self.runner.as_ref(), stop)),
+            hosts_block: needs.hosts_block
+                && self
+                    .hosts_file
+                    .as_deref()
+                    .and_then(linux_dns::read_block)
+                    .is_some(),
+            names: names.map(<[String]>::to_vec),
+            dns_down: dns_down.map(str::to_owned),
+            nss: self.nss,
+        }
+    }
+
+    /// Linux: the second request that [`setup::after_helper`] asks for. If
+    /// the helper chose the hosts file, `resolved_install` moves from the
+    /// results to the skipped steps with the helper's code. When the request
+    /// does not run, the error says that the steps before it are done:
+    /// [`codes::SETUP_HOSTS_NOT_WRITTEN`] or [`codes::SETUP_HOSTS_NOT_REMOVED`].
+    fn follow_up(
         &self,
         report: &mut SetupReport,
-        block: bool,
+        follow_up: FollowUp,
         platform: Platform,
-        names: Option<&[String]>,
         stop: &CancellationToken,
     ) {
-        if report.error.is_some() {
-            return;
-        }
-        let (ops, not_run) = if let Some(code) = linux_dns::helper_chose_hosts(&report.results) {
+        if let Some((op, code)) = &follow_up.retire {
             tracing::warn!(
                 code,
                 "marsad expected the marsa0 link, but marsa-helper chose the hosts file; \
                  sending the operations of the hosts way"
             );
-            report
-                .results
-                .retain(|result| result.op != OpName::ResolvedInstall);
-            report.skipped.push(skip(OpName::ResolvedInstall, &code));
-            let mut ops = Vec::new();
-            push_hosts_ops(&mut ops, report, names);
-            // No names to write, no prompt: after `resolved_use_hosts` the
-            // helper took an earlier link out itself.
-            if !ops
-                .iter()
-                .any(|op| matches!(op, HelperOp::HostsSync { .. }))
-            {
-                return;
-            }
-            (ops, codes::SETUP_HOSTS_NOT_WRITTEN)
-        } else if block && linux_dns::link_made(&report.results) {
-            tracing::info!("the link is made; taking Marsa's old block out of the hosts file");
-            (vec![HelperOp::HostsRemove], codes::SETUP_HOSTS_NOT_REMOVED)
-        } else {
+            report.results.retain(|result| result.op != *op);
+            report.skipped.push(skip(*op, code));
+        }
+        report.skipped.extend(follow_up.skips);
+        if follow_up.ops.is_empty() {
             return;
-        };
-        match self.apply(ops, platform, stop) {
+        }
+        match self.apply(follow_up.ops, platform, stop) {
             Ok(results) => report.results.extend(results),
             // The helper may have run: their texts say so.
             Err(error)
@@ -257,43 +236,8 @@ impl Setup {
                     "the steps before are done, but the second request did not run: {}",
                     error.code
                 );
-                report.error = Some(failure(not_run, message));
+                report.error = Some(failure(follow_up.not_run, message));
             }
-        }
-    }
-
-    /// macOS: `pf_install` if nobody listens on 80 and 443, else the reason
-    /// why not in `report` (ADR 0008, "Herd conflict").
-    fn pf_op(
-        &self,
-        caddy: CaddyInput,
-        ops: &mut Vec<HelperOp>,
-        report: &mut SetupReport,
-        stop: &CancellationToken,
-    ) {
-        match ports::holders(self.runner(), Os::Mac, stop) {
-            Some(holders) if holders.is_empty() => ops.push(HelperOp::PfInstall {
-                http_port: caddy.http_port,
-                https_port: caddy.https_port,
-            }),
-            Some(holders) => {
-                for holder in &holders {
-                    tracing::warn!(
-                        port = holder.port,
-                        process = ?holder.process,
-                        pid = ?holder.pid,
-                        app = ?holder.app,
-                        "a program listens on a port the pf redirect would take; no pf_install"
-                    );
-                }
-                report.port_holders = holders;
-                report
-                    .skipped
-                    .push(skip(OpName::PfInstall, codes::REDIRECT_PORT_HELD));
-            }
-            None => report
-                .skipped
-                .push(skip(OpName::PfInstall, codes::PORTS_NOT_CHECKED)),
         }
     }
 

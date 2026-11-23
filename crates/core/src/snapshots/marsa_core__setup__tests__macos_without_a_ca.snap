@@ -1,0 +1,23 @@
+---
+source: crates/core/src/setup.rs
+expression: plan(&facts)
+---
+Plan {
+    ops: [
+        ResolverInstall {
+            port: 18053,
+        },
+        PfInstall {
+            http_port: 8080,
+            https_port: 8443,
+        },
+    ],
+    skips: [
+        SetupSkip {
+            op: TrustInstall,
+            code: "ca_unreadable",
+        },
+    ],
+    port_holders: [],
+    local: [],
+}

@@ -1,0 +1,54 @@
+---
+source: crates/core/src/setup.rs
+expression: plan(&facts)
+---
+Plan {
+    ops: [
+        ResolverInstall {
+            port: 18053,
+        },
+    ],
+    skips: [
+        SetupSkip {
+            op: PfInstall,
+            code: "redirect_port_held",
+        },
+    ],
+    port_holders: [
+        PortHolder {
+            port: 80,
+            address: "*",
+            process: Some(
+                "nginx",
+            ),
+            pid: Some(
+                77,
+            ),
+            user: Some(
+                "omar",
+            ),
+            command: None,
+            app: None,
+        },
+        PortHolder {
+            port: 443,
+            address: "*",
+            process: Some(
+                "nginx",
+            ),
+            pid: Some(
+                77,
+            ),
+            user: Some(
+                "omar",
+            ),
+            command: None,
+            app: None,
+        },
+    ],
+    local: [
+        UserTrust {
+            pem: "PEM",
+        },
+    ],
+}

@@ -1,0 +1,24 @@
+---
+source: crates/core/src/setup.rs
+expression: plan(&facts)
+---
+Plan {
+    ops: [
+        PfInstall {
+            http_port: 8080,
+            https_port: 8443,
+        },
+    ],
+    skips: [
+        SetupSkip {
+            op: ResolverInstall,
+            code: "dns_not_running",
+        },
+    ],
+    port_holders: [],
+    local: [
+        UserTrust {
+            pem: "PEM",
+        },
+    ],
+}

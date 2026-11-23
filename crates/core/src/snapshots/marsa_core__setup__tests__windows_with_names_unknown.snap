@@ -1,0 +1,19 @@
+---
+source: crates/core/src/setup.rs
+expression: windows_plan(&facts)
+---
+Plan {
+    ops: [
+        TrustInstall {
+            pem: "<the fixture PEM>",
+        },
+    ],
+    skips: [
+        SetupSkip {
+            op: HostsSync,
+            code: "hosts_sites_unknown",
+        },
+    ],
+    port_holders: [],
+    local: [],
+}

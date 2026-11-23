@@ -1,0 +1,21 @@
+---
+source: crates/core/src/setup.rs
+expression: plan(&facts)
+---
+Plan {
+    ops: [
+        HostsSync {
+            names: [
+                "a.test",
+            ],
+        },
+    ],
+    skips: [
+        SetupSkip {
+            op: TrustInstall,
+            code: "ca_unreadable",
+        },
+    ],
+    port_holders: [],
+    local: [],
+}

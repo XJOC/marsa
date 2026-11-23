@@ -1,0 +1,23 @@
+---
+source: crates/core/src/setup.rs
+expression: "plan(&linux(Some(255), Some(true)))"
+---
+Plan {
+    ops: [
+        TrustInstall {
+            pem: "PEM",
+        },
+        ResolvedInstall {
+            port: 18053,
+        },
+        PortsInstall,
+    ],
+    skips: [],
+    port_holders: [],
+    local: [
+        NssInstall {
+            pem: "PEM",
+        },
+        RecordDnsWay,
+    ],
+}

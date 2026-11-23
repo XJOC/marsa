@@ -1,0 +1,25 @@
+---
+source: crates/core/src/setup.rs
+expression: "after_helper(&linux(Some(255), Some(true)), &results)"
+---
+Some(
+    FollowUp {
+        ops: [
+            ResolvedRemove,
+            HostsSync {
+                names: [
+                    "a.test",
+                    "b.test",
+                ],
+            },
+        ],
+        retire: Some(
+            (
+                ResolvedInstall,
+                "resolved_use_hosts",
+            ),
+        ),
+        skips: [],
+        not_run: "setup_hosts_not_written",
+    },
+)

@@ -1,0 +1,22 @@
+---
+source: crates/core/src/setup.rs
+expression: plan(&facts)
+---
+Plan {
+    ops: [
+        ResolvedInstall {
+            port: 18053,
+        },
+        PortsInstall,
+    ],
+    skips: [
+        SetupSkip {
+            op: TrustInstall,
+            code: "caddy_not_installed",
+        },
+    ],
+    port_holders: [],
+    local: [
+        RecordDnsWay,
+    ],
+}
