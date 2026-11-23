@@ -480,6 +480,10 @@ pub(super) fn error_message(code: &str) -> Option<&'static str> {
         }
         "mysql_start_timeout" => "MySQL started but took no connections in time.",
         "mysql_unsupported_platform" => "Marsa has no MySQL for this system.",
+        "mail_id_invalid" => "That is not a mail id.",
+        "mail_not_found" => "Mailpit has no mail with that id.",
+        "mail_not_running" => "Mailpit does not run.",
+        "mail_unavailable" => "Mailpit did not answer as expected.",
         "mailpit_init_failed" => "Marsa could not make Mailpit's mail folder.",
         "mailpit_not_installed" => "Mailpit is not installed.",
         "mailpit_orphan_stuck" => "An old Mailpit of this Marsa still runs and did not stop.",

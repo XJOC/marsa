@@ -346,6 +346,16 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
              control character, which MySQL's settings file cannot hold, so MySQL was not \
              started. Run \"marsa logs mysql\" to see the path."
             .into(),
+        "mail_not_running" => "Mailpit does not run, so there is no mail to show. Run \
+             \"marsa services start mailpit\", or \"marsa install mailpit\" first."
+            .into(),
+        "mail_id_invalid" => "That is not a mail id. Run \"marsa mail\" to see the ids.".into(),
+        "mail_not_found" => "Mailpit has no mail with that id. Run \"marsa mail\" to see the \
+             ids."
+            .into(),
+        "mail_unavailable" => "Mailpit did not answer as expected. Run \"marsa logs mailpit\" \
+             to see why."
+            .into(),
         // Mailpit, the same way.
         "mailpit_not_installed" => "Mailpit is not installed. Run \"marsa install mailpit\", \
              then try again."
