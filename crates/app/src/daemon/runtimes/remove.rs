@@ -357,7 +357,8 @@ fn in_use(
         | Runtime::Caddy
         | Runtime::Postgres
         | Runtime::Mysql
-        | Runtime::Valkey => |_| None,
+        | Runtime::Valkey
+        | Runtime::Mailpit => |_| None,
     };
     let default = default_tool(runtime).and_then(|tool| match tool {
         Tool::Php => global.php.default.as_ref(),

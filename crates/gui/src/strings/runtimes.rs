@@ -158,6 +158,7 @@ pub fn example_version(runtime: Runtime) -> &'static str {
         Runtime::Postgres => "18",
         Runtime::Mysql => "8.4",
         Runtime::Valkey => "8.1",
+        Runtime::Mailpit => "1.34",
     }
 }
 
@@ -315,6 +316,7 @@ pub fn runtime_name(runtime: Runtime) -> &'static str {
         Runtime::Postgres => "PostgreSQL",
         Runtime::Mysql => "MySQL",
         Runtime::Valkey => "Valkey",
+        Runtime::Mailpit => "Mailpit",
     }
 }
 

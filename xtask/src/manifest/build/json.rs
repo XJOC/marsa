@@ -34,6 +34,9 @@ pub(in crate::manifest) struct RuntimesJson {
     /// Left out while empty, as MySQL.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub valkey: Vec<ReleaseJson>,
+    /// Left out while empty, as MySQL.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mailpit: Vec<ReleaseJson>,
 }
 
 impl RuntimesJson {
@@ -46,6 +49,7 @@ impl RuntimesJson {
             Runtime::Postgres => &self.postgres,
             Runtime::Mysql => &self.mysql,
             Runtime::Valkey => &self.valkey,
+            Runtime::Mailpit => &self.mailpit,
         }
     }
 
@@ -58,6 +62,7 @@ impl RuntimesJson {
             Runtime::Postgres => &mut self.postgres,
             Runtime::Mysql => &mut self.mysql,
             Runtime::Valkey => &mut self.valkey,
+            Runtime::Mailpit => &mut self.mailpit,
         }
     }
 }

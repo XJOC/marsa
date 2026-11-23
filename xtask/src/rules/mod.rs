@@ -17,14 +17,10 @@ use crate::manifest::workspace_root;
 
 /// Files whose code may pass [`rust::LIMIT`] lines, and why. An entry that
 /// is no longer needed is a violation too, so the list stays true.
-const LONG_FILES: &[(&str, &str)] = &[
-    (
-        "crates/app/src/cli/strings/errors.rs",
-        "one table of texts: tables are split by domain, not by length",
-    ),
-    ("crates/core/src/types.rs", "to split by domain"),
-    ("crates/core/src/databases/mod.rs", "to split by job"),
-];
+const LONG_FILES: &[(&str, &str)] = &[(
+    "crates/app/src/cli/strings/errors.rs",
+    "one table of texts: tables are split by domain, not by length",
+)];
 
 /// One broken rule.
 #[derive(Debug, PartialEq, Eq)]
