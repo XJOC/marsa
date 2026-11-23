@@ -46,6 +46,9 @@ pub enum Tool {
     /// Valkey 8.1, for Laravel's Redis cache and queue. Installed like the
     /// others; `marsad` runs it.
     Valkey,
+    /// Mailpit, the mail catcher. Installed like the others; `marsad` runs
+    /// it.
+    Mailpit,
 }
 
 impl From<Tool> for Runtime {
@@ -58,6 +61,7 @@ impl From<Tool> for Runtime {
             Tool::Postgres => Runtime::Postgres,
             Tool::Mysql => Runtime::Mysql,
             Tool::Valkey => Runtime::Valkey,
+            Tool::Mailpit => Runtime::Mailpit,
         }
     }
 }

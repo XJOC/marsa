@@ -74,6 +74,7 @@ pub fn runtime_name(runtime: Runtime) -> &'static str {
         Runtime::Postgres => "PostgreSQL",
         Runtime::Mysql => "MySQL",
         Runtime::Valkey => "Valkey",
+        Runtime::Mailpit => "Mailpit",
     }
 }
 

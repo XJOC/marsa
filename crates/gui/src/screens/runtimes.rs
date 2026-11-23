@@ -90,7 +90,7 @@ pub(crate) fn kind_for(runtime: Runtime) -> Kind {
     match runtime {
         Runtime::Php | Runtime::Node => Kind::Language,
         Runtime::Composer | Runtime::Caddy => Kind::Tool,
-        Runtime::Postgres | Runtime::Mysql | Runtime::Valkey => Kind::Engine,
+        Runtime::Postgres | Runtime::Mysql | Runtime::Valkey | Runtime::Mailpit => Kind::Engine,
     }
 }
 

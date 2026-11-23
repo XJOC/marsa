@@ -1,0 +1,55 @@
+{
+  "tag_name": "v1.34.0",
+  "draft": false,
+  "prerelease": false,
+  "assets": [
+    {
+      "name": "mailpit-darwin-amd64.tar.gz",
+      "size": 11224715,
+      "digest": "sha256:a497582d4e9f9a5d0eea84f8622530533dce0797cf8a4952bd7a59487e5d9c7c",
+      "browser_download_url": "https://github.com/axllent/mailpit/releases/download/v1.34.0/mailpit-darwin-amd64.tar.gz"
+    },
+    {
+      "name": "mailpit-darwin-arm64.tar.gz",
+      "size": 10481453,
+      "digest": "sha256:32933e0bd17e9738f19ab2eb5ec4d50e183448c9f29ba97e762d418a0f72e854",
+      "browser_download_url": "https://github.com/axllent/mailpit/releases/download/v1.34.0/mailpit-darwin-arm64.tar.gz"
+    },
+    {
+      "name": "mailpit-linux-386.tar.gz",
+      "size": 10900473,
+      "digest": "sha256:4e0b708e9cd60e670392938b6ad2788f8e395fe6068675e6e840fd466a50333b",
+      "browser_download_url": "https://github.com/axllent/mailpit/releases/download/v1.34.0/mailpit-linux-386.tar.gz"
+    },
+    {
+      "name": "mailpit-linux-amd64.tar.gz",
+      "size": 11235062,
+      "digest": "sha256:af236b42f171b1c74f0ac5ff444f44d36f2f2ecc0134f5a2f1d4e307e56a0d2c",
+      "browser_download_url": "https://github.com/axllent/mailpit/releases/download/v1.34.0/mailpit-linux-amd64.tar.gz"
+    },
+    {
+      "name": "mailpit-linux-arm.tar.gz",
+      "size": 10766985,
+      "digest": "sha256:af00728a81c5b624aed7c2ddefce749df2eb59c495fc40eeffa84800aa72353e",
+      "browser_download_url": "https://github.com/axllent/mailpit/releases/download/v1.34.0/mailpit-linux-arm.tar.gz"
+    },
+    {
+      "name": "mailpit-linux-arm64.tar.gz",
+      "size": 10257273,
+      "digest": "sha256:179f3fe9642edb3a123edc613003e45641869c5b2728c2076c7bef1c3e09dd01",
+      "browser_download_url": "https://github.com/axllent/mailpit/releases/download/v1.34.0/mailpit-linux-arm64.tar.gz"
+    },
+    {
+      "name": "mailpit-windows-amd64.zip",
+      "size": 11288840,
+      "digest": "sha256:8f080d41374bf22686606374a0a483c8563c1bf29ae078179792392ff8c911d7",
+      "browser_download_url": "https://github.com/axllent/mailpit/releases/download/v1.34.0/mailpit-windows-amd64.zip"
+    },
+    {
+      "name": "mailpit-windows-arm64.zip",
+      "size": 10221047,
+      "digest": "sha256:59ccb08fb30660e9f0e3f8a721abc32a4aca88ba37cea004ec69940245d8554e",
+      "browser_download_url": "https://github.com/axllent/mailpit/releases/download/v1.34.0/mailpit-windows-arm64.zip"
+    }
+  ]
+}

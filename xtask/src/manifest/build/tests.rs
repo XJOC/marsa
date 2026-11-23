@@ -471,6 +471,51 @@ fn valkey_needs_the_recipes_archive_of_our_release() {
     assert!(!Proof::OurValkey.keeps_file());
 }
 
+#[test]
+fn mailpit_needs_the_recipes_archive_and_its_github_digest() {
+    assert_eq!(Proof::of(Runtime::Mailpit, "archive"), Proof::MailpitDigest);
+    let recipe = recipes::builtin(Runtime::Mailpit).expect("recipe");
+    let version = Version::new(1, 34, 0);
+    let template = recipe
+        .artifact_url(Platform::LinuxX64, "archive", &version)
+        .expect("linux-x64");
+    let sums = sum_file_for(&template);
+    Proof::MailpitDigest
+        .allows(&template, Some(&template), sums.as_ref())
+        .expect("the recipe's archive");
+    // A fork, our Valkey, theseus, or no sum at all.
+    for url in [
+        "https://github.com/evil/mailpit/releases/download/v1.34.0/mailpit-linux-amd64.tar.gz",
+        "https://github.com/XJOC/marsa/releases/download/valkey-8.1.11-r1/\
+             valkey-8.1.11-linux-x64.tar.gz",
+        "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.7.0/\
+             postgresql-18.7.0-x86_64-unknown-linux-gnu.tar.gz",
+        "https://example.org/mailpit-linux-amd64.tar.gz",
+    ] {
+        let sums = sum_file_for(url);
+        let err = Proof::MailpitDigest
+            .allows(url, Some(url), sums.as_ref())
+            .expect_err(url);
+        assert!(err.to_string().contains("only a Mailpit release"), "{err}");
+    }
+    // Another Mailpit archive, with its own matching digest: another
+    // platform (32-bit ARM) or an older version.
+    for other in [
+        "https://github.com/axllent/mailpit/releases/download/v1.34.0/mailpit-linux-arm.tar.gz",
+        "https://github.com/axllent/mailpit/releases/download/v1.33.1/mailpit-linux-amd64.tar.gz",
+    ] {
+        let sums = sum_file_for(other);
+        let err = Proof::MailpitDigest
+            .allows(other, Some(&template), sums.as_ref())
+            .expect_err("not the recipe's file");
+        assert!(
+            err.to_string().contains("only that Mailpit archive"),
+            "{err}"
+        );
+    }
+    assert!(!Proof::MailpitDigest.keeps_file());
+}
+
 /// An override that names another archive of our releases stops the
 /// build before any download of Valkey: darwin-arm64 is its first
 /// platform.
