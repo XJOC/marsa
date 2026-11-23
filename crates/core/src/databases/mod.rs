@@ -189,6 +189,8 @@ mod tests {
 
     use super::*;
     use crate::orphan::Liveness;
+    // Only the Unix-only `unix_sockets` tests use it.
+    #[cfg(unix)]
     use crate::php::MAX_SOCKET_PATH;
     use crate::ports::PortLookup;
     use crate::recipes::Os;
