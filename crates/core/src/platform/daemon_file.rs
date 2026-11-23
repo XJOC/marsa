@@ -8,7 +8,7 @@
 //!
 //! On Unix the file is mode `0600` inside a `0700` folder. Windows has no mode
 //! bits: the file sits under `%LOCALAPPDATA%` and inherits its ACL, which gives
-//! access to the user only. Task S-08c checks this on a real Windows machine.
+//! access to the user only. This was checked on a real Windows machine.
 
 use std::fmt;
 use std::fs::{self, File};
@@ -323,7 +323,7 @@ fn check_private(path: &Path, metadata: &fs::Metadata) -> Result<(), DaemonFileE
     Ok(())
 }
 
-/// Windows: the file inherits the user-only ACL of `%LOCALAPPDATA%` (S-08c).
+/// Windows: the file inherits the user-only ACL of `%LOCALAPPDATA%`.
 #[cfg(not(unix))]
 fn check_private(_path: &Path, _metadata: &fs::Metadata) -> Result<(), DaemonFileError> {
     Ok(())

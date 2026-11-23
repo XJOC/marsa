@@ -332,7 +332,7 @@ fn windows_trust(data_dir: &Path) -> Verdict {
 
 /// The installed database servers that need the Visual C++ runtime as PHP
 /// does: Oracle's MySQL and theseus' PostgreSQL are MSVC builds that bring
-/// none (S-12). Valkey is a Cygwin build and needs none.
+/// none. Valkey is a Cygwin build and needs none.
 fn vc_servers(data_dir: &Path) -> Vec<String> {
     let runtimes = RuntimesDir::in_dir(data_dir);
     [ServerKind::Mysql, ServerKind::Postgres]

@@ -56,8 +56,8 @@ pub struct LinuxFacts {
 /// The first systemd whose resolved keeps a new link's settings while
 /// systemd-networkd looks at it (ADR 0014, finding 30).
 pub const FIRST_LINK_SYSTEMD: u32 = 250;
-/// Before 250 the link is used on 249 only, the version tested (spike
-/// S-02c), and only without systemd-networkd.
+/// Before 250 the link is used on 249 only, the version tested,
+/// and only without systemd-networkd.
 pub const LINK_BEFORE_250: u32 = 249;
 
 /// The way for `facts`. The same rule as `resolved_install` in

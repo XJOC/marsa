@@ -16,7 +16,7 @@ use tracing::warn;
 /// What Caddy prints when an address is taken: Go's text on macOS and Linux,
 /// and the two English Windows texts. Windows says "forbidden by its access
 /// permissions" when the holder took the port for itself alone, as IIS does
-/// with port 80 (spike S-11). Compared in lower case.
+/// with port 80. Compared in lower case.
 const PORT_IN_USE: [&str; 3] = [
     "address already in use",
     "only one usage of each socket address",

@@ -1140,7 +1140,7 @@ mod tests {
             let output = RealSystem
                 .run_system_tool("certutil.exe", &["-store", "Root", id])
                 .unwrap();
-            // NTE_NOT_FOUND, as in spike S-11: it ran and searched the store.
+            // NTE_NOT_FOUND, as seen on Windows: it ran and searched the store.
             let text = String::from_utf8_lossy(&output.stdout);
             assert_eq!(output.code, Some(0x8009_0011_u32 as i32), "{id}: {text}");
         }

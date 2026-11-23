@@ -1,5 +1,5 @@
-//! `cargo xtask manifest`: build `manifest.json` from `recipes/pins.toml`
-//! (task M2-07), and verify a signed one.
+//! `cargo xtask manifest`: build `manifest.json` from `recipes/pins.toml`,
+//! and verify a signed one.
 //!
 //! The tool never signs. The owner signs on their own machine with
 //! `minisign`, because the secret key never enters the repository or CI.
@@ -28,7 +28,7 @@ pub(crate) use verify::run as verify;
 use build::{Inspect, Target};
 use pins::Pins;
 
-/// Where the published manifest lives (M2-02, question 1).
+/// Where the published manifest lives.
 const PUBLISHED_URL: &str =
     "https://github.com/XJOC/marsa/releases/download/runtimes-manifest/manifest.json";
 
@@ -133,8 +133,8 @@ pub(crate) fn run_check_php(
 }
 
 /// `cargo xtask manifest check-mysql <url>`: Oracle's whole proof for one
-/// MySQL 8.4 archive on cdn.mysql.com, as `build` runs it for MySQL (task
-/// M6-05): its `.md5` and `.asc`, the GPG signature by the pinned key, and
+/// MySQL 8.4 archive on cdn.mysql.com, as `build` runs it for MySQL:
+/// its `.md5` and `.asc`, the GPG signature by the pinned key, and
 /// the MD5. Prints the size and sha256 the manifest would record. Keeps
 /// nothing: the archive is deleted after.
 pub(crate) fn run_check_mysql(url: &str) -> Result<()> {

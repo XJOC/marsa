@@ -1,5 +1,5 @@
 //! `cargo xtask manifest verify`: check the signature with the key built into
-//! Marsa, and check the JSON with the same rules as the installer (M2-02).
+//! Marsa, and check the JSON with the same rules as the installer.
 //!
 //! The signature check goes through `Manifest::verify_embedded` only: no
 //! other key can be trusted. The local JSON check runs first, so a JSON

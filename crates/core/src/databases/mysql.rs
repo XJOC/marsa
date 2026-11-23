@@ -122,7 +122,7 @@ fn cnf_path(path: &Path) -> Result<String, UnwritablePath> {
 /// - `performance_schema=OFF`, `innodb_buffer_pool_size=64M`, and a small
 ///   log buffer and few InnoDB threads: under 250 MB idle on a CI runner,
 ///   which does not take pages back as macOS does on a busy Mac, instead
-///   of about 450 MB by default (S-12).
+///   of about 450 MB by default.
 /// - `disable_log_bin`: no binary log, so the disk does not fill in
 ///   development.
 /// - No `log-error`: the log goes to stderr, which the supervisor keeps in
@@ -248,7 +248,7 @@ pub fn mysqld_args(config: &Path, os: Os) -> Vec<String> {
 }
 
 /// SIGTERM, then a kill after 30 s (ADR 0023). SIGTERM ends the sessions
-/// and exits in 1 to 3.4 s with a client connected (S-12).
+/// and exits in 1 to 3.4 s with a client connected (measured).
 pub fn mysql_stop() -> StopMethod {
     StopMethod::signals([(Signal::Term, STOP_WAIT)])
 }
@@ -257,7 +257,7 @@ pub fn mysql_stop() -> StopMethod {
 /// 0023, section 6): `mysqladmin shutdown` as `root@127.0.0.1` on `port`,
 /// up to 30 s for the exit, counted from its start, then a kill
 /// (`TerminateProcess`), after which MySQL recovers its data at its next
-/// start (1.2 to 1.7 s in S-12).
+/// start (1.2 to 1.7 s, measured).
 ///
 /// - `--no-defaults` first, as `mysqladmin` requires: no option file of the
 ///   user's (`C:\my.ini`, `.mylogin.cnf`) changes where or how it connects.
@@ -303,7 +303,7 @@ pub fn mysqld_pid(text: &str) -> Option<u32> {
 /// The check before a start of MySQL on `os`: [`decide_start`], and on
 /// macOS and Linux a pid that the OS cannot tell refuses too. A second
 /// `mysqld` on the same data folder waits about 100 s for the InnoDB lock
-/// before it fails (S-12), so only a pid known to be dead or another
+/// before it fails, so only a pid known to be dead or another
 /// program's lets it start.
 ///
 /// Windows cannot tell any pid to Marsa yet (`process::real_identity`), and
@@ -311,7 +311,7 @@ pub fn mysqld_pid(text: &str) -> Option<u32> {
 /// Object ends `mysqld` with a crashed `marsad`, before it deletes its file
 /// (ADR 0017). So there an unknown pid starts, as for PostgreSQL. A
 /// `mysqld` started by hand on the same folder then makes the new one fail
-/// at the InnoDB lock (about 14 s on Windows, S-12) instead of at once.
+/// at the InnoDB lock (about 14 s on Windows) instead of at once.
 pub fn decide_mysql_start(facts: &StartFacts, os: Os) -> StartDecision {
     match facts.pid_file {
         PidFileCheck::Unknown { pid } if os != Os::Windows => {

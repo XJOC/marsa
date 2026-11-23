@@ -29,7 +29,7 @@ use super::upstream::{
     Algorithm, Layout, MYSQL_FOLDERS, Source, SumFile, hex, parse_hex, sum_file_for,
 };
 
-/// The JSON that `marsa_core::installer::manifest` reads (M2-02). Field
+/// The JSON that `marsa_core::installer::manifest` reads. Field
 /// order is the output order, and maps are `BTreeMap`, so the same inputs
 /// give the same bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
