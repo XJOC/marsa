@@ -4,7 +4,8 @@
 //! | Route | Answer |
 //! | --- | --- |
 //! | `GET /v1/hosts` | `HostsStatus`: whether the hosts file is used, and the sites missing from Marsa's block |
-//! | `POST /v1/hosts/sync` | `SetupReport`: the helper's `hosts_sync` result, or in `error` why it did not run |
+//! | `POST /v1/jobs/hosts-sync` | `202 JobAccepted`; the end is a `job` event with the `SetupReport`: the helper's `hosts_sync` result, or in `error` why it did not run |
+//! | `POST /v1/hosts/sync` | The same job, answered with its `SetupReport` when it ends (clients before ADR 0026) |
 //!
 //! The hosts file has no wildcards, so each new site needs a line, and only
 //! root writes it. **Only a command of the user calls the sync**: `marsa
@@ -42,15 +43,18 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use marsa_core::dns;
 use marsa_core::helper::HelperOp;
-use marsa_core::recipes::Os;
-use marsa_core::types::{HostsStatus, SetupReport, SetupSkip};
+use marsa_core::recipes::{Os, Platform};
+use marsa_core::types::{HostsStatus, JobAccepted, JobKind, JobOutcome, SetupReport, SetupSkip};
 
 use super::super::http;
 use super::super::http::routes::HttpError;
+use super::super::jobs;
 use super::super::state::Daemon;
 use super::{Flow, Running, Setup, linux_dns, names_of};
 
-/// The routes on `setup`, merged into setup's own.
+/// The routes on `setup`, merged into setup's own: `GET /v1/hosts`,
+/// `POST /v1/jobs/hosts-sync`, and its old waiting form `POST
+/// /v1/hosts/sync` (ADR 0026).
 pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
     let read = {
         let setup = Arc::clone(&setup);
@@ -59,13 +63,25 @@ pub fn routes(setup: Arc<Setup>) -> Router<Arc<Daemon>> {
             async move { status(daemon, setup).await }
         }
     };
-    let sync = move |State(daemon): State<Arc<Daemon>>| {
+    let for_job = Arc::clone(&setup);
+    let job = move |State(daemon): State<Arc<Daemon>>| {
+        let setup = Arc::clone(&for_job);
+        async move {
+            let (id, _) = begin(daemon, setup).await?;
+            Ok::<_, HttpError>((StatusCode::ACCEPTED, Json(JobAccepted { id })))
+        }
+    };
+    let wait = move |State(daemon): State<Arc<Daemon>>| {
         let setup = Arc::clone(&setup);
-        async move { sync(daemon, setup).await }
+        async move {
+            let (_, ended) = begin(daemon, setup).await?;
+            Ok::<_, HttpError>(Json(jobs::wait(ended, "hosts sync").await?))
+        }
     };
     Router::new()
         .route("/v1/hosts", get(read))
-        .route("/v1/hosts/sync", post(sync))
+        .route("/v1/jobs/hosts-sync", post(job))
+        .route("/v1/hosts/sync", post(wait))
 }
 
 async fn status(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<HostsStatus>, HttpError> {
@@ -81,21 +97,50 @@ async fn status(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<HostsStat
         .map(Json)
 }
 
-async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport>, HttpError> {
+/// Starts the sync job ([`jobs::start`]). The request is checked here, so
+/// that a system that does not use the hosts file, and a setup or uninstall
+/// that runs, are refused at once with 409, on both routes.
+async fn begin(
+    daemon: Arc<Daemon>,
+    setup: Arc<Setup>,
+) -> Result<(u64, jobs::Ended<SetupReport>), HttpError> {
     let platform = setup
         .platform()
         .filter(|platform| platform.os() == Os::Linux)
         .ok_or_else(not_used)?;
     let running = Running::take(&setup, Flow::Setup).map_err(Flow::busy)?;
     let names = site_names(&daemon).await?;
-    let report = http::blocking("hosts", move || {
+    let status = http::blocking("hosts", {
+        let (daemon, setup, names) = (Arc::clone(&daemon), Arc::clone(&setup), names.clone());
+        move || Ok(read_status(&daemon, &setup, &names))
+    })
+    .await?;
+    if !status.used {
+        return Err(not_used());
+    }
+    let work = work(Arc::clone(&daemon), setup, platform, running, names, status);
+    Ok(jobs::start(
+        &daemon,
+        JobKind::HostsSync,
+        "hosts sync",
+        JobOutcome::HostsSync,
+        work,
+        |_, _| {},
+    ))
+}
+
+async fn work(
+    daemon: Arc<Daemon>,
+    setup: Arc<Setup>,
+    platform: Platform,
+    running: Running,
+    names: Vec<String>,
+    status: HostsStatus,
+) -> Result<SetupReport, HttpError> {
+    http::blocking("hosts", move || {
         // Moved in, so a setup waits for this sync to end even if the client
         // goes away.
         let _running = running;
-        let status = read_status(&daemon, &setup, &names);
-        if !status.used {
-            return Err(not_used());
-        }
         let mut report = SetupReport::default();
         if status.missing.is_empty() {
             return Ok(report);
@@ -119,8 +164,7 @@ async fn sync(daemon: Arc<Daemon>, setup: Arc<Setup>) -> Result<Json<SetupReport
         }
         Ok(report)
     })
-    .await?;
-    Ok(Json(report))
+    .await
 }
 
 /// The host names of the daemon's sites, from the list `GET /v1/sites`
@@ -157,7 +201,9 @@ mod tests {
     use marsa_core::platform::daemon_file::{Token, daemon_authority};
     use marsa_core::recipes::Platform;
     use marsa_core::sites::{Site, SiteKind};
-    use marsa_core::types::{ErrorBody, SiteList};
+    use marsa_core::types::{
+        ErrorBody, Event, JobAccepted, JobKind, JobOutcome, JobUpdate, SiteList,
+    };
     use serde_json::Value;
     use tempfile::TempDir;
     use tower::ServiceExt as _;
@@ -169,6 +215,10 @@ mod tests {
     use crate::daemon::http::auth::{AuthConfig, require_auth};
 
     const PORT: u16 = 49_321;
+    /// The old route, which answers when the sync ends.
+    const WAITING_SYNC: &str = "/v1/hosts/sync";
+    /// The job route, which answers `202` at once.
+    const JOB_SYNC: &str = "/v1/jobs/hosts-sync";
 
     /// A data folder with a helper, a hosts file, and a daemon whose sites
     /// are `names` (without `.test`).
@@ -281,7 +331,12 @@ mod tests {
         }
 
         async fn sync(&self) -> (StatusCode, Value) {
-            self.call("POST", "/v1/hosts/sync").await
+            self.call("POST", WAITING_SYNC).await
+        }
+
+        /// `POST /v1/jobs/hosts-sync`: the answer comes before the work ends.
+        async fn sync_job(&self) -> (StatusCode, Value) {
+            self.call("POST", JOB_SYNC).await
         }
     }
 
@@ -334,12 +389,14 @@ mod tests {
             let fake = no_programs();
             let app = place.app(&fake, Platform::LinuxX64);
             assert_eq!(app.status().await, HostsStatus::default(), "{hosts:?}");
-            let (status, json) = app.sync().await;
-            assert_eq!(
-                (status, code(&json)),
-                (StatusCode::CONFLICT, "hosts_not_used".to_owned()),
-                "{hosts:?}"
-            );
+            for uri in [WAITING_SYNC, JOB_SYNC] {
+                let (status, json) = app.call("POST", uri).await;
+                assert_eq!(
+                    (status, code(&json)),
+                    (StatusCode::CONFLICT, "hosts_not_used".to_owned()),
+                    "{hosts:?} {uri}"
+                );
+            }
             assert!(fake.calls().is_empty());
         }
     }
@@ -352,11 +409,14 @@ mod tests {
             let fake = no_programs();
             let app = place.app(&fake, platform);
             assert_eq!(app.status().await, HostsStatus::default());
-            let (status, json) = app.sync().await;
-            assert_eq!(
-                (status, code(&json)),
-                (StatusCode::CONFLICT, "hosts_not_used".to_owned())
-            );
+            for uri in [WAITING_SYNC, JOB_SYNC] {
+                let (status, json) = app.call("POST", uri).await;
+                assert_eq!(
+                    (status, code(&json)),
+                    (StatusCode::CONFLICT, "hosts_not_used".to_owned()),
+                    "{uri}"
+                );
+            }
             assert!(fake.calls().is_empty());
         }
     }
@@ -385,6 +445,54 @@ mod tests {
             HelperRequest::new(vec![HelperOp::HostsSync { names }])
         );
         assert_eq!(fs::read_to_string(place.hosts()).unwrap(), hosts);
+    }
+
+    /// `POST /v1/jobs/hosts-sync` answers `202` while the prompt is still
+    /// open; a second sync gets 409; and the end is the job's `done` with the
+    /// same report the old route answers.
+    #[tokio::test]
+    async fn the_job_route_answers_at_once_and_the_report_is_the_end() {
+        let place = Place::new(&["shop"], EMPTY_BLOCK).marked();
+        let (started, mut prompt_shown) = tokio::sync::mpsc::unbounded_channel();
+        let (release, releases) = std::sync::mpsc::channel::<()>();
+        let releases = std::sync::Mutex::new(releases);
+        let fake = linux_fake_on(UBUNTU_2204_SERVER, move |request| {
+            started.send(()).unwrap();
+            releases.lock().unwrap().recv().unwrap();
+            answer_for(&request, &[])
+        });
+        let mut events = place.daemon.events().subscribe();
+        let app = place.app(&fake, Platform::LinuxX64);
+
+        let (status, json) = app.sync_job().await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{json}");
+        let accepted: JobAccepted = serde_json::from_value(json).unwrap();
+        prompt_shown.recv().await.unwrap();
+        assert_eq!(place.daemon.jobs().running().len(), 1);
+        for uri in [WAITING_SYNC, JOB_SYNC] {
+            let (status, json) = app.call("POST", uri).await;
+            assert_eq!(
+                (status, code(&json)),
+                (StatusCode::CONFLICT, "setup_running".to_owned()),
+                "{uri}"
+            );
+        }
+
+        release.send(()).unwrap();
+        let last = loop {
+            match events.recv().await.unwrap() {
+                Event::Job(event) if event.is_last() => break event,
+                _ => {}
+            }
+        };
+        assert_eq!(last.id, accepted.id);
+        assert_eq!(last.kind, JobKind::HostsSync);
+        let JobUpdate::Done(JobOutcome::HostsSync(report)) = &last.update else {
+            panic!("not done: {last:?}");
+        };
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].op, OpName::HostsSync);
+        assert_eq!(place.daemon.jobs().get(accepted.id), Some(last));
     }
 
     /// Nothing missing: no prompt.
@@ -448,11 +556,14 @@ mod tests {
                 .with_state(Arc::clone(&place.daemon))
                 .layer(from_fn_with_state(auth, require_auth));
             let app = App { router, bearer };
-            let (status, json) = app.sync().await;
-            assert_eq!(
-                (status, code(&json)),
-                (StatusCode::CONFLICT, busy.to_owned())
-            );
+            for uri in [WAITING_SYNC, JOB_SYNC] {
+                let (status, json) = app.call("POST", uri).await;
+                assert_eq!(
+                    (status, code(&json)),
+                    (StatusCode::CONFLICT, busy.to_owned()),
+                    "{uri}"
+                );
+            }
             drop(running);
             assert_eq!(app.sync().await.0, StatusCode::OK);
             assert_eq!(fake.pkexec_calls(), 1);
@@ -499,7 +610,11 @@ mod tests {
                 StatusCode::FORBIDDEN,
             ),
         ];
-        for (method, uri) in [("GET", "/v1/hosts"), ("POST", "/v1/hosts/sync")] {
+        for (method, uri) in [
+            ("GET", "/v1/hosts"),
+            ("POST", WAITING_SYNC),
+            ("POST", JOB_SYNC),
+        ] {
             for (headers, status) in &cases {
                 let (got, _) = app.send(method, uri, headers).await;
                 assert_eq!(got, *status, "{method} {uri} {headers:?}");

@@ -46,8 +46,8 @@ use crate::runtimes::Runtime;
 use crate::types::{
     AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, DoctorReport, ErrorBody,
     Event, Health, HostsStatus, InstallAccepted, InstallRequest, LinkRequest, LogLine, ParkRequest,
-    RuntimeList, ServiceAction, ServiceStatus, SetupReport, SiteList, SitePatch, Uninstalled,
-    XdebugRequest, XdebugState,
+    RuntimeList, ServiceAction, ServiceStatus, SiteList, SitePatch, Uninstalled, XdebugRequest,
+    XdebugState,
 };
 use lifecycle::lock_is_held;
 
@@ -402,23 +402,6 @@ impl DaemonClient {
     /// prompt.
     pub async fn hosts(&self) -> Result<HostsStatus, ClientError> {
         self.call(Method::GET, &["v1", "hosts"], REQUEST_TIMEOUT)
-            .await
-    }
-
-    /// `POST /v1/hosts/sync`: the names of every site go into
-    /// Marsa's block in the hosts file, behind the password prompt, if any
-    /// is missing; with none missing, nothing runs. Only for a command of
-    /// the user: never call it from a background task. Waits up to
-    /// [`HOSTS_SYNC_TIMEOUT`]. The helper's result, or why it did not run,
-    /// is in the report, as for setup.
-    ///
-    /// # Errors
-    ///
-    /// Any [`ClientError`]; `hosts_not_used` (409) where this system does
-    /// not use the hosts file, and `setup_running` or `uninstall_running`
-    /// (409) while one of those runs.
-    pub async fn sync_hosts(&self) -> Result<SetupReport, ClientError> {
-        self.call(Method::POST, &["v1", "hosts", "sync"], HOSTS_SYNC_TIMEOUT)
             .await
     }
 
