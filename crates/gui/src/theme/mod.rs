@@ -937,6 +937,11 @@ pub(crate) mod tests {
         // new one is checked at once.
         for (folder, least) in [("widgets", 9), ("screens", 7), ("shell", 2), ("panel", 2)] {
             for (name, source) in folder_sources(folder, least) {
+                // A file of tests only (`version/tests.rs`): left out, like
+                // the `tests` module that `before_tests` cuts off.
+                if name.ends_with("tests.rs") {
+                    continue;
+                }
                 let rules = match (folder, name.as_str()) {
                     ("widgets", "icons.rs") => Rules::Geometry,
                     ("widgets", _) => Rules::Widget,
