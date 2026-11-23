@@ -29,7 +29,7 @@ use crate::daemon::state::Daemon;
 /// test can answer without asking the system.
 type Gather = fn(&Path, &DaemonFacts) -> DoctorReport;
 
-/// The routes, for `api::router` to merge before its fallbacks. `port` is the
+/// The routes, for `http::routes::router` to merge before its fallbacks. `port` is the
 /// one the daemon listens on, for the `marsad` check.
 pub fn routes(port: u16) -> Router<Arc<Daemon>> {
     routes_with(port, system)

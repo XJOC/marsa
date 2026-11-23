@@ -86,7 +86,7 @@ pub const SERVER_ACTION_WAIT: Duration = Duration::from_secs(30);
 /// client gives up after 45 s without a byte.
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 
-/// The routes, for `api::router` to merge before its fallbacks.
+/// The routes, for `http::routes::router` to merge before its fallbacks.
 pub fn routes() -> Router<Arc<Daemon>> {
     Router::new()
         .route("/v1/services", get(services))

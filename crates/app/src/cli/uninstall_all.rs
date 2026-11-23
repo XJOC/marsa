@@ -390,7 +390,7 @@ impl Ask for Terminal {
     }
 }
 
-/// The systems the daemon runs the uninstall on (`daemon/uninstall_api.rs`).
+/// The systems the daemon runs the uninstall on (`daemon/setup/uninstall.rs`).
 fn runs_here(platform: Option<Platform>) -> bool {
     matches!(
         platform,

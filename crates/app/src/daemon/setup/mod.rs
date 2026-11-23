@@ -96,7 +96,7 @@ pub const SLOWEST_SETUP: Duration = Duration::from_secs(
         + (4 + MAX_PS as u64) * PIPE_GRACE.as_secs(),
 );
 
-/// The routes on `setup`, for `api::router` to merge before its fallbacks:
+/// The routes on `setup`, for `http::routes::router` to merge before its fallbacks:
 /// `POST /v1/jobs/setup`, its old waiting form `POST /v1/setup`, and the
 /// hosts routes of [`hosts`].
 /// The uninstall route gets the same [`Setup`], so the two never run at once.

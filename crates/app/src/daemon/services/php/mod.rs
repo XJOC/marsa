@@ -1006,7 +1006,7 @@ mod tests {
         let sites = [site("shop", SiteKind::Laravel, Some("8.4.3"))];
         let pools = php.sync(&daemon, &sites, None).await;
         assert_eq!(pools, PhpPools::default());
-        assert!(!daemon.proc_alive(fpm_id(PHP84)));
+        assert!(!daemon.proc_alive(ServiceId::pool(Os::Windows, PHP84)));
         assert!(!dir.path().join("php").exists(), "no files written");
     }
 

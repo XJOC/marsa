@@ -55,7 +55,7 @@ fn main() -> ExitCode {
     // `apply` must never write to stderr, not one byte. On exit 1 or 2,
     // osascript's `do shell script` raises an error whose text is the shell's
     // stderr if it has any, and its stdout only if not. marsad reads this
-    // JSON line from that error text (`daemon/setup.rs`, `read_answer`),
+    // JSON line from that error text (`daemon/setup/osascript.rs`, `read_answer`),
     // so anything on stderr would hide every result.
     let _ = writeln!(io::stdout().lock(), "{line}");
     ExitCode::from(exit)
