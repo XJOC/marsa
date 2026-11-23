@@ -13,6 +13,7 @@ use marsa::cli::default_version::{self, UseArgs};
 use marsa::cli::doctor;
 use marsa::cli::install::{self, InstallArgs};
 use marsa::cli::logs::{self, LogsArgs};
+use marsa::cli::mail::{self, MailArgs};
 use marsa::cli::runtimes::{self, RuntimesArgs};
 use marsa::cli::services::{self, ServicesArgs};
 use marsa::cli::setup;
@@ -65,6 +66,9 @@ enum Command {
     Services(ServicesArgs),
     /// Show the output of a service.
     Logs(LogsArgs),
+    /// List the mail your projects sent, which Mailpit kept on this
+    /// computer; show one with "show <ID>", or delete all with "clear".
+    Mail(MailArgs),
     /// `sites`, `park`, `link`, `secure`, `unsecure`, `unlink`, `forget`,
     /// `isolate`, `unisolate`, and `open`, each a command of its own.
     #[command(flatten)]
@@ -150,6 +154,7 @@ async fn main() -> ExitCode {
         Command::Daemon(command) => daemon::run(*command, &data_dir).await,
         Command::Services(args) => services::run(args, &data_dir).await,
         Command::Logs(args) => logs::run(args, &data_dir).await,
+        Command::Mail(args) => mail::run(args, &data_dir).await,
         Command::Sites(command) => sites::run(command, &data_dir).await,
         Command::Setup => setup::run(&data_dir).await,
         Command::Autostart(args) => autostart::run(args, &data_dir).await,

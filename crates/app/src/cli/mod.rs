@@ -11,6 +11,7 @@ pub mod default_version;
 pub mod doctor;
 pub mod install;
 pub mod logs;
+pub mod mail;
 pub mod progress;
 pub mod runtimes;
 pub mod services;

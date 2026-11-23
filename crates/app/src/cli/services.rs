@@ -12,6 +12,7 @@ use marsa_core::types::{ServiceAction, ServiceId, ServiceState, ServiceStatus};
 use super::Failure;
 use super::daemon::{connect, failure};
 use super::strings;
+use super::text::columns;
 
 /// The arguments of `marsa services`. Without a command: the table.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -162,22 +163,7 @@ fn table(services: &[ServiceStatus]) -> String {
             status.restarts.to_string(),
         ]
     }));
-    let mut widths = [0; 4];
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
-        }
-    }
-    let mut text = String::new();
-    for row in &rows {
-        let mut line = String::new();
-        for (cell, width) in row.iter().zip(widths) {
-            line.push_str(&format!("{cell:<width$}  "));
-        }
-        text.push_str(line.trim_end());
-        text.push('\n');
-    }
-    text
+    columns(&rows)
 }
 
 #[cfg(test)]
