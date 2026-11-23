@@ -15,6 +15,7 @@ pub mod doctor;
 pub mod fs;
 pub mod helper;
 pub mod hex;
+pub mod mail;
 pub mod orphan;
 pub mod php;
 pub mod ports;
