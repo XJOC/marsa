@@ -32,8 +32,8 @@ use marsa_core::types::{
     ErrorBody, Event, Health, InstallAccepted, InstallRequest, JobAccepted, JobEvent, JobFailure,
     JobKind, JobOutcome, JobStep, JobUpdate, LinkRequest, LogLine, LogStream, OpName, OpResult,
     OpStatus, ParkRequest, RuntimeList, RuntimeVersions, ServiceAction, ServiceState,
-    ServiceStatus, SetupReport, SetupSkip, Site, SiteKind, SiteList, SitePatch, SkippedFolder,
-    Source, UninstallReport, Uninstalled, VersionInUse, XdebugState,
+    ServiceStatus, SetupReport, SetupSkip, Site, SiteKind, SiteList, SiteLog, SiteLogLine,
+    SitePatch, SkippedFolder, Source, UninstallReport, Uninstalled, VersionInUse, XdebugState,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -522,6 +522,53 @@ async fn services_and_logs_are_read() {
             "GET /v1/logs/caddy?follow=true",
         ]
     );
+}
+
+#[tokio::test]
+async fn a_site_log_is_read_and_followed() {
+    let lines = vec![
+        SiteLogLine {
+            seq: 0,
+            text: "[2026-11-24 10:00:00] local.INFO: ready".into(),
+        },
+        SiteLogLine {
+            seq: 1,
+            text: "مرسى".into(),
+        },
+    ];
+    let log = SiteLog {
+        file: Some("laravel.log".into()),
+        lines: lines.clone(),
+        cut_at_start: true,
+    };
+    let (answer, streamed) = (log.clone(), lines.clone());
+    let router = Router::new().route(
+        "/v1/sites/{name}/log",
+        get(move |RawQuery(query): RawQuery| async move {
+            match query.as_deref() {
+                Some("follow=true") => sse_response(sse_body(&streamed)).into_response(),
+                _ => Json(answer).into_response(),
+            }
+        }),
+    );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    assert_eq!(client.site_log("shop").await.unwrap(), log);
+    let followed = collect(client.follow_site_log("shop").await.unwrap()).await;
+    assert_eq!(followed, items(&lines));
+    assert_eq!(
+        fake.targets(),
+        [
+            "GET /v1/sites/shop/log",
+            "GET /v1/sites/shop/log?follow=true"
+        ]
+    );
+    for name in ["", ".", ".."] {
+        let err = client.site_log(name).await.unwrap_err();
+        assert_eq!(err.code(), "invalid_id", "{err:?}");
+        let err = client.follow_site_log(name).await.unwrap_err();
+        assert_eq!(err.code(), "invalid_id", "{err:?}");
+    }
 }
 
 #[tokio::test]
