@@ -68,11 +68,7 @@ pub fn routes() -> Router<Arc<Daemon>> {
 }
 
 async fn list(State(daemon): State<Arc<Daemon>>) -> Answer {
-    match daemon.sites() {
-        Some(list) => Ok(Json(list)),
-        // No build yet: see `Daemon::rebuild_sites`.
-        None => Ok(Json(daemon.rebuild_sites().await?)),
-    }
+    Ok(Json(daemon.site_list().await?))
 }
 
 async fn park(State(daemon): State<Arc<Daemon>>, body: JsonBody<ParkRequest>) -> Answer {

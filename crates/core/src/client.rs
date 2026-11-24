@@ -17,6 +17,7 @@
 //! used (`HTTP_PROXY` would receive the header), redirects are not followed,
 //! and no error message holds the token.
 
+mod db_browser;
 mod error;
 mod jobs;
 mod lifecycle;
@@ -626,6 +627,7 @@ mod tests {
         // or `.timeout(wait)` fails here.
         let sources = [
             include_str!("client.rs"),
+            include_str!("client/db_browser.rs"),
             include_str!("client/jobs.rs"),
             include_str!("client/lifecycle.rs"),
             include_str!("client/sse.rs"),

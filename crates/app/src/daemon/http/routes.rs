@@ -48,6 +48,7 @@ pub fn router(daemon: Arc<Daemon>, auth: AuthConfig) -> Router {
         .merge(crate::daemon::autostart::api::routes())
         .merge(crate::daemon::setup::doctor::routes(auth.port()))
         .merge(crate::daemon::runtimes::xdebug::routes())
+        .merge(crate::daemon::db_browser::routes())
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
         .with_state(daemon)
@@ -67,6 +68,9 @@ pub struct HttpError {
     /// The facts of `version_in_use`. Boxed, so every
     /// `Result<_, HttpError>` stays small.
     pub in_use: Option<Box<VersionInUse>>,
+    /// What a database server said, for the database browser only. Never in
+    /// `message`, which is for logs.
+    pub detail: Option<String>,
 }
 
 impl HttpError {
@@ -76,6 +80,7 @@ impl HttpError {
             code,
             message: message.into(),
             in_use: None,
+            detail: None,
         }
     }
 }
@@ -84,6 +89,7 @@ impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         let mut body = ErrorBody::new(self.code, self.message);
         body.in_use = self.in_use.map(|in_use| *in_use);
+        body.detail = self.detail;
         (self.status, Json(body)).into_response()
     }
 }

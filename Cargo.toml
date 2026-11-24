@@ -59,6 +59,10 @@ sha2 = "0.11"
 # `certutil` finds a certificate by it and not by a SHA-256. It only finds
 # the certificate and never decides about trust.
 sha1 = "0.11"
+# The database browser in marsad (ADR 0028). No macros, migrations, JSON, type
+# crates, or TLS: values are read as text, and every connection is to
+# Marsa's own servers on 127.0.0.1.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "mysql", "postgres", "sqlite"] }
 # No `xattr`: the installer does not keep extended attributes (task M2-03).
 tar = { version = "0.4", default-features = false }
 # The menu-bar icon `marsa-tray` (task M5-04): `tao` runs the event loop on

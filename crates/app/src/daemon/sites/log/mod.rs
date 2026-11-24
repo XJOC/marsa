@@ -95,12 +95,9 @@ async fn site_log(
 
 /// The folder of the Laravel site `name`.
 async fn laravel_root(daemon: &Arc<Daemon>, name: &str) -> Result<PathBuf, HttpError> {
-    let sites = match daemon.sites() {
-        Some(sites) => sites,
-        // No build yet: see `Daemon::rebuild_sites`.
-        None => daemon.rebuild_sites().await?,
-    };
-    let site = sites
+    let site = daemon
+        .site_list()
+        .await?
         .sites
         .into_iter()
         .find(|site| site.name == name)
