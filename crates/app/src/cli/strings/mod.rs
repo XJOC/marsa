@@ -6,6 +6,7 @@
 //! `marsa_core::codes` and one arm to `known`: a test fails until both exist.
 
 mod doctor;
+mod dumps;
 mod errors;
 mod mail;
 mod runtimes;
@@ -17,6 +18,7 @@ mod sites;
 mod tests;
 
 pub use doctor::*;
+pub use dumps::*;
 use errors::*;
 pub use mail::*;
 pub use runtimes::*;
