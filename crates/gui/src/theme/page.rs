@@ -62,3 +62,9 @@ pub const SETTINGS_TEXT_MIN: f32 = 220.0;
 pub const MAIL_LIST_WIDTH: f32 = 340.0;
 pub const MAIL_FACT_LABEL: f32 = 70.0;
 pub const MAIL_STATE_WIDTH: f32 = 440.0;
+
+/// The Dumps screen (layout.md, Dumps screen): the same shape as Mail, so
+/// the same widths, under names of its own.
+pub const DUMPS_LIST_WIDTH: f32 = MAIL_LIST_WIDTH;
+pub const DUMPS_FACT_LABEL: f32 = 60.0;
+pub const DUMPS_STATE_WIDTH: f32 = MAIL_STATE_WIDTH;

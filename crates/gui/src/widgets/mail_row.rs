@@ -1,4 +1,5 @@
-//! A mail in the Mail list (layout.md, Mail screen): two lines in a row
+//! A caught item in the Mail and Dumps lists (layout.md, Mail screen and
+//! Dumps screen; components.md, Tables and lists): two lines in a row
 //! `size.row` 54 high. The sender, and at the end how long ago it came, in
 //! `caption`; the subject in `body.sm` and `ink2`, and at the end, while the
 //! mail is new, a dot and the word "New" in the mail color (never the dot
@@ -40,6 +41,7 @@ pub struct MailRow<'a> {
     age: &'a str,
     new: bool,
     selected: bool,
+    section: Section,
     look: Option<Look>,
 }
 
@@ -53,8 +55,15 @@ impl<'a> MailRow<'a> {
             age,
             new: false,
             selected: false,
+            section: Section::Mail,
             look: None,
         }
+    }
+
+    /// The section whose color marks a new item: Mail's by default.
+    pub const fn section(mut self, section: Section) -> Self {
+        self.section = section;
+        self
     }
 
     /// The mail is not opened yet.
@@ -97,7 +106,7 @@ impl Widget for MailRow<'_> {
             painter.rect_filled(under, CornerRadius::ZERO, theme.color.line);
             let pad = theme.space.s4;
             let gap = theme.space.s3;
-            let mail = theme.section(Section::Mail).fg;
+            let mail = theme.section(self.section).fg;
             // The end column first: the age, and "New" with its dot; the
             // sender and the subject take what is left, cut short.
             let age = layout(painter, self.age, theme.text.caption, Color32::PLACEHOLDER);

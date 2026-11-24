@@ -7,8 +7,8 @@
 //! uncompressed 24-bit BMP, then closes the window.
 //! `MARSA_GUI_THEME=light|dark` draws that theme instead of the system's.
 //! `MARSA_GUI_SIZE=900x720` opens the window at that size.
-//! `MARSA_GUI_ROUTE=home|sites|runtimes|runtimes:<runtime>|services|logs|logs:<service>|mail|settings|site:<name>`
-//! opens that screen (`site:shop` is the page of the site `shop`; `runtimes:node` is Node.js chosen). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|mail|mail-empty|mail-stopped|confirm-delete-mail|confirm-unlink|confirm-uninstall|notice-success|notice-error`
+//! `MARSA_GUI_ROUTE=home|sites|runtimes|runtimes:<runtime>|services|logs|logs:<service>|mail|dumps|settings|site:<name>`
+//! opens that screen (`site:shop` is the page of the site `shop`; `runtimes:node` is Node.js chosen). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|mail|mail-empty|mail-stopped|dumps|dumps-empty|dumps-off|dumps-busy|dumps-long|confirm-delete-mail|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! draws fixed fake data and starts no daemon (see `demo`).
 //! `MARSA_GUI_CLICK=x,y` clicks that point (in points, from the top left of
 //! the window) once the window has settled, so a menu is open in the picture
@@ -394,6 +394,7 @@ fn parse_route(name: &str) -> Option<Route> {
         "services" => Route::Services,
         "logs" => Route::Logs(LogSource::Caddy),
         "mail" => Route::Mail,
+        "dumps" => Route::Dumps,
         "settings" => Route::Settings,
         _ => return None,
     })
@@ -477,7 +478,8 @@ mod tests {
         );
         assert_eq!(parse_route("logs:"), None);
         assert_eq!(parse_route("mail"), Some(Route::Mail));
-        assert_eq!(parse_route("dumps"), None);
+        assert_eq!(parse_route("dumps"), Some(Route::Dumps));
+        assert_eq!(parse_route("queues"), None);
         assert_eq!(parse_route("site:shop"), Some(Route::Site("shop".into())));
         assert_eq!(parse_route("site:"), None);
         assert_eq!(

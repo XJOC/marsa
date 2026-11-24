@@ -1,8 +1,7 @@
 //! The sidebar (layout.md, Shell; components.md, Sidebar): the name and the
 //! fold button, the items in their groups, then the status and Settings at
 //! the bottom. Only the sections that ship appear (rules.md 8): Mail, while
-//! Mailpit is installed; Phase 2 adds Databases, Dumps, and Queues to these
-//! groups.
+//! Mailpit is installed; Phase 2 adds Databases and Queues to these groups.
 
 use eframe::egui::{Layout, RichText, Ui, vec2};
 
@@ -18,6 +17,7 @@ pub(crate) enum Item {
     Sites,
     /// Only while Mailpit is installed ([`Item::shown`]).
     Mail,
+    Dumps,
     Logs,
     Runtimes,
     Services,
@@ -29,7 +29,7 @@ pub(crate) enum Item {
 pub(crate) const GROUPS: [&[Item]; 4] = [
     &[Item::Home],
     &[Item::Sites],
-    &[Item::Mail, Item::Logs],
+    &[Item::Mail, Item::Dumps, Item::Logs],
     &[Item::Runtimes, Item::Services],
 ];
 
@@ -42,6 +42,7 @@ impl Item {
             Self::Home => Route::Home,
             Self::Sites => Route::Sites,
             Self::Mail => Route::Mail,
+            Self::Dumps => Route::Dumps,
             Self::Logs => Route::Logs(LogSource::default()),
             Self::Runtimes => Route::Runtimes(MAIN_RUNTIME),
             Self::Services => Route::Services,
@@ -64,6 +65,7 @@ impl Item {
             Route::Home => Self::Home,
             Route::Sites | Route::Site(_) => Self::Sites,
             Route::Mail => Self::Mail,
+            Route::Dumps => Self::Dumps,
             Route::Logs(_) => Self::Logs,
             Route::Runtimes(_) => Self::Runtimes,
             Route::Services => Self::Services,
@@ -77,6 +79,7 @@ impl Item {
             Self::Home => Some(Section::Home),
             Self::Sites => Some(Section::Sites),
             Self::Mail => Some(Section::Mail),
+            Self::Dumps => Some(Section::Dumps),
             Self::Logs => Some(Section::Logs),
             Self::Runtimes => Some(Section::Runtimes),
             Self::Services => Some(Section::Services),
@@ -183,8 +186,8 @@ pub(crate) fn show(ui: &mut Ui, model: &Model, narrow: bool) -> Vec<Action> {
     actions
 }
 
-/// The widget of `item`: Sites counts the sites, and Mail the mail not
-/// opened yet, as new.
+/// The widget of `item`: Sites counts the sites, Mail the mail not opened
+/// yet, and Dumps the dumps that came while its screen was shut, as new.
 fn nav(model: &Model, item: Item, current: Item, folded: bool) -> NavItem<'static> {
     let shown = match item.section() {
         Some(section) => NavItem::section(section),
@@ -194,9 +197,11 @@ fn nav(model: &Model, item: Item, current: Item, folded: bool) -> NavItem<'stati
     let count = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
     let sites = model.session.sites.sites.len() as u64;
     let unread = model.session.mail.unread();
+    let unseen = model.session.dumps.unseen();
     match item {
         Item::Sites if sites > 0 => shown.count(count(sites), false),
         Item::Mail if unread > 0 => shown.count(count(unread), true),
+        Item::Dumps if unseen > 0 => shown.count(count(unseen), true),
         _ => shown,
     }
 }
@@ -219,9 +224,10 @@ mod tests {
 
     /// Every item a window without Mailpit shows: the groups, then
     /// Settings.
-    const ALL: [Item; 6] = [
+    const ALL: [Item; 7] = [
         Item::Home,
         Item::Sites,
+        Item::Dumps,
         Item::Logs,
         Item::Runtimes,
         Item::Services,
@@ -300,6 +306,7 @@ mod tests {
                 Item::Home,
                 Item::Sites,
                 Item::Mail,
+                Item::Dumps,
                 Item::Logs,
                 Item::Runtimes,
                 Item::Services
@@ -312,7 +319,7 @@ mod tests {
         for item in ALL {
             assert!(tree.node_with_label(item.label()).is_some(), "{item:?}");
         }
-        for section in [Section::Databases, Section::Dumps, Section::Queues] {
+        for section in [Section::Databases, Section::Queues] {
             let name = strings::section_name(section);
             assert!(tree.node_with_label(name).is_none(), "{name} ships later");
         }
@@ -379,6 +386,62 @@ mod tests {
     }
 
     #[test]
+    fn dumps_is_always_there_between_mail_and_logs_and_counts_what_came_while_it_was_shut() {
+        use marsa_core::types::{Dump, DumpList, DumpsStatus};
+        let harness = Harness::new(egui::Theme::Light);
+        let dumps = strings::section_name(Section::Dumps);
+        let dump = |id: u64| Dump {
+            id,
+            received_at: 0,
+            source_file: None,
+            source_line: None,
+            uri: None,
+            method: None,
+            label: None,
+            text: "1".into(),
+            truncated: false,
+        };
+        let mut model = connected();
+        model.update(Update::Dumps {
+            list: DumpList {
+                status: DumpsStatus::Listening,
+                latest_id: 2,
+                count: 2,
+                dumps: vec![dump(2), dump(1)],
+            },
+            replace: true,
+        });
+        let tree = harness.accessibility(|ui| {
+            show(ui, &model, false);
+        });
+        let node = tree.node_with_label(dumps).expect("the Dumps item");
+        assert_eq!(node.description(), Some("2 dumps"));
+        let top = |label: &str| {
+            tree.node_with_label(label)
+                .expect(label)
+                .bounds()
+                .unwrap()
+                .y0
+        };
+        assert!(top(strings::SITES) < top(dumps) && top(dumps) < top(strings::LOGS));
+        // A click opens Dumps, which counts them seen and reads what is new.
+        let actions = click(&harness, &model, false, dumps);
+        assert_eq!(actions, [Action::Navigate(Route::Dumps)]);
+        for action in actions {
+            let sent = model.apply_action(action).command();
+            assert!(
+                matches!(sent, Some(crate::bridge::Command::ReadDumps)),
+                "{sent:?}"
+            );
+        }
+        let tree = harness.accessibility(|ui| {
+            show(ui, &model, false);
+        });
+        let node = tree.node_with_label(dumps).expect("the Dumps item");
+        assert_eq!(node.description(), None, "seen");
+    }
+
+    #[test]
     fn every_sidebar_item_sets_its_route_open_and_folded() {
         let harness = Harness::new(egui::Theme::Light);
         for folded in [false, true] {
@@ -388,7 +451,9 @@ mod tests {
                 let actions = click(&harness, &model, false, item.label());
                 assert_eq!(actions, [Action::Navigate(item.route())], "{item:?}");
                 for action in actions {
-                    assert!(model.apply_action(action).is_none());
+                    // Dumps reads what is new as it opens, like Mail.
+                    let sent = model.apply_action(action).command();
+                    assert!(sent.is_none() || item == Item::Dumps, "{item:?}: {sent:?}");
                 }
                 assert_eq!(model.route, item.route());
                 assert_eq!(Item::of(&model.route), item);
@@ -404,6 +469,7 @@ mod tests {
             (Route::Site("shop".into()), Item::Sites),
             (Route::Logs(LogSource::Caddy), Item::Logs),
             (Route::Mail, Item::Mail),
+            (Route::Dumps, Item::Dumps),
             (Route::Runtimes(Runtime::Node), Item::Runtimes),
             (Route::Services, Item::Services),
             (Route::Settings, Item::Settings),

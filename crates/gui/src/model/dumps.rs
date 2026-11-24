@@ -10,7 +10,7 @@ use super::*;
 
 /// What the window knows of the dumps. Part of the [`Session`]: a new
 /// connection reads it again.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct DumpsState {
     /// Newest first, at most [`MAX_KEPT_DUMPS`] and [`MAX_KEPT_BYTES`] of
     /// text, as the daemon keeps them.

@@ -1,5 +1,5 @@
 //! Debug builds only: fixed fake data for the design review.
-//! `MARSA_GUI_DEMO=ok|caddy-stopped|many-sites|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|mail|mail-empty|mail-stopped|confirm-delete-mail|confirm-unlink|confirm-uninstall|notice-success|notice-error`
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|many-sites|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|mail|mail-empty|mail-stopped|dumps|dumps-empty|dumps-off|dumps-busy|dumps-long|confirm-delete-mail|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! fills the model with a few sites, PHP and Caddy (or nothing, for the
 //! first run), and starts no bridge and no daemon: the window draws a state the review needs without a
 //! machine to break. Pair it with
@@ -23,6 +23,7 @@ use crate::model::{
     Action, Autostart, InstallJob, LinkForm, LogLevel, Model, Removal, SitesNotice, Update, apply,
 };
 
+mod dumps;
 mod mail;
 
 /// The variable that names the state.
@@ -93,6 +94,16 @@ pub enum Demo {
     MailStopped,
     /// `Mail` with the confirmation of "Delete every mail?" open.
     ConfirmDeleteMail,
+    /// The same as `Ok`, with six dumps, four of them new, the newest shown.
+    Dumps,
+    /// `Dumps` with the capture on and nothing caught yet.
+    DumpsEmpty,
+    /// `Dumps` with the capture off.
+    DumpsOff,
+    /// `Dumps` with another program holding the dump server's port.
+    DumpsBusy,
+    /// `Dumps` with one dump of 2 000 lines, cut at its limit.
+    DumpsLong,
     /// The same as `Ok`, with the confirmation of "Unlink shop.test?" open.
     ConfirmUnlink,
     /// `Runtimes`, with the confirmation of uninstalling PHP 8.3.27 open.
@@ -134,6 +145,11 @@ fn parse(name: &str) -> Option<Demo> {
         "mail-empty" => Demo::MailEmpty,
         "mail-stopped" => Demo::MailStopped,
         "confirm-delete-mail" => Demo::ConfirmDeleteMail,
+        "dumps" => Demo::Dumps,
+        "dumps-empty" => Demo::DumpsEmpty,
+        "dumps-off" => Demo::DumpsOff,
+        "dumps-busy" => Demo::DumpsBusy,
+        "dumps-long" => Demo::DumpsLong,
         "confirm-unlink" => Demo::ConfirmUnlink,
         "confirm-uninstall" => Demo::ConfirmUninstall,
         "notice-success" => Demo::NoticeSuccess,
@@ -224,6 +240,12 @@ pub fn fill(model: &mut Model, demo: Demo) {
         Demo::Mail | Demo::MailEmpty | Demo::MailStopped | Demo::ConfirmDeleteMail
     ) {
         mail::fill(model, demo, php);
+    }
+    if matches!(
+        demo,
+        Demo::Dumps | Demo::DumpsEmpty | Demo::DumpsOff | Demo::DumpsBusy | Demo::DumpsLong
+    ) {
+        dumps::fill(model, demo);
     }
 }
 

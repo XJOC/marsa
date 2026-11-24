@@ -9,7 +9,8 @@
 //! then logs one line (the time of the first frame, and how many frames ran
 //! while the window was idle) and closes the window. `logs=5000` opens the
 //! Logs screen with that many lines of Caddy's log instead, and
-//! `scroll=240` then turns the wheel on it for 240 frames, up and back down,
+//! `dumps=500` opens the Dumps screen with that many made-up dumps (the
+//! window keeps 500). `scroll=240` then turns the wheel on it for 240 frames, up and back down,
 //! and logs the mean and the worst frame time of those frames. `sites` and
 //! `logs` are 0, `scroll` is 0, and `idle` is 60 when left out; with
 //! nothing to list the window opens on Home.
@@ -25,8 +26,8 @@ use eframe::egui;
 use marsa_core::php::PhpMinor;
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    Health, LogLine, LogStream, PoolKind, RuntimeList, RuntimeVersions, ServiceId, ServiceState,
-    ServiceStatus, Site, SiteKind, SiteList, Source,
+    Dump, DumpList, DumpsStatus, Health, LogLine, LogStream, PoolKind, RuntimeList,
+    RuntimeVersions, ServiceId, ServiceState, ServiceStatus, Site, SiteKind, SiteList, Source,
 };
 
 use crate::model::{LogSource, Model, Route, Update};
@@ -52,6 +53,9 @@ pub struct Plan {
     pub sites: usize,
     /// How many lines Caddy's log has (the window keeps 5000 at most).
     pub logs: usize,
+    /// How many made-up dumps the Dumps screen lists (the window keeps 500
+    /// at most).
+    pub dumps: usize,
     /// How long the window is idle once it has settled.
     pub idle: Duration,
     /// How many frames the wheel turns on the list after that: up for half
@@ -103,6 +107,7 @@ fn parse(text: &str) -> Option<Plan> {
     let mut plan = Plan {
         sites: 0,
         logs: 0,
+        dumps: 0,
         idle: IDLE,
         scroll: 0,
     };
@@ -112,6 +117,7 @@ fn parse(text: &str) -> Option<Plan> {
         match key.trim() {
             "sites" => plan.sites = usize::try_from(value).ok()?,
             "logs" => plan.logs = usize::try_from(value).ok()?,
+            "dumps" => plan.dumps = usize::try_from(value).ok()?,
             "idle" => plan.idle = Duration::from_secs(value),
             "scroll" => plan.scroll = u32::try_from(value).ok()?,
             _ => return None,
@@ -166,8 +172,14 @@ pub fn fill(model: &mut Model, plan: Plan) {
     ]));
     model.update(Update::Sites(sites(plan.sites)));
     model.update(Update::Log(caddy_log(plan.logs)));
+    model.update(Update::Dumps {
+        list: dumps(plan.dumps),
+        replace: true,
+    });
     if plan.logs > 0 {
         model.route = Route::Logs(LogSource::Caddy);
+    } else if plan.dumps > 0 {
+        model.route = Route::Dumps;
     } else if plan.sites > 0 {
         model.route = Route::Sites;
     }
@@ -203,6 +215,46 @@ fn caddy_log(count: usize) -> Vec<LogLine> {
             }
         })
         .collect()
+}
+
+/// `count` dumps, newest first, of the sizes a project makes: mostly a line
+/// or two, now and then an array of a hundred lines, and every 50th one of
+/// 2 000.
+fn dumps(count: usize) -> DumpList {
+    let dumps: Vec<Dump> = (1..=count)
+        .rev()
+        .map(|n| {
+            let lines = match n {
+                n if n % 50 == 0 => 2000,
+                n if n % 7 == 0 => 100,
+                _ => 2,
+            };
+            let mut text = String::from("array:2 [");
+            for line in 0..lines {
+                text.push_str(&format!(
+                    "\n  \"key {line}\" => \"value {line} of dump {n}\""
+                ));
+            }
+            text.push_str("\n]");
+            Dump {
+                id: n as u64,
+                received_at: 1_795_000_000_000 + n as u64 * 1000,
+                source_file: Some(format!("/demo/Code/site-{:04}/routes/web.php", n % 50 + 1)),
+                source_line: Some(u32::try_from(n % 200 + 1).unwrap_or(1)),
+                uri: Some(format!("http://site-{:04}.test/products/{n}", n % 50 + 1)),
+                method: Some("GET".into()),
+                label: None,
+                text,
+                truncated: false,
+            }
+        })
+        .collect();
+    DumpList {
+        status: DumpsStatus::Listening,
+        latest_id: count as u64,
+        count: count as u64,
+        dumps,
+    }
 }
 
 /// `count` sites named `site-0001`, on PHP 8.4 and 8.3 by turns.
@@ -385,6 +437,7 @@ impl Run {
             tracing::info!(
                 sites = self.plan.sites,
                 logs = self.plan.logs,
+                dumps = self.plan.dumps,
                 first_frame_ms = self.first_frame_ms,
                 idle_secs = self.plan.idle.as_secs(),
                 idle_frames = self.idle_frames,
@@ -417,6 +470,7 @@ mod tests {
         Plan {
             sites,
             logs: 0,
+            dumps: 0,
             idle: IDLE,
             scroll: 0,
         }
@@ -511,6 +565,32 @@ mod tests {
         let mut empty = Model::default();
         fill(&mut empty, Plan { sites: 0, ..plan });
         assert_eq!(empty.route, Route::Home);
+    }
+
+    #[test]
+    fn a_dumps_plan_opens_on_dumps_with_the_most_the_window_keeps() {
+        assert_eq!(
+            parse("dumps=500,idle=10,scroll=240"),
+            Some(Plan {
+                dumps: 500,
+                idle: Duration::from_secs(10),
+                scroll: 240,
+                ..plan(0)
+            })
+        );
+        let mut model = Model::default();
+        fill(
+            &mut model,
+            Plan {
+                dumps: 600,
+                ..plan(0)
+            },
+        );
+        assert_eq!(model.route, Route::Dumps);
+        let dumps = &model.session.dumps.dumps;
+        assert_eq!(dumps.len(), 500, "the window keeps no more");
+        assert_eq!(dumps[0].id, 600);
+        assert!(dumps.iter().any(|dump| dump.text.lines().count() > 1000));
     }
 
     #[test]
