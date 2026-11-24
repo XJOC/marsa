@@ -2,7 +2,7 @@
 //! the API's types. Every column of those statements is text or null, so one
 //! reader serves the three engines.
 
-use marsa_core::types::{DbTableInfo, DbTableKind, DbTableRef, DbTables};
+use marsa_core::types::{DbColumn, DbKey, DbTableInfo, DbTableKind, DbTableRef, DbTables};
 use sqlx::{ColumnIndex, Decode, Row, Type};
 
 use super::unavailable;
@@ -33,6 +33,42 @@ where
         });
     }
     Ok(DbTables { tables })
+}
+
+/// The rows of `columns_sql`: the columns in their order, and the names
+/// of the primary key's columns in the key's order.
+pub(super) fn columns<R>(rows: &[R]) -> Result<(Vec<DbColumn>, Vec<String>), HttpError>
+where
+    R: Row,
+    for<'r> String: Decode<'r, R::Database> + Type<R::Database>,
+    usize: ColumnIndex<R>,
+{
+    let mut columns = Vec::with_capacity(rows.len());
+    let mut key: Vec<(u32, String)> = Vec::new();
+    for row in rows {
+        let name = text(row, 0)?.ok_or_else(unreadable)?;
+        let key_kind = match text(row, 4)?.as_deref() {
+            Some("primary") => Some(DbKey::Primary),
+            Some("unique") => Some(DbKey::Unique),
+            None => None,
+            Some(_) => return Err(unreadable()),
+        };
+        let place: u32 = text(row, 5)?
+            .and_then(|place| place.parse().ok())
+            .ok_or_else(unreadable)?;
+        if place > 0 {
+            key.push((place, name.clone()));
+        }
+        columns.push(DbColumn {
+            name,
+            type_name: text(row, 1)?.unwrap_or_default(),
+            nullable: text(row, 2)?.as_deref() == Some("1"),
+            default: text(row, 3)?,
+            key: key_kind,
+        });
+    }
+    key.sort();
+    Ok((columns, key.into_iter().map(|(_, name)| name).collect()))
 }
 
 /// Column `index` of `row`, as text or null.

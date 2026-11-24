@@ -4,7 +4,10 @@
 use reqwest::Method;
 
 use super::{ClientError, DaemonClient, REQUEST_TIMEOUT};
-use crate::types::{DbSource, DbSources, DbTables, DbTablesRequest};
+use crate::types::{
+    DbPage, DbRowsRequest, DbSource, DbSources, DbTable, DbTableRef, DbTableRequest, DbTables,
+    DbTablesRequest,
+};
 
 impl DaemonClient {
     /// `GET /v1/db/sources`: Marsa's database servers and the sites' SQLite
@@ -29,6 +32,36 @@ impl DaemonClient {
             source: source.clone(),
         };
         self.call_with(Method::POST, &["v1", "db", "tables"], &body)
+            .await
+    }
+
+    /// `POST /v1/db/table`: the columns of `table`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::db_tables`]; `db_table_not_found` (404).
+    pub async fn db_table(
+        &self,
+        source: &DbSource,
+        table: &DbTableRef,
+    ) -> Result<DbTable, ClientError> {
+        let body = DbTableRequest {
+            source: source.clone(),
+            table: table.clone(),
+        };
+        self.call_with(Method::POST, &["v1", "db", "table"], &body)
+            .await
+    }
+
+    /// `POST /v1/db/rows`: one page of a table (`marsa_core::db_browser::PAGE_ROWS`
+    /// rows after `request.offset`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::db_table`]; `db_source_invalid` (400) for a sort column the
+    /// table does not have.
+    pub async fn db_rows(&self, request: &DbRowsRequest) -> Result<DbPage, ClientError> {
+        self.call_with(Method::POST, &["v1", "db", "rows"], request)
             .await
     }
 

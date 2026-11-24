@@ -572,3 +572,194 @@ mod server_errors {
         assert!(detail.contains("own words"), "{detail}");
     }
 }
+
+/// `POST /v1/db/rows` on the site `blog`'s `table` (no schema).
+async fn page(app: &App, table: &str, extra: Value) -> (StatusCode, Value) {
+    let mut body = json!({ "source": blog(), "table": { "name": table }, "offset": 0 });
+    for (key, value) in extra.as_object().unwrap() {
+        body[key] = value.clone();
+    }
+    app.router.answer("POST", "/v1/db/rows", Some(body)).await
+}
+
+const NUMBERED: &str = "CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT NOT NULL, \
+     score REAL, body BLOB, created datetime);\
+     INSERT INTO posts (id, title, score, body, created) \
+     WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 600) \
+     SELECT i, 'post ' || i, i / 2.0, x'00ff', '2026-11-24 10:00:00' FROM n;";
+
+#[tokio::test]
+async fn a_tables_columns_come_with_their_key() {
+    let app = App::new();
+    make_file(&app.site("blog").await, SHOP).await;
+    let body = json!({ "source": blog(), "table": { "name": "users" } });
+    let (status, json) = app.router.answer("POST", "/v1/db/table", Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(
+        json,
+        json!({ "columns": [
+            { "name": "id", "type_name": "INTEGER", "nullable": false, "default": null, "key": "primary" },
+            { "name": "email", "type_name": "TEXT", "nullable": true, "default": null, "key": "unique" },
+        ] })
+    );
+}
+
+#[tokio::test]
+async fn a_page_is_500_rows_in_the_keys_order() {
+    let app = App::new();
+    make_file(&app.site("blog").await, NUMBERED).await;
+    let (status, json) = page(&app, "posts", json!({ "count": true })).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["rows"].as_array().unwrap().len(), 500);
+    assert_eq!(json["key"], json!([0]));
+    assert_eq!(json["total"], json!({ "rows": 600, "exact": true }));
+    assert_eq!(
+        json["columns"],
+        json!([
+            { "name": "id", "kind": "number" },
+            { "name": "title", "kind": "text" },
+            { "name": "score", "kind": "number" },
+            { "name": "body", "kind": "binary" },
+            { "name": "created", "kind": "time" },
+        ])
+    );
+    // Values as SQLite writes them; a BLOB as its size only.
+    assert_eq!(
+        json["rows"][0],
+        json!(["1", "post 1", "0.5", { "bytes": 2 }, "2026-11-24 10:00:00"])
+    );
+    assert_eq!(json["rows"][499][0], "500");
+
+    // Without a count, the total is what the pages prove, marked as such.
+    let (_, json) = page(&app, "posts", json!({ "offset": 500 })).await;
+    assert_eq!(json["rows"].as_array().unwrap().len(), 100);
+    assert_eq!(json["rows"][0][0], "501");
+    assert_eq!(json["total"], json!({ "rows": 600, "exact": false }));
+
+    let (status, json) = page(&app, "posts", json!({ "offset": 600 })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["rows"], json!([]));
+}
+
+#[tokio::test]
+async fn a_page_sorts_by_a_column_then_the_key() {
+    let app = App::new();
+    make_file(&app.site("blog").await, NUMBERED).await;
+    let sort = json!({ "sort": { "column": "id", "descending": true } });
+    let (_, json) = page(&app, "posts", sort).await;
+    assert_eq!(json["rows"][0][0], "600");
+    let sort = json!({ "sort": { "column": "title" } });
+    let (_, json) = page(&app, "posts", sort).await;
+    // Text order: "post 1", "post 10", "post 100", ...
+    assert_eq!(json["rows"][1][1], "post 10");
+
+    let sort = json!({ "sort": { "column": "nope" } });
+    let (status, json) = page(&app, "posts", sort).await;
+    assert_eq!(
+        (status, json["error"]["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("db_source_invalid"))
+    );
+    let (status, json) = page(&app, "missing", json!({})).await;
+    assert_eq!(
+        (status, json["error"]["code"].as_str()),
+        (StatusCode::NOT_FOUND, Some("db_table_not_found"))
+    );
+    let body =
+        json!({ "source": blog(), "table": { "schema": "main", "name": "posts" }, "offset": 0 });
+    let (status, _) = app.router.answer("POST", "/v1/db/rows", Some(body)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn every_cell_shape_and_a_table_with_no_key() {
+    let app = App::new();
+    make_file(
+        &app.site("blog").await,
+        "CREATE TABLE notes (body TEXT, n INTEGER);\
+         INSERT INTO notes VALUES (NULL, 1), ('NULL', 2), ('', 3), (replace(hex(zeroblob(200)), '0', 'é'), 4), (x'ff00', 5);",
+    )
+    .await;
+    let (status, json) = page(&app, "notes", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["key"], json!([]));
+    let cells: Vec<Value> = json["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row[0].clone())
+        .collect();
+    assert_eq!(cells[0], Value::Null);
+    assert_eq!(cells[1], "NULL");
+    assert_eq!(cells[2], "");
+    // 400 "é" are 800 bytes: cut at a character within 256.
+    assert_eq!(cells[3]["bytes"], 800);
+    let cut = cells[3]["text"].as_str().unwrap();
+    assert_eq!((cut.len(), cut.chars().all(|c| c == 'é')), (256, true));
+    assert_eq!(cells[4], json!({ "bytes": 2 }));
+}
+
+/// Page after page, every row comes once and in order.
+#[tokio::test]
+async fn walking_10000_rows_gives_each_once_in_order() {
+    let app = App::new();
+    make_file(
+        &app.site("blog").await,
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, label TEXT);\
+         INSERT INTO t (id, label) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000) \
+         SELECT i, 'row ' || i FROM n;",
+    )
+    .await;
+    let mut ids = Vec::new();
+    let mut offset = 0;
+    loop {
+        let (status, json) = page(&app, "t", json!({ "offset": offset })).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = json["rows"].as_array().unwrap();
+        if rows.is_empty() {
+            break;
+        }
+        ids.extend(
+            rows.iter()
+                .map(|row| row[0].as_str().unwrap().parse::<u32>().unwrap()),
+        );
+        offset += rows.len();
+    }
+    assert_eq!(ids, (1..=10_000).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn names_with_spaces_quotes_semicolons_and_arabic_are_one_name() {
+    let app = App::new();
+    make_file(
+        &app.site("blog").await,
+        r#"CREATE TABLE "we""ird; t" ("مفتاح" INTEGER PRIMARY KEY, "a b`c" TEXT);
+           INSERT INTO "we""ird; t" VALUES (2, 'two'), (1, 'one');"#,
+    )
+    .await;
+    let (status, json) = page(&app, "we\"ird; t", json!({ "sort": { "column": "a b`c" } })).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["columns"][0]["name"], "مفتاح");
+    assert_eq!(json["rows"], json!([["1", "one"], ["2", "two"]]));
+}
+
+/// Values of 1 MiB each: the page comes back cut, far under 1 MiB.
+#[tokio::test]
+async fn large_values_come_back_cut() {
+    let app = App::new();
+    make_file(
+        &app.site("blog").await,
+        "CREATE TABLE big (id INTEGER PRIMARY KEY, v TEXT);\
+         INSERT INTO big (id, v) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20) \
+         SELECT i, hex(zeroblob(524288)) FROM n;",
+    )
+    .await;
+    let body = json!({ "source": blog(), "table": { "name": "big" }, "offset": 0 });
+    let response = app.router.send("POST", "/v1/db/rows", Some(body)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    assert!(bytes.len() < 64 * 1024, "{} bytes", bytes.len());
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["rows"][0][1]["bytes"], 1_048_576);
+}

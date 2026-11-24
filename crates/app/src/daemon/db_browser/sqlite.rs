@@ -22,11 +22,15 @@ use axum::http::StatusCode;
 use marsa_core::codes;
 use marsa_core::db_browser::{self, Engine};
 use marsa_core::sites::validate_name;
-use marsa_core::types::{DbSiteFile, DbTables, SiteList};
+use marsa_core::types::{
+    DbColumn, DbPage, DbRowsRequest, DbSiteFile, DbTable, DbTableInfo, DbTableRef, DbTables,
+    DbTotal, SiteList,
+};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
-use sqlx::{ConnectOptions, Connection};
+use sqlx::{ConnectOptions, Connection, Row};
+use tokio_stream::StreamExt;
 
-use super::{catalog, unavailable};
+use super::{COUNT_LIMIT, catalog, rows, unavailable};
 use crate::daemon::http::routes::HttpError;
 use crate::daemon::state::Daemon;
 
@@ -135,14 +139,117 @@ pub(super) async fn open(file: &Path) -> Result<SqliteConnection, HttpError> {
         .map_err(|err| unavailable(err.to_string()))
 }
 
+/// Opens `file`, runs `work` on it, and closes it before the answer, so
+/// the file is free again at once, whatever `work` returned.
+async fn with_file<T>(
+    file: &Path,
+    work: impl AsyncFnOnce(&mut SqliteConnection) -> Result<T, HttpError>,
+) -> Result<T, HttpError> {
+    let mut connection = open(file).await?;
+    let result = work(&mut connection).await;
+    let _ = connection.close().await;
+    result
+}
+
 /// The tables and views of `file`.
 pub(super) async fn tables(file: PathBuf) -> Result<DbTables, HttpError> {
-    let mut connection = open(&file).await?;
+    with_file(&file, async |connection| read_tables(connection).await).await
+}
+
+async fn read_tables(connection: &mut SqliteConnection) -> Result<DbTables, HttpError> {
     let rows = sqlx::query(db_browser::tables_sql(Engine::Sqlite))
-        .fetch_all(&mut connection)
-        .await;
-    // Closed before the answer, so the file is free again at once.
-    let _ = connection.close().await;
-    let rows = rows.map_err(|err| unavailable(err.to_string()))?;
+        .fetch_all(connection)
+        .await
+        .map_err(|err| unavailable(err.to_string()))?;
     catalog::tables(&rows)
+}
+
+/// The columns of `table`, after the catalog listed it, and its key.
+async fn read_columns(
+    connection: &mut SqliteConnection,
+    table: &DbTableRef,
+) -> Result<(DbTableInfo, Vec<DbColumn>, Vec<String>), HttpError> {
+    let info = rows::listed(&read_tables(connection).await?, table)?;
+    let found = sqlx::query(db_browser::columns_sql(Engine::Sqlite))
+        .bind(&table.name)
+        .fetch_all(connection)
+        .await
+        .map_err(|err| unavailable(err.to_string()))?;
+    let (columns, key) = catalog::columns(&found)?;
+    Ok((info, columns, key))
+}
+
+/// `POST /v1/db/table` for a site's file.
+pub(super) async fn table(file: PathBuf, table: DbTableRef) -> Result<DbTable, HttpError> {
+    with_file(&file, async |connection| {
+        let (_, columns, _) = read_columns(connection, &table).await?;
+        Ok(DbTable { columns })
+    })
+    .await
+}
+
+/// `POST /v1/db/rows` for a site's file: one page, read row by row.
+pub(super) async fn page(file: PathBuf, request: DbRowsRequest) -> Result<DbPage, HttpError> {
+    with_file(&file, async |connection| {
+        let (info, columns, key) = read_columns(connection, &request.table).await?;
+        rows::check_sort(&columns, request.sort.as_ref())?;
+        let sql = db_browser::page_sql(
+            Engine::Sqlite,
+            &request.table,
+            &key,
+            request.sort.as_ref(),
+            request.offset,
+        )
+        .map_err(rows::sql_error)?;
+        let (page_columns, key) = rows::page_columns(Engine::Sqlite, &columns, &key);
+        let mut found = Vec::new();
+        {
+            let mut stream = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch(&mut *connection);
+            while let Some(row) = stream.next().await {
+                let row = row.map_err(|err| unavailable(err.to_string()))?;
+                let cells = (0..row.len())
+                    .map(|index| rows::sqlite_cell(&row, index, db_browser::CELL_BYTES))
+                    .collect::<Result<Vec<_>, _>>()?;
+                found.push(cells);
+            }
+        }
+        let seen = request.offset.saturating_add(found.len() as u64);
+        let total = if request.count {
+            count(connection, &request.table)
+                .await?
+                .unwrap_or_else(|| rows::estimated(info.estimate, seen))
+        } else {
+            rows::estimated(info.estimate, seen)
+        };
+        Ok(DbPage {
+            columns: page_columns,
+            key,
+            rows: found,
+            offset: request.offset,
+            total,
+        })
+    })
+    .await
+}
+
+/// The exact number of rows, or `None` past [`COUNT_LIMIT`]. Last on the
+/// connection: SQLite cannot stop it, so the connection closes after it.
+async fn count(
+    connection: &mut SqliteConnection,
+    table: &DbTableRef,
+) -> Result<Option<DbTotal>, HttpError> {
+    let sql = db_browser::count_sql(Engine::Sqlite, table).map_err(rows::sql_error)?;
+    let counted = tokio::time::timeout(
+        COUNT_LIMIT,
+        sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql)).fetch_one(connection),
+    )
+    .await;
+    match counted {
+        Err(_) => Ok(None),
+        Ok(Err(err)) => Err(unavailable(err.to_string())),
+        Ok(Ok(rows)) => Ok(Some(DbTotal {
+            rows: u64::try_from(rows).unwrap_or(0),
+            exact: true,
+        })),
+    }
 }
