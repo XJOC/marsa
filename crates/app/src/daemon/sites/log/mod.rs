@@ -15,7 +15,9 @@
 //! ends when the client goes away, when the daemon stops, or when the folder
 //! becomes unsafe (a last `: site_log_unsafe` comment). A file that became
 //! shorter is read again from its start after a `: truncated` comment.
-//! The lines are never logged: they may hold the user's data.
+//! The lines are never logged: they may hold the user's data. A stream
+//! keeps the folder it started with, still checked at each look, until the
+//! client leaves: a site unlinked meanwhile is not stopped for it.
 
 mod reader;
 
@@ -41,8 +43,8 @@ use tokio_stream::{Stream, StreamExt as _};
 use tokio_util::sync::CancellationToken;
 
 use self::reader::{LogError, Tail};
-use crate::daemon::http::Rejected as _;
 use crate::daemon::http::routes::HttpError;
+use crate::daemon::http::{Rejected as _, job_failed};
 use crate::daemon::state::Daemon;
 
 /// How often a stream looks for new lines.
@@ -79,7 +81,7 @@ async fn site_log(
     // `reader`): never on the server's own threads.
     let started = tokio::task::spawn_blocking(move || Tail::start(&root))
         .await
-        .map_err(|_| internal("the site log job failed"))?;
+        .map_err(|err| job_failed("site log", &err))?;
     let (mut log, mut tail) = started.map_err(|err| log_error(&name, &err))?;
     if !query.follow {
         log.lines.extend(tail.finish());
@@ -126,14 +128,6 @@ fn log_error(site: &str, err: &LogError) -> HttpError {
     HttpError::new(status, err.code(), err.to_string())
 }
 
-fn internal(message: &str) -> HttpError {
-    HttpError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        codes::INTERNAL_ERROR,
-        message.to_owned(),
-    )
-}
-
 /// The `?follow=true` body: `first`, then the lines that one task finds
 /// every `every`. The task ends with the stream, at `stop`, or when the
 /// folder becomes unsafe.
@@ -152,7 +146,8 @@ fn follow(
         .map(Ok)
 }
 
-/// The task of one stream.
+/// The task of one stream. Each wait also watches `stop`, so a client that
+/// stops reading, or a look that hangs, never holds the daemon's stop.
 async fn look(
     site: String,
     mut tail: Tail,
@@ -166,21 +161,32 @@ async fn look(
     ticks.tick().await;
     loop {
         tokio::select! {
+            biased;
             () = stop.cancelled() => return,
             () = sender.closed() => return,
             _ = ticks.tick() => {}
         }
-        let looked = tokio::task::spawn_blocking(move || {
+        let job = tokio::task::spawn_blocking(move || {
             let step = tail.poll();
             (tail, step)
-        })
-        .await;
-        let Ok((back, step)) = looked else {
-            tracing::error!(%site, "the site log job failed");
-            return;
+        });
+        // A look that never ends (a FIFO swapped in, see `reader`) keeps its
+        // blocking thread, but not this task.
+        let looked = tokio::select! {
+            biased;
+            () = stop.cancelled() => return,
+            looked = job => looked,
+        };
+        let (back, step) = match looked {
+            Ok(looked) => looked,
+            Err(err) => {
+                tracing::error!(%site, error = %err, "the site log job failed");
+                return;
+            }
         };
         tail = back;
         let mut events = Vec::new();
+        let mut last = false;
         match step {
             Ok(step) => {
                 if step.truncated {
@@ -190,18 +196,26 @@ async fn look(
             }
             Err(err @ LogError::Unsafe(_)) => {
                 tracing::warn!(%site, code = err.code(), error = %err, "stopped following the site log");
-                // The stream ends anyway: a client that left needs nothing.
-                let _ = sender.send(SseEvent::default().comment(err.code())).await;
-                return;
+                events.push(SseEvent::default().comment(err.code()));
+                last = true;
             }
             Err(err) => {
                 tracing::debug!(%site, error = %err, "cannot read the site log now; trying again");
             }
         }
         for event in events {
-            if sender.send(event).await.is_err() {
-                return;
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => return,
+                sent = sender.send(event) => {
+                    if sent.is_err() {
+                        return;
+                    }
+                }
             }
+        }
+        if last {
+            return;
         }
     }
 }
@@ -336,10 +350,16 @@ mod tests {
         read: &mut String,
         needle: &str,
     ) {
-        while !read.contains(needle) {
-            let chunk = chunks.next().await.expect("the stream ended").unwrap();
-            read.push_str(std::str::from_utf8(&chunk).unwrap());
-        }
+        // Time is paused: this is a guard against a hang, not a wait.
+        let found = tokio::time::timeout(Duration::from_secs(60), async {
+            while !read.contains(needle) {
+                let chunk = chunks.next().await.expect("the stream ended").unwrap();
+                read.push_str(std::str::from_utf8(&chunk).unwrap());
+            }
+        });
+        found
+            .await
+            .unwrap_or_else(|_| panic!("no {needle:?} in {read:?}"));
     }
 
     #[tokio::test(start_paused = true)]
@@ -364,6 +384,54 @@ mod tests {
         while let Some(chunk) = chunks.next().await {
             chunk.unwrap();
         }
+    }
+
+    // Made with `std::os::unix::fs::symlink`.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_followed_log_whose_folder_leads_out_ends_without_its_lines() {
+        let app = App::new();
+        let root = app.site("shop", true).await;
+        fs::write(log_file(&root), "one\n").unwrap();
+        let response = app
+            .router
+            .send("GET", "/v1/sites/shop/log?follow=true", None)
+            .await;
+        let mut chunks = Body::into_data_stream(response.into_body());
+        let mut read = String::new();
+        until(&mut chunks, &mut read, r#""text":"one""#).await;
+        let outside = app.dir.path().join("secrets");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("laravel.log"), "one\nsecret\n").unwrap();
+        fs::remove_dir_all(root.join("storage/logs")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("storage/logs")).unwrap();
+        until(&mut chunks, &mut read, ": site_log_unsafe\n").await;
+        let rest = tokio::time::timeout(Duration::from_secs(60), async {
+            while let Some(chunk) = chunks.next().await {
+                read.push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
+            }
+        });
+        rest.await.expect("the stream ends");
+        assert!(!read.contains("secret"), "{read}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_task_ends_when_the_client_leaves() {
+        let temp = TempDir::new().unwrap();
+        let (_, tail) = Tail::start(temp.path()).unwrap();
+        let (sender, receiver) = mpsc::channel(1);
+        let task = tokio::spawn(look(
+            "shop".into(),
+            tail,
+            sender,
+            CancellationToken::new(),
+            LOOK_EVERY,
+        ));
+        drop(receiver);
+        tokio::time::timeout(Duration::from_secs(60), task)
+            .await
+            .expect("the task ends")
+            .unwrap();
     }
 
     #[tokio::test(start_paused = true)]
