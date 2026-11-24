@@ -47,7 +47,7 @@ use crate::types::{
     AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, DoctorReport, DumpList,
     DumpsCapture, ErrorBody, Event, Health, HostsStatus, InstallAccepted, InstallRequest,
     LinkRequest, LogLine, MailList, MailText, ParkRequest, RuntimeList, ServiceStatus, SiteList,
-    SitePatch, XdebugRequest, XdebugState,
+    SiteLog, SiteLogLine, SitePatch, XdebugRequest, XdebugState,
 };
 use lifecycle::lock_is_held;
 
@@ -283,6 +283,33 @@ impl DaemonClient {
     /// folder: [`DaemonClient::forget`] removes those.
     pub async fn unlink(&self, name: &str) -> Result<SiteList, ClientError> {
         self.call(Method::DELETE, &["v1", "sites", name]).await
+    }
+
+    /// `GET /v1/sites/{name}/log`: the end of the Laravel site's newest log
+    /// (`storage/logs/laravel*.log`), read by the daemon.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; the daemon's `site_not_found` (404),
+    /// `site_not_laravel` (409), and `site_log_unsafe` (409).
+    pub async fn site_log(&self, name: &str) -> Result<SiteLog, ClientError> {
+        self.call(Method::GET, &["v1", "sites", name, "log"]).await
+    }
+
+    /// `GET /v1/sites/{name}/log?follow=true`: the same lines, then each new
+    /// one as it is written. A stream that ends without `shutting_down` was
+    /// stopped by the daemon: the log became unsafe to read.
+    ///
+    /// # Errors
+    ///
+    /// As [`DaemonClient::site_log`].
+    pub async fn follow_site_log(
+        &self,
+        name: &str,
+    ) -> Result<EventStream<SiteLogLine>, ClientError> {
+        let mut url = self.url(&["v1", "sites", name, "log"])?;
+        url.set_query(Some("follow=true"));
+        self.stream(url).await
     }
 
     /// `DELETE /v1/sites/park` with `{"path": ...}`: `path` is no longer
