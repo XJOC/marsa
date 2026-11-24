@@ -1,0 +1,10 @@
+---
+source: crates/core/src/dumps/tests.rs
+expression: "describe(\"label\", version)"
+---
+--- dump 1 ---
+source: /app/routes/web.php:42
+request: - -
+label: my-label
+truncated: false
+"with a label"

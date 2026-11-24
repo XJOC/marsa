@@ -1,0 +1,46 @@
+---
+source: crates/core/src/dumps/tests.rs
+expression: "describe(\"scalars\", version)"
+---
+--- dump 1 ---
+source: /app/routes/web.php:18
+request: - -
+label: -
+truncated: false
+null
+--- dump 2 ---
+source: /app/routes/web.php:19
+request: - -
+label: -
+truncated: false
+true
+--- dump 3 ---
+source: /app/routes/web.php:20
+request: - -
+label: -
+truncated: false
+42
+--- dump 4 ---
+source: /app/routes/web.php:21
+request: - -
+label: -
+truncated: false
+3.14
+--- dump 5 ---
+source: /app/routes/web.php:22
+request: - -
+label: -
+truncated: false
+-0.5
+--- dump 6 ---
+source: /app/routes/web.php:23
+request: - -
+label: -
+truncated: false
+"hello"
+--- dump 7 ---
+source: /app/routes/web.php:24
+request: - -
+label: -
+truncated: false
+""
