@@ -44,10 +44,10 @@ use crate::platform::daemon_file::{
 };
 use crate::runtimes::Runtime;
 use crate::types::{
-    AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, DoctorReport, ErrorBody,
-    Event, Health, HostsStatus, InstallAccepted, InstallRequest, LinkRequest, LogLine, MailList,
-    MailText, ParkRequest, RuntimeList, ServiceStatus, SiteList, SitePatch, XdebugRequest,
-    XdebugState,
+    AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, DoctorReport, DumpList,
+    DumpsCapture, ErrorBody, Event, Health, HostsStatus, InstallAccepted, InstallRequest,
+    LinkRequest, LogLine, MailList, MailText, ParkRequest, RuntimeList, ServiceStatus, SiteList,
+    SitePatch, XdebugRequest, XdebugState,
 };
 use lifecycle::lock_is_held;
 
@@ -369,6 +369,52 @@ impl DaemonClient {
     /// As [`Self::mail`].
     pub async fn clear_mail(&self) -> Result<MailList, ClientError> {
         self.call(Method::DELETE, &["v1", "mail"]).await
+    }
+
+    /// `GET /v1/dumps`: the dumps with an id over `after` (all, if `None`),
+    /// newest first, and what the dump server is doing.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `invalid_query` (400) cannot happen from here.
+    pub async fn dumps(&self, after: Option<u64>) -> Result<DumpList, ClientError> {
+        let mut url = self.url(&["v1", "dumps"])?;
+        if let Some(after) = after {
+            url.set_query(Some(&format!("after={after}")));
+        }
+        let request = self.http.get(url);
+        self.answer(request.timeout(REQUEST_TIMEOUT)).await
+    }
+
+    /// `DELETE /v1/dumps`: forgets every dump. The list after.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`].
+    pub async fn clear_dumps(&self) -> Result<DumpList, ClientError> {
+        self.call(Method::DELETE, &["v1", "dumps"]).await
+    }
+
+    /// `GET /v1/dumps/capture`: whether `dump()` goes to Marsa.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; a `config_*` code (500) when `global.toml`
+    /// cannot be read.
+    pub async fn dumps_capture(&self) -> Result<DumpsCapture, ClientError> {
+        self.call(Method::GET, &["v1", "dumps", "capture"]).await
+    }
+
+    /// `PUT /v1/dumps/capture`: turns the capture on or off. On, the dump
+    /// server tries the port again; see [`DumpList::status`] afterwards.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::dumps_capture`], when `global.toml` cannot be written.
+    pub async fn set_dumps_capture(&self, enabled: bool) -> Result<DumpsCapture, ClientError> {
+        let body = DumpsCapture { enabled };
+        self.call_with(Method::PUT, &["v1", "dumps", "capture"], &body)
+            .await
     }
 
     /// `GET /v1/php/xdebug`: whether PHP loads Xdebug, and which versions.

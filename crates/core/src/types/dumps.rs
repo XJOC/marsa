@@ -49,9 +49,27 @@ pub struct DumpList {
     pub dumps: Vec<Dump>,
 }
 
+/// `GET` and `PUT /v1/dumps/capture`: whether `dump()` goes to the window.
+/// The setting is `[dumps] enabled` in `global.toml`; whether the port is
+/// free is [`DumpList::status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DumpsCapture {
+    pub enabled: bool,
+}
+
 #[cfg(test)]
 mod dump_tests {
     use super::*;
+
+    #[test]
+    fn the_capture_body_is_one_flag() {
+        let on = DumpsCapture { enabled: true };
+        assert_eq!(
+            serde_json::to_value(on).expect("json"),
+            serde_json::json!({ "enabled": true })
+        );
+        assert!(serde_json::from_value::<DumpsCapture>(serde_json::json!({})).is_err());
+    }
 
     #[test]
     fn a_list_round_trips_and_the_status_is_a_word() {

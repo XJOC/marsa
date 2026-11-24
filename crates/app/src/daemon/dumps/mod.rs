@@ -10,6 +10,7 @@
 //! task, the store, and the event that tells the window about a new dump,
 //! sent at most every 250 ms however many dumps arrive.
 
+pub mod api;
 mod listener;
 mod store;
 
