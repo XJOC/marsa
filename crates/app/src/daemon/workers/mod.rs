@@ -50,7 +50,8 @@ pub struct Workers {
 struct Inner {
     /// Every worker of this run. A worker turned off keeps its runtime, so
     /// its `seq` goes on if it is turned on again: a client never sees it go
-    /// back.
+    /// back. One per site and kind ever wanted in this run, each at most
+    /// `LOG_LINES` lines, like the pools.
     runtimes: BTreeMap<ServiceId, Arc<Mutex<ServiceRuntime>>>,
     /// The ones wanted now: the routes see these only.
     listed: BTreeSet<ServiceId>,
@@ -95,13 +96,18 @@ impl Workers {
 
     /// The runtime of worker `id`, made on first use, and listed.
     fn runtime(&self, id: ServiceId) -> Arc<Mutex<ServiceRuntime>> {
+        self.list(id).0
+    }
+
+    /// [`Workers::runtime`], and whether it was not listed before.
+    fn list(&self, id: ServiceId) -> (Arc<Mutex<ServiceRuntime>>, bool) {
         let mut inner = lock(&self.inner);
-        inner.listed.insert(id);
+        let new = inner.listed.insert(id);
         let runtime = inner
             .runtimes
             .entry(id)
             .or_insert_with(|| Arc::new(Mutex::new(ServiceRuntime::new(id))));
-        Arc::clone(runtime)
+        (Arc::clone(runtime), new)
     }
 
     fn listed(&self) -> Vec<ServiceId> {
@@ -281,6 +287,10 @@ impl WorkerManager {
                 cannot_run(daemon, *id, code);
             }
         }
+        // The stops above may have taken a while.
+        if daemon.shutdown().is_cancelled() {
+            return;
+        }
         for (id, plan) in start {
             if self.start(daemon, plan) {
                 self.running.insert(id, plan.clone());
@@ -316,13 +326,14 @@ impl WorkerManager {
 }
 
 /// `Failed { code }` for a wanted worker that cannot run, once: a pass that
-/// finds it so again sends no event.
+/// finds it so again sends no event. A worker listed again (turned off and
+/// on) sends it again, so a client that follows the events sees it come back.
 fn cannot_run(daemon: &Daemon, id: ServiceId, code: &str) {
-    let runtime = daemon.workers().runtime(id);
+    let (runtime, new) = daemon.workers().list(id);
     let mut runtime = lock(&runtime);
     let already =
         matches!(&runtime.status.state, ServiceState::Failed { code: now } if now == code);
-    if !already {
+    if new || !already {
         warn!(service = %id, code, "the worker cannot run");
         let text = format!("marsad: the worker cannot run: {code}");
         runtime.note(daemon.events(), &text);
