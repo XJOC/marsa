@@ -516,6 +516,20 @@ mod real {
             data.join("runtimes/php/8.4.1/bin/php")
         }
 
+        /// Kills the process at the end of a test, whatever happened.
+        struct KillOnDrop(u32);
+
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                // No assert: a panic here, while a failed test unwinds,
+                // would abort the run.
+                let _ = std::process::Command::new("/bin/kill")
+                    .args(["-KILL", &self.0.to_string()])
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+
         fn record_of(data: &Path, id: ServiceId) -> Option<PidRecord> {
             process::read_pid_file(&orphan::pid_path(data, id))
         }
@@ -585,6 +599,8 @@ mod real {
                 .trim()
                 .parse()
                 .unwrap();
+            // Killed even when an assert fails: it is no child of this test.
+            let _kill = KillOnDrop(old);
             let identity = tokio::time::timeout(WAIT, async {
                 loop {
                     if let Liveness::Alive { started, .. } = process::real_identity(old).await {
@@ -664,6 +680,92 @@ mod real {
             // The next pass does not wait for it again.
             manager.sync(&daemon, &[on]).await;
             assert_eq!(lock(&probe.signals).len(), 2);
+        }
+
+        /// A process list where pid 4242 is our old worker for two looks
+        /// (before the start, before the signal), then gone.
+        #[derive(Debug)]
+        struct Fading {
+            looks: Mutex<u32>,
+            signals: Mutex<Vec<(u32, Signal)>>,
+            php: PathBuf,
+        }
+
+        impl ProcessProbe for Fading {
+            fn real_identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
+                let mut looks = lock(&self.looks);
+                let now = if pid == 4242 && *looks < 2 {
+                    *looks += 1;
+                    Liveness::Alive {
+                        exe: self.php.clone(),
+                        started: StartTime::Ticks(7),
+                    }
+                } else if pid == 4242 {
+                    Liveness::Gone
+                } else {
+                    Liveness::Unknown
+                };
+                Box::pin(std::future::ready(now))
+            }
+
+            fn children(&self, _ppid: u32) -> BoxFuture<'_, Option<Vec<ChildProcess>>> {
+                Box::pin(std::future::ready(Some(Vec::new())))
+            }
+
+            fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
+                lock(&self.signals).push((pid, signal));
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+
+        #[tokio::test]
+        async fn the_first_pass_stops_an_old_worker_no_site_asks_for_any_more() {
+            let Setup {
+                _temp,
+                data,
+                root,
+                daemon,
+                mut manager,
+            } = setup();
+            install_php(&data, "8.4.1");
+            // `queue-old`: its site was turned off while no daemon ran.
+            let old = ServiceId::Worker(WorkerKind::Queue, SiteKey::new("old").unwrap());
+            let record = |id: ServiceId| {
+                let record = PidRecord {
+                    pid: 4242,
+                    exe: php(&data),
+                    started: StartTime::Ticks(7),
+                };
+                process::write_pid_file(&orphan::pid_path(&data, id), &record).unwrap();
+            };
+            record(old);
+            let run = marsa_core::data_dir::DataDir::new(&data).run();
+            fs::write(run.join("postgres.pid"), "{}").unwrap();
+            let probe = Arc::new(Fading {
+                looks: Mutex::new(0),
+                signals: Mutex::new(Vec::new()),
+                php: php(&data),
+            });
+            manager.probes = probe.clone();
+            let on = site(&root, SiteKind::Laravel, Some("8.4.1"), true, false);
+            manager.sync(&daemon, std::slice::from_ref(&on)).await;
+            assert_eq!(*lock(&probe.signals), [(4242, Signal::Term)]);
+            assert!(record_of(&data, old).is_none());
+            // Not a worker's record: left alone.
+            assert!(run.join("postgres.pid").exists());
+            // The wanted worker started, and is not swept.
+            let new = wait_for(&daemon, running).await;
+            assert!(daemon.workers().find(old).is_none());
+
+            // Once only: a record that appears later waits for the next
+            // daemon.
+            let later = ServiceId::Worker(WorkerKind::Schedule, SiteKey::new("old").unwrap());
+            record(later);
+            manager.sync(&daemon, &[on]).await;
+            assert_eq!(lock(&probe.signals).len(), 1);
+            assert!(record_of(&data, later).is_some());
+            daemon.stop_procs(WAIT).await;
+            gone(new.pid.unwrap()).await;
         }
 
         #[tokio::test]

@@ -76,7 +76,9 @@ pub(super) async fn clear(
     let path = pid_path(data_dir, id);
     // A child of this daemon is one of its own workers, never an orphan:
     // after a reboot on Linux, where start times count from the boot, an
-    // old record of another worker could name it.
+    // old record of another worker could name it. A layer on top of the
+    // checks of `clear`, looked at once: a list that cannot be read leaves
+    // them alone, and the checks of a pass end before its workers start.
     if let Some(record) = process::read_pid_file(&path)
         && probes
             .children(std::process::id())
@@ -364,6 +366,33 @@ mod tests {
         assert_eq!(run(&fake, temp.path()).await, Before::Clear);
         assert!(fake.signals().is_empty());
         assert!(!pid_path(temp.path(), queue()).exists());
+    }
+
+    #[test]
+    fn only_the_records_of_workers_are_swept() {
+        let (temp, _) = data();
+        let run = DataDir::new(temp.path()).run();
+        std::fs::create_dir_all(&run).unwrap();
+        for name in [
+            "postgres.pid",
+            "php-fpm-8.4.pid",
+            "caddy.pid",
+            "queue-shop.pid",
+            "schedule-blog.pid",
+            "queue-Shop.pid",
+            "queue-.pid",
+            "queue-shop.txt",
+            "daemon.lock",
+        ] {
+            std::fs::write(run.join(name), "").unwrap();
+        }
+        let mut found: Vec<String> = recorded_workers(temp.path())
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        found.sort();
+        assert_eq!(found, ["queue-shop", "schedule-blog"]);
+        assert!(recorded_workers(&temp.path().join("none")).is_empty());
     }
 
     /// Kills the process at the end of a test, whatever happened.

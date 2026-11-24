@@ -324,12 +324,9 @@ impl WorkerManager {
             checks.push((*id, self.check(*id, plan.spec.stop.clone())));
         }
         self.swept = true;
-        let swept: Vec<ServiceId> = records
+        let sweeps: Vec<_> = records
             .into_iter()
             .filter(|id| !wanted.contains_key(id))
-            .collect();
-        let swept: Vec<_> = swept
-            .into_iter()
             .filter_map(|id| match id {
                 ServiceId::Worker(kind, _) => {
                     Some((id, self.check(id, workers::stop_method(kind))))
@@ -337,14 +334,6 @@ impl WorkerManager {
                 _ => None,
             })
             .collect();
-        for (id, check) in swept {
-            match check.await {
-                Ok(Before::Clear) => {}
-                Ok(Before::Note(text)) => info!(service = %id, "{text}"),
-                Ok(Before::Stuck(text)) => warn!(service = %id, "{text}"),
-                Err(err) => warn!(service = %id, error = %err, "the orphan check failed"),
-            }
-        }
         for ((id, plan), (_, check)) in start.into_iter().zip(checks) {
             let before = check.await;
             // A worker kept from starting by its old run is not tried again
@@ -352,6 +341,16 @@ impl WorkerManager {
             // tries again.
             if self.start(daemon, plan, before) || daemon.workers().failed_stuck(id) {
                 self.running.insert(id, plan.clone());
+            }
+        }
+        // After the starts: an old worker of a site that no longer asks for
+        // it must not hold up the ones that are wanted.
+        for (id, check) in sweeps {
+            match check.await {
+                Ok(Before::Clear) => {}
+                Ok(Before::Note(text)) => info!(service = %id, "{text}"),
+                Ok(Before::Stuck(text)) => warn!(service = %id, "{text}"),
+                Err(err) => warn!(service = %id, error = %err, "the orphan check failed"),
             }
         }
     }

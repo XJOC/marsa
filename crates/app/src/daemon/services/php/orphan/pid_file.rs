@@ -168,7 +168,7 @@ impl PidFile {
         }
     }
 
-    /// After php-fpm exited: its pid may belong to anyone from now on.
+    /// After the process exited: its pid may belong to anyone from now on.
     pub fn remove(&self) {
         if let Err(err) = process::remove_pid_file(&self.path) {
             warn!(%err, path = %self.path.display(), "cannot delete the pid file");
