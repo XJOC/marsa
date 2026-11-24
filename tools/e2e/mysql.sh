@@ -214,8 +214,8 @@ page=$(api_ok POST /v1/db/rows '{"source": {"kind": "server", "server": "mysql",
 [ "$(jq -c '.total' <<<"$page")" = '{"rows":2,"exact":true}' ] || fail "total: $page"
 value=$(api_ok POST /v1/db/cell '{"source": {"kind": "server", "server": "mysql", "database": "app"}, "table": {"name": "posts"}, "column": "body", "key": ["1"]}')
 [ "$(jq -r '.cell' <<<"$value")" = "مرحبا بالعالم" ] || fail "cell: $value"
-[ "$(api_status POST /v1/db/cell '{"source": {"kind": "server", "server": "mysql", "database": "app"}, "table": {"name": "posts"}, "column": "body", "key": ["9"]}')" = "404 db_row_not_found" ] ||
-  fail "a missing row"
+missing=$(api_status POST /v1/db/cell '{"source": {"kind": "server", "server": "mysql", "database": "app"}, "table": {"name": "posts"}, "column": "body", "key": ["9"]}')
+[ "$missing" = "404 db_row_not_found" ] || fail "a missing row: $missing"
 # One connection for each source (the server's catalog, and app), no pool,
 # both over TCP: the socket's root would show `localhost` as its host.
 others="select count(*) from information_schema.processlist where user = 'root' and host like '127.0.0.1:%' and id <> connection_id()"

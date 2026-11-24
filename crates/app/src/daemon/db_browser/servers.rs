@@ -54,9 +54,11 @@ const POSTGRES_HOME: &str = "postgres";
 /// at a time on each connection. The caller bounds the whole request with
 /// `within`.
 ///
-/// The connection is out of its slot while `work` runs, and goes back only
-/// when `work` succeeds: one that failed, timed out, or whose request was
-/// dropped (the client hung up) is closed, never used again.
+/// The connection is out of its slot while `work` runs. It goes back when
+/// `work` succeeds, or refuses the request itself (a 4xx answer, such as a
+/// row no one has): the connection is then in a known state. One that
+/// failed in the database or the driver (5xx), timed out, or whose request
+/// was dropped (the client hung up) is closed, never used again.
 pub(super) async fn with<T>(
     daemon: &Arc<Daemon>,
     server: DbServer,
@@ -80,7 +82,11 @@ pub(super) async fn with<T>(
         None => connect(server, port, database.as_deref()).await?,
     };
     let result = work(&mut conn).await;
-    if result.is_ok() {
+    let known = match &result {
+        Ok(_) => true,
+        Err(err) => err.status.is_client_error(),
+    };
+    if known {
         *held = Some(conn);
     }
     result

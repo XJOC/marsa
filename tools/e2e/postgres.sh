@@ -207,8 +207,8 @@ echo "first row: $(jq -c '.rows[0]' <<<"$page")"
 body=$(tcp -U root -d app -c 'select body from posts where id = 1')
 value=$(api_ok POST /v1/db/cell "{\"source\": $source, \"table\": $posts, \"column\": \"body\", \"key\": [\"1\"]}")
 [ "$(jq -r '.cell' <<<"$value")" = "$body" ] || fail "cell: $value"
-[ "$(api_status POST /v1/db/cell "{\"source\": $source, \"table\": $posts, \"column\": \"body\", \"key\": [\"9\"]}")" = "404 db_row_not_found" ] ||
-  fail "a missing row"
+missing=$(api_status POST /v1/db/cell "{\"source\": $source, \"table\": $posts, \"column\": \"body\", \"key\": [\"9\"]}")
+[ "$missing" = "404 db_row_not_found" ] || fail "a missing row: $missing"
 # One connection for each source (the server's catalog, and app), no pool.
 # Each is read-only: the daemon reads the setting back before it uses one.
 others="select count(*) from pg_stat_activity where application_name = 'marsa'"
