@@ -8,6 +8,7 @@
 //! | `PATCH /v1/sites/{name}` | `SitePatch` | `SiteList` after the change |
 //! | `DELETE /v1/sites/{name}` | – | `SiteList` after the change |
 //! | `DELETE /v1/sites/park` | `ParkRequest` | `SiteList` after the change |
+//! | `GET /v1/sites/{name}/log` | – | `SiteLog`, or SSE with `?follow=true` (module `log`) |
 //!
 //! Each change goes through [`Daemon::change_sites`]: `sites.toml` is written
 //! atomically, the list is built again, and `sites_changed` goes to
@@ -63,6 +64,7 @@ pub fn routes() -> Router<Arc<Daemon>> {
             post(link).patch(link_patch).delete(link_delete),
         )
         .route("/v1/sites/{name}", patch(patch_site).delete(unlink_site))
+        .merge(super::log::routes())
 }
 
 async fn list(State(daemon): State<Arc<Daemon>>) -> Answer {
