@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use anyhow::Context as _;
 use clap::Parser;
 use marsa::daemon::http::server::{self, AlreadyRunning};
-use marsa::daemon::log_filter::log_filter;
+use marsa::daemon::log_filter::{log_filter, no_driver_log};
 use marsa::daemon::services::supervisor::{LOG_FILE_LIMIT, LogFile};
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
@@ -103,6 +103,7 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
         .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
     tracing_subscriber::registry()
         .with(filter)
+        .with(no_driver_log())
         .with(to_file)
         .with(to_stderr)
         .try_init()

@@ -677,6 +677,21 @@ pub(super) mod server {
             .running_program(&pg.daemon)
             .unwrap();
         assert!(program.ends_with("18.7.0/bin/postgres"), "{program:?}");
+        // The database browser's port is the one the run took connections
+        // on, also when global.toml names another or cannot be read.
+        let manager = pg.daemon.server(ServerKind::Postgres);
+        assert_eq!(manager.ready_port(&pg.daemon), Some(pg.port));
+        let global = ConfigPaths::in_dir(pg.daemon.data_dir()).global;
+        let saved = std::fs::read(&global).ok();
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        for text in ["[postgres]\nport = 5999\n", "not = [toml"] {
+            std::fs::write(&global, text).unwrap();
+            assert_eq!(manager.ready_port(&pg.daemon), Some(pg.port), "{text}");
+        }
+        match saved {
+            Some(bytes) => std::fs::write(&global, bytes).unwrap(),
+            None => std::fs::remove_file(&global).unwrap(),
+        }
         // A shutdown gives it the time of its whole ladder.
         let postgres = ServiceId::Database(ServerKind::Postgres);
         let limit = pg
@@ -700,6 +715,12 @@ pub(super) mod server {
             pg.daemon
                 .server(ServerKind::Postgres)
                 .running_program(&pg.daemon),
+            None
+        );
+        assert_eq!(
+            pg.daemon
+                .server(ServerKind::Postgres)
+                .ready_port(&pg.daemon),
             None
         );
         let texts = pg.texts();

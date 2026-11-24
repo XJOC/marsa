@@ -157,14 +157,7 @@ async fn connect(server: DbServer, port: u16, database: Option<&str>) -> Result<
                 .ssl_mode(PgSslMode::Disable)
                 .application_name("marsa")
                 .disable_statement_logging();
-            // The driver takes it from marsad's environment and has no way
-            // to drop it: it could set the role or the search path.
-            if options.get_options().is_some() {
-                return Err(unavailable(
-                    "PGOPTIONS is set in marsad's environment, and the browser does not use it"
-                        .to_owned(),
-                ));
-            }
+            no_startup_options(&options)?;
             let mut conn = options.connect().await.map_err(db_error)?;
             for sql in [
                 "SET default_transaction_read_only = on".to_owned(),
@@ -176,7 +169,7 @@ async fn connect(server: DbServer, port: u16, database: Option<&str>) -> Result<
                     .map_err(db_error)?;
             }
             let row = sqlx::query(
-                "SELECT current_setting('default_transaction_read_only'), \
+                "SELECT pg_catalog.current_setting('default_transaction_read_only'), \
                  (SELECT setting FROM pg_catalog.pg_settings WHERE name = 'statement_timeout')",
             )
             .fetch_one(&mut conn)
@@ -185,6 +178,18 @@ async fn connect(server: DbServer, port: u16, database: Option<&str>) -> Result<
             check_settings(&row, "on")?;
             Ok(Conn::Postgres(conn))
         }
+    }
+}
+
+/// The driver takes `PGOPTIONS` from marsad's environment and has no way to
+/// drop it: it could set the role or the search path. Then the browser
+/// refuses PostgreSQL.
+pub(super) fn no_startup_options(options: &PgConnectOptions) -> Result<(), HttpError> {
+    match options.get_options() {
+        None => Ok(()),
+        Some(_) => Err(unavailable(
+            "PGOPTIONS is set in marsad's environment, and the browser does not use it".to_owned(),
+        )),
     }
 }
 

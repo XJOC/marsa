@@ -548,6 +548,22 @@ mod server_errors {
         assert!(detail.contains("own words"), "{detail}");
     }
 
+    /// `PGOPTIONS` would reach the startup packet: the browser refuses.
+    #[test]
+    fn startup_options_from_the_environment_are_refused() {
+        use sqlx::postgres::PgConnectOptions;
+
+        use super::super::servers::no_startup_options;
+
+        let plain = PgConnectOptions::new_without_pgpass();
+        if plain.get_options().is_none() {
+            assert!(no_startup_options(&plain).is_ok());
+        }
+        let with = plain.options([("search_path", "elsewhere")]);
+        let err = no_startup_options(&with).unwrap_err();
+        assert_eq!(err.code, "db_unavailable");
+    }
+
     #[test]
     fn any_other_failure_is_unavailable_with_the_reason() {
         let (status, code, message, detail) = mapped("42P01");

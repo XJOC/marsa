@@ -25,8 +25,8 @@ pub(super) const MAX_OPEN: usize = 4;
 /// own catalog connection).
 pub(super) type Key = (DbServer, Option<String>);
 
-/// One source's connection: `None` until the first request opens it, and
-/// again after a request failed on it. A `tokio` lock held across `.await`
+/// One source's connection: `None` until the first request opens it, while
+/// a request uses it, and after a request failed on it. A `tokio` lock held across `.await`
 /// as the one-request-at-a-time token of the source, not as a guard of
 /// shared data (AGENTS.md section 6).
 pub(super) type Slot<C> = Arc<tokio::sync::Mutex<Option<C>>>;

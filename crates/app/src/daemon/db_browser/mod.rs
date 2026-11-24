@@ -42,7 +42,6 @@ use marsa_core::codes;
 use marsa_core::databases::ServerKind;
 use marsa_core::types::{
     DbDatabase, DbServer, DbServerInfo, DbSource, DbSources, DbTables, DbTablesRequest,
-    ServiceState,
 };
 use tracing::info;
 
@@ -153,7 +152,9 @@ async fn server_info(
         return Ok(None);
     };
     let state = manager.status().state;
-    let (databases, problem) = if state == ServiceState::Running {
+    // Only once it said it takes connections: a server that starts shows
+    // as running, with no databases yet and no problem.
+    let (databases, problem) = if manager.ready_port(daemon).is_some() {
         match within(servers::with(daemon, server, None, servers::databases)).await {
             Ok(names) => (
                 names.into_iter().map(|name| DbDatabase { name }).collect(),
