@@ -25,8 +25,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # The last commit of main before sqlx: the baseline of the budget.
-  BASELINE: b5d82b5c319c4b9537bec5ced9767194560a8a74
+  # The last commit of main before sqlx: the baseline of the budget. Fixed
+  # from now on: a moving baseline would hide growth.
+  BASELINE: 28f2d364b398ab009cb138525a3f95e1b91d16a3
   # The budget's 6 MB, read the strict way: 6,000,000 bytes.
   MAX_GROWTH: 6000000
 
