@@ -89,15 +89,21 @@ impl DaemonClient {
     /// `db_query_failed`, `db_timeout`, with the server's words in
     /// [`ClientError::detail`]. `db_result_gone` when the daemon stopped
     /// before the end, or the rows were read by another client.
+    ///
+    /// With `cancel_after`, the statement is cancelled once that time passed:
+    /// then `db_query_cancelled`.
     pub async fn run_db_query(
         &self,
         request: &DbQueryRequest,
+        cancel_after: Option<std::time::Duration>,
     ) -> Result<(u64, DbResult), ClientError> {
+        let segments = ["v1", "jobs", "db", "query"];
         let (id, outcome) = self
             .run_job_with(
-                &["v1", "jobs", "db", "query"],
+                &segments,
                 Some(request),
                 codes::DB_RESULT_GONE,
+                cancel_after,
             )
             .await?;
         let JobOutcome::DbQuery(_) = outcome else {

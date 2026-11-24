@@ -199,17 +199,20 @@ impl DaemonClient {
         segments: &[&str],
         lost: &'static str,
     ) -> Result<JobOutcome, ClientError> {
-        self.run_job_with::<()>(segments, None, lost)
+        self.run_job_with::<()>(segments, None, lost, None)
             .await
             .map(|(_, outcome)| outcome)
     }
 
-    /// [`Self::run_job`] with a JSON `body`, if any; also the job's id.
+    /// [`Self::run_job`] with a JSON `body`, if any; also the job's id. With
+    /// `cancel_after`, the job is cancelled (`DELETE /v1/jobs/{id}`) once that
+    /// time passed, and followed on to its end.
     pub(super) async fn run_job_with<B: serde::Serialize>(
         &self,
         segments: &[&str],
         body: Option<&B>,
         lost: &'static str,
+        cancel_after: Option<std::time::Duration>,
     ) -> Result<(u64, JobOutcome), ClientError> {
         // An id that cannot be a path segment is refused before any request.
         self.url(segments)?;
@@ -221,8 +224,20 @@ impl DaemonClient {
         };
         let id = accepted.id;
         let mut resyncs = 0;
+        let mut deadline = cancel_after.map(|after| tokio::time::Instant::now() + after);
         loop {
-            match stream.next().await {
+            let next = match deadline {
+                Some(at) => tokio::select! {
+                    next = stream.next() => next,
+                    () = tokio::time::sleep_until(at) => {
+                        deadline = None;
+                        self.cancel_job(id).await?;
+                        continue;
+                    }
+                },
+                None => stream.next().await,
+            };
+            match next {
                 Some(Ok(StreamItem::Item(Event::Job(event)))) if event.id == id => {
                     resyncs = 0;
                     if let Some(end) = ended(event) {
