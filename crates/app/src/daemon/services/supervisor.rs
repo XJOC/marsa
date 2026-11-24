@@ -270,7 +270,8 @@ async fn supervise(spec: ServiceSpec, shared: Shared, cancel: CancellationToken)
     loop {
         shared.set_state(ServiceState::Starting, None, restarts);
         let started = Instant::now();
-        let code = match command(&spec).spawn() {
+        // The code of the failure, and how the run ended in words.
+        let (code, how) = match command(&spec).spawn() {
             Ok(child) => match run(child, &spec, &shared, &cancel, restarts).await {
                 Exit::Stopped => break,
                 Exit::Exited(status) => {
@@ -292,28 +293,32 @@ async fn supervise(spec: ServiceSpec, shared: Shared, cancel: CancellationToken)
                             () = cancel.cancelled() => break,
                         }
                     }
-                    if let (RestartPolicy::Always { .. }, Some(delay)) =
-                        (spec.restart, restart_delay(spec.restart, restarts))
-                    {
-                        let how = status.map_or("exited".to_owned(), |status| status.to_string());
-                        shared.note(&format!(
-                            "marsad: {how}, starting again in {}",
-                            seconds(delay)
-                        ));
-                    }
-                    EXITED
+                    let how = status.map_or("exited".to_owned(), |status| status.to_string());
+                    (EXITED, how)
                 }
             },
             Err(err) => {
                 warn!(service = %spec.id, %err, "cannot start");
-                codes::SPAWN_FAILED
+                (codes::SPAWN_FAILED, "could not start".to_owned())
             }
+        };
+        let delay = restart_delay(spec.restart, restarts);
+        // A worker whose restarts ran out says so: its log says why.
+        let code = match delay {
+            None if spec.id.is_worker() && code == EXITED => codes::WORKER_FAILED,
+            _ => code,
         };
         let failed = ServiceState::Failed { code: code.into() };
         shared.set_state(failed, None, restarts);
-        let Some(delay) = restart_delay(spec.restart, restarts) else {
+        let Some(delay) = delay else {
             return;
         };
+        if matches!(spec.restart, RestartPolicy::Always { .. }) {
+            shared.note(&format!(
+                "marsad: {how}, starting again in {}",
+                seconds(delay)
+            ));
+        }
         tokio::select! {
             () = tokio::time::sleep(delay) => restarts += 1,
             () = cancel.cancelled() => break,
