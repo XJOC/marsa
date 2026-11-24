@@ -142,6 +142,12 @@ pub struct SiteSettings {
         deserialize_with = "proxy_port"
     )]
     pub proxy: Option<u16>,
+    /// Run `php artisan queue:work` for this site. Written only when `true`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub queue: bool,
+    /// Run `php artisan schedule:work` for this site. Written only when `true`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub schedule: bool,
 }
 
 impl SitesConfig {
@@ -489,6 +495,8 @@ mod tests {
             node: None,
             secure: true,
             proxy: None,
+            queue: false,
+            schedule: false,
         }
     }
 
@@ -716,6 +724,8 @@ mod tests {
             node: Some("20".to_owned()),
             secure: true,
             proxy: None,
+            queue: false,
+            schedule: false,
         };
         assert_eq!(config.sites.len(), 2);
         assert_eq!(config.sites["shop"], site(dir.path(), Some("8.3")));
@@ -1009,7 +1019,9 @@ mod tests {
              root = {SHOP_TOML}\n\
              php = \"8.4\"\n\
              secure = false\n\
-             proxy = 5173\n"
+             proxy = 5173\n\
+             queue = true\n\
+             schedule = true\n"
         )
     }
 
@@ -1018,6 +1030,8 @@ mod tests {
         let shop = SiteSettings {
             secure: false,
             proxy: Some(5173),
+            queue: true,
+            schedule: true,
             ..site(Path::new(SHOP), Some("8.4"))
         };
         SitesConfig {
@@ -1041,6 +1055,7 @@ mod tests {
         assert_eq!(shop.node.as_deref(), Some("22"));
         assert!(shop.secure);
         assert_eq!(shop.proxy, None);
+        assert!(!shop.queue && !shop.schedule);
     }
 
     #[test]

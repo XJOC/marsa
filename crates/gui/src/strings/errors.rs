@@ -50,6 +50,12 @@ pub(super) fn error_message(code: &str) -> Option<&'static str> {
         "service_managed_by_sites" => {
             "This service starts and stops with the sites that need its PHP version."
         }
+        "worker_failed" => {
+            "This worker crashed again and again, so Marsa stopped it. Its log says why."
+        }
+        "worker_follows_site" => {
+            "This worker runs while its site asks for it: use the site's switch."
+        }
         "php_fpm_orphan_stuck" => {
             "An old php-fpm from a crashed daemon holds the socket or port and could not be \
              stopped safely."

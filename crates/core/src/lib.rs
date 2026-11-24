@@ -29,6 +29,7 @@ pub mod services;
 pub mod sitelog;
 pub mod sites;
 pub mod types;
+pub mod workers;
 
 #[cfg(feature = "full")]
 pub mod client;

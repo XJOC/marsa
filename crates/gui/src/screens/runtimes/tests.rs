@@ -28,6 +28,8 @@ fn site(name: &str, php: &str, source: Source) -> Site {
         php: Some(v(php)),
         php_source: Some(source),
         secure: true,
+        queue: false,
+        schedule: false,
     }
 }
 

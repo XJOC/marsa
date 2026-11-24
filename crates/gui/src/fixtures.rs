@@ -40,5 +40,7 @@ pub(crate) fn site(name: &str, php: Option<&str>, source: Option<Source>) -> Sit
         php: php.map(|text| text.parse::<Version>().expect("a version")),
         php_source: source,
         secure: true,
+        queue: false,
+        schedule: false,
     }
 }

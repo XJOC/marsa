@@ -1049,6 +1049,8 @@ mod tests {
             php_source: php.as_ref().map(|_| Source::GlobalDefault),
             php,
             secure,
+            queue: false,
+            schedule: false,
         }
     }
 

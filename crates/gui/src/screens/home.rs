@@ -673,6 +673,8 @@ mod tests {
             php: php.map(|text| text.parse().expect("a version")),
             php_source: None,
             secure: true,
+            queue: false,
+            schedule: false,
         }
     }
 

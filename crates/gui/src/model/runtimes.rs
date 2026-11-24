@@ -69,14 +69,14 @@ pub fn runtime_missing(rows: &[RuntimeRow], runtime: Runtime) -> bool {
 }
 
 /// What a service is called: `caddy` is Caddy, `php-fpm-8.4` is PHP-FPM 8.4.
-/// A database server shows under its id.
+/// A database server and a site's worker (`queue-shop`) show under their id.
 pub fn service_name(id: ServiceId) -> String {
     match id {
         ServiceId::Caddy => strings::SERVICE_CADDY.to_owned(),
         ServiceId::Dns => strings::SERVICE_DNS.to_owned(),
         ServiceId::Pool(PoolKind::Fpm, minor) => strings::service_php_fpm(&minor.to_string()),
         ServiceId::Pool(PoolKind::Cgi, minor) => strings::service_php_cgi(&minor.to_string()),
-        ServiceId::Database(_) => id.to_string(),
+        ServiceId::Database(_) | ServiceId::Worker(..) => id.to_string(),
     }
 }
 
@@ -86,7 +86,7 @@ pub fn service_description(id: ServiceId, waiting: bool, sites: usize) -> String
     match id {
         ServiceId::Caddy => strings::DESCRIPTION_CADDY.to_owned(),
         ServiceId::Dns => strings::DESCRIPTION_DNS.to_owned(),
-        ServiceId::Database(_) => strings::DESCRIPTION_OTHER.to_owned(),
+        ServiceId::Database(_) | ServiceId::Worker(..) => strings::DESCRIPTION_OTHER.to_owned(),
         ServiceId::Pool(..) if waiting => strings::DESCRIPTION_POOL_WAITING.to_owned(),
         ServiceId::Pool(_, minor) => strings::description_pool(&minor.to_string(), sites),
     }

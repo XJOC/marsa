@@ -79,6 +79,12 @@ pub struct SitePatch {
         deserialize_with = "present"
     )]
     pub proxy: Option<Option<NonZeroU16>>,
+    /// Run `php artisan queue:work` for the site, or stop it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<bool>,
+    /// Run `php artisan schedule:work` for the site, or stop it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<bool>,
 }
 
 /// For a field where `null` and a missing key differ. A missing key stays

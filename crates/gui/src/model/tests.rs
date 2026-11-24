@@ -62,6 +62,8 @@ fn site(name: &str, secure: bool) -> Site {
         php: None,
         php_source: None,
         secure,
+        queue: false,
+        schedule: false,
     }
 }
 
@@ -1169,6 +1171,8 @@ fn a_line_counts_the_sites_that_run_a_version_of_it() {
         php: php.map(|text| text.parse().expect("a version")),
         php_source: None,
         secure: true,
+        queue: false,
+        schedule: false,
     };
     let mut model = connected();
     model.update(Update::Sites(SiteList {

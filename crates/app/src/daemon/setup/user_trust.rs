@@ -834,6 +834,8 @@ mod tests {
             php: None,
             php_source: None,
             secure: true,
+            queue: false,
+            schedule: false,
         };
         let config = sites_config(&CaddyInput::default(), &[site], &PhpPools::default()).unwrap();
         let ca = &config["apps"]["pki"]["certificate_authorities"]["marsa"];

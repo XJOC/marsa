@@ -233,6 +233,14 @@ pub enum RestartPolicy {
         initial: Duration,
         max: Duration,
     },
+    /// As `OnFailure`, and a clean exit (code 0) is restarted too, after
+    /// `initial`, without counting: a worker that `php artisan queue:restart`
+    /// or `--max-time` ended is not failing.
+    Always {
+        max_retries: u32,
+        initial: Duration,
+        max: Duration,
+    },
 }
 
 /// How long to wait before the next restart, or `None` to stay `Failed`.
@@ -242,9 +250,15 @@ pub enum RestartPolicy {
 pub fn restart_delay(policy: RestartPolicy, attempt: u32) -> Option<Duration> {
     match policy {
         RestartPolicy::Never => None,
-        RestartPolicy::OnFailure { max_retries, .. } if attempt >= max_retries => None,
+        RestartPolicy::OnFailure { max_retries, .. }
+        | RestartPolicy::Always { max_retries, .. }
+            if attempt >= max_retries =>
+        {
+            None
+        }
         // `checked_pow` is `None` from 2^32 on: the delay is `max` long before.
-        RestartPolicy::OnFailure { initial, max, .. } => Some(
+        RestartPolicy::OnFailure { initial, max, .. }
+        | RestartPolicy::Always { initial, max, .. } => Some(
             2_u32
                 .checked_pow(attempt)
                 .map_or(max, |factor| initial.saturating_mul(factor))

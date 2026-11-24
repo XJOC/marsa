@@ -554,6 +554,8 @@ mod tests {
             php: None,
             php_source: None,
             secure: true,
+            queue: false,
+            schedule: false,
         };
         model.update(Update::Sites(SiteList {
             sites: vec![site],
