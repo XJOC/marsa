@@ -54,6 +54,15 @@ pub struct Site {
     pub php_source: Option<Source>,
     /// Served over HTTPS. The default is `true`.
     pub secure: bool,
+    /// The site's setting asks for `php artisan queue:work`. The daemon runs
+    /// it for a Laravel site only.
+    /// Missing in JSON from an older daemon reads as `false`.
+    #[serde(default)]
+    pub queue: bool,
+    /// The site's setting asks for `php artisan schedule:work` (a Laravel
+    /// site only, as `queue`).
+    #[serde(default)]
+    pub schedule: bool,
 }
 
 impl Site {
@@ -111,6 +120,8 @@ impl Found {
             php,
             php_source,
             secure,
+            queue: false,
+            schedule: false,
         }
     }
 }
@@ -429,6 +440,8 @@ pub fn list(
         if let Some(port) = proxy {
             site.kind = SiteKind::NodeProxy { port };
         }
+        site.queue = own.is_some_and(|table| table.queue);
+        site.schedule = own.is_some_and(|table| table.schedule);
         site
     };
     SiteList {
@@ -503,6 +516,8 @@ mod tests {
             node: None,
             secure: true,
             proxy: None,
+            queue: false,
+            schedule: false,
         }
     }
 
@@ -520,6 +535,7 @@ mod tests {
         let mut shop = table("/work/shop");
         shop.secure = false;
         shop.php = Some("8.3".to_owned());
+        shop.queue = true;
         let mut app = table("/work/app");
         app.proxy = Some(5173);
         toml.sites.insert("shop".to_owned(), shop);
@@ -545,6 +561,8 @@ mod tests {
         assert!(app.secure);
         assert!(!shop.secure);
         assert_eq!(shop.php, Some(Version::new(8, 3, 1)));
+        assert!(shop.queue && !shop.schedule);
+        assert!(!app.queue && !app.schedule);
     }
 
     #[test]
@@ -881,6 +899,8 @@ mod tests {
                 "php": "8.4.1",
                 "php_source": { "type": "version_file", "path": "/code/shop/.php-version" },
                 "secure": true,
+                "queue": false,
+                "schedule": false,
             })
         );
         let back: Site = serde_json::from_value(json).expect("deserialize");

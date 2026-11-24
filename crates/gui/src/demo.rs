@@ -582,6 +582,8 @@ fn sites() -> SiteList {
             php: php.parse().ok(),
             php_source: Some(source),
             secure,
+            queue: false,
+            schedule: false,
         }
     };
     let file = |folder: &str, name: &str| PathBuf::from("/demo").join(folder).join(name);
@@ -655,6 +657,8 @@ fn many_sites() -> SiteList {
             php: php.parse().ok(),
             php_source: Some(Source::GlobalDefault),
             secure: true,
+            queue: false,
+            schedule: false,
         });
     }
     list

@@ -866,6 +866,8 @@ fn site_list(parked: &str) -> SiteList {
             php: Some(semver::Version::new(8, 4, 23)),
             php_source: Some(Source::GlobalDefault),
             secure: false,
+            queue: false,
+            schedule: false,
         }],
         skipped: vec![SkippedFolder {
             path: code.join("متجر"),
@@ -917,6 +919,8 @@ async fn sites_park_link_and_update_site_are_called() {
         php: Some(None),
         secure: Some(false),
         proxy: Some(None),
+        queue: None,
+        schedule: None,
     };
     // `park` is a valid site name: its fixed path takes `PATCH` too.
     assert_eq!(

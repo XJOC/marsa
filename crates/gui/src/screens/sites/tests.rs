@@ -59,6 +59,8 @@ fn site(name: &str, php: Option<&str>, source: Option<Source>) -> Site {
         php: php.map(v),
         php_source: source,
         secure: true,
+        queue: false,
+        schedule: false,
     }
 }
 

@@ -280,6 +280,10 @@ pub const VALKEY_UNSUPPORTED_PLATFORM: &str = "valkey_unsupported_platform";
 pub const VERSION_AMBIGUOUS: &str = "version_ambiguous";
 pub const VERSION_IN_USE: &str = "version_in_use";
 pub const VERSION_NOT_INSTALLED: &str = "version_not_installed";
+/// A site's worker crashed again and again, and the daemon stopped restarting it.
+pub const WORKER_FAILED: &str = "worker_failed";
+/// A worker runs while its site's setting asks for it (`marsa queue on|off`), not by a service action.
+pub const WORKER_FOLLOWS_SITE: &str = "worker_follows_site";
 pub const XDEBUG_INTERRUPTED: &str = "xdebug_interrupted";
 
 /// Every code above, in alphabetical order.
@@ -545,6 +549,8 @@ pub const ALL: &[&str] = &[
     VERSION_AMBIGUOUS,
     VERSION_IN_USE,
     VERSION_NOT_INSTALLED,
+    WORKER_FAILED,
+    WORKER_FOLLOWS_SITE,
     XDEBUG_INTERRUPTED,
 ];
 

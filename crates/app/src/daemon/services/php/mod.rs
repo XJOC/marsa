@@ -778,6 +778,8 @@ mod tests {
             php: php.map(v),
             php_source: php.map(|_| Source::GlobalDefault),
             secure: true,
+            queue: false,
+            schedule: false,
         }
     }
 

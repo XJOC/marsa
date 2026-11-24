@@ -292,6 +292,8 @@ mod tests {
             php: php.parse().ok(),
             php_source: None,
             secure: true,
+            queue: false,
+            schedule: false,
         }
     }
 

@@ -1098,6 +1098,8 @@ async fn a_version_in_use_is_refused_and_nothing_changes() {
             node,
             secure,
             proxy,
+            queue: false,
+            schedule: false,
         };
         (name.to_owned(), site)
     };
@@ -1410,6 +1412,8 @@ async fn a_default_with_other_versions_or_a_pin_keeps_its_version() {
                 node: Some("24".into()),
                 secure: true,
                 proxy: None,
+                queue: false,
+                schedule: false,
             },
         )]
         .into(),

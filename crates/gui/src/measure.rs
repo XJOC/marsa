@@ -271,6 +271,8 @@ fn sites(count: usize) -> SiteList {
                 php: php.parse().ok(),
                 php_source: Some(Source::GlobalDefault),
                 secure: n % 7 != 0,
+                queue: false,
+                schedule: false,
             }
         })
         .collect();

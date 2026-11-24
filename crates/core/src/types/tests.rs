@@ -94,6 +94,24 @@ fn every_plain_state_is_snake_case() {
     }
 }
 
+fn worker(kind: WorkerKind, site: &str) -> ServiceId {
+    ServiceId::Worker(kind, SiteKey::new(site).unwrap())
+}
+
+#[test]
+fn site_keys_hold_valid_names_and_compare_as_text() {
+    let key = |name| SiteKey::new(name).unwrap();
+    assert_eq!(key("shop").as_str(), "shop");
+    assert_eq!(format!("{:?}", key("shop")), "\"shop\"");
+    assert!(key("blog") < key("shop") && key("shop") < key("shop-2"));
+    assert_eq!(key("shop"), key("shop"));
+    for bad in ["", "Shop", "a/b", "..", "-shop", &"a".repeat(64)] {
+        assert_eq!(SiteKey::new(bad), None, "{bad:?}");
+    }
+    assert!(worker(WorkerKind::Queue, "shop").is_worker());
+    assert!(!ServiceId::Caddy.is_worker());
+}
+
 /// The text of each id is the one the daemon sent before the type: the
 /// JSON, the log file names, and the routes did not change.
 #[test]
@@ -107,6 +125,15 @@ fn service_ids_are_their_text_and_nothing_else_parses() {
         (ServiceId::Database(ServerKind::Postgres), "postgres"),
         (ServiceId::Database(ServerKind::Mysql), "mysql"),
         (ServiceId::Database(ServerKind::Valkey), "valkey"),
+        (worker(WorkerKind::Queue, "shop"), "queue-shop"),
+        (
+            worker(WorkerKind::Schedule, "my-shop-2"),
+            "schedule-my-shop-2",
+        ),
+        (
+            worker(WorkerKind::Queue, &"a".repeat(63)),
+            &*format!("queue-{}", "a".repeat(63)),
+        ),
     ];
     for (id, text) in ids {
         assert_eq!(id.to_string(), text);
@@ -137,6 +164,17 @@ fn service_ids_are_their_text_and_nothing_else_parses() {
         "php-fpm-+8.4",
         "my-php-fpm-8.4",
         "mailhog",
+        "queue",
+        "queue-",
+        "queue-Shop",
+        "queue-a/b",
+        "queue-..",
+        "queue--shop",
+        "queue-shop-",
+        "queue-shop.test",
+        "schedule-",
+        "worker-shop",
+        &*format!("queue-{}", "a".repeat(64)),
     ] {
         assert_eq!(text.parse::<ServiceId>(), Err(UnknownService(text.into())));
     }
@@ -633,6 +671,8 @@ fn site_list_in_a_sites_changed_event() {
             php: Some(semver::Version::new(8, 4, 23)),
             php_source: Some(Source::GlobalDefault),
             secure: true,
+            queue: false,
+            schedule: false,
         }],
         skipped: vec![SkippedFolder {
             path: PathBuf::from("/code/متجر"),
@@ -649,11 +689,22 @@ fn site_list_in_a_sites_changed_event() {
                     "name": "shop", "root": "/code/shop", "docroot": "/code/shop/public",
                     "kind": { "type": "laravel" }, "php": "8.4.23",
                     "php_source": { "type": "global_default" }, "secure": true,
+                    "queue": false, "schedule": false,
                 }],
                 "skipped": [{ "path": "/code/متجر", "code": "site_name_invalid" }],
             },
         }),
     );
+}
+
+#[test]
+fn a_site_from_an_older_daemon_runs_no_workers() {
+    let site: Site = serde_json::from_value(json!({
+        "name": "shop", "root": "/code/shop", "docroot": "/code/shop/public",
+        "kind": { "type": "laravel" }, "php": null, "secure": true,
+    }))
+    .unwrap();
+    assert!(!site.queue && !site.schedule);
 }
 
 #[test]
@@ -681,14 +732,18 @@ fn a_site_patch_tells_null_from_a_missing_field() {
             php: Some(Some("8.3".into())),
             secure: Some(false),
             proxy: Some(NonZeroU16::new(5173)),
+            queue: Some(true),
+            schedule: Some(false),
         },
-        json!({ "php": "8.3", "secure": false, "proxy": 5173 }),
+        json!({ "php": "8.3", "secure": false, "proxy": 5173, "queue": true, "schedule": false }),
     );
     round_trip(
         &SitePatch {
             php: Some(None),
             secure: None,
             proxy: Some(None),
+            queue: None,
+            schedule: None,
         },
         json!({ "php": null, "proxy": null }),
     );

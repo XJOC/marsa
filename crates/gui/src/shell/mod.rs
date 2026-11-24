@@ -195,6 +195,8 @@ mod tests {
                 php: None,
                 php_source: None,
                 secure: true,
+                queue: false,
+                schedule: false,
             }],
             ..SiteList::default()
         }));

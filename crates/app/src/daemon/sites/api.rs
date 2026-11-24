@@ -264,6 +264,8 @@ fn new_table(root: PathBuf) -> SiteSettings {
         node: None,
         secure: true,
         proxy: None,
+        queue: false,
+        schedule: false,
     }
 }
 

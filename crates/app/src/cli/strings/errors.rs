@@ -279,6 +279,14 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
             "{service_first} starts and stops with the sites that need its PHP version, so it \
              cannot be started or stopped by hand. Run \"marsa logs {id}\" to see its lines."
         ),
+        "worker_failed" => format!(
+            "{id} stopped after it crashed again and again. Run \"marsa logs {id}\" to see why, \
+             fix it, then run \"marsa services restart {id}\"."
+        ),
+        "worker_follows_site" => format!(
+            "{id} runs while its site asks for it, so it cannot be started or stopped by hand. \
+             Use \"marsa queue on|off <site>\" or \"marsa schedule on|off <site>\"."
+        ),
         "php_fpm_orphan_stuck" => format!(
             "An old php-fpm, left running when the Marsa daemon crashed, still holds the socket \
              or port {service} needs, and Marsa could not stop it safely. Run \"marsa logs \

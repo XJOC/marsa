@@ -40,8 +40,8 @@ pub struct ServiceStatus {
 
 /// A service `marsad` runs. On the wire it is its id text: `caddy`, `dns`,
 /// `php-fpm-8.4` (`php-cgi-8.4` on Windows, ADR 0016), `postgres`, `mysql`,
-/// or `valkey`. The id also names the log file `logs/<id>.log` and the pid
-/// file `run/<id>.pid`.
+/// `valkey`, or a site's worker (`queue-shop`, `schedule-shop`). The id also
+/// names the log file `logs/<id>.log` and the pid file `run/<id>.pid`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ServiceId {
     /// The web server that serves every site.
@@ -52,6 +52,102 @@ pub enum ServiceId {
     /// that need it.
     Pool(PoolKind, PhpMinor),
     Database(ServerKind),
+    /// A Laravel site's `artisan queue:work` or `artisan schedule:work`,
+    /// which runs while the site's setting asks for it.
+    Worker(WorkerKind, SiteKey),
+}
+
+/// What a site's worker runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WorkerKind {
+    /// `php artisan queue:work`: the jobs of the site's queue.
+    Queue,
+    /// `php artisan schedule:work`: the site's scheduled tasks, each minute.
+    Schedule,
+}
+
+impl WorkerKind {
+    pub const ALL: [Self; 2] = [Self::Queue, Self::Schedule];
+
+    /// The start of the worker's id: `queue-<site>`.
+    pub const fn prefix(self) -> &'static str {
+        match self {
+            Self::Queue => "queue",
+            Self::Schedule => "schedule",
+        }
+    }
+
+    /// The `artisan` command.
+    pub const fn command(self) -> &'static str {
+        match self {
+            Self::Queue => "queue:work",
+            Self::Schedule => "schedule:work",
+        }
+    }
+}
+
+/// A site name inside a [`ServiceId`], which stays `Copy`. Made only from a
+/// valid site name (1 to 63 of `a-z`, `0-9`, and `-`,
+/// `sites::validate_name`), so an id never holds `/`, `..`, or a space, and
+/// `logs/queue-<site>.log` is always one file in `logs/`.
+#[derive(Clone, Copy)]
+pub struct SiteKey {
+    bytes: [u8; crate::sites::MAX_NAME_LEN],
+    len: u8,
+}
+
+impl SiteKey {
+    /// `None` for a name that is not a valid site name.
+    pub fn new(name: &str) -> Option<Self> {
+        crate::sites::validate_name(name).ok()?;
+        let mut bytes = [0; crate::sites::MAX_NAME_LEN];
+        bytes[..name.len()].copy_from_slice(name.as_bytes());
+        let len = u8::try_from(name.len()).ok()?;
+        Some(Self { bytes, len })
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..usize::from(self.len)])
+            .expect("a site key holds ASCII only, checked by `new`")
+    }
+}
+
+impl PartialEq for SiteKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for SiteKey {}
+
+impl PartialOrd for SiteKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SiteKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl std::hash::Hash for SiteKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+
+impl fmt::Debug for SiteKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl fmt::Display for SiteKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// The program a PHP pool runs.
@@ -88,6 +184,11 @@ impl ServiceId {
     pub fn is_pool(self) -> bool {
         matches!(self, Self::Pool(..))
     }
+
+    /// A site's worker: it runs while the site's setting asks for it.
+    pub fn is_worker(self) -> bool {
+        matches!(self, Self::Worker(..))
+    }
 }
 
 impl fmt::Display for ServiceId {
@@ -97,6 +198,7 @@ impl fmt::Display for ServiceId {
             Self::Dns => f.write_str("dns"),
             Self::Pool(kind, minor) => write!(f, "{}-{minor}", kind.program()),
             Self::Database(kind) => f.write_str(kind.id()),
+            Self::Worker(kind, site) => write!(f, "{}-{site}", kind.prefix()),
         }
     }
 }
@@ -118,6 +220,16 @@ impl FromStr for ServiceId {
         }
         if let Some(kind) = ServerKind::from_id(text) {
             return Ok(Self::Database(kind));
+        }
+        for kind in WorkerKind::ALL {
+            let site = text
+                .strip_prefix(kind.prefix())
+                .and_then(|rest| rest.strip_prefix('-'));
+            if let Some(site) = site {
+                return SiteKey::new(site)
+                    .map(|site| Self::Worker(kind, site))
+                    .ok_or_else(unknown);
+            }
         }
         let (program, line) = text.rsplit_once('-').ok_or_else(unknown)?;
         let kind = [PoolKind::Fpm, PoolKind::Cgi]
