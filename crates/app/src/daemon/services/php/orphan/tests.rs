@@ -1486,7 +1486,7 @@ fn every_installed_php_fpm_is_accepted_and_nothing_else() {
     let other = DataDir::new(dir.path()).runtimes().join("php").join("8.4");
     std::fs::create_dir_all(other.join("bin")).unwrap();
 
-    let found = installed_programs(dir.path(), platform);
+    let found = installed_programs(dir.path(), platform, "php-fpm");
     assert_eq!(found, accepted(programs.clone()));
     for program in &programs {
         assert!(found.contains(program), "{program:?}");
@@ -1497,7 +1497,7 @@ fn every_installed_php_fpm_is_accepted_and_nothing_else() {
     // Each once.
     let twice = accepted([programs[0].clone(), programs[0].clone()]);
     assert!(twice.len() <= 2, "{twice:?}");
-    assert!(installed_programs(&dir.path().join("none"), platform).is_empty());
+    assert!(installed_programs(&dir.path().join("none"), platform, "php-fpm").is_empty());
 }
 
 #[tokio::test]

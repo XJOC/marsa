@@ -29,6 +29,7 @@ use super::init::{installed_programs, installed_servers};
 use super::orphan;
 use super::settings::{any_installed, read_settings, save_enabled};
 use crate::daemon::services::actions::{Busy, take_turn};
+use crate::daemon::services::pid_record::{self, Cleared};
 use crate::daemon::services::probe::{ProcessProbe, SystemProbe};
 use crate::daemon::services::supervisor::{EXITED, ServiceRuntime, lock};
 use crate::daemon::state::Daemon;
@@ -455,27 +456,20 @@ impl ServerManager {
         let servers = installed_servers(kind, daemon.data_dir(), platform);
         let ladder = &self.orphan_ladder;
         let probes = &*self.probes;
-        let looks = orphan::STOP_LOOKS;
-        let cleared = orphan::clear(
-            kind,
-            probes,
-            daemon.data_dir(),
-            &servers,
-            ladder,
-            port,
-            looks,
-        );
+        let looks = pid_record::STOP_LOOKS;
+        let owner = orphan::owner(kind, daemon.data_dir(), port);
+        let cleared = pid_record::clear(&owner, probes, &servers, ladder, looks);
         match cleared.await {
-            Ok(orphan::Cleared::Stopped { pid, signal }) => {
+            Ok(Cleared::Stopped { pid, signal }) => {
                 let text = orphan::stopped_line(kind, pid, signal);
                 lock(&self.runtime).note(daemon.events(), &text);
             }
-            Ok(orphan::Cleared::Nothing | orphan::Cleared::Forgotten) => {}
-            Ok(orphan::Cleared::Unknown { pid }) => {
+            Ok(Cleared::Nothing | Cleared::Forgotten) => {}
+            Ok(Cleared::Unknown { pid }) => {
                 let text = orphan::unknown_line(kind, pid);
                 lock(&self.runtime).note(daemon.events(), &text);
             }
-            Err(orphan::Stuck(reason)) => {
+            Err(pid_record::Stuck(reason)) => {
                 warn!(%reason, server = kind.id(), "our old server did not stop");
                 lock(&self.runtime).note(daemon.events(), &format!("marsad: {reason}."));
             }

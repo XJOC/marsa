@@ -28,22 +28,21 @@
 use marsa_core::codes;
 use marsa_core::data_dir::DataDir;
 use std::convert::Infallible;
-use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use marsa_core::databases::ServerKind;
-use marsa_core::orphan::{Liveness, PidRecord, PidfileState, classify_pidfile};
+use marsa_core::orphan::{Liveness, PidRecord, PidfileState};
 use marsa_core::platform::process::{self, Signal};
-use marsa_core::services::{StopAction, StopMethod};
 use marsa_core::types::{Event, ServiceId};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::daemon::services::php::orphan::{accepted, own_executable};
+use crate::daemon::services::pid_record::{self, Owner};
 use crate::daemon::services::probe::ProcessProbe;
 use crate::daemon::services::runtime::AbortOnDrop;
 use crate::daemon::services::supervisor::{ServiceRuntime, lock};
@@ -57,13 +56,6 @@ pub(super) fn stuck_code(kind: ServerKind) -> &'static str {
         ServerKind::Mailpit => codes::MAILPIT_ORPHAN_STUCK,
     }
 }
-
-/// How often a wait looks again.
-const POLL: Duration = Duration::from_millis(50);
-/// How long, after the orphan is gone, the port may take to be free.
-const PORT_WAIT: Duration = Duration::from_secs(5);
-/// How long a SIGKILL may take to end the process.
-const KILL_WAIT: Duration = Duration::from_secs(5);
 
 /// `run/<id>.pid` of `data_dir`.
 pub(super) fn pid_path(kind: ServerKind, data_dir: &Path) -> PathBuf {
@@ -274,21 +266,6 @@ pub(super) async fn settled(mut recorded: watch::Receiver<Recorded>) -> Recorded
     }
 }
 
-/// The steps of `ladder` that are signals, with their waits. A request to the
-/// server's port and a stop program are left out: they find the server by its
-/// port or its data folder, which does not prove that the process of the pid
-/// record is the one that holds them.
-fn signal_steps(ladder: &StopMethod) -> Vec<(Signal, Duration)> {
-    ladder
-        .steps
-        .iter()
-        .filter_map(|step| match step.action {
-            StopAction::Signal(signal) => Some((signal, step.wait)),
-            StopAction::Send(_) | StopAction::Run(_) => None,
-        })
-        .collect()
-}
-
 /// Deletes `run/<id>.pid` when it names `pid`, a run that has ended. A
 /// record of another pid (a newer run, or one that could not be told) stays.
 pub(super) fn forget_run(kind: ServerKind, data_dir: &Path, pid: u32) {
@@ -323,7 +300,7 @@ pub(super) async fn orphan_program(
     }
     let record = process::read_pid_file(&pid_path(kind, data_dir))?;
     let servers = accepted(programs.iter().cloned());
-    let state = check(probes, &record, &servers).await;
+    let state = pid_record::check(probes, &record, &servers).await;
     debug!(pid = record.pid, %state, server = kind.id(), "checked the pid record");
     match state {
         PidfileState::Ours { .. } | PidfileState::Unknown { .. } => {}
@@ -337,191 +314,20 @@ pub(super) async fn orphan_program(
     programs.iter().find(runs).cloned()
 }
 
-/// Why the start cannot go on.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Stuck(pub(super) String);
-
-/// How many times a start looks at the pid of the record. It goes on to its
-/// own checks after a look that cannot tell: our server would still hold
-/// the port and its own pid file, which refuse it.
-pub(super) const START_LOOKS: u32 = 1;
-/// How many times a stop looks, when the system cannot tell who runs the
-/// pid, before it goes on without a signal: a `ps` or `lsof` may fail once,
-/// and a stop has no later check to fall back on.
-pub(super) const STOP_LOOKS: u32 = 3;
-/// How long between two of those looks.
-const LOOK_AGAIN: Duration = Duration::from_millis(250);
-
-/// What [`clear`] did, for the recent lines.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Cleared {
-    /// No file: nothing was signalled.
-    Nothing,
-    /// The system could not tell whether the pid of the file is our old
-    /// server, at any look: nothing was signalled, and the file stays.
-    Unknown { pid: u32 },
-    /// The file named a process that is gone or another program's now: only
-    /// the file was deleted.
-    Forgotten,
-    /// Our old server ended after `signal`, the last one sent (`None`: it
-    /// ended before any).
-    Stopped { pid: u32, signal: Option<Signal> },
-}
-
-/// Finds the server that `run/<id>.pid` names, and stops it when it is
-/// ours, by `ladder` ([`ServerKind::stop`]) and a final SIGKILL, then waits
-/// for `port`. A first look that cannot tell is made again, up to `looks`
-/// looks in all ([`START_LOOKS`], [`STOP_LOOKS`]).
-///
-/// # Errors
-///
-/// [`Stuck`], with the reason, when our server still runs after SIGKILL, or
-/// cannot be told from another program after a signal. Nothing else is
-/// signalled then.
-pub(super) async fn clear(
-    kind: ServerKind,
-    probes: &dyn ProcessProbe,
-    data_dir: &Path,
-    servers: &[PathBuf],
-    ladder: &StopMethod,
-    port: u16,
-    looks: u32,
-) -> Result<Cleared, Stuck> {
-    if !process::DATABASE_ORPHAN_RECOVERY {
-        return Ok(Cleared::Nothing);
-    }
-    let Some(record) = process::read_pid_file(&pid_path(kind, data_dir)) else {
-        return Ok(Cleared::Nothing);
-    };
-    let pid = record.pid;
-    let mut state = check(probes, &record, servers).await;
-    for _ in 1..looks {
-        if !matches!(state, PidfileState::Unknown { .. }) {
-            break;
-        }
-        debug!(
-            pid,
-            server = kind.id(),
-            "cannot tell who runs the pid yet; looking again"
-        );
-        tokio::time::sleep(LOOK_AGAIN).await;
-        state = check(probes, &record, servers).await;
-    }
-    info!(pid, %state, server = kind.id(), "checked the pid record");
-    match state {
-        PidfileState::Missing | PidfileState::Stale { .. } | PidfileState::Mismatch { .. } => {
-            forget(kind, data_dir);
-            return Ok(Cleared::Forgotten);
-        }
-        // Often another user's process at a reused pid, after a reboot.
-        PidfileState::Unknown { .. } => {
-            warn!(
-                pid,
-                server = kind.id(),
-                "cannot tell whether the pid record names our old server; no signal"
-            );
-            return Ok(Cleared::Unknown { pid });
-        }
-        PidfileState::Ours { .. } => {}
-    }
-    // Signals only. A request to the server's port (Valkey's `SHUTDOWN
-    // SAVE`), or a stop program that finds the server by its port or its
-    // data folder, would reach whatever is there, which the check of the pid
-    // does not prove is this process (ADR 0023, section 8).
-    let signals = signal_steps(ladder)
-        .into_iter()
-        .chain([(Signal::Kill, KILL_WAIT)]);
-    // The last signal sent, for the line that says how it stopped.
-    let mut sent = None;
-    for (signal, wait) in signals {
-        match check(probes, &record, servers).await {
-            PidfileState::Ours { .. } => {}
-            PidfileState::Unknown { .. } => {
-                let reason = format!(
-                    "our old {} (pid {pid}) did not stop, and the system cannot tell whether \
-                     that pid is still it, so it gets no {}",
-                    kind.name(),
-                    signal.name()
-                );
-                return Err(Stuck(reason));
-            }
-            // Gone, or someone else's now: it ended between two checks.
-            _ => return Ok(done(kind, data_dir, pid, sent, port).await),
-        }
-        warn!(
-            pid,
-            signal = signal.name(),
-            server = kind.id(),
-            "stopping our old server"
-        );
-        if let Err(err) = probes.signal(pid, signal).await {
-            warn!(pid, signal = signal.name(), %err, "the signal failed");
-        }
-        sent = Some(signal);
-        if gone(probes, &record, servers, wait).await {
-            return Ok(done(kind, data_dir, pid, sent, port).await);
-        }
-    }
-    let reason = format!(
-        "our old {} (pid {pid}) still runs after SIGKILL",
-        kind.name()
-    );
-    Err(Stuck(reason))
-}
-
-/// The file against what the system says now: the file the process really
-/// runs, and its start time.
-async fn check(probes: &dyn ProcessProbe, record: &PidRecord, servers: &[PathBuf]) -> PidfileState {
-    let now = probes.real_identity(record.pid).await;
-    classify_pidfile(record, servers, &now)
-}
-
-/// Polls until the process is not our server any more, at most `limit`. An
-/// answer that cannot be told waits on: it may be a `ps` that failed once.
-async fn gone(
-    probes: &dyn ProcessProbe,
-    record: &PidRecord,
-    servers: &[PathBuf],
-    limit: Duration,
-) -> bool {
-    let started = Instant::now();
-    loop {
-        match check(probes, record, servers).await {
-            PidfileState::Ours { .. } | PidfileState::Unknown { .. } => {}
-            _ => return true,
-        }
-        if started.elapsed() >= limit {
-            return false;
-        }
-        tokio::time::sleep(POLL).await;
+/// The pid record of server `kind`, for [`pid_record::clear`]: the port to
+/// wait for is `port`.
+pub(super) fn owner(kind: ServerKind, data_dir: &Path, port: u16) -> Owner<'static> {
+    Owner {
+        id: ServiceId::Database(kind),
+        name: kind.name(),
+        pid_file: pid_path(kind, data_dir),
+        port: Some(port),
+        recovery: process::DATABASE_ORPHAN_RECOVERY,
     }
 }
 
-/// After the orphan ended: the file goes, then a short wait for the port, so
-/// the check before a start does not find it busy with a listener that is
-/// closing.
-async fn done(
-    kind: ServerKind,
-    data_dir: &Path,
-    pid: u32,
-    signal: Option<Signal>,
-    port: u16,
-) -> Cleared {
-    info!(
-        pid,
-        signal = signal.map(Signal::name),
-        server = kind.id(),
-        "our old server stopped"
-    );
-    forget(kind, data_dir);
-    let started = Instant::now();
-    while TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err() && started.elapsed() < PORT_WAIT {
-        tokio::time::sleep(POLL).await;
-    }
-    Cleared::Stopped { pid, signal }
-}
-
-/// The line for `marsa logs <id>` after [`clear`] stopped our old server.
+/// The line for `marsa logs <id>` after [`pid_record::clear`] stopped our
+/// old server.
 pub(super) fn stopped_line(kind: ServerKind, pid: u32, signal: Option<Signal>) -> String {
     let how = match (kind, signal) {
         (_, None) => "it ended before a signal".to_owned(),
@@ -538,8 +344,9 @@ pub(super) fn stopped_line(kind: ServerKind, pid: u32, signal: Option<Signal>) -
     )
 }
 
-/// The line for `marsa logs <id>` after a stop whose [`clear`] could not
-/// tell who runs the pid of the record ([`Cleared::Unknown`]).
+/// The line for `marsa logs <id>` after a stop whose [`pid_record::clear`]
+/// could not tell who runs the pid of the record
+/// ([`pid_record::Cleared::Unknown`]).
 pub(super) fn unknown_line(kind: ServerKind, pid: u32) -> String {
     format!(
         "marsad: run/{id}.pid names pid {pid}, and the system cannot tell whether it is still \
@@ -552,47 +359,7 @@ pub(super) fn unknown_line(kind: ServerKind, pid: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use marsa_core::services::{StopCommand, StopStep, TcpRequest};
-
     use super::*;
-
-    /// An orphan is stopped by signals only: neither a request to the port
-    /// nor a stop program, which would reach whatever holds the port or the
-    /// data folder, goes in its ladder.
-    #[test]
-    fn an_orphans_ladder_has_signals_only() {
-        let wait = Duration::from_secs(3);
-        let ladder = StopMethod {
-            steps: vec![
-                StopStep {
-                    action: StopAction::Send(TcpRequest {
-                        port: 6379,
-                        bytes: b"x".to_vec(),
-                        name: "request",
-                        limit: Duration::from_secs(1),
-                    }),
-                    wait,
-                },
-                StopStep {
-                    action: StopAction::Run(StopCommand {
-                        program: PathBuf::from("/bin/stop"),
-                        args: Vec::new(),
-                        name: "stop program",
-                        on_failure: "",
-                    }),
-                    wait,
-                },
-                StopStep {
-                    action: StopAction::Signal(Signal::Term),
-                    wait,
-                },
-            ],
-        };
-        assert_eq!(signal_steps(&ladder), [(Signal::Term, wait)]);
-        assert!(signal_steps(&StopMethod { steps: Vec::new() }).is_empty());
-    }
 
     /// Each way [`record`] ends, against a fake that answers each look from
     /// a script. Only where the daemon writes records at all

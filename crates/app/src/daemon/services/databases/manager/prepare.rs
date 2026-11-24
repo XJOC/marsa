@@ -25,6 +25,7 @@ use super::super::settings::read_settings;
 use super::super::{mailpit, mysql, orphan, postgres, valkey};
 use super::run::Refusal;
 use super::{ActionError, ServerManager};
+use crate::daemon::services::pid_record::{self, Cleared};
 use crate::daemon::services::supervisor::lock;
 use crate::daemon::state::Daemon;
 
@@ -67,27 +68,16 @@ impl ServerManager {
         let servers = installed_servers(kind, daemon.data_dir(), platform);
         let ladder = &self.orphan_ladder;
         let probes = &*self.probes;
-        let looks = orphan::START_LOOKS;
-        let cleared = orphan::clear(
-            kind,
-            probes,
-            daemon.data_dir(),
-            &servers,
-            ladder,
-            port,
-            looks,
-        );
+        let looks = pid_record::START_LOOKS;
+        let owner = orphan::owner(kind, daemon.data_dir(), port);
+        let cleared = pid_record::clear(&owner, probes, &servers, ladder, looks);
         match cleared.await {
-            Ok(orphan::Cleared::Stopped { pid, signal }) => {
+            Ok(Cleared::Stopped { pid, signal }) => {
                 let text = orphan::stopped_line(kind, pid, signal);
                 lock(&self.runtime).note(daemon.events(), &text);
             }
-            Ok(
-                orphan::Cleared::Nothing
-                | orphan::Cleared::Forgotten
-                | orphan::Cleared::Unknown { .. },
-            ) => {}
-            Err(orphan::Stuck(reason)) => return Err(ActionError::OrphanStuck(kind, reason)),
+            Ok(Cleared::Nothing | Cleared::Forgotten | Cleared::Unknown { .. }) => {}
+            Err(pid_record::Stuck(reason)) => return Err(ActionError::OrphanStuck(kind, reason)),
         }
         let chosen = Chosen {
             platform,

@@ -13,12 +13,13 @@ use marsa_core::recipes::Platform;
 use marsa_core::runtimes::{Runtime, RuntimesDir};
 use tracing::{debug, warn};
 
-use super::super::{fpm_id, fpm_program};
+use super::super::{fpm_id, php_program};
 use crate::daemon::services::probe::ProcessProbe;
 
-/// The php-fpm of each installed PHP version of `data_dir`. An installed
-/// list that cannot be read gives none, so nothing counts as ours.
-pub fn installed_programs(data_dir: &Path, platform: Platform) -> Vec<PathBuf> {
+/// Program `name` (`php-fpm`, `php`) of each installed PHP version of
+/// `data_dir`. An installed list that cannot be read gives none, so nothing
+/// counts as ours.
+pub fn installed_programs(data_dir: &Path, platform: Platform, name: &str) -> Vec<PathBuf> {
     let versions = RuntimesDir::in_dir(data_dir)
         .installed(Runtime::Php)
         .unwrap_or_else(|err| {
@@ -27,7 +28,7 @@ pub fn installed_programs(data_dir: &Path, platform: Platform) -> Vec<PathBuf> {
         });
     let programs = versions
         .iter()
-        .filter_map(|version| fpm_program(data_dir, platform, version));
+        .filter_map(|version| php_program(data_dir, platform, version, name));
     accepted(programs)
 }
 
