@@ -1,0 +1,15 @@
+---
+source: crates/core/src/db_browser/tests.rs
+expression: "statements(Engine::Postgres)"
+---
+SELECT * FROM "users" ORDER BY "id" LIMIT 500 OFFSET 0
+SELECT * FROM "users" ORDER BY "email" DESC, "id" LIMIT 500 OFFSET 500
+SELECT * FROM "users" ORDER BY "id" LIMIT 500 OFFSET 9223372036854775807
+SELECT * FROM "users" ORDER BY "order_id", "line" LIMIT 500 OFFSET 1000
+SELECT * FROM "events" LIMIT 500 OFFSET 99500
+SELECT * FROM "events" ORDER BY "email" DESC LIMIT 500 OFFSET 0
+SELECT COUNT(*) FROM "users"
+SELECT "bio" FROM "users" WHERE "id"::text = $1
+SELECT "note" FROM "users" WHERE "order_id"::text = $1 AND "line"::text = $2
+SELECT * FROM "audit"."log" ORDER BY "id" LIMIT 500 OFFSET 0
+SELECT COUNT(*) FROM "audit"."log"
