@@ -16,8 +16,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use marsa_core::platform::process;
 use marsa_core::services::{
-    LogBuffer, ProgramNotAbsolute, STOP_COMMAND_GRACE, ServiceSpec, StopAction, StopCommand,
-    StopMethod, TcpRequest, restart_delay,
+    LogBuffer, ProgramNotAbsolute, RestartPolicy, STOP_COMMAND_GRACE, ServiceSpec, StopAction,
+    StopCommand, StopMethod, TcpRequest, restart_delay,
 };
 use marsa_core::types::{Event, LogLine, LogStream, ServiceState, ServiceStatus};
 use std::net::Ipv4Addr;
@@ -39,6 +39,12 @@ const DRAIN_WAIT: Duration = Duration::from_secs(1);
 /// A run this long counts as healthy: the restart count starts again from 0,
 /// so failures days apart do not use up the retries.
 const STABLE_RUN: Duration = Duration::from_secs(60);
+
+/// Under [`RestartPolicy::Always`], a clean exit after a run this long is
+/// not counted: `queue:restart` after a deploy, or `--max-time`. A shorter
+/// one counts as a failure, so a program that exits 0 at once ends `Failed`
+/// instead of starting again each second without end.
+pub const CLEAN_RUN_MIN: Duration = Duration::from_secs(5);
 
 /// The failure code of a run that exited by itself, with no stop request.
 pub const EXITED: &str = "exited";
@@ -255,7 +261,8 @@ impl Shared {
 /// How one run of the process ended.
 enum Exit {
     Stopped,
-    Exited,
+    /// By itself; `None` when the wait failed.
+    Exited(Option<ExitStatus>),
 }
 
 async fn supervise(spec: ServiceSpec, shared: Shared, cancel: CancellationToken) {
@@ -266,9 +273,33 @@ async fn supervise(spec: ServiceSpec, shared: Shared, cancel: CancellationToken)
         let code = match command(&spec).spawn() {
             Ok(child) => match run(child, &spec, &shared, &cancel, restarts).await {
                 Exit::Stopped => break,
-                Exit::Exited => {
-                    if started.elapsed() >= STABLE_RUN {
+                Exit::Exited(status) => {
+                    let ran = started.elapsed();
+                    if ran >= STABLE_RUN {
                         restarts = 0;
+                    }
+                    let clean = status.is_some_and(|status| status.success());
+                    if let RestartPolicy::Always { initial, .. } = spec.restart
+                        && clean
+                        && ran >= CLEAN_RUN_MIN
+                    {
+                        shared.note(&format!(
+                            "marsad: exited cleanly, starting again in {}",
+                            seconds(initial)
+                        ));
+                        tokio::select! {
+                            () = tokio::time::sleep(initial) => continue,
+                            () = cancel.cancelled() => break,
+                        }
+                    }
+                    if let (RestartPolicy::Always { .. }, Some(delay)) =
+                        (spec.restart, restart_delay(spec.restart, restarts))
+                    {
+                        let how = status.map_or("exited".to_owned(), |status| status.to_string());
+                        shared.note(&format!(
+                            "marsad: {how}, starting again in {}",
+                            seconds(delay)
+                        ));
                     }
                     EXITED
                 }
@@ -313,10 +344,15 @@ async fn run(
     let exit = tokio::select! {
         result = child.wait() => {
             match result {
-                Ok(status) => warn!(service = %spec.id, %status, "exited"),
-                Err(err) => warn!(service = %spec.id, %err, "cannot wait for the process"),
+                Ok(status) => {
+                    warn!(service = %spec.id, %status, "exited");
+                    Exit::Exited(Some(status))
+                }
+                Err(err) => {
+                    warn!(service = %spec.id, %err, "cannot wait for the process");
+                    Exit::Exited(None)
+                }
             }
-            Exit::Exited
         }
         () = cancel.cancelled() => {
             shared.set_state(ServiceState::Stopping, pid, restarts);
@@ -676,6 +712,15 @@ impl Write for LogFile {
 
     fn flush(&mut self) -> io::Result<()> {
         self.file.as_mut().map_or(Ok(()), Write::flush)
+    }
+}
+
+/// `4s`, or `500ms` under a second, for the notes in a worker's log.
+fn seconds(wait: Duration) -> String {
+    if wait >= Duration::from_secs(1) {
+        format!("{}s", wait.as_secs())
+    } else {
+        format!("{}ms", wait.as_millis())
     }
 }
 

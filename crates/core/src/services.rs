@@ -233,9 +233,11 @@ pub enum RestartPolicy {
         initial: Duration,
         max: Duration,
     },
-    /// As `OnFailure`, and a clean exit (code 0) is restarted too, after
-    /// `initial`, without counting: a worker that `php artisan queue:restart`
-    /// or `--max-time` ended is not failing.
+    /// As `OnFailure`, except that a clean exit (code 0) after a run of
+    /// some seconds (the supervisor's `CLEAN_RUN_MIN`) waits `initial` and
+    /// is not counted: a worker that `php artisan queue:restart` or
+    /// `--max-time` ended is not failing. Each restart leaves a note in the
+    /// service's log.
     Always {
         max_retries: u32,
         initial: Duration,

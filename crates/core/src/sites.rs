@@ -54,11 +54,13 @@ pub struct Site {
     pub php_source: Option<Source>,
     /// Served over HTTPS. The default is `true`.
     pub secure: bool,
-    /// `php artisan queue:work` runs for this site (a Laravel site only).
+    /// The site's setting asks for `php artisan queue:work`. The daemon runs
+    /// it for a Laravel site only.
     /// Missing in JSON from an older daemon reads as `false`.
     #[serde(default)]
     pub queue: bool,
-    /// `php artisan schedule:work` runs for this site (a Laravel site only).
+    /// The site's setting asks for `php artisan schedule:work` (a Laravel
+    /// site only, as `queue`).
     #[serde(default)]
     pub schedule: bool,
 }

@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use marsa::daemon::services::supervisor::{ServiceHandle, Supervisor};
+use marsa::daemon::services::supervisor::{CLEAN_RUN_MIN, ServiceHandle, Supervisor};
 use marsa_core::services::{RestartPolicy, ServiceSpec, StopMethod};
 use marsa_core::types::{Event, LogLine, LogStream, ServiceState};
 use tempfile::TempDir;
@@ -61,6 +61,13 @@ fn fake_service() {
         "fail" => {
             println!("fake failing");
             std::process::exit(3);
+        }
+        // Runs a little past `CLEAN_RUN_MIN`, then exits 0, like a queue
+        // worker ended by `queue:restart`.
+        "late" => {
+            println!("fake late");
+            std::thread::sleep(CLEAN_RUN_MIN + Duration::from_millis(300));
+            std::process::exit(0);
         }
         // Never exits, and ignores SIGTERM: a tokio handler replaces the
         // default action. Only a kill stops it.
@@ -304,6 +311,67 @@ async fn a_failing_process_restarts_until_the_limit() {
         (status.state, status.restarts, status.pid),
         (exited(), 2, None)
     );
+}
+
+fn notes(events: &[Event]) -> Vec<String> {
+    let note = |event: &Event| match event {
+        Event::Log(line) if line.text.starts_with("marsad: ") => Some(line.text.clone()),
+        _ => None,
+    };
+    events.iter().filter_map(note).collect()
+}
+
+#[tokio::test]
+async fn under_always_a_clean_exit_at_once_counts_and_ends_failed() {
+    let policy = RestartPolicy::Always {
+        max_retries: 2,
+        initial: Duration::from_millis(50),
+        max: Duration::from_millis(100),
+    };
+    let (mut handle, mut rx, logs) = start("print", policy);
+    let events = finish(&mut handle, &mut rx).await;
+    let status = handle.status();
+    assert_eq!((status.state, status.restarts), (exited(), 2));
+    // A note before each restart, in the events and the log file.
+    let notes = notes(&events);
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert!(notes[0].ends_with(", starting again in 50ms"), "{notes:?}");
+    let file = std::fs::read_to_string(logs.path().join("caddy.log")).unwrap();
+    assert!(file.contains(&notes[1]), "{file:?}");
+}
+
+#[tokio::test]
+async fn under_always_a_clean_exit_after_a_run_is_not_counted() {
+    let policy = RestartPolicy::Always {
+        max_retries: 1,
+        initial: Duration::from_millis(50),
+        max: Duration::from_millis(100),
+    };
+    let (handle, mut rx, _logs) = start("late", policy);
+    let mut events = Vec::new();
+    // The second run starts, with no restart counted.
+    let second = tokio::time::timeout(WAIT, async {
+        let mut runs = 0;
+        loop {
+            let event = rx.recv().await.unwrap();
+            let running =
+                matches!(&event, Event::ServiceChanged(s) if s.state == ServiceState::Running);
+            events.push(event);
+            if running {
+                runs += 1;
+                if runs == 2 {
+                    break;
+                }
+            }
+        }
+    });
+    second.await.expect("a second run");
+    assert_eq!(handle.status().restarts, 0);
+    assert_eq!(
+        notes(&events),
+        ["marsad: exited cleanly, starting again in 50ms"]
+    );
+    handle.stop().await.unwrap();
 }
 
 #[tokio::test]

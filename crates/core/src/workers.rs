@@ -13,7 +13,8 @@ use crate::types::{ServiceId, SiteKey, WorkerKind};
 /// row, then `Failed`. A queue fails for passing reasons (its database not
 /// up yet after a boot), so more tries than `supervisord`'s 3. A run of
 /// 60 s resets the count (the supervisor's `STABLE_RUN`), and a clean exit
-/// (`queue:restart` after a deploy) is not counted.
+/// after a few seconds (`queue:restart` after a deploy) is not counted
+/// ([`RestartPolicy::Always`]).
 pub const RESTART: RestartPolicy = RestartPolicy::Always {
     max_retries: 8,
     initial: Duration::from_secs(1),
