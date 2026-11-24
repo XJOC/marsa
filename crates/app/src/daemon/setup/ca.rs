@@ -707,6 +707,7 @@ mod tests {
             admin_port: port(0),
             http_port: port(1),
             https_port: port(2),
+            dumps: None,
         };
         drop(free);
         caddy.ready_limit = ready;

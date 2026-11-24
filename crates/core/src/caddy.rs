@@ -20,6 +20,7 @@
 //! tokio.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -288,12 +289,17 @@ pub fn ca_bundle_text(system_pem: &str, marsa_root_pem: &str) -> String {
     text
 }
 
-/// What the config is built from: the ports. The sites go to [`sites_config`].
+/// What the config is built from: the ports, and where the dump server
+/// listens. The sites go to [`sites_config`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaddyInput {
     pub admin_port: u16,
     pub http_port: u16,
     pub https_port: u16,
+    /// Where the dump server listens, while it does (ADR 0027). Every PHP
+    /// site then sends its `dump()` there. `None`: the dumps stay in the
+    /// page, as PHP writes them.
+    pub dumps: Option<SocketAddr>,
 }
 
 impl Default for CaddyInput {
@@ -302,6 +308,7 @@ impl Default for CaddyInput {
             admin_port: ADMIN_PORT,
             http_port: HTTP_PORT,
             https_port: HTTPS_PORT,
+            dumps: None,
         }
     }
 }
@@ -478,7 +485,7 @@ pub fn sites_config(
         sorted.into_iter().partition(|site| site.secure);
     let secure_hosts: Vec<String> = secure.iter().map(|site| site.host()).collect();
 
-    let mut http_routes = site_routes(&plain, pools)?;
+    let mut http_routes = site_routes(&plain, pools, input.dumps)?;
     if !secure_hosts.is_empty() {
         http_routes.push(json!({
             "match": [{ "host": secure_hosts }],
@@ -507,7 +514,7 @@ pub fn sites_config(
         "listen": [loopback(input.https_port)],
         // No HTTP/3: the `pf` redirect on macOS covers TCP only (ADR 0008).
         "protocols": ["h1", "h2"],
-        "routes": site_routes(&secure, pools)?,
+        "routes": site_routes(&secure, pools, input.dumps)?,
         // The `marsa` server already sends HTTP to HTTPS.
         "automatic_https": { "disable_redirects": true },
     });
@@ -524,15 +531,26 @@ pub fn sites_config(
 }
 
 /// The routes of the sites, in the order given.
-fn site_routes(sites: &[&Site], pools: &PhpPools) -> Result<Vec<Value>, CaddyError> {
-    sites.iter().map(|site| site_route(site, pools)).collect()
+fn site_routes(
+    sites: &[&Site],
+    pools: &PhpPools,
+    dumps: Option<SocketAddr>,
+) -> Result<Vec<Value>, CaddyError> {
+    sites
+        .iter()
+        .map(|site| site_route(site, pools, dumps))
+        .collect()
 }
 
 /// The route of one site: its exact host, then its handlers in a `subroute`.
 /// `terminal` stops Caddy before the next routes, such as the greeting.
-fn site_route(site: &Site, pools: &PhpPools) -> Result<Value, CaddyError> {
+fn site_route(
+    site: &Site,
+    pools: &PhpPools,
+    dumps: Option<SocketAddr>,
+) -> Result<Value, CaddyError> {
     let routes = match site.kind {
-        SiteKind::Laravel | SiteKind::Php => php_routes(site, pools)?,
+        SiteKind::Laravel | SiteKind::Php => php_routes(site, pools, dumps)?,
         SiteKind::Static => {
             let root = utf8(&site.docroot)?;
             vec![json!({
@@ -570,7 +588,11 @@ fn site_route(site: &Site, pools: &PhpPools) -> Result<Value, CaddyError> {
 /// 5. Serve every other file as it is.
 ///
 /// Without a running pool the site answers 503 with a clear text.
-fn php_routes(site: &Site, pools: &PhpPools) -> Result<Vec<Value>, CaddyError> {
+fn php_routes(
+    site: &Site,
+    pools: &PhpPools,
+    dumps: Option<SocketAddr>,
+) -> Result<Vec<Value>, CaddyError> {
     let root = utf8(&site.docroot)?;
     let minor = site.php.as_ref().map(PhpMinor::from);
     let dials = minor
@@ -596,6 +618,16 @@ fn php_routes(site: &Site, pools: &PhpPools) -> Result<Vec<Value>, CaddyError> {
         "transport": { "protocol": "fastcgi", "split_path": [".php"] },
         "upstreams": upstreams,
     });
+    if let Some(addr) = dumps {
+        // A FastCGI parameter is `$_SERVER[...]` in PHP, and symfony/var-dumper
+        // reads these two: `dump()` then goes to the dump server and not to
+        // the page (ADR 0027). It falls back to the page by itself when the
+        // server is not there. Only PHP sites: a static site has no PHP.
+        proxy["transport"]["env"] = json!({
+            "VAR_DUMPER_FORMAT": "server",
+            "VAR_DUMPER_SERVER": addr.to_string(),
+        });
+    }
     if dials.len() > 1 {
         proxy["load_balancing"] = json!({
             "selection_policy": { "policy": "least_conn" },
@@ -713,6 +745,7 @@ mod tests {
             admin_port: 1,
             http_port: 2,
             https_port: 3,
+            dumps: None,
         };
         let config = caddy_config(&input);
 
@@ -1141,6 +1174,74 @@ mod tests {
         );
     }
 
+    fn with_dumps() -> CaddyInput {
+        CaddyInput {
+            dumps: Some("127.0.0.1:9912".parse().expect("an address")),
+            ..CaddyInput::default()
+        }
+    }
+
+    /// While the dump server listens, each PHP site's FastCGI transport gets
+    /// the two parameters that send `dump()` to it; nothing else changes.
+    #[test]
+    fn four_sites_with_the_dump_server_snapshot() {
+        let config =
+            sites_config(&with_dumps(), &four_sites(), &socket_pools()).expect("build the config");
+        insta::assert_json_snapshot!("four_sites_with_the_dump_server", config);
+    }
+
+    #[test]
+    fn the_dump_parameters_are_only_on_fastcgi_transports() {
+        let on = sites_config(&with_dumps(), &four_sites(), &socket_pools()).expect("config");
+        let off = build(&four_sites(), &socket_pools());
+        assert_ne!(on, off);
+        let text = on.to_string();
+        // Two PHP sites ("shop" is secure, "legacy" is not), one transport
+        // each; the static site and the Node proxy get none.
+        assert_eq!(text.matches("VAR_DUMPER_FORMAT").count(), 2, "{text}");
+        assert_eq!(text.matches("VAR_DUMPER_SERVER").count(), 2);
+        assert!(text.contains("\"VAR_DUMPER_SERVER\":\"127.0.0.1:9912\""));
+        // Removing the parameters gives the config without the dump server.
+        let mut stripped = on;
+        strip_dump_env(&mut stripped);
+        assert_eq!(stripped, off);
+    }
+
+    /// `env` out of every FastCGI transport of `value`.
+    fn strip_dump_env(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                if map.get("protocol").is_some_and(|p| p == "fastcgi") {
+                    map.remove("env");
+                }
+                map.values_mut().for_each(strip_dump_env);
+            }
+            Value::Array(items) => items.iter_mut().for_each(strip_dump_env),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn no_dump_server_and_no_pool_leave_the_config_as_it_was() {
+        let input = CaddyInput::default();
+        assert_eq!(input.dumps, None);
+        assert_eq!(
+            sites_config(&input, &four_sites(), &socket_pools()).expect("config"),
+            build(&four_sites(), &socket_pools())
+        );
+        // A PHP site with no running pool answers 503 and has no transport.
+        let legacy = site(
+            "legacy",
+            SiteKind::Php,
+            "/code/legacy",
+            Some("8.3.14"),
+            false,
+        );
+        let legacy = [legacy];
+        let config = sites_config(&with_dumps(), &legacy, &windows_pools()).expect("config");
+        assert_eq!(config, build(&legacy, &windows_pools()));
+    }
+
     /// Every config has Marsa's CA, also with no site or with no secure
     /// site, so Caddy makes the CA when it starts and `marsa setup` can
     /// trust it at once. Caddy never trusts it itself. Without a
@@ -1189,6 +1290,7 @@ mod tests {
             admin_port: 1,
             http_port: 2,
             https_port: 3,
+            dumps: None,
         };
         assert_eq!(
             sites_config(&input, &[], &PhpPools::default()),

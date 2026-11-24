@@ -472,4 +472,90 @@ mod tests {
         assert!(last.text.contains("127.0.0.1:18443"), "{}", last.text);
         daemon.stop_procs(Duration::from_secs(5)).await;
     }
+
+    /// A Laravel site on PHP 8.3 and a pool for it.
+    fn laravel(root: PathBuf) -> (Vec<Site>, PhpPools) {
+        use marsa_core::caddy::Dial;
+        use marsa_core::php::PhpMinor;
+        let site = Site {
+            kind: SiteKind::Laravel,
+            php: Some("8.3.14".parse().unwrap()),
+            ..shop(root)
+        };
+        let pools = PhpPools(std::collections::BTreeMap::from([(
+            PhpMinor { major: 8, minor: 3 },
+            vec![Dial::Unix(PathBuf::from("/run/php-8.3.sock"))],
+        )]));
+        (vec![site], pools)
+    }
+
+    /// The dump server turning on or off reaches a running Caddy, and a
+    /// Caddy that does not run reads it from the next config.
+    #[tokio::test]
+    async fn caddy_follows_the_dump_server() {
+        use crate::daemon::dumps::DumpsService;
+        let (port, mut loads) = fake_admin(StatusCode::OK, "").await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::new(dir.path().to_path_buf());
+        daemon.caddy_mut().input.admin_port = port;
+        daemon.set_dumps(DumpsService::new(0));
+        let daemon = Arc::new(daemon);
+        let (sites, pools) = laravel(dir.path().join("shop"));
+        daemon.caddy().apply(&daemon, sites, pools).await.unwrap();
+        let follower = crate::daemon::dumps::caddy::follow(&daemon);
+        assert_eq!(daemon.caddy().dumps_target(), None);
+
+        // Off to on while Caddy does not run: the target is kept, nothing sent.
+        let shutdown = daemon.shutdown().clone();
+        daemon.dumps().apply(true, &shutdown).await;
+        let addr = daemon.dumps().local_addr().unwrap();
+        wait_for(|| daemon.caddy().dumps_target() == Some(addr)).await;
+        assert!(loads.try_recv().is_err(), "no Caddy runs: nothing is sent");
+
+        // Caddy runs: off sends a config without the parameters, on with them.
+        pretend_caddy_runs(&daemon);
+        daemon.dumps().apply(false, &shutdown).await;
+        let off = loads.recv().await.unwrap();
+        assert!(!off.to_string().contains("VAR_DUMPER"), "{off}");
+        daemon.dumps().apply(true, &shutdown).await;
+        let on = loads.recv().await.unwrap();
+        let addr = daemon.dumps().local_addr().unwrap();
+        let text = on.to_string();
+        assert!(text.contains("\"VAR_DUMPER_FORMAT\":\"server\""), "{text}");
+        assert!(
+            text.contains(&format!("\"VAR_DUMPER_SERVER\":\"{addr}\"")),
+            "{text}"
+        );
+
+        shutdown.cancel();
+        follower.await.unwrap();
+        daemon.dumps().shutdown(Duration::from_secs(2)).await;
+        daemon.stop_procs(Duration::from_secs(5)).await;
+    }
+
+    /// A port that another program holds is not a place to send dumps to.
+    #[tokio::test]
+    async fn a_busy_dump_port_gives_caddy_no_address() {
+        use crate::daemon::dumps::DumpsService;
+        let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut daemon = Daemon::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        daemon.set_dumps(DumpsService::new(blocker.local_addr().unwrap().port()));
+        let daemon = Arc::new(daemon);
+        let follower = crate::daemon::dumps::caddy::follow(&daemon);
+        let shutdown = daemon.shutdown().clone();
+        daemon.dumps().apply(true, &shutdown).await;
+        assert_eq!(daemon.caddy().dumps_target(), None);
+        shutdown.cancel();
+        follower.await.unwrap();
+    }
+
+    async fn wait_for(mut done: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the condition never held");
+    }
 }

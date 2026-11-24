@@ -148,6 +148,11 @@ pub async fn run(data_dir: PathBuf, dns_port: u16) -> anyhow::Result<()> {
     // The DNS server on macOS and Linux.
     daemon.set_dns(dns::DnsService::for_daemon(dns_port));
     let daemon = Arc::new(daemon);
+    // The dump server (ADR 0027): a port that another program holds is the
+    // status `port_in_use`, and `dump()` stays in the page. Before the sites
+    // sync, so Caddy's first config already has its address.
+    dumps::start_at_launch(&daemon).await;
+    let dumps_follow = dumps::caddy::follow(&daemon);
     // The first site list, so the first client gets it at once. A broken
     // sites.toml is logged; the routes report it again with its code.
     if let Err(err) = daemon.rebuild_sites().await {
@@ -168,9 +173,6 @@ pub async fn run(data_dir: PathBuf, dns_port: u16) -> anyhow::Result<()> {
     // After the first build, so it starts from its parked folders. It stops
     // when `daemon.shutdown` is cancelled.
     let watcher = sites::watch::start(&daemon);
-    // The dump server (ADR 0027): a port that another program holds is the
-    // status `port_in_use`, and `dump()` stays in the page.
-    dumps::start_at_launch(&daemon).await;
     // After the API listener. It stops when `daemon.shutdown` is cancelled. A
     // port in use is a failed `dns` service: the daemon runs on without it.
     daemon
@@ -193,6 +195,7 @@ pub async fn run(data_dir: PathBuf, dns_port: u16) -> anyhow::Result<()> {
     // waits for it. The map is empty otherwise, and this returns at once.
     daemon.stop_procs(PROCS_LIMIT).await;
     // Before the lock goes, so the next daemon finds the ports free.
+    let _ = dumps_follow.await;
     daemon.dumps().shutdown(dumps::STOP_LIMIT).await;
     daemon.dns().shutdown(dns::STOP_LIMIT).await;
 
